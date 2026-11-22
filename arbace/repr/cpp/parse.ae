@@ -3862,6 +3862,17 @@
                                                                 (not (:tparam (first en))))))))
                                                 (range (inc db) (ix p))))]
                       (soft-diag! p (long i) (str "local variable '" (ts (tok-at p (long i))) "' may not appear in this context"))))
+                ;; (cpp-diag-b, 2026-11-22: [dcl.fct.default]/9, an earlier parameter of the clause in a default argument, outside
+                ;; an unevaluated operand: GCC's "parameter 'I' may not appear in this context", at the name; a lambda's parameters
+                ;; aside)
+                _ (when (and has-dflt (not (skim? p)) (main-tok? p db) (seq (remove nil? nms))
+                             (not-any? #(#{"sizeof" "decltype" "alignof" "noexcept" "typeid" "__typeof__" "__decltype" "[" "requires"} (ts (tok-at p %))) (range (inc db) (ix p))))
+                    (let [pn (set (remove nil? nms))]
+                      (when-let [i (first (filter (fn [i] (let [^T t (tok-at p i) ^T pv (tok-at p (dec i))]
+                                                            (and (identical? :id (.-k t)) (contains? pn (.-s t))
+                                                                 (not (or (t= pv ".") (t= pv "->") (t= pv "::"))) (not (t= (tok-at p (inc i)) "::")))))
+                                                  (range (inc db) (ix p))))]
+                        (soft-diag! p (long i) (str "parameter '" (ts (tok-at p (long i))) "' may not appear in this context")))))
                 _ (when (and (skim? p) (t= (tok-at p (dec (ix p))) "=")) nil)
                 e (if cva (dec (last-ix p)) (last-ix p))
                 pv (node p "ParmVarDecl" (:b ds) (max (:b ds) e)
@@ -4618,6 +4629,31 @@
                       (soft-diag! p (long (:i lp)) (str "'" (:s lp) "' is neither function nor member function; cannot be declared friend"))
                       (and (= ctx :member) (not fs) (= "static" (:storage ds)) (not (:typedef ds)) (some #(nil? (:name %)) (stv p CLS)))
                       (soft-diag! p (long (:i lp)) (str "static data member '" (:s lp) "' in unnamed class"))
+                      ;; ([over.oper.general]/? : an operator function has no default arguments, operator() aside; a non-member
+                      ;; one has a parameter of class or enumeration type, or a reference to one; [basic.stc.dynamic.deallocation]/2
+                      ;; operator delete returns void)
+                      (and fs (:op lp) (not= "()" (:op lp)) (some #(= "c" (:init %)) (:params fs)))
+                      (soft-diag! p (long (:i lp)) (str "'operator" (:op lp) "' cannot have default arguments"))
+                      (and fs (#{"delete" "delete[]"} (:op lp)) (not (:typedef ds))
+                           (or ptrs? (not= {:t :b :w ["void"]} (select-keys (or base0 {}) [:t :w]))))
+                      (soft-diag! p (long (:b ds)) "'operator delete' must return type 'void'")
+                      (and fs (:op lp) (not (#{"new" "new[]" "delete" "delete[]" "()" "[]" "->" "=" "co_await"} (:op lp)))
+                           (or (#{:top :block} ctx) (and (= ctx :member) (:friend ds)))
+                           (seq (:types fs))
+                           (every? #(contains? #{:b :p :a} (:t %)) (:types fs)))
+                      (soft-diag! p (long (:i lp)) (str "'operator" (:op lp) "' must have an argument of class or enumerated type"))
+                      ;; ([dcl.fct.default]/3: default arguments in a function declaration's parameters alone, not a typedef's)
+                      (and fs (:typedef ds) (some #(= "c" (:init %)) (:params fs)))
+                      (soft-diag! p (long (:i lp)) "default arguments are only permitted for function parameters")
+                      ;; ([dcl.fct.default]/4: a parameter after one with a default argument has one, from this or an earlier
+                      ;; declaration (none here), a pack's aside: GCC's "default argument missing for parameter 3 of ...")
+                      (and fs (= 1 np) (not (:g qn)) (:s lp) (not (:typedef ds))
+                           (let [ps (vec (:params fs))
+                                 i (first (keep-indexed #(when (= "c" (:init %2)) %1) ps))]
+                             (and i (some #(not= "c" (:init %)) (subvec ps i))
+                                  (not-any? #(str/includes? (str (get-in % [:type :qualType])) "...") ps)
+                                  (nil? (sc/find-in (scope p) (:s lp))))))
+                      (soft-diag! p (long (:i lp)) (str "default argument missing for a parameter of '" (:s lp) "'"))
                       (and (:dtor lp) (string? (:dtor lp)) (not fs))
                       (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "' as non-function"))
                       (and (:dtor lp) (string? (:dtor lp)) (= 1 np) (not (:g qn)) (= ctx :member) cls (not= (:dtor lp) cls) (not (:friend ds)))
