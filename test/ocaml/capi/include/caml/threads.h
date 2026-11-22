@@ -6,5 +6,6 @@
 #define caml_release_runtime_system caml_enter_blocking_section
 #define caml_acquire_runtime_system caml_leave_blocking_section
 CAMLextern int caml_c_thread_register(void);
+CAMLextern int caml_c_thread_register_in_domain(uintnat dom_unique_id);
 CAMLextern int caml_c_thread_unregister(void);
 #endif
