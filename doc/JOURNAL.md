@@ -15688,3 +15688,51 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+## 2026-11-22: C's completeness rows by class (c-rows-1122)
+
+The burst's stream C2: C's non-passes ranked by class, the classes that can pass fixed, each proved by its narrowest command, the
+records re-recorded from whole runs of their corpora (no gate; stage 0 the main checkout's, repr/c and ci evaluated from the
+checkout; gcc only by hand for the round trip's level 3, ARBACE_C_JUDGE=gcc). Branch c-rows-1122 from mac/next 863bdaea1; the
+classes, fixes, proofs, records and decisions in doc/C23-SURVEY.md, "As built: c-rows".
+
+Fixed:
+- repr/c's parser reads C23's `va_start (ap, last)` (the va_list and an identifier alone, the form gcc does not warn of) as cc's
+  two-argument list, other extra tokens skipped as gcc does; the converter keeps the va_list alone, so the forms are unchanged (five
+  files compared byte for byte). It was the tree check's gcc-syntax row of every torture program calling va_start: 89 of the
+  class's 131 files now equal cc's trees.
+- The converter keeps a function declaration's asm label (`:c/asm-label`): builtins/memops-asm.c and strstr-asm.c printed calls
+  to memcpy; level 3 equal under gcc's judge by hand; the eight corpus files with such labels pass all levels, annotations and
+  their ci runs unchanged.
+- The round trip's level 4 judges a print only where level 3 (the objects byte for byte) does not hold it (return-addr.c's
+  addresses, reverse-complement-5.c's read before its buffer).
+- ci's builder takes a file-scope object initialized with setjmp as setjmp (mir's new/setjmp2.c): eval and AOT pass.
+- The dg check's read recovers as gcc's parser (under *recover* alone): a missing `;` after the last token when the next stands
+  on a later line, the tokens skipped to the `;`; an unterminated literal's stray token a recovery error; a recovery error hides no
+  later error of its line; libcpp's separator after 0b; a dg-error's leading N: read as its column; -traditional-cpp's errors for
+  #embed and __has_embed. c23-digit-separators-2, c23-bool-errors-3 and gcc.dg/cpp/embed-4 pass dg; c23-attr-syntax-6 (recorded
+  pass on 11-17) fails on next itself (checked in a pristine worktree): classed pedantic-diag.
+- test/c/check-budget.edn: four of the class speed's nine, measured at eval with 900 s budgets at 12 to 26 s, get 60 s (CS216 (a)).
+
+Records (whole corpora, passing runs): the tree check of torture-execute, torture-execute-mirror, gcc-bitint, gcc-c23, gcc-embed
+and the mutants (three mutants their originals'
+gcc-syntax entries covered left of no class by the record, classed gcc-syntax by hand as it asks, then recorded again); the token
+check and annotations of gcc-embed; the round trip of torture-execute, torture-execute-mirror, gcc-embed and benchmarksgame (the
+six rows test/records/accepted.edn held removed there); the dg check; the run level of mir at eval and AOT. compcert and
+benchmarksgame's eval record was not taken: at load 90 to 113 it timed out compcert/fib.c (a pass) and two of the four budgeted.
+Not yet recorded: torture-compile's tree check (one of its files allocates past ulimit's 8 GiB; its run under bin/heavy-lock,
+12 GiB in steps.edn, waited two hours behind three jobs): 20080124-1.c, equal under --only, stays a known entry, stale for the
+night's c-parse torture-compile part until `bin/heavy-lock env REPR_C_THREADS=4 bin/repr-c parse-check --corpus torture-compile
+--no-mutants --record` runs (queued in the worktree when pushed).
+
+Cells: read 5,237 / 226 / 12 to 5,327 / 138 / 10, eval 2,323 / 36 / 0 to 2,324 / 35 / 0, AOT 2,331 / 28 / 0 to 2,333 / 26 / 0,
+print 4,833 / 5 / 12 to 4,842 / 2 / 12; C's completeness 0.9815 to 0.9861 (without by design 0.9988 to 0.9989), maturity and
+independence 1. bin/reap --record, bin/crops-score --record, --judge --strict and bin/records-check: 0 problems; bin/ci
+judge-test 116 tests, 630 assertions, 0 failures.
+
+Decisions proposed (the survey): CR1, the read cell's 137 files (138 now) where cc is wrong, 132 of them passing their own verdict
+elsewhere (dg directives or the run), counted pass (read to 0.9973); CR2, speed's other five (150 to 423 s) by design or
+budgeted; CR3, SPEC §14's floating types (_Float16, _Float128, decimal), x87 long double and fenv, a few days of soft-float in
+crt, ci and cf2g. Left deferred: eval-depth 5 and eval-limits 10 (the next re-seed and a converter that does not recurse per
+nesting level), decl-diag 3, parse-gap 1, pedantic-diag 1, macro-context 1, objects-macro-body 1.
+Alternatives not taken: classing the read rows n/a (CR1 (b)); a type-based setjmp detection (the builder sees forms, not types,
+at that point); hand-editing the three mutants' result rows (the record run again instead).
