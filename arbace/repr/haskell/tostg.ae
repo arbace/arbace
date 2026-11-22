@@ -910,9 +910,19 @@
 (declare hnf-arg? atomic-args?)
 (defn- unknown-unlifted-arg?
   "hs-r6: a constructor's argument at a field of one unlifted representation (Int#'s :int, not a sum's several nor a
-  void) whose expression says a lifted one: not an atom, of a type the untyped Core leaves open"
+  void) whose expression says a lifted one: not an atom, of a type the untyped Core leaves open; r the field's source
+  type's representation (field-src-reps: an UNPACKed strict Int field is unboxed in the layout, its argument boxed)"
   [a r]
   (and (keyword? r) (not= :L r) (not= :v r) (not (atomic-args? [a])) (not (head? a 'lit)) (= [:L] (expr-reps a))))
+
+(defn- field-src-reps
+  "hs-r6: a constructor's fields' representations from their declared types (its type's arguments after its dictionaries),
+  not the layout's (con-reps: a library's -O2 layout unpacks a strict Int, SrcLoc's lines, which the Core passes boxed);
+  :L each when the type is not known"
+  [c]
+  (let [ci (con-info c) ar (or (:arity ci) 0) d (or (:dicts ci) 0)
+        ts (when-let [t (global-type c)] (arg-types t))]
+    (if (and ts (= ar (+ d (count ts)))) (into (vec (repeat d :L)) (map (comp reps->rep type-reps) ts)) (vec (repeat ar :L)))))
 
 (defn- floatable-con
   "A saturated application of a constructor without strict fields: [CON ARGS]"
@@ -929,7 +939,7 @@
                    ;; HF10-P37: a field of several representations takes several atoms (with-atoms')
                    (not (some vector? (con-reps c)))
                    ;; hs-r6: an unlifted field's argument of a type left open is case-bound (app-expr's), no value
-                   (not (some true? (map unknown-unlifted-arg? args (concat (con-reps c) (repeat :L))))))
+                   (not (some true? (map unknown-unlifted-arg? args (concat (field-src-reps c) (repeat :L))))))
           [c args])))))
 
 (defn- app-expr [f args]
@@ -1023,11 +1033,11 @@
         ;; CorePrep's cpeArg binds an unlifted argument, not a lazy let of a thunk (T10481's I# (raise# e), whose thunk was
         ;; read as an integer; UnliftedNewtypesDependentFamilyRun's I# (method Proxy |> R:BarIntRep ~ Int#))
         (and (= ar (count args))
-             (some (fn [[a r]] (unknown-unlifted-arg? a r)) (map vector args (concat (con-reps c) (repeat :L)))))
+             (some (fn [[a r]] (unknown-unlifted-arg? a r)) (map vector args (concat (field-src-reps c) (repeat :L)))))
         (let [rs (mapv (fn [a r] (if (unknown-unlifted-arg? a r)
                                    (let [n (fresh "sat")] (swap! *reps* assoc n r) [n [[:case n r (expr a)]]])
                                    (atom-of a)))
-                       args (concat (con-reps c) (repeat :L)))]
+                       args (concat (field-src-reps c) (repeat :L)))]
           (wrap-binds (vec (mapcat second (reverse rs))) (strict-con c (mapv first rs))))
         (= ar (count args)) (with-atoms args (fn [as] (strict-con c as)))
         :else (with-atoms args (fn [as] (list 'app (gname (second f)) as)))))
