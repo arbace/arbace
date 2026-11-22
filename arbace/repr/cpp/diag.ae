@@ -3364,7 +3364,79 @@
                     (:inner f) nil)))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types]))
+;; Operands of scalar and GNU vector types (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Using Vector Instructions through Built-in
+;; Functions": vector_size makes a vector of its element type, whose binary operators take two vectors of the same element type and
+;; number of elements, ~ an integer vector's; and the standard's rules the same operands break): a subscript whose index operand is
+;; of floating or vector type ([expr.sub]/1: one operand a pointer or array, the other of integral or unscoped enumeration type:
+;; "invalid types 'int[10][float]' for array subscript"), an array new's bound of such a type ([expr.new]/8: "expression in
+;; new-declarator must have integral or enumeration type"), a switch's ([stmt.switch]/2: "switch quantity not an integer"), ~ of a
+;; floating type or vector ([expr.unary.op]/10: "wrong type argument to bit-complement"), a binary operator between vectors of
+;; different element types ("invalid operands to binary +"; conversion/simd3.C, simd4.C). The operands judged are variables named
+;; directly, their types read off their declarations.
+
+(defn operand-types
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                              (when (= main (or (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :operand-type :msg msg})))))
+        tds (into {} (for [n (:nodes u) :when (#{"TypedefDecl" "TypeAliasDecl"} (:kind n))] [(:name n) n]))
+        kind-of (fn [d]
+                  (let [qt (str/trim (str/replace (str (get-in d [:type :qualType])) #"\b(?:const|volatile)\b" ""))
+                        td (get tds qt)
+                        vec? (or (some #(= "vector_size" (gnu-attr-name %)) (gnu-attrs-of d))
+                                 (and td (some #(= "vector_size" (gnu-attr-name %)) (gnu-attrs-of td))))
+                        base (str/trim (if td (str/replace (str (get-in td [:type :qualType])) #"\b(?:const|volatile)\b" "") qt))]
+                    (cond
+                      (re-find #"\]$" base) (if vec? nil {:k :array})
+                      (re-find #"[*&]$" base) (if vec? nil {:k :ptr})
+                      (float-type-size base) {:k (if vec? :vector :float) :el base :fl true}
+                      (int-type-size base) {:k (if vec? :vector :int) :el base :fl false}
+                      :else nil)))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))]
+    (letfn [(w [x vars]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      vars (if (#{"FunctionDecl" "CXXMethodDecl"} k)
+                             (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) pv]))
+                             vars)
+                      kd (fn [e] (let [e (some-> e strip)]
+                                   (when (= "DeclRefExpr" (:kind e))
+                                     (when-let [d (or (get vars (get-in e [:referencedDecl :name])) (get globals (get-in e [:referencedDecl :name])))]
+                                       (kind-of d)))))
+                      bad-index? (fn [t] (or (= :float (:k t)) (= :vector (:k t))))]
+                  (case k
+                    "ArraySubscriptExpr" (let [[a b] (:inner x) ka (kd a) kb (kd b)]
+                                           (when (and ka kb
+                                                      (if (#{:array :ptr} (:k ka)) (bad-index? kb)
+                                                          (if (#{:array :ptr} (:k kb)) (bad-index? ka) (not (and (= :vector (:k ka)) (= :int (:k kb)))))))
+                                             (report! x "invalid types for array subscript")))
+                    "CXXNewExpr" (when-let [sz (and (:isArray x) (some #(when (= "DeclRefExpr" (:kind (some-> % strip))) %) (:inner x)))]
+                                   (when (bad-index? (kd sz)) (report! sz "expression in new-declarator must have integral or enumeration type")))
+                    "SwitchStmt" (when (bad-index? (kd (first (:inner x)))) (report! (first (:inner x)) "switch quantity not an integer"))
+                    "UnaryOperator" (when (= "~" (:opcode x))
+                                      (let [t (kd (first (:inner x)))] (when (and t (:fl t) (#{:float :vector} (:k t))) (report! x "wrong type argument to bit-complement"))))
+                    ("BinaryOperator" "CompoundAssignOperator")
+                    (let [[a b] (:inner x) ka (kd a) kb (kd b)]
+                      (when (and (= :vector (:k ka)) (= :vector (:k kb)) (not= (:el ka) (:el kb))
+                                 (#{"+" "-" "*" "/" "%" "&" "|" "^" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^="} (:opcode x)))
+                        (report! x (str "invalid operands to binary " (str/replace (str (:opcode x)) #"=$" "")))))
+                    nil)
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v vars)))
+                (vector? x) (loop [ys x vars vars]
+                              (when-let [y (first ys)]
+                                (w y vars)
+                                (recur (rest ys) (if (and (map? y) (= "DeclStmt" (:kind y)))
+                                                   (into vars (for [d (:inner y) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))] [(:name d) d]))
+                                                   vars))))
+                :else nil))]
+      (w (:nodes u) {}))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
