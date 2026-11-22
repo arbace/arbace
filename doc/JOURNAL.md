@@ -17092,3 +17092,39 @@ Asked by the main session after cpp-read's, hs-r7's and R3's reports and the Pyt
 - Rust C6-5 (a): the library build's 36 units are the build's description, data like `std.edn` (made once by `std-crates --units`, held to
   Cargo's `--unit-graph` in the oracle tier); C4's identities count own. Alternatives not taken: (b) port Cargo's resolution (5-8 agent
   days); (c) (a) now, (b) when a second library build needs it.
+
+## 2026-11-22: the user's second counting decisions applied (branch `counting2-1122`, from mac/next `a8c6d3137`)
+
+The n/a half of the entry above, as counting-1122 applied the first (no check run, the user's "avoid redundancy and unnecessary tests":
+bin/reap --record, bin/crops-score --record, --judge --strict, --self-test, --self-test-ref and bin/records-check only; bin/pyi
+divergences, which classes the record with pyi's own judge and runs nothing, before and after). Each rule is the class's `:kind :na`,
+keyed on the verdict the record holds (a row a class names counts n/a only when it does not pass), every row keeping its reason;
+doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the second questions", has the mechanism and the numbers.
+- Classes `:na` (`:decided` says since when and the alternatives not taken): C++'s test/cpp/divergences-dg.edn `:gcc-dialect` 173,
+  `:gxx-only-rules` 2, `:musl-libc` 1; Python's test/python/divergences.edn `:fork` 557, `:testinternalcapi` 132, `:venv-and-build`
+  49; Haskell's test/haskell/divergences.edn `:process` 1 (T24672) and `:skipped` 2 (T24809, T4262). Left by design, built by
+  others: C++'s `:gcc-own-rules` 135, Python's `:extension-modules` 75, Haskell's `:no-reference` 31.
+- bin/pyi's own judge (test/python/libtest_judge.ae) classes by `:tests` and `:match`, the kind only printed: bin/pyi divergences gives
+  fork 557, testinternalcapi 132 and venv-and-build 49 before and after, the lines' "(design," now "(na,". hsi's check
+  (bin/lib/hsi/check) and the C++ dg check (arbace/repr/cpp/dg.ae) read no class kind either.
+- bin/crops-score (test/crops/score.ae): an n/a case leaves the stages' counted cases as it leaves the cell's. `na-ids` reads `:ids`
+  beside `:tests` (hsi's classes name programs by `:ids`); `na-cases` keeps a row the record passes (C++'s `:musl-libc` names
+  Wnull-conversion-1.C, which the own front end passes: a pass in reap, and kept in the read stage's count); `:count-from`'s `:out`
+  takes it (C++'s read: 1,699 of 4,382 own rows, 182 n/a; 0.780 -> 0.788); `:case-inputs` leaves out of the cell's ids its `:na`
+  classes' non-passing ids (`cell-rows`, `cell-na-ids`): without it Haskell's eval took T24809 and T4262 out twice (the matrix's
+  total without them, eval-out.edn's list with them: 913 of 913), so they left test/haskell/eval-out.edn (34 -> 32, the fact's
+  `:cases` too) and the stage counts 915 of 915. No other crop's stage moved (Java's, C++'s and Rust's case-inputs name no n/a id).
+  C++'s judge's stated `:dg` the cell's 4,383 (4,564 before, which had not taken 497-3 (a)'s and 502-2 (a)'s 5 n/a either; still 1.0
+  at three decimals). Left as before this round: pr105475-2.C (undefined-expectation), which the cell passes by clang's record and
+  the own record fails, out of the read stage's rows and in the cell's (one row).
+- Cells: C++ read 5,665 / 311 / 517 (38 n/a) -> 5,665 / 135 / 517 (214 n/a); Python eval 39,204 / 2,719 / 3,627 (2,771 n/a) ->
+  39,204 / 1,981 / 3,627 (3,509 n/a); Haskell eval 894 / 34 / 22 -> 894 / 31 / 22 (3 n/a).
+- Completeness, exact (floored to six decimals, then to one): C++ 0.961380 -> 0.967457 (96.1 -> 96.7), Python 0.961507 -> 0.965050
+  (96.1 -> 96.5), Haskell 0.983464 -> 0.984209 (98.3 -> 98.4); what is meant to pass unchanged (C++ 0.978450, Python 0.977173, Haskell
+  0.992197). Independence: C++ 0.953940 -> 0.955500 (95.3 -> 95.5; test/crops/scores.edn 0.9540 -> 0.9556), Python and Haskell 1.0.
+- Controls: bin/crops-score --self-test's `counting-1122b-tests` (`na-ids` not taking a `:design` class's ids; `na-cases` leaving a
+  passing and an unnamed row; C++'s count with the passing row taken out too; Haskell's with the n/a ids kept and 34 out, 913; each
+  crop's completeness, C++'s with the 176 still by design); with `na-cases` taking every named row, or `na-ids` reading `:tests`
+  alone, the self-test failed.
+Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0 problems), --self-test, --self-test-ref,
+bin/records-check (9 pairs, 0 problems).
