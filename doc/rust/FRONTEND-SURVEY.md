@@ -6105,3 +6105,51 @@ from the pack), std.rs (`cirun: undefined function <alloc::string::String as Ord
 record (nothing written). C4 is recorded own by the first native-interface build with C1's configuration that passes
 (`RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=.. RF_EXTRA_IFACE=.. RF_DROP_GLUE=1 bin/rust-front rsi-build --native-core` over the six, then the
 record): the next host stream's rsi-build at the merged head can be that one.
+
+## rust-c3x: TypeId::of's constants, C3's exports again, C6-5 (a)'s record, share-generics (2026-11-22, branch `rust-c3x-1122`)
+
+From `mac/next` (`169119776`: R2b's round three, R3's C1/C4 and the Mac's 524 as one line).
+
+### 524-1 (a): TypeId::of's constants (built)
+
+rustc 1.99.1's `TyCtxt::type_id_hash` ported into `arbace.rust.front.mono` (`type-id-hash`; the sources read in the pinned tarball are
+named in the journal's entry): the type with its regions erased hashed by StableHash into rustc-stable-hash's SipHasher128, its two
+halves the TypeId's 16 bytes, each 8-byte half a pointer into the type's GlobalAlloc::TypeId at the half as offset (write_type_id).
+In 1.99 a `Ty` hashes its TyKind directly (no nested fingerprint); a `&List` (generic arguments, a tuple's types) and an AdtDef each
+enter as the Fingerprint of their own hash; a DefId as its DefPathHash, computed from the StableCrateIds (C6-2's) down the def path
+(DefPathData's discriminant, the name, the disambiguator); an AdtDef's variants, fields, visibilities, flags and ReprOptions (its
+field_shuffle_seed from the DefPathHash) read from the ADT's library sources. `build_run`'s inline-const evaluates TypeId::of's
+`const { type_id::<T>() }` at the instance with it (runtime-body's fix-static makes the allocation and its two relocations).
+
+| check | result |
+|---|---|
+| `bin/rust-front type-id-check`: every TypeId::of constant of the pack rust-front-rsi | **6 of 10 equal** (String, &str, u64, u32, i32, core's ParseIntError), 0 differ, 4 refused |
+| the crossed control (a computed constant against the next case's recorded bytes) | 6 of 6 differ |
+| the eval cases' constants (panics 4, unwind 4, intrinsics' u32) | String, &str, u64, u32: all among the equal |
+
+Refused: a program-local ADT (the synthetic programs' Noisy, AppError, Failure: their def keys are mono's `def-key`, their items the
+program's own nodes; not read yet) and an ADT local to an impl's method (alloc's `{impl#17}::from::StringError`: the impl's items are
+not walked); arrays (a constant's hash), trait objects, function pointers and closures.
+
+### Share-generics: the question (not built)
+
+R2b's round three: 21 of std's 25 differing items differ only by the crate that instantiates a generic callee. rustc 1.99.1
+(compiler/rustc_codegen_ssa/src/back/symbol_export.rs, `upstream_monomorphizations_provider`, lines 500-560 in the pinned tarball)
+takes each upstream generic instance from the crates that export it (under share-generics a crate exports the generic instances of
+its own whole mono collection), the one of the lowest StableCrateId when several do. Knowing it natively needs each upstream crate's
+whole collection, not only the closure std's items reach.
+
+```
+DECISION C3X-1: std's units' upstream generic instances (share-generics), 21 of std's 25 differing items and alloc's to_uppercase
+- (a) collect each upstream crate's whole mono set natively (mono's collector at *lib-crate* over every root of core, alloc, the small
+      dependencies, and since C6-1 (a) the seven backtrace crates: L2 over whole crates, plus L3's interfaces), then rustc's
+      lowest-StableCrateId choice: exact and own; core's roots alone are its 8,359 non-generic functions and statics (one process over
+      8 GiB likely: under the heavy lock), about 8-12 agent days with L3
+- (b) build std's reference without shared generics (test/rust/runtime/std.edn's RUSTFLAGS `-Zshare-generics=no`, the IR re-pinned by
+      `bin/rsi std-build --update` in the oracle tier, the pack rust-front-rsi and the samples' IR pack recorded again, the runtime
+      rebuilt: one night as C6-1 (b)'s re-pin): every crate then instantiates its own copies, which the units already do, and a
+      program's -O0 build finds no upstream instance to share (mono's upstream choice for programs goes too); small code, a
+      configuration of rustc's build like C6-1 (b) (recommended)
+- (c) read each crate's exported generic symbols from the pinned rlibs' rmeta (exported_symbols), as std-crates-rsi.edn was read before
+      C6-2 (b): about a day, exact, but a record of rustc's build (C6 stays rustc's unless counted as the build's description)
+```

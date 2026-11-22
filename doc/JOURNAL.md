@@ -18130,3 +18130,9 @@ case's recorded bytes) 6 of 6 differing. build_run's inline-const evaluates Type
 (`(indirect-type-id HEX)`, runtime-body's fix-static making the allocation and its two relocations into the type's :other
 allocation, counted a native const). The eval cases' TypeId constants are String, &str, u64 and u32 (panics 4, unwind 4, intrinsics'
 u32): all equal. pack-compare-test passed at the change. The program-level proof is item 1's RF_FACT_TRACE rsi-build (below).
+- `bin/rust-front essential` at the change (`996298710`): passed, its known summary, every control differing, 0 stub calls (18 min).
+- Share-generics (item 4 of the brief, not built): rustc 1.99.1's upstream_monomorphizations_provider read
+  (compiler/rustc_codegen_ssa/src/back/symbol_export.rs:500-560 of the pinned tarball): an instance several upstream crates export is
+  taken from the lowest StableCrateId, and a crate exports under share-generics the generic instances of its whole collection. The
+  question for the user, DECISION C3X-1, with options (whole collections natively, 8-12 days; std's reference without shared
+  generics, one re-pin night, recommended; the rlibs' exported symbols read, a record) in doc/rust/FRONTEND-SURVEY.md, "rust-c3x".
