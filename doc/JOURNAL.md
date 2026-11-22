@@ -17726,3 +17726,32 @@ Haskell's completeness 0.991279 -> **0.997649** (exact: eval 948/957, read, AOT 
 
 Left (deferred, 9): mandel, parfib, secretary and eff/VS beyond the caps or the light memory (hsi's speed and memory); minimax's
 splitmix_init on hsi; smallpt and ben-raytrace (primitive's front-end gaps); unpack_sums_6 (:own-speed) and T23071 (:speed), hs-speed's.
+
+## 2026-11-22: hs-pkgs-1122 round 4: :ghc-no-finish keyed on GHC's verdict; eff/VS queued at 16 GiB
+
+**:ghc-no-finish on the verdict, not a list** (the main session, applying the user's HES101 rule, 2026-11-22). The class now keys on
+GHC's recorded status in test/haskell/ref-ghc914.edn: `:ref-statuses [137 152 :timeout]`, record-ref's kill at its 10 s of CPU
+(SIGKILL after SIGXCPU; 152 SIGXCPU alone; :timeout at three times it in wall seconds), and it takes every non-pass that no class
+names by id and whose reference is such a kill. Three judges read it: bin/reap (read-source :hsi-check's `:ref-status` from the
+source's new `:hsi-ref`, test/reap/cells.edn's Haskell eval source; classify takes a class's `:ref-statuses`, as Python's
+`:ref-outcomes` keys on CPython's record), bin/lib/hsi/check's judge (`ref_status`, `verdict_class`, for the pack's classes and the
+own ones, divergences-own.edn's :ghc-no-finish-own with its outcomes) and bin/hsi divergences (test/haskell/eval/divergences.ae, the
+reference beside the classes file). A row the record passes stays a pass: of the ten programs whose GHC run was killed, blackscholes,
+nbody and queens pass on hsi (their own verdicts, HES97 (a)'s caps) and stay passes; the seven others are n/a: fannkuch-redux and
+spectral/minimax (HES101's two) and parallel/minimax, parallel/mandel, parallel/parfib, real/smallpt and real/ben-raytrace. They leave
+:hackage-pending (smallpt, ben-raytrace: the class is empty), :hackage-c (parallel/minimax: empty), :own-speed-no-pack (mandel,
+parfib) and test/haskell/eval-out.edn (10 -> 5 cases; independence.edn's :out-of-cases 5). Controls: a killed reference's lookup
+gives the class (smallpt, nbody), a completed one's none (partree, status 0, stays :own-speed-no-pack).
+Alternative not taken: listing the seven ids, which the next record-ref run would leave stale.
+
+**eff/VS at 16 GiB.** Queued through the big-job lock (`bin/heavy-lock`, 12 tickets ahead at the queueing): the 600 s run at the
+check's 16 GiB through the timing wrapper, then, if it passes, its cap (1.5 x its CPU, rounded up to 10 s) and the `--only --record`
+run, under one hold. Not run within the round: VS stays in :own-speed-no-pack (deferred).
+
+**Checks.** The whole own record judged (0 unclassed), `bin/hsi own-verdicts --check` (919 of 929 by their own verdict), `bin/hsi
+golden --oracle --control` pass; `bin/reap --record` 0 problems, `bin/crops-score --record`, `--judge --strict` 0 problems,
+`bin/records-check` 0 problems.
+
+**Scores.** Haskell's eval cell 948 / 0 / 9 (13 n/a) -> **948 / 0 / 4 (18 n/a)**; completeness 0.997649 -> **0.998949** (the mean of
+the cells: eval 948/952, read, AOT and print 1; floor 99), independence 1.0000. Left (deferred, 4): secretary and eff/VS
+(:own-speed-no-pack), unpack_sums_6 (:own-speed) and T23071 (:speed), hs-speed's.
