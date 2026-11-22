@@ -17279,3 +17279,14 @@ Follows this branch's round-three entry. doc/rust/FRONTEND-SURVEY.md, "As built:
 - At the merged head: core 191 of 275 items equal to std's IR, alloc 21 of 25, std 101 of 325 (the three builds again; every crossed
   control differing); `bin/rust-front essential` and `core-essential` their known summaries; inline-test 15 of 15, pack-compare-test
   passed. R3's own path at the merged head (the same build and check over `.tmp/rust-front/c1m`) runs; its outcome follows.
+
+## 2026-11-22: rust-c6c-1122: R3's own path at the merged head, built; its ci check left running at hand-back
+
+At the merged head (`df4946d10`: R3 and the Mac's 524 merged) the three programs built again with C1's configuration (`RF_EXTRA_IFACE
+RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`, `.tmp/rust-front/c1m`; core-attrs made again
+first, its key moved with mono.ae): 3 of 3 own, with 524's facts (std: callees 2870/2880, entry 1/1, layouts 4703/4703, symbols
+1955/1955; unwind: callees 430/430, layouts 815/815; panics: callees 471/471, layouts 910/910). Its `bin/rsi check --front own --only`
+needs std's runtime at the merged head's lowering key (524's base carries next's newer arbace/repr/c/lex.ae and pp.ae, so the
+runtime of `69683177b` is stale): lowered again and read into ci (about 70 minutes), then the check; running when this branch was
+handed back (the worktree's .tmp/c6c/p5/status and rsi-check.out). The 524-2 host stream's rsi-build at the merged head covers
+the same programs.
