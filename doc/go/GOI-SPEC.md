@@ -5559,3 +5559,101 @@ limit and prints `runtime: sp=` and the runtime's trace. An executable whose bac
 100,000 (the op's absence is caught). Tests: `test/goi/run/go/t/deep.ae` (300,000 calls; gc's run the same), and
 `bin/goi test`'s depth checks (`depth_tests`): `depth-limit`'s cases, `deep.ae` under `ARBACE_GOI_DEPTH=150000` and
 `test/goi/run/go/depth/runaway.ae` under program mode's default, each ending in goi's depth error.
+
+## Since v1: gc's -std, -+, -complete and -p, walk's print check, extra receivers, internal imports (2026-11-22, branch `go-rows-1122`)
+
+The burst of 2026-11-21/22 (the user's goal: 100 completeness) re-examined every by-design class of Go's four cells.
+What this round built, each proven by `bin/goi check --only` (and `check --aot --only`) with the negative controls'
+subjects in the run, against gc's errors and runs of the originals:
+
+- **gc's modes for std and the runtime** (`:gc-std`). `bin/goi`'s `check_err` passes `-std`, `-+`, `-complete` and
+  `-p=PATH` to gc's reference as before and now to goi too (`arbace.go.run --gc-mode`, `{:std :runtime :complete
+  :pkgpath}`), where they were unsupported:
+  - gc's syntax driver (`go/arbace/repr/go/gcsyntax/errors.ae`, `Revision` 6) takes the flags (`SetFlags`, read by
+    `arbace.repr.go.syntax`'s `file-errors` and `decl-errors`): noder's pragma checks under `base.Flag.Std` and
+    `CompilingRuntime` (`//go:X is not allowed in the standard library`, `allowedStdPragmas`; the runtime's
+    directives allowed under `-+`; `go:uintptrkeepalive` allowed under `-std`, its `requires go:nosplit` then
+    reported by funcExt's port), and funcExt's `missing function body` under `-complete` (and for `init`), a
+    linknamed function excepted;
+  - the escape analysis' errors of a runtime package (`arbace.go.escape/runtime-lines`): escape.go's `finish`, `x
+    escapes to heap, not allowed in runtime` at each variable moved to heap, and walk's `ir.ClosureDebugRuntimeCheck`,
+    `heap-allocated closure f.func1, not allowed in runtime` at each function literal that captures variables,
+    escapes and is not a go or defer wrapper;
+  - `-p`: the package path the inliner's rules name (`*gc-pkgpath*`): hairyVisitor's `call to GetCallerPC` (a static
+    call of internal/runtime/sys's `GetCallerPC` or `GetCallerSP`, the package compiled as itself among them) and the
+    intrinsics' table for the package's own functions.
+
+  `uintptrkeepalive`, `fixedbugs/issue48097`, `fixedbugs/issue14999` and `internal/runtime/sys/inlinegcpc` pass;
+  `fixedbugs/issue18331` reaches gc's reference, which fails its own `// ERROR` comments (writer's `can only use
+  //go:noescape` is not reached after noder's errors): skipped, `:gc-reference` (not applicable). `nowritebarrier`
+  (`-+ -p=runtime`, `go:nowritebarrier` and `go:nowritebarrierrec`) stays: gc's write barrier checks are its SSA back
+  end's (`ssa/writebarrier.go`'s `needwb` over the SSA values, `ssagen/nowb.go`'s call graph after inlining), refused by
+  `check_err` with that reason.
+- **walk's print check**: `illegal types for operand: println` (`walk/builtin.go`'s `walkPrint`, `badtype`): an argument
+  of `print` or `println` of an array or struct type has no printer of the runtime's; goi reports it, once a line, when
+  nothing before it did (`arbace.go.run/print-type-lines`; generic functions left out). `fixedbugs/issue79258` passes.
+- **extra receivers** (`:spellings`): gc's syntax keeps a method's first receiver (`parser.go`'s `funcDeclOrNil`, `method
+  has multiple receivers`), so types2 never sees the others' types; in mode `:full` forms the receivers are the elements
+  of the vector before its `:recv-closing`, and goi's checker drops the extra ones as gc's tree does
+  (`arbace.go.check.decl/extra-receivers-dropped`): `fixedbugs/bug217` passes (no `undefined: d`).
+- **internal std packages in errorcheck** (`:std-out-of-scope`): gc's errorcheck compiles a file against the whole
+  standard library's importcfg, so Go's rule on internal packages does not apply; with the standard library's forms at
+  hand (`--escape-std`) `arbace.go.run`'s errorcheck binds `arbace.go.repl/*internal-ok*` and imports an internal std
+  package neither listed nor interpreted from those forms (`internal-std?`). `escape_runtime_atomic` (`-m -l`, its
+  tags of internal/runtime/atomic's `Loadp`, `StorepNoWB`, `Casp1` made from its forms) passes.
+- **Queue 420's and 426's rows recorded**: `interface/assertinline`, `defererrcheck`, `sliceopt`,
+  `fixedbugs/issue35073b` (gc's front-end `-d` diagnostics), `fixedbugs/issue9608` (a bodiless function built on its
+  first call), `peano` (program mode's depth limit) and `fixedbugs/issue68415` (`unique` importable, the deferred class
+  `:std-weak-unique`) pass on the gate's executable at next's key with the checkout's namespaces; their rows were
+  waiting for a run. (`fixedbugs/issue35073b` needs the standard library's forms, `.tmp/repr-go/forms/linux-amd64`,
+  which `bin/goi check` reads but does not make: `bin/goi annotations` does, the gate's `goi` step before
+  `goi-check-full`.)
+
+- **gc's `-d=escapedebug=1`** (`:gc-flags`, "front-end work, not ported yet" at queue 420): walk/convert.go's `dataWord`
+  after order.go's `addrTemp`, over each conversion to an interface after the inliner and the escape analysis'
+  `rewriteWithLiterals` (`arbace.go.escape/dataword-lines`, the conversions recorded by `finish!` with their escape
+  and their operand's static value): a pointer-shaped value is its own data word; a zero-sized one, a bool or a byte
+  use a global; order makes a constant, or a variable whose static value is an array or struct literal, the read-only
+  zero value (a zero literal of at most 1,024 bytes) or a read-only global (a static literal) when the conversion
+  needs the value's address (`dataWordFuncName`: not convT16, convT32, convT64, convTstring, convTslice) or the operand
+  is a static composite literal (`isStaticCompositeLiteral`); else a conversion that does not escape and is at most
+  1,024 bytes uses a stack temporary; each printed as gc's `convert: MSG: X`, at the conversion's line, or at the
+  variable's declaration where order leaves the variable itself (a parameter, an address-taken or heap variable, a
+  type not SSA-able, or no `addrTemp`: gc's `ir.Name` is its declaration). Two parts of gc's front end the port lacked
+  came with it, both after the inliner as gc runs them: `deadlocals.Funcs` (`dead-locals`: an assignment without
+  effects to a local never read is dropped, so a literal whose every call was inlined is neither analyzed nor
+  compiled; not under `-N`), and the single definitions of an inlined body's copied locals
+  (`register-copy-defs!`), so that a literal the inlined body defines and calls is inlined in turn (`string10`'s
+  `f2()` inside the inlined `f()`). `escape_iface_data` passes (its 42 diagnostics, no other line).
+
+At the AOT level:
+
+- **GOI-DESIGN-REVIEW.md's Proposed 8 (c), decided 2026-11-05 and built now**: a run program whose source names
+  `runtime.Caller` or `runtime.Callers`, or holds a `/*line` directive, is built from its forms of mode `:full` printed
+  back to its text (`check_one`; `GOI_AOT_LAYOUT=full` still for every program), the rest from mode `:lines` in the lines
+  layout. The class `:positions`' three (`devirtualization_nil_panics`, `fixedbugs/issue22662`, `fixedbugs/issue29504`)
+  pass, and the 22 other programs the rule selects pass as before.
+- **The final expression statement** (`:spellings`): in mode `:full` a function with results whose `:go/pos` records no
+  `:return` ends in an expression statement (an invalid program: gc's `missing return`), which the printer now prints as
+  written (`arbace.repr.go.print-code/*final-expr-stmt*`), not as the implicit return of SPEC.md §6.4: `return.go`
+  passes.
+
+At the print level: **empty declaration groups** (`:empty-decl-group`, G2F6's alternative taken as text, not as a form):
+the converter keeps an empty group's tokens (`import ( )` at file level, a local `var ()`), keyword and parentheses with
+their positions, in go/file's `:go/empties` (mode `:full` only), and the printer lays them out with the comments and the
+source's semicolons (`print-emit/full-result`); `bin/repr-go read --full --corpus test --text` prints all 1,708 files
+byte for byte, `test/empty.go` and both `issue49611.go` among them, so `test/repr/go/roundtrip-text-known.edn` is empty.
+
+The tags' cache version (`tag-version`) moves to `escape-10`: the inliner's GetCallerPC rule,
+deadlocals and the copied locals' definitions change the standard library's tags made with the inliner, so the next
+`bin/goi check` makes them again (its warm-up, about 22 minutes from an empty cache).
+
+**Results** (whole runs, recorded: `bin/goi check --record --jobs 6`, `check --aot --record --jobs 6`, the gate's executable at
+next's key with the checkout's namespaces): 1,781 of 1,838 pass (1,764 of 1,837 before; `typeparam/dictionaryCapture-noinline`
+new in the list), 0 fail, 0 error; `fixedbugs/issue15281` passes too (the memory class's `ReadMemStats` after an allocation, three
+runs of three: dead slots cleared since queue 420's day), its known line removed. AOT 1,696 pass (1,691). `bin/goi divergences`:
+foreign code 8, memory 6, unsafe layout 2, gc-m 1 (deferred), gc-flags 28, gc-std 1, gc-phases 7, gc-reference 4 (n/a); AOT:
+go-build-complete 1, no-forms 137 and gc-reference 4 (n/a). The corpora were not read again for these runs (the reads of
+linux-errtest-full and std need more than the 8 GiB a process may take outside the heavy lock; this branch changes nothing a
+read of a checked program gives): the copies read at main's key, re-keyed. Not built (next round): `escape_unique` and
+`nowritebarrier`'s write barrier checks.

@@ -60,6 +60,11 @@
   "The file of the function a message is of."
   nil)
 
+(def ^:dynamic *gc-pkgpath*
+  "gc's -p (base.Ctxt.Pkgpath): the package path the analyzed package is compiled as, which the
+  rules naming a package's functions read (the intrinsics, GetCallerPC's); nil: its own path."
+  nil)
+
 (defn- warn! [line msg]
   (vswap! *msgs* conj [*wfile* (or line 0) msg]))
 
@@ -1722,6 +1727,8 @@
           (report-leaks! (e/o o :line) nm esc (mapv #(e/o % :name) (fn-get f :results))))
         (leak-encode esc)))))
 
+(declare iface-conv?)
+
 (defn- finish! [b fns]
   (doseq [f fns]
    (binding [*wfile* (fn-get f :file)]
@@ -1745,6 +1752,30 @@
             (vswap! *defer-log* update :heap (fnil conj #{}) n))
           (when (and *defer-log* (name-loc? l) (or (lget l :addrtaken) (lget l :captured)))
             (vswap! *defer-log* update :unssa (fnil conj #{}) n))
+          ;; gc's -d=escapedebug (dataword-lines): each conversion to an interface, its escape decided
+          (when (and *defer-log* (:dataword @*defer-log*) (not (name-loc? l)) (iface-conv? n))
+            (let [x (:x n)
+                  o (when (= :local (:op x)) (:obj x))
+                  vl (when o (.get ^java.util.HashMap (:loc-of *ctx*) o))]
+              (vswap! *defer-log* update :convs (fnil conj [])
+                      [*wfile* (long (or (lget l :line) 0)) n (has-attr? l attr-escapes)
+                       {:sv (static-value x)
+                        :var-line (when o (e/o o :line))
+                        :param (boolean (when o (#{:param :result} (e/o o :esc-class))))
+                        :addrtaken (boolean (when vl (or (lget vl :addrtaken) (has-attr? vl attr-escapes))))}])))
+          ;; gc's -+ (runtime-lines): a variable moved to heap is an error (escape.go's finish), as is a
+          ;; closure that captures variables and escapes (walk's ir.ClosureDebugRuntimeCheck)
+          (when (and *defer-log* (:runtime @*defer-log*) (has-attr? l attr-escapes))
+            (if (name-loc? l)
+              (when-not (str/starts-with? (e/o n :name) ".")
+                (vswap! *defer-log* update :rt (fnil conj #{})
+                        [*wfile* (long (or (lget l :line) 0))
+                         (str (if (e/o n :inl-pkg) (str (e/o n :inl-pkg) "." (e/o n :name)) (e/o n :name)) " escapes to heap, not allowed in runtime")]))
+              (when (and (map? n) (= :fn (:op n)) (not wrapper))
+                (when-let [c (fn-of-node n)]
+                  (when (and (fn-get c :closure?) (not (fn-get c :wrapper)))
+                    (vswap! *defer-log* update :rt (fnil conj #{})
+                            [*wfile* (long (or (lget l :line) 0)) (str "heap-allocated closure " (fn-get c :name) ", not allowed in runtime")]))))))
           (if (has-attr? l attr-escapes)
             (if (name-loc? l)
               (when (and (pos? (long *m*)) (not (str/starts-with? (e/o n :name) ".")))
@@ -2147,7 +2178,22 @@
   (boolean (if (or (fn-get f :foreign) (fn-get f :foreign-body))
              (contains? (get intrinsics (fn-get f :pkg-path)) (fn-get f :local-name))
              (and (fn-get f :obj) (not (fn-get f :parent))
-                  (contains? (get intrinsics (:local-pkg *ctx*)) (fn-get f :name))))))
+                  (contains? (get intrinsics (or (:gc-pkg *ctx*) (:local-pkg *ctx*))) (fn-get f :name))))))
+
+(defn- caller-pc-call
+  "hairyVisitor's GetCallerPC rule (inline/inl.go): a static call of internal/runtime/sys's
+  GetCallerPC or GetCallerSP (the package compiled as -p=internal/runtime/sys among them), whose
+  caller cannot be inlined (the logical caller's PC or SP is not the physical one's); its name, or
+  nil."
+  [c]
+  (let [cl (:callee c)
+        o (when (= :func (:op cl)) (:obj cl))]
+    (when (e/obj? o)
+      (let [pk (e/o o :pkg)
+            pk (if (or (nil? pk) (= pk (:local-pkg *ctx*))) (or (:gc-pkg *ctx*) (:local-pkg *ctx*)) pk)
+            nm (e/o o :name)]
+        (when (and (= "internal/runtime/sys" pk) (#{"GetCallerPC" "GetCallerSP"} nm))
+          nm)))))
 
 (defn- hairy-cost
   "hairyVisitor over function f's body: [cost reason], gc's IR nodes counted as the unified IR
@@ -2260,6 +2306,8 @@
                            "keepalive" (do (cost! 2) (doseq [a (:args c)] (visit a)))
                            (do (cost! 1) (doseq [a (:args c)] (when-not (= :type (:op a)) (visit a)))))
                 :iface (do (cost! (+ 1 inline-extra-call-cost)) (visit (:callee c)) (doseq [a (:args c)] (visit a)))
+                (if-let [pc (caller-pc-call c)]
+                  (vreset! reason (str "call to " pc))
                 (let [callee (inl-callee f c)
                       inl (when callee (can-inline! callee))
                       sig (node-type (:callee c))
@@ -2274,7 +2322,7 @@
                   (case (:kind c)
                     :method (visit (method-recv (:callee c)))
                     (visit (:callee c)))
-                  (doseq [a args] (visit a)))))]
+                  (doseq [a args] (visit a))))))]
       (visit (fn-get f :body)))
     [(long @budget) @reason]))
 
@@ -2455,10 +2503,49 @@
               :else x))]
     (cp body)))
 
+(defn- register-copy-defs!
+  "The ReassignOracle's single definitions of an inlined body's copied locals (a local declared once
+  with its value and never assigned again nor addressed: :single-def, a func-typed one's
+  :func-assigns), so that a call through a copied literal's variable (a literal the inlined body
+  defines and calls, f2 := func() {...}; f2()) is a static call there too, inlined in turn."
+  [body]
+  (let [^java.util.HashMap sd (:single-def *ctx*)
+        ^java.util.HashMap fa (:func-assigns *ctx*)
+        func-typed? (fn [o] (= :func (kind (e/o o :type))))
+        mine (java.util.IdentityHashMap.)
+        kill! (fn [o] (when (and (e/obj? o) (.containsKey mine o)) (.put sd o ::none) (when (.containsKey fa o) (.put fa o ::none))))]
+    (letfn [(defs [x]
+              (cond
+                (map? x) (do (when (and (= :decl (:op x)) (seq (:init x)) (= (count (:objs x)) (count (:init x))))
+                               (doseq [[o v] (map vector (:objs x) (:init x))
+                                       :when (and (e/obj? o) (e/o o :local?) (not (e/o o :addressed?)) (not (.containsKey sd o)))]
+                                 (.put mine o true)
+                                 (.put sd o v)
+                                 (when (func-typed? o) (.put fa o [v]))))
+                             (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj :objs} k) (defs v))))
+                (sequential? x) (doseq [v x] (defs v))
+                :else nil))
+            (uses [x]
+              (cond
+                (map? x) (do (case (:op x)
+                               :assign (doseq [l (:lhs x)] (when (and (map? l) (= :place-local (:op l))) (kill! (:obj l))))
+                               :op-assign (let [p (:place x)] (when (= :place-local (:op p)) (kill! (:obj p))))
+                               :incdec (let [p (:place x)] (when (= :place-local (:op p)) (kill! (:obj p))))
+                               :range (doseq [p (:places x)] (when (and (map? p) (= :place-local (:op p))) (kill! (:obj p))))
+                               :addr (let [y (:x x)] (when (and (map? y) (#{:local :place-local} (:op y))) (kill! (:obj y))))
+                               nil)
+                             (doseq [[k v] x] (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj :objs} k) (uses v))))
+                (sequential? x) (doseq [v x] (uses v))
+                :else nil))]
+      (defs body)
+      (uses body))))
+
 (defn- register-copies!
   "Records for the literals of an inlined body (copies of the callee's), scanned, so that their
-  calls in the copy can be inlined in turn."
+  calls in the copy can be inlined in turn (their variables' single definitions too:
+  register-copy-defs!)."
   [caller body]
+  (register-copy-defs! body)
   (letfn [(walk [x]
             (cond
               (map? x) (if (and (= :fn (:op x)) (::copy x))
@@ -3026,7 +3113,7 @@
 
 (def ^:private tag-version
   "The version of the tags' analysis, in the cache's keys: changed with the analysis."
-  "escape-9")
+  "escape-10")
 
 (def ^:private pkg-tags
   "The other packages' tags analyzed in this process: path -> {function name -> its record}."
@@ -3269,6 +3356,135 @@
                    [(fn-get f :file) (long (or line 0))
                     (cond open "open-coded defer" never "stack-allocated defer" :else "heap-allocated defer")]))))))
 
+(defn- iface-conv?
+  "Whether node n converts a value of a non-interface type to an interface (OCONVIFACE)."
+  [n]
+  (boolean (and (map? n) (or (= :convert-iface (:op n)) (and (= :conv (:op n)) (= :iface (conv-kind n))))
+                (when-let [x (:x n)] (when-let [ty (node-type x)] (not (iface? ty)))))))
+
+(defn- sole-component
+  "types.Type.SoleComponent: the one component of a struct of one field or an array of one element,
+  recursively, the type itself for any other; nil for a struct or array of more or fewer."
+  [ty]
+  (let [u (under ty)]
+    (if (vector? u)
+      (case (nth u 0)
+        :struct (let [fs (nth u 1)] (when (= 1 (count fs)) (sole-component (:type (first fs)))))
+        :array (when (= 1 (long (nth u 1))) (sole-component (nth u 2)))
+        ty)
+      ty)))
+
+(defn- dataword-needs-addr?
+  "walk/convert.go's dataWordFuncName's needsaddr: a value converted by convT or convTnoptr (by its
+  address), not by convT16, convT32, convT64, convTstring or convTslice."
+  [ty]
+  (let [sz (size ty) al (align ty) sc (sole-component ty)]
+    (not (or (and (= sz 2) (= al 2))
+             (and (= sz 4) (= al 4) (not (has-pointers? ty)))
+             (and (= sz 8) (= al 8) (not (has-pointers? ty)))
+             (and sc (#{:string :slice} (kind sc)))))))
+
+(defn- static-composite-lit?
+  "walk/complit.go's isStaticCompositeLiteral: a constant, nil, or an array or struct literal (not a
+  slice's) of such, or an interface conversion of one."
+  [n]
+  (cond
+    (const? n) true
+    (= :lit (:op n)) (case (:kind n)
+                       :array (every? #(static-composite-lit? (elt-value %)) (:elems n))
+                       :struct (every? #(static-composite-lit? (:value %)) (:fields n))
+                       false)
+    (iface-conv? n) (static-composite-lit? (:x n))
+    :else false))
+
+(defn- zero-lit?
+  "ir.IsZero over an array or struct literal: every element absent or zero."
+  [n]
+  (cond
+    (const? n) (let [v (:val n)] (or (nil? v) (= :nil (:op n)) (and (number? v) (zero? v)) (= "" v) (false? v)))
+    (= :lit (:op n)) (case (:kind n)
+                       :array (every? #(zero-lit? (elt-value %)) (:elems n))
+                       :struct (every? #(zero-lit? (:value %)) (:fields n))
+                       false)
+    :else false))
+
+(defn- can-ssa?
+  "ssa.CanSSA (amd64): a type of at most 4 words, not an array of more than one element, a struct of
+  at most 4 fields of such types."
+  [ty]
+  (and (<= (size ty) 32)
+       (let [u (under ty)]
+         (if (vector? u)
+           (case (nth u 0)
+             :array (and (<= (long (nth u 1)) 1) (or (zero? (long (nth u 1))) (can-ssa? (nth u 2))))
+             :struct (let [fs (nth u 1)] (and (<= (count fs) 4) (every? #(can-ssa? (:type %)) fs)))
+             true)
+           true))))
+
+(defn- dataword-diag
+  "walk/convert.go's dataWord over conversion n (order.go's addrTemp first): the diagnostic gc's
+  -d=escapedebug=1 prints for it, [file line text], or nil when the value is allocated or is its own
+  data word. esc: whether the conversion escapes; info: its operand's static value (:sv, made while
+  the analysis ran) and variable, when it is one ({:var-line :param :addrtaken}), whose position the diagnostic has when order leaves the variable
+  itself (a parameter's, an address-taken or heap one's, or no addrTemp at all: gc's ir.Name is its
+  declaration), else the conversion's line (a literal, a copy, a read-only global at the statement)."
+  [file line n esc info]
+  (let [x (:x n)
+        ty (node-type x)
+        sc (sole-component ty)
+        sz (size ty)
+        addr? (or (dataword-needs-addr? ty) (static-composite-lit? x))
+        op-line (if (and (= :local (:op x)) (:var-line info)
+                         (not (and addr? (not (:param info)) (not (:addrtaken info)) (can-ssa? ty))))
+                  (long (:var-line info))
+                  line)
+        say (fn [msg l] [file l (str "convert: " msg ": " (fmt-node x 0))])
+        ;; order's addrTemp: a constant becomes a read-only global; a value whose static value is an
+        ;; array or struct literal, the read-only zero value or a read-only global
+        ordered (when addr?
+                  (if (const? x)
+                    :global
+                    (let [v (or (:sv info) x)]
+                      (when (and (= :lit (:op v)) (#{:array :struct} (:kind v)))
+                        (cond
+                          (and (zero-lit? v) (pos? sz) (<= sz 1024)) :zeroval
+                          (static-composite-lit? v) :global
+                          :else nil)))))]
+    (cond
+      (direct-iface? ty) nil
+      (zero? sz) (say "using global for zero-sized interface value" (if (= :global ordered) line op-line))
+      (or (= :bool (kind (or sc ty))) (and (= 1 sz) (t/integer-type? (or sc ty))))
+      (say "using global for single-byte interface value" (if (= :global ordered) line op-line))
+      (= :zeroval ordered) (say "using global for zero value interface value" line)
+      (= :global ordered) (say "using global for interface value" line)
+      (and (not esc) (<= sz 1024)) (say "using stack temporary for interface value" op-line)
+      :else nil)))
+
+(defn dataword-lines
+  "gc's -d=escapedebug=1 (Go 1.27.1's walk/convert.go, dataWord, after walk/order.go's addrTemp): at
+  each conversion to an interface of checked package r, after inlining and the escape analysis'
+  rewriteWithLiterals, how its data word avoids an allocation (a zero-sized value, a single byte, the
+  read-only zero value, a read-only global, a stack temporary), as gc's diagnose prints it; [file
+  line message], sorted."
+  [r]
+  (let [log (volatile! {:dataword true})]
+    (binding [*m* 0 *msgs* (volatile! []) *defer-log* log]
+      (analyze-package r))
+    (vec (sort (distinct (keep (fn [[f l n esc info]] (dataword-diag f l n esc info)) (:convs @log)))))))
+
+(defn runtime-lines
+  "gc's -+ (base.Flag.CompilingRuntime, Go 1.27.1's src/cmd/compile/internal): the errors of a
+  package compiled into the runtime that the escape analysis decides, escape/escape.go's finish
+  (\"x escapes to heap, not allowed in runtime\" at each variable moved to heap) and walk's
+  ir.ClosureDebugRuntimeCheck (\"heap-allocated closure f.func1, not allowed in runtime\" at each
+  function literal that captures variables, is neither called directly nor inlined, and escapes;
+  go and defer wrappers left out), over checked package r: [file line message], sorted."
+  [r]
+  (let [log (volatile! {:runtime true})]
+    (binding [*m* 0 *msgs* (volatile! []) *defer-log* log]
+      (analyze-package r))
+    (vec (sort (:rt @log #{})))))
+
 (defn- same-safe?
   "ir.SameSafeExpr: l and r the same side-effect-free expression (a place and its value alike)."
   [l r]
@@ -3362,6 +3578,68 @@
                                      false)))]
              (ok (:value st)))))))
 
+(defn- dead-locals
+  "deadlocals.Funcs (Go 1.27.1's cmd/compile/internal/deadlocals, after the inliner): in a function's
+  body (its literals' bodies inside it), the assignments of a value without effects (a variable, a
+  constant, nil, a function literal) to a local that is never read are dropped (gc's _ = 0): a
+  literal whose every call was inlined is then neither analyzed nor compiled. Returns the body."
+  [body]
+  (let [defs (java.util.LinkedHashMap.)         ; local -> [[node index] ...], or ::used
+        dead (java.util.IdentityHashMap.)       ; assign or decl node -> #{index}
+        local? (fn [o] (and (e/obj? o) (#{:auto :param} (e/o o :esc-class)) (not= "_" (e/o o :name))))
+        effects? (fn [x] (not (and (map? x) (or (#{:local :nil :fn} (:op x)) (const? x)))))]
+    (letfn [(use! [o]
+              (let [s (.get defs o)]
+                (.put defs o ::used)
+                (when (vector? s) (doseq [[_ _ rhs] s] (visit rhs)))))
+            (assign! [node i o rhs]
+              (if (and (local? o) (not (effects? rhs)) (not= ::used (.get defs o)))
+                (.put defs o (conj (or (.get defs o) []) [node i rhs]))
+                (visit rhs)))
+            (visit [x]
+              (cond
+                (map? x)
+                (case (:op x)
+                  :local (when (local? (:obj x)) (use! (:obj x)))
+                  :decl (let [objs (vec (:objs x)) init (vec (:init x))]
+                          (if (and (seq init) (= (count objs) (count init)))
+                            (doseq [[i o r] (map vector (range) objs init)] (if o (assign! x i o r) (visit r)))
+                            (doseq [r init] (visit r))))
+                  :assign (let [ls (vec (:lhs x)) rs (vec (:rhs x))]
+                            (if (= (count ls) (count rs))
+                              (doseq [[i l r] (map vector (range) ls rs)]
+                                (if (and (map? l) (= :place-local (:op l)))
+                                  (assign! x i (:obj l) r)
+                                  (do (visit l) (visit r))))
+                              (do (doseq [l ls] (visit l)) (doseq [r rs] (visit r)))))
+                  :place-local (when (local? (:obj x)) (use! (:obj x)))
+                  (doseq [[k v] x]
+                    (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj :objs} k) (visit v))))
+                (sequential? x) (doseq [v x] (visit v))
+                :else nil))]
+      (visit body)
+      (doseq [[o s] defs :when (vector? s) [node i _] s]
+        (.put dead node (conj (or (.get dead node) #{}) i)))
+      (if (zero? (.size dead))
+        body
+        (letfn [(zero [r] {:op :const :mode :constant :type :int :val 0 :line (:line r)})
+                (rw [x]
+                  (cond
+                    (map? x)
+                    (let [ds (.get dead x)
+                          x (if ds
+                              (case (:op x)
+                                :decl (assoc x :init (vec (map-indexed (fn [i r] (if (ds i) (zero r) r)) (:init x))))
+                                :assign (assoc x :lhs (vec (map-indexed (fn [i l] (if (ds i) :blank l)) (:lhs x)))
+                                               :rhs (vec (map-indexed (fn [i r] (if (ds i) (zero r) r)) (:rhs x))))
+                                x)
+                              x)]
+                      (into {} (map (fn [[k v]] [k (if (#{:type :to :sig :field :method :recv-type :iface :form :obj :objs} k) v (rw v))])) x))
+                    (vector? x) (mapv rw x)
+                    (seq? x) (doall (map rw x))
+                    :else x))]
+          (rw body))))))
+
 (defn- inline-package!
   "CanInline over the package's functions and literals, then their bodies with the calls gc
   inlines inlined; the package scanned again over the new bodies (the literals inlined away
@@ -3406,7 +3684,10 @@
                            (vec (remove #(and (= :assign (:op %)) (= 1 (count (:rhs %))) (= :inlcall (:op (first (:rhs %))))
                                               (static-inlined? (first (:rhs %))))
                                         (fn-get f :inlined-body)))
-                           (fn-get f :inlined-body))))
+                           (fn-get f :inlined-body)))
+        ;; deadlocals.Funcs after the inliner (not under -N)
+        (when-not (get *debug* :N)
+          (fn-set! f :body (dead-locals (fn-get f :body)))))
       (let [lone-fns (vec (for [g lone]
                             (volatile! (assoc (select-keys @g [:node :name :file :params :param-types :results :sig :line :inl :inl-state])
                                               :parent nil :closure? false :recv nil :esc :unknown
@@ -3727,6 +4008,7 @@
   in *msgs*."
   [r]
   (binding [*ctx* {:local-pkg (:path r)
+                   :gc-pkg (or *gc-pkgpath* (:path r))
                    :fn-of-obj (java.util.HashMap.)
                    :fn-of-node (java.util.IdentityHashMap.)
                    :loc-of (java.util.HashMap.)

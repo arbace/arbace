@@ -137,7 +137,7 @@ The scores of `next` (`test/crops/scores.edn`, `bin/crops-score`; in brackets co
 |---|---:|---:|---:|---|
 | Clojure | 99.0 (99.4) | 100 | 100 | |
 | Java | 72.9 (80.4); 77.2 on `java-night` | 100 | 99.7 | completeness |
-| Go | 97.0 (100.0) | 100 | 100 | |
+| Go | 98.9 (100.0) | 100 | 100 | |
 | C | 96.0 (99.6) | 100 | 99.7 | |
 | OCaml | 84.2 (96.4); 82.5 before OC222 (a) | 100 | 51.3 | completeness, independence |
 | C++ | 76.3 (96.8); 89.1 (97.8) / 71.3 on `cpp-print-own` | 100 | 67.8 | completeness, independence |
@@ -355,6 +355,12 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
 - **Clojure** (99 99 100 100). Landed: `h-clojure-go` (CDR2's and CDR4 (b)'s rows recorded, eval deferred 50 -> 45; gen-class's
   `:exposes-methods` takes the world's protected methods) and its fix `h-prepare-fail` (no fn defined after genclass.ae in
   arbace.core). Held: genclass's record after a build at the new gate_key, then the AOT suite with test-dot, test-bean, genclass.
+- **Go** (go-rows-1122, 2026-11-22, the burst's stream G1: the by-design classes re-examined; journal "Go's by-design classes
+  re-examined, round 1"): gc's -std, -+, -complete, -p, walk's print check, -d=escapedebug (with deadlocals), the extra receivers,
+  internal std imports in errorcheck, queue 420/426's rows recorded; AOT Proposed 8 (c) and return.go; print's empty declaration
+  groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
+  gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
+  Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),

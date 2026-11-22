@@ -426,7 +426,7 @@
                 [(or f file) (+ (long n) (- line (long el)))]
                 [file line]))))))))
 
-(declare typeassert-lines)
+(declare typeassert-lines print-type-lines)
 
 (defn errorcheck
   "Checks the package of package file pf (forms root root) without running it (GR7b, the
@@ -453,7 +453,15 @@
         _ (no-assembly! src)
         ;; the types written, for gc's size checks after the declarations' (front)
         sizes (when front (atom []))
-        r (binding [env/*sizes* sizes] (repl/check-source src (fn [_] nil) false))
+        ;; gc compiles the file against the whole standard library (Go's test driver's importcfg): with
+        ;; std's forms at hand an internal std package neither listed nor interpreted is imported from them
+        std-root (:std gcflags)
+        r (binding [env/*sizes* sizes
+                    repl/*internal-ok* (boolean std-root)]
+            (repl/check-source src (fn [path]
+                                     (when (and std-root (repl/internal-std? path))
+                                       (load/package-source {:dir std-root} path @repl/config)))
+                               false))
         errs (:errors r)]
     (when-let [bi (some #(when (= :BrokenImport (:code %)) %) errs)]
       (fail 125 "unsupported" (str "an import neither in the table nor interpreted: " (:msg bi))))
@@ -486,14 +494,14 @@
           lines (if front
                   (let [_ (require 'arbace.repr.go.syntax)
                         name (.getName (File. ^String front))
-                        noder (:lines ((resolve 'arbace.repr.go.syntax/file-errors) front name))
+                        noder (:lines ((resolve 'arbace.repr.go.syntax/file-errors) front name (:mode gcflags)))
                         ;; base.FlushErrors: sorted by position (file, line), stable
                         pos (fn [^String l] (let [[_ f n] (re-find #"^(.*?):([0-9]+): " l)]
                                               [(or f "") (if n (Long/parseLong n) 0)]))
                         merged (sort-by pos (concat lines noder))]
                     (if (seq merged)
                       merged
-                      (let [d ((resolve 'arbace.repr.go.syntax/decl-errors) front name lang)]
+                      (let [d ((resolve 'arbace.repr.go.syntax/decl-errors) front name lang (:mode gcflags))]
                         ;; then the reader's: gc's types' sizes (types.CalcSize), as gc reports them
                         ;; when nothing before them did (GOI-SPEC.md, "Since v1: gc's size checks")
                         (if (seq d) d (map relocate (code/size-errors @sizes))))))
@@ -506,6 +514,7 @@
                   (let [_ (require 'arbace.go.escape)
                         analyze (resolve 'arbace.go.escape/analyze)
                         el (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                           (resolve 'arbace.go.escape/*gc-pkgpath*) (:pkgpath (:mode gcflags))
                                            (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
                                            (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} (:debug gcflags))
                                            (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
@@ -516,6 +525,7 @@
           lines (if (and (not errs?) (pos? (long (get (:debug gcflags) :defer 0))))
                   (let [_ (require 'arbace.go.escape)
                         dl (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                           (resolve 'arbace.go.escape/*gc-pkgpath*) (:pkgpath (:mode gcflags))
                                            (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
                                            (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} (:debug gcflags))
                                            (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
@@ -530,16 +540,46 @@
                   (if (and (not errs?) (or app? sl?))
                     (let [_ (require 'arbace.go.escape)
                           al (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                           (resolve 'arbace.go.escape/*gc-pkgpath*) (:pkgpath (:mode gcflags))
                                              (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
                                              (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} dbg)
                                              (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
                                ((resolve 'arbace.go.escape/append-slice-lines) r app? sl? (boolean (get dbg :N))))]
                       (concat lines (for [[f l m] al] (relocate (str f ":" l ": " m)))))
                     lines))
+          ;; gc's -d=escapedebug: walk's dataWord, how each conversion to an interface avoids an allocation
+          ;; (arbace.go.escape/dataword-lines)
+          lines (if (and (not errs?) (pos? (long (get (:debug gcflags) :escapedebug 0))))
+                  (let [_ (require 'arbace.go.escape)
+                        dl (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                           (resolve 'arbace.go.escape/*gc-pkgpath*) (:pkgpath (:mode gcflags))
+                                           (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
+                                           (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} (:debug gcflags))
+                                           (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
+                             ((resolve 'arbace.go.escape/dataword-lines) r))]
+                    (concat lines (for [[f l m] dl] (relocate (str f ":" l ": " m)))))
+                  lines)
           ;; gc's -d=typeassert: its SSA builder's type assertions, inlined or a runtime call
           lines (if (and (not errs?) (pos? (long (get (:debug gcflags) :typeassert 0))))
                   (concat lines (for [[f l m] (typeassert-lines r)] (relocate (str f ":" l ": " m))))
                   lines)
+          ;; the errors of gc's phases after type checking that goi decides from the checked trees, when
+          ;; nothing before them did: under -+ the escape analysis' and walk's of a runtime package
+          ;; (arbace.go.escape/runtime-lines), and walk's arguments print and println cannot print
+          ;; (print-type-lines)
+          late (when-not errs?
+                 (concat
+                   (when (:runtime (:mode gcflags))
+                     (let [_ (require 'arbace.go.escape)]
+                       (with-bindings {(resolve 'arbace.go.escape/*import-root*) (:std gcflags)
+                                       (resolve 'arbace.go.escape/*gc-pkgpath*) (:pkgpath (:mode gcflags))
+                                       (resolve 'arbace.go.escape/*tag-cache*) (:tag-cache gcflags)
+                                       (resolve 'arbace.go.escape/*debug*) (merge {:zerocopy 1} (:debug gcflags))
+                                       (resolve 'arbace.go.escape/*inline*) (boolean (:inline gcflags))}
+                         ((resolve 'arbace.go.escape/runtime-lines) r))))
+                   (print-type-lines r)))
+          lines (concat lines (for [[f l m] (sort (distinct late))] (relocate (str f ":" l ": " m))))
+          errs? (or errs? (boolean (seq late)))
           ;; gc's base.ErrorfAt: at the max-errors-th error (after its repeats are dropped) the
           ;; errors are flushed and the compilation ends with too many errors at its position
           lines (if (and max-errors (>= (count lines) max-errors))
@@ -550,6 +590,30 @@
       (doseq [l lines] (println l))
       (flush)
       (if errs? 1 0))))
+
+(defn- print-type-lines
+  "walk's walkPrint (Go 1.27.1's src/cmd/compile/internal/walk/builtin.go): an argument of print or
+  println whose type is an array or a struct (named or not) has no printer of the runtime's, an
+  error (badtype: \"illegal types for operand: println\") at the call's line, once a line; [file
+  line message], sorted. Generic functions are left out (gc reports at their instances, whose
+  arguments' types the shapes decide)."
+  [r]
+  (let [out (volatile! #{})]
+    (doseq [d (:decl-infos r)
+            :when (and (:tree d) (not (:generic d)))
+            :let [f (:file d)
+                  file (cond (string? f) f (map? f) (:name f) :else nil)]]
+      (letfn [(walk [x]
+                (cond
+                  (map? x) (do (when (and (= :call (:op x)) (= :builtin (:kind x)) (#{"print" "println"} (:builtin x)) (:line x)
+                                          (some #(#{:array :struct} (when-let [ty (:type %)] (t/kind-of ty))) (:args x)))
+                                 (vswap! out conj [file (long (:line x)) (str "illegal types for operand: " (:builtin x))]))
+                               (doseq [[k v] x]
+                                 (when-not (#{:type :to :sig :field :method :recv-type :iface :form :obj} k) (walk v))))
+                  (sequential? x) (doseq [v x] (walk v))
+                  :else nil))]
+        (walk (:tree d))))
+    (sort @out)))
 
 (defn- typeassert-lines
   "gc's -d=typeassert (ssagen's dottype1, Go 1.27.1's src/cmd/compile/internal/ssagen/ssa.go): at
@@ -626,6 +690,8 @@
                           "--escape-debug" (recur (assoc-in opts [:gc :debug] (read-string (second as))) (drop 2 as))
                           "--escape-std" (recur (assoc-in opts [:gc :std] (second as)) (drop 2 as))
                           "--escape-cache" (recur (assoc-in opts [:gc :tag-cache] (second as)) (drop 2 as))
+                          ;; gc's -std, -+, -complete and -p: {:std true :runtime true :complete true :pkgpath P}
+                          "--gc-mode" (recur (assoc-in opts [:gc :mode] (read-string (second as))) (drop 2 as))
                           ;; gc's inliner on (no -l): its decisions before the escape analysis
                           "--inline" (recur (assoc-in opts [:gc :inline] true) (rest as))
                           [opts as]))
