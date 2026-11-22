@@ -16287,3 +16287,13 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   __cached__ for the run, its __loader__ a SourceFileLoader but for "<stdin>"; the interactive functions and
   Py_UniversalNewlineFgets, which wants ungetc, not given). Probe: run_file and run_fileexflags give None, a missing name
   NameError, run_simplefile and run_anyfileex 0 with the script's own output, py_fopen's first bytes and FileNotFoundError 2.
+- Legacy subinterpreters through the C API (_testcapi's run_in_subinterp: test_syslog's three, test_threading's,
+  test_int's, test_atexit's, test_capi's test_misc and test_getargs' and others that reached "pyi's C API does not provide
+  PyThreadState_Swap"): go.arbace.py's ExtNewInterpreter and ExtEndInterpreter (newSubInterp with the "legacy" config,
+  whenceLegacyCAPI, entered by the calling thread with xiEnter; the session left and the interpreter ended), pyctypes'
+  Py_NewInterpreter, Py_EndInterpreter and PyThreadState_Swap over them (the calling thread runs in the subinterpreter
+  between the two, so PyRun_SimpleStringFlags runs in its __main__), PyThreadState_Get the current state. Both halves in
+  one commit, before the build that compiles go/arbace/py: a pyctypes naming ExtNewInterpreter against an executable
+  without it would be the night's failure again. Probe: run_in_subinterp("x = 1") 0; the subinterpreter's
+  syslog.openlog() a RuntimeError; its syslog.syslog after the main interpreter's openlog 0; an uncaught ValueError printed
+  and -1; the subinterpreter's own sys.modules (no syslog) while the main one keeps its.
