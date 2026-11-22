@@ -6749,4 +6749,15 @@ deferred (test/reap/matrix.edn), in repr/c and the dg check (queue 522 owns crt,
   own verdict (CP413 (a)). Options: (a) the own reference's stream counts as the token check's own verdict for a file known only in
   :reference-wrong classes (test/reap/cells.edn's :own-elsewhere gains c-tokens-ref's record), and the tree check's pp-known rows
   follow the token row (their trees differ from cc's only by the stream); (b) n/a (out of both denominators); (c) by design as
-  decided. *Recommended: (a)*, the C++ crop's rule, read 0.9996 to 1.0 with CT2.
+  decided. *Recommended: (a)*, the C++ crop's rule: read 5,468 / 2 / 5 to 5,470 / 0 / 5.
+- **CT2 The evaluated port's limits (read eval-depth 5, print eval-limits 10): the checks' host.** The tree check and the round trip run
+  on stage 0, which evaluates a changed repr/c from the checkout until the next re-seed: the evaluator stops at 10,000 interpreted calls
+  (gcc's limits-*.c nest 10,000 levels) and the round trip's 120 s budget stops the big reads. On a compiled repr/c (the gate's
+  executable, which embeds the checkout's repr/c) the probe of this branch (gate executable `b2a5b50d` in a checkout at its commit)
+  passes libunicode.c (levels 1-2), quickjs.c (both readers reject it: CONFIG_VERSION undefined, gcc's recorded status 1) and
+  pr46534.c (once the round trip's resource links read string literals by an unrolled loop, this branch); limits-externdecl.c and
+  sqlite3.c need more than 8 GB (the heavy lock); the five deep files need the parse's nesting bound raised (REPR_C_MAX_NEST, 20,000 in
+  the tree check since this branch) and the converter's depth measured on a compiled build. Options: (a) c-parse's torture-compile part
+  and c-roundtrip's torture-compile, quickjs and sqlite parts run on the gate's executable (`env ARBACE_HOST_EXE="$GATE_EXE"`, `:needs
+  [go-build]`, `:hosts [:prog ...]`), their records from such runs; (b) wait for the next re-seed, whose stage 0 embeds repr/c
+  compiled; (c) by design. *Recommended: (a)*, the compiled repr/c C9 made, as c-check already runs ci on the gate's executable.
