@@ -15774,3 +15774,10 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   or 0 < N < 640 the start's error "... invalid limit; must be >= 640 or 0 for unlimited.", status 1; the option over the
   variable; test_int_max_str_digits). Proof: `-X cpu_count=4321 -X int_max_str_digits=6000` prints 4321 4321 6000 6000,
   the variables 1234 1234 0 0, `-X int_max_str_digits=100` the error and status 1.
+- pyctypes for xxlimited (a crop path, interpreted from the checkout: no build): the two modules registered as the
+  world's; multi-phase initialization with execution slots (moduleFromDefAndSpec: the module made as PyModule_Create2
+  makes one, md_state and its functions bound to it, then each Py_mod_exec slot run; until now only m_methods were taken,
+  self NULL, no slot run: xxlimited had no Xxo); PyType_FromSpec of a spec that adds nothing (basicsize and itemsize 0, no
+  slot but doc and bases) over a built-in base pyi's C side cannot lay out is the plain heap subclass (xxlimited's Str
+  over str); _PyObject_GC_New is _PyObject_New (xxlimited_35's new()). Probe: Xxo's attribute, foo(1, 2), Str("abcd").upper(),
+  demo, Error.
