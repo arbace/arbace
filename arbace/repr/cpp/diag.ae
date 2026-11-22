@@ -83,12 +83,17 @@
         (let [t (read-string (slurp f))]
           (into (set (:keywords t)) (keep (fn [[n k]] (when-not (#{:lib :target-lib} k) n)) (:builtins t))))))))
 
+(def ^:private gcc-only-builtins
+  "cpp-gnu (2026-11-22): GCC's builtins clang's table does not hold (the GCC 15.2 manual's \"Constructing Function Calls\":
+  __builtin_va_arg_pack, __builtin_va_arg_pack_len), never undeclared."
+  #{"__builtin_va_arg_pack" "__builtin_va_arg_pack_len"})
+
 (defn- dunder-ok?
   "Whether the unqualified name `nm` no lookup found may be undeclared: any name not starting with __; a __ name only when
-  clang's table is there and holds neither a builtin nor a keyword of that spelling."
+  clang's table is there and holds neither a builtin nor a keyword of that spelling (nor one of GCC's own builtins)."
   [^String nm]
   (if (str/starts-with? nm "__")
-    (when-let [ids @clang-identifiers] (not (contains? ids nm)))
+    (when-let [ids @clang-identifiers] (not (or (contains? ids nm) (contains? gcc-only-builtins nm))))
     true))
 
 (def ^:private block-kinds
@@ -3502,7 +3507,41 @@
         (.add out {:line 0 :col 0 :kind :error :rule :eh-abi :msg "conflicting declaration of C function '__dynamic_cast'"})))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi]))
+;; GNU's __builtin_va_arg_pack (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Constructing Function Calls": it "represents all
+;; anonymous arguments of an inline function ... It must be only passed as last argument to some other function with variable
+;; arguments"): a use that is not the last argument of a call, or not in the callee's variable arguments (a parameter's place, a
+;; function without ...), or no argument at all, is "invalid use of '__builtin_va_arg_pack ()'", at the use (ext/va-arg-pack-2.C).
+
+(defn va-arg-pack
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (into {} (for [n (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u)) :when (and (= "FunctionDecl" (:kind n)) (string? (:name n)))]
+                       [(:name n) n]))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        pack? (fn [x] (let [x (some-> x strip)]
+                        (and (= "CallExpr" (:kind x)) (= "__builtin_va_arg_pack" (get-in (some-> (first (:inner x)) strip) [:referencedDecl :name])))))
+        ok (java.util.IdentityHashMap.)]
+    ;; the uses as a call's last argument in the callee's variable arguments
+    (walk-nodes (fn [n _]
+                  (when (= "CallExpr" (:kind n))
+                    (let [args (vec (rest (:inner n)))
+                          callee (get fns (get-in (some-> (first (:inner n)) strip) [:referencedDecl :name]))
+                          np (count (filter #(= "ParmVarDecl" (:kind %)) (:inner callee)))
+                          va (re-find #"\.\.\.\)" (str (get-in callee [:type :qualType])))]
+                      (doseq [[i a] (map-indexed vector args) :when (pack? a)]
+                        (when (and callee va (= i (dec (count args))) (>= (long i) (long np)))
+                          (.put ok (strip a) true))))))
+                (:nodes u) nil)
+    (walk-nodes (fn [n _]
+                  (when (and (pack? n) (= n (strip n)) (not (.containsKey ok n)))
+                    (when-let [o (get-in n [:range :begin :offset])]
+                      (when (= main (or (get-in n [:range :begin :file]) main))
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :va-arg-pack :msg "invalid use of '__builtin_va_arg_pack ()'"}))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
