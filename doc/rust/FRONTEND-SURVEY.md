@@ -5958,3 +5958,123 @@ facts, ALLOC_IFACE_ROUNDS=1): iter::traits::double_ended, any, fmt, fmt::rt, io:
 io::error's `cfg_select!` modules); num: 1,917 of 1,917 (its 72 `from_*_bytes`/`to_*_bytes` with `[u8; size_of::<Self>()]`, the call
 now evaluated in collect's lower-const-arg as rustc's type_of writes it). No chain was run again for them (the user's rule of
 2026-11-22): core's count after np5 plus these is at most 27,194 of 27,498 (27,062 + the 59 constness facts + create_formatter + num's 72), not measured whole.
+
+## As built: C6-4, round three: the back end's next causes (2026-11-22, branch `rust-c6c-1122`)
+
+From `mac/next` (`5f59be57d`: rust-c6b-1122 and R3's `e3c56d260`), R3's `rust-c4-1122` merged twice (`152a26cb7`, then its last
+head `7bd7b001d` at the coordinator's word: collect's unknown trait Self the same fix on both sides, R3's kept; codegen's pair tag
+the same fix, ours kept; pack-compare-test's cases of both, the 512 cases once; R3's stray `core_check.ae.orig` removed). The back
+end's lowering against std's IR at the pin, item for item with the crossed control, as rust-c6b's; the user's rule of the day
+("avoid redundancy and unnecessary tests"): std's export made again only for the keys a change moves (the 69 backtrace_rs keys,
+`lib-export --keys`, merged into the export by key), no whole export.
+
+### What was built
+
+- **The inliner's InstSimplify takes `getelementptr P, 0 -> P`** (`arbace.rust.back.inline`, simplifyGEPInst over the clone): an
+  inlined `ptr.add(start)` at a constant 0 is the pointer, so the pair the next callee builds is `insertvalue {ptr, i64} poison,
+  ptr %p, 0` as std's IR writes it (trim_right, memrchr_aligned, possibly_round, TwoWaySearcher::new, parse_next_component).
+  Checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5): the clone's zero GEP folded, whether the zero is the
+  call's argument or the callee's own constant; the caller's own zero GEP kept (inline-test's c9 and its control c10: 13 of 13).
+- **CopyProp's return rule only for an SSA local** (build-run's o0-normalize): rustc 1.99 has no RenameReturnPlace (nrvo.rs is gone,
+  DestinationPropagation is mir-opt-level 2); `_0` takes a local's name only through copy_prop.rs' rule, whose local is SSA.
+  read_uleb128's `result |= ..` keeps its own alloca, as std's IR (pack-compare-test's case and control).
+- **A reference to an unsized struct tail keeps the base's metadata** (codegen's `ref`): a struct whose layout is
+  `(memory false)` (BackendRepr::Memory { sized: false }: Path, OsStr, Slice, newtypes over `[u8]`) is unsized though the table
+  writes its sized prefix 0; `as_encoded_bytes(&self.inner)` passed nothing where std's IR passes the pair.
+- **A closure passed as a scalar pair** takes each half's pointee alignment by its upvars (codegen's pair-align; DebugMap::finish's
+  `and_then(.., |_| ..)`: `ptr align 8` on the `&mut Formatter` half).
+- **A builtin derive's method is `#[inline]`** (mono's ext-attrs: rustc_builtin_macros' deriving writes `#[inline]` on clone, eq,
+  partial_cmp, cmp, hash, fmt, default and Eq's assertion; the impl the sources do not hold, its trait derived on its self type's
+  definition): `<Components as Clone>::clone` and `<State as PartialEq>::eq` are `#[inline]` copies with std's instantiating crate,
+  as std's IR names them. core-attrs takes `num/niche_types.rs` and `num/imp/fmt.rs` (Nanoseconds' macro-made methods, Formatted's).
+- **A repr(C) enum's tag is c_int** (mono's adt-repr: the sources' `#[repr(C)]` of an enum whose interface :repr, the helper's
+  `repr().int`, is nil): backtrace's `uw::_Unwind_Reason_Code`, trace_fn's `ret i32`.
+- **The module lists carry rustc's file names** (core-check's module-files, `--list`'s fourth column, read-modules): module.rs
+  joins a `#[path]` to the declaring file's directory and never resolves `..`, so std's backtrace_rs files are
+  `std/src/../../backtrace/src/..` in its spans (Bomb::drop's and stash's panic locations), core's stdarch and portable-simd files
+  `core/src/../../stdarch/..`; run-module's root file is that name.
+- **A module path is in the type namespace** beside a function of its name (mono's ext-value-ns?, lib-unit's RF_LIB_MODULES: the
+  crates' module lists): backtrace's `gimli::mmap` is both a function and a module, `Mmap` std's IR's `..5gimli4mmap4Mmap` under `Nt`.
+- **lib-unit's vtables** (build-run's lib-unit-run): each body's unsizing casts to a trait object with mono's vtable-alloc, as
+  program-facts gives a program's, which runtime-body's casts take in turn.
+- An export entry carries the facts of the functions nested in its body when the crate's pass holds them (custom_owner_from_box's
+  generic `drop_box_raw`: alloc's pass cache of 2026-11-20 does not, so the item stays).
+- **The always-inliner's order as rustc 1.99.1 and LLVM 23 give it.** rustc 1.99.1's `items_in_deterministic_order`
+  (compiler/rustc_middle/src/mono.rs:569-590, read in the pinned `rustc-1.99.1-src.tar.xz`) sorts a codegen unit's items by symbol
+  name unless `-Z codegen-source-order` (rust-lang/rust#145358), not by definition span: the callees come to LLVM's AlwaysInliner in
+  their symbols' order (rust-c6b's stand-in, callees before callers, retired; `LIB_UNIT_SYMBOL_ORDER=0` keeps it). The inliner takes
+  a callee's call sites in its use list's order, newest first (`F.users()`: codegen creates a body's calls in rustc's reverse
+  postorder, codegen's `*call-seq*` numbers them `:cseq`; a clone's calls are newer than the caller's own, an invoke made of a cloned
+  call newer still): the host's `opt -passes='default<O0>'` over the same modules, with the use lists rustc's codegen makes (newest
+  first; a forward reference in a text module reverses them, `uselistorder` puts them back), gives inline-test's c11 (two calls:
+  the first site's alloca first) and c12 (through a second callee: the second site's first), both ours (14 of 14). With them std's
+  trim_right and core's memrchr_aligned, possibly_round, dragon's format_exact and TwoWaySearcher::new are equal.
+- **mono's source reader parses the library as edition 2024** (core's, alloc's and std's Cargo.toml; the files their `#[path]`
+  modules take): a 2021 parse refused std's path.rs (`if HAS_PREFIXES && let Some(p) = ..`), so every attribute of path.rs was
+  unknown (PathBuf::deref's and From<OsString>'s `#[inline]`, the derives): `EXT_ATTRS_TRACE=1` names such an item.
+- **The export's assert spans** (core-check's export-entry): a key two built asserts share, or one the passes renumbered, takes the
+  next unused built assert of its message's kind in block order (digits_to_dec_str's first bounds check had no location, `?`).
+- **The inliner folds an inlined `inttoptr` of a constant** (ConstantFoldCastInstruction over the clone: 0 `ptr null`, another the
+  constant expression; opt's own output for the same module): `without_provenance_mut(0)` inlined is `ptr null`, as std's IR
+  (stack_overflow's `null`; inline-test's c13, 15 of 15).
+- `export core --add` of the wanted callees (without_provenance, without_provenance_mut, wrapping_offset, ptr::read, align_of) and of
+  digits_to_dec_str and digits_to_exp_str again (their old entries taken out): 37 keys asked (the refused ones retried), 7 bodies, 18
+  module files, 5 min 51 s, 2.8 GB; std's 69 backtrace_rs keys and `sys::args::unix::imp::init` by `lib-export --keys` (53 bodies,
+  merged by key); alloc's `CString::new`'s nested `spec_new_impl_bytes` none (not a key the export can build).
+
+### Results
+
+`bin/rust-front lib-unit build|compare` at each step against std's IR at the pin (`test/rust/runtime/ir.sha256`), the crossed control
+differing every time; a compare alone where only the compare's code changed (the inliner, codegen), the units built again where the
+build's did:
+
+| core's 275 items | equal | differ | refused | no symbol |
+|---|---|---|---|---|
+| before (`rust-c6b-1122` r8) | 183 | 12 | 77 | 3 |
+| r1 at the merged head: derive attributes, the zero GEP, CopyProp's return rule, closure pairs, repr(C), rustc's file names (core's build 13 min, 3.0 GB) | 185 | 10 | 77 | 3 |
+| the callees in their symbols' order (compare) | 187 | 8 | 77 | 3 |
+| the call sites newest first, codegen's creation order (compare) | 189 | 6 | 77 | 3 |
+| the --add round and vtables in the program's bindings (built again) | **190** | 6 | 76 | 3 |
+
+| std's 325 items | equal | differ | refused | no symbol |
+|---|---|---|---|---|
+| before (`rust-c6b-1122` r8) | 83 | 27 | 214 | 1 |
+| r1 at the merged head | 91 | 20 | 214 | 0 |
+| the callees in their symbols' order (compare) | 92 | 19 | 214 | 0 |
+| the library parsed as edition 2024 (built again), the call sites newest first | 94 | 17 | 214 | 0 |
+| backtrace_rs and init exported again, vtables, built again | 97 | 23 | 205 | 0 |
+| an inlined constant inttoptr folded (compare) | **98** | 22 | 205 | 0 |
+
+alloc's 25 items: **21 equal** throughout (2 differ, 2 refused), as before.
+
+std's 22 differing items by cause: **18 share-generics' upstream instances** (format_symbol_name, gimli::mmap's deref, parse_start,
+stash's allocate, panic_handler's `get` and two `take_box`, resume_unwind's `take_box`, include_cur_dir, parse_next_component and its
+`_back`, trim_left, `_set_extension`, `_print_fmt`, BacktraceLock's `print`, checked_add_duration, find_eh_action,
+read_encoded_pointer: each now differs by an instantiating crate alone), StdoutLock's and StderrLock's `write_fmt` (the returned
+guard's pointee alignment: the futex `ReentrantLock` std's interface lacks), trace_fn (rustc calls `<&mut dyn FnMut(..) as
+FnMut>::call_mut`, our typeck calls through the object; with its repr(C) return now `i32`), hashmap_random_keys (a 9-byte local where
+rustc's MIR has 8, MIR-level). alloc's 2: to_uppercase (share-generics: core's `<Chars as IntoIterator>::into_iter`),
+custom_owner_from_box (the nested generic `drop_box_raw`'s facts: alloc's pass cache of 2026-11-20 predates queue 498's nested
+functions). core's 6: digits_to_dec_str and digits_to_exp_str (the first bounds check's span: the built assert has none, the index
+expression's THIR span, the front end's), mul_pow2 (`assert!`'s 4,093-byte `stringify!`), slice_index_fail (a fn-local item's
+disambiguator), from_bytes_with_nul and lookup (MIR-level). std's refusals (205): 116 not exported (the export's, R3's line), 48
+layouts std's interface lacks (`std::fs::File`, the futex `Mutex`, `RwLock`, `Option<SymbolName>`), 12 promoted and 11 unevaluated
+constants (libc's `S_IFDIR` and `UIO_MAXIOV`, std's `HAS_PREFIXES` and anonymous constants), 13 callees mono refuses (the external
+opaque `panic_output::{opaque#0}` whose hidden type std's interface does not write, addr2line's and rustc_demangle's unresolved
+paths, a builtin Try candidate), 3 `#[inline(always)]` callees not built, 1 symbol, 1 scalar operation; no vtable refused (8 before
+the round: lib-unit's casts now take mono's vtables).
+
+**Share-generics, what Arbace would need** (rustc 1.99.1's compiler/rustc_codegen_ssa/src/back/symbol_export.rs, read in the
+pinned tarball): a crate's exported generic instances are the generic items of its own whole collection
+(`collect_and_partition_mono_items`, external linkage), and an instance several upstream crates export is taken from the one of the
+lowest StableCrateId (lines 544-552). core's id (`f4c9..`) is the highest of std's 25 crates (rustc_demangle `1841..`, gimli,
+compiler_builtins, addr2line, alloc `58bf..`, hashbrown, libc, std_detect, adler2, memchr, std, miniz_oxide, object, unwind, cfg_if
+below it): find_eh_action's `<Result<usize, ()> as Try>::branch` is rustc_demangle's, its `<*const u8>::is_null` alloc's, the rest
+core's. Knowing them without reading std's IR is every upstream crate's whole collection (core's roots: 8,359 non-generic functions in
+its interface, its 2,486 external defines; alloc's; the deps'), C6's L2 with L3 for the seven backtrace crates unless C6-1 (b) drops
+them; not this round.
+
+The targeted checks at the head: `bin/rust-front essential` passed (its known summary, every control differing, 0 stub calls; it
+first failed on records staged from rust-c6b's worktree, `.tmp/rust-front/records/stage` copied with its paths, removed and staged
+again), `core-essential` its known summary (566 equal, the control differing), inline-test 15 of 15, pack-compare-test passed
+(R3's cases and this branch's); reap 56 of 56 cells, crops-score 0 problems, records-check 9 pairs 0 problems.

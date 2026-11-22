@@ -16899,3 +16899,54 @@ call (`[u8; size_of::<Self>()]`, eval-int-expr's size_of with a primitive impl's
 cfg_select modules (module-files reads no macro's arms), core_simd ops' glob of a private import, to_bytes' anonymous-constant
 args, shift_scalar's impl-fresh `'_`, the Thin trait alias bound (a clause the solver would have to expand), legacy_int_modules'
 consts, the [const] clauses (512's).
+
+## 2026-11-22: rust-c6c-1122: C6-4's third round (the back end's next causes), R3 merged, C6-5 (a) recorded
+
+Branch `rust-c6c-1122` from `mac/next` (`5f59be57d`), the burst's stream R2b (C6: std's IR made by Arbace). No gate (the user's
+word); light runs, each process under `ulimit -v 8 GiB`, one big process at a time, the host at load 30 to 150; the user's rule of
+the day ("avoid redundancy and unnecessary tests"): std's and alloc's exports made again only for the keys a change moves
+(`lib-export --keys`, merged into the export by key), core's by `export core --add`. Merged: R3's `rust-c4-1122` at `152a26cb7`,
+then its last head `7bd7b001d` at the coordinator's word (collect's unknown trait Self the same fix on both sides, R3's kept;
+codegen's pair tag the same fix, ours kept; pack-compare-test's cases of both, the 512 cases once; R3's stray
+`arbace/rust/front/core_check.ae.orig` removed). doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three".
+
+- The always-inliner (arbace.rust.back.inline) as LLVM 23's: InstSimplify's `getelementptr P, 0 -> P` and ConstantFoldCastInstruction's
+  `inttoptr` of a constant over the clone; the callees in
+  their symbols' order, read in rustc 1.99.1's compiler/rustc_middle/src/mono.rs (items_in_deterministic_order sorts a codegen unit
+  by symbol name unless -Z codegen-source-order, rust-lang/rust#145358; rust-c6b's callees-first stand-in retired); a callee's call
+  sites newest first in its use list (codegen numbers the calls as it creates them, rustc's reverse postorder, `:cseq`; a clone's
+  calls newer than the caller's own). Each rule checked against the host's `opt -passes='default<O0>'` (LLVM 23.1.5; a text
+  module's forward references reverse a use list, `uselistorder` restores rustc's): inline-test 15 of 15 (c9-c13 new).
+- Codegen: a reference to an unsized struct tail keeps the base's metadata (`(memory false)` layouts: Path, OsStr, Slice); a closure
+  passed as a scalar pair takes its upvars' pointee alignments. build-run's o0-normalize: CopyProp's return-place rule only for an
+  SSA local (rustc 1.99 has no nrvo.rs: read_uleb128 keeps `result`'s alloca). pack-compare-test's cases with their controls.
+- mono: builtin derives' methods `#[inline]` (ext-attrs, the impl's trait derived on its self type); the library's sources parsed as
+  edition 2024 (std's path.rs' let chains had made every path.rs attribute unknown); repr(C) enums from the sources (c_int tags);
+  a module path in the type namespace beside a function of its name (RF_LIB_MODULES); lib-unit's vtables (vtable-alloc-in, the
+  program's bindings). core-attrs takes num/niche_types.rs and num/imp/fmt.rs.
+- The front end's facts the back end reads: the module lists carry rustc's file names (module.rs joins a #[path] to the declaring
+  file's directory, `..` kept: std's backtrace_rs `std/src/../../backtrace/..`, core's stdarch `core/src/../../stdarch/..`); an
+  export's assert spans matched by message kind and order where two built asserts share a key; an entry's nested functions' facts.
+- Exports: `export core --add` of the wanted callees (without_provenance, without_provenance_mut, wrapping_offset, ptr::read,
+  align_of) and of digits_to_dec_str and digits_to_exp_str again (7 bodies, 5 min 51 s); std's 69 backtrace_rs keys and
+  sys::args::unix::imp::init by `lib-export --keys` (53 bodies, merged by key); alloc's and std's module caches copied from
+  rust-c6b's worktree repointed to this one (alloc's had kept the old paths: its partial export read nothing).
+- Results (items equal to std's IR at the pin, define for define, the crossed control differing each time): core 190 of 275 (183
+  before: r1 185, the symbols' order 187, the use lists' order 189, the --add round and vtables 190), alloc 21 of 25 (21), std 98 of
+  325 (83: r1 91, 92, the edition 2024 parse 94, the exports and vtables 97, the inttoptr fold 98; refused 214 -> 205).
+- Left: std's 22 differing items are 18 share-generics' upstream instances (each differs by an instantiating crate alone; rustc's
+  symbol_export.rs takes an instance from the exporting crate of the lowest StableCrateId, core's the highest of std's 25 crates:
+  every upstream crate's whole collection, C6's L2 with L3 unless C6-1 (b)), two `write_fmt` (the futex ReentrantLock std's interface
+  lacks), trace_fn (the FnMut call's typeck), hashmap_random_keys (MIR); alloc's 2 (share-generics, a nested generic fn's facts in
+  alloc's 2026-11-20 pass cache); core's 6 (a bounds check's THIR span, mul_pow2's `stringify!`, slice_index_fail's fn-local
+  disambiguator, two MIR-level). The front end's (R3's line): std's 116 items not exported, 48 layouts, 23 constants, 13 callees
+  (panic_output's opaque hidden type among them).
+- Checks at the head: `bin/rust-front essential` passed (its known summary, every control differing, 0 stub calls; it first failed
+  on records staged from rust-c6b's worktree with their paths, staged again), `core-essential` its known summary (566 equal),
+  pack-compare-test passed, inline-test 15 of 15; reap 56 of 56, crops-score 0 problems, records-check 0 problems.
+- C6-5 (a), the user's ruling of the day: rsi-build's C4 words begin "own" when std's interface and names are both native
+  (`bin/rust-front`'s rsi-build). R3's switch run (`rsi-native5`, RF_NATIVE_IFACE=1 and RF_NATIVE_NAMES, 5 of 5 own) is not run
+  again (the merge leaves the interface pass unchanged): its inputs.tsv's five rows say so, and its programs are recorded by `bin/rsi
+  check --record --front own --corpus samples` with R3's own path at this head (std, unwind, panics) checked first; std's lowered
+  runtime is built at this checkout's key for it (none at next's lowering key on the host: cpp/lower, repr/llvm and repr/c moved
+  since R3's base). Their outcome is the next entry.
