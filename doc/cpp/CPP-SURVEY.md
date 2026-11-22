@@ -10067,7 +10067,7 @@ parser's tree and the source text.
   must: r1 (129 files), r2 (432), r5 (750 of 900 in five chunks of 150: the stream's directories' own passes, the parser change's
   reach and the rules' files; the sixth chunk's 148 files, 11 of them the stream's cpp2a udlit-class-nttp and using-enum files, left
   unrun at the consolidation, their rows next's). No recorded pass lost in the stream's directories; rows of other directories the runs
-  changed put back to next's (the other streams' to record; cp0x/constexpr-ctor10.C, cpp1y/lambda-generic-77914.C and parse/crash72.C
+  changed put back to next's (the other streams' to record; cpp0x/constexpr-ctor10.C, cpp1y/lambda-generic-77914.C and parse/crash72.C
   pass on these rules; cpp0x/udlit-suffix-neg.C timed out under the host's load, as cpp-gnu saw).
 - the dg tool's GOMEMLIMIT=1500MiB default starves the own front end's 4 workers on these headers (a run of 786 files took over 3 hours
   in the Go collector, at its limit); the record runs set GOMEMLIMIT=2800MiB, then 4000MiB (RSS about 3 to 4 GB, VmSize under the
