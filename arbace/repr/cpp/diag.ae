@@ -5305,6 +5305,184 @@
 
 (swap! checks conj subscript-arity)
 
+;; Defaulted comparison operator functions ([class.compare.default]/1-2, P2085, P2002): for a class C, a non-template member that is
+;; const with one parameter of type const C& (beside its implicit object parameter, no && ref-qualifier: "defaulted member 'X' must
+;; have parameter type 'const C&'", "defaulted 'X' must have exactly one parameter", "defaulted member 'X' must be 'const'",
+;; "defaulted 'X' cannot have '&&' ref-qualifier"), or a friend of C with two parameters both const C& or both C ("defaulted 'X'
+;; must have parameters of either type 'const C&' or 'C', not both"); defined at namespace scope only as a friend C declares ("defaulted
+;; 'X' is not a friend of 'C'"); == and the secondary comparison operators return bool ([class.eq]/1, [class.compare.secondary]/1:
+;; "defaulted 'X' must return 'bool'").
+
+(defn defaulted-comparisons
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ops #{"operator==" "operator!=" "operator<" "operator>" "operator<=" "operator>=" "operator<=>"}
+        at! (fn [n msg]
+              (when-let [o (when (= main (get-in n [:range :begin :file])) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :defaulted-comparison :msg msg}))))
+        norm (fn [^String t] (-> t (str/replace #"\b(?:struct|class)\s+" "") (str/replace #"\s+" " ") (str/replace #" ?& ?" "&") str/trim))
+        cls-of (fn [^String t] (-> (norm t) (str/replace #"^const " "") (str/replace #" const$" "") (str/replace #"&+$" "") (str/replace #"<.*>$" "") str/trim))
+        is-c? (fn [^String t ^String c] (let [b (str/replace (norm t) #"<.*>" "")] (= b c)))
+        cref? (fn [^String t ^String c] (let [x (str/replace (norm t) #"<.*>" "")] (or (= x (str "const " c "&")) (= x (str c " const&")))))
+        ret-of (fn [^String qt] (str/trim (or (second (re-find #"^(.*?)\s*\(" qt)) "")))
+        params (fn [f] (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
+        bool-op? (fn [nm] (not= nm "operator<=>"))
+        friend-sigs (java.util.HashMap.)
+        classes (java.util.HashMap.)]
+    ((fn coll [nodes prefix]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           "NamespaceDecl" (coll (:inner n) (str prefix (:name n) "::"))
+           "LinkageSpecDecl" (coll (:inner n) prefix)
+           "CXXRecordDecl" (when (and (:name n) (:completeDefinition n))
+                             (.put classes (str prefix (:name n)) n)
+                             (doseq [fd (:inner n) :when (= "FriendDecl" (:kind fd)) f (:inner fd) :when (and (= "FunctionDecl" (:kind f)) (ops (:name f)))]
+                               (.put friend-sigs [(str prefix (:name n)) (:name f) (mapv #(norm (str (get-in % [:type :qualType]))) (params f))] true)))
+           nil)))
+     (:nodes u) "")
+    (letfn [(member! [c f]
+              (let [nm (:name f) qt (str (get-in f [:type :qualType])) q (or (fn-tail-quals qt) "")
+                    ps (vec (params f))
+                    xo (some :isExplicitObjectParameter ps)]
+                (when-not xo
+                  (cond
+                    (not= 1 (count ps)) (at! f (str "defaulted '" nm "' must have exactly one parameter"))
+                    (not (cref? (str (get-in (first ps) [:type :qualType])) c)) (at! f (str "defaulted member '" nm "' must have parameter type 'const " c "&'"))
+                    :else nil)
+                  (when (str/includes? q "&&") (at! f (str "defaulted '" nm "' cannot have '&&' ref-qualifier")))
+                  (when-not (re-find #"\bconst\b" q) (at! f (str "defaulted member '" nm "' must be 'const'"))))
+                (when (and (bool-op? nm) (not (#{"bool" "auto"} (ret-of qt))) (not (str/blank? (ret-of qt))))
+                  (at! f (str "defaulted '" nm "' must return 'bool'")))))
+            (friend! [c f]
+              (let [nm (:name f) qt (str (get-in f [:type :qualType]))
+                    ts (mapv #(str (get-in % [:type :qualType])) (params f))]
+                (when (= 2 (count ts))
+                  (let [kinds (mapv #(cond (cref? % c) :cref (is-c? % c) :val :else :other) ts)]
+                    (cond (some #{:other} kinds) (at! f (str "defaulted '" nm "' must have parameters of either type 'const " c "&' or '" c "'"))
+                          (apply not= kinds) (at! f (str "defaulted '" nm "' must have parameters of either type 'const " c "&' or '" c "', not both 'const " c "&' and '" c "'"))
+                          :else nil)))
+                (when (and (bool-op? nm) (not (#{"bool" "auto"} (ret-of qt))) (not (str/blank? (ret-of qt))))
+                  (at! f (str "defaulted '" nm "' must return 'bool'")))))
+            (walk [nodes prefix]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  "NamespaceDecl" (walk (:inner n) (str prefix (:name n) "::"))
+                  "LinkageSpecDecl" (walk (:inner n) prefix)
+                  "ClassTemplateDecl" (walk (:inner n) prefix)
+                  "CXXRecordDecl" (when (and (:name n) (:completeDefinition n))
+                                    (doseq [m (:inner n)]
+                                      (cond (and (= "CXXMethodDecl" (:kind m)) (:explicitlyDefaulted m) (ops (:name m))) (member! (:name n) m)
+                                            (= "FriendDecl" (:kind m))
+                                            (doseq [f (:inner m) :when (and (= "FunctionDecl" (:kind f)) (:explicitlyDefaulted f) (ops (:name f)))] (friend! (:name n) f))
+                                            (= "CXXRecordDecl" (:kind m)) (walk [m] prefix)
+                                            :else nil)))
+                  "FunctionDecl" (when (and (:explicitlyDefaulted n) (ops (:name n)) (= main (get-in n [:range :begin :file])))
+                                   (let [ps (params n)
+                                         c (when (seq ps) (cls-of (str (get-in (first ps) [:type :qualType]))))
+                                         sig (mapv #(norm (str (get-in % [:type :qualType]))) ps)]
+                                     (when (and c (re-matches #"[A-Za-z_]\w*" c) (not (.get friend-sigs [(str prefix c) (:name n) sig])))
+                                       (at! n (str "defaulted '" (:name n) "' is not a friend of '" c "'")))))
+                  nil)))]
+      (walk (:nodes u) ""))
+    (vec (distinct out))))
+
+(swap! checks conj defaulted-comparisons)
+
+;; The built-in three-way comparison ([expr.spaceship]/2-8): with operands the check can type (literals, variables, enumerators, the
+;; address of a function or member, a call's declared type), none of type std::nullptr_t ("ordered comparison of pointer with
+;; 'std::nullptr_t'"), not a bool with another type, no array operand (no array-to-pointer conversion), no unscoped enumeration with a
+;; floating type or another enumeration ([depr.arith.conv.enum] made ill-formed for <=>), no narrowing (a negative constant or a signed
+;; variable against an unsigned operand), no pointer to function or member and no complex operand ("invalid operands of types 'A' and
+;; 'B' to binary 'operator<=>'"); and an operand pair that is valid needs its comparison category type declared, a class
+;; std::strong_ordering or std::partial_ordering ("'std::strong_ordering' is not defined", "... is not a type"; [cmp.categories]: the
+;; header <compare>) whose value members are static data members ("'std::partial_ordering::equivalent()' is not a static data member").
+
+(defn builtin-spaceship
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        enums (java.util.HashMap.) enum-types (java.util.HashSet.)
+        std (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (when (and (= "EnumDecl" (:kind n)) (:name n) (not (:scopedEnumTag n)))
+                          (.add enum-types (:name n))
+                          (doseq [c (:inner n) :when (= "EnumConstantDecl" (:kind c))] (.put enums (:name c) (:name n)))))
+                      (:nodes u) nil)
+        _ (doseq [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)))
+                  n ((fn flat [xs] (mapcat #(if (and (= "NamespaceDecl" (:kind %)) (:isInline %)) (flat (:inner %)) [%]) xs)) (:inner ns))
+                  :when (#{"strong_ordering" "partial_ordering"} (:name n))]
+            (.put std (:name n) (if (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n)) n (or (.get std (:name n)) n))))
+        words-kind (fn [ws] (let [s (set ws)]
+                              (cond (s "bool") :bool
+                                    (or (s "float") (s "double")) :float
+                                    (s "unsigned") :uint
+                                    (some #{"int" "long" "short" "char" "signed"} s) :int
+                                    :else nil)))
+        kind (fn k [x]
+               (case (:kind x)
+                 ("IntegerLiteral") (let [t (str (get-in x [:type :qualType]))] (if (re-find #"unsigned" t) :uint :int))
+                 "CharacterLiteral" :int
+                 "CXXBoolLiteralExpr" :bool
+                 "FloatingLiteral" :float
+                 "ImaginaryLiteral" :complex
+                 "CXXNullPtrLiteralExpr" :nullptr
+                 "ParenExpr" (when (= 1 (count (:inner x))) (k (first (:inner x))))
+                 "UnaryOperator" (let [[y] (:inner x)]
+                                   (case (:opcode x)
+                                     "-" (let [kk (k y)] (if (and (#{"IntegerLiteral" "FloatingLiteral"} (:kind y)) (#{:int :uint} kk)) :negint kk))
+                                     "&" (when (= "DeclRefExpr" (:kind y))
+                                           (cond (seq (:qualifier y)) (when (#{:fn :var} (get-in y [:_ent :k])) :memptr)
+                                                 (= :fn (get-in y [:_ent :k])) :fnptr
+                                                 :else nil))
+                                     nil))
+                 "DeclRefExpr" (let [e (:_ent x)]
+                                 (cond (:enumerator e) (when-let [en (.get enums (str (:name e)))] [:enum en])
+                                       (not= :var (:k e)) nil
+                                       (= :a (get-in e [:ty :t])) :array
+                                       (= :b (get-in e [:ty :t])) (words-kind (get-in e [:ty :w]))
+                                       (and (= :n (get-in e [:ty :t])) (.contains enum-types (str (get-in e [:ty :s])))) [:enum (get-in e [:ty :s])]
+                                       :else nil))
+                 "CallExpr" (let [f (first (:inner x))]
+                              (when (and (= "DeclRefExpr" (:kind f)) (= :fn (get-in f [:_ent :k]))
+                                         (re-find #"^(?:decltype\(nullptr\)|std::nullptr_t|nullptr_t)\s*\(" (str (get-in f [:_ent :qt]))))
+                                :nullptr))
+                 nil))
+        at! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                          (when (= main (get-in n [:range :begin :file]))
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :spaceship :msg msg})))))
+        tn (fn [k] (cond (vector? k) (second k) (keyword? k) (name k) :else "?"))]
+    (walk-nodes
+     (fn [n _]
+       (when (and (= "BinaryOperator" (:kind n)) (= "<=>" (:opcode n)) (= 2 (count (:inner n))))
+         (let [[a b] (map kind (:inner n))
+               bad (str "invalid operands of types '" (tn a) "' and '" (tn b) "' to binary 'operator<=>'")
+               arith #{:int :uint :negint :float :bool}]
+           (when (and a b)
+             (cond
+               (or (= :nullptr a) (= :nullptr b)) (at! n "ordered comparison of pointer with 'std::nullptr_t'")
+               (or (#{:array :fnptr :memptr :complex} a) (#{:array :fnptr :memptr :complex} b)) (at! n bad)
+               (and (or (= :bool a) (= :bool b)) (not= a b)) (at! n "operands of 'operator<=>' of type 'bool' and another type")
+               (and (vector? a) (vector? b) (not= a b)) (at! n bad)
+               (or (and (vector? a) (= :float b)) (and (vector? b) (= :float a))) (at! n bad)
+               (or (and (= :negint a) (= :uint b)) (and (= :negint b) (= :uint a))) (at! n "narrowing conversion in 'operator<=>'")
+               (and (arith a) (arith b))
+               (let [cat (if (or (= :float a) (= :float b)) "partial_ordering" "strong_ordering")
+                     c (.get std cat)]
+                 (cond (nil? c) (at! n (str "'std::" cat "' is not defined; did you forget to '#include <compare>'?"))
+                       (not (#{"CXXRecordDecl"} (:kind c))) (at! n (str "'std::" cat "' is not a type"))
+                       (not (:completeDefinition c)) nil
+                       :else (let [want (if (= cat "partial_ordering") ["less" "equivalent" "greater" "unordered"] ["less" "equal" "greater"])]
+                               (when-let [m (some (fn [w] (let [ms (filter #(= w (:name %)) (:inner c))]
+                                                            (when (and (seq ms) (not (some #(= "VarDecl" (:kind %)) ms))) w)))
+                                                  want)]
+                                 (at! n (str "'std::" cat "::" m "' is not a static data member"))))))
+               :else nil)))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj builtin-spaceship)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]
