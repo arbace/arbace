@@ -3959,7 +3959,51 @@
        (:nodes u) nil))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls]))
+;; GCC's built-in functions as values (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Other Built-in Functions": a built-in without a
+;; library function behind it, __builtin_trap's kind, exists only as a call: GCC's "built-in function '__builtin_trap' must be directly
+;; called"; one with a library fallback, __builtin_abs for abs, has an address): such a name used other than as a call's callee, the
+;; operand of a cast to void, an expression statement of its own or an unevaluated operand (sizeof, alignof, decltype, typeof,
+;; noexcept), or as a template argument of a variable's type, is an error at the use (addr_builtin-1.C). A builtin's fallback is the
+;; library function of its name without __builtin_ in clang's table (cpp/target/clang-builtins.edn).
+
+(def ^:private lib-functions
+  (delay (let [f (java.io.File. "cpp/target/clang-builtins.edn")]
+           (when (.exists f)
+             (into #{} (keep (fn [[n k]] (when (#{:lib :target-lib} k) n)) (:builtins (read-string (slurp f)))))))))
+
+(defn builtin-values
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        libs @lib-functions
+        declared (into #{} (for [n (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u)) :when (string? (:name n))] (:name n)))
+        direct? (fn [^String nm] (and libs (re-matches #"__builtin_\w+" nm) (not (contains? libs (subs nm 10))) (not (contains? declared nm))
+                                      (some? (re-find #"^__builtin_(?:trap|unreachable|abort_|return_address|frame_address|expect|prefetch|constant_p|clear_cache|debugtrap|ia32_\w+|choose_expr|va_\w+|unpredictable)" nm))))
+        report! (fn [o msg] (when o (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :builtin-value :msg msg}))))
+        off (fn [n] (when (= main (or (get-in n [:range :begin :file]) main)) (get-in n [:range :begin :offset])))]
+    (letfn [(w [x parent uneval]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      uneval (or uneval (and (= "UnaryExprOrTypeTraitExpr" k)) (#{"CXXNoexceptExpr" "DecltypeType"} k))]
+                  (when (and (= "DeclRefExpr" k) (not uneval))
+                    (let [nm (str (get-in x [:referencedDecl :name]))]
+                      (when (direct? nm)
+                        (let [pk (:kind parent)]
+                          (when-not (or (and (= "CallExpr" pk) (identical? x (first (:inner parent))))
+                                        (and (#{"CStyleCastExpr" "CXXStaticCastExpr" "CXXFunctionalCastExpr"} pk) (= "void" (str/trim (str (get-in parent [:type :qualType])))))
+                                        (= "CompoundStmt" pk))
+                            (report! (off x) (str "built-in function '" nm "' must be directly called")))))))
+                  (when (= "VarDecl" k)
+                    (when-let [[_ nm] (re-find #"<[^<>]*\b(__builtin_\w+)\b[^<>]*>" (str (get-in x [:type :qualType])))]
+                      (when (direct? nm) (report! (or (get-in x [:loc :offset]) (off x)) (str "built-in function '" nm "' must be directly called")))))
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                    (w v (if k x parent) uneval)))
+                (vector? x) (doseq [y x] (w y parent uneval))
+                :else nil))]
+      (w (:nodes u) nil false))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
