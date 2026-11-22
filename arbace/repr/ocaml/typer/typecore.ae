@@ -401,6 +401,11 @@
     (when (empty? pats) (type-error (str "The type " (str/join "." (env/lid-parts lid)) " is not a variant type")))
     [path (reduce (fn [p p0] {:desc [:Tpat_or p0 p (e 1)] :type t}) (first pats) (rest pats))]))
 
+(def ^:dynamic *defer-unpack*
+  "Typecore's Modules_allowed for a let (queue 531: alcotest's `let (module T) = t in T.pp`): a (module M) pattern's type need not be
+  a package yet, its bound expression typed after it; add-pattern-vars' type_module_variable checks it"
+  false)
+
 (defn type-pat
   "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
   [env sp expected vars]
@@ -412,7 +417,7 @@
                          _ (when-let [pt (get d 2)]
                              (unify! (annot-type env {:ptyp_desc [:Ptyp_package pt]})
                                      expected "pattern"))]
-                     (when-not (= :Tpackage ((ty/desc (ty/expand-head expected)) 0))
+                     (when-not (or *defer-unpack* (= :Tpackage ((ty/desc (ty/expand-head expected)) 0)))
                        (type-error "The type of this packed module cannot be inferred"))
                      (when (:txt (d 1)) (swap! vars conj [n id expected :module]))
                      (mk [:Tpat_var id n] expected))
@@ -525,7 +530,11 @@
   [env vars]
   (reduce (fn [e [n id t m]]
             (if m
-              (assoc-in e [:modules n] (env/add-module! id {:path [:Pident id] :mty (env/modtype-of-package (ty/expand-head t))
+              (assoc-in e [:modules n] (env/add-module! id {:path [:Pident id]
+                                                            :mty (let [x (ty/expand-head t)]
+                                                                   (when-not (= :Tpackage ((ty/desc x) 0))
+                                                                     (type-error "The type of this packed module cannot be inferred"))
+                                                                   (env/modtype-of-package x))
                                                             :addr [:var id]}))
               (add-value e n id t)))
           env vars))
@@ -689,6 +698,15 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
+
+(defn- unpack-pattern?
+  "Typecore.may_contain_modules: a (module M) pattern somewhere in p"
+  [p]
+  (letfn [(go [x] (cond (and (map? x) (:ppat_desc x)) (or (= :Ppat_unpack ((:ppat_desc x) 0)) (some go (vals x)))
+                        (map? x) (some go (vals x))
+                        (sequential? x) (some go x)
+                        :else false))]
+    (boolean (go p))))
 
 (defn- turn-let-into-match?
   "Typecore.turn_let_into_match: the pattern holds a constructor, an open tuple or a labelled one (exists_ppat over
@@ -891,10 +909,18 @@
                                   (let [[l' sarg] (first sargs)] [l' sarg nil (vec (rest sargs))])
                                   (extract-label name sargs))
                           sarg (second found)]
-                      (when-not (and found (= :Pexp_pack ((:pexp_desc sarg) 0)))
-                        (type-error "a dependent function applied to an argument that is not a packed module is outside the slice"))
-                      (let [texp (type-expect env sarg (ty/newty [:Tpackage (d 3) (d 4)]))]
-                        (recur (functor-result d ((:desc texp) 1)) (nth found 3) (cons [l [:typed texp]] rev))))
+                      (cond
+                        (and found (= :Pexp_pack ((:pexp_desc sarg) 0)))
+                        (let [texp (type-expect env sarg (ty/newty [:Tpackage (d 3) (d 4)]))]
+                          (recur (functor-result d ((:desc texp) 1)) (nth found 3) (cons [l [:typed texp]] rev)))
+                        ;; (queue 531: b0's B0_testing) an argument that is not a packed module: collect_apply_args' filter_arrow,
+                        ;; the dependent arrow unified with an arrow (its result independent of the module, Ctype's Tfunctor
+                        ;; against Tarrow), then applied as an arrow
+                        found
+                        (let [arr (ty/newty [:Tarrow l (ty/newvar) (ty/newvar)])]
+                          (unify! tyf' arr "function")
+                          (recur arr sargs rev))
+                        :else (type-error "a dependent function's module argument cannot be omitted")))
                     (not= :Tarrow (d 0))
                     ;; collect_unknown_apply_args
                     (let [[l sarg] (first sargs)]
@@ -1007,10 +1033,23 @@
                     (type-expect env {:pexp_desc [:Pexp_match (vb-exp-constraint vb) [{:pc_lhs (:pvb_pat vb) :pc_guard nil :pc_rhs (d 3)}]]
                                       :pexp_loc loc}
                                  expected))
-                (let [eqs (atom [])
-                      [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
-                      body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
-                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc)))
+                (if (some #(unpack-pattern? (:pvb_pat %)) (d 2))
+                  ;; (queue 531) Typecore's let with module patterns: its patterns' modules entered in a scope of their own, the
+                  ;; bound expressions typed before the modules are (Modules_allowed), the body's type unified with a variable of
+                  ;; the outer level, so that a type M.n of an unpacked M leaving the let is expanded (or escapes)
+                  (let [outer (ty/newvar)
+                        [vbs body] (ty/with-local-level
+                                     (ty/with-scope
+                                       (let [eqs (atom [])
+                                             [vbs env'] (binding [*let-equations* eqs *defer-unpack* true] (type-let env (d 1) (d 2)))
+                                             body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                                         (unify! outer (:type body) "expression")
+                                         [vbs body])))]
+                    (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
+                  (let [eqs (atom [])
+                        [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
+                        body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                    (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
                                      [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
@@ -1165,7 +1204,9 @@
                            (ty/expand-head expected))
                        td (ty/desc t)]
                    (when-not (= :Tpackage (td 0)) (type-error "This module packing's signature cannot be inferred"))
-                   (let [tm (*type-package* env (d 1) t)]
+                   ;; (queue 531: b0's B0_testing.T.make) Typemod.type_package: the module typed at a local level in a scope of
+                   ;; its own, so a local type of it reaching an outer variable is expanded (`type t = a`'s t to a)
+                   (let [tm (ty/with-local-level (ty/with-scope (*type-package* env (d 1) t)))]
                      (unify! t expected "expression")
                      (mkexp [:Texp_pack tm] t loc)))
       :Pexp_coerce (let [t2g (env/make-generic! (env/transl-type env (atom {}) (d 3)))
@@ -1413,13 +1454,17 @@
                :else (type-error "Cannot infer the signature of this module parameter"))
         tpack (ty/newty [:Tpackage (pack 0) (pack 1)])
         mty (env/modtype-of-package tpack)
-        s-id (ty/ident-create name)
-        [[params body res-ty]]
+        ;; (queue 531: b0's B0_testing.T.with', `?equal ?pp (module T : T with type t = a)`) M scoped at the body's level, so a type
+        ;; T.n reaching a variable of the outer level (an earlier parameter's) is expanded to its constraint (Ctype.update_level's
+        ;; scope check), as OCaml's scoped identifier is
+        [s-id [params body res-ty]]
         (ty/with-local-level
-          (let [entry (env/add-module! s-id {:path [:Pident s-id] :mty mty :addr [:var s-id]})
-                env' (assoc-in env [:modules name] entry)
-                expected-res (if expected-f (ty/subst-module-ident (expected-f 2) [:Pident s-id] (expected-f 5)) (ty/newvar))]
-            [(type-function env' rest sbody expected-res)]))
+          (ty/with-scope
+            (let [s-id (ty/ident-create name)
+                  entry (env/add-module! s-id {:path [:Pident s-id] :mty mty :addr [:var s-id]})
+                  env' (assoc-in env [:modules name] entry)
+                  expected-res (if expected-f (ty/subst-module-ident (expected-f 2) [:Pident s-id] (expected-f 5)) (ty/newvar))]
+              [s-id (type-function env' rest sbody expected-res)])))
         ident (env/tfunctor-ident name (pack 0))
         exp-type (if (ty/type-mentions? s-id res-ty)
                    (ty/newty [:Tfunctor l ident (pack 0) (pack 1) (ty/subst-module-ident s-id [:Pident ident] res-ty)])
@@ -1509,6 +1554,13 @@
                                   (:fields cs))
                           (every? (fn [[_ [m _ _]]] (not= :Mutable m)) (:vars @(:sign cs)))))
       :Texp_new (let [c (:type (d 2))] (loop [c c] (case (c 0) :Cty_arrow true :Cty_constr (recur (c 3)) false)))
+      ;; (queue 531: b0's B0__os.copy, `let prune = match rel with true -> fun ... | false -> fun ...`) the scrutinee and every case's
+      ;; guard and right-hand side nonexpansive, no exception pattern in a case
+      :Texp_match (letfn [(exn-pat? [p] (or (= :Tpat_exception ((:desc p) 0)) (boolean (some exn-pat? (subpatterns p)))))]
+                    (and (nonexpansive? (d 1))
+                         (every? (fn [c] (and (or (nil? (:guard c)) (nonexpansive? (:guard c))) (nonexpansive? (:rhs c))
+                                              (not (exn-pat? (:lhs c)))))
+                                 (d 2))))
       :Texp_ifthenelse (and (nonexpansive? (d 2)) (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_sequence (nonexpansive? (d 2))
       :Texp_apply (and (some nil? (map second (d 2))) (nonexpansive? (d 1))

@@ -548,6 +548,27 @@
                           n))))]
       (go t))))
 
+(defn nondep-package
+  "A dependent arrow's result made independent of its parameter against an arrow (Ctype.unify3's and moregen's Tfunctor against
+  Tarrow: identifier_escape_for with the parameter bound to the package's module type, which expands S.n to the package's
+  constraint for n): t copied where a type S.n (S the identifier id, n a constraint of the package cs, [names type] pairs) is
+  that constraint's type; nil when t still names id (queue 531: b0's String.Map.add_to_set against its interface)"
+  [id cs t]
+  (let [path-of (fn [names] (reduce (fn [q n] [:Pdot q n]) [:Pident id] names))
+        by-path (into {} (for [[names ct] cs] [(path-of names) ct]))
+        memo (atom {})]
+    (letfn [(go [t]
+              (let [t (repr t) d (desc t)]
+                (cond
+                  (contains? @memo t) (@memo t)
+                  (not (type-mentions? id t)) t
+                  (and (= :Tconstr (d 0)) (empty? (d 2)) (contains? by-path (d 1))) (by-path (d 1))
+                  :else (let [n (newty2 (level t) [:Tvar nil])]
+                          (swap! memo assoc t n)
+                          (swap! n assoc :desc (map-desc go d))
+                          n))))]
+      (let [r (go t)] (when-not (type-mentions? id r) r)))))
+
 (defn- occur [v t]
   (let [seen (atom #{})]
     (letfn [(go [t]
@@ -664,6 +685,12 @@
     (when-not (identical? t1 t2)
       (let [d1 (desc t1) d2 (desc t2)]
         (cond
+          ;; Ctype.unify's (Tvar, Tconstr) when deep_occur: unify2, the abbreviation expanded before the variable is linked
+          ;; (queue 531: alcotest's `module Identity : S with type 'a t = 'a`, return's 'a against 'a t)
+          (and (= :Tvar (d1 0)) (= :Tconstr (d2 0)) (deep-occur t1 t2) (not (identical? (repr (expand-head t2)) t2)))
+          (unify t1 (expand-head t2))
+          (and (= :Tvar (d2 0)) (= :Tconstr (d1 0)) (deep-occur t2 t1) (not (identical? (repr (expand-head t1)) t1)))
+          (unify (expand-head t1) t2)
           (= :Tvar (d1 0)) (do (occur t1 t2) (update-level (level t1) t2) (link! t1 t2))
           (= :Tvar (d2 0)) (do (occur t2 t1) (update-level (level t2) t1) (link! t2 t1))
           (and (= :Tconstr (d1 0) (d2 0)) (or (= (d1 1) (d2 1)) (= (*normalize-type-path* (d1 1)) (*normalize-type-path* (d2 1))))
@@ -706,8 +733,14 @@
               (unify (d1 5) (subst-module-ident (d2 2) [:Pident (d1 2)] (d2 5))))
           ;; a Tfunctor against an arrow: equal when its result does not depend on its parameter (the package the
           ;; arrow's argument)
-          ;; (Ctype.unify3's Tfunctor/Tarrow pair: the package unified with the arrow's argument, the parameter's identifier
-          ;; erased from the result by identifier_escape, then the results unified)
+          ;; (queue 531) its result's S.n taken as the package's constraint for n, as identifier_escape_for expands them, when
+          ;; every S.n it names is one
+          (and (= :Tfunctor (d1 0)) (= :Tarrow (d2 0)) (= (d1 1) (d2 1)) (type-mentions? (d1 2) (d1 5)) (nondep-package (d1 2) (d1 4) (d1 5)))
+          (do (unify (newty [:Tpackage (d1 3) (d1 4)]) (d2 2)) (unify (nondep-package (d1 2) (d1 4) (d1 5)) (d2 3)))
+          (and (= :Tarrow (d1 0)) (= :Tfunctor (d2 0)) (= (d1 1) (d2 1)) (type-mentions? (d2 2) (d2 5)) (nondep-package (d2 2) (d2 4) (d2 5)))
+          (do (unify (d1 2) (newty [:Tpackage (d2 3) (d2 4)])) (unify (d1 3) (nondep-package (d2 2) (d2 4) (d2 5))))
+          ;; (queue 534: Ctype.unify3's Tfunctor/Tarrow pair otherwise: the package unified with the arrow's argument, the
+          ;; parameter's identifier erased from the result by identifier_escape, then the results unified)
           (and (= :Tfunctor (d1 0)) (= :Tarrow (d2 0)) (= (d1 1) (d2 1))
                (or (not (type-mentions? (d1 2) (d1 5))) @bind-functor-param))
           (do (unify (newty [:Tpackage (d1 3) (d1 4)]) (d2 2))

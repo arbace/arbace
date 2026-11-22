@@ -410,6 +410,21 @@ covers what.
   0.8.5, uutf 1.0.4, cmdliner 2.1.1 and base64 3.5.2 (ISC), re 1.14.0 (LGPL-2.1-or-later with the OCaml LGPL linking
   exception), pprint 20230830 (LGPL-2.0-only with the OCaml LGPL linking exception), yojson 3.0.0 (BSD-3-Clause),
   containers 3.18 (BSD-2-Clause), as their opam files state. `test/ocaml/opam/load.ml` is Arbace's own.
+- The opam set's test libraries (test/ocaml/corpora.edn, the pins `:opam-NAME` of queue 531, the user's decision of 2026-11-22
+  on 528-15): the packages five of the set's tests need (sexplib0's sexplib0_test, re's expect, base64's test, fmt's test_fmt,
+  cmdliner's test_arg), at the versions opam-repository's master 5c9b817c546fcd5cb2be1cb52b08ea5c36320181 pins by checksum,
+  fetched into `.tmp/` and read in place, **not distributed** (each keeps its own license and notices), as their opam files
+  state: under the MIT License, Jane Street's base v0.17.3, base_quickcheck v0.17.1, bin_prot v0.17.0-1, capitalization,
+  expect_test_helpers_core, fieldslib, jane-street-headers, jst-config, parsexp, sexp_pretty, sexplib, splittable_random,
+  stdio, time_now and variantslib (v0.17.0), ocaml-compiler-libs v0.17.0, ocaml_intrinsics_kernel v0.17.3, typerep v0.17.1,
+  ppxlib_jane v0.17.4 and the rewriters ppx_assert, ppx_base, ppx_cold, ppx_compare, ppx_custom_printf,
+  ppx_disable_unused_warnings, ppx_enumerate, ppx_fields_conv, ppx_fixed_literal, ppx_hash, ppx_here,
+  ppx_ignore_instrumentation, ppx_jane, ppx_log, ppx_module_timer, ppx_optional, ppx_pipebang, ppx_sexp_message,
+  ppx_sexp_value, ppx_stable_witness, ppx_string and ppx_string_conv (v0.17.0), ppx_bench, ppx_bin_prot, ppx_inline_test,
+  ppx_let, ppx_optcomp, ppx_sexp_conv, ppx_stable, ppx_tydi, ppx_typerep_conv and ppx_variants_conv (v0.17.1),
+  ppx_globalize v0.17.2, ppx_expect v0.17.3, and ppxlib 0.39.0 (Jane Street Group, LLC and the ppxlib authors); under the
+  ISC License, alcotest 1.10.1, bos 0.3.0, fpath 0.7.3, logs 0.10.0 and rresult 0.7.0; b0 0.0.6 under the ISC License and
+  the BSD 2-Clause License (its opam file lists both); ppx_derivers 1.2.1 under the BSD 3-Clause License.
 - `x509roots/` (`x509roots/go/arbace/x509roots/fallback/bundle.ae` and `bundle/`, with
   `bundle/bundle.der`; x509roots/README.md, doc/go/BOX-NOTES.md "TLS (option 2)"): the package
   `bundle` of the module `golang.org/x/crypto/x509roots/fallback`, https://go.googlesource.com/crypto
