@@ -563,3 +563,46 @@ list of cases; each row keeps its reason. Built (branch `counting-1122`):
 | Go | eval 1,781 / 52 / 1 (4 n/a) | eval 1,781 / 38 / 1 (18 n/a) | 0.9889 -> 0.9908 | 1.0 |
 | x86-64 | print 195,651 / 861 / 2 | print 195,651 / 138 / 2 (723 n/a) | 0.9989 -> 0.9998 | 0.99996 |
 | Haskell | eval stage (910 + 0.5 x 9) / 919 | (910 + 0.5 x 6) / 916 | 0.9832 | 0.9990 -> 0.9993 |
+
+## Decided (the user, 2026-11-22): the second questions
+
+The user's decisions of 2026-11-22 on the burst's second questions (doc/JOURNAL.md, "the user's decisions on the burst's second
+questions") count eight more classes n/a, as the section above counts its own: the class's `:kind :na`, its rows and their reasons
+kept, keyed on the verdict the record holds (a row a class names counts n/a only when the record does not pass it), never a copied
+list. Built (branch `counting2-1122`):
+
+- **C++, read.** `test/cpp/divergences-dg.edn`'s `:gcc-dialect` (173: OpenMP, OpenACC, GNU TM, GCC's contracts, -fpermissive,
+  -fms-extensions; CP399 (a)), `:gxx-only-rules` (2, CP328 (a)) and `:musl-libc` (1, Wconversion-null-4: musl's NULL is nullptr)
+  `:kind :na`. `:musl-libc` names a second file, Wnull-conversion-1.C, which the own front end passes: a pass in reap (its
+  `classify` sees only the non-passes) and in the read stage's count (below). Left by design: `:gcc-own-rules` (135), which the
+  user's decision builds (the GNU extension rules ported into the own front end).
+- **Python, eval.** `test/python/divergences.edn`'s `:fork` (557), `:testinternalcapi` (132) and `:venv-and-build` (49) `:kind :na`.
+  bin/pyi's own judge (test/python/libtest_judge.ae) classes by `:tests` and `:match` alone (the kind is only printed): `bin/pyi
+  divergences` over the record gives the same classes and counts before and after, the kind's word aside. Left by design:
+  `:extension-modules` (75), which the decision builds (C extension modules through ci's C world).
+- **Haskell, eval.** `test/haskell/divergences.edn`'s `:process` (T24672, forkProcess) and `:skipped` (T24809, T4262, all.T's own
+  skips) `:kind :na`. Left by design: `:no-reference` (31), which the decision builds (the packages vendored, GHC's runs recorded by
+  hand in the oracle tier).
+- **The stages' cases follow the cells'.** An n/a case is none of the cell's cases, so none of a stage's counted cases:
+  - `:count-from`'s `:out` (497-3 (a), C++'s read) takes `na-cases`: an `:na` class's id leaves the counted rows unless the record
+    passes it (Wnull-conversion-1.C stays, an own pass): 1,699 of 4,382 rows own (182 n/a), the stage (1934 + 1699 + 0.5 x 2683) /
+    6316 = 0.788 (0.780 before). One row differs from the cell still, as before this round: undefined-expectation's
+    pr105475-2.C, which the cell passes by clang's record (outside the syntax-only list) and the own record fails.
+  - `:case-inputs` (RFP53 (a), HF10-P29 (a)) leaves out of the cell's ids the ids its `:na` classes name in `:tests` or `:ids` (hsi's
+    classes) whose row does not pass (`cell-rows`, `cell-na-ids`, `na-cases`), as the matrix's total leaves them out; before, an
+    `:out-of-cases` id that is n/a was taken out twice (Haskell's eval counted 913 of 913). T24809 and T4262 left
+    test/haskell/eval-out.edn (34 -> 32 out, the fact's `:cases` too): the eval stage 915 of 915 own. No other crop's stage moves
+    (Java, C++ and Rust name no `:na` class's id among their cases).
+  - C++'s judge: its stated `:dg` cases the cell's, 4,383 (3,731 pass and 866 not, less 214 n/a; the 4,564 stated before had not
+    taken 497-3 (a)'s and 502-2 (a)'s 5 either): (8430 + 1929 + 0.5 x 5) / 10364, 1.0 at three decimals as before.
+- **Negative controls.** `bin/crops-score --self-test`'s `counting-1122b-tests` (run by every `--judge`): `na-ids` takes an `:na`
+  class's `:tests` and `:ids`, not a `:design` class's; `na-cases` leaves a passing row and an unnamed one; C++'s count keeps the
+  passing row (the control, every named row out, differs); Haskell's eval counts 915 with or without the two ids on the out list
+  (the control, the n/a ids kept with 34 out, gives 913); the three crops' completeness before and after, and C++'s with the 176 by
+  design (must differ). With `na-cases` taking every named row, or `na-ids` reading `:tests` alone, the self-test failed.
+
+| crop | cell before | cell after | completeness exact (floored) | independence |
+|---|---|---|---|---|
+| C++ | read 5,665 / 311 / 517 (38 n/a) | read 5,665 / 135 / 517 (214 n/a) | 0.961380 -> 0.967457 (96.1 -> 96.7) | 0.953940 -> 0.955500 (95.3 -> 95.5; the read stage 0.7798 -> 0.7876) |
+| Python | eval 39,204 / 2,719 / 3,627 (2,771 n/a) | eval 39,204 / 1,981 / 3,627 (3,509 n/a) | 0.961507 -> 0.965050 (96.1 -> 96.5) | 1.0 |
+| Haskell | eval 894 / 34 / 22 | eval 894 / 31 / 22 (3 n/a) | 0.983464 -> 0.984209 (98.3 -> 98.4) | 1.0 (eval 916 of 916 -> 915 of 915) |
