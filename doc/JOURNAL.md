@@ -16420,3 +16420,53 @@ finalization family (PYS9 (a)); test_remote_pdb 45 needs sys.remote_exec between
   (idempotent). P2's os-and-files-misc rows for test_json's broken-pipe tests (exit status 120) should pass now (writeErr
   drops the buffered bytes, so the shutdown flush succeeds after json.tool's dup2): to be confirmed by the record.
   Coordination: the record (P1's alone) is made at this merge; P2's later commits are measured at the next record.
+
+## 2026-11-22: py-eval-1122: the eval record re-recorded, the 6,902 regressions gone (Python eval 39,204 / 5,490 / 3,627 -> 40,552 / 5,300 / 2,472)
+The whole run of `bin/pyi check --fresh --record` used the gate executable b2a5b50d48192fabce24, built at 9a2b7842a. Its
+runtime was the branch's (runtime_guard: compiled). The run had 2 jobs, under the agent's `ulimit -v 8388608` (the burst's
+rule), and started at 05:32 UTC. Of its 529 modules, 479 ran at 9a2b7842a. The other 50 ran at 3ee81c30f when the run was
+resumed (`bin/pyi check --record` without `--fresh` keeps a module that has a `.status`). 3ee81c30f changes only pyctypes,
+which is out of every key and interpreted from the checkout. The resumed modules are test_capi and the 49 not yet run.
+- The regression is gone. Next's run at 1e8ee0196 had 8,092 rows "import SystemError: pyi: Go panic: &{...}" and 883 rows
+  "UnboundLocalError: cannot access local variable 'module'". This run has neither. Its 9 Go panic rows are the record's
+  kinds: test_ctypes' three from_address segmentation faults and test_capi's six signal panics. The cause was a stale goi
+  table: bin/goi's table key did not hash the table's own Go forms (go/arbace/py and its loaded files), so the gate
+  executable carried a table older than its runtime, and every lazy package's import panicked. The table key now hashes
+  them (this branch's first round). pyi now names the throwable of a Go panic (`panicText`, arbace.python.run's
+  SetPanicText hook: class, message, up to four causes).
+- A new regression of this branch, fixed at 3ee81c30f: test_capi's test_misc.Test_testcapi.test_atexit calls
+  Py_NewInterpreter, then reaches PyInterpreterState_Get, which pyi does not provide. The unwinding skipped its
+  Py_EndInterpreter, so the thread stayed in the subinterpreter, and later tests saw that interpreter's stdout, warnings
+  and ast (test_run_simplestring '', test_number's DeprecationWarning, test_compilestringflags). capiLeave of the
+  outermost C entry now ends the subinterpreters left alive, and PyGILState_GetThisThreadState is provided. Proof
+  (`bin/pyi check --only`, eight rows): seven pass, and test_atexit still errors on PyInterpreterState_Get. The resumed
+  run's test_capi shows the same.
+- 18 modules keep their previous record rows. They are left out of the final judge's modules.tsv (`--judge DIR --record`:
+  the judged modules' rows are written again and the others are kept). This is the coordinator's instruction for the
+  rows that crashed only on the agent's 8 GB cap. 13 modules are in that group: test_buffer, test_capi, test_cmd_line
+  (test_relativedir_bug46421's child runs test_longexp), test_code_module, test_compile, test_ctypes, test_fstring,
+  test_longexp, test_mmap, test_modulefinder, test_pdb, test_pickle and test_pyrepl. Go reported "fatal error: out of
+  memory", or mmap ENOMEM. The coordinator reruns them under the big lock at the consolidation; the lock's queue was 11
+  jobs deep today. Four modules fail in the whole-module run on timing or gc, and those rows are in no class: test_xml_etree
+  and test_xml_etree_c (BasicElementTest.test_cyclic_gc; it passes alone), test.test_multiprocessing_spawn.test_misc
+  (TestCloseFds.test_closefd: "failed to join the thread in 30.0 seconds") and test_processes (16 memory-cap crashes and
+  test_notify; the module reached its 3,600 s limit). Last, test_crossinterp: it imports now, and its 4,612 subtest ids
+  hold object reprs with addresses and the checkout's path. Ids like these cannot be recorded until the driver
+  normalises them.
+- 15 regressions are recorded as classed non-passes. All were confirmed by a targeted `--only` rerun. Thirteen are spawn
+  pools past the runner's own 8192 MB cap (:host-memory): test_process_pool 4, test_shutdown 5, test_manager 3 and
+  test_multiprocessing_main_handling's test_package_compiled. A spawn worker is 1.44 GB resident (RssAnon 1,072 MB)
+  beside a parent's 0.8 GB (RssAnon 468 MB). Five workers, the parent and the resource tracker come to 9.2 GB. The
+  records night passed these tests under the same cap, so the workers grew; the cause is not known yet. The other two
+  are test_io's CSignalsTest.test_reentrant_write_text (a hang, :runner-limits) and test_sqlite3's
+  test_table_lock_cursor_non_readonly_select ("database table is locked").
+- Classes: :audit-hooks takes test_audit's test_syslog. The syslog module is new, and audit hooks are never called in
+  pyi; also, its implicit openlog passes facility 0 where CPython passes LOG_USER, a fix for the next py change.
+  :functools-core takes test_traceback's two PurePythonTracebackErrorCaretTests rows (partial's pure `__call__` frame).
+- Mistakes of this round, for the record. I took the first run for stalled and stopped it at 480 of 529 modules, but it
+  was test_tarfile running slowly (the resume ran it in 900 s). A concurrent `--only` run in the same worktree shared
+  `.tmp/t6i` and removed test_tarfile's working directory while it ran, so test_tarfile was run again. Two checks in one
+  worktree must not run at once.
+- bin/reap --record: Python eval 39,204 / 5,490 / 3,627 -> 40,552 / 5,300 / 2,472 (1,363 rows now pass against the
+  record). bin/crops-score --record: Python completeness 0.9485 -> 0.9555 (meant 0.9772 -> 0.9840), maturity 1.0. The
+  strict judge: 0 problems. records-check: 0 problems.
