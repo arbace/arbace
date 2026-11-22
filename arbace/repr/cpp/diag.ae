@@ -2770,7 +2770,133 @@
             :else nil))))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas]))
+;; GNU's labels as values (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Labels as Values": `&&label` is the label's address, a
+;; `void *` constant of the function it labels, and `goto *exp;` jumps to the address `exp` gives, "any expression of type void *"):
+;; `&&label` outside any function's body names no label ("label 'N' referenced outside of any function"); an enumerator's value
+;; given by one is a pointer, no integral constant ("enumerator value for 'O' must have integral or unscoped enumeration type");
+;; a computed goto's operand of array or class type does not convert to void * ("cannot convert 'b' from type 'B' to type
+;; 'void*'"), its type read off the variable it names, through subscripts (ext/label1.C, label10.C, label11.C; templates' operands
+;; are not judged).
+
+(defn labels-as-values
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                              (when (= main (or (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :label-value :msg msg})))))
+        records (into #{} (keep #(when (and (= "CXXRecordDecl" (:kind %)) (:name %)) (:name %)) (:nodes u)))
+        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) (str (get-in n [:type :qualType]))]))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))]
+    (letfn [(w [x in-fn tmpl vars]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      tmpl (or tmpl (#{"FunctionTemplateDecl" "ClassTemplateDecl"} k))
+                      fn? (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "LambdaExpr"} k)
+                      vars (if fn? (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) (str (get-in pv [:type :qualType]))])) vars)]
+                  (case k
+                    "AddrLabelExpr" (when-not in-fn (report! x (str "label '" (:_label x) "' referenced outside of any function")))
+                    "EnumConstantDecl" (when (some #(= "AddrLabelExpr" (:kind (strip %))) (:inner x))
+                                         (report! x (str "enumerator value for '" (:name x) "' must have integral or unscoped enumeration type")))
+                    "IndirectGotoStmt" (when-not tmpl
+                                         (let [t (loop [e (strip (:_target x)) dims 0]
+                                                   (case (:kind e)
+                                                     "ArraySubscriptExpr" (recur (strip (first (:inner e))) (inc dims))
+                                                     "DeclRefExpr" (when-let [qt (get vars (get-in e [:referencedDecl :name]) (get globals (get-in e [:referencedDecl :name])))]
+                                                                     (loop [qt (str/trim qt) d dims]
+                                                                       (cond (zero? d) qt
+                                                                             (re-find #"\[\d*\]$" qt) (recur (str/trim (str/replace qt #"\[\d*\]$" "")) (dec d))
+                                                                             (re-find #"\*$" qt) (recur (str/trim (str/replace qt #"\s*\*$" "")) (dec d))
+                                                                             :else nil)))
+                                                     nil))]
+                                           (when (and t (or (re-find #"\]$" t)
+                                                            (contains? records (str/trim (str/replace t #"\b(?:const|volatile|struct|class)\b" "")))))
+                                             (report! x (str "cannot convert the operand from type '" t "' to type 'void*'")))))
+                    nil)
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                    (w v (or in-fn fn?) tmpl vars)))
+                (vector? x) (loop [ys x vars vars]
+                              (when-let [y (first ys)]
+                                (w y in-fn tmpl vars)
+                                (recur (rest ys) (if (and (map? y) (= "DeclStmt" (:kind y)))
+                                                   (into vars (for [d (:inner y) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))] [(:name d) (str (get-in d [:type :qualType]))]))
+                                                   vars))))
+                :else nil))]
+      (w (:nodes u) false false {}))
+    (vec out)))
+
+;; A switch's case values (cpp-gnu, 2026-11-22): [stmt.switch]/2, no two case constants of a switch have the same value, and GNU's
+;; case ranges (the GCC 15.2 manual's "Case Ranges": `case low ... high:`, every value from low to high) none in common with another
+;; label of the switch: "duplicate (or overlapping) case value", at the later label. The values read here: integer and character
+;; literals, negation, a const or constexpr variable or an enumerator whose value is such a literal (an enumerator without one the
+;; previous plus one); a label of another value is not judged. In a function template the switch is judged when its labels are
+;; known and the unit names the template outside its definition (an instantiation, as GCC judges it; ext/case-range2.C).
+
+(defn case-values
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        consts (java.util.HashMap.)
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr" "ConstantExpr"} (:kind x)) (strip (first (:inner x))) x))
+        lit (fn lit [x]
+              (let [x (strip x)]
+                (case (:kind x)
+                  "IntegerLiteral" (some-> (:value x) str (str/replace #"[uUlL']+$" "") (#(try (Long/decode %) (catch Exception _ nil))))
+                  "CharacterLiteral" (when (number? (:value x)) (long (:value x)))
+                  "UnaryOperator" (when (#{"-" "+"} (:opcode x)) (when-let [v (lit (first (:inner x)))] (if (= "-" (:opcode x)) (- (long v)) v)))
+                  "DeclRefExpr" (.get consts (get-in x [:referencedDecl :name]))
+                  nil)))
+        _ (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "VarDecl" (when (and (string? (:name n))
+                                               (or (:constexpr n) (re-find #"^\s*const\b|\bconst\s*$" (str (get-in n [:type :qualType]))))
+                                               (re-matches #"(?:const\s+)?(?:unsigned |signed )?(?:int|long|short|char|long long)\s*(?:const)?" (str/trim (str (get-in n [:type :qualType])))))
+                                      (when-let [v (some lit (:inner n))] (.put consts (:name n) v)))
+                          "EnumDecl" (loop [es (filter #(= "EnumConstantDecl" (:kind %)) (:inner n)) prev -1]
+                                       (when-let [e (first es)]
+                                         (let [v (if (seq (:inner e)) (some lit (:inner e)) (inc (long prev)))]
+                                           (when (and v (string? (:name e))) (.put consts (:name e) v))
+                                           (when v (recur (rest es) v)))))
+                          nil))
+                      (:nodes u) nil)
+        named (java.util.HashSet.)
+        _ (walk-nodes (fn [n _] (when (= "DeclRefExpr" (:kind n)) (when-let [o (get-in n [:range :begin :offset])] (.add named [(get-in n [:referencedDecl :name]) (long o)])))) (:nodes u) nil)
+        instantiated? (fn [t] (let [b (long (or (get-in t [:range :begin :offset]) -1)) e (long (or (get-in t [:range :end :offset]) -1))]
+                                (some (fn [[nm o]] (and (= nm (:name t)) (or (< (long o) b) (> (long o) e)))) named)))]
+    (letfn [(cases [body]
+              ;; the case labels of a switch's body, not of the switches nested in it
+              (let [acc (java.util.ArrayList.)]
+                (letfn [(c [x] (cond (map? x) (when-not (= "SwitchStmt" (:kind x))
+                                                (when (= "CaseStmt" (:kind x)) (.add acc x))
+                                                (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (c v)))
+                                     (vector? x) (doseq [y x] (c y))
+                                     :else nil))]
+                  (c body))
+                (vec acc)))
+            (judge [sw]
+              (let [seen (java.util.ArrayList.)]
+                (doseq [cs (cases (last (:inner sw)))
+                        :let [in (vec (:inner cs))
+                              range? (and (= 3 (count in)) (lit (nth in 1)))
+                              lo (lit (first in)) hi (if range? (lit (nth in 1)) lo)]
+                        :when (and lo hi)]
+                  (when (some (fn [[a z]] (and (<= (long a) (long hi)) (<= (long lo) (long z)))) seen)
+                    (when-let [o (get-in cs [:range :begin :offset])]
+                      (when (= main (or (get-in cs [:range :begin :file]) main))
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :case-value :msg "duplicate (or overlapping) case value"})))))
+                  (.add seen [lo hi]))))
+            (w [x tmpl]
+              (cond (map? x) (let [tmpl (if (#{"FunctionTemplateDecl" "ClassTemplateDecl"} (:kind x)) x tmpl)]
+                               (when (and (= "SwitchStmt" (:kind x)) (or (nil? tmpl) (and (= "FunctionTemplateDecl" (:kind tmpl)) (instantiated? tmpl))))
+                                 (judge x))
+                               (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tmpl)))
+                    (vector? x) (doseq [y x] (w y tmpl))
+                    :else nil))]
+      (w (:nodes u) nil))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
