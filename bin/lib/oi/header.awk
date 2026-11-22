@@ -347,11 +347,22 @@ END {
       # compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi); at the light level (-v aot=1, queue 413) the
       # driver's `oi capi`, which the runtime spawns (OI_CAPI_SERVER)
       if (key == "modules" && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
+      # (queue 523) C files and OCaml units of the test's directory (gc-roots: globrootsprim.c globroots.ml): at oi's level the units
+      # typed first, in their order, each before the program (bin/oi's oi_one, @mods=FILE,...), the C files its stubs; the AOT levels keep
+      # the class
+      if (key == "modules" && aot == 0 && val ~ /^[A-Za-z0-9_.]+\.(c|ml)( +[A-Za-z0-9_.]+\.(c|ml))*$/ && val ~ /\.c( |$)/ && val ~ /\.ml( |$)/) {
+        c = split(val, hm, " "); cs = ""; mls = ""
+        for (q = 1; q <= c; q++) { if (hm[q] ~ /\.c$/) cs = cs (cs == "" ? "" : ",") hm[q]; else mls = mls (mls == "" ? "" : ",") hm[q] }
+        csclass = key " = " val; env = env " @cstubs=" cs " @mods=" mls; continue
+      }
       # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
       # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # s, the minor heap's size in words (queue 523): oi's simulated minor heap (Gc's minor_heap_size, OC218's countWords) at oi's level
+      # (statmemprof/user_data_regression's s=100); the AOT levels keep the class
+      if (key == "ocamlrunparam" && val ~ /^,?s=[0-9]+[kMG]?$/ && aot == 0) { env = env " OCAMLRUNPARAM=" val; continue }
       # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
       # (queue 370: at the light level too, Bt's backtraces; not yet the compiled level)
       if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && aot != 2) { env = env " OCAMLRUNPARAM=" val; continue }

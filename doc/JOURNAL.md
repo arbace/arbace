@@ -17313,3 +17313,138 @@ reaches); the code generator's Sema (arbace/cpp/sema.ae) for the rules that need
 declarations' types themselves); a whole dg-error run (4,564 files; the own passes and the files whose expected messages name a rule's
 diagnostic were run instead); the template instantiation depth, constexpr evaluation and atomic builtins' families (template.ae's and
 the constant evaluator's ground, left).
+
+## 2026-11-22: Python's round trip, level 3 a compile without positions (py-small-1122, round 1)
+
+The user's (b) of the morning ("level 3 as a compile without positions (so :code-lines passes)"). Level 3 compared the code
+compiled from the original's text and from the print's; mode :lines records no positions, and CPython 3.14's code generation
+follows the lines a node spans (where a NOP stays, a superinstruction fuses, an exception range or a jump falls: E7 corrected,
+"As built: PY2"), so 30 files (3 stdlib, 21 site-packages, 6 Lib/test) were `:code-lines` in test/python/roundtrip-known.edn, and
+pip's candidates.py `:own-code-lines` in roundtrip-own-known.edn (pyi's compiler ports CPython's line passes).
+- Live (CPython, the read cell's record): tools/pydump/codelevel.py compiles each file's ast with every node at line 1, column 0
+  and normalizes it by pydump.py's own norm_code; bin/repr-python's code_levels rewrites the TSVs' CODE column into level-*.tsv,
+  the helper's TSVs left as dumped. A separate script on purpose: pydump.py's digest keys every member of the python-pydump packs
+  (tools/pydump/records.bash), so changing it would have made every record STALE; its CODE column (positions included) stays the
+  records'. With REPR_PYTHON_RT_LEVELS=recorded (the packs' rows, which keep positions) level 3 is implied by level 2 (compare
+  --recorded): a compile without positions is a function of the ast without attributes.
+- Records mode (pyi's own levels): own-code compiles the forms read in mode :lines (no positions) instead of the text read in mode
+  :full. bin/pyi compile-check already compiles every corpus file's :lines forms (compile-known.edn empty), so no file can newly
+  fail there.
+- The control: each control's reference print with a statement added (code_mutants: `__code_control__ = 0` appended), its digests
+  by codelevel.py; the print's row with the mutant's digests must fail level 2, and with the mutant's code beside the print's own
+  ast, level 3 (as queue 431's control for pyi's levels). Both modes' runs: every control failed as it must.
+- Proof, only the rows the change can move (the user's "avoid redundancy": a file whose ast is equal compiles to the same code
+  without positions, so only the 30 can change): `REPR_PYTHON_ORACLE=live bin/repr-python roundtrip --record --only-list` over the
+  30 and the three corpora's control pairs (36 files): all levels pass, the 30 `:known "code"` rows of roundtrip-results.edn now
+  `:pass`, roundtrip-known.edn's `:code-lines` empty (the class kept, its text saying so); records mode the same list: candidates.py
+  passes, roundtrip-own-known.edn's `:own-code-lines` empty. A partial --record no longer rewrites roundtrip-costs.edn (a whole
+  run's costs only).
+- Read cell: pass 3,702 to 3,732, by design 34 to 4 (the 4 :rejected, which the counting stream, counting-1122, takes); Python's
+  completeness 0.9485 to 0.9506.
+
+## 2026-11-22: pyi's finalization at a frame's return, gated (py-small-1122, round 2)
+
+The user's (b) of 222's DECISION 1 (doc/python/PYTHON-SURVEY.md, "As built: 222", DECISION 1; "As built: the moment at a frame's
+return, gated"). An instance whose class has a __del__ is noted on its thread with its frame's depth; the loop's return path compares
+the thread's deepest note with its depth (one load and a compare) and, when a frame that deep returns, runs one Go collection and the
+drain (finAtReturn); a survivor is noted for the caller, at most 3 checks; finSpent's budget bounds the time.
+- The first measure (base and branch compiled by bin/pyi aot, run back to back) found the gate open at every program's start: pyi's _io
+  is _pyio, so every open() and every import's FileIO and BufferedReader carry IOBase.__del__: 11 to 23 forced collections a run
+  (GODEBUG=gctrace=1), +6.9% compiled and +4.0% on the loop (wall). Refined (8e122ac7d): a class whose __del__ is _pyio's is not
+  noted (files keep the collection's moment, as before); the runs' collections are base's exactly. Alternatives not taken: checking a
+  file's closed state at the return (Python code at every return of a frame that opened a file); a smaller budget of its own.
+- Cost, the 10 benchmarks of 222's table, 10 rounds alternating, least: compiled +2.9% wall, +2.7% CPU; on the loop -0.8% wall, -0.3%
+  CPU (the host at 50-70 load on 64 CPUs; single benchmarks move by up to 10% either way). Under the 3% budget.
+- Proved by --only runs (the user's "avoid redundancy"): del.py, async.py, async-gen-aclose.py and samples/functions.py (the corpus's
+  only programs that make __del__ objects) compiled and on the loop: 4 of 4 pass, del.py by its golden text, the control failing;
+  test_gc, test_weakref and test_finalization by check --aot --lib-test --fresh at base and branch: the same 194 pass, 63 classed, 0
+  failing, row for row (test_trashcan_threads' counts aside). For P1 (py-eval-1122, the eval record): no method of these three modules
+  is expected to move.
+- Left: check-aot-linux-amd64.edn's del.py row (AOT deferred 1, and the eval cell's loop column by design 1) moves at the next whole
+  bin/pyi check --aot --record, which the tool takes only whole and only on a host whose runtime is the checkout's compiled (the gate's
+  build at this branch's key: a 33 GiB build); divergences-aot.edn's :finalization-goi and divergences-synth.edn's del.py go then
+  (their texts say so now).
+
+## 2026-11-22: misc-tails round 1: Rust's read and print at 100 (branch `misc-tails-1122`, from next `c7a8439ad`)
+
+The burst's misc tails, Rust first: the read and print cells' four non-passes each (`:converter-depth` 3 deferred, `:parser-rejects`
+1 by design). The UI suite's tarball fetched by its pin (`rustc-1.99.1-src.tar.xz`, the corpus's SHA-256) into the worktree's
+`.tmp/repr-rust/src`: RCD1 (a)'s `ensure-sufficient-stack` (2026-11-17), checked then on synthetic shapes only, round trips the three
+deep files (`bin/repr-rust roundtrip --text --only`, then `--pretty-only`: tree, text byte for byte, mode `:full`'s trees and the
+pretty layout all equal, the UI control failing as it must). erased-serde's `features_check/error.rs`, which rustc's own parser
+rejects alone (the helper: `expected item, found "..."` at 1:1-1:82), passes by its own verdict: `test/rust/roundtrip-rejects.edn`
+records rustc's diagnostic and the comparisons (`compare`, `compare-text`, `--rejects`) pass a listed file whose native rejection has
+that message and span, with a built-in control per pass (the message changed must fail). Alternatives: keeping the class by design
+(the user asked for the own verdict); counting the file out of the corpus (it is a file of the crate). Beside: `--pretty --only`
+printed nothing (fixed in `pretty_level`); the UI corpus's negative control named two `:rejected` files and was always left (replaced).
+Classes `:parser-rejects` and `:converter-depth` dropped from `test/rust/divergences-{read,print}.edn`. doc/rust/RUST-NOTES.md, "The
+files rustc rejects; the deep files confirmed". After (`bin/reap --record`, `bin/crops-score --record`): Rust read 33,342 / 1 / 3 to
+33,346 / 0 / 0, print the same; Rust's completeness 0.9999 to 1.0000 (66,704 of 66,704 counted cells' cases across read and print, eval
+and AOT 6 and 6).
+
+## 2026-11-22: misc-tails round 2: Go's AOT `:go-build-complete` passes; Python's read left to py-small
+
+- **Go AOT, `fixedbugs/issue9608.go` (`:go-build-complete`, RPS31 (a) by design).** Re-examined: the test is `// rundir`, whose header
+  says why it is a directory test: Go's test driver (`test/run.go`'s compileInDir) compiles each package with `go tool compile`,
+  without `-complete`, and gc eliminates the bodiless `fail()`'s dead calls. go build gives a package without assembly `-complete`
+  (cmd/go's work/gc.go), but puts `-gcflags` after its own flags, and `-complete` only adds the missing-body error (cmd/compile's
+  noder/writer.go, its one use). So `bin/goi`'s check_dir passes `-gcflags=MODULE/...=-complete=false` (before the action's own) for a
+  rundir test: its packages are compiled as the driver compiles them. RPS31's option (b), an empty `.s` file, tested the harness; this
+  reproduces the test's declared build. Proof: `bin/goi check --aot --jobs 4 --only` over the 116 rundir tests (every caller of the
+  change): 116 pass (issue9608 among them, 115 as before), the control `_control/issue48337a-vs-dedup` failing as it must; the row
+  edited from that run (`--record` writes only the whole record), the known entry and the class dropped. (The run's linux-errtest
+  corpus read OOMs under 8 GB and the big lock had 8 waiting: the errorcheck corpus was marked fresh in the worktree's scratch, not
+  read; no errorcheck program was selected.) Go AOT 1,696 / 1 by design to 1,697 / 0; Go's completeness 0.9908 to 0.9910.
+- **Python read, `:code-lines` 30**: already done by py-small (`3daf8efbd` on mac/py-small-1122, "round trip level 3 a compile
+  without positions", the user's (b) of 2026-11-22), not yet merged into next: not duplicated here.
+
+## 2026-11-22: hs-speed-1122, second round: HES97 (a)'s per-program CPU limits built, HES102 (k-nucleotide's stdin), the three n/a named
+
+After the first round's merge (next `e3d9a3331`, Haskell 0.9868 with counting2's `:process` and `:skipped` n/a), the coordinator's
+brief: the 600 s measurement makes HES97 (a), decided by the user on 2026-11-17 and never built, the design for the rows that pass by
+their own verdicts given time (as GHC's testsuite's run_timeout_multiplier); HES102 a technical fix; T13825-unit and tcrun022 named n/a
+in completeness as unboxedsums_unit_tests is. Left for the user: HES100 (b), HES101, T21305 (HES96), HES103's cfd, dcbm and
+threads004; hs-pkgs fetches parallel, random, old-time and unboxed-ref (not duplicated here).
+
+**HES97 (a).** bin/lib/hsi/check's `HSI_CPU_CAPS` (ID=SECONDS, as HSI_MEM_CAPS), by default test/haskell/cpu-caps.tsv: a listed
+program's CPU limit its cap when above HSI_TIMEOUT (wall three times it; the AOT level's two runs too; a profiled run keeps
+HSI_TIMEOUT). The 17 caps from a run of the rows at a 600 s limit through a timing wrapper (HSI_EXE): about 1.5 times the larger of each
+row's CPU (user + system) and the first round's loaded wall seconds, rounded up to 10 s (kahan 400 for 265.9 s of CPU ... spectral-norm
+760 for 297.7; doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES97 (a) and HES102"). The night's hsi-check: about 1,340 s more CPU
+(2,360 against 17 x 60; at most 3,580 if every row ran to its cap). Alternatives: one larger limit for every program (hides a slowdown
+anywhere), caps from one run's CPU alone (n-body's ran 228.9 s here and 387 s of wall on the loaded host: too tight).
+
+**HES102.** boot.edn's `:stdin` entries (a program's input its boot.sh makes: k-nucleotide's k-nucleotide.faststdin, fasta-c 60000 on
+ci, 610,077 bytes), given as the plan's stdin by bin/lib/hsi/check and record-ref (bin/lib/hsi/boot-stdin.bash), its own verdict
+k-nucleotide.faststdout (bin/hsi own-verdicts lists it: its record a run without the input; golden/na.tsv's `undefined` entry gone;
+review.ae takes the input entries). It prints the expected output at 150 s of CPU.
+
+**The three n/a.** T13825-unit joins `:ghc-package`, tcrun022 a new `:optimizer-rules` (`:kind :na`), their reasons eval-out.edn's.
+Both pass in the record, and counting2's rule (an `:na` class's row counts n/a only when the record does not pass it) keeps them
+passes: completeness does not move by it; counting passes out would change the rule for every crop, the user's to decide.
+
+Records: test/haskell/check-hsi-own.edn's 27 rows (the 17 capped and the ten control subjects) from one passing `--only --record` run
+at the default limit, the caps applying (27 pass, the eleven controls failing as they must); test/haskell/own-verdicts.tsv (k-nucleotide
+added); test/crops/independence.edn's Haskell judge fact (self 7757 -> 7758: k-nucleotide judged by its own expected output). Rows
+moved: `:speed` 14 -> 3 (kahan, queens, x2n1, fasta, k-nucleotide, n-body, spectral-norm, compareByteArrays, AtomicPrimops, T21651,
+setnumcapabilities001 pass; left fannkuch-redux, minimax, T23071), `:own-speed` 4 -> 1 (treejoin, dom-lt, T21969 pass; left
+unpack_sums_6), `:no-reference` 31 -> 28 (bspt, fulsom, pic pass). The eval cell 896 / 31 / 19 (4 n/a) -> 913 / 28 / 5 (4 n/a); AOT
+139 / 0 / 0; Haskell completeness 0.986786 -> 0.991279 (99.1 floored; 0.9986 without by design). bin/reap --record, bin/crops-score
+--record, --judge --strict, bin/records-check, bin/hsi divergences, bin/hsi own-verdicts --check, bin/hsi golden --oracle --control:
+0 problems. Light: no gate.
+
+## 2026-11-22: the user's decisions on the burst's third questions (C's 3 rows, Haskell's GHC-rejected, eff and hartel, Haskell's 3)
+
+Asked by the main session after 522's, hs-speed's and hs-pkgs' reports (about 10:40 UTC; the second questions' entry above says "09:30 UTC",
+which was 07:30 UTC: the session's clock notes ran two hours ahead that morning); answered by the user:
+- C's 3 rows left after soft-float: the 2 inline-assembly programs (x87 instructions; argument registers) are built, the asm assembled by
+  repr/asm and run on x86i as Haskell's CallConv runs its .s; union-bitfield, a test of undefined behaviour, is n/a. Alternatives not taken:
+  all 3 n/a; all 3 by design.
+- Haskell's 6 programs GHC 9.14.1 itself rejects with no package missing (cfd and dcbm: GpH's old Parallel; threads004: forkOnIO; linsolv:
+  DatatypeContexts; warshall: rnf no longer exported; matmult: foldl' ambiguous since base 4.20; hs-pkgs-1): n/a. Alternatives not taken:
+  must-fail compiles; by design.
+- Haskell's eff and hartel (nofib directories of 7 and 14 sub-programs, no main; hs-pkgs-2): the 21 sub-programs are added to the corpus as
+  programs, GHC's runs recorded, hsi judged on them. Alternatives not taken: n/a; by design.
+- Haskell's fannkuch-redux and minimax (GHC's own -O0 run does not finish within the reference's 10 s; HES101) and T21305 (writeByteArray#
+  past a 3-element array, undefined behaviour; HES96): n/a. Alternatives not taken: an optimizer for the own libraries' STG (HES100 (b)) so
+  the two run like nofib's -O; by design.

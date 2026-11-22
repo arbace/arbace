@@ -40,7 +40,9 @@
   (import (except (rnrs)
                   map for-each string-for-each vector-for-each error define-record-type let-syntax letrec-syntax let*-values case string-copy string->list vector->list string-fill! vector-fill!
                   member assoc bytevector-copy bytevector-copy! utf8->string string->utf8 vector-map close-port close-input-port close-output-port
-                  call-with-port exact-integer-sqrt)
+                  call-with-port exact-integer-sqrt /)
+          ;; SCS4 (d): R7RS's / as before, Chez's (the R7RS corpora's reference with Chibi), where (rnrs) gives R6RS's
+          (rename (only (psyntax system $all) $chez-/) ($chez-/ /))
           (prefix (only (rnrs) map for-each string-for-each vector-for-each define-record-type let-syntax letrec-syntax let*-values) r6:)
           (rnrs mutable-pairs)
           (only (rnrs r5rs) quotient remainder modulo)

@@ -1421,7 +1421,7 @@
   (when (= :fn (:kind f))
     (some (fn [e] (when (same-sig? (fnd (:id e)) f) (:id e))) (.get ^java.util.HashMap (:names scope) (block-fn-key (:name f))))))
 
-(declare analyze rv ce-try)
+(declare analyze rv ce-try cx-cce-type!)
 
 (defn- noexcept-of
   "Whether a function type's spelling says noexcept: `noexcept`, `noexcept(true)`, or noexcept(e) of a constant e
@@ -1888,6 +1888,12 @@
         pinfo {:param-names (mapv :name pn)
                :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
     (if old
+      (do
+      ;; (queue 518, the checker: [dcl.fct.def.delete]/4, a deleted definition is the function's first declaration: one after a
+      ;; declaration that is not deleted is GCC's "deleted definition of 'X' is not first declaration", cpp0x/deleted11.C's
+      ;; `sometype::sometype() = delete;`, cpp0x/deleted10.C's explicit specializations)
+      (when (and (checking?) (:explicitlyDeleted n) (not (header-node? n)) (not (:deleted (fnd id))))
+        (*on-refusal* (ex-info (str "codegen: deleted definition of '" (:name n) "' is not its first declaration") {:codegen/refused :redecl}) n))
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
@@ -1914,7 +1920,7 @@
                             body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
-                            (and body (lazy-header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true))))
+                            (and body (lazy-header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true)))))
       (do (swap! *fns* assoc id (merge f pinfo {:id id :node n :def-scope scope}
                                       (when body {:body body :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))})
                                       (when (and (or body (:explicitlyDefaulted n)) (lazy-header-node? n) (not (:used f))) {:lazy true})))
@@ -2409,6 +2415,7 @@
                           (if (checking?) (swap! *order* conj [:cx-error bad]) (throw bad))
                           (let [ft (resolve-type cs (get-in k [:type :qualType]))
                               i (count (:fields (abi/cls id)))
+                              _ (when (:isBitfield k) (cx-cce-type! cs (first (kids k)) "a bit-field's width"))
                               bits (when (:isBitfield k) (const-int cs (first (kids k))))
                               init (when (:hasInClassInitializer k) (if bits (second (kids k)) (first (kids k))))]
                           (abi/update-cls! id update :fields conj (cond-> {:name (:name k) :ty ft :init init :access @access :i i :bits bits
@@ -2535,9 +2542,20 @@
                  nil
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
                ;; (queue 497: and an out-of-line member declaration no member of its class matches)
-               (if (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches ')" (str (.getMessage e)))
+               (cond
+                 (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches ')" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
-                 (throw e))))))
+                 ;; (queue 518: a namespace-scope variable's, function's or alias's declaration whose template argument is no
+                 ;; constant, `S<f()> s;`, cpp0x/pr78765.C's ValueTypeInfo<var>: dropped without a word and the unit going on, as
+                 ;; GCC goes on past an erroneous declaration; before, the unit stopped there, every later error of the file lost.
+                 ;; Only that refusal: others (an unknown type, a class template argument deduction) follow an erroneous
+                 ;; declaration whose recovery the slice does not model, cpp0x/vt-34753.C's `B<int> c;` after a constructor
+                 ;; template GCC drops, cpp2a/class-deduction-aggr1.C's guides)
+                 (and (not (:cls scope)) (not (header-node? n))
+                      (#{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl"} (:kind n))
+                      (re-find #"not a constant" (str (.getMessage e))))
+                 nil
+                 :else (throw e))))))
         (declare-node*! scope n)))))
 
 ;; queue 505 (500-2 (a), the checker): a class first declared by an elaborated-type-specifier `class-key identifier` that
@@ -3190,6 +3208,24 @@
       (let [c (binding [*ce-wide* true] (const-int (or (:def-scope v) *root*) (:init v)))]
         (upd-var! id assoc :cint c)
         (if *ce-wide* c (narrow-out c))))))
+
+(declare analyze rv)
+
+(defn- cx-cce-type!
+  "Queue 518 (the checker): a converted constant expression of integral type ([expr.const]/12: integral promotions and
+  conversions other than narrowing, no floating-integral conversion, no conversion from a scoped enumeration) written as `n`, a
+  case label's ([stmt.switch]/2) or a bit-field's width ([class.bit]/1, an integral constant expression): one of floating or
+  scoped enumeration type is GCC's \"could not convert\", reported at `n` (cpp0x/enum28.C's `case 1.0:`, cpp0x/scoped_enum2.C's
+  `int i: E::e;`; a case label of scoped enumeration type is the condition's own when it switches on that enumeration, so only
+  its floating labels, `enum?` false). The analysis goes on."
+  [scope n what & [enum?]]
+  (when (and (checking?) (map? n))
+    (let [t (try (abi/unq (:ty (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} n)))) (catch arbace.lang.ExceptionInfo _ nil))]
+      (when (and (map? t) (or (abi/floating? t) (and (not= false enum?) (abi/enum? t) (:scoped (abi/enm (:id t))))))
+        (*on-refusal* (ex-info (str "codegen: could not convert an expression of type " (if (abi/floating? t) "floating" "scoped enumeration")
+                                    " to an integral type in a converted constant expression (" what ")")
+                               {:codegen/refused :conversion})
+                      n)))))
 
 (defn const-int [scope n]
   (tick!)
@@ -4316,7 +4352,9 @@
   [e]
   (or (= :nullptr (abi/bn (:ty e)))
       (and (= :int (:op e)) (zero? (long (:v e))) (abi/integral? (:ty e)) (not (abi/enum? (:ty e)))
-           (not (and (checking?) (>= (long *cxx-year*) 11) (= :bool (abi/bn (:ty e))))))))
+           (not (and (checking?) (>= (long *cxx-year*) 11) (= :bool (abi/bn (:ty e)))))
+           ;; (queue 518: nor a character literal, `'\0'`, cpp0x/nullptr36.C's `void *p = '\0';`, GCC's "invalid conversion")
+           (not (and (checking?) (>= (long *cxx-year*) 11) (#{:char :wchar :char8 :char16 :char32} (abi/bn (:ty e))))))))
 
 (defn- class-id [t] (when (abi/class? (abi/unq t)) (:id (abi/unq t))))
 
@@ -5046,7 +5084,8 @@
                 ;; (CX12, the checker: copy-initialization from a class none of whose conversion functions is non-explicit,
                 ;; [over.match.conv]/1.1, [dcl.init]/16.7: no candidate at all, clang's err_typecheck_convert_incompatible's
                 ;; "no viable conversion", gcc's "cannot convert")
-                (when (and (checking?) (not (:lambda (abi/cls cid)))
+                ;; (queue 518: and a capturing closure's, which has none, [expr.prim.lambda.closure]/9: lambda-conv8.C)
+                (when (and (checking?) (or (not (:lambda (abi/cls cid))) (:cx-capturing (abi/cls cid)))
                            ;; (in direct-initialization: no explicit one yielding the type either, [over.match.conv]/1.1)
                            (not-any? #(not (:explicit (fnd %))) (conv-fns cid))
                            (or (not explicit?) (not-any? #(= (abi/unq (abi/non-ref (:ret (:ty (fnd %))))) (abi/unq t)) (conv-fns cid)))
@@ -7987,7 +8026,9 @@
         _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
             (try (analyze-implicit! m) (catch arbace.lang.ExceptionInfo _ (upd-fn! m assoc :deleted true))))
-        inits (sort-by first @(:inits lam))]
+        inits (sort-by first @(:inits lam))
+        ;; (queue 518, the checker: a closure that captures has no conversion function, [expr.prim.lambda.closure]/9)
+        _ (when (and (checking?) (seq inits)) (abi/update-cls! id assoc :cx-capturing true))]
     (when (empty? inits)
       ;; the conversion to a pointer to function and the static __invoke it returns
       (let [ivid (next-id) cvid (next-id) ft {:k :fn :ret ret :ps ps :va false}
@@ -9759,7 +9800,9 @@
                        pt (promote-type (:ty e))]
                    {:s :block :items (vec (concat (when init [(stmt c init)])
                                                   [{:s :switch :e (convert-scalar e pt false) :ty pt :body (stmt (block-ctx c) (second ks))}]))})
-    "CaseStmt" (let [[v body] (kids n)] {:s :case :v (const-int (:scope ctx) v) :body (stmt ctx body)})
+    "CaseStmt" (let [[v body] (kids n)
+                     _ (cx-cce-type! (:scope ctx) v "a case label" false)]
+                 {:s :case :v (const-int (:scope ctx) v) :body (stmt ctx body)})
     "DefaultStmt" {:s :default :body (stmt ctx (first (kids n)))}
     "LabelStmt" {:s :label :name (:name n) :body (stmt ctx (first (kids n)))}
     "GotoStmt" (let [t (when-not (:label n) (node-text n)) [_ l] (re-find #"goto\s+([A-Za-z_][A-Za-z_0-9]*)" (or t ""))] {:s :goto :name (or (:label n) l)})
