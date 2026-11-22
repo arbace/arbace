@@ -16278,3 +16278,12 @@ SystemError: pyi: Go panic: &{...}" and 883 "UnboundLocalError: cannot access lo
   --fresh --only` on the 710e90 executable, go/arbace/py interpreted, PYI_RUNNER=python3 as the runner, its three controls
   failing as they must): test_xxlimited 16 of 16 pass and test_syslog 10 of 13 (its three subinterpreter tests reach
   run_in_subinterp's PyThreadState_Swap, :capi-port's), 24 of them and then the last 2 "now pass" against the record.
+- pyctypes, the C API's file functions test_capi's test_run and test_file reach (:capi-port's Py_fopen rows, 16 in the
+  record): PyErr_SetFromErrno and its filename forms (the world's errno, os.strerror's text, OSError's constructor choosing
+  the subclass), Py_fopen (os.fsencode's path, musl's fopen in the world with "e" for O_CLOEXEC, EINTR retried, the OSError
+  with the path) and Py_fclose, _Py_IsValidFD (fcntl F_GETFD asked of crt's system calls), PyRun_File, FileEx, FileFlags,
+  FileExFlags and PyRun_SimpleFile, SimpleFileEx, SimpleFileExFlags, AnyFile, AnyFileEx, AnyFileFlags, AnyFileExFlags (the
+  FILE read whole by the world's fread, closeit fclose'd, run as the string functions run theirs; __main__'s __file__ and
+  __cached__ for the run, its __loader__ a SourceFileLoader but for "<stdin>"; the interactive functions and
+  Py_UniversalNewlineFgets, which wants ungetc, not given). Probe: run_file and run_fileexflags give None, a missing name
+  NameError, run_simplefile and run_anyfileex 0 with the script's own output, py_fopen's first bytes and FileNotFoundError 2.
