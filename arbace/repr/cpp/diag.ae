@@ -3780,7 +3780,72 @@
                     (:nodes u) nil)))
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors]))
+;; GCC's __builtin_operator_new and __builtin_operator_delete (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Other Built-in Functions",
+;; after P2652's and clang's: a call as `::operator new (args)` whose selected function must be a replaceable global allocation
+;; (deallocation) function, [new.delete.single], [new.delete.array]'s signatures): when the viable functions are a placement form
+;; (`operator new (size_t, void *)`, <new>'s) or one the program declares with another signature, and no replaceable one, "call to
+;; '__builtin_operator_new' does not select replaceable global allocation function", at the call; no viable one is overload
+;; resolution's own error (ext/builtin-operator-new-2.C). An argument's kind read off a literal, a variable's or parameter's type, a
+;; template parameter's type taken to fit an arithmetic or pointer parameter.
+
+(defn builtin-operator-new
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        pkind (fn [^String qt] (let [t (str/trim (str/replace qt #"\b(?:const|volatile)\b" ""))]
+                                 (cond (re-find #"align_val_t" t) :align (re-find #"nothrow_t" t) :nothrow (re-find #"\*$" t) :ptr
+                                       (or (int-type-size t) (float-type-size t) (#{"size_t" "std::size_t"} t)) :arith :else :other)))
+        repl {"operator new" #{[:arith] [:arith :align] [:arith :nothrow] [:arith :align :nothrow]}
+              "operator delete" #{[:ptr] [:ptr :arith] [:ptr :align] [:ptr :arith :align] [:ptr :nothrow] [:ptr :align :nothrow]}}
+        placement {"operator new" [[:arith :ptr]] "operator delete" [[:ptr :ptr]]}
+        user (for [f (:nodes u) :when (and (= "FunctionDecl" (:kind f)) (#{"operator new" "operator delete"} (:name f)))]
+               [(:name f) (mapv #(pkind (str (get-in % [:type :qualType]))) (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))])
+        fits? (fn [ak pk] (case ak (:int :float) (= pk :arith) :ptr (= pk :ptr) :dep (#{:arith :ptr} pk) :align (= pk :align) :nothrow (= pk :nothrow) false))
+        viable? (fn [aks pks] (and (= (count aks) (count pks)) (every? boolean (map fits? aks pks))))]
+    (letfn [(w [x vars tps]
+              (cond
+                (map? x)
+                (let [k (:kind x)
+                      tps (if (= "FunctionTemplateDecl" k) (into tps (keep #(when (= "TemplateTypeParmDecl" (:kind %)) (:name %)) (:inner x))) tps)
+                      vars (if (#{"FunctionDecl" "CXXMethodDecl"} k)
+                             (into vars (for [pv (:inner x) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)))] [(:name pv) (str (get-in pv [:type :qualType]))]))
+                             vars)
+                      akind (fn [a] (let [a (strip a)]
+                                      (case (:kind a)
+                                        "IntegerLiteral" :int "FloatingLiteral" :float
+                                        "DeclRefExpr" (let [nm (get-in a [:referencedDecl :name])]
+                                                        (if-let [t (get vars nm)]
+                                                          (if (contains? tps (str/trim (str/replace t #"[&\s]+$" ""))) :dep
+                                                              (case (pkind t) :ptr :ptr :arith (if (float-type-size (str/trim t)) :float :int) :align :align :nothrow :nothrow nil))
+                                                          (when (= "nothrow" nm) :nothrow)))
+                                        nil)))]
+                  (when (= "CallExpr" k)
+                    (let [cn (get-in (some-> (first (:inner x)) strip) [:referencedDecl :name])
+                          op (case cn "__builtin_operator_new" "operator new" "__builtin_operator_delete" "operator delete" nil)]
+                      (when op
+                        (let [aks (mapv akind (rest (:inner x)))]
+                          (when (every? some? aks)
+                            (let [rv (some #(viable? aks %) (get repl op))
+                                  nv (or (some #(viable? aks %) (get placement op))
+                                         (some (fn [[n pks]] (and (= n op) (not (contains? (get repl op) pks)) (viable? aks pks))) user))]
+                              (when (and nv (not rv))
+                                (when-let [o (get-in x [:range :begin :offset])]
+                                  (when (= main (or (get-in x [:range :begin :file]) main))
+                                    (let [[l c] (line-col starts (long o))]
+                                      (.add out {:line l :col c :kind :error :rule :operator-new
+                                                 :msg (str "call to '" cn "' does not select replaceable global " (if (= op "operator new") "allocation" "deallocation") " function")})))))))))))
+                  (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v vars tps)))
+                (vector? x) (loop [ys x vars vars]
+                              (when-let [y (first ys)]
+                                (w y vars tps)
+                                (recur (rest ys) (if (and (map? y) (= "DeclStmt" (:kind y)))
+                                                   (into vars (for [d (:inner y) :when (and (= "VarDecl" (:kind d)) (string? (:name d)))] [(:name d) (str (get-in d [:type :qualType]))]))
+                                                   vars))))
+                :else nil))]
+      (w (:nodes u) {} #{}))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
