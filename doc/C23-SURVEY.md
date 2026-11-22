@@ -6707,3 +6707,46 @@ reverse-complement-5).
   merged (the worktree's `.tmp/f16-wip*.patch`, not committed: crt's binary16 conversions with ties to even, ci's and cf2g's "f16" loads, stores
   and r16 rounding, the builder's kind, fty and conversions; cirun builds, nothing run yet).
 
+
+## As built: c-tails, C's read and print tails (2026-11-22, branch `c-tails-1122` from mac/next `c7a8439ad`)
+
+The burst's C stream for 100% completeness: the read cell's 5 by design and 10 deferred, the print cell's 2 by design and 12
+deferred (test/reap/matrix.edn), in repr/c and the dg check (queue 522 owns crt, ci's back end and cf2g).
+
+### Built
+
+- **The dg check's recoveries** (arbace/repr/c/parse.ae, convert.ae, c.ae; *recover* and the converter's `*soft-errors*`, bound by
+  the dg read alone): gcc's errors the parse or the converter gave and stopped at are recovered as gcc's parser recovers, so that
+  the checker runs on the rest: a comma before what begins no declarator ("expected identifier or '(' before X", c-c++-common's
+  embed-10), a parenthesized type name with storage classes and no `{` ("storage class specifier in cast/'sizeof'/'alignof'"), a
+  compound literal's storage class C23 does not allow ("expected expression before 'typedef'"), a function definition whose
+  declarator is no function's (`auto g { }`: dropped, the error kept), an underspecified declaration's errors (C23 auto: an empty
+  one, a declarator that is no plain identifier, a second declarator, none initialized; constexpr likewise), and gcc's
+  declspecs_add_scspec over every declaration's and compound literal's storage classes (duplicates, two storage classes,
+  thread_local, constexpr and auto with the others, C23 auto made a storage class by a type specifier).
+- **The checker's diagnostics** (arbace/c/check.ae): gcc 14+'s -Wint-conversion permerror (an integer to a pointer, a pointer to an
+  integer other than bool or an enumeration; ci's runs read permissive), compound literals' storage classes (file-scope register,
+  thread_local without static, a static one's elements constant, the address of a register one), C23 auto (file-scope auto and
+  register, a parameter's storage class, a name its scope declares, a tag its initializer declares or defines, the name used in
+  its own initializer, a braced initializer), constexpr (the same underspecified rules, its tags in the specifiers or a compound
+  literal's type name, the type's qualifiers and its members', a variably modified type, and check_constexpr_init on each scalar
+  element: an object's value, a call, a pointer that is not null, an integer initializer that is no integer constant expression or
+  not representable, a complex value for a real type, a union's member that is not the initialized one), and no cap at 100 errors
+  (gcc has none: c23-constexpr-3's line 161 on had been cut).
+- **A gnu:: attribute's `(*)`** (parse.ae's balanced-garbage?): an abstract declarator's pointer, not an operator before `)`: the
+  arguments read as expressions (c23-attr-syntax-6's `sizeof (void (*)(...))`, its pedwarn "requires a named argument").
+- **Assembler sources' preprocessing** (pp.ae): a main file named .S is preprocessed as libcpp's CLK_ASM (tools/ppref's rule): a
+  line whose `#` begins no directive is text and `# N` no line marker; tcc-pp's 13.S's stream is the own reference's (its
+  :ref :differs gone).
+- **The tree check's nesting bound** (parse.ae's `*max-nest*`, REPR_C_MAX_NEST, 20,000 in bin/lib/repr-c/parse-check).
+
+### Proposed (DECISIONs for the user)
+
+- **CT1 sqlite3.c and tcc-pp's 13.S at the read level (by design, 2 rows; CR1 (a) left them: no dg directive, no run).** Both are
+  known only where cc, the token and tree checks' reference, is wrong (has-gnu and pp-known for sqlite3.c, unterminated-literal and
+  pp-known for 13.S), and both pass the own reference at check time: their preprocessed streams are GCC 15.2.0's libcpp's behind
+  tools/ppref (c-tokens-ref's REPR_C_PP_JUDGE=own: "pp ref"; 13.S since this branch's assembler mode), which is C++'s read source's
+  own verdict (CP413 (a)). Options: (a) the own reference's stream counts as the token check's own verdict for a file known only in
+  :reference-wrong classes (test/reap/cells.edn's :own-elsewhere gains c-tokens-ref's record), and the tree check's pp-known rows
+  follow the token row (their trees differ from cc's only by the stream); (b) n/a (out of both denominators); (c) by design as
+  decided. *Recommended: (a)*, the C++ crop's rule, read 0.9996 to 1.0 with CT2.

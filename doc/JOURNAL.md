@@ -17195,3 +17195,33 @@ llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), a
 195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
 108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
 and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
+
+## 2026-11-22: c-tails round 1: C's read rows by the dg check, the print's assembler units (branch `c-tails-1122`, from mac/next `c7a8439ad`)
+
+The burst's C stream (doc/C23-SURVEY.md, "As built: c-tails"): the read cell's 5 by design and 10 deferred, the print cell's 2 and
+12, in repr/c and the dg check (queue 522 owns ci's back end, crt and cf2g). Built, each by gcc 15.2's own code read from its tarball
+(`gcc-15.2.0/gcc/c/c-parser.cc`, `c-decl.cc`, `c-typeck.cc`, `gcc/c-family/c-opts.cc`, the pinned `.tmp/repr-c/gcc-15.2.0.tar.xz`):
+- the dg read's recoveries (arbace/repr/c/parse.ae under *recover*, arbace/repr/c/convert.ae's `*soft-errors*`, bound by the dg read
+  alone): after an initializer a comma that begins no declarator, a parenthesized type name with storage classes and no `{` (cast,
+  sizeof, alignof), a compound literal's storage class C23 does not allow, a function definition whose declarator is no function's,
+  C23 auto's and constexpr's underspecified declarations (c_parser_declaration_or_fndef), and declspecs_add_scspec over every
+  declaration's and compound literal's storage classes;
+- the checker (arbace/c/check.ae): -Wint-conversion as gcc's permerror (C99 and later or -pedantic-errors, not -fpermissive; a
+  builtin the checker types as int left out), compound literals' storage classes (build_compound_literal), C23 auto's rules,
+  constexpr's (grokdeclarator's qualifiers and variably modified types, check_constexpr_init on each scalar element of an
+  initializer, the union's initialized member, tags in the specifiers or a compound literal's type name), a parameter's storage
+  class, no cap at 100 errors (gcc has none);
+- a gnu:: attribute's `(*)` read as an abstract declarator (c23-attr-syntax-6), assembler sources preprocessed as libcpp's CLK_ASM
+  (13.S's stream now the own reference's), and the round trip's assembler units (SPEC §9.6: the directives as forms, the text as
+  `c/asm-text`; 12.S and 13.S pass levels 1 and 2, and gcc's level 3 by hand under ARBACE_C_JUDGE=gcc: the objects equal).
+Proofs: `bin/ci dg` whole, 619 of 619 supported (614 before; c23-auto-3, c23-complit-5, c23-constexpr-3, embed-10,
+c23-attr-syntax-6 pass; the control holds), recorded (`--record`, rerun at the record's commit in a clean worktree: the same
+record); `bin/ci annotations` whole: its 14 false errors of the first version (gnu89's free conversions, a GNU global register
+variable, unknown builtins' int results) fixed and the 14 files rerun with the control, then recorded whole (`--record`, passing, at
+the record's commit in a clean worktree: the rows the checker's later changes on next had left stale refreshed, pr33855.c's accepted
+problem drained from test/records/accepted.edn); `bin/ci check --only` over the 13 run
+programs that use auto, constexpr or storage-class compound literals (all pass, controls hold); `bin/repr-c check --tokens`,
+`parse-check` and `roundtrip --only` over the files touched, with their controls (REPR_C_PP_JUDGE=own: 13.S "ref", sqlite3.c
+"ref"); `roundtrip --corpus tcc-pp --record`. Read 5,460 / 5 / 10 to 5,468 / 2 / 5 (the dg rows and, by CR1 (a), the token and
+tree rows of c23-attr-syntax-6, c23-complit-5 and embed-10), print 4,842 / 2 / 12 to 4,844 / 0 / 12. Left: eval-depth 5 and
+eval-limits 10 (a compiled host, round 2), sqlite3.c and 13.S at the read level (CT1, the user's), shell.c and unicode_gen.c.
