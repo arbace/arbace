@@ -16948,3 +16948,130 @@ non-passing among them are the rows above (the stale passes at 863bdaea1, conste
 pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517, print 3,880 / 0 / 15 ->
 3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
 merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
+
+## 2026-11-22: hs-r7-1122: Haskell's eval programs not own, seventh round (Typeable's kinds, impredicativity, quasi-quotes, five packages own)
+
+Branch `hs-r7-1122` from mac/next `94dbc03af` (which holds hs-r6-1122 `6f2af94ea`), by an agent of the main host (the coordinator's
+brief: hs-r6's "still at 0.5" list less the three waiting on the user's decision, T13825-unit, unboxedsums_unit_tests and tcrun022).
+Light: the front end alone on single programs and hsi runs over composed own libraries (`.tmp/r7/front.sh`, `run.sh`,
+`compose2.sh`), the libraries rebuilt in a run worktree at the branch's commit (`.tmp/worktrees/hs-r7-run`, its .tmp this
+worktree's: `.tmp/r7/full.sh`), targeted `bin/hsi check --libs own --only` runs (`.tmp/r7/rerun.sh`); no gate.
+
+**T14236: Typeable's evidence of a partially applied arrow at its kind arguments.** ghc-internal's mkTrAppChecked asks
+`typeRep @((->) x :: TYPE ry -> Type)`, which GHC solves as doTyApp's `(FUN 'Many @rx @ry) x`, doTyConApp giving mkTrCon $tcFUN
+[SomeTypeRep 'Many, SomeTypeRep rx, SomeTypeRep ry] with rx's and ry's evidence from the givens (the IsTYPE matches' TypeRep
+patterns). The solver gave the constants 'Many, LiftedRep, LiftedRep (HF10-P39 (a)'s unapplied arrow), so eqTypeRep failed and App
+printed the TrApp unrebuilt. Now (typecheck.ae's arrow-tycon-ev, HF9-P4's erased kinds undone there alone): q is the first
+argument's kind, TYPE q, its annotated kind (TrApp's (b :: k1)) rewritten by the given equalities in force (the IsTYPE match's
+k1 ~ TYPE rx), else a kind link's (typeRepKind's, mkTrFun's); r the result kind's argument from the type's kind signature (hs-type's
+HsKindSig kept beside the type, *kind-sigs*); each one's evidence a closed one's mkTrCon or the solver's (a given), LiftedRep where
+no kind is known (GHC's defaulting). ghc-internal's STG: GHC.Internal.Data.Typeable.Internal alone moves (mkTrAppChecked's list now
+[Many, $dTypeable rx, $dTypeable ry], GHC's shape); T14236 prints `Int# -> [Char]`.
+
+**T7861: GHC's impredicativity check with Quick Look's exception, and its message.** GHC 9.14.1 compiles main to typeError of
+"Couldn't match expected type ‘a0’ with actual type ‘(forall (b :: k0). a1) -> a1’ / Cannot instantiate unification variable ‘a0’
+/ with a type involving polytypes: ..." (GHC.Tc.Utils.Unify's simpleUnifyCheck: a TauTv is never filled with a type holding a forall
+or a context; GHC.Tc.Gen.App's quickLookArg skips the argument `f` of `seq`, its parameter a bare instantiation variable, not
+guarded, and findNoQuantVars false: f's instantiation leaves a free). Ported (typecheck.ae, tc-app's argument check): an argument
+whose parameter type is a bare meta, filled by its check with a type holding a polytype below its top, is CannotUnifyWithPolytype's
+error unless Quick Look takes it (ImpredicativeTypes or the head ($), and no-quant-vars? of the argument's head at its arguments);
+the elaborator still fills metas freely elsewhere. The message (mismatch-text's :poly entry, code 91028): the mismatch, then
+pprCannotUnifyVariableReason's two lines; metas named after their quantified variable when errors are deferred (inst-meta), tidied
+with GHC's numbering on a clash (getHelpfulOccName's trailing 0, tidyOccName: seq's a0, f's a1), a nested forall printed with its
+kinded binder (a binder its body leaves unconstrained is of the signature's generalised {k}, a meta k0 in an instance);
+GHC.Tc.Gen.Match's StmtErrCtxt for a do block's statements ("In a stmt of a 'do' block:", the statement's expression checked NC); a
+wired-in interface's variable a#UNIQUE tidied to a. The run's stderr is GHC's byte for byte (1cd4be20...).
+
+**T13688: quasi-quotes run at compile time.** The new namespace arbace.repr.haskell.thsplice and front.ae's th-expand!, before a
+module is renamed: each [q|text|] of its dump (SplicePat, HsUntypedSplice, HsSpliceTy over HsQuasiQuote) becomes a line of a
+generated Main (the module's imports by their source spans, qualified Prelude, Language.Haskell.TH.Syntax and .Quote, `runQ
+(quotePat (q) "text") >>= print`, quoteExp, quoteType), read and compiled by the same front end over the program's modules compiled
+before it (GHC's stage restriction: the quoter's module), its STG beside theirs, run on hsi over the same libraries (sh with ulimit
+and timeout); each printed value read back (Show's syntax: constructors, literals with Haskell's escapes, lists, tuples, negative
+numbers, ratios) and converted as GHC.ThToHs does (cvtPat, cvtl: literals, an IntegerL overloaded, variables, constructors,
+application, tuples, lists, parentheses; names as mkName's or module-qualified) into the native dump in the quote's place, then
+renamed and elaborated as any. front build takes --hsi PATH --hsi-libs DIR,... --hsi-image DIR; bin/lib/hsi/check passes them (the
+own set and its image under --libs own). T13688 prints "hello world" / good twice and leaves the class :oracle-pending (judged by
+its pending own verdict, T13688.stdout).
+
+**T24245, T25364, TestTypeableBinary: ghc-platform, ghc-experimental, ghc-boot, ghc-heap and ghci own.** Their own interfaces
+were made already by haskell-iface-own (queue 429); now each is an own package as the 20 above base are: a producer step
+haskell-lib-own-P in test/gate/steps.edn (dependency order: ghc-platform, ghc-experimental, ghc-boot, ghc-heap, ghci; lib-check
+--package P --ifaces own --judge test/haskell/lib-check-own-P.edn, then lib-stg --package P --ifaces own, its controls
+lib-check-controls-P.tsv, already there, and the new lib-stg-controls-P.txt; outputs P-pool.tar and P-own.tar), the five P-own.tar
+in hsi-check's and hsi-check-aot's :uses and HSI_OWN_TARS, the crop's step list, the controls table, lane 2's HSI_OWN_PACKAGES.
+The programs then met front-end gaps of their own, each GHC's rule:
+- T24245 (GHC.TypeNats.Experimental, GHC.TypeLits.Experimental): a type-level character of the native dump is (char N), which
+  hs-type took for a Character (a ClassCastException); `SNat @62` under a type application named the pattern synonym itself, not
+  its builder $bSNat (var-occ's rule now in HsAppType too); minusSNat's `m <= n` is Assert (m <=? n) (LeErrMsg m n), and
+  Assert's equations `Assert 'True _ = ()`, `Assert _ errMsg = errMsg` had their wildcards as metas, so the own interface wrote
+  free variables (tv "m1") no argument matches: fam-eqn now binds a wildcard as GHC's renamer names it (the own interfaces of
+  ghc-internal's Assert, Data.Type.Equality's (==) and Typeable.Internal's NotApplication change accordingly, the judge's facts
+  equal as before); the reduction's evidence is the constraint unit's, whose dictionary GHC binds as CUnit (sc-base, dcon-occ in
+  typecheck.ae, tostg.ae and simplify.ae: CUnit with CTupleN and CSolo; GHC.Internal.Classes' own STG gains the CUnit binding,
+  2303 -> 2304 of 2318 bindings equal, its data equal); GHC.Builtin.Types.Literals' Log2, CmpChar, ConsSymbol, UnconsSymbol,
+  CharToNat and NatToChar ported into builtin-fam; KnownChar's evidence a C# of the literal (EvChar's mkCharExpr: a bare literal
+  was no Core tostg reads).
+- T25364 (GHC.Utils.Encoding) and TestTypeableBinary (GHCi.TH.Binary, imported for its orphans; the program's Binary (TypeRep a)
+  is binary's): no change beyond the packages.
+
+**The libraries**, made again at the branch's commit in the run worktree as the gate's producers make them (`.tmp/r7/full.sh`,
+the elaborator's change being shared code whose callers in the libraries cannot be listed beforehand): lib-check --ifaces own of
+ghc-internal, every module elaborated, 0 worse, 0 better against its record (12.5 minutes, 1.77 GB); its pool moves in three
+interfaces alone, the wildcard equations' binders (GHC.Internal.TypeError's Assert, GHC.Internal.Data.Type.Equality's (==),
+GHC.Internal.Data.Typeable.Internal's NotApplication), the judge's facts as before. lib-stg --ifaces own of ghc-internal: 9,208 of
+10,742 bindings equal (9,207 before), 0 worse, control 0 of 171; its STG moves in GHC.Internal.Classes (CUnit) and
+GHC.Internal.Data.Typeable.Internal (mkTrAppChecked) alone; test/haskell/lib-stg-own-results.edn re-recorded from it (Classes'
+row). base and the 20 packages above it: every lib-check judge 0 worse, their pools and STG byte for byte the round's start
+(`.tmp/r7/diffall.sh` against the copies kept). The five new packages: ghc-platform 1 module, ghc-experimental 11 (17 of 22 interface
+facts equal to GHC's on its 2 modules the pack holds; control differs), ghc-boot 12 (7 elaborated without an error, 59 of 59 facts
+equal; control differs), ghc-heap 18, ghci 17 (11 without an error, 57 of 57 facts; control differs); lib-stg of each a measure (no
+-O0 reference yet); their records test/haskell/lib-check-own-P.edn written from those runs (libcheck record over each modules.edn,
+lib-check's own description, no second run), each judged against its record: 0 worse.
+
+**The programs that change**, found by the front end itself (the user's word of the day, "avoid redundancy and unnecessary tests":
+the rows the change moves, their controls, no proof taken twice). At the T7861 commit the front end over the 129 programs whose
+sources name a feature its changes touch (rank-n types, runST, mask, Data.Data's traversals, Typeable, -fdefer-type-errors) over the
+round's starting libraries, against lane 2's outputs: 125 byte for byte, the three hs-r6 re-recorded (arr020, the two
+UnliftedNewtypes), and Defer01 (its unreached deferred messages now name a0 where they said t0, closer to GHC's). At the branch's
+head the front end over the 60 programs whose sources name a feature of the later changes (type-level literals and families,
+pattern synonyms, quasi-quotes, Constraint, Data.Type.Equality and the like) and the targets, on the rebuilt libraries composed as
+the check composes them (`.tmp/r7/compose2.sh`), against the base commit `94dbc03af` run over the round's starting libraries in a
+worktree of its own (lane 2's outputs were gone with hs-r5's worktree): 58 byte for byte, T13688 and T24245 (the targets) differ.
+The library changes reach no other program: mkTrAppChecked's arrow branch differs only for an unlifted argument or result, and no
+program's STG names Classes' old constructor C:CUnit.
+
+**The re-record**: `bin/hsi check --libs own --only @7 ids --record` (lane 2's environment with the five packages in
+HSI_OWN_PACKAGES, `.tmp/r7/rerun.sh`): 7 of 7 pass own (T14236, T7861, T13688 by its pending own verdict, T24245, T25364,
+TestTypeableBinary, Defer01 as before); six lines of test/haskell/check-hsi-own.edn change, Defer01's not. No AOT program moves (Defer01's
+result unchanged; none of the targets is in AOT's set): its record stays. The negative controls, their subjects run on the own
+libraries (no record): 11 of 11 fail as they must. The whole record judged with the check's judge (`.tmp/r7/judge.sh`): 0 unclassed,
+own-fallback.txt 0 problems (empty now); 950 lines, 916 :libs :own, the 31 out of the cases, and T13825-unit, tcrun022 and
+unboxedsums_unit_tests, counted out by the user's decision of 2026-11-22 (applied by the counting agent, not here).
+
+**Made own, by cause (eval 910 -> 916 of the 919 cases; AOT 139 of 139 as before):**
+- Typeable's evidence of a partially applied arrow at its kind arguments (doTyApp, doTyConApp; the givens' kinds): T14236;
+- GHC's impredicativity check with Quick Look's exception and CannotUnifyWithPolytype's message: T7861;
+- quasi-quotes run at compile time (runRnSplice through hsi, GHC.ThToHs): T13688;
+- five packages own, with the family wildcard, CUnit, the built-in families, KnownChar's evidence, the type-level character and the
+  builder under a type application: T24245; the packages alone: T25364, TestTypeableBinary.
+
+**Scores** (`bin/reap --record`: Haskell eval 892 -> 893 pass, deferred 23 -> 22, T13688 out of :oracle-pending, 56 of 56 cells,
+0 problems; `bin/crops-score --record`): Haskell's eval stage 0.9950 -> 0.9980 (917.5 / 919 = 0.99836), AOT 1.0000, independence
+**0.9990 -> 0.9996** (exact 0.99967; floor 99, unchanged), completeness 0.9809 -> 0.9811, maturity 1. `bin/crops-score --judge
+--strict` 0 problems, `bin/records-check` 9 pairs, 0 problems.
+
+**Left:** the three cases the user counted out (T13825-unit, unboxedsums_unit_tests, tcrun022) are the eval stage's last 0.5s until
+the counting agent applies the decision. Found, not done: lib-check's closures grow from the names an interface mentions, so an
+orphan module (Data.Binary.Generic's GBinaryPut/GBinaryGet instances) that a dependency imports is missing from them (GHC's
+dep_orphs), and ghc-boot's GHC.Data.SizedSeq, GHC.ForeignSrcLang, GHC.LanguageExtensions and ghci's GHCi.TH.Binary, GHCi.Message,
+GHCi.TH, GHCi.ResolvedBCO elaborate with unsolved Generic-defaulted Binary instances (Cabal-syntax's 71 modules likewise); ghc-boot's
+GHC.Version and ghci's GHC.Platform.Host are hadrian's generated modules, in no corpus (GHC.UniqueSubdir, GHCi.InfoTable); GHC.Unit.Database
+(two skolems) and GHCi.FFI are gaps of their own. None of them is reached by the three programs. base's own lib-check and lib-stg
+records are stale (4 and 22 modules better, since hs-r5), not re-recorded here.
+
+Alternatives not taken: the impredicativity check in unify for every TauTv (GHC's rule in full, but the elaborator fills metas with
+polytypes where GHC has infer holes, let bindings without a signature: a regression risk over 900 programs and 27 libraries, for
+no case here); Quick Look in full (QL's instantiation variables through the whole application); generating GHC.Version and
+GHC.Platform.Host as PrimopWrappers was (no program needs them); a second lib-check run of the five packages for their records
+(written from the runs' modules.edn instead). Not done: doc/AGENDA.md (the main session's), the gate.
