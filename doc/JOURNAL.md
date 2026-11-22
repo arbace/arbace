@@ -17487,3 +17487,301 @@ statmemprof/bigarray, regression/pr11865/mkroot in no class of the native diverg
 Alternatives not taken: rules per test's message (each rule is the standard's and judged on every file it reaches and on valid programs);
 the namespace-scope declaration loop of sema.ae, where function templates refuse whole units (queue 518's ground); a whole dg-error run
 (the stream's directories and the other directories' passes were run instead).
+## 2026-11-22: hs-pkgs-1122: Haskell's no-reference programs built (the Hackage packages vendored, GHC's runs recorded, five packages own)
+
+Branch `hs-pkgs-1122` from mac/next `a8c6d3137`, by an agent of the main host (the coordinator's brief after the user's decision of
+2026-11-22: Haskell's 31 `no-reference` programs, which GHC never built in the reference, are built). Light, targeted: GHC's builds
+and runs of the programs in question (oracle tier, by hand), the packages' own libraries in this worktree (lib-check and lib-stg per
+package, as hs-r7's producers make them), `bin/hsi check --libs own --only` over the 28 programs; no gate. hs-speed works on hsi's
+speed apart (no file of go/arbace/hs touched here).
+
+**The 31.** The class `:no-reference` counted 28 programs whose reference was `:no-build` and whose run was `:no-dump` on both
+sides (test/haskell/eval-out.edn's 28 nofib entries), and bspt, fulsom and pic (divergences-own.edn's `:no-reference-own`, killed at
+the check's CPU limit). Their causes, read from GHC's errors and nofib's Makefiles: 19 parallel programs (`SRC_DEPS = parallel`, and
+random for linsolv, transclos and minimax), gc_bench and sieve (old-time), secretary (random), smallpt (unboxed-ref, over primitive),
+ben-raytrace (primitive, random, parallel), stm001 (its main is StmTest.hs: record-ref and the check looked for Main.hs or NAME.hs
+only), threads004, and eff and hartel (no main file: each a directory of nofib's sub-programs, its Makefile's SUBDIRS); bspt, fulsom
+and pic import nofib-common's NofibUtils, which record-ref does not give GHC (HF10-P64), and are speed rows at heart: the coordinator
+(relaying hs-speed's HES103 breakdown) left those three to hs-speed's per-row CPU caps (HES97 (a)), so nothing of them is touched here
+(a first pass gave GHC nofib-common and recorded the 29 NofibUtils programs' runs; reverted before the commit).
+
+**The packages** (test/haskell/hackage.edn): each package's newest version on Hackage on 2026-11-22, its tarball pinned by SHA-256 and
+size, and where Hackage revised the .cabal (x-revision, which cabal-install reads from the index) the revision pinned too: old-locale
+1.0.0.7 (revision 2), old-time 1.1.1.0, splitmix 0.1.3.2, random 1.3.1, parallel 3.3.0.0 (revision 1: the tarball's .cabal says
+`base < 4.22`, which rejects GHC 9.14.1's base 4.22; the revision says `< 4.23`), primitive 0.9.1.0 (revision 1, the same) and
+unboxed-ref 0.4.0.0; from https://hackage.haskell.org/package/NAME-VERSION/NAME-VERSION.tar.gz and .../revision/N.cabal. Their
+licenses in LICENSE.md ("The Hackage packages of Haskell's eval corpora": old-locale, old-time and random the Glasgow Haskell
+Compiler License with the Haskell 98 Report's notice, parallel GHC's license, splitmix, primitive and unboxed-ref BSD 3-Clause).
+`bin/hsi hackage fetch` (bin/lib/hsi/hackage) downloads them once in the main checkout (a worktree takes its copy, inputs.bash's
+haskell_take) and extracts them into .tmp/hsi/hackage/src with the revised .cabal in place; nothing of them is committed.
+
+**GHC's side (oracle tier, by hand).** `bin/hsi hackage ghc-db` builds the seven with the host's GHC 9.14.1 by Cabal's Setup (built
+against the installed Cabal 3.16; old-time's build-type Configure through autoconfUserHooks), `--ipid NAME-VERSION`, static, no
+profiling, into a package database of their own. record-ref (bin/lib/hsi/record-ref): a nofib program whose SRC_DEPS name one of
+them gets `-package-db` that database; SRC_DEPS's `+=` read too (bin/lib/hsi/records.bash's nofib_src_deps: blackscholes'
+`SRC_DEPS += parallel` was dropped), the same in the check's plan; the main file found as nofib's mk links it (records.bash's
+nofib_main: Main.hs, Main.lhs, NAME.hs, NAME.lhs, else the one source whose module is Main: stm001's StmTest.hs), in both planners. `bin/hsi record-ref --corpus nofib --only` of the 28 (the other lines kept):
+- GHC built 20 of the 28: gc_bench, sieve, stm001, partak, partree, prsa, transclos, coins, gray, sumeuler, secretary, ray (status 0,
+  0.2 to 8.0 s) and blackscholes, mandel, minimax, nbody, parfib, queens, smallpt, ben-raytrace (killed at the reference's 10 s of
+  CPU, status 137: their own verdicts are their shipped outputs, own-verdicts' rule for such a record);
+- GHC 9.14.1 rejects six sources itself, no package missing: parallel/cfd and dcbm (GpH's old module Parallel, in no package,
+  GHC-87110), linsolv (a data context without DatatypeContexts, GHC-87429), matmult (foldl' ambiguous with Prelude's, exported since
+  base 4.20, GHC-87543), warshall (rnf, gone from Control.Parallel.Strategies' exports, GHC-88464), smp/threads004 (forkOnIO, gone
+  from GHC.Conc, GHC-61689); nofib's own build leaves these out (OTHER_SUBDIRS) but its program list has them;
+- eff and hartel: no main file (nofib's driver of 7 and 14 sub-programs, their Makefiles' SUBDIRS; no all.T, so the brief's rule
+  sends them to the user).
+
+**The own side.** The packages as the corpus's (test/haskell/corpus-ghc-9.14.1.edn's new `:hackage`, configured as Cabal configures
+each library: default-language, default-extensions, cpp-options, include-dirs, build-depends by name, `-this-unit-id NAME-VERSION`;
+`:src-as`, the module paths as Cabal's build gave them to GHC, src/System/Random.hs, ./Control/Parallel.hs, GHC's finder's join,
+which the libraries' SrcLoc text spells: read from GHC's archives), read only when REPR_HASKELL_ONLY_PACKAGES names them
+(bin/repr-haskell's corpus_plan_raw), so the round trips, the records' keys (native-inputs, the corpus packs) and the read and print
+cells' module counts are :packages' alone. Their dependencies above the boot libraries come from a package database of Arbace's own
+records (arbace.repr.haskell.target hackage-db: name, version, id, exposed, depends, the boot units' ids test/haskell/target/
+installation.edn's), which the packages' flags name with `-package-db`; the driver (arbace.repr.haskell.driver) now stacks
+`-package-db` databases as GHC's readUnitDatabases does (a later database's unit replacing an earlier one's of the same id), so a
+module's MIN_VERSION macros cover random's splitmix. bin/repr-haskell links the extracted sources as the tree's hackage/ and writes
+the database (hackage_link). arbace.repr.haskell.target's package-deps reads a Hackage package's .cabal there; lib-check and lib-stg
+take its unit id NAME-VERSION from hackage.edn and its :src-as for the srcmap; a Hackage dependency's own STG beside the libraries
+(bin/lib/repr-haskell/hackage.bash: GHC's packs have none, so the front end named splitmix's modules' unit `main`;
+LIB_STG_DEP_OWN_TARS in the gate); and lib-stg's front end names the package's own modules by its unit (libcheck's stg
+--own-modules: a boot package's modules are in GHC's pack, a Hackage package's were not, and random's references to its own
+System.Random.Internal were main's).
+
+Two of GHC's rules the front end lacked, both met in random:
+- a constraint synonym as a superclass: `class (KnownNat (SeedSize g), 1 <= SeedSize g, Typeable g) => SeedGen g`, where
+  GHC.Internal.Data.Type.Ord's `x <= y = Assert (x <=? y) (LeErrMsg x y)`: solve-pred now expands a synonym that is no class and
+  solves its predicates as a constraint family's (Assert 'True _ = (): CUnit); before, "no superclass dictionary <=";
+- a default signature whose context mentions the method's own variables: `default randomR :: (RandomGen g, UniformRange a) =>
+  (a, a) -> g -> (a, g)` for `randomR :: RandomGen g => ...`: GHC's tc_default checks the method's type against $dm's by
+  subsumption; now the method's own dictionaries are lambda-bound and each predicate of the default's context is the method's own
+  dictionary it equals (the variables matched through the bodies) or solved at the instance's head; before, no dictionary was
+  passed and the method held $dm's partial application (secretary: hsi's case on a PAP).
+Both are shared code; their callers listed rather than rerun: no boot library declares a class with a constraint synonym among its
+superclasses, and of the boot libraries' nine default signatures only GHC.Internal.TH.Lift's `default lift :: (r ~ ..., Quote m)
+=> ...` mentions a variable of the method's own, and every Lift instance of the libraries defines lift (the derived ones too:
+deriv.ae's gen-lift writes both methods); the run corpora's default signatures (11 generics tests) mention none.
+
+The libraries, each lib-check --ifaces own then lib-stg --ifaces own, at the branch's code (old-locale, splitmix and parallel made
+again after the two changes: their pools byte for byte the same): old-locale 1 module, splitmix 3, random 6, parallel 3, and parsec
+(a boot library: gray imports it; its own interfaces were queue 429's) 25: every module elaborates without an error, every module's
+STG made; no GHC interface of them is in the pack haskell-ifaces-ghc-9.14.1 and no -O0 STG of them in haskell-stg-libs-O0, so the
+judge's facts are 0 of 0 and the lib-stg controls wait for the oracle window, as hs-r7's ghc-platform's (the controls files say so).
+Records test/haskell/lib-check-own-P.edn written from those runs (libcheck record, lib-check's own description), each judged 0
+worse. Gate steps haskell-lib-own-{old-locale,splitmix,random,parallel,parsec} (their pools and own tars, random's
+LIB_STG_DEP_OWN_TARS), their tars in hsi-check's and hsi-check-aot's :uses and HSI_OWN_TARS, the crop's step list, the controls
+table. primitive and unboxed-ref are configured in the corpus too but not own: primitive's lib-check stops at three modules (11 of
+14 elaborate: Data.Primitive.Array's and SmallArray's typed quotes of an operator application and of an unboxed tuple, `[|| pure
+$! x ||]`, `[|| Array (emptyArray# (##)) ||]`, which th-quote does not render, and Data.Primitive.PrimArray's Functor NonEmpty
+unsolved); old-time needs its configure header (HsTimeConfig.h: the probe's answers for its template, an hour's probe) and
+System/Time.hsc through Arbace's hsc2hs on ci.
+
+**The programs** (`bin/hsi check --libs own --only` of the 28, the 25 packages above base and the five, `--record`):
+3 pass: partak (20 s; its record line made again with its golden file below, 22 s), partree (52 s, killed at the limit in an earlier run at 77 s of wall: near the limit) and stm001 (11 s), on
+the own libraries (`:libs :own`, their STG the native front end's); 12 meet the check's 60 s of CPU (blackscholes, coins, gray, mandel,
+nbody, parfib, prsa, queens, ray, sumeuler, transclos, secretary: hsi's speed, 25 to 50 times GHC's -O0 here); minimax stops at
+splitmix's C (splitmix_init); matmult, which GHC rejects, compiles and runs on the own front end (its renamer prefers the module's
+own foldl' to Prelude's: GHC reports the ambiguity); 11 stay `:no-dump`: the five other GHC-rejected sources, eff and hartel, and
+gc_bench, sieve, smallpt and ben-raytrace, whose packages are not own (their pack lines the helper's failure). The negative controls,
+their subjects run on the same own libraries (no record): 11 of 11 fail as they must. The whole record judged with the check's own
+judge copied (`.tmp/hp/judge.sh`): 0 unclassed, own-fallback.txt 0 problems; 17 lines of check-hsi-own.edn change, 933 of 950 lines
+:libs :own.
+
+**The record and its classes.** check-hsi-own.edn: the 28 lines replaced. divergences.edn: `:no-reference` keeps the GHC-rejected
+sources but matmult, the two without main and the 29 NofibUtils programs (hs-speed's three among them); the 20 GHC now builds and
+callback002 (passing since HES85 (a)) out; the new `:hackage-pending` (deferred): gc_bench, sieve, smallpt, ben-raytrace, whose package is not own yet, their
+pack lines the helper's failure. divergences-own.edn: `:no-reference-own` takes matmult (the own front end accepts what GHC
+rejects); the new `:own-speed-no-pack` (deferred): the 12 at the check's CPU limit and partree, with no pack run to compare; the new `:hackage-c`
+(deferred): minimax, whose setStdGen forces random's global generator's initializer, splitmix's C splitmix_init, not on hsi.
+eval-out.edn: the three that pass leave the out-of-cases list (the brief: a program leaves when it passes); the 17 others GHC now
+builds stay until they pass, their reasons restated (with next's merge, which took T24809 and T4262 out as n/a: 29 left;
+independence.edn's :out-of-cases :cases 32 -> 29, the eval stage's 918 cases all own). Counting those 17 in
+now would hold the eval stage under 1: four of them (the :hackage-pending) have no own line, 0.5 each. The judge's lists: own-verdicts --record (896 of 909: the 13
+programs whose shipped outputs GHC's runs give, ben-raytrace and smallpt by the rule for a record killed at its limit, and four
+golden files); reviewed golden files: gc_bench, sieve and stm001, which print nothing (golden/nofib-silent.edn), and partak
+(golden/nofib-parallel.edn: FAST_OPTS 34 15 8, Takeuchi's function with x <= y = z, y for x > y > z, the shipped NORM_OPTS line's
+rule too), each from its source, GHC's run agreeing; left on GHC's record with a reason: secretary (its frequencies come from random's
+SplitMix stream); na.tsv: the 20 out, the reasons of linsolv, matmult and warshall restated. `bin/hsi golden --oracle --control`
+passes (78 golden files, the controls failing), `bin/hsi own-verdicts --check` current; independence.edn's judge facts: eval 877 of
+878 -> 896 of 898 by their own verdicts, :cases {:self 7757 :recorded 1} -> {:self 7776 :recorded 2}.
+
+**Checks.** `test/gate/caches-test.bash --coverage` (every .tmp name of bin/ a row's) and `test/docs/claude-md-test.bash` pass;
+steps.edn read by the Clojure reader (243 steps). No gate (the user's rule).
+
+**Merged with mac/next `e3d9a3331`** (hs-speed's round, the second counting decisions, x86-objs, queue 517 and 518): bin/hsi's
+header, the journal, independence.edn's and eval-out.edn's out-of-cases (T24809 and T4262 n/a there) joined; matrix and scores taken
+from next and recorded again; the whole own record judged again on the merged check (0 unclassed).
+
+**Scores** (on the merge; `bin/reap --record`: Haskell eval, next's 896 pass, 31 by design, 19 deferred, 4 n/a -> 899, 11, 36, 4;
+56 of 56 cells, 0 problems; `bin/crops-score --record`): Haskell's completeness 0.98679 -> **0.98758** (exact 0.987579: read 1, eval
+899/946, AOT 139/139, print 1; floor 98), without by design 0.99484 -> 0.99045 (17 programs from by design to deferred), maturity 1,
+independence 1.0000 as recorded (exact 0.99997: the judge stage's 2 recorded cases, cacheprof and secretary, of 7,778; floor 99). `bin/crops-score --judge --strict` 0 problems, `bin/records-check` 9 pairs, 0 problems.
+
+**Left, and the user's questions:**
+- DECISION hs-pkgs-1 (the six sources GHC 9.14.1 rejects: cfd, dcbm, linsolv, matmult, warshall, threads004): (a) n/a, out of the
+  cases and the completeness denominator (the source is no program of GHC 9.14.1; nofib's own build leaves them out); (b) judged
+  as compile-fail tests: the native front end must reject each as GHC does (matmult's renamer rule first), a pass when it does;
+  (c) keep them by design. Recommended: (a) (the coordinator relays hs-speed's view: n/a, GHC itself cannot build them).
+- DECISION hs-pkgs-2 (eff, hartel: no main file, each a directory of nofib's sub-programs): (a) n/a; (b) their sub-programs become
+  programs of the corpus (eff 7, hartel 14: nofib's own driver, their Makefile's SUBDIRS), the corpus's program count changed;
+  (c) keep them by design. Recommended: (b) if the corpus may grow, else (a).
+- Next round (no decision needed): old-time own (gc_bench, sieve), primitive and unboxed-ref own (smallpt, ben-raytrace), splitmix's
+  init.c on hsi (minimax), the 12 at the CPU limit are hsi's speed (hs-speed's), parsec's and the four's GHC interfaces and -O0 STG at
+  the oracle window (their judges' facts and lib-stg's controls), the Hackage packages' modules in the read and print round trips
+  (the corpus's :packages count unchanged so far), test/gate/loads.edn for the five new steps at the next gate (`--loads-update`).
+
+Alternatives not taken: the packages' sources committed (the corpus is read in place, by pin, as GHC's tarball); the Hackage packages
+as units of the derived global database (every module's MIN_VERSION header would have changed, the read records' keys with it);
+GHC's registered database for the native reads (a GHC product in the own path); the whole check rerun after the shared changes (the
+callers listed instead). Not done: doc/AGENDA.md (the main session's), the gate.
+
+## 2026-11-22: hs-pkgs-1122, round 2: old-time own; gc_bench and sieve pass
+
+The coordinator's message during round 1 (hs-speed's HES103 breakdown): build the package ones, leave bspt, fulsom and pic to
+hs-speed, the GHC-rejected sources a question with n/a recommended. Round 1 left old-time's two programs pending; done now.
+
+**old-time's configure header, Arbace's.** arbace.repr.haskell.configure: a `hackage-products-spec` beside products-spec (old-time
+1.1.1.0's include/HsTimeConfig.h, its template from the tree's hackage/, linked by bin/repr-haskell-target's src from `bin/hsi
+hackage src`), probed and answered as the tarball's products but never written into the derived installation (`products` keeps
+products-spec; the new verb `hackage-products ROOT` writes it into the Hackage sources, called by bin/repr-haskell's hackage_link);
+its rules: old-time's configure.ac (AC_CHECK_HEADERS, AC_CHECK_FUNCS, AC_STRUCT_TIMEZONE as time's, FP_DECL_ALTZONE's
+AC_CHECK_DECLS([altzone]), AC_HEADER_TIME's TIME_WITH_SYS_TIME), and rule-of's three patterns take autoconf 2.72's 'quotes' beside
+2.69's `quotes'. The probe restricted to the one product (REPR_HASKELL_PROBE_ONLY, its answers merged into the file's others, the
+maps kept sorted; the probe's loops skip a product with no value checks): 3 compile tests on ci, 20 s; test/haskell/target/answers.edn
+gains old-time's 31 answers, the others byte for byte. The header written from them is byte for byte the host configure's (GHC's
+side's Setup build, `.tmp/hsi/hackage/ghc/build/old-time-1.1.1.0/dist/build/include/HsTimeConfig.h`).
+
+**System/Time.hsc through Arbace's hsc2hs on ci.** The corpus's old-time entry (:hsc System/Time.hsc, :hsc-flags with Cabal's
+`--cflag=-D__GLASGOW_HASKELL__=914`); `REPR_HASKELL_ONLY_PACKAGES=old-time bin/repr-haskell target hsc` writes
+.tmp/repr-haskell/target/hsc/old-time/System/Time.hs. Two fixes on the way: target_hsc passes a `--cflag=-D` to ci (the .hsc's
+`#ifdef __GLASGOW_HASKELL__` around `#include "HsTime.h"` hid the configure answers: "Don't know how to get at timezone name on
+your OS."), and arbace.repr.haskell.hsc2hs reads the .hsc byte for byte as hsc2hs does (ISO-8859-1: a comment's ± is its two bytes'
+octal escapes in the C program and its UTF-8 again in the output; it was one escape of its code point, an invalid byte); no .hsc of
+the corpus's plan holds a non-ASCII byte, so no other output moves. The output is byte for byte the host hsc2hs's
+(dist/build/System/Time.hs). The native read takes a Hackage package's hsc outputs from there, placed beside the .hsc as Cabal's
+build places them (native_dump_corpus).
+
+**The library and the programs.** lib-check --package old-time --ifaces own: 1 module, elaborated without an error; lib-stg: its STG
+made (old-locale's own STG beside, LIB_STG_DEP_OWN_TARS); test/haskell/lib-check-own-old-time.edn written from the run, judged 0
+worse; its controls files; the gate step haskell-lib-own-old-time (`target hsc` first, then lib-check and lib-stg), its tar in
+hsi-check's and hsi-check-aot's :uses and HSI_OWN_TARS, the crop's list, the controls table. `bin/hsi check --libs own --only`
+gc_bench and sieve, `--record`: both pass on the own libraries by their own verdicts (their golden files, round 1's): gc_bench 27 s,
+sieve 8 s. They leave divergences.edn's :hackage-pending (smallpt and ben-raytrace stay: primitive's front-end gaps) and
+eval-out.edn (27 out; independence.edn's :cases 29 -> 27, the eval stage's 920 cases all own). The whole record judged again: 0
+unclassed.
+
+**Scores** (`bin/reap --record`: Haskell eval 899 -> 901 pass, 11 by design, 36 -> 34 deferred, 4 n/a; `bin/crops-score --record`):
+Haskell's completeness 0.98758 -> **0.98811** (exact 0.988108: eval 901/946; floor 98), without by design 0.99045 -> 0.99091,
+independence 1.0000 as recorded (exact 0.99997). `bin/crops-score --judge --strict` 0 problems, `bin/records-check` 0 problems,
+`bin/hsi golden --oracle --control` and `own-verdicts --check` pass.
+
+Left as round 1 says: the DECISIONs hs-pkgs-1 (the six GHC-rejected sources) and hs-pkgs-2 (eff, hartel); primitive and unboxed-ref
+(smallpt, ben-raytrace, both beyond GHC's own 10 s in the reference); splitmix's C (minimax); the 12 at the CPU limit (hsi's speed).
+
+## 2026-11-22: hs-pkgs-1122, round 3: next's hs-speed round merged; caps for the Hackage programs; the user's third decisions applied
+
+The coordinator's messages: merge next (hs-speed's round 2, b92d49e41: HES97 (a)'s per-program CPU caps, k-nucleotide's stdin, bspt,
+fulsom and pic passing, T13825-unit and tcrun022 n/a), rerun the judges and the records, measure the 12 `:own-speed-no-pack` programs
+as hs-speed measured its rows; then the user's decisions (ead97197e): hs-pkgs-1 and HES101, HES96 n/a, hs-pkgs-2 the 22 sub-programs.
+
+**The merge.** check-hsi-own.edn row by row (the 28 Hackage programs' rows this branch's, every other row next's: disjoint programs),
+divergences-own.edn's :no-reference-own (both sides' notes), golden/na.tsv (secretary and k-nucleotide both gone), independence.edn's
+Haskell judge fact (both sides' programs judged: 897 of 899, self 7777, recorded 2). Then next again (ead97197e), the journal alone.
+next's OCaml merge (ed1ea8b72) leaves bin/reap 3 OCaml rows in no class and its two cells unequal to the record (not this branch's):
+reap --record refuses to write, so Haskell's eval cell is set in test/reap/matrix.edn from reap's own judgment of it (948 / 0 / 9, its
+classes as reap counts them), the other cells next's; bin/reap's and crops-score --judge's problems are those OCaml rows alone.
+
+**The caps (HES97 (a)) for the Hackage programs.** The 12 measured at a 600 s limit through a timing wrapper (HSI_EXE: busybox time's
+user + system seconds of each hsi run, 3 jobs): blackscholes 522.6 s of CPU, coins 98.7, gray 157.7, nbody 359.1, prsa 101.5, queens
+563.3, ray 214.2, sumeuler 269.8, transclos 64.7 finished; mandel, parfib and secretary met the 600 s. Caps 1.5 times the CPU, rounded
+up to 10 s (their earlier runs were killed at 60 s, so no loaded wall seconds to compare), in test/haskell/cpu-caps.tsv: 790, 150,
+240, 540, 160, 850, 330, 410, 100. `--only --record` at the default limit, the caps applying: 9 of 9 pass (blackscholes 586 s and
+queens 590 s of wall at 3 jobs).
+
+**hs-pkgs-1, HES101, HES96: n/a** (the user, 2026-11-22; a row the record passes would stay a pass, none does): divergences.edn's
+:ghc-rejects (cfd, dcbm, linsolv, warshall, threads004, matmult), :ghc-no-finish (fannkuch-redux, spectral/minimax: GHC's own -O0 run
+does not finish within record-ref's 10 s), :undefined-behaviour (T21305), `:kind :na`, as counting2's; divergences-own.edn's
+:ghc-rejects-own (matmult's own run) and :ghc-no-finish-own (fannkuch-redux's own run, whose stdout differs from the pack's); out of
+:no-reference, :speed, :own-speed, :test-cmm and :no-reference-own. The six leave eval-out.edn (an n/a id no case, not counted twice).
+
+**hs-pkgs-2: eff and hartel as programs.** bin/lib/hsi/records.bash's nofib_programs: a nofib directory with no main file whose
+Makefile names SUBDIRS stands for them, each a program in the Makefile's order (real/eff's 7: CS S FS VS VSM CSD VSD; spectral/hartel's
+15: comp_lab_zift wave4main wang typecheck transform solid sched nucleic2 parstof listcopy listcompr ida genfft fft event; the
+decision said 21, hartel's Makefile names 15), planned so by record-ref, bin/hsi check and pins (eval-corpora.edn's :programs real 29
+-> 35, spectral 46 -> 60; `bin/hsi pins --check` OK). record-ref builds a sub-program inside its driver's directory, the driver's own
+files beside (hartel's programs `#include "../Fast2haskell.hs"`). GHC's runs recorded (oracle tier, by hand, `record-ref --only` the
+22): all 22 build and run (status 0), 21 their shipped expected output, nucleic2 printing nothing (its USE_GLASGOW_HACKS printf off).
+The parents' rows go from ref-ghc914.edn, check-hsi-own.edn, check-hsi.edn, golden/na.tsv, eval-out.edn and :no-reference.
+own-verdicts --record: the 21 by their shipped files, nucleic2 by a reviewed golden file (golden/nofib-silent.edn). hsi on the own
+libraries (`--only --record`): 18 pass; VS, VSD, VSM and solid met the 60 s; measured at 600 s: VSD 64.5 s of CPU, VSM 91.1, solid 92.3
+(caps 100, 140, 140; re-recorded: pass), VS ran out of the light runs' 8 GiB at 85 s (its cap waits for a run at the check's 16 GiB
+under the big-job lock, whose queue held eight builds: VS in :own-speed-no-pack meanwhile). 21 of 22 pass.
+
+**Checks.** The whole own record judged (0 unclassed), `bin/hsi own-verdicts --check` (919 of 929 by their own verdict) and `bin/hsi
+golden --oracle --control` pass; the 11 negative controls at the final state fail as they must; `bin/records-check` 0 problems.
+
+**Scores** (Haskell's eval cell as reap judges it: next's 913 / 28 / 5 (4 n/a) -> 948 / 0 / 9 (13 n/a); `bin/crops-score --record`):
+Haskell's completeness 0.991279 -> **0.997649** (exact: eval 948/957, read, AOT and print 1; floor 99), without by design 0.997649
+(no by design left), independence 1.0000 (the eval stage's 948 cases all own).
+
+Left (deferred, 9): mandel, parfib, secretary and eff/VS beyond the caps or the light memory (hsi's speed and memory); minimax's
+splitmix_init on hsi; smallpt and ben-raytrace (primitive's front-end gaps); unpack_sums_6 (:own-speed) and T23071 (:speed), hs-speed's.
+
+## 2026-11-22: hs-pkgs-1122 round 4: :ghc-no-finish keyed on GHC's verdict; eff/VS queued at 16 GiB
+
+**:ghc-no-finish on the verdict, not a list** (the main session, applying the user's HES101 rule, 2026-11-22). The class now keys on
+GHC's recorded status in test/haskell/ref-ghc914.edn: `:ref-statuses [137 152 :timeout]`, record-ref's kill at its 10 s of CPU
+(SIGKILL after SIGXCPU; 152 SIGXCPU alone; :timeout at three times it in wall seconds), and it takes every non-pass that no class
+names by id and whose reference is such a kill. Three judges read it: bin/reap (read-source :hsi-check's `:ref-status` from the
+source's new `:hsi-ref`, test/reap/cells.edn's Haskell eval source; classify takes a class's `:ref-statuses`, as Python's
+`:ref-outcomes` keys on CPython's record), bin/lib/hsi/check's judge (`ref_status`, `verdict_class`, for the pack's classes and the
+own ones, divergences-own.edn's :ghc-no-finish-own with its outcomes) and bin/hsi divergences (test/haskell/eval/divergences.ae, the
+reference beside the classes file). A row the record passes stays a pass: of the ten programs whose GHC run was killed, blackscholes,
+nbody and queens pass on hsi (their own verdicts, HES97 (a)'s caps) and stay passes; the seven others are n/a: fannkuch-redux and
+spectral/minimax (HES101's two) and parallel/minimax, parallel/mandel, parallel/parfib, real/smallpt and real/ben-raytrace. They leave
+:hackage-pending (smallpt, ben-raytrace: the class is empty), :hackage-c (parallel/minimax: empty), :own-speed-no-pack (mandel,
+parfib) and test/haskell/eval-out.edn (10 -> 5 cases; independence.edn's :out-of-cases 5). Controls: a killed reference's lookup
+gives the class (smallpt, nbody), a completed one's none (partree, status 0, stays :own-speed-no-pack).
+Alternative not taken: listing the seven ids, which the next record-ref run would leave stale.
+
+**eff/VS at 16 GiB.** Queued through the big-job lock (`bin/heavy-lock`, 12 tickets ahead at the queueing): the 600 s run at the
+check's 16 GiB through the timing wrapper, then, if it passes, its cap (1.5 x its CPU, rounded up to 10 s) and the `--only --record`
+run, under one hold. Not run within the round: VS stays in :own-speed-no-pack (deferred).
+
+**Checks.** The whole own record judged (0 unclassed), `bin/hsi own-verdicts --check` (919 of 929 by their own verdict), `bin/hsi
+golden --oracle --control` pass; `bin/reap --record` 0 problems, `bin/crops-score --record`, `--judge --strict` 0 problems,
+`bin/records-check` 0 problems.
+
+**Scores.** Haskell's eval cell 948 / 0 / 9 (13 n/a) -> **948 / 0 / 4 (18 n/a)**; completeness 0.997649 -> **0.998949** (the mean of
+the cells: eval 948/952, read, AOT and print 1; floor 99), independence 1.0000. Left (deferred, 4): secretary and eff/VS
+(:own-speed-no-pack), unpack_sums_6 (:own-speed) and T23071 (:speed), hs-speed's.
+
+## 2026-11-22: c-tails round 1: C's read rows by the dg check, the print's assembler units (branch `c-tails-1122`, from mac/next `c7a8439ad`)
+
+The burst's C stream (doc/C23-SURVEY.md, "As built: c-tails"): the read cell's 5 by design and 10 deferred, the print cell's 2 and
+12, in repr/c and the dg check (queue 522 owns ci's back end, crt and cf2g). Built, each by gcc 15.2's own code read from its tarball
+(`gcc-15.2.0/gcc/c/c-parser.cc`, `c-decl.cc`, `c-typeck.cc`, `gcc/c-family/c-opts.cc`, the pinned `.tmp/repr-c/gcc-15.2.0.tar.xz`):
+- the dg read's recoveries (arbace/repr/c/parse.ae under *recover*, arbace/repr/c/convert.ae's `*soft-errors*`, bound by the dg read
+  alone): after an initializer a comma that begins no declarator, a parenthesized type name with storage classes and no `{` (cast,
+  sizeof, alignof), a compound literal's storage class C23 does not allow, a function definition whose declarator is no function's,
+  C23 auto's and constexpr's underspecified declarations (c_parser_declaration_or_fndef), and declspecs_add_scspec over every
+  declaration's and compound literal's storage classes;
+- the checker (arbace/c/check.ae): -Wint-conversion as gcc's permerror (C99 and later or -pedantic-errors, not -fpermissive; a
+  builtin the checker types as int left out), compound literals' storage classes (build_compound_literal), C23 auto's rules,
+  constexpr's (grokdeclarator's qualifiers and variably modified types, check_constexpr_init on each scalar element of an
+  initializer, the union's initialized member, tags in the specifiers or a compound literal's type name), a parameter's storage
+  class, no cap at 100 errors (gcc has none);
+- a gnu:: attribute's `(*)` read as an abstract declarator (c23-attr-syntax-6), assembler sources preprocessed as libcpp's CLK_ASM
+  (13.S's stream now the own reference's), and the round trip's assembler units (SPEC §9.6: the directives as forms, the text as
+  `c/asm-text`; 12.S and 13.S pass levels 1 and 2, and gcc's level 3 by hand under ARBACE_C_JUDGE=gcc: the objects equal).
+Proofs: `bin/ci dg` whole, 619 of 619 supported (614 before; c23-auto-3, c23-complit-5, c23-constexpr-3, embed-10,
+c23-attr-syntax-6 pass; the control holds), recorded (`--record`, rerun at the record's commit in a clean worktree: the same
+record); `bin/ci annotations` whole: its 14 false errors of the first version (gnu89's free conversions, a GNU global register
+variable, unknown builtins' int results) fixed and the 14 files rerun with the control, then recorded whole (`--record`, passing, at
+the record's commit in a clean worktree: the rows the checker's later changes on next had left stale refreshed, pr33855.c's accepted
+problem drained from test/records/accepted.edn); `bin/ci check --only` over the 13 run
+programs that use auto, constexpr or storage-class compound literals (all pass, controls hold); `bin/repr-c check --tokens`,
+`parse-check` and `roundtrip --only` over the files touched, with their controls (REPR_C_PP_JUDGE=own: 13.S "ref", sqlite3.c
+"ref"); `roundtrip --corpus tcc-pp --record`. Read 5,460 / 5 / 10 to 5,468 / 2 / 5 (the dg rows and, by CR1 (a), the token and
+tree rows of c23-attr-syntax-6, c23-complit-5 and embed-10), print 4,842 / 2 / 12 to 4,844 / 0 / 12. Left: eval-depth 5 and
+eval-limits 10 (a compiled host, round 2), sqlite3.c and 13.S at the read level (CT1, the user's), shell.c and unicode_gen.c.

@@ -116,13 +116,43 @@
       (doseq [n (keys us)] (visit n)))
     (vec seen)))
 
+(defn hackage-packages
+  "hs-pkgs-1122: test/haskell/hackage.edn's packages, in dependency order: [{:name :version :id :deps}] (the unit id NAME-VERSION,
+  as the GHC side's Setup registers it, --ipid)"
+  [^String repo]
+  (vec (for [p (:packages (rd (str repo "/test/haskell/hackage.edn")))]
+         (assoc (select-keys p [:name :version :deps]) :id (str (:name p) "-" (:version p))))))
+
+(defn- with-hackage
+  "The installation's facts with the Hackage packages as units of their own database, each .cabal file in the tree's hackage/
+  (bin/hsi hackage fetch's sources, linked there by bin/repr-haskell)"
+  [facts ^String repo]
+  (reduce (fn [f {:keys [name version id]}]
+            (-> f (assoc-in [:units name] {:id id})
+                (assoc-in [:cabal name :file] (str "hackage/" name "-" version "/" name ".cabal"))))
+          facts (hackage-packages repo)))
+
+(defn hackage-confs
+  "The Hackage packages' database (hs-pkgs-1122), as GHC's records name what the driver reads of them: {file text}, each
+  NAME-VERSION.conf with its name, version, id, key, exposed and depends (the boot units' ids the installation's, the Hackage
+  packages' NAME-VERSION)"
+  [^String repo]
+  (let [facts (rd (str repo "/test/haskell/target/installation.edn"))
+        hs (hackage-packages repo)
+        ids (merge (into {} (for [[n u] (:units facts)] [n (:id u)])) (into {} (map (juxt :name :id) hs)))]
+    (into (sorted-map)
+          (for [{:keys [name version id deps]} hs]
+            [(str id ".conf")
+             (str "name: " name "\nversion: " version "\nid: " id "\nkey: " id "\nexposed: True\n"
+                  "depends:" (apply str (map #(str " " (or (get ids %) (throw (ex-info (str name ": no unit " %) {})))) (sort deps))) "\n")]))))
+
 (defn package-deps
   "HF10-P30 (a), P17 (doc/haskell/FRONTEND-SURVEY.md, \"As built: P17 (first slice)\"): PKG's library dependencies, transitively
   (each visited unit's .cabal finalized for the installation as units does, its build-depends the records' depends), each
   after its own, PKG left out: [{:name :cabal :modules N}] (N its library's exposed modules, the ones an importer names: 0
   for a unit of reexports alone, ghc-prim's (its Dummy hidden), ghc-bignum's). rts, whose .cabal the corpus's tree lacks, has no Haskell modules: :cabal nil"
   [^String src ^String repo ^String pkg]
-  (let [facts (rd (str repo "/test/haskell/target/installation.edn"))
+  (let [facts (with-hackage (rd (str repo "/test/haskell/target/installation.edn")) repo)
         corpus (corpus-packages repo)
         vars (merge (project-vars (:ghc facts)) {"Suffix" "" "SourceRoot" "."})
         load (memoize (fn [name]
@@ -425,8 +455,13 @@
     (case verb
       "derive" (do (derive-tree (first pos) (get opts "--src") (get opts "--musl") repo (get opts "--libffi")) (System/exit 0))
       "compare" (System/exit (if (compare-trees (first pos) (second pos)) 0 1))
+      ;; hackage-db OUT (hs-pkgs-1122): the Hackage packages' database, NAME-VERSION.conf each, into OUT
+      "hackage-db" (let [out (first pos)]
+                     (.mkdirs (File. ^String out))
+                     (doseq [[f t] (hackage-confs repo)] (spit (str out "/" f) t))
+                     (System/exit 0))
       ;; deps PKG --src TREE: PKG's dependencies in dependency order, NAME TAB CABAL TAB MODULES a line (P17)
       "deps" (do (doseq [{:keys [name cabal modules]} (package-deps (get opts "--src") repo (first pos))]
                    (println (str name "\t" (or cabal "-") "\t" modules)))
                  (System/exit 0))
-      (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK | deps PKG --src TREE") (System/exit 2)))))
+      (do (println "usage: -m arbace.repr.haskell.target derive OUT --src TREE --musl MUSL | compare OUT PACK | deps PKG --src TREE | hackage-db OUT") (System/exit 2)))))

@@ -60,23 +60,46 @@
 
 (defn- version-key [^String v] (mapv #(Long/parseLong %) (re-seq #"\d+" v)))
 
+(defn- db-units
+  "A package database's units (its .conf files sorted), ${pkgroot} the directory above it"
+  [^java.io.File db ^String pkgroot]
+  (let [files (sort (filter #(str/ends-with? % ".conf") (.list db)))]
+    (vec (for [f files]
+           (let [fs (conf-fields (slurp (str db "/" f)))
+                 expand #(str/replace % "${pkgroot}" pkgroot)]
+             {:id (get fs "id") :name (get fs "name") :version (get fs "version")
+              :exposed (= "True" (get fs "exposed"))
+              :include-dirs (mapv expand (words (get fs "include-dirs")))
+              :depends (vec (words (get fs "depends")))})))))
+
 (defn installation
   "The GHC installation under libdir: {:libdir :settings :units [unit...] :by-id {id unit}}, a unit
   {:id :name :version :exposed :include-dirs :depends}, in the database's order (its files sorted)"
   [^String libdir]
-  (let [db (cpp/file-at (str libdir "/package.conf.d"))
-        files (sort (filter #(str/ends-with? % ".conf") (.list db)))
-        units (vec (for [f files]
-                     (let [fs (conf-fields (slurp (str db "/" f)))
-                           expand #(str/replace % "${pkgroot}" libdir)]
-                       {:id (get fs "id") :name (get fs "name") :version (get fs "version")
-                        :exposed (= "True" (get fs "exposed"))
-                        :include-dirs (mapv expand (words (get fs "include-dirs")))
-                        :depends (vec (words (get fs "depends")))})))]
+  (let [units (db-units (cpp/file-at (str libdir "/package.conf.d")) libdir)]
     {:libdir libdir
      :settings (read-settings libdir)
      :units units
      :by-id (into {} (map (juxt :id identity) units))}))
+
+(defn stack-package-dbs
+  "GHC's package database stack (GHC.Unit.State's readUnitDatabases): the global database (the installation's) and then each
+  -package-db DIR of the flags in their order, a later database's unit replacing an earlier one of the same id (hs-pkgs-1122:
+  the Hackage packages' database, test/haskell/hackage.edn)"
+  [inst flags]
+  (let [dirs (keep (fn [[f a]] (when (= f "-package-db") a)) (partition 2 1 flags))]
+    (if (empty? dirs)
+      inst
+      (let [extra (mapcat (fn [^String d]
+                            ;; (under the sysroot when it holds it, else the checkout's: the Hackage database is Arbace's records,
+                            ;; .tmp/hsi/hackage/db, no part of the installation)
+                            (let [f (let [g (cpp/file-at d)] (if (.isDirectory g) g (File. d)))]
+                              (when-not (.isDirectory f) (throw (ex-info (str "no package database " d) {})))
+                              (db-units f (or (.getParent (File. d)) d))))
+                          dirs)
+            ids (set (map :id extra))
+            units (vec (concat (remove #(contains? ids (:id %)) (:units inst)) extra))]
+        (assoc inst :units units :by-id (into {} (map (juxt :id identity) units)))))))
 
 (defn ghc-unit
   "The unit id of the ghc library in the database (the helper's :ghc-unit): ghc-VERSION-HASH"
@@ -125,6 +148,7 @@
           (recur (nnext fs) (update acc :packages conj (or (unit-named inst a) (throw (ex-info (str "cannot satisfy -package " a) {})))))
           "-hide-package" (recur (nnext fs) (update acc :hidden conj a))
           "-this-unit-id" (recur (nnext fs) (assoc acc :home a))
+          "-package-db" (recur (nnext fs) acc)
           (recur (next fs) acc))))))
 
 (defn- wired-id
@@ -194,6 +218,7 @@
   :macros (the header's text or nil) :defines :include-dirs (the command line's)}"
   [inst cmdline ^String file & [extra]]
   (let [flags (vec (concat cmdline extra))
+        inst (stack-package-dbs inst flags)
         libdir (:libdir inst)
         s (:settings inst)
         {:keys [os arch]} (platform inst)
