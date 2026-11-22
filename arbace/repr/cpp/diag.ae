@@ -2558,7 +2558,219 @@
                   (:nodes u) nil))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays]))
+;; GNU's unavailable attribute (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Common Function Attributes", "Common Variable Attributes"
+;; and "Common Type Attributes": unavailable "results in an error if the function [variable, type] is used anywhere in the source
+;; file", as deprecated's warning; a use within a declaration itself marked unavailable is none): the uses of a type (a declaration's
+;; written type, a function's return type, a typedef's, a cast's or functional notation's, a template argument), of a variable, a
+;; function or an enumerator (an id-expression naming it, a call, a conversion to a pointer), of a member (a member access through
+;; it), and the calls of a lambda whose attributes name it ([expr.prim.lambda.general]/1), each at the use. A name is judged when
+;; every declaration of it the unit holds (a member: in classes) is unavailable; a type's name is not judged inside a template that
+;; declares a parameter of that name (ext/attr-unavailable-1.C, -6.C, -8.C, -9.C, cpp23/lambda-attr2.C).
+
+(defn unavailable
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        unav? (fn [n] (some #(= "unavailable" (gnu-attr-name %)) (gnu-attrs-of n)))
+        types (java.util.HashSet.) values (java.util.HashMap.) members (java.util.HashMap.) lams (java.util.HashSet.)
+        note! (fn [^java.util.HashMap m nm u?] (let [[a b] (or (.get m nm) [0 0])] (.put m nm [(inc (long a)) (+ (long b) (if u? 1 0))])))
+        _ (walk-nodes (fn [n parent]
+                        (let [k (:kind n) nm (:name n)]
+                          (when (string? nm)
+                            (case k
+                              ("TypedefDecl" "TypeAliasDecl" "EnumDecl") (when (unav? n) (.add types nm))
+                              "CXXRecordDecl" (when (unav? n) (.add types nm))
+                              "ClassTemplateDecl" (when (some #(and (= "CXXRecordDecl" (:kind %)) (unav? %)) (:inner n)) (.add types nm))
+                              "FunctionTemplateDecl" (note! values nm (some #(and (= "FunctionDecl" (:kind %)) (unav? %)) (:inner n)))
+                              ("VarDecl" "ParmVarDecl" "FunctionDecl" "EnumConstantDecl") (when-not (= "FunctionTemplateDecl" (:kind parent)) (note! values nm (unav? n)))
+                              ("FieldDecl" "CXXMethodDecl") (when (= "CXXRecordDecl" (:kind parent)) (note! members nm (unav? n)))
+                              nil))
+                          (when (and (= "VarDecl" k) (some #(and (= "LambdaExpr" (:kind %)) (:_unavailable %)) (:inner n)))
+                            (.add lams nm))))
+                      (:nodes u) nil)
+        all-unav (fn [^java.util.HashMap m nm] (when-let [[a b] (.get m nm)] (and (pos? (long a)) (= a b))))
+        report! (fn [n msg] (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                              (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))]
+                                  (.add out {:line l :col c :kind :error :rule :unavailable :msg msg})))))
+        type-hit (fn [^String qt hidden] (first (filter #(and (not (contains? hidden %)) (re-find (re-pattern (str "(?<![\\w:])" (java.util.regex.Pattern/quote %) "\\b")) qt)) types)))]
+    (when (or (seq types) (seq values) (seq members) (seq lams))
+      (letfn [(w [x parent hidden in-unav]
+                (cond
+                  (map? x)
+                  (let [k (:kind x)
+                        hidden (if (#{"ClassTemplateDecl" "FunctionTemplateDecl" "TypeAliasTemplateDecl" "VarTemplateDecl" "ClassTemplatePartialSpecializationDecl"} k)
+                                 (into hidden (keep #(when (#{"TemplateTypeParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner x)))
+                                 hidden)
+                        ;; (a class's own name inside its definition: its injected-class-name, no use, line 95's `int member3(T *);`)
+                        hidden (if (and (= "CXXRecordDecl" k) (string? (:name x))) (conj hidden (:name x)) hidden)
+                        self-unav (unav? x)
+                        in-unav (or in-unav (and self-unav (#{"FunctionDecl" "CXXMethodDecl" "TypedefDecl" "TypeAliasDecl" "VarDecl" "FieldDecl"} k)))]
+                    (when (and k (not self-unav) (not in-unav) (seq types))
+                      (let [qt (case k
+                                 ("VarDecl" "FieldDecl" "ParmVarDecl" "TypedefDecl" "TypeAliasDecl") (str (get-in x [:type :qualType]))
+                                 ("FunctionDecl" "CXXMethodDecl") (fn-ret-type (str (get-in x [:type :qualType])))
+                                 ("CXXTemporaryObjectExpr" "CXXFunctionalCastExpr" "CXXUnresolvedConstructExpr" "CXXScalarValueInitExpr" "CStyleCastExpr"
+                                  "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXNewExpr") (str (get-in x [:type :qualType]))
+                                 nil)]
+                        (when-let [t (and qt (type-hit qt hidden))]
+                          (report! x (str "'" t "' is unavailable")))))
+                    (when (and k (not in-unav))
+                      (case k
+                        "DeclRefExpr" (let [nm (get-in x [:referencedDecl :name])]
+                                        (cond (and (string? nm) (all-unav values nm)) (report! x (str "'" nm "' is unavailable"))
+                                              (and (string? nm) (.contains lams nm) parent (= "CallExpr" (:kind parent)) (identical? x (first (:inner parent))))
+                                              (report! x (str "'" nm "' is unavailable"))
+                                              :else nil))
+                        "MemberExpr" (let [nm (:name x)] (when (and (string? nm) (all-unav members nm)) (report! x (str "'" nm "' is unavailable"))))
+                        nil))
+                    (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))]
+                      (w v (if k x parent) hidden in-unav)))
+                  (vector? x) (doseq [y x] (w y parent hidden in-unav))
+                  :else nil))]
+        (w (:nodes u) nil #{} false)))
+    (vec out)))
+
+;; GCC's built-in traits in a function template's signature (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Type Traits": the __is_*,
+;; __has_*, __underlying_type, __decay, __remove_*, __add_* ... built-ins, for which the Itanium ABI has no mangling): a function
+;; template whose type names one with a dependent operand (written, or through an alias template whose type is one) cannot be
+;; mangled, an error once a specialization is used -- the unit names the template outside its own definition: "use of built-in
+;; trait '...' in function signature; use library traits instead", at the template (ext/decay1.C, is_empty2.C, underlying_type7.C).
+
+(def ^:private builtin-trait-re
+  #"\b__(?:is_[a-z_]+|has_[a-z_]+|underlying_type|decay|remove_[a-z_]+|add_[a-z_]+|make_signed|make_unsigned|reference_(?:binds|constructs|converts)_[a-z_]+|builtin_is_[a-z_]+|type_pack_element)\s*[(<]")
+
+(defn trait-signatures
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        aliases (set (for [n (:nodes u) :when (= "TypeAliasTemplateDecl" (:kind n))
+                           :let [a (first (filter #(= "TypeAliasDecl" (:kind %)) (:inner n)))]
+                           :when (re-find builtin-trait-re (str (get-in a [:type :qualType])))]
+                       (:name n)))
+        named (java.util.HashMap.)]
+    (walk-nodes (fn [n _] (when (= "DeclRefExpr" (:kind n))
+                            (when-let [o (get-in n [:range :begin :offset])]
+                              (let [nm (get-in n [:referencedDecl :name])] (when (string? nm) (.put named nm (conj (or (.get named nm) []) (long o))))))))
+                (:nodes u) nil)
+    (doseq [t (:nodes u) :when (= "FunctionTemplateDecl" (:kind t))
+            :let [f (first (filter #(= "FunctionDecl" (:kind %)) (:inner t)))
+                  qt (str (get-in f [:type :qualType]))
+                  tps (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:name %)) (:inner t)))
+                  m (re-matcher builtin-trait-re qt)
+                  hit (or (loop [] (when (.find m)
+                                     ;; (a dependent operand: a template parameter named in what follows the trait's name)
+                                     (if (some #(re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote %) "\\b")) (subs qt (.end m))) tps) true (recur))))
+                          (some #(re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote %) "\\s*<")) qt) aliases))
+                  b (long (or (get-in t [:range :begin :offset]) -1)) e (long (or (get-in t [:range :end :offset]) -1))]
+            :when (and hit (string? (:name t)) (some #(or (< (long %) b) (> (long %) e)) (.get named (:name t))))
+            :let [o (or (get-in f [:loc :offset]) (get-in t [:range :begin :offset]))]
+            :when (and o (= main (or (get-in f [:loc :file]) main)))]
+      (let [[l c] (line-col starts (long o))]
+        (.add out {:line l :col c :kind :error :rule :builtin-trait :msg "use of built-in trait in function signature; use library traits instead"})))
+    (vec out)))
+
+;; GCC's front end's pragmas (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Pragmas Accepted by GCC": the loop pragmas `#pragma GCC ivdep`,
+;; `#pragma GCC unroll n`, `#pragma GCC novector` before a for, while or do statement of a function, n "an integer constant expression"
+;; whose values 0 and 1 block unrolling, GCC's limit 65534; `#pragma interface`, `implementation`, `pack`, `weak`, which the front end
+;; reads between declarations or statements): a loop pragma outside any function's body, "'#pragma GCC ivdep' must be inside a
+;; function"; an unroll factor that is not a non-negative integral constant less than 65535 (a floating type, a value out of range;
+;; in a template a type-dependent factor at each specialization the unit names by explicit template arguments, a value-dependent
+;; one of floating type at once), "'#pragma GCC unroll' requires an assignment-expression that evaluates to a non-negative integral
+;; constant less than 65535"; such a pragma inside a declaration or an expression, "'#pragma' is not allowed here" (parse/ivdep-2.C,
+;; ivdep-3.C, pragma2.C, ext/unroll-6.C, unroll-8.C). The preprocessor's records of the main file's pragmas (:pragmas).
+
+(defn- unroll-value
+  "The unroll factor's text evaluated: {:t :int|:float|:dep|nil :v BigInteger}, `env` a template parameter's name to its argument
+  (a type's name, or an integer), `tps` the template parameters' names to :type or :value; nil :t when it is no expression read here."
+  [^String text env tps]
+  (let [toks (vec (re-seq #"0[xX][0-9a-fA-F]+[uUlL]*|\d+\.\d*(?:[eE][-+]?\d+)?[fFlL]?|\d+[eE][-+]?\d+[fFlL]?|\d+[uUlL]*|[A-Za-z_]\w*|[-+()*/]" text))
+        pos (atom 0)
+        peek* (fn [] (get toks @pos))
+        next* (fn [] (let [t (get toks @pos)] (swap! pos inc) t))
+        num (fn [^String t]
+              (cond (re-find #"[.eE]" (if (re-find #"^0[xX]" t) "" t)) {:t :float}
+                    (re-find #"^0[xX]" t) {:t :int :v (java.math.BigInteger. (str/replace (subs t 2) #"[uUlL]+$" "") 16)}
+                    :else {:t :int :v (java.math.BigInteger. (str/replace t #"[uUlL]+$" ""))}))
+        type-of (fn [nm] (let [a (get env nm)] (cond (nil? a) :dep (re-find #"\b(?:float|double)\b" (str a)) :float :else :int)))
+        comb (fn [a b op]
+               (cond (or (nil? (:t a)) (nil? (:t b))) {:t nil}
+                     (or (= :float (:t a)) (= :float (:t b))) {:t :float}
+                     (or (= :dep (:t a)) (= :dep (:t b))) {:t :dep}
+                     (or (nil? (:v a)) (nil? (:v b))) {:t :int-dep}
+                     :else {:t :int :v (if (= op "+") (.add ^java.math.BigInteger (:v a) (:v b)) (.subtract ^java.math.BigInteger (:v a) (:v b)))}))]
+    (letfn [(primary []
+              (let [t (next*)]
+                (cond
+                  (nil? t) {:t nil}
+                  (= t "-") (let [x (primary)] (if (and (= :int (:t x)) (:v x)) {:t :int :v (.negate ^java.math.BigInteger (:v x))} x))
+                  (= t "(") (if (and (= :type (get tps (peek*))) (= ")" (get toks (inc @pos))))
+                              (let [nm (next*)] (next*) (let [x (primary) ty (type-of nm)]
+                                                          (case ty :float {:t :float} :dep {:t :dep} (if (= :int (:t x)) x {:t :int-dep}))))
+                              (let [x (expr)] (next*) x))
+                  (re-find #"^\d" t) (num t)
+                  (= :value (get tps t)) (if-let [a (get env t)] {:t :int :v (java.math.BigInteger. (str a))} {:t :int-dep})
+                  :else {:t nil})))
+            (expr []
+              (loop [a (primary)]
+                (if (#{"+" "-"} (peek*))
+                  (let [op (next*) b (primary)] (recur (comb a b op)))
+                  a)))]
+      (let [r (expr)] (if (peek*) {:t nil} r)))))
+
+(defn pragmas
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        prs (:pragmas u)
+        report! (fn [o msg] (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :pragma :msg msg})))]
+    (when (seq prs)
+      (let [bodies (java.util.ArrayList.) ; [begin end tparams template-name]
+            spans (java.util.ArrayList.)  ; [begin end kind] of every node with a range in the main file
+            calls (java.util.HashMap.)]
+        (letfn [(w [x tmpl]
+                  (cond
+                    (map? x)
+                    (let [k (:kind x)
+                          tmpl (if (= "FunctionTemplateDecl" k)
+                                 {:name (:name x) :tps (into {} (keep #(case (:kind %) "TemplateTypeParmDecl" [(:name %) :type] "NonTypeTemplateParmDecl" [(:name %) :value] nil) (:inner x)))
+                                  :order (vec (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner x)))}
+                                 tmpl)
+                          b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset])
+                          f (or (get-in x [:range :begin :file]) main)]
+                      (when (and k b e (= f main)) (.add spans [(long b) (long e) k]))
+                      (when (and (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl"} k))
+                        (when-let [body (first (filter #(= "CompoundStmt" (:kind %)) (:inner x)))]
+                          (let [bb (get-in body [:range :begin :offset]) be (get-in body [:range :end :offset])]
+                            (when (and bb be) (.add bodies [(long bb) (long be) tmpl])))))
+                      (when (and (= "DeclRefExpr" k) (:explicitTemplateArgs x))
+                        (let [nm (get-in x [:referencedDecl :name])] (.put calls nm (conj (or (.get calls nm) #{}) (vec (:explicitTemplateArgs x))))))
+                      (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tmpl)))
+                    (vector? x) (doseq [y x] (w y tmpl))
+                    :else nil))]
+          (w (:nodes u) nil))
+        (doseq [{:keys [off text]} prs
+                :let [o (long off)
+                      [_ ns verb arg] (re-matches #"#\s*pragma\s+(?:(GCC)\s+)?(\w+)\s*(.*?)\s*" (str text))
+                      loop? (and (= ns "GCC") (#{"ivdep" "unroll" "novector"} verb))
+                      deferred? (or loop? (and (nil? ns) (#{"interface" "implementation" "pack" "weak"} verb)))
+                      body (reduce (fn [best [b e :as bd]] (if (and (< (long b) o (long e)) (or (nil? best) (> (long b) (long (first best))))) bd best)) nil bodies)
+                      inner (reduce (fn [best [b e :as sp]] (if (and (< (long b) o (long e)) (or (nil? best) (> (long b) (long (first best))))) sp best)) nil spans)]
+                :when deferred?]
+          (cond
+            (and inner (not (#{"CompoundStmt" "CXXRecordDecl" "NamespaceDecl" "LinkageSpecDecl" "ClassTemplateDecl"} (nth inner 2)))
+                 (not (and loop? (#{"ForStmt" "WhileStmt" "DoStmt" "CXXForRangeStmt"} (nth inner 2)))))
+            (report! o "'#pragma' is not allowed here")
+            (and loop? (nil? body)) (report! o (str "'#pragma GCC " verb "' must be inside a function"))
+            (and (= verb "unroll") body)
+            (let [tmpl (nth body 2)
+                  bad? (fn [r] (or (= :float (:t r)) (and (= :int (:t r)) (:v r) (or (neg? (.signum ^java.math.BigInteger (:v r))) (>= (.compareTo ^java.math.BigInteger (:v r) (java.math.BigInteger/valueOf 65535)) 0)))))
+                  r (unroll-value arg {} (:tps tmpl))]
+              (when (or (bad? r)
+                        (and (#{:dep :int-dep} (:t r)) tmpl
+                             (some (fn [as] (bad? (unroll-value arg (zipmap (:order tmpl) as) (:tps tmpl)))) (.get calls (:name tmpl)))))
+                (report! o "'#pragma GCC unroll' requires an assignment-expression that evaluates to a non-negative integral constant less than 65535")))
+            :else nil))))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
