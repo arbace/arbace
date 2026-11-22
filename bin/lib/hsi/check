@@ -309,8 +309,9 @@ front_eligible() { # SRC MAIN FLAGS KIND IFACES: the main module and its own mod
   if [ "$flags" != - ]; then for f in $flags; do case $f in
     *.o) [ -f "$src/${f%.o}.c" ] || { front_why="c $f"; return 1; } ;;
     # (queue 422, after 332's merge: a test's own .cmm read by arbace.repr.haskell.cmm and loaded by hsi run --cmm beside the
-    # native STG, as beside GHC's; a Cmm main stays refused above; assembly refused)
-    *.s|*.S) front_why="c $f"; return 1 ;;
+    # native STG, as beside GHC's; a Cmm main stays refused above; hs-speed: a .s, the test's x86-64 assembly, assembled by
+    # bin/repr-asm object and loaded by hsi run --asm beside the native STG; a .S, which needs the C preprocessor, refused)
+    *.S) front_why="c $f"; return 1 ;;
     # (HF10-P59 (a): GHC's -main-is FN names Main's entry, an unqualified FN resolved in Main's scope by the front end:
     # T16453M6, T19397M2-M4; a module's name, M or M.fn, another main module, is refused)
     -main-is) case $(echo "$flags" | sed 's/.*-main-is *//; s/ .*//') in [a-z_]*) ;;
@@ -390,6 +391,13 @@ if [ "$front" = native ]; then
   flibs=$libs
   # --libs own: the own interfaces and the own libraries' constructors; the fallback list's programs not tried (P23 (a))
   if [ "$libs_set" = own ]; then ifaces=$own_if; flibs=$own_libs; fi
+  # T13688 (hs-r7): a quasi-quote's splice run on hsi by the front end (arbace.repr.haskell.front's th-expand!), over the
+  # libraries the programs run on (the own set and its image under --libs own)
+  th_args=()
+  if [ -n "$hsi" ]; then
+    if [ "$libs_set" = own ]; then th_args=(--hsi "$hsi" --hsi-libs "$own_libs" --hsi-image "$own_images")
+    else th_args=(--hsi "$hsi" --hsi-libs "${libs//:/,}"); [ "$images" = none ] || th_args+=(--hsi-image "$images"); fi
+  fi
   fb=$own_fallback_list
   # front_gen ID SRC GEN MAIN (queue 422, report 346's item 8; HES92 (a)'s pre_cmd on the native path): the main all.T's pre_cmd
   # `{compiler} --run ./GEN.hs` writes (unboxedsums/ManyUbxSums), made by this compiler, not GHC's: GEN through the native front
@@ -401,7 +409,7 @@ if [ "$front" = native ]; then
     g=$fw/gen/$ob; rm -rf "$g"; mkdir -p "$g/src"; cp -r "$src"/. "$g/src"/
     printf '%s@%s\t\n' "$g/src/$gen" "${ob}_gen" > "$g/plan.tsv"
     (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
-       --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} -o "$g/out" --plan "$g/plan.tsv") > "$g/front.log" 2>&1 || true
+       --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} ${th_args[@]+"${th_args[@]}"} -o "$g/out" --plan "$g/plan.tsv") > "$g/front.log" 2>&1 || true
     gl=$(grep -E "^${ob}_gen (ok|read|rename|typecheck|typecheck-errors|stg|crash) " "$g/front.log" | head -1)
     case $gl in "${ob}_gen ok"*) ;; *) gl="$gl (not ok)" ;; esac
     [ "${gl% (not ok)}" = "$gl" ] && [ -d "$g/out/stg/${ob}_gen" ] || { echo "pre-gen $gen: the front end: ${gl:-no line}" | cut -c1-120; return 1; }
@@ -458,7 +466,7 @@ if [ "$front" = native ]; then
     : > "$log"
     while [ -s "$pl" ]; do
       (export GOMEMLIMIT=${HSI_FRONT_MEM:-1536MiB}; cd "$root" && exec env ARBACE_PATH=$root "$("$root/bin/hsi" exe)" -m arbace.repr.haskell.front build \
-         --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
+         --ifaces "$ifaces" --libs "${flibs//:/,}" ${front_inst[@]+"${front_inst[@]}"} ${th_args[@]+"${th_args[@]}"} -o "$fw/out" --plan "$pl") >> "$log" 2>&1 &
       pid=$!; last=$(date +%s); n0=$(grep -cE '^[^ ]+ (ok|read|rename|typecheck|typecheck-errors|stg|crash|timeout) ' "$log" || true)
       while kill -0 "$pid" 2>"$TMPDIR/hsi-front-kill.err"; do
         sleep 5; now=$(date +%s)
@@ -494,6 +502,10 @@ fi
 # file, its flags, and for a test of several modules its directory's sources, then the helper's identity
 prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell's alone)
   local src=$1 main=$2 flags=$3 kind=$4 gen=""
+  # (nor its own assembly, hs-speed: a .s of the flags left out, "-" for none left, the key the plan gave before it named the .s)
+  if [[ " $flags " == *".s "* ]]; then
+    local kf="" w; for w in $flags; do case $w in *.s) ;; *) kf="${kf:+$kf }$w" ;; esac; done; flags=${kf:--}
+  fi
   # HES92 (a): a main all.T's pre_cmd generates (hsi_pre_gen) is no source: its generator is keyed in its place
   [ -z "${5:-}" ] || gen=$(hsi_pre_gen "$5")
   { echo "$flags $kind${sfx:+ $opt}"; if [ -n "$gen" ]; then cat "$src/$gen"; else cat "$src/$main"; fi
@@ -593,7 +605,7 @@ one() {
   # the dump's flags: all.T's, less a test's own C, Cmm, assembly and objects (the helper compiles Haskell only); its
   # C files built by ci into a node program hsi loads (HES64 (a), bin/hsi cnodes), with the flags the C reads (-I, -D)
   # (an extra Haskell source of all.T's, multi_compile_and_run's ManyUbxSums_Addr.hs, given the helper as a file: HES92 (a))
-  local fl=() f cfiles=() cflags=() cmmfiles=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
+  local fl=() f cfiles=() cflags=() cmmfiles=() asmfiles=() optc="" hsf=(); if [ "$flags" != - ]; then for f in $flags; do
     # -optcX: X for the C compiler, a lone -D, -I or -U joined to the next one's (-optc-D -optcFOO is -DFOO)
     if [[ $f == -optc* ]]; then
       f=${f#-optc}
@@ -601,7 +613,7 @@ one() {
       case $f in -D|-I|-U) optc=$f ;; -D*|-I*|-U*) cflags+=("$f") ;; esac
       continue
     fi
-    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm) cmmfiles+=("$f") ;; *.s|*.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
+    case $f in *.c) cfiles+=("$f") ;; *.o) [ -f "$src/${f%.o}.c" ] && cfiles+=("${f%.o}.c") ;; *.cmm) cmmfiles+=("$f") ;; *.s) asmfiles+=("$f") ;; *.S|*.h|*.cpp|*.cc) ;; *.hs|*.lhs) hsf+=("$f") ;; -I*|-D*|-U*) fl+=("$f"); cflags+=("$f") ;; *) fl+=("$f") ;; esac; done; fi
   # the dump's key: the main file, the flags, the helper; a test of several modules: its directory's sources too
   local key prog stg="" srcs="" td=0
   if [ -n "$cmm_main" ]; then
@@ -735,6 +747,25 @@ one() {
     fi
     la+=(--cmm "$prog/cmm.ae")
     [ -z "$cmm_main" ] || la+=(--cmm-main)
+  fi
+  # the test's own x86-64 assembly (all.T's extra_hc_opts of a .s under arch('x86_64'): CallConv): each file assembled by
+  # Arbace's object assembler (bin/repr-asm object, AX4) into an ELF64 object, kept by the file's, repr/asm's and the
+  # assembler's digests, loaded by hsi run --asm, its procedures run on x86i (go/arbace/x86i) as the primcalls name them
+  if [ ${#asmfiles[@]} -gt 0 ]; then
+    local af ak an=0
+    for af in "${asmfiles[@]}"; do
+      an=$((an + 1))
+      ak=$( { (cd "$src" && sha256sum "$af"); find "$root/arbace/asm" "$root/arbace/repr/asm" "$root/arbace/repr/asm.ae" -name '*.ae' | LC_ALL=C sort | xargs sha256sum; } | sha256sum | cut -c1-64)
+      if [ ! -f "$prog/asm-$an.key" ] || [ "$(cat "$prog/asm-$an.key")" != "$ak" ]; then
+        rm -f "$prog/asm-$an.key"
+        if ! "$root/bin/repr-asm" object "$src/$af" "$prog/asm-$an.o" > "$prog/asm-$an.log" 2>&1; then
+          local e; e=$(grep -v '^==' "$prog/asm-$an.log" | tail -n 1 | cut -c1-160 | sed 's/\\/\\\\/g; s/"/\\"/g')
+          echo "{:id \"$id\" :result :hsi :status 3 :message \"hsi: repr-asm: $e\" :reason :asm-build :dump $td :run 0}" > "$res"; return 0
+        fi
+        echo "$ak" > "$prog/asm-$an.key"
+      fi
+      la+=(--asm "$prog/asm-$an.o")
+    done
   fi
   IFS=: read -r -a dirs <<< "$plibs"
   for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
