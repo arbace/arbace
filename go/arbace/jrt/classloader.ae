@@ -22,8 +22,9 @@
     (GetDefinedPackages__Package1 ^{:tag (* RefArray)} [])))
 
 (go/type ClassLoader
-  "ClassLoader is java.lang.ClassLoader (abstract): a parent and a name.\n"
-  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name))
+  "ClassLoader is java.lang.ClassLoader (abstract): a parent, a name and whether it is parallel capable (its class
+registered when it was made: jdk26u's parallelLockMap).\n"
+  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name ^bool parallel))
 
 (go/var ClassLoader_class
   (Define (addr (lit ClassInfo :Name "java.lang.ClassLoader" :Kind KindClass
@@ -32,10 +33,55 @@
 
 (go/method Ctor "Ctor is ClassLoader(): the system class loader as parent.\n"
   [^{:tag (* ClassLoader)} t ^ClassLoader_I this]
-  (set! (.-parent t) appLoader))
+  (set! (.-parent t) appLoader)
+  (set! (.-parallel t) (parallelRegistered (.GetClass__Class this))))
 (go/method Ctor_ClassLoader "Ctor_ClassLoader is ClassLoader(ClassLoader parent).\n"
   [^{:tag (* ClassLoader)} t ^ClassLoader_I this ^ClassLoader_I parent]
-  (set! (.-parent t) parent))
+  (set! (.-parent t) parent)
+  (set! (.-parallel t) (parallelRegistered (.GetClass__Class this))))
+
+;; parallel capable loaders (jdk26u's ClassLoader.ParallelLoaders, registerAsParallelCapable,
+;; isRegisteredAsParallelCapable; java-design-1122): the registered loader classes, ClassLoader itself and the built-in
+;; loaders' from the start; a class is registered when its superclass is
+
+(go/var
+  [^{:tag sync/Mutex} parallelMu]
+  [^{:tag (map (* Class) bool) :doc "parallelLoaders: the loader classes registered as parallel capable.\n"}
+   parallelLoaders (make (map (* Class) bool))])
+
+(go/func parallelRegistered ^bool [^{:tag (* Class)} c]
+  (.Lock parallelMu)
+  (defer (.Unlock parallelMu))
+  (aget parallelLoaders c))
+
+(go/func ClassLoader_RegisterAsParallelCapable__Z
+  "ClassLoader_RegisterAsParallelCapable__Z is ClassLoader.registerAsParallelCapable (protected static, caller
+sensitive): the caller's class (the first frame of the current thread's stack below ClassLoader's) registered when its
+superclass is (ParallelLoaders.register); whether it is registered.\n"
+  ^bool []
+  (let [^{:tag (* Class)} caller nil]
+    (range [_ f (stackFrames (rawFrames (callersAll 1)) (evalTrace) (goiTrace) (interpFrames (interpTrace)) true)]
+      (when (or (== (.-k f) nil) (strings/HasPrefix (.-cls f) "java.lang.ClassLoader"))
+        (continue))
+      (set! caller (.-k f))
+      (break))
+    (when (== caller nil)
+      (return false))
+    (.Lock parallelMu)
+    (defer (.Unlock parallelMu))
+    (when (aget parallelLoaders caller)
+      (return true))
+    (let [sup (.GetSuperclass__Class caller)]
+      (when (and (!= sup nil) (aget parallelLoaders sup))
+        (aset parallelLoaders caller true)
+        (return true)))
+    false))
+
+(go/method IsRegisteredAsParallelCapable__Z
+  "IsRegisteredAsParallelCapable__Z is ClassLoader.isRegisteredAsParallelCapable: whether its class was registered
+when the loader was made.\n"
+  ^bool [^{:tag (* ClassLoader)} t]
+  (.-parallel t))
 
 (go/method Self_ClassLoader ^{:tag (* ClassLoader)} [^{:tag (* ClassLoader)} t] t)
 (go/method GetParent__ClassLoader ^ClassLoader_I [^{:tag (* ClassLoader)} t] (.-parent t))
@@ -86,9 +132,9 @@ loader's class of that name, the registry's; ClassNotFoundException otherwise (C
 
 (go/var
   [^{:tag (* builtinLoader)} platformLoader
-   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :name (Intern "platform")) :cls platformLoader_class))]
+   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :name (Intern "platform") :parallel true) :cls platformLoader_class))]
   [^{:tag (* builtinLoader)} appLoader
-   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :parent platformLoader :name (Intern "app"))
+   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :parent platformLoader :name (Intern "app") :parallel true)
               :cls appLoader_class))])
 
 (go/func ClassLoader_GetSystemClassLoader__ClassLoader
@@ -428,7 +474,11 @@ specification when not empty.\n"
     v))
 
 (go/func init []
-  (set! (.-IsInstance (.Info Package_class)) Package_InstanceOf))
+  (set! (.-IsInstance (.Info Package_class)) Package_InstanceOf)
+  (aset parallelLoaders ClassLoader_class true)
+  (aset parallelLoaders builtinLoader_class true)
+  (aset parallelLoaders platformLoader_class true)
+  (aset parallelLoaders appLoader_class true))
 
 ;; ---------------------------------------------------------------------------------------
 ;; jdk.internal.foreign.Utils
