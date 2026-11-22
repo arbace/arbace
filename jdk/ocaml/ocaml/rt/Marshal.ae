@@ -7,7 +7,8 @@
 ;;
 ;; Divergence by design (as oi's): a boxed float, int32, int64 or nativeint has no identity, so two
 ;; fields holding "the same" boxed number are written twice (the object counter still counts each).
-;; Custom blocks: java.lang.Integer "_i", I64 "_j", NInt "_n"; the other Customs are abstract.
+;; Custom blocks: java.lang.Integer "_i", I64 "_j", NInt "_n", a bigarray, and (queue 527) a custom block a C stub allocated
+;; (CBlock), written and read by its operations' serialize and deserialize (CApi's server); the other Customs are abstract.
 ;; An object block (tag 248) read back gets a fresh oid (caml_fresh_oo_id's counter), unless it is a predefined
 ;; exception's (a negative one).
 
@@ -169,6 +170,25 @@
               (do (when (.shareLookup this v) (break :item))
                   (BaOps/serialize this (BigArray/of v))
                   (.record this v) (break :item))
+              ;; (queue 527) a C stub's custom block (extern_custom of a block without a fixed length): its identifier, the sizes its
+              ;; operations' serialize gave, its bytes (CApi/serialize); abstract when its operations have no serialize
+              (and (instance? Custom v) (instance? CBlock (.-v (cast Custom v))))
+              (do (when (.shareLookup this v) (break :item))
+                  (let [r (cast Object/1 (CApi/serialize (cast Custom v)))]
+                    (when (nil? r) (.invalid this "output_value: abstract value (Custom)"))
+                    (let [b (cast byte/1 (aget r 0))
+                          s32 (.longValue (cast Long (aget r 1)))
+                          s64 (.longValue (cast Long (aget r 2)))
+                          id (cast byte/1 (Rt/ofUtf8 (.-id (cast Custom v))))]
+                      (.b1 this 24)
+                      (.write out id 0 (alength id))
+                      (.b1 this 0)
+                      (.be32 this s32)
+                      (.be64 this s64)
+                      (.write out b 0 (alength b))
+                      (set! size32 (unchecked-add size32 (unchecked-add 2 (unsigned-bit-shift-right (unchecked-add s32 3) 2))))
+                      (set! size64 (unchecked-add size64 (unchecked-add 2 (unsigned-bit-shift-right (unchecked-add s64 7) 3))))
+                      (.record this v) (break :item))))
               (instance? Custom v) (.invalid this "output_value: abstract value (Custom)")
               ;; the Closures flag (OC216 (a), oi's closureFields): a block of Closure_tag, its code pointer (a long/1 of the
               ;; number, see codeNumber) and its free variables, or for a partial application its function and arguments
@@ -406,19 +426,39 @@
           (if (== (aget src i) 0) (set! e i) (recur (unchecked-inc-int i)))))
       (when (< e 0) (.failf this "unterminated custom block identifier"))
       (let [name (String. src pos (unchecked-subtract-int e pos) java.nio.charset.StandardCharsets/ISO_8859_1)]
-        (when (not (or (.equals name "_i") (.equals name "_j") (.equals name "_n") (.equals name "_bigarr02")))
-          (.failf this (java-str "unknown custom block identifier " name)))
-        (when (not (== code (if (.equals name "_bigarr02") 24 25))) (.failf this (java-str "wrong custom block kind " name)))
-        (set! pos (unchecked-inc-int e))
-        (let [v (cond (.equals name "_bigarr02") (do (.u32 this) (.u64 this) (BaOps/deserialize this))
-                      (.equals name "_i") (Integer/valueOf (unchecked-int (.u32 this)))
-                      (.equals name "_j") (I64. (.u64 this))
-                      :else (let [k (.u8 this)]
-                              (cond (== k 1) (NInt. (long (unchecked-int (.u32 this))))
-                                    (== k 2) (NInt. (.u64 this))
-                                    :else (throw (Rt/failwith "input_value: ill-formed native integer")))))]
-          (.recordObj this v)
-          v))))
+        (if (not (or (.equals name "_i") (.equals name "_j") (.equals name "_n") (.equals name "_bigarr02")))
+          (.readCCustom this name e (long code))
+          (.readBuiltinCustom this name e (long code))))))
+
+  ;; (queue 527) a custom block of a C stub's registered operations (intern's CODE_CUSTOM_LEN): their deserialize over the bytes after
+  ;; the sizes (CApi/deserialize), the size it returned against the size recorded, pos past the bytes it read
+  (method ^:public readCCustom [this ^String name ^int e ^long code]
+    (when (not (== code 24)) (.failf this (java-str "unknown custom block identifier " name)))
+    (set! pos (unchecked-inc-int e))
+    (.u32 this)
+    (let [expected (.u64 this)
+          r (cast Object/1 (CApi/deserialize name src pos end expected))]
+      (when (nil? r) (.failf this (java-str "unknown custom block identifier " name)))
+      (when (not (== (.longValue (cast Long (aget r 1))) expected))
+        (throw (Rt/failwith "input_value: incorrect length of serialized custom data")))
+      (set! pos (unchecked-add-int pos (unchecked-int (.longValue (cast Long (aget r 2))))))
+      (let [v (aget r 0)]
+        (.recordObj this v)
+        v)))
+
+  ;; the runtime's own custom blocks: an int32, an int64, a nativeint, a bigarray
+  (method ^:public readBuiltinCustom [this ^String name ^int e ^long code]
+    (when (not (== code (if (.equals name "_bigarr02") 24 25))) (.failf this (java-str "wrong custom block kind " name)))
+    (set! pos (unchecked-inc-int e))
+    (let [v (cond (.equals name "_bigarr02") (do (.u32 this) (.u64 this) (BaOps/deserialize this))
+                  (.equals name "_i") (Integer/valueOf (unchecked-int (.u32 this)))
+                  (.equals name "_j") (I64. (.u64 this))
+                  :else (let [k (.u8 this)]
+                          (cond (== k 1) (NInt. (long (unchecked-int (.u32 this))))
+                                (== k 2) (NInt. (.u64 this))
+                                :else (throw (Rt/failwith "input_value: ill-formed native integer")))))]
+      (.recordObj this v)
+      v))
 
   ;; the objects' identifiers are caml_fresh_oo_id's (one counter, ExtCore/ooId)
   (method ^:public ^:static nextOid ^long []

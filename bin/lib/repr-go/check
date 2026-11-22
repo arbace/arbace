@@ -47,7 +47,10 @@
 #                        variants), test-only packages included; work directory GOOS-GOARCH-tests
 #   --controls FILE      the negative controls (GTS81 (a), doc/GATE-SURVEY.md "As built: GTS88 (b)"): lines "KIND SUBJECT REFERENCE"
 #                        (KIND package, test or dirtest; both the corpus entries' paths; # comments; other kinds,
-#                        text, are bin/repr-go roundtrip --text's): the candidate's SUBJECT compared by gocmp with the
+#                        text, are bin/repr-go roundtrip --text's; package controls are left with --with-tests;
+#                        "embed PACKAGE", --with-tests: the package's candidate with one of the Go files its tests
+#                        embed altered in its text alone, which must fail the code level, the user's decision of
+#                        2026-11-22): the candidate's SUBJECT compared by gocmp with the
 #                        ORIGINAL of REFERENCE, which must fail at the tree level (a dirtest's subject FILE.dir staged
 #                        under the reference's .go names, compared at the tree level alone). A control that passes fails the run
 #                        (exit 1, whatever else); one whose subject is not in the run, or does not pass tree there, is
@@ -373,16 +376,25 @@ ctl_status=0
 run_controls() {
   [ -n "$controls" ] || return 0
   [ -f "$controls" ] || { echo "no controls file $controls" >&2; exit 2; }
-  local kind subj ref a b sdir rdir log res st n=0 held=0 left=0 bad=0
+  local kind subj ref a b sdir rdir log res st rk n=0 held=0 left=0 bad=0
   while read -r kind subj ref _; do
     case $kind in ''|'#'*|text) continue ;; esac
     n=$((n + 1))
+    # an embed control is a package's (--with-tests: the round trip of the corpus tests); the package controls are the
+    # round trips' without tests (the staged files are the package's own, not its tests')
+    rk=$kind; [ "$kind" = embed ] && rk=package
+    if [ "$kind" = embed ] && { [ -z "$with_tests" ] || [ "${REPR_GO_LEVELS/code/}" = "$REPR_GO_LEVELS" ]; }; then
+      echo "CONTROL left $kind $subj (a package's tests' embedded files: --with-tests at the level code)"; left=$((left + 1)); continue
+    fi
+    if [ "$kind" = package ] && [ -n "$with_tests" ]; then
+      echo "CONTROL left $kind $subj vs $ref (a package control: the round trips without tests)"; left=$((left + 1)); continue
+    fi
     # the subject must be in the run, passing the tree level
-    if ! awk -F'\t' -v k="$kind" -v s="$subj" '$1 == k && $2 == s && $3 ~ /(^| )tree=pass( |$)/ { f = 1 } END { exit !f }' "$raw"; then
+    if ! awk -F'\t' -v k="$rk" -v s="$subj" '$1 == k && $2 == s && $3 ~ /(^| )tree=pass( |$)/ { f = 1 } END { exit !f }' "$raw"; then
       echo "CONTROL left $kind $subj vs $ref (the subject is not in this run, or does not pass the tree level)"; left=$((left + 1)); continue
     fi
-    sdir=$(awk -F'\t' -v k="$kind" -v s="$subj" '$1 == k && $2 == s { print $3; exit }' "$corpus")
-    rdir=$(awk -F'\t' -v k="$kind" -v s="$ref" '$1 == k && $2 == s { print $3; exit }' "$corpus")
+    sdir=$(awk -F'\t' -v k="$rk" -v s="$subj" '$1 == k && $2 == s { print $3; exit }' "$corpus")
+    rdir=$(awk -F'\t' -v k="$rk" -v s="$ref" '$1 == k && $2 == s { print $3; exit }' "$corpus")
     [ -n "$sdir" ] || sdir=$subj
     [ -n "$rdir" ] || rdir=$ref
     case $kind in
@@ -411,15 +423,37 @@ run_controls() {
           echo "CONTROL left $kind $subj vs $ref (the directories' files differ in number: ${#sf[@]} and ${#rf[@]})"; left=$((left + 1)); continue
         fi
         for i in "${!sf[@]}"; do cp "$cand/test/$sd/${sf[$i]}" "$b/${rf[$i]}"; done ;;
-      *) echo "controls: kind $kind (package, test or dirtest)" >&2; exit 2 ;;
+      embed)
+        # the user's decision of 2026-11-22 (doc/go/ROUNDTRIP.md, "Tests that embed their own sources"): the package's
+        # candidate with one of the Go files its tests embed (the first of CANDIDATE.embedded.txt's in its directory, the
+        # list bin/repr-go roundtrip --tests printed from mode :full) altered in its text alone, an empty declaration group
+        # appended (the tree level identifies it away), against its own original
+        a=$goroot/src/$sdir; b=$work/controls/embed-$(echo "$subj" | tr '/ ' '__')
+        rm -rf "$b"; mkdir -p "$b"
+        find "$cand/src/$sdir" -maxdepth 1 -type f -exec cp {} "$b/" \;
+        f=$(awk -v d="$sdir/" 'index($0, d) == 1 && index(substr($0, length(d) + 1), "/") == 0 { print substr($0, length(d) + 1); exit }' "$cand.embedded.txt" 2> /dev/null)
+        if [ -z "$f" ] || [ ! -f "$b/$f" ]; then
+          echo "CONTROL left $kind $subj (no embedded Go file of its in ${cand#$root/}.embedded.txt)"; left=$((left + 1)); continue
+        fi
+        printf '\nvar ()\n' >> "$b/$f" ;;
+      *) echo "controls: kind $kind (package, test, dirtest or embed)" >&2; exit 2 ;;
     esac
     if [ ! -e "$a" ] || [ ! -e "$b" ]; then
       echo "CONTROL left $kind $subj vs $ref (no $([ -e "$a" ] || echo "$a")$([ -e "$b" ] || echo " $b"))"; left=$((left + 1)); continue
     fi
     log=$work/logs/control-${kind}-$(echo "$subj-vs-$ref" | tr '/ ' '__').log
-    # a directory test's control at the tree level alone, its judgment (the other levels compile and run both sides)
-    res=$(REPR_GO_LEVELS=$([ "$kind" = dirtest ] && echo tree || echo "$REPR_GO_LEVELS") "$0" --worker "$(printf '%s\t%s\t%s\t%s\t%s\t' "$kind" "$subj" "$a" "$b" "$log")")
+    # a directory test's control at the tree level alone, its judgment (the other levels compile and run both sides); an
+    # embed control's at the levels tree and code, judged by the code level (the tree passes: the text alone differs)
+    res=$(REPR_GO_LEVELS=$(case $kind in dirtest) echo tree ;; embed) echo tree,code ;; *) echo "$REPR_GO_LEVELS" ;; esac) \
+          "$0" --worker "$(printf '%s\t%s\t%s\t%s\t%s\t' "$rk" "$subj" "$a" "$b" "$log")")
     st=$(echo "$res" | cut -f3)
+    if [ "$kind" = embed ]; then
+      case " $st " in
+        *" code=fail "*) echo "CONTROL ok $kind $subj ($st)"; held=$((held + 1)) ;;
+        *) echo "CONTROL FAILED $kind $subj ($st): the code level passes an embedded file's altered text"; bad=$((bad + 1)) ;;
+      esac
+      continue
+    fi
     case " $st " in
       *" tree=fail "*) echo "CONTROL ok $kind $subj vs $ref ($st)"; held=$((held + 1)) ;;
       *) echo "CONTROL FAILED $kind $subj vs $ref ($st): the comparison passes what differs"; bad=$((bad + 1)) ;;

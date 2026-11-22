@@ -399,15 +399,26 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   Round 51: simd const eval (a), `--record` defaults to `--front own` (a). Branch `rust-c6-1120` (2026-11-21, holds rust-rec-1120
   and 503-rust-causes4): C6-2 (std's StableCrateIds by Cargo's hash ported), C4's interface and C4-1's names assembled natively
   (std-names 14,953 of 15,162 facts; C4 not own until C6-5's ruling), C1's three drop-glue faults fixed (std, vectors, unwind,
-  panics build own; vectors passes own on ci), C6-4's AlwaysInliner (core 114 of 275 items equal to std's IR). Next: TypeId::of's
-  constant as rustc's hash and core's sort recursion (unwind, panics, std on ci), C6-4's next export (8 callees), core's interface
-  differences for C4 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1's drop glue"). Branch `rust-c6b-1122` (2026-11-22,
+  panics build own; vectors passes own on ci), C6-4's AlwaysInliner (core 114 of 275 items equal to std's IR). Branch
+  `rust-c4-1122` (2026-11-22, R3): C1's TypeId constants as rustc's inttoptr pointers and a pair's niche tag at its offset (std,
+  unwind, panics pass own on ci; ci's 32-bit pointer constants a finding for C), C4's passes with every alias, enum reprs, pattern
+  types, const traits and the builtin derives (core 27,062 of 27,498 facts, alloc and std all equal, names 15,120 of 15,162) and the
+  switch run 5 of 5 own on the native interface and names (C4 counted own only after C6-5's ruling). Branch `rust-c6b-1122` (2026-11-22,
   the burst's R2, with 512-rust-causes5 and R3's rust-c4-1122 merged): C6-4's next export and the back end's lowering as std's IR
   writes it (core's macro-made attributes, IRBuilder's folds, LLVM 23's float text, -Z fewer-names' literal types, InstSimplify's
   aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
   alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
   unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
-  lowering as std's IR writes it").
+  lowering as std's IR writes it"). Next: C1's six programs built
+  again and recorded, core's 436 facts left, C6-4's next export ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1 and C4:
+  the burst's round"). Branch `rust-c6c-1122` (2026-11-22, R2b, R3's `7bd7b001d` merged): the always-inliner as LLVM 23's (the
+  callees in their symbols' order, rustc 1.99.1's codegen unit order; the call sites newest first in their use lists; the zero GEP
+  and the constant inttoptr folded), unsized struct tails' references, closure pairs' alignments, builtin derives `#[inline]`, the
+  library parsed as edition 2024, repr(C) enums, rustc's #[path] file names, lib-unit's vtables; then the Mac's 524 (C3) merged, one
+  Rust line: core 191 of 275 items equal to std's IR (183), alloc 21 of 25, std 101 of 325 (83); std's differing items now mostly
+  share-generics' upstream instances (21 of 25: every upstream crate's whole collection, L2); R3's own path 3 of 3 on ci; C6-5 (a)
+  taken (rsi-build's C4 own with both native), not recorded yet: R3's switch run 4 of 6 on ci (built before its C1 fixes), the next
+  native-interface build with C1's configuration records it (FRONTEND-SURVEY, "As built: C6-4, round three").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh

@@ -1,0 +1,148 @@
+;; C threads registered with the runtime (queue 530, DECISION 528-12 (a); threads.h's caml_c_thread_register, its _in_domain form and
+;; caml_c_thread_unregister, caml_acquire_runtime_system and caml_release_runtime_system from a thread the C started). Two locks meet:
+;; ci's baton (crt's scheduler: one C thread runs at a time, the baton passing where a thread waits and at the preemption points) and oi's
+;; interpreter's lock (the master lock: one goroutine runs OCaml code at a time). The rule that keeps them from a deadlock: no goroutine
+;; waits for the interpreter's lock while its C thread holds the baton. A C thread steps off the baton (park) while it waits for the
+;; lock and while OCaml's code of its callback runs; and the C's main thread, which oi's stubs run on, steps off it between the stubs
+;; once the C has started a thread, so the C's threads run while OCaml's code runs (as the C runtime's threads run beside OCaml's).
+;; Stepping off is a helper goroutine standing for the thread in the scheduler: it sleeps there a millisecond at a time (nanosleep,
+;; which passes the baton on) until the thread wants the baton back (unpark), and returns holding it. A registered thread is an oi
+;; thread of its domain (oi.NewCThread); between acquire and release it holds the interpreter's lock, and its callbacks run on it.
+(in-ns 'go.arbace.oicapi)
+
+(go/file "threads.go" :imports [[fmt "fmt"] [os "os"] [atomic "sync/atomic"] [ci "arbace/ci"] [crt "arbace/crt"] [oi "arbace/oi"]])
+
+(go/type cthread "cthread is a C thread's registration: its oi thread (nil once unregistered), the domain it registered in (st_stubs.c's
+recorded domain: registering again in another one fails), and, while it holds the runtime, the thread the boundary served before (at the
+AOT levels, wk: its conversation with the runtime, wire.go's; th is nil there, the runtime's thread being the runtime's).\n"
+  (struct ^bool reg ^{:tag (* oi/Thread)} th ^int dom ^bool holding ^{:tag (* oi/Thread)} prev ^{:tag (* worker)} wk))
+
+(go/type parker "parker is a thread stepped off the baton: its helper sleeps in its place until want, then returns holding the baton\n(done: nil, or the panic the scheduler raised in it).\n"
+  (struct ^{:tag atomic/Bool} want ^{:tag (chan any)} done))
+
+(go/method park "park steps the running C thread off the baton (its caller holds it): a helper goroutine sleeps in the scheduler in its\nplace, so the other threads run, until unpark.\n" ^{:tag (* parker)} [^{:tag (* capi)} c]
+  (when (== (.-ts c) 0)
+    ;; a struct timespec of one millisecond, static
+    (set! (.-ts c) (.allocStatic c 2 tagAbstract))
+    (.Store64 (.-m c) (.-ts c) 0)
+    (.Store64 (.-m c) (+ (.-ts c) 8) 1000000))
+  (let [pk (addr (lit parker :done (make (chan any) 1)))
+        s (.-Sys (.-p c))
+        ts (.-ts c)]
+    (go ((fn []
+           (defer ((fn []
+                     (when [r (recover)] (!= r nil)
+                       ;; the program ended by another C thread (exit_group, a fault), raised in the main thread's stand-in
+                       (when [(values e ok) (assert (* crt/Exit) r)] ok
+                         (os/Exit (.-Code e)))
+                       (fmt/Fprintf os/Stderr "oi: a C thread ended the program: %v\n" r)
+                       (os/Exit oi/StatusInternal)))))
+           (while (not (.Load (.-want pk)))
+             (.Syscall s 35 ts 0 0 0 0 0))
+           (>! (.-done pk) nil))))
+    pk))
+
+(go/method unpark "unpark takes the baton back: the helper's next wake returns it to the thread.\n" [^{:tag (* parker)} pk]
+  (.Store (.-want pk) true)
+  (<! (.-done pk)))
+
+(go/method offBaton "offBaton runs f with the running C thread stepped off the baton.\n" [^{:tag (* capi)} c ^{:tag (func [])} f]
+  (let [pk (.park c)]
+    (defer (.unpark pk))
+    (f)))
+
+(go/method enter "enter gives the C's main thread the baton back when it stepped off it between the stubs; it tells whether it had.\n"
+  ^bool [^{:tag (* capi)} c]
+  (let [pk (.-mainPk c)]
+    (when (== pk nil)
+      (return false))
+    (set! (.-mainPk c) nil)
+    (.unpark pk)
+    true))
+
+(go/method leave "leave steps the C's main thread off the baton between the stubs, once the C has started a thread.\n" [^{:tag (* capi)} c]
+  (when (and (== (.-mainPk c) nil) (!= (.-Sched (.-Sys (.-p c))) nil))
+    (set! (.-mainPk c) (.park c))))
+
+(go/method cthreadOf "cthreadOf is the C thread t's registration, nil for the main thread or one never registered.\n" ^{:tag (* cthread)} [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t]
+  (when (or (== t (.-Main (.-p c))) (== (.-cthreads c) nil))
+    (return nil))
+  (aget (.-cthreads c) t))
+
+(go/method register "register is caml_c_thread_register_in_domain(dom) on the C thread t (caml_c_thread_register: dom 0), as st_stubs.c's: 0 for
+the main thread, a thread registered already or registered before in another domain, and a domain that does not run; else t an oi
+thread of the domain, 1. The runtime is not held when it returns.\n" ^int [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t ^int dom]
+  (when (== t (.-Main (.-p c)))
+    (return 0))
+  (when (== (.-cthreads c) nil)
+    (set! (.-cthreads c) (lit (map (* ci/Thread) (* cthread)))))
+  (let [ct (aget (.-cthreads c) t)]
+    (when (and (!= ct nil) (or (.-reg ct) (!= (.-dom ct) dom)))
+      (return 0))
+    (when (!= Apply nil)
+      ;; the AOT levels' server: the runtime knows its domains
+      (let [ok false]
+        (.offBaton c (fn [] (set! ok (wireDomain dom))))
+        (when (not ok)
+          (return 0))
+        (aset (.-cthreads c) t (addr (lit cthread :reg true :dom dom)))
+        (return 1)))
+    (.offBaton c oi/Acquire)
+    (let [th (oi/NewCThread dom)]
+      (oi/Release)
+      (when (== th nil)
+        (return 0))
+      (aset (.-cthreads c) t (addr (lit cthread :reg true :th th :dom dom)))
+      1)))
+
+(go/method unregister "unregister is caml_c_thread_unregister on the C thread t: 1 when it was registered (its oi thread ended), else 0.\n"
+  ^int [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t]
+  (let [ct (.cthreadOf c t)]
+    (when (or (== ct nil) (not (.-reg ct)))
+      (return 0))
+    (set! (.-reg ct) false)
+    (when (!= (.-th ct) nil)
+      (.offBaton c oi/Acquire)
+      (.EndCThread (.-th ct))
+      (oi/Release)
+      (set! (.-th ct) nil))
+    1))
+
+(go/method acquire "acquire is caml_acquire_runtime_system (caml_leave_blocking_section) on a C thread other than the main one: the
+interpreter's lock taken off the baton, the boundary serving the thread's oi thread (an outermost call of its own: the copies freed at its
+release); 0 on the main thread (runtime.c's blocking flag), else 1.\n" ^int [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t]
+  (when (== t (.-Main (.-p c)))
+    (return 0))
+  (let [ct (.cthreadOf c t)]
+    (when (or (== ct nil) (not (.-reg ct)) (.-holding ct))
+      (return 1))
+    (if (!= Apply nil)
+      (.offBaton c (fn [] (set! (.-wk ct) (wireAcquire (.-dom ct)))))
+      (.offBaton c oi/Acquire))
+    (set! (.-holding ct) true)
+    (set! (.-prev ct) (.-th c))
+    (set! (.-th c) (.-th ct))
+    (inc! (.-depth c))
+    (when (== (.-depth c) 1)
+      (.toCAll c))
+    1))
+
+(go/method release "release is caml_release_runtime_system (caml_enter_blocking_section) on a C thread other than the main one: the
+boundary's copies freed when it was the outermost holder, the interpreter's lock given up; 0 on the main thread, else 1.\n"
+  ^int [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t]
+  (when (== t (.-Main (.-p c)))
+    (return 0))
+  (let [ct (.cthreadOf c t)]
+    (when (or (== ct nil) (not (.-holding ct)))
+      (return 1))
+    (dec! (.-depth c))
+    (when (== (.-depth c) 0)
+      (.reset c))
+    (set! (.-th c) (.-prev ct))
+    (set! (.-prev ct) nil)
+    (set! (.-holding ct) false)
+    (if (!= (.-wk ct) nil)
+      (do (asyncEnd (.-wk ct))
+          (set! (.-wk ct) nil))
+      (oi/Release))
+    1))

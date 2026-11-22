@@ -46,7 +46,8 @@ cmd_suite_corpus() {
     [ -f "$OPAM/$pkg/.extracted" ] || die "suite corpus: the opam package $pkg is not fetched out (bin/repr-ocaml corpus fetch)"
   done
   if [ -d "$OPAM" ]; then
-    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t\t%s\t%s\t%s\t%s\n", $1, $2, $3, $4, $6, "'"$OPAM"'/" $1, $5 }
+    # (a seventh column INCS, queue 528: the libraries the program links, as header.awk's include names them: unix)
+    grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
       NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
   fi
   cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"
@@ -66,9 +67,22 @@ suite_stage() {
     # and the .ml files its header names as readonly_files, data (parsetree/test's source.ml: OT21 (b))
     local ro f; ro=$(sed -n 's/.*readonly_files *= *"\([^"]*\)".*/\1/p' "$base/$id.ml" | head -1)
     for f in $ro; do case $f in *.ml) [ -f "$base/$(dirname "$id")/$f" ] && cp "$base/$(dirname "$id")/$f" "$d/" ;; esac; done ;; esac
+  # queue 534: an opam unit its directory's dune file preprocesses (a library's `(preprocess (action (run ... %{input-file})))`) or
+  # makes by a rule (no .mly or .mll of its stem) is given the text dune's build compiles, by arbace.repr.ocaml.prep's build-into
+  local build=() s
   for u in $units; do
-    case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;; *) if [ -f "$base/$u" ]; then cp "$base/$u" "$d/"; else suite_gen "$base/$u" "$d"; fi ;; esac
+    case $u in =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
+      *) s=$base/${u%.*}
+         if [ -f "$base/$u" ]; then
+           case $id in opam/*) if grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune"; then build+=("$base/$u"); continue; fi ;; esac
+           cp "$base/$u" "$d/"
+         elif [ "${id#opam/}" != "$id" ] && [ ! -f "$s.mly" ] && [ ! -f "$s.mll" ] && [ -f "$(dirname "$base/$u")/dune" ]; then build+=("$base/$u")
+         else suite_gen "$base/$u" "$d"; fi ;; esac
   done
+  if [ ${#build[@]} -gt 0 ]; then
+    local exe; exe=$( (declare -F arbace_exe > /dev/null && arbace_exe) || echo "$ARBACE_HOST_EXE")
+    ARBACE_PATH="$root" "$exe" -m arbace.repr.ocaml.prep build-into "$d" "${build[@]}" > "$d/build-into.log" 2>&1 || true
+  fi
 }
 
 # suite_gen FILE DIR (OC194 (a), OC197 (a)): a unit the test's ocamlyacc grammar (FILE's stem .mly: its .mli and .ml) or ocamllex lexer

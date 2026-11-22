@@ -132,7 +132,7 @@
 
 (def ^:dynamic *unit*
   "{:class sym, :name the unit, :n counter atom, :classes atom (member classes), :consts atom
-  ([sym init]...), :missing atom {name count}}"
+  ([sym init]...), :ints atom {n field}, :blocks atom {block constant field} (queue 527), :missing atom {name count}}"
   nil)
 
 (defn- fresh [prefix] (symbol (str prefix (swap! (:n *unit*) inc))))
@@ -163,8 +163,11 @@
     (list 'Double/longBitsToDouble (Double/doubleToRawLongBits d))
     d))
 
+(declare const-form)
+
 (defn- const-init
-  "The Java form that makes constant c (once: the unit's static field holds it)."
+  "The Java form that makes constant c (once: the unit's static field holds it); a block's fields that are blocks the unit's shared
+  ones (const-form)."
   [c]
   (let [[h a] c]
     (case h
@@ -176,7 +179,8 @@
       immstring (list 'ocaml.rt.Rt/s (latin1 a))
       float-array (list 'new 'double/1 (mapv #(double-form (parse-float %)) a))
       block (let [[_ tag fs] c]
-              (list 'ocaml.rt.Rt/block (list 'unchecked-int tag) (list 'new 'Object/1 (mapv const-init fs))))
+              (list 'ocaml.rt.Rt/block (list 'unchecked-int tag)
+                    (list 'new 'Object/1 (mapv #(if (and (= 'block (first %)) (:blocks *unit*)) (const-form %) (const-init %)) fs))))
       (throw (ex-info (str "constant " h) {:const c})))))
 
 (defn- const-form
@@ -194,9 +198,21 @@
                 (swap! ints assoc v f)
                 f)))
         (list 'Long/valueOf a))
-      (let [k (fresh "k")]
-        (swap! (:consts *unit*) conj [k (const-init c)])
-        (symbol (str (unit-class)) (name k))))))
+      (if-let [blocks (and (= 'block h) (:blocks *unit*))]
+        ;; (queue 527) a block constant once a unit, shared by every occurrence of an equal one, its fields' blocks too: ocamlopt's
+        ;; Closure makes each structured constant a label by Compilenv.new_structured_constant ~shared:true, one for structurally
+        ;; equal constants (lib-marshal/intext's `let x = D "sharing" in G(x, x)`, folded into one constant whose fields are x's,
+        ;; physically equal)
+        (or (get @blocks c)
+            (let [init (const-init c)
+                  k (fresh "k")
+                  f (symbol (str (unit-class)) (name k))]
+              (swap! (:consts *unit*) conj [k init])
+              (swap! blocks assoc c f)
+              f))
+        (let [k (fresh "k")]
+          (swap! (:consts *unit*) conj [k (const-init c)])
+          (symbol (str (unit-class)) (name k)))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; free variables
@@ -873,7 +889,7 @@
   [{:keys [name code]}]
   (let [cls (symbol (last (str/split (class-of name) #"\.")))]
     (binding [*unit* {:class (symbol (class-of name)) :name name :n (atom 0)
-                      :classes (atom []) :consts (atom []) :ints (atom {}) :slots (atom []) :missing (atom {})}]
+                      :classes (atom []) :consts (atom []) :ints (atom {}) :blocks (atom {}) :slots (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
             classes (mapv realize @(:classes *unit*))

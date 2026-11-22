@@ -33,6 +33,12 @@ extern value __oi_predef(int index);
 extern int __oi_re_control(int op);
 extern intnat __oi_re_cursor(const char *path, int pid);
 extern intnat __oi_re_next(intnat pos, int64_t *out);
+extern uintnat __oi_gc_count(int k);
+extern void __oi_gc_request_minor(void);
+extern int __oi_thread_register(intnat dom);
+extern int __oi_thread_unregister(void);
+extern int __oi_thread_acquire(void);
+extern int __oi_thread_release(void);
 
 /* the atoms: zero-sized blocks, one a tag */
 static header_t atoms[256];
@@ -62,6 +68,10 @@ value caml_alloc(mlsize_t wosize, tag_t tag)
   if (tag < No_scan_tag) for (mlsize_t i = 0; i < wosize; i++) Field(v, i) = Val_unit;
   return v;
 }
+/* gc_ctrl.h's statistics (queue 523): oi's counters, live */
+uintnat caml_max_stack_wsize = 128 * 1024 * 1024;
+uintnat caml_fiber_wsz = 64;
+uintnat caml_oi_gc_count(int k) { return __oi_gc_count(k); }
 value caml_alloc_small(mlsize_t wosize, tag_t tag) { return caml_alloc(wosize, tag); }
 value caml_alloc_shr(mlsize_t wosize, tag_t tag) { return caml_alloc(wosize, tag); }
 value caml_alloc_tuple(mlsize_t n) { return caml_alloc(n, 0); }
@@ -246,19 +256,24 @@ void caml_fatal_error(const char *msg, ...)
 }
 
 /* the runtime lock: oi's threads run one at a time already, and a stub's blocking section releases nothing; it only marks the
-   thread outside the runtime, where Caml_state_opt is NULL (signals.c's caml_enter_blocking_section clears the domain's state) */
+   thread outside the runtime, where Caml_state_opt is NULL (signals.c's caml_enter_blocking_section clears the domain's state).
+   On a thread the C started and registered (queue 530) they release and take oi's lock (go/arbace/oicapi's threads.go): the
+   natives answer 0 on the main thread, whose stubs hold the lock */
 static int blocking;
 struct caml_domain_state { int unused; };
 static struct caml_domain_state domain_state;
 caml_domain_state *caml_state_opt(void) { return blocking ? NULL : &domain_state; }
-void caml_enter_blocking_section(void) { blocking = 1; }
-void caml_enter_blocking_section_no_pending(void) { blocking = 1; }
-void caml_leave_blocking_section(void) { blocking = 0; }
+void caml_enter_blocking_section(void) { if (!__oi_thread_release()) blocking = 1; }
+void caml_enter_blocking_section_no_pending(void) { if (!__oi_thread_release()) blocking = 1; }
+void caml_leave_blocking_section(void) { if (!__oi_thread_acquire()) blocking = 0; }
 void caml_process_pending_actions(void) {}
 value caml_process_pending_actions_exn(void) { return Val_unit; }
 int caml_check_pending_actions(void) { return 0; }
-int caml_c_thread_register(void) { return 1; }
-int caml_c_thread_unregister(void) { return 1; }
+void caml_request_minor_gc(void) { __oi_gc_request_minor(); }
+/* a thread the C started, registered with the runtime in a domain that runs (threads.h; queue 530): an oi thread of that domain */
+int caml_c_thread_register_in_domain(uintnat dom_unique_id) { return __oi_thread_register((intnat) dom_unique_id); }
+int caml_c_thread_register(void) { return __oi_thread_register(0); }
+int caml_c_thread_unregister(void) { return __oi_thread_unregister(); }
 int caml_domain_alone(void) { return 1; }
 
 /* signal numbers: the Sys.sigXXX numbers (negative) against the system's (runtime/signals.c's table, its order) */

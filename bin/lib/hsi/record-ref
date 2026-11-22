@@ -31,6 +31,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/hsi/records.bash"
+. "$root/bin/lib/hsi/boot-stdin.bash" # HES102: a nofib program's input its boot.sh makes
 corpora=samples,synthetic,testsuite-core,nofib only="" jobs=${HSI_JOBS:-8} out="" opt=O0 keep="" arm64=""
 while [ $# -gt 0 ]; do
   case $1 in
@@ -91,26 +92,35 @@ if want testsuite || want testsuite-core; then
 fi
 # nofib_c_srcs DIR: bin/lib/hsi/records.bash (HES86 (a): bin/hsi check plans the same C)
 if want nofib; then
+  # hs-pkgs-1122: the Hackage packages (test/haskell/hackage.edn) built by the host's GHC into a package database of their own
+  # (bin/hsi hackage ghc-db), added with -package-db for a program whose SRC_DEPS name one of them
+  hnames=" $("$root/bin/hsi" hackage names | tr '\n' ' ')" hdb=""
   for s in imaginary spectral real shootout gc parallel smp; do
-    for p in "$root/.tmp/hsi/nofib/$s"/*/; do
-      [ -f "$p/Makefile" ] || continue
-      n=$(basename "$p"); mk=$p/Makefile
-      main=-; for m in Main.hs Main.lhs "$n.hs" "$n.lhs"; do [ -f "$p/$m" ] && { main=$m; break; }; done
+    for rel in $(nofib_programs "$root/.tmp/hsi/nofib/$s"); do
+      p=$root/.tmp/hsi/nofib/$s/$rel/; n=$(basename "$rel"); mk=$p/Makefile
+      main=$(nofib_main "${p%/}" "$n")
       # the Makefile's variables (the plain assignments; a conditional one's first branch)
       fo=$(sed -n 's/^FAST_OPTS *= *//p' "$mk" | head -1)
       pa=$(sed -n 's/^PROG_ARGS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
       hc=$(sed -n 's/^SRC_HC_OPTS *+\{0,1\}= *//p' "$mk" | tr '\n' ' ')
-      deps=$(sed -n 's/^SRC_DEPS *= *//p' "$mk" | head -1)
-      for dpk in $deps; do hc="$hc -package $dpk"; done
+      deps=$(nofib_src_deps "$mk")
+      for dpk in $deps; do
+        if [[ $hnames == *" $dpk "* ]] && [[ $hc != *"-package-db "* ]]; then
+          [ -n "$hdb" ] || hdb=$("$root/bin/hsi" hackage ghc-db) || { echo "hsi record-ref: bin/hsi hackage ghc-db failed" >&2; exit 1; }
+          hc="$hc -package-db $hdb"
+        fi
+        hc="$hc -package $dpk"
+      done
       # HES85 (a): the program's C as nofib's mk links it (ghc-paths.mk's C_SRCS: the .c and .S of SRCS but the *_stub.c;
       # SRCS every source of the directory, ALL_SRCS, less EXCLUDED_SRCS, unless the Makefile sets SRCS itself, as
       # paraffins, primes, compress, fasta, reverse-complement and simple do to leave their C versions out), the Haskell
       # compiled first below: smp/callback001 and 002's cbits.c, spectral/fft2's fft.c
       for cf in $(nofib_c_srcs "${p%/}"); do hc="$hc $cf"; done
       sin=-; for f in "$n.faststdin" "$n.stdin"; do [ -f "$p/$f" ] && { sin=$f; break; }; done
+      [ "$sin" != - ] || { bsin=$(boot_stdin_name "nofib/$s/$rel"); [ -z "$bsin" ] || sin=$bsin; }
       exp=-; for f in "$n.faststdout" "$n.stdout"; do [ -f "$p/$f" ] && { exp=$f; break; }; done
       args=$(echo "$pa ${fo:-}" | xargs)
-      add "nofib/$s/$n" nofib "${p%/}" "$main" "$(echo "$hc" | xargs)" "${args:--}" 0 "$n" "$sin" "$exp"
+      add "nofib/$s/$rel" nofib "${p%/}" "$main" "$(echo "$hc" | xargs)" "${args:--}" 0 "$n" "$sin" "$exp"
     done
   done
 fi
@@ -124,6 +134,9 @@ one() {
   local i=$1 id kind src main flags ropts exit name sin exp
   IFS=$'\037' read -r id kind src main flags ropts exit name sin exp <<< "$(sed -n "${i}p" "$plan")"
   local w=$work/run/$i r=$work/res/$i t0 t1 t2 st ebuild
+  # hs-pkgs-1122: a nofib sub-program (real/eff/CS, spectral/hartel/fft) built as nofib's make builds it, inside its driver's
+  # directory: the driver's own files beside (hartel's programs #include "../Fast2haskell.hs")
+  case $id in nofib/*/*/*) rm -rf "$w"; mkdir -p "$w"; find "$(dirname "$src")" -maxdepth 1 -type f -exec cp {} "$w"/ \; ; w=$w/$(basename "$src") ;; esac
   rm -rf "$w"; mkdir -p "$w"
   # the program's directory's files (not its subdirectories but those a test names: copied whole, small)
   cp -r "$src"/. "$w"/ 2> "$w.cp.log" || true
@@ -167,6 +180,7 @@ one() {
   local cmd="./$name"
   if [ "$ropts" != - ]; then cmd="$cmd ${ropts//\/dev\/null/.empty}"; fi
   local stdin=.empty; [ "$sin" != - ] && stdin=$sin
+  [ "$sin" = - ] || [ -f "$w/$sin" ] || boot_stdin_put "$id" "$w" || true
   [[ $ropts == *"<"* ]] && stdin=.empty
   st=0
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \
@@ -191,7 +205,7 @@ one() {
   echo "{:id \"$id\" :status $status :stdout \"$so\" :bytes $(stat -c %s "$w.stdout") :first \"$(esc "$fo")\" :stderr \"$se\" :err-bytes $(stat -c %s "$w.stderr") :err-first \"$(esc "$fe")\"$expv$ex :build $(printf '%.2f' "$(echo "$t1 - $t0" | bc)") :run $(printf '%.2f' "$(echo "$t2 - $t1" | bc)")}" > "$r"
   rm -rf "$w" "$w.build.log" "$w.pre.log" "$w.cp.log" "$w.stdout" "$w.stderr"
 }
-export -f one hsi_pre_gen
+export -f one hsi_pre_gen boot_stdin_name boot_stdin_put
 export work plan opt root keep
 # each program under a cap of its own (the build's 300 s, the run's, the copies)
 seq 1 "$(wc -l < "$plan")" | xargs -P "$jobs" -I{} timeout -s KILL 600 bash -c 'one {}'

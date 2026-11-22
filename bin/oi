@@ -918,7 +918,7 @@ cmd_record_ref() {
 # oi_dump D BASE FLAGS INCS: BASE.ml (in D) dumped as Lambda into D/U.ae (U the module's name), by the native typer (NATIVE=1) or
 # ocdump; status 0, else 1 with the row's reason (dump: ...) on the standard output
 oi_dump() {
-  local d=$1 base=$2 flags=$3 incs=$4
+  local d=$1 base=$2 flags=$3 incs=$4 own=${5:-}
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
@@ -938,6 +938,8 @@ oi_dump() {
     done
     # the program's libraries (ocaml-libs4's unix, threads, str, compiler-libs and the testsuite's testing) by their sources' interfaces
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
+    # (queue 523) the test's own units typed before it (OWN, its directory: their .cmi.ae files)
+    [ -n "$own" ] && { if [ -n "$inc" ]; then inc="$inc:$own"; else inc="--include $own"; fi; }
     if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> "typer-$base.err"); then
       # the error's message alone: Arbace's "Execution error (CLASS) at NS/FN (FILE:LINE)." and "Full report at: FILE" left out
       echo "dump: typer: $(typer_err_text "$d/typer-$base.err")"; return 1
@@ -1010,6 +1012,32 @@ export -f oi_depend_prog
 # loader reads a plugin (OI-CMO 1, the imports, the Lambda); an .mli is read by the units that need it. MAIN, the main program's units
 # (DIR/UNIT), linked as ocamlc's link step takes them: their imports into D/dynlink.imports (OI_DYNLINK_IMPORTS, the executable's CRC
 # table), their Lambda files but the last's (the test's own, oi_one's) printed, one a line. Status 0, else 1 with the row's reason
+# oi_mods ID D FLAGS INCS FILE,... (queue 523): the test's own OCaml units (header.awk's @mods), each typed natively in D in their order,
+# its interface written for the units after it and the program (--cmi-out), the next typed against D; their Lambda files on the standard
+# output, space-separated, in that order. Status 1 with the row's reason on the standard output
+oi_mods() {
+  local id=$1 d=$2 flags=$3 incs=$4 mods=$5 src f b U nf="" extra inc out=""
+  src=$(dirname "$TESTS/$id")
+  [ "${NATIVE:-0}" = 1 ] || { echo "modules: the test's own units on the native path alone"; return 1; }
+  for f in $flags; do
+    case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;;
+      *) echo "dump: typer: flag $f not modelled"; return 1 ;; esac
+  done
+  for f in $(echo "$mods" | tr ',' ' '); do
+    b=${f%.ml}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
+    cp "$src/$f" "$d/"; [ -f "$src/$b.mli" ] && cp "$src/$b.mli" "$d/"
+    inc="$d"; [ -n "$incs" ] && inc="$inc:$(inc_dirs "$incs")"
+    if [ -f "$d/$b.mli" ]; then extra=--intf; else extra="--cmi-out $d/$b.cmi.ae"; fi
+    if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --file "$f" "$f" > "$U.ae" 2> "typer-$b.err"); then
+      echo "dump: typer $f: $(typer_err_text "$d/typer-$b.err")"; return 1
+    fi
+    if grep -q '^(ocaml/error' "$d/$U.ae"; then echo "dump: $f: $(head -c 200 "$d/$U.ae" | tr '\n\t' '  ')"; return 1; fi
+    out="$out $d/$U.ae"
+  done
+  echo "${out# }"
+}
+export -f oi_mods
+
 oi_dynlink() {
   local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 src f dir file b U nf="" extra inc
   src=$(dirname "$TESTS/$id")
@@ -1069,7 +1097,14 @@ oi_one() {
     # (header.awk's tool mode, queue 511: the row's program is the tool's (bin/lib/oi/tools.bash), the test's files its input)
     why=$(oi_tool_prog "$(tool_of "$env")" "$id" "$d" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   else
-    why=$(oi_dump "$d" "$base" "$flags" "$incs") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
+    # (queue 523) the test's own OCaml units (header.awk's @mods=FILE,...: modules beside C stubs), typed in their order before the program
+    local mods="" own=""
+    for kv in $env; do case $kv in @mods=*) mods=${kv#@mods=} ;; esac; done
+    if [ -n "$mods" ]; then
+      own=$(oi_mods "$id" "$d" "$flags" "$incs" "$mods") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$own"; return; }
+      mains="$own "; own=$d
+    fi
+    why=$(oi_dump "$d" "$base" "$flags" "$incs" "$own") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   fi
   if [ -n "$(ocamldoc_of "$env")" ]; then units="$(tr '\n' ' ' < "$ODOC/units.txt")"
   else units="$(inc_units "$incs" "$d/$u.ae" | tr '\n' ' ')$mains"; fi
@@ -1093,10 +1128,15 @@ oi_one() {
   local st=0 t0 t1
   t0=$(date +%s.%N); times > "$d/cpu0"
   local lib=$LIB; [ "${NATIVE:-0}" = 1 ] && lib=${LIB_NATIVE:-$LIB}
+  local rs; rs=$(runscript_of "$env")
   if [ -n "$hk" ]; then
     # ocamltest's hook TEST.run in place of the run action (hook_run; OC203 (a)): its program oi on the dump
     prog_script "$d/program" "$EXE" run "$lib" $units "$d/$u.ae" -- $args
     hook_run "$id" "$d" "$d/oi.out" "$env" limited_cpu "$TIMEOUT" "$(oi_wall)" || st=$?
+  elif [ -n "$rs" ]; then
+    # header.awk's complete-exe mode (queue 528): the test's script runs ./NAME, oi on the dump (bin/lib/oi/tools.bash's runscript_of)
+    prog_script "$d/${rs#*:}" "$EXE" run "$lib" $units "$d/$u.ae" -- $args
+    (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" sh "$(dirname "$TESTS/$id")/${rs%%:*}") || st=$?
   else
     (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $units "$u.ae" -- $args) || st=$?
   fi
@@ -1411,6 +1451,12 @@ o2j_alone() {
       prog_script "$d/program" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-2500MiB}" GOGC="${O2J_GOGC:-off}" GOMAXPROCS=1 \
         O2J_ARGV0="$argv0" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" $(cat "$files") -- "$@"
       hook_run "$id" "$d" "$out" "$OI_REDIR" limited_cpu $(o2j_cpu) || st=$? ;;
+    *" @runscript="*)
+      # header.awk's complete-exe mode (queue 528): the test's script runs ./NAME, o2j's run of the program
+      local d rs; d=$(dirname "$out"); rs=$(runscript_of "$OI_REDIR")
+      prog_script "$d/${rs#*:}" env ARBACE_PATH="$root/jdk/ocaml" TMPDIR="$O2J/tmp" GOMEMLIMIT="${O2J_GOMEMLIMIT:-2500MiB}" GOGC="${O2J_GOGC:-off}" GOMAXPROCS=1 \
+        O2J_ARGV0="$argv0" "$(arbace_exe)" "$root/test/ocaml/o2j/run.ae" $(cat "$files") -- "$@"
+      (cd "$d" && run_redirected "$OI_REDIR" "$out" limited_cpu $(o2j_cpu) sh "$(dirname "$TESTS/$id")/${rs%%:*}") || st=$? ;;
     *) (cd "$(dirname "$out")" && O2J_ARGV0=$argv0 run_redirected "${OI_REDIR:-}" "$out" o2j_run_cpu $(o2j_cpu) $(cat "$files") -- "$@") || st=$? ;;
   esac
   case " ${OI_REDIR:-} " in *" @check=check-program-output "*) hook_check "$id" "$(dirname "$out")" "$out" "$OI_REDIR" ;; esac
@@ -1431,6 +1477,10 @@ o2j_env_runs() {
     ( for kv in $(env_vars "$env"); do export "$kv"; done; OI_REDIR=$env; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
     # (header.awk's ocamldoc mode, queue 480: the row's output TEST.result, ocamldoc's own output judged beside it)
     [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$(dirname "$out")" "$out"
+    # (header.awk's objinfo mode at this level, queue 528: the compiler's output judged beside the tool's)
+    [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$(dirname "$out")" "$out"
+    # (header.awk's ocamlopt-alone mode with check-ocamlopt.byte-output, queue 533: the native typer's warnings)
+    [ -z "$(compout_of "$env")" ] || compout_output "$id" "$(dirname "$out")" "$out"
   done
 }
 
@@ -1507,6 +1557,12 @@ o2j_dump() {
     local f; for f in "$d"/*.cmo; do cp "$f" "${f%.cmo}.cmxs"; done
     return 0
   fi
+  # header.awk's objinfo mode at this level (queue 528, DECISION 528-8 (a)): oiobjinfo translated as the row's program (oi_tool_prog's
+  # preparation, the test's files and the standard library's .cmi beside it)
+  if [ -n "$(tool_of "$env")" ]; then
+    why=$(oi_tool_prog "$(tool_of "$env")" "$id" "$d" "$dyncopy" o2j) || printf '(ocaml/error "%s")\n' "$(echo "${why#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"
+    return 0
+  fi
   # header.awk's depend mode (queue 478): the depend program translated as the row's program (oi_depend_prog's, at this level's dump)
   if [ -n "$(depend_of "$env")" ]; then
     local f; for f in $(echo "$dyncopy" | tr ',' ' '); do cp -r "$(dirname "$src")/$f" "$d/"; done
@@ -1515,12 +1571,34 @@ o2j_dump() {
     mv "$d/_depend/Ocamldep.ae" "$d/$u.ae"
     return 0
   fi
-  o2j_dump_file "$d" "$base" "$flags" "$incs"
+  # header.awk's ocamlopt-alone mode with the compiler's output judged (queue 533, DECISION 528-R1 (a); @compout=1, @w=SPEC,...): the
+  # native typer runs with the test's -w, its warnings (D/typer.err) the compiler's output o2j_env_runs judges (compout_output); ocdump
+  # reports no warnings, so the oracle's path refuses the row
+  if [ -n "$(compout_of "$env")" ] && [ "${NATIVE:-0}" != 1 ]; then
+    printf '(ocaml/error "%s")\n' "the compiler's output (check-ocamlopt.byte-output) is the native typer's: ocdump reports no warnings" > "$d/$u.ae"; return 0
+  fi
+  o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")"
 }
 
-# o2j_dump_file D BASE FLAGS INCS: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's error form
+# compout_of ENV: 1 when ENV is a row whose compiler's output is judged (header.awk's @compout=1, queue 533), else nothing; wspec_of ENV:
+# its -w specs (@w=SPEC,...), as one -w of the native typer (arbace.repr.ocaml.typer splits it at the commas)
+compout_of() { case " $1 " in *" @compout=1 "*) echo 1 ;; esac; }
+wspec_of() { local kv; for kv in $1; do case $kv in @w=*) echo "${kv#@w=}" ;; esac; done; }
+# compout_output ID D OUT: the compiler's output, the native typer's warnings (D/typer.err), judged as ocamltest's check-ocamlopt.byte-output
+# judges ocamlopt's against TEST.compilers.reference (none: no output); when they differ, appended to the row's output OUT, so the row fails
+compout_output() {
+  local id=$1 d=$2 out=$3 ref=$TESTS/$1.compilers.reference
+  [ -f "$d/typer.err" ] || : > "$d/typer.err"
+  if [ -f "$ref" ]; then cmp -s "$ref" "$d/typer.err" || { echo "oi: the compiler's output differs from $(basename "$ref"):"; cat "$d/typer.err"; } >> "$out"
+  elif [ -s "$d/typer.err" ]; then { echo "oi: the compiler's output (no $(basename "$id").compilers.reference):"; cat "$d/typer.err"; } >> "$out"; fi
+  return 0
+}
+export -f compout_of wspec_of compout_output
+
+# o2j_dump_file D BASE FLAGS INCS [WSPEC]: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's
+# error form; WSPEC (queue 533): the native typer's -w, its warnings in D/typer.err
 o2j_dump_file() {
-  local d=$1 base=$2 flags=$3 incs=$4
+  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-}
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
@@ -1530,6 +1608,7 @@ o2j_dump_file() {
       case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;; *) bad=$f ;; esac
     done
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
+    [ -n "$wspec" ] && nf="$nf -w $wspec"
     if [ -n "$bad" ]; then printf '(ocaml/error "typer: flag %s not modelled")\n' "$bad" > "$d/$u.ae"
     elif ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
       printf '(ocaml/error "typer: %s")\n' "$(grep -a -v '^\s*at \|^Full report at:\|^/.*\.edn$\|^$' "$d/typer.err" | sed 's/^Execution error ([A-Za-z.]*) at [^ ]* ([^)]*)\.$//; s/^Execution error ([A-Za-z.]*) at [^ ]* ([^)]*)\. //' | tr '\n\t"\\' '    ' | sed 's/^ *//; s/  */ /g; s/ *$//' | head -c 200)" > "$d/$u.ae"

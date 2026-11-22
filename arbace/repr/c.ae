@@ -28,6 +28,79 @@
 
 (defn- base-name ^String [^String p] (let [i (.lastIndexOf p "/")] (if (neg? i) p (subs p (inc i)))))
 
+(def ^:dynamic *asm-units*
+  "c-tails: when true (the round trip, bin/repr-c read), a main file named .S (gcc's assembler-with-cpp, libcpp's CLK_ASM) is read
+  as an assembler unit (SPEC §9.6): its preprocessing layer's directives as forms and its assembler text between them as
+  (c/asm-text TEXT) forms; false (the checker's reads, ci, the tree check): read as C, as before."
+  false)
+
+(def ^:private asm-directive-names
+  #{"define" "undef" "include" "include_next" "if" "ifdef" "ifndef" "elif" "elifdef" "elifndef" "else" "endif" "line"
+    "error" "warning" "pragma" "ident" "sccs" "assert" "unassert" "embed"})
+
+(defn- asm-lines
+  "The logical lines of an assembler source's text `t`: [text-with-new-lines directive?] in order, a directive's backslash
+  continuations joined to it (libcpp's phase 2), a line whose `#` begins no directive name text (CLK_ASM)."
+  [^String t]
+  (let [n (count t)]
+    (loop [i 0 out []]
+      (if (>= i n)
+        out
+        (let [;; one physical line and its continuations
+              j (loop [j i]
+                  (let [e (.indexOf t "\n" (int j))]
+                    (cond (neg? e) n
+                          (and (pos? e) (= \\ (.charAt t (dec e)))) (recur (inc e))
+                          :else (inc e))))
+              s (subs t i j)
+              m (re-find #"^[ \t]*#[ \t]*([A-Za-z_][A-Za-z_0-9]*)?" s)
+              ;; a directive name, or nothing after the `#` (the null directive); `# 33` is no line marker in assembler and
+              ;; `# comment` text
+              dir? (and m (if (second m)
+                            (contains? asm-directive-names (second m))
+                            (boolean (re-find #"^[ \t]*#[ \t]*(\\\n[ \t]*)*\n?$" s))))]
+          (recur j (conj out [s dir?])))))))
+
+(defn- asm-directive-form
+  "A directive line's form (SPEC §9.2): c/define and c/undef as a C unit's, the rest c/directive with its text after the `#`'s
+  white space normalized to one space (the continuations joined)."
+  [^String s]
+  (let [one (-> s (str/replace #"\\\n" " ") (str/replace #"/\*.*?\*/" " ") (str/replace #"//.*" "") str/trim)
+        norm (str/replace one #"\s+" " ")
+        [_ verb rest-text] (re-find #"^#\s*([A-Za-z_][A-Za-z_0-9]*)?\s*(.*)$" norm)]
+    (case verb
+      "define"
+      (let [[_ nm params body] (re-find #"^([A-Za-z_][A-Za-z_0-9]*)(\([^)]*\))?\s*(.*)$" rest-text)]
+        (if params
+          (let [ps (vec (mapcat (fn [^String p]
+                                  (let [p (str/trim p)]
+                                    (cond (= p "...") ['&]
+                                          (.endsWith p "...") ['& (symbol (subs p 0 (- (count p) 3)))]
+                                          (= p "") []
+                                          :else [(symbol p)])))
+                                (str/split (subs params 1 (dec (count params))) #",")))]
+            (list 'c/define (symbol nm) ps body))
+          (list 'c/define (symbol nm) body)))
+      "undef" (list 'c/undef (symbol (str/trim rest-text)))
+      (list 'c/directive (str "#" (when verb verb) (when (seq rest-text) (str " " rest-text)))))))
+
+(defn- read-asm
+  "c-tails: an assembler source (*asm-units*): {:file-form :forms :units {}} (SPEC §9.6). `full`: each form's text kept
+  (:c/text), printed back byte for byte."
+  [cfg fc ^String name full]
+  (let [path (if (.startsWith name "/") name (str (:base cfg) "/" name))
+        t (String. ^bytes (lex/read-bytes path) "ISO-8859-1")
+        groups (partition-by second (asm-lines t))
+        forms (vec (mapcat (fn [g]
+                             (if (second (first g))
+                               (for [[s _] g] (cond-> (asm-directive-form s) full (with-meta {:c/text s})))
+                               (let [s (apply str (map first g))]
+                                 [(cond-> (list 'c/asm-text s) full (with-meta {:c/text s}))])))
+                           groups))
+        file-form (cond-> (list 'c/file (base-name name) :std (keyword (:std fc)) :lang :asm)
+                    full (-> (concat [:positions :full]) (with-meta {:c/head ""})))]
+    {:ns (ns-name-of name) :file-form file-form :forms forms :units {}}))
+
 (defn read-c
   "Reads the C file `name` (relative to (:base cfg)) with the configuration `cfg`
   (arbace.repr.c.host/config's) and the file configuration `fc`: {:ns :file-form :forms :units}, or
@@ -35,6 +108,8 @@
   :message m}. `full` reads mode :full: each top-level form holds its text (:c/text), c/file the text
   before the first (:c/head)."
   [cfg fc ^String name full]
+  (if (and *asm-units* (.endsWith name ".S"))
+  (read-asm cfg fc name full)
   (if-let [u (seq (:unsupported fc))]
     ;; CS239 (a): an option whose effect the read does not model is refused, a class of its own, not a wrong search
     {:refused :option :message (str "option " (str/join " " u) ": not modelled (gcc's quote/bracket split of the include search, -I-)")}
@@ -53,9 +128,12 @@
                              (map (fn [[l m]] (str l ": " m))
                                   (pedantic/notes name bytes (keyword (:std fc)) (:no-c2y-compat fc) (:no-c23-compat fc))))))}
       :else
-      (let [c (convert/convert r name bytes (keyword (:std fc)) {})
-            ;; CS150: the errors a recovered parse (parse/*recover*) reported, the checker's beside them
+      (let [soft (when parse/*recover* (java.util.ArrayList.))
+            c (binding [convert/*soft-errors* soft] (convert/convert r name bytes (keyword (:std fc)) {}))
+            ;; CS150: the errors a recovered parse (parse/*recover*) reported, the checker's beside them; c-tails: the converter's
+            ;; recovered ones (convert/*soft-errors*) too
             c (cond-> c (:recovered r) (assoc :parse-errors (:errors r)))
+            c (cond-> c (seq soft) (assoc :parse-errors (vec (concat (:parse-errors c) soft))))
             ;; CS214 (R5): the directory the read's relative paths are against, for the checker to read a unit's own lines
             c (assoc c :base (:base cfg))
             c (if (and (= :errors (:pedantic fc)) (not (:refused c)))
@@ -101,7 +179,7 @@
                                                 forms))
                         head (subs text 0 (int (or (first starts) n)))]
                     (assoc c :ns (ns-name-of name) :forms forms
-                           :file-form (with-meta file-form {:c/head head}))))))))))))))
+                           :file-form (with-meta file-form {:c/head head})))))))))))))))
 
 (defn unit-texts
   "A read's .ae files: {relative-path text}, the main unit's NAME.ae and its header units' c/h/D.ae."
@@ -161,7 +239,7 @@
           fc (host/file-config opts "gnu23")
           st (atom 0)]
       (doseq [f files]
-        (let [rd (read-c (host/config h fc ".") fc f (:full flags))]
+        (let [rd (binding [*asm-units* true] (read-c (host/config h fc ".") fc f (:full flags)))]
           (cond
             (:error rd) (do (binding [*out* *err*] (doseq [e (:error rd)] (println e))) (reset! st 1))
             (:refused rd) (do (binding [*out* *err*] (println (str f ": refused (" (name (:refused rd)) "): " (:message rd)))) (reset! st 1))
