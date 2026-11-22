@@ -258,11 +258,14 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         qdefs (java.util.HashMap.)
-        mine? (fn [n] (= main (get-in n [:loc :file])))
-        report! (fn [n msg] (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+        ;; (cpp-gnu, 2026-11-22: a declaration a macro of the main file writes is the main file's, at its expansion,
+        ;; ext/gnu-inline-global-reject.C's)
+        mine? (fn [n] (= main (or (get-in n [:loc :file]) (get-in n [:loc :expansionLoc :file]))))
+        loff (fn [n] (or (get-in n [:loc :offset]) (get-in n [:loc :expansionLoc :offset])))
+        report! (fn [n msg] (let [[l c] (line-col starts (long (loff n)))]
                               (.add out {:line l :col c :kind :error :rule :redefinition :msg msg})))
         ;; a trailing requires-clause makes a function's signature another (C++20 [over.dcl]): none compared
-        reqs? (fn [n] (let [b (long (get-in n [:loc :offset] 0))
+        reqs? (fn [n] (let [b (long (or (loff n) (get-in n [:loc :expansionLoc :offset]) 0))
                             e (loop [i b d 0]
                                 (if (>= i (.length src)) i
                                     (let [c (.charAt src (int i))]
@@ -293,7 +296,7 @@
                         (report! n (str "redefinition of '" (:name n) "'"))
                         (.put qdefs k true))))))]
     (letfn [(enter! [^java.util.HashMap r rk n path]
-              (let [nm (:name n) off (get-in n [:loc :offset]) dc (when (and off (mine? n)) (dclass n))]
+              (let [nm (:name n) off (loff n) dc (when (and off (mine? n)) (dclass n))]
                 (when (and nm (not= "" nm) dc)
                   (if (qualified-name? src (long off))
                     (when-let [q (qualifier src (long off))] (qdef! n (str path q "::" nm)))
@@ -324,10 +327,10 @@
             (class! [n path]
               (let [r (java.util.HashMap.)
                     ;; the members' path: the class's, written in its namespace or qualified (`struct A::B {...}`)
-                    q (when-let [off (when (mine? n) (get-in n [:loc :offset]))] (when (qualified-name? src (long off)) (qualifier src (long off))))
+                    q (when-let [off (when (mine? n) (loff n))] (when (qualified-name? src (long off)) (qualifier src (long off))))
                     ;; a specialization's members are its own (A<bool>::B is not A<T>::B)
                     path (cond (#{"ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl"} (:kind n))
-                               (str "(specialization@" (get-in n [:loc :offset]) ")::")
+                               (str "(specialization@" (loff n) ")::")
                                (:name n) (str path (when q (str q "::")) (:name n) "::")
                                :else "(unnamed)::")]
                 (doseq [m (:inner n)]
@@ -3436,7 +3439,70 @@
       (w (:nodes u) {}))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types]))
+;; GNU's numeric literal suffixes (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Options Controlling C++ Dialect", -fext-numeric-literals,
+;; the default of the gnu++ dialects: the suffixes of GCC's extended literals -- imaginary i and j, the fixed-point types of ISO/IEC TR
+;; 18037, w and q -- are its own, not user-defined literals' ud-suffixes): a literal with a fixed-point suffix (k or r, after u, h, l or ll)
+;; is GCC's "fixed-point types not supported in C++", at the literal (cpp0x/gnu_fext-numeric-literals.C, std_fext-numeric-literals.C).
+
+(defn fixed-point-literals
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ext (let [ds (filter #{"-fext-numeric-literals" "-fno-ext-numeric-literals"} (concat (:args u) *driver-args*))]
+              (if (seq ds) (= "-fext-numeric-literals" (last ds)) (str/starts-with? (str (:std u)) "gnu")))]
+    (when ext
+      (walk-nodes (fn [n _]
+                    (when (= "UserDefinedLiteral" (:kind n))
+                      (let [b (get-in n [:range :begin :offset]) len (get-in n [:range :begin :tokLen])]
+                        (when (and b len (= main (or (get-in n [:range :begin :file]) main)) (<= (+ (long b) (long len)) (.length src)))
+                          (let [t (subs src (long b) (+ (long b) (long len)))]
+                            (when (re-matches #"(?:\d[\d']*\.?[\d']*|\.\d[\d']*)(?:[eE][-+]?\d+)?(?i:u?(?:h|l|ll)?[kr])" t)
+                              (let [[l c] (line-col starts (long b))]
+                                (.add out {:line l :col c :kind :error :rule :literal :msg "fixed-point types not supported in C++"}))))))))
+                  (:nodes u) nil))
+    (vec out)))
+
+;; GNU's gnu_inline (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Common Function Attributes": gnu_inline with inline gives GNU C89's
+;; inline semantics, the definition used for inlining alone, "in C++ ... it still requires the inline keyword"): the inline declarations
+;; of a function agree on it -- an inline declaration after a gnu_inline one or the reverse, "'f' redeclared inline with[out]
+;; 'gnu_inline' attribute", at the later (ext/gnu-inline-global-reject.C; the redefinitions are redefinitions' own). And GCC's
+;; dynamic_cast runtime (the Itanium C++ ABI's 2.9.7: a dynamic_cast to a pointer or reference of another class is a call of
+;; __cxxabiv1's extern "C" void *__dynamic_cast(const void *, const __class_type_info *, const __class_type_info *, ptrdiff_t), which
+;; g++ declares implicitly): a declaration by the program of that name of another type conflicts, an error with no line (its
+;; implicit declaration's place, :line 0), rtti/dyncast8.C.
+
+(defn gnu-inline-and-abi
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        gi? (fn [n] (some #(= "gnu_inline" (gnu-attr-name %)) (gnu-attrs-of n)))
+        first-inline (java.util.HashMap.)]
+    (doseq [f (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u))
+            :when (and (= "FunctionDecl" (:kind f)) (:inline f) (string? (:name f)))]
+      (if-let [g0 (.get first-inline (:name f))]
+        (when (not= (= g0 :gnu) (boolean (gi? f)))
+          (when-let [o (or (get-in f [:loc :offset]) (get-in f [:loc :expansionLoc :offset]) (get-in f [:range :begin :offset]))]
+            (when (= main (or (get-in f [:loc :file]) (get-in f [:loc :expansionLoc :file]) (get-in f [:range :begin :file]) main))
+              (let [[l c] (line-col starts (long o))]
+                (.add out {:line l :col c :kind :error :rule :gnu-inline
+                           :msg (str "'" (:name f) "' redeclared inline " (if (gi? f) "with" "without") " 'gnu_inline' attribute")})))))
+        (.put first-inline (:name f) (if (gi? f) :gnu :plain))))
+    ;; __dynamic_cast
+    (let [decls (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "__cxxabiv1" (:name ns)))
+                      d (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:inner ns))
+                      :when (and (#{"FunctionDecl" "VarDecl"} (:kind d)) (= "__dynamic_cast" (:name d)))]
+                  d)
+          used (let [r (atom false)]
+                 (walk-nodes (fn [n _] (when (and (= "CXXDynamicCastExpr" (:kind n)) (not (re-find #"^(?:const )?void \*" (str (get-in n [:type :qualType])))))
+                                         (reset! r true)))
+                             (:nodes u) nil)
+                 @r)]
+      (when (and used (some #(or (= "VarDecl" (:kind %))
+                                 (not= "void *(const void *, const __class_type_info *, const __class_type_info *, long)"
+                                       (str/replace (str (get-in % [:type :qualType])) #"\s*(?:throw\(\)|noexcept)\s*$" "")))
+                            decls))
+        (.add out {:line 0 :col 0 :kind :error :rule :eh-abi :msg "conflicting declaration of C function '__dynamic_cast'"})))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
@@ -3609,7 +3675,9 @@
                                     true
                                     (do (.add given [nm (:line d) inner]) false))))))
                           ds))]
-      {:diags ds :other (+ (long other) (count (driver-errors *driver-args*))) :declines (:declines u)})
+      ;; (cpp-gnu: a check's error with no line, :line 0, an implicit declaration's, counted with those outside the main file)
+      {:diags (vec (remove #(= 0 (:line %)) ds))
+       :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)})
     (catch arbace.lang.ExceptionInfo e
       (if-let [g (or (:cpp/gap (ex-data e)) (when (:cpp/parse (ex-data e)) :parse))]
         {:refused g :message (ex-message e)}
