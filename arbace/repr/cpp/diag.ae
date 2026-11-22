@@ -3879,7 +3879,82 @@
                 (:nodes u) nil)
     (vec out)))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits]))
+;; GNU's error attribute through always_inline (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Common Function Attributes": error
+;; (message) "If ... a call to such a function is not eliminated through dead code elimination or other optimizations, an error ...
+;; is diagnosed"; always_inline and gnu_inline's extern inline functions are inlined at each call, __builtin_va_arg_pack_len the number of
+;; the call's anonymous arguments, __builtin_constant_p of an argument the call gives as a literal 1): at each call of such an inline
+;; function with literal arguments, its body is followed with its parameters bound -- an if's condition decided or both branches
+;; kept, a return ending the path -- and a call of an error function on a path is "call to 'f' declared with attribute error", at
+;; that call (ext/va-arg-pack-len-2.C).
+
+(defn error-attr-calls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (into {} (for [n (mapcat #(if (= "LinkageSpecDecl" (:kind %)) (:inner %) [%]) (:nodes u)) :when (and (= "FunctionDecl" (:kind n)) (string? (:name n)))]
+                       [(:name n) n]))
+        erroring (set (for [[nm f] fns :when (some #(= "error" (gnu-attr-name %)) (gnu-attrs-of f))] nm))
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        inline? (fn [f] (and (:inline f) (some #(#{"always_inline" "gnu_inline"} (gnu-attr-name %)) (gnu-attrs-of f))))
+        callee (fn [c] (get-in (some-> (first (:inner c)) strip) [:referencedDecl :name]))]
+    (when (seq erroring)
+      (walk-nodes
+       (fn [c _]
+         (when (= "CallExpr" (:kind c))
+           (when-let [f (get fns (callee c))]
+             (when-let [body (and (inline? f) (first (filter #(= "CompoundStmt" (:kind %)) (:inner f))))]
+               (let [ps (vec (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner f)))
+                     args (vec (rest (:inner c)))
+                     lit (fn [a] (let [a (strip a)] (case (:kind a) "IntegerLiteral" (try (Long/parseLong (str (:value a))) (catch Exception _ nil)) "StringLiteral" :str nil)))]
+                 (when (and (>= (count args) (count ps)) (every? some? (map lit args)))
+                   (let [env (zipmap ps (map lit args))
+                         va-len (- (count args) (count ps))]
+                     (letfn [(ev [x]
+                               (let [x (strip x)]
+                                 (case (:kind x)
+                                   "IntegerLiteral" (try (Long/parseLong (str (:value x))) (catch Exception _ nil))
+                                   "DeclRefExpr" (let [v (get env (get-in x [:referencedDecl :name]))] (when (number? v) v))
+                                   "CallExpr" (case (callee x)
+                                                "__builtin_va_arg_pack_len" va-len
+                                                "__builtin_constant_p" (let [a (some-> (second (:inner x)) strip)]
+                                                                         (if (or (#{"IntegerLiteral" "StringLiteral"} (:kind a))
+                                                                                 (and (= "DeclRefExpr" (:kind a)) (contains? env (get-in a [:referencedDecl :name]))))
+                                                                           1 0))
+                                                nil)
+                                   "UnaryOperator" (when (= "!" (:opcode x)) (when-let [v (ev (first (:inner x)))] (if (zero? (long v)) 1 0)))
+                                   "BinaryOperator" (let [[a b] (:inner x) va (ev a) vb (ev b) op (:opcode x)]
+                                                      (cond
+                                                        (= op "&&") (cond (and va (zero? (long va))) 0 (and va vb) (if (zero? (long vb)) 0 1) :else nil)
+                                                        (= op "||") (cond (and va (not (zero? (long va)))) 1 (and va vb) (if (zero? (long vb)) 0 1) :else nil)
+                                                        (and va vb) (let [va (long va) vb (long vb)]
+                                                                      (case op "&" (bit-and va vb) "|" (bit-or va vb) "+" (+ va vb) "-" (- va vb)
+                                                                            "==" (if (= va vb) 1 0) "!=" (if (not= va vb) 1 0) "<" (if (< va vb) 1 0) ">" (if (> va vb) 1 0)
+                                                                            "<=" (if (<= va vb) 1 0) ">=" (if (>= va vb) 1 0) nil))
+                                                        :else nil))
+                                   nil)))
+                             (calls! [x]
+                               (walk-nodes (fn [k _] (when (and (= "CallExpr" (:kind k)) (contains? erroring (callee k)))
+                                                       (when-let [o (get-in k [:range :begin :offset])]
+                                                         (when (= main (or (get-in k [:range :begin :file]) main))
+                                                           (let [[l cc] (line-col starts (long o))]
+                                                             (.add out {:line l :col cc :kind :error :rule :error-attr
+                                                                        :msg (str "call to '" (callee k) "' declared with attribute error")}))))))
+                                           x nil))
+                             ;; a statement followed: true when it ends the path (a return on every way through it)
+                             (stmt [x]
+                               (case (:kind x)
+                                 "ReturnStmt" (do (calls! x) true)
+                                 "CompoundStmt" (loop [ss (:inner x)] (if-let [s1 (first ss)] (if (stmt s1) true (recur (rest ss))) false))
+                                 "IfStmt" (let [[cnd th el] (:inner x) v (ev cnd)]
+                                            (calls! cnd)
+                                            (cond (nil? v) (let [a (stmt th) b (if el (stmt el) false)] (and a b))
+                                                  (zero? (long v)) (if el (stmt el) false)
+                                                  :else (stmt th)))
+                                 (do (calls! x) false)))]
+                       (stmt body)))))))))
+       (:nodes u) nil))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
