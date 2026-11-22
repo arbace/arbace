@@ -100,6 +100,101 @@ env_val() { local kv; for kv in $1; do case $kv in "$2="*) echo "${kv#"$2"=}" ;;
 
 export -f toplevel_build toplevel_unit toplib_need env_val
 
+# the bytecode tools on oi (queue 532, DECISION 528-13 (a); doc/ocaml/OCAML-SURVEY.md "As built: queue 532"): ocamlc itself, OCaml
+# 5.5.0's driver/main.ml over compiler-libs' ocamlcommon (bin/oi's COMPLIB_UNITS and the rest of comp_SOURCES: opcodes, makedepend,
+# compile_common) and ocamlbytecomp (ocamlbytecomp_SOURCES), all unmodified, and tools/dumpobj on them; the units the Makefile
+# generates made as it makes them: opcodes.ml and tools/opnames.ml by tools/make_opcodes (the native ocamllex's, run on oi) over
+# runtime/caml/instruct.h, opcodes.mli by the typer's `ocamlc -i` (`types`), bytecomp/byterntm.ml by the native ocamllex
+BCLIB=$OI_DIR/bytecomp
+BCLIB_UNITS="opcodes makedepend compile_common byterntm instruct bytegen printinstr emitcode bytelink bytelibrarian bytepackager errors compile maindriver"
+export BCLIB BCLIB_UNITS
+
+# bytecomp_build: the units above, driver/main.ml (ocamlc) and tools/opnames.ml and dumpobj.ml typed and translated natively in
+# .tmp/oi/bytecomp/src (each against its .mli) with compiler-libs' interfaces, once a library (its key, native_key's) and source; a lock
+# keeps the check's jobs to one build. Status 0, else 1 with the reason on the standard output
+bytecomp_build() {
+  [ "${NATIVE:-0}" = 1 ] || { echo "bytecomp: on the native path alone"; return 1; }
+  local w=$BCLIB key
+  key=$({ cat "$LIB/key"; sha256sum "$TOP"/bytecomp/*.ml* "$TOP"/driver/*.ml* "$TOP"/tools/make_opcodes.mll "$TOP"/tools/opnames.mli "$TOP"/tools/dumpobj.ml* "$TOP/runtime/caml/instruct.h"; declare -f bytecomp_build bytecomp_unit; echo "$BCLIB_UNITS"; } | sha256sum | cut -d' ' -f1)
+  mkdir -p "$OI_DIR"
+  (
+    flock 8
+    [ -f "$w/key" ] && [ "$(cat "$w/key")" = "$key" ] && exit 0
+    [ -f "$w/failed.key" ] && [ "$(head -1 "$w/failed.key")" = "$key" ] && { sed -n 2p "$w/failed.key"; exit 1; }
+    bcfail() { printf '%s\n%s\n' "$key" "$1" > "$w/failed.key"; echo "$1"; exit 1; }
+    rm -rf "${w:?}"; mkdir -p "$w/src" "$w/gen"
+    local m lib=${LIB_NATIVE:-$LIB}
+    # the generated units (the Makefile's rules for bytecomp/opcodes.ml, bytecomp/opcodes.mli, tools/opnames.ml, bytecomp/byterntm.ml)
+    "$root/bin/repr-ocaml" ocamllex -q -o "$w/gen/make_opcodes.ml" "$TOP/tools/make_opcodes.mll" > "$w/gen/ocamllex.log" 2>&1 \
+      && "$root/bin/repr-ocaml" ocamllex -q -o "$w/src/byterntm.ml" "$TOP/bytecomp/byterntm.mll" >> "$w/gen/ocamllex.log" 2>&1 \
+      || bcfail "bytecomp: the native ocamllex: $(head -c 200 "$w/gen/ocamllex.log" | tr '\n\t' '  ')"
+    (cd "$w/gen" && typer_ns lambda --simplify --stdlib "$(native_dir)" --file make_opcodes.ml make_opcodes.ml > Make_opcodes.ae 2> typer.err) \
+      || bcfail "bytecomp: typer make_opcodes: $(typer_err_text "$w/gen/typer.err")"
+    for m in opcodes opnames; do
+      (cd "$w/gen" && "$EXE" run "$lib" Make_opcodes.ae -- -$m < "$TOP/runtime/caml/instruct.h" > "$w/src/$m.ml" 2> "$m.err") \
+        || bcfail "bytecomp: make_opcodes -$m on oi: $(head -c 200 "$w/gen/$m.err" | tr '\n\t' '  ')"
+    done
+    (cd "$w/src" && typer_ns types --stdlib "$(native_dir)" --file opcodes.ml opcodes.ml > "$w/gen/opcodes.types" 2> "$w/gen/types.err") \
+      || bcfail "bytecomp: typer -i opcodes: $(typer_err_text "$w/gen/types.err")"
+    printf '%b\n' "$(sed -n '2s/^ *"\(.*\)"$/\1/p' "$w/gen/opcodes.types")" > "$w/src/opcodes.mli"
+    [ -s "$w/src/opcodes.mli" ] || bcfail "bytecomp: opcodes.mli is empty"
+    for m in makedepend compile_common errors compile maindriver main; do cp "$TOP/driver/$m.ml" "$TOP/driver/$m.mli" "$w/src/"; done
+    for m in instruct bytegen printinstr emitcode bytelink bytelibrarian bytepackager; do cp "$TOP/bytecomp/$m.ml" "$TOP/bytecomp/$m.mli" "$w/src/"; done
+    cp "$TOP/bytecomp/byterntm.mli" "$TOP/tools/opnames.mli" "$TOP/tools/dumpobj.ml" "$TOP/tools/dumpobj.mli" "$w/src/"
+    : > "$w/failed.txt"
+    for m in $BCLIB_UNITS main opnames dumpobj; do echo "$m"; done | xargs -r -L 1 -P "${OI_LIB_JOBS:-3}" bash -c 'bytecomp_unit "$1" || true' _
+    [ -s "$w/failed.txt" ] && bcfail "bytecomp: typer: $(head -1 "$w/failed.txt" | tr '\t' ' ' | head -c 200)"
+    for m in $BCLIB_UNITS; do echo "$w/src/$(echo "${m:0:1}" | tr a-z A-Z)${m:1}.ae"; done > "$w/units.txt"
+    local miss; miss=$(lib_missing $(cat "$w/units.txt") "$w/src/Main.ae" "$w/src/Opnames.ae" "$w/src/Dumpobj.ae"); [ -z "$miss" ] || bcfail "bytecomp: $miss"
+    # each program's units in link order (ocamlc links what a linked unit requires): ocamlc's (driver/main.ml), dumpobj's
+    bclib_need "$w/src/Main.ae" > "$w/ocamlc.units"; bclib_need "$w/src/Dumpobj.ae" > "$w/dumpobj.units"
+    miss=$(lib_missing $(cat "$w/ocamlc.units" "$w/dumpobj.units")); [ -z "$miss" ] || bcfail "bytecomp: $miss"
+    echo "$key" > "$w/key"
+  ) 8> "$OI_DIR/bytecomp.lock"
+}
+
+# bytecomp_unit UNIT: $BCLIB/src/UNIT.ml typed and translated natively (against its .mli) into Unit.ae, or listed in $BCLIB/failed.txt
+bytecomp_unit() {
+  local d=$BCLIB/src m=$1 M; M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"
+  if (cd "$d" && OI_TYPER_TIMEOUT=${OI_LIB_TIMEOUT:-240} typer_ns lambda --simplify --debug --intf --stdlib "$(native_dir)" \
+        --include "$d:$COMPLIB" --file "$m.ml" "$m.ml" > "$M.ae.new" 2> "$m.typer.err"); then
+    mv "$d/$M.ae.new" "$d/$M.ae"; return 0
+  fi
+  rm -f "${d:?}/${M:?}.ae.new"; printf '%s\t%s\n' "$m" "$(typer_err_text "$d/$m.typer.err")" >> "$BCLIB/failed.txt"; return 1
+}
+
+# bclib_need DUMP...: the units of compiler-libs and of the tool's own (BCLIB_UNITS, then tools/opnames) the dumps require and those
+# they require, in link order
+bclib_need() {
+  local -A seen=(); local q=() m u M own=()
+  for u in "$@"; do while read -r m; do [ -n "$m" ] && q+=("$m"); done <<< "$(dump_required "$u")"; done
+  while [ ${#q[@]} -gt 0 ]; do
+    m=${q[0]}; q=("${q[@]:1}"); [ -n "${seen[$m]:-}" ] && continue; seen[$m]=1
+    [ -f "$BCLIB/src/$m.ae" ] || continue
+    while read -r u; do [ -n "$u" ] && q+=("$u"); done <<< "$(dump_required "$BCLIB/src/$m.ae")"
+  done
+  for m in $BCLIB_UNITS opnames; do M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; [ -n "${seen[$M]:-}" ] && own+=("$BCLIB/src/$M.ae"); done
+  complib_need "$@" "${own[@]}"; printf '%s\n' "${own[@]}"
+}
+
+# bc_stdlib D: D/_stdlib, the standard library's .cmi files made on oi (objinfo_build's) and stdlib/runtime-launch-info as the
+# Makefile makes it for a build without mangled runtime names, a NUL then the executable launcher, here a line (Config.launch_method
+# is the shebang one, so Bytelink writes no executable launcher: write_header reads the file, its stub is never copied)
+bc_stdlib() {
+  local d=$1/_stdlib; rm -rf "$d"; mkdir -p "$d"; ln -s "$OIOBJ"/stdlib/* "$d/"
+  printf '\000oi: no executable launcher\n' > "$d/runtime-launch-info"
+}
+
+# bc_ocamlc D ARG...: ocamlc ARG... on oi in D (driver/main.ml over compiler-libs' bytecomp: bytecomp_build's), its messages (the
+# standard output and error, ocamltest's compiler output) in D/compilers.out; its exit status
+bc_ocamlc() {
+  local d=$1 lib=${LIB_NATIVE:-$LIB}; shift
+  # shellcheck disable=SC2046
+  (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $(cat "$BCLIB/ocamlc.units") "$BCLIB/src/Main.ae" -- "$@") > "$d/compilers.out" 2>&1
+}
+
+export -f bytecomp_build bytecomp_unit bclib_need bc_stdlib bc_ocamlc
+
 # oi_tool_prog NAME ID D COPY ENV: the row's program for the tool NAME in its run directory D, the test's files (COPY, comma-separated: the
 # readonly files and the modules) copied from its source directory; objinfo: the standard library's .cmi files linked as D/_stdlib and
 # oiobjinfo dumped as a program of the row's path (oi_dump, natively) into D/U.ae, U the test's unit. ocamltex and toplevel (queue 529):
@@ -178,6 +273,33 @@ oi_tool_prog() {
       # shellcheck disable=SC2086
       { complib_need "$d/$u.ae" $tl; echo "$tl"; printf '%s\n' $own; } | grep . > "$d/tool.units"
       return 0 ;;
+    dumpobj)
+      # (queue 532) tool-dumpobj's header (header.awk's dumpobj mode): ocamlc on oi builds the test's program, `ocamlc -nostdlib -I
+      # _stdlib FLAGS -o TEST.byte TEST.ml` (@bcflags=FLAG,...), then the row's program is tools/dumpobj on oi (its arguments the
+      # run hook's, header.awk's)
+      why=$(objinfo_build) || { echo "${why:-objinfo: the build failed}"; return 1; }
+      why=$(bytecomp_build) || { echo "${why:-bytecomp: the build failed}"; return 1; }
+      bc_stdlib "$d"
+      # shellcheck disable=SC2046
+      bc_ocamlc "$d" -nostdlib -I _stdlib $(env_val "$env" @bcflags | tr ',' ' ') -o "$base.byte" "$base.ml" \
+        || { echo "dumpobj: ocamlc on oi: $(head -c 200 "$d/compilers.out" | tr '\n\t' '  ')"; return 1; }
+      cp "$BCLIB/src/Dumpobj.ae" "$d/$u.ae"; cp "$BCLIB/dumpobj.units" "$d/tool.units"
+      return 0 ;;
+    cmo)
+      # (queue 532) a compile-only test of a unit's .cmo (header.awk's objinfo mode, program = "U.cmo"): the copies (@cmocopy=SRC:DST,...),
+      # then `ocamlc -nostdlib -I _stdlib FLAGS -c FILES` on oi (@bcflags, @bcmods), its messages judged by tool_output; the row's program
+      # oiobjinfo printing the .cmo (no file to compile; its arguments header.awk's)
+      why=$(objinfo_build) || { echo "${why:-objinfo: the build failed}"; return 1; }
+      why=$(bytecomp_build) || { echo "${why:-bytecomp: the build failed}"; return 1; }
+      for f in $(echo "$copy" | tr ',' ' '); do cp -r "$src/$f" "$d/"; done
+      for f in $(env_val "$env" @cmocopy | tr ',' ' '); do cp "$d/${f%%:*}" "$d/${f#*:}"; done
+      bc_stdlib "$d"
+      # shellcheck disable=SC2046
+      bc_ocamlc "$d" -nostdlib -I _stdlib $(env_val "$env" @bcflags | tr ',' ' ') -c $(env_val "$env" @bcmods | tr ',' ' ') || true
+      mkdir -p "$d/_tool"; cp "$root/test/ocaml/objinfo/oiobjinfo.ml" "$d/_tool/"
+      why=$(oi_dump "$d/_tool" oiobjinfo "" complib) || { echo "cmo: oiobjinfo: $why"; return 1; }
+      mv "$d/_tool/Oiobjinfo.ae" "$d/$u.ae"
+      return 0 ;;
     *) echo "tool: $name is not a tool of bin/oi"; return 1 ;;
   esac
 }
@@ -191,6 +313,11 @@ tool_output() {
       ref=$TESTS/$id.compilers.reference
       if [ -f "$ref" ]; then cmp -s "$ref" "$d/ocamlc.out" || { echo "oi: the compiler's output differs from $(basename "$ref"):"; cat "$d/ocamlc.out" 2>/dev/null; } >> "$out"
       elif [ -s "$d/ocamlc.out" ]; then { echo "oi: the compiler's output (no $(basename "$id").compilers.reference):"; cat "$d/ocamlc.out"; } >> "$out"; fi ;;
+    cmo)
+      # (queue 532) ocamlc on oi's messages (D/compilers.out, bc_ocamlc's) as check-ocamlc.byte-output judges them
+      ref=$TESTS/$id.compilers.reference
+      if [ -f "$ref" ]; then cmp -s "$ref" "$d/compilers.out" || { echo "oi: the compiler's output differs from $(basename "$ref"):"; cat "$d/compilers.out" 2>/dev/null; } >> "$out"
+      elif [ -s "$d/compilers.out" ]; then { echo "oi: the compiler's output (no $(basename "$id").compilers.reference):"; cat "$d/compilers.out"; } >> "$out"; fi ;;
     ocamltex)
       # (queue 529) ocamltest's script action writes the script's output and errors into the test's output file after ocamltex's own
       # (-o TEST.output, check-program-output's against TEST.reference): the row's output is TEST.output, then the run's own (none on success)

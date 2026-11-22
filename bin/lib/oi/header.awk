@@ -221,7 +221,7 @@ END {
   # oi's level alone: the light AOT level does not load compiler-libs' typing units in its limit (queue 480's DECISION 480-1)
   oimode = 0
   if (aot == 0 && hasbuild && !dlmode && !dpmode && !odmode) {
-    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0
+    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0; oisrc = ""; oidst = ""; oicps = ""
     for (j = 1; j <= m && oimode; j++) {
       s = trim(st[j]); if (s == "") continue
       v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
@@ -231,15 +231,18 @@ END {
       if (s ~ /^all_modules *= *"/) { oimods = v; oicopy = oicopy " " v; continue }
       if (s == "setup-ocamlc.byte-build-env" || s == "check-ocamlc.byte-output" || s == "check-program-output") continue
       if (s ~ /^output *= *"out_objinfo"$/) continue
+      # (queue 532) ocamltest's copy action before the compile (src = "A"; dst = "B"; copy), kept for the .cmo test below
+      if (s ~ /^(src|dst) *= *"/ && !oicomp) { if (s ~ /^src/) oisrc = v; else oidst = v; continue }
+      if (s == "copy" && !oicomp && oisrc != "" && oidst != "") { oicps = oicps (oicps == "" ? "" : ",") oisrc ":" oidst; oisrc = ""; oidst = ""; continue }
       if (s == "ocamlc.byte") { if (oimods == "" || oiobj) oimode = 0; oicomp = 1; continue }
       if (s ~ /^program *= *"/) { if (!oicomp) oimode = 0; oiprog = v; continue }
       if (s == "ocamlobjinfo") { if (oiprog == "") oimode = 0; oiobj = 1; continue }
       oimode = 0
     }
-    if (!(oico && oicomp && oiobj)) oimode = 0
+    if (!(oico && oicomp && oiobj) || (oicps != "" && oiprog !~ /^[A-Za-z0-9_]+\.cmo$/)) oimode = 0
     if (oimode) {
-      c = split(oiflags " " oimods " " oiprog " " oicopy, hm, " ")
-      for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
+      c = split(oiflags " " oimods " " oiprog " " oicopy " " oicps, hm, /[ ,:]/)
+      for (q = 1; q <= c; q++) if (hm[q] != "" && hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
     }
   }
   if (oimode) {
@@ -247,8 +250,38 @@ END {
     for (q = 1; q <= c; q++) if (!(hm[q] in oiseen)) { oiseen[hm[q]] = 1; oicp = oicp (oicp == "" ? "" : ",") hm[q] }
     helper = 0; m = 0; incs = " complib"
     args = trim("-c " oiflags " -nostdlib -I _stdlib " oimods " -objinfo " oiprog); gsub(/ +/, " ", args)
-    env = env " @tool=objinfo @dyncopy=" oicp
+    # (queue 532) the unit's .cmo (program = "U.cmo"): the compile is ocamlc on oi (bin/lib/oi/tools.bash's bytecomp tool), `ocamlc
+    # -nostdlib -I _stdlib FLAGS -c FILES` after the copies (@cmocopy=SRC:DST,...), then ocamlobjinfo's .cmo printing (oiobjinfo, no file
+    # to compile) with ocamltest's -null-crc; environment @tool=cmo @bcflags=FLAG,... @bcmods=FILE,...
+    if (oiprog ~ /^[A-Za-z0-9_]+\.cmo$/) {
+      args = "-objinfo -null-crc " oiprog; bcf = trim(oiflags); gsub(/ +/, ",", bcf); bcm = trim(oimods); gsub(/ +/, ",", bcm)
+      env = env " @tool=cmo @dyncopy=" oicp " @bcflags=" bcf " @bcmods=" bcm (oicps == "" ? "" : " @cmocopy=" oicps)
+    } else env = env " @tool=objinfo @dyncopy=" oicp
   }
+  # dumpobj mode (queue 532, DECISION 528-13 (a): compiler-libs' bytecomp on oi, judged by the test's own .reference): a test at oi's
+  # level whose header builds its program (`flags = "FLAGS"; setup-ocamlc.byte-build-env; ocamlc.byte; run; check-program-output`) and
+  # whose run hook TEST.run is tools/dumpobj's (`"${ocamlrun}" "${ocamlsrcdir}/tools/dumpobj" -nobanners "${program}" > "${output}"`):
+  # the build is ocamlc on oi (OCaml 5.5.0's driver over compiler-libs' bytecomp, bin/lib/oi/tools.bash), `ocamlc -nostdlib -I _stdlib
+  # FLAGS -o TEST.byte TEST.ml`, and the run the hook's command line, tools/dumpobj on oi, the row's program with `-nobanners
+  # TEST.byte` (no hook); environment @tool=dumpobj @bcflags=FLAG,...
+  dbmode = 0
+  if (aot == 0 && hasbuild && !dlmode && !odmode && !oimode) {
+    dbb = FILENAME; sub(/^.*\//, "", dbb); sub(/\.ml$/, "", dbb); hook = FILENAME; sub(/\.mll?$/, ".run", hook)
+    while ((getline hl < hook) > 0) if (trim(hl) == "\"${ocamlrun}\" \"${ocamlsrcdir}/tools/dumpobj\" -nobanners \"${program}\" > \"${output}\"") dbmode = 1
+    close(hook); dbflags = ""; dbstep = 0
+    for (j = 1; j <= m && dbmode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+      if (s ~ /^flags *= *"/ && dbstep == 0) { dbflags = v; continue }
+      if (s == "setup-ocamlc.byte-build-env" && dbstep == 0) { dbstep = 1; continue }
+      if (s == "ocamlc.byte" && dbstep == 1) { dbstep = 2; continue }
+      if (s == "run" && dbstep == 2) { dbstep = 3; continue }
+      if (s == "check-program-output" && dbstep == 3) { dbstep = 4; continue }
+      dbmode = 0
+    }
+    if (dbstep != 4 || dbflags !~ /^[A-Za-z0-9_ -]*$/ || dbb !~ /^[A-Za-z0-9_]+$/) dbmode = 0
+  }
+  if (dbmode) { helper = 0; m = 0; incs = ""; args = "-nobanners " dbb ".byte"; gsub(/ /, ",", dbflags); env = env " @tool=dumpobj @bcflags=" dbflags }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
@@ -479,7 +512,7 @@ END {
   # check-program-output, so TEST.run (@hook=run: swapchan's and tls's sort, delayintr's SIGINT) and TEST.check-program-output
   # (@check=check-program-output: signal's grep) are its hooks; bin/oi's runners run them as actions_helpers.ml's run_hook does
   hook = FILENAME; sub(/\.mll?$/, ".run", hook)
-  if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
+  if (!dbmode && (getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
   hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   # ocamltest exports its variables to the program's environment (environments.ml's to_system_env; queue 515): a program that reads

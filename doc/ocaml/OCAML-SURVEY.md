@@ -4651,3 +4651,37 @@ holds no class. The read cell 3,143 / 19 / 0 to 3,162 / 0 / 0; OCaml's completen
   oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
   passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
 - Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.
+
+## As built: queue 532 (2026-11-22, the VM): ocamlc and dumpobj on oi, tool-dumpobj and the .cmo test
+
+DECISION 528-13 (a) (the user, 2026-11-22): compiler-libs' bytecomp as a tool on oi. The bytecode compiler is OCaml's own, unmodified,
+typed by Arbace's typer and run on oi; its rows are judged by their own .reference.
+
+- **ocamlc on oi** (`bin/lib/oi/tools.bash`'s `bytecomp_build`, `.tmp/oi/bytecomp` by its key, outside bin/oi so native_key and
+  `COMPLIB_UNITS` stay 529's): the rest of comp_SOURCES (opcodes, makedepend, compile_common) and ocamlbytecomp_SOURCES (byterntm,
+  instruct, bytegen, printinstr, emitcode, bytelink, bytelibrarian, bytepackager, errors, compile, maindriver), `driver/main.ml` itself
+  (`exit (Maindriver.main Sys.argv Format.err_formatter)`), and `tools/dumpobj.ml` with `tools/opnames.ml`, each typed against its
+  .mli over compiler-libs' interfaces (17 units, none refused, about 3 minutes at 2 jobs). The generated units are made as the
+  Makefile makes them: `tools/make_opcodes.mll` by the native ocamllex, run on oi over `runtime/caml/instruct.h` (`-opcodes`, `-opnames`),
+  `opcodes.mli` by the typer's `ocamlc -i` (`types`), `bytecomp/byterntm.ml` by the native ocamllex. Each program links what its
+  dump requires (`bclib_need`: 130 units for ocamlc, 33 for dumpobj).
+- **The command line** (`bc_ocamlc`): `ocamlc -nostdlib -I _stdlib FLAGS ...` as ocamltest's ocamlc.byte runs it, less `-use-runtime
+  ${ocamlrun}` (Symtable.init would run `ocamlrun -p` for the primitives: the runtime's own list, Runtimedef's, is used, as for any
+  ocamlc without -use-runtime; the shebang line is the only other thing it changes) and `-I runtime`. `_stdlib` is the standard
+  library's .cmi files made on oi (objinfo_build's) with `runtime-launch-info` as stdlib/Makefile makes it for unmangled runtime names
+  (a NUL, then the launcher: Config's launch method is the shebang one, so Bytelink reads the file and writes a sh launcher, never the
+  stub, which is a line here).
+- **oi.** `Obj.raw_field` of a custom block's field 0 (`caml_obj_raw_field`): in C the address of its custom operations, here a word
+  made from the operations' identifier (`customOpsWord` over `customIdent`: "_i", "_j", "_n", a Custom's name), the same for every
+  block of a kind: dumpobj's `same_custom` tells the boxed integers apart by it (`GETGLOBAL 42L`).
+- **header.awk** (aot=0 alone; over every header of the testsuite at levels 0, 1 and 2, 4,542 readings, only these two change):
+  the dumpobj mode (`flags; setup-ocamlc.byte-build-env; ocamlc.byte; run; check-program-output` with the run hook TEST.run being
+  tools/dumpobj's command line: ocamlc on oi builds TEST.byte, the row's program is dumpobj on oi with the hook's arguments
+  `-nobanners TEST.byte`, no hook) and the objinfo mode's .cmo (`src`/`dst`/`copy` before the compile, `program = "U.cmo"`: ocamlc on
+  oi compiles, its messages judged against TEST.compilers.reference by `tool_output`, then oiobjinfo, which now prints a .cmo
+  verbatim as tools/objinfo.ml's print_cmo_infos does, with ocamltest's `-null-crc`).
+- **Rows** (run, `bin/oi check --only-list`): tool-dumpobj/test passes (`GETGLOBAL 42L ... SETGLOBAL compilation unit `Test' ... STOP`,
+  the reference byte for byte) and no-alias-deps/aliases passes (warning 49's two reports byte for byte, then the .cmo's imports in
+  Consistbl's order and its required globals). `:compiler-output` and `:compiler-output-cmo` list no program at oi's level; the AOT
+  levels keep both (528-8: the tools AOT-compiled, the main host's compiled level). Controls: dumpobj's run against the .cmo test's
+  reference and the reverse must differ.

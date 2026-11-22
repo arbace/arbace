@@ -17,9 +17,9 @@
 
 (* oiobjinfo (Arbace, queue 511): ocamltest's `ocamlc -c FLAGS FILE...` then `ocamlobjinfo ARGS` on oi, over compiler-libs' units.
    Modified from OCaml 5.5.0's tools/objinfo.ml (its .cmi and .cmt printing kept verbatim: print_name_crc, print_cmi_infos,
-   print_cmt_infos; the .cmo, .cma, .cmx, .cmxa, .cmxs and executable parts left out, since oi writes none of them) and
-   driver/compile_common.ml (the interface and implementation steps up to typing, which writes the .cmi, .cmt and .cmti: oi has no
-   bytecode back end, so no .cmo is written).
+   print_cmt_infos; since queue 532 its .cmo printing too, print_cmo_infos, for the .cmo files ocamlc on oi writes (bin/oi's
+   bytecomp tool); the .cma, .cmx, .cmxa, .cmxs and executable parts left out) and driver/compile_common.ml (the interface and
+   implementation steps up to typing, which writes the .cmi, .cmt and .cmti; the .cmo is ocamlc on oi's, not this program's).
 
    oiobjinfo [-c] [-bin-annot] [-bin-annot-occurrences] [-I DIR]... [-nostdlib] FILE.ml|FILE.mli... -objinfo [OBJINFO-ARG]...
    The compiler's messages (warnings and errors, as ocamlc prints them) go to ocamlc.out in the current directory, ocamltest's
@@ -52,6 +52,30 @@ let print_name_crc (name, crco) =
 
 let print_spaced_string s =
   printf " %s" s
+
+let yesno_of_bool oc b = output_string oc (if b then "YES" else "no")
+
+let print_line name =
+  printf "\t%s\n" name
+
+let print_required_compunit (Cmo_format.Compunit cu_name) =
+  printf "\t%s\n" cu_name
+
+let print_cmo_infos cu =
+  let open Cmo_format in
+  printf "Unit name: %s\n" (Symtable.Compunit.name cu.cu_name);
+  print_string "Interfaces imported:\n";
+  List.iter print_name_crc cu.cu_imports;
+  print_string "Required globals:\n";
+  List.iter print_required_compunit cu.cu_required_compunits;
+  printf "Uses unsafe features: ";
+  (match cu.cu_primitives with
+    | [] -> printf "no\n"
+    | l  ->
+        printf "YES\n";
+        printf "Primitives declared in this module:\n";
+        List.iter print_line l);
+  printf "Force link: %a\n" yesno_of_bool cu.cu_force_link
 
 let print_cmi_infos name crcs =
   if not !quiet then begin
@@ -161,12 +185,18 @@ let print_cmt_infos cmt =
 let exit_err msg = print_endline msg; exit 2
 let exit_errf fmt = Printf.ksprintf exit_err fmt
 
-(* objinfo's dump_obj for the kinds oi writes (.cmi, .cmt, .cmti); another kind is refused *)
+(* objinfo's dump_obj for the kinds oi writes (.cmi, .cmt, .cmti, and ocamlc on oi's .cmo); another kind is refused *)
 let dump_obj filename =
   let open Magic_number in
   if not !quiet then printf "File %s\n" filename;
   let ic = open_in_bin filename in
   match read_current_info ~expected_kind:None ic with
+  | Ok { kind = Cmo; version = _ } ->
+     let cu_pos = input_binary_int ic in
+     seek_in ic cu_pos;
+     let cu = (input_value ic : Cmo_format.compilation_unit) in
+     close_in ic;
+     print_cmo_infos cu
   | Ok { kind = (Cmi | Cmt); version = _ } ->
      close_in ic;
      let cmi, cmt = Cmt_format.read filename in
