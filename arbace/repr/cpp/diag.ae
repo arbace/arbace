@@ -4822,6 +4822,117 @@
 
 (swap! checks conj option-errors)
 
+;; [expr.const]/5 (C++23 /5.7-5.8): an operation with undefined behaviour is no core constant expression: a division or remainder by
+;; zero, a shift by a negative count or one not less than the promoted left operand's width ([expr.shift]/1), in an evaluated part of
+;; a case label's or an enumerator's integral constant expression (|| and && and ?: evaluate one side). GCC's "division by zero is
+;; not a constant expression", "right operand of shift expression is negative", "enumerator value for 'E3' is not an integer
+;; constant", at the label or the enumerator. Only literals, casts and the operators judged: a name or a call leaves the expression.
+
+(defn- ce-type [^String qt]
+  (let [q (str/trim (str/replace (str qt) #"\b(const|volatile)\b" ""))]
+    (case q
+      ("int" "short" "signed char" "char" "bool" "unsigned short" "unsigned char" "wchar_t" "char16_t" "char8_t") [32 false]
+      ("unsigned int" "char32_t") [32 true]
+      ("long" "long long") [64 false]
+      ("unsigned long" "unsigned long long") [64 true]
+      nil)))
+
+(def ^:private ^:dynamic *ce-overflow* "an atom set when a signed operation's value leaves its type's range" nil)
+
+(defn- ce-eval
+  "[value bits unsigned] of the integral constant expression `x`, nil when not judged; throws ex-info {:ce-bad msg}."
+  [x]
+  (let [k (:kind x) in (:inner x)
+        bad (fn [m] (throw (ex-info m {:ce-bad m})))
+        wrap (fn [^BigInteger v bits u] (let [m (.shiftLeft BigInteger/ONE (int bits)) r (.mod v m)
+                                              w (if (or u (< (.compareTo r (.shiftLeft BigInteger/ONE (int (dec bits)))) 0)) r (.subtract r m))]
+                                          w))
+        ;; (a signed operation's mathematical value outside its type: [expr.pre]/4's undefined behaviour, noted)
+        swrap (fn [^BigInteger v bits u] (let [r (wrap v bits u)] (when (and (not u) *ce-overflow* (not= r v)) (reset! *ce-overflow* true)) r))
+        usual (fn [[_ b1 u1] [_ b2 u2]] (let [b (max (long b1) (long b2))] [b (boolean (or (and u1 (= b b1)) (and u2 (= b b2))))]))]
+    (case k
+      "IntegerLiteral" (when-let [[b u] (ce-type (get-in x [:type :qualType]))]
+                         (let [v (try (BigInteger. (str/replace (str (:value x)) #"'" "")) (catch Exception _ nil))] (when v [v b u])))
+      "CharacterLiteral" (when (number? (:value x)) [(BigInteger/valueOf (long (:value x))) 32 false])
+      ("ParenExpr" "ConstantExpr") (ce-eval (first in))
+      ("ImplicitCastExpr" "CStyleCastExpr" "CXXStaticCastExpr" "CXXFunctionalCastExpr")
+      (when-let [[b u] (ce-type (get-in x [:type :qualType]))]
+        (when-let [[v] (ce-eval (last in))] [(wrap v b u) b u]))
+      "UnaryOperator"
+      (when-let [[v b u :as e] (ce-eval (first in))]
+        (let [[b u] (if (< (long b) 32) [32 false] [b u])]
+          (case (:opcode x) "-" [(swrap (.negate ^BigInteger v) b u) b u] "+" [v b u] "~" [(wrap (.not ^BigInteger v) b u) b u]
+                "!" [(if (zero? (.signum ^BigInteger v)) BigInteger/ONE BigInteger/ZERO) 32 false] nil)))
+      "BinaryOperator"
+      (let [o (:opcode x)]
+        (case o
+          ("||" "&&") (when-let [[a] (ce-eval (first in))]
+                        (if (= (= o "||") (not (zero? (.signum ^BigInteger a))))
+                          [(if (= o "||") BigInteger/ONE BigInteger/ZERO) 32 false]
+                          (when-let [[b] (ce-eval (second in))] [(if (zero? (.signum ^BigInteger b)) BigInteger/ZERO BigInteger/ONE) 32 false])))
+          (when-let [l (ce-eval (first in))]
+            (when-let [r (ce-eval (second in))]
+              (let [[lv] l [rv] r
+                    lp (if (< (long (second l)) 32) [lv 32 false] l)
+                    [b u] (usual lp (if (< (long (second r)) 32) [rv 32 false] r))]
+                (case o
+                  ("/" "%") (if (zero? (.signum ^BigInteger rv)) (bad "division by zero is not a constant expression")
+                                [(wrap (if (= o "/") (.divide ^BigInteger lv rv) (.rem ^BigInteger lv rv)) b u) b u])
+                  ("<<" ">>") (let [w (long (second lp))]
+                                (cond (neg? (.signum ^BigInteger rv)) (bad "right operand of shift expression is negative")
+                                      (>= (.compareTo ^BigInteger rv (BigInteger/valueOf w)) 0) (bad "right operand of shift expression is greater than or equal to the precision of the left operand")
+                                      :else [(wrap (if (= o "<<") (.shiftLeft ^BigInteger lv (int rv)) (.shiftRight ^BigInteger lv (int rv))) w (nth lp 2)) w (nth lp 2)]))
+                  "+" [(swrap (.add ^BigInteger lv rv) b u) b u]
+                  "-" [(swrap (.subtract ^BigInteger lv rv) b u) b u]
+                  "*" [(swrap (.multiply ^BigInteger lv rv) b u) b u]
+                  "&" [(wrap (.and ^BigInteger lv rv) b u) b u]
+                  "|" [(wrap (.or ^BigInteger lv rv) b u) b u]
+                  "^" [(wrap (.xor ^BigInteger lv rv) b u) b u]
+                  ("<" ">" "<=" ">=" "==" "!=") (let [c (.compareTo ^BigInteger lv rv)]
+                                                  [(if (case o "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) BigInteger/ONE BigInteger/ZERO) 32 false])
+                  nil))))))
+      "ConditionalOperator" (when-let [[c] (ce-eval (first in))] (ce-eval (if (zero? (.signum ^BigInteger c)) (nth in 2) (second in))))
+      nil)))
+
+(defn constant-ub
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        pe (some #{"-pedantic-errors"} (:args u))
+        year (cxx-year (:std u))
+        add! (fn [n m] (when-let [o (mine-at n main)]
+                         (let [[l c] (line-col starts o)]
+                           (.add out {:line l :col c :kind :error :rule :constant-ub :msg m}))))
+        judge (fn [n e what]
+                (when (map? e)
+                  (binding [*ce-overflow* (atom false)]
+                    (try (ce-eval e)
+                         ;; (GCC's pedwarn "overflow in constant expression", an error under -pedantic-errors)
+                         (when (and pe @*ce-overflow*) (add! n "overflow in constant expression"))
+                         (catch arbace.lang.ExceptionInfo x
+                           (when-let [m (:ce-bad (ex-data x))]
+                             (add! n (str m (when what (str "; " what))))))))))]
+    ;; ([conv.ptr]/1 since C++11 (CWG 903): a null pointer constant is an integer literal of value zero, or of std::nullptr_t; an
+    ;; integral expression of literals that is none initializing a pointer: GCC's "invalid conversion from 'int' to 'void*'")
+    (when (and (>= (long year) 11) (not (some #{"-fpermissive"} (:args u))))
+      (walk-nodes (fn [n _]
+                    (when (and (= "VarDecl" (:kind n)) (= "c" (:init n)) (str/ends-with? (str/trim (str (get-in n [:type :qualType]))) "*"))
+                      (let [e (first (filter map? (:inner n)))]
+                        (when (and (#{"BinaryOperator" "ParenExpr" "ConditionalOperator" "UnaryOperator"} (:kind e))
+                                   (not (and (= "ParenExpr" (:kind e)) (= "IntegerLiteral" (:kind (first (:inner e))))))
+                                   (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true)))
+                          (add! n "invalid conversion from 'int' to a pointer type")))))
+                  (:nodes u) nil))
+    (walk-nodes (fn [n _]
+                  (case (:kind n)
+                    "CaseStmt" (let [in (:inner n)] (judge n (first in) nil) (when (= 3 (count in)) (judge n (second in) nil)))
+                    "EnumConstantDecl" (judge n (first (filter map? (:inner n))) (str "enumerator value for '" (:name n) "' is not an integer constant"))
+                    "FieldDecl" (when (:isBitfield n) (judge n (first (filter map? (:inner n))) "bit-field width not an integer constant"))
+                    nil))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj constant-ub)
+
 ;; the checker's (arbace.cpp.sema) refusals this stream adds, as sema-rules' entries: [class regexp diagnostic]
 (alter-var-root #'sema-rules into
   [[:bool-incdec #"^codegen: use of an operand of type 'bool' in 'operator" "use of an operand of type 'bool' is forbidden"]
