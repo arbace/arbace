@@ -1559,6 +1559,41 @@
           (when-not (.containsKey decls (:name n)) (.put decls (:name n) [(long (get-in n [:loc :offset])) qt]))
           (.add bad (:name n)))))
     (doseq [b bad] (.remove decls b))
+    ;; (cpp-read, 2026-11-22: [dcl.spec.auto.general]/11 in the function's own body: its return type is deduced at its first
+    ;; return statement, so a use of its name before that statement ends -- a recursive call in the first return's operand, or
+    ;; with no return statement at all anywhere in the body -- is GCC's same error, at the use; a non-template function the unit
+    ;; declares once, the main file's, the statements' returns outside a lambda's or a local class's body)
+    (let [counts (java.util.HashMap.)]
+      (walk-nodes (fn [x _] (when (and (= "FunctionDecl" (:kind x)) (:name x)) (.put counts (:name x) (inc (long (or (.get counts (:name x)) 0))))))
+                  (:nodes u) nil)
+      (walk-nodes
+       (fn [n parent]
+         (when (and (= "FunctionDecl" (:kind n)) (:name n) (not= "FunctionTemplateDecl" (:kind parent))
+                    (= 1 (.get counts (:name n))) (= main (get-in n [:loc :file])) (get-in n [:loc :offset]))
+           (let [qt (str (get-in n [:type :qualType]))
+                 body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+             (when (and body (re-find #"^(const )?auto( |&|\*|\()" qt) (not (str/includes? qt "->")))
+               (let [first-ret (atom nil)
+                     find-ret (fn find-ret [x]
+                                (cond (map? x) (cond (#{"LambdaExpr" "CXXRecordDecl"} (:kind x)) nil
+                                                     (= "ReturnStmt" (:kind x)) (when (nil? @first-ret) (reset! first-ret (get-in x [:range :end :offset])))
+                                                     :else (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (find-ret v)))
+                                      (coll? x) (doseq [y x] (find-ret y))
+                                      :else nil))
+                     _ (find-ret (:inner body))
+                     lim (or @first-ret Long/MAX_VALUE)
+                     seen (java.util.HashSet.)]
+                 (walk-nodes
+                  (fn [x _]
+                    (when (and (= "DeclRefExpr" (:kind x)) (= (:name n) (get-in x [:referencedDecl :name])))
+                      (when-let [xo (get-in x [:range :begin :offset])]
+                        (when (and (<= (long xo) (long lim)) (= main (or (get-in x [:range :begin :file]) main)))
+                          (let [[l c] (line-col starts (long xo))]
+                            (when (.add seen l)
+                              (.add out {:line l :col c :kind :error :rule :undeduced
+                                         :msg (str "use of '" (str/replace (fn-spelling (:name n) qt) #"^auto &" "auto& ") "' before deduction of 'auto'")})))))))
+                  (:inner body) nil))))))
+       (:nodes u) nil))
     (when (seq decls)
       (walk-nodes
        (fn [x _]
@@ -1633,7 +1668,103 @@
                      (.add out {:line l :col c :kind :error :rule :auto-return
                                 :msg (str "return-statement with no value, in function returning 'auto" ptr "'")})))))))))
      (:nodes u) nil)
+    ;; (cpp-read, 2026-11-22: [dcl.type.decltype]/1.3 with [dcl.type.auto.deduct]/5, decltype(auto) deduces from its
+    ;; initializer as decltype does: an unparenthesized id-expression naming a function gives the function's type, which no
+    ;; variable has ([dcl.fct]/? [basic.compound]): GCC's "initializer for 'decltype(auto) a' has function type; did you forget
+    ;; the '()'?", at the declaration; the name the unit's function's and no variable's, parameter's, member's or binding's)
+    (let [fns (java.util.HashSet.) vars (java.util.HashSet.)]
+      (walk-nodes (fn [x _] (when-let [nm (:name x)]
+                              (case (:kind x)
+                                ("FunctionDecl" "CXXMethodDecl") (.add fns nm)
+                                ("VarDecl" "ParmVarDecl" "FieldDecl" "BindingDecl" "EnumConstantDecl" "NonTypeTemplateParmDecl") (.add vars nm)
+                                nil)))
+                  (:nodes u) nil)
+      (walk-nodes
+       (fn [n _]
+         (when (and (= "VarDecl" (:kind n)) (:name n) (= main (get-in n [:loc :file])) (get-in n [:loc :offset])
+                    (= "decltype(auto)" (str/trim (str (get-in n [:type :qualType])))))
+           (let [init (last (:inner n))]
+             (when (and (= "DeclRefExpr" (:kind init)) (.contains fns (get-in init [:referencedDecl :name]))
+                        (not (.contains vars (get-in init [:referencedDecl :name]))))
+               (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                 (.add out {:line l :col c :kind :error :rule :auto-return
+                            :msg (str "initializer for 'decltype(auto) " (:name n) "' has function type; did you forget the '()'?")}))))))
+       (:nodes u) nil))
     (vec (distinct out))))
+
+;; cpp-read (2026-11-22): GCC's classification built-ins take floating-point operands (c-family's
+;; check_builtin_function_arguments: __builtin_isfinite and its kin one REAL_TYPE operand, "non-floating-point argument in call to
+;; function", at it; __builtin_isless and its kin two, both real or one real and one integer, "non-floating-point arguments in
+;; call to function", at the call): an operand the tree shows is neither, a function's name (the unit's function and no
+;; variable's) or a string literal, at the call's line.
+(def ^:private fp-builtins-1 #{"__builtin_isfinite" "__builtin_isinf" "__builtin_isinf_sign" "__builtin_isnan" "__builtin_isnormal"
+                               "__builtin_issignaling" "__builtin_signbit"})
+(def ^:private fp-builtins-2 #{"__builtin_isgreater" "__builtin_isgreaterequal" "__builtin_isless" "__builtin_islessequal"
+                               "__builtin_islessgreater" "__builtin_isunordered" "__builtin_iseqsig"})
+
+(defn builtin-fp-args
+  "The classification built-ins' operands' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (java.util.HashSet.) vars (java.util.HashSet.)]
+    (walk-nodes (fn [x _] (when-let [nm (:name x)]
+                            (case (:kind x)
+                              ("FunctionDecl" "CXXMethodDecl") (.add fns nm)
+                              ("VarDecl" "ParmVarDecl" "FieldDecl" "BindingDecl" "EnumConstantDecl" "NonTypeTemplateParmDecl") (.add vars nm)
+                              nil)))
+                (:nodes u) nil)
+    (walk-nodes
+     (fn [x _]
+       (when (= "CallExpr" (:kind x))
+         (let [[callee & args] (:inner x)
+               nm (when (= "DeclRefExpr" (:kind callee)) (get-in callee [:referencedDecl :name]))
+               bad? (fn [a] (or (= "StringLiteral" (:kind a))
+                                (and (= "DeclRefExpr" (:kind a)) (.contains fns (get-in a [:referencedDecl :name]))
+                                     (not (.contains vars (get-in a [:referencedDecl :name]))))))]
+           (when-let [o (and nm (or (and (fp-builtins-1 nm) (= 1 (count args))) (and (fp-builtins-2 nm) (= 2 (count args))))
+                             (some bad? args) (get-in callee [:range :begin :offset]))]
+             (when (= main (or (get-in callee [:range :begin :file]) main))
+               (let [[l c] (line-col starts (long o))]
+                 (.add out {:line l :col c :kind :error :rule :builtin-args
+                            :msg (str (if (fp-builtins-1 nm) "non-floating-point argument" "non-floating-point arguments") " in call to function '" nm "'")})))))))
+     (:nodes u) nil)
+    (vec out)))
+
+;; cpp-read (2026-11-22): [expr.reinterpret.cast]/11, a glvalue is cast to a reference type, a prvalue not: GCC's "invalid cast of
+;; a prvalue expression of type 'T1' to type 'T2'" (typeck.cc's build_reinterpret_cast_1), at the cast; the operand a prvalue the
+;; tree shows, a literal but a string literal, or a call of the unit's function (no variable's name) every declaration of which
+;; returns no reference.
+(defn reinterpret-prvalues
+  "The reinterpret_casts' prvalue operands' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        rets (java.util.HashMap.) vars (java.util.HashSet.)]
+    (walk-nodes (fn [x _] (when-let [nm (:name x)]
+                            (case (:kind x)
+                              "FunctionDecl" (.put rets nm (conj (or (.get rets nm) []) (str (get-in x [:type :qualType]))))
+                              ("VarDecl" "ParmVarDecl" "FieldDecl" "BindingDecl" "EnumConstantDecl" "NonTypeTemplateParmDecl" "CXXMethodDecl") (.add vars nm)
+                              nil)))
+                (:nodes u) nil)
+    (walk-nodes
+     (fn [x _]
+       (when (and (= "CXXReinterpretCastExpr" (:kind x)) (#{"lvalue" "xvalue"} (:valueCategory x)))
+         (let [a (first (:inner x))
+               callee (when (= "CallExpr" (:kind a)) (first (:inner a)))
+               cn (when (= "DeclRefExpr" (:kind callee)) (get-in callee [:referencedDecl :name]))
+               ret (fn [^String q] (when-let [[_ r] (re-find #"^(.*?)\s*\(" q)] (str/trim r)))
+               intype (cond (#{"IntegerLiteral" "FloatingLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "CXXNullPtrLiteralExpr"} (:kind a))
+                            (str (get-in a [:type :qualType]))
+                            (and cn (seq (.get rets cn)) (not (.contains vars cn)))
+                            (let [rs (map ret (.get rets cn))]
+                              (when (and (every? some? rs) (apply = rs) (not (re-find #"&|^auto|^decltype" (first rs)))) (first rs)))
+                            :else nil)]
+           (when-let [o (and intype (get-in x [:range :begin :offset]))]
+             (when (= main (or (get-in x [:range :begin :file]) main))
+               (let [[l c] (line-col starts (long o))]
+                 (.add out {:line l :col c :kind :error :rule :reinterpret
+                            :msg (str "invalid cast of a prvalue expression of type '" intype "'")})))))))
+     (:nodes u) nil)
+    (vec out)))
 
 ;; queue 460: [temp.variadic]/5, "a pack whose name appears within the pattern of a pack expansion is expanded by that
 ;; expansion ... an appearance of a name of a pack that is not expanded is ill-formed" (GCC's "parameter packs not expanded with
@@ -1873,7 +2004,7 @@
                 [(:nodes u) (vec (vals (:decltypes u)))] nil)
     (vec (vals (into (sorted-map) (map (juxt :line identity) out))))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs]))
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
