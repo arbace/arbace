@@ -16826,3 +16826,29 @@ no-op landing pad for no block and no reason for a personality, as rustc's MIR a
 (`7f59c9ff7`, pack-compare-test's case and control); the three programs built again on it (38 min): the same log counts, and against the run before the export the dead
 `unreachable` blocks fall from 85 to 40 (panics), 68 to 31 (unwind), 548 to 343 (vectors), the functions with a personality from 53
 to 33, 46 to 32, 141 to 70.
+
+## 2026-11-22: the user's decisions on the burst's by-design and counting questions
+
+Asked in the morning of 2026-11-22 (.tmp/goal/decisions-1122.md collects the streams' evidence); the goal: 100 completeness and
+independence for every crop.
+Counting:
+- Python: Lib/test's 1,917 methods skipped by their own tests on pyi and on CPython's recorded run count n/a; so do the 113 UDP-Lite
+  tests (this host's kernel removed UDP-Lite), test_opcache 73 + tuple reuse 6 and the cpython-only 617 (PYS15 (a)'s CPython
+  implementation details), and test_remote_pdb 45. The read cell's 4 :rejected files pass by each file's own verdict; print's 4 n/a.
+- C: CR1 (a): the 132 read rows where cc is wrong and the file passes its own verdict elsewhere (dg directives or its run) count as
+  read passes. The five speed benchmarks at eval count n/a.
+- Go: the 137 read rows count as passes where Arbace's reader agrees with the reference (same trees, same conversion failure; the 73
+  rejects' error messages compared). eval's foreign-code 8 and memory 6 count n/a.
+- x86-64: the cross judge's 723 rows of llvm-mc's own Intel text (AXS34) count out of the cases.
+- Haskell: T13825-unit, unboxedsums_unit_tests (the `ghc` package) and tcrun022 (-O RULES) count out of the cases.
+To build:
+- Python: real ports of _datetime and _decimal (libmpdec), reversing PY6g DECISION 1; level 3 as a compile without positions (so
+  :code-lines passes); 222's option (b), finalisation at a frame's return, gated near-zero cost and measured against the 3% budget.
+- C: CR3 (a) soft-float, _Float16 and _Float128 first.
+- Go: gc's own compiler inside the executable for the gc-flags and gc-phases rows (GOI-DESIGN-REVIEW Proposed 1 (b), reversing 1 (a)
+  of 2026-11-05), and text-preserving print for the 9 tests-embed-sources packages.
+- x86-64: Mach-O and COFF writers and views, compact unwind included (AXS99 (b)).
+- Scheme: R6RS's answers for programs importing (rnrs), Chez's for (chezscheme) (SCS4 (d)).
+- Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
+- Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
+Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
