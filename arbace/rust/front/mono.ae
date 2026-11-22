@@ -794,7 +794,9 @@
                  (= "C" r) (assoc :c true)
                  ;; RFP58 (a): repr(simd), read from the sources of an ADT the interface lacks; RIND5: also of a known one in a
                  ;; SIMD module (core::simd's `Simd<T, N>`, `#[repr(simd, packed)]`: the interface writes no repr(simd))
-                 (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)))))
+                 (and (or (not (tc/std-adt-known? adt)) (str/includes? (str adt) "simd")) (:simd (src-adt adt))) (assoc :simd true)
+                 ;; queue 524 (C3): a source enum's repr(int)
+                 (and (not (tc/std-adt-known? adt)) (:int (src-adt adt))) (assoc :int (:int (src-adt adt)))))))
 
 (def ^:private niche-range-ends
   "queue 462 (448-4 (a) 5): the inclusive ends of core::num::niche_types' range pattern types that std's interface writes by
@@ -836,11 +838,14 @@
 (defn- variant-fields [adt args]
   (when (and (string? adt) (not (tc/std-adt-known? adt)))
     (if-let [s (src-adt adt)]
-      (let [fs (mapv #(src-ty s args %) (:fields s))]
+      (let [fs (mapv #(src-ty s args %) (concat (:fields s) (apply concat (:variants s))))]
         (when (some nil? fs) (throw (ex-info (str "mono: a field of " adt " (its sources)") {:fact :layout}))))
       (throw (ex-info (str "mono: " adt " is not in std's interface") {:fact :layout}))))
   (if (and (string? adt) (not (tc/std-adt-known? adt)))
-    (let [s (src-adt adt)] [(mapv #(erase-regions (src-ty s args %)) (:fields s))])
+    (let [s (src-adt adt)]
+      (if (:enum s)
+        (mapv (fn [v] (mapv #(erase-regions (src-ty s args %)) v)) (:variants s))
+        [(mapv #(erase-regions (src-ty s args %)) (:fields s))]))
   (vec (for [v (tc/variants-any adt)]
          (vec (for [[_ t] (tc/all-fields-of-variant (if (map? v) (or (:path v) (:id v)) v))]
                 (c/subst (erase-regions (if (string? adt) (pattern-field t adt) t)) (vec args))))))))
@@ -866,8 +871,13 @@
 
 (declare layout-of)
 
+(declare src-adt)
 (defn- union-adt? [adt]
-  (if (string? adt) (= "Union" (:kind (get (:adts c/*si*) adt))) (and (number? adt) (= "Union" (:kind (c/def-of adt))))))
+  (if (string? adt)
+    (or (= "Union" (:kind (get (:adts c/*si*) adt)))
+        ;; queue 524 (C3): a source union (catch_unwind's Data)
+        (and (not (tc/std-adt-known? adt)) (boolean (:union (src-adt adt)))))
+    (and (number? adt) (= "Union" (:kind (c/def-of adt))))))
 
 (defn- layout-of-union
   "rustc_abi's layout_of_union (rustc_abi/src/layout.rs, 1.99.1) over the one variant's FIELDS: the alignment the largest
@@ -964,13 +974,14 @@
              (let [[_ adt args] t
                  repr (adt-repr adt)
                  vs (mapv #(mapv layout-of %) (variant-fields adt args))
-                 enum? (tc/enum? adt)
+                 senum (when (and (string? adt) (not (tc/std-adt-known? adt))) (let [s (src-adt adt)] (when (:enum s) s)))
+                 enum? (or (tc/enum? adt) (some? senum))
                  cell? (contains? #{(c/lang "unsafe_cell") (c/lang "unsafe_pinned")} adt)
                  maybe-unsized (and (not enum?) (seq (first (variant-fields adt args))) (not (sized-ty? (peek (first (variant-fields adt args))))))
                  l (if (:simd repr)
                      (simd-layout (first (variant-fields adt args)) (first vs))
-                     (layout-of-struct-or-enum repr vs enum? cell? (when enum? (tc/discriminant-values adt)) (not maybe-unsized)))]
-             (cond-> l enum? (assoc :discrs (vec (tc/discriminant-values adt))))))
+                     (layout-of-struct-or-enum repr vs enum? cell? (when enum? (if senum (:discrs senum) (tc/discriminant-values adt))) (not maybe-unsized)))]
+             (cond-> l enum? (assoc :discrs (vec (if senum (:discrs senum) (tc/discriminant-values adt)))))))
       ;; C6-4 (a): a projection an ADT's field leaves at the instance (Cow<str>'s `<str as ToOwned>::Owned`) normalized by the
       ;; solver, as layout_of normalizes its type first
       :proj (let [n (try (erase-regions (tc/normalize-deep t)) (catch Throwable _ t))]
@@ -1061,6 +1072,20 @@
 
 (defn- fget [x k] (when (seq? x) (get (apply hash-map (rest x)) k)))
 
+(defn- body-adt-items
+  "queue 524 (C3): the items a function body declares at its top statements that are structs, enums, unions or uses"
+  [body]
+  (let [acc (java.util.ArrayList.)]
+    (letfn [(walk [x depth]
+              (cond (and (seq? x) (= 'Item (first x)) (keyword? (second x)) (seq? (fget x :kind)) (#{'Struct 'Enum 'Union 'Use} (first (fget x :kind)))) (.add acc x)
+                    (and (seq? x) (= 'Item (first x)) (keyword? (second x))) nil   ; a nested function's own items are its own
+                    (> depth 12) nil
+                    (seq? x) (doseq [y x] (walk y (inc depth)))
+                    (vector? x) (doseq [y x] (walk y (inc depth)))
+                    :else nil))]
+      (walk body 0))
+    (vec acc)))
+
 (defn- drop-fn-bodies
   "RF19: a parsed file's items without what ext-attrs and src-adt never read (they read the items' kinds, names, attributes,
   headers, fields and macro calls): functions' bodies and macro definitions' token trees (each `(Fn ... :body B ...)`'s and
@@ -1068,7 +1093,15 @@
   collections' run (51 of core's files)"
   [x]
   (cond (and (seq? x) (#{'Fn 'MacroDef} (first x)) (some #{:body} x))
-        (with-meta (apply list (first x) (mapcat (fn [[k v]] [k (if (= k :body) 'None (drop-fn-bodies v))]) (partition 2 (rest x)))) (meta x))
+        ;; queue 524 (C3): a function's body kept as the ADT and use items it declares (`union Data<F, R>` in catch_unwind,
+        ;; `struct DropOnPanic<T>` in select_unpredictable), src-adt's fn-local definitions; the rest dropped
+        (with-meta (apply list (first x) (mapcat (fn [[k v]] [k (if (= k :body)
+                                                                    (if (= 'Fn (first x))
+                                                                      (let [its (body-adt-items v)] (if (seq its) (list 'LocalItems (mapv drop-fn-bodies its)) 'None))
+                                                                      'None)
+                                                                    (drop-fn-bodies v))])
+                                                 (partition 2 (rest x))))
+                   (meta x))
         (seq? x) (with-meta (apply list (map drop-fn-bodies x)) (meta x))
         (vector? x) (with-meta (into [] (comp (remove (fn [a] (and (seq? a) (= 'Attribute (first a))
                                                                    (let [k (fget a :kind)] (and (seq? k) (= 'DocComment (first k)))))))
@@ -1277,6 +1310,17 @@
                 true)))
           (fget it :attrs)))
 
+(defn- repr-int
+  "queue 524 (C3): an item's repr(INT) (`#[repr(u8)]`): the integer's name, or nil"
+  [it]
+  (some (fn [a]
+          (let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
+                nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
+                args (when item (fget item :args))]
+            (when (and (= nm "repr") (seq? args) (= 'Delimited (first args)))
+              (some #(re-matches #"[iu](?:8|16|32|64|128|size)" (str (first %))) (meta-items (fget (second args) :tokens))))))
+        (fget it :attrs)))
+
 (defn- repr-simd? [it]
   (some (fn [a]
           (let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
@@ -1393,11 +1437,21 @@
               (let [[crate & segs] (str/split p #"::")
                     root (lib-crate-root crate)]
                 (when root
-                  (when-let [[items _ _] (module-items root (butlast segs))]
+                  (when-let [[items _ _] (or (module-items root (butlast segs))
+                                             ;; queue 524 (C3): a definition local to a module's function (`std::panicking::
+                                             ;; catch_unwind::Data`): the function's kept items, its module's uses beside
+                                             (when (>= (count segs) 2)
+                                               (when-let [[mitems d f] (module-items root (butlast (butlast segs)))]
+                                                 (when-let [fi (some #(when (and (= 'Fn (item-kind %)) (= (last (butlast segs)) (fn-item-name %)) (attr-cfg-ok? %)
+                                                                                 (let [b (fget (second (fget % :kind)) :body)] (and (seq? b) (= 'LocalItems (first b)))))
+                                                                        %)
+                                                                     mitems)]
+                                                   [(into (vec (second (fget (second (fget fi :kind)) :body))) (filter #(= 'Use (item-kind %)) mitems)) d f]))))]
                     (let [nm (last segs)]
-                      (if-let [it (some #(when (and (= 'Struct (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)]
+                      (if-let [it (some #(when (and (#{'Struct 'Union} (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)]
                         (let [[_ _ gens vd] (fget it :kind)]
                           {:simd (boolean (repr-simd? it))
+                           :union (= 'Union (item-kind it))
                            :mod (vec (butlast segs))
                            :params (mapv #(second (fget % :ident)) (fget gens :params))
                            ;; queue 524 (C3): VariantData::Struct's fields are named (`(Struct :fields [..] :recovered No)`), Tuple's
@@ -1407,8 +1461,36 @@
                                          :else [])
                            :uses (use-renames items)
                            :crate crate})
+                        (if-let [it (some #(when (and (= 'Enum (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)]
+                          ;; queue 524 (C3): a crate-private enum (alloc::raw_vec::AllocInit, btree's markers, hashbrown's
+                          ;; Fallibility): its variants (cfg evaluated) with their fields, their discriminants (an explicit
+                          ;; literal, else the previous one's plus one), repr(int)
+                          (let [[_ _ gens ed] (fget it :kind)
+                                vs (filter attr-cfg-ok? (fget ed :variants))
+                                data-fields (fn [vd] (cond (and (seq? vd) (= 'Struct (first vd))) (mapv #(fget % :ty) (or (fget vd :fields) []))
+                                                           (and (seq? vd) (= 'Tuple (first vd))) (mapv #(fget % :ty) (second vd))
+                                                           :else []))
+                                lit (fn [v] (let [d (fget v :disr_expr)
+                                                  e (when (and (seq? d) (= 'Some (first d))) (fget (second d) :value))
+                                                  k (when e (fget e :kind))]
+                                              (cond (nil? d) nil (= 'None d) nil
+                                                    (and (seq? k) (= 'Lit (first k)) (= 'Integer (fget (second k) :kind)))
+                                                    (let [t (str/replace (str (fget (second k) :symbol)) "_" "")]
+                                                      (cond (str/starts-with? t "0x") (bigint (BigInteger. (subs t 2) 16))
+                                                            (str/starts-with? t "0b") (bigint (BigInteger. (subs t 2) 2))
+                                                            :else (bigint (BigInteger. t 10))))
+                                                    :else (throw (ex-info "mono: a discriminant not a literal" {})))))
+                                discrs (loop [vs vs prev -1 acc []] (if-let [v (first vs)] (let [d (or (lit v) (inc prev))] (recur (rest vs) d (conj acc d))) acc))]
+                            {:enum true
+                             :int (repr-int it)
+                             :mod (vec (butlast segs))
+                             :params (mapv #(second (fget % :ident)) (fget gens :params))
+                             :variants (mapv #(data-fields (fget % :data)) vs)
+                             :discrs discrs
+                             :uses (use-renames items)
+                             :crate crate})
                         (when-let [[elem len] (types-macro-struct items nm)]
-                          {:simd true :params [] :fields [[:types elem len]] :uses {} :crate crate}))))))
+                          {:simd true :params [] :fields [[:types elem len]] :uses {} :crate crate})))))))
               (catch Throwable _ nil))]
       (swap! src-adt-cache assoc p r)
       r)))
@@ -1428,7 +1510,9 @@
         known (fn [p] (when (and p (std-adt-known-or-src? p)) p))
         resolve (fn [segs]
                   (let [full (if-let [u (get (:uses s) (first segs))] (into u (rest segs)) segs)
-                        full (if (= "crate" (first full)) (into [(:crate s)] (rest full)) full)]
+                        full (if (= "crate" (first full)) (into [(:crate s)] (rest full)) full)
+                        ;; hashbrown's lib.rs: `extern crate alloc as stdalloc;`
+                        full (if (and (= "hashbrown" (:crate s)) (= "stdalloc" (first full))) (into ["alloc"] (rest full)) full)]
                     (or (known (std-name-path full))
                         ;; another crate's own path (hashbrown's `crate::raw::..`) or a name of the module itself
                         (when (= (:crate s) (first full)) (known (str/join "::" full)))
@@ -1478,6 +1562,23 @@
       (and (seq? k) (= 'Slice (first k)))
       (when-let [el (src-ty s args (second k))] [:slice el])
       (and (seq? k) (= 'Paren (first k))) (src-ty s args (second k))
+      ;; queue 524 (C3): a trait object (`dyn Any + Send` in catch_unwind's Data): its principal and auto traits by their def
+      ;; paths (std's names), no projection, the region erased
+      (and (seq? k) (= 'TraitObject (first k)))
+      (let [paths (for [b (second k) :when (and (seq? b) (= 'Trait (first b)))
+                        :let [p (fget (fget (second b) :trait_ref) :path)
+                              segs (path-segs p)]
+                        ;; (a trait with arguments, `dyn Fn(&str)`, not read: nil, the whole refused)
+                        :let [segs (if (= 'None (fget (last (fget p :segments)) :args)) segs nil)
+                              full (if-let [u (get (:uses s) (first segs))] (into u (rest segs)) segs)
+                              full (if (= "crate" (first full)) (into [(:crate s)] (rest full)) full)]]
+                    (when segs (std-name-path full)))
+            autos #{"core::marker::Send" "core::marker::Sync" "core::marker::Unpin" "core::panic::unwind_safe::UnwindSafe"
+                    "core::panic::unwind_safe::RefUnwindSafe"}]
+        (when (and (seq paths) (every? some? paths))
+          (let [pr (remove autos paths) au (filter autos paths)]
+            (when (<= (count pr) 1)
+              [:dyn {:principal (when (seq pr) [(first pr) []]) :projections [] :autos (vec au)} [:re-erased]]))))
       (and (seq? k) (= 'Array (first k)))
       (let [el (src-ty s args (second k))
             ce (fget (nth k 2) :value) ck (fget ce :kind)
@@ -2644,6 +2745,15 @@
                             :when (and (vector? ft) (= :fndef (first ft)) (not (intrinsic? (second ft))))
                             :let [[_ cd args] ft]]
                         [(second o) (try-fact #(call-fsym cd args))]))})))))
+
+(defn call-callee
+  "queue 524 (C3): within build-program's bindings, the callee fact of a call's function constant F that program-facts did not
+  see, one a runtime pass made after the collector walked the body (ElaborateDrops' `<Box<String> as Drop>::drop` in a
+  closure's box drop): Instance::try_resolve's as callee-fact gives it, or an [:error ...] value; nil for a call through a pointer"
+  [n f]
+  (when-let [ft (call-fndef (list 'call f))]
+    (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+      (tc/with-solver (solver-def) (fn [] (try-fact #(callee-fact ft)))))))
 
 (defn inline-always-callees
   "C6-4 (the always-inliner): within build-program's bindings, the callees of BODIES' calls that are `#[inline(always)]`

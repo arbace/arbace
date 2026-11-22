@@ -731,6 +731,29 @@
       (check "524: a braced struct's fields from the sources (two), a tuple struct's (two)" r [2 2])
       (check "524 control: a struct the sources lack" (binding [mono/*lib-dir* dir] (if (mono/src-adt "core::Missing") [:equal] [:differs])) :differs)
       ;; a library constant's integer literal (core::char's `const TAG_CONT: u8 = 0b1000_0000;`), as CTFE evaluates it
+      ;; a crate-private enum from the sources (alloc::raw_vec::AllocInit's two unit variants, btree's empty markers), laid out
+      (let [dir (str dir "-e")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "enum Two { A, B }\nenum Gap { A, B = 5, C }\nenum Leaf {}\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a source enum's layout (two unit variants: a u8 tag 0..=1), its discriminants with an explicit one (0 5 6)"
+                 [(get-in (lay "core::Two") [:abi]) (:discrs (lay "core::Gap"))] '[(scalar (int 8 false [0N 1N])) [0 5 6]])
+          (check "524: an empty enum's layout (uninhabited, zero-sized)" (select-keys (lay "core::Leaf") [:size :uninhabited]) {:size 0 :uninhabited true})
+          (check "524 control: an enum the sources lack stays refused" (let [l (lay "core::Missing")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
+      ;; a definition local to a function (catch_unwind's `union Data`, select_unpredictable's `struct DropOnPanic`), a union laid out
+      (let [dir (str dir "-f")]
+        (.mkdirs (java.io.File. (str dir "/core/src")))
+        (spit (str dir "/core/src/lib.rs") "fn f() { struct L(u8, u16); union U { a: u8, b: u32 } let x = 1; }\nfn g() { let y = 2; }\n")
+        (let [lay (fn [p] (binding [mono/*lib-dir* dir mono/*layouts* (atom {}) c/*defs* (atom [])
+                                    c/*si* {:adts {} :fns {} :traits {} :impls {}}
+                                    c/*std* {:mods {} :lang {"unsafe_cell" "core::cell::UnsafeCell" "unsafe_pinned" "core::pin::UnsafePinned"}}]
+                            (get (mono/layout-table [(with-meta (list 'ty p (list 'adt p p [])) {:tc [:adt p []]})]) p)))]
+          (check "524: a function's local struct and union from the sources (the union 4 bytes, its fields overlaid)"
+                 [(select-keys (lay "core::f::L") [:size :align]) (select-keys (lay "core::f::U") [:size :align])] [{:size 4 :align 2} {:size 4 :align 4}])
+          (check "524 control: a name the function does not declare stays refused" (let [l (lay "core::g::L")] (if (mono/error? l) [:differs l] [:equal l])) :differs)))
       (let [dir (str dir "-k")]
         (.mkdirs (java.io.File. (str dir "/core/src")))
         (spit (str dir "/core/src/lib.rs") "const K: u8 = 0b1000_0000;\nconst N: i32 = -5;\nconst S: &str = \"x\";\n")
