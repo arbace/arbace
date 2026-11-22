@@ -44,6 +44,9 @@
 ;; queue 412 (round 7): [dcl.init.list]/7's narrowing conversions judged (the checker): false under -Wno-narrowing, -fpermissive
 ;; or -Wno-error=narrowing (GCC's permerror then a warning or nothing), and for the code generator
 (def ^:dynamic *narrowing* false)
+;; queue 518 (the checker): P0522's matching of template template arguments ([temp.arg.template]/3-4), GCC's -fnew-ttp-matching,
+;; on by default from C++17; nil: by the standard, true or false: the option given (-fnew-ttp-matching, -fno-new-ttp-matching)
+(def ^:dynamic *new-ttp-matching* nil)
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
@@ -62,6 +65,7 @@
 ;; the language's year (11, 14, 17, 20, 23, 26; 3 for C++98/03), bound from the file's standard by the checker and, since
 ;; CP293 (a), by the code generator (arbace.cpp.codegen/gen-file)
 (def ^:dynamic *cxx-year* 17)
+(defn new-ttp-matching? [] (if (nil? *new-ttp-matching*) (>= (long *cxx-year*) 17) (boolean *new-ttp-matching*)))
 
 (defn cxx-year
   "The year of the standard `std` names (c++98 and c++03 as 3, gnu++NN as c++NN; 17 when unknown)."
@@ -3164,7 +3168,11 @@
 
 (defn const-int [scope n]
   (tick!)
-  (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))]
+  (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))
+        ;; (queue 518: a variable's braced initializer of one element, the scalar it initializes, [dcl.init.list]/3.9:
+        ;; integral_constant's `static constexpr T value {Value};` read by var-const-int in a constraint, cpp2a/concepts-pr67148.C's,
+        ;; had been "not a constant: the expression :init-list")
+        e (if (and (= :init-list (:op e)) (= 1 (count (:items e)))) (rv (first (:items e))) e)]
     (letfn [(ev [e]
               (case (:op e)
                 :int (if (:ice e) 1 (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
@@ -8167,13 +8175,23 @@
                            ;; the substitution fails, the requires-expression false; GCC's "invalid parameter type", reported
                            ;; at the requires-expression)
                            void-param (atom false)
-                           _ (doseq [pn (:params n)]
+                           _ (doseq [pn (:params n)
+                                     :let [qt (str (get-in pn [:type :qualType]))
+                                           ;; (queue 518: a function parameter pack, `Args&&... args` of cpp2a/concepts-pr67148.C's
+                                           ;; Function concept, [expr.prim.req.general]/3: its parameters from the expanded
+                                           ;; parameter list, its name standing for them, as fn-type-scope's :varpack)
+                                           fty (when (re-find #"\.\.\.\s*$" qt)
+                                                 (try (resolve-type (:scope c) (str "void (" qt ")")) (catch arbace.lang.ExceptionInfo _ nil)))
+                                           pk (when (and (= :fn (:k fty)) (not-any? #(= :pack-exp (:k %)) (:ps fty))) (:ps fty))]]
+                             (if pk
+                               (let [ids (mapv (fn [t] (let [id (next-id)] (swap! *vars* assoc id {:id id :name nil :ty t :storage :local :fn (:fn-id ctx)}) id)) pk)]
+                                 (when (:name pn) (enter! (:scope c) (:name pn) {:e :varpack :ids ids})))
                                (let [id (next-id)
                                      pt (resolve-type (:scope c) (get-in pn [:type :qualType]))]
                                  (when (and (checking?) (abi/void? pt) (not (:c pt)) (not (:v pt)) (not (str/includes? (str (get-in pn [:type :qualType])) "...")))
                                    (reset! void-param true))
                                  (swap! *vars* assoc id {:id id :name (:name pn) :ty pt :storage :local :fn (:fn-id ctx)})
-                                 (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id}))))
+                                 (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id})))))
                            _ (when @void-param
                                (when-let [h *on-refusal*]
                                  (h (ex-info "codegen: invalid parameter type 'void' in a requires-expression's parameters" {:codegen/refused :constraint :cx/node n}) n)))
