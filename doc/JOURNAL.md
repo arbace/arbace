@@ -18397,3 +18397,105 @@ u32): all equal. pack-compare-test passed at the change. The program-level proof
   taken from the lowest StableCrateId, and a crate exports under share-generics the generic instances of its whole collection. The
   question for the user, DECISION C3X-1, with options (whole collections natively, 8-12 days; std's reference without shared
   generics, one re-pin night, recommended; the rlibs' exported symbols read, a record) in doc/rust/FRONTEND-SURVEY.md, "rust-c3x".
+
+## 2026-11-22: cpp-rt-own4: GNU's VLAs, late destructor calls, lazily named specializations; the runtime's last pack units
+
+Branch `cpp-rt-own4-1122` from mac/next 3e8dfe109 (cpp-rt-own3 in it; the lowered runtime 194 of 198 units own, C++'s eval and AOT
+0.995 each, independence 95). The brief (the main session, toward the CoMaIn goal): the last 4 pack units, cpp-rt-own3's causes-left
+table the list; DECISION cpp-rt-own3-1 (a) and cpp-rt-own3-2 (a) taken as recommended; tzdb's and valarray's drops probed first.
+Light and targeted, no gate; each rule on a reduced case against clang 23.1.5's IR recorded by hand with the host's clang++ (the oracle
+tier's tool), each unit by `arbace.cpp.codegen gen-batch` with runtime_ours' options, its names against the pack cpp-runtime-ir's IR.
+
+What was done (7a8b8de1f, c6c1ef6eb, 4c013f6df, the code; doc/cpp/CPP-SURVEY.md, "As built: cpp-rt-own4", the details):
+
+1. DECISION cpp-rt-own3-1 (a), GNU's VLAs: the parser keeps a VarDecl's array bounds (`:_vla`, a `:_` key); sema's vla-local types a
+   block-scope array whose outermost bound is no constant `{:k :arr :n nil :vla true}` with the bound analyzed in the block; codegen's
+   vla-decl! writes clang's shape: the bound zext'ed to i64, llvm.stacksave at the scope's first VLA into a slot, a dynamic alloca
+   aligned to 16, the bound in an i64 slot, llvm.stackrestore as a normal cleanup (no landing pad for it). Unit:
+   c++17/floating_to_chars.cc (with the gaps below).
+2. DECISION cpp-rt-own3-2 (a): an explicit destructor call of a class not complete where analyzed is `:late-dtor-call`, its destructor
+   taken when written. The probe: floating_from_chars' `__p->~_Up()` comes from vector<_BigBlock>'s destructor, made eager by the lazy
+   round's variable rule (a parameter of that type), never written; _BigBlock is never defined in the unit.
+3. valarray's drops probed first: valarray<size_t> cached empty after the analysis instantiated `_Expr<_UnClos<__unary_plus, _Expr,
+   _Clos>, value_type>`'s chain (451 nested) until its stack ended; a specialization named in a member function's type while its
+   template is instantiated twice up the stack is now named lazily (incomplete, :lazy-inst, layout refused, instantiated where named
+   again outside any instantiation). Unit: c++98/valarray.cc (and a destructor's explicit instantiation, below).
+4. tzdb probed first: the header drop of `typename invoke_result<_Fn, _Args...>::type` is projected<It, Proj> for a Proj that is an
+   overload set's type (a candidate's constraint), not the call's (projected over a pointer to member function or to a data member
+   of class type generates as clang's); the "no operator()" stays (Left, below).
+5. On the way, each on a reduced case against clang 23.1.5's IR: the parser's member-initializer lookup (no mode's: a block's
+   declaration in a member function had found a shadowed member), no ADL for a qualified call, the built-in enum comparison over a
+   converted user operator, __builtin_fpclassify, member templates differing by cv- and ref-qualifiers kept apart, a destructor's
+   explicit instantiation, exact 128-bit constants in the template text evaluator, a parameter's top-level const on its variable (the
+   parser's `:_const`), a variable template's pack arguments as written, a non-type parameter no pack for a pack in its type's
+   arguments, a linkonce_odr variable whose address is taken written, an explicit specialization of a static template internal.
+
+Results. `bin/cppi runtime-build` (auto, at 8eab9eb73, under `ulimit -v 8388608`, CPPI_DISK_MAX=94: the disk at 91% from other
+lines): 198 units, 198 pass, **197 by our route** (from 194), every own unit's names the pack's (also checked unit by unit while the
+IR was made); IR 6,971 s, read, print and lower 299 s. runtime-ci 199 of 199 (every unit read again: the reader's key another than
+any kept library's; 6,020 s). `bin/cppi runtime-inputs --record`: own 197, pack 1. lower-essential 6 of 6 (499 s). cpp-check-essential's
+command: samples 4 of 4, runtime 4 of 4, the run controls differing as they must, selfref 220 of 225 (3,449 s). codegen-gen 156 of 156,
+the record written again byte for byte (no digest moved), its judge with both controls failing as they must. `bin/repr-cpp c2j-check`:
+33 of 33, 0 reflection warnings, on the gate's executable 92a96093a59cb6e9edb9 (stage 0 refuses the path-first load of the checkout's
+arbace/core since b4ab3ebfc's runtime, `Compiler$Dyn/hideMethod`: the environment's). Scores: the REAP matrix unchanged; C++'s eval
+and AOT stages 0.9950 to 0.9990 each, its independence 0.9522 to 0.9538, **95** (floored, unchanged); crops-score `--judge --strict`
+and records-check 0 problems.
+
+Left (1 unit): c++20/tzdb.cc, "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`
+(23 minutes into the unit; a reduced case with <chrono> did not finish in 20): DECISION cpp-rt-own4-1 in the survey's section. Found and
+left: `*opt` of a prvalue optional ambiguous among operator*() const&, && and const&& (the rvalue object's ranking); a subnormal long
+double literal's x86_fp80 constant malformed.
+
+Alternatives weighed: VLAs by a heap allocation (rejected: clang's IR is the stack save and the dynamic alloca, and the lowering takes
+them already); the late destructor call by declaring a placeholder destructor on the incomplete class (rejected: finish-class! would
+keep it when the class is completed with its own); valarray's chain cut at one instantiation up the stack (rejected: a class template
+naming another specialization of itself in a member's type, span's first(), would then need completion on demand everywhere) or
+instantiated on any later access through abi's cls (rejected: a completion inside another's would chain again, and no template state
+exists at code generation); 128-bit casts folded into the 64-bit representation (rejected: `~(_Value)0` of unsigned __int128 would be
+silently wrong); the parameter's const read from its qualType (rejected: the parser prints the parameter as the function's type does,
+so a `:_const` key). Rejected: a gate run (the brief's).
+
+Commits: 7a8b8de1f, c6c1ef6eb, 4c013f6df, 4e1a13298 (the code), 8eab9eb73 (rt_ours_glob), 6aa1269ec (the records: runtime inputs,
+scores), and this entry's commit (the survey's section, the journal). Pushed to mac.
+
+## 2026-11-22: cpp-rt-own4: tzdb's second round, parked on a WIP branch
+
+After the proofs and the push (455e8b7df), tzdb again with a lighter reduction (`.tmp/tz/t9.cc`, <bits/chrono.h> for <chrono>: 79
+seconds a probe, against 25 minutes for the unit): `&ZoneInfo::until` had been deduced as the overload set's own type, so ranges'
+projected had no value_type. Four code generator rules, each on a reduced case against clang 23.1.5's IR (deduction from a member
+function pointer of one function, a noexcept member function type's Do, the rewritten `<=>` candidate of a more specialized template
+over operator@, type-constraints with arguments in subsumption) take the unit past the upper_bound call to its next refusal,
+`year::min()/January/1` (a friend declared in month and defined in year_month, not found). Not landed: no runtime-build covers them,
+and the unit has 2,000 lines more at 25 minutes a probe; they wait on the branch `cpp-rt-own4-tzdb-wip-1122` (one commit on
+cpp-rt-own4-1122, pushed to mac, marked not for merge). DECISION cpp-rt-own4-1 (a) in the survey's section now names that branch.
+
+## 2026-11-22: cpp-rt-own4: next merged into the branch (169119776), both sides kept; consolidation
+
+Next had taken four C++ streams since the branch's base (cpp-read, cpp-gnu, cpp-diag-b and the Mac's 518), and its merge of
+cpp-rt-own4-1122 conflicted. Merged next into the branch (446f22a4e), both sides kept: sema's redeclaration of a function takes
+queue 518's deleted-definition check (the checker's) and this branch's `:param-const` beside `:param-names`; parse.ae's parameter
+list takes this branch's `:_const` key and cpp-diag-b's redefinition of a parameter; this branch's one change in the checker's
+mode (a member's initializer alone looks up the class's complete scope, `late*`) sits beside cpp-read's recovery, unchanged; the
+journal's and the survey's sections next's first, then this branch's; the scores recorded again: C++'s eval and AOT 0.9950 to 0.9990,
+its independence 0.9614 to 0.9630, **96** floored (REAP matrix unchanged, crops-score `--judge --strict` and records-check 0 problems).
+
+Proofs at the merge, targeted: `bin/cppi codegen-gen` 156 of 156 pass, the forms' digests unchanged (the merge leaves the code
+generator's output alone, so no runtime-build of its own); `bin/repr-cpp c2j-check` 33 of 33 compiled, 0 failed, and 0 reflection
+warnings once diag.ae's three are fixed: next's cpp-diag-b had left `(.indexOf src "\n" i)` and `(.indexOf src "*/" (+ i 2))` on a
+boxed index and `(.rem ^BigInteger lv rv)`, a method BigInteger lacks (`remainder`: a constant `%` in the checker's evaluator would
+have failed by reflection), fixed in this entry's commit. Not finished at the hand-back (the consolidation): the dg rerun of the
+2,072 own passes of next's record (`bin/repr-cpp dg --corpus dg-error --front native --only`, no --record; log
+`.tmp/dg-merge.log` of the worktree) and cpp-check-essential's command (its runtime-ci rebuilding the runtime at the merge's key,
+log `.tmp/chk-merge.log`) were running; lower-essential, started beside it, raced that rebuild in the same runtime directory and
+failed reading a unit's gen.refused (no verdict: to run again once the runtime is at the key). No gate (the user's rule).
+
+tzdb's third round on the WIP branch (`cpp-rt-own4-tzdb-wip-1122`, next merged in at 1dd00c37a, stopped at a5c0aaa90 by the
+consolidation): seven code generator rules on reduced cases against clang 23.1.5's IR, none proven by a runtime-build (the survey's
+section, "tzdb's third round"): a friend declared alone in an associated class visible to ADL ([basic.lookup.argdep]/4.3, <chrono>'s
+`year::min()/January`); noexcept on a member function pointer's type from its text; a namespace function template's call on tag
+objects in a constant's text (__call_is_nt); a throwing member pointer call in noexcept(...); const&& ranked between && and const&;
+constexpr class objects read by the evaluator; constructor direct-initialized POD locals folded. Alternatives weighed: entering a
+body-less friend declaration into the namespace as a hidden function (rejected: a class template's friend then defined at namespace
+scope would stay hidden from ordinary lookup) against keeping it on its class and declaring it on demand (taken); `:constexpr` on
+global variables in the code generator's mode (rejected: global-init's folding and three more readers would change) against a key of
+the evaluator's alone (`:cg-constexpr`, taken).
