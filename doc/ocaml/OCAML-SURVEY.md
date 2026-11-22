@@ -4595,3 +4595,59 @@ its B0.ml; pprint's PPrintTest), and at oi's level the 5 of `test/ocaml/own-verd
   (compiler-libs' typing units do not load in its limit, DECISION 480-1). `bin/oi objinfo-check` (the native typer's own printing)
   reads its programs from divergences-aot.edn's classes now.
 - Control (`test/ocaml/controls.txt`): index_labels' run against index_vb's reference must differ.
+## As built: the build's own reads (2026-11-22, branch `small-tails-ochs-1122`, from next `863bdaea1`)
+
+The read cell's last 19 rows, by design until now (`:oracle-rejects` 17, `:templates` 2), are files OCaml's parser rejects as an
+implementation or an interface but which their package's own build reads otherwise. Each is now judged as that build reads it, a
+pass by its own verdict (REASON `own verdict: HOW`), as OC213 (a) judges the testsuite's rejected files by their own tests:
+`arbace.repr.ocaml.prep` (`arbace/repr/ocaml/prep.ae`), `own-build PATH`:
+
+- **ocaml scripts** (topkg's `pkg/pkg.ml` of astring, cmdliner, fmt and uutf, cmdliner's `build.ml`: first line `#!/usr/bin/env
+  ocaml`) and **Toploop.use_file's input** (astring's `astring_top_init.ml`, which `astring_top.ml` hands to `Toploop.use_file`): read
+  as toploop.ml's `use_lexbuf` reads both, `Lexer.skip_hash_bang` (lexer.mll's rule: the `#!` line, or the three-line `#!...!#`
+  form, blanked so every later position stays) then `Parse.use_file` (the ported parser's `use_file` entry): 6 files.
+- **cppo inputs**: yojson 3.0.0's `lib/dune` runs its vendored `mucppo/mucppo.exe %{out} -o %{targets}` on eight `*.cppo.ml(i)`; the
+  rule is read from the dune file (`(rule (targets T) (deps (:out S) ...) (action (run P %{out} -o %{targets})))`), mucppo ported
+  statement for statement (`mucppo`, held to the package's `mucppo.ml` by its SHA-256: another mucppo is no rule), its `#include
+  "read.ml"` the native ocamllex's output of `read.mll` (dune's `(ocamllex read lexer_utils)`), and the output read as the target's
+  kind: 8 files; the three files they include alone (`type.ml`, `util.ml`, `write.mli`, with cppo's `#ifdef`s) pass when every output
+  that includes them reads: 3 files.
+- **the stdlib's templates**: `float.template.mli` and `moreLabels.template.mli` are `tools/sync_stdlib_docs`'s inputs (its README: run
+  by hand, not by the build); its perl substitutions are ported (`sync-stdlib-docs`: each `perl -p` a line at a time, `.` any byte but a
+  newline, the `/e` substitutions' `tail -n +K`, the backticked patches of `tools/unlabel-patches/`), and a template passes when its
+  expansion is the tarball's `stdlib/float.mli` (`stdlib/moreLabels.mli`) byte for byte, read as an interface: 2 files.
+
+Checked against the host's tools by hand (the oracle tier's, once): the eight mucppo outputs byte for byte those of the package's own
+mucppo built by the host's ocamlc 5.5.0 (after the host's ocamllex made `read.ml`), and the two expansions byte for byte the files the
+host's perl makes by running `tools/sync_stdlib_docs` on a copy of the tree (the release's committed `float.mli`, `moreLabels.mli`,
+`list.mli` ... are all in sync with their sources). No host tool at check time.
+
+The negative controls, `test/ocaml/own-build-controls.txt` (paths under `.tmp/repr-ocaml/`: each subject's bytes judged by the
+reference's rule in the reference's place, every one must fail, else nothing is recorded): a script as a mucppo input and as an
+included file, a cppo interface as a script, each template in the other's place: 5 of 5 fail. `bin/repr-ocaml roundtrip
+--record-results` passes the build's judge for the opam set and the stdlib (`--own-controls-root`), and `own-read --check` (the step
+`ocaml-read-essential`'s, `ocaml-read`'s checks part) checks the testsuite's rows and then the stdlib's and the ten opam corpora's.
+
+The record: `bin/repr-ocaml roundtrip --record-results opam stdlib` (every corpus's round trip passing, the stdlib's 150 and the opam
+set's 540 files): the 19 rows from `reject` to `pass`, nothing else (the print record unchanged); `test/ocaml/divergences-read.edn`
+holds no class. The read cell 3,143 / 19 / 0 to 3,162 / 0 / 0; OCaml's completeness 0.9071 to 0.9086 (read 99.4% to 100%; floored, 90.7% to 90.8%).
+
+## As built: queue 515 (2026-11-22, the VM): the light AOT level's stale header rows, a reperformed continuation's callstack, ocamlc -warn-help
+
+- **The AOT record's header rows.** Queue 413's C API at the light level (`@cstubs` at aot=1) and queue 461's dropped flambda
+  alternative made header.awk run 14 programs check-aot-native.edn still recorded as `class`. Recorded by list (`bin/oi check --aot
+  --record --only-list`): backtrace/backtrace_c_exn, c-api/test_c_thread_has_lock, test_c_thread_has_lock_systhread and locale/test
+  pass (taken out of `:c-runtime-decided` and `:c-runtime-internals` at AOT); the rest stay in their classes with their reasons
+  (cstubs reads of caml/gc.h, gc_ctrl.h and cmmain.c's declarator; mkroot's timeout; pr3612's Marshal of the C's custom block, the
+  class's `^fail status ` match; lib-runtime-events/test's and statmemprof/bigarray's outputs; backtrace/lazy as at eval).
+- **A reperformed continuation's callstack at the light level** (`Effects/reperform`, `Bt/linked`): the handler's fiber's frames
+  with the forwarded continuation's fiber's above them, as oi's queue 461 (caml_reperform links the stacks): backtrace_effects_nested
+  passes at AOT.
+- **ocamlc -warn-help** (`:compiler-of-the-tree` gone at eval and at the light level; the compiled level's class kept until its
+  record): ocamltest exports its variables to the program's environment, so header.awk gives a program that reads
+  `Sys.getenv "ocamlsrcdir"` or `"ocamlrun"` (warnings/mnemonics alone in the testsuite) ocamlsrcdir as the tarball's root and
+  ocamlrun as `bin/lib/oi/ocamlrun`, which runs only `ocamlc -warn-help`: `test/ocaml/warnhelp/warnhelp.ml`
+  (Warnings.help_warnings, as main_args.ml's option) over compiler-libs' utils/warnings.ml typed by Arbace's typer and run on
+  oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
+  passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
+- Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.

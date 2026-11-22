@@ -1,0 +1,43 @@
+#!/bin/bash
+# ocamltest's ocamlrun for a test that runs the built tree's bytecode compiler (queue 515): warnings/mnemonics reads ocamltest's
+# variables ocamlsrcdir and ocamlrun and runs `${ocamlrun} ${ocamlsrcdir}/ocamlc -warn-help` (header.awk exports both to such a
+# program, as ocamltest exports its environment, Environments.to_system_env). Arbace's ocamlc -warn-help: the tarball's
+# utils/warnings.ml (compiler-libs' unit, bin/oi's native complib) and test/ocaml/warnhelp/warnhelp.ml (Warnings.help_warnings, as
+# main_args.ml's -warn-help calls it) typed by Arbace's typer and run on oi, at every level (a tool of the test, as bin/oi depend's
+# ocamldep is: DECISION 476-1 (a)). Any other command line is refused (status 2).
+set -u
+here=$(cd "$(dirname "$0")" && pwd); root=$(cd "$here/../../.." && pwd)
+if [ $# != 2 ] || [ "$(basename "$1")" != ocamlc ] || [ "$2" != -warn-help ]; then
+  echo "ocamlrun: Arbace's runs only ocamlc -warn-help (got: $*)" >&2; exit 2
+fi
+OI_DIR=$root/.tmp/oi
+lib=$OI_DIR/lib; complib=$OI_DIR/complib; exe=$OI_DIR/bin/oi; w=$OI_DIR/warnhelp
+src=$root/test/ocaml/warnhelp/warnhelp.ml
+host=${ARBACE_HOST_EXE:-$root/target/seed/$(case $(uname -m) in x86_64) echo amd64 ;; aarch64) echo arm64 ;; esac)/arbace}
+for f in "$lib/key" "$exe" "$complib/Warnings.ae"; do [ -e "$f" ] || { echo "ocamlrun: no $f (bin/oi stdlib, bin/oi build)" >&2; exit 2; }; done
+key=$(cat "$lib/key" "$src" "$complib"/*.ae | sha256sum | cut -d' ' -f1)
+mkdir -p "$w"
+(
+  flock 8
+  [ -f "$w/key" ] && [ "$(cat "$w/key")" = "$key" ] && exit 0
+  rm -f "$w/key" "$w/Warnhelp.ae" "$w/units.txt"; cp "$src" "$w/warnhelp.ml"
+  (cd "$w" && ARBACE_PATH="$root" GOMEMLIMIT=1500MiB GOMAXPROCS=1 "$host" -m arbace.repr.ocaml.typer lambda --simplify \
+     --stdlib "$OI_DIR/stdlib-native-build" --include "$complib" --file warnhelp.ml warnhelp.ml > Warnhelp.ae 2> typer.err) \
+    || { echo "ocamlrun: typer: $(grep -v '^\s*at ' "$w/typer.err" | head -3 | tr '\n' ' ')" >&2; exit 2; }
+  # the compiler-libs units Warnhelp requires and theirs, in the library's link order (bin/oi's complib_need)
+  req() { awk '!on { i = index($0, "["); if (!i) next; on = 1; $0 = substr($0, i) }
+    on { j = index($0, "]"); s = j ? substr($0, 1, j) : $0
+         while (match(s, /"[^"]*"/)) { print substr(s, RSTART + 1, RLENGTH - 2); s = substr(s, RSTART + RLENGTH) }
+         if (j) exit }' "$1"; }
+  declare -A seen=(); q=($(req "$w/Warnhelp.ae"))
+  while [ ${#q[@]} -gt 0 ]; do
+    u=${q[0]}; q=("${q[@]:1}"); [ -n "${seen[$u]:-}" ] && continue; seen[$u]=1
+    [ -f "$complib/$u.ae" ] && q+=($(req "$complib/$u.ae"))
+  done
+  : > "$w/units.txt"
+  for u in $(sed -n 's/^COMPLIB_UNITS="\(.*\)"$/\1/p' "$root/bin/oi"); do
+    M="$(echo "${u:0:1}" | tr a-z A-Z)${u:1}"; [ -n "${seen[$M]:-}" ] && echo "$complib/$M.ae" >> "$w/units.txt"
+  done
+  echo "$key" > "$w/key"
+) 8> "$w.lock" || exit 2
+exec "$exe" run "$lib" $(cat "$w/units.txt") "$w/Warnhelp.ae" --

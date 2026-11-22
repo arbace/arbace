@@ -1172,3 +1172,28 @@ of PostProcess and of the Haddock pass give the helper's dump of mode `:lines`, 
 turns into the same forms. The helper stays the oracle (`bin/repr-haskell native-check`); CPP, unlit
 and hsc2hs stay GHC's driver's (the helper's `cpp` verb). Design, results and what is left:
 [NATIVE.md](NATIVE.md).
+
+## The closing parenthesis's line (2026-11-22, branch `small-tails-ochs-1122`, from next `863bdaea1`)
+
+The read cell's last three rows (`:own-iface-span-lines`, deferred: queue 325's DECISION 1 (a), queue 429's DECISION 429-1 (a)) and
+the same three of the layout layout's own interface level (the print cell's beside source) had one cause: the front end names some
+binders by their span (`NAME_L1_C1_L2_C2`, the comparison keeping the lines), and mode `:lines` lost the line of a type's closing `)`
+written on a line of its own (Cabal's `convertInclude :: ... -> UnifyM s ( ModuleScopeU s , Either ... )` and `dependencyGraph`, 465-473
+printed 465-472 and 725-731 printed 725-730; ghc-internal's `NotApplication (f a) = TypeError ( ... )` equation, 521-525 printed 521-524):
+the printer joined the `)` to the line before, so the signature's or the equation's span ended a line earlier.
+
+The forms now keep that line: `:hs/close` (SPEC §7.1, "Token lines") on a parenthesized type (`(:paren ...)`, or the form its implicit
+parentheses enclose) or a tuple type whose span ends on a later line than its last element (`arbace.repr.haskell.convert`'s
+`close-line`, `with-close`), and the printer goes to that line before the `)` when its output has not reached it, never back, in both
+the braces and the layout layouts, never in the full layout (`arbace.repr.haskell.print`'s `close!`). Expressions and patterns keep
+the rule of the end lines as before (no known difference names one).
+
+The proof, the gate step haskell-iface-own's command by hand under the light lane's lock (`.tmp/hs-iface-own.sh`: lib-check
+`--ifaces own` of the 45 packages, then `bin/repr-haskell roundtrip --layout --iface-own --only` them; 404 minutes, one process at a
+time): the tree level 1,344 of 1,344 equal in both layouts (`:hs/close` on both sides of every comparison); the own interface level
+1,344 of 1,344 units equal in both layouts, 0 known, the controls differing, once the comparison's SrcLoc normalization (D341-3 (a)) also
+takes the bare form the front end on next now writes a HasCallStack SrcLoc's positions in (`(lit "98#")`, no `I#` box:
+test/haskell/iface_own.ae's `srcloc-bare-re`): without it array's Data/Array/Base.hs (both layouts) and exceptions' Control/Monad/Catch.hs
+(the layout layout) differed by those columns alone, a difference of the judge, not of the print (the pools of hs-r5, hs-r6 and hs-r7
+hold the same bare form). Both known files list nothing; `:own-iface-span-lines` is removed from the read and print classes. The read
+cell 2,687 / 0 / 3 to 2,690 / 0 / 0.

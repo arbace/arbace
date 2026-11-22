@@ -331,6 +331,13 @@ covers what.
   MenhirLib's terms ("Menhir and MenhirLib", below). The rest of them (`ast.ae`'s dump, which ports Arbace's own
   tools/ocdump/ocdump.ml, `native.ae`, the LALR(1) construction of `menhir.ae`) is Arbace's own, under the Eclipse
   Public License 1.0.
+- The read level's own verdicts by the build (doc/ocaml/OCAML-SURVEY.md, "As built: the build's own reads", 2026-11-22):
+  `arbace/repr/ocaml/prep.ae`'s `mucppo` ports mucppo (Copyright 2023-2024 Marek Kubica, https://github.com/Leonidas-from-XIV/mucppo,
+  as vendored in yojson 3.0.0's `lib/mucppo/mucppo.ml`, the opam tarball pinned in test/ocaml/corpora.edn), released by its notice
+  under the CC0 1.0 Universal Public Domain Dedication (https://creativecommons.org/publicdomain/zero/1.0/); its `sync-stdlib-docs`
+  ports the perl substitutions of OCaml 5.5.0's `tools/sync_stdlib_docs` (Copyright 2020 INRIA, John Whitington; the release tarball
+  above) under the GNU Lesser General Public License version 2.1 with the OCaml LGPL linking exception (below); the rest of the file
+  and `test/ocaml/own-build-controls.txt` are Arbace's own, under the Eclipse Public License 1.0.
 - ocamllex ported (doc/ocaml/OCAML-SURVEY.md, "As built: ocamllex ported (OC186)"): `arbace/repr/ocaml/ocamllex.ae` ports OCaml
   5.5.0's lex/ (lexer.mll, parser.mly, cset.ml, table.ml, lexgen.ml, compact.ml, common.ml, output.ml, main.ml) and the parts of
   stdlib/set.ml it relies on, from the same release tarball (SHA-256 `fcc6ae665d1ec51d52510eaac7834a86a9806bf5a258bb7cca78733fccf015ba`,

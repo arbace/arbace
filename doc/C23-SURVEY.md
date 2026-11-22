@@ -6547,3 +6547,163 @@ h and 28 min at the full sizes); nbody-4 stops at once at both levels on `_mm_lo
 AOT: fasta-2 19 s, fasta-7 25 s, fasta-5 43 s and mandelbrot-2 34 s end with status 0 at the specification's exact lengths; the
 other 11 pass 60 s twice. No program fits the check at both levels, and C's reference (`c.selfref ref`) is one for both, so none
 moved: the 16 leave the judge's cases as the check runs them, with no argument, the measurement in each reason.
+
+## As built: c-rows, C's completeness rows by class (2026-11-21/22, branch `c-rows-1122` from mac/next `863bdaea1`)
+
+The burst's stream C2 (doc/AGENDA.md's goal, 100 completeness): C's non-passes ranked by class, the classes that can pass fixed,
+each proved by its narrowest command, the records re-recorded from whole-corpus runs. Stage 0 the main checkout's
+(`/root/arbace/target/seed/amd64/arbace`, repr/c and ci evaluated from the checkout), no gate, no gcc at check time (gcc only by
+hand under `ARBACE_C_JUDGE=gcc` for the round trip's level 3, the oracle tier's).
+
+### The rows by class (before)
+
+| cell | pass / design / deferred | the classes (rows) |
+|---|---|---|
+| read | 5,237 / 226 / 12 (8 n/a) | design: gcc-syntax 131, embed 47, pp-errors 23, va-opt 10, u-prefix 5, error-test 2, has-c-attribute 2, trigraphs 2, ucn-identifier 2, unterminated-literal 2, digit-separators 1, has-gnu 1, pp-known 1, xid-identifier 1 (count once a file); deferred: eval-depth 5, decl-diag 3, parse-gap 1, pedantic-diag 1, pp-diag 1, wrong-reason 1 |
+| eval | 2,323 / 36 / 0 | by-design 18, speed 9, long-double 4, fenv 2, ub 2, gcc-builtin 1 |
+| AOT | 2,331 / 28 / 0 | by-design 18, long-double 5, fenv 2, ub 2, gcc-builtin 1 |
+| print | 4,833 / 5 / 12 | design: assembler 2, objects 2, run-address 1; deferred: eval-limits 10, macro-context 1, objects-macro-body 1 (and 6 rows recorded known whose entries had left the known file: counted nowhere) |
+
+### Built (arbace/repr/c/, arbace/c/; each proved by its narrowest command)
+
+- **C23's va_start (ap, last) read as cc reads it** (`parse.ae`'s c23-va-start-args): the one form gcc does not warn of, the
+  va_list and an identifier alone, is cc's two-argument list in the tree (gcc's skip of the extra tokens kept for any other
+  form, which need not be an expression: c23-stdarg-6's `random ! ignored`); the converter keeps the va_list alone
+  (`convert.ae`, 7.16.1.4: the extra arguments never evaluated), so the forms are unchanged (five files' :lines and :full
+  forms compared byte for byte before and after). The tree check's gcc-syntax rows of every torture program that calls
+  va_start were this (`<stdarg.h>`'s C23 va_start is `__builtin_c23_va_start (__VA_ARGS__)`): `bin/repr-c parse-check --only`
+  over the class's 131 files: 89 equal (84 torture-execute, 2 torture-execute-mirror, torture-compile's 20080124-1.c,
+  gcc-bitint's bitint-5.c, gcc-c23's c23-nullptr-1.c), the other 42 cc's own gaps (C23 attributes, storage classes in
+  compound literals, named loops, `...` first, if declarations, _Decimal64x...).
+- **A function declaration's asm label kept** (`convert.ae`'s decl-form): `void *memcpy (...) __asm ("my_memcpy")` held
+  `:c/asm-label` only for objects; the function's was dropped, so the print called memcpy (torture-execute's
+  builtins/memops-asm.c and strstr-asm.c, the class objects, CS81 (a)'s "an asm label's section"). The printer's decl-tail
+  already wrote a declaration's label. `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip --only` (by hand, gcc the oracle tier's):
+  level 3 equal for both; the 8 files of the corpora with an asm label after a declarator round-trip at all four levels
+  (pidigits-6, bitint-84, 20011119-1/-2, pr69691, ieee/20041213-1 and the two), annotations equal, and `bin/ci check` and
+  `check --aot --only` pass pr69691 and both ieee/20041213-1. Their known entries removed (the no-gcc record drops the levels
+  3-4 of a row whose oracle class the known file no longer lists, 808d08d60's rule).
+- **The round trip's level 4 under equal objects** (`rtcheck.ae`'s judge-row): the objects byte for byte (level 3, each
+  compiled under its own name) make the print's program the original's, so a run that differs is the program's own
+  nondeterminism: level 4 judges only where level 3 does not hold. return-addr.c (a return address under ASLR) and
+  reverse-complement-5.c (a read before its buffer, in selfref-out.edn) pass; run-address a guard class.
+  `test/c/judge_test.ae`: the record test's h.c (level 3 equal, level 4 differs: passes), e.c (both differ: fails), and the
+  control test's case of alike fabricated objects now passes (two corpus files' objects never are alike).
+- **setjmp through a pointer** (`arbace/c/build.ae`'s setjmp-call?): ci's setjmp is a statement of its function (SjStmt,
+  SjBody) found by the callee's name; a file-scope object initialized with setjmp (mir's new/setjmp2.c: `static int
+  (*setjmp2) (jmp_buf) = setjmp;`) names it too, as on the target, where setjmp is a function its caller's frame returns to.
+  `bin/ci check --only`, `check --aot --only`: setjmp2.c passes at both (selfref-out.edn keeps it out of the judge's cases:
+  7.13.1.1 leaves it undefined; it passes against gcc's recorded run), new/setjmp.c unchanged; its check-known entry removed.
+- **The dg check's read recovers as gcc's parser** (`parse.ae`, under `*recover*`, the dg check's read alone; the tree check
+  and every other read unchanged): (1) an expression statement's missing `;` (must-semi): gcc's c_parser_skip_until_found,
+  "expected ';' before X" at the next token, or after the last token consumed when the next stands on a later line
+  (maybe_suggest_missing_token_insertion), the tokens skipped to a `;` or an unmatched closer; (2) the stray token of an
+  unterminated literal a recovery error (gcc's c-lex reports and drops it); (3) a recovery error hides no later error of its
+  line (dedupe-errors: c23-bool-errors-3's keyword enumerator, then `_Bool` where gcc expects `;`). `convert.ae`'s
+  bad-binary-constant: a separator right after 0b is libcpp's "digit separator after base indicator" before the suffix.
+  `arbace/c/dg.ae`'s msg-mismatch: a regex's leading "N:" is its column (gcc-dg.exp's process-message), "-:" none; the
+  verdict's example names the regex no message matches. c23-digit-separators-2.c and c23-bool-errors-3.c pass.
+- **-traditional-cpp's missing #embed and __has_embed** (`host.ae`'s file-config `:traditional`, `pp.ae`): gcc's errors
+  "'#embed' not supported in traditional C" (the line dropped) and "'__has_embed' not supported in traditional C", then
+  "missing binary operator before token '('" (the operand dropped, the identifier 0); nothing else of traditional C modelled.
+  gcc.dg/cpp/embed-4.c passes dg; its print is rejected for its own words now (print-own.edn's entry removed, the
+  `:roundtrip-own` control's reference moved to embed-13), its token check's pp level equals cc's (the lex level stays known).
+- c23-attr-syntax-6.c's line 82 (`[[gnu :: vector_size (sizeof (void (*)(...)))]]`): the dg record passed it at 11-17, but
+  next (pristine, its own worktree) fails it: the pedwarn of `(...)` before C23 inside a gnu:: attribute's balanced tokens,
+  which the forms keep as text since n-c-last (`:c/tokens`); classed pedantic-diag (deferred).
+- **Four benchmarks' budgets** (`test/c/check-budget.edn`): the class speed's nine measured at eval with 900 s budgets (three
+  jobs at once, load 30 to 40): spectral-norm 12 s, compcert/spectral 12 s, siphash24 16 s, nbody 26 s, aes 150 s,
+  binarytrees 254 s, chomp 351 s, fannkuch 381 s, almabench 423 s, all with gcc's output. The first four get 60 s (CS216 (a)'s
+  rule for programs near the limit); the five others stay in speed (CR2). The record keeps the four in speed: the whole run of
+  compcert and benchmarksgame at 22:51 (load 90 to 113) passed siphash24 and spectral but timed out nbody and spectral-norm at
+  60 s and compcert/fib.c (a pass) at 10 s, so it was not a passing run and its rows were not taken; the night records them.
+
+### The records and the cells
+
+Each from a whole run of its corpora, the code above, no gcc (stage 0 the main checkout's; the host at load 30 to 110):
+- the tree check (`bin/repr-c parse-check --record --no-mutants`): torture-execute and torture-execute-mirror (1,773 of 1,773
+  equal; the 86 entries removed), gcc-bitint, gcc-c23 and gcc-embed (bitint-5.c and c23-nullptr-1.c equal; embed-4.c's tree
+  now differs from cc's by its preprocessor's errors only, guessed :pp-errors, the token check's pp level equal); torture-compile
+  not yet: one of its files allocates past ulimit's 8 GiB (two runs under it died at 6.3 and 6.5 GiB, one thread or four), and
+  its run under bin/heavy-lock (steps.edn: 12 GiB) waited behind three jobs for two hours when this branch was pushed: its
+  20080124-1.c (equal under `--only`) stays a known gcc-syntax entry, stale for the night's c-parse part until that record
+  (`bin/heavy-lock env REPR_C_THREADS=4 bin/repr-c parse-check --corpus torture-compile --no-mutants --record`); the mutants (`--mutants-only`, steps.edn's `ARBACE_NO_AOT=1`): 7,504 equal, three that their
+  originals' gcc-syntax entries had covered (m01931-0, m02371-1, m03685-1: a mutant's recovery after va_start's argument or
+  a C2y declaration) left of no class by the record, classed gcc-syntax by hand as it asks, then recorded again;
+- the token check (`check --tokens --record --corpus gcc-embed`): embed-4.c's pp entry removed (its lex entry stays);
+- the annotations (`bin/ci annotations --record --corpus gcc-embed`): the rows' first errors moved, 37 pass, 10 known as before;
+- the round trip (`roundtrip --record`, no gcc): torture-execute 1,672 of 1,672 (the five self-including files and the two asm
+  files pass), torture-execute-mirror 101 of 101, gcc-embed 47 of 47, benchmarksgame 52 of 52 (reverse-complement-5.c), the six
+  rows test/records/accepted.edn held removed there;
+- the dg check (`bin/ci dg --record`): 614 of 619 supported (decl-diag 3, parse-gap 1, pedantic-diag 1), 8 unsupported;
+- the run level (`bin/ci check --record`, `check --aot --record`, `--corpus mir`): eval 311 of 312 and AOT 311 of 312 (setjmp2.c
+  at both, long-double-load.c at AOT, whose record still held a failure the own verdict had cleared on 11-07; union-bitfield.c
+  ub). compcert and benchmarksgame: not taken (above).
+
+| cell | before | after |
+|---|---|---|
+| read | 5,237 / 226 / 12 | 5,327 / 138 / 10 (5,328 / 137 / 10 with torture-compile's record) |
+| eval | 2,323 / 36 / 0 | 2,324 / 35 / 0 |
+| AOT | 2,331 / 28 / 0 | 2,333 / 26 / 0 |
+| print | 4,833 / 5 / 12 | 4,842 / 2 / 12 |
+
+C's completeness 0.9815 to 0.9861 (without by design 0.9988 to 0.9989); maturity and independence 1.
+
+Rows moved per class: read gcc-syntax 131 to 43 (88 pass, 89 with torture-compile's record), the tree check's pp-errors 23 to 24 (embed-4.c, whose token row stays embed by its lex entry), dg's pedantic-diag
+1 to 1 (digit-separators-2 passes, attr-syntax-6 in), pp-diag 1 to 0, wrong-reason 1 to 0; eval ub 2 to 1; AOT ub 2 to 1,
+long-double 5 to 4; print objects 2 to 0, run-address 1 to 0, and six rows counted nowhere now pass (self-include 5,
+reverse-complement-5).
+
+### Left, and why
+
+- read: eval-depth 5 (deferred): gcc's limits-*.c nest 10,000 levels; stage 0 evaluates repr/c from the checkout (its embedded copy
+  is the re-seed's), whose evaluator stops at 10,000 interpreted calls, and the compiled parse stops at MAX-NEST (4,000) on purpose,
+  since the converter and the checkers after it recurse past Go's 1 GB stack over such a tree: the next re-seed and a converter
+  that does not recurse per nesting level. decl-diag 3 (c23-auto-3, c23-complit-5, c23-constexpr-3: the checker's declaration
+  errors, 33, 20 and about 150 lines each), parse-gap 1 (embed-10: gcc's int-conversion error, "makes pointer from integer
+  without a cast", which the checker does not give: adding it would refuse run programs gcc 15 accepts only with -fpermissive),
+  pedantic-diag 1 (c23-attr-syntax-6, above); and the 137 by design of CR1.
+- eval and AOT: CR2's five speed programs (eval), CR3's classes.
+- print: eval-limits 10 (as eval-depth, and three files past the read's budget evaluated: quickjs.c, sqlite3.c,
+  limits-externdecl.c), macro-context 1 (shell.c: its BOX_24 recovery holds since CS82 (b); its level 1 now differs by musl's
+  self-referential `#define stderr (stderr)` inside an assert the print expands, reexpansion's limit; the entry kept, its class
+  the deferred one it had), objects-macro-body 1 (unicode_gen.c: a header macro's invocation, assert inside a for body, is
+  printed expanded: its tokens hold several locations where the original's held one, and gcc -O0 adds a nop at the `||`'s join;
+  recovering a header's invocation needs has-other?'s rule changed for every file), assembler 2 (tcc-pp's 12.S and 13.S: no
+  C translation unit; a preprocessing-layer form for assembler text would be SPEC's to add).
+
+### Proposed (DECISIONs for the user)
+
+- **CR1 The read cell's files where cc is wrong (by design, 137 rows once torture-compile's record has 20080124-1.c pass).** The token and tree checks' reference is cc; where its
+  scanner, preprocessor or parser lacks a C23 or GNU construct (the classes gcc-syntax, embed, pp-errors, va-opt, u-prefix,
+  error-test, has-c-attribute, trigraphs, ucn-identifier, unterminated-literal, digit-separators, has-gnu, pp-known,
+  xid-identifier) the port follows gcc and the file is a known entry, by design (CS260 (a), CS267 (a)). Options: (a) such a file
+  passes when its own verdict passes elsewhere: a gcc-* corpus file by the dg check's verdict on its DejaGnu directives (the
+  read cell's first source), a run corpus program by its run's own verdict (the eval cell's record); reap's `:c-known` reader
+  counts it pass and names the verdict; 132 of the 137 hold one (embed 46, gcc-syntax 41, pp-errors 24, va-opt 10, u-prefix 5,
+  has-c-attribute 2, trigraphs 2, ucn-identifier 2, digit-separators 1, unterminated-literal 1, error-test 1, xid-identifier 1),
+  the other five stay by design (c23-attr-syntax-6, c23-complit-5 and c-c++-common's embed-10, whose dg verdicts fail;
+  sqlite3.c and tcc-pp's 13.S, which have none); a dg-do preprocess file's
+  directives judge its errors, not its tokens, so this is weaker than cc's token equality for those (the C++ crop's token
+  check reads libcpp at check time instead, its independence 0.769 at read); (b) the same files n/a (out of both
+  denominators); (c) by design as decided. *Recommended: (a)*: the user's rule of 2026-11-07 (each test's own verdict), every
+  verdict already recorded, read 0.9729 to 0.9973.
+- **CR2 The eval level's 10 s for five benchmarks (speed, 5 rows; the other four have 60 s since this branch, the record at the
+  next whole run).** CS107 (a) kept them by design (the interpreter 100-300 times gcc -O0's time; AOT passes all). Measured at
+  eval with gcc's output: aes 150 s, binarytrees 254 s, chomp 351 s, fannkuch 381 s, almabench 423 s (three at once, load 30-40).
+  Options: (a) budgets at about twice those in test/c/check-budget.edn (the night's eval run longer by about 25 minutes of one
+  core); (b) by design as decided. *Recommended: (b)* until the interpreter is faster (CS107 (a)'s profile-guided pass).
+- **CR3 SPEC §14's floating types and CS35's long double (eval 26 of its 35, AOT 26).** by-design 18: _Float16 (3: torture's
+  bitint-25, c23-imaginary-constants-7, synth's decl-floatn-wide, which needs _Float128 too), _Float128 (7: bitint-28 to -31 and
+  torture's bitint-22 and -24, c23-imaginary-constants-5; bitint-28, -29 and -30 also test FE_INVALID, which ci does not model),
+  _Decimal32/64/64x (5, dfp-8 out of the judge's cases), x87 and argument-register assembly (3); long-double 4 (eval and AOT);
+  fenv 2 (signaling NaNs' FE_INVALID); gcc-builtin 1 (20021127-1.c defines llabs, which gcc expands as its builtin at -O0: ci
+  would need gcc's builtin folding of the reserved names, keyed by the units' -fno-builtin and -ffreestanding); ub 1
+  (union-bitfield.c's uninitialized bits, out of the judge's cases).
+  Options: (a) build soft-float binary16 and binary128 in crt (math/big's correctly rounded
+  arithmetic within each format's range, subnormals rounded once) with their loads, stores, conversions (to and from
+  `_BitInt` rounded once) and complex parts in ci and cf2g, then BID decimal floats, then x87's long double; a few days;
+  (b) keep SPEC §14 and CS35. *Recommended: (a) for _Float16 and _Float128 first.* _Float16 was begun after this round and not
+  merged (the worktree's `.tmp/f16-wip*.patch`, not committed: crt's binary16 conversions with ties to even, ci's and cf2g's "f16" loads, stores
+  and r16 rounding, the builder's kind, fty and conversions; cirun builds, nothing run yet).
+

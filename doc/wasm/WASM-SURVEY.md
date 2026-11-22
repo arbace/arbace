@@ -1525,3 +1525,31 @@ Checks (each under 1 GiB): `bin/repr-wasm wast --only` the five custom-page-size
 scripts of limits, offsets and alignment (961, msg 375 of 375) and `test/wasm/essential-wast.txt` (2,431; the ten controls fail as they
 must); the row re-recorded by hand from the `--only` run's rows (`--only` does not `--record`; the run's 352 rows differ from the
 record in that one); `bin/reap --record`, `bin/crops-score --record`, then `bin/reap` and `bin/crops-score --judge --strict`, 0 problems.
+
+## As built: small-tails, the proposals' profiles (2026-11-21, branch `small-tails-wasm-1122`)
+
+The two by-design classes left in the counted cells were scripts judged by rules they were not written against: the threads
+proposal's scripts assert Wasm 1.0's core (one memory, one table, nat32 limits, the older size message), the custom descriptors
+proposal's assert its relaxed `br_on_cast` rule, and D326-2 (a) and D327-1 (a) chose between global rules (Wasm 3.0's everywhere, or
+the proposal's everywhere, which would break Wasm 3.0's own scripts). A third way was not among their options: each script judged by
+its own directory's rules, as each proposal's repository runs its scripts on its own reference interpreter. Built, doc/wasm/SPEC.md
+§9.1: `arbace.wasm.valid/*profile*` and `profile-of` (`proposals/threads/` `:threads`, `proposals/custom-descriptors/`
+`:custom-descriptors`, else nil, Wasm 3.0's with the proposals built, unchanged), `arbace.repr.wasm.text/*limits32*` (nat32 limits,
+"i32 constant out of range"), bound by `arbace.repr.wasm.wast/with-profile` for the read level's scripts and controls and the eval
+planner's scripts; wai's `Profile` and `ProfileOf` (`go/arbace/wai/valid.ae`: `checkCounts` after the import, table and memory
+sections, the threads message, the relaxed cast), set by the light driver in `runScript`, `control` and `w2g`. Wasm 3.0's rules are
+unchanged for the root scripts (their `br_on_cast.wast` still rejects the relaxed casts), so the decisions stand as taken.
+
+Rows: read `threads-before-wasm-3.0` 11 and `custom-descriptors-br-on-cast-relaxed` 2 -> 0 (the 13 pass, with 2 new print rows and
+11 new msg rows, all passing; the threads' 6 msg rows of the older size message pass); eval and AOT `custom-descriptors-br-on-cast-relaxed`
+2 -> 0 each. The classes are removed. Left: `custom-page-sizes-flag-message` (2 msg rows, a beside source, D326-1 (a); a
+`:custom-page-sizes` profile would let the root's and custom descriptors' binary.wast read 0x08 as Wasm 3.0 does, not built: the
+proposals built are global, not per directory) and eval's `go-speed` (3 `:budget`, wai's interpretive speed, WAS35).
+
+Checks (each under 2 GiB): `bin/repr-wasm wast --only` the 18 scripts of proposals/threads and proposals/custom-descriptors with
+`test/wasm/essential-wast.txt` (58 scripts: testsuite 3,109 of 3,109, print 1,272 of 1,272, msg 1,835 of 1,837, the 2 the flag's class;
+13 controls fail as they must, 3 new); `bin/wai check --only` the same 18 with `test/wasm/essential-eval.txt` (71 scripts: testsuite
+19,685, msg 2,787, valid 2,248, all pass; 24 controls and checks, 3 new); `bin/wai check --aot --only` the 18 with
+`test/wasm/essential-aot.txt` (49 scripts: 2,709 of 2,709 functions translated; testsuite 17,318, msg 2,038, all pass; 19 controls and
+checks, 1 new). `--only` does not `--record`: the records' rows of the runs' scripts replaced by the runs' rows (wast 16,535 -> 16,548
+rows, eval and AOT 2 rows each changed).

@@ -2362,6 +2362,27 @@
       (unify tf (fn-ty (con-ty tc-int) (fn-ty tl r)))
       [r (app* cf [(list 'app (list 'v (ext-name "var" "GHC.Internal.Types" "I#")) [(list 'lit (str n "#"))]) cl])])))
 
+(defn- neg-zero-overlit
+  "hs-r6: GHC.Rename.Expr's rnExpr of an HsOverLit through rnOverLit (Note [Negative zero], #13211): a negative zero (-0
+  or -0.0 lexed as one literal under NegativeLiterals or LexicalNegation; isNegativeZeroOverLit: its value 0 and its
+  neg flag set) is negate applied to the literal made positive (negateOverLitVal), the sign kept at run time (an
+  Integer's or Rational's value has no negative zero)
+  (FMA_ConstantFold's `fmadd @Float 1 0 -0`: GHC's negOp leaves negateFloat# 0.0# unfolded, so fmaOne's 0.0 + z is z,
+  -0.0; read as the literal 0 it folded to +0.0); the positive literal, which the caller negates, else nil"
+  [e v]
+  (let [ol (arg v 2) val (when (seq? ol) (arg ol 2)) x (when (seq? val) (arg val 1))
+        zero? (fn [n] (and (number? n) (== 0 n)))]
+    (when (and (seq? x) (true? (nth x 2 nil))
+               (case (con val)
+                 HsIntegral (let [n (nth x 3 nil)] (or (zero? n) (and (string? n) (re-matches #"-?0+" n))))
+                 HsFractional (let [r (nth x 3 nil)] (and (seq? r) (zero? (nth r 1 nil))))
+                 false))
+      (let [x2 (apply list (assoc (vec x) 2 false))
+            val2 (apply list (assoc (vec val) 1 x2))
+            ol2 (apply list (assoc (vec ol) 2 val2))
+            sp (when (L? e) (lsp e))]
+        (list 'L sp (apply list (assoc (vec v) 2 ol2)))))))
+
 (defn- overlit
   "An overloaded literal: its type a fresh meta constrained by Num (Fractional), the core resolved at the end"
   [v]
@@ -3549,7 +3570,7 @@
                [r (app* cn [c])])
       HsPar (infer env (arg v 2))
       HsPragE (infer env (arg v 3))
-      HsOverLit (overlit v)
+      HsOverLit (if-let [pz (neg-zero-overlit e v)] (infer env (list 'L (when (L? e) (lsp e)) (list 'NegApp nil pz))) (overlit v))
       HsLit (if (ovl-string? v) (ovl-string v) (hslit v))
       ;; HF10-P54 (a): PostfixOperators' left section (e op) is op e (GHC.Tc.Gen.Expr's SectionL, its postfix_ops)
       SectionL (if (contains? *exts* "PostfixOperators")
@@ -3820,7 +3841,12 @@
       ;; Integer (an integral literal), Float or Double (either), not under RebindableSyntax, the literal is built at its
       ;; type with no Num or Fractional wanted (GHC.Internal.Bignum.Integer's literals need no Num Integer, which
       ;; GHC.Internal.Num defines above it)
-      HsOverLit (let [ol (arg v 2) val (arg ol 2)
+      HsOverLit (if-let [pz (neg-zero-overlit e v)]
+                  ;; (negate checked against t: its argument the positive literal checked against t, so the short cut applies)
+                  (let [[tn cn] (var-occ env (ext-name "var" "GHC.Internal.Num" "negate"))]
+                    (unify tn (fn-ty t t))
+                    (app* cn [(check-expr env pz t)]))
+                 (let [ol (arg v 2) val (arg ol 2)
                       tn (let [x (expand (zonk tp))] (when (= :tc (first x)) (second x)))
                       ;; (RebindableSyntax's literal is its fromInteger's: the renamer's implicit name of any literal, the
                       ;; standard fromInteger too, made every literal look rebindable, so the short cut never applied: Data.Char's
@@ -3846,7 +3872,7 @@
                     (and (not int?) (contains? #{tc-float tc-double} tn) (= 'HsFractional (con val))
                          (let [e (nth (arg val 1) 4 0)] (and (number? e) (<= -100 e 100))))
                     (lit-core :frac (arg val 1) tp nil nil)
-                    :else (let [[t1 c] (overlit v)] (unify t1 t) c)))
+                    :else (let [[t1 c] (overlit v)] (unify t1 t) c))))
       HsApp (let [[h args] (app-spine v)] (second (tc-app env h args t)))
       OpApp (second (tc-app env (arg v 3) [(arg v 2) (arg v 4)] t))
       HsCase (let [[ts cs] (infer env (arg v 2))]

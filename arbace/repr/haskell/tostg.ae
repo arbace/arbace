@@ -61,7 +61,8 @@
   (:require [arbace.string :as str]
             [arbace.repr.haskell.desugar :as ds]
             [arbace.repr.haskell.simplify :as simpl]
-            [arbace.repr.haskell.typecheck :as tc])
+            [arbace.repr.haskell.typecheck :as tc]
+            [arbace.repr.haskell.famenv :as famenv])
   (:import [java.io File]))
 
 (def ^:dynamic *r* nil)       ; the elaborator's result
@@ -351,9 +352,11 @@
 (def ^:dynamic *bkinds* nil) ; HF10-P20: the top-level binding's type variables' kept kinds ({TV kind-type}), its binders' reps
 (declare kind-type)
 
+(declare newtype-rep)
+
 (defn type-reps
   "A type's PrimReps after unarisation: a vector, empty for a void type"
-  [t]
+  [t & [depth]]
   (let [t (expand-syn (strip-forall t))]
     (if (= :tc (first t))
       (let [[_ n args] t]
@@ -363,7 +366,11 @@
           (and (= "GHC.Internal.Types" (nth n 2)) (re-matches #"Tuple[0-9]+#|Solo#|Unit#" (nth n 3))) (vec (mapcat type-reps args))
           (and (= "GHC.Internal.Prim" (nth n 2)) (contains? prim-tycon-reps (nth n 3))) (get prim-tycon-reps (nth n 3))
           (and (= "GHC.Internal.Prim" (nth n 2)) (str/ends-with? (nth n 3) "#")) [:U]
-          :else [:L]))
+          ;; hs-r6: a newtype is its representation type's (typePrimRep sees through newtypes: UnliftedNewtypes' newtype
+          ;; over Int# or an unboxed sum is unlifted), a data family's newtype instance its representation tycon's (the
+          ;; module's own instances); a lifted one's representation is [:L] as before (at most 8 newtypes deep: newtype
+          ;; Void = Void Void)
+          :else (if-let [u (and (< (or depth 0) 8) (newtype-rep t))] (type-reps u (inc (or depth 0))) [:L])))
       ;; HF10-P20: a type variable of the binding whose kind is kept (unsafeCoerceAddr's x :: a, a :: TYPE 'AddrRep)
       (if-let [kt (and (= :tv (first t)) (some-> (get *bkinds* (second t)) kind-type))]
         (type-reps kt)
@@ -379,6 +386,29 @@
           (let [[tvs body] (if (= :forall (first ct)) [(nth ct 1) (nth ct 3)] [[] ct])]
             (when (fun-ty? body)
               (@#'tc/subst (if args (zipmap tvs args) {}) (first (nth body 2))))))))))
+
+(defn- newtype-rep
+  "hs-r6: a newtype's application (or a data family's application whose own instance is a newtype instance, the
+  elaborator's :fam-insts) as its field's type at the constructor's result type matched against it (GHC.Core.Coercion's
+  instNewTyCon_maybe, the family instance's representation tycon first: lookupFamInstEnv); nil for another type"
+  [t]
+  (when (= :tc (first t))
+    (let [[_ n args] t
+          tcs (:tycons *r*)
+          nt (fn [tn] (let [i (get tcs tn)] (when (= 'newtype (:flavour i)) i)))
+          i (or (nt n)
+                (some (fn [[fname eqn]]
+                        (when (and (= fname n) (:data eqn) (= :tc (first (:rhs eqn)))
+                                   (famenv/match-tys (:tvs eqn) (:lhs eqn) (vec args)))
+                          (nt (second (:rhs eqn)))))
+                      (:fam-insts *r*)))]
+      (when i
+        (when-let [ct (let [c (first (:cons i))] (or (get (:genv *r*) c) (get (:types *r*) c)))]
+          (let [[tvs body] (if (= :forall (first ct)) [(nth ct 1) (strip-forall (nth ct 3))] [[] ct])]
+            (when (fun-ty? body)
+              (let [[field res] (nth body 2)
+                    s (famenv/match-tys tvs [(strip-forall res)] [t])]
+                (when s (@#'tc/subst s field))))))))))
 
 (defn- result-type
   "A type after n arguments (dictionary arguments first), or nil"
@@ -523,6 +553,9 @@
     ;; thunk from the foldr branch, its writes never run: Array.! read arrEleBottom)
     case (let [alts (nth e 3) rs (map #(expr-reps (nth % 3)) alts)] (or (first (remove #{[:L]} rs)) [:L]))
     (let letrec) (expr-reps (nth e 2))
+    ;; hs-r6: a cast's result type is the expression's (a newtype instance's field at its representation tycon:
+    ;; UnliftedNewtypesDependentFamilyRun's `I# (method Proxy |> R:BarIntRep ~ Int#)`)
+    cast (if-let [t (:r (nth e 2))] (type-reps t) (expr-reps (second e)))
     [:L]))
 
 (def ^:dynamic *multi* nil)   ; atom {(lv ...) [[name rep]...]}: an unboxed tuple's binder unarised into its components
@@ -874,7 +907,23 @@
   [c]
   (some true? (map (fn [s r] (and s (= :L r))) (con-strict c) (concat (con-reps c) (repeat :L)))))
 
-(declare hnf-arg?)
+(declare hnf-arg? atomic-args?)
+(defn- unknown-unlifted-arg?
+  "hs-r6: a constructor's argument at a field of one unlifted representation (Int#'s :int, not a sum's several nor a
+  void) whose expression says a lifted one: not an atom, of a type the untyped Core leaves open; r the field's source
+  type's representation (field-src-reps: an UNPACKed strict Int field is unboxed in the layout, its argument boxed)"
+  [a r]
+  (and (keyword? r) (not= :L r) (not= :v r) (not (atomic-args? [a])) (not (head? a 'lit)) (= [:L] (expr-reps a))))
+
+(defn- field-src-reps
+  "hs-r6: a constructor's fields' representations from their declared types (its type's arguments after its dictionaries),
+  not the layout's (con-reps: a library's -O2 layout unpacks a strict Int, SrcLoc's lines, which the Core passes boxed);
+  :L each when the type is not known"
+  [c]
+  (let [ci (con-info c) ar (or (:arity ci) 0) d (or (:dicts ci) 0)
+        ts (when-let [t (global-type c)] (arg-types t))]
+    (if (and ts (= ar (+ d (count ts)))) (into (vec (repeat d :L)) (map (comp reps->rep type-reps) ts)) (vec (repeat ar :L)))))
+
 (defn- floatable-con
   "A saturated application of a constructor without strict fields: [CON ARGS]"
   [e]
@@ -888,7 +937,9 @@
                        (every? true? (map (fn [x s r] (or (not s) (not= :L r) (hnf-arg? x)))
                                           args (concat (con-strict c) (repeat false)) (concat (con-reps c) (repeat :L)))))
                    ;; HF10-P37: a field of several representations takes several atoms (with-atoms')
-                   (not (some vector? (con-reps c))))
+                   (not (some vector? (con-reps c)))
+                   ;; hs-r6: an unlifted field's argument of a type left open is case-bound (app-expr's), no value
+                   (not (some true? (map unknown-unlifted-arg? args (concat (field-src-reps c) (repeat :L))))))
           [c args])))))
 
 (defn- app-expr [f args]
@@ -976,6 +1027,18 @@
                        args st ats (concat (con-reps c) (repeat :L)))]
           (wrap-binds (vec (mapcat second (reverse rs)))
                       (strict-con c (mapv first rs) (set (for [[n bs hnf] rs :when (or hnf (some #(= :case (first %)) bs))] n)))))
+        ;; hs-r6: an argument at a field of an unlifted representation whose expression's representations the untyped
+        ;; Core does not say (a representation-polymorphic result, raise# or undefined at Int#; a call whose result type
+        ;; was a cast's, erased): it has the field's type (the application is well typed), so it is case-bound as
+        ;; CorePrep's cpeArg binds an unlifted argument, not a lazy let of a thunk (T10481's I# (raise# e), whose thunk was
+        ;; read as an integer; UnliftedNewtypesDependentFamilyRun's I# (method Proxy |> R:BarIntRep ~ Int#))
+        (and (= ar (count args))
+             (some (fn [[a r]] (unknown-unlifted-arg? a r)) (map vector args (concat (field-src-reps c) (repeat :L)))))
+        (let [rs (mapv (fn [a r] (if (unknown-unlifted-arg? a r)
+                                   (let [n (fresh "sat")] (swap! *reps* assoc n r) [n [[:case n r (expr a)]]])
+                                   (atom-of a)))
+                       args (concat (field-src-reps c) (repeat :L)))]
+          (wrap-binds (vec (mapcat second (reverse rs))) (strict-con c (mapv first rs))))
         (= ar (count args)) (with-atoms args (fn [as] (strict-con c as)))
         :else (with-atoms args (fn [as] (list 'app (gname (second f)) as)))))
     (and (head? f 'v) (newtype-selector? (second f)))
@@ -1095,9 +1158,15 @@
                   (let [[ex b at] w] (with-meta (list 'case ex b at [(list 'alt :default [] body)]) {:float true}))))
               (mk se) (reverse wraps)))))
 
-(defn- sum-type [t]
-  (let [t (when t (expand-syn (strip-forall t)))]
-    (when (and (vector? t) (= :tc (first t)) (sum-tc? (second t))) t)))
+(defn- sum-type
+  "An unboxed sum's type, nil for another; hs-r6: through newtypes (an unlifted newtype over a sum, UnliftedNewtypes'
+  Maybe# a = Maybe# (# a | (# #) #): Unarise sees its representation), at most 8 deep"
+  [t]
+  (loop [t (when t (expand-syn (strip-forall t))) k 0]
+    (cond (not (and (vector? t) (= :tc (first t)))) nil
+          (sum-tc? (second t)) t
+          (< k 8) (when-let [u (newtype-rep t)] (recur (expand-syn (strip-forall u)) (inc k)))
+          :else nil)))
 
 (defn- sum-comps
   "HF10-P37: a type of an unboxed sum whose slots are known: its tag's and slots' representations, one component each
@@ -1697,6 +1766,12 @@
           prog0 (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))
                           arbace.repr.haskell.simpleopt/*unlifted-binder?* (fn [b] (boolean (when (lv? b) (when-let [t (get (:ltypes *r*) b)] (not= [:L] (type-reps t))))))
                           ds/*casts* simpl?
+                          ;; hs-r6: a binder of (# t #), t lifted: unlifted though its representation is t's (desugar's unlifted-let)
+                          ds/*solo-binder?* (fn [b] (boolean (when (lv? b)
+                                                               (when-let [t (get (:ltypes *r*) b)]
+                                                                 (let [t (expand-syn (strip-forall t))]
+                                                                   (and (= :tc (first t)) (vector? (second t)) (= "GHC.Internal.Types" (nth (second t) 2))
+                                                                        (= "Solo#" (nth (second t) 3)) (= [:L] (type-reps t))))))))
                           ds/*unboxed-tuple?* (fn [e] (some? (expr-comps e)))]
                   (ds/desugar-program r))
           ;; the match variables' types (HF10-P20: desugar's fresh-types)

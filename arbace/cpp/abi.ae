@@ -558,6 +558,30 @@
   "cpp-rt-own: the id of the function or variable whose name is being mangled (mangle-fn, mangle-var), or nil."
   nil)
 
+(def ^:dynamic *redef*
+  "cpp-rt-own3 (DECISION cpp-rt-own2-3 (a)): {:mode :old|:new :hit atom} while a name is mangled for the code generator's hook: a
+  class defined by a qualified name over its declaration in an inline namespace (sema's :mangle-path-after) named by the
+  declaration's path (:old) or the definition's (:new), the class's id put in :hit when consulted."
+  nil)
+
+(def ^:dynamic *redef-hook*
+  "cpp-rt-own3: the code generator's (fn [kind class-id old new] name), bound for a unit with such a class: clang fixes a name when
+  its code generator first refers to it, the class's interesting declaration its definition from then on (RecordType::getDecl),
+  so the code generator chooses by the place of the first reference (arbace.cpp.codegen's redef-name); nil: the entity-id rule."
+  nil)
+
+(defn- with-redef
+  "A name `thunk` mangles, through *redef-hook* when bound and the name differs by a redefined class's two paths."
+  [kind thunk]
+  (if (or (nil? *redef-hook*) *redef*)
+    (thunk)
+    (let [hit (atom nil)
+          nn (binding [*redef* {:mode :new :hit hit}] (thunk))]
+      (if-not @hit
+        nn
+        (let [on (binding [*redef* {:mode :old :hit (atom nil)}] (thunk))]
+          (if (= on nn) nn (*redef-hook* kind @hit on nn)))))))
+
 (defn path-of-type
   "The scope path naming a class or enumeration type: its enclosing path and itself. (cpp-rt-own: a class defined by a qualified
   name through an inline namespace, sema's :mangle-path-after [PATH ID]: the definition's namespace PATH for an entity made after
@@ -567,7 +591,12 @@
   [t]
   (case (:k t)
     :class (let [c (cls (:id t)) after (:mangle-path-after c)]
-             (conj (vec (if (and after *mangle-id* (>= (long *mangle-id*) (long (second after)))) (first after) (:path c))) [:cls (:id t)]))
+             (conj (vec (cond (nil? after) (:path c)
+                              ;; (cpp-rt-own3: the code generator's choice by the first reference, *redef*)
+                              *redef* (do (reset! (:hit *redef*) (:id t)) (if (= :old (:mode *redef*)) (:path c) (first after)))
+                              (and *mangle-id* (>= (long *mangle-id*) (long (second after)))) (first after)
+                              :else (:path c)))
+                   [:cls (:id t)]))
     :enum (conj (vec (:path (enm (:id t)))) [:enum (:id t)])))
 
 (declare local-encoding)
@@ -745,13 +774,25 @@
   one candidate)."
   [t]
   (cond
-    (and (map? t) (= :tparam (:k t))) (cond-> {:k :tparam :i (:i t)} (:c t) (assoc :c true) (:v t) (assoc :v true))
+    ;; (cpp-rt-own3: and its depth beyond 0, a constraint's TL<d-1>_ parameter, another candidate than the signature's T_)
+    (and (map? t) (= :tparam (:k t))) (cond-> {:k :tparam :i (:i t)} (:c t) (assoc :c true) (:v t) (assoc :v true)
+                                        (pos? (long (or (:depth t) 0))) (assoc :depth (:depth t)))
     (map? t) (into {} (map (fn [[k v]] [k (skey v)]) (dissoc t :written :qual)))
     (vector? t) (mapv skey t)
     :else t))
 
+(defn- flat-tdep
+  "cpp-rt-own3: a dependent member type of a dependent member type, X::a of T::b (an alias template's typename __iter_traits<...>::value_type
+  over __iter_traits = typename __iter_traits_impl<...>::type), as one: T::b::a, clang's canonical nested-name-specifier."
+  [t]
+  (let [b (when (= :tdep (:k t)) (:base t))]
+    (if (and b (= :tdep (:k b)) (not (contains? b :dt)) (nil? (:c b)) (nil? (:v b)))
+      (flat-tdep (assoc t :base (:base b) :names (vec (concat (:names b) (:names t)))))
+      t)))
+
 (defn- mangle-type* ^String [t]
-  (let [q (cvq t)
+  (let [t (if (= :tdep (:k t)) (flat-tdep t) t)
+        q (cvq t)
         bare (unq t)
         sk (skey bare)
         inner (fn []
@@ -775,7 +816,9 @@
                                               (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
                                               (when (:va bare) "z") "E"))
                   ;; a template's own parameter and a dependent template-id, in a function template's signature (§G3)
-                  :tparam (sub-or [:qparam 0 (:i bare)] #(template-param (:i bare)))
+                  ;; (cpp-rt-own3: a constraint's parameter of a depth beyond 0, sema's constraint scope, TL<d-1>_<i-1>_ as q-param)
+                  :tparam (let [d (long (or (:depth bare) 0)) i (long (:i bare))]
+                            (sub-or [:qparam d i] #(if (pos? d) (str "TL" (dec d) "_" (when (pos? i) (dec i)) "_") (template-param i))))
                   :pack-exp (sub-or [:t sk] #(str "Dp" (mangle-type* (:of bare))))
                   ;; T::name, a dependent member type: N <prefix> <name> E
                   ;; (CP391 (a): a dependent decltype, DT <expression> E, a substitution candidate after its operand's)
@@ -784,8 +827,24 @@
                                                (if-let [f (first (filter (fn [m] (and (map? m) (= :fail (:x m)))) (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) (:dt bare))))]
                                                  (fail :mangle "a dependent decltype's " (:what f))
                                                  (str "DT" (mangle-dt-expr (:dt bare)) "E"))
-                                             (str "N" (if (= :tspec (:k base)) (sub-or [:t base] (fn [] (tspec-unwrapped base))) (mangle-type* base))
-                                                  (apply str (map (fn [x] (if (map? x) (str (source-name (:name x)) (template-args (:args x))) (source-name x))) (:names bare))) "E"))))
+                                             ;; (cpp-rt-own3: each further name's prefix a candidate, T::a of T::a::b, as clang 15 and later
+                                             ;; write a nested-name-specifier's identifier (ItaniumMangle.cpp's manglePrefix): <iterator_concepts.h>'s
+                                             ;; iter_value_t<_It>, __iter_traits_impl<...>::type::value_type in string_view's constructor's
+                                             ;; requires-clause, its ::type a candidate; one already a candidate is its substitution)
+                                             (let [names (vec (:names bare)) knames (vec (:names sk)) n (count names)
+                                                   pkey (fn [k] [:t (assoc sk :names (subvec knames 0 k))])
+                                                   seen (first (filter (fn [k] (and (string? (nth names (dec (long k))))
+                                                                                    (not (neg? (.indexOf ^java.util.List @*subs* (pkey k))))))
+                                                                       (range (dec n) 0 -1)))
+                                                   nm (fn [x] (if (map? x) (str (source-name (:name x)) (template-args (:args x))) (source-name x)))]
+                                               (str "N" (if seen
+                                                          (seq-id (.indexOf ^java.util.List @*subs* (pkey seen)))
+                                                          (if (= :tspec (:k base)) (sub-or [:t base] (fn [] (tspec-unwrapped base))) (mangle-type* base)))
+                                                    (apply str (map (fn [k] (let [x (nth names k) s (nm x)]
+                                                                              (when (and (< (inc (long k)) n) (string? x)) (swap! *subs* conj (pkey (inc (long k)))))
+                                                                              s))
+                                                                    (range (or seen 0) n)))
+                                                    "E")))))
                   ;; (::std::X<...> is St X I...E, no N ... E: <unscoped-template-name>)
                   :tspec (sub-or [:t sk] #(if (or (empty? (:path bare)) (= [[:ns "std"]] (vec (:path bare))))
                                               (tspec-unwrapped bare) (str "N" (tspec-unwrapped bare) "E")))))]
@@ -887,16 +946,37 @@
   ^String [^long depth ^long i]
   (sub-or [:qparam depth i] #(str "T" (when (pos? depth) (str "L" (dec depth) "_")) (when (pos? i) (dec i)) "_")))
 
+(defn split-template-id
+  "cpp-rt-own3: a template-id's text `name<a, b<c>>` as [name [arg-text ...]] (the commas at its top level), or nil for one
+  without arguments."
+  [^String s]
+  (let [s (str/trim s) i (.indexOf s "<")]
+    (when (and (pos? i) (str/ends-with? s ">"))
+      (let [inner (subs s (inc i) (dec (count s)))]
+        (loop [k 0 depth 0 start 0 out []]
+          (if (= k (count inner))
+            [(str/trim (subs s 0 i)) (let [l (str/trim (subs inner start))] (if (and (empty? out) (empty? l)) [] (conj out l)))]
+            (let [c (.charAt inner k)]
+              (cond (#{\< \( \[ \{} c) (recur (inc k) (inc depth) start out)
+                    (#{\> \) \] \}} c) (recur (inc k) (dec depth) start out)
+                    (and (= c \,) (zero? depth)) (recur (inc k) depth (inc k) (conj out (str/trim (subs inner start k))))
+                    :else (recur (inc k) depth start out)))))))))
+
 (defn- mangle-constraint
   "A requires-clause's expression (the native parser's node) as clang 23 mangles it after a function template's
   arguments (Q <expression>; ItaniumMangle.cpp's mangleRequiresClause, mangleExpression): operators, calls, names as
   written (an unresolved simple name with its explicit arguments), the template's own parameters by depth and index;
-  `pidx` {name index} of the template's parameters (G4)."
-  ^String [n pidx ^long depth]
+  `pidx` {name index} of the template's parameters (G4). (cpp-rt-own3, DECISION cpp-rt-own2-2 (a): `q`'s :types, the texts
+  it writes as types resolved by sema in the constraint scope, not instantiated -- a member template's class's parameters at
+  depth 0, its own at depth 1 (TL0_), alias templates expanded, typedefs resolved, as clang's canonical types -- and :pnames
+  {name [depth index kind]} of the parameters that scope binds; the old texts' rules for the rest.)"
+  ^String [q]
+  (let [n (:node q) pidx (:pidx q) depth (long (or (:depth q) 0)) types (:types q) pnames (:pnames q)]
   (letfn [(ty [^String a]
             ;; a type as written in a constraint: the template's parameters, builtins, pointers, references, cv
             (let [a (str/trim a)]
               (cond
+                (get types a) (mangle-type* (get types a))
                 (get pidx a) (if (zero? depth) (mangle-type* {:k :tparam :i (get pidx a)}) (q-param depth (get pidx a)))
                 (str/ends-with? a "&&") (mangle-type* {:k :rref :to (tt (subs a 0 (- (count a) 2)))})
                 (str/ends-with? a "&") (mangle-type* {:k :ref :to (tt (subs a 0 (dec (count a))))})
@@ -913,7 +993,12 @@
                 :else (fail :mangle "a constraint's type " a))))
           (arg [^String a]
             (let [a (str/trim a)]
-              (if-let [i (get pidx a)] (q-param depth i) (ty a))))
+              (cond
+                ;; (a non-type parameter as an argument an expression, X <template-param> E)
+                (= :value (nth (get pnames a) 2 nil)) (let [[d i] (get pnames a)] (str "X" (q-param d i) "E"))
+                (get types a) (mangle-type* (get types a))
+                (get pidx a) (q-param depth (get pidx a))
+                :else (ty a))))
           (req [r]
             (case (:kind r)
               ;; (clang's mangleRequirement: X <expression>, no end marker)
@@ -939,6 +1024,11 @@
               "BinaryOperator" (str (or (expr-op-codes (:opcode n)) (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))) (ex (second (:inner n))))
               "UnaryOperator" (str (case (:opcode n) "!" "nt" "-" "ng" "~" "co" (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))))
               "CallExpr" (str "cl" (apply str (map ex (:inner n))) "E")
+              ;; (cpp-rt-own3: sizeof and alignof of a type, st <type> and at <type>; of an expression, sz and az)
+              "UnaryExprOrTypeTraitExpr" (let [o (:name n)]
+                                           (if-let [t (get-in n [:argType :qualType])]
+                                             (str (case o "sizeof" "st" ("alignof" "__alignof" "_Alignof") "at" (fail :mangle "a constraint's " o)) (ty t))
+                                             (str (case o "sizeof" "sz" ("alignof" "__alignof" "_Alignof") "az" (fail :mangle "a constraint's " o)) (ex (first (:inner n))))))
               "CXXBoolLiteralExpr" (if (:value n) "Lb1E" "Lb0E")
               "IntegerLiteral" (str "Li" (:value n) "E")
               ("DeclRefExpr" "UnresolvedLookupExpr")
@@ -946,13 +1036,23 @@
                     targs (when-let [as (:explicitTemplateArgs n)] (str "I" (apply str (map arg as)) "E"))]
                 (when (:globalQualifier n) (fail :mangle "a ::-qualified name in a constraint"))
                 (cond
+                  ;; (cpp-rt-own3: T::x of a type parameter, sr <unresolved-type> <name>, no E)
+                  (and (= 1 (count (:qualifier n))) (= :type (nth (get pnames (str (first (:qualifier n)))) 2 nil)))
+                  (let [[d i] (get pnames (str (first (:qualifier n))))] (str "sr" (q-param d i) (source-name nm) targs))
                   ;; ns::f<...>: sr <the namespaces' names> E <name> (clang's mangleUnresolvedName, unresolved-qualifier-levels)
-                  (seq (:qualifier n)) (do (when (some #(re-find #"<" (str %)) (:qualifier n)) (fail :mangle "a template in a constraint's qualifier"))
-                                           (str "sr" (apply str (map #(source-name (str %)) (:qualifier n))) "E" (source-name nm) targs))
+                  ;; (cpp-rt-own3: a level a template-id as written, its simple-id <source-name> <template-args>: span's
+                  ;; `__is_compatible_ref<iter_reference_t<_It>>::value`, sr19__is_compatible_refIDT...EE5value)
+                  (seq (:qualifier n)) (str "sr" (apply str (map (fn [q] (let [q (str q)]
+                                                                         (if-let [[tn as] (when (str/includes? q "<") (split-template-id q))]
+                                                                           (str (source-name tn) "I" (apply str (map arg as)) "E")
+                                                                           (if (str/includes? q "<") (fail :mangle "a constraint's qualifier " q) (source-name q)))))
+                                                                 (:qualifier n)))
+                                            "E" (source-name nm) targs)
+                  (and (get pnames nm) (nil? targs)) (let [[d i] (get pnames nm)] (q-param d i))
                   (get pidx nm) (q-param depth (get pidx nm))
                   :else (str (source-name nm) targs)))
               (fail :mangle "a constraint's " (:kind n))))]
-    (ex n)))
+    (ex n))))
 
 (declare encoding*)
 
@@ -965,7 +1065,7 @@
    (cond
      (= :c (:linkage f)) (:name f)
      (and (= "main" (:name f)) (empty? (:path f)) (not (:cls f))) "main"
-     :else (binding [*subs* (atom []) *mangle-id* (:id f)] (str "_Z" (encoding* f variant))))))
+     :else (with-redef :name #(binding [*subs* (atom []) *mangle-id* (:id f)] (str "_Z" (encoding* f variant)))))))
 
 (defn- encoding*
   "A function's <encoding> (its mangled name without _Z) in the current substitution table: a local entity's
@@ -976,6 +1076,11 @@
      (= :local (ffirst (:path f))) (str "Z" (local-enc (second (first (:path f)))) "E" (encoding* (assoc f :path (vec (rest (:path f)))) variant))
      :else
        (let [path (vec (:path f))
+             ;; (cpp-rt-own3: a member of a class defined by a qualified name over its declaration in an inline namespace, its
+             ;; members the definition's, named in the namespace the definition names, as clang: fs_dir.cc's implicit
+             ;; std::filesystem::_Dir::~_Dir(), _ZNSt10filesystem4_DirD2Ev; the declaration's path before for an implicit member)
+             path (let [i (last (keep-indexed (fn [i el] (when (and (vector? el) (= :cls (first el)) (:mangle-path-after (cls (second el)))) i)) path))]
+                    (if i (into (vec (first (:mangle-path-after (cls (second (nth path i)))))) (subvec path i)) path))
              ti (:tinst f)
              uname (fn [^String out]
                      (if ti
@@ -990,16 +1095,22 @@
                                                                       (str (when (:pack t) "Tp")
                                                                            (if-let [k (:tk t)]
                                                                              ;; Tk <type-constraint>: the concept's name (not a substitution candidate)
-                                                                             (str "Tk" (cond (empty? (:path k)) (source-name (:name k))
-                                                                                                                         (= [[:ns "std"]] (:path k)) (str "St" (source-name (:name k)))
-                                                                                                                         :else (str "N" (mangle-prefix (:path k)) (source-name (:name k)) "E")))
+                                                                             ;; (cpp-rt-own3: with arguments, the concept's template-name a candidate and its
+                                                                             ;; arguments as written, clang 23's mangleTypeConstraint: TkSt18sized_sentinel_forITL0__E)
+                                                                             (str "Tk" (if-let [as (:args k)]
+                                                                                         (cond (empty? (:path k)) (str (template-prefix "" (:tid k) (:name k)) (template-args as))
+                                                                                               (= [[:ns "std"]] (:path k)) (str (template-prefix "St" (:tid k) (:name k)) (template-args as))
+                                                                                               :else (str "N" (template-prefix (mangle-prefix (:path k)) (:tid k) (:name k)) (template-args as) "E"))
+                                                                                         (cond (empty? (:path k)) (source-name (:name k))
+                                                                                               (= [[:ns "std"]] (:path k)) (str "St" (source-name (:name k)))
+                                                                                               :else (str "N" (mangle-prefix (:path k)) (source-name (:name k)) "E"))))
                                                                              (str "Tn" (mangle-type* (:ty t))))))
                                                                     (template-arg a))) (:args ti)))
                             ;; a constrained template's requires-clause (clang 23: Q <expression>, G4)
                             ;; (one this does not write yet, a requires-expression among it: left out, the names level differs)
                             (when-let [q (:q ti)]
                               (let [saved @*subs*]
-                                (try (str "Q" (mangle-constraint (:node q) (:pidx q) (:depth q)))
+                                (try (str "Q" (mangle-constraint q))
                                      (catch arbace.lang.ExceptionInfo _ (reset! *subs* saved) nil))))
                             "E"))
                        (str out (unqualified-name f variant))))
@@ -1012,10 +1123,24 @@
          (str enc
               (when (and ti (not (#{:ctor :dtor :conv} (:kind f)))) (mangle-type* (:ret sig)))
               ;; (an explicit object parameter first among the parameters, cpp-s3)
-              (bare-params (if (:xobj f) (into [(:xobj f)] (:ps sig)) (:ps sig)) (:va sig))))))
+              (bare-params (if (:xobj f) (into [(:xobj f)] (:ps sig)) (:ps sig)) (:va sig))
+              ;; (cpp-rt-own3, DECISION cpp-rt-own2-2 (a): a trailing requires-clause after the parameters, clang 23's Q <expression>
+              ;; of a template's (sema's :tq of its :tinst) or of a templated member function's (:tq): basic_string's
+              ;; `basic_string() requires is_default_constructible_v<_Alloc>`, ...C2EvQ26is_default_constructible_vIT1_E; one this does
+              ;; not write left out, as a template head's)
+              (when-let [q (if ti (:tq ti) (:tq f))]
+                (let [saved @*subs*]
+                  (try (str "Q" (mangle-constraint q))
+                       (catch arbace.lang.ExceptionInfo _ (reset! *subs* saved) nil))))))))
+
+(declare mangle-var*)
 
 (defn mangle-var
   "A variable's mangled name at namespace or class scope (a global in the global namespace keeps its name; static: L)."
+  ^String [v]
+  (with-redef :name #(mangle-var* v)))
+
+(defn- mangle-var*
   ^String [v]
   (binding [*mangle-id* (:id v)]
   (let [path (vec (:path v))
@@ -1049,19 +1174,20 @@
 (defn mangle-local-static
   "A static local's name in the function f (Itanium §5.1.6: Z encoding E name, the discriminator _N from the second)."
   ^String [f ^String nm ^long disc]
-  (let [enc (binding [*subs* (atom [])] (local-encoding f))]
-    (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_")))))
+  (with-redef :name
+    #(let [enc (binding [*subs* (atom [])] (local-encoding f))]
+       (str "_ZZ" enc "E" (source-name nm) (cond (zero? disc) "" (< disc 11) (str "_" (dec disc)) :else (str "__" (dec disc) "_"))))))
 
 (defn mangle-type-name
   "The mangling of a class type alone (for _ZTV, _ZTI, _ZTS)."
   ^String [t]
-  (binding [*subs* (atom [])] (mangle-type* t)))
+  (with-redef :type #(binding [*subs* (atom [])] (mangle-type* t))))
 
 (defn mangle-ctor-vtable-name
   "A construction vtable's name, _ZTC <derived> <offset> _ <base>: one name, its substitutions shared by the two types
   (ECPublicKeyIS0_E after 12ECPrivateKeyI4EC2NE)."
   ^String [derived ^long off base]
-  (binding [*subs* (atom [])] (str "_ZTC" (mangle-type* derived) off "_" (mangle-type* base))))
+  (with-redef :name #(binding [*subs* (atom [])] (str "_ZTC" (mangle-type* derived) off "_" (mangle-type* base)))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The SysV x86-64 psABI's classification of a class passed or returned by value (§3.2.3; in the structure of clang's

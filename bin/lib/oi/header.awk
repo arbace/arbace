@@ -315,6 +315,9 @@ END {
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
+          # -runtime-variant=i (queue 516, DECISION 511-2 (a)): the instrumented runtime, whose allocation buckets oi's ring emits
+          # (ext_runtime_events.go's reAlloc) at oi's level; the AOT levels keep the class
+          if (f == "-runtime-variant=i" && aot == 0) continue
           if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           cls("flags " val)
         }
@@ -386,6 +389,8 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
+    # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it
+    if (s == "instrumented-runtime" && aot == 0) continue
     if (s == "bytecode") sawbyte = 1
     if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
@@ -411,6 +416,11 @@ END {
   if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
   hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
+  # ocamltest exports its variables to the program's environment (environments.ml's to_system_env; queue 515): a program that reads
+  # ocamlsrcdir or ocamlrun (warnings/mnemonics, which runs `${ocamlrun} ${ocamlsrcdir}/ocamlc -warn-help`) gets ocamlsrcdir as the
+  # pinned tarball's root and ocamlrun as bin/lib/oi/ocamlrun (Arbace's ocamlc -warn-help on oi), at every level
+  if (index(text, "Sys.getenv \"ocamlsrcdir\"")) env = env " ocamlsrcdir=@OCAMLSRCDIR@"
+  if (index(text, "Sys.getenv \"ocamlrun\"")) env = env " ocamlrun=@OCAMLSRCDIR@/../../../bin/lib/oi/ocamlrun"
   if (args ~ /\$VAR/) { cls("arguments = " args) }
   for (q = 1; q <= nexp; q++) { ev = expand(setv[expname[q]], 0); gsub(/[ \t]/, "", ev); sub("@@SET" q "@@", expname[q] "=" ev, env) }
   # the arguments as ocamltest gives them (OC210 (a)): expanded, then split into words (actions_helpers.ml's String.words)

@@ -2609,11 +2609,38 @@
 
 (def ^:private setjmp-names #{"setjmp" "_setjmp" "sigsetjmp" "__sigsetjmp" "__builtin_setjmp"})
 
+;; c-rows (2026-11-21): setjmp called through a pointer (mir's new/setjmp2.c: `static int (*setjmp2) (jmp_buf) = setjmp;`, then
+;; `if (setjmp2 (env))`). On the target setjmp is a function like any other, its caller's frame the one a longjmp returns to, so
+;; the call works whatever names the callee; ci's setjmp is a statement of its function (SjStmt, SjBody), found by name: a
+;; file-scope object whose initializer is setjmp (or its address) names it too. A call through such a pointer that no longer holds
+;; setjmp is an SjStmt still, which runs as the plain call it is.
+(def ^:private sj-alias-cache (java.util.Collections/synchronizedMap (java.util.WeakHashMap.)))
+
+(defn- setjmp-aliases
+  "The names of the unit's file-scope objects initialized with setjmp (setjmp-names), a set (cached by the unit's forms)."
+  []
+  (let [fs (:forms *u*)]
+    (if (nil? fs)
+      #{}
+      (or (.get ^java.util.Map sj-alias-cache fs)
+          (let [sj? (fn [i] (or (and (symbol? i) (setjmp-names (name i)))
+                                (and (seq? i) ('#{addr c/addr} (first i)) (symbol? (second i)) (setjmp-names (name (second i))))))
+                s (set (for [f fs
+                             :when (seq? f)
+                             d (if (= 'c/group (first f)) (drop 2 f) [f])
+                             :when (and (seq? d) (= 'c/var (first d)) (= 3 (count d)) (symbol? (second d)) (sj? (nth d 2)))]
+                         (name (second d))))]
+            (.put ^java.util.Map sj-alias-cache fs s)
+            s)))))
+
+(defn- setjmp-call? [x]
+  (and (symbol? x) (or (setjmp-names (name x)) (contains? (setjmp-aliases) (name x)))))
+
 (defn- has-setjmp?
   "Whether a statement's own expressions call setjmp (a compound statement's body is its statements', so a
   block or a let is never the guarded statement: re-entering it would run its declarations again)."
   [f]
-  (letfn [(in-expr [x] (cond (seq? x) (or (and (symbol? (first x)) (setjmp-names (name (first x)))) (some in-expr x))
+  (letfn [(in-expr [x] (cond (seq? x) (or (setjmp-call? (first x)) (some in-expr x))
                              (vector? x) (some in-expr x)
                              :else false))]
     (cond
@@ -2737,7 +2764,7 @@
   "Whether forms call setjmp anywhere (the function's body is then an SjBody)."
   [f]
   (cond
-    (seq? f) (or (and (symbol? (first f)) (setjmp-names (name (first f)))) (some calls-setjmp? f))
+    (seq? f) (or (setjmp-call? (first f)) (some calls-setjmp? f))
     (vector? f) (some calls-setjmp? f)
     :else false))
 

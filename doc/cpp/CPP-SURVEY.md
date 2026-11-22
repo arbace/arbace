@@ -9495,6 +9495,17 @@ by hand, the oracle tier's tool, then on the units by `arbace.cpp.codegen gen-ba
 - Since C++17 the redundant out-of-line definition of an inline static data member ([depr.static.constexpr]) is written whether used or
   not, weak_odr, as an explicit instantiation's (clang's GVA_StrongODR): exp path's `constexpr path::value_type path::preferred_separator;`.
 
+### DECISION 510-1 (a) (the coordinator, after the runtime-build): a using-declared member's implicit object parameter
+
+The Mac's queue 510, round 2 (mac/510-cpp-dg-own14 eb1ac403f, merged into next) found that cpp-rt-own's 4bad0587c, a derived
+object's binding of the implicit object parameter ranked as a derived-to-base Conversion, broke cpp1z/using1.C, and gave the
+checker [over.match.funcs.general]/4: a member a using-declaration of class U nominates is U's member for that parameter, no
+conversion from an object of U. 259a4fb98 gives the code generator the same rule (the using-declaration's member function
+entries carry :ucls in both modes; the ranking's ucls without the checker's guard; CPP_UCLS_TRACE traces it). Checked: the
+worktree's `.tmp/u510/using1.cpp` against clang 23.1.5's IR (B::g(int), the using-declared A::h(int) and A::f(short, int) called as
+clang calls them; the base code refuses it, "ambiguous call (2 viable)"); and every own unit generated again at 259a4fb98 (two
+gen-batch processes over runtime_ours' lines, the worktree's `.tmp/u510/run.sh`): all 193 C++ units' names the pack's, every one's IR byte for byte that of the runtime built at 5b5c77242; the rule applies in vector's and deque's `using _Base::_M_get_Tp_allocator;` and the like (11 members, about 530 calls; rope's _M_get_allocator) and changes no choice.
+
 ### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's IR's
 
 c++17/memory_resource.cc (the linkage rules, the address constant, __is_pod), c++17/fs_ops.cc and cow-fs_ops.cc (the linkage rules,
@@ -9580,6 +9591,151 @@ DECISION cpp-rt-own2-3 (c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc: `
 (b) Leave them on the pack.
 ```
 
+## As built: cpp-rt-own3, C++20's constraint mangling, constant POD locals and emission-order naming (2026-11-21; branch `cpp-rt-own3-1121` from mac/next 863bdaea1)
+
+The brief (the main session, toward the CoMaIn goal: C++'s eval and AOT independence, 0.986 each): more of the lowered runtime's
+11 pack units by Arbace's own code generator, with cpp-rt-own2's three decisions taken as recommended: cpp-rt-own2-1 (a),
+cpp-rt-own2-2 (a), cpp-rt-own2-3 (a); then, if time allowed, floating_to_chars' VLAs and probes of valarray, floating_from_chars
+and tzdb; and the found bug (a constinit union wrapper's vptr lost) if on the way. Light: no gate; one generator process at a time
+but for two or three probes side by side (the host shared with the Haskell line). Each rule checked on a reduced case against
+clang 23.1.5's IR recorded by hand (the oracle tier's tool; the worktree's `.tmp/{q1,c1,d1,t1,f2,f4}`, scratch), then on the units by
+`arbace.cpp.codegen gen-batch` with runtime_ours' options, each unit's defined external names against the pack cpp-runtime-ir's IR
+(n-all5's runtime build, runtime-judge's names level).
+
+### DECISION cpp-rt-own2-2 (a): C++20's constraints as clang 23 mangles them
+
+- **The constraint scope** (template.ae's constraint-scope): clang mangles a template's constraints as written, never
+  instantiated ([temp.constr.decl]: a member template's associated constraints are checked by substitution, not substituted in).
+  So a member template of a class template's specialization keeps its class's parameters: each enclosing specialization's
+  template's parameters (a partial specialization's own) at depth 0, 1, ..., the template's own at the next depth, each a
+  `{:k :tparam :i :depth}` (abi's T_ at depth 0, TL<d-1>_<i-1>_ beyond, a substitution candidate keyed by depth and index:
+  the signature's T_ of the instantiated member template, whose parameters are at depth 0, is the constraint's T_ of the class's
+  first parameter, clang's `SH_`); the class template's member typedefs entered as its pattern declares them, resolved over those
+  parameters (span's `is_const_v<element_type>`, T_, not char). The texts a constraint writes as types (template arguments as
+  written, a qualifier level's arguments, sizeof's and casts' types) resolved there once, at instantiation (constraint-q, the
+  code generator's alone): alias templates expanded and typedefs resolved as clang's canonical types.
+- **Type-constraints with arguments**: `Tk <template-name> <args>`, the concept's name a candidate (string_view's
+  `sized_sentinel_for<_It> _End`, TkSt18sized_sentinel_forITL0__E).
+- **Trailing requires-clauses**: after the parameters, `Q <expression>`, a function template's (:tq of its :tinst) and a templated
+  member function's (sema's declare-fn!, :tq, `basic_string() requires is_default_constructible_v<_Alloc>`, ...C2EvQ26is_default_constructible_vIT1_E).
+- **Expressions**: sizeof and alignof (st, at, sz, az), `T::x` of a type parameter (sr T_ x, no E), a qualifier level that is a
+  template-id as written (sr19__is_compatible_refI...EE5value), a non-type parameter as an argument (X T_ E).
+- **Dependent names**: a dependent member type of a dependent member type flattened (T::b::a, clang's canonical
+  nested-name-specifier: iter_value_t's `__iter_traits_impl<...>::type::value_type`), each further prefix a substitution
+  candidate (clang 15's manglePrefix of an identifier), a prefix already a candidate its substitution.
+
+Checked: `.tmp/q1/q.cpp`, `q2.cpp`, `q3.cpp` (string_view's constructor's shape, a member template's and a non-template member's
+trailing clauses, sizeof, iter_reference_t's decltype at depth 1, a template-id qualifier, a member typedef): every defined name
+clang 23.1.5's.
+
+### DECISION cpp-rt-own2-1 (a): a POD local's constant initializer, and the evaluator's unknown objects
+
+- **const-local!** (codegen.ae): a local of POD class type (not a union, no vptr or bit-field, trivially copyable and destructible,
+  its default construction trivial) whose initializer (`:expr` or `:list`) the evaluator folds (const-leaves, not manifestly
+  constant-evaluated: sema's *ce-object-manifest*) is initialized as clang's EmitAutoVarAlloca and EmitAutoVarInit do
+  (IsConstantAggregate, then emitStoresForConstant): all zero a memset, at most 32 bytes or an empty class a memcpy from a private
+  constant `__const.FN.VAR`, a larger one a memset and its non-zero leaves stored when at most 6, else the memcpy. Arrays not yet.
+- **Unknown objects** (sema's *ce-unknown*): an automatic or static object outside the evaluation is a location whose read or write is
+  no constant (`T::ms(a)` of a local `a` folds in every dialect, as clang); since C++23 a reference variable outside the evaluation
+  refers to one (P2280R4: text_encoding.cc's `auto __end = __range.end();`, end() never called); one cell a variable an evaluation,
+  two lvalues of one object one location. The code generator's alone, not the checker's.
+- **A reference argument of an empty class evaluated** (ce-args-env): before, skipped as a value nothing reads, so
+  `_Alloc_traits::max_size(_M_get_allocator())` folded where clang, `this` being no constant, calls `_M_get_allocator() const` and
+  inlines the always-inline max_size; by value still skipped.
+
+Checked: `.tmp/c1/te.cpp` in C++17 and C++23 (this-based calls not folded, a local's lvalue folded, a reference's only in C++23,
+a POD's prvalue and lists, an empty class's sentinel), `cst.cpp` (a const POD local: a memcpy too, no static, MergeAllConstants
+off): every defined name clang's, the stores' shapes clang's.
+
+### DECISION cpp-rt-own2-3 (a): a class redefined over an inline namespace's declaration, its names in emission order
+
+Clang's code generator runs as the parser goes (HandleTopLevelDecl) and fixes a name when it first refers to its entity; a
+RecordType's declaration is the class's definition once parsed. So an entity first referred to from code clang writes before the
+definition keeps the declaration's path, one first referred to after it, or from a deferred definition written at the end, the
+definition's. The code generator (codegen.ae's redef-name, redef-resolve!): while the module is written, each name that differs by
+the class's two paths (abi's *redef* modes, through the *redef-hook* every public mangler goes by) is a placeholder `_Z§k§`
+(`§k§` for a type's mangling) with the earliest place it was referred from (*mangle-pos*: the unit's token order, the parser's
+:_b), replaced at the end by the declaration's form when that place is before the definition's (sema's :mangle-path-after's third
+element), else the definition's; the places: an explicit instantiation definition's members at the instantiation (clang writes
+them there; template.ae's :explicit-inst-pos), a non-inline definition at its own token, a non-deferred global at its own, the rest
+the end; a constexpr specialization made before the definition named there (clang instantiates it where first referred to and
+passes it to its code generator, EmitGlobal of a deferred definition: exp dir's shared_ptr<v1::__cxx11::_Dir>::shared_ptr(), which
+`end(directory_iterator)` reaches through the defaulted constructor); the class's own members in the definition's namespace (an
+implicit destructor too: _ZNSt10filesystem4_DirD2Ev). cow-fs_dir's earlier entity-id model is the unbound hook's fallback; that unit's
+names stay the pack's under the new rule.
+
+Checked: `.tmp/d1/d.cpp` (an explicit instantiation's members and their direct callees old, a deferred callee's callee and later
+references new) and `e.cpp` (a constexpr default constructor reached from a header's inline function before the definition: old;
+the same class's other members later: new): every defined name clang's.
+
+### Found on the way: inline variables and constructor templates
+
+- An inline const variable is not internal ([basic.link]/3.2) and is defined where odr-used, linkonce_odr (<ranges>' customization
+  point objects, `inline constexpr __access::_Data data{};`: print.cc's _ZNSt6ranges4_Cpo4dataE).
+- **The found bug** (cpp-rt-own2's `.tmp/t1/ci.cpp`, copied with its clang IR into this worktree's `.tmp/t1` before cpp-rt-own2's worktree was removed): a constructor template is a user-declared constructor ([class.ctor.general]):
+  the class has no implicit default constructor ([class.default.ctor]/1) and is no aggregate. `constinit CI<D> dr{};` was taken for
+  an aggregate, its union member zeroed, the vptr lost; now value-initialized by the template with an empty pack, D's vptr the
+  vtable's address point, as clang. Left: `constinit CI<A> ar{&dr.obj};` initialized dynamically where clang folds it (the
+  evaluator does not bind a constructor template's pack parameters: "a load"); internal names alone, the same behaviour.
+
+- **c++20/format.cc's last two gaps** (its constraints DECISION 2's): a constructor template defined outside its class
+  (<bits/locale_classes.tcc>'s `template<typename _Facet> locale::locale(const locale&, _Facet*)`) is its declaration's
+  redeclaration, found among the class's :ctor-tmpls (constructor templates are entered by no name): before, a second template,
+  `locale loc2(loc, facetp.get())` "ambiguous call (2 viable)" (`.tmp/f2/l.cpp`); and an internal class's inheriting constructor
+  internal, as implicit-fn!'s members (__uniq_ptr_data<(anonymous)::__encoding, ...>'s CI2 __uniq_ptr_impl, written linkonce_odr
+  before; `.tmp/f4/u.cpp`). Both checked against clang's IR.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's
+
+c++26/text_encoding.cc (DECISION 1), c++20/sstream-inst.cc, c++23/print.cc and c++20/format.cc (DECISION 2; print also the
+customization point objects, format the two gaps above), c++17/fs_dir.cc, exp/filesystem/dir.cc and cow-dir.cc (DECISION 3): 187 to
+**194 of 198**. runtime_ours' summary line counts exp/filesystem's units too (it had said 183 of 187).
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| reduced cases against clang 23.1.5's IR (by hand) | q.cpp, q2.cpp, q3.cpp, te.cpp (C++17, C++23), cst.cpp, cpo.cpp, d.cpp, e.cpp, l.cpp, u.cpp: every defined name clang's; t1/ci.cpp: dr's vptr clang's |
+| `bin/cppi runtime-build` (auto, at 5b5c77242, under `ulimit -v 8388608`, CPPI_DISK_MAX=93: a first run stopped at its lowering on the light tier's 90% guard, the disk 91% from other lines' worktrees until the coordinator freed 59 GB) | **198 units, 198 pass, 194 by our route** ("ours 194"), the names level equal for each own unit (the C unit's c-defs.txt included); IR 8,795 s (one generator process, the host's load up to 90 on 64 cores), read, print and lower 314 s; 2 h 32 min wall, peak 2.6 GB |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`, ci's library seeded from cpp-rt-own2's: the same reader) | 199 of 199 read (the 198 units and cx-rt), the units whose lowered C changed read again in 25 chunks (nearly all: const-local! and the evaluator move many units' IR, no unit's names); 1 h 44 min (the host's load 70 to 140 on 64 cores), peak 4.0 GB |
+| `bin/cppi runtime-inputs --record` | own 194, pack 4: test/cpp/runtime/inputs-linux-amd64.edn's 7 rows `{:ir :own, :ci-target :own}` |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`, on this runtime) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 7 min 19 s, 2.1 GB |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | samples 4 of 4 and runtime 4 of 4 pass (the programs' IR by our route), the run controls bitfields-vs-io, coroutine-vs-pr106188 and ctor-throw-vs-thread-throw differing as they must; selfref 220 of 225 judged by their own verdict; 44 min 49 s, peak 2.6 GB |
+| `bin/cppi codegen-gen` (`--record`, a whole run at 574e72fbf, then its judge at the final code with the controls) | 156 of 156, both controls failing as they must; 33 digests moved, the same in the judging run and the record (deterministic): 31 by const-local!'s constant POD locals (brace-elision, convfns, convfns-ops, eh-lambda, elab-decl, hdr-swap, lambda-namespace, lambdas, longdouble, memberptrs, methods, mixed-features, namespaces, operators, recursion, rtti, spaceship, staticmembers, structs, sysv-mixed, tmpl-class-arg, tmpl-defaults, tmpl-dependent, tmpl-friends, tmpl-member-template, tmpl-members, tmpl-namespace, tmpl-nested-args, tmpl-nontype; struct-bind with its constraints; layout's a memset of zeros), hdr-string (max_size's `_M_get_allocator() const` called, the evaluator's empty-class reference argument), hdr-vector and struct-bind (_Vector_impl's and pair's constructors' constraints mangled); no other. Against clang 23.1.5's IR of the samples (by hand, `-std=c++23`, the host's libstdc++ 15.2.0, as codegen-check compiles them): hdr-string, hdr-vector and struct-bind now define clang's names, no sample lost one; hdr-vector's known `:trailing-requires` (test/cpp/codegen/known.edn) removed |
+| `bin/repr-cpp c2j-check` (at the final code) | 33 of 33 sources compiled, 0 failed, **0 reflection warnings** (ok, 361 s) |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.986 to 0.995 each (the runtime's half 0.972 to 0.990: (194 + 4 x 0.5) / 198), its independence 0.9482 to 0.9518, **94 to 95** (floored); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+The runtime-keyed steps (runtime-ci, runtime-inputs, lower-essential, the check) ran on the runtime built at 5b5c77242, with
+sema.ae at 5b5c77242 in the working tree while they ran (259a4fb98, DECISION 510-1 (a), moves the runtime's key; its own proof the
+units generated again, above). Keys: the runtime's key moves (the code generator, sema, template, abi, rt_ours_glob): the gate's
+cpp-runtime builds once (about 2 h 30 min on this host loaded, 1 h 30 min alone); `gate_key` and the javac keys move (arbace/cpp
+embedded); runtime-ci's key moves (nearly every unit read again).
+
+### The units left on the pack (4 of 198), by the size of their next step (each probed to its refusal, gen-batch at the final code but
+the last two sema fixes)
+
+| unit | cause | next decision |
+|---|---|---|
+| c++17/floating_to_chars.cc | GNU's variable-length arrays, five `char buffer[n + 1]` locals ("not a constant: output_length_upper_bound"); clang's IR: llvm.stacksave, `alloca i8, i64 %n, align 16`, llvm.stackrestore at the scope's exits | DECISION cpp-rt-own3-1 |
+| c++17/floating_from_chars.cc | "no member ~_Up" at <bits/memory_resource.h>'s allocator_traits<polymorphic_allocator<_Tp>>::destroy, `__p->~_Up();` (CPP_GEN_WHERE=2): an explicit destructor call on a class whose destructor is not declared yet (cpp-rt-own2's "a pool resource's vector of an incomplete _BigBlock instantiated") | DECISION cpp-rt-own3-2 |
+| c++20/tzdb.cc | probed to the end for the first time: "no operator()", after header drops of `typename invoke_result<_Fn, _Args...>::type` (an alias's dependent type over a pack expansion, unresolved: an operator* and two aliases dropped) | a probe of the drop first |
+| c++98/valarray.cc | "no member size", after <valarray>'s out-of-line members dropped ("unknown type _Tp", 64; "_Dom", 3) and gslice's recursion depth | a probe of the drops first |
+
+```
+DECISION cpp-rt-own3-1 (c++17/floating_to_chars.cc: GNU's variable-length arrays)
+(a) VLAs in sema and the code generator: a local array whose bound is no constant typed with that bound as an expression of the
+    block (the declarator's text analyzed there, converted to size_t), its declaration llvm.stacksave, a dynamic alloca of the
+    bound's elements (align 16) and llvm.stackrestore as a cleanup at its scope's exits, its decay and subscripts through the
+    element type; the lowering takes clang's dynamic allocas and stack saves already (ci's heap chain). Recommended: one unit,
+    clang's own shape, and C++ programs with VLAs (g++.dg's) by our route too.
+(b) Leave it on the pack.
+
+DECISION cpp-rt-own3-2 (c++17/floating_from_chars.cc: a destructor named through a template parameter before it is declared)
+(a) A class's implicit destructor declared when its class is completed, and an explicit destructor call of a class not complete
+    where it is analyzed resolved when its function is written (the call's function a lazy reference); probe first which class
+    reaches polymorphic_allocator's destroy incomplete (the pool's vector<_BigBlock>). Recommended: one unit.
+(b) Leave it on the pack.
+```
 ## As built: cpp-read, C++'s read and print cells (2026-11-21/22; branch `cpp-read-1122` from next `863bdaea1`; the burst's stream C3)
 
 The read cell's token check, the dg check's syntax-own rows (CP262 (b): files expecting only syntax errors, judged by the own front

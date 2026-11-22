@@ -20,6 +20,8 @@
                   FileOutputStream
                   IOException
                   InputStreamReader
+                  InvalidClassException
+                  ObjectStreamException
                   Reader
                   Serializable)
         '(java.lang.invoke MethodType)
@@ -9485,7 +9487,68 @@
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20]
       (let [cm (CodeRun/fixed this 20)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])]
-        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs)))))
+        (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
+
+    ;; serialized as its class's name and closed-over values (FnSer), not as the evaluator's
+    ;; code tree: protected, so that ObjectStreamClass inherits it into the fn's class made at
+    ;; run time (Clojure's suite's function-serialization)
+    (method ^:protected writeReplace :throws [ObjectStreamException] [this]
+      (FnSer/evaluated this)))
+
+  ;; a fn serialized (EvalFn's, AOTFn's and AOTRestFn's writeReplace): its class's name, its
+  ;; closed-over values, its metadata and its kind, read back (readResolve) as a fn of that
+  ;; class made in this process with those values. As the JVM's ObjectInputStream resolves a
+  ;; fn's class by its name: an evaluated fn's class is known only to the process whose
+  ;; DynamicClassLoader made it (here the process that serialized one of its fns, the FnExpr
+  ;; kept weakly by the class's name, as the loader's cache keeps the class softly), a compiled
+  ;; fn's to every process of the program that made one of its fns (AOT.fnClass)
+  (defclass ^:public ^:static ^:final FnSer
+    :implements [Serializable]
+
+    (field ^:private ^:static ^:final ^java.util.concurrent.ConcurrentHashMap EVALUATED
+      (java.util.concurrent.ConcurrentHashMap.))
+
+    (field ^:private ^String name)
+
+    (field ^:private ^Object/1 closed)
+
+    (field ^:private ^IPersistentMap meta)
+
+    ;; 0 an evaluated fn (EvalFn), 1 a compiled fn (AOTFn), 2 a compiled variadic fn (AOTRestFn)
+    (field ^:private ^int kind)
+
+    ;; AOTRestFn's required arity
+    (field ^:private ^int required)
+
+    (constructor ^:public [this ^String name ^Object/1 closed ^IPersistentMap meta ^int kind ^int required]
+      (set! (.-name this) name)
+      (set! (.-closed this) closed)
+      (set! (.-meta this) meta)
+      (set! (.-kind this) kind)
+      (set! (.-required this) required))
+
+    (method ^:public ^:static evaluated ^FnSer [^EvalFn f]
+      (let [n (.getName (.-j2g$class f))]
+        (.put EVALUATED n (java.lang.ref.WeakReference. (.-fe f)))
+        (FnSer. n (.-closed f) nil 0 0)))
+
+    (method ^:public ^:static compiled ^FnSer [^Class c body ^IPersistentMap meta ^int kind ^int required]
+      (FnSer. (.getName c) (Dyn/aotValues body) meta kind required))
+
+    (method ^:private readResolve :throws [ObjectStreamException] [this]
+      (if (== kind 0)
+          (let [r (cast java.lang.ref.WeakReference (.get EVALUATED name))
+                fe (when (some? r) (cast FnExpr (.get r)))]
+            (when (nil? fe)
+              (throw (InvalidClassException. name "the class of an evaluated fn this process did not make")))
+            (EvalFn. fe closed))
+          (let [c (AOT/fnClassNamed name)
+                body (when (some? c) (Dyn/newAOTBody c closed))]
+            (when (nil? body)
+              (throw (InvalidClassException. name "the class of a compiled fn this process did not make")))
+            (if (== kind 1)
+                (AOTFn. body c meta)
+                (AOTRestFn. body c meta required))))))
 
   (defclass ^:public ^:static EvalMethod
     :extends RestFn
@@ -9610,6 +9673,20 @@
     ;; the class of the compiled fns of one code (AOT.fnClass) gets the closed-over fields of the
     ;; code object body as its own, read through the fn (RPS41)
     (method ^:public ^:static ^:native defineAOTFnFields ^void [^Class c body])
+
+    ;; the closed-over values of a compiled fn's code object body, boxed, in the order
+    ;; defineAOTFnFields gives them as fields (a compiled fn serialized: FnSer)
+    (method ^:public ^:static ^:native aotValues ^Object/1 [body])
+
+    ;; a new code object of the compiled fns of class c (made by AOT.fnClass, its fields given by
+    ;; defineAOTFnFields) holding the values vs in that order; nil when they do not fit (a
+    ;; compiled fn read back: FnSer)
+    (method ^:public ^:static ^:native newAOTBody [^Class c ^Object/1 vs])
+
+    ;; the method of name and params that setMethod gave class c made private (a proxy's
+    ;; writeObject and readObject, which ObjectStreamClass takes only when private, as Clojure's
+    ;; generate-proxy declares them)
+    (method ^:public ^:static ^:native hideMethod ^void [^Class c ^String name ^Class/1 params])
 
     (method ^:public ^:static ^:native newInstance [^Class c ^Object/1 fieldValues])
 
@@ -10773,7 +10850,7 @@
                      "constants" (.-constants x) "constantsID" (Integer/valueOf (.-constantsID x))
                      "altCtorDrops" (Integer/valueOf (.-altCtorDrops x))
                      "keywordCallsites" (.-keywordCallsites x) "protocolCallsites" (.-protocolCallsites x)
-                     "onceOnly" (Boolean/valueOf (.-onceOnly x)) "opts" (.-opts x)
+                     "onceOnly" (Boolean/valueOf (.-onceOnly x)) "opts" (.-opts x) "src" (.-src x)
                      "classMeta" (.-classMeta x) "canBeDirect" (Boolean/valueOf (.-canBeDirect x))
                      "isDeftype" (Boolean/valueOf (.isDeftype x))
                      "supportsMeta" (Boolean/valueOf (.supportsMeta x))]))
@@ -11039,6 +11116,12 @@
                 (when (some? body) (Dyn/defineAOTFnFields d body))
                 (.put FN_CLASSES name d)
                 d)))))
+
+    ;; the class of the compiled fns named name when this process made one of them (fnClass),
+    ;; else nil (a compiled fn read back: FnSer)
+    (method ^:public ^:static fnClassNamed ^Class [^String name]
+      (locking FN_CLASSES
+        (cast Class (.get FN_CLASSES name))))
 
     ;; the constants of a compiled class (SA155): the n values encoded in s by arbace.c2j.emit
     ;; (pool-encode), each made as the code emitValue writes would make it, in order; a value

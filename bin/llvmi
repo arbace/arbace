@@ -367,15 +367,17 @@ run_budget() {
 # seconds under bin/lib/cppi/runprog.bash's cppi_run_prog, its own memory cap and no inherited GOMEMLIMIT): ID STATUS OUT-SHA
 # OUT-BYTES ERR-SHA ERR-BYTES ERR-FIRST
 run1() {
-  local id=$1 rd st b; shift
+  local id=$1 rd st b pre=(); shift
   rd=$(mktemp -d "$TMPDIR/llvmi-run.XXXXXX")
   : > "$rd/in"
   b=$(run_budget "$id")
+  # a module whose main takes the environment (run_env): the program under llvmi's fixed environment alone (small-tails)
+  [ -n "$(run_env "$id")" ] && pre=(env -i $llvmi_env)
   if [ -n "$b" ]; then
     . "$root/bin/lib/cppi/runprog.bash"
-    (cd "$rd" && cppi_run_prog "$b" 0 "$rd/st" "$@" < in > out 2> err); st=$(cat "$rd/st")
+    (cd "$rd" && cppi_run_prog "$b" 0 "$rd/st" "${pre[@]}" "$@" < in > out 2> err); st=$(cat "$rd/st")
   else
-    { (cd "$rd" && timeout 10 "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
+    { (cd "$rd" && timeout 10 "${pre[@]}" "$@" < in > out 2> err); } 2> "$rd/sh"; st=$?
   fi
   [ $st = 124 ] && st=timeout
   [ -n "${LLVMI_RUN_OUT:-}" ] && head -c 65536 "$rd/out" > "$LLVMI_RUN_OUT/$id.out"  # the own verdicts' CHECK lines read it
@@ -386,7 +388,13 @@ run1() {
 # run_args ID: the program's arguments its own verdict's RUN lines give (WORK/args.tsv, arbace.llvm.check run-args: `%lli %s test`),
 # none for a module without (lli's record ran every module with none); queue 358
 run_args() { [ -n "${LLVMI_ARGS:-}" ] && [ -f "$LLVMI_ARGS" ] && awk -F'\t' -v i="$1" '$1 == i { print $2; exit }' "$LLVMI_ARGS"; return 0; }
-export -f run1 run_budget run_args; export root
+# run_env ID: --env for a module whose main takes the environment (WORK/args.tsv's third column `env`, arbace.llvm.check's main-envp?:
+# lit runs lli with lit's environment, never an empty one; ExecutionEngine/MCJIT/2003-08-21-EnvironmentTest), placed before the node
+# program (cirun) or after the package (an AOT shard's), so ci's RunMain gives the program the runner's environment (RES29 (a)), which
+# run1 makes llvmi_env alone: fixed, the host's variables never reach the program (small-tails, 2026-11-21)
+run_env() { [ -n "${LLVMI_ARGS:-}" ] && [ -f "$LLVMI_ARGS" ] && awk -F'\t' -v i="$1" '$1 == i { if ($3 == "env") print "--env"; exit }' "$LLVMI_ARGS"; return 0; }
+llvmi_env="PATH=/usr/bin:/bin HOME=/ LANG=C GOMAXPROCS=${GOMAXPROCS:-4} GOMEMLIMIT=${GOMEMLIMIT:-1500MiB}"
+export -f run1 run_budget run_args run_env; export root llvmi_env
 
 # musl_prepare: ci's libc (bin/ci musl prepare) without a compiler. ci's prepare configures musl with the host's gcc
 # (CC=gcc ./configure) when its tree is absent; llvmi makes configure's products first as musl's Makefile makes them
@@ -620,8 +628,8 @@ case $cmd in
           awk -F'\t' '$2 == "ok" {print $1}' "$work/nodes-eh/nodes.tsv" 2>"$TMPDIR/llvmi-eh.err" > "$work/run-eh.ids" || : > "$work/run-eh.ids"
         fi
         t2=$(date +%s)
-        awk -F'\t' '$2 == "ok" {print $1}' "$work/nodes/nodes.tsv" 2>"$TMPDIR/llvmi-nodes.err" | xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes" $(run_args "$1")' _ {} "$work/nodes" > "$work/run.tsv"
-        [ -s "$work/run-eh.ids" ] && xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' "$2/$1.nodes" $(run_args "$1")' _ {} "$work/nodes-eh" < "$work/run-eh.ids" >> "$work/run.tsv"
+        awk -F'\t' '$2 == "ok" {print $1}' "$work/nodes/nodes.tsv" 2>"$TMPDIR/llvmi-nodes.err" | xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' $(run_env "$1") "$2/$1.nodes" $(run_args "$1")' _ {} "$work/nodes" > "$work/run.tsv"
+        [ -s "$work/run-eh.ids" ] && xargs -d '\n' -P "$jobs" -I{} bash -c 'run1 "$1" '"$cirun"' $(run_env "$1") "$2/$1.nodes" $(run_args "$1")' _ {} "$work/nodes-eh" < "$work/run-eh.ids" >> "$work/run.tsv"
       else
         go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
         mod=$work/mod
@@ -672,7 +680,7 @@ case $cmd in
             gen_main
             [ -s "$s.built" ] && gb -o "$work/shard.exe" ./shard >> "$s.build.log" 2>&1
           fi
-          [ -x "$work/shard.exe" ] && awk -F'\t' '{print $1 "\n" $2}' "$s.built" | xargs -d '\n' -n 2 -P "$jobs" bash -c 'run1 "$1" '"$work"'/shard.exe "$2" $(run_args "$1")' _ >> "$work/run.tsv"
+          [ -x "$work/shard.exe" ] && awk -F'\t' '{print $1 "\n" $2}' "$s.built" | xargs -d '\n' -n 2 -P "$jobs" bash -c 'run1 "$1" '"$work"'/shard.exe "$2" $(run_env "$1") $(run_args "$1")' _ >> "$work/run.tsv"
           rm -rf "$work/shard.exe" "$mod"
           echo "llvmi aot: $(basename "$s"): $(wc -l < "$s") programs, $(wc -l < "$s.built") built"
         done

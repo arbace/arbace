@@ -42,7 +42,7 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
   two steps). The essential gate at `22b4c6542` failed cpp-essential (two Toks, below) and suite-go (`--run-one`'s JDK check
   under load), both fixed at `88b8e7f1a`, which passed and became main.
 - **The crops' scores** (`bin/crops-score` on next; completeness, without by design, maturity, independence): Clojure 99.1
-  99.6 100 100, Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
+  99.6 100 100 (99.7 99.9 100 100 on `clj-rows-1122`), Java 89.1 91.6 100 59.7, Go 98.6 100 100 100, C 98.2 99.9 100 99.9, C++ 93.2 94.9 100 74.7, OCaml 88.8 94.0
   100 100, Scheme 99.9 100 100 100, Haskell 97.3 99.1 100 78.4, Rust 100 100 100 80.0, LLVM IR 99.3 100 100 99.0, Python 0 0
   83.3 98.2 (eval and AOT wait for its records, lane 4), x86-64 assembly 99.4 99.9 100 100, arm64 assembly 99.9 99.9 100 99.9,
   WebAssembly 100 100 100 100. Below 90% complete: Java and OCaml (and Python, unrecorded).
@@ -361,6 +361,11 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
   gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
   Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
+- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
+  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
+  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
+  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
+  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
@@ -396,7 +401,13 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   (std-names 14,953 of 15,162 facts; C4 not own until C6-5's ruling), C1's three drop-glue faults fixed (std, vectors, unwind,
   panics build own; vectors passes own on ci), C6-4's AlwaysInliner (core 114 of 275 items equal to std's IR). Next: TypeId::of's
   constant as rustc's hash and core's sort recursion (unwind, panics, std on ci), C6-4's next export (8 callees), core's interface
-  differences for C4 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1's drop glue").
+  differences for C4 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1's drop glue"). Branch `rust-c6b-1122` (2026-11-22,
+  the burst's R2, with 512-rust-causes5 and R3's rust-c4-1122 merged): C6-4's next export and the back end's lowering as std's IR
+  writes it (core's macro-made attributes, IRBuilder's folds, LLVM 23's float text, -Z fewer-names' literal types, InstSimplify's
+  aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
+  alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
+  unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
+  lowering as std's IR writes it").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh
