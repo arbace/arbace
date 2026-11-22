@@ -1837,7 +1837,16 @@ covers what.
   `X86EncodingOptimizationForImmediate.def`, and `arbace/asm/elf.ae` (the ELF64 writer and reader) `llvm/lib/MC/ELFObjectWriter.cpp`
   and `StringTableBuilder.cpp`, the same tarball, licence and manner; no code is copied. x86-print (2026-11-22): `arbace/asm/amd64/lfi.ae`
   (the LFI rewriter) follows `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp`, `llvm/lib/MC/MCLFI.cpp` and `MCLFIRewriter.cpp` of
-  the same tarball, licence and manner. The records `test/asm/records/obj-*.edn` hold
+  the same tarball, licence and manner. x86-objs (2026-11-22, AXS99 (b)): `arbace/asm/macho.ae` and `arbace/asm/amd64/macho.ae` (the
+  Mach-O writer and reader, x86's relocations and compact unwind) follow `llvm/lib/MC/MachObjectWriter.cpp`, `MCMachOStreamer.cpp`,
+  `MCParser/DarwinAsmParser.cpp`, `MCSectionMachO.cpp`, `MCObjectFileInfo.cpp`, `MCAsmInfoDarwin.cpp`, `MCDwarf.cpp` and
+  `llvm/lib/Target/X86/MCTargetDesc/X86MachObjectWriter.cpp` and `X86AsmBackend.cpp`; `arbace/asm/coff.ae` and
+  `arbace/asm/amd64/coff.ae` (the COFF writer and reader, x86's relocations and Win64 unwind tables) follow `WinCOFFObjectWriter.cpp`,
+  `MCWinCOFFStreamer.cpp`, `MCParser/COFFAsmParser.cpp`, `MCWin64EH.cpp`, `MCStreamer.cpp`'s emitWinCFI* and
+  `X86WinCOFFObjectWriter.cpp`, `X86WinCOFFStreamer.cpp`; `arbace/asm/amd64/objview.ae` (the views) follows
+  `llvm/tools/llvm-objdump/{llvm-objdump,MachODump}.cpp`, `llvm/tools/llvm-readobj/{MachODumper,COFFDumper}.cpp`,
+  `llvm/lib/Object/{MachOObjectFile,COFFObjectFile,FaultMapParser,RelocationResolver}.cpp` and llvm-nm's `llvm-nm.cpp`: the same
+  tarball, licence and manner; no code is copied. The records `test/asm/records/obj-*.edn` hold
   llvm-mc 23.1.5's output for musl's files (MIT), Arbace's own tests and `llvm/test/MC/X86`'s (Apache 2.0 WITH LLVM-exception). AX4's
   second slice: `arbace/asm/link.ae` (the static linker) follows lld's `lld/ELF/` from the same tarball (`Driver.cpp`, `InputFiles.cpp`,
   `SymbolTable.cpp`, `Symbols.cpp`, `LinkerScript.cpp`, `Writer.cpp`, `OutputSections.cpp`, `SyntheticSections.cpp`, `InputSection.cpp`,

@@ -2165,3 +2165,91 @@ Left (the decisions for the user, with their rows; and the deferred):
   llvm-nm of COFF, pad-for-align-debug's 63): (a) by design; (b) Arbace's Mach-O and COFF writers and views (days of work).
 - `:elf32` 2 deferred (AXS101): abs8's i386 run (llvm-objdump -d -r of an ELF32 object), with the verdict's 32 i386 lines beside: an
   ELF32 writer and reader with X86ELFObjectWriter's getRelocType32 (scoped, not started: the round was stopped).
+
+## As built: x86-objs (2026-11-22; branch `x86-objs-1122`, from `mac/next` `3e8dfe109`)
+
+The user's decision of 2026-11-22: AXS99 (b), Arbace's own Mach-O and COFF writers and views, compact unwind included (doc/JOURNAL.md,
+"the user's decisions on the burst's by-design and counting questions"). Every object run of MC/X86's tests for a Darwin or Windows
+triple is now assembled by Arbace into that format and judged by its own CHECK lines; no LLVM tool, nothing copied (the logic ported
+from llvm-project 23.1.5's pinned tarball, LICENSE.md, doc/ARBACE.md).
+
+- **The object assembler's formats** (`arbace.asm.obj/*fmt*`, nil for ELF): a map of the format's part, each hook where LLVM's
+  writer or streamer differs: the temporary prefix (MCAsmInfo's InternalSymbolPrefix: `L` on Darwin and i386 COFF, `.L` on x86-64
+  COFF), initSections, the format's directives (before the architecture's and the generic ones), emitLabel's hook, finishImpl's,
+  the PC-relative fixup's resolution (isSymbolRefDifferenceFullyResolvedImpl), the frames, the DWARF sections, the post-layout
+  binding, recordRelocation (the relocation kept by the format, the field's fixed value written), the writer. ELF's paths are as
+  they were, but three rules now read as LLVM's for all: a relaxed AT&T instruction's fixup error keeps its place (MCFixup::getLoc
+  is its expression's; only the Intel parser's expressions have none, queue 372's fixup-overflow-32), a Darwin macro without
+  parameters expands `$$`, `$n`, `$0`..`$9`, and an instruction marks its section as holding instructions.
+- **Mach-O** (`arbace.asm.macho`, `arbace.asm.amd64.macho`): MachObjectWriter's file (the header, LC_SEGMENT(_64) with every section,
+  LC_VERSION_MIN_* or LC_BUILD_VERSION, LC_DATA_IN_CODE, LC_SYMTAB, LC_DYSYMTAB, LC_LINKER_OPTION; the section data padded to the next
+  section's alignment, the zerofill sections last; the relocations reversed; the locals, then the externals and the undefined sorted
+  by name; MachO's string table, padded), MCMachOStreamer's atoms (an atom-defining label starts a fragment, finishImpl's atom of each
+  fragment) deciding the PC-relative fixups as x86-64's isSymbolRefDifferenceFullyResolvedImpl does (same section, same atom; i386's
+  temporaries and no .subsections_via_symbols), DarwinAsmParser's directives (`.section SEG,SECT[,TYPE[,ATTRS[,STUB]]]` by
+  ParseSectionSpecifier and its errors, the named section switches, `.zerofill`, `.tbss`, `.comm`/`.lcomm` and `.align` in powers of
+  two, `.macosx_version_min` and its kin, `.build_version`, `.data_region`/`.end_data_region` with MachObjectWriter's fatal "data
+  region not terminated", `.private_extern`, `.weak_definition`, `.weak_reference`, `.no_dead_strip`, `.alt_entry`, `.desc`, ...),
+  X86MachObjectWriter's relocations (RecordX86_64Relocation: SUBTRACTOR/UNSIGNED pairs, SIGNED_1/2/4, BRANCH, GOT_LOAD, GOT, TLV,
+  local relocations in debug sections, a variable's address; RecordX86Relocation: scattered SECTDIFF/LOCAL_SECTDIFF pairs, VANILLA,
+  TLVP; each of their errors at its fixup's place), MCExpr's Mach-O rule for a relocation's symbol (a variable whose value has a
+  symbol and a constant is the relocation's symbol), and the frames: generateCompactUnwindEncoding (DarwinX86AsmBackend: BP frame,
+  frameless immediate and indirect stack sizes, the register permutation, DWARF mode for everything else and for signal frames,
+  `--emit-dwarf-unwind`, `-emit-compact-unwind-non-canonical`), EmitCompactUnwind into __LD,__compact_unwind (debug: local
+  relocations), and __TEXT,__eh_frame with DW_EH_PE_pcrel and Darwin's DwarfFDESymbolsUseAbsDiff (the FDE's address a temporary
+  variable's value: no relocation).
+- **COFF** (`arbace.asm.coff`, `arbace.asm.amd64.coff`): WinCOFFObjectWriter's file (the header, the section headers with their
+  alignment characteristics, the raw data, the relocations, the symbols: each section's with its section definition and JamCRC
+  checksum, the registered symbols, the weak externals and their defaults, `.file`'s records; WinCOFF's string table, `/OFFSET` for a
+  long section name), recordRelocation (the section's symbol for a temporary without its own, REL32's 4, FK_SecRel_2's 0) with
+  X86WinCOFFObjectWriter's types (IMAGE_REL_AMD64_*, IMAGE_REL_I386_*, a difference across sections REL32), the PC-relative rule
+  (a function's symbol never resolved, else its section), COFFAsmParser's directives (`.section NAME,"FLAGS"` by parseSectionFlags,
+  `.def`/`.scl`/`.type`/`.endef`, `.secrel32`, `.secidx`, `.secnum` and `.secoffset` (their values at the layout), `.rva`, `.weak`,
+  `.reloc` with dir32, secrel32 and secidx as fixups inserted in MCAssembler::layout's groups), names with `@` (AllowAtInName: the part
+  after it no specifier), and Win64's unwind tables (`.seh_*` as MCStreamer's emitWinCFI* builds the frames, MCWin64EH's version-1
+  UNWIND_INFO written at `.seh_endproc` into the text section's .xdata, RUNTIME_FUNCTION at the end into its .pdata, a text section
+  other than .text getting its own unique pair).
+- **The views** (`arbace.asm.amd64.objview`; the verdict's `format-view`): llvm-objdump -d (the shared `disasm-lines`, ELF's view
+  rewritten on it: the sections' addresses, Mach-O's `SEGMENT,SECTION`, the symbols as disassembleObject takes them per format),
+  --unwind-info (printMachOCompactUnwindSection, findUnwindRelocNameAddend), --dwarf=frames (arm64's call frame view made shareable:
+  `dwarf-frames-lines`, the section's address as DWARFDebugFrame's EHFrameAddress, x86's CallFrameString, `regN` names,
+  resolveMachOX86_64), --fault-map-section, -r for COFF; llvm-readobj -S with --sd and -r for Mach-O (MachODumper) and COFF
+  (COFFDumper, printFlags with the alignment's mask); llvm-nm for COFF. FileCheck's numeric variables with a precision (`%.8x`,
+  `%.2X`) in uses and definitions (decode-check's subset).
+- **Controls** (test/asm/controls-objverdict.txt): a fourth field `byte SECTION OFFSET` flips the low bit of that byte of each run's
+  own object (one byte changed must fail): compact-unwind's encoding, pad-for-align-debug's first instruction, faultmap's version,
+  compact-unwind-force-dwarf's FDE program, reloc-directive's addend, win-import-call-optimization's .retplne; and two tests' objects
+  held to another's lines (compact-unwind-signal-frame against compact-unwind-mode-dwarf's, fp-setup-macho against
+  compact-unwind-cfi_def_cfa's); each fails as it must.
+
+Proof (stage 0 of mac/next's seed): `bin/repr-asm object-verdict --record` whole: 68 files, 1,243 CHECK lines, 1,203 met (865 before),
+the rest :elf32 32, :x32 7, :options 1; the 338 :other-format lines all met (19 files), every other row as recorded; 16 controls failing
+as they must (8 new). `encode-check --record --only` over the 21 files touched: 223 of 223 CHECK texts, the cross judge 50 of 50, the
+cell's 138 :other-format rows met. Unchanged: object-check ok (musl 32, synthetic 8, obj-err 3 of 3, mc-x86-obj), arm64's object
+verdict 2,890 of 2,890 (its call frame view now shared). After: x86-64 print 195,651 pass / 861 by design / 2 deferred to 195,789 / 723 /
+2, AOT 108 / 0 / 0 (the verdict beside, 1,203 of 1,243); completeness 0.9989 to 0.9991 (the 723 the cross judge's, counted out of the
+cases by the user's decision of 2026-11-22, another stream's).
+
+Left: AXS101's ELF32 (:elf32 2 print rows and 32 verdict lines, :x32 7); :options 1 (gnux32-dwarf-gen's -g, DWARF's debug info);
+arm64's Mach-O and COFF (no matrix row: MC/AArch64's Darwin-only object tests are outside mc-aarch64-obj, and the encode check's reject
+level, beside, holds 13 lines of AArch64MachObjectWriter's messages).
+
+Round 2 (AXS101 (a), the burst's "if time allows"): i386's ELF32.
+
+- **The writer and the reader** (`arbace.asm.elf`): `write-object`'s `:class 32` lays out ELFWriter's 32-bit file (the 52-byte header,
+  40-byte section headers, 16-byte symbols, 4-byte alignments) and `:rel true` SHT_REL sections (`.rel` + the section's name, 8-byte
+  entries, the addend left in the field: i386's hasRelocationAddend false); `read-object` reads ELF32 too (REL's and RELA's
+  entries, a REL relocation's `:rel`). ELF64's bytes are unchanged (the defaults; object-check below).
+- **The relocations** (`arbace.asm.amd64.obj`): an i386 run (the object assembler's `:rel?`) is EM_386, ELFCLASS32, and its types
+  X86ELFObjectWriter::getRelocType's for EM_386 (getType64's field type, then getRelocType32: R_386_32/PC32/16/PC16/8/PC8, GOT32,
+  GOT32X for MOV32rm's relaxable form, GOTPC, GOTOFF, PLT32, the TLS ones), `.reloc` with R_386_* and BFD_RELOC_NONE/8/16/32;
+  `{disp32}` and `.d32` on JMP_1 or JCC_1 force the relaxed form (X86AsmParser::processInstruction: JMP_2/JCC_2 in 16-bit mode).
+- **The views**: llvm-objdump -d -r's relocation lines in the address's width, -r's header and offsets, llvm-readobj -r's REL
+  section (its name, no addend: printRelocation's optional one), llvm-readelf -s's columns (GNUELFDumper's Bias), the file's names
+  (`elf32-i386`, `i386`, `32bit`): arm64's views take a target's `:class`.
+
+Proof of round 2: `object-verdict --record` whole: 1,224 of 1,243 (reloc-directive-elf-32 11, tlsdesc-32 5, x86-16 5 met; x86-32 7 and
+x86-branch-relaxation 4 :view-llvm-objdump, views not built), 18 controls failing (2 new); `encode-check --record --only` over the 26
+files with an i386 or 16-bit object run: 135 of 135 texts (abs8's 2 :elf32 rows met); object-check 89 of 89 byte for byte and arm64's
+16 of 16 (ELF64 unchanged). After: print 195,791 / 723 / 0, AOT 108 / 0 / 0. Left: x32 (7 beside lines), gnux32-dwarf-gen's -g, the two
+views.
