@@ -17370,3 +17370,22 @@ directories the run changed were put back to next's (the other streams' to recor
 cpp1y/lambda-generic-77914.C and parse/crash72.C pass on these rules.
 
 Scores: C++ independence 0.958600 -> 0.959000 (floored 95), completeness 0.972378 -> 0.972536 (floored 97).
+
+## 2026-11-22: cpp-diag-a round 3: comparisons, concepts, declarations, coroutines' awaiters, P2564's escalation, name-independent declarations
+
+The stream's last round (doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a", its rules, shared functions and checks): new checks in
+arbace/repr/cpp/diag.ae for defaulted comparisons and the built-in three-way comparison, concept declarations, concept-ids and
+placeholders, prospective destructors, friend class templates' constraints, class-scope using-declarations, designated initializers,
+destroying delete, non-local lambdas, bit-field bindings, C++26's delete of an incomplete type and name-independent declarations,
+assume's pack expansion; the coroutine check's awaiter and allocation rules, P2564's escalation of constexpr function templates;
+shared functions touched: `redefinitions` (a block-scope automatic `_`), parse.ae's `parse-if` (if consteval's else branch).
+
+Proof: r5, the 900 files the round's rules reach (the stream's directories' own passes among them), in chunks of 150 (`--record` each,
+GOMEMLIMIT 2800-4000MiB: at the tool's 1500MiB the first attempt, r3, spent over three hours in the collector and was stopped, its
+record restored); five chunks run (750 files), the sixth (148 files, 11 of the stream's) stopped at the coordinator's consolidation and
+left unrecorded. 67 files of the stream's directories fail -> pass, none lost; other directories' rows put back to next's. A false
+positive found in chunk 01 (constrained-bindings on `template<...> auto [`, `mutable auto [`) fixed by requiring a concept's name;
+no row of the stream's directories had it (its chunks scanned).
+
+Scores: C++ read 5,793 / 0 / 528 (after round 2: 5,797 / 0 / 524) -> 5,805 / 0 / 516; independence 0.959000 -> 0.960000 (floored 96; the
+stream's start 0.957800, floored 95), completeness 0.972536 -> 0.972852 (floored 97). The stream's total: 139 files to own pass.

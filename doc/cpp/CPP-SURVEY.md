@@ -9986,3 +9986,105 @@ the record unchanged): C++ read 5,665 / 135 / 517 (214 n/a, next's) -> 5,786 / 0
 - an observation for the user: coroutines/pr105475-3.C passes on the coroutine_handle rule, though, as pr105475-broken-spec.C (which 497-3
   (a) made :undefined-expectation), it specializes std::coroutine_handle ([coroutine.handle.general]/2: undefined behaviour); both now pass
   by their own lines, so no class needs them.
+
+## As built: cpp-diag-a, the own front end's rules for C++20 to C++26 (2026-11-22; branch `cpp-diag-a-1122` from next `171f82078`; the burst's stream on C++'s independence)
+
+The stream's directories of the dg check's dg-error part, gxx-dg/cpp2a, cpp23, cpp26, concepts and coroutines (queue 518 holding cpp0x,
+template, cpp1y, cpp1z, other and ext, cpp-diag-b parse, lookup, diagnostic, init, expr, conversion, inherit, overload and the small
+rest): their files that fail their own dg-error lines on Arbace's own front end (`bin/repr-cpp dg --front native`,
+test/cpp/check-dg-own-linux-amd64.edn), grouped by expected message, each group a rule written from the C++ standard (N4950, the C++26
+working draft for P2169, P2361, P3144) with GCC 15.2's wording read off the tests' dg-error lines (the verdict compares lines, not
+texts); no GCC code was read. Every rule is a new check appended to arbace/repr/cpp/diag.ae (`checks`, by `swap!`), over the native
+parser's tree and the source text.
+
+### The rules
+
+- coroutines (`coroutine-rules`, `coroutine-handle-members`): [expr.await]/2 (no await or yield expression outside a function body, in
+  a handler, in sizeof's or decltype's operand), [dcl.spec.auto.general]/4 (no coroutine with a deduced return type), no return
+  statement in a coroutine, the promise's interface ([dcl.fct.def.coroutine]/3-/12: initial_suspend, final_suspend, get_return_object,
+  unhandled_exception unless -fno-exceptions, return_void or return_value for each co_return, yield_value for each co_yield, not both
+  return forms; its operator new usable with the frame's size, its operator delete with (void*) or (void*, size_t),
+  get_return_object_on_allocation_failure static, with a noexcept operator new and std::nothrow), the awaiters' interface
+  ([expr.await]/3: await_ready, await_suspend, await_resume, await_suspend's result void, bool or a coroutine handle; co_yield's
+  awaiter yield_value's result, a deduced one read off its return statement), judged when the promise class is resolved
+  (coroutine_traits' explicit specialization for R alone, else R::promise_type; no bases, no using-declaration, no template; a
+  member function with R's primary traits only); GCC's checks of the promise after the body skipped when the body had an error;
+  and GCC's interface with a std::coroutine_handle the unit declares (address non-static and single on coroutine_handle<void>,
+  from_address static and single);
+- explicit object parameters (`explicit-object-params`, `xobj-overloads`, P0847R7): [dcl.fct]/6 (first parameter only, none in a
+  requires-expression, a function type or a non-member function, no default argument, no pack; C++23's), static, virtual,
+  allocation and deallocation functions, cv- and ref-qualifiers, overriding a base's virtual function, override and final, a
+  destructor, mutable and static lambdas, `this` in the body, an explicitly defaulted assignment's signature, and
+  [basic.scope.scope]/4's corresponding object parameters against static and implicit object member functions;
+- __builtin_source_location's std::source_location::__impl (`builtin-source-location`; the tests' messages state it, the GCC manual
+  does not document the builtin);
+- constinit and consteval where no declaration may have them (`constinit-consteval-specs`: [dcl.constinit]/1, [dcl.constexpr]/1-2,
+  [dcl.spec.general]/2, [dcl.typedef]/1, [basic.start.main]/3), immediate functions (`immediate-addresses`: [expr.const]/16-18 and
+  P2564's escalation: an immediate function's address taken or an immediate invocation reading a variable not usable in constant
+  expressions outside an immediate function context, `if consteval`'s branches, constexpr function templates and abbreviated ones
+  escalating to immediate functions, to a fixpoint) and consteval virtual functions ([class.virtual]/18);
+- constexpr bodies before C++23 (`constexpr-pre23-bodies`: static and thread_local variables, goto, try-blocks and function-try-blocks
+  before C++20, C++11's function-try-block bodies) and `if consteval`'s else branch a compound statement ([stmt.if]/4, the parser's
+  `parse-if`);
+- later standards in earlier ones, GCC's pedwarns under -pedantic-errors (`version-pedwarns`: labels at the end of a compound statement,
+  alias-declarations as init-statements, auto(x), lambda templates), using-declarations as init-statements
+  (`using-init-statements`), lambda specifiers (`lambda-specifiers`: mutable with static, a static lambda's capture, two ellipses in a
+  capture), operator[]'s arity before C++23 (`subscript-arity`), non-local lambdas with a capture-default and constexpr objects of
+  classes with virtual bases (`nonlocal-lambdas`);
+- comparisons (`defaulted-comparisons`: [class.compare.default]/1-2, P2085's friends, == and the secondary operators' bool;
+  `builtin-spaceship`: [expr.spaceship]'s operand rules and the comparison category types <compare> declares);
+- concepts and placeholders (`concept-decl-rules`: a concept at namespace scope, unconstrained, one template-head, defined once, no class
+  of its name, distinct requires-expression parameters, no placeholder in an alias or typedef, no default for a template parameter
+  pack, friends with requires-clauses as definitions; `abbreviated-templates`: virtual and literal-operator abbreviated templates,
+  constrained auto with a trailing return type or in a type-id; `constrained-bindings`; `concept-qualifiers`: a concept-id as a
+  nested-name-specifier, a concept-id's argument count; `auto-template-args`; `prospective-destructors`: [class.dtor]/4 with
+  constraints of literal booleans; `friend-template-constraints`: a friend class template's template-head against the original's);
+- declarations (`using-and-consteval-overrides`: [namespace.udecl]/3-5 and [enum.udecl]/1; `designated-lists`: C++20's all-or-none
+  designated clauses and no pack expansion; `destroying-deletes`: P0722's first parameter; `bitfield-captures`: a structured binding
+  of a bit-field captured by reference; `delete-incomplete`: P3144, C++26; `assume-expansions`: an assume attribute's pack expansion);
+- C++26's name-independent declarations (`name-independent-uses`, P2169: an ambiguous use of `_` in a block, a parameter's scope, a
+  selection or iteration statement's shared scope, a lambda's init-captures; static and namespace-scope structured bindings and
+  template parameters named twice), with `redefinitions` not reporting a block-scope automatic variable `_` (except under
+  -pedantic-errors before C++26).
+
+### The shared functions touched (named for queue 518 and cpp-diag-b)
+
+- arbace/repr/cpp/diag.ae: `checks` (the new checks appended by `swap!`, after `fallthroughs`); `redefinitions` (`enter!`: a block-scope
+  automatic variable named `_` takes the name without a conflict, except under -pedantic-errors before C++26). Not touched: `sema-errors`
+  and its namespace-scope loop (queue 518's), arbace/cpp/sema.ae, arbace/cpp/template.ae. The stream's own earlier functions
+  (`coroutine-rules`, `explicit-object-params`, `immediate-addresses`, `lambda-specifiers`, `constrained-bindings`,
+  `using-and-consteval-overrides`) were changed in place.
+- arbace/repr/cpp/parse.ae: `parse-if` (`if consteval`'s else branch, "'if consteval' requires compound statement").
+
+### Checked
+
+- each rule on its files with the REPL's probe (arbace.repr.cpp.dg's verdict over the file's dg.edn entry), and the stream's directories'
+  own passes again with the REPL at the last code (concepts 55 of 55, cpp23, cpp26 and coroutines 112 of 112, cpp2a 182 of 185: the
+  three regressions fixed before the record, constrained auto in structured bindings GCC's pedwarn and a concept's name, auto inside
+  a template argument's brackets, P1099's enumerators in class-scope using-declarations);
+- three record runs, `bin/repr-cpp dg --corpus dg-error --front native --only LIST --record`, each over the whole corpus's files whose
+  source a round's rules can reach (by a pattern of the constructs), with the control pair DRs/dr2082.C and DRs/dr1423.C failing as it
+  must: r1 (129 files), r2 (432), r5 (750 of 900 in five chunks of 150: the stream's directories' own passes, the parser change's
+  reach and the rules' files; the sixth chunk's 148 files, 11 of them the stream's cpp2a udlit-class-nttp and using-enum files, left
+  unrun at the consolidation, their rows next's). No recorded pass lost in the stream's directories; rows of other directories the runs
+  changed put back to next's (the other streams' to record; cp0x/constexpr-ctor10.C, cpp1y/lambda-generic-77914.C and parse/crash72.C
+  pass on these rules; cpp0x/udlit-suffix-neg.C timed out under the host's load, as cpp-gnu saw).
+- the dg tool's GOMEMLIMIT=1500MiB default starves the own front end's 4 workers on these headers (a run of 786 files took over 3 hours
+  in the Go collector, at its limit); the record runs set GOMEMLIMIT=2800MiB, then 4000MiB (RSS about 3 to 4 GB, VmSize under the
+  8 GB ulimit).
+
+### The cells
+
+C++ read 5,786 / 0 / 532 -> 5,805 / 0 / 516; the own record's passes in the stream's directories +139 (r1 52: coroutines 28, cpp23 13,
+cpp2a 11; r2 20: cpp2a 15, cpp23 5; r5 67: cpp2a 46, coroutines 7, cpp23 6, concepts 4, cpp26 4). C++'s independence 0.957800 ->
+0.960000 (the tool's mean of its rounded stages; the read stage 0.799 -> 0.810; floored 96, from 95), completeness 0.972210 -> 0.972852
+(floored 97).
+
+### Left
+
+The stream's directories' remaining failures are mostly the code generator's Sema's (overload resolution's no match and ambiguity,
+constraint satisfaction at a call, the constant evaluator: bit_cast, dynamic_cast, uninitialized reads, consteval invocations whose
+argument is a constant the evaluator must run, constexpr new), template instantiation (errors only at a specialization: concepts' T::f,
+explicit-obj-lambda's instantiations, using-enum-7), class members named `_` (name-independent-decl6, -10's code generator's error),
+C++26's unevaluated strings (unevalstr1/2: the parser's string concatenation in linkage specifications and literal operators),
+coroutines through class templates (pr104051, pr105301, coro-bad-gro), and the 11 cpp2a files of the unrun chunk.
