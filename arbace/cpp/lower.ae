@@ -561,6 +561,54 @@
       (list 'compound-lit ct
             (apply list 'init (for [i (range n)] (mask (list 'conv (ctype et) (list '>> x (* i k))) k)))))))
 
+;; small-tails (2026-11-21): an x86_fp80's bits for ci, whose long double holds the value as binary64 (CS35). A bitcast between
+;; x86_fp80 and i80 is a value's bits, not memory's: the IR's i80 is the x87 extended encoding (sign, 15-bit exponent biased 16383,
+;; 64-bit significand with its explicit integer bit), which every binary64 value has exactly; the other way the encoding's value
+;; rounded to binary64, as ci's fptrunc would. gcc's long double is x87's own (*ci* false: the bytes copied as before). Every
+;; signbit, isnan or exponent test clang writes as `bitcast x86_fp80 to i80` (gcc's torture 20080502-1) reads the IR's bits.
+(defn- f80-bits
+  "The x87 encoding of the long double e (binary64 in ci) as an i80 in its container, unsigned __int128."
+  [e]
+  (let [u64 (fn [n] (int-lit n 64))
+        v (fn [s t & init] (apply list 'c/var (with-meta s {:tag t}) init))]
+    (list 'stmt-expr
+          (list 'let [(v 'cx$d 'double (list 'conv 'double e)) (v 'cx$b 'unsigned-long) (v 'cx$e 'unsigned-long) (v 'cx$m 'unsigned-long)
+                      (v 'cx$k 'unsigned-long) (v 'cx$E 'unsigned-long) (v 'cx$M 'unsigned-long)]
+                (list '__builtin_memcpy '(addr cx$b) '(addr cx$d) 8)
+                (list 'set! 'cx$e (list 'bit-and (list '>> 'cx$b 52) (u64 2047)))
+                (list 'set! 'cx$m (list 'bit-and 'cx$b (u64 4503599627370495)))
+                ;; a subnormal binary64 normalized: its leading one at bit 63, the exponent 15372 - k (2^-1074's 15309 plus its position)
+                (list 'set! 'cx$k (list '? (list '== 'cx$m (u64 0)) (u64 0) (list 'conv 'unsigned-long (list '__builtin_clzll 'cx$m))))
+                (list 'set! 'cx$E (list '? (list '== 'cx$e (u64 2047)) (u64 32767)
+                                        (list '? (list '!= 'cx$e (u64 0)) (list '+ 'cx$e (u64 15360))
+                                              (list '? (list '== 'cx$m (u64 0)) (u64 0) (list '- (u64 15372) 'cx$k)))))
+                (list 'set! 'cx$M (list '? (list '!= 'cx$e (u64 0)) (list 'bit-or (u64 9223372036854775808) (list '<< 'cx$m 11))
+                                        (list '<< 'cx$m 'cx$k)))
+                (list 'bit-or (list '<< (list 'conv 'unsigned-__int128 (list 'bit-or (list '<< (list '>> 'cx$b 63) 15) 'cx$E)) 64)
+                      (list 'conv 'unsigned-__int128 'cx$M))))))
+
+(defn- bits-f80
+  "The long double (binary64 in ci) of the x87 encoding e, an i80 in its container: the value rounded to binary64; an
+  infinity or a NaN by its bits (the NaN quiet, the payload's top bits kept)."
+  [e]
+  (let [u64 (fn [n] (int-lit n 64))
+        v (fn [s t & init] (apply list 'c/var (with-meta s {:tag t}) init))]
+    (list 'stmt-expr
+          (list 'let [(v 'cx$i 'unsigned-__int128 e) (v 'cx$M 'unsigned-long) (v 'cx$x 'unsigned-long) (v 'cx$E 'unsigned-long)
+                      (v 'cx$b 'unsigned-long) (v 'cx$d 'double) (v 'cx$r 'long-double)]
+                (list 'set! 'cx$M (list 'conv 'unsigned-long 'cx$i))
+                (list 'set! 'cx$x (list 'bit-and (list 'conv 'unsigned-long (list '>> 'cx$i 64)) (u64 65535)))
+                (list 'set! 'cx$E (list 'bit-and 'cx$x (u64 32767)))
+                (list 'set! 'cx$b (list 'bit-or (list 'bit-or (list '<< (list '>> 'cx$x 15) 63) (list '<< (u64 2047) 52))
+                                        (list '? (list '== (list '<< 'cx$M 1) (u64 0)) (u64 0)
+                                              (list 'bit-or (list 'bit-and (list '>> 'cx$M 11) (u64 4503599627370495)) (u64 2251799813685248)))))
+                (list '__builtin_memcpy '(addr cx$d) '(addr cx$b) 8)
+                ;; finite: M * 2^(E - 16383 - 63), E 0 (a denormal) as 1
+                (list 'set! 'cx$r (list '? (list '== 'cx$E (u64 32767)) (list 'conv 'long-double 'cx$d)
+                                        (list '__builtin_ldexpl (list 'conv 'long-double 'cx$M)
+                                              (list '- (list 'conv 'int (list '? (list '== 'cx$E (u64 0)) (u64 1) 'cx$E)) 16446))))
+                (list '? (list 'and (list '!= 'cx$E (u64 32767)) (list '!= (list '>> 'cx$x 15) (u64 0))) (list '- 'cx$r) 'cx$r)))))
+
 (defn- cast-expr
   [op t1 e t2]
   (let [w1 (int-bits t1) w2 (int-bits t2) c2 (when (or w2 (float-type? t2) (ptr-type? t2) (aggregate? t2)) (ctype t2))]
@@ -579,6 +627,9 @@
       bitcast (cond
                 (and (ptr-type? t1) (ptr-type? t2)) e
                 (= t1 t2) e
+                ;; ci: x86_fp80's value and the x87 encoding as i80 (f80-bits, bits-f80; small-tails)
+                (and *ci* (= t1 'x86_fp80) (= w2 80)) (f80-bits e)
+                (and *ci* (= w1 80) (= t2 'x86_fp80)) (bits-f80 e)
                 ;; a vector of elements narrower than a byte (<N x i1>, <1 x i4>) is bit-packed in LLVM and a byte an element
                 ;; here: through the bits as an integer (element i at bits i*k)
                 (or (packed-vector? t1) (packed-vector? t2)) (bits-value t2 (value-bits t1 e))
@@ -1167,6 +1218,9 @@
         (when (and (not= h 'bitcast) (or (vec? t1) (vec? t2))) (refuse :vector h " of " (pr-str t1)))
         (set (cast-expr h t1 (value v t1) t2)))
       alloca (let [[t] args [s a] (size-align t) cnt (:count o) al (max (long a) (long (or (:align o) 1)))
+                   ;; a place llvm.va_start writes (ci): at least x86-64's va_list (:va-areas, lower-define)
+                   va? (contains? (:va-areas @*fn*) res)
+                   [s al] (if (and va? (nil? cnt)) [(max (long s) 24) (max (long al) 8)] [s al])
                    entry (:entry-block @*fn*)
                    ;; a va_list (x86-64's [1 x %struct.__va_list_tag]): its address passed to a call is the va_list itself (CX8)
                    _ (when (and (seq? t) (= 'array (first t)) (= 1 (second t)) (named? (nth t 2))
@@ -1220,6 +1274,14 @@
                 (packed-vector? (first v))
                 (let [n (packed-bytes (first v)) bt (bits-type (* 8 (long n)))]
                   [(list '__builtin_memcpy (typed-value pv) (list 'addr (list 'compound-lit bt (value-bits (first v) (typed-value v)))) n)])
+                ;; ci (small-tails, 2026-11-21): an x86_fp80's store writes the IR's store size, 10 bytes: ci's long double's 8
+                ;; (binary64, CS35) and two zero bytes, so two stores of one value are equal byte for byte as in the IR (a memcmp
+                ;; of the 10 bytes, gcc's torture ieee/copysign2 at -O2), where they left two bytes of the slot as they were
+                (and *ci* (= (first v) 'x86_fp80))
+                [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))
+                 (list 'set! (list 'deref (list 'conv (list '* (if (:volatile o) '(volatile unsigned-short) 'unsigned-short))
+                                                (list '+ (list 'conv '(* char) (typed-value pv)) 8)))
+                       (int-lit 0 16))]
                 :else
                 [(list 'set! (list 'deref (list 'conv (list '* ct) (typed-value pv))) (typed-value v))]))
       getelementptr (let [[st base & idxs] args
@@ -1379,7 +1441,22 @@
                           {:c (with-meta (symbol (str sym "$v")) {:tag (ctype bt)}) :local sym :byval true}
                           {:c (with-meta sym {:tag (ctype t)})}))))
         dyn (and *ci* (boolean (some (fn [b] (some #(re-find #"llvm\.stackrestore" (pr-str %)) (drop 2 b))) blocks)))
-        state (atom {:void (= rt 'void) :name (gname-str (second f)) :dyn dyn :allocas [] :phis {} :block nil :entry-block true
+        ;; small-tails (2026-11-21): for ci the places llvm.va_start and llvm.va_copy write, the locals passed to them; an alloca
+        ;; among them takes at least x86-64's va_list (24 bytes, aligned 8), which the ci va_start below writes whole: IR written for
+        ;; lli's interpreter (no target, `alloca ptr` as its va_list one pointer wide) runs as its own frontend would have written it
+        ;; for x86-64 (ExecutionEngine/Interpreter/test-interp-variable-arguments, the class lli-reference's last row)
+        va-areas (when *ci*
+                   (set (for [b blocks x (drop 2 b)
+                              :let [x (if (= (first x) '=) (nth x 2) x)]
+                              :when (and (seq? x) (= 'call (first x)))
+                              :let [cs (vec (rest x))
+                                    i (first (keep-indexed (fn [i e] (when (and (symbol? e) (re-find #"^llvm\.va_(start|copy)" (name e))) i)) cs))]
+                              :when i
+                              arg (first (filter vector? (subvec cs (inc i))))
+                              :let [v (when (vector? arg) (peek arg))]
+                              :when (and (symbol? v) (str/starts-with? (name v) "%"))]
+                          (local-sym v))))
+        state (atom {:void (= rt 'void) :name (gname-str (second f)) :dyn dyn :va-areas va-areas :allocas [] :phis {} :block nil :entry-block true
                      :last-param (some-> (last (remove :byval params)) :c (vary-meta (constantly nil)))})
         _ (doseq [b blocks]
             (let [[_ l & is] b]
@@ -1423,13 +1500,140 @@
       (seq attrs) (assoc :c/decl-attrs [(apply list '__attribute__ attrs)])
       (and asm-name (not static)) (assoc :c/asm-label (str "__asm__(\"" (str/replace asm-name #"([\\\"])" "\\\\$1") "\")")))))
 
+(defn- target-layout
+  "small-tails (2026-11-21): a target extension type `(target \"NAME\" PARAM ...)` as its layout type, the type LLVM lays it
+  out as (llvm/lib/IR/Type.cpp's getTargetTypeInfo at the pinned llvm-project-23.1.5: the data layout's size and alignment of
+  the type are its layout type's), so a module that only allocates, stores and loads one runs (ExecutionEngine/Interpreter/
+  test-interp-target-ext-type). A type whose layout type is void or a scalable vector has no size: refused as before."
+  [t]
+  (let [[_ ^String nm & ps] t
+        ints (vec (filter integer? ps))
+        refused #(refuse :type "type " (pr-str t))]
+    (cond
+      (#{"spirv.Image" "spirv.SignedImage"} nm) 'ptr
+      (= nm "spirv.Type") (let [[_ size al] ints]
+                            (if (and size al (pos? (long size)) (pos? (long al)))
+                              (list 'array (quot (* 8 (long size)) (long al)) (symbol (str "i" al)))
+                              'i32))
+      (#{"spirv.IntegralConstant" "spirv.Literal"} nm) (refused)
+      (= nm "spirv.Padding") (if (seq ints) (list 'array (first ints) 'i8) (refused))
+      (str/starts-with? nm "spirv.") 'ptr
+      (= nm "dx.Padding") (if (seq ints) (list 'array (first ints) 'i8) (refused))
+      (str/starts-with? nm "dx.") 'ptr
+      (= nm "amdgcn.named.barrier") '(vector 4 i32)
+      (= nm "llvm.test.vectorelement") 'i32
+      (#{"wasm.funcref" "wasm.externref"} nm) 'ptr
+      ;; aarch64.svcount and riscv.vector.tuple (scalable vectors), amdgpu.stridemark and the rest (void)
+      :else (refused))))
+
+(defn- target-types-out
+  "The forms x with every target extension type replaced by its layout type (target-layout)."
+  [x]
+  (cond
+    (and (seq? x) (= 'target (first x)) (string? (second x))) (target-layout x)
+    (seq? x) (with-meta (apply list (map target-types-out x)) (meta x))
+    (vector? x) (with-meta (mapv target-types-out x) (meta x))
+    (map? x) (with-meta (into {} (map (fn [[k v]] [k (target-types-out v)])) x) (meta x))
+    :else x))
+
+;; small-tails (2026-11-21): a module of another data layout whose meaning does not depend on how it differs from x86-64's.
+;; The lowering lays every type out by x86-64 SysV's layout; a module written for another (llvm/test's i686 modules: 32-bit
+;; pointers, i64 aligned 4) runs as written when the two layouts lay out alike everything whose layout it observes: every
+;; aggregate type it names (size and members' offsets, recursively), every getelementptr's source element type (its stride),
+;; and, when the pointer widths differ, no pointer held in memory (a load or store of ptr) and no ptrtoint or inttoptr. A
+;; scalar's slot (an alloca's or a global's size and alignment) is not observed by its loads and stores. Else :datalayout as
+;; before. For ci (llvmi) alone; LLVM's own rules: llvm/lib/IR/DataLayout.cpp (llvm-project-23.1.5): the default
+;; specifications (i8:8, i16:16, i32:32, i64:32:64, f16, f32, f64, f128 natural, p:64:64), an integer width without its own
+;; specification aligned as the next wider one specified, else the widest; a vector without one aligned to its store size's
+;; power of two; alloc size the store size rounded to the ABI alignment.
+
+(defn- dl-parse
+  "The ABI alignments (bits) of a data layout string's specifications over LLVM's defaults: {:i {width align} :f {...} :v {...}
+  :ptr [size align]}."
+  [^String s]
+  (let [num (fn [x] (when x (Long/parseLong (re-find #"[0-9]+" x))))]
+    (reduce (fn [m tok]
+              (let [[k & ns] (str/split tok #":")]
+                (cond
+                  (#{"p" "p0"} k) (assoc m :ptr [(num (first ns)) (num (second ns))])
+                  (re-matches #"i[0-9]+" k) (assoc-in m [:i (num k)] (num (first ns)))
+                  (re-matches #"f[0-9]+" k) (assoc-in m [:f (num k)] (num (first ns)))
+                  (re-matches #"v[0-9]+" k) (assoc-in m [:v (num k)] (num (first ns)))
+                  :else m)))
+            {:i {8 8 16 16 32 32 64 32} :f {16 16 32 32 64 64 128 128} :v {} :ptr [64 64]}
+            (str/split s #"-"))))
+
+(defn- dl-layout
+  "[alloc-size align member-layouts] of type t under the parsed data layout dl (bytes); member-layouts [[offset layout] ...]
+  for an aggregate, nil for a scalar."
+  [dl types t]
+  (let [t (if (named? t) (let [d (get types t)] (if (or (nil? d) (= d 'opaque)) (refuse :datalayout "an opaque type " (pr-str t)) d)) t)
+        pow2 (fn [n] (loop [p 1] (if (>= p n) p (recur (* 2 p)))))
+        bytes (fn [bits] (max 1 (quot (long bits) 8)))
+        alloc (fn [store al] (* al (quot (+ store al -1) al)))
+        scalar (fn [store al] [(alloc store al) al nil])
+        flt {"half" 16 "bfloat" 16 "float" 32 "double" 64 "x86_fp80" 80 "fp128" 128}]
+    (if-let [n (int-bits t)]
+      (let [ws (sort (keys (:i dl)))
+            w (or (first (filter #(>= (long %) n) ws)) (last ws))]
+        (scalar (quot (+ n 7) 8) (bytes (get (:i dl) w))))
+      (cond
+        (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))) (let [[s a] (:ptr dl)] (scalar (bytes s) (bytes a)))
+        (and (symbol? t) (flt (name t))) (let [w (flt (name t)) store (quot (+ (long w) 7) 8)]
+                                           (scalar store (if-let [a (get (:f dl) w)] (bytes a) (pow2 store))))
+        (and (seq? t) (= 'array (first t))) (let [[s a m] (dl-layout dl types (nth t 2))]
+                                              [(* (long (nth t 1)) (long s)) a [[0 [s a m]]]])
+        (and (seq? t) (= 'vector (first t))) (let [[_ _ _ :as el] (dl-layout dl types (nth t 2))
+                                                   k (int-bits (nth t 2))
+                                                   store (if k (quot (+ (* (long (nth t 1)) (long k)) 7) 8) (* (long (nth t 1)) (long (first el))))
+                                                   al (if-let [a (get (:v dl) (* 8 store))] (bytes a) (pow2 store))]
+                                               [(alloc store al) al [[0 el]]])
+        (and (seq? t) ('#{struct packed} (first t)))
+        (let [packed (= 'packed (first t))
+              [off al ms] (reduce (fn [[off al ms] ft]
+                                    (let [[s a :as l] (dl-layout dl types ft) a (if packed 1 a) o (alloc off a)]
+                                      [(+ o s) (max al a) (conj ms [o l])]))
+                                  [0 1 []] (rest t))]
+          [(alloc off al) al ms])
+        :else (refuse :datalayout "the layout of " (pr-str t))))))
+
+(defn- layout-neutral?
+  "Whether the module's forms observe nothing in which data layout dl lays out otherwise than x86-64's (see above)."
+  [forms types ^String dl]
+  (let [mine (dl-parse dl) ours (dl-parse expected-layout)
+        same? (fn [t] (= (dl-layout mine types t) (dl-layout ours types t)))
+        same-size? (fn [t] (= (first (dl-layout mine types t)) (first (dl-layout ours types t))))
+        ptr-differs (not= (first (:ptr mine)) (first (:ptr ours)))
+        aggs (atom #{}) strides (atom #{}) ptr-mem (atom false)
+        ptr? (fn [t] (or (= t 'ptr) (and (seq? t) (= (first t) 'ptr))))
+        walk (fn walk [x]
+               (when (seq? x)
+                 (let [h (first x)]
+                   (cond
+                     (and ('#{array vector} h) (integer? (second x))) (swap! aggs conj x)
+                     (and ('#{struct packed} h) (seq (rest x)) (not-any? vector? (rest x))) (swap! aggs conj x)
+                     (= h 'getelementptr) (let [[_ [st]] (split-flags (rest x))] (swap! strides conj st))
+                     ('#{ptrtoint inttoptr} h) (reset! ptr-mem true)
+                     (and (= h 'load) (ptr? (second x))) (reset! ptr-mem true)
+                     (and (= h 'store) (vector? (second x)) (ptr? (first (second x)))) (reset! ptr-mem true))))
+               (cond (seq? x) (doseq [y x] (walk y))
+                     (vector? x) (doseq [y x] (walk y))
+                     (map? x) (doseq [y (vals x)] (walk y))))]
+    (doseq [f forms] (walk f))
+    (and (not (and ptr-differs @ptr-mem))
+         (every? same? (concat (keys types) @aggs))
+         (every? same-size? @strides))))
+
 (defn lower-module
   "The C forms of a module's LLVM forms: [file-form forms]."
   [forms ^String c-name]
-  (let [types (into {} (for [f forms :when (= (first f) 'llvm/type)] [(second f) (nth f 2)]))
+  (let [forms (if *ci* (mapv target-types-out forms) forms)
+        types (into {} (for [f forms :when (= (first f) 'llvm/type)] [(second f) (nth f 2)]))
         groups (into {} (for [f forms :when (= (first f) 'llvm/attributes)] [(second f) (nth f 2)]))
         dl (some #(when (= (first %) 'llvm/datalayout) (second %)) forms)
-        _ (when (and dl (not= dl expected-layout)) (refuse :datalayout "the data layout " dl))
+        ;; another data layout: refused, but for ci a module that observes nothing the two layouts lay out otherwise (small-tails)
+        _ (when (and dl (not= dl expected-layout) (not (and *ci* (layout-neutral? forms types dl))))
+            (refuse :datalayout "the data layout " dl))
         ctors (some #(when (and (= (first %) 'llvm/global) (= (gname-str (second %)) "llvm.global_ctors")) %) forms)
         ctor-list (when ctors (vec (for [[_ [_ [_ prio] [_ fv]]] (rest (nth ctors 3))] [(gname-str fv) prio])))
         ;; llvm.global_dtors (C's __attribute__((destructor)); llvmi's ExecutionEngine tests): each a C destructor that calls the function
@@ -1480,7 +1684,10 @@
                           [init opts] (if (and (seq more) (not (keyword? (first more)))) [(first more) (rest more)] [nil more])
                           o (apply hash-map opts)
                           info (get globals s)
-                          ct (ctype t)
+                          ;; ci (small-tails): an x86_fp80 global in its slot union, the IR's 16 bytes, as a member's (ci's long double
+                          ;; takes 8, and a store writes the IR's 10: the store above)
+                          f80g (and *ci* (= t 'x86_fp80))
+                          ct (if f80g (slot-union t) (ctype t))
                           nat (if (:align o) (try (second (size-align t)) (catch Exception _ 1)) 1)
                           m (merge (linkage-meta o (:asm info))
                                    {:tag ct}
@@ -1488,7 +1695,7 @@
                                    (when (:thread-local o) {:thread_local true}))]
                       (when (:section o) (when-not (#{"llvm.metadata"} (:section o)) nil))
                       [(list 'c/var (with-meta (:c info) (if (nil? init) (assoc (dissoc m :static) :extern true) (dissoc m :c/decl-attrs))))
-                       (when (some? init) (list 'c/var (with-meta (:c info) m) (cinit init t)))]))
+                       (when (some? init) (list 'c/var (with-meta (:c info) m) (if f80g (slot-init (cinit init t) t) (cinit init t))))]))
             gvars (vec (for [[d df] gvars]
                          (cond
                            (and df (not (:static (meta (second d)))))

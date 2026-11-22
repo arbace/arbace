@@ -3175,3 +3175,61 @@ move to the oracle tier). arm64's judge held one recorded part: the AOT cell's o
   runs that control each time. cfi_val_offset and large-eh-encoding left the list (their own words). The essential step's inputs
   hold `:a64i` now (the round trip builds a64i's light driver) and its controls the round trip's. arm64's judge: 23,059 own of
   23,060 cases, 1 out, none recorded (judge 1.0).
+
+## As built: small-tails, the last non-passes (2026-11-22; branch `small-tails-arm64-1122`, from next `863bdaea1`)
+
+The burst of 2026-11-21/22 (100 completeness): the arm64 row's last tails, read 2 deferred, AOT 1 deferred, print 5 by design and 2
+deferred. Each was built; none is left classed (the beside rows of encode's `:directive`, 1, stay by design).
+
+- **`:error-misplaced`, read 2 and print 2** (the same two files: AXS96 (a)'s judge holds an error test's refusals to the lines its
+  CHECK lines state errors at). neon-diagnostics' `ld1 v0.8b, v1.8b}, [x0]` (and `st1`'s) has its error stated: the block of seven
+  statements is followed by the block of their errors, each `CHECK-ERROR: error: ...` then the statement llvm-mc echoes
+  (`CHECK-ERROR:        ld1 v0.8b, v1.8b}, [x0]`), and the judge's places were a CHECK line's neighbours alone (the block's first
+  and last statements). `arbace.repr.asm/error-checks` now also takes a CHECK line whose text is a statement's own text (a trailing
+  `//` comment left out, white space collapsed) as that statement's place, the nearest before it, else after it: llvm-mc prints the
+  refused line after each `error:` line, so the echo names the statement. (llvm-mc refuses it at the matcher, `invalid operand for
+  instruction`: AArch64AsmParser::parseInstruction takes a `}` after an operand as a token, for SME's `{ za }`; the reader refuses
+  it at the syntax, which the read level's judge does not tell apart: the message is not judged.) basic-a64-diagnostics' four `;;
+  Exponent too large`, `;; Fraction too precise`, `;; Explicitly encoded value too large`, `;; Not possible to fmov ZR to a whole
+  vector` are statements in AArch64's ELF syntax (`;` its separator, `//` its comment) that the test states no error at. llvm-mc
+  refuses each: parseInstruction parses the second word as an operand (an expression; no operand parser takes two bare words but
+  parseOptionalMulOperand's `mul vl`) and then wants `,`, `]`, `!`, `}` or the end ('unexpected token in argument list',
+  AArch64AsmParser.cpp, llvm-project 23.1.5, read from the pinned tarball), and the test passes upstream because FileCheck holds
+  only the stated lines: an extra error printed outside a chain of `-NEXT` lines is skipped. `arbace.repr.asm/tolerated?` (arm64)
+  takes such a refusal when the statement is that shape on the text itself (three or more bare words, the second and third apart
+  by white space, the second neither a register nor `mul`: `words-statement?`) and FileCheck's matching lets it through (no `-NOT`
+  line of an error prefix; no chain, a plain CHECK line and its `-NEXT`/`-SAME`/`-EMPTY` lines, whose statements, the echoed ones
+  when every `error:` line has its echo, else every place the chain states, lie on both sides of it). A fabricated test (a words
+  statement inside a chain of two errors, another after it) gives inside not tolerated, after tolerated, by hand. The round trip's
+  detail names them: `5 refusals at the test's errors (4 of statements llvm-mc's parser refuses, unstated)`. arm64 has error
+  controls now (`test/asm/controls-error-arm64.txt`, run by `bin/repr-asm --arch arm64 roundtrip`: basic-a64-diagnostics against
+  neon-diagnostics' lines and back, armv9-sysp-diagnostics against arm64-vector-lists'), and amd64's four still fail. The class is
+  removed: a refusal elsewhere is unclassed.
+- **`:check-text`, print 5 (and encode 7 beside).** A CHECK text that does not read as an instruction (`CHECK: sp, x3, x7, lsl
+  #4`, a part of the printed line; `#{{1.06250*(e\+00)?}}`, a regular expression beyond fc-texts' alternatives) is now judged by the
+  input its place pairs with (`encheck/paired-statement`: the block of adjacent lines that state an encoding, with or without a
+  text, paired line for line with the block of statements just before it, else just after it): the input encoded against the
+  stated bytes, and the input printed (its immediates by its row's kinds) holding the CHECK text as FileCheck finds a pattern within
+  the line (`fc-pattern`: the literal parts quoted, `{{...}}` as regular expressions, white space collapsed; a `[[...]]` variable no
+  pattern). A text-less block (`armv8r-unsupported-inst`'s two `CHECK: encoding:` lines written before `dcps3 #4` and `smc #7`) is
+  paired with the statements after it when the ones before are not as many (`paired-input`). Controls (`controls-encode-arm64.txt`,
+  each must differ): `_control/pattern-fmov-imm` (fmov s4's pattern against the next line's input), `_control/pattern-part-of-line`
+  (`sp, x3, x7, lsl #4` against the line before's input), `_control/paired-after` (dcps3 #4 against smc #7's bytes). The class is
+  removed.
+- **`:unsupported-literal-pool`, AOT 1** (ARS50 (a), the user's of 2026-11-11, "later"). `ldr Rt, =EXPR` as AArch64AsmParser's
+  parseOperand (AsmToken::Equal) and llvm/lib/MC/ConstantPools.cpp make it (`arbace.asm.arm64.obj/literal-form`, `emit-pool!`,
+  `emit-pools!`): `ldr`'s alone ('unexpected token in operand'), after a scalar register ('Only valid when first operand is
+  register'); a constant a MOVZ of the register's width holds (shifted right by 16 while above 0xffff with 16 low zero bits, 48 at
+  most for X, 16 for W) is that MOVZ; a W register's constant past 32 bits 'Immediate too large for register'; anything else an
+  entry of the current section's pool (an equal constant or a bare symbol of the same size taken again, the caches never cleared,
+  as ConstantPool's outlive an emission), the instruction a literal load of the entry's temporary label (an LDR19 fixup resolved in
+  the section). `.ltorg` and `.pool` emit the current section's pool; at the file's end (`:finish`, before -implicit-mapsyms' ends
+  and the attributes, as AsmParser::Run calls emitConstantPools before the streamer's finish) every pool left, in the order the
+  pools were made, each in its section; an entry: zeros to its size's alignment (emitValueToAlignment, still in the code's mapping),
+  its label, its value (data: `$d`), its error at its `ldr`. `error-location-ldr-pseudo`'s `ldr x0, =(-undef)` now meets its
+  stated `expected relocatable expression` at its line (object-verdict 2,890 of 2,890). Checked by hand against clang 23.1.5's
+  integrated assembler (the oracle tier's): two samples (constants, a symbol, a W entry after an X one with its padding, `.ltorg` and
+  a reuse after it, a second code section's pool at the end, a `.data` between) byte for byte the same objects. The eval
+  (`arbace.asm.arm64.eval`) takes the same form: its `ldr` of the entry's label laid out at the entries' AOT places.
+
+After: arm64 read 6,656 pass / 0 / 0, AOT 3,173 / 0 / 0, print 12,671 / 0 / 0 (eval unchanged, 560); the row's completeness 1.0.

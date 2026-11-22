@@ -16531,3 +16531,170 @@ computation without placeholders. Rejected: a gate run (the brief's).
 
 Commits: 574e72fbf (the code, rt_ours_glob), 5b5c77242 (format's two gaps, codegen-gen's digests), 259a4fb98 (DECISION 510-1 (a)),
 d845c9472 (the records: runtime inputs, scores), and this entry's commit (the survey's section, the journal). Pushed to mac.
+## 2026-11-21: WebAssembly's proposals judged by their own rules: the threads' and custom descriptors' by-design rows pass (small-tails-wasm-1122)
+
+The burst's stream S1 (small tails), WebAssembly's part: the crop's last by-design rows, read 13 (`threads-before-wasm-3.0` 11,
+`custom-descriptors-br-on-cast-relaxed` 2), eval and AOT 2 each (`custom-descriptors-br-on-cast-relaxed`). Cause: the scripts of
+`proposals/threads/` were written against Wasm 1.0's core (one memory, one table, nat32 limits, "memory size must be at most 65536
+pages (4GiB)") and those of `proposals/custom-descriptors/` against the proposal's relaxed `br_on_cast` rule, while repr/wasm and wai
+judged every script by Wasm 3.0's. D326-2 (a) and D327-1 (a) chose between global rules ((b) of D327-1, the proposal's rule
+everywhere, would have broken Wasm 3.0's own br_on_cast.wast); a third way, each script by the rules of its own directory as each
+proposal's repository runs its scripts, was not among the options, and it contradicts neither decision: the root scripts keep Wasm
+3.0's rules, their br_on_cast.wast still rejects the relaxed casts.
+
+Built (doc/wasm/SPEC.md §9.1, doc/wasm/WASM-SURVEY.md "As built: small-tails"): profiles by the script's directory,
+`arbace.wasm.valid/*profile*` and `profile-of` (`:threads`, `:custom-descriptors`, else nil), `arbace.repr.wasm.text/*limits32*`,
+bound by `arbace.repr.wasm.wast/with-profile` (the read level and its controls, the eval planner arbace.wasm.check); wai's `Profile`,
+`ProfileOf` and `checkCounts` (`go/arbace/wai/valid.ae`, hand-edited forms in the converter's style: the printed module drops the
+forms' comment lines, so a re-conversion would have rewritten every file), set by the light driver's `runScript`, `control` and `w2g`.
+Controls added: the read level's three (`as-valid` on a threads script's second memory and table, `as-invalid` on the relaxed cast:
+each must differ, the profile deciding), the eval level's valid flip and two checks, the AOT level's check.
+
+Checks (each under 2 GiB, the forks' shared lock for the AOT build): `bin/repr-wasm wast --only` the 18 scripts of the two
+directories with test/wasm/essential-wast.txt (testsuite 3,109 of 3,109, print 1,272 of 1,272, msg 1,835 of 1,837: the two of
+`custom-page-sizes-flag-message`, beside; 13 controls fail as they must); `bin/wai check --only` the 18 with essential-eval.txt (testsuite
+19,685, msg 2,787, valid 2,248: all pass; controls and checks 24 of 24); `bin/wai check --aot --only` the 18 with essential-aot.txt
+(2,709 of 2,709 functions translated; testsuite 17,318, msg 2,038: all pass; 19 of 19). `--only` does not `--record`: each record's rows
+of the runs' scripts replaced by the runs' rows (wast-results 16,535 -> 16,548 rows: 13 rows now pass, 13 new print and msg rows, all
+passing, the 6 older-message rows pass; eval-results and aot-results 2 rows each). The classes are removed from divergences-wast,
+-eval and -aot. Cells: read 8,281/13/0 -> 8,294/0/0, eval 63,057/2/0 -> 63,059/0/0, AOT 63,060/2/0 -> 63,062/0/0, print 2,935 ->
+2,937; completeness 0.9996 -> 1.0000 (meant 1.0000). Left: `custom-page-sizes-flag-message` (2 msg rows, beside, D326-1 (a)) and
+eval's `go-speed` (3 `:budget`, out of crops-score's cases). `bin/reap --record`, `bin/crops-score --record`, then `bin/reap`,
+`bin/crops-score --judge --strict` and `bin/records-check`: 0 problems. No gate.
+
+## 2026-11-22: arm64 assembly's last non-passes built (small-tails-arm64-1122)
+
+The burst's stream S1 (100 completeness), its arm64 part, on branch small-tails-arm64-1122 from next 863bdaea1; details in
+doc/asm/ARM64-SURVEY.md, "As built: small-tails, the last non-passes". Before: read 6,654 / 0 / 2 (`:error-misplaced`), AOT 3,172 /
+0 / 1 (`:unsupported-literal-pool`), print 12,664 / 5 (`:check-text`) / 2 (`:error-misplaced`).
+- The error tests' judge (arbace/repr/asm.ae, AXS96 (a)'s, shared with amd64): a CHECK line that echoes a statement's text is that
+  statement's place (neon-diagnostics' `ld1 v0.8b, v1.8b}` and `st1`'s, stated in a block of errors after a block of statements);
+  on arm64 a refusal the test states no error at passes when the statement is three or more bare words (the second no register,
+  not `mul`), which AArch64AsmParser::parseInstruction refuses by its own rule ('unexpected token in argument list': read from
+  llvm-project 23.1.5's AArch64AsmParser.cpp in the pinned tarball), and no chain of -NEXT lines spans it and no -NOT line exists
+  (FileCheck's own verdict skips the extra error): basic-a64-diagnostics' four `;;` lines, statements in AArch64's ELF syntax.
+  Alternatives weighed: FileCheck's tolerance alone (looser: any refusal outside a chain would pass, hiding a reader that refuses a
+  valid statement), llvm-mc's recorded stderr as a pack (the oracle's record in the judge), keeping the class. arm64 error controls
+  added (test/asm/controls-error-arm64.txt, 3, each fails); amd64's 4 still fail; a fabricated test checked by hand (a words
+  statement inside a chain not tolerated, after it tolerated).
+- The encode check's judge (arbace/repr/asm/arm64/encheck.ae): a CHECK text that does not read (a part of the printed line, a
+  regular expression beyond the alternatives) judged by the input its place pairs with, its encoding against the stated bytes and
+  its print holding the text as a FileCheck pattern; a text-less block also paired with the statements after it. Controls 3 added
+  to test/asm/controls-encode-arm64.txt, each fails.
+- The literal pool (arbace/asm/arm64/obj.ae; ARS50 (a), "later", the user's of 2026-11-11): `ldr Rt, =EXPR` a MOVZ when the
+  constant fits, else an entry of the section's pool (deduplicated as ConstantPool's caches), emitted at `.ltorg`/`.pool` and at
+  the end before the streamer's finish; the eval (arbace/asm/arm64/eval.ae) takes the same form. Two samples assembled by hand by
+  clang 23.1.5 (the oracle tier's) and by Arbace: the same bytes.
+- Classes removed: divergences-read-arm64's `:error-misplaced`, divergences-encode-arm64's `:check-text`, divergences-object-arm64's
+  `:unsupported-literal-pool`.
+- Proofs (light, each under 1.3 GB): `bin/repr-asm --arch arm64 roundtrip` (444 of 444, 9 controls fail), `bin/repr-asm roundtrip`
+  (amd64, unchanged, its 7 controls fail), `bin/repr-asm --arch arm64 encode-check` (encode 12,297 / 1 directive, print 12,227 of
+  12,227, input and reject unchanged; 18 controls fail), `bin/repr-asm --arch arm64 object-verdict` (2,890 of 2,890; 12 controls
+  fail), each then `--record` (whole runs); bin/reap --record, bin/crops-score --record.
+After: read 6,656 / 0 / 0, AOT 3,173 / 0 / 0, print 12,671 / 0 / 0; arm64's completeness 1.0.
+
+## 2026-11-22: small-tails-arm64-1122's checks after the record
+
+After the records (the entry above): bin/reap and bin/crops-score --judge --strict 0 problems, bin/records-check 9 pairs, 0
+problems; arm64's scores line in test/crops/scores.edn completeness 0.9997 -> 1.0000 (maturity and independence 1.0000).
+asm-arm64-essential's controls (test/gate/crops/asm.edn and the spliced test/gate/steps.edn) name test/asm/controls-error-arm64.txt
+(gate.crops check: 0 problems; the step's inputs already hold test/asm/).
+
+## 2026-11-21: LLVM IR's eval and AOT: the last 7 by-design rows built (small-tails-1122)
+
+The burst's stream S1, LLVM IR's part: eval and AOT each 555 / 7 by design (`:datalayout` 1, `:target-type` 1, `:envp` 1,
+`:lli-reference` 1, `:long-double` 3). Re-examined, none is a divergence the user decided: each is the lowering's or the runner's to
+build. All for ci alone (`arbace.cpp.lower/*ci*`, which only llvmi binds; C++'s lowering for gcc untouched), doc/llvm/LOWER.md "LL6",
+doc/llvm/LLVM-CROP-SURVEY.md "As built: small-tails":
+- test-interp-variable-arguments: an alloca that llvm.va_start or llvm.va_copy takes is at least x86-64's va_list (24 bytes, aligned 8);
+  the module (no target, written for lli's interpreter) used `alloca ptr`, which ci's va_start overran. `result is 6`.
+- test-interp-target-ext-type: a target extension type lowered as its layout type, from llvm/lib/IR/Type.cpp's getTargetTypeInfo
+  (llvm-project-23.1.5's tarball, .tmp/llvm/llvm-project-23.1.5.src.tar.xz, lines 1052-1141).
+- 2003-08-21-EnvironmentTest: a module whose main takes envp runs with ci's existing `--env` (RES29 (a)) under `env -i` and a fixed
+  environment of bin/llvmi's (`llvmi_env`), no change to C's runtime: LLS58 (proposed 2026-11-18, not decided) as its proposal read,
+  host-independent and never empty.
+- 2008-06-05-APInt-OverAShr (i686's data layout): a module of another layout runs when it observes nothing the two lay out otherwise
+  (every named aggregate's size and offsets, every GEP stride, no pointer in memory or converted when the widths differ), by
+  DataLayout.cpp's rules (same tarball); three hand-made modules that do observe the difference stay refused (`bin/llvmi lower`, exit 3).
+- 20080502-1 at -O0 and -O2: `bitcast x86_fp80 to i80` (clang's signbit) is the x87 encoding of ci's binary64 value, the other way
+  rounded. ieee/copysign2 at -O2: an x86_fp80 store writes the IR's 10 bytes (binary64, then two zero bytes) and a scalar x86_fp80
+  global is its 16-byte slot union, so the inlined memcmp of 10 bytes compares equal values equal. What is left of ci's binary64 long
+  double (the 80-bit arithmetic, the encoding read from memory) has no row now.
+Alternatives weighed: x87 encodings in memory throughout (rejected: musl on ci writes long doubles through pointers as binary64, CS35,
+so memory shared with C would disagree), changing ci's RunMain to a default environment (rejected: C's runtime and C's crop).
+
+Checks (light, under 2 GiB a process; AOT's Go build under the forks' lock): `bin/llvmi check --only` the 24 modules the change can
+reach (an x86_fp80 store or global, the i80 bitcast, va_start or va_copy, a target type, main's envp) and the datalayout one, with four
+control subjects: 28 of 28 pass, 3 negative controls judged, none passes (cpp.runtime.library, the 25th reached, takes C++'s route,
+not *ci*: left out); `--aot --only` the same 28 of 28, controls 3 of 3; both recorded from those runs (`--judge --record`, the
+subset's rows alone). A control added: the environment module's run against the va_list module's CHECK line. The five classes,
+left with no row, removed. Cells: eval 555/7/0 -> 562/0/0, AOT 555/7/0 -> 562/0/0; LLVM completeness 0.9938 -> 1.0000. `bin/reap
+--record`, `bin/crops-score --record`, then `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`. No gate.
+
+## 2026-11-21: Scheme's ecraven record made whole on the main host; Scheme's and Python's tails that only a decision moves (small-tails-1122)
+
+The burst's stream S1. **Scheme, eval's 3 deferred** (`ecraven-too-slow`: takl, ntakl, earley): queue 334's speed (2026-11-17) let them
+finish in the VM's runs, but the record predated it and `bin/si ecraven --record` refuses a partial run. The whole run on the main host,
+`SI_TIMEOUT=600 bin/si ecraven --record` (the gate step's limit, under the forks' lock, MemAvailable checked: earley takes 3 GiB): 57 of
+58 pass (takl 248 s, ntakl 196, earley 125), read0 :na as before, no regression, the controls fail as they must. Eval 2,832/3/3 ->
+2,835/3/0. The class keeps no row; it stays, :volatile, for a run on a loaded host (doc/scheme/SCHEME-SURVEY.md, "As built: small-tails").
+
+**Scheme, eval's and AOT's 3 by design** (`chez-exact-zero`, `chez-console-port`, `chez-condition-message`, Racket's suite's five
+tests): SCS4 (a), the user's decision of 2026-11-08 (si keeps Chez's tower and ports; Chez fails the same tests). Nothing built: passing
+them means leaving Chez's semantics. Passed to the user as a decision: (a) keep; (b) SCS4 (b), R6RS's own examples ((/ 1.0 0) +inf.0,
+(/ 0 3.5) 0.0, (angle +inf.0) 0.0) and separate console ports, Chez's mats then classed; (d) new, R6RS's answers for programs that import
+(rnrs) and Chez's for (chezscheme), so both the suite and the mats pass; the condition message (Racket's own words, which R6RS does not
+specify) is the suite's expectation alone.
+
+**Python, AOT's 1 deferred** (synth/datamodel/del.py, `:finalization-goi`): the golden text prints `del 1` before `0 -> None`, CPython
+freeing the comprehension's list at the `and`; pyi's compiled run prints it at exit. Reference counting's moment is by design (PYS9 (a),
+2026-11-04) and only `del`'s moment is built (queue 222's DECISION 1 (a), the user's): nothing built. Passed to the user: the gated moment
+at a frame's return (222's (b): one global load a frame while no tracked object with work lives; here the lambda's return would collect
+the list before show prints), measured against the 3% budget on the bench sample, would pass it; else the row stays (deferred until W2's
+goi runs `__del__` as the compiled run does, then `:finalization`, by design).
+
+## 2026-11-22: OCaml's read cell judged whole: the build's own reads (small-tails-ochs-1122)
+
+The burst's small tails (the user's goal: 100 completeness): OCaml's read cell had 19 by-design rows, files OCaml's parser rejects that
+no test reads (`:oracle-rejects` 17: topkg's pkg/pkg.ml, cmdliner's build.ml, astring's toplevel init file, yojson's cppo inputs;
+`:templates` 2: the stdlib's sed/perl templates). Re-examined as the rules ask: each is read by its package's own build, so each is now
+judged as that build reads it, OC213 (a)'s own verdict carried from the testsuite to the opam set and the stdlib (doc/ocaml/OCAML-SURVEY.md,
+"As built: the build's own reads"). New namespace `arbace.repr.ocaml.prep`: the toplevel's read of an ocaml script or
+Toploop.use_file's input (skip_hash_bang, Parse.use_file), mucppo ported from yojson 3.0.0's vendored `lib/mucppo/mucppo.ml` (the opam
+tarball `yojson-3.0.0.tbz` pinned in test/ocaml/corpora.edn; mucppo by Marek Kubica, https://github.com/Leonidas-from-XIV/mucppo, CC0
+1.0; held to the file's SHA-256 8a56c3b1...) with dune's rules read from the package's `lib/dune`, and the perl chain of OCaml 5.5.0's
+`tools/sync_stdlib_docs` (the release tarball, LGPL 2.1 with the linking exception) for `stdlib/float.mli` and `stdlib/moreLabels.mli`.
+Alternatives: keeping the classes by design (the read level reads what OCaml's parser reads), or classing them :na (not OCaml): both
+leave files a build reads unjudged; a cppo or perl run on the host is a host tool. Checked once by hand against the host (mucppo built
+by ocamlc 5.5.0, ocamllex, perl): byte for byte. Controls: 5 of 5 fail. `bin/repr-ocaml roundtrip --record-results opam stdlib`
+(9.5 minutes, every corpus passing): 19 rows `reject` -> `pass`; `own-read --check` 0 rows changed over the testsuite, the stdlib and the
+ten opam corpora; the read classes file empty. bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
+problems. OCaml read 3,143 / 19 / 0 -> 3,162 / 0 / 0; completeness 0.9071 -> 0.9086. Light: no gate.
+
+## 2026-11-22: hsi freezes an interrupted thunk as GHC does (HES56 (b)); Haskell's :async-revert gone (small-tails-ochs-1122)
+
+The burst's small tails: Haskell's AOT cell had one by-design row, samples/AsyncRerun (`:async-revert`, also eval's), HES56 (a)'s
+"reverted until a test needs (b)". Built (b) (doc/haskell/HASKELL-EVAL-SURVEY.md, "As built: HES56 (b)"): an asynchronous exception
+thrown to a runnable thread freezes each update frame's segment and the thread's control into its thunk (GHC's rts/RaiseAsync.c
+raiseAsync and AP_STACK, studied for the rule, not ported), resumed by the next demand; transactions and the other raise paths revert as
+before. Alternatives: keep the class (a), or freeze in every path (the running thread's control at a primop's delivery is no resumable
+expression in hsi's machine). Proof: AsyncRerun passes at eval and AOT on the pack's and the own libraries (the own pools and STG of
+ghc-internal and base made for it), its four rows recorded with --only --record; 40 concurrent testsuite programs and four samples
+still pass. The eval cell 859 / 61 / 30 -> 860 / 60 / 30, AOT 137 / 1 / 1 -> 138 / 0 / 1. Left at AOT: nofib/spectral/fibheaps,
+`:own-speed` (deferred), the own -O0 libraries' code at the 60 s CPU limit (57 s when it passed), HF10's -O1 line. bin/reap --record,
+bin/crops-score --record, --judge --strict, bin/records-check, bin/hsi divergences: 0 problems. Light: no gate.
+
+## 2026-11-22: Haskell's read cell whole: a type's closing parenthesis keeps its line (small-tails-ochs-1122)
+
+Haskell's read cell had three deferred rows (`:own-iface-span-lines`: Cabal's UnifyM and PackageIndex, ghc-internal's
+Typeable/Internal), the own interface level's binders named by a span whose end line the print moved: mode `:lines` joined a type's
+closing `)` written on a line of its own to the line before. Fixed in repr/haskell (doc/haskell/HASKELL-NOTES.md, "The closing
+parenthesis's line"; SPEC §7.1): the converter writes `:hs/close` (the span's end line) on a parenthesized or tuple type whose `)` is past
+its last element's end, the printer goes to that line before the `)` (forward only, braces and layout layouts, not the full layout).
+Alternatives: normalizing the binders' end lines in the comparison (hides a real difference of the print), naming binders by their start
+alone in the front end (changes every own interface and the hsi records). Proof: the gate step haskell-iface-own's command by hand
+under the lock (404 minutes): tree level 1,344 of 1,344 in both layouts, own interfaces 1,344 of 1,344 in both, the three known entries
+gone from both known files; on the way the comparison's D341-3 (a) SrcLoc normalization extended to the bare literals next's front end
+now writes (array's Data.Array.Base and exceptions' Control.Monad.Catch differed by SrcLoc columns alone; other worktrees' pools show the
+same form). `bin/repr-haskell test` passes. The read cell 2,687 / 0 / 3 -> 2,690 / 0 / 0. bin/reap --record, bin/crops-score --record,
+--judge --strict, bin/records-check: 0 problems. Light: no gate.

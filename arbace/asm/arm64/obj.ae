@@ -146,11 +146,88 @@
   (into {} (for [c ["eq" "ne" "cs" "hs" "cc" "lo" "mi" "pl" "vs" "vc" "hi" "ls" "ge" "lt" "gt" "le" "al" "nv"]]
              [(symbol (str "b" c)) (symbol (str "b." c))])))
 
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the literal pools (small-tails, 2026-11-22): AArch64AsmParser::parseOperand's `ldr Rt, =EXPR` (AsmToken::Equal) and
+;; AArch64TargetStreamer's ConstantPools (llvm/lib/MC/ConstantPools.cpp): a constant a MOVZ holds is that MOVZ; another value
+;; an entry of the current section's pool (an equal constant's or a bare symbol's of the same size taken again, never
+;; forgotten: ConstantPool's caches outlive an emission), the instruction a literal load of the entry's temporary label. A
+;; pool is emitted at `.ltorg` (`.pool`) and, the rest, at the end of the file, each section's in the order its pool was made
+;; (AssemblerConstantPools' MapVector: emitAll, before the streamer's finish), each entry aligned to its size with zeros
+;; (emitValueToAlignment), its label, then its value (emitValue: data, AArch64's $d); an entry's error is at its ldr.
+
+(def ^:dynamic *pools* nil)
+
+(declare data-value!)
+
+(defn- gpr64? [r] (let [n (str/lower-case (name r))] (or (str/starts-with? n "x") (#{"sp" "fp" "lr"} n))))
+
+(defn literal-form
+  "The form of an instruction with a `=EXPR` operand (its operands resolved and folded): `ldr`'s alone (else LLVM's
+  'unexpected token in operand'), after a scalar register (else 'Only valid when first operand is register'); a constant a
+  MOVZ of the register's width holds as that MOVZ (the value shifted right by 16 while it is above 0xffff with 16 low zero
+  bits, 48 at most for an X register, 16 for a W one), a W register's constant past 32 bits LLVM's 'Immediate too large for
+  register', anything else `(ldr Rt LABEL)` with the pool's entry. A form with no `=` operand is returned as it is."
+  [ctx f]
+  (let [ops (vec (rest f))
+        i (first (keep-indexed (fn [i op] (when (= 'lit (head op)) i)) ops))]
+    (if-not i
+      f
+      (let [_ (when-not (= "ldr" (str/lower-case (name (first f)))) (o/fail "unexpected token in operand"))
+            r (first ops)
+            _ (when-not (and (pos? (long i)) (= 'reg (head r)) (nil? (nth r 2 nil))) (o/fail "Only valid when first operand is register"))
+            x? (gpr64? (second r))
+            e (second (ops i))
+            c (o/const-value e @(:syms ctx))]
+        (or (when c
+              (let [c (long c)
+                    [imm sh] (loop [imm c sh 0]
+                               (if (and (pos? (Long/compareUnsigned imm 0xffff)) (>= (Long/numberOfTrailingZeros imm) 16))
+                                 (recur (unsigned-bit-shift-right imm 16) (+ sh 16))
+                                 [imm sh]))]
+                (if (and (<= (long sh) (if x? 48 16)) (<= 0 (Long/compareUnsigned 0xffff imm)))
+                  (apply list 'movz r (list 'imm imm) (when (pos? (long sh)) [(list 'shift 'lsl (list 'imm sh))]))
+                  (do (when-not (or x? (<= 0 c 0xffffffff) (<= -2147483648 c 2147483647)) (o/fail "Immediate too large for register"))
+                      nil))))
+            (let [size (if x? 8 4)
+                  sec (:index @(o/cur-sec ctx))
+                  key (cond c [:c c size] (symbol? e) [:s (name e) size] (= 'sym (head e)) [:s (str (second e)) size] :else nil)
+                  pool (get-in @*pools* [:pools sec])
+                  label (or (when key (get (:cache pool) key))
+                            (let [n (o/tmp! ctx)]
+                              (swap! *pools* (fn [p] (-> p
+                                                         (update :order #(if (some #{sec} %) % (conj % sec)))
+                                                         (update-in [:pools sec :entries] (fnil conj []) [n e size @(:pos ctx)])
+                                                         (cond-> key (assoc-in [:pools sec :cache key] n)))))
+                              n))]
+              (apply list (first f) (assoc ops i (symbol label)))))))))
+
+(defn- emit-pool!
+  "The pool of section `sec` (its index) emitted in the current section, its entries cleared (ConstantPool::emitEntries)."
+  [ctx sec]
+  (let [es (get-in @*pools* [:pools sec :entries])
+        pos @(:pos ctx)]
+    (when (seq es)
+      (swap! *pools* assoc-in [:pools sec :entries] [])
+      (doseq [[n e size at] es]
+        (o/align! ctx size 0 1 nil false)
+        (o/label! ctx n)
+        (vreset! (:pos ctx) at)
+        (data-value! ctx e size)
+        (vreset! (:pos ctx) pos)))))
+
+(defn- emit-pools!
+  "emitAll: every section's pool left, in the order the pools were made, each in its section (left current, as LLVM's)."
+  [ctx]
+  (doseq [sec (:order @*pools*)
+          :when (seq (get-in @*pools* [:pools sec :entries]))]
+    (o/switch! ctx (.get ^java.util.ArrayList (:sections ctx) (int sec)))
+    (emit-pool! ctx sec)))
+
 (defn- emit-insn! [ctx f]
   (let [f (if-let [b (cond-branch (first f))] (cons b (rest f)) f)
         f (const-subst ctx (o/resolve-expr ctx f))
         f (if (some #(= 'float (head %)) (rest f)) (optional-hash f) f)
-        _ (when (some #(= 'lit (head %)) (rest f)) (o/unsupported :literal-pool (str "ldr =: " (pr-str f))))
+        f (literal-form ctx f)
         refused (fn [^Exception e] (o/unsupported :instruction (str (or (:asm/message (ex-data e)) (.getMessage e)) ": " (pr-str f))))
         r (try (lenc/encode f)
                (catch arbace.lang.ExceptionInfo e
@@ -551,7 +628,7 @@
                       (o/visit-syms! ctx e)
                       (.add ^java.util.ArrayList (:fixups @ch) [(.size ^java.util.ArrayList (:bytes @ch)) 0 (list 'at e "tlsdesc") [:tlsdesc-call] false 0]))
       ("arch" "arch_extension" "cpu") nil
-      ("ltorg" "pool") nil
+      ("ltorg" "pool") (emit-pool! ctx (:index @(o/cur-sec ctx)))
       ;; .reloc OFFSET, TYPE, EXPR (AArch64AsmBackend::getFixupKind: R_AARCH64_* by name, BFD_RELOC_NONE/16/32/64, a number)
       "reloc" (let [[off t e] args
                     tn (if (integer? t) (long t) (str/upper-case (str t)))
@@ -598,8 +675,8 @@
    :keep-symbol? keep-symbol?
    :tls-specs tls-specs
    :directive directive
-   :wrap (fn [t] (binding [*attrs* (atom {:subs [] :active nil})] (t)))
-   :finish (fn [ctx] (when *implicit-mapsyms* (implicit-end! ctx)) (attributes-section! ctx))
+   :wrap (fn [t] (binding [*attrs* (atom {:subs [] :active nil}) *pools* (atom {:order [] :pools {}})] (t)))
+   :finish (fn [ctx] (emit-pools! ctx) (when *implicit-mapsyms* (implicit-end! ctx)) (attributes-section! ctx))
    :cfi cfi
    ;; a macro's or a repetition's expanded body read as AArch64's GNU text (AX11's macros, ARS49 (a): macro-hex-int)
    :read-text (fn [_ctx src] (asm/read-items src {:arch :arm64 :syntax :gnu}))
