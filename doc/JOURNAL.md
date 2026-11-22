@@ -17177,3 +17177,30 @@ The proof of the raised cap passes 8 GB, so it is queued under bin/heavy-lock (b
   START line's id). test___all__'s test_all: 29 s and a pass alone on b2a5b50d4819 with a warm IR cache, but run early in
   the check (test___all__ sorts first among the test_ modules) it compiles most of the 329 modules it imports, about 415 s
   cold (P1's run today: past 300 s, as the record): 900 s.
+
+## 2026-11-22: py-mods-1122, round 4: the interpreted proof of rounds 1-2, and OrderedDict's three faults it found
+
+`bin/pyi check --fresh --only` (.tmp/only/a1.txt: test_ordered_dict, test_file_eintr, test_utf8_mode whole, test_fileio's
+and test_io's named rows, test_email's two) on b2a5b50d4819 with the checkout's go/arbace/py interpreted by goi (the
+gate's executables at this branch's key wait in the heavy queue), the runner python3's, controls failing as they must.
+Moved, against the record: test_file_eintr's six readall (`:io-c-checks`; all 18 of its tests pass), test_fileio's
+testErrnoOnClosedReadinto (C and Py), test_io's test_check_encoding_warning (C, Py), test_text_encoding (C, Py),
+test_nonblock_pipe_write_bigbuf and _smallbuf (C, Py) (`:io-c-checks`), CSignalsTest's and PySignalsTest's
+test_interrupted_write_buffered and _unbuffered (`:runner-limits`, they hung), test_email's
+test_get_param_linear_complexity (`:runner-limits`; 264 s interpreted). Not moved interpreted: test_interrupted_write_text
+(C, Py; idle 90 s: the 4 MB str's encode under goi outlasts the alarm, so nothing is written and the reader thread the test
+joins never returns; to be judged compiled) and test_long_lines (300 s interpreted). test_utf8_mode's children (each
+interpreted, 50 s a start) were stopped unjudged; it is in the compiled proof's list.
+test_ordered_dict: 250 ok, and three faults of the C OrderedDict, fixed here: its __eq__ called dict's comparison as
+builtins_odict.go's init captured it, nil (that file's init runs before dict.go's) -- a Go panic on every comparison;
+OrderedDict's methods got a subclass's built-in value, not the instance (callBound unwraps unless the Builtin is an
+objectDescr, as SimpleNamespace's __reduce__), so copy(), setdefault(), update() and __reduce__ of a subclass saw neither
+its class nor its __getitem__, __setitem__ and __dict__ (test_issue148660_copy_clear_in_subclass_getitem,
+test_reduce_not_too_fat): its methods are objectDescr now; fromkeys took dict's (no keywords): its own class method,
+fromkeys(iterable, value=None). divergences.edn and divergences-315.edn: :ordered-dict-c's and :io-c-checks' :why say what
+moved and what is left (finalization's, and C io's own checks that need a native _io).
+Also corrected in round 4, round 1's interruptible os.write: interruptibleWait holds for every main-thread call (the wake
+pipe is made on first use), so it toggled O_NONBLOCK on every blocking descriptor's write, a regular file's included --
+a flag of the open file description, which a pipe shared with a parent or children shares. Now only a FIFO takes it, and
+no flag is changed: after a poll that finds it writable a pipe takes PIPE_BUF bytes without blocking, so the write goes
+in chunks of at most 4096 bytes between polls (with the wake pipe, the handlers run on a signal).
