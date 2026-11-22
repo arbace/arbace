@@ -17154,6 +17154,81 @@ pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 31
 3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
 merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
 
+## 2026-11-22: py-capi-1122, round 1: 102 of test_capi's 169 :capi-port methods pass (the C API natives)
+
+The burst's py-capi stream (Python eval's deferred :capi-port 939 and :testcapi 859; the main session's brief), branch py-capi-1122
+from mac/next 99b2c942a with mac/py-eval-1122 (9a2b7842a, P1) merged first: P1's branch carries C API natives of test_capi's
+test_run and test_file and its runtime, so this work builds on them and runs on their executable
+(.tmp/gate-exe/b2a5b50d48192fabce24, go/arbace/py the same as 9a2b7842a's; go/arbace/pyctypes is a lazy package interpreted
+from the checkout, edited as Go in bin/pyi runtime print's tree and read back by repr-go read, no build).
+- Found: _testcapi is built by ci into pyi's C world already (all 38 parts since queue 274b, _testbuffer since 456); the record
+  (the records night, 11-19) predates PyConfig_Get (830 of :capi-port's 939 rows are test_traceback, test_compile, test_dis,
+  test_marshal and test_code failing to import at requires_debug_ranges' config_get, given since n-py-eval) and the
+  _testinternalcapi stand-in (queue 465), so the record overstates both classes; P1's next record measures them.
+- Before-run on that head: bin/pyi check --only test_capi (PYI_RUNNER=python3; 35 min): test_capi 746 of 1,328 pass,
+  :capi-port 169, :testinternalcapi 206, :specializing 89, :testcapi-behaviour 23, failing 25.
+- The natives (doc/python/PYTHON-SURVEY.md, "As built: py-capi-1122"): mapping and dict argument checks and messages, the object
+  protocol's Repr/Str/ASCII/Bytes, bytes and bytearray concat, repr and sizes, unicode's ensure_unicode and code-point search
+  (pyi's own str.count counts a lone surrogate of a pair twice; the natives do not use it), wide characters, WriteChar,
+  imports (pyi's magic number, AddModuleObject, Import, ImportModuleLevel, frozen modules), PEP 757's PyLong_Export and
+  PyLongWriter, PyFrame_New, weak references over proxies, the complex natives with the world's errno, PyObject_Print,
+  PyStructSequence_NewType, PyConfig_Set's sys attributes, Py_BuildValue's O&/D/error walk, and test_misc's small ones; a new
+  file go/arbace/pyctypes/capi_tail.ae registered last; a list mirror whose C slots are unchanged keeps Go's value.
+- Proof: bin/pyi check --only of the 188 methods that did not pass (the six out-of-memory crashes left out: the runs' ulimit
+  -v 8 GiB; they pass in the record and passed again in this selection), 129 s: 102 of the 169 :capi-port methods pass, the 21
+  failing are the before-run's (test_run's ten and test_number's three fail only in a whole-module run, P1's area; three
+  subinterpreter and thread-state tests) but test_misc's Test_testcapi.test_weakref_capi, a segmentation fault now that
+  PyWeakref_GetObject exists (the macro PyWeakref_GET_OBJECT reads the weak reference's layout): named in :capi-port's :tests.
+  Controls 1-3 failing as they must. :capi-port's :tests keep the 68 names that pass now: the record still holds their old
+  rows, P1's next record makes them stale.
+- Not done here (decisions or other streams): :testcapi's rows that name _testinternalcapi (in the record about 757 of its
+  859: test_peepholer, test_embed's InitConfigTests, test_context's HamtTest, test_time's TestCPyTime, test_codecs'
+  LocaleCodecTest, test_type_cache, test_interpreters, ...) belong to the user's _testinternalcapi decision, which the counting2
+  stream makes n/a; whether they follow it is the user's (the reclassification was not made here). The record's :testcapi
+  "ndarray object required" rows (test_buffer, 75) predate queue 456's _testbuffer.
+Light: no gate; the executable b2a5b50d4819, the tools' host stage 0.
+
+## 2026-11-22: py-capi-1122, round 2: the C world's extension modules through the import system; 27 more of test_capi's natives
+
+The user's decision of 2026-11-22 (relayed by the coordinator): Python's :extension-modules are built, C extension modules
+loaded through ci's C world. Branch py-capi-1122 (round 1: 403cdaa4d).
+- The import system (doc/python/PYTHON-SURVEY.md, "py-capi-1122, round 2"): _imp.extension_suffixes() ['.arbace-314.so'],
+  create_dynamic and exec_dynamic delegated to go/arbace/pyctypes' loader (core go/arbace/py/builtins_capi_api.ae:
+  SetDynamicLoader), an extension file an export table of the world's PyInit_ functions (tools/pyi/lib-dynload, on sys.path
+  after the stdlib by bin/pyi), single-phase and multi-phase loading as Python/importdl.c, import.c and moduleobject.c
+  (slots checked, Py_mod_create, the unreported exceptions chained, an uninitialized definition refused, PyState_*). CPython
+  3.14.10's Modules/_testsinglephase.c and _testmultiphase.c (with its clinic header) built into the world: lib.conf, key
+  ba0de8fa, 27 min 48 s on the P1 executable b2a5b50d4819 in a scratch worktree at bab3c7283 whose arbace/core_proxy.ae was
+  9a2b7842a's (next's b4ab3ebfc calls Compiler$Dyn/hideMethod, which no executable here has; the builder's key does not
+  read core_proxy.ae, and `bin/pyi-clib key ctypestest` on this branch gives the same ba0de8fa). The empty built-in
+  _testmultiphase of PY6b removed (the user's decision on PY6b superseded by this one): the module is the world's.
+- More natives (pyctypes; the core's new ExtWriteUnraisableMsg, ExtSetSysFlag, ExtSetCPUCount): PyErr_SetString, SetObject
+  and Restore as errors.c's, the unraisable reports' err_msg None, PyUnicode_FromFormatV ported whole, PyErr_Format and
+  FormatUnraisable on it, PyUnstable_Exc_PrepReraiseStar, PyErr_SetExcInfo and SetHandledException, PyConfig_Set of
+  sys.flags' members, int_max_str_digits and cpu_count, the allocator domains, PyInterpreterState_Get/GetDict,
+  PyUnstable_AtExit, PyGILState_GetThisThreadState, the code extra, _PyObject_NewVar, a set mirror for PySet_GET_SIZE,
+  __ipow__'s optional modulo, Py_AddPendingCall (run when C returns to Python), PyNamespace_New.
+- An executable of this tree (2d8f9f6b9, the core's last change) is queued under the heavy lock in a clean worktree
+  (.tmp/worktrees/py-capi-build); every proof below runs the P1 executable with go/arbace/py interpreted from the
+  checkout (bin/pyi's runtime_from_source), the slow path the coordinator allowed until 521's compiled worlds land.
+- Proofs (`bin/pyi check --only`, PYI_RUNNER=python3, controls 1-3 failing as they must): the round's 103 methods
+  (test_capi's 28, :extension-modules' 75): 115 of 144 pass, 74 now pass against the record; then test_importlib whole
+  (1,383 methods with the controls' subjects): 1,276 pass, 106 classed, 48 now pass, one regression,
+  NonModuleExtensionTests.test_nonmodule_cases (its child loads _testmultiphase_nonmodule*, whose create slot calls
+  _PyNamespace_New), fixed by PyNamespace_New and passing by unittest, with test_bad_modules, test_try_registration and
+  TestPendingCalls (test_max_pending's not-main-only subtest skips on the _testinternalcapi stand-in). test_import whole was
+  stopped: its child processes start pyi on the interpreted runtime (90 s each) past the test timeout; its rows of the
+  round's list ran (test_create_dynamic_null passes; its single-phase tests skip on check_impl_detail(), CPython only).
+- Moved against the record (every method a run of this branch passes that the record does not): :capi-port 85,
+  :testcapi 47 (test_capi's modules that import since queue 465's stand-in), :extension-modules 50 (test_importlib 48,
+  test_import 1, test_ctypes 1). New deferred class :extension-subinterp-check (5): an isolated subinterpreter's
+  multi-interpreter check before loading an extension (_imp._override_multi_interp_extensions_check is a stub); before
+  :extension-modules in the file so the records night's rows of those names stay classed.
+- Coordination: the coordinator's message on the C world's speed (521's compiled worlds in goi's table): this branch's world
+  (_testcapi, _testsinglephase, _testmultiphase) registers the same way once 521 lands; nothing recorded here (P1 owns the
+  Lib/test record).
+Light: no gate; reap, crops-score and records-check before the push.
+
 ## 2026-11-22: hs-r7-1122: Haskell's eval programs not own, seventh round (Typeable's kinds, impredicativity, quasi-quotes, five packages own)
 
 Branch `hs-r7-1122` from mac/next `94dbc03af` (which holds hs-r6-1122 `6f2af94ea`), by an agent of the main host (the coordinator's
@@ -18574,3 +18649,32 @@ no row of the stream's directories had it (its chunks scanned).
 
 Scores: C++ read 5,793 / 0 / 528 (after round 2: 5,797 / 0 / 524) -> 5,805 / 0 / 516; independence 0.959000 -> 0.960000 (floored 96; the
 stream's start 0.957800, floored 95), completeness 0.972536 -> 0.972852 (floored 97). The stream's total: 139 files to own pass.
+## 2026-11-22: py-capi-1122, merge of mac/next (8395e0b38): P1's subinterpreter fix kept beside the pending calls
+
+The coordinator's request: merge mac/next, which goes past the 9a2b7842a this branch had merged (3ee81c30f: pyctypes ends the
+subinterpreters a C entry made and left when the outermost entry leaves, and adds PyGILState_GetThisThreadState; bbea63978: P1's
+new Lib/test eval record), keeping both sides, and prove test_capi's moved methods again on the merged tree.
+- Conflicts: go/arbace/pyctypes.ae and go/arbace/pyctypes/world.ae resolved on the printed Go (`bin/pyi runtime print`, the
+  package read back): world.go is next's, its capiLeave ending the leaked subinterpreters (endLeakedSubs) and then releasing the
+  unowned proxies, with this branch's drain of Py_AddPendingCall's queue after them (runPendingCalls, when C has returned to Python);
+  the package file this branch's :files with next's init order merged (liveSubs beside interpDicts, ...). PyGILState_GetThisThreadState
+  was defined on both sides: P1's (capi_port.go, PyThreadState_Get's native) kept, this branch's tailTable entry removed. doc/JOURNAL.md
+  and the survey keep both sides' entries (the py-design merge paragraph where next moved it); the records taken from next and
+  re-recorded.
+- Proof (`PYI_RUNNER=python3 bin/pyi check --only`, the gate executable b2a5b50d4 as before, the checkout's py, ci and crt interpreted
+  by goi since next's ci and crt differ from it too; 15 min): the 132 test_capi methods moved by rounds 1 and 2 (.tmp/only-merge.txt):
+  130 pass, 0 regressions against the record; the three controls failed as they must. Two not passing: test_unicode's
+  test_from_format crashed with "out of memory" in the first driver (6.5 GB in use under the 8 GiB `ulimit -v`, the driver 470 s into
+  the module with three packages interpreted; it passed at round 2 with py alone interpreted), run again alone below; and
+  TestPendingCalls.test_max_pending, which round 2 counted as moved wrongly: its 'main-only' subtest passes, its 'not main-only' one
+  skips for _testinternalcapi.pending_threadfunc, and a skipped subtest leaves the method without a verdict (not-run, unittest's own
+  rule), so it is listed in :testinternalcapi-absent's :tests (n/a, the user's of 2026-11-22), as its record row already is by
+  verdict; the moved :testcapi count is one less (46, not 47).
+- The two run again alone (.tmp/only-merge2.txt, 9 min): test_from_format passes (a fresh driver, under the same limit),
+  test_max_pending classed (:testinternalcapi-absent); 0 failing, the three controls failed as they must. So 131 of the 132 pass on the
+  merged tree, the other n/a. A whole run's driver of test_capi with py, ci and crt interpreted comes near 8 GiB; the record's runs
+  are on the compiled executable (P1's next whole run, which records the eval rows; nothing recorded here).
+- reap --record, crops-score --record, --judge --strict and records-check: 0 problems; Python completeness 0.9794 as next's
+  (the rows move between classes only, against P1's record: :extension-subinterp-check 5 from :extension-modules, test_weakref_capi
+  to :capi-port by this branch's :tests).
+Light: no gate.
