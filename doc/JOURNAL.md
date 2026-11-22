@@ -17252,3 +17252,30 @@ codegen's pair tag the same fix, ours kept; pack-compare-test's cases of both, t
   check --record --front own --corpus samples` with R3's own path at this head (std, unwind, panics) checked first; std's lowered
   runtime is built at this checkout's key for it (none at next's lowering key on the host: cpp/lower, repr/llvm and repr/c moved
   since R3's base). Their outcome is the next entry.
+
+## 2026-11-22: rust-c6c-1122: R3's own path checked, C6-5 (a)'s record tried, the Mac's 524 merged (one Rust line)
+
+Follows this branch's round-three entry. doc/rust/FRONTEND-SURVEY.md, "As built: C6-4, round three", "At the merged head".
+
+- R3's own path at `69683177b` (before 524): std, unwind and panics built by `RF_EXTRA_IFACE=core-pass/core-iface.edn:std/deps/
+  hashbrown-iface.edn:std/deps/libc-iface.edn RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front rsi-build --native-core panics std unwind`
+  (1 h 40 min, 3.1 GB; 3 of 3 own), then `RSI_JOBS=1 RSI_CI_MEMLIMIT=5GiB RSI_STD_DIR=<the main checkout's std at the pin>
+  RSI_FRONT_DIR=.tmp/rust-front/c1p bin/rsi check --front own --corpus samples --only` the three: 3 of 3 pass, the std-vs-panics
+  control differing (1 h 41 min, 6.2 GB: std's runtime lowered at this checkout's lowering key first, 94 units in 12 min, none on the
+  host at next's key since cpp/lower, repr/llvm and repr/c moved after R3's base; its ci read 55 min).
+- C6-5 (a)'s record: R3's switch run `rsi-native5` (RF_NATIVE_IFACE=1, RF_NATIVE_NAMES, RF_CORE_ATTRS=none; built before R3's C1
+  fixes, no RF_DROP_GLUE) copied, its inputs.tsv's five C4 rows rewritten as the writer now words them (`own: std's interface from the
+  crates' native passes, the StableCrateIds by Cargo's metadata hash ported, std's names from the crates' sources (the library build's
+  units its description, C6-5 (a))`), then `bin/rsi check --record --front own --corpus samples` from it: 4 of 6 pass (intrinsics,
+  panics, vectors; threads from the pack), std.rs (an undefined `<String as Ord>::cmp`) and unwind.rs (stdout) not; rsi refused the
+  record, nothing written. C4 is recorded own by the first native-interface build with C1's configuration that passes; the next host
+  stream's rsi-build at the merged head can be it. test/crops/independence.edn's eval text says so.
+- The Mac's 524 merged (`mac/524-rust-c3` at `26c7532a2`, its base R3 with next; the coordinator's word): collect's unknown trait Self
+  R3's again, core-attrs.txt both sides' files, the docs' and pack-compare-test's blocks each kept once (prepared in a side worktree
+  while the ci check ran, then this branch fast-forwarded to it). Then: lib-unit's core exports collect ub_checks.rs
+  (test/rust/front/lib-unit-iface-extra.txt; copy_nonoverlapping's and offset's entries exported again, 2 bodies, 6 min), codegen
+  takes a function item's type zero-sized when the table lacks its text, an inlined call made an invoke takes its destinations after
+  its arguments.
+- At the merged head: core 191 of 275 items equal to std's IR, alloc 21 of 25, std 101 of 325 (the three builds again; every crossed
+  control differing); `bin/rust-front essential` and `core-essential` their known summaries; inline-test 15 of 15, pack-compare-test
+  passed. R3's own path at the merged head (the same build and check over `.tmp/rust-front/c1m`) runs; its outcome follows.
