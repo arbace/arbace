@@ -106,7 +106,11 @@
 #                                 positions included, those of the helper's), and E-forms (GP5:
 #                                 their .ae text byte for byte in modes :lines and :full; where the
 #                                 helper's conversion fails, the native one failing with its
-#                                 message). The helper's dumps and
+#                                 message, :same in the report); a file go/parser rejects on both
+#                                 sides by its errors in gc's words, the native reader's (bin/repr-go
+#                                 syntax-errors) against gc's own over the original, line for line
+#                                 (corpus_gc_errors: NAME.gc/KEY.txt beside the helper's dumps of a
+#                                 corpus of files; the user's decision of 2026-11-22). The helper's dumps and
 #                                 the program lists made when missing or when what they are made
 #                                 from changed (NAME.key; --fresh: afresh); a corpus whose list is
 #                                 empty, or that the helper dumped nothing of, fails; --headers: the loader alone,
@@ -136,7 +140,10 @@
 #                                 tamago/amd64 with its _test.go files (corpus tests) into
 #                                 .tmp/repr-go/cand-tests, checked with bin/repr-go check --with-tests,
 #                                 reference test/repr/go/roundtrip-tests.edn, known differences
-#                                 (with reasons) test/repr/go/roundtrip-tests-known.edn.
+#                                 (with reasons) test/repr/go/roundtrip-tests-known.edn; the Go
+#                                 files a package's tests embed from its own directory printed from
+#                                 mode :full, byte for byte their originals (roundtrip_tests_embedded;
+#                                 the controls "embed PACKAGE" alter one's text, which must fail).
 #                                 --dirs: $GOROOT/test's directory tests for GOOS/ARCH (corpus
 #                                 [linux-]dirtest[-arm64]: several packages each, local imports)
 #                                 into .tmp/repr-go/cand-dirtest-[GOOS-]ARCH, checked with
@@ -309,11 +316,46 @@ corpus_dump() {
         > "$out.tsv" || true ;;
   esac
   t1=$(date +%s.%N)
+  rm -rf "$out.gc" "$out.gc.key"
   awk -F'\t' -v what="$name" -v secs="$(echo "$t1 - $t0" | bc)" '
     { n[$1]++ } $1 == "ok" || $1 == "errors" { files += $3; bytes += $4 } $4 > max { max = $4; big = $2 }
     END { printf "%s: %d dumped (%d ok, %d with type errors, %d failed, %d excluded by the configuration), %d files, %.1f MB (largest %s, %.1f MB), %.1f s\n",
           what, n["ok"] + n["errors"], n["ok"], n["errors"], n["fail"], n["excluded"], files, bytes / 1e6, big, max / 1e6, secs }' "$out.tsv"
   grep -v -P '^(ok|excluded)\t' "$out.tsv" || true
+}
+
+# corpus_gc_errors CORPUS KEY: the reference's errors of the files the helper rejects, in gc's words (the user's decision
+# of 2026-11-22; doc/go/GO-PARSER-SURVEY.md, "As built: the rejected files' messages"): for a corpus of files
+# ([linux-]test[-arm64], [linux-]errtest), gc itself, `go tool compile -p=p -C -e` with std's export data as Go's test
+# driver compiles an error test (no action's flags: the native reader's syntax errors take none), over each file of a
+# fail line of the helper's summary, by its path; its output into .tmp/godump/corpus/NAME.gc/KEY.txt, which native-check
+# compares with gc's syntax errors from the native reader (arbace.repr.go.syntax, bin/repr-go syntax-errors), line for
+# line. Made with the dumps, kept by their key (NAME.gc.key: dumps_key's); prints a summary line
+corpus_gc_errors() {
+  local c=$1 key=$2 cgoos cwhat carch name d cfg k n=0 genv
+  corpus_config "$c"
+  name=$(corpus_name "$cgoos" "$cwhat")
+  case $cwhat in test|test-arm64|errtest) ;; *) return 0 ;; esac
+  d=$work/corpus/$name.gc
+  rm -rf "$d" "$d.key" "$d.tmp"
+  mkdir -p "$d.tmp"
+  genv=(GOROOT="$goroot" GOTOOLCHAIN=local GOFLAGS= GO111MODULE=off GOPROXY=off GOEXPERIMENT= CGO_ENABLED=0 GOOS="$cgoos" GOARCH="$carch")
+  if awk -F'\t' '$1 == "fail" { f = 1 } END { exit !f }' "$work/corpus/$name.tsv"; then
+    cfg=$work/corpus/$name.gc.importcfg
+    env "${genv[@]}" "$goroot/bin/go" list -export -f '{{if .Export}}packagefile {{.ImportPath}}={{.Export}}{{end}}' std > "$cfg" \
+      || { echo "native-check: $c: std's export data for gc's references failed" >&2; return 1; }
+    while IFS= read -r k; do
+      [ -f "$goroot/test/$k" ] || continue
+      mkdir -p "$(dirname "$d.tmp/$k")"
+      (cd "$goroot/test" && env "${genv[@]}" "$goroot/bin/go" tool compile -p=p -C -e -importcfg="$cfg" -o "$d.tmp/a.o" "$goroot/test/$k") \
+        > "$d.tmp/$k.txt" 2>&1 < /dev/null || true
+      rm -f "$d.tmp/a.o"
+      n=$((n + 1))
+    done < <(awk -F'\t' '$1 == "fail" { print $2 }' "$work/corpus/$name.tsv")
+  fi
+  mv "$d.tmp" "$d"
+  echo "$key" > "$d.key"
+  echo "$name: gc's errors of the $n files the helper rejects (${d#$root/})"
 }
 
 corpus() {
@@ -417,7 +459,9 @@ native_dumps() {
         build >&2 || return 1
         corpus_dump "$c" >&2 || { echo "native-check: $c: the helper's dumps failed" >&2; return 1; }
         echo "$key" > "$work/corpus/$name.key"
-      fi ;;
+      fi
+      # the reference's gc errors of the files the helper rejects (a corpus of files), made with the dumps or when missing
+      [ "$(cat "$work/corpus/$name.gc.key" 2> /dev/null)" = "$key" ] || corpus_gc_errors "$c" "$key" >&2 || return 1 ;;
   esac
   awk -F'\t' '$1 == "ok" || $1 == "errors" { n++ } END { exit !n }' "$work/corpus/$name.tsv" 2> /dev/null \
     || { echo "native-check: $c: the helper dumped no package ($work/corpus/$name.tsv)" >&2; return 1; }
@@ -518,7 +562,8 @@ native_check() {
 }
 
 # native_record_ids SPEC...: test/repr/go/native-check-ids.edn's lines of the specs' corpora written afresh from their
-# helper's dumps (the keys of the .edn files under each spec's :dumps), the other corpora's lines kept
+# helper's dumps (the keys of the .edn files under each spec's :dumps) and, in a corpus of files, the files it rejects
+# (the keys of its summary's fail lines: native-check judges them by their errors in gc's words), the other corpora's lines kept
 native_record_ids() {
   local f=$root/test/repr/go/native-check-ids.edn t sp name dumps
   t=$root/.tmp/repr-go/native-check-ids.$$; mkdir -p "$root/.tmp/repr-go"
@@ -528,12 +573,15 @@ native_record_ids() {
     dumps=${dumps%/}
     [ -n "$name" ] && [ -d "$dumps" ] || { echo "native-check --record-ids: $sp: no :name or no dumps directory" >&2; return 1; }
     echo "$name" >> "$t.names"
-    (cd "$dumps" && find . -name '*.edn' -type f | sed 's|^\./||; s|\.edn$||') | LC_ALL=C sort \
+    # the dumps, and the files the helper rejects (a corpus of files: judged by their errors in gc's words since 2026-11-22)
+    { (cd "$dumps" && find . -name '*.edn' -type f | sed 's|^\./||; s|\.edn$||')
+      [ ! -d "$dumps.gc" ] || awk -F'\t' '$1 == "fail" { print $2 }' "$dumps.tsv"; } | LC_ALL=C sort -u \
       | awk -v n="$name" '{ printf "[\"%s/%s\"]\n", n, $0 }' >> "$t.new"
   done
   [ -f "$f" ] && grep '^\["' "$f" | awk -F'"' 'NR == FNR { drop[$0] = 1; next } { split($2, a, "/"); if (!(a[1] in drop)) print }' "$t.names" - >> "$t.new"
   { echo ";; bin/repr-go native-check's ids (GT8, doc/GATE-SURVEY.md, \"As built: GT8 (the tools' lists)\"): per corpus its helper's"
-    echo ";; dumps, the check's denominator, one [\"CORPUS/KEY\"] a line (KEY a dump's key: a package's path, a program's file),"
+    echo ";; dumps and the files it rejects in a corpus of files (judged by their errors in gc's words), the check's denominator,"
+    echo ";; one [\"CORPUS/KEY\"] a line (KEY a dump's key: a package's path, a program's file),"
     echo ";; the universe of the gate's rotation of repr-go-native (bin/repr-go native-check CORPUS --only LIST). Written by"
     echo ";; bin/repr-go native-check --record-ids [CORPUS...] from the helper's dumps (made when missing), no check run."
     echo "["; LC_ALL=C sort -u "$t.new"; echo "]"; } > "$f"
@@ -665,6 +713,37 @@ roundtrip_text() {
   return $status
 }
 
+# roundtrip_tests_embedded CAND: the Go files a package of the corpus tests embeds from its own directory (TamaGo's
+# testdata_tamago_test.go, //go:embed *.go and the like: the EmbedFiles of go list -test's packages and test variants)
+# printed in mode :full (the user's decision of 2026-11-22; doc/go/ROUNDTRIP.md, "Tests that embed their own sources"):
+# each such file the candidate CAND holds, printed from mode :lines by the round trip, replaced by its print from mode
+# :full (bin/repr-go read --full --tests of the packages that hold them, printed into CAND-full), so that the test binary
+# embeds the original's text and the code level compares the program's code; each replaced file compared with its
+# original byte for byte (a difference fails); their list CAND.embedded.txt (the negative controls of kind embed,
+# bin/lib/repr-go/check). Prints a summary line
+roundtrip_tests_embedded() {
+  local cand=$1 full=$1-full list=$1.embedded.txt pkgs=() f n=0 differ=0 s=0
+  rm -rf "$full"
+  env GOROOT="$goroot" GOOS=tamago GOARCH=amd64 CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS= GOWORK=off "$goroot/bin/go" list -test -e \
+    -f '{{$d := .Dir}}{{range .EmbedFiles}}{{$d}}{{"\t"}}{{.}}{{"\n"}}{{end}}' std \
+    > "$list.all" || { echo "roundtrip --tests: the embedded files: go list failed" >&2; return 1; }
+  # a Go file of the package's own directory (the files bin/repr-go check compiles in the original's place: gocmp's overlay)
+  awk -F'\t' '$2 !~ /\// && $2 ~ /\.go$/ { print $1 "/" $2 }' "$list.all" | sed -n "s|^$goroot/src/||p" | LC_ALL=C sort -u \
+    | while IFS= read -r f; do if [ -f "$cand/src/$f" ]; then echo "$f"; fi; done > "$list"
+  [ -s "$list" ] || { echo "roundtrip --tests: no embedded Go file in the candidate"; return 0; }
+  mapfile -t pkgs < <(sed 's|/[^/]*$||' "$list" | LC_ALL=C sort -u)
+  convert --full --tests --out "$root/.tmp/repr-go/forms/tests-embedded-full" --print "$full" "${pkgs[@]}" || s=$?
+  if [ $s -ge 128 ]; then echo "roundtrip --tests: the converter died (exit status $s)" >&2; return 1; fi
+  while IFS= read -r f; do
+    if [ ! -f "$full/src/$f" ]; then echo "roundtrip --tests: $f: not printed from mode :full" >&2; differ=$((differ + 1)); continue; fi
+    cp "$full/src/$f" "$cand/src/$f"
+    cmp -s "$cand/src/$f" "$goroot/src/$f" || { echo "roundtrip --tests: $f printed from mode :full differs from its original" >&2; differ=$((differ + 1)); }
+    n=$((n + 1))
+  done < "$list"
+  echo "roundtrip --tests: $n embedded Go files of ${#pkgs[@]} packages printed from mode :full (${list#$root/}), $((n - differ)) byte for byte their originals"
+  [ "$differ" -eq 0 ]
+}
+
 roundtrip() {
   local goos=tamago arch=amd64 record="" cand ref t0 t1 t2 status with_tests="" check prefix text="" dirs=""
   while [ $# -gt 0 ]; do
@@ -721,6 +800,7 @@ roundtrip() {
     converted --corpus "$prefix$dt" --print "$cand" || return 1
   elif [ -n "$with_tests" ]; then
     converted --corpus tests --print "$cand" || return 1
+    roundtrip_tests_embedded "$cand" || return 1
   else
     local tests=test
     [ "$arch" = arm64 ] && tests=test-arm64
