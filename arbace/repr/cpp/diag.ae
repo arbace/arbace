@@ -4003,7 +4003,79 @@
       (w (:nodes u) nil false))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values]))
+;; GCC's __builtin_launder (cpp-gnu, 2026-11-22; the GCC 15.2 manual's "Other Built-in Functions", as std::launder's [ptr.launder]:
+;; one argument, a pointer to an object type): another number of arguments is "wrong number of arguments to '__builtin_launder'" -- in a
+;; template a written argument beside a pack expansion at once, GCC's, a pack's size at each specialization the unit names by explicit
+;; template arguments --, an argument of non-pointer type "argument is not a pointer to object type" (a variable's declared type, in a
+;; function template's specialization the unit calls the parameter's type deduced from the call's argument), at the call
+;; (cpp1z/launder2.C).
+
+(defn builtin-launder
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                              (when (= main (or (get-in n [:range :begin :file]) main))
+                                (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :launder :msg msg})))))
+        launder? (fn [c] (and (= "CallExpr" (:kind c)) (= "__builtin_launder" (get-in (some-> (first (:inner c)) strip) [:referencedDecl :name]))))
+        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) (str (get-in n [:type :qualType]))]))
+        ptr? (fn [^String t] (boolean (re-find #"\*\s*(?:const\s*)?$" (str/trim t))))
+        ;; calls of each function template: [explicit-args arg-exprs]
+        calls (let [m (java.util.HashMap.)]
+                (walk-nodes (fn [c _] (when (= "CallExpr" (:kind c))
+                                        (let [cal (some-> (first (:inner c)) strip)]
+                                          (when (= "DeclRefExpr" (:kind cal))
+                                            (let [nm (get-in cal [:referencedDecl :name])]
+                                              (.put m nm (conj (or (.get m nm) []) [(vec (:explicitTemplateArgs cal)) (vec (rest (:inner c)))])))))))
+                            (:nodes u) nil)
+                m)
+        expr-type (fn [e vars] (let [e (strip e)]
+                                 (case (:kind e)
+                                   "DeclRefExpr" (or (get vars (get-in e [:referencedDecl :name])) (get globals (get-in e [:referencedDecl :name])))
+                                   "UnaryOperator" (when (= "&" (:opcode e)) "T *")
+                                   nil)))]
+    (doseq [n (:nodes u)]
+      (if (= "FunctionTemplateDecl" (:kind n))
+        (let [f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n))
+              tps (vec (filter #(= "TemplateTypeParmDecl" (:kind %)) (:inner n)))
+              pack (some #(when (:isParameterPack %) (:name %)) tps)
+              npre (count (take-while #(not (:isParameterPack %)) tps))
+              params (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
+              pvars (into {} (for [p params :when (string? (:name p))] [(:name p) (str (get-in p [:type :qualType]))]))]
+          (walk-nodes (fn [c _]
+                        (when (launder? c)
+                          (let [args (rest (:inner c))
+                                plain (count (remove #(= "PackExpansionExpr" (:kind %)) args))
+                                exps (count (filter #(= "PackExpansionExpr" (:kind %)) args))]
+                            (cond
+                              (or (and (zero? exps) (not= 1 plain)) (and (pos? exps) (pos? plain)))
+                              (report! c "wrong number of arguments to '__builtin_launder'")
+                              (and (pos? exps) pack)
+                              (when (some (fn [[eas _]] (and (>= (count eas) npre) (not= 1 (- (count eas) npre)))) (.get calls (:name n)))
+                                (report! c "wrong number of arguments to '__builtin_launder'"))
+                              (= 1 plain)
+                              (let [a (strip (first args))]
+                                (when (= "DeclRefExpr" (:kind a))
+                                  (when-let [pt (get pvars (get-in a [:referencedDecl :name]))]
+                                    (let [pt (str/trim pt) tp (some #(when (= pt (:name %)) pt) tps)
+                                          pi (first (keep-indexed (fn [i p] (when (= (:name p) (get-in a [:referencedDecl :name])) i)) params))]
+                                      ;; a parameter of type T deduced at each call from the argument's type
+                                      (when (and tp pi (some (fn [[eas cargs]] (when-let [at (and (empty? eas) (get cargs pi) (expr-type (get cargs pi) {}))]
+                                                                                 (not (ptr? at))))
+                                                             (.get calls (:name n))))
+                                        (report! c "argument is not a pointer to object type"))))))
+                              :else nil))))
+                      (:inner f) nil))
+        (walk-nodes (fn [c _]
+                      (when (launder? c)
+                        (let [args (vec (rest (:inner c)))]
+                          (cond (not= 1 (count args)) (report! c "wrong number of arguments to '__builtin_launder'")
+                                :else (when-let [t (expr-type (first args) {})]
+                                        (when-not (ptr? t) (report! c "argument is not a pointer to object type")))))))
+                    n nil)))
+    (vec (distinct out))))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder]))
 
 ;; queue 499: a fallthrough statement ([dcl.attr.fallthrough]/1, `[[fallthrough]];`, GNU's `[[gnu::fallthrough]];`) with no
 ;; enclosing switch statement in its function: ill-formed, GCC's error "invalid use of attribute 'fallthrough'"; and under
