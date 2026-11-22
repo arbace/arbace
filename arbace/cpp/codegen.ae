@@ -509,6 +509,10 @@
 (defn- run-cleanup! [c]
   (cond
     (or (:try c) (:terminate c) (:filter c) (:eh-only c) (:delete c) (:guard-abort c) (:free-exn c)) nil
+    ;; (cpp-rt-own4: a VLA's scope left, its stack saved at the scope's first VLA restored, clang's CallStackRestore)
+    (:stackrestore c) (let [sp (val! (list 'load 'ptr ['ptr (:stackrestore c)] :align 8))]
+                        (declare! "llvm.stackrestore.p0" 'void '[ptr])
+                        (emit! (list 'call 'void (gsym "llvm.stackrestore.p0") [['ptr sp]])))
     (:end-catch c) (do (declare! "__cxa_end_catch" 'void []) (call-insn! 'void 'void (gsym "__cxa_end_catch") [] (not (:might-throw c))))
     :else
   (cond
@@ -570,7 +574,10 @@
 (def ^:dynamic *in-eh-walk* false) ; queue 382: inside a landing pad's cleanups: a call that may throw terminates
 (def ^:dynamic *as-base* nil) ; {:vtt v}: the next constructor or destructor called is a base subobject's
 
-(defn- eh-state [] (vec (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*))))
+(defn- eh-state []
+  ;; (cpp-rt-own4: a VLA's stack restore is a normal cleanup alone, clang's pushStackRestore(NormalCleanup): no landing pad
+  ;; for it, none run while unwinding)
+  (vec (remove :stackrestore (concat (:cleanups @*f*) (when *extend* @*extend*) (when *temps* @*temps*)))))
 
 (defn- pad-plan
   "[clauses cleanup? filter?] of a landing pad for the cleanup stack `state` (clauses: type_info symbols, nil for catch-all;
@@ -1755,6 +1762,11 @@
     :call (if (= :pr (:cat e))
             (member-call! e nil)
             (load! (:ty e) (emit-lv e)))
+    ;; (cpp-rt-own4, DECISION cpp-rt-own3-2 (a): sema's explicit destructor call of a class incomplete where it was analyzed,
+    ;; its destructor taken now, the call as sema's method-call writes it)
+    :late-dtor-call (let [d (or (:dtor (abi/cls (:cls e))) (fail :codegen "the destructor of the incomplete class " (:name (abi/cls (:cls e)))))]
+                      (member-call! {:op :call :fn d :obj (:obj e) :args [] :virtual (boolean (and (:virtual-ok e) (:virtual (sema/fnd d))))
+                                     :ty abi/void :cat :pr} nil))
     :icall (if (= :pr (:cat e)) (icall! e nil) (load! (:ty e) (emit-lv e)))
     :new (let [et (:et e)
                cid (when (abi/class? (abi/unq et)) (:id (abi/unq et)))
@@ -2236,7 +2248,38 @@
             :else (global!))
           true)))))
 
+(def ^:private ^:dynamic *vla-saved* nil) ; atom: the current scope's stack saved for its VLAs (clang's DidCallStackSave)
+
+(defn- vla-decl!
+  "cpp-rt-own4 (DECISION cpp-rt-own3-1 (a)): GNU's variable-length array (sema's vla-local), as clang's EmitAutoVarAlloca
+  writes one at -O0: its bound evaluated and widened to i64 (EmitVariablyModifiedType: CreateIntCast unsigned), at the
+  scope's first VLA the stack saved (llvm.stacksave into an alloca, a normal cleanup restoring it when the scope is left,
+  pushStackRestore), then the array a dynamic alloca of its element type, aligned to at least 16 (ASTContext's getDeclAlign:
+  the target's large-array alignment for a VLA), and the bound kept in an i64 alloca (__vla_expr). Its address is the
+  variable's."
+  [vid t]
+  (let [v (sema/var* vid)
+        b (:vla-n v)
+        bt (abi/underlying (abi/unq (:ty b)))
+        bv (emit-rv b)
+        lf (abi/llvm-type bt true)
+        bits (Long/parseLong (subs (name lf) 1))
+        n (cond (= 64 bits) bv (< bits 64) (val! (list 'zext lf bv 'i64)) :else (val! (list 'trunc lf bv 'i64)))
+        et (abi/unq (:of (abi/unq t)))]
+    (when (or (nil? *vla-saved*) (not @*vla-saved*))
+      (let [slot (alloca! 'ptr 8)]
+        (declare! "llvm.stacksave.p0" 'ptr [])
+        (emit! (list 'store ['ptr (val! (list 'call 'ptr (gsym "llvm.stacksave.p0") []))] ['ptr slot] :align 8))
+        (when *vla-saved* (reset! *vla-saved* true))
+        (push-cleanup! {:stackrestore slot})))
+    (let [a (val! (list 'alloca (elem-type et) :count ['i64 n] :align (max 16 (abi/align-of et))))
+          ve (alloca! 'i64 8)]
+      (emit! (list 'store ['i64 n] ['ptr ve] :align 8))
+      a)))
+
 (defn- local-decl! [s]
+  (if (:vla-n (sema/var* (:var s)))
+    (swap! *f* assoc-in [:addr (:var s)] (vla-decl! (:var s) (:ty (sema/var* (:var s)))))
   (let [v (sema/var* (:var s))
         t (:ty v)
         nrvo (= (:var s) (:nrvo @*f*))
@@ -2263,7 +2306,7 @@
         nrvo nil
         (abi/arr? (abi/unq t))
         (push-cleanup! {:array addr :n (quot (abi/size-of t) (abi/size-of bt)) :cls (:id bt)})
-        :else (push-cleanup! {:addr addr :cls (:id bt)})))))
+        :else (push-cleanup! {:addr addr :cls (:id bt)}))))))
 
 (defn- static-local! [vid]
   (let [v (sema/var* vid)
@@ -2366,7 +2409,7 @@
            (emit! (list 'call 'void (list 'asm "" cs :sideeffect) vs :attrs [:nounwind])))
     :block (if (:flat s)
              (doseq [x (:items s)] (emit-stmt x))
-             (let [d (cleanup-depth)] (doseq [x (:items s)] (emit-stmt x)) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
+             (let [d (cleanup-depth)] (binding [*vla-saved* (atom false)] (doseq [x (:items s)] (emit-stmt x))) (when-not (:term @*f*) (unwind-to! d)) (swap! *f* update :cleanups #(subvec % 0 d))))
     :decl (local-decl! s)
     :static-local (static-local! (:var s))
     :expr (with-full (let [e (:e s)]
