@@ -1372,12 +1372,25 @@
             (let [;; C6-4: each Assert's span (build's :assert-span, which the passes keep the terminator but not its metadata
                   ;; of: build-run's aspans), by its condition, expected value and message, put back on the passes' terminator as
                   ;; a call's span, which externalize makes its caller location (:call-loc), the panic's Location
-                  aspans (into {} (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
-                                    [(vec (take 3 (rest t))) (:assert-span (meta t))]))
+                  built (vec (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
+                               [(vec (take 3 (rest t))) (:assert-span (meta t))]))
+                  aspans (into {} built)
+                  ;; rust-c6c: a key two built asserts share, or one the passes changed (their locals renumbered: digits_to_dec_str's
+                  ;; `parts[0]`), takes the next unused built assert of its message's kind, in block order
+                  kind-of (fn [k] (let [m (nth k 2 nil)] (if (seq? m) (first m) m)))
+                  uniq (set (for [[k n] (frequencies (map first built)) :when (= 1 n)] k))
+                  used (volatile! #{})
                   r (if (empty? aspans) r
-                        (update r :blocks (fn [bs] (mapv (fn [blk] (let [t (:term blk) sp (when (and (seq? t) (= 'assert (first t))) (get aspans (vec (take 3 (rest t)))))]
-                                                                     (if sp (assoc blk :term (vary-meta t assoc :call-span sp)) blk)))
-                                                         bs))))]
+                        (let [exact (set (for [blk (:blocks r) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)))
+                                               :let [k (vec (take 3 (rest t)))] :when (uniq k)] k))]
+                          (update r :blocks (fn [bs] (mapv (fn [blk] (let [t (:term blk)
+                                                                           k (when (and (seq? t) (= 'assert (first t))) (vec (take 3 (rest t))))
+                                                                           sp (cond (nil? k) nil
+                                                                                    (uniq k) (get aspans k)
+                                                                                    :else (when-let [i (first (keep-indexed (fn [i [bk _]] (when (and (= (kind-of bk) (kind-of k)) (not (exact bk)) (not (@used i))) i)) built))]
+                                                                                            (vswap! used conj i) (second (nth built i))))]
+                                                                       (if sp (assoc blk :term (vary-meta t assoc :call-span sp)) blk)))
+                                                           bs)))))]
             (cond-> {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
             :attrs ((requiring-resolve 'arbace.rust.front.mono/local-attrs) (:id (:def b)))
             ;; C6: the attributes of the functions nested in it (handle_alloc_error's `#[inline] fn rt_error`), which its body
