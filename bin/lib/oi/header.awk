@@ -156,6 +156,61 @@ END {
     odmode = (odmode == 2 && odplugins != "")
   }
   if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
+  # toplevel modes (queue 529, DECISION 528-7 (a): the toplevel on oi through oi's Dynlink, judged by the test's own .reference), at oi's
+  # level alone (the light AOT level does not load compiler-libs' typing units in its limit, DECISION 480-1; the compiled level's is the
+  # main host's, 528-8):
+  # - ocamltex: a header of ocamltest's script action running tools/ocamltex (`script = "[${ocamlrun}] ${ocamlsrcdir}/tools/ocamltex -repo-root
+  #   ${ocamlsrcdir} ${readonly_files} -o ${output}"; script with unix, str; check-program-output`, readonly_files the test's TEST.input,
+  #   output TEST.output, reference its own .reference, the shared-libraries and no-shared-libraries alternatives the same script): the
+  #   run is bin/oi's ocamltex on oi (tools/ocamltex.ml over compiler-libs' toplevel, bin/lib/oi/tools.bash), arguments `-repo-root _root
+  #   TEST.input -o TEST.output`, environment @tool=ocamltex @dyncopy=TEST.input, its output TEST.output (tool_output's)
+  # - toplevel: self-contained-toplevel's header (setup-ocamlc.byte-build-env; `module = "F.ml"; ocamlc.byte` each; the `ocaml` script
+  #   action, `test_file = "S.ml"; arguments = "A"; ocaml with ocamlcommon`; then `module = ""; program = ...; libraries += "...
+  #   ocamltoplevel"; all_modules = "..."; ocamlc.byte`; `set OCAMLLIB = "${ocamlsrcdir}/stdlib"; arguments = "ARGS"; run;
+  #   check-program-output`): environment @tool=toplevel @dyncopy=READONLY,... @topmods=F.ml,... @topscript=S.ml:A,... @topall=FILE,...
+  #   and OCAMLLIB=_stdlib (the run directory's standard library .cmi files, made on oi: ${ocamlsrcdir}/stdlib's are the build's)
+  cxmode = 0; tlmode = 0
+  if (aot == 0 && !dlmode && !odmode) {
+    tb = FILENAME; sub(/^.*\//, "", tb); sub(/\.mll?$/, "", tb)
+    cxmode = 1; cxscript = 0; cxcheck = 0
+    for (j = 1; j <= m && cxmode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      if (s == "reference = \"@TSD@/" tb ".reference\"" || s == "output = \"" tb ".output\"" || s == "readonly_files = \"@TSD@/" tb ".input\"") continue
+      if (s == "hasstr" || s == "hasunix" || s == "shared-libraries" || s == "no-shared-libraries" || s == "script with unix, str") continue
+      if (s ~ /^script *= *"(\$VAR )?@OCAMLSRCDIR@\/tools\/ocamltex -repo-root @OCAMLSRCDIR@ \$VAR -o \$VAR"$/) { cxscript = 1; continue }
+      if (s == "check-program-output") { cxcheck = 1; continue }
+      cxmode = 0
+    }
+    if (!(cxscript && cxcheck) || tb !~ /^[A-Za-z0-9_]+$/) cxmode = 0
+    if (!cxmode && hasbuild) {
+      tlmode = 1; tph = 0; tcur = ""; tmods = ""; tsf = ""; tsa = ""; tall = ""; targs = ""; tcopy = ""; tlib = 0; tchk = 0
+      for (j = 1; j <= m && tlmode; j++) {
+        s = trim(st[j]); if (s == "") continue
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+        if (s ~ /^readonly_files *= *"/ && tph == 0) { c = split(v, hm, " "); for (q = 1; q <= c; q++) tcopy = tcopy (tcopy == "" ? "" : ",") hm[q]; continue }
+        if (s == "setup-ocamlc.byte-build-env" && tph == 0) continue
+        if (s ~ /^module *= *"/) { if (tph == 0 && v ~ /^[A-Za-z0-9_]+\.ml$/) { tcur = v; continue } if (tph == 1 && v == "") continue; tlmode = 0; continue }
+        if (s == "ocamlc.byte" && tph == 0 && tcur != "") { tmods = tmods (tmods == "" ? "" : ",") tcur; tcur = ""; continue }
+        if (s == "ocaml_script_as_argument = \"true\"" && tph == 0) continue
+        if (s ~ /^test_file *= *"/ && tph == 0 && v ~ /^[A-Za-z0-9_]+\.ml$/) { tsf = v; continue }
+        if (s ~ /^arguments *= *"/ && tph == 0) { tsa = v; gsub(/ /, ",", tsa); continue }
+        if (s == "ocaml with ocamlcommon" && tph == 0 && tsf != "") { tph = 1; continue }
+        if (s ~ /^program *= *"\$VAR\/[A-Za-z0-9_]+\.exe"$/ && tph == 1) continue
+        if (s ~ /^libraries *\+= *"/ && tph == 1) { c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] == "ocamltoplevel") tlib = 1; else if (hm[q] != "ocamlbytecomp" && hm[q] != "ocamlcommon") tlmode = 0 }; continue }
+        if (s ~ /^all_modules *= *"/ && tph == 1) { tall = v; gsub(/ /, ",", tall); continue }
+        if (s == "ocamlc.byte" && tph == 1 && tall != "" && tlib) { tph = 2; continue }
+        if (s == "set OCAMLLIB = \"@OCAMLSRCDIR@/stdlib\"" && tph == 2) continue
+        if (s ~ /^arguments *= *"/ && tph == 2) { targs = v; continue }
+        if (s == "run" && tph == 2) { tph = 3; continue }
+        if (s == "check-program-output" && tph == 3) { tchk = 1; continue }
+        tlmode = 0
+      }
+      if (!(tph == 3 && tchk) || tmods == "") tlmode = 0
+      if (tlmode) { c = split(tcopy "," tmods "," tsf "," tsa "," tall " " targs, hm, /[, ]/); for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.]*$/) tlmode = 0 }
+    }
+  }
+  if (cxmode) { helper = 0; m = 0; incs = ""; args = "-repo-root _root " tb ".input -o " tb ".output"; env = env " @tool=ocamltex @dyncopy=" tb ".input" }
+  if (tlmode) { helper = 0; m = 0; incs = ""; args = targs; env = env " @tool=toplevel @dyncopy=" tcopy " @topmods=" tmods " @topscript=" tsf ":" tsa " @topall=" tall " OCAMLLIB=_stdlib" }
   # objinfo mode (queue 511: ocamltest's tools as Arbace's own, judged by the test's own .reference): a test at oi's level whose header
   # is ocamltest's compile-only test of a unit's .cmt (compile_only = "true"; setup-ocamlc.byte-build-env; all_modules = "FILES";
   # ocamlc.byte; check-ocamlc.byte-output with flags = "FLAGS", readonly_files and modules copied) followed by `program = "ARGS";
