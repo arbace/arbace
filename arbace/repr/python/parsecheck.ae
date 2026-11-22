@@ -120,13 +120,246 @@
                   (not (re-find re str-err)) (str (pr-str str-err) " does not contain " (pr-str (:search e))))))
         (posf :lineno l) (posf :offset o) (posf :end-lineno el) (posf :end-offset eo))))
 
+;; ---- traceback's keyword typo (py-design-1122): Lib/traceback.py's TracebackException._find_keyword_typos of CPython
+;; 3.14.10, which format_exception_only (a doctest's exception line) runs over a SyntaxError whose message is the
+;; parser's "invalid syntax": a NAME token of the failing statement replaced by a keyword close to it (Python/
+;; suggestions.c's _Py_CalculateSuggestions, then difflib.get_close_matches), the first replacement codeop.compile_command
+;; accepts (mode exec, PyCF_ONLY_AST) giving "invalid syntax. Did you mean 'KW'?". Ported, no code vendored.
+
+(def ^:private kwlist
+  ;; keyword.kwlist: the grammar's keywords sorted (Tools/build/generate_keyword.py), from the reader's own grammar
+  (delay (vec (sort (keys (:keywords (nv/grammar)))))))
+
+(defn- utf8 ^bytes [^String s] (.getBytes s "UTF-8"))
+
+(defn- subst-cost
+  "suggestions.c's substitution_cost of two bytes"
+  ^long [^long a ^long b]
+  (let [lo (fn ^long [^long c] (if (and (<= 65 c) (<= c 90)) (+ c 32) c))]
+    (cond (not= (bit-and a 31) (bit-and b 31)) 2
+          (== a b) 0
+          (== (lo a) (lo b)) 1
+          :else 2)))
+
+(defn- levenshtein
+  "suggestions.c's levenshtein_distance over UTF-8 bytes (MOVE_COST 2, CASE_COST 1, MAX_STRING_SIZE 40)"
+  ^long [^bytes a0 ^bytes b0 ^long max-cost]
+  (let [a (vec (map #(bit-and (long %) 0xff) a0)) b (vec (map #(bit-and (long %) 0xff) b0))
+        [a b] (loop [a a b b] (if (and (seq a) (seq b) (== (long (first a)) (long (first b)))) (recur (subvec a 1) (subvec b 1)) [a b]))
+        [a b] (loop [a a b b] (if (and (seq a) (seq b) (== (long (peek a)) (long (peek b)))) (recur (pop a) (pop b)) [a b]))
+        na (count a) nb (count b)]
+    (cond
+      (or (zero? na) (zero? nb)) (* (+ na nb) 2)
+      (or (> na 40) (> nb 40)) (inc max-cost)
+      :else
+      (let [[a b] (if (< nb na) [b a] [a b]) na (count a) nb (count b)]
+        (if (> (* (- nb na) 2) max-cost)
+          (inc max-cost)
+          (let [buf (long-array (for [i (range na)] (* 2 (inc i))))]
+            (loop [bi 0 result 0]
+              (if (>= bi nb)
+                result
+                (let [code (long (nth b bi))
+                      [result minimum]
+                      (loop [i 0 distance (* bi 2) result (* bi 2) minimum Long/MAX_VALUE]
+                        (if (>= i na)
+                          [result minimum]
+                          (let [substitute (+ distance (subst-cost code (long (nth a i))))
+                                distance (aget buf i)
+                                r (min (+ (min result distance) 2) substitute)]
+                            (aset buf i r)
+                            (recur (inc i) distance r (min minimum r)))))]
+                  (if (> (long minimum) max-cost)
+                    (inc max-cost)
+                    (recur (inc bi) (long result))))))))))))
+
+(defn- calculate-suggestion
+  "_suggestions._generate_suggestions(candidates, name): suggestions.c's _Py_CalculateSuggestions"
+  [candidates ^String name]
+  (let [nb (utf8 name)]
+    (loop [cs candidates best nil best-d Long/MAX_VALUE]
+      (if-let [item (first cs)]
+        (if (= item name)
+          (recur (rest cs) best best-d)
+          (let [ib (utf8 item)
+                maxd (min (quot (* (+ (alength nb) (alength ib) 3) 2) 6) (dec best-d))
+                d (levenshtein nb ib maxd)]
+            (if (or (> d maxd) (and best (>= d best-d)))
+              (recur (rest cs) best best-d)
+              (recur (rest cs) item d))))
+        best))))
+
+(defn- matching-total
+  "The sizes of difflib.SequenceMatcher(None, a, b).get_matching_blocks() summed: find_longest_match's longest block
+  (the earliest in a, then in b; no junk, and b shorter than 200 has no popular elements), then the same on each side"
+  ^long [^String a ^String b]
+  (let [b2j (reduce (fn [m [j c]] (update m c (fnil conj []) j)) {} (map-indexed vector b))
+        longest (fn [alo ahi blo bhi]
+                  (loop [i alo j2len {} bi alo bj blo bs 0]
+                    (if (>= i ahi)
+                      [bi bj bs]
+                      (let [[nj2 bi bj bs]
+                            (reduce (fn [[nj2 bi bj bs] j]
+                                      (if (or (< j blo) (>= j bhi))
+                                        [nj2 bi bj bs]
+                                        (let [k (inc (long (get j2len (dec j) 0)))]
+                                          (if (> k bs) [(assoc nj2 j k) (inc (- i k)) (inc (- j k)) k] [(assoc nj2 j k) bi bj bs]))))
+                                    [{} bi bj bs] (get b2j (.charAt a (int i)) []))]
+                        (recur (inc i) nj2 (long bi) (long bj) (long bs))))))
+        total (fn total [alo ahi blo bhi]
+                (let [[i j k] (longest alo ahi blo bhi)]
+                  (if (zero? (long k))
+                    0
+                    (+ (long k)
+                       (if (and (< alo i) (< blo j)) (long (total alo i blo j)) 0)
+                       (if (and (< (+ i k) ahi) (< (+ j k) bhi)) (long (total (+ i k) ahi (+ j k) bhi)) 0)))))]
+    (total 0 (count a) 0 (count b))))
+
+(defn- close-matches
+  "difflib.get_close_matches(word, possibilities, n, cutoff): the ratios 2M/T of SequenceMatcher(None, x, word) at least
+  cutoff, the n largest (score, x) pairs, largest first"
+  [^String word possibilities n cutoff]
+  (->> (for [x possibilities
+             :let [t (+ (count x) (count word)) r (if (pos? t) (/ (* 2.0 (matching-total x word)) t) 1.0)]
+             :when (>= r (double cutoff))]
+         [r x])
+       (sort (fn [[r1 x1] [r2 x2]] (let [c (compare r2 r1)] (if (zero? c) (compare x2 x1) c))))
+       (take n)
+       (mapv second)))
+
+(defn- py-splitlines
+  "str.splitlines(): the lines without their ends (\\n, \\r, \\r\\n, \\v, \\f, \\x1c-\\x1e, \\x85, \\u2028, \\u2029)"
+  [^String s]
+  (let [n (.length s)]
+    (loop [i 0 a 0 out []]
+      (if (>= i n)
+        (if (< a n) (conj out (subs s a n)) out)
+        (let [c (.charAt s i)]
+          (cond
+            (and (= c \return) (< (inc i) n) (= (.charAt s (inc i)) \newline)) (recur (+ i 2) (+ i 2) (conj out (subs s a i)))
+            (#{10 13 11 12 28 29 30 0x85 0x2028 0x2029} (int c)) (recur (inc i) (inc i) (conj out (subs s a i)))
+            :else (recur (inc i) a out)))))))
+
+(defn- py-space? [^String l] (and (seq l) (every? #(let [c (int %)] (or (Character/isWhitespace c) (== c 0x85) (== c 0xa0))) l)))
+
+(defn- dedent
+  "textwrap.dedent of 3.14.10: the margin the smallest and largest non-blank lines share in spaces and tabs, blank lines
+  emptied"
+  [^String text]
+  (let [lines (vec (.split text "\n" -1))
+        nb (filter #(and (seq %) (not (py-space? %))) lines)
+        l1 (if (seq nb) (reduce #(if (neg? (compare %2 %1)) %2 %1) nb) "")
+        l2 (if (seq nb) (reduce #(if (pos? (compare %2 %1)) %2 %1) nb) "")
+        margin (loop [m 0]
+                 (cond (>= m (count l1)) (max 0 (dec m))
+                       (or (not= (.charAt ^String l1 m) (.charAt ^String l2 m)) (not (#{\space \tab} (.charAt ^String l1 m)))) m
+                       :else (recur (inc m))))]
+    (str/join "\n" (for [l lines] (if (py-space? l) "" (subs l (min margin (count l))))))))
+
+(defn- full-compile-ok?
+  "compile(CODE, '<input>', 'exec') (flags 0: the code object, symtable and code generation too, by pyi's own compiler,
+  arbace.python.run's compile-uncached) raises no SyntaxError; another error ends the search"
+  [^String code]
+  (require 'arbace.python 'arbace.python.run)
+  (let [r (str (@(ns-resolve 'arbace.python.run 'compile-uncached) "exec" code))
+        r (if (str/starts-with? r "\u0001") (subs r (inc (.indexOf r "\u0003"))) r)]
+    (cond (re-find #"^(SyntaxError|IndentationError|TabError): " r) false
+          (re-find #"^[A-Z][A-Za-z]*(Error|Exception): " r) (throw (ex-info "not a syntax error" {:abort true}))
+          :else true)))
+
+(defn- compile-command-ok?
+  "codeop.compile_command(code, symbol=\"exec\", flags=PyCF_ONLY_AST) returns (a tree, or None for incomplete input)
+  rather than raising SyntaxError (Lib/codeop.py's _maybe_compile): when the code parses (ONLY_AST, the incomplete
+  input flags), the final compile (flags 0, the whole compiler) decides; when it does not, code + newline parsing or
+  being incomplete input returns None, else the final compile raises. A non-syntax error ends the search (traceback's
+  suppress(Exception))"
+  [^String code]
+  (let [blank? (every? (fn [l] (let [l (str/trim l)] (or (empty? l) (= \# (first l))))) (.split code "\n" -1))
+        code (if blank? "pass" code)
+        attempt (fn [s] (try (nv/parse-source s :exec {:incomplete true}) :ok
+                             (catch arbace.lang.ExceptionInfo e
+                               (if-let [[cls] (:python-error (ex-data e))]
+                                 (if (or (contains? kinds cls) (= cls "IncompleteInputError")) cls (throw (ex-info "not a syntax error" {:abort true})))
+                                 (throw e)))))]
+    (if (= :ok (attempt code))
+      (full-compile-ok? code)
+      (contains? #{:ok "IncompleteInputError"} (attempt (str code "\n"))))))
+
+(defn- keyword-typo
+  "_find_keyword_typos over the error ERR of SOURCE ({:kind :msg :pos :text :metadata}): ERR with the message
+  \"invalid syntax. Did you mean 'KW'?\" when a keyword in place of a NAME token of the failing statement makes it
+  compile, else ERR"
+  [{:keys [msg pos text metadata] :as err} ^String source]
+  (or (when (and (string? text) metadata
+                 (or (= msg "invalid syntax") (str/includes? (str msg) "Perhaps you forgot a comma")))
+        (try
+          (let [line (long (first metadata))
+                end-line (long (or (first pos) 0))
+                lines (py-splitlines source)
+                code (dedent (str/join "\n" (subvec lines (min (count lines) (if (pos? line) (dec line) 0))
+                                                    (max (min (count lines) (if (pos? line) (dec line) 0)) (min end-line (count lines))))))]
+            (when (<= (count code) 1024)
+              (let [error-lines (py-splitlines code)
+                    toks (:tokens (lex/stream code true))]
+                (loop [ts toks left 10]
+                  (when-let [[type s sl sc _ ec] (first ts)]
+                    (if (or (not= (long type) (long lex/NAME)) (some #{s} @kwlist))
+                      (recur (rest ts) left)
+                      (let [left (dec left)]
+                        (when-not (neg? left)
+                          (let [sugg (calculate-suggestion @kwlist s)
+                                ms (take 3 (concat (when sugg [sugg]) (close-matches s @kwlist 3 0.5)))
+                                hit (some (fn [kw]
+                                            (when (and (seq kw) (not= kw s) (<= (long sl) (count error-lines)))
+                                              (let [l ^String (nth error-lines (dec (long sl)))
+                                                    cps (vec (.toArray (.codePoints l)))
+                                                    nl (str (String. (int-array (subvec cps 0 (min (count cps) (long sc)))) 0 (min (count cps) (long sc)))
+                                                            kw
+                                                            (let [r (subvec cps (min (count cps) (long ec)))] (String. (int-array r) 0 (count r))))
+                                                    c (str/join "\n" (assoc error-lines (dec (long sl)) nl))]
+                                                (when (compile-command-ok? c) kw))))
+                                          ms)]
+                            (if hit
+                              (assoc err :msg (str "invalid syntax. Did you mean '" hit "'?"))
+                              (recur (rest ts) left)))))))))))
+          (catch arbace.lang.ExceptionInfo e (if (:abort (ex-data e)) nil (throw e)))))
+      err))
+
+(defn- source-error
+  "The error compile(SOURCE, F, MODE) raises in the case's own mode (\"eval\": eval()'s str, its leading spaces and tabs
+  stripped; \"single\": a doctest's example), as error-form gives it with :text and :metadata, or :accepted"
+  [^String source mode]
+  (let [m (case mode "eval" :eval "single" :single :exec)
+        s (if (= m :eval) (str/replace source #"^[ \t]+" "") source)]
+    (try (nv/parse-source s m {}) :accepted
+         (catch arbace.lang.ExceptionInfo e
+           (if-let [[cls msg l o el eo t] (:python-error (ex-data e))]
+             {:kind (str cls) :msg msg :pos (when (some? l) [l o el eo]) :text t :metadata (:metadata (ex-data e))}
+             (throw e))))))
+
+(defn- case-error
+  "The error the expectation E is judged on: the file's read (mode exec, read-dump's MINE) for exec and no mode, else
+  the source parsed in E's mode; a doctest's line format_exception_only's (traceback's keyword typo); nil when accepted"
+  [e mine-err ^String source]
+  (let [err (if (and source (#{"eval" "single"} (:mode e)))
+              (let [r (source-error source (:mode e))] (when (map? r) r))
+              mine-err)]
+    (when err
+      (if (and source (= "doctest" (:helper e)))
+        (keyword-typo (if (and (:metadata err) (contains? err :text)) err
+                          (let [r (source-error source (or (:mode e) "exec"))] (if (map? r) r err)))
+                      (-> source (str/replace "\r\n" "\n") (str/replace "\r" "\n")))
+        err))))
+
 (defn- own-verdict
   "[status detail] by the case's own verdict (:own-pass, :own-fail WHY), or nil when it is judged by the record: the
-  native reader accepts the case, the case has no expectation, or one cannot be judged here"
-  [rel mine]
+  native reader accepts the case, the case has no expectation, or one cannot be judged here. Each expectation is judged
+  on the error of its own mode (py-design-1122: assertAllRaise's eval, a doctest's single; exec the file's read), a
+  doctest's with traceback's keyword typo"
+  [rel mine & [source]]
   (when-let [es (seq (get *expects* rel))]
     (when-let [err (error-form mine)]
-      (let [why (map #(expect-fails err %) es)]
+      (let [why (map #(if-let [ce (case-error % err source)] (expect-fails ce %) (str "accepted in mode " (:mode %))) es)]
         (cond (some #{:undecided} why) nil
               (every? nil? why) [:own-pass nil]
               :else [:own-fail (first (remove nil? why))])))))
@@ -137,7 +370,14 @@
   [^String src ^String ref-path ^String out rel]
   (let [rf (File. ref-path)
         own (when (seq *expects*)
-              (own-verdict rel (try (nv/read-dump (read-bytes src) rel *full*) (catch Throwable _ nil))))]
+              (let [bs (read-bytes src)]
+                (own-verdict rel (try (nv/read-dump bs rel *full*) (catch Throwable _ nil))
+                             (try (let [d (java.nio.charset.StandardCharsets/UTF_8)
+                                        dc (doto (.newDecoder d)
+                                             (.onMalformedInput java.nio.charset.CodingErrorAction/REPORT)
+                                             (.onUnmappableCharacter java.nio.charset.CodingErrorAction/REPORT))]
+                                    (str (.decode dc (java.nio.ByteBuffer/wrap bs))))
+                                  (catch Throwable _ nil)))))]
     (cond
       own (into [rel] own)
       (not (.exists rf))

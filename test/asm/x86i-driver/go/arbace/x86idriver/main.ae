@@ -24,7 +24,7 @@
 
 
 ^{:go/end 29} (go/func usage []
-  (fmt/Fprintln os/Stderr "usage: x86i run [--stats] [--coverage FILE] EXE [ARG...] | x86i decode-text EXE | x86i decode-hex FILE | x86i claimed | x86i trace --mode sys|step|bisect EXE [ARG...]")
+  (fmt/Fprintln os/Stderr "usage: x86i run [--stats] [--coverage FILE] EXE [ARG...] | x86i cpu EXE [ARG...] | x86i decode-text EXE | x86i decode-hex FILE | x86i claimed | x86i trace --mode sys|step|bisect EXE [ARG...]")
   (os/Exit 2))
 
 
@@ -64,6 +64,8 @@
           (usage))
 
         (os/Exit (trace (aget args 1) (subslice args 2)))))
+    (case ["cpu"]
+      (os/Exit (cpu (subslice os/Args 2))))
     (case ["decode-text"]
       (decodeText (aget os/Args 2)))
     (case ["decode-hex"]
@@ -150,6 +152,64 @@
 
 
       (.WriteString os/Stdout (.String out)))))
+
+
+(go/func cpu "cpu runs EXE natively under ptrace: the CPU's run of a program whose output follows cpuid (`# cpu: cpuid`), each cpuid\nof its code sections (decode-text's sweep) an int3 answered with x86i's model (x86i.CpuidModel), as the lockstep's modes\nanswer it (x86-print); stdin, stdout and stderr the driver's, its exit status the program's (128 + a signal's).\n" ^int [^{:tag (slice string)} argv]
+  (let [(values f err) (emu/ReadELF (aget argv 0))]
+    (when (!= err nil)
+      (fmt/Fprintf os/Stderr "x86i cpu: %v\n" err)
+      (return 2))
+
+    (let [sites (make (map uint64 uint64))]
+      (range [_ s (.-Sections f)]
+        (when (or (== (bit-and (.-Flags s) emu/SHF_EXECINSTR) 0) (!= (.-Type s) emu/SHT_PROGBITS))
+          (continue))
+
+        (let [b (.Bytes f (.-Off s) (.-Size s))]
+          (for [off 0] (< off (len b)) _
+            (let [(values in r) (x86i/Decode (subslice b off (min (+ off 15) (len b))) true)
+                n (max (conv int (.-Len in)) 1)]
+              (when (and (== r x86i/DecOK) (strings/EqualFold (.Text in) "cpuid"))
+                (aset sites (+ (.-Addr s) (conv uint64 off)) (conv uint64 n)))
+
+              (set! off + n)))))
+
+      (let [(values t err2) (emu/StartTracee (aget argv 0) argv (os/Environ) (lit (slice uintptr) 0 1 2))]
+        (when (!= err2 nil)
+          (fmt/Fprintf os/Stderr "x86i cpu: %v\n" err2)
+          (return 2))
+
+        (range [a _ sites]
+          (when [err (.Write t a (lit (slice byte) 0xcc))] (!= err nil)
+            (fmt/Fprintf os/Stderr "x86i cpu: %v\n" err)
+            (.Kill t)
+            (return 2)))
+
+        (let [sig 0]
+          (while true
+            (let [(values ns err) (.Resume t sig)]
+              (set! sig 0)
+              (when (!= err nil)
+                (fmt/Fprintf os/Stderr "x86i cpu: %v\n" err)
+                (.Kill t)
+                (return 2))
+
+              (when (== ns emu/StopExit)
+                (return (.-Status t)))
+
+              (when (== ns emu/StopSignal)
+                (let [a (- (.-Rip (.-Regs t)) 1)
+                    (values n ok) (aget sites a)]
+                  ;; SIGTRAP (5) at a patched cpuid: the model's answer, RIP past the instruction; any other signal delivered
+                  (if (and ok (== (.-Sig t) 5))
+                    (let [(values ea eb ec ed) (x86i/CpuidModel (conv uint32 (.-Rax (.-Regs t))) (conv uint32 (.-Rcx (.-Regs t))))]
+                      (set! (values (.-Rax (.-Regs t)) (.-Rbx (.-Regs t)) (.-Rcx (.-Regs t)) (.-Rdx (.-Regs t))) (values (conv uint64 ea) (conv uint64 eb) (conv uint64 ec) (conv uint64 ed)))
+                      (set! (.-Rip (.-Regs t)) (+ a n))
+                      (when [err (.SetRegs t)] (!= err nil)
+                        (fmt/Fprintf os/Stderr "x86i cpu: %v\n" err)
+                        (.Kill t)
+                        (return 2)))
+                    (set! sig (.-Sig t))))))))))))
 
 
 ^{:go/end 213} (go/func trace ^int [^string mode ^{:tag (slice string)} argv]

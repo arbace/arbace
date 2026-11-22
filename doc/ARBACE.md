@@ -368,6 +368,14 @@ code. Three kinds of things live here:
   `rustc_abi/src/{layout.rs,layout/simple.rs,lib.rs,wrapping_range.rs}` and `rustc_ty_utils/src/layout.rs`; with rustc-stable-hash
   0.1.2's `src/{sip128,stable_hasher}.rs` (https://github.com/rust-lang/rustc-stable-hash, as rustc's Cargo.lock pins it); LICENSE.md
   names the files (MIT OR Apache-2.0); `mono_check.ae` is Arbace's own; evaluated from the checkout, out of `gate_key` (RFS13).
+  C6 and C4-1 (2026-11-20, doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice", "As built: C6-2", "As built: C4-1 (a)",
+  "C6-4's next slice"): `arbace/rust/front/lib_unit.ae`'s v0 decoder after rustc 1.99.1's `rustc_symbol_mangling/src/v0.rs`;
+  `arbace/rust/front/cargo_meta.ae` after Cargo 0.100.0 (the pinned rustc-1.99.1-src.tar.xz's `src/tools/cargo`, at 5f94df478:
+  `compute_metadata` and the inputs it hashes) with semver 1.0.28 and rustc-stable-hash 0.1.2 from its `vendor/`;
+  `arbace/rust/front/std_names.ae` after `rustc_resolve/src/{build_reduced_graph,imports}.rs` and `rustc_builtin_macros/src/lib.rs`;
+  `arbace/rust/back/inline.ae` after LLVM 23's `llvm/lib/Transforms/IPO/AlwaysInliner.cpp` and `Utils/{InlineFunction,CloneFunction}.cpp`
+  (the same tarball's `src/llvm-project`, Apache-2.0 WITH LLVM-exception); LICENSE.md names the files; evaluated from the checkout,
+  out of `gate_key` (RFS13).
   `arbace/rust/front/core_check.ae` (RF12's first slice, 2026-11-09, doc/rust/FRONTEND-SURVEY.md, "As built: RF12 (first slice)": the
   front end over core's own module files) ports rustc 1.99.1, the same revision and sources: `rustc_expand/src/module.rs` (the module
   tree, `#[path]`, directory ownership), and with it in `expand.ae` `rustc_expand/src/mbe/{metavar_expr,transcribe}.rs` (metavariable
@@ -470,6 +478,9 @@ code. Three kinds of things live here:
   `go/arbace/x86i/dectab.ae`), written by hand; x86i's Go forms (`go/arbace/x86i`, `go/arbace/emu`, outside `arbace/`) were written
   as Go and converted by repr/go's native reader (doc/asm/AMD64.md §10; LICENSE.md); AX5.3 and AX5.4 (2026-11-10, "As built: AX5.3 and
   AX5.4") the same way (`signal.ae`, `sem_bit.ae` new), and `test/asm/x86i/gen.ae` (`asm.x86i-gen`, the synthetic programs) by hand.
+  x86-print (2026-11-22, doc/asm/AMD64-SURVEY.md, "As built: x86-print"): `asm/amd64/lfi.ae` (`arbace.asm.amd64.lfi`: the LFI rewriter
+  and its ABI note) written by hand after the same tarball's `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp`,
+  `llvm/lib/MC/MCLFI.cpp` and `MCLFIRewriter.cpp`; no code is copied.
 - `repr/asm/arm64/gnu.ae` and `repr/asm/plan9.ae` (`arbace.repr.asm.arm64.gnu`, `arbace.repr.asm.plan9`; AR1,
   doc/asm/ARM64-SURVEY.md, doc/asm/SPEC.md §10-§11), and the AArch64 dialects of `lex.ae` and `gnu.ae`: written by hand on
   2026-11-10 after the same llvm-project tarball's `llvm/lib/Target/AArch64/AsmParser/AArch64AsmParser.cpp` (the operand

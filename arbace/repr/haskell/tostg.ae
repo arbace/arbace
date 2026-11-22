@@ -487,7 +487,7 @@
       (when-let [t (get (:ltypes *r*) x)] (type-reps t))
       [:L]))
 
-(declare unboxed-con?)
+(declare unboxed-con? hnf-arg?)
 
 (def ^:dynamic *body-type* nil)  ; HF10-P8: the top-level binding's result type after its lambdas (an unboxed sum's construction in it)
 
@@ -608,6 +608,20 @@
 (def ^:dynamic *body-tycon* nil) ; the top-level binding's result type constructor after its lambdas, when a data type
 (def ^:dynamic *arities* {})  ; the module's top-level binders (Core's lv or name vector) -> their lambdas' count
 
+(declare newtype-unwrap)
+
+(defn- pap-arg-types
+  "hs-own-stg-2 (a): a function type's parameters as a partial application counts them: its dictionaries' first (each the
+  class applied), then its arguments, through synonyms and newtypes ($fSemigroupIO's sconcat field, $csconcat d: \\ds s ->,
+  IO's State# argument a void binder)"
+  [t]
+  (loop [t t out []]
+    (cond (= :forall (first t)) (recur (nth t 3) (into out (map (fn [[c ts]] (if (vector? c) [:tc c ts] nil)) (nth t 2))))
+          (fun-ty? t) (recur (second (nth t 2)) (conj out (first (nth t 2))))
+          (not= t (expand-syn t)) (recur (expand-syn t) out)
+          (newtype-unwrap t) (recur (newtype-unwrap t) out)
+          :else out)))
+
 (defn- pap-eta
   "CorePrep's cpeArg at -O0 (cpeArgArity's exprArity, cpeEtaExpand): an argument that is a partial application of one
   of the module's top-level functions, whose arity is known, is eta-expanded to that arity: a function closure, not a
@@ -620,7 +634,7 @@
         (when (and ar (> ar (count args)) (pos? (count args)))
           (let [xs (mapv (fn [i] (list 'lv "eta" (str "E" (inc i) ".pe" (swap! *n* inc)))) (range (- ar (count args))))
                 t (if (lv? f) (get (:ltypes *r*) f) (global-type k))
-                tys (when t (drop (count args) (arg-types t)))]
+                tys (when t (drop (count args) (pap-arg-types t)))]
             (doseq [[x t2] (map vector xs (concat tys (repeat nil)))] (swap! *lreps* assoc x (if t2 (type-reps t2) [:L])))
             (list 'lam xs (list 'app f (into (vec args) xs)))))))))
 
@@ -860,6 +874,7 @@
   [c]
   (some true? (map (fn [s r] (and s (= :L r))) (con-strict c) (concat (con-reps c) (repeat :L)))))
 
+(declare hnf-arg?)
 (defn- floatable-con
   "A saturated application of a constructor without strict fields: [CON ARGS]"
   [e]
@@ -867,7 +882,11 @@
     (when (and (head? e 'app) (head? (second e) 'v) (con-name? (second (second e))))
       (let [g (second (second e)) c (as-data g) args (nth e 2)]
         (when (and (not (newtype-con? c)) (not (and (class-of-dcon g) (newtype-class? (class-of-dcon g))))
-                   (= (:arity (con-info c)) (count args)) (not (lifted-strict? c))
+                   (= (:arity (con-info c)) (count args))
+                   ;; (a strict lifted field's argument a value, exprIsHNF: no evaluation, the application a value too)
+                   (or (not (lifted-strict? c))
+                       (every? true? (map (fn [x s r] (or (not s) (not= :L r) (hnf-arg? x)))
+                                          args (concat (con-strict c) (repeat false)) (concat (con-reps c) (repeat :L)))))
                    ;; HF10-P37: a field of several representations takes several atoms (with-atoms')
                    (not (some vector? (con-reps c))))
           [c args])))))
@@ -947,14 +966,16 @@
         (and (= ar (count args)) (some true? (con-strict c)))
         ;; a strict field's argument that is not an atom: case-bound (CorePrep's strict argument), the last
         ;; argument's binding outermost
+        ;; (CorePrep's mkNonRecFloat: a strict argument that is a value, exprIsHNF, is let-bound, not case-bound, and
+        ;; needs no evaluation: a Rational literal's 1 :% 2, its fields IS 1# and IS 2#, static constructors)
         (let [st (concat (con-strict c) (repeat false))
               ats (concat (field-alt-types c) (repeat '(poly)))
-              rs (mapv (fn [a s at r] (if (and s (= :L r) (not (atomic-args? [a])))
+              rs (mapv (fn [a s at r] (if (and s (= :L r) (not (atomic-args? [a])) (not (hnf-arg? a)))
                                         (let [n (fresh "sat")] (swap! *reps* assoc n :L) [n [[:case n :L (expr a) at]]])
-                                        (atom-of a)))
+                                        (conj (atom-of a) (and s (= :L r) (hnf-arg? a)))))
                        args st ats (concat (con-reps c) (repeat :L)))]
           (wrap-binds (vec (mapcat second (reverse rs)))
-                      (strict-con c (mapv first rs) (set (for [[n bs] rs :when (some #(= :case (first %)) bs)] n)))))
+                      (strict-con c (mapv first rs) (set (for [[n bs hnf] rs :when (or hnf (some #(= :case (first %)) bs))] n)))))
         (= ar (count args)) (with-atoms args (fn [as] (strict-con c as)))
         :else (with-atoms args (fn [as] (list 'app (gname (second f)) as)))))
     (and (head? f 'v) (newtype-selector? (second f)))
@@ -963,6 +984,20 @@
     (head? f 'v) (with-atoms (sum-args f args) (fn [as] (list 'app (gname (second f)) as)))
     :else (let [n (fresh "sat")]
             (list 'let (list 'bind [n :L] (rhs f)) (with-atoms args (fn [as] (list 'app n as)))))))
+
+(defn- hnf-arg?
+  "exprIsHNF of a constructor's argument (GHC 9.14's, Note [Strict fields in Core]): a lambda, a literal that is not a
+  string, a saturated constructor application whose strict lifted fields are values themselves"
+  [a]
+  (let [a (flatten-app a)]
+    (cond (head? a 'lam) true
+          (head? a 'lit) (not (string-lit? a))
+          (and (head? a 'app) (head? (second a) 'v) (con-name? (second (second a))))
+          (let [c (as-data (second (second a))) ar (:arity (con-info c)) args (nth a 2)]
+            (boolean (and ar (= ar (count args)) (not (newtype-con? c)) (not (unboxed-con? (second (second a))))
+                          (every? true? (map (fn [x s r] (or (not s) (not= :L r) (hnf-arg? x)))
+                                             args (concat (con-strict c) (repeat false)) (concat (con-reps c) (repeat :L)))))))
+          :else false)))
 
 (defn- alt-type [alts]
   (let [cs (keep (fn [[_ c]] (when (vector? c) c)) alts)
@@ -1660,11 +1695,12 @@
     (let [simpl? (not= "0" (System/getenv "REPR_HASKELL_SIMPL"))
           r (update r :core drop-proof-matches)
           prog0 (binding [arbace.repr.haskell.simpleopt/*unlifted?* (fn [e] (not= [:L] (expr-reps e)))
+                          arbace.repr.haskell.simpleopt/*unlifted-binder?* (fn [b] (boolean (when (lv? b) (when-let [t (get (:ltypes *r*) b)] (not= [:L] (type-reps t))))))
                           ds/*casts* simpl?
                           ds/*unboxed-tuple?* (fn [e] (some? (expr-comps e)))]
                   (ds/desugar-program r))
           ;; the match variables' types (HF10-P20: desugar's fresh-types)
-          r (update r :ltypes merge @ds/fresh-types)
+          r (update r :ltypes merge @ds/fresh-types @ds/retypes)
           _ (set! *r* r)
           ;; HF10-P20: a NOINLINE binding a RULE's right-hand side mentions is external too, as GHC's -O0 output has it
           ;; (Enum's eftInt, efdtInt: eftIntList's right-hand side, which the programs' interfaces name; List's lenAcc,

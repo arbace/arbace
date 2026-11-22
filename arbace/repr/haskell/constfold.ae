@@ -110,12 +110,12 @@
 (defn- lits [kind args] (let [vs (map lit-val args)] (when (every? #(= kind (first %)) vs) (mapv #(conv kind (second %)) vs))))
 (defn- is-lit? [kind e r] (let [v (lit-val e)] (and (= kind (first v)) (= r (second v)))))
 
-(declare int-rule int-ops)
+(declare int-rule int-ops shift-ops)
 
 (defn primop-rule
   "The rewritten application of primop o to args, or nil (mkPrimOpRule's rules in GHC's order)"
   [o args]
-  (if (contains? int-ops o)
+  (if (or (contains? int-ops o) (contains? shift-ops o))
     (int-rule o args)
   (when-let [[kind op] (get ops o)]
     (let [ap (fn [op2 as] (list 'app (prim (op-name kind op2)) (vec as)))]
@@ -195,7 +195,34 @@
    "leChar#" [:char :le]
    "int2Word#" [:int :to-word] "word2Int#" [:word :to-int] "ord#" [:char :to-int] "chr#" [:int :to-char]})
 
+(def ^:private shift-ops
+  {"uncheckedIShiftL#" [:int :shl] "uncheckedIShiftRA#" [:int :sra] "uncheckedIShiftRL#" [:int :srl]
+   "uncheckedShiftL#" [:word :shl] "uncheckedShiftRL#" [:word :srl]})
+
+(defn- shift-rule
+  "hs-r5: shiftRule (IntSllOp, IntSraOp, IntSrlOp, WordSllOp, WordSrlOp at the native word's 64 bits): a shift by a literal 0
+  is its argument, by a negative literal or one of 64 or more zero (Note [Guarding against silly shifts]), a literal
+  shifted by a literal folded (the logical shift on the 64-bit word), the result wrapped to its type"
+  [o args]
+  (when-let [[k op] (get shift-ops o)]
+    (when (= 2 (count args))
+      (let [[e1 e2] args v2 (ilit e2)]
+        (when (= :int (first v2))
+          (let [n (second v2) v1 (ilit e1)]
+            (cond
+              (zero? n) e1
+              (or (neg? n) (>= n 64)) (mk-kind k 0)
+              (= k (first v1))
+              (let [x (second v1)]
+                (mk-kind k (case op
+                             :shl (.shiftLeft (biginteger x) (int n))
+                             :sra (.shiftRight (biginteger x) (int n))
+                             :srl (.shiftRight (biginteger (wrapw x)) (int n)))))
+              :else nil)))))))
+
 (defn- int-rule [o args]
+  (if (contains? shift-ops o)
+    (shift-rule o args)
   (when-let [[k op] (get int-ops o)]
     (let [vs (mapv ilit args)
           lits (when (every? #(= k (first %)) vs) (mapv second vs))
@@ -230,7 +257,7 @@
         :to-word (when lits (mk-word (first lits)))
         :to-int (when lits (mk-int (first lits)))
         :to-char (when (and lits (<= 0 (first lits) 1114111)) (list 'lit (str "'(char " (first lits) ")'#")))
-        nil))))
+        nil)))))
 
 (defn lit-eq
   "ConstantFold's litEq (Note [The litEq rule: converting equality to case]): x ==# lit (or lit ==# x, and the other
@@ -245,7 +272,7 @@
                 [eq ne] (if (= op :eq) [true-i false-i] [false-i true-i])]
             (list 'case x (mk-wild) [(list 'alt :default [] ne) (list 'alt lit [] eq)])))))))
 
-(defn has-rules? [o] (or (contains? ops o) (contains? int-ops o)))
+(defn has-rules? [o] (or (contains? ops o) (contains? int-ops o) (contains? shift-ops o)))
 
 (defn fold
   "An expression with the floating-point primops' rules applied bottom-up, to a fixpoint at each application"

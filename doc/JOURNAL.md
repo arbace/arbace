@@ -15688,3 +15688,593 @@ models computing their tables exactly, so their verdicts are their own. Done on 
   Python's judge stage 0.9980 -> 1, independence 0.9996 -> 1.0000; --judge --strict, --self-test, bin/records-check and
   bin/reap: 0 problems. indep-out-1121 splits the same entry 127/24; merged after it, both rows become 151 own.
 Light: no gate; stage 0 the gate's executable 6aae87f093d10041e7ed.
+
+## 2026-11-21: the Rust line back in next
+
+The Mac's 512 (mac/512-rust-causes5 a5cfe536f) found rust-front-essential's one differing body: not 498's constant-switch arm but 474's
+ab8999fea, which ran RemoveNoopLandingPads again just before SimplifyCfg-pre-optimizations (a6's `f`: `drop(_2) -> [return: bb2, unwind
+continue]` where rustc keeps `unwind: bb4`, a bare cleanup resume; rustc runs that pass again only among run_optimization_passes, before
+SimplifyCfg-final). The runtime pipeline's last pass is SimplifyCfg alone again, and build-run's o0-normalize runs RemoveNoopLandingPads in
+rustc's place. The revert d0cdf3d7f is reverted (bbe3c5eec) and 512 merged; the 2026-11-21 entry that blamed 498 is corrected by this one.
+## 2026-11-22: x86-print round 1: the x86-64 print cell's object texts by their own words, the LFI rewriter
+
+The burst's stream X1 (branch `x86-print-1122` from `mac/next` `863bdaea1`): x86-64 assembly's print cell at 194,796 pass /
+1,187 by design / 531 deferred, ranked by cause: the cross judge's `:ambiguous` 566 (by design), `:object-unjudged` 406 (deferred),
+`:other-tool` 366 (by design), `:pcrel-imm` 118, `:unread` 63, `:lfi` 61, `:debug-trace` 57, `:mask-operand` 33,
+`:other-instruction` 21, `:disassemble-only` 12, `:other-target` 7, `:diagnostic` 4, `:dollar-name` 2, the round trip's 1 + 1.
+- `:object-unjudged` (406 deferred): queue 337's object verdict was never recorded on the main host (its cells.edn source `:until`);
+  recorded (`bin/repr-asm object-verdict --record`, 68 files, 864 of 1,243 lines, controls failing) and the 36 files re-recorded:
+  362 met, 43 `:other-format`, 1 `:debug-trace` (--stats).
+- `:other-tool` (366 by design, AXS95 (a)'s "the object is judged at the AOT level"): re-examined; the texts are the tests' own
+  words over the object, so `arbace.asm.amd64.check/other-tool-class` now holds them to the verdict's view for every file (arm64's
+  judge-rest's rule): 332 met, 32 `:other-format`, 2 `:elf32`, 1 LFI. Alternative kept: leave them by design (rejected: a check
+  Arbace can make).
+- `:other-target` (7): not another target; x86-evenDirective's `-x86_64-unknown-unknown` is Triple::normalize's x86-64
+  (`check/norm-triple`; objcheck no longer takes a flag's value for a flag); its 7 readobj --sd texts met (the view takes --sd).
+- `:lfi` (61 deferred, "no source in the corpora to port"): the pinned llvm-project 23.1.5 tarball holds
+  `llvm/lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp` and `llvm/lib/MC/MCLFI.cpp`; ported as `arbace/asm/amd64/lfi.ae`
+  (LICENSE.md, doc/ARBACE.md), used by the print level and the object assembler: 61 texts and the note's readelf line met,
+  thread-pointer-errors' 6 error lines met. mayLoad/mayStore (pattern-inferred in X86, not in the table) is read as "a memory
+  operand that is not an address", documented in the namespace; adding them to the table (regenerating asm/amd64/table.edn with
+  pattern inference) was weighed and left: no test tells the two apart.
+- Proof: encode-check `--only` over the 67 files: 767 of 845 texts, the rest `:other-format` 75, `:elf32` 2, `:debug-trace` 1;
+  cross 565 of 567; controls failing; recorded with `--record --only`. bin/reap --record: print 194,796 / 1,187 / 531 ->
+  195,558 / 890 / 66; bin/crops-score --record (x86-64 assembly's completeness 99.4% -> 99.5%), --judge --strict and
+  bin/records-check: 0 problems. doc/asm/AMD64-SURVEY.md, "As built: x86-print".
+Light: no gate; stage 0 /root/arbace/target/seed/amd64/arbace.
+
+## 2026-11-22: x86-print round 2: the by-design classes re-examined (the matcher's trace, warnings, --stats, cpuid, the read's two)
+
+Stream X1's second round (branch `x86-print-1122`), each by-design class of x86-64 assembly re-examined as the burst's rules ask
+(implement what can pass; what truly cannot goes to the user with its rows):
+- The cross judge's `:ambiguous` (566): 29 are the same instruction with the same encoding (an imm8 printU8Imm masks, `bt eax,
+  255` for $-1; a scale without an index the encoder ignores): `arbace.asm.amd64.check/same-machine-insn?` takes instruction and
+  encoding byte for byte as the same machine instruction (control-cross uses it too): they pass. 537 are llvm-mc's own (471 `_REV`,
+  66 operand-size variants): no Intel text of llvm-mc's tells them apart (X86AsmParser.cpp of the pinned tarball has no `{load}` or
+  `{store}`; the `.s` aliases are EmitPriority 0); left for the user with `:pcrel-imm` 118, `:mask-operand` 33, `:other-instruction`
+  21, `:disassemble-only` 12, `:dollar-name` 2. Alternative weighed: compare encodings alone (AXS34 (b)): rejected, it hides the
+  `_REV` forms' different opcode.
+- `:debug-trace` (58): x86_64-asm-match's 57 lines are MatchInstructionImpl's -debug-only=asm-matcher trace, which the matcher can
+  write as LLVM's does (llvm/utils/TableGen/AsmMatcherEmitter.cpp's emitted lines, X86Operand.h's print, read from the pinned
+  tarball): `arbace.asm.amd64.asm/*trace*`, 57 of 57 met; align-branch-convergence's --stats line is MCAssembler's RelaxationSteps:
+  `arbace.asm.obj/layout!` now follows relaxOnce's loop (FirstStable, the last moved section; a chunk's size change counts when it
+  moves the next chunk) and counts it, met (3); object-check, the verdict and arm64's object checks unchanged.
+- `:diagnostic` (4): CheckDispOverflow ported into the operands (the 64-bit displacement error, the 32/16-bit warnings, the value
+  shortened); the print level holds warning texts to the parser's warnings with their line and column: 4 met, the error runs' 4 error
+  lines met.
+- The read cell's `:error-input` and `:not-input` (1 + 1, also the print cell's round-trip source): the Inputs/ file another test
+  gives to `not llvm-mc` is read as an error test is and passes on a refusal; the not-input test file is read with its statements kept,
+  judged by the round trip's own levels (its refusals by nothing: no RUN line gives it to llvm-mc). A judgment call reported to the
+  user: the second relies on the round trip alone.
+- `:unread` (63, deferred): pad-for-align-debug's runs read `%S/Inputs/pad-align-*.s`; a run reading another file is now held to the
+  object verdict: Mach-O's `:other-format` (by design, AXS99 pending).
+- The eval cell's `:cpuid` (2, AXS58 (a)): the native's cpuid answered with x86i's model in the CPU's run and the sys mode, as the
+  step mode already does: `x86i.CpuidModel` factored from x86i's cpuid; the lockstep's sys mode runs x86i first and puts an int3 at
+  each cpuid it is about to run before the native runs (`sysRun`, `sysResume`; put back before a switch to the step mode); the
+  driver's `x86i cpu EXE` is the CPU's run of a `# cpu: cpuid` program (an int3 at each cpuid of decode-text's sweep). Controls
+  inject-cpuid-model and lockstep-cpuid-model (X86I_INJECT=cpuid:model alters x86i's answer only) fail as they must.
+- Found and fixed: two `grep -q` at a pipe's end under pipefail in bin/repr-asm (the objverdict list let large-eh-encoding in at
+  random, 68 or 69 files; the new error-input flag never set).
+- Proof: the whole encode-check (12.5 minutes): 106,074 of 106,075 encodings, 108,461 of 108,601 texts, cross 86,380 of 87,103,
+  every control failing, the judge ok against the record (no row worse); then `--record --only` over the 14 files moved; object-verdict
+  `--record` (68 files, 865 of 1,243); the round trip of mc-asmparser and mc-x86 `--record` (157 and 621 pass); x86i-check `--record`
+  whole (9 minutes: 46 of 46 at every level, lockstep/cpuid and x86i/cpuid pass, its controls failing).
+- bin/reap --record: read 25,253 / 1 / 1 -> 25,255 / 0 / 0; eval 136 / 2 / 0 -> 138 / 0 / 0; print 195,558 / 890 / 66 ->
+  195,651 / 861 / 2. bin/crops-score --record: x86-64 assembly's completeness 99.5% -> 99.9% (100.0% without by design);
+  --judge --strict and bin/records-check: 0 problems. The coordinator stopped the burst here (allowance): ELF32 (the 2 deferred) not
+  started; the by-design classes left are listed for the user in doc/asm/AMD64-SURVEY.md, "As built: x86-print".
+Light: no gate; stage 0 /root/arbace/target/seed/amd64/arbace.
+## 2026-11-20: hs-own-stg, third round (memory caps, the coordinator's five causes, hs-own-stg-1 (a)'s reference run)
+
+Branch `hs-own-stg-1120`, after the second round's entry. The coordinator's order: cap every experimental run at 6 GiB; the
+constructor saturation, eta expansion through IO, binding order, Typeable.Internal's kinds, update flags; base's whole number;
+hs-own-stg-1 (a)'s -O0 reference when the heavy lock's queue is short. Mid-round (the coordinator's rule, the queue at nine jobs
+for up to 2.7 h with 41 GB free): a job under 8 GiB runs directly under `ulimit -v 8388608`, no heavy lock.
+
+**Memory.** Every targeted run (`.tmp/ana/run-only`) under `ulimit -v 6291456`; the whole passes under 8 GiB, no heavy lock (the
+queued `rebuild3.sh` and its heavy-lock wrapper killed at 18:38, its ticket gone with it). Peaks: ghc-internal's whole lib-stg
+3.1-3.2 GB, base's 1.7 GB, GHC's -O0 reference dump 0.8 GB. The cap caught round 2's runaway at once: the Go runtime's "out of
+memory" at 4.5 GB in use, the allocation a `vec` in evaluated code; con-pap-eta's `(vec (concat (con-reps c) (repeat :L)))`, a
+vector of an infinite sequence.
+
+**hs-own-stg-1 (a), the coherent -O0 reference.** Run directly (18:40, 8 GiB cap): ghc-internal compiled at -O0, base failed
+(`HsBase.h: No such file or directory`): `bin/hsi pkgdb-O0` copied the installed ghc-internal entry, whose include, library and
+data dirs are `${pkgroot}`-relative, into another database (`8cc9adafa` writes `$libdir` in their place). Second run 18:52-18:59:
+510 dumps of ghc-internal, base, ghc-prim and ghc-bignum into `.tmp/hsi/dumps-O0` (not recorded): ghc-internal's 267 bodies
+byte-equal to the pack's (their headers name the database flag), base's 23 of 241 different (the default methods' unfoldings,
+and SrcLoc's fields: ghc-internal's UNPACKed strict Ints are boxed at -O0). Re-judged without re-recording (LIB_STG_REF): ghc-
+internal's counts are the pack's by construction (equal bodies). base needs every unit's constructors at -O0
+(`673fa1b8b`, `LIB_STG_O0_LAYOUT=all`; with lib-stg's --o0-layout 1 Data.List.NonEmpty, Data.Bifoldable and
+System.CPUTime.Unsupported lose 11, 4 and 2 against the coherent reference: they held ghc-internal's SrcLoc unpacked).
+
+**1. The constructor partially applied (`b49c40b37`).** Round 2's diagnosis (CorePrep's maybeSaturate) was the wrong mechanism:
+the con-pap-eta retry, its runaway fixed, gave no binding (every eta binder CorePrep's one name a position, `eta_E1`, where GHC's
+binders are fresh: ds1_366, ds1_369). GHC's is the typechecker's and desugarer's ConLikeTc (GHC.Tc.Gen.Head's tcInferDataCon,
+GHC.HsToCore.Expr's ds_app, Note [Typechecking data constructors]): every data constructor occurrence is \ds .. -> K ds .. applied
+to its arguments, the simple optimiser beta-reducing (showChar = (:) is \ds ds1 -> ds : ds1). typecheck.ae's con-eta wraps the
+unsaturated occurrences. ghc-internal 8,394 -> 8,430 (10 modules better, 0 worse).
+
+**2. Eta expansion through IO (`d9811d65d`, part).** The instance method binders had no type (fresh locals), so findRhsArity had
+no typeArity and mkEtaWW no type: they are noted now. IO's $c<> is GHC's $c<>10 binder for binder (\d a b (s :: State#) -> case a
+void# of ..). ghc-internal +3 (Conc.Sync, ReadPrec 18 -> 20). $fSemigroupIO itself still differs; DECISION hs-own-stg-2 below.
+
+**3. Binding order (`448e539a4`).** rename.ae's scc is containers' Data.Graph.scc as GHC.Data.Graph.Directed uses it (Kosaraju's,
+edges sorted by node order, the transpose's lists as accumArray (flip (:)) builds them, a cycle in preorder); Tarjan's matched
+independent nodes only. bigNatAnd's banged where bindings are forced szB first as GHC does. BigNat 95 -> 101, Backend.Native
+18 -> 21 (correction: the commit message also credits Conc.Sync 56 -> 57, which is `d9811d65d`'s; that measurement ran with it).
+`bin/repr-haskell rename-check` (GHC's renamer live): every module still equal, group order equal in 33 of 80 modules (26).
+
+**4. Typeable.Internal (`fa37c9289`, part).** add-given! expands each side's synonym at the head (canEqNC's coreView):
+getRuntimeRep's TrType alternative, TYPE r ~ Type, now gives r ~ BoxedRep Lifted. 16 -> 15 errors, no binding changes. The rest
+is the kind equalities of its GADT matches; DECISION hs-own-stg-3 below.
+
+**5. Update flags (`3a7932d8c`, one cause).** leftSection's compulsory unfolding was one lambda of two binders without occurrence
+information, so a left section's application (op e) was substituted into the lambda, a function closure where GHC let-binds it,
+a thunk (elemIndex x = findIndex (x==)); the template is rightSection's now. OldList, Show, ReadP, Bits, Text.Read.Lex, Exts,
+Stack, Stack.CCS, Data.Version, Control.Arrow one or two each (correction: the commit message's ReadPrec 18 -> 20 is
+`d9811d65d`'s).
+
+**Two more** found on the way: `c2a60711f` a strict field's argument that is a value (exprIsHNF: a Rational literal's IS 1#, IS 2#)
+is let-bound, not case-bound, and the application floats as a static constructor (Real's $dmround, Float: +2); `1d5ae3d4f`
+tools/hsprimops/primops.awk ports genprimopcode's bytearray_access_ops and addr_access_ops (AccessOps.hs): 180 ByteArray# and
+Addr# primops the table lacked, which the Simplifier took for functions of arity 0 (wordWriteAddrLE#'s arity 2, GHC's 3):
+primops.ae regenerated from the pinned tarball, 582 -> 762 entries (Bignum.Primitives 37 -> 40, BigNat +1).
+
+**Results** (each whole pass in a detached worktree `.tmp/worktrees/hs-own-stg-b` at the commit, judged, no record):
+- ghc-internal, `lib-stg --ifaces own --judge` over all 265 modules (the pack's reference, the coherent one's bodies equal):
+  `b49c40b37` 8,430; `d9811d65d` 8,433; `3a7932d8c` 8,453; the head `1d5ae3d4f` on the own pools rebuilt there **8,467 of 10,007**
+  (the round's start 8,394; n-hs-libs' record 7,982), 0 worse or missing at each, the control 0 of 171, 79 modules with every
+  binding equal (77); Typeable.Internal the one module at errors (15). The passes before the head read the own pools of
+  `ee24d0650` (the detached worktree's copy of lib-check's work names the branch worktree's absolute paths); the head's rebuilt
+  them: `lib-check --ifaces own --judge` 265 modules, 0 worse, 3 better (Bignum.Integer and TH.Lift errors -> ok, Typeable.Internal
+  16 -> 15 errors), base's 241, 0 worse, 4 better.
+- base, `lib-stg --package base --ifaces own --judge`, 1,097 bindings (recorded 584; round 2's pass 641 at `2cb904800`): at
+  `b26839c64` with ConLikeTc 845 on the pack, 864 on the coherent reference (LIB_STG_O0_LAYOUT=all); at `3a7932d8c` 847 and 867;
+  at the head on the rebuilt pools **850 on the pack, 876 on the coherent reference**; 0 worse at each, the control (Data.Complex)
+  0 of 25. The coherent reference's gains over the pack are Control.Applicative, Data.Complex, Data.Fixed, Data.Functor.Compose,
+  Product and Sum, Data.Semigroup, GHC.Stats and System.Timeout (the default methods' -O0 unfoldings).
+- classes.ae at `b49c40b37` (1,577 differing): unclassified 489, closures or fields 381, case for let 221, the call stack's
+  placement 172, update flags 117 (57 of them instance dictionaries), a type's name 57, binding order 48, a static constructor
+  34, arity 26, given equalities' selectors 21.
+
+**DECISION hs-own-stg-2: the default methods inlined at IO** ($fSemigroupIO's sconcat and stimes; the class's defaults at a known
+dictionary of a newtype over a function: IO, ST, ReadP). GHC instantiates the inlined default's local workers (sconcat's go,
+stimes's f and g) at IO a by type application, so the Simplifier eta-expands them through IO and the class-op rule resolves <> on
+the known dictionary, its AbsBinds wrapper inlined at its dictionary arguments. Our Core has no type arguments: the workers keep
+the class method's polymorphic types. Options: (a, recommended) typed inlining: at a beta-reduction whose binder's type has type
+variables and whose argument's type is known (core's exprType), the one-way match's substitution applied to the types of the
+template's binders as the Simplifier clones them (a clone forced where the substitution changes a type), and the AbsBinds
+wrapper inlined at known dictionaries (its arguments' discount); about a day, the sizes: $fSemigroupIO and $fMonoidIO, ST's,
+ReadP's and ReadPrec's instances, part of the update-flag class's 57 instance dictionaries (not measured which); (b) type arguments in
+Core (the desugarer's and Simplifier's applications carry types): faithful, weeks; (c) leave them.
+
+**DECISION hs-own-stg-3: Typeable.Internal's kind equalities** (15 errors in one module, 38 of 74 bindings equal; typeRepKind's
+TrType, TrTyCon and TrApp alternatives, the Fun pattern synonym's provided k ~ Type, TrFun's FUN m a b). A GADT match on
+TypeRep (a :: k) gives (a :: k) ~ (Type :: Type), hence k ~ Type; our [:tc TypeRep [a]] has no invisible kind argument.
+Options: (a, recommended) kinds of the skolems from the signatures' and constructors' kind annotations (*tv-kinds*), and add-given!
+adding the kinds' equality when it binds a kinded skolem (kind-of of the other side: Type's, an application's result kind), the
+pattern synonym's builder checked under its provided equalities; about half a day, the module from errors to ok; (b) invisible
+kind arguments in type constructor applications (TypeRep @k a): faithful, a change to every poly-kinded type; (c) leave it at
+errors (its own STG judged as now).
+
+**Lane 2's expectation.** next's 05:07 run (this morning's report): 725 of 777 eligible programs own, 712 passing. Round 2 removed
+five own-fallback entries (tcrun019, tcrun024, tcrun025, conc013, T25998) that pass on the own libraries. Expected when lane 2
+runs: about 730 of 777 own (717 passing), more only if round 3's STG changes turn some of the 23 remaining fallback programs
+(:front-run, :own-report, :own-lib, :untried-cap); not measured here (lane 2's run).
+
+Not run: the gate, any record, the own programs.
+
+## 2026-11-20: hs-own-stg, fourth round (hs-own-stg-3 (a), hs-own-stg-2 (a))
+
+Branch `hs-own-stg-1120`, after the third round's entry. The coordinator took both decisions: hs-own-stg-3 (a) first, then
+hs-own-stg-2 (a); the same caps (6 GiB experiments, 8 GiB whole passes); each commit with whole-pass counts; the fallback
+programs rounds 3-4 would flip for lane 2 (measuring at `b26839c64`).
+
+**hs-own-stg-3 (a) (`f8e51f7b0`): GHC.Internal.Data.Typeable.Internal from 15 errors to none.** Traced unification by
+unification (REPR_HASKELL_TC_TRACE): typeRepKind's TrType, TrTyCon, TrApp and TrFun alternatives, the Fun pattern synonym's
+matcher and builder, the (->) against FUN 'Many, typeLitTypeRep's Typeable k at its uses, splitApp's NotApplication a. The
+pieces: the kind annotations of the signatures', pattern synonyms' and GADT constructors' variables kept by name (a
+signature's skolem sk_X X's; a constructor's existential skolem its own) and a signature's class constraints giving kinds
+(KnownNat a: a :: Nat, an imported class's parameter kinds from its methods' types); a given equality binding a kinded skolem
+gives its kinds' equality, a GADT pattern's universal its instance's kind (TrTyCon's (a :: k')); an annotated variable's
+instantiation links its kind to its instance's (unified before the last solving); GHC.Internal.Prim's FUN m a b unifies with
+the arrow at m := Many, its kind Type; a constraint family's stuck application rewritten by the given equalities.
+
+**hs-own-stg-2 (a) (`c2333a4a2`, `eee23a833`): typed beta reduction.** A dictionary parameter's type is its class applied,
+every dictionary function's type is in the Simplifier's genv, and a beta reduction matches the binder's type against the
+argument's (core's exprType under the substitution so far): the Simplifier clones the body's binders the match retypes
+(GHC's substIdType), the simple optimiser retypes them in place (desugar's retypes, merged into :ltypes); a partial
+application's eta binders take its type's parameters through newtypes. Then simplify.ae's preInlineUnconditionally lost a
+join-point exclusion GHC does not have (GHC 9.14's excludes only Exitify's exit join points): stimes's g wrapper, a join point
+called once from f's recursive join point, is inlined at its dictionaries. $fMonoidIO is GHC's; $fSemigroupIO's <>, sconcat
+and stimes have GHC's arities and void binders, the rest of it the superclass selections' placement (GHC's cases before the
+join point, ours lets inside it).
+
+**Results.** Each whole pass in a detached worktree at the commit with its own pools (lib-check and lib-stg --ifaces own of
+ghc-internal and base, judged, no record; 8 GiB). At `f8e51f7b0`: ghc-internal lib-check 265 modules, 0 worse; lib-stg
+**8,467 of 10,007**, all 265 modules ok (Typeable.Internal from errors), control 0 of 171; base lib-check 241, 0 worse;
+base lib-stg 876 of 1,097 on the coherent reference, 0 worse, control 0 of 25. At `eee23a833` (with both parts of
+hs-own-stg-2): ghc-internal **8,468** (Base 161 -> 162: $fMonoidIO), all ok, 0 worse; base **876** on the coherent reference,
+850 on the pack, 0 worse. `759a9597e` and `872d7aea3` (below) leave both unchanged.
+
+**The fallback programs (lane 2).** Tried on the own libraries (HSI_OWN_FALLBACK=try, 6 GiB a program) at `eee23a833` and, for attribution, at lane 2's
+`59dea8370` with its own libraries: the 15 entries of own-fallback.txt that can run (the :front-run and :own-report ones; the
+8 :untried-cap ones need more than the cap) end the same at both heads. Rounds 3-4 flip none of them; testsuite/numeric/
+should_run/T8726 passes at both (the light run's 2 GiB was its limit), so it can leave the list at the next lane-2 run.
+
+**The night's merge (interrupting the round).** Lane 2 found bytestring's 2 and time's 17 modules from ok to errors in
+lib-check at `b26839c64`: round 2's derived Lift names Template Haskell's library (GHC's known-key names, loaded on demand),
+and 3 of time's modules' derived Data wanted base's Data (Fixed (a :: k)), whose kind variable our types do not carry.
+`759a9597e`: GHC.Internal.TH.Lib's interface in the grown closure of a module that names Lift; an instance's lone free variable
+used only in Typeable takes the head variable's instance's kind. bytestring 31 and time 47 modules 0 worse again. The
+coordinator's proof: the rule fires (trace) only for base's Data (Fixed) in time's DiffTime, NominalDiffTime and TimeOfDay
+(applied) and for Show (TypeRep (a :: k)) in binary's Data.Binary.Class (not applied), but its kind computation took fresh ids
+and renumbered that interface's unfolding binders: `872d7aea3` gives them back. With both, on lane 2's pools: binary's pool and
+STG byte-identical to lane 2's, time's pool byte-identical, its STG different exactly in the 17 modules lane 2 had at errors.
+On a branch `hs-lane2-fix-1120` (59dea8370 + the two, `d2700be27`): time's own libraries rebuilt, the ten programs that load
+them re-run (eval and the four AOT rows): outcomes as recorded, timings only; reap, crops-score, records-check unchanged.
+
+Not run: the gate, any record.
+
+## 2026-11-21: hs-r5-1121: Haskell's eval and AOT programs not own, fifth round (the front end's causes; lane 2's records again)
+
+Branch `hs-r5-1121` from mac/next `863bdaea1`, by an agent of the main host (the coordinator's brief: bring Haskell's eval and AOT
+independence stages toward 1.0, making own as many as the causes allow of the 40 eval programs lane 2 left on GHC's recorded STG,
+0.5 each, and of AOT's 4; then lane 2's two records once more at the branch's head). mac/hs-own-stg-1120 `094d7a5a0` merged first
+(`e780b92fc`: rounds 3 and 4, Typeable.Internal from errors and typed inlining; its 759a9597e and 872d7aea3 were next's already as
+12bb439e1 and 645fd36d7; the journal's two appends kept, next's first), held until now because it moves the programs' STG and this
+round ends with a re-record. Light: targeted `HSI_OWN_FALLBACK=try bin/hsi check --libs own --only` runs (6 to 8 GiB a program, one or
+two jobs) on own libraries made at the branch while it changed (`.tmp/r5/prep.sh`, lane 2's prep), the front end alone on single
+programs (`.tmp/r5/front.sh`); no gate.
+
+**The 40 before** (check-hsi-own.edn at next): 23 of own-fallback.txt (15 runnable, 8 :untried-cap), 7 stopped by the front end's
+typecheck (T5462Yes1, T13688, T15598, T4809, T9497a-run, T9497b-run, T9497c-run), ManyUbxSums (no line from the front end in 600 s),
+quotRem2Large (a StackOverflowError in the front end), 8 :ineligible. AOT's 4 on the pack: runtime-deep (:untried-cap), T19289 and
+StrictPats (the list), T15598 (typecheck).
+
+**The front end's typecheck stops** (`8099038bb`; each after GHC 9.14.1's own rule, no GHC code ported):
+- T15598 and T22086, RebindableSyntax's do: the renamer took no operator under RebindableSyntax, the elaborator always GHC.Internal.Base's
+  (>>=), so `_ <- show 42; prog` with a local `(>>=) = InfDo` unified [Char]'s list with InfDo. Now the renamer attaches the (>>=) and
+  (>>) in scope (GHC.Rename.Env's lookupSyntaxName: the unqualified name's lookupOccRn), and the elaborator types a bind statement as
+  tcSyntaxOp does (the operator's type first, the continuation checked against its second argument, skolemised when that is a polytype:
+  InfDo's `forall a. a -> InfDo`), its HasCallStack frame "a do statement" at the statement (T22086's expected stack). Only under
+  RebindableSyntax; the standard path is byte for byte as before (its wanteds' order kept).
+- T5462Yes1 and T4809, derived instances of imported classes of type constructors: DeriveAnyClass' GFunctor and GND's MonadIO, MonadCont,
+  MonadWriter w, MonadState s... kept the head at the type's every argument (GFunctor (B a), Monad (XMLGenT m a) wanted as a
+  superclass). derive-all! knew the class's kind only for the module's own classes; class-last-arity now reads an imported class's
+  last parameter's kind from its methods' types (ctx-kinds' rule; else a superclass whose last argument is that parameter), and a
+  request of arity 1 drops the type's last argument (GHC.Tc.Deriv's deriveTyData), anyclass and multi-parameter requests included.
+- T9497a-run, T9497b-run, T9497c-run, typed holes: `main = _main` under -fdefer-typed-holes (or -fdefer-type-errors) is GHC's deferred
+  hole, a typeError of GHC.Tc.Errors' message at run time. The elaborator makes an unbound `_x` a hole (HsUnboundVar), its evidence a
+  placeholder typeError filled once the binding group is solved (hole-text): Found hole with its type and the hint of a named hole,
+  the contexts (the hole's own expression none: addExprCtxt skips HsUnboundVar), the relevant bindings (the group's binders, unfiltered
+  for a hole) and the valid hole fits (GHC.Tc.Errors.Hole: the binders first, "bound at", then the imports' names, the renamer's GREs
+  with their ImportSpec, "imported from ‘Prelude’ at FILE:1:1 (and originally defined in ‘M’)"; GHC.Internal.Err's left out,
+  not_trivial; each candidate checked by tcCheckHoleFit's rule in a sandbox: instantiated, unified with the hole's type, every
+  constraint solved by the instances or a defaulted call stack; sorted by the size of its type applications, at most 6). The text of all
+  three is GHC's byte for byte (readLn @() and mempty @(IO ()) found among Prelude's 250 names). bin/lib/hsi/check passes
+  -fdefer-typed-holes to the front end as it passed -fdefer-type-errors.
+- quotRem2Large: the Simplifier recursed 7 interpreted calls a cons of its 1,080-element literal list, past the evaluator's 10,000
+  (MAX_DEPTH, fixed in stage 0's runtime); rebuild-go recurs for its own continuations and simpl-in-id calls it directly (5 a cons).
+- ManyUbxSums: the generated module (1,331 functions and 1,331 tests, 10,663 lines) took 177 s in a 3 GiB heap but ran past 600 s in
+  the check's 1.5 GiB (HSI_FRONT_MEM), collecting. The renamed tree was held twice through the elaboration and the STG (rename-file's
+  result keeps it as :tree, nothing reads it after; the copy read from its file stayed in compile-module's frame: the interpreter
+  clears no locals); now it is held once and let go before the STG (dissoc, and a volatile emptied in a function of its own): 438 s
+  at 1.5 GiB alone (tc :binds 194 -> 46 s), 176 s in the check's front shard.
+
+**own-fallback.txt's 15 runnable entries** (tried on the own libraries; the reason each was listed, then what happened):
+- T8726 (:own-report): passes (the light runs' 2 GiB had been its limit; 33.5 s).
+- T22086 (runs differently): RebindableSyntax's (>>) above; passes.
+- T16449_2 (runs differently, printed 1099511627776): GHC's -O0 Simplifier folds `uncheckedIShiftL# 1# 1000#` to 0 (ConstantFold's
+  shiftRule, Note [Guarding against silly shifts], read in the pinned tarball's compiler/GHC/Core/Opt/ConstantFold.hs); hsi computed
+  the masked shift. constfold.ae ports shiftRule for the native Int and Word shifts (`2f4024507`); passes.
+- T19289 (runs differently, a frame missing): a pattern synonym's required HasCallStack is pushed at its occurrence (GHC's OccurrenceOf
+  origin, "Annotated, called at T19289.hs:24:26"); tc-patsyn-pat took it as a plain wanted. Passes.
+- T246 (stopped by undefined): a record pattern's fields are matched in the order the pattern writes them (matchOneConLike's
+  select_arg_vars, Note [Record patterns]); tc-rec-pat made the positional pattern in declaration order. It notes the written order on
+  the pcon, and the desugarer's match-cons matches those columns in it, consecutive equations of one order a group (compatible_pats);
+  a pattern in declaration order is matched as before. Passes.
+- dsrun007 (case on a function): `C{}` of a constructor without labels was C itself; dsExpr's RecordCon gives each argument
+  recConError "SPAN|" (unlabelled_bottom), a missing labelled field "SPAN|f" (mkErrorAppDs; it was the bare label). Passes.
+- T9858c (runs differently, (True,False)): `() :: Constraint` is GHC.Classes' CUnit, a type constructor of its own; the kind
+  signature was erased. Passes.
+- StrictPats (runs differently, 5 of 19 cases): GHC's isUnliftedHsBind makes a binding of an unlifted binder strict (dsUnliftedBind's
+  case); a where-binding of Int# whose right-hand side is representation-polymorphic (undefined :: Int#, I# _x = undefined) was dropped
+  dead by the simple optimiser, which judged its expression lifted. simpleopt keeps a local binder of an unlifted type from inlining or
+  dropping by the binder's noted type too: 18 of 19 cases now; n's `_x = undefined :: (# () #)` (an unboxed 1-tuple of a lifted type,
+  whose representation is a lifted one's) still dropped. Stays listed.
+- T14236 (was a stop, now runs differently): Type.Reflection's App over the own Typeable.Internal prints FUN 'Many 'IntRep ('BoxedRep
+  'Lifted) Int# [Char] where GHC's mkTrApp rebuilds the TrFun. Stays.
+- T10481 and UnliftedNewtypesDependentFamilyRun (not an integer: a thunk): `I# (raise# e)` floated with raise# at Int# a lifted thunk
+  (the untyped Core does not carry raise#'s representation; GHC's STG drops the I#, a bottom). Tried case-binding such a field in tostg:
+  the Simplifier floats it to the top level before, no change; reverted. Stay.
+- UnliftedNewtypesIdentityRun (no (#_|#)): an unlifted newtype over an unboxed sum, its match and construction not seen through. Stays.
+- FMA_ConstantFold (runs differently): an -O test, expect_broken(21227), whose reviewed golden output is GHC's -O constant folding of fma
+  losing the signed zeros; the -O0 front end computes IEEE results (no FAIL line). Stays.
+- T16650b, T7861: as listed (an unlifted array through unsafeCoerce#; GHC's deferred impredicative error). Stay.
+
+**The 8 :untried-cap entries**, one at a time at 8 GiB (the check's 60 s of CPU): last-piece, Loop, runtime-deep, readMVar1, fptr02 and
+CarryOverflow pass (4.96 to 34.66 s); compareByteArrays and T23071 are killed at the CPU limit as their lines of lane 2's record are on
+the pack (so 16 GiB would change nothing), in divergences-own.edn's :own-speed already; all eight left the list (`cefa9cc5a`).
+own-fallback.txt 23 -> 8 entries.
+
+**The 8 :ineligible:** nofib/gc/happy's IOExts is imported only under `#ifdef DEBUG` (its Makefile's -cpp): bin/lib/hsi/check's scan now
+leaves an import found only under a CPP conditional to the front end, which preprocesses first as GHC does; happy compiles (15 modules)
+and passes own. The other seven cannot be own by a small addition: T13825-unit and unboxedsums_unit_tests import GHC (the ghc package,
+the compiler itself); TestTypeableBinary GHCi.TH.Binary (ghci, over ghc-boot and ghc-platform); T25364 GHC.Utils.Encoding (ghc-boot,
+with ghc-platform); T24245 GHC.TypeLits.Experimental (ghc-experimental: one package over base and ghc-internal, but a new own package is
+its lib-check and lib-stg producers, a gate step haskell-lib-own-ghc-experimental and their records); foundation
+GHC.Internal.PrimopWrappers (ghc-internal's generated module, genprimopcode --make-haskell-wrappers: primiface.ae parses primops.txt.pp
+already, but lib-check's plan, the native read and lib-stg take a package's modules from the tarball's sources, and the module enters
+ghc-internal's records); tcrun022's RULES pragma (an -O test whose rule fires; the -O0 front end applies no user rule). T13688 needs
+Template Haskell's quasi-quote splices run at compile time, which the front end does not do.
+
+**The re-record** at `cefa9cc5a` (the code commits `8099038bb`, `2f4024507`, `cefa9cc5a`), lane 2's scripts adapted (`.tmp/r5/final.sh`:
+prep.sh, then run.sh eval and aot):
+- The own libraries rebuilt from empty (19:11-21:01, every process under 8 GiB and 1.9 GB of RSS): lib-check --ifaces own --judge of
+  ghc-internal 265 modules, 0 worse, 3 better; base 241, 0 worse, 4 better; the 20 packages above base each 0 worse (bytestring's and
+  time's lane-2 errors gone with 759a9597e); the controls differ as they must. lib-stg --ifaces own --judge: ghc-internal **8,471 of
+  10,007** bindings equal (round 4's 8,468; the shift rule and the record field order), 0 worse, control 0 of 171; base 850 of 1,097 on the
+  pack's reference, 0 worse, control 0 of 25.
+- Eval, lane 2's command and environment under the heavy lock (`bin/hsi check --libs own --corpus nofib,samples,synthetic,testsuite-core
+  --jobs 4 --record`, ARBACE_MEM_GIB=16, HSI_OWN_PACKAGES the 20 packages; 52 min, tree peak 13.8 GB): 950 programs, 902 own (876 pass),
+  17 pack, 31 never run; the eleven negative controls fail as they must; 3 in no class: bspt, fulsom and pic, NofibUtils programs judged by
+  their own verdicts since hs-judge's round 5 (a9509572b, after lane 2's run) and killed at the CPU limit, their stderr now equal, so their
+  outcome is :differs [:status :stdout] or [:status] where :no-reference-own named [:status :stdout :stderr]: the class takes those
+  outcomes too (divergences-own.edn), the record judged again with the check's own judge (lane 2's judge.sh): 0 unclassed.
+  ManyUbxSums's front end gave no line in 600 s on the loaded host (load 70 to 90: the host's other agents' jobs beside the run's four
+  shards; 176 s in the targeted try): rerun alone as lane 2 reran its thirteen (`--only`, `--record` replacing its line, HSI_FRONT_SHARDS=1,
+  the per-program cap 8 GiB under the 8 GiB process limit, not the heavy lock, which the AOT run's queue held): the front end 440 s, the
+  program passes own. Final record: **903 own** (877 pass), 16 pack (14 pass), 31 never run; 21 lines of status 137, none a pass; against
+  lane 2's record no program passes less (59 lines changed in the run: 23 of the 24 below, 26 NofibUtils programs passing by their new own
+  verdicts, bspt, fulsom, pic and fannkuch-redux killed at the limit with other differences, hash, mutstore2, pidigits, threads007, T16846
+  and T22798 within the CPU limit now).
+- AOT, lane 2's command (`--aot --libs own ... --only @aot-ids.txt --jobs 2 --record`, its 139 ids): not under the heavy lock (its queue held
+  three other agents' jobs, javac's tool among them; the brief names the lock for the eval run), so under the 8 GiB process limit with the
+  per-program cap 8 GiB (lane 2's 16; tree peak 7.0 GB, 38 min): **138 own** (136 pass), 1 pack (StrictPats, passes); fibheaps in
+  :own-speed and AsyncRerun in :async-revert as before, 0 unclassed; the six controls whose subjects ran fail as they must.
+
+**Made own, by cause (eval 879 -> 903 of the 919 cases, AOT 135 -> 138 of 139):**
+- front-end typecheck stops (6): T15598 (RebindableSyntax), T5462Yes1 and T4809 (derived heads of imported constructor classes; T5462Yes1
+  by its pending own verdict, so out of divergences.edn's :oracle-pending), T9497a-run, T9497b-run, T9497c-run (typed holes);
+- the front end's limits (2): quotRem2Large (the Simplifier's depth), ManyUbxSums (the heap; on the rerun);
+- own-fallback.txt's runnable entries (7): T8726, T22086, T16449_2, T19289, T246, dsrun007, T9858c;
+- its :untried-cap entries (8): last-piece, Loop, runtime-deep, readMVar1, fptr02, CarryOverflow (pass), compareByteArrays, T23071 (the CPU
+  limit, as on the pack);
+- :ineligible (1): nofib/gc/happy (an import under #ifdef DEBUG);
+- AOT (3): runtime-deep, T19289, T15598.
+Side effect, no change to the records: the CPP-conditional rule lets nofib/parallel/transclos, warshall and matmult reach the front end
+(their Control.Parallel imports are under `#if defined(STRATEGIES)`), which stops on their #else branch's names; GHC's record has them
+:no-dump (the Makefiles' -package parallel), their lines unchanged, out of the cases as before (eval-out.edn).
+
+**Left (16 eval cases at 0.5, AOT 1):** own-fallback.txt's 8 (StrictPats, T14236, T10481, UnliftedNewtypesDependentFamilyRun,
+UnliftedNewtypesIdentityRun, FMA_ConstantFold, T16650b, T7861: the causes above), T13688 (quasi-quote splices), the 7 ineligible
+(packages outside the own set or a generated ghc-internal module, tcrun022's RULES); AOT StrictPats.
+
+**Scores** (`bin/reap --record`, `bin/crops-score --record`): Haskell eval 892 / 35 / 23 (was 859 / 61 / 30), AOT 137 / 1 / 1 (as before);
+Haskell's eval stage 0.978 -> 0.991, AOT 0.986 -> 0.996, independence **0.9928 -> 0.9974** (floor 99, unchanged), completeness 0.9722 ->
+0.9809 (meant 0.9895 -> 0.9916), maturity 1. `bin/crops-score --judge --strict` 0 problems, `--self-test` and `bin/reap --self-test` pass,
+`bin/reap` 56 of 56 cells, 0 problems, `bin/records-check` 9 pairs, 0 problems.
+
+Alternatives not taken: the front end's memory for ManyUbxSums by raising HSI_FRONT_MEM (an environment change for one program; the
+held tree was the cause); classing bspt, fulsom and pic in :own-speed (their class is lane 2's, its outcomes only widened); the AOT run
+queued behind three heavy jobs; StrictPats' last case by treating an unboxed 1-tuple of a lifted type as unlifted in the Simplifier's
+hook (it would move every (# a #) binder's levity, the libraries' STG with it; left for a narrower rule); generating
+GHC.Internal.PrimopWrappers and adding ghc-experimental or ghc-boot to the own packages (not small: lib-check's plan, gate producers,
+records). Not done: doc/AGENDA.md (the main session's), the gate.
+## 2026-11-21: java-read-1122: Java's print cell, the printer reading back its shapes, erasures and type arguments
+
+The burst's stream J1 (Java's read and print cells), its first round, on branch `java-read-1122` from next `863bdaea1`, ended
+by the coordinator's throttle. The work is repr/java's printer, `arbace/repr/java/print.ae` (outside the reader's hash: no
+forms, provenance or converted tree moves; inside `arbace_javac_key`, as all of arbace/ is), and one function of
+bin/java-check. Light proofs on javac's tool of the night, `javac-60886b4973e7356caf1b` (REPR_JAVA_STALE_OK=1), the tools'
+host stage 0, the main checkout's forms cache; no gate.
+
+**Ranked by cause** (next's records): print 3,258 pass / 29 by design / 38 deferred, its 67 rows :print-type-arguments 31,
+:print-shapes 18 (design), :print-erasure 11 (design), :print-classes-unnamed 3, :print-release 2, :print-overload-cast 1,
+:read-failed 1; read 7,748 / 0 / 96, its 96 rows :diag-release 44, :diag-processors 25, :diag-doclint 8, :diag-file-manager 8,
+:diag-closed-world 4, :diag-command-line 4, :read-platform 3.
+
+**The printer** (each rule a comment at its place in print.ae; every row looked at against its jtreg source):
+- the shapes (17 of :print-shapes' 18): a let the converter merged from a local and the next statement's temporaries split
+  back (`float f = 0f; --q().x;`, `int y = x; return y++;`); a for's update found by its temporaries' numbers (the converter
+  converts the update before the body: o-117 before o-118); `continue;` written after a last statement the converter would
+  push the loop's tail into (an if, a block, a switch), for a source's `if (c) a; continue;` or a case's `break;`, and the
+  loop bodies of `for` and `while (true)` printed through loop-tail's do; an assigning if chain whose branches end in the
+  loop's recur keeps its local's initializer; `(when (some? x) (if ...))` as `x == null ? null : ...` (convert's simplify);
+  a doubled label (the labeled statement's and the switch's own) printed once, a switch's label by its keyword; a pattern
+  test's value as an if's condition printed `x instanceof P p ? a : false`; a hoisted increment (x-2) as a block lambda's
+  `return x++;`; a switch of postfix arms returned whole (`return switch`); a static field incremented through an expression
+  keeps its qualifier (`iBar(b).si++`); an integer literal printed long only where Arbace's resolution would see longs
+  (phase 4 narrows them all: verify("", 0, i0[0], 0)); an inherited field of this by its simple name (this.f of a constant
+  field makes javac check this for null).
+- the erasures (10 of :print-erasure's 11, 4 more stale): an untagged for-each binding as Object, an anonymous class's local
+  as var, a switch of references' local as Object, an untagged conditional over a parameter written as the if chain, the
+  selector's erasure cast left to javac, a record pattern's selector cast with its type arguments (^:unconditional), nested
+  switches' intersection casts left out.
+- the type arguments (28 of :print-type-arguments' 31): raw unchecked casts where a parameterized one is refused (List<Date>
+  to List<Foo>) or a call's wildcard result or inference clashes with the target; a lambda cast to its interface with its
+  instantiated types in a raw array, as another lambda's value and for an Object; a generic interface's cast for overloads
+  (doAs) and explicit parameter types for overloads by generic interfaces; varargs spread where the explicit raw array
+  loses the call's inference (Arrays.asList(fooRef, barRef), Stream.of(new A(), new B())); a method reference's
+  `new E<Short>()` receiver; (T) for a bounded type variable's argument; a field's type variable by its receiver's type
+  argument; java.base's generic signatures and an interface's static methods from the platform's declarations pack
+  (jdk/platform/java.base.decls, read with arbace.repr.java.platform and classfile).
+- t03216 (:print-overload-cast): the converter does pin `(^[Object] v "s")`; a pinned call's reference argument now gets
+  its widening cast. t05973 (TextBlockLang, `-encoding utf8`): bin/java-check's read_opts leaves out `-encoding utf-8/utf8`
+  (the reader reads UTF-8; javac's API would hand the option to a file manager that serves none); a change in repr/java's
+  javac.ae would have moved the reader's hash and the four provenance files, so the harness takes it.
+
+**Proof and record**: the 67 rows run at read and print (`--save .tmp/rec`): 56 of 67 print rows pass, t05973 reads;
+recorded alone, `bin/java-check --judge --partial --record` (0 regressions). A regression sample of 300 of the 3,258 passing
+print rows (3 chunks of 100, GOMEMLIMIT 3GiB: the printer's process peaked 6.5 GB on 67 tests unlimited and ran out of
+memory under `ulimit -v 8G` on 667 at once): every row passes. Not run: the print level whole (the night's).
+Java print 3,258 / 29 / 38 → **3,314 / 2 / 9**; read 7,748 / 0 / 96 → **7,749 / 0 / 95**; Java's completeness 0.9493 →
+**0.9535** (meant 0.9688 → 0.9710); `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`:
+0 problems. The sample found one row failing that is next's own, not this branch's: t04738 (TestReceiverTypeOwner) fails
+with next's printer too (main's checkout, the same tool): n-java-conv (92eabf1b7) puts a receiver's type annotation on the
+receiver and on its type's outer class, and the printer writes it twice (not a repeatable annotation); its print row still
+says pass until the print level runs whole.
+
+**Left, ranked**: :diag-release 44 + :print-release 2 + :read-platform 2 (`--release N`, JCS50 (b) built on next but its
+javac tool not proved: this branch's tool build, `bin/javac-vendor tool` under heavy-lock, still running at the round's
+end); :diag-processors 25 (JCS51 (a): processors from sources on the tool, a tool rebuild); :diag-doclint 8 (JCS52 (a));
+:diag-file-manager 8 and :diag-command-line 4 (JCS53 (a)); :diag-closed-world 4; :print-classes-unnamed 4 (t03567, t05125
+a switch's locals' slots, t06072, t06244 now reading back its forms); :print-type-arguments 3 (t05474, t05503, t05691: the
+forms keep no explicit type arguments, no raw `new ArrayList()`, no `var`'s instantiation); by design t05905 and t07835.
+## 2026-11-22: Go's by-design classes re-examined, round 1 (go-rows-1122)
+
+The burst of 2026-11-21/22 (the user's goal: 100 completeness), stream G1: every by-design class of Go's four cells
+re-examined for what goi, repr/go or the build would need; what could pass was built, largest first; branch
+`go-rows-1122` from mac/next 863bdaea1. doc/go/GOI-SPEC.md, "Since v1: gc's -std, -+, -complete and -p, walk's print
+check, extra receivers, internal imports" holds the details. Built:
+- goi's eval: gc's `-std`, `-+`, `-complete`, `-p` (gcsyntax driver Revision 6 with `SetFlags`; arbace.go.run `--gc-mode`;
+  arbace.go.escape's runtime-lines and the inliner's GetCallerPC rule): uintptrkeepalive, fixedbugs/issue48097, issue14999,
+  internal/runtime/sys/inlinegcpc pass, issue18331 reaches gc's reference, which fails its own comments (n/a); walk's
+  print check (issue79258); gc's `-d=escapedebug=1` (walk's dataWord after order's addrTemp, with gc's deadlocals pass and
+  the copied locals' single definitions in inlined bodies: escape_iface_data); the extra receivers gc's syntax drops
+  (bug217); internal std packages imported from std's forms in errorcheck (escape_runtime_atomic); queue 420's and 426's
+  rows (assertinline, defererrcheck, sliceopt, issue35073b, issue9608, peano) and fixedbugs/issue68415 (unique) recorded.
+- AOT: GOI-DESIGN-REVIEW.md's Proposed 8 (c) (decided 2026-11-05, not built until now): the three positions programs pass;
+  return.go's final expression statement printed as written in mode :full.
+- print: empty declaration groups kept in mode :full as go/file's :go/empties (the text level byte for byte, 1,708 files of
+  the test corpus); roundtrip-text-known.edn empty.
+- Proofs (light, no gate; the gate's executable at next's key 710e90e4771a10548878 with the checkout's namespaces by
+  ARBACE_PATH, stage 0 the tools' host): `bin/goi check --only` of each class's programs with the three interp controls'
+  subjects (the controls fail as they must), `check --aot --only` of the 25 run programs Proposed 8 (c) selects and return.go
+  with the three AOT controls' subjects (27 of 27 pass); every errorcheck program (`--list`, 659) after each escape change:
+  617, then 618 pass, 0 fail, 0 error, no regression; `bin/repr-go read --full --corpus test --text`: 1,708 files byte for byte.
+- The records from one whole run each (`bin/goi check --record --jobs 6`, `check --aot --record --jobs 6`), the escape tags
+  made afresh (tag-version escape-10). The corpora were not read again for them: the read of linux-errtest-full and of std
+  (linux-amd64) needs more than the 8 GiB a process may take outside bin/heavy-lock, whose queue held a javac tool build for
+  hours; this branch changes nothing a read of the checked programs gives (convert.ae's :go/empties touches only the three
+  compile-only files of the empty groups, outside goi's lists), so the corpora read at main's key (merge-1121's copies; std's
+  of 2026-11-05) were re-keyed to the checkout's corpus_key. A failed std read under the cap removes the corpus first (repr-go's
+  convert: rm -rf before converting): it did once, broke a first whole run (stopped, std's forms restored, run again).
+- The records: test/goi/check-linux-amd64.edn 1,838 programs, 1,781 pass (1,764), 0 fail, 0 error, 44 unsupported, 9 known,
+  4 skipped; the rows moved: assertinline, defererrcheck, sliceopt, issue35073b, escape_iface_data (gc-flags 33 -> 28),
+  issue9608 (foreign-code 9 -> 8), peano (call-depth, gone), issue68415 (std-weak-unique, deferred, gone),
+  escape_runtime_atomic (std-out-of-scope, gone), bug217 (spellings, gone), uintptrkeepalive, issue48097, issue79258,
+  issue14999, inlinegcpc (gc-std 7 -> 1, issue18331 to :gc-reference n/a), issue15281 (memory 7 -> 6: it passes now, three
+  runs of three by --only; its known line removed), typeparam/dictionaryCapture-noinline new in the list and passing.
+  test/goi/check-aot-linux-amd64.edn 1,696 pass (1,691): devirtualization_nil_panics, issue22662, issue29504, return.go and
+  dictionaryCapture-noinline; classes :positions and :spellings gone; the no-forms rows' reasons are the native read's.
+  Print: test/repr/go/roundtrip-text-known.edn empty, :empty-decl-group gone. bin/goi divergences and --aot: every program in a
+  class, the essential subsets 0 not passing.
+- REAP (bin/reap --record): Go read 12,158 / 137 / 0 (unchanged), eval 1,764 / 68 / 2 -> 1,781 / 52 / 1 (n/a 3 -> 4), AOT
+  1,691 / 5 -> 1,696 / 1, print 2,584 / 12 -> 2,584 / 9. bin/crops-score --record: Go's completeness 98.6 -> 98.9 (eval 96.2 ->
+  97.1, AOT 99.7 -> 99.9, print 99.5 -> 99.7; 100.0 without by design), maturity and independence 100; --judge --strict, bin/reap
+  and bin/records-check: 0 problems.
+- Left, ranked by rows, each a decision for the user (GOI-SPEC.md's section and GOI-DESIGN-REVIEW.md hold the reasons):
+  read's 137 (invalid-programs 64, parser-rejects 73: the native reader agrees with the helper on every one, E-tree equal and
+  the same conversion failure for the 64, both go/parsers rejecting the 73; options: count that agreement as the read's pass,
+  with an E-errors comparison of the 73's messages added; or n/a as AOT's no-forms; or GC47 (b), forms for invalid code);
+  gc in the executable (GOI-DESIGN-REVIEW.md Proposed 1 (b), decided (a) on 2026-11-05: gc-flags 28 (-live 8, the SSA passes'
+  -d 15, -d=wb 4, -d=nil 3, tailcall), gc-phases 7 (stack frame too large), the rest of -+ (nowritebarrier, drafted below));
+  print's 9 tests-embed-sources (TamaGo's tests embed their package's own .go files: an identity candidate passes the code
+  level, so only mode :lines' layout differs; options: print those packages in mode :full for the code level, or mask the
+  embedded data in gocmp's comparison, or keep); goi's foreign-code 8 (assembly and linkname, §1.1) and memory 6 (allocation
+  counts and profiles); unsafe-layout 2 (issue8606b: gc's comparison order, a back-end change and a build; nilptr by design);
+  AOT's issue9608 (RPS31 (a): go build's -complete; (b) an empty .s file, rejected then as testing the harness).
+- Not done this round (the coordinator's throttle): escape_unique (gc-m, deferred: other packages' generic instances, 1-2
+  days, unique.Make's closure over internal/sync, sync/atomic and internal/abi) and nowritebarrier (ssagen/nowb.go's checks
+  over the port's post-inline bodies with an approximate needwb; drafted unapplied in the worktree's .tmp/patches/nowb.py).
+Light: no gate; the gate's executable 710e90e4771a10548878, stage 0 the tools' host, ARBACE_PATH the worktree.
+## 2026-11-21: py-design-1122, round 1: the read cell's by-design classes own-mode, own-traceback and charset emptied
+
+Branch `py-design-1122` from mac/next 863bdaea1 (stream P2 of the burst: the by-design part of Python's cells). The read cell's
+64 by-design files were :code-lines 30 and :rejected 4 (the :lines round trip), and parse-check's :own-traceback 24, :own-mode 5
+and :charset 1 (the syntax-errors corpus, judged by each case's own verdict since queue 240). The last three could pass:
+- :own-mode (test_fstring's assertAllRaise, mode eval): arbace.repr.python.parsecheck's own verdict judged every expectation on
+  the file's exec-mode read. Now each expectation is judged on the error of its own mode: "eval" parses the source by the eval
+  rule after stripping its leading spaces and tabs (bltinmodule.c's builtin_eval_impl), "single" by the interactive rule (a
+  doctest's compile), exec and none by the file's read as before (arbace.repr.python.native/parse-source's modes).
+- :own-traceback (test_syntax's doctests expecting "invalid syntax. Did you mean 'for'?"): a doctest's expected line is
+  traceback.format_exception_only's, which runs TracebackException._find_keyword_typos (Lib/traceback.py of CPython 3.14.10,
+  the pinned tarball) over a SyntaxError whose message is "invalid syntax" or names a forgotten comma. Ported into the judge,
+  no code vendored: the failing statement's lines from the parser's _metadata (peg.ae's last statement), textwrap.dedent of
+  3.14.10, tokenize's NAME tokens (lex/stream with extra tokens), at most 10 non-keyword names, for each the candidates
+  _suggestions._generate_suggestions gives (Python/suggestions.c's _Py_CalculateSuggestions and levenshtein_distance over UTF-8,
+  MOVE_COST 2, CASE_COST 1) then difflib.get_close_matches(name, keyword.kwlist, 3, 0.5) (SequenceMatcher's matching blocks
+  without junk, the n largest (ratio, word) pairs), the first replacement that codeop.compile_command(code, symbol="exec",
+  flags=PyCF_ONLY_AST) accepts. Its _maybe_compile was read closely: when the code parses (ONLY_AST, incomplete-input flags),
+  the final compile without the caller's flags decides, so a symtable or code generation error refuses the candidate; that
+  final compile is pyi's own compiler (arbace.python.run's compile-uncached "exec"). The first try without it took
+  test_syntax-0082's "(mat x)" for "(await x)" ("Did you mean 'await'?"), which CPython refuses ("'await' outside function"):
+  with the final compile all 623 own-judged cases pass. keyword.kwlist is the reader's grammar's keywords sorted.
+- :charset (test_exceptions' case b'# -*- coding: iso8859-7 -*-\n\xe1 = 0xI'): jrt has ISO-8859-7 (overlay JrtCharsets);
+  the reader's codec table (lex/codec) did not name it. arbace.repr.python.native now adds iso8859_7 and its aliases of
+  encodings.aliases (more-codecs, consulted after lex/codec: a change to lex.ae makes stage 0 reload lex from the checkout
+  while the compiled peg keeps the old Lx type, a ClassCastException), and decode-error-text refuses its three undefined
+  bytes (0xAE, 0xD2, 0xFF, Lib/encodings/iso8859_7.py) with the charmap codec's message. The case decodes, its error is
+  "invalid hexadecimal literal" at 2:6, the position its test expects.
+A negative control for the typo port: test/python/controls-read.edn's syntax-errors-typo, test_syntax-0296 ("fur a in b",
+Did you mean 'for'?) judged against test_syntax-0297's expected "Did you mean 'else'?": fails as it must.
+Runs (gate executable 710e90e4771a10548878 as the host): bin/repr-python parse-check --no-mutants syntax-errors and --full:
+874 files, by their own verdict 623 (pass 623, fail 0), by the record 251 equal, both controls failing as they must; recorded
+with --record (both sections of the corpus, whole): parse-check-known.edn's syntax-errors section empty, 30 rows of
+parse-check-results.edn :known -> :pass. bin/reap --record: Python read 3,672 / 64 -> 3,702 / 34; bin/crops-score --record:
+Python completeness 0.9465 -> 0.9485; --judge --strict and bin/records-check: 0 problems. The emptied classes stay in
+test/python/divergences-read.edn with a note. Left in the read cell, decisions for the user: :code-lines 30 (the :lines
+print carries no lines, and CPython's code generation depends on them: level 3 can only pass by compiling a position-free
+ast, which is level 2 again) and :rejected 4 (deliberately bad files CPython rejects; the read gives CPython's class and
+message, which is each file's own test's verdict: they could count as passes, as parse-check's own-judged errors do).
+
+## 2026-11-22: py-design-1122, round 2: _functools' reduce and cmp_to_key, _hmac and _uuid in pyi's runtime; stopped at the coordinator's throttle
+
+The eval cell's by-design rows (test/python/divergences.edn's :kind :design classes over the committed record, 2026-11-19's) were
+ranked by count: skipped-by-test 2,535, c-accelerators 1,311, cpython-only 617, fork 557, testinternalcapi 132,
+extension-modules 75, finalization 57, venv-and-build 49, finalization-cycle 24, coroutines 20, ssl-go-tls 19, gc-collector 17
+and 19 smaller ones (5,491 rows, 5,492 with the loop's del.py). Cross-read with CPython 3.14.10's recorded outcomes
+(ref-cpython314-lib-test*.edn): of skipped-by-test's 2,535, CPython's own run skipped 1,917 too (the platform 765, regrtest's
+-u none 191, the root account 91, CPython's run flags -B and -P or its build 266, the host's kernel 61, absent third-party
+packages 50, multiprocessing variants 123, the rest 370), ran 477 (the C variants of _functools 119, _hmac 28, _hashlib 27,
+OpenSSL's digests 20, _elementtree 18; UDP-Lite 113, which this host's kernel 7.3 no longer has, CPython having recorded on an
+older one; test_opcache 73 and tuple reuse 6, CPython's implementation details; test_remote_pdb 45 behind
+sys.is_remote_debug_enabled()). Done (branch py-design-1122; the runtime's Go printed, edited and read back with bin/pyi runtime
+print and read; Modules/ of the pinned CPython 3.14.10 tarball read as prior art, nothing vendored):
+- _functools: reduce and cmp_to_key are Modules/_functoolsmodule.c's, built-in functions (queue 459's thin module gave
+  functools.py's pure functions, which bind as methods in test_functools' C classes: TestReduceC 3 and TestCmpToKeyC 8 failed
+  on next's build): _functools_reduce_impl's iteration and messages, clinic's argument messages, functools.KeyWrapper
+  (keyobject: tp_call, tp_richcompare calling cmp and comparing with 0, "other argument must be K instance", unhashable,
+  DISALLOW_INSTANTIATION, the obj member, __text_signature__ "(obj)"). partial, Placeholder and _lru_cache_wrapper stay thin.
+- _json: the thin encoder's negative _current_indent_level indents as 0, as create_indent_cache does
+  (test_speedups.test_current_indent_level).
+- sys.stdin and the other standard text streams: readlines(hint) and iteration (json.tool --json-lines reads
+  sys.stdin.readlines()).
+- SIGPIPE and SIGXFSZ ignored at the start (an atStartHook), as CPython's _PySignal_Init does; before, only once _signal
+  was imported, so json.tool's child died of the signal (-13).
+- _uuid: Modules/_uuidmodule.c as built with libuuid: generate_time_safe() is libuuid's time-based version 1 UUID (the
+  Gregorian 100-ns clock, a random 14-bit clock sequence advanced when the clock goes back, up to 10 per tick, the variant,
+  the first interface's hardware address or a random multicast node), status -1 (no uuidd, no state file);
+  has_uuid_generate_time_safe 1; has_stable_extractable_node 1 when the node is an interface's address.
+- _hmac: Modules/hmacmodule.c over Go's crypto and hashlib_blake2.go: new, compute_digest, the twelve compute_*, _hmac.HMAC
+  (copy, update, digest, hexdigest, name, digest_size, block_size, its repr), UnknownHashError, _GIL_MINSIZE; the
+  py_hmac_static_hinfo names and hashlib names, the lower() fallback; RFC 2104 over builtins_hashlib.go's pyHash states
+  (their copyHash for copy() and digest()). Two first tries failed under goi (the checkout's runtime interpreted): a blake2
+  adapter implementing hash.Hash made goi print "no stub left for methods of type func() int (go/arbace/gotable.edn :stubs)"
+  at every start (failing every test that reads a child's stderr), and a hash interface of the runtime's own over Go's
+  hashes panicked ("goi cannot call Write on *sha256.Digest: the type is not in the table"); pyHash, whose Go hashes goi's
+  table already serves, has neither problem.
+- Classes: the C twins test_functools runs since queue 459 that fail for the thin module's reasons named in their Py twins'
+  classes (TestPartialC/CSubclass's repr_safety in :functools-core, TestLRUC's weakrefable in :finalization-cycle) or in
+  :c-accelerators (TestPartialC/CSubclass's test_attributes_unwritable: the pure partial's slots are writable);
+  test_tool's two test_broken_pipe_error in :os-and-files-misc (deferred: exit status 120, the flush at exit failing again).
+  Named by :tests, the five rows already in the record (skipped there for "requires the C _functools module") move out of
+  skipped-by-test: bin/reap --record, Python eval 39,204 / 5,492 / 3,625 -> 39,204 / 5,490 / 3,627 (design -2: TestPartialC's
+  and TestPartialCSubclass's repr_safety into the deferred :functools-core); bin/crops-score --record (Python completeness
+  unchanged at 0.9485). The eval record itself is P1's: the passes above wait for its next whole run.
+Runs (bin/pyi check --only, the gate's executable 710e90e4771a10548878, the checkout's runtime interpreted by goi,
+PYI_CHECK_RECORD a scratch copy of the record; the eval record is P1's): test_functools 309 of 325 pass (the record 197,
+next's build 299), test_hmac 91 of 148 (the record 63: the 28 "requires _hmac" pass), test_uuid 105 of 120 (the record 49:
+the C classes' 56), test_hashlib 70 (unchanged), test_imaplib 229, test_smtplib 85, no failures in these; test_json 150 pass
+before the module's 3,600 s limit on the interpreted runtime (its other failures that run were the stub warning above) and
+test_pickle 174 before the limit: neither conclusive there; the three controls failed as they must. After the pyHash rework,
+test_hmac again: 91 of 148 pass, 0 failing, the 28 now passing (and the controls failing as they must); test_uuid 105 of
+120, 0 failing (the run before it). Not committed, kept in the worktree for the next round (.tmp/stage): _hashlib (_hashopenssl.c over Go's
+crypto: HASH, HASHXOF, HMAC, pbkdf2_hmac, scrypt RFC 7914 with EVP_PBE_scrypt's checks, unit-tested against RFC 7914's and
+CPython's vectors; its HMAC still on the first try's hash adapters, to be moved onto the pyHash states) and _pickle's dump/dumps/load/loads as built-in functions (unverified: test_pickle times out interpreted).
+Left for the user (with rows, in the report): skipped-by-test's 1,917 that CPython's run skips too (a :na kind?), UDP-Lite
+113 (the kernel), the decided c-accelerators (_datetime 553 plus test_types' 129 import, _decimal 346) under queue 459's
+thin pattern or not, cpython-only 617 (PYS15 (a)), fork 557, testinternalcapi 132, extension-modules 75 and the
+finalization family (PYS9 (a)); test_remote_pdb 45 needs sys.remote_exec between pyi processes (a design).

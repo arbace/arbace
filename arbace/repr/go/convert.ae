@@ -30,6 +30,7 @@
 (def ^:dynamic *src* nil)          ; mode :full: the bytes of the Go file converted, when read
 (def ^:dynamic *raw* false)        ; raw mode (GP3): no annotation read, the typed decisions open
 (def ^:dynamic *source-text* true) ; mode :full: the file's text beyond the tree read (source-text)
+(def ^:dynamic *empties* nil)      ; mode :full: atom [[line col token] ...], the empty declaration groups' tokens
 
 (defn note! [k] (when *stats* (swap! *stats* update-in [:notes k] (fnil inc 0))))
 (defn count-node! [n] (when *stats* (swap! *stats* update-in [:nodes (first n)] (fnil inc 0))))
@@ -1002,12 +1003,22 @@
       (when-let [v (lit/const-form (:val o) (ty/const-kind (:t o)))]
         {:val v}))))
 
+(defn- empty-group!
+  "Mode :full: an empty declaration group gd (var (), import ( ): no specs, so no form) kept as its
+  tokens with their positions in *empties* (go/file's :go/empties, G2F6's text level)."
+  [gd]
+  (let [{:keys [tok specs lparen rparen] :as f} (nf gd)
+        tp (:tok-pos f)]
+    (when (and *empties* (empty? specs) lparen rparen tp)
+      (swap! *empties* into [(conj (parse-pos tp) tok) (conj (parse-pos lparen) "(") (conj (parse-pos rparen) ")")]))))
+
 (defn decl-bindings
   "The let bindings of a local declaration (a decl-stmt), and the kind :let or :let-type."
   [st]
   (let [gd (:decl (nf st))
         {:keys [tok specs]} (nf gd)]
     (count-node! gd)
+    (empty-group! gd)
     (case tok
       "var"
       [:let
@@ -1800,7 +1811,11 @@
                                        (seq (:space st)) (assoc :go/space (:space st))
                                        (not= "\n" (:tail st)) (assoc :go/tail (:tail st)))))))
         _ (swap! placed into (map (fn [[l c]] [l c]) header))
-        decl-forms (binding [*groups* groups
+        empties (atom [])
+        _ (binding [*empties* (when *full* empties)]
+            (doseq [d decls :when (and (= :gen-decl (nt d)) (= "import" (:tok (nf d))))] (empty-group! d)))
+        decl-forms (binding [*empties* (when *full* empties)
+                             *groups* groups
                              *src* (when (and *full* *text-dir*)
                                      (let [src (java.io.File. ^String *text-dir* ^String name)]
                                        (when (.isFile src)
@@ -1824,6 +1839,8 @@
                         (range) decls)
                        (map (fn [dv] (swap! placed conj (vec (take 2 dv))) (free-directive dv))
                             (get-in plan [:free (count decls)])))))
+        ;; mode :full: the empty declaration groups' tokens (G2F6): text beyond the forms, as :go/semis
+        file-form (if (seq @empties) (full-meta file-form {:go/empties (vec (sort @empties))}) file-form)
         unplaced (remove (fn [[l c]] (@placed [l c])) dirs)
         comments (reduce
                   (fn [m g]

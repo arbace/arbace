@@ -156,6 +156,44 @@ END {
     odmode = (odmode == 2 && odplugins != "")
   }
   if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
+  # objinfo mode (queue 511: ocamltest's tools as Arbace's own, judged by the test's own .reference): a test at oi's level whose header
+  # is ocamltest's compile-only test of a unit's .cmt (compile_only = "true"; setup-ocamlc.byte-build-env; all_modules = "FILES";
+  # ocamlc.byte; check-ocamlc.byte-output with flags = "FLAGS", readonly_files and modules copied) followed by `program = "ARGS";
+  # output = "out_objinfo"; ocamlobjinfo; check-program-output`: the shape-index, uid-deps and uids tests. The run is bin/oi's oiobjinfo
+  # (test/ocaml/objinfo/oiobjinfo.ml on compiler-libs' units, bin/lib/oi/tools.bash): `ocamlc -c FLAGS FILES` up to typing (the .cmi,
+  # .cmt and .cmti written by Typemod), then ocamlobjinfo's .cmt printing with ARGS; the row's environment @tool=objinfo and
+  # @dyncopy=FILE,..., its libraries compiler-libs'; the compiler's own output (ocamlc.out) judged beside it by bin/oi's tool_output. At
+  # oi's level alone: the light AOT level does not load compiler-libs' typing units in its limit (queue 480's DECISION 480-1)
+  oimode = 0
+  if (aot == 0 && hasbuild && !dlmode && !dpmode && !odmode) {
+    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0
+    for (j = 1; j <= m && oimode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
+      if (s ~ /^flags *= *"/) { oiflags = v; continue }
+      if (s ~ /^compile_only *= *"true"$/) { oico = 1; continue }
+      if (s ~ /^(readonly_files|modules) *= *"/) { oicopy = oicopy " " v; continue }
+      if (s ~ /^all_modules *= *"/) { oimods = v; oicopy = oicopy " " v; continue }
+      if (s == "setup-ocamlc.byte-build-env" || s == "check-ocamlc.byte-output" || s == "check-program-output") continue
+      if (s ~ /^output *= *"out_objinfo"$/) continue
+      if (s == "ocamlc.byte") { if (oimods == "" || oiobj) oimode = 0; oicomp = 1; continue }
+      if (s ~ /^program *= *"/) { if (!oicomp) oimode = 0; oiprog = v; continue }
+      if (s == "ocamlobjinfo") { if (oiprog == "") oimode = 0; oiobj = 1; continue }
+      oimode = 0
+    }
+    if (!(oico && oicomp && oiobj)) oimode = 0
+    if (oimode) {
+      c = split(oiflags " " oimods " " oiprog " " oicopy, hm, " ")
+      for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
+    }
+  }
+  if (oimode) {
+    c = split(oicopy, hm, " "); oicp = ""; delete oiseen
+    for (q = 1; q <= c; q++) if (!(hm[q] in oiseen)) { oiseen[hm[q]] = 1; oicp = oicp (oicp == "" ? "" : ",") hm[q] }
+    helper = 0; m = 0; incs = " complib"
+    args = trim("-c " oiflags " -nostdlib -I _stdlib " oimods " -objinfo " oiprog); gsub(/ +/, " ", args)
+    env = env " @tool=objinfo @dyncopy=" oicp
+  }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)

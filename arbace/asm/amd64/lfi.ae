@@ -1,0 +1,139 @@
+(ns arbace.asm.amd64.lfi
+  "x86-64's LFI rewriter (Lightweight Fault Isolation; x86-print, 2026-11-22): llvm-project 23.1.5's
+  lib/Target/X86/MCTargetDesc/X86MCLFIRewriter.cpp and lib/MC/MCLFI.cpp (Apache-2.0 WITH LLVM-exception, written again in
+  Arbace), which llvm-mc runs on every instruction of a run whose triple is LFI's (`x86_64_lfi`, Triple::isLFI): the
+  streamer's emitInstruction hands the matched MCInst to the rewriter, which emits its sandboxed replacement instead
+  (`syscall` a call through the runtime's table, an %fs access through the virtual thread pointer at 16(%r15)), and the
+  streamer's finish emits the LFI ABI note (emitLFINoteSection). Used by the print level (arbace.asm.amd64.check's
+  assemble-file) and by the object assembler (arbace.asm.amd64.obj), both on arbace.asm.amd64.asm's matched instructions.
+
+  What the table does not hold, read from the instruction's operands: mayLoad/mayStore (X86's are mostly inferred from
+  the instructions' patterns, which the table leaves out) is every instruction with a memory operand but those whose
+  memory operand is an address (LEA's, the NOPs'); hasDefOfPhysReg reads the explicit defs (no x86 instruction defines
+  %r14 or %r15 implicitly); readsRegister reads the explicit uses (the instructions with an %fs memory operand whose
+  implicit uses could hold their destination, MULX's %rdx, are not told apart)."
+  (:require [arbace.asm.amd64.asm :as x]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; LFIBaseReg, LFIScratchReg, LFITPReg; TPOffset
+(def ^:private base-reg "R14")
+(def ^:private scratch-reg "R11")
+(def ^:private tp-reg "R15")
+(def ^:private tp-offset 16)
+
+(defn lfi-triple?
+  "Triple::isLFI: the environment `lfi` (x86_64_lfi, aarch64_lfi: the triple's architecture's subarch spelling)."
+  [^String triple]
+  (boolean (and triple (re-find #"(?i)^(x86_64|aarch64)_lfi(-|$)|-lfi(-|$)" triple))))
+
+(defn- gpr64
+  "The 64-bit general register a register is part of (MCRegisterInfo's regsOverlap over the GPRs), else the register."
+  [^String r]
+  (when r
+    (or (when-let [[_ n] (re-matches #"R(\d+)(?:D|W|B|BH|WH)?" r)] (str "R" n))
+        (when-let [[_ c] (re-matches #"[RE]?([ABCD])(?:X|L|H)" r)] (str "R" c "X"))
+        (when-let [[_ c] (re-matches #"[RE]?(SI|DI|BP|SP)L?" r)] (str "R" c))
+        (when (re-matches #"[RE]?IP" r) "RIP")
+        r)))
+
+(defn- overlap? [a b] (and a b (= (gpr64 a) (gpr64 b))))
+
+(defn- gr64? [r] (contains? (set (get (:classes x/*t*) "reg:GR64")) r))
+
+(defn- info [inst] (get (:insns x/*t*) inst))
+
+(defn- reads?
+  "readsRegister: an operand after the defs that overlaps REG (the explicit uses, the memory reference's registers among them)."
+  [r reg]
+  (let [defs (long (:defs (info (:inst r)) 0))]
+    (boolean (some (fn [o] (overlap? (:reg o) reg)) (drop defs (:mi r))))))
+
+(defn- modifies?
+  "mayModifyRegister (MCInstrDesc::hasDefOfPhysReg) over the explicit defs."
+  [r reg]
+  (boolean (some (fn [o] (overlap? (:reg o) reg)) (take (long (:defs (info (:inst r)) 0)) (:mi r)))))
+
+(defn- mem-index
+  "findFSMemOperand's memory operand: X86II::getMemoryOperandNo plus the operand bias, -1 when none."
+  ^long [r]
+  (x/memory-operand (info (:inst r)) (count (:mi r))))
+
+(defn- accesses-memory?
+  "mayLoad || mayStore: a memory operand that is not only an address (LEA's, the NOPs')."
+  [r]
+  (and (>= (mem-index r) 0) (not (re-find #"^(LEA|NOOP)" (:inst r)))))
+
+(defn- fs-mem
+  "The %fs memory operand's index (findFSMemOperand), or nil."
+  [r]
+  (let [m (mem-index r)]
+    (when (and (>= m 0) (= "FS" (:reg (nth (:mi r) (+ m 4) nil)))) m)))
+
+(defn- insn
+  "An emitted instruction: the encoder's result for INST with operands MI in 64-bit mode."
+  [inst mi]
+  (assoc (x/encode inst mi 64 #{}) :inst inst :mi mi :pflags #{}))
+
+(defn- tp-load [reg] (insn "MOV64rm" [{:reg reg} {:reg tp-reg} {:imm 1} {:reg nil} {:imm tp-offset} {:reg nil}]))
+
+(defn- rewrite-fs
+  "rewriteFSAccess."
+  [r ^long m]
+  (let [mi (:mi r)
+        base (:reg (nth mi m)) index (:reg (nth mi (+ m 2))) disp (nth mi (+ m 3))
+        has-base (some? base) has-index (some? index)
+        has-disp (not (and (contains? disp :imm) (zero? (long (:imm disp)))))
+        modified (fn [mi'] (insn (:inst r) mi'))]
+    (cond
+      ;; %fs:0 -> TPOffset(%r15)
+      (and (not has-base) (not has-index) (not has-disp))
+      [[:insn (modified (assoc mi m {:reg tp-reg} (+ m 3) {:imm tp-offset} (+ m 4) {:reg nil}))]]
+      (or (not (or (nil? base) (gr64? base))) (not (or (nil? index) (gr64? index))) (= base "RSP") (= base "RIP"))
+      [[:error "unsupported addressing mode for %fs access"]]
+      :else
+      (let [dest (when (and (pos? m) (contains? (first mi) :reg)) (:reg (first mi)))
+            tp (if (and dest (pos? (long (:defs (info (:inst r)) 0))) (gr64? dest) (not (reads? r dest))) dest scratch-reg)]
+        (if (and (= tp scratch-reg) (reads? r scratch-reg))
+          [[:error "%fs access reads reserved register %r11"]]
+          (vec (concat
+                [[:insn (tp-load tp)]]
+                ;; both slots occupied: the base computed by a lea
+                (when (and has-base has-index)
+                  [[:insn (insn "LEA64r" [{:reg tp} {:reg tp} {:imm 1} {:reg base} {:imm 0} {:reg nil}])]])
+                ;; TPDest the new base, the original base (an offset from %fs) the new index
+                [[:insn (modified (cond-> (assoc mi m {:reg tp} (+ m 4) {:reg nil})
+                                    (and has-base (not has-index)) (assoc (+ m 2) {:reg base})))]])))))))
+
+(defn rewrite
+  "doRewriteInst for the matched instruction R ({:inst :mi :pflags} with its encoding, arbace.asm.amd64.asm's): what the
+  rewriter emits in its place, a vector of [:insn R'] (an instruction with its encoding), [:label SYM] (a label emitted)
+  and [:error MESSAGE] (Ctx.reportError at the instruction, which then emits nothing). TMP makes the temporary symbol
+  createTempSymbol makes (the caller's numbering, shared with its other temporaries)."
+  [r tmp]
+  (cond
+    (or (modifies? r base-reg) (modifies? r tp-reg)) [[:error "illegal modification of reserved LFI register"]]
+    ;; syscall -> leaq .Ltmp(%rip), %r11; jmpq *-8(%r14); .Ltmp:
+    (= "SYSCALL" (:inst r))
+    (let [s (tmp)]
+      [[:insn (insn "LEA64r" [{:reg scratch-reg} {:reg "RIP"} {:imm 1} {:reg nil} {:expr s} {:reg nil}])]
+       [:insn (insn "JMP64m" [{:reg base-reg} {:imm 1} {:reg nil} {:imm -8} {:reg nil}])]
+       [:label s]])
+    (and (accesses-memory? r) (fs-mem r)) (rewrite-fs r (long (fs-mem r)))
+    :else [[:insn r]]))
+
+(def note-text
+  "emitLFINoteSection for x86_64 as assembly text (MCLFI.cpp): the note in its own COMDAT group, its namespace's and
+  architecture's sizes, NT_VERSION, the two names NUL-terminated and aligned to 4. The object assembler assembles it at the
+  end of the file (the streamer's finishImpl)."
+  (str ".section .note.LFI.ABI.x86_64,\"aG\",@note,.note.LFI.ABI.x86_64,comdat\n"
+       ".long 4\n.long 7\n.long 1\n.ascii \"LFI\"\n.byte 0\n.p2align 2, 0x0\n.ascii \"x86_64\"\n.byte 0\n.p2align 2, 0x0\n"))
+
+(def note-lines
+  "The same note as MCAsmStreamer writes it: printSwitchToSection's `.section` with its flags, type and group, emitIntValue's
+  `.long`, emitBytes' `.ascii`, the terminator's `.byte`, emitValueToAlignment's `.p2align` with its fill (a section that
+  is no code's)."
+  ["\t.section\t.note.LFI.ABI.x86_64,\"aG\",@note,.note.LFI.ABI.x86_64,comdat"
+   "\t.long\t4" "\t.long\t7" "\t.long\t1" "\t.ascii\t\"LFI\"" "\t.byte\t0" "\t.p2align\t2, 0x0"
+   "\t.ascii\t\"x86_64\"" "\t.byte\t0" "\t.p2align\t2, 0x0"])

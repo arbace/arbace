@@ -64,6 +64,7 @@
 (def ^:dynamic *globals* (constantly nil)) ; NAME -> {:details ... :arity n :type T :unf U}: imported and wired-in Ids
 (def ^:dynamic *ltypes* {})                ; the elaborator's local binders' types
 (def ^:dynamic *new-types* nil)            ; atom {binder type}: the clones' types, for tostg
+(def ^:dynamic *retypes* nil)              ; atom {binder type}: hs-own-stg-2 (a), the simple optimiser's beta reductions' types
 (def ^:dynamic *uniq* nil)                 ; atom: fresh uniques
 (def ^:dynamic *unlifted-type?* (fn [t] false))
 (def ^:dynamic *unlifted-expr?* (fn [e] false))
@@ -114,7 +115,7 @@
   "An Id's type (the elaborator's), or nil"
   [x]
   (let [i (info x) k (vkey x)]
-    (or (:type i) (get *ltypes* k) (when *new-types* (get @*new-types* k)) (when (vector? k) (get *genv* k)))))
+    (or (:type i) (when *retypes* (get @*retypes* k)) (get *ltypes* k) (when *new-types* (get @*new-types* k)) (when (vector? k) (get *genv* k)))))
 
 (defn fresh-uniq [] (str "s" (swap! *uniq* inc)))
 
@@ -257,16 +258,47 @@
     (re-matches #"-?(Infinity|[0-9.eE+-]+)#" t) (prim-tc "Float#")
     :else nil))
 
+(defn pred-as-type
+  "A predicate [CLASS [ARG...]] (a dictionary binder's type, peel-param's) as the type [:tc CLASS [ARG...]]; else t"
+  [t]
+  (if (and (vector? t) (vector? (first t)) (vector? (second t))) [:tc (first t) (second t)] t))
+
 (defn- ty-match
   "One-way matching of a pattern type (a constructor's or a function's, its quantified variables free) against an
   instance: the variables' bindings added to m (tcMatchTy, the part the representations need)"
   [m p t]
+  (let [p (pred-as-type p) t (pred-as-type t)]
   (cond (or (not (vector? p)) (not (vector? t))) m
         (= :tv (first p)) (if (contains? m (second p)) m (assoc m (second p) t))
         (and (= :tc (first p)) (= :tc (first t)) (= (second p) (second t)) (nth p 2) (nth t 2)
              (= (count (nth p 2)) (count (nth t 2))))
         (reduce (fn [m [a b]] (ty-match m a b)) m (map vector (nth p 2) (nth t 2)))
-        :else m))
+        :else m)))
+
+(defn type-match
+  "hs-own-stg-2 (a): one-way matching of a binder's type p (its variables the pattern's) against an argument's type t: the
+  variables' bindings added to m ({} when nothing matches), predicates as types"
+  [m p t]
+  (let [p (pred-as-type p) t (pred-as-type t)]
+    (cond (or (not (vector? p)) (not (vector? t))) m
+          (= :tv (first p)) (cond (contains? m (second p)) m
+                                  (= p t) m
+                                  :else (assoc m (second p) t))
+          (and (= :tc (first p)) (= :tc (first t)) (= (second p) (second t)) (nth p 2) (nth t 2)
+               (= (count (nth p 2)) (count (nth t 2))))
+          (reduce (fn [m [a b]] (type-match m a b)) m (map vector (nth p 2) (nth t 2)))
+          (and (= :forall (first p)) (= :forall (first t)) (= (count (nth p 2)) (count (nth t 2))))
+          (let [m2 (reduce (fn [m [[_ as] [_ bs]]] (reduce (fn [m [a b]] (type-match m a b)) m (map vector as bs)))
+                           m (map vector (nth p 2) (nth t 2)))]
+            (type-match m2 (nth p 3) (nth t 3)))
+          :else m)))
+
+(defn subst-type
+  "A type with the variables of m replaced (tsubst; a predicate's arguments too)"
+  [m t]
+  (if (and (vector? t) (vector? (first t)) (vector? (second t)))
+    [(first t) (mapv #(tsubst m %) (second t))]
+    (tsubst m t)))
 
 (defn- peel-param
   "A function type's first value parameter (a dictionary's predicate too) and the rest, through newtypes: [arg res]"

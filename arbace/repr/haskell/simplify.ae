@@ -125,11 +125,20 @@
                    (= :one (:k o)) (assoc :occ {:k :many :tail nil})
                    (some? u) (assoc :unf (when (c/evald-unf? u) {:k :other :cons []}))))))
 
+(defn- tv-free? [t] (not (some (fn [x] (and (vector? x) (= :tv (first x)))) (tree-seq coll? seq t))))
+
 (defn- subst-id-bndr
-  "substIdBndr: the binder renamed when in scope already (uniqAway), its fragile info zapped: [env out-bndr]"
+  "substIdBndr: the binder renamed when in scope already (uniqAway), its fragile info zapped: [env out-bndr]; hs-own-stg-2
+  (a): under a type substitution (:tsubst, the beta reductions' type matches) a binder whose type it changes is cloned with
+  the substituted type (GHC's substIdType: a default method's local worker inlined at IO typed at IO a)"
   [env b]
   (let [k (c/vkey b)
-        b1 (if (and (c/lv? b) (contains? (:in-scope env) k)) (c/clone b) b)
+        ts (:tsubst env)
+        t0 (when (and (seq ts) (c/lv? b)) (c/id-type b))
+        t1 (when t0 (c/subst-type ts t0))
+        retype? (and t1 (not= t1 t0))
+        b1 (if (and (c/lv? b) (or retype? (contains? (:in-scope env) k))) (c/clone b) b)
+        _ (when (and retype? c/*new-types*) (swap! c/*new-types* assoc b1 t1))
         b2 (zap-fragile b1)
         env2 (-> env (assoc-in [:in-scope (c/vkey b2)] b2)
                  (assoc :subst (if (= (c/vkey b2) k) (dissoc (:subst env) k) (assoc (:subst env) k [:done-id (c/occ-form b2)]))))]
@@ -361,7 +370,9 @@
     (cond (not (:pre-inline (:mode env))) nil
           (:noinline (c/info b)) nil
           (and top? (c/dead-end-id? b)) nil
-          (and (c/join? b) (= :one (:k occ)) (:in-lam occ)) nil
+          ;; (hs-own-stg-2 (a): no exclusion of a join point used once inside a lambda: GHC's excludes only Exitify's exit join
+          ;; points, which -O0 does not make; stimes's g wrapper, a join point called from f's recursive join point, is
+          ;; inlined at its dictionaries there)
           (contains? *exported* (c/vkey b)) nil
           (not (one-occ-pre? top? (or occ {:k :many}) rhs)) nil
           (not (c/stable-unf? unf)) (extend-subst env b (cont-ex rhs-env rhs))
@@ -568,7 +579,7 @@
 ;;; ------------------------------------------------------------------------------------------
 ;;; The Simplifier (GHC.Core.Opt.Simplify.Iteration)
 
-(declare simpl-expr-f simpl-expr-c simpl-expr rebuild rebuild-call simpl-lam complete-bind simpl-lazy-bind
+(declare simpl-expr-f simpl-expr-c simpl-expr rebuild rebuild-go rebuild-call simpl-lam complete-bind simpl-lazy-bind
          simpl-join-bind simpl-alts mk-dupable-cont mk-dupable-case-cont simpl-alt make-trivial prepare-rhs
          simpl-non-rec-body complete-bind-x simpl-rec-bind prepare-binding simpl-join-rhs rebuild-case)
 
@@ -883,7 +894,7 @@
 
 (defn- simpl-in-id [env v k]
   (if (and (c/gv? v) (lazy-con-rep? v))
-    (rebuild (zap-subst env) v k)
+    (rebuild-go (zap-subst (zap-subst env)) v k)
     (let [r (subst-id env v)]
       (case (first r)
         :cont (simpl-expr-f (assoc env :subst (second r)) (nth r 2) k)
@@ -948,6 +959,20 @@
           body (if (seq bs) (list 'lam (vec bs) (nth e 2)) (nth e 2))]
       (if (= :apply (:k k))
         (let [{:keys [arg dup cont] se :env} k
+              ;; hs-own-stg-2 (a): the binder's type matched against the argument's (GHC's type application, done here
+              ;; by matching: a default method's dictionary binder Semigroup a at $fSemigroupIO d, a := IO a'), the
+              ;; substitution applied to the body's binders as they are cloned
+              bt (c/id-type b)
+              env (if (and bt (not (tv-free? bt)) (not (c/head? arg 'lit)))
+                    (let [ts0 (:tsubst env)
+                          ;; (the argument's type under the substitution so far: an in-expression's binders keep the
+                          ;; template's types)
+                          at (try (c/infer-type! arg nil) (catch Throwable _ nil))
+                          at (if (and at (seq ts0)) (c/subst-type ts0 at) at)
+                          th (when at (c/type-match {} bt at))
+                          th (into {} (remove (fn [[x t]] (= t [:tv x])) th))]
+                      (if (seq th) (update env :tsubst (fn [m] (merge (into {} (map (fn [[x t]] [x (c/subst-type th t)]) m)) th))) env))
+                    env)
               lev (lam-arg-levity b arg)
               from [:beta lev]]
           (tick!)
@@ -999,12 +1024,14 @@
 (defn- rebuild-go [env e k]
   (case (:k k)
     :stop [(empty-floats env) e]
-    :cast (rebuild-go env (c/mk-cast e (:co k)) (:cont k))
+    :cast (recur env (c/mk-cast e (:co k)) (:cont k))
     :select (rebuild-case (in-scope-from-e (:env k) env) e (:bndr k) (:alts k) (:cont k))
     :strict-arg (rebuild-call env (add-val-arg (:fun k) e) (:cont k))
     :strict-bind (complete-bind-x (in-scope-from-e (:env k) env) (:from k) (:bndr k) e (:body k) (:cont k))
+    ;; (hs-r5: recur, not a call: a constructor applied down a long list literal, quotRem2Large's 1,080 elements,
+    ;; nests one level a cons, and the interpreter's call depth is bounded)
     :apply (let [[_ _ a2] (simpl-lazy-arg env (:dup k) (:env k) (:arg k) nil)]
-             (rebuild-go env (c/mk-apps e [a2]) (:cont k)))))
+             (recur env (c/mk-apps e [a2]) (:cont k)))))
 
 (defn rebuild [env e k] (rebuild-go (zap-subst env) e k))
 
@@ -1474,7 +1501,7 @@
   (binding [c/*uniq* (atom 0)
             c/*new-types* (atom {})
             c/*ltypes* (:ltypes r)
-            c/*genv* (merge (:genv r) (:types r))
+            c/*genv* (merge (:dfun-types r) (:genv r) (:types r))
             c/*tycons* (:tycons r)
             c/*unlifted-type?* (:unlifted-type? hooks)
             c/*unlifted-expr?* (let [ue (:unlifted-expr? hooks) ut (:unlifted-type? hooks)]

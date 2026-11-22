@@ -2071,3 +2071,97 @@ triples). Queue 337 judges them by the tests' own verdicts, as AR4's arm64 verdi
   `:x32` 7, `:options` 1 (gnux32-dwarf-gen's -g), `:stats` 1; its seven controls failing as they must. Unchanged: object-check musl
   32 of 32, synthetic 8 of 8 with obj-err 3 of 3, mc-x86-obj 49 of 49; arm64's a64-synthetic 3 of 3 with obj-err-arm64 2 of 2 and
   object-verdict ok (2,819 of 2,832); `backend check` byte for byte.
+
+## As built: x86-print (2026-11-22; branch `x86-print-1122`, from `mac/next` `863bdaea1`)
+
+The burst's stream X1: the x86-64 print cell's deferred and by-design rows ranked by cause (at `863bdaea1`: print 194,796 pass /
+1,187 by design / 531 deferred; read 25,253 / 1 / 1; eval 136 / 2 / 0), the largest fixed first, each proven on its own files with
+the controls, the rows re-recorded alone (`encode-check --record --only`), no host assembler.
+
+Round 1:
+
+- **The object verdict's main-host record (queue 337's `:until`).** `bin/repr-asm object-verdict --record`: 68 files, 1,243 CHECK
+  lines, 864 met, `:other-format` 338, `:elf32` 32, `:x32` 7, `:options` 1, `:stats` 1 (queue 372's numbers), its seven controls
+  failing; `test/reap/cells.edn`'s `:until` dropped (the source shown beside the AOT cell, AXS100 (a)). The 36 files of the print
+  level's 406 `:object-unjudged` texts re-recorded: 362 met (and the 5 streamer's lines beside them), 43 `:other-format`, 1 `--stats`
+  `:debug-trace`.
+- **The other tools' texts by their own words (AXS95 (a)'s `:other-tool`).** `arbace.asm.amd64.check/other-tool-class` holds every
+  other tool's CHECK text to the object verdict's view of Arbace's object, also for the files whose object object-check holds to
+  llvm-mc's recorded one (AXS95 (a) had them by design: "judged at the AOT level"), as arm64's judge-rest does: of the 366 texts
+  332 met, 32 `:other-format` (compact-unwind-cfi_def_cfa, fp-setup-macho, hex-immediates, the Mach-O runs of no-elf-compact-unwind
+  and reloc-undef-global), 2 `:elf32` (abs8's i386 run), LFI's note 1 (below). The verdict's llvm-readobj view takes `--sd` (arm64's
+  section data). The object check's comparison with llvm-mc's records stays the AOT cell's.
+- **The triple as Triple::normalize reads it.** x86-evenDirective's `-triple -x86_64-unknown-unknown` (an empty first component)
+  was `:other-target` at the print level and `:options` at the verdict (its value taken for a flag): `check/norm-triple` moves the
+  architecture first, objcheck's `backend-opts` skips a flag's value; its 7 `llvm-readobj -S --sd` texts met (`.even`'s NOP fill).
+- **The LFI rewriter** (`arbace.asm.amd64.lfi`, after X86MCLFIRewriter.cpp, MCLFI.cpp, MCLFIRewriter.cpp of the pinned tarball):
+  `syscall` to `leaq .Ltmp(%rip), %r11; jmpq *-8(%r14); .Ltmp:` (createTempSymbol, the streamer's count), the %fs accesses through
+  16(%r15) (the TP destination operand 0 when written and not read, else %r11; a lea when base and index are both taken), its three
+  errors, and the ABI note at the end (`.section .note.LFI.ABI.x86_64,"aG",@note,...,comdat` with its data), in the print level's
+  assemble-file (`*lfi*`) and the object assembler (`:lfi`, the note assembled by `:finish`). What the table does not hold is read
+  from the operands (mayLoad/mayStore: a memory operand that is not an address, LEA's and the NOPs'; the explicit defs and uses),
+  as the namespace says. LFI-abi-note 11, LFI-syscall 3, LFI-thread-pointer 48 texts met; LFI-thread-pointer-errors 6 of 6 error
+  lines.
+
+Proof: encode-check `--only` over the 67 files of the moved rows: 767 of 845 texts met, the rest `:other-format` 75, `:elf32` 2,
+`:debug-trace` 1; the cross judge 565 of 567 (abs8's 2 `:dollar-name`, as recorded); 6 of 6 error lines; every control of the slice
+failing as it must. After: print 195,558 pass / 890 by design / 66 deferred (completeness 99.5%, 100.0% without by design).
+
+Round 2:
+
+- **The cross judge's same instruction** (AXS34's `:ambiguous`, re-examined): of its 566 rows 471 are `_REV` forms (`vmovups.s`
+  printed `vmovups zmm2, zmm1`, read back as the 0x10 form), 66 operand-size variants (retw's `ret`, popl %ss's `pop ss` in 32-bit
+  mode, the far branches' 16/32-bit immediates) and 29 the same instruction with another operand value of the same encoding (an imm8
+  printU8Imm masks: `bt eax, 255` for $-1, `blendps xmm1, xmm2, 192` for -64; a scale without an index, which the encoder ignores).
+  `check/same-machine-insn?` (the judge's and control-cross's comparison) takes the instruction with its encoding byte for byte (the
+  fixups' expressions the same) as the same machine instruction: the 29 pass. The 537 others are llvm-mc's own: its Intel printer
+  writes no text that tells them apart (no `{load}`/`{store}` in X86AsmParser, the `.s` aliases EmitPriority 0, Intel's mnemonics
+  without the size suffix), so a printer that keeps llvm-mc's texts cannot pass them (the decision for the user, with `:pcrel-imm`,
+  `:mask-operand`, `:other-instruction`, `:disassemble-only`, `:dollar-name`: below).
+- **-debug-only=asm-matcher** (AXS97 (a)'s `:debug-trace`, re-examined): `arbace.asm.amd64.asm/*trace*` makes the trace
+  MatchInstructionImpl writes (AsmMatcherEmitter.cpp's DEBUG_WITH_TYPE lines: the mnemonic's encodings, each matchable tried, each
+  formal class against the actual operand printed as X86Operand::print does, the result; getMatchClassName's MCK_ names,
+  getEnumNameForToken for tokens, MaxNumOperands' InvalidMatchClass, the x87 suffix trial's NUL mnemonic, checkTargetMatchPredicate's
+  diag code 6, the missing features' indices by the predicates' names (unverified: no test reads them)); the print level judges a
+  matcher-trace run's CHECK lines against it: x86_64-asm-match 57 of 57. Controls `_control-print/sse2-64-vs-asm-match`, and by hand
+  the test against itself `same`, a mutant (pshufb's memory operand a register) `differs`.
+- **llvm-mc --stats**: `arbace.asm.obj/layout!` follows relaxOnce's loop (FirstStable, the last moved section, each pass's most
+  iterations added to RelaxationSteps; a chunk's size change counts when it moves the next chunk, LLVM's Changed), the object's
+  `:relax-steps`; the verdict holds a --stats run's lines to `N assembler - Number of assembler layout and relaxation steps`:
+  align-branch-convergence's STATS line met (3). Control `_control-objverdict/align-branch-convergence-plain`. Unchanged: object-check
+  89 of 89, arm64's 16 of 16 and its verdict 2,889 of 2,890.
+- **The parser's warnings** (`:diagnostic`'s 4): CheckDispOverflow in the operands (`asm/*warnings*`): 64-bit addressing's
+  displacement out of isInt<32> an error, 32-bit's and 16-bit's a warning with the value shortened; the print level holds a run's
+  `warning:` texts in order to them, the message and the place (`[[#@LINE+N]]`'s line, the column of the base's `%` or Intel's `[`),
+  always for the warnings it ports: displacement-overflow and intel-syntax-displacement-overflow 2 + 2 met, their error runs' 4 error
+  lines met. Control `_control-print/x86-16-vs-displacement-overflow`; by hand a mutant (one warning's statement in range) `differs`.
+- **An error test's input and a file no RUN line reads** (the read cell's 1 + 1, the round trip's at print): make_list flags a file of
+  Inputs/ that a test above gives to `not llvm-mc` `error-input`: read as an error test is (per statement, AXS96 (a)), at least one
+  refusal (llvm-mc refuses it; its words not judged), round trip byte for byte. A not-input file (pad-for-align-debug.s, a lit test's
+  prose with `;` lines) is read the same way, its refusals judged by nothing (no RUN line gives it to llvm-mc): the round trip's own
+  levels judge it.
+- **pad-for-align-debug's 63 texts** (`:unread`): its runs read `%S/Inputs/pad-align-*.s`, not the test: a run whose llvm-mc reads
+  another file is held to the object verdict (Mach-O's triple: `:other-format`).
+- **cpuid** (the eval cell's 2, `:cpuid`, AXS58 (a)): the native's cpuid answered with x86i's model in the CPU's run and the sys mode,
+  as the step mode does: `x86i.CpuidModel` (x86i's cpuid's answer, factored), the sys mode's `sysRun` patching an int3 at each cpuid
+  x86i is about to run before the native runs (`sysResume` answers it: EAX..EDX, RIP past it; put back for the step mode), and the
+  driver's `x86i cpu EXE` (the CPU's run of a `# cpu: cpuid` program: under ptrace, an int3 at each cpuid of its code sections by
+  decode-text's sweep). Controls `_control/inject-cpuid-model`, `lockstep-cpuid-model` (X86I_INJECT=cpuid:model: x86i's own answer's
+  EBX bit flipped) fail as they must.
+
+Proof of round 2: the whole encode-check (12.5 minutes, the judge ok against the record), `--record --only` over the 14 files moved,
+object-verdict `--record` (68 files, 865 of 1,243), object-check 89 of 89, arm64's object-check 16 of 16 and verdict, the round trip
+of mc-asmparser and mc-x86 `--record` (157 and 621 pass), x86i-check `--record` whole (46 of 46 at every level, its controls failing).
+After: read 25,255 / 0 / 0, eval 138 / 0 / 0, AOT 108 / 0 / 0, print 195,651 pass / 861 by design / 2 deferred; completeness 99.9%
+(print 99.6%), 100.0% without by design.
+
+Left (the decisions for the user, with their rows; and the deferred):
+- the cross judge's llvm-mc classes, 723 by design: `:ambiguous` 537 (471 `_REV`, 66 operand-size variants), `:pcrel-imm` 118,
+  `:mask-operand` 33, `:other-instruction` 21, `:disassemble-only` 12, `:dollar-name` 2: a printer that writes llvm-mc's Intel texts
+  cannot pass them (they pass only with an Intel print of Arbace's own, which the print level's Intel CHECK texts and the decoder's
+  would then fail). (a) keep by design (AXS34 (a), never put to the user); (b) count them out of the cases (nothing defines a round
+  trip llvm-mc's own syntax cannot make).
+- `:other-format` 138 by design (AXS99, pending): Mach-O's and COFF's objects (compact unwind, __eh_frame, Mach-O relocations,
+  llvm-nm of COFF, pad-for-align-debug's 63): (a) by design; (b) Arbace's Mach-O and COFF writers and views (days of work).
+- `:elf32` 2 deferred (AXS101): abs8's i386 run (llvm-objdump -d -r of an ELF32 object), with the verdict's 32 i386 lines beside: an
+  ELF32 writer and reader with X86ELFObjectWriter's getRelocType32 (scoped, not started: the round was stopped).
