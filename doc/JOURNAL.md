@@ -16852,3 +16852,37 @@ To build:
 - Clojure: CDR12, CDR13, CDR14, CDR15 (doc/CLOJURE-DESIGN-REVIEW.md).
 - Java: t05905 (the qualifier recorded in the forms) and t07835 (JDI's generic types indexed).
 Kept as built: LLVM's envp (LLS58), arm64's literal pools (ARS50), arm64's error-judge rule, hsi's interrupted thunks (HES56 (b)).
+
+## 2026-11-22: Go's print cell: the 9 tests-embed-sources packages printed in mode :full (go-read2-1122, part 1)
+
+The user's decision of 2026-11-22 (the entry above, "To build": text-preserving print for the 9 tests-embed-sources
+packages). Branch `go-read2-1122` from mac/next `3e8dfe109` (with go-rows-1122). TamaGo's testdata_tamago_test.go files
+embed what a package's tests read, the package's own Go files among them; the code level compiles the candidate in the
+original's place through the go command's -overlay, which //go:embed reads, so the test binary embedded the candidate's
+(flattened) text and nine packages were known at the code level (test/repr/go/roundtrip-tests-known.edn: crypto,
+go/format, go/parser, go/printer, internal/trace, io/ioutil, net/http, os, sync).
+- `bin/repr-go roundtrip --tests` (`roundtrip_tests_embedded`): after the corpus is converted and printed (mode :lines),
+  the Go files a package embeds from its own directory (`go list -test`'s EmbedFiles; only a package's own files are
+  compiled in the original's place, gocmp's overlay) that the candidate holds are replaced by their print from mode
+  :full (`bin/repr-go read --full --tests` of the packages holding them), each compared with its original byte for
+  byte, a difference failing the round trip; their list `cand-tests.embedded.txt`. 153 files of 12 packages (the nine,
+  and internal/types/errors, path/filepath and runtime/metrics, whose :lines prints already flattened as their
+  originals do), 153 byte for byte. The rule is keyed on go list's embeds, not on a copied list of packages.
+- The negative controls `embed PACKAGE` (test/repr/go/roundtrip-controls.txt, one for each of the nine; bin/lib/repr-go/check,
+  judged with --with-tests): one embedded file of the package altered in its text alone (an empty declaration group
+  appended, which the tree level identifies away): tree pass, code fail, 9 of 9 held. A first form of the control
+  restored the files' :lines prints (the state before): it failed the code level for seven, but go/format's
+  format_test.go and sync's example_test.go print from mode :lines with their originals' tokens today, so their code
+  passed either way (the known entries dated from an earlier printer). The same run showed that the package controls
+  (container/list vs ring) erred under --with-tests (the staged files are the package's own, gocmp -tests wants its
+  tests'): the controls file says they are left there, and the check now leaves them.
+- Runs: the conversion of the corpus tests (`bin/repr-go roundtrip --tests --record`, REPR_GO_JOBS=4, GOMEMLIMIT=6GiB
+  under the 8 GiB cap: 554 dumps, 0 failed, 528 s; the 12 packages in mode :full, 24 dumps, 148 s). Its check at the
+  default `-j` (the host's 64 cores) took the host's MemAvailable from 28 to 8 GiB within a minute, 192 gocmp processes:
+  stopped (this worktree's processes alone), and run again as the round trip runs it with `-j 8` on the same candidate
+  (`bin/repr-go check --with-tests --no-tests --known ... --controls ... --record test/repr/go/roundtrip-tests.edn`):
+  379 packages, tree 379, export and code 378 (unsafe skip), the nine rows :fail -> :pass and nothing else changed; the
+  known file empty. test/repr/go/divergences-print.edn's :tests-embed-sources gone.
+- Go's print cell 2,584 / 9 / 0 -> 2,593 / 0 / 0 (129 n/a); Go's completeness 0.988974 -> 0.989842 (floored 98.8 ->
+  98.9; the read cell's round is part 2). bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0
+  problems), bin/records-check (0 problems). doc/go/ROUNDTRIP.md, "Tests that embed their own sources".
