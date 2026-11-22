@@ -360,6 +360,9 @@ END {
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # s, the minor heap's size in words (queue 523): oi's simulated minor heap (Gc's minor_heap_size, OC218's countWords) at oi's level
+      # (statmemprof/user_data_regression's s=100); the AOT levels keep the class
+      if (key == "ocamlrunparam" && val ~ /^,?s=[0-9]+[kMG]?$/ && aot == 0) { env = env " OCAMLRUNPARAM=" val; continue }
       # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
       # (queue 370: at the light level too, Bt's backtraces; not yet the compiled level)
       if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && aot != 2) { env = env " OCAMLRUNPARAM=" val; continue }
