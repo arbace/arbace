@@ -1,0 +1,247 @@
+(ns arbace.repr.haskell.thsplice
+  "T13688 (hs-r7): Template Haskell's quasi-quotes run at compile time, as GHC runs an untyped splice in the renamer
+  (GHC.Rename.Splice's runRnSplice; GHC.Tc.Gen.Splice's runMeta through the external interpreter): each quasi-quote
+  [q|text|] of a module is the splice quotePat q \"text\" (quoteExp in an expression, quoteType in a type), run as a program
+  of its own: a generated Main with the module's imports (the quoter's module is compiled before it, GHC's stage
+  restriction) printing runQ's value (TH.Syntax's derived Show, through the Quasi IO instance), compiled by the same front
+  end and run on hsi over the same libraries (arbace.repr.haskell.front's th-expand!). Here: the quasi-quotes found in a
+  native dump, the generated program's text, the printed values read back (a reader of Show's syntax) and converted into
+  the parsed tree's forms in the quasi-quote's place (GHC.ThToHs' cvtPat, cvtl and cvtType: literals, variables,
+  constructors, applications, tuples, lists, infix applications; a name as written, mkName's or the module-qualified one
+  the printed NameG gives), the dump then renamed and elaborated as any"
+  (:require [arbace.string :as str]
+            [arbace.walk :as walk]))
+
+(defn- L? [x] (and (seq? x) (= 'L (first x))))
+
+(defn- qq-ctx
+  "The context of a splice node: :pat, :exp, :type, or nil when node is no quasi-quote's splice"
+  [node]
+  (when (and (seq? node) (seq? (nth node 2 nil)) (= 'HsQuasiQuote (first (nth node 2))))
+    (case (first node) SplicePat :pat HsUntypedSplice :exp HsSpliceTy :type nil)))
+
+(defn quasi-quotes
+  "The quasi-quotes of a dump's forms, in tree order: [{:ctx :pat|:exp|:type :quoter RDR :qspan SPAN :text S :span SPAN}...],
+  :span the splice's (its L's), nil when none"
+  [forms]
+  (let [out (atom [])]
+    (letfn [(w [x sp]
+              (cond (L? x) (w (nth x 2) (second x))
+                    (seq? x) (if-let [ctx (qq-ctx x)]
+                               (let [[_ _ q t] (nth x 2)]
+                                 (swap! out conj {:ctx ctx :quoter (nth q 2) :qspan (second q) :text (nth t 2) :span sp}))
+                               (doseq [y x] (w y sp)))
+                    (coll? x) (doseq [y x] (w y sp))
+                    :else nil))]
+      (w forms nil))
+    (seq @out)))
+
+(defn- span-text
+  "The source text of span [l1 c1 l2 c2] (1-based lines and columns, the end column exclusive) of lines"
+  [lines [l1 c1 l2 c2]]
+  (let [ls (subvec lines (dec l1) l2)]
+    (if (= l1 l2)
+      (subs (first ls) (dec c1) (dec c2))
+      (str/join "\n" (concat [(subs (first ls) (dec c1))] (butlast (rest ls)) [(subs (last ls) 0 (dec c2))])))))
+
+(defn- hs-string
+  "A Haskell string literal of s (show's escapes for the quotes, the backslash and control characters)"
+  [^String s]
+  (str "\"" (apply str (map (fn [c] (case c \" "\\\"" \\ "\\\\" \newline "\\n" \tab "\\t" \return "\\r"
+                                      (if (< (int c) 32) (str "\\" (int c) "\\&") (str c))))
+                            s))
+       "\""))
+
+(defn gen-source
+  "The generated program's text: Main with the module's imports (their source text, from the dump's import declarations'
+  spans), qualified Prelude and TH imports of its own, and a main printing each quasi-quote's runQ value on a line"
+  [forms ^String source qqs]
+  (let [lines (vec (str/split-lines source))
+        mod (some (fn [f] (when (and (L? f) (seq? (nth f 2)) (= 'HsModule (first (nth f 2)))) (nth f 2))) forms)
+        imports (when mod (nth mod 4))
+        itexts (for [i imports :when (L? i)] (span-text lines (second i)))
+        q (fn [{:keys [ctx quoter qspan text]}]
+            (str "TH__S.runQ (TH__Q." (case ctx :pat "quotePat" :exp "quoteExp" :type "quoteType")
+                 " (" (span-text lines qspan) ") " (hs-string text) ") TH__P.>>= TH__P.print"))]
+    (str "module Main (main) where\n"
+         (str/join "\n" itexts) (when (seq itexts) "\n")
+         "import qualified Prelude as TH__P\n"
+         "import qualified Language.Haskell.TH.Syntax as TH__S\n"
+         "import qualified Language.Haskell.TH.Quote as TH__Q\n"
+         "main :: TH__P.IO ()\n"
+         "main = do\n"
+         (str/join "" (map (fn [x] (str "  " (q x) "\n")) qqs)))))
+
+;;; Show's syntax read back: constructors applied to arguments, parentheses, lists, tuples, string, character and number
+;;; literals (show's escapes), a negative number in parentheses, a rational's %, a record's braces not
+
+(def ^:private ascii-escapes
+  {"NUL" 0 "SOH" 1 "STX" 2 "ETX" 3 "EOT" 4 "ENQ" 5 "ACK" 6 "BEL" 7 "BS" 8 "HT" 9 "LF" 10 "VT" 11 "FF" 12 "CR" 13 "SO" 14
+   "SI" 15 "DLE" 16 "DC1" 17 "DC2" 18 "DC3" 19 "DC4" 20 "NAK" 21 "SYN" 22 "ETB" 23 "CAN" 24 "EM" 25 "SUB" 26 "ESC" 27
+   "FS" 28 "GS" 29 "RS" 30 "US" 31 "SP" 32 "DEL" 127})
+
+(defn- read-escape
+  "A Haskell escape after the backslash at i of s: [code-point-or-nil next-index] (\\& gives nil)"
+  [^String s i]
+  (let [c (.charAt s i)]
+    (case c
+      \n [10 (inc i)] \t [9 (inc i)] \r [13 (inc i)] \a [7 (inc i)] \b [8 (inc i)] \f [12 (inc i)] \v [11 (inc i)]
+      \\ [92 (inc i)] \" [34 (inc i)] \' [39 (inc i)] \& [nil (inc i)]
+      \^ [(- (int (.charAt s (inc i))) 64) (+ i 2)]
+      (if (Character/isDigit c)
+        (let [j (loop [j i] (if (and (< j (count s)) (Character/isDigit (.charAt s j))) (recur (inc j)) j))]
+          [(Long/parseLong (subs s i j)) j])
+        (let [k (some (fn [n] (when (str/starts-with? (subs s i) n) n)) (sort-by (comp - count) (keys ascii-escapes)))]
+          (if k [(get ascii-escapes k) (+ i (count k))] (throw (ex-info (str "thsplice: unknown escape \\" c) {}))))))))
+
+(defn- tokens
+  "Show's output as tokens: [:str S] [:char C] [:num N] [:id NAME] and the punctuation's strings ( ) [ ] , % -"
+  [^String s]
+  (loop [i 0 out []]
+    (if (>= i (count s))
+      out
+      (let [c (.charAt s i)]
+        (cond
+          (Character/isWhitespace c) (recur (inc i) out)
+          (#{\( \) \[ \] \, \% \-} c) (recur (inc i) (conj out (str c)))
+          (= c \") (let [[v j] (loop [j (inc i) sb (StringBuilder.)]
+                                 (let [d (.charAt s j)]
+                                   (cond (= d \") [(str sb) (inc j)]
+                                         (= d \\) (let [[cp k] (read-escape s (inc j))] (when cp (.appendCodePoint sb (int cp))) (recur k sb))
+                                         :else (recur (inc j) (.append sb d)))))]
+                     (recur j (conj out [:str v])))
+          (= c \') (let [[cp j] (if (= \\ (.charAt s (inc i))) (read-escape s (+ i 2)) [(int (.charAt s (inc i))) (+ i 2)])]
+                     (recur (inc j) (conj out [:char cp])))
+          (Character/isDigit c) (let [j (loop [j i] (if (and (< j (count s)) (Character/isDigit (.charAt s j))) (recur (inc j)) j))]
+                                  (recur j (conj out [:num (bigint (subs s i j))])))
+          (or (Character/isLetter c) (= c \_))
+          (let [j (loop [j i] (if (and (< j (count s)) (let [d (.charAt s j)] (or (Character/isLetterOrDigit d) (#{\_ \' \.} d)))) (recur (inc j)) j))]
+            (recur j (conj out [:id (subs s i j)])))
+          :else (throw (ex-info (str "thsplice: cannot read " (pr-str (subs s i (min (count s) (+ i 20))))) {})))))))
+
+(declare parse-expr)
+
+(defn- parse-atom
+  "An atom of Show's syntax at token i: [value next]; a constructor alone {:con NAME :args []}"
+  [ts i]
+  (let [t (nth ts i)]
+    (cond
+      (= t "(") (if (= (nth ts (inc i)) "-")
+                  (let [[v j] (parse-atom ts (+ i 2))] [(- v) (inc j)])
+                  (let [[v j] (parse-expr ts (inc i))]
+                    (case (nth ts j)
+                      "%" (let [[d k] (parse-expr ts (inc j))] [{:ratio [v d]} (inc k)])
+                      "," (loop [vs [v] j j] (if (= (nth ts j) ",") (let [[w k] (parse-expr ts (inc j))] (recur (conj vs w) k)) [{:tuple vs} (inc j)]))
+                      [v (inc j)])))
+      (= t "[") (if (= (nth ts (inc i)) "]")
+                  [{:list []} (+ i 2)]
+                  (loop [vs [] j (inc i)]
+                    (let [[w k] (parse-expr ts j)]
+                      (if (= (nth ts k) ",") (recur (conj vs w) (inc k)) [{:list (conj vs w)} (inc k)]))))
+      (= :str (first t)) [{:str (second t)} (inc i)]
+      (= :char (first t)) [{:char (second t)} (inc i)]
+      (= :num (first t)) [(second t) (inc i)]
+      (= :id (first t)) [{:con (second t) :args []} (inc i)]
+      :else (throw (ex-info (str "thsplice: unexpected token " (pr-str t)) {})))))
+
+(defn- atom-start? [t] (or (vector? t) (= t "(") (= t "[")))
+
+(defn- parse-expr
+  "A constructor applied to atoms, or an atom: [value next]"
+  [ts i]
+  (let [t (nth ts i)]
+    (if (and (vector? t) (= :id (first t)))
+      (loop [args [] j (inc i)]
+        (if (and (< j (count ts)) (atom-start? (nth ts j)))
+          (let [[a k] (parse-atom ts j)] (recur (conj args a) k))
+          [{:con (second t) :args args} j]))
+      (parse-atom ts i))))
+
+(defn read-shown
+  "A line of Show's output (a TH AST value) as data: {:con NAME :args [...]}, {:str S}, {:char C}, a number, {:list [...]},
+  {:tuple [...]}, {:ratio [N D]}"
+  [line]
+  (let [ts (tokens line) [v j] (parse-expr ts 0)]
+    (when (< j (count ts)) (throw (ex-info (str "thsplice: trailing tokens in " (pr-str line)) {})))
+    v))
+
+;;; GHC.ThToHs' conversion, the subset: the forms the native reader writes, each node at the splice's span
+
+(defn- occ-name
+  "A TH Name as shown (NameS x, NameQ M.x, NameG M.x, NameU x_n): [qualifier-or-nil occ]"
+  [^String s]
+  (let [i (.lastIndexOf s ".")]
+    (if (and (pos? i) (< i (dec (count s))) (Character/isUpperCase (.charAt s 0)) (not (str/ends-with? (subs s 0 i) ".")))
+      [(subs s 0 i) (subs s (inc i))]
+      [nil s])))
+
+(defn- rdr
+  "The reader's RdrName of a shown name in namespace ns"
+  [ns s]
+  (let [[q o] (occ-name s)] (if q (list 'qual ns q o) (list 'unqual ns o))))
+
+(defn- lit-form
+  "cvtLit of a non-overloaded literal: HsString, HsChar (StringL, CharL, StringPrimL not)"
+  [{:keys [con args]}]
+  (let [[a] args]
+    (case con
+      "StringL" (list 'HsString (list 'src (str "\"" (:str a) "\"")) (:str a))
+      "CharL" (list 'HsChar (list 'src (str "'" (str (char (:char a))) "'")) (list 'char (:char a)))
+      (throw (ex-info (str "thsplice: literal " con " not converted") {})))))
+
+(defn- overlit
+  "cvtOverLit of IntegerL n: HsIntegral (IL (src n) neg n)"
+  [n]
+  (list 'OverLit 'NoExtField (list 'HsIntegral (list 'IL (list 'src (str n)) (neg? n) n))))
+
+(declare cvt-exp cvt-pat)
+
+(defn cvt-pat
+  "cvtPat: a TH Pat as the parsed tree's pattern node at span sp"
+  [{:keys [con args] :as p} sp]
+  (let [l (fn [x] (list 'L sp x))]
+    (case con
+      "LitP" (let [lit (first args)]
+               (if (= "IntegerL" (:con lit))
+                 (list 'NPat nil (l (overlit (first (:args lit)))) 'Nothing 'NoExtField)
+                 (list 'LitPat 'NoExtField (lit-form lit))))
+      "VarP" (list 'VarPat 'NoExtField (l (rdr "var" (:con (first args)))))
+      "WildP" (list 'WildPat 'NoExtField)
+      "TupP" (list 'TuplePat nil (mapv #(l (cvt-pat % sp)) (:list (first args))) 'Boxed)
+      "ListP" (list 'ListPat nil (mapv #(l (cvt-pat % sp)) (:list (first args))))
+      "ConP" (let [[n _ ps] args]
+               (list 'ConPat nil (l (rdr "data" (:con n))) (list 'PrefixCon [] (mapv #(l (cvt-pat % sp)) (:list ps)))))
+      (throw (ex-info (str "thsplice: pattern " con " not converted") {})))))
+
+(defn cvt-exp
+  "cvtl: a TH Exp as the parsed tree's expression node at span sp"
+  [{:keys [con args] :as e} sp]
+  (let [l (fn [x] (list 'L sp x))]
+    (case con
+      "LitE" (let [lit (first args)]
+               (if (= "IntegerL" (:con lit))
+                 (list 'HsOverLit 'NoExtField (overlit (first (:args lit))))
+                 (list 'HsLit 'NoExtField (lit-form lit))))
+      "VarE" (list 'HsVar 'NoExtField (l (rdr "var" (:con (first args)))))
+      "ConE" (list 'HsVar 'NoExtField (l (rdr "data" (:con (first args)))))
+      "AppE" (list 'HsApp 'NoExtField (l (cvt-exp (first args) sp)) (l (cvt-exp (second args) sp)))
+      "ListE" (list 'ExplicitList nil (mapv #(l (cvt-exp % sp)) (:list (first args))))
+      "TupE" (list 'ExplicitTuple nil (mapv (fn [m] (if (= "Just" (:con m))
+                                                       (list 'Present 'NoExtField (l (cvt-exp (first (:args m)) sp)))
+                                                       (list 'Missing 'NoExtField)))
+                                             (:list (first args)))
+                   'Boxed)
+      "ParensE" (list 'HsPar nil (l (cvt-exp (first args) sp)))
+      (throw (ex-info (str "thsplice: expression " con " not converted") {})))))
+
+(defn substitute
+  "The forms with the i-th quasi-quote's splice node replaced by (conv i ctx) (each quasi-quote in quasi-quotes' order)"
+  [forms conv]
+  (let [n (atom -1)]
+    (letfn [(w [x]
+              (cond (seq? x) (if-let [ctx (qq-ctx x)]
+                               (conv (swap! n inc) ctx)
+                               (apply list (map w x)))
+                    (vector? x) (mapv w x)
+                    :else x))]
+      (mapv w forms))))

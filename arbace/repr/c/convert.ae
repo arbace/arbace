@@ -49,6 +49,13 @@
 (def ^:dynamic *cx* nil)
 (defn- cx [k] (get *cx* k))
 
+(def ^:dynamic *soft-errors*
+  "c-tails: under a recovering read (parse/*recover*, the dg check's), an ArrayList that takes the converter's errors gcc gives
+  and goes on from (a function definition whose declarator is no function's, `auto g { }`: gcc's c_parser_declaration_or_fndef
+  reports it and skips the block), the item dropped and the read going on, so that the checker still runs; nil: such an error
+  ends the read (the text levels, ci)."
+  nil)
+
 (def ^:dynamic *include-inside*
   "Queue 178: when true, a declaration whose other files' tokens all come from headers its own extent includes is the main
   file's (included-inside?), not refused as :split-declaration. ci's libc read binds it (arbace.c.musl/read-one: five of
@@ -765,7 +772,73 @@
       (list 'complex (or scalar 'double))
       scalar)))
 
-(declare tokens-text)
+(declare tokens-text node-tokens)
+
+(defn- soft!
+  "c-tails: a recovered error at token `t` (*soft-errors*), once."
+  [t ^String msg]
+  (when-let [^ArrayList se *soft-errors*]
+    (let [m (str (if t (tree/pos-string t) "-") ": " msg)]
+      (when-not (.contains se m) (.add se m)))))
+
+(defn- scspec-errors!
+  "c-tails (*soft-errors*, the dg check's read): gcc's declspecs_add_scspec (c-decl.cc) over a declaration's specifiers in
+  order, `els` a sequence of [:sc StorageClassSpecifier-node] and [:type] (a type specifier): its errors for duplicate,
+  conflicting and misplaced storage class specifiers (C23's auto that may infer the type, constexpr, thread_local) as
+  recovered errors."
+  [els]
+  (when *soft-errors*
+    (loop [els (seq els) sc nil thread? false constexpr? false auto23? false typed? false]
+      (when-let [[k n] (first els)]
+        (if (= k :type)
+          ;; c-decl.cc's declspecs_add_type: a type specifier makes a C23 auto the storage class
+          (if auto23?
+            (let [t (when n (first (filter #(instance? PTok %) (node-tokens n))))]
+              (cond sc (do (soft! t "multiple storage classes in declaration specifiers") (recur (next els) sc thread? constexpr? false true))
+                    thread? (do (soft! t "'_Thread_local' used with 'auto'") (recur (next els) sc thread? constexpr? false true))
+                    constexpr? (do (soft! t "'auto' used with 'constexpr'") (recur (next els) sc thread? constexpr? false true))
+                    :else (recur (next els) :auto thread? constexpr? false true)))
+            (recur (next els) sc thread? constexpr? auto23? true))
+          (let [t (g n :Token) w (tsrc t) q (str "'" w "'") c (cs n)
+                c23 (#{:c23 :gnu23 :c2y :gnu2y} (cx :std))]
+            (case c
+              :StorageClassSpecifierThreadLocal
+              (do (when thread? (soft! t "duplicate '_Thread_local' or '__thread'"))
+                  (cond (= sc :auto) (do (soft! t (str q " used with 'auto'")) (recur (next els) sc thread? constexpr? auto23? typed?))
+                        (= sc :register) (do (soft! t (str q " used with 'register'")) (recur (next els) sc thread? constexpr? auto23? typed?))
+                        (= sc :typedef) (do (soft! t (str q " used with 'typedef'")) (recur (next els) sc thread? constexpr? auto23? typed?))
+                        constexpr? (do (soft! t (str q " used with 'constexpr'")) (recur (next els) sc thread? constexpr? auto23? typed?))
+                        :else (recur (next els) sc true constexpr? auto23? typed?)))
+              :StorageClassSpecifierConstexpr
+              (do (when constexpr? (soft! t (str "duplicate " q)))
+                  (cond (= sc :extern) (soft! t (str q " used with 'extern'"))
+                        (= sc :typedef) (soft! t (str q " used with 'typedef'"))
+                        (= sc :auto) (soft! t (str q " used with 'auto'"))
+                        thread? (soft! t (str q " used with '_Thread_local'")))
+                  (recur (next els) sc thread? (or constexpr? (not (or (#{:extern :typedef :auto} sc) thread?))) auto23? typed?))
+              (:StorageClassSpecifierAuto :StorageClassSpecifierExtern :StorageClassSpecifierRegister
+               :StorageClassSpecifierStatic :StorageClassSpecifierTypedef)
+              (if (and (= c :StorageClassSpecifierAuto) c23 (not typed?) (not= sc :typedef))
+                ;; "auto" potentially used for type deduction
+                (do (when auto23? (soft! t (str "duplicate " q)))
+                    (recur (next els) sc thread? constexpr? true typed?))
+                (let [nsc ({:StorageClassSpecifierAuto :auto :StorageClassSpecifierExtern :extern :StorageClassSpecifierRegister :register
+                            :StorageClassSpecifierStatic :static :StorageClassSpecifierTypedef :typedef} c)
+                      _ (when (and (= nsc :auto) constexpr?) (soft! t (str q " used with 'constexpr'")))
+                      auto23? (if (and (= nsc :typedef) auto23?) (do (soft! t "'typedef' used with 'auto'") false) auto23?)
+                      _ (when (= nsc sc) (soft! t (str "duplicate " q)))]
+                  (cond
+                    (and sc (not= nsc sc)) (do (soft! t "multiple storage classes in declaration specifiers")
+                                               (recur (next els) sc thread? constexpr? auto23? typed?))
+                    :else
+                    (let [thread? (if (and thread? (not (#{:extern :static} nsc)))
+                                    (do (soft! t (str "'_Thread_local' used with " q)) false)
+                                    thread?)
+                          constexpr? (if (and constexpr? (not (#{:auto :register :static} nsc)))
+                                       (do (soft! t (str "'constexpr' used with " q)) false)
+                                       constexpr?)]
+                      (recur (next els) nsc thread? constexpr? auto23? typed?)))))
+              (recur (next els) sc thread? constexpr? auto23? typed?))))))))
 
 (defn specifiers
   "A declaration's specifiers (DeclarationSpecifiers or SpecifierQualifierList, or a vector of their
@@ -778,6 +851,12 @@
         ;; an attribute declaration of empty specifiers, `[[]];` (C23 6.7): its :c/decl-attrs [] (the print's [[]]), which a
         ;; declaration with type specifiers does not keep (an empty [[]] before them is printed as none)
         had-attr (volatile! false)]
+    (when *soft-errors*
+      (scspec-errors! (keep (fn [e] (case (cs e)
+                                      :DeclarationSpecifiersStorage [:sc (g e :StorageClassSpecifier)]
+                                      (:DeclarationSpecifiersTypeSpec :SpecifierQualifierListTypeSpec) [:type (g e :TypeSpecifier)]
+                                      nil))
+                            els)))
     (doseq [e els]
       ;; CS140: an attribute after a type specifier stood after the type (it appertains to it, not to the declaration)
       (let [add-attrs (fn [as] (when as (vreset! had-attr true)) (.addAll at as) (when (pos? (.size tspecs)) (.addAll tat as)))]
@@ -1198,6 +1277,7 @@
                   :PostfixExpressionDec (L 'dec! (expr (g n :PostfixExpression)))
                   :PostfixExpressionComplit
                   (let [f (Lv (list* 'compound-lit (type-name-form (g n :TypeName)) (init-form (g n :InitializerList) (g n :Token4))))
+                        _ (scspec-errors! (map (fn [sc] [:sc sc]) (g n :StorageClassSpecifiers)))
                         scs (keep #(storage-keys (cs %)) (g n :StorageClassSpecifiers))]
                     (if (seq scs) (addm f (zipmap scs (repeat true))) f))
                   (refuse :expression (str "postfix " c) n))
@@ -1421,6 +1501,37 @@
   (let [ts (node-tokens n) f (list 'c/asm (tokens-text ts)) r (asm-recovered ts)]
     (if (and r (not= r (second f))) (with-meta f {:c/asm-text r}) f)))
 
+(defn- underspec-idls
+  "c-tails (*soft-errors*, the dg check's read): the init declarators of the declaration `d` (specifiers' meta `sm`) that gcc keeps
+  when the declaration is underspecified (C23's auto with no type specifier, inferring the type; constexpr), its errors recovered
+  (c-parser.cc's c_parser_declaration_or_fndef): an empty declaration, a declarator that is not a plain identifier, a second
+  declarator (the first kept) or one without an initializer (none kept)."
+  [d sm idls]
+  (let [ds (g d :DeclarationSpecifiers)
+        typed? (some #(#{:DeclarationSpecifiersTypeSpec} (cs %)) (chain ds :DeclarationSpecifiers))
+        auto? (and (:auto sm) (not typed?) (#{:c23 :gnu23 :c2y :gnu2y} (cx :std)))
+        kw (cond auto? "auto" (:constexpr sm) "constexpr")
+        here (first (filter #(instance? PTok %) (node-tokens d)))]
+    (cond
+      (nil? kw) idls
+      (empty? idls) (do (when auto? (soft! here "'auto' in empty declaration")) idls)
+      :else
+      (let [id (g (first idls) :InitDeclarator)
+            dd (g id :Declarator)
+            ;; a declarator in parentheses is the declarator (`auto ((i2)) = 3;`, c23-auto-1.c): gcc's tree has no node for them
+            plain? (loop [dd dd]
+                     (and dd (nil? (g dd :Pointer))
+                          (let [x (g dd :DirectDeclarator)]
+                            (case (cs x)
+                              :DirectDeclaratorIdent true
+                              :DirectDeclaratorDecl (recur (g x :Declarator))
+                              false))))]
+        (cond
+          (and auto? (not plain?)) (do (soft! here "'auto' requires a plain identifier, possibly with attributes, as declarator") [])
+          (not= (cs id) :InitDeclaratorInit) (do (soft! here (str "'" kw "' requires an initialized data declaration")) [])
+          (next idls) (do (soft! here (str "'" kw "' may only be used with a single declarator")) [(first idls)])
+          :else idls)))))
+
 (defn declaration
   "A Declaration's forms (§6.2-§6.8)."
   [d]
@@ -1433,6 +1544,10 @@
                    {type :type sm :meta implicit-int :implicit-int typedef :typedef} spec
                    sm (cond-> sm implicit-int (assoc :c/implicit-int true))
                    idls (chain (g d :InitDeclaratorList) :InitDeclaratorList)
+                   ;; c-tails (*soft-errors*): c-parser.cc's c_parser_declaration_or_fndef on an underspecified declaration
+                   ;; (C23's auto inferring the type, constexpr): its errors recovered, the declaration dropped or cut to its first
+                   ;; declarator as gcc skips the rest
+                   idls (if *soft-errors* (underspec-idls d sm idls) idls)
                    end (attrs (g d :AttributeSpecifierList))
                    one (fn [idl i shared]
                          (let [id (g idl :InitDeclarator)
@@ -1447,8 +1562,14 @@
                                ;; it alone (its form, printed alone) has them as its leading attributes, after the shared ones
                                ;; (CS83's class: :c/list-attrs, printed at the head, read again as such, differed)
                                m (if-let [a (attrs (g idl :AttributeSpecifierList))] (update m :c/decl-attrs (fnil into []) a) m)
-                               init (if (= (cs id) :InitDeclaratorInit) (initializer (g id :Initializer)) ::none)]
-                           (decl-form spec nt t m init (when-let [a (g id :Asm)] (tokens-text (node-tokens a))))))]
+                               init (if (= (cs id) :InitDeclaratorInit) (initializer (g id :Initializer)) ::none)
+                               f (decl-form spec nt t m init (when-let [a (g id :Asm)] (tokens-text (node-tokens a))))]
+                           ;; c-tails: under the dg check's recovering read (*soft-errors*), an initializer that holds no line of
+                           ;; its own (a constant) on another line than its declarator: its line, the checker's for the conversion's
+                           ;; error (c-c++-common/cpp/embed-10.c's #embed line); not in the text levels' forms
+                           (if (and *soft-errors* (not= init ::none) (not (iobj? init)) (seq? f) (has-main? (g id :Initializer)))
+                             (vary-meta f assoc :c/init-line (line-of (min-po (g id :Initializer))))
+                             f)))]
                (cond
                  ;; cc follows a file-scope static_assert with an empty declaration of its own
                  (and (empty? idls) (nil? (g d :DeclarationSpecifiers))) []
@@ -1803,7 +1924,7 @@
               (throw (ex-info (if sp
                                 (str (tree/pos-string sp) ": '" (tsrc sp) "' requires an initialized data declaration")
                                 (str (if b (tree/pos-string b) "-") ": expected '=', ',', ';', 'asm' or '__attribute__' before '{' token"))
-                              {:c/error true}))))
+                              {:c/error true :c/soft true}))))
         [_ ps r] t
         kr (:c/kr (meta ps))
         ps (if kr
@@ -2263,6 +2384,7 @@
   (let [d (.digest (java.security.MessageDigest/getInstance "SHA-256") (.getBytes s "UTF-8"))]
     (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (take 8 d)))))
 
+
 (defn external
   "An ExternalDeclaration's forms."
   [ed]
@@ -2270,11 +2392,15 @@
     :ExternalDeclarationFuncDef
     (let [fd (g ed :FunctionDefinition)
           t (group-of fd)
-          f (function-definition (g fd :DeclarationSpecifiers) (g fd :Declarator) (g fd :DeclarationList) (g fd :CompoundStatement)
-                                 (attrs (g fd :AttributeSpecifierList)) fd)]
+          f (try (function-definition (g fd :DeclarationSpecifiers) (g fd :Declarator) (g fd :DeclarationList) (g fd :CompoundStatement)
+                                      (attrs (g fd :AttributeSpecifierList)) fd)
+                 (catch arbace.lang.ExceptionInfo e
+                   (if (and *soft-errors* (:c/soft (ex-data e)))
+                     (do (.add ^ArrayList *soft-errors* (ex-message e)) nil)
+                     (throw e))))]
       ;; a definition one invocation made whole is printed as the invocation (gcc -O0 places a nop at a body's
       ;; end whose brace is on another line than its last statement: the expansion's tokens share one place)
-      [(if t (addm f {:c/macro-stmt t}) f)])
+      (cond (nil? f) [] t [(addm f {:c/macro-stmt t})] :else [f]))
     :ExternalDeclarationDecl
     (let [d (g ed :Declaration)
           t (group-of d)

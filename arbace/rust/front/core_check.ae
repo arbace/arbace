@@ -286,6 +286,7 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; The module tree (rustc_expand/src/module.rs: mod_dir_path, default_submod_path)
 
+(declare rel-path)
 (defn module-files
   "core's out-of-line modules: [{:path \"core::num::wrapping\" :file F :dir D}] in the order the crate's expansion loads
   them (depth first); the arch modules of stdarch and portable-simd marked :vendored"
@@ -318,8 +319,13 @@
                           fd (if (and pa (not (re-find #"/mod\.rs$" f))) (.getParent (File. ^String f)) fd)
                           canon (.getCanonicalPath (File. ^String f))]
                       (when (.exists (File. ^String f))
-                        (swap! out conj {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))})
-                        (walk p canon fd (fget (parse-file canon) :items) nil)))))))]
+                        ;; rust-c6c: the file as rustc names it (module.rs joins the #[path] to the declaring file's directory and
+                        ;; never resolves `..`: std's backtrace_rs `std/src/../../backtrace/src/..`), its spans' file (run-module)
+                        (swap! out conj (cond-> {:path p :file canon :vendored (boolean (re-find #"/(stdarch|portable-simd)/" canon))}
+                                          (not= (rel-path f) (rel-path canon)) (assoc :src f)))
+                        ;; rust-c6c: the declaring file as rustc names it (a #[path] below is joined to its directory: gimli.rs'
+                        ;; `#[path = "gimli/mmap_unix.rs"] mod mmap;` under std/src/../../backtrace), its items parsed from the file
+                        (walk p f fd (fget (parse-file canon) :items) nil)))))))]
       (let [lib (crate-lib-file lib-dir *crate*)]
         (binding [*item-macros* (if (some #{*crate*} dep-crates) (crate-item-macros lib) *item-macros*)]
           (swap! out conj {:path *crate* :file lib})
@@ -612,7 +618,12 @@
   (case (first r)
     :re-static "'static"
     :re-early (nth r 2)
-    :re-bound (cond (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
+    :re-bound (cond ;; C4 (2026-11-22): a fn pointer type's own anonymous variable (collect's :fn-binder, queue 493: [:re-bound nil
+                    ;; :inner N]), bound by the fn pointer's binder: `'^^#N` in a struct field (ArgumentType's formatter, OsFunctions)
+                    ;; (in a signature, sig-sty's *late-sig*, the helper writes such a region `'_`: alloc's convert_while_ascii)
+                    (and (nil? (second r)) (= :inner (nth r 2 nil)) (number? (nth r 3 nil)) (nil? *late-sig*))
+                    (str "'" (apply str (repeat (long (or *inner-depth* 2)) "^")) "#" (nth r 3))
+                    (and *inner-depth* (nil? (second r)) (number? (nth r 2 nil)))
                     (str "'" (apply str (repeat *inner-depth* "^")) "#" (dec (long (nth r 2))))
                     (and *inner-depth* (= :for (nth r 2 nil)) (string? (second r))) (str "'" (apply str (repeat *inner-depth* "^")) (second r))
                     (and *clause-binder* (nil? (second r)) (number? (nth r 2 nil))) (str "'^#" (+ (long *clause-binder*) (dec (long (nth r 2)))))
@@ -633,6 +644,53 @@
     (let [ins (mapv #(ty->sty % path-of) (:inputs sig))]
       [ins (ty->sty (:output sig) path-of)])))
 
+;; C4 (2026-11-22): a pattern type (`pattern_type!(u8 is 1..)`, collect's [:pat TY TEXT]) as the helper writes it, rustc's Display of
+;; ty::Pat: (text "(u8) is 1..=core::::num::niche_types::NonZeroU8Inner::{constant#0}"). rustc_ast_lowering makes each written end
+;; of a range an anonymous constant of the field (`STRUCT::FIELD::{constant#K}`, in order) and each missing end one of the struct
+;; (`STRUCT::{constant#K}`: the type's MIN or MAX); an exclusive end is its constant's body `sub_one(END)`. Printed: a literal end
+;; written inclusive by its value (an end at the type's MAX as an open `..`), any other end by its constant's path; an or-pattern in
+;; parentheses; `!null` as written. *pat-owner* is [ADT-PATH FIELD] while a struct field's type is written.
+(def ^:dynamic *pat-owner* nil)
+
+(defn- pat-text [inner pat]
+  (let [ty-name (collect/print-ty inner)
+        alts (str/split (str/replace (str pat) #"\s+" "") #"\|")
+        [adt field] *pat-owner*
+        root (fn [p] (let [[c r] (str/split (str p) #"::" 2)] (str c "::::" r)))
+        sk (atom -1) fk (atom -1)
+        sconst (fn [] (str (root adt) "::{constant#" (swap! sk inc) "}"))
+        fconst (fn [] (str (root adt) "::" field "::{constant#" (swap! fk inc) "}"))
+        int-lit (fn [x] (when-let [[_ neg body] (re-matches #"(-?)((?:0x[0-9a-fA-F_]+)|(?:[0-9][0-9_]*))(?:[iu](?:8|16|32|64|128|size))?" x)]
+                          (let [b (str/replace body "_" "")
+                                v (if (str/starts-with? b "0x") (bigint (java.math.BigInteger. (subs b 2) 16)) (bigint b))]
+                            (if (= "-" neg) (- v) v))))
+        char-lit (fn [x] (when-let [[_ c] (re-matches #"'(.*)'" x)]
+                           (if-let [[_ h] (re-matches #"\\u\{([0-9a-fA-F]+)\}" c)] (Long/parseLong h 16) (when (= 1 (count c)) (long (int (first c)))))))
+        lit (fn [x] (or (int-lit x) (char-lit x)))
+        show (fn [v] (if (= [:char] inner)
+                       (let [c (long v)] (if (and (<= 0x20 c 0x7e) (not (#{0x27 0x5c} c))) (str "'" (char c) "'") (str "'\\u{" (Long/toHexString c) "}'")))
+                       (str v)))
+        tmax (case (first inner)
+               :char 0x10FFFF
+               (:int :uint) (let [t (second inner) n (if (str/ends-with? t "size") 64 (parse-long (subs t 1)))]
+                              (dec (reduce * 1N (repeat (if (= :int (first inner)) (dec n) n) 2N))))
+               nil)
+        one (fn [a]
+              (if (= a "!null")
+                "!null"
+                (let [i (str/index-of a "..")
+                      incl (and i (= \= (get a (+ i 2))))
+                      st (when i (subs a 0 i)) en (when i (subs a (+ i (if incl 3 2))))]
+                  (when-not i (throw (ex-info "pattern" {})))
+                  (let [s-txt (if (str/blank? st) (sconst) (let [v (lit st)] (do (fconst) (if v (show v) (throw (ex-info "pattern start" {}))))))
+                        e-txt (cond (str/blank? en) (str "..=" (sconst))
+                                    (and incl (lit en)) (do (fconst) (if (and tmax (= (bigint (lit en)) (bigint tmax))) ".." (str "..=" (show (lit en)))))
+                                    :else (str "..=" (fconst)))]
+                    (str s-txt e-txt)))))
+        body (if (= 1 (count alts)) (one (first alts)) (str "(" (str/join " | " (map one alts)) ")"))]
+    (when (and (some #(not= % "!null") alts) (nil? adt)) (throw (ex-info "pattern without its owner" {})))
+    (str "(" ty-name ") is " body)))
+
 (defn ty->sty
   "A type as the helper's structural form (sty->ty's inverse); PATH-OF gives a local definition's interface path; nil
   when the type has a part the interface does not write (a closure, an opaque type, an inference variable)"
@@ -645,12 +703,21 @@
               :param (list 'param (nth t 1) (nth t 2))
               ;; round 52: a const parameter as a generic argument (`BoxedArrayIntoIter<T, N, A>`), as the helper writes it
               :cparam (list 'cparam (nth t 1) (nth t 2))
-              :adt (list 'adt (d (second t)) (mapv s (nth t 2)))
+              ;; C4 (2026-11-22): a const generic argument's value (char's `EscapeIterInner<10, AlwaysEscaped>`), as the helper writes
+              ;; it: (const "10")
+              :cval (list 'const (str (second t)))
+              ;; C4 (2026-11-22): an extern type (`extern "Rust" { type VTable; }`) as the helper prints it, by its visible path
+              ;; through std (DynMetadata's `NonNull<VTable>`: (text "std::ptr::metadata::VTable"))
+              :adt (if (and (number? (second t)) (= "ForeignTy" (:kind (collect/def-of (second t)))))
+                     (list 'text (str/replace-first (d (second t)) #"^core::" "std::"))
+                     (list 'adt (d (second t)) (mapv s (nth t 2))))
               :ref (list 'ref (region-name (nth t 1)) (boolean (nth t 2)) (s (nth t 3)))
               :ptr (list 'ptr (boolean (nth t 1)) (s (nth t 2)))
               :slice (list 'slice (s (second t)))
               :array (list 'array (s (nth t 1)) (let [c (nth t 2)] (case (first c) :cval (second c) :cparam (list 'cparam (nth c 1) (nth c 2)) (throw (ex-info "const" {})))))
               :tuple (list 'tuple (mapv s (second t)))
+              ;; C4: a pattern type, its text (pat-text)
+              :pat (list 'text (pat-text (nth t 1) (nth t 2)))
               :proj (list 'projection (d (nth t 1)) (mapv s (nth t 2)))
               :fnptr (binding [*inner-depth* (inc (long (or *inner-depth* 1)))] (list 'fnptr (mapv s (:inputs (second t))) (s (:output (second t)))))
               ;; RIND9 (a): a trait object as the helper writes it: (dyn (trait P ARGS) [(proj ITEM ARGS TERM)] [AUTOS] REGION),
@@ -661,7 +728,11 @@
                                   (vec (for [[ad args term] projections] (list 'proj (d ad) (mapv s args) (s term))))])]
                      (list 'dyn (first inner) (second inner)
                            (vec (sort-by (fn [p] [(get {"core::marker::Sync" 0 "core::marker::Send" 1} p 2) p]) (map d autos)))
-                           (if (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_" (region-name r))))
+                           ;; C4 (2026-11-22): a named late-bound region by its name (the helper prints the object's region by
+                           ;; Display: create_formatter's `&'a mut (dyn Write + 'a)`, (dyn .. "'a") in a `'^'a` reference)
+                           (cond (and (= :re-bound (first r)) (= :anon (nth r 2 nil))) "'_"
+                                 (and (= :re-bound (first r)) (string? (second r)) (not= "'_" (second r)) (not= :for (nth r 2 nil))) (second r)
+                                 :else (region-name r))))
               ;; queue 417: std's return-position impl Trait (io/stdio.rs' `fn as_mut_buf(&mut self) -> &mut BufReader<impl
               ;; Read>`) as the helper writes it: (opaque "FN::{opaque#N}" ARGS), ARGS the function's generics at their
               ;; identity, then the lifetimes the opaque type captures (edition 2024: every one in scope), the early ones
@@ -709,7 +780,12 @@
     ;; RIND9 (a): `E: 'a` as the helper writes it; `'b: 'a` and a const parameter's type (ConstArgHasType) as its (other TEXT)
     :type-outlives (when-let [t (ty->sty (second c) path-of)] (list 'type-outlives t (region-name (nth c 2))))
     :region-outlives (list 'other (str (region-name (second c)) ": " (region-name (nth c 2))))
-    :const-has-type (list 'other (#'collect/print-clause c))
+    ;; C4 (2026-11-22): core's own type there by its visible path through std, as the helper prints it ("the constant `ORD` has
+    ;; type `std::intrinsics::AtomicOrdering`", the atomic intrinsics)
+    :const-has-type (let [t (nth c 2)]
+                      (list 'other (if (and (= "core" *crate*) (vector? t) (= :adt (first t)) (number? (second t)))
+                                     (str "the constant `" (collect/print-const (second c)) "` has type `std::" (collect/print-ty t) "`")
+                                     (#'collect/print-clause c))))
     nil))
 
 (defn- generics-sty
@@ -835,7 +911,9 @@
                                        (cond-> {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self false
                                         :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
+                                        :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d)))
+                                                                                   ;; C4: `#[rustc_comptime]` (TypeId's trait_info_of)
+                                                                                   (own-attr? (:node k) "rustc_comptime"))
                                         ;; C4: rustc's is_promotable_const_fn (a const fn's #[rustc_promotable])
                                         :promotable (and (or (= :const (get-in (:node k) [:header :constness])) (= :const (:constness (:node d))))
                                                          (own-attr? (:node k) "rustc_promotable"))
@@ -893,7 +971,8 @@
              (let [g (collect/generics-of (:id d))
                    n (:node d)
                    field-tys (fn [owner data] (vec (map-indexed (fn [i f] [(or (:ident f) (str i))
-                                                                           (ty->sty (collect/type-of (some #(when (and (= owner (:parent %)) (= "Field" (:kind %)) (= (or (:ident f) (str i)) (second (:data %)))) (:id %)) (collect/defs))) path-of)])
+                                                                           (binding [*pat-owner* [p (or (:ident f) (str i))]]
+                                                                             (ty->sty (collect/type-of (some #(when (and (= owner (:parent %)) (= "Field" (:kind %)) (= (or (:ident f) (str i)) (second (:data %)))) (:id %)) (collect/defs))) path-of))])
                                                                 (:fields data))))
                    variants (if (= "Enum" (:kind d))
                               (vec (for [v (collect/defs) :when (and (= (:id d) (:parent v)) (= "Variant" (:kind v)))]
@@ -940,7 +1019,10 @@
                                    {:generics (generics-sty kg) :parent-count (count (:params g)) :has-self true
                                     :predicates (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id k))))
                                     :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
-                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (= :const (:constness (:node d))) :promotable false
+                                    :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (and (= :const (:constness (:node d)))
+                                                                          ;; C4: a const trait's method marked #[rustc_non_const_trait_method]
+                                                                          (not (own-attr? (:node k) "rustc_non_const_trait_method")))
+                                    :promotable false
                                     :nounwind (own-attr? (:node k) "rustc_nounwind") :native true}]))]
                (-> acc
                    (assoc-in [:traits p] {:generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self true
@@ -1011,11 +1093,11 @@
 (defn run-module
   "A module file's bodies, each [[name key] body-or-nil error-or-nil detail] handed to ON-BODY as it is built (its value
   kept): {:stages {stage :ok|message} :bodies [value ...]}"
-  [{:keys [path file]} table names std-file std si ^String lib-dir on-body]
+  [{:keys [path file] :as m} table names std-file std si ^String lib-dir on-body]
   (let [stages (atom {})
         native (atom nil)
         only (some-> (System/getenv "CORE_ONLY") re-pattern)
-        rel-file (rel-path file)
+        rel-file (rel-path (or (:src m) file))
         out (atom [])]
     (try
       ;; round 54 (RIND9 (a), std): std's modules take std's own prelude (lib.rs' `#[prelude_import] use
@@ -1198,7 +1280,13 @@
                                             (and site tc/*root-file*) (assoc :call-loc [(src tc/*root-file*) (site 0) (site 1)])
                                             ;; a call written in the body's own file: its own place there
                                             (and (not site) tc/*root-file* (ex/root-span? cs)) (assoc :call-loc [(src tc/*root-file*) (cs 0) (cs 1)])
-                                            (and (not site) (= 5 (count o))) (assoc :call-loc [(src (o 0)) (o 1) (o 2)])))))]
+                                            (and (not site) (= 5 (count o))) (assoc :call-loc [(src (o 0)) (o 1) (o 2)])
+                                            ;; queue 524 (C3): a call made of the body file's own tokens a macro was given
+                                            ;; (assert_unsafe_precondition!'s check expression in its nested precondition_check:
+                                            ;; `Layout::is_size_align_valid(size, align)`), its own place there, as rustc's span
+                                            ;; of a metavariable's tokens keeps the root context
+                                            (and (not site) tc/*root-file* (not (ex/root-span? cs)) (= 4 (count o)) (every? number? o))
+                                            (assoc :call-loc [(src tc/*root-file*) (o 0) (o 1)])))))]
                (if m (with-meta y m) y))
     (vector? x) (let [y (mapv externalize x)] (if (meta x) (with-meta y (cond-> (meta x) (:tc (meta x)) (update :tc ext-ty))) y))
     (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data} k))]
@@ -1265,7 +1353,9 @@
         adt-ps (set (for [x ts0 :when (and (vector? x) (= :adt (first x)) (string? (second x)))] (second x)))
         ancestors (fn [^String p] (let [segs (str/split p #"::")] (for [i (range 2 (count segs))] (str/join "::" (take i segs)))))
         pick (fn [k ps] (into {} (for [p ps :let [f (get-in native [k p])] :when (and f (not (get-in si-full [k p])))] [p (dissoc f :native)])))
-        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps)))
+        ;; rust-c6c: and the functions nested in its body (:nested-attrs' paths: custom_owner_from_box's generic
+        ;; `drop_box_raw<T: ?Sized>`, reified at `dyn Error + Send + Sync`, whose symbol carries its argument as std's IR's)
+        fs (pick :fns (concat fps (ancestors (str (:def e))) (mapcat ancestors adt-ps) (keys (:nested-attrs e))))
         parents (set (keep #(let [i (.lastIndexOf ^String % "::")] (when (pos? i) (subs % 0 i))) (conj fps (str (:def e)))))
         is (pick :impls parents)
         ts (pick :traits parents)
@@ -1288,12 +1378,25 @@
             (let [;; C6-4: each Assert's span (build's :assert-span, which the passes keep the terminator but not its metadata
                   ;; of: build-run's aspans), by its condition, expected value and message, put back on the passes' terminator as
                   ;; a call's span, which externalize makes its caller location (:call-loc), the panic's Location
-                  aspans (into {} (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
-                                    [(vec (take 3 (rest t))) (:assert-span (meta t))]))
+                  built (vec (for [blk (:blocks b) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)) (:assert-span (meta t)))]
+                               [(vec (take 3 (rest t))) (:assert-span (meta t))]))
+                  aspans (into {} built)
+                  ;; rust-c6c: a key two built asserts share, or one the passes changed (their locals renumbered: digits_to_dec_str's
+                  ;; `parts[0]`), takes the next unused built assert of its message's kind, in block order
+                  kind-of (fn [k] (let [m (nth k 2 nil)] (if (seq? m) (first m) m)))
+                  uniq (set (for [[k n] (frequencies (map first built)) :when (= 1 n)] k))
+                  used (volatile! #{})
                   r (if (empty? aspans) r
-                        (update r :blocks (fn [bs] (mapv (fn [blk] (let [t (:term blk) sp (when (and (seq? t) (= 'assert (first t))) (get aspans (vec (take 3 (rest t)))))]
-                                                                     (if sp (assoc blk :term (vary-meta t assoc :call-span sp)) blk)))
-                                                         bs))))]
+                        (let [exact (set (for [blk (:blocks r) :let [t (:term blk)] :when (and (seq? t) (= 'assert (first t)))
+                                               :let [k (vec (take 3 (rest t)))] :when (uniq k)] k))]
+                          (update r :blocks (fn [bs] (mapv (fn [blk] (let [t (:term blk)
+                                                                           k (when (and (seq? t) (= 'assert (first t))) (vec (take 3 (rest t))))
+                                                                           sp (cond (nil? k) nil
+                                                                                    (uniq k) (get aspans k)
+                                                                                    :else (when-let [i (first (keep-indexed (fn [i [bk _]] (when (and (= (kind-of bk) (kind-of k)) (not (exact bk)) (not (@used i))) i)) built))]
+                                                                                            (vswap! used conj i) (second (nth built i))))]
+                                                                       (if sp (assoc blk :term (vary-meta t assoc :call-span sp)) blk)))
+                                                           bs)))))]
             (cond-> {:key k :def (def-path-string (:id (:def b))) :equal equal? :pass last-pass
             :attrs ((requiring-resolve 'arbace.rust.front.mono/local-attrs) (:id (:def b)))
             ;; C6: the attributes of the functions nested in it (handle_alloc_error's `#[inline] fn rt_error`), which its body
@@ -1355,7 +1458,7 @@
       ;; RF_CORE_ATTRS: the macro-made items core's sources do not show)
       "--attrs"
       (let [[_ front-dir cache-dir modules-file out & files] args
-            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v src] (str/split l #" ")]] [f (cond-> {:path p :file f :vendored (= v "vendored")} (seq src) (assoc :src src))]))
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))
@@ -1377,10 +1480,10 @@
             (println "core-attrs: not a module file:" f)))
         (spit out (pr-str (into (sorted-map) @acc)))
         (println "core-attrs:" (count @acc) "functions' attributes to" out))
-      "--list" (doseq [m (module-files lib-dir)] (println (:path m) (:file m) (if (:vendored m) "vendored" "")))
+      "--list" (doseq [m (module-files lib-dir)] (println (str/trimr (str (:path m) " " (:file m) " " (if (:vendored m) "vendored" "") (when (:src m) (str " " (:src m)))))))
       "--check"
       (let [[_ front-dir oracle-dir cache-dir modules-file & files] args
-            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v] (str/split l #" ")]] [f {:path p :file f :vendored (= v "vendored")}]))
+            mods (into {} (for [l (str/split-lines (slurp modules-file)) :let [[p f v src] (str/split l #" ")]] [f (cond-> {:path p :file f :vendored (= v "vendored")} (seq src) (assoc :src src))]))
             std-file (str front-dir "/std-names.edn")
             std (collect/load-std std-file)
             si (collect/load-std-iface (str front-dir "/std-iface.edn"))

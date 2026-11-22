@@ -37,7 +37,10 @@
 #                                  (default samples stdlib site-packages lib-test): the helper's dump of each file, the
 #                                  converter and the printer (one Arbace run on stage 0, the namespaces evaluated from the
 #                                  checkout), the helper's dump of each printed file, then per file: 1 the forms equal, 2
-#                                  ast.dump equal, 3 the code without positions equal; a file that does not pass every
+#                                  ast.dump equal, 3 the code compiled from the ast without positions equal (the user's
+#                                  decision of 2026-11-22: tools/pydump/codelevel.py, every node at line 1, column 0, then
+#                                  pydump.py's norm_code; its control a mutated print, its code beside the print's own ast,
+#                                  which must fail level 3; recorded, level 3 implied by level 2); a file that does not pass every
 #                                  level is judged against test/python/roundtrip-known.edn (--record rewrites the corpus's
 #                                  entries: a file the writer cannot class by rule is printed, not written, exit 3).
 #                                  Each stage's time and peak RSS per file and per process into
@@ -45,8 +48,9 @@
 #                                  test/python/roundtrip-costs.edn. The helper's stages run in N processes (default 2).
 #                                  In records mode (queue 431) levels 2 and 3 are each file's own verdict by pyi, no CPython:
 #                                  level 2 pyi's ast (arbace.repr.python.astjson's tree without attributes, ast.dump's
-#                                  default), level 3 pyi's code objects (arbace.python.compile of the text read in mode :full)
-#                                  without positions, of the original and of the print (own-levels, in N processes), against
+#                                  default), level 3 pyi's code objects (arbace.python.compile of the forms read in mode
+#                                  :lines, no positions: the user's decision of 2026-11-22), normalized, of the original and
+#                                  of the print (own-levels, in N processes), against
 #                                  test/python/roundtrip-own-known.edn (--record writes it alone in records mode: no results
 #                                  file, no costs; the rule :own-code-lines); their controls: the reference's print with the
 #                                  subject's print's digests fails level 2, and a mutated print (a statement added) fails
@@ -540,6 +544,40 @@ own_levels() {
   cat "$tsv".own.* | LC_ALL=C sort > "$tsv" && rm -f "$tsv".own.*
 }
 
+# code_levels BASE TSV OUT (the user's decision of 2026-11-22: level 3 a compile without positions): TSV's rows with the
+# CODE column of each ok row CPython's normalized code of the file's ast without positions (tools/pydump/codelevel.py;
+# pydump.py's own CODE, positions included, stays the records'), into OUT, in $JOBS processes, the rows sorted
+code_levels() {
+  local base=$1 tsv=$2 out=$3 s="$3.split" i pids=() rc=0
+  rm -rf "$s"; mkdir -p "$s"
+  awk -v n="${JOBS:-1}" -v f="$s/part." '{ print > (f (NR % n)) }' "$tsv"
+  for i in "$s"/part.*; do
+    python3 -I -S -B "$root/tools/pydump/codelevel.py" --base "$base" --tsv "$i" --out "$i.out" & pids+=($!)
+  done
+  for i in "${pids[@]}"; do wait "$i" || rc=1; done
+  [ $rc = 0 ] && cat "$s"/part.*.out | LC_ALL=C sort > "$out"
+  rm -rf "$s"
+  return $rc
+}
+
+# code_mutants ID DIR: level 3's negative control (live): each control's reference print (test/python/controls-read.edn) with
+# a statement added at its end, under DIR/mutant, its rows (REL STATUS AST CODE: ast.dump's digest and codelevel.py's) into
+# DIR/mutant.tsv; compare --mutant-tsv judges the print's row with the mutant's code beside its own ast, which must fail
+# level 3 (the controls' references read with the Clojure reader's simplest subset: one map a pair, no brace in a :why)
+code_mutants() {
+  local id=$1 d=$2 r
+  rm -rf "$d/mutant" "$d/mutant.list"; mkdir -p "$d/mutant"; : > "$d/mutant.tsv"
+  tr '\n' ' ' < "$CONTROLS_READ" | grep -o '{:id [^}]*}' | grep -F ":corpus \"$id\"" | sed -n 's/.*:reference "\([^"]*\)".*/\1/p' \
+    | while IFS= read -r r; do
+        [ -f "$d/printed/$r" ] || continue
+        mkdir -p "$(dirname "$d/mutant/$r")"
+        { cat "$d/printed/$r"; printf '\n__code_control__ = 0\n'; } > "$d/mutant/$r"
+        echo "$r" >> "$d/mutant.list"
+      done
+  [ -s "$d/mutant.list" ] || return 0
+  python3 -I -S -B "$root/tools/pydump/codelevel.py" --base "$d/mutant" --list "$d/mutant.list" --rows "$d/mutant.tsv"
+}
+
 # rt_recorded_levels ID BASE DIR ORIGR (records mode, mode :lines; queue 257): levels 2 and 3 from CPython's records: the
 # originals' rows (python-pydump-ID's tree rows, as parse-check reads them; with REPR_PYTHON_RT_ORIG=helper they are the
 # rows already) and the print's (python-pydump-printed-ID, keyed by the printed file's bytes) into the TSVs compare reads
@@ -631,12 +669,24 @@ roundtrip_one() {
       fi
     fi
   fi
+  # the user's decision of 2026-11-22 (doc/JOURNAL.md): live, level 3 is CPython's compile of each file's ast without positions
+  # (code_levels), the original's and the print's, into level-*.tsv (the helper's TSVs stay as dumped: the records' rows and
+  # the costs); its negative control, a mutated print (code_mutants). Recorded (REPR_PYTHON_RT_LEVELS=recorded), the rows'
+  # CODE keeps positions: level 3 is implied by level 2 there (compare --recorded), a compile without positions being a
+  # function of the ast without attributes
+  local otsv="$d/helper-orig.tsv" ptsv="$d/helper-printed.tsv" mutant=""
+  if pyrec_live && [ -z "$TEXT" ]; then
+    timed code-orig code_levels "$base" "$d/helper-orig.tsv" "$d/level-orig.tsv" || { echo "roundtrip $id: FAILED: level 3 of the originals (codelevel.py)"; return 1; }
+    timed code-printed code_levels "$d/printed" "$d/helper-printed.tsv" "$d/level-printed.tsv" || { echo "roundtrip $id: FAILED: level 3 of the print (codelevel.py)"; return 1; }
+    code_mutants "$id" "$d" || { echo "roundtrip $id: FAILED: level 3's control (codelevel.py)"; return 1; }
+    otsv="$d/level-orig.tsv"; ptsv="$d/level-printed.tsv"; mutant="$d/mutant.tsv"
+  fi
   local rc=0 rfile=""
   [ -n "$record" ] && [ -z "$own" ] && rfile="$root/test/python/$([ -n "$TEXT" ] && echo full || echo roundtrip)-results.edn"
-  timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$d/helper-orig.tsv" \
-    --cand-tsv "$d/helper-printed.tsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
+  timed compare py_arbace compare --corpus "$id" --orig "$d/orig" --cand "$d/cand" --orig-tsv "$otsv" \
+    --cand-tsv "$ptsv" --convert-tsv "$d/convert-print.tsv" --known "$known" --results "$d/results.edn" --controls "$CONTROLS_READ" \
     ${record:+--record} ${TEXT:+--text} ${ONLY:+--partial} ${deferred:+--deferred} ${recorded:+--recorded} \
-    ${own:+--own --printed "$d/printed"} \
+    ${own:+--own --printed "$d/printed"} ${mutant:+--mutant-tsv "$mutant"} \
     ${rfile:+--results-file "$rfile"} || rc=$?
   { echo "{:corpus :$id :jobs $JOBS"
     echo " :wall-seconds {$(awk '{ printf "%s\"%s\" %s", (NR > 1 ? " " : ""), $1, $2 }' "$STAGES")}"
@@ -667,7 +717,8 @@ cmd_roundtrip() {
     rc=0; roundtrip_one "$id" "$record" || rc=$?
     [ $rc -gt $worst ] && worst=$rc
   done
-  if [ -n "$record" ] && pyrec_live; then
+  # the costs of a whole run only (an --only-list run's files are not the corpus's)
+  if [ -n "$record" ] && pyrec_live && [ -z "$ONLY" ]; then
     { echo ";; The round trip's costs per corpus (bin/repr-python roundtrip ${TEXT:+--text }--record; GT8's budget): each stage's wall seconds"
       echo ";; (the helper's in :jobs processes), and per file each stage's seconds (total, mean, p50, p95, max and its file)"
       echo ";; and :peak-kib, the largest peak RSS of the stage's processes (each process's high-water mark after each file:"
