@@ -611,6 +611,30 @@
   "In a GADT pattern: (fn [t1 t2] added?) adds a local equation for a locally abstract type (Ctype's pattern mode)"
   nil)
 
+;; Ctype.identifier_escape (queue 534): a dependent arrow's result unified with an arrow's, its parameter's identifier id
+;; erased first: each type whose path names id expanded in place (try_expand_safe, the node linked to its expansion) with id
+;; bound to a module of the package's type, its constraints manifest (bind-functor-param, set by the env namespace); one
+;; that does not expand cannot escape (the unification fails)
+(def bind-functor-param "(fn [id pack-path constraints f]): f called with id bound to a module of the package's type, then id's entry restored" (atom nil))
+
+(declare unify-error)
+(defn- identifier-escape! [id t err]
+  (let [seen (atom #{})]
+    (letfn [(go [t] (let [t (repr t)]
+                      (when-not (@seen t)
+                        (swap! seen conj t)
+                        (let [d (desc t)]
+                          (if (and (= :Tconstr (d 0)) (path-mentions? id (d 1)))
+                            (let [decl (*find-type* (d 1))]
+                              (if (and decl (:manifest decl))
+                                (let [e (subst (:params decl) (d 2) (:manifest decl))]
+                                  (link! t e)
+                                  (swap! seen disj t)
+                                  (go e))
+                                (err)))
+                            (doseq [c (children d)] (go c)))))))]
+      (go t))))
+
 (defn unify-error [t1 t2]
   (when-not (and *gadt-equation* t1 t2 (*gadt-equation* t1 t2))
     (throw (ex-info "Unify" {:unify :mismatch :t1 t1 :t2 t2}))))
@@ -682,10 +706,22 @@
               (unify (d1 5) (subst-module-ident (d2 2) [:Pident (d1 2)] (d2 5))))
           ;; a Tfunctor against an arrow: equal when its result does not depend on its parameter (the package the
           ;; arrow's argument)
-          (and (= :Tfunctor (d1 0)) (= :Tarrow (d2 0)) (= (d1 1) (d2 1)) (not (type-mentions? (d1 2) (d1 5))))
-          (do (unify (newty [:Tpackage (d1 3) (d1 4)]) (d2 2)) (unify (d1 5) (d2 3)))
-          (and (= :Tarrow (d1 0)) (= :Tfunctor (d2 0)) (= (d1 1) (d2 1)) (not (type-mentions? (d2 2) (d2 5))))
-          (do (unify (d1 2) (newty [:Tpackage (d2 3) (d2 4)])) (unify (d1 3) (d2 5)))
+          ;; (Ctype.unify3's Tfunctor/Tarrow pair: the package unified with the arrow's argument, the parameter's identifier
+          ;; erased from the result by identifier_escape, then the results unified)
+          (and (= :Tfunctor (d1 0)) (= :Tarrow (d2 0)) (= (d1 1) (d2 1))
+               (or (not (type-mentions? (d1 2) (d1 5))) @bind-functor-param))
+          (do (unify (newty [:Tpackage (d1 3) (d1 4)]) (d2 2))
+              (when (type-mentions? (d1 2) (d1 5))
+                (@bind-functor-param (d1 2) (d1 3) (d1 4)
+                 #(identifier-escape! (d1 2) (d1 5) (fn [] (unify-error t1 t2)))))
+              (unify (d1 5) (d2 3)))
+          (and (= :Tarrow (d1 0)) (= :Tfunctor (d2 0)) (= (d1 1) (d2 1))
+               (or (not (type-mentions? (d2 2) (d2 5))) @bind-functor-param))
+          (do (unify (d1 2) (newty [:Tpackage (d2 3) (d2 4)]))
+              (when (type-mentions? (d2 2) (d2 5))
+                (@bind-functor-param (d2 2) (d2 3) (d2 4)
+                 #(identifier-escape! (d2 2) (d2 5) (fn [] (unify-error t1 t2)))))
+              (unify (d1 3) (d2 5)))
           (and (= :Ttuple (d1 0) (d2 0)) (= (map first (d1 1)) (map first (d2 1))))
           (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
           ;; Ctype.unify3: the first type linked to the second before their rows are unified (so that a recursive
