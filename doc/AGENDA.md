@@ -13,6 +13,21 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
 [`arbace-inside-itself-v1`](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md)
 (2026-10-11 to 2026-10-15), and the frozen branches' (before).
 
+## State at 2026-11-22, 19:30 UTC (the burst's consolidation)
+
+The user's burst (2026-11-21 evening to 11-22: "100% for the completeness and independence of the crops"; max pace until 90% of the
+weekly allowance, then consolidate and gate) reached 90% at 17:04 UTC; consolidation since. next 3a005e514 (floored, from the records):
+Go, LLVM IR, x86-64, arm64 and WebAssembly 100/100; Rust completeness 100, independence 80; C 99.9; Scheme 99.9; Haskell 99.8; Clojure
+99.7; Python 97.9; C++ 97.3 / 96.5; Java 96.1; OCaml 95.0 (every other independence 100). The user's decisions of the day are the
+journal's five "the user's decisions" entries of 2026-11-22.
+- The essential gate runs on 3a005e514 in .tmp/worktrees/gate-next (on pass: main fast-forwarded and pushed).
+- Waiting on their heavy-lock runs, then merged: clj-cdr (CDR12-15), java-design (JD1-JD9 applied, JD4 built), java-bytecode (JD3's
+  stages 1-3: loader, interpreter, verifier), py-accel (the Mac's 521+525: CPython's _datetime/_decimal compiled into the C world), the
+  Java reader batch (520, --release rows, doclint); 526 (C++ recovery) after a whole own dg record.
+- Consolidation's list (.tmp/goal/decisions-1122.md): Python's 13 cap-crash modules under the lock, Haskell's eff/VS, C CT1's two ppref
+  rows, OCaml's compiled AOT records and 528-8's 19 tool rows, py-capi's world through 521's listing, C's ~80 rows the Mac did not run.
+- Questions for the user: Python D1-D6 (py-mods: forkserver first), Rust C3X-1 (share-generics; -Zshare-generics=no recommended).
+
 ## State
 
 - **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W, packed from the fixpoint's G3 at `53da41d93`,

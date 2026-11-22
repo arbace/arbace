@@ -18887,3 +18887,15 @@ back in mode :full: the index rewritten by the reader (200 files, every load lis
 other form changed. The same check on the runtime interpreted from the checkout (b2a5b50d4819): test_ordered_dict 22 now
 pass, the same two PurePythonOrderedDict*.test_free_after_iterating rows failing as before either merge, the controls as
 they must. The gate's build at 5ba9efb1 (d0b49c34a, before these merges) finished at 18:13; c1 runs on it.
+
+## 2026-11-22: the burst's consolidation (90% of the weekly allowance at 17:04 UTC)
+
+By the user's rule ("improve the pace as much as this host allows: when 90% of allowance has been reached we consolidate and gating is
+allowed"), no new stream started after 17:04 UTC; every host agent and the Mac's six were told to stop at a clean commit and report.
+Merged into next since: 530, 527 (wire.ae and CApi.ae appended functions kept from both sides), 534, 531, 529+532, rust-c3x
+(type_id_hash), cpp-rt-own4 (197 of 198 runtime units own; diag.ae's two `.rem` calls fixed), cpp-diag-a (+139 own dg files; 2 rows rerun
+on the merged code), py-eval (P1's record: the regression's cause, goi's table key not hashing the table's Go forms), py-capi, py-mods
+(class.ae merged on its printed Go). OCaml's 523 rows were recorded on this host (ff4224f94) after its classes had dropped them; 533's
+`:c-run` added to c-check's inputs (19b1d84aa). The essential gate runs on 3a005e514 (AGENDA, "State at 2026-11-22"). Also: the clock notes
+of the morning ran two hours ahead (the second questions' entry says 09:30 UTC for about 07:30); a guard gives heavy-lock holders
+oom_score_adj -500 after two OOM kills; a heavy-lock ticket must not be renamed (its waiter matches its own name).
