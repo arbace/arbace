@@ -211,9 +211,13 @@
 (defn- ext-crate [^String p] (first (str/split p #"::")))
 
 (def ^:dynamic *instance-def* nil)   ; the definition being mangled as an instance: its own segment is a value
+(declare ^:dynamic *native-attrs*)
 
 (defn- ext-value-ns? [^String p]
   (or (= p *instance-def*) (contains? (:fns c/*si*) p) (contains? (:consts c/*si*) p)
+      ;; C6-4: a function the export built, or one nested in an exported body (`panic_already_borrowed::do_panic`, const_panic!'s
+      ;; fn-local function, the parent of const_eval_select's `runtime`): rustc's v0 prints it in the value namespace
+      (contains? *native-attrs* p)
       (some? (re-find #"^(Fn|AssocFn|Static|Const)" (str (get (:kinds c/*std*) p))))
       ;; RF16: an item std's names do not list (one nested in a function's body: thread_local!'s `const KEYS` in
       ;; RandomState::new) named in upper case is a const or a static (rustc's non_upper_case_globals): the value namespace
@@ -1224,7 +1228,13 @@
                                                  :when (= (second segs) (fn-item-name f))]
                                              f)]
                                   (when (= 1 (count hits)) (attr-strings (fget (first hits) :attrs))))))))
-                        :else (when-let [[its d f _] (child-mod-items items dir file s)] (recur its d f (rest segs))))))))
+                        :else (if-let [[its d f _] (child-mod-items items dir file s)]
+                                (recur its d f (rest segs))
+                                ;; C6-4: a module a macro declares (std's sys/alloc/mod.rs: `cfg_select! { unix => { mod unix; } ..}`),
+                                ;; rustc's default file, as module-items finds one (unix::alloc's #[inline]: an instantiating crate)
+                                (let [own-dir (if (re-find #"/(lib|mod)\.rs$" file) dir (str dir "/" (str/replace (.getName (File. ^String file)) #"\.rs$" "")))
+                                      f (some #(when (.exists (File. ^String %)) %) [(str own-dir "/" s ".rs") (str own-dir "/" s "/mod.rs")])]
+                                  (when f (recur (parse-rs f) (.getParent (File. ^String f)) f (rest segs))))))))))
               (catch Throwable _ nil))]
       (swap! attr-cache assoc ck r)
       r))))
@@ -1874,6 +1884,110 @@
     :adt (when-not (tc/enum? (second t)) (apply concat (variant-fields (second t) (nth t 2))))
     nil))
 
+(def ^:dynamic *llty*
+  "C6-4: with true, layout-table gives each layout its LLVM type as rustc's codegen writes it without type names (:llty, the
+  -Z fewer-names of std's build: type_of.rs' uncached_llvm_type with no name), which codegen takes for an ADT or a closure
+  (lib-unit's compare against std's IR); false elsewhere (the programs' IR names their structs)"
+  false)
+
+(defn- prim-llty [p] (case (first p) :int (symbol (str "i" (second p))) :float (if (= 32 (second p)) 'float 'double) :ptr 'ptr))
+
+(defn- padding-filler-ty
+  "type_padding_filler: an array of the integer approximate_align picks for ALIGN (x86_64: i128 aligned 16), SIZE bytes"
+  [size align]
+  (let [u (cond (>= align 16) 16 (>= align 8) 8 (>= align 4) 4 (>= align 2) 2 :else 1)]
+    (list 'array (quot size u) (symbol (str "i" (* 8 u))))))
+
+(declare llvm-type-of)
+
+(defn- restrict-for-offset [align offset]
+  (if (zero? (long offset)) align (min (long align) (long (Long/lowestOneBit (long offset))))))
+
+(defn- struct-llfields
+  "type_of.rs' struct_llfields: the fields in increasing offset (memory order), a padding filler before each one past the
+  previous end, a last filler to the size; FIELD-TY gives a field's LLVM type by its index"
+  [l field-ty]
+  (let [offs (:offsets (:fields l)) order (or (:order (:fields l)) (range (count offs)))
+        la (long (:align l))
+        [res off prev packed] (reduce (fn [[res off prev packed] i]
+                                        (let [to (long (nth offs i)) [fl fty] (field-ty i)
+                                              eff (restrict-for-offset (min la (long (:align fl))) to)
+                                              res (if (> to off) (conj res (padding-filler-ty (- to off) (min prev eff))) res)]
+                                          [(conj res fty) (+ to (long (:size fl))) eff (or packed (< eff (long (:align fl))))]))
+                                      [[] 0 la false] order)
+        res (if (and (pos? (count offs)) (> (long (:size l)) off)) (conj res (padding-filler-ty (- (long (:size l)) off) prev)) res)]
+    (apply list (if packed 'packed 'struct) res)))
+
+(defn llvm-type-of
+  "C6-4: a type's LLVM type as rustc_codegen_llvm's layout.llvm_type writes it with fewer names (type_of.rs): a scalar its
+  memory type (bool i8), a scalar pair the struct of both, an array the array of its element's, a union or a primitive one
+  filler, an aggregate (FieldsShape::Arbitrary: a struct's or a closure's fields, a tuple's, an enum's tag) its fields with
+  rustc's padding fillers; nil where not known"
+  [t]
+  (let [t (erase-regions t) l (layout-of t) abi (:abi l) f (:fields l)]
+    (case (first abi)
+      :scalar (prim-llty (:prim (second abi)))
+      :pair (list 'struct (prim-llty (:prim (nth abi 1))) (prim-llty (:prim (nth abi 2))))
+      (cond
+        (or (= :primitive f) (and (vector? f) (= :union (first f)))) (list 'struct (padding-filler-ty (:size l) (:align l)))
+        (and (vector? f) (= :array (first f))) (when-let [e (llvm-type-of (second t))] (list 'array (nth f 2) e))
+        (map? f)
+        (let [vs (:variants l)
+              fts (case (first t)
+                    :tuple (second t)
+                    :closure (let [ups (or (when (c/lib-closure? t) (mapv erase-regions (rest (nth t 4)))) (get *closure-upvars* (second t)))]
+                               (if-let [as (and (not (c/lib-closure? t)) (nth t 3 nil))] (mapv #(erase-regions (c/subst % as)) ups) ups))
+                    :adt (when (= :single (first vs)) (nth (variant-fields (second t) (nth t 2)) (second vs) nil))
+                    nil)]
+          (cond
+            ;; an enum of several variants: its one field the tag (tag_layout: the tag's primitive)
+            (= :multiple (first vs))
+            (let [tag (:tag (second vs))]
+              (struct-llfields l (fn [_] [{:size (prim-size (:prim tag)) :align (prim-align (:prim tag))} (prim-llty (:prim tag))])))
+            (and fts (= (count fts) (count (:offsets f))))
+            (let [lts (mapv (fn [ft] [(layout-of ft) (llvm-type-of ft)]) fts)]
+              (when (every? second lts) (struct-llfields l (fn [i] (nth lts i)))))
+            :else nil))
+        :else nil))))
+
+(defn- pointee-info-at
+  "C6-4: rustc_middle's pointee_info_at (ty/layout.rs) for T's layout at OFFSET: {:align A :safe BOOL} of the pointer there, or
+  nil: a reference's pointee (safe), a raw pointer's (not safe), a Box's pointee made safe; else the field that holds the whole
+  pointer, looked into (a struct's, a tuple's, a closure's; at a niche enum's tag the untagged variant's), unions none"
+  [t off]
+  (let [t (erase-regions t) off (long off)]
+    (case (first t)
+      ;; at 8, a trait object's vtable pointer (field_ty_or_layout: `&'static [usize; 3]`, a reference whatever the pointer)
+      :ref (cond (zero? off) {:align (:align (layout-of (nth t 3))) :safe true}
+                 (and (= 8 off) (not (sized-ty? (nth t 3))) (= :dyn (first (struct-tail (nth t 3))))) {:align 8 :safe true})
+      :ptr (cond (zero? off) {:align (:align (layout-of (nth t 2))) :safe false}
+                 (and (= 8 off) (not (sized-ty? (nth t 2))) (= :dyn (first (struct-tail (nth t 2))))) {:align 8 :safe true})
+      ;; a pattern type (NonNull's `*const T is !null`, the niche types' ranges): its base's
+      (:pat-notnull :pat-range) (pointee-info-at (second t) off)
+      (let [l (layout-of t) vs (:variants l) f (:fields l)
+            box? (and (= :adt (first t)) (or (= (c/lang "owned_box") (second t)) (= "alloc::boxed::Box" (second t))))
+            [offs fts] (cond
+                         (not (map? f)) nil
+                         (= :multiple (first vs))
+                         (let [m (second vs) enc (:enc m)]
+                           (when (and (= :niche (first enc)) (= :adt (first t)) (= off (long (first (:offsets f)))))
+                             (let [u (second enc)] [(:offsets (nth (:variants m) u)) (nth (variant-fields (second t) (nth t 2)) u nil)])))
+                         :else
+                         [(:offsets f) (case (first t)
+                                         :tuple (second t)
+                                         :closure (let [ups (or (when (c/lib-closure? t) (mapv erase-regions (rest (nth t 4)))) (get *closure-upvars* (second t)))]
+                                                    (if-let [as (and (not (c/lib-closure? t)) (nth t 3 nil))] (mapv #(erase-regions (c/subst % as)) ups) ups))
+                                         :adt (when (and (= :single (first vs)) (not (union-adt? (second t)))) (nth (variant-fields (second t) (nth t 2)) (second vs) nil))
+                                         nil)])
+            r (when (and offs fts (= (count offs) (count fts)))
+                (some (fn [i] (let [fs (long (nth offs i))]
+                                (when (<= fs off)
+                                  (let [fl (layout-of (nth fts i))]
+                                    (when (<= (+ off 8) (+ fs (long (:size fl))))
+                                      (pointee-info-at (nth fts i) (- off fs)))))))
+                      (range (count offs))))]
+        (if (and r box? (zero? off)) (assoc r :safe true) r)))))
+
 (defn layout-table
   "{TEXT layout-form-or-error} over the type forms FORMS (their types: the builder's when it left them, else form->ty) and
   their components"
@@ -1883,7 +1997,23 @@
               (when-not (contains? @seen txt)
                 (swap! seen conj txt)
                 (try (let [t (if (fn? t) (t) t)]
-                       (try (swap! acc assoc txt (layout-form (layout-of t)))
+                       (try (swap! acc assoc txt (cond-> (layout-form (layout-of t))
+                                                   *llty* (as-> lf (if-let [ty (try (llvm-type-of t) (catch Throwable _ nil))] (assoc lf :llty ty) lf))
+                                                   ;; C6-4: an ADT's pointer components' pointee alignments where safe (fn_abi's
+                                                   ;; pointee_align: a newtype of a reference, PanicMessage's `&Arguments`)
+                                                   (and *llty* (= :adt (first t)))
+                                                   (as-> lf (let [ab (:abi (layout-of t))
+                                                                  pa (fn [o] (let [pi (try (pointee-info-at t o)
+                                                                                           (catch Throwable e
+                                                                                             (when (System/getenv "RF_POINTEE_TRACE")
+                                                                                               (binding [*out* *err*] (println "pointee-info-at" (pr-str t) o (.getMessage e))))
+                                                                                             nil))]
+                                                                               (when (:safe pi) (:align pi))))]
+                                                              (case (first ab)
+                                                                :scalar (if (= :ptr (first (:prim (second ab)))) (assoc lf :pointee-aligns [(pa 0)]) lf)
+                                                                :pair (assoc lf :pointee-aligns [(when (= :ptr (first (:prim (nth ab 1)))) (pa 0))
+                                                                                                 (when (= :ptr (first (:prim (nth ab 2)))) (pa (nth ab 3)))])
+                                                                lf)))))
                             (catch Throwable e (swap! acc assoc txt [:error (.getMessage e)])))
                        (doseq [x (try (components (erase-regions t)) (catch Throwable _ nil))]
                          (let [x (erase-regions x)] (when-let [tx (try (text-of x) (catch Throwable _ nil))] (add tx x)))))

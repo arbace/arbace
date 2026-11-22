@@ -615,6 +615,7 @@ fn's code object.\n"
         info (.Info c)]
     (when (== (.Kind t) reflect/Pointer)
       (set! t (.Elem t)))
+    (.Store aotBodies c t)
     (for [i (conv int 0)] (< i (.NumField t)) (inc! i)
       (let [sf (.Field t i)
             k i]
@@ -625,3 +626,58 @@ fn's code object.\n"
                              :Type (aotFieldClass (.-Type sf)) :Modifiers 0
                              :Get (fn ^any [^any o]
                                     (Box (.Interface (.Field (.Elem (reflect/ValueOf (code o))) k))))))))))))
+
+(go/var ^{:tag sync/Map :doc "aotBodies maps the class of the compiled fns of one code (AOTFnFields') to its code object's
+Go struct type (NewAOTBody).\n"} aotBodies)
+
+(go/func AOTValues
+  "AOTValues is the closed-over values of a compiled fn's code object body (the fields of its Go
+struct but the header, F_x for x, in their order, as AOTFnFields lists them), boxed: a compiled fn
+serialized (Compiler$FnSer, Clojure's suite's function-serialization).\n"
+  ^{:tag (* RefArray)} [^any body]
+  (let [v (reflect/ValueOf body)
+        ^{:tag (slice any)} vs nil]
+    (when (== (.Kind v) reflect/Pointer)
+      (set! v (.Elem v)))
+    (let [t (.Type v)]
+      (for [i (conv int 0)] (< i (.NumField t)) (inc! i)
+        (when (strings/HasPrefix (.-Name (.Field t i)) "F_")
+          (set! vs (append vs (Box (.Interface (.Field v i))))))))
+    (RefArrayOf Object_class (spread vs))))
+
+(go/func NewAOTBody
+  "NewAOTBody is a new code object of the compiled fns of class c (AOTFnFields' Go struct type)
+holding the values vs in its F_ fields' order (AOTValues'), each unboxed for a primitive field: a
+compiled fn read back (Compiler$FnSer). nil when c is no such class or vs does not fit the fields.\n"
+  ^any [^{:tag (* Class)} c ^{:tag (* RefArray)} vs]
+  (let [(values x ok) (.Load aotBodies c)]
+    (when (not ok)
+      (return nil))
+    (let [t (assert reflect/Type x)
+          p (reflect/New t)
+          e (.Elem p)
+          n 0
+          k 0]
+      (when (!= vs nil)
+        (set! n (len (.-A vs))))
+      (for [i (conv int 0)] (< i (.NumField t)) (inc! i)
+        (let [sf (.Field t i)]
+          (when (strings/HasPrefix (.-Name sf) "F_")
+            (when (>= k n)
+              (return nil))
+            (let [fc (aotFieldClass (.-Type sf))
+                  v (aget (.-A vs) k)]
+              (inc! k)
+              (if (.IsPrimitive__Z fc)
+                (let [(values pv ok) (Unbox fc v)]
+                  (when (not ok)
+                    (return nil))
+                  (.Set (.Field e i) (.Convert (reflect/ValueOf pv) (.-Type sf))))
+                (when (!= v nil)
+                  (let [rv (reflect/ValueOf v)]
+                    (when (not (.AssignableTo (.Type rv) (.-Type sf)))
+                      (return nil))
+                    (.Set (.Field e i) rv))))))))
+      (when (!= k n)
+        (return nil))
+      (.Interface p))))
