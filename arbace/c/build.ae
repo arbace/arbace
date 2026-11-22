@@ -58,18 +58,19 @@
   (let [t (under t)]
     (case (:k t)
       :void :v
-      (:float :double :ldouble :float32 :float64 :float32x :float64x) :f
+      ;; c-rows (2026-11-22): _Float16 a float64 holding a binary16 value, loaded, stored and converted to as binary16
+      (:float :double :ldouble :float32 :float64 :float32x :float64x :float16) :f
       (:struct :union :array) :m
       ;; complex types: their parts floating, or integers of at most 64 bits (GNU's complex integer types, CS105); a part
       ;; of a type out of eval (_Float16, _Float128, the decimal types: SPEC §14) refused by design as the part is
       :complex (let [pt (under (:of t))]
                  (cond
-                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x} (:k pt)) :m
-                   (#{:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
+                   (#{:float :double :ldouble :float32 :float64 :float32x :float64x :float16} (:k pt)) :m
+                   (#{:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x} (:k pt))
                    (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
                    (and (chk/int-type? pt) (not (wide? pt))) :m
                    :else (refuse :complex "the complex type " (chk/tstr t) " (deferred)")))
-      (:float16 :float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
+      (:float128 :float128x :bf16 :dec32 :dec64 :dec128 :dec64x) (refuse :by-design "the type " (chk/tstr t) " (SPEC §14)")
       ;; GNU vector types (CS320 (a)): lanes in memory, an aggregate's address
       :vector :m
       :fn :i
@@ -100,7 +101,8 @@
       :bitint (str (if (:u t) "u" "s") (:n t)))))
 
 (defn- f32? [t] (#{:float :float32} (:k (under t))))
-(defn- fty [t] (if (f32? t) "f32" "f64"))
+(defn- f16? [t] (= :float16 (:k (under t))))
+(defn- fty [t] (cond (f32? t) "f32" (f16? t) "f16" :else "f64"))
 
 (defn- ptr? [t] (#{:ptr :nullptr} (:k (under t))))
 (defn- unsigned-ty?
@@ -346,13 +348,16 @@
       (case [k tk]
         [:i :i] (let [a (ity ft) b (ity t)]
                   {:k :i :t t :n (if (or (= a b) (#{"i64" "u64" "p"} b) (and (#{"i64" "u64" "p"} a) (#{"i64" "u64" "p"} b))) n (list 'cv b n))})
-        [:i :f] {:k :f :t t :n (list 'i2f (ity ft) (if (f32? t) 1 0) n)}
+        ;; to _Float16 through the double, exact for every integer whose binary16 is finite (|x| < 65520 < 2^53)
+        [:i :f] {:k :f :t t :n (if (f16? t) (list 'r16 (list 'i2f (ity ft) 0 n)) (list 'i2f (ity ft) (if (f32? t) 1 0) n))}
         [:f :i] {:k :i :t t :n (list 'f2i (ity t) n)}
-        [:f :f] {:k :f :t t :n (if (and (f32? t) (not (f32? ft))) (list 'r32 n) n)}
+        [:f :f] {:k :f :t t :n (cond (and (f16? t) (not (f16? ft))) (list 'r16 n)
+                                     (and (f32? t) (not (f32? ft)) (not (f16? ft))) (list 'r32 n)
+                                     :else n)}
         [:i :w] {:k :w :t t :n (list 'i2w (wty t) (ity ft) n)}
         [:w :i] {:k :i :t t :n (list 'w2i (ity t) (wty ft) n)}
         [:w :w] {:k :w :t t :n (if (= (wty t) (wty ft)) n (list 'w2w (wty t) (wty ft) n))}
-        [:w :f] {:k :f :t t :n (list 'w2f (wty ft) (if (f32? t) 1 0) n)}
+        [:w :f] {:k :f :t t :n (if (f16? t) (list 'r16 (list 'w2f (wty ft) 0 n)) (list 'w2f (wty ft) (if (f32? t) 1 0) n))}
         [:f :w] {:k :w :t t :n (list 'f2w (wty t) n)}
         ;; a vector cast to a vector or a scalar of its size, or a scalar to a vector: its bits (GNU's rule)
         [:m :m] (assoc x :t t)
