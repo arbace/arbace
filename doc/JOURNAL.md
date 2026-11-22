@@ -16886,3 +16886,65 @@ copied list, and every row keeps its reason. The mechanism and the numbers are i
   `:reference-wrong` or taking any verdict).
 Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict, --self-test, --self-test-ref, bin/records-check: 0
 problems. Not done here: Go's 137 read rows (another stream's: the 73 rejects' messages compared first).
+## 2026-11-22: cpp-read-1122: C++'s read and print cells (the burst's stream C3)
+
+Branch cpp-read-1122 from next 863bdaea1 (mac/next merged again at a8a23e3ea: queue 510's checker rounds 1-2 and their own-record
+rows), the burst of 2026-11-21/22: no gate, light targeted checks. Share: the token check's and the dg check's syntax-own rows, the
+print cell's deferred rows, the read cell's by-design classes re-examined, and :own-diag rows in families queue 510 (the Mac) is not
+on (510: no matching function, extra-only, access, missed lines, incomplete types, deleted functions, inheriting constructors);
+arbace/cpp's code generator not touched (C++ runtime round 3's), arbace/cpp/sema.ae only for two nil guards of its lookup trace.
+
+Sources studied (prior art, read only, nothing vendored; GPL code never copied, the rules restated from the standard and the
+behaviour): gcc-15.2.0 from the pinned tarball (test/cpp/corpora.edn's sha256; extracted into .tmp only): libcpp/lex.cc
+(scan_cur_identifier, maybe_ignore_udl_macro_suffix, forms_identifier_p, lex_raw_string, _cpp_lex_direct's EOF), libcpp/charset.cc
+(one_utf8_to_cppchar, _cpp_valid_utf8, ucn_valid_in_identifier), libcpp/init.cc (lang_defaults), gcc/c-family/c-common.cc
+(maybe_suggest_missing_token_insertion, get_missing_token_insertion_kind, check_builtin_function_arguments), gcc/cp/parser.cc
+(cp_parser_class_specifier_1's want_semicolon, cp_parser_member_declaration, cp_parser_statement_seq_opt, cp_parser_statement's
+labels, cp_parser_iteration_statement, cp_parser_declarator, cp_parser_skip_to_end_of_statement), gcc/cp/init.cc (build_new_1),
+gcc/cp/typeck.cc (build_reinterpret_cast_1), gcc/cp/decl.cc (cp_finish_decl's decltype(auto)); g++ 15.2 run by hand on a few files
+for its messages (analysis only, the oracle tier's tool; nothing recorded).
+
+What was done (doc/cpp/CPP-SURVEY.md, "As built: cpp-read"): the shared lexer's C++ mode as libcpp (ud-suffixes, extended
+characters and their errors, an unterminated raw string's end, -pedantic's identifier set, a UCN macro name's key); the parser's
+recovery and GCC's syntax diagnostics (skip-rec!, missing-token placement, want_semicolon, an end-of-input error's place, about
+forty rules each restated from the standard); five diag.ae rules over the final tree; the converter's and printer's five
+forms-differ rows. Each fix proven on its rows by the REPL's probe (the dg verdict of arbace.repr.cpp.dg), then by whole runs.
+
+Proofs, light (the user's "avoid redundancy and unnecessary tests", 2026-11-22, applied from the round trips on): the token check's
+three samplings whole after the lexer's main change, the later lexer changes on the 7 files they touch with the controls'
+pair (`pp-check --only ... --record-results`); the dg check whole at 4c05537a9 (4,564 files, 8,369 s), recorded, the
+undeclared-name refinement after it on its 161 files (merged), the load's timeouts of recorded passes alone (two pass, constexpr-asm-3
+takes 341 s, past CP329 (a)'s cap); the round trip's gxx-dg-every-10 and gxx-old-deja-every-10 whole with --record-results (the five
+rows, no other), c-c++-common-every-10, samples and gxx-dg-essential whole (unchanged), libstdcxx-testsuite-every-40's 24 files with
+the touched constructs. A first gxx-dg-every-10 run showed four rows passing before turning forms-differ (range-for8.C,
+nontype6.C, constexpr-99287.C, srcloc15.C: a range declaration defining a class, ' >' after a default the forms keep as text, a member
+declarator whose ; the parser now assumes); the record of that run discarded, the three causes fixed, the rows passing before the
+whole run that was recorded.
+
+Cells: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517 (38 n/a): the token check's 5 by design to pass, :syntax-own 66 -> 15,
+:own-diag 515 -> 497, :oracle-crash 5 -> 4, :musl-libc 2 -> 1 (cpp26/literals2.C left the class: the own front end's ISO-8859-1
+conversion gives the directives' errors); print 3,880 / 0 / 15 -> 3,885 / 0 / 10. Completeness 95.81 -> 96.14, independence 94.84
+-> 95.00. The own record had 13 rows pass that fail at 863bdaea1 already (checked on a base worktree): five pass again
+(conversion/const3.C, lookup/crash5.C and parse/crash1.C by this stream, cpp1z/using1.C and cpp1z/pr92536.C since 510's merge), eight
+are recorded failing as they are (expr/return1.C, other/return1.C, parse/crash68.C, template/error1.C, init/member1.C,
+cpp0x/pr78765.C, cpp0x/alias-decl-pr92206-4.C, cpp1z/pr86648.C: Sema's incomplete types, overloads and missed lines, queue
+510/518's); cpp0x/gen-attrs-17.2.C (it passed on a false "expected }" at the file's end, gone with the recovery; its line needs
+Sema's alignment of a GNU-aligned member) and cpp1z/constexpr-asm-3.C (time) too.
+
+Left for the user (decisions, by design): :gcc-dialect 173 (CP399 (a)), :gcc-own-rules 135 (CP398 (c): each GNU rule portable into
+the own front end one at a time if the user wants them deferred instead), :gxx-only-rules 2 (CP328 (a)), :musl-libc 1
+(warn/Wconversion-null-4.C, musl's NULL). Deferred and left: :syntax-own's 15 (six in the constant evaluator's "used before its
+definition" family, Sema's file, queue 510/518's), :own-diag's 497 (outside this stream's share now: the Mac's queue 518 holds the dg
+families), the print cell's 10 (forms-differ 5, HotSpot's 5 needing a `hotspot-x86-linux` own record over jdk26u's sources).
+Alternatives considered: making the parameter list's error recover as GCC's (parse/error6.C) -- left, the parser's tentative parses
+would leak its diagnostic; parsing GNU attribute arguments as expressions (cpp0x/pr84606.C) -- left, a change to every attribute's read.
+
+## 2026-11-22: cpp-read-1122 merged with next again (ecdf052dd)
+
+mac/next merged again before the push (queue 518's checker rounds, C's c-rows): the own record taken from this stream, then the 164
+files either side moved (518's rows, and the rows whose status differs between the two records) run again on the merged tree
+(`bin/repr-cpp dg --front native --only`, merged into the record): own passes 1,699 (this stream's 1,681, next's 1,593); the 15
+non-passing among them are the rows above (the stale passes at 863bdaea1, constexpr-asm-3's time, 518's four qualttp files and
+pr69056 as next recorded them). Cells against next's record: C++ read 5,589 / 317 / 587 -> 5,665 / 311 / 517, print 3,880 / 0 / 15 ->
+3,885 / 0 / 10; completeness 95.81 -> 96.14, independence 95.24 -> 95.40 (the earlier entry's 94.84 -> 95.00 was against the first
+merge's tree). reap, crops-score (--record, --judge --strict) and records-check: 0 problems.
