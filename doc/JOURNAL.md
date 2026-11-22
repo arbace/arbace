@@ -17128,3 +17128,70 @@ doc/CROPS-SCORE.md, "Decided (the user, 2026-11-22): the second questions", has 
   alone, the self-test failed.
 Runs: bin/reap --record (0 problems), bin/crops-score --record, --judge --strict (0 problems), --self-test, --self-test-ref,
 bin/records-check (9 pairs, 0 problems).
+## 2026-11-22: x86-objs round 1: Mach-O and COFF writers and views (AXS99 (b))
+
+The burst's stream x86-objs (branch `x86-objs-1122`, from `mac/next` `3e8dfe109`), the user's decision of 2026-11-22 (AXS99 (b),
+"Mach-O and COFF writers and views, compact unwind included"). Studied: llvm-project 23.1.5's pinned tarball
+(`.tmp/llvm/llvm-project-23.1.5.src.tar.xz`, test/asm/corpora.edn's pin, sha256 fb50b1ea...), its `llvm/lib/MC/MachObjectWriter.cpp`,
+`MCMachOStreamer.cpp`, `MCParser/DarwinAsmParser.cpp`, `MCSectionMachO.cpp`, `MCObjectFileInfo.cpp`, `MCAsmInfoDarwin.cpp`,
+`MCDwarf.cpp` (EmitCompactUnwind, EmitCIE, EmitFDE, the frames' emit), `MCExpr.cpp` (the Mach-O rule for a variable as a
+relocation's symbol, AttemptToFoldSymbolOffsetDifference), `MCAssembler.cpp` (evaluateFixup, the .reloc groups), `WinCOFFObjectWriter.cpp`,
+`MCWinCOFFStreamer.cpp`, `MCParser/COFFAsmParser.cpp`, `MCWin64EH.cpp`, `MCStreamer.cpp`'s emitWinCFI*, `MCContext.cpp`,
+`StringTableBuilder.cpp`, `llvm/lib/Target/X86/MCTargetDesc/{X86MachObjectWriter,X86WinCOFFObjectWriter,X86AsmBackend,X86MCAsmInfo,
+X86WinCOFFStreamer,X86MCCodeEmitter}.cpp`, `llvm/tools/llvm-objdump/{llvm-objdump,MachODump}.cpp`, `llvm/tools/llvm-readobj/{MachODumper,
+COFFDumper}.cpp`, `llvm/lib/Object/{MachOObjectFile,COFFObjectFile,FaultMapParser,RelocationResolver}.cpp`,
+`llvm/include/llvm/DebugInfo/DWARF/LowLevel/DWARFDataExtractorSimple.h` (getEncodedPointer: an absptr read takes no relocation),
+`llvm/lib/DebugInfo/DWARF/DWARFDebugFrame.cpp` and `llvm/lib/Support/ScopedPrinter.cpp`; the logic written again, nothing copied
+(LICENSE.md, doc/ARBACE.md). doc/asm/AMD64-SURVEY.md, "As built: x86-objs", holds the design.
+
+New: `arbace/asm/macho.ae`, `arbace/asm/amd64/macho.ae`, `arbace/asm/coff.ae`, `arbace/asm/amd64/coff.ae`, `arbace/asm/amd64/objview.ae`;
+`arbace.asm.obj` gains `*fmt*` (the format's part, nil for ELF) and `*keep-var*`; the verdict (`arbace.asm.amd64.objcheck`) assembles
+a Darwin or Windows triple's run in that format and holds its CHECK lines to `format-view`; ELF's llvm-objdump -d view rewritten on the
+shared `disasm-lines`; arm64's call frame view made shareable (`dwarf-frames-lines`, `*frame-target*`, the section's address);
+decode-check's FileCheck subset takes a numeric variable's precision. Findings on the way, each LLVM's: Darwin's FDE address goes
+through a temporary variable (DwarfFDESymbolsUseAbsDiff) and so needs no relocation, which is what makes llvm-objdump --dwarf=frames
+print each function's own address (getEncodedPointer reads absptr unrelocated); `.seh_endproc` writes the unwind info at once, so a
+text section's .xdata comes right after it in the section table; COFF's `.reloc` names (dir32, secrel32, secidx) are ordinary fixups
+inserted in MCAssembler::layout's groups, their fixed values written into the data; a relaxed AT&T instruction's fixup error keeps
+its place (MCFixup::getLoc is its expression's), only the Intel parser's expressions have none (queue 372's `<unknown>:0:` rule was
+Intel's alone).
+
+Proof (stage 0 of mac/next's seed, ARBACE_HOST_EXE the main checkout's): `bin/repr-asm object-verdict --record` whole: 68 files, 1,243
+CHECK lines, 1,203 met (865 before), the rest :elf32 32, :x32 7, :options 1; the 338 :other-format lines all met: pad-for-align-debug 114,
+compact-unwind-force-dwarf 58, win-import-call-optimization 32, compact-unwind-mode-dwarf 24, compact-unwind-cfi_def_cfa 19,
+reloc-directive 18, compact-unwind 13, x86_long_nop 12 (its two i386 Mach-O runs), macho-reloc-errors-x86_64 8,
+compact-unwind-signal-frame 8, faultmap-section-parsing 7, align-branch-single 7 (its COFF run), hex-immediates 4, stdcall 4,
+fp-setup-macho 3, macho-reloc-errors-x86 3, reloc-macho 2, check-end-of-data-region 1, signed-coff-pcrel 1; every other row as recorded;
+its 16 controls failing as they must, 8 of them new (6 one-byte mutations of Mach-O and COFF objects, 2 cross).
+`bin/repr-asm encode-check --record --only` over the 21 files the change touches: the print level 223 of 223 CHECK texts met (the
+cell's 138 :other-format rows all met: pad-for-align-debug 63, compact-unwind-cfi_def_cfa 19, reloc-directive 18, compact-unwind 13,
+faultmap-section-parsing 7, reloc-undef-global 5, hex-immediates 4, fp-setup-macho 3, reloc-macho 2, stdcall 2,
+check-end-of-data-region 1, no-elf-compact-unwind 1), the cross judge 50 of 50, the other 9 files as recorded. Unchanged by the shared
+code (run, not recorded): `bin/repr-asm object-check` ok (musl 32, synthetic 8, obj-err 3 of 3, mc-x86-obj; the relaxed AT&T rule and
+the formats' hooks leave ELF's objects as they were), `bin/repr-asm --arch arm64 object-verdict` ok (2,890 of 2,890, the stated
+encodings 1,975 and texts 2,337: arm64's call frame view through `dwarf-frames-lines`). After (`bin/reap --record`, `bin/crops-score
+--record`): x86-64 print 195,651 pass / 861 by design / 2 deferred to 195,789 / 723 / 2 (the 723 the cross judge's AXS34 rows, which the
+user's decision of the same day counts out of the cases, another stream's); AOT 108 / 0 / 0 unchanged (the verdict beside, AXS100 (a):
+865 to 1,203 of 1,243); asm-amd64's completeness 0.9989 to 0.9991. Left: the cross judge's rows (counting), :elf32 (2 print rows, 32
+verdict lines) and :x32 (7) for AXS101's ELF32, :options 1 (gnux32-dwarf-gen's -g). arm64: no matrix row waits for Mach-O (MC/AArch64's
+Darwin-only object tests are outside the corpus mc-aarch64-obj; the encode check's reject level, beside, holds label-arithmetic-diags-darwin
+10 and macho-addend-range 3 lines that AArch64MachObjectWriter's messages would judge): an arm64 Mach-O writer is not part of this round.
+
+## 2026-11-22: x86-objs round 2: i386's ELF32 (AXS101 (a))
+
+The burst's "if time allows" (AXS101, recommended (b) by queue 337, the burst asked (a)): `arbace.asm.elf`'s writer takes `:class 32`
+(ELFWriter's 32-bit layout: the 52-byte header, 40-byte section headers, 16-byte symbols, 4-byte alignments) and `:rel true` (SHT_REL,
+`.rel` sections, 8-byte entries, the addend in the field), its reader ELF32 and REL; an i386 run of the object assembler is EM_386
+ELFCLASS32 with X86ELFObjectWriter::getRelocType's EM_386 types (getType64 then getRelocType32, from llvm-project 23.1.5's
+`llvm/lib/Target/X86/MCTargetDesc/X86ELFObjectWriter.cpp`, the names from `llvm/include/llvm/BinaryFormat/ELFRelocs/i386.def`),
+`.reloc` with R_386_* and BFD_RELOC_*; `{disp32}`/`.d32` on JMP_1 or JCC_1 forces the relaxed form (X86AsmParser.cpp's
+processInstruction: JMP_2/JCC_2 in 16-bit mode), which Relocations/x86-16 needed; the verdict's views take a target's `:class`
+(objdump's relocation widths, readobj -r's REL section without addend, readelf -s's columns). Proof: `object-verdict --record` whole:
+1,224 of 1,243 (1,203 before): reloc-directive-elf-32 11, tlsdesc-32 5, x86-16 5 met; x86-32 7 and x86-branch-relaxation 4 now
+:view-llvm-objdump (their viewers, `--no-addresses` through sed and `-D --section` with another triple, are views not built: deferred);
+18 controls failing (2 new: tlsdesc-32's and x86-16's objects, one byte changed). `encode-check --record --only` over the 26 files with
+an i386 or 16-bit object run: 135 of 135 CHECK texts, abs8's 2 :elf32 rows met. ELF64's bytes unchanged: object-check 89 of 89 equal to
+llvm-mc's byte for byte (musl 32, synthetic 8, mc-x86-obj 49, obj-err 3 of 3), arm64's object-check 16 of 16. After: x86-64 print
+195,791 pass / 723 by design / 0 deferred (the 723 the cross judge's, counted out by the user's decision, another stream's); AOT
+108 / 0 / 0 (the verdict beside: 1,224 of 1,243, the rest :view-llvm-objdump 11, :x32 7, :options 1). Left: x32 (ELF32 with EM_X86_64
+and RELA, and the encoder's REX on x32's TLSDESC lea: 7 beside lines), gnux32-dwarf-gen's -g, the two views.
