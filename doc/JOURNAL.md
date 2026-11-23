@@ -19168,3 +19168,32 @@ Applied in test/java/divergences.edn (java-design-1123):
   by design); `--judge --strict` and `bin/records-check` pass. By design left: class loading and defineClass (JD3's), FFM and
   Kerberos (being built on this branch), the harness's (jvm-tools, memory-limit, flaky-timeout), j2g-reflection, smartcardio,
   diffcheck's corpus-own exclusions.
+
+## 2026-11-23: java-design-1123: JD7 built (javac's synthetic lambda methods in reflection); Dyn's clone; train 1's session
+
+- JD7 (the user's BUILD of 2026-11-23): `arbace.classes.analyze/synthetic-lambdas` lists a class's lambdas as javac's
+  LambdaToMethod makes their methods: the name analyze-lambda already gave (lambda$M$N, javac's per-prefix index, used until
+  now for SerializedLambda), the captured locals first in the order the body first names them then the instantiated
+  descriptor's parameters (erased), private and synthetic, static unless the body uses this. The interpreter publishes them
+  as member table entries (`Compiler$CFGo.setMethod`, an entry that throws when invoked: the lambda runs as its own class's
+  method), j2g lists them in a program's own classes' member tables as `m` lines (jrt's throwing entry). Method references
+  to a protected method declared in another package are made lambdas as javac's TransTypes makes them
+  (`needsConversionToLambda`'s `isProtectedInSuperClassOfEnclosingClassInOtherPackage`; analyze-method-ref's bound, unbound and
+  static references through `ref-as-lambda`), which numbers ProtectedInaccessibleMethodRefTest2's three as javac does.
+  Alternatives considered: invocable synthetic methods (a second entry point to every lambda body; no test calls them);
+  names computed apart from the analysis (the analyzer already numbers them for serialization).
+- Proved by day without a build: `.tmp/jd/dev/arbace-dev`, the executable 2399c5e5's with the checkout's
+  `arbace/classes/analyze.ae` and `interp.ae` evaluated over its own before test/java/run.ae (the interp level's harness for a
+  change to the Java forms' front end alone): t06144 PrivateLambdas, t06157 CaptureVarOrder, t06306
+  ProtectedInaccessibleMethodRefTest2 pass, the control t03208 passes, the negative controls c00001 and c00004 differ. The
+  compiled level waits for a train's build.
+- j2g: Dyn's `Clone__O` calls the interpreted class's own `clone()` by its key (`DynClass.ByKey`), else Object's refusal:
+  compiled code cloning an interpreted object through an interface that declares `clone()` public (BuildOddSel t05330:
+  PKIXParameters clones its CertSelector). Waits for a train.
+- The class-file API's compiled rows (t06042 and its kin: "Unable to resolve symbol: ClassFile/of") are stale: the API is in
+  the world since F26, and `bin/java-check --analyze-only` of t06042 on the checkout refuses none of its classes; their rows run
+  with train 1's.
+- Train 1 (the coordinator's: next + java-design-1123 at 0ad52db70 + clj-1123, one edge update and one gate build) builds this
+  branch's FFM, Kerberos, XML parser, setProperties and JD4; `.tmp/jd/session-train1.sh` waits for its build, runs the compiled
+  and interp rows on its executables in java-design-b1 (the compiled ones under one heavy-lock ticket), then
+  `.tmp/jd/post-1123.sh` merges train 1 and records them.
