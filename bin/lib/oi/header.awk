@@ -294,7 +294,8 @@ END {
   # FLAGS -o TEST.byte TEST.ml`, and the run the hook's command line, tools/dumpobj on oi, the row's program with `-nobanners
   # TEST.byte` (no hook); environment @tool=dumpobj @bcflags=FLAG,...
   dbmode = 0
-  if (aot == 0 && hasbuild && !dlmode && !odmode && !oimode && !cemode) {
+  # (burst 2026-11-23, 528-8 (a)) at the compiled level too: tools/dumpobj translated by o2j and j2g as the row's program
+  if ((aot == 0 || aot == 2) && hasbuild && !dlmode && !odmode && !oimode && !cemode) {
     dbb = FILENAME; sub(/^.*\//, "", dbb); sub(/\.ml$/, "", dbb); hook = FILENAME; sub(/\.mll?$/, ".run", hook)
     while ((getline hl < hook) > 0) if (trim(hl) == "\"${ocamlrun}\" \"${ocamlsrcdir}/tools/dumpobj\" -nobanners \"${program}\" > \"${output}\"") dbmode = 1
     close(hook); dbflags = ""; dbstep = 0
