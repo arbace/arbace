@@ -540,6 +540,10 @@
    "__is_nothrow_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
    "__is_trivially_destructible" (fn [_ [a]] (and (not (abi/void? (abi/unq a))) (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?)))
    "__has_trivial_destructor" (fn [_ [a]] (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?))
+   ;; (cpp-tzdb: GNU's, a trivial default constructor, clang's HasTrivialDefaultConstructor: <bits/stl_tempbuf.h>'s
+   ;; __uninitialized_construct_buf_dispatch<__has_trivial_constructor(_Tp)>, tzdb.cc's ranges::stable_sort)
+   "__has_trivial_constructor" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
+                                             (or (abi/scalar? u) (and (abi/class? u) (boolean (trivially-default? (:id u)))))))
    "__is_trivially_copyable" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
                                            (or (abi/scalar? u) (and (abi/class? u) (sema/trivial-copy? (:id u)) (sema/trivial-dtor? (:id u))))))
    "__is_trivial" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
@@ -659,7 +663,12 @@
     (if (some dependent? ts)
       {:k :texpr :o :trait :name nm :types ts}
       (do (cx-trait-incomplete! nm ts)
-          (if ((value-traits nm) scope ts) 1 0)))))
+          ;; (cpp-tzdb: a trait's value is its own context, never the standard conversions alone of a user-defined conversion
+          ;; that asked for it, [over.best.ics]/4: the class instance holding it is cached)
+          (let [r (binding [sema/*no-user* false] ((value-traits nm) scope ts))]
+            (when (and (System/getenv "CPP_TRAIT_TRACE") (#{"__is_base_of" "__is_convertible"} nm))
+              (binding [*out* *err*] (println "TRAIT" nm (boolean r) (pr-str (map (fn [t] (let [u (abi/unq (abi/non-ref t)) u (if (abi/ptr? u) (abi/unq (:to u)) u)] (if (abi/class? u) (let [c (abi/cls (:id u)) bc (some-> (first (:bases c)) :cls abi/cls) pc (fn [c] (when-let [o (last (filter #(= :cls (first %)) (:path c)))] (let [oc (abi/cls (second o))] [(second o) (:name oc) (:targs oc) (:tmpl oc)])))] [(:name c) (:id u) (pc c) (when bc [(:id bc) (pc bc)])]) t))) ts)))))
+            (if r 1 0))))))
 
 (defn trait-type
   "A transform trait's type of its type arguments' forms (__remove_cv(T), __decay(T), ...), dependent in a signature."
@@ -1042,6 +1051,14 @@
 
 (declare concept-satisfied?)
 
+(defn- fn-entities
+  "The entities a call's callee name `s` (a symbol, n/f for n::f) denotes in `scope`; none when its qualifier names no scope."
+  [scope s]
+  (if (namespace s)
+    (try (sema/lookup-qualified scope (vec (concat (str/split (namespace s) #"/") [(name s)])))
+         (catch arbace.lang.ExceptionInfo _ nil))
+    (sema/lookup scope (name s))))
+
 (defn- const-form
   "A constant of a template argument's or array bound's form: a number, a name, X<T>::member, (cpp/text s)."
   [scope f]
@@ -1087,10 +1104,12 @@
     (static-call-value scope (nth f 2))
     ;; (CP378 (a): a call of a constexpr function named alone on constant arguments, `T<ice()>`, as the text's (an array bound
     ;; `int[sq(3)]`): manifestly constant-evaluated, a template argument)
-    (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil)) (nil? (namespace (nth f 2)))
-         (some #(= :fn (:e %)) (sema/lookup scope (name (nth f 2)))))
+    ;; (cpp-tzdb: and a qualified one, <chrono>'s hh_mm_ss<_Duration>::precision, `duration<..., ratio<1,
+    ;; __detail::__pow10(fractional_width)>>`, a consteval function: its alias had been dropped, "unknown type __detail/__pow10")
+    (and (seq? f) (= 'fn (first f)) (vector? (second f)) (symbol? (nth f 2 nil))
+         (some #(= :fn (:e %)) (fn-entities scope (nth f 2))))
     (let [args (mapv #(const-form scope %) (second f))
-          cands (filter #(and (= :fn (:e %)) (= (count args) (count (:ps (:ty (sema/fnd (:id %))))))) (sema/lookup scope (name (nth f 2))))]
+          cands (filter #(and (= :fn (:e %)) (= (count args) (count (:ps (:ty (sema/fnd (:id %))))))) (fn-entities scope (nth f 2)))]
       (when (or (empty? cands) (not-every? number? args)) (fail :template "constant call " (pr-str f)))
       (sema/ce-call-fn (:id (first cands)) args))
     ;; (cpp-s11: sizeof(T) of a type, read as the form of a call of sizeof, a template argument: <charconv>'s
@@ -1286,8 +1305,14 @@
           (recur (inc i) (conj args {:pack []}))
         (when d
           (let [s (bind-scope (:scope t) (or (:dparams p) (subvec (:params t) 0 i)) args nil)
+                ;; (cpp-tzdb: a type's default with the names its template's declaration sees, not only the caller's, as
+                ;; queue 392's signatures: weak_ptr's `template<typename _Yp, typename = _Constructible<const
+                ;; shared_ptr<_Yp>&>> weak_ptr(const shared_ptr<_Yp>&)`, asked from make_unique's body in <bits/unique_ptr.h>,
+                ;; which <memory> includes before <bits/shared_ptr.h>, had dropped out with "not a template: shared_ptr":
+                ;; tzdb.cc's std::make_unique<time_zone::_Impl>(node))
                 a (if (= :type (:kind p))
-                    (sema/resolve-type s d)
+                    (binding [sema/*cutoff* (max (long sema/*cutoff*) (long (or (:pos t) 0)))]
+                      (sema/resolve-type s d))
                     (value-arg (binding [sema/*cutoff* Long/MAX_VALUE]
                                  (try (sema/const-int s d)
                                       (catch arbace.lang.ExceptionInfo e
@@ -2325,8 +2350,17 @@
                              (update :waits (fn [ws] (into {} (for [[w cs] ws :let [cs (disj cs cid)] :when (seq cs)] [w cs])))))))
         (when (System/getenv "CPP_TMPL_TRACE")
           (binding [*out* *err*] (println "provisional instance" (:name t) cid "made again")))
-        (let [fp (abi/cls cid)]
-          (declare-instance! t args node params bargs false cid)
+        (let [fp (abi/cls cid)
+              ;; (cpp-tzdb: its named nested classes, by their enclosing class and name, made again under their ids:
+              ;; sema's *class-ids*, declare-class!)
+              nested (into {} (for [[k c] @abi/*classes*
+                                    :when (and (not= k cid) (:name c) (not= "" (:name c)) (not (:tmpl c))
+                                               (some #(= [:cls cid] %) (:path c)))
+                                    :let [p (last (filter #(= :cls (first %)) (:path c)))]
+                                    :when p]
+                                [[(second p) (:name c)] k]))]
+          (binding [sema/*class-ids* (atom nested)]
+            (declare-instance! t args node params bargs false cid))
           (when-let [[ptid pps pb] (:from-partial fp)]
             (abi/update-cls! cid assoc :from-partial [ptid pps pb])
             (when-let [pt (some #(when (= ptid (:id %)) %) (:partials t))]
@@ -2827,6 +2861,23 @@
         (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))]
           (binding [*alias-node* (when (:range (:pattern t)) (:pattern t))]
             (let [bs (bind-scope (:scope t) (:params t) args nil)
+                  ;; (cpp-tzdb: an alias template's requires-clause, its associated constraints, [temp.alias]/2 with
+                  ;; [temp.names]/7: not satisfied for non-dependent arguments, the template-id is invalid -- a
+                  ;; substitution failure where a deduction names it: <bits/ostream.h>'s C++20 `template<typename _Os,
+                  ;; typename _Tp> requires __derived_from_ios_base<_Os> && ... using __rvalue_stream_insertion_t = _Os&&`,
+                  ;; whose rvalue inserter operator<<(_Ostream&&, const _Tp&) had been chosen for an lvalue
+                  ;; ostringstream, _Ostream an lvalue reference: tzdb.cc's `ss << "..." << lineno`. As instantiate-fn's
+                  ;; constraints: false with a doubt is not satisfied either, only not a sure failure for the checker; an
+                  ;; evaluation that throws is a doubt, the alias kept)
+                  _ (when-let [rc (:constraint t)]
+                      (when-not (dependent? args)
+                        (let [d (atom false)
+                              ok (try (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cutoff* Long/MAX_VALUE]
+                                        (sema/constraint-satisfied? bs rc))
+                                      (catch arbace.lang.ExceptionInfo _ (reset! d true) true))]
+                          (when-not ok
+                            (throw (ex-info (str "codegen: constraints not satisfied for the alias template " (:name t))
+                                            {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))}))))))
                   ty (sema/resolve-type bs (get-in (:pattern t) [:type :qualType]))]
               ;; (queue 506, the checker: named by a declaration's own type, its T::X's access in the alias's context)
               (when (identical? f sema/*cx-alias-check*) (sema/cx-alias-access! t bs))
@@ -5247,19 +5298,36 @@
                                        ;; is_constructible<span, span> again, to the constraints' depth)
                                        ;; (too-few-args? reads every declaration's default arguments, CP375 (a))
                                        :when (not (too-few-args? (tmpl tid) args))
-                                       :let [fid (try (let [a (deduce-call (tmpl tid) [] args)]
+                                       ;; (cpp-tzdb: deduction and the substitution of the template's default arguments are
+                                       ;; their own context, not the user-defined conversion that asks for the converting
+                                       ;; constructor template, [over.best.ics]/4 restricting the argument's conversion to the
+                                       ;; parameter alone: time_point's `template<typename _Dur2, typename =
+                                       ;; _Require<is_convertible<_Dur2, _Dur>>> time_point(const time_point<clock, _Dur2>&)`
+                                       ;; asked under *no-user* for `info.begin = sys_days(...)` had made
+                                       ;; is_convertible<days, seconds> false, cached so, and tzdb.cc's later `sys_seconds
+                                       ;; secs(sys_days(ymd) + days(1))` found no converting constructor)
+                                       :let [fid (binding [sema/*no-user* false]
+                                                  (try (let [a (deduce-call (tmpl tid) [] args)]
                                                         (when (and (nil? a) (System/getenv "CPP_TMPL_TRACE"))
                                                           (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "does not deduce")))
                                                         (when a (instantiate-fn tid a)))
                                                       (catch arbace.lang.ExceptionInfo e
                                                         (when (System/getenv "CPP_TMPL_TRACE")
                                                           (binding [*out* *err*] (println "constructor template of" (:name (abi/cls cid)) "drops out:" (.getMessage e))))
-                                                        nil))]
+                                                        nil)))]
                                        :when fid
                                        ;; [class.copy.ctor]/5: never instantiated to the signature X(X)
                                        :let [ps (:ps (:ty (sema/fnd fid)))]
                                        :when (not (and (= 1 (count ps)) (= {:k :class :id cid} (abi/unq (first ps)))))]
                                    fid)))
+         ;; (cpp-tzdb: the one specialization an overload set of one function template names by its written arguments and its
+         ;; defaults, [temp.arg.explicit]/4, or nil: sema's deduce-auto)
+         :single-spec (fn [e]
+                        (when (and (= 1 (count (:tmpls e))) (:targs-text e))
+                          (try (let [tid (first (:tmpls e)) t (tmpl tid)
+                                     a (complete-args t (explicit-args t (:targs-text e) (:targs-scope e)))]
+                                 (when (and a (not (some dependent? a))) (instantiate-fn tid a)))
+                               (catch arbace.lang.ExceptionInfo _ nil))))
          ;; (queue 510, the checker: every constructor template of class `cid` surely needs an argument, sema's cx-no-default-sure?)
          :ctor-tmpls-need-args? (fn [cid] (every? #(too-few-args? (tmpl %) []) (:ctor-tmpls (abi/cls cid))))
          :pack-expand expand-type-pack

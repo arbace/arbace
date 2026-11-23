@@ -2102,6 +2102,8 @@
                (re-find (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (str tn)) "\\s*<")) qt))
       (ex-info (str "codegen: variable has incomplete type '" qt "'") {:codegen/refused :incomplete}))))
 
+(declare str-units)
+
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
@@ -2151,6 +2153,15 @@
                (and (abi/arr? ty) (nil? (:n ty)) (abi/class? (abi/unq (:of ty))) (= "InitListExpr" (:kind i))
                     (seq (kids i)) (every? #(= "InitListExpr" (:kind %)) (kids i)))
                (assoc ty :n (count (kids i)))
+               ;; (cpp-tzdb: of characters, by a string literal, alone or in braces, [dcl.init.string]/1-2 and [dcl.array]/7:
+               ;; tzdb.cc's `static const char tzdata_chars[] = R"__libstdcxx__(...)__libstdcxx__";` given to std::size(const
+               ;; T (&)[N]), whose N had been nil, the deduction's crash)
+               (and (abi/arr? ty) (nil? (:n ty)) (abi/integral? (abi/unq (:of ty))) i
+                    (let [s (if (= "InitListExpr" (:kind i)) (when (= 1 (count (kids i))) (first (kids i))) i)]
+                      (= "StringLiteral" (:kind s))))
+               (let [s (if (= "InitListExpr" (:kind i)) (first (kids i)) i)
+                     a (analyze {:scope scope :statics (atom [])} s)]
+                 (if (= :str (:op a)) (assoc ty :n (inc (count (str-units a)))) ty))
                :else ty))
         ^java.util.HashMap m (:names home)
         old (some #(when (= :var (:e %)) (:id %)) (.get m (:name n)))
@@ -2347,6 +2358,8 @@
 (declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)
 (declare cx-tinst-member-type-access! cx-alias-member-access! cx-base-type-access! cx-member-tparam-access!) ; queue 506
 
+(def ^:dynamic *class-ids* nil) ; cpp-tzdb: an atom {[class-id name] id}: the nested classes a remade instance reuses
+
 (defn- declare-class! [scope0 n]
   (let [;; (cpp-rt-own: an elaborated-type-specifier's class, `struct P *p;` a member of S, is declared in the smallest namespace or
         ;; block scope holding it, [basic.scope.pdecl]/7.2 (the parser's :_elab-decl, queue 505's mark, 8c2fa2b4d): libcpp's cpp_reader
@@ -2392,7 +2405,15 @@
                                        ;; (cpp-rt-own3, DECISION cpp-rt-own2-3 (a): and the definition's position, the code
                                        ;; generator's emission-order naming, arbace.cpp.codegen's redef-name)
                                        (assoc :mangle-path-after [(vec (:path qns)) (inc (long @*ids*)) (long (or (:_b n) 0))]))))
-        id (or old (next-id))
+        ;; (cpp-tzdb: a provisional instance made again in place keeps its nested classes' ids, template.ae's class-completed!:
+        ;; a class declared between the two makings names them -- <format>'s basic_format_arg<_Context>::handle derives from
+        ;; _Arg_value<_Context>::_HandleBase, and _Arg_value<format_context>, made inside basic_format_context's definition, is
+        ;; made again once the context is complete: its new _HandleBase had been another class than handle's base, so
+        ;; derived_from<handle, _HandleBase> was false in _M_set)
+        reused (when (and (not old) nm *class-ids* (:cls scope))
+                 (let [k [(:cls scope) nm] r (get @*class-ids* k)]
+                   (when r (swap! *class-ids* dissoc k) r)))
+        id (or old reused (next-id))
         ;; (a class of an unnamed namespace, or local to an internal function, has internal linkage and so have its
         ;; members, [basic.link]/4; G5c: libsupc++'s vec.cc's uncatch_exception, atexit_thread.cc's key_s)
         ;; (queue 351: a class local to a function that is neither inline nor a template's instance has internal linkage
@@ -2402,7 +2423,7 @@
                                             (let [lf (second (first (:path s)))] (and (map? lf) (not (or (:inline lf) (:tinst lf))))))
                                        true
                                        :else (recur (:parent s))))
-        cs (or (:scope (abi/cls id)) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
+        cs (or (when-not reused (:scope (abi/cls id))) (new-scope :class scope :cls id :path (conj (:path scope) [:cls id]) :internal internal))
         t {:k :class :id id}]
     (when-not old
       (swap! abi/*classes* assoc id {:id id :name nm :path (:path scope) :scope cs :fields [] :bases [] :outer scope
@@ -3120,8 +3141,15 @@
                       (and (or (seq (:ctor-tmpls (abi/cls id))) (:cx-ctor-dropped (abi/cls id))) (not (:header (abi/cls id))))
                       (seq (:ctor-tmpls (abi/cls id))))))
       (let [nontriv (or (abi/dynamic? id) (some :init (:fields c))
-                        (some default-ctor-nontrivial? (class-like-members id)))]
-        (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))))
+                        (some default-ctor-nontrivial? (class-like-members id)))
+            fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [] :va false} :trivial (not nontriv))]
+        ;; (cpp-tzdb, the code generator: [class.default.ctor]/2.2, a member of reference type without a default member
+        ;; initializer defines the implicit default constructor as deleted -- tzdb.cc's `struct quoted { string& str; ... }`,
+        ;; whose definition had been analyzed, the reference default-initialized: "a non-const reference to a temporary".
+        ;; The checker keeps the rule its records were made with)
+        (when (and (not (checking?)) (not (:union c))
+                   (some #(and (abi/ref? (:ty %)) (not (:init %))) (:fields c)))
+          (upd-fn! fid assoc :deleted true))))
     ;; (cpp-rt-own2: and when a base's default constructor is inherited by a using-declaration and the class declares none of its
     ;; own, as clang's needsImplicitDefaultConstructor declares it (HasInheritedDefaultConstructor): unique_ptr's __uniq_ptr_data,
     ;; `using __uniq_ptr_impl<_Tp, _Dp>::__uniq_ptr_impl;` beside its defaulted move constructor, value-initialized by unique_ptr()
@@ -7803,6 +7831,8 @@
    "__builtin_fpclassify" :fpclassify
    "__builtin_alloca" :alloca
    "__builtin_clear_padding" :clear-padding
+   ;; (cpp-tzdb: x86's spin-wait hint, <bits/atomic_wait.h>'s __thread_relax, clang's llvm.x86.sse2.pause, which the lowering drops)
+   "__builtin_ia32_pause" :pause
    ;; (n-cpp-eval: GCC's __builtin_shuffle of GNU vectors, g++.dg's torture/vshuf-*.C)
    "__builtin_shuffle" :shuffle
    "__atomic_always_lock_free" :lock-free "__atomic_is_lock_free" :lock-free
@@ -9341,6 +9371,7 @@
                             :else {:op :int :v 0 :ty abi/int* :cat :pr}))
         ;; (CP378 (a): 0 in code that runs, marked :ice: the evaluator's 1 when manifestly constant-evaluated)
         :is-constant-evaluated {:op :int :v 0 :ice true :ty abi/bool* :cat :pr}
+        :pause {:op :pause :ty abi/void :cat :pr}
         ;; (cpp-s8: __builtin_signbit(x), the sign bit of a floating x, -0 and a NaN's too: copysign(1, x) < 0 by libm's
         ;; copysign of x's type (clang reads the bit of the value's representation, the same answer); __builtin_isfinite(x):
         ;; x - x == x - x, false for an infinity and a NaN alone. Both an int, as clang's)
@@ -9940,7 +9971,15 @@
   ([t e scope what node] (let [d (deduce-auto t e)] (placeholder-check! scope t d what node) d))
   ([t e]
   (case (:k t)
-    :auto (let [et (if (abi/class? (abi/unq (:ty e))) (abi/unq (:ty e)) (abi/unq (:ty (rv e))))] (cond-> et (:c t) (assoc :c true) (:v t) (assoc :v true)))
+    :auto (let [;; (cpp-tzdb: a template-id naming a function template's one specialization, its arguments written and
+                ;; defaulted, is an lvalue of that function, [temp.arg.explicit]/4 with [over.over]: <format>'s
+                ;; basic_format_arg::handle, `auto __func = _S_format<__maybe_const_t<_Tp>>;`, deduced a pointer to it
+                ;; (an overload set's type before))
+                e (if-let [f (when (and (= :fnset (:op e)) (nil? (fn-matching e nil)) (empty? (:fns e)))
+                               (when-let [h (:single-spec @hooks)] (h e)))]
+                    (if (and (:cls (fnd f)) (not (:static (fnd f)))) e {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr})
+                    e)
+                et (if (abi/class? (abi/unq (:ty e))) (abi/unq (:ty e)) (abi/unq (:ty (rv e))))] (cond-> et (:c t) (assoc :c true) (:v t) (assoc :v true)))
     :ref (assoc t :to (if (= :auto (:k (:to t))) (cond-> (:ty e) (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) e)))
     :rref (if (and (= :auto (:k (:to t))) (= :lv (:cat e))) (abi/lref (:ty e)) (assoc t :to (if (= :auto (:k (:to t))) (:ty e) (deduce-auto (:to t) e))))
     :ptr (assoc t :to (let [pt (:to (abi/unq (:ty (rv e))))] (if (= :auto (:k (:to t))) (cond-> pt (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) {:op :deref :ty pt :cat :lv}))))
