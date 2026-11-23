@@ -10873,3 +10873,62 @@ assignments and constructors deleted through a base's or member's overload resol
 error of one initializer, the first stops the declaration); other/offsetof8.C (a virtual base's member through a null pointer and
 offsetof); tc1/dr147.C and override2.C (the injected-class-name as a qualified type, virt-specifiers as names); parse/access13.C (an
 access declaration); cpp23/ext-floating* (the extended floating-point types' conversion ranks).
+
+## As built: cpp-tpl2 (2), the checker's concepts: constraints' explanations, constraint matching of template template arguments (2026-11-23; branch `cpp-tpl2-1123` from next `2d89c6f19`)
+
+The stream's second round, on the concepts group of the read cell's deferred rows (constraint satisfaction at calls,
+requires-expressions, constrained ordering), then the safe items of the first round's "Left". Each rule from the standard's text
+([temp.constr], [expr.prim.req], [temp.arg.template], [temp.over.link]) and GCC's behaviour as the tests record it; no GCC or
+clang code. All of it is the checker's.
+
+- **Constraints' explanations.** `sema/*cx-constraint-explain*` (an atom a caller binds) collects the sure errors of the atomic
+  constraints a satisfaction meets (the substitution failure that makes an atom false, `sure-failure?`'s list); a concept's
+  memoized satisfaction keeps its errors and gives them to each later asker (template.ae's concept-satisfied?). They ride on the
+  error that reports the failure, GCC's explanation at the atom: a class template's "template constraint failure"
+  (class-constraints-check!), a call's "no matching function" (instantiate-fn's unsatisfied constraints, call-candidates), and a
+  static_assert's failure at -fconcepts-diagnostics-depth=2 or more. A requirement's error (an expression requirement, a
+  return-type-requirement not satisfied) is GCC's at depth 2 or more only (`*concepts-diag-depth*`, from the option the dg read
+  now passes, as -ftemplate-depth); under GCC's nested text output (-fdiagnostics-set-output=...experimental-nesting=yes) a test
+  reads them as its multiline output, so none is reported.
+- **In a constraint's satisfaction**: a static member's access judged by the friends of the constrained template's name
+  (`*cx-constraint-of*`: concepts-access2.C's B, A its friend); a non-static member function called by a qualified name with no
+  object ("cannot call member function ... without object", concepts-class3.C); a non-static member function named and not called
+  in an expression requirement ([expr.ref]/6.3.2, concepts/diagnostic10.C); an atomic constraint of the main file that analyzes but
+  is surely no constant expression ([temp.constr.atomic]/3: ill-formed, the checker's evaluator's sure refusal at its operation,
+  the constraint false: concepts-pr98644.C; not in a recursion).
+- A constrained class template named by a friend declaration, and by an explicit instantiation, checked ([temp.names]/7).
+- **Template template arguments** ([temp.arg.template]/3-4 with [temp.constr.order]): the parser keeps a template template
+  parameter's own requires-clause (`:_treq`, a private key); a constrained class template matches it only when its constraints
+  are subsumed by the parameter's, both normalized with one set of symbols for their parameters (`cx-ttp-constraint-mismatch?`,
+  concepts-ttp6.C).
+- A constrained placeholder non-type parameter (`same_as<T> auto N`): its argument's type (a literal's) checked against the
+  type-constraint at the specialization, a sure drop (concepts-placeholder3.C's i<int, true>).
+- An out-of-line definition of a member class template with other constraints than its declaration in the class
+  (class-redecl-constraints!, template/spec43.C, concepts-class.C).
+- A call with explicit template arguments: a specialization made before for other arguments is no candidate of its own
+  (concepts-explicit-spec7.C's shape: f<43>() after f<42>()).
+
+### Checked
+
+Each rule on its files and reduced programs by the probe; every own pass and every deferred row at the round's first state
+(2,688 files: 8 to own pass, two own passes lost, concepts/nested-diagnostics-1.C and -1-truncated.C, to explanations GCC
+nests, fixed by the nested-output rule); the 210 files with a concept or a requires-clause at the head (one crash in a recursion,
+cpp2a/concepts-recursive-sat1.C, fixed by keeping the non-constant rule out of recursions); the control pair failing as it must.
+The record: `--judge --record` over the 2,688 files' run, the 210 files read again at the head `--record`, the two timeouts' rows kept;
+then mac/next merged (cpp-decl2: C++ read 5,951 / 0 / 332) and both streams' 37 new own passes (9 and 28) read again on the merged
+tree, all passing, the control failing.
+
+### The cells
+
+The own record: 9 rows to own pass (concepts/diagnostic10, cpp2a/concepts-access2, -class, -class3, -iconv1, -p1141, -pr98644, -ttp6,
+template/spec43), none lost. With cpp-decl2 merged: C++ read 5,951 / 0 / 332 -> 5,960 / 0 / 323 (248 n/a).
+
+### Left
+
+Of the concepts group: a closure's constrained call operator (concepts-lambda2.C, 37 lines), recursive satisfaction's "depends on
+itself" through friend operators (concepts-recursive-sat4.C), a concept whose definition did not parse (concepts-requires15.C),
+pack expansions in a placeholder's type-constraint (concepts-placeholder5.C), GCC's ambiguity by constraints of
+concepts-return-req1.C and concepts-memfun4.C (overload resolution: cpp-decl2's), an equality-comparison requirement of a class
+without operator== (concepts-friend2.C: the operator's lookup), concepts-err1.C's closure-typed atom, the parser's rules of
+concepts-requires1.C and -requires20.C; an explicit specialization of a member template of a member class template
+(concepts-explicit-spec7.C: A<int>::B<int>'s qualifier). Of the first round's "Left": crash89.C's default argument, never evaluated.

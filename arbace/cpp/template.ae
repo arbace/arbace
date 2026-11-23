@@ -114,7 +114,9 @@
                                           {:node k})
                ;; (queue 518, the checker: its own template parameters, for the template template argument's match, cx-ttp-arg-mismatch?)
                "TemplateTemplateParmDecl" (cond-> {:name (:name k) :kind :template}
-                                            (and (sema/checking?) (:_tparams k)) (assoc :ttparams (tparams {:inner (:_tparams k)}))))
+                                            (and (sema/checking?) (:_tparams k)) (assoc :ttparams (tparams {:inner (:_tparams k)}))
+                                            ;; (cpp-tpl2: its own requires-clause, cx-ttp-constraint-mismatch?)
+                                            (and (sema/checking?) (:_treq k)) (assoc :treq (:_treq k))))
              ;; (cpp-s4: a pack's `...` is written before its name, not in its default argument -- variant's
              ;; `typename = enable_if_t<sizeof...(_Types) != 0>` is no pack -- nor in a template template parameter's own
              ;; parameter list, `template<typename...> class _Tp`)
@@ -1222,6 +1224,27 @@
               (range upto))))
     (catch arbace.lang.ExceptionInfo _ false)))
 
+(declare normal-form subsumes?)
+(defn- cx-ttp-constraint-mismatch?
+  "cpp-tpl2 (the checker), [temp.arg.template]/3-4 with [temp.constr.order]: a constrained class template `at` as the argument
+  of the template template parameter `p` (its own parameters and requires-clause, :ttparams :treq, the enclosing template's
+  parameters bound in `s`) matches only when p's associated constraints subsume at's (P at least as specialized as A, the
+  constraints the tie-breaker): both normalized with their own parameters standing for one set of symbols. GCC's \"constraint
+  mismatch\": cpp2a/concepts-ttp6.C. Nothing the slice cannot normalize is judged."
+  [p at s]
+  (boolean
+    (when (and (>= (long sema/*cxx-year*) 20) (:class-constraint at) (:ttparams p)
+               (= (count (:ttparams p)) (count (:params at))) (not-any? :pack (:params at)))
+      (try
+        (let [syms (vec (map-indexed (fn [i q] (if (= :type (:kind q)) {:k :tparam :i i :tid -1123 :name (str "#" i)} (throw (ex-info "codegen: n/a" {:codegen/refused :template}))))
+                                     (:params at)))
+              ps (bind-scope s (:ttparams p) syms nil)
+              as (bind-scope (:scope at) (:params at) syms nil)
+              P (when-let [x (:treq p)] (normal-form ps x nil 0))
+              A (normal-form as (:class-constraint at) nil 0)]
+          (not (and P (subsumes? P A))))
+        (catch arbace.lang.ExceptionInfo _ false)))))
+
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
   [scope p f & [pscope]]
@@ -1252,11 +1275,20 @@
                            (or (cx-ttp-arg-mismatch? (:ttparams p) (:params (tmpl (:tmpl a))))
                                ;; (cpp-tpl2: a non-type parameter's type, substituted by the arguments before, not A's at its
                                ;; position, cx-ttp-types-differ?'s rule for a class template's template-id: template/ttp12.C)
-                               (cx-ttp-value-types-differ? (vec (:ttparams p)) (vec (:params (tmpl (:tmpl a)))) (tmpl (:tmpl a)) (or pscope scope))))
+                               (cx-ttp-value-types-differ? (vec (:ttparams p)) (vec (:params (tmpl (:tmpl a)))) (tmpl (:tmpl a)) (or pscope scope))
+                               (cx-ttp-constraint-mismatch? p (tmpl (:tmpl a)) (or pscope scope))))
                   (throw (ex-info (str "codegen: a template template argument whose parameters do not match " (:name p))
                                   {:codegen/refused :template :cx/sure-drop true})))
                 a)
-    (let [pt (param-type (or pscope scope) p)]
+    (let [pt (param-type (or pscope scope) p)
+          ;; (cpp-tpl2, the checker: a placeholder parameter's type deduced from a literal argument, [temp.arg.nontype]/1 with
+          ;; [dcl.type.auto.deduct]: bool for true and false, int for an int literal; instantiate-fn checks its type-constraint)
+          lit (cond (boolean? f) :bool ('#{true false} f) :bool (and (integer? f) (<= Integer/MIN_VALUE f Integer/MAX_VALUE)) :int
+                    (and (symbol? f) (re-matches #"\d+" (str f))) :int :else nil)
+          pt (if (and (sema/checking?) (map? pt) (= :auto (:k pt)) lit)
+               (if (= :bool lit) abi/bool* abi/int*)
+               pt)
+]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
         (value-arg (if-some [c (cx-class-targ scope f pt)] c (const-form scope f)) (:name p) pt)))))
@@ -2620,16 +2652,20 @@
   [t args]
   (when (and (sema/checking?) (or (:class-constraint t) (and (= :var (:tk t)) (:constraint t)) (some :tc (:params t))) (not (dependent? args)))
     (let [d (atom false)
+          ex (atom [])
           ;; (a variable template's too, its requires-clause its :constraint: concepts/var-templ1.C)
           rc (or (:class-constraint t) (when (= :var (:tk t)) (:constraint t)))
           ok (try (let [ps (bind-scope (:scope t) (:params t) args nil)]
-                    (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cutoff* Long/MAX_VALUE]
+                    (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cutoff* Long/MAX_VALUE sema/*cx-constraint-explain* ex
+                              sema/*cx-constraint-of* (str (:name t))]
                       (and (type-constraints-satisfied? t args ps)
                            (or (nil? rc) (sema/constraint-satisfied? ps rc)))))
                   (catch arbace.lang.ExceptionInfo _ (reset! d true) true))]
       (when (and (not ok) (not @d))
         (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "'")
-                        {:codegen/refused :template :cx/sure-drop true}))))))
+                        (cond-> {:codegen/refused :template :cx/sure-drop true}
+                          ;; (cpp-tpl2: the atoms' errors, GCC's explanations, arbace.repr.cpp.diag's handler)
+                          (seq @ex) (assoc :cx/explain (vec (distinct @ex))))))))))
 
 (defn- chain-members!
   "cpp-small (G1), the checker: `f` (a class's instantiation) called, the member functions it gives a definition to analyze
@@ -3182,10 +3218,13 @@
   (let [k [(:id c) (canonical args)]
         eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
                      (let [d (atom false)
-                           r (binding [sema/*constraint-doubt* d]
+                           ;; (cpp-tpl2: its atoms' sure errors kept with the answer, given again to each asker,
+                           ;; sema's *cx-constraint-explain*)
+                           ex (when (sema/checking?) (atom []))
+                           r (binding [sema/*constraint-doubt* d sema/*cx-constraint-explain* ex]
                                (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
-                       [r @d]))
-        [r d] (if-let [m *satisfaction*]
+                       [r @d (some-> ex deref seq vec)]))
+        [r d ex] (if-let [m *satisfaction*]
                 (let [v (get @m k ::none)]
                   (if (= ::none v)
                     (let [u (atom false)
@@ -3202,6 +3241,7 @@
                 (eval1))]
     (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
+    (when-let [xs (when (and (seq ex) (not r)) sema/*cx-constraint-explain*)] (swap! xs into ex))
     r)
   (do (sema/doubt!) true)))
 
@@ -3367,10 +3407,13 @@
             ;; P14 (b)): not satisfied, no specialization ([temp.deduct]/5, [over.match.viable]/3)
             ;; (CX12, CP281 (a), the checker: a constraint that evaluated to false with no doubt is a sure failure)
             d (atom false)
+            ex (atom [])
             unsat (fn [what]
                     (when (System/getenv "CPP_CONSTRAINT_TRACE") (binding [*out* *err*] (println "unsatisfied" what (:name t) (pr-str args) (pr-str (some-> (:constraint t) (#'sema/node-text))))))
                     (throw (ex-info (str "codegen: " what " not satisfied for " (:name t))
-                                    {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))
+                                    (cond-> {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))}
+                                      ;; (cpp-tpl2: the atoms' sure errors, call-candidates' explanations)
+                                      (and (sema/checking?) (not @d) (seq @ex)) (assoc :cx/explain (vec (distinct @ex)))))))
             ;; (the type-constraints first: [temp.constr.decl]/3.1 puts them before the requires-clause in the conjunction,
             ;; which is checked in order and stops at the first not satisfied, [temp.constr.op]/2; libstdc++'s C++23 tuple's
             ;; `template<__eligible_tuple_like<tuple> _UTuple> requires (__constructible_from_tuple_like<_UTuple>())`, whose
@@ -3380,10 +3423,10 @@
             ;; converting constructor template: [over.best.ics]/4's standard-conversions-only does not reach into it --
             ;; std::format's basic_format_string(const _Tp&) requires convertible_to<const _Tp&, basic_string_view<_CharT>>,
             ;; whose static_cast needs string_view's converting constructor)
-            _ (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
+            _ (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cx-constraint-explain* (when (sema/checking?) ex) sema/*cx-constraint-of* (str (:name t)) sema/*cx-constraint-of* (str (:name t))] (type-constraints-satisfied? t args ps)) (unsat "type-constraints"))
             _ (when-let [rc (:constraint t)]
                 ;; (n-cpp-concepts, the checker: a member template's, `this` its class's, sema's *constraint-this*)
-                (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false
+                (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false sema/*cx-constraint-explain* (when (sema/checking?) ex)
                                     sema/*constraint-insts* (if (sema/checking?) (conj sema/*constraint-insts* [tid args]) sema/*constraint-insts*)
                                     sema/*constraint-this* (or sema/*constraint-this*
                                                                (when-let [c (and (sema/checking?) (:cls (:scope t)))] (abi/ptr {:k :class :id c})))]
@@ -3394,12 +3437,21 @@
             ;; failure, cx-subst-fail!'s; the other refusals left to the slice as before)
             _ (when (and (sema/checking?) (not (dependent? args)))
                 (binding [sema/*cx-subst* (str (:name t))]
-                  (doseq [p (:params t) :when (and (not (#{:type :template} (:kind p))) (:qt p))]
-                    (try (let [pt (param-type ps p)]
+                  (doseq [[i p] (map-indexed vector (:params t)) :when (and (not (#{:type :template} (:kind p))) (:qt p))]
+                    (try (let [pt (param-type ps p)
+                               a (get (vec args) i)]
                            ;; ([temp.param]/4: no non-type parameter of type void; [temp.deduct.general]/11's invalid type)
                            (when (and (map? pt) (abi/void? (abi/unq pt)))
-                             (sema/cx-subst-fail! "'void' is not a valid type for a template non-type parameter")))
+                             (sema/cx-subst-fail! "'void' is not a valid type for a template non-type parameter"))
+                           ;; (a constrained placeholder's type-constraint, `same_as<T> auto N`, [temp.param]/? with
+                           ;; [dcl.type.auto.deduct]/2: the argument's type satisfies it, else no specialization, a sure drop:
+                           ;; cpp2a/concepts-placeholder3.C's i<int, true>)
+                           (when (and (map? pt) (= :auto (:k pt)) (:tc pt) (map? a) (map? (:ty a)) (:type-constraint @sema/hooks))
+                             (when (false? ((:type-constraint @sema/hooks) ps (str/trim (str (:tc pt))) (abi/unq (:ty a))))
+                               (throw (ex-info (str "codegen: placeholder constraints not satisfied for " (:name t))
+                                               {:codegen/refused :template :cx/sure-drop true})))))
                          (catch arbace.lang.ExceptionInfo e
+                           (when (:cx/sure-drop (ex-data e)) (when-not (:cx/subst (ex-data e)) (throw e)))
                            (when (:cx/subst (ex-data e))
                              (throw (if-let [k (:node (meta p))] (ex-info (ex-message e) (assoc (ex-data e) :cx/node k)) e))))))))
             fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d sema/*instantiating* {:tid tid :args args}
@@ -3689,6 +3741,9 @@
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                              (when (:cx/subst (ex-data e))
                                                (swap! explain conj {:msg (ex-message e) :node (or (:cx/node (ex-data e)) (cx-explain-node t (some-> at deref)))}))
+                                             ;; (cpp-tpl2: a constraint not satisfied, its atoms' errors)
+                                             (when (:cx/constraint-false (ex-data e))
+                                               (swap! explain into (:cx/explain (ex-data e))))
                                              ;; (CP281 (a): a constraint surely false is the program's, a sure drop)
                                              (if (or (:cx/constraint-false (ex-data e)) (:cx/sure-drop (ex-data e))) (reset! sr true) (reset! u true))
                                              (if (#{:template-pack :template-template} (:codegen/refused (ex-data e))) (throw e) nil))
@@ -4270,6 +4325,12 @@
       ;; a member class of a class template defined outside it (G5: basic_ostream<_CharT, _Traits>::sentry)
       (let [tid (ool-class-template scope cn qt)
             _ (ool-head-check! (tmpl tid) n)
+            ;; (cpp-tpl2, the checker: a member class template defined outside its class with other constraints than its
+            ;; declaration in the class, [temp.over.link]/7 with [temp.class.general]/2: class-redecl-constraints!'s error,
+            ;; template/spec43.C's `requires true struct x<int>::y`)
+            _ (when (and (sema/checking?) (not (sema/header-node? n)))
+                (when-let [d (some #(when (and (= "ClassTemplateDecl" (:kind %)) (= (:name %) (:name n))) %) (kids (:pattern (tmpl tid))))]
+                  (class-redecl-constraints! {:name (:name n) :params (tparams d) :class-constraint (:requiresClause d)} n)))
             o {:k :class :node (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n))) :pnames (mapv :name (tparams n)) :nested nested}]
         (upd-tmpl! tid update :ool (fnil conj []) o)
         (doseq [[_ cid] (:insts (tmpl tid))] (when (:from-primary (abi/cls cid)) (attach-one! tid cid o)))
@@ -4449,7 +4510,14 @@
                 (when-not (:defined (sema/var* vid)) (upd-var! vid assoc :pending-def true))))))
         (cx-explicit-var-type! scope n)
         (when-let [[_ t] (and (not (:_extern n)) (re-matches #"(?s)\s*(?:class|struct|union)\s+(.*?)\s*" (str (:_text n))))]
-          (when-let [ty (try (sema/resolve-type scope t) (catch arbace.lang.ExceptionInfo _ nil))]
+          (when-let [ty (try (sema/resolve-type scope t)
+                             (catch arbace.lang.ExceptionInfo e
+                               ;; (cpp-tpl2, the checker: an explicit instantiation of a constrained class template whose
+                               ;; constraints are surely not satisfied, [temp.explicit]/? with [temp.names]/7: reported at it)
+                               (when (and (sema/checking?) sema/*on-refusal* (not (sema/header-node? n))
+                                          (re-find #"^codegen: template constraint failure for" (str (ex-message e))))
+                                 (sema/*on-refusal* e n))
+                               nil))]
             ;; (queue 392: not an explicit specialization's either, [temp.explicit]/4 with [temp.expl.spec]: locale-inst.cc's `template
             ;; class ctype_byname<C>;` of <bits/locale_facets.h>'s ctype_byname<char>, whose vtable is its key function's unit's, had
             ;; been written weak_odr with its members)

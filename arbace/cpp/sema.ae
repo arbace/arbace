@@ -1656,7 +1656,7 @@
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class|template constraint failure for)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function)" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -1691,6 +1691,16 @@
             (h (ex-info "codegen: constraint expression does not have type 'bool'" {:codegen/refused :constraint :cx/node n}) n))
           ::bad)))))
 
+(declare ^:dynamic *ce-manifest* ce-eval convert-scalar rv)
+;; cpp-tpl2 (the checker): the name of the template whose associated constraints are being checked (a static member's access in
+;; them judged by the friends of that name, cx-static-access!), or nil
+(def ^:dynamic *cx-constraint-of* nil)
+;; cpp-tpl2 (the checker): GCC's -fconcepts-diagnostics-depth=N (arbace.repr.cpp.diag binds it; GCC's default 1)
+(def ^:dynamic *concepts-diag-depth* 1)
+;; cpp-tpl2 (the checker): an atom the satisfactions under way add their atomic constraints' sure errors to ({:msg :node}), GCC's
+;; explanations of a constraint not satisfied; nil when no caller reports them
+(def ^:dynamic *cx-constraint-explain* nil)
+
 (defn constraint-satisfied?
   "A constraint expression's satisfaction in `scope` ([temp.constr.constr]: the atomic constraints constant expressions
   of type bool; a substitution failure or an expression not constant is not satisfied)."
@@ -1719,8 +1729,31 @@
                 (finally (when a (reset! a saved))))))
        (catch arbace.lang.ExceptionInfo e
          (when (or (System/getenv "CPP_TMPL_TRACE") (System/getenv "CPP_CONCEPT_TRACE")) (binding [*out* *err*] (println "constraint not satisfied:" (.getMessage e))))
+         ;; (cpp-tpl2, the checker: [temp.constr.atomic]/3, an atomic constraint that analyzes but is surely no constant
+         ;; expression -- `bool(T(1))` for T = int*, a reinterpret_cast, [expr.const]/5.15 -- makes the program ill-formed, not
+         ;; the constraint false: the checker's evaluator's sure refusal (h-cpp-consteval's :cx/sure) reported at its operation,
+         ;; the constraint then not satisfied: cpp2a/concepts-pr98644.C)
+         (if-let [y (when (and (checking?) (not (:cx/sure (ex-data e))) (not (sure-failure? e)) (map? rc) (not (header-node? rc))
+                                 ;; (not for a recursion found, nor deep in nested satisfactions: cpp2a/concepts-recursive-sat1.C)
+                                 (not= :depth (:codegen/refused (ex-data e))) (not (re-find #"depends on itself" (str (ex-message e))))
+                                 (<= (long *constraint-depth*) 1))
+                      (try (let [x (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} rc))]
+                             (binding [*ce-manifest* true] (ce-eval (convert-scalar (rv x) abi/bool* false)))
+                             nil)
+                           (catch arbace.lang.ExceptionInfo y (when (:cx/sure (ex-data y)) y))))]
+           (do (when-let [h *on-refusal*]
+                 (h (ex-info (str "codegen: expression is not a constant expression (" (subs (str (ex-message y)) (min (count (str (ex-message y))) (count "not a constant: "))) ")")
+                             {:codegen/refused :constexpr :cx/node (if-let [at (:cx/at (ex-data y))] {:range at} rc)})
+                    nil))
+               false)
          ;; (n-cpp-concepts: an atomic constraint whose substitution fails by the program's own error is false, no doubt)
-         (if (sure-failure? e) false (doubt!)))))
+         (if (sure-failure? e)
+           (do ;; (cpp-tpl2: the error recorded as GCC's explanation of the unsatisfied constraint, at the atom, when a caller asks,
+               ;; *cx-constraint-explain*: the template constraint failure's or the call's report carries it)
+               (when-let [x *cx-constraint-explain*]
+                 (swap! x conj {:msg (ex-message e) :node (or (:cx/node (ex-data e)) rc)}))
+               false)
+           (doubt!))))))
 
 (defn- always-inline-node?
   "Whether a function declaration's attributes hold GNU's always_inline ([[gnu::always_inline]], __attribute__((always_inline)))."
@@ -2809,7 +2842,16 @@
                     ;; (queue 499: a friend declaration naming another class's inaccessible member function)
                     (cx-friend-member-access! cs id k fd)
                     ;; (queue 505: a friend function's identity, cx-friend-fn-ident!)
-                    (cx-friend-fn-ident! cs id k fd)))
+                    (cx-friend-fn-ident! cs id k fd)
+                    ;; (cpp-tpl2: a friend class naming a constrained class template's specialization of non-dependent
+                    ;; arguments, [temp.names]/7: its constraints checked, GCC's "template constraint failure" at the class
+                    ;; declaring it, concepts-friend2.C's `friend class Foo<T>;` in S<X>)
+                    (when-let [qt (when (and (nil? fd) (not (header-node? n))) (get-in k [:type :qualType]))]
+                      (when (str/includes? (str qt) "<")
+                        (try (resolve-type cs (str/replace (str qt) #"^\s*(?:class|struct|union)\s+" ""))
+                             (catch arbace.lang.ExceptionInfo x
+                               (when (re-find #"^codegen: template constraint failure for" (str (ex-message x)))
+                                 (*on-refusal* x (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))))))))))
                 (binding [*member-access* @access] (declare-node! cs k))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
@@ -6852,7 +6894,17 @@
   [ctx dc nm a nc]
   (if *constraint-doubt*
     (try (cx-access! ctx dc nm a nc nil)
-         (catch arbace.lang.ExceptionInfo x (if (= :access (:codegen/refused (ex-data x))) (doubt!) (throw x))))
+         (catch arbace.lang.ExceptionInfo x
+           (if (= :access (:codegen/refused (ex-data x)))
+             ;; (cpp-tpl2: the constrained template's name known, *cx-constraint-of*, and the class naming no friend that could be
+             ;; it -- a friend class or function of that name, or one it cannot tell -- the error is sure: concepts-access2.C's B)
+             (let [c (abi/cls dc) tn *cx-constraint-of*]
+               (if (and (string? tn) c
+                        (not (contains? (:friend-class-names c) tn)) (not (contains? (:friend-fns c) tn))
+                        (not (contains? (:friend-class-names c) "")))
+                 (throw x)
+                 (doubt!)))
+             (throw x))))
     (cx-access! ctx dc nm a nc nil)))
 
 (defn- cx-ctor-access!
@@ -8958,7 +9010,9 @@
                  ;; that template's deduction alone ([temp.over]/1), not again as the function its name lookup found: two of one
                  ;; type made `_M_construct<true>(...)` ambiguous with `_M_construct<false>`)
                  tset (set (:tmpls callee))
-                 own-fns (if (checking?) (:fns callee) (remove #(contains? tset (:tid (:tinst (fnd %)))) (:fns callee)))
+                 ;; (cpp-tpl2, the checker: with explicit template arguments too, a specialization made before for other
+                 ;; arguments is no candidate of its own, concepts-explicit-spec7.C's A<int>::f<43>() after f<42>())
+                 own-fns (if (and (checking?) (not (:targs-text callee))) (:fns callee) (remove #(contains? tset (:tid (:tinst (fnd %)))) (:fns callee)))
                  ;; (queue 514, the checker: a template-id names the specializations of the templates its name finds, never a
                  ;; function that is no template ([temp.names]/3 with P0846, [over.call.func]): those found are no candidates,
                  ;; sure drops, cpp2a/fn-template17.C's `f<T> ()` of a using-declaration's `void f ()`)
@@ -8990,6 +9044,12 @@
                  fid (binding [*drops* (cond-> (meta tcands) (seq nontmpl) (update :sure-drops (fnil + 0) (count (distinct nontmpl))))]
                        (resolve-overload (distinct cands) args obj))
                  f (fnd fid)
+                 ;; (cpp-tpl2, the checker: in a constraint's satisfaction, a non-static member function called by a qualified name
+                 ;; with no object and no `this`, [class.mfct.non.static]/1 (expr.prim.id.general/3): GCC's "cannot call member
+                 ;; function ... without object", a sure substitution failure of the atom, cpp2a/concepts-class3.C)
+                 _ (when (and (checking?) *cx-constraint-of* (:qualified callee) (nil? obj) (nil? (:this-type ctx))
+                              (:cls f) (not (:static f)) (= :method (:kind f)))
+                     (fail :call "cannot call member function '" (:name f) "' without object"))
                  ;; (CP324 (a): a function found through a class's using-declaration has that declaration's access as a
                  ;; member of its class)
                  _ (when (:member-access callee)
@@ -10273,13 +10333,29 @@
                                                   ok (binding [*constraint-doubt* d] ((:type-constraint @hooks) (:scope c) (str/trim (:_ret r)) dt))]
                                               (when @d (doubt!))
                                               (when (:_noexcept r) (doubt!))
+                                              ;; (cpp-tpl2: a return-type-requirement surely not satisfied, GCC's "placeholder
+                                              ;; constraints not satisfied" at it at -fconcepts-diagnostics-depth=2 or more)
+                                              (when-let [xs (when (and (checking?) (false? ok) (not @d) (>= (long *concepts-diag-depth*) 2)) *cx-constraint-explain*)]
+                                                (swap! xs conj {:msg "codegen: placeholder constraints not satisfied (a return-type-requirement)" :node (if (:range r) r (first (:inner r)))}))
                                               (cond (nil? ok) (if (checking?) (doubt!) true)
                                                     ;; (a false met with a doubt: for the code generator true, as before)
                                                     (and (not ok) @d (not (checking?))) true
                                                     :else ok))
                                             (or (:_ret r) (:_noexcept r)) (do (doubt!) true)
+                                            ;; (cpp-tpl2, the checker: a non-static member function named by a class member access
+                                            ;; and not called, [expr.ref]/6.3.2 ("can be used only as the left-hand operand of a
+                                            ;; member function call"): GCC's "invalid use of non-static member function", the
+                                            ;; requirement surely false, concepts/diagnostic10.C's `t.f`)
+                                            (and (checking?) (#{"MemberExpr" "UnresolvedMemberExpr" "CXXDependentScopeMemberExpr"} (:kind (first (:inner r))))
+                                                 (= :fnset (:op x)) (:obj x) (seq (:fns x))
+                                                 (every? #(let [f (fnd %)] (and (:cls f) (not (:static f)))) (:fns x)))
+                                            (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'")
                                             :else true)))
                                       (catch arbace.lang.ExceptionInfo e
+                                        ;; (cpp-tpl2: a requirement's sure error, GCC's explanation at -fconcepts-diagnostics-depth=2 or
+                                        ;; more, *concepts-diag-depth*: at depth 1 GCC notes it)
+                                        (when-let [xs (when (and (checking?) (sure-expr-failure? e) (>= (long *concepts-diag-depth*) 2)) *cx-constraint-explain*)]
+                                          (swap! xs conj {:msg (ex-message e) :node (or (:cx/node (ex-data e)) (first (:inner r)) r)}))
                                         (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "requirement" (:kind r) "fails:" (ex-message e) "|" (some-> (node-text r) (subs 0 (min 120 (count (node-text r))))))))
                                         (if (and (checking?) (sure-expr-failure? e)) false (doubt!)))))]
                        {:op :int :v (if (and (not @void-param) (every? (fn [r] (let [v (ok? r)]
@@ -12370,10 +12446,12 @@
     (let [c (first (kids n))]
       (when c
         (let [d (atom false)
-              e (binding [*cutoff* Long/MAX_VALUE *constraint-doubt* d] (rv (analyze ctx c)))
+              ;; (cpp-tpl2: a concept's atoms' errors, GCC's explanations of the assertion's failure)
+              ex (atom [])
+              e (binding [*cutoff* Long/MAX_VALUE *constraint-doubt* d *cx-constraint-explain* ex] (rv (analyze ctx c)))
               sure (atom nil)
               v (when-not (sassert-unsure-node? c)
-                  (try (binding [*constraint-doubt* d *ce-manifest* true *ce-point* (:range n)] (ce-eval (convert-scalar e abi/bool* false)))
+                  (try (binding [*constraint-doubt* d *ce-manifest* true *ce-point* (:range n) *cx-constraint-explain* ex] (ce-eval (convert-scalar e abi/bool* false)))
                        (catch arbace.lang.ExceptionInfo x
                          (when (:cx/sure (ex-data x)) (reset! sure x)) nil)))]
           ;; (h-cpp-consteval: a condition [expr.const]/5 makes surely not constant, GCC's "non-constant condition for static
@@ -12385,7 +12463,7 @@
                   (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
               (throw (ex-info (str "codegen: non-constant condition for static assertion (" m ")") {:codegen/refused :sassert :cx/node n}))))
           (when (and (number? v) (zero? (long v)) (not @d))
-            (throw (ex-info "codegen: static assertion failed" {:codegen/refused :sassert :cx/node n}))))))))
+            (throw (ex-info "codegen: static assertion failed" (cond-> {:codegen/refused :sassert :cx/node n} (and (seq @ex) (>= (long *concepts-diag-depth*) 2)) (assoc :cx/explain (vec (distinct @ex))))))))))))
 
 (defn- cx-static-member-init?
   "CP321 (a): whether the checker analyzes the static data member `v`'s in-class initializer: a member of a class of the
