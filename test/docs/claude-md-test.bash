@@ -102,7 +102,7 @@ if [ -z "${CLAUDE_MD_CONTROL:-}" ]; then
     else echo "ok   control: $e fails ($(grep -c '^FAIL' "$ctl.log") FAIL)"; fi
   done <<'CONTROLS'
 s/,repr-wasm,wai}`)/,wai}`)/
-s/a64i,wai}`, pyi's/a64i}`, pyi's/
+s/a64i,wai,cix86}`, pyi's/a64i,wai}`, pyi's/
 s/`jdk\/provenance.edn`, `jdk\/platform\/`, /`jdk\/provenance.edn`, /
 s/claude-md,$/claude-md, gate-tests,/
 s/`wasm-essential`, `llvm-essential`,/`wasm-check-essential`, `llvm-essential`,/
