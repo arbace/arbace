@@ -10693,3 +10693,91 @@ P2564R3 escalates (consteval-prop*: an immediate-escalating function made immedi
 member call or a constructor call (consteval-memfn1.C), the taking of an immediate function's address; consteval11.C's and
 consteval34.C's calls in a conditional's taken branch; the other constant rows of the both-fail list (reinterpret_cast and
 OpenMP rules, literal-type and virtual-base diagnostics of declarations: Sema's, not the evaluator's).
+
+## As built: cpp-tpl2, the checker's templates: substitution failures, partial specializations, template arguments (2026-11-23; branch `cpp-tpl2-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the templates group of the read cell's deferred rows (gxx-dg's dg-error rows judged by the own
+front end's diagnostics; `.tmp/goal/cpp-na-proposal.md`'s "templates ~96"). Each rule from the standard's text ([temp.deduct],
+[temp.arg], [temp.alias], [temp.spec.partial], [temp.res], [temp.explicit], [class.derived], [class.copy.ctor]) and GCC's
+behaviour as the tests record it; no GCC or clang code. All of it is the checker's (arbace.cpp.sema with *on-refusal* bound).
+
+### Substitution failures, and GCC's explanations
+
+- `sema/*cx-subst*` (the template's name) is bound while a function template's signature is substituted (instantiate-fn: its
+  non-type parameters' types, then its declaration; finish-deduction: the default template arguments, [temp.deduct.general]/5) and
+  unbound again in a class template's instantiation it asks for (instantiate-class*: those errors are no substitution failure, not
+  the immediate context). `cx-subst-fail!` throws a sure drop (`:cx/subst`) for the constructs [temp.deduct.general]/11 lists:
+  `cx-formed!` (a pointer to a reference, a reference to void, an array of references, functions, void or of unknown bound, a
+  function returning an array or a function, a pointer to member of a reference, void or a non-class), a zero or negative array
+  bound, a nested-name-specifier's type that is no class (`T::x` for int or void), a qualified name a complete class does not
+  declare as a type (`enable_if<false, T>::type`, `cx-no-type-named!`), a member type the template may not access (access checking
+  is part of the substitution, [temp.deduct.general]/8; a class's friend function of the template's name grants it,
+  `cx-subst-friend?`), an elaborated-type-specifier's class-key naming no class, a void non-type parameter, a class's own
+  `operator delete[]` the context may not access; and, in a decltype or a default argument, an operand whose error is surely the
+  program's (`sure-failure?`'s list: no member, no viable or an ambiguous call, a deleted function, a call of a non-function...).
+- `call-candidates` and the constructor templates' hook record each such drop with the node the analysis was at (else the
+  template's declaration's name, `cx-explain-node`); `resolve-overload`'s "no viable function" carries them (`:cx/explain`), and the
+  dg handler (arbace.repr.cpp.diag's sema-errors) reports each as an error at its construct with the call's error, as GCC explains
+  a failed deduction (its "In substitution of ..." errors at the template's lines). A drop in a nested SFINAE context reports
+  nothing: only a call's error that reaches a handler carries them.
+- The constructor templates' candidates restore the checker's position (the "no matching" error had been placed at the last
+  substituted node, sfinae26.C's line 22).
+- explicit-fn-instantiation! takes a sure drop as one (ttp16.C).
+
+### Template arguments and declarations
+
+- [temp.arg.template]/3 without P0522's matching (-fno-new-ttp-matching, before C++17): a pack of A matches only a pack of P
+  (variadic-ex14.C); a non-type parameter's type of P (substituted by the arguments before it) not A's (ttp12.C): GCC's "type/value
+  mismatch", now also at a class template's template-id (declare-node! reports and drops the declaration).
+- C++03's 14.3.1/2: a local type as a template argument (local4.C); the literal 0 for a pointer non-type parameter, never a
+  converted constant expression (crash84.C).
+- CWG 1430: a pack expansion as an alias template's or a concept's non-pack parameter (template-id; `cx-alias-pack-check!` at a
+  function template's declaration; the template then no candidate of a call for the concept's).
+- [temp.spec.partial.match]/3: a partial specialization one of whose parameters its arguments do not name (`cx-partial-undeducible!`),
+  reported and kept as a declaration without a definition: its arguments' class is GCC's incomplete type (crash97.C, pr31439.C).
+- [temp.explicit]/4: an explicit instantiation of a static data member whose type is not the member's (instantiate9.C).
+- A typename-specifier naming a member class template before C++17 (class-deduction107.C); a member class named as a template
+  (`typename A<T>::template D<T>`, alias-decl-60.C).
+- An alias template that is its target's template-id by its own parameters is the target as a template template argument (CWG 1286:
+  X<W> is X<Z>); a class template's specialization of non-dependent arguments has a type key, so `using T = X<Y>; using T = X<Z>;`
+  conflicts (alias-decl-equiv1.C).
+- sizeof of a variable named in a template argument's form (dependent-name16.C's false "no matching" at a valid call).
+
+### Classes
+
+- [class.derived.general]/2: a base class that is incomplete (`cx-incomplete-base!`, reported and dropped), and a base naming a
+  specialization surely without a definition (class-deduction69.C, pr31439.C).
+- [class.copy.ctor]/5: a constructor whose only parameter is its class by value (crash126.C's line 7).
+- An out-of-line member of a specialization surely without a definition: "invalid use of incomplete type".
+
+### Also
+
+- arbace.repr.cpp.diag's __integer_pack: a call inside a template's declaration is no "outside of a template" (variadic184.C).
+
+### Checked
+
+Each rule on its files and on reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over a dg.edn entry); the 459 own
+passes of the touched directories at the first state; every own pass with the targets at `e6b85eecb` (2,389 files: 20 to own pass, none
+lost but the two files past 300 s under load that cpp-1123 and cpp-ce2 met); every own pass and every deferred row at `2eedd719f` (2,685
+files: 38 to own pass; two own passes lost to the incomplete-base rule, a closure type as a base, cpp0x/lambda/lambda-field-names.C and
+cpp1z/decomp62.C, the rule then leaving closures and unnamed classes out, `7eb29b82f`, and those rows read again); the control pair
+DRs/dr2082.C vs dr1423.C failing as it must. The record: `--judge --record` over the 2,685 files' run, the six files the fix touches
+read again `--record`, the two timeouts' rows kept.
+
+### The cells
+
+The own record: 38 rows to own pass (cpp0x/alias-decl-33, -60, -80, -dr1558, -equiv1, -pr92206-1, -pr92206-1a, decltype48,
+fntmpdefarg3, lambda/lambda-ice2, pr31439, pr77655, sfinae26, sfinae65, variadic-ex14, variadic144, variadic184, cpp1z/class-deduction69,
+-107, constexpr-if-lambda3, nontype-auto17, cpp2a/concepts-dr1430, paren-init26, template/access7, array28, crash84, crash97, deduce3,
+error45, instantiate9, local4, ptrmem2, sfinae2, sfinae30, ttp12, ttp16, unify11, void4), none lost. C++ read 5,872 / 0 / 410 (249 n/a)
+-> 5,910 / 0 / 372; completeness 0.9770 -> 0.9785, independence 0.9666 -> 0.9672 (the read stage 0.835 -> 0.838).
+
+### Left
+
+In the scope: GCC's errors at a hard instantiation's construct inside a class template (crash89.C's default argument, eh2.C's dynamic
+exception specification, alias-decl-67.C, crash125.C), partial ordering against the primary ("not more specialized", nondeduced7.C,
+partial-specialization12.C), the noexcept-specifier's instantiation (sfinae11.C's lines 9 and 25), C++03's integral constant expressions
+of pointer parameters (nontype3.C, crash14.C), pre-C++17 copy-initialization from a prvalue (crash126.C's line 12), a dependent name
+parsed as a non-type yielding a type (dependent-name16.C), an explicit specialization of a member template's constraints
+(concepts-explicit-spec7.C), template template parameters' constraints (concepts-ttp6.C), the native parser's recovery after a syntax
+error in a template head (crash98.C, crash99.C, redecl5.C, typedef4.C, pr90138.C).

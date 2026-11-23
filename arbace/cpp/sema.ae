@@ -85,6 +85,30 @@
       (throw (ex-info "codegen: the read's time cap passed" {:cpp/timeout true})))))
 ;; the function templates of the call being resolved whose deduction gave no candidate: {:sure-drops n :unsure-drops m}
 (def ^:dynamic *drops* nil)
+;; cpp-tpl2 (the checker): true while a function template's signature is substituted (arbace.cpp.template/instantiate-fn: its
+;; non-type parameters' types, its declaration), false again in a class template's instantiation it asks for (whose errors are
+;; no substitution failure, [temp.deduct.general]/8's immediate context)
+(def ^:dynamic *cx-subst* false)
+(defn cx-subst?
+  "cpp-tpl2: whether a type or expression formed now is a function template's signature being substituted (the checker)."
+  [] (boolean (and *cx-subst* (checking?))))
+(declare cx-type-friend?)
+(defn- cx-subst-friend?
+  "cpp-tpl2: whether a friend declaration of class `cid` may grant the template being substituted (*cx-subst*, its name) a member
+  with access `acc`: a friend class, a friend function of its name, or cx-type-friend?'s gate when the name is not known."
+  [cid acc]
+  (let [c (abi/cls cid)]
+    (if (string? *cx-subst*)
+      (boolean (or (:friend-classes c) (seq (:friend-class-names c)) (contains? (:friend-fns c) *cx-subst*)
+                   (and (= :protected acc) (some (fn [d] (and (:has-friends d) (abi/derived-from? (:id d) cid))) (vals @abi/*classes*)))))
+      (cx-type-friend? cid acc))))
+(defn cx-subst-fail!
+  "cpp-tpl2, the checker: a construct a substitution of template arguments forms that is ill-formed by itself ([temp.deduct.general]/8:
+  an invalid type or expression in the immediate context is a substitution failure): the template surely drops out of the call's
+  candidates, and its message is the explanation GCC gives as an error at the construct when the call then finds no viable
+  function (arbace.cpp.template/call-candidates' :explain)."
+  [& msg]
+  (throw (ex-info (str "codegen: " (apply str msg)) {:codegen/refused :subst :cx/sure-drop true :cx/subst true})))
 ;; the access of the class member being declared (the access-specifier before it)
 (def ^:dynamic *member-access* nil)
 ;; the language's year (11, 14, 17, 20, 23, 26; 3 for C++98/03), bound from the file's standard by the checker and, since
@@ -178,7 +202,7 @@
 ;; namespace; and two of them differ. A namespace-scope directive at or after *cutoff* is not in force yet.
 (def ^:dynamic *cx-udir-pos* nil) ; IdentityHashMap: a scope's :usings list -> IdentityHashMap {nominee's :names -> the directive's position}
 
-(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls)
+(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend?)
 
 (defn- cx-udir-visible? [s u]
   (or (not= :ns (:kind s))
@@ -654,6 +678,8 @@
         {:x :cast :code c :t (dt-type scope (dt-written-type n)) :args [(ir (first in))]}
         {:x :fail :what (str "a " (:kind n))}))))
 
+(declare sure-failure?)
+
 (defn- decltype-of
   "decltype(e) ([dcl.type.decltype]/1): the operand the native parser kept for the text `t`, analyzed in `scope`
   (unevaluated: its result is not kept); an unparenthesized id-expression or member access its entity's declared type,
@@ -670,6 +696,12 @@
                  ;; (an operand that does not analyze, a template's parameters in it: a dependent type, the decltype
                  ;; analyzed again where the arguments are bound; G4: __void_t<decltype(declval<_Alloc&>().allocate(...))>)
                  (catch arbace.lang.ExceptionInfo e
+                   ;; (cpp-tpl2, the checker: in a function template's signature substituted, an operand whose error is surely the
+                   ;; program's, sure-failure?'s, is a substitution failure, [temp.deduct.general]/8 ("invalid types and expressions
+                   ;; ... in the immediate context"): cx-subst-fail! with its message and node, GCC's explanation)
+                   (when (and (cx-subst?) (sure-failure? e) (not (:cx/subst (ex-data e))))
+                     (throw (ex-info (str "codegen: " (subs (str (ex-message e)) 9)) (assoc (ex-data e) :codegen/refused :subst :cx/sure-drop true :cx/subst true))))
+                   (when (and (cx-subst?) (:cx/subst (ex-data e))) (throw e))
                    (if (:codegen/refused (ex-data e))
                      (do (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") dependent:" (.getMessage e))))
                          ;; (only an unknown name, a lookup that found nothing after argument-dependent lookup, is
@@ -703,6 +735,55 @@
 
 (declare cx-elab-declare!)
 
+;; (cpp-tpl2, the checker: the types a substitution may not form, [dcl.ptr]/4 ("there shall be no pointers to references"),
+;; [dcl.ref]/1 and /5 (no reference to void, no arrays of references), [dcl.array]/1 (an element type is no reference, void,
+;; function or array of unknown bound), [dcl.fct]/11 (no function returns an array or a function), [dcl.mptr]/4 (no pointer to a
+;; member of reference type or of cv void, nor of a non-class): in a function template's signature substituted, a substitution
+;; failure ([temp.deduct.general]/11's list: "attempting to create an array with an element type that is void, a function type,
+;; or a reference type", "a pointer to member ... of reference type", "a function type whose return type is a function or an
+;; array"), cx-subst-fail!; GCC's words as its explanation)
+(defn- cx-formed!
+  [k t & [c]]
+  (when (cx-subst?)
+    (let [u (abi/unq t)
+          tv (fn [t] (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t)))]
+      (when-not (tv t)
+        (case k
+          :ptr (when (abi/ref? t) (cx-subst-fail! "forming pointer to reference type"))
+          :ref (when (abi/void? u) (cx-subst-fail! "forming reference to void"))
+          :arr (cond (abi/ref? t) (cx-subst-fail! "creating array of references")
+                     (abi/fn? u) (cx-subst-fail! "creating array of functions")
+                     (abi/void? u) (cx-subst-fail! "creating array of void")
+                     (and (abi/arr? u) (nil? (:n u))) (cx-subst-fail! "creating array of an array of unknown bound"))
+          :ret (cond (abi/arr? u) (cx-subst-fail! "function returning an array")
+                     (abi/fn? u) (cx-subst-fail! "function returning a function"))
+          :mptr (cond (abi/ref? t) (cx-subst-fail! "creating pointer to member reference type")
+                      (abi/void? u) (cx-subst-fail! "creating pointer to member of type void")
+                      (and (map? c) (not (tv c)) (not (abi/class? (abi/unq c)))) (cx-subst-fail! "creating pointer to member of non-class type")))))))
+
+;; (cpp-tpl2, the checker: a substituted elaborated-type-specifier whose class-key names no class, [dcl.type.elab]/6 with
+;; [temp.deduct.general]/8 -- `struct enable_if<true, T>::type` for T = int: a substitution failure; GCC's "which is not a class type")
+(defn- cx-elab-class! [f t]
+  (when (and (cx-subst?) (#{'struct 'class 'union "struct" "class" "union"} (second f)) (map? t)
+             (not (abi/class? (abi/unq t))) (not (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t))))
+    (cx-subst-fail! "'" (pr-str (nth f 2)) "' resolves to " (pr-str (abi/unq t)) ", which is not a class type"))
+  t)
+
+(defn- cx-no-type-named!
+  "cpp-tpl2 (the checker): the refusal of a qualified name of the type `nm` that the complete class `t` (its bases complete, no
+  dependent argument, no header's) does not declare as a type ([temp.res.general]/3, [class.member.lookup]): in a function
+  template's signature substituted a substitution failure ([temp.deduct.general]/11, cx-subst-fail!: enable_if<false, T>::type),
+  else the program's error (cpp0x/alias-decl-pr92206-1.C's alias default; \"unknown type\" kept first, the headers' retry
+  reads it). Nil when the class is not such."
+  [t ^String nm f]
+  (let [c (when (abi/class? (abi/unq t)) (abi/cls (:id (abi/unq t))))]
+    (when (and (checking?) c (:complete c) (not (:defining c)) (not (:header c)) (not (dt-dependent? (:targs c)))
+               (every? #(let [b (abi/cls (:cls %))] (and b (:complete b))) (:bases c))
+               (not (some #(= :type (:e (second %))) (class-lookup (:id (abi/unq t)) nm false))))
+      (if (cx-subst?)
+        (cx-subst-fail! "no type named '" nm "' in '" (:name c) "'")
+        (fail :type "unknown type " (pr-str f) ": no type named '" nm "' in the complete class '" (:name c) "'")))))
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
@@ -719,13 +800,20 @@
             es (if (= 1 (count parts)) (lookup scope (first parts))
                    (or (when-let [h (:dependent-name @hooks)] (h scope parts)) (lookup-qualified scope parts)))
             e (type-entity es)]
-        (or (:ty e) (fail :type "unknown type " f)))))
+        (or (:ty e)
+            ;; (cpp-tpl2, the checker: a qualified name `T::x` whose qualifier is a complete class that declares no type x: the
+            ;; cpp/scope form's rule below)
+            (when (and (checking?) (> (count parts) 1))
+              (when-let [qt (try (:ty (first (filter #(= :type (:e %)) (lookup-qualified scope (vec (butlast parts)))))) (catch arbace.lang.ExceptionInfo _ nil))]
+                (when (abi/class? (abi/unq qt))
+                  (cx-no-type-named! (abi/unq qt) (last parts) f))))
+            (fail :type "unknown type " f)))))
     (seq? f)
     (case (first f)
-      * (abi/ptr (resolve-type-form scope (second f)))
+      * (let [t (resolve-type-form scope (second f))] (cx-formed! :ptr t) (abi/ptr t))
       ;; references to references collapse ([dcl.ref]/7: a substituted T& or T&&)
-      & (let [t (resolve-type-form scope (second f))] (abi/lref (if (abi/ref? t) (:to t) t)))
-      && (let [t (resolve-type-form scope (second f))] (if (abi/ref? t) t (abi/rref t)))
+      & (let [t (resolve-type-form scope (second f))] (cx-formed! :ref t) (abi/lref (if (abi/ref? t) (:to t) t)))
+      && (let [t (resolve-type-form scope (second f))] (cx-formed! :ref t) (if (abi/ref? t) t (abi/rref t)))
       ;; GNU's __complex__ T (_Complex T): {:k :complex :of T} (cpp-s3: std::complex<long double>'s _M_value)
       complex {:k :complex :of (abi/unq (resolve-type-form scope (second f)))}
       ;; (cpp-s4: cv on an array type is on its elements, [basic.type.qualifier]/3: `const T&` of T = char[4], std::format's
@@ -737,9 +825,15 @@
       restrict (resolve-type-form scope (second f))
       cpp/attributed (resolve-type-form scope (last f))
       array (if (= 2 (count f))
-              (abi/arr nil (resolve-type-form scope (second f)))
-              (abi/arr (let [b (second f)] (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil))
-                       (resolve-type-form scope (nth f 2))))
+              (abi/arr nil (doto (resolve-type-form scope (second f)) (->> (cx-formed! :arr))))
+              (abi/arr (let [b (second f)
+                             n (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil)]
+                         ;; (cpp-tpl2, the checker: [temp.deduct.general]/11's "attempting to create an array with ... a size that
+                         ;; is zero or negative", [dcl.array]/1; GCC's words)
+                         (when (and (number? n) (<= (long n) 0) (cx-subst?))
+                           (cx-subst-fail! (if (zero? (long n)) "zero-size array" "size of array is negative")))
+                         n)
+                       (doto (resolve-type-form scope (nth f 2)) (->> (cx-formed! :arr)))))
       fn (if-let [tt (when (and (symbol? (nth f 2 nil)) (str/starts-with? (str (nth f 2)) "__") (:is-trait @hooks) ((:is-trait @hooks) (str (nth f 2))))
                        (:trait-type @hooks))]
            ;; a transform trait's type (G4: __remove_cv(T)), spelled as a function type returning the trait's name
@@ -748,7 +842,7 @@
                va (some #{'&} ps)
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
-           {:k :fn :ret (resolve-type-form scope r)
+           {:k :fn :ret (doto (resolve-type-form scope r) (->> (cx-formed! :ret)))
             ;; a parameter of array or function type is a pointer ([dcl.fct]/5), a substituted one too
             :ps (mapv (fn [t] (cond (abi/arr? t) (abi/ptr (:of t)) (abi/fn? t) (abi/ptr t) :else t))
                       (mapcat #(if (and (seq? %) (= 'pack-expand (first %)))
@@ -759,7 +853,7 @@
       ;; (cpp-rt-own: an elaborated-type-specifier's name is looked up ignoring the names that are no types, [basic.lookup.elab]/1:
       ;; libcpp's traditional.cc, `struct block *block;` then `block = (struct block *) (exp + macro->count);`, the variable had
       ;; hidden the class, "unknown type block")
-      cpp/elaborated (let [x (nth f 2)
+      cpp/elaborated (cx-elab-class! f (let [x (nth f 2)
                            simple (when (and (symbol? x) (not (builtin-syms x)) (= 1 (count (name-parts x)))) (first (name-parts x)))]
                        (or (when (and simple (not (checking?)))
                              (some-> (loop [s scope] (when s (or (type-entity (find-here s simple true)) (recur (:parent s))))) :ty))
@@ -784,7 +878,7 @@
                                       (if-let [t (cx-elab-declare! scope f e)] t (throw e)))))
                              (try (resolve-type-form scope x)
                                   (catch arbace.lang.ExceptionInfo e
-                                    (if-let [t (cx-elab-declare! scope f e)] t (throw e)))))))
+                                    (if-let [t (cx-elab-declare! scope f e)] t (throw e))))))))
       ;; (n-cpp-concepts, the checker: a constrained placeholder, `C auto` ([dcl.spec.auto.general]/1), an auto with its
       ;; type-constraint's text, checked once deduced: placeholder-check!; the code generator refuses it as before)
       constrained (if (and (checking?) (:tc-text (meta f)) (#{'auto 'decltype-auto} (nth f 2 nil)))
@@ -821,7 +915,11 @@
                                                           {:name (name (second %)) :args (mapv (fn [a] (resolve-type-form scope a)) (nnext %))}
                                                           :else (fail :type "type form " (pr-str f)))
                                                    (cons p more))}
-                    (not (abi/class? t)) (fail :type "a scope of a non-class " (pr-str f))
+                    ;; (cpp-tpl2, the checker: a substituted nested-name-specifier's type that is no class, [temp.deduct.general]/11's
+                    ;; "attempting to use a type that is not a class or enumeration type in a qualified name"; GCC's words)
+                    (not (abi/class? t)) (if (and (cx-subst?) (not (abi/enum? (abi/unq t))) (not (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t))))
+                                           (cx-subst-fail! "'" (pr-str (abi/unq t)) "' is not a class, struct, or union type")
+                                           (fail :type "a scope of a non-class " (pr-str f)))
                     ;; a member template's specialization (Outer<int>::Inner<double>): its name found in the class, its
                     ;; arguments resolved here
                     (and (seq? p) (= '<> (first p)))
@@ -830,8 +928,27 @@
                     ;; (a qualified name: the class's members and its bases', dependent ones in the pattern too,
                     ;; [class.member.lookup]; G5: move_iterator<It>::iterator_category from __move_iter_cat)
                     (let [e (type-entity (or (seq (map second (class-lookup (:id (abi/unq t)) (name p) false)))
-                                             (lookup-qualified (:scope (abi/cls-of t)) [(name p)] false)))]
-                      (recur (or (:ty e) (fail :type "unknown type " (pr-str f))) more))
+                                             (lookup-qualified (:scope (abi/cls-of t)) [(name p)] false)))
+                          ;; (cpp-tpl2, the checker: in a function template's signature substituted, a member type named by a
+                          ;; qualified name that the template, no class's member, may not access, [temp.deduct.general]/8 (access
+                          ;; checking is done as part of the substitution process) with [class.access]/1-2: a substitution
+                          ;; failure, cx-subst-fail!; a class that declares a friend not judged, cx-type-friend?)
+                          cid (:id (abi/unq t))
+                          acc (when (and e (cx-subst?) (nil? (:cls scope))) (:access e))
+                          _ (when (and (#{:private :protected} acc) (not (cx-subst-friend? cid acc)))
+                              (cx-subst-fail! "'" (name p) "' is a " (name acc) " member of '" (:name (abi/cls cid)) "' within this context"))]
+                      (recur (or (:ty e)
+                                 ;; (cpp-tpl2, the checker: a substituted qualified name a complete class does not declare as a type,
+                                 ;; [temp.deduct.general]/11's "attempting to use a type in a nested-name-specifier ... when that type
+                                 ;; does not contain the specified member": enable_if<false, T>::type; GCC's "no type named")
+                                 (cx-no-type-named! t (name p) f)
+                                 ;; (cpp-tpl2, the checker: a typename-specifier naming a member class template, not a type, before
+                                 ;; C++17's deduced class type ([temp.res.general]/5 with [dcl.type.simple]/3): GCC's "names ...,
+                                 ;; which is not a type"; cpp1z/class-deduction107.C at C++11)
+                                 (when (and (checking?) (< (long *cxx-year*) 17)
+                                            (some #(and (= :tmpl (:e (second %))) (= :class (:tk (second %)))) (class-lookup (:id (abi/unq t)) (name p) false)))
+                                   (fail :name "'" (name p) "' names a template, which is not a type"))
+                                 (fail :type "unknown type " (pr-str f))) more))
                     :else (fail :type "type form " (pr-str f))))
       member-ptr (let [c (resolve-type-form scope (second f))
                        u (resolve-type-form scope (nth f 2))
@@ -839,7 +956,8 @@
                        ;; (CX12, the checker: a volatile member function's type)
                        u (if (and (checking?) (abi/fn? u) (or (:v u) (:volatile (meta (nth f 2))))) (-> u (dissoc :v) (assoc :vq true)) u)
                        ;; (and its ref-qualifier, [dcl.fct]/4)
-                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)]
+                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)
+                       _ (cx-formed! :mptr u c)]
                    ;; (CX12, the checker: a template parameter's class kept, T::* deduced)
                    ;; (cpp-rt-own: the code generator's too, its template signatures' `_Tp _Class::*`: std::mem_fn(&stat_type::st_nlink),
                    ;; fs_ops.cc's hard_link_count, "mem_fn does not deduce"; mangled M <template-param>, abi's)
@@ -1310,6 +1428,12 @@
              tid-type (fn [] (if (seq done)
                                (resolve-type scope (str (when global? "::") (str/join "::" (conj done p))))
                                (resolve-type (or s scope) p)))]
+         ;; (cpp-tpl2, the checker: a substituted signature's qualified name of a member type its template, no class's member,
+         ;; may not access, resolve-type-form's cpp/scope rule)
+         (when-let [acc (when (and (empty? more) s (:cls s) (cx-subst?) (nil? (:cls scope)))
+                          (some #(when (= :type (:e %)) (:access %)) es))]
+           (when (and (#{:private :protected} acc) (not (cx-subst-friend? (:cls s) acc)))
+             (cx-subst-fail! "'" p "' is a " (name acc) " member of '" (:name (abi/cls (:cls s))) "' within this context")))
          (if (empty? more)
            (if (str/includes? p "<")
              [{:e :type :ty (tid-type) :pos -1}] ; a template-id names a type (A<int>)
@@ -1332,9 +1456,13 @@
                    ;; (cpp-tpl, the checker: [basic.lookup.qual.general]/1, a nested-name-specifier's type that is no class nor
                    ;; enumeration -- a template parameter's argument int in T::x ([temp.res.general]/3 at the instantiation) --
                    ;; GCC's "'int' is not a class, struct, or union type")
-                   (when (and (checking?) (= :type (:e e)) (#{:b :ptr :ref :rref :arr :mptr} (:k (:ty e))) (not (abi/void? (:ty e)))
+                   (when (and (checking?) (= :type (:e e)) (#{:b :ptr :ref :rref :arr :mptr :fn} (:k (:ty e)))
+                              (or (cx-subst?) (and (not (abi/void? (:ty e))) (not= :fn (:k (:ty e)))))
                               (not (re-find #":k :(auto|dep|tparam|tdep)" (pr-str (:ty e)))))
-                     (fail :name "'" p "' is not a class, struct, or union type"))
+                     ;; (cpp-tpl2: in a function template's signature substituted, a substitution failure, cx-subst-fail!)
+                     (if (cx-subst?)
+                       (cx-subst-fail! "'" p "' is not a class, struct, or union type")
+                       (fail :name "'" p "' is not a class, struct, or union type")))
                    (fail :lookup "no scope " p))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1798,7 +1926,16 @@
                 ;; constructor taken for a function of the global namespace, "this outside a method")
                 (expanded-qualifier n)))
         home (if (seq q)
-               (let [e (first (filter #(#{:ns :type} (:e %)) (lookup-qualified scope q)))]
+               (let [e (first (filter #(#{:ns :type} (:e %))
+                                      ;; (cpp-tpl2, the checker: a qualifier naming a class template's specialization surely without
+                                      ;; a definition, select-instance!'s :cx/sure-incomplete -- the class a partial specialization not
+                                      ;; deducible declares, template/crash98.C -- is the invalid use of an incomplete type below)
+                                      (try (lookup-qualified scope q)
+                                           (catch arbace.lang.ExceptionInfo x
+                                             (if-let [nm (when (checking?) (:cx/sure-incomplete (ex-data x)))]
+                                               (throw (ex-info (str "codegen: invalid use of incomplete type '" nm "'")
+                                                               {:codegen/refused :incomplete :cx/node n}))
+                                               (throw x))))))]
                  (cond (= :ns (:e e)) (:scope e)
                        ;; (queue 492, the checker: a member defined outside a class the checker knows incomplete, [basic.def]/5
                        ;; with [class.mfct]: `A::~A() {}` after `struct A;`; GCC's "invalid use of incomplete type", reported at
@@ -1852,6 +1989,11 @@
                  o))
         ty (if xobj (update ty :ps (comp vec rest)) ty)
         pn (if xobj (vec (rest pn)) pn)
+        ;; (cpp-tpl2, the checker: [class.copy.ctor]/5, a constructor of class X whose only parameter is of type cv X -- a class
+        ;; template's specialization's `A(A<T, T>)` for A<int, int> -- is ill-formed: GCC's "invalid constructor", the
+        ;; declaration reported and dropped, declare-node!)
+        _ (when (and (checking?) (= k :ctor) cid (= 1 (count (:ps ty))) (= {:k :class :id cid} (abi/unq (first (:ps ty)))))
+            (throw (ex-info "codegen: invalid constructor: its only parameter of its own class type" {:codegen/refused :decl :cx/node n})))
         f {:name nm :kind k :cls cid :ty ty :cq (if xobj (boolean (:c (:to xobj))) (method-const? qt))
            :refq (if xobj (if (= :rref (:k xobj)) "&&" "&") (when cid (method-refq qt))) :op (when (and nm (not= k :conv)) (fn-op nm))
            ;; (a class's allocation and deallocation functions are static members, [class.free]/1)
@@ -2166,6 +2308,24 @@
                (not (re-find #"underlying_type" qt))
                (re-find (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote (str tn)) "\\s*<")) qt))
       (ex-info (str "codegen: variable has incomplete type '" qt "'") {:codegen/refused :incomplete}))))
+
+(defn- cx-incomplete-base!
+  "cpp-tpl2 (the checker): [class.derived.general]/2, a base-specifier's class that is incomplete or still being defined (a
+  class only declared, a class template's specialization without a definition): GCC's \"invalid use of incomplete type\",
+  reported at the base-specifier `bs`, true (the base dropped, as GCC goes on without it). Not judged in a header, for a
+  header's class, nor for one a template's instance waits to complete."
+  [bt bs n id]
+  (when (and (checking?) *on-refusal* (map? bt) (abi/class? bt) (not (header-node? n)))
+    (let [c (abi/cls (:id bt))]
+      ;; (a closure type is complete once its lambda-expression is analyzed: not judged, cpp0x/lambda/lambda-field-names.C,
+      ;; cpp1z/decomp62.C; nor an unnamed class)
+      (when (and c (not (:header c)) (not (:lazy-inst c)) (not (:lambda c)) (seq (str (:name c)))
+                 (or (not (:complete c)) (= (:id bt) id))
+                 (or (not (:tmpl c)) (:cx-sure-incomplete c)))
+        (*on-refusal* (ex-info (str "codegen: invalid use of incomplete type '" (:name c) "'")
+                               {:codegen/refused :incomplete :cx/node (if (:range bs) bs n)})
+                      n)
+        true))))
 
 (defn- declare-var!
   [scope n storage]
@@ -2491,7 +2651,24 @@
                                                ss (when (:isPackExpansion bs)
                                                     (when-let [h (:pack-scopes @hooks)]
                                                       (h scope (distinct (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (str qt))))))]
-                                         bt (if ss (map #(resolve-type % qt) ss) [(resolve-type scope qt)])]
+                                         bt (if ss (map #(resolve-type % qt) ss)
+                                                [(try (resolve-type scope qt)
+                                                      ;; (cpp-tpl2, the checker: a base naming a class template's specialization
+                                                      ;; surely without a definition, select-instance!'s :cx/sure-incomplete,
+                                                      ;; [class.derived.general]/2: GCC's "invalid use of incomplete type", at the
+                                                      ;; base-specifier)
+                                                      (catch arbace.lang.ExceptionInfo x
+                                                        (if-let [tn (when (checking?) (:cx/sure-incomplete (ex-data x)))]
+                                                          (do (abi/update-cls! id assoc :cx-inst-refused true)
+                                                          (throw (ex-info (str "codegen: invalid use of incomplete type '" tn "'")
+                                                                          {:codegen/refused :incomplete :cx/node (if (:range bs) bs n)})))
+                                                          ;; (cpp-tpl2: a base naming a member class as a template, template-id's
+                                                          ;; refusal, at the base-specifier too)
+                                                          (if (and (checking?) (re-find #"^codegen: '.*' names a class, which is not a class template" (str (ex-message x))))
+                                                            (do (abi/update-cls! id assoc :cx-inst-refused true)
+                                                                (throw (ex-info (ex-message x) (assoc (ex-data x) :cx/node (if (:range bs) bs n)))))
+                                                            (throw x)))))])
+                                         :when (not (cx-incomplete-base! bt bs n id))]
                                        (cond-> {:cls (:id bt) :virtual (boolean (:isVirtual bs)) :access (keyword (or (#{"public" "protected" "private"} (:writtenAccess bs))
                                                                                                          (if (= "class" (:tagUsed n)) "private" "public")))}
                                          ;; a base dependent in a template's pattern (CODEGEN.md G3: [temp.dep]/4)
@@ -2703,9 +2880,14 @@
       ;; be complete)
       (try (declare-node*! scope n)
            (catch arbace.lang.ExceptionInfo e
-             (if (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
+             (cond
+               (and (:codegen/refused (ex-data e)) (re-find #"an incomplete class template" (str (.getMessage e))))
                (do (swap! *main-retry* conj [scope n e]) nil)
-               (throw e))))
+               ;; (cpp-tpl2, the checker: a type a complete class surely does not declare, cx-no-type-named!: reported at the
+               ;; alias and dropped, as the other declarations' refusals below)
+               (and (checking?) (re-find #"^codegen: unknown type .*: no type named '.*' in the complete class" (str (.getMessage e))))
+               (do (*on-refusal* e n) nil)
+               :else (throw e))))
       ;; (n-cpp-concepts, the checker: a main file's declaration that names a constrained class template's specialization
       ;; whose constraints are surely not satisfied, or deduces a constrained placeholder's type that does not satisfy its
       ;; constraint, is reported at the declaration and dropped, the unit going on, as a statement's refusal is)
@@ -2723,7 +2905,8 @@
                ;; (queue 487: and one that names an ambiguous name, cx-unqualified-ambiguous!, cx-qualified-ambiguous!)
                ;; (queue 497: and an out-of-line member declaration no member of its class matches)
                (cond
-                 (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches ')" (str (.getMessage e)))
+                 ;; (cpp-tpl2: and one whose class template's template template argument surely does not match, [temp.arg.template]/3-4)
+                 (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches '|a template template argument whose parameters do not match|pack expansion argument for non-pack parameter of alias template|'.*' names a class, which is not a class template|invalid constructor: |could not convert an expression of type int to a pointer in a converted constant expression|unknown type .*: no type named '.*' in the complete class)" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
                  ;; (queue 518: a namespace-scope variable's, function's or alias's declaration whose template argument is no
                  ;; constant, `S<f()> s;`, cpp0x/pr78765.C's ValueTypeInfo<var>: dropped without a word and the unit going on, as
@@ -5312,7 +5495,12 @@
       (case (:k t)
         :b (when (keyword? (:n t)) [:b (:n t) cv])
         :enum (when (abi/enm (:id t)) [:enum (:id t) cv])
-        :class (let [c (abi/cls (:id t))] (when (and c (not (:tmpl c)) (not (:lambda c))) [:class (:id t) cv]))
+        :class (let [c (abi/cls (:id t))]
+                 (when (and c (not (:lambda c))
+                            ;; (cpp-tpl2: a class template's specialization by arguments of no dependence, one class a list of
+                            ;; arguments, template/ttp args by their template: cpp0x/alias-decl-equiv1.C's X<Y> and X<Z>)
+                            (or (not (:tmpl c)) (and (:targs c) (not (dt-dependent? (:targs c))) (:complete c))))
+                   [:class (:id t) cv]))
         :ptr (when-let [k (cx-type-key (:to t))] [:ptr k cv])
         nil))))
 
@@ -6132,7 +6320,7 @@
                                (fail :overload "call to a deleted function " (:name f) " (implicitly deleted)")))
                            b)
       (empty? viable)
-      (let [{:keys [sure-drops unsure-drops]} (when (checking?) *drops*)]
+      (let [{:keys [sure-drops unsure-drops explain]} (when (checking?) *drops*)]
         ;; (CX12, the checker: the templates whose deduction failed by the algorithm alone count as candidates; one that may
         ;; have failed by the slice keeps the call from being diagnosed)
         (cond
@@ -6149,6 +6337,11 @@
                                                       args))
                                  cs))
           (fail :overload "no viable function (a generic lambda's conversion not modeled) among " (count (distinct cands)) " for " n0 " arguments")
+          ;; (cpp-tpl2, the checker: the candidates' substitution failures, call-candidates' :explain, reported with the call's
+          ;; error, each at its construct, as GCC's explanations; arbace.repr.cpp.diag's handler)
+          (seq explain)
+          (throw (ex-info (str "codegen: no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments")
+                          {:codegen/refused :overload :cx/explain (vec (distinct explain))}))
           :else
           (fail :overload "no viable function among " (+ (count (distinct cands)) (long (or sure-drops 0))) " for " n0 " arguments: " (pr-str (map :ty (second (first cs)))))))
       :else (fail :overload "ambiguous call (" (count viable) " viable)" (when (System/getenv "CPP_HDR_TRACE") (str ": " (pr-str (map (fn [[f]] [(:name (fnd f)) (:ps (:ty (fnd f))) (loc-of (get-in (:node (fnd f)) [:range :begin]))]) viable))))))))
@@ -7045,7 +7238,8 @@
   conversion is not considered for a constructor's first parameter of type X or reference to X ([over.best.ics]/4)."
   ([id args ctx] (ctor-init id args ctx false))
   ([id args ctx nested]
-  (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+  (let [hc (when-let [h (:ctor-candidates @hooks)] (h id args))
+        cands (concat (ctor-candidates id) hc)
         ;; (CP323 (a), the checker: the constructors a class inherits by `using B::B;` ([namespace.udecl]/3,
         ;; [over.match.funcs]/8-9: B's constructors but its copy and move constructors and a default constructor), its
         ;; own declared beside them; one chosen is checked for its access as B's member ([namespace.udecl]/19) and the
@@ -7072,7 +7266,7 @@
         inh (inh-of id #{})
         cands (concat cands inh)
         cands (if nested (remove #(= id (class-id (abi/non-ref (or (first (:ps (:ty (fnd %)))) abi/void)))) cands) cands)
-        fid (try (resolve-overload cands args nil)
+        fid (try (binding [*drops* (assoc *drops* :explain (:explain (meta hc)))] (resolve-overload cands args nil))
                      (catch arbace.lang.ExceptionInfo e
                        (cond
                          ;; (cpp-decl2, the checker: an ambiguity among the class's own constructors and those it inherits from
@@ -10614,7 +10808,18 @@
                                 (let [dn (if arr "operator delete[]" "operator delete")
                                       [k ids] (alloc-lookup cid dn false)]
                                   (when (and (= :class k) (seq ids) (every? #(let [f (fnd %)] (and (:deleted f) (:deleted-sure f))) ids))
-                                    (fail :overload "call to a deleted function " dn)))))
+                                    (fail :overload "call to a deleted function " dn))
+                                  ;; (cpp-tpl2, the checker: [expr.delete]/12 ([class.free]: the deallocation function's access
+                                  ;; checked), the class's own operator delete inaccessible in the context: in a function template's
+                                  ;; signature substituted, a substitution failure, template/sfinae30.C's decltype(delete[] t); in
+                                  ;; a function's body check-access!'s rule)
+                                  (when (and (= :class k) (= 1 (count ids)))
+                                    (let [acc (:access (fnd (first ids)))]
+                                      (when (#{:private :protected} acc)
+                                        (if (cx-subst?)
+                                          (when (and (nil? (:cls (:scope ctx))) (not (cx-subst-friend? cid acc)))
+                                            (fail :access "'" dn "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'"))
+                                          (check-access! ctx cid dn acc))))))))
                           d (delete-dealloc et arr (boolean (:isGlobal n)))
                           bt (loop [t (abi/unq et)] (if (abi/arr? t) (recur (abi/unq (:of t))) t)) c (class-id bt)]
                       {:op :delete :e e :array arr :dealloc d :global (boolean (:isGlobal n))
