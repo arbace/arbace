@@ -19069,3 +19069,58 @@ The brief: close the read cell's 49 deferred rows and the print cell's 7 in test
   9 pass; control c00001 differs. `--judge --partial --record`: 3 now passing, 0 regressions.
 - Cells: print 3,318 / 0 / 7 -> 3,321 / 0 / 4; read 7,795 / 0 / 49 unchanged; Java completeness 0.9632 -> 0.9634. `bin/reap
   --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 549, javac on Arbace's doclint, file manager and command line (538-5; branch `549-java-doclint-fm`, the VM)
+
+The read cell's 49 deferred rows were all at the diagnostics level, in javac on Arbace's own Java (JCS52 (a), JCS53 (a)). The 25
+processor rows are left to the host's JD3 bytecode loader (the user's JCS51 decision of 2026-11-23).
+- **doclint** (`overlay/jdk/javac/variants/ServiceLoader.ae`). The tool's ServiceLoader is the program's. Its `stream()` read the
+  registry, so `DocLint.newDocLint` found no provider ("As built: JCS52 (a)"). The variant now replaces `stream()`: each of
+  `providers()` becomes a `Provider` whose `get()` makes a new instance (`fresh`, its own `j2g/add`: one member to each).
+- **The file manager** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/{FileManager,StandardFileManager,Main}.java`, new
+  `com/sun/tools/javac/file/ArbaceFileObject.java`):
+  - `FileManager` is a `BaseFileManager` that javac trusts (`@ClientCodeWrapper.Trusted`), so javac no longer wraps it. `Arguments`
+    therefore gives its warnings for a default platform (source.no.system.modules.path, source.no.bootclasspath).
+  - Its file objects are `PathFileObject`s, through `ArbaceFileObject`. That class sits in javac's package because
+    `inferBinaryName` and `getSibling` are package-private there. A raw diagnostic then names a file by its short name, and two
+    objects for one path are equal.
+  - Once it has javac's context its characters are decoded by `BaseFileManager.decode`, which handles `-encoding`.
+  - `-source 8`'s platform class path is now the system modules' classes.
+- **The command line** (`Main.run`):
+  - The file manager gets the task's context before `call`, as `Main.compile`'s "reinit with options" does.
+  - `-XDexpectKeys` is judged as `Main.compile` judges it.
+  - After an error in the task's preparation the counts are printed. `JavacTaskImpl.doCall` returns before `JavaCompiler.compile`,
+    whose end prints them; `Main.compile` goes on into it. "Before" is detected as no source read.
+  - `-encoding` is passed to javac's API and handled by the file manager.
+- **javac's forms.** The seven overlay files were read by `bin/repr-java read-jdk --check --no-javac` on the 538 tool (7 of 7
+  converted). The unchanged CtSymFileManager and ReleasePlatforms came out byte for byte the committed forms. SystemCompiler's
+  `javax.tools.JavaCompiler` is now qualified, because Main's new import of javac's `JavaCompiler` shares the package's namespace.
+  The package file `com/sun/tools/javac/file.ae` loads ArbaceFileObject after PathFileObject, as names.ae's topo-order does.
+  `sources.txt` and the provenance's counts were updated. The host's `bin/javac-vendor convert`/`verify` makes them afresh.
+- **The tool.** One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java`: 5 h 43 min wall, about 1 h 40 min of it
+  waiting for the lock, 27.5 GB peak. The compiled namespaces (aot-javac) were reused.
+  - The first-stage tool, tried at once, showed the refused ServiceLoader: `j2g/add` takes one member, and `fresh` had shared the
+    first one. The fix (a32b29bcf) went in 14 s before the final j2g read the variants ("3 replaced, 0 cut, 2 added"; 49,347
+    classes analyzed, no failures).
+  - The build recorded its start's key, 6e6db5f5. The key now written beside the tool is the checkout's, a3e3fd09.
+  - `bin/javac-vendor check --from`: no failures. Shared at `.tmp/shared/javac-arm64/`, replacing 538's.
+- **Exploratory probes, not evidence.** Before the build I ran the overlay's Java on Alpine's openjdk25 as a stand-in. The user
+  restricts that JDK to bootstrapping a JDK 26 build (2026-11-02), so those runs prove nothing. They were deleted, and none of
+  their numbers is used.
+- **Proofs** on the new tool, with `bin/java-check --levels diagnostics --only` over the 24 rows of the four classes and the
+  control pair t06443/t06444 (`.tmp/q549/after/`):
+  - 21 now pass: doclint 8; file manager 8 (t06452 t06697 t07420 t07442 t07462 t07478 t07536 t07622); command line 3 (t06660
+    t07527 t07621); closed world t07440, which already passed on 538's tool.
+  - t07463 is still refused (a jar on `--module-path`, JCS53 (a)). The processing tests t07545, t07546 and t07552 still crash on
+    `getUnnamedModule`.
+  - The control c00002 differs, as it must.
+  - Before: the same 26 on 538's tool (`.tmp/q549/base/`), the rows as recorded.
+- **A regression sample** on the new tool, 202 tests (every 10th diagnostics test, every 40th classes test), read, classes,
+  diagnostics and print:
+  - Read, classes and print: every test as recorded.
+  - Diagnostics: 110 as recorded and 3 of this task's rows now passing.
+  - 6 `--release N` tests fail. They fail the same way on 538's tool: this VM has no own platform cache, so no ct.sym. That is the
+    environment, not a regression; they were not recorded.
+- **Cells:** read 7,795 / 0 / 49 -> 7,815 / 0 / 29. Java completeness 0.9634 -> 0.9640. `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`: 0 problems. `bin/provenance-check` reports the same as at 538: reader b45f7ace,
+  the host's regeneration.
