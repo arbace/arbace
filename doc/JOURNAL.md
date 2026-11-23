@@ -19370,3 +19370,11 @@ generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacF
 behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
 committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
 method) is left for after train 3's run.
+## 2026-11-23: an interpreted interface's method on a proxy (JCS51's TestElementsAnnotatedWith; train 3)
+
+t07544 (TestElementsAnnotatedWith) on train 1's tool stopped on AbstractMethodError jdk.proxy1.$Proxy0.names(): javac's
+AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the test's processor defined from its class file
+(annot/AnnotatedElementInfo), and the processor's invokeinterface of names() on it reached CallV's reflective path, where the
+proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
+with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
+as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
