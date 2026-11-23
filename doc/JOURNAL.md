@@ -19567,3 +19567,14 @@ Proofs: `bin/pyi check --only` on the VM (goi, the checkout's runtime), four run
 refuses a runtime that is not compiled, so the main host's next record replaces them). Python eval at 320e74469: 40,552 / 1,398 /
 1,585 -> 40,616 / 1,338 / 1,579 (4,789 n/a); `bin/reap --record`, `bin/crops-score --record` (Python 98.12 -> 98.16),
 `--judge --strict` and `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 537's record rows written again by `bin/pyi check --judge DIR --record` (correction of the entry above)
+
+The coordinator's request: the rows the entry above says were transcribed from the runs' results (`merge_record.py`) are written
+instead by the judge's own `--record` over one directory holding the modules the runs covered whole (`.tmp/q537/judge-rec`:
+test_hmac, test_hashlib, test_uuid and test_urllib2 of the first run, test_index of the second, test_complex and test_cmath of
+the fourth, test_int of a fifth run alone, whose timing test passed there), as queue 536 recorded. `--record` refuses an `--only`
+run, so test_os' two PseudoterminalTests rows and test_capi's test_D stay as next has them until the main host's whole record.
+Two rows recorded as timeouts at the VM's load (test_uuid's test_unix_getnode_from_libuuid, test_urllib2's test_http_body_pipe,
+class `:runner-limits`). Python eval: 40,552 / 1,398 / 1,585 -> 40,611 / 1,341 / 1,581 (not 40,616 / 1,338 / 1,579);
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.

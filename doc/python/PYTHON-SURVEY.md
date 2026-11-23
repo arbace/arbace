@@ -8141,10 +8141,13 @@ each run): test_hmac 143 ok and 3 bigmem skips, test_hashlib 76 ok and 14 skips 
 PseudoterminalTests, test_int, test_complex, test_cmath, test_index, test_capi's test_D, test_uuid and test_urllib2 (two
 timeouts past 300 s at load 30-50, both children of pyi on goi; test_http_body_pipe passes alone); a differential probe of
 `_hashlib` (83 lines) and of `complex()` (70 cases) against python3 3.14.10, equal but the pickling message fixed after.
-The record's rows of the modules run were written from those runs' results (`bin/pyi check --record` refuses a runtime not
-compiled; the main host's next record replaces them): 64 rows to pass, 2 setUpClass skip rows dropped, 3 rows kept as recorded
-(the two timeouts, test_int's timing test). Python eval at next 320e74469 (the user's n/a decisions merged): 40,552 / 1,398 /
-1,585 (4,789 n/a) -> 40,616 / 1,338 / 1,579; `:skipped-by-test` 87 -> 36, `:openssl` 6 -> 0, `:coroutines` 20 -> 17.
+The record's rows of the modules run whole were written by `bin/pyi check --judge DIR --record` over a directory of those
+runs (test_hmac, test_hashlib, test_uuid, test_urllib2, test_int, test_index, test_complex, test_cmath; as queue 536 recorded):
+test_uuid's test_unix_getnode_from_libuuid and test_urllib2's test_http_body_pipe recorded as the VM's load timeouts
+(`:runner-limits`; the second passes alone), the two setUpClass skip rows of test_hmac gone. The rows of modules run by id
+(test_os' PseudoterminalTests, test_capi's test_D) wait for the main host's whole record. Python eval at next 320e74469 (the
+user's n/a decisions merged): 40,552 / 1,398 / 1,585 (4,789 n/a) -> 40,611 / 1,341 / 1,581; `:skipped-by-test` 87 -> 38,
+`:openssl` 6 -> 0, `:coroutines` 20 -> 18.
 
 What stays (queue 537's report, `.tmp/q537/537-py-design.md` on the VM, its DECISIONs): `:c-accelerators` (the main host's),
 `:extension-modules` (66: built by py-capi-1122 after the record's commit, moved by the next whole record), `:finalization` (57),
