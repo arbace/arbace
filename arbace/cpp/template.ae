@@ -670,10 +670,7 @@
       (do (cx-trait-incomplete! nm ts)
           ;; (cpp-tzdb: a trait's value is its own context, never the standard conversions alone of a user-defined conversion
           ;; that asked for it, [over.best.ics]/4: the class instance holding it is cached)
-          (let [r (binding [sema/*no-user* false] ((value-traits nm) scope ts))]
-            (when (and (System/getenv "CPP_TRAIT_TRACE") (#{"__is_base_of" "__is_convertible"} nm))
-              (binding [*out* *err*] (println "TRAIT" nm (boolean r) (pr-str (map (fn [t] (let [u (abi/unq (abi/non-ref t)) u (if (abi/ptr? u) (abi/unq (:to u)) u)] (if (abi/class? u) (let [c (abi/cls (:id u)) bc (some-> (first (:bases c)) :cls abi/cls) pc (fn [c] (when-let [o (last (filter #(= :cls (first %)) (:path c)))] (let [oc (abi/cls (second o))] [(second o) (:name oc) (:targs oc) (:tmpl oc)])))] [(:name c) (:id u) (pc c) (when bc [(:id bc) (pc bc)])]) t))) ts)))))
-            (if r 1 0))))))
+          (if (binding [sema/*no-user* false] ((value-traits nm) scope ts)) 1 0)))))
 
 (defn trait-type
   "A transform trait's type of its type arguments' forms (__remove_cv(T), __decay(T), ...), dependent in a signature."
@@ -3966,7 +3963,15 @@
     ;; lvalue": cow-stdexcept.cc, the old ABI's locale-inst.cc and the COW string units)
     (upd-tmpl! mid assoc :pattern (let [op (:pattern (tmpl mid))]
                                     (cond-> pat (and (= "static" (:storageClass op)) (not (:storageClass pat))) (assoc :storageClass "static")))
-               :params params :sig nil
+               ;; (cpp-tzdb: and the declaration's own pattern among its declarations, its default arguments the call's,
+               ;; [dcl.fct.default]/4: path::string's `const _Allocator& __a = _Allocator()`, too-few-args? and instantiate-fn)
+               :decls (let [op (:pattern (tmpl mid))] (cond-> (vec (:decls (tmpl mid))) (and op (not (identical? op pat))) (conj op)))
+               ;; (cpp-tzdb: the declaration's default arguments kept, [temp.param]/12: filesystem::path's `template<typename
+               ;; _CharT, typename _Traits = std::char_traits<_CharT>, typename _Allocator = std::allocator<_CharT>> string(...)`
+               ;; defined outside the class without them, so `string<char>()` deduced nothing)
+               :params (let [olds (:params (tmpl mid))]
+                         (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (inherit-default p olds params i) p)) params)))
+               :sig nil
                :scope (if (seq (:pnames o))
                         (bind-scope (:scope c) (mapv (fn [nm p] {:name nm :kind (:kind p)}) (:pnames o) outer-params) (:targs c) nil)
                         (:scope c))))))
@@ -4297,7 +4302,12 @@
         ;; path::_S_convert(const _EcharT*, const _EcharT*)`, called from the static _S_convert(_Tp) on no object, "codegen:
         ;; lvalue": fs_path.cc's and cow-fs_path.cc's path from a std::wstring)
         (when body? (upd-tmpl! old #(assoc % :pattern (cond-> pattern (and (= "static" (:storageClass (:pattern %))) (not (:storageClass pattern))) (assoc :storageClass "static"))
-                                           :params (tparams n) :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
+                                           ;; (cpp-tzdb: the earlier declaration's default arguments kept, [temp.param]/12:
+                                           ;; filesystem::path's string<_CharT, _Traits = ..., _Allocator = ...>(), defined
+                                           ;; outside its class without them, so `string<char>()` deduced nothing)
+                                           :params (let [olds (:params %) news (tparams n)]
+                                                     (vec (map-indexed (fn [i p] (if (and (nil? (:default p)) (:default (get olds i))) (inherit-default p olds news i) p)) news)))
+                                           :sig nil :decls (conj (vec (:decls %)) (:pattern %)))))
         (let [tid (next-id)]
           (swap! *tmpls* assoc tid {:id tid :tk :fn :name (:name n) :scope scope :path (:path scope) :params (tparams n) :pattern pattern
                                     :pos (:_b n) :insts {} :constraint (:requiresClause n)
