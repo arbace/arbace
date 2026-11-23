@@ -19086,3 +19086,33 @@ bin/bytecode-check and java-check interp and compiled over the 11 rows' tests an
 and type annotations, saved for --judge). Left: defineHiddenClass, defineClass(String, ByteBuffer, ...), line numbers
 in bytecode frames; NoSuchFieldError, BootstrapMethodError, ClassCircularityError, UnsupportedClassVersionError (not in
 the world: their superclasses stand for them).
+## 2026-11-23: JD3's rows built and run (build #2); JCS51's processors through the class-file loader (java-bytecode-1122)
+
+Build #2 of java-bytecode-1122 at 65c1bc58c (bin/arbace-go --build under the big lock, the build worktree
+.tmp/worktrees/java-bytecode-build; 22 GB peak, about 2 h 20 min with the queue): bin/bytecode-check on the built executable
+passes (programs, verifier cases, 900 mutants as HotSpot, the control failing). bin/java-check interp and compiled over the 11
+rows' tests and 60 regression tests (saved, not recorded: the records are taken on the train's shared build, the user's rule of
+2026-11-23): compiled, all 11 JD3 tests pass (22 rows' compiled half) and t04878, t07643, t06005 beside them, no regression;
+interp, 7 of the 11 pass with t04878 and t07643, t04712-t04715 failing on AnnotationTypeMismatchExceptionProxy.generateException
+left untranslated, and t04538 (ExceptionHidingLoader) regressed (forName through a loader whose loadClass returns null returned
+null). Both fixed (3860d35e1): j2g roots the three ExceptionProxies' generateException (main.ae; jrt's annotation members call
+it, no Java code of the world does); jrt's Class.forName(name, init, loader) throws ClassNotFoundException for a null, as
+HotSpot's SystemDictionary does. Merged mac/next fa635f636 (cb65d32ea; the journal kept both). doc/classes/BYTECODE-SURVEY.md,
+"As built: stage 4, the rows' first build".
+
+The user's decision of 2026-11-23 (relayed by the coordinator): JCS51's annotation processors (:diag-processors, 25 diagnostics
+rows) are loaded from their class files through JD3's loader, with an AbstractProcessor subclass (DynSub) in javac's tool world,
+instead of JCS51 (a)'s processors given as sources. Built (write-ahead of javac's tool build): javac on Arbace's file manager
+(overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/FileManager.java) answers getClassLoader(location) with a DirLoader over
+the location's directories (it answered null: NameProcessIterator's loadClass failed, proc.processor.cant.instantiate), which
+defines NAME.class by ClassLoader.defineClass, as JavacFileManager's URLClassLoader does (jdk26u
+src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java, getClassLoader, read for the behaviour, no code
+copied); its forms read by bin/repr-java read-jdk --check --no-javac of the overlay's six files (the five unchanged ones byte for
+byte the committed forms). j2g: javax/annotation/processing/AbstractProcessor on model/class-supers (javac's tool world alone, as
+F6's). None of the 25 tests checked the processors' other needs yet (javac's processing environment through reflection's member
+tables, Module.addReads in ensureReadable); the proof is javac's tool built at the train's executable and bin/java-check
+--levels diagnostics over the 25. Alternatives not taken: JCS51 (a)'s sources-to-forms path (superseded by the user); a
+closed list of processors compiled into the tool (JCS51 (c)). The class-file API rows at the compiled level (t05992-t06008,
+t06042, t06043, t06072, t06156, t06329, t06390) need no class-file loader: they read class files with java.lang.classfile and
+com.sun.tools.javac.Main, which the compiled world lacks (JD4's javac world at the compiled level, and java.lang.classfile in the
+shipped world); they pass at interp.

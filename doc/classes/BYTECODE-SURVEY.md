@@ -173,3 +173,37 @@ Not ported from HotSpot (a reference only, no code copied): its error message fo
   test/bytecode/expected.edn, `--record-jdk`), with a negative control. On the REPL (the Java forms interpreted,
   .tmp/dev's harness) before the build: every result the JDK's; GetSimpleNameTest's twelve classes' simple names
   jdk26u's.
+
+## As built: stage 4, the rows' first build (2026-11-23)
+
+Build #2 of java-bytecode-1122 at 65c1bc58c (`bin/arbace-go --build` under the big lock in the build worktree; the
+executable's `bin/bytecode-check`: every program, verifier case and mutant as the JDK, the control failing), then
+`bin/java-check --levels interp` and `--levels compiled` of the 11 rows' tests and 60 regression tests (class loaders, type
+annotations, the class-file tests), saved in `.tmp/res/{interp1,compiled1}`, not recorded (the records are the train's build's,
+the user's rule of 2026-11-23):
+- compiled: all 11 pass (t04537, t04712-t04715, t04865, t04868, t04870, t07735, t07736, t07737), and t04878, t07643 and t06005
+  beside them; no regression.
+- interp: 7 of the 11 pass (t04537, t04865, t04868, t04870, t07735-t07737), with t04878 and t07643; t04712-t04715 failed on
+  `AnnotationTypeMismatchExceptionProxy.generateException` not translated (jrt's annotation members call it; no Java code of
+  the world does), and t04538 (ExceptionHidingLoader) regressed: `Class.forName(name, false, loader)` through a loader whose
+  `loadClass` returns null returned null. Fixed after the build (3860d35e1): j2g roots the three ExceptionProxies'
+  `generateException`; jrt's forName throws ClassNotFoundException for a null, as HotSpot does.
+
+## As built: JCS51's processors from their class files (2026-11-23, write-ahead of javac's tool build)
+
+The user's decision of 2026-11-23: JCS51's annotation processors (`:diag-processors`, 25 diagnostics rows) are loaded from
+their class files through this loader, AbstractProcessor a superclass the defined classes may extend in javac's tool world,
+instead of JCS51 (a)'s processors given as sources.
+- `overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/FileManager.java`: `getClassLoader(location)` returns a `DirLoader`
+  (it returned null, so JavacProcessingEnvironment's NameProcessIterator failed on `loadClass`:
+  `proc.processor.cant.instantiate`): a ClassLoader over the location's directories, the system loader its parent, whose
+  `findClass` reads `NAME.class` below a directory and defines it by `defineClass` (jrt's, then `arbace.lang.Bytecode.define`),
+  as javac's own JavacFileManager's URLClassLoader does. Its forms, `jdk/javac/forms/jdk/internal/jrt/javac/FileManager.ae`,
+  read by `bin/repr-java read-jdk --check --no-javac` of the overlay's six files on javac's tool 60886b4973e7 (the other five
+  byte for byte the committed forms; the night's `bin/javac-vendor verify` reads them all again).
+- j2g: `javax/annotation/processing/AbstractProcessor` on `arbace.j2g.model/class-supers` (its DynSub_C; javac's tool world
+  alone, as F6's javax.tools and com.sun.source classes): a processor defined from bytes extends it, and so does
+  JavacTestingAbstractProcessor, a class file of the test library; its `processingEnv` is read through the host's
+  `superField`, javac calls its `init`, `getSupported*` and `process` through the DynSub's slots.
+- Not proved yet: javac's tool (`bin/javac-vendor tool` at the train's gate executable) and the diagnostics level of the 25
+  tests (`bin/java-check --levels diagnostics --list`) are the next run.
