@@ -280,6 +280,11 @@ the world uses. Decided (Q1 (a)): the Go build's variant makes `FnMethod.primInt
 (no primitive fns: callers call `invoke`), and `invokeFn` converts a `^long` or `^double` parameter
 with `RT.longCast`/`doubleCast` on entry and a primitive return on exit, so the arithmetic stays the
 same; `IFn$LL` and the rest stay in the closed world for translated code (Q1).
+Since 2026-11-22 (doc/CLOJURE-DESIGN-REVIEW.md, CDR15 (a): the user's Q1 (b) in place of Q1 (a); doc/VENDOR-NOTES.md,
+hand change 39) the analysis is still Q1 (a)'s, but a fn with primitive signatures implements their interfaces: an
+evaluated one is an object of EvalFn's DynSub type, its class made by `Dyn.defineProxyClass` with the interfaces, each
+`invokePrim` its `invoke` converted; a Java forms fn's class (which implements them, as on the JVM) is interpreted as an
+ordinary class extending AFunction or RestFn, objects of their DynSub types, rather than as `CF$FnObj`.
 
 ## 4. What the evaluator needs from the others
 

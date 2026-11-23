@@ -61,7 +61,15 @@
     ^{:tag (array 4 uint64)} ops
     ^{:tag (* ci/Func)} flush
     ;; two words of static memory a helper's results are written into
-    ^uint64 scratch))
+    ^uint64 scratch
+    ;; the C's threads (queue 530, threads.go): their registrations, the main thread stepped off the baton between the stubs, the
+    ;; static timespec the stand-ins sleep with
+    ^{:tag (map (* ci/Thread) (* cthread))} cthreads
+    ^{:tag (* parker)} mainPk
+    ^uint64 ts
+    ;; the closures given to the C, by the index their copy holds in its first word (queue 530): a C thread may call one back after the
+    ;; outermost call that gave it ended (lib-systhreads/test_c_thread_register's closure, unregistered, as OCaml's stays put)
+    ^{:tag (slice (weak/Pointer oi/Closure))} closures))
 
 (go/var ^{:tag (* capi)} the)
 
@@ -176,6 +184,7 @@
 (go/func Flush "Flush flushes C's stdio (libc's exit, after the OCaml channels' flush at the program's end).\n" []
   (when (and (!= the nil) (!= (.-flush the) nil))
     (defer ((fn [] (recover))))
+    (.enter the)
     (.Call (.-p the) (.-Main (.-p the)) (.-flush the) nil)))
 
 (go/func RunMain "RunMain runs a C program of its own on ci (a test's helper program, OC201 (a), doc/ocaml/OCAML-SURVEY.md \"As built:\nOC199-OC201\"): the node program at path loaded as Load loads the stubs (musl initialized, the process's getpid, kill and\nraise the host's: a helper's kill of another process reaches it, which ci's own emulation, crt's, refuses), then its main\ncalled with argv and the environment; main's status, C's stdio flushed.\n"
@@ -340,7 +349,11 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
         (return (.alloc c 0 0)))
       (return (.alloc c (conv uint64 (len (.-F x))) tagDoubleArray)))
     (case [(* oi/Closure)]
-      (return (.alloc c 2 tagClosure)))
+      ;; its first word the index of the closure in closures, tagged (queue 530)
+      (let [a (.alloc c 2 tagClosure)]
+        (.Store64 (.-m c) a (bit-or (<< (conv uint64 (len (.-closures c))) 1) 1))
+        (set! (.-closures c) (append (.-closures c) (^{:inst [oi/Closure]} weak/Make x)))
+        (return a)))
     (case [(* oi/Custom)]
       (when [(values _ _ dims _ ok) (oi/BigarrayParts v)] ok
         (return (.alloc c (conv uint64 (+ 5 (len dims))) tagCustom)))
@@ -522,6 +535,11 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
               (aset (.-statics c) w v))
             (return v))))
       (case [tagClosure]
+        ;; a copy of an earlier call (queue 530: a C thread's callback of a closure given before): its index, while it lives
+        (let [i (>> (.Load64 m w) 1)]
+          (when (< i (conv uint64 (len (.-closures c))))
+            (when [v (.Value (aget (.-closures c) i))] (!= v nil)
+              (return v))))
         (oi/Internalf "a C stub returned a closure oi did not give it")))
     (let [b (addr (lit oi/Block :Tag tag :F (make (slice oi/Value) wosize)))]
       (when (>= tag tagAbstract)
@@ -581,7 +599,8 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
 
 (go/method call "call calls the C function f with oi's arguments a on ci's main thread.\n"
   ^oi/Value [^{:tag (* capi)} c ^{:tag (* oi/Thread)} th ^{:tag (* ci/Func)} f ^{:tag (slice oi/Value)} a]
-  (let [t (.-Main (.-p c))
+  (let [parked (.enter c)
+        t (.-Main (.-p c))
         sp (.-SP t)
         top (.-Top t)
         depth (.-Depth t)
@@ -599,6 +618,8 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
                 (when (== (.-depth c) 0)
                   (.reset c))
                 (set! (.-th c) prev)
+                (when (or parked (== (.-depth c) 0))
+                  (.leave c))
                 (when (!= r nil)
                   (when [(values flt ok) (assert (* crt/Fault) r)] ok
                     (oi/Internalf "a C stub's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
@@ -632,7 +653,8 @@ here, not a null pointer (queue 478).
 
 (go/method callRaw "callRaw is call with the representations reprs (CallRaw's): a value encoded, an unboxed or untagged argument as\nitself, the result likewise.\n"
   ^oi/Value [^{:tag (* capi)} c ^{:tag (* ci/Func)} f ^string reprs ^{:tag (slice oi/Value)} a]
-  (let [t (.-Main (.-p c))
+  (let [parked (.enter c)
+        t (.-Main (.-p c))
         sp (.-SP t)
         top (.-Top t)
         depth (.-Depth t)]
@@ -647,6 +669,8 @@ here, not a null pointer (queue 478).
                 (dec! (.-depth c))
                 (when (== (.-depth c) 0)
                   (.reset c))
+                (when (or parked (== (.-depth c) 0))
+                  (.leave c))
                 (when (!= r nil)
                   (when [(values flt ok) (assert (* crt/Fault) r)] ok
                     (oi/Internalf "a C stub's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
@@ -674,13 +698,18 @@ here, not a null pointer (queue 478).
         (.result c r)))))
 
 (go/method callback "callback is caml_callbackN_exn: the closure applied to the n arguments at args on oi's thread; the result, or\nthe exception raised marked as caml_callback_exn marks it.\n"
-  ^uint64 [^{:tag (* capi)} c ^uint64 clos ^int n ^uint64 args]
+  ^uint64 [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t ^uint64 clos ^int n ^uint64 args]
   (.fromCAll c)
   (let [f (.decode c clos)
         vs (make (slice oi/Value) n)]
     (for [i 0] (< i n) (inc! i)
       (aset vs i (.decode c (.Load64 (.-m c) (+ args (conv uint64 (* 8 i)))))))
-    (let [(values r exn) (.apply c f vs)]
+    (let [^oi/Value r nil
+          ^oi/Value exn nil]
+      (if (or (== t nil) (== t (.-Main (.-p c))))
+        (set! (values r exn) (.apply c f vs))
+        ;; a C thread's callback (queue 530): OCaml's code runs off the baton, so the C's other threads and oi's stubs run meanwhile
+        (.offBaton c (fn [] (set! (values r exn) (.apply c f vs)))))
       (.toCAll c)
       (when (!= exn nil)
         (return (bit-or (.encode c exn) 2)))
@@ -732,8 +761,14 @@ here, not a null pointer (queue 478).
                      (ai 0))]
       ["__oi_predef" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                        (ai (.encode c (.predef c (conv int (arg a 0))))))]
-      ["caml_callbackN_exn" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
-                              (ai (.callback c (arg a 0) (conv int (conv int32 (arg a 1))) (arg a 2))))]
+      ["caml_callbackN_exn" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                              (ai (.callback c t (arg a 0) (conv int (conv int32 (arg a 1))) (arg a 2))))]
+      ;; the C's threads (queue 530, threads.go)
+      ["__oi_thread_register" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
+                                (ai (conv uint64 (.register c t (conv int (conv int64 (arg a 0)))))))]
+      ["__oi_thread_unregister" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.unregister c t))))]
+      ["__oi_thread_acquire" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.acquire c t))))]
+      ["__oi_thread_release" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.release c t))))]
       ["caml_raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                       (.fromCAll c)
                       (oi/Raise (.decode c (arg a 0)))
@@ -917,6 +952,7 @@ a scanned block its fields, transitively.\n" ^{:tag (map uint64 bool)} [^{:tag (
 (go/method ccall "ccall calls runtime.c's helper name with integer arguments on ci's main thread, its state put back however it ends.\n"
   ^uint64 [^{:tag (* capi)} c ^string name & ^{:tag (slice uint64)} args]
   (let [f (aget (.-ByName (.-p c)) name)
+        parked (.enter c)
         t (.-Main (.-p c))
         sp (.-SP t)
         top (.-Top t)
@@ -927,7 +963,9 @@ a scanned block its fields, transitively.\n" ^{:tag (map uint64 bool)} [^{:tag (
     (defer ((fn []
               (set! (.-SP t) sp)
               (set! (.-Top t) top)
-              (set! (.-Depth t) depth))))
+              (set! (.-Depth t) depth)
+              (when parked
+                (.leave c)))))
     (range [i a args]
       (aset as i (lit ci/Arg :K \i :I (conv int64 a))))
     (conv uint64 (.-I (.Call (.-p c) t f as)))))

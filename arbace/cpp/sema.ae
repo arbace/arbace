@@ -1391,6 +1391,8 @@
 
 (defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
 
+
+
 (defn- same-sig? [f g]
   (and (= (:name f) (:name g)) (= (:kind f) (:kind g)) (= (boolean (:cq f)) (boolean (:cq g))) (= (:refq f) (:refq g))
        (= (mapv abi/unq (:ps (:ty f))) (mapv abi/unq (:ps (:ty g))))))
@@ -1686,6 +1688,12 @@
         (catch arbace.lang.ExceptionInfo x
           (if (= :access (:codegen/refused (ex-data x))) (*on-refusal* x k) (throw x)))))))
 
+;; cpp-rt-own4, the code generator: a member function's type being resolved (declare-fn!), where a class template's
+;; specialization is only named ([temp.inst]/2): template.ae's instantiate-class* names one lazily there when its template
+;; is already being instantiated twice up the stack (<valarray>'s _Expr<_UnClos<__unary_plus, _Expr, _Clos>, value_type>
+;; operator+() const, an endless chain of instantiations otherwise); declare-instance! binds it false for a class's body
+(def ^:dynamic *in-signature* false)
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -1765,7 +1773,7 @@
         ;; (a trailing return type's decltype names the parameters: `-> decltype(make_move_iterator(__it.base()))`;
         ;; they are in its scope, [basic.scope.param]; G4)
         tscope (fn-type-scope rs n)
-        ty (assoc (resolve-type tscope qt) :cq (method-const? qt))
+        ty (assoc (binding [*in-signature* (and cid (not (checking?)))] (resolve-type tscope qt)) :cq (method-const? qt))
         ty (dissoc ty :cq)
         nm (:name n)
         body (body-of n)
@@ -1885,8 +1893,11 @@
         _ (when (and old (or bns hidden))
             (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id old :pos (:pos f)}))
         id (or old (next-id))
-        pinfo {:param-names (mapv :name pn)
-               :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}]
+        pinfo (cond-> {:param-names (mapv :name pn)
+                       :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}
+                ;; (cpp-rt-own4, the code generator: each parameter's top-level const, which the function's type leaves out,
+                ;; [dcl.fct]/5, and its variable keeps: analyze-fn!)
+                (not (checking?)) (assoc :param-const (mapv #(boolean (:_const %)) pn)))]
     (if old
       (do
       ;; (queue 518, the checker: [dcl.fct.def.delete]/4, a deleted definition is the function's first declaration: one after a
@@ -1894,7 +1905,7 @@
       ;; `sometype::sometype() = delete;`, cpp0x/deleted10.C's explicit specializations)
       (when (and (checking?) (:explicitlyDeleted n) (not (header-node? n)) (not (:deleted (fnd id))))
         (*on-refusal* (ex-info (str "codegen: deleted definition of '" (:name n) "' is not its first declaration") {:codegen/refused :redecl}) n))
-      (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names] [])))
+      (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names :param-const] [])))
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
                             (:used f) (assoc :used true)
@@ -7274,7 +7285,15 @@
       (cx-access! ctx qcid (first q) :public cid nil))
     (let [[fcid fids e] (if (str/starts-with? (str nm) "~")
                           ;; an explicit destructor call (p->~T(), [class.dtor]/14): the class's destructor
-                          (let [k (or qcid cid) d (:dtor (abi/cls k))] (when d [k [d] {:e :fn :id d}]))
+                          ;; (cpp-rt-own4, DECISION cpp-rt-own3-2 (a), the code generator: a class not complete here, its
+                          ;; destructor not declared yet, resolved when the function is written, codegen's :late-dtor-call:
+                          ;; floating_from_chars.cc's vector<__pool_resource::_BigBlock, polymorphic_allocator<_BigBlock>>
+                          ;; destroyed, whose _BigBlock the unit never defines, `__p->~_Up()` in allocator_traits<
+                          ;; polymorphic_allocator<_Tp>>::destroy, analyzed by the lazy round though clang never instantiates it)
+                          (let [k (or qcid cid) c (abi/cls k) d (:dtor c)]
+                            (cond d [k [d] {:e :fn :id d}]
+                                  (and (not (checking?)) (or (not (:complete c)) (:defining c))) [k [] {:e :late-dtor :cls k}]
+                                  :else nil))
                           (method-set-of (or qcid cid) nm))
           fids (if qcid fids fids)
           ;; (round 54, fourth pass: o.B::Y whose qualifier names an enumeration of o's class, [expr.ref]/7.5: a member
@@ -7287,6 +7306,8 @@
                     (catch arbace.lang.ExceptionInfo _ nil)))]
       (cond
         en {:op :comma :l obj :r en :ty (:ty en) :cat (:cat en)}
+        (= :late-dtor (:e e)) {:op :late-dtor :cls (:cls e) :obj (update (cx-via obj qcid) :ty #(if (map? %) (dissoc % :c :v) %))
+                               :qualified (boolean qcid) :ty {:k :overload} :cat :lv}
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
@@ -7605,6 +7626,8 @@
    "__builtin_signbit" :signbit "__builtin_isfinite" :isfinite
    ;; (cpp-rt-own: and floating_from_chars.cc's __builtin_isinf, with __builtin_isnan beside it)
    "__builtin_isinf" :isinf "__builtin_isnan" :isnan
+   ;; (cpp-rt-own4: floating_to_chars.cc's __builtin_fpclassify)
+   "__builtin_fpclassify" :fpclassify
    "__builtin_alloca" :alloca
    "__builtin_clear_padding" :clear-padding
    ;; (n-cpp-eval: GCC's __builtin_shuffle of GNU vectors, g++.dg's torture/vshuf-*.C)
@@ -7653,6 +7676,11 @@
 
 (defn analyze-call [ctx callee args]
   (case (:op callee)
+    ;; (cpp-rt-own4: an explicit destructor call of a class not complete where analyzed, member-expr's :late-dtor; the
+    ;; destructor found when the call is written)
+    :late-dtor (if (seq args)
+                 (fail :call "a destructor call with arguments")
+                 {:op :late-dtor-call :cls (:cls callee) :obj (:obj callee) :virtual-ok (not (:qualified callee)) :ty abi/void :cat :pr})
     :mbound (let [ft (:fty callee)]
               {:op :mcall :obj (:obj callee) :m (:m callee) :fty ft
                :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
@@ -7675,7 +7703,10 @@
                  nontmpl (when (and (checking?) (:targs-text callee))
                            (filter #(let [f (fnd %)] (and (not (:tinst f)) (not (:tid f)))) own-fns))
                  own-fns (if (seq nontmpl) (remove (set nontmpl) own-fns) own-fns)
-                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method)) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 ;; (cpp-rt-own4, the code generator: no argument-dependent lookup for a qualified name, [basic.lookup.argdep]/1:
+                 ;; floating_from_chars.cc's `fast_float::from_chars(first, last, value, fmt)` had found std::from_chars through
+                 ;; the std::chars_format argument, a better match than the template, from_chars(double&) calling itself)
+                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?))))) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
                  _ (when (and (empty? cands) (empty? (:tmpls callee)) (empty? nontmpl)) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
@@ -7782,6 +7813,16 @@
                             ;; (CP338 (a): none viable, a != b's rewritten candidate !(a == b), [over.match.oper]/3.4: a
                             ;; class's defaulted operator!= visible in a defaulted <=>'s body, (x <=> y) != 0 of std::strong_ordering)
                             (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr}))
+          ;; (cpp-rt-own4, the code generator: the built-in candidate for two operands of one enumeration type, [over.built]/16's
+          ;; operator==(T, T) and the relational ones, exact matches, better than a function reached through a user-defined
+          ;; conversion of an operand ([over.match.best]/2.1, [over.ics.rank]/2.1): floating_from_chars.cc's auto_locale, `ec ==
+          ;; errc{}` of a std::errc, had called operator==(const error_condition&, const error_condition&) through
+          ;; error_condition's converting constructor; the built-in operator then, as when none is viable)
+          (and (not (checking?)) (#{"==" "!=" "<" ">" "<=" ">="} o) (= 2 (count args)) (nil? lc)
+               (let [[ta tb] (map #(abi/unq (abi/non-ref (:ty %))) args)] (and (abi/enum? ta) (= ta tb)))
+               (not (contains? ms best))
+               (some #(abi/class? (abi/unq (abi/non-ref %))) (:ps (:ty (fnd best)))))
+          nil
           (contains? ms best) (method-call ctx best l more true)
           :else (fn-call ctx best args))))))
 
@@ -8760,7 +8801,10 @@
     (if (and (= "DeclRefExpr" (:kind (first (kids n)))) (atomic-builtin? (str (get-in (first (kids n)) [:referencedDecl :name]))))
       ;; an __atomic builtin a template's pattern wrote as a call (the parser keeps AtomicExpr outside templates)
       (atomic-expr ctx (get-in (first (kids n)) [:referencedDecl :name]) (rest (kids n)))
-    (if-let [b (when (= "DeclRefExpr" (:kind (first (kids n)))) (value-builtins (get-in (first (kids n)) [:referencedDecl :name])))]
+    (if-let [b (when (= "DeclRefExpr" (:kind (first (kids n))))
+                 (let [b (value-builtins (get-in (first (kids n)) [:referencedDecl :name]))]
+                   ;; (cpp-rt-own4: __builtin_fpclassify the code generator's alone, the checker's records made without it)
+                   (when-not (and (= :fpclassify b) (checking?)) b)))]
       ;; the builtins that are their operand's value (G4: the headers' __builtin_expect(e, v): e as a long;
       ;; __builtin_constant_p: 0 at run time, as clang folds it at -O0 when e is not a constant)
       (if (vector? b)
@@ -8818,6 +8862,28 @@
                      :isfinite (let [d (bin "-" xn xn)] (bin "==" d d))
                      :isinf (let [d (bin "-" xn xn)] (bin "&&" (bin "==" xn xn) (bin "!=" d d)))
                      :isnan (bin "!=" xn xn))]
+          (convert-scalar (rv (analyze ctx node)) abi/int* false))
+        ;; (cpp-rt-own4: __builtin_fpclassify(nan, inf, normal, subnormal, zero, x), GCC's and clang's classification, as clang's
+        ;; CGBuiltin tests it: zero when x == 0, nan when x is unordered, inf when |x| is infinite (x - x a NaN), normal when |x| is
+        ;; at least the type's smallest normal (<cfloat>'s FLT_MIN, DBL_MIN, LDBL_MIN), else subnormal; an int)
+        :fpclassify
+        (let [[an ai anorm asub az xn] (rest (kids n))
+              _ (when-not xn (fail :call "__builtin_fpclassify of " (count (rest (kids n))) " arguments"))
+              t (abi/unq (:ty (rv (analyze ctx xn))))
+              [qt mn] (case (abi/bn t)
+                        :float ["float" "1.17549435082228750796873653722224568e-38"]
+                        :double ["double" "2.22507385850720138309023271733240406e-308"]
+                        :ldouble ["long double" "3.36210314311209350626267781732175260e-4932"]
+                        (fail :type "__builtin_fpclassify of " (pr-str t)))
+              lit (fn [v] {:kind "FloatingLiteral" :value v :type {:qualType qt} :valueCategory "prvalue" :range (:range n)})
+              bin (fn [o a c] {:kind "BinaryOperator" :opcode o :inner [a c] :range (:range n)})
+              cnd (fn [c a e] {:kind "ConditionalOperator" :inner [c a e] :range (:range n)})
+              d (bin "-" xn xn)
+              node (cnd (bin "==" xn (lit "0.0")) az
+                        (cnd (bin "!=" xn xn) an
+                             (cnd (bin "!=" d d) ai
+                                  (cnd (bin "||" (bin ">=" xn (lit mn)) (bin "<=" xn {:kind "UnaryOperator" :opcode "-" :inner [(lit mn)] :range (:range n)}))
+                                       anorm asub))))]
           (convert-scalar (rv (analyze ctx node)) abi/int* false))
         ;; __builtin_addressof(x): x's address, no operator& ([specialized.addressof])
         :addressof (let [e (analyze ctx (second (kids n)))] {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr})
@@ -9280,19 +9346,41 @@
       {:ty {:k :dep :name "<deduction failed>"} :ctad-error (ex-info (.getMessage ^Throwable (:err r)) (assoc (ex-data (:err r)) :cx/node n))}
       :else (if-let [t (fallback)] {:ty t :ctad-init a} (throw (:err r))))))
 
+(defn- vla-local
+  "cpp-rt-own4 (DECISION cpp-rt-own3-1 (a)), the code generator's: GNU's variable-length array, a block-scope array whose
+  outermost bound is no constant (floating_to_chars.cc's `char buffer[output_length_upper_bound + 1];`): [type bound], the
+  type {:k :arr :n nil :vla true :of T} and the bound the parser kept (the VarDecl's :_vla, outermost first) analyzed here
+  as an integer prvalue, clang's VariableArrayType's size expression, evaluated where the declaration is (codegen's
+  local-decl!: llvm.stacksave, a dynamic alloca, llvm.stackrestore at the scope's exits). Nil when the declaration is no
+  such array (the element type must resolve: an inner bound no constant stays the refusal)."
+  [ctx n qt]
+  (let [b (first (:_vla n))
+        f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))]
+    (when (and (map? b) (seq? f) (= 'array (first f)) (= 3 (count f)) (not (number? (second f)))
+               (not= "static" (:storageClass n)) (not (:tls n)) (nil? (init-kid n)))
+      (let [et (resolve-type-form (:scope ctx) (nth f 2))
+            e (rv (analyze ctx b))]
+        (when (and (abi/integral? (abi/unq (abi/underlying (abi/unq (:ty e))))) (not (abi/class? (abi/unq et))))
+          [(assoc (abi/arr nil et) :vla true) e])))))
+
 (defn- local-var! [ctx n storage]
   (let [qt (get-in n [:type :qualType])
         ct (ctad-template (:scope ctx) (or (:_ctad n) qt))
         cv (if ct (ctad-var ctx n ct qt) (ctad-compound-var (:scope ctx) n qt))
+        vla (atom nil)
         ty (if cv (:ty cv) (try (resolve-type (:scope ctx) qt)
                 (catch arbace.lang.ExceptionInfo x
+                  (cond
+                    ;; (cpp-rt-own4, the code generator: a VLA, vla-local)
+                    (and (not (checking?)) (= :local storage) (:_vla n) (boolean (re-find #"not a constant" (str (.getMessage x)))))
+                    (if-let [[t e] (vla-local ctx n qt)] (do (reset! vla e) t) (throw x))
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
-                  (if (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
+                    (and (checking?) (nil? (init-kid n)) (re-matches #"[A-Za-z_]\w*" (str qt)))
                     (try (resolve-type (:scope ctx) (str qt "<>")) (catch arbace.lang.ExceptionInfo _ (throw x)))
                     ;; (queue 500: a specialization surely without a definition, the variable's refusal)
-                    (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
+                    :else (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
         _ (cx-void-var! n ty)
         _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
@@ -9301,6 +9389,7 @@
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
         v (cond-> {:id id :name (:name n) :ty ty :storage st :fn (:fn-id ctx) :init-node (init-kid n) :constexpr (boolean (:constexpr n)) :tls (boolean (:tls n))}
             cv (assoc :ctad-init (:ctad-init cv) :ctad-error (:ctad-error cv))
+            @vla (assoc :vla-n @vla)
             (and (checking?) (unavailable-node? n)) (assoc :unavailable true)
             ;; (queue 509: the innermost try-block it is declared in, for cx-movable-var)
             (and (checking?) (:cx-try ctx)) (assoc :cx-try (:cx-try ctx))
@@ -10185,7 +10274,14 @@
         ;; a member's body sees the class's members: its scope is the class's for lookups
         fs (if (and cls (not (:keep-def-scope f))) (assoc fs :parent (:scope (abi/cls cls))) fs)
         pids (vec (map-indexed (fn [i t]
-                                 (let [id (next-id) nm (nth (:param-names f) i nil)]
+                                 (let [id (next-id) nm (nth (:param-names f) i nil)
+                                       ;; (cpp-rt-own4, the code generator: the parameter's top-level const, declare-fn!'s
+                                       ;; :param-const, when the parameters are as many as the function's: floating_to_chars.cc's
+                                       ;; `const optional<int> precision`, whose value() is the const& one, and `const int precision`
+                                       ;; given to optional<int>(_Up&&) as const int&)
+                                       t (if (and (= (count (:param-const f)) (count (:ps (:ty f)))) (nth (:param-const f) i false)
+                                                  (not (abi/ref? t)) (not (checking?)))
+                                           (assoc t :c true) t)]
                                    (swap! *vars* assoc id {:id id :name nm :ty t :storage :param :fn fid})
                                    (when nm (enter! fs nm {:e :var :id id}))
                                    id))

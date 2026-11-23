@@ -13,7 +13,11 @@
            [java.nio.file.attribute FileAttribute]))
 
 (defn- clj [s] (rules/translate s {:kind :clj :to-ae true :features #{:clj}}))
-(defn- cljc [s] (rules/translate s {:kind :cljc :to-ae true :features #{:clj}}))
+(defn- body
+  "A .ae text without read --full's record at its end (every .cljc read into a .ae has one since CDR13 (a))."
+  [t]
+  (if-let [[b _] (rules/full-split t)] b t))
+(defn- cljc [s] (body (rules/translate s {:kind :cljc :to-ae true :features #{:clj}})))
 (defn- cljc-kept [s] (rules/translate s {:kind :cljc :to-ae false :features #{:clj}}))
 
 (deftest form-ends
@@ -59,8 +63,15 @@
     (is (thrown-with-msg? Exception #"keyword" (cljc "#?(clj 1)"))))
   (testing "kept when the file stays .cljc, and in .clj files"
     (is (= "#?(:clj arbace.core :cljs cljs.core)" (cljc-kept "#?(:clj clojure.core :cljs cljs.core)")))
-    (is (= "(f 1)" (rules/translate "(f #?(:cljs 2 :arbace 1))"
-                                     {:kind :cljc :to-ae true :features #{:arbace}})))))
+    (is (= "(f 1)" (body (rules/translate "(f #?(:cljs 2 :arbace 1))"
+                                           {:kind :cljc :to-ae true :features #{:arbace}})))))
+  (testing "recorded at the .ae's end since CDR13 (a), as read --full did, and given back by print"
+    (let [s "(f #?(:cljs 2 :clj 1))
+" t (rules/translate s {:kind :cljc :to-ae true :features #{:clj}})]
+      (is (rules/full? t))
+      (is (= "(f 1)
+" (body t)))
+      (is (= s (rules/print-text t {:kind :clj :to-ae true :features #{:clj}}))))))
 
 (deftest rename
   (are [from to] (= to (rename/rename from))
@@ -95,20 +106,6 @@
          (clj "(.__getClojureFnMappings p) \"__initClojureFnMappings\" __updateClojureFnMappings __clojureFnMap")))
   (is (= "x__getClojureFnMappings __clojureFnMapX" (clj "x__getClojureFnMappings __clojureFnMapX"))))
 
-(deftest security-manager
-  (is (= "(java.lang.SecurityManager.) (java.lang.SecurityManager/x) ^java.lang.SecurityManager s"
-         (clj "(SecurityManager.) (SecurityManager/x) ^SecurityManager s")))
-  (testing "strings, comments, keywords, qualified names left alone"
-    (is (= "\"SecurityManager\" ; SecurityManager\n:SecurityManager java.lang.SecurityManager"
-           (clj "\"SecurityManager\" ; SecurityManager\n:SecurityManager java.lang.SecurityManager"))))
-  (testing "a file that imports it is left alone"
-    (are [s] (= s (clj s))
-      "(ns a (:import (java.io File) (java.lang SecurityManager)))\n(SecurityManager.)"
-      "(ns a (:import [java.lang SecurityManager]))\n(SecurityManager.)"
-      "(import 'java.lang.SecurityManager)\n(SecurityManager.)"))
-  (testing "not in .java files"
-    (is (= "SecurityManager s;" (rules/translate "SecurityManager s;" {:kind :java})))))
-
 (deftest core-names
   (let [cn (fn [s] (rules/core-names s #{"return" "switch" "label"}))]
     (is (= "(ns a\n  (:require b)\n  (:refer-clojure :exclude [return switch]))\n(defn ^:private return [])\n(defmacro ^{:m 1} switch [])\n(def other 1)"
@@ -125,8 +122,10 @@
   (is (not (contains? (rules/arbace-core-names) "map"))))
 
 (deftest the-table
-  (is (= [:reader-conditionals :rename :proxy-methods :core-names :security-manager]
+  (is (= [:reader-conditionals :rename :proxy-methods :core-names]
          (map :id rules/rules)))
+  (testing "no one-way rule since CDR13 (a) and CDR14 (a)"
+    (is (every? #(= :reversible (:way %)) rules/rules)))
   (is (every? #(or (= :none (:rule %)) (some #{(:rule %)} (map :id rules/rules)))
               rules/divergences))
   (is (= "clojure.core" (rules/translate "clojure.core" {:kind :clj} #{:rename}))))
@@ -134,12 +133,12 @@
 (deftest plans
   (let [p #(main/plan %1 (set %2) (merge {:text []} %3))]
     (is (= {:kind :clj :to-ae true :out "a.ae"} (p "a.clj" ["a.clj"] {})))
-    (is (= {:kind :cljc :to-ae true :out "a.ae"} (p "a.cljc" ["a.cljc"] {})))
+    (is (= {:kind :cljc :to-ae true :out "a.ae" :full true} (p "a.cljc" ["a.cljc"] {})))
     (is (:skip (p "a.cljc" ["a.clj" "a.cljc"] {})))
     (is (:skip (p "a.clj" ["a.clj" "a.ae"] {})))
     (is (= {:kind :cljc :to-ae false :out "a.cljc"} (p "a.cljc" ["a.cljc"] {:keep-ext true})))
     (is (= {:kind :clj :to-ae true :out "data_readers.ae"} (p "data_readers.clj" [] {})))
-    (is (= {:kind :cljc :to-ae true :out "data_readers.ae"} (p "data_readers.cljc" [] {})))
+    (is (= {:kind :cljc :to-ae true :out "data_readers.ae" :full true} (p "data_readers.cljc" [] {})))
     (is (= {:kind :clj :to-ae false :out "data_readers.clj"} (p "data_readers.clj" [] {:keep-ext true})))
     (testing "data_readers files that would collide keep their names (Arbace merges all three)"
       (is (= {:kind :clj :to-ae true :out "data_readers.ae"}
@@ -171,9 +170,10 @@
     (put "data_readers.cljc" "{a/b #?(:cljs a.c/b-js :clj clojure.core/identity)}\n")
     (let [stats (main/run [(str src)] (str out) {:text []})]
       (is (= {:translated 4 :to-ae 3 :copied 1 :skipped 2 :unchanged 0 :errors 0} stats))
-      (is (= "{a/b arbace.core/identity}\n" (slurp (io/file out "data_readers.ae"))))
+      (is (= "{a/b arbace.core/identity}\n" (body (slurp (io/file out "data_readers.ae")))))
       (is (not (.exists (io/file out "data_readers.cljc"))))
-      (is (= "(ns a.b (:require [arbace.string :as s] ))\n;; arbace.set\n" (slurp (io/file out "a/b.ae"))))
+      (is (= "(ns a.b (:require [arbace.string :as s] ))\n;; arbace.set\n" (body (slurp (io/file out "a/b.ae")))))
+      (is (rules/full? (slurp (io/file out "a/b.ae"))) "a .cljc's conditionals recorded (CDR13 (a))")
       (is (= "(ns a.c)\n(arbace.set/union)\n" (slurp (io/file out "a/c.ae"))))
       (is (= "import arbace.lang.IFn;\n" (slurp (io/file out "a/C.java"))))
       (is (= "clojure.core\n" (slurp (io/file out "res/x.txt"))))

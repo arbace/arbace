@@ -314,9 +314,16 @@
                       ;; (a static data member in its class is declared, not defined: [class.static.data]/3)
                       (when (and (= rk :class) (not= "VarDecl" (:kind n))) (qdef! n (str path nm)))
                       (if-let [o (.get r nm)]
-                        (if-let [m (conflict rk o dc n)]
+                        ;; (cpp-diag-a: C++26's name-independent declarations, P2169 [basic.scope.scope]/5-6: a block-scope variable
+                        ;; named _ of automatic storage conflicts with no earlier declaration, and takes the name's place; GCC
+                        ;; accepts them before C++26 with a pedwarn, which -pedantic-errors makes an error)
+                        (if-let [m (when-not (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)) (nil? (:storageClass n)) (not (:tls n))
+                                                  (or (re-find #"(?:26|2c)$" (str (:std u))) (not (some #{"-pedantic-errors"} (:args u)))))
+                                     (conflict rk o dc n))]
                           (report! n m)
-                          (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2)))))
+                          (if (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)))
+                            (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})
+                            (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2))))))
                         (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})))))))
             (poison! [^java.util.HashMap r n] (when-let [nm (:name n)] (.put r nm {:poison true})))
             (params! [^java.util.HashMap r f]
@@ -4782,9 +4789,9 @@
       (when (< i n)
         (let [c (.charAt src i) d (if (< (inc i) n) (.charAt src (inc i)) \space)]
           (cond
-            (and (= c \/) (= d \/)) (let [e (let [k (.indexOf src "\n" i)] (if (neg? k) n k))]
+            (and (= c \/) (= d \/)) (let [e (let [k (.indexOf src "\n" (int i))] (if (neg? k) n k))]
                                       (doseq [k (range i e)] (.setCharAt sb (int k) \space)) (recur e))
-            (and (= c \/) (= d \*)) (let [e (let [k (.indexOf src "*/" (+ i 2))] (if (neg? k) n (+ k 2)))]
+            (and (= c \/) (= d \*)) (let [e (let [k (.indexOf src "*/" (int (+ i 2)))] (if (neg? k) n (+ k 2)))]
                                       (doseq [k (range i e) :when (not= \newline (.charAt src (int k)))] (.setCharAt sb (int k) \space)) (recur e))
             (or (= c \") (and (= c \') (not (and (pos? i) (Character/isLetterOrDigit (.charAt src (dec i)))))))
             (let [e (loop [k (inc i)] (cond (>= k n) n (= \\ (.charAt src k)) (recur (+ k 2)) (= c (.charAt src k)) k (= \newline (.charAt src k)) k :else (recur (inc k))))]
@@ -4881,7 +4888,7 @@
                     [b u] (usual lp (if (< (long (second r)) 32) [rv 32 false] r))]
                 (case o
                   ("/" "%") (if (zero? (.signum ^BigInteger rv)) (bad "division by zero is not a constant expression")
-                                [(wrap (if (= o "/") (.divide ^BigInteger lv rv) (.rem ^BigInteger lv rv)) b u) b u])
+                                [(wrap (if (= o "/") (.divide ^BigInteger lv rv) (.remainder ^BigInteger lv rv)) b u) b u])
                   ("<<" ">>") (let [w (long (second lp))]
                                 (cond (neg? (.signum ^BigInteger rv)) (bad "right operand of shift expression is negative")
                                       (>= (.compareTo ^BigInteger rv (BigInteger/valueOf w)) 0) (bad "right operand of shift expression is greater than or equal to the precision of the left operand")
@@ -5054,6 +5061,1897 @@
     (vec out)))
 
 (swap! checks conj fallthroughs)
+
+;; ---------------------------------------------------------------------------------------------
+;; cpp-diag-a (2026-11-22; the burst's stream on C++'s independence, doc/cpp/CPP-SURVEY.md, "As built: cpp-diag-a"): rules
+;; restated from the C++ standard (N4950 and the C++26 draft's wording where named) and the GCC 15.2 manual for GCC's wording;
+;; no GCC code read.
+
+;; Coroutines ([dcl.fct.def.coroutine], [expr.await], [expr.yield], [stmt.return.coroutine]):
+;; - [expr.await]/2: an await-expression (co_yield's too, [expr.yield]/1 being co_await of yield_value) appears only in a
+;;   function body: one in a namespace-scope variable's initializer is "'co_await' cannot be used outside a function"; nor in a
+;;   handler ("await expressions are not permitted in handlers"), nor in an unevaluated operand (sizeof, decltype: "'co_await'
+;;   cannot be used in an unevaluated context");
+;; - [dcl.spec.auto.general]/4 (a coroutine's return type is never deduced: [dcl.fct.def.coroutine]/1's note): a co_ operator in a
+;;   function or lambda whose declared return type is a placeholder with no trailing return type, "'co_await' cannot be used in a
+;;   function with a deduced return type", at the operator;
+;; - [stmt.return]/1 with [stmt.return.coroutine]: a coroutine has no return statement ("a 'return' statement is not allowed in
+;;   coroutine; did you mean 'co_return'?", at the function's name, as GCC places it);
+;; - [dcl.fct.def.coroutine]/3-/12: the promise type, coroutine_traits<R, P...>::promise_type (an explicit specialization the
+;;   unit gives for R with no other argument, else R::promise_type, [coroutine.traits.primary]), must declare initial_suspend,
+;;   final_suspend and get_return_object (/5, /7), unhandled_exception when exceptions are enabled (/5), return_void for a
+;;   co_return with no operand and return_value for one with a non-void operand ([stmt.return.coroutine]/2), yield_value for a
+;;   co_yield ([expr.yield]/1), and not both return_void and return_value (/6): "no member named 'X' in 'P'" (GCC's places:
+;;   the function's name, final_suspend at the body's closing brace, return_value or return_void at the co_return, yield_value at
+;;   the co_yield), "the coroutine promise type 'P' declares both 'return_value' and 'return_void'". Judged only when the
+;;   promise class is resolved: a complete class of the unit, no bases, no using-declaration, the function no template's and
+;;   no member function (whose traits take the object parameter), no partial specialization of coroutine_traits in the unit.
+
+(defn- co-word ^String [c] (case (:kind c) "CoawaitExpr" "co_await" "CoyieldExpr" "co_yield" "co_return"))
+
+(defn- co-nodes
+  "Every co_ node of a function body `x` with its ancestors' kinds (innermost first), not looking into lambdas, local classes
+  or nested functions."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    ((fn w [x anc]
+       (cond
+         (map? x) (cond (co-kinds (:kind x)) (do (.add out [x anc]) (w (:inner x) (cons x anc)))
+                        (or (= "LambdaExpr" (:kind x)) (#{"CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"} (:kind x)) (fn-kinds (:kind x))) nil
+                        :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v (if (:kind x) (cons x anc) anc))))
+         (or (vector? x) (seq? x)) (doseq [y x] (w y anc))
+         :else nil))
+     x ())
+    (vec out)))
+
+(defn- returns-in
+  "The return statements of a function body `x`, not looking into lambdas, local classes or nested functions."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    ((fn w [x]
+       (cond
+         (map? x) (cond (= "ReturnStmt" (:kind x)) (.add out x)
+                        (or (= "LambdaExpr" (:kind x)) (#{"CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl"} (:kind x)) (fn-kinds (:kind x))) nil
+                        :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v)))
+         (or (vector? x) (seq? x)) (doseq [y x] (w y))
+         :else nil))
+     x)
+    (vec out)))
+
+(defn- deduced-ret? [^String qt]
+  (boolean (and (re-find #"^(?:const\s+)?(?:auto|decltype\(auto\))\s*\(" qt)
+                (not (re-find #"\)\s*(?:const\s*|volatile\s*|&{1,2}\s*|noexcept(?:\([^()]*\))?\s*)*->" qt)))))
+
+(defn coroutine-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        at! (fn [off msg]
+              (when off
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :coroutine :msg msg}))))
+        mine? (fn [n] (= main (or (get-in n [:range :begin :file]) (get-in n [:range :begin :expansionLoc :file]))))
+        begin (fn [n] (when (mine? n) (get-in n [:range :begin :offset])))
+        classes (java.util.HashMap.)
+        specs (java.util.ArrayList.)
+        partial? (volatile! false)
+        _ ((fn ns-walk [nodes prefix]
+             (doseq [n nodes]
+               (case (:kind n)
+                 "NamespaceDecl" (ns-walk (:inner n) (if (and (= "std" (:name n)) (= "" prefix)) "std::" (str prefix (when (:name n) (str (:name n) "::")))))
+                 "LinkageSpecDecl" (ns-walk (:inner n) prefix)
+                 "CXXRecordDecl" (when (and (:name n) (:completeDefinition n) (not (str/starts-with? prefix "std::")))
+                                   (let [q (str prefix (:name n))]
+                                     (.put classes q (if (.containsKey classes q) :ambiguous n))
+                                     (ns-walk (:inner n) (str q "::"))))
+                 "ClassTemplateSpecializationDecl" (when (= "coroutine_traits" (:name n)) (.add specs n))
+                 "ClassTemplatePartialSpecializationDecl" (when (= "coroutine_traits" (:name n)) (vreset! partial? true))
+                 nil)))
+           (:nodes u) "")
+        cls (fn [^String q] (let [q (str/replace (str/replace q #"^(?:struct|class)\s+" "") #"\s+" "")
+                                  q (str/replace q #"^::" "")
+                                  c (.get classes q)]
+                              (when (map? c) c)))
+        promise-in (fn [c]
+                     (when (and c (empty? (:bases c)))
+                       (some (fn [m] (case (:kind m)
+                                       "CXXRecordDecl" (when (and (= "promise_type" (:name m)) (:completeDefinition m)) m)
+                                       ("TypeAliasDecl" "TypedefDecl") (when (= "promise_type" (:name m)) (or (cls (str (get-in m [:type :qualType]))) :unknown))
+                                       nil))
+                             (:inner c))))
+        promise-of (fn [^String r method?]
+                     (let [r (str/trim r)
+                           mine (filter (fn [s] (= (str/replace (str (get-in (first (:inner s)) [:type :qualType])) #"^::" "") r)) specs)]
+                       (cond
+                         @partial? nil
+                         ;; (a member function's traits take its object parameter: judged only with R's primary traits)
+                         (and (seq mine) method?) nil
+                         (seq mine) (when (= 1 (count mine))
+                                      (let [s (first mine) targs (filter #(= "TemplateArgument" (:kind %)) (:inner s))]
+                                        (when (and (= 2 (count targs)) (:isPack (second targs)))
+                                          (promise-in (assoc s :bases [])))))
+                         :else (promise-in (cls r)))))
+        no-exc? (some #{"-fno-exceptions"} (:args u))
+        names-of (fn [p] (set (keep :name (:inner p))))
+        literal-like #{"IntegerLiteral" "FloatingLiteral" "StringLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "InitListExpr" "UnaryOperator" "BinaryOperator"}
+        coroutine! (fn [f b lambda?]
+                     (let [cos (co-nodes b)
+                           qt (str (if lambda? (get-in f [:inner 0 :inner 0 :type :qualType]) (get-in f [:type :qualType])))]
+                       (when (seq cos)
+                         (let [[c] (first cos)]
+                           (cond
+                             (deduced-ret? qt)
+                             (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type"))
+                             ;; (no coroutine at all, [dcl.fct.def.coroutine]/4: coroutines' "cannot be used in a constructor", ...)
+                             (and (not lambda?)
+                                  (or (#{"CXXConstructorDecl" "CXXDestructorDecl"} (:kind f)) (and (= "FunctionDecl" (:kind f)) (= "main" (:name f)))
+                                      (:constexpr f) (:consteval f) (re-find #"\.\.\.\)" qt)))
+                             nil
+                             :else
+                             (do
+                               (doseq [r (returns-in b)]
+                                 (at! (or (get-in f [:loc :offset]) (begin f)) "a 'return' statement is not allowed in coroutine; did you mean 'co_return'?")
+                                 r)
+                               (doseq [[c anc] cos]
+                                 (when (and (#{"CoawaitExpr" "CoyieldExpr"} (:kind c)) (some #(= "CXXCatchStmt" (:kind %)) anc))
+                                   (at! (begin c) (str (if (= "CoyieldExpr" (:kind c)) "yield" "await") " expressions are not permitted in handlers")))
+                                 (when (and (#{"CoawaitExpr" "CoyieldExpr"} (:kind c))
+                                            (some #(and (= "UnaryExprOrTypeTraitExpr" (:kind %)) (#{"sizeof" "alignof"} (:name %))) anc))
+                                   (at! (begin c) (str "'" (co-word c) "' cannot be used in an unevaluated context"))))
+                               (when (and (not lambda?) (fn-kinds (:kind f)) (mine? f))
+                                 (when-let [[_ r] (re-find #"^([^()]+?)\s*\(" qt)]
+                                   (let [p (promise-of r (= "CXXMethodDecl" (:kind f)))]
+                                     (when (and (map? p) (not (some #(#{"UsingDecl" "UsingShadowDecl"} (:kind %)) (:inner p))))
+                                       (let [ms (names-of p)
+                                             n-before (.size out)
+                                             pn (str (:name p))
+                                             name-off (or (get-in f [:loc :offset]) (begin f))
+                                             miss (fn [m] (str "no member named '" m "' in '" pn "'"))]
+                                         ;; ([expr.await]/3: with no await_transform in the promise, a co_await's operand of a class type
+                                         ;; with no operator co_await is its awaiter, and a co_yield's awaiter promise.yield_value(e)'s
+                                         ;; result; the awaiter has await_ready, await_suspend and await_resume, and await_suspend returns
+                                         ;; void, bool or a coroutine handle ([expr.await]/3.7): "no member named 'await_ready' in 'A'",
+                                         ;; "'await_suspend' must return 'void', 'bool' or a coroutine handle", at the operator)
+                                         (when-not (ms "await_transform")
+                                           (let [outer (str/replace (str r) #"\s+" "")
+                                                 awaiter! (fn [c ^String tn]
+                                                            (let [tn (str/replace (str/trim tn) #"^(?:struct|class)\s+" "")
+                                                                  a (or (cls tn) (cls (str outer "::" tn)))]
+                                                              (when (and (map? a) (empty? (:bases a)) (not (some #(= "operator co_await" (:name %)) (:inner a)))
+                                                                         (not (some #(#{"UsingDecl" "UsingShadowDecl"} (:kind %)) (:inner a))))
+                                                                (let [an (set (keep :name (:inner a)))]
+                                                                  (doseq [m ["await_ready" "await_suspend" "await_resume"] :when (not (an m))]
+                                                                    (at! (begin c) (str "no member named '" m "' in '" tn "'")))
+                                                                  (let [sus (filter #(and (= "await_suspend" (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner a))]
+                                                                    (when (= 1 (count sus))
+                                                                      (let [rt (str/trim (or (second (re-find #"^(.*?)\s*\(" (str (get-in (first sus) [:type :qualType])))) ""))]
+                                                                        (when-not (or (str/blank? rt) (re-matches #"(?:const\s+)?(?:void|bool)" rt) (re-find #"coroutine_handle|\bauto\b|decltype" rt))
+                                                                          (at! (begin c) "'await_suspend' must return 'void', 'bool' or a coroutine handle")))))))))]
+                                             (doseq [[c] cos]
+                                               (case (:kind c)
+                                                 "CoawaitExpr" (let [e (first (:inner c))]
+                                                                 (when (#{"CXXFunctionalCastExpr" "CXXTemporaryObjectExpr" "CXXConstructExpr"} (:kind e))
+                                                                   (awaiter! c (str (get-in e [:type :qualType])))))
+                                                 "CoyieldExpr" (let [ys (filter #(and (= "yield_value" (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner p))]
+                                                                 (when (= 1 (count ys))
+                                                                   (when-let [[_ rt] (re-find #"^([A-Za-z_][\w:]*)\s*\(" (str (get-in (first ys) [:type :qualType])))]
+                                                                     (if (= "auto" rt)
+                                                                       ;; (a deduced return type: its one return statement's class prvalue)
+                                                                       (let [rs (returns-in (some #(when (= "CompoundStmt" (:kind %)) %) (:inner (first ys))))
+                                                                             e (first (:inner (first rs)))]
+                                                                         (when (and (= 1 (count rs)) (#{"CXXFunctionalCastExpr" "CXXTemporaryObjectExpr"} (:kind e)))
+                                                                           (awaiter! c (str (get-in e [:type :qualType])))))
+                                                                       (awaiter! c rt)))))
+                                                 nil))))
+                                         ;; (GCC checks the promise's other members after the body, and not when the body had an error)
+                                         (when (= n-before (.size out))
+                                         (when-not (ms "initial_suspend") (at! name-off (miss "initial_suspend")))
+                                         (when-not (ms "final_suspend") (at! (get-in b [:range :end :offset]) (miss "final_suspend")))
+                                         (when-not (ms "get_return_object") (at! name-off (miss "get_return_object")))
+                                         (when (and (not no-exc?) (not (ms "unhandled_exception"))) (at! name-off (miss "unhandled_exception")))
+                                         ;; ([dcl.fct.def.coroutine]/9-11: the promise's own operator new is called with the frame's size
+                                         ;; (a function with no parameter: no other form), its operator delete with (void*) or (void*,
+                                         ;; size_t); a get_return_object_on_allocation_failure is static, and asks a nothrow operator new
+                                         ;; (a promise's, noexcept) and std::nothrow: "'operator new' is provided by 'P' but is not usable
+                                         ;; with the function signature 'f'", "no suitable 'operator delete' for 'P'", "cannot call member
+                                         ;; function 'P::get_return_object_on_allocation_failure()' without object", "... but 'operator new'
+                                         ;; is not marked 'throw()' or 'noexcept'", "... but 'std::nothrow' cannot be found")
+                                         (let [mem (fn [nm] (filter #(and (= nm (:name %)) (= "CXXMethodDecl" (:kind %))) (:inner p)))
+                                               pts (fn [m] (filter #(= "ParmVarDecl" (:kind %)) (:inner m)))
+                                               size-t? (fn [t] (boolean (re-matches #"(?:std::)?(?:__)?size_t|unsigned long(?: int)?" (str/trim (str t)))))
+                                               news (mem "operator new") dels (mem "operator delete")
+                                               fparams (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                                               gro (mem "get_return_object_on_allocation_failure")]
+                                           (when (and (seq news) (empty? fparams)
+                                                      (not-any? (fn [m] (let [ps (vec (pts m))]
+                                                                          (and (seq ps) (size-t? (get-in (ps 0) [:type :qualType]))
+                                                                               (every? :init (rest ps)))))
+                                                                news))
+                                             (at! name-off (str "'operator new' is provided by '" pn "' but is not usable with the function signature")))
+                                           (when (and (seq dels)
+                                                      (not-any? (fn [m] (let [ps (vec (map #(str/replace (str (get-in % [:type :qualType])) #"\s+" "") (pts m)))]
+                                                                          (or (= ps ["void*"]) (and (= 2 (count ps)) (= "void*" (ps 0)) (size-t? (ps 1))))))
+                                                                dels))
+                                             (at! name-off (str "no suitable 'operator delete' for '" pn "'")))
+                                           (when (seq gro)
+                                             (cond (not-any? #(= "static" (:storageClass %)) gro)
+                                                   (at! name-off (str "cannot call member function '" pn "::get_return_object_on_allocation_failure()' without object"))
+                                                   (and (seq news) (not-any? #(re-find #"noexcept|throw\(\)" (str (get-in % [:type :qualType]))) news))
+                                                   (at! name-off (str "'" pn "::get_return_object_on_allocation_failure()' is provided by '" pn "' but 'operator new' is not marked 'throw()' or 'noexcept'"))
+                                                   (not (some (fn [ns] (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns))
+                                                                            (some #(and (= "VarDecl" (:kind %)) (= "nothrow" (:name %))) (:inner ns))))
+                                                              (:nodes u)))
+                                                   (at! name-off (str "'" pn "::get_return_object_on_allocation_failure()' is provided by '" pn "' but 'std::nothrow' cannot be found"))
+                                                   :else nil))))
+                                         (if (and (ms "return_value") (ms "return_void"))
+                                           (at! name-off (str "the coroutine promise type '" pn "' declares both 'return_value' and 'return_void'"))
+                                           (doseq [[c] cos]
+                                             (case (:kind c)
+                                               "CoreturnStmt" (let [e (first (:inner c))]
+                                                                (cond (nil? e) (when-not (ms "return_void") (at! (begin c) (miss "return_void")))
+                                                                      (literal-like (:kind e)) (when-not (ms "return_value") (at! (begin c) (miss "return_value")))
+                                                                      :else nil))
+                                               "CoyieldExpr" (when-not (ms "yield_value") (at! (begin c) (miss "yield_value")))
+                                               nil))))))))))))))
+        walk (fn w [nodes tmpl?]
+               (doseq [n nodes]
+                 (let [k (:kind n)]
+                   (cond
+                     (#{"FunctionTemplateDecl" "ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "VarTemplateDecl"} k) (w (:inner n) true)
+                     (fn-kinds k) (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                                    (when (mine? n) (if tmpl? (when-let [[c] (first (co-nodes b))] (when (deduced-ret? (str (get-in n [:type :qualType]))) (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type")))) (coroutine! n b false)))
+                                    (w (:inner b) tmpl?))
+                     (= "LambdaExpr" k) (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                                          (when (mine? n) (when-let [[c] (first (co-nodes b))]
+                                                            (when (deduced-ret? (str (get-in n [:inner 0 :inner 0 :type :qualType])))
+                                                              (at! (begin c) (str "'" (co-word c) "' cannot be used in a function with a deduced return type")))))
+                                          (w (:inner b) tmpl?))
+                     (#{"NamespaceDecl" "LinkageSpecDecl" "CXXRecordDecl" "ClassTemplateSpecializationDecl"} k) (w (:inner n) (or tmpl? (and (= "CXXRecordDecl" k) false)))
+                     (#{"VarDecl" "DeclStmt"} k)
+                     (do (when (and (= "VarDecl" k) (mine? n) (re-find #"decltype\s*\(\s*co_(?:await|yield)\b" (str (get-in n [:type :qualType]))))
+                           (at! (begin n) (str "'" (second (re-find #"(co_await|co_yield)" (str (get-in n [:type :qualType])))) "' cannot be used in an unevaluated context")))
+                         (w (:inner n) tmpl?))
+                     :else (when (vector? (:inner n)) (w (:inner n) tmpl?))))))]
+    ;; namespace-scope initializers
+    ((fn top [nodes]
+       (doseq [n nodes]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "VarDecl" (when-let [[c] (first (co-nodes (:inner n)))]
+                       (when (#{"CoawaitExpr" "CoyieldExpr"} (:kind c))
+                         (at! (begin c) (str "'" (co-word c) "' cannot be used outside a function"))))
+           nil)))
+     (:nodes u))
+    (walk (:nodes u) false)
+    (vec (distinct out))))
+
+(swap! checks conj coroutine-rules)
+
+;; GCC's coroutine interface (the GCC 15.2 manual's -fcoroutines with [coroutine.handle]'s members, which a coroutine's lowering
+;; calls: std::coroutine_handle<void>::address, a non-static member function, and std::coroutine_handle<P>::from_address, a static
+;; one, [coroutine.handle.export.import]): a std::coroutine_handle the main file declares itself whose coroutine_handle<void> (its
+;; explicit specialization, else the primary template) has no member address ("'address' is not a member of
+;; 'std::coroutine_handle<void>'") or another kind of one ("'std::coroutine_handle<void>::address' must be a non-overloaded
+;; method"), or whose primary template has no from_address or another kind of one, at a coroutine's first co_ operator
+;; (coroutines/pr105475*.C; an explicit specialization's from_address is coroutine-handle-interface's).
+
+(defn coroutine-handle-members
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        std-items (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)) (= main (get-in ns [:range :begin :file])))
+                        r (:inner ns)] r)
+        primary (some (fn [t] (when (and (= "ClassTemplateDecl" (:kind t)) (= "coroutine_handle" (:name t)))
+                                (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) (:inner t))))
+                      std-items)
+        void-spec (some (fn [r] (when (and (= "ClassTemplateSpecializationDecl" (:kind r)) (= "coroutine_handle" (:name r))
+                                           (= "void" (some #(when (= "TemplateArgument" (:kind %)) (str/trim (str (get-in % [:type :qualType])))) (:inner r))))
+                                  r))
+                        std-items)
+        hv (or void-spec primary)
+        members (fn [r nm] (filter #(= nm (:name %)) (:inner r)))
+        addr (when hv (let [ms (members hv "address")]
+                        (cond (empty? ms) "'address' is not a member of 'std::coroutine_handle<void>'"
+                              (not (and (= 1 (count ms)) (= "CXXMethodDecl" (:kind (first ms))) (not= "static" (:storageClass (first ms)))))
+                              "'std::coroutine_handle<void>::address' must be a non-overloaded method")))
+        from (when primary (let [ms (members primary "from_address")]
+                             (cond (empty? ms) "'from_address' is not a member of 'std::coroutine_handle<promise_type>'"
+                                   (not (and (= 1 (count ms)) (= "CXXMethodDecl" (:kind (first ms))) (= "static" (:storageClass (first ms)))))
+                                   "'std::coroutine_handle<promise_type>::from_address' must be a non-overloaded static function")))]
+    (when (or addr from)
+      (walk-nodes (fn [f _]
+                    (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+                      (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+                        (when-let [[c] (first (co-nodes b))]
+                          (when-let [o (get-in c [:range :begin :offset])]
+                            (let [[l col] (line-col starts (long o))]
+                              (doseq [m [addr from] :when m]
+                                (.add out {:line l :col col :kind :error :rule :coroutine :msg m}))))))))
+                  (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj coroutine-handle-members)
+
+;; Explicit object parameters (C++23, P0847R7: [dcl.fct]/6, [class.mfct.non.static], [over.match.funcs.general], [class.virtual]/7,
+;; [expr.prim.lambda.closure]/5, [expr.prim.req.general]/4, [expr.prim.this]/2):
+;; - only the first parameter of a member function's (or lambda's) parameter list may be one ("only the first parameter of a member
+;;   function can be declared as an explicit object parameter"), and none of a requires-expression's ("'this' specifier in a
+;;   requires-expression parameter"), of a function type's or of a non-member function ("a function type cannot have an explicit
+;;   object parameter", the parser's error for the latter);
+;; - it has no default argument ("an explicit object parameter may not have a default argument") and is no function parameter pack
+;;   ("an explicit object parameter cannot be a function parameter pack");
+;; - its member function is neither static nor virtual ("an explicit object member function cannot be 'static'", "... 'virtual'"),
+;;   overrides no virtual function of a base ("explicit object member function overrides virtual function"; a base's virtual
+;;   function of that name and the other parameters' count), and has no cv-qualifier or ref-qualifier ("explicit object member
+;;   function 'f' cannot have cv-qualifier", "... ref-qualifier"); a destructor has no parameter ("destructors may not have
+;;   parameters"); a non-virtual one marked override or final ([class.virtual]/5: "marked 'override', but does not override",
+;;   "marked 'final', but is not virtual") when it overrides nothing;
+;; - a lambda with one is neither mutable nor static ("'mutable' lambda specifier with explicit object parameter", "'static' ...");
+;; - its body has no `this` ("'this' is unavailable for explicit object member functions"), local classes' members aside.
+
+(defn- fn-tail-quals
+  "The qualifiers after a function type's parameter list (`void (S) const &` -> \"const &\"), nil when not found."
+  [^String qt]
+  (let [n (count qt)
+        open (loop [i 0 depth 0]
+               (when (< i n)
+                 (let [c (.charAt qt i)]
+                   (cond (and (= c \() (zero? depth)
+                              (not (re-find #"(?:decltype|typeof|__typeof__|noexcept|alignas|sizeof)\s*$" (subs qt 0 i)))) i
+                         (#{\< \(} c) (recur (inc i) (inc depth))
+                         (#{\> \)} c) (recur (inc i) (max 0 (dec depth)))
+                         :else (recur (inc i) depth)))))]
+    (when open
+      (let [close (loop [i (inc open) depth 1]
+                    (when (< i n)
+                      (let [c (.charAt qt i)]
+                        (cond (= c \() (recur (inc i) (inc depth))
+                              (= c \)) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                              :else (recur (inc i) depth)))))]
+        (when close
+          (str/trim (str/replace (subs qt (inc close)) #"(?:noexcept|throw)\b.*$|->.*$" "")))))))
+
+(defn explicit-object-params
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg]
+              (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :explicit-object :msg msg}))))
+        text (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset]) l (get-in n [:range :end :tokLen])]
+                       (when (and b e (mine? n) (<= (long b) (+ (long e) (long (or l 0)))) (<= (+ (long e) (long (or l 0))) (count src)))
+                         (subs src (long b) (+ (long e) (long (or l 0)))))))
+        classes (java.util.HashMap.)
+        _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n))
+                                  (.put classes (:name n) (if (.containsKey classes (:name n)) :ambiguous n))))
+                      (:nodes u) nil)
+        params (fn [m] (filter #(= "ParmVarDecl" (:kind %)) (:inner m)))
+        base-virtual (fn bv [cls nm nparams seen]
+                       (some (fn [b] (let [bn (str/replace (str/trim (str (get-in b [:type :qualType]))) #"^(?:struct|class)\s+" "")
+                                           c (.get classes bn)]
+                                       (when (and (map? c) (not (contains? seen bn)))
+                                         (or (some #(and (= nm (:name %)) (= "CXXMethodDecl" (:kind %)) (:virtual %)
+                                                         (= nparams (count (remove :isExplicitObjectParameter (params %)))))
+                                                   (:inner c))
+                                             (bv c nm nparams (conj seen bn))))))
+                             (:bases cls)))
+        this-in (fn [b] (let [acc (java.util.ArrayList.)]
+                          ((fn w [x] (cond (map? x) (cond (= "CXXThisExpr" (:kind x)) (.add acc x)
+                                                          (#{"CXXRecordDecl" "ClassTemplateDecl"} (:kind x)) nil
+                                                          :else (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w v)))
+                                           (or (vector? x) (seq? x)) (doseq [y x] (w y))))
+                           b)
+                          (vec acc)))
+        method! (fn [cls m]
+                  (let [ps (vec (params m))
+                        xs (filter :isExplicitObjectParameter ps)]
+                    (when (seq xs)
+                      ;; (C++23's: before it GCC's error "explicit object member function only available with '-std=c++23'")
+                      (when (< (long (cxx-year (:std u))) 23)
+                        (at! (first xs) "explicit object member function only available with '-std=c++23' or '-std=gnu++23'"))
+                      (doseq [p (rest ps) :when (:isExplicitObjectParameter p)]
+                        (at! p "only the first parameter of a member function can be declared as an explicit object parameter"))
+                      (doseq [p xs]
+                        (when (:init p) (at! p "an explicit object parameter may not have a default argument"))
+                        (when (str/ends-with? (str/trim (str (get-in p [:type :qualType]))) "...")
+                          (at! p "an explicit object parameter cannot be a function parameter pack")))
+                      (when (:isExplicitObjectParameter (first ps))
+                        (let [qt (str (get-in m [:type :qualType]))
+                              q (or (fn-tail-quals qt) "")
+                              t (or (text m) "")
+                              ;; the declarator's text after its parameter list, before the body or the end
+                              tail (let [i (.lastIndexOf t ")" (int (let [j (.indexOf t "{")] (if (neg? j) (count t) j))))] (if (neg? i) "" (subs t (inc i))))
+                              ov (re-find #"\boverride\b" (str/replace tail #"\{.*" ""))
+                              fi (re-find #"\bfinal\b" (str/replace tail #"\{.*" ""))]
+                          (case (:kind m)
+                            "CXXDestructorDecl" (at! m "destructors may not have parameters")
+                            nil)
+                          (when (= "static" (:storageClass m)) (at! m "an explicit object member function cannot be 'static'"))
+                          ;; ([dcl.fct.def.default]/2: an explicitly defaulted copy or move assignment returns a reference to its class
+                          ;; and takes its non-object parameter by reference: "defaulted 'operator=' ...")
+                          (when (and (= "operator=" (:name m)) (:explicitlyDefaulted m) cls (= 2 (count ps)))
+                            (let [rt (str/replace (str/trim (or (second (re-find #"^(.*?)\s*\(" qt)) "")) #"\s+" "")
+                                  pt (str/replace (str (get-in (second ps) [:type :qualType])) #"\s+" "")]
+                              (when (or (not= rt (str (:name cls) "&")) (not (str/ends-with? pt "&")))
+                                (at! m (str "explicitly defaulted 'operator=' of '" (:name cls) "' has an invalid signature")))))
+                          ;; (an allocation or deallocation function is a static member, [class.free]/1)
+                          (when (re-matches #"operator\s*(?:new|delete)\s*(?:\[\])?" (str (:name m)))
+                            (at! m (str "'" (:name m) "' cannot be an explicit object member function (it is implicitly static)")))
+                          (when (:virtual m) (at! m "an explicit object member function cannot be 'virtual'"))
+                          (when (re-find #"\b(?:const|volatile)\b" q) (at! m (str "explicit object member function '" (:name m) "' cannot have cv-qualifier")))
+                          (when (re-find #"&" q) (at! m (str "explicit object member function '" (:name m) "' cannot have ref-qualifier")))
+                          (when (and (= "CXXMethodDecl" (:kind m)) cls)
+                            (if (base-virtual cls (:name m) (dec (count ps)) #{})
+                              (at! m "explicit object member function overrides virtual function")
+                              (when-not (:virtual m)
+                                (cond ov (at! m (str "'" (:name m) "' marked 'override', but does not override"))
+                                      fi (at! m (str "'" (:name m) "' marked 'final', but is not virtual"))))))
+                          (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner m))]
+                            (doseq [x (take 1 (this-in b))]
+                              (at! x "'this' is unavailable for explicit object member functions"))))))))]
+    (walk-nodes (fn [n parent]
+                  (case (:kind n)
+                    ("CXXMethodDecl" "CXXDestructorDecl" "CXXConstructorDecl" "CXXConversionDecl")
+                    (when (mine? n) (method! (when (= "CXXRecordDecl" (:kind parent)) parent) n))
+                    "FunctionDecl" (when (and (mine? n) (:isExplicitObjectParameter (first (params n))) (not (str/includes? (str (text n)) "::")))
+                                     (at! n "a non-member function cannot have an explicit object parameter"))
+                    "RequiresExpr" (doseq [p (:params n) :when (:isExplicitObjectParameter p)]
+                                     (at! p "'this' specifier in a requires-expression parameter"))
+                    ("TypeAliasDecl" "TypedefDecl" "FieldDecl" "VarDecl")
+                    (when-let [t (text n)]
+                      (when (re-find #"[(,]\s*this\s+[A-Za-z_:]" (if (#{"FieldDecl" "VarDecl"} (:kind n)) (str/replace t #"(?s)[={\[].*" "") (str/replace t #"(?s)[{\[].*" "")))
+                        (at! n "a function type cannot have an explicit object parameter")))
+                    "LambdaExpr" (when-let [t (text n)]
+                                   (let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+                                         bo (get-in b [:range :begin :offset])
+                                         head (if (and bo (mine? b)) (subs src (long (get-in n [:range :begin :offset])) (long bo)) t)]
+                                     (when (re-find #"\(\s*this\b" head)
+                                       (when-let [[_ w] (re-find #"\)\s*(?:[^()]*\s)?\b(mutable|static)\b" head)]
+                                         (at! n (str "'" w "' lambda specifier with explicit object parameter"))))))
+                    nil))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj explicit-object-params)
+
+;; [basic.scope.scope]/4 and [over.load]/1 with explicit object parameters (C++23): two member function declarations of a class with
+;; the same name, the same non-object parameter-type-list and both templates or neither correspond, so cannot be overloaded, when
+;; one is static, or when both are non-static with corresponding object parameters: exactly one an implicit object member function
+;; with no ref-qualifier and the object parameters' types the same after removing references, or the types the same (an implicit
+;; object member function's object parameter "cv X&", "cv X&&" with &&). Judged when one of the two has an explicit object parameter,
+;; whose type names the class unless the other is static (GCC's "'g' cannot be overloaded with 'f'", at the later one).
+
+(defn- obj-type-key
+  "A parameter type's [base cv ref] (`S const&` -> [\"S\" #{\"const\"} \"&\"]), the base's spaces dropped."
+  [^String t]
+  (let [t (str/trim t)
+        ref (cond (str/ends-with? t "&&") "&&" (str/ends-with? t "&") "&" :else nil)
+        cv (set (re-seq #"\b(?:const|volatile)\b" t))
+        base (-> t (str/replace #"\b(?:const|volatile|struct|class)\b" "") (str/replace #"[&\s]" ""))]
+    [base cv ref]))
+
+(defn xobj-overloads
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        norm (fn [^String t] (-> t (str/replace #"\s+" " ") str/trim))]
+    (walk-nodes
+     (fn [c _]
+       (when (and (= "CXXRecordDecl" (:kind c)) (:completeDefinition c) (:name c) (mine? c))
+         (let [cn (:name c)
+               ms (vec (keep (fn [m]
+                               (let [[f tmpl] (cond (= "CXXMethodDecl" (:kind m)) [m false]
+                                                    (= "FunctionTemplateDecl" (:kind m)) [(some #(when (= "CXXMethodDecl" (:kind %)) %) (:inner m)) true]
+                                                    :else nil)]
+                                 (when f
+                                   (let [ps (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                                         xo (when (:isExplicitObjectParameter (first ps)) (first ps))
+                                         q (or (fn-tail-quals (str (get-in f [:type :qualType]))) "")]
+                                     {:f f :name (:name f) :tmpl tmpl :static (= "static" (:storageClass f))
+                                      :xo xo :others (mapv #(norm (str (get-in % [:type :qualType]))) (if xo (rest ps) ps))
+                                      :obj (cond xo (obj-type-key (str (get-in xo [:type :qualType])))
+                                                 :else [cn (set (re-seq #"\b(?:const|volatile)\b" q)) (if (str/includes? q "&&") "&&" "&")])
+                                      :noref (and (not xo) (not (str/includes? q "&")))}))))
+                             (:inner c)))]
+           (doseq [j (range (count ms)) i (range j)
+                   :let [a (ms i) b (ms j)]
+                   :when (and (= (:name a) (:name b)) (= (:tmpl a) (:tmpl b)) (= (:others a) (:others b))
+                              (or (:xo a) (:xo b))
+                              (or (:static a) (:static b) (some #(= cn (first (:obj %))) (filter :xo [a b]))))]
+             (let [corr (cond (or (:static a) (:static b)) true
+                              (not= (boolean (:noref a)) (boolean (:noref b)))
+                              (= (vec (take 2 (:obj a))) (vec (take 2 (:obj b))))
+                              :else (= (:obj a) (:obj b)))]
+               (when (and corr (mine? (:f b)))
+                 (when-let [o (or (get-in b [:f :loc :offset]) (get-in b [:f :range :begin :offset]))]
+                   (let [[l col] (line-col starts (long o))]
+                     (.add out {:line l :col col :kind :error :rule :explicit-object
+                                :msg (str "'" (:name b) "' cannot be overloaded with '" (:name a) "'")})))))))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj xobj-overloads)
+
+;; GCC's __builtin_source_location (which std::source_location::current calls, [support.srcloc.cons]): it returns a pointer to a
+;; constant std::source_location::__impl, so (as its diagnostics in the dg tests state) the unit must declare std::source_location as
+;; a class ("'source_location' is not a member of 'std'", "'void std::source_location()' is not a type", "'std::source_location' is
+;; not a class type") whose member __impl is a class ("'__impl' is not a member of 'std::source_location'", "... is not a type", "...
+;; is not a class type") with only the non-static data members _M_file_name and _M_function_name of type const char * and _M_line and
+;; _M_column of an integral type ("'std::source_location::__impl' does not contain only non-static data members '_M_file_name',
+;; '_M_function_name', '_M_line' and '_M_column'", "... does not have 'const char *' type", "... does not have integral type"), at
+;; the call (cpp2a/srcloc*.C).
+
+(defn builtin-source-location
+  [u starts ^String src ^String main]
+  (let [calls (let [acc (java.util.ArrayList.)]
+                (walk-nodes (fn [n _] (when (and (#{"CallExpr" "BuiltinExpr"} (:kind n)) (= main (get-in n [:range :begin :file])))
+                                        (let [o (long (or (get-in n [:range :begin :offset]) -1))]
+                                          (when (and (>= o 0) (.startsWith src "__builtin_source_location" (int o)))
+                                            (.add acc n)))))
+                            (:nodes u) nil)
+                (vec acc))]
+    (when (seq calls)
+      (let [std-items (for [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)))
+                            r ((fn flat [xs] (mapcat #(if (and (= "NamespaceDecl" (:kind %)) (:isInline %)) (flat (:inner %)) [%]) xs)) (:inner ns))] r)
+            sl (filter #(= "source_location" (:name %)) std-items)
+            cls (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) sl)
+            integral #"^(?:(?:unsigned|signed|short|long|int|char|char8_t|char16_t|char32_t|wchar_t|bool|__int128)\s*)+$"
+            msg (cond
+                  cls (let [im (filter #(= "__impl" (:name %)) (:inner cls))
+                            ic (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) im)]
+                        (cond
+                          ic (let [fs (filter #(= "FieldDecl" (:kind %)) (:inner ic))
+                                   nm (set (map :name fs))
+                                   want #{"_M_file_name" "_M_function_name" "_M_line" "_M_column"}
+                                   ty (fn [n] (str/trim (str (get-in (first (filter #(= n (:name %)) fs)) [:type :qualType]))))]
+                               (cond
+                                 (or (not= nm want) (not= (count fs) 4))
+                                 "'std::source_location::__impl' does not contain only non-static data members '_M_file_name', '_M_function_name', '_M_line' and '_M_column'"
+                                 (not (re-matches #"const char\s*\*" (ty "_M_file_name"))) "'std::source_location::__impl::_M_file_name' does not have 'const char *' type"
+                                 (not (re-matches #"const char\s*\*" (ty "_M_function_name"))) "'std::source_location::__impl::_M_function_name' does not have 'const char *' type"
+                                 (not (re-matches integral (ty "_M_line"))) "'std::source_location::__impl::_M_line' does not have integral type"
+                                 (not (re-matches integral (ty "_M_column"))) "'std::source_location::__impl::_M_column' does not have integral type"
+                                 :else nil))
+                          (some #(fn-kinds (:kind %)) im) "'std::source_location::__impl()' is not a type"
+                          (some #(#{"TypedefDecl" "TypeAliasDecl"} (:kind %)) im) "'std::source_location::__impl' is not a class type"
+                          (empty? im) "'__impl' is not a member of 'std::source_location'"
+                          :else nil))
+                  (some #(fn-kinds (:kind %)) sl) "'void std::source_location()' is not a type"
+                  (some #(#{"TypedefDecl" "TypeAliasDecl"} (:kind %)) sl) "'std::source_location' is not a class type"
+                  (empty? sl) "'source_location' is not a member of 'std'"
+                  :else nil)]
+        (when msg
+          (vec (for [c calls :let [o (get-in c [:range :begin :offset])] :when o
+                     :let [[l col] (line-col starts (long o))]]
+                 {:line l :col col :kind :error :rule :source-location :msg msg})))))))
+
+(swap! checks conj builtin-source-location)
+
+;; constinit and consteval where no declaration may have them ([dcl.constinit]/1: constinit only on a variable of static or thread
+;; storage duration; [dcl.constexpr]/1-2: consteval only on a function or function template, not a destructor, nor an allocation
+;; or deallocation function, [basic.start.main]/3 not main; [dcl.spec.general]/2: at most one of constexpr, consteval and
+;; constinit; [dcl.typedef]/1: none with typedef; [dcl.type.elab]: none on a type's declaration; [dcl.fct]/3: none on a parameter,
+;; [temp.param]/2 nor a template parameter), each at the declaration in GCC's words ("'constinit' on function return type is not
+;; allowed", "'constinit' specifier invalid for function", "non-static data member 'm' declared 'constinit'", "a parameter cannot
+;; be declared 'constinit'", "'constinit' can only be applied to a variable with static or thread storage duration", "'constinit'
+;; cannot appear in a typedef declaration", "'constinit' cannot be used for type declarations", "can use at most one of the
+;; 'constinit' and 'constexpr' specifiers", "a variable cannot be declared 'consteval'", "static data member 'w' declared
+;; 'consteval'", "structured binding declaration cannot be 'consteval'", "a destructor cannot be 'consteval'", "'operator new'
+;; cannot be 'consteval'", "cannot declare '::main' to be 'consteval'", "both 'constexpr' and 'consteval' specified"). The
+;; decl-specifiers are read off the source between a declaration's start and its name.
+
+(defn constinit-consteval-specs
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg]
+              (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :decl-spec :msg msg}))))
+        n-src (count src)
+        ;; (the decl-specifier's own place, where GCC reports these: the keyword in the declaration's specifiers)
+        kw-at! (fn [n ^String w msg]
+                 (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])
+                       i (when (and b e (< (long b) (long e) n-src)) (let [m (re-matcher (re-pattern (str "\\b" w "\\b")) (subs src (long b) (long e)))] (when (.find m) (+ (long b) (.start m)))))]
+                   (if (and i (mine? n))
+                     (let [[l c] (line-col starts (long i))] (.add out {:line l :col c :kind :error :rule :decl-spec :msg msg}))
+                     (at! n msg))))
+        fn-aliases (set (for [n (:nodes u) :when (and (#{"TypedefDecl" "TypeAliasDecl"} (:kind n)) (:name n))
+                              :let [t (str (get-in n [:type :qualType]))]
+                              :when (and (re-find #"\)\s*(?:const|volatile|&|noexcept)?\s*$" t) (not (re-find #"\(\s*[*&]" t)))]
+                          (:name n)))
+        specs (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])]
+                        (when (and b e (mine? n) (= main (get-in n [:loc :file] main)) (< (long b) (long e) n-src))
+                          (set (re-seq #"\b(?:constinit|consteval|constexpr|static|extern|thread_local|typedef)\b"
+                                       (str/replace (subs src (long b) (long e)) #"(?s)\(.*" ""))))))
+        prefix (fn [n] (let [b (get-in n [:range :begin :offset])]
+                         (when (and b (mine? n))
+                           (let [t (subs src (max 0 (- (long b) 200)) (long b))
+                                 t (last (str/split t #"[;{}]" -1))]
+                             (set (re-seq #"\b(?:constinit|consteval)\b" (or t "")))))))
+        both! (fn [n ss]
+                (when (and (ss "constexpr") (ss "constinit")) (at! n "can use at most one of the 'constinit' and 'constexpr' specifiers"))
+                (when (and (ss "constexpr") (ss "consteval")) (at! n "both 'constexpr' and 'consteval' specified"))
+                (when (and (ss "consteval") (ss "constinit")) (at! n "can use at most one of the 'constinit' and 'consteval' specifiers")))
+        walk (fn w [nodes ctx]
+               (doseq [n nodes :when (map? n)]
+                 (let [k (:kind n)
+                       ss (when (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "VarDecl"
+                                   "FieldDecl" "ParmVarDecl" "NonTypeTemplateParmDecl" "TypedefDecl" "DecompositionDecl"} k)
+                            (specs n))]
+                   (when (seq ss) (both! n ss))
+                   (case k
+                     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                     (do (when (and ss (ss "constinit"))
+                           (let [after (let [o (long (get-in n [:loc :offset]))] (subs src o (min n-src (+ o 200))))]
+                             (kw-at! n "constinit" (if (or (#{"CXXConstructorDecl" "CXXDestructorDecl"} k) (re-find #"^~?[A-Za-z_]\w*\s*\(" after))
+                                      "'constinit' on function return type is not allowed"
+                                      "'constinit' specifier invalid for function"))))
+                         (when (and ss (ss "consteval"))
+                           (cond (= "CXXDestructorDecl" k) (at! n "a destructor cannot be 'consteval'")
+                                 (re-matches #"operator\s*(?:new|delete)\s*(?:\[\])?" (str (:name n)))
+                                 (at! n (str "'" (str/replace (str (:name n)) #"\[\]" " []") "' cannot be 'consteval'"))
+                                 (and (= "main" (:name n)) (= ctx :ns) (= "FunctionDecl" k)) (at! n "cannot declare '::main' to be 'consteval'")
+                                 :else nil))
+                         (doseq [c (:inner n) :when (= "ParmVarDecl" (:kind c))] (w [c] :param))
+                         (doseq [c (:inner n) :when (= "CompoundStmt" (:kind c))] (w (:inner c) :local)))
+                     "VarDecl" (do (when ss
+                                     (when (and (ss "constinit") (fn-aliases (str/trim (str (get-in n [:type :qualType])))))
+                                       (kw-at! n "constinit" "'constinit' specifier invalid for function"))
+                                     (when (and (ss "constinit") (= ctx :local) (not (or (ss "static") (ss "extern") (ss "thread_local"))))
+                                       (at! n "'constinit' can only be applied to a variable with static or thread storage duration"))
+                                     (when (ss "consteval")
+                                       (at! n (if (= ctx :class) (str "static data member '" (:name n) "' declared 'consteval'") "a variable cannot be declared 'consteval'"))))
+                                   (w (:inner n) (if (= ctx :class) :ns ctx)))
+                     "DecompositionDecl" (when ss
+                                           (when (and (ss "constinit") (= ctx :local) (not (or (ss "static") (ss "extern") (ss "thread_local"))))
+                                             (at! n "'constinit' can only be applied to a variable with static or thread storage duration"))
+                                           (when (ss "consteval") (at! n "structured binding declaration cannot be 'consteval'")))
+                     "FieldDecl" (when ss (doseq [w ["constinit" "consteval"] :when (ss w)] (at! n (str "non-static data member '" (:name n) "' declared '" w "'"))))
+                     ("ParmVarDecl" "NonTypeTemplateParmDecl") (when ss (doseq [w ["constinit" "consteval"] :when (ss w)] (at! n (str "a parameter cannot be declared '" w "'"))))
+                     "TypedefDecl" (when ss (doseq [w ["constinit" "consteval" "constexpr"] :when (ss w)] (at! n (str "'" w "' cannot appear in a typedef declaration"))))
+                     ("CXXRecordDecl" "EnumDecl")
+                     (do (when (and (:completeDefinition n) (not (:isImplicit n)) (#{:ns :local :class} ctx))
+                           (doseq [w (prefix n)] (at! n (str "'" w "' cannot be used for type declarations"))))
+                         (w (:inner n) :class))
+                     ("NamespaceDecl" "LinkageSpecDecl") (w (:inner n) :ns)
+                     ("FunctionTemplateDecl" "ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl" "VarTemplateDecl")
+                     (w (:inner n) ctx)
+                     ("CompoundStmt" "DeclStmt" "IfStmt" "ForStmt" "WhileStmt" "DoStmt" "SwitchStmt" "CXXForRangeStmt" "CaseStmt" "DefaultStmt" "LabelStmt" "AttributedStmt" "CXXTryStmt" "CXXCatchStmt")
+                     (w (:inner n) ctx)
+                     nil))))]
+    (walk (:nodes u) :ns)
+    (vec (distinct out))))
+
+(swap! checks conj constinit-consteval-specs)
+
+;; [expr.const]/16-18 (C++23, P2564; GCC applies it in C++20 too): a potentially-evaluated id-expression naming an immediate (consteval)
+;; function that is not the function of an immediate invocation is immediate-escalating, so may appear only in an immediate function
+;; context (a consteval function's body, an `if consteval`'s compound statement) or an immediate-escalating function (a lambda's call
+;; operator, a constexpr function template's specialization, a defaulted special member): elsewhere -- a namespace-scope or static
+;; variable's initializer, a non-template function that is not consteval -- taking its address is ill-formed ("taking address of an
+;; immediate function 'consteval int f()'", "constant evaluation returns address of immediate function" for a constexpr variable's).
+;; Judged for the unit's consteval functions of a name no other function of the unit has (a member as Class::name), not in a
+;; template, lambda, unevaluated operand, default argument or default member initializer; there too an immediate invocation whose
+;; argument reads a variable not usable in constant expressions.
+
+(defn immediate-addresses
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ce (java.util.HashMap.)
+        ;; escalating functions ([expr.const]/18: a constexpr function template's specialization, an abbreviated one's): name -> body
+        esc-cands (java.util.HashMap.)
+        _ ((fn coll [nodes cls tmpl?]
+             (doseq [n nodes :when (map? n)]
+               (case (:kind n)
+                 ("FunctionDecl" "CXXMethodDecl")
+                 (do (doseq [k (cond-> [(:name n)] cls (conj (str cls "::" (:name n))))]
+                       (.put ce k (and (not (identical? false (.get ce k))) (boolean (:_consteval n)))))
+                     (when (and (:constexpr n) (not (:_consteval n)) (nil? cls)
+                                (or tmpl? (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner n))))
+                       (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))]
+                         (.put esc-cands (:name n) [n b]))))
+                 "FunctionTemplateDecl" (coll (:inner n) cls true)
+                 ("CXXRecordDecl" "ClassTemplateDecl") (coll (:inner n) (or (when (= "CXXRecordDecl" (:kind n)) (:name n)) cls) false)
+                 ("NamespaceDecl" "LinkageSpecDecl") (coll (:inner n) nil false)
+                 nil)))
+           (:nodes u) nil false)
+        escalated (java.util.HashSet.)
+        imm? (fn [d] (let [nm (str (get-in d [:referencedDecl :name]))
+                           q (:qualifier d)
+                           k (if (seq q) (str (str/join "::" q) "::" nm) nm)]
+                       (and (= :fn (get-in d [:_ent :k]))
+                            (or (and (true? (.get ce k)) (not (:tmpl (:_ent d))))
+                                (and (empty? q) (.contains escalated nm))))))
+        ;; an argument reading a variable not usable in constant expressions ([expr.const]/5.9): a parameter (no declaration
+        ;; point in the parser's entity) or a non-const variable of a fundamental type, not under & or an unevaluated operand
+        reads-var? (fn rv [x]
+                     (cond (map? x) (case (:kind x)
+                                      "DeclRefExpr" (let [e (:_ent x)]
+                                                      (and (= :var (:k e)) (not (:enumerator e)) (not (:constexpr e)) (not (:tparam e))
+                                                           (or (nil? (:vat e))
+                                                               (and (= :b (get-in e [:ty :t])) (not (get-in e [:ty :c]))))))
+                                      ("UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "LambdaExpr") false
+                                      "UnaryOperator" (if (= "&" (:opcode x)) false (some rv (:inner x)))
+                                      (boolean (some (fn [[k v]] (and (not= k :_ent) (not= k :_t) (coll? v) (rv v))) x)))
+                           (sequential? x) (boolean (some rv x))
+                           :else false))
+        ;; the walk of an evaluated region outside an immediate function context: (hit! node kind constexpr?) at an immediate
+        ;; function's address (:addr) and an immediate invocation that is no constant expression (:call)
+        expr (fn ex [x constexpr? hit!]
+               (cond
+                 (map? x) (let [k (:kind x)]
+                            (cond
+                              (= "DeclRefExpr" k) (when (imm? x) (hit! x :addr constexpr?))
+                              (#{"LambdaExpr" "UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "RequiresExpr" "ConceptSpecializationExpr"
+                                 "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "StmtExpr"} k) nil
+                              (fn-kinds k) nil
+                              ;; (`if consteval`'s compound statement is an immediate function context, its else branch not; `if !consteval`
+                              ;; the other way round)
+                              (and (= "IfStmt" k) (:isConsteval x))
+                              (if (:isNegatedConsteval x) (ex (first (:inner x)) constexpr? hit!) (ex (second (:inner x)) constexpr? hit!))
+                              (#{"CallExpr" "CXXMemberCallExpr" "CXXOperatorCallExpr"} k)
+                              (let [[f & args] (:inner x)]
+                                (when-not (= "DeclRefExpr" (:kind f)) (ex f constexpr? hit!))
+                                ;; (an immediate invocation, [expr.const]/16, is a constant expression: an argument that reads a
+                                ;; variable not usable in constant expressions for a parameter of a non-reference type makes it none:
+                                ;; "call to consteval function 'f(x)' is not a constant expression", at the call)
+                                (when (and (= "DeclRefExpr" (:kind f)) (imm? f))
+                                  (let [ptys (get-in f [:_ent :ptys])]
+                                    (when (some (fn [[i a]] (and (reads-var? a) (not (#{:r :rr :lref :rref} (:t (nth ptys i nil)))) (not= :ref (:t (nth ptys i nil)))
+                                                                 (or (= :b (:t (nth ptys i nil))) (.contains escalated (str (get-in f [:referencedDecl :name]))))))
+                                                (map-indexed vector args))
+                                      (hit! x :call constexpr?))))
+                                (doseq [a args] (ex a constexpr? hit!)))
+                              (= "VarDecl" k) (ex (:inner x) (boolean (:constexpr x)) hit!)
+                              (= "ParmVarDecl" k) nil
+                              :else (doseq [[kk v] x :when (and (not= kk :_ent) (not= kk :_t) (coll? v))] (ex v constexpr? hit!))))
+                 (or (vector? x) (seq? x)) (doseq [y x] (ex y constexpr? hit!))
+                 :else nil))
+        ;; P2564's escalation: a candidate whose body has an immediate-escalating expression is an immediate function (to a fixpoint)
+        _ (loop [i 0]
+            (let [before (.size escalated)]
+              (doseq [[nm [_ b]] esc-cands :when (not (.contains escalated nm))]
+                (let [hit (volatile! false)]
+                  (expr b false (fn [_ _ _] (vreset! hit true)))
+                  (when @hit (.add escalated nm))))
+              (when (and (< i 4) (> (.size escalated) before)) (recur (inc i)))))
+        report! (fn [d kind constexpr?]
+                  (when-let [o (get-in d [:range :begin :offset])]
+                    (when (= main (get-in d [:range :begin :file]))
+                      (let [[l c] (line-col starts (long o))
+                            nm (if (= kind :call) (get-in (first (:inner d)) [:referencedDecl :name]) (get-in d [:referencedDecl :name]))]
+                        (.add out {:line l :col c :kind :error :rule :immediate
+                                   :msg (case kind
+                                          :call (str "call to consteval function '" nm "(...)' is not a constant expression")
+                                          (if constexpr? (str "constant evaluation returns address of immediate function '" nm "'")
+                                              (str "taking address of an immediate function '" nm "'")))})))))
+        decls (fn dw [nodes]
+                (doseq [n nodes :when (map? n)]
+                  (case (:kind n)
+                    ("NamespaceDecl" "LinkageSpecDecl") (dw (:inner n))
+                    "CXXRecordDecl" (dw (filter #(not= "FieldDecl" (:kind %)) (:inner n)))
+                    "VarDecl" (expr n false report!)
+                    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
+                    (when-not (or (:_consteval n) (:explicitlyDefaulted n)
+                                  ;; (an abbreviated function template's, [dcl.fct]/22: a parameter of a placeholder type)
+                                  (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner n)))
+                      (doseq [c (:inner n) :when (#{"CompoundStmt" "CXXCtorInitializer" "CXXTryStmt"} (:kind c))] (expr c false report!)))
+                    nil)))]
+    (decls (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj immediate-addresses)
+
+;; A constexpr (or consteval) function's body before C++23 ([dcl.constexpr]/3 of C++11 to C++20, P2242 lifting the last of it): no
+;; definition of a variable of static or thread storage duration ("'b' defined 'static' in 'constexpr' function only available with
+;; '-std=c++23'"), no goto statement ("'goto' in 'constexpr' function only available with '-std=c++23'"); before C++20 (P1002) no
+;; try-block ("'try' in 'constexpr' function only available with '-std=c++20'") nor function-try-block ("function-try-block body of
+;; 'constexpr' function only available with '-std=c++20'"; GCC's pedwarns, errors under -pedantic-errors) and no uninitialized
+;; variable of a scalar type ("uninitialized variable 'a' in 'constexpr' function", the existing rule's in a function-try-block's
+;; blocks); in C++11 a function-try-block is no return statement ("body of 'constexpr' function 'f' not a return-statement", at the
+;; function's end) nor, with statements in its try-block, a constructor's empty body ("'constexpr' constructor does not have empty
+;; body", at the try-block's end), and its compound statements are C++11's "compound-statement in 'constexpr' function" (a pedwarn).
+;; The main file's functions outside templates, as constexpr-bodies judges them; lambdas and local classes not looked into.
+
+(defn constexpr-pre23-bodies
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (long (cxx-year (:std u)))
+        pe? (boolean (some #{"-pedantic-errors"} (:args u)))
+        pw? (or pe? (boolean (some #{"-pedantic" "-Wpedantic"} (:args u))))
+        at! (fn [n off msg]
+              (when (and off (= main (or (get-in n [:range :begin :file]) main)))
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :constexpr :msg msg}))))
+        beg (fn [n] (get-in n [:range :begin :offset]))
+        walk (fn w [f x]
+               (cond (map? x) (do (f x)
+                                  (when-not (#{"LambdaExpr" "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "FunctionDecl" "CXXMethodDecl"} (:kind x))
+                                    (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (w f v))))
+                     (sequential? x) (doseq [y x] (w f y))
+                     :else nil))
+        fn! (fn [n]
+              (let [what (if (:_consteval n) "consteval" "constexpr")
+                    body (some #(when (#{"CompoundStmt" "CXXTryStmt"} (:kind %)) %) (:inner n))
+                    ftb? (= "CXXTryStmt" (:kind body))
+                    ctor? (= "CXXConstructorDecl" (:kind n))]
+                (when (and body (= main (get-in n [:range :begin :file]))
+                           (not (some #(= "NativeDecline" (:kind %)) (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (:inner %) (seq %)) body))))
+                  (when (< year 23)
+                    (walk (fn [x]
+                            (case (:kind x)
+                              "VarDecl" (when (and (string? (:name x)) (or (= "static" (:storageClass x)) (:tls x)) (not= "extern" (:storageClass x)))
+                                          (at! x (or (get-in x [:loc :offset]) (beg x))
+                                               (str "'" (:name x) "' defined '" (if (:tls x) "thread_local" "static") "' in '" what "' function only available with '-std=c++23' or '-std=gnu++23'")))
+                              "GotoStmt" (at! x (beg x) (str "'goto' in '" what "' function only available with '-std=c++23' or '-std=gnu++23'"))
+                              nil))
+                          body))
+                  (when (< year 20)
+                    (when (and ftb? pe?)
+                      (at! body (beg body) (str "function-try-block body of '" what "' " (if ctor? "constructor" "function") " only available with '-std=c++20' or '-std=gnu++20'")))
+                    (when pe?
+                      (walk (fn [x] (when (and (= "CXXTryStmt" (:kind x)) (not (identical? x body)))
+                                      (at! x (beg x) (str "'try' in '" what "' function only available with '-std=c++20' or '-std=gnu++20'"))))
+                            body))
+                    (when ftb?
+                      (walk (fn [x]
+                              (when (= "DeclStmt" (:kind x))
+                                (doseq [v (:inner x)
+                                        :when (and (= "VarDecl" (:kind v)) (nil? (:init v)) (empty? (:inner v)) (nil? (:storageClass v)) (not (:tls v))
+                                                   (re-matches scalar-type-re (str/trim (str (get-in v [:type :qualType])))))]
+                                  (at! v (or (get-in v [:loc :offset]) (beg v)) (str "uninitialized variable '" (:name v) "' in '" what "' function")))))
+                            body)))
+                  (when (= 11 year)
+                    (when ftb?
+                      (let [tb (first (:inner body))]
+                        (if ctor?
+                          (when (some #(not (#{"NullStmt"} (:kind %))) (:inner tb))
+                            (at! tb (get-in tb [:range :end :offset]) "'constexpr' constructor does not have empty body"))
+                          (at! body (get-in n [:range :end :offset]) (str "body of 'constexpr' function '" (:name n) "' not a return-statement")))))
+                    (when (and pe? (or ftb? (some #(= "CXXTryStmt" (:kind %)) (:inner body))))
+                      (walk (fn [x] (when (= "CXXTryStmt" (:kind x))
+                                      (doseq [c (:inner x)
+                                              :let [cs (if (= "CXXCatchStmt" (:kind c)) (some #(when (= "CompoundStmt" (:kind %)) %) (:inner c)) c)]
+                                              :when (and (= "CompoundStmt" (:kind cs)) (not (and (identical? x body) (identical? c (first (:inner x))))))]
+                                        (at! cs (beg cs) "compound-statement in 'constexpr' function"))))
+                            body))))))
+        decls (fn d [ns]
+                (doseq [n ns]
+                  (case (:kind n)
+                    ("NamespaceDecl" "LinkageSpecDecl" "ExportDecl" "CXXRecordDecl") (d (:inner n))
+                    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl")
+                    (when (or (:constexpr n) (:_consteval n)) (fn! n))
+                    nil)))]
+    (decls (remove :_hdr (:nodes u)))
+    (vec (distinct out))))
+
+(swap! checks conj constexpr-pre23-bodies)
+
+;; Later standards' constructs in an earlier standard's unit, GCC's pedwarns ("only available with '-std=c++NN'"), errors under
+;; -pedantic-errors: a label at the end of a compound statement (C++23, P2324: "label at end of compound statement only available
+;; with '-std=c++23'", at the closing brace), an alias-declaration as an init-statement (C++23, P2360: "alias-declaration in
+;; init-statement only available with '-std=c++23'"), auto(x) and auto{x} (C++23, P0849: "'auto(x)' only available with
+;; '-std=c++23'"), a lambda's template-parameter-list (C++20, P0428: "lambda templates are only available with '-std=c++20'").
+
+(defn version-pedwarns
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        year (long (cxx-year (:std u)))
+        args (:args u)
+        pe? (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
+        at! (fn [n off msg]
+              (when (and off (= main (get-in n [:range :begin :file])))
+                (let [[l c] (line-col starts (long off))]
+                  (.add out {:line l :col c :kind :error :rule :pedantic :msg msg}))))
+        n-src (count src)]
+    (when pe?
+      (walk-nodes
+       (fn [n _]
+         (case (:kind n)
+           "CompoundStmt" (when (< year 23)
+                            (let [l (peek (vec (:inner n)))
+                                  ;; (the labels' statement: none, or the parser's null statement at the brace, not a written `;`)
+                                  end (loop [x l] (if (and (= "LabelStmt" (:kind x)) (= 1 (count (:inner x))) (= "LabelStmt" (:kind (first (:inner x))))) (recur (first (:inner x))) x))
+                                  st (first (:inner end))]
+                              (when (and (= "LabelStmt" (:kind l))
+                                         (or (nil? st)
+                                             (and (= "NullStmt" (:kind st))
+                                                  (let [o (get-in st [:range :begin :offset])] (and o (< (long o) n-src) (not= 59 (int (.charAt src (int o)))))))))
+                                (at! n (get-in n [:range :end :offset]) "label at end of compound statement only available with '-std=c++23' or '-std=gnu++23'"))))
+           ("IfStmt" "SwitchStmt" "ForStmt" "CXXForRangeStmt")
+           (when (< year 23)
+             (let [i (first (:inner n))]
+               (when (and (= "DeclStmt" (:kind i)) (some #(= "TypeAliasDecl" (:kind %)) (:inner i))
+                          (or (#{"ForStmt" "CXXForRangeStmt"} (:kind n)) (:hasInit n)))
+                 (at! n (get-in i [:range :begin :offset]) "alias-declaration in init-statement only available with '-std=c++23' or '-std=gnu++23'"))))
+           "CXXFunctionalCastExpr" (when (and (< year 23) (= :auto (get-in n [:_t :t])))
+                                     (let [o (get-in n [:range :begin :offset])]
+                                       (when (and o (< (+ (long o) 4) n-src) (.startsWith src "auto" (int o)))
+                                         (at! n o (str "'auto" (if (= "InitListExpr" (:kind (first (:inner n)))) "{x}" "(x)") "' only available with '-std=c++23' or '-std=gnu++23'")))))
+           "LambdaExpr" (when (< year 20)
+                          (let [o (get-in n [:range :begin :offset])]
+                            (when (and o (= main (get-in n [:range :begin :file])))
+                              ;; the lambda-introducer's closing bracket, then `<`
+                              (let [t (subs src (long o) (min n-src (+ (long o) 400)))
+                                    close (loop [i 0 depth 0]
+                                            (when (< i (count t))
+                                              (let [c (.charAt t i)]
+                                                (cond (= c \[) (recur (inc i) (inc depth))
+                                                      (= c \]) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                                                      :else (recur (inc i) depth)))))]
+                                (when (and close (re-find #"^\s*<" (subs t (inc (long close)))))
+                                  (at! n o "lambda templates are only available with '-std=c++20' or '-std=gnu++20'"))))))
+           nil))
+       (:nodes u) nil))
+    (vec (distinct out))))
+
+(swap! checks conj version-pedwarns)
+
+;; [expr.prim.lambda.general]/4 (C++23, P1169): a lambda-specifier-seq has not both mutable and static ("'mutable' specifier conflicts
+;; with 'static'", "'static' specifier conflicts with 'mutable'", at the later), and a static lambda has no lambda-capture ("'static'
+;; lambda specifier with lambda capture"). Read off the lambda's text: its introducer, its parameter list's closing parenthesis, the
+;; specifiers up to the body.
+
+(defn lambda-specifiers
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at! (fn [off msg] (let [[l c] (line-col starts (long off))] (.add out {:line l :col c :kind :error :rule :lambda :msg msg})))
+        match (fn [^String t i open close]
+                (loop [i (long i) depth 0]
+                  (when (< i (count t))
+                    (let [c (.charAt t (int i))]
+                      (cond (= c open) (recur (inc i) (inc depth))
+                            (= c close) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                            :else (recur (inc i) depth))))))]
+    (walk-nodes
+     (fn [n _]
+       (when (= "LambdaExpr" (:kind n))
+         (let [o (get-in n [:range :begin :offset])
+               b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+               bo (get-in b [:range :begin :offset])]
+           (when (and o bo (= main (get-in n [:range :begin :file])) (= main (get-in b [:range :begin :file])) (< (long o) (long bo) n-src))
+             (let [t (subs src (long o) (long bo))
+                   ic (match t 0 \[ \])]
+               ;; (cpp-diag-a: [expr.prim.lambda.capture]/2, a capture has one ellipsis, before an init-capture's name or after a
+               ;; simple capture's: "too many '...' in lambda capture")
+               (when (and ic (re-find #"(?:^|,)\s*&?\s*\.\.\.\s*[A-Za-z_]\w*\s*\.\.\." (subs t 1 (long ic))))
+                 (at! (long o) "too many '...' in lambda capture"))
+               (when ic
+                 (let [rest-t (subs t (inc (long ic)))
+                       po (.indexOf ^String rest-t "(")]
+                   (when (and (>= po 0) (re-find #"^\s*(?:<[^{]*>\s*(?:requires[^(]*)?)?\($" (subs rest-t 0 (inc po))))
+                     (when-let [pc (match rest-t po \( \))]
+                       (let [base (+ (long o) (inc (long ic)) (inc (long pc)))
+                             specs (subs rest-t (inc (long pc)))
+                             m (re-matcher #"\b(mutable|static)\b" specs)
+                             found (loop [acc []] (if (.find m) (recur (conj acc [(.group m 1) (.start m)])) acc))
+                             kinds (map first found)]
+                         (when (and (some #{"mutable"} kinds) (some #{"static"} kinds))
+                           (let [[w off] (first (filter (fn [[w]] (not= w (first kinds))) found))]
+                             (at! (+ base (long off)) (str "'" w "' specifier conflicts with '" (first kinds) "'"))))
+                         (when (and (some #{"static"} kinds) (re-find #"\S" (subs t 1 (long ic))))
+                           (at! (+ base (long (second (first (filter #(= "static" (first %)) found)))))
+                                "'static' lambda specifier with lambda capture"))))))))))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj lambda-specifiers)
+
+;; [over.sub]/1 before C++23 (P2128's multidimensional subscript): a class's operator[] has exactly one parameter beside its object
+;; ("'int& S::operator[]()' must have exactly one argument", at the declaration; a static one's every parameter counted).
+
+(defn subscript-arity
+  [u starts ^String src ^String main]
+  (when (< (long (cxx-year (:std u))) 23)
+    (let [out (java.util.ArrayList.)]
+      (walk-nodes (fn [n parent]
+                    (when (and (= "CXXMethodDecl" (:kind n)) (re-matches #"operator\s*\[\]" (str (:name n)))
+                               (= main (get-in n [:range :begin :file])) (#{"CXXRecordDecl"} (:kind parent)))
+                      (let [ps (remove :isExplicitObjectParameter (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))]
+                        (when (and (not= 1 (count ps)) (not (:variadic n)))
+                          (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :operator
+                                         :msg (str "'" (:name n) "' must have exactly one argument")})))))))
+                  (:nodes u) nil)
+      (vec out))))
+
+(swap! checks conj subscript-arity)
+
+;; Defaulted comparison operator functions ([class.compare.default]/1-2, P2085, P2002): for a class C, a non-template member that is
+;; const with one parameter of type const C& (beside its implicit object parameter, no && ref-qualifier: "defaulted member 'X' must
+;; have parameter type 'const C&'", "defaulted 'X' must have exactly one parameter", "defaulted member 'X' must be 'const'",
+;; "defaulted 'X' cannot have '&&' ref-qualifier"), or a friend of C with two parameters both const C& or both C ("defaulted 'X'
+;; must have parameters of either type 'const C&' or 'C', not both"); defined at namespace scope only as a friend C declares ("defaulted
+;; 'X' is not a friend of 'C'"); == and the secondary comparison operators return bool ([class.eq]/1, [class.compare.secondary]/1:
+;; "defaulted 'X' must return 'bool'").
+
+(defn defaulted-comparisons
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ops #{"operator==" "operator!=" "operator<" "operator>" "operator<=" "operator>=" "operator<=>"}
+        at! (fn [n msg]
+              (when-let [o (when (= main (get-in n [:range :begin :file])) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                (let [[l c] (line-col starts (long o))]
+                  (.add out {:line l :col c :kind :error :rule :defaulted-comparison :msg msg}))))
+        norm (fn [^String t] (-> t (str/replace #"\b(?:struct|class)\s+" "") (str/replace #"\s+" " ") (str/replace #" ?& ?" "&") str/trim))
+        cls-of (fn [^String t] (-> (norm t) (str/replace #"^const " "") (str/replace #" const$" "") (str/replace #"&+$" "") (str/replace #"<.*>$" "") str/trim))
+        is-c? (fn [^String t ^String c] (let [b (str/replace (norm t) #"<.*>" "")] (= b c)))
+        cref? (fn [^String t ^String c] (let [x (str/replace (norm t) #"<.*>" "")] (or (= x (str "const " c "&")) (= x (str c " const&")))))
+        ret-of (fn [^String qt] (str/trim (or (second (re-find #"^(.*?)\s*\(" qt)) "")))
+        params (fn [f] (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
+        bool-op? (fn [nm] (not= nm "operator<=>"))
+        friend-sigs (java.util.HashMap.)
+        classes (java.util.HashMap.)]
+    ((fn coll [nodes prefix]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           "NamespaceDecl" (coll (:inner n) (str prefix (:name n) "::"))
+           "LinkageSpecDecl" (coll (:inner n) prefix)
+           "CXXRecordDecl" (when (and (:name n) (:completeDefinition n))
+                             (.put classes (str prefix (:name n)) n)
+                             (doseq [fd (:inner n) :when (= "FriendDecl" (:kind fd)) f (:inner fd) :when (and (= "FunctionDecl" (:kind f)) (ops (:name f)))]
+                               (.put friend-sigs [(str prefix (:name n)) (:name f) (mapv #(norm (str (get-in % [:type :qualType]))) (params f))] true)))
+           nil)))
+     (:nodes u) "")
+    (letfn [(member! [c f]
+              (let [nm (:name f) qt (str (get-in f [:type :qualType])) q (or (fn-tail-quals qt) "")
+                    ps (vec (params f))
+                    xo (some :isExplicitObjectParameter ps)]
+                (when-not xo
+                  (cond
+                    (not= 1 (count ps)) (at! f (str "defaulted '" nm "' must have exactly one parameter"))
+                    (not (cref? (str (get-in (first ps) [:type :qualType])) c)) (at! f (str "defaulted member '" nm "' must have parameter type 'const " c "&'"))
+                    :else nil)
+                  (when (str/includes? q "&&") (at! f (str "defaulted '" nm "' cannot have '&&' ref-qualifier")))
+                  (when-not (re-find #"\bconst\b" q) (at! f (str "defaulted member '" nm "' must be 'const'"))))
+                (when (and (bool-op? nm) (not (#{"bool" "auto"} (ret-of qt))) (not (str/blank? (ret-of qt))))
+                  (at! f (str "defaulted '" nm "' must return 'bool'")))))
+            (friend! [c f]
+              (let [nm (:name f) qt (str (get-in f [:type :qualType]))
+                    ts (mapv #(str (get-in % [:type :qualType])) (params f))]
+                (when (= 2 (count ts))
+                  (let [kinds (mapv #(cond (cref? % c) :cref (is-c? % c) :val :else :other) ts)]
+                    (cond (some #{:other} kinds) (at! f (str "defaulted '" nm "' must have parameters of either type 'const " c "&' or '" c "'"))
+                          (apply not= kinds) (at! f (str "defaulted '" nm "' must have parameters of either type 'const " c "&' or '" c "', not both 'const " c "&' and '" c "'"))
+                          :else nil)))
+                (when (and (bool-op? nm) (not (#{"bool" "auto"} (ret-of qt))) (not (str/blank? (ret-of qt))))
+                  (at! f (str "defaulted '" nm "' must return 'bool'")))))
+            (walk [nodes prefix]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  "NamespaceDecl" (walk (:inner n) (str prefix (:name n) "::"))
+                  "LinkageSpecDecl" (walk (:inner n) prefix)
+                  "ClassTemplateDecl" (walk (:inner n) prefix)
+                  "CXXRecordDecl" (when (and (:name n) (:completeDefinition n))
+                                    (doseq [m (:inner n)]
+                                      (cond (and (= "CXXMethodDecl" (:kind m)) (:explicitlyDefaulted m) (ops (:name m))) (member! (:name n) m)
+                                            (= "FriendDecl" (:kind m))
+                                            (doseq [f (:inner m) :when (and (= "FunctionDecl" (:kind f)) (:explicitlyDefaulted f) (ops (:name f)))] (friend! (:name n) f))
+                                            (= "CXXRecordDecl" (:kind m)) (walk [m] prefix)
+                                            :else nil)))
+                  "FunctionDecl" (when (and (:explicitlyDefaulted n) (ops (:name n)) (= main (get-in n [:range :begin :file])))
+                                   (let [ps (params n)
+                                         c (when (seq ps) (cls-of (str (get-in (first ps) [:type :qualType]))))
+                                         sig (mapv #(norm (str (get-in % [:type :qualType]))) ps)]
+                                     (when (and c (re-matches #"[A-Za-z_]\w*" c) (not (.get friend-sigs [(str prefix c) (:name n) sig])))
+                                       (at! n (str "defaulted '" (:name n) "' is not a friend of '" c "'")))))
+                  nil)))]
+      (walk (:nodes u) ""))
+    (vec (distinct out))))
+
+(swap! checks conj defaulted-comparisons)
+
+;; [dcl.struct.bind]/1 with [dcl.spec.auto.general]/2 (P1141): a structured binding declaration's decl-specifier-seq has the
+;; placeholder `auto` alone, no type-constraint ("structured binding declaration cannot have constrained 'auto' type", at the
+;; declaration; templates' too, GCC diagnosing their definitions).
+
+(defn constrained-bindings
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        ;; (GCC accepts it as an extension with a pedwarn, which -pedantic-errors makes an error: concepts-placeholder10.C)
+        args (:args u)
+        pe? (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
+        concepts (java.util.HashSet.)
+        _ (walk-nodes (fn [n _] (when (and (= "ConceptDecl" (:kind n)) (:name n)) (.add concepts (:name n)))) (:nodes u) nil)]
+    (walk-nodes (fn [n _]
+                  (when (and pe? (= "DecompositionDecl" (:kind n)))
+                    (let [b (get-in n [:range :begin :offset])]
+                      (when (and b (= main (get-in n [:range :begin :file])))
+                        (let [t (subs src (long b) (min n-src (+ (long b) 300)))
+                              head (let [i (.indexOf ^String t "[")] (when (pos? i) (subs t 0 i)))]
+                          ;; (the identifier before auto a concept the unit declares: a type-constraint, not a decl-specifier)
+                          (when (and head (when-let [[_ c] (re-find #"([A-Za-z_]\w*)\s*(?:<[^\[]*>)?\s+auto\b\s*&{0,2}\s*$" (str/replace head #"\b(?:const|volatile|static|thread_local|inline|constexpr|constinit|extern)\b" ""))]
+                                               (.contains concepts c)))
+                            (let [[l c] (line-col starts (long b))]
+                              (.add out {:line l :col c :kind :error :rule :structured-binding
+                                         :msg "structured binding declaration cannot have constrained 'auto' type"}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj constrained-bindings)
+
+;; The built-in three-way comparison ([expr.spaceship]/2-8): with operands the check can type (literals, variables, enumerators, the
+;; address of a function or member, a call's declared type), none of type std::nullptr_t ("ordered comparison of pointer with
+;; 'std::nullptr_t'"), not a bool with another type, no array operand (no array-to-pointer conversion), no unscoped enumeration with a
+;; floating type or another enumeration ([depr.arith.conv.enum] made ill-formed for <=>), no narrowing (a negative constant or a signed
+;; variable against an unsigned operand), no pointer to function or member and no complex operand ("invalid operands of types 'A' and
+;; 'B' to binary 'operator<=>'"); and an operand pair that is valid needs its comparison category type declared, a class
+;; std::strong_ordering or std::partial_ordering ("'std::strong_ordering' is not defined", "... is not a type"; [cmp.categories]: the
+;; header <compare>) whose value members are static data members ("'std::partial_ordering::equivalent()' is not a static data member").
+
+(defn builtin-spaceship
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        enums (java.util.HashMap.) enum-types (java.util.HashSet.)
+        std (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (when (and (= "EnumDecl" (:kind n)) (:name n) (not (:scopedEnumTag n)))
+                          (.add enum-types (:name n))
+                          (doseq [c (:inner n) :when (= "EnumConstantDecl" (:kind c))] (.put enums (:name c) (:name n)))))
+                      (:nodes u) nil)
+        _ (doseq [ns (:nodes u) :when (and (= "NamespaceDecl" (:kind ns)) (= "std" (:name ns)))
+                  n ((fn flat [xs] (mapcat #(if (and (= "NamespaceDecl" (:kind %)) (:isInline %)) (flat (:inner %)) [%]) xs)) (:inner ns))
+                  :when (#{"strong_ordering" "partial_ordering"} (:name n))]
+            (.put std (:name n) (if (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n)) n (or (.get std (:name n)) n))))
+        words-kind (fn [ws] (let [s (set ws)]
+                              (cond (s "bool") :bool
+                                    (or (s "float") (s "double")) :float
+                                    (s "unsigned") :uint
+                                    (some #{"int" "long" "short" "char" "signed"} s) :int
+                                    :else nil)))
+        kind (fn k [x]
+               (case (:kind x)
+                 ("IntegerLiteral") (let [t (str (get-in x [:type :qualType]))] (if (re-find #"unsigned" t) :uint :int))
+                 "CharacterLiteral" :int
+                 "CXXBoolLiteralExpr" :bool
+                 "FloatingLiteral" :float
+                 "ImaginaryLiteral" :complex
+                 "CXXNullPtrLiteralExpr" :nullptr
+                 "ParenExpr" (when (= 1 (count (:inner x))) (k (first (:inner x))))
+                 "UnaryOperator" (let [[y] (:inner x)]
+                                   (case (:opcode x)
+                                     "-" (let [kk (k y)] (if (and (#{"IntegerLiteral" "FloatingLiteral"} (:kind y)) (#{:int :uint} kk)) :negint kk))
+                                     "&" (when (= "DeclRefExpr" (:kind y))
+                                           (cond (seq (:qualifier y)) (when (#{:fn :var} (get-in y [:_ent :k])) :memptr)
+                                                 (= :fn (get-in y [:_ent :k])) :fnptr
+                                                 :else nil))
+                                     nil))
+                 "DeclRefExpr" (let [e (:_ent x)]
+                                 (cond (:enumerator e) (when-let [en (.get enums (str (:name e)))] [:enum en])
+                                       (not= :var (:k e)) nil
+                                       (= :a (get-in e [:ty :t])) :array
+                                       (= :b (get-in e [:ty :t])) (words-kind (get-in e [:ty :w]))
+                                       (and (= :n (get-in e [:ty :t])) (.contains enum-types (str (get-in e [:ty :s])))) [:enum (get-in e [:ty :s])]
+                                       :else nil))
+                 "CallExpr" (let [f (first (:inner x))]
+                              (when (and (= "DeclRefExpr" (:kind f)) (= :fn (get-in f [:_ent :k]))
+                                         (re-find #"^(?:decltype\(nullptr\)|std::nullptr_t|nullptr_t)\s*\(" (str (get-in f [:_ent :qt]))))
+                                :nullptr))
+                 nil))
+        at! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
+                          (when (= main (get-in n [:range :begin :file]))
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :spaceship :msg msg})))))
+        tn (fn [k] (cond (vector? k) (second k) (keyword? k) (name k) :else "?"))]
+    (walk-nodes
+     (fn [n _]
+       (when (and (= "BinaryOperator" (:kind n)) (= "<=>" (:opcode n)) (= 2 (count (:inner n))))
+         (let [[a b] (map kind (:inner n))
+               bad (str "invalid operands of types '" (tn a) "' and '" (tn b) "' to binary 'operator<=>'")
+               arith #{:int :uint :negint :float :bool}]
+           (when (and a b)
+             (cond
+               (or (= :nullptr a) (= :nullptr b)) (at! n "ordered comparison of pointer with 'std::nullptr_t'")
+               (or (#{:array :fnptr :memptr :complex} a) (#{:array :fnptr :memptr :complex} b)) (at! n bad)
+               (and (or (= :bool a) (= :bool b)) (not= a b)) (at! n "operands of 'operator<=>' of type 'bool' and another type")
+               (and (vector? a) (vector? b) (not= a b)) (at! n bad)
+               (or (and (vector? a) (= :float b)) (and (vector? b) (= :float a))) (at! n bad)
+               (or (and (= :negint a) (= :uint b)) (and (= :negint b) (= :uint a))) (at! n "narrowing conversion in 'operator<=>'")
+               (and (arith a) (arith b))
+               (let [cat (if (or (= :float a) (= :float b)) "partial_ordering" "strong_ordering")
+                     c (.get std cat)]
+                 (cond (nil? c) (at! n (str "'std::" cat "' is not defined; did you forget to '#include <compare>'?"))
+                       (not (#{"CXXRecordDecl"} (:kind c))) (at! n (str "'std::" cat "' is not a type"))
+                       (not (:completeDefinition c)) nil
+                       :else (let [want (if (= cat "partial_ordering") ["less" "equivalent" "greater" "unordered"] ["less" "equal" "greater"])]
+                               (when-let [m (some (fn [w] (let [ms (filter #(= w (:name %)) (:inner c))]
+                                                            (when (and (seq ms) (not (some #(= "VarDecl" (:kind %)) ms))) w)))
+                                                  want)]
+                                 (at! n (str "'std::" cat "::" m "' is not a static data member"))))))
+               :else nil)))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj builtin-spaceship)
+
+;; Using-declarations and using-enum-declarations ([namespace.udecl]/3-5, [enum.udecl]/1): a using-declarator names no destructor ("'E::~E'
+;; names destructor"); one in a class's member-specification names a member of a base class, its nested-name-specifier no other class
+;; of the unit nor a namespace ("type 'A' is not a base type for type 'B'", "using-declaration for non-member at class scope"; a class
+;; template's members not judged, their bases dependent); a using-enum-declaration names an enumeration ("'A' is not an enumerated type").
+;; [class.virtual]/18: a consteval virtual function overrides and is overridden only by consteval ones ("non-'consteval' function 'f'
+;; overriding 'consteval' function", "'consteval' function 'f' overriding non-'consteval' function"; the unit's bases by name, the
+;; parameters' types as written).
+
+(defn using-and-consteval-overrides
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at! (fn [n msg] (when-let [o (when (= main (get-in n [:range :begin :file])) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :using :msg msg}))))
+        text (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+                       (when (and b e (= main (get-in n [:range :begin :file])) (<= (long b) (long e)) (< (long e) n-src))
+                         (subs src (long b) (inc (long e))))))
+        classes (java.util.HashMap.) namespaces (java.util.HashSet.) enums (java.util.HashSet.)
+        _ (walk-nodes (fn [n _]
+                        (case (:kind n)
+                          "CXXRecordDecl" (when (and (:name n) (:completeDefinition n)) (.put classes (:name n) (if (.containsKey classes (:name n)) :ambiguous n)))
+                          "NamespaceDecl" (when (:name n) (.add namespaces (:name n)))
+                          "EnumDecl" (when (:name n) (.add enums (:name n)))
+                          nil))
+                      (:nodes u) nil)
+        base-names (fn bn [c seen]
+                     (into #{} (mapcat (fn [b] (let [nm (-> (str (get-in b [:type :qualType])) (str/replace #"^(?:struct|class)\s+" "") (str/replace #"<.*$" "") str/trim)
+                                                     bc (.get classes nm)]
+                                                 (cons nm (when (and (map? bc) (not (seen nm))) (bn bc (conj seen nm))))))
+                                       (:bases c))))
+        params (fn [f] (mapv #(str/replace (str (get-in % [:type :qualType])) #"\s+" "") (filter #(= "ParmVarDecl" (:kind %)) (:inner f))))
+        consteval? (fn [f] (boolean (or (:_consteval f) (:consteval f))))]
+    (letfn [(walk [nodes cls tmpl?]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  ("NamespaceDecl" "LinkageSpecDecl") (walk (:inner n) nil tmpl?)
+                  "ClassTemplateDecl" (walk (:inner n) nil true)
+                  "CXXRecordDecl" (when (:completeDefinition n)
+                                    (when (and (not tmpl?) (= main (get-in n [:range :begin :file])))
+                                      (let [bs (base-names n #{})]
+                                        (doseq [m (:inner n) :when (= "CXXMethodDecl" (:kind m))]
+                                          (doseq [b bs :let [bc (.get classes b)] :when (map? bc)
+                                                  bm (:inner bc) :when (and (= "CXXMethodDecl" (:kind bm)) (= (:name m) (:name bm)) (:virtual bm)
+                                                                            (= (params m) (params bm)))]
+                                            (cond (and (consteval? bm) (not (consteval? m)))
+                                                  (at! m (str "non-'consteval' function '" (:name m) "' overriding 'consteval' function"))
+                                                  (and (consteval? m) (not (consteval? bm)))
+                                                  (at! m (str "'consteval' function '" (:name m) "' overriding non-'consteval' function"))
+                                                  :else nil)))))
+                                    (walk (:inner n) n tmpl?))
+                  "UsingDecl" (when-let [t (or (:_text n) (text n))]
+                                (when (= main (get-in n [:range :begin :file] main))
+                                  (let [t (str/replace (str/replace t #"^\s*using\s+" "") #"^typename\s+" "")
+                                        parts (map str/trim (str/split (str/replace t #";\s*$" "") #"::"))]
+                                    (cond
+                                      (and (>= (count parts) 2) (str/starts-with? (last parts) "~"))
+                                      (at! n (str "'" (str/join "::" parts) "' names destructor"))
+                                      (and cls (not tmpl?) (>= (count parts) 2) (not= "" (first parts)))
+                                      (let [q (first parts)
+                                            ;; (C++20's P1099: a using-declarator naming an enumerator needs no base)
+                                            enumerator? (and (>= (long (cxx-year (:std u))) 20) (map? (.get classes q))
+                                                             (some (fn [e] (and (= "EnumDecl" (:kind e)) (some #(and (= "EnumConstantDecl" (:kind %)) (= (last parts) (:name %))) (:inner e))))
+                                                                   (:inner (.get classes q))))]
+                                        (cond (and (map? (.get classes q)) (not= q (:name cls)) (not ((base-names cls #{}) q)) (not enumerator?))
+                                              (at! n (str "type '" q "' is not a base type for type '" (:name cls) "'"))
+                                              (and (.contains namespaces q) (not (.containsKey classes q)))
+                                              (at! n "using-declaration for non-member at class scope")
+                                              :else nil))
+                                      :else nil))))
+                  "UsingEnumDecl" (when-let [t (text n)]
+                                    (when-let [[_ nm] (re-find #"using\s+enum\s+(?:[\w:]*::)?\s*([A-Za-z_]\w*)\s*;?\s*$" t)]
+                                      (when (and (map? (.get classes nm)) (not (.contains enums nm)))
+                                        (at! n (str "'" nm "' is not an enumerated type")))))
+                  nil)))]
+      (walk (:nodes u) nil false))
+    (vec (distinct out))))
+
+(swap! checks conj using-and-consteval-overrides)
+
+;; Concepts' and placeholders' declarations ([temp.concept]/2-5, [dcl.spec.auto.general]/5, [temp.param]/14, [temp.friend]/9,
+;; [expr.prim.req.general]/5, [basic.scope.scope]/4): a concept is declared at namespace scope ("concept 'C' not in namespace scope"),
+;; with one template-head and no constraint on its parameters ("a concept cannot be constrained", "concept 'C' has multiple template
+;; parameter lists"), once ("redefinition of concept 'b'"), and not with a class of its name in its scope ("'E' redeclared as different
+;; kind of entity"); a requires-expression's parameters have distinct names ("conflicting declaration"); an alias-declaration or typedef
+;; has no placeholder type ("'auto' not allowed in alias declaration", "typedef declared 'auto'"); a template parameter pack has no
+;; default argument ("template parameter pack cannot have a default argument"); a non-template friend function declaration with a
+;; requires-clause, or a friend function template whose requires-clause names its enclosing template's parameters, is a definition
+;; ("non-template friend 'foo' with a requires-clause must be a definition", "friend 'bar' with a requires-clause that depends on an
+;; enclosing template parameter must be a definition").
+
+(defn concept-decl-rules
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg] (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :concept :msg msg}))))
+        names-in (fn [x] (let [acc (java.util.HashSet.)]
+                           (walk-nodes (fn [d _] (when (= "DeclRefExpr" (:kind d)) (.add acc (str (get-in d [:referencedDecl :name]))))) x nil)
+                           acc))
+        tparam-names (fn [t] (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner t))))
+        has-body? (fn [f] (some #(#{"CompoundStmt" "CXXTryStmt"} (:kind %)) (:inner f)))
+        tparams! (fn [t]
+                   (doseq [p (:inner t) :when (and (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind p)) (:isParameterPack p))]
+                     (when (or (some #(= "TemplateArgument" (:kind %)) (:inner p))
+                               (and (= "NonTypeTemplateParmDecl" (:kind p)) (seq (remove #(#{"ConceptSpecializationExpr" "NativeAttr"} (:kind %)) (:inner p)))))
+                       (at! p "template parameter pack cannot have a default argument"))))]
+    (letfn [(scope! [nodes cls? enclosing]
+              (let [seen (java.util.HashMap.)]
+                (doseq [n nodes :when (map? n)]
+                  (case (:kind n)
+                    "ConceptDecl"
+                    (do (when cls? (at! n (str "concept '" (:name n) "' not in namespace scope")))
+                        (when (some :_tc (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:inner n)))
+                          (at! n "a concept cannot be constrained"))
+                        (let [b (get-in n [:range :begin :offset])]
+                          (when (and b (mine? n) (or (re-find #"^template\s*<[^{};]*?>\s*template\s*<" (subs src (long b) (min n-src (+ (long b) 300))))
+                                                     (re-find #"template\s*<[^{};]*>\s*$" (last (str/split (subs src (max 0 (- (long b) 300)) (long b)) #"[;{}]" -1)))))
+                            (at! n (str "concept '" (:name n) "' has multiple template parameter lists"))))
+                        (case (.get seen (:name n))
+                          :concept (at! n (str "redefinition of concept '" (:name n) "'"))
+                          :class (at! n (str "'" (:name n) "' redeclared as different kind of entity"))
+                          nil)
+                        (.put seen (:name n) :concept))
+                    "CXXRecordDecl" (do (when (and (:name n) (:completeDefinition n) (not (:isImplicit n)))
+                                          (when (= :concept (.get seen (:name n))) (at! n (str "'" (:name n) "' redeclared as different kind of entity")))
+                                          (when-not (.containsKey seen (:name n)) (.put seen (:name n) :class)))
+                                        (scope! (:inner n) true enclosing))
+                    ("NamespaceDecl" "LinkageSpecDecl") (scope! (:inner n) false enclosing)
+                    "ClassTemplateDecl" (do (tparams! n)
+                                            (scope! (filter #(= "CXXRecordDecl" (:kind %)) (:inner n)) cls? (into enclosing (tparam-names n))))
+                    ("FunctionTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl") (tparams! n)
+                    "TypeAliasDecl" (when (re-matches #"(?:(?:const|volatile)\s+)*auto" (str/trim (str (get-in n [:type :qualType]))))
+                                      (at! n "'auto' not allowed in alias declaration"))
+                    "TypedefDecl" (when (re-matches #"(?:(?:const|volatile)\s+)*auto" (str/trim (str (get-in n [:type :qualType]))))
+                                    (at! n "typedef declared 'auto'"))
+                    "FriendDecl" (doseq [f (:inner n)]
+                                   (case (:kind f)
+                                     "FunctionDecl" (when (and (:trailingRequiresClause f) (not (has-body? f)))
+                                                      (at! f (str "non-template friend '" (:name f) "' with a requires-clause must be a definition")))
+                                     "FunctionTemplateDecl" (when-let [fd (some #(when (= "FunctionDecl" (:kind %)) %) (:inner f))]
+                                                              (when (and (:trailingRequiresClause fd) (not (has-body? fd))
+                                                                         (some (set enclosing) (names-in (:trailingRequiresClause fd))))
+                                                                (at! fd (str "friend '" (:name fd) "' with a requires-clause that depends on an enclosing template parameter must be a definition"))))
+                                     nil))
+                    nil))))]
+      (scope! (:nodes u) false #{}))
+    (walk-nodes (fn [n _]
+                  (when (= "RequiresExpr" (:kind n))
+                    (let [seen (java.util.HashSet.)]
+                      (doseq [p (:params n) :when (:name p)]
+                        (when-not (.add seen (:name p)) (at! p (str "conflicting declaration '" (get-in p [:type :qualType]) " " (:name p) "'")))))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj concept-decl-rules)
+
+;; Abbreviated function templates and constrained placeholders ([dcl.fct]/22, [temp.mem]/4, [over.literal]/5, [dcl.spec.auto.general]/4):
+;; a function with a placeholder parameter is a template, so not virtual ("templates may not be 'virtual'") nor a literal operator
+;; (whose template has an empty parameter-declaration-clause: "literal operator template has invalid parameter list"); a function
+;; declarator with a trailing return type has plain auto ("'f' function with trailing return type has constrained 'auto' type
+;; specifier rather than plain 'auto'"), and a type-id no constrained placeholder ("invalid use of constrained 'auto' type").
+
+(defn abbreviated-templates
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))
+        at! (fn [n msg] (when-let [o (when (mine? n) (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset])))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :placeholder :msg msg}))))
+        auto-param? (fn [f] (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner f)))
+        head (fn [n] (let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])]
+                       (when (and b e (mine? n) (< (long b) (long e) n-src)) (subs src (long b) (long e)))))]
+    (walk-nodes
+     (fn [n parent]
+       (case (:kind n)
+         ("CXXMethodDecl" "FunctionDecl")
+         (do (when (and (:virtual n) (auto-param? n)) (at! n "templates may not be 'virtual'"))
+             (when (and (re-find #"^operator\s*\"\"" (str (:name n))) (auto-param? n))
+               (at! n "literal operator template has invalid parameter list"))
+             (when (re-find #"\)\s*(?:const\s*|noexcept\s*)*->" (str (get-in n [:type :qualType])))
+               (when-let [h (head n)]
+                 (when (re-find #"[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\s*$" (str/replace h #"\b(?:static|inline|constexpr|consteval|virtual|explicit|friend|extern|const|volatile)\b" ""))
+                   (at! n (str "'" (:name n) "' function with trailing return type has constrained 'auto' type specifier rather than plain 'auto'"))))))
+         ("TypeAliasDecl" "TypedefDecl")
+         (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+           (when (and b e (mine? n) (< (long b) (long e) n-src))
+             (let [t (subs src (long b) (inc (long e)))
+                   ty (if (= "TypeAliasDecl" (:kind n)) (second (re-find #"(?s)=(.*)$" t)) t)]
+               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
+                 (at! n "invalid use of constrained 'auto' type")))))
+         nil))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj abbreviated-templates)
+
+;; Designated initializers (C++20, [dcl.init.general]/1, [dcl.init.aggr]/3.1, [temp.variadic]/5): a braced-init-list is a
+;; designated-initializer-list or none of its clauses is designated ("either all initializer clauses should be designated or none of
+;; them should be"), and a designated clause is no pack expansion ("'...' not allowed in designated initializer list"). Read off the
+;; list's text, its top-level clauses; a list with a GNU array designator `[N] =` not judged.
+
+(defn designated-lists
+  [u starts ^String src ^String main]
+  (when (>= (long (cxx-year (:std u))) 20)
+    (let [out (java.util.ArrayList.)
+          n-src (count src)
+          clauses (fn [^String t]
+                    ;; the top-level clauses of `{ ... }`'s text
+                    (let [n (count t)]
+                      (loop [i 1 depth 0 start 1 acc [] q nil]
+                        (if (>= i n) acc
+                            (let [c (.charAt t i)]
+                              (cond
+                                (and q (= c \\)) (recur (+ i 2) depth start acc q)
+                                q (recur (inc i) depth start acc (if (= c q) nil q))
+                                (or (= c \") (= c \')) (recur (inc i) depth start acc c)
+                                (#{\( \[ \{} c) (recur (inc i) (inc depth) start acc nil)
+                                (and (#{\) \] \}} c) (zero? depth)) (conj acc (subs t start i))
+                                (#{\) \] \}} c) (recur (inc i) (dec depth) start acc nil)
+                                (and (= c \,) (zero? depth)) (recur (inc i) depth (inc i) (conj acc (subs t start i)) nil)
+                                :else (recur (inc i) depth start acc nil)))))))]
+      (walk-nodes
+       (fn [n _]
+         (when (= "InitListExpr" (:kind n))
+           (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
+             (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (= \{ (.charAt src (int b))))
+               (let [cs (remove str/blank? (map str/trim (clauses (subs src (long b) (inc (long e))))))
+                     desig? (fn [^String c] (boolean (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)))]
+                 (when (and (seq cs) (not-any? #(str/starts-with? % "[") cs) (not-any? #(str/includes? % "#") cs))
+                   (let [ds (filter desig? cs)
+                         [l c] (line-col starts (long b))]
+                     (when (and (seq ds) (some (complement desig?) cs))
+                       (.add out {:line l :col c :kind :error :rule :designator
+                                  :msg "either all initializer clauses should be designated or none of them should be"}))
+                     (when (some #(str/ends-with? % "...") ds)
+                       (.add out {:line l :col c :kind :error :rule :designator :msg "'...' not allowed in designated initializer list"})))))))))
+       (:nodes u) nil)
+      (vec (distinct out)))))
+
+(swap! checks conj designated-lists)
+
+;; A destroying operator delete ([basic.stc.dynamic.deallocation]/3, P0722): a member of C whose second parameter is
+;; std::destroying_delete_t has a first parameter of type C* ("'operator delete' takes type 'C*' as first parameter").
+
+(defn destroying-deletes
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n parent]
+                  (when (and (= "CXXMethodDecl" (:kind n)) (re-matches #"operator\s*delete" (str (:name n)))
+                             (= "CXXRecordDecl" (:kind parent)) (:name parent) (= main (get-in n [:range :begin :file])))
+                    (let [ps (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner n)))]
+                      (when (and (>= (count ps) 2) (re-find #"destroying_delete_t" (str (get-in (ps 1) [:type :qualType])))
+                                 (not= (str (:name parent) "*") (str/replace (str (get-in (ps 0) [:type :qualType])) #"\s+|\bstruct\b|\bclass\b" "")))
+                        (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :delete
+                                       :msg (str "'operator delete' takes type '" (:name parent) "*' as first parameter")})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj destroying-deletes)
+
+;; [expr.prim.lambda.capture]/3: a lambda-expression whose smallest enclosing scope is no block scope (a namespace-scope variable's
+;; initializer, a parameter's type there) has no capture-default ("non-local lambda expression cannot have a capture-default"). Read
+;; off a namespace-scope variable's initializer text outside every lambda body. And [dcl.constexpr]/3-4 with [class.default.ctor]/4: a
+;; class with a virtual base has no constexpr constructor, so a constexpr variable of it is no constant ("'struct A' has virtual base
+;; classes", at the class, and at the variable).
+
+(defn nonlocal-lambdas
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        at-off! (fn [off rule msg] (let [[l c] (line-col starts (long off))] (.add out {:line l :col c :kind :error :rule rule :msg msg})))
+        classes (java.util.HashMap.)]
+    (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n)) (.put classes (:name n) n))) (:nodes u) nil)
+    ((fn top [nodes]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "VarDecl"
+           (do
+             (let [b (get-in n [:loc :offset]) e (get-in n [:range :end :offset])]
+               (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (:init n))
+                 (let [t (subs src (long b) (inc (long e)))
+                       eq (.indexOf ^String t "=")]
+                   (when (pos? eq)
+                     (loop [i (inc eq) depth 0]
+                       (when (< i (count t))
+                         (let [c (.charAt t i)]
+                           (cond (= c \{) (recur (inc i) (inc depth))
+                                 (= c \}) (recur (inc i) (max 0 (dec depth)))
+                                 (and (zero? depth) (= c \[) (< (inc i) (count t)) (#{\& \=} (.charAt t (inc i)))
+                                      (re-find #"^\[\s*[&=]\s*(?:,[^\]]*)?\]" (subs t i)))
+                                 (do (at-off! (+ (long b) i) :lambda "non-local lambda expression cannot have a capture-default") (recur (inc i) depth))
+                                 :else (recur (inc i) depth)))))))))
+             (when (:constexpr n)
+               (when-let [c (.get classes (str/trim (str/replace (str (get-in n [:type :qualType])) #"^(?:const\s+)?(?:(?:struct|class)\s+)?" "")))]
+                 (when (some :isVirtual (:bases c))
+                   (when-let [o (get-in c [:loc :offset])]
+                     (when (= main (get-in c [:range :begin :file]))
+                       (at-off! o :constexpr (str "'struct " (:name c) "' has virtual base classes"))))
+                   (when-let [o (get-in n [:loc :offset])]
+                     (at-off! o :constexpr (str "call to non-'constexpr' function '" (:name c) "::" (:name c) "()'")))))))
+           nil)))
+     (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj nonlocal-lambdas)
+
+;; [expr.prim.lambda.capture]/12 with [dcl.init.ref]/5: a structured binding naming a bit-field ([dcl.struct.bind]/5: the binding
+;; refers to the member) is not captured by reference, explicitly (`&a`, `&a = a`) or by a capture-default `&` that a use in the body
+;; captures ("cannot bind bit-field 'a' to 'int&'", at the lambda). The bindings of a class whose non-static data members the
+;; initializer's type lists, no base.
+
+(defn bitfield-captures
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        recs (java.util.HashMap.)
+        _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n)) (.put recs (:name n) n))) (:nodes u) nil)
+        names-in (fn [x] (let [acc (java.util.HashSet.)]
+                           (walk-nodes (fn [d _] (when (= "DeclRefExpr" (:kind d)) (.add acc (str (get-in d [:referencedDecl :name]))))) x nil)
+                           acc))]
+    (walk-nodes
+     (fn [f _]
+       (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+         (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+           (let [bits (java.util.HashSet.)]
+             ;; the body's statements in order: a binding of a bit-field, then the lambdas after it
+             (walk-nodes
+              (fn [n _]
+                (case (:kind n)
+                  "DecompositionDecl"
+                  (let [init (first (remove #(= "BindingDecl" (:kind %)) (:inner n)))
+                        cn (get-in init [:_t :s])
+                        r (when cn (.get recs cn))
+                        fs (when (and r (empty? (:bases r))) (filter #(= "FieldDecl" (:kind %)) (:inner r)))
+                        bs (filter #(= "BindingDecl" (:kind %)) (:inner n))]
+                    (when (and (seq fs) (= (count fs) (count bs)))
+                      (doseq [[bd fd] (map vector bs fs) :when (:isBitfield fd)] (.add bits (:name bd)))))
+                  "LambdaExpr"
+                  (when (and (pos? (.size bits)) (= main (get-in n [:range :begin :file])))
+                    (let [o (long (get-in n [:range :begin :offset]))
+                          lb (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+                          intro (let [t (subs src o (min n-src (+ o 300)))] (second (re-find #"^\[([^\]]*)\]" t)))
+                          caps (when intro (map str/trim (str/split intro #",")))
+                          used (when lb (names-in lb))]
+                      (doseq [nm bits]
+                        (when (or (some #(re-matches (re-pattern (str "&\\s*" nm "(?:\\s*=.*)?")) %) caps)
+                                  (and (some #(= "&" %) caps) used (.contains ^java.util.HashSet used nm)
+                                       (not (some #(re-matches (re-pattern (str nm "(?:\\s*=.*)?")) %) caps))))
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :capture :msg (str "cannot bind bit-field '" nm "' to 'int&'")}))))))
+                  nil))
+              (:inner b) nil)))))
+     (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj bitfield-captures)
+
+;; C++26's name-independent declarations (P2169, [basic.scope.scope]/5, [basic.lookup.general]/? ): a block-scope variable or
+;; structured binding named _ of automatic storage may be declared again in its scope; an unqualified use of _ whose lookup finds
+;; more than one entity there (two such declarations, or one with a declaration of another kind, the extern ones of a name one
+;; entity) is ambiguous ("reference to '_' is ambiguous", at the use). A selection or iteration statement's init-statement,
+;; condition and for-range-declaration share their scope with the substatement's outermost block ([stmt.pre]/5).
+
+(defn name-independent-uses
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        new-frame (fn [] (java.util.HashMap. {:ext 0 :ind 0}))
+        add! (fn [^java.util.HashMap fr kind] (.put fr kind (inc (long (.get fr kind)))))
+        decl! (fn [fr d]
+                (case (:kind d)
+                  "VarDecl" (when (= "_" (:name d)) (add! fr (if (#{"extern" "static"} (:storageClass d)) :ext :ind)))
+                  "FunctionDecl" (when (= "_" (:name d)) (add! fr :ext))
+                  "DecompositionDecl" (doseq [b (:inner d) :when (and (= "BindingDecl" (:kind b)) (= "_" (:name b)))] (add! fr :ind))
+                  nil))
+        use! (fn [stack x]
+               (when-let [fr (first (filter (fn [^java.util.HashMap f] (pos? (+ (long (.get f :ext)) (long (.get f :ind))))) stack))]
+                 (let [^java.util.HashMap fr fr]
+                   (when (>= (+ (if (pos? (long (.get fr :ext))) 1 0) (long (.get fr :ind))) 2)
+                     (when-let [o (get-in x [:range :begin :offset])]
+                       (when (= main (get-in x [:range :begin :file]))
+                         (let [[l c] (line-col starts (long o))]
+                           (.add out {:line l :col c :kind :error :rule :name-independent :msg "reference to '_' is ambiguous"}))))))))]
+    (letfn [(expr [x stack]
+              (cond (map? x) (case (:kind x)
+                               "DeclRefExpr" (when (and (= "_" (get-in x [:referencedDecl :name])) (empty? (:qualifier x))) (use! stack x))
+                               ("LambdaExpr" "CXXRecordDecl") nil
+                               (doseq [[k v] x :when (and (not= k :_ent) (not= k :_t) (coll? v))] (expr v stack)))
+                    (sequential? x) (doseq [y x] (expr y stack))
+                    :else nil))
+            (stmts [xs stack] (doseq [x xs] (stmt x stack)))
+            (stmt [x stack]
+              (when (map? x)
+                (case (:kind x)
+                  "CompoundStmt" (stmts (:inner x) (cons (new-frame) stack))
+                  "DeclStmt" (doseq [d (:inner x)] (expr (:inner d) stack) (decl! (first stack) d))
+                  ("ForStmt" "WhileStmt" "IfStmt" "SwitchStmt" "CXXForRangeStmt")
+                  (let [fr (new-frame) st (cons fr stack)]
+                    (doseq [c (:inner x)]
+                      (cond (= "CompoundStmt" (:kind c)) (stmts (:inner c) st)
+                            (= "DeclStmt" (:kind c)) (stmt c st)
+                            (#{"VarDecl" "DecompositionDecl"} (:kind c)) (do (expr (:inner c) st) (decl! fr c))
+                            (#{"ForStmt" "WhileStmt" "IfStmt" "SwitchStmt" "CXXForRangeStmt" "DoStmt" "ReturnStmt"} (:kind c)) (stmt c st)
+                            :else (expr c st))))
+                  (expr x stack))))]
+      (walk-nodes (fn [f _]
+                    (when (and (fn-kinds (:kind f)) (= main (get-in f [:range :begin :file])))
+                      (when-let [b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner f))]
+                        ;; (a parameter's scope is the body's outermost block's, [basic.scope.param]/1, [basic.scope.block]/2)
+                        (let [fr (new-frame)]
+                          (doseq [pm (:inner f) :when (and (= "ParmVarDecl" (:kind pm)) (= "_" (:name pm)))] (add! fr :ind))
+                          (stmts (:inner b) (list fr))))))
+                  (:nodes u) nil)
+      ;; a lambda's captures named _ ([expr.prim.lambda.capture]/6: an init-capture is name-independent), read off its introducer:
+      ;; two, then a use of _ in its body, is ambiguous; a parameter _ with a capture _ is "lambda parameter '_' previously declared
+      ;; as a capture" ([expr.prim.lambda.capture]/5)
+      (walk-nodes (fn [l _]
+                    (when (and (= "LambdaExpr" (:kind l)) (= main (get-in l [:range :begin :file])))
+                      (let [o (long (get-in l [:range :begin :offset]))
+                            intro (second (re-find #"^\[([^\]]*)\]" (subs src o (min (count src) (+ o 300)))))
+                            caps (when intro (filter #(re-matches #"&?\s*_(?:\s*=.*)?" %) (map str/trim (str/split intro #","))))
+                            b (some #(when (= "CompoundStmt" (:kind %)) %) (:inner l))
+                            m (get-in l [:inner 0 :inner 0])]
+                        (when (seq caps)
+                          (when (some #(and (= "ParmVarDecl" (:kind %)) (= "_" (:name %))) (:inner m))
+                            (let [[ln c] (line-col starts o)]
+                              (.add out {:line ln :col c :kind :error :rule :name-independent :msg "lambda parameter '_' previously declared as a capture"})))
+                          (when (and b (>= (count caps) 2))
+                            (stmts (:inner b) (list (doto (new-frame) (.put :ind (count caps))))))))))
+                  (:nodes u) nil))
+    ;; structured bindings and template parameters that are not name-independent ([basic.scope.scope]/5: a static or namespace-scope
+    ;; structured binding, a template parameter): one named twice is "redeclaration of 'auto _'", "redefinition of 'int _'"
+    ((fn ns-walk [nodes ns?]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (ns-walk (:inner n) true)
+           ("FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl")
+           (do (let [nms (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner n))
+                     dup (some (fn [[k v]] (when (> (long v) 1) k)) (frequencies nms))]
+                 (when dup
+                   (when-let [p (last (filter #(= dup (:name %)) (:inner n)))]
+                     (when-let [o (when (= main (get-in p [:range :begin :file])) (or (get-in p [:loc :offset]) (get-in p [:range :begin :offset])))]
+                       (let [[l c] (line-col starts (long o))]
+                         (.add out {:line l :col c :kind :error :rule :redefinition :msg (str "redefinition of template parameter '" dup "'")}))))))
+               (ns-walk (filter #(fn-kinds (:kind %)) (:inner n)) false))
+           nil)))
+     (:nodes u) true)
+    (walk-nodes (fn [d _]
+                  (when (and (= "DecompositionDecl" (:kind d)) (= main (get-in d [:range :begin :file])))
+                    (let [o (long (get-in d [:range :begin :offset]))
+                          static? (re-find #"^(?:\[\[[^\]]*\]\]\s*)?(?:static|thread_local|extern)\b" (subs src o (min (count src) (+ o 40))))
+                          nms (keep #(when (= "BindingDecl" (:kind %)) (:name %)) (:inner d))]
+                      (when (and (or static? (:_nsscope d)) (some (fn [[_ v]] (> (long v) 1)) (frequencies nms)))
+                        (let [[l c] (line-col starts o)]
+                          (.add out {:line l :col c :kind :error :rule :redefinition :msg "redeclaration of 'auto _'"}))))))
+                (:nodes u) nil)
+    ((fn nsd [nodes]
+       (doseq [d nodes :when (map? d)]
+         (case (:kind d)
+           ("NamespaceDecl" "LinkageSpecDecl") (nsd (:inner d))
+           "DecompositionDecl"
+           (let [nms (keep #(when (= "BindingDecl" (:kind %)) (:name %)) (:inner d))]
+             (when (and (= main (get-in d [:range :begin :file])) (some (fn [[_ v]] (> (long v) 1)) (frequencies nms)))
+               (let [[l c] (line-col starts (long (get-in d [:range :begin :offset])))]
+                 (.add out {:line l :col c :kind :error :rule :redefinition :msg "redefinition of 'auto _'"}))))
+           nil)))
+     (:nodes u))
+    (vec (distinct out))))
+
+(swap! checks conj name-independent-uses)
+
+;; Prospective destructors (C++20, [class.dtor]/4, P0848): of a class's prospective destructors with constraints the check can
+;; evaluate (true, false, !, &&, || and parentheses), the destructor is the one whose constraints are satisfied; two satisfied, none
+;; more constrained, is "destructor for 'A<int>' is ambiguous", none satisfied "no viable destructor for 'B<int>'", at the class, when
+;; the unit names a specialization of it (a class template's are judged at its specialization's name, here its first written one).
+
+(defn- const-bool
+  "The value of a constraint's text made only of true, false, !, &&, ||, not, and, or and parentheses, nil otherwise."
+  [^String t]
+  (let [t (-> t (str/replace #"\bnot\b" "!") (str/replace #"\band\b" "&&") (str/replace #"\bor\b" "||") str/trim)]
+    (when (re-matches #"[\s()!&|]*(?:(?:true|false)[\s()!&|]*)+" t)
+      (let [toks (re-seq #"true|false|&&|\|\||!|\(|\)" t)
+            pos (volatile! 0)
+            peek* (fn [] (nth toks @pos nil))
+            next* (fn [] (let [x (peek* )] (vswap! pos inc) x))]
+        (letfn [(prim [] (let [x (next*)]
+                           (case x
+                             "true" true "false" false
+                             "!" (not (prim))
+                             "(" (let [v (orx)] (next*) v)
+                             (throw (ex-info "bad" {})))))
+                (andx [] (loop [v (prim)] (if (= "&&" (peek*)) (do (next*) (let [w (prim)] (recur (and v w)))) v)))
+                (orx [] (loop [v (andx)] (if (= "||" (peek*)) (do (next*) (let [w (andx)] (recur (or v w)))) v)))]
+          (try (let [v (orx)] (when (= @pos (count toks)) (boolean v))) (catch Throwable _ nil)))))))
+
+(defn prospective-destructors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        text (fn [x] (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset]) l (get-in x [:range :end :tokLen])]
+                       (when (and b e l (<= (long b) (+ (long e) (long l)) n-src)) (subs src (long b) (+ (long e) (long l))))))]
+    (walk-nodes
+     (fn [n parent]
+       (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n) (= main (get-in n [:range :begin :file])))
+         (let [ds (filter #(= "CXXDestructorDecl" (:kind %)) (:inner n))
+               vals (map #(when-let [rc (:trailingRequiresClause %)] (when-let [t (text rc)] (const-bool t))) ds)]
+           (when (and (>= (count ds) 2) (every? some? vals))
+             (let [tmpl? (= "ClassTemplateDecl" (:kind parent))
+                   spec (when tmpl? (second (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name n)) "\\s*(<[^<>;]*>)")) src)))
+                   cn (str (:name n) (or spec ""))
+                   sat (count (filter true? vals))
+                   o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+               (when (and o (or (not tmpl?) spec))
+                 (let [[l c] (line-col starts (long o))]
+                   (cond (>= sat 2) (.add out {:line l :col c :kind :error :rule :destructor :msg (str "destructor for '" cn "' is ambiguous")})
+                         (zero? sat) (.add out {:line l :col c :kind :error :rule :destructor :msg (str "no viable destructor for '" cn "'")})
+                         :else nil))))))))
+     (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj prospective-destructors)
+
+;; A friend class template's declaration redeclares the class template of its name, so its template-head is equivalent to the
+;; earlier one's ([temp.over.link]/6-7, [temp.friend]): the same type-constraints on its parameters and an equivalent
+;; requires-clause, its tokens the same ("redeclaration of 'template<class T> struct A' with different constraints", at the friend).
+
+(defn friend-template-constraints
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        text (fn [x] (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset]) l (get-in x [:range :end :tokLen])]
+                       (when (and b e l (<= (long b) (+ (long e) (long l)) n-src)) (str/replace (subs src (long b) (+ (long e) (long l))) #"\s+" ""))))
+        sig (fn [t rc] [(mapv #(vec (:_tc %)) (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:inner t)))
+                        (when rc (or (text rc) :unknown))])
+        originals (java.util.HashMap.)]
+    ((fn top [nodes]
+       (doseq [n nodes :when (map? n)]
+         (case (:kind n)
+           ("NamespaceDecl" "LinkageSpecDecl") (top (:inner n))
+           "ClassTemplateDecl" (when-not (.containsKey originals (:name n)) (.put originals (:name n) (sig n (:requiresClause n))))
+           nil)))
+     (:nodes u))
+    (walk-nodes (fn [fd _]
+                  (when (and (= "FriendDecl" (:kind fd)) (= main (get-in fd [:range :begin :file])))
+                    (when-let [t (some #(when (= "ClassTemplateDecl" (:kind %)) %) (:inner fd))]
+                      (when-let [orig (.get originals (:name t))]
+                        (let [mine (sig t (or (:requiresClause fd) (:requiresClause t)))]
+                          (when (and (not (some #{:unknown} [(second orig) (second mine)])) (not= orig mine))
+                            (when-let [o (or (get-in t [:loc :offset]) (get-in (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner t)) [:loc :offset]) (get-in fd [:range :begin :offset]))]
+                              (let [[l c] (line-col starts (long o))]
+                                (.add out {:line l :col c :kind :error :rule :friend
+                                           :msg (str "redeclaration of class template '" (:name t) "' with different constraints")})))))))))
+                (:nodes u) nil)
+    (vec (distinct out))))
+
+(swap! checks conj friend-template-constraints)
+
+;; [temp.names]/8 with [expr.prim.id.qual]/1: a concept-id names no type or namespace, so it is no nested-name-specifier
+;; ("concept-id 'foo<T>' in nested-name-specifier", at the qualified name).
+
+(defn concept-qualifiers
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        concepts (java.util.HashSet.)
+        ;; (cpp-diag-a: a concept-id in an expression names every template parameter of its concept, [temp.arg.general]/4-5:
+        ;; "wrong number of template arguments (1, should be 2)"; a concept with a pack or a default argument not judged)
+        arity (java.util.HashMap.)]
+    (walk-nodes (fn [n _] (when (and (= "ConceptDecl" (:kind n)) (:name n))
+                            (.add concepts (:name n))
+                            (let [ps (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:inner n))]
+                              (.put arity (:name n) (if (or (.containsKey arity (:name n)) (some :isParameterPack ps) (some #(seq (:inner %)) ps)) :unknown (count ps))))))
+                (:nodes u) nil)
+    (when (pos? (.size concepts))
+      (walk-nodes (fn [n _]
+                    (when (and (= "DeclRefExpr" (:kind n)) (:explicitTemplateArgs n) (empty? (:qualifier n)))
+                      (let [k (.get arity (str (get-in n [:referencedDecl :name])))]
+                        (when (and (number? k) (not= (long k) (count (:explicitTemplateArgs n))) (not-any? #(str/includes? (str %) "...") (:explicitTemplateArgs n)))
+                          (when-let [o (when (= main (get-in n [:range :begin :file])) (get-in n [:range :begin :offset]))]
+                            (let [[l col] (line-col starts (long o))]
+                              (.add out {:line l :col col :kind :error :rule :concept
+                                         :msg (str "wrong number of template arguments (" (count (:explicitTemplateArgs n)) ", should be " k ")")})))))))
+                    (:nodes u) nil)
+      (walk-nodes (fn [n _]
+                    (when-let [q (seq (:qualifier n))]
+                      (when-let [c (some #(let [b (str/trim (str/replace (str %) #"<.*$" ""))] (when (and (str/includes? (str %) "<") (.contains concepts b)) %)) q)]
+                        (when-let [o (when (= main (get-in n [:range :begin :file])) (get-in n [:range :begin :offset]))]
+                          (let [[l col] (line-col starts (long o))]
+                            (.add out {:line l :col col :kind :error :rule :concept :msg (str "concept-id '" c "' in nested-name-specifier")}))))))
+                  (:nodes u) nil))
+    (vec (distinct out))))
+
+(swap! checks conj concept-qualifiers)
+
+;; A placeholder type in a template argument ([dcl.spec.auto.general]/5 lists where auto may appear: no template-argument; the
+;; Concepts TS's `tuple<auto>` is gone from C++20): a declared variable's type with `auto` inside a template argument list is
+;; "invalid use of 'auto' in template argument" (decltype(auto) and a class template's deduction aside).
+
+(defn auto-template-args
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (and (#{"VarDecl" "FieldDecl"} (:kind n)) (= main (get-in n [:range :begin :file])))
+                    (let [t (str/replace (str (get-in n [:type :qualType])) #"decltype\(auto\)" "")]
+                      (when (re-find #"[A-Za-z_]\w*\s*<[^<>;=]*\bauto\b[^<>;=]*>" t)
+                        (when-let [o (or (get-in n [:loc :offset]) (get-in n [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :placeholder :msg "invalid use of 'auto' in template argument"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj auto-template-args)
+
+;; C++26's [expr.delete]/5 (P3144): the operand of a delete-expression is no pointer to an incomplete class type ("operator 'delete'
+;; used on incomplete type", "operator 'delete []' ..."); a class completed only after the expression is incomplete there.
+
+(defn delete-incomplete
+  [u starts ^String src ^String main]
+  (when (re-find #"(?:26|2c)$" (str (:std u)))
+    (let [out (java.util.ArrayList.)
+          defs (java.util.HashMap.)
+          _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n) (:completeDefinition n) (= main (get-in n [:range :begin :file])))
+                                    (when-let [o (get-in n [:range :begin :offset])]
+                                      (.put defs (:name n) (min (long o) (long (or (.get defs (:name n)) Long/MAX_VALUE)))))))
+                        (:nodes u) nil)
+          declared (java.util.HashSet.)
+          _ (walk-nodes (fn [n _] (when (and (= "CXXRecordDecl" (:kind n)) (:name n)) (.add declared (:name n)))) (:nodes u) nil)]
+      (walk-nodes (fn [n _]
+                    (when (and (= "CXXDeleteExpr" (:kind n)) (= main (get-in n [:range :begin :file])))
+                      (let [x (first (:inner n))
+                            ty (get-in x [:_ent :ty])
+                            cn (when (and (= "DeclRefExpr" (:kind x)) (= :p (:t ty)) (= :n (get-in ty [:of :t]))) (get-in ty [:of :s]))
+                            o (get-in n [:range :begin :offset])]
+                        (when (and cn o (.contains declared cn) (> (long (or (.get defs cn) Long/MAX_VALUE)) (long o)))
+                          (let [[l c] (line-col starts (long o))
+                                arr (re-find #"^delete\s*\[" (subs src (long o) (min (count src) (+ (long o) 12))))]
+                            (.add out {:line l :col c :kind :error :rule :delete
+                                       :msg (str "operator 'delete" (when arr " []") "' used on incomplete type")}))))))
+                  (:nodes u) nil)
+      (vec out))))
+
+(swap! checks conj delete-incomplete)
+
+;; [stmt.pre]/1: an init-statement is an expression-statement, a simple-declaration or an alias-declaration, not a using-declaration
+;; or a using-directive ("expected primary-expression before 'using'", at it).
+
+(defn using-init-statements
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (#{"IfStmt" "SwitchStmt" "ForStmt" "CXXForRangeStmt"} (:kind n))
+                    (let [i (first (:inner n))]
+                      (when (and (= "DeclStmt" (:kind i)) (some #(#{"UsingDecl" "UsingDirectiveDecl"} (:kind %)) (:inner i))
+                                 (or (#{"ForStmt" "CXXForRangeStmt"} (:kind n)) (:hasInit n)))
+                        (when-let [o (when (= main (get-in i [:range :begin :file])) (get-in i [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :syntax :msg "expected primary-expression before 'using'"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj using-init-statements)
+
+;; [dcl.attr.grammar]/4 with [dcl.attr.assume]/1: an assume attribute followed by `...` is a pack expansion of it, which the attribute
+;; does not allow (an attribute-token's own rule): "pack expansion of 'assume' attribute" (its argument with a pack), "expansion pattern
+;; '(1 > 0)' contains no parameter packs" (without). Read off the main file's text, comments and literals aside.
+
+(defn assume-expansions
+  [u starts ^String src ^String main]
+  (let [clean (-> src (str/replace #"(?s)/\*.*?\*/" (fn [m] (str/replace m #"[^\n]" " "))) (str/replace #"//[^\n]*" (fn [m] (str/replace m #"." " ")))
+                  (str/replace #"\"(?:\\.|[^\"\\\n])*\"" (fn [m] (str/replace m #"." " "))))
+        m (re-matcher #"\[\[\s*(?:(?:__)?gnu(?:__)?\s*::\s*)?(?:__)?assume(?:__)?\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)\s*\.\.\.\s*\]\]" clean)]
+    (loop [acc []]
+      (if (.find m)
+        (let [[l c] (line-col starts (long (.start m)))]
+          (recur (conj acc {:line l :col c :kind :error :rule :attribute
+                            :msg (if (re-find #"[A-Za-z_]" (.group m 1)) "pack expansion of 'assume' attribute"
+                                     (str "expansion pattern '(" (str/trim (.group m 1)) ")' contains no parameter packs"))})))
+        acc))))
+
+(swap! checks conj assume-expansions)
 
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
