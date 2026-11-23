@@ -3659,7 +3659,7 @@
     ;; deftype: nil; a reify: its object
     (method ^:public eval [this]
       (if (instance? FnExpr this)
-          (Compiler$CodeRun/newFnClosed (cast FnExpr this) (new Object/1 0))
+          (Compiler$EvalFn. (cast FnExpr this) (new Object/1 0))
           (Compiler$Evaluator/newInstance (cast NewInstanceExpr this) nil)))
 
     (method ^:public hasJavaClass ^boolean [this] true)
@@ -3691,13 +3691,6 @@
 
     (field ^:public ^Class evalClass)
 
-    ;; CDR15 (a), Q1 (b): an evaluated fn with primitive signatures is an object of its class made by
-    ;; Dyn.defineProxyClass over EvalFn (Evaluator.fnClass), made by these constructors of it, EvalFn's
-    ;; (FnExpr, Frame) and (FnExpr, Object[]); nil for every other fn (an EvalFn)
-    (field ^:public ^java.lang.reflect.Constructor evalCtorF)
-
-    (field ^:public ^java.lang.reflect.Constructor evalCtorC)
-
     (field ^:public ^String evalSource)
 
     (field ^:public ^Namespace evalNs)
@@ -3706,7 +3699,7 @@
 
     (method ^:public evalIn [this ^Compiler$Frame f]
       (if (instance? FnExpr this)
-          (Compiler$CodeRun/newFn (cast FnExpr this) f)
+          (Compiler$EvalFn. (cast FnExpr this) f)
           (Compiler$Evaluator/newInstance (cast NewInstanceExpr this) f))))
 
   (defclass ^:enum PATHTYPE
@@ -3740,10 +3733,6 @@
 
     (field ^String prim)
 
-    ;; CDR15 (a), Q1 (b): the primitive interface the JVM's fn class implements for this method (evalPrimInterface),
-    ;; which the evaluated fn's class implements (Evaluator.fnClass); the analysis keeps primInterface's nil (Q1 (a))
-    (field ^:public ^String evalPrim)
-
     (constructor ^:public [this ^ObjExpr objx ^ObjMethod parent]
       (super. objx parent))
 
@@ -3762,26 +3751,6 @@
     ;; primitive interface, so callers call invoke; the evaluator converts ^long and ^double
     ;; parameters and returns
     (method ^:public ^:static primInterface ^String [^IPersistentVector arglist] nil)
-
-    ;; CDR15 (a), Q1 (b) (the user, 2026-11-22; doc/CLOJURE-DESIGN-REVIEW.md): the primitive interface of the JVM's
-    ;; FnMethod.primInterface for a fixed arglist ("arbace.lang.IFn$LL" for ^long x returning ^long), which the
-    ;; evaluated fn implements without the analysis changing (callers still call invoke); nil when the arglist has no
-    ;; primitive, is variadic or has more than 4 parameters (the JVM's compile errors, which the Go build does not raise)
-    (method ^:public ^:static evalPrimInterface ^String [^IPersistentVector arglist]
-      (let [sb (StringBuilder.)
-            n (.count arglist)]
-        (when (> n 4) (return nil))
-        (loop [^int i 0]
-          (when (< i n)
-            (let [p (.nth arglist i)]
-              (when (.equals _AMP_ p) (return nil))
-              (.append sb (FnMethod/classChar (arbace.lang.Compiler/tagOf p))))
-            (recur (unchecked-inc-int i))))
-        (.append sb (FnMethod/classChar (arbace.lang.Compiler/tagOf arglist)))
-        (let [r (.toString sb)]
-          (if (or (>= (.indexOf r "L") 0) (>= (.indexOf r "D") 0))
-              (java-str "arbace.lang.IFn$" r)
-              nil))))
 
     ;; CDR2: the RT cast typing a call of a fn whose arglist returns ^long (longCast) or ^double
     ;; (doubleCast), as Clojure's invokePrim of IFn$...L or ...D types it; nil otherwise (another
@@ -3933,8 +3902,6 @@
                               (recur (unchecked-inc-int i)))
                             (recur (unchecked-inc-int i)))
                         nil)))
-                ;; CDR15 (a): the parameters are checked by now (classChar's error raised above for an int)
-                (set! (.-evalPrim method) (FnMethod/evalPrimInterface parms))
                 (set! (.-body method) (.parse (Compiler$BodyExpr$Parser.) C/RETURN body))
                 method)))
           (finally (Var/popThreadBindings)))))
@@ -9269,9 +9236,6 @@
     ;; the compiled method the frame was last made ready for (reset): its slots and prims
     ;; sized for it, its method, objx and source its own
     (field ^CMethod cm)
-    ;; fn's closed-over values, read once a call (closed): since CDR15 (a) EvalFn has a subclass, so a field read
-    ;; through fn is a call of its class interface; nil until the first read
-    (field ^Object/1 fnClosed)
 
     (constructor ^:public [this ^int n ^EvalFn fn ^ObjMethod method ^ObjExpr objx self]
       (set! (.-slots this) (new Object/1 n))
@@ -9299,7 +9263,6 @@
         (set! (.-source this) (.-source cm))
         (set! (.-cm this) cm))
       (set! (.-fn this) fn)
-      (set! (.-fnClosed this) nil)
       ;; slot 0: the fn itself (its name in its body), unless the fn is direct
       (when (and (some? fn) (.-selfSlot cm))
         (aset slots 0 fn))
@@ -9313,17 +9276,14 @@
     (method ^:public release ^void [this ^int n]
       (CodeRun/clear slots n)
       (set! (.-fn this) nil)
-      (set! (.-fnClosed this) nil)
       (set! (.-self this) nil)
       (set! (.-caller this) nil))
 
     ;; the i-th closed-over value
     (method ^:public closed [this ^int i]
-      (let [c fnClosed]
-        (cond
-          (some? c) (aget c i)
-          (some? fn) (let [d (.-closed fn)] (set! fnClosed d) (aget d i))
-          :else (Dyn/getField self i)))))
+      (if (some? fn)
+          (aget (.-closed fn) i)
+          (Dyn/getField self i))))
 
   (defclass ^:public ^:static EvalFn
     :extends RestFn
@@ -9363,14 +9323,14 @@
     ;; ArraySeq of them binds it. Past 5 arguments the values are put in an array first
     ;; (Evaluator.invokeArray; RestFn's seq before, doc/go/EVAL-SPEED.md)
     (method ^:public invoke [this]
-      (let [cm (CodeRun/fixed fe 0)]
+      (let [cm (CodeRun/fixed this 0)]
         (if (some? cm)
             (let [st (CodeRun/state)]
               (CodeRun/invokeFn this cm (CodeRun/frame st cm this nil) st))
             (Evaluator/invokeSpread this RT/EMPTY_ARRAY))))
 
     (method ^:public invoke [this a]
-      (let [cm (CodeRun/fixed fe 1)]
+      (let [cm (CodeRun/fixed this 1)]
         (if (some? cm)
             (let [st (CodeRun/state)
                   f (CodeRun/frame st cm this nil)]
@@ -9383,7 +9343,7 @@
             (Evaluator/invokeSpread this (new Object/1 [a])))))
 
     (method ^:public invoke [this a b]
-      (let [cm (CodeRun/fixed fe 2)]
+      (let [cm (CodeRun/fixed this 2)]
         (if (some? cm)
             (let [st (CodeRun/state)
                   f (CodeRun/frame st cm this nil)]
@@ -9398,7 +9358,7 @@
             (Evaluator/invokeSpread this (new Object/1 [a b])))))
 
     (method ^:public invoke [this a b c]
-      (let [cm (CodeRun/fixed fe 3)]
+      (let [cm (CodeRun/fixed this 3)]
         (if (some? cm)
             (let [st (CodeRun/state)
                   f (CodeRun/frame st cm this nil)]
@@ -9415,7 +9375,7 @@
             (Evaluator/invokeSpread this (new Object/1 [a b c])))))
 
     (method ^:public invoke [this a b c d]
-      (let [cm (CodeRun/fixed fe 4)]
+      (let [cm (CodeRun/fixed this 4)]
         (if (some? cm)
             (let [st (CodeRun/state)
                   f (CodeRun/frame st cm this nil)]
@@ -9434,7 +9394,7 @@
             (Evaluator/invokeSpread this (new Object/1 [a b c d])))))
 
     (method ^:public invoke [this a b c d e]
-      (let [cm (CodeRun/fixed fe 5)]
+      (let [cm (CodeRun/fixed this 5)]
         (if (some? cm)
             (let [st (CodeRun/state)
                   f (CodeRun/frame st cm this nil)]
@@ -9455,77 +9415,77 @@
             (Evaluator/invokeSpread this (new Object/1 [a b c d e])))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6]
-      (let [cm (CodeRun/fixed fe 6)
+      (let [cm (CodeRun/fixed this 6)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7]
-      (let [cm (CodeRun/fixed fe 7)
+      (let [cm (CodeRun/fixed this 7)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8]
-      (let [cm (CodeRun/fixed fe 8)
+      (let [cm (CodeRun/fixed this 8)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9]
-      (let [cm (CodeRun/fixed fe 9)
+      (let [cm (CodeRun/fixed this 9)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10]
-      (let [cm (CodeRun/fixed fe 10)
+      (let [cm (CodeRun/fixed this 10)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11]
-      (let [cm (CodeRun/fixed fe 11)
+      (let [cm (CodeRun/fixed this 11)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12]
-      (let [cm (CodeRun/fixed fe 12)
+      (let [cm (CodeRun/fixed this 12)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13]
-      (let [cm (CodeRun/fixed fe 13)
+      (let [cm (CodeRun/fixed this 13)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14]
-      (let [cm (CodeRun/fixed fe 14)
+      (let [cm (CodeRun/fixed this 14)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15]
-      (let [cm (CodeRun/fixed fe 15)
+      (let [cm (CodeRun/fixed this 15)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16]
-      (let [cm (CodeRun/fixed fe 16)
+      (let [cm (CodeRun/fixed this 16)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17]
-      (let [cm (CodeRun/fixed fe 17)
+      (let [cm (CodeRun/fixed this 17)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18]
-      (let [cm (CodeRun/fixed fe 18)
+      (let [cm (CodeRun/fixed this 18)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19]
-      (let [cm (CodeRun/fixed fe 19)
+      (let [cm (CodeRun/fixed this 19)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
     (method ^:public invoke [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20]
-      (let [cm (CodeRun/fixed fe 20)
+      (let [cm (CodeRun/fixed this 20)
             vs (new Object/1 [a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20])]
         (if (some? cm) (Evaluator/invokeArray this cm vs) (Evaluator/invokeSpread this vs))))
 
@@ -9581,7 +9541,7 @@
                 fe (when (some? r) (cast FnExpr (.get r)))]
             (when (nil? fe)
               (throw (InvalidClassException. name "the class of an evaluated fn this process did not make")))
-            (CodeRun/newFnClosed fe closed))
+            (EvalFn. fe closed))
           (let [c (AOT/fnClassNamed name)
                 body (when (some? c) (Dyn/newAOTBody c closed))]
             (when (nil? body)
@@ -9655,18 +9615,6 @@
                 (CodeRun/bind f cm 1 b)
                 (CodeRun/bind f cm 2 c)))
         (CodeRun/invokeMethod this cm f st))))
-
-  ;; CDR15 (a), Q1 (b): the fn of an evaluated fn's invokePrim slots (Evaluator.primSlots): called by Dyn's dispatch
-  ;; with the fn (EvalFn's DynSub object) and the arguments boxed, it calls the fn's invoke, whose parameters and
-  ;; result the evaluator converts as for any call (invokeFn); the dispatch converts the result to the primitive
-  (defclass ^:public ^:static PrimInvoke
-    :extends AFn
-    (field ^:public ^:static ^:final ^PrimInvoke INSTANCE (PrimInvoke.))
-    (method ^:public invoke [this f] (.invoke (cast IFn f)))
-    (method ^:public invoke [this f a] (.invoke (cast IFn f) a))
-    (method ^:public invoke [this f a b] (.invoke (cast IFn f) a b))
-    (method ^:public invoke [this f a b c] (.invoke (cast IFn f) a b c))
-    (method ^:public invoke [this f a b c d] (.invoke (cast IFn f) a b c d)))
 
   (defclass ^:public ^:static EvalState
     ;; one thread's evaluator: the innermost frame and the depth (J2G-SPEC §10.5, §10.7)
@@ -10060,73 +10008,22 @@
       (when (some? f)
         (set! (.-line f) line)))
 
-    ;; the class of fe's fns (cached on the FnExpr). CDR15 (a), Q1 (b) (the user, 2026-11-22;
-    ;; doc/CLOJURE-DESIGN-REVIEW.md): a fn with primitive signatures (FnMethod.evalPrim) gets a class
-    ;; implementing their interfaces (IFn$LL ...) as the JVM's fn class does, made by defineProxyClass over
-    ;; EvalFn: its objects are of EvalFn's DynSub type (arbace.j2g.model/class-supers), which has every
-    ;; interface's methods and checks the class's interfaces, each invokePrim's slot the fn's invoke with its
-    ;; result converted (Compiler$PrimInvoke); made by the class's constructors (evalCtorF, evalCtorC)
+    ;; the class of fe's fns (cached on the FnExpr)
     (method ^:public ^:static fnClass ^Class [^FnExpr fe]
       (let [^:mutable c (.-evalClass fe)]
         (when (nil? c)
-          (let [ifs (Evaluator/primInterfaces fe)]
-            (if (nil? ifs)
-                (set! c (Dyn/defineFnClass (.-name fe) EvalFn))
-                (do (set! c (Dyn/defineProxyClass (.-name fe) EvalFn ifs))
-                    (Evaluator/primSlots c ifs)))
-            ;; the closed-over locals as the compiled class's fields (reflection reads them:
-            ;; Clojure's clearing tests), named and typed as ObjExpr.compile declares them
-            (let [bs (Evaluator/closes fe)]
-              (loop [^int i 0]
-                (when (< i (alength bs))
-                  (let [lb (aget bs i)
-                        p (.getPrimitiveType lb)]
-                    (Dyn/defineFnField c (.-name lb) i (if (some? p) p Object)))
-                  (recur (unchecked-inc-int i)))))
-            (when (some? ifs)
-              (set! (.-evalCtorF fe) (.getConstructor c (new Class/1 [FnExpr Frame])))
-              (set! (.-evalCtorC fe) (.getConstructor c (new Class/1 [FnExpr (.getClass RT/EMPTY_ARRAY)])))))
+          (set! c (Dyn/defineFnClass (.-name fe) EvalFn))
+          ;; the closed-over locals as the compiled class's fields (reflection reads them:
+          ;; Clojure's clearing tests), named and typed as ObjExpr.compile declares them
+          (let [bs (Evaluator/closes fe)]
+            (loop [^int i 0]
+              (when (< i (alength bs))
+                (let [lb (aget bs i)
+                      p (.getPrimitiveType lb)]
+                  (Dyn/defineFnField c (.-name lb) i (if (some? p) p Object)))
+                (recur (unchecked-inc-int i)))))
           (set! (.-evalClass fe) c))
         c))
-
-    ;; CDR15 (a): the distinct primitive interfaces of fe's methods (FnMethod.evalPrim), nil when none
-    (method ^:public ^:static primInterfaces ^Class/1 [^FnExpr fe]
-      (let [l (java.util.ArrayList.)]
-        (loop [s (RT/seq (.-methods fe))]
-          (when (some? s)
-            (let [n (.-evalPrim (cast FnMethod (.first s)))]
-              (when (and (some? n) (not (.contains l n))) (.add l n)))
-            (recur (.next s))))
-        (if (.isEmpty l)
-            nil
-            (let [a (new Class/1 (.size l))]
-              (loop [^int i 0]
-                (when (< i (.size l))
-                  (aset a i (RT/classForName (cast String (.get l i))))
-                  (recur (unchecked-inc-int i))))
-              a))))
-
-    ;; CDR15 (a): each interface's invokePrim (IFn$LOD: invokePrim(long, Object)double) given the fn's invoke as
-    ;; its slot's fn, the result converted to the primitive by Dyn's dispatch (RT.longCast, doubleCast)
-    (method ^:static primSlots ^void [^Class c ^Class/1 ifs]
-      (loop [^int i 0]
-        (when (< i (alength ifs))
-          (let [n (.getName (aget ifs i))
-                sig (.substring n (unchecked-inc-int (.lastIndexOf n "$")))
-                np (unchecked-dec-int (.length sig))
-                ps (new Class/1 np)]
-            (loop [^int j 0]
-              (when (< j np)
-                (aset ps j (Evaluator/primSigClass (.charAt sig j)))
-                (recur (unchecked-inc-int j))))
-            (Dyn/setMethod c "invokePrim" ps (Evaluator/primSigClass (.charAt sig np)) PrimInvoke/INSTANCE))
-          (recur (unchecked-inc-int i)))))
-
-    (method ^:static primSigClass ^Class [^char ch]
-      (switch ch
-        \L Long/TYPE
-        \D Double/TYPE
-        Object))
 
     ;; the locals objx closes over, in the order of its closes (cached on the ObjExpr)
     (method ^:public ^:static closes ^LocalBinding/1 [^ObjExpr objx]
@@ -10377,7 +10274,7 @@
         ;; a fixed arity's compiled method (cached by arity, CodeRun.fixed), else the variadic
         ;; one's
         (when (<= n maxf)
-          (set! cm (CodeRun/fixed fe n)))
+          (set! cm (CodeRun/fixed fn n)))
         (when (and (nil? cm) (some? vm) (>= n vreq))
           (let [c (.-evalCM vm)]
             (set! cm (if (some? c) c (CodeRun/cmethod vm fe true)))))
@@ -11402,28 +11299,6 @@
     (method ^:static ^:native threadState [])
     (method ^:static ^:native setThreadState ^void [s])
 
-    ;; an evaluated fn of fe in frame f, and with its closed-over values: an EvalFn, or for a fn with primitive
-    ;; signatures (CDR15 (a), Q1 (b)) an object of its class made by Evaluator.fnClass (EvalFn's DynSub type)
-    (method ^:public ^:static newFn ^EvalFn [^FnExpr fe ^Frame f]
-      (when (nil? (.-evalClass fe)) (Evaluator/fnClass fe))
-      (let [c (.-evalCtorF fe)]
-        (if (nil? c)
-            (EvalFn. fe f)
-            (CodeRun/construct c fe f))))
-
-    (method ^:public ^:static newFnClosed ^EvalFn [^FnExpr fe ^Object/1 closed]
-      (when (nil? (.-evalClass fe)) (Evaluator/fnClass fe))
-      (let [c (.-evalCtorC fe)]
-        (if (nil? c)
-            (EvalFn. fe closed)
-            (CodeRun/construct c fe closed))))
-
-    (method ^:static construct ^EvalFn [^java.lang.reflect.Constructor c ^FnExpr fe x]
-      (try
-        (cast EvalFn (.newInstance c (new Object/1 [fe x])))
-        (catch java.lang.reflect.InvocationTargetException e
-          (throw (Util/sneakyThrow (.getCause e))))))
-
     (method ^:public ^:static state ^EvalState []
       (let [^:mutable s (cast EvalState (CodeRun/threadState))]
         (when (nil? s)
@@ -11493,23 +11368,22 @@
     ;; are filled at each arity's first call; the array's last element, a CMethod of its own,
     ;; marks an arity without a fixed method (no static here: CodeRun's static methods are
     ;; without class initialization guards)
-    ;; (Given the fn's FnExpr, not the fn: since CDR15 (a) EvalFn has a subclass, its DynSub type, so a field read
-    ;; through an EvalFn is a call of its class interface; EvalFn's invoke methods read fe themselves)
-    (method ^:public ^:static fixed ^CMethod [^FnExpr fe ^int n]
-      (let [cms (.-evalArities fe)]
+    (method ^:public ^:static fixed ^CMethod [^EvalFn fn ^int n]
+      (let [cms (.-evalArities (.-fe fn))]
         (if (nil? cms)
-            (CodeRun/arity fe n)
+            (CodeRun/arity fn n)
             (let [cm (aget cms n)]
               (cond
-                (nil? cm) (CodeRun/arity fe n)
+                (nil? cm) (CodeRun/arity fn n)
                 (.-none cm) nil
                 :else cm)))))
 
     ;; the compiled method of fn's fixed arity n found, compiled and cached (FnExpr.evalArities),
     ;; or nil. (Threads that fill the cache at once may each make an array: a lost one is made
     ;; again; the methods themselves are compiled once, CodeRun.cmethod)
-    (method ^:static arity ^CMethod [^FnExpr fe ^int n]
-      (let [^:mutable cms (.-evalArities fe)
+    (method ^:static arity ^CMethod [^EvalFn fn ^int n]
+      (let [fe (.-fe fn)
+            ^:mutable cms (.-evalArities fe)
             ^:mutable ^FnMethod m nil]
         (when (nil? cms)
           (set! cms (new CMethod/1 (unchecked-add-int MAX_POSITIONAL_ARITY 2)))
@@ -12702,7 +12576,7 @@
     (field ^:public ^:final ^Code/1 fetch)
     (constructor ^:public [this ^FnExpr fe ^Code/1 fetch] (set! (.-fe this) fe) (set! (.-fetch this) fetch))
     (method ^:public run [this ^Frame f]
-      (CodeRun/newFnClosed fe (CodeRun/runAll fetch f))))
+      (EvalFn. fe (CodeRun/runAll fetch f))))
 
   (defclass ^:public ^:static CodeReify
     :extends Code

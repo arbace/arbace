@@ -1161,7 +1161,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
     Clojure code naming it unqualified compiles as upstream's does. repr/clojure's rule `:security-manager`, which
     qualified it, is gone with it (doc/REPR-CLOJURE.md). The oracle's `native.ae:410`, which records the frozen v4
     jar's answer to `(ns-resolve (create-ns 'native.imports.fresh) 'SecurityManager)` (nil: v4 had hand change 11), is a
-    known mismatch of main since v4 (`test/oracle/known-go-amd64-frozen.edn`).
+    known mismatch of main since v4 (`test/oracle/known-go-amd64-frozen.edn`); since 2026-11-23 (CDR14, the user) that
+    case and `state_errors.ae:454` (a fresh namespace's map, 106 names, v4's 105) are dropped from the oracle's forms.
 39. **The evaluator's fns with primitive signatures implement their primitive interfaces** (2026-11-22, branch
     `clj-cdr-1122`; doc/CLOJURE-DESIGN-REVIEW.md, CDR15 (a), the user's decision of 2026-11-22: doc/go/EVAL-PLAN.md's
     Q1 (b) in place of Q1 (a)). The analysis is unchanged (`FnMethod.primInterface` still nil: callers call `invoke`,
@@ -1182,6 +1183,13 @@ step 4 (2026-10-07); the others came with later work, as each says:
     EvalFn, so the call path reads them where it holds the struct: `CodeRun.fixed` and `arity` take the fn's
     `FnExpr` (EvalFn's invoke methods pass their own `fe`), and a `Frame` keeps the fn's closed-over values from their
     first read in a call (`fnClosed`).
+    **Its evaluated half withdrawn** (2026-11-23, branch `clj-1123`; CDR15 (b), the user's decision of 2026-11-23: it
+    cost plain evaluated calls about 9%): `arbace/lang/Compiler.ae` is as before it (EvalFn a leaf, no `fnClass` proxy,
+    `PrimInvoke`, `newFn`, `evalPrimInterface`, `Frame.fnClosed`; `CodeRun.fixed` takes the fn again), `Compiler$EvalFn`
+    out of `arbace.j2g.model/class-supers`, `arbace.j2g.dyn`'s `defineFnField` as before: an evaluated `^long` fn is a
+    plain fn again (Q1 (a): boxed, `invoke` converting). The Java forms half stays (`make-klass`, AFunction and RestFn
+    among class-supers): a fn the Java forms compiler compiles is an `IFn$LL` whose `invokePrim` runs (the oracle's
+    `native.ae:233`, `:234`, `:237`, which are such fns).
 
 ## Dialect divergences
 
