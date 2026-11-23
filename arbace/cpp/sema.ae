@@ -3535,10 +3535,16 @@
   [v]
   (and (map? v) (contains? v ::gaddr)))
 
+(defn ce-null?
+  "cpp-tzdb: whether the evaluator's value is ce-object's null pointer, {::gaddr ::null}: an object's pointer member a null pointer
+  constant initialized (<atomic>'s atomic<T*>{nullptr}, tzdb.cc's constinit statics)."
+  [v]
+  (and (ce-gaddr? v) (= ::null (::gaddr v))))
+
 (defn ce-global-addr
   "cpp-rt-own2: [var-id byte-offset] of an address value of ce-object's object (the code generator's pointer leaf), else nil."
   [v]
-  (when (ce-gaddr? v) [(::gaddr v) (::off v)]))
+  (when (and (ce-gaddr? v) (not (ce-null? v))) [(::gaddr v) (::off v)]))
 
 (defn ce-union-member
   "cpp-rt-own2: the active member's index of a union's value of ce-object's, nil when none is."
@@ -3731,7 +3737,7 @@
       ;; (CP378 (a): a pointer to an object, `this`, a location)
       (ce-loc? v) (if (abi/ptr? t) v (if (= :bool (abi/bn t)) 1 (not-constant "a pointer as " (pr-str t))))
       ;; (cpp-rt-own2: the address of an object of static storage duration, ce-object's: a pointer's value alone)
-      (ce-gaddr? v) (if (abi/ptr? t) v (not-constant "an address as " (pr-str t)))
+      (ce-gaddr? v) (if (or (abi/ptr? t) (and (ce-null? v) (= :nullptr (abi/bn t)))) v (not-constant "an address as " (pr-str t)))
       (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
       ;; (h-cpp-consteval, the checker: a null pointer, :null's 0)
       (and (or (abi/ptr? t) (= :nullptr (abi/bn t))) (number? v) (zero? (double v)) (checking?)) 0
@@ -3806,7 +3812,8 @@
                   :else (if (and (:ty e) (wide? (:ty e))) (ce-wrap (:ty e) (:v e)) (:v e)))
        :float (:v e)
        ;; (h-cpp-consteval, the checker: a null pointer, the value 0 of a pointer type -- not in the code generator's folds)
-       :null (if (checking?) 0 (not-constant "a null pointer"))
+       ;; (cpp-tzdb: under ce-object, the object's constant initialization, a null pointer value its pointer leaf writes)
+       :null (cond (checking?) 0 *ce-gaddr* {::gaddr ::null ::off 0} :else (not-constant "a null pointer"))
        ;; (CP378 (a): class objects: `this`, an address, a prvalue object, a value-initialized scalar)
        :this (or (::this env) (not-constant "this outside a member's evaluation"))
        :addr (or (when *ce-gaddr* (ce-static-addr (:e e) env)) (ce-lv (:e e) env))
@@ -3858,8 +3865,13 @@
                                         (ub! e "signed left shift discards bits")
                                         :else nil)
                           nil)))
+                    ;; (cpp-tzdb: an unsigned 64-bit operation wraps, [basic.fundamental]/2, the host's checked + - * not: <chrono>'s
+                    ;; __modulo_offset<7, long>()'s `_Up(-1) - ...`, folded as an immediate invocation, had thrown "long overflow";
+                    ;; a signed one past 64 bits, undefined, is no constant)
                     (ce-wrap t (if-some [w (when (wide? t) (wide-binop (:o e) a b))] w (case (:o e)
-                                 "+" (+ a b) "-" (- a b) "*" (* a b)
+                                 "+" (if (and u (not (wide? t))) (unchecked-add (long a) (long b)) (try (+ a b) (catch ArithmeticException _ (not-constant "an overflow"))))
+                                 "-" (if (and u (not (wide? t))) (unchecked-subtract (long a) (long b)) (try (- a b) (catch ArithmeticException _ (not-constant "an overflow"))))
+                                 "*" (if (and u (not (wide? t))) (unchecked-multiply (long a) (long b)) (try (* a b) (catch ArithmeticException _ (not-constant "an overflow"))))
                                  "/" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/divideUnsigned a b) (quot a b)))
                                  "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
@@ -4421,7 +4433,9 @@
   (try (binding [*ce-steps* (atom 0) *ce-const* (or *ce-const* (atom #{})) *ce-pos* (or *ce-pos* (atom nil)) *ce-dead* (or *ce-dead* (atom #{}))
                  *ce-temps* (or *ce-temps* (atom [])) *ce-manifest* *ce-object-manifest* *ce-gaddr* ga *ce-unknown* (or *ce-unknown* (atom {}))]
          (let [v (ce-init t i {})] (when (map? v) v)))
-       (catch arbace.lang.ExceptionInfo x (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)
+       (catch arbace.lang.ExceptionInfo x
+         (when (System/getenv "CPP_CE_TRACE") (binding [*out* *err*] (println "CEOBJ" (pr-str (when (abi/class? (abi/unq t)) (:name (abi/cls (:id (abi/unq t)))))) (.getMessage x))))
+         (when-not (or (:codegen/not-constant (ex-data x)) (:codegen/refused (ex-data x))) (throw x)) nil)
        (catch RuntimeException x (if @ga nil (throw x))))))
 
 (defn ce-field-value
@@ -6301,6 +6315,13 @@
           ;; (cpp-s11: a trivial copy or move from a braced list, `T x({...})`, copies the list's temporary, [over.ics.list]:
           ;; the list initializes it, and the initialization is that temporary's)
           (and (:trivial f) (= 1 (count args)) (= :init-list (:op (first args)))) (init-for {:k :class :id id} (first args) ctx :copy)
+          ;; (cpp-tzdb: an argument of the class or a class derived from it; one of another class reaches the trivial copy or
+          ;; move constructor's reference through its conversion function, [over.ics.user], whose prvalue initializes the
+          ;; object in place -- tzdb.cc's `sys_days{y/mwdl}`, year_month_weekday_last's operator sys_days(), whose 4 bytes had
+          ;; been copied as the 8 of a time_point)
+          (and (:trivial f) (= 1 (count args)) (not= :init-list (:op (first args)))
+               (let [c (class-id (:ty (first args)))] (and c (not= c id) (not (abi/derived-from? c id)) (conv-for c {:k :class :id id} false (:c (:ty (first args)))))))
+          {:i :expr :e (user-conv ctx (first args) {:k :class :id id} false)}
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
@@ -7601,11 +7622,11 @@
   fold (and the function then emitted as before). <chrono>'s __add_modulo's __modulo_offset<7, long>()."
   [ctx call f]
   (if (and (not (checking?)) (:consteval f) (not *unevaluated*) (not (some-> (:fn-id ctx) fnd :consteval)))
-    (or (ce-try call true)
+    (or (try (ce-try call true) (catch RuntimeException _ nil))
         (let [v (try (binding [*ce-manifest* true *ce-steps* (atom 0) *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{})
                                *ce-temps* (atom []) *ce-unknown* (atom {}) *ce-wide* true]
                        (ce-eval call {}))
-                     (catch arbace.lang.ExceptionInfo _ nil))]
+                     (catch RuntimeException _ nil))]
           (when (and (ce-ptr? v) (::lit v) (zero? (long (::i v))) (abi/ptr? (abi/unq (:ty call))))
             (rv (::lit v))))
         call)
