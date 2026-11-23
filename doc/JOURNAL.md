@@ -19068,3 +19068,56 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   - :dynlink-decided's 2: .cma loading with ocamlmklib, and native backtraces;
   - the 4 design rows, brought to the user as n/a: natdynlink, b0, ppx_expect and Base.
   The AOT levels keep their classes (the host's).
+
+## 2026-11-23: queue 539b, OCaml's eval level, follow-up (the VM)
+
+- The user's decisions of 2026-11-23 on 539's DECISION blocks:
+  - 539-1 (a): lib-dynlink-native/main is n/a at eval. It moves to the new class :na-native-dynlink in test/ocaml/divergences.edn, so
+    :c-runtime-internals at eval now lists no program.
+  - 539-2 (a): cmdliner/test_arg is n/a. It moves to the new class :na-unreleased in divergences-suite.edn.
+  - 539-3: pin and build the Jane Street closure so that re/expect and sexplib0_test run.
+- The closure was already pinned. I computed it from the pinned versions' opam files in opam-repository 5c9b817c5, for ppx_compare,
+  ppx_expect, ppx_here, ppx_sexp_conv, ppx_sexp_value, ppx_inline_test, ppxlib, base, expect_test_helpers_core and sexplib0, counting
+  runtime depends only (no with-test, with-doc or with-dev-setup). All of it is among queue 531's 73 :opam- pins, except three that
+  these two tests do not need:
+  - core: only expect_test_helpers_core's core part;
+  - num: only sexplib.num;
+  - ocamlformat: with-dev-setup only.
+  No tarball needed fetching.
+- What is missing is a ppx toolchain on oi, not sources. Its stages, sized from the packages' dune files:
+  1. ppxlib's own build:
+     - astlib's and ast's pp_rewrite (IF_AT_LEAST and OCAML_VERSION rewriting) and astlib/config/gen.ml's ast-version, as prep
+       rules held to their SHA-256;
+     - src/gen's gen_ast_pattern and gen_ast_builder, run on oi over ast.ml with compiler-libs' Parse and Pprintast;
+     - skip_hash_bang.mll by the native ocamllex;
+     - the ppxlib_metaquot driver, which bootstraps ppxlib.traverse.
+  2. The rewriters preprocessed by metaquot and traverse, and drivers linked from them, for three tests' sets:
+     - ppx_expect alone (re's lib_test/expect);
+     - ppx_compare, ppx_expect, ppx_here, ppx_sexp_conv and ppx_sexp_value (sexplib0_test);
+     - ppx_jane, about 35 rewriters (expect_test_helpers_base, which also needs sexp_pretty).
+     Plus ppx_base with ppx_optcomp, for time_now.
+  3. The runtime libraries, with their C stubs on ci: base (143 units, 6 C files), stdio, parsexp, sexplib, sexp_pretty, time_now
+     (C), ppx_expect's runtime (C), ppx_inline_test's runtime-lib and config, and the ppx runtime-libs.
+  4. The two tests: dune's inline_tests runner main, judged by status and no .corrected file.
+  This is several queue tasks; the report proposes a split (DECISION 539b-1). This round did none of the stages.
+- bin/oi, in one change:
+  - need_selection: an --only or --only-list that takes no program now stops the check with an error, where before it judged 0
+    programs and exited 0;
+  - lib_unit_native: a unit that is typed but not written, or a typer killed with no message or by a full disk or memory, is now a
+    broken build. libs_native then fails before the key is written, instead of the unit being listed as the typer's refusal.
+  Tests (copies extracted from bin/oi, or bin/oi itself): .tmp/q539/tests/libs-native-broken.bash fails 4 cases on the parent and
+  passes on the change; only-empty.bash passes.
+- statmemprof/custom passes at eval and is now recorded. The fix is queue 523's sampling of custom blocks; the record was stale, and
+  Memprof's RNG is seeded, so the result is deterministic. The control compare-vs-evaluation-order differs.
+- The deferred rows I did not close, with why:
+  - misc/darkening_work: oi's major_collections is Go's NumGC, and the interpreter's own garbage drives it. evalArgs' slice of each
+    primitive call alone makes the writes' run 72 cycles longer. Closing it means counting major cycles from OCaml's own allocations,
+    which would change every Gc statistic oi prints (DECISION 539b-2).
+  - backtrace/backtrace_dynlink: native-only (ocamlopt, .cmxs). Proposed n/a, as 539-1 (DECISION 539b-3).
+  - lib-dynlink-bytecode/main: needs ocamlmklib's .cma with C stubs, loaded dynamically, in three runs (main, static, custom).
+    OC220 (a)'s next step.
+  - weak-ephe-final/ephetest and ephetest3: an ephemeron whose key is reachable only from its own data; Go's weak pointers cannot
+    express that.
+  - :speed's 5 rows: interpretation cost.
+- Records: check-oi-native.edn's statmemprof/custom row, the matrix and the scores. OCaml eval 598 / 2 / 10 (66 n/a), completeness
+  0.9517 -> 0.9529. bin/reap, crops-score --judge --strict and records-check: 0 problems.
