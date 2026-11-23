@@ -669,6 +669,13 @@
         {:k :tdep :base {:k :tparam :i -1 :tid -1 :name "decltype"} :names [(str "decltype(" t ")")]
          :dt (dt-ir scope n)}
         (and (= "DeclRefExpr" (:kind n)) (= :var (:op x))) (:ty (var* (:id x)))
+        ;; (cpp-tzdb: and a reference's, its declared reference type, not the referred object's -- var-node's deref of the
+        ;; raw reference: a generic lambda's `auto&& __lhs` deduced from an lvalue, ranges' __make_comp_proj, `using _TL =
+        ;; decltype(__lhs)`, whose std::forward<_TL> had made the projection's argument an rvalue: __invoke<identity&, Z>
+        ;; for clang's <identity&, Z&>)
+        (and (= "DeclRefExpr" (:kind n)) (= :deref (:op x)) (= :load (:op (:e x))) (= :var (:op (:e (:e x)))) (:raw (:e (:e x)))
+             (abi/ref? (:ty (var* (:id (:e (:e x)))))))
+        (:ty (var* (:id (:e (:e x)))))
         ;; (cpp-s14: a function's name, an overload set of one function and no template: the function's type
         ;; ([dcl.type.decltype]/1.3, [over.over]/1's set of one: `decltype(f)`, <refwrap.h>'s users); several, ill-formed)
         (and (= :fnset (:op x)) (not (:obj x)) (empty? (:tmpls x)) (= 1 (count (distinct (:fns x)))))
@@ -3878,7 +3885,9 @@
        :land (if (and (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
        :lor (if (or (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
        :cond (if (zero? (ce-num (ev (:c e)))) (ev (:else e)) (ev (:then e)))
-       :comma (do (ev (:l e)) (ev (:r e)))
+       ;; (cpp-tzdb: `o.k` of a static member whose object is a variable's lvalue, rv's comma: the object needs no value, its
+       ;; evaluation no read -- <bits/chrono_io.h>'s `if constexpr (__hms.fractional_width == 0)` of a local hh_mm_ss)
+       :comma (do (when-not (and (= :var (:op (:l e))) (#{:lv :xv} (:cat (:l e)))) (ev (:l e))) (ev (:r e)))
        :load (let [x (:e e)
                    ;; (cpp-s4: an element of a local constant array, `__found[__i]` of libstdc++'s __find_uniq_type_in_pack,
                    ;; the array a vector of its elements' values in `env`)
@@ -6007,6 +6016,8 @@
            (catch arbace.lang.ExceptionInfo x
              (when (re-find #"call to a deleted function" (str (.getMessage x))) (throw x)))))))
 
+(def ^:dynamic *copy-init-ctors* nil) ; cpp-tzdb: a copy-initialization from the class's own type, class-init's: no explicit template
+
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
   [t args ctx style]
@@ -6073,6 +6084,12 @@
       (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
            (let [c (class-id (:ty (first args)))] (not (and c (or (= c id) (abi/derived-from? c id))))))
       (let [r (ctor-init id args ctx)] (cx-elided-copy! id nil) r)
+      ;; (cpp-tzdb: a copy-initialization from the class's own type or a derived one, [over.match.ctor]/1: the converting
+      ;; constructors alone, no explicit constructor template's specialization -- <format>'s basic_format_arg::handle,
+      ;; `template<typename _Tp> explicit handle(_Tp&)`, had taken a non-const handle copied by value, formatter<handle>)
+      (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
+           (let [c (class-id (:ty (first args)))] (and c (or (= c id) (abi/derived-from? c id)))))
+      (binding [*copy-init-ctors* true] (ctor-init id args ctx))
       :else (ctor-init id args ctx)))))
 
 (defn- inheriting-ctor!
@@ -6191,7 +6208,11 @@
   conversion is not considered for a constructor's first parameter of type X or reference to X ([over.best.ics]/4)."
   ([id args ctx] (ctor-init id args ctx false))
   ([id args ctx nested]
-  (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+  (let [copy? *copy-init-ctors*]
+  (binding [*copy-init-ctors* nil]
+  (let [cands (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)]
+                                              (cond->> (h id args)
+                                                copy? (remove #(:explicit (fnd %))))))
         ;; (CP323 (a), the checker: the constructors a class inherits by `using B::B;` ([namespace.udecl]/3,
         ;; [over.match.funcs]/8-9: B's constructors but its copy and move constructors and a default constructor), its
         ;; own declared beside them; one chosen is checked for its access as B's member ([namespace.udecl]/19) and the
@@ -6262,7 +6283,7 @@
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
           (and (:consteval f) (abi/empty-class? id)) {:i :none}
-          :else {:i :ctor :fn fid :args (call-args f args ctx)}))))
+          :else {:i :ctor :fn fid :args (call-args f args ctx)}))))))
 
 (defn- cx-no-default-sure?
   "Queue 510 (the checker): whether class `id` surely has no default constructor ([class.default.ctor]/1, [over.match.ctor]):
@@ -6325,7 +6346,8 @@
       ;; constructor surely, [class.default.ctor]/2.4)
       (if (cx-no-default-sure? id)
         (throw (ex-info (str "codegen: no default constructor for " (:name (abi/cls id))) {:codegen/refused :init :cx/no-default-sure true}))
-        (fail :init "no default constructor for " (:name (abi/cls id)))))
+        (fail :init "no default constructor for " (:name (abi/cls id))
+              (when (System/getenv "CPP_TRAIT_TRACE") (let [c (abi/cls id)] (str " DCTRACE " id " " (pr-str (:targs c)) " " (pr-str (map (fn [t] (if (abi/class? (abi/unq t)) [(:name (abi/cls (:id (abi/unq t)))) (:targs (abi/cls (:id (abi/unq t))))] t)) (:targs c))) " partial " (pr-str (:from-partial c)) " primary " (:from-primary c) " ctors " (count (:ctors c)) " " (pr-str (map #(select-keys (fnd %) [:deleted :implicit :ps]) (:ctors c)))))))))
     ;; (queue 510, the checker: an implicit default constructor not yet defined -- a class template's specialization or a
     ;; local class made after the declarations' entries -- defined now, so that one deleted surely for a subobject's deleted
     ;; or missing default constructor is the error of this use, as the entries define the main file's classes' before

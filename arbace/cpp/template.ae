@@ -455,6 +455,11 @@
   (let [c (abi/cls id)]
     (and (not (abi/dynamic? id))
          (every? #(let [f (sema/fnd %)] (or (seq (:ps (:ty f))) (and (or (:implicit f) (:defaulted f)) (not (:tinits f)) true))) (:ctors c))
+         ;; (cpp-tzdb: and one at all, not deleted, [class.prop]/2's eligible default constructor: <chrono>'s leap_second,
+         ;; whose only constructors take arguments or copy, is no trivial class, so __is_bitwise_relocatable<leap_second> is
+         ;; false and vector's relocation the element-wise one, clang's __relocate_a_1 over __relocate_object_a)
+         (or (sema/checking?)
+             (some #(let [f (sema/fnd %)] (and (empty? (:ps (:ty f))) (not (:deleted f)))) (:ctors c)))
          (every? (fn [fl] (and (nil? (:init fl)) (trivial-class? (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)) trivially-default?))) (:fields c))
          (every? #(trivially-default? (:cls %)) (:bases c)))))
 
@@ -3324,6 +3329,15 @@
                                    :let [ty (try (sema/resolve-type s a) (catch Exception _ nil))]
                                    :when (and (map? ty) (:k ty))]
                                [a ty]))
+             ;; (cpp-tzdb: a compound requirement's type-constraint, a concept named alone, `-> __boolean_testable`: its
+             ;; namespace path and name, R <its nested name>)
+             :concepts (into {} (for [x (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) node)
+                                      :when (and (map? x) (= "CompoundRequirement" (:kind x)) (string? (:_ret x)))
+                                      :let [nm (str/trim (:_ret x))]
+                                      :when (re-matches #"[A-Za-z_][A-Za-z_0-9]*" nm)
+                                      :let [e (first (filter #(and (= :tmpl (:e %)) (= :concept (:tk %))) (try (sema/lookup s nm) (catch Exception _ nil))))]
+                                      :when e]
+                                  [nm {:path (:path (tmpl (:id e))) :name nm}]))
              ;; (cpp-tzdb: an unqualified name of a static data member of the enclosing class, mangled as clang writes a
              ;; declaration's reference, L <the pattern's member's name> E: <ranges>' subrange's constructor `requires
              ;; (!_S_store_size)`, QntL_ZNS_8subrange13_S_store_sizeEE)
@@ -3434,7 +3448,12 @@
           (upd-fn! fid assoc :lazy true :inline true :keep-def-scope true
                    :tinst (cond-> {:tid tid :args args :tsig (sym-sig t) :tn (tn-types t cs)}
                             (:constraint t) (assoc :q (constraint-q (:constraint t) cs pidx depth))
-                            (and cs (:trailingRequiresClause (:pattern t))) (assoc :tq (constraint-q (:trailingRequiresClause (:pattern t)) cs pidx depth)))))
+                            ;; (cpp-tzdb: the function's parameters by name, fp_ fp0_ ... in the clause: <compare>'s _Synth3way's
+                            ;; `requires requires { { __t < __u } -> __boolean_testable; ... }`)
+                            (and cs (:trailingRequiresClause (:pattern t)))
+                            (assoc :tq (assoc (constraint-q (:trailingRequiresClause (:pattern t)) cs pidx depth)
+                                              :fparams (into {} (map-indexed (fn [i p] [(:name p) i])
+                                                                             (filter #(= "ParmVarDecl" (:kind %)) (kids (:pattern t))))))))))
         ;; a constructor template's specialization is a candidate through its template (the :ctor-candidates hook),
         ;; not one of the class's constructors (never a copy constructor: [class.copy.ctor]/5)
         (let [f (sema/fnd fid)]
