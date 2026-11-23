@@ -6517,11 +6517,28 @@
          (when (= "InitListExpr" (:kind n))
            (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
              (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (= \{ (.charAt src (int b))))
-               (let [cs (remove str/blank? (map str/trim (clauses (subs src (long b) (inc (long e))))))
-                     desig? (fn [^String c] (boolean (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)))]
-                 (when (and (seq cs) (not-any? #(str/starts-with? % "[") cs) (not-any? #(str/includes? % "#") cs))
+               (let [lt (subs src (long b) (inc (long e)))
+                     ;; (cpp-decl2: an #embed directive among the clauses, [cpp.embed]/9-10: its prefix, the resource's
+                     ;; bytes (at most its limit; two or more when no limit is given) and its suffix as the clauses it
+                     ;; expands to, so a designated prefix before the bytes mixes designated and plain clauses: cpp/embed-14.C)
+                     emb (boolean (re-find #"(?m)^\s*#\s*embed\b" lt))
+                     lt (if emb
+                          (str/replace lt #"(?m)^\s*#\s*embed\b([^\n]*)"
+                                       (fn [[_ ^String d]]
+                                         (let [arg (fn [k] (second (re-find (re-pattern (str "\\b" k "\\s*\\(([^)]*)\\)")) d)))
+                                               lim (some-> (arg "limit") str/trim (#(try (Long/decode ^String %) (catch Exception _ nil))))
+                                               bytes (cond (nil? lim) " 0, 0" (zero? (long lim)) "" (= 1 (long lim)) " 0" :else " 0, 0")]
+                                           (if (str/blank? bytes)
+                                             (str " " (or (arg "if_empty") "") " ")
+                                             (str " " (or (arg "prefix") "") bytes (or (arg "suffix") "") " ")))))
+                          lt)
+                     cs (remove str/blank? (map str/trim (clauses lt)))
+                     desig? (fn [^String c] (boolean (or (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)
+                                                         (and emb (re-find #"^\[[^\[\]]*\]\s*=(?!=)" c)))))]
+                 (when (and (seq cs) (or emb (not-any? #(str/starts-with? % "[") cs)) (or emb (not-any? #(str/includes? % "#") cs)))
                    (let [ds (filter desig? cs)
-                         [l c] (line-col starts (long b))]
+                         ;; (an #embed's list: GCC's place, the first clause that differs, the directive's bytes)
+                         [l c] (line-col starts (long (if emb (+ (long b) (.indexOf ^String (subs src (long b) (inc (long e))) "#")) b)))]
                      (when (and (seq ds) (some (complement desig?) cs))
                        (.add out {:line l :col c :kind :error :rule :designator
                                   :msg "either all initializer clauses should be designated or none of them should be"}))
@@ -7189,3 +7206,9 @@
 (alter-var-root #'sema-rules conj
   [:bit-cast #"^codegen: '__builtin_bit_cast' (source|destination) (type|size) " "invalid __builtin_bit_cast"]
   [:incomplete #"^codegen: '[^']*' has incomplete type$" "variable has incomplete type"])
+
+;; cpp-decl2 (2026-11-23): the checker's initialization, lookup, special member and overload rules (arbace.cpp.sema)
+(alter-var-root #'sema-rules conj
+  [:init #"^codegen: designator order for field '.*' does not match declaration order" "designator order does not match declaration order"])
+(alter-var-root #'sema-rules conj
+  [:uninit #"^codegen: uninitialized (const|reference) member '.*' in a constructor" "uninitialized const or reference member in a constructor"])

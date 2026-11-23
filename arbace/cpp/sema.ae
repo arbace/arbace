@@ -5751,6 +5751,48 @@
 
 (defn- unspelled-fn [t] (when (map? t) (dissoc t :written :qual)))
 
+;; cpp-decl2: designated initializer lists in overload resolution ([over.ics.list]/2, C++20): a designated-initializer-list
+;; converts only to an aggregate class its designators can initialize, each naming a direct non-static data member (or one
+;; of an anonymous member's); the order is not part of the conversion, but once the function is chosen its parameter's
+;; initialization is ill-formed when the designators do not follow the members' declaration order ([dcl.init.list]/3.1,
+;; [dcl.init.aggr]/3.1: GCC's "designator order for field 'A::x' does not match declaration order in 'A'"; cpp2a/desig4.C,
+;; cpp2a/desig6.C). The parser places a non-overloaded callee's list itself (arbace.repr.cpp.parse/designate).
+(defn- desig-field-index
+  "The index among class `cid`'s non-static data members of the member the designator name `v` names, directly or through
+  an anonymous member (that member's index), or nil."
+  [cid v]
+  (let [fls (vec (remove :static (:fields (abi/cls cid))))]
+    (some (fn [[i fl]]
+            (cond (= v (:name fl)) i
+                  (and (:anon fl) (abi/class? (abi/unq (:ty fl))) (desig-field-index (:id (abi/unq (:ty fl))) v)) i
+                  :else nil))
+          (map-indexed vector fls))))
+
+(defn- desig-convertible?
+  "Whether the designated list `e` (an :init-list with :desigs) can initialize the type `pt` ([over.ics.list]/2)."
+  [e pt]
+  (let [u (abi/unq pt)]
+    (and (abi/class? u) (aggregate? u) (not (:union (abi/cls (:id u))))
+         (every? (fn [d] (or (nil? d) (let [[k v] (first d)] (and (= :f k) (desig-field-index (:id u) v))))) (:desigs e)))))
+
+(defn- desig-order!
+  "The checker: the designated list `a` initializing a parameter of type `p`, its designators out of the members' order."
+  [a p]
+  (when (and (checking?) *on-refusal* (= :init-list (:op a)) (:desigs a))
+    (let [u (abi/unq (abi/non-ref p))]
+      (when (and (abi/class? u) (aggregate? u) (not (:union (abi/cls (:id u)))))
+        (loop [ds (seq (:desigs a)) prev -1]
+          (when ds
+            (let [d (first ds) [k v] (first d)
+                  i (when (and d (= :f k)) (desig-field-index (:id u) v))]
+              (cond (nil? i) (recur (next ds) prev)
+                    (< (long i) (long prev))
+                    (let [cn (:name (abi/cls (:id u)))]
+                      (*on-refusal* (ex-info (str "codegen: designator order for field '" cn "::" v "' does not match declaration order in '" cn "'")
+                                             {:codegen/refused :init :cx/node (:desig-node a)})
+                                    (:desig-node a)))
+                    :else (recur (next ds) (long i))))))))))
+
 (declare better-ics?)
 
 (defn ics
@@ -5764,6 +5806,8 @@
       (and (checking?) (= :fnset (:op e)) (empty? (:tmpls e)) (= :ref (:k p)) (abi/fn? (abi/unq pt))
            (some #(= (unspelled-fn (abi/unq pt)) (unspelled-fn (:ty (fnd %)))) (:fns e)))
       {:rank 0}
+      ;; (cpp-decl2: a designated list converts to an aggregate its designators name members of, [over.ics.list]/2)
+      (and (= :init-list (:op e)) (:desigs e) (not (desig-convertible? e pt))) nil
       ;; an overload set converts to a pointer to function only ([over.over]; G5: std::endl among operator<<'s candidates)
       (and (= :fnset (:op e)) (not (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt)))))) nil
       ;; (queue 423: a braced list for a reference to a class, [over.ics.list]/9 with [dcl.init.list]/3.10: one element of a
@@ -6095,7 +6139,8 @@
     (vec (concat
           (map-indexed (fn [i a] (if (< i (count ps))
                                    ;; (queue 492, the checker: a braced argument copy-list-initializes its parameter, cx-explicit-list!)
-                                   (binding [*cx-copy-list* (or *cx-copy-list* (and (checking?) (= :init-list (:op a))))] (init-for (nth ps i) a ctx :copy))
+                                   (do (desig-order! a (nth ps i))
+                                       (binding [*cx-copy-list* (or *cx-copy-list* (and (checking?) (= :init-list (:op a))))] (init-for (nth ps i) a ctx :copy)))
                                    (let [a (rv a)]
                                                                                            ;; [expr.call]/12: a class argument through the ellipsis is
                                                                                            ;; conditionally-supported; clang passes a trivially copyable and
@@ -6629,7 +6674,24 @@
                              {:codegen/refused :overload :cx/node cn})
                     cn)
       ;; (queue 499: the subobject's member, implicitly deleted for queue 499's reasons, its own reason at its class too)
-      (cx-sub-dtor-chain! f))))
+      (cx-sub-dtor-chain! f)
+      ;; (cpp-decl2: a default constructor deleted for subobjects' deleted default constructors, [class.default.ctor]/2.5:
+      ;; each such subobject's own reason at its class too, as GCC explains the deletion member by member down to the
+      ;; uninitialized const or reference member, "uninitialized const member in 'struct Y11'": init/pr25811.C's Y1 over
+      ;; Y11 a[1], Z over Z1-Z4, init/const10.C's D over its base B)
+      (when (and (= :ctor (:kind f)) (empty? (:ps (:ty f))))
+        (let [c (abi/cls (:cls f))]
+          (doseq [sc (distinct (concat (map :cls (:bases c))
+                                       (keep (fn [fl] (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                                                        (when (and (abi/class? t) (not (abi/ref? (:ty fl)))) (:id t))))
+                                             (remove :static (:fields c)))))
+                  :when (and sc (not= sc (:cls f)))
+                  :let [g (some (fn [cid] (let [g (fnd cid)] (when (and (= :ctor (:kind g)) (empty? (:ps (:ty g))) (:implicit g)
+                                                                         (:deleted g) (:deleted-sure g) (:cx-sub-deleted g))
+                                                                g)))
+                                (:ctors (abi/cls sc)))]
+                  :when g]
+            (cx-deleted-implicit! g)))))))
 
 ;; (queue 463, the checker: the destructor a variable's definition makes potentially invoked, [class.dtor]/15: "a program
 ;; is ill-formed if a destructor that is potentially invoked is deleted or not accessible from the context of the
@@ -10303,6 +10365,9 @@
                                    (when (and f (not (:cls f)) (not (:this-type ctx))) (check-type-access! (:scope ctx) qt n))))
                                {:op :zero-val :ty t :cat :pr})
     "InitListExpr" (cond-> {:op :init-list :items (cond->> (analyze-args ctx (kids n)) (checking?) (embed-positions n)) :ty {:k :init-list}}
+                     ;; (cpp-decl2: a designated list the parser left as written, an overloaded callee's argument: its
+                     ;; designators, for [over.ics.list]/2 and the order check of the parameter's initialization, desig-*)
+                     (and (:_desigs n) (some some? (:_desigs n))) (assoc :desigs (:_desigs n) :desig-node n)
                      ;; (cpp-ce2: a union's member the list initializes, the semantic form's `field`: its designator's)
                      (get-in n [:field :name]) (assoc :field (get-in n [:field :name])))
     ;; a default member initializer's place in a semantic list (the native parser's fill, [dcl.init.aggr]/5.1): the
@@ -11377,6 +11442,20 @@
                                  (and (:union c) (or (not (:init fl)) (some #(and (vector? %) (= :field (first %))) (keys given))))
                                  {:i :none}
                                  (:init fl) (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (analyze ctx (:init fl)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
+                                 ;; (cpp-decl2, the checker: a user-provided constructor leaving a member of reference type or of
+                                 ;; const-qualified non-class type (or an array of it) without initialization, [class.base.init]/9.3
+                                 ;; with [dcl.init.general]/7 (default-initialization of a const object of a type that is not
+                                 ;; const-default-constructible) and [class.base.init]/8 of C++11 (a reference member): GCC's
+                                 ;; "uninitialized const member in 'const int'", "uninitialized reference member in 'int&'" at the
+                                 ;; constructor; init/pr29043.C's `C5() {}` over `int const iit[1]`)
+                                 (and (checking?) *on-refusal* (not (:implicit f)) (not (:defaulted f)) (not (:inh-from f)) (:node f)
+                                      (string? (:name fl)) (seq (:name fl)) (not (:static fl)) (not (:anon fl)) (not (:union c)) (:ty fl)
+                                      (let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))]
+                                        (or (abi/ref? (:ty fl)) (and (:c t) (not (abi/class? (abi/unq t))) (not (abi/arr? (abi/unq t)))))))
+                                 (do (*on-refusal* (ex-info (str "codegen: uninitialized " (if (abi/ref? (:ty fl)) "reference" "const") " member '" (:name fl) "' in a constructor")
+                                                            {:codegen/refused :uninit :cx/node (:node f)})
+                                                   (:node f))
+                                     {:i :none})
                                  :else (init-for (:ty fl) nil ctx :default))})))})))
 
 (defn- nrvo-var
@@ -11688,6 +11767,14 @@
         ;; (a default constructor, deleted for a reference member or a const member of a type that is no class, with no
         ;; default member initializer, [class.default.ctor]/2.2-2.3 (an anonymous union's members aside): the member,
         ;; as cx-deleted-implicit! reports it at the class, GCC's "uninitialized const member in 'class bar'")
+        ;; (cpp-decl2: a union all of whose variant members are of const-qualified type, or arrays of them, none with a
+        ;; default member initializer, [class.default.ctor]/2.3 of C++20 (/2.4 of C++11): GCC's "uninitialized const
+        ;; member in 'union U'" at the union, init/pr25811.C, init/pr43719.C)
+        (when (and (empty? (:ps (:ty f))) (:union c) (string? (:name c)) (seq (:name c)))
+          (let [fls (filter #(and (not (:static %)) (string? (:name %)) (seq (:name %)) (:ty %)) (:fields c))]
+            (when (and (seq fls) (not-any? :init fls)
+                       (every? #(let [t (loop [t (:ty %)] (if (abi/arr? t) (recur (:of t)) t))] (and (not (abi/ref? t)) (:c t))) fls))
+              (fail :overload "call to a deleted function " (:name (first fls))))))
         (when (and (empty? (:ps (:ty f))) (not (:union c)))
           (doseq [fl (:fields c)
                   :when (and (not (:static fl)) (not (:init fl)) (string? (:name fl)) (seq (:name fl)) (:ty fl)
