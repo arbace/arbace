@@ -19115,3 +19115,35 @@ Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 
 - Their rows (.tmp/jd/compiled-javac.list: the 56 and the control t03208) run in the queued heavy session after the build. Today
   at compiled: 23 :design-also-compiled, 17 :javac-api, 11 :launcher-tests (n/a), 2 :jvm-tools, 1 :classfile, 1 :classloading,
   1 pass.
+
+## 2026-11-23: java-design-1123: the gate build's failure found (an import cycle) and fixed; FFM merged; the session queued
+
+- The failure of java-design's build at 00:53 (java-design-b1's `.tmp/build.sh`, its log in the ffm worktree's
+  `ffm-session.log`; both candidates, c8b77a3a4 with FFM and fad2ae534 without): `bin/build-go`'s "import cycle not allowed":
+  `arbace/jrt` imported `arbace/lang` from `j2g_classes.ae`. Round 2 put java.security.jgss in the world; its sun.security.jgss
+  classes are JDK packages (package jrt), but org.ietf.jgss, the GSS-API itself, was not in `arbace.j2g.names/pkg-of`'s JDK
+  prefixes, so its eight classes went to package lang as a user's (`J_org_ietf_jgss_Oid_J`) and jrt's krb5 classes referenced
+  them (lang imports cinterp, which imports jrt). Fixed in general: `pkg-of` takes `org/ietf/` as a JDK package (16211f7e8).
+  Alternative not taken: renaming the classes into jrt by the renames table (eight entries for what is a package rule).
+- Branch `java-design-1123` from `java-design-1122` (fad2ae534), mac/next (fa635f636) merged: conflicts in the journal (both
+  sides), `jdk/edge.edn` (the branch's, a superset), the provenance files (counts summed by hand: jdk/ 3,827 sources and 4,067
+  forms with FFM; javac's 824 and 915, next's less SecuritySupport), `test/reap/matrix.edn` and `test/crops/scores.edn` (next's,
+  recorded again after the rows). No `bin/jrt-convert update`: queue 520's reader change (835e66a3 -> 83a29bfb) moved no form
+  of jdk/ (JCS52 (a)'s As built), so the branch's forms read by the older reader stand; `jrt-convert verify` of the night
+  checks it.
+- `java-design-ffm-1122` (c8b77a3a4, round 3: the foreign memory API's segments, layouts and arenas, its derived overlays and
+  forms) merged (1770213dc): its build had failed on the same cycle, after j2g translated it. jrt's hand-written
+  `Utils_CheckNonNegativeArgument` stand-in retired as the branch did; `bin/jrt-convert derive --check` of the five derived
+  overlays: same.
+- j2g: `System.setProperties(Properties)` for translated code (m/j2g-static?, out.ae; b3fe74719): GetSystemProperties (t04794)
+  compiled stopped at "jrt lacks java.lang.System.setProperties"; J2g_SystemSetProperties existed for the interpreter's path.
+- Queued under the big lock (`.tmp/jd/session-1123.sh` in the java-design worktree, run in java-design-b1 detached at
+  b3fe74719): `bin/j2g-edge update` (committed there), `bin/arbace-go --gate-build` (amd64), then bin/java-check's compiled
+  level on java-design's lists (compiled1: round 1-3's rows; compiled-javac: JD4's 56 tests naming javac's API, one program
+  with javac's world) and the heavy interp row (t05445); then outside the lock the interp rows (interp1, 2 jobs,
+  `session-1123-light.sh`); then `.tmp/jd/post-1123.sh` judges and records them (partial), reap, crops-score, records-check.
+- Scope (the coordinator, 2026-11-23): the Mac (538) takes Java's read 49 and print 7 deferred rows; this stream keeps JD4 and
+  the eval/AOT rows that are not the bytecode VM's (JD3, java-bytecode). The doclint finding of the day (the tool's
+  ServiceLoader variant also replacing `stream()`, its providers as `ProviderImpl`s; `bin/jrt-convert vet --forms-add
+  jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
+  the patch in `.tmp/jd/doclint-stream-variant.patch`.
