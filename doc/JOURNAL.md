@@ -19602,3 +19602,42 @@ remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild
   with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
   owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
 >>>>>>> mac/536-py-deferred
+## 2026-11-23: queue 546, the user's decisions on 539b's rows; ppxlib's bootstrap on oi begins (the VM)
+
+- The user's decisions of 2026-11-23 on 539b's DECISION blocks:
+  - 539b-2: n/a (the user's choice, neither listed option). misc/darkening_work moves to the new class :na-gc-pacing in
+    test/ocaml/divergences.edn. oi keeps Go's NumGC as Gc's major_collections; there is no simulated major heap.
+  - 539b-3 (a): backtrace/backtrace_dynlink is n/a at eval. It joins :na-native-dynlink (native-dynlink and ocamlopt's .cmxs, no
+    bytecode alternative), and :dynlink-decided keeps lib-dynlink-bytecode/main alone.
+  - 539b-1: build all three stages in order. This task, 546, is T1: ppxlib's bootstrap on oi. T2 (ppx_expect with base, stdio and
+    time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test) follow as tasks of their own.
+- 546's T1, where it stopped (the VM, 2026-11-23):
+  - The user's decision 539b-2 is n/a: the main session's relay first named it "(a)", corrected to the user's own choice, which was
+    neither listed option.
+  - prep ports ppxlib's own sources, each held to its SHA-256:
+    - astlib's and ast's pp_rewrite.mll/pp.ml and astlib/config/gen.ml's ast-version (arbace.repr.ocaml.prep's ppxlib-pp). Proof
+      (probe): on all 72 files (astlib/*.ml(i), ast/versions.ml(i)), byte for byte the output of pp.exe built from the pinned
+      sources by the VM's OCaml 5.5.
+    - ocaml-compiler-libs v0.17.0's src/gen/gen.ml with read_cma.ml (ocaml_common.ml, from the tarball's Makefile's ocamlcommon
+      units). Proof (probe): byte for byte the VM's gen.exe on ocamlcommon.cma.
+    - src/shadow/gen/gen.ml (ocaml_shadow.ml) over ocamlcommon's modules only: a subset, line for line, of the host's
+      (ocamlbytecomp's, ocamltoplevel's and ocamloptcomp's 157 modules left out). It only adds deprecation aliases, so it does not
+      change which programs compile.
+  - bin/oi ppx gen|check, bin/lib/oi/ppx.bash and test/ocaml/ppx-programs.tsv: the generators and the metaquot driver as programs
+    on oi; the metaquot driver judged against test/metaquot/run.t's two cram cases, with a negative control.
+  - Seven typer fixes (test/ocaml/typer-repros, each sample checked against ocamlc), each failing on the typer before it:
+    1. find_record_qual;
+    2. constrained abbreviations expanded by instance;
+    3. declarations fully generic;
+    4. no abbreviation memo under GADT equations: a per-node memo, as OCaml's, overflowed the stack on typer-check's class samples,
+       so the fresh expansion is scoped to GADT patterns and branches instead (types/fresh-depth);
+    5. nested package constraints;
+    6. a parameter that unpacks a module typed in a scope of its own;
+    7. no link of an object to a scoped module's abbreviation.
+    typer-check after each step: 79 of 79 at the end; the native library rebuilt with 0 refused.
+  - Where T1 stops: astlib's 77 units and ppxlib_ast's versions, ast_helper_lite and import type. ast/ast.ml overflows the stack in
+    env's find-unit: Ppxlib_ast__Import's components resolve alias addresses eagerly and re-enter the unit being computed (1,242
+    nested calls). It needs lazy alias addresses, or a guard for a unit in progress. ppxlib's src (34 units), the generators' runs
+    and the metaquot driver are not reached.
+  - Records: the two n/a reclasses give OCaml eval 598 / 2 / 8 with 68 n/a, completeness 0.9529 -> 0.9537. bin/reap,
+    crops-score --judge --strict and records-check: 0 problems.
