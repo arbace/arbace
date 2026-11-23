@@ -19029,3 +19029,43 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 538, Java's read and print deferred rows (repr/java; branch `538-java-read-print`, the VM)
+
+The brief: close the read cell's 49 deferred rows and the print cell's 7 in test/java/divergences.edn by fixing repr/java.
+- The read cell's 49 are not repr/java's. Its sources are the read, classes and diagnostics levels. Read and classes pass 3,325 of 3,325,
+  so all 49 are diagnostics rows: javac on Arbace's own Java and world (`:diag-processors` 25, `:diag-doclint` 8, `:diag-file-manager`
+  8, `:diag-command-line` 4, `:diag-closed-world` 4). Their fixes are in overlay/jdk/javac and need a new tool build each. The
+  user's decision of 2026-11-23 loads JCS51's processors through JD3's bytecode loader, which is the host's. None was changed here.
+- The print cell's 7 were looked at one by one (java-check print, javac on Arbace's errors, the class files' code by java.print's
+  code-lines). Three pass now:
+  - t05474 (`arbace/repr/java/print.ae`, `raw-lambda-arg-cast`): `x -> jobs(x)`. x is an implicit lambda parameter that the forms tag
+    with the raw Collection. Passed for jobs(Collection<Integer>), it made javac's call unchecked and its result an erased Stream, so the
+    next lambda's `job` was typed Object. The printer now writes `jobs((Collection<Integer>) x)`. This applies only to a lambda's
+    parameter, the one candidate, and a parameter of the same class parameterized without type variables. The converter drops the
+    cast again (the same erasure).
+  - t05691 (print.ae, `raw-rooted?`, `raw-recv-mref-cast`): `queue.stream().mapToInt(Integer::intValue)` on a local printed raw (the
+    source's `var`). The raw receiver's parameter is the raw ToIntFunction, so the method reference was typed applyAsInt(Object). An
+    unbound method reference whose recorded instantiated types are not Object, passed to a call on a raw receiver, is now cast to its
+    interface instantiated: `(ToIntFunction<Integer>) Integer::intValue`.
+  - t06244 (`arbace/repr/java/convert.ae` `method-ref-form`, print.ae `method-ref-text`): `(new E<Short>())::xI`. javac null-checks a
+    bound method reference's receiver unless it is a bare new (Attr.makeNullCheck tests the tree's tag, without skipping parentheses).
+    The original's parentheses gave Objects.requireNonNull, which the printed `new E<Short>()::xI` lost. The converter now marks such a
+    receiver `^:null-check` (a PARENS around a NEWCLASS), and the printer writes the parentheses back. **This moves repr/java's reader
+    hash** (83a29bfb -> b45f7ace). In jdk26u's sources the shape occurs only in a comment of java.base and in langtools tests outside
+    the corpus but this one, so jdk/'s forms should not change. The provenance files want the host's regeneration, as for 520.
+  - Left, each with a DECISION in the report (.tmp/q538/538-java-read-print.md):
+    - t05503: raw `new ArrayList()` against the diamond. The forms keep neither.
+    - t05125: a colon switch's locals share one scope, so the local slots differ from the arrow form the printer writes.
+    - t03567: `|`, `&` and `^` of pure booleans are read as or/and, as `||` and `&&` would be.
+    - t06072: `x.f = x.f + 1` against `+=` through an inner class's accessors (access$N and iadd moved).
+    Each is a shape the forms do not record.
+- javac's tool: the cleanup of 2026-11-23 removed the VM's only arm64 arbace-javac (q403's), so one was built here.
+  `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` took 4 h 01 min with a 26.6 GB peak: a first build, the
+  namespaces compiled, a compiled first build, repr/java's reader compiled, then the tool. Key 380d25064878 (the checkout plus these
+  edits). It is shared at .tmp/shared/javac-arm64/.
+- Proofs: `bin/java-check --levels read,print --only '^(t03567|t05125|t05474|t05503|t05691|t06072|t06244|t03208|t03209) '`. Before
+  (q403's tool, next fa635f636): the seven as recorded. After: t05474, t05691 and t06244 pass; the other four as recorded; read 9 of
+  9 pass; control c00001 differs. `--judge --partial --record`: 3 now passing, 0 regressions.
+- Cells: print 3,318 / 0 / 7 -> 3,321 / 0 / 4; read 7,795 / 0 / 49 unchanged; Java completeness 0.9632 -> 0.9634. `bin/reap
+  --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
