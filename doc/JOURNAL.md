@@ -19168,3 +19168,20 @@ copied into test/haskell/check-hsi-own.edn, `T23071 1310 869.8` into test/haskel
 :own-speed, as the classes keep their programs that pass at caps). Haskell eval 949 / 0 / 3 -> 950 / 0 / 2 (18 n/a);
 completeness 0.9992 -> 0.9995. secretary's 3000 s run follows under the same lock. bin/reap --record, bin/crops-score --record,
 --judge --strict, bin/records-check: 0 problems.
+
+## 2026-11-23: unpack_sums_6 n/a as a fragile timing test; secretary passes at its own cap of 1,580 s (smalls2-1123)
+
+- The user's decision of 2026-11-23 on testsuite/unboxedsums/unpack_sums_6, after hsi's CAF collection (entry above) let it complete:
+  (a), n/a as a fragile timing test (all.T's fragile(22504)); the CAF collection stays. Its exit status is whether the unlayered
+  sum took less time than the layered one, which -O0 (no UNPACK) leaves to chance: 3 of 5 runs exit 0 on hsi. A class of its own,
+  test/haskell/divergences.edn's `:fragile-timing` `:kind :na` (`:results [:fail]`, its id), so a failing run counts outside
+  both denominators; :own-speed no longer lists it; its cap 160 s (104.8 s of CPU measured at 6 GiB) in test/haskell/cpu-caps.tsv.
+  Recorded with the CAF-collecting hsi (`--only --record` at the cap): this run exited 0, a pass (90 s). Alternatives not taken:
+  keep it deferred; record whichever verdict a run gives.
+- secretary (the user's decision (b) of 2026-11-23, with T23071): its 3000 s run under the lock passed at 1,047.6 s of CPU; cap 1,580
+  s; `--only --record` at the cap passed (1,083 s): the row copied into test/haskell/check-hsi-own.edn, `secretary 1580 1047.6`
+  into cpu-caps.tsv, the id out of :own-speed-no-pack and out of test/haskell/eval-out.edn (a program leaves when it passes: 5 -> 4
+  out; test/crops/independence.edn's :out-of-cases :cases 4).
+- Cells: Haskell eval 950 / 0 / 2 -> 952 / 0 / 0 (18 n/a); completeness 0.9995 -> 1.0000 (100), independence 1.0. bin/reap --record,
+  bin/crops-score --record, --judge --strict, --self-test, bin/records-check: 0 problems. The option (a) for secretary and T23071, an optimizer for the own
+  libraries' STG (HES100 (b)), is not needed for completeness.
