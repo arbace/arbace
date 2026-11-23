@@ -19245,3 +19245,23 @@ Applied in test/java/divergences.edn (java-design-1123):
 - Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
   with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
   GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
