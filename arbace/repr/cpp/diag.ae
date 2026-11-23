@@ -4263,8 +4263,11 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         year (cxx-year (:std u))
+        pe? (boolean (some #{"-pedantic-errors"} (:args u)))
         names-of (fn [decls] (into {} (for [d decls :let [nm (:name d)] :when (and (string? nm) (seq nm) (or (conflicting-kinds (:kind d)) (#{"ParmVarDecl" "BindingDecl"} (:kind d)))
-                                                                                  (not (and (= nm "_") (>= (long year) 2026))))]
+                                                                                  ;; (cpp-1123: before C++26 a name-independent `_` is GCC's pedwarn alone,
+                                                                                  ;; an error under -pedantic-errors only: cpp26/name-independent-decl2.C, -8.C)
+                                                                                  (not (and (= nm "_") (or (>= (long year) 2026) (not pe?)))))]
                                         [nm d])))
         stmt-decls (fn [s] (case (:kind s)
                              "DeclStmt" (mapcat #(cond (= "DecompositionDecl" (:kind %)) (filter (fn [b] (= "BindingDecl" (:kind b))) (:inner %))
@@ -5457,7 +5460,7 @@
                       (when (:isExplicitObjectParameter (first ps))
                         (let [qt (str (get-in m [:type :qualType]))
                               q (or (fn-tail-quals qt) "")
-                              t (or (text m) "")
+                              ^String t (or (text m) "")
                               ;; the declarator's text after its parameter list, before the body or the end
                               tail (let [i (.lastIndexOf t ")" (int (let [j (.indexOf t "{")] (if (neg? j) (count t) j))))] (if (neg? i) "" (subs t (inc i))))
                               ov (re-find #"\boverride\b" (str/replace tail #"\{.*" ""))
@@ -6001,8 +6004,8 @@
                 (loop [i (long i) depth 0]
                   (when (< i (count t))
                     (let [c (.charAt t (int i))]
-                      (cond (= c open) (recur (inc i) (inc depth))
-                            (= c close) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                      (cond (= (int c) (int open)) (recur (inc i) (inc depth))
+                            (= (int c) (int close)) (if (= 1 depth) i (recur (inc i) (dec depth)))
                             :else (recur (inc i) depth))))))]
     (walk-nodes
      (fn [n _]
@@ -6459,7 +6462,9 @@
            (when (and b e (mine? n) (< (long b) (long e) n-src))
              (let [t (subs src (long b) (inc (long e)))
                    ty (if (= "TypeAliasDecl" (:kind n)) (second (re-find #"(?s)=(.*)$" t)) t)]
-               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
+               ;; (cpp-1123: a decl-specifier keyword before auto is no type-constraint: `static auto constexpr value` in an alias's
+               ;; class, cpp0x/alias-decl-16.C)
+               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b|static\b|constexpr\b|inline\b|extern\b|thread_local\b|mutable\b|constinit\b|consteval\b|friend\b|register\b|virtual\b|explicit\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
                  (at! n "invalid use of constrained 'auto' type")))))
          nil))
      (:nodes u) nil)
@@ -6485,7 +6490,7 @@
                             (let [c (.charAt t i)]
                               (cond
                                 (and q (= c \\)) (recur (+ i 2) depth start acc q)
-                                q (recur (inc i) depth start acc (if (= c q) nil q))
+                                q (recur (inc i) depth start acc (if (= (int c) (int q)) nil q))
                                 (or (= c \") (= c \')) (recur (inc i) depth start acc c)
                                 (#{\( \[ \{} c) (recur (inc i) (inc depth) start acc nil)
                                 (and (#{\) \] \}} c) (zero? depth)) (conj acc (subs t start i))
@@ -6640,7 +6645,7 @@
 (defn name-independent-uses
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
-        new-frame (fn [] (java.util.HashMap. {:ext 0 :ind 0}))
+        new-frame (fn ^java.util.HashMap [] (java.util.HashMap. {:ext 0 :ind 0}))
         add! (fn [^java.util.HashMap fr kind] (.put fr kind (inc (long (.get fr kind)))))
         decl! (fn [fr d]
                 (case (:kind d)
@@ -6701,7 +6706,7 @@
                             (let [[ln c] (line-col starts o)]
                               (.add out {:line ln :col c :kind :error :rule :name-independent :msg "lambda parameter '_' previously declared as a capture"})))
                           (when (and b (>= (count caps) 2))
-                            (stmts (:inner b) (list (doto (new-frame) (.put :ind (count caps))))))))))
+                            (stmts (:inner b) (list (doto ^java.util.HashMap (new-frame) (.put :ind (count caps))))))))))
                   (:nodes u) nil))
     ;; structured bindings and template parameters that are not name-independent ([basic.scope.scope]/5: a static or namespace-scope
     ;; structured binding, a template parameter): one named twice is "redeclaration of 'auto _'", "redefinition of 'int _'"
@@ -6953,6 +6958,68 @@
 
 (swap! checks conj assume-expansions)
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-decl (2026-11-23): lookup, declarations and classes (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl")
+
+;; [over.literal]/3: a literal operator's parameter-declaration-clause is one of (const char*), (unsigned long long int), (long
+;; double), (char), (wchar_t), (char8_t), (char16_t), (char32_t), (const C*, std::size_t) for those five character types; no ellipsis.
+;; [over.literal]/5: a literal operator template's is empty. [lex.ext]/3 (a numeric literal: a raw literal operator or a numeric
+;; literal operator template but not both), GCC's at the declaration: "... conflicts with raw literal operator" and the reverse.
+;; A parameter whose type names an identifier the rule does not know (a typedef) leaves the declaration unjudged.
+
+(def ^:private udl-words #{"const" "volatile" "char" "wchar_t" "char8_t" "char16_t" "char32_t" "bool" "short" "int" "long" "signed"
+                           "unsigned" "float" "double" "void" "std" "size_t" "__size_t" "decltype" "sizeof" "auto" "nullptr_t"})
+
+(defn- udl-judgeable? [^String q] (every? udl-words (re-seq #"[A-Za-z_]\w*" q)))
+
+(defn- udl-size? [^String q]
+  (let [q (str/trim q)]
+    (or (#{"std::size_t" "size_t" "__size_t" "unsigned long" "long unsigned" "unsigned long int" "long unsigned int"} q)
+        (str/starts-with? q "decltype(sizeof"))))
+
+(defn- udl-list-ok? [qs variadic]
+  (and (not variadic)
+       (case (count qs)
+         1 (contains? #{"const char *" "unsigned long long" "long double" "char" "wchar_t" "char8_t" "char16_t" "char32_t"} (first qs))
+         2 (and (contains? #{"const char *" "const wchar_t *" "const char8_t *" "const char16_t *" "const char32_t *"} (first qs))
+                (udl-size? (second qs)))
+         false)))
+
+(defn literal-operators
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        raws (java.util.HashMap.) tmpls (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :literal-operator :msg msg}))))
+        fdecl (fn [f tmpl]
+                (let [nm (str (:name f))
+                      ps (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                      qs (mapv #(str/trim (str (get-in % [:type :qualType]))) ps)]
+                  (when (and (str/starts-with? nm "operator\"\"") (every? udl-judgeable? qs) (not (:_qn f)))
+                    (if tmpl
+                      (do (when (seq qs) (report! f (str "literal operator template '" nm "' has invalid argument list")))
+                          (when (empty? qs)
+                            (if-let [r (.get raws nm)] (report! f (str "literal operator template '" nm "' conflicts with raw literal operator '" r "'"))
+                                (.put tmpls nm nm))))
+                      (if (udl-list-ok? qs (:variadic f))
+                        (when (= qs ["const char *"])
+                          (if (.get tmpls nm) (report! f (str "raw literal operator '" nm "' conflicts with literal operator template"))
+                              (.put raws nm nm)))
+                        (report! f (str "'" (get-in f [:type :qualType]) " " nm "' has invalid argument list")))))))
+        w (fn w [xs]
+            (doseq [x xs]
+              (case (:kind x)
+                ("NamespaceDecl" "LinkageSpecDecl") (w (:inner x))
+                "FunctionDecl" (fdecl x false)
+                "FunctionTemplateDecl" (when-let [f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner x))]
+                                         (when (some #(and (= "NonTypeTemplateParmDecl" (:kind %)) (:isParameterPack %)) (:inner x))
+                                           (fdecl f true)))
+                nil)))]
+    (w (:nodes u))
+    (vec out)))
+
+(swap! checks conj literal-operators)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]
@@ -7093,3 +7160,12 @@
        :other (:other r 0) :fatal 0
        :message (if-let [e (first es)] (format-diag main e) "")
        :diags (mapv #(format-diag main %) es)})))
+
+;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
+(alter-var-root #'sema-rules conj
+  [:name #"^codegen: '.*' is not a class, struct, or union type" "is not a class, struct, or union type"])
+
+;; cpp-1123 (2026-11-23): the checker's objects of abstract class types ([class.abstract]/3, arbace.cpp.sema/cx-abstract!)
+(alter-var-root #'sema-rules conj
+  [:abstract #"^codegen: cannot declare .* to be of abstract type" "cannot declare to be of abstract type"]
+  [:base #"^codegen: cannot derive from 'final' base" "cannot derive from 'final' base"])

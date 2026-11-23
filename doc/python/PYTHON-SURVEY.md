@@ -8092,3 +8092,17 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   63 classed, 0 failing both, every row the same (test_trashcan_threads' counts aside, a failure both times). The AOT record's
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
+
+## As built: the user's n/a decisions of 2026-11-23 (na-apply-1123)
+
+The user's decisions on the eval tail's proposal (A-F, H's test_gc counts, I, J1-J3 taken; G not now; doc/JOURNAL.md, "Python and
+C++: the user's n/a decisions of 2026-11-23"), applied to `test/python/divergences.edn` from the record, no run:
+`:cpython-marked` (CPython's own decorators, its list `test/python/cpython-marked.txt` made by `test/python/cpython_marked.py`
+from the pinned tree and read through the class key `:tests-file`), `:bytecode` (absorbs `:dis`), `:object-layout` (absorbs
+`:inline-values`, `:specializing`, `:tuple-id-reuse`, `:pyc-magic`), `:gc-cycle-count` (test_gc's twelve counts), and n/a for
+`:remote-debugging`, `:gc-collector`, `:fails-under-cpython-too`, `:subtest-ids`, `:tracemalloc-driver-depth`; `:skipped-by-both`
+keyed also on `:excluded` and on bin/reap's `:no-tests` (a module row whose CPython run recorded no method); `:fork`'s two
+patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s list. The eval cell: 40,552 / 1,604 / 1,714 (4,454
+n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
+(`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
+`:finalization-cycle` by design.

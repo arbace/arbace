@@ -18,54 +18,53 @@
       (set! Rt/depth (if (nil? v) 0 (.intValue (cast Integer (aget v 0)))))
       (Bt/restore (if (nil? v) nil (cast Object/1 (aget v 1))))))
 
-  ;; the threads waiting for the lock, and the times it was taken (yield's)
+  ;; the threads waiting for the lock, and the times it was taken (yield's). The lock is a ticket lock (DECISION 528-14 (a), the
+  ;; burst of 2026-11-23): a thread that asks for it takes the next ticket and holds it when the tickets served reach its own, so the
+  ;; waiting threads take it in the order they asked, as OCaml 5's masterlock hands it over; a yield gives it to the first of them and
+  ;; asks again behind the others (lib-systhreads/testyield: one iteration a thread). A thread woken from await asks again likewise
   (field ^:static ^int waiting 0)
   (field ^:static ^long turn 0)
+  (field ^:static ^long next 0)
+  (field ^:static ^long serving 0)
 
-  (method ^:public ^:static lock ^void []
-    (locking lk
+  ;; (under lk) waits for a ticket of its own's turn, then holds the lock
+  (method ^:static acquire ^void []
+    (let [t next]
+      (set! next (unchecked-inc next))
       (set! waiting (unchecked-inc-int waiting))
-      (while held (.wait lk))
+      (while (or held (< serving t)) (.wait lk))
       (set! waiting (unchecked-dec-int waiting))
       (set! held true)
       (set! turn (unchecked-inc turn))
       (Gil/restore)))
 
+  ;; (under lk) gives the lock up to the next ticket
+  (method ^:static release ^void []
+    (Gil/save)
+    (set! held false)
+    (set! serving (unchecked-inc serving))
+    (.notifyAll lk))
+
+  (method ^:public ^:static lock ^void []
+    (locking lk (Gil/acquire)))
+
   (method ^:public ^:static unlock ^void []
-    (locking lk
-      (Gil/save)
-      (set! held false)
-      (.notifyAll lk)))
+    (locking lk (Gil/release)))
 
   ;; releases the lock until another thread's broadcast, then takes it again (gilCond.Wait)
   (method ^:public ^:static await ^void []
     (locking lk
-      (Gil/save)
-      (set! held false)
-      (.notifyAll lk)
+      (Gil/release)
       (.wait lk)
-      (set! waiting (unchecked-inc-int waiting))
-      (while held (.wait lk))
-      (set! waiting (unchecked-dec-int waiting))
-      (set! held true)
-      (set! turn (unchecked-inc turn))
-      (Gil/restore)))
+      (Gil/acquire)))
 
   (method ^:public ^:static broadcast ^void []
     (locking lk (.notifyAll lk)))
 
-  ;; lets a thread that waits for the lock run first, if one does: the lock given up until another thread took it (turn moved)
-  ;; and gave it back (a plain unlock and lock would take it again before the waiting thread wakes)
+  ;; lets a thread that waits for the lock run first, if one does: the lock given to the first waiting ticket, and asked for again
+  ;; behind every thread that waits
   (method ^:public ^:static yield ^void []
     (locking lk
       (when (> waiting 0)
-        (Gil/save)
-        (let [t turn]
-          (set! held false)
-          (.notifyAll lk)
-          (set! waiting (unchecked-inc-int waiting))
-          (while (or held (== turn t)) (.wait lk))
-          (set! waiting (unchecked-dec-int waiting))
-          (set! held true)
-          (set! turn (unchecked-inc turn))
-          (Gil/restore))))))
+        (Gil/release)
+        (Gil/acquire)))))

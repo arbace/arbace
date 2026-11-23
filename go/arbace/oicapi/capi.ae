@@ -69,7 +69,10 @@
     ^uint64 ts
     ;; the closures given to the C, by the index their copy holds in its first word (queue 530): a C thread may call one back after the
     ;; outermost call that gave it ended (lib-systhreads/test_c_thread_register's closure, unregistered, as OCaml's stays put)
-    ^{:tag (slice (weak/Pointer oi/Closure))} closures))
+    ^{:tag (slice (weak/Pointer oi/Closure))} closures
+    ;; a C program that embeds OCaml (queue 539, Embed): the program's argv, and the OCaml program's initialisation while its main runs
+    ^{:tag (slice string)} argv
+    ^{:tag (func [])} start))
 
 (go/var ^{:tag (* capi)} the)
 
@@ -149,6 +152,7 @@
             (for [k 0] (< k 4) (inc! k)
               (aset (.-ops c) k (.Load64 m (+ a (conv uint64 (* 8 k))))))))
         (set! (.-flush c) (aget (.-ByName p) "__oi_c_flush"))
+        (set! (.-argv c) argv)
         (set! the c)
         (set! oi/ExternalFallback (fn ^oi/Ext [^string name ^int nargs] (.external c name nargs)))
         (set! (.-scratch c) (.allocStatic c 2 tagAbstract))
@@ -202,6 +206,40 @@
                                                 (lit ci/Arg :K \i :I (conv int64 envp))))]
       (Flush)
       (return (conv int (conv int32 (.-I r))) nil))))
+
+(go/func OwnMain "OwnMain tells whether the loaded stubs have a main of their own (queue 539: a C program that embeds OCaml,
+embedded/cmcaml); test/ocaml/capi/main.c, linked when they have none, defines __oi_no_main.\n" ^bool []
+  (and (Has "main") (not (Has "__oi_no_main"))))
+
+(go/func Embed "Embed runs the stubs' own main (OwnMain) for oi's thread th, with the program's argv and the environment: its caml_main
+or caml_startup runs start, the OCaml program's initialisation (oi.RunEmbedded's: once), and its callbacks run on th; the whole of main
+is one outermost call of the boundary (its copies live until main returns). main's status; the C's exit an exit of the run.\n"
+  ^int [^{:tag (* oi/Thread)} th ^{:tag (func [])} start]
+  (let [c the
+        f (aget (.-ByName (.-p c)) "main")
+        t (.-Main (.-p c))
+        (values envp _) (.stack c (.-argv c) (os/Environ))
+        av (- envp (conv uint64 (* 8 (+ (len (.-argv c)) 1))))
+        prev (.-th c)]
+    (set! (.-th c) th)
+    (set! (.-start c) start)
+    (inc! (.-depth c))
+    (defer ((fn []
+              (let [r (recover)]
+                (dec! (.-depth c))
+                (when (== (.-depth c) 0)
+                  (.reset c))
+                (set! (.-start c) nil)
+                (set! (.-th c) prev)
+                (when (!= r nil)
+                  (when [(values flt ok) (assert (* crt/Fault) r)] ok
+                    (oi/Internalf "the C main's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
+                  (when [(values ex ok) (assert (* crt/Exit) r)] ok
+                    (panic (addr (lit oi/ExitSignal :Code (.-Code ex)))))
+                  (panic r))))))
+    (let [r (.Call (.-p c) t f (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 (len (.-argv c)))) (lit ci/Arg :K \i :I (conv int64 av))
+                                   (lit ci/Arg :K \i :I (conv int64 envp))))]
+      (conv int (conv int32 (.-I r))))))
 
 (go/method stack "stack is an initial stack's vector as Linux's: argv's pointers, 0, the environment's, 0, the auxiliary vector\n(AT_PAGESZ, AT_RANDOM); the environment's address and argv[0]'s.\n"
   [^{:tag (* capi)} c ^{:tag (slice string)} argv ^{:tag (slice string)} env] :results [uint64 uint64]
@@ -769,6 +807,11 @@ here, not a null pointer (queue 478).
       ["__oi_thread_unregister" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.unregister c t))))]
       ["__oi_thread_acquire" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.acquire c t))))]
       ["__oi_thread_release" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.release c t))))]
+      ;; a C program that embeds OCaml (queue 539): runtime.c's caml_main and caml_startup, the OCaml program's initialisation (Embed)
+      ["__oi_caml_main" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                          (when (!= (.-start c) nil)
+                            ((.-start c)))
+                          (ai 0))]
       ["caml_raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                       (.fromCAll c)
                       (oi/Raise (.decode c (arg a 0)))

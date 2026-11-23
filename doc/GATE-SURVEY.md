@@ -5264,3 +5264,34 @@ Not done here: queue 301's step (`mac/301-asm-arm64-goroot-step`) is not in this
 `:hosts [:stage0 :go :arm64]` and its command becomes `bin/a64i goroot-check` alone. a64i-arbace does the same when it is written.
 A step that `:needs` an absent step still runs, because `ok_status` counts `absent` as done, as in the oracle tier. arm64's steps
 each declare `:arm64` themselves.
+
+## As built: the big lock's two slots (branch `heavy2-1123`, 2026-11-23)
+
+The user's decision (2026-11-23): "Two slots, memory-gated". `bin/heavy-lock` keeps GTS32 (a)'s FIFO of tickets
+(`LOCK.queue/TIME-PID`, holding the start time, the dead removed by the next waiter) and puts it in front of two flock
+slots: slot 1 the plain flock on `big.lock` (so `flock big.lock CMD` still excludes it), slot 2 a flock on `big.lock.2`.
+Each ticket has a state file beside it, `LOCK.queue/.s-TIME-PID` ("STARTTIME STATE NEED-KIB", STATE `wait`, 1 or 2,
+written before the ticket; a dotfile, so the one-slot version's listing never sees it; one whose process is gone removed
+by the next waiter). The first ticket in state `wait` is the head: it takes slot 1 when free, else slot 2. A job that would
+run beside another (the other slot held, by a ticket or a plain flock) is admitted only when MemAvailable less 2 GiB, less
+what the other holders declared and have not reached yet (their need less their process tree's RSS: a build just started
+counts at its declared peak), exceeds its own need, `HEAVY_MEM_GIB` (default 24, a gate build's ~22 GiB; `all`: the host's
+MemTotal, a job never run beside another); a job alone needs no memory. A head that does not fit releases the slot and
+waits; no later ticket passes it. The command runs with `ARBACE_HEAVY_HELD=1` (the OOM protector's mark) and
+`ARBACE_HEAVY_SLOT`, inheriting the held slot's descriptor as flock(1)'s child did; `HEAVY_LOCK_WAITS` as before.
+`--queue` prints each ticket's slot or "waiting" and its need, and the plain flocks' holders without a ticket.
+
+The gate declares its needs: a step's admission (`GATE_STEP_MEM_GIB`) is its `HEAVY_MEM_GIB` (`bin/lib/gate-run.bash`'s
+`step`, also for an `:inner` step's tools), and `bin/gate --concurrent`'s whole-run hold declares `all`.
+
+The change was deployed while six one-slot waiters were queued, so the new script reads their tickets (no state file) as
+the old protocol's: an old ticket waits for every earlier ticket and then for slot 1. A new waiter after one takes slot 2
+only, never slot 1 before it, and always under the memory rule (the old one will hold slot 1); an old ticket after a new
+holder runs when the holder ends (slot 1 may sit idle meanwhile: transitional, until the old waiters drain). Deployed by
+writing the new file beside the old one and renaming it over (the running instances keep the old inode).
+
+Tested by `test/gate/heavy-lock-test.bash` (seconds, sleep jobs on a scratch lock, MemAvailable's stand-in
+`HEAVY_LOCK_MEMAVAIL_KIB`): two jobs at once and the third waiting; a head that does not fit waiting while a later ticket
+that would fit does not pass it; FIFO of five with room for one; a dead ticket and state file removed; plain flock beside a
+slot-2 ticket, and waiting for a slot-1 one; and the one-slot version (`903b053e4`'s file) holding, waiting at the head, and
+queued after a new holder.

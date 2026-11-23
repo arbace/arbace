@@ -101,6 +101,8 @@ END {
   }
   if (aot == 0 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  # (burst 2026-11-23) and when they are C alone (lib-threads' sigint.c): a C helper is its own program on ci, whatever the level
+  if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.c( +[A-Za-z0-9_]+\.c)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   # dynlink mode (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"): a test at oi's level that includes dynlink and
   # whose bytecode alternative builds plugins: in its build environment (setup-ocamlc.byte-build-env) each `module = FILE; ocamlc.byte` a
   # unit compiled in the current directory (cwd = DIR; cd), one link `all_modules = "A.cmo ... MAIN.cmo"; ocamlc.byte` (module = "") the
@@ -140,7 +142,9 @@ END {
   # ocamldoc's own list, bin/oi's ocamldoc_build). At oi's level alone: at the light AOT level (bin/oi's o2j_dump and translate loop have
   # the mode) t01 did not finish in 600 s of CPU with 7 GB resident (queue 480; DECISION 480-1), so the AOT levels keep the class
   odmode = 0; odplugins = ""
-  if (aot == 0) {
+  # (burst 2026-11-23, 528-8 (a)) at the compiled level too: ocamldoc translated by o2j and j2g as the row's program, its plugins in the
+  # program's Dynlink registry (bin/oi's o2j_dump and c2_programs); the light level keeps the class (DECISION 480-1)
+  if (aot == 0 || aot == 2) {
     odmode = 1
     for (j = 1; j <= m; j++) {
       s = trim(st[j]); if (s == "") continue
@@ -241,7 +245,9 @@ END {
   hasoptbuild = 0
   for (j = 1; j <= m; j++) if (trim(st[j]) == "setup-ocamlopt.byte-build-env") hasoptbuild = 1
   oimode = 0
-  if (aot == 0 && (hasbuild || hasoptbuild) && !dlmode && !dpmode && !odmode && !cemode) {
+  # (burst 2026-11-23, DECISION 528-8 (a): the tools AOT-compiled at the compiled level, compiler-libs in its library) the mode at the
+  # compiled level too (aot == 2): oiobjinfo translated by o2j and j2g as the row's program; the light level keeps the class (528's probe)
+  if ((aot == 0 || aot == 2) && (hasbuild || hasoptbuild) && !dlmode && !dpmode && !odmode && !cemode) {
     oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0; oisrc = ""; oidst = ""; oicps = ""; oishared = ""; oiopt = 0
     for (j = 1; j <= m && oimode; j++) {
       s = trim(st[j]); if (s == "") continue
@@ -292,7 +298,8 @@ END {
   # FLAGS -o TEST.byte TEST.ml`, and the run the hook's command line, tools/dumpobj on oi, the row's program with `-nobanners
   # TEST.byte` (no hook); environment @tool=dumpobj @bcflags=FLAG,...
   dbmode = 0
-  if (aot == 0 && hasbuild && !dlmode && !odmode && !oimode && !cemode) {
+  # (burst 2026-11-23, 528-8 (a)) at the compiled level too: tools/dumpobj translated by o2j and j2g as the row's program
+  if ((aot == 0 || aot == 2) && hasbuild && !dlmode && !odmode && !oimode && !cemode) {
     dbb = FILENAME; sub(/^.*\//, "", dbb); sub(/\.ml$/, "", dbb); hook = FILENAME; sub(/\.mll?$/, ".run", hook)
     while ((getline hl < hook) > 0) if (trim(hl) == "\"${ocamlrun}\" \"${ocamlsrcdir}/tools/dumpobj\" -nobanners \"${program}\" > \"${output}\"") dbmode = 1
     close(hook); dbflags = ""; dbstep = 0
@@ -315,8 +322,43 @@ END {
   # output judged: max_arity's warning 5) it keeps the class at the compiled level; at the light level (queue 533, DECISION 528-R1
   # (a)) the compiler's output is the native typer's warnings (@compout=1, the flags' -w specs @w=SPEC,...: bin/oi's typer runs with
   # -w), judged against TEST.compilers.reference
+  # gen mode (burst 2026-11-23, 528-3 (a)'s unboxed-primitive-args): a native header that generates its program with ocamltest's `ocaml`
+  # script action (setup-ocamlopt.byte-build-env; test_file = SCRIPT; ocaml_script_as_argument; each `arguments = ARG; compiler_output =
+  # OUT; ocaml`; all_modules = "C... ML..."; ocamlopt.byte; run; check-program-output) runs at the compiled level: bin/oi's gen_prog runs
+  # SCRIPT on oi once an ARG into D/OUT, the last unit of all_modules the program, the other .ml its @mods, the .c its stubs (the run
+  # directory's); environment @gen=SCRIPT:ARG>OUT,... @genmain=ML @dyncopy=READONLY,... @cstubs=C,... @mods=ML,...
+  # At the compiled level alone: the generated program (unboxed-primitive-args' main.ml, 600 KB of Lambda) passed 7.6 GB in the light
+  # level's one translation process, whose whole run the gate declares at 4 GiB; the light level keeps the class
+  gnmode = 0
+  if (aot == 2 && !hasbuild && hasoptbuild) {
+    gnmode = 1; gscript = ""; garg = ""; gout = ""; gens = ""; gro = ""; gall = ""
+    for (j = 1; j <= m && gnmode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+      if (s ~ /^readonly_files *= *"/) { gro = v; continue }
+      if (s == "setup-ocamlopt.byte-build-env" || s == "ocamlopt.byte" || s == "run" || s == "check-program-output") continue
+      if (s ~ /^test_file *= *"/) { gscript = v; sub(/^.*\//, "", gscript); continue }
+      if (s ~ /^ocaml_script_as_argument *= *"true"$/) continue
+      if (s ~ /^arguments *= *"/) { garg = v; continue }
+      if (s ~ /^compiler_output *= *"/) { gout = v; continue }
+      if (s == "ocaml") { if (garg == "" || gout == "" || gscript == "") gnmode = 0; gens = gens (gens == "" ? "" : ",") garg ">" gout; garg = ""; gout = ""; continue }
+      if (s ~ /^all_modules *= *"/) { gall = v; continue }
+      gnmode = 0
+    }
+    if (gens == "" || gall == "" || gscript !~ /^[A-Za-z0-9_]+\.ml$/) gnmode = 0
+  }
+  if (gnmode) {
+    c = split(gall, hm, " "); gcs = ""; gmls = ""; gmain = ""
+    for (q = 1; q <= c; q++) {
+      if (hm[q] ~ /\.c$/) gcs = gcs (gcs == "" ? "" : ",") hm[q]
+      else if (hm[q] ~ /\.ml$/) { if (gmain != "") gmls = gmls (gmain == "" || gmls == "" ? "" : ",") gmain; gmain = hm[q] }
+    }
+    gsub(/ +/, ",", gro)
+    helper = 0; m = 0; incs = ""; args = ""
+    env = env " @gen=" gscript ":" gens " @genmain=" gmain (gro == "" ? "" : " @dyncopy=" gro) (gcs == "" ? "" : " @cstubs=" gcs) (gmls == "" ? "" : " @mods=" gmls)
+  }
   opmode = 0; opout = 0; wspec = ""
-  if (aot >= 1 && !hasbuild && hasoptbuild) {
+  if (aot >= 1 && !hasbuild && hasoptbuild && !gnmode) {
     opmode = 1
     for (j = 1; j <= m; j++) { s = trim(st[j]); if (s == "") continue
       if (s == "check-ocamlopt.byte-output" && aot == 1) { opout = 1; continue }
@@ -511,7 +553,8 @@ END {
       # (queue 523) C files and OCaml units of the test's directory (gc-roots: globrootsprim.c globroots.ml): at oi's level the units
       # typed first, in their order, each before the program (bin/oi's oi_one, @mods=FILE,...), the C files its stubs; the AOT levels keep
       # the class
-      if (key == "modules" && aot == 0 && val ~ /^[A-Za-z0-9_.]+\.(c|ml)( +[A-Za-z0-9_.]+\.(c|ml))*$/ && val ~ /\.c( |$)/ && val ~ /\.ml( |$)/) {
+      # (burst 2026-11-23) at the AOT levels too: bin/oi's o2j_dump types the units first (oi_mods) and translates them with the program
+      if (key == "modules" && val ~ /^[A-Za-z0-9_.]+\.(c|ml)( +[A-Za-z0-9_.]+\.(c|ml))*$/ && val ~ /\.c( |$)/ && val ~ /\.ml( |$)/) {
         c = split(val, hm, " "); cs = ""; mls = ""
         for (q = 1; q <= c; q++) { if (hm[q] ~ /\.c$/) cs = cs (cs == "" ? "" : ",") hm[q]; else mls = mls (mls == "" ? "" : ",") hm[q] }
         csclass = key " = " val; env = env " @cstubs=" cs " @mods=" mls; continue
@@ -606,6 +649,8 @@ END {
   if (index(args, "$") || index(args, "\\")) { args = expand(args, 0); gsub(/[ \t]+/, " ", args); args = trim(args) }
   # a test of C stubs that runs only native (int64-unboxing: its externals' bytecode names are "", the unboxed native ones the C's)
   # stays its class: oi calls an external by its bytecode name
-  if (csclass != "" && sawnative && !sawbyte) { cls(csclass) }
+  # (burst 2026-11-23) at oi's level alone: the AOT levels call such an external by its native name with unboxed words (o2j's native:
+  # calls, CApi/nativeCall, OC199 (a))
+  if (aot == 0 && csclass != "" && sawnative && !sawbyte) { cls(csclass) }
   print "run\t" trim(flags) "\t" trim(incs) "\t" args "\t" trim(env)
 }
