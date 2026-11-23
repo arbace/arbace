@@ -19602,3 +19602,31 @@ remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild
   with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
   owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
 >>>>>>> mac/536-py-deferred
+
+## 2026-11-23: cpp-small, C++'s read tail G1, G2 and H built (branch `cpp-small-1123` from mac/next `e52a17d33`)
+
+- **What**: the user's decision of 2026-11-23 on the read tail's proposal (`.tmp/goal/cpp-na-proposal.md`, classes G1, G2, H):
+  built in Arbace's own front end, not n/a. G1, the template instantiation depth ([temp.inst]/17; GCC's -ftemplate-depth, 900 by
+  default, the option honoured): arbace.cpp.sema's `*max-tmpl-depth*`, `*tmpl-chain*`, `*tmpl-slack*`, `depth-fatal!`, `*fatal*`,
+  arbace.cpp.template's `pending` (a specialization's definition at its user's body's depth plus one), `chain-members!`,
+  `instantiate-class*`'s check, `cx-explicit-subst!` ([temp.deduct.general]/2-3's explicit arguments substituted first: the same
+  substitution re-entered is endless) and `constraint-satisfied?`'s endless satisfactions with new arguments; the timeouts of
+  template/vtable2.C and cpp0x/alias-decl-55.C are now the expected error (alias-decl-55 in seconds). G2, [expr.new]/8 with GCC's
+  limit 2^63 - 8 (PTRDIFF_MAX from c/target/abi.edn plus one less the cookie): `cx-new-size!`, with GNU's `__typeof__ (sizeof 0)`,
+  abi's byte layout for a class without bit-fields and align-of of an array without its size. H: the unnamed union's `{`, #embed's
+  elements at the list's closing brace (64 bytes or more, but the first and last), "the value of 'v' is not usable" at the read.
+  Also an elaborated-type-specifier in a function body declares its class there (decltype29's `ft<struct a*, 0>`).
+- **How decided**: every place and threshold from g++ 15.2's behaviour by hand on probes (`.tmp/probe/` of the worktree; no GCC code
+  read), recorded in the code's comments and doc/cpp/CPP-SURVEY.md, "As built: cpp-small". The depth model was fitted to measured
+  thresholds: a called member's chain needs -ftemplate-depth=S-1 and fails at the class the body instantiates; the vtable chain from
+  an explicit instantiation needs S-1 too and fails at the virtual function's declaration (so a class a vtable-reached body
+  instantiates costs no level). Alternatives considered: n/a for G1 (the proposal's option; the user chose build); a stack-depth
+  cut of the infinite cases alone (it would not give -ftemplate-depth's finite limits, pr23510 and recurse).
+- **Records**: `bin/repr-cpp dg --corpus dg-error --front native --only` the 12 rows and the control pair `--record` (stage 0,
+  GOMEMLIMIT=3000MiB); `test/cpp/divergences-dg.edn`'s :gcc-own-rules lost alias-decl-55, concepts-recursive-sat1, pr23510, recurse
+  and vtable2. C++ read 5,834 / 0 / 447 -> 5,846 / 0 / 435 (250 n/a); completeness 0.9755 -> 0.9760, independence 0.9658 -> 0.9660.
+  The own passes rerun twice (2,227 and the targets): none lost; udlit-suffix-neg.C and missing-header-pr110164.C pass 300 s on
+  mac/next's tree as on this one (the host's load; rows kept). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` and
+  `bin/records-check`: 0 problems.
+- Noticed, not mine: mac/next's doc/JOURNAL.md holds merge conflict markers (lines 19033, 19546, 19604: `<<<<<<< HEAD`, `=======`,
+  `>>>>>>> mac/536-py-deferred`) from 9b60ce498's merge; left for the coordinator.

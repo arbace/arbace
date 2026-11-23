@@ -10528,3 +10528,11 @@ Each rule from the standard and g++ 15.2's behaviour observed by hand (probes, n
   first and last, a shorter run at the directive (g++'s observed places; cpp/embed-7.C, cpp/embed-16.C); a const variable, not
   constexpr, whose initializer is surely not constant, read in a constant evaluation: "the value of 'v' is not usable" at the read
   (cpp23/constexpr-nonlit4.C).
+
+Checked: each target alone and in the record run (the 12 rows pass, the control pair dr2082-vs-dr1423 failing as it must); the
+own record's 2,227 passes twice (reg1 on the G2/H/first-G1 tree, reg2 on the head with the 14 targets): none lost but
+cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C, past 300 s under the host's load, which time out alone on mac/next's
+tree too (rows kept); probes of the depth model against g++ 15.2 (the recursion and vtable thresholds above), of the size limit and of
+the #embed places. The read cell: 5,834 / 0 / 447 (250 n/a) -> 5,846 / 0 / 435; :gcc-own-rules' five depth files out of its :tests.
+Left: `new (T[N])` (a parenthesized array type) is not judged by cx-new-size! (the native parser's form; no target needs it), and
+the constant evaluator's long arithmetic still throws Java's ArithmeticException past 2^63 in an unsigned expression (caught here only).
