@@ -17448,3 +17448,33 @@ which was 07:30 UTC: the session's clock notes ran two hours ahead that morning)
 - Haskell's fannkuch-redux and minimax (GHC's own -O0 run does not finish within the reference's 10 s; HES101) and T21305 (writeByteArray#
   past a 3-element array, undefined behaviour; HES96): n/a. Alternatives not taken: an optimizer for the own libraries' STG (HES100 (b)) so
   the two run like nofib's -O; by design.
+
+## 2026-11-23: py-accel, queues 521 and 525 merged with j2g's program copy; the eval measured; :c-accelerators narrowed
+
+Branch `py-accel-1122` (mac): 521's `6db3dd0cb` (CPython's `_datetimemodule.c` and `_decimal.c` with libmpdec built by ci into pyi's
+C world ctypestest, its cf2g package committed as Go forms and linked into the executable through `arbace/clib/worlds` in goi's table,
+DECISION 521-2 (b)) and 525's `8d2a609d1` (the 18 pyi gaps 521's modules exposed, DECISION 521-3 (a)) merged on next `ead97197e`;
+`5a4c223da` (runtime_state counts clib and pyctypes), `1627e8fba`/`a179a8e5c` (j2g's program copy takes arbace/clib, arbace/pyctypes,
+arbace/clib/worlds and the world's packages: the gate build had failed with "package arbace/clib is not in std"); `b5c6f40e6` (the world
+built again on next's ci builder: queue 522's soft-float adds musl's long double code, so `bin/pyi-clib verify ctypestest` on the merged
+tree differed from 521's nodes.ae, key and aot forms; new Key 4422cb00...). Its own gate build (key `5ee95bf34622f0956ee2`) gives way to
+train 1 (the user: records share gate builds): `bin/pyi-clib verify ctypestest` and the record wait for the train's executables.
+
+Measured on `a179a8e5c`'s gate build (`2399c5e5`, the world of 521 compiled; valid for classing, not for the record): `bin/pyi check
+test_datetime test_types test_decimal test_bool test_getopt` (one at a time): 2,010 methods, 1,946 pass, 64 classed, 0 failing, 0
+regressions, 999 now pass (test_datetime 1,058 / 50 / 0 in 688 s, 4 driver runs: 3 crashes in test_fromisoformat_fails; test_types
+126 / 3 / 0 in 58 s; test_decimal 721 / 11 / 0 in 250 s; the controls failed as they must); 5.3 GB peak, 19 min. test_logging (2 at once
+with other modules, a loaded host): driver starts 24.1 s and 27.6 s wall (26.0 and 13.9 s CPU) against 10.8 s before (py-eval's run):
+not conclusive under the load; to measure again alone.
+
+`test/python/divergences.edn`: `:c-accelerators` narrowed to _pickle and _json (every test_datetime and test_decimal id removed: 682
+pass now, 6 skipped are other classes'; the matches "requires C version" and "_datetime" removed, "_decimal" narrowed to the two
+stale rows' messages, "requires _decimal" (test_functools) and "C _decimal module required" (test_int), until their modules rerun);
+the 13 real gaps go to a new deferred class `:c-accelerator-gaps` (fromisoformat's NULL dereference in the C world, U+FFFD for a lone
+surrogate through PyUnicode_FromFormat's %c, musl's offset zone names with no tzset in the C world, subclass constructors keeping
+tzinfo, one timedelta computation, no subinterpreters). Judged again on the run (`bin/pyi check --judge`, nothing run).
+
+Not done here, by the user's instruction (avoid redundancy): the merge with next's py-capi world (`_testsinglephase`, `_testmultiphase`
+in the same lib.conf), which needs the world rebuilt and another gate build; its text merge of go/arbace/py and pyctypes (3 conflicts
+in printed Go: builtins_ctypes_api.go's lazy modules both kept, capi.go's tables both kept, capi_objects.go's PyImport_Import next's)
+and of gotable.edn, lib.conf and divergences.edn is kept in `py-accel/.tmp/merge-n-scratch/`.

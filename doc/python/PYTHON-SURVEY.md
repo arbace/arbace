@@ -8011,3 +8011,15 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   63 classed, 0 failing both, every row the same (test_trashcan_threads' counts aside, a failure both times). The AOT record's
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
+
+## As built: 521 and 525 merged, the C accelerators in the executable (2026-11-23, the main host, py-accel-1122)
+
+Queues 521 (`_datetime` and `_decimal` from CPython 3.14.10's own C, built by ci into the world ctypestest, compiled into the executable
+through goi's table: `bin/pyi-clib aot-forms`, `go/arbace/clib/ctypestest/aot`, `go/arbace/clib/worlds`; DECISION 521-2 (b)) and 525
+(the gaps those modules exposed, DECISION 521-3 (a)) merged on next with two fixes: j2g's program copy now takes arbace/clib,
+arbace/pyctypes, arbace/clib/worlds and the world's packages, and the world is built again on next's ci builder (queue 522's soft-float
+long double). On `a179a8e5c`'s build (521's world, before the rebuild) the eval of test_datetime, test_types and test_decimal gives 1,905 of 1,969 methods passing, 0
+failing (999 more than the record); the classes: `:c-accelerators` now covers _pickle and _json alone, and the 13 test_datetime methods
+_datetime's C reaches beyond pyi's C API and C world are the deferred `:c-accelerator-gaps` (fromisoformat's NULL dereference, a lone
+surrogate through PyUnicode_FromFormat's %c, the C world's local zone names without tzset, subclass constructors, one timedelta
+computation, subinterpreters). PYI_C_ACCEL=0 runs the pure twins as before.
