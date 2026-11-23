@@ -19030,6 +19030,7 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
 
+<<<<<<< HEAD
 ## 2026-11-23: Scheme's last by-design rows: SCS4 (d)'s records, SCS38 (a) (branch `smalls-1123`, from mac/next `fa635f636`)
 
 The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.md).
@@ -19465,3 +19466,139 @@ renaming tickets to mark holders (rejected: the old waiters compare names and co
 as stated (taken with the holders' unreached declarations subtracted: a gate build just started shows almost nothing in
 MemAvailable and reaches ~22 GiB minutes later, so MemAvailable alone would admit a second build into an OOM); probing slot 1
 through /proc/locks (taken only for `--queue`'s display; admission probes with `flock -n`, which is atomic).
+
+## 2026-11-23: Python and C++: the user's n/a decisions of 2026-11-23 (branch `na-apply-1123` from mac/next `e52a17d33`)
+
+The user's decisions (2026-11-23, 13:40 UTC), on the proposals `.tmp/goal/py-na-proposal.md` (Python's eval tail, read-only
+analysis at `69bb781b5`, its row lists `.tmp/goal/pyna/`: `propose.py`, `proposal-ids.json`) and `.tmp/goal/cpp-na-proposal.md`
+(C++'s read tail, `.tmp/goal/cpp-na-work/`), verbatim as relayed:
+
+Python:
+- "TAKE as n/a: A (the 51 test_capi rows needing _testinternalcapi -> :testinternalcapi-absent, before :capi-port claims them),
+  B (:cpython-marked: keyed on CPython 3.14.10's Lib/test decorators @cpython_only/@refcount_test/@impl_detail(cpython=True)/
+  @requires_specialization; the user accepted a TOOL-MADE list: commit the scanning tool (in test/python/, reproducible from the
+  pinned source tree .tmp/repr-python/Python-3.14.10) and its generated list, the class reading the list), C (:remote-debugging ->
+  n/a), D (:bytecode), E (:object-layout), F (:gc-collector -> n/a, reversing the 11-22 by-design call), I (:not-a-case),
+  J1/J2/J3 (:skipped-by-both and :fork extended)."
+- "H: only test_gc's 12 count rows of :finalization-cycle become n/a; the rest stays."
+- "G (:refcount-moment): NOT now (decided after 222 (b) is built)."
+- "Each class with :kind :na and a reason citing CPython's own marking and the user's decision."
+
+C++:
+- "TAKE as n/a: A (4 -fopenmp files into :gcc-dialect's list, per 11-22), B (18: GCC flags enabling a later standard's feature
+  at an earlier -std), C (4 attributes at C++11), D (15 IFNDR [-Wtemplate-body] in never-instantiated templates; only the
+  verified ones, not the 6 instantiated/syntax-error files), E (3 IFNDR constexpr), F (2 IFNDR partial specialization after
+  use). Classes ... with :kind :na, reasons citing the standard."
+- G1, G2 and H are build work (another agent's), not n/a.
+
+Applied (no runs: n/a reclassing only, judged from the records by `bin/reap`):
+
+Python, `test/python/divergences.edn`:
+- A: the 51 test_capi ids (test_unicode 23, test_misc 17, test_exceptions 7, test_complex 2, test_object 1, test_set 1) out of
+  `:capi-port`'s `:tests`; `:testinternalcapi-absent`'s verdict rule takes them.
+- B: `:cpython-marked`, n/a, after `:cpython-only`, its ids read from `test/python/cpython-marked.txt` through a new class key
+  `:tests-file` (bin/reap's `classes-of`, `test/python/libtest_judge.ae`'s `read-classes`, `test/cover/classes.ae`: the file's ids,
+  one a line before a tab, joined to `:tests`). The list is made by `test/python/cpython_marked.py` (python3 -I, CPython's own
+  `ast` over the pinned `.tmp/repr-python/Python-3.14.10/Lib`, no run; `--check FILE` makes it afresh and compares): every id of
+  the record whose method, class or a base class it inherits the method through carries `cpython_only`, `refcount_test`,
+  `impl_detail` (no guard, or `cpython=True`) or `requires_specialization(_ft)` (951 ids, every one a non-pass: the marker's own
+  skip, `:cpython-only`'s, takes most). The class takes the proposal's 52 exactly (capi-port 19, remote-debugging 18,
+  skipped-by-test 11, testcapi 2, specializing 2), and from other n/a classes rows that were n/a already (testinternalcapi-absent
+  107, cpython-implementation-details 50, skipped-by-both 2, remote-debugging-disabled 2); 4 C-accelerator rows (py-accel's)
+  stay `:c-accelerators`', the class being above it. The reap step's inputs name the list.
+- C: `:remote-debugging` n/a (the rest of its 41 rows). D: `:bytecode`, n/a (absorbs `:dis`, removed, and test_code's nine
+  and test_dis's four rows of `:code-objects` and `:code-positions`; `:code-objects` keeps CodeWeakRefTest). E: `:object-layout`,
+  n/a (absorbs `:inline-values`, `:specializing`, `:tuple-id-reuse` and `:pyc-magic`, removed, test_long's `test___sizeof__` from
+  `:core-objects-287`, and the skips naming CPython's build: unicodedata as an external module, "stub loader has no suffixes",
+  `_xxtestfuzz`, "cpython only"). F: `:gc-collector` n/a (as it stands, 14 rows, test_warnings' two FinalizationTest rows among
+  them). H: `:gc-cycle-count`, n/a, before `:finalization-cycle`: test_gc's twelve counts of cyclic garbage. I (:not-a-case):
+  `:fails-under-cpython-too`, `:subtest-ids` and `:tracemalloc-driver-depth` n/a (kept as three classes, each marked; 18 rows).
+  J1: bin/reap's `py-ref-outcomes` gives a module row `MODULE/*` the outcome `:no-tests` when the references' `:module` line has
+  status 0 or 4 and no method of the module is recorded; J2: `:excluded` (record-ref's machine-named skips: 32-bit, musl);
+  `:skipped-by-both`'s `:ref-outcomes` now `[:skipped :excluded :no-tests]` (84 + 44 rows). J3: `:fork`'s two patterns
+  ("requires working os.fork", pty.fork()'s missing os.fork).
+- Not applied: G (`:refcount-moment`); the rest of `:finalization-cycle`.
+
+C++, `test/cpp/divergences-dg.edn` (the read cell's dg source): A and B into `:gcc-dialect`'s `:tests` (4 + 18, with comments);
+new n/a classes after it, by file: `:attribute-before-its-standard` (C: 4; [dcl.attr.grammar]/5 of C++11),
+`:ifndr-uninstantiated-template` (D: 15; [temp.res.general]/6), `:ifndr-constexpr-never-constant` (E: 3; C++11
+[dcl.constexpr]/5), `:ifndr-specialization-after-use` (F: 2; [temp.spec.partial.general]/1, CWG 2179). D's 15 are the
+proposal's hand-read list (forw_enum10, typedef1, lambda-variadic11, tc1/dr176, defarg19 and crash67 excluded); three of them
+(template/memfriend6, cpp0x/vt-34052, template/void14) the proposal called borderline.
+
+Cells (bin/reap --record): Python eval 40,552 / 1,604 / 1,714 (4,454 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a); C++ read
+5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). Alternatives not taken: a hand list for B (the user asked for the
+tool's); a separate `:not-a-case` class gathering I's three (kept apart: their reasons differ, each now n/a); a class of its own
+for J2 (the same rule as `:skipped-by-both`, CPython skipping there too).
+
+## 2026-11-23: the n/a decisions' edge rows back to deferred; queue 536 merged (branch `na-edge-1123` from mac/next `320e74469`)
+
+The user decided (2026-11-23, relayed by the coordinator): "pull out all 5 edge rows, back to deferred so they get built:
+Python test_warnings' 2 FinalizationTest rows (out of :gc-collector), and C++ D's 3 borderline rows memfriend6, vt-34052 and
+void14 (out of :ifndr-uninstantiated-template)". Applied: test_warnings' FinalizationTest test_finalization and
+test_late_resource_warning leave `:gc-collector`'s `:tests` (both pass in the record, so the cell does not move: the names
+were stale; a later failure of theirs is no longer n/a); template/memfriend6.C, cpp0x/vt-34052.C and template/void14.C leave
+`:ifndr-uninstantiated-template` (12 files now), their rows back to the deferred class that matches them (`:own-diag`).
+Then mac/536-py-deferred (`fe8f03006`, the Mac's queue 536: test_audit, test_pathlib, test_xml_etree(_c) recorded again;
+goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18) merged, test/python/divergences.edn's
+both sides' class changes kept, reap and crops-score recorded again. 536 makes go/arbace/py export Audit and AuditActive,
+so goi's table and its table check need a gate build: it rides train 2.
+=======
+## 2026-11-23: queue 536, Python eval's largest deferred classes (the VM; branch `536-py-deferred`)
+
+Brief: `.tmp/worktrees/q/tasks/536-py-deferred.md` (the deferred classes of test/python/divergences.edn, largest first; 537 the
+design ones, 535 D1-D6, the main host :c-accelerators, ctypes and the cap-crash modules). Base next fa635f636. The classes by rows
+(bin/pyi divergences --table on the base's record): capi-port 314 (pyctypes' natives: the main host's), goi-liveness-fallthrough 255,
+multiprocessing 199 and multiprocessing-children 84 (535's), testcapi 97, runner-limits 77, host-memory 62, io-c-checks 48 (535's),
+remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild), dbm-sqlite3-locking 30, ... audit-hooks 23.
+
+- **goi-liveness-fallthrough (254 of its 255 rows): stale rows, re-recorded.** test_xml_etree's and test_xml_etree_c's 254 rows
+  were kept from the records night of 2026-11-19 when the re-record of 2026-11-22 (bbea63978) left both modules out (their
+  whole-module runs failed test_cyclic_gc on gc timing); goi's fix cfd69a6d2 was in that re-record's executable. Run on the VM at
+  this branch (bin/pyi check --only, goi interpreting py and expat): every one of the 254 passes. The record's two modules were
+  written again from that run (bin/pyi check --judge DIR --record over a copy holding the two modules alone), xml_etree_c's eight
+  IOTest and Iterparse rows from a second run of them alone (see Runs). Four rows fail on the VM in both runs and are recorded so
+  (see Records). The class keeps test_multiprocessing_spawn's test_rapid_restart (535's area).
+- **audit-hooks: PEP 578's hooks called** (go/arbace/py/audit.go: sys.addaudithook's list, PySys_Audit as `Audit`, sys.audit's
+  checks, addaudithook's own "sys.addaudithook" event and its refusal by an Exception) and the events audit-tests.py checks:
+  marshal.dumps/loads/load, object.__setattr__ (check_set_special_type_attr's __name__, __qualname__, __bases__, __module__, __doc__,
+  __type_params__; __class__'s assignment), mmap.__new__, _posixsubprocess.fork_exec, sys.excepthook (a hook's RuntimeError ends the
+  display), sys.unraisablehook (a user's hook), socket.gethostname/__new__/bind, gc.get_objects/get_referrers/get_referents,
+  sys._getframe, sys._getframemodulename, _thread.start_new_thread/start_joinable_thread, syslog.openlog/syslog/setlogmask/closelog
+  (the implicit openlog's own event, and its facility LOG_USER: 22-11's note), time.sleep, sys.monitoring.register_callback; pickle's
+  and sqlite3's are their modules' own sys.audit calls. Left in the class: test_cantrace (a hook's __cantrace__: pyi's tracer is not
+  suspended while a hook runs) and test_open (FileIO's "open": pyi's _io is _pyio, whose FileIO audits none; a wrapper of _pyio's
+  FileIO.__init__ was written and withdrawn, as 535 owns _io's work this round).
+- **os-and-files-misc: os.fspath of a str or bytes subclass's instance** returns it as it is (PyOS_FSPath's PyUnicode_Check):
+  test_pathlib's six test_str_subclass_common rows pass.
+- **dbm-sqlite3-locking: not closed; crt left as it was.** The main host's lead (crt's fcntl F_GETLK leaves l_type, so SQLite sees a
+  conflict) is right as far as it goes: with F_UNLCK answered (`bin/ci run` of a probe: F_WRLCK before, F_UNLCK after), SQLite's
+  WAL index proceeds to mmap its -shm file MAP_SHARED, which crt refuses (ENODEV), so the rows fail on "disk I/O error" and
+  test_dbm's test_clear, a pass, fails. With crt's mmap of a file added too (a copy, a shared writable one written back at munmap,
+  as emu's fileMap; `bin/ci run` probe against gcc's), WAL works (a probe's connect, journal_mode=wal, CREATE, REPLACE), but the
+  dbm rows still fail: dbm.sqlite3 leaves `PRAGMA journal_mode = wal`'s and `__setitem__`'s cursors unclosed, which CPython's
+  reference count resets at once and pyi's collector does not, so a statement stays active, the write is not committed when the
+  database is closed, and whichdb reads an empty file. Both crt changes were withdrawn (crt is the C crop's; no row gained, one
+  lost); the patch and the analysis are in the report's DECISION 536-1.
+- **Runs** (the VM, arm64, its load 20-38; stage 0 nx's, goi interpreting the checkout's py; the runner by python3,
+  PYI_RUNNER=python3, after a crt change had the compiled runner's AOT module and its C libraries rebuilt twice): `bin/pyi check
+  --only` of the five modules and pathlib's six rows (logs .tmp/q536/check1.log, judge1.log), of test_dbm and test_dbm_sqlite3 on
+  the crt patch (check-dbm.log: no row gained, test_uri_substitutions lost), then test_audit and test_pathlib whole with the xml
+  modules' timing rows and xml_etree_c's eight IOTest and Iterparse rows again (checkF.log; 85 min, test_audit 5,125 s alone); the
+  three negative controls failed as they must in every run. xml_etree_c's eight rows errored in the first run on "No such file or
+  directory: '@test_1036_tmpæ'": my second `--only` run in the same worktree shared and cleaned `.tmp/t6i` (and overwrote
+  `.tmp/repr-python/pyi/check-only.txt`, so the first run's judge was redone with its own list: `--judge`); they pass alone.
+- **Records**: `bin/pyi check --judge DIR --record` over two directories holding only the recorded modules (test_audit and
+  test_pathlib from the last run; the xml modules from the first, xml_etree_c's eight rows from the last). Not recorded: test_dbm
+  and test_dbm_sqlite3 (crt unchanged). Two VM-only rows each way: test_deeply_nested_deepcopy past 600 s with py interpreted
+  (classed :runner-limits and :slow-on-goi; the main host's compiled run passes it) and test_cyclic_gc (named in
+  :finalization-collect: the main host's whole-module runs failed it too). The record's writer put the four modules' rows in its
+  own order, hence a long diff of moved lines; the rows that changed are 291.
+- **Numbers**: Python eval 40,552 / 1,604 / 1,714 -> 40,827 / 1,610 / 1,437 (the six design rows: C14N subtests the xml modules
+  now reach, skipped by the test); goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18. Python's
+  completeness 0.9794 -> 0.9810. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict` and
+  `bin/records-check`: 0 problems.
+- Alternatives left: a wrapper raising FileIO's "open" (withdrawn: 535's _io), ssl's and readline's "open" events (written, withdrawn
+  with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
+  owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
+>>>>>>> mac/536-py-deferred

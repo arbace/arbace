@@ -10486,3 +10486,12 @@ C++ read 5,821 / 0 / 503 -> 5,834 / 0 / 490; the own record's passes +16; comple
 
 The read cell's 490 deferred rows by cause, and c++20/tzdb.cc (cpp-tzdb-1123): doc/JOURNAL.md's entry of the day names them;
 pretty1.C's :oracle-text row waits for a runtime-build at the tree's key (a later train).
+
+## As built: the user's n/a decisions of 2026-11-23 (na-apply-1123)
+
+The read tail's proposal A-F taken (doc/JOURNAL.md, "Python and C++: the user's n/a decisions of 2026-11-23"), by file in
+`test/cpp/divergences-dg.edn`: four more -fopenmp files (A) and 18 runs of a later standard's feature by a GCC flag below C++20
+(B: -fconcepts at C++17, -fcoroutines at C++14 and C++17) into `:gcc-dialect`; `:attribute-before-its-standard` (C, 4),
+`:ifndr-uninstantiated-template` (D, 15), `:ifndr-constexpr-never-constant` (E, 3), `:ifndr-specialization-after-use` (F, 2),
+each n/a citing the standard. The read cell: 5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). G1, G2 and H are build
+work (another stream).
