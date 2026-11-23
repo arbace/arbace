@@ -19029,3 +19029,27 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 544, the embedded oi: Lambda interpreted by OCaml's runtime itself (the toplevel's AOT, first steps; the VM)
+
+The user's decision (a) for the toplevel rows at the AOT level (caml-tex's ellipses and redirections, self-contained-toplevel): the toplevel
+compiled, oi embedded, each phrase's Lambda loaded as a plugin at run time. Branch `544-ocaml-aot-toplevel` from next fa635f636.
+- What "oi embedded" became: an interpreter of oi's Lambda forms in the runtime's own Java forms (`jdk/ocaml/ocaml/rt/Oi.ae` and six small
+  classes), over the runtime's values. Considered and not taken: embedding go/arbace/oi itself in the compiled program (as the C API's main
+  embeds it): its values are not the runtime's, so a phrase linked against the program's globals (Toploop's getvalue and setvalue, Foo,
+  the standard library) and printed by genprintval would cross a value bridge in both directions (copies, closure handles), with mutable
+  state and exception identity lost; the interpreter in the runtime shares the heap, so a phrase is a plugin as Dynlink's are. Modelled
+  on go/arbace/oi/compile.ae (frames of slots, closures copying their free variables) with o2j's prim-value as the table of primitives.
+- The compiled level: o2j's registry-methods give a text the registry lacks to `Oi/parse`, fall back to `Oi/global`, and carry the
+  externals' table (`extIndex`, `extCall`; no reflection there); the loader is set for a program one of whose units calls
+  `caml_oi_dynlink_parse`. The light level: `O2J_PLUGIN_INTERP=1` (test/ocaml/o2j/run.ae) interprets plugins, for the proofs; the checks
+  keep the translation. The runtime gains `caml_sys_modify_argv`.
+- Proofs (run): a plugin driver at the light level and at the compiled level (j2g 633 s, 5.4 GiB; Go build 587 s, 5.1 GiB); a coverage
+  unit printed as the host's OCaml 5.5 by both loaders; 41 basic/ and basic-more/ programs as plugins: 36 by their .reference, the other
+  five not the interpreter's (3 units the driver does not link, a flag, tailcalls' speed), the compiled outputs equal to the light ones.
+  The test script fails on the parent (no Oi) and passes here. Header readings of the plumbing patch: of 4,533 (levels 0 to 2) only the
+  three rows' at level 2 change.
+- The compiled toplevel did not build on the VM: the three rows' shard took j2g 4,548 s at 16.7 GB, and Go's compile of its one package
+  (259 MB of Go) passed 36 GB in 38 minutes and was stopped. bin/oi and header.awk are left unchanged (their patch is in the report:
+  editing bin/oi rebuilds the main host's library), the rows keep their class at both AOT levels, no record changes, and the cells are as
+  before (OCaml AOT 513 / 22 / 82). DECISION 544-1 (report 544) asks how the compiled toplevel is to be built.

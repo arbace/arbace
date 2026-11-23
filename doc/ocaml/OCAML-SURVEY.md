@@ -4801,3 +4801,48 @@ typed by Arbace's typer and run on oi; its rows are judged by their own .referen
   Consistbl's order and its required globals). `:compiler-output` and `:compiler-output-cmo` list no program at oi's level; the AOT
   levels keep both (528-8: the tools AOT-compiled, the main host's compiled level). Controls: dumpobj's run against the .cmo test's
   reference and the reverse must differ.
+
+## As built: queue 544 (2026-11-23, the VM): the embedded oi, Lambda interpreted by the runtime itself (the toplevel's AOT, first steps)
+
+The user's decision (a) of 2026-11-23: the toplevel at the AOT level is the toplevel compiled, oi embedded in it, each phrase's Lambda
+loaded as a plugin at run time. Built here: the embedded oi and its loading at both AOT levels. Not reached: the three toplevel rows at the
+compiled level, whose program does not build on the VM (below, DECISION 544-1).
+
+- **The embedded oi** (`jdk/ocaml/ocaml/rt/Oi.ae` with `OiSym`, `OiList`, `ONode`, `OiCtx`, `OiExit`, `OiTail`, `OiFn`): an interpreter
+  of oi's Lambda forms (the text `caml_oi_dynlink_parse` is given: tools/ocdump's Lambda, topeval.ml's printer) written in the runtime's
+  own Java forms, over the runtime's values, so that a phrase's functions are closures the translated code calls (`OiFn`, a `Closure`),
+  its globals the program's module blocks (`ExtCore/unitG`, the loader's "global") and its primitives and externals the runtime methods o2j
+  calls for the same names (o2j's prim-value read as ops). A reader (lists, vectors, maps, strings, keywords, integers), a compiler to nodes
+  (each variable a slot of its function's frame, a closure's free variables copied when it is made, a letrec's closures set after they are
+  made) and an evaluator: static exits as `OiExit`, trywith as o2j's (depth and backtrace stack restored), tail calls of interpreted
+  functions in constant stack (`OiTail`, Oi/call's loop). `Oi/parse` gives the loader's entry [NAME DEPS REFS INIT nil] (o2j's plugin-deps),
+  INIT a Runnable; setglobal stores the unit's block in `Oi/units` (`Oi/global`, which the loaders' "global" answers; `Main/reset` clears it).
+  Not interpreted: tupled functions (as o2j), the debugging events (dropped), o2j's static blocks (an immutable block of constants is made
+  at each evaluation, as ocamlc's code makes it). go/arbace/oi itself is not embedded: its values are not the runtime's, and a phrase links
+  against the program's globals.
+- **The externals.** The runtime has no reflection at the compiled level, so the program's main class carries the table
+  (`arbace.o2j/oi-ext-methods`: `extIndex`, a name's index and arity, `extCall`, the call by index, over the runtime's externals), reached by
+  the loader's verbs "ext-index" and "ext-call"; an external not there is the C API's (`CApi/call`), as in a translated unit.
+- **The compiled level** (`arbace.o2j`'s registry-methods): a plugin's text the registry lacks is `Oi/parse`'s (it was a Failure), "global"
+  falls back to `Oi/global`, and the loader is set for a program that links Dynlink or one of whose own units calls `caml_oi_dynlink_parse`
+  (`calls-oi-loader?`: topeval.ml, a driver of plugins).
+- **The light level** (`test/ocaml/o2j/run.ae`): `O2J_PLUGIN_INTERP=1` has the runner interpret plugins in place of translating them (the
+  externals' table `ocaml.u.OiExts`, `oi-ext-class`, defined at the first use); the checks keep the translation.
+- **The runtime**: `caml_sys_modify_argv` (ExtSys, oi's since queue 529; the executable's name kept), used by the toplevel's
+  override_sys_argv before a script.
+
+**Proofs (run, the VM, arm64).** A driver (`oiplug.ml`: each argument a Lambda unit's text, parsed, linked and initialised through the
+dynlink externals) at the light level loads a coverage unit (closures, letrec, exceptions, switches, string switches, loops, records,
+float arrays, boxed integers, lazy, polymorphic variants, or-patterns, functors, objects with inheritance, Hashtbl, labels, Format) by the
+embedded oi and by o2j's translation: both print what the host's OCaml 5.5 prints. 41 testsuite programs of basic/ and basic-more/ typed
+by the native typer and loaded as plugins by the embedded oi: 36 pass by their .reference; 3 name units the driver does not link (Link
+errors, the same by translation), safer_matching needs its -safer-matching flag (the same output by translation), tailcalls is correct and
+slow (its 10^7-step loops interpreted). The same driver built at the compiled level (o2j cprogs over clib, j2g 633 s and 5.4 GiB, Go's build
+587 s and 5.1 GiB; no class of the runtime refused): the coverage unit as the host's OCaml, the 41 programs as at the light level, each
+output equal to the light level's (tailcalls past 120 s).
+
+**The compiled toplevel (DECISION 544-1).** With header.awk's toplevel modes at aot=2 and bin/oi's compiled level taking a tool row's
+units (a patch kept out of the branch, so that bin/oi and its native_key stay as they are), the three rows' shard (each program the
+standard library, Unix, Str, compiler-libs' 131 units, the toplevel and ocamltex or main.ml: 68 MB of Java forms) translated by j2g in
+4,548 s at 16.7 GB; the Go package `arbace/lang` it makes (259 MB of Go, every class) took Go's compile past 36 GB in 38 minutes, still
+growing, and was stopped (the host's other jobs). The rows keep their class at both AOT levels.
