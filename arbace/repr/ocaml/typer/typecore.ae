@@ -142,6 +142,16 @@
         exact (filter (fn [c] (or (not closed) (= (count ids) (count (ty/label-all c))))) with-ids)]
     (cond (seq exact) exact (seq with-ids) with-ids :else cands)))
 
+(defn- record-first-lid
+  "The first label of a record expression or pattern as Typecore.type_label_a_list looks it up: qualified by find_record_qual's
+  module, the first qualified label's, when it is unqualified (`{e with a = x; M.b = y}`: a is M.a; queue 546, ppxlib's migrations)"
+  [fields]
+  (let [lid (:txt (first (first fields)))
+        q (first (for [[l _] fields :let [x (:txt l)] :when (= :Ldot (x 0))] (x 1)))]
+    (if (and q (= :Lident (lid 0)))
+      [:Ldot q {:txt (lid 1)}]
+      lid)))
+
 (defn lookup-label
   "A label by its name, the expected record type's first (an inline record's labels are only reached so); without an
   expected record type, the first label of a record expression or pattern chosen among the records that have all its
@@ -455,7 +465,7 @@
         (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
       :Ppat_record
       (let [fields (d 1)
-            l0 (lookup-label env (:txt (first (first fields))) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
+            l0 (lookup-label env (record-first-lid fields) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
                              (= :Closed (d 2)))
             [res _ args] (instance-label l0)
             _ (unify! res expected "pattern")
@@ -664,10 +674,10 @@
   [p t]
   (let [ok (atom false) eqs (atom [])]
     (binding [*equations* eqs]
-      (try
+      (ty/fresh-scope #(try
         (ty/try-unify (check-cex p t (fn [] (reset! ok true)))
                       (throw (ex-info "undo" {:unify :undo})))
-        (finally (undo-equations! @eqs))))
+        (finally (undo-equations! @eqs)))))
     @ok))
 
 (defn- gadt-rows? [rows]
@@ -1042,13 +1052,15 @@
                                      (ty/with-scope
                                        (let [eqs (atom [])
                                              [vbs env'] (binding [*let-equations* eqs *defer-unpack* true] (type-let env (d 1) (d 2)))
-                                             body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                                             body (try (let [k #(type-expect env' (d 3) expected)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                                                   (finally (undo-equations! @eqs)))]
                                          (unify! outer (:type body) "expression")
                                          [vbs body])))]
                     (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
                   (let [eqs (atom [])
                         [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
-                        body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                        body (try (let [k #(type-expect env' (d 3) expected)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                                                   (finally (undo-equations! @eqs)))]
                     (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
@@ -1120,7 +1132,7 @@
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
-            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected)
+            l0 (lookup-label env (record-first-lid fields) (or (and init (:type init)) expected)
                              (mapv (fn [[lid _]] (lid-name (:txt lid))) fields) (nil? init-s))
             [res _ args] (instance-label l0)
             _ (unify! res expected "expression")
@@ -1363,7 +1375,7 @@
   ([env targ tres scases computation] (type-cases env targ tres scases computation nil))
   ([env targ tres scases computation conts]
   (let [typed (mapv (fn [c] (let [vars (atom []) eqs (atom [])
-                                  p (binding [*equations* eqs] (type-pat-generalized env (:pc_lhs c) targ vars))
+                                  p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env (:pc_lhs c) targ vars)))
                                   done @eqs
                                   ;; the equations' types, kept for the case's body, then taken back
                                   now (mapv (fn [[path _]] [path (env/find-decl path)]) done)]
@@ -1376,10 +1388,12 @@
                   ext-env (if cont (add-pattern-vars env' [cont]) env')]
               (doseq [[path decl] now] (env/add-decl! path decl))
               (try
-                (cond-> {:lhs p
-                         :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
-                         :rhs (type-expect ext-env (:pc_rhs c) tres)}
-                  cont (assoc :cont (cont 1)))
+                (let [body #(cond-> {:lhs p
+                                     :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
+                                     :rhs (type-expect ext-env (:pc_rhs c) tres)}
+                              cont (assoc :cont (cont 1)))]
+                  ;; (queue 546) under the pattern's equations, abbreviations expand afresh (ty/fresh-depth)
+                  (if (seq now) (ty/fresh-scope body) (body)))
                 (finally (undo-equations! before)))))
           typed (or conts (repeat nil))))))
 
@@ -1425,11 +1439,12 @@
                           (do (when (ty/is-optional l) (unify! (ty/type-option (ty/newvar)) targ "parameter"))
                               [targ nil]))
             vars (atom []) eqs (atom [])
-            p (binding [*equations* eqs] (type-pat-generalized env spat tint vars))
+            p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env spat tint vars)))
             _ (pressure-variants! [p])
             env' (add-pattern-vars env @vars)
             ;; a GADT parameter's equations hold over the rest of the function
-            [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
+            [params body _] (try (let [k #(type-function env' (rest sparams) sbody tret)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                 (finally (undo-equations! @eqs)))
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l :loc (:pparam_loc sp)
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}] (:type p))}]
@@ -1652,7 +1667,7 @@
       (let [vb (first svbs)
             e (type-exp env (:pvb_expr vb))
             vars (atom [])
-            p (binding [*equations* *let-equations*] (type-pat env (:pvb_pat vb) (:type e) vars))]
+            p (binding [*equations* *let-equations*] (ty/fresh-scope #(type-pat env (:pvb_pat vb) (:type e) vars)))]
         [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
     (type-let* env rec svbs))))
 
