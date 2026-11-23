@@ -8861,13 +8861,38 @@
     ;; a user-defined literal ([lex.ext]/3-8): the literal operator's call, operator""X(...) with the literal's value
     "UserDefinedLiteral"
     (if-let [u (:_udl n)]
-      (let [callee {:kind "DeclRefExpr" :referencedDecl {:name (str "operator\"\"" (:suffix u))} :range (:range n)}
+      (let [opname (str "operator\"\"" (:suffix u))
+            callee {:kind "DeclRefExpr" :referencedDecl {:name opname} :range (:range n)}
+            ;; (cpp-1123: [lex.ext]/3-4, a numeric literal's operator: one whose parameter is unsigned long long (an integer)
+            ;; or long double (a floating literal) called with the value; else the raw literal operator (const char*) with the
+            ;; spelling as a string; else the numeric literal operator template with the spelling's characters as its
+            ;; template arguments, operator""X<'c', ...>(): <chrono>'s `operator""min<'0'>()` for 0min, tzdb.cc)
+            numeric (when (#{:int :float} (:k u))
+                      (let [es (try (lookup (:scope ctx) opname) (catch arbace.lang.ExceptionInfo _ nil))
+                            one-param (fn [pred] (some #(when (= :fn (:e %))
+                                                          (let [ps (:ps (:ty (fnd (:id %))))]
+                                                            (and (= 1 (count ps)) (pred (abi/unq (first ps))))))
+                                                       es))
+                            want (if (= :int (:k u)) :ullong :ldouble)]
+                        (cond
+                          (one-param #(= want (abi/bn %))) nil
+                          (and (:text u) (one-param #(and (abi/ptr? %) (= :char (abi/bn (abi/unq (:to %)))))))
+                          {:raw true}
+                          (and (:text u) (some #(= :tmpl (:e %)) es))
+                          {:tmpl (mapv #(if (= \' %) "'\\''" (str "'" % "'")) (:text u))})))
             args (case (:k u)
                    :str [{:kind "StringLiteral" :value (:value u) :type {:qualType (str "const " (:ty u) "[" (:n u) "]")} :valueCategory "lvalue" :range (:range n)}
                          {:kind "IntegerLiteral" :value (str (dec (long (:n u)))) :type {:qualType "unsigned long"} :valueCategory "prvalue"}]
                    :chr [{:kind "CharacterLiteral" :value (:value u) :type {:qualType (:ty u)} :valueCategory "prvalue"}]
                    :int [{:kind "IntegerLiteral" :value (str (:value u)) :type {:qualType "unsigned long long"} :valueCategory "prvalue"}]
-                   :float [{:kind "FloatingLiteral" :value (str (:value u)) :type {:qualType "long double"} :valueCategory "prvalue"}])]
+                   :float [{:kind "FloatingLiteral" :value (str (:value u)) :type {:qualType "long double"} :valueCategory "prvalue"}])
+            [callee args] (cond
+                            (:raw numeric)
+                            [callee [{:kind "StringLiteral" :value (pr-str (:text u)) :type {:qualType (str "const char[" (inc (count (:text u))) "]")}
+                                      :valueCategory "lvalue" :range (:range n)}]]
+                            (:tmpl numeric)
+                            [(assoc callee :_wn true :explicitTemplateArgs (:tmpl numeric)) []]
+                            :else [callee args])]
         (analyze ctx {:kind "CallExpr" :inner (vec (cons callee args)) :range (:range n)}))
       (fail :expr "a user-defined literal"))
     "AtomicExpr" (if (:_atomic n) (atomic-expr ctx (:_atomic n) (:_args n)) (fail :expr "AtomicExpr"))
