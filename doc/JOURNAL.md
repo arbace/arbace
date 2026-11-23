@@ -19529,3 +19529,61 @@ Cells (bin/reap --record): Python eval 40,552 / 1,604 / 1,714 (4,454 n/a) -> 40,
 5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). Alternatives not taken: a hand list for B (the user asked for the
 tool's); a separate `:not-a-case` class gathering I's three (kept apart: their reasons differ, each now n/a); a class of its own
 for J2 (the same rule as `:skipped-by-both`, CPython skipping there too).
+
+## 2026-11-23: cpp-ce2, the checker's constant evaluator (branch `cpp-ce2-1123` from mac/next `69bb781b5`)
+
+The burst's C++ read stream "cpp-ce2" (the coordinator's brief: the constant evaluator's gaps, the largest cause group of the read
+cell's deferred rows; cpp-rt owns c++20/tzdb.cc and the runtime build). All in arbace/cpp/sema.ae's checker mode (`checking?`), with
+two parser and two diag additions; the code generator's folds unchanged but for one lookup. The rules from the standard's text
+([expr.const], [basic.life], [bit.cast], [expr.dynamic.cast], [expr.new], [expr.delete], [class.dtor], [class.temporary],
+[class.union.general], [dcl.init.aggr], [temp.point]) and GCC 15.2's behaviour as the tests record it; no GCC or clang code read.
+
+- Unions: arbace/repr/cpp/parse.ae `designate` keeps a union's one designated element's member as the InitListExpr's `field`
+  (clang's semantic form); Sema's "InitListExpr" carries it as :field and the aggregate branch initializes that member; an empty
+  list takes a default member initializer's member ([dcl.init.aggr]/5). cpp2a/constexpr-union7.C's `g({.f = 3.14})` now reaches C++17's
+  "change of the active member".
+- Pointers to data members evaluated ({::mdata [class path]}, `.*`/`->*`'s :mfield): cpp2a/constexpr-98122.C.
+- __builtin_bit_cast: the native parser's BuiltinExpr keeps the type-id and operand (:_bitcast, :_bctype; the converter writes its text
+  as before); Sema's `bit-cast-expr` (GCC's static errors: incomplete types, a variable's at its declaration, not trivially copyable,
+  array destination, sizes) and the evaluator's `ce-bit-cast` (the type rules of [bit.cast]/3; the object representation as bits,
+  padding, unnamed bit-fields and uninitialized members indeterminate; [bit.cast]/2's indeterminate result for unsigned char and
+  std::byte, else GCC's "accessing uninitialized byte at offset N"). The code generator's mode refuses it as before.
+- Lifetimes and destructors: explicit destructor and pseudo-destructor calls end lifetimes; reads, writes and destruction of an ended
+  object are GCC's "outside its lifetime"; from C++20 a block's, a full-expression's temporaries' and a call's by-value parameters'
+  class objects are destroyed by their constexpr destructors; a return statement's temporary dies at its end, a reference variable's
+  lives with its block; an implicit or first-declaration-defaulted constructor is constexpr from C++20 (no virtual bases).
+- Objects made in place: a constructor's or a `this`-taking aggregate's cell aliases the place its value is first put in (`ce-made`,
+  `ce-adopt!`, `ce-res`), so a pointer the construction kept locates the object (cpp1y/constexpr-tracking-const11.C); a constexpr
+  namespace-scope or static local class variable is one cell per evaluation (`&g == &g`).
+- dynamic_cast (P1327R1, `ce-dyncast`) and pointer conversions to a base and down to a derived class.
+- Allocation (P0784R7): `ce-new`, `ce-delete`, `ce-heap-end!` (GCC's deallocation errors, "refers to a result of 'operator new'",
+  "allocated storage has not been deallocated" at the new-expression); std::construct_at's placement new; a namespace-scope variable's
+  address an unknown object's. In a function template's specialization the global operator new is looked up at the point of
+  instantiation (construct_at.h declares its placement form after std::construct_at): a false "no matching operator new" gone.
+- diag: a constant evaluation's error in a header of the test's own directory counted outside the main file (line 0), as GCC reports
+  it there (cpp2a/constexpr-union6.C); :bit-cast and "'v' has incomplete type" rules.
+
+Checked: each rule on its files and reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over the file's dg.edn entry);
+regressions over the record's own passes (187 files twice, then all 2,227 at `002f57e1c`: no own pass lost but
+cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s under load, as cpp-1123 found); the control pair failing
+as it must; mac/next merged (`320e74469`, the user's n/a decisions: C++ read 5,834 / 0 / 444, 253 n/a).
+
+The record run (13:59-16:00 UTC, `bin/repr-cpp dg --corpus dg-error --front native --only` 2,920 files `--record`: the own passes,
+the read cell's both-fail rows, the targets and the control pair; stage 0, GOMEMLIMIT=3000MiB): 37 rows to own pass (the targets of
+the unions, bit_cast, lifetime, dynamic_cast and allocation groups, and incidentally cpp1y/constexpr-nsdmi7a.C, pr94066.C, pr94066-3.C,
+cpp2a/constexpr-new13.C, gomp/pr34964.C), none lost; cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s
+again under the host's load (a rerun with REPR_CPP_DG_TIMEOUT=900 ran past 30 minutes and was stopped; the base tree `69bb781b5` reads
+the first past 240 s by hand too): their recorded rows kept, as cpp-1123 did. Cells: C++ read 5,834 / 0 / 444 (253 n/a) -> 5,860 / 0 /
+419 (252 n/a); completeness 0.9756 -> 0.9766 (floored 97), independence 0.9658 -> 0.9664 (floored 96; the read stage 0.831 -> 0.834);
+eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Left in the scope: constexpr-dynamic11.C, -dynamic17.C (an object under construction's dynamic type: a base is built in a cell of its
+own), bit-cast2.C (a never-instantiated template's non-dependent checks), cpp1y/constexpr-union3.C, -union4.C (a default member
+initializer's error at the variable), cpp0x/union1.C, lambda/lambda-anon1.C (declaration rules).
+
+Alternatives weighed: in-place construction by passing the destination location into ce-construct (rejected for now: every caller of
+ce-init would change; the alias on first placement gives the same locations for the cases the tests make); counting every Sema error in
+a non-main file as GCC's (rejected: a wrong evaluation in a system header would fail passing tests; the test's own headers only); the
+bit_cast's bytes as whole bytes (rejected: bit-fields and unnamed bit-fields need bits, bit-cast5.C, bit-cast13.C); placement new only
+inside std::construct_at (taken for every placement new of the reserved form from C++20: no false error, at most an acceptance GCC
+refuses outside construct_at before C++26).

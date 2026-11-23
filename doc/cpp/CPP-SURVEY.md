@@ -10495,3 +10495,82 @@ The read tail's proposal A-F taken (doc/JOURNAL.md, "Python and C++: the user's 
 `:ifndr-uninstantiated-template` (D, 15), `:ifndr-constexpr-never-constant` (E, 3), `:ifndr-specialization-after-use` (F, 2),
 each n/a citing the standard. The read cell: 5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). G1, G2 and H are build
 work (another stream).
+
+## As built: cpp-ce2, the checker's constant evaluator: unions, __builtin_bit_cast, lifetimes, dynamic_cast, allocation (2026-11-23; branch `cpp-ce2-1123` from mac/next `69bb781b5`)
+
+The burst's C++ read stream on the constant evaluator's gaps, the largest cause group of the read cell's 490 deferred rows (gxx-dg's
+dg-error rows judged by the own front end's diagnostics). Each rule from the standard's text ([expr.const], [basic.life], [bit.cast],
+[expr.dynamic.cast], [expr.new], [expr.delete], [class.dtor], [class.union.general], [dcl.init.aggr]) and GCC's behaviour as the tests
+record it; no GCC or clang code. All of it is the checker's (arbace.cpp.sema with *on-refusal* bound, `checking?`): the code generator's
+folds are as before (cpp-rt owns them), but for the global allocation lookup in a template's specialization below.
+
+### The rules
+
+- Unions: a union's designated element, `{.f = 3.14}`, initializes the member it names (arbace/repr/cpp/parse.ae `designate`'s `un`:
+  clang's semantic InitListExpr `field`, which Sema's "InitListExpr" reads as the list's :field, the aggregate branch's union member);
+  an empty list for a union with a default member initializer takes that member ([dcl.init.aggr]/5). So C++17's "change of the active
+  member" and C++20's "accessing ... member instead of initialized ..." are reached through designators.
+- Pointers to data members: `&C::m` evaluates to {::mdata [class path]} (the :mptr-data node keeps :cx-cls :cx-i), `o.*m`'s :mfield
+  appends the path (ce-lv), a null one GCC's null dereference.
+- __builtin_bit_cast (std::bit_cast): the native parser keeps its type-id and operand (BuiltinExpr :_bitcast :_bctype, the converter's
+  text as before); Sema's `bit-cast-expr` gives GCC's static errors (incomplete type, a variable's at its declaration "'v' has incomplete
+  type", not trivially copyable, an array destination, unequal sizes; diag's :bit-cast rule); the evaluator's `ce-bit-cast` checks the
+  types ([bit.cast]/3: a union, a pointer, a pointer to member, a reference member, volatile: "is not a constant expression because 'T'
+  is/contains ..."), writes the operand's object representation as bits (`bc-ser!`: the class layout's field and base offsets,
+  bit-fields at their bit offsets, padding and unnamed bit-fields and members never initialized indeterminate) and reads the
+  destination's value from them (`bc-de`): an indeterminate bit of a value is GCC's "accessing uninitialized byte at offset N" unless the
+  type is unsigned char or std::byte ([bit.cast]/2), whose value is then indeterminate (a member left out, an element nil: their reads
+  "accessing uninitialized member/array element", the :load of an element of an array through a pointer now sure).
+- Lifetimes: an explicit destructor call (`ce-explicit-dtor!`) and a pseudo-destructor call of a scalar (the void cast :cx-pseudo-dtor)
+  end the object's lifetime; a later read, write or destruction of it is GCC's "outside its lifetime" (the local's read, ce-check-const!,
+  `ce-end-lives!` at a block's end, a full-expression's end for temporaries, a call's end for parameters); a void cast evaluates its
+  operand (a glvalue's object not read). A temporary bound by a return statement dies at its end, a reference variable's lives with the
+  block ([class.temporary]/6).
+- Destructors (C++20, [dcl.constexpr]/3): a block's class objects with a constexpr destructor are destroyed in reverse order at its end
+  (`ce-destroy!`: the body, then members and bases), as are arrays' elements, temporaries at their full-expression's end and by-value
+  parameters at the call's end (`ce-destroy-cells!`); an implicit or first-declaration-defaulted constructor is constexpr in C++20
+  unless the class has virtual bases (P1331R2).
+- Objects made in place: a constructor's or a `this`-taking aggregate's object made in a cell of its own is the object of the place its
+  value is first put in ([class.temporary]/2's prvalue materialization): `ce-made` tags the value with its cell, `ce-adopt!` aliases the
+  cell to the place, `ce-res` follows the alias, so `this` stored in a member (`int *ptr = &a;`) locates the object where it lives
+  (GCC's "modifying a const object" through it). A constexpr namespace-scope or static local class variable is one cell an evaluation.
+- dynamic_cast (P1327R1, [expr.dynamic.cast]/7-9, `ce-dyncast`): the most derived object (the location's path less its trailing base
+  steps); to void*, it; a downcast to the C object the operand's is a public base subobject of; a crosscast to the unambiguous public base
+  of the most derived object; failing, a null pointer or GCC's "reference 'dynamic_cast' failed". Pointer conversions to a base and
+  static_cast down to a derived class move the location's path ([conv.ptr]/3, [expr.static.cast]/11).
+- Allocation (P0784R7, C++20): a new-expression of the global allocation function makes an object in a cell of its own (`ce-new`, a
+  scalar default-initialized indeterminate), delete destroys and frees it (`ce-delete`: GCC's "deallocation of storage that was not
+  previously allocated", "... already deallocated", "(non-)array deallocation of object allocated with (non-)array allocation"); the
+  outermost evaluation's end (`ce-heap-end!`) refuses a result that points to its allocations ("refers to a result of 'operator new'") and
+  storage not freed ("allocated storage has not been deallocated"), at the new-expression; std::construct_at's placement new begins the
+  object at its location (a union member there made active, [class.union.general]/6), a namespace-scope variable's address an unknown
+  object's (delete of it refused). In a function template's specialization the global operator new is looked up at the point of
+  instantiation ([temp.point]; construct_at.h declares its placement form after std::construct_at), which also lifts a false "no
+  matching operator new" from valid programs.
+- diag: a constant evaluation's error at an operation of a header the test includes from its own directory (a relative name) is GCC's
+  error there, counted outside the main file (line 0); a system header's stays out.
+
+### Checked
+
+Each rule on its files and on reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over each file's dg.edn entry); the
+regressions over the record's own passes (187 files twice, then all 2,227 with the targets at `002f57e1c`), no own pass lost but
+cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C, past 300 s under load before this stream too (the base tree's read
+of the first past 240 s by hand; their rows kept); the control pair DRs/dr2082.C, DRs/dr1423.C failing as it must. The record run at
+the head with mac/next merged (`320e74469`): the own passes, the read cell's both-fail rows and the targets, 2,920 files.
+
+### The cells
+
+The own record: 37 rows to own pass (cpp0x/constexpr-union8, cpp1y/constexpr-lifetime4, -lifetime6, -lifetime7, -nsdmi7a,
+-tracking-const11, -union5, pr94066, pr94066-3, cpp2a/bit-cast4, -5, -11, -12, -13, -14, -17, constexpr-98122, -dtor7, -dtor8,
+-dynamic4, -6, -7, -8, -9, -14, -18, -new3, -new13, -new15, -new26, -union3, -union6, -union7, gomp/pr34964), none lost. C++ read
+5,834 / 0 / 444 (253 n/a) -> 5,860 / 0 / 419 (252 n/a); completeness 0.9756 -> 0.9766, independence 0.9658 -> 0.9664 (the read stage
+0.831 -> 0.834); eval, AOT and print unchanged.
+
+### Left
+
+In the scope: cpp2a/constexpr-dynamic11.C and -dynamic17.C (the dynamic type of an object under construction, [class.cdtor]/6: the
+evaluator builds a base in a cell of its own, so a cast from inside its constructor sees the base alone), cpp2a/bit-cast2.C (the
+non-dependent checks of a template never instantiated, GCC's eager ones), cpp1y/constexpr-union3.C and -union4.C (an error in a default
+member initializer's evaluation put at its operation where GCC puts it at the variable), cpp0x/union1.C and lambda-anon1.C (declaration
+rules, not the evaluator's). Placement new is taken in every constant evaluation from C++20 (GCC refuses it outside std::construct_at
+before C++26: an acceptance, never a false error).
