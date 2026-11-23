@@ -8280,3 +8280,50 @@ What stays (queue 537's report, `.tmp/q537/537-py-design.md` on the VM, its DECI
 `sys.modules['warnings']` at each call, which BaseTest.setUp swaps; `_py_warnings`' `_wm` does not follow), `:ssl-go-tls` (19),
 `:child-is-pyi` (10), the `_pyio` classes (535's), `:skipped-by-test`'s 36 (among them `_elementtree` 19 and `_zoneinfo` 2:
 accelerators; `_testbuffer` 3; the UTF-8 mode 3; ctypes' complex and dllist 6, the main host's).
+
+## As built: 545, a native _io: CPython's Modules/_io ported to Go (2026-11-23, the Mac VM, queue 545; the user's 535-2 (a))
+
+pyi's `io` was `_pyio` (§6.6, PY6a): `_io` re-exported `_pyio`'s classes. Since 545 `_io` is CPython's C module ported to Go
+in go/arbace/py, and `_pyio` is the Python side only (test_io's Py* classes, as in CPython).
+- **The port.** CPython 3.14.10's `Modules/_io` (tag v3.14.10, the pinned tarball, SHA-256 de414a57...b72032), with 3.15.2's
+  differences under `py315()` (fileio's `truncate` mode string and readall's readable check, StringIO.truncate's `pos`,
+  CHECK_CLOSED raising IS_CLOSED's error and close by IS_CLOSED, textio's write): `builtins_io.ae` (_iomodule.c: open, open_code,
+  text_encoding, DEFAULT_BUFFER_SIZE 128 KiB, UnsupportedOperation a class of (OSError, ValueError) named `io`'s, the shared
+  converters: clinic's Py_ssize_t, int, str, the r/w buffers, PyNumber_AsOff_t), `builtins_io_iobase.ae` (iobase.c's _IOBase and
+  _RawIOBase, _BufferedIOBase, _TextIOBase), `builtins_io_bytesio.ae`, `builtins_io_stringio.ae` (with textio.c's
+  IncrementalNewlineDecoder and `_PyIO_find_line_ending`), `builtins_io_fileio.ae`, `builtins_io_buffered.ae` (BufferedReader,
+  Writer, Random, RWPair), `builtins_io_textio.ae`, `builtins_io_zguard.ae` (the getsets' type check, the types that inherit
+  object's tp_new). Error messages, the C-only checks (uninitialized objects, detached buffers, gh-143008/142594's buffer
+  checks, readinto's argument types, the misbehaving raw's OSError, reentrant calls), `_finalizing`, the pickling refusals
+  and the 3.14 clinic messages are C's.
+- **Objects.** The types are static (one set for every interpreter, where CPython's are each module's heap types; their
+  `__flags__` say HEAPTYPE as CPython's do, so copyreg's `_reduce_ex` walks past them). Every instance holds iobase's
+  `__dict__` (instanceDict, `ioDictOf`) and takes weak references. A subclass's instance keeps the Go value
+  (`Instance.value`); the _io methods are `objectDescr` (they get the instance itself) and a subclass's _io slots (repr,
+  iteration, `__init__`) keep the instance, so C's calls of `self`'s methods find a subclass's (class.go's fixupSlots).
+  BytesIO's buffer is a slice (no copy-on-write: only CPython-only tests see it); getbuffer's view is a memoryview of a
+  `_BytesIOBuffer` that counts its exports (buffer_export.go). StringIO's buffer is code points, accumulated as a string
+  while every write appends. The buffered lock is ENTER_BUFFERED's: a reentrant call from the same thread (a signal
+  handler's) is "reentrant call inside %R", another thread waits with the GIL released. FileIO's reads and writes are
+  `_Py_read`/`_Py_write` over os.read's and os.write's interruptible waits (readInterruptible, writeInterruptible); a write
+  to descriptor 1 or 2 flushes the runtime's buffered standard streams first, as os.write does.
+- **Finalization.** iobase_finalize is the Go finalizer (TrackFinalizer) of an exact FileIO, buffered object, TextIOWrapper
+  or base instance, and of every subclass's instance (wrapInstance), except a class with a Python `__del__` of its own
+  (slot_tp_finalize; `_IOBase.__del__` is the base's). The cycle collector walks the _io objects (finalize.go's cyIsNode and
+  cyTraverse), so `f.f = f` dies at `gc.collect()` with its ResourceWarning. The moment at the last reference stays Go's:
+  test_io's eight test_error_through_destructor (C and Py) move to `:finalization`.
+- **The standard streams** stay the runtime's own text streams (sys.go's textFile over the interpreter's bufio writers), now
+  instances of types deriving from the native TextIOWrapper, BufferedWriter and BufferedReader (create_stdio's types):
+  `isinstance(sys.stdout, io.TextIOWrapper)` holds without ABC registration; a native method or getset the stream does not
+  define is the descriptor's TypeError on it (`sys.stdout.detach()`, CPython's detaches).
+- **_pyio is no longer code that stands for C** (pylifecycle.go's cImplModules: `_py_warnings` alone), so its frames are traced
+  and profiled as Python's, as in CPython.
+- **The open audit event**: FileIO's `__init__` calls `sys.audit("open", name, mode, flags)` (PySys_Audit); queue 536's audit
+  hooks answer it once merged (test_audit's test_open row).
+- **Proved** on the VM (AOT, `bin/pyi check --aot --lib-test --fresh --only`): test_io 631 pass (590 in the record), test_fileio
+  97 (92), test_file_eintr 18 (12), test_fileinput 57 (56), test_memoryio 177 (166); 0 failing, no row the record passes
+  fails; the controls fail as they must (.tmp/q545/aot-final.log, from the committed forms after the merge with next). 64 rows of the record move to pass at the main host's re-record (`:io-c-checks` 38,
+  `:runner-limits` 7 (CSignalsTest's and PySignalsTest's writes: interruptible now), `:io-memory-c` 6, `:buffer-exports` 5,
+  `:data-model` 4, `:pyio` 4).
+- **Classes**: `:strace-leader` (n/a, 535-3 (a): test_fileio's two test_syscalls_read); `:io-c-checks`, `:io-memory-c`, `:pyio`,
+  `:pyio-size-type` and `:pyio-buffered` keep their rows until the re-record (their why says so).
