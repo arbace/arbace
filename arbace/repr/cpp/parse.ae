@@ -1480,7 +1480,17 @@
                                        (and fields (empty? (:bases-order ce)) (< i (count fields))) (get ftypes (fields i))
                                        :else nil))
           head-ok (fn [[k v]] (if arr (and (= k :i) v) (and (= k :f) (some #{v} fields))))
-          placeable (and ds (or arr (and ce (not (:union ce)) (empty? (:bases-order ce))))
+          ;; (cpp-ce2: a union's one designated element, `{.f = 3.14}`: the member it names is the one initialized,
+          ;; [dcl.init.aggr]/3.1 with [dcl.init.aggr]/5's union rule; clang's semantic InitListExpr's `field`, which Sema
+          ;; reads; a nested designator `.s.b = 1` the member's list without braces)
+          un (when (and ce (:union ce) (= 1 (count kids)) (= 1 (count ds)) (first ds) (head-ok (first (first ds))))
+               (let [d (first ds) v (second (first d)) st (get ftypes v) x1 (kids 0)
+                     x2 (if (> (count d) 1)
+                          {:kind "InitListExpr" :inner [x1] :_desigs [(vec (rest d))] :range (:range x1)}
+                          x1)
+                     x2 (if st (designate p st x2) (dissoc x2 :_desigs))]
+                 (assoc (dissoc x :_desigs) :inner [x2] :field {:name v})))
+          placeable (and (nil? un) ds (or arr (and ce (not (:union ce)) (empty? (:bases-order ce))))
                          (every? (fn [d] (or (nil? d) (head-ok (first d)))) ds)
                          (not (some (fn [[d e]] (and (> (count d) 1) (nil? e))) (partition 2 1 ds))))
           slots (when placeable
@@ -1526,7 +1536,7 @@
                                                 :else (dissoc k :_nested :_desigs))))
                           (range n)))
                   (vec (map-indexed (fn [j k] (if (and (nil? ds) (sub-type j)) (designate p (sub-type j) k) k)) kids)))]
-      (assoc (dissoc x :_desigs) :inner inner)))))
+      (or un (assoc (dissoc x :_desigs) :inner inner))))))
 
 (defn- paren-init
   "A direct-initialization's single parenthesized argument `x` for an object of type `t`: a braced list for a class is
@@ -2002,6 +2012,17 @@
                                  (when (and cs (is? p ")")) {:type (qt ty) :path cs}))))]
         (adv! p) (skip-balanced! p)
         (cond-> (text-node p "BuiltinExpr" b) (map? r) (assoc :_offsetof r)))
+      ;; (cpp-ce2: __builtin_bit_cast(T, e) for Sema, clang's BuiltinBitCastExpr, Parser::ParseBuiltinBitCast: a type-id, then an
+      ;; assignment-expression; the node the converter's text all the same, as __builtin_va_arg's)
+      (and (= s "__builtin_bit_cast") *full-headers* (not (skim? p)) (is-at? p 1 "("))
+      (or (try (adv! p) (adv! p)
+               (let [ty (parse-type-id p :paren)]
+                 (when (accept! p ",")
+                   (let [x (with-gt p true (parse-assign-expr p))]
+                     (when (is? p ")") (adv! p)
+                       (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_bitcast x :_bctype (qt ty))))))
+               (catch arbace.lang.ExceptionInfo _ nil))
+          (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
       ;; (cpp-gnu, 2026-11-22: a type trait's operands are type-ids, the GCC 15.2 manual's "Type Traits": a ( after the trait's own
