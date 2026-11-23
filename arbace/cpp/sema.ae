@@ -3479,6 +3479,22 @@
 ;; a prvalue initializes its result object, no copy): that cell aliases the place, {cell [cell2 path]} (ce-adopt!), so a pointer the
 ;; construction kept, `this` stored in a member, locates the object where it lives (ce-res)
 (def ^:dynamic *ce-moved* nil)
+;; cpp-ce3 (the checker): the cells of the objects whose constructors are initializing their base classes ([class.base.init]/13.2),
+;; whose dynamic type is not their own class yet ([class.cdtor]/5-6: during a base's construction a virtual call or a dynamic_cast
+;; sees the subobject's own class, the most derived object's not begun): a constructed base subobject's dynamic type its own,
+;; one not constructed yet no object (GCC's vtable pointer read, "accessing uninitialized member")
+(def ^:dynamic *ce-bases* #{})
+(def ^:dynamic *ce-mi-at*
+  "cpp-ce3 (the checker): the range of the mem-initializer whose initialization is under way (its constructor call's place)."
+  nil)
+
+(def ^:dynamic *ce-analyzing-imm* false) ; cpp-ce3: true while an immediate invocation is evaluated (cx-immediate-eval!: none nested)
+
+(def ^:dynamic *ce-point*
+  "cpp-ce3 (the checker): the range of the declaration whose initializer or condition the evaluation is of (a constexpr or
+  constinit variable's, a static_assert's): where the evaluation is, [expr.const]/5.3's \"before its definition\"."
+  nil)
+
 (def ^:private ce-from ::from)
 (defn- ce-made [v cell] (if (and (map? v) (checking?)) (vary-meta v assoc ::from cell) v))
 (defn- ce-adopt!
@@ -3841,7 +3857,7 @@
   (when (and (checking?) (not *ce-in-call*) (not *ce-fold*))
     (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true :cx/sure true :cx/top (some-> *ce-pos* deref)}))))
 
-(declare ce-lv ce-init ce-glvalue ce-store ce-construct ce-args-env ce-not-constexpr? cx-pce-bad? ce-has-label? ce-bit-cast gcc-type-str ce-base-path ce-destroy! ce-explicit-dtor! ce-dyncast ce-new ce-delete ce-heap-end!)
+(declare ce-loop-limit! ce-undefined? ce-lv ce-init ce-glvalue ce-store ce-construct ce-args-env ce-not-constexpr? cx-pce-bad? ce-has-label? ce-bit-cast gcc-type-str ce-base-path ce-destroy! ce-explicit-dtor! ce-dyncast ce-new ce-delete ce-heap-end!)
 
 (def ^:dynamic *ce-analyzing*
   "h-cpp-read: the functions whose bodies a constant evaluation is analyzing (their ids), so that a call of one from within
@@ -3861,7 +3877,8 @@
           (when top (ce-heap-end! v))
           (if (or (ce-ptr? v) (map? v)) (not-constant (if (ce-ptr? v) "a pointer's value" "an object's value")) (if w v (narrow-out v))))))
   ([e env]
-   (when (> (long (swap! *ce-steps* inc)) 1000000) (not-constant "too many steps"))
+   ;; (cpp-ce3: the checker's budget above -fconstexpr-loop-limit's iterations of a loop of a few steps, so that its error comes first)
+   (when (> (long (swap! *ce-steps* inc)) (if (checking?) 3000000 1000000)) (not-constant "too many steps"))
    (when-let [p (or (:cx-at e) (when (= :load (:op e)) (:cx-at (:e e))))] (when *ce-pos* (reset! *ce-pos* p)))
    (when (zero? (rem (long @*ce-steps*) 4096)) (tick!))
    (let [ev #(ce-eval % env)
@@ -3932,7 +3949,16 @@
                  ;; ([expr.const]/5.15: a reinterpret_cast, as a conversion between a pointer and an integer is)
                  (not-constant "cast " (:ck e)))))
        :unop (let [v (ev (:e e))]
-               (ce-wrap t (case (:o e) "-" (if (float? v) (- (double v)) (if (wide? t) (- (bigint v)) (- (long v)))) "+" v "~" (if (wide? t) (- -1 (bigint v)) (bit-not (long v))))))
+               ;; (cpp-ce3: a 64-bit negation exact, never Java's ArithmeticException: an unsigned one modulo 2^64, [basic.fundamental]/2,
+               ;; a signed one's -LLONG_MIN outside the range, [expr.pre]/4, the checker's sure error)
+               (ce-wrap t (case (:o e)
+                            "-" (cond (float? v) (- (double v))
+                                      (wide? t) (- (bigint v))
+                                      (and (= Long/MIN_VALUE (long v)) (abi/integral? t) (abi/signed? t))
+                                      (if (checking?) (ub! e "value 9223372036854775808 is outside the range of representable values")
+                                          (not-constant "a signed overflow"))
+                                      :else (unchecked-negate (long v)))
+                            "+" v "~" (if (wide? t) (- -1 (bigint v)) (bit-not (long v))))))
        :not (if (zero? (ce-num (ev (:e e)))) 1 0)
        :binop (let [a (ev (:l e)) b (ev (:r e))]
                 (if (abi/floating? t)
@@ -3942,8 +3968,11 @@
                     ;; (CX12, the checker: the operations whose result is undefined, ExprConstant's diagnostics)
                     (when (and (checking?) (abi/integral? t) (#{"+" "-" "*" "/" "%" "<<" ">>"} (:o e)))
                       (let [bits (* 8 (long (abi/size-of (abi/underlying (abi/unq t)))))
-                            lo (if u 0 (- (bigint (bit-shift-left 1 (dec bits)))))
-                            hi (if u nil (dec (bigint (bit-shift-left 1 (dec bits)))))
+                            ;; (cpp-ce3: 2^(bits-1) exact, a BigInt: a long's (bit-shift-left 1 63) is Long/MIN_VALUE, which had made
+                            ;; every 64-bit signed sum, difference and product, 5LL + 3LL, "outside the range")
+                            half (bigint (.shiftLeft java.math.BigInteger/ONE (int (dec bits))))
+                            lo (if u 0 (- half))
+                            hi (if u nil (dec half))
                             big (fn [x] (bigint x))
                             out? (fn [r] (and hi (or (< r lo) (> r hi))))]
                         (case (:o e)
@@ -3959,8 +3988,17 @@
                                         (ub! e "signed left shift discards bits")
                                         :else nil)
                           nil)))
+                    ;; (cpp-ce3: 64-bit arithmetic exact, never Java's ArithmeticException: an unsigned type's modulo 2^64,
+                    ;; [basic.fundamental]/2, ce-wrap's; a signed one past its range the checker's error above, else no constant)
                     (ce-wrap t (if-some [w (when (wide? t) (wide-binop (:o e) a b))] w (case (:o e)
-                                 "+" (+ a b) "-" (- a b) "*" (* a b)
+                                 ("+" "-" "*") (if (and (abi/integral? t) (or (wide-value? a) (wide-value? b)))
+                                                 (not-constant "a value outside 64 bits")
+                                                 (let [a (long a) b (long b)
+                                                       r (case (:o e) "+" (unchecked-add a b) "-" (unchecked-subtract a b) (unchecked-multiply a b))]
+                                                   (when (and (abi/integral? t) (not u)
+                                                              (not= (bigint r) (case (:o e) "+" (+ (bigint a) (bigint b)) "-" (- (bigint a) (bigint b)) (* (bigint a) (bigint b)))))
+                                                     (not-constant "a signed overflow"))
+                                                   r))
                                  "/" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/divideUnsigned a b) (quot a b)))
                                  "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
@@ -3988,6 +4026,15 @@
        :lor (if (or (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
        :cond (if (zero? (ce-num (ev (:c e)))) (ev (:else e)) (ev (:then e)))
        :comma (do (ev (:l e)) (ev (:r e)))
+       ;; (cpp-ce3, the checker: GNU's statement expression, its statements a block of their own and its last expression's value the
+       ;; value; a jump out of it no constant)
+       :stmt-expr (if-not (checking?)
+                    (not-constant "a statement expression")
+                    (let [r (ce-exec {:s :block :items (cond-> (vec (:items e)) (:e e) (conj {:s :se-value :e (:e e)}))} env)]
+                      (case (first r)
+                        :se-value (second r)
+                        :normal 0
+                        (not-constant "a jump out of a statement expression"))))
        :load (let [x (:e e)
                    ;; (cpp-s4: an element of a local constant array, `__found[__i]` of libstdc++'s __find_uniq_type_in_pack,
                    ;; the array a vector of its elements' values in `env`)
@@ -4072,7 +4119,24 @@
        :incdec (let [x (:e e) l (ce-lv x env)
                      _ (ce-check-const! e l)
                      old (ce-get l)
-                     nv (if (ce-ptr? old) (ce-ptr-add old (if (= "++" (:o e)) 1 -1)) (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) old 1)))]
+                     ;; (cpp-ce3: exact, an unsigned 64-bit one modulo 2^64; a signed one's past its range, [expr.pre]/4, the
+                     ;; checker's sure error, else no constant)
+                     nv (cond (ce-ptr? old) (ce-ptr-add old (if (= "++" (:o e)) 1 -1))
+                              (float? old) (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) old 1))
+                              (or (wide? (:ty x)) (wide-value? old)) (ce-wrap (:ty x) ((if (= "++" (:o e)) + -) (bigint old) 1))
+                              :else (let [o (long old) r (if (= "++" (:o e)) (unchecked-inc o) (unchecked-dec o))
+                                          ux (abi/underlying (abi/unq (:ty x)))]
+                                      ;; (an int's or wider's, the promoted type's own; a narrower one's is converted back, [conv.integral]/3)
+                                      (when (and (abi/integral? ux) (abi/signed? ux) (not= :bool (abi/bn ux)) (>= (long (abi/size-of ux)) 4))
+                                        (let [bits (* 8 (long (abi/size-of ux)))
+                                              lim (cond (= bits 64) (if (= "++" (:o e)) Long/MAX_VALUE Long/MIN_VALUE)
+                                                        (= "++" (:o e)) (dec (bit-shift-left 1 (dec bits)))
+                                                        :else (- (bit-shift-left 1 (dec bits))))]
+                                          (when (= o lim)
+                                            (if (checking?) (ub! e "value " (if (= "++" (:o e)) (inc (bigint o)) (dec (bigint o)))
+                                                                 " is outside the range of representable values")
+                                                (not-constant "a signed overflow")))))
+                                      (ce-wrap (:ty x) r)))]
                  (ce-put! l nv) (if (:post e) old nv))
        :call (if (and (checking?) (= :dtor (:kind (fnd (:fn e)))) (:obj e) (not (:virtual e)))
                (ce-explicit-dtor! e env)
@@ -4088,6 +4152,15 @@
                ;; (a constexpr member function of an empty class, its object nothing it can read: evaluated without it,
                ;; integral_constant's operator value_type() of `__is_invocable<...>{}`; CP332 (a))
                ;; (CP378 (a): another's on its object, `this` the object's location; a virtual call is not evaluated)
+               ;; (cpp-ce3, the checker: a member call on an object whose storage the evaluation freed, [basic.life]/7, GCC's "use of
+               ;; allocated storage after deallocation", before a virtual call's refusal)
+               (when (and (checking?) *ce-heap* (:obj e) (:cls f) (not (:static f))
+                          ;; (an object expression of no side effect, evaluated again below: a variable, a load, *, ., ->)
+                          ((fn pure? [x] (and (map? x) (case (:op x) (:var :this) true (:load :deref :field :base-lv :decay) (pure? (or (:e x) (:obj x))) false))) (:obj e)))
+                 (let [o (try (ce-lv (:obj e) env) (catch arbace.lang.ExceptionInfo _ nil))
+                       c (when (ce-loc? o) (::cell (ce-res o)))]
+                   (when (and c (get-in @*ce-heap* [c :freed]))
+                     (ub! e "use of allocated storage after deallocation in a constant expression"))))
                (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))))
                          (:virtual e))
                  (not-constant "a call of " (:name f)))
@@ -4097,6 +4170,12 @@
                (when (and (not (:tbody f)) (contains? *ce-analyzing* (:id f)))
                  (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))
                (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false *ce-analyzing* (conj *ce-analyzing* (:id f))] (analyze-fn! (:id f)))))
+               ;; (cpp-ce3, the checker: a constexpr function of the main file not defined yet where the evaluation is,
+               ;; [expr.const]/5.3, GCC's "used before its definition")
+               (when (ce-undefined? f)
+                 (if *ce-in-call*
+                   (ub! e "'" (:name f) "' used before its definition")
+                   (do (ce-top-sure! "'" (:name f) "' used before its definition") (not-constant "an undefined function"))))
                (let [f (fnd (:fn e))
                      member? (and (:cls f) (not (:static f)))
                      _ (when (and member? (abi/empty-class? (:cls f)) (= :deref (:op (:obj e))) (checking?))
@@ -4112,14 +4191,14 @@
                    (let [v (ce-init (first (:ps (:ty f))) (first (:args e)) env)]
                      (ce-put! this (if (ce-loc? v) (ce-get v) v))
                      this)
-                   (let [env2 (cond-> (assoc (ce-args-env f (:args e) env) ::ret rt) this (assoc ::this this))
+                   (let [env2 (cond-> (assoc (ce-args-env f (:args e) env) ::ret rt ::fn (:id f)) this (assoc ::this this))
                          p0 (some-> *ce-pos* deref)
                          pce-bad (and (checking?) (cx-pce-bad? (:id f)))
                          _ (when (>= (long *ce-depth*) (long *constexpr-depth*))
                              (if (checking?)
                                (ub! e "'constexpr' evaluation depth exceeds maximum of " *constexpr-depth*)
                                (not-constant "'constexpr' evaluation depth exceeds maximum of " *constexpr-depth*)))
-                         r (try (binding [*ce-in-call* true *ce-depth* (inc (long *ce-depth*))] (ce-exec (:tbody f) env2))
+                         r (try (binding [*ce-in-call* true *ce-mi-at* nil *ce-depth* (inc (long *ce-depth*))] (ce-exec (:tbody f) env2))
                                 (catch arbace.lang.ExceptionInfo x
                                   (if (and pce-bad (:cx/sure (ex-data x)) (not (:cx/pce (ex-data x))))
                                     (throw (ex-info (.getMessage x) (assoc (ex-data x) :cx/pce true)))
@@ -4296,17 +4375,20 @@
     :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-full-expr (ce-init (::ret env) (:init s) env))] :else [:ret 0])
     :expr (do (ce-full-expr (ce-eval (:e s) env)) [:normal])
     :if (if (zero? (ce-num (ce-eval (:cond s) env))) (if (:else s) (ce-exec (:else s) env) [:normal]) (ce-exec (:then s) env))
-    :while (loop [] (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal]
-                        (let [r (ce-exec (:body s) env)] (case (first r) :ret r :break [:normal] (recur)))))
-    :do (loop [] (let [r (ce-exec (:body s) env)]
-                   (case (first r) :ret r :break [:normal]
-                         (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal] (recur)))))
-    :for (loop [] (if (and (:cond s) (zero? (ce-num (ce-eval (:cond s) env)))) [:normal]
-                      (let [r (ce-exec (:body s) env)]
-                        (case (first r) :ret r :break [:normal]
-                              (do (when (:inc s) (ce-eval (:inc s) env)) (recur))))))
+    ;; (cpp-ce3, the checker: a loop's iterations bounded by GCC's -fconstexpr-loop-limit, [implimits]: past it GCC's error at the loop)
+    :while (loop [k 0] (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal]
+                           (let [_ (ce-loop-limit! s k) r (ce-exec (:body s) env)] (case (first r) :ret r :break [:normal] (recur (inc k))))))
+    :do (loop [k 0] (let [_ (ce-loop-limit! s k) r (ce-exec (:body s) env)]
+                      (case (first r) :ret r :break [:normal]
+                            (if (zero? (ce-num (ce-eval (:cond s) env))) [:normal] (recur (inc k))))))
+    :for (loop [k 0] (if (and (:cond s) (zero? (ce-num (ce-eval (:cond s) env)))) [:normal]
+                         (let [_ (ce-loop-limit! s k) r (ce-exec (:body s) env)]
+                           (case (first r) :ret r :break [:normal]
+                                 (do (when (:inc s) (ce-eval (:inc s) env)) (recur (inc k)))))))
     :break [:break]
     :continue [:continue]
+    ;; (cpp-ce3: a statement expression's value, ce-eval's :stmt-expr)
+    :se-value [:se-value (ce-eval (:e s) env)]
     ;; (h-cpp-consteval: a switch, [stmt.switch]: its body's statements from the label its condition's value selects, else
     ;; default's, labels passed through; a body declaring at its top not evaluated)
     (:case :default :label) (ce-exec (:body s) env)
@@ -4399,6 +4481,13 @@
             n0 (loop [k (count p)] (if (and (pos? k) (vector? (nth p (dec k)))) (recur (dec k)) k))
             p0 (subvec p 0 n0) tail (subvec p n0)
             v0 (let [v @(::cell l)] (if (seq p0) (get-in v p0) v))
+            ;; (cpp-ce3: an object whose constructor is building its bases, [class.cdtor]/6: the dynamic type the base subobject's
+            ;; own on the operand's path, constructed; one not constructed yet, its vtable pointer uninitialized)
+            [p0 tail v0] (if (and (empty? p0) (seq tail) (contains? *ce-bases* (::cell l)))
+                           (let [b (first tail) v1 (get v0 b)]
+                             (when-not (map? v1) (ub! e "accessing uninitialized member"))
+                             [[b] (subvec tail 1) v1])
+                           [p0 tail v0])
             d (when (map? v0) (::cls v0))
             _ (when-not d (not-constant "dynamic_cast of an object of no class"))
             _ (when (abi/has-vbases? d) (not-constant "dynamic_cast in a class with virtual bases"))
@@ -4427,9 +4516,26 @@
 (defn- ce-heap-cell
   "The cell of the allocation the pointer value `p` points to the start of (nil when it is none of the evaluation's)."
   [p]
-  (cond (ce-loc? p) (let [l (ce-res p)] (when (empty? (::path l)) (::cell l)))
+  ;; (cpp-ce3: or a base subobject of it, a delete through a pointer to a base, [expr.delete]/3: the most derived object's)
+  (cond (ce-loc? p) (let [l (ce-res p)] (when (every? vector? (::path l)) (::cell l)))
         (ce-ptr? p) (let [b (::base p)] (when (and (ce-loc? b) (zero? (long (::i p)))) (let [l (ce-res b)] (when (empty? (::path l)) (::cell l)))))
         :else nil))
+
+(def ^:dynamic *constexpr-loop-limit* 262144)
+
+(defn- ce-loop-limit!
+  "cpp-ce3 (the checker): the loop `s` entering its iteration `k` (from 0): past GCC's -fconstexpr-loop-limit (262144 by default)
+  its error at the loop, \"'constexpr' loop iteration count exceeds limit of N\"."
+  [s k]
+  (when (and (>= (long k) (long *constexpr-loop-limit*)) (checking?))
+    (ub! s "'constexpr' loop iteration count exceeds limit of " *constexpr-loop-limit* " (use '-fconstexpr-loop-limit=' to increase the limit)")))
+
+(defn- ce-std-construct-at?
+  "cpp-ce3: whether the function `fid` is std::construct_at (a specialization of it; in namespace std or one inline in it)."
+  [fid]
+  (let [f (when fid (fnd fid))]
+    (boolean (and f (not (:cls f)) (= "std" (some (fn [p] (when (= :ns (first p)) (second p))) (:path f)))
+                  (re-matches #"construct_at(<.*)?" (str (:name f)))))))
 
 (defn- ce-new
   "cpp-ce2 (the checker): a new-expression in a constant evaluation, [expr.new], [expr.const]/5.20 (P0784R7): the global
@@ -4442,7 +4548,15 @@
       ;; (the reserved placement form, std::construct_at's, [specialized.construct]/2, [expr.const]/5.20.1: an object of the type
       ;; begun at the location, its lifetime's start making a union's member there active, [class.union.general]/6; a location in
       ;; a member that is not active GCC's "accessing ... member instead of initialized ..." or "accessing uninitialized member")
-      (let [p (ce-eval (:placement e) env)
+      (let [;; (cpp-ce3, the user's decision of 2026-11-23: before C++26 the placement form is no constexpr function, so its call
+            ;; is no constant but in std::construct_at's own body, [expr.const]/5.20.1 of C++20 and C++23, GCC's
+            ;; is_std_construct_at of the evaluation's innermost call; from C++26 constexpr, P2747R2, [new.delete.placement])
+            _ (when (and (checking?) (< (long *cxx-year*) 26) (not (ce-std-construct-at? (::fn env))))
+                (if *ce-in-call*
+                  (ub! e "call to non-'constexpr' function 'void* operator new(std::size_t, void*)'")
+                  (do (ce-top-sure! "call to non-'constexpr' function 'void* operator new(std::size_t, void*)'")
+                      (not-constant "a placement new outside std::construct_at"))))
+            p (ce-eval (:placement e) env)
             l (cond (ce-loc? p) (ce-res p)
                     (and (ce-ptr? p) (ce-loc? (::base p))) (ce-res (update (::base p) ::path conj (::i p)))
                     :else (not-constant "a placement new at " (pr-str (type p))))
@@ -4797,6 +4911,21 @@
                 (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda)))
                 (:node f) (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))))
 
+(defn- ce-undefined?
+  "cpp-ce3 (the checker): whether the constexpr function `f` of the main file has no definition yet where the evaluation is
+  ([expr.const]/5.3): no body, or one after *ce-point* in the same file; not defaulted or implicit, no template's specialization,
+  no builtin."
+  [f]
+  (boolean (and (checking?) f (or (:constexpr f) (:consteval f))
+                (or (and (not (:body f)) (not (:tbody f)))
+                    (when-let [pt *ce-point*]
+                      (let [a (some-> (get-in (:node f) [:range :begin]) loc-of) b (some-> (:begin pt) loc-of)]
+                        (and (:body f) (:offset a) (:offset b) (= (:file a) (:file b)) (> (long (:offset a)) (long (:offset b)))))))
+                (not (:defaulted f)) (not (:implicit f))
+                (not (:out-of-line-default f)) (not (:ool-defaulted f)) (not (:deleted f)) (not (:tinst f))
+                (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda)))
+                (:node f) (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))))
+
 (defn- ce-construct
   "The value of an object of class `cid` its constexpr constructor `fid` makes from the initializers `args`: its
   mem-initializers (the bases', then the members', [class.base.init]/13), then its body with `this`; `start` the object
@@ -4814,6 +4943,8 @@
       (if (ce-not-constexpr? f)
         (ce-sure! "call to non-'constexpr' function '" (:name f) "'")
         (not-constant "a call of the constructor " (:name f))))
+    (when (ce-undefined? f)
+      (if-let [at *ce-mi-at*] (ub! {:cx-at at} "'" (:name f) "' used before its definition") (ce-sure! "'" (:name f) "' used before its definition")))
     (when (seq (abi/vbases-init cid)) (not-constant "a class with virtual bases"))
     (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false] (analyze-fn! fid))))
     (if (and (or (:defaulted f) (:implicit f)) (not (:body f)) (= 1 (count args))
@@ -4824,22 +4955,46 @@
     (let [f (fnd fid)
           c (abi/cls cid)
           cell (atom (or start {::cls cid}))
-          env2 (assoc (ce-args-env f args env) ::this {::cell cell ::path []} ::ret abi/void)
+          env2 (assoc (ce-args-env f args env) ::this {::cell cell ::path []} ::ret abi/void ::fn fid)
           ti (:tinits f)]
       ;; (h-cpp-consteval: a mem-initializer's errors at the constructor)
       (when-let [r (some-> (:node f) :range)] (when *ce-pos* (reset! *ce-pos* r)))
-      (binding [*ce-in-call* true]
+      (binding [*ce-in-call* true *ce-mi-at* nil]
         (if-let [d (:delegate ti)]
           (reset! cell (ce-adopt! cell [] (ce-init {:k :class :id cid} d env2)))
-          (do (doseq [b (:bases ti)]
-                (swap! cell assoc [:b (:base b)] (ce-adopt! cell [[:b (:base b)]] (ce-init {:k :class :id (:base b)} (:init b) env2))))
+          (do (binding [*ce-bases* (if (checking?) (conj *ce-bases* cell) *ce-bases*)]
+                (doseq [b (:bases ti)]
+                  (swap! cell assoc [:b (:base b)] (ce-adopt! cell [[:b (:base b)]] (binding [*ce-mi-at* (:at b)] (ce-init {:k :class :id (:base b)} (:init b) env2))))))
               (doseq [fl (:fields ti)]
                 (let [ft (:ty (nth (:fields c) (:field fl)))]
                   (when-not (and (= :none (:i (:init fl))) (not (abi/class? (abi/unq ft))))
-                    (swap! cell assoc (:field fl) (ce-adopt! cell [(:field fl)] (ce-store ft (ce-init ft (:init fl) env2)))))))))
+                    (swap! cell assoc (:field fl) (ce-adopt! cell [(:field fl)] (ce-store ft (binding [*ce-mi-at* (:at fl)] (ce-init ft (:init fl) env2))))))))))
         (ce-exec (:tbody f) env2))
       ;; (cpp-ce2, the checker: the value tagged with its cell, which its place aliases, ce-adopt!)
       (ce-made @cell cell)))))
+
+(defn- ce-range-in?
+  "cpp-ce3: whether the position range `at` begins within the range `r` (one file's offsets)."
+  [at r]
+  (let [a (some-> (:begin at) loc-of) b (some-> (:begin r) loc-of) e (some-> (:end r) loc-of)]
+    (boolean (and (:offset a) (:offset b) (:offset e) (= (:file a) (:file b))
+                  (<= (long (:offset b)) (long (:offset a)) (long (:offset e)))))))
+
+(defmacro ^:private ce-dmi-at
+  "cpp-ce3 (the checker): the aggregate item `it`'s initialization (`body`); when it is a default member initializer's
+  (:dmi-range), a sure error at an operation of that initializer's own text is the use's ([dcl.init.aggr]/5.1, [class.mem.general]:
+  the initializer taken where the aggregate is initialized; GCC's copy of it bears the use's location), at `use` (nil: the variable
+  the evaluation initializes, cx-sure-error!'s); one inside a function it calls stays there."
+  [it use body]
+  `(let [r# (:dmi-range ~it)]
+     (if-not r#
+       ~body
+       (try ~body
+            (catch arbace.lang.ExceptionInfo x#
+              (let [d# (ex-data x#)]
+                (if (and (:cx/sure d#) (:cx/at d#) (ce-range-in? (:cx/at d#) r#))
+                  (throw (ex-info (.getMessage x#) (assoc d# :cx/at ~use)))
+                  (throw x#))))))))
 
 (defn- ce-init
   "CP378 (a): the value an initializer (init-for's) gives an object, a reference or a parameter of type `t` (nil: the
@@ -4877,13 +5032,16 @@
                            ;; [dcl.init.aggr]/5: the aggregate in a cell of its own, `this` its location, each member's
                            ;; lifetime begun as its initialization starts -- a union's member then its active one)
                            (let [cell (atom {::cls cid})
-                                 env2 (assoc env ::this {::cell cell ::path []} ::agg-this true)]
+                                 env2 (assoc env ::this {::cell cell ::path []} ::agg-this true)
+                                 ;; (cpp-ce3: the use's position, ce-dmi-at's: within a call the operation that entered last, else
+                                 ;; none, the variable's own)
+                                 use (when *ce-in-call* (some-> *ce-pos* deref))]
                              (doseq [[b it] (map vector bs items)]
                                (swap! cell assoc [:b (:cls b)] (ce-adopt! cell [[:b (:cls b)]] (ce-init {:k :class :id (:cls b)} it env2))))
                              (doseq [[fi it] (map vector fu (drop nb items))]
                                (let [ft (:ty (nth (:fields c) fi))]
                                  (swap! cell assoc fi (ce-fresh-of ft))
-                                 (let [x (ce-store ft (ce-init ft it env2))] (swap! cell assoc fi (ce-adopt! cell [fi] x)))))
+                                 (let [x (ce-store ft (ce-dmi-at it use (ce-init ft it env2)))] (swap! cell assoc fi (ce-adopt! cell [fi] x)))))
                              ;; (cpp-ce2: tagged with its cell, which its place aliases, ce-adopt!)
                              (ce-made @cell cell))
                          (as-> {::cls cid} o
@@ -7094,7 +7252,9 @@
                                                 ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
                                                 ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
                                                 (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
-                                                        (assoc :agg-this true))
+                                                        (assoc :agg-this true)
+                                                        ;; (cpp-ce3: the initializer's own range, ce-dmi-at)
+                                                        (cond-> (and (checking?) (map? d) (:range d)) (assoc :dmi-range (:range d))))
                                                 (init-for (:ty s) {:op :init-list :items []} ctx :value))))
                                           subs)))
                  :fields-used (mapv (comp :i :field) (remove :base subs))})))
@@ -8093,11 +8253,14 @@
              (not (some-> (:fn-id ctx) fnd :consteval)))
     (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))
 
+(declare cx-immediate-eval!)
+
 (defn- fn-call [ctx fid args]
   (let [f (fnd (deduced! fid))
         _ (cx-immediate-call! ctx f)]
-    {:op :call :fn fid :args (call-args f args ctx)
-     :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
+    (cx-immediate-eval! ctx f
+      {:op :call :fn fid :args (call-args f args ctx)
+       :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))})))
 
 (defn adl-nss
   "CP338 (a): the namespace `ns` with, when it is an inline namespace, the namespaces enclosing it as far as the first that is
@@ -10841,6 +11004,8 @@
     (cond
       (not (and (checking?) (map? r) (:range n))) r
       (#{:asm :goto} (:s r)) (assoc r :cx-at (:range n))
+      ;; (cpp-ce3: a loop's, where its iteration count's limit is reported)
+      (#{:while :do :for} (:s r)) (assoc r :cx-at (:range n))
       ;; (cpp-ce2: a compound statement's closing brace, where its objects are destroyed)
       (and (= "CompoundStmt" (:kind n)) (= :block (:s r)) (get-in n [:range :end]))
       (assoc r :cx-end {:begin (get-in n [:range :end]) :end (get-in n [:range :end])})
@@ -11141,6 +11306,13 @@
                                    [:field (get-in i [:anyInit :name])])
                                [x] (kids i)]
                            [k x])))
+        ;; (cpp-ce3, the checker: each mem-initializer's range, the place of its constructor call's errors, ce-construct's *ce-mi-at*)
+        at-of (if (checking?) (into {} (for [i (:inits f) :when (or (:range i) (:_range i))]
+                                         [(if-let [b (or (:baseInit i) (:delegatingInit i))]
+                                            [:base (if (= (str/trim (str (:qualType b))) (:name c)) cid (:id (resolve-type (:scope ctx) (:qualType b))))]
+                                            [:field (get-in i [:anyInit :name])])
+                                          (or (:range i) (:_range i))]))
+                  {})
         init-of (fn [t x]
                   (cond
                     (nil? x) nil
@@ -11177,7 +11349,7 @@
       {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
                      (let [t {:k :class :id (:cls b)}
                            x (get given [:base (:cls b)])]
-                       {:base (:cls b) :idx i :init (cond (contains? (:pre-inits f) (:cls b)) (get (:pre-inits f) (:cls b))
+                       {:base (:cls b) :idx i :at (get at-of [:base (:cls b)]) :init (cond (contains? (:pre-inits f) (:cls b)) (get (:pre-inits f) (:cls b))
                                                          (contains? given [:base (:cls b)]) (init-of t x)
                                                          :else (init-for t nil ctx :default))})))
        ;; the virtual bases, which the complete object's constructor initializes ([class.base.init]/7)
@@ -11186,7 +11358,7 @@
                         {:base v :init (if (contains? given [:base v]) (init-of t (get given [:base v])) (init-for t nil ctx :default))})))
        :fields (vec (for [fl (:fields c)]
                       (let [x (get given [:field (:name fl)])]
-                        {:field (:i fl)
+                        {:field (:i fl) :at (get at-of [:field (:name fl)])
                          :init (cond
                                  (contains? given [:field (:name fl)]) (if (nil? x) (init-for (:ty fl) nil ctx :value) (init-of (:ty fl) x))
                                  ;; a mem-initializer of an anonymous union's (or struct's) member
@@ -11631,13 +11803,34 @@
                              (if imm "constant" "immediate") " evaluation returns address of immediate function '" (:name (or imm inv)) "')")
                         {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))))
   (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))))
-    (try (binding [*ce-manifest* true] (ce-eval (:e i)))
+    (try (binding [*ce-manifest* true *ce-point* (:cx-range v)] (ce-eval (:e i)))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
   ;; (h-cpp-consteval: a class object's initializer too, its constructor's evaluation: [dcl.constexpr]/10's full-expression)
   (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (#{:ctor :zero-then :list :copy :expr} (:i i))
              (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v))))
-    (try (binding [*ce-manifest* true *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])] (ce-init (:ty v) i {}))
+    (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])] (ce-init (:ty v) i {}))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x)))))
+
+(defn- cx-immediate-eval!
+  "cpp-ce3 (the checker): an immediate invocation ([expr.const]/16-17: a call of a consteval function in no immediate function
+  context: not in a consteval function, not in an immediate-escalating one, a constexpr function or a lambda's call operator,
+  P2564R3, and in no unevaluated operand) is a full-expression that is a constant expression: the call `node` evaluated, an
+  evaluation the program's own operation makes surely not constant GCC's \"call to consteval function 'f(...)' is not a constant
+  expression\" at the call, the operation's own error beside it. The call node returned."
+  [ctx f node]
+  (when (and (checking?) (:consteval f) (not (:cx-imm-error f)) (not *unevaluated*) (not *ce-analyzing-imm*)
+             (let [g (some-> (:fn-id ctx) fnd)]
+               (not (and g (or (:consteval g) (:constexpr g) (and (:cls g) (some-> (abi/cls (:cls g)) :lambda)))))))
+    (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true] (ce-eval node) nil)
+                 (catch arbace.lang.ExceptionInfo x x))
+          d (some-> x ex-data)]
+      (when (:cx/sure d)
+        (let [m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
+          (when-let [at (:cx/at d)]
+            (when-let [h *on-refusal*]
+              (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
+          (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))))
+  node)
 
 (defn- sassert-unsure-node?
   "Whether a static_assert's condition holds a node whose value the slice approximates: a type trait, sizeof or alignof
@@ -11659,7 +11852,7 @@
               e (binding [*cutoff* Long/MAX_VALUE *constraint-doubt* d] (rv (analyze ctx c)))
               sure (atom nil)
               v (when-not (sassert-unsure-node? c)
-                  (try (binding [*constraint-doubt* d *ce-manifest* true] (ce-eval (convert-scalar e abi/bool* false)))
+                  (try (binding [*constraint-doubt* d *ce-manifest* true *ce-point* (:range n)] (ce-eval (convert-scalar e abi/bool* false)))
                        (catch arbace.lang.ExceptionInfo x
                          (when (:cx/sure (ex-data x)) (reset! sure x)) nil)))]
           ;; (h-cpp-consteval: a condition [expr.const]/5 makes surely not constant, GCC's "non-constant condition for static
@@ -11799,6 +11992,8 @@ protected:
                     (if (:cx-at s) ["neither branch of 'if' is a constant expression" (:cx-at s)] a)))))
       :asm (when (and (< (long *cxx-year*) 20) (:cx-at s)) ["inline assembly is not a constant expression" (:cx-at s)])
       :goto (when (:cx-at s) ["'goto' is not a constant expression" (:cx-at s)])
+      ;; (cpp-ce3: a do statement's body runs at least once, [stmt.do]/1)
+      :do (pce-stmt (:body s))
       :static-local (when (:cx-at s) [(str "'" (:name (var* (:var s))) "' defined '" (if (:tls (var* (:var s))) "thread_local" "static") "' in 'constexpr' context") (:cx-at s)])
       nil)))
 
