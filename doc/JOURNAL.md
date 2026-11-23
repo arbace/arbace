@@ -20158,3 +20158,26 @@ Alternatives weighed: every requirement's error as an explanation (rejected: GCC
 from depth 2); a non-constant atom thrown on as the condition's error (rejected: a static_assert then stopped the unit; the atom's error
 reported and the constraint false gives GCC's lines); the constraint matching of template template arguments by satisfaction with
 symbolic arguments (rejected for subsumption of the normal forms, [temp.arg.template]/4's partial ordering).
+
+## 2026-11-23: cpp-decl2 (2), the stream's left list (branch `cpp-decl2-1123` after next `2c468272c`)
+
+The coordinator's follow-up to cpp-decl2: its left list, templates aside. Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl2 (2)"):
+enumeration redeclarations (diag's enum-redecls, the parser's elaborated enum rules, sema's one entity per redeclared enumeration),
+deleted friend definitions (template.ae's friend!, the redefinition check by signature), inline variables (parser, diag's
+redefinitions with inline static members and class templates' out-of-class members, uninit-consts, odr-inline-vars; sema's incomplete
+type), subobjects' copy and move members surely deleted (generalized from synth2's rule to moves, assignments and members defaulted on
+their first declaration, reported at the declaration), an array's element errors at each element, and three crashes made diagnostics
+(CWG 1397's default member initializer, a volatile object through an ellipsis, a nil nominee of a using-directive).
+
+Alternatives weighed: for inline-var2's class template members, keying out-of-class definitions by the template-id's text (rejected: an
+explicit specialization's `Z<0>::x` and a partial one would collide; only a template-head with parameters and identifier arguments maps
+to the pattern's path); for array elements, per-element errors in every aggregate (rejected for now: GCC judges a class aggregate's
+members as one initialization, only the array's elements were needed); for the deleted move members, CWG 1402's "ignored by overload
+resolution" (kept as the checker had it: an implicit move member deleted is no candidate, one defaulted by the user is, as GCC reports
+cpp0x/defaulted20.C).
+
+Checked: the record run 21:55-23:33 UTC over 2,706 files (the own passes, the deferred rows, the candidates; stage 0,
+GOMEMLIMIT=3000MiB): own pass 2,316 -> 2,364 (the two files past 300 s under load keep their pass rows), none lost, 10 rows to own pass.
+mac/next merged (cpp-tpl2 (2), no conflict); the 19 rows the two streams turned read again on the merged tree, all pass; the control pair
+fails as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: C++ read 5,960 / 0 / 323 ->
+5,970 / 0 / 314 (247 n/a).

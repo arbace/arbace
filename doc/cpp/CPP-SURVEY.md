@@ -10932,3 +10932,37 @@ concepts-return-req1.C and concepts-memfun4.C (overload resolution: cpp-decl2's)
 without operator== (concepts-friend2.C: the operator's lookup), concepts-err1.C's closure-typed atom, the parser's rules of
 concepts-requires1.C and -requires20.C; an explicit specialization of a member template of a member class template
 (concepts-explicit-spec7.C: A<int>::B<int>'s qualifier). Of the first round's "Left": crash89.C's default argument, never evaluated.
+
+## As built: cpp-decl2 (2), the stream's left list (2026-11-23; branch `cpp-decl2-1123` after next `2c468272c`)
+
+The coordinator's follow-up: the left list of "As built: cpp-decl2" above, templates aside (cpp-tpl2's). Same sources and rules.
+
+- Enumeration redeclarations (diag's `enum-redecls`, [dcl.enum]/2-5): scoped against unscoped, two fixed underlying types, one
+  definition (the parser's `:_body` marks a written enumerator list), a qualified opaque-enum-declaration, a definition by a qualified
+  name in a scope that does not enclose it; the parser's elaborated `enum class E e;` and `enum E : int e;` ([dcl.type.elab]/1); sema
+  keeps a redeclared enumeration one entity (its id and scope) and declares neither of the two refused forms, so `enum N1::E6 x;` no
+  longer finds two types (cpp0x/forw_enum6.C).
+- Friends: a deleted friend definition declared by template.ae's friend! (the checker's), so a call choosing it is a use of a deleted
+  function, and the redefinition check knows the namespace's functions by signature for "deleted definition ... is not first
+  declaration" (cpp0x/pr62101.C).
+- Inline variables ([dcl.inline], [class.static.data]/4, [basic.def.odr]): the parser's inline field, type, parameter and block-scope
+  variable; an inline static data member's declaration in its class a definition (its out-of-class redefinitions, a class template's
+  too by its pattern's path, an uninitialized const one, an incomplete type, also in a class template's instance); an odr-used extern
+  inline variable never defined (diag's `odr-inline-vars`; cpp1z/inline-var2.C, 26 lines).
+- Implicit and first-declaration-defaulted copy and move constructors and assignment operators deleted when no candidate of a
+  subobject's class can bind the source (a const or an rvalue one), the defaulted one's reason at its declaration
+  (cpp0x/pr71979.C, cpp0x/defaulted20.C; init/synth2.C's rule generalized).
+- An array's elements' initialization errors each at its element, the others analyzed on (diagnostic/array-init1.C).
+- Crashes made diagnostics: a default member initializer its own analysis needs (CWG 1397, `nsdmi-guard`: "required before the end of
+  its enclosing class"), a volatile class object through an ellipsis (its copy had chosen A(...) again without end), a
+  using-directive naming no declared namespace (lookup/missing-std-include-7.C).
+
+Checked: the record run over the same 2,706 files (21:55-23:33 UTC): own pass 2,316 -> 2,364 counting the two timeouts' kept rows,
+none lost; 10 rows to own pass (cpp0x/defaulted20, forw_enum6, nsdmi-dr1397, pr62101, pr71979, cpp1z/inline-var2,
+diagnostic/array-init1, lookup/missing-std-include-7, overload/ellipsis3, and concepts/dr1430 by the inline and enum rules); mac/next
+merged (cpp-tpl2's concepts, 9 rows), the 19 rows read again on the merged tree, all passing, the control pair failing. C++ read
+5,960 / 0 / 323 -> 5,970 / 0 / 314 (247 n/a).
+
+Left: cpp1y/pr66690.C and class-deduction107 (access in templates), implicit-trivial1.C (a private constructor template chosen for a
+copy), overload/using2.C (using-declarations conflicting with declarations and each other), lambda-anon1.C, noexcept71.C, offsetof8.C,
+tc1/dr147.C, override2.C, parse/access13.C, inherit/virtual2.C (a base-clause's error recovery), cpp23/ext-floating*.
