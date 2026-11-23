@@ -19442,3 +19442,26 @@ __PRETTY_FUNCTION__ from the written signature alone (rejected: the qualificatio
 resolved types where no template is involved); abstract classes judged at the class's completion only (rejected: a class being defined
 is abstract by its own pure functions already, GCC's other/abstract2.C reports inside it); the coroutines flag for every file whose
 options hold two standards (taken only for a driver's -std=c++20 or later, the coordinator's scope).
+
+## 2026-11-23: the big lock's two slots, memory-gated (branch `heavy2-1123` from mac/next `69bb781b5`)
+
+The user decided (2026-11-23) "Two slots, memory-gated": the host's big lock (`bin/heavy-lock`, GTS32 (a)) admits a second
+heavy job when memory permits. Built: the FIFO of tickets unchanged (names, contents, the dead removed by the next waiter),
+in front of two flock slots, `big.lock` (slot 1, still the plain flock agents take with `flock big.lock CMD`) and
+`big.lock.2`; a state file beside each new ticket (`.s-TIME-PID`: wait, 1 or 2, and the need) tells holders from waiters, so
+the head is the first waiter, and holders no longer block the queue. A second job runs only when MemAvailable less 2 GiB, less
+the other holders' declared needs not yet reached (need less process tree RSS), exceeds its `HEAVY_MEM_GIB` (default 24;
+`all`: never beside another); the head that does not fit waits and nothing passes it. The gate passes each step's admission
+as its `HEAVY_MEM_GIB`, and `--concurrent`'s whole-run hold `all`. doc/GATE-SURVEY.md, "As built: the big lock's two slots";
+CLAUDE.md's sentence; the Makefile's `gate-queue` line; `test/gate/heavy-lock-test.bash`.
+
+Interop with the one-slot waiters queued during the change (six at the time): their tickets carry no state file and are read as
+the old protocol's (they wait for every earlier ticket, then for slot 1), so a new waiter after one takes slot 2 only, under
+the memory rule, and never slot 1 before it. Deployed into the main checkout by writing the file beside it and renaming it
+over, so the running bash instances keep reading the old inode.
+
+Alternatives weighed: a counted semaphore in one file (rejected: plain `flock big.lock` users would no longer be excluded);
+renaming tickets to mark holders (rejected: the old waiters compare names and contents); the memory rule on MemAvailable alone,
+as stated (taken with the holders' unreached declarations subtracted: a gate build just started shows almost nothing in
+MemAvailable and reaches ~22 GiB minutes later, so MemAvailable alone would admit a second build into an OOM); probing slot 1
+through /proc/locks (taken only for `--queue`'s display; admission probes with `flock -n`, which is atomic).

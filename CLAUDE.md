@@ -564,7 +564,10 @@ Prior art:
   host, a step over three times its latest passes is flagged, the `:heavy true` steps (measured peaks above
   8 GiB, `:mem-gib`) run each under `GATE_HEAVY_CMD` (default `bin/heavy-lock`: the host's big-job lock
   `ARBACE_HEAVY_LOCK`, by default the main checkout's `.tmp/big.lock`, taken in turn, a FIFO of tickets in
-  front of the flock that plain `flock big.lock` users still exclude; GTS32 (a), `make gate-queue`) and the
+  front of the flock that plain `flock big.lock` users still exclude; GTS32 (a), `make gate-queue`; since 2026-11-23 (the
+  user) two slots, `big.lock` and `big.lock.2`, a job beside another admitted only when its `HEAVY_MEM_GIB` (default 24; the
+  gate's steps their admission, `--concurrent`'s run `all`) fits MemAvailable less 2 GiB less what the other holder declared
+  and has not reached, the head that does not fit waiting, no later ticket passing it) and the
   gate itself does not (a caller that holds the lock sets `GATE_HEAVY_CMD=env`, else the gate waits for it),
   the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
   GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
