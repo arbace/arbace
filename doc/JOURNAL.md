@@ -20159,3 +20159,49 @@ The user's decisions of 2026-11-23 on queue 540's report:
 - Cells recorded here: C print 4,844 / 0 / 11 (1 n/a), from 4,844 / 1 / 11. `bin/reap --record`, `bin/crops-score --record` and
   `--judge --strict`, `bin/records-check`: 0 problems. Every other row moves with the main host's records (540's list, with
   limits-caselabels.c among the passes of the torture-compile records, read and print).
+
+## 2026-11-23: queue 535, Python D1-D6: forkserver without os.fork, the rest where feasible (the Mac VM, branch `535-py-d1d6`)
+
+The user's "Build them" of 2026-11-23 on py-mods' six (doc/AGENDA.md's questions; the main session's notes of 2026-11-22) supersedes
+for the start method forkserver the decisions of 2026-11-04 (PY6e's DECISION (a), no os.fork) and 2026-11-22 (the forkserver rows in
+`:fork`, n/a). Base mac/next fa635f636; stage 0 nx's (stale runtime: the eval proofs ran the checkout's runtime interpreted by goi).
+- D1, forkserver (doc/python/PYTHON-SURVEY.md, "As built: 535"): `os.fork` stays absent (a forked Go process keeps one thread of a
+  runtime that needs its others). The fork server starts each child as a fresh process of sys.executable (`util.spawnv_passfds`,
+  the request's descriptors at their numbers), which does the server's preload again and runs `_serve_one` as the forked child does;
+  the server's protocol (pid and exit status to the client, waitpid on SIGCHLD) is unchanged. The change is a patch of the pinned
+  `Lib/multiprocessing/forkserver.py` (3.14.10's and 3.15.2's texts by SHA-256) applied at compile time by the new
+  `arbace/python/libpatch.ae` from `arbace.python.run/compile-source` (eval and AOT alike), one line replaced and three functions
+  appended, the file unpatched on disk; `PYI_LIB_PATCHES=0` withholds it (the control). The IR cache keeps a patched answer under the
+  source's own key (go/arbace/py's aot.go looks the cache up by the text it has): found when the control's unpatched answer, kept
+  under that key, made the compiled launcher's server die again; the control's answers are no longer kept.
+  Alternatives considered: a fork-safe child by a patched Go runtime (overlay/go: the executables of a re-seed only, and the forked
+  child's netpoller, locked threads and goroutines in system calls still lost); spawn as the default start method (249's option
+  (b)): not needed, forkserver works; a zygote child kept ready by the server: the preload's side effects still repeat.
+  Left n/a, needing fork's copy of the server's memory: the three preload tests (the preload's import once in the server).
+- D4: lib-test-limits.tsv gives the forkserver modules spawn's limits (its children are pyi processes as spawn's).
+- D5 in part: `_imp.extension_suffixes()` the platform's suffix first (`.arbace-314-x86_64-linux-musl.so`, aarch64 on arm64), then
+  py-capi's `.arbace-314.so`; `_sysconfigdata__linux_`'s SOABI and EXT_SUFFIX the first, LIBRARY and LDLIBRARY `libpython3.14.a`.
+- Found on the forkserver modules' first run: dict's `__ror__` and set's `__ror__`, `__rand__`, `__rsub__`, `__rxor__` (CPython's
+  add_operators: the reflected wrapper of the same nb slot; a manager's proxies forward `other | proxy` to them), and
+  `_thread.get_native_id()` of the main thread the process id (it was the ident, 1 in every process).
+- D2 (a native `_io`), D6 (strace shapes): not built; DECISIONs in the report. D3: py-accel's.
+- Proofs (doc/python/PYTHON-SURVEY.md, "As built: 535"; logs in the main checkout's .tmp/q535/): fs1.py by `bin/pyi run` PASS
+  (5 min 17 s, goi), with `PYI_LIB_PATCHES=0` FAIL (unexpected EOF), by the compiled launcher PASS (13 s); `bin/pyi check --aot
+  --lib-test --only` rounds 2-4 over the touched modules: 291 rows the eval record does not pass pass, none it passes fails
+  (round 3's two test_set rows, a dict `__ror__` taking a set's left operand, fixed and run again in round 4); every negative control
+  failed as it must. The eval record (the main host's) is not re-recorded here: its forkserver rows stay classed as recorded, the
+  classes saying they leave at the next record; the three preload tests move to the new `:forkserver-preload` (n/a), so Python's
+  eval cell is 40,552 / 1,604 / 1,711 (4,457 n/a), from 40,552 / 1,604 / 1,714 (4,454 n/a); `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`.
+
+## 2026-11-23: queue 535's decisions (the user's, through the main session)
+
+535-1 (a): forkserver's three preload tests (test_misc's test_preload_main, test_preload_main_sys_argv; test_processes'
+test_std_streams_flushed_after_preload) n/a in `:forkserver-preload`, as built: they count import-time output a forked child inherits
+from the server's single import, which pyi's fresh children redo. 535-2 (a): a native _io, CPython's Modules/_io (FileIO, Buffered*,
+TextIOWrapper, BytesIO, StringIO) ported to Go, as queue 545, test_io's C classes judged; _pyio stays the Py* side. 535-3 (a):
+test_fileio's two test_syscalls_read rows n/a (strace without -f sees only the thread-group leader, and pyi reaches its interpreter through
+bin/pyi's exec chain); they leave `:io-c-checks` in 545, which reworks that class. 535-4 (a): the six test_sysconfig rows of
+`:venv-and-build` stay n/a (an installation's or build tree's files pyi does not have). Alternatives considered: 535-1 (b) a fork-safe Go
+runtime; 535-2 (b) the C-only checks by design for good; 535-3 (b) the interpreter locked to the leader thread and an exec-only chain;
+535-4 (b) a source-build layout.

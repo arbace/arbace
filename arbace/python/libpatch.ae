@@ -1,0 +1,155 @@
+(ns arbace.python.libpatch
+  "pyi's patches of the pinned Lib (queue 535, doc/python/PYTHON-SURVEY.md, \"As built: 535\"): a module of
+  CPython's Lib whose code needs what pyi cannot give is compiled from its source with a few lines changed, at the one
+  place every pyi compile goes through (arbace.python.run/compile-source: imports, exec and compile on goi, the AOT's
+  modules compiled ahead and its compile-server). A patch applies to the exact source it was written against (the
+  SHA-256 of its text: 3.14.10's file, or 3.15.2's under REPR_PYTHON_VERSION=3.15) in mode exec and to no other text, so
+  another version of the file, or a program's own copy, compiles as it is. Each edit replaces one line by one line and
+  the added functions go after the file's last line, so the patched module's line numbers are the file's (tracebacks,
+  linecache, inspect.getsource read the file). The patched answer is cached under the key of the source as given (the
+  runtime's own lookup of the IR cache keys the text it has). PYI_LIB_PATCHES=0 compiles every source as it is (the control:
+  the run without them), keeping no such answer.
+
+  The patches:
+    multiprocessing/forkserver.py   the fork server's os.fork(): pyi has no os.fork (Go's runtime is multithreaded: a
+                                    forked child has one thread of a runtime that needs its others). The server starts
+                                    each child as a fresh process of sys.executable instead (util.spawnv_passfds, as it
+                                    was itself started), passing it the request's descriptors at their numbers (child_r,
+                                    the alive pipe, the resource tracker's and the client's); the child does the
+                                    server's preload again (sys.argv, sys.path, __main__ as __mp_main__, the preload
+                                    modules), clears atexit as the forked child does, restores the server's original
+                                    signal handlers and runs _serve_one (spawn._main on child_r). The server keeps
+                                    forkserver's protocol: the child's pid written to the client, its exit status from
+                                    the server's SIGCHLD and waitpid, the child the server's own. What a fork alone
+                                    gives is not given: the preloaded modules' import runs again in each child (their
+                                    side effects repeat), and the server's memory is not the child's."
+  (:require [arbace.string :as str])
+  (:import [java.security MessageDigest]))
+
+(defn- sha256 [^String s]
+  (let [md (MessageDigest/getInstance "SHA-256")]
+    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) (.digest md (.getBytes s "UTF-8"))))))
+
+(def ^:private forkserver-common
+  "The functions every version's forkserver.py gets (after its last line); _pyi_preload is the version's"
+  "
+
+# pyi (queue 535, arbace/python/libpatch.ae): no os.fork, so main() starts each child as a fresh process of
+# sys.executable that does the preload again and serves the request as the forked child does.
+
+def _pyi_handler_names(handlers):
+    names = {}
+    for sig, handler in handlers.items():
+        if handler is signal.SIG_DFL:
+            names[int(sig)] = 'dfl'
+        elif handler is signal.SIG_IGN:
+            names[int(sig)] = 'ign'
+        elif handler is signal.default_int_handler:
+            names[int(sig)] = 'int'
+    return names
+
+def _pyi_spawn_one(child_r, fds, handlers, preload, *args, sys_argv=None, **kws):
+    '''Start the child of a request (main()'s os.fork in CPython): its pid'''
+    cmd = ('import sys; '
+           'from multiprocessing.forkserver import _pyi_serve_one; '
+           '_pyi_serve_one(%d, %r, %r, %r, %r, sys_argv=sys.argv[1:], **%r)')
+    cmd %= (child_r, list(fds), _pyi_handler_names(handlers), preload, args, kws)
+    exe = spawn.get_executable()
+    argv = [exe] + util._args_from_interpreter_flags() + ['-c', cmd]
+    if sys_argv is not None:
+        argv += sys_argv
+    return util.spawnv_passfds(exe, argv, [child_r] + list(fds))
+
+def _pyi_serve_one(child_r, fds, handler_names, preload, args, *, sys_argv=None, **kws):
+    '''The child of a request: the forked child's work in main() after os.fork'''
+    code = 1
+    try:
+        _pyi_preload(preload, *args, sys_argv=sys_argv, **kws)
+        util._close_stdin()
+        atexit._clear()
+        atexit.register(util._exit_function)
+        handlers = {}
+        for sig, name in handler_names.items():
+            handlers[sig] = {'dfl': signal.SIG_DFL, 'ign': signal.SIG_IGN,
+                             'int': signal.default_int_handler}[name]
+        code = _serve_one(child_r, fds, [], handlers)
+    except Exception:
+        sys.excepthook(*sys.exc_info())
+        sys.stderr.flush()
+    finally:
+        atexit._run_exitfuncs()
+        os._exit(code)
+")
+
+(def ^:private forkserver-preload-314
+  "3.14.10's main() preload, as a function"
+  "
+def _pyi_preload(preload, main_path=None, sys_path=None, *, sys_argv=None):
+    if preload:
+        if sys_argv is not None:
+            sys.argv[:] = sys_argv
+        if sys_path is not None:
+            sys.path[:] = sys_path
+        if '__main__' in preload and main_path is not None:
+            process.current_process()._inheriting = True
+            try:
+                spawn.import_main_path(main_path)
+            finally:
+                del process.current_process()._inheriting
+        for modname in preload:
+            try:
+                __import__(modname)
+            except ImportError:
+                pass
+")
+
+(def ^:private forkserver-preload-315
+  "3.15.2's main() preload is its own _handle_preload"
+  "
+def _pyi_preload(preload, main_path=None, sys_path=None, *, sys_argv=None, on_error='ignore'):
+    _handle_preload(preload, main_path, sys_path, sys_argv, on_error)
+")
+
+(def patches
+  "FILE (the path's end under Lib/) -> {SHA-256 of the source it applies to -> [[OLD-LINE NEW-LINE] ... APPENDED]}"
+  {"/multiprocessing/forkserver.py"
+   {"12eb380e9a5baee40e547961afa4eb81e1f2ca493f623e2f79edf0bf66eb57bf"  ; 3.14.10
+    [[["                        pid = os.fork()"
+       "                        pid = _pyi_spawn_one(child_r, fds, old_handlers, preload, main_path, sys_path, sys_argv=sys_argv)"]]
+     (str forkserver-common forkserver-preload-314)]
+    "811a5bfcda2944eaa8f3b939fc490e3947cde2d0e994c3715b65b12474f53989"  ; 3.15.2
+    [[["                        pid = os.fork()"
+       "                        pid = _pyi_spawn_one(child_r, fds, old_handlers, preload, main_path, sys_path, sys_argv=sys_argv, on_error=on_error)"]]
+     (str forkserver-common forkserver-preload-315)]}})
+
+(defn- apply-patch
+  "SOURCE with each [OLD NEW] line replaced (OLD must be exactly one whole line of it) and APPENDED after its end"
+  [source [edits appended]]
+  (let [lines (vec (str/split source #"\n" -1))
+        lines (reduce (fn [ls [old new]]
+                        (let [ix (keep-indexed #(when (= %2 old) %1) ls)]
+                          (when-not (= 1 (count ix))
+                            (throw (ex-info (str "pyi's Lib patch: the line '" (str/trim old) "' is not in its source once") {})))
+                          (assoc ls (first ix) new)))
+                      lines edits)
+        text (str/join "\n" lines)]
+    (str text (when-not (str/ends-with? text "\n") "\n") appended)))
+
+(defn- patch-of
+  "The patch of SOURCE from FILE in MODE, or nil"
+  [mode file source]
+  (when (and (= mode "exec") (string? file))
+    (some (fn [[suffix by-sha]] (when (str/ends-with? file suffix) (get by-sha (sha256 source)))) patches)))
+
+(defn withheld?
+  "SOURCE has a patch that PYI_LIB_PATCHES=0 withholds (arbace.python.run keeps no such answer in its IR cache)"
+  [mode file source]
+  (and (= "0" (System/getenv "PYI_LIB_PATCHES")) (some? (patch-of mode file source))))
+
+(defn patch
+  "SOURCE as pyi compiles it from FILE in MODE: a patched module's source when FILE ends with one of patches' names and
+  SOURCE is the text its patch was written against, else SOURCE; PYI_LIB_PATCHES=0: SOURCE (the patches' control)"
+  [mode file source]
+  (if-let [p (when (not= "0" (System/getenv "PYI_LIB_PATCHES")) (patch-of mode file source))]
+    (apply-patch source p)
+    source))

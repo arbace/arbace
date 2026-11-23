@@ -31,7 +31,7 @@
   ;; 3.14 answer is never a 3.15 one; 3.14's keys as before
   (delay (sha256 (apply str (when (= "3.15" (System/getenv "REPR_PYTHON_VERSION")) "REPR_PYTHON_VERSION=3.15\u0000")
                         (for [f (concat ["arbace/python/compile.ae" "arbace/python/ir.ae" "arbace/python/scope.ae"
-                                             "arbace/python/run.ae"]
+                                             "arbace/python/run.ae" "arbace/python/libpatch.ae"]
                                             ;; the native reader (PY9): arbace/repr/python's namespaces
                                             (sort (for [^File x (.listFiles (File. (str root "/arbace/repr/python")))
                                                         :when (.endsWith (.getName x) ".ae")]
@@ -283,9 +283,14 @@
 (defn compile-source
   "go.arbace.py's compiler (SetCompiler): MODE exec, eval or single; FILE names the source in messages only"
   [mode file source]
+  ;; queue 535: pyi's Lib patches (arbace.python.libpatch) compile a patched text, kept under the key of the source as given
+  ;; (the runtime's own lookup of this cache, go/arbace/py's aot.go, keys the text it has; libpatch.ae is in the digest);
+  ;; the patches' control (PYI_LIB_PATCHES=0) of a patched source is not kept
   (let [key (sha256 (str mode "\u0000" @compiler-digest "\u0000" source))
+        unpatched? ((requiring-resolve 'arbace.python.libpatch/withheld?) mode file source)
+        source ((requiring-resolve 'arbace.python.libpatch/patch) mode file source)
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
-    (if (.exists cf)
+    (if (and (not unpatched?) (.exists cf))
       (slurp cf)
       (let [r (try (cond
                      (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
@@ -293,8 +298,9 @@
                      (str/starts-with? mode "symtable:") (symtable-answer (subs mode 9) source)
                      :else (compile-uncached mode source))
                    (catch StackOverflowError _ too-deep-to-parse))]
-        (when (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
-                  (str/starts-with? r "SyntaxError: ") (str/starts-with? r "\u0001"))
+        (when (and (not unpatched?)
+                   (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
+                       (str/starts-with? r "SyntaxError: ") (str/starts-with? r "\u0001")))
           (.mkdirs (.getParentFile cf))
           (let [tmp (File. (str (.getPath cf) ".tmp" (swap! counter inc)))]
             (spit tmp r)
