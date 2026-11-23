@@ -324,11 +324,13 @@ END {
   # -w), judged against TEST.compilers.reference
   # gen mode (burst 2026-11-23, 528-3 (a)'s unboxed-primitive-args): a native header that generates its program with ocamltest's `ocaml`
   # script action (setup-ocamlopt.byte-build-env; test_file = SCRIPT; ocaml_script_as_argument; each `arguments = ARG; compiler_output =
-  # OUT; ocaml`; all_modules = "C... ML..."; ocamlopt.byte; run; check-program-output) runs at the AOT levels: bin/oi's gen_prog runs
+  # OUT; ocaml`; all_modules = "C... ML..."; ocamlopt.byte; run; check-program-output) runs at the compiled level: bin/oi's gen_prog runs
   # SCRIPT on oi once an ARG into D/OUT, the last unit of all_modules the program, the other .ml its @mods, the .c its stubs (the run
   # directory's); environment @gen=SCRIPT:ARG>OUT,... @genmain=ML @dyncopy=READONLY,... @cstubs=C,... @mods=ML,...
+  # At the compiled level alone: the generated program (unboxed-primitive-args' main.ml, 600 KB of Lambda) passed 7.6 GB in the light
+  # level's one translation process, whose whole run the gate declares at 4 GiB; the light level keeps the class
   gnmode = 0
-  if (aot >= 1 && !hasbuild && hasoptbuild) {
+  if (aot == 2 && !hasbuild && hasoptbuild) {
     gnmode = 1; gscript = ""; garg = ""; gout = ""; gens = ""; gro = ""; gall = ""
     for (j = 1; j <= m && gnmode; j++) {
       s = trim(st[j]); if (s == "") continue
