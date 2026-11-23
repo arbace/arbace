@@ -20317,3 +20317,35 @@ next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
   classes whose rows pass now keep them until the main host's re-record (their why says so).
 - The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
 
+
+## 2026-11-23: py-mac-1123, the Python branches consolidated on train-2 (the Mac VM, for train 2)
+
+Train 2 (origin/train-2 a6f6fdbf3) left out every Python branch: 535-py-d1d6, 537-py-design and 545-py-native-io each conflicted
+with next in go/arbace/py/*.ae (Go forms whose :go/comments carry positions) and overlapped each other. As their owner, branch
+py-mac-1123 from a6f6fdbf3 merges, in order, origin/535-py-d1d6 (37bbae6f3, 0e609fbe1), origin/537-py-design (63ecfd842,
+211857567), origin/545-py-native-io (6b27c238a, 02f5ad799) and 551-py-finalization-warnings (74c3c59e4, 78170d088).
+
+The method (queue 482's and py-mods-1122's, 70e3ebc79 and e80fd1ca6 on origin/py-mods-1122): each conflicted go/arbace/py file
+printed in its package at the merge base, ours and theirs (git archive of each side's go/arbace/py, bin/repr-go print of py.ae;
+a file printed alone loses its layout, tried first and dropped), the three Go files merged by git merge-file, the package printed
+from the working tree with the merged Go put over it, then go/arbace/py read back in mode :full (bin/repr-go read --full --tests,
+as bin/pyi runtime read; builtins_os_other kept in py.ae as runtime_read_other merges it): builtins_capi_api and builtins_thread
+(535; one hunk differing only in the line numbers of a struct printed with line directives, ours taken), class and sys (545),
+builtins_imp, interp and sys (551) merged with no Go conflict; py.ae made again by each read-back, which changed no other file.
+The scripts: .tmp/qpy/resolve_ae.sh, readback.sh, pyae_union.py (the union of both sides' files for the print). Records and
+classes: divergences.edn's :fork took 535's :why and train-2's :decided and :match; the eval record is train-2's with 537's 64
+changed and 2 removed rows applied by id (537's writer had reordered the file); the journal and the survey keep both sides;
+scores and matrix are recorded again on the merge.
+
+The checks on the merge (the VM, pinned to four CPUs for the night): gofmt and go vet of the printed py, pyctypes and clib (clean
+but the five generated nodes.go of clib, as before), go test ./py ok; bin/pyi check --aot over the modules each branch touched
+(535: forkserver's test_manager, test_misc, test_processes, test_sysconfig, test_set, test_dict; 537: test_hmac, test_hashlib,
+test_os's two pseudo-terminal rows, test_int, test_complex, test_cmath; 545: test_io, test_fileio, test_file_eintr,
+test_fileinput, test_memoryio; 551: test_warnings, test_sys): 21 modules, 2,870 methods, 2,619 pass, 246 classed, 5 failing,
+all five test_warnings', which 25c00615c fixes (_PyImport_BlessMyLoader calls importlib's _bless_my_loader, as import.c does,
+where the port had a Go stand-in; no source line for a <string> file, as _Py_DisplaySourceLine fails to open it; test_tracemalloc
+named in :warnings-c), then test_warnings again: 227 pass, 15 classed, 0 failing; the three negative controls failed as they
+must. bin/reap --record (0 problems; the matrix's five Clojure lines were stale on train-2 a6f6fdbf3 itself, recorded from its
+records), bin/crops-score --record, then --judge --strict and bin/records-check: 0 problems. bin/pyi runtime check (goi
+interprets the merged runtime) was still running at the commit: its timeouts under the pin are load, and c-codecs.py's
+`bytearray + bytes` Go panic under goi (fine on AOT) is train-2's own: the same panic at a6f6fdbf3 and before 545.
