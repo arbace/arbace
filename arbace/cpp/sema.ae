@@ -1754,6 +1754,12 @@
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
   [scope n]
+  ;; (cpp-decl2, the checker: a non-member operator=, operator(), operator[] or operator-> is ill-formed, [over.ass]/1,
+  ;; [over.call]/1, [over.sub]/1, [over.ref]/1 (the parser's error); GCC does not declare it, so its use is "'operator='
+  ;; not defined", other/operator1.C)
+  (if (and (checking?) (= "FunctionDecl" (:kind n)) (not (:cls scope)) (not (:friend n))
+           (#{"operator=" "operator()" "operator[]" "operator->"} (:name n)))
+    nil
   (let [rc (:trailingRequiresClause n)
         ;; (its parameters in scope: requires { __lhs.base() == __rhs.base(); }, G4)
         rps (when rc (let [ps (new-scope :block scope)]
@@ -1925,7 +1931,21 @@
             (let [pns (vec (param-nodes n))
                   void? (fn [pn] (re-matches #"(?:(?:const|volatile)\s+)*void(?:\s+(?:const|volatile))*" (str/trim (str (get-in pn [:type :qualType])))))]
               (when-let [pn (first (filter #(and (void? %) (or (> (count pns) 1) (:name %) (seq (kids %)))) pns))]
-                (*on-refusal* (ex-info "codegen: invalid use of type 'void' in parameter declaration" {:codegen/refused :incomplete}) pn))))
+                (*on-refusal* (ex-info "codegen: invalid use of type 'void' in parameter declaration" {:codegen/refused :incomplete}) pn))
+              ;; (cpp-decl2: a lone unnamed parameter of cv-qualified void is no empty parameter list, [dcl.fct]/2 names
+              ;; void alone: GCC's "invalid use of cv-qualified type 'const void' in parameter declaration", conversion/err-recover1.C)
+              (when (and (= 1 (count pns)) (void? (first pns)) (not (:name (first pns))) (empty? (kids (first pns)))
+                         (re-find #"\b(?:const|volatile)\b" (str (node-text (first pns)))))
+                (*on-refusal* (ex-info "codegen: invalid use of cv-qualified type 'void' in parameter declaration" {:codegen/refused :incomplete :cx/cv-void true}) (first pns)))))
+        ;; (the function's type keeps that parameter, as GCC's erroneous one, so a conversion to a pointer to `void ()` fails:
+        ;; GCC's "cannot convert")
+        f (if (and (checking?) (nil? *instantiating*) (not (header-node? n)) (empty? (:ps (:ty f)))
+                   (let [pns (vec (param-nodes n))]
+                     (and (= 1 (count pns)) (not (:name (first pns))) (empty? (kids (first pns)))
+                          (re-matches #"(?:(?:const|volatile)\s+)*void(?:\s+(?:const|volatile))*" (str/trim (str (get-in (first pns) [:type :qualType]))))
+                          (re-find #"\b(?:const|volatile)\b" (str (node-text (first pns)))))))
+            (assoc-in f [:ty :ps] [(assoc abi/void :c true)])
+            f)
         ;; (queue 492, the checker: a non-member function definition's written return and parameter types, their member
         ;; types' access as a namespace-scope variable's, check-type-access!; [class.access]/1-2)
         _ (when (and (checking?) body (nil? cid) (nil? *instantiating*) (not (header-node? n)) (= :ns (:kind scope)) (not (:friend f)))
@@ -1958,7 +1978,14 @@
         _ (when (and (checking?) body (not (header-node? n)) (not (:explicitlyDeleted n)))
             (doseq [[pt pnode] (map vector (:ps ty) pn) :when (map? pt)]
               (cx-abstract! pt pnode "parameter"))
-            (when-not (#{:ctor :dtor :conv} k) (cx-abstract! (:ret ty) n "return type")))]
+            (when-not (#{:ctor :dtor :conv} k) (cx-abstract! (:ret ty) n "return type")))
+        ;; (cpp-decl2, the checker: a default argument `{...}` for a reference to an abstract class creates a temporary of
+        ;; that type, [dcl.init.list]/3.10 with [class.abstract]/3: GCC's "cannot declare ... to be of abstract type" at the
+        ;; declaration, cpp0x/abstract-default1.C; its uses' at the call, call-args)
+        _ (when (and (checking?) (not (header-node? n)) (nil? *instantiating*))
+            (doseq [[pt pnode d] (map vector (:ps ty) pn (:defaults pinfo))
+                    :when (and (map? pt) (abi/ref? pt) (map? d) (= "InitListExpr" (:kind d)))]
+              (cx-abstract! (abi/non-ref pt) pnode "a temporary")))]
     (if old
       (do
       ;; (queue 518, the checker: [dcl.fct.def.delete]/4, a deleted definition is the function's first declaration: one after a
@@ -2021,7 +2048,7 @@
     ;; instantiation's, arbace.cpp.template/instantiate-fn)
     (when (and rc id (nil? *instantiating*) (not (checking?)) (:cls scope))
       (when-let [q ((requiring-resolve 'arbace.cpp.template/member-tq) scope rc)] (upd-fn! id assoc :tq q)))
-    id))))
+    id)))))
 
 (declare ctad-var)
 
@@ -5478,6 +5505,17 @@
              (let [a (abi/unq (:to from)) b (abi/unq (:to to))]
                (or (and (abi/fn? a) (abi/void? b)) (and (abi/void? a) (abi/fn? b)))))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a function pointer and void*)")
+        ;; (cpp-decl2: a pointer to function converts to no pointer to another function type, [conv.fctptr]/1 taking only
+        ;; noexcept away (C++17); judged when every parameter and result type is one the checker judges: GCC's "cannot convert
+        ;; 'void (*)(int)' to 'void (*)()' in initialization", conversion/err-recover1.C)
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
+             (abi/fn? (abi/unq (:to from))) (abi/fn? (abi/unq (:to to)))
+             (let [a (abi/unq (:to from)) b (abi/unq (:to to))
+                   sure? (fn [t] (let [t (abi/non-ref t)] (or (abi/void? (abi/unq t)) (and (not (abi/fn? (abi/unq t))) (cx-sure-scalar? t)))))]
+               (and (every? sure? (cons (:ret a) (:ps a))) (every? sure? (cons (:ret b) (:ps b)))
+                    (or (not= (abi/unq (:ret a)) (abi/unq (:ret b))) (not= (mapv abi/unq (:ps a)) (mapv abi/unq (:ps b)))
+                        (not= (boolean (:va a)) (boolean (:va b)))))))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (another function type)")
         ;; (cpp-diag-b, round 2: pointers to arrays, [conv.qual]/3 with DR 330)
         (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e)) (not (abi/void? (abi/unq (:to to)))) (cx-array-qual-bad? from to))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (no qualification conversion of arrays)")
@@ -6160,6 +6198,9 @@
           (for [i (range (count args) (count ps))]
             (let [d (nth (:defaults f) i nil)]
               (when-not d (fail :call "missing argument"))
+              ;; (cpp-decl2: a default argument `{...}` for a reference to an abstract class, its temporary at the call)
+              (when (and (checking?) (map? d) (= "InitListExpr" (:kind d)) (abi/ref? (nth ps i)))
+                (when-let [at (some-> *at* deref)] (cx-abstract! (abi/non-ref (nth ps i)) at "a temporary")))
               ;; (cpp-ce3: a default argument's immediate invocations not evaluated here, cx-immediate-eval!)
               (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
 
@@ -6833,7 +6874,20 @@
       ;; then copies the prvalue it made, cx-elided-copy!)
       (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
            (let [c (class-id (:ty (first args)))] (not (and c (or (= c id) (abi/derived-from? c id))))))
-      (let [r (ctor-init id args ctx)] (cx-elided-copy! id nil) r)
+      (let [r (ctor-init id args ctx)]
+        ;; (cpp-decl2, the checker: copy-initialization from another type considers the converting constructors alone,
+        ;; [over.match.copy]/1.1, [class.conv.ctor]/2: an explicit constructor chosen, none of the others viable, is GCC's
+        ;; "conversion from 'int' to non-scalar type 'A' requested"; cpp0x/nsdmi3.C's default member initializer `A a1 = 1;`)
+        (when (and (checking?) (map? r) (= :ctor (:i r)))
+          (let [f (some-> (:fn r) fnd)]
+            (when (and f (:explicit f) (:explicit-sure f) (:node f))
+              (let [others (remove #(:explicit (fnd %)) (ctor-candidates id))]
+                (when (or (empty? others)
+                          (try (resolve-overload others args nil) false
+                               (catch arbace.lang.ExceptionInfo x (boolean (re-find #"no viable function among" (str (.getMessage x)))))))
+                  (throw (ex-info (str "codegen: conversion from " (cx-tyname (:ty (first args))) " to non-scalar type '" (:name (abi/cls id)) "' requested (an explicit constructor)")
+                                  {:codegen/refused :init :cx/conv-explicit true})))))))
+        (cx-elided-copy! id nil) r)
       :else (ctor-init id args ctx)))))
 
 (defn- inheriting-ctor!
@@ -6982,6 +7036,21 @@
         fid (try (resolve-overload cands args nil)
                      (catch arbace.lang.ExceptionInfo e
                        (cond
+                         ;; (cpp-decl2, the checker: an ambiguity among the class's own constructors and those it inherits from
+                         ;; direct non-virtual bases that inherit none themselves, the candidates all known as for "no viable"
+                         ;; below; a base constructor with the parameter types of one of the class's own hidden by it,
+                         ;; [namespace.udecl]/15, before the ranking: [over.match.best]/2 has no tie-breaker for a base's
+                         ;; constructor of other parameter types, so cpp1z/inh-ctor30.C's B(short) and A(double) for 1 are
+                         ;; ambiguous)
+                         (and (checking?) (:inherits-ctors (abi/cls id)) (not nested)
+                              (re-find #"^codegen: ambiguous call \(\d+ viable\)$" (str (.getMessage e)))
+                              (let [c (abi/cls id) nms (:inherits-ctors c)
+                                    bs (filter #(contains? nms (:name (abi/cls (:cls %)))) (:bases c))]
+                                (and (= (count nms) (count (set (map #(:name (abi/cls (:cls %))) bs))))
+                                     (every? #(and (not (:virtual %)) (empty? (:inherits-ctors (abi/cls (:cls %))))) bs))))
+                         (let [own (concat (ctor-candidates id) (when-let [h (:ctor-candidates @hooks)] (h id args)))
+                               vis (remove #(contains? own-ps (mapv abi/unq (:ps (:ty (fnd %))))) inh)]
+                           (resolve-overload (concat own vis) args nil))
                          ;; (CP323 (a): a class inheriting constructors, which the slice does not declare: for the checker
                          ;; an initialization no declared constructor accepts is not judged, the object declared all the same;
                          ;; the code generator refuses it, as before)
@@ -11441,7 +11510,28 @@
                                  ;; one member has a mem-initializer, the one a default member initializer names, /9.1)
                                  (and (:union c) (or (not (:init fl)) (some #(and (vector? %) (= :field (first %))) (keys given))))
                                  {:i :none}
-                                 (:init fl) (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (analyze ctx (:init fl)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
+                                 (:init fl)
+                                 (let [dn (:init fl)
+                                       ;; (cpp-decl2, the checker: a default member initializer `= {...}` copy-list-initializes
+                                       ;; its member, [dcl.init.general]/15, an explicit constructor's choice ill-formed
+                                       ;; (cx-explicit-list!); one `= x` of another type takes converting constructors alone
+                                       ;; (class-init); either error reported at the initializer and the rest of the
+                                       ;; constructor analyzed, as GCC reports it once at the member: cpp0x/nsdmi3.C)
+                                       cl (when (and (checking?) (map? dn) (= "InitListExpr" (:kind dn)))
+                                            (when-let [b (get-in dn [:range :begin :offset])]
+                                              (let [^String src *src*]
+                                                (loop [i (dec (long b))]
+                                                  (cond (neg? i) nil
+                                                        (Character/isWhitespace (.charAt src (int i))) (recur (dec i))
+                                                        (= \= (.charAt src (int i))) dn
+                                                        :else nil)))))]
+                                   (try (binding [*cx-copy-list* (or *cx-copy-list* cl)]
+                                          (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (analyze ctx dn))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind dn)) :list :copy)))
+                                        (catch arbace.lang.ExceptionInfo e
+                                          (if (and (checking?) *on-refusal* (map? dn) (:range dn)
+                                                   (or (:cx/conv-explicit (ex-data e)) (re-find #"from initializer list would use explicit constructor" (str (.getMessage e)))))
+                                            (do (*on-refusal* e dn) {:i :none})
+                                            (throw e)))))
                                  ;; (cpp-decl2, the checker: a user-provided constructor leaving a member of reference type or of
                                  ;; const-qualified non-class type (or an array of it) without initialization, [class.base.init]/9.3
                                  ;; with [dcl.init.general]/7 (default-initialization of a const object of a type that is not
