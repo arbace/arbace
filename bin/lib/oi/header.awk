@@ -101,6 +101,8 @@ END {
   }
   if (aot == 0 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.(c|ml)( +[A-Za-z0-9_]+\.(c|ml))*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.ml( +[A-Za-z0-9_]+\.ml)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
+  # (burst 2026-11-23) and when they are C alone (lib-threads' sigint.c): a C helper is its own program on ci, whatever the level
+  if (aot >= 1 && hasbuild && rofiles ~ /^[A-Za-z0-9_]+\.c( +[A-Za-z0-9_]+\.c)*$/) { helper = 1; roclass = "readonly_files = " rofiles }
   # dynlink mode (OC220 (a)'s loader, doc/ocaml/OCAML-SURVEY.md "As built: OC220's loader"): a test at oi's level that includes dynlink and
   # whose bytecode alternative builds plugins: in its build environment (setup-ocamlc.byte-build-env) each `module = FILE; ocamlc.byte` a
   # unit compiled in the current directory (cwd = DIR; cd), one link `all_modules = "A.cmo ... MAIN.cmo"; ocamlc.byte` (module = "") the
