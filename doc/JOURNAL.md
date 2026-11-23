@@ -19120,3 +19120,12 @@ and the compiled level's pass counts by the counting rule (a). Queued at hand-ba
 delayintr and unboxed-primitive-args, whole under the big lock (its translation process), `--record`; then the suite's compiled run
 of opam/base64/test and opam/fmt/test_fmt (`--record`). In the branch's worktree (`.tmp/oc/finalize.sh`, log `.tmp/oc/finalize.log`),
 after the 17 tool rows' compiled run (`.tmp/oc/chain.log`'s "tools: exit"): the light level's whole re-records.
+
+## 2026-11-23: ocaml-1123: 539-2 (a) at AOT, opam/cmdliner/test_arg n/a
+
+The user decided 539-2 (a) (the Mac's 539 report, through the coordinator): opam/cmdliner/test_arg is n/a, since it needs
+B0_testing.Test.Snapshot.exp_loc, which no released b0 provides (b0 0.0.6 is opam-repository's newest at 5c9b817c5), so it cannot be
+built from pinned sources. Applied at AOT here: test/ocaml/divergences-suite-aot.edn's `:na-unreleased-dependency` (the row leaves
+`:opam-not-run`); the Mac applies it at eval (539's follow-up). Alternative not taken: (b) by design until a b0 release carries the API.
+opam/re/expect and sexplib0_test stay `:opam-not-run` until the Mac's 539 follow-up (the Jane Street closure: ppxlib, base,
+ppx_expect, ppx_inline_test) merges; their AOT rows follow it.
