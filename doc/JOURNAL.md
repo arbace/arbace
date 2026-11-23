@@ -19029,3 +19029,40 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 540, C's and C++'s print rows (the VM; branch `540-c-cpp-print` from next fa635f636)
+
+C's print level had 12 deferred rows, its read level 5 (test/repr/c/roundtrip-known.edn, parse-check-known.edn). C++'s print level had
+10 (the own records, plus the hotspot files no record holds). The VM has no compiled host for the checkout's repr/c: stage 0 evaluates
+the namespaces the checkout changed (RT.toolSource). So the rows that need a compiled host (the evaluator's 10,000-call depth, the read
+budget) are left to the main host's records, as its findings say.
+- repr/c (convert.ae): an invocation whose expansion holds __LINE__ was printed expanded. It is now printed as itself after
+  `#line N /*arbace*/`, N the invocation's presumed line (lex/position, #line applied), when the invocation stands on one line; one over
+  several lines is still printed expanded (gcc's __LINE__ there need not be the port's). The reread computes the same N from the
+  print's #line, so the :c/macro texts are equal, and place-directives! drops the marked directive. __COUNTER__ is still printed expanded.
+  - sqlite's shell.c: its asserts no longer bring musl's `#define stderr (stderr)` back expanded. Levels 1-2 pass (they differed).
+  - quickjs's unicode_gen.c: its last `assert(0);` is one expansion again, and its gcc -O0 object equals the original's (the VM's
+    aarch64 gcc, by hand; the recorded l3 is amd64's, the main host's to record again).
+  - shell.c's level 3 still differs, by gcc -O0's layout-dependent branches at a one-line `if( zCol==0 ) continue;` that the print
+    lays over two lines (shown by hand: the print with that line joined moves the difference to the next such function). That is
+    CS81 (a)'s "rest", so shell.c moves from :macro-context to :objects, by design (DECISION 540-2 in the report).
+- bin/lib/repr-c/roundtrip: REPR_C_MAX_NEST defaults to 20,000, as parse-check sets it (the main host's suggestion). On a compiled host,
+  limits-declparen.c, -exprparen.c, -pointer.c and -structnest.c pass levels 1-2 (the main host's run: 167 s, 2.8 GB). An evaluated host
+  stops at the evaluator's depth as before (the VM: limits-exprparen.c, "panic: stack overflow", 6 s). limits-caselabels.c nests
+  100,000 labeled statements, past the bound, and stays (DECISION 540-1).
+- repr/cpp (print.ae): a text form whose text begins with `#` (or `%:`) is printed on the line before it. It is never a directive (a
+  directive is c/directive), and at a line's start the reread took it for one: g++.old-deja's g++.other/crash41.C, `int a; #// ...`.
+  It now passes level 1 (gxx-old-deja-every-10 --only-list).
+- repr/cpp (native.ae) with arbace.repr.c.pp/preprocess's new :closed-token: after a failed #include closes the stream, the token cc's
+  shift returned with it (the first after the directive's line) is dropped for C++. Clang's fatal error stops there, and the token
+  read alone made `(cpp/text "export")` out of the print's `export module M;`. gxx-modules' target-aarch64-1_a.C now passes level 1.
+  C's token and tree checks are unchanged: `stream` and `preprocess`'s tokens are as before.
+- Left: the other three recorded C++ rows (gxx-dg's template30.C, attr-no_unique_address1.C, ramp-return-a.C) still fail level 1 at
+  head. reap's "improvements until --record-results" is wrong for them: the own judge classes them by rule, and the known file never
+  listed them. template30's comes from the split `>` that the native parser locates in clang's scratch space, so the converter takes
+  `z<int>` for macro text. That is the native parser's location model, the C++ read's. The five hotspot files need jdk26u's build tree
+  (gensrc), which the VM lacks.
+- Records here: roundtrip-known.edn (shell.c :objects), the classes' texts in test/c/divergences-print.edn, matrix.edn and scores.edn
+  (`bin/reap --record`, `bin/crops-score --record`). The results rows are the main host's: `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip
+  --corpus quickjs,sqlite --record` and the torture-compile corpus on the gate's executable, `bin/repr-c parse-check --corpus
+  torture-compile --record` there, and `--record-results` for gxx-old-deja-every-10 and gxx-modules-all.
