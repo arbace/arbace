@@ -15,7 +15,8 @@
  * registered below; lookup() itself, reached only by reflection, answers the public lookup.
  * Not in the Go build: VarHandles (j2g compiles their constant handles statically, J2G-SPEC section 8.5, and
  * VarHandle stays outside the world: findVarHandle and its kin throw UnsupportedOperationException), class
- * definition (defineClass, defineHiddenClass: no class loader), classData, the loops and tableSwitch.
+ * definition by defineHiddenClass, classData, the loops and tableSwitch (defineClass defines through arbace.lang.Bytecode since
+ * java-bytecode-1122: doc/classes/BYTECODE-SURVEY.md).
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package java.lang.invoke;
@@ -614,9 +615,70 @@ public class MethodHandles {
             throw new UnsupportedOperationException("jrt: VarHandle is not in the Go build (J2G-SPEC 8.5)");
         }
 
-        /** Not in the Go build: no class definition at run time. */
+        /**
+         * jdk26u's Lookup.defineClass (java-bytecode-1122, doc/classes/BYTECODE-SURVEY.md): the class of the bytes, in the
+         * lookup class's package, defined by its loader (arbace.lang.Bytecode.define, by reflection: the Java forms' class-file
+         * loader of the program, which the JDK's world cannot name);
+         * IllegalAccessException without PACKAGE access, IllegalArgumentException for another package or bytes that are
+         * no class file (jdk26u's ClassFile.of().parse failing), as jdk26u's ClassDefiner.
+         */
         public Class<?> defineClass(byte[] bytes) throws IllegalAccessException {
-            throw new UnsupportedOperationException("jrt: Lookup.defineClass is not in the Go build (no class loader)");
+            Objects.requireNonNull(bytes);
+            if ((lookupModes() & PACKAGE) == 0)
+                throw new IllegalAccessException("Lookup does not have PACKAGE access");
+            String name = classFileName(bytes).replace('/', '.');
+            int i = name.lastIndexOf('.');
+            String pn = i < 0 ? "" : name.substring(0, i);
+            if (!pn.equals(lookupClass.getPackageName()))
+                throw new IllegalArgumentException(name + " not in same package as lookup class");
+            try {
+                Method define = Class.forName("arbace.lang.Bytecode").getMethod("define", ClassLoader.class, String.class,
+                    byte[].class, int.class, int.class, Object.class);
+                return (Class<?>) define.invoke(null, lookupClass.getClassLoader(), name, bytes, 0, bytes.length, null);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                Throwable t = e.getCause();
+                if (t instanceof RuntimeException r) throw r;
+                if (t instanceof Error r) throw r;
+                throw new IllegalStateException(t);
+            } catch (ReflectiveOperationException e) {
+                throw new UnsupportedOperationException("Lookup.defineClass: this program has no class-file loader (arbace.lang.Bytecode)", e);
+            }
+        }
+
+        /** The internal name of a class file's this_class (JVMS 4.1, 4.4), IllegalArgumentException when it has none. */
+        private static String classFileName(byte[] b) {
+            try {
+                java.nio.ByteBuffer buf = java.nio.ByteBuffer.wrap(b);
+                if (buf.getInt() != 0xCAFEBABE)
+                    throw new IllegalArgumentException("Bad magic number");
+                buf.getShort();
+                buf.getShort();
+                int n = buf.getShort() & 0xFFFF;
+                int[] offsets = new int[n];
+                int[] classes = new int[n];
+                for (int k = 1; k < n; k++) {
+                    int tag = buf.get() & 0xFF;
+                    offsets[k] = buf.position();
+                    switch (tag) {
+                        case 1 -> buf.position(buf.position() + 2 + (buf.getShort(buf.position()) & 0xFFFF));
+                        case 7 -> classes[k] = buf.getShort() & 0xFFFF;
+                        case 8, 16, 19, 20 -> buf.getShort();
+                        case 15 -> { buf.get(); buf.getShort(); }
+                        case 3, 4, 9, 10, 11, 12, 17, 18 -> buf.getInt();
+                        case 5, 6 -> { buf.getLong(); k++; }
+                        default -> throw new IllegalArgumentException("Bad constant pool tag " + tag);
+                    }
+                }
+                buf.getShort();
+                int ti = buf.getShort() & 0xFFFF;
+                if (ti <= 0 || ti >= n || classes[ti] <= 0 || classes[ti] >= n)
+                    throw new IllegalArgumentException("Bad this_class index " + ti);
+                int at = offsets[classes[ti]];
+                int len = buf.getShort(at) & 0xFFFF;
+                return new String(b, at + 2, len, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (java.nio.BufferUnderflowException | IndexOutOfBoundsException e) {
+                throw new IllegalArgumentException("Truncated class file", e);
+            }
         }
 
         /** Produces a method handle for a reflected method (jdk26u's reference kinds; an accessible one unchecked). */

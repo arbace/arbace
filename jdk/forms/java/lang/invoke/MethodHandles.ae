@@ -3,8 +3,15 @@
 (in-ns 'java.lang.invoke)
 
 (import '(java.io Serializable)
-        '(java.lang.reflect Array Constructor Field Member Method Modifier)
-        '(java.nio ByteOrder)
+        '(java.lang.reflect Array
+                            Constructor
+                            Field
+                            InvocationTargetException
+                            Member
+                            Method
+                            Modifier)
+        '(java.nio BufferUnderflowException ByteBuffer ByteOrder)
+        '(java.nio.charset StandardCharsets)
         '(java.util ArrayDeque Arrays HashSet List Objects)
         '(sun.invoke.util VerifyAccess))
 
@@ -640,8 +647,80 @@
 
     (method ^:public defineClass :throws [IllegalAccessException] ^{:tag (Class ?)} [this
                                                                                      ^byte/1 bytes]
-      (throw (UnsupportedOperationException.
-               "jrt: Lookup.defineClass is not in the Go build (no class loader)")))
+      (Objects/requireNonNull bytes)
+      (when (== (bit-and-int (.lookupModes this) PACKAGE) 0)
+        (throw (IllegalAccessException. "Lookup does not have PACKAGE access")))
+      (let [name (.replace (Lookup/classFileName bytes) \/ \.)
+            i (.lastIndexOf name \.)
+            ^String pn (if (< i 0) "" (.substring name 0 i))]
+        (when-not (.equals pn (.getPackageName lookupClass))
+          (throw (IllegalArgumentException. (java-str name " not in same package as lookup class"))))
+        (try
+          (let [define (.getMethod (Class/forName "arbace.lang.Bytecode")
+                                   "define"
+                                   ClassLoader
+                                   String
+                                   byte/1
+                                   Integer/TYPE
+                                   Integer/TYPE
+                                   Object)]
+            (cast Class
+                  (.invoke define
+                           nil
+                           (.getClassLoader lookupClass)
+                           name
+                           bytes
+                           (Integer/valueOf 0)
+                           (alength bytes)
+                           nil)))
+          (catch InvocationTargetException e
+            (let [t (.getCause e)]
+              (when-instance [^RuntimeException r t] (throw r))
+              (when-instance [^Error r t] (throw r))
+              (throw (IllegalStateException. t))))
+          (catch ReflectiveOperationException e
+            (throw
+              (UnsupportedOperationException.
+                "Lookup.defineClass: this program has no class-file loader (arbace.lang.Bytecode)"
+                e))))))
+
+    (method ^:private ^:static classFileName ^String [^byte/1 b]
+      (try
+        (let [buf (ByteBuffer/wrap b)]
+          (when-not (== (.getInt buf) (unchecked-int 0xCAFEBABE))
+            (throw (IllegalArgumentException. "Bad magic number")))
+          (.getShort buf)
+          (.getShort buf)
+          (let [n (bit-and-int (.getShort buf) 0xFFFF)
+                offsets (new int/1 n)
+                classes (new int/1 n)]
+            (let [^:mutable ^int k 1]
+              (while (< k n)
+                (let [tag (bit-and-int (.get buf) 0xFF)]
+                  (aset offsets k (.position buf))
+                  (switch tag
+                    1
+                      (.position buf
+                                 (unchecked-add-int
+                                   (unchecked-add-int (.position buf) 2)
+                                   (bit-and-int (.getShort buf (.position buf)) 0xFFFF)))
+                    7 (aset classes k (bit-and-int (.getShort buf) 0xFFFF))
+                    (8 16 19 20) (.getShort buf)
+                    15 (do (.get buf) (.getShort buf))
+                    (3 4 9 10 11 12 17 18) (.getInt buf)
+                    (5 6) (do (.getLong buf) (set! k (unchecked-inc-int k)))
+                    (throw (IllegalArgumentException. (java-str "Bad constant pool tag " tag)))))
+                (set! k (unchecked-inc-int k))))
+            (.getShort buf)
+            (let [ti (bit-and-int (.getShort buf) 0xFFFF)]
+              (when (or (or (or (<= ti 0) (>= ti n)) (<= (aget classes ti) 0))
+                        (>= (aget classes ti) n))
+                (throw (IllegalArgumentException. (java-str "Bad this_class index " ti))))
+              (let [at (aget offsets (aget classes ti))
+                    len (bit-and-int (.getShort buf at) 0xFFFF)]
+                (String. b (unchecked-add-int at 2) len StandardCharsets/UTF_8)))))
+        (catch [BufferUnderflowException IndexOutOfBoundsException] e
+          (throw (IllegalArgumentException. "Truncated class file" e)))))
 
     (method ^:public unreflect :throws [IllegalAccessException] ^MethodHandle [this ^Method m]
       (when (identical? (.getDeclaringClass m) MethodHandle)
