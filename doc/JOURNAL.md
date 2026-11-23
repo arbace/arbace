@@ -19276,3 +19276,94 @@ The coordinator's request, from the VM's closed queue 541 (reports/541-hs-eval.m
   paths (the closures' own files may hold them too; a rebuild is the sure way). Test: a plan naming another worktree's .tmp (the
   hs-pkgs worktree's, which names hs-r7-run's) refused with exit 1 and its paths; the same plan's paths made this checkout's passes
   the check (`--only` an empty list: 0 modules, exit 0). The hs-pkgs worktree's own pools are such a plan: its lib-stg would now refuse.
+## 2026-11-23: queue 539, OCaml's eval level: four deferred rows closed, the rest left with why (the VM)
+
+- Base mac/next fa635f636, branch 539-ocaml-eval. The eval cell's 19 non-passes (15 deferred, 4 by design) were triaged from the
+  committed records (no base runs). Four deferred rows pass now, by changes to oi (go/arbace/oi, go/arbace/oicapi, the driver
+  test/ocaml/oi/cmd/main.ae and the C API test/ocaml/capi). No package variable of oi changed (no :init-order change).
+- backtrace/lazy (:backtrace-references): oi now gives the bytecode's frames. ocamlc's run, read from OCaml 5.5.0's
+  bytecomp/bytegen.ml (comp_expr's Levent Lev_after: the event is put on the continuation; Llet's body is followed by add_pop's POP),
+  prints "Called from unknown location" where the return address of the inline lazy force's call to
+  CamlinternalLazy.force_lazy_block has no event. Two rules follow. First, a call in no tail position without an event, in a unit
+  compiled with -g, is a slot of unknown location. The Compiler's `debug` is set when the unit's form holds an event with the native
+  typer's information (hasEvent). Second, an event after a let marks no call. Before, oi gave test1's own event to the forced call and
+  no frame to test2's. The output is now ocamlc's recorded run byte for byte (774 bytes).
+  Regression set: the 36 passing programs whose reference or source prints backtraces, plus c-api and lib-systhreads. All 36 still
+  pass (log .tmp/q539/logs/run-bt.log).
+- embedded/cmcaml (:c-runtime-decided, OC221 (a)): caml_startup embedding at oi's level. misc.h gains char_os and, under
+  CAML_INTERNALS, main_os as main (as runtime/caml/misc.h has). runtime.c's caml_main and caml_startup call the native
+  __oi_caml_main, and caml_shutdown does nothing. main.c marks itself with __oi_no_main, so oicapi.OwnMain tells the stubs' own main
+  apart from it. The driver then runs oi.RunEmbedded with oicapi.Embed:
+  - the C's main runs on ci with the program's argv, as one outermost call of the boundary;
+  - the OCaml program's initialisation runs at its first caml_main;
+  - callbacks run on oi's thread;
+  - the program's at_exit runs once main returns.
+  Before, cmmain.c did not read (char_os unknown).
+- statmemprof/thread_exit_in_callback (suite, :gc-and-memory): oi's thread start printed "Thread N killed on uncaught exception"
+  for an exception that escapes thread.ml's wrapper. Here that is the memprof callback's second Thread.Exit, raised at
+  check_memprof_cb's allocation inside the wrapper's Exit handler. otherlibs/systhreads/st_stubs.c's caml_thread_start ignores
+  caml_callback_exn's result, so the thread now ends silently. test/ocaml/oi-known.edn loses the row's entry (STALE once it passed).
+- statmemprof/user_data_regression (:runtime-parameters): no change. Queue 523's header.awk rule for OCAMLRUNPARAM's s already runs
+  it, but check-oi-native.edn had not been recorded since. It passes.
+- Recorded with --record --only-list: check-oi-native.edn's 3 rows and check-suite-oi-native.edn's 1 row. Controls:
+  compare-vs-evaluation-order and main-vs-usemultdef both differ, as they must. Then the matrix and scores: OCaml eval 597 / 4 / 11
+  (593 / 4 / 15 before), completeness 0.9501 -> 0.9517. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+- Left, with why, in the report (.tmp/q539/539-ocaml-eval.md):
+  - :speed's 5 rows: interpretation cost, e.g. subarraystub's 41,001 C calls each copying a 262 KB bigarray through ci;
+  - :gc-and-memory's 4: the major collector's own work, Memprof's custom blocks, an ephemeron key reachable only from its data;
+  - :dynlink-decided's 2: .cma loading with ocamlmklib, and native backtraces;
+  - the 4 design rows, brought to the user as n/a: natdynlink, b0, ppx_expect and Base.
+  The AOT levels keep their classes (the host's).
+
+## 2026-11-23: queue 539b, OCaml's eval level, follow-up (the VM)
+
+- The user's decisions of 2026-11-23 on 539's DECISION blocks:
+  - 539-1 (a): lib-dynlink-native/main is n/a at eval. It moves to the new class :na-native-dynlink in test/ocaml/divergences.edn, so
+    :c-runtime-internals at eval now lists no program.
+  - 539-2 (a): cmdliner/test_arg is n/a. It moves to the new class :na-unreleased in divergences-suite.edn.
+  - 539-3: pin and build the Jane Street closure so that re/expect and sexplib0_test run.
+- The closure was already pinned. I computed it from the pinned versions' opam files in opam-repository 5c9b817c5, for ppx_compare,
+  ppx_expect, ppx_here, ppx_sexp_conv, ppx_sexp_value, ppx_inline_test, ppxlib, base, expect_test_helpers_core and sexplib0, counting
+  runtime depends only (no with-test, with-doc or with-dev-setup). All of it is among queue 531's 73 :opam- pins, except three that
+  these two tests do not need:
+  - core: only expect_test_helpers_core's core part;
+  - num: only sexplib.num;
+  - ocamlformat: with-dev-setup only.
+  No tarball needed fetching.
+- What is missing is a ppx toolchain on oi, not sources. Its stages, sized from the packages' dune files:
+  1. ppxlib's own build:
+     - astlib's and ast's pp_rewrite (IF_AT_LEAST and OCAML_VERSION rewriting) and astlib/config/gen.ml's ast-version, as prep
+       rules held to their SHA-256;
+     - src/gen's gen_ast_pattern and gen_ast_builder, run on oi over ast.ml with compiler-libs' Parse and Pprintast;
+     - skip_hash_bang.mll by the native ocamllex;
+     - the ppxlib_metaquot driver, which bootstraps ppxlib.traverse.
+  2. The rewriters preprocessed by metaquot and traverse, and drivers linked from them, for three tests' sets:
+     - ppx_expect alone (re's lib_test/expect);
+     - ppx_compare, ppx_expect, ppx_here, ppx_sexp_conv and ppx_sexp_value (sexplib0_test);
+     - ppx_jane, about 35 rewriters (expect_test_helpers_base, which also needs sexp_pretty).
+     Plus ppx_base with ppx_optcomp, for time_now.
+  3. The runtime libraries, with their C stubs on ci: base (143 units, 6 C files), stdio, parsexp, sexplib, sexp_pretty, time_now
+     (C), ppx_expect's runtime (C), ppx_inline_test's runtime-lib and config, and the ppx runtime-libs.
+  4. The two tests: dune's inline_tests runner main, judged by status and no .corrected file.
+  This is several queue tasks; the report proposes a split (DECISION 539b-1). This round did none of the stages.
+- bin/oi, in one change:
+  - need_selection: an --only or --only-list that takes no program now stops the check with an error, where before it judged 0
+    programs and exited 0;
+  - lib_unit_native: a unit that is typed but not written, or a typer killed with no message or by a full disk or memory, is now a
+    broken build. libs_native then fails before the key is written, instead of the unit being listed as the typer's refusal.
+  Tests (copies extracted from bin/oi, or bin/oi itself): .tmp/q539/tests/libs-native-broken.bash fails 4 cases on the parent and
+  passes on the change; only-empty.bash passes.
+- statmemprof/custom passes at eval and is now recorded. The fix is queue 523's sampling of custom blocks; the record was stale, and
+  Memprof's RNG is seeded, so the result is deterministic. The control compare-vs-evaluation-order differs.
+- The deferred rows I did not close, with why:
+  - misc/darkening_work: oi's major_collections is Go's NumGC, and the interpreter's own garbage drives it. evalArgs' slice of each
+    primitive call alone makes the writes' run 72 cycles longer. Closing it means counting major cycles from OCaml's own allocations,
+    which would change every Gc statistic oi prints (DECISION 539b-2).
+  - backtrace/backtrace_dynlink: native-only (ocamlopt, .cmxs). Proposed n/a, as 539-1 (DECISION 539b-3).
+  - lib-dynlink-bytecode/main: needs ocamlmklib's .cma with C stubs, loaded dynamically, in three runs (main, static, custom).
+    OC220 (a)'s next step.
+  - weak-ephe-final/ephetest and ephetest3: an ephemeron whose key is reachable only from its own data; Go's weak pointers cannot
+    express that.
+  - :speed's 5 rows: interpretation cost.
+- Records: check-oi-native.edn's statmemprof/custom row, the matrix and the scores. OCaml eval 598 / 2 / 10 (66 n/a), completeness
+  0.9517 -> 0.9529. bin/reap, crops-score --judge --strict and records-check: 0 problems.
