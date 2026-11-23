@@ -19723,3 +19723,12 @@ a non-main file as GCC's (rejected: a wrong evaluation in a system header would 
 bit_cast's bytes as whole bytes (rejected: bit-fields and unnamed bit-fields need bits, bit-cast5.C, bit-cast13.C); placement new only
 inside std::construct_at (taken for every placement new of the reserved form from C++20: no false error, at most an acceptance GCC
 refuses outside construct_at before C++26).
+
+## 2026-11-23: cpp-ce2 merged with cpp-small (branch `cpp-ce2-1123`)
+
+mac/next (`8674189b3`, with cpp-small's read rules: C++ read 5,846 / 0 / 435) merged into cpp-ce2-1123; two code conflicts resolved by
+keeping both sides (sema.ae's "InitListExpr": cpp-small's embedded positions and cpp-ce2's union :field; diag.ae's sema-errors handler:
+cpp-small's :cx/reported guard around cpp-ce2's line-0 header error), the journal and survey by union. The 48 rows the two streams
+turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read again on the merged tree: 46 own pass and the control pair
+failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
+5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.

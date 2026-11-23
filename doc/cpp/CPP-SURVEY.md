@@ -10604,7 +10604,9 @@ The own record: 37 rows to own pass (cpp0x/constexpr-union8, cpp1y/constexpr-lif
 -tracking-const11, -union5, pr94066, pr94066-3, cpp2a/bit-cast4, -5, -11, -12, -13, -14, -17, constexpr-98122, -dtor7, -dtor8,
 -dynamic4, -6, -7, -8, -9, -14, -18, -new3, -new13, -new15, -new26, -union3, -union6, -union7, gomp/pr34964), none lost. C++ read
 5,834 / 0 / 444 (253 n/a) -> 5,860 / 0 / 419 (252 n/a); completeness 0.9756 -> 0.9766, independence 0.9658 -> 0.9664 (the read stage
-0.831 -> 0.834); eval, AOT and print unchanged.
+0.831 -> 0.834); eval, AOT and print unchanged. With mac/next merged after (`8674189b3`, cpp-small's 5,846 / 0 / 435): the 48 rows the two
+streams turned to own pass read again on the merged tree, all 46 passing and the control failing; C++ read 5,872 / 0 / 410 (249 n/a),
+completeness 0.9770, independence 0.9666.
 
 ### Left
 
