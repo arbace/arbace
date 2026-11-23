@@ -19732,3 +19732,32 @@ cpp-small's :cx/reported guard around cpp-ce2's line-0 header error), the journa
 turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read again on the merged tree: 46 own pass and the control pair
 failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
 5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.
+
+## 2026-11-23: cpp-tzdb: c++20/tzdb.cc by Arbace's own code generator, its names clang's; pretty1 out of check-known (branch `cpp-tzdb-1123`)
+
+DECISION cpp-rt-own4-1 (a) carried through (doc/cpp/CPP-SURVEY.md, "As built: cpp-tzdb"). The branch had stopped at
+`sys_seconds secs(sys_days(ymd) + days(1))` with time_point's converting constructor template missing, and, its preceding
+function stubbed, at `struct quoted`'s friend. Both traced, not guessed: the first was [over.best.ics]/4's standard-conversions-only
+reaching into a converting constructor template's deduction and a trait's value, which cached is_convertible<days, seconds> false
+(a class instance, so every later use saw it); the second no order at all, the implicit default constructor of a class with a
+reference member, which is deleted. Then, probe by probe on the whole unit (25 minutes each; reduced cases against clang 23.1.5's IR
+by the host's clang++ with rt_ir's flags, by hand, the oracle), twelve rules for the generation and eleven for the names: the first
+generated IR differed from the pack's in 106 names, the last in none (1,066 of 1,066, names.sh's approximation of check.ae's
+defined-names). Three of the name rules fix miscompiles that other units may hit too: a trivial copy constructor reached through
+another class's conversion function had copied the source's bytes (`sys_days{y/mwdl}`), path::string() had called itself (a
+template-id's call took the non-template), and an unsigned 64-bit subtraction in the evaluator threw on the host.
+
+Kept to the code generator where the checker's records were made with the old rule (the deleted default constructor, a trivial
+class's default constructor, the immediate invocations, the template-id candidates, the specializations' default arguments); the
+deduction context, traits, alias constraints, default template arguments' cutoff, nested class ids and decltype of a reference apply to
+both. The own dg check (bin/repr-cpp dg --front native --only): 303 files at 30abf2bea's tree with the fixes (every 8th own pass, the
+trait and alias-template files), 288 own passes as recorded; after merging mac/next (097078f5b, cpp-ce2 and cpp-small: one conflict
+in sema's ce-lv, resolved keeping both branches) 314 files at another offset, 299 as recorded; no own pass lost.
+gxx-dg/diagnostic/missing-header-pr110164.C does not finish on mac/next itself (69bb781b5 in a throwaway worktree: over 1,100 s), a
+pre-existing hang, not this branch's.
+
+Records: rt_ours_glob takes c++20/tzdb.cc; test/cpp/check-known.edn loses pretty1 (GCC's __PRETTY_FUNCTION__ since 5651dd62a). The
+runtime build and the sampling's records run detached under bin/heavy-lock (`.tmp/tz/chain.sh` of the worktree: runtime-build,
+runtime-inputs --record, check --sample 25 --record, check --aot --sample 25 --record; each step's status in `.tmp/tz/chain/status`);
+the lock's queue held five jobs when it started (18:28 UTC). Left for that run: reap, crops-score (--record, --judge --strict),
+records-check, and this journal's results.
