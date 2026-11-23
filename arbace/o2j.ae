@@ -910,6 +910,28 @@
 
 (defn- jstrs [xs] (list 'new 'String/1 (mapv #(list 'java-str %) xs)))
 
+;; the embedded oi (queue 544, jdk/ocaml's Oi): the externals a Lambda text interpreted at run time calls, by the program's loader's
+;; verbs "ext-index" (a name's index and arity, (index << 8) | arity, nil for no external of the runtime) and "ext-call" (an index and the
+;; arguments): the runtime has no reflection at the compiled level, so the table is the program's (its main class's static methods)
+(defn oi-ext-methods
+  "The static methods extIndex and extCall over *externals* (load-externals!), sorted by name."
+  []
+  (let [es (sort-by key *externals*) n (symbol "n$") i (symbol "i$") a (symbol "a$")]
+    [(list 'method (with-meta 'extIndex {:public true :static true}) [(with-meta n {:tag 'String})]
+           (concat (list 'switch n)
+                   (mapcat (fn [k [nm [_ ar]]] [nm (list 'Long/valueOf (bit-or (bit-shift-left (long k) 8) (long ar)))]) (range) es)
+                   [nil]))
+     (list 'method (with-meta 'extCall {:public true :static true}) [(with-meta i {:tag 'int}) (with-meta a {:tag 'Object/1})]
+           (concat (list 'switch i)
+                   (mapcat (fn [k [nm [cls ar]]] [k (apply list (symbol (str cls) nm) (map (fn [j] (list 'aget a j)) (range ar)))]) (range) es)
+                   [(list 'throw (list 'ocaml.rt.Rt/internal "oi: no such external"))]))]))
+
+(defn oi-ext-class
+  "The light level's table of the externals (test/ocaml/o2j/run.ae): oi-ext-methods in the class ocaml.u.OiExts."
+  []
+  (conj (header-forms "ocaml.u" nil)
+        (concat (list 'defclass (with-meta 'OiExts {:public true})) (oi-ext-methods))))
+
 (defn- registry-methods
   "The compiled level's Dynlink (OC220 (a)'s compiled half, queue 373-1): the program's loader, its main class's static methods. load
   answers jdk/ocaml's Main/loader: \"parse\" a plugin's Lambda text, looked up by its key (plugin-key) among PLUGINS ({:name :key
@@ -917,12 +939,19 @@
   of no plugin a Failure; \"define\" the entry's INIT; \"global\" a unit's module block (UNITS', then the plugins'), nil for another name."
   [units plugins]
   (let [x (symbol "x$") t (symbol "t$") k (symbol "k$") n (symbol "n$") main (str *pkg* ".M__main")]
+    (into
     [(list 'method (with-meta 'load {:public true :static true}) [(with-meta x {:tag 'Object/1})]
            (list 'let [(with-meta t {:tag 'String}) (list 'cast 'String (list 'aget x 0))]
                  (list 'cond
                        (list '.equals t (list 'java-str "parse")) (list (symbol main "plugin") (list 'cast 'String (list 'aget x 1)))
                        (list '.equals t (list 'java-str "define")) (list 'aget (list 'cast 'Object/1 (list 'aget x 1)) 3)
                        (list '.equals t (list 'java-str "global")) (list (symbol main "global") (list 'cast 'String (list 'aget x 1)))
+                       ;; the embedded oi's externals (queue 544)
+                       (list '.equals t (list 'java-str "ext-index")) (list (symbol main "extIndex") (list 'cast 'String (list 'aget x 1)))
+                       (list '.equals t (list 'java-str "ext-call"))
+                       (list 'let [(with-meta (symbol "c$") {:tag 'Object/1}) (list 'cast 'Object/1 (list 'aget x 1))]
+                             (list (symbol main "extCall") (list 'unchecked-int (list 'long (list 'cast 'Long (list 'aget (symbol "c$") 0))))
+                                   (list 'cast 'Object/1 (list 'aget (symbol "c$") 1))))
                        :else nil)))
      (list 'method (with-meta 'plugin {:public true :static true}) [(with-meta t {:tag 'String})]
            (list 'let [(with-meta k {:tag 'String}) (list 'java-str (list 'String/valueOf (list '.hashCode t)) (list 'java-str "#")
@@ -934,13 +963,15 @@
                                                           (list 'lambda 'Runnable [] (list (symbol (str *pkg* ".D_" name) "init")) nil)
                                                           nil])])
                                  plugins)
-                         [:else (list 'throw (list 'ocaml.rt.Rt/failwith (list 'java-str "o2j: dynlink: no plugin of this text in the program's registry")))])))
+                         ;; a text no plugin of the registry has: the embedded oi's (queue 544: a toplevel phrase's)
+                         [:else (list 'ocaml.rt.Oi/parse t)])))
      (list 'method (with-meta 'global {:public true :static true}) [(with-meta n {:tag 'String})]
            (concat (list 'cond)
                    (mapcat (fn [u] [(list '.equals n (list 'java-str u)) (symbol (program-class u) "G")]) (distinct units))
                    (mapcat (fn [{:keys [name]}] [(list '.equals n (list 'java-str name)) (symbol (str *pkg* ".D_" name) "G")])
                            (remove #(some #{(:name %)} units) plugins))
-                   [:else nil]))]))
+                   [:else (list 'ocaml.rt.Oi/global n)]))]
+    (oi-ext-methods))))
 
 (defn main-forms
   "The program's main class: inits, the units' initialisation in link order as one Runnable, and
@@ -956,12 +987,12 @@
                              [nil]))
                (concat
                 (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void}))
-                (when (and *in-ns* (some #{"Dynlink"} units))
+                (when (and *in-ns* (some #{"Dynlink" "Topeval"} units))
                   [(list 'ocaml.rt.Main/setUnits (jstrs units))
                    (list 'ocaml.rt.Main/setLoader (list 'lambda 'java.util.function.Function [(symbol "x$")]
                                                         (list (symbol (str *pkg* ".M__main") "load") (list 'cast 'Object/1 (symbol "x$")))))])
                 [(list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))]))
-         (when (and *in-ns* (some #{"Dynlink"} units)) (registry-methods units plugins)))))
+         (when (and *in-ns* (some #{"Dynlink" "Topeval"} units)) (registry-methods units plugins)))))
 
 (defn shard-forms
   "The compiled level's dispatcher (OC93 (a)): the class ocaml.u.Shard, whose main runs the program the environment
