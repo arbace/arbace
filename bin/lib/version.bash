@@ -75,7 +75,7 @@ arbace_crop_paths=(
 # depends on (it analyzes the runtime's classes, not their Go natives), stay out of arbace_runtime_key alone
 arbace_runtime_not=(! -path go/arbace/oi.ae ! -path 'go/arbace/oi/*' ! -path go/arbace/scm.ae ! -path 'go/arbace/scm/*'
                     ! -path go/arbace/scminterp.ae ! -path 'go/arbace/scminterp/*' ! -path go/arbace/py.ae ! -path 'go/arbace/py/*'
-                    ! -path go/arbace/libm.ae ! -path 'go/arbace/libm/*')
+                    ! -path go/arbace/libm.ae ! -path 'go/arbace/libm/*' ! -path go/arbace/pytls.ae ! -path 'go/arbace/pytls/*')
 arbace_not_crops=()
 for _p in "${arbace_crop_paths[@]}"; do arbace_not_crops+=(! -path "$_p"); done
 unset _p
@@ -94,7 +94,8 @@ unset _p
 # a provenance rewritten keeps the gate's executables and their runtime the checkout's); nor jdk/platform/ (JN10
 # part 2, the java.base pack of repr/java's shipped reader: no program embeds it until the read closure is
 # embedded, doc/classes/JAVA-FRONTEND-SURVEY.md, "As built: JN10 (write-ahead)", JFS147); nor the crops' Go forms
-# (go/arbace/{oi,scm,scminterp,py,libm}{.ae,/}: oi's, si's, pyi's and the libm port hsi and pyi import; the user, 2026-11-03,
+# (go/arbace/{oi,scm,scminterp,py,libm,pytls}{.ae,/}: oi's, si's, pyi's, the libm port hsi and pyi import and the crypto/tls
+# _ssl imports (queue 552); the user, 2026-11-03,
 # before the re-seed after the backlog: a crop's Go change reruns no compile of the runtime's namespaces; c2j analyzes
 # the runtime's classes, not their Go natives; ci's, cinterp's and crt's stay, C's embedded runtime). Two programs of one runtime key
 # analyze a checkout's namespaces alike, so a build's host of that key compiles them (one j2g

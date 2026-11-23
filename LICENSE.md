@@ -69,6 +69,16 @@ covers what.
   (doc/go/JRT-NOTES.md, phase 2a): Copyright 2009 The Go Authors, under Go's BSD 3-Clause
   License (text below). `overlay/go/runtime/arbace_local.ae` and `overlay/go/runtime.ae` are
   Arbace's own.
+- `go/arbace/pytls.ae` and `go/arbace/pytls/` (queue 552, the user's 537-4 (a): the TLS stack under pyi's `_ssl`;
+  doc/python/PYTHON-SURVEY.md, "As built: 552"): Go's `src/crypto/tls` with the dependencies it takes from inside GOROOT
+  (`src/vendor/golang.org/x/crypto`'s cryptobyte, chacha20poly1305, chacha20, internal/poly1305 and internal/alias;
+  `src/crypto/internal/fips140/tls12` and `tls13`, `src/crypto/tls/internal/fips140tls`) of TamaGo's go1.27.1 tree
+  (https://github.com/usbarmory/tamago-go, tag `go1.27.1`, the GOROOT pinned by `seed/goroot.sha256`, SHA-256
+  5745170fd3c83cb77ec88bc50aee8606f0436e718c222b48376b5943ac0cebe5), patched (post-handshake authentication, external
+  PSKs, TLS 1.2 PSK suites, the exporter secret in the key log, alerts from the verification callbacks; the stubs of
+  boring, godebug and cpu; doc/python/pytls-vendor.md and pytls-vendor.diff) and converted to Go forms by `bin/repr-go
+  read`: Copyright 2009 The Go Authors, under Go's BSD 3-Clause License (text below; golang.org/x/crypto's LICENSE is
+  the same text). The `arbace_*.go` files' new code is Arbace's, under the same license as the files it extends.
 - `overlay/go/reflect/arbace_named.ae` (goi's run-time named types, doc/go/GOI-SPEC.md "As built:
   GR9a-c"): Arbace's addition to Go's package `reflect`, written after the GR9 survey's prototype
   (doc/go/GR9-SURVEY.md, Appendix B) on reflect's own types and helpers of TamaGo's go1.27.1
