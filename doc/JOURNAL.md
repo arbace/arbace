@@ -19081,3 +19081,13 @@ and the light level's whole re-records; the eval rows the Mac's, queue 539). Bef
   check-aot-native.edn, check-suite-aot-native.edn and aot-known.edn's stale entries, then `bin/reap --record`, `bin/crops-score
   --record`, `bin/records-check`. chain2 (oc-compiled) writes the whole native compiled records from its older tree: at its merge, its
   file first, then this branch's 17 rows (`--record --only-list .tmp/oc/tools.txt` again, or the rows copied).
+
+## 2026-11-23: the user's decisions on ocaml-1123's two questions
+
+Asked through the coordinator from ocaml-1123's report; answered by the user:
+- The counting rule: (a), an AOT case passes when either AOT level (the light level or the compiled level) passes it (`bin/reap`'s
+  `:other-level`, as built on ocaml-1123). Alternative not taken: (b) only the tool rows at the compiled level.
+- The toplevel rows at AOT (tool-caml-tex/ellipses, redirections, self-contained-toplevel/main): (a), oi embedded in the compiled
+  toplevel, the Mac's queue 544. Alternatives not taken: (b) n/a at AOT; (c) by design.
+- ocaml-1123 continues the AOT list: ocamldoc's five rows at the compiled level, int64-unboxing, unboxed-primitive-args, the gc-roots
+  tests' `@mods` at the AOT levels, opam base64 and fmt; the Mac's 539 handles backtrace/lazy and user_data_regression at eval.
