@@ -19109,3 +19109,18 @@ test/rust/runtime/ir.sha256). Logs in the VM's `.tmp/q542/logs/lu/` and `lub/`.
 - Checks: foreign-test (the probe's extern block lowered, variadic, the link name; libc's id) FAIL at the parent, PASS at the change;
   pack-compare-test passed, inline-test 15 of 15, `bin/rust-front essential` passed (its known summary, five controls differing, 0
   stub calls). Built in a side worktree (detached) so that the queued rsi-build kept the round-1 code; cherry-picked after it.
+
+## 2026-11-23: 542 (the VM): C6 round 3, libc's repr(C) and core's ptr callees
+
+- A dependency's `#[repr(C)]` structs and unions now carry `:repr "C"` in its native interface facts (core-check's ADT facts, for
+  libc, hashbrown and unwind only: std's own crates keep the helper's shape): libc's `s! { .. }` structs take their repr from the
+  macro, which mono's source reading (src-adt) never sees, so stat's fields were reordered (st_mode at 128 for rustc's 24). libc's
+  pass now writes 252 repr(C) ADTs. lib-unit compare: FileType's and size's field offsets equal (std 119 -> 121).
+- `bin/rust-front lib-unit export core --add` over its 16 module files built no body for core::ptr (`core::ptr ... bodies 0`), while
+  core-check over ptr/mod.rs alone (`CORE_EXPORT_KEYS` without_provenance, without_provenance_mut, read) exports all three (2 equal to
+  rustc's built MIR) and mem/mod.rs alone align_of: appended to the export by hand (the add round's own mechanism, `cat` onto
+  native-core-items.edn), with the round-2 add's two bodies: std 121 -> **124 equal**, 15 differ, 186 refused (stack_overflow's
+  `Handler::null`, eh's read_encoded_pointer and find_eh_action now equal). The multi-file run's loss is not diagnosed (a finding for
+  the export: why ptr's keys are not wanted when 16 files run together).
+- Not yet: the 37 statics initialized by a const fn call (lib-unit's build gives no static facts, `:statics {}`, so a body naming a
+  static is refused at the build even when exported: CTFE of the initializer and the static's symbol are one piece of work).
