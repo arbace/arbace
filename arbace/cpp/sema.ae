@@ -1588,7 +1588,12 @@
   "explicit-spec's [explicit? sure?]: sure? false for an explicit(cond) whose value the slice could not evaluate (queue 497)."
   [scope ^String text]
   (let [t (or text "")]
-    (if-let [[_ rest] (re-find #"(?s)^\s*(?:inline\s+|constexpr\s+)*explicit(?![A-Za-z0-9_$])\s*(\(.*)?" t)]
+    ;; (cpp-tzdb, the code generator: the text is the source's, so a reserved macro's name may stand before `explicit`,
+    ;; <bits/basic_string.h>'s `_GLIBCXX20_CONSTEXPR explicit basic_string(const _Tp&, const _Alloc& = _Alloc())`, which had
+    ;; converted a string_view to a string implicitly: the conditional operator's string_view : string had both ways)
+    (if-let [[_ rest] (if (checking?)
+                        (re-find #"(?s)^\s*(?:inline\s+|constexpr\s+)*explicit(?![A-Za-z0-9_$])\s*(\(.*)?" t)
+                        (re-find #"(?s)^\s*(?:inline\s+|constexpr\s+|_[A-Z][A-Z0-9_]*\s+)*explicit(?![A-Za-z0-9_$])\s*(\(.*)?" t))]
       (if (and rest (str/starts-with? rest "("))
         (let [depth (atom 0)
               end (loop [i 0] (if (>= i (count rest)) nil
@@ -8471,6 +8476,27 @@
                   ;; (else the other operand converted to the class, a temporary by its converting constructor)
                   [k {:op :temp-obj :init (init-for kt o ctx :copy) :ty kt :cat :pr}])]
       (if swap? (cond-node ctx c o k) (cond-node ctx c k o)))
+    ;; (cpp-tzdb, the code generator: [expr.cond]/4.3.3, operands of two unrelated class types: the one that converts
+    ;; implicitly to the other's type after lvalue-to-rvalue conversion (its cv kept) converted so, exactly one of them, the
+    ;; result a prvalue of that type: `false ? declval<const string_view&>() : declval<const string&>()` is a prvalue const
+    ;; string_view, <type_traits>' __cond_res, so common_reference_t<const string_view&, const string&> and common_type_t,
+    ;; tzdb.cc's ranges::equal_range(node->rules, ri.rules(), ranges::less{}, &Rule::name) over totally_ordered_with)
+    (and (not (checking?)) (class-id (:ty a)) (class-id (:ty b)) (not= (class-id (:ty a)) (class-id (:ty b)))
+         (not (abi/derived-from? (class-id (:ty a)) (class-id (:ty b)))) (not (abi/derived-from? (class-id (:ty b)) (class-id (:ty a)))))
+    (let [target (fn [o] (cond-> (abi/unq (:ty o)) (:c (:ty o)) (assoc :c true) (:v (:ty o)) (assoc :v true)))
+          ;; (the implicit conversion sequence first, ics: an explicit constructor is no candidate, basic_string's from a
+          ;; string_view-like type)
+          conv (fn [e o] (let [t (target o)]
+                           (when (ics e (abi/unq t))
+                             (try {:op :temp-obj :init (init-for (abi/unq t) e ctx :copy) :ty t :cat :pr}
+                                  (catch arbace.lang.ExceptionInfo _ nil)))))
+          ab (conv a b) ba (conv b a)]
+      (cond (and ab (not ba)) (let [b' (if (= :pr (:cat b)) b {:op :temp-obj :init (init-for (abi/unq (:ty b)) b ctx :copy) :ty (target b) :cat :pr})]
+                                {:op :cond :c c :then ab :else b' :ty (target b) :cat :pr})
+            (and ba (not ab)) (let [a' (if (= :pr (:cat a)) a {:op :temp-obj :init (init-for (abi/unq (:ty a)) a ctx :copy) :ty (target a) :cat :pr})]
+                                {:op :cond :c c :then a' :else ba :ty (target a) :cat :pr})
+            :else (fail :conversion "the conditional operator's operands of class types " (:name (abi/cls (class-id (:ty a)))) " and "
+                        (:name (abi/cls (class-id (:ty b)))) ": " (if ab "each converts to the other" "neither converts to the other"))))
     :else (let [a (rv a) b (rv b)
                 ;; ([expr.cond]/7.1: operands of the same type, that type; bool ? bool stays bool)
                 t (cond (= (abi/unq (:ty a)) (abi/unq (:ty b))) (abi/unq (:ty a))
