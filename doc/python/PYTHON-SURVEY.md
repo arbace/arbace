@@ -8093,6 +8093,7 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
 
+<<<<<<< HEAD
 ## As built: the user's n/a decisions of 2026-11-23 (na-apply-1123)
 
 The user's decisions on the eval tail's proposal (A-F, H's test_gc counts, I, J1-J3 taken; G not now; doc/JOURNAL.md, "Python and
@@ -8106,3 +8107,53 @@ patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s lis
 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
 (`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
 `:finalization-cycle` by design.
+=======
+## As built: 536, the largest deferred classes of the eval level (2026-11-23, the Mac VM, queue 536)
+
+The deferred classes of `test/python/divergences.edn` by rows on next fa635f636's record (`bin/pyi divergences --table`), less those
+others own this round (537 the design classes; 535 D1-D6: multiprocessing, the native _io's checks, the spawn modules' limits,
+sysconfig, fileio's strace; the main host :c-accelerators, pyctypes' `:capi-port`, the cap-crash modules):
+
+- **`:goi-liveness-fallthrough` (255 rows): 254 were stale.** test_xml_etree's and test_xml_etree_c's rows were the records
+  night's (2026-11-19), before goi's fallthrough fix (cfd69a6d2) reached an executable; the re-record of 2026-11-22 left both
+  modules out. Run at this branch (goi interpreting py and pyexpat), all 254 pass; both modules are recorded again. The class
+  keeps test_multiprocessing_spawn's test_rapid_restart.
+- **`:audit-hooks` (23 rows): PEP 578 in pyi** (`go/arbace/py/audit.go`). `sys.addaudithook` keeps the hooks (one list for the
+  process, as the interpreter's `audit_hooks`), `Audit(event, args...)` is PySys_Audit (each hook called with the event and the
+  arguments' tuple; the first error stops it and fails the operation), `sys.audit` checks as `sys_audit` does (nothing without a
+  hook, then "expected str for argument 'event'"), and `sys.addaudithook` first raises "sys.addaudithook" (an Exception refuses the
+  hook silently, a BaseException propagates). The runtime raises the events test_audit checks, each at CPython's place and with
+  its arguments: marshal.dumps (dumps and dump), marshal.loads, marshal.load; object.__setattr__ (check_set_special_type_attr:
+  `__name__`, `__qualname__`, `__module__`, `__doc__`, `__bases__`, `__type_params__`; object_set_class's `__class__`);
+  mmap.__new__; _posixsubprocess.fork_exec; sys.excepthook (PyErr_Print: a hook's RuntimeError ends the display); sys.unraisablehook
+  (a user's hook); socket.gethostname, socket.__new__, socket.bind; gc.get_objects, get_referrers, get_referents; sys._getframe,
+  sys._getframemodulename; _thread.start_new_thread, start_joinable_thread; syslog.openlog (the implicit one too, now with
+  LOG_USER as CPython's), syslog.syslog, setlogmask, closelog; time.sleep (before the conversion); sys.monitoring.register_callback.
+  pickle's find_class and sqlite3's connect are their modules' own `sys.audit` calls. Not given: CPython's C hooks
+  (PySys_AddAuditHook), `__cantrace__` (pyi's tracer is not suspended while a hook runs: test_cantrace), and FileIO's "open":
+  pyi's `_io` is `_pyio`, whose FileIO audits nothing (test_open; a wrapper of FileIO.__init__ was tried and withdrawn, `_io` being
+  535's this round), nor the many events no test of the class needs (exec, compile, import, os.*, ...).
+- **`:os-and-files-misc`: `os.fspath`** gives a str or bytes subclass's instance as it is (PyOS_FSPath's PyUnicode_Check):
+  test_pathlib's six test_str_subclass_common rows pass; test_pathlib recorded again (971 pass, 398 skipped).
+- **`:dbm-sqlite3-locking` (30 rows): not closed.** crt's fcntl F_GETLK answers 0 without writing l_type, so SQLite's unix VFS
+  takes every probe for a conflict (the main host's lead). Answering F_UNLCK moves SQLite's WAL on to mmap its `-shm` file, which
+  crt refuses (ENODEV): "disk I/O error", and test_dbm's test_clear fails. A file mmap in crt (a copy, written back at munmap, as
+  emu's fileMap) makes WAL work, but the rows still fail on pyi's own cause: dbm.sqlite3 never closes the cursors of `PRAGMA
+  journal_mode = wal` and of `__setitem__`, which CPython's reference count resets at once; under pyi the statements stay active
+  until the collector runs, so a write is not in the file when the database is closed and reopened. Both crt changes were
+  withdrawn (crt is the C crop's); the report's DECISION 536-1 carries the patch.
+
+The eval cell: 40,552 / 1,604 / 1,714 before, 40,827 / 1,610 / 1,437 after (pass / design / deferred; the design count's +6 are
+the six C14N subtests the xml modules now reach, skipped by the test); Python's completeness 0.9794 to 0.9810.
+
+Proofs (the VM, arm64; stage 0 nx's with goi interpreting the checkout's py; `PYI_RUNNER=python3` drives the runner alone, so a py
+or crt change does not compile the runner's AOT module again): `bin/pyi check --only` of test_audit, test_dbm, test_dbm_sqlite3,
+test_xml_etree, test_xml_etree_c and test_pathlib's six rows, then test_audit and test_pathlib whole with the four timing rows and
+xml_etree_c's eight IOTest and Iterparse rows again (`PYI_LIB_TEST_TEST_TIMEOUT=600`, `PYI_LIB_TEST_TIMEOUT=10800`); the three
+negative controls fail as they must in each. The record's rows of those four modules were written by `bin/pyi check --judge DIR
+--record` over copies of the run directories holding those modules alone; xml_etree_c's eight rows are the second run's (the first
+run's errors came from a second `--only` run of the same worktree cleaning the shared `.tmp/t6i` directories). Two rows went the
+other way on the VM: test_deeply_nested_deepcopy is past 600 s with py interpreted (`:runner-limits`, `:slow-on-goi`: it passes on
+the main host's compiled runtime) and test_cyclic_gc fails whole and alone (`:finalization-collect`; the main host's whole-module
+runs failed it too).
+>>>>>>> mac/536-py-deferred
