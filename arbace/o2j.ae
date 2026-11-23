@@ -910,6 +910,18 @@
 
 (defn- jstrs [xs] (list 'new 'String/1 (mapv #(list 'java-str %) xs)))
 
+;; (queue 544) a program one of whose own units calls oi's Dynlink externals itself (the toplevel's topeval.ml, a driver of plugins):
+;; its main class sets the runtime's loader as a program that links Dynlink does (main-forms)
+(def ^:dynamic *oi-loader* false)
+
+(defn- calls-oi-loader?
+  "Whether unit u's code names the external caml_oi_dynlink_parse."
+  [u]
+  (letfn [(walk [x] (cond (seq? x) (or (and (= 'prim (first x)) (= "caml_oi_dynlink_parse" (second x))) (some walk x))
+                          (vector? x) (some walk x)
+                          :else false))]
+    (boolean (walk (:code u)))))
+
 ;; the embedded oi (queue 544, jdk/ocaml's Oi): the externals a Lambda text interpreted at run time calls, by the program's loader's
 ;; verbs "ext-index" (a name's index and arity, (index << 8) | arity, nil for no external of the runtime) and "ext-call" (an index and the
 ;; arguments): the runtime has no reflection at the compiled level, so the table is the program's (its main class's static methods)
@@ -987,12 +999,12 @@
                              [nil]))
                (concat
                 (list 'method (with-meta 'main {:public true :static true}) (with-meta [(with-meta 'args {:tag 'String/1})] {:tag 'void}))
-                (when (and *in-ns* (some #{"Dynlink" "Topeval"} units))
+                (when (and *in-ns* (or (some #{"Dynlink"} units) *oi-loader*))
                   [(list 'ocaml.rt.Main/setUnits (jstrs units))
                    (list 'ocaml.rt.Main/setLoader (list 'lambda 'java.util.function.Function [(symbol "x$")]
                                                         (list (symbol (str *pkg* ".M__main") "load") (list 'cast 'Object/1 (symbol "x$")))))])
                 [(list 'System/exit (list 'ocaml.rt.Main/run 'args (list (symbol (str *pkg* ".M__main") "inits"))))]))
-         (when (and *in-ns* (some #{"Dynlink" "Topeval"} units)) (registry-methods units plugins)))))
+         (when (and *in-ns* (or (some #{"Dynlink"} units) *oi-loader*)) (registry-methods units plugins)))))
 
 (defn shard-forms
   "The compiled level's dispatcher (OC93 (a)): the class ocaml.u.Shard, whose main runs the program the environment
@@ -1115,7 +1127,7 @@
                      (str "Translated by arbace.o2j from the Lambda of the plugin " (:name u) "."))
         (doseq [[m c] (sort missing)] (println (str "missing\t" od "\t" (:name u) "\t" m "\t" c)))))
     (write-forms (io/file od "M__main.ae")
-                 (main-forms (concat libs (map :name us)) (for [u ps] (merge {:name (:name u) :key (:key u)} (plugin-deps u))))
+                 (binding [*oi-loader* (boolean (some calls-oi-loader? us))] (main-forms (concat libs (map :name us)) (for [u ps] (merge {:name (:name u) :key (:key u)} (plugin-deps u)))))
                  "The program's main class, by arbace.o2j.")
     ;; (the library units only the plugins name after the main class: in the program's tree, not in its link)
     (spit (io/file od "files.txt")
