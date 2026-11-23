@@ -18899,3 +18899,60 @@ on the merged code), py-eval (P1's record: the regression's cause, goi's table k
 `:c-run` added to c-check's inputs (19b1d84aa). The essential gate runs on 3a005e514 (AGENDA, "State at 2026-11-22"). Also: the clock notes
 of the morning ran two hours ahead (the second questions' entry says 09:30 UTC for about 07:30); a guard gives heavy-lock holders
 oom_score_adj -500 after two OOM kills; a heavy-lock ticket must not be renamed (its waiter matches its own name).
+
+## 2026-11-23: java-batch-1122: Java's reader batch: 520 merged, JCS52 (a) doclint, javac's tool once, the regeneration once, the --release rows
+
+The main session's "PENDING HOST BATCH" (520-1 (a): one regeneration for every reader change), stream java-batch of the burst; branch
+`java-batch-1122` from mac/next `3e8dfe109`, next `6bf9970cc` merged before the builds. No gate (the user). Each heavy step under
+`bin/heavy-lock`, one session chaining the gate's executables, javac's convert, the tool build and the regeneration (the
+coordinator's request); the light runs under `ulimit -v 8 GiB`, `GOMEMLIMIT=3GiB`, the print chunks at most 101 tests.
+
+1. **Merged** mac/520-java-print2 `752419048` (queue 520): `7175a240c` keeps `(do q C/f)` for a constant read through a pure
+   non-type qualifier (JLS 15.29; t05905; repr/java's reader hash `835e66a3` -> `83a29bfb`), `f9ceb9f5a` the printer's declarations of a
+   class the tools' host lacks from the platform (`REPR_JAVA_PLATFORM`, set by bin/java-check's print step; t07835), `752419048` both
+   out of `:print-shapes` and `:print-erasure`.
+2. **JCS52 (a), doclint in javac's world** (decided 2026-10-25; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JCS52 (a)"):
+   bin/javac-vendor's module jdk.javadoc (jdk26u at baf63fb, `src/jdk.javadoc/share/classes/jdk/javadoc/internal/{doclint/{Checker,
+   DocLint,Env,Messages},html/{HtmlAttr,HtmlTag},tool/AccessLevel}.java`; GPL-2.0 with the Classpath exception, as javac's sources,
+   LICENSE.md's jdk26u entry), its four `doclint*.properties` compiled by CompileProperties on javac's tool in the generate step and
+   compared with the build's `support/gensrc/jdk.javadoc`; the tool world's ServiceLoader streams its providers and its variant binds
+   `com.sun.tools.doclint.DocLint` to jdk.javadoc's provider. Alternatives: a variant of `DocLint.newDocLint` returning the provider
+   directly (smaller, but the decision says the service is bound as the world binds its others); the whole of jdk.javadoc (no:
+   doclint's closure is seven files).
+3. **The printer, t04738** (J1's finding, decisions-1122.md): since n-java-conv (`92eabf1b7`) the receiver is printed, and a
+   declaration's TYPE_USE annotation that javac also puts on a qualified type's outer class (`@A Outer<T>.Inner this`) was printed
+   twice, `@A @A`, which javac refuses (not repeatable). `strip-decl-annotations`, which fields and methods used, now serves every
+   declaration that prints its modifiers before its type (parameters, the receiver, locals, for-each, lambdas', patterns'); not in the
+   reader's hash.
+4. **The print sample** (520-2 (a): keep and classify what REPR_JAVA_PLATFORM moves): 302 passing print rows (170 whose sources import a
+   package outside the program's world, 130 random, seed 1122; `.tmp/sel/` in the worktree), in three chunks under GOMEMLIMIT=3GiB on
+   J1's tool (`javac-8e45bec2...`, key `d906aaf3`, REPR_JAVA_STALE_OK, the checkout's repr/java by RT.toolSource): t05905 and t07835 now
+   pass; no row moves to a non-pass; only class-file notes improve (t04730 11 -> 1 differing class files, t04738, t06002, t06005).
+   Recorded with `--judge --partial --record`.
+5. **The heavy chain**, one hold of `bin/heavy-lock` (the coordinator; the first try OOM-killed at 11:28 by another stream's
+   unlocked 20 GB process, nothing written, requeued). Steps:
+   - A: the gate's executables at `36aab1207a6fe6f3a858` (next 6bf9970cc's gate key; no executable held next's aot key), 79 min,
+     22.5 GB, then `bin/javac-vendor convert` on J1's tool, 8 min, 8.2 GB. It changed only doclint's 15 forms, ServiceLoader's,
+     jdk/javac/edge.edn (`:exists` ObjectInputStream, ObjectOutputStream, CodingErrorAction; doclint's packages `:unexported`),
+     sources.txt (+11) and provenance. No form of jdk.compiler moved.
+   - B: javac's tool `javac-273d4acab196a651b919`, 75 min, 26.5 GB.
+   - mac/clj-cdr-1122 did not merge cleanly (doc/JOURNAL.md, jdk/provenance.edn, jdk/javac/provenance.edn), so C ran without it.
+   - C: jrt-convert update (38 min, 11.9 GB, chunked), javac-vendor convert (8 min), fixtures (1 min) and forms (2 min) updates. Only
+     the provenance files moved; bin/provenance-check passes.
+   - D: the rows on the new tool.
+6. **Rows moved:**
+   - Diagnostics 44 (`--release`), classes 2, interp 3 and print 2 (t06345; t04718 after a printer fix: the printer declared
+     `var result = a.equals(b)` under `--release 8`, and now types Object's equals, hashCode and toString calls of an untyped receiver,
+     which no override changes).
+   - Source sets of t04718 and t06345 now own (read independence 7,840 -> 7,844 of 7,844 cases own).
+   - The `--release` controls (7, 27) are still refused, status 2.
+   - The 8 doclint rows do not move: the tool's ServiceLoader is the program's registry (since 2026-11-10), whose `stream()`, which
+     `DocLint.newDocLint` uses, ignores the variant's providers (the probe: iterator 1, stream 0). Fixed in the next tool build by the
+     variant's `stream()` ("As built: JCS52 (a)").
+   - `:diag-release` and `:print-release` are empty, `:read-platform`'s release pattern is out, and `:diag-doclint`'s note says why.
+7. **Not built, left to a later stream** (both decided (a) on 2026-10-25; the survey says what each needs): JCS51 processors (25
+   rows), JCS53 command line and file manager (12 rows).
+
+Java's completeness 0.959904 -> 0.961747 on the batch (read 7,795 / 0 / 49, eval 3,097 / 116 / 112, print 3,318 / 0 / 7), 0.963175 after
+merging next 66e688931 (96.3 floored); maturity and independence 1.0. Checks: reap, crops-score --record and --judge --strict,
+records-check 0 problems. No gate; no compiled-level run of t05905 (a whole-world j2g; its interp proved on the Mac).

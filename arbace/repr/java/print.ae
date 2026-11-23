@@ -523,6 +523,25 @@
   [scope m]
   (apply str (for [a (annotation-items m)] (str (annotation-text scope a) " "))))
 
+(defn- strip-decl-annotations
+  "Declared type `t` of a declaration with metadata `dm`: a qualified type's outermost class
+  annotated by the declaration's own annotations (Outer<A>.Inner, javac's TYPE_USE annotation of
+  the modifiers on it, which the converter keeps on both) without them, so that Java writes them
+  once, in the modifiers. Fields' and methods' types, and since queue 520's batch (t04738, the
+  receiver printed since n-java-conv: @A @A Outer<T>.Inner this) every declaration's that prints
+  its modifiers before its type: parameters, the receiver, locals, for-each, lambdas' and
+  patterns' bindings."
+  [dm t]
+  (if (and (seq? t) (= '.. (first t)))
+    (let [[_ outer inner] t
+          outer' (strip-decl-annotations dm outer)
+          items (annotation-items (meta outer'))
+          own (set (annotation-items dm))]
+      (if (and (seq items) (every? own items) (instance? arbace.lang.IObj outer'))
+        (list '.. (with-meta outer' (reduce dissoc (meta outer') (map first items))) inner)
+        (if (identical? outer outer') t (list '.. outer' inner))))
+    t))
+
 ;;; ------------------------------------------------------------------------------------------
 ;;; Types (SPEC §4.3)
 
@@ -805,6 +824,30 @@
 
 (declare pack-methods)
 
+(def ^:private print-platform
+  (delay (try (platform/composite (platform/resource-pack)
+                                  (when-let [d (not-empty (System/getenv "REPR_JAVA_PLATFORM"))]
+                                    (when (.isDirectory (java.io.File. ^String d)) (platform/dir-platform d))))
+              (catch Throwable _ nil))))
+
+(defn- platform-info
+  "Class `bin`'s declarations (cenv/info's shape) from the platform's class file, for a class the tools'
+  host does not hold (queue 520, t07835: JDI's Connector.defaultArguments()'s Map, which var would take as
+  javac's Map<String, Connector.Argument>): the java.base pack, then REPR_JAVA_PLATFORM's exploded modules
+  when it is set (bin/java-check's print step sets it to the read's platform); nil when neither has it."
+  [^String bin]
+  (when-let [p @print-platform]
+    (let [i (.lastIndexOf bin ".")
+          pkg (if (neg? i) "" (subs bin 0 i))
+          path (str (str/replace bin "." "/") ".class")]
+      (when-let [b (some #(platform/class-bytes p % path) (get (platform/index p) pkg))]
+        (let [c (cf/parse b)]
+          {:interface? (not (zero? (bit-and (long (:flags c)) 0x200)))
+           :super (:super c) :interfaces (:interfaces c)
+           :fields (:fields c)
+           ;; no synthetic member (a bridge is dropped below, as for the host's)
+           :methods (filterv #(zero? (bit-and (long (:flags %)) 0x1000)) (:methods c))})))))
+
 (defn- host-decl
   "The declaration of class `bin` from the tools' host's own classes (the JDK's that the corpus
   does not hold), erased, or nil."
@@ -812,7 +855,7 @@
   (if (contains? @host-decls bin)
     (get @host-decls bin)
     (let [d (try
-              (when-let [i (cenv/info (str/replace bin "." "/"))]
+              (when-let [i (or (cenv/info (str/replace bin "." "/")) (platform-info bin))]
                 {:kind (if (:interface? i) :interface :class)
                  :super (some-> (:super i) (str/replace "/" "."))
                  :ifaces (mapv #(str/replace % "/" ".") (:interfaces i))
@@ -2513,7 +2556,7 @@
             jn (when (get-in env [:locals (name p) :pattern])
                  (first (remove (fn [c] (some #(= c (or (:java %) %)) (cons nil (concat (keys (:locals env)) (keep :java (vals (:locals env)))))))
                                 (map #(str (ident p) "_" %) (iterate inc 1)))))]
-        {:text (str (binding-mods env p) (if t (type-text (:scope env) t) "var") " " (or jn (ident p)))
+        {:text (str (binding-mods env p) (if t (type-text (:scope env) (strip-decl-annotations (meta p) t)) "var") " " (or jn (ident p)))
          :env (if (= '_ p) env (add-local env p :pattern true :java jn))})
       (seq? p)
       (let [[r & subs] p
@@ -2731,6 +2774,19 @@
                false)
     :else false))
 
+(defn- object-method-jtype
+  "The return type of a call of one of Object's methods that no override can change, whatever its
+  receiver: equals (boolean) and hashCode (int), primitive, and toString (String, a final class); nil
+  for any other form. The printer's type of such a call when its receiver's type is unknown, where it
+  printed var, which Java before 10 has not (t04718, compiled with --release 8)."
+  [x]
+  (when (and (seq? x) (symbol? (first x)))
+    (case [(str (first x)) (count x)]
+      [".equals" 3] "boolean"
+      [".hashCode" 2] "int"
+      [".toString" 2] "java.lang.String"
+      nil)))
+
 (defn- untagged-jtype
   "The jtype of an untagged local initialized with `init` (SPEC §5.3): a long for an integer
   literal, else the initializer's type; nil when the printer cannot tell."
@@ -2750,7 +2806,7 @@
                                     (let [t (type-of env v)] (and t (not (prim-names t)) (not (integer? v))))))
                         vs))))
     "java.lang.Object"
-    :else (type-of env init)))
+    :else (or (type-of env init) (object-method-jtype init))))
 
 (defn- local-type-text
   "The declared type of a local binding `s` with initializer `init`: its tag, else what an
@@ -2761,7 +2817,7 @@
      (cond
        ;; an anonymous class's type: Java's var
        (anonymous-class? t) "var"
-       t (decl-type-text (:scope env) t)
+       t (decl-type-text (:scope env) (strip-decl-annotations (meta s) t))
        ;; an untagged local of an anonymous class instance: the source's var (a declared
        ;; supertype differs from the initializer's type, which the converter tags)
        (is? init 'anon) "var"
@@ -3683,7 +3739,7 @@
                    ;; an untagged binding is Object's (the converter tags every other type, the
                    ;; erasure of a var's): var would take the element's type (for (Object o : a)
                    ;; over an Integer[], read back as ^Integer o)
-                   (labeled frame (block (str "for (" (binding-mods env b) (if t (decl-type-text (:scope env) t) "Object")
+                   (labeled frame (block (str "for (" (binding-mods env b) (if t (decl-type-text (:scope env) (strip-decl-annotations (meta b) t)) "Object")
                                               " " (ident b) " : " (for-each-coll-text env coll t) ")")
                                          bl)))
       "loop" (if (empty? (second x))
@@ -3902,7 +3958,7 @@
                                                            (let [b (class-binary sc t)]
                                                              (and b (decl-of b) (empty? (:tparams (decl-of b))))))))
                                  ps))
-                    (str "(" (str/join ", " (map #(str (binding-mods env %) (decl-type-text sc (tag-of %)) " " (ident %)) ps)) ")")
+                    (str "(" (str/join ", " (map #(str (binding-mods env %) (decl-type-text sc (strip-decl-annotations (meta %) (tag-of %))) " " (ident %)) ps)) ")")
                     mods? (str "(" (str/join ", " (map #(str (binding-mods env %) "var " (ident %)) ps)) ")")
                     (= 1 (count ps)) (ident (first ps))
                     :else (str "(" (str/join ", " (map ident ps)) ")"))
@@ -4063,7 +4119,7 @@
 
 (defn- param-text [env p varargs?]
   (let [t (tag-of p)
-        tt (if t (decl-type-text (:scope env) t) "Object")
+        tt (if t (decl-type-text (:scope env) (strip-decl-annotations (meta p) t)) "Object")
         tt (if varargs? (str/replace tt #"\[\]$" "...") tt)]
     (str (binding-mods env p) tt " " (ident p)
          ;; the declarations alone: a parameter of the runtime's forms named by a Java keyword
@@ -4101,7 +4157,7 @@
    (let [t (tag-of r)]
      (cond
        t (str (annotations-text (:scope env) (meta r))
-              (decl-type-text (:scope env) t)
+              (decl-type-text (:scope env) (strip-decl-annotations (meta r) t))
               (if ctor? (str " " (tag-simple-name t) ".this") " this"))
        ctor? nil
        (seq (annotation-items (meta r)))
@@ -4117,22 +4173,6 @@
     (if (keyword? (first xs))
       (recur (nnext xs) (assoc opts (first xs) (second xs)))
       [opts xs])))
-
-(defn- strip-decl-annotations
-  "Declared type `t` of a declaration with metadata `dm`: a qualified type's outermost class
-  annotated by the declaration's own annotations (Outer<A>.Inner, javac's TYPE_USE annotation of
-  the modifiers on it, which the converter keeps on both) without them, so that Java writes them
-  once, in the modifiers."
-  [dm t]
-  (if (and (seq? t) (= '.. (first t)))
-    (let [[_ outer inner] t
-          outer' (strip-decl-annotations dm outer)
-          items (annotation-items (meta outer'))
-          own (set (annotation-items dm))]
-      (if (and (seq items) (every? own items) (instance? arbace.lang.IObj outer'))
-        (list '.. (with-meta outer' (reduce dissoc (meta outer') (map first items))) inner)
-        (if (identical? outer outer') t (list '.. outer' inner))))
-    t))
 
 ;; A try that ends a void body with `return;` in its block: the source has a `return;` after the try too (the
 ;; converter drops a body's last return, but keeps the one in the try, T6978574); the printer writes it.

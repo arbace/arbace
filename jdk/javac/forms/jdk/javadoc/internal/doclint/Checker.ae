@@ -1,0 +1,1035 @@
+;; Converted from jdk26u src/jdk.javadoc/share/classes/jdk/javadoc/internal/doclint/Checker.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.javadoc.internal.doclint)
+
+(import '(com.sun.source.doctree AttributeTree
+                                 AuthorTree
+                                 DocCommentTree
+                                 DocRootTree
+                                 DocTree
+                                 DocTree$Kind
+                                 EndElementTree
+                                 EntityTree
+                                 ErroneousTree
+                                 EscapeTree
+                                 IndexTree
+                                 InheritDocTree
+                                 LinkTree
+                                 LiteralTree
+                                 ParamTree
+                                 ProvidesTree
+                                 RawTextTree
+                                 ReferenceTree
+                                 ReturnTree
+                                 SeeTree
+                                 SerialDataTree
+                                 SerialFieldTree
+                                 SinceTree
+                                 StartElementTree
+                                 SummaryTree
+                                 SystemPropertyTree
+                                 TextTree
+                                 ThrowsTree
+                                 UnknownBlockTagTree
+                                 UnknownInlineTagTree
+                                 UsesTree
+                                 ValueTree
+                                 VersionTree)
+        '(com.sun.source.tree Tree Tree$Kind)
+        '(com.sun.source.util DocTreePath DocTreePathScanner TreePath)
+        '(com.sun.tools.javac.code Flags)
+        '(com.sun.tools.javac.tree DocPretty JCTree$JCClassDecl)
+        '(com.sun.tools.javac.util Assert)
+        '(java.io IOException StringWriter)
+        '(java.net URI URISyntaxException)
+        '(java.util Deque EnumSet HashMap HashSet Iterator LinkedList List Map Objects Set)
+        '(java.util.function Function IntPredicate Predicate)
+        '(java.util.regex Pattern)
+        '(java.util.stream Collectors Stream)
+        '(javax.lang.model SourceVersion)
+        '(javax.lang.model.element Element
+                                   ElementKind
+                                   ExecutableElement
+                                   NestingKind
+                                   RecordComponentElement
+                                   TypeElement
+                                   VariableElement)
+        '(javax.lang.model.type TypeKind TypeMirror)
+        '(javax.lang.model.util Elements$Origin)
+        '(javax.tools Diagnostic$Kind JavaFileObject$Kind)
+        '(jdk.javadoc.internal.html HtmlAttr
+                                    HtmlTag
+                                    HtmlTag$BlockType
+                                    HtmlTag$ElemKind
+                                    HtmlTag$EndKind
+                                    HtmlTag$Flag))
+
+(defclass ^:public Checker
+  :extends (DocTreePathScanner Void Void)
+
+  (field ^:final ^Env env)
+
+  (field ^{:tag (Set Element)} foundParams (HashSet.))
+
+  (field ^{:tag (Set TypeMirror)} foundThrows (HashSet.))
+
+  (field ^{:tag (Map Element (Set String))} foundAnchors (HashMap.))
+
+  (field ^boolean foundInheritDoc false)
+
+  (field ^boolean foundReturn false)
+
+  (field ^boolean hasNonWhitespaceText false)
+
+  (defclass ^:public ^:enum Flag
+    (constants
+      TABLE_HAS_CAPTION
+      TABLE_IS_PRESENTATION
+      HAS_ELEMENT
+      HAS_HEADING
+      HAS_INLINE_TAG
+      HAS_TEXT
+      REPORTED_BAD_INLINE))
+
+  (defclass ^:static TagStackItem
+    (field ^:final ^DocTree tree)
+
+    (field ^:final ^HtmlTag tag)
+
+    (field ^:final ^{:tag (Set HtmlAttr)} attrs)
+
+    (field ^:final ^{:tag (Set Flag)} flags)
+
+    (constructor [this ^DocTree tree ^HtmlTag tag]
+      (set! (.-tree this) tree)
+      (set! (.-tag this) tag)
+      (set! attrs (EnumSet/noneOf HtmlAttr))
+      (set! flags (EnumSet/noneOf Flag)))
+
+    (method ^:public toString ^String [this] (String/valueOf tag)))
+
+  (field ^:private ^:final ^{:tag (Deque TagStackItem)} tagStack)
+
+  (field ^:private ^HtmlTag currHeadingTag)
+
+  (field ^:private ^int implicitHeadingRank)
+
+  (field ^:private ^boolean inIndex)
+
+  (field ^:private ^boolean inLink)
+
+  (field ^:private ^boolean inSee)
+
+  (field ^:private ^boolean inSummary)
+
+  (constructor [this ^Env env]
+    (set! (.-env this) (cast Env (Assert/checkNonNull env)))
+    (set! tagStack (LinkedList.)))
+
+  (method ^:public scan ^Void [this ^DocCommentTree tree ^TreePath p]
+    (.initTypes env)
+    (.setCurrent env p tree)
+    (let [isOverridingMethod (not (.isEmpty (.-currOverriddenMethods env)))
+          fo (.getSourceFile (.getCompilationUnit p))]
+      (cond
+        (identical? (.getKind (.getLeaf p)) Tree$Kind/PACKAGE)
+          (let [isPkgInfo (.isNameCompatible fo "package-info" JavaFileObject$Kind/SOURCE)]
+            (if (nil? tree)
+                (do (when isPkgInfo (.reportMissing this "dc.missing.comment")) (return nil))
+                (when-not isPkgInfo (.reportReference this "dc.unexpected.comment"))))
+        (and (some? tree) (.isNameCompatible fo "package" JavaFileObject$Kind/HTML))
+          (when (.isEmpty (.getFullBody tree))
+            (.reportMissing this "dc.missing.comment")
+            (return nil))
+        (nil? tree)
+          (do
+            (cond
+              (.isDefaultConstructor this)
+                (when (.isNormalClass this (.getParentPath p))
+                  (.reportMissing this "dc.default.constructor"))
+              (and (and (and (and (not isOverridingMethod) (not (.isSynthetic this)))
+                             (not (.isAnonymous this)))
+                        (not (.isRecordComponentOrField this)))
+                   (not (.isImplicitlyDeclaredClass this (.getLeaf (.-currPath env)))))
+                (.reportMissing this "dc.missing.comment"))
+            (return nil))
+        (and (and (.isEmpty (.getFirstSentence tree)) (not isOverridingMethod))
+             (not (.pseudoElement this p)))
+          (cond
+            (.isEmpty (.getBlockTags tree))
+              (do (.reportMissing this "dc.empty.comment") (return nil))
+            (.allMatch (.stream (.getBlockTags tree))
+                       (lambda Predicate ^boolean [^DocTree t]
+                         (not (identical? (.getKind t) DocTree$Kind/DEPRECATED))))
+              (.report (.-messages env)
+                       Messages$Group/MISSING
+                       Diagnostic$Kind/WARNING
+                       tree
+                       "dc.empty.main.description"
+                       (new Object/1 []))))
+      (.clear tagStack)
+      (set! currHeadingTag nil)
+      (.clear foundParams)
+      (.clear foundThrows)
+      (set! foundInheritDoc false)
+      (set! foundReturn false)
+      (set! hasNonWhitespaceText false)
+      (set! implicitHeadingRank
+            (switch (.getKind (.getLeaf p))
+              (MODULE PACKAGE CLASS INTERFACE ENUM ANNOTATION_TYPE RECORD) 1
+              COMPILATION_UNIT (if (.isNameCompatible fo "package" JavaFileObject$Kind/HTML) 1 0)
+              (METHOD VARIABLE) 3
+              (throw (AssertionError.
+                       (java-str "unexpected tree kind: " (.getKind (.getLeaf p)) " " fo)))))
+      (.scan this (DocTreePath. p tree) nil)
+      (cond
+        (.isDeclaredType this)
+          (let [te (cast TypeElement (.-currElement env))]
+            (.checkParamsDocumented this (.getTypeParameters te))
+            (.checkParamsDocumented this (.getRecordComponents te)))
+        (.isExecutable this)
+          (when-not isOverridingMethod
+            (let [ee (cast ExecutableElement (.-currElement env))]
+              (when-not (.isCanonicalRecordConstructor this ee)
+                (.checkParamsDocumented this (.getTypeParameters ee))
+                (.checkParamsDocumented this (.getParameters ee)))
+              (switch (.getKind (.getReturnType ee))
+                (VOID NONE) nil
+                (when (and (and (not foundReturn) (not foundInheritDoc))
+                           (not (.isSameType (.-types env)
+                                             (.getReturnType ee)
+                                             (.-java_lang_Void env))))
+                  (.reportMissing this "dc.missing.return")))
+              (.checkThrowsDocumented this (.getThrownTypes ee)))))
+      nil))
+
+  (method ^:private isCanonicalRecordConstructor ^boolean [this ^ExecutableElement ee]
+    (let [te (cast TypeElement (.getEnclosingElement ee))]
+      (if (not (identical? (.getKind te) ElementKind/RECORD))
+          false
+          (let [^{:tag (List (? extends RecordComponentElement))} stateComps (.getRecordComponents
+                                                                               te)
+                ^{:tag (List (? extends VariableElement))} params (.getParameters ee)]
+            (if (not (== (.size stateComps) (.size params)))
+                false
+                (let [^{:tag (Iterator (? extends RecordComponentElement))} stateIter (.iterator
+                                                                                        stateComps)
+                      ^{:tag (Iterator (? extends VariableElement))} paramIter (.iterator params)]
+                  (while (and (.hasNext paramIter) (.hasNext stateIter))
+                    (let [param (cast VariableElement (.next paramIter))
+                          comp (cast RecordComponentElement (.next stateIter))]
+                      (when (or (not (Objects/equals (.getSimpleName param) (.getSimpleName comp)))
+                                (not (.isSameType (.-types env) (.asType param) (.asType comp))))
+                        (return false))))
+                  true))))))
+
+  (method ^:private pseudoElement ^boolean [this ^TreePath p]
+    (and (identical? (.getKind (.getLeaf p)) Tree$Kind/COMPILATION_UNIT)
+         (identical? (.getKind (.getSourceFile (.getCompilationUnit p))) JavaFileObject$Kind/HTML)))
+
+  (method ^:private reportMissing ^void [this ^String code & ^Object/1 args]
+    (.report (.-messages env)
+             Messages$Group/MISSING
+             Diagnostic$Kind/WARNING
+             (.getLeaf (.-currPath env))
+             code
+             args))
+
+  (method ^:private reportReference ^void [this ^String code & ^Object/1 args]
+    (.report (.-messages env)
+             Messages$Group/REFERENCE
+             Diagnostic$Kind/WARNING
+             (.getLeaf (.-currPath env))
+             code
+             args))
+
+  (method ^:public scan ^Void [this ^DocTreePath path ^Void unused]
+    (cast Void (.scan super path unused)))
+
+  (method ^:public visitDocComment ^Void [this ^DocCommentTree tree ^Void ignore]
+    (.scan this (.getFirstSentence tree) ignore)
+    (.scan this (.getBody tree) ignore)
+    (.checkTagStack this)
+    (for-each [^DocTree blockTag (.getBlockTags tree)]
+      (.clear tagStack)
+      (.scan this blockTag ignore)
+      (.checkTagStack this))
+    nil)
+
+  (method ^:private checkTagStack ^void [this]
+    (for-each [^TagStackItem tsi tagStack]
+      (.warnIfEmpty this tsi nil)
+      (when (and (identical? (.getKind (.-tree tsi)) DocTree$Kind/START_ELEMENT)
+                 (identical? (.-endKind (.-tag tsi)) HtmlTag$EndKind/REQUIRED))
+        (let [t (cast StartElementTree (.-tree tsi))]
+          (.error (.-messages env) Messages$Group/HTML t "dc.tag.not.closed" (.getName t))))))
+
+  (method ^:public visitText ^Void [this ^TextTree tree ^Void ignore]
+    (set! hasNonWhitespaceText (.hasNonWhitespace this tree))
+    (when hasNonWhitespaceText (.checkAllowsText this tree) (.markEnclosingTag this Flag/HAS_TEXT))
+    nil)
+
+  (method ^:public visitEntity ^Void [this ^EntityTree tree ^Void ignore]
+    (set! hasNonWhitespaceText true)
+    (.checkAllowsText this tree)
+    (.markEnclosingTag this Flag/HAS_TEXT)
+    (let [s (.getCharacters (.-trees env) tree)]
+      (when (nil? s)
+        (.error (.-messages env) Messages$Group/HTML tree "dc.entity.invalid" (.getName tree)))
+      nil))
+
+  (method ^:public visitEscape ^Void [this ^EscapeTree tree ^Void ignore]
+    (set! hasNonWhitespaceText true)
+    (.checkAllowsText this tree)
+    (.markEnclosingTag this Flag/HAS_TEXT)
+    nil)
+
+  (method checkAllowsText ^void [this ^DocTree tree]
+    (let [top (cast TagStackItem (.peek tagStack))]
+      (when (and (and (some? top) (identical? (.getKind (.-tree top)) DocTree$Kind/START_ELEMENT))
+                 (not (.acceptsText (.-tag top))))
+        (when (.add (.-flags top) Flag/REPORTED_BAD_INLINE)
+          (.error (.-messages env)
+                  Messages$Group/HTML
+                  tree
+                  "dc.text.not.allowed"
+                  (.getName (cast StartElementTree (.-tree top))))))))
+
+  (method ^:public visitStartElement ^Void [this ^StartElementTree tree ^Void ignore]
+    (let [treeName (.getName tree)
+          t (HtmlTag/of treeName)]
+      (cond
+        (nil? t) (.error (.-messages env) Messages$Group/HTML tree "dc.tag.unknown" treeName)
+        (identical? (.-elemKind t) HtmlTag$ElemKind/HTML4)
+          (.error (.-messages env) Messages$Group/HTML tree "dc.tag.not.supported.html5" treeName)
+        :else
+          (let [^:mutable done false]
+            (for-each [^TagStackItem tsi tagStack]
+              (if (.accepts (.-tag tsi) t)
+                  (do
+                    (while (not (identical? (.peek tagStack) tsi))
+                      (.warnIfEmpty this (cast TagStackItem (.peek tagStack)) nil)
+                      (.pop tagStack))
+                    (set! done true)
+                    (break))
+                  (when-not (identical? (.-endKind (.-tag tsi)) HtmlTag$EndKind/OPTIONAL)
+                    (set! done true)
+                    (break))))
+            (when (and (not done) (.accepts HtmlTag/BODY t))
+              (while (not (.isEmpty tagStack))
+                (.warnIfEmpty this (cast TagStackItem (.peek tagStack)) nil)
+                (.pop tagStack)))
+            (.markEnclosingTag this Flag/HAS_ELEMENT)
+            (.checkStructure this tree t)
+            (switch t (H1 H2 H3 H4 H5 H6) (.checkHeading this tree t))
+            (when (.contains (.-flags t) HtmlTag$Flag/NO_NEST)
+              (for-each [^TagStackItem i tagStack]
+                (when (identical? t (.-tag i))
+                  (.warning (.-messages env)
+                            Messages$Group/HTML
+                            tree
+                            "dc.tag.nested.not.allowed"
+                            treeName)
+                  (break))))
+            (when (and (.isSelfClosing tree) (not (.isSelfClosingAllowed this t)))
+              (.error (.-messages env) Messages$Group/HTML tree "dc.tag.self.closing" treeName))))
+      (try
+        (let [parent (cast TagStackItem (.peek tagStack))
+              top (TagStackItem. tree t)]
+          (.push tagStack top)
+          (.visitStartElement super tree ignore)
+          (when (some? t)
+            (switch t
+              CAPTION
+                (when (and (some? parent) (identical? (.-tag parent) HtmlTag/TABLE))
+                  (.add (.-flags parent) Flag/TABLE_HAS_CAPTION))
+              (H1 H2 H3 H4 H5 H6)
+                (when (and (some? parent)
+                           (or (identical? (.-tag parent) HtmlTag/SECTION)
+                               (identical? (.-tag parent) HtmlTag/ARTICLE)))
+                  (.add (.-flags parent) Flag/HAS_HEADING))
+              IMG
+                (when-not (.contains (.-attrs top) HtmlAttr/ALT)
+                  (.error (.-messages env)
+                          Messages$Group/ACCESSIBILITY
+                          tree
+                          "dc.no.alt.attr.for.image"))))
+          nil)
+        (finally
+          (when (or (nil? t) (identical? (.-endKind t) HtmlTag$EndKind/NONE)) (.pop tagStack))))))
+
+  (method ^:private isSelfClosingAllowed ^boolean [this ^HtmlTag tag]
+    (identical? (.-endKind tag) HtmlTag$EndKind/NONE))
+
+  (method ^:private checkStructure ^void [this ^StartElementTree tree ^HtmlTag t]
+    (let [treeName (.getName tree)
+          top (cast TagStackItem (.peek tagStack))]
+      (switch (.-blockType t)
+        BLOCK
+          (do
+            (when (or (nil? top) (.accepts (.-tag top) t)) (return))
+            (switch (.getKind (.-tree top))
+              START_ELEMENT
+                (when (identical? (.-blockType (.-tag top)) HtmlTag$BlockType/INLINE)
+                  (let [name (.getName (cast StartElementTree (.-tree top)))]
+                    (if (.equalsIgnoreCase "a" (.toString name))
+                        (.warning (.-messages env)
+                                  Messages$Group/HTML
+                                  tree
+                                  "dc.tag.not.allowed.element.default.style"
+                                  treeName
+                                  name)
+                        (.error (.-messages env)
+                                Messages$Group/HTML
+                                tree
+                                "dc.tag.not.allowed.inline.element"
+                                treeName
+                                name))
+                    (return)))
+              (LINK LINK_PLAIN)
+                (let [name (.-tagName (.getKind (.-tree top)))]
+                  (.warning (.-messages env)
+                            Messages$Group/HTML
+                            tree
+                            "dc.tag.not.allowed.tag.default.style"
+                            treeName
+                            name)
+                  (return))))
+        INLINE (when (or (nil? top) (.accepts (.-tag top) t)) (return))
+        (LIST_ITEM TABLE_ITEM)
+          (when (some? top)
+            (.remove (.-flags top) Flag/REPORTED_BAD_INLINE)
+            (when (.accepts (.-tag top) t) (return)))
+        OTHER
+          (do
+            (switch t
+              SCRIPT nil
+              (.error (.-messages env) Messages$Group/HTML tree "dc.tag.not.allowed" treeName))
+            (return)))
+      (.error (.-messages env) Messages$Group/HTML tree "dc.tag.not.allowed.here" treeName)))
+
+  (method ^:private checkHeading ^void [this ^StartElementTree tree ^HtmlTag tag]
+    (cond
+      (> (.getHeadingRank this tag) (unchecked-add-int (.getHeadingRank this currHeadingTag) 1))
+        (if (nil? currHeadingTag)
+            (.error (.-messages env)
+                    Messages$Group/ACCESSIBILITY
+                    tree
+                    "dc.tag.heading.sequence.1"
+                    tag
+                    implicitHeadingRank)
+            (.error (.-messages env)
+                    Messages$Group/ACCESSIBILITY
+                    tree
+                    "dc.tag.heading.sequence.2"
+                    tag
+                    currHeadingTag))
+      (<= (.getHeadingRank this tag) implicitHeadingRank)
+        (.error (.-messages env)
+                Messages$Group/ACCESSIBILITY
+                tree
+                "dc.tag.heading.sequence.3"
+                tag
+                implicitHeadingRank))
+    (set! currHeadingTag tag))
+
+  (method ^:private getHeadingRank ^int [this ^HtmlTag tag]
+    (if (nil? tag)
+        implicitHeadingRank
+        (switch tag H1 1 H2 2 H3 3 H4 4 H5 5 H6 6 (throw (IllegalArgumentException.)))))
+
+  (method ^:public visitEndElement ^Void [this ^EndElementTree tree ^Void ignore]
+    (let [treeName (.getName tree)
+          t (HtmlTag/of treeName)]
+      (cond
+        (nil? t) (.error (.-messages env) Messages$Group/HTML tree "dc.tag.unknown" treeName)
+        (identical? (.-endKind t) HtmlTag$EndKind/NONE)
+          (.error (.-messages env) Messages$Group/HTML tree "dc.tag.end.not.permitted" treeName)
+        :else
+          (let [^:mutable done false]
+            (while (not (.isEmpty tagStack))
+              (let [top (cast TagStackItem (.peek tagStack))]
+                (cond
+                  (identical? t (.-tag top))
+                    (do
+                      (switch t
+                        TABLE
+                          (when (and (and (not (.contains (.-flags top) Flag/TABLE_IS_PRESENTATION))
+                                          (not (.contains (.-attrs top) HtmlAttr/SUMMARY)))
+                                     (not (.contains (.-flags top) Flag/TABLE_HAS_CAPTION)))
+                            (.error (.-messages env)
+                                    Messages$Group/ACCESSIBILITY
+                                    tree
+                                    "dc.no.summary.or.caption.for.table"))
+                        (SECTION ARTICLE)
+                          (when-not (.contains (.-flags top) Flag/HAS_HEADING)
+                            (.error (.-messages env)
+                                    Messages$Group/HTML
+                                    tree
+                                    "dc.tag.requires.heading"
+                                    treeName)))
+                      (.warnIfEmpty this top tree)
+                      (.pop tagStack)
+                      (set! done true)
+                      (break))
+                  (or (nil? (.-tag top))
+                      (not (identical? (.-endKind (.-tag top)) HtmlTag$EndKind/REQUIRED)))
+                    (do (.warnIfEmpty this top nil) (.pop tagStack))
+                  :else
+                    (let [^:mutable found false]
+                      (for-each [^TagStackItem si tagStack]
+                        (when (identical? (.-tag si) t) (set! found true) (break)))
+                      (if (and found
+                               (identical? (.getKind (.-tree top)) DocTree$Kind/START_ELEMENT))
+                          (do
+                            (.error (.-messages env)
+                                    Messages$Group/HTML
+                                    (.-tree top)
+                                    "dc.tag.start.unmatched"
+                                    (.getName (cast StartElementTree (.-tree top))))
+                            (.pop tagStack))
+                          (do
+                            (.error (.-messages env)
+                                    Messages$Group/HTML
+                                    tree
+                                    "dc.tag.end.unexpected"
+                                    treeName)
+                            (set! done true)
+                            (break)))))))
+            (when (and (not done) (.isEmpty tagStack))
+              (.error (.-messages env) Messages$Group/HTML tree "dc.tag.end.unexpected" treeName))))
+      (cast Void (.visitEndElement super tree ignore))))
+
+  (method warnIfEmpty ^void [this ^TagStackItem tsi ^DocTree endTree]
+    (when (some? (.-tag tsi))
+      (when-instance [^StartElementTree startTree (.-tree tsi)]
+        (when (and (and (and (and (.contains (.-flags (.-tag tsi)) HtmlTag$Flag/EXPECT_CONTENT)
+                                  (not (.contains (.-flags tsi) Flag/HAS_TEXT)))
+                             (not (.contains (.-flags tsi) Flag/HAS_ELEMENT)))
+                        (not (.contains (.-flags tsi) Flag/HAS_INLINE_TAG)))
+                   (not (identical? (.-elemKind (.-tag tsi)) HtmlTag$ElemKind/HTML4)))
+          (let [^DocTree tree (if (some? endTree) endTree ^DocTree startTree)
+                treeName (.getName startTree)]
+            (.warning (.-messages env) Messages$Group/HTML tree "dc.tag.empty" treeName))))))
+
+  (method ^:public visitAttribute ^Void [this ^AttributeTree tree ^Void ignore]
+    (when-not (not (identical? (.getParentKind this) DocTree$Kind/START_ELEMENT))
+      (let [currTag (.-tag (cast TagStackItem (.peek tagStack)))]
+        (when (and (some? currTag) (not (identical? (.-elemKind currTag) HtmlTag$ElemKind/HTML4)))
+          (let [name (.getName tree)
+                attr (.getAttr currTag name)]
+            (when (some? attr)
+              (let [first (.add (.-attrs (cast TagStackItem (.peek tagStack))) attr)]
+                (when-not first
+                  (.error (.-messages env) Messages$Group/HTML tree "dc.attr.repeated" name))))
+            (let [attrName (.toString name)]
+              (when (and (not (.startsWith attrName "on")) (not (.startsWith attrName "data-")))
+                (let [k (.getAttrKind currTag name)]
+                  (switch k
+                    OK nil
+                    OBSOLETE
+                      (.warning (.-messages env) Messages$Group/HTML tree "dc.attr.obsolete" name)
+                    HTML4
+                      (.error (.-messages env)
+                              Messages$Group/HTML
+                              tree
+                              "dc.attr.not.supported.html5"
+                              name)
+                    INVALID
+                      (.error (.-messages env) Messages$Group/HTML tree "dc.attr.unknown" name))))
+              (when (some? attr)
+                (switch attr
+                  ID
+                    (let [value (.getAttrValue this tree)]
+                      (if (nil? value)
+                          (.error (.-messages env)
+                                  Messages$Group/HTML
+                                  tree
+                                  "dc.anchor.value.missing")
+                          (do
+                            (when-not (.matches (.matcher validId value))
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.invalid.anchor"
+                                      value))
+                            (when-not (.checkAnchor this value)
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.anchor.already.defined"
+                                      value)))))
+                  HREF
+                    (when (identical? currTag HtmlTag/A)
+                      (let [v (.getAttrValue this tree)]
+                        (if (or (nil? v) (.isEmpty v))
+                            (.error (.-messages env) Messages$Group/HTML tree "dc.attr.lacks.value")
+                            (let [m (.matcher docRoot v)]
+                              (if (.matches m)
+                                  (let [rest (.group m 2)]
+                                    (when-not (.isEmpty rest) (.checkURI this tree rest)))
+                                  (.checkURI this tree v))))))
+                  VALUE
+                    (when (identical? currTag HtmlTag/LI)
+                      (let [v (.getAttrValue this tree)]
+                        (if (or (nil? v) (.isEmpty v))
+                            (.error (.-messages env) Messages$Group/HTML tree "dc.attr.lacks.value")
+                            (when-not (.matches (.matcher validNumber v))
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.attr.not.number")))))
+                  BORDER
+                    (cond
+                      (identical? currTag HtmlTag/TABLE)
+                        (let [v (.getAttrValue this tree)]
+                          (try
+                            (when (or (nil? v)
+                                      (and (not (.isEmpty v)) (not (== (Integer/parseInt v) 1))))
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.attr.table.border.not.valid"
+                                      (if (nil? v) ^Object tree ^Object v)))
+                            (catch NumberFormatException ex
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.attr.table.border.not.number"
+                                      v))))
+                      (identical? currTag HtmlTag/IMG)
+                        (let [v (.getAttrValue this tree)]
+                          (try
+                            (when (or (nil? v)
+                                      (and (not (.isEmpty v)) (not (== (Integer/parseInt v) 0))))
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.attr.img.border.not.valid"
+                                      (if (nil? v) ^Object tree ^Object v)))
+                            (catch NumberFormatException ex
+                              (.error (.-messages env)
+                                      Messages$Group/HTML
+                                      tree
+                                      "dc.attr.img.border.not.number"
+                                      v)))))
+                  ROLE
+                    (when (identical? currTag HtmlTag/TABLE)
+                      (let [v (.getAttrValue this tree)]
+                        (when (Objects/equals v "presentation")
+                          (.add (.-flags (cast TagStackItem (.peek tagStack)))
+                                Flag/TABLE_IS_PRESENTATION)))))))))
+        nil)))
+
+  (method ^:private checkAnchor ^boolean [this ^String name]
+    (let [e (.getEnclosingPackageOrClass this (.-currElement env))]
+      (or (nil? e)
+          (.add (cast Set
+                      (.computeIfAbsent foundAnchors
+                                        e
+                                        (lambda Function ^Set [^Element k] (HashSet.))))
+                name))))
+
+  (method ^:private getEnclosingPackageOrClass ^Element [this ^:mutable ^Element e]
+    (while (some? e)
+      (when (or (.isDeclaredType (.getKind e)) (identical? (.getKind e) ElementKind/PACKAGE))
+        (return e))
+      (set! e (.getEnclosingElement e)))
+    e)
+
+  (field ^:private ^:static ^:final ^Pattern validId (Pattern/compile "[^\\s]+"))
+
+  (field ^:private ^:static ^:final ^Pattern validNumber (Pattern/compile "-?[0-9]+"))
+
+  (field ^:private ^:static ^:final ^Pattern docRoot
+    (Pattern/compile "(?i)(\\{@docRoot *}/?)?(.*)"))
+
+  (method ^:private getAttrValue ^String [this ^AttributeTree tree]
+    (when (some? (.getValue tree))
+      (let [sw (StringWriter.)]
+        (try (.print (DocPretty. sw) (.getValue tree)) (catch IOException e))
+        (.toString sw))))
+
+  (method ^:private checkURI ^void [this ^AttributeTree tree ^String uri]
+    (when-not (.startsWith uri "javascript:")
+      (try
+        (URI. uri)
+        (catch URISyntaxException e
+          (.error (.-messages env) Messages$Group/HTML tree "dc.invalid.uri" uri)))))
+
+  (method ^:public visitAuthor ^Void [this ^AuthorTree tree ^Void ignore]
+    (.warnIfEmpty this tree (.getName tree))
+    (cast Void (.visitAuthor super tree ignore)))
+
+  (method ^:public visitDocRoot ^Void [this ^DocRootTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (cast Void (.visitDocRoot super tree ignore)))
+
+  (method ^:public visitIndex ^Void [this ^IndexTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (when inIndex
+      (.warning (.-messages env)
+                Messages$Group/HTML
+                tree
+                "dc.tag.nested.tag"
+                (java-str "@" (.getTagName tree))))
+    (for-each [^TagStackItem tsi tagStack]
+      (when (identical? (.-tag tsi) HtmlTag/A)
+        (.warning (.-messages env)
+                  Messages$Group/HTML
+                  tree
+                  "dc.tag.a.within.a"
+                  (java-str "{@" (.getTagName tree) "}"))
+        (break)))
+    (let [prevInIndex inIndex]
+      (try
+        (set! inIndex true)
+        (cast Void (.visitIndex super tree ignore))
+        (finally (set! inIndex prevInIndex)))))
+
+  (method ^:public visitInheritDoc ^Void [this ^InheritDocTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (set! foundInheritDoc true)
+    (cast Void (.visitInheritDoc super tree ignore)))
+
+  (method ^:public visitLink ^Void [this ^LinkTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (when inLink
+      (.warning (.-messages env)
+                Messages$Group/HTML
+                tree
+                "dc.tag.nested.tag"
+                (java-str "@" (.getTagName tree))))
+    (let [prevInLink inLink
+          ^HtmlTag t (if (identical? (.getKind tree) DocTree$Kind/LINK) HtmlTag/CODE HtmlTag/SPAN)]
+      (.push tagStack (TagStackItem. tree t))
+      (try
+        (set! inLink true)
+        (cast Void (.visitLink super tree ignore))
+        (finally (.pop tagStack) (set! inLink prevInLink)))))
+
+  (method ^:public visitSee ^Void [this ^SeeTree node ^Void unused]
+    (try (set! inSee true) (cast Void (.visitSee super node unused)) (finally (set! inSee false))))
+
+  (method ^:public visitLiteral ^Void [this ^LiteralTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (when (identical? (.getKind tree) DocTree$Kind/CODE)
+      (for-each [^TagStackItem tsi tagStack]
+        (when (identical? (.-tag tsi) HtmlTag/CODE)
+          (.warning (.-messages env) Messages$Group/HTML tree "dc.tag.code.within.code")
+          (break))))
+    (cast Void (.visitLiteral super tree ignore)))
+
+  (method ^:public visitParam ^Void [this ^ParamTree tree ^Void ignore]
+    (let [typaram (.isTypeParameter tree)
+          nameTree (.getName tree)
+          ^Element paramElement (when (some? nameTree)
+                                  (.getElement (.-trees env)
+                                               (DocTreePath. (.getCurrentPath this) nameTree)))]
+      (if (nil? paramElement)
+          (switch (.getKind (.-currElement env))
+            (CLASS INTERFACE)
+              (if typaram
+                  (.error (.-messages env)
+                          Messages$Group/REFERENCE
+                          nameTree
+                          "dc.param.name.not.found")
+                  (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.param"))
+            (METHOD CONSTRUCTOR RECORD)
+              (.error (.-messages env) Messages$Group/REFERENCE nameTree "dc.param.name.not.found")
+            (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.param"))
+          (let [unique (.add foundParams paramElement)]
+            (when-not unique
+              (.warning (.-messages env) Messages$Group/REFERENCE tree "dc.exists.param" nameTree))))
+      (.warnIfEmpty this tree (.getDescription tree))
+      (cast Void (.visitParam super tree ignore))))
+
+  (method ^:private checkParamsDocumented ^void [this ^{:tag (List (? extends Element))} list]
+    (when-not foundInheritDoc
+      (for-each [^Element e list]
+        (when-not (.contains foundParams e)
+          (let [^CharSequence paramName (if (identical? (.getKind e) ElementKind/TYPE_PARAMETER)
+                                            ^CharSequence (java-str "<" (.getSimpleName e) ">")
+                                            ^CharSequence (.getSimpleName e))]
+            (.reportMissing this "dc.missing.param" paramName))))))
+
+  (method ^:public visitProvides ^Void [this ^ProvidesTree tree ^Void ignore]
+    (let [e (.getElement (.-trees env) (.-currPath env))]
+      (when-not (identical? (.getKind e) ElementKind/MODULE)
+        (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.provides"))
+      (let [serviceType (.getServiceType tree)
+            se (.getElement (.-trees env) (DocTreePath. (.getCurrentPath this) serviceType))]
+        (when (nil? se)
+          (.error (.-messages env) Messages$Group/REFERENCE tree "dc.service.not.found"))
+        (cast Void (.visitProvides super tree ignore)))))
+
+  (method ^:public visitReference ^Void [this ^ReferenceTree tree ^Void ignore]
+    (when-not (.startsWith (.getSignature tree) "##")
+      (let [e (.getElement (.-trees env) (.getCurrentPath this))]
+        (cond
+          (nil? e) (.reportBadReference this tree)
+          (and (and (or inLink inSee) (identical? (.getKind e) ElementKind/CLASS))
+               (not (identical? (.getKind (.asType e)) TypeKind/DECLARED)))
+            (.reportBadReference this tree))))
+    (cast Void (.visitReference super tree ignore)))
+
+  (method ^:private reportBadReference ^void [this ^ReferenceTree tree]
+    (when-not (.-strictReferenceChecks env)
+      (let [refSig (.getSignature tree)
+            sep (.indexOf refSig "/")]
+        (when (> sep 0)
+          (let [moduleName (.substring refSig 0 sep)]
+            (when (SourceVersion/isName moduleName)
+              (let [^Element m (.getModuleElement (.-elements env) moduleName)]
+                (when (nil? m)
+                  (.warning (.-messages env)
+                            Messages$Group/REFERENCE
+                            tree
+                            "dc.ref.in.missing.module"
+                            moduleName)
+                  (return))))))))
+    (.error (.-messages env) Messages$Group/REFERENCE tree "dc.ref.not.found"))
+
+  (method ^:public visitReturn ^Void [this ^ReturnTree tree ^Void ignore]
+    (when foundReturn (.warning (.-messages env) Messages$Group/REFERENCE tree "dc.exists.return"))
+    (when (.isInline tree)
+      (let [dct (.getDocComment (.getCurrentPath this))
+            first (.findFirst (.filter (.stream (.getFirstSentence dct))
+                                       (lambda Predicate ^boolean [^DocTree t]
+                                         (not (Checker/isBlank t)))))]
+        (when (or (.isEmpty first) (not (identical? (.get first) tree)))
+          (.warning (.-messages env) Messages$Group/SYNTAX tree "dc.return.not.first"))))
+    (let [e (.getElement (.-trees env) (.-currPath env))]
+      (when (or (not (identical? (.getKind e) ElementKind/METHOD))
+                (identical? (.getKind (.getReturnType (cast ExecutableElement e))) TypeKind/VOID))
+        (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.return"))
+      (set! foundReturn true)
+      (.warnIfEmpty this tree (.getDescription tree))
+      (cast Void (.visitReturn super tree ignore))))
+
+  (method ^:private ^:static isBlank ^boolean [^DocTree t]
+    (switch (.getKind t)
+      TEXT (.isBlank (.getBody (cast TextTree t)))
+      MARKDOWN (.isBlank (.getContent (cast RawTextTree t)))
+      false))
+
+  (method ^:public visitSerialData ^Void [this ^SerialDataTree tree ^Void ignore]
+    (.warnIfEmpty this tree (.getDescription tree))
+    (cast Void (.visitSerialData super tree ignore)))
+
+  (method ^:public visitSerialField ^Void [this ^SerialFieldTree tree ^Void ignore]
+    (.warnIfEmpty this tree (.getDescription tree))
+    (cast Void (.visitSerialField super tree ignore)))
+
+  (method ^:public visitSince ^Void [this ^SinceTree tree ^Void ignore]
+    (.warnIfEmpty this tree (.getBody tree))
+    (cast Void (.visitSince super tree ignore)))
+
+  (method ^:public visitSummary ^Void [this ^SummaryTree tree ^Void aVoid]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (when inSummary
+      (.warning (.-messages env)
+                Messages$Group/HTML
+                tree
+                "dc.tag.nested.tag"
+                (java-str "@" (.getTagName tree))))
+    (let [idx (.indexOf (.getFullBody (.-currDocComment env)) tree)]
+      (when (or (and (== idx 1) hasNonWhitespaceText) (> idx 1))
+        (.warning (.-messages env)
+                  Messages$Group/SYNTAX
+                  tree
+                  "dc.invalid.summary"
+                  (.getTagName tree)))
+      (let [prevInSummary inSummary]
+        (try
+          (set! inSummary true)
+          (cast Void (.visitSummary super tree aVoid))
+          (finally (set! inSummary prevInSummary))))))
+
+  (method ^:public visitSystemProperty ^Void [this ^SystemPropertyTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (for-each [^TagStackItem tsi tagStack]
+      (when (identical? (.-tag tsi) HtmlTag/A)
+        (.warning (.-messages env)
+                  Messages$Group/HTML
+                  tree
+                  "dc.tag.a.within.a"
+                  (java-str "{@" (.getTagName tree) "}"))
+        (break)))
+    (cast Void (.visitSystemProperty super tree ignore)))
+
+  (method ^:public visitThrows ^Void [this ^ThrowsTree tree ^Void ignore]
+    (let [exName (.getExceptionName tree)
+          ex (.getElement (.-trees env) (DocTreePath. (.getCurrentPath this) exName))]
+      (cond
+        (nil? ex) (.error (.-messages env) Messages$Group/REFERENCE tree "dc.ref.not.found")
+        (.isThrowable this (.asType ex))
+          (switch (.getKind (.-currElement env))
+            (CONSTRUCTOR METHOD)
+              (when (.isCheckedException this (.asType ex))
+                (let [ee (cast ExecutableElement (.-currElement env))]
+                  (.checkThrowsDeclared this exName (.asType ex) (.getThrownTypes ee))))
+            (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.throws"))
+        :else (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.throws"))
+      (.warnIfEmpty this tree (.getDescription tree))
+      (cast Void (.scan this (.getDescription tree) ignore))))
+
+  (method ^:private isThrowable ^boolean [this ^TypeMirror tm]
+    (switch (.getKind tm)
+      (DECLARED TYPEVAR) (.isAssignable (.-types env) tm (.-java_lang_Throwable env))
+      false))
+
+  (method ^:private checkThrowsDeclared ^void [this ^ReferenceTree tree ^TypeMirror t
+                                               ^{:tag (List (? extends TypeMirror))} list]
+    (let [^:mutable found false]
+      (for-each [^TypeMirror tl list]
+        (when (.isAssignable (.-types env) t tl) (.add foundThrows tl) (set! found true)))
+      (when-not found
+        (.error (.-messages env) Messages$Group/REFERENCE tree "dc.exception.not.thrown" t))))
+
+  (method ^:private checkThrowsDocumented ^void [this ^{:tag (List (? extends TypeMirror))} list]
+    (when-not foundInheritDoc
+      (for-each [^TypeMirror tl list]
+        (when (and (.isCheckedException this tl) (not (.contains foundThrows tl)))
+          (.reportMissing this "dc.missing.throws" tl)))))
+
+  (method ^:public visitUnknownBlockTag ^Void [this ^UnknownBlockTagTree tree ^Void ignore]
+    (.checkUnknownTag this tree (.getTagName tree))
+    (cast Void (.visitUnknownBlockTag super tree ignore)))
+
+  (method ^:public visitUnknownInlineTag ^Void [this ^UnknownInlineTagTree tree ^Void ignore]
+    (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+    (.checkUnknownTag this tree (.getTagName tree))
+    (cast Void (.visitUnknownInlineTag super tree ignore)))
+
+  (method ^:private checkUnknownTag ^void [this ^DocTree tree ^String tagName]
+    (let [k (.getKind tree)]
+      (java-assert (or (identical? k DocTree$Kind/UNKNOWN_BLOCK_TAG)
+                       (identical? k DocTree$Kind/UNKNOWN_INLINE_TAG)))
+      (java-assert (not (.contains (.getStandardTags this) tagName)))
+      (when (and (some? (.-customTags env)) (not (.contains (.-customTags env) tagName)))
+        (let [suggestions (DocLint/suggestSimilar (.-customTags env) tagName)]
+          (if (.isEmpty suggestions)
+              (.error (.-messages env) Messages$Group/SYNTAX tree "dc.unknown.javadoc.tag")
+              (.error (.-messages env)
+                      Messages$Group/SYNTAX
+                      tree
+                      "dc.unknown.javadoc.tag.with.hint"
+                      (String/join ", " suggestions)))))))
+
+  (method ^:private getStandardTags ^{:tag (Set String)} [this]
+    (cast Set
+          (.collect (.map (.filter (Stream/of (DocTree$Kind/values))
+                                   (lambda Predicate ^boolean [^DocTree$Kind k]
+                                     (some? (.-tagName k))))
+                          (lambda Function ^String [^DocTree$Kind k] (.-tagName k)))
+                    (Collectors/toUnmodifiableSet))))
+
+  (method ^:public visitUses ^Void [this ^UsesTree tree ^Void ignore]
+    (let [e (.getElement (.-trees env) (.-currPath env))]
+      (when-not (identical? (.getKind e) ElementKind/MODULE)
+        (.error (.-messages env) Messages$Group/REFERENCE tree "dc.invalid.uses"))
+      (let [serviceType (.getServiceType tree)
+            se (.getElement (.-trees env) (DocTreePath. (.getCurrentPath this) serviceType))]
+        (when (nil? se)
+          (.error (.-messages env) Messages$Group/REFERENCE tree "dc.service.not.found"))
+        (cast Void (.visitUses super tree ignore)))))
+
+  (method ^:public visitValue ^Void [this ^ValueTree tree ^Void ignore]
+    (let [ref (.getReference tree)]
+      (if (or (nil? ref) (.isEmpty (.getSignature ref)))
+          (when-not (.isConstant this (.-currElement env))
+            (.error (.-messages env) Messages$Group/REFERENCE tree "dc.value.not.allowed.here"))
+          (let [e (.getElement (.-trees env) (DocTreePath. (.getCurrentPath this) ref))]
+            (when-not (.isConstant this e)
+              (.error (.-messages env) Messages$Group/REFERENCE tree "dc.value.not.a.constant"))))
+      (let [format (.getFormat tree)]
+        (when (some? format)
+          (let [f (.toString (.getBody format))
+                count (.count (.filter (.chars (.toString (.getBody format)))
+                                       (lambda IntPredicate ^boolean [^int ch] (== ch \%))))]
+            (when-not (== count 1)
+              (.error (.-messages env) Messages$Group/REFERENCE format "dc.value.bad.format" f))))
+        (.markEnclosingTag this Flag/HAS_INLINE_TAG)
+        (cast Void (.visitValue super tree ignore)))))
+
+  (method ^:private isConstant ^boolean [this ^Element e]
+    (if (and (some? e) (identical? (.getKind e) ElementKind/FIELD))
+        (let [value (.getConstantValue (cast VariableElement e))] (some? value))
+        false))
+
+  (method ^:public visitVersion ^Void [this ^VersionTree tree ^Void ignore]
+    (.warnIfEmpty this tree (.getBody tree))
+    (cast Void (.visitVersion super tree ignore)))
+
+  (method ^:public visitErroneous ^Void [this ^ErroneousTree tree ^Void ignore]
+    (.error (.-messages env) Messages$Group/SYNTAX tree nil (.getMessage (.getDiagnostic tree) nil))
+    nil)
+
+  (method ^:private getParentKind ^DocTree$Kind [this]
+    (.getKind (.getLeaf (.getParentPath (.getCurrentPath this)))))
+
+  (method ^:private isCheckedException ^boolean [this ^TypeMirror t]
+    (not (or (.isAssignable (.-types env) t (.-java_lang_Error env))
+             (.isAssignable (.-types env) t (.-java_lang_RuntimeException env)))))
+
+  (method ^:private isSynthetic ^boolean [this]
+    (identical? (.getOrigin (.-elements env) (.-currElement env)) Elements$Origin/SYNTHETIC))
+
+  (method ^:private isAnonymous ^boolean [this]
+    (if-instance [^TypeElement te (.-currElement env)]
+      (identical? (.getNestingKind te) NestingKind/ANONYMOUS)
+      false))
+
+  (method ^:private isDefaultConstructor ^boolean [this]
+    (and (identical? (.getKind (.-currElement env)) ElementKind/CONSTRUCTOR)
+         (identical? (.getOrigin (.-elements env) (.-currElement env)) Elements$Origin/MANDATED)))
+
+  (method ^:private isDeclaredType ^boolean [this]
+    (let [ek (.getKind (.-currElement env))] (or (.isClass ek) (.isInterface ek))))
+
+  (method ^:private isExecutable ^boolean [this]
+    (let [ek (.getKind (.-currElement env))] (switch ek (CONSTRUCTOR METHOD) true false)))
+
+  (method ^:private isRecordComponentOrField ^boolean [this]
+    (or (identical? (.getKind (.-currElement env)) ElementKind/RECORD_COMPONENT)
+        (and (and (some? (.getEnclosingElement (.-currElement env)))
+                  (identical? (.getKind (.getEnclosingElement (.-currElement env)))
+                              ElementKind/RECORD))
+             (identical? (.getKind (.-currElement env)) ElementKind/FIELD))))
+
+  (method ^:private isNormalClass ^boolean [this ^TreePath p]
+    (switch (.getKind (.getLeaf p))
+      (ENUM RECORD) false
+      CLASS (not (.isImplicitlyDeclaredClass this (.getLeaf p)))
+      (throw (IllegalArgumentException. (.name (.getKind (.getLeaf p)))))))
+
+  (method ^:private isImplicitlyDeclaredClass ^boolean [this ^Tree t]
+    (if (identical? (.getKind t) Tree$Kind/CLASS)
+        (if-instance [^JCTree$JCClassDecl classDecl t]
+          (not (== (bit-and (.-flags (.-mods classDecl)) Flags/IMPLICIT_CLASS) 0))
+          false)
+        false))
+
+  (method markEnclosingTag ^void [this ^Flag flag]
+    (let [top (cast TagStackItem (.peek tagStack))] (when (some? top) (.add (.-flags top) flag))))
+
+  (method toString ^String [this ^TreePath p]
+    (let [sb (StringBuilder. "TreePath[")] (.toString this p sb) (.append sb "]") (.toString sb)))
+
+  (method toString ^void [this ^TreePath p ^StringBuilder sb]
+    (let [parent (.getParentPath p)]
+      (when (some? parent) (.toString this parent sb) (.append sb ","))
+      (.append (.append (.append (.append (.append sb (.getKind (.getLeaf p))) ":") (.getPos env p))
+                        ":S")
+               (.getStartPos env p))))
+
+  (method warnIfEmpty ^void [this ^DocTree tree ^{:tag (List (? extends DocTree))} list]
+    (for-each [^DocTree d list]
+      (when (or (not (identical? (.getKind d) DocTree$Kind/TEXT))
+                (.hasNonWhitespace this (cast TextTree d)))
+        (return)))
+    (.warning (.-messages env) Messages$Group/MISSING tree "dc.empty" (.-tagName (.getKind tree))))
+
+  (method hasNonWhitespace ^boolean [this ^TextTree tree]
+    (not (.isBlank (.getBody tree)))))
