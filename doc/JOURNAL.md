@@ -19057,3 +19057,27 @@ equal next's; tools/cirun built from the checkout): `bin/ci check --corpus synth
 synth-c23 --record` 79 of 79 (compiled equal to interpreted), the controls holding (decl-alignment against decl-abstract-declarators'
 gcc run differs). Both records unchanged byte for byte, so C's eval 2,355 / 0 / 0 and AOT 2,358 / 0 / 0 stand. Not changed: the
 default list (adding synth-c23 to `all` would make every whole run 79 programs longer; the gate's c-check parts name their corpora).
+
+## 2026-11-23: ocaml-1123, OCaml's AOT cell at the level a case needs, the tools at the compiled level, the ticket lock (branch `ocaml-1123`, from mac/next `fa635f636`)
+
+The burst's OCaml stream (the coordinator's brief .tmp/goal/burst-1123-brief.md; scope after 09:00: the AOT cell, the compiled chain
+and the light level's whole re-records; the eval rows the Mac's, queue 539). Before: OCaml AOT 513 / 22 / 82 (59 n/a).
+- **The AOT cell judged at the level a case needs** (528-8 (a), the user 2026-11-22: the tool rows at the compiled level where the
+  light level does not fit; the coordinator: "AOT at the level the rows need"): `bin/reap`'s `:other-level` source key (test/reap/main.ae's
+  `other-level-pick`): a classed light-level non-pass (no `:na` class) that the compiled level's native record passes is a pass. Read
+  from `test/ocaml/check-aot-compiled-native.edn` and `check-suite-aot-compiled-native.edn` (the native path's compiled records; the
+  oracle path's 2026-11-05 `check-aot-compiled.edn` is not read: it would have taken 15 cases). A record not there yet takes nothing.
+  `bin/crops-score --self-test` holds the rule with four controls. Alternatives not taken: any class (also `:na`); a list of marked
+  classes (`:compiled-level`, first written, dropped: a case either AOT level passes is an AOT pass whatever its light class); the light
+  level's CPU limit raised for the slow programs (the night's budget).
+- **The tools at the compiled level**: header.awk's objinfo and dumpobj modes at aot=2; bin/oi's compiled check judges the tool's
+  compiler output after the run, links a tool's own units (tool.units), and takes def838bc9's heavy_run around build-go.
+- **The runtime's lock a ticket lock** (528-14 (a): testyield): jdk/ocaml/ocaml/rt/Gil.ae.
+- **Proofs**: `bin/reap` 0 problems (the matrix unchanged until the records land: the native compiled records are not there yet);
+  `bin/crops-score --self-test` passes (the rule's case and its four controls); testyield passes at the light level by its own
+  verdict (its record's fail the control).
+- **Left running** (detached, the worktree's `.tmp/oc/chain.sh`, log `.tmp/oc/chain.log`): the 17 tool rows at the compiled level
+  (queued 9th for the big lock at 09:3x), then the light level's whole re-records. After it: commit check-aot-compiled-native.edn,
+  check-aot-native.edn, check-suite-aot-native.edn and aot-known.edn's stale entries, then `bin/reap --record`, `bin/crops-score
+  --record`, `bin/records-check`. chain2 (oc-compiled) writes the whole native compiled records from its older tree: at its merge, its
+  file first, then this branch's 17 rows (`--record --only-list .tmp/oc/tools.txt` again, or the rows copied).
