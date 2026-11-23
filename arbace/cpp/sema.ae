@@ -1855,7 +1855,7 @@
            ;; __pool_resource::_Pool::vector::begin() returning an unnamed namespace's chunk*, linkonce_odr before)
            :internal (boolean (or (and (not cid) (= "static" (:storageClass n))) (:internal home) (and cid (internal-type? ty))))
            :internal-l (boolean (and (not cid) (= "static" (:storageClass n)) (not (:internal home))))
-           :inline (boolean (or (:inline n) (:constexpr n) (and cid (= scope home) (or body (:explicitlyDefaulted n)))))
+           :inline (boolean (or (:inline n) (:constexpr n) (:_consteval n) (and cid (= scope home) (or body (:explicitlyDefaulted n)))))
            :path (:path home)
            :scope home
            :explicit (explicit-spec scope (node-text n))
@@ -4021,7 +4021,9 @@
                                          n (long (or (:n (abi/unq (:ty a))) (inc (count us))))
                                          el (:of (abi/unq (:ty a)))
                                          cs (mapv #(ce-wrap el %) us)]
-                                     {::base (into cs (repeat (max 0 (- n (count cs))) 0)) ::i 0})
+                                     ;; (::lit, cpp-tzdb: the literal itself, so a pointer to its first element an immediate
+                                     ;; invocation returns folds back to it, imm-fold)
+                                     {::base (into cs (repeat (max 0 (- n (count cs))) 0)) ::i 0 ::lit a})
                   (and (= :var (:op a)) (contains? env (:id a)) (vector? @(get env (:id a)))) {::base (get env (:id a)) ::i 0}
                   ;; (h-cpp-consteval: an array subobject, a member's, an element's: its location)
                   (#{:field :deref :base-lv :reinterpret-lv} (:op a))
@@ -4479,6 +4481,8 @@
                                                               ;; noexcept since C++17, [except.spec]/1, abi's Do)
                                                               (and (not (checking?)) (:noexcept f) (>= (long *cxx-year*) 17)) (assoc :nx true))} :cat :pr}))
 
+(declare ptr-literal-of)
+
 (defn rv
   "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
   [e]
@@ -4497,8 +4501,26 @@
       ;; o.k of a constant static member: o evaluated, k folded (not an odr-use)
       (and (= :comma (:op e)) (= :var (:op (:r e))) (lv? e) (not (abi/class? t)))
       (let [r (rv (:r e))] (if (= :int (:op r)) {:op :comma :l (:l e) :r r :ty (:ty r) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
+      ;; (cpp-tzdb, the code generator: a constexpr pointer variable whose initializer is a string literal's address, read in
+      ;; place, the literal's, as clang folds the read of a constexpr variable: <bits/chrono_io.h>'s __formatter_chrono<char>'s
+      ;; `static constexpr const _CharT* _S_chars = _GLIBCXX_WIDEN(...)`, which clang never writes nor guards)
+      (and (not (checking?)) (= :var (:op e)) (abi/ptr? (abi/unq t)) (:cg-constexpr (var* (:id e))) (:init (var* (:id e))))
+      (or (ptr-literal-of (:id e)) {:op :load :e e :ty (abi/unq t) :cat :pr})
       (and (lv? e) (not (abi/class? t))) {:op :load :e e :ty (abi/unq t) :cat :pr}
       :else e)))
+
+(defn- ptr-literal-of
+  "cpp-tzdb: the string literal's decayed address a constexpr pointer variable `id` is initialized with (an immediate
+  invocation's folded value among them), or nil; kept on the variable."
+  [id]
+  (let [v (var* id)]
+    (if (contains? v :cptr)
+      (:cptr v)
+      (let [r (try (let [x (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope (or (:def-scope v) *root*) :statics (atom [])} (:init v))))]
+                     (when (and (= :decay (:op x)) (= :str (:op (:e x)))) x))
+                   (catch arbace.lang.ExceptionInfo _ nil))]
+        (upd-var! id assoc :cptr r)
+        r))))
 
 (defn- promote-type [t]
   (let [t (abi/unq t)]
@@ -7572,11 +7594,30 @@
              (not (some-> (:fn-id ctx) fnd :consteval)))
     (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))
 
+(defn- imm-fold
+  "cpp-tzdb, the code generator: an immediate invocation ([expr.const]/16: a call of a consteval function outside one) is
+  evaluated at compile time, its value in place of the call, as clang's ConstantExpr: an integral or floating value, or a
+  pointer to a string literal's first element (<format>'s _Widen<char>(\"...\", L\"...\")); the call kept when it does not
+  fold (and the function then emitted as before). <chrono>'s __add_modulo's __modulo_offset<7, long>()."
+  [ctx call f]
+  (if (and (not (checking?)) (:consteval f) (not *unevaluated*) (not (some-> (:fn-id ctx) fnd :consteval)))
+    (or (ce-try call true)
+        (let [v (try (binding [*ce-manifest* true *ce-steps* (atom 0) *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{})
+                               *ce-temps* (atom []) *ce-unknown* (atom {}) *ce-wide* true]
+                       (ce-eval call {}))
+                     (catch arbace.lang.ExceptionInfo _ nil))]
+          (when (and (ce-ptr? v) (::lit v) (zero? (long (::i v))) (abi/ptr? (abi/unq (:ty call))))
+            (rv (::lit v))))
+        call)
+    call))
+
 (defn- fn-call [ctx fid args]
   (let [f (fnd (deduced! fid))
         _ (cx-immediate-call! ctx f)]
-    {:op :call :fn fid :args (call-args f args ctx)
-     :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
+    (imm-fold ctx
+              {:op :call :fn fid :args (call-args f args ctx)
+               :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}
+              f)))
 
 (defn adl-nss
   "CP338 (a): the namespace `ns` with, when it is an inline namespace, the namespaces enclosing it as far as the first that is
