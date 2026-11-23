@@ -8760,6 +8760,14 @@
                                :qualified (boolean qcid) :ty {:k :overload} :cat :lv}
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
         (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
+                              ;; (cpp-decl2, the checker: a data member of a virtual base through a null pointer constant cast,
+                              ;; `((B*)0)->i`, whose virtual base's place no object gives: GCC's "invalid access to non-static data
+                              ;; member 'A::i' of NULL object", other/offsetof8.C)
+                              (when (and (checking?) (:isArrow n) (not= (:cls e) cid)
+                                         (let [x (loop [x o] (if (#{:cast :convert} (:op x)) (recur (:e x)) x))]
+                                           (or (= :null (:op x)) (and (= :int (:op x)) (= 0 (:v x)))))
+                                         (nth (abi/base-path cid (:cls e)) 2 nil))
+                                (fail :null-object "invalid access to non-static data member '" nm "' of NULL object"))
                               (field-node (cx-via (if (= :pr (:cat obj)) (materialize obj) obj) qcid) (:cls e) (:i e)))
         (= :indirect (:e e)) (do (cx-anon-union-access! ctx e nm (or qcid cid) cid)
                                  (reduce (fn [o [c i]] (field-node o c i)) (if (= :pr (:cat obj)) (materialize obj) obj) (:chain e)))
@@ -9598,6 +9606,29 @@
                          [(analyze ctx a)]))
                ns)))
 
+(defn- cx-list-items
+  "cpp-decl2, the checker: a braced list's elements as analyze-args gives them; when an element's analysis is refused, each
+  other element is analyzed too and every refusal reported at its element (GCC reports each: other/offsetof8.C's two), the
+  first then thrown as reported, the list's initialization not made."
+  [ctx ns]
+  (if-not *on-refusal*
+    (analyze-args ctx ns)
+    (let [errs (java.util.ArrayList.)
+          out (vec (mapcat (fn [a]
+                             (try (if (= "PackExpansionExpr" (:kind a)) (analyze-args ctx [a]) [(analyze ctx a)])
+                                  (catch arbace.lang.ExceptionInfo e
+                                    (if (and (:codegen/refused (ex-data e)) (not (:cpp/timeout (ex-data e))) (not (:cx/reported (ex-data e)))
+                                             (map? a) (:range a))
+                                      (do (.add errs [e a]) [])
+                                      (throw e)))))
+                           ns))]
+      (if (.isEmpty errs)
+        out
+        (if (= 1 (count errs))
+          (throw (first (first errs)))
+          (do (doseq [[e a] errs] (*on-refusal* e (or (:cx/node (ex-data e)) a)))
+              (let [[e] (first errs)] (throw (ex-info (.getMessage ^Throwable e) (assoc (ex-data e) :cx/reported true))))))))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Lambdas ([expr.prim.lambda]): the closure class (a local class, mangled as clang names it: $_N in a function of
 ;; internal or external linkage, Ul<params>E<n>_ in an inline one), a field per capture in the order captured
@@ -10356,7 +10387,11 @@
                         (if-let [nm (:f c)]
                           (let [cid (or (class-id t) (fail :expr "offsetof in a non-class " (pr-str t)))
                                 [owner e] (first (class-lookup cid nm))
-                                bo (when owner (let [[_ o vb] (abi/base-path cid owner)] (when vb (fail :expr "offsetof through a virtual base")) o))
+                                bo (when owner (let [[_ o vb] (abi/base-path cid owner)] (when vb (if (checking?)
+                                                                                                  ;; (cpp-decl2: GCC's error, [support.types.layout]/1's conditionally-
+                                                                                                  ;; supported non-standard-layout class: other/offsetof8.C)
+                                                                                                  (fail :null-object "invalid access to non-static data member '" nm "' of NULL object (through a virtual base)")
+                                                                                                  (fail :expr "offsetof through a virtual base"))) o))
                                 chain (case (:e e) :field [[(:cls e) (:i e)]] :indirect (:chain e) (fail :expr "offsetof of a non-field " nm))
                                 fo (reduce (fn [a [k i]] (+ (long a) (long (get (:fields (abi/layout k)) i)))) 0 chain)
                                 [k i] (peek chain)]
@@ -10923,7 +10958,7 @@
                                  (let [f (when-let [i (:fn-id ctx)] (fnd i))]
                                    (when (and f (not (:cls f)) (not (:this-type ctx))) (check-type-access! (:scope ctx) qt n))))
                                {:op :zero-val :ty t :cat :pr})
-    "InitListExpr" (cond-> {:op :init-list :items (cond->> (analyze-args ctx (kids n)) (checking?) (embed-positions n)) :ty {:k :init-list}}
+    "InitListExpr" (cond-> {:op :init-list :items (cond->> (if (checking?) (cx-list-items ctx (kids n)) (analyze-args ctx (kids n))) (checking?) (embed-positions n)) :ty {:k :init-list}}
                      ;; (cpp-decl2: a designated list the parser left as written, an overloaded callee's argument: its
                      ;; designators, for [over.ics.list]/2 and the order check of the parameter's initialization, desig-*)
                      (and (:_desigs n) (some some? (:_desigs n))) (assoc :desigs (:_desigs n) :desig-node n)
