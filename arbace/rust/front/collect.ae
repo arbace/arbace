@@ -302,7 +302,7 @@
     (case (:kind it)
       :fn (let [id (add-def! {:parent parent :data [:value nm] :kind "Fn" :node it :ident-span isp})]
             (collect-opaques! id it)
-            (walk-body! (:body it) id))
+            (when-not (:foreign it) (walk-body! (:body it) id)))
       (:struct :union)
       (let [id (add-def! {:parent parent :data [:type nm] :kind (if (= :struct (:kind it)) "Struct" "Union") :node it :ident-span isp})]
         (when-let [ck (and (= :struct (:kind it)) (ctor-kind (:data it)))]
@@ -326,8 +326,9 @@
       :const (let [id (add-def! {:parent parent :data [:value nm] :kind "Const { is_type_const: false }" :node it :ident-span isp})]
                (walk-body! (:expr it) id))
       :static (let [id (add-def! {:parent parent :data [:value nm] :node it :ident-span isp
-                                  :kind (str "Static { safety: Safe, mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
-                (walk-body! (:expr it) id))
+                                  ;; queue 542: a foreign static's safety its block's (unsafe unless marked `safe`)
+                                  :kind (str "Static { safety: " (if (= :unsafe (:safety it)) "Unsafe" "Safe") ", mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
+                (when (:expr it) (walk-body! (:expr it) id)))
       :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
       :foreign-ty (add-def! {:parent parent :data [:type nm] :kind "ForeignTy" :node it :ident-span isp})
       :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
@@ -1807,7 +1808,9 @@
           {:inputs inputs
            :output (if (:output f) (binding [*elided* (or fixed :anon)] (lower-ty (:output f))) unit)
            :safety (:safety (:header f))
-           :abi (:abi (:header f))})))))
+           :abi (:abi (:header f))
+           ;; queue 542: a foreign function's `...` (C-variadic: its calls take more arguments than its inputs)
+           :variadic (boolean (:variadic f))})))))
 
 (defn ext-ctor-sig
   "A std constructor's signature: its variant's fields to its ADT at the ADT's identity arguments"
@@ -1848,7 +1851,8 @@
                 (if m
                   (early-regions
                   {:inputs (mapv sty->ty (:inputs m)) :output (sty->ty (:output m))
-                   :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))}
+                   :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))
+                   :variadic (boolean (:variadic m))}
                   d)
                   (or (get *native-sigs* d) {:inputs [] :output [:err (str "no sig " d)]})))))
 

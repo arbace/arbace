@@ -1794,8 +1794,21 @@
           (or (names "inline") (names "inline(always)")) true
           :else false)))
 
+(declare item-name-of)
+(defn foreign-link-name
+  "queue 542 (C6): a foreign function's symbol (its `#[link_name]`, else its name): a local one's node, an upstream one's
+  interface fact (:foreign, the native pass's); nil for any other definition"
+  [d]
+  (if (number? d)
+    (let [n (:node (c/def-of d))]
+      (when (:foreign n)
+        (or (some #(when-let [u (:unparsed %)] (when (= "link_name" (first (str/split u #"[ (=]"))) (second (re-find #"=\s*\"([^\"]*)\"" u)))) (:attrs n))
+            (item-name-of d))))
+    (let [f (:foreign (get (:fns c/*si*) d))] (when (string? f) f))))
+
 (defn mir-available? [d]
-  (or (number? d) (and (#{"Fn" "AssocFn"} (def-kind d)) (or (generic-def? d) (cross-crate-inlinable? d)))))
+  (and (not (foreign-link-name d))
+       (or (number? d) (and (#{"Fn" "AssocFn"} (def-kind d)) (or (generic-def? d) (cross-crate-inlinable? d))))))
 
 (defn- may-conflict?
   "instantiation_mode is GloballyShared { may_conflict: true } (at opt-level 0)"
@@ -1833,6 +1846,9 @@
     (cond (and (not shim) (upstream-symbol def args)) (upstream-symbol def args)
           (weak-link names) (mangle-internal (weak-link names))
           (names "rustc_std_internal_symbol") (mangle-internal (item-name-of def))
+          ;; queue 542 (C6): a foreign item's symbol is its link name, never mangled (a #[rustc_std_internal_symbol] one's the
+          ;; internal mangling above: std's __rust_panic_cleanup)
+          (and (not shim) (foreign-link-name def)) (foreign-link-name def)
           (names "no_mangle") (item-name-of def)
           :else (v0-mangle def args (or (non-erasable? args) (and (#{"Fn" "AssocFn" "Closure"} (def-kind def)) (may-conflict? inst)))))))
 
@@ -2092,7 +2108,11 @@
         (cond-> {:kind (or shim "item") :symbol (instance-symbol (cond-> {:def d :args args} shim (assoc :shim shim))) :def (print-path d)
                  :can-unwind (and (not (names "rustc_nounwind")) (boolean (or (#{"Rust" "rust-call" "rust-cold" ""} abi) (re-find #"unwind" abi))))
                  :track-caller (boolean (names "track_caller"))}
-          (and (not shim) (or (not (mir-available? d)) (upstream-symbol d args))) (assoc :external true))))))))
+          (and (not shim) (or (not (mir-available? d)) (upstream-symbol d args))) (assoc :external true)
+          ;; queue 542 (C6): a C-variadic foreign function: its fixed parameters' count (the call's type `(i64, ...)`)
+          (and (not shim) (foreign-link-name d))
+          (as-> m (let [sig (try (c/fndef-sig d) (catch Throwable _ nil))]
+                    (if (:variadic sig) (assoc m :variadic (count (:inputs sig))) m))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; the record's type forms as types (for the layouts of the types core's bodies use), and the types' texts

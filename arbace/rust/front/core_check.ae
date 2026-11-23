@@ -420,6 +420,15 @@
                     Static (add! m "Mod" {:ns :value :name nm :path p
                                           :kind (str "Static { safety: Safe, mutability: " (if (= 'Mut (fget (second k) :mutability)) "Mut" "Not") ", nested: false }")})
                     TyAlias (add! m "Mod" {:ns :type :name nm :kind "TyAlias" :path p})
+                    ;; queue 542 (C6): a foreign block's functions, statics and types in its module (libc's `read`, `syscall`)
+                    ForeignMod (doseq [fi (fget (second k) :items) :let [fk (fget fi :kind)] :when (and (seq? fk) (cfg-on? fi))]
+                                 (let [fnm (second (fget (second fk) :ident)) fp (str m "::" fnm)]
+                                   (case (head fk)
+                                     Fn (add! m "Mod" {:ns :value :name fnm :kind "Fn" :path fp})
+                                     Static (add! m "Mod" {:ns :value :name fnm :path fp
+                                                           :kind (str "Static { safety: Unsafe, mutability: " (if (= 'Mut (fget (second fk) :mutability)) "Mut" "Not") ", nested: false }")})
+                                     TyAlias (add! m "Mod" {:ns :type :name fnm :kind "ForeignTy" :path fp})
+                                     nil)))
                     (Struct Union) (do (add! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p})
                                        (when-let [ck (and (= 'Struct (head k)) (ctor-kind (nth k 3)))]
                                          (add! m "Mod" {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))
@@ -810,6 +819,11 @@
 (defn- own-attr? [node nm]
   (boolean (some #(when-let [u (:unparsed %)] (= nm (first (str/split u #"[ (=]")))) (:attrs node))))
 
+(defn- own-attr-value
+  "queue 542: an attribute's string value (`#[link_name = \"realname\"]`), else nil"
+  [node nm]
+  (some #(when-let [u (:unparsed %)] (when (= nm (first (str/split u #"[ (=]"))) (second (re-find #"=\s*\"([^\"]*)\"" u)))) (:attrs node)))
+
 ;; C4 (2026-11-22): an enum's discriminant type and its variants' discriminants, as the helper writes them (tools/rsdump/front.rs:
 ;; `a.repr().int`'s type, else nil; `a.discriminants(tcx)`'s Display): rustc_middle's AdtDef::discriminants, an explicit
 ;; discriminant's value (its anonymous constant evaluated: literals, `-`, `<<`, `|`, the crate's integer constants), else the
@@ -959,13 +973,16 @@
                    [ins out] (sig-sty (:id d) sig path-of)
                    preds (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))]
                (if (and (every? some? ins) out)
-                 (assoc-in acc [:fns p] {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
-                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
+                 (assoc-in acc [:fns p] (cond-> {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
+                                         :inputs ins :output out :variadic (boolean (:variadic sig)) :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
                                          ;; C4: `#[rustc_comptime]` (the intrinsics align_of, field_offset ..) a const fn too (is_const_fn)
                                          :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_comptime"))
                                          ;; C4: is_promotable_const_fn and NEVER_UNWIND from the function's own attributes
                                          :promotable (and (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_promotable"))
-                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true})
+                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true}
+                                         ;; queue 542 (C6): a foreign function (no body; its symbol its link name), as std's interface
+                                         ;; does not write it: :foreign its link name (`#[link_name = ".."]`, else its own)
+                                         (:foreign (:node d)) (assoc :foreign (or (own-attr-value (:node d) "link_name") (second (:data d))))))
                  acc))
              (and (#{"Struct" "Enum" "Union"} (:kind d)) (not (get (:adts si) p)))
              (let [g (collect/generics-of (:id d))
