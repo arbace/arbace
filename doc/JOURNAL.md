@@ -19560,3 +19560,52 @@ next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
 - Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
   classes whose rows pass now keep them until the main host's re-record (their why says so).
 - The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
+## 2026-11-23: queue 537, Python eval's largest by-design classes: _hashlib over Go's crypto, the pseudo-terminal functions, the rest to the user (the Mac VM)
+
+What: the eval cell's `:kind :design` classes of test/python/divergences.edn, largest first by the committed record's rows
+(test/python/check-lib-test-linux-amd64.edn at next fa635f636, classified as `bin/reap` classifies them; `:c-accelerators`,
+the ctypes classes, the cap-crash modules and del.py the main host's, D1-D6 queue 535's, every `:deferred` class queue 536's),
+each built in pyi or brought to the user as n/a with why.
+
+Built (go/arbace/py, written as Go in `bin/pyi runtime print`'s module and read back):
+- `_hashlib` (`builtins_hashopenssl.ae`), CPython 3.14.10's Modules/_hashopenssl.c over Go's crypto in place of OpenSSL's EVP
+  interface, as `_ssl` is over Go's crypto/tls (PYS22 (a), the precedent): hashlib.py and hmac.py take it first, test_hmac's 49
+  OpenSSL rows of `:skipped-by-test` and test_hashlib's 6 of `:openssl` run. Studied: cpython v3.14.10 Modules/_hashopenssl.c,
+  Modules/clinic/_hashopenssl.c.h, Lib/hashlib.py, Lib/hmac.py, Lib/test/support/hashlib_helper.py; RFC 8018 §5.2 (PBKDF2),
+  RFC 7914 §3-§5 (scrypt); OpenSSL 3's scrypt parameter checks as python3 3.14.10 on this VM shows them. Alternatives: (a) keep
+  `:openssl` and the OpenSSL rows by design (PY6d's choice of the built-in modules alone): no, the user's goal is 100% and the
+  module is buildable on Go's crypto; (b) link OpenSSL through ci: a C world's libcrypto is a crop of its own, and nothing in the
+  tests needs OpenSSL itself.
+- `os.posix_openpt`, `grantpt`, `unlockpt`, `ptsname` (posixmodule.c over musl 1.2.6).
+- the pickling refusal of a built-in data type names its tp_name (`'_hashlib.HASH'`, `'_md5.md5'`, `'zlib.Compress'`).
+- `int()` of an int subclass calls its `__int__` (PyNumber_Long's nb_int; test_int's test_int_returns_int_subclass and
+  test_int_subclass_with_int), `complex()` follows actual_complex_new and complex_new_impl (a single exact complex returned as it
+  is, `__complex__` on any other type, the strict-subclass DeprecationWarning, the two-argument path's type checks and warnings;
+  cmath's and getargs' `D` warn too): test_complex's test_constructor and test_capi's test_D, three of `:coroutines`' rows that
+  its catch-all match took. Studied: cpython v3.14.10 Objects/complexobject.c (actual_complex_new, complex_new_impl,
+  try_complex_special_method), Objects/abstract.c (PyNumber_Long).
+
+Found, not built (the report's DECISIONs): test_warnings' 15 DeprecatedTests in `:coroutines` are `:warnings-c`'s cause (no C
+`_warnings`, whose warn reads `sys.modules['warnings']` at each call; BaseTest.setUp swaps it): a Go `_warnings` (Python/_warnings.c)
+would serve them and `:warnings-c` (536's class). The user's n/a decisions of 2026-11-23 (next 320e74469, merged before the record)
+took `:skipped-by-test`'s counting rows (J1/J2: 149 rows), `:gc-collector`, `:inline-values`, `:tuple-id-reuse`, `:specializing`,
+`:pyc-magic`, `:subtest-ids`, `:fails-under-cpython-too` and test_gc's cycle counts, which this task had as DECISION 537-1 and
+n/a candidates.
+
+Proofs: `bin/pyi check --only` on the VM (goi, the checkout's runtime), four runs, the negative controls failing in each (logs
+`.tmp/q537/check-537{,b,c,d}.log`). The record's rows of the modules run written from those runs' results (64 to pass; `--record`
+refuses a runtime that is not compiled, so the main host's next record replaces them). Python eval at 320e74469: 40,552 / 1,398 /
+1,585 -> 40,616 / 1,338 / 1,579 (4,789 n/a); `bin/reap --record`, `bin/crops-score --record` (Python 98.12 -> 98.16),
+`--judge --strict` and `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 537's record rows written again by `bin/pyi check --judge DIR --record` (correction of the entry above)
+
+The coordinator's request: the rows the entry above says were transcribed from the runs' results (`merge_record.py`) are written
+instead by the judge's own `--record` over one directory holding the modules the runs covered whole (`.tmp/q537/judge-rec`:
+test_hmac, test_hashlib, test_uuid and test_urllib2 of the first run, test_index of the second, test_complex and test_cmath of
+the fourth, test_int of a fifth run alone, whose timing test passed there), as queue 536 recorded. `--record` refuses an `--only`
+run, so test_os' two PseudoterminalTests rows and test_capi's test_D stay as next has them until the main host's whole record.
+Two rows recorded as timeouts at the VM's load (test_uuid's test_unix_getnode_from_libuuid, test_urllib2's test_http_body_pipe,
+class `:runner-limits`). Python eval: 40,552 / 1,398 / 1,585 -> 40,611 / 1,341 / 1,581 (not 40,616 / 1,338 / 1,579);
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
