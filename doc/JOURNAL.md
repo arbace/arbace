@@ -19029,3 +19029,31 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: rust-indep-1123: C3X-1 (b) decided and the re-pin's first half built (WIP, handed to the Mac)
+
+- Decision (the user, 2026-11-23): C3X-1 (b), std's reference built with `-Zshare-generics=no` (each crate keeps its own
+  instantiations and exports none), over (a) every upstream crate's whole mono collection natively (8-12 days) and (c) the rlibs'
+  exported symbols read (a record of rustc's build). Also standing: C6-5 (a), the library build's units a description as data.
+- Built (branch `rust-indep-1123` from mac/next `fa635f636`, which carries the rust-c6-1120 line back with 512's fix:
+  `bbe3c5eec`, `512be0226`): `test/rust/runtime/std.edn` `:rustflags` + `-Zshare-generics=no`, `:clang` moved to the host's
+  "Alpine clang version 23.1.6" (the old flags' build with it gave the 110 pinned units byte for byte); `bin/rsi std-build --update`:
+  120 units, 56 MB (`test/rust/runtime/ir.sha256`); the crates' StableCrateIds unchanged (the cgu names `core.f4c9..`, `alloc.58bf..`),
+  their SVHs and file names moved: `bin/rust-front std-crates --rsi` rewrote `test/rust/front/std-crates-rsi.edn`, `std-crates --units`
+  left `std-build-units.edn` unchanged, `std-crates --native`: 31 of 31 units' -C metadata equal, the three identities the computed ones.
+- The programs' IR packs re-made against it (`bin/rsi ir-pack --corpus samples`, `--corpus synthetic`: every x.ll moved, every shim.ll
+  the same). The UI pack (`test/rust/ir/ui.sha256`, the every-40th, :clean-only) was never made on this host and has no UI sources here:
+  its pin is stale until `bin/rsi ir-pack --corpus ui --sample 40` where the sources are.
+- `bin/rust-front records make rsi`: the pack rust-front-rsi is byte for byte the old one (`4159566a..`: the records were already made
+  with the program's `-Zshare-generics=no`); only its keys moved (std-crates-rsi.edn's SVHs), `test/rust/records/rust-front-rsi.tsv`.
+- C6's measure against the new IR (`bin/rust-front lib-unit compare`, the units rust-c3x built, light): std 116 of 325 equal (101
+  before), 10 differ (25), 199 refused; alloc 21 of 25 as before (to_uppercase still differs); the crossed controls differing. std's
+  10: trace_fn, the two write_fmt, the three take_box, realloc_fallback, args, _print_fmt, hashmap_random_keys.
+- `bin/rsi`'s std_ir_dir and lib-unit's lookup also take the main checkout's `.tmp/rsi/std-*/` at the pin, so that commits before
+  and after the re-pin each find their std (make the new one there with `RSI_STD_DIR=/root/arbace/.tmp/rsi/std-sgn bin/rsi std-build`).
+- Not run (the user moved Rust's own lowering to the Mac, 2026-11-23): the lowered std at the new pin (`bin/rsi runtime-ci`, under the
+  lock), the six cases built again on the own path with the native interface and names (C1, C4: `RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=..
+  RF_EXTRA_IFACE=core/native-iface.edn:std/deps/hashbrown-iface.edn:std/deps/libc-iface.edn RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front
+  rsi-build --native-core` over the six, threads too since the atomic intrinsics), then `bin/rsi check --record --front own --corpus
+  samples` (RSI_FRONT_DIR from that build), the synthetic record and `check --aot --record --corpus samples`. Until then the rsi
+  records stand from the old packs: the branch is WIP, not for next. Scores unchanged (Rust 100 / 80; eval and AOT 0.5).
