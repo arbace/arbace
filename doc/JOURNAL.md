@@ -19156,3 +19156,15 @@ completes (104.8 s of CPU, 2.4 GB peak); its negative control, the same build wi
 own verdict is a timing comparison that -O0 leaves to chance (all.T marks the test fragile(22504)): exit 0 on the first run, 1 on
 the capped record run (not recorded); further runs measure the rate for the coordinator. doc/haskell/HASKELL-EVAL-SURVEY.md, "As
 built: the program's CAFs collected".
+
+## 2026-11-23: Haskell's T23071 passes at its own cap of 1,310 s (the user's decision (b)) (smalls2-1123)
+
+The user's decision of 2026-11-23 on T23071 and secretary (killed at 600 s of CPU on the own libraries): (b) measure at 3000 s under
+the big-job lock, cap each at 1.5 times its CPU if it finishes, else (a), an optimizer for the own libraries' STG. smalls' long.sh
+(in the hs-pkgs worktree, the own libraries built there, 16 GiB, the timing wrapper): T23071 (a million prints of listThreads: the
+own libraries' -O0 Handle layer, a flat profile of interpretation, 92% in runSlice) passed at 869.8 s of CPU (752 s of wall); its
+cap 1,310 s; `bin/hsi check --libs own --only testsuite/primops/should_run/T23071 --record` at that cap passed (761 s): the row
+copied into test/haskell/check-hsi-own.edn, `T23071 1310 869.8` into test/haskell/cpu-caps.tsv (kept listed in :speed and
+:own-speed, as the classes keep their programs that pass at caps). Haskell eval 949 / 0 / 3 -> 950 / 0 / 2 (18 n/a);
+completeness 0.9992 -> 0.9995. secretary's 3000 s run follows under the same lock. bin/reap --record, bin/crops-score --record,
+--judge --strict, bin/records-check: 0 problems.
