@@ -3489,6 +3489,9 @@
   nil)
 
 (def ^:dynamic *ce-analyzing-imm* false) ; cpp-ce3: true while an immediate invocation is evaluated (cx-immediate-eval!: none nested)
+;; cpp-ce3: true while a conditional's branch, a default argument or a default member initializer is analyzed: its immediate
+;; invocations are not evaluated there (a branch not taken; the use's, P2564R3's escalation to the constructor)
+(def ^:dynamic *cx-no-imm* false)
 
 (def ^:dynamic *ce-point*
   "cpp-ce3 (the checker): the range of the declaration whose initializer or condition the evaluation is of (a constexpr or
@@ -6112,7 +6115,8 @@
           (for [i (range (count args) (count ps))]
             (let [d (nth (:defaults f) i nil)]
               (when-not d (fail :call "missing argument"))
-              (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
+              ;; (cpp-ce3: a default argument's immediate invocations not evaluated here, cx-immediate-eval!)
+              (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
 
 (defn init-list-elem
   "E when the type `t` (cv-qualified, or a reference to it) is std::initializer_list<E>, else nil."
@@ -7251,7 +7255,7 @@
                                                                (fail :uninit-ref "uninitialized reference member")))]
                                                 ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
                                                 ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
-                                                (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
+                                                (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
                                                         (assoc :agg-this true)
                                                         ;; (cpp-ce3: the initializer's own range, ce-dmi-at)
                                                         (cond-> (and (checking?) (map? d) (:range d)) (assoc :dmi-range (:range d))))
@@ -10002,7 +10006,8 @@
     ;; of a non-function" before)
     (let [[c a b] (kids n)
           fa (fn [x] (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
-      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (fa (analyze ctx a)) (fa (analyze ctx b))))
+      ;; (cpp-ce3: an immediate invocation in a branch is not evaluated where the branch is analyzed, cx-immediate-eval!)
+      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (binding [*cx-no-imm* true] (fa (analyze ctx a))) (binding [*cx-no-imm* true] (fa (analyze ctx b)))))
     ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
     ;; bound as an opaque value (a glvalue's address, a class prvalue materialized, else its value), the condition and the
     ;; true operand both that value (clang's OpaqueValueExpr, CodeGenFunction::OpaqueValueMapping)
@@ -10012,7 +10017,7 @@
           x (if (and (= :pr (:cat x)) (abi/class? (abi/unq (:ty x)))) (materialize x) x)
           k (swap! opaque-ids inc)
           ov {:op :opaque :id k :ty (:ty x) :cat (:cat x)}
-          r (cond-node ctx (to-bool ov) ov (analyze ctx y))]
+          r (cond-node ctx (to-bool ov) ov (binding [*cx-no-imm* true] (analyze ctx y)))]
       {:op :bind-opaque :id k :e x :body r :ty (:ty r) :cat (:cat r)})
     "CallExpr"
     (if-let [op (when (= "DeclRefExpr" (:kind (first (kids n))))
@@ -11371,7 +11376,7 @@
                                  ;; one member has a mem-initializer, the one a default member initializer names, /9.1)
                                  (and (:union c) (or (not (:init fl)) (some #(and (vector? %) (= :field (first %))) (keys given))))
                                  {:i :none}
-                                 (:init fl) (init-for (:ty fl) (let [d (analyze ctx (:init fl))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
+                                 (:init fl) (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (analyze ctx (:init fl)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind (:init fl))) :list :copy))
                                  :else (init-for (:ty fl) nil ctx :default))})))})))
 
 (defn- nrvo-var
@@ -11818,7 +11823,8 @@
   evaluation the program's own operation makes surely not constant GCC's \"call to consteval function 'f(...)' is not a constant
   expression\" at the call, the operation's own error beside it. The call node returned."
   [ctx f node]
-  (when (and (checking?) (:consteval f) (not (:cx-imm-error f)) (not *unevaluated*) (not *ce-analyzing-imm*)
+  (when (and (checking?) (:consteval f) (not (:cx-imm-error f)) (not *unevaluated*) (not *ce-analyzing-imm*) (not *cx-no-imm*)
+             (not (and (:cls ctx) (not (:fn-id ctx))))
              (let [g (some-> (:fn-id ctx) fnd)]
                (not (and g (or (:consteval g) (:constexpr g) (and (:cls g) (some-> (abi/cls (:cls g)) :lambda)))))))
     (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true] (ce-eval node) nil)

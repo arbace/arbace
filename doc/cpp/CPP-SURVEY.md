@@ -10616,3 +10616,80 @@ non-dependent checks of a template never instantiated, GCC's eager ones), cpp1y/
 member initializer's evaluation put at its operation where GCC puts it at the variable), cpp0x/union1.C and lambda-anon1.C (declaration
 rules, not the evaluator's). Placement new is taken in every constant evaluation from C++20 (GCC refuses it outside std::construct_at
 before C++26: an acceptance, never a false error).
+
+## As built: cpp-ce3, the checker's constant evaluator: placement new, objects under construction, exact arithmetic, loops, definitions, immediate invocations (2026-11-23; branch `cpp-ce3-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the constant evaluator's open rows after cpp-ce2 (gxx-dg's dg-error rows judged by the own front end's
+diagnostics). Each rule from the standard's text ([expr.const], [class.cdtor], [class.base.init], [dcl.init.aggr], [basic.fundamental],
+[expr.pre], [implimits], [new.delete.placement]) and GCC's behaviour as the tests record it; no GCC or clang code. All of it the
+checker's (arbace.cpp.sema with *on-refusal* bound, `checking?`), but the exact 64-bit arithmetic, which the code generator's folds share.
+
+### The rules
+
+- Placement new (the user's decision of 2026-11-23): before C++26 the reserved placement form is no constexpr function, so its
+  new-expression in a constant evaluation is GCC's "call to non-'constexpr' function 'void* operator new(std::size_t, void*)'" unless
+  the evaluation's innermost call is std::construct_at's ([expr.const]/5.20.1 of C++20 and C++23; GCC's is_std_construct_at); from
+  C++26 it is constexpr (P2747R2). The evaluator knows its calling function: a call's and a constructor's environment carry it (::fn),
+  `ce-std-construct-at?` reads its name and namespace.
+- The dynamic type of an object under construction ([class.cdtor]/5-6, [class.base.init]/13): while a constructor initializes its
+  bases its object's cell is in `*ce-bases*`; a dynamic_cast whose operand is a base subobject of such an object takes the base
+  subobject as its most derived object when that base is constructed (constexpr-dynamic11.C: the A subobject's dynamic type is A, the
+  cast to B fails), and one not constructed yet is GCC's "accessing uninitialized member" (its vtable pointer read, constexpr-dynamic17.C).
+- A default member initializer's errors at the use ([dcl.init.aggr]/5.1): an aggregate's member initialized from its default member
+  initializer (the item's :dmi-range) whose evaluation fails at an operation of that initializer's own text reports it where the
+  aggregate is initialized (the variable, or within a call the operation the evaluation entered last; `ce-dmi-at`), as GCC's copy of
+  the initializer bears the use's location; one inside a function it calls stays there (cpp1y/constexpr-union3.C, -union4.C).
+- Exact arithmetic: a 64-bit unsigned sum, difference, product, negation, increment or decrement is computed modulo 2^64
+  ([basic.fundamental]/2), never Java's ArithmeticException (cpp-small caught it in the array-size check alone); a signed one past its
+  range is the checker's sure "value N is outside the range of representable values" ([expr.pre]/4), else no constant. Found on the
+  way: the checker's signed range check took 2^63 as a long's (bit-shift-left 1 63), Long/MIN_VALUE, so every 64-bit signed +, - and *
+  (`constexpr long long q = 5LL + 3LL;`) had been "outside the range"; now exact (a BigInt). An increment or decrement of an int or
+  wider signed type past its range is the same error (it had wrapped).
+- The loop limit (GCC's -fconstexpr-loop-limit, default 262144, arbace.repr.cpp.diag binds the file's option): a while, do or for
+  statement's iterations counted (`ce-loop-limit!`), past the limit GCC's "'constexpr' loop iteration count exceeds limit of N" at the
+  loop (the statement's :cx-at); the checker's step budget 3,000,000 (the code generator's 1,000,000) so that a loop of a few steps
+  reaches the limit first (cpp1y/constexpr-70265-1.C, -2.C).
+- Used before its definition ([expr.const]/5.3): a constexpr or consteval function of the main file with no definition, or one whose
+  definition comes after the declaration whose initializer or condition is evaluated (`*ce-point*`: a constexpr or constinit
+  variable's, a static_assert's), is GCC's "'f' used before its definition", at the call, at a constructor's mem-initializer (the
+  native parser's CXXCtorInitializer keeps its range as the private :_range, which no tree check reads; `*ce-mi-at*`), else at the
+  evaluation's last position (cpp2a/constinit10.C, constexpr-dtor4.C).
+- Immediate invocations ([expr.const]/16-17, P2564R3): a call of a consteval function outside an immediate function context (not in a
+  consteval function, not in a constexpr one or a lambda's call operator, which escalate; not in an unevaluated operand) is evaluated
+  as the full-expression it is (`cx-immediate-eval!`); an evaluation the program's own operation makes surely not constant is GCC's
+  "call to consteval function 'f(...)' is not a constant expression" at the call, the operation's own error beside it
+  (cpp2a/consteval9.C).
+- Allocation: a delete through a pointer to a base subobject of an allocated object frees the most derived one ([expr.delete]/3: GCC
+  does not diagnose the missing virtual destructor), and a member call on an object whose storage the evaluation freed is GCC's "use of
+  allocated storage after deallocation" before a virtual call's refusal (cpp2a/constexpr-new12.C).
+- GNU's statement expression `({ ... e; })` is evaluated: its statements a block of their own, its last expression's value the value
+  (cpp2a/constexpr-init5.C); the potential constant check takes a do statement's body as run (cpp1y/constexpr-89785-2.C).
+- Immediate invocations are not evaluated where a conditional's branch, a default argument or a default member initializer is analyzed
+  (`*cx-no-imm*`: a branch the condition may not take; GCC's error is the use's, P2564R3's escalation to the constructor), nor in a
+  class's scope outside a function.
+
+### Checked
+
+Each rule on its files and on reduced programs by the probe (arbace.repr.cpp.dg's read-own over a dg.edn entry: unsigned 64-bit sums,
+products and negations past 2^63, signed overflow of +, -, ++ and --, placement new in and outside std::construct_at at C++20 and
+C++26, functions and constructors defined after their use). The record run (`bin/repr-cpp dg --corpus dg-error --front native --only`
+2,881 files `--record`: every own pass of the record and the read cell's both-fail rows; stage 0, GOMEMLIMIT=3000MiB, 100 minutes):
+own pass 2,273 -> 2,284, no own pass lost but cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s under the
+host's load, as cpp-ce2 and cpp-small found (rows kept); after the immediate invocations' exclusions a second record run over every
+recorded file that names consteval, the changed rows, the union targets and the control pair (58 files): none lost, the control pair
+DRs/dr2082.C vs DRs/dr1423.C failing as it must.
+
+### The cells
+
+The own record: 15 rows to own pass (cpp0x/pr71966-1, -2, cpp1y/constexpr-70265-1, -2, -89785-2, -union3, -union4, cpp2a/consteval9,
+constexpr-dtor4, -dynamic11, -dynamic17, -init5, -new12, constinit10, ubsan/vptr-18), none lost; init/new38.C's crash (Java's
+ArithmeticException) a judged failure. C++ read 5,872 / 0 / 410 (249 n/a) -> 5,885 / 0 / 398 (248 n/a); completeness 0.9770 ->
+0.9775, independence 0.9666 -> 0.9668; eval, AOT and print unchanged.
+
+### Left
+
+In the scope: cpp2a/bit-cast2.C (a never-instantiated template's non-dependent checks, GCC's eager ones); the immediate invocations
+P2564R3 escalates (consteval-prop*: an immediate-escalating function made immediate, its callers' errors), an immediate invocation in a
+member call or a constructor call (consteval-memfn1.C), the taking of an immediate function's address; consteval11.C's and
+consteval34.C's calls in a conditional's taken branch; the other constant rows of the both-fail list (reinterpret_cast and
+OpenMP rules, literal-type and virtual-base diagnostics of declarations: Sema's, not the evaluator's).
