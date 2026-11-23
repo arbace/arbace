@@ -19029,3 +19029,61 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 536, Python eval's largest deferred classes (the VM; branch `536-py-deferred`)
+
+Brief: `.tmp/worktrees/q/tasks/536-py-deferred.md` (the deferred classes of test/python/divergences.edn, largest first; 537 the
+design ones, 535 D1-D6, the main host :c-accelerators, ctypes and the cap-crash modules). Base next fa635f636. The classes by rows
+(bin/pyi divergences --table on the base's record): capi-port 314 (pyctypes' natives: the main host's), goi-liveness-fallthrough 255,
+multiprocessing 199 and multiprocessing-children 84 (535's), testcapi 97, runner-limits 77, host-memory 62, io-c-checks 48 (535's),
+remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild), dbm-sqlite3-locking 30, ... audit-hooks 23.
+
+- **goi-liveness-fallthrough (254 of its 255 rows): stale rows, re-recorded.** test_xml_etree's and test_xml_etree_c's 254 rows
+  were kept from the records night of 2026-11-19 when the re-record of 2026-11-22 (bbea63978) left both modules out (their
+  whole-module runs failed test_cyclic_gc on gc timing); goi's fix cfd69a6d2 was in that re-record's executable. Run on the VM at
+  this branch (bin/pyi check --only, goi interpreting py and expat): every one of the 254 passes. The record's two modules were
+  written again from that run (bin/pyi check --judge DIR --record over a copy holding the two modules alone), xml_etree_c's eight
+  IOTest and Iterparse rows from a second run of them alone (see Runs). Four rows fail on the VM in both runs and are recorded so
+  (see Records). The class keeps test_multiprocessing_spawn's test_rapid_restart (535's area).
+- **audit-hooks: PEP 578's hooks called** (go/arbace/py/audit.go: sys.addaudithook's list, PySys_Audit as `Audit`, sys.audit's
+  checks, addaudithook's own "sys.addaudithook" event and its refusal by an Exception) and the events audit-tests.py checks:
+  marshal.dumps/loads/load, object.__setattr__ (check_set_special_type_attr's __name__, __qualname__, __bases__, __module__, __doc__,
+  __type_params__; __class__'s assignment), mmap.__new__, _posixsubprocess.fork_exec, sys.excepthook (a hook's RuntimeError ends the
+  display), sys.unraisablehook (a user's hook), socket.gethostname/__new__/bind, gc.get_objects/get_referrers/get_referents,
+  sys._getframe, sys._getframemodulename, _thread.start_new_thread/start_joinable_thread, syslog.openlog/syslog/setlogmask/closelog
+  (the implicit openlog's own event, and its facility LOG_USER: 22-11's note), time.sleep, sys.monitoring.register_callback; pickle's
+  and sqlite3's are their modules' own sys.audit calls. Left in the class: test_cantrace (a hook's __cantrace__: pyi's tracer is not
+  suspended while a hook runs) and test_open (FileIO's "open": pyi's _io is _pyio, whose FileIO audits none; a wrapper of _pyio's
+  FileIO.__init__ was written and withdrawn, as 535 owns _io's work this round).
+- **os-and-files-misc: os.fspath of a str or bytes subclass's instance** returns it as it is (PyOS_FSPath's PyUnicode_Check):
+  test_pathlib's six test_str_subclass_common rows pass.
+- **dbm-sqlite3-locking: not closed; crt left as it was.** The main host's lead (crt's fcntl F_GETLK leaves l_type, so SQLite sees a
+  conflict) is right as far as it goes: with F_UNLCK answered (`bin/ci run` of a probe: F_WRLCK before, F_UNLCK after), SQLite's
+  WAL index proceeds to mmap its -shm file MAP_SHARED, which crt refuses (ENODEV), so the rows fail on "disk I/O error" and
+  test_dbm's test_clear, a pass, fails. With crt's mmap of a file added too (a copy, a shared writable one written back at munmap,
+  as emu's fileMap; `bin/ci run` probe against gcc's), WAL works (a probe's connect, journal_mode=wal, CREATE, REPLACE), but the
+  dbm rows still fail: dbm.sqlite3 leaves `PRAGMA journal_mode = wal`'s and `__setitem__`'s cursors unclosed, which CPython's
+  reference count resets at once and pyi's collector does not, so a statement stays active, the write is not committed when the
+  database is closed, and whichdb reads an empty file. Both crt changes were withdrawn (crt is the C crop's; no row gained, one
+  lost); the patch and the analysis are in the report's DECISION 536-1.
+- **Runs** (the VM, arm64, its load 20-38; stage 0 nx's, goi interpreting the checkout's py; the runner by python3,
+  PYI_RUNNER=python3, after a crt change had the compiled runner's AOT module and its C libraries rebuilt twice): `bin/pyi check
+  --only` of the five modules and pathlib's six rows (logs .tmp/q536/check1.log, judge1.log), of test_dbm and test_dbm_sqlite3 on
+  the crt patch (check-dbm.log: no row gained, test_uri_substitutions lost), then test_audit and test_pathlib whole with the xml
+  modules' timing rows and xml_etree_c's eight IOTest and Iterparse rows again (checkF.log; 85 min, test_audit 5,125 s alone); the
+  three negative controls failed as they must in every run. xml_etree_c's eight rows errored in the first run on "No such file or
+  directory: '@test_1036_tmpæ'": my second `--only` run in the same worktree shared and cleaned `.tmp/t6i` (and overwrote
+  `.tmp/repr-python/pyi/check-only.txt`, so the first run's judge was redone with its own list: `--judge`); they pass alone.
+- **Records**: `bin/pyi check --judge DIR --record` over two directories holding only the recorded modules (test_audit and
+  test_pathlib from the last run; the xml modules from the first, xml_etree_c's eight rows from the last). Not recorded: test_dbm
+  and test_dbm_sqlite3 (crt unchanged). Two VM-only rows each way: test_deeply_nested_deepcopy past 600 s with py interpreted
+  (classed :runner-limits and :slow-on-goi; the main host's compiled run passes it) and test_cyclic_gc (named in
+  :finalization-collect: the main host's whole-module runs failed it too). The record's writer put the four modules' rows in its
+  own order, hence a long diff of moved lines; the rows that changed are 291.
+- **Numbers**: Python eval 40,552 / 1,604 / 1,714 -> 40,827 / 1,610 / 1,437 (the six design rows: C14N subtests the xml modules
+  now reach, skipped by the test); goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18. Python's
+  completeness 0.9794 -> 0.9810. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict` and
+  `bin/records-check`: 0 problems.
+- Alternatives left: a wrapper raising FileIO's "open" (withdrawn: 535's _io), ssl's and readline's "open" events (written, withdrawn
+  with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
+  owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
