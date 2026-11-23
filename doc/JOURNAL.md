@@ -19139,3 +19139,20 @@ C++'s gxx-modules-all round trip (`bin/repr-cpp dg --corpus modules --record`, q
 recorded: 1,180 of 1,181 pass (target-aarch64-1_a.C among them), but part-4_c.C, a pass in the record, crashes in the print
 ("print: a name: (decltype (cpp/text \"f\"))" after `import foo;`), a regression of queue 540's native.ae change (the token after
 a closed stream dropped) or its printer change, sent back to the VM; the record keeps its pass row until then.
+
+## 2026-11-23: hsi collects the program's unreachable CAFs (unpack_sums_6's memory, the user's decision (b)) (smalls2-1123)
+
+The user's decision of 2026-11-23 on testsuite/unboxedsums/unpack_sums_6 (out of memory at 16 GiB): (b) fix hsi so dead values stop
+holding memory, then measure and cap. The cause found was a CAF, not a frame's dead locals: GHC -O0 floats the program's
+`makeUnlayered magnitude` to the top level, and hsi's evaluated CAFs were Go roots for the whole run, so the 10-million-cell list
+stayed. Built (go/arbace/hs/cafgc.ae new, rts.ae's marker `caf` mode, load.ae's and image.ae's `noteCAF`, machine.ae's
+`schedDepth` and `cafCheck`; edited as Go by `bin/hsi runtime print`, read back by `bin/hsi runtime read`; fdwait.ae restored, its
+committed hand comment the read does not keep; go/arbace/hs is a crop path, out of every key): past a 1 GiB Go heap (then twice
+the last), hsi marks from its roots, a blackholed thunk's code not followed (GHC's blackhole has no SRT), and reverts the program's
+own (unit main) evaluated CAFs the mark did not reach, as GHCi's revertCAFs; the libraries' CAFs never. Alternatives not taken:
+reverting every CAF (stdout's handle and the RTS's named closures would be at risk of a second evaluation); a CAF list never
+collected but cleared after main's first reference (not GHC's rule). Proof: unpack_sums_6 on the own libraries at a 6 GiB cap
+completes (104.8 s of CPU, 2.4 GB peak); its negative control, the same build with HSI_CAF_GC=0, runs out of memory at 5 GB. Its
+own verdict is a timing comparison that -O0 leaves to chance (all.T marks the test fragile(22504)): exit 0 on the first run, 1 on
+the capped record run (not recorded); further runs measure the rate for the coordinator. doc/haskell/HASKELL-EVAL-SURVEY.md, "As
+built: the program's CAFs collected".
