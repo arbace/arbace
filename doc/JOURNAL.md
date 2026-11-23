@@ -19109,3 +19109,14 @@ about 50 minutes), written by rename so that the running compiled check kept its
   `:unix-java`, OT24 (a); their compiled rows queued: HostSys, OC216 (a)). unboxed-primitive-args' translation passed 7.6 GB, so it
   was stopped and runs alone under the big lock. The negative controls: each row's record before this change (classed), and the light
   run's judgment, in which signal and delayintr fail against their own references.
+
+## 2026-11-23: ocaml-1123, round 2 corrected: unboxed-primitive-args at the compiled level alone
+
+The previous entry's light run of unboxed-primitive-args alone under the big lock was not made: header.awk's gen mode is the compiled
+level's alone (c6bca5151), as the generated program's Lambda (600 KB) took the light level's one translation process past 7.6 GB and
+the gate declares the light level's whole run (oi-aot, oi-suite-aot) at 4 GiB; the light level keeps its class (`:c-api`, deferred),
+and the compiled level's pass counts by the counting rule (a). Queued at hand-back (the build worktree's `.tmp/oc/compiled-b.sh`, log
+`.tmp/oc/chain-b.log`): the compiled level's run of tool-ocamldoc/t01-t05, gc-roots/globroots_sequential, lib-threads/signal,
+delayintr and unboxed-primitive-args, whole under the big lock (its translation process), `--record`; then the suite's compiled run
+of opam/base64/test and opam/fmt/test_fmt (`--record`). In the branch's worktree (`.tmp/oc/finalize.sh`, log `.tmp/oc/finalize.log`),
+after the 17 tool rows' compiled run (`.tmp/oc/chain.log`'s "tools: exit"): the light level's whole re-records.
