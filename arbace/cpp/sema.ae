@@ -807,7 +807,11 @@
                        ;; (CX12, the checker: a volatile member function's type)
                        u (if (and (checking?) (abi/fn? u) (or (:v u) (:volatile (meta (nth f 2))))) (-> u (dissoc :v) (assoc :vq true)) u)
                        ;; (and its ref-qualifier, [dcl.fct]/4)
-                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)]
+                       u (if-let [r (when (and (checking?) (abi/fn? u)) (:cpp/ref (meta (nth f 2))))] (assoc u :refq (if (= r :&&) "&&" "&")) u)
+                       ;; (cpp-rt-own4, the code generator: a non-throwing member function's type, noexcept part of the type since
+                       ;; C++17 ([except.spec]/1 with [dcl.fct]/1), as mptr-fn-node's &C::f: <type_traits>' __call_is_nt over `long
+                       ;; (Z::*)() const noexcept`, mangled KDoF..E, abi's)
+                       u (if (and (not (checking?)) (abi/fn? u) (true? (:noexcept (meta (nth f 2)))) (>= (long *cxx-year*) 17)) (assoc u :nx true) u)]
                    ;; (CX12, the checker: a template parameter's class kept, T::* deduced)
                    ;; (cpp-rt-own: the code generator's too, its template signatures' `_Tp _Class::*`: std::mem_fn(&stat_type::st_nlink),
                    ;; fs_ops.cc's hard_link_count, "mem_fn does not deduce"; mangled M <template-param>, abi's)
@@ -2159,6 +2163,9 @@
                :pos (long (or (:_b n) 0))}
             ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
             v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
+            ;; (cpp-rt-own4, the code generator: a constexpr variable of namespace or class scope marked for the evaluator alone,
+            ;; ce-lv's read of a constexpr class object)
+            v (cond-> v (and (not (checking?)) (:constexpr n)) (assoc :cg-constexpr true))
             ;; (h-cpp-consteval, the checker: a constinit variable's initializer a constant expression too, [dcl.constinit]/2)
             v (cond-> v (and (checking?) (not (:constexpr n)) (:constinit v)) (assoc :cx-constinit true :cx-range (:range n)))
             ;; (queue 463, the checker: a static data member's access, [class.access]/1, judged where it is named)
@@ -4047,6 +4054,14 @@
                (let [c (atom (binding [*ce-in-call* true] (ce-init (:ty v) (:ginit v) {})))]
                  (when *ce-const* (swap! *ce-const* conj c))
                  {::cell c ::path []})
+               ;; (cpp-rt-own4, the code generator: a constexpr object of class type of namespace or class scope, usable in
+               ;; constant expressions ([expr.const]/4), its initializer's value as the checker's: <chrono>'s `inline constexpr
+               ;; month January{1}` in tzdb.cc's year::min()/January/1, whose POD local clang initializes from a constant)
+               (and (not (checking?)) (:cg-constexpr v) (#{:global :member-static} (:storage v)) (map? (:ginit v)) (not= :none (:i (:ginit v)))
+                    (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v))))
+               (let [c (atom (binding [*ce-in-call* true] (ce-init (:ty v) (:ginit v) {})))]
+                 (when *ce-const* (swap! *ce-const* conj c))
+                 {::cell c ::path []})
                ;; (cpp-rt-own3: an object of a variable outside the evaluation, its lvalue alone, *ce-unknown*'s)
                (and (not (checking?)) (not (abi/ref? (:ty v))) (#{:local :param :global :static-local :member-static} (:storage v)))
                (ce-unknown-loc [:var (:id e)])
@@ -4227,7 +4242,7 @@
     (when-not (:tbody f) (when (:body f) (analyze-fn! (:id f))))
     (let [f (fnd fid)]
       (binding [*ce-steps* (atom 0) *ce-manifest* true]
-        (let [env (assoc (into {} (map (fn [pid a] [pid (atom (ce-wrap (:ty (var* pid)) a))]) (:params f) args)) ::ret (:ret (:ty f)))
+        (let [env (assoc (into {} (map (fn [pid a] [pid (atom (if (and (map? a) (contains? a ::cls)) a (ce-wrap (:ty (var* pid)) a)))]) (:params f) args)) ::ret (:ret (:ty f)))
               r (ce-exec (:tbody f) env)]
           (if (and (= :ret (first r)) (not (ce-ptr? (second r))) (not (map? (second r)))) (ce-wrap (:ret (:ty f)) (second r)) (not-constant "no return")))))))
 
@@ -4302,7 +4317,10 @@
 (defn mptr-fn-node [fid]
   (let [f (fnd fid)]
     {:op :mptr-fn :fn fid :ty {:k :mptr :cls (:cls f) :to (cond-> (:ty f) (:cq f) (assoc :cq true) (:vq f) (assoc :vq true)
-                                                              (and (checking?) (:refq f)) (assoc :refq (:refq f)))} :cat :pr}))
+                                                              (and (checking?) (:refq f)) (assoc :refq (:refq f))
+                                                              ;; (cpp-rt-own4, the code generator: a noexcept member function's type is
+                                                              ;; noexcept since C++17, [except.spec]/1, abi's Do)
+                                                              (and (not (checking?)) (:noexcept f) (>= (long *cxx-year*) 17)) (assoc :nx true))} :cat :pr}))
 
 (defn rv
   "The prvalue of a glvalue of non-class type (lvalue-to-rvalue), an array's decay, a function's."
@@ -5070,6 +5088,10 @@
                                       ;; a ref-qualified one ([over.match.funcs]/5): && takes an rvalue object, & (not const) an lvalue
                                       (and (= "&&" (:refq f)) (= :lv (:cat obj))) nil
                                       (and (= "&" (:refq f)) (not (:cq f)) (not= :lv (:cat obj))) nil
+                                      ;; (cpp-rt-own4, the code generator: a const&& one for a non-const rvalue is worse than a && one,
+                                      ;; [over.ics.rank]/3.2.6, the more cv-qualified reference, and better than a const& one, /3.2.3:
+                                      ;; `*opt` of a prvalue std::optional had been ambiguous among its operator*s)
+                                      (and (= "&&" (:refq f)) (:cq f) (not (:c (:ty obj))) (not (checking?))) {:rank 0 :sub 0}
                                       (and (= "&&" (:refq f))) {:rank 0 :sub -1}
                                       (and (:cq f) (not (:c (:ty obj)))) {:rank 0 :sub 1}
                                       :else {:rank 0 :sub 0})
@@ -7458,6 +7480,27 @@
   [acls e]
   (let [c (:friend-cls e)] (or (nil? c) (contains? acls c))))
 
+(defn- befriended?
+  "cpp-rt-own4 (the code generator): whether the hidden friend `e` named `nm` is declared a friend by one of the associated
+  classes `acls` ([basic.lookup.argdep]/4.3: a friend declared in an associated class is visible, wherever it is defined);
+  each class's friend declarations alone (template.ae's friend!) declared here once, on the first lookup that asks, and
+  matched by signature."
+  [acls e nm]
+  (and (not (checking?)) (:friend-cls e)
+       (let [g (fnd (:id e))]
+         (some (fn [a]
+                 (let [ds (get (:friend-decls (abi/cls a)) nm)]
+                   (some (fn [i]
+                           (let [d (nth ds i)
+                                 fid (if (contains? d :fid)
+                                       (:fid d)
+                                       (let [fid (try (declare-fn! (:fs d) (:k d)) (catch Exception _ nil))]
+                                         (abi/update-cls! a assoc-in [:friend-decls nm i :fid] fid)
+                                         fid))]
+                             (and fid (same-sig? (fnd fid) g))))
+                         (range (count ds)))))
+               acls))))
+
 (defn- adl-fns
   "The functions named `nm` in the namespaces of the class arguments' classes ([basic.lookup.argdep], for classes)."
   [args nm]
@@ -7472,7 +7515,7 @@
                cid (or (class-id pt) (when (abi/enum? pt) pt))] :when cid
          :let [acls (adl-classes args)]
          ns (adl-class-nss cid)
-         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (friend-visible? acls e))]
+         e (binding [*cutoff* Long/MAX_VALUE] (own-names ns nm)) :when (and (= :fn (:e e)) (or (friend-visible? acls e) (befriended? acls e nm)))]
      (:id e))))
 
 (defn- sure-assoc-nss
@@ -7758,6 +7801,21 @@
        :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
        :ty (abi/non-ref (:ret ft)) :cat (case (:k (:ret ft)) :ref :lv :rref :xv :pr)})))
 
+(declare operator-call)
+
+(defn- rewritten-better?
+  "cpp-rt-own4 (the code generator): whether x <=> y's best candidate, a function template's specialization of the same parameter
+  types as `best` (a non-member operator@'s, another template's), is more specialized than it (template.ae's tiebreak: partial
+  ordering, then [temp.func.order]/6's more constrained), so the rewritten candidate wins, [over.match.best]/2.5 before /2.8."
+  [ctx o args best ms]
+  (when (and (not (checking?)) (#{"<" ">" "<=" ">="} o) (= 2 (count args)) (not (contains? ms best)) (:tinst (fnd best)) (:tiebreak @hooks))
+    (let [c (try (operator-call ctx "<=>" args) (catch arbace.lang.ExceptionInfo _ nil))
+          cf (when (and (= :call (:op c)) (nil? (:obj c))) (fnd (:fn c)))
+          bf (fnd best)]
+      (boolean (and cf (:tinst cf) (not= (:tid (:tinst cf)) (:tid (:tinst bf)))
+                    (= (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty cf))) (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty bf))))
+                    ((:tiebreak @hooks) (:fn c) best 2))))))
+
 (defn operator-call
   "An overloaded operator's call ([over.match.oper]): the members of the first operand's class and the non-members found
   by unqualified lookup and ADL; nil when none is viable (the built-in operator then)."
@@ -7823,6 +7881,15 @@
                (not (contains? ms best))
                (some #(abi/class? (abi/unq (abi/non-ref %))) (:ps (:ty (fnd best)))))
           nil
+          ;; (cpp-rt-own4, the code generator: the rewritten candidate (x <=> y) @ 0 of a function template more specialized than
+          ;; the best operator@ one, [over.match.best]/2.5 coming before /2.8's preference for the candidate not rewritten:
+          ;; [temp.func.order]/6, the template parameter lists equivalent ([temp.over.link]/6: a type-constraint is not part of
+          ;; the equivalence) and the parameters the same, the more constrained -- <bits/chrono.h>'s `operator<=>(const
+          ;; time_point<_Clock, _Dur1>&, const time_point<_Clock, _Dur2>&)` with `three_way_comparable_with<_Dur1> _Dur2` over the
+          ;; unconstrained operator<, duration's likewise: tzdb.cc's ranges::less over sys_seconds, clang's operator<=> and
+          ;; operator<(strong_ordering, __unspec))
+          (rewritten-better? ctx o args best ms)
+          (operator-call ctx o [(operator-call ctx "<=>" args) {:op :int :v 0 :ty abi/int* :cat :pr}])
           (contains? ms best) (method-call ctx best l more true)
           :else (fn-call ctx best args))))))
 
@@ -8660,13 +8727,19 @@
     ;; defaulted special member counted as not throwing; G4)
     "CXXNoexceptExpr" (let [x (binding [*unevaluated* true] (analyze ctx (first (kids n))))
                             fns (atom #{})
+                            ;; (cpp-rt-own4, the code generator: a call through a pointer to member function of a type not
+                            ;; non-throwing may throw, [except.spec]/6, since C++17 when noexcept is the type's (its :nx):
+                            ;; <type_traits>' __call_is_nt for `long (Z::*)() const`, __is_nothrow_invocable had been true)
+                            thr (atom false)
                             walk (fn walk [x] (cond (map? x) (when-not (:kind x)
                                                                 (when (integer? (:fn x)) (swap! fns conj (:fn x)))
+                                                                (when (and (= :mcall (:op x)) (not (checking?)) (>= (long *cxx-year*) 17) (not (:nx (:fty x))))
+                                                                  (reset! thr true))
                                                                 (doseq [[k v] x :when (not (#{:scope :node :def-scope :parent :names :usings :ty} k))] (walk v)))
                                                     (sequential? x) (doseq [y x] (walk y))
                                                     :else nil))]
                         (walk x)
-                        {:op :int :v (if (every? #(let [f (fnd %)] (or (:noexcept f) (:implicit f) (:defaulted f))) @fns) 1 0) :ty abi/bool* :cat :pr})
+                        {:op :int :v (if (and (not @thr) (every? #(let [f (fnd %)] (or (:noexcept f) (:implicit f) (:defaulted f))) @fns)) 1 0) :ty abi/bool* :cat :pr})
     "CXXNullPtrLiteralExpr" {:op :null :ty abi/nullptr-t :cat :pr}
     "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
     "ParenExpr" (analyze ctx (first (kids n)))
