@@ -529,3 +529,33 @@ The cells (pass / by design / deferred): read 908 / 2 / 0 to 909 / 0 / 0; eval 2
   which the oracle's three native.ae cases need, stays.
 - Then the deferred `:xml-stream` (StAX's event reader's closure in java-xml-classes.txt, an AOT run), CDR16 and the other
   rows left, by the burst's stream (branch `clj-1123`).
+
+## Proposed (2026-11-23): CDR17-CDR21, the by-design rows left
+
+What CDR14-CDR16 leave not passing at eval and AOT, all by design; each needs the user's word to become a pass or n/a
+(doc/CROPS-SCORE.md: a row is n/a only by a decision in doc/JOURNAL.md).
+
+**CDR17. main-since-v4's last two (eval, the oracle, 2 cases).** polymorphism.ae:176 (MultiFn names two ambiguous classes in
+the order of their names, hand change 14, ac8b9718) and state_errors.ae:542 (main's loaders look for `.ae` first, so the
+not-found message names `.ae`). (a) As CDR14: drop the two forms and record the expected files again from the frozen jar; (b)
+record main's answers for them in an overlay the oracle reads beside the v4 expected files; (c) keep. Recommended (a), as CDR14.
+
+**CDR18. identity-hash (eval 1, the oracle; and diffcheck's pair, not counted).** `(hash (StringBuilder. "x"))` records
+HotSpot's identity hash, which no implementation reproduces (nor HotSpot across runs with another thread history). (a) Drop
+the form (CDR14's way); (b) n/a; (c) keep. Recommended (a).
+
+**CDR19. method-invoke-message (eval 1, the oracle).** jrt's Method.invoke words a wrong receiver as JDK 26's
+DirectMethodHandleAccessor does; the v4 jar's run said "object is not an instance of java.lang.String". (a) Drop the form; (b)
+align jrt's message with the v4 record (it would differ from the JDK 26 message Java's conformance tests see); (c) keep (RPS19
+(a)). Recommended (a): the JDK 26 wording is the right one.
+
+**CDR20. security-providers (eval 1, the oracle).** The Go build lists SUN, SunRsaSign, SunEC and SunJCE; java.security names
+eight more (SunJSSE, SunJGSS, SunSASL, XMLDSig, SunPCSC, JdkLDAP, JdkSASL, SunPKCS11), each a module of its own but SunJSSE.
+(a) The eight providers' classes in the shipped world as providers whose services fail when used (days, the closure of each
+module's provider class); (b) n/a (SC4); (c) keep. Recommended (b).
+
+**CDR21. The class files, tools.deps and run-time sources (eval 4, AOT 4).** `:class-files` (clj-1208 at eval,
+test-proxy-method-order and gen-interface-source-file read class files with ASM: D13, no class files), `:tools-deps`
+(arbace.repl.deps adds jars at run time: D6, CDR9), `:runtime-source` (AOT: a file the test writes at run time loads from
+source). (a) n/a, each by its recorded decision; (b) keep as by design. Recommended (a): they test what Arbace decided not to
+have (class files, jars) or what no AOT build can (a source made after the build).
