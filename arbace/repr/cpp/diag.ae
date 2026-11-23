@@ -6953,6 +6953,68 @@
 
 (swap! checks conj assume-expansions)
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-decl (2026-11-23): lookup, declarations and classes (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl")
+
+;; [over.literal]/3: a literal operator's parameter-declaration-clause is one of (const char*), (unsigned long long int), (long
+;; double), (char), (wchar_t), (char8_t), (char16_t), (char32_t), (const C*, std::size_t) for those five character types; no ellipsis.
+;; [over.literal]/5: a literal operator template's is empty. [lex.ext]/3 (a numeric literal: a raw literal operator or a numeric
+;; literal operator template but not both), GCC's at the declaration: "... conflicts with raw literal operator" and the reverse.
+;; A parameter whose type names an identifier the rule does not know (a typedef) leaves the declaration unjudged.
+
+(def ^:private udl-words #{"const" "volatile" "char" "wchar_t" "char8_t" "char16_t" "char32_t" "bool" "short" "int" "long" "signed"
+                           "unsigned" "float" "double" "void" "std" "size_t" "__size_t" "decltype" "sizeof" "auto" "nullptr_t"})
+
+(defn- udl-judgeable? [^String q] (every? udl-words (re-seq #"[A-Za-z_]\w*" q)))
+
+(defn- udl-size? [^String q]
+  (let [q (str/trim q)]
+    (or (#{"std::size_t" "size_t" "__size_t" "unsigned long" "long unsigned" "unsigned long int" "long unsigned int"} q)
+        (str/starts-with? q "decltype(sizeof"))))
+
+(defn- udl-list-ok? [qs variadic]
+  (and (not variadic)
+       (case (count qs)
+         1 (contains? #{"const char *" "unsigned long long" "long double" "char" "wchar_t" "char8_t" "char16_t" "char32_t"} (first qs))
+         2 (and (contains? #{"const char *" "const wchar_t *" "const char8_t *" "const char16_t *" "const char32_t *"} (first qs))
+                (udl-size? (second qs)))
+         false)))
+
+(defn literal-operators
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        raws (java.util.HashMap.) tmpls (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :literal-operator :msg msg}))))
+        fdecl (fn [f tmpl]
+                (let [nm (str (:name f))
+                      ps (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                      qs (mapv #(str/trim (str (get-in % [:type :qualType]))) ps)]
+                  (when (and (str/starts-with? nm "operator\"\"") (every? udl-judgeable? qs) (not (:_qn f)))
+                    (if tmpl
+                      (do (when (seq qs) (report! f (str "literal operator template '" nm "' has invalid argument list")))
+                          (when (empty? qs)
+                            (if-let [r (.get raws nm)] (report! f (str "literal operator template '" nm "' conflicts with raw literal operator '" r "'"))
+                                (.put tmpls nm nm))))
+                      (if (udl-list-ok? qs (:variadic f))
+                        (when (= qs ["const char *"])
+                          (if (.get tmpls nm) (report! f (str "raw literal operator '" nm "' conflicts with literal operator template"))
+                              (.put raws nm nm)))
+                        (report! f (str "'" (get-in f [:type :qualType]) " " nm "' has invalid argument list")))))))
+        w (fn w [xs]
+            (doseq [x xs]
+              (case (:kind x)
+                ("NamespaceDecl" "LinkageSpecDecl") (w (:inner x))
+                "FunctionDecl" (fdecl x false)
+                "FunctionTemplateDecl" (when-let [f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner x))]
+                                         (when (some #(and (= "NonTypeTemplateParmDecl" (:kind %)) (:isParameterPack %)) (:inner x))
+                                           (fdecl f true)))
+                nil)))]
+    (w (:nodes u))
+    (vec out)))
+
+(swap! checks conj literal-operators)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]
