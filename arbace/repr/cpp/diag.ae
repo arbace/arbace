@@ -4263,8 +4263,11 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         year (cxx-year (:std u))
+        pe? (boolean (some #{"-pedantic-errors"} (:args u)))
         names-of (fn [decls] (into {} (for [d decls :let [nm (:name d)] :when (and (string? nm) (seq nm) (or (conflicting-kinds (:kind d)) (#{"ParmVarDecl" "BindingDecl"} (:kind d)))
-                                                                                  (not (and (= nm "_") (>= (long year) 2026))))]
+                                                                                  ;; (cpp-1123: before C++26 a name-independent `_` is GCC's pedwarn alone,
+                                                                                  ;; an error under -pedantic-errors only: cpp26/name-independent-decl2.C, -8.C)
+                                                                                  (not (and (= nm "_") (or (>= (long year) 2026) (not pe?)))))]
                                         [nm d])))
         stmt-decls (fn [s] (case (:kind s)
                              "DeclStmt" (mapcat #(cond (= "DecompositionDecl" (:kind %)) (filter (fn [b] (= "BindingDecl" (:kind b))) (:inner %))
@@ -5457,7 +5460,7 @@
                       (when (:isExplicitObjectParameter (first ps))
                         (let [qt (str (get-in m [:type :qualType]))
                               q (or (fn-tail-quals qt) "")
-                              t (or (text m) "")
+                              ^String t (or (text m) "")
                               ;; the declarator's text after its parameter list, before the body or the end
                               tail (let [i (.lastIndexOf t ")" (int (let [j (.indexOf t "{")] (if (neg? j) (count t) j))))] (if (neg? i) "" (subs t (inc i))))
                               ov (re-find #"\boverride\b" (str/replace tail #"\{.*" ""))
@@ -6001,8 +6004,8 @@
                 (loop [i (long i) depth 0]
                   (when (< i (count t))
                     (let [c (.charAt t (int i))]
-                      (cond (= c open) (recur (inc i) (inc depth))
-                            (= c close) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                      (cond (= (int c) (int open)) (recur (inc i) (inc depth))
+                            (= (int c) (int close)) (if (= 1 depth) i (recur (inc i) (dec depth)))
                             :else (recur (inc i) depth))))))]
     (walk-nodes
      (fn [n _]
@@ -6459,7 +6462,9 @@
            (when (and b e (mine? n) (< (long b) (long e) n-src))
              (let [t (subs src (long b) (inc (long e)))
                    ty (if (= "TypeAliasDecl" (:kind n)) (second (re-find #"(?s)=(.*)$" t)) t)]
-               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
+               ;; (cpp-1123: a decl-specifier keyword before auto is no type-constraint: `static auto constexpr value` in an alias's
+               ;; class, cpp0x/alias-decl-16.C)
+               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b|static\b|constexpr\b|inline\b|extern\b|thread_local\b|mutable\b|constinit\b|consteval\b|friend\b|register\b|virtual\b|explicit\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
                  (at! n "invalid use of constrained 'auto' type")))))
          nil))
      (:nodes u) nil)
@@ -6485,7 +6490,7 @@
                             (let [c (.charAt t i)]
                               (cond
                                 (and q (= c \\)) (recur (+ i 2) depth start acc q)
-                                q (recur (inc i) depth start acc (if (= c q) nil q))
+                                q (recur (inc i) depth start acc (if (= (int c) (int q)) nil q))
                                 (or (= c \") (= c \')) (recur (inc i) depth start acc c)
                                 (#{\( \[ \{} c) (recur (inc i) (inc depth) start acc nil)
                                 (and (#{\) \] \}} c) (zero? depth)) (conj acc (subs t start i))
@@ -6640,7 +6645,7 @@
 (defn name-independent-uses
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
-        new-frame (fn [] (java.util.HashMap. {:ext 0 :ind 0}))
+        new-frame (fn ^java.util.HashMap [] (java.util.HashMap. {:ext 0 :ind 0}))
         add! (fn [^java.util.HashMap fr kind] (.put fr kind (inc (long (.get fr kind)))))
         decl! (fn [fr d]
                 (case (:kind d)
@@ -6701,7 +6706,7 @@
                             (let [[ln c] (line-col starts o)]
                               (.add out {:line ln :col c :kind :error :rule :name-independent :msg "lambda parameter '_' previously declared as a capture"})))
                           (when (and b (>= (count caps) 2))
-                            (stmts (:inner b) (list (doto (new-frame) (.put :ind (count caps))))))))))
+                            (stmts (:inner b) (list (doto ^java.util.HashMap (new-frame) (.put :ind (count caps))))))))))
                   (:nodes u) nil))
     ;; structured bindings and template parameters that are not name-independent ([basic.scope.scope]/5: a static or namespace-scope
     ;; structured binding, a template parameter): one named twice is "redeclaration of 'auto _'", "redefinition of 'int _'"
@@ -7159,3 +7164,8 @@
 ;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
 (alter-var-root #'sema-rules conj
   [:name #"^codegen: '.*' is not a class, struct, or union type" "is not a class, struct, or union type"])
+
+;; cpp-1123 (2026-11-23): the checker's objects of abstract class types ([class.abstract]/3, arbace.cpp.sema/cx-abstract!)
+(alter-var-root #'sema-rules conj
+  [:abstract #"^codegen: cannot declare .* to be of abstract type" "cannot declare to be of abstract type"]
+  [:base #"^codegen: cannot derive from 'final' base" "cannot derive from 'final' base"])

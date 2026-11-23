@@ -1702,7 +1702,16 @@
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
                  (not (lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
-          (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
+          (let [[_ num sfx] (or (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)
+                                ;; (cpp-1123: a suffix without an underscore, the standard library's reserved ones -- <chrono>'s
+                                ;; 0min, <string>'s s -- [lex.ext]/1 with [usrlit.suffix]: the longest numeric prefix whose rest is
+                                ;; an identifier a literal operator in scope has; tzdb.cc's `info.save = 0min;`)
+                                (some (fn [k] (let [num (subs s 0 k) sfx (subs s k)]
+                                                (when (and (re-matches #"[A-Za-z][A-Za-z0-9_]*" sfx)
+                                                           (or (lit/int-literal num) (lit/float-literal num))
+                                                           (lookup (scope p) (str "operator\"\"" sfx)))
+                                                  [s num sfx])))
+                                      (range (dec (count s)) 0 -1)))]
             ;; (round 54, fourth pass: C++98 has no user-defined literal, [lex.icon], [lex.fcon]: a number's identifier suffix is
             ;; GCC's error "invalid suffix \"_mm\" on floating constant", "... on integer constant")
             (when (and num (< (.-year p) 2011))
@@ -1716,8 +1725,8 @@
             (node p "UserDefinedLiteral" i i
                   (if num
                     (if-let [[v] (lit/int-literal num)]
-                      {:_udl {:k :int :suffix sfx :value v}}
-                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v}} {}))
+                      {:_udl {:k :int :suffix sfx :value v :text num}}
+                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v :text num}} {}))
                     {}))))))))
 
 (defn- simple-type-start?
@@ -4782,9 +4791,13 @@
                       ;; ([class.conv.fct]/1, [over.oper.general]/? , [over.call]/1, [over.sub]/1 before C++23's P1169 and P2589: a
                       ;; conversion function is a non-static member, an operator function a non-static member or a non-member,
                       ;; operator new and delete aside)
+                      ;; (cpp-1123: a static operator() or operator[] before C++23 is GCC's pedwarn "... may be a static member
+                      ;; function only with '-std=c++23'", an error under -pedantic-errors alone; cpp23/subscript11.C)
+                      (and fs (= "static" (:storage ds)) (#{"()" "[]"} (:op lp)) (< (.-year p) 2023))
+                      (pedantic-diag! p (long (:i lp)) (str "'" (name-str p qn) "' may be a static member function only with '-std=c++23'"))
                       (and fs (= "static" (:storage ds)) (or (:conv lp) (:op lp))
                            (not (#{"new" "new[]" "delete" "delete[]"} (:op lp)))
-                           (not (and (#{"()" "[]"} (:op lp)) (>= (.-year p) 2023))))
+                           (not (#{"()" "[]"} (:op lp))))
                       (soft-diag! p (long (:i lp)) (if (or (:conv lp) (#{"=" "()" "[]" "->"} (:op lp)))
                                                      (str "'" (name-str p qn) "' must be a non-static member function")
                                                      (str "'" (name-str p qn) "' must be either a non-static member function or a non-member function")))
