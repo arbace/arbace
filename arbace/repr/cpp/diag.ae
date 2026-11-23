@@ -313,10 +313,24 @@
               (let [nm (:name n) off (loff n) dc (when (and off (mine? n)) (dclass n))]
                 (when (and nm (not= "" nm) dc)
                   (if (qualified-name? src (long off))
-                    (when-let [q (qualifier src (long off))] (qdef! n (str path q "::" nm)))
+                    (if-let [q (qualifier src (long off))]
+                      (qdef! n (str path q "::" nm))
+                      ;; (cpp-decl2: a class template's member defined out of its class, `template <int N> int Z<N>::var37;`,
+                      ;; its template-head non-empty and its arguments identifiers: the pattern's member, "(template)::Z::var37",
+                      ;; the class walk's path for the template's own members; cpp1z/inline-var2.C)
+                      (let [b (long (or (get-in n [:range :begin :offset]) off))
+                            before (str (subs src (max 0 (- b 200)) b) "\u0001" (subs src (min b (long off)) (long off)))
+                            head (subs src (max 0 (- (long off) 200)) (long off))]
+                        (when-let [[_ cn args] (re-find #"(\w+)\s*<\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*>\s*::\s*$" head)]
+                          (when (and (re-find #"template\s*<[^<>]*[A-Za-z_][^<>]*>" (subs before (inc (.indexOf ^String before "\u0001"))))
+                                     (not-any? #{"int" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "void" "wchar_t"
+                                                 "char8_t" "char16_t" "char32_t" "auto"}
+                                               (map str/trim (str/split args #","))))
+                            (qdef! n (str "(template)::" cn "::" nm))))))
                     (do
                       ;; (a static data member in its class is declared, not defined: [class.static.data]/3)
-                      (when (and (= rk :class) (not= "VarDecl" (:kind n))) (qdef! n (str path nm)))
+                      ;; (cpp-decl2: an inline static data member's declaration is its definition, [class.static.data]/4)
+                      (when (and (= rk :class) (or (not= "VarDecl" (:kind n)) (:inline n))) (qdef! n (str path nm)))
                       (if-let [o (.get r nm)]
                         ;; (cpp-diag-a: C++26's name-independent declarations, P2169 [basic.scope.scope]/5-6: a block-scope variable
                         ;; named _ of automatic storage conflicts with no earlier declaration, and takes the name's place; GCC
@@ -4807,7 +4821,10 @@
     (walk-nodes (fn [n parent]
                   (when (and (= "VarDecl" (:kind n)) (string? (:name n)) (not (:init n))
                              (not (#{"extern"} (:storageClass n)))
-                             (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent)))
+                             ;; (cpp-decl2: an inline static data member's declaration in its class is its definition, [dcl.inline]/?
+                             ;; with [class.static.data]/4: cpp1z/inline-var2.C's `static inline const int var25;`)
+                             (or (and (:inline n) (#{"CXXRecordDecl"} (:kind parent)))
+                                 (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent))))
                              (empty? (filter map? (:inner n))))
                     (let [t (str (get-in n [:type :qualType]))
                           b (strip t)]
@@ -7406,3 +7423,39 @@
     (vec out)))
 
 (swap! checks conj enum-redecls)
+
+;; cpp-decl2 (2026-11-23): [basic.def.odr]/11 (C++23 /12): an inline variable odr-used in a translation unit is defined there; an
+;; `extern inline` declaration at namespace scope never defined in the file whose name is used outside an unevaluated operand
+;; (sizeof, alignof, decltype, noexcept, typeid) is GCC's "odr-used inline variable 'var19' is not defined", at the declaration;
+;; cpp1z/inline-var2.C. Read off the main file's text after the declaration.
+(defn odr-inline-vars
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (java.util.ArrayList.)
+        defined (java.util.HashSet.)]
+    (letfn [(region! [nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  ("LinkageSpecDecl" "NamespaceDecl") (region! (:inner n))
+                  "VarDecl" (when (and (string? (:name n)) (= main (get-in n [:loc :file])))
+                              (if (and (:inline n) (= "extern" (:storageClass n)) (not (:init n)) (empty? (filter map? (:inner n))))
+                                (.add decls n)
+                                (when (or (:init n) (not= "extern" (:storageClass n))) (.add defined (:name n)))))
+                  nil)))]
+      (region! (:nodes u)))
+    (doseq [n decls :when (not (.contains defined (:name n)))
+            :let [e (long (or (get-in n [:range :end :offset]) (get-in n [:loc :offset])))
+                  m (re-matcher (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name n)) "\\b")) (subs src (min (count src) (inc e))))]]
+      (when (loop []
+              (if (.find m)
+                (let [i (+ (inc e) (.start m))
+                      before (subs src (max 0 (- i 40)) i)]
+                  (if (re-find #"(?:sizeof|alignof|__alignof__|decltype|noexcept|typeid)\s*\(\s*$|extern\s+inline[^;]*$|//[^\n]*$" before)
+                    (recur)
+                    true))
+                false))
+        (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+          (.add out {:line l :col c :kind :error :rule :odr-inline :msg (str "odr-used inline variable '" (:name n) "' is not defined")}))))
+    (vec out)))
+
+(swap! checks conj odr-inline-vars)
