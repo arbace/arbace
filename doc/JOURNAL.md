@@ -19530,6 +19530,142 @@ Cells (bin/reap --record): Python eval 40,552 / 1,604 / 1,714 (4,454 n/a) -> 40,
 tool's); a separate `:not-a-case` class gathering I's three (kept apart: their reasons differ, each now n/a); a class of its own
 for J2 (the same rule as `:skipped-by-both`, CPython skipping there too).
 
+## 2026-11-23: the n/a decisions' edge rows back to deferred; queue 536 merged (branch `na-edge-1123` from mac/next `320e74469`)
+
+The user decided (2026-11-23, relayed by the coordinator): "pull out all 5 edge rows, back to deferred so they get built:
+Python test_warnings' 2 FinalizationTest rows (out of :gc-collector), and C++ D's 3 borderline rows memfriend6, vt-34052 and
+void14 (out of :ifndr-uninstantiated-template)". Applied: test_warnings' FinalizationTest test_finalization and
+test_late_resource_warning leave `:gc-collector`'s `:tests` (both pass in the record, so the cell does not move: the names
+were stale; a later failure of theirs is no longer n/a); template/memfriend6.C, cpp0x/vt-34052.C and template/void14.C leave
+`:ifndr-uninstantiated-template` (12 files now), their rows back to the deferred class that matches them (`:own-diag`).
+Then mac/536-py-deferred (`fe8f03006`, the Mac's queue 536: test_audit, test_pathlib, test_xml_etree(_c) recorded again;
+goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18) merged, test/python/divergences.edn's
+both sides' class changes kept, reap and crops-score recorded again. 536 makes go/arbace/py export Audit and AuditActive,
+so goi's table and its table check need a gate build: it rides train 2.
+## 2026-11-23: queue 536, Python eval's largest deferred classes (the VM; branch `536-py-deferred`)
+
+Brief: `.tmp/worktrees/q/tasks/536-py-deferred.md` (the deferred classes of test/python/divergences.edn, largest first; 537 the
+design ones, 535 D1-D6, the main host :c-accelerators, ctypes and the cap-crash modules). Base next fa635f636. The classes by rows
+(bin/pyi divergences --table on the base's record): capi-port 314 (pyctypes' natives: the main host's), goi-liveness-fallthrough 255,
+multiprocessing 199 and multiprocessing-children 84 (535's), testcapi 97, runner-limits 77, host-memory 62, io-c-checks 48 (535's),
+remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild), dbm-sqlite3-locking 30, ... audit-hooks 23.
+
+- **goi-liveness-fallthrough (254 of its 255 rows): stale rows, re-recorded.** test_xml_etree's and test_xml_etree_c's 254 rows
+  were kept from the records night of 2026-11-19 when the re-record of 2026-11-22 (bbea63978) left both modules out (their
+  whole-module runs failed test_cyclic_gc on gc timing); goi's fix cfd69a6d2 was in that re-record's executable. Run on the VM at
+  this branch (bin/pyi check --only, goi interpreting py and expat): every one of the 254 passes. The record's two modules were
+  written again from that run (bin/pyi check --judge DIR --record over a copy holding the two modules alone), xml_etree_c's eight
+  IOTest and Iterparse rows from a second run of them alone (see Runs). Four rows fail on the VM in both runs and are recorded so
+  (see Records). The class keeps test_multiprocessing_spawn's test_rapid_restart (535's area).
+- **audit-hooks: PEP 578's hooks called** (go/arbace/py/audit.go: sys.addaudithook's list, PySys_Audit as `Audit`, sys.audit's
+  checks, addaudithook's own "sys.addaudithook" event and its refusal by an Exception) and the events audit-tests.py checks:
+  marshal.dumps/loads/load, object.__setattr__ (check_set_special_type_attr's __name__, __qualname__, __bases__, __module__, __doc__,
+  __type_params__; __class__'s assignment), mmap.__new__, _posixsubprocess.fork_exec, sys.excepthook (a hook's RuntimeError ends the
+  display), sys.unraisablehook (a user's hook), socket.gethostname/__new__/bind, gc.get_objects/get_referrers/get_referents,
+  sys._getframe, sys._getframemodulename, _thread.start_new_thread/start_joinable_thread, syslog.openlog/syslog/setlogmask/closelog
+  (the implicit openlog's own event, and its facility LOG_USER: 22-11's note), time.sleep, sys.monitoring.register_callback; pickle's
+  and sqlite3's are their modules' own sys.audit calls. Left in the class: test_cantrace (a hook's __cantrace__: pyi's tracer is not
+  suspended while a hook runs) and test_open (FileIO's "open": pyi's _io is _pyio, whose FileIO audits none; a wrapper of _pyio's
+  FileIO.__init__ was written and withdrawn, as 535 owns _io's work this round).
+- **os-and-files-misc: os.fspath of a str or bytes subclass's instance** returns it as it is (PyOS_FSPath's PyUnicode_Check):
+  test_pathlib's six test_str_subclass_common rows pass.
+- **dbm-sqlite3-locking: not closed; crt left as it was.** The main host's lead (crt's fcntl F_GETLK leaves l_type, so SQLite sees a
+  conflict) is right as far as it goes: with F_UNLCK answered (`bin/ci run` of a probe: F_WRLCK before, F_UNLCK after), SQLite's
+  WAL index proceeds to mmap its -shm file MAP_SHARED, which crt refuses (ENODEV), so the rows fail on "disk I/O error" and
+  test_dbm's test_clear, a pass, fails. With crt's mmap of a file added too (a copy, a shared writable one written back at munmap,
+  as emu's fileMap; `bin/ci run` probe against gcc's), WAL works (a probe's connect, journal_mode=wal, CREATE, REPLACE), but the
+  dbm rows still fail: dbm.sqlite3 leaves `PRAGMA journal_mode = wal`'s and `__setitem__`'s cursors unclosed, which CPython's
+  reference count resets at once and pyi's collector does not, so a statement stays active, the write is not committed when the
+  database is closed, and whichdb reads an empty file. Both crt changes were withdrawn (crt is the C crop's; no row gained, one
+  lost); the patch and the analysis are in the report's DECISION 536-1.
+- **Runs** (the VM, arm64, its load 20-38; stage 0 nx's, goi interpreting the checkout's py; the runner by python3,
+  PYI_RUNNER=python3, after a crt change had the compiled runner's AOT module and its C libraries rebuilt twice): `bin/pyi check
+  --only` of the five modules and pathlib's six rows (logs .tmp/q536/check1.log, judge1.log), of test_dbm and test_dbm_sqlite3 on
+  the crt patch (check-dbm.log: no row gained, test_uri_substitutions lost), then test_audit and test_pathlib whole with the xml
+  modules' timing rows and xml_etree_c's eight IOTest and Iterparse rows again (checkF.log; 85 min, test_audit 5,125 s alone); the
+  three negative controls failed as they must in every run. xml_etree_c's eight rows errored in the first run on "No such file or
+  directory: '@test_1036_tmpæ'": my second `--only` run in the same worktree shared and cleaned `.tmp/t6i` (and overwrote
+  `.tmp/repr-python/pyi/check-only.txt`, so the first run's judge was redone with its own list: `--judge`); they pass alone.
+- **Records**: `bin/pyi check --judge DIR --record` over two directories holding only the recorded modules (test_audit and
+  test_pathlib from the last run; the xml modules from the first, xml_etree_c's eight rows from the last). Not recorded: test_dbm
+  and test_dbm_sqlite3 (crt unchanged). Two VM-only rows each way: test_deeply_nested_deepcopy past 600 s with py interpreted
+  (classed :runner-limits and :slow-on-goi; the main host's compiled run passes it) and test_cyclic_gc (named in
+  :finalization-collect: the main host's whole-module runs failed it too). The record's writer put the four modules' rows in its
+  own order, hence a long diff of moved lines; the rows that changed are 291.
+- **Numbers**: Python eval 40,552 / 1,604 / 1,714 -> 40,827 / 1,610 / 1,437 (the six design rows: C14N subtests the xml modules
+  now reach, skipped by the test); goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18. Python's
+  completeness 0.9794 -> 0.9810. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict` and
+  `bin/records-check`: 0 problems.
+- Alternatives left: a wrapper raising FileIO's "open" (withdrawn: 535's _io), ssl's and readline's "open" events (written, withdrawn
+  with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
+  owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
+
+## 2026-11-23: cpp-small, C++'s read tail G1, G2 and H built (branch `cpp-small-1123` from mac/next `e52a17d33`)
+
+- **What**: the user's decision of 2026-11-23 on the read tail's proposal (`.tmp/goal/cpp-na-proposal.md`, classes G1, G2, H):
+  built in Arbace's own front end, not n/a. G1, the template instantiation depth ([temp.inst]/17; GCC's -ftemplate-depth, 900 by
+  default, the option honoured): arbace.cpp.sema's `*max-tmpl-depth*`, `*tmpl-chain*`, `*tmpl-slack*`, `depth-fatal!`, `*fatal*`,
+  arbace.cpp.template's `pending` (a specialization's definition at its user's body's depth plus one), `chain-members!`,
+  `instantiate-class*`'s check, `cx-explicit-subst!` ([temp.deduct.general]/2-3's explicit arguments substituted first: the same
+  substitution re-entered is endless) and `constraint-satisfied?`'s endless satisfactions with new arguments; the timeouts of
+  template/vtable2.C and cpp0x/alias-decl-55.C are now the expected error (alias-decl-55 in seconds). G2, [expr.new]/8 with GCC's
+  limit 2^63 - 8 (PTRDIFF_MAX from c/target/abi.edn plus one less the cookie): `cx-new-size!`, with GNU's `__typeof__ (sizeof 0)`,
+  abi's byte layout for a class without bit-fields and align-of of an array without its size. H: the unnamed union's `{`, #embed's
+  elements at the list's closing brace (64 bytes or more, but the first and last), "the value of 'v' is not usable" at the read.
+  Also an elaborated-type-specifier in a function body declares its class there (decltype29's `ft<struct a*, 0>`).
+- **How decided**: every place and threshold from g++ 15.2's behaviour by hand on probes (`.tmp/probe/` of the worktree; no GCC code
+  read), recorded in the code's comments and doc/cpp/CPP-SURVEY.md, "As built: cpp-small". The depth model was fitted to measured
+  thresholds: a called member's chain needs -ftemplate-depth=S-1 and fails at the class the body instantiates; the vtable chain from
+  an explicit instantiation needs S-1 too and fails at the virtual function's declaration (so a class a vtable-reached body
+  instantiates costs no level). Alternatives considered: n/a for G1 (the proposal's option; the user chose build); a stack-depth
+  cut of the infinite cases alone (it would not give -ftemplate-depth's finite limits, pr23510 and recurse).
+- **Records**: `bin/repr-cpp dg --corpus dg-error --front native --only` the 12 rows and the control pair `--record` (stage 0,
+  GOMEMLIMIT=3000MiB); `test/cpp/divergences-dg.edn`'s :gcc-own-rules lost alias-decl-55, concepts-recursive-sat1, pr23510, recurse
+  and vtable2. C++ read 5,834 / 0 / 447 -> 5,846 / 0 / 435 (250 n/a); completeness 0.9755 -> 0.9760, independence 0.9658 -> 0.9660.
+  The own passes rerun twice (2,227 and the targets): none lost; udlit-suffix-neg.C and missing-header-pr110164.C pass 300 s on
+  mac/next's tree as on this one (the host's load; rows kept). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` and
+  `bin/records-check`: 0 problems.
+- Noticed, not mine: mac/next's doc/JOURNAL.md holds merge conflict markers (lines 19033, 19546, 19604: `<<<<<<< HEAD`, `=======`,
+  `>>>>>>> mac/536-py-deferred`) from 9b60ce498's merge; left for the coordinator.
+## 2026-11-23: queue 546, the user's decisions on 539b's rows; ppxlib's bootstrap on oi begins (the VM)
+
+- The user's decisions of 2026-11-23 on 539b's DECISION blocks:
+  - 539b-2: n/a (the user's choice, neither listed option). misc/darkening_work moves to the new class :na-gc-pacing in
+    test/ocaml/divergences.edn. oi keeps Go's NumGC as Gc's major_collections; there is no simulated major heap.
+  - 539b-3 (a): backtrace/backtrace_dynlink is n/a at eval. It joins :na-native-dynlink (native-dynlink and ocamlopt's .cmxs, no
+    bytecode alternative), and :dynlink-decided keeps lib-dynlink-bytecode/main alone.
+  - 539b-1: build all three stages in order. This task, 546, is T1: ppxlib's bootstrap on oi. T2 (ppx_expect with base, stdio and
+    time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test) follow as tasks of their own.
+- 546's T1, where it stopped (the VM, 2026-11-23):
+  - The user's decision 539b-2 is n/a: the main session's relay first named it "(a)", corrected to the user's own choice, which was
+    neither listed option.
+  - prep ports ppxlib's own sources, each held to its SHA-256:
+    - astlib's and ast's pp_rewrite.mll/pp.ml and astlib/config/gen.ml's ast-version (arbace.repr.ocaml.prep's ppxlib-pp). Proof
+      (probe): on all 72 files (astlib/*.ml(i), ast/versions.ml(i)), byte for byte the output of pp.exe built from the pinned
+      sources by the VM's OCaml 5.5.
+    - ocaml-compiler-libs v0.17.0's src/gen/gen.ml with read_cma.ml (ocaml_common.ml, from the tarball's Makefile's ocamlcommon
+      units). Proof (probe): byte for byte the VM's gen.exe on ocamlcommon.cma.
+    - src/shadow/gen/gen.ml (ocaml_shadow.ml) over ocamlcommon's modules only: a subset, line for line, of the host's
+      (ocamlbytecomp's, ocamltoplevel's and ocamloptcomp's 157 modules left out). It only adds deprecation aliases, so it does not
+      change which programs compile.
+  - bin/oi ppx gen|check, bin/lib/oi/ppx.bash and test/ocaml/ppx-programs.tsv: the generators and the metaquot driver as programs
+    on oi; the metaquot driver judged against test/metaquot/run.t's two cram cases, with a negative control.
+  - Seven typer fixes (test/ocaml/typer-repros, each sample checked against ocamlc), each failing on the typer before it:
+    1. find_record_qual;
+    2. constrained abbreviations expanded by instance;
+    3. declarations fully generic;
+    4. no abbreviation memo under GADT equations: a per-node memo, as OCaml's, overflowed the stack on typer-check's class samples,
+       so the fresh expansion is scoped to GADT patterns and branches instead (types/fresh-depth);
+    5. nested package constraints;
+    6. a parameter that unpacks a module typed in a scope of its own;
+    7. no link of an object to a scoped module's abbreviation.
+    typer-check after each step: 79 of 79 at the end; the native library rebuilt with 0 refused.
+  - Where T1 stops: astlib's 77 units and ppxlib_ast's versions, ast_helper_lite and import type. ast/ast.ml overflows the stack in
+    env's find-unit: Ppxlib_ast__Import's components resolve alias addresses eagerly and re-enter the unit being computed (1,242
+    nested calls). It needs lazy alias addresses, or a guard for a unit in progress. ppxlib's src (34 units), the generators' runs
+    and the metaquot driver are not reached.
+  - Records: the two n/a reclasses give OCaml eval 598 / 2 / 8 with 68 n/a, completeness 0.9529 -> 0.9537. bin/reap,
+    crops-score --judge --strict and records-check: 0 problems.
 ## 2026-11-23: cpp-ce2, the checker's constant evaluator (branch `cpp-ce2-1123` from mac/next `69bb781b5`)
 
 The burst's C++ read stream "cpp-ce2" (the coordinator's brief: the constant evaluator's gaps, the largest cause group of the read

@@ -10496,6 +10496,46 @@ The read tail's proposal A-F taken (doc/JOURNAL.md, "Python and C++: the user's 
 each n/a citing the standard. The read cell: 5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). G1, G2 and H are build
 work (another stream).
 
+## As built: cpp-small, the instantiation depth, the maximum object size and four diagnostics' places (2026-11-23; branch `cpp-small-1123` from mac/next `e52a17d33`)
+
+The user's decision of 2026-11-23 on the read tail's proposal (`.tmp/goal/cpp-na-proposal.md`): G1, G2 and H built, not n/a.
+Each rule from the standard and g++ 15.2's behaviour observed by hand (probes, no GCC code read).
+
+- **G1, the template instantiation depth** ([temp.inst]/17, [implimits]; GCC's -ftemplate-depth, default 900): `arbace.cpp.sema`'s
+  `*max-tmpl-depth*` (clang's 1024 for the code generator; arbace.repr.cpp.diag binds the file's -ftemplate-depth=N or -ftemplate-depth-N,
+  else 900; arbace.repr.cpp.dg passes the option, which :clang drops) and `*tmpl-chain*`, the depth of the body under analysis: a
+  specialization's definition (a function template's, a class template specialization's member) gets the depth of the body that uses it
+  plus one (`arbace.cpp.template/pending`, per scanned body; `chain-members!` for the member functions a class's instantiation gives
+  definitions, :inst-vt), a class instantiation counts the classes nested in it above that depth (`instantiate-class*`), and a body past
+  the limit is not analyzed, the error at its declaration's name. The model reproduces g++'s thresholds on probes (`template<int I>
+  struct F { int operator()() { F<I+1> f; ... } }` with `F<S>` specialized needs -ftemplate-depth=S-1, the class at the variable; the
+  virtual-function chain through the vtable after `template struct P<1>;` the same, the error at f's declaration: a class a vtable-reached
+  body instantiates costs no level of its own there, `*tmpl-slack*`). Two recursions with no end found directly, `depth-fatal!` (GCC's
+  error is fatal: the unit's analysis stops after the entry under way, `*fatal*`): a substitution of a call's explicit template arguments
+  into a signature with a decltype ([temp.deduct.general]/2-3) that needs the same substitution again (`cx-explicit-subst!`,
+  cpp0x/decltype29.C), and constraint satisfactions of one function template's specializations nested ten deep with arguments never
+  seen before in the chain (`constraint-satisfied?`, `*constraint-insts*`, at the innermost requires-expression; the same arguments
+  again stay "depends on itself"; cpp2a/concepts-recursive-sat1.C). Also an elaborated-type-specifier naming no class in a function's
+  body declares it there ([basic.scope.pdecl]/7.2: `ft<struct a*, 0>(0)`, `cx-elab-declare!`).
+- **G2, the maximum object size** ([expr.new]/8): `cx-new-size!`, an array new's constant counts times its element's size against
+  2^63 - 8 (PTRDIFF_MAX, c/target/abi.edn's 8-byte ptrdiff_t, plus one less the array cookie's size_t: g++ accepts `new
+  char[0x7ffffffffffffff8]` and rejects `[0x7ffffffffffffff9]`, with or without a cookie, an over-aligned type at 2^63, a constant inner
+  bound under a variable count); exact arithmetic, a bound read unsigned. For it: GNU's `__typeof__ (sizeof 0)` (resolve-type-form's
+  typeof-text: sizeof's and alignof's std::size_t), abi's layout in bytes for a class without bit-fields (`struct S { char a
+  [__SIZE_MAX__ / 8]; }` had been "too large for its layout"), abi's align-of of an array its element's (no size computed).
+- **H, places**: the union's multiple initializers at an unnamed union's `{` (cpp0x/pr58510.C; a named one's at its name, as g++);
+  an #embed's elements (`embed-positions`): a run of 64 or more of one directive's bytes reported at the list's closing brace but its
+  first and last, a shorter run at the directive (g++'s observed places; cpp/embed-7.C, cpp/embed-16.C); a const variable, not
+  constexpr, whose initializer is surely not constant, read in a constant evaluation: "the value of 'v' is not usable" at the read
+  (cpp23/constexpr-nonlit4.C).
+
+Checked: each target alone and in the record run (the 12 rows pass, the control pair dr2082-vs-dr1423 failing as it must); the
+own record's 2,227 passes twice (reg1 on the G2/H/first-G1 tree, reg2 on the head with the 14 targets): none lost but
+cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C, past 300 s under the host's load, which time out alone on mac/next's
+tree too (rows kept); probes of the depth model against g++ 15.2 (the recursion and vtable thresholds above), of the size limit and of
+the #embed places. The read cell: 5,834 / 0 / 447 (250 n/a) -> 5,846 / 0 / 435; :gcc-own-rules' five depth files out of its :tests.
+Left: `new (T[N])` (a parenthesized array type) is not judged by cx-new-size! (the native parser's form; no target needs it), and
+the constant evaluator's long arithmetic still throws Java's ArithmeticException past 2^63 in an unsigned expression (caught here only).
 ## As built: cpp-ce2, the checker's constant evaluator: unions, __builtin_bit_cast, lifetimes, dynamic_cast, allocation (2026-11-23; branch `cpp-ce2-1123` from mac/next `69bb781b5`)
 
 The burst's C++ read stream on the constant evaluator's gaps, the largest cause group of the read cell's 490 deferred rows (gxx-dg's

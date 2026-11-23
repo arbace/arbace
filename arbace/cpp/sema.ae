@@ -50,6 +50,31 @@
 ;; CX12 (second slice): the checker's rules that the code generator does not apply (on with *on-refusal*: a program the
 ;; checker reads may be ill-formed; the code generator's programs are not, and its analysis stays as it was)
 (defn checking? [] (some? *on-refusal*))
+;; cpp-small (G1): the limit on the depth of nested template instantiations ([temp.inst]/17, [implimits]): clang's 1024 for the
+;; code generator, GCC's -ftemplate-depth for the checker (arbace.repr.cpp.diag binds it: the option's N, else GCC's default 900);
+;; and the depth of the function body being analyzed, a specialization's definition instantiated where a body of depth d uses it
+;; at d + 1 (arbace.cpp.template/pending; 0 for a function no template's), the class instantiations under way counted above it
+(def ^:dynamic *max-tmpl-depth* 1024)
+(def ^:dynamic *tmpl-chain* 0)
+;; (1 in a body analyzed as a virtual function of a class instantiated in another body, arbace.cpp.template/chain-members!)
+(def ^:dynamic *tmpl-slack* 0)
+;; (the checker: an atom set once an infinite instantiation was reported, GCC's fatal error: the unit's analysis stops after the
+;; entry under way, depth-fatal!)
+(def ^:dynamic *fatal* nil)
+
+(defn depth-fatal!
+  "cpp-small (G1), the checker: an instantiation recursion found unbounded (the same substitution re-entered, or constraint
+  satisfactions nested with ever new arguments) reported as GCC's fatal \"template instantiation depth exceeds maximum\" at the
+  node `n` (else the analysis' position), the unit's analysis stopped after the entry under way (*fatal*); then a refusal of
+  the substitution under way thrown."
+  [what n]
+  (when-let [h *on-refusal*]
+    (when-not (some-> *fatal* deref)
+      (h (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of " *max-tmpl-depth* " (" what ")")
+                  {:codegen/refused :depth})
+         (or n (some-> *at* deref)))
+      (when *fatal* (reset! *fatal* true))))
+  (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth (" what ")") {:codegen/refused :depth :cx/reported true})))
 ;; CP329 (a): the dg read's time cap for one file (arbace.repr.cpp.diag binds it: System/nanoTime's deadline, 0 none); past it
 ;; every analysis step throws {:cpp/timeout true}, which the refusals' handlers may catch, so the analysis unwinds with nothing
 ;; more done and the reader, seeing the deadline passed, reports the file's read as :timeout
@@ -772,6 +797,13 @@
                  (cond (= t "nullptr") abi/nullptr-t
                        (re-find #"^(sizeof|alignof)\b" t) abi/ulong*
                        :else (decltype-of scope t)))
+      ;; (cpp-small: GNU's typeof of the forms g++.dg's tests name size_t and ptrdiff_t by, `typedef __typeof__ (sizeof 0)
+      ;; size_t;` (init/new44.C, init/new46.C): sizeof's and alignof's type, std::size_t ([expr.sizeof]/6); the others refused as
+      ;; before)
+      typeof-text (let [t (str/trim (str (second f)))]
+                    (cond (= t "nullptr") abi/nullptr-t
+                          (re-find #"^(sizeof|alignof|__alignof__)\b" t) abi/ulong*
+                          :else (fail :type "type form " (pr-str f))))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
       cpp/scope (loop [t (resolve-type-form scope (second f))
                        ;; X::template Y<A>::Z: the parts after `template` (G4: __alloc_traits<_Alloc>::template rebind<_Tp>::other)
@@ -1463,6 +1495,12 @@
                           (and (number? v) (not (zero? (double v))))))))))))
 
 (def ^:dynamic *constraint-depth* 0)
+;; (cpp-small: the function templates' specializations whose associated constraints are being checked, [tid args] outermost first,
+;; arbace.cpp.template/instantiate-fn's)
+(def ^:dynamic *constraint-insts* [])
+;; (and the constraint expressions being checked, outermost first: the innermost one not a concept-id is where the recursion is
+;; reported, the requires-expression whose call makes the next specialization)
+(def ^:dynamic *constraint-node* nil)
 (def ^:dynamic *constraint-stack* nil)
 ;; CX12, CP281 (a) (the checker): an atom set when a satisfaction's evaluation met an expression the slice could not analyze
 ;; or evaluate (a refusal read as not satisfied): its false then not sure. A false with the atom unset is the program's own
@@ -1533,8 +1571,17 @@
   ;; clang's "satisfaction of constraint depends on itself", [temp.constr.atomic]/3; the depth bounds it, G5)
   (try (when (> (long *constraint-depth*) 24)
          (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "constraint depth" (pr-str *constraint-stack*))))
+         ;; (cpp-small, G1, the checker: the satisfactions under way the constraints of one function template's specializations, each
+         ;; with arguments not seen before in the chain, a recursion that makes new specializations without end, `foo<N + 1>(t)` in
+         ;; the constraint of foo<N>: GCC's fatal "template instantiation depth exceeds maximum" at the atom being checked,
+         ;; cpp2a/concepts-recursive-sat1.C; the same arguments again stay a satisfaction that depends on itself)
+         (when (checking?)
+           (let [xs *constraint-insts*]
+             (when (and (>= (count xs) 10) (apply = (map first (take-last 10 xs))) (apply distinct? (take-last 10 xs)))
+               (when (System/getenv "CPP_DEPTH_TRACE") (binding [*out* *err*] (println "constraint nodes" (pr-str (map (juxt :kind #(get-in % [:range :begin :offset])) *constraint-node*)))))
+               (depth-fatal! "the constraints' satisfaction" (last (filter #(and (map? %) (:range %) (not (#{"ConceptSpecializationExpr" "DeclRefExpr"} (:kind %)))) *constraint-node*))))))
          (fail :template "a constraint's satisfaction depends on itself"))
-       (binding [*constraint-depth* (inc (long *constraint-depth*))
+       (binding [*constraint-depth* (inc (long *constraint-depth*)) *constraint-node* (if (checking?) (conj (or *constraint-node* []) rc) *constraint-node*)
                  *constraint-stack* (when (System/getenv "CPP_CONCEPT_TRACE") (conj (or *constraint-stack* []) (let [t (str (node-text rc))] (subs t 0 (min 60 (count t))))))]
          ;; (the checker's position stays the call's: the constraint's nodes are the template's)
          (let [a *at* saved (some-> a deref)]
@@ -2551,8 +2598,15 @@
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
       ;; [class.mem.general]/11: GCC's "initializations for multiple members of 'A'", at the union)
+      ;; (cpp-small, H: at the union's name, an unnamed union's at its `{`, as g++ 15.2 places it (observed by hand:
+      ;; `union U` at U, `union\n {` at the brace): cpp0x/pr58510.C)
       (when (and (checking?) (:union (abi/cls id)) (< 1 (count (filter :init (:fields (abi/cls id))))))
-        (*on-refusal* (ex-info (str "codegen: initializations for multiple members of '" nm "'") {:codegen/refused :union}) n))
+        (*on-refusal* (ex-info (str "codegen: initializations for multiple members of '" nm "'") {:codegen/refused :union})
+                      (let [l (:loc n) o (:offset l)]
+                        (if (and (integer? o) (:file l) (= (:file l) (get-in n [:range :begin :file])))
+                          (let [o (if nm (long o) (let [i (.indexOf ^String (text-of (:file l)) "{" (int o))] (if (neg? i) (long o) i)))]
+                            (assoc-in n [:range :begin] (assoc l :offset o)))
+                          n))))
       (finish-class! id)
       ;; (CP365 (a): finished, and the provisional instances that waited for it made again)
       (abi/update-cls! id assoc :finished true)
@@ -2675,7 +2729,8 @@
   scope ([basic.scope.pdecl]/7.2), incomplete, and its type; else nil."
   [scope f e]
   (let [[_ kw nm] f]
-    (when (and (checking?) *main-retry* (= :type (:codegen/refused (ex-data e)))
+    ;; (cpp-small: also in a function's body, a block scope, as in a template argument `ft<struct a*, 0>(0)`, cpp0x/decltype29.C)
+    (when (and (checking?) (or *main-retry* (#{:block :fn} (:kind (cx-elab-target scope)))) (= :type (:codegen/refused (ex-data e)))
                (#{'struct 'class 'union} kw) (symbol? nm) (re-matches #"[A-Za-z_][A-Za-z_0-9]*" (str nm)))
       (when-let [s (cx-elab-target scope)]
         (declare-class! s {:kind "CXXRecordDecl" :tagUsed (str kw) :name (str nm)})
@@ -3977,8 +4032,17 @@
                        init (or (:init v) (:init-node v))]
                    (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v) (and *ce-fold* (abi/floating? (:ty v)))))
                      ;; (its initializer manifestly constant-evaluated: the variable is usable in constant expressions, CP378 (a))
-                     (ce-wrap (:ty v) (let [x (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init)))]
-                                        (binding [*ce-manifest* true] (ce-eval x {}))))
+                     (ce-wrap (:ty v) (let [ix (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init)))]
+                                        ;; (cpp-small, H: a const variable, not constexpr, whose initializer is surely not constant:
+                                        ;; the value not usable, at the read, [expr.const]/4 and /5.9, as g++ places it, not at the
+                                        ;; initializer's operation: cpp23/constexpr-nonlit4.C's `return v;`)
+                                        (try (binding [*ce-manifest* true] (ce-eval ix {}))
+                                             (catch arbace.lang.ExceptionInfo ex
+                                               (let [d (ex-data ex)]
+                                                 (if (and (checking?) (not (:constexpr v)) (:cx/sure d) (:cx/at d) (:cx-at x) (:name v))
+                                                   (throw (ex-info (str "not a constant: the value of '" (:name v) "' is not usable in a constant expression")
+                                                                   (assoc d :cx/at (:cx-at x))))
+                                                   (throw ex)))))))
                      ;; ([expr.const]/5.9: an lvalue-to-rvalue conversion of a variable not usable in constant expressions,
                      ;; [expr.const]/4: neither constexpr nor a const integral or enumeration one -- a plain variable, a
                      ;; const double)
@@ -8642,6 +8706,45 @@
     (or cls
         (global-dealloc array? {:size (boolean (and (let [u (abi/unq et)] (or (not (abi/class? u)) (:complete (abi/cls (:id u))))) (or (not array?) wants destructed))) :align over}))))
 
+;; cpp-small (G2): [expr.new]/8, an array new-expression's size past the implementation's maximum object size is ill-formed when
+;; its count is a constant. Arbace's target takes GCC's limit, PTRDIFF_MAX (c/target/abi.edn's :typedefs "PTRDIFF" :long, 8
+;; bytes) plus one less an array cookie's size_t (8 bytes), 2^63 - 8, whether or not the type needs a cookie: observed on g++ 15.2 by hand (behaviour
+;; only: `new char[0x7ffffffffffffff8]` accepted, `[0x7ffffffffffffff9]` "size ... of array exceeds maximum object size
+;; '9223372036854775807'"; the same for a type with a destructor, for an over-aligned one at 2^63, for a non-constant outer count
+;; with a constant inner bound and for `new (T[N])`); init/new44.C, init/new46.C. The size is the constant counts' product
+;; times the innermost element's size, exact (an overflow is past the limit); a negative count is not judged here.
+(def ^:private max-new-size 9223372036854775800N) ; 2^63 less the cookie
+
+(defn- cx-new-size!
+  [ctx n nexpr et]
+  (when (map? nexpr)
+    (try
+      (let [cnt (let [e (rv (binding [*cutoff* Long/MAX_VALUE] (analyze ctx nexpr)))
+                      t (abi/unq (:ty e))]
+                  (when (and (map? t) (abi/integral? t))
+                    ;; (an evaluation the evaluator's long arithmetic overflows judges nothing here)
+                    (when-let [c (try (ce-try e) (catch ArithmeticException _ nil))]
+                      (let [v (:v c)]
+                        (when (and (= :int (:op c)) (integer? v))
+                          (let [b (bigint v)]
+                            (cond (not (neg? b)) b
+                                  (abi/signed? t) nil
+                                  :else (+' b 18446744073709551616N))))))))
+            [inner leaf] (loop [t (abi/unq et) acc 1N]
+                           (if (and (abi/arr? t) (integer? (:n t)))
+                             (recur (abi/unq (:of t)) (*' acc (let [k (bigint (:n t))] (if (neg? k) (+' k 18446744073709551616N) k))))
+                             [acc t]))
+            sz (when-not (or (abi/arr? leaf) (= :fn (:k leaf)))
+                 (try (bigint (abi/size-of leaf)) (catch Exception _ nil)))]
+        (when (System/getenv "CX_NEW_TRACE") (binding [*out* *err*] (println "new-size" cnt inner (pr-str leaf) sz)))
+        (when sz
+          (let [total (*' inner sz (or cnt 1N))]
+            (when (> total max-new-size)
+              (*on-refusal* (ex-info (str "codegen: size '" total "' of array exceeds maximum object size '9223372036854775807'")
+                                     {:codegen/refused :array})
+                            n)))))
+      (catch arbace.lang.ExceptionInfo x (when (System/getenv "CX_NEW_TRACE") (binding [*out* *err*] (println "new-size refused" (ex-message x)))) nil))))
+
 (defn- new-expr [ctx n]
   (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         et (:to t)
@@ -8664,6 +8767,7 @@
                :else (init-for et [(analyze ctx initn)] ctx :direct))
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
+    (when (and nexpr (checking?)) (cx-new-size! ctx n nexpr et))
     {:op :new :placement placement :alloc (when-not placement (:alloc fa)) :dealloc (when-not placement (:dealloc fa))
      :cookie (boolean (and nexpr (not placement) (let [bt (loop [x (abi/unq et)] (if (abi/arr? x) (recur (abi/unq (:of x))) x)) c (class-id bt)]
                                    (or (and c (not (trivial-dtor? c)))
@@ -8679,6 +8783,40 @@
      :cat :pr}))
 
 (defn- dtor-of [cid] (:dtor (abi/cls cid)))
+
+;; cpp-small (H): where g++ 15.2 places a diagnostic about an element an #embed made (observed by hand, behaviour only: lists of
+;; one directive's bytes, limit 1 to 300): a run of fewer than 64 at the directive, a longer one's first and last element at the
+;; directive and the others at the list's closing brace (cpp/embed-7.C, cpp/embed-16.C). The preprocessor gives each of a run's
+;; integer literals the directive's position, so a run is the literals of one position on a line that is an #embed directive.
+(defn- embed-line?
+  [b]
+  (let [o (:offset b) t (text-of (:file b))]
+    (and (integer? o) (string? t) (< (long o) (count t))
+         (let [ls (inc (.lastIndexOf ^String t "\n" (int (dec (long o)))))
+               le (let [i (.indexOf ^String t "\n" (int o))] (if (neg? i) (count t) i))]
+           (boolean (re-find #"^\s*#\s*embed\b" (subs t ls le)))))))
+
+(defn- embed-positions
+  "The analyzed elements `xs` of the list node `n` (its kids), each element an #embed's run made given the position g++ reports
+  it at (:cx-at)."
+  [n xs]
+  (let [ks (vec (kids n))]
+    (if (or (not= (count ks) (count xs)) (not-any? #(= "IntegerLiteral" (:kind %)) ks))
+      xs
+      (let [pos (fn [k] (when (= "IntegerLiteral" (:kind k)) (let [b (get-in k [:range :begin])] [(:file b) (:offset b)])))
+            runs (partition-by pos (map-indexed vector ks))
+            end (get-in n [:range :end])]
+        (reduce (fn [xs run]
+                  (let [[_ k0] (first run) p (pos k0) c (count run)]
+                    (if (and p end (embed-line? (get-in k0 [:range :begin])))
+                      (reduce (fn [xs [j [i k]]]
+                                (let [x (nth xs i)]
+                                  (if (map? x)
+                                    (assoc xs i (assoc x :cx-at (if (and (>= c 64) (< 0 (long j) (dec c))) {:begin end :end end} (:range k))))
+                                    xs)))
+                              xs (map-indexed vector run))
+                      xs)))
+                (vec xs) runs)))))
 
 (defn- analyze-args
   "The typed expressions of argument nodes, a pack expansion (args...) analyzed once for each of its packs' elements."
@@ -9996,7 +10134,7 @@
                                  (let [f (when-let [i (:fn-id ctx)] (fnd i))]
                                    (when (and f (not (:cls f)) (not (:this-type ctx))) (check-type-access! (:scope ctx) qt n))))
                                {:op :zero-val :ty t :cat :pr})
-    "InitListExpr" (cond-> {:op :init-list :items (analyze-args ctx (kids n)) :ty {:k :init-list}}
+    "InitListExpr" (cond-> {:op :init-list :items (cond->> (analyze-args ctx (kids n)) (checking?) (embed-positions n)) :ty {:k :init-list}}
                      ;; (cpp-ce2: a union's member the list initializes, the semantic form's `field`: its designator's)
                      (get-in n [:field :name]) (assoc :field (get-in n [:field :name])))
     ;; a default member initializer's place in a semantic list (the native parser's fill, [dcl.init.aggr]/5.1): the
@@ -11697,7 +11835,8 @@ protected:
             *conv-tmpl-cache* (atom {}) *cx-udir-pos* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-names* (when (checking?) (cx-hdr-names nodes))
-            *cx-all-names* (when (checking?) (cx-all-names nodes))]
+            *cx-all-names* (when (checking?) (cx-all-names nodes))
+            *fatal* (when (checking?) (atom false))]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
@@ -11735,12 +11874,22 @@ protected:
                                   (cond
                                     (and (:body f) (not (:tbody f)))
                                     (do (upd-fn! id assoc :analyzed true)
-                                        (if-let [h *on-refusal*]
-                                          (try (analyze-fn! id)
-                                               (cx-potential-constant! id)
-                                               (catch arbace.lang.ExceptionInfo e
-                                                 (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
-                                          (analyze-fn! id)))
+                                        (binding [*tmpl-chain* (long (or (:inst-chain f) 0)) *tmpl-slack* (if (:inst-vt f) 1 0)]
+                                          (when (System/getenv "CPP_DEPTH_TRACE") (binding [*out* *err*] (println "body" (:name f) id "chain" *tmpl-chain*)))
+                                          (if-let [h *on-refusal*]
+                                            ;; (cpp-small, G1: a specialization's definition past the instantiation depth limit is not
+                                            ;; analyzed, GCC's fatal "template instantiation depth exceeds maximum" at its declaration's
+                                            ;; name: template/vtable2.C, cpp0x/alias-decl-55.C; the uses it would make stop there)
+                                            (if (> (long *tmpl-chain*) (long *max-tmpl-depth*))
+                                              (h (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of " *max-tmpl-depth* " (" (:name f) ")")
+                                                          {:codegen/refused :depth})
+                                                 (let [n (:node f) l (:loc n)]
+                                                   (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n)))
+                                              (try (analyze-fn! id)
+                                                   (cx-potential-constant! id)
+                                                   (catch arbace.lang.ExceptionInfo e
+                                                     (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
+                                            (analyze-fn! id))))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))
                                     (do (upd-fn! id assoc :analyzed true)
@@ -11826,9 +11975,9 @@ protected:
                                      (upd-var! id assoc :ginit (global-init id)))))))]
            (loop [i 0]
              (let [order @*order*]
-               (if (< i (count order))
+               (if (and (< i (count order)) (not (some-> *fatal* deref)))
                  (do (entry! (nth order i)) (recur (inc i)))
-                 (when-let [more (seq (when-let [h (:pending @hooks)] (h)))]
-                   (doseq [x more] (entry! x))
+                 (when-let [more (seq (when-not (some-> *fatal* deref) (when-let [h (:pending @hooks)] (h))))]
+                   (doseq [x more] (when-not (some-> *fatal* deref) (entry! x)))
                    (recur i))))))))
       {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :ns-tags @abi/*ns-tags* :root root}))))
