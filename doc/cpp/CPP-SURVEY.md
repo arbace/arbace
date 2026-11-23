@@ -10781,3 +10781,95 @@ of pointer parameters (nontype3.C, crash14.C), pre-C++17 copy-initialization fro
 parsed as a non-type yielding a type (dependent-name16.C), an explicit specialization of a member template's constraints
 (concepts-explicit-spec7.C), template template parameters' constraints (concepts-ttp6.C), the native parser's recovery after a syntax
 error in a template head (crash98.C, crash99.C, redecl5.C, typedef4.C, pr90138.C).
+
+## As built: cpp-decl2, initialization, lookup, declarations, special members and overload resolution (2026-11-23; branch `cpp-decl2-1123` from mac/next `e08a71302`)
+
+The burst's C++ read stream on the read tail's groups "initialization", "lookup, access, declarations", "special members" and
+"overload resolution" (`.tmp/goal/cpp-na-proposal.md`; gxx-dg's dg-error rows judged by the own front end's diagnostics). Each rule
+from the standard's text and g++ 15.2's behaviour (the tests' records, and probes by hand with the host's g++ where named); no GCC or
+clang code read. Templates, concepts and the constant evaluator are other streams' (cpp-tpl2, cpp-ce3).
+
+### The rules
+
+- Designated initializers in overload resolution (arbace/cpp/sema.ae, `desig-convertible?`, `desig-order!`): a list the parser left as
+  written (an overloaded callee's argument) keeps its designators (`:desigs`); it converts only to an aggregate class whose members
+  they name ([over.ics.list]/2), and once the function is chosen its parameter's initialization with the designators out of the
+  members' order is GCC's "designator order for field 'A::x' does not match declaration order in 'A'" (cpp2a/desig4.C, desig6.C).
+  arbace/repr/cpp/diag.ae's designated-lists: an #embed among a list's clauses expands to its prefix, its bytes and its suffix
+  ([cpp.embed]), so a designated prefix before the bytes mixes designated and plain clauses, at the directive (cpp/embed-14.C).
+- Deleted default constructors explained down to the member (`cx-deleted-implicit!`): a default constructor deleted for subobjects'
+  deleted default constructors reports each such subobject's own reason at its class ([class.default.ctor]/2.5: init/pr25811.C,
+  pr43719.C's Y1 over Y11 a[1], Z over Z1-Z4, init/const10.C's D over its base); a union all of whose variant members are const
+  ([class.default.ctor]/2.3) has its default constructor deleted.
+- A user-provided constructor that leaves a reference member, a const member of a non-class type (or an array of it) or of a class
+  type that is not const-default-constructible ([dcl.init.general]/7-8, `cx-const-default-constructible?`) uninitialized
+  ([class.base.init]/9.3): GCC's "uninitialized const member", at the constructor (init/pr29043.C, cpp0x/defaulted2.C); a new-expression
+  without initializer of such a const type ([expr.new]/22): "uninitialized const in 'new'".
+- Copy-initialization from another type takes converting constructors alone ([over.match.copy]/1.1): an explicit constructor chosen,
+  none of the others viable, is GCC's "conversion from 'int' to non-scalar type 'A' requested"; a default member initializer's
+  copy-list-initialization (`= {...}`, the source's `=` before the brace) refuses an explicit constructor (cx-explicit-list!); both
+  reported at the initializer, the implicit constructor analyzed on (cpp0x/nsdmi3.C).
+- An ambiguity among a class's own constructors and those it inherits from direct non-virtual bases that inherit none, the hidden
+  ones ([namespace.udecl]/15) left out, is judged (cpp1z/inh-ctor30.C).
+- A default argument `{...}` for a reference to an abstract class creates an object of it ([class.abstract]/3): at the declaration
+  and at each call taking it (cpp0x/abstract-default1.C).
+- A pointer to function converts to no pointer to another function type ([conv.fctptr]; parameters and results the checker judges);
+  a lone parameter of cv-qualified void ([dcl.fct]/2 names void alone) is GCC's "invalid use of cv-qualified type", and the function
+  keeps that parameter, so it converts to no `void (*)()` (conversion/err-recover1.C); a named void parameter likewise makes no
+  default constructor (other/error13.C).
+- A non-member operator=, operator(), operator[] or operator-> ([over.ass]/1, [over.call]/1, [over.sub]/1, [over.ref]/1): the parser's
+  "must be a non-static member function", not declared by the checker, its use GCC's "'operator=' not defined" (other/operator1.C).
+- Declarations (arbace/repr/cpp/diag.ae, parse.ae): C language linkage entities of one name in different namespaces have one type
+  ([dcl.link]/7, [basic.link]/11; `c-linkage-entities`, lookup/extern-c-redecl6.C); a namespace-definition whose name finds two
+  namespaces in the enclosing namespace and its inline set ([namespace.def.general]/2; `namespace-ambiguity`, lookup/pr94257.C); a
+  qualified declarator-id outside its namespace only ([dcl.meaning.general]/1): `void ::S ()` in its own namespace "explicit
+  qualification" (lookup/pr79766.C), a member of two elements of the inline namespace set "reference to 'Q::i' is ambiguous", one a
+  using-directive nominates "should have been declared inside" (cpp0x/inline-ns2.C); a friend function's definition is its namespace's
+  in the redefinition check, a deleted one after a declaration "not first declaration" ([dcl.fct.def.delete]/4, cpp0x/pr80259.C); a
+  friend's pure-specifier and a defaulted function that is no special member or comparison ([dcl.fct.def.default]/1,
+  cpp0x/defaulted2.C); exception specifications held to the latest declaration (cpp0x/noexcept46.C); declaration specifiers that want
+  a declarator before a class declared with none (cpp0x/decl-loc1.C); an enumeration or a class defined after a using-declarator of
+  its name ([basic.scope.scope]/4, lookup/using53.C: a dependent one's class too, its enumeration not, as g++ 15.2); a bit-field of a
+  non-integral type left out of its class (parse/bitfield1.C).
+- Special members (sema): a function with a deleted definition overrides none without one and the reverse ([class.virtual]); a
+  union-like class's implicit default, copy and move constructors and destructor deleted for a variant member's non-trivial one
+  ([class.default.ctor]/2.1, [class.copy.ctor]/10.1, [class.dtor]/7.1), reported at the member (cpp0x/union1.C, cpp0x/defaulted2.C);
+  an implicit copy constructor over a const member whose class has only non-const copy constructors deleted (init/synth2.C).
+- Narrowing of a std::initializer_list's class element by its converting constructor's argument ([dcl.init.list]/5; g++ 15.2 judges
+  it for initializer_list elements alone, not an aggregate's members, observed by hand: cpp0x/initlist36.C); a reference
+  direct-initialized by a parenthesized expression binds an aggregate initialized from it from C++20, as g++ (cpp2a/paren-init23.C);
+  a new-expression's parenthesized array initialization takes the elements past the expressions as copy-list-initialized, an explicit
+  default constructor refused (expr/anew5.C).
+
+### Checked
+
+Each rule on its files and on reduced programs by the probe (arbace.repr.cpp.dg's read-own over a dg.edn entry; g++ 15.2 by hand on
+the narrowing, designator and #embed probes). The record run (`bin/repr-cpp dg --corpus dg-error --front native --only` 2,706 files
+`--record`: every own pass of the record, the read cell's deferred rows and the stream's candidates; stage 0, GOMEMLIMIT=3000MiB,
+20:26-21:25 UTC): own pass 2,288 -> 2,313, one own pass lost (cpp0x/union4.C: a union member whose default constructor is deleted
+had been taken by the new non-trivial rule, at the member; fixed, the union rule left to it) and one new crash fixed
+(cpp1y/lambda-generic-variadic2.C: a header's default member initializer read against the main file's text), both read again with
+every recorded file that names `union` (108 files); cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s
+under load as before (their pass rows kept). With mac/next merged (cpp-tpl2's 38 rows): the 66 rows the two streams turned to own
+pass read again on the merged tree, all passing, the control pair DRs/dr2082.C vs dr1423.C failing as it must.
+
+### The cells
+
+The own record: 28 rows to own pass (conversion/err-recover1, cpp/embed-14, cpp0x/abstract-default1, decl-loc1, defaulted2,
+initlist36, inline-ns2, noexcept46, nsdmi3, pr80259, union1, cpp1z/inh-ctor30, cpp2a/desig4, desig6, paren-init23, expr/anew5,
+init/const10, pr25811, pr29043, pr43719, synth2, lookup/extern-c-redecl6, pr79766, pr94257, using53, other/error13, operator1,
+parse/bitfield1), none lost. C++ read 5,923 / 0 / 360 (248 n/a, mac/next with cpp-tpl2) -> 5,951 / 0 / 332; completeness 0.9790 ->
+0.9801, independence 0.9674 -> 0.9678 (the read stage 0.839 -> 0.841); eval, AOT and print unchanged.
+
+### Left
+
+In the scope, found and not built: cpp0x/pr62101.C and the friend functions the checker does not declare (sema's FriendDecl: their
+calls, a deleted one's use); cpp0x/forw_enum6.C (opaque enumeration redeclarations: scoped/unscoped, underlying types, qualified
+opaque declarations, a definition in a namespace that does not enclose it, and a false "ambiguous" for `enum N1::E6`);
+cpp1z/inline-var2.C (inline static data members' redefinitions, also of class templates', and its other `inline` rules);
+cpp0x/lambda/lambda-anon1.C (a lambda naming a local anonymous union's member); cpp0x/noexcept71.C (an undeclared name in a
+noexcept-specifier outside a complete-class context); cpp0x/pr71979.C, defaulted20.C, implicit-trivial1.C (implicit move
+assignments and constructors deleted through a base's or member's overload resolution); diagnostic/array-init1.C (each element's
+error of one initializer, the first stops the declaration); other/offsetof8.C (a virtual base's member through a null pointer and
+offsetof); tc1/dr147.C and override2.C (the injected-class-name as a qualified type, virt-specifiers as names); parse/access13.C (an
+access declaration); cpp23/ext-floating* (the extended floating-point types' conversion ranks).

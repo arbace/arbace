@@ -20089,3 +20089,47 @@ lock (.tmp/c/rt540.sh, 17 GiB):
 - `roundtrip --corpus torture-compile --record` and `parse-check --corpus torture-compile --no-mutants --record` both ran out of
   memory within two minutes (15.6 GB at the 17 GiB cap; the compiled host reads 8 files at once, the 20,000 bound lets the limits
   files nest deep); queued again under the lock with 2 threads, 22 GiB and GOMEMLIMIT 18 GiB (.tmp/c/rt540b.sh).
+
+## 2026-11-23: cpp-decl2, initialization, lookup, declarations, special members and overload resolution (branch `cpp-decl2-1123` from mac/next `e08a71302`)
+
+The burst's C++ read stream on the read tail's groups other than templates and the constant evaluator
+(`.tmp/goal/cpp-na-proposal.md`'s "remaining ... to BUILD": initialization, lookup/access/declarations, special members, overload
+resolution). The deferred rows of these groups were probed one by one (the own front end's diagnostics against each file's dg.edn
+entry) and grouped by cause; each rule from the standard's text and g++ 15.2's behaviour as the tests record it, with the host's g++
+15.2 run by hand on three questions (narrowing of class elements: initializer_list elements only, not an aggregate's members; array
+designators mixed with plain clauses: GCC's "either all ... or none" error; `A x = 1` with an explicit constructor); no GCC or clang
+code read. doc/cpp/CPP-SURVEY.md, "As built: cpp-decl2", lists the rules.
+
+Built (arbace/cpp/sema.ae, the checker's unless said; arbace/repr/cpp/parse.ae and diag.ae): designators in overload resolution
+([over.ics.list]/2) and the chosen parameter's designator order; #embed in designated lists; deleted default constructors explained
+down to the uninitialized member, and unions of const members; uninitialized const and reference members in user-provided
+constructors and const-default-constructibility ([dcl.init.general]/7-8, also for new); explicit constructors in copy-initialization
+and default member initializers; inherited constructors' ambiguities; abstract classes created by `{}` default arguments; function
+pointer conversions and cv void parameters; non-member operator=, (), [], ->; C linkage entities across namespaces; namespace
+definitions' ambiguity; explicit and inline-namespace qualification; friend definitions in the redefinition check; friends' pure
+specifiers and defaulted non-special functions; exception specifications against the latest declaration; specifiers before a
+class declared with no declarator; classes and enumerations defined after a using-declarator of their name; non-integral bit-fields
+dropped; deleted and non-deleted overriders; union-like classes' special members deleted for non-trivial variant members, at the
+member; implicit copy constructors over a const member without a const copy constructor; narrowing of initializer_list elements by
+converting constructors; C++20 parenthesized aggregate initialization through a reference; array new's paren-init with an explicit
+default constructor.
+
+Alternatives weighed: for the designators, placing them in the parser for overloaded callees too (rejected: the parser does not know
+the chosen overload; sema ranks, so the order is judged after the choice, as [over.ics.list]/2's note says); for the union rule's place,
+the class (rejected: GCC puts "union member ... with non-trivial" at the member, and a class line is an extra error in union1.C);
+judging every ambiguous inheriting-constructor call (rejected: only when the inherited candidates are all known, the "no viable"
+rule's condition, the hidden ones removed first).
+
+Checked: the record run 20:26-21:25 UTC (`bin/repr-cpp dg --corpus dg-error --front native --only` 2,706 files `--record`: the own passes,
+the deferred rows and the candidates; stage 0, GOMEMLIMIT=3000MiB): own pass 2,288 -> 2,313; cpp0x/union4.C lost (the new union rule
+took a deleted member's) and cpp1y/lambda-generic-variadic2.C's new crash (a header's initializer offset read against the main text),
+both fixed and read again with the 108 recorded files naming `union` (2,316 with the two timeouts' rows kept as earlier streams kept
+them: cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C past 300 s under load); 28 rows to own pass, none lost; the control
+pair failing as it must. mac/next merged (cpp-tpl2's templates, train 1; the record's one conflict, paren-init23 and paren-init26, both
+sides' passes), the 66 rows both streams turned to own pass read again on the merged tree: all pass. `bin/reap --record`,
+`bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read 5,923 / 0 / 360 -> 5,951 / 0 / 332 (248 n/a);
+completeness 0.9790 -> 0.9801, independence 0.9674 -> 0.9678.
+
+Left (the survey's list): friend functions in sema (pr62101), opaque enumeration redeclarations (forw_enum6), inline variables
+(inline-var2), implicit moves deleted through overload resolution (pr71979, defaulted20, implicit-trivial1), per-element errors of one
+initializer (array-init1), and smaller ones.
