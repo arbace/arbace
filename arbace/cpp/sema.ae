@@ -7313,7 +7313,15 @@
                 d (not= (class-id rt) (class-id pt))]
             {:i :bind :e (if (and d (class-id pt)) {:op :base-lv :e c :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c rt)) :cat (:cat c)} c)})
           (or (and (:c pt) (not (and (checking?) (:v pt)))) (= :rref (:k t)))
-          {:i :bind-temp :init (init-for (abi/unq pt) e ctx :copy) :ty (abi/unq pt)}
+          {:i :bind-temp :init (if (and (checking?) (vector? src) (>= (long *cxx-year*) 20) (abi/class? (abi/unq pt)) (aggregate? (abi/unq pt))
+                                        (not (class-id at)))
+                                 ;; (cpp-decl2, the checker: a reference direct-initialized by a parenthesized expression of
+                                 ;; another type binds a temporary of an aggregate class initialized from it as C++20's
+                                 ;; parenthesized aggregate initialization ([dcl.init.general]/16.6.2.2), as g++ 15.2 does:
+                                 ;; cpp2a/paren-init23.C's `const S& s(1);` accepted)
+                                 (init-for (abi/unq pt) src ctx :direct)
+                                 (init-for (abi/unq pt) e ctx :copy))
+           :ty (abi/unq pt)}
           :else (fail :init "a non-const reference to a temporary")))
       (vector? src)
       (cond
@@ -9075,6 +9083,15 @@
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
     (when (and nexpr (checking?)) (cx-new-size! ctx n nexpr et))
+    ;; (cpp-decl2, the checker: C++20's parenthesized initialization of an array by a new-expression, [dcl.init.general]/16.5,
+    ;; its elements copy-initialized from the expressions; g++ 15.2 takes the elements past them as copy-list-initialized from
+    ;; {}, so an explicit default constructor is its "converting to 'T' from initializer list would use explicit constructor":
+    ;; expr/anew5.C's new T[3](1, 2), not new T[2](1, 2) nor new T[3]())
+    (when (and nexpr (checking?) (>= (long *cxx-year*) 20) (= "ParenListExpr" (:kind initn)) (seq (kids initn)))
+      (let [nv (try (analyze ctx nexpr) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (and (= :int (:op nv)) (integer? (:v nv)) (> (long (:v nv)) (count (kids initn))))
+          (binding [*cx-copy-list* initn]
+            (init-for et {:op :init-list :items []} ctx :list)))))
     {:op :new :placement placement :alloc (when-not placement (:alloc fa)) :dealloc (when-not placement (:dealloc fa))
      :cookie (boolean (and nexpr (not placement) (let [bt (loop [x (abi/unq et)] (if (abi/arr? x) (recur (abi/unq (:of x))) x)) c (class-id bt)]
                                    (or (and c (not (trivial-dtor? c)))
