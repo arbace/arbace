@@ -2,7 +2,8 @@
 # queue 546 (test/ocaml/typer-repros/run.bash ROOT [STDLIB-BUILD]): the samples of the typer's fixes for ppxlib's ast/versions.ml and
 # astlib's migrations, each ocamlc accepts, each typed by ROOT's typer (arbace.repr.ocaml.typer lambda) must be accepted: a record's
 # first label qualified by find_record_qual (c0), constrained abbreviations expanded by instance (c1), a declaration's nodes all generic
-# (c4), no abbreviation memo under GADT equations (c5, c12), a package type's nested constraints (c15, c19, c20, c21). STDLIB-BUILD: the
+# (c4), no abbreviation memo under GADT equations (c5, c12), a package type's nested constraints (c15, c19, c20, c21), a parameter that unpacks a module scoped so its types leaving
+# the function expand, and an object not linked to a scoped module's abbreviation (c24, c25). STDLIB-BUILD: the
 # native stdlib's build directory (bin/oi stdlib's .tmp/oi/stdlib-native-build by default).
 ROOT=${1:?ROOT}; L=${2:-$ROOT/.tmp/oi/stdlib-native-build}; D=$(cd "$(dirname "$0")" && pwd); fail=0
 W=$(mktemp -d "${TMPDIR:-$ROOT/.tmp/tmp}/t546.XXXX")

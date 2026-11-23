@@ -1439,12 +1439,23 @@
                           (do (when (ty/is-optional l) (unify! (ty/type-option (ty/newvar)) targ "parameter"))
                               [targ nil]))
             vars (atom []) eqs (atom [])
-            p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env spat tint vars)))
-            _ (pressure-variants! [p])
-            env' (add-pattern-vars env @vars)
-            ;; a GADT parameter's equations hold over the rest of the function
-            [params body _] (try (let [k #(type-function env' (rest sparams) sbody tret)] (if (seq @eqs) (ty/fresh-scope k) (k)))
-                                 (finally (undo-equations! @eqs)))
+            typed (fn []
+                    (let [p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env spat tint vars)))
+                          _ (pressure-variants! [p])
+                          env' (add-pattern-vars env @vars)
+                          ;; a GADT parameter's equations hold over the rest of the function
+                          r (try (let [k #(type-function env' (rest sparams) sbody tret)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                 (finally (undo-equations! @eqs)))]
+                      [p r]))
+            ;; (queue 546) Typecore's type_cases for a parameter that unpacks modules (`((module A) : t) -> ...`): its modules
+            ;; scoped at a level of their own, the result unified with a variable of the outer level, so that a type A.n leaving
+            ;; the function is expanded (or escapes), as the let with module patterns does (ppxlib's versions.ml, immediate_migration)
+            [p [params body _]] (if (unpack-pattern? spat)
+                                  (let [outer (ty/newvar)]
+                                    (ty/with-local-level
+                                      (ty/with-scope
+                                        (let [r (typed)] (unify! outer tret "function") r))))
+                                  (typed))
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l :loc (:pparam_loc sp)
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}] (:type p))}]
