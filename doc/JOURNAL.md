@@ -19029,3 +19029,42 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 539, OCaml's eval level: four deferred rows closed, the rest left with why (the VM)
+
+- Base mac/next fa635f636, branch 539-ocaml-eval. The eval cell's 19 non-passes (15 deferred, 4 by design) were triaged from the
+  committed records (no base runs). Four deferred rows pass now, by changes to oi (go/arbace/oi, go/arbace/oicapi, the driver
+  test/ocaml/oi/cmd/main.ae and the C API test/ocaml/capi). No package variable of oi changed (no :init-order change).
+- backtrace/lazy (:backtrace-references): oi now gives the bytecode's frames. ocamlc's run, read from OCaml 5.5.0's
+  bytecomp/bytegen.ml (comp_expr's Levent Lev_after: the event is put on the continuation; Llet's body is followed by add_pop's POP),
+  prints "Called from unknown location" where the return address of the inline lazy force's call to
+  CamlinternalLazy.force_lazy_block has no event. Two rules follow. First, a call in no tail position without an event, in a unit
+  compiled with -g, is a slot of unknown location. The Compiler's `debug` is set when the unit's form holds an event with the native
+  typer's information (hasEvent). Second, an event after a let marks no call. Before, oi gave test1's own event to the forced call and
+  no frame to test2's. The output is now ocamlc's recorded run byte for byte (774 bytes).
+  Regression set: the 36 passing programs whose reference or source prints backtraces, plus c-api and lib-systhreads. All 36 still
+  pass (log .tmp/q539/logs/run-bt.log).
+- embedded/cmcaml (:c-runtime-decided, OC221 (a)): caml_startup embedding at oi's level. misc.h gains char_os and, under
+  CAML_INTERNALS, main_os as main (as runtime/caml/misc.h has). runtime.c's caml_main and caml_startup call the native
+  __oi_caml_main, and caml_shutdown does nothing. main.c marks itself with __oi_no_main, so oicapi.OwnMain tells the stubs' own main
+  apart from it. The driver then runs oi.RunEmbedded with oicapi.Embed:
+  - the C's main runs on ci with the program's argv, as one outermost call of the boundary;
+  - the OCaml program's initialisation runs at its first caml_main;
+  - callbacks run on oi's thread;
+  - the program's at_exit runs once main returns.
+  Before, cmmain.c did not read (char_os unknown).
+- statmemprof/thread_exit_in_callback (suite, :gc-and-memory): oi's thread start printed "Thread N killed on uncaught exception"
+  for an exception that escapes thread.ml's wrapper. Here that is the memprof callback's second Thread.Exit, raised at
+  check_memprof_cb's allocation inside the wrapper's Exit handler. otherlibs/systhreads/st_stubs.c's caml_thread_start ignores
+  caml_callback_exn's result, so the thread now ends silently. test/ocaml/oi-known.edn loses the row's entry (STALE once it passed).
+- statmemprof/user_data_regression (:runtime-parameters): no change. Queue 523's header.awk rule for OCAMLRUNPARAM's s already runs
+  it, but check-oi-native.edn had not been recorded since. It passes.
+- Recorded with --record --only-list: check-oi-native.edn's 3 rows and check-suite-oi-native.edn's 1 row. Controls:
+  compare-vs-evaluation-order and main-vs-usemultdef both differ, as they must. Then the matrix and scores: OCaml eval 597 / 4 / 11
+  (593 / 4 / 15 before), completeness 0.9501 -> 0.9517. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+- Left, with why, in the report (.tmp/q539/539-ocaml-eval.md):
+  - :speed's 5 rows: interpretation cost, e.g. subarraystub's 41,001 C calls each copying a 262 KB bigarray through ci;
+  - :gc-and-memory's 4: the major collector's own work, Memprof's custom blocks, an ephemeron key reachable only from its data;
+  - :dynlink-decided's 2: .cma loading with ocamlmklib, and native backtraces;
+  - the 4 design rows, brought to the user as n/a: natdynlink, b0, ppx_expect and Base.
+  The AOT levels keep their classes (the host's).
