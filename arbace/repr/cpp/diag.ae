@@ -7341,3 +7341,57 @@
   [:virtual #"^codegen: (non-)?deleted function '.*' overriding (non-)?deleted function" "deleted and non-deleted functions overriding each other"])
 (alter-var-root #'sema-rules conj
   [:uninit #"^codegen: uninitialized const in 'new'" "uninitialized const in new"])
+
+;; cpp-decl2 (2026-11-23): an enumeration's declarations ([dcl.enum]/3-5): each redeclaration scoped or unscoped as the first
+;; ("scoped/unscoped mismatch in enum 'E1'"), of the same underlying type when both are fixed (a scoped one's int when none is
+;; written: "different underlying type in enum 'E4'"), one definition ("multiple definition of 'enum E6'"), an
+;; opaque-enum-declaration's name a simple identifier ("opaque-enum-specifier must use a simple identifier"), and a definition
+;; by a qualified name in a scope that encloses the enumeration's ([dcl.enum]/4: "declaration of 'enum class N1::E6' in namespace
+;; 'N2' which does not enclose 'N1'"); at the later declaration's name. cpp0x/forw_enum6.C. The main file's namespaces and classes,
+;; templates not followed.
+(defn enum-redecls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (get-in n [:loc :offset])]
+                              (let [[l c] (line-col starts (long o))]
+                                (.add out {:line l :col c :kind :error :rule :enum-redecl :msg msg}))))
+        ut (fn [n] (some-> (get-in n [:fixedUnderlyingType :qualType]) str str/trim (str/replace #"\s+" " ")))]
+    (letfn [(region! [path nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") (:inner n))
+                  "CXXRecordDecl" (when (and (string? (:name n)) (:completeDefinition n)) (region! (str path (:name n) "::") (:inner n)))
+                  "EnumDecl" (when (and (string? (:name n)) (seq (:name n)) (= main (get-in n [:loc :file])))
+                               (let [q (:_equal n)
+                                     k (if q
+                                         (let [nested (str path (str/join "::" q) "::" (:name n))
+                                               glob (str (str/join "::" q) "::" (:name n))]
+                                           (cond (.containsKey seen nested) nested
+                                                 (.containsKey seen glob) glob
+                                                 :else nested))
+                                         (str path (:name n)))]
+                                 (when (and q (not (:_body n)))
+                                   (report! n "opaque-enum-specifier must use a simple identifier"))
+                                 (when (and q (:_body n) (seq path) (not (str/starts-with? k path)) (.containsKey seen k))
+                                   (report! n (str "declaration of 'enum " (:name n) "' in '" (subs path 0 (- (count path) 2))
+                                                   "' which does not enclose '" (str/join "::" q) "'")))
+                                 (when-not (or (and q (not (:_body n)))
+                                               ;; (a definition refused as not enclosed defines nothing)
+                                               (and q (:_body n) (seq path) (not (str/starts-with? k path)) (.containsKey seen k)))
+                                   (if-let [o (.get seen k)]
+                                     (cond
+                                       (not= (boolean (:scopedEnumTag o)) (boolean (:scopedEnumTag n)))
+                                       (report! n (str "scoped/unscoped mismatch in enum '" (:name n) "'"))
+                                       (and (ut o) (ut n) (not= (ut o) (ut n)))
+                                       (report! n (str "different underlying type in enum '" (:name n) "'"))
+                                       (and (:_body o) (:_body n) (or (not q) (str/starts-with? k path)))
+                                       (report! n (str "multiple definition of 'enum " (:name n) "'"))
+                                       :else (when (:_body n) (.put seen k n)))
+                                     (.put seen k n)))))
+                  nil)))]
+      (region! "" (:nodes u)))
+    (vec out)))
+
+(swap! checks conj enum-redecls)

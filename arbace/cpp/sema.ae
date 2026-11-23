@@ -2494,7 +2494,24 @@
         (swap! *order* conj [:var id])
         id))))
 
-(defn- declare-enum! [scope n]
+(declare declare-enum!*)
+
+(defn- declare-enum!
+  "An enumeration's declaration; the checker leaves out (cpp-decl2) a qualified opaque-enum-declaration and a definition by a
+  qualified name in a scope that does not enclose its enumeration ([dcl.enum]/2, /4: diag's enum-redecls reports them)."
+  [scope n]
+  (if (and (checking?) (seq (:_equal n))
+           (let [has-body (or (:_body n) (some #(= "EnumConstantDecl" (:kind %)) (kids n)))]
+             (or (not has-body)
+                 (let [e (try (first (lookup-qualified scope (vec (:_equal n)))) (catch arbace.lang.ExceptionInfo _ nil))
+                       target (cond (= :ns (:e e)) (:scope e)
+                                    (= :type (:e e)) (when-let [cid (try (class-id (:ty e)) (catch arbace.lang.ExceptionInfo _ nil))] (:scope (abi/cls cid)))
+                                    :else nil)]
+                   (and target (not (loop [s target] (cond (nil? s) false (identical? (:names s) (:names scope)) true :else (recur (:parent s))))))))))
+    nil
+    (declare-enum!* scope n)))
+
+(defn- declare-enum!* [scope n]
   (let [;; (queue 492, the checker: an enumeration defined by a qualified name is the named class's or namespace's member,
         ;; its enumerators too, [dcl.enum]/1, [class.mem]: `enum A::B : int { x };` then A::x)
         scope (or (when-let [q (and (checking?) (seq (:_equal n)))]
@@ -2503,19 +2520,27 @@
                             (= :type (:e e)) (when-let [cid (try (class-id (:ty e)) (catch arbace.lang.ExceptionInfo _ nil))] (:scope (abi/cls cid)))
                             :else nil)))
                   scope)
-        id (next-id)
         nm (:name n)
+        ;; (cpp-decl2, the checker: a redeclaration of an enumeration declared in the same scope, `enum class E : int;` then its
+        ;; definition, declares the same entity, [dcl.enum]/3 (C++23 [dcl.enum]/4): its id kept, so its name finds one type, not
+        ;; two ("reference to 'E6' is ambiguous" before: cpp0x/forw_enum6.C)
+        old-id (when (and (checking?) nm)
+                 (some #(when (and (= :type (:e %)) (= :enum (:k (:ty %)))
+                                   (= (:path (abi/enm (:id (:ty %)))) (:path scope)))
+                          (:id (:ty %)))
+                       (.get ^java.util.HashMap (:names scope) nm)))
+        id (or old-id (next-id))
         scoped (boolean (:scopedEnumTag n))
         under (if-let [ft (get-in n [:fixedUnderlyingType :qualType])] (resolve-type scope ft) abi/int*)
-        es (new-scope :enum scope :path (conj (:path scope) [:enum id]))
+        es (or (when old-id (:scope (abi/enm old-id))) (new-scope :enum scope :path (conj (:path scope) [:enum id])))
         t {:k :enum :id id}
         ;; (queue 492, the checker: a member enumeration's access, its own or an earlier declaration's in the class: an opaque
         ;; `enum D : int;` under private:, defined by `enum C::D : int { y };` at namespace scope)
         eacc (when (and (checking?) (= :class (:kind scope)) (:cls scope))
                (or *member-access* (when nm (some #(when (= :type (:e %)) (:access %)) (.get ^java.util.HashMap (:names scope) nm)))))]
     (when-not nm (reset! *last-anon* t))
-    (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped})
-    (when nm (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
+    (when-not old-id (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped}))
+    (when (and nm (not old-id)) (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
                                 ;; (queue 492, the checker: a member enumeration's access, check-type-access!)
                                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
     ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
