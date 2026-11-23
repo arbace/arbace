@@ -19359,3 +19359,14 @@ class with non-trivial initialization (a class with an assert always has it: :us
 the global flag as before (javac's holder class is not translated). No class runs with assertions enabled
 (Class.desiredAssertionStatus stays false). Proof due on train 3's build: t06029 at interp and compiled, and the Java
 essential checks. Branch java-bytecode-assert-1123 (from java-bytecode-1122 731924212).
+## 2026-11-23: JCS51 on train 1's tool, 18 of 25; the Filer's generated sources (java-bytecode-assert-1123, train 3)
+
+JCS51's 25 processing tests at the diagnostics level on train 1's javac tool (javac-f170fb32cd7e, d9217f672): 18 pass, recorded
+on java-bytecode-1122 (660ab0f75), :diag-processors narrowed to the 7 left. Three of the seven stop on the Filer's generated
+sources: javac on Arbace's file manager had no SOURCE_OUTPUT (getJavaFileForOutput's IOException, BrokenEnumConstructor's
+output, and the generated classes missing in GenerateAndError and WErrorGen). Built for train 3: SOURCE_OUTPUT (no -s on
+Arbace) goes to CLASS_OUTPUT's directory, else the current directory, as jdk26u's JavacFileManager.getFileForOutput puts a
+generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java at baf63fb, read for the
+behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
+committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
+method) is left for after train 3's run.
