@@ -231,6 +231,14 @@ covers what.
   `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
   tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
   License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_io.ae`, `builtins_io_iobase.ae`, `builtins_io_bytesio.ae` and `builtins_io_stringio.ae` (queue 545,
+  the user's 535-2 (a): pyi's module `_io`, the C side of io; doc/python/PYTHON-SURVEY.md, "As built: 545"): ports to Go of
+  CPython 3.14.10's `Modules/_io/_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c` and `textio.c`'s IncrementalNewlineDecoder,
+  `_PyIO_find_line_ending` and `_TextIOBase`, with their `Modules/_io/clinic/*.c.h`, and of `bufferedio.c`'s
+  `_BufferedIOBase`, from the same release tarball (SHA-256 de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032),
+  with 3.15.2's differences from its tarball (SHA-256 8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), by
+  hand on 2026-11-23: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement
+  for Python 3.14 (text below).
 - `go/arbace/py/builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`, `builtins_tracemalloc.ae` and
   `monitoring.ae` (queue 220, PYS22 (a): pyi's modules `faulthandler`, `_lsprof`, `termios`, `_tracemalloc` and
   sys.monitoring's call-family events; doc/python/PYTHON-SURVEY.md, "As built: 220"): ports to Go of CPython 3.14.10's
