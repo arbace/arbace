@@ -1023,6 +1023,43 @@
                                             pkgs)
                                     [:else (list 'do (list '.println 'System/err (list 'java-str "o2j: no program " p)) '(System/exit 126))])))))))
 
+(defn- dir-ae-stems
+  "The stems of DIR's .ae files, sorted."
+  [^java.io.File dir]
+  (sort (for [^java.io.File f (or (.listFiles dir) []) :let [n (.getName f)] :when (str/ends-with? n ".ae")]
+          (subs n 0 (- (count n) 3)))))
+
+(defn split-packages
+  "The compiled level's Go packages of a shard's classes (queue 544b, DECISION 544-1 (a)), for j2g's packages.edn (the input's
+  top-level class -> Go package, arbace.j2g.names/compiled-packages): the runtime's classes (ocaml/rt) the package ocaml_rt, each
+  library unit's class (ocaml/u/M_<Unit>) a package of its own, ou_<Unit>, each program's classes (ocaml/p<N>) its package ocaml_p<N>;
+  the dispatcher ocaml.u.Shard stays in lang, j2g's entry. A unit names only units linked before it and the runtime, a program its units
+  and the libraries', the dispatcher the programs: no import cycle. Go then compiles a translated library unit by unit, where one
+  package of every class (lang) took Go's compile past 36 GB for compiler-libs' toplevel (queue 544). A sorted map: the same text
+  whatever the run."
+  [^java.io.File o]
+  (into (sorted-map)
+        (concat
+         (for [c (dir-ae-stems (io/file o "ocaml/rt"))] [(str "ocaml/rt/" c) "ocaml_rt"])
+         ;; (a unit's file is named by the unit, its class M_<Unit>: class-name)
+         (for [c (dir-ae-stems (io/file o "ocaml/u")) :when (not= c "Shard")] [(str "ocaml/u/" (class-name c)) (str "ou_" c)])
+         (for [^java.io.File d (sort-by #(.getName ^java.io.File %) (or (.listFiles (io/file o "ocaml")) []))
+               :when (and (.isDirectory d) (re-matches #"p\d+" (.getName d)))
+               c (dir-ae-stems d)]
+           [(str "ocaml/" (.getName d) "/" (if (or (= c "M__main") (str/starts-with? c "D_")) c (class-name c)))
+            (str "ocaml_" (.getName d))]))))
+
+(defn split?
+  "Whether a shard's classes are split into packages (split-packages): O2J_SPLIT 1 always, 0 never, else (the default) when its library
+  units' forms (OUT/ocaml/u) pass O2J_SPLIT_BYTES (default 24 MB: compiler-libs' units, 62 MB; the standard library's with Unix and Str
+  about 10), so that the compiled level's other shards are built as before."
+  [^java.io.File o]
+  (case (System/getenv "O2J_SPLIT")
+    "1" true
+    "0" false
+    (> (reduce + (for [^java.io.File f (or (.listFiles (io/file o "ocaml/u")) [])] (.length f)))
+       (Long/parseLong (or (System/getenv "O2J_SPLIT_BYTES") "25165824")))))
+
 (defn package-forms
   "A package's namespace file for the compiled level's trees (j2g skips it: its first form is ns)."
   [pkg]
@@ -1214,7 +1251,11 @@
               (binding [*in-ns* true]
                 (write-forms (io/file o "ocaml/u/Shard.ae") (shard-forms pkgs) "The compiled level's dispatcher, by arbace.o2j.")
                 (doseq [p (cons "ocaml.u" pkgs)]
-                  (write-forms (io/file o (str (str/replace p "." "/") ".ae")) (package-forms p) "A package of the compiled level, by arbace.o2j."))))
+                  (write-forms (io/file o (str (str/replace p "." "/") ".ae")) (package-forms p) "A package of the compiled level, by arbace.o2j."))
+                ;; (queue 544b) a large shard's classes in Go packages of their own (split?, split-packages)
+                (if (split? (io/file o))
+                  (spit (io/file o "packages.edn") (str (pr-str (split-packages (io/file o))) "\n"))
+                  (.delete (io/file o "packages.edn")))))
     "main" (let [[o & units] args]
              (write-forms (io/file o) (main-forms units) "The program's main class, by arbace.o2j."))
     (do (println "usage: o2j lib LAMBDA-DIR OUT-DIR | prog LIB-OUT OUT-DIR DUMP... | unit DUMP OUT [DUMP OUT...] | main OUT UNIT...") (System/exit 2))))
