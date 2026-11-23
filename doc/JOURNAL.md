@@ -19432,3 +19432,18 @@ assertion records) pass. The rows (t04540, t04541, t06029; t03295 and t04542 als
 Java forms subclass of URLClassLoader) are judged on the train's build. resources(String) (t04543) is not built yet: its
 stream is lazy over the loader's own getResources, which jrt cannot call virtually nor build a Stream for; it needs a static
 of jrt's own Java (jdk.internal.jrt.ClassPathResources.resources, jdk/forms predicted) and j2g's resource helpers.
+
+## 2026-11-23: queue 540's C rows on train 1's compiled host: quickjs and sqlite recorded; torture-compile out of memory, again (smalls2-1123)
+
+train-1 (d9217f672, smalls2-1123's 540 merge in it) merged into smalls2-1123 (d42c77793; the journal's conflict, both kept); its gate
+executable /root/arbace/.tmp/gate-exe/fb29d2672f0d7bf945b6/amd64/arbace (540's repr/c compiled in) the tools' host, under the big-job
+lock (.tmp/c/rt540.sh, 17 GiB):
+- `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip --corpus quickjs,sqlite --record` (6 min, 8.9 GB peak): quickjs 10 of 10 pass (quickjs.c:
+  its read rejects as gcc does, CONFIG_VERSION undefined, both reject; libunicode.c's level 2 equal; unicode_gen.c's level 3 equal,
+  540's #line print), their known entries dropped; sqlite: shell.c known, class objects-layout (n/a, 540-2), levels 1-2 equal, 3
+  differs; sqlite3.c now read whole (no read budget compiled) but known: level 1 differs at an offsetof form inside a macro
+  (`etof(BtCursor, BTCURSOR_FIRST_UNINIT)` / `(offsetof BtCursor :pBt)`), its print refused by gcc; its known class is still
+  :eval-limits (the record keeps classes): a print fault for the VM's 540, not a limit. C print 4,844 / 0 / 11 -> 4,847 / 0 / 8.
+- `roundtrip --corpus torture-compile --record` and `parse-check --corpus torture-compile --no-mutants --record` both ran out of
+  memory within two minutes (15.6 GB at the 17 GiB cap; the compiled host reads 8 files at once, the 20,000 bound lets the limits
+  files nest deep); queued again under the lock with 2 threads, 22 GiB and GOMEMLIMIT 18 GiB (.tmp/c/rt540b.sh).
