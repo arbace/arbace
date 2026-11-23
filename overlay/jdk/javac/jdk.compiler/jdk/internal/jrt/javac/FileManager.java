@@ -10,7 +10,8 @@
  * them. Since JFS52 (b) StandardFileManager extends it, the standard file manager of javac's
  * JavaCompiler on Arbace (SystemCompiler). Since F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
  * F6") a class file without -d goes where javac's own file manager puts it. Since JCS50 (b) its platforms
- * are --release's too (ReleasePlatforms, CtSymFileManager). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
+ * are --release's too (ReleasePlatforms, CtSymFileManager). Since JCS51 a location's class loader defines its class files
+ * from their bytes (DirLoader: annotation processors). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
  * baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt.javac;
@@ -280,9 +281,42 @@ public class FileManager implements JavaFileManager {
         }
     }
 
+    /**
+     * The class loader of a location's directories (JCS51, the user's decision of 2026-11-23): a class's file found
+     * below a directory of the location by its binary name, defined from its bytes by ClassLoader.defineClass (the
+     * class-file loader, interpreter and verifier of arbace.lang.Bytecode, doc/classes/BYTECODE-SURVEY.md), as javac's
+     * own file manager's URLClassLoader defines it: the annotation processors javac's -processor names.
+     */
+    static final class DirLoader extends ClassLoader {
+        private final List<File> roots;
+
+        DirLoader(List<File> roots, ClassLoader parent) {
+            super(parent);
+            this.roots = roots;
+        }
+
+        @Override
+        protected Class<?> findClass(String name) throws ClassNotFoundException {
+            String rel = name.replace('.', '/') + ".class";
+            for (File r : roots) {
+                File f = new File(r, rel);
+                if (f.isFile()) {
+                    byte[] b;
+                    try {
+                        b = bytes(f);
+                    } catch (IOException e) {
+                        throw new ClassNotFoundException(name, e);
+                    }
+                    return defineClass(name, b, 0, b.length);
+                }
+            }
+            throw new ClassNotFoundException(name);
+        }
+    }
+
     @Override
     public ClassLoader getClassLoader(Location location) {
-        return null;
+        return new DirLoader(dirs(location), ClassLoader.getSystemClassLoader());
     }
 
     @Override

@@ -1,0 +1,94 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/InitSecContextToken.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io IOException InputStream)
+        '(java.net InetAddress)
+        '(org.ietf.jgss GSSException)
+        '(sun.security.krb5 Credentials KrbApReq KrbException)
+        '(sun.security.krb5.internal KerberosTime)
+        '(sun.security.util DerValue))
+
+(defclass InitSecContextToken
+  :extends InitialToken
+
+  (field ^:private ^:static ^:final ^boolean ACCEPTOR_USE_INITIATOR_SEQNUM)
+
+  (static-initializer
+    (let [propName "sun.security.krb5.acceptor.sequence.number.nonmutual"
+          s (System/getProperty propName "initiator")]
+      (cond
+        (.equals s "initiator") (set! ACCEPTOR_USE_INITIATOR_SEQNUM true)
+        (or (.equals s "zero") (.equals s "0")) (set! ACCEPTOR_USE_INITIATOR_SEQNUM false)
+        :else (throw (AssertionError. (java-str "Unrecognized value for " propName ": " s))))))
+
+  (field ^:private ^:final ^KrbApReq apReq)
+
+  (constructor :throws [KrbException IOException GSSException] [this ^Krb5Context context
+                                                                ^Credentials tgt
+                                                                ^Credentials serviceTicket]
+    (let [mutualRequired (.getMutualAuthState context)
+          useSubkey true
+          useSequenceNumber true
+          gssChecksum (InitialToken$OverloadedChecksum. context tgt serviceTicket)
+          checksum (.getChecksum gssChecksum)]
+      (.setTktFlags context (.getFlags serviceTicket))
+      (.setAuthTime context (.toString (KerberosTime. (.getAuthTime serviceTicket))))
+      (set! apReq (KrbApReq. serviceTicket mutualRequired useSubkey useSequenceNumber checksum))
+      (.resetMySequenceNumber context (.intValue (.getSeqNumber apReq)))
+      (let [subKey (.getSubKey apReq)]
+        (if (some? subKey)
+            (.setKey context Krb5Context/INITIATOR_SUBKEY subKey)
+            (.setKey context Krb5Context/SESSION_KEY (.getSessionKey serviceTicket)))
+        (when-not mutualRequired
+          (.resetPeerSequenceNumber context
+                                    (if ACCEPTOR_USE_INITIATOR_SEQNUM
+                                        (.intValue (.getSeqNumber apReq))
+                                        0))))))
+
+  (constructor :throws [IOException GSSException KrbException] [this ^Krb5Context context
+                                                                ^Krb5AcceptCredential cred
+                                                                ^InputStream is]
+    (let [tokenId (bit-or-int (bit-shift-left-int (.read is) 8) (.read is))]
+      (when-not (== tokenId Krb5Token/AP_REQ_ID)
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN -1 "AP_REQ token id does not match!")))
+      (let [apReqBytes (.toByteArray (DerValue. is))
+            ^:mutable ^InetAddress addr nil]
+        (when (some? (.getChannelBinding context))
+          (set! addr (.getInitiatorAddress (.getChannelBinding context))))
+        (set! apReq (KrbApReq. apReqBytes cred addr))
+        (let [sessionKey (.getSessionKey (.getCreds apReq))
+              subKey (.getSubKey apReq)]
+          (if (some? subKey)
+              (.setKey context Krb5Context/INITIATOR_SUBKEY subKey)
+              (.setKey context Krb5Context/SESSION_KEY sessionKey))
+          (let [gssChecksum (InitialToken$OverloadedChecksum.
+                              context
+                              (.getChecksum apReq)
+                              sessionKey
+                              subKey)]
+            (.setContextFlags gssChecksum context)
+            (let [delegCred (.getDelegatedCreds gssChecksum)]
+              (when (some? delegCred)
+                (let [^Krb5CredElement credElement (Krb5InitCredential/getInstance
+                                                     (cast Krb5NameElement (.getSrcName context))
+                                                     delegCred)]
+                  (.setDelegCred context credElement)))
+              (let [apReqSeqNumber (.getSeqNumber apReq)
+                    ^int peerSeqNumber (if (some? apReqSeqNumber) (.intValue apReqSeqNumber) 0)]
+                (.resetPeerSequenceNumber context peerSeqNumber)
+                (when-not (.getMutualAuthState context)
+                  (.resetMySequenceNumber context
+                                          (if ACCEPTOR_USE_INITIATOR_SEQNUM peerSeqNumber 0)))
+                (.setAuthTime context (.toString (KerberosTime. (.getAuthTime (.getCreds apReq)))))
+                (.setTktFlags context (.getFlags (.getCreds apReq)))
+                (let [ad (.getAuthzData (.getCreds apReq))] (.setAuthzData context ad)))))))))
+
+  (method ^:public ^:final getKrbApReq ^KrbApReq [this] apReq)
+
+  (method ^:public ^:final encode :throws [IOException] ^byte/1 [this]
+    (let [apReqBytes (.getMessage apReq)
+          retVal (new byte/1 (unchecked-add-int 2 (alength apReqBytes)))]
+      (InitSecContextToken/writeInt Krb5Token/AP_REQ_ID retVal 0)
+      (System/arraycopy apReqBytes 0 retVal 2 (alength apReqBytes))
+      retVal)))

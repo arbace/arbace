@@ -26,7 +26,10 @@
 ;; keeps the first Throwable but a ThreadDeath, and a test whose main returned fails on it. Here a
 ;; default uncaught-exception handler keeps it (and prints it as the JVM's default handler does), and
 ;; a main that returned exits 97 when one was kept: bin/java-check's own judge fails the test, its
-;; oracle (the JDK's launcher, which has no such rule) takes 97 as 0.
+;; oracle (the JDK's launcher, which has no such rule) takes 97 as 0. Only a thread of the main
+;; thread's group or of a group below it is kept (DECISION 517-2 (a), java-design-1122): jtreg's group
+;; holds main and the threads it starts, not the JDK's own threads of the system group (RMI's accept
+;; loop, sun.rmi.runtime.NewThreadAction's), whose uncaught exception jtreg does not judge.
 (ns java.check.run
   (:require [arbace.string :as str]
             [arbace.java.io :as io])
@@ -107,9 +110,21 @@
         (when (seq classes) (eval (cons 'do classes)))))))
 
 (def ^:private uncaught
-  "The first Throwable but a ThreadDeath another thread did not catch, with its thread's name (jtreg's
-  MainThreadGroup)."
+  "The first Throwable but a ThreadDeath another thread of main's group did not catch, with its thread's name
+  (jtreg's MainThreadGroup)."
   (atom nil))
+
+(defn- in-group?
+  "Whether thread group g is group top or below it (jtreg's MainThreadGroup holds the threads main starts)."
+  [^ThreadGroup top ^ThreadGroup g]
+  (loop [g g]
+    (cond (nil? g) false
+          (identical? g top) true
+          :else (recur (.getParent g)))))
+
+(def ^:private main-group
+  "The main thread's group: the threads of it and of the groups below it are the test's (DECISION 517-2 (a))."
+  (.getThreadGroup (Thread/currentThread)))
 
 (defn -main [& argv]
   (let [[mode [root main & more]] (if (= "--load" (first argv)) [(second argv) (drop 2 argv)] ["files" argv])
@@ -131,7 +146,8 @@
      (reify Thread$UncaughtExceptionHandler
        (uncaughtException [_ t e]
          (when-not (instance? ThreadDeath e)
-           (compare-and-set! uncaught nil [(.getName ^Thread t) e])
+           (when (in-group? main-group (.getThreadGroup ^Thread t))
+             (compare-and-set! uncaught nil [(.getName ^Thread t) e]))
            (locking System/err
              (.print System/err (str "Exception in thread \"" (.getName ^Thread t) "\" "))
              (.printStackTrace ^Throwable e)

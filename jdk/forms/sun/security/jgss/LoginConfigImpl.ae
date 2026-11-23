@@ -1,0 +1,90 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/LoginConfigImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss)
+
+(import '(java.util HashMap)
+        '(javax.security.auth.login AppConfigurationEntry
+                                    AppConfigurationEntry$LoginModuleControlFlag
+                                    Configuration)
+        '(org.ietf.jgss Oid)
+        '(sun.security.util Debug))
+
+(defclass ^:public LoginConfigImpl
+  :extends Configuration
+
+  (field ^:private ^:final ^Configuration config)
+
+  (field ^:private ^:final ^GSSCaller caller)
+
+  (field ^:private ^:final ^String mechName)
+
+  (field ^:private ^:static ^:final ^Debug debug
+    (Debug/getInstance "gssloginconfig" "\t[GSS LoginConfigImpl]"))
+
+  (field ^:public ^:static ^:final ^boolean HTTP_USE_GLOBAL_CREDS)
+
+  (static-initializer
+    (let [prop (System/getProperty "http.use.global.creds")]
+      (set! HTTP_USE_GLOBAL_CREDS (not (.equalsIgnoreCase "false" prop)))))
+
+  (constructor ^:public [this ^GSSCaller caller ^Oid mech]
+    (set! (.-caller this) caller)
+    (if (.equals mech GSSUtil/GSS_KRB5_MECH_OID)
+        (set! mechName "krb5")
+        (throw (IllegalArgumentException. (java-str (.toString mech) " not supported"))))
+    (set! config (Configuration/getConfiguration)))
+
+  (method ^:public getAppConfigurationEntry ^AppConfigurationEntry/1 [this ^String name]
+    (let [^:mutable ^AppConfigurationEntry/1 entries nil]
+      (when-not (.equalsIgnoreCase "OTHER" name)
+        (let [^:mutable ^String/1 alts nil]
+          (if (.equals "krb5" mechName)
+              (cond
+                (identical? caller GSSCaller/CALLER_INITIATE)
+                  (set! alts
+                        (new
+                          String/1
+                          ["com.sun.security.jgss.krb5.initiate" "com.sun.security.jgss.initiate"]))
+                (identical? caller GSSCaller/CALLER_ACCEPT)
+                  (set! alts
+                        (new String/1
+                             ["com.sun.security.jgss.krb5.accept" "com.sun.security.jgss.accept"]))
+                (instance? HttpCaller caller)
+                  (set! alts (new String/1 ["com.sun.security.jgss.krb5.initiate"]))
+                (identical? caller GSSCaller/CALLER_UNKNOWN)
+                  (throw (AssertionError. "caller not defined")))
+              (throw (IllegalArgumentException. (java-str mechName " not supported"))))
+          (for-each [^String alt alts]
+            (set! entries (.getAppConfigurationEntry config alt))
+            (when (some? debug)
+              (.println debug
+                        (java-str "Trying " alt (if (nil? entries) ": does not exist." ": Found!"))))
+            (when (some? entries) (break)))
+          (when (nil? entries)
+            (when (some? debug)
+              (.println debug "Cannot read JGSS entry, use default values instead."))
+            (set! entries (.getDefaultConfigurationEntry this)))
+          entries))))
+
+  (method ^:private getDefaultConfigurationEntry ^AppConfigurationEntry/1 [this]
+    (let [^{:tag (HashMap String String)} options (HashMap. 2)]
+      (when (or (nil? mechName) (.equals mechName "krb5"))
+        (if (LoginConfigImpl/isServerSide caller)
+            (do
+              (.put options "useKeyTab" "true")
+              (.put options "storeKey" "true")
+              (.put options "doNotPrompt" "true")
+              (.put options "principal" "*")
+              (.put options "isInitiator" "false"))
+            (do
+              (if (and (instance? HttpCaller caller) (not HTTP_USE_GLOBAL_CREDS))
+                  (.put options "useTicketCache" "false")
+                  (.put options "useTicketCache" "true"))
+              (.put options "doNotPrompt" "false")))
+        (new AppConfigurationEntry/1
+             [(AppConfigurationEntry. "com.sun.security.auth.module.Krb5LoginModule"
+                                      AppConfigurationEntry$LoginModuleControlFlag/REQUIRED
+                                      options)]))))
+
+  (method ^:private ^:static isServerSide ^boolean [^GSSCaller caller]
+    (identical? GSSCaller/CALLER_ACCEPT caller)))

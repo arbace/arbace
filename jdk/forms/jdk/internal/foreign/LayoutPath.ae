@@ -1,0 +1,433 @@
+;; Converted from overlay/jdk/java.base/jdk/internal/foreign/LayoutPath.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.foreign)
+
+(import '(java.lang.foreign AddressLayout
+                            GroupLayout
+                            MemoryLayout
+                            MemoryLayout$PathElement
+                            MemorySegment
+                            SequenceLayout
+                            StructLayout
+                            ValueLayout)
+        '(java.lang.invoke MethodHandle MethodHandles MethodType VarHandle VarHandle$AccessMode)
+        '(java.util Arrays Objects)
+        '(java.util.function Function Predicate UnaryOperator)
+        '(java.util.stream Collectors IntStream Stream)
+        '(jdk.internal.vm.annotation ForceInline))
+
+(defclass ^:public LayoutPath
+  (field ^:private ^:static ^:final ^long/1 EMPTY_STRIDES (new long/1 0))
+
+  (field ^:private ^:static ^:final ^long/1 EMPTY_BOUNDS (new long/1 0))
+
+  (field ^:private ^:static ^:final ^MethodHandle/1 EMPTY_DEREF_HANDLES (new MethodHandle/1 0))
+
+  (field ^:public ^:static ^:final ^MemoryLayout$PathElement/1 EMPTY_PATH_ELEMENTS
+    (new MemoryLayout$PathElement/1 0))
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_ADD_SCALED_OFFSET)
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_SLICE)
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_SLICE_LAYOUT)
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_CHECK_ENCL_LAYOUT)
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_SEGMENT_RESIZE)
+
+  (field ^:private ^:static ^:final ^MethodHandle MH_ADD_EXACT)
+
+  (static-initializer
+    (try
+      (let [lookup (MethodHandles/lookup)]
+        (set! MH_ADD_SCALED_OFFSET
+              (.findStatic lookup
+                           LayoutPath
+                           "addScaledOffset"
+                           (MethodType/methodType
+                             Long/TYPE
+                             Long/TYPE
+                             (new Class/1 [Long/TYPE Long/TYPE Long/TYPE]))))
+        (set! MH_SLICE
+              (.findVirtual lookup
+                            MemorySegment
+                            "asSlice"
+                            (MethodType/methodType
+                              MemorySegment
+                              Long/TYPE
+                              (new Class/1 [Long/TYPE]))))
+        (set! MH_SLICE_LAYOUT
+              (.findVirtual lookup
+                            MemorySegment
+                            "asSlice"
+                            (MethodType/methodType
+                              MemorySegment
+                              Long/TYPE
+                              (new Class/1 [MemoryLayout]))))
+        (set! MH_CHECK_ENCL_LAYOUT
+              (.findStatic lookup
+                           LayoutPath
+                           "checkEnclosingLayout"
+                           (MethodType/methodType
+                             Void/TYPE
+                             MemorySegment
+                             (new Class/1 [Long/TYPE MemoryLayout]))))
+        (set! MH_SEGMENT_RESIZE
+              (.findStatic lookup
+                           LayoutPath
+                           "resizeSegment"
+                           (MethodType/methodType MemorySegment MemorySegment)))
+        (set! MH_ADD_EXACT
+              (.findStatic lookup
+                           Math
+                           "addExact"
+                           (MethodType/methodType Long/TYPE Long/TYPE (new Class/1 [Long/TYPE])))))
+      (catch Throwable ex (throw (ExceptionInInitializerError. ex)))))
+
+  (field ^:private ^:final ^MemoryLayout layout)
+
+  (field ^:private ^:final ^long offset)
+
+  (field ^:private ^:final ^LayoutPath enclosing)
+
+  (field ^:private ^:final ^long/1 strides)
+
+  (field ^:private ^:final ^long/1 bounds)
+
+  (field ^:private ^:final ^MethodHandle/1 derefAdapters)
+
+  (constructor ^:private [this ^MemoryLayout layout ^long offset ^long/1 strides ^long/1 bounds
+                          ^MethodHandle/1 derefAdapters ^LayoutPath enclosing]
+    (set! (.-layout this) layout)
+    (set! (.-offset this) offset)
+    (set! (.-strides this) strides)
+    (set! (.-bounds this) bounds)
+    (set! (.-derefAdapters this) derefAdapters)
+    (set! (.-enclosing this) enclosing))
+
+  (method ^:public sequenceElement ^LayoutPath [this]
+    (let [seq (.requireSequenceLayout this)
+          elem (.elementLayout seq)]
+      (LayoutPath/nestedPath elem
+                             offset
+                             (.addStride this (.byteSize elem))
+                             (.addBound this (.elementCount seq))
+                             derefAdapters
+                             this)))
+
+  (method ^:public sequenceElement ^LayoutPath [this ^long start ^long step]
+    (let [seq (.requireSequenceLayout this)]
+      (.checkSequenceBounds this seq start)
+      (let [elem (.elementLayout seq)
+            elemSize (.byteSize elem)
+            nelems (if (> step 0)
+                       (unchecked-subtract (.elementCount seq) start)
+                       (unchecked-add start 1))
+            maxIndex (Math/ceilDiv nelems (Math/abs step))]
+        (LayoutPath/nestedPath elem
+                               (unchecked-add offset (unchecked-multiply start elemSize))
+                               (.addStride this (unchecked-multiply elemSize step))
+                               (.addBound this maxIndex)
+                               derefAdapters
+                               this))))
+
+  (method ^:public sequenceElement ^LayoutPath [this ^long index]
+    (let [seq (.requireSequenceLayout this)]
+      (.checkSequenceBounds this seq index)
+      (let [elemSize (.byteSize (.elementLayout seq))
+            elemOffset (unchecked-multiply elemSize index)]
+        (LayoutPath/nestedPath (.elementLayout seq)
+                               (unchecked-add offset elemOffset)
+                               strides
+                               bounds
+                               derefAdapters
+                               this))))
+
+  (method ^:public groupElement ^LayoutPath [this ^String name]
+    (let [g (.requireGroupLayout this)
+          ^:mutable offset 0
+          ^:mutable ^MemoryLayout elem nil]
+      (loop [^int i 0]
+        (when (< i (.size (.memberLayouts g)))
+          (let [l (cast MemoryLayout (.get (.memberLayouts g) i))]
+            (cond
+              (and (.isPresent (.name l)) (.equals (cast String (.get (.name l))) name))
+                (set! elem l)
+              (instance? StructLayout g)
+                (do
+                  (set! offset (unchecked-add offset (.byteSize l)))
+                  (recur (unchecked-inc-int i)))
+              :else (recur (unchecked-inc-int i))))))
+      (when (nil? elem)
+        (throw (LayoutPath/badLayoutPath
+                 (String/format "cannot resolve '%s' in layout %s"
+                                (new Object/1 [name (.breadcrumbs this)])))))
+      (LayoutPath/nestedPath elem
+                             (unchecked-add (.-offset this) offset)
+                             strides
+                             bounds
+                             derefAdapters
+                             this)))
+
+  (method ^:public groupElement ^LayoutPath [this ^long index]
+    (let [g (.requireGroupLayout this)
+          ^long elemSize (.size (.memberLayouts g))
+          ^:mutable offset 0
+          ^:mutable ^MemoryLayout elem nil]
+      (loop [^int i 0]
+        (when (<= i index)
+          (when (== i elemSize)
+            (throw (LayoutPath/badLayoutPath
+                     (String/format "cannot resolve element %d in layout: %s"
+                                    (new Object/1 [index (.breadcrumbs this)])))))
+          (set! elem (cast MemoryLayout (.get (.memberLayouts g) i)))
+          (if (and (instance? StructLayout g) (< i index))
+              (do
+                (set! offset (unchecked-add offset (.byteSize elem)))
+                (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))
+      (LayoutPath/nestedPath elem
+                             (unchecked-add (.-offset this) offset)
+                             strides
+                             bounds
+                             derefAdapters
+                             this)))
+
+  (method ^:public derefElement ^LayoutPath [this]
+    (if-instance [^AddressLayout addressLayout layout]
+      (if (.isEmpty (.targetLayout addressLayout))
+          (throw (LayoutPath/badLayoutPath
+                   (String/format "Cannot dereference layout: %s"
+                                  (new Object/1 [(.breadcrumbs this)]))))
+          (let [derefLayout (cast MemoryLayout (.get (.targetLayout addressLayout)))
+                ^:mutable handle (.toMethodHandle
+                                   (.dereferenceHandle this false)
+                                   VarHandle$AccessMode/GET)]
+            (set! handle (MethodHandles/filterReturnValue handle MH_SEGMENT_RESIZE))
+            (LayoutPath/derefPath derefLayout handle this)))
+      (throw
+        (LayoutPath/badLayoutPath
+          (String/format "Cannot dereference layout: %s" (new Object/1 [(.breadcrumbs this)]))))))
+
+  (method ^:private ^:static resizeSegment ^MemorySegment [^MemorySegment segment]
+    (Utils/longToAddress (.address segment) Long/MAX_VALUE 1))
+
+  (method ^:public offset ^long [this] offset)
+
+  (method ^:public dereferenceHandle ^VarHandle [this]
+    (.dereferenceHandle this true))
+
+  (method ^:public dereferenceHandle ^VarHandle [this ^boolean adapt]
+    (if-instance [^ValueLayout valueLayout layout]
+      (let [constantOffset (== (alength strides) 0)
+            handle (Utils/makeRawSegmentViewVarHandle
+                     (.rootLayout this)
+                     valueLayout
+                     constantOffset
+                     offset)]
+        (when-not constantOffset
+          (let [^:mutable offsetAdapter (.offsetHandle this)]
+            (set! offsetAdapter (MethodHandles/insertArguments offsetAdapter 0 (Long/valueOf 0)))
+            (throw (UnsupportedOperationException.
+                     "a var handle combinator (java.lang.invoke's are not in the Go build)"))))
+        (when adapt
+          (when (> (alength derefAdapters) 0)
+            (throw (UnsupportedOperationException.
+                     "a var handle combinator (java.lang.invoke's are not in the Go build)")))
+          (loop [^int i (alength derefAdapters)]
+            (when (> i 0)
+              (let [^:mutable adapter (aget derefAdapters (unchecked-subtract-int i 1))]
+                (when (> i 1)
+                  (set! adapter (MethodHandles/insertArguments adapter 1 (Integer/valueOf 0))))
+                (throw (UnsupportedOperationException.
+                         "a var handle combinator (java.lang.invoke's are not in the Go build)"))))))
+        handle)
+      (throw (IllegalArgumentException.
+               (String/format "Path does not select a value layout: %s"
+                              (new Object/1 [(.breadcrumbs this)]))))))
+
+  (method ^:private ^:static ^{ForceInline true} addScaledOffset ^long [^long base ^long index
+                                                                        ^long stride ^long bound]
+    (Objects/checkIndex index bound)
+    (unchecked-add base (unchecked-multiply stride index)))
+
+  (method ^:public offsetHandle ^MethodHandle [this]
+    (let [^:mutable mh MH_ADD_EXACT]
+      (loop [^int i (unchecked-subtract-int (alength strides) 1)]
+        (when (>= i 0)
+          (let [collector (MethodHandles/insertArguments
+                            MH_ADD_SCALED_OFFSET
+                            2
+                            (aget strides i)
+                            (aget bounds i))]
+            (set! mh (MethodHandles/collectArguments mh 1 collector))
+            (recur (unchecked-dec-int i)))))
+      (MethodHandles/insertArguments mh 1 offset)))
+
+  (method ^:private rootLayout ^MemoryLayout [this]
+    (if (some? enclosing) (.rootLayout enclosing) (.-layout this)))
+
+  (method ^:public sliceHandle ^MethodHandle [this]
+    (let [^:mutable ^MethodHandle sliceHandle nil]
+      (if (some? enclosing)
+          (do
+            (set! sliceHandle MH_SLICE)
+            (set! sliceHandle (MethodHandles/insertArguments sliceHandle 2 (.byteSize layout))))
+          (do
+            (set! sliceHandle MH_SLICE_LAYOUT)
+            (set! sliceHandle (MethodHandles/insertArguments sliceHandle 2 layout))))
+      (set! sliceHandle (MethodHandles/collectArguments sliceHandle 1 (.offsetHandle this)))
+      (when (some? enclosing)
+        (let [oldType (.type sliceHandle)
+              alignCheck (MethodHandles/insertArguments MH_CHECK_ENCL_LAYOUT 2 (.rootLayout this))]
+          (set! sliceHandle (MethodHandles/collectArguments sliceHandle 0 alignCheck))
+          (let [reorder (.toArray (IntStream/concat
+                                    (IntStream/of (new int/1 [0 1]))
+                                    (IntStream/range 0 (.parameterCount oldType))))]
+            (set! sliceHandle (MethodHandles/permuteArguments sliceHandle oldType reorder)))))
+      sliceHandle))
+
+  (method ^:private ^:static checkEnclosingLayout ^void [^MemorySegment segment ^long offset
+                                                         ^MemoryLayout enclosing]
+    (.checkEnclosingLayout (cast AbstractMemorySegmentImpl segment) offset enclosing true))
+
+  (method ^:public layout ^MemoryLayout [this] layout)
+
+  (method ^:public ^:static rootPath ^LayoutPath [^MemoryLayout layout]
+    (LayoutPath. layout 0 EMPTY_STRIDES EMPTY_BOUNDS EMPTY_DEREF_HANDLES nil))
+
+  (method ^:private ^:static nestedPath ^LayoutPath [^MemoryLayout layout ^long offset
+                                                     ^long/1 strides ^long/1 bounds
+                                                     ^MethodHandle/1 derefAdapters ^LayoutPath encl]
+    (LayoutPath. layout offset strides bounds derefAdapters encl))
+
+  (method ^:private ^:static derefPath ^LayoutPath [^MemoryLayout layout ^MethodHandle handle
+                                                    ^LayoutPath encl]
+    (let [handles (cast MethodHandle/1
+                        (Arrays/copyOf (.-derefAdapters encl)
+                                       (unchecked-add-int (alength (.-derefAdapters encl)) 1)))]
+      (aset handles (alength (.-derefAdapters encl)) handle)
+      (LayoutPath. layout 0 EMPTY_STRIDES EMPTY_BOUNDS handles nil)))
+
+  (method ^:private requireSequenceLayout ^SequenceLayout [this]
+    (cast SequenceLayout (.requireLayoutType this SequenceLayout "sequence")))
+
+  (method ^:private requireGroupLayout ^GroupLayout [this]
+    (cast GroupLayout (.requireLayoutType this GroupLayout "group")))
+
+  (method ^:private requireLayoutType :type-params [(T extends MemoryLayout)] ^T [this
+                                                                                  ^{:tag (Class T)} layoutClass
+                                                                                  ^String name]
+    (when-not (.isAssignableFrom layoutClass (.getClass layout))
+      (throw (LayoutPath/badLayoutPath
+               (String/format "attempting to select a %s element from a non-%s layout: %s"
+                              (new Object/1 [name name (.breadcrumbs this)])))))
+    (cast MemoryLayout (.cast layoutClass layout)))
+
+  (method ^:private checkSequenceBounds ^void [this ^SequenceLayout seq ^long index]
+    (when (>= index (.elementCount seq))
+      (throw (LayoutPath/badLayoutPath
+               (String/format
+                 "sequence index out of bounds; index: %d, elementCount is %d for layout %s"
+                 (new Object/1 [index (.elementCount seq) (.breadcrumbs this)]))))))
+
+  (method ^:private ^:static badLayoutPath ^IllegalArgumentException [^String cause]
+    (IllegalArgumentException. (java-str "Bad layout path: " cause)))
+
+  (method ^:private addStride ^long/1 [this ^long stride]
+    (let [newStrides (Arrays/copyOf strides (unchecked-add-int (alength strides) 1))]
+      (aset newStrides (alength strides) stride)
+      newStrides))
+
+  (method ^:private addBound ^long/1 [this ^long maxIndex]
+    (let [newBounds (Arrays/copyOf bounds (unchecked-add-int (alength bounds) 1))]
+      (aset newBounds (alength bounds) maxIndex)
+      newBounds))
+
+  (method ^:private breadcrumbs ^String [this]
+    (cast String
+          (.collect (.map (.map (Stream/iterate this
+                                                (method-ref Predicate [LayoutPath] Objects/nonNull)
+                                                (lambda UnaryOperator ^LayoutPath [^LayoutPath lp]
+                                                  (.-enclosing lp)))
+                                (method-ref Function ^MemoryLayout [LayoutPath] LayoutPath/.layout))
+                          (method-ref Function ^String [MemoryLayout] Object/.toString))
+                    (Collectors/joining ", selected from: "))))
+
+  (defclass ^:public ^:record GroupElementByName [^String name]
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (constructor ^:public ^:compact [this] (Objects/requireNonNull name))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.groupElement layoutPath name))
+
+    (method ^:public toString ^String [this]
+      (java-str "groupElement(\"" name "\")")))
+
+  (defclass ^:public ^:record GroupElementByIndex [^long index]
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (constructor ^:public ^:compact [this]
+      (when (< index 0) (throw (IllegalArgumentException. "Index < 0"))))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.groupElement layoutPath index))
+
+    (method ^:public toString ^String [this]
+      (java-str "groupElement(" index ")")))
+
+  (defclass ^:public ^:record SequenceElementByIndex [^long index]
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (constructor ^:public ^:compact [this]
+      (when (< index 0) (throw (IllegalArgumentException. "Index < 0"))))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.sequenceElement layoutPath index))
+
+    (method ^:public toString ^String [this]
+      (java-str "sequenceElement(" index ")")))
+
+  (defclass ^:public ^:record SequenceElementByRange [^long start ^long step]
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (constructor ^:public ^:compact [this]
+      (when (< start 0)
+        (throw (IllegalArgumentException. (java-str "Start index must be positive: " start))))
+      (when (== step 0) (throw (IllegalArgumentException. (java-str "Step must be != 0: " step)))))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.sequenceElement layoutPath start step))
+
+    (method ^:public toString ^String [this]
+      (java-str "sequenceElement(" start ", " step ")")))
+
+  (defclass ^:public ^:record SequenceElement []
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (field ^:private ^:static ^:final ^SequenceElement INSTANCE (SequenceElement.))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.sequenceElement layoutPath))
+
+    (method ^:public toString ^String [this] "sequenceElement()")
+
+    (method ^:public ^:static instance ^MemoryLayout$PathElement []
+      INSTANCE))
+
+  (defclass ^:public ^:record DereferenceElement []
+    :implements [MemoryLayout$PathElement (UnaryOperator LayoutPath)]
+
+    (field ^:private ^:static ^:final ^DereferenceElement INSTANCE (DereferenceElement.))
+
+    (method ^:public apply ^LayoutPath [this ^LayoutPath layoutPath]
+      (.derefElement layoutPath))
+
+    (method ^:public hashCode ^int [this] 31)
+
+    (method ^:public toString ^String [this] "dereferenceElement()")
+
+    (method ^:public ^:static instance ^MemoryLayout$PathElement []
+      INSTANCE)))

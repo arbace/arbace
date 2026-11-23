@@ -1,0 +1,186 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/GSSUtil.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss)
+
+(import '(java.security Security)
+        '(java.util HashSet Iterator Set Vector)
+        '(javax.security.auth Subject)
+        '(javax.security.auth.callback CallbackHandler)
+        '(javax.security.auth.kerberos KerberosKey KerberosPrincipal KerberosTicket)
+        '(javax.security.auth.login LoginContext LoginException)
+        '(org.ietf.jgss GSSCredential GSSException GSSName Oid)
+        '(sun.net.www.protocol.http.spnego NegotiateCallbackHandler)
+        '(sun.security.jgss.krb5 Krb5NameElement)
+        '(sun.security.jgss.spi GSSCredentialSpi GSSNameSpi)
+        '(sun.security.jgss.spnego SpNegoCredElement)
+        '(sun.security.util ConsoleCallbackHandler Debug))
+
+(defclass ^:public GSSUtil
+  (field ^:public ^:static ^:final ^Oid GSS_KRB5_MECH_OID
+    (GSSUtil/createOid "1.2.840.113554.1.2.2"))
+
+  (field ^:public ^:static ^:final ^Oid GSS_KRB5_MECH_OID2 (GSSUtil/createOid "1.3.5.1.5.2"))
+
+  (field ^:public ^:static ^:final ^Oid GSS_KRB5_MECH_OID_MS
+    (GSSUtil/createOid "1.2.840.48018.1.2.2"))
+
+  (field ^:public ^:static ^:final ^Oid GSS_SPNEGO_MECH_OID (GSSUtil/createOid "1.3.6.1.5.5.2"))
+
+  (field ^:public ^:static ^:final ^Oid NT_GSS_KRB5_PRINCIPAL
+    (GSSUtil/createOid "1.2.840.113554.1.2.2.1"))
+
+  (field ^:static ^:final ^Debug DEBUG
+    (Debug/of "jgss" (System/getProperty "sun.security.jgss.debug")))
+
+  (method ^:static debug ^void [^String message]
+    (java-assert (some? message))
+    (.println DEBUG message))
+
+  (method ^:public ^:static createOid ^Oid [^String oidStr]
+    (try
+      (Oid. oidStr)
+      (catch GSSException e
+        (when (some? DEBUG) (GSSUtil/debug (java-str "Ignored invalid OID: " oidStr)))
+        nil)))
+
+  (method ^:public ^:static isSpNegoMech ^boolean [^Oid oid]
+    (.equals GSS_SPNEGO_MECH_OID oid))
+
+  (method ^:public ^:static isKerberosMech ^boolean [^Oid oid]
+    (or (or (.equals GSS_KRB5_MECH_OID oid) (.equals GSS_KRB5_MECH_OID2 oid))
+        (.equals GSS_KRB5_MECH_OID_MS oid)))
+
+  (method ^:public ^:static getMechStr ^String [^Oid oid]
+    (cond
+      (GSSUtil/isSpNegoMech oid) "SPNEGO"
+      (GSSUtil/isKerberosMech oid) "Kerberos V5"
+      :else (.toString oid)))
+
+  (method ^:public ^:static getSubject ^Subject [^GSSName name ^GSSCredential creds]
+    (let [^:mutable ^{:tag (HashSet Object)} privCredentials nil
+          ^{:tag (HashSet Object)} pubCredentials (HashSet.)
+          ^:mutable ^{:tag (Set GSSCredentialSpi)} gssCredentials nil
+          ^{:tag (Set KerberosPrincipal)} krb5Principals (HashSet.)]
+      (when (instance? GSSNameImpl name)
+        (try
+          (let [ne (.getElement (cast GSSNameImpl name) GSS_KRB5_MECH_OID)
+                ^:mutable krbName (.toString ne)]
+            (when (instance? Krb5NameElement ne)
+              (set! krbName (.getName (.getKrb5PrincipalName (cast Krb5NameElement ne)))))
+            (let [krbPrinc (KerberosPrincipal. krbName)] (.add krb5Principals krbPrinc)))
+          (catch GSSException ge
+            (when (some? DEBUG) (GSSUtil/debug (java-str "Skipped name " name " due to " ge))))))
+      (if (instance? GSSCredentialImpl creds)
+          (do
+            (set! gssCredentials (.getElements (cast GSSCredentialImpl creds)))
+            (set! privCredentials (HashSet. (.size gssCredentials)))
+            (GSSUtil/populateCredentials privCredentials gssCredentials))
+          (set! privCredentials (HashSet.)))
+      (when (some? DEBUG)
+        (GSSUtil/debug "Created Subject with the following")
+        (GSSUtil/debug (java-str "principals=" krb5Principals))
+        (GSSUtil/debug (java-str "public creds=" pubCredentials))
+        (GSSUtil/debug (java-str "private creds=" privCredentials)))
+      (Subject. false krb5Principals pubCredentials privCredentials)))
+
+  (method ^:private ^:static populateCredentials ^void [^{:tag (Set Object)} credentials
+                                                        ^{:tag (Set ?)} gssCredentials]
+    (let [^:mutable ^Object cred nil
+          ^{:tag (Iterator ?)} elements (.iterator gssCredentials)]
+      (while (.hasNext elements)
+        (set! cred (.next elements))
+        (when (instance? SpNegoCredElement cred)
+          (set! cred (.getInternalCred (cast SpNegoCredElement cred))))
+        (cond
+          (instance? KerberosTicket cred)
+            (do
+              (when-not (.equals (.getName (.getClass cred))
+                                 "javax.security.auth.kerberos.KerberosTicket")
+                (let [tempTkt (cast KerberosTicket cred)]
+                  (set! cred
+                        (KerberosTicket. (.getEncoded tempTkt)
+                                         (.getClient tempTkt)
+                                         (.getServer tempTkt)
+                                         (.getEncoded (.getSessionKey tempTkt))
+                                         (.getSessionKeyType tempTkt)
+                                         (.getFlags tempTkt)
+                                         (.getAuthTime tempTkt)
+                                         (.getStartTime tempTkt)
+                                         (.getEndTime tempTkt)
+                                         (.getRenewTill tempTkt)
+                                         (.getClientAddresses tempTkt)))))
+              (.add credentials cred))
+          (instance? KerberosKey cred)
+            (do
+              (when-not (.equals (.getName (.getClass cred))
+                                 "javax.security.auth.kerberos.KerberosKey")
+                (let [tempKey (cast KerberosKey cred)]
+                  (set! cred
+                        (KerberosKey. (.getPrincipal tempKey)
+                                      (.getEncoded tempKey)
+                                      (.getKeyType tempKey)
+                                      (.getVersionNumber tempKey)))))
+              (.add credentials cred))
+          (some? DEBUG) (GSSUtil/debug (java-str "Skipped cred element: " cred))))))
+
+  (method ^:public ^:static login :throws [LoginException] ^Subject [^GSSCaller caller ^Oid mech]
+    (let [^:mutable ^CallbackHandler cb nil]
+      (if (instance? HttpCaller caller)
+          (set! cb (NegotiateCallbackHandler. (.info (cast HttpCaller caller))))
+          (let [defaultHandler (Security/getProperty "auth.login.defaultCallbackHandler")]
+            (if (and (some? defaultHandler) (not (== (.length defaultHandler) 0)))
+                (set! cb nil)
+                (set! cb (ConsoleCallbackHandler.)))))
+      (let [lc (LoginContext. "" nil cb (LoginConfigImpl. caller mech))]
+        (.login lc)
+        (.getSubject lc))))
+
+  (method ^:public ^:static useSubjectCredsOnly ^boolean [^GSSCaller caller]
+    (let [propValue (System/getProperty "javax.security.auth.useSubjectCredsOnly")]
+      (if (instance? HttpCaller caller)
+          (.equalsIgnoreCase "true" propValue)
+          (not (.equalsIgnoreCase "false" propValue)))))
+
+  (method ^:public ^:static useMSInterop ^boolean []
+    (let [propValue (System/getProperty "sun.security.spnego.msinterop" "true")]
+      (not (.equalsIgnoreCase propValue "false"))))
+
+  (method ^:public ^:static searchSubject :type-params [(T extends GSSCredentialSpi)] ^{:tag (Vector T)} [^:final ^GSSNameSpi name
+                                                                                                          ^:final ^Oid mech
+                                                                                                          ^:final ^boolean initiate
+                                                                                                          ^:final ^{:tag (Class (? extends T))} credCls]
+    (when (some? DEBUG)
+      (GSSUtil/debug
+        (java-str "Search Subject for "
+                  (GSSUtil/getMechStr mech)
+                  (if initiate " INIT" " ACCEPT")
+                  " cred ("
+                  (if (nil? name) "<<DEF>>" (.toString name))
+                  ", "
+                  (.getName credCls)
+                  ")")))
+    (let [^:mutable ^{:tag (Vector T)} creds nil
+          currSubj (Subject/current)]
+      (cond
+        (some? currSubj)
+          (do
+            (set! creds (Vector.))
+            (let [^{:tag (Iterator GSSCredentialImpl)} iterator (.iterator
+                                                                  (.getPrivateCredentials
+                                                                    currSubj
+                                                                    GSSCredentialImpl))]
+              (while (.hasNext iterator)
+                (let [cred (cast GSSCredentialImpl (.next iterator))]
+                  (when (some? DEBUG) (GSSUtil/debug (java-str "...Found cred" cred)))
+                  (try
+                    (let [ce (.getElement cred mech initiate)]
+                      (when (some? DEBUG) (GSSUtil/debug (java-str "......Found element: " ce)))
+                      (cond
+                        (and (.equals (.getClass ce) credCls)
+                             (or (nil? name) (.equals name ^Object (.getName ce))))
+                          (.add creds (cast GSSCredentialSpi (.cast credCls ce)))
+                        (some? DEBUG) (GSSUtil/debug "......Discard element")))
+                    (catch GSSException ge
+                      (when (some? DEBUG) (GSSUtil/debug (java-str "...Discard cred (" ge ")")))))))))
+        (some? DEBUG) (GSSUtil/debug "No Subject"))
+      creds)))
