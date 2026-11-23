@@ -2431,6 +2431,14 @@
           (when dup
             (*on-refusal* (ex-info (str "codegen: duplicate base type '" (:name (abi/cls (:cls dup))) "' is invalid") {:codegen/refused :base}) n)
             (abi/update-cls! id assoc :bases (reduce (fn [o b] (if (and (:cls b) (not (:dependent b)) (some #(= (:cls b) (:cls %)) o)) o (conj o b))) [] bs)))))
+      ;; (cpp-1123, the checker: [class.pre]/5, a class marked with the class-virt-specifier final named as a base,
+      ;; GCC's "cannot derive from 'final' base 'B2' in derived type 'D2'", reported at the class: cpp0x/override2.C)
+      (when (some #(= "FinalAttr" (:kind %)) (:inner n)) (abi/update-cls! id assoc :final true))
+      (when (and (checking?) (not (header-node? n)))
+        (doseq [b (:bases (abi/cls id))
+                :let [bc (when (and (:cls b) (not (:dependent b))) (abi/cls (:cls b)))]
+                :when (:final bc)]
+          (*on-refusal* (ex-info (str "codegen: cannot derive from 'final' base '" (:name bc) "' in derived type '" nm "'") {:codegen/refused :base}) n)))
       ;; alignas on the class ([dcl.align]): its alignment at least the strictest one written (a type's or a constant's)
       ;; (and GNU's aligned, G5c: unwind.h's `struct _Unwind_Exception { ... } __attribute__((__aligned__))`, without an
       ;; argument the target's largest alignment, 16 on x86-64, as GCC documents it and clang's TargetInfo's
@@ -4681,6 +4689,12 @@
         ;; ([conv.integral]/1, [conv.fpint]/2, [conv.bool]/1: a scoped enumeration converts to no arithmetic type)
         (and (abi/enum? from) (:scoped (abi/enm (:id from))) (abi/arith? to))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a scoped enumeration)")
+        ;; (cpp-1123: no standard conversion takes a pointer, a pointer to member or std::nullptr_t to an integral or floating
+        ;; type but bool, [conv.integral], [conv.fpint], [conv.bool] -- GCC's permerror "invalid conversion from 'void*' to
+        ;; 'int'", nothing under -fpermissive, sema-errors' rule; init/pr43064-2.C's `m_int(NULL)` with NULL `((void *)0)`)
+        (and (or (abi/integral? to) (abi/floating? to)) (not= :bool (abi/bn to)) (not (abi/enum? to))
+             (or (abi/ptr? from) (abi/mptr? from) (= :nullptr (abi/bn from))))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a pointer to an arithmetic type)")
         ;; ([conv.ptr]/1: a null pointer constant is an integer literal of value zero, or a prvalue of std::nullptr_t; an
         ;; integral constant expression of value zero before C++11, CWG 903 -- a folded constant counts as one here)
         (and (abi/ptr? to) (or (abi/arith? from) (abi/enum? from)) (not (null-constant? e)) (cx-sure-scalar? to))
@@ -6850,6 +6864,10 @@
     {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))
 
 (defn- to-bool [e]
+  ;; (cpp-1123, the checker: a scoped enumeration has no implicit conversion to bool, so no contextual one, [conv.bool],
+  ;; [dcl.enum]/10 with [conv]/4: GCC's "could not convert 'y' from 'Col' to 'bool'"; cpp0x/scoped_enum_examples.C)
+  (when (and (checking?) (abi/enum? (abi/unq (:ty e))) (:scoped (abi/enm (:id (abi/unq (:ty e))))))
+    (fail :conversion "cannot convert '" (:name (abi/enm (:id (abi/unq (:ty e))))) "' to 'bool' implicitly"))
   (if (abi/class? (abi/unq (:ty e)))
     (convert-scalar (user-conv {:scope *root*} e abi/bool* true) abi/bool* false)
     (convert-scalar (rv e) abi/bool* false)))
@@ -11035,7 +11053,12 @@ protected:
                   [(str "call to non-'constexpr' function '" (:name (fnd (:fn e))) "'") (:cx-at e)])
                 (pce-expr (:obj e)) (some pce-expr (:args e)))
       ;; (GCC's: any reinterpret_cast, and a nonzero integer constant converted to a pointer; not a pointer to an integer)
-      :cast (or (when (and (or (:cx-reinterpret e) (and (= :int->ptr (:ck e)) (= :int (:op (:e e))) (not (zero? (long (:v (:e e))))))) (:cx-at e))
+      ;; (cpp-1123: a reinterpret_cast between a pointer and an integer is no failure here, GCC's potential constant check
+      ;; passing it and its evaluation failing, "conversion from pointer type ... in a constant expression": g++ 15.2 by hand,
+      ;; cpp1y/constexpr-82304.C, whose use then has no error of its own)
+      :cast (or (when (and (or (and (:cx-reinterpret e) (not (#{:ptr->int :int->ptr} (:ck e))))
+                               (and (= :int->ptr (:ck e)) (= :int (:op (:e e))) (not (zero? (long (:v (:e e)))))))
+                           (:cx-at e))
                   ["'reinterpret_cast' is not a constant expression" (:cx-at e)])
                 (pce-expr (:e e)))
       :reinterpret-lv (or (when (and (:cx-reinterpret e) (:cx-at e)) ["'reinterpret_cast' is not a constant expression" (:cx-at e)])
