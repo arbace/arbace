@@ -10438,3 +10438,51 @@ argument is a constant the evaluator must run, constexpr new), template instanti
 explicit-obj-lambda's instantiations, using-enum-7), class members named `_` (name-independent-decl6, -10's code generator's error),
 C++26's unevaluated strings (unevalstr1/2: the parser's string concatenation in linkage specifications and literal operators),
 coroutines through class templates (pr104051, pr105301, coro-bad-gro), and the 11 cpp2a files of the unrun chunk.
+
+## As built: cpp-1123, the burst's C++ stream: GCC's __PRETTY_FUNCTION__, deleted and abstract members, final bases, and the stopped agents' rules (2026-11-23; branch `cpp-1123` from mac/next `fa635f636`)
+
+The stream's brief (the burst of 2026-11-23, the coordinator's): C++'s independence gaps first (the read stage's own path, the
+lowered runtime's last unit, eval's and AOT's one by-design row), then the 503 deferred read rows by cause. Four agents started on
+the read rows by family (cpp-ce, cpp-ov, cpp-tpl, cpp-decl) and one on the runtime unit (cpp-tzdb) were stopped after about 25
+minutes by the user's rule of 08:50 (one worktree a stream, no parallel copies; the host near OOM): cpp-ov had written nothing,
+the other three's WIP commits are merged here (a093284f7, 9b87f2fdd, 65b1cd0b9) and proven with the rest; cpp-tzdb went on as
+the stream's one build worktree.
+
+### The rules (each from the standard, GCC's manual or g++ 15.2's behaviour by hand; no GCC code)
+
+- arbace/cpp/sema.ae (the checker's mode unless said): `cx-member-deleting` (finish-class!'s implicit copy constructor and copy
+  assignment: [class.copy.ctor]/10.1, [class.copy.assign]/7.2-7.3, `:cx-sub-deleted` for cx-deleted-implicit!'s report at the class);
+  `cx-pure-overridden?`, `cx-abstract-class`, `cx-abstract-type`, `cx-abstract!` ([class.abstract]/2-3), called from incomplete-var!,
+  the member loop's `bad` checks, declare-fn! (a definition's parameter and return types), the throw and analyze*'s prvalues of calls
+  and casts (not in unevaluated operands); the final base (the class definition's bases, `:final` from the FinalAttr node);
+  `to-bool` (a scoped enumeration); `cx-implicit-scalar!` (a pointer, pointer to member or nullptr_t to an arithmetic type);
+  `pce-expr`'s :cast (no reinterpret_cast between a pointer and an integer); `predefined-name`, `gcc-pretty-function`,
+  `gcc-type-str`, `gcc-spell` (__func__, __FUNCTION__, __PRETTY_FUNCTION__, both modes); the UserDefinedLiteral branch (numeric
+  literal operators by [lex.ext]/3-4, both modes).
+- arbace/repr/cpp/parse.ae: the static operator() and operator[] before C++23 (pedantic-diag!); a number's ud-suffix without an
+  underscore when its literal operator is in scope (parse-number).
+- arbace/repr/cpp/diag.ae: block-redeclarations (`_` before C++26 without -pedantic-errors); abbreviated-templates (decl-specifier
+  keywords before auto); sema-rules' :abstract and :base entries; five reflection hints.
+- arbace/cpp/template.ae: eval-text's `T{}` of an instantiated class whose member value is a constant.
+- arbace/repr/cpp/dg.ae, native.ae: -fcoroutines below C++20 after a driver's -std=c++20 or later (file-run, read-own, parse-file).
+- Merged from the stopped agents: sema.ae's global-init and ce-lv (cpp-ce), diag.ae's literal-operators (cpp-decl), parse.ae's
+  gt-lexeme-at, gt-close-check!, binop-at, type-id-kind and sema.ae's lookup-qualified (cpp-tpl).
+
+### Checked
+
+- each rule on its files and on valid programs by the REPL's probe (arbace.repr.cpp.dg's verdict over the file's dg.edn entry);
+  __PRETTY_FUNCTION__ on a 17-case program against g++ 15.2's output (equal); the literal and integral_constant rules on reduced cases
+  against clang 23.1.5's IR (names equal);
+- the own passes three times (reg2, reg3 with the both-fail and candidate lists, then the record run at the head): none lost but the
+  two files past 300 s under load (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C, rows kept); the merged tree's 21 own
+  passes of failed includes and modules again; the control pair failing as it must.
+
+### The cells
+
+C++ read 5,821 / 0 / 503 -> 5,834 / 0 / 490; the own record's passes +16; completeness 0.9734 -> 0.9740, independence 0.9652 -> 0.9654
+(the read stage 0.828 -> 0.829).
+
+### Left
+
+The read cell's 490 deferred rows by cause, and c++20/tzdb.cc (cpp-tzdb-1123): doc/JOURNAL.md's entry of the day names them;
+pretty1.C's :oracle-text row waits for a runtime-build at the tree's key (a later train).

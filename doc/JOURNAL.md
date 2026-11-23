@@ -19367,3 +19367,78 @@ The coordinator's request, from the VM's closed queue 541 (reports/541-hs-eval.m
   - :speed's 5 rows: interpretation cost.
 - Records: check-oi-native.edn's statmemprof/custom row, the matrix and the scores. OCaml eval 598 / 2 / 10 (66 n/a), completeness
   0.9517 -> 0.9529. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+
+## 2026-11-23: cpp-1123, the burst's C++ stream (branch `cpp-1123` from mac/next `fa635f636`)
+
+The coordinator's brief: C++'s independence gaps (the read stage's own path, the lowered runtime's last unit, eval's and AOT's by-design
+row), then the 503 deferred read rows by cause, print's 10 (moved to the Mac's 540 during the day). Five agents were started (cpp-ce,
+cpp-ov, cpp-tpl, cpp-decl on the read rows by family, cpp-tzdb on the runtime unit); the user's rules of 08:45-08:50 (the host near
+OOM; one worktree a stream, no parallel copies) stopped the four read agents after about 25 minutes: their WIP commits (cpp-ce
+4eaba194e, cpp-decl 11a79edbe, cpp-tpl 46b42f0dc; cpp-ov wrote nothing) were merged into cpp-1123 and proven here with the stream's
+own rules; cpp-tzdb went on as the stream's one build worktree. A shared slot wrapper (`.tmp/an/cpp-slot` of the worktree: two slots)
+held the stream to two processes above 1 GB.
+
+What was built (doc/cpp/CPP-SURVEY.md, "As built: cpp-1123", the details):
+- __PRETTY_FUNCTION__ as GCC writes it (sema.ae predefined-name, gcc-pretty-function, gcc-type-str; the GCC 15.2 manual's "Function
+  Names as Strings", the spelling observed on g++ 15.2 by hand, no GCC code): a 17-case program's strings equal g++'s, and
+  gxx-dg-run/template/pretty1.C's own route now writes g++'s "X<T>::X() [with T = void]", which should turn eval's and AOT's one
+  :oracle-text design row into a pass. Not recorded yet: the sampling's check needs a lowered runtime at the tree's key (a runtime-build,
+  with tzdb's, on a later train).
+- The own front end's rules from the standard (sema.ae, the checker's mode): implicitly deleted copy assignment for const non-class or
+  reference members ([class.copy.assign]/7.2-7.3) and copy constructor for rvalue reference members ([class.copy.ctor]/10.1), reported
+  at the class by cx-deleted-implicit!; abstract class types ([class.abstract]/2-3: variables, members, function definitions' parameter
+  and return types, thrown objects, prvalues of calls and explicit conversions); final bases ([class.pre]/5); a scoped enumeration in a
+  contextual conversion to bool; a pointer, pointer to member or std::nullptr_t converted to an arithmetic type.
+- The stopped agents' WIP proven and kept: cpp-ce's constant evaluation (a namespace-scope auto constexpr variable's initializer checked;
+  a constant scalar's object readable through a pointer), cpp-decl's literal operators ([over.literal]/3, /5, [lex.ext]/3), cpp-tpl's
+  `>=` closing a template argument list ([temp.names]/4) and T::x on a non-class argument.
+- Five own passes next had broken (their rows recorded on cpp-diag-a and cpp-diag-b, merged in parallel on 11-22) fixed: a static
+  operator() or operator[] before C++23 GCC's pedwarn (cpp23/subscript11.C), a name-independent _ redeclared in a block before C++26 an
+  error under -pedantic-errors alone (cpp26/name-independent-decl2.C, -8.C), a decl-specifier keyword before auto no type-constraint
+  (cpp0x/alias-decl-16.C), a reinterpret_cast between a pointer and an integer no potential-constant failure (cpp1y/constexpr-82304.C,
+  g++ 15.2 by hand); diag.ae's five reflection warnings hinted away.
+- The dg harness: GCC's driver leaves coroutines on after an earlier -std=c++20 (`g++ -std=c++20 -std=c++17 -dM -E` defines
+  __cpp_impl_coroutine, by hand), so a file of a driver whose flags hold -std=c++20 or later (coroutines.exp) run below C++20 by its own
+  options gets -fcoroutines (dg.ae file-run), which the own front end takes (native.ae: the co_ keywords and __cpp_impl_coroutine);
+  coroutines/co-await-void_type.C, the read cell's one :gxx-disagrees row (the coordinator's request). Control: coroutines/pr95616-0.C
+  (C++20) and cpp1z/fold1.C (dg.exp's driver) keep their flags.
+- For the runtime's last unit, c++20/tzdb.cc (with cpp-tzdb-1123's code generator rules): numeric literals with the standard library's
+  suffixes (0min, 24h: parse.ae, a ud-suffix without an underscore when a literal operator of it is in scope), their literal operator
+  templates ([lex.ext]/3-4: sema.ae), and an instantiated integral_constant's `T{}` in constant text (template.ae; <bits/parse_numbers.h>).
+
+Correction to my report of the day: template/nontype10.C was already n/a (:host-dependent-expectation, 499-2 (a), 2026-11-20); the
+user's decision (a) of today on it changes nothing. The read cell's one :gxx-disagrees row is coroutines/co-await-void_type.C (above).
+
+Proofs (stage 0, no gate executable, light): each rule on its files and on valid programs by the probe (arbace.repr.cpp.dg's verdict
+over each file's dg.edn entry); regressions over every own pass of the record, three times (reg2 at 7115e2baf, reg3 at 9a19c03a3 with
+the both-fail and candidate lists, 2,775 files), no own pass lost beyond cpp0x/udlit-suffix-neg.C and
+diagnostic/missing-header-pr110164.C, which exceed the probe's 300 s under load as cpp-gnu found (their rows kept); then the record run
+at the head over the own passes, the new ones, co-await-void_type.C and the control pair DRs/dr2082.C, DRs/dr1423.C.
+The record run (12:10-12:33 UTC, `bin/repr-cpp dg --corpus dg-error --front native --only` 2,228 files `--record`): own pass 2,225, 16
+rows to own pass (defaulted17, rv-copy1, ref-qual8, abstract2, abstract8, scoped_enum_examples, constexpr-reinterpret2,
+constexpr-nonlit12, udlit-args-neg, udlit-operator-neg, parse/template30, cpp0x/override3, cpp1z/register1, cpp26/constexpr-voidptr4,
+cpp2a/constexpr-dynamic10, init/array58), no own pass lost, co-await-void_type.C now read with its header (its row "missed: accepted",
+the checker's coroutine diagnostic at C++17 left), the control failing as it must. mac/next merged twice (d55d627c5, fd1ff41f5; native.ae's
+queue 540 failed-#include token kept beside the coroutines keywords), the 21 own passes of failed includes and modules run on the merged
+tree: 21 of 21.
+
+Cells: C++ read 5,821 / 0 / 503 -> 5,834 / 0 / 490 (207 n/a); completeness 0.9734 -> 0.9740 (floored 97), independence 0.9652 ->
+0.9654 (floored 96; the read stage 0.828 -> 0.829); eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score --record`,
+`--judge --strict`, `bin/records-check`: 0 problems.
+
+Left, by cause (the read cell's 490 deferred): template definitions' non-dependent checks (GCC's eager ones), constraint satisfaction at
+calls, the constant evaluator (unions' active members, __builtin_bit_cast, lifetimes, dynamic_cast), designated initializers in overload
+resolution (sema ignores :_desigs), an implicit member deleted after a non-viable subobject call (unsure today), errors at a macro's
+spelling line (init/pr43064-2.C), C++17's coroutine checks (co-await-void_type.C). tzdb.cc (cpp-tzdb-1123, `30abf2bea` with
+cpp-1123 merged; not landed): after the literal and integral_constant rules the unit stops in _S_read_leap_seconds at
+`sys_seconds secs(sys_days(ymd) + days(1));`, time_point's converting constructor template missing from the candidates; reduced cases
+(t31-t33) generate with clang's names, and the bisect over the unit's text (t34-t37) puts the cause in the analysis of
+time_zone::_M_get_sys_info's body before it (an order-dependent state: with that body stubbed the unit stops earlier, at the anonymous
+`quoted`'s friend operator>>'s `ws(in)`, "a non-const reference to a temporary"). pretty1's record and tzdb wait for a later train's
+runtime-build.
+
+Alternatives weighed: four family agents in parallel (stopped by the user's rule of 08:50: one worktree a stream); GCC's
+__PRETTY_FUNCTION__ from the written signature alone (rejected: the qualification GCC prints is the type's, not the spelling's, so
+resolved types where no template is involved); abstract classes judged at the class's completion only (rejected: a class being defined
+is abstract by its own pure functions already, GCC's other/abstract2.C reports inside it); the coroutines flag for every file whose
+options hold two standards (taken only for a driver's -std=c++20 or later, the coordinator's scope).
