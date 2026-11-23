@@ -1569,6 +1569,9 @@ o2j_dump() {
     fi
     echo "$why" > "$d/ocamldoc.args"; cp "$ODOC/units.txt" "$d/dynmains.txt"
     local f; for f in "$d"/*.cmo; do cp "$f" "${f%.cmo}.cmxs"; done
+    # (burst 2026-11-23) the plugins' Lambda, the compiled level's registry (the light level loads the .cmxs' Lambda itself)
+    : > "$d/dynplugins.txt"
+    for f in $(plugins_of "$env" | tr ',' ' '); do f=${f%.ml}; echo "$d/$(echo "${f:0:1}" | tr a-z A-Z)${f:1}.ae" >> "$d/dynplugins.txt"; done
     return 0
   fi
   # header.awk's objinfo mode at this level (queue 528, DECISION 528-8 (a)): oiobjinfo translated as the row's program (oi_tool_prog's
@@ -1591,8 +1594,51 @@ o2j_dump() {
   if [ -n "$(compout_of "$env")" ] && [ "${NATIVE:-0}" != 1 ]; then
     printf '(ocaml/error "%s")\n' "the compiler's output (check-ocamlopt.byte-output) is the native typer's: ocdump reports no warnings" > "$d/$u.ae"; return 0
   fi
+  # (burst 2026-11-23) the AOT levels' generated program (header.awk's gen mode: unboxed-primitive-args): the test's script run on oi
+  # for each of its arguments, its output a file of the run directory (ocamltest's `ocaml` action with compiler_output), then the
+  # generated main unit dumped as the test's program (test.ml is its header alone), its C stubs built from the run directory (D/cstubs.here)
+  local gen=""; for kv in $env; do case $kv in @gen=*) gen=${kv#@gen=} ;; esac; done
+  if [ -n "$gen" ]; then
+    why=$(gen_prog "$id" "$d" "$gen" "$env") || { printf '(ocaml/error "%s")\n' "$(echo "${why#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0; }
+  fi
+  # (burst 2026-11-23) the test's own OCaml units (header.awk's @mods=FILE,...: modules beside C stubs, the gc-roots tests) at the AOT
+  # levels: typed in their order before the program (oi_mods, as oi_one's), translated with it (D/dynmains.txt), the program typed
+  # against their interfaces
+  local mods=""; for kv in $env; do case $kv in @mods=*) mods=${kv#@mods=} ;; esac; done
+  if [ -n "$mods" ]; then
+    local own
+    own=$(oi_mods "$id" "$d" "$flags" "$incs" "$mods") || { printf '(ocaml/error "%s")\n' "$(echo "${own#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0; }
+    printf '%s\n' $own > "$d/dynmains.txt"
+    o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")" "$d"
+    return 0
+  fi
   o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")"
 }
+
+# gen_prog ID D GEN ENV (burst 2026-11-23): header.awk's gen mode (@gen=SCRIPT:ARG>OUT,...): SCRIPT (the test's, ocaml_script_as_argument)
+# run on oi once an ARG, its standard output D/OUT (compiler_output); the readonly files (@dyncopy) copied beside; the generated main
+# (@genmain=FILE) becomes D/BASE.ml, the program; D/cstubs.here marks the C stubs as the run directory's. Status 1 with the reason
+gen_prog() {
+  local id=$1 d=$2 gen=$3 env=$4 src base sc g a o f main=""
+  src=$(dirname "$TESTS/$id"); base=$(basename "$id")
+  for kv in $env; do case $kv in @dyncopy=*) for f in $(echo "${kv#@dyncopy=}" | tr ',' ' '); do cp "$src/$f" "$d/"; done ;; @genmain=*) main=${kv#@genmain=} ;; esac; done
+  sc=${gen%%:*}; cp "$src/$sc" "$d/"
+  local S; S=$(echo "${sc:0:1}" | tr a-z A-Z)${sc:1}; S=${S%.ml}
+  o2j_dump_file "$d" "${sc%.ml}" "" ""
+  grep -q '^(ocaml/error' "$d/$S.ae" && { echo "gen: $sc: $(head -c 160 "$d/$S.ae" | tr '\n\t' '  ')"; return 1; }
+  local lib=${LIB_NATIVE:-$LIB}
+  for g in $(echo "${gen#*:}" | tr ',' ' '); do
+    a=${g%%>*}; o=${g#*>}
+    # shellcheck disable=SC2046
+    (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" "$S.ae" -- "$a") > "$d/$o" 2> "$d/gen-$a.err" \
+      || { echo "gen: $sc $a on oi: $(head -c 160 "$d/gen-$a.err" | tr '\n\t' '  ')"; return 1; }
+  done
+  rm -f "$d/$S.ae"
+  [ -n "$main" ] && [ -f "$d/$main" ] || { echo "gen: no generated main $main"; return 1; }
+  cp "$d/$main" "$d/$base.ml"; : > "$d/cstubs.here"
+  return 0
+}
+export -f gen_prog
 
 # compout_of ENV: 1 when ENV is a row whose compiler's output is judged (header.awk's @compout=1, queue 533), else nothing; wspec_of ENV:
 # its -w specs (@w=SPEC,...), as one -w of the native typer (arbace.repr.ocaml.typer splits it at the commas)
@@ -1612,7 +1658,7 @@ export -f compout_of wspec_of compout_output
 # o2j_dump_file D BASE FLAGS INCS [WSPEC]: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's
 # error form; WSPEC (queue 533): the native typer's -w, its warnings in D/typer.err
 o2j_dump_file() {
-  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-}
+  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-} own=${6:-}
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
@@ -1622,6 +1668,8 @@ o2j_dump_file() {
       case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;; *) bad=$f ;; esac
     done
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
+    # (burst 2026-11-23) OWN: the test's own units' directory (header.awk's @mods, typed before the program by oi_mods)
+    if [ -n "$own" ]; then if [ -n "$inc" ]; then inc="$inc:$own"; else inc="--include $own"; fi; fi
     [ -n "$wspec" ] && nf="$nf -w $wspec"
     if [ -n "$bad" ]; then printf '(ocaml/error "typer: flag %s not modelled")\n' "$bad" > "$d/$u.ae"
     elif ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
@@ -1704,7 +1752,8 @@ cmd_check_aot() {
     rm -f "$d/cstubs.why"
     for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
     if [ -n "$cs" ]; then
-      if nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes OI_CAPI_SERVER=$EXE"
+      local csdir; csdir=$(dirname "$TESTS/$id"); [ -f "$d/cstubs.here" ] && csdir=$d
+      if nodes=$(cstubs_nodes "$csdir" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes OI_CAPI_SERVER=$EXE"
       else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/cstubs.why"; continue; fi
     fi
     # (header.awk's ocamldoc mode, queue 480: ocamldoc's arguments and its program's interface digests)
@@ -1957,6 +2006,7 @@ c2_programs() {
     # (burst 2026-11-23, 528-8 (a): header.awk's objinfo mode at this level, the compiler's output judged beside the tool's, as
     # o2j_env_runs' at the light level)
     [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$d" "$d/o2j.out"
+    [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$d" "$d/o2j.out"
     t1=$(date +%s.%N); times > "$d/cpu1"
     local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
@@ -2013,9 +2063,13 @@ cmd_check_compiled() {
     # (a plugin test's main program units before its own and its plugins as +DUMP, the registry's, queue 373-1; its run reads the
     # program's interface digests)
     local dm=""
-    [ -s "$d/dynmains.txt" ] && dm=$(sed 's/$/\t/' "$d/dynmains.txt" | tr -d '\n')
+    # (burst 2026-11-23) the main units of clib's libraries as @UNIT (ocamldoc's: compiler-libs, unix, str, dynlink), the others its own
+    [ -s "$d/dynmains.txt" ] && dm=$(c2_tool_units "$d/dynmains.txt")
     [ -s "$d/dynplugins.txt" ] && dm="$dm$(sed 's/^/+/; s/$/\t/' "$d/dynplugins.txt" | tr -d '\n')"
     case " $env " in *" @dyn="*) env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports" ;; esac
+    # (burst 2026-11-23, 528-8 (a)) header.awk's ocamldoc mode at this level: the run's arguments (o2j_dump's D/ocamldoc.args) and the
+    # program's interface digests for Dynlink's checks of the plugins (the registry's: D/dynplugins.txt)
+    if [ -n "$(ocamldoc_of "$env")" ]; then args=$(cat "$d/ocamldoc.args"); env="$env OI_DYNLINK_IMPORTS=$ODOC/main.imports"; fi
     # (burst 2026-11-23, 528-8 (a)) a tool's own units (oi_tool_prog's D/tool.units, in link order: dumpobj's) in place of its includes':
     # those of clib's libraries as @UNIT, the tool's others translated into its package
     if [ -s "$d/tool.units" ]; then
@@ -2042,7 +2096,8 @@ cmd_check_compiled() {
     local cs="" kv capi=0 nodes
     for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
     if [ -n "$cs" ] && [ ! -s "$d/helper.why" ]; then
-      if nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
+      local csdir; csdir=$(dirname "$TESTS/$id"); [ -f "$d/cstubs.here" ] && csdir=$d
+      if nodes=$(cstubs_nodes "$csdir" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
       else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/helper.why"; fi
     fi
     # the seventh field: 1 for a program that includes unix (OT25 (a): at most O2J_SHARD_UNIX of them a shard)
