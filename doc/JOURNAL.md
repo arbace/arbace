@@ -19121,3 +19121,21 @@ own --corpus nofib --only nofib/real/eff/VS --record` at that cap passed (61.5 s
 lock), T23071 and secretary (the user's decision (b) of 2026-11-23: measured at 3000 s under the lock, capped if they finish, else
 (a): an optimizer for the own libraries' STG). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
 problems.
+
+## 2026-11-23: C's CT1 recorded: sqlite3.c and 13.S judged by the own pp reference (smalls2-1123)
+
+The user's decision of 2026-11-22 (CT1: ppref's agreement counted as the token check's own verdict) and counting3-1122's rule
+(`:own-elsewhere`'s `:reason-re "pp ref"`) waited for a run. Under the big-job lock: `bin/repr-cpp ppref build` (GCC 15.2.0's libcpp
+behind tools/ppref, built by Arbace's own C++ code generator, repr/c, cf2g and TamaGo's go into the main checkout's .tmp/ppref, at
+this branch's key, queue 540's repr/c included), then `REPR_C_PP_JUDGE=own bin/repr-c check --tokens --corpus tcc-pp,sqlite
+--record` (the tools' host the gate executable 8bfa5cd4, 540's changed repr/c evaluated from the checkout): tcc-pp 22 files (lex
+equal 21, 13.S's lex differs as cc's scanner does; pp equal 21, 13.S "ref"), sqlite 2 (pp: shell.c equal, sqlite3.c "ref");
+test/repr/c/pp-check-results.edn's two rows "pp gcc" -> "pp ref", the known file unchanged. Cells (bin/reap --record): C read
+5,468 / 2 / 5 -> 5,470 / 0 / 5 (the tree check's pp-known row follows its token row, count-once); completeness 0.9991 -> 0.9992.
+The 5 deferred (eval-depth: gcc's limits-*.c at 10,000 levels) are the VM's queue 540 (round 2 on the train's compiled host).
+bin/crops-score --record, --judge --strict, bin/records-check: 0 problems.
+
+C++'s gxx-modules-all round trip (`bin/repr-cpp dg --corpus modules --record`, queue 540's second C++ row) was run and not
+recorded: 1,180 of 1,181 pass (target-aarch64-1_a.C among them), but part-4_c.C, a pass in the record, crashes in the print
+("print: a name: (decltype (cpp/text \"f\"))" after `import foo;`), a regression of queue 540's native.ae change (the token after
+a closed stream dropped) or its printer change, sent back to the VM; the record keeps its pass row until then.
