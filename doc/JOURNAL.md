@@ -19314,3 +19314,24 @@ bin/crops-score --record, --judge --strict, bin/records-check: 0 problems. The r
 libunicode.c, the four limits files, unicode_gen.c's level 3, and 540-3's 16 GiB runs: limits-externdecl.c, pr46534.c,
 sqlite3.c) wait for a gate executable built from this tree (the build train): stage 0 and next's gate executable both evaluate
 540's convert.ae from the checkout.
+## 2026-11-23: ClassLoader's remaining members in jrt (the user's decision (a); java-bytecode-1122)
+
+The user decided (a) on the question of java-bytecode's report (relayed by the coordinator): the ClassLoader members the
+:classloading rows still lack are added to jrt rather than kept by design. Built at stage 0, no gate build
+(go/arbace/jrt/defineclass.ae, written from jdk26u's java.lang.ClassLoader at baf63fb as documented behaviour, no code
+copied): findLoadedClass (protected final: the loader's defined class, a built-in loader's the registry's; null for null, ""
+and a name with /), getPackage(String) (protected, deprecated: the loader's own, else its parent's, a built-in loader's the
+registry's packages), getPackages() (the loader's and its ancestors', the eldest first; the boot loader's not listed),
+registerAsParallelCapable() (protected static, caller-sensitive: the caller found on jrt's stack walk, StackWalker's
+frames, ClassLoader's own frames skipped; registered when its superclass is; IllegalStateException for a caller that is not
+a ClassLoader subclass, jdk26u's IllegalCallerException being a class of the world jrt cannot name) and
+isRegisteredAsParallelCapable() (the loader object's class; ClassLoader and the built-in loaders registered),
+setClassAssertionStatus, setPackageAssertionStatus, setDefaultAssertionStatus and clearAssertionStatus (recorded; no class
+of the Go build runs with assertions enabled, so Class.desiredAssertionStatus stays false). The non-final ones are in
+ClassLoader_I (the member tables call them through it); bin/jrt manifest regenerated manifest.edn, manifest_test.ae and
+reflect_tables.ae. Proof: bin/jrt build (amd64) and bin/jrt test -run TestLoaderMembers|TestPackages|TestClassLoaders
+(TestLoaderMembers new: GetPackage.java's view over a child and parent loader, findLoadedClass, parallel capability, the
+assertion records) pass. The rows (t04540, t04541, t06029; t03295 and t04542 also need a class file as a resource and a
+Java forms subclass of URLClassLoader) are judged on the train's build. resources(String) (t04543) is not built yet: its
+stream is lazy over the loader's own getResources, which jrt cannot call virtually nor build a Stream for; it needs a static
+of jrt's own Java (jdk.internal.jrt.ClassPathResources.resources, jdk/forms predicted) and j2g's resource helpers.
