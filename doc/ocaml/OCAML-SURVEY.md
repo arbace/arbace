@@ -4837,3 +4837,24 @@ on `oc-compiled-1122`) and the light level's whole re-records after 533 and 528-
   for the user). The C-stub rows of native-only tests (int64-unboxing's unboxed externals, unboxed-primitive-args' generated stubs),
   the gc-roots tests' `@mods` at the AOT levels, opam/base64 and fmt (light-speed at the light level; chain2's tree predates 531's
   staging, so their compiled rows need a run of this tree).
+
+### The user's list after the decisions of 2026-11-23 (the counting rule (a); the toplevel rows the Mac's 544)
+
+- **The gc-roots tests' `@mods` at the AOT levels** (globroots_sequential, globroots_parallel, globroots_parallel_spawn_burn): header.awk's
+  modules rule (C files and OCaml units of the test's directory) at every level; bin/oi's `o2j_dump` types the units first (`oi_mods`,
+  as oi_one), writes them to `D/dynmains.txt` (translated with the program, at both AOT levels) and types the program against their
+  interfaces (`o2j_dump_file`'s sixth argument, the run directory).
+- **Native-only C stubs at the AOT levels** (int64-unboxing/test): header.awk's class for a native-only test with C stubs is oi's alone;
+  the AOT levels call such an external by its native name with unboxed words (o2j's `native:` calls, `CApi/nativeCall`, OC199 (a)).
+- **The gen mode** (unboxed-primitive-args/test, 528-3 (a)): a native header that generates its program with ocamltest's `ocaml` script
+  action runs at the AOT levels; `gen_prog` runs the script on oi once an argument (its output the `compiler_output` file of the run
+  directory: stubs.c, main.ml), the last unit of `all_modules` becomes the program, the other .ml its `@mods`, the .c its stubs, built
+  from the run directory (`D/cstubs.here`, read by both AOT levels' `cstubs_nodes`).
+- **A helper of C alone at the AOT levels** (lib-threads/signal, delayintr: sigint.c): built on ci as oi's (`oi_helper`, its own program
+  whatever the level), the level's program runs it as `./sigint`.
+- **ocamldoc at the compiled level** (tool-ocamldoc/t01-t05): header.awk's ocamldoc mode at aot=2; `o2j_dump` lists the plugins' Lambda
+  in `D/dynplugins.txt` (the compiled level's Dynlink registry); the compiled check takes the run's arguments (`D/ocamldoc.args`), the
+  program's interface digests (`OI_DYNLINK_IMPORTS`) and judges ocamldoc's output (`ocamldoc_output`); a program's main units of clib's
+  libraries are `@UNIT`s (`c2_tool_units` over `D/dynmains.txt`: ocamldoc's compiler-libs, unix, str, dynlink).
+- **The suite's compiled level takes C stubs** (opam/base64/test, opam/fmt/test_fmt: queue 531's `@cstubs`): their node program and a
+  shard with the C API's main, as the run corpus's (OC215 (a)).
