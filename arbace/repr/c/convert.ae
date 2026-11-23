@@ -1829,18 +1829,32 @@
         items
         (case (cs st)
           :StatementLabeled
-          (let [ls (g st :LabeledStatement)
-                lbl (at ls (case (cs ls)
-                             :LabeledStatementLabel (list 'label (keyword (tsrc (g ls :Token))))
-                             :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
-                             :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
-                             :LabeledStatementDefault (list 'default)))
-                lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))
-                inner (g ls :Statement)
-                lbl (if (and inner (= (cs inner) :StatementExpr)) ; GNU attributes after the label before `}` (CS144)
-                      (with-attrs lbl :c/attrs (g (g inner :ExpressionStatement) :LabelAttributeSpecifierList))
-                      lbl)]
-            (into [lbl] (when-let [s (g ls :Statement)] (stmt-items s))))
+          ;; queue 540b: a chain of labels (gcc's limits-caselabels.c: 100,000) in a loop, as the recursion through stmt-items
+          ;; took it: each label's group claimed, its form, then the next label's directives (dirs-at) and the next label; the
+          ;; innermost label's statement by stmt-items, and its items' rule (a lone form carries the statement's invocation)
+          (let [out (java.util.ArrayList.)]
+            (loop [st st t0 nil first? true]
+              (let [t (if first? nil (or (group-of st) (group-semi st)))
+                    ls (g st :LabeledStatement)
+                    lbl (at ls (case (cs ls)
+                                 :LabeledStatementLabel (list 'label (keyword (tsrc (g ls :Token))))
+                                 :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
+                                 :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
+                                 :LabeledStatementDefault (list 'default)))
+                    lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))
+                    inner (g ls :Statement)
+                    lbl (if (and inner (= (cs inner) :StatementExpr)) ; GNU attributes after the label before `}` (CS144)
+                          (with-attrs lbl :c/attrs (g (g inner :ExpressionStatement) :LabelAttributeSpecifierList))
+                          lbl)]
+                (if (and inner (= (cs inner) :StatementLabeled))
+                  (do (.add out lbl)
+                      (doseq [d (dirs-at inner 0)] (.add out d))
+                      (recur inner t false))
+                  (let [rest-items (when inner (stmt-items inner))]
+                    (if (and t (not first?) (empty? rest-items))
+                      (.add out (addm lbl {:c/macro-stmt t}))
+                      (do (.add out lbl) (doseq [x rest-items] (.add out x))))))))
+            (vec out))
           :StatementCompound [(at st (Lv (cons 'do (compound-items (g st :CompoundStatement)))))]
           :StatementExpr
           (let [es (g st :ExpressionStatement)

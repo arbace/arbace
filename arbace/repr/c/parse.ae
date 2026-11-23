@@ -1079,31 +1079,84 @@ void __atomic_store();
       :RETURN (sc (node "JumpStatement" :Case :JumpStatementReturn :Token (sh p) :ExpressionList (expression p true) :Token2 (must p \;)))
       (unexpected p "jump statement"))))
 
-(defn- labeled-statement [^Parser p decl-ok]
-  (let [r (case (rn p)
-            :eof (unexpected-eof p)
-            :CASE (let [r (node "LabeledStatement" :Token (sh p) :ConstantExpression (constant-expression p))]
-                    (if (= (rn p) :DDD)
-                      (do (s! r :Case :LabeledStatementRange)
-                          (s! r :Token2 (sh p))
-                          (s! r :ConstantExpression2 (constant-expression p))
-                          (s! r :Token3 (must p \:))
-                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token3))))
-                      (do (s! r :Case :LabeledStatementCaseLabel)
-                          (s! r :Token2 (must p \:))
-                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))))
-                    r)
-            :DEFAULT (let [r (node "LabeledStatement" :Case :LabeledStatementDefault :Token (sh p) :Token2 (must p \:))]
-                       (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))
-                       r)
-            :IDENTIFIER (let [r (node "LabeledStatement" :Case :LabeledStatementLabel :Token (sh p) :Token2 (must p \:))]
-                          (s! r :Statement (labeled-statement-body p decl-ok (.get r :Token2)))
-                          (if (nil? (slot p FNSCOPE))
-                            (let [t (sh p)] (eh p (str (tpos t) ": unexpected label")))
-                            (declare! (slot p FNSCOPE) (src (.get r :Token)) r))
-                          r)
-            (unexpected p "labeled statement"))]
-    r))
+(defn- label-head
+  "A labeled statement's label: [node label?], the node without its :Statement; label? false when the lookahead is no label (the
+  error's value, nil, as the node)."
+  [^Parser p]
+  (case (rn p)
+    :eof [(unexpected-eof p) false]
+    :CASE (let [r (node "LabeledStatement" :Token (sh p) :ConstantExpression (constant-expression p))]
+            (if (= (rn p) :DDD)
+              (do (s! r :Case :LabeledStatementRange)
+                  (s! r :Token2 (sh p))
+                  (s! r :ConstantExpression2 (constant-expression p))
+                  (s! r :Token3 (must p \:))
+                  [r true])
+              (do (s! r :Case :LabeledStatementCaseLabel)
+                  (s! r :Token2 (must p \:))
+                  [r true])))
+    :DEFAULT [(node "LabeledStatement" :Case :LabeledStatementDefault :Token (sh p) :Token2 (must p \:)) true]
+    :IDENTIFIER [(node "LabeledStatement" :Case :LabeledStatementLabel :Token (sh p) :Token2 (must p \:)) true]
+    [(unexpected p "labeled statement") false]))
+
+(defn- label-colon [^HashMap r] (if (= (.get r :Case) :LabeledStatementRange) (.get r :Token3) (.get r :Token2)))
+
+(defn- label-next?
+  "queue 540b: statement's dispatch, the lookahead alone: the next statement is a labeled one (an identifier and `:`, case or
+  default)."
+  [^Parser p]
+  (let [c (rn p)]
+    (if (= c :IDENTIFIER)
+      (= (pkc p 1) \:)
+      (and (not (or (expression? c) (= c \;) (= c :ATTRIBUTE)))
+           (not (std-attr-at? p 0))
+           (in? (rn p true) :CASE :DEFAULT)))))
+
+(defn- labeled-statement
+  "queue 540b: a chain of labels (`case 1: case 2: ... stmt`, gcc's limits-caselabels.c's 100,000) parsed in a loop, not by
+  recursion: each label whose statement is another label (labeled-statement-body's statement, at statement's dispatch) takes
+  the next in turn; the statement after the last label is parsed as before, then the chain is linked from the inside out, each
+  label's declaration (or its error) in the recursion's order, innermost first. The tree is cc's, each label's :Statement a
+  Statement of the next label."
+  [^Parser p decl-ok]
+  (let [chain (java.util.ArrayList.)]
+    (loop [decl-ok decl-ok]
+      (let [[r label?] (label-head p)]
+        (.add chain r)
+        (if-not label?
+          nil
+          (let [colon (label-colon r)
+                ;; labeled-statement-body, its statement taken here when it is another label
+                inner (if decl-ok
+                        (let [i (skip-attribute-specifiers p 0)
+                              c (pkct p i)]
+                          (cond
+                            (and (= c :TYPENAME) (= (pkc p (inc i)) \:)) (do (slot! p LDOK true) [:stmt (statement p false)])
+                            (or (declaration-specifier? c true) (= c :STATICASSERT) (= c :AUTOTYPE) (= c \}))
+                            [:stmt (node "Statement" :Case :StatementExpr :ExpressionStatement
+                                         (let [es (node "ExpressionStatement" :Token (synth-semi colon))]
+                                           (when (and (= c \}) (pos? i)) (s! es :LabelAttributeSpecifierList (attribute-specifier-list-opt p)))
+                                           es))]
+                            :else (do (slot! p LDOK true) nil)))
+                        (do
+                          (when (and *recover* (std-attr-at? p 0) (= (pkc p (std-attrs-end p)) \;))
+                            (eh-soft! p (str (tpos (tok0 p)) ": unexpected '[', expected statement")))
+                          nil))]
+            (cond
+              inner (s! r :Statement (second inner))
+              (label-next? p) (let [ld (slot p LDOK)] (slot! p LDOK false) (recur ld))
+              :else (s! r :Statement (statement p false)))))))
+    (loop [i (dec (.size chain))]
+      (when (>= i 0)
+        (let [^HashMap r (.get chain i)]
+          (when (< i (dec (.size chain)))
+            (s! r :Statement (node "Statement" :Case :StatementLabeled :LabeledStatement (.get chain (inc i)))))
+          (when (and r (= (.get r :Case) :LabeledStatementLabel))
+            (if (nil? (slot p FNSCOPE))
+              (let [t (sh p)] (eh p (str (tpos t) ": unexpected label")))
+              (declare! (slot p FNSCOPE) (src (.get r :Token)) r)))
+          (recur (dec i)))))
+    (.get chain 0)))
 
 (defn iteration-statement [^Parser p]
   (new-scope! p)
