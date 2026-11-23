@@ -8093,7 +8093,6 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
 
-<<<<<<< HEAD
 ## As built: the user's n/a decisions of 2026-11-23 (na-apply-1123)
 
 The user's decisions on the eval tail's proposal (A-F, H's test_gc counts, I, J1-J3 taken; G not now; doc/JOURNAL.md, "Python and
@@ -8107,7 +8106,7 @@ patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s lis
 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
 (`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
 `:finalization-cycle` by design.
-=======
+
 ## As built: 536, the largest deferred classes of the eval level (2026-11-23, the Mac VM, queue 536)
 
 The deferred classes of `test/python/divergences.edn` by rows on next fa635f636's record (`bin/pyi divergences --table`), less those
@@ -8156,4 +8155,3 @@ run's errors came from a second `--only` run of the same worktree cleaning the s
 other way on the VM: test_deeply_nested_deepcopy is past 600 s with py interpreted (`:runner-limits`, `:slow-on-goi`: it passes on
 the main host's compiled runtime) and test_cyclic_gc fails whole and alone (`:finalization-collect`; the main host's whole-module
 runs failed it too).
->>>>>>> mac/536-py-deferred
