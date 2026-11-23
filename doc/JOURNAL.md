@@ -19960,3 +19960,121 @@ assertion records) pass. The rows (t04540, t04541, t06029; t03295 and t04542 als
 Java forms subclass of URLClassLoader) are judged on the train's build. resources(String) (t04543) is not built yet: its
 stream is lazy over the loader's own getResources, which jrt cannot call virtually nor build a Stream for; it needs a static
 of jrt's own Java (jdk.internal.jrt.ClassPathResources.resources, jdk/forms predicted) and j2g's resource helpers.
+
+## 2026-11-23: the user's decisions on Java's remaining by-design classes; their rows classed
+
+Relayed by the coordinator (the user, 2026-11-23): JDI (JD9) and AWT/Swing (desktop) are n/a; JMX is n/a; serialization (its
+compiled level), XML (JD8, reversing 2026-11-22's "stays"), javac's synthetic lambdas (JD7, reversing DECISION 517-1 (a)), the
+class-file API and the jrt: image (:zip) are to be built; annotation processors from class files (JCS51) go through JD3's
+class-file loader (java-bytecode's stream), not JCS51 (a)'s interpreted sources. Alternatives not taken: keeping them by design.
+
+Applied in test/java/divergences.edn (java-design-1123):
+- `:jmx`, `:jdi`, `:desktop`: kind `:na`.
+- `:xml`, `:classfile`, `:zip`, `:synthetic-lambdas`: kind `:world` (deferred: to be built).
+- `:design-also` and `:design-also-compiled` (JCS129 (a)'s by-design-beside-its-cause lists): their tests' sources (test/java/
+  ref-jdk26.edn's `:files` in jdk26u at the platform's pin) scanned for the features' packages; a test naming javax.management,
+  com.sun.jdi or java.awt/javax.swing moved to new n/a classes `:design-also-na` (32 interpreted) and `:design-also-compiled-na`
+  (39 compiled); the two naming javax.smartcardio (t08070, t08073; no decision changed JCS97 (a)) to `:design-also-smartcardio`
+  (`:design`); the rest stay, kind `:world` (they wait for serialization, XML, the class-file API, class loading).
+- `bin/reap --record`: Java eval 3,109 / 116 / 100 -> 3,109 / 51 / 119 (46 n/a), AOT 3,079 / 155 / 91 -> 3,079 / 54 / 161
+  (31 n/a; the branch's JD1, JD2, JD5, JD6 n/a classes included); `bin/crops-score --record`: Java completeness 96.9 (97.6 without
+  by design); `--judge --strict` and `bin/records-check` pass. By design left: class loading and defineClass (JD3's), FFM and
+  Kerberos (being built on this branch), the harness's (jvm-tools, memory-limit, flaky-timeout), j2g-reflection, smartcardio,
+  diffcheck's corpus-own exclusions.
+
+## 2026-11-23: java-design-1123: JD7 built (javac's synthetic lambda methods in reflection); Dyn's clone; train 1's session
+
+- JD7 (the user's BUILD of 2026-11-23): `arbace.classes.analyze/synthetic-lambdas` lists a class's lambdas as javac's
+  LambdaToMethod makes their methods: the name analyze-lambda already gave (lambda$M$N, javac's per-prefix index, used until
+  now for SerializedLambda), the captured locals first in the order the body first names them then the instantiated
+  descriptor's parameters (erased), private and synthetic, static unless the body uses this. The interpreter publishes them
+  as member table entries (`Compiler$CFGo.setMethod`, an entry that throws when invoked: the lambda runs as its own class's
+  method), j2g lists them in a program's own classes' member tables as `m` lines (jrt's throwing entry). Method references
+  to a protected method declared in another package are made lambdas as javac's TransTypes makes them
+  (`needsConversionToLambda`'s `isProtectedInSuperClassOfEnclosingClassInOtherPackage`; analyze-method-ref's bound, unbound and
+  static references through `ref-as-lambda`), which numbers ProtectedInaccessibleMethodRefTest2's three as javac does.
+  Alternatives considered: invocable synthetic methods (a second entry point to every lambda body; no test calls them);
+  names computed apart from the analysis (the analyzer already numbers them for serialization).
+- Proved by day without a build: `.tmp/jd/dev/arbace-dev`, the executable 2399c5e5's with the checkout's
+  `arbace/classes/analyze.ae` and `interp.ae` evaluated over its own before test/java/run.ae (the interp level's harness for a
+  change to the Java forms' front end alone): t06144 PrivateLambdas, t06157 CaptureVarOrder, t06306
+  ProtectedInaccessibleMethodRefTest2 pass, the control t03208 passes, the negative controls c00001 and c00004 differ. The
+  compiled level waits for a train's build.
+- j2g: Dyn's `Clone__O` calls the interpreted class's own `clone()` by its key (`DynClass.ByKey`), else Object's refusal:
+  compiled code cloning an interpreted object through an interface that declares `clone()` public (BuildOddSel t05330:
+  PKIXParameters clones its CertSelector). Waits for a train.
+- The class-file API's compiled rows (t06042 and its kin: "Unable to resolve symbol: ClassFile/of") are stale: the API is in
+  the world since F26, and `bin/java-check --analyze-only` of t06042 on the checkout refuses none of its classes; their rows run
+  with train 1's.
+- Train 1 (the coordinator's: next + java-design-1123 at 0ad52db70 + clj-1123, one edge update and one gate build) builds this
+  branch's FFM, Kerberos, XML parser, setProperties and JD4; `.tmp/jd/session-train1.sh` waits for its build, runs the compiled
+  and interp rows on its executables in java-design-b1 (the compiled ones under one heavy-lock ticket), then
+  `.tmp/jd/post-1123.sh` merges train 1 and records them.
+
+## 2026-11-23: the user's decisions on XML's place and smartcardio; java-design-1123's scope; the unlinked native, Reference's clone
+
+- The user (relayed by the coordinator, 2026-11-23): XML is built in javac's tool world (java-design's option (b): the tests
+  naming java.xml run on javac's tool at interp, as F6's javac-API tests do, and in javac-world shards at compiled, as JD4's;
+  the shipped program does not grow); javax.smartcardio is n/a. The Mac (queue 543) takes jrt's open causes (CountDownLatch and
+  Semaphore extendable, ForkJoinPool.schedule, System.Logger, the jdk.charsets charsets, the Buddhist calendar, stack traces'
+  line numbers, type annotations' reflection, the ConditionObject name, the jrt: and zipfs providers); java-design keeps XML in
+  the tool world, serialization at compiled, t04823, JD7 and Dyn's clone, and train 1's records. Alternatives not taken for XML:
+  the shipped world (a third to a half more of jdk/forms in every build), a world and executable of its own.
+- `:smartcardio` and `:design-also-smartcardio`: kind `:na`. `bin/reap --record`: the cells unchanged (no row of the two fails
+  today); `crops-score --judge --strict` and `records-check` pass.
+- An own native method that nothing implements (SubclassTest's AbstractObjectInputStream.allocateNewObject, t04443;
+  MethodAccessFlagTest's m4, t04832; both compiled, "Go does not compile: undefined: ..._native"): j2g's body throws
+  UnsatisfiedLinkError, named as HotSpot names an unlinked native ('R C.m(P, ...)'), as the JVM does when it is called
+  (decls/method-forms); reach.ae roots UnsatisfiedLinkError's constructor for it. java.lang.UnsatisfiedLinkError entered the
+  world (test/jrt/jrt_sources.ae's jd1123-sources, jdk/sources.txt, jdk/forms/java/lang/UnsatisfiedLinkError.ae read by
+  `bin/repr-java read-jdk --no-javac` on javac's tool: the same forms as the vendoring read but the header's path, checked on
+  ThreadDeath; the provenance's counts 3,828 and 4,068). Waits for a train.
+- t04823 ReferenceClone: a SoftReference, WeakReference or PhantomReference subclass's super.clone() was Object's shallow copy
+  (dyn/clone-call: jrt's manifest lists no clone for the references, so impl-of found Object's); now jrt's reference's own
+  Clone__O (CloneNotSupportedException, Reference.clone's), for a DynSub of a Reference subclass whose jrt struct has one.
+  Waits for a train.
+- Found, not built: t04725 (annotation UnitTest) fails first on annotation elements of type byte, short and float (their values
+  null, their defaults "missing element"), before its proxies' serialization; t04444 SubclassGC needs a class loader's classes
+  unloaded (JD3's loader). Both stay deferred.
+
+## 2026-11-23: java-design-1123: XML in javac's tool world, the measured closure (plan, nothing built yet)
+
+- The user's (b) of today: java.xml's parsers, DOM, transform, XPath, validation and StAX, and java.xml.crypto's XML signature,
+  in javac's tool world (overlay/jdk/javac/closure.txt, read by `bin/javac-vendor convert` into jdk/javac/forms), the XML tests
+  routed there as F6 and JD4 route javac's API tests (bin/java-check's tool_re: their sources naming javax.xml's parsers,
+  transform, xpath, validation, stream, catalog and crypto, org.w3c.dom, org.xml.sax; at interp on javac's tool, at compiled
+  in javac-world shards).
+- The closure measured as JN7.2 measured the SAX parser's: the 15 XML tests (t08077-t08081, t08083, t08088-t08096) compiled
+  by the jdk26u build's javac and run by its java with `-Xshare:off -Xlog:class+load` (`.tmp/jd/xmlload/run.py`, each test's
+  renamed sources as test/java/ref-jdk26.edn's :files give them): 1,007 java.xml and 162 java.xml.crypto classes loaded, 803
+  top-level source files beyond the shipped world's (jdk/sources.txt), javac's (jdk/javac/sources.txt) and the closure's
+  (684 java.xml, 119 java.xml.crypto; about 247,000 lines; BCEL's generic 173, XSLTC's compiler 57, XPath's functions 42,
+  Xerces' schema datatypes 35, ...); `.tmp/jd/xmlload/need.txt`. Still to add: the classes their members' descriptors name and
+  their supertypes (j2g translates a call only when its descriptor's classes are in the world), found by
+  `bin/javac-vendor check`'s refusals, and the factories found by name (FactoryFinder's defaults, the XML signature's
+  providers) rooted for reflection, as round 2 rooted the default DatatypeFactory.
+- XSLTC (the XSLT tests t08091, t08093, t08096's transform) compiles a stylesheet to class files with BCEL and defines them:
+  JD3's class-file loader and interpreter in the tool's world as well.
+- Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
+  with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
+  GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
