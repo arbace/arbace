@@ -128,7 +128,11 @@ type embedding it, or the AnnotationObj).\n"
 nil (the instance check of an interpreted annotation type: arbace.j2g.dyncf).\n"
   ^{:tag (* Class)} [^any x]
   (let [(values b ok) (assert annotationBased x)]
-    (when (not ok) (return nil))
+    (when (not ok)
+      ;; a proxy over an AnnotationInvocationHandler (AnnotationParser's annotations of a class defined from bytes)
+      (let [a (annotationObjOf x)]
+        (when (!= a nil) (return (.-typ a))))
+      (return nil))
     (.-typ (.annBase b))))
 
 (go/method index ^int [^{:tag (* AnnotationObj)} a ^string name]
@@ -143,7 +147,15 @@ array cloned. j2g's annotation types call it (unboxing a primitive).\n"
   (let [i (.index a name)]
     (when (< i 0)
       (panic (incompleteAnnotation (.-typ a) name)))
+    ;; an ExceptionProxy's exception (AnnotationInvocationHandler.invoke; AnnotationParser's mismatches of a class defined
+    ;; from bytes, java-bytecode-1122)
+    (let [(values xp ok) (assert exceptionProxy (aget (.-vals a) i))]
+      (when ok (panic (.GenerateException__RuntimeException xp))))
     (cloneMember (aget (.-vals a) i))))
+
+(go/type exceptionProxy
+  "exceptionProxy is a sun.reflect.annotation.ExceptionProxy (translated: jrt knows it by its method).\n"
+  (interface (GenerateException__RuntimeException ^RuntimeException_I [])))
 
 (go/var ^{:doc "the exception of a member without a value (JCS213 (b): the world's, translated from jdk26u)\n"}
   incompleteAnnotationName "java.lang.annotation.IncompleteAnnotationException")
@@ -582,7 +594,53 @@ a bucket's in insertion order.\n"
 C desc, F name), its parameters' by key (P name desc) and index.\n"
   (struct ^{:tag (slice any)} class
           ^{:tag (map string (slice any))} members
-          ^{:tag (map string (slice (slice any)))} params))
+          ^{:tag (map string (slice (slice any)))} params
+          ^{:tag (func [string] [any]) :doc "a class defined from bytes: its annotations by key, parsed on demand (SetAnnotationSource)\n"} src
+          ^{:tag sync/Map :doc "src's answers by key\n"} srcCache))
+
+(go/var ^{:tag sync/Map :doc "annotationSources: *ClassInfo -> func(string) any (SetAnnotationSource).\n"} annotationSources)
+
+(go/func SetAnnotationSource
+  "SetAnnotationSource gives class c, defined from bytes (java-bytecode-1122), its annotations by key: \"T\" the
+class's, \"M NAME DESC\", \"C DESC\", \"F NAME\" a member's (an Annotation[]), \"P NAME DESC\" a method's
+parameters' (Annotation[][]), \"D NAME DESC\" an element's default (arbace.lang.BytecodeAnnotations: jdk26u's
+AnnotationParser over the class file's own constant pool).\n"
+  [^{:tag (* Class)} c ^{:tag (func [string] [any])} src]
+  (.Store annotationSources (.-info c) src)
+  (.Delete annotationDataCache (.-info c)))
+
+(go/func refSlice "refSlice: the elements of an Object[] (nil: none).\n" ^{:tag (slice any)} [^any x]
+  (let [(values a ok) (assert (* RefArray) x)]
+    (when (or (not ok) (== a nil)) (return nil))
+    (.-A a)))
+
+(go/method sourced
+  "sourced is src's answer for key, once.\n"
+  ^any [^{:tag (* annData)} d ^string key]
+  (let [(values v ok) (.Load (.-srcCache d) key)]
+    (when ok (return v)))
+  (let [v ((.-src d) key)
+        (values w _) (.LoadOrStore (.-srcCache d) key v)]
+    w))
+
+(go/func memberAnnotations
+  "memberAnnotations: the declared annotations of c's member key (M NAME DESC, C DESC, F NAME).\n"
+  ^{:tag (slice any)} [^{:tag (* Class)} c ^string key]
+  (let [d (annotations c)]
+    (when (!= (.-src d) nil)
+      (return (refSlice (.sourced d key))))
+    (aget (.-members d) key)))
+
+(go/func paramAnnotations
+  "paramAnnotations: the declared annotations of c's method key's parameters (P NAME DESC).\n"
+  ^{:tag (slice (slice any))} [^{:tag (* Class)} c ^string key]
+  (let [d (annotations c)]
+    (when (!= (.-src d) nil)
+      (let [^{:tag (slice (slice any))} out nil]
+        (range [_ x (refSlice (.sourced d key))]
+          (set! out (append out (refSlice x))))
+        (return out)))
+    (aget (.-params d) key)))
 
 (go/var ^{:tag sync/Map :doc "annotationData: *ClassInfo -> *annData, decoded once.\n"} annotationDataCache)
 (go/var ^{:tag sync/Map :doc "annotationDefaultsCache: *ClassInfo -> *annDefaults.\n"} annotationDefaultsCache)
@@ -653,6 +711,11 @@ makes: arbace.classes.interp), forgetting what was decoded from its earlier data
                         (while (<= (len ps) i) (set! ps (append ps nil)))
                         (aset ps i (append (aget ps i) a))
                         (aset (.-params d) k ps))))))))))
+      ;; a class defined from bytes: its annotations from its source (SetAnnotationSource)
+      (let [(values sv ok) (.Load annotationSources info)]
+        (when ok
+          (set! (.-src d) (assert (func [string] [any]) sv))
+          (set! (.-class d) (append (.-class d) (spread (refSlice ((.-src d) "T")))))))
       (let [(values w _) (.LoadOrStore annotationDataCache info d)]
         (assert (* annData) w)))))
 
@@ -926,11 +989,11 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
   (strings/ReplaceAll (descriptorOf c) "/" "."))
 
 (go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Method)} m]
-  (aget (.-members (annotations (.-clazz m))) (+ "M " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m))))))
+  (memberAnnotations (.-clazz m) (+ "M " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m))))))
 (go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Constructor)} k]
-  (aget (.-members (annotations (.-clazz k))) (+ "C " (subslice (methodKey "" (.-params k) nil) 1))))
+  (memberAnnotations (.-clazz k) (+ "C " (subslice (methodKey "" (.-params k) nil) 1))))
 (go/method declaredAnnotationList ^{:tag (slice any)} [^{:tag (* Field)} f]
-  (aget (.-members (annotations (.-clazz f))) (+ "F " (.-Name (.-info f)))))
+  (memberAnnotations (.-clazz f) (+ "F " (.-Name (.-info f)))))
 
 (go/method Is_AnnotatedElement [^{:tag (* AccessibleObject)} a])
 
@@ -987,13 +1050,13 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
   "GetParameterAnnotations__Annotation2 is Method.getParameterAnnotations.\n"
   ^{:tag (* RefArray)} [^{:tag (* Method)} m]
   (parameterAnnotations
-    (aget (.-params (annotations (.-clazz m))) (+ "P " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m)))))
+    (paramAnnotations (.-clazz m) (+ "P " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m)))))
     (len (.-params m))))
 (go/method GetParameterAnnotations__Annotation2
   "GetParameterAnnotations__Annotation2 is Constructor.getParameterAnnotations.\n"
   ^{:tag (* RefArray)} [^{:tag (* Constructor)} k]
   (parameterAnnotations
-    (aget (.-params (annotations (.-clazz k))) (+ "P " (methodKey "<init>" (.-params k) nil)))
+    (paramAnnotations (.-clazz k) (+ "P " (methodKey "<init>" (.-params k) nil)))
     (len (.-params k))))
 
 (go/method GetDefaultValue__O
@@ -1001,6 +1064,10 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
   ^any [^{:tag (* Method)} m]
   (when (or (!= (len (.-params m)) 0) (not (.IsAnnotation__Z (.-clazz m))))
     (return nil))
+  ;; a class defined from bytes: its AnnotationDefault parsed by AnnotationParser (SetAnnotationSource)
+  (let [(values sv ok) (.Load annotationSources (.-info (.-clazz m)))]
+    (when ok
+      (return ((assert (func [string] [any]) sv) (+ "D " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m))))))))
   (let [(values v ok) (aget (.-vals (annotationDefaults (.-clazz m))) (.-Name (.-info m)))]
     (when (not ok) (return nil))
     (cloneMember v)))

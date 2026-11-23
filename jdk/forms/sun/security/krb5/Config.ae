@@ -1,0 +1,840 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/Config.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5)
+
+(import '(java.io File IOException)
+        '(java.net InetAddress UnknownHostException)
+        '(java.nio.file Files Path Paths)
+        '(java.util ArrayDeque
+                    ArrayList
+                    Arrays
+                    Deque
+                    HashMap
+                    HashSet
+                    Hashtable
+                    List
+                    Locale
+                    Map
+                    Set
+                    StringTokenizer
+                    Vector)
+        '(java.util.function Consumer)
+        '(java.util.regex Pattern)
+        '(java.util.stream Stream)
+        '(jdk.internal.util OperatingSystem)
+        '(sun.net.dns ResolverConfiguration)
+        '(sun.security.krb5.internal Krb5)
+        '(sun.security.krb5.internal.crypto EType)
+        '(sun.security.util Debug SecurityProperties))
+
+(defclass ^:public Config
+  (field ^:public ^:static ^:final ^boolean DISABLE_REFERRALS)
+
+  (field ^:public ^:static ^:final ^int MAX_REFERRALS)
+
+  (field ^:private ^:static ^:final ^int MAX_INCLUDE_FILE 100)
+
+  (static-initializer
+    (let [disableReferralsProp (SecurityProperties/getOverridableProperty
+                                 "sun.security.krb5.disableReferrals")]
+      (if (some? disableReferralsProp)
+          (set! DISABLE_REFERRALS (.equalsIgnoreCase "true" disableReferralsProp))
+          (set! DISABLE_REFERRALS false))
+      (let [^:mutable ^int maxReferralsValue 5
+            maxReferralsProp (SecurityProperties/getOverridableProperty
+                               "sun.security.krb5.maxReferrals")]
+        (try
+          (set! maxReferralsValue (Integer/parseInt maxReferralsProp))
+          (catch NumberFormatException e))
+        (set! MAX_REFERRALS maxReferralsValue))))
+
+  (field ^:private ^:static ^Config singleton nil)
+
+  (field ^:private ^{:tag (Map Path (List String))} allConfs (HashMap.))
+
+  (field ^:private ^{:tag (Hashtable String Object)} stanzaTable (Hashtable.))
+
+  (field ^:private ^:static ^:final ^int BASE16_0 1)
+
+  (field ^:private ^:static ^:final ^int BASE16_1 16)
+
+  (field ^:private ^:static ^:final ^int BASE16_2 (unchecked-multiply-int 16 16))
+
+  (field ^:private ^:static ^:final ^int BASE16_3
+    (unchecked-multiply-int (unchecked-multiply-int 16 16) 16))
+
+  (field ^:private ^:final ^String defaultRealm)
+
+  (field ^:private ^:final ^String defaultKDC)
+
+  (method ^:private ^:static ^:native getWindowsDirectory ^String [^boolean isSystem])
+
+  (method ^:public ^:static ^:synchronized getInstance :throws [KrbException] ^Config []
+    (when (nil? singleton) (set! singleton (Config.)))
+    singleton)
+
+  (method ^:public ^:static refresh :throws [KrbException] ^void []
+    (locking Config (set! singleton (Config.)))
+    (KdcComm/initStatic)
+    (EType/initStatic)
+    (KrbAsReqBuilder$ReferralsState/initStatic))
+
+  (method ^:private ^:static isMacosLionOrBetter ^boolean []
+    (if (not (OperatingSystem/isMacOS))
+        false
+        (let [osVersion (System/getProperty "os.version")
+              fragments (.split osVersion "\\.")]
+          (if (< (alength fragments) 2)
+              false
+              (do
+                (try
+                  (let [majorVers (Integer/parseInt (aget fragments 0))
+                        minorVers (Integer/parseInt (aget fragments 1))]
+                    (when (> majorVers 10) (return true))
+                    (when (and (== majorVers 10) (>= minorVers 7)) (return true)))
+                  (catch NumberFormatException e))
+                false)))))
+
+  (constructor :throws [KrbException] ^:private [this]
+    (let [tmp (System/getProperty "java.security.krb5.kdc")]
+      (if (some? tmp) (set! defaultKDC (.replace tmp \: \space)) (set! defaultKDC nil))
+      (set! defaultRealm (System/getProperty "java.security.krb5.realm"))
+      (when (or (and (nil? defaultKDC) (some? defaultRealm))
+                (and (nil? defaultRealm) (some? defaultKDC)))
+        (throw
+          (KrbException.
+            "System property java.security.krb5.kdc and java.security.krb5.realm both must be set or neither must be set.")))
+      (try
+        (let [^:mutable fileName (.getJavaFileName this)]
+          (if (some? fileName)
+              (let [p (.loadConfigFile this fileName)]
+                (.parseStanzaTable this p)
+                (when (some? Krb5/DEBUG) (.println Krb5/DEBUG "Loaded from Java config")))
+              (let [^:mutable found false]
+                (when (Config/isMacosLionOrBetter)
+                  (try
+                    (set! stanzaTable (SCDynamicStoreConfig/getConfig))
+                    (when (some? Krb5/DEBUG)
+                      (.println Krb5/DEBUG "Loaded from SCDynamicStoreConfig"))
+                    (set! found true)
+                    (catch IOException ioe)))
+                (when-not found
+                  (set! fileName (.getNativeFileName this))
+                  (let [p (.loadConfigFile this fileName)]
+                    (.parseStanzaTable this p)
+                    (when (some? Krb5/DEBUG) (.println Krb5/DEBUG "Loaded from native config")))))))
+        (catch IOException ioe
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG "Exception thrown in loading config:")
+            (.printStackTrace ioe (.getPrintStream Krb5/DEBUG)))
+          (throw (KrbException. "krb5.conf loading failed"))))))
+
+  (method ^:public get ^String [this & ^String/1 keys]
+    (let [^{:tag (Vector String)} v (.getString0 this keys)]
+      (when (some? v) (cast String (.firstElement v)))))
+
+  (method ^:public getBooleanObject ^Boolean [this & ^String/1 keys]
+    (let [s (.get this keys)]
+      (when (some? s)
+        (switch (.toLowerCase s Locale/US)
+          ("yes" "true") Boolean/TRUE
+          ("no" "false") Boolean/FALSE
+          nil))))
+
+  (method ^:public getAll ^String [this & ^String/1 keys]
+    (let [^{:tag (Vector String)} v (.getString0 this keys)]
+      (when (some? v)
+        (let [sb (StringBuilder.)
+              ^:mutable first true]
+          (for-each [^:mutable ^String s v]
+            (set! s (.replaceAll s "[\\s,]+" " "))
+            (if first (do (.append sb s) (set! first false)) (.append (.append sb \space) s)))
+          (.toString sb)))))
+
+  (method ^:public exists ^boolean [this & ^String/1 keys]
+    (some? (.get0 this keys)))
+
+  (method ^:private getString0 ^{:tag (Vector String)} [this & ^String/1 keys]
+    (try
+      (cast Vector (.get0 this keys))
+      (catch ClassCastException cce (throw (IllegalArgumentException. cce)))))
+
+  (method ^:private get0 [this & ^String/1 keys]
+    (let [^:mutable ^Object current stanzaTable]
+      (try
+        (for-each [^String key keys]
+          (set! current (.get (cast Hashtable current) key))
+          (when (nil? current) (return nil)))
+        current
+        (catch ClassCastException cce (throw (IllegalArgumentException. cce))))))
+
+  (method ^:public ^:static duration :throws [KrbException] ^int [^String s]
+    (when (.isEmpty s) (throw (KrbException. "Duration cannot be empty")))
+    (if (.matches s "\\d+")
+        (Integer/parseInt s)
+        (let [^:mutable m (.matcher (Pattern/compile "(\\d+):(\\d+)(:(\\d+))?") s)]
+          (if (.matches m)
+              (let [hr (Integer/parseInt (.group m 1))
+                    min (Integer/parseInt (.group m 2))]
+                (when (>= min 60) (throw (KrbException. (java-str "Illegal duration format " s))))
+                (let [^:mutable result (unchecked-add-int
+                                         (unchecked-multiply-int hr 3600)
+                                         (unchecked-multiply-int min 60))]
+                  (when (some? (.group m 4))
+                    (let [sec (Integer/parseInt (.group m 4))]
+                      (when (>= sec 60)
+                        (throw (KrbException. (java-str "Illegal duration format " s))))
+                      (set! result (unchecked-add-int result sec))))
+                  result))
+              (do
+                (set! m
+                      (.matcher (Pattern/compile
+                                  "((\\d+)d)?\\s*((\\d+)h)?\\s*((\\d+)m)?\\s*((\\d+)s)?"
+                                  Pattern/CASE_INSENSITIVE)
+                                s))
+                (if (.matches m)
+                    (let [^:mutable ^int result 0]
+                      (when (some? (.group m 2))
+                        (set! result
+                              (unchecked-add-int
+                                result
+                                (unchecked-multiply-int 86400 (Integer/parseInt (.group m 2))))))
+                      (when (some? (.group m 4))
+                        (set! result
+                              (unchecked-add-int
+                                result
+                                (unchecked-multiply-int 3600 (Integer/parseInt (.group m 4))))))
+                      (when (some? (.group m 6))
+                        (set! result
+                              (unchecked-add-int
+                                result
+                                (unchecked-multiply-int 60 (Integer/parseInt (.group m 6))))))
+                      (when (some? (.group m 8))
+                        (set! result (unchecked-add-int result (Integer/parseInt (.group m 8)))))
+                      result)
+                    (throw (KrbException. (java-str "Illegal duration format " s)))))))))
+
+  (method ^:public getIntValue ^int [this & ^String/1 keys]
+    (let [result (.get this keys)
+          ^:mutable value Integer/MIN_VALUE]
+      (when (some? result)
+        (try
+          (set! value (.parseIntValue this result))
+          (catch NumberFormatException e
+            (when (some? Krb5/DEBUG)
+              (.println Krb5/DEBUG
+                        (java-str "Exception in getting value of "
+                                  (Arrays/toString keys)
+                                  ": "
+                                  (.getMessage e)))
+              (.println Krb5/DEBUG (java-str "Setting " (Arrays/toString keys) " to minimum value")))
+            (set! value Integer/MIN_VALUE))))
+      value))
+
+  (method ^:private parseIntValue :throws [NumberFormatException] ^int [this ^String input]
+    (let [^:mutable ^int value 0]
+      (if (.startsWith input "+")
+          (let [temp (.substring input 1)] (Integer/parseInt temp))
+          (do
+            (if (.startsWith input "0x")
+                (let [temp (.substring input 2)
+                      chars (.toCharArray temp)]
+                  (if (> (alength chars) 8)
+                      (throw (NumberFormatException.))
+                      (loop [^int i 0]
+                        (when (< i (alength chars))
+                          (let [index (unchecked-subtract-int
+                                        (unchecked-subtract-int (alength chars) i)
+                                        1)]
+                            (switch (aget chars i)
+                              \0
+                                (do
+                                  (set! value (unchecked-add-int value 0))
+                                  (recur (unchecked-inc-int i)))
+                              \1
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 1 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \2
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 2 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \3
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 3 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \4
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 4 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \5
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 5 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \6
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 6 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \7
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 7 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \8
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 8 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              \9
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 9 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\a \A)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 10 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\b \B)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 11 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\c \C)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 12 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\d \D)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 13 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\e \E)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 14 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (\f \F)
+                                (do
+                                  (set! value
+                                        (unchecked-add-int
+                                          value
+                                          (unchecked-multiply-int 15 (.getBase this index))))
+                                  (recur (unchecked-inc-int i)))
+                              (throw (NumberFormatException. "Invalid numerical format")))))))
+                  (when (< value 0) (throw (NumberFormatException. "Data overflow."))))
+                (set! value (Integer/parseInt input)))
+            value))))
+
+  (method ^:private getBase ^int [this ^int i]
+    (let [^:mutable ^int result 16]
+      (switch i
+        0 (set! result BASE16_0)
+        1 (set! result BASE16_1)
+        2 (set! result BASE16_2)
+        3 (set! result BASE16_3)
+        (loop [^int j 1]
+          (when (< j i)
+            (set! result (unchecked-multiply-int result 16))
+            (recur (unchecked-inc-int j)))))
+      result))
+
+  (method ^:private readConfigFileLines :throws [KrbException IOException] ^void [this ^Path file
+                                                                                  ^{:tag (Set Path)} dups]
+    (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "Loading krb5 profile at " file)))
+    (when-not (.isAbsolute file) (throw (KrbException. "Profile path not absolute")))
+    (when (> (.size allConfs) MAX_INCLUDE_FILE) (throw (KrbException. "Too many include files")))
+    (when-not (.add dups file) (throw (KrbException. "Recursive include")))
+    (try
+      (when-not (.containsKey allConfs file)
+        (let [^{:tag (List String)} lines (Files/readAllLines file)
+              ^{:tag (List String)} content (ArrayList.)]
+          (.put allConfs file content)
+          (let [^:mutable inSections false]
+            (for-each [^:mutable ^String line lines]
+              (set! line (.trim line))
+              (when-not (or (or (.isEmpty line) (.startsWith line "#")) (.startsWith line ";"))
+                (cond
+                  (.startsWith line "includedir ")
+                    (let [dir (Paths/get (.trim (.substring line (.length "includedir ")))
+                                         (new String/1 []))]
+                      (with-resources [^{:tag (Stream Path)} files (Files/list dir)]
+                        (for-each [^Path p (.toList (.sorted files))]
+                          (when-not (Files/isDirectory p)
+                            (let [name (.toString (.getFileName p))]
+                              (when (or (.matches name "[a-zA-Z0-9_-]+")
+                                        (and (not (.startsWith name ".")) (.endsWith name ".conf")))
+                                (.readConfigFileLines this p dups)
+                                (.add content (java-str "#include " p))))))))
+                  (.startsWith line "include ")
+                    (let [p (Paths/get (.trim (.substring line (.length "include ")))
+                                       (new String/1 []))]
+                      (.add content (java-str "#include " p))
+                      (.readConfigFileLines this p dups))
+                  (not inSections)
+                    (cond
+                      (== (.charAt line 0) \[) (do (set! inSections true) (.add content line))
+                      (some? Krb5/DEBUG)
+                        (.println Krb5/DEBUG (java-str "Line not in any section: " line)))
+                  :else (.add content line)))))))
+      (finally (.remove dups file))))
+
+  (method ^:private loadConfigFile :throws [IOException KrbException] ^Path [this
+                                                                             ^:final ^String fileName]
+    (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "Loading config file from " fileName)))
+    (let [^{:tag (Set Path)} dupsCheck (HashSet.)
+          fullp (.toAbsolutePath (Paths/get fileName (new String/1 [])))]
+      (when-not (not (Files/exists fullp)) (.readConfigFileLines this fullp dupsCheck))
+      fullp))
+
+  (method ^:private ^:static normalize :throws [KrbException] ^{:tag (List String)} [^{:tag (List String)} raw]
+    (let [^{:tag (List String)} result (ArrayList.)
+          ^{:tag (List String)} unwritten (ArrayList.)
+          ^:mutable ^String previous nil]
+      (for-each [^String line raw]
+        (cond
+          (.startsWith line "#") (if (nil? previous) (.add result line) (.add unwritten line))
+          (.startsWith line "[")
+            (do
+              (when-not (.endsWith line "]")
+                (throw (KrbException. (java-str "Illegal config content:" line))))
+              (when (some? previous)
+                (.add result previous)
+                (.forEach unwritten (method-ref Consumer [String] result List/.add))
+                (.clear unwritten)
+                (.add result "}"))
+              (let [title (.trim (.substring line 1 (unchecked-subtract-int (.length line) 1)))]
+                (when (.isEmpty title)
+                  (throw (KrbException. (java-str "Illegal config content:" line))))
+                (set! previous (java-str title " = {"))))
+          (.startsWith line "{")
+            (do
+              (when (nil? previous)
+                (throw (KrbException. "Config file should not start with \"{\"")))
+              (set! previous (java-str previous " {"))
+              (when (> (.length line) 1)
+                (.add result previous)
+                (.forEach unwritten (method-ref Consumer [String] result List/.add))
+                (.clear unwritten)
+                (set! previous (.trim (.substring line 1)))))
+          :else
+            (do
+              (when (nil? previous)
+                (throw (KrbException. "Config file must starts with a section")))
+              (.add result previous)
+              (.forEach unwritten (method-ref Consumer [String] result List/.add))
+              (.clear unwritten)
+              (set! previous line))))
+      (when (some? previous)
+        (.add result previous)
+        (.forEach unwritten (method-ref Consumer [String] result List/.add))
+        (.clear unwritten)
+        (.add result "}"))
+      result))
+
+  (method ^:private parseStanzaTable :throws [KrbException] ^void [this ^Path entry]
+    (let [^:mutable ^{:tag (Hashtable String Object)} current stanzaTable
+          ^{:tag (Deque (Hashtable String Object))} stack (ArrayDeque.)
+          ^:mutable ^{:tag (List String)} v (cast List (.get allConfs entry))]
+      (when (some? v)
+        (set! v (Config/normalize v))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG (java-str ">>> Begin Kerberos config at " entry))
+          (.forEach v (method-ref Consumer [String] Krb5/DEBUG Debug/.println))
+          (.println Krb5/DEBUG (java-str ">>> End Kerberos config at " entry)))
+        (for-each [^String line v]
+          (cond
+            (.startsWith line "#include ")
+              (.parseStanzaTable this (Path/of (.substring line 9) (new String/1 [])))
+            (.equals line "}")
+              (do
+                (when (.isEmpty stack) (throw (KrbException. "Unmatched close brace")))
+                (set! current (cast Hashtable (.pop stack))))
+            :else
+              (let [pos (.indexOf line \=)]
+                (when (< pos 0) (throw (KrbException. (java-str "Illegal config content:" line))))
+                (let [^:mutable key (.trim (.substring line 0 pos))
+                      value (Config/unquote (.substring line (unchecked-add-int pos 1)))]
+                  (cond
+                    (.equals value "{")
+                      (let [^:mutable ^{:tag (Hashtable String Object)} subTable nil]
+                        (when (identical? current stanzaTable)
+                          (set! key (.toLowerCase key Locale/US)))
+                        (if (.containsKey current key)
+                            (let [obj (.get current key)]
+                              (if (instance? Hashtable obj)
+                                  (set! subTable (cast Hashtable obj))
+                                  (set! subTable (Hashtable.))))
+                            (do (set! subTable (Hashtable.)) (.put current key subTable)))
+                        (.push stack current)
+                        (set! current subTable))
+                    (.containsKey current key)
+                      (let [obj (.get current key)]
+                        (when (instance? Vector obj) (.add (cast Vector obj) value)))
+                    :else
+                      (let [^{:tag (Vector String)} values (Vector.)]
+                        (.add values value)
+                        (.put current key values)))))))
+        (when-not (identical? current stanzaTable) (throw (KrbException. "Not closed"))))))
+
+  (method ^:private getJavaFileName ^String [this]
+    (let [^:mutable name (System/getProperty "java.security.krb5.conf")]
+      (when (nil? name)
+        (set! name
+              (java-str (System/getProperty "java.home")
+                        File/separator
+                        "conf"
+                        File/separator
+                        "security"
+                        File/separator
+                        "krb5.conf"))
+        (when-not (.fileExists this name) (set! name nil)))
+      (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "Java config name: " name)))
+      name))
+
+  (method ^:private getNativeFileName ^String [this]
+    (let [^:mutable ^String name nil]
+      (cond
+        (OperatingSystem/isWindows)
+          (do
+            (try (Credentials/ensureLoaded) (catch Exception e))
+            (when Credentials/alreadyLoaded
+              (let [^:mutable path (Config/getWindowsDirectory false)]
+                (when (some? path)
+                  (if (.endsWith path "\\")
+                      (set! path (java-str path "krb5.ini"))
+                      (set! path (java-str path "\\krb5.ini")))
+                  (when (.fileExists this path) (set! name path)))
+                (when (nil? name)
+                  (set! path (Config/getWindowsDirectory true))
+                  (when (some? path)
+                    (if (.endsWith path "\\")
+                        (set! path (java-str path "krb5.ini"))
+                        (set! path (java-str path "\\krb5.ini")))
+                    (set! name path)))))
+            (when (nil? name) (set! name "c:\\winnt\\krb5.ini")))
+        (OperatingSystem/isMacOS) (set! name (.findMacosConfigFile this))
+        :else (set! name "/etc/krb5.conf"))
+      (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "Native config name: " name)))
+      name))
+
+  (method ^:private findMacosConfigFile ^String [this]
+    (let [userHome (System/getProperty "user.home")
+          ^:const PREF_FILE "/Library/Preferences/edu.mit.Kerberos"
+          userPrefs (java-str userHome PREF_FILE)]
+      (cond
+        (.fileExists this userPrefs) userPrefs
+        (.fileExists this PREF_FILE) PREF_FILE
+        :else "/etc/krb5.conf")))
+
+  (method ^:private ^:static unquote ^String [^:mutable ^String s]
+    (set! s (.trim s))
+    (when (and (>= (.length s) 2)
+               (or (and (== (.charAt s 0) \")
+                        (== (.charAt s (unchecked-subtract-int (.length s) 1)) \"))
+                   (and (== (.charAt s 0) \')
+                        (== (.charAt s (unchecked-subtract-int (.length s) 1)) \'))))
+      (set! s (.trim (.substring s 1 (unchecked-subtract-int (.length s) 1)))))
+    s)
+
+  (method ^:public listTable ^void [this] (.println System/out this))
+
+  (method ^:public defaultEtype :throws [KrbException] ^int/1 [this ^String configName]
+    (let [^:mutable ^String default_enctypes nil]
+      (set! default_enctypes (.get this "libdefaults" configName))
+      (when (and (nil? default_enctypes) (not (.equals configName "permitted_enctypes")))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG "Getting permitted_enctypes from libdefaults"))
+        (set! default_enctypes (.get this "libdefaults" "permitted_enctypes")))
+      (let [^:mutable ^int/1 etype nil]
+        (if (nil? default_enctypes)
+            (do
+              (when (some? Krb5/DEBUG)
+                (.println
+                  Krb5/DEBUG
+                  (java-str
+                    "default_enctypes were null, using builtin default etypes for configuration "
+                    configName)))
+              (set! etype (EType/getBuiltInDefaults)))
+            (do
+              (when (some? Krb5/DEBUG)
+                (.println Krb5/DEBUG (java-str "default_enctypes:" default_enctypes)))
+              (let [^:mutable delim " "
+                    ^:mutable ^StringTokenizer st nil]
+                (loop [^int j 0]
+                  (if (< j (.length default_enctypes))
+                      (if (.equals (.substring default_enctypes j (unchecked-add-int j 1)) ",")
+                          (set! delim ",")
+                          (recur (unchecked-inc-int j)))
+                      nil))
+                (set! st (StringTokenizer. default_enctypes delim))
+                (let [len (.countTokens st)
+                      ^{:tag (ArrayList Integer)} ls (ArrayList. len)
+                      ^:mutable ^int type 0]
+                  (loop [^int i 0]
+                    (when (< i len)
+                      (set! type (Config/getType (.nextToken st)))
+                      (if (and (not (== type -1)) (EType/isSupported type))
+                          (do (.add ls type) (recur (unchecked-inc-int i)))
+                          (recur (unchecked-inc-int i)))))
+                  (if (.isEmpty ls)
+                      (throw (KrbException.
+                               (java-str
+                                 "out of "
+                                 len
+                                 " default etypes no supported etypes found for configuration "
+                                 configName)))
+                      (do
+                        (set! etype (new int/1 (.size ls)))
+                        (loop [^int i 0]
+                          (when (< i (alength etype))
+                            (aset etype i (.intValue (cast Integer (.get ls i))))
+                            (recur (unchecked-inc-int i))))))))))
+        (when (some? Krb5/DEBUG)
+          (let [^:mutable s (java-str "default etypes for " configName ":")]
+            (loop [^int i 0]
+              (when (< i (alength etype))
+                (set! s (java-str s (java-str " " (aget etype i))))
+                (recur (unchecked-inc-int i))))
+            (set! s (java-str s "."))
+            (.println Krb5/DEBUG s)))
+        etype)))
+
+  (method ^:public ^:static getType ^int [^String input]
+    (let [^:mutable ^int result -1]
+      (if (nil? input)
+          result
+          (do
+            (cond
+              (or (.startsWith input "d") (.startsWith input "D"))
+                (cond
+                  (.equalsIgnoreCase input "des-cbc-crc")
+                    (set! result EncryptedData/ETYPE_DES_CBC_CRC)
+                  (.equalsIgnoreCase input "des-cbc-md5")
+                    (set! result EncryptedData/ETYPE_DES_CBC_MD5)
+                  (.equalsIgnoreCase input "des-mac") (set! result Checksum/CKSUMTYPE_DES_MAC)
+                  (.equalsIgnoreCase input "des-mac-k") (set! result Checksum/CKSUMTYPE_DES_MAC_K)
+                  (.equalsIgnoreCase input "des-cbc-md4")
+                    (set! result EncryptedData/ETYPE_DES_CBC_MD4)
+                  (or (or (or (.equalsIgnoreCase input "des3-cbc-sha1")
+                              (.equalsIgnoreCase input "des3-hmac-sha1"))
+                          (.equalsIgnoreCase input "des3-cbc-sha1-kd"))
+                      (.equalsIgnoreCase input "des3-cbc-hmac-sha1-kd"))
+                    (set! result EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD))
+              (or (.startsWith input "a") (.startsWith input "A"))
+                (cond
+                  (or (or (.equalsIgnoreCase input "aes128-cts")
+                          (.equalsIgnoreCase input "aes128-sha1"))
+                      (.equalsIgnoreCase input "aes128-cts-hmac-sha1-96"))
+                    (set! result EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96)
+                  (or (or (.equalsIgnoreCase input "aes256-cts")
+                          (.equalsIgnoreCase input "aes256-sha1"))
+                      (.equalsIgnoreCase input "aes256-cts-hmac-sha1-96"))
+                    (set! result EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96)
+                  (or (.equalsIgnoreCase input "aes128-sha2")
+                      (.equalsIgnoreCase input "aes128-cts-hmac-sha256-128"))
+                    (set! result EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128)
+                  (or (.equalsIgnoreCase input "aes256-sha2")
+                      (.equalsIgnoreCase input "aes256-cts-hmac-sha384-192"))
+                    (set! result EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192)
+                  (or (.equalsIgnoreCase input "arcfour-hmac")
+                      (.equalsIgnoreCase input "arcfour-hmac-md5"))
+                    (set! result EncryptedData/ETYPE_ARCFOUR_HMAC))
+              (.equalsIgnoreCase input "rc4-hmac") (set! result EncryptedData/ETYPE_ARCFOUR_HMAC)
+              (.equalsIgnoreCase input "CRC32") (set! result Checksum/CKSUMTYPE_CRC32)
+              (or (.startsWith input "r") (.startsWith input "R"))
+                (cond
+                  (.equalsIgnoreCase input "rsa-md5") (set! result Checksum/CKSUMTYPE_RSA_MD5)
+                  (.equalsIgnoreCase input "rsa-md5-des")
+                    (set! result Checksum/CKSUMTYPE_RSA_MD5_DES))
+              (.equalsIgnoreCase input "hmac-sha1-des3-kd")
+                (set! result Checksum/CKSUMTYPE_HMAC_SHA1_DES3_KD)
+              (.equalsIgnoreCase input "hmac-sha1-96-aes128")
+                (set! result Checksum/CKSUMTYPE_HMAC_SHA1_96_AES128)
+              (.equalsIgnoreCase input "hmac-sha1-96-aes256")
+                (set! result Checksum/CKSUMTYPE_HMAC_SHA1_96_AES256)
+              (.equalsIgnoreCase input "hmac-sha256-128-aes128")
+                (set! result Checksum/CKSUMTYPE_HMAC_SHA256_128_AES128)
+              (.equalsIgnoreCase input "hmac-sha384-192-aes256")
+                (set! result Checksum/CKSUMTYPE_HMAC_SHA384_192_AES256)
+              (or (or (.equalsIgnoreCase input "hmac-md5-rc4")
+                      (.equalsIgnoreCase input "hmac-md5-arcfour"))
+                  (.equalsIgnoreCase input "hmac-md5-enc"))
+                (set! result Checksum/CKSUMTYPE_HMAC_MD5_ARCFOUR)
+              (.equalsIgnoreCase input "NULL") (set! result EncryptedData/ETYPE_NULL))
+            result))))
+
+  (method ^:public resetDefaultRealm ^void [this ^String realm]
+    (when (some? Krb5/DEBUG)
+      (.println Krb5/DEBUG (java-str ">>> Config try resetting default kdc " realm))))
+
+  (method ^:public useAddresses ^boolean [this]
+    (or (identical? (.getBooleanObject this "libdefaults" "no_addresses") Boolean/FALSE)
+        (identical? (.getBooleanObject this "libdefaults" "noaddresses") Boolean/FALSE)))
+
+  (method ^:private useDNS ^boolean [this ^String name ^boolean defaultValue]
+    (let [^:mutable value (.getBooleanObject this "libdefaults" name)]
+      (if (some? value)
+          (.booleanValue value)
+          (do
+            (set! value (.getBooleanObject this "libdefaults" "dns_fallback"))
+            (if (some? value) (.booleanValue value) defaultValue)))))
+
+  (method ^:private useDNS_KDC ^boolean [this]
+    (.useDNS this "dns_lookup_kdc" true))
+
+  (method ^:private useDNS_Realm ^boolean [this]
+    (.useDNS this "dns_lookup_realm" false))
+
+  (method ^:public getDefaultRealm :throws [KrbException] ^String [this]
+    (if (some? defaultRealm)
+        defaultRealm
+        (let [^:mutable ^Exception cause nil
+              ^:mutable realm (.get this "libdefaults" "default_realm")]
+          (when (and (nil? realm) (.useDNS_Realm this))
+            (try (set! realm (.getRealmFromDNS this)) (catch KrbException ke (set! cause ke))))
+          (when (nil? realm)
+            (when (OperatingSystem/isWindows) (set! realm (System/getenv "USERDNSDOMAIN"))))
+          (when (nil? realm)
+            (let [ke (KrbException. "Cannot locate default realm")]
+              (when (some? cause) (.initCause ke cause))
+              (throw ke)))
+          realm)))
+
+  (method ^:public getKDCList :throws [KrbException] ^String [this ^:mutable ^String realm]
+    (when (nil? realm) (set! realm (.getDefaultRealm this)))
+    (if (.equalsIgnoreCase realm defaultRealm)
+        defaultKDC
+        (let [^:mutable ^Exception cause nil
+              ^:mutable kdcs (.getAll this "realms" realm "kdc")]
+          (when (and (nil? kdcs) (.useDNS_KDC this))
+            (try (set! kdcs (.getKDCFromDNS this realm)) (catch KrbException ke (set! cause ke))))
+          (when (nil? kdcs)
+            (when (OperatingSystem/isWindows)
+              (let [^:mutable logonServer (System/getenv "LOGONSERVER")]
+                (when (and (some? logonServer) (.startsWith logonServer "\\\\"))
+                  (set! logonServer (.substring logonServer 2)))
+                (set! kdcs logonServer))))
+          (when (nil? kdcs)
+            (when (some? defaultKDC) (return defaultKDC))
+            (let [ke (KrbException. (java-str "Cannot locate KDC for " realm))]
+              (when (some? cause) (.initCause ke cause))
+              (throw ke)))
+          kdcs)))
+
+  (method ^:private getRealmFromDNS :throws [KrbException] ^String [this]
+    (let [^:mutable ^String realm nil
+          ^:mutable ^String hostName nil]
+      (try
+        (set! hostName (.getCanonicalHostName (InetAddress/getLocalHost)))
+        (catch UnknownHostException e
+          (let [ke (KrbException. Krb5/KRB_ERR_GENERIC
+                                  (java-str "Unable to locate Kerberos realm: " (.getMessage e)))]
+            (.initCause ke e)
+            (throw ke))))
+      (let [mapRealm (PrincipalName/mapHostToRealm hostName)]
+        (if (nil? mapRealm)
+            (let [^{:tag (List String)} srchlist (.searchlist (ResolverConfiguration/open))]
+              (for-each [^String domain srchlist]
+                (set! realm (Config/checkRealm domain))
+                (when (some? realm) (break))))
+            (set! realm (Config/checkRealm mapRealm)))
+        (when (nil? realm)
+          (throw (KrbException. Krb5/KRB_ERR_GENERIC "Unable to locate Kerberos realm")))
+        realm)))
+
+  (method ^:private ^:static checkRealm ^String [^String mapRealm]
+    (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "getRealmFromDNS: trying " mapRealm)))
+    (let [^:mutable ^String/1 records nil
+          ^:mutable newRealm mapRealm]
+      (while (and (nil? records) (some? newRealm))
+        (set! records (KrbServiceLocator/getKerberosService newRealm))
+        (set! newRealm (Realm/parseRealmComponent newRealm)))
+      (when (some? records)
+        (loop [^int i 0]
+          (if (< i (alength records))
+              (if (.equalsIgnoreCase (aget records i) mapRealm)
+                  (return (aget records i))
+                  (recur (unchecked-inc-int i)))
+              nil)))
+      nil))
+
+  (method ^:private getKDCFromDNS :throws [KrbException] ^String [this ^String realm]
+    (let [^:mutable kdcs ""
+          ^:mutable ^String/1 srvs nil]
+      (when (some? Krb5/DEBUG) (.println Krb5/DEBUG "getKDCFromDNS using UDP"))
+      (set! srvs (KrbServiceLocator/getKerberosService realm "_udp"))
+      (when (nil? srvs)
+        (when (some? Krb5/DEBUG) (.println Krb5/DEBUG "getKDCFromDNS using TCP"))
+        (set! srvs (KrbServiceLocator/getKerberosService realm "_tcp")))
+      (when (nil? srvs)
+        (throw (KrbException. Krb5/KRB_ERR_GENERIC
+                              (java-str "Unable to locate KDC for realm " realm))))
+      (when-not (== (alength srvs) 0)
+        (loop [^int i 0]
+          (when (< i (alength srvs))
+            (set! kdcs (java-str kdcs (java-str (.trim (aget srvs i)) " ")))
+            (recur (unchecked-inc-int i))))
+        (set! kdcs (.trim kdcs))
+        (when-not (.equals kdcs "") kdcs))))
+
+  (method ^:private fileExists ^boolean [this ^String name]
+    (.exists (File. name)))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuffer.)] (Config/toStringInternal "" stanzaTable sb) (.toString sb)))
+
+  (method ^:private ^:static toStringInternal ^void [^String prefix obj ^StringBuffer sb]
+    (cond
+      (instance? String obj) (.append (.append sb obj) \newline)
+      (instance? Hashtable obj)
+        (let [^{:tag (Hashtable ? ?)} tab (cast Hashtable obj)]
+          (.append sb "{\n")
+          (for-each [o (.keySet tab)]
+            (.append (.append (.append (.append sb prefix) "    ") o) " = ")
+            (Config/toStringInternal (java-str prefix "    ") (.get tab o) sb))
+          (.append (.append sb prefix) "}\n"))
+      (instance? Vector obj)
+        (let [^{:tag (Vector ?)} v (cast Vector obj)]
+          (.append sb "[")
+          (let [^:mutable first true]
+            (for-each [o (.toArray v)]
+              (when-not first (.append sb ","))
+              (.append sb o)
+              (set! first false))
+            (.append sb "]\n"))))))

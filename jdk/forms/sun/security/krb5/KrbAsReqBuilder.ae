@@ -1,0 +1,279 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/KrbAsReqBuilder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5)
+
+(import '(java.io IOException)
+        '(java.util Arrays)
+        '(javax.security.auth.kerberos KeyTab)
+        '(sun.security.jgss.krb5 Krb5Util)
+        '(sun.security.krb5.internal HostAddresses KDCOptions KerberosTime Krb5 PAData)
+        '(sun.security.krb5.internal.crypto EType))
+
+(defclass ^:public ^:final KrbAsReqBuilder
+  (field ^:private ^KDCOptions options)
+
+  (field ^:private ^PrincipalName cname)
+
+  (field ^:private ^PrincipalName refCname)
+
+  (field ^:private ^PrincipalName sname)
+
+  (field ^:private ^KerberosTime from)
+
+  (field ^:private ^KerberosTime till)
+
+  (field ^:private ^KerberosTime rtime)
+
+  (field ^:private ^HostAddresses addresses)
+
+  (field ^:private ^:final ^char/1 password)
+
+  (field ^:private ^:final ^KeyTab ktab)
+
+  (field ^:private ^PAData/1 paList)
+
+  (field ^:private ^KrbAsReq req)
+
+  (field ^:private ^KrbAsRep rep)
+
+  (defclass ^:private ^:static ^:enum State
+    (constants INIT REQ_OK DESTROYED))
+
+  (field ^:private ^State state)
+
+  (method ^:private init :throws [KrbException] ^void [this ^PrincipalName cname]
+    (set! (.-cname this) cname)
+    (set! (.-refCname this) cname)
+    (set! state State/INIT))
+
+  (constructor :throws [KrbException] ^:public [this ^PrincipalName cname ^KeyTab ktab]
+    (.init this cname)
+    (set! (.-ktab this) ktab)
+    (set! (.-password this) nil))
+
+  (constructor :throws [KrbException] ^:public [this ^PrincipalName cname ^char/1 pass]
+    (.init this cname)
+    (set! (.-password this) (.clone pass))
+    (set! (.-ktab this) nil))
+
+  (method ^:public getKeys :throws [KrbException] ^EncryptionKey/1 [this ^boolean isInitiator]
+    (.checkState this ^State (if isInitiator State/REQ_OK State/INIT) "Cannot get keys")
+    (if (some? password)
+        (let [eTypes (EType/getDefaults "default_tkt_enctypes")
+              result (new EncryptionKey/1 (alength eTypes))
+              ^:mutable ^String salt nil]
+          (try
+            (loop [^int i 0]
+              (when (< i (alength eTypes))
+                (let [snp (PAData/getSaltAndParams (aget eTypes i) paList)]
+                  (if (some? snp)
+                      (do
+                        (when (and (not (== (aget eTypes i) EncryptedData/ETYPE_ARCFOUR_HMAC))
+                                   (some? (.-salt snp)))
+                          (set! salt (.-salt snp)))
+                        (aset result
+                              i
+                              (EncryptionKey/acquireSecretKey cname password (aget eTypes i) snp))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i))))))
+            (when (nil? salt) (set! salt (.getSalt cname)))
+            (loop [^int i 0]
+              (if (< i (alength eTypes))
+                  (if (nil? (aget result i))
+                      (do
+                        (aset result
+                              i
+                              (EncryptionKey/acquireSecretKey password salt (aget eTypes i) nil))
+                        (recur (unchecked-inc-int i)))
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (catch IOException ioe
+              (let [ke (KrbException. Krb5/ASN1_PARSE_ERROR)] (.initCause ke ioe) (throw ke))))
+          result)
+        (throw (IllegalStateException. "Required password not provided"))))
+
+  (method ^:public setOptions ^void [this ^KDCOptions options]
+    (.checkState this State/INIT "Cannot specify options")
+    (set! (.-options this) options))
+
+  (method ^:public setTill ^void [this ^KerberosTime till]
+    (.checkState this State/INIT "Cannot specify till")
+    (set! (.-till this) till))
+
+  (method ^:public setRTime ^void [this ^KerberosTime rtime]
+    (.checkState this State/INIT "Cannot specify rtime")
+    (set! (.-rtime this) rtime))
+
+  (method ^:public setTarget ^void [this ^PrincipalName sname]
+    (.checkState this State/INIT "Cannot specify target")
+    (set! (.-sname this) sname))
+
+  (method ^:public setAddresses ^void [this ^HostAddresses addresses]
+    (.checkState this State/INIT "Cannot specify addresses")
+    (set! (.-addresses this) addresses))
+
+  (method ^:private build :throws [KrbException IOException] ^KrbAsReq [this ^EncryptionKey key
+                                                                        ^ReferralsState referralsState]
+    (let [^:mutable ^PAData/1 extraPAs nil
+          ^:mutable ^int/1 eTypes nil]
+      (if (some? password)
+          (set! eTypes (EType/getDefaults "default_tkt_enctypes"))
+          (let [ks (Krb5Util/keysFromJavaxKeyTab ktab cname)]
+            (set! eTypes (EType/getDefaults "default_tkt_enctypes" ks))
+            (for-each [^EncryptionKey k ks] (.destroy k))))
+      (set! options (if (nil? options) (KDCOptions.) options))
+      (if (.isEnabled referralsState)
+          (do
+            (when (.sendCanonicalize referralsState) (.set options KDCOptions/CANONICALIZE true))
+            (set! extraPAs (new PAData/1 [(PAData. Krb5/PA_REQ_ENC_PA_REP (new byte/1 []))])))
+          (.set options KDCOptions/CANONICALIZE false))
+      (KrbAsReq. key options refCname sname from till rtime eTypes addresses extraPAs)))
+
+  (method ^:private resolve :throws [KrbException Asn1Exception IOException] ^KrbAsReqBuilder [this]
+    (if (some? ktab)
+        (.decryptUsingKeyTab rep ktab req cname)
+        (.decryptUsingPassword rep password req cname))
+    (when (some? (.getPA rep))
+      (if (or (nil? paList) (== (alength paList) 0))
+          (set! paList (.getPA rep))
+          (let [extraLen (alength (.getPA rep))]
+            (when (> extraLen 0)
+              (let [oldLen (alength paList)]
+                (set! paList
+                      (cast PAData/1
+                            (Arrays/copyOf paList (unchecked-add-int (alength paList) extraLen))))
+                (System/arraycopy (.getPA rep) 0 paList oldLen extraLen))))))
+    this)
+
+  (method ^:private send :throws [KrbException IOException] ^KrbAsReqBuilder [this]
+    (let [^:mutable preAuthFailedOnce false
+          ^:mutable ^KdcComm comm nil
+          ^:mutable ^EncryptionKey pakey nil
+          referralsState (ReferralsState. this)]
+      (while true
+        (when (.refreshComm referralsState) (set! comm (KdcComm. (.getRealmAsString refCname))))
+        (try
+          (set! req (.build this pakey referralsState))
+          (set! rep (KrbAsRep. (.send comm req)))
+          (return this)
+          (catch KrbException ke
+            (cond
+              (and (not preAuthFailedOnce)
+                   (or (== (.returnCode ke) Krb5/KDC_ERR_PREAUTH_FAILED)
+                       (== (.returnCode ke) Krb5/KDC_ERR_PREAUTH_REQUIRED)))
+                (do
+                  (when (some? Krb5/DEBUG)
+                    (.println Krb5/DEBUG "KrbAsReqBuilder: PREAUTH FAILED/REQ, re-send AS-REQ"))
+                  (set! preAuthFailedOnce true)
+                  (let [kerr (.getError ke)
+                        paEType (PAData/getPreferredEType
+                                  (.getPA kerr)
+                                  (aget (EType/getDefaults "default_tkt_enctypes") 0))]
+                    (if (nil? password)
+                        (let [ks (Krb5Util/keysFromJavaxKeyTab ktab cname)]
+                          (set! pakey (EncryptionKey/findKey paEType ks))
+                          (when (some? pakey) (set! pakey (cast EncryptionKey (.clone pakey))))
+                          (for-each [^EncryptionKey k ks] (.destroy k)))
+                        (set! pakey
+                              (EncryptionKey/acquireSecretKey
+                                cname
+                                password
+                                paEType
+                                (PAData/getSaltAndParams paEType (.getPA kerr)))))
+                    (set! paList (.getPA kerr))))
+              (.handleError referralsState ke) (do (set! pakey nil) (set! preAuthFailedOnce false))
+              :else (throw ke)))))))
+
+  (defclass ^:static ^:final ReferralsState
+    (field ^:private ^:static ^boolean canonicalizeConfig)
+
+    (field ^:private ^boolean enabled)
+
+    (field ^:private ^boolean sendCanonicalize)
+
+    (field ^:private ^boolean isEnterpriseCname)
+
+    (field ^:private ^int count)
+
+    (field ^:private ^boolean refreshComm)
+
+    (field ^:private ^KrbAsReqBuilder reqBuilder)
+
+    (static-initializer (ReferralsState/initStatic))
+
+    (method ^:static initStatic ^void []
+      (set! canonicalizeConfig false)
+      (try
+        (set! canonicalizeConfig
+              (identical? (.getBooleanObject (Config/getInstance) "libdefaults" "canonicalize")
+                          Boolean/TRUE))
+        (catch KrbException e
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG
+                      (java-str "Exception in getting canonicalize, using default value "
+                                (Boolean/valueOf canonicalizeConfig)
+                                ": "
+                                (.getMessage e)))))))
+
+    (constructor :throws [KrbException] [this ^KrbAsReqBuilder reqBuilder]
+      (set! (.-reqBuilder this) reqBuilder)
+      (set! sendCanonicalize canonicalizeConfig)
+      (set! isEnterpriseCname
+            (== (.getNameType (.-refCname reqBuilder)) PrincipalName/KRB_NT_ENTERPRISE))
+      (.updateStatus this)
+      (when (and (not enabled) isEnterpriseCname)
+        (throw (KrbException. "NT-ENTERPRISE principals only allowed when referrals are enabled.")))
+      (set! refreshComm true))
+
+    (method ^:private updateStatus ^void [this]
+      (set! enabled (and (not Config/DISABLE_REFERRALS) (or isEnterpriseCname sendCanonicalize))))
+
+    (method handleError :throws [RealmException] ^boolean [this ^KrbException ke]
+      (when enabled
+        (when (== (.returnCode ke) Krb5/KRB_ERR_WRONG_REALM)
+          (let [referredRealm (.getClientRealm (.getError ke))]
+            (when (and (and (some? referredRealm) (not (.isEmpty (.toString referredRealm))))
+                       (< count Config/MAX_REFERRALS))
+              (set! (.-refCname reqBuilder)
+                    (PrincipalName. (.getNameType (.-refCname reqBuilder))
+                                    (.getNameStrings (.-refCname reqBuilder))
+                                    referredRealm))
+              (set! refreshComm true)
+              (set! count (unchecked-inc-int count))
+              (return true))))
+        (when (and (< count Config/MAX_REFERRALS) sendCanonicalize)
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG
+                      "KrbAsReqBuilder: AS-REQ failed. Retrying with CANONICALIZE false."))
+          (set! sendCanonicalize false)
+          (.updateStatus this)
+          (return true)))
+      false)
+
+    (method refreshComm ^boolean [this]
+      (let [retRefreshComm refreshComm] (set! refreshComm false) retRefreshComm))
+
+    (method isEnabled ^boolean [this] enabled)
+
+    (method sendCanonicalize ^boolean [this] sendCanonicalize))
+
+  (method ^:public action :throws [KrbException Asn1Exception IOException] ^KrbAsReqBuilder [this]
+    (.checkState this State/INIT "Cannot call action")
+    (set! state State/REQ_OK)
+    (.resolve (.send this)))
+
+  (method ^:public getCreds ^Credentials [this]
+    (.checkState this State/REQ_OK "Cannot retrieve creds")
+    (.getCreds rep))
+
+  (method ^:public getCCreds ^sun.security.krb5.internal.ccache.Credentials [this]
+    (.checkState this State/REQ_OK "Cannot retrieve CCreds")
+    (.getCCreds rep))
+
+  (method ^:public destroy ^void [this]
+    (set! state State/DESTROYED)
+    (when (some? password) (Arrays/fill password (unchecked-char 0))))
+
+  (method ^:private checkState ^void [this ^State st ^String msg]
+    (when-not (identical? state st)
+      (throw (IllegalStateException. (java-str msg " at " st " state"))))))

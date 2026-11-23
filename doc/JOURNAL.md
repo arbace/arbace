@@ -19030,6 +19030,212 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
 
+## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
+
+Branch `java-design-1122` from mac/next `99b2c942a`, next `7aa328e67` merged (queue 517's three rounds). Scope: test/java/divergences.edn's
+by-design and harness-design classes at interp and compiled, :speed-hang and :speed-hang-compiled, and queue 517's leftovers
+(DECISIONs 517-1 (a), 517-2 (a), reach.ae's class literals, t05150). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-design-1122"
+lists what was built: the JVM's array limit and StringBuilder's growth limit (jrt), StackTraceElement's module constructor, ClassLoader's
+getPackage(s), findLoadedClass, parallel-capable registration and assertion status, URLClassLoader.addURL's duplicates, URLClassLoader,
+StandardMBean and FileLock extendable, a class literal rooting its class's initializer and constructors (j2g's reach.ae), and three
+world slices: java.base's XML parser (Properties' XML form), java.security.jgss's shared classes (Kerberos, GSS-API), javax.xml.datatype
+(with jdk.xml.internal.SecuritySupport moved out of javac's world); j2g's renames for their eight names the world held; java-check's
+uncaught rule taken to main's thread group (517-2 (a)); :synthetic-lambdas by design (517-1 (a)). Sources studied: jdk26u at baf63fb
+(/root/jdk26u): the slices' files, src/hotspot/share/oops/arrayOop.hpp (max_array_length), java/lang/AbstractStringBuilder.java and
+jdk/internal/util/ArraysSupport.java (newCapacity, newLength), java/lang/ClassLoader.java (ParallelLoaders, the assertion maps,
+getPackages), sun/rmi/runtime/NewThreadAction.java (the system group), jtreg's MainWrapper's rule as run.ae describes it.
+
+The world's forms were read by `bin/jrt-convert predict` (repr/java's vendoring read with context, javac's tool 8e45bec2 under
+REPR_JAVA_STALE_OK) and laid into jdk/forms write-ahead (`bin/jrt-convert verify` at the next night); jdk/sources.txt, the provenance
+counts, the module table (bin/jrt modules), jdk/provides.txt (bin/jrt provides) and jrt's manifest (bin/jrt manifest) regenerated.
+The foreign memory API's slice (jdk.internal.foreign and java.lang.foreign without the linker; Utils and AbstractMemorySegmentImpl
+derived overlays; a native segment's buffer over its block, jdk.internal.jrt.NativeArrays) waits on branch `java-design-ffm-1122`:
+three of its files (Utils, LayoutPath, AbstractLayout) read only with the whole closure as context, the convert step's chunked read
+(about 10 GiB), which the build session makes first.
+
+Not proven yet: the build (j2g's edge recorded afresh, then `bin/arbace-go --build`) and the compiled rows run in one heavy-lock
+session queued at 07:36 behind four sessions; the interp rows run on its executable after it. This checkpoint's records: :synthetic-lambdas
+(6 rows deferred -> design); reap 0 problems; crops-score --judge --strict, records-check 0 problems; Java completeness 0.9612 (next's).
+
+## 2026-11-22: java-design-1122: the first heavy session (14:00-14:45 UTC) built nothing; fixed; the second queued
+
+The session (java-design-b1's .tmp/build.sh under bin/heavy-lock, queued at 07:36, its turn at 13:54) ran:
+- the foreign memory API's forms: the convert step's chunked read of the whole closure (1,595 s) read every file of the slice but
+  three: jdk.internal.foreign's Utils and LayoutPath and layout/AbstractLayout call MethodHandles.filterValue, collectCoordinates
+  and insertCoordinates, which jrt's java.lang.invoke (overlay/jdk, F15) has not: javac's attribution errs and the converter's
+  model asserts (javac_model.ae:155). Fixed on `java-design-ffm-1122`: LayoutPath and AbstractLayout derived overlays and
+  Utils's derivation extended, each such statement a throw (test/jrt/derive.ae; the var handle combinators are not in the Go
+  build); not a reader limit.
+- candidate 4f3abed9f: `bin/j2g-edge update`'s j2g run refused duplicate Go names, three of round 1's XML parser
+  (jdk.internal.org.xml.sax's ContentHandler and Attributes beside java.net's and javax.naming.directory's, jdk.internal.util.xml.impl's
+  Pair beside java.net.http's): the names check of round 2 had looked at the new slices alone. Renamed (arbace/j2g/names.ae:
+  Sax_ContentHandler, Sax_Attributes, Xml_Pair; a96273ac5), and the session's last candidate pointed at that commit.
+- a96273ac5: the edge recorded (184 classes beyond jdk/edge.edn's; jdk/edge.edn, jdk/javac/edge.edn and its provenance's
+  :jdk-edge committed as 8986f75ac), then the build: repr/go's printer refused jrt's setPackageAssertionStatus (`(if ...)` in
+  an expression position). Fixed (956dae9c4); the changed jrt files printed and gofmt'ed by hand since (bin/repr-go print).
+  The build's gocache_trim cut the shared Go cache from 17.5 to 11.5 GB at its start (queue 517's finding 2).
+The session ended with the lock released; the second (the same script: the FFM forms first, then the candidates' edge, build and
+compiled rows; interp rows on its executable after it) is queued behind ten sessions. No row moved; records as at the checkpoint.
+
+## 2026-11-22: java-design-1122: the user's JD1-JD9 applied (journal 195fafabb's decisions)
+
+- n/a classes keyed on their rows (test/java/divergences.edn, :kind :na, each with its reason): :launcher-tests (JD1: t08310,
+  t08312-t08322, out of :jvm-tools), :hotspot-diagnostic and :hotspot-beans (JD5: their kind :na), :jit-loops (JD6: the 15
+  hotspot/jtreg/compiler tests of :speed-hang, and t03713, t03743 of :speed-hang-compiled; timeouts only), :heap-sized-output (JD2:
+  t07649, out of :memory-limit).
+- t05291 a wall-clock limit: bin/java-check's test_wall, a timeouts.txt line "NAME SECONDS wall" runs the test under SECONDS of wall
+  time and no CPU limit (limited_cpu unlimited); ThreadSafetyTest at 240 s; test/java/timeouts-test.bash checks the call, the
+  exports and the line (40 checks pass). Its rows run in the queued session (bin/java-check from the built commit).
+- t04683 and t05126 stay in :speed-hang(-compiled), deferred as jrt bugs. JD8, JD9 left as they are; JD7 by design; JD3 to the new
+  java-bytecode stream (the define-bytes rows left to it). JD4 (javac's API at the compiled level) is this stream's next.
+- crops-score found a bug the n/a classes exposed: cell-rows took a record row's second element as its result, which in Java's rows
+  ([ID NAME RESULT REASON]) is the jtreg name, so every id an :na class names counted n/a in every cell (read 0.9950, print 0.9940,
+  AOT 0.9980). row-result takes the row's first keyword after the id (else the second element, OCaml's string results); a self-test
+  case with its control (the old rule takes the passing row). No other crop's score moved.
+Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 / 88 -> 3,079 / 139 / 86 (21 n/a); completeness 0.9612
+-> 0.9651 (exact 0.965067), independence 1.0. reap, crops-score (--self-test, --judge --strict), records-check: 0 problems.
+
+## 2026-11-22: java-design-1122: JD4 (a), javac's API at the compiled level (write-ahead: its rows run in the queued session)
+
+- The user's JD4 (a): the 56 tests whose sources name javac's API (bin/java-check's tool_test rule: com.sun.tools.javac,
+  com.sun.source, javax.tools, javax.lang.model, javax.annotation.processing, java.util.spi.ToolProvider; langtools-run 42,
+  jdk-other 11, jdk-run 3) now build at the compiled level as javac's tool is built. bin/java-check's javac_tests writes
+  WORK/javac.list before java.check/shards, which puts those tests into shards of their own (marked WORK/j2g/sK/javac; a split
+  shard's halves keep the mark); compiled_shard gives such a shard's j2g run javac's world beside the tests' forms and the compiled
+  namespaces (jdk/javac/forms, overlay/jdk/javac/variants, jdk/edge.edn and jdk/javac/edge.edn: bin/arbace-go --build-java's
+  inputs) and keeps the program by key in .tmp/java-check/javac-prog/KEY (the javac world's files, AOT.key, the j2g executable,
+  the tests' forms keys), reused while the key holds; the runs get the platform property as on the tool
+  (-Djdk.internal.jrt.javac.platform, tool_exe's bin/repr-java platform-dir, now set for the compiled level too).
+- Alternatives considered: one program a test (56 j2g runs of javac's world, 28-40 GB each: hours); running the compiled level's
+  javac tests on javac's tool (that is the interp level's F6, not the compiled level); the javac world in every shard (every
+  compiled part pays javac's j2g). Chosen: the user's one program, cached by key.
+- Probe (--analyze-only, t05992 and the control t03208): javac.list holds t05992 alone; s0 = t03208, s1 = t05992 marked javac.
+  The gate's java-compiled-full declares the javac world's files as inputs; the three parts with javac tests at 45 GiB until a
+  night measures them (javac's tool build's j2g, 28.6-40.8 GB).
+- Their rows (.tmp/jd/compiled-javac.list: the 56 and the control t03208) run in the queued heavy session after the build. Today
+  at compiled: 23 :design-also-compiled, 17 :javac-api, 11 :launcher-tests (n/a), 2 :jvm-tools, 1 :classfile, 1 :classloading,
+  1 pass.
+
+## 2026-11-23: java-design-1123: the gate build's failure found (an import cycle) and fixed; FFM merged; the session queued
+
+- The failure of java-design's build at 00:53 (java-design-b1's `.tmp/build.sh`, its log in the ffm worktree's
+  `ffm-session.log`; both candidates, c8b77a3a4 with FFM and fad2ae534 without): `bin/build-go`'s "import cycle not allowed":
+  `arbace/jrt` imported `arbace/lang` from `j2g_classes.ae`. Round 2 put java.security.jgss in the world; its sun.security.jgss
+  classes are JDK packages (package jrt), but org.ietf.jgss, the GSS-API itself, was not in `arbace.j2g.names/pkg-of`'s JDK
+  prefixes, so its eight classes went to package lang as a user's (`J_org_ietf_jgss_Oid_J`) and jrt's krb5 classes referenced
+  them (lang imports cinterp, which imports jrt). Fixed in general: `pkg-of` takes `org/ietf/` as a JDK package (16211f7e8).
+  Alternative not taken: renaming the classes into jrt by the renames table (eight entries for what is a package rule).
+- Branch `java-design-1123` from `java-design-1122` (fad2ae534), mac/next (fa635f636) merged: conflicts in the journal (both
+  sides), `jdk/edge.edn` (the branch's, a superset), the provenance files (counts summed by hand: jdk/ 3,827 sources and 4,067
+  forms with FFM; javac's 824 and 915, next's less SecuritySupport), `test/reap/matrix.edn` and `test/crops/scores.edn` (next's,
+  recorded again after the rows). No `bin/jrt-convert update`: queue 520's reader change (835e66a3 -> 83a29bfb) moved no form
+  of jdk/ (JCS52 (a)'s As built), so the branch's forms read by the older reader stand; `jrt-convert verify` of the night
+  checks it.
+- `java-design-ffm-1122` (c8b77a3a4, round 3: the foreign memory API's segments, layouts and arenas, its derived overlays and
+  forms) merged (1770213dc): its build had failed on the same cycle, after j2g translated it. jrt's hand-written
+  `Utils_CheckNonNegativeArgument` stand-in retired as the branch did; `bin/jrt-convert derive --check` of the five derived
+  overlays: same.
+- j2g: `System.setProperties(Properties)` for translated code (m/j2g-static?, out.ae; b3fe74719): GetSystemProperties (t04794)
+  compiled stopped at "jrt lacks java.lang.System.setProperties"; J2g_SystemSetProperties existed for the interpreter's path.
+- Queued under the big lock (`.tmp/jd/session-1123.sh` in the java-design worktree, run in java-design-b1 detached at
+  b3fe74719): `bin/j2g-edge update` (committed there), `bin/arbace-go --gate-build` (amd64), then bin/java-check's compiled
+  level on java-design's lists (compiled1: round 1-3's rows; compiled-javac: JD4's 56 tests naming javac's API, one program
+  with javac's world) and the heavy interp row (t05445); then outside the lock the interp rows (interp1, 2 jobs,
+  `session-1123-light.sh`); then `.tmp/jd/post-1123.sh` judges and records them (partial), reap, crops-score, records-check.
+- Scope (the coordinator, 2026-11-23): the Mac (538) takes Java's read 49 and print 7 deferred rows; this stream keeps JD4 and
+  the eval/AOT rows that are not the bytecode VM's (JD3, java-bytecode). The doclint finding of the day (the tool's
+  ServiceLoader variant also replacing `stream()`, its providers as `ProviderImpl`s; `bin/jrt-convert vet --forms-add
+  jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
+  the patch in `.tmp/jd/doclint-stream-variant.patch`.
+
+## 2026-11-22: classes defined from class-file bytes (JD3): the loader, the interpreter and the verifier (java-bytecode-1122)
+
+The user's decision JD3 of 2026-11-22 (the entry above): Java classes defined from class-file bytes built in full, a
+class-file loader with a bytecode interpreter and verifier. Branch java-bytecode-1122 from mac/next 195fafabb; the
+design note doc/classes/BYTECODE-SURVEY.md (the rows, where it goes, the loader, the interpreter, the verifier, the
+stages, what it does not do; its "As built: stages 1-3").
+
+Design taken: a class defined from bytes is an interpreted class of the Java forms' interpreter (a Compiler$CF$Klass made
+through the host, Compiler$CFGo$GoHost on Go: Dyn objects, Dyn's slots, the member tables, CF$Klass.init's JLS 12.4.2,
+the shadow stack of stack traces), its methods CF$Meths whose body (BytecodeBody, a CF$Node) runs their bytecode; the
+loader, the interpreter and the verifier are Java forms in arbace/lang (Bytecode.ae, BytecodeFile.ae, BytecodeCode.ae,
+BytecodeVerifier.ae), translated into the executable and into every program, so they mix with the Java forms' classes
+and the world's through one class model. Alternatives not taken: the interpreter in jrt as Go forms (no access to CF's
+Klass, Meth and Frame: a second object model); decompiling class files into Java forms (JCS302's (b): structured control
+flow from any bytecode, and a verifier still needed); java.lang.classfile's parser and its verifier port (the class-file
+API in every program; the brief asks the verifier ported from the JVMS).
+
+Written from the JVMS (Java SE 26 edition: chapter 4's format, 4.8's format checks, 4.10.1's type checking rules,
+4.10.2's inference, chapter 5's loading, linking and resolution, chapter 6's instructions); HotSpot (openjdk/jdk26u
+src/hotspot/share/classfile/classFileParser.cpp, verifier.cpp, prims/jvm.cpp's JVM_GetMethodParameters) read for its
+messages and its failover and padding rules only, no code copied. jdk26u's Java reused as the world has it:
+sun.reflect.annotation.AnnotationParser and AnnotationType (annotations of a class defined from bytes),
+java.lang.reflect.Executable's verifyParameters rules (ported into j2g's getParameters).
+
+Built (stages 1-3, write-ahead of the rows' build; doc/classes/BYTECODE-SURVEY.md, "As built: stages 1-3"):
+- arbace/lang/BytecodeFile.ae (the parser, JVMS 4.1-4.8 with HotSpot's ClassFormatError texts), Bytecode.ae (define:
+  name, prohibited package, duplicate per loader, superclass and interfaces through the defining loader, the Klass's
+  layout, methods, vtable, publishing, enums, the attributes as jrt's data with new W records for MethodParameters,
+  BytecodeAnnotations over jdk26u's AnnotationParser, linking on CF$Klass's new linker field), BytecodeCode.ae (every
+  instruction of JVMS 6.5; field and method resolution; invokedynamic for LambdaMetafactory (metafactory,
+  altMetafactory), StringConcatFactory, ObjectMethods, SwitchBootstraps, ConstantBootstraps' constants; jsr/ret),
+  BytecodeVerifier.ae (4.10.1 type checking with the StackMapTable and the protected check, version 50 failing over to
+  4.10.2 inference, jsr/ret by modified locals).
+- jrt: go/arbace/jrt/defineclass.ae (new), classloader.ae (ClassLoader.self; loadClass by delegation; findClass in
+  ClassLoader_I), reflect.ae (getClassLoader's defining loader, forName through a user loader, JDK annotation types'
+  proxies as jrt's annotation objects), annotation.ae (SetAnnotationSource, ExceptionProxy members thrown, proxies'
+  annotation type), classdata.ae (W records, executableParameters, getDeclaringClass through the loader); manifest
+  regenerated (bin/jrt manifest: defineClass x3, findClass, resolveClass).
+- j2g: dyncf.ae's natives setAnnotationSource, setInit, setDefiningLoader; main.ae Class.describeConstable known to
+  compiled call sites, ClassDesc.ofDescriptor rooted; out.ae getParameters over W records (jdk26u's verifyParameters).
+- overlay/jdk MethodHandles.Lookup.defineClass through arbace.lang.Bytecode.define (reflectively); jdk/forms'
+  MethodHandles.ae as bin/jrt-convert predict reads it (j2g's analysis of the predicted world: 0 failures).
+- bin/bytecode-check (make bytecode-check, bytecode-record; test/bytecode): javac's programs, a version 49 class, a
+  jsr/ret class, the rows' verifier classes and 900 mutants against the JDK's results (test/bytecode/expected.edn,
+  HotSpot -Xverify:all), with a negative control.
+Proofs so far (light, no build): the Java forms interpreted at the REPL of the gate executable 92a96093a59c (.tmp/dev's
+harness): the programs' output byte for byte the JDK's; GetSimpleNameTest's twelve classes' simple names jdk26u's;
+bin/bytecode-check on that harness: all pass, control fails as it must (1,200 earlier mutants also agreed with HotSpot,
+after fixes: invokedynamic's zero bytes, max_locals vs arguments, StackMapTable format errors, exception-table offsets,
+switch padding before version 51); bin/jrt build and the jrt tests of Loader, Reflect, Proxy, Annotation, Classdata,
+Package, Manifest pass; bin/reap --record, bin/crops-score --record and --judge --strict, bin/records-check: 0 problems,
+no record changed.
+Not yet proved: the rows (one bin/arbace-go --build queued under bin/heavy-lock, .tmp/bin/build.sh, which also runs
+bin/bytecode-check and java-check interp and compiled over the 11 rows' tests and 60 regression tests of class loaders
+and type annotations, saved for --judge). Left: defineHiddenClass, defineClass(String, ByteBuffer, ...), line numbers
+in bytecode frames; NoSuchFieldError, BootstrapMethodError, ClassCircularityError, UnsupportedClassVersionError (not in
+the world: their superclasses stand for them).
+## 2026-11-23: JD3's rows built and run (build #2); JCS51's processors through the class-file loader (java-bytecode-1122)
+
+Build #2 of java-bytecode-1122 at 65c1bc58c (bin/arbace-go --build under the big lock, the build worktree
+.tmp/worktrees/java-bytecode-build; 22 GB peak, about 2 h 20 min with the queue): bin/bytecode-check on the built executable
+passes (programs, verifier cases, 900 mutants as HotSpot, the control failing). bin/java-check interp and compiled over the 11
+rows' tests and 60 regression tests (saved, not recorded: the records are taken on the train's shared build, the user's rule of
+2026-11-23): compiled, all 11 JD3 tests pass (22 rows' compiled half) and t04878, t07643, t06005 beside them, no regression;
+interp, 7 of the 11 pass with t04878 and t07643, t04712-t04715 failing on AnnotationTypeMismatchExceptionProxy.generateException
+left untranslated, and t04538 (ExceptionHidingLoader) regressed (forName through a loader whose loadClass returns null returned
+null). Both fixed (3860d35e1): j2g roots the three ExceptionProxies' generateException (main.ae; jrt's annotation members call
+it, no Java code of the world does); jrt's Class.forName(name, init, loader) throws ClassNotFoundException for a null, as
+HotSpot's SystemDictionary does. Merged mac/next fa635f636 (cb65d32ea; the journal kept both). doc/classes/BYTECODE-SURVEY.md,
+"As built: stage 4, the rows' first build".
+
+The user's decision of 2026-11-23 (relayed by the coordinator): JCS51's annotation processors (:diag-processors, 25 diagnostics
+rows) are loaded from their class files through JD3's loader, with an AbstractProcessor subclass (DynSub) in javac's tool world,
+instead of JCS51 (a)'s processors given as sources. Built (write-ahead of javac's tool build): javac on Arbace's file manager
+(overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/FileManager.java) answers getClassLoader(location) with a DirLoader over
+the location's directories (it answered null: NameProcessIterator's loadClass failed, proc.processor.cant.instantiate), which
+defines NAME.class by ClassLoader.defineClass, as JavacFileManager's URLClassLoader does (jdk26u
+src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java, getClassLoader, read for the behaviour, no code
+copied); its forms read by bin/repr-java read-jdk --check --no-javac of the overlay's six files (the five unchanged ones byte for
+byte the committed forms). j2g: javax/annotation/processing/AbstractProcessor on model/class-supers (javac's tool world alone, as
+F6's). None of the 25 tests checked the processors' other needs yet (javac's processing environment through reflection's member
+tables, Module.addReads in ensureReadable); the proof is javac's tool built at the train's executable and bin/java-check
+--levels diagnostics over the 25. Alternatives not taken: JCS51 (a)'s sources-to-forms path (superseded by the user); a
+closed list of processors compiled into the tool (JCS51 (c)). The class-file API rows at the compiled level (t05992-t06008,
+t06042, t06043, t06072, t06156, t06329, t06390) need no class-file loader: they read class files with java.lang.classfile and
+com.sun.tools.javac.Main, which the compiled world lacks (JD4's javac world at the compiled level, and java.lang.classfile in the
+shipped world); they pass at interp.
+
 ## 2026-11-23: Scheme's last by-design rows: SCS4 (d)'s records, SCS38 (a) (branch `smalls-1123`, from mac/next `fa635f636`)
 
 The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.md).
@@ -19205,3 +19411,24 @@ The coordinator's request, from the VM's closed queue 541 (reports/541-hs-eval.m
   paths (the closures' own files may hold them too; a rebuild is the sure way). Test: a plan naming another worktree's .tmp (the
   hs-pkgs worktree's, which names hs-r7-run's) refused with exit 1 and its paths; the same plan's paths made this checkout's passes
   the check (`--only` an empty list: 0 modules, exit 0). The hs-pkgs worktree's own pools are such a plan: its lib-stg would now refuse.
+## 2026-11-23: ClassLoader's remaining members in jrt (the user's decision (a); java-bytecode-1122)
+
+The user decided (a) on the question of java-bytecode's report (relayed by the coordinator): the ClassLoader members the
+:classloading rows still lack are added to jrt rather than kept by design. Built at stage 0, no gate build
+(go/arbace/jrt/defineclass.ae, written from jdk26u's java.lang.ClassLoader at baf63fb as documented behaviour, no code
+copied): findLoadedClass (protected final: the loader's defined class, a built-in loader's the registry's; null for null, ""
+and a name with /), getPackage(String) (protected, deprecated: the loader's own, else its parent's, a built-in loader's the
+registry's packages), getPackages() (the loader's and its ancestors', the eldest first; the boot loader's not listed),
+registerAsParallelCapable() (protected static, caller-sensitive: the caller found on jrt's stack walk, StackWalker's
+frames, ClassLoader's own frames skipped; registered when its superclass is; IllegalStateException for a caller that is not
+a ClassLoader subclass, jdk26u's IllegalCallerException being a class of the world jrt cannot name) and
+isRegisteredAsParallelCapable() (the loader object's class; ClassLoader and the built-in loaders registered),
+setClassAssertionStatus, setPackageAssertionStatus, setDefaultAssertionStatus and clearAssertionStatus (recorded; no class
+of the Go build runs with assertions enabled, so Class.desiredAssertionStatus stays false). The non-final ones are in
+ClassLoader_I (the member tables call them through it); bin/jrt manifest regenerated manifest.edn, manifest_test.ae and
+reflect_tables.ae. Proof: bin/jrt build (amd64) and bin/jrt test -run TestLoaderMembers|TestPackages|TestClassLoaders
+(TestLoaderMembers new: GetPackage.java's view over a child and parent loader, findLoadedClass, parallel capability, the
+assertion records) pass. The rows (t04540, t04541, t06029; t03295 and t04542 also need a class file as a resource and a
+Java forms subclass of URLClassLoader) are judged on the train's build. resources(String) (t04543) is not built yet: its
+stream is lazy over the loader's own getResources, which jrt cannot call virtually nor build a Stream for; it needs a static
+of jrt's own Java (jdk.internal.jrt.ClassPathResources.resources, jdk/forms predicted) and j2g's resource helpers.

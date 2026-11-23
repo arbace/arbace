@@ -68,9 +68,10 @@ class DirectByteBuffer
     }
 
     // The JDK's constructors over memory addresses (Buffer's JavaNioAccess: JNI's NewDirectByteBuffer,
-    // memory segments' buffers): the Go build has no memory addressed so
+    // memory segments' buffers): a native memory segment's (java-design-1122) shares the bytes of jrt's
+    // native block at addr (Unsafe.allocateMemory's, go/arbace/jrt/nativemem.ae) as its array
     DirectByteBuffer(long addr, int cap, Object obj, MemorySegment segment) {
-        this(addr, cap);
+        this(jdk.internal.jrt.NativeArrays.bytes(addr, cap), 0, cap, segment);
     }
 
     DirectByteBuffer(long addr, int cap, Object obj, java.io.FileDescriptor fd, boolean isSync,
