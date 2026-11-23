@@ -8106,3 +8106,37 @@ patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s lis
 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
 (`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
 `:finalization-cycle` by design.
+
+## As built: 552, a vendored crypto/tls under _ssl: TLS 1.3 post-handshake authentication, PSKs, the exporter secret (2026-11-23, the Mac VM, queue 552; the user's 537-4 (a))
+
+pyi's `_ssl` (queue 209, PYS22 (a)) ran over Go's own crypto/tls, which has no post-handshake authentication, no PSKs and
+four key-log secrets where OpenSSL writes five (`:ssl-go-tls`, 19 rows). Since 552 it runs over a vendored copy with them.
+- **The copy**: go/arbace/pytls (import path `arbace/pytls`, package `tls`) and its internal packages: TamaGo's go1.27.1
+  `src/crypto/tls` (https://github.com/usbarmory/tamago-go, tag go1.27.1, the GOROOT `seed/goroot.sha256` pins) with what it
+  imports from inside GOROOT, which a package outside it cannot: `vendor/golang.org/x/crypto`'s cryptobyte (and asn1),
+  chacha20poly1305, chacha20, internal/poly1305, internal/alias (the generic code, no assembly), `crypto/internal/fips140/tls12`
+  and `tls13` rewritten over the public crypto/hmac and crypto/hkdf, `crypto/tls/internal/fips140tls` (never required), and
+  stubs of crypto/internal/boring (off), internal/godebug (Go 1.27's defaults; $GODEBUG not read) and internal/cpu. AES-GCM is
+  crypto/cipher's (the FIPS module's increasing-nonce check of TLS 1.2 is the one thing lost). Every change is listed in
+  doc/python/pytls-vendor.md and shown by doc/python/pytls-vendor.diff (against the files as copied); upstream lines edited
+  are marked `// arbace`, the features' code is in `arbace_keylog_alerts.go`, `arbace_pha.go`, `arbace_psk.go`, their Go tests
+  in `arbace_features_test.go` (17, each feature both ways). Upstream's own tests, run on a scratch copy: 686 pass, 3 fail by
+  the intended changes (the key log's fifth line, the new Config fields, the PSK suites' order rule), 22 skipped; the 162
+  recorded handshakes replay byte for byte.
+- **The features**: `Config.PostHandshakeAuth` (client: extension 49, the answer to a post-handshake CertificateRequest),
+  `Config.PostHandshakeClientAuth` (server: SSL_VERIFY_POST_HANDSHAKE, no request in a TLS 1.3 handshake whose client offered
+  PHA), `Conn.RequestClientCertificate` (SSL_verify_client_post_handshake: the request now, the client's answer verified in
+  the server's next Read; its errors OpenSSL's WRONG_SSL_VERSION, EXTENSION_NOT_RECEIVED, STILL_IN_INIT); TLS 1.3 external
+  PSKs (psk_dhe_ke, SHA-256, `DidResume`) and TLS 1.2's plain PSK suites (RFC 4279: PSK-AES256-GCM-SHA384,
+  PSK-CHACHA20-POLY1305, PSK-AES128-GCM-SHA256, PSK-AES256-CBC-SHA, PSK-AES128-CBC-SHA) through `PSKClientCallback`,
+  `PSKServerCallback` and `PSKIdentityHint`; `EXPORTER_SECRET` in the key log; an `AlertError` from the verification
+  callbacks sent as that alert (OpenSSL's unknown_ca and the others of ssl_x509err2alert, in TLS 1.3 too, where the
+  transport could not rewrite the encrypted alert).
+- **_ssl** (builtins_ssl*.ae): `HAS_PHA`, `HAS_PSK` (and 3.15's `HAS_PSK_TLS13`) true; `set_psk_client_callback` and
+  `set_psk_server_callback` as _ssl.c's (the callbacks called on the Python thread, their errors unraisable); the PSK suites
+  in the cipher table (kPSK, aPSK, PSK), offered only with this side's callback; `verify_client_post_handshake`; the peer's
+  certificates taken again after a read that completed a post-handshake authentication.
+- **The keys and the table**: pyi's runtime imports arbace/pytls, so it is listed in goi's table (arbace/go/table.ae's
+  `program-path?`) and copied into the program with go/arbace/py (arbace/j2g/main.ae); `gate_key` moves (those namespaces
+  and go/arbace/pytls), `arbace_runtime_key` does not (`arbace_runtime_not`); the gate's `:pyi` host lists it; bin/pyi prints
+  it beside the runtime, builds it into the AOT module and reads it back (`runtime read`, `runtime read-pytls`).
