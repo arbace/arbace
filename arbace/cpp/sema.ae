@@ -2593,6 +2593,9 @@
                                                                             ;; facet's `mutable _Atomic_word _M_refcount` through a const this was
                                                                             ;; const, cow-locale_init.cc's &_M_refcount a const int*)
                                                                             :mutable (boolean (:mutable k))}
+                                                                     ;; (cpp-decl2, the checker: the member's node, a union member's
+                                                                     ;; diagnostic's place, cx-deleted-implicit!)
+                                                                     (checking?) (assoc :node k)
                                                                      ;; [[no_unique_address]] on a member of class type: potentially
                                                                      ;; overlapping ([intro.object]/8, Itanium §1.1; cpp-gatefix)
                                                                      (and (not bits) (abi/class? (abi/unq ft))
@@ -3173,6 +3176,24 @@
                    (some #(let [g (fnd %)] (and (= (:kind g) (:kind f)) (or (= :dtor (:kind f)) (and (= (:name g) (:name f)) (= (:cq g) (:cq f)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f)))))))) bv))
           (upd-fn! mid assoc :virtual true)
           (abi/update-cls! id update :virtuals (fnil conj []) mid))))
+    ;; (cpp-decl2, the checker: [class.virtual]/18 (C++23 /20), a function with a deleted definition overrides none without
+    ;; one and one without a deleted definition overrides none with one: GCC's "non-deleted function 'virtual void D::f()'
+    ;; overriding deleted function", "deleted function ... overriding non-deleted function", at the overrider; the written
+    ;; deletions alone, cpp0x/defaulted2.C)
+    (when (and (checking?) *on-refusal*)
+      (doseq [mid (:methods c)
+              :let [f (fnd mid)]
+              :when (and (= :method (:kind f)) (:node f) (not (:implicit f)) (not (header-node? (:node f))))
+              :let [g (some #(let [g (fnd %)] (when (and (= :method (:kind g)) (= (:name g) (:name f)) (= (boolean (:cq g)) (boolean (:cq f)))
+                                                         (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps (:ty f)))))
+                                                g))
+                            bv)]
+              :when (and g (not= (boolean (:deleted-sure f)) (boolean (:deleted-sure g))) (= (boolean (:deleted f)) (boolean (:deleted-sure f)))
+                         (= (boolean (:deleted g)) (boolean (:deleted-sure g))))]
+        (*on-refusal* (ex-info (str "codegen: " (if (:deleted-sure f) "deleted" "non-deleted") " function '" (:name f) "' overriding "
+                                    (if (:deleted-sure g) "deleted" "non-deleted") " function")
+                               {:codegen/refused :virtual :cx/node (:node f)})
+                      (:node f))))
     ;; the destructor
     (let [members (class-like-members id)
           d (:dtor (abi/cls id))
@@ -6725,7 +6746,7 @@
 (defn- cx-deleted-implicit!
   [f]
   (when (and (checking?) *on-refusal* (not *cx-in-implicit*) (:implicit f) (:cx-sub-deleted f) (not (:cx-class-reported f)))
-    (when-let [cn (:cx-node (abi/cls (:cls f)))]
+    (when-let [cn (or (:cx-union-node f) (:cx-node (abi/cls (:cls f))))]
       (upd-fn! (:id f) assoc :cx-class-reported true)
       (*on-refusal* (ex-info (str "codegen: call to a deleted function " (:cx-sub-deleted f) " (implicitly defining " (:name f) ")")
                              {:codegen/refused :overload :cx/node cn})
@@ -7186,7 +7207,7 @@
                      sub (or (second (re-find #"call to a deleted function (\S+)" m))
                              (when (:cx/no-default-sure (ex-data e)) (second (re-find #"no default constructor for (\S+)" m))))]
                  (if sub
-                   (upd-fn! fid assoc :deleted true :deleted-sure true :tinits nil :cx-sub-deleted sub)
+                   (upd-fn! fid assoc :deleted true :deleted-sure true :tinits nil :cx-sub-deleted sub :cx-union-node (:cx-union-node (ex-data e)))
                    (upd-fn! fid dissoc :analyzed)))))))
     (when (and (checking?) (:deleted-sure (fnd fid)))
       ;; (queue 492: an implicitly deleted one's reason at its class too, as resolve-overload*'s)
@@ -9067,6 +9088,24 @@
                             n)))))
       (catch arbace.lang.ExceptionInfo x (when (System/getenv "CX_NEW_TRACE") (binding [*out* *err*] (println "new-size refused" (ex-message x)))) nil))))
 
+(defn- cx-const-default-constructible?
+  "cpp-decl2 (the checker): [dcl.init.general]/8, whether class `id` is const-default-constructible: its default-initialization
+  invokes a user-provided constructor of its own, or each direct non-variant non-static data member has a default member
+  initializer or is of a const-default-constructible class type, and each direct base is (a union: some variant member has a
+  default member initializer); true when the slice cannot tell (an anonymous member, a template, a header's class)."
+  [id]
+  (let [c (abi/cls id)]
+    (or (nil? c) (not (:complete c)) (:tmpl c) (:header c)
+        (some #(let [f (fnd %)] (and (empty? (:ps (:ty f))) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f)))) (:ctors c))
+        (seq (:ctor-tmpls c)) (seq (:inherits-ctors c))
+        (if (:union c)
+          (boolean (some :init (:fields c)))
+          (and (every? #(cx-const-default-constructible? (:cls %)) (:bases c))
+               (every? (fn [fl] (or (:static fl) (:init fl) (:anon fl) (not (string? (:name fl)))
+                                    (let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                                      (and (abi/class? t) (cx-const-default-constructible? (:id t))))))
+                       (:fields c)))))))
+
 (defn- new-expr [ctx n]
   (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         et (:to t)
@@ -9079,6 +9118,13 @@
         fa (find-allocation ctx (if nexpr et et) (boolean nexpr) (boolean (:isGlobal n)) (vec pargs))
         ;; the reserved placement form new (p) T: clang's CodeGen uses its argument, calls nothing
         placement (when (:reserved fa) (convert-scalar (rv (first pargs)) (abi/ptr abi/void) false))
+        _ (when (and (checking?) (nil? initn) (nil? nexpr) (:c et) (not (abi/ref? et))
+                     (or (abi/scalar? (abi/unq et))
+                         (and (abi/class? (abi/unq et)) (not (cx-const-default-constructible? (:id (abi/unq et)))))))
+            ;; (cpp-decl2, the checker: [expr.new]/22 with [dcl.init.general]/7, a new-expression without an initializer
+            ;; default-initializes its object, a const one of a type not const-default-constructible ill-formed: GCC's
+            ;; "uninitialized const in 'new' of 'const struct B'"; cpp0x/defaulted2.C)
+            (fail :uninit "uninitialized const in 'new' of a type not const-default-constructible"))
         init (cond
                nexpr nil
                (nil? initn) (init-for et nil ctx :default)
@@ -11574,7 +11620,10 @@
                                  (and (checking?) *on-refusal* (not (:implicit f)) (not (:defaulted f)) (not (:inh-from f)) (:node f)
                                       (string? (:name fl)) (seq (:name fl)) (not (:static fl)) (not (:anon fl)) (not (:union c)) (:ty fl)
                                       (let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))]
-                                        (or (abi/ref? (:ty fl)) (and (:c t) (not (abi/class? (abi/unq t))) (not (abi/arr? (abi/unq t)))))))
+                                        (or (abi/ref? (:ty fl)) (and (:c t) (not (abi/class? (abi/unq t))) (not (abi/arr? (abi/unq t))))
+                                            ;; (a const member of a class type not const-default-constructible, [dcl.init.general]/7:
+                                            ;; cpp0x/defaulted2.C's `const B b;` with B() = default over an int)
+                                            (and (:c t) (abi/class? (abi/unq t)) (not (cx-const-default-constructible? (:id (abi/unq t))))))))
                                  (do (*on-refusal* (ex-info (str "codegen: uninitialized " (if (abi/ref? (:ty fl)) "reference" "const") " member '" (:name fl) "' in a constructor")
                                                             {:codegen/refused :uninit :cx/node (:node f)})
                                                    (:node f))
@@ -11875,6 +11924,30 @@
     (do
     ;; (queue 499: a subobject's deleted or inaccessible destructor, cx-sub-dtor!)
     (cx-sub-dtor! f cls)
+    ;; (cpp-decl2, the checker: a union's implicit default constructor, copy or move constructor or destructor is deleted when a
+    ;; variant member's corresponding one is non-trivial (the default constructor: no variant member with a default member
+    ;; initializer), [class.default.ctor]/2.1, [class.copy.ctor]/10.1, [class.dtor]/7.1: GCC's "union member 'U::g' with
+    ;; non-trivial 'G::G()'" at the member, cx-deleted-implicit!; cpp0x/defaulted2.C, cpp0x/union1.C)
+    (when (and (checking?) (:implicit f) (#{:ctor :dtor} (:kind f)) (not (:inh-from f)))
+      (let [c (abi/cls cls)
+            k (cond (= :dtor (:kind f)) :dtor (empty? (:ps (:ty f))) :default (= 1 (count (:ps (:ty f)))) :copy)]
+        ;; (a union-like class's variant members too, an anonymous union member's, [class.union.anon]/? with
+        ;; [class.default.ctor]/2.1: cpp0x/union1.C's C over union { A a; })
+        (doseq [[c' cid'] (cond (and (:union c) (string? (:name c)) (seq (:name c))) [[c cls]]
+                                (and (not (:union c)) (string? (:name c))) (for [fl (:fields c) :when (:anon fl)
+                                                                                 :let [ac (abi/cls-of (:ty fl))] :when (and ac (:union ac))]
+                                                                             [ac nil])
+                                :else nil)
+                :let [c c']]
+        (when (and k (:union c) (not (header-node? (:cx-node (abi/cls cls)))) (or cid' (not (header-node? (:node (first (:fields c))))))
+                   (not (and (= k :default) (some :init (:fields c)))))
+          (doseq [fl (remove :static (:fields c))
+                  :let [t (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)))]
+                  :when (and (abi/class? t) (not (abi/ref? (:ty fl))) (string? (:name fl)) (:node fl)
+                             (case k :default (default-ctor-nontrivial? (:id t)) :copy (not (trivial-copy? (:id t))) :dtor (not (trivial-dtor? (:id t)))))]
+            (throw (ex-info (str "codegen: call to a deleted function " (:name fl) " (a union member with a non-trivial "
+                                 (case k :default "default constructor" :copy "copy constructor" :dtor "destructor") ")")
+                            {:codegen/refused :overload :cx-union-node (:node fl)})))))))
     ;; (queue 492, the checker: a defaulted default, copy or move constructor is deleted when a potentially constructed
     ;; subobject's destructor is deleted, [class.default.ctor]/2.7, [class.copy.ctor]/10.4: the subobject's deleted
     ;; destructor, as a deleted call, the member's deletion)
@@ -12349,7 +12422,9 @@ protected:
                                                                                 (when (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e)))
                                                                                   (second (re-find #"no default constructor for (\S+)" (str (.getMessage e)))))))
                                                           ;; (queue 499: the subobject's implicitly deleted destructor, cx-sub-dtor-chain!)
-                                                          :cx-q499-sub (:cx-q499-sub (ex-data e)))
+                                                          :cx-q499-sub (:cx-q499-sub (ex-data e))
+                                                          ;; (cpp-decl2: a union's member, its place)
+                                                          :cx-union-node (:cx-union-node (ex-data e)))
                                                  (throw e)))))
                                     :else nil)))
                           ;; (the rest of CP313 (a): an error found while declaring, reported in order)
