@@ -13,6 +13,21 @@ The current state of the work (as of 2026-11-19 morning, the State's consolidati
 [`arbace-inside-itself-v1`](https://github.com/arbace/arbace/blob/arbace-inside-itself-v1/doc/JOURNAL.md)
 (2026-10-11 to 2026-10-15), and the frozen branches' (before).
 
+## State at 2026-11-22, 19:30 UTC (the burst's consolidation)
+
+The user's burst (2026-11-21 evening to 11-22: "100% for the completeness and independence of the crops"; max pace until 90% of the
+weekly allowance, then consolidate and gate) reached 90% at 17:04 UTC; consolidation since. next 3a005e514 (floored, from the records):
+Go, LLVM IR, x86-64, arm64 and WebAssembly 100/100; Rust completeness 100, independence 80; C 99.9; Scheme 99.9; Haskell 99.8; Clojure
+99.7; Python 97.9; C++ 97.3 / 96.5; Java 96.1; OCaml 95.0 (every other independence 100). The user's decisions of the day are the
+journal's five "the user's decisions" entries of 2026-11-22.
+- The essential gate runs on 3a005e514 in .tmp/worktrees/gate-next (on pass: main fast-forwarded and pushed).
+- Waiting on their heavy-lock runs, then merged: clj-cdr (CDR12-15), java-design (JD1-JD9 applied, JD4 built), java-bytecode (JD3's
+  stages 1-3: loader, interpreter, verifier), py-accel (the Mac's 521+525: CPython's _datetime/_decimal compiled into the C world), the
+  Java reader batch (520, --release rows, doclint); 526 (C++ recovery) after a whole own dg record.
+- Consolidation's list (.tmp/goal/decisions-1122.md): Python's 13 cap-crash modules under the lock, Haskell's eff/VS, C CT1's two ppref
+  rows, OCaml's compiled AOT records and 528-8's 19 tool rows, py-capi's world through 521's listing, C's ~80 rows the Mac did not run.
+- Questions for the user: Python D1-D6 (py-mods: forkserver first), Rust C3X-1 (share-generics; -Zshare-generics=no recommended).
+
 ## State
 
 - **The seed** is `3c48859d…` (2026-11-17, the consolidation's re-seed W, packed from the fixpoint's G3 at `53da41d93`,
@@ -361,11 +376,12 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
   gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
   Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
-- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
-  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
-  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
-  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
-  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
+- **Clojure** (99.84 99.97 100 100; `clj-cdr-1122`, 2026-11-23, after `clj-rows-1122`'s 99.7). CDR12-CDR15 built (doc/CLOJURE-DESIGN-REVIEW.md,
+  "As built (2026-11-22)"): Swing's table model in jdk/, every .cljc's conditionals recorded, SecurityManager a default import again,
+  prim interfaces on evaluated and Java forms fns; one build (`52c31a81c04b`): read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT 833 / 4 / 1.
+  Left: `:xml-stream` (the event reader's closure in the jdk-extra list, then an AOT run); for the user: CDR14's two oracle cases
+  against v4 (keep as main's divergences, or drop the forms), CDR15's evaluated part (plain evaluated calls about 9% slower in the
+  microbenchmark; the Java forms part alone keeps the three cases); CDR16 open.
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
@@ -399,15 +415,26 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   Round 51: simd const eval (a), `--record` defaults to `--front own` (a). Branch `rust-c6-1120` (2026-11-21, holds rust-rec-1120
   and 503-rust-causes4): C6-2 (std's StableCrateIds by Cargo's hash ported), C4's interface and C4-1's names assembled natively
   (std-names 14,953 of 15,162 facts; C4 not own until C6-5's ruling), C1's three drop-glue faults fixed (std, vectors, unwind,
-  panics build own; vectors passes own on ci), C6-4's AlwaysInliner (core 114 of 275 items equal to std's IR). Next: TypeId::of's
-  constant as rustc's hash and core's sort recursion (unwind, panics, std on ci), C6-4's next export (8 callees), core's interface
-  differences for C4 ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1's drop glue"). Branch `rust-c6b-1122` (2026-11-22,
+  panics build own; vectors passes own on ci), C6-4's AlwaysInliner (core 114 of 275 items equal to std's IR). Branch
+  `rust-c4-1122` (2026-11-22, R3): C1's TypeId constants as rustc's inttoptr pointers and a pair's niche tag at its offset (std,
+  unwind, panics pass own on ci; ci's 32-bit pointer constants a finding for C), C4's passes with every alias, enum reprs, pattern
+  types, const traits and the builtin derives (core 27,062 of 27,498 facts, alloc and std all equal, names 15,120 of 15,162) and the
+  switch run 5 of 5 own on the native interface and names (C4 counted own only after C6-5's ruling). Branch `rust-c6b-1122` (2026-11-22,
   the burst's R2, with 512-rust-causes5 and R3's rust-c4-1122 merged): C6-4's next export and the back end's lowering as std's IR
   writes it (core's macro-made attributes, IRBuilder's folds, LLVM 23's float text, -Z fewer-names' literal types, InstSimplify's
   aggregate rules in the inliner, the asserts' locations, :nounwind): core 183 of 275 items equal to std's IR (114 before),
   alloc 21 of 25 (18), std 83 of 325 (61); DECISION 512-1 (a) taken (std's rsi export made again: catch_unwind's lines
   unchanged, their root the helper's fnptr types without `unsafe`) (FRONTEND-SURVEY, "As built: C6-4's next export, core's
-  lowering as std's IR writes it").
+  lowering as std's IR writes it"). Next: C1's six programs built
+  again and recorded, core's 436 facts left, C6-4's next export ([rust/FRONTEND-SURVEY.md](rust/FRONTEND-SURVEY.md), "C1 and C4:
+  the burst's round"). Branch `rust-c6c-1122` (2026-11-22, R2b, R3's `7bd7b001d` merged): the always-inliner as LLVM 23's (the
+  callees in their symbols' order, rustc 1.99.1's codegen unit order; the call sites newest first in their use lists; the zero GEP
+  and the constant inttoptr folded), unsized struct tails' references, closure pairs' alignments, builtin derives `#[inline]`, the
+  library parsed as edition 2024, repr(C) enums, rustc's #[path] file names, lib-unit's vtables; then the Mac's 524 (C3) merged, one
+  Rust line: core 191 of 275 items equal to std's IR (183), alloc 21 of 25, std 101 of 325 (83); std's differing items now mostly
+  share-generics' upstream instances (21 of 25: every upstream crate's whole collection, L2); R3's own path 3 of 3 on ci; C6-5 (a)
+  taken (rsi-build's C4 own with both native), not recorded yet: R3's switch run 4 of 6 on ci (built before its C1 fixes), the next
+  native-interface build with C1's configuration records it (FRONTEND-SURVEY, "As built: C6-4, round three").
 - **LLVM IR** (98 99 100 98). Landed: `h-haskell-deferred`'s LLVM part (the verifier's GEP and blockaddress checks: read deferred
   17 -> 15, eval 15 -> 3), LLS54 (a) (the tx pack with dg-options), `h-judges`' split-file section, the Mac's 335 (Verifier rules:
   read deferred 15 -> 1; D335-1 (a), D335-2 (a)). Held: 335's `ir-make rt --mutants` and `verify-rt-heldout --record`; the 13 eh

@@ -352,13 +352,14 @@ corpus_bignum() {
   else cat; fi
 }
 # the plan as the corpus writes it ($libdir and $repo not expanded: the records' keys name no path of the host); the packages
-# named by REPR_HASKELL_ONLY_PACKAGES alone when it is set (the sample recordings and verifies)
+# named by REPR_HASKELL_ONLY_PACKAGES alone when it is set (the sample recordings and verifies), and then (hs-pkgs-1122) the
+# corpus's :hackage packages it names too, never in a whole read's plan
 corpus_plan_raw() {
   local f
   f=$(corpus_file "$1")
   arbace_tool -e "(let [c (read-string (slurp \"$f\")) what (keyword \"$2\")
                         j (fn [xs] (apply str (interpose \" \" xs)))]
-    (doseq [p (:packages c)]
+    (doseq [p (concat (:packages c) (when (seq \"${REPR_HASKELL_ONLY_PACKAGES:-}\") (:hackage c)))]
       (println (str (:name p) \"\t\" (:dir p) \"\t\"
         (j (concat [(str \"-X\" (:language p))] (map #(str \"-X\" %) (:extensions p)) [\"-haddock\"] (:ghc-flags p)))
         \"\t\" (j (map #(if (vector? %) (second %) %) (if (= what :all) (concat (:modules p) (:hsc p) (:boot p)) (get p what))))
@@ -417,6 +418,28 @@ corpus_fetch() {
     rm -f "$pl"
   ) 8> "$dir/fetch.lock"
   srcroot=$dir/$name
+  hackage_link "$c"
+}
+
+# hackage_link CORPUS (hs-pkgs-1122): when REPR_HASKELL_ONLY_PACKAGES names one of the corpus's :hackage packages, their sources
+# (bin/hsi hackage fetch: test/haskell/hackage.edn's pinned tarballs, a worktree's taken from the main checkout) linked as the
+# tree's hackage/ and their package database written (arbace.repr.haskell.target hackage-db: .tmp/hsi/hackage/db, which their
+# :ghc-flags' -package-db name)
+hackage_link() {
+  local f hs p want=""
+  [ -n "${REPR_HASKELL_ONLY_PACKAGES:-}" ] || return 0
+  f=$(corpus_file "$1")
+  hs=$(arbace_tool -e "(doseq [p (:hackage (read-string (slurp \"$f\")))] (println (:name p)))")
+  for p in $hs; do [[ " $REPR_HASKELL_ONLY_PACKAGES " == *" $p "* ]] && want=1; done
+  [ -n "$want" ] || return 0
+  local hsrc; hsrc=$("$root/bin/hsi" hackage src) || { echo "repr-haskell: bin/hsi hackage fetch failed" >&2; exit 1; }
+  ln -sfn "$hsrc" "$srcroot/hackage"
+  ARBACE_REPO=$root arbace_tool -m arbace.repr.haskell.target hackage-db "$root/.tmp/hsi/hackage/db" ||
+    { echo "repr-haskell: the Hackage packages' database (arbace.repr.haskell.target hackage-db) failed" >&2; exit 1; }
+  # their configure products (old-time's HsTimeConfig.h: arbace.repr.haskell.configure's hackage-products-spec, the answers probed on
+  # Arbace's C target), where Cabal's build would make them
+  ARBACE_REPO=$root arbace_tool -m arbace.repr.haskell.configure hackage-products "$srcroot" ||
+    { echo "repr-haskell: the Hackage packages' configure products (arbace.repr.haskell.configure hackage-products) failed" >&2; exit 1; }
 }
 
 # corpus_configure CORPUS: one line per package with a :configure, tab-separated: name, directory,
@@ -598,7 +621,8 @@ target_hsc() {
       for cf in $rawf; do
         cf=${cf//\$libdir/$TDERIVED/sysroot$libdir}; cf=${cf//\$repo/$root}
         fl+=("$cf")
-        case $cf in -I/*) args+=("$cf") ;; -I*) args+=("-I$srcroot/$dir/${cf#-I}") ;; --cflag=/*) args+=("-I$(dirname "${cf#--cflag=}")") ;; esac
+        # (hs-pkgs-1122: a --cflag=-D, Cabal's -D__GLASGOW_HASKELL__=914 for old-time's .hsc, defined for ci as for the C compiler)
+        case $cf in -I/*) args+=("$cf") ;; -I*) args+=("-I$srcroot/$dir/${cf#-I}") ;; --cflag=/*) args+=("-I$(dirname "${cf#--cflag=}")") ;; --cflag=-D*) args+=("${cf#--cflag=}") ;; esac
       done
       # the system's include directory last, as gcc's /usr/include for hsc2hs on the host: libffi's ffi.h (HFS-I11 (a))
       args+=("-I$TDERIVED/sysroot/usr/include")
@@ -674,6 +698,11 @@ native_dump_corpus() {
     if [ -z "$cdir" ]; then
       base=$srcroot/$dir; hsp=-
       if [ -n "$nhsc" ] && [ -d "$nhsc/$name" ]; then hsp=$nhsc/$name
+      # hs-pkgs-1122: a Hackage package's .hsc modules through Arbace's hsc2hs on ci (bin/repr-haskell target hsc with
+      # REPR_HASKELL_ONLY_PACKAGES=PKG: .tmp/repr-haskell/target/hsc/PKG), no part of the derived installation's
+      elif [ -z "$live" ] && [ -d "$rh/target/hsc/$name" ] && [[ $dir == hackage/* ]]; then hsp=$rh/target/hsc/$name
+        # (its outputs X.hs beside X.hsc, where Cabal's build makes them, as native_place_inputs puts the pack's)
+        (cd "$hsp" && find . -name '*.hs' -printf '%P\n') | while read -r f; do cp "$hsp/$f" "$base/$f"; done
       elif [ -n "$live" ] && printf '%s\n' $files | grep -q '\.hsc$'; then
         # live: the helper's cpp verb runs hsc2hs (X.hs beside X.hsc) and writes its record
         hsp=$out/hspp/$name; mkdir -p "$hsp"

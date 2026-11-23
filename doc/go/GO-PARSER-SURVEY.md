@@ -2610,3 +2610,50 @@ a node go/parser rejects (`goParserRejects`), the files without forms; a file go
 errors of both programs byte for byte (5 and 66 lines); a probe of the subset's edges (named types, `:=`, variadic
 parameters, shadowing, function literals, string constants) reports only lines gc reports. GOI-SPEC.md, "Since v1:
 types2's range and slice checks".
+
+## As built: the rejected files' messages and the readers' agreement (2026-11-22)
+
+The user's decision of 2026-11-22 (doc/JOURNAL.md, "the user's decisions on the burst's by-design and counting questions"):
+the read cell's 137 by-design rows of linux-errtest, 64 invalid programs (`:invalid-programs`, raw forms only) and 73
+files go/parser rejects (`:parser-rejects`), count as passes where Arbace's own reader agrees with the reference reader:
+the same trees and the same conversion failure for the 64; for the 73, both reject, and their error messages compared.
+Branch `go-read2-1122`.
+
+- The 64: native-check already held them to the helper (E-tree before any conversion; E-forms "where the helper's
+  conversion fails, the native one failing with its message", a different message a failure). The check now records the
+  verdict: a raw-only row of the report is `[KEY MESSAGE :same]` when the native conversion fails with the helper's
+  message (`check-job`'s `:final-same`; a row without an oracle, `:no-export`, is compared too).
+- The 73: no tree on either side, so the readers are compared by their errors in gc's words. The reference's: gc itself
+  over the original, `go tool compile -p=p -C -e` with std's export data as Go's test driver compiles an error test,
+  without the action's flags (the native reader's syntax errors take none), by the file's path; `bin/repr-go`'s
+  `corpus_gc_errors` writes them beside the helper's dumps of a corpus of files (`.tmp/godump/corpus/NAME.gc/KEY.txt`,
+  for each fail line of the helper's summary; made with the dumps, kept by their key, `NAME.gc.key`). The native
+  reader's: gc's syntax errors as Arbace runs gc's own parser (`arbace.repr.go.syntax`, `bin/repr-go syntax-errors`'s
+  path, GP6, GPS41 (c)). `annotate`'s `rejected-check` compares them line for line, each line's file read as the
+  file's base name on both sides when it names the file by its path (`file-lines`: gc prints a line's file as given,
+  the native reader by the name given, but a position under a `//line` directive naming the same file by its resolved
+  path as gc does, `fixedbugs/issue15611.go`); a position in a message is compared as printed (gc's and the native
+  reader's both the path, `fixedbugs/issue14006.go`'s "already defined at"). A difference is a failure of the check
+  (`SYNTAX` rows, the report's `:rejected-differ`, `${GOROOT}` for the tree's path); the report counts
+  `:rejected-agree` and `:rejected-no-ref`. A first run without the directive rule found the three files with a
+  `//line` directive (issue15611, issue18393, issue32133) differing by that spelling alone.
+- The negative control (test/repr/go/native-controls.edn, level `:syntax`): `control/bombad-one-message-altered`, the
+  native reader's errors of bombad.go with one message altered (`alter-message`: its first message's first character)
+  judged by the same comparison against gc's, which must differ (held).
+- The record: `bin/reap record-native-check` writes `:rejected-agree` per corpus and a raw-only row's `:same`; it takes
+  several reports since (native-check's runs of some corpora each, as the gate's parts run it: none partial, no corpus
+  twice, every corpus in one). The reader `:native-check` gives such entries the reason of the agreement (`:agree`), and
+  bin/reap's rule `agreement` counts an entry with it as a pass in a class marked `:agreement`
+  (test/repr/go/divergences-read.edn: `:invalid-programs`, `:parser-rejects`; `:goos-other-boards` stays n/a, DECISION B),
+  the detail naming them by class and reason; `bin/reap --self-test`'s three cases hold the rule (an agreeing entry of a
+  marked class passes; one without the verdict, or of an unmarked class, stays).
+- The gate's rotation of repr-go-native: the files a corpus of files rejects join its universe
+  (`native-check --record-ids`, test/repr/go/native-check-ids.edn: the check's denominator), the control's subject
+  `linux-errtest/bombad.go` its `:always`, and a `SYNTAX` row a failure its `:failed-re` reruns.
+- Proofs: `bin/repr-go native-check linux-errtest` (whole, `REPR_GO_JOBS=3`, under the 8 GiB cap): E-tree 586 of 586,
+  the 64 raw-only rows `:same`, 73 rejected by both, the control held; then the 73 again after the directive rule
+  (`--only`), 73 equal to gc's own. The record from native-check over every corpus in three runs (the light corpora and
+  linux-errtest with box under the 8 GiB cap, the std, tests and cmd corpora with the check under the big-job lock, 31 GB
+  at its peak): 22 corpora, 12,275 dumps, 0 not known, linux-errtest 73 of 73 rejected files with gc's errors equal and
+  its 64 raw-only rows `:same`, every control held in one of the runs; the other corpora's numbers those of the record of
+  2026-10-24. bin/reap: Go's read cell 12,158 / 137 / 0 -> 12,295 / 0 / 0 (67 n/a).

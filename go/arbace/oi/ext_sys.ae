@@ -96,7 +96,7 @@
   ^{:line 93} [^bool runtimeWarnings]
   ^{:line 94} [^bool backtraceActive]
   ^{:line 95} [^bool parserTraceFlag]
-  ^{:line 97} [gcControl (lit (slice Value) 262144 0 120 0 0 (stackWords) 0 0 44 100 8192)]
+  ^{:line 97} [gcControl (lit (slice Value) (minorHeapInit) 0 120 0 0 (stackWords) 0 0 44 100 8192)]
   ^{:line 98} [gcTweaks (lit (slice (struct
           ^{:line 99 :tag string} name
           ^{:line 100 :tag int} v ^int init))
@@ -122,7 +122,7 @@
       ^{:line 113} words ^{:go/end 113} (fn ^int [^uint64 b] (conv int (/ b 8)))]
     (addr (lit Block :Tag 0 :F (lit (slice Value)
           ^{:line 115} (conv float64 minorWords) (conv float64 0) (conv float64 majorWords)
-          (+ minorHeapCollections gcMinorAsked) (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked)
+          (+ minorHeapCollections gcMinorAsked) (+ (+ (- (conv int (.-NumGC m)) gcAbsorbed) gcMajorAsked) cMajorCycles)
           (words (.-HeapSys m)) 1 (words (.-HeapAlloc m)) (conv int (- (.-Mallocs m) (.-Frees m)))
           (words (.-HeapIdle m)) 0 0 0 gcCompactions (words (.-HeapSys m)) 0 forcedMajorCount 0)))))
 
@@ -139,6 +139,7 @@
     ;; also finds the tracked major values' deaths; Go's collection ran (fullMajor's, when a weak pointer was made: every tracked
     ;; value with an identity has one); their callbacks run now, or after the callback that asked for the collection
     (set! minorUsed 0)
+    (set! customMinorExtra 0)
     (memprofMinorGC th true)
     (when (> majors 0)
       (memprofMajorGC th))
@@ -436,6 +437,15 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
           (r "caml_sys_argv" ^{:go/end 307} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (mainArgv)))
           (r "caml_sys_get_argv" ^{:go/end 310} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
               (addr (lit Block :Tag 0 :F (lit (slice Value) (Str (argv0)) (mainArgv))))))
+          ;; caml_sys_modify_argv (sys.c): Sys.argv replaced, the toplevel's override_sys_argv for a script's arguments (queue 529)
+          (r "caml_sys_modify_argv" (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
+              (when [p (CurrentProgram)] (!= p nil)
+                (let [^{:tag (slice string)} ss (zero (slice string))]
+                  (when [(values b ok) (assert (* Block) (aget a 0))] ok
+                    (range [_ v (.-F b)]
+                      (set! ss (append ss (GoString v)))))
+                  (set! (.-Argv p) ss)))
+              Unit))
 
           (r "caml_sys_executable_name" ^{:go/end 311} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (Str (argv0))))
           (r "caml_sys_proc_self_exe" ^{:go/end 317} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]
@@ -896,6 +906,17 @@ closures, the boxed numbers of arithmetic or the runtime's own blocks.\n"} minor
     (.Unlock youngMu)
     (not y)))
 
+(go/func minorHeapInit "minorHeapInit is the minor heap's initial size in words: OCAMLRUNPARAM's s (queue 523) normalized as domain.c's
+caml_norm_minor_heap_size (at least Max_young_wosize + 1, rounded up to whole 4 KiB pages, the reference host's), else 256 Ki.\n" ^int []
+  (when [s (runParam 115)] (> s 0)
+    (when (< s 257)
+      (set! s 257))
+    (return (* (/ (+ s 511) 512) 512)))
+  262144)
+
+(go/func GcRequestMinor "GcRequestMinor is a C stub's caml_request_minor_gc (queue 523): a minor collection of the simulated minor heap at the\nnext allocation counted (the minor heap's space used up), as the runtime's request is honoured at its next poll.\n" []
+  (set! minorUsed (AsInt (aget gcControl 0))))
+
 (go/func countWords "countWords counts an allocation of wosize words (and its header; an atom, wosize 0, is static); it reports whether the
 allocation overflowed the simulated minor heap, which a minor collection empties before the block is made (counted in Gc's minor
 collections and emitted in Runtime_events' ring, queue 516); while the ring is active the allocation is counted in its buckets.\n" ^bool [^int wosize]
@@ -910,6 +931,7 @@ collections and emitted in Runtime_events' ring, queue 516); while the ring is a
   (set! minorUsed + (+ wosize 1))
   (when (> minorUsed (AsInt (aget gcControl 0)))
     (set! minorUsed (+ wosize 1))
+    (set! customMinorExtra 0)
     (youngClear)
     (inc! minorHeapCollections)
     (reMinorHeap)
@@ -959,7 +981,7 @@ not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value 
     ^{:tag bool} major))
 
 (go/type memprofSampleT "memprofSampleT is a queued callback: kind 0 an allocation's (n samples of size words, its source src: 0 Normal,
-1 Marshal), 1 a promotion's, 2 a minor deallocation's, 3 a major deallocation's (of ent).\n" (struct
+1 Marshal, 2 Custom, 3 Map_file: memprofCustom), 1 a promotion's, 2 a minor deallocation's, 3 a major deallocation's (of ent).\n" (struct
     ^{:tag int} kind
     ^{:tag int} n
     ^{:tag int} size
@@ -985,9 +1007,13 @@ not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value 
   (memprofSampleIn th p wosize v (> wosize 256) 0))
 
 (go/func memprofSampleIn "memprofSampleIn is memprofSample of a block in the major heap or not (major), from the source src.\n" [^{:tag (* Thread)} th ^{:tag (* memprofProfile)} p ^int wosize ^Value v ^bool major ^int src]
-  (let [words (conv float64 (+ wosize 1)) n 0 lambda (.-lambda p)]
+  (memprofSampleW th p (+ wosize 1) wosize v major src))
+
+(go/func memprofSampleW "memprofSampleW is memprofSampleIn of nw words sampled (a block's with its header; a custom block's memory alone, queue 523)
+reported as size wosize.\n" [^{:tag (* Thread)} th ^{:tag (* memprofProfile)} p ^int nw ^int wosize ^Value v ^bool major ^int src]
+  (let [words (conv float64 nw) n 0 lambda (.-lambda p)]
     (when (>= lambda 1)
-      (set! n (+ wosize 1)))
+      (set! n nw))
     (when (and (> lambda 0) (< lambda 1))
       (set! memprofNext - words)
       (while (<= memprofNext 0)
@@ -999,6 +1025,46 @@ not sampled). It returns v.\n" ^Value [^{:tag (* Thread)} th ^int wosize ^Value 
           (when [(values w ok) (assert (* weakRef) (weakOf v))] ok
             (set! r w)))
         (set! (.-mpQ th) (append (.-mpQ th) (lit memprofSampleT :kind 0 :n n :size wosize :src src :major major :prof p :ref r)))))))
+
+(go/func memprofCustom "memprofCustom samples v, a custom block whose memory outside the heap is bytes (a bigarray's data), for Gc.Memprof
+(queue 523, memprof.c's caml_memprof_sample_block of a custom block's memory: its words rounded up, no header), from the source src
+(2 Custom, 3 Map_file), in the major heap or not, as the allocation of th; nothing when no profile samples, or in a callback.\n" [^{:tag (* Thread)} th ^Value v ^int bytes ^int src ^bool major]
+  (when (or (== th nil) (not memprofStarted) (.-mpInCb th))
+    (return))
+  (let [w (/ (+ bytes 7) 8)]
+    (when (<= w 0)
+      (return))
+    (when [p (.-mp (.-Dom th))] (and (!= p nil) (== (.-status p) 0))
+      (memprofSampleW th p w w v major src))
+    (when (> (len (.-mpQ th)) 0)
+      (.memprofRun th))))
+
+(go/var ^{:tag int :doc "customMinorExtra is the bytes of the custom blocks' memory the minor heap's blocks hold since its last collection (queue 523).\n"} customMinorExtra)
+
+(go/func customMem "customMem is custom.c's caml_alloc_custom_mem of v, whose memory outside the heap is bytes, by th (queue 523): at most
+custom_minor_max_size bytes, the block is the minor heap's and its memory counts towards a minor collection (caml_adjust_minor_gc_speed:
+custom_minor_ratio percent of the minor heap's bytes, then a collection at the next counted allocation, as the runtime's request is
+honoured at its next poll); more, the block is the major heap's; then it is sampled by Gc.Memprof from the source Custom.\n" [^{:tag (* Thread)} th ^Value v ^int bytes]
+  (let [major (> bytes (AsInt (aget gcControl 10)))]
+    (when (and (not major) (> bytes 0))
+      (set! customMinorExtra + bytes)
+      (when (>= customMinorExtra (/ (* (* (AsInt (aget gcControl 0)) 8) (AsInt (aget gcControl 9))) 100))
+        (set! customMinorExtra 0)
+        (set! minorUsed (AsInt (aget gcControl 0)))))
+    (memprofCustom th v bytes 2 major)))
+
+(go/func MemprofCustom "MemprofCustom is memprofCustom of a bigarray v a C stub made with memory the collector manages (go/arbace/oicapi:
+caml_ba_alloc's CAML_BA_MANAGED, its data allocated or given), sampled from the source Custom.\n" [^{:tag (* Thread)} th ^Value v]
+  (customMem th v (baBytes v)))
+
+(go/func baBytes "baBytes is the bytes of a bigarray's data (its elements times their size), 0 for another value.\n" ^int [^Value v]
+  (when [(values c ok) (assert (* Custom) v)] ok
+    (when [(values b ok2) (assert (* bigarray) (.-V c))] ok2
+      (let [n (aget baEltSize (.-kind b))]
+        (range [_ d (.-dims b)]
+          (set! n * d))
+        (return n))))
+  0)
 
 (go/func refAlive "refAlive reports whether a tracked value lives after Go's collection: its weak pointer not collected (nil, a value
 without an identity, is taken as dead: a boxed number does not outlive its use).\n" ^bool [^{:tag (* weakRef)} r]

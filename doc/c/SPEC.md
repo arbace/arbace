@@ -1075,6 +1075,24 @@ messages (gcc's `dg-error` tests, C7), as GP6 made gc's errors the Go read's. Th
 cc's (the oracle's) where cc gives one, and the error tests are judged by line and kind (error or not),
 not by text, as goi's errorcheck (the survey's §5.5).
 
+### 9.6 Assembler sources (c-tails, 2026-11-22)
+
+A main file named `.S` is an assembler source that gcc preprocesses as `assembler-with-cpp` (libcpp's `CLK_ASM`) and
+assembles: no C translation unit. Its forms are the preprocessing layer's alone: its directives as §9.2's forms
+(`c/define` and `c/undef` as a C unit's, the others `c/directive` with their text normalized; a backslash-continued
+directive one line, its comments dropped) and the assembler text between them as `(c/asm-text "TEXT")`, the lines as
+written with their new-lines (a line whose `#` begins no directive name is text, as `CLK_ASM` reads it: `# comment`,
+`# 33`). `c/file` carries `:lang :asm`. Mode `:lines` prints the directives and the texts in order; mode `:full` keeps
+each form's lines as `:c/text`, the original byte for byte. Eval and AOT have nothing to run: the preprocessed text is
+the assembler's. The round trip and `bin/repr-c read` read a `.S` so; the checker's reads (ci, the dg and annotation
+checks) and the token and tree checks read it as C text, as before (the token check preprocesses it in `CLK_ASM`'s way).
+
+```clojure
+(c/file "12.S" :std :c99 :lang :asm)
+(c/define SRC [& y] "9999: y; .section __ex_table, \"a\"; .long 9999b, 6001f ;")
+(c/asm-text "\n    SRC(1: movw (%esi), %bx)\n6001:\n")
+```
+
 ## 10. Positions, comments and mode `:full`
 
 ### 10.1 Mode `:lines` (the default)
@@ -1355,7 +1373,7 @@ CS3 (a): what the reader reads and the printer prints, but ci and cf2g refuse by
 |---|---|
 | ~~GNU nested functions (`c/defn` in a block)~~ | in since 2026-11-17 (CS321 (a), the user; doc/C23-SURVEY.md, "As built: GNU nested functions"): a command of their own, a static chain through a global per nested function, the enclosing locals in frame memory, a non-local goto as a longjmp to a jmp_buf set at the enclosing function's entry |
 | ~~`__real__`, `__imag__` (`real`, `imag`)~~ | in since 2026-11-17 (h-c-run, doc/C23-SURVEY.md, "As built: h-c-run"): a complex operand's part, an lvalue of a complex object's |
-| inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated |
+| inline assembly (`c/asm` in a function, extended `asm`) with a template | the target's instructions; musl's are natives in `crt`. An empty template is in (h-c-run, 2026-11-17): its operands parsed from the text, a tied output given its input's value converted, the operands' side effects evaluated. A file-scope basic `asm` is in (queue 522c, the user's decision of 2026-11-22): its templates assembled by repr/asm and arbace.asm's amd64 assembler, each `.text` label a function of machine code (`(mcode ...)`), run on x86i over ci's memory by the System V ABI (go/arbace/cix86; tools/cirun's and cf2g's programs, not the executable's embedded ci); not yet relocations or data sections. `__builtin_apply_args` and `__builtin_apply` are in too, over ci's arguments in gcc's x86-64 block layout (no machine runs them) |
 | ~~GNU vector types (`vector_size`, `__builtin_shufflevector`, `__builtin_convertvector`)~~ | in since 2026-11-17 (CS320 (a), the user; doc/C23-SURVEY.md, "As built: GNU vector types"): lanes in memory, element-wise operators, comparisons, subscripts, broadcast, the shuffles, `convertvector`, SSE2's `cmp*pd` and `movmskp[ds]`; the `_mm_*` functions of Arbace's headers still declared only |
 | `__int128` beyond `+ - * / % << >> & \| ^ ~`, comparisons and conversions | the survey's CS3 (a): `__int128` arithmetic is in, its library (`printf` has none) and atomics out |
 | ~~`_Decimal32/64/128` arithmetic and conversions~~ | in since queue 522 (CR3 (a), the user's decision of 2026-11-22): BID in software (crt's WType Dec), musl's `printf` still prints none |

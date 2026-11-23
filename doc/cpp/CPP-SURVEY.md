@@ -9986,3 +9986,455 @@ the record unchanged): C++ read 5,665 / 135 / 517 (214 n/a, next's) -> 5,786 / 0
 - an observation for the user: coroutines/pr105475-3.C passes on the coroutine_handle rule, though, as pr105475-broken-spec.C (which 497-3
   (a) made :undefined-expectation), it specializes std::coroutine_handle ([coroutine.handle.general]/2: undefined behaviour); both now pass
   by their own lines, so no class needs them.
+
+## As built: cpp-diag-b, the own front end's diagnostics for parse, lookup, diagnostic, init and the small directories (2026-11-22; branch `cpp-diag-b-1122` from mac/next `171f82078`; the burst's stream beside queue 518 and cpp-diag-a)
+
+The stream's directories of gxx-dg: parse, lookup, diagnostic, init, expr, conversion, inherit, overload, warn, DRs, tc1, eh, cpp, tls,
+ubsan (602 files failing their own dg-error lines on Arbace's own front end at the base). The failing files grouped by their expected
+messages, each rule restated from the C++ standard (GCC's manual for its words and its extensions: __thread, -Wmain, -pedantic's pedwarns);
+no GCC code read. The verdict is by line, so each rule is judged on valid programs beside (`.tmp/probe/t/ok*.C`, no error) and on the
+stream's whole directories' own passes.
+
+### The rules
+
+- decl-specifiers (arbace/repr/cpp/parse.ae, `spec-checks!` over a new wrapper `parse-decl-specs` of the renamed `parse-decl-specs*`; the
+  specifiers' own keyword tokens, `spec-tokens`, a class-specifier's head and body and parenthesized, bracketed and angled operands left
+  out): typedef with a storage class, __thread before extern or static, __thread with typedef or register ([dcl.stc]/1, GCC's manual),
+  [dcl.type.simple]/3's table (two data types, long long long, long with short, signed with unsigned, long/short/signed/unsigned on the
+  wrong core type, complex bool), virtual friend, virtual static, virtual outside a class, member templates virtual ([temp.mem]/3), friend
+  outside a class, mutable on a non-member, __thread at block scope without static or extern, on a non-static member, storage classes on
+  parameters, members (extern, register) and template parameters, class definitions declared friend; register in C++17 (pedantic,
+  [diff.cpp14.dcl.dcl]) on variables without an asm label and on parameters; thread_local on functions; storage classes in a linkage
+  specification without braces ([dcl.link]/8);
+- declarators (the declarator loop of `parse-simple-decl`, one cond after the declarator is parsed): return types and ptr-operators on
+  constructors, destructors and conversion functions, static or cv-qualified ones, destructor names as non-function, non-member, another
+  class's member, a namespace's ("not a class-name"), destructor templates; members defined in a namespace not enclosing their class
+  ([namespace.memdef]/2), members declared out of class without a definition ([class.mfct]/2), namespace members qualified but not declared
+  there, qualified block-scope declarations, extra qualification, friend variables, friend definitions by qualified names
+  ([class.friend]/6), local classes' friends without a prior local declaration ([class.friend]/11), static data members of unnamed classes,
+  in-class initializers of static data members of non-integral type, constexpr variables and static data members without an initializer
+  (scalar and pointer variables; class objects a constexpr default constructor initializes; not variable templates nor out-of-class
+  redeclarations, as GCC), operator functions' default arguments (not operator(), new or delete), operands of class or enumeration type,
+  static operator and conversion functions (C++23's static operator() and [] aside), allocation functions (void* return, a std::size_t
+  first parameter without a default, not in a namespace nor static) and operator delete's void, default arguments in a typedef, missing
+  after a default (first declarations), earlier parameters in a default argument ([dcl.fct.default]/9), exception specifications in
+  typedefs before C++17, pure specifiers on non-virtual, static or non-member functions and on a function definition, cv-qualified
+  non-member and static member functions, main's linkage; bit-fields: static, friend and non-integral (pointer, reference, array, member
+  pointer, function, class) ones;
+- classes and namespaces: duplicate bases, invalid class-head names (a template parameter's or typedef's qualifier), classes defined by a
+  namespace-qualified name outside an enclosing namespace, pointers to members of namespaces, namespace definitions in blocks, C++98's
+  extra semicolons (pedantic), invalid octal and binary digits;
+- arbace/repr/cpp/diag.ae, checks appended to `checks` by `swap!` after its definition (no edit of the vector): `block-redeclarations`
+  ([basic.scope.block]/2: a parameter, a condition's, init-statement's or for-range-declaration's name, a handler's exception-declaration
+  redeclared in the outermost block, an anonymous union's members among them), `unsized-arrays`, `union-bases`, `covariant-returns`
+  ([class.virtual]/8 over the file's classes by name), `main-linkage`, `main-rules` ([basic.start.main]/2-3, -Wmain under -pedantic-errors),
+  `same-name-members` ([class.mem.general]), `thread-dynamic-init` (GNU __thread's constant initialization), `stray-jumps` (break and
+  continue outside their statements), `uninit-consts` ([dcl.init.general]/8's const-default-constructible), `class-member-conflicts`
+  (repeated using-declarations, overloads on the return type alone, typedefs conflicting with a member class); and sema-rules' entries by
+  `alter-var-root` for the checker's new refusal classes;
+- the checker (arbace/cpp/sema.ae, outside the namespace-scope declaration loop): bool operands of ++ (C++17) and --, ordered comparisons of
+  a pointer with a null pointer constant (CWG 1512), arrays from a non-array expression, braces around a scalar (C++98's braced scalar
+  elements and members too), an aggregate's uninitialized reference member, initializer strings too long ([dcl.init.string]/2),
+  string literals to char* in C++11 under -pedantic-errors, return statements with and without a value ([stmt.return]/2), non-const and
+  volatile lvalue references to rvalues of class type ([dcl.init.ref]/5.4), multi-level qualification conversions ([conv.qual]/3,
+  `cx-qual-bad?`), void operands of assignments and binary operators, assignments to an enumeration, unary +, - and ~'s operand types,
+  reinterpret_cast and const_cast to a non-reference type (`cx-named-cast!`), function pointers in arithmetic, delete's operand.
+
+### The shared functions touched (named for queue 518 and cpp-diag-a)
+
+- parse.ae: `parse-decl-specs` (now a wrapper of `parse-decl-specs*`, the old body), `parse-param-list` (register, earlier parameters in a
+  default argument), `parse-primary` (a namespace-qualified id-expression's undeclared first name, `declare declared-in-main?`), `parse-bases`
+  (duplicate bases), `parse-class-specifier` (invalid and non-enclosed class-head names), `ptr-ops` (namespace pointers to members),
+  `parse-simple-decl`'s declarator loop (the rules above), the bit-field branch of the member declarator, `parse-external-decl` (`;` and
+  namespace in a block), the linkage specification without braces, `lexical-diags!` (octal and binary digits).
+- diag.ae: the new checks and sema-rules' entries after `(def checks ...)`; no existing function changed.
+- sema.ae: `init-for` (arrays, scalars' braces, references, strings, the aggregate's members), `cx-implicit-scalar!` (write strings),
+  `cx-bad-ptr-conv?` (with `cx-qual-bad?`), `builtin-binop` (ordered comparisons, function pointers), `assign-node` (enumerations), the
+  UnaryOperator, BinaryOperator, CompoundAssignOperator, ReturnStmt, CXXDeleteExpr and named casts' cases of `analyze`.
+
+### Checked
+
+- each rule on its files with the REPL's probe and on hand-written valid programs (`ok1.C` to `ok22.C`, no error); a REPL that reloads
+  sema.ae must reload template.ae too (its hooks), or the probe refuses function templates' units: the dg runs, fresh processes, decide;
+- the stream's directories whole (1,111 files; the slow diagnostic/missing-header-pr110164.C, lookup/missing-std-include-3.C and
+  parse/limits-initializer1.C apart, their rows kept), `--record`, at ef84e6092 and again on the merged tree (e99575471): own passes of the
+  directories 512 -> 690 of their 1,114 rows, no own pass lost against the base, the control _control/dg/dr2082-vs-dr1423 failing as it must;
+- the other directories' own passes (1,333 of them, cpp0x/udlit-suffix-neg.C apart; no record): four regressions found and fixed
+  (constexpr without an initializer on a variable template, an out-of-class redeclaration and class objects), rerun in a fresh process: all
+  pass; next's 11 changed rows run on the merged tree, unchanged; missing-header-pr110164.C with a 2,400 s cap on the head (no record).
+- an incident: an interrupted run's own step recorded "no read row" for the stream's rows (the run killed after its read); every row was
+  recorded again from the next whole run and the three slow files' rows restored from the base.
+
+### The cells
+
+C++ read 5,786 / 0 / 532 (213 n/a) -> 5,799 / 0 / 520 (212 n/a); the own record's passes 1,846 -> 2,029 (183, 178 of the stream's
+directories and next's 5 merged); completeness 0.972210 -> 0.972688 (floored 97); independence 0.957770 -> 0.960667 (floored 95 -> 96;
+the read stage 0.799193 -> 0.813677).
+
+### Left
+
+- 422 files of the directories fail their own lines: expression semantics in templates (the checker skips units whose function templates
+  the namespace-scope loop refuses, queue 518's ground), access to protected members through pointers to members, the template
+  instantiation's errors, constant evaluation (ubsan/), GCC's recovery cascades after a syntax error, -Werror= options the checker does not
+  read (warn/Wwrite-strings-4 to -6), arrays in qualification conversions (conversion/qual1, qual2), and the many one-file rules.
+
+### Round 2 (2026-11-22, after next's merge of round 1 at e247eea2b)
+
+The 424 files left in the directories, the families that need no namespace-scope loop first (queue 526 widens the loop's recovery;
+mac/526-cpp-recovery had no commit yet when this round closed). The rules, from the standard (GCC's manual for its options):
+
+- options and lexical (diag.ae's `option-errors` over `code-text`, the source with comments and literals blanked; parse.ae's
+  `escape-error` and `lexical-diags!`): -Werror=pragma-once-outside-header, -Werror=write-strings (`werror?`: -Werror=X, or -Werror with
+  -WX), C++98's long long and LL suffixes under -pedantic-errors without -Wno-long-long; unknown escape sequences, C++23's delimited
+  escapes before C++23, C++17's hexadecimal floating literals before C++17 (pedantic); va_arg of a reference type; C's _Atomic; the
+  checker's void operand of ?: ([expr.cond]/2) — 11 files;
+- constant evaluation (diag.ae's `constant-ub`, `ce-eval` over literals, casts and operators): division by zero and shift counts out of
+  range in case labels, enumerators and bit-field widths ([expr.const]/5), signed overflow there under -pedantic-errors, integral
+  expressions of literals that are no null pointer constant initializing a pointer ([conv.ptr]/1, not under -fpermissive) — 5 files;
+- qualification conversions with array levels (sema.ae's `cx-qual-levels`, `cx-array-qual-bad?`: [conv.qual]/3 with DR 330 and P0388),
+  const_cast and reinterpret_cast over them, function pointers and void* converted implicitly (CWG 195) — 5 files;
+- pointer to member conversions (`cx-mptr-base!`: a virtual, ambiguous or, but for a C-style cast, inaccessible base; another member
+  type; constness cast away) and static_cast downcasts of pointers and references through a virtual or ambiguous base — 8 files;
+- declarations: typedef names qualified or of operator functions, block-scope extern with an initializer, C++26's delete reason before
+  C++26 (pedantic), two data types in a template parameter, members that declare nothing — 7 files;
+- comparisons of distinct pointer types without a composite pointer type ([expr.eq]/3) — 1 file; asm operands' names and constraints —
+  3 files; parameters of one clause named alike, invalid pure specifiers on a function typedef's member, enumerations defined twice in a
+  class — 3 files; non-constant inner bounds in new-expressions (`new-bounds`; its files' other lines are template instantiations) — 0.
+
+Shared functions touched beyond round 1's: parse.ae `escape-error`, `lexical-diags!`, `parse-asm-parts`, `delete-reason!`,
+`parse-param-list`, the `__builtin_va_arg` and `_Atomic` branches, `spec-checks!` (template parameters); sema.ae `cond-node`,
+`cx-implicit-scalar!`, `cx-named-cast!` (static and C-style casts), `builtin-binop` (pointer comparisons); diag.ae only appended checks
+and sema-rules' entries (`unsized-arrays` narrowed: a pointer or reference to an unknown bound is complete).
+
+Checked: each family's files and valid programs (`ok23.C` to `ok30.C`) on the probe; the directories' 1,111 files run whole with
+`--record` twice (68d8fd8ac, a35cdbd43): own passes of the directories 690 -> 733 of 1,114, one regression on the way (parse/array-size3.C,
+the narrowing of `unsized-arrays` too wide: an unnamed class's name holds a parenthesis) fixed and run again; the other directories'
+1,338 own passes run on a35cdbd43 without a record: all pass; the control failing as it must. Merged with next (95da59ab7: C's and
+Haskell's rounds; C's pp.ae change concerns .S files alone): reap 0 problems.
+
+Cells: C++ read 5,799 / 0 / 520 -> 5,802 / 0 / 519 (210 n/a); own passes 2,029 -> 2,072; completeness 0.972688 -> 0.972734 (floored
+97); independence 0.960667 -> 0.961348 (floored 96; read stage 0.813677 -> 0.817081).
+
+
+## As built: cpp-rt-own4, GNU's VLAs, late destructor calls, lazily named specializations and the last pack units (2026-11-22; branch `cpp-rt-own4-1122` from mac/next 3e8dfe109)
+
+The brief (the main session, toward the CoMaIn goal: C++'s eval and AOT independence, 0.995 each): the lowered runtime's last 4 pack
+units by Arbace's own code generator, cpp-rt-own3's causes-left table the list, its decisions taken as recommended: cpp-rt-own3-1 (a)
+(GNU's variable-length arrays), cpp-rt-own3-2 (a) (a destructor named before its class is complete, resolved late); tzdb and valarray
+probed first. Light: no gate; each rule on a reduced case against clang 23.1.5's IR (the host's clang++, the oracle tier's tool, by
+hand; the worktree's `.tmp/{v1,d1,ff,fc,ec,fp,vo,ei,va,tc,tz}`, scratch), then each unit by `arbace.cpp.codegen gen-batch` with
+runtime_ours' options (`.tmp/where.sh`), its defined external names against the pack cpp-runtime-ir's IR (runtime-judge's names level).
+The C++ read stream (cpp-read-1122) and the Mac's dg tasks edit sema.ae and template.ae in the checker's paths: every rule below is
+the code generator's alone (`(not (checking?))`) but two that are no mode's, named where they are.
+
+### DECISION cpp-rt-own3-1 (a): GNU's variable-length arrays
+
+- **The parser** (parse.ae's parse-simple-decl, no mode's: a `:_` key, the tree compared with clang's unchanged): a VarDecl whose
+  declarator has an array bound that is no literal keeps its bounds as parsed, outermost first, `:_vla`.
+- **sema** (vla-local, from local-var!, the code generator's): a block-scope variable whose type does not resolve because its
+  outermost bound is no constant ("not a constant" anywhere in the refusal, a const local's initializer calling strlen too), no
+  initializer, not static or thread_local, its element type resolving and no class: the type `{:k :arr :n nil :vla true :of T}`, the
+  var's `:vla-n` the bound analyzed in the block's scope as an integer prvalue (clang's VariableArrayType's size expression). abi's
+  size-align refuses a :vla array (sizeof of a VLA is not modelled).
+- **The code generator** (vla-decl!): as clang's EmitAutoVarAlloca at -O0: the bound evaluated and widened to i64 (zext from a
+  narrower type, clang's CreateIntCast unsigned), at the scope's first VLA (`*vla-saved*`, bound per compound statement: clang's
+  DidCallStackSave per RunCleanupsScope) `llvm.stacksave` stored into a `ptr` alloca and a cleanup `{:stackrestore slot}` pushed,
+  then `alloca T, i64 n, align max(16, alignof T)` (ASTContext::getDeclAlign's large-array alignment for a VLA) and the bound
+  stored into an `i64` alloca (clang's __vla_expr); the variable's address the dynamic alloca. The cleanup is a normal one only
+  (clang's pushStackRestore(NormalCleanup, ...)): run-cleanup! loads the slot and calls `llvm.stackrestore`, eh-state leaves it out,
+  so no landing pad for it and none runs it while unwinding. The lowering takes the dynamic allocas and stack saves already (ci's
+  heap chain, cx$dyn_alloc).
+
+Checked: `.tmp/v1/vla.cc` (a VLA in a function, two in a template's block, one of 4 + k, one of long by a short bound): the 5
+defined names clang's, each function's allocas, stack save, dynamic alloca, __vla_expr store and restore in clang's order.
+
+### DECISION cpp-rt-own3-2 (a): an explicit destructor call of a class not complete where it is analyzed
+
+The probe first: floating_from_chars.cc's `__p->~_Up()` is reached through `vector<__pool_resource::_BigBlock,
+polymorphic_allocator<_BigBlock>>::~vector`, made eager by the lazy round's variable rule (template.ae's pending: a parameter of
+vector<_BigBlock> type, the vector's copy and move constructors' `__x` and `__rv`, puts its class's closure's destructors in the
+round), though clang instantiates none of it there; _BigBlock is never defined in the unit (memory_resource.cc defines it). A
+class's implicit destructor is already declared at its completion (finish-class!). So: member-expr (the code generator's), the
+destructor name of a class not complete (or being defined) with no destructor declared yet, is `{:op :late-dtor :cls k :obj o}`;
+analyze-call makes it `{:op :late-dtor-call ...}` (no arguments); codegen's emit-rv takes the class's destructor when it writes the
+call (method-call's node then: virtual unless qualified), and refuses there if it is still missing. The lazy round's walk finds
+the object's class type in it, so a destructor declared later is made eager as before.
+
+Checked: `.tmp/d1/d.cc` (~V<Never> of an incomplete Never, through a parameter V<Never>&, analyzed with the late node and never
+written; kill<Done> and kill<Virt>, and a qualified `v->Virt::~Virt()`): the 6 defined names clang's.
+
+### valarray: specializations named lazily in member functions' types (the drops probed first)
+
+valarray.cc's "no member size": valarray<size_t> was cached with no member, its instantiation through gslice's constructor having
+ended on "recursive template instantiation exceeded maximum depth (the analysis' stack, under valarray)": <valarray>'s
+`_Expr<_Clos, _Tp>` declares `_Expr<_UnClos<__unary_plus, std::_Expr, _Clos>, value_type> operator+() const` (and -, ~, !), each
+specialization naming the next in a member function's type, and the analysis instantiated every class template specialization it
+named (451 nested _Expr instantiations before the stack ended). [temp.inst]/2: naming a specialization in a function declaration does
+not instantiate it; clang instantiates none of them until one is used. The rule (the code generator's; the checker instantiates as
+before): while a member function's type is resolved (sema's `*in-signature*`, bound in declare-fn!, unbound by declare-instance!
+for a class's body), a specialization of a template already being instantiated twice up the stack (template.ae's `*inst-stack*`,
+`lazy-here?`) is named lazily: an incomplete class marked :lazy-inst cached as the template's instance (lazy-instance!), its layout
+refused (abi's layout*: no code is written from a class never defined), instantiated in place when it is named again outside any
+class's instantiation and any member function's type (a use of the unit's own code). Two up the stack, not one, so that a class
+template whose member names another specialization of itself (`span<T, dynamic_extent> first(size_type)` of span<T, N>) is
+instantiated as before; only a chain like _Expr's is cut. The 64 "unknown type _Tp" drops (the out-of-line operators the macros
+of <valarray> define) and the drops of gslice_array's and slice_array's members stay: valarray.cc uses none of them.
+
+Checked: `.tmp/va/v1.cc` (`v.size()` of a valarray<size_t>, gnu++98, valarray.cc's options): generated, 180 specializations named
+lazily, none instantiated; then valarray.cc itself (below).
+
+### Found on the way (each by its reduced case against clang 23.1.5's IR)
+
+- **The parser** (no mode's; parse.ae, shared with the read stream): parse-simple-decl looked a declaration's initializer up with the
+  class's complete scope first (with-late*) in every context, so in a member function's body a block's declaration `size_t shr =
+  limb_bits - shl;` found the member function shl, declared later in the class, before the local `size_t shl` (fast_float.h's
+  bigint::shl_bits; `this->shl` then, "arithmetic on ulong and ptr"); the complete scope is already below the function's
+  parameters (fn-body's with-late*), so now a member's initializer alone takes it ([class.mem]/7). The trees change only where a
+  local or a parameter shadows a member, as clang's (a DeclRefExpr of the local). `.tmp/ff/s.cc`, `s3.cc`, `m.cc` (a default member
+  initializer naming a later member still sees it).
+- **No argument-dependent lookup for a qualified name** ([basic.lookup.argdep]/1; sema's analyze-call, the code generator's):
+  floating_from_chars.cc's `fast_float::from_chars(first, last, value, fmt)` had found std::from_chars through the std::chars_format
+  argument, a better match than the template, so `std::from_chars(double&)` called itself and fast_float's parser was never
+  written. `.tmp/fc/f1.cc`: 82 defined functions as clang's 82.
+- **The built-in candidate for two operands of one enumeration type** ([over.built]/16, [over.match.best]/2.1; sema's operator-call,
+  the code generator's): the built-in comparison is better than a function reached through a user-defined conversion of an operand;
+  floating_from_chars.cc's auto_locale `ec == errc{}` had called operator==(const error_condition&, const error_condition&) through
+  error_condition's converting constructor (7 names more than the pack's). `.tmp/ec/e.cc`.
+- **__builtin_fpclassify** (sema, the code generator's; the checker's records were made without it): zero when x == 0, nan when x is
+  unordered, inf when x - x is a NaN, normal when |x| is at least FLT_MIN, DBL_MIN or LDBL_MIN, else subnormal, an int (floating_to_chars.cc's
+  __handle_special_value). `.tmp/fp/fp.cc` run against clang's (status 203: zero, normal, subnormal, inf and NaN of float, double's
+  zero, subnormal and normal, long double's zero, normal and LDBL_MIN), its names clang's.
+- **Member templates differing by cv- or ref-qualifiers** (template.ae's redeclaration check, the code generator's): the
+  functionally-equivalent check compared the signatures without the member's qualifiers, so <optional>'s `value_or(_Up&&) const&` and
+  `value_or(_Up&&) &&` were one template, the second, and `precision.value_or(0)` of an lvalue had no viable function
+  (floating_to_chars.cc; any optional's value_or). `.tmp/vo/d.cc`, `e.cc`, `g.cc`.
+- **A destructor's explicit instantiation** (template.ae's explicit-qualifier, the code generator's): `template
+  valarray<size_t>::~valarray();` names the destructor by two tokens, `~ valarray`, which the qualifier's search did not take: its
+  member was not marked, ~valarray written linkonce_odr with no D1 alias (valarray.cc's missing _ZNSt8valarrayImED1Ev). `.tmp/ei/e.cc`:
+  C1 and D1 aliases, D2 weak_odr, as clang.
+- **128-bit constants in the template text evaluator** (template.ae's eval-text, the code generator's; the checker refuses them as
+  before, cpp-s5b): a cast to __int128 or unsigned __int128 is an exact `{:k :w128 :v :u}` value modulo 2^128, which the
+  comparisons, the logical operators, ?:, unary - and ~, + - * and the shifts compute (fold-w128) and which never leaves the text
+  (eval-text refuses one as its result), so only what it decides does: <type_traits>' __is_signed_helper's `_Tp(-1) < _Tp(0)`, so
+  is_signed<__int128> and is_signed<unsigned __int128> (floating_to_chars.cc's __to_chars_i of the 128-bit mantissa had found no
+  `value`). `.tmp/tc/w.cc` run against clang's (status 93: is_signed of both, is_unsigned, and a template over `T(1) << 100 > T(0)`,
+  `T(-1) < T(0)`, `~T(0) == T(-1)` of both).
+- **A parameter's top-level const** (the parser's ParmVarDecl `:_const`, a `:_` key, since its qualType prints the parameter as the
+  function's type does, [dcl.fct]/5; sema's declare-fn! `:param-const` and analyze-fn!, the code generator's): the parameter's variable
+  keeps it, so `const optional<int> precision`'s value() is the const& one and `const int precision` given to optional<int>(_Up&&) deduces
+  const int& (floating_to_chars.cc: value() & and optional<int>(int&) before). `.tmp/op/o2.cc`: 31 names clang's.
+- **A variable template's pack arguments as written** (abi's mangle-expr :vt): an unresolved name's arguments a pack's elements one by
+  one, as :sr's and :mcall's already, no J ... E: <optional>'s `enable_if_t<is_constructible_v<_Tp, _Args...>, bool>`,
+  X18is_constructible_vIS0_DpT_EE, and `__and_v<__not_<...>, ...>`, X7__and_vISt6__not_...E. `.tmp/op/o2.cc`.
+- **A non-type template parameter is no pack for a `...` in its type's template arguments** (template.ae's tparams, the code
+  generator's): `enable_if_t<is_constructible_v<_Tp, _Args...>, bool> = false` had been a pack, mangled `TpTn...` with an empty `JE`
+  argument, clang's `Tn...Lb0E`. `.tmp/op/o2.cc`.
+- **A linkonce_odr variable whose address is taken is written** (codegen's var-addr and gen-module's pruning): `return nullopt;` and
+  `optional<int>(in_place, 3)` copy an empty class from the inline variables, a copy no instruction reads, so the pruning of the
+  unreferenced linkonce_odr variables (queue 367) had dropped _ZSt7nullopt and _ZSt8in_place, which clang writes (its EmitLValue of the
+  copy's source). `.tmp/op/o3.cc`: names and globals clang's.
+- **An explicit specialization of a static function template is internal** (template.ae's explicit-fn-spec!, the code generator's;
+  [temp.expl.spec], and an argument of internal linkage, as instantiate-fn's): `template<> optional<to_chars_result>
+  __handle_special_value<floating_type_float16_t>(...)` had been external. `.tmp/hs/h.cc`.
+
+### The units made own (rt_ours_glob, bin/cppi), each one's names by gen-batch the pack's
+
+c++17/floating_to_chars.cc (DECISION 1, with __builtin_fpclassify, optional's value_or, a parameter's top-level const, the variable
+template's pack arguments, the non-type parameter, nullopt and in_place, the 128-bit constants, the explicit specializations'
+linkage), c++17/floating_from_chars.cc (DECISION 2, with the parser's lookup, the qualified call's ADL, the enum comparison) and
+c++98/valarray.cc (the lazily named specializations and the destructor's explicit instantiation): 194 to **197 of 198**.
+
+### c++20/tzdb.cc, probed to the end again (left on the pack)
+
+The header drop of `typename invoke_result<_Fn, _Args...>::type` (projected's value_type and operator*) is
+`projected<__normal_iterator<...>, P>` for a P that is an overload set's type ({:k :overload}: an overloaded function's address taken
+as a candidate's projection, `&Vec::value_type::name` of a generic lambda), not the call's: projected over a pointer to member
+function (`.tmp/tz/t7.cc`) or to a data member of class type (`t8.cc`) and invoke_result of both (`t4.cc`, `t5.cc`) generate as
+clang's. The refusal stays "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`
+(23 minutes into the unit; the reduced case with <chrono>'s sys_seconds, `.tmp/tz/t6.cc`, did not finish in 20 minutes): none of
+__upper_bound_fn's two operator()s is viable, the range one's `indirect_strict_weak_order<const sys_seconds*, projected<iterator_t<R>,
+P>> _Comp = ranges::less` constraint over time_point's three-way comparison the likely one. Next: a probe of that constraint alone,
+with a faster harness (the unit's chrono and format headers make each probe 20 minutes or more).
+
+### Found and left (not on the units' way)
+
+- `*opt` of a prvalue `std::optional<int>` (`*hv(p, w)`): "ambiguous call (3 viable)" among optional's operator*() const&, && and
+  const&&, the base's too (`.tmp/hs/h.cc`'s first form): the implicit object parameter's ranking for an rvalue object
+  ([over.match.funcs]/5, [over.ics.rank]/3.2.3) does not prefer && over const&&.
+- A subnormal long double literal (`1e-4940L`): its x86_fp80 constant written with too many hex digits ("lower-float-format",
+  `.tmp/fp/fp.cc`'s first form): fp80-hex for a subnormal.
+
+### Checked (the brief's proofs, and only these; no gate)
+
+| check | result |
+|---|---|
+| reduced cases against clang 23.1.5's IR (by hand, the host's clang++ -O0) | v1/vla.cc, d1/d.cc, ff/s.cc, ff/s3.cc, ff/m.cc, fc/f1.cc, ec/e.cc, vo/{d,e,g}.cc, ei/e.cc, op/o2.cc, op/o3.cc, hs/h.cc: every defined name clang's (v1: the VLAs' shape clang's); fp/fp.cc and tc/w.cc run as clang's builds (statuses 203 and 93); va/v1.cc generated (180 lazily named, none instantiated) |
+| each unit by gen-batch with runtime_ours' options (`.tmp/where.sh`), names against the pack | floating_to_chars, floating_from_chars, valarray: same; tzdb: "no operator() of __upper_bound_fn" (23 min) |
+| `bin/cppi runtime-build` (auto, at 8eab9eb73, under `ulimit -v 8388608`, CPPI_DISK_MAX=94: the disk at 91% from other lines) | **198 units, 198 pass, 197 by our route** ("ours 197"), the names level equal for each own unit (each of the 196 C++ units' names checked against the pack while the IR was made, then runtime-judge's); IR 6,971 s (one generator process), read, print and lower 299 s; 2 h 2 min wall |
+| `bin/cppi runtime-ci` (`CPPI_CI_CHUNK=8 CPPI_CI_MEMLIMIT=2GiB`, under `ulimit -v 8388608`) | 199 of 199 read (the 198 units and cx-rt; the reader's key another than any kept library's, so every unit read again, in 25 chunks); 6,020 s |
+| `bin/cppi runtime-inputs --record` | own 197, pack 1: test/cpp/runtime/inputs-linux-amd64.edn's 3 rows `{:ir :own, :ci-target :own}` |
+| `bin/cppi lower-essential` (`ARBACE_NO_AOT=1`, on this runtime) | 6 files, 6 pass, 0 failing (the control's lowered run the oracle tier's); 499 s |
+| `bin/cppi check --only test/cpp/essential-check.txt` (cpp-check-essential's command, `ARBACE_NO_AOT=1 CPPI_THREADS=2 CPPI_CI_MEMLIMIT=3GiB`, on this runtime) | samples 4 of 4 and runtime 4 of 4 pass (the programs' IR by our route), the run controls bitfields-vs-io, coroutine-vs-pr106188 and ctor-throw-vs-thread-throw differing as they must, selfref's control refused as it must; selfref 220 of 225 judged by their own verdict; 3,449 s |
+| `bin/cppi codegen-gen` (`--record`, a whole run, then its judge with the controls) | 156 of 156 generated, the record written again byte for byte (no digest moved: no sample meets a rule of this round), then its judge (gen-judge over the same run) 156 pass with both controls failing as they must; 881 s |
+| `bin/repr-cpp c2j-check` | 33 of 33 sources compiled, 0 failed, **0 reflection warnings** (ok, 333 s); on the gate's executable 92a96093a59cb6e9edb9 as the host (ARBACE_HOST_EXE): stage 0 refuses ARBACE_PATH_FIRST's load of the checkout's arbace/core since b4ab3ebfc's runtime (`Compiler$Dyn/hideMethod`, which the seed's runtime lacks), the environment's, not this round's |
+| `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` | the matrix unchanged (56 of 56 cells, 0 problems); C++'s eval and AOT stages 0.9950 to 0.9990 each, its independence 0.9522 to **0.9538**, 95 (floored, unchanged); test/crops/scores.edn re-recorded, `--judge --strict` 0 problems, records-check 9 pairs, 0 problems |
+
+The runtime-keyed steps (runtime-ci, runtime-inputs, lower-essential, the check) ran on the runtime built at 8eab9eb73, the code
+of that commit in the working tree. Keys: the runtime's key moves (the code generator, sema, template, abi, repr/cpp's parser,
+rt_ours_glob): the gate's cpp-runtime builds once (2 h on this host); `gate_key` and the javac keys move (arbace/cpp and
+arbace/repr/cpp embedded); runtime-ci's key moves (every unit read again). Shared code touched (the read stream's and the dg
+tasks' files): parse.ae (the `:_vla` and `:_const` keys, no tree change; with-late* for a member's initializer alone, which
+changes the trees, the checker's too, only where a block's local or a parameter shadows a member, as clang's), sema.ae and
+template.ae (every change behind `(not (checking?))` or reached only from the code generator's paths); a dry merge with
+mac/cpp-read-1122 (b75bcfe07) has no conflict.
+
+### The unit left on the pack (1 of 198)
+
+| unit | cause | next decision |
+|---|---|---|
+| c++20/tzdb.cc | "no operator() of __upper_bound_fn" at `ranges::upper_bound(infos, tp, ranges::less{}, &ZoneInfo::until)`: neither operator() viable, the range overload's `indirect_strict_weak_order<const sys_seconds*, projected<iterator_t<R>, P>>` over time_point's three-way comparison the likely constraint; each probe 20 minutes or more | DECISION cpp-rt-own4-1 |
+
+```
+DECISION cpp-rt-own4-1 (c++20/tzdb.cc: ranges::upper_bound with a member function projection over chrono's time_point)
+(a) Probe the constraint alone (`indirect_strict_weak_order<ranges::less, const sys_seconds*, projected<vector<Z>::iterator,
+    sys_seconds (Z::*)() const noexcept>>` in a static_assert, the unit's options) with the full parse cache on
+    (CPP_GEN_FULL_CACHE=1) so each probe costs the analysis alone, then fix what it refuses. Recommended: the last unit, the
+    lowered runtime's IR all Arbace's own (eval and AOT 1.0 for the runtime's half).
+(b) Leave it on the pack.
+```
+
+### tzdb's second round (not landed: the branch `cpp-rt-own4-tzdb-wip-1122`, one commit on this branch, no runtime-build at its code)
+
+A lighter reduction found the cause in 79 seconds a probe (`.tmp/tz/t9.cc`: <algorithm>, <vector> and <bits/chrono.h> in place of
+<chrono>): the projection's `_Proj` was deduced as the overload set's own type ({:k :overload}) from `&ZoneInfo::until`, so
+projected<It, _Proj> had no value_type and neither operator() was viable; the constraints themselves evaluate as clang's
+(`.tmp/tz/t10.cc`, ten concept-ids, 1023 both). Four rules, each on a reduced case against clang 23.1.5's IR: `&C::m` of one member
+function deduces from its pointer type ([temp.deduct.call]/6); a noexcept member function's type is noexcept since C++17, mangled
+Do (`MS1_KDoFSD_vE`); a relational operator's rewritten candidate `(x <=> y) @ 0` wins when its template is more specialized than
+the best operator@'s ([over.match.best]/2.5 before /2.8: <bits/chrono.h>'s constrained operator<=> of duration and time_point over
+the unconstrained operator<, clang's choice); a type-constraint with arguments counts in the associated constraints
+(`three_way_comparable_with<_Dur1> _Dur2`). With them the unit passes the upper_bound call and stops at `year::min()/January/1`,
+"arithmetic on class and class": month's friend declaration of `operator/(const year&, const month&)` and year_month's friend
+definition of it (`chrono::year`, `chrono::month` qualified), found by ADL through month, not taken. Each tzdb probe is 25 minutes
+and the unit has 2,000 more lines: DECISION cpp-rt-own4-1 (a) now means landing the WIP branch's four rules with the runtime's
+proofs and going on from the friend's redeclaration.
+
+### tzdb's third round (not landed: the WIP branch at `a5c0aaa90`, stopped at the consolidation)
+
+The WIP branch took cpp-rt-own4-1122 with next merged (1dd00c37a), then seven code generator rules, each on a reduced case
+against clang 23.1.5's IR (`.tmp/tz/` of the worktree `cpp-rt-own4-tzdb`), none proven by a runtime-build: a friend declared
+alone in an associated class makes its definition in another class visible to ADL ([basic.lookup.argdep]/4.3; template.ae's
+friend! keeps the declaration on its class, sema's befriended? declares it on the first lookup that asks and matches it by
+signature: t16, `year::min()/January` found, names equal); noexcept kept on a member function pointer's type read from its text
+since C++17 (`KDoF..E`); a call of a namespace's function template specialization on tag objects in a constant's text
+(template.ae's ns-call-value: <type_traits>' `__call_is_nt<_Fn, _Args...>(typename _Result::__invoke_type{})` in
+__call_is_nothrow's base, whose class had had no base and __is_nothrow_invocable no value: t17, eight traits as clang's); a call
+through a member function pointer of a throwing type may throw in `noexcept(...)` (t14, 13 as clang's, 15 before); a const&& member
+for a non-const rvalue ranked between && and const& ([over.ics.rank]/3.2.6: t18, `*opt` of a prvalue no longer ambiguous); a
+constexpr class object of namespace scope read by the evaluator ([expr.const]/4, `:cg-constexpr`); and a POD local
+direct-initialized by a constexpr constructor folded as clang's isConstantInitializer does (t20-t22, the `__const` globals and
+names equal). <chrono> alone (`.tmp/tz/t15.cc`, 27 minutes) generated with the first rule, its names clang's but for the
+functions the POD local's folding (the last two rules, found by it) leaves out; the whole unit's probe was stopped at the
+consolidation. DECISION cpp-rt-own4-1 (a) now means: the WIP branch's rules with a runtime-build (198 units, names against
+the pack) and lower-essential, then the unit's probe again.
+## As built: cpp-diag-a, the own front end's rules for C++20 to C++26 (2026-11-22; branch `cpp-diag-a-1122` from next `171f82078`; the burst's stream on C++'s independence)
+
+The stream's directories of the dg check's dg-error part, gxx-dg/cpp2a, cpp23, cpp26, concepts and coroutines (queue 518 holding cpp0x,
+template, cpp1y, cpp1z, other and ext, cpp-diag-b parse, lookup, diagnostic, init, expr, conversion, inherit, overload and the small
+rest): their files that fail their own dg-error lines on Arbace's own front end (`bin/repr-cpp dg --front native`,
+test/cpp/check-dg-own-linux-amd64.edn), grouped by expected message, each group a rule written from the C++ standard (N4950, the C++26
+working draft for P2169, P2361, P3144) with GCC 15.2's wording read off the tests' dg-error lines (the verdict compares lines, not
+texts); no GCC code was read. Every rule is a new check appended to arbace/repr/cpp/diag.ae (`checks`, by `swap!`), over the native
+parser's tree and the source text.
+
+### The rules
+
+- coroutines (`coroutine-rules`, `coroutine-handle-members`): [expr.await]/2 (no await or yield expression outside a function body, in
+  a handler, in sizeof's or decltype's operand), [dcl.spec.auto.general]/4 (no coroutine with a deduced return type), no return
+  statement in a coroutine, the promise's interface ([dcl.fct.def.coroutine]/3-/12: initial_suspend, final_suspend, get_return_object,
+  unhandled_exception unless -fno-exceptions, return_void or return_value for each co_return, yield_value for each co_yield, not both
+  return forms; its operator new usable with the frame's size, its operator delete with (void*) or (void*, size_t),
+  get_return_object_on_allocation_failure static, with a noexcept operator new and std::nothrow), the awaiters' interface
+  ([expr.await]/3: await_ready, await_suspend, await_resume, await_suspend's result void, bool or a coroutine handle; co_yield's
+  awaiter yield_value's result, a deduced one read off its return statement), judged when the promise class is resolved
+  (coroutine_traits' explicit specialization for R alone, else R::promise_type; no bases, no using-declaration, no template; a
+  member function with R's primary traits only); GCC's checks of the promise after the body skipped when the body had an error;
+  and GCC's interface with a std::coroutine_handle the unit declares (address non-static and single on coroutine_handle<void>,
+  from_address static and single);
+- explicit object parameters (`explicit-object-params`, `xobj-overloads`, P0847R7): [dcl.fct]/6 (first parameter only, none in a
+  requires-expression, a function type or a non-member function, no default argument, no pack; C++23's), static, virtual,
+  allocation and deallocation functions, cv- and ref-qualifiers, overriding a base's virtual function, override and final, a
+  destructor, mutable and static lambdas, `this` in the body, an explicitly defaulted assignment's signature, and
+  [basic.scope.scope]/4's corresponding object parameters against static and implicit object member functions;
+- __builtin_source_location's std::source_location::__impl (`builtin-source-location`; the tests' messages state it, the GCC manual
+  does not document the builtin);
+- constinit and consteval where no declaration may have them (`constinit-consteval-specs`: [dcl.constinit]/1, [dcl.constexpr]/1-2,
+  [dcl.spec.general]/2, [dcl.typedef]/1, [basic.start.main]/3), immediate functions (`immediate-addresses`: [expr.const]/16-18 and
+  P2564's escalation: an immediate function's address taken or an immediate invocation reading a variable not usable in constant
+  expressions outside an immediate function context, `if consteval`'s branches, constexpr function templates and abbreviated ones
+  escalating to immediate functions, to a fixpoint) and consteval virtual functions ([class.virtual]/18);
+- constexpr bodies before C++23 (`constexpr-pre23-bodies`: static and thread_local variables, goto, try-blocks and function-try-blocks
+  before C++20, C++11's function-try-block bodies) and `if consteval`'s else branch a compound statement ([stmt.if]/4, the parser's
+  `parse-if`);
+- later standards in earlier ones, GCC's pedwarns under -pedantic-errors (`version-pedwarns`: labels at the end of a compound statement,
+  alias-declarations as init-statements, auto(x), lambda templates), using-declarations as init-statements
+  (`using-init-statements`), lambda specifiers (`lambda-specifiers`: mutable with static, a static lambda's capture, two ellipses in a
+  capture), operator[]'s arity before C++23 (`subscript-arity`), non-local lambdas with a capture-default and constexpr objects of
+  classes with virtual bases (`nonlocal-lambdas`);
+- comparisons (`defaulted-comparisons`: [class.compare.default]/1-2, P2085's friends, == and the secondary operators' bool;
+  `builtin-spaceship`: [expr.spaceship]'s operand rules and the comparison category types <compare> declares);
+- concepts and placeholders (`concept-decl-rules`: a concept at namespace scope, unconstrained, one template-head, defined once, no class
+  of its name, distinct requires-expression parameters, no placeholder in an alias or typedef, no default for a template parameter
+  pack, friends with requires-clauses as definitions; `abbreviated-templates`: virtual and literal-operator abbreviated templates,
+  constrained auto with a trailing return type or in a type-id; `constrained-bindings`; `concept-qualifiers`: a concept-id as a
+  nested-name-specifier, a concept-id's argument count; `auto-template-args`; `prospective-destructors`: [class.dtor]/4 with
+  constraints of literal booleans; `friend-template-constraints`: a friend class template's template-head against the original's);
+- declarations (`using-and-consteval-overrides`: [namespace.udecl]/3-5 and [enum.udecl]/1; `designated-lists`: C++20's all-or-none
+  designated clauses and no pack expansion; `destroying-deletes`: P0722's first parameter; `bitfield-captures`: a structured binding
+  of a bit-field captured by reference; `delete-incomplete`: P3144, C++26; `assume-expansions`: an assume attribute's pack expansion);
+- C++26's name-independent declarations (`name-independent-uses`, P2169: an ambiguous use of `_` in a block, a parameter's scope, a
+  selection or iteration statement's shared scope, a lambda's init-captures; static and namespace-scope structured bindings and
+  template parameters named twice), with `redefinitions` not reporting a block-scope automatic variable `_` (except under
+  -pedantic-errors before C++26).
+
+### The shared functions touched (named for queue 518 and cpp-diag-b)
+
+- arbace/repr/cpp/diag.ae: `checks` (the new checks appended by `swap!`, after `fallthroughs`); `redefinitions` (`enter!`: a block-scope
+  automatic variable named `_` takes the name without a conflict, except under -pedantic-errors before C++26). Not touched: `sema-errors`
+  and its namespace-scope loop (queue 518's), arbace/cpp/sema.ae, arbace/cpp/template.ae. The stream's own earlier functions
+  (`coroutine-rules`, `explicit-object-params`, `immediate-addresses`, `lambda-specifiers`, `constrained-bindings`,
+  `using-and-consteval-overrides`) were changed in place.
+- arbace/repr/cpp/parse.ae: `parse-if` (`if consteval`'s else branch, "'if consteval' requires compound statement").
+
+### Checked
+
+- each rule on its files with the REPL's probe (arbace.repr.cpp.dg's verdict over the file's dg.edn entry), and the stream's directories'
+  own passes again with the REPL at the last code (concepts 55 of 55, cpp23, cpp26 and coroutines 112 of 112, cpp2a 182 of 185: the
+  three regressions fixed before the record, constrained auto in structured bindings GCC's pedwarn and a concept's name, auto inside
+  a template argument's brackets, P1099's enumerators in class-scope using-declarations);
+- three record runs, `bin/repr-cpp dg --corpus dg-error --front native --only LIST --record`, each over the whole corpus's files whose
+  source a round's rules can reach (by a pattern of the constructs), with the control pair DRs/dr2082.C and DRs/dr1423.C failing as it
+  must: r1 (129 files), r2 (432), r5 (750 of 900 in five chunks of 150: the stream's directories' own passes, the parser change's
+  reach and the rules' files; the sixth chunk's 148 files, 11 of them the stream's cpp2a udlit-class-nttp and using-enum files, left
+  unrun at the consolidation, their rows next's). No recorded pass lost in the stream's directories; rows of other directories the runs
+  changed put back to next's (the other streams' to record; cpp0x/constexpr-ctor10.C, cpp1y/lambda-generic-77914.C and parse/crash72.C
+  pass on these rules; cpp0x/udlit-suffix-neg.C timed out under the host's load, as cpp-gnu saw).
+- the dg tool's GOMEMLIMIT=1500MiB default starves the own front end's 4 workers on these headers (a run of 786 files took over 3 hours
+  in the Go collector, at its limit); the record runs set GOMEMLIMIT=2800MiB, then 4000MiB (RSS about 3 to 4 GB, VmSize under the
+  8 GB ulimit).
+
+### The cells
+
+C++ read 5,786 / 0 / 532 -> 5,805 / 0 / 516; the own record's passes in the stream's directories +139 (r1 52: coroutines 28, cpp23 13,
+cpp2a 11; r2 20: cpp2a 15, cpp23 5; r5 67: cpp2a 46, coroutines 7, cpp23 6, concepts 4, cpp26 4). C++'s independence 0.957800 ->
+0.960000 (the tool's mean of its rounded stages; the read stage 0.799 -> 0.810; floored 96, from 95), completeness 0.972210 -> 0.972852
+(floored 97).
+
+### Left
+
+The stream's directories' remaining failures are mostly the code generator's Sema's (overload resolution's no match and ambiguity,
+constraint satisfaction at a call, the constant evaluator: bit_cast, dynamic_cast, uninitialized reads, consteval invocations whose
+argument is a constant the evaluator must run, constexpr new), template instantiation (errors only at a specialization: concepts' T::f,
+explicit-obj-lambda's instantiations, using-enum-7), class members named `_` (name-independent-decl6, -10's code generator's error),
+C++26's unevaluated strings (unevalstr1/2: the parser's string concatenation in linkage specifications and literal operators),
+coroutines through class templates (pr104051, pr105301, coro-bad-gro), and the 11 cpp2a files of the unrun chunk.

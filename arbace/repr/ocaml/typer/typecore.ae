@@ -265,6 +265,55 @@
 
 (defn mkexp [d t loc] {:desc d :type t :loc loc})
 
+;; ---------------------------------------------------------------------------------------------
+;; Warnings (queue 533, DECISION 528-R1 (a)): Location.prerr_warning for the warnings the typer ports, today 5
+;; (ignored-partial-application); the typer's driver binds *warn* when it is given -w (arbace.repr.ocaml.typer)
+
+(def ^:dynamic *warn* "Location.prerr_warning: (fn [kind loc]) a warning raised at loc, or nil (no warning reported)" nil)
+
+(def ^:dynamic *delayed-checks*
+  "Typecore's delayed checks (add_delayed_check): an atom of thunks the driver runs after the unit's typing, or nil" nil)
+
+(defn- constrained-exp?
+  "exp_extra holds a Texp_constraint: (e : t) typed (type-expect's Pexp_constraint marks the expression)"
+  [e] (boolean (::constraint (meta e))))
+
+(defn check-partial-application
+  "Typecore.check_partial_application's ignored-partial-application part: exp of a function type that is syntactically
+  an application, a send, a new or a let-op (through matches, tries, conditionals, lets, sequences and local items),
+  unless constrained, raises warning 5; a type not known yet (a Tvar) is checked again after the unit's typing.
+  (statement's non-unit-statement, warning 10, is not ported.)"
+  [exp]
+  (when *warn*
+    (let [doit (fn []
+                 (when (#{:Tarrow :Tfunctor} ((ty/desc (ty/expand-head (:type exp))) 0))
+                   ((fn check [e]
+                      (when-not (constrained-exp? e)
+                        (let [d (:desc e)]
+                          (case (d 0)
+                            :Texp_match (do (run! #(check (:rhs %)) (d 2)) (run! #(check (:rhs %)) (get d 4)))
+                            :Texp_try (do (check (d 1)) (run! #(check (:rhs %)) (d 2)) (run! #(check (:rhs %)) (get d 3)))
+                            :Texp_ifthenelse (when (d 3) (check (d 2)) (check (d 3)))
+                            :Texp_let (check (d 3))
+                            :Texp_sequence (check (d 2))
+                            :Texp_struct_item (check (d 2))
+                            (:Texp_apply :Texp_send :Texp_new :Texp_letop) (*warn* :ignored-partial-application (:loc e))
+                            nil))))
+                    exp)))]
+      (if (and *delayed-checks* (= :Tvar ((ty/desc (ty/expand-head (:type exp))) 0)))
+        (swap! *delayed-checks* conj doit)
+        (doit)))))
+
+(defn pattern-needs-partial-application-check?
+  "Typecore.pattern_needs_partial_application_check: _, an exception pattern or an or-pattern of them, unconstrained"
+  [p]
+  (and (empty? (:constraints p))
+       (case ((:desc p) 0)
+         (:Tpat_any :Tpat_exception) true
+         :Tpat_or (and (pattern-needs-partial-application-check? ((:desc p) 1))
+                       (pattern-needs-partial-application-check? ((:desc p) 2)))
+         false)))
+
 (defn annot-type
   "An annotation's type: an instance of its scheme, or in a class the class's own variables (TyVarEnv)"
   [env sty]
@@ -352,6 +401,11 @@
     (when (empty? pats) (type-error (str "The type " (str/join "." (env/lid-parts lid)) " is not a variant type")))
     [path (reduce (fn [p p0] {:desc [:Tpat_or p0 p (e 1)] :type t}) (first pats) (rest pats))]))
 
+(def ^:dynamic *defer-unpack*
+  "Typecore's Modules_allowed for a let (queue 531: alcotest's `let (module T) = t in T.pp`): a (module M) pattern's type need not be
+  a package yet, its bound expression typed after it; add-pattern-vars' type_module_variable checks it"
+  false)
+
 (defn type-pat
   "The pattern sp at the expected type; its variables conj'ed onto the atom vars as [name id type]"
   [env sp expected vars]
@@ -363,7 +417,7 @@
                          _ (when-let [pt (get d 2)]
                              (unify! (annot-type env {:ptyp_desc [:Ptyp_package pt]})
                                      expected "pattern"))]
-                     (when-not (= :Tpackage ((ty/desc (ty/expand-head expected)) 0))
+                     (when-not (or *defer-unpack* (= :Tpackage ((ty/desc (ty/expand-head expected)) 0)))
                        (type-error "The type of this packed module cannot be inferred"))
                      (when (:txt (d 1)) (swap! vars conj [n id expected :module]))
                      (mk [:Tpat_var id n] expected))
@@ -476,7 +530,11 @@
   [env vars]
   (reduce (fn [e [n id t m]]
             (if m
-              (assoc-in e [:modules n] (env/add-module! id {:path [:Pident id] :mty (env/modtype-of-package (ty/expand-head t))
+              (assoc-in e [:modules n] (env/add-module! id {:path [:Pident id]
+                                                            :mty (let [x (ty/expand-head t)]
+                                                                   (when-not (= :Tpackage ((ty/desc x) 0))
+                                                                     (type-error "The type of this packed module cannot be inferred"))
+                                                                   (env/modtype-of-package x))
                                                             :addr [:var id]}))
               (add-value e n id t)))
           env vars))
@@ -640,6 +698,15 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Expressions
+
+(defn- unpack-pattern?
+  "Typecore.may_contain_modules: a (module M) pattern somewhere in p"
+  [p]
+  (letfn [(go [x] (cond (and (map? x) (:ppat_desc x)) (or (= :Ppat_unpack ((:ppat_desc x) 0)) (some go (vals x)))
+                        (map? x) (some go (vals x))
+                        (sequential? x) (some go x)
+                        :else false))]
+    (boolean (go p))))
 
 (defn- turn-let-into-match?
   "Typecore.turn_let_into_match: the pattern holds a constructor, an open tuple or a labelled one (exists_ppat over
@@ -820,7 +887,10 @@
     (if (and (= 1 (count sargs)) (= :Nolabel ((ffirst sargs) 0)) (prim "%ignore"))
       (let [targ (ty/newvar) tret (ty/newvar)]
         (unify! fty (ty/newty [:Tarrow [:Nolabel] targ tret]) "function")
-        [[[[:Nolabel] (type-expect env (second (first sargs)) targ)]] tret])
+        ;; Typecore's special case for ignore: the argument checked for a partial application
+        (let [arg (type-expect env (second (first sargs)) targ)]
+          (check-partial-application arg)
+          [[[[:Nolabel] arg]] tret]))
       (let [[ls tvar] (list-labels fty)
             nonopt (remove ty/is-optional ls)
             ignore-labels (and (not tvar) (= (count nonopt) (count sargs)) (every? #(= :Nolabel ((first %) 0)) sargs)
@@ -839,10 +909,18 @@
                                   (let [[l' sarg] (first sargs)] [l' sarg nil (vec (rest sargs))])
                                   (extract-label name sargs))
                           sarg (second found)]
-                      (when-not (and found (= :Pexp_pack ((:pexp_desc sarg) 0)))
-                        (type-error "a dependent function applied to an argument that is not a packed module is outside the slice"))
-                      (let [texp (type-expect env sarg (ty/newty [:Tpackage (d 3) (d 4)]))]
-                        (recur (functor-result d ((:desc texp) 1)) (nth found 3) (cons [l [:typed texp]] rev))))
+                      (cond
+                        (and found (= :Pexp_pack ((:pexp_desc sarg) 0)))
+                        (let [texp (type-expect env sarg (ty/newty [:Tpackage (d 3) (d 4)]))]
+                          (recur (functor-result d ((:desc texp) 1)) (nth found 3) (cons [l [:typed texp]] rev)))
+                        ;; (queue 531: b0's B0_testing) an argument that is not a packed module: collect_apply_args' filter_arrow,
+                        ;; the dependent arrow unified with an arrow (its result independent of the module, Ctype's Tfunctor
+                        ;; against Tarrow), then applied as an arrow
+                        found
+                        (let [arr (ty/newty [:Tarrow l (ty/newvar) (ty/newvar)])]
+                          (unify! tyf' arr "function")
+                          (recur arr sargs rev))
+                        :else (type-error "a dependent function's module argument cannot be omitted")))
                     (not= :Tarrow (d 0))
                     ;; collect_unknown_apply_args
                     (let [[l sarg] (first sargs)]
@@ -884,7 +962,7 @@
                          tret (reverse targs))]
         [(mapv (fn [[l a]] [l (if (and (vector? a) (= :omitted (a 0))) nil a)]) targs) tret]))))
 
-(defn type-statement [env sexp] (type-exp env sexp))
+(defn type-statement [env sexp] (let [e (type-exp env sexp)] (check-partial-application e) e))
 
 (defn- record-repres [l] (:repres l))
 
@@ -955,10 +1033,23 @@
                     (type-expect env {:pexp_desc [:Pexp_match (vb-exp-constraint vb) [{:pc_lhs (:pvb_pat vb) :pc_guard nil :pc_rhs (d 3)}]]
                                       :pexp_loc loc}
                                  expected))
-                (let [eqs (atom [])
-                      [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
-                      body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
-                  (mkexp [:Texp_let (d 1) vbs body] (:type body) loc)))
+                (if (some #(unpack-pattern? (:pvb_pat %)) (d 2))
+                  ;; (queue 531) Typecore's let with module patterns: its patterns' modules entered in a scope of their own, the
+                  ;; bound expressions typed before the modules are (Modules_allowed), the body's type unified with a variable of
+                  ;; the outer level, so that a type M.n of an unpacked M leaving the let is expanded (or escapes)
+                  (let [outer (ty/newvar)
+                        [vbs body] (ty/with-local-level
+                                     (ty/with-scope
+                                       (let [eqs (atom [])
+                                             [vbs env'] (binding [*let-equations* eqs *defer-unpack* true] (type-let env (d 1) (d 2)))
+                                             body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                                         (unify! outer (:type body) "expression")
+                                         [vbs body])))]
+                    (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
+                  (let [eqs (atom [])
+                        [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
+                        body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                    (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
                                      [:Pfunction_body {:pexp_desc [:Pexp_constraint ((d 3) 1) (c 1)] :pexp_loc (:pexp_loc ((d 3) 1))}]
@@ -993,6 +1084,7 @@
                             (type-error "None of the patterns in this 'match' expression match values."))
                         cases (type-cases env (:type arg) expected val-cases true)
                         effs (when (seq eff-cases) (type-effect-cases env expected eff-cases conts))]
+                    (when (every? #(pattern-needs-partial-application-check? (:lhs %)) cases) (check-partial-application arg))
                     (mkexp (cond-> [:Texp_match arg cases (partiality cases (:type arg))] effs (conj effs)) expected loc))
       :Pexp_try (let [body (type-expect env (d 1) expected)
                       [exn-cases eff-cases conts] (split-effect-cases (d 2))
@@ -1086,8 +1178,12 @@
                              (ret [:Texp_ifthenelse c a nil] (ty/type-unit)))))
       :Pexp_sequence (let [a (type-statement env (d 1)) b (type-expect env (d 2) expected)]
                        (mkexp [:Texp_sequence a b] (:type b) loc))
-      :Pexp_while (let [c (type-expect env (d 1) (ty/type-bool)) b (type-statement env (d 2))]
-                    (assoc (ret [:Texp_while c b] (ty/type-unit)) :env env))
+      ;; `while true do ... done` has the expected type (Typecore's Pexp_while: the loop never ends normally; toplevel/topcommon.ml's
+      ;; read_input_default, `try while true do ... done with ... -> (!i, true)`)
+      :Pexp_while (let [c (type-expect env (d 1) (ty/type-bool)) b (type-statement env (d 2))
+                        cd (:desc c)
+                        forever? (and (= :Texp_construct (cd 0)) (= "true" (:name (cd 1))))]
+                    (assoc (if forever? (mkexp [:Texp_while c b] expected loc) (ret [:Texp_while c b] (ty/type-unit))) :env env))
       :Pexp_for (let [p (:ppat_desc (d 1))
                       lo (type-expect env (d 2) (ty/type-int))
                       hi (type-expect env (d 3) (ty/type-int))
@@ -1101,7 +1197,8 @@
       :Pexp_constraint (let [t (annot-type env (d 2))
                              e (type-expect env (d 1) t)]
                          (unify! t expected "expression")
-                         e)
+                         ;; exp_extra's Texp_constraint, read by check-partial-application
+                         (vary-meta e assoc ::constraint true))
       :Pexp_assert (let [e (type-expect env (d 1) (ty/type-bool))
                          false? (let [ed (:desc e)] (and (= :Texp_construct (ed 0)) (= "false" (:name (ed 1)))))]
                      (ret [:Texp_assert e (or (last (:pexp_loc_stack sexp)) (:pexp_loc sexp))] ; innermost_location: the stack's last
@@ -1111,7 +1208,9 @@
                            (ty/expand-head expected))
                        td (ty/desc t)]
                    (when-not (= :Tpackage (td 0)) (type-error "This module packing's signature cannot be inferred"))
-                   (let [tm (*type-package* env (d 1) t)]
+                   ;; (queue 531: b0's B0_testing.T.make) Typemod.type_package: the module typed at a local level in a scope of
+                   ;; its own, so a local type of it reaching an outer variable is expanded (`type t = a`'s t to a)
+                   (let [tm (ty/with-local-level (ty/with-scope (*type-package* env (d 1) t)))]
                      (unify! t expected "expression")
                      (mkexp [:Texp_pack tm] t loc)))
       :Pexp_coerce (let [t2g (env/make-generic! (env/transl-type env (atom {}) (d 3)))
@@ -1359,13 +1458,17 @@
                :else (type-error "Cannot infer the signature of this module parameter"))
         tpack (ty/newty [:Tpackage (pack 0) (pack 1)])
         mty (env/modtype-of-package tpack)
-        s-id (ty/ident-create name)
-        [[params body res-ty]]
+        ;; (queue 531: b0's B0_testing.T.with', `?equal ?pp (module T : T with type t = a)`) M scoped at the body's level, so a type
+        ;; T.n reaching a variable of the outer level (an earlier parameter's) is expanded to its constraint (Ctype.update_level's
+        ;; scope check), as OCaml's scoped identifier is
+        [s-id [params body res-ty]]
         (ty/with-local-level
-          (let [entry (env/add-module! s-id {:path [:Pident s-id] :mty mty :addr [:var s-id]})
-                env' (assoc-in env [:modules name] entry)
-                expected-res (if expected-f (ty/subst-module-ident (expected-f 2) [:Pident s-id] (expected-f 5)) (ty/newvar))]
-            [(type-function env' rest sbody expected-res)]))
+          (ty/with-scope
+            (let [s-id (ty/ident-create name)
+                  entry (env/add-module! s-id {:path [:Pident s-id] :mty mty :addr [:var s-id]})
+                  env' (assoc-in env [:modules name] entry)
+                  expected-res (if expected-f (ty/subst-module-ident (expected-f 2) [:Pident s-id] (expected-f 5)) (ty/newvar))]
+              [s-id (type-function env' rest sbody expected-res)])))
         ident (env/tfunctor-ident name (pack 0))
         exp-type (if (ty/type-mentions? s-id res-ty)
                    (ty/newty [:Tfunctor l ident (pack 0) (pack 1) (ty/subst-module-ident s-id [:Pident ident] res-ty)])
@@ -1455,6 +1558,13 @@
                                   (:fields cs))
                           (every? (fn [[_ [m _ _]]] (not= :Mutable m)) (:vars @(:sign cs)))))
       :Texp_new (let [c (:type (d 2))] (loop [c c] (case (c 0) :Cty_arrow true :Cty_constr (recur (c 3)) false)))
+      ;; (queue 531: b0's B0__os.copy, `let prune = match rel with true -> fun ... | false -> fun ...`) the scrutinee and every case's
+      ;; guard and right-hand side nonexpansive, no exception pattern in a case
+      :Texp_match (letfn [(exn-pat? [p] (or (= :Tpat_exception ((:desc p) 0)) (boolean (some exn-pat? (subpatterns p)))))]
+                    (and (nonexpansive? (d 1))
+                         (every? (fn [c] (and (or (nil? (:guard c)) (nonexpansive? (:guard c))) (nonexpansive? (:rhs c))
+                                              (not (exn-pat? (:lhs c)))))
+                                 (d 2))))
       :Texp_ifthenelse (and (nonexpansive? (d 2)) (or (nil? (d 3)) (nonexpansive? (d 3))))
       :Texp_sequence (nonexpansive? (d 2))
       :Texp_apply (and (some nil? (map second (d 2))) (nonexpansive? (d 1))
@@ -1521,12 +1631,21 @@
               :else false))]
     (boolean (go sp))))
 
-(declare type-let*)
+(declare type-let* type-let**)
 
 (defn type-let
   "[value-bindings env'] for let [rec]: each {:pat :expr}"
   [env rec svbs]
-  (let [svbs (mapv vb-constraint svbs)]
+  (let [svbs (mapv vb-constraint svbs)
+        [vbs _ :as r] (type-let** env rec svbs)]
+    ;; Typecore.type_let: each binding whose pattern is _ (or an exception, or an or-pattern of them) checked for a
+    ;; partial application
+    (doseq [vb vbs] (when (pattern-needs-partial-application-check? (:pat vb)) (check-partial-application (:expr vb))))
+    r))
+
+(defn- type-let**
+  [env rec svbs]
+  (do
     (if (and (= rec :Nonrecursive) (= 1 (count svbs)) *let-equations* (gadt-pattern? env (:pvb_pat (first svbs))))
       ;; let K = e in body with K a GADT constructor: the expression first, then its pattern with equations that
       ;; hold over the body (as match e with K -> body)

@@ -145,12 +145,19 @@ if [ -z "$judge" ]; then
       (cd "$root" && arbace_tool -m arbace.c.run test/c/host nodes-list "$work" "$d/todo.tsv" "$threads") > "$d/nodes.log" 2>&1
       [ -f "$work/nodes.tsv" ] && cat "$work/nodes.tsv" >> "$d/nodes.tsv" && rm -f "$work/nodes.tsv"
     fi
+    # queue 533 (522c's DECISION (a)): under CI_EXE a node program holding an (mcode ...) command (a file-scope asm's machine
+    # code) runs on tools/cirun, which links x86i (go/arbace/cix86); the executable's embedded ci does not until the re-seed
+    # window that links it there. cirun built, or kept by its key, only when such a program is to run
+    if [ -n "${CI_EXE:-}" ] && grep -rlq --include='*.nodes' '(mcode ' "$work/$id" 2>/dev/null; then
+      { [ -n "${CIRUN:-}" ] && [ -x "$cirun" ]; } || "$root/bin/ci" cirun-build --ensure || exit 1
+    fi
     # each node program run
     run1() { # ID
-      local i=$1 f=$work/$1.nodes rd st sum bytes
+      local i=$1 f=$work/$1.nodes rd st sum bytes r=$runner
+      [ -z "${CI_EXE:-}" ] || ! grep -q '(mcode ' "$f" || r=$cirun
       rd=$(mktemp -d "$work/run.XXXXXX")
       (cd "$rd" && { [ -z "${ARBACE_COVER_DIR:-}" ] || export "$(cover_env ci "$i")"; } \
-         && timeout "$(( $(ci_budget "$i") * cover_x ))" $runner "$f" < "$work/empty-stdin" > out 2> err); st=$?
+         && timeout "$(( $(ci_budget "$i") * cover_x ))" $r "$f" < "$work/empty-stdin" > out 2> err); st=$?
       cover_settle ci "$i"
       [ $st = 124 ] && st=timeout
       sum=$(sha256sum < "$rd/out" | cut -d' ' -f1); bytes=$(wc -c < "$rd/out")
@@ -159,7 +166,7 @@ if [ -z "$judge" ]; then
       # the disk: a node program holds musl's linked part (about 0.4 MB); kept when it did not exit 0
       [ -n "${CI_KEEP_NODES:-}" ] || [ "$st" != 0 ] || rm -f "$f"
     }
-    export -f run1 ci_budget cover_env cover_settle; export work cirun root runner cover_x
+    export -f run1 ci_budget cover_env cover_settle; export work cirun root runner cover_x CI_EXE
     # the runs appended (--resume keeps the earlier ones), only those of todo.tsv
     [ -n "$resume" ] || : > "$d/run.tsv"
     awk -F'\t' 'BEGIN { while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); t[f[1]] = 1 }; ARGV[2] = "" } $2 == "ok" && ($1 in t) && !seen[$1]++ {print $1}' "$d/nodes.tsv" "$d/todo.tsv" \
