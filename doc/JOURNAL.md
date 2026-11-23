@@ -19063,3 +19063,15 @@ for the start method forkserver the decisions of 2026-11-04 (PY6e's DECISION (a)
   classes saying they leave at the next record; the three preload tests move to the new `:forkserver-preload` (n/a), so Python's
   eval cell is 40,552 / 1,604 / 1,711 (4,457 n/a), from 40,552 / 1,604 / 1,714 (4,454 n/a); `bin/reap --record`, `bin/crops-score
   --record`, `--judge --strict`, `bin/records-check`.
+
+## 2026-11-23: queue 535's decisions (the user's, through the main session)
+
+535-1 (a): forkserver's three preload tests (test_misc's test_preload_main, test_preload_main_sys_argv; test_processes'
+test_std_streams_flushed_after_preload) n/a in `:forkserver-preload`, as built: they count import-time output a forked child inherits
+from the server's single import, which pyi's fresh children redo. 535-2 (a): a native _io, CPython's Modules/_io (FileIO, Buffered*,
+TextIOWrapper, BytesIO, StringIO) ported to Go, as queue 545, test_io's C classes judged; _pyio stays the Py* side. 535-3 (a):
+test_fileio's two test_syscalls_read rows n/a (strace without -f sees only the thread-group leader, and pyi reaches its interpreter through
+bin/pyi's exec chain); they leave `:io-c-checks` in 545, which reworks that class. 535-4 (a): the six test_sysconfig rows of
+`:venv-and-build` stay n/a (an installation's or build tree's files pyi does not have). Alternatives considered: 535-1 (b) a fork-safe Go
+runtime; 535-2 (b) the C-only checks by design for good; 535-3 (b) the interpreter locked to the leader thread and an exec-only chain;
+535-4 (b) a source-build layout.
