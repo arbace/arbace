@@ -19095,7 +19095,7 @@ budget) are left to the main host's records, as its findings say.
   --corpus quickjs,sqlite --record` and the torture-compile corpus on the gate's executable, `bin/repr-c parse-check --corpus
   torture-compile --record` there, and `--record-results` for gxx-old-deja-every-10 and gxx-modules-all.
 
-## 2026-11-23: queue 540 merged onto next (branch `smalls2-1123`), DECISION 540-2 (a)'s n/a applied
+## 2026-11-23: queue 540 merged onto next (branch `smalls2-1123`), DECISION 540-2's n/a applied
 
 mac/540-c-cpp-print (b2fc220c8, the VM's partial: C's shell.c and unicode_gen.c at levels 1-2, C++'s crash41.C and
 target-aarch64-1_a.C, the round trip's REPR_C_MAX_NEST at 20,000) merged onto next 28740dc3b; the journal's one conflict (two
@@ -19108,3 +19108,16 @@ bin/crops-score --record, --judge --strict, bin/records-check: 0 problems. The r
 libunicode.c, the four limits files, unicode_gen.c's level 3, and 540-3's 16 GiB runs: limits-externdecl.c, pr46534.c,
 sqlite3.c) wait for a gate executable built from this tree (the build train): stage 0 and next's gate executable both evaluate
 540's convert.ae from the checkout.
+
+## 2026-11-23: Haskell's eff/VS at the check's 16 GiB: passes at its own cap (smalls2-1123)
+
+hs-pkgs-1122 left nofib/real/eff/VS in divergences-own.edn's :own-speed-no-pack: killed at the 60 s, and its 600 s measurement ran out
+of the light runs' 8 GiB. Run under the big-job lock at the check's 16 GiB (hs-pkgs' .tmp/hp/vs-both.sh, in the hs-pkgs worktree,
+whose own libraries' pools and STG are built there; hsi's sources equal next's): the 600 s measurement through the timing wrapper
+passed at 96.4 s of CPU (63.7 s of wall), so its cap is 150 s (HES97 (a)'s 1.5 times, rounded up to 10 s), and `bin/hsi check --libs
+own --corpus nofib --only nofib/real/eff/VS --record` at that cap passed (61.5 s); its row copied into test/haskell/check-hsi-own.edn,
+`nofib/real/eff/VS 150 96.4` into test/haskell/cpu-caps.tsv, the id out of :own-speed-no-pack. Haskell eval 948 / 0 / 4 -> 949 / 0 / 3
+(18 n/a); completeness 0.9989 -> 0.9992. Left: unpack_sums_6 (:own-speed; out of memory at 8 GiB, its 16 GiB run queued under the
+lock), T23071 and secretary (the user's decision (b) of 2026-11-23: measured at 3000 s under the lock, capped if they finish, else
+(a): an optimizer for the own libraries' STG). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
+problems.
