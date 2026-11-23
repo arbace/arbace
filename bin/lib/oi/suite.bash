@@ -75,7 +75,13 @@ suite_stage() {
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u"); else suite_wrap_one "$base" "$u" "$d"; fi ;;
+      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
+          # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
+          # DIR by the native ocamllex, then staged as the library's module
+          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && [ -f "$base/$(suite_wrap_path "$u" | sed 's/\.ml$//').mll" ]; then
+            local wg=$d.wgen; mkdir -p "$wg"; suite_gen "$base/$(suite_wrap_path "$u")" "$wg"
+            [ -f "$wg/$(basename "$(suite_wrap_path "$u")")" ] && suite_wrap_one "$base" "$u" "$d" "$wg/$(basename "$(suite_wrap_path "$u")")"
+          else suite_wrap_one "$base" "$u" "$d"; fi ;;
       *) if suite_needs_build "$id" "$base" "$u"; then build+=("$base/$u")
          elif [ -f "$base/$u" ]; then cp "$base/$u" "$d/"
          else suite_gen "$base/$u" "$d"; fi ;;
@@ -99,6 +105,7 @@ suite_stage() {
       rm -rf "$d.wbuild"
     fi
   fi
+  rm -rf "$d.wgen"
 }
 
 # suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,
