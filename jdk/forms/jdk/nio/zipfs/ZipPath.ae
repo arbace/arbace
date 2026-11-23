@@ -1,0 +1,800 @@
+;; Converted from jdk26u src/jdk.zipfs/share/classes/jdk/nio/zipfs/ZipPath.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.nio.zipfs)
+
+(import '(java.io File IOException InputStream OutputStream)
+        '(java.net URI)
+        '(java.nio.channels FileChannel SeekableByteChannel)
+        '(java.nio.charset StandardCharsets)
+        '(java.nio.file AccessDeniedException
+                        AccessMode
+                        CopyOption
+                        DirectoryNotEmptyException
+                        DirectoryStream
+                        DirectoryStream$Filter
+                        FileAlreadyExistsException
+                        FileStore
+                        Files
+                        InvalidPathException
+                        LinkOption
+                        NoSuchFileException
+                        OpenOption
+                        Path
+                        ProviderMismatchException
+                        ReadOnlyFileSystemException
+                        StandardCopyOption
+                        StandardOpenOption
+                        WatchEvent$Kind
+                        WatchEvent$Modifier
+                        WatchKey
+                        WatchService)
+        '(java.nio.file.attribute BasicFileAttributeView
+                                  BasicFileAttributes
+                                  FileAttribute
+                                  FileAttributeView
+                                  FileOwnerAttributeView
+                                  FileTime
+                                  GroupPrincipal
+                                  PosixFileAttributeView
+                                  PosixFileAttributes
+                                  PosixFilePermission
+                                  UserPrincipal)
+        '(java.util Arrays Iterator Map NoSuchElementException Objects Set))
+
+(defclass ^:final ZipPath
+  :implements [Path]
+
+  (field ^:private ^:final ^ZipFileSystem zfs)
+
+  (field ^:private ^:final ^byte/1 path)
+
+  (field ^:private ^:volatile ^int/1 offsets)
+
+  (field ^:private ^int hashcode 0)
+
+  (constructor [this ^ZipFileSystem zfs ^byte/1 path]
+    (this. zfs path false))
+
+  (constructor [this ^ZipFileSystem zfs ^byte/1 path ^boolean normalized]
+    (set! (.-zfs this) zfs)
+    (cond
+      normalized (set! (.-path this) path)
+      (.isUTF8 (.-zc zfs)) (set! (.-path this) (.normalize this path))
+      :else (set! (.-path this) (.normalize this (.getString zfs path)))))
+
+  (constructor [this ^ZipFileSystem zfs ^String path]
+    (set! (.-zfs this) zfs)
+    (set! (.-path this) (.normalize this path)))
+
+  (method ^:public getRoot ^ZipPath [this]
+    (when (.isAbsolute this) (.getRootDir zfs)))
+
+  (method ^:public getFileName ^ZipPath [this]
+    (let [^:mutable off (alength path)]
+      (when-not (or (== off 0) (and (== off 1) (== (aget path 0) \/)))
+        (while (and (>= (set! off (unchecked-dec-int off)) 0) (not (== (aget path off) \/))))
+        (if (< off 0)
+            this
+            (do
+              (set! off (unchecked-inc-int off))
+              (let [result (new byte/1 (unchecked-subtract-int (alength path) off))]
+                (System/arraycopy path off result 0 (alength result))
+                (ZipPath. (.getFileSystem this) result true)))))))
+
+  (method ^:public getParent ^ZipPath [this]
+    (let [^:mutable off (alength path)]
+      (when-not (or (== off 0) (and (== off 1) (== (aget path 0) \/)))
+        (while (and (>= (set! off (unchecked-dec-int off)) 0) (not (== (aget path off) \/))))
+        (if (<= off 0)
+            (.getRoot this)
+            (let [result (new byte/1 off)]
+              (System/arraycopy path 0 result 0 off)
+              (ZipPath. (.getFileSystem this) result true))))))
+
+  (method ^:public getNameCount ^int [this]
+    (.initOffsets this)
+    (alength offsets))
+
+  (method ^:public getName ^ZipPath [this ^int index]
+    (.initOffsets this)
+    (when (or (< index 0) (>= index (alength offsets))) (throw (IllegalArgumentException.)))
+    (let [begin (aget offsets index)
+          ^int len (if (== index (unchecked-subtract-int (alength offsets) 1))
+                       (unchecked-subtract-int (alength path) begin)
+                       (unchecked-subtract-int
+                         (unchecked-subtract-int (aget offsets (unchecked-add-int index 1)) begin)
+                         1))]
+      (let [result (new byte/1 len)]
+        (System/arraycopy path begin result 0 len)
+        (ZipPath. zfs result))))
+
+  (method ^:public subpath ^ZipPath [this ^int beginIndex ^int endIndex]
+    (.initOffsets this)
+    (when (or (or (or (< beginIndex 0) (>= beginIndex (alength offsets)))
+                  (> endIndex (alength offsets)))
+              (>= beginIndex endIndex))
+      (throw (IllegalArgumentException.)))
+    (let [begin (aget offsets beginIndex)
+          ^int len (if (== endIndex (alength offsets))
+                       (unchecked-subtract-int (alength path) begin)
+                       (unchecked-subtract-int
+                         (unchecked-subtract-int (aget offsets endIndex) begin)
+                         1))]
+      (let [result (new byte/1 len)]
+        (System/arraycopy path begin result 0 len)
+        (ZipPath. zfs result))))
+
+  (method ^:public toRealPath :throws [IOException] ^ZipPath [this & ^LinkOption/1 options]
+    (let [^:mutable ^ZipPath realPath nil
+          resolved (.getResolvedPath this)]
+      (if (identical? resolved path)
+          (set! realPath this)
+          (do (set! realPath (ZipPath. zfs resolved true)) (set! (.-resolved realPath) resolved)))
+      (.checkAccess realPath)
+      realPath))
+
+  (method isHidden ^boolean [this] false)
+
+  (method ^:public toAbsolutePath ^ZipPath [this]
+    (if (.isAbsolute this)
+        this
+        (let [tmp (new byte/1 (unchecked-add-int (alength path) 1))]
+          (System/arraycopy path 0 tmp 1 (alength path))
+          (aset tmp 0 (unchecked-byte \/))
+          (ZipPath. zfs tmp true))))
+
+  (method ^:public toUri ^URI [this]
+    (try
+      (URI. "jar"
+            (java-str (ZipPath/decodeUri (.toString (.toUri (.getZipFile zfs))))
+                      "!"
+                      (.getRealPath this))
+            nil)
+      (catch Exception ex (throw (AssertionError. ex)))))
+
+  (method ^:private getRealPath ^String [this]
+    (let [resolvedPath (.getResolvedPath this)
+          realPath (.lookupPath zfs resolvedPath)]
+      (.getString zfs ^byte/1 (if (some? realPath) realPath resolvedPath))))
+
+  (method ^:private equalsNameAt ^boolean [this ^ZipPath other ^int index]
+    (let [mbegin (aget offsets index)
+          ^int mlen (if (== index (unchecked-subtract-int (alength offsets) 1))
+                        (unchecked-subtract-int (alength path) mbegin)
+                        (unchecked-subtract-int
+                          (unchecked-subtract-int (aget offsets (unchecked-add-int index 1)) mbegin)
+                          1))]
+      (let [obegin (aget (.-offsets other) index)
+            ^int olen (if (== index (unchecked-subtract-int (alength (.-offsets other)) 1))
+                          (unchecked-subtract-int (alength (.-path other)) obegin)
+                          (unchecked-subtract-int
+                            (unchecked-subtract-int
+                              (aget (.-offsets other) (unchecked-add-int index 1))
+                              obegin)
+                            1))]
+        (if (not (== mlen olen))
+            false
+            (let [^:mutable ^int n 0]
+              (while (< n mlen)
+                (when-not (== (aget path (unchecked-add-int mbegin n))
+                              (aget (.-path other) (unchecked-add-int obegin n)))
+                  (return false))
+                (set! n (unchecked-inc-int n)))
+              true)))))
+
+  (method ^:public relativize ^Path [this ^Path other]
+    (let [o (.checkPath this other)]
+      (cond
+        (.equals o this) (ZipPath. zfs (new byte/1 0) true)
+        (== (alength (.-path this)) 0) o
+        :else
+          (do
+            (when (or (not (identical? (.-zfs this) (.-zfs o)))
+                      (not (= (.isAbsolute this) (.isAbsolute o))))
+              (throw (IllegalArgumentException.)))
+            (if (and (== (alength (.-path this)) 1) (== (aget (.-path this) 0) \/))
+                (ZipPath. zfs (Arrays/copyOfRange (.-path o) 1 (alength (.-path o))) true)
+                (let [mc (.getNameCount this)
+                      oc (.getNameCount o)
+                      n (Math/min mc oc)
+                      ^:mutable ^int i 0]
+                  (while (< i n)
+                    (when-not (.equalsNameAt this o i) (break))
+                    (set! i (unchecked-inc-int i)))
+                  (let [^:mutable dotdots (unchecked-subtract-int mc i)
+                        ^:mutable len (unchecked-subtract-int (unchecked-multiply-int dotdots 3) 1)]
+                    (when (< i oc)
+                      (set! len
+                            (unchecked-add-int len
+                                               (unchecked-add-int
+                                                 (unchecked-subtract-int
+                                                   (alength (.-path o))
+                                                   (aget (.-offsets o) i))
+                                                 1))))
+                    (let [result (new byte/1 len)
+                          ^:mutable ^int pos 0]
+                      (while (> dotdots 0)
+                        (aset result pos (unchecked-byte \.))
+                        (set! pos (unchecked-inc-int pos))
+                        (aset result pos (unchecked-byte \.))
+                        (set! pos (unchecked-inc-int pos))
+                        (when (< pos len)
+                          (aset result pos (unchecked-byte \/))
+                          (set! pos (unchecked-inc-int pos)))
+                        (set! dotdots (unchecked-dec-int dotdots)))
+                      (when (< i oc)
+                        (System/arraycopy (.-path o)
+                                          (aget (.-offsets o) i)
+                                          result
+                                          pos
+                                          (unchecked-subtract-int
+                                            (alength (.-path o))
+                                            (aget (.-offsets o) i))))
+                      (ZipPath. zfs result)))))))))
+
+  (method ^:public getFileSystem ^ZipFileSystem [this] zfs)
+
+  (method ^:public isAbsolute ^boolean [this]
+    (and (> (alength path) 0) (== (aget path 0) \/)))
+
+  (method ^:public resolve ^ZipPath [this ^Path other]
+    (let [o (.checkPath this other)]
+      (cond
+        (== (alength (.-path o)) 0) this
+        (or (.isAbsolute o) (== (alength (.-path this)) 0)) o
+        :else (.resolve this (.-path o)))))
+
+  (method ^:private resolve ^ZipPath [this ^byte/1 opath]
+    (let [^:mutable ^byte/1 resolved nil
+          tpath (.-path this)
+          tlen (alength tpath)
+          olen (alength opath)]
+      (if (== (aget path (unchecked-subtract-int tlen 1)) \/)
+          (do
+            (set! resolved (new byte/1 (unchecked-add-int tlen olen)))
+            (System/arraycopy tpath 0 resolved 0 tlen)
+            (System/arraycopy opath 0 resolved tlen olen))
+          (do
+            (set! resolved (new byte/1 (unchecked-add-int (unchecked-add-int tlen 1) olen)))
+            (System/arraycopy tpath 0 resolved 0 tlen)
+            (aset resolved tlen (unchecked-byte \/))
+            (System/arraycopy opath 0 resolved (unchecked-add-int tlen 1) olen)))
+      (ZipPath. zfs resolved true)))
+
+  (method ^:public resolveSibling ^Path [this ^Path other]
+    (Objects/requireNonNull other "other")
+    (let [^Path parent (.getParent this)] (if (nil? parent) other (.resolve parent other))))
+
+  (method ^:public startsWith ^boolean [this ^Path other]
+    (Objects/requireNonNull other "other")
+    (if-instance [^ZipPath o other]
+      (if (or (not (= (.isAbsolute o) (.isAbsolute this)))
+              (> (alength (.-path o)) (alength (.-path this))))
+          false
+          (let [^:mutable olast (alength (.-path o))]
+            (loop [^int i 0]
+              (if (< i olast)
+                  (if (not (== (aget (.-path o) i) (aget (.-path this) i)))
+                      (return false)
+                      (recur (unchecked-inc-int i)))
+                  nil))
+            (set! olast (unchecked-dec-int olast))
+            (or (or (== (alength (.-path o)) (alength (.-path this)))
+                    (== (aget (.-path o) olast) \/))
+                (== (aget (.-path this) (unchecked-add-int olast 1)) \/))))
+      false))
+
+  (method ^:public endsWith ^boolean [this ^Path other]
+    (Objects/requireNonNull other "other")
+    (if-instance [^ZipPath o other]
+      (let [^:mutable olast (unchecked-subtract-int (alength (.-path o)) 1)]
+        (when (and (> olast 0) (== (aget (.-path o) olast) \/))
+          (set! olast (unchecked-dec-int olast)))
+        (let [^:mutable last (unchecked-subtract-int (alength (.-path this)) 1)]
+          (when (and (> last 0) (== (aget (.-path this) last) \/))
+            (set! last (unchecked-dec-int last)))
+          (cond
+            (== olast -1) (== last -1)
+            (or (and (.isAbsolute o) (or (not (.isAbsolute this)) (not (== olast last))))
+                (< last olast))
+              false
+            :else
+              (do
+                (while (>= olast 0)
+                  (when-not (== (aget (.-path o) olast) (aget (.-path this) last)) (return false))
+                  (set! olast (unchecked-dec-int olast))
+                  (set! last (unchecked-dec-int last)))
+                (or (or (== (aget (.-path o) (unchecked-add-int olast 1)) \/) (== last -1))
+                    (== (aget (.-path this) last) \/))))))
+      false))
+
+  (method ^:public resolve ^ZipPath [this ^String other]
+    (let [opath (.normalize this other)]
+      (cond
+        (== (alength opath) 0) this
+        (or (== (aget opath 0) \/) (== (alength (.-path this)) 0)) (ZipPath. zfs opath true)
+        :else (.resolve this opath))))
+
+  (method ^:public resolveSibling ^Path [this ^String other]
+    (.resolveSibling this (.getPath zfs other)))
+
+  (method ^:public startsWith ^boolean [this ^String other]
+    (.startsWith this (.getPath zfs other)))
+
+  (method ^:public endsWith ^boolean [this ^String other]
+    (.endsWith this (.getPath zfs other)))
+
+  (method ^:public normalize ^Path [this]
+    (let [resolved (.getResolved this)]
+      (if (identical? resolved path) this (ZipPath. zfs resolved true))))
+
+  (method ^:private checkPath ^ZipPath [this ^Path path]
+    (Objects/requireNonNull path "path")
+    (when-not (instance? ZipPath path) (throw (ProviderMismatchException.)))
+    (cast ZipPath path))
+
+  (method ^:private initOffsets ^void [this]
+    (when (nil? offsets)
+      (let [^:mutable ^int count 0
+            ^:mutable ^int index 0]
+        (set! count 0)
+        (set! index 0)
+        (if (== (alength path) 0)
+            (set! count 1)
+            (while (< index (alength path))
+              (let [c (aget path (let [old-1 index] (set! index (unchecked-inc-int index)) old-1))]
+                (when-not (== c \/)
+                  (set! count (unchecked-inc-int count))
+                  (while (and (< index (alength path)) (not (== (aget path index) \/)))
+                    (set! index (unchecked-inc-int index)))))))
+        (let [result (new int/1 count)]
+          (set! count 0)
+          (set! index 0)
+          (while (< index (alength path))
+            (let [c (aget path index)]
+              (if (== c \/)
+                  (set! index (unchecked-inc-int index))
+                  (do
+                    (aset result count index)
+                    (set! count (unchecked-inc-int count))
+                    (set! index (unchecked-inc-int index))
+                    (while (and (< index (alength path)) (not (== (aget path index) \/)))
+                      (set! index (unchecked-inc-int index)))))))
+          (locking this (when (nil? offsets) (set! offsets result)))))))
+
+  (field ^:private ^:volatile ^byte/1 resolved nil)
+
+  (method getResolvedPath ^byte/1 [this]
+    (let [^:mutable r resolved]
+      (when (nil? r)
+        (if (.isAbsolute this)
+            (set! r (.getResolved this))
+            (set! r (.getResolvedPath (.toAbsolutePath this))))
+        (set! resolved r))
+      resolved))
+
+  (method ^:private normalize ^byte/1 [this ^byte/1 path]
+    (let [len (alength path)]
+      (if (== len 0)
+          path
+          (let [^:mutable ^byte prevC 0]
+            (loop [^int i 0]
+              (when (< i len)
+                (let [c (aget path i)]
+                  (when (or (== c \\) (== c \u0000)) (return (.normalize this path i)))
+                  (when (and (== c (unchecked-byte \/)) (== prevC \/))
+                    (return (.normalize this path (unchecked-subtract-int i 1))))
+                  (set! prevC c)
+                  (recur (unchecked-inc-int i)))))
+            (if (and (> len 1) (== prevC \/))
+                (Arrays/copyOf path (unchecked-subtract-int len 1))
+                path)))))
+
+  (method ^:private normalize ^byte/1 [this ^byte/1 path ^int off]
+    (let [to (new byte/1 (alength path))
+          ^:mutable ^int n 0]
+      (while (< n off) (aset to n (aget path n)) (set! n (unchecked-inc-int n)))
+      (let [^:mutable m n
+            ^:mutable ^byte prevC 0]
+        (while (< n (alength path))
+          (let [^:mutable c (aget path (let [old-2 n] (set! n (unchecked-inc-int n)) old-2))]
+            (when (== c (unchecked-byte \\)) (set! c (unchecked-byte \/)))
+            (when-not (and (== c (unchecked-byte \/)) (== prevC (unchecked-byte \/)))
+              (when (== c \u0000)
+                (throw (InvalidPathException. (.getString zfs path)
+                                              "Path: nul character not allowed")))
+              (aset to m c)
+              (set! m (unchecked-inc-int m))
+              (set! prevC c))))
+        (when (and (> m 1) (== (aget to (unchecked-subtract-int m 1)) \/))
+          (set! m (unchecked-dec-int m)))
+        (if (== m (alength to)) to (Arrays/copyOf to m)))))
+
+  (method ^:private normalize ^byte/1 [this ^:mutable ^String path]
+    (if (.isUTF8 (.-zc zfs))
+        (.normalize this (.getBytes zfs path))
+        (let [len (.length path)]
+          (if (== len 0)
+              (new byte/1 0)
+              (let [^:mutable ^char prevC 0]
+                (loop [^int i 0]
+                  (when (< i len)
+                    (let [c (.charAt path i)]
+                      (when (or (== c \\) (== c \u0000)) (return (.normalize this path i len)))
+                      (when (and (== c \/) (== prevC \/))
+                        (return (.normalize this path (unchecked-subtract-int i 1) len)))
+                      (set! prevC c)
+                      (recur (unchecked-inc-int i)))))
+                (when (and (> len 1) (== prevC \/))
+                  (set! path (.substring path 0 (unchecked-subtract-int len 1))))
+                (.getBytes zfs path))))))
+
+  (method ^:private normalize ^byte/1 [this ^String path ^:mutable ^int off ^:mutable ^int len]
+    (let [to (StringBuilder. len)]
+      (.append to path 0 off)
+      (let [^:mutable ^char prevC 0]
+        (while (< off len)
+          (let [^:mutable c (.charAt path
+                                     (let [old-3 off] (set! off (unchecked-inc-int off)) old-3))]
+            (when (== c \\) (set! c \/))
+            (when-not (and (== c \/) (== prevC \/))
+              (when (== c \u0000)
+                (throw (InvalidPathException. path "Path: nul character not allowed")))
+              (.append to c)
+              (set! prevC c))))
+        (set! len (.length to))
+        (when (and (> len 1) (== prevC \/)) (.delete to (unchecked-subtract-int len 1) len))
+        (.getBytes zfs (.toString to)))))
+
+  (method ^:private getResolved ^byte/1 [this]
+    (loop [^int i 0]
+      (if (< i (alength path))
+          (if (and (== (aget path i) (unchecked-byte \.))
+                   (or (== (unchecked-add-int i 1) (alength path))
+                       (== (aget path (unchecked-add-int i 1)) \/)))
+              (return (.resolve0 this))
+              (recur (unchecked-inc-int i)))
+          nil))
+    path)
+
+  (method ^:private resolve0 ^byte/1 [this]
+    (let [to (new byte/1 (alength path))
+          nc (.getNameCount this)
+          lastM (new int/1 nc)
+          ^:mutable ^int lastMOff -1
+          ^:mutable ^int m 0]
+      (loop [^int i 0]
+        (when (< i nc)
+          (let [^:mutable n (aget offsets i)
+                ^:mutable ^int len (if (== i (unchecked-subtract-int (alength offsets) 1))
+                                       (unchecked-subtract-int (alength path) n)
+                                       (unchecked-subtract-int
+                                         (unchecked-subtract-int
+                                           (aget offsets (unchecked-add-int i 1))
+                                           n)
+                                         1))]
+            (cond
+              (and (== len 1) (== (aget path n) (unchecked-byte \.)))
+                (do
+                  (when (and (== m 0) (== (aget path 0) \/))
+                    (aset to m (unchecked-byte \/))
+                    (set! m (unchecked-inc-int m)))
+                  (recur (unchecked-inc-int i)))
+              (and (and (== len 2) (== (aget path n) \.))
+                   (== (aget path (unchecked-add-int n 1)) \.))
+                (if (>= lastMOff 0)
+                    (do
+                      (set! m (aget lastM lastMOff))
+                      (set! lastMOff (unchecked-dec-int lastMOff))
+                      (recur (unchecked-inc-int i)))
+                    (do
+                      (if (== (aget path 0) \/)
+                          (when (== m 0)
+                            (aset to m (unchecked-byte \/))
+                            (set! m (unchecked-inc-int m)))
+                          (do
+                            (when (and (not (== m 0))
+                                       (not (== (aget to (unchecked-subtract-int m 1)) \/)))
+                              (aset to m (unchecked-byte \/))
+                              (set! m (unchecked-inc-int m)))
+                            (while (> (let [old-4 len] (set! len (unchecked-dec-int len)) old-4) 0)
+                              (aset to m (aget path n))
+                              (set! m (unchecked-inc-int m))
+                              (set! n (unchecked-inc-int n)))))
+                      (recur (unchecked-inc-int i))))
+              :else
+                (do
+                  (when (or (and (== m 0) (== (aget path 0) \/))
+                            (and (not (== m 0))
+                                 (not (== (aget to (unchecked-subtract-int m 1)) \/))))
+                    (aset to m (unchecked-byte \/))
+                    (set! m (unchecked-inc-int m)))
+                  (aset lastM (set! lastMOff (unchecked-inc-int lastMOff)) m)
+                  (while (> (let [old-5 len] (set! len (unchecked-dec-int len)) old-5) 0)
+                    (aset to m (aget path n))
+                    (set! m (unchecked-inc-int m))
+                    (set! n (unchecked-inc-int n)))
+                  (recur (unchecked-inc-int i)))))))
+      (when (and (> m 1) (== (aget to (unchecked-subtract-int m 1)) \/))
+        (set! m (unchecked-dec-int m)))
+      (if (== m (alength to)) to (Arrays/copyOf to m))))
+
+  (method ^:public toString ^String [this] (.getString zfs path))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable h hashcode] (when (== h 0) (set! hashcode (set! h (Arrays/hashCode path)))) h))
+
+  (method ^:public equals ^boolean [this obj]
+    (and (and (instance? ZipPath obj) (identical? (.-zfs this) (.-zfs (cast ZipPath obj))))
+         (== (.compareTo this (cast Path obj)) 0)))
+
+  (method ^:public compareTo ^int [this ^Path other]
+    (let [o (.checkPath this other)] (Arrays/compareUnsigned (.-path this) (.-path o))))
+
+  (method ^:public register ^WatchKey [this ^WatchService watcher
+                                       ^{:tag (array (WatchEvent$Kind ?))} events &
+                                       ^WatchEvent$Modifier/1 modifiers]
+    (when (or (or (nil? watcher) (nil? events)) (nil? modifiers)) (throw (NullPointerException.)))
+    (throw (ProviderMismatchException.)))
+
+  (method ^:public register ^WatchKey [this ^WatchService watcher &
+                                       ^{:tag (array (WatchEvent$Kind ?))} events]
+    (.register this watcher events (new WatchEvent$Modifier/1 0)))
+
+  (method ^:public toFile ^File [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public iterator ^{:tag (Iterator Path)} [this]
+    (anon ^:diamond (Iterator Path) []
+      (field ^:private ^int i 0)
+
+      (method ^:public hasNext ^boolean [this]
+        (< i (.getNameCount ZipPath/this)))
+
+      (method ^:public next ^Path [this]
+        (if (< i (.getNameCount ZipPath/this))
+            (let [^Path result (.getName ZipPath/this i)] (set! i (unchecked-inc-int i)) result)
+            (throw (NoSuchElementException.))))
+
+      (method ^:public remove ^void [this]
+        (throw (ReadOnlyFileSystemException.)))))
+
+  (method getFileAttributeView :type-params [(V extends FileAttributeView)] ^V [this
+                                                                                ^{:tag (Class V)} type]
+    (when (nil? type) (throw (NullPointerException.)))
+    (cond
+      (identical? type BasicFileAttributeView) ^FileAttributeView (ZipFileAttributeView. this false)
+      (identical? type ZipFileAttributeView) ^FileAttributeView (ZipFileAttributeView. this true)
+      :else
+        (do
+          (when (.-supportPosix zfs)
+            (when (identical? type PosixFileAttributeView)
+              (return ^FileAttributeView (ZipPosixFileAttributeView. this false)))
+            (when (identical? type FileOwnerAttributeView)
+              (return ^FileAttributeView (ZipPosixFileAttributeView. this true))))
+          nil)))
+
+  (method ^:private getFileAttributeView ^ZipFileAttributeView [this ^String type]
+    (when (nil? type) (throw (NullPointerException.)))
+    (cond
+      (.equals "basic" type) (ZipFileAttributeView. this false)
+      (.equals "zip" type) (ZipFileAttributeView. this true)
+      :else
+        (do
+          (when (.-supportPosix zfs)
+            (when (.equals "posix" type) (return (ZipPosixFileAttributeView. this false)))
+            (when (.equals "owner" type) (return (ZipPosixFileAttributeView. this true))))
+          (throw (UnsupportedOperationException. (java-str "view <" type "> is not supported"))))))
+
+  (method createDirectory :throws [IOException] ^void [this &
+                                                       ^{:tag (array (FileAttribute ?))} attrs]
+    (.createDirectory zfs (.getResolvedPath this) attrs))
+
+  (method newInputStream :throws [IOException] ^InputStream [this & ^OpenOption/1 options]
+    (for-each [^OpenOption opt options]
+      (when-not (identical? opt StandardOpenOption/READ)
+        (throw (UnsupportedOperationException. (java-str "'" opt "' not allowed")))))
+    (.newInputStream zfs (.getResolvedPath this)))
+
+  (method newDirectoryStream :throws [IOException] ^{:tag (DirectoryStream Path)} [this
+                                                                                   ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (ZipDirectoryStream. this filter))
+
+  (method delete :throws [IOException] ^void [this]
+    (.deleteFile zfs (.getResolvedPath this) true))
+
+  (method ^:private deleteIfExists :throws [IOException] ^void [this]
+    (.deleteFile zfs (.getResolvedPath this) false))
+
+  (method readAttributes :throws [IOException] ^ZipFileAttributes [this]
+    (let [zfas (.getFileAttributes zfs (.getResolvedPath this))]
+      (when (nil? zfas) (throw (NoSuchFileException. (.toString this))))
+      zfas))
+
+  (method readAttributes :type-params [(A extends BasicFileAttributes)] :throws [IOException] ^A [this
+                                                                                                  ^{:tag (Class A)} type]
+    (cond
+      (or (identical? type BasicFileAttributes) (identical? type ZipFileAttributes))
+        ^BasicFileAttributes (.readAttributes this)
+      (and (identical? type PosixFileAttributes) (.-supportPosix zfs))
+        ^BasicFileAttributes (.readAttributes this)
+      :else
+        (throw (UnsupportedOperationException.
+                 (java-str "Attributes of type " (.getName type) " not supported")))))
+
+  (method setAttribute :throws [IOException] ^void [this ^String attribute value &
+                                                    ^LinkOption/1 options]
+    (let [^:mutable ^String type nil
+          ^:mutable ^String attr nil
+          ^:mutable colonPos (.indexOf attribute \:)]
+      (if (== colonPos -1)
+          (do (set! type "basic") (set! attr attribute))
+          (do
+            (set! type (.substring attribute 0 colonPos))
+            (set! colonPos (unchecked-inc-int colonPos))
+            (set! attr (.substring attribute colonPos))))
+      (.setAttribute (.getFileAttributeView this type) attr value)))
+
+  (method setTimes :throws [IOException] ^void [this ^FileTime mtime ^FileTime atime ^FileTime ctime]
+    (.setTimes zfs (.getResolvedPath this) mtime atime ctime))
+
+  (method setOwner :throws [IOException] ^void [this ^UserPrincipal owner]
+    (.setOwner zfs (.getResolvedPath this) owner))
+
+  (method setPermissions :throws [IOException] ^void [this ^{:tag (Set PosixFilePermission)} perms]
+    (.setPermissions zfs (.getResolvedPath this) perms))
+
+  (method setGroup :throws [IOException] ^void [this ^GroupPrincipal group]
+    (.setGroup zfs (.getResolvedPath this) group))
+
+  (method readAttributes :throws [IOException] ^{:tag (Map String Object)} [this ^String attributes
+                                                                            & ^LinkOption/1 options]
+    (let [^:mutable ^String view nil
+          ^:mutable ^String attrs nil
+          ^:mutable colonPos (.indexOf attributes \:)]
+      (if (== colonPos -1)
+          (do (set! view "basic") (set! attrs attributes))
+          (do
+            (set! view (.substring attributes 0 colonPos))
+            (set! colonPos (unchecked-inc-int colonPos))
+            (set! attrs (.substring attributes colonPos))))
+      (.readAttributes (.getFileAttributeView this view) attrs)))
+
+  (method readAttributesIfExists :throws [IOException] ^ZipFileAttributes [this]
+    (.getFileAttributes zfs (.getResolvedPath this)))
+
+  (method getFileStore :throws [IOException] ^FileStore [this]
+    (if (.exists this)
+        (.getFileStore zfs this)
+        (throw (NoSuchFileException. (.getString zfs path)))))
+
+  (method isSameFile :throws [IOException] ^boolean [this ^Path other]
+    (cond
+      (.equals this other) true
+      (or (nil? other) (not (identical? (.getFileSystem this) (.getFileSystem other)))) false
+      :else
+        (do
+          (.checkAccess this)
+          (.checkAccess (cast ZipPath other))
+          (Arrays/equals (.getResolvedPath this) (.getResolvedPath (cast ZipPath other))))))
+
+  (method newByteChannel :throws [IOException] ^SeekableByteChannel [this
+                                                                     ^{:tag (Set (? extends OpenOption))} options
+                                                                     &
+                                                                     ^{:tag (array (FileAttribute ?))} attrs]
+    (.newByteChannel zfs (.getResolvedPath this) options attrs))
+
+  (method newFileChannel :throws [IOException] ^FileChannel [this
+                                                             ^{:tag (Set (? extends OpenOption))} options
+                                                             &
+                                                             ^{:tag (array (FileAttribute ?))} attrs]
+    (.newFileChannel zfs (.getResolvedPath this) options attrs))
+
+  (method checkAccess :throws [IOException] ^void [this & ^AccessMode/1 modes]
+    (let [^:mutable w false
+          ^:mutable x false]
+      (for-each [^AccessMode mode modes]
+        (switch mode
+          READ nil
+          WRITE (set! w true)
+          EXECUTE (set! x true)
+          (throw (UnsupportedOperationException.))))
+      (.checkAccess zfs (.getResolvedPath this))
+      (when (or (and w (.isReadOnly zfs)) x) (throw (AccessDeniedException. (.toString this))))))
+
+  (method exists ^boolean [this] (.exists zfs (.getResolvedPath this)))
+
+  (method newOutputStream :throws [IOException] ^OutputStream [this & ^OpenOption/1 options]
+    (if (== (alength options) 0)
+        (.newOutputStream zfs
+                          (.getResolvedPath this)
+                          StandardOpenOption/CREATE
+                          StandardOpenOption/TRUNCATE_EXISTING
+                          StandardOpenOption/WRITE)
+        (.newOutputStream zfs (.getResolvedPath this) options)))
+
+  (method move :throws [IOException] ^void [this ^ZipPath target & ^CopyOption/1 options]
+    (if (Files/isSameFile (.getZipFile (.-zfs this)) (.getZipFile (.-zfs target)))
+        (.copyFile zfs true (.getResolvedPath this) (.getResolvedPath target) options)
+        (do (.copyToTarget this target options) (.delete this))))
+
+  (method copy :throws [IOException] ^void [this ^ZipPath target & ^CopyOption/1 options]
+    (if (Files/isSameFile (.getZipFile (.-zfs this)) (.getZipFile (.-zfs target)))
+        (.copyFile zfs false (.getResolvedPath this) (.getResolvedPath target) options)
+        (.copyToTarget this target options)))
+
+  (method ^:private copyToTarget :throws [IOException] ^void [this ^ZipPath target &
+                                                              ^CopyOption/1 options]
+    (let [^:mutable replaceExisting false
+          ^:mutable copyAttrs false]
+      (for-each [^CopyOption opt options]
+        (cond
+          (identical? opt StandardCopyOption/REPLACE_EXISTING) (set! replaceExisting true)
+          (identical? opt StandardCopyOption/COPY_ATTRIBUTES) (set! copyAttrs true)))
+      (let [zfas (.readAttributes this)
+            ^:mutable ^boolean exists false]
+        (if replaceExisting
+            (try
+              (.deleteIfExists target)
+              (set! exists false)
+              (catch DirectoryNotEmptyException x (set! exists true)))
+            (set! exists (.exists target)))
+        (when exists (throw (FileAlreadyExistsException. (.toString target))))
+        (if (.isDirectory zfas)
+            (.createDirectory target)
+            (with-resources [is (.newInputStream zfs (.getResolvedPath this))
+                             os (.newOutputStream target)]
+              (.transferTo is os)))
+        (when copyAttrs
+          (let [view (cast ZipFileAttributeView (.getFileAttributeView target ZipFileAttributeView))]
+            (try
+              (.setTimes view (.lastModifiedTime zfas) (.lastAccessTime zfas) (.creationTime zfas))
+              (.setPermissions view (cast Set (.orElse (.storedPermissions zfas) nil)))
+              (catch IOException x (try (.delete target) (catch IOException ignore)) (throw x))))))))
+
+  (method ^:private ^:static decode ^int [^char c]
+    (cond
+      (and (>= c \0) (<= c \9)) (unchecked-subtract-int c \0)
+      (and (>= c \a) (<= c \f)) (unchecked-add-int (unchecked-subtract-int c \a) 10)
+      (and (>= c \A) (<= c \F)) (unchecked-add-int (unchecked-subtract-int c \A) 10)
+      :else (do (java-assert false) -1)))
+
+  (method ^:private ^:static decodeUri ^String [^String s]
+    (when (some? s)
+      (let [n (.length s)]
+        (cond
+          (== n 0) s
+          (< (.indexOf s \%) 0) s
+          :else
+            (let [sb (StringBuilder. n)
+                  bb (new byte/1 n)
+                  ^:mutable betweenBrackets false]
+              (let [^:mutable ^int i 0]
+                (while (< i n)
+                  (let [^:mutable c (.charAt s i)]
+                    (cond
+                      (== c \[) (set! betweenBrackets true)
+                      (and betweenBrackets (== c \])) (set! betweenBrackets false))
+                    (if (or (not (== c \%)) betweenBrackets)
+                        (do (.append sb c) (set! i (unchecked-inc-int i)))
+                        (let [^:mutable ^int nb 0]
+                          (while (== c \%)
+                            (java-assert (>= (unchecked-subtract-int n i) 2))
+                            (aset bb
+                                  nb
+                                  (unchecked-byte
+                                    (bit-or-int (bit-shift-left-int
+                                                  (bit-and-int
+                                                    (ZipPath/decode
+                                                      (.charAt s (set! i (unchecked-inc-int i))))
+                                                    0xf)
+                                                  4)
+                                                (bit-and-int
+                                                  (ZipPath/decode
+                                                    (.charAt s (set! i (unchecked-inc-int i))))
+                                                  0xf))))
+                            (set! nb (unchecked-inc-int nb))
+                            (when (>= (set! i (unchecked-inc-int i)) n) (break))
+                            (set! c (.charAt s i)))
+                          (.append sb (String. bb 0 nb StandardCharsets/UTF_8)))))))
+              (.toString sb)))))))

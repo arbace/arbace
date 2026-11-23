@@ -2,13 +2,16 @@
 
 (in-ns 'jdk.internal.jrt)
 
-(import '(java.util ArrayList Collection Collections List)
+(import '(java.util ArrayList Collection Collections List Map WeakHashMap)
         '(java.util.concurrent CancellationException
+                               Delayed
                                ExecutionException
                                ExecutorCompletionService
                                ForkJoinPool
                                ForkJoinTask
                                Future
+                               RejectedExecutionException
+                               ScheduledFuture
                                TimeUnit
                                TimeoutException))
 
@@ -16,6 +19,8 @@
   (constructor ^:private [this])
 
   (method ^:public ^:static shutdownNow ^{:tag (List Runnable)} [^ForkJoinPool pool]
+    (when-not (identical? pool (ForkJoinPool/commonPool))
+      (.put CANCEL_ON_SHUTDOWN pool Boolean/TRUE))
     (.shutdown pool)
     (Collections/emptyList))
 
@@ -109,4 +114,149 @@
                   (recur (unchecked-dec-int left)))))
             (when (nil? ee) (set! ee (ExecutionException. nil)))
             (throw ee))
-          (finally (for-each [^{:tag (Future T)} f futures] (.cancel f true))))))))
+          (finally (for-each [^{:tag (Future T)} f futures] (.cancel f true)))))))
+
+  (field ^:private ^:static ^:final ^{:tag (Map ForkJoinPool Boolean)} CANCEL_ON_SHUTDOWN
+    (Collections/synchronizedMap (WeakHashMap.)))
+
+  (method ^:public ^:static schedule ^{:tag (ScheduledFuture ?)} [^ForkJoinPool pool
+                                                                  ^Runnable command ^long delay
+                                                                  ^TimeUnit unit]
+    (let [d (.toNanos unit delay)]
+      (when (nil? command) (throw (NullPointerException.)))
+      (ForkJoinPools/start pool (ScheduledTask. pool command nil d 0))))
+
+  (method ^:public ^:static schedule :type-params [V] ^{:tag (ScheduledFuture V)} [^ForkJoinPool pool
+                                                                                   ^{:tag (Callable V)} callable
+                                                                                   ^long delay
+                                                                                   ^TimeUnit unit]
+    (let [d (.toNanos unit delay)]
+      (when (nil? callable) (throw (NullPointerException.)))
+      (ForkJoinPools/start pool (ScheduledTask. pool nil callable d 0))))
+
+  (method ^:public ^:static scheduleAtFixedRate ^{:tag (ScheduledFuture ?)} [^ForkJoinPool pool
+                                                                             ^Runnable command
+                                                                             ^long initialDelay
+                                                                             ^long period
+                                                                             ^TimeUnit unit]
+    (let [d (.toNanos unit initialDelay)
+          p (.toNanos unit period)]
+      (when (nil? command) (throw (NullPointerException.)))
+      (when (<= p 0) (throw (IllegalArgumentException.)))
+      (ForkJoinPools/start pool (ScheduledTask. pool command nil d p))))
+
+  (method ^:public ^:static scheduleWithFixedDelay ^{:tag (ScheduledFuture ?)} [^ForkJoinPool pool
+                                                                                ^Runnable command
+                                                                                ^long initialDelay
+                                                                                ^long delay
+                                                                                ^TimeUnit unit]
+    (let [d (.toNanos unit initialDelay)
+          p (.toNanos unit delay)]
+      (when (nil? command) (throw (NullPointerException.)))
+      (when (<= p 0) (throw (IllegalArgumentException.)))
+      (ForkJoinPools/start pool (ScheduledTask. pool command nil d (unchecked-negate p)))))
+
+  (method ^:public ^:static cancelDelayedTasksOnShutdown ^void [^ForkJoinPool pool]
+    (when-not (identical? pool (ForkJoinPool/commonPool))
+      (.put CANCEL_ON_SHUTDOWN pool Boolean/TRUE)))
+
+  (method ^:private ^:static start :type-params [T] ^{:tag (ScheduledTask T)} [^ForkJoinPool pool
+                                                                               ^{:tag (ScheduledTask T)} task]
+    (when (.isShutdown pool) (throw (RejectedExecutionException.)))
+    (.execute pool (Waiter. task))
+    task)
+
+  (defclass ^:private ^:static ^:final Waiter
+    :extends (ForkJoinTask Void)
+
+    (field ^:private ^:final ^{:tag (ScheduledTask ?)} task)
+
+    (constructor [this ^{:tag (ScheduledTask ?)} task]
+      (set! (.-task this) task))
+
+    (method ^:public getRawResult ^Void [this] nil)
+
+    (method ^:protected setRawResult ^void [this ^Void v])
+
+    (method ^:protected exec ^boolean [this]
+      (let [^{:tag (ScheduledTask ?)} t task]
+        (while true
+          (while true
+            (when (.isDone t) (return true))
+            (when (and (.isShutdown (.-pool t))
+                       (or (not (== (.-period t) 0)) (.containsKey CANCEL_ON_SHUTDOWN (.-pool t))))
+              (.cancel t false)
+              (return true))
+            (let [left (unchecked-subtract (.-when t) (System/nanoTime))]
+              (when (<= left 0) (break))
+              (try
+                (.get t (Math/min left 20000000) TimeUnit/NANOSECONDS)
+                (catch [TimeoutException
+                        InterruptedException
+                        ExecutionException
+                        CancellationException] ignore))))
+          (when-not (.runOnce t) (return true))))))
+
+  (defclass ^:static ^:final ScheduledTask
+    :extends (ForkJoinTask T)
+    :implements [(ScheduledFuture T)]
+    :type-params [T]
+
+    (field ^:final ^ForkJoinPool pool)
+
+    (field ^:final ^Runnable runnable)
+
+    (field ^:final ^{:tag (Callable (? extends T))} callable)
+
+    (field ^:final ^long period)
+
+    (field ^:volatile ^long when)
+
+    (field ^T result)
+
+    (constructor [this ^ForkJoinPool pool ^Runnable runnable
+                  ^{:tag (Callable (? extends T))} callable ^long delay ^long period]
+      (set! (.-pool this) pool)
+      (set! (.-runnable this) runnable)
+      (set! (.-callable this) callable)
+      (set! (.-period this) period)
+      (set! (.-when this) (unchecked-add (System/nanoTime) (Math/max delay 0))))
+
+    (method ^:public getRawResult ^T [this] result)
+
+    (method ^:protected setRawResult ^void [this ^T v] (set! result v))
+
+    (method ^:protected exec ^boolean [this]
+      (or (.runOnce this) (.isDone this)))
+
+    (method runOnce ^boolean [this]
+      (if (.isDone this)
+          false
+          (do
+            (try
+              (if (some? callable)
+                  (let [^T v (.call callable)]
+                    (arbace.core/when (== period 0) (.complete this v) (return false)))
+                  (do
+                    (.run runnable)
+                    (arbace.core/when (== period 0) (.complete this nil) (return false))))
+              (catch Throwable ex (.completeExceptionally this ex) (return false)))
+            (if (.isDone this)
+                false
+                (do
+                  (if (> period 0)
+                      (set! when (unchecked-add when period))
+                      (set! when (unchecked-subtract (System/nanoTime) period)))
+                  true)))))
+
+    (method ^:public getDelay ^long [this ^TimeUnit unit]
+      (.convert unit (unchecked-subtract when (System/nanoTime)) TimeUnit/NANOSECONDS))
+
+    (method ^:public compareTo ^int [this ^Delayed other]
+      (if (identical? other this)
+          0
+          (let [d (if-instance [^{:tag (ScheduledTask ?)} t other]
+                    (unchecked-subtract when (.-when t))
+                    (unchecked-subtract (.getDelay this TimeUnit/NANOSECONDS)
+                                        (.getDelay other TimeUnit/NANOSECONDS)))]
+            (cond (< d 0) -1 (> d 0) 1 :else 0))))))

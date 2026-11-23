@@ -451,7 +451,13 @@
    ["invokeAll" "(Ljava/util/Collection;)Ljava/util/List;"]
    ["invokeAll" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/util/List;"]
    ["invokeAny" "(Ljava/util/Collection;)Ljava/lang/Object;"]
-   ["invokeAny" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"]])
+   ["invokeAny" "(Ljava/util/Collection;JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;"]
+   ;; queue 543: ForkJoinPool's own delayed tasks (JDK 25), not ExecutorService's: the manifest declares them
+   ["schedule" "(Ljava/lang/Runnable;JLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;"]
+   ["schedule" "(Ljava/util/concurrent/Callable;JLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;"]
+   ["scheduleAtFixedRate" "(Ljava/lang/Runnable;JJLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;"]
+   ["scheduleWithFixedDelay" "(Ljava/lang/Runnable;JJLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;"]
+   ["cancelDelayedTasksOnShutdown" "()V"]])
 
 (defn fjp-support-key
   "The static method of ForkJoinPools behind ExecutorService method [name desc]: the pool first."
@@ -468,10 +474,13 @@
           :let [[ps r] (t/parse-method-desc desc)
                 [_ hn hd] (fjp-support-key k)
                 pn (vec (for [i (range (count ps))] (symbol (str "p" i))))]]
-      (list 'go/method (symbol (nm/method-base name desc))
-            (vary-meta (vec (cons (tag 't '(* ForkJoinPool)) (map #(tag %1 (m/go-type :jrt %2)) pn ps)))
-                       assoc :tag (m/go-type :jrt r))
-            (list 'return (apply list (m/class-sym :jrt fjp-support-class (str "_" (nm/method-base hn hd))) 't pn))))))
+      (let [call (apply list (m/class-sym :jrt fjp-support-class (str "_" (nm/method-base hn hd))) 't pn)
+            params (vec (cons (tag 't '(* ForkJoinPool)) (map #(tag %1 (m/go-type :jrt %2)) pn ps)))]
+        (if (= "V" r)
+          (list 'go/method (symbol (nm/method-base name desc)) params call)
+          (list 'go/method (symbol (nm/method-base name desc))
+                (vary-meta params assoc :tag (m/go-type :jrt r))
+                (list 'return call)))))))
 
 (defn access-flags?
   "Whether j2g writes Class, Method, Constructor and Field's accessFlags (JCS273): AccessFlag and jrt's
@@ -1520,7 +1529,11 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
         stacks? (and (m/translated? "java/util/HashMap") (m/hand-written? "java/lang/Thread"))
         ;; String.transform (support-forms; h-java-members)
         string-transform? (string-transform?)
-        ;; Object's protected finalize (h-java-members): jdk26u's empty body, so that a class calling it
+;; ForkJoinPool's delayed tasks (queue 543; fjp-support-forms' methods), for the interpreter
+        fjp-sched? (and (m/translated? fjp-support-class) (m/translated? "java/util/concurrent/ExecutorService")
+                        (m/translated? "java/util/concurrent/ScheduledFuture")
+                        (m/hand-written? "java/util/concurrent/ForkJoinPool"))
+                ;; Object's protected finalize (h-java-members): jdk26u's empty body, so that a class calling it
         ;; (super.finalize(), C.this.finalize()) resolves; Object's table had clone alone of its protected
         ;; methods
         object-finalize? true
@@ -1531,7 +1544,7 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                               (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/ClassDesc"))
                      [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* Class)) this)))]))]
     (when (or (seq str-ms) (seq cls-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks?
-              (parameters?) string-transform? object-finalize?)
+              (parameters?) string-transform? object-finalize? fjp-sched?)
       [(apply list 'go/func 'init []
               (concat
                 (when tann?
@@ -1572,6 +1585,25 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                                        :Return Object_class :Modifiers 0x1
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args]
                                                  (.Transform_Function__O ((inst As (* String)) this) ((inst As Function) (aget args 0)))))))])
+                (when fjp-sched?
+                  (let [p '(assert (* ForkJoinPool) this)
+                        r0 '((inst As Runnable) (aget args 0))
+                        l1 '(assert int64 (aget args 1))
+                        l2 '(assert int64 (aget args 2))
+                        u2 '((inst As (* TimeUnit)) (aget args 2))
+                        u3 '((inst As (* TimeUnit)) (aget args 3))]
+                    [(list 'set! '(.-Methods (.Info ForkJoinPool_class))
+                           (list 'append '(.-Methods (.Info ForkJoinPool_class))
+                                 (sig "schedule" '[Runnable_class Prim_long TimeUnit_class] 'ScheduledFuture_class 0x1
+                                      (list '.Schedule_Runnable_J_TimeUnit__ScheduledFuture p r0 l1 u2))
+                                 (sig "schedule" '[Callable_class Prim_long TimeUnit_class] 'ScheduledFuture_class 0x1
+                                      (list '.Schedule_Callable_J_TimeUnit__ScheduledFuture p '((inst As Callable) (aget args 0)) l1 u2))
+                                 (sig "scheduleAtFixedRate" '[Runnable_class Prim_long Prim_long TimeUnit_class] 'ScheduledFuture_class 0x1
+                                      (list '.ScheduleAtFixedRate_Runnable_J_J_TimeUnit__ScheduledFuture p r0 l1 l2 u3))
+                                 (sig "scheduleWithFixedDelay" '[Runnable_class Prim_long Prim_long TimeUnit_class] 'ScheduledFuture_class 0x1
+                                      (list '.ScheduleWithFixedDelay_Runnable_J_J_TimeUnit__ScheduledFuture p r0 l1 l2 u3))
+                                 (sig "cancelDelayedTasksOnShutdown" [] 'Prim_void 0x1
+                                      (list 'do (list '.CancelDelayedTasksOnShutdown__V p) '(return nil)))))]))
                 (when object-finalize?
                   ['(set! (.-Methods (.Info Object_class))
                           (append (.-Methods (.Info Object_class))

@@ -1,0 +1,151 @@
+;; Converted from jdk26u src/jdk.charsets/share/classes/sun/nio/cs/ext/JISAutoDetect.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.nio.cs.ext)
+
+(import '(java.nio ByteBuffer CharBuffer)
+        '(java.nio.charset Charset CharsetDecoder CharsetEncoder CoderResult)
+        '(jdk.internal.util OperatingSystem)
+        '(sun.nio.cs DelegatableDecoder EUC_JP HistoricallyNamedCharset SJIS))
+
+(defclass ^:public JISAutoDetect
+  :extends Charset
+  :implements [HistoricallyNamedCharset]
+
+  (field ^:private ^:static ^:final ^int EUCJP_MASK 0x01)
+
+  (field ^:private ^:static ^:final ^int SJIS2B_MASK 0x02)
+
+  (field ^:private ^:static ^:final ^int SJIS1B_MASK 0x04)
+
+  (field ^:private ^:static ^:final ^int EUCJP_KANA1_MASK 0x08)
+
+  (field ^:private ^:static ^:final ^int EUCJP_KANA2_MASK 0x10)
+
+  (constructor ^:public [this]
+    (super. "x-JISAutoDetect" (ExtendedCharsets/aliasesFor "x-JISAutoDetect")))
+
+  (method ^:public contains ^boolean [this ^Charset cs]
+    (or (or (or (or (.equals (.name cs) "US-ASCII") (instance? SJIS cs)) (instance? EUC_JP cs))
+            (instance? ISO2022_JP cs))
+        (instance? JISAutoDetect cs)))
+
+  (method ^:public canEncode ^boolean [this] false)
+
+  (method ^:public newDecoder ^CharsetDecoder [this] (Decoder. this))
+
+  (method ^:public historicalName ^String [this] "JISAutoDetect")
+
+  (method ^:public newEncoder ^CharsetEncoder [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:private ^:static looksLikeJapanese ^boolean [^CharBuffer cb]
+    (let [^:mutable ^int hiragana 0
+          ^:mutable ^int katakana 0]
+      (while (.hasRemaining cb)
+        (let [c (.get cb)]
+          (when (and (and (<= 0x3040 c) (<= c 0x309f))
+                     (> (set! hiragana (unchecked-inc-int hiragana)) 1))
+            (return true))
+          (when (and (and (<= 0xff65 c) (<= c 0xff9f))
+                     (> (set! katakana (unchecked-inc-int katakana)) 1))
+            (return true))))
+      false))
+
+  (defclass ^:private ^:static Decoder
+    :extends CharsetDecoder
+
+    (field ^:private ^:static ^:final ^String SJISName (Decoder/getSJISName))
+
+    (field ^:private ^:static ^:final ^String EUCJPName "EUC_JP")
+
+    (field ^:private ^DelegatableDecoder detectedDecoder nil)
+
+    (constructor ^:public [this ^Charset cs]
+      (super. cs (float 0.5) (float 1.0)))
+
+    (method ^:private ^:static isPlainASCII ^boolean [^byte b]
+      (and (>= b 0) (not (== b 0x1b))))
+
+    (method ^:private ^:static copyLeadingASCII ^void [^ByteBuffer src ^CharBuffer dst]
+      (let [start (.position src)
+            limit (unchecked-add-int start (Math/min (.remaining src) (.remaining dst)))
+            ^:mutable ^int p 0
+            ^:mutable ^byte b 0]
+        (set! p start)
+        (while (and (< p limit) (Decoder/isPlainASCII (set! b (.get src p))))
+          (.put dst (unchecked-char (bit-and-int b 0xff)))
+          (set! p (unchecked-inc-int p)))
+        (.position src p)))
+
+    (method ^:private decodeLoop ^CoderResult [this ^DelegatableDecoder decoder ^ByteBuffer src
+                                               ^CharBuffer dst]
+      (.reset (cast CharsetDecoder decoder))
+      (set! detectedDecoder decoder)
+      (.decodeLoop detectedDecoder src dst))
+
+    (method ^:protected decodeLoop ^CoderResult [this ^ByteBuffer src ^CharBuffer dst]
+      (if (nil? detectedDecoder)
+          (do
+            (Decoder/copyLeadingASCII src dst)
+            (cond
+              (not (.hasRemaining src)) CoderResult/UNDERFLOW
+              (and (not (.hasRemaining dst)) (Decoder/isPlainASCII (.get src (.position src))))
+                CoderResult/OVERFLOW
+              :else
+                (let [cbufsiz (unchecked-int
+                                (unchecked-multiply (.limit src) (double (.maxCharsPerByte this))))
+                      sandbox (CharBuffer/allocate cbufsiz)
+                      cs2022 (Charset/forName "ISO-2022-JP")
+                      dd2022 (cast DelegatableDecoder (.newDecoder cs2022))
+                      src2022 (.asReadOnlyBuffer src)
+                      res2022 (.decodeLoop dd2022 src2022 sandbox)]
+                  (if (not (.isError res2022))
+                      (.decodeLoop this dd2022 src dst)
+                      (let [csEUCJ (Charset/forName EUCJPName)
+                            csSJIS (Charset/forName SJISName)
+                            ddEUCJ (cast DelegatableDecoder (.newDecoder csEUCJ))
+                            ddSJIS (cast DelegatableDecoder (.newDecoder csSJIS))
+                            srcEUCJ (.asReadOnlyBuffer src)]
+                        (.clear sandbox)
+                        (let [resEUCJ (.decodeLoop ddEUCJ srcEUCJ sandbox)]
+                          (if (.isError resEUCJ)
+                              (.decodeLoop this ddSJIS src dst)
+                              (let [srcSJIS (.asReadOnlyBuffer src)
+                                    sandboxSJIS (CharBuffer/allocate cbufsiz)
+                                    resSJIS (.decodeLoop ddSJIS srcSJIS sandboxSJIS)]
+                                (cond
+                                  (.isError resSJIS) (.decodeLoop this ddEUCJ src dst)
+                                  (> (.position srcEUCJ) (.position srcSJIS))
+                                    (.decodeLoop this ddEUCJ src dst)
+                                  (< (.position srcEUCJ) (.position srcSJIS))
+                                    (.decodeLoop this ddSJIS src dst)
+                                  (== (.position src) (.position srcEUCJ)) CoderResult/UNDERFLOW
+                                  :else
+                                    (do
+                                      (.flip sandbox)
+                                      (.decodeLoop
+                                        this
+                                        ^DelegatableDecoder (if (JISAutoDetect/looksLikeJapanese
+                                                                  sandbox)
+                                                                ddEUCJ
+                                                                ddSJIS)
+                                        src
+                                        dst)))))))))))
+          (.decodeLoop detectedDecoder src dst)))
+
+    (method ^:protected implReset ^void [this] (set! detectedDecoder nil))
+
+    (method ^:protected implFlush ^CoderResult [this ^CharBuffer out]
+      (if (some? detectedDecoder) (.implFlush detectedDecoder out) (.implFlush super out)))
+
+    (method ^:public isAutoDetecting ^boolean [this] true)
+
+    (method ^:public isCharsetDetected ^boolean [this]
+      (some? detectedDecoder))
+
+    (method ^:public detectedCharset ^Charset [this]
+      (when (nil? detectedDecoder) (throw (IllegalStateException. "charset not yet detected")))
+      (.charset (cast CharsetDecoder detectedDecoder)))
+
+    (method ^:private ^:static getSJISName ^String []
+      (if (OperatingSystem/isWindows) "windows-31J" "Shift_JIS"))))
