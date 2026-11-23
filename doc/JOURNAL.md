@@ -19185,3 +19185,23 @@ completeness 0.9992 -> 0.9995. secretary's 3000 s run follows under the same loc
 - Cells: Haskell eval 950 / 0 / 2 -> 952 / 0 / 0 (18 n/a); completeness 0.9995 -> 1.0000 (100), independence 1.0. bin/reap --record,
   bin/crops-score --record, --judge --strict, --self-test, bin/records-check: 0 problems. The option (a) for secretary and T23071, an optimizer for the own
   libraries' STG (HES100 (b)), is not needed for completeness.
+
+## 2026-11-23: two Haskell harness fixes from the VM's queue 541 (smalls2-1123)
+
+The coordinator's request, from the VM's closed queue 541 (reports/541-hs-eval.md on the queue branch, findings 1 and 3):
+- bin/lib/hsi/check's wall cap was three times a run's CPU limit, whatever the host's load: on the VM (load 35-43 on 8 cores, hsi at
+  20-25 % of a core) secretary was killed at 1,530 s of wall with 321 s of its 510 s of CPU, and the VM raised HSI_CPU_CAPS for the
+  wall's sake to record. Now `wall_cap CPU`: a backstop for a run that stops using the CPU, three times the CPU limit while the host's
+  load is at most its cores, times the load per core (rounded up) above (the 1-minute load average, nproc; HSI_WALL_FACTOR sets the
+  factor); every hsi run of the check takes it (the program's run, the AOT profile's run, a test's generator's run). Alternatives not
+  taken: a fixed margin (max(3 x, cap + N): still short at a fifth of a core for long caps); no wall cap when HSI_JOBS=1 (a hung run
+  would hold the night). Test: test/haskell/hsi/wall-cap-test.bash (by hand; the main host idle and loaded, the VM's load, the VM's
+  secretary within the cap), its control the old rule falling short of the VM's run; with wall_cap made the old fixed 3 x, the test
+  fails 4 of its 7 lines, as it must. One check run (samples/Arrays) through the changed script passes.
+- bin/lib/repr-haskell/lib-stg --ifaces own read the plan lib-check left (.tmp/repr-haskell/lib-check/own/PKG/plan.txt), which names
+  its sources and closures by absolute paths of the checkout lib-check ran in; a pool copied or moved from another checkout failed
+  every module on a missing file (the VM's worktree moved from q488). Now such a plan is refused at once, the paths it names listed,
+  with the command that makes it here (`bin/repr-haskell lib-check --ifaces own [--package P]`). Alternative not taken: rebasing the
+  paths (the closures' own files may hold them too; a rebuild is the sure way). Test: a plan naming another worktree's .tmp (the
+  hs-pkgs worktree's, which names hs-r7-run's) refused with exit 1 and its paths; the same plan's paths made this checkout's passes
+  the check (`--only` an empty list: 0 modules, exit 0). The hs-pkgs worktree's own pools are such a plan: its lib-stg would now refuse.
