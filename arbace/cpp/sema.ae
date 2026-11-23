@@ -6971,8 +6971,8 @@
 ;; function" on the class's line, besides the use's); once a member)
 (defn- cx-deleted-implicit!
   [f]
-  (when (and (checking?) *on-refusal* (not *cx-in-implicit*) (:implicit f) (:cx-sub-deleted f) (not (:cx-class-reported f)))
-    (when-let [cn (or (:cx-union-node f) (:cx-node (abi/cls (:cls f))))]
+  (when (and (checking?) *on-refusal* (not *cx-in-implicit*) (or (:implicit f) (:defaulted f)) (:cx-sub-deleted f) (not (:cx-class-reported f)))
+    (when-let [cn (or (:cx-union-node f) (when (and (:defaulted f) (not (:implicit f))) (:node f)) (:cx-node (abi/cls (:cls f))))]
       (upd-fn! (:id f) assoc :cx-class-reported true)
       (*on-refusal* (ex-info (str "codegen: call to a deleted function " (:cx-sub-deleted f) " (implicitly defining " (:name f) ")")
                              {:codegen/refused :overload :cx/node cn})
@@ -12163,24 +12163,45 @@
     (do
     ;; (queue 499: a subobject's deleted or inaccessible destructor, cx-sub-dtor!)
     (cx-sub-dtor! f cls)
-    ;; (cpp-decl2, the checker: an implicit copy constructor whose const member (or a member read through a const source) is of
-    ;; a class all of whose constructors taking one argument are copy constructors with a non-const parameter, so that
-    ;; [class.copy.ctor]/10's overload resolution for the member finds no viable one: defined as deleted, GCC's "no matching
-    ;; function for call to 'G::G(const G&)'" at the class where it is implicitly defined; init/synth2.C)
-    (when (and (checking?) (:implicit f) (= :ctor (:kind f)) (not (:inh-from f)) (= 1 (count (:ps (:ty f))))
-               (= :ref (:k (first (:ps (:ty f))))))
-      (let [c (abi/cls cls) pc (:c (:to (first (:ps (:ty f)))))]
+    ;; (cpp-decl2, the checker: an implicit copy or move constructor or assignment operator ([class.copy.ctor]/10,
+    ;; [class.copy.assign]/7) is deleted when a subobject's overload resolution surely finds nothing viable: the subobject's class
+    ;; (a base, or a member of class type or an array of it) declares only copy constructors (assignment operators) whose
+    ;; parameter is a non-const lvalue reference, and the source is const (a const member, or the copy's `const X&`) or an rvalue
+    ;; (a move); GCC's "no matching function for call to 'G::G(const G&)'" or "cannot bind non-const lvalue reference" at the
+    ;; class where it is implicitly defined: init/synth2.C, cpp0x/pr71979.C's B::operator=(B&&) over A::operator=(A&))
+    (when (and (checking?) (or (:implicit f) (and (:defaulted f) (not (:ool-defaulted f)) (:node f))) (#{:ctor :method} (:kind f))
+               (not (:inh-from f)) (= 1 (count (:ps (:ty f))))
+               (or (= :ctor (:kind f)) (= "operator=" (:name f)))
+               (#{:ref :rref} (:k (first (:ps (:ty f))))))
+      (let [c (abi/cls cls)
+            p0 (first (:ps (:ty f)))
+            move? (= :rref (:k p0))
+            pc (:c (:to p0))
+            assign? (= "operator=" (:name f))]
         (when (and (not (:union c)) (string? (:name c)) (:cx-node c) (not (header-node? (:cx-node c))))
-          (doseq [fl (remove :static (:fields c))
-                  :let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)) u (abi/unq t)]
-                  :when (and (abi/class? u) (not (abi/ref? (:ty fl))) (not (:anon fl)) (string? (:name fl)) (or pc (:c t)))
-                  :let [m (abi/cls (:id u))
-                        ones (filter #(let [g (fnd %)] (and (= 1 (- (count (:ps (:ty g))) (count (filter some? (:defaults g))))) (not (:deleted g))))
-                                     (:ctors m))]
+          (doseq [[sid const?] (concat (for [b (:bases c) :when (not (:virtual b))] [(:cls b) pc])
+                                       (for [fl (remove :static (:fields c))
+                                             :let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t)) u (abi/unq t)]
+                                             :when (and (abi/class? u) (not (abi/ref? (:ty fl))) (not (:anon fl)) (string? (:name fl)))]
+                                         [(:id u) (or pc (:c t))]))
+                  :when (or move? const?)
+                  :let [m (abi/cls sid)
+                        cands (if assign?
+                                (filter #(let [g (fnd %)] (and (= "operator=" (:name g)) (= 1 (count (:ps (:ty g)))) (not (:deleted g)))) (:methods m))
+                                (filter #(let [g (fnd %)] (and (= 1 (- (count (:ps (:ty g))) (count (filter some? (:defaults g))))) (not (:deleted g)))) (:ctors m)))]
                   :when (and m (:complete m) (not (:tmpl m)) (not (:header m)) (empty? (:ctor-tmpls m)) (empty? (:inherits-ctors m))
-                             (seq ones) (every? #(let [g (fnd %)] (and (copy-ctor? g (:id u)) (not (:c (:to (first (:ps (:ty g)))))))) ones))]
-            (throw (ex-info (str "codegen: call to a deleted function " (:name m) " (no copy constructor takes a const " (:name m) ")")
-                            {:codegen/refused :overload}))))))
+                             (or (not assign?) (empty? (:conv-tmpls m)))
+                             (seq cands)
+                             ;; (each candidate's parameter a reference to M the source cannot bind: a non-const lvalue reference
+                             ;; for an rvalue or a const source, a non-const rvalue reference for an lvalue or a const source)
+                             (every? #(let [g (fnd %) q (first (:ps (:ty g)))]
+                                        (and (#{:ref :rref} (:k q)) (= sid (class-id (:to q))) (not (:c (:to q)))
+                                             (or const? (if (= :ref (:k q)) move? (not move?)))))
+                                     cands))]
+            (throw (ex-info (str "codegen: call to a deleted function " (:name m) (if assign? "::operator=" "")
+                                 " (no " (if assign? "assignment operator" "constructor") " of " (:name m) " takes "
+                                 (if const? "a const " "an ") (if move? "rvalue" "lvalue") ")")
+                            {:codegen/refused :overload :cx-defaulted-delete (boolean (:defaulted f))}))))))
     ;; (cpp-decl2, the checker: a union's implicit default constructor, copy or move constructor or destructor is deleted when a
     ;; variant member's corresponding one is non-trivial (the default constructor: no variant member with a default member
     ;; initializer), [class.default.ctor]/2.1, [class.copy.ctor]/10.1, [class.dtor]/7.1: GCC's "union member 'U::g' with
@@ -12654,6 +12675,9 @@ protected:
                                                     ;; defaulted <=> declares, cpp2a/spaceship-synth-neg4.C's A without ==)
                                                     (and (checking?) (:defaulted (fnd id)) (#{"==" "<=>"} (:op (fnd id)))
                                                          (:codegen/refused (ex-data e)))
+                                                    ;; (cpp-decl2: a member defaulted on its first declaration that the subobjects'
+                                                    ;; overload resolution surely deletes, analyze-implicit*'s :cx-defaulted-delete)
+                                                    (and (checking?) (:defaulted (fnd id)) (:cx-defaulted-delete (ex-data e)))
                                                     (and (:implicit (fnd id))
                                                         (or (= :overload (:codegen/refused (ex-data e)))
                                                             ;; ([class.default.ctor]/2.5: a member or base with no default
