@@ -19029,3 +19029,37 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+## 2026-11-23: py-accel, queues 521 and 525 merged with j2g's program copy; the eval measured; :c-accelerators narrowed
+
+Branch `py-accel-1122` (mac): 521's `6db3dd0cb` (CPython's `_datetimemodule.c` and `_decimal.c` with libmpdec built by ci into pyi's
+C world ctypestest, its cf2g package committed as Go forms and linked into the executable through `arbace/clib/worlds` in goi's table,
+DECISION 521-2 (b)) and 525's `8d2a609d1` (the 18 pyi gaps 521's modules exposed, DECISION 521-3 (a)) merged on next `ead97197e`;
+`5a4c223da` (runtime_state counts clib and pyctypes), `1627e8fba`/`a179a8e5c` (j2g's program copy takes arbace/clib, arbace/pyctypes,
+arbace/clib/worlds and the world's packages: the gate build had failed with "package arbace/clib is not in std"); `b5c6f40e6` (the world
+built again on next's ci builder: queue 522's soft-float adds musl's long double code, so `bin/pyi-clib verify ctypestest` on the merged
+tree differed from 521's nodes.ae, key and aot forms; new Key 4422cb00...). Its own gate build (key `5ee95bf34622f0956ee2`) gives way to
+train 1 (the user: records share gate builds): `bin/pyi-clib verify ctypestest` and the record wait for the train's executables.
+
+Measured on `a179a8e5c`'s gate build (`2399c5e5`, the world of 521 compiled; valid for classing, not for the record): `bin/pyi check
+test_datetime test_types test_decimal test_bool test_getopt` (one at a time): 2,010 methods, 1,946 pass, 64 classed, 0 failing, 0
+regressions, 999 now pass (test_datetime 1,058 / 50 / 0 in 688 s, 4 driver runs: 3 crashes in test_fromisoformat_fails; test_types
+126 / 3 / 0 in 58 s; test_decimal 721 / 11 / 0 in 250 s; the controls failed as they must); 5.3 GB peak, 19 min. test_logging (2 at once
+with other modules, a loaded host): driver starts 24.1 s and 27.6 s wall (26.0 and 13.9 s CPU) against 10.8 s before (py-eval's run):
+not conclusive under the load; to measure again alone.
+
+`test/python/divergences.edn`: `:c-accelerators` narrowed to _pickle and _json (every test_datetime and test_decimal id removed: 682
+pass now, 6 skipped are other classes'; the matches "requires C version" and "_datetime" removed, "_decimal" narrowed to the two
+stale rows' messages, "requires _decimal" (test_functools) and "C _decimal module required" (test_int), until their modules rerun);
+the 13 real gaps go to a new deferred class `:c-accelerator-gaps` (fromisoformat's NULL dereference in the C world, U+FFFD for a lone
+surrogate through PyUnicode_FromFormat's %c, musl's offset zone names with no tzset in the C world, subclass constructors keeping
+tzinfo, one timedelta computation, no subinterpreters). Judged again on the run (`bin/pyi check --judge`, nothing run).
+
+Merged with next (fa635f636; the coordinator: py-accel-w's own build cancelled, the branch rides train 2): next's py-eval and py-capi
+had added xxlimited, xxlimited_35, _testmultiphase and _testsinglephase to the same world, so lib.conf takes both sides' files and the
+world is built again (`bin/pyi-clib build ctypestest` on a179a8e5c's gate exe: Key fdb2a32c..., 9.9 MB of node program, its cf2g aot
+forms; 3 h 20 min, most of it waiting for the big lock, 5.9 GB). go/arbace/py and pyctypes were merged on their printed Go (git
+merge-file over base ead97197e; three conflicts: builtins_ctypes_api.go's lazy modules and capi.go's native tables both kept,
+capi_objects.go's PyImport_Import next's, which returns the leaf module as 521's importLeaf did), go vet clean, and read back in one hold
+of the big lock (REPR_GO_JOBS=4; a first read at 32 jobs outside the lock had been killed for the host's memory); files only one side
+changed read back byte for byte as that side's. gotable.edn lists both sides' packages. Left for train 2's executables: `bin/pyi-clib
+verify ctypestest`, the three modules' eval with `--record`, reap, crops-score and records-check.
