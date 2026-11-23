@@ -3617,8 +3617,9 @@
   on ([class.union.general]/6), else not a constant (\"change of the active member\" before C++20, [expr.const]/5.10 of
   C++17; from C++20 an access out of the member's lifetime, \"accessing ... member instead of initialized ...\" or
   \"accessing uninitialized member\")."
-  [e x l]
-  (let [l (ce-res l) p (vec (::path l)) n (count p) syn (if x (ce-lhs-steps x) 0)]
+  ([e x l] (ce-union-write! e x l false))
+  ([e x l create?]
+  (let [l (ce-res l) p (vec (::path l)) n (count p) syn (if create? 1 (if x (ce-lhs-steps x) 0))]
     (loop [j 0]
       (when (< j n)
         (let [pre (subvec p 0 j) k (nth p j)
@@ -3632,12 +3633,13 @@
                   (let [a (ce-union-active v) named (>= j (- n syn))]
                     (cond (not (checking?)) (when a (not-constant "a union's member changed"))
                           (< (long *cxx-year*) 20) (when a (ub! e "change of the active member of a union from '" (ce-member-name (::cls v) a) "' to '" (ce-member-name (::cls v) k) "'"))
-                          (and named (ce-implicit-lifetime? (:ty fl))) nil
+                          ;; (cpp-ce2: a new-expression's object at the member itself, its creation, [intro.object]/1)
+                          (and named (or create? (ce-implicit-lifetime? (:ty fl)))) nil
                           a (ub! e "accessing '" (ce-member-name (::cls v) k) "' member instead of initialized '" (ce-member-name (::cls v) a) "' member")
                           :else (ub! e "accessing uninitialized member '" (ce-member-name (::cls v) k) "'"))))
                 (let [u (assoc (if (:union c) (select-keys v [::cls]) v) k (ce-fresh-of (:ty fl)))]
                   (if (seq pre) (swap! (::cell l) assoc-in pre u) (reset! (::cell l) u))))))
-          (recur (inc j)))))))
+          (recur (inc j))))))))
 
 (defn- ce-fresh-of
   "An object of type `t` whose lifetime began with no initialization (h-cpp-consteval): a class's {::cls}, an array's
@@ -4371,7 +4373,24 @@
   scalar's value indeterminate); a placement form or a class's own operator new no constant."
   [e env]
   (let [alloc (some-> (:alloc e) fnd)]
-    (when (or (:placement e) (and alloc (:cls alloc))) (not-constant "a placement or class-specific new-expression"))
+    (when (and alloc (:cls alloc)) (not-constant "a class-specific new-expression"))
+    (if (:placement e)
+      ;; (the reserved placement form, std::construct_at's, [specialized.construct]/2, [expr.const]/5.20.1: an object of the type
+      ;; begun at the location, its lifetime's start making a union's member there active, [class.union.general]/6; a location in
+      ;; a member that is not active GCC's "accessing ... member instead of initialized ..." or "accessing uninitialized member")
+      (let [p (ce-eval (:placement e) env)
+            l (cond (ce-loc? p) (ce-res p)
+                    (and (ce-ptr? p) (ce-loc? (::base p))) (ce-res (update (::base p) ::path conj (::i p)))
+                    :else (not-constant "a placement new at " (pr-str (type p))))
+            et (:et e) u (abi/unq et)]
+        (when (:n e) (not-constant "an array placement new"))
+        (ce-union-write! e nil l true)
+        (let [i (:init e)
+              v (if (and (= :none (:i i)) (abi/scalar? u)) nil (ce-store et (ce-init et i env)))]
+          (when (and *ce-dead* (empty? (::path l))) (swap! *ce-dead* disj (::cell l)))
+          (ce-adopt! (::cell l) (vec (::path l)) v)
+          (ce-put! l v)
+          l))
     (let [et (:et e) u (abi/unq et)
           at (:cx-at e)]
       (if (:n e)
@@ -4390,7 +4409,7 @@
               c (atom v)]
           (ce-adopt! c [] v)
           (swap! *ce-heap* assoc c {:array false :at at})
-          {::cell c ::path []})))))
+          {::cell c ::path []}))))))
 
 (defn- ce-delete
   "cpp-ce2 (the checker): a delete-expression in a constant evaluation, [expr.delete]: a null pointer nothing; else the object
@@ -8564,7 +8583,10 @@
         over (overaligned? et)
         avt (align-val-t)
         size {:op :int :v 0 :ty abi/ulong* :cat :pr}
-        [scope ids] (alloc-lookup cid nm global?)
+        ;; (cpp-ce2: in a function template's specialization, the global scope's declarations at the point of instantiation,
+        ;; [temp.point]/1, [temp.res.general]/1: a dependent new-expression's allocation function, [expr.new]/12 -- std::construct_at's
+        ;; placement new over construct_at.h's operator new declared after it)
+        [scope ids] (if (and (checking?) (some-> (:fn-id ctx) fnd :tinst)) (binding [*cutoff* Long/MAX_VALUE] (alloc-lookup cid nm global?)) (alloc-lookup cid nm global?))
         try-res (fn [args] (try (resolve-overload ids args nil) (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x))) nil (throw x)))))
         ;; (the implicit global declarations are always there, [basic.stc.dynamic]/2: a program's own global placement
         ;; form does not hide them)
