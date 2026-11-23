@@ -355,8 +355,16 @@
      (if own
        (mapv (fn [e] [id e]) own)
        (let [found (keep #(seq (class-lookup (:cls %) nm unqualified?)) (if unqualified? (remove :dependent (:bases c)) (:bases c)))
-             keep? (fn [r] (not-any? (fn [o] (abi/derived-from? (ffirst o) (ffirst r))) found))]
-         (first (filter keep? found)))))))
+             keep? (fn [r] (not-any? (fn [o] (abi/derived-from? (ffirst o) (ffirst r))) found))
+             kept (filter keep? found)]
+         ;; (cpp-decl2, the checker: [class.member.lookup]/6, the sets of two bases' classes differing make the lookup
+         ;; ambiguous: GCC's "request for member 'f' is ambiguous"; judged for functions and data members of the main file's
+         ;; classes, cpp2a/concepts-memfun4.C's S2<>{}.f() over B<>::f and C<>::f)
+         (when (and (checking?) (>= (count (distinct (map ffirst kept))) 2)
+                    (every? (fn [r] (every? #(#{:fn :field} (:e (second %))) r)) kept)
+                    (not-any? #(:header (abi/cls (ffirst %))) kept) (not (:header c)))
+           (fail :ambiguous "reference to '" nm "' is ambiguous (found in several base classes)"))
+         (first kept))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Types from clang's qualType strings
@@ -1576,8 +1584,28 @@
   (let [^java.util.HashMap m (:names scope)
         other-spec? (fn [g] (when-let [{:keys [tid args]} *instantiating*]
                               (let [ti (:tinst g)] (and ti (= tid (:tid ti)) (not= args (:args ti))))))]
-    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))) (:id e)))
+    (some (fn [e] (when (and (= :fn (:e e)) (same-sig? (fnd (:id e)) f) (not (other-spec? (fnd (:id e))))
+                             ;; (cpp-decl2, the checker: a base's member a using-declaration names is no declaration the class's
+                             ;; own member redeclares: it hides it or overloads it, [namespace.udecl]/14, cx-udecl-hide!)
+                             (not (and (checking?) (:ucls e) (:cls f) (not= (:cls (fnd (:id e))) (:cls f)))))
+                    (:id e)))
           (.get m (case (:kind f) :ctor " ctor" :dtor " dtor" (:name f))))))
+
+(defn- cx-udecl-hide!
+  "cpp-decl2, the checker: [namespace.udecl]/14 (C++20), the class's member function `f` (node `n`) hides a base's member a
+  using-declaration brought in with the same name, parameter-type-list, cv- and ref-qualifiers and trailing requires-clause; one
+  whose requires-clause differs stays a candidate beside it (cpp2a/concepts-memfun4.C's S<>{}.f(): ambiguous, CWG 2789)."
+  [home f n]
+  (when (and (checking?) (:cls f))
+    (let [^java.util.HashMap m (:names home)
+          k (:name f)
+          rq (fn [x] (some-> (:trailingRequiresClause x) node-text (str/replace #"\s+" "")))]
+      (when-let [es (seq (.get m k))]
+        (let [keep (remove (fn [e] (and (= :fn (:e e)) (:ucls e)
+                                        (let [g (fnd (:id e))]
+                                          (and g (not= (:cls g) (:cls f)) (same-sig? g f) (= (rq (:node g)) (rq n))))))
+                           es)]
+          (when (< (count keep) (count es)) (.put m k (vec keep))))))))
 
 ;; queue 445: a block-scope function declaration ([basic.link]/6, [basic.scope.block]: `void terminate() noexcept;` in c++config.h's
 ;; std::__terminate) declares the function of its innermost enclosing namespace, named in the block alone: clang mangles it
@@ -2018,7 +2046,12 @@
         ;; explicit-obj-default2.C's defaulted assignments. By value, deduced (this auto&&) or named in a body: refused
         xobj (when (and cid (:isExplicitObjectParameter (first pn)))
                (let [o (first (:ps ty))]
-                 (when-not (and (abi/ref? o) (abi/class? (abi/unq (:to o))) (= cid (:id (abi/unq (:to o)))))
+                 (when-not (and (abi/ref? o) (abi/class? (abi/unq (:to o)))
+                                (or (= cid (:id (abi/unq (:to o))))
+                                    ;; (cpp-decl2, the checker: a reference to another class, a derived one's `this S<T>&&`
+                                    ;; ([dcl.fct]/6 allows any type), declared all the same so that its class is complete:
+                                    ;; cpp2a/concepts-memfun4.C's B<>, whose using-declarations in S<> had found nothing)
+                                    (checking?)))
                    (fail :xobj "an explicit object parameter not a reference to its class"))
                  (when (and (:name (first pn)) body) (fail :xobj "an explicit object parameter named in a body"))
                  o))
@@ -2211,6 +2244,7 @@
                                            (and (same-sig? g f) (= (:tid *instantiating*) (:tid (:tinst g)))))))
                                (.get ^java.util.HashMap (:names home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)))))
             (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id id :pos (:pos f)}))
+          (when (and cid (= k :method)) (cx-udecl-hide! home f n))
           (when bns (enter! home (block-fn-key nm) {:e :fn :id id :pos (:pos f)}))
           (when (= k :ctor) (abi/update-cls! cid update :ctors (fnil conj []) id))
           (when (= k :dtor) (abi/update-cls! cid assoc :dtor id))
@@ -3256,7 +3290,18 @@
                                        (catch arbace.lang.ExceptionInfo _ nil))]
                       (abi/update-cls! (:cls scope) update :inherits-ctors conj bn)
                       (when (checking?) (abi/update-cls! (:cls scope) assoc-in [:cx-inh-nodes bn] n))))
-                  (doseq [e es] (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
+                  (doseq [e es
+                          ;; (cpp-decl2, the checker: a base member hidden by the class's own declared before the using-declaration,
+                          ;; [namespace.udecl]/14, cx-udecl-hide!'s rule in the other order)
+                          :when (not (and (checking?) (:cls scope) (= :fn (:e e))
+                                          (let [g (fnd (:id e))
+                                                rq (fn [x] (some-> (:trailingRequiresClause x) node-text (str/replace #"\s+" "")))]
+                                            (and g (some (fn [o] (and (= :fn (:e o)) (not (:ucls o))
+                                                                      (let [h (fnd (:id o))]
+                                                                        (and h (= (:cls h) (:cls scope)) (not= (:cls g) (:cls h))
+                                                                             (same-sig? g h) (= (rq (:node g)) (rq (:node h)))))))
+                                                         (.get ^java.util.HashMap (:names scope) (last parts)))))))]
+                    (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                                              (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
                                                              ;; (CP324 (a): a member function's synonym has the using-declaration's
@@ -6291,6 +6336,10 @@
              ;; (cpp-rt-own: a reference binding's :sub against another's alone; a pointer's qualification adjustment's against
              ;; a non-reference's)
              (not= (boolean (:refb a)) (boolean (:refb b))) false
+             ;; (cpp-decl2, the checker: [over.ics.rank]/3.2.3 compares no binding of an implicit object parameter of a member
+             ;; function declared without a ref-qualifier against an rvalue reference's: B::g(this S&&) and S::g() for S{}.g()
+             ;; neither better, cpp2a/concepts-memfun4.C)
+             (and (or (:noref a) (:noref b)) (or (neg? (long (or (:sub a) 0))) (neg? (long (or (:sub b) 0))))) false
              :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
 
 (declare resolve-overload*)
@@ -6322,8 +6371,8 @@
                                       (and (= "&&" (:refq f)) (= :lv (:cat obj))) nil
                                       (and (= "&" (:refq f)) (not (:cq f)) (not= :lv (:cat obj))) nil
                                       (and (= "&&" (:refq f))) {:rank 0 :sub -1}
-                                      (and (:cq f) (not (:c (:ty obj)))) {:rank 0 :sub 1}
-                                      :else {:rank 0 :sub 0})
+                                      (and (:cq f) (not (:c (:ty obj)))) (cond-> {:rank 0 :sub 1} (and (checking?) (nil? (:refq f))) (assoc :noref true))
+                                      :else (cond-> {:rank 0 :sub 0} (and (checking?) (nil? (:refq f))) (assoc :noref true)))
                                 {:rank 0 :sub 0})
                            ;; (cpp-rt-own: an object of a class derived from the member's binds the implicit object parameter by a
                            ;; derived-to-base Conversion, [over.match.funcs]/5 with [over.best.ics]/6: complex_io.cc's `__s << '('` of
@@ -8152,7 +8201,16 @@
       (case (count fs)
         1 (user-conv ctx e (abi/unq (abi/non-ref (:ret (:ty (fnd (first fs)))))) false)
         0 e ; contextually converted later (&&, ||) or refused there
-        (fail :conversion "a class operand with " (count fs) " conversion functions")))
+        (do ;; (cpp-decl2, the checker: conversion functions to one type declared in different classes, two bases', are
+            ;; ranked by no rule -- their implicit object parameters differ, so constraints are not compared,
+            ;; [over.match.best.general]/2.6 (CWG 2789) -- the operator's conversion ambiguous: GCC's "ambiguous overload for
+            ;; 'operator=='", cpp2a/concepts-memfun4.C's S2<>{} == 5)
+            (when (and (checking?) (empty? (conv-tmpls (class-id (:ty e))))
+                       (= 1 (count (distinct (map #(abi/unq (abi/non-ref (:ret (:ty (fnd %))))) fs))))
+                       (= (count fs) (count (distinct (map #(:cls (fnd %)) fs))))
+                       (not (:header (abi/cls (class-id (:ty e))))))
+              (fail :overload "ambiguous call (the operand's conversion functions of " (count fs) " base classes)"))
+            (fail :conversion "a class operand with " (count fs) " conversion functions"))))
     e))
 
 (defn- class-operand? [e] (or (abi/class? (abi/unq (:ty e))) (abi/enum? (abi/unq (:ty e)))))
