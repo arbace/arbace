@@ -2,7 +2,9 @@
 
 (in-ns 'jdk.internal.jrt.javac)
 
-(import '(com.sun.tools.javac.api JavacTool)
+(import '(com.sun.tools.javac.api JavacTaskImpl JavacTool)
+        '(com.sun.tools.javac.main JavaCompiler)
+        '(com.sun.tools.javac.util Log)
         '(java.io File FileInputStream IOException InputStream PrintWriter)
         '(java.util ArrayList HashSet List Set)
         '(javax.tools JavaFileObject)
@@ -65,12 +67,9 @@
                         (Main/path (cast String (.get args (set! i (unchecked-inc-int i))))))
                 "--module-source-path"
                   (set! moduleSourcePath (cast String (.get args (set! i (unchecked-inc-int i)))))
-                ("--system" "--module-path" "-encoding")
+                ("--system" "--module-path")
                   (let [v (cast String (.get args (set! i (unchecked-inc-int i))))
-                        as (cond
-                             (.equals a "--system") (.equals v "none")
-                             (.equals a "--module-path") (.isEmpty v)
-                             :else (or (.equalsIgnoreCase v "utf-8") (.equalsIgnoreCase v "utf8")))]
+                        as (if (.equals a "--system") (.equals v "none") (.isEmpty v))]
                     (when-not as
                       (.println err (java-str "error: unsupported on Arbace: " a " " v))
                       (.flush err)
@@ -103,13 +102,34 @@
                 (when (.add named (Main/canonical file)) (.add units (.source fm file)))))
             (if (.isEmpty units)
                 (do (.println err "error: no source files") (.flush err) 2)
-                (let [^:mutable ^Boolean ok nil]
+                (let [^:mutable ^Boolean ok nil
+                      ^:mutable ^Log log nil
+                      ^:mutable ^JavaCompiler comp nil]
                   (try
-                    (set! ok (.call (.getTask (JavacTool/create) err fm nil opts nil units)))
+                    (let [task (cast JavacTaskImpl
+                                     (.getTask (JavacTool/create) err fm nil opts nil units))
+                          context (.getContext task)]
+                      (.setContext fm context)
+                      (set! log (Log/instance context))
+                      (set! ok (.call task))
+                      (set! comp (JavaCompiler/instance context)))
                     (catch [IllegalArgumentException IllegalStateException] e
                       (.println err (java-str "error: " (.getMessage e)))
                       (.flush err)
                       (return 2)))
+                  (when (and (not (.booleanValue ok)) (not (.-sourceRead fm)))
+                    (.printCount comp "error" (.errorCount comp))
+                    (.printCount comp "warn" (.warningCount comp)))
+                  (when (some? (.-expectDiagKeys log))
+                    (if (.isEmpty (.-expectDiagKeys log))
+                        (do (.printRawLines log "all expected diagnostics found") (set! ok true))
+                        (do
+                          (.printRawLines log
+                                          (java-str
+                                            "expected diagnostic keys not found: "
+                                            (.-expectDiagKeys log)))
+                          (set! ok false))))
+                  (.flush log)
                   (.flush err)
                   (if (.booleanValue ok) 0 1))))))))
 
