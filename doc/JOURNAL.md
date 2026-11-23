@@ -20133,3 +20133,28 @@ completeness 0.9790 -> 0.9801, independence 0.9674 -> 0.9678.
 Left (the survey's list): friend functions in sema (pr62101), opaque enumeration redeclarations (forw_enum6), inline variables
 (inline-var2), implicit moves deleted through overload resolution (pr71979, defaulted20, implicit-trivial1), per-element errors of one
 initializer (array-init1), and smaller ones.
+
+## 2026-11-23: cpp-tpl2's second round, the checker's concepts (branch `cpp-tpl2-1123` from next `2d89c6f19`)
+
+The coordinator's next round after next took the first (`2d89c6f19`): the concepts group of the read cell's deferred rows, then the
+first round's "Left" where safe; cpp-decl2 works on initialization, lookup, special members and overload resolution meanwhile, so this
+round kept to constraints and templates. The 26 deferred rows naming concepts or requires-clauses grouped from the own record and
+g++ 15.2's recorded errors: most need GCC's explanation of an unsatisfied constraint (an error at the atom beside the template
+constraint failure or the call's "no matching function"), a few a rule inside the satisfaction (an access, a call with no object, a
+member function not called, a non-constant atom), one the constraint matching of template template arguments. Built from the standard's
+text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2 (2)".
+
+Checked: each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files) at the round's
+first state: 8 to own pass, two own passes lost (concepts/nested-diagnostics-1.C and -1-truncated.C: their explanations are GCC's nested
+text output, which the tests read by dg-begin-multiline-output) and fixed by reporting none under -fdiagnostics-set-output's nesting;
+the 210 files with a concept or a requires-clause read again after the non-constant atom rule (one crash in a recursion,
+cpp2a/concepts-recursive-sat1.C, fixed by keeping that rule out of recursions) and again with `--record`; the control pair failing as it
+must. The record: `--judge --record` over the 2,688 files' run, then the 210 files `--record`, the two timeouts' rows kept. 9 rows to
+own pass, none lost. mac/next merged (cpp-decl2's rows: C++ read 5,951 / 0 / 332) without conflict; both streams' 37 new own passes
+read again on the merged tree, all passing. C++ read 5,960 / 0 / 323 (248 n/a); completeness 0.9805, independence 0.9680. `bin/reap --record`, `bin/crops-score --record`,
+`--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: every requirement's error as an explanation (rejected: GCC notes them at its default depth 1 and gives the error
+from depth 2); a non-constant atom thrown on as the condition's error (rejected: a static_assert then stopped the unit; the atom's error
+reported and the constraint false gives GCC's lines); the constraint matching of template template arguments by satisfaction with
+symbolic arguments (rejected for subsumption of the normal forms, [temp.arg.template]/4's partial ordering).
