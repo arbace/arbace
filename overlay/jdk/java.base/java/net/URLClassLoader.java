@@ -75,10 +75,14 @@ public class URLClassLoader extends ClassLoader implements Closeable {
         }
     }
 
-    /** Appends url to the URLs searched (ignored once closed, as the JDK's). */
+    /**
+     * Appends url to the URLs searched: ignored when null, once closed, or when the list holds it already (as
+     * jdk26u's URLClassPath.addURL: "If the URL specified is null or is already in the list of URLs, ... then
+     * invoking this method has no effect").
+     */
     protected void addURL(URL url) {
         synchronized (urls) {
-            if (url != null && !closed)
+            if (url != null && !closed && !urls.contains(url))
                 urls.add(url);
         }
     }

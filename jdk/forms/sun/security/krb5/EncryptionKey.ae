@@ -1,0 +1,300 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/EncryptionKey.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5)
+
+(import '(java.io IOException)
+        '(java.security GeneralSecurityException)
+        '(java.util Arrays)
+        '(javax.crypto.spec DESKeySpec DESedeKeySpec)
+        '(sun.security.jgss.krb5 Krb5Util)
+        '(sun.security.krb5.internal Krb5 PAData$SaltAndParams)
+        '(sun.security.krb5.internal.ccache CCacheOutputStream)
+        '(sun.security.krb5.internal.crypto Aes128
+                                            Aes128Sha2
+                                            Aes256
+                                            Aes256Sha2
+                                            ArcFourHmac
+                                            Des
+                                            Des3
+                                            EType)
+        '(sun.security.util DerInputStream DerOutputStream DerValue))
+
+(defclass ^:public EncryptionKey
+  :implements [Cloneable]
+
+  (field ^:public ^:static ^:final ^EncryptionKey NULL_KEY
+    (EncryptionKey. (new byte/1 []) EncryptedData/ETYPE_NULL nil))
+
+  (field ^:private ^int keyType)
+
+  (field ^:private ^byte/1 keyValue)
+
+  (field ^:private ^Integer kvno)
+
+  (method ^:public ^:synchronized getEType ^int [this] keyType)
+
+  (method ^:public ^:final getKeyVersionNumber ^Integer [this] kvno)
+
+  (method ^:public ^:final getBytes ^byte/1 [this] keyValue)
+
+  (method ^:public ^:synchronized clone [this]
+    (EncryptionKey. keyValue keyType kvno))
+
+  (method ^:public ^:static acquireSecretKeys ^EncryptionKey/1 [^PrincipalName princ ^String keytab]
+    (when (nil? princ)
+      (throw (IllegalArgumentException. "Cannot have null principal name to look in keytab.")))
+    (let [ktab (sun.security.krb5.internal.ktab.KeyTab/getInstance keytab)]
+      (.readServiceKeys ktab princ)))
+
+  (method ^:public ^:static acquireSecretKey :throws [KrbException] ^EncryptionKey [^PrincipalName cname
+                                                                                    ^char/1 password
+                                                                                    ^int etype
+                                                                                    ^PAData$SaltAndParams snp]
+    (let [^:mutable ^String salt nil
+          ^:mutable ^byte/1 s2kparams nil]
+      (if (some? snp)
+          (do
+            (set! salt (if (some? (.-salt snp)) (.-salt snp) (.getSalt cname)))
+            (set! s2kparams (.-params snp)))
+          (do (set! salt (.getSalt cname)) (set! s2kparams nil)))
+      (EncryptionKey/acquireSecretKey password salt etype s2kparams)))
+
+  (method ^:public ^:static acquireSecretKey :throws [KrbException] ^EncryptionKey [^char/1 password
+                                                                                    ^String salt
+                                                                                    ^int etype
+                                                                                    ^byte/1 s2kparams]
+    (EncryptionKey. (EncryptionKey/stringToKey password salt s2kparams etype) etype nil))
+
+  (method ^:public ^:static acquireSecretKeys :throws [KrbException] ^EncryptionKey/1 [^char/1 password
+                                                                                       ^String salt]
+    (let [etypes (EType/getDefaults "default_tkt_enctypes")
+          encKeys (new EncryptionKey/1 (alength etypes))]
+      (loop [^int i 0]
+        (when (< i (alength etypes))
+          (cond
+            (EType/isSupported (aget etypes i))
+              (do
+                (aset encKeys
+                      i
+                      (EncryptionKey. (EncryptionKey/stringToKey password salt nil (aget etypes i))
+                                      (aget etypes i)
+                                      nil))
+                (recur (unchecked-inc-int i)))
+            (some? Krb5/DEBUG)
+              (do
+                (.println Krb5/DEBUG
+                          (java-str "Encryption Type "
+                                    (EType/toString (aget etypes i))
+                                    " is not supported/enabled"))
+                (recur (unchecked-inc-int i)))
+            :else (recur (unchecked-inc-int i)))))
+      encKeys))
+
+  (constructor ^:public [this ^byte/1 keyValue ^int keyType ^Integer kvno]
+    (if (some? keyValue)
+        (do
+          (set! (.-keyValue this) (new byte/1 (alength keyValue)))
+          (System/arraycopy keyValue 0 (.-keyValue this) 0 (alength keyValue)))
+        (throw (IllegalArgumentException. "EncryptionKey: Key bytes cannot be null!")))
+    (set! (.-keyType this) keyType)
+    (set! (.-kvno this) kvno))
+
+  (constructor ^:public [this ^int keyType ^byte/1 keyValue]
+    (this. keyValue keyType nil))
+
+  (method ^:private ^:static stringToKey :throws [KrbCryptoException] ^byte/1 [^char/1 password
+                                                                               ^String salt
+                                                                               ^byte/1 s2kparams
+                                                                               ^int keyType]
+    (let [slt (.toCharArray salt)
+          pwsalt (new char/1 (unchecked-add-int (alength password) (alength slt)))]
+      (System/arraycopy password 0 pwsalt 0 (alength password))
+      (System/arraycopy slt 0 pwsalt (alength password) (alength slt))
+      (Arrays/fill slt \0)
+      (try
+        (switch keyType
+          (EncryptedData/ETYPE_DES_CBC_CRC EncryptedData/ETYPE_DES_CBC_MD5)
+            (Des/string_to_key_bytes pwsalt)
+          EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD (Des3/stringToKey pwsalt)
+          EncryptedData/ETYPE_ARCFOUR_HMAC (ArcFourHmac/stringToKey password)
+          EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96 (Aes128/stringToKey password salt s2kparams)
+          EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96 (Aes256/stringToKey password salt s2kparams)
+          EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128
+            (Aes128Sha2/stringToKey password salt s2kparams)
+          EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192
+            (Aes256Sha2/stringToKey password salt s2kparams)
+          (throw (IllegalArgumentException.
+                   (java-str "encryption type " (EType/toString keyType) " not supported"))))
+        (catch GeneralSecurityException e
+          (let [ke (KrbCryptoException. (.getMessage e))] (.initCause ke e) (throw ke)))
+        (finally (Arrays/fill pwsalt \0)))))
+
+  (constructor :throws [KrbCryptoException] ^:public [this ^char/1 password ^String salt
+                                                      ^String algorithm]
+    (cond
+      (or (or (nil? algorithm) (.equalsIgnoreCase algorithm "DES"))
+          (.equalsIgnoreCase algorithm "des-cbc-md5"))
+        (set! keyType EncryptedData/ETYPE_DES_CBC_MD5)
+      (.equalsIgnoreCase algorithm "des-cbc-crc") (set! keyType EncryptedData/ETYPE_DES_CBC_CRC)
+      (or (.equalsIgnoreCase algorithm "DESede") (.equalsIgnoreCase algorithm "des3-cbc-sha1-kd"))
+        (set! keyType EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD)
+      (or (.equalsIgnoreCase algorithm "AES128")
+          (.equalsIgnoreCase algorithm "aes128-cts-hmac-sha1-96"))
+        (set! keyType EncryptedData/ETYPE_AES128_CTS_HMAC_SHA1_96)
+      (or (.equalsIgnoreCase algorithm "ArcFourHmac") (.equalsIgnoreCase algorithm "rc4-hmac"))
+        (set! keyType EncryptedData/ETYPE_ARCFOUR_HMAC)
+      (or (.equalsIgnoreCase algorithm "AES256")
+          (.equalsIgnoreCase algorithm "aes256-cts-hmac-sha1-96"))
+        (do
+          (set! keyType EncryptedData/ETYPE_AES256_CTS_HMAC_SHA1_96)
+          (when-not (EType/isSupported keyType)
+            (throw (IllegalArgumentException. (java-str "Algorithm " algorithm " not enabled")))))
+      (.equalsIgnoreCase algorithm "aes128-cts-hmac-sha256-128")
+        (set! keyType EncryptedData/ETYPE_AES128_CTS_HMAC_SHA256_128)
+      (.equalsIgnoreCase algorithm "aes256-cts-hmac-sha384-192")
+        (do
+          (set! keyType EncryptedData/ETYPE_AES256_CTS_HMAC_SHA384_192)
+          (when-not (EType/isSupported keyType)
+            (throw (IllegalArgumentException. (java-str "Algorithm " algorithm " not enabled")))))
+      :else (throw (IllegalArgumentException. (java-str "Algorithm " algorithm " not supported"))))
+    (set! keyValue (EncryptionKey/stringToKey password salt nil keyType))
+    (set! kvno nil))
+
+  (constructor :throws [KrbCryptoException] ^:public [this ^EncryptionKey key]
+    (set! keyValue (Confounder/bytes (alength (.-keyValue key))))
+    (loop [^int i 0]
+      (when (< i (alength keyValue))
+        (aset keyValue i (unchecked-byte (bit-xor-int (aget keyValue i) (aget (.-keyValue key) i))))
+        (recur (unchecked-inc-int i))))
+    (set! keyType (.-keyType key))
+    (try
+      (when (or (== keyType EncryptedData/ETYPE_DES_CBC_MD5)
+                (== keyType EncryptedData/ETYPE_DES_CBC_CRC))
+        (when-not (DESKeySpec/isParityAdjusted keyValue 0)
+          (set! keyValue (Des/set_parity keyValue)))
+        (when (DESKeySpec/isWeak keyValue 0)
+          (aset keyValue 7 (unchecked-byte (bit-xor-int (aget keyValue 7) 0xF0)))))
+      (when (== keyType EncryptedData/ETYPE_DES3_CBC_HMAC_SHA1_KD)
+        (when-not (DESedeKeySpec/isParityAdjusted keyValue 0)
+          (set! keyValue (Des3/parityFix keyValue)))
+        (let [oneKey (new byte/1 8)]
+          (loop [^int i 0]
+            (when (< i (alength keyValue))
+              (System/arraycopy keyValue i oneKey 0 8)
+              (if (DESKeySpec/isWeak oneKey 0)
+                  (do
+                    (aset keyValue
+                          (unchecked-add-int i 7)
+                          (unchecked-byte
+                            (bit-xor-int (aget keyValue (unchecked-add-int i 7)) 0xF0)))
+                    (recur (unchecked-add-int i 8)))
+                  (recur (unchecked-add-int i 8)))))))
+      (catch GeneralSecurityException e
+        (let [ke (KrbCryptoException. (.getMessage e))] (.initCause ke e) (throw ke)))))
+
+  (constructor :throws [Asn1Exception IOException] ^:public [this ^DerValue encoding]
+    (let [^:mutable ^DerValue der nil]
+      (when-not (== (.getTag encoding) DerValue/tag_Sequence)
+        (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (if (== (bit-and-int (.getTag der) (unchecked-byte 0x1F)) (unchecked-byte 0x00))
+          (set! keyType (.intValue (.getBigInteger (.getData der))))
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (if (== (bit-and-int (.getTag der) (unchecked-byte 0x1F)) (unchecked-byte 0x01))
+          (set! keyValue (.getOctetString (.getData der)))
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (when (> (.available (.getData der)) 0) (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))))
+
+  (method ^:public ^:synchronized asn1Encode :throws [Asn1Exception IOException] ^byte/1 [this]
+    (let [bytes (DerOutputStream.)
+          ^:mutable temp (DerOutputStream.)]
+      (.putInteger temp keyType)
+      (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true (unchecked-byte 0x00)) temp)
+      (set! temp (DerOutputStream.))
+      (.putOctetString temp keyValue)
+      (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true (unchecked-byte 0x01)) temp)
+      (set! temp (DerOutputStream.))
+      (.write temp DerValue/tag_Sequence bytes)
+      (.toByteArray temp)))
+
+  (method ^:public ^:synchronized destroy ^void [this]
+    (when (some? keyValue)
+      (loop [^int i 0]
+        (when (< i (alength keyValue)) (aset keyValue i 0) (recur (unchecked-inc-int i))))))
+
+  (method ^:public ^:static parse :throws [Asn1Exception IOException] ^EncryptionKey [^DerInputStream data
+                                                                                      ^byte explicitTag
+                                                                                      ^boolean optional]
+    (when-not (and optional
+                   (not (== (bit-and-int (unchecked-byte (.peekByte data)) (unchecked-byte 0x1F))
+                            explicitTag)))
+      (let [der (.getDerValue data)]
+        (if (not (== explicitTag (bit-and-int (.getTag der) (unchecked-byte 0x1F))))
+            (throw (Asn1Exception. Krb5/ASN1_BAD_ID))
+            (let [subDer (.getDerValue (.getData der))] (EncryptionKey. subDer))))))
+
+  (method ^:public ^:synchronized writeKey :throws [IOException] ^void [this ^CCacheOutputStream cos]
+    (.write16 cos keyType)
+    (.write16 cos keyType)
+    (.write32 cos (alength keyValue))
+    (loop [^int i 0]
+      (when (< i (alength keyValue)) (.write8 cos (aget keyValue i)) (recur (unchecked-inc-int i)))))
+
+  (method ^:public toString ^String [this]
+    (java-str "EncryptionKey: keyType=" keyType ", kvno=" kvno ", " (Krb5Util/keyInfo keyValue)))
+
+  (method ^:public ^:static findKey :throws [KrbException] ^EncryptionKey [^int etype
+                                                                           ^EncryptionKey/1 keys]
+    (EncryptionKey/findKey etype nil keys))
+
+  (method ^:private ^:static versionMatches ^boolean [^Integer v1 ^Integer v2]
+    (if (or (or (or (nil? v1) (== v1 0)) (nil? v2)) (== v2 0)) true (.equals v1 v2)))
+
+  (method ^:public ^:static findKey :throws [KrbException] ^EncryptionKey [^int etype ^Integer kvno
+                                                                           ^EncryptionKey/1 keys]
+    (when-not (EType/isSupported etype)
+      (throw (KrbException.
+               (java-str "Encryption type " (EType/toString etype) " is not supported/enabled"))))
+    (let [^:mutable ^int ktype 0
+          ^:mutable etypeFound false
+          ^:mutable ^int kvno_found 0
+          ^:mutable ^EncryptionKey key_found nil]
+      (loop [^int i 0]
+        (when (< i (alength keys))
+          (set! ktype (.getEType (aget keys i)))
+          (if (EType/isSupported ktype)
+              (let [kv (.getKeyVersionNumber (aget keys i))]
+                (if (== etype ktype)
+                    (do
+                      (set! etypeFound true)
+                      (cond
+                        (EncryptionKey/versionMatches kvno kv) (return (aget keys i))
+                        (> kv kvno_found)
+                          (do
+                            (set! key_found (aget keys i))
+                            (set! kvno_found kv)
+                            (recur (unchecked-inc-int i)))
+                        :else (recur (unchecked-inc-int i))))
+                    (recur (unchecked-inc-int i))))
+              (recur (unchecked-inc-int i)))))
+      (when (or (== etype EncryptedData/ETYPE_DES_CBC_CRC)
+                (== etype EncryptedData/ETYPE_DES_CBC_MD5))
+        (loop [^int i 0]
+          (when (< i (alength keys))
+            (set! ktype (.getEType (aget keys i)))
+            (if (or (== ktype EncryptedData/ETYPE_DES_CBC_CRC)
+                    (== ktype EncryptedData/ETYPE_DES_CBC_MD5))
+                (let [kv (.getKeyVersionNumber (aget keys i))]
+                  (set! etypeFound true)
+                  (cond
+                    (EncryptionKey/versionMatches kvno kv)
+                      (return (EncryptionKey. etype (.getBytes (aget keys i))))
+                    (> kv kvno_found)
+                      (do
+                        (set! key_found (EncryptionKey. etype (.getBytes (aget keys i))))
+                        (set! kvno_found kv)
+                        (recur (unchecked-inc-int i)))
+                    :else (recur (unchecked-inc-int i))))
+                (recur (unchecked-inc-int i))))))
+      (when etypeFound key_found))))

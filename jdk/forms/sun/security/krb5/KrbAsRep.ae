@@ -1,0 +1,117 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/KrbAsRep.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5)
+
+(import '(java.io IOException)
+        '(java.util Objects)
+        '(javax.security.auth.kerberos KeyTab)
+        '(sun.security.jgss.krb5 Krb5Util)
+        '(sun.security.krb5.internal ASRep EncASRepPart KRBError Krb5 PAData)
+        '(sun.security.krb5.internal.crypto EType KeyUsage)
+        '(sun.security.util DerValue))
+
+(defclass ^:final KrbAsRep
+  :extends KrbKdcRep
+
+  (field ^:private ^ASRep rep)
+
+  (field ^:private ^Credentials creds)
+
+  (constructor :throws [KrbException Asn1Exception IOException] [this ^byte/1 ibuf]
+    (let [encoding (DerValue. ibuf)]
+      (try
+        (set! rep (ASRep. encoding))
+        (catch Asn1Exception e
+          (set! rep nil)
+          (let [err (KRBError. encoding)
+                errStr (.getErrorString err)
+                ^:mutable ^String eText nil]
+            (when (and (some? errStr) (> (.length errStr) 0))
+              (if (== (.charAt errStr (unchecked-subtract-int (.length errStr) 1)) 0)
+                  (set! eText (.substring errStr 0 (unchecked-subtract-int (.length errStr) 1)))
+                  (set! eText errStr)))
+            (let [^:mutable ^KrbException ke nil]
+              (if (nil? eText)
+                  (set! ke (KrbException. err))
+                  (do
+                    (when (some? Krb5/DEBUG)
+                      (.println Krb5/DEBUG (java-str "KRBError received: " eText)))
+                    (set! ke (KrbException. err eText))))
+              (.initCause ke e)
+              (throw ke)))))))
+
+  (method getPA ^PAData/1 [this] (.-pAData rep))
+
+  (method decryptUsingKeyTab :throws [KrbException Asn1Exception IOException] ^void [this
+                                                                                     ^KeyTab ktab
+                                                                                     ^KrbAsReq asReq
+                                                                                     ^PrincipalName cname]
+    (let [^:mutable ^EncryptionKey dkey nil
+          encPartKeyType (.getEType (.-encPart rep))
+          encPartKvno (.-kvno (.-encPart rep))]
+      (try
+        (set! dkey
+              (EncryptionKey/findKey encPartKeyType
+                                     encPartKvno
+                                     (Krb5Util/keysFromJavaxKeyTab ktab cname)))
+        (catch KrbException ke
+          (when (== (.returnCode ke) Krb5/KRB_AP_ERR_BADKEYVER)
+            (set! dkey
+                  (EncryptionKey/findKey encPartKeyType (Krb5Util/keysFromJavaxKeyTab ktab cname))))))
+      (when (nil? dkey)
+        (throw (KrbException. Krb5/API_INVALID_ARG
+                              (java-str "Cannot find key for type/kvno to decrypt AS REP - "
+                                        (EType/toString encPartKeyType)
+                                        "/"
+                                        encPartKvno))))
+      (.decrypt this dkey asReq cname)))
+
+  (method decryptUsingPassword :throws [KrbException Asn1Exception IOException] ^void [this
+                                                                                       ^char/1 password
+                                                                                       ^KrbAsReq asReq
+                                                                                       ^PrincipalName cname]
+    (let [encPartKeyType (.getEType (.-encPart rep))
+          dkey (EncryptionKey/acquireSecretKey cname
+                                               password
+                                               encPartKeyType
+                                               (PAData/getSaltAndParams
+                                                 encPartKeyType
+                                                 (.-pAData rep)))]
+      (.decrypt this dkey asReq cname)))
+
+  (method ^:private decrypt :throws [KrbException Asn1Exception IOException] ^void [this
+                                                                                    ^EncryptionKey dkey
+                                                                                    ^KrbAsReq asReq
+                                                                                    ^PrincipalName cname]
+    (let [enc_as_rep_bytes (.decrypt (.-encPart rep) dkey KeyUsage/KU_ENC_AS_REP_PART)
+          enc_as_rep_part (.reset (.-encPart rep) enc_as_rep_bytes)
+          encoding (DerValue. enc_as_rep_part)
+          enc_part (EncASRepPart. encoding)]
+      (set! (.-encKDCRepPart rep) enc_part)
+      (let [req (.getMessage asReq)]
+        (KrbAsRep/check true req rep dkey)
+        (let [^:mutable clientAlias cname]
+          (when (.equals clientAlias (.-cname rep)) (set! clientAlias nil))
+          (set! creds
+                (Credentials. (.-ticket rep)
+                              (.-cname rep)
+                              clientAlias
+                              (.-sname enc_part)
+                              nil
+                              (.-key enc_part)
+                              (.-flags enc_part)
+                              (.-authtime enc_part)
+                              (.-starttime enc_part)
+                              (.-endtime enc_part)
+                              (.-renewTill enc_part)
+                              (.-caddr enc_part)))
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG
+                      (java-str ">>> KrbAsRep cons in KrbAsReq.getReply "
+                                (.getNameString (.-cname (.-reqBody req))))))))))
+
+  (method getCreds ^Credentials [this]
+    (cast Credentials (Objects/requireNonNull creds "Creds not available yet.")))
+
+  (method getCCreds ^sun.security.krb5.internal.ccache.Credentials [this]
+    (sun.security.krb5.internal.ccache.Credentials. rep)))

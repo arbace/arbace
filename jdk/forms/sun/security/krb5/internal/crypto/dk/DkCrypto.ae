@@ -1,0 +1,481 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/crypto/dk/DkCrypto.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.crypto.dk)
+
+(import '(java.io ByteArrayInputStream ByteArrayOutputStream)
+        '(java.nio CharBuffer)
+        '(java.nio.charset StandardCharsets)
+        '(java.security GeneralSecurityException InvalidAlgorithmParameterException)
+        '(java.util Arrays)
+        '(javax.crypto Cipher)
+        '(sun.security.krb5 Confounder KrbCryptoException)
+        '(sun.security.krb5.internal.crypto KeyUsage)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass ^:public ^:abstract DkCrypto
+  (field ^:protected ^:static ^:final ^boolean debug false)
+
+  (field ^:static ^:final ^byte/1 KERBEROS_CONSTANT
+    (new byte/1 [0x6b 0x65 0x72 0x62 0x65 0x72 0x6f 0x73]))
+
+  (method ^:protected ^:abstract getKeySeedLength ^int [this])
+
+  (method ^:protected ^:abstract randomToKey ^byte/1 [this ^byte/1 in])
+
+  (method ^:protected ^:abstract getCipher :throws [GeneralSecurityException] ^Cipher [this
+                                                                                       ^byte/1 key
+                                                                                       ^byte/1 ivec
+                                                                                       ^int mode])
+
+  (method ^:public ^:abstract getChecksumLength ^int [this])
+
+  (method ^:protected ^:abstract getHmac :throws [GeneralSecurityException] ^byte/1 [this
+                                                                                     ^byte/1 key
+                                                                                     ^byte/1 plaintext])
+
+  (method ^:public encrypt :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                          ^byte/1 baseKey
+                                                                                          ^int usage
+                                                                                          ^byte/1 ivec
+                                                                                          ^byte/1 new_ivec
+                                                                                          ^byte/1 plaintext
+                                                                                          ^int start
+                                                                                          ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [^:mutable ^byte/1 Ke nil
+          ^:mutable ^byte/1 Ki nil]
+      (try
+        (let [constant (new byte/1 5)]
+          (aset constant 0 (unchecked-byte (bit-and-int (bit-shift-right-int usage 24) 0xff)))
+          (aset constant 1 (unchecked-byte (bit-and-int (bit-shift-right-int usage 16) 0xff)))
+          (aset constant 2 (unchecked-byte (bit-and-int (bit-shift-right-int usage 8) 0xff)))
+          (aset constant 3 (unchecked-byte (bit-and-int usage 0xff)))
+          (aset constant 4 (unchecked-byte 0xaa))
+          (set! Ke (.dk this baseKey constant))
+          (when debug
+            (.println System/err (java-str "usage: " usage))
+            (when (some? ivec) (DkCrypto/traceOutput "old_state.ivec" ivec 0 (alength ivec)))
+            (DkCrypto/traceOutput "plaintext" plaintext start (^[int int] Math/min len 32))
+            (DkCrypto/traceOutput "constant" constant 0 (alength constant))
+            (DkCrypto/traceOutput "baseKey" baseKey 0 (alength baseKey))
+            (DkCrypto/traceOutput "Ke" Ke 0 (alength Ke)))
+          (let [encCipher (.getCipher this Ke ivec Cipher/ENCRYPT_MODE)
+                blockSize (.getBlockSize encCipher)
+                confounder (Confounder/bytes blockSize)
+                plainSize (.roundup this (unchecked-add-int (alength confounder) len) blockSize)]
+            (when debug
+              (.println System/err
+                        (java-str "confounder = "
+                                  (alength confounder)
+                                  "; plaintext = "
+                                  len
+                                  "; padding = "
+                                  (unchecked-subtract-int
+                                    (unchecked-subtract-int plainSize (alength confounder))
+                                    len)
+                                  "; total = "
+                                  plainSize))
+              (DkCrypto/traceOutput "confounder" confounder 0 (alength confounder)))
+            (let [toBeEncrypted (new byte/1 plainSize)]
+              (System/arraycopy confounder 0 toBeEncrypted 0 (alength confounder))
+              (System/arraycopy plaintext start toBeEncrypted (alength confounder) len)
+              (Arrays/fill toBeEncrypted
+                           (unchecked-add-int (alength confounder) len)
+                           plainSize
+                           (unchecked-byte 0))
+              (let [cipherSize (.getOutputSize encCipher plainSize)
+                    ccSize (unchecked-add-int cipherSize (.getChecksumLength this))
+                    ciphertext (new byte/1 ccSize)]
+                (.doFinal encCipher toBeEncrypted 0 plainSize ciphertext 0)
+                (when (and (some? new_ivec) (== (alength new_ivec) blockSize))
+                  (System/arraycopy ciphertext
+                                    (unchecked-subtract-int cipherSize blockSize)
+                                    new_ivec
+                                    0
+                                    blockSize)
+                  (when debug (DkCrypto/traceOutput "new_ivec" new_ivec 0 (alength new_ivec))))
+                (aset constant 4 (unchecked-byte 0x55))
+                (set! Ki (.dk this baseKey constant))
+                (when debug
+                  (DkCrypto/traceOutput "constant" constant 0 (alength constant))
+                  (DkCrypto/traceOutput "Ki" Ki 0 (alength Ke)))
+                (let [hmac (.getHmac this Ki toBeEncrypted)]
+                  (when debug
+                    (DkCrypto/traceOutput "hmac" hmac 0 (alength hmac))
+                    (DkCrypto/traceOutput "ciphertext"
+                                          ciphertext
+                                          0
+                                          (^[int int] Math/min (alength ciphertext) 32)))
+                  (System/arraycopy hmac 0 ciphertext cipherSize (.getChecksumLength this))
+                  ciphertext)))))
+        (finally
+          (when (some? Ke) (Arrays/fill Ke 0 (alength Ke) (unchecked-byte 0)))
+          (when (some? Ki) (Arrays/fill Ki 0 (alength Ki) (unchecked-byte 0)))))))
+
+  (method ^:public encryptRaw :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                             ^byte/1 baseKey
+                                                                                             ^int usage
+                                                                                             ^byte/1 ivec
+                                                                                             ^byte/1 plaintext
+                                                                                             ^int start
+                                                                                             ^int len]
+    (when debug
+      (.println System/err (java-str "usage: " usage))
+      (when (some? ivec) (DkCrypto/traceOutput "old_state.ivec" ivec 0 (alength ivec)))
+      (DkCrypto/traceOutput "plaintext" plaintext start (^[int int] Math/min len 32))
+      (DkCrypto/traceOutput "baseKey" baseKey 0 (alength baseKey)))
+    (let [encCipher (.getCipher this baseKey ivec Cipher/ENCRYPT_MODE)
+          blockSize (.getBlockSize encCipher)]
+      (when-not (== (unchecked-remainder-int len blockSize) 0)
+        (throw (GeneralSecurityException.
+                 (java-str "length of data to be encrypted ("
+                           len
+                           ") is not a multiple of the blocksize ("
+                           blockSize
+                           ")"))))
+      (let [cipherSize (.getOutputSize encCipher len)
+            ciphertext (new byte/1 cipherSize)]
+        (.doFinal encCipher plaintext 0 len ciphertext 0)
+        ciphertext)))
+
+  (method ^:public decryptRaw :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 baseKey
+                                                                          ^int usage ^byte/1 ivec
+                                                                          ^byte/1 ciphertext
+                                                                          ^int start ^int len]
+    (when debug
+      (.println System/err (java-str "usage: " usage))
+      (when (some? ivec) (DkCrypto/traceOutput "old_state.ivec" ivec 0 (alength ivec)))
+      (DkCrypto/traceOutput "ciphertext" ciphertext start (^[int int] Math/min len 32))
+      (DkCrypto/traceOutput "baseKey" baseKey 0 (alength baseKey)))
+    (let [decCipher (.getCipher this baseKey ivec Cipher/DECRYPT_MODE)
+          blockSize (.getBlockSize decCipher)]
+      (when-not (== (unchecked-remainder-int len blockSize) 0)
+        (throw (GeneralSecurityException.
+                 (java-str "length of data to be decrypted ("
+                           len
+                           ") is not a multiple of the blocksize ("
+                           blockSize
+                           ")"))))
+      (let [decrypted (.doFinal decCipher ciphertext start len)]
+        (when debug
+          (DkCrypto/traceOutput "decrypted"
+                                decrypted
+                                0
+                                (^[int int] Math/min (alength decrypted) 32)))
+        decrypted)))
+
+  (method ^:public decrypt :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 baseKey
+                                                                       ^int usage ^byte/1 ivec
+                                                                       ^byte/1 ciphertext ^int start
+                                                                       ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [^:mutable ^byte/1 Ke nil
+          ^:mutable ^byte/1 Ki nil]
+      (try
+        (let [constant (new byte/1 5)]
+          (aset constant 0 (unchecked-byte (bit-and-int (bit-shift-right-int usage 24) 0xff)))
+          (aset constant 1 (unchecked-byte (bit-and-int (bit-shift-right-int usage 16) 0xff)))
+          (aset constant 2 (unchecked-byte (bit-and-int (bit-shift-right-int usage 8) 0xff)))
+          (aset constant 3 (unchecked-byte (bit-and-int usage 0xff)))
+          (aset constant 4 (unchecked-byte 0xaa))
+          (set! Ke (.dk this baseKey constant))
+          (when debug
+            (.println System/err (java-str "usage: " usage))
+            (when (some? ivec) (DkCrypto/traceOutput "old_state.ivec" ivec 0 (alength ivec)))
+            (DkCrypto/traceOutput "ciphertext" ciphertext start (^[int int] Math/min len 32))
+            (DkCrypto/traceOutput "constant" constant 0 (alength constant))
+            (DkCrypto/traceOutput "baseKey" baseKey 0 (alength baseKey))
+            (DkCrypto/traceOutput "Ke" Ke 0 (alength Ke)))
+          (let [decCipher (.getCipher this Ke ivec Cipher/DECRYPT_MODE)
+                blockSize (.getBlockSize decCipher)
+                cksumSize (.getChecksumLength this)
+                cipherSize (unchecked-subtract-int len cksumSize)
+                decrypted (.doFinal decCipher ciphertext start cipherSize)]
+            (when debug
+              (DkCrypto/traceOutput "decrypted"
+                                    decrypted
+                                    0
+                                    (^[int int] Math/min (alength decrypted) 32)))
+            (aset constant 4 (unchecked-byte 0x55))
+            (set! Ki (.dk this baseKey constant))
+            (when debug
+              (DkCrypto/traceOutput "constant" constant 0 (alength constant))
+              (DkCrypto/traceOutput "Ki" Ki 0 (alength Ke)))
+            (let [calculatedHmac (.getHmac this Ki decrypted)]
+              (when debug
+                (DkCrypto/traceOutput "calculated Hmac" calculatedHmac 0 (alength calculatedHmac))
+                (DkCrypto/traceOutput "message Hmac" ciphertext cipherSize cksumSize))
+              (let [^:mutable cksumFailed false]
+                (when (>= (alength calculatedHmac) cksumSize)
+                  (loop [^int i 0]
+                    (if (< i cksumSize)
+                        (if (not (== (aget calculatedHmac i)
+                                     (aget ciphertext (unchecked-add-int cipherSize i))))
+                            (set! cksumFailed true)
+                            (recur (unchecked-inc-int i)))
+                        nil)))
+                (when cksumFailed (throw (GeneralSecurityException. "Checksum failed")))
+                (when (and (some? ivec) (== (alength ivec) blockSize))
+                  (System/arraycopy ciphertext
+                                    (unchecked-subtract-int
+                                      (unchecked-add-int start cipherSize)
+                                      blockSize)
+                                    ivec
+                                    0
+                                    blockSize)
+                  (when debug (DkCrypto/traceOutput "new_state.ivec" ivec 0 (alength ivec))))
+                (let [plaintext (new byte/1 (unchecked-subtract-int (alength decrypted) blockSize))]
+                  (System/arraycopy decrypted blockSize plaintext 0 (alength plaintext))
+                  plaintext)))))
+        (finally
+          (when (some? Ke) (Arrays/fill Ke 0 (alength Ke) (unchecked-byte 0)))
+          (when (some? Ki) (Arrays/fill Ki 0 (alength Ki) (unchecked-byte 0)))))))
+
+  (method roundup ^int [this ^int n ^int blocksize]
+    (unchecked-multiply-int
+      (unchecked-divide-int (unchecked-subtract-int (unchecked-add-int n blocksize) 1) blocksize)
+      blocksize))
+
+  (method ^:public calculateChecksum :throws [GeneralSecurityException] ^byte/1 [this
+                                                                                 ^byte/1 baseKey
+                                                                                 ^int usage
+                                                                                 ^byte/1 input
+                                                                                 ^int start ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [constant (new byte/1 5)]
+      (aset constant 0 (unchecked-byte (bit-and-int (bit-shift-right-int usage 24) 0xff)))
+      (aset constant 1 (unchecked-byte (bit-and-int (bit-shift-right-int usage 16) 0xff)))
+      (aset constant 2 (unchecked-byte (bit-and-int (bit-shift-right-int usage 8) 0xff)))
+      (aset constant 3 (unchecked-byte (bit-and-int usage 0xff)))
+      (aset constant 4 (unchecked-byte 0x99))
+      (let [Kc (.dk this baseKey constant)]
+        (when debug
+          (.println System/err (java-str "usage: " usage))
+          (DkCrypto/traceOutput "input" input start (^[int int] Math/min len 32))
+          (DkCrypto/traceOutput "constant" constant 0 (alength constant))
+          (DkCrypto/traceOutput "baseKey" baseKey 0 (alength baseKey))
+          (DkCrypto/traceOutput "Kc" Kc 0 (alength Kc)))
+        (try
+          (let [hmac (.getHmac this Kc input)]
+            (when debug (DkCrypto/traceOutput "hmac" hmac 0 (alength hmac)))
+            (cond
+              (== (alength hmac) (.getChecksumLength this)) hmac
+              (> (alength hmac) (.getChecksumLength this))
+                (let [buf (new byte/1 (.getChecksumLength this))]
+                  (System/arraycopy hmac 0 buf 0 (alength buf))
+                  buf)
+              :else
+                (throw (GeneralSecurityException.
+                         (java-str "checksum size too short: "
+                                   (alength hmac)
+                                   "; expecting : "
+                                   (.getChecksumLength this))))))
+          (finally (Arrays/fill Kc 0 (alength Kc) (unchecked-byte 0)))))))
+
+  (method dk :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 key ^byte/1 constant]
+    (.randomToKey this (.dr this key constant)))
+
+  (method ^:protected dr :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 key
+                                                                     ^:mutable ^byte/1 constant]
+    (let [encCipher (.getCipher this key nil Cipher/ENCRYPT_MODE)
+          blocksize (.getBlockSize encCipher)]
+      (when-not (== (alength constant) blocksize)
+        (set! constant (DkCrypto/nfold constant (unchecked-multiply-int blocksize 8))))
+      (let [^:mutable toBeEncrypted constant
+            keybytes (bit-shift-right-int (.getKeySeedLength this) 3)
+            rawkey (new byte/1 keybytes)
+            ^:mutable ^int posn 0
+            ^:mutable ^int n 0
+            ^:mutable ^int len 0]
+        (while (< n keybytes)
+          (when debug
+            (.println System/err (java-str "Encrypting: " (DkCrypto/bytesToString toBeEncrypted))))
+          (let [cipherBlock (.doFinal encCipher toBeEncrypted)]
+            (when debug
+              (.println System/err
+                        (java-str "K: "
+                                  (set! posn (unchecked-inc-int posn))
+                                  " = "
+                                  (DkCrypto/bytesToString cipherBlock))))
+            (set! len
+                  (if (<= (unchecked-subtract-int keybytes n) (alength cipherBlock))
+                      (unchecked-subtract-int keybytes n)
+                      (alength cipherBlock)))
+            (when debug (.println System/err (java-str "copying " len " key bytes")))
+            (System/arraycopy cipherBlock 0 rawkey n len)
+            (set! n (unchecked-add-int n len))
+            (set! toBeEncrypted cipherBlock)))
+        rawkey)))
+
+  (method ^:static nfold ^byte/1 [^byte/1 in ^:mutable ^int outbits]
+    (let [inbits (alength in)]
+      (set! outbits (bit-shift-right-int outbits 3))
+      (let [^:mutable ^int a 0
+            ^:mutable ^int b 0
+            ^:mutable ^int c 0
+            ^:mutable ^int lcm 0]
+        (set! a outbits)
+        (set! b inbits)
+        (while (not (== b 0)) (set! c b) (set! b (unchecked-remainder-int a b)) (set! a c))
+        (set! lcm (unchecked-divide-int (unchecked-multiply-int outbits inbits) a))
+        (when debug
+          (.println System/err (java-str "k: " inbits))
+          (.println System/err (java-str "n: " outbits))
+          (.println System/err (java-str "lcm: " lcm)))
+        (let [out (new byte/1 outbits)]
+          (Arrays/fill out (unchecked-byte 0))
+          (let [^:mutable ^int thisbyte 0
+                ^:mutable ^int msbit 0
+                ^:mutable ^int i 0
+                ^:mutable ^int bval 0
+                ^:mutable ^int oval 0]
+            (set! i (unchecked-subtract-int lcm 1))
+            (while (>= i 0)
+              (set! msbit
+                    (unchecked-remainder-int
+                      (unchecked-add-int
+                        (unchecked-add-int (unchecked-subtract-int (bit-shift-left-int inbits 3) 1)
+                                           (unchecked-multiply-int
+                                             (unchecked-add-int (bit-shift-left-int inbits 3) 13)
+                                             (unchecked-divide-int i inbits)))
+                        (bit-shift-left-int
+                          (unchecked-subtract-int inbits (unchecked-remainder-int i inbits))
+                          3))
+                      (bit-shift-left-int inbits 3)))
+              (set! bval
+                    (bit-and-int (unsigned-bit-shift-right-int
+                                   (bit-or-int (bit-shift-left-int
+                                                 (bit-and-int
+                                                   (aget
+                                                     in
+                                                     (unchecked-remainder-int
+                                                       (unchecked-subtract-int
+                                                         (unchecked-subtract-int inbits 1)
+                                                         (unsigned-bit-shift-right-int msbit 3))
+                                                       inbits))
+                                                   0xff)
+                                                 8)
+                                               (bit-and-int
+                                                 (aget
+                                                   in
+                                                   (unchecked-remainder-int
+                                                     (unchecked-subtract-int
+                                                       inbits
+                                                       (unsigned-bit-shift-right-int msbit 3))
+                                                     inbits))
+                                                 0xff))
+                                   (unchecked-add-int (bit-and-int msbit 7) 1))
+                                 0xff))
+              (set! thisbyte (unchecked-add-int thisbyte bval))
+              (set! oval (bit-and-int (aget out (unchecked-remainder-int i outbits)) 0xff))
+              (set! thisbyte (unchecked-add-int thisbyte oval))
+              (aset out
+                    (unchecked-remainder-int i outbits)
+                    (unchecked-byte (bit-and-int thisbyte 0xff)))
+              (when debug
+                (.println System/err
+                          (java-str "msbit["
+                                    i
+                                    "] = "
+                                    msbit
+                                    "\tbval="
+                                    (Integer/toHexString bval)
+                                    "\toval="
+                                    (Integer/toHexString oval)
+                                    "\tsum = "
+                                    (Integer/toHexString thisbyte))))
+              (set! thisbyte (unsigned-bit-shift-right-int thisbyte 8))
+              (when debug (.println System/err (java-str "carry=" thisbyte)))
+              (set! i (unchecked-dec-int i)))
+            (when-not (== thisbyte 0)
+              (set! i (unchecked-subtract-int outbits 1))
+              (while (>= i 0)
+                (set! thisbyte (unchecked-add-int thisbyte (bit-and-int (aget out i) 0xff)))
+                (aset out i (unchecked-byte (bit-and-int thisbyte 0xff)))
+                (set! thisbyte (unsigned-bit-shift-right-int thisbyte 8))
+                (set! i (unchecked-dec-int i))))
+            out)))))
+
+  (method ^:static bytesToString ^String [^byte/1 digest]
+    (let [digestString (StringBuilder.)]
+      (loop [^int i 0]
+        (if (< i (alength digest))
+            (if (< (bit-and-int (aget digest i) 0x000000ff) 0x10)
+                (do
+                  (.append (.append digestString \0)
+                           (Integer/toHexString (bit-and-int (aget digest i) 0x000000ff)))
+                  (recur (unchecked-inc-int i)))
+                (do
+                  (.append digestString
+                           (Integer/toHexString (bit-and-int (aget digest i) 0x000000ff)))
+                  (recur (unchecked-inc-int i))))
+            nil))
+      (.toString digestString)))
+
+  (method ^:private ^:static binaryStringToBytes ^byte/1 [^String str]
+    (let [usageStr (.toCharArray str)
+          usage (new byte/1 (unchecked-divide-int (alength usageStr) 2))]
+      (loop [^int i 0]
+        (when (< i (alength usage))
+          (let [a (Byte/parseByte (String. usageStr (unchecked-multiply-int i 2) 1) 16)
+                b (Byte/parseByte
+                    (String. usageStr (unchecked-add-int (unchecked-multiply-int i 2) 1) 1)
+                    16)]
+            (aset usage i (unchecked-byte (bit-or-int (bit-shift-left-int a 4) b)))
+            (recur (unchecked-inc-int i)))))
+      usage))
+
+  (method ^:static traceOutput ^void [^String traceTag ^byte/1 output ^int offset ^int len]
+    (try
+      (let [out (ByteArrayOutputStream. len)]
+        (.encodeBuffer (HexDumpEncoder.) (ByteArrayInputStream. output offset len) out)
+        (.println System/err (java-str traceTag ":\n" (.toString out))))
+      (catch Exception e)))
+
+  (method ^:static charToUtf8 ^byte/1 [^char/1 chars]
+    (let [cb (CharBuffer/wrap chars)
+          bb (.encode StandardCharsets/UTF_8 cb)
+          len (.limit bb)
+          answer (new byte/1 len)]
+      (.get bb answer 0 len)
+      answer))
+
+  (method ^:static charToUtf16 ^byte/1 [^char/1 chars]
+    (let [cb (CharBuffer/wrap chars)
+          bb (.encode StandardCharsets/UTF_16LE cb)
+          len (.limit bb)
+          answer (new byte/1 len)]
+      (.get bb answer 0 len)
+      answer))
+
+  (method ^:static iterationCount :throws [InvalidAlgorithmParameterException] ^int [^byte/1 params
+                                                                                     ^int defaultValue]
+    (if (nil? params)
+        defaultValue
+        (do
+          (when-not (== (alength params) 4)
+            (throw (InvalidAlgorithmParameterException. "Invalid params")))
+          (when (or (not (== (aget params 0) 0)) (>= (bit-and-int (aget params 1) 0xff) 80))
+            (throw (InvalidAlgorithmParameterException. "Incoming iteration count is too big")))
+          (let [iter_count (DkCrypto/readBigEndian params 0 4)]
+            (when (and (not ALLOW_WEAK_PBKDF2_ITERATION_COUNT) (< iter_count defaultValue))
+              (throw (InvalidAlgorithmParameterException. "Incoming iteration count is too small")))
+            iter_count))))
+
+  (method ^:public ^:static ^:final readBigEndian ^int [^byte/1 data ^:mutable ^int pos
+                                                        ^:mutable ^int size]
+    (let [^:mutable ^int retVal 0
+          ^:mutable shifter (unchecked-multiply-int (unchecked-subtract-int size 1) 8)]
+      (while (> size 0)
+        (set! retVal
+              (unchecked-add-int retVal
+                                 (bit-shift-left-int (bit-and-int (aget data pos) 0xff) shifter)))
+        (set! shifter (unchecked-subtract-int shifter 8))
+        (set! pos (unchecked-inc-int pos))
+        (set! size (unchecked-dec-int size)))
+      retVal))
+
+  (field ^:public ^:static ^boolean ALLOW_WEAK_PBKDF2_ITERATION_COUNT false))

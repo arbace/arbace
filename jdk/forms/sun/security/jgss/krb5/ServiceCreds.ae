@@ -1,0 +1,101 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/ServiceCreds.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io IOException)
+        '(java.util ArrayList Collections List Set)
+        '(javax.security.auth Subject)
+        '(javax.security.auth.kerberos KerberosKey KerberosPrincipal KerberosTicket KeyTab)
+        '(sun.security.krb5 Credentials EncryptionKey KrbException PrincipalName))
+
+(defclass ^:public ^:final ServiceCreds
+  (field ^:private ^KerberosPrincipal kp)
+
+  (field ^:private ^{:tag (Set KerberosPrincipal)} allPrincs)
+
+  (field ^:private ^{:tag (List KeyTab)} ktabs)
+
+  (field ^:private ^{:tag (List KerberosKey)} kk)
+
+  (field ^:private ^KerberosTicket tgt)
+
+  (field ^:private ^boolean destroyed)
+
+  (constructor ^:private [this])
+
+  (method ^:public ^:static getInstance ^ServiceCreds [^Subject subj
+                                                       ^:mutable ^String serverPrincipal]
+    (let [sc (ServiceCreds.)]
+      (set! (.-allPrincs sc) (.getPrincipals subj KerberosPrincipal))
+      (for-each [^KerberosKey key (SubjectComber/findMany subj serverPrincipal nil KerberosKey)]
+        (.add (.-allPrincs sc) (.getPrincipal key)))
+      (cond
+        (some? serverPrincipal) (set! (.-kp sc) (KerberosPrincipal. serverPrincipal))
+        (== (.size (.-allPrincs sc)) 1)
+          (let [^:mutable hasUnbound false]
+            (for-each [^KeyTab ktab (SubjectComber/findMany subj nil nil KeyTab)]
+              (when-not (.isBound ktab) (set! hasUnbound true) (break)))
+            (when-not hasUnbound
+              (set! (.-kp sc) (cast KerberosPrincipal (.next (.iterator (.-allPrincs sc)))))
+              (set! serverPrincipal (.getName (.-kp sc))))))
+      (set! (.-ktabs sc) (SubjectComber/findMany subj serverPrincipal nil KeyTab))
+      (set! (.-kk sc) (SubjectComber/findMany subj serverPrincipal nil KerberosKey))
+      (set! (.-tgt sc)
+            (cast KerberosTicket (SubjectComber/find subj nil serverPrincipal KerberosTicket)))
+      (when-not (and (and (.isEmpty (.-ktabs sc)) (.isEmpty (.-kk sc))) (nil? (.-tgt sc)))
+        (set! (.-destroyed sc) false)
+        sc)))
+
+  (method ^:public getName ^String [this]
+    (when destroyed (throw (IllegalStateException. "This object is destroyed")))
+    (when (some? kp) (.getName kp)))
+
+  (method ^:public getKKeys ^KerberosKey/1 [this]
+    (when destroyed (throw (IllegalStateException. "This object is destroyed")))
+    (let [^:mutable one kp]
+      (when (and (nil? one) (not (.isEmpty allPrincs)))
+        (set! one (cast KerberosPrincipal (.next (.iterator allPrincs)))))
+      (when (nil? one)
+        (for-each [^KeyTab ktab ktabs]
+          (let [pn (.getOneName (Krb5Util/snapshotFromJavaxKeyTab ktab))]
+            (when (some? pn) (set! one (KerberosPrincipal. (.getName pn))) (break)))))
+      (if (some? one) (.getKKeys this one) (new KerberosKey/1 0))))
+
+  (method ^:public getKKeys ^KerberosKey/1 [this ^KerberosPrincipal princ]
+    (when destroyed (throw (IllegalStateException. "This object is destroyed")))
+    (let [^{:tag (ArrayList KerberosKey)} keys (ArrayList.)]
+      (if (and (some? kp) (not (.equals princ kp)))
+          (new KerberosKey/1 0)
+          (do
+            (for-each [^KerberosKey k kk] (when (.equals (.getPrincipal k) princ) (.add keys k)))
+            (for-each [^KeyTab ktab ktabs]
+              (when (and (nil? (.getPrincipal ktab)) (.isBound ktab))
+                (when-not (.contains allPrincs princ) (continue)))
+              (Collections/addAll keys (.getKeys ktab princ)))
+            (cast KerberosKey/1 (.toArray keys (new KerberosKey/1 0)))))))
+
+  (method ^:public getEKeys ^EncryptionKey/1 [this ^PrincipalName princ]
+    (when destroyed (throw (IllegalStateException. "This object is destroyed")))
+    (let [^:mutable kkeys (.getKKeys this (KerberosPrincipal. (.getName princ)))]
+      (when (== (alength kkeys) 0) (set! kkeys (.getKKeys this)))
+      (let [ekeys (new EncryptionKey/1 (alength kkeys))]
+        (loop [^int i 0]
+          (when (< i (alength ekeys))
+            (aset ekeys
+                  i
+                  (EncryptionKey. (.getEncoded (aget kkeys i))
+                                  (.getKeyType (aget kkeys i))
+                                  (.getVersionNumber (aget kkeys i))))
+            (recur (unchecked-inc-int i))))
+        ekeys)))
+
+  (method ^:public getInitCred ^Credentials [this]
+    (when destroyed (throw (IllegalStateException. "This object is destroyed")))
+    (when (some? tgt) (try (Krb5Util/ticketToCreds tgt) (catch [KrbException IOException] e nil))))
+
+  (method ^:public destroy ^void [this]
+    (set! destroyed true)
+    (set! kp nil)
+    (.clear ktabs)
+    (.clear kk)
+    (set! tgt nil)))
