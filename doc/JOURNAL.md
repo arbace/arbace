@@ -19063,3 +19063,27 @@ capi_objects.go's PyImport_Import next's, which returns the leaf module as 521's
 of the big lock (REPR_GO_JOBS=4; a first read at 32 jobs outside the lock had been killed for the host's memory); files only one side
 changed read back byte for byte as that side's. gotable.edn lists both sides' packages. Left for train 2's executables: `bin/pyi-clib
 verify ctypestest`, the three modules' eval with `--record`, reap, crops-score and records-check.
+
+## 2026-11-23: py-accel, `:c-accelerator-gaps` fixed (the coordinator's follow-up while train 2 waits)
+
+The 13 test_datetime methods `_datetime`'s C reached beyond pyi (classed earlier today), probed with `bin/pyi aot` against the
+host's CPython 3.14.10:
+- **fromisoformat's crash (3).** `_sanitize_isoformat_str` replaces a surrogate separator through `PyUnicode_WriteChar`; pyctypes'
+  WriteChar took the str's runes as `[]rune(s.String())`, and pyi's str text is WTF-8, so each lone surrogate became three U+FFFD
+  and the index landed elsewhere: '2009\ud80002\ud80028' then encoded to UTF-8 and the parser crashed at address 0, and
+  '2009-02-03\ud80004:05' (CPython: datetime(2009, 2, 3, 4, 5)) was refused. Now `s.Runes()` (a copy where written); the same
+  `[]rune(s.String())` in five other pyctypes places (keepWide, translateCharmap, ctypes' u/U setters, a c_wchar array's value)
+  takes `s.Runes()` too.
+- **The timedelta computation (1).** pyctypes' `_PyLong_DivmodNear` turned Go's Euclidean quotient into floor division the wrong
+  way for a negative divisor (q+1 for q-1): (3us) / -2 gave 0, not -2us. Unit-tested on twelve sign cases.
+- **astimezone's zone names (2) and the subclass constructors (3).** Arbace's pyconfig.h lacked `HAVE_STRUCT_TM_TM_ZONE`
+  (configure's answer for this target), so `_datetime` took the zone's name from musl's strftime %Z, which gives none: a naive
+  datetime's local zone became the UTC singleton, `astimezone(timezone.utc)` returned self unchanged (the subclass constructors'
+  failure) and named zones printed as "UTC-05:00". Defined; the world built again once (Key 78da3543..., `bin/pyi-clib build
+  ctypestest` on a179a8e5c's gate exe).
+- **isoformat with a surrogate separator (3)** passes already on the merge: py-capi's PyUnicode_FromFormatV keeps runes.
+- The subinterpreter test (1) stays in `:c-accelerator-gaps` (no subinterpreters).
+pyctypes' Go edited on its printed text and read back (one hold of the big lock); the diff is the seven changed lines.
+Proof: `bin/pyi check --aot --lib-test --fresh --only` on the 13 ids (the AOT module from the new world's committed aot forms and the
+read-back pyctypes): 12 pass, 1 classed (the subinterpreter test), 0 failing; the three controls fail as they must. `:c-accelerator-gaps`
+now holds that one method. The records wait for train 2's executables, as before.
