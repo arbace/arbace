@@ -19147,3 +19147,91 @@ Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 
   ServiceLoader variant also replacing `stream()`, its providers as `ProviderImpl`s; `bin/jrt-convert vet --forms-add
   jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
   the patch in `.tmp/jd/doclint-stream-variant.patch`.
+
+## 2026-11-22: classes defined from class-file bytes (JD3): the loader, the interpreter and the verifier (java-bytecode-1122)
+
+The user's decision JD3 of 2026-11-22 (the entry above): Java classes defined from class-file bytes built in full, a
+class-file loader with a bytecode interpreter and verifier. Branch java-bytecode-1122 from mac/next 195fafabb; the
+design note doc/classes/BYTECODE-SURVEY.md (the rows, where it goes, the loader, the interpreter, the verifier, the
+stages, what it does not do; its "As built: stages 1-3").
+
+Design taken: a class defined from bytes is an interpreted class of the Java forms' interpreter (a Compiler$CF$Klass made
+through the host, Compiler$CFGo$GoHost on Go: Dyn objects, Dyn's slots, the member tables, CF$Klass.init's JLS 12.4.2,
+the shadow stack of stack traces), its methods CF$Meths whose body (BytecodeBody, a CF$Node) runs their bytecode; the
+loader, the interpreter and the verifier are Java forms in arbace/lang (Bytecode.ae, BytecodeFile.ae, BytecodeCode.ae,
+BytecodeVerifier.ae), translated into the executable and into every program, so they mix with the Java forms' classes
+and the world's through one class model. Alternatives not taken: the interpreter in jrt as Go forms (no access to CF's
+Klass, Meth and Frame: a second object model); decompiling class files into Java forms (JCS302's (b): structured control
+flow from any bytecode, and a verifier still needed); java.lang.classfile's parser and its verifier port (the class-file
+API in every program; the brief asks the verifier ported from the JVMS).
+
+Written from the JVMS (Java SE 26 edition: chapter 4's format, 4.8's format checks, 4.10.1's type checking rules,
+4.10.2's inference, chapter 5's loading, linking and resolution, chapter 6's instructions); HotSpot (openjdk/jdk26u
+src/hotspot/share/classfile/classFileParser.cpp, verifier.cpp, prims/jvm.cpp's JVM_GetMethodParameters) read for its
+messages and its failover and padding rules only, no code copied. jdk26u's Java reused as the world has it:
+sun.reflect.annotation.AnnotationParser and AnnotationType (annotations of a class defined from bytes),
+java.lang.reflect.Executable's verifyParameters rules (ported into j2g's getParameters).
+
+Built (stages 1-3, write-ahead of the rows' build; doc/classes/BYTECODE-SURVEY.md, "As built: stages 1-3"):
+- arbace/lang/BytecodeFile.ae (the parser, JVMS 4.1-4.8 with HotSpot's ClassFormatError texts), Bytecode.ae (define:
+  name, prohibited package, duplicate per loader, superclass and interfaces through the defining loader, the Klass's
+  layout, methods, vtable, publishing, enums, the attributes as jrt's data with new W records for MethodParameters,
+  BytecodeAnnotations over jdk26u's AnnotationParser, linking on CF$Klass's new linker field), BytecodeCode.ae (every
+  instruction of JVMS 6.5; field and method resolution; invokedynamic for LambdaMetafactory (metafactory,
+  altMetafactory), StringConcatFactory, ObjectMethods, SwitchBootstraps, ConstantBootstraps' constants; jsr/ret),
+  BytecodeVerifier.ae (4.10.1 type checking with the StackMapTable and the protected check, version 50 failing over to
+  4.10.2 inference, jsr/ret by modified locals).
+- jrt: go/arbace/jrt/defineclass.ae (new), classloader.ae (ClassLoader.self; loadClass by delegation; findClass in
+  ClassLoader_I), reflect.ae (getClassLoader's defining loader, forName through a user loader, JDK annotation types'
+  proxies as jrt's annotation objects), annotation.ae (SetAnnotationSource, ExceptionProxy members thrown, proxies'
+  annotation type), classdata.ae (W records, executableParameters, getDeclaringClass through the loader); manifest
+  regenerated (bin/jrt manifest: defineClass x3, findClass, resolveClass).
+- j2g: dyncf.ae's natives setAnnotationSource, setInit, setDefiningLoader; main.ae Class.describeConstable known to
+  compiled call sites, ClassDesc.ofDescriptor rooted; out.ae getParameters over W records (jdk26u's verifyParameters).
+- overlay/jdk MethodHandles.Lookup.defineClass through arbace.lang.Bytecode.define (reflectively); jdk/forms'
+  MethodHandles.ae as bin/jrt-convert predict reads it (j2g's analysis of the predicted world: 0 failures).
+- bin/bytecode-check (make bytecode-check, bytecode-record; test/bytecode): javac's programs, a version 49 class, a
+  jsr/ret class, the rows' verifier classes and 900 mutants against the JDK's results (test/bytecode/expected.edn,
+  HotSpot -Xverify:all), with a negative control.
+Proofs so far (light, no build): the Java forms interpreted at the REPL of the gate executable 92a96093a59c (.tmp/dev's
+harness): the programs' output byte for byte the JDK's; GetSimpleNameTest's twelve classes' simple names jdk26u's;
+bin/bytecode-check on that harness: all pass, control fails as it must (1,200 earlier mutants also agreed with HotSpot,
+after fixes: invokedynamic's zero bytes, max_locals vs arguments, StackMapTable format errors, exception-table offsets,
+switch padding before version 51); bin/jrt build and the jrt tests of Loader, Reflect, Proxy, Annotation, Classdata,
+Package, Manifest pass; bin/reap --record, bin/crops-score --record and --judge --strict, bin/records-check: 0 problems,
+no record changed.
+Not yet proved: the rows (one bin/arbace-go --build queued under bin/heavy-lock, .tmp/bin/build.sh, which also runs
+bin/bytecode-check and java-check interp and compiled over the 11 rows' tests and 60 regression tests of class loaders
+and type annotations, saved for --judge). Left: defineHiddenClass, defineClass(String, ByteBuffer, ...), line numbers
+in bytecode frames; NoSuchFieldError, BootstrapMethodError, ClassCircularityError, UnsupportedClassVersionError (not in
+the world: their superclasses stand for them).
+## 2026-11-23: JD3's rows built and run (build #2); JCS51's processors through the class-file loader (java-bytecode-1122)
+
+Build #2 of java-bytecode-1122 at 65c1bc58c (bin/arbace-go --build under the big lock, the build worktree
+.tmp/worktrees/java-bytecode-build; 22 GB peak, about 2 h 20 min with the queue): bin/bytecode-check on the built executable
+passes (programs, verifier cases, 900 mutants as HotSpot, the control failing). bin/java-check interp and compiled over the 11
+rows' tests and 60 regression tests (saved, not recorded: the records are taken on the train's shared build, the user's rule of
+2026-11-23): compiled, all 11 JD3 tests pass (22 rows' compiled half) and t04878, t07643, t06005 beside them, no regression;
+interp, 7 of the 11 pass with t04878 and t07643, t04712-t04715 failing on AnnotationTypeMismatchExceptionProxy.generateException
+left untranslated, and t04538 (ExceptionHidingLoader) regressed (forName through a loader whose loadClass returns null returned
+null). Both fixed (3860d35e1): j2g roots the three ExceptionProxies' generateException (main.ae; jrt's annotation members call
+it, no Java code of the world does); jrt's Class.forName(name, init, loader) throws ClassNotFoundException for a null, as
+HotSpot's SystemDictionary does. Merged mac/next fa635f636 (cb65d32ea; the journal kept both). doc/classes/BYTECODE-SURVEY.md,
+"As built: stage 4, the rows' first build".
+
+The user's decision of 2026-11-23 (relayed by the coordinator): JCS51's annotation processors (:diag-processors, 25 diagnostics
+rows) are loaded from their class files through JD3's loader, with an AbstractProcessor subclass (DynSub) in javac's tool world,
+instead of JCS51 (a)'s processors given as sources. Built (write-ahead of javac's tool build): javac on Arbace's file manager
+(overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/FileManager.java) answers getClassLoader(location) with a DirLoader over
+the location's directories (it answered null: NameProcessIterator's loadClass failed, proc.processor.cant.instantiate), which
+defines NAME.class by ClassLoader.defineClass, as JavacFileManager's URLClassLoader does (jdk26u
+src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java, getClassLoader, read for the behaviour, no code
+copied); its forms read by bin/repr-java read-jdk --check --no-javac of the overlay's six files (the five unchanged ones byte for
+byte the committed forms). j2g: javax/annotation/processing/AbstractProcessor on model/class-supers (javac's tool world alone, as
+F6's). None of the 25 tests checked the processors' other needs yet (javac's processing environment through reflection's member
+tables, Module.addReads in ensureReadable); the proof is javac's tool built at the train's executable and bin/java-check
+--levels diagnostics over the 25. Alternatives not taken: JCS51 (a)'s sources-to-forms path (superseded by the user); a
+closed list of processors compiled into the tool (JCS51 (c)). The class-file API rows at the compiled level (t05992-t06008,
+t06042, t06043, t06072, t06156, t06329, t06390) need no class-file loader: they read class files with java.lang.classfile and
+com.sun.tools.javac.Main, which the compiled world lacks (JD4's javac world at the compiled level, and java.lang.classfile in the
+shipped world); they pass at interp.

@@ -1,0 +1,219 @@
+;; The class-file loader's, interpreter's and verifier's own check (doc/classes/BYTECODE-SURVEY.md, JD3): class files
+;; of test/bytecode/classes (javac's of test/bytecode/java, jdk26u's verifier tests' bytes, GenJsr's jsr/ret class)
+;; defined by arbace.lang.Bytecode through a loader of their own, linked (verified) and run, each program's result
+;; against the JDK's (test/bytecode/expected.edn); and mutants of three of them (one byte of a method's code, or its
+;; max_stack or max_locals, changed: a deterministic generator here) verified, each verdict (ok, VerifyError,
+;; ClassFormatError) against HotSpot's (-Xverify:all, recorded by bin/bytecode-check --record-jdk with
+;; test/bytecode/HotSpotVerdicts.java). A script, run as
+;;
+;;   EXE test/bytecode/check.ae check            the programs and the mutants against expected.edn
+;;   EXE test/bytecode/check.ae mutants DIR      writes the mutants into DIR/NAME/mNNNN.class (for the JDK's record)
+;;
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(ns bytecode.check
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io])
+  (:import (java.io File)))
+
+(def root "test/bytecode")
+
+;; the REPL's copy of the classes (.tmp/dev's bcdev.Bytecode*) on an executable without them
+(when-let [f (System/getenv "BYTECODE_PRELOAD")] (load-file f))
+
+(defn- bytecode-class
+  "arbace.lang.Bytecode, or the REPL's copy of it (bcdev.Bytecode, .tmp/dev's)."
+  ^Class []
+  (or (try (Class/forName "arbace.lang.Bytecode") (catch Throwable _ nil))
+      (Class/forName "bcdev.Bytecode")))
+
+(defn- call [mname & args]
+  (arbace.lang.Reflector/invokeStaticMethod (.getName (bytecode-class)) ^String mname (object-array args)))
+
+(defn- read-bytes ^bytes [^String p]
+  (java.nio.file.Files/readAllBytes (.toPath (File. p))))
+
+(defn- loader [] (proxy [ClassLoader] []))
+
+(defn- define [l ^bytes b] (call "define" l nil b (int 0) (int (alength b)) nil))
+
+(defn- link [c] (call "link" (call "ofClass" c)))
+
+(defn- verdict
+  "The verdict of class file b defined (after deps, each defined first) by a new loader and linked."
+  [deps ^bytes b]
+  (try
+    (let [l (loader)]
+      (doseq [d deps] (define l d))
+      (link (define l b))
+      "ok")
+    (catch VerifyError _ "VerifyError")
+    (catch ClassFormatError _ "ClassFormatError")
+    (catch Throwable e
+      (let [m (str (.getMessage e))]
+        ;; the REPL's copy names jrt's stand-ins by their kind (Bytecode/error)
+        (cond (str/starts-with? m "E0:") "ClassFormatError"
+              (str/starts-with? m "E4:") "VerifyError"
+              :else (str "other: " (.getName (class e)) ": " m))))))
+
+;; ---------------------------------------------------------------------------------------------
+;; programs
+
+(def programs
+  "Each program: its classes in definition order (files of test/bytecode/classes) and its entry, a static method
+  returning a String."
+  [{:id "hello" :classes ["Hello"] :entry ["Hello" "main2" [(class (into-array String []))] [(into-array String [])]]}
+   {:id "t2" :classes ["Shape" "Base" "Sq" "Circ" "Point" "Color" "Color$1" "MyEx" "Expr" "Num" "Add" "T2" "T2$Inner" "T2$1"]
+    :entry ["T2" "main2" [] []]}
+   {:id "plain49" :classes ["Plain49"] :entry ["Plain" "run" [Integer/TYPE] [(int 4)]]}
+   {:id "jsr" :classes ["J"] :entry ["J" "f" [Integer/TYPE] [(int 5)]]}])
+
+(defn- run-program [{:keys [classes entry]}]
+  (try
+    (let [l (loader)
+          cs (into {} (for [n classes :let [c (define l (read-bytes (str root "/classes/" n ".class")))]] [(.getName ^Class c) c]))]
+      (doseq [[_ c] cs] (link c))
+      (let [[cn mn ps args] entry
+            ^Class c (cs cn)
+            m (.getDeclaredMethod c mn (into-array Class ps))]
+        (.setAccessible m true)
+        (str (.invoke m nil (object-array args)))))
+    (catch Throwable e (str "error: " e))))
+
+;; the verifier tests' classes: [file deps expected]
+(def verifier-cases
+  [["A" [] "ok"] ["B" [] "VerifyError"] ["AA" [] "ok"] ["B49" ["AA"] "VerifyError"] ["C50" ["AA"] "VerifyError"]
+   ["I" [] "ok"] ["C" ["I"] "ok"]])
+
+;; ---------------------------------------------------------------------------------------------
+;; mutants
+
+(defn- u2 [^bytes b i] (bit-or (bit-shift-left (bit-and (aget b i) 0xFF) 8) (bit-and (aget b (inc i)) 0xFF)))
+(defn- u4 [^bytes b i] (bit-or (bit-shift-left (u2 b i) 16) (u2 b (+ i 2))))
+
+(defn- code-ranges
+  "The code arrays of class file b: [start end header] (header: the Code attribute's max_stack's offset)."
+  [^bytes b]
+  (let [n (u2 b 8)
+        [p utf8] (loop [i 1 p 10 utf8 {}]
+                   (if (>= i n)
+                     [p utf8]
+                     (let [t (bit-and (aget b p) 0xFF)]
+                       (case (int t)
+                         1 (let [l (u2 b (inc p))]
+                             (recur (inc i) (+ p 3 l) (assoc utf8 i (String. b (int (+ p 3)) (int l) "UTF-8"))))
+                         (3 4) (recur (inc i) (+ p 5) utf8)
+                         (5 6) (recur (+ i 2) (+ p 9) utf8)
+                         (7 8 16 19 20) (recur (inc i) (+ p 3) utf8)
+                         (9 10 11 12 17 18) (recur (inc i) (+ p 5) utf8)
+                         15 (recur (inc i) (+ p 4) utf8)))))
+        p (+ p 6)
+        p (+ p 2 (* 2 (u2 b p)))
+        skip-attrs (fn [p out code?]
+                     (let [na (u2 b p)]
+                       (loop [k 0 p (+ p 2) out out]
+                         (if (>= k na)
+                           [p out]
+                           (let [nm (utf8 (u2 b p)) l (u4 b (+ p 2))]
+                             (recur (inc k) (+ p 6 l)
+                                    (if (and code? (= nm "Code"))
+                                      (conj out [(+ p 14) (+ p 14 (u4 b (+ p 10))) (+ p 6)])
+                                      out)))))))]
+    (loop [section 0 p p out []]
+      (if (= section 2)
+        out
+        (let [nm (u2 b p)
+              [p out] (loop [m 0 p (+ p 2) out out]
+                        (if (>= m nm)
+                          [p out]
+                          (let [[p out] (skip-attrs (+ p 6) out (= section 1))]
+                            (recur (inc m) p out))))]
+          (recur (inc section) p out))))))
+
+(defn- lcg "The generator's next state (Knuth's MMIX constants)." [^long s]
+  (unchecked-add (unchecked-multiply s 6364136223846793005) 1442695040888963407))
+
+(defn- pick [^long s n] (mod (unsigned-bit-shift-right s 33) n))
+
+(defn mutants
+  "n mutants of class file b, seeded: each one byte of a code array changed (a random value, or one more or less), or
+  a method's max_stack or max_locals."
+  [^bytes b n seed]
+  (let [rs (code-ranges b)]
+    (loop [k 0 s (lcg seed) out []]
+      (if (>= k n)
+        out
+        (let [c (aclone b)
+              [st en hdr] (nth rs (pick s (count rs)))
+              s (lcg s)
+              kind (pick s 100)
+              s (lcg s)]
+          (if (< kind 15)
+            (let [off (+ hdr (* 2 (pick s 2)) 1)
+                  s (lcg s)
+                  v (bit-and (aget c off) 0xFF)
+                  nv (case (int (pick s 5)) 0 0 1 1 2 2 3 (inc v) (max 0 (dec v)))]
+              (aset c off (unchecked-byte nv))
+              (recur (inc k) (lcg s) (conj out c)))
+            (let [i (+ st (pick s (- en st)))
+                  s (lcg s)
+                  v (bit-and (aget c i) 0xFF)
+                  nv (if (< (pick s 2) 1)
+                       (pick (lcg s) 256)
+                       (bit-and (+ v (case (int (pick (lcg s) 3)) 0 1 1 -1 2)) 0xFF))]
+              (aset c i (unchecked-byte nv))
+              (recur (inc k) (lcg (lcg s)) (conj out c)))))))))
+
+(def mutant-sets
+  "Each set: its base class file, its dependencies (defined first), the count and seed."
+  [{:id "hello" :base "Hello" :deps [] :n 300 :seed 3}
+   {:id "t2" :base "T2" :deps ["Shape" "Base" "Sq" "Circ" "Point" "Color" "Color$1" "MyEx" "Expr" "Num" "Add" "T2$Inner" "T2$1"]
+    :n 300 :seed 7}
+   {:id "plain49" :base "Plain49" :deps [] :n 300 :seed 11}])
+
+(defn- class-file ^bytes [n] (read-bytes (str root "/classes/" n ".class")))
+
+;; ---------------------------------------------------------------------------------------------
+
+(defn- check []
+  (let [expected (read-string (slurp (str root "/expected.edn")))
+        bad (atom 0)
+        report (fn [what ok? detail]
+                 (when-not ok? (swap! bad inc))
+                 (println (if ok? "pass" "FAIL") what (if ok? "" detail)))]
+    (doseq [p programs]
+      (let [got (run-program p)
+            want (get-in expected [:programs (:id p)])]
+        (report (str "program " (:id p)) (= got want) (str "got " (pr-str got) ", the JDK's " (pr-str want)))))
+    (doseq [[f deps want] verifier-cases]
+      (let [got (verdict (map class-file deps) (class-file f))]
+        (report (str "verifier " f) (= got want) (str "got " got ", HotSpot's " want))))
+    (doseq [{:keys [id base deps n seed]} mutant-sets]
+      (let [ds (mapv class-file deps)
+            ms (mutants (class-file base) n seed)
+            want (get-in expected [:mutants id])
+            got (mapv #(verdict ds %) ms)
+            diffs (remove nil? (map-indexed (fn [i [g w]] (when (not= g w) [i g w])) (map vector got want)))]
+        (report (str "mutants " id " (" (count ms) ", " (count (filter #{"ok"} want)) " valid)")
+                (and (= (count got) (count want)) (empty? diffs))
+                (str (count diffs) " verdicts differ from HotSpot's: " (pr-str (take 10 diffs))))))
+    ;; the negative control: the mutants' verdicts judged against another set's, which must not agree
+    (let [{:keys [id base deps n seed]} (first mutant-sets)
+          got (mapv #(verdict (map class-file deps) %) (mutants (class-file base) n seed))
+          other (get-in expected [:mutants (:id (second mutant-sets))])]
+      (report "control: hello's mutants against t2's verdicts disagree" (not= got other) "they agree"))
+    (println (if (zero? @bad) "bytecode check: pass" (str "bytecode check: " @bad " failing")))
+    (System/exit (if (zero? @bad) 0 1))))
+
+(defn- write-mutants [dir]
+  (doseq [{:keys [id base n seed]} mutant-sets]
+    (let [d (File. (str dir "/" id))]
+      (.mkdirs d)
+      (doseq [[i ^bytes m] (map-indexed vector (mutants (class-file base) n seed))]
+        (java.nio.file.Files/write (.toPath (File. d (format "m%04d.class" i))) m
+                                   (into-array java.nio.file.OpenOption []))))))
+
+(let [[cmd arg] *command-line-args*]
+  (case cmd
+    "check" (check)
+    "mutants" (write-mutants arg)
+    (do (println "usage: EXE test/bytecode/check.ae check | mutants DIR") (System/exit 2))))
