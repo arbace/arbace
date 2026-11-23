@@ -19046,3 +19046,14 @@ The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.
 - Cells: Scheme eval 2,835 / 3 / 0 -> 2,837 / 0 / 0 (5 n/a), AOT 2,513 / 3 / 0 -> 2,515 / 0 / 0 (3 n/a); completeness 0.9994 ->
   1.0000 (100), independence 1.0. Runs: `bin/si divergences` (no run), bin/reap --record (0 problems), bin/crops-score --record,
   --judge --strict (0 problems), bin/records-check.
+
+## 2026-11-23: C's "about 80 rows the Mac did not run" are synth-c23's 79, run on the main host: pass, records unchanged (smalls-1123)
+
+queue 522c's report (the Mac, 2026-11-22) counted 2,275 eval and 2,279 AOT passes in its whole runs against records of 2,359 rows and
+left "about 80 rows" to the main host. They are synth-c23's 79 programs: bin/lib/ci/check's default corpus list (`all`, queue 150)
+does not name synth-c23 (test/c/corpora.edn's :synth-c23, GT8.6), so a whole `bin/ci check` without `--corpus` never runs it (07dfe5c2f
+ran it beside the whole runs). Run on next's tree (fa635f636; the tools' host the gate executable 8bfa5cd4, whose repr/c and arbace/c
+equal next's; tools/cirun built from the checkout): `bin/ci check --corpus synth-c23 --record` 79 of 79 pass and `check --aot --corpus
+synth-c23 --record` 79 of 79 (compiled equal to interpreted), the controls holding (decl-alignment against decl-abstract-declarators'
+gcc run differs). Both records unchanged byte for byte, so C's eval 2,355 / 0 / 0 and AOT 2,358 / 0 / 0 stand. Not changed: the
+default list (adding synth-c23 to `all` would make every whole run 79 programs longer; the gate's c-check parts name their corpora).
