@@ -19057,3 +19057,22 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   rsi-build --native-core` over the six, threads too since the atomic intrinsics), then `bin/rsi check --record --front own --corpus
   samples` (RSI_FRONT_DIR from that build), the synthetic record and `check --aot --record --corpus samples`. Until then the rsi
   records stand from the old packs: the branch is WIP, not for next. Scores unchanged (Rust 100 / 80; eval and AOT 0.5).
+
+## 2026-11-23: 542 (the VM): core's whole interface pass for C4's switch, std-iface-native's guard
+
+Follows rust-indep-1123's entry (branch `542-rust-own-lowering` from `0c3c91860`). The inputs handed over (rust-front's core, alloc
+and std exports and native passes, np5's std-names.edn) held as core's `native-iface.edn` RF12-P7's core-check supplement (1,084
+functions: what the helper's interface lacks), which `bin/rust-front std-iface-native` takes by default: its first run gave core 0 of
+27,498 facts (alloc 3,863 of 3,863, std 4,644 of 4,644), so a `RF_NATIVE_IFACE=1` build from it would have run with no native core
+interface. Done here:
+- core's whole pass made again on the VM as rust-c4-1122's np5 chain made it (`alloc-check --crate core --pass`, one round, the
+  front's std-names np5's native names; 1 h 30 min, 3.57 GB): **27,194 of 27,498 facts equal** to the helper's (169 differ, 135
+  missing; the control differing), the survey's bound for np5 with the post-np5 fixes (27,062 + 59 + 1 + 72), now measured whole.
+  Left as the survey lists them: io::error's and io_slice's `cfg_select!` modules, legacy_int_modules' constants, core_simd's ops and
+  to_bytes, the Thin alias bound.
+- `bin/rust-front std-iface-native` refuses a core file of fewer than `CORE_IFACE_MIN_FNS` (10,000) functions, naming core's pass and
+  `CORE_NATIVE_IFACE` (the supplement assembled before; the parent assembles it, the change refuses it and takes the pass). The
+  alternative, a new default path for core's pass, was not taken: no script writes the pass to a fixed place yet.
+- The worktree's caches named three other roots (q493, q524, the host's rust-c3x), as 524's finding 5: rewritten, core's index made
+  again by the pass. Then the std IR at the new pin came from the main host (`.tmp/rsi/std-sgn`, 120 units checked against
+  test/rust/runtime/ir.sha256); next runtime-ci, rsi-build's six cases on the own path, the records.
