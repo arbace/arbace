@@ -1,0 +1,800 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/Krb5Context.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io IOException InputStream InvalidObjectException ObjectInputStream OutputStream)
+        '(java.security Key Provider)
+        '(javax.security.auth Subject)
+        '(javax.security.auth.kerberos KerberosCredMessage KerberosPrincipal KerberosTicket)
+        '(org.ietf.jgss ChannelBinding GSSContext GSSCredential GSSException MessageProp Oid)
+        '(sun.security.jgss GSSCaller GSSUtil TokenTracker)
+        '(sun.security.jgss.spi GSSContextSpi GSSCredentialSpi GSSNameSpi)
+        '(sun.security.krb5 Credentials EncryptionKey KrbApReq KrbCred KrbException)
+        '(sun.security.krb5.internal AuthorizationData Krb5)
+        '(sun.security.util HexDumpEncoder))
+
+(defclass Krb5Context
+  :implements [GSSContextSpi]
+
+  (field ^:private ^:static ^:final ^int STATE_NEW 1)
+
+  (field ^:private ^:static ^:final ^int STATE_IN_PROCESS 2)
+
+  (field ^:private ^:static ^:final ^int STATE_DONE 3)
+
+  (field ^:private ^:static ^:final ^int STATE_DELETED 4)
+
+  (field ^:private ^int state STATE_NEW)
+
+  (field ^:public ^:static ^:final ^int SESSION_KEY 0)
+
+  (field ^:public ^:static ^:final ^int INITIATOR_SUBKEY 1)
+
+  (field ^:public ^:static ^:final ^int ACCEPTOR_SUBKEY 2)
+
+  (field ^:private ^boolean credDelegState false)
+
+  (field ^:private ^boolean mutualAuthState true)
+
+  (field ^:private ^boolean replayDetState true)
+
+  (field ^:private ^boolean sequenceDetState true)
+
+  (field ^:private ^boolean confState true)
+
+  (field ^:private ^boolean integState true)
+
+  (field ^:private ^boolean delegPolicyState false)
+
+  (field ^:private ^boolean isConstrainedDelegationTried false)
+
+  (field ^:private ^int mySeqNumber)
+
+  (field ^:private ^int keySrc)
+
+  (field ^:private ^TokenTracker peerTokenTracker)
+
+  (field ^:private ^CipherHelper cipherHelper nil)
+
+  (field ^:private ^:final mySeqNumberLock (Object.))
+
+  (field ^:private ^:final peerSeqNumberLock (Object.))
+
+  (field ^:private ^EncryptionKey key)
+
+  (field ^:private ^Krb5NameElement myName)
+
+  (field ^:private ^Krb5NameElement peerName)
+
+  (field ^:private ^int lifetime)
+
+  (field ^:private ^:final ^boolean initiator)
+
+  (field ^:private ^ChannelBinding channelBinding)
+
+  (field ^:private ^Krb5CredElement myCred)
+
+  (field ^:private ^Krb5CredElement delegatedCred)
+
+  (field ^:private ^Credentials tgt)
+
+  (field ^:private ^Credentials serviceCreds)
+
+  (field ^:private ^KrbApReq apReq)
+
+  (field ^:private ^:final ^GSSCaller caller)
+
+  (constructor :throws [GSSException] [this ^GSSCaller caller ^Krb5NameElement peerName
+                                       ^Krb5CredElement myCred ^int lifetime]
+    (when (nil? peerName) (throw (IllegalArgumentException. "Cannot have null peer name")))
+    (set! (.-caller this) caller)
+    (set! (.-peerName this) peerName)
+    (set! (.-myCred this) myCred)
+    (set! (.-lifetime this) lifetime)
+    (set! (.-initiator this) true))
+
+  (constructor :throws [GSSException] [this ^GSSCaller caller ^Krb5CredElement myCred]
+    (set! (.-caller this) caller)
+    (set! (.-myCred this) myCred)
+    (set! (.-initiator this) false))
+
+  (constructor :throws [GSSException] ^:public [this ^GSSCaller caller ^byte/1 interProcessToken]
+    (throw (GSSException. GSSException/UNAVAILABLE -1 "GSS Import Context not available")))
+
+  (method ^:public ^:final isTransferable :throws [GSSException] ^boolean [this]
+    false)
+
+  (method ^:public ^:final getLifetime ^int [this]
+    GSSContext/INDEFINITE_LIFETIME)
+
+  (method ^:public requestLifetime :throws [GSSException] ^void [this ^int lifetime]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! (.-lifetime this) lifetime)))
+
+  (method ^:public ^:final requestConf :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! confState value)))
+
+  (method ^:public ^:final getConfState ^boolean [this] confState)
+
+  (method ^:public ^:final requestInteg :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! integState value)))
+
+  (method ^:public ^:final getIntegState ^boolean [this] integState)
+
+  (method ^:public ^:final requestCredDeleg :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this))
+      (when (or (nil? myCred) (not (instance? Krb5ProxyCredential myCred)))
+        (set! credDelegState value))))
+
+  (method ^:public ^:final getCredDelegState ^boolean [this]
+    (if (.isInitiator this)
+        credDelegState
+        (do (.tryConstrainedDelegation this) (some? delegatedCred))))
+
+  (method ^:public ^:final requestMutualAuth :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! mutualAuthState value)))
+
+  (method ^:public ^:final getMutualAuthState ^boolean [this]
+    mutualAuthState)
+
+  (method ^:public ^:final requestReplayDet :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! replayDetState value)))
+
+  (method ^:public ^:final getReplayDetState ^boolean [this]
+    (or replayDetState sequenceDetState))
+
+  (method ^:public ^:final requestSequenceDet :throws [GSSException] ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! sequenceDetState value)))
+
+  (method ^:public ^:final getSequenceDetState ^boolean [this]
+    (or sequenceDetState replayDetState))
+
+  (method ^:public ^:final requestDelegPolicy ^void [this ^boolean value]
+    (when (and (== state STATE_NEW) (.isInitiator this)) (set! delegPolicyState value)))
+
+  (method ^:public ^:final getDelegPolicyState ^boolean [this]
+    delegPolicyState)
+
+  (method ^:public ^:final requestAnonymity :throws [GSSException] ^void [this ^boolean value])
+
+  (method ^:public ^:final getAnonymityState ^boolean [this] false)
+
+  (method ^:final getCipherHelper :throws [GSSException] ^CipherHelper [this ^EncryptionKey ckey]
+    (let [^:mutable ^EncryptionKey cipherKey nil]
+      (when (nil? cipherHelper)
+        (set! cipherKey (if (nil? (.getKey this)) ckey (.getKey this)))
+        (set! cipherHelper (CipherHelper. cipherKey)))
+      cipherHelper))
+
+  (method ^:final incrementMySequenceNumber ^int [this]
+    (let [^:mutable ^int retVal 0]
+      (locking mySeqNumberLock
+        (set! retVal mySeqNumber)
+        (set! mySeqNumber (unchecked-add-int retVal 1)))
+      retVal))
+
+  (method ^:final resetMySequenceNumber ^void [this ^int seqNumber]
+    (when (some? Krb5/DEBUG)
+      (.println Krb5/DEBUG (java-str "Krb5Context setting mySeqNumber to: " seqNumber)))
+    (locking mySeqNumberLock (set! mySeqNumber seqNumber)))
+
+  (method ^:final resetPeerSequenceNumber ^void [this ^int seqNumber]
+    (when (some? Krb5/DEBUG)
+      (.println Krb5/DEBUG (java-str "Krb5Context setting peerSeqNumber to: " seqNumber)))
+    (locking peerSeqNumberLock (set! peerTokenTracker (TokenTracker. seqNumber))))
+
+  (method ^:final setKey :throws [GSSException] ^void [this ^int keySrc ^EncryptionKey key]
+    (set! (.-key this) key)
+    (set! (.-keySrc this) keySrc)
+    (set! cipherHelper (CipherHelper. key)))
+
+  (method ^:public ^:final getKeySrc ^int [this] keySrc)
+
+  (method ^:private getKey ^EncryptionKey [this] key)
+
+  (method ^:final setDelegCred ^void [this ^Krb5CredElement delegatedCred]
+    (set! (.-delegatedCred this) delegatedCred))
+
+  (method ^:final setCredDelegState ^void [this ^boolean state]
+    (set! credDelegState state))
+
+  (method ^:final setMutualAuthState ^void [this ^boolean state]
+    (set! mutualAuthState state))
+
+  (method ^:final setReplayDetState ^void [this ^boolean state]
+    (set! replayDetState state))
+
+  (method ^:final setSequenceDetState ^void [this ^boolean state]
+    (set! sequenceDetState state))
+
+  (method ^:final setConfState ^void [this ^boolean state]
+    (set! confState state))
+
+  (method ^:final setIntegState ^void [this ^boolean state]
+    (set! integState state))
+
+  (method ^:final setDelegPolicyState ^void [this ^boolean state]
+    (set! delegPolicyState state))
+
+  (method ^:public ^:final setChannelBinding :throws [GSSException] ^void [this
+                                                                           ^ChannelBinding channelBinding]
+    (set! (.-channelBinding this) channelBinding))
+
+  (method ^:final getChannelBinding ^ChannelBinding [this] channelBinding)
+
+  (method ^:public ^:final getMech ^Oid [this]
+    Krb5MechFactory/GSS_KRB5_MECH_OID)
+
+  (method ^:public ^:final getSrcName :throws [GSSException] ^GSSNameSpi [this]
+    (if (.isInitiator this) ^GSSNameSpi myName ^GSSNameSpi peerName))
+
+  (method ^:public ^:final getTargName :throws [GSSException] ^GSSNameSpi [this]
+    (if (not (.isInitiator this)) ^GSSNameSpi myName ^GSSNameSpi peerName))
+
+  (method ^:public ^:final getDelegCred :throws [GSSException] ^GSSCredentialSpi [this]
+    (when (and (not (== state STATE_IN_PROCESS)) (not (== state STATE_DONE)))
+      (throw (GSSException. GSSException/NO_CONTEXT)))
+    (when (.isInitiator this) (throw (GSSException. GSSException/NO_CRED)))
+    (.tryConstrainedDelegation this)
+    (when (nil? delegatedCred) (throw (GSSException. GSSException/NO_CRED)))
+    delegatedCred)
+
+  (method ^:private tryConstrainedDelegation ^void [this]
+    (when-not (and (not (== state STATE_IN_PROCESS)) (not (== state STATE_DONE)))
+      (when-not isConstrainedDelegationTried
+        (when (nil? delegatedCred)
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG (java-str ">>> Constrained deleg from " caller)))
+          (try
+            (set! delegatedCred
+                  (Krb5ProxyCredential.
+                    (Krb5InitCredential/getInstance GSSCaller/CALLER_ACCEPT myName lifetime)
+                    peerName
+                    serviceCreds))
+            (catch GSSException gsse)))
+        (set! isConstrainedDelegationTried true))))
+
+  (method ^:public ^:final isInitiator ^boolean [this] initiator)
+
+  (method ^:public ^:final isProtReady ^boolean [this]
+    (== state STATE_DONE))
+
+  (method ^:public ^:final initSecContext :throws [GSSException] ^byte/1 [this ^InputStream is
+                                                                          ^int mechTokenSize]
+    (let [^:mutable ^byte/1 retVal nil
+          ^:mutable ^InitialToken token nil
+          ^:mutable errorCode GSSException/FAILURE]
+      (when (some? Krb5/DEBUG)
+        (.println Krb5/DEBUG
+                  (java-str "Entered Krb5Context.initSecContext with state="
+                            (Krb5Context/printState state))))
+      (when-not (.isInitiator this)
+        (throw (GSSException. GSSException/FAILURE -1 "initSecContext on an acceptor GSSContext")))
+      (try
+        (cond
+          (== state STATE_NEW)
+            (do
+              (set! state STATE_IN_PROCESS)
+              (set! errorCode GSSException/NO_CRED)
+              (if (nil? myCred)
+                  (do
+                    (set! myCred
+                          (Krb5InitCredential/getInstance
+                            caller
+                            myName
+                            GSSCredential/DEFAULT_LIFETIME))
+                    (set! myCred
+                          (Krb5ProxyCredential/tryImpersonation
+                            caller
+                            (cast Krb5InitCredential myCred))))
+                  (when-not (.isInitiatorCredential myCred)
+                    (throw (GSSException. errorCode -1 "No TGT available"))))
+              (set! myName (cast Krb5NameElement (.getName myCred)))
+              (let [^:mutable ^Krb5ProxyCredential proxyCreds nil]
+                (if (instance? Krb5InitCredential myCred)
+                    (do
+                      (set! proxyCreds nil)
+                      (set! tgt (.getKrb5Credentials (cast Krb5InitCredential myCred))))
+                    (do
+                      (set! proxyCreds (cast Krb5ProxyCredential myCred))
+                      (set! tgt (.getKrb5Credentials (.-self proxyCreds)))))
+                (when (GSSUtil/useSubjectCredsOnly caller)
+                  (let [^:mutable ^KerberosTicket kerbTicket nil]
+                    (set! kerbTicket
+                          (Krb5Util/getServiceTicket
+                            GSSCaller/CALLER_UNKNOWN
+                            ^String (if (nil? proxyCreds)
+                                        (.getName (.getKrb5PrincipalName myName))
+                                        (.getName (.getKrb5PrincipalName (.getName proxyCreds))))
+                            (.getName (.getKrb5PrincipalName peerName))))
+                    (when (some? kerbTicket)
+                      (when (some? Krb5/DEBUG)
+                        (.println Krb5/DEBUG
+                                  (java-str "Found service ticket in the subject" kerbTicket)))
+                      (set! serviceCreds (Krb5Util/ticketToCreds kerbTicket)))))
+                (when (nil? serviceCreds)
+                  (when (some? Krb5/DEBUG)
+                    (.println Krb5/DEBUG "Service ticket not found in the subject"))
+                  (if (nil? proxyCreds)
+                      (set! serviceCreds
+                            (Credentials/acquireServiceCreds
+                              (.getName (.getKrb5PrincipalName peerName))
+                              tgt))
+                      (set! serviceCreds
+                            (Credentials/acquireS4U2proxyCreds
+                              (.getName (.getKrb5PrincipalName peerName))
+                              (.-userCreds proxyCreds)
+                              (.getKrb5PrincipalName (.getName proxyCreds))
+                              tgt)))
+                  (when (GSSUtil/useSubjectCredsOnly caller)
+                    (let [subject (Subject/current)]
+                      (cond
+                        (and (some? subject) (not (.isReadOnly subject)))
+                          (let [kt (Krb5Util/credsToTicket serviceCreds)]
+                            (.add (.getPrivateCredentials subject) kt))
+                        (some? Krb5/DEBUG)
+                          (.println Krb5/DEBUG
+                                    "Subject is readOnly;Kerberos Service ticket not stored")))))
+                (set! errorCode GSSException/FAILURE)
+                (set! token (InitSecContextToken. this tgt serviceCreds))
+                (set! apReq (.getKrbApReq (cast InitSecContextToken token)))
+                (set! retVal (.encode token))
+                (set! myCred nil)
+                (when-not (.getMutualAuthState this) (set! state STATE_DONE))
+                (when (some? Krb5/DEBUG)
+                  (.println Krb5/DEBUG
+                            (java-str "Created InitSecContextToken:\n"
+                                      (.encodeBuffer (HexDumpEncoder.) retVal))))))
+          (== state STATE_IN_PROCESS)
+            (do
+              (AcceptSecContextToken. this serviceCreds apReq is)
+              (set! apReq nil)
+              (set! state STATE_DONE))
+          (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "state is " state)))
+        (catch KrbException e
+          (when (some? Krb5/DEBUG) (.printStackTrace e))
+          (let [gssException (GSSException. errorCode -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException)))
+        (catch IOException e
+          (let [gssException (GSSException. errorCode -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      retVal))
+
+  (method ^:public ^:final isEstablished ^boolean [this]
+    (== state STATE_DONE))
+
+  (method ^:public ^:final acceptSecContext :throws [GSSException] ^byte/1 [this ^InputStream is
+                                                                            ^int mechTokenSize]
+    (let [^:mutable ^byte/1 retVal nil]
+      (when (some? Krb5/DEBUG)
+        (.println Krb5/DEBUG
+                  (java-str "Entered Krb5Context.acceptSecContext with state="
+                            (Krb5Context/printState state))))
+      (when (.isInitiator this)
+        (throw
+          (GSSException. GSSException/FAILURE -1 "acceptSecContext on an initiator GSSContext")))
+      (try
+        (cond
+          (== state STATE_NEW)
+            (do
+              (set! state STATE_IN_PROCESS)
+              (if (nil? myCred)
+                  (set! myCred (Krb5AcceptCredential/getInstance caller myName))
+                  (when-not (.isAcceptorCredential myCred)
+                    (throw (GSSException. GSSException/NO_CRED -1 "No Secret Key available"))))
+              (set! myName (cast Krb5NameElement (.getName myCred)))
+              (let [token (InitSecContextToken. this (cast Krb5AcceptCredential myCred) is)
+                    clientName (.getClient (.getKrbApReq token))]
+                (set! peerName (Krb5NameElement/getInstance clientName))
+                (when (nil? myName)
+                  (set! myName
+                        (Krb5NameElement/getInstance (.getServer (.getCreds (.getKrbApReq token))))))
+                (when (.getMutualAuthState this)
+                  (set! retVal (.encode (AcceptSecContextToken. this (.getKrbApReq token)))))
+                (set! serviceCreds (.getCreds (.getKrbApReq token)))
+                (set! myCred nil)
+                (set! state STATE_DONE)))
+          (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "state is " state)))
+        (catch KrbException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException)))
+        (catch IOException e
+          (when (some? Krb5/DEBUG) (.printStackTrace e (.getPrintStream Krb5/DEBUG)))
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      retVal))
+
+  (method ^:public ^:final getWrapSizeLimit :throws [GSSException] ^int [this ^int qop
+                                                                         ^boolean confReq
+                                                                         ^int maxTokSize]
+    (let [^:mutable ^int retVal 0]
+      (cond
+        (== (.getProto cipherHelper) 0)
+          (set! retVal (WrapToken/getSizeLimit qop confReq maxTokSize (.getCipherHelper this nil)))
+        (== (.getProto cipherHelper) 1)
+          (set! retVal
+                (WrapToken_v2/getSizeLimit qop confReq maxTokSize (.getCipherHelper this nil))))
+      retVal))
+
+  (method ^:public ^:final wrap :throws [GSSException] ^byte/1 [this ^byte/1 inBuf ^int offset
+                                                                ^int len ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Wrap called in invalid state!")))
+    (let [^:mutable ^byte/1 encToken nil]
+      (try
+        (cond
+          (== (.getProto cipherHelper) 0)
+            (let [token (WrapToken. this msgProp inBuf offset len)] (set! encToken (.encode token)))
+          (== (.getProto cipherHelper) 1)
+            (let [token (WrapToken_v2. this msgProp inBuf offset len)]
+              (set! encToken (.encode token))))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG
+                    (java-str "Krb5Context.wrap: token=["
+                              (Krb5Context/getHexBytes encToken 0 (alength encToken))
+                              "]")))
+        encToken
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))))
+
+  (method ^:public ^:final wrap :throws [GSSException] ^int [this ^byte/1 inBuf ^int inOffset
+                                                             ^int len ^byte/1 outBuf ^int outOffset
+                                                             ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Wrap called in invalid state!")))
+    (let [^:mutable ^int retVal 0]
+      (try
+        (cond
+          (== (.getProto cipherHelper) 0)
+            (let [token (WrapToken. this msgProp inBuf inOffset len)]
+              (set! retVal (.encode token outBuf outOffset)))
+          (== (.getProto cipherHelper) 1)
+            (let [token (WrapToken_v2. this msgProp inBuf inOffset len)]
+              (set! retVal (.encode token outBuf outOffset))))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG
+                    (java-str "Krb5Context.wrap: token=["
+                              (Krb5Context/getHexBytes outBuf outOffset retVal)
+                              "]")))
+        retVal
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))))
+
+  (method ^:public ^:final wrap :throws [GSSException] ^void [this ^byte/1 inBuf ^int offset
+                                                              ^int len ^OutputStream os
+                                                              ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Wrap called in invalid state!")))
+    (let [^:mutable ^byte/1 encToken nil]
+      (try
+        (cond
+          (== (.getProto cipherHelper) 0)
+            (let [token (WrapToken. this msgProp inBuf offset len)]
+              (.encode token os)
+              (when (some? Krb5/DEBUG) (set! encToken (.encode token))))
+          (== (.getProto cipherHelper) 1)
+            (let [token (WrapToken_v2. this msgProp inBuf offset len)]
+              (.encode token os)
+              (when (some? Krb5/DEBUG) (set! encToken (.encode token)))))
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      (when (some? Krb5/DEBUG)
+        (.println Krb5/DEBUG
+                  (java-str "Krb5Context.wrap: token=["
+                            (Krb5Context/getHexBytes encToken 0 (alength encToken))
+                            "]")))))
+
+  (method ^:public ^:final wrap :throws [GSSException] ^void [this ^InputStream is ^OutputStream os
+                                                              ^MessageProp msgProp]
+    (let [^:mutable ^byte/1 data nil]
+      (try
+        (set! data (new byte/1 (.available is)))
+        (.read is data)
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      (.wrap this data 0 (alength data) os msgProp)))
+
+  (method ^:public ^:final unwrap :throws [GSSException] ^byte/1 [this ^byte/1 inBuf ^int offset
+                                                                  ^int len ^MessageProp msgProp]
+    (when (some? Krb5/DEBUG)
+      (.println Krb5/DEBUG
+                (java-str "Krb5Context.unwrap: token=["
+                          (Krb5Context/getHexBytes inBuf offset len)
+                          "]")))
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 " Unwrap called in invalid state!")))
+    (let [^:mutable ^byte/1 data nil]
+      (cond
+        (== (.getProto cipherHelper) 0)
+          (let [token (WrapToken. this inBuf offset len msgProp)]
+            (set! data (.getData token))
+            (.setSequencingAndReplayProps this token msgProp))
+        (== (.getProto cipherHelper) 1)
+          (let [token (WrapToken_v2. this inBuf offset len msgProp)]
+            (set! data (.getData token))
+            (.setSequencingAndReplayProps this token msgProp)))
+      data))
+
+  (method ^:public ^:final unwrap :throws [GSSException] ^int [this ^byte/1 inBuf ^int inOffset
+                                                               ^:mutable ^int len ^byte/1 outBuf
+                                                               ^int outOffset ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Unwrap called in invalid state!")))
+    (cond
+      (== (.getProto cipherHelper) 0)
+        (let [token (WrapToken. this inBuf inOffset len msgProp)]
+          (set! len (.getData token outBuf outOffset))
+          (.setSequencingAndReplayProps this token msgProp))
+      (== (.getProto cipherHelper) 1)
+        (let [token (WrapToken_v2. this inBuf inOffset len msgProp)]
+          (set! len (.getData token outBuf outOffset))
+          (.setSequencingAndReplayProps this token msgProp)))
+    len)
+
+  (method ^:public ^:final unwrap :throws [GSSException] ^int [this ^InputStream is ^byte/1 outBuf
+                                                               ^int outOffset ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Unwrap called in invalid state!")))
+    (let [^:mutable ^int len 0]
+      (cond
+        (== (.getProto cipherHelper) 0)
+          (let [token (WrapToken. this is msgProp)]
+            (set! len (.getData token outBuf outOffset))
+            (.setSequencingAndReplayProps this token msgProp))
+        (== (.getProto cipherHelper) 1)
+          (let [token (WrapToken_v2. this is msgProp)]
+            (set! len (.getData token outBuf outOffset))
+            (.setSequencingAndReplayProps this token msgProp)))
+      len))
+
+  (method ^:public ^:final unwrap :throws [GSSException] ^void [this ^InputStream is
+                                                                ^OutputStream os
+                                                                ^MessageProp msgProp]
+    (when-not (== state STATE_DONE)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Unwrap called in invalid state!")))
+    (let [^:mutable ^byte/1 data nil]
+      (cond
+        (== (.getProto cipherHelper) 0)
+          (let [token (WrapToken. this is msgProp)]
+            (set! data (.getData token))
+            (.setSequencingAndReplayProps this token msgProp))
+        (== (.getProto cipherHelper) 1)
+          (let [token (WrapToken_v2. this is msgProp)]
+            (set! data (.getData token))
+            (.setSequencingAndReplayProps this token msgProp)))
+      (try
+        (.write os data)
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))))
+
+  (method ^:public ^:final getMIC :throws [GSSException] ^byte/1 [this ^byte/1 inMsg ^int offset
+                                                                  ^int len ^MessageProp msgProp]
+    (let [^:mutable ^byte/1 micToken nil]
+      (try
+        (cond
+          (== (.getProto cipherHelper) 0)
+            (let [token (MicToken. this msgProp inMsg offset len)] (set! micToken (.encode token)))
+          (== (.getProto cipherHelper) 1)
+            (let [token (MicToken_v2. this msgProp inMsg offset len)]
+              (set! micToken (.encode token))))
+        micToken
+        (catch IOException e
+          (set! micToken nil)
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))))
+
+  (method ^:private getMIC :throws [GSSException] ^int [this ^byte/1 inMsg ^int offset ^int len
+                                                        ^byte/1 outBuf ^int outOffset
+                                                        ^MessageProp msgProp]
+    (let [^:mutable ^int retVal 0]
+      (try
+        (cond
+          (== (.getProto cipherHelper) 0)
+            (let [token (MicToken. this msgProp inMsg offset len)]
+              (set! retVal (.encode token outBuf outOffset)))
+          (== (.getProto cipherHelper) 1)
+            (let [token (MicToken_v2. this msgProp inMsg offset len)]
+              (set! retVal (.encode token outBuf outOffset))))
+        retVal
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))))
+
+  (method ^:private getMIC :throws [GSSException] ^void [this ^byte/1 inMsg ^int offset ^int len
+                                                         ^OutputStream os ^MessageProp msgProp]
+    (try
+      (cond
+        (== (.getProto cipherHelper) 0)
+          (let [token (MicToken. this msgProp inMsg offset len)] (.encode token os))
+        (== (.getProto cipherHelper) 1)
+          (let [token (MicToken_v2. this msgProp inMsg offset len)] (.encode token os)))
+      (catch IOException e
+        (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+          (.initCause gssException e)
+          (throw gssException)))))
+
+  (method ^:public ^:final getMIC :throws [GSSException] ^void [this ^InputStream is
+                                                                ^OutputStream os
+                                                                ^MessageProp msgProp]
+    (let [^:mutable ^byte/1 data nil]
+      (try
+        (set! data (new byte/1 (.available is)))
+        (.read is data)
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      (.getMIC this data 0 (alength data) os msgProp)))
+
+  (method ^:public ^:final verifyMIC :throws [GSSException] ^void [this ^byte/1 inTok ^int tokOffset
+                                                                   ^int tokLen ^byte/1 inMsg
+                                                                   ^int msgOffset ^int msgLen
+                                                                   ^MessageProp msgProp]
+    (cond
+      (== (.getProto cipherHelper) 0)
+        (let [token (MicToken. this inTok tokOffset tokLen msgProp)]
+          (.verify token inMsg msgOffset msgLen)
+          (.setSequencingAndReplayProps this token msgProp))
+      (== (.getProto cipherHelper) 1)
+        (let [token (MicToken_v2. this inTok tokOffset tokLen msgProp)]
+          (.verify token inMsg msgOffset msgLen)
+          (.setSequencingAndReplayProps this token msgProp))))
+
+  (method ^:private verifyMIC :throws [GSSException] ^void [this ^InputStream is ^byte/1 inMsg
+                                                            ^int msgOffset ^int msgLen
+                                                            ^MessageProp msgProp]
+    (cond
+      (== (.getProto cipherHelper) 0)
+        (let [token (MicToken. this is msgProp)]
+          (.verify token inMsg msgOffset msgLen)
+          (.setSequencingAndReplayProps this token msgProp))
+      (== (.getProto cipherHelper) 1)
+        (let [token (MicToken_v2. this is msgProp)]
+          (.verify token inMsg msgOffset msgLen)
+          (.setSequencingAndReplayProps this token msgProp))))
+
+  (method ^:public ^:final verifyMIC :throws [GSSException] ^void [this ^InputStream is
+                                                                   ^InputStream msgStr
+                                                                   ^MessageProp mProp]
+    (let [^:mutable ^byte/1 msg nil]
+      (try
+        (set! msg (new byte/1 (.available msgStr)))
+        (.read msgStr msg)
+        (catch IOException e
+          (let [gssException (GSSException. GSSException/FAILURE -1 (.getMessage e))]
+            (.initCause gssException e)
+            (throw gssException))))
+      (.verifyMIC this is msg 0 (alength msg) mProp)))
+
+  (method ^:public ^:final export :throws [GSSException] ^byte/1 [this]
+    (throw (GSSException. GSSException/UNAVAILABLE -1 "GSS Export Context not available")))
+
+  (method ^:public ^:final dispose :throws [GSSException] ^void [this]
+    (set! state STATE_DELETED)
+    (set! delegatedCred nil)
+    (set! tgt nil)
+    (set! serviceCreds nil)
+    (set! key nil))
+
+  (method ^:public ^:final getProvider ^Provider [this]
+    Krb5MechFactory/PROVIDER)
+
+  (method ^:private setSequencingAndReplayProps ^void [this ^MessageToken token ^MessageProp prop]
+    (when (or replayDetState sequenceDetState)
+      (let [seqNum (.getSequenceNumber token)] (.getProps peerTokenTracker seqNum prop))))
+
+  (method ^:private setSequencingAndReplayProps ^void [this ^MessageToken_v2 token ^MessageProp prop]
+    (when (or replayDetState sequenceDetState)
+      (let [seqNum (.getSequenceNumber token)] (.getProps peerTokenTracker seqNum prop))))
+
+  (method ^:private ^:static getHexBytes ^String [^byte/1 bytes ^int pos ^int len]
+    (let [sb (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i len)
+          (let [b1 (bit-and-int (bit-shift-right-int (aget bytes i) 4) 0x0f)
+                b2 (bit-and-int (aget bytes i) 0x0f)]
+            (.append sb (Integer/toHexString b1))
+            (.append sb (Integer/toHexString b2))
+            (.append sb \space)
+            (recur (unchecked-inc-int i)))))
+      (.toString sb)))
+
+  (method ^:private ^:static printState ^String [^int state]
+    (switch state
+      STATE_NEW "STATE_NEW"
+      STATE_IN_PROCESS "STATE_IN_PROCESS"
+      STATE_DONE "STATE_DONE"
+      STATE_DELETED "STATE_DELETED"
+      (java-str "Unknown state " state)))
+
+  (method getCaller ^GSSCaller [this] caller)
+
+  (defclass ^:static KerberosSessionKey
+    :implements [Key]
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 699307378954123869)
+
+    (field ^:private ^:final ^EncryptionKey key)
+
+    (constructor [this ^EncryptionKey key] (set! (.-key this) key))
+
+    (method ^:public getAlgorithm ^String [this]
+      (Integer/toString (.getEType key)))
+
+    (method ^:public getFormat ^String [this] "RAW")
+
+    (method ^:public getEncoded ^byte/1 [this] (.clone (.getBytes key)))
+
+    (method ^:public toString ^String [this]
+      (java-str "Kerberos session key: etype="
+                (.getEType key)
+                ", "
+                (Krb5Util/keyInfo (.getBytes key))))
+
+    (method ^:private readObject :throws [IOException ClassNotFoundException] ^void [this
+                                                                                     ^ObjectInputStream stream]
+      (throw (InvalidObjectException. "KerberosSessionKey not directly deserializable"))))
+
+  (method ^:public inquireSecContext :throws [GSSException] [this ^String type]
+    (when-not (.isEstablished this)
+      (throw (GSSException. GSSException/NO_CONTEXT -1 "Security context not established.")))
+    (switch type
+      "KRB5_GET_SESSION_KEY" (return (KerberosSessionKey. key))
+      "KRB5_GET_SESSION_KEY_EX"
+        (return (javax.security.auth.kerberos.EncryptionKey. (.getBytes key) (.getEType key)))
+      "KRB5_GET_TKT_FLAGS" (return (.clone tktFlags))
+      "KRB5_GET_AUTHZ_DATA"
+        (if (.isInitiator this)
+            (throw (GSSException. GSSException/UNAVAILABLE
+                                  -1
+                                  "AuthzData not available on initiator side."))
+            (return authzData))
+      "KRB5_GET_AUTHTIME" (return authTime)
+      "KRB5_GET_KRB_CRED"
+        (do
+          (when-not (.isInitiator this)
+            (throw (GSSException. GSSException/UNAVAILABLE
+                                  -1
+                                  "KRB_CRED not available on acceptor side.")))
+          (let [sender (KerberosPrincipal. (.getName (.getKrb5PrincipalName myName)))
+                recipient (KerberosPrincipal. (.getName (.getKrb5PrincipalName peerName)))]
+            (try
+              (let [krbCred (.getMessage (KrbCred. tgt serviceCreds key))]
+                (return (KerberosCredMessage. sender recipient krbCred)))
+              (catch [KrbException IOException] e
+                (let [gsse (GSSException. GSSException/UNAVAILABLE
+                                          -1
+                                          "KRB_CRED not generated correctly.")]
+                  (.initCause gsse e)
+                  (throw gsse)))))))
+    (throw (GSSException. GSSException/UNAVAILABLE -1 "Inquire type not supported.")))
+
+  (field ^:private ^boolean/1 tktFlags)
+
+  (field ^:private ^String authTime)
+
+  (field ^:private ^AuthorizationData authzData)
+
+  (method ^:public setTktFlags ^void [this ^boolean/1 tktFlags]
+    (set! (.-tktFlags this) tktFlags))
+
+  (method ^:public setAuthTime ^void [this ^String authTime]
+    (set! (.-authTime this) authTime))
+
+  (method ^:public setAuthzData ^void [this ^AuthorizationData authzData]
+    (set! (.-authzData this) authzData)))

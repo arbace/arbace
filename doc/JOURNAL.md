@@ -19029,6 +19029,125 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
+
+Branch `java-design-1122` from mac/next `99b2c942a`, next `7aa328e67` merged (queue 517's three rounds). Scope: test/java/divergences.edn's
+by-design and harness-design classes at interp and compiled, :speed-hang and :speed-hang-compiled, and queue 517's leftovers
+(DECISIONs 517-1 (a), 517-2 (a), reach.ae's class literals, t05150). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-design-1122"
+lists what was built: the JVM's array limit and StringBuilder's growth limit (jrt), StackTraceElement's module constructor, ClassLoader's
+getPackage(s), findLoadedClass, parallel-capable registration and assertion status, URLClassLoader.addURL's duplicates, URLClassLoader,
+StandardMBean and FileLock extendable, a class literal rooting its class's initializer and constructors (j2g's reach.ae), and three
+world slices: java.base's XML parser (Properties' XML form), java.security.jgss's shared classes (Kerberos, GSS-API), javax.xml.datatype
+(with jdk.xml.internal.SecuritySupport moved out of javac's world); j2g's renames for their eight names the world held; java-check's
+uncaught rule taken to main's thread group (517-2 (a)); :synthetic-lambdas by design (517-1 (a)). Sources studied: jdk26u at baf63fb
+(/root/jdk26u): the slices' files, src/hotspot/share/oops/arrayOop.hpp (max_array_length), java/lang/AbstractStringBuilder.java and
+jdk/internal/util/ArraysSupport.java (newCapacity, newLength), java/lang/ClassLoader.java (ParallelLoaders, the assertion maps,
+getPackages), sun/rmi/runtime/NewThreadAction.java (the system group), jtreg's MainWrapper's rule as run.ae describes it.
+
+The world's forms were read by `bin/jrt-convert predict` (repr/java's vendoring read with context, javac's tool 8e45bec2 under
+REPR_JAVA_STALE_OK) and laid into jdk/forms write-ahead (`bin/jrt-convert verify` at the next night); jdk/sources.txt, the provenance
+counts, the module table (bin/jrt modules), jdk/provides.txt (bin/jrt provides) and jrt's manifest (bin/jrt manifest) regenerated.
+The foreign memory API's slice (jdk.internal.foreign and java.lang.foreign without the linker; Utils and AbstractMemorySegmentImpl
+derived overlays; a native segment's buffer over its block, jdk.internal.jrt.NativeArrays) waits on branch `java-design-ffm-1122`:
+three of its files (Utils, LayoutPath, AbstractLayout) read only with the whole closure as context, the convert step's chunked read
+(about 10 GiB), which the build session makes first.
+
+Not proven yet: the build (j2g's edge recorded afresh, then `bin/arbace-go --build`) and the compiled rows run in one heavy-lock
+session queued at 07:36 behind four sessions; the interp rows run on its executable after it. This checkpoint's records: :synthetic-lambdas
+(6 rows deferred -> design); reap 0 problems; crops-score --judge --strict, records-check 0 problems; Java completeness 0.9612 (next's).
+
+## 2026-11-22: java-design-1122: the first heavy session (14:00-14:45 UTC) built nothing; fixed; the second queued
+
+The session (java-design-b1's .tmp/build.sh under bin/heavy-lock, queued at 07:36, its turn at 13:54) ran:
+- the foreign memory API's forms: the convert step's chunked read of the whole closure (1,595 s) read every file of the slice but
+  three: jdk.internal.foreign's Utils and LayoutPath and layout/AbstractLayout call MethodHandles.filterValue, collectCoordinates
+  and insertCoordinates, which jrt's java.lang.invoke (overlay/jdk, F15) has not: javac's attribution errs and the converter's
+  model asserts (javac_model.ae:155). Fixed on `java-design-ffm-1122`: LayoutPath and AbstractLayout derived overlays and
+  Utils's derivation extended, each such statement a throw (test/jrt/derive.ae; the var handle combinators are not in the Go
+  build); not a reader limit.
+- candidate 4f3abed9f: `bin/j2g-edge update`'s j2g run refused duplicate Go names, three of round 1's XML parser
+  (jdk.internal.org.xml.sax's ContentHandler and Attributes beside java.net's and javax.naming.directory's, jdk.internal.util.xml.impl's
+  Pair beside java.net.http's): the names check of round 2 had looked at the new slices alone. Renamed (arbace/j2g/names.ae:
+  Sax_ContentHandler, Sax_Attributes, Xml_Pair; a96273ac5), and the session's last candidate pointed at that commit.
+- a96273ac5: the edge recorded (184 classes beyond jdk/edge.edn's; jdk/edge.edn, jdk/javac/edge.edn and its provenance's
+  :jdk-edge committed as 8986f75ac), then the build: repr/go's printer refused jrt's setPackageAssertionStatus (`(if ...)` in
+  an expression position). Fixed (956dae9c4); the changed jrt files printed and gofmt'ed by hand since (bin/repr-go print).
+  The build's gocache_trim cut the shared Go cache from 17.5 to 11.5 GB at its start (queue 517's finding 2).
+The session ended with the lock released; the second (the same script: the FFM forms first, then the candidates' edge, build and
+compiled rows; interp rows on its executable after it) is queued behind ten sessions. No row moved; records as at the checkpoint.
+
+## 2026-11-22: java-design-1122: the user's JD1-JD9 applied (journal 195fafabb's decisions)
+
+- n/a classes keyed on their rows (test/java/divergences.edn, :kind :na, each with its reason): :launcher-tests (JD1: t08310,
+  t08312-t08322, out of :jvm-tools), :hotspot-diagnostic and :hotspot-beans (JD5: their kind :na), :jit-loops (JD6: the 15
+  hotspot/jtreg/compiler tests of :speed-hang, and t03713, t03743 of :speed-hang-compiled; timeouts only), :heap-sized-output (JD2:
+  t07649, out of :memory-limit).
+- t05291 a wall-clock limit: bin/java-check's test_wall, a timeouts.txt line "NAME SECONDS wall" runs the test under SECONDS of wall
+  time and no CPU limit (limited_cpu unlimited); ThreadSafetyTest at 240 s; test/java/timeouts-test.bash checks the call, the
+  exports and the line (40 checks pass). Its rows run in the queued session (bin/java-check from the built commit).
+- t04683 and t05126 stay in :speed-hang(-compiled), deferred as jrt bugs. JD8, JD9 left as they are; JD7 by design; JD3 to the new
+  java-bytecode stream (the define-bytes rows left to it). JD4 (javac's API at the compiled level) is this stream's next.
+- crops-score found a bug the n/a classes exposed: cell-rows took a record row's second element as its result, which in Java's rows
+  ([ID NAME RESULT REASON]) is the jtreg name, so every id an :na class names counted n/a in every cell (read 0.9950, print 0.9940,
+  AOT 0.9980). row-result takes the row's first keyword after the id (else the second element, OCaml's string results); a self-test
+  case with its control (the old rule takes the passing row). No other crop's score moved.
+Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 / 88 -> 3,079 / 139 / 86 (21 n/a); completeness 0.9612
+-> 0.9651 (exact 0.965067), independence 1.0. reap, crops-score (--self-test, --judge --strict), records-check: 0 problems.
+
+## 2026-11-22: java-design-1122: JD4 (a), javac's API at the compiled level (write-ahead: its rows run in the queued session)
+
+- The user's JD4 (a): the 56 tests whose sources name javac's API (bin/java-check's tool_test rule: com.sun.tools.javac,
+  com.sun.source, javax.tools, javax.lang.model, javax.annotation.processing, java.util.spi.ToolProvider; langtools-run 42,
+  jdk-other 11, jdk-run 3) now build at the compiled level as javac's tool is built. bin/java-check's javac_tests writes
+  WORK/javac.list before java.check/shards, which puts those tests into shards of their own (marked WORK/j2g/sK/javac; a split
+  shard's halves keep the mark); compiled_shard gives such a shard's j2g run javac's world beside the tests' forms and the compiled
+  namespaces (jdk/javac/forms, overlay/jdk/javac/variants, jdk/edge.edn and jdk/javac/edge.edn: bin/arbace-go --build-java's
+  inputs) and keeps the program by key in .tmp/java-check/javac-prog/KEY (the javac world's files, AOT.key, the j2g executable,
+  the tests' forms keys), reused while the key holds; the runs get the platform property as on the tool
+  (-Djdk.internal.jrt.javac.platform, tool_exe's bin/repr-java platform-dir, now set for the compiled level too).
+- Alternatives considered: one program a test (56 j2g runs of javac's world, 28-40 GB each: hours); running the compiled level's
+  javac tests on javac's tool (that is the interp level's F6, not the compiled level); the javac world in every shard (every
+  compiled part pays javac's j2g). Chosen: the user's one program, cached by key.
+- Probe (--analyze-only, t05992 and the control t03208): javac.list holds t05992 alone; s0 = t03208, s1 = t05992 marked javac.
+  The gate's java-compiled-full declares the javac world's files as inputs; the three parts with javac tests at 45 GiB until a
+  night measures them (javac's tool build's j2g, 28.6-40.8 GB).
+- Their rows (.tmp/jd/compiled-javac.list: the 56 and the control t03208) run in the queued heavy session after the build. Today
+  at compiled: 23 :design-also-compiled, 17 :javac-api, 11 :launcher-tests (n/a), 2 :jvm-tools, 1 :classfile, 1 :classloading,
+  1 pass.
+
+## 2026-11-23: java-design-1123: the gate build's failure found (an import cycle) and fixed; FFM merged; the session queued
+
+- The failure of java-design's build at 00:53 (java-design-b1's `.tmp/build.sh`, its log in the ffm worktree's
+  `ffm-session.log`; both candidates, c8b77a3a4 with FFM and fad2ae534 without): `bin/build-go`'s "import cycle not allowed":
+  `arbace/jrt` imported `arbace/lang` from `j2g_classes.ae`. Round 2 put java.security.jgss in the world; its sun.security.jgss
+  classes are JDK packages (package jrt), but org.ietf.jgss, the GSS-API itself, was not in `arbace.j2g.names/pkg-of`'s JDK
+  prefixes, so its eight classes went to package lang as a user's (`J_org_ietf_jgss_Oid_J`) and jrt's krb5 classes referenced
+  them (lang imports cinterp, which imports jrt). Fixed in general: `pkg-of` takes `org/ietf/` as a JDK package (16211f7e8).
+  Alternative not taken: renaming the classes into jrt by the renames table (eight entries for what is a package rule).
+- Branch `java-design-1123` from `java-design-1122` (fad2ae534), mac/next (fa635f636) merged: conflicts in the journal (both
+  sides), `jdk/edge.edn` (the branch's, a superset), the provenance files (counts summed by hand: jdk/ 3,827 sources and 4,067
+  forms with FFM; javac's 824 and 915, next's less SecuritySupport), `test/reap/matrix.edn` and `test/crops/scores.edn` (next's,
+  recorded again after the rows). No `bin/jrt-convert update`: queue 520's reader change (835e66a3 -> 83a29bfb) moved no form
+  of jdk/ (JCS52 (a)'s As built), so the branch's forms read by the older reader stand; `jrt-convert verify` of the night
+  checks it.
+- `java-design-ffm-1122` (c8b77a3a4, round 3: the foreign memory API's segments, layouts and arenas, its derived overlays and
+  forms) merged (1770213dc): its build had failed on the same cycle, after j2g translated it. jrt's hand-written
+  `Utils_CheckNonNegativeArgument` stand-in retired as the branch did; `bin/jrt-convert derive --check` of the five derived
+  overlays: same.
+- j2g: `System.setProperties(Properties)` for translated code (m/j2g-static?, out.ae; b3fe74719): GetSystemProperties (t04794)
+  compiled stopped at "jrt lacks java.lang.System.setProperties"; J2g_SystemSetProperties existed for the interpreter's path.
+- Queued under the big lock (`.tmp/jd/session-1123.sh` in the java-design worktree, run in java-design-b1 detached at
+  b3fe74719): `bin/j2g-edge update` (committed there), `bin/arbace-go --gate-build` (amd64), then bin/java-check's compiled
+  level on java-design's lists (compiled1: round 1-3's rows; compiled-javac: JD4's 56 tests naming javac's API, one program
+  with javac's world) and the heavy interp row (t05445); then outside the lock the interp rows (interp1, 2 jobs,
+  `session-1123-light.sh`); then `.tmp/jd/post-1123.sh` judges and records them (partial), reap, crops-score, records-check.
+- Scope (the coordinator, 2026-11-23): the Mac (538) takes Java's read 49 and print 7 deferred rows; this stream keeps JD4 and
+  the eval/AOT rows that are not the bytecode VM's (JD3, java-bytecode). The doclint finding of the day (the tool's
+  ServiceLoader variant also replacing `stream()`, its providers as `ProviderImpl`s; `bin/jrt-convert vet --forms-add
+  jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
+  the patch in `.tmp/jd/doclint-stream-variant.patch`.
+
 ## 2026-11-22: classes defined from class-file bytes (JD3): the loader, the interpreter and the verifier (java-bytecode-1122)
 
 The user's decision JD3 of 2026-11-22 (the entry above): Java classes defined from class-file bytes built in full, a
@@ -19116,6 +19235,85 @@ closed list of processors compiled into the tool (JCS51 (c)). The class-file API
 t06042, t06043, t06072, t06156, t06329, t06390) need no class-file loader: they read class files with java.lang.classfile and
 com.sun.tools.javac.Main, which the compiled world lacks (JD4's javac world at the compiled level, and java.lang.classfile in the
 shipped world); they pass at interp.
+
+## 2026-11-23: Scheme's last by-design rows: SCS4 (d)'s records, SCS38 (a) (branch `smalls-1123`, from mac/next `fa635f636`)
+
+The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.md).
+- SCS4 (d) (the user, 2026-11-22; built by queue 519, 743fd799b and ea98d1599: (rnrs)'s `/` and `angle` give R6RS's answers, the
+  console is two ports) had left `:chez-exact-zero` and `:chez-console-port` matching nothing, "kept until the records are made
+  again on the main host". Made: `bin/si check --only racket/base --only racket/io/ports --only racket/exceptions --record` and the
+  same with `--aot` (stage 0; the record's other 48 and 50 entries kept): racket/base and racket/io/ports pass at both levels, the
+  compiled runs equal to the interpreted ones; the two classes removed. No other program run: nothing else changed.
+- SCS38 (a) (the user, 2026-11-23, through the coordinator; doc/scheme/SCHEME-SURVEY.md, "As built: SCS4 (d)", Proposed): the
+  racket/exceptions test that compares a lexical violation's condition-message text with Racket's own words leaves the judged
+  cases: `:chez-condition-message` `:kind :na`, its reason written in the class (R6RS specifies a condition's types, not its
+  message's text). Alternatives not taken: (b) keep it by design; (c) give si's lexical violations Racket's words (another
+  implementation's unspecified text; Chez's mats expect Chez's).
+- Cells: Scheme eval 2,835 / 3 / 0 -> 2,837 / 0 / 0 (5 n/a), AOT 2,513 / 3 / 0 -> 2,515 / 0 / 0 (3 n/a); completeness 0.9994 ->
+  1.0000 (100), independence 1.0. Runs: `bin/si divergences` (no run), bin/reap --record (0 problems), bin/crops-score --record,
+  --judge --strict (0 problems), bin/records-check.
+
+## 2026-11-23: C's "about 80 rows the Mac did not run" are synth-c23's 79, run on the main host: pass, records unchanged (smalls-1123)
+
+queue 522c's report (the Mac, 2026-11-22) counted 2,275 eval and 2,279 AOT passes in its whole runs against records of 2,359 rows and
+left "about 80 rows" to the main host. They are synth-c23's 79 programs: bin/lib/ci/check's default corpus list (`all`, queue 150)
+does not name synth-c23 (test/c/corpora.edn's :synth-c23, GT8.6), so a whole `bin/ci check` without `--corpus` never runs it (07dfe5c2f
+ran it beside the whole runs). Run on next's tree (fa635f636; the tools' host the gate executable 8bfa5cd4, whose repr/c and arbace/c
+equal next's; tools/cirun built from the checkout): `bin/ci check --corpus synth-c23 --record` 79 of 79 pass and `check --aot --corpus
+synth-c23 --record` 79 of 79 (compiled equal to interpreted), the controls holding (decl-alignment against decl-abstract-declarators'
+gcc run differs). Both records unchanged byte for byte, so C's eval 2,355 / 0 / 0 and AOT 2,358 / 0 / 0 stand. Not changed: the
+default list (adding synth-c23 to `all` would make every whole run 79 programs longer; the gate's c-check parts name their corpora).
+
+## 2026-11-23: queue 540, C's and C++'s print rows (the VM; branch `540-c-cpp-print` from next fa635f636)
+
+C's print level had 12 deferred rows, its read level 5 (test/repr/c/roundtrip-known.edn, parse-check-known.edn). C++'s print level had
+10 (the own records, plus the hotspot files no record holds). The VM has no compiled host for the checkout's repr/c: stage 0 evaluates
+the namespaces the checkout changed (RT.toolSource). So the rows that need a compiled host (the evaluator's 10,000-call depth, the read
+budget) are left to the main host's records, as its findings say.
+- repr/c (convert.ae): an invocation whose expansion holds __LINE__ was printed expanded. It is now printed as itself after
+  `#line N /*arbace*/`, N the invocation's presumed line (lex/position, #line applied), when the invocation stands on one line; one over
+  several lines is still printed expanded (gcc's __LINE__ there need not be the port's). The reread computes the same N from the
+  print's #line, so the :c/macro texts are equal, and place-directives! drops the marked directive. __COUNTER__ is still printed expanded.
+  - sqlite's shell.c: its asserts no longer bring musl's `#define stderr (stderr)` back expanded. Levels 1-2 pass (they differed).
+  - quickjs's unicode_gen.c: its last `assert(0);` is one expansion again, and its gcc -O0 object equals the original's (the VM's
+    aarch64 gcc, by hand; the recorded l3 is amd64's, the main host's to record again).
+  - shell.c's level 3 still differs, by gcc -O0's layout-dependent branches at a one-line `if( zCol==0 ) continue;` that the print
+    lays over two lines (shown by hand: the print with that line joined moves the difference to the next such function). That is
+    CS81 (a)'s "rest", so shell.c moves from :macro-context to :objects, by design (DECISION 540-2 in the report).
+- bin/lib/repr-c/roundtrip: REPR_C_MAX_NEST defaults to 20,000, as parse-check sets it (the main host's suggestion). On a compiled host,
+  limits-declparen.c, -exprparen.c, -pointer.c and -structnest.c pass levels 1-2 (the main host's run: 167 s, 2.8 GB). An evaluated host
+  stops at the evaluator's depth as before (the VM: limits-exprparen.c, "panic: stack overflow", 6 s). limits-caselabels.c nests
+  100,000 labeled statements, past the bound, and stays (DECISION 540-1).
+- repr/cpp (print.ae): a text form whose text begins with `#` (or `%:`) is printed on the line before it. It is never a directive (a
+  directive is c/directive), and at a line's start the reread took it for one: g++.old-deja's g++.other/crash41.C, `int a; #// ...`.
+  It now passes level 1 (gxx-old-deja-every-10 --only-list).
+- repr/cpp (native.ae) with arbace.repr.c.pp/preprocess's new :closed-token: after a failed #include closes the stream, the token cc's
+  shift returned with it (the first after the directive's line) is dropped for C++. Clang's fatal error stops there, and the token
+  read alone made `(cpp/text "export")` out of the print's `export module M;`. gxx-modules' target-aarch64-1_a.C now passes level 1.
+  C's token and tree checks are unchanged: `stream` and `preprocess`'s tokens are as before.
+- Left: the other three recorded C++ rows (gxx-dg's template30.C, attr-no_unique_address1.C, ramp-return-a.C) still fail level 1 at
+  head. reap's "improvements until --record-results" is wrong for them: the own judge classes them by rule, and the known file never
+  listed them. template30's comes from the split `>` that the native parser locates in clang's scratch space, so the converter takes
+  `z<int>` for macro text. That is the native parser's location model, the C++ read's. The five hotspot files need jdk26u's build tree
+  (gensrc), which the VM lacks.
+- Records here: roundtrip-known.edn (shell.c :objects), the classes' texts in test/c/divergences-print.edn, matrix.edn and scores.edn
+  (`bin/reap --record`, `bin/crops-score --record`). The results rows are the main host's: `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip
+  --corpus quickjs,sqlite --record` and the torture-compile corpus on the gate's executable, `bin/repr-c parse-check --corpus
+  torture-compile --record` there, and `--record-results` for gxx-old-deja-every-10 and gxx-modules-all.
+
+## 2026-11-23: queue 540 merged onto next (branch `smalls2-1123`), DECISION 540-2 (a)'s n/a applied
+
+mac/540-c-cpp-print (b2fc220c8, the VM's partial: C's shell.c and unicode_gen.c at levels 1-2, C++'s crash41.C and
+target-aarch64-1_a.C, the round trip's REPR_C_MAX_NEST at 20,000) merged onto next 28740dc3b; the journal's one conflict (two
+entries appended at once) kept both. The user's decisions on its questions (2026-11-23, through the coordinator): 540-2, shell.c's
+level-3 difference (gcc -O0's branches following a one-line `if( zCol==0 ) continue;` the :lines print lays over two lines), is n/a,
+not by design: a class of its own, `:objects-layout` `:kind :na` (test/c/divergences-print.edn; test/repr/c/roundtrip-known.edn's
+shell.c entry and class text), and `:objects` back to its asm-label text (a guard class, no member). 540-1, limits-caselabels.c's
+iterative label chains, is the VM's build. Cells (bin/reap --record): C print 4,844 / 0 / 12 -> 4,844 / 0 / 11 (1 n/a).
+bin/crops-score --record, --judge --strict, bin/records-check: 0 problems. The rows that need a compiled host (quickjs.c,
+libunicode.c, the four limits files, unicode_gen.c's level 3, and 540-3's 16 GiB runs: limits-externdecl.c, pr46534.c,
+sqlite3.c) wait for a gate executable built from this tree (the build train): stage 0 and next's gate executable both evaluate
+540's convert.ae from the checkout.
 ## 2026-11-23: ClassLoader's remaining members in jrt (the user's decision (a); java-bytecode-1122)
 
 The user decided (a) on the question of java-bytecode's report (relayed by the coordinator): the ClassLoader members the
