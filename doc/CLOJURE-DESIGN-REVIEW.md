@@ -559,3 +559,19 @@ test-proxy-method-order and gen-interface-source-file read class files with ASM:
 (arbace.repl.deps adds jars at run time: D6, CDR9), `:runtime-source` (AOT: a file the test writes at run time loads from
 source). (a) n/a, each by its recorded decision; (b) keep as by design. Recommended (a): they test what Arbace decided not to
 have (class files, jars) or what no AOT build can (a source made after the build).
+
+## Decided (2026-11-23, the user: CDR17-CDR21) and as built (branch `clj-1123`)
+
+The user accepted every recommendation of "Proposed (2026-11-23)": CDR17 (a), CDR18 (a), CDR19 (a) (the forms dropped and the
+expected files recorded again from the frozen jar, as CDR14), CDR20 (b) and CDR21 (a) (n/a under their recorded decisions).
+- Dropped, each line made a comment so that every other case keeps its id: polymorphism.ae:176 (the ambiguous `(class-ambig "s")`),
+  state_errors.ae:542 (`(require 'no.such.namespace)`), strings.ae:408 (`(hash (StringBuilder. "x"))`), and of native.ae:652 only the
+  element that differed, `(outcome #(call-qualified 5 "c"))` (its message; the form's other checks stay, the next one comparing the
+  same call's outcome with Reflector's). `bin/oracle record forms/native forms/state_errors forms/polymorphism forms/strings` on the
+  frozen jar: one case fewer in each of the three, native.ae:652's record its form and value less that element, nothing else changed.
+  The known files (the Go build's, the parked box's, diffcheck's) lose the four and their emptied groups; the classes
+  `:identity-hash` (eval and AOT's diffcheck pair), `:main-since-v4` and `:method-invoke-message` go.
+- n/a (`:kind :na`, outside the denominators): eval's `:security-providers` (SC4), `:class-files` (D13; clj-1208 at eval CDR8 (b)) and
+  `:tools-deps` (D6, CDR9); AOT's `:class-files`, `:tools-deps` and `:runtime-source` (2026-11-02).
+- Cells: eval 21,121 / 9 / 2 to 21,122 / 0 / 2 (5 n/a; native.ae:652 passes), AOT 833 / 4 / 1 to 833 / 0 / 1 (4 n/a). The deferred
+  rows (`:xml`, `:xml-stream` at eval, `:xml-stream` at AOT) wait for the train's build (CDR16 (a), the event reader's closure).

@@ -19190,3 +19190,21 @@ print 1031 / 0 / 0), stage 0 and the frozen jar only (no gate build: since 09:20
 - Proposed for the user: CDR17-CDR21, the by-design rows left (doc/CLOJURE-DESIGN-REVIEW.md, "Proposed (2026-11-23)").
 - Records left for the train's build (`.tmp/probe/records.sh TRAIN` in the worktree): the bench, the oracle's two files, `--aot --list`
   (clojure-xml, reflect), the eval java.xml rows on the extended executable; then the references, classes, reap and crops-score.
+
+## 2026-11-23: the user's decisions CDR17-CDR21: the Clojure crop's last by-design rows dropped or n/a (branch `clj-1123`)
+
+The user accepted every recommendation of doc/CLOJURE-DESIGN-REVIEW.md, "Proposed (2026-11-23)" (relayed by the burst's coordinator):
+CDR17 (main-since-v4's last two), CDR18 (identity-hash) and CDR19 (method-invoke-message): the forms dropped and the expected files
+recorded again from the frozen jar, as CDR14; CDR20 (security providers) and CDR21 (class-files, tools-deps, runtime-source): n/a under
+their recorded decisions (SC4; D13 and CDR8 (b); D6 and CDR9; the user's of 2026-11-02). Alternatives were in the proposal (an overlay of
+main's answers for CDR17, aligning jrt's message for CDR19, the providers' classes for CDR20, keeping them by design).
+- Built on stage 0 and the frozen jar alone (no gate build): polymorphism.ae:176, state_errors.ae:542 and strings.ae:408 made comments
+  (the case ids of every other form unchanged); of native.ae:652 only `(outcome #(call-qualified 5 "c"))`, the element whose message
+  differed (the form's other checks kept). `bin/oracle record forms/native forms/state_errors forms/polymorphism forms/strings`: 282, 802,
+  532 and 461 cases, the three dropped and native.ae:652's form and value without the element, nothing else (compared without the ids).
+  test/oracle/known-go-amd64-frozen.edn keeps only the providers' case; the parked box's known file and test/diffcheck/known.edn lose the
+  four (diffcheck's identity-hash group with them). Classes: eval drops `:identity-hash`, `:main-since-v4`, `:method-invoke-message` and
+  marks `:security-providers`, `:class-files`, `:tools-deps` `:na`; AOT drops its diffcheck pair's `:identity-hash` and marks `:class-files`,
+  `:tools-deps`, `:runtime-source` `:na`.
+- Cells: eval 21,121 / 9 / 2 to 21,122 / 0 / 2 (5 n/a), AOT 833 / 4 / 1 to 833 / 0 / 1 (4 n/a); read and print unchanged. Left: the three
+  deferred rows, for the train's build (`.tmp/probe/records.sh train-1`, its watcher running).
