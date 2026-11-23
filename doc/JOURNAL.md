@@ -19760,6 +19760,50 @@ under `ulimit -v` 24 GiB so that a runaway fails fast.
   rows pr4229, domains and init-info) and the suite's opam rows under one ticket of 16 GiB, then the compiler-libs programs (ocamldoc's
   five and the 16 tool rows) in one shard under one ticket of 40 GiB, each under `ulimit -v`.
 
+## 2026-11-23: cpp-ce3, the checker's constant evaluator: placement new, objects under construction, exact arithmetic (branch `cpp-ce3-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the constant evaluator (arbace/cpp/sema.ae) after cpp-ce2; doc/cpp/CPP-SURVEY.md, "As built: cpp-ce3".
+Each rule from the standard's text and GCC 15.2's behaviour as gxx-dg's tests record it; no GCC or clang code read.
+
+Decision (the user, 2026-11-23): placement new in a constant evaluation is restricted to std::construct_at before C++26, as the
+standard ([expr.const]/5.20.1 of C++20 and C++23) and GCC (is_std_construct_at) do; from C++26 allowed (P2747R2). Built: the evaluator
+knows its calling function (a call's and a constructor's environment carry ::fn; `ce-std-construct-at?`), and the reserved placement
+form outside std::construct_at is GCC's "call to non-'constexpr' function 'void* operator new(std::size_t, void*)'". This replaces
+cpp-ce2's acceptance of every placement new from C++20. Alternative weighed: accepting it until a test needs the refusal (cpp-ce2's
+choice; rejected by the decision: an acceptance GCC refuses is a wrong answer too).
+
+Built (the checker's, `checking?`): the dynamic type of an object under construction ([class.cdtor]/6: `*ce-bases*`, the cells of
+objects whose constructors are building their bases; a dynamic_cast's operand in a constructed base subobject takes that base as its
+most derived object, one in a base not constructed yet GCC's "accessing uninitialized member"); a default member initializer's errors
+at the use (`ce-dmi-at`, the item's :dmi-range); exact 64-bit arithmetic (unsigned modulo 2^64, signed past its range the sure "value
+N is outside the range of representable values"; shared with the code generator's folds, which had thrown Java's ArithmeticException)
+and, found on the way, the signed range check's bounds exact: (bit-shift-left 1 63) is a long's Long/MIN_VALUE, so every 64-bit signed
++, - and * (`5LL + 3LL`) had been "outside the range" in the checker; GCC's -fconstexpr-loop-limit (`ce-loop-limit!`, the step budget
+3,000,000 in the checker so that the limit comes first); "used before its definition" (`ce-undefined?`, `*ce-point*` the evaluated
+declaration's range, `*ce-mi-at*` a mem-initializer's range: the native parser's CXXCtorInitializer keeps it as the private :_range,
+no tree check reads underscore keys); immediate invocations evaluated (`cx-immediate-eval!`, not in an immediate function context, a
+conditional's branch, a default argument or a default member initializer); delete through a base pointer and a member call on freed
+storage; GNU statement expressions evaluated; the potential constant check's do body.
+
+Checked: the probe on each file and on reduced programs; the record run (17:41-19:21 UTC, `bin/repr-cpp dg --corpus dg-error --front
+native --only` 2,881 files `--record`: every own pass and the read cell's both-fail rows; stage 0) then a second record run of the 58
+files naming consteval, the changed rows, the union targets and the control pair after the immediate invocations' exclusions: own pass
+2,273 -> 2,288, no own pass lost but cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s under load (their
+pass rows kept, as cpp-ce2 and cpp-small did); the control pair DRs/dr2082.C vs dr1423.C failing as it must. 15 rows to own pass:
+cpp0x/pr71966-1, -2, cpp1y/constexpr-70265-1, -2, -89785-2, -union3, -union4, cpp2a/consteval9, constexpr-dtor4, -dynamic11,
+-dynamic17, -init5, -new12, constinit10, ubsan/vptr-18. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+`bin/records-check`: 0 problems. C++ read 5,872 / 0 / 410 (249 n/a) -> 5,885 / 0 / 398 (248 n/a); completeness 0.9770 -> 0.9775,
+independence 0.9666 -> 0.9668.
+
+Left: bit-cast2.C (out of scope: IFNDR eager template checks), P2564R3's escalation (consteval-prop*), immediate invocations in member
+and constructor calls, consteval11.C's and consteval34.C's calls in a taken branch. Alternatives weighed for the immediate invocations:
+evaluating every consteval call wherever it is analyzed (rejected: a branch never taken, `0 ? bar (3) : 1`, and a default member
+initializer whose error GCC puts at the constructor gave false errors in consteval11.C, consteval34.C, consteval-prop6.C and -prop10.C);
+for the loop limit, extending diag's static rule for never-ending loops to static_assert (rejected: the evaluator's count is general).
+
+mac/next (`e10409e1c`, ocaml-1123's AOT round) merged: the journal by union, `bin/reap --record`, `bin/crops-score --record`, `--judge
+--strict`, `bin/records-check` again: 0 problems, C++ read 5,885 / 0 / 398 (248 n/a) as above.
+
 
 ## 2026-11-23: cpp-tpl2, the checker's templates (branch `cpp-tpl2-1123` from mac/next `097078f5b`)
 
@@ -19794,3 +19838,12 @@ tests expect); "not more specialized than the primary" by the existing partial o
 partial specializations, which are everywhere in the headers).
 
 Left: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2", "Left"; the concepts group not begun but for concepts-dr1430.C.
+
+## 2026-11-23: cpp-tpl2 merged with cpp-ce3 (branch `cpp-tpl2-1123`)
+
+mac/next (`e08a71302`, with cpp-ce3's constant evaluator rules: C++ read 5,885 / 0 / 398) merged into cpp-tpl2-1123; the code merged
+without conflict (sema.ae, diag.ae, parse.ae), the journal and survey by union, the own record by git's merge (both streams' rows).
+The 53 rows the two streams turned to own pass (38 and 15) read again on the merged tree (`bin/repr-cpp dg --front native --only`, no
+record): 53 own pass and the control pair failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+`bin/records-check`: 0 problems. C++ read 5,885 / 0 / 398 (cpp-ce3's) -> 5,923 / 0 / 360 (248 n/a); completeness 0.9790, independence
+0.9674.
