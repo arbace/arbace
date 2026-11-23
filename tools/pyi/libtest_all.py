@@ -21,9 +21,10 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       outlives S seconds (default 300) is killed and written "CASE ID timeout ..."; with --idle-timeout S (queue 275;
       default 0, off; bin/pyi passes 90) one whose processes (the driver's session and its descendants, /proc) use under 5%
       of one core for S seconds is a hang, killed then: "CASE ID timeout the test idle past S s, a hang ..."; with --mem-max MB
-      (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed resident memory
-      passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
-      driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); each test's
+      (queue 321; default 0, off; bin/pyi passes PYI_LIB_TEST_MEM_MAX, 8192) one whose processes' summed memory (each
+      process's proportional set size since py-mods-1122: shared pages counted once) passes MB, sampled every 5 s, is killed then: "CASE ID crash the test's processes past MB MB resident ..." (a
+      driver of test_capi reached 29.6 GB on the VM; a night's 4 jobs share the host's memory); PYI_LIB_TEST_LIMITS (py-mods-1122;
+      test/python/lib-test-limits.tsv, bin/pyi's) raises a listed module's memory cap and module timeout; each test's
       wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
       other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
@@ -331,8 +332,8 @@ except (ValueError, OSError, AttributeError):
 
 
 def tree_rss_mb(pid):
-    """queue 321: the summed resident memory (MB) of a driver's processes, as tree_cpu finds them; None where /proc
-    cannot be read"""
+    """queue 321: the summed memory (MB) of a driver's processes, as tree_cpu finds them (their proportional set sizes
+    since py-mods-1122); None where /proc cannot be read"""
     try:
         names = os.listdir("/proc")
     except OSError:
@@ -360,10 +361,26 @@ def tree_rss_mb(pid):
             if q not in mine and v[0] in mine:
                 mine.add(q)
                 grew = True
-    return sum(procs[q][2] for q in mine) * PAGE_KB // 1024
+    # py-mods-1122: each process's proportional set size (smaps_rollup's Pss: its private pages and its share of the
+    # pages it shares), so the executable's text that every pyi child maps (about 360 MB resident, the same pages) counts
+    # once among them, not once a child as the resident sizes summed it (a spawned child's 960 MB resident were 630 MB
+    # of the host's); a process whose smaps_rollup cannot be read counts its resident size
+    kb = 0
+    for q in mine:
+        pss = None
+        try:
+            with open("/proc/%d/smaps_rollup" % q) as f:
+                for line in f:
+                    if line.startswith("Pss:"):
+                        pss = int(line.split()[1])
+                        break
+        except (OSError, ValueError, IndexError):
+            pss = None
+        kb += pss if pss is not None else procs[q][2] * PAGE_KB
+    return kb // 1024
 
 
-def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0):
+def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0, test_timeouts=None):
     skipfile = os.path.join(d, m + ".skip")
     out_lines, err_parts, reported = [], [], set()
     times = []  # queue 275: DIR/MODULE.times, a line a test: ID, outcome, wall and CPU seconds (the driver's processes)
@@ -460,7 +477,7 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
                             times.append("#start\t%d\t%.1f\t%s" % (attempts, now - state["t_start"],
                                                                    "%.1f" % c if c is not None else "?"))
                             state["t_start"] = None
-                        state["current"], state["deadline"] = row[1], now + test_timeout
+                        state["current"], state["deadline"] = row[1], now + max(test_timeout, (test_timeouts or {}).get(row[1], 0))
                         state["t0"], state["cpu0"], state["samples"] = now, c, ([(now, c)] if c is not None else [])
                     elif row[0] == "CASE" and len(row) > 1:
                         if row[1] not in reported and state["t0"] is not None:
@@ -489,7 +506,7 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
             break
         if cur and cur not in reported:
             if state["killed"] == "test":
-                out_lines.append("CASE\t%s\ttimeout\tthe test past %d s (killed; the driver started again)" % (cur, test_timeout))
+                out_lines.append("CASE\t%s\ttimeout\tthe test past %d s (killed; the driver started again)" % (cur, max(test_timeout, (test_timeouts or {}).get(cur, 0))))
             elif state["killed"] == "idle":
                 # queue 275: a hang told from a slow test: its processes idle (under 5% of a core) for idle_timeout s
                 out_lines.append("CASE\t%s\ttimeout\tthe test idle past %d s, a hang (killed; the driver started again)" % (cur, idle_timeout))
@@ -520,12 +537,36 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
     return attempts
 
 
+def read_limits(path):
+    """py-mods-1122: the per-module limits (PYI_LIB_TEST_LIMITS, test/python/lib-test-limits.tsv: MODULE<TAB>MEM_MB<TAB>
+    MODULE_TIMEOUT_S<TAB>WHY, # and blank lines ignored): {module: (mem MB, module timeout s)}, each only ever above
+    --mem-max and --module-timeout (a module whose children are each a whole pyi process, the runner's caps sized for
+    one driver: the limits are the runner's, not the tests')"""
+    out, tests = {}, {}
+    if not path or not os.path.exists(path):
+        return out, tests
+    for line in open(path, encoding="utf-8"):
+        if not line.strip() or line.startswith("#"):
+            continue
+        f = line.rstrip("\n").split("\t")
+        if len(f) < 3:
+            continue
+        if "/" in f[0]:
+            # MODULE/TEST-ID<TAB>-<TAB>TEST_TIMEOUT_S: the test's own timeout (above --test-timeout)
+            mod, tid = f[0].split("/", 1)
+            tests.setdefault(mod, {})[tid] = float(f[2])
+        else:
+            out[f[0]] = (int(f[1]), float(f[2]))
+    return out, tests
+
+
 def cmd_run(args):
     root, mods, d = arg(args, "--root"), read_list(arg(args, "--modules")), os.path.abspath(arg(args, "--dir"))
     jobs = int(arg(args, "--jobs", "1"))
     test_timeout, module_timeout = float(arg(args, "--test-timeout", "300")), float(arg(args, "--module-timeout", "3600"))
     idle_timeout = float(arg(args, "--idle-timeout", "0"))
     mem_max = int(arg(args, "--mem-max", "0"))
+    limits, test_limits = read_limits(os.environ.get("PYI_LIB_TEST_LIMITS"))
     oracle = arg(args, "--oracle")
     tbase = os.path.abspath(arg(args, "--tmp-base", os.path.join(d, "_tmp")))
     os.makedirs(d, exist_ok=True)
@@ -542,7 +583,10 @@ def cmd_run(args):
                 m = q.pop(0)
             t0 = time.monotonic()
             tmp = short_tmp(tbase, "j%d" % k)
-            n = run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout, mem_max)
+            mm, mt = limits.get(m, (mem_max, module_timeout))
+            if mem_max and mm:
+                mm = max(mm, mem_max)
+            n = run_module(m, root, d, oracle, test_timeout, max(mt, module_timeout), tmp, idle_timeout, mm if mem_max else 0, test_limits.get(m))
             shutil.rmtree(tmp, ignore_errors=True)
             shutil.rmtree(tmp + "c", ignore_errors=True)
             tmp_guard(m, os.path.join(d, "tmp-leftovers.log"))

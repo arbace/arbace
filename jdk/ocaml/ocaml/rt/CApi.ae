@@ -10,11 +10,12 @@
 ;; the signals the C sent the process itself, one a byte, pending in ExtSignal, then 'm' the reply), and at the program's end (Main/run's finish) 'Z', the C's stdio flushed; else the external is missing, as before.
 ;;
 ;; The session: the values that crossed in an outermost call, by id (the order both sides gave them) and back; a C custom block the
-;; C allocated (kept for the run) is one Custom by its address.
+;; C allocated is one Custom by its address (held weakly since queue 523: its finalize runs once the Custom is unreachable, at an
+;; asked collection, collected); Marshal writes and reads one through the C's operations (serialize, deserialize: queue 527).
 
 (in-ns 'ocaml.rt)
 
-(import '(java.io ByteArrayOutputStream DataInputStream File OutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap))
+(import '(java.io ByteArrayOutputStream DataInputStream File OutputStream RandomAccessFile IOException) '(java.util ArrayList HashMap IdentityHashMap) '(java.lang.ref WeakReference))
 
 (defclass ^:public ^:final CApi
 
@@ -30,10 +31,19 @@
   (field ^:static ^ArrayList nodes)
   (field ^:static ^IdentityHashMap ids)
   (field ^:static ^int depth 0)
-  ;; the C's custom blocks by address, kept for the run
+  ;; the C's custom blocks by address: a WeakReference to the block's one Custom (queue 523: held weakly, the dead ones' addresses
+  ;; sent to the server at the collections the program asks for, collected, so that the C's finalize runs)
   (field ^:static ^HashMap cblocks (HashMap.))
+  (field ^:static ^:final ^ArrayList cbDead (ArrayList.))
   ;; a Java throwable a callback raised, rethrown when the C call has unwound
   (field ^:static ^Throwable pending)
+  ;; (queue 530) the closures that crossed, a handle each for the run ('k' u32), so that one the C keeps past the outermost call (a
+  ;; root, a C thread's) comes back as itself; the C's threads' agent (started at the server's 't'), and the program's generation it
+  ;; serves (finish ends it)
+  (field ^:static ^IdentityHashMap kept (IdentityHashMap.))
+  (field ^:static ^ArrayList keptList (ArrayList.))
+  (field ^:static ^long gen 0)
+  (field ^:static ^boolean agentOn false)
 
   ;; ---- writing
 
@@ -81,8 +91,18 @@
       (and (instance? Custom v) (instance? CBlock (.-v (cast Custom v))))
       (let [c (cast Custom v)]
         (CApi/u8 o 99) (CApi/bytes o (cast byte/1 (Rt/ofUtf8 (.-id c)))) (CApi/u64 o (.-addr (cast CBlock (.-v c)))))
-      (instance? Closure v) (do (CApi/add v) (CApi/u8 o 107))
+      (instance? Closure v) (do (CApi/add v) (CApi/u8 o 107) (CApi/u32 o (long (CApi/keep v))))
       :else (do (CApi/add v) (CApi/u8 o 104))))
+
+  ;; the closure v's handle, given at its first crossing (queue 530)
+  (method ^:static keep ^int [v]
+    (let [h (.get kept v)]
+      (if (some? h)
+        (.intValue (cast Integer h))
+        (let [n (.size keptList)]
+          (.put kept v (Integer/valueOf n))
+          (.add keptList v)
+          n))))
 
   ;; the contents of the nodes known now
   (method ^:static putUpdates ^void [^ByteArrayOutputStream o]
@@ -131,6 +151,7 @@
         106 (I64. (.rd64 this))
         110 (NInt. (.rd64 this))
         114 (.get nodes (unchecked-int (.rd32 this)))
+        107 (let [c (.get keptList (unchecked-int (.rd32 this)))] (CApi/add c) c)
         112 (CApi/predef (unchecked-int (.rd32 this)))
         98 (let [tag (unchecked-int (.rd32 this)) n (unchecked-int (.rd32 this)) f (new Object/1 n) b (Block. tag f)]
              (CApi/add b)
@@ -147,10 +168,11 @@
                (CApi/add c)
                (loop [^int i 0] (when (< i n) (aset data i (.get this)) (recur (unchecked-inc-int i))))
                c))
-        99 (let [id (Rt/utf8 (.rdBytes this (unchecked-int (.rd32 this)))) a (.rd64 this) k (Long/valueOf a) c (.get cblocks k)]
+        99 (let [id (Rt/utf8 (.rdBytes this (unchecked-int (.rd32 this)))) a (.rd64 this) k (Long/valueOf a)
+                 r (cast WeakReference (.get cblocks k)) c (if (some? r) (.get r) nil)]
              (if (some? c)
                c
-               (let [nc (Custom. id (CBlock. a))] (.put cblocks k nc) nc)))
+               (let [nc (Custom. id (CBlock. a))] (.put cblocks k (WeakReference. nc)) nc)))
         (throw (Rt/internal (java-str "the C API: a value of the wire form " op))))))
 
   ;; fail.h's predefined exception i
@@ -216,6 +238,8 @@
             (== k 109) r
             (== k 111) (do (.write System/out r 0 n) (recur))
             (== k 101) (do (.write System/err r 0 n) (recur))
+            ;; (queue 530) the C started a thread: its agent from now on
+            (== k 116) (do (CApi/startAgent) (recur))
             ;; a signal the C sent the process itself (raise, kill of its pid): the runtime's own, pending (ExtSignal), its handler
             ;; run when the call returns (call3)
             (== k 115) (do (loop [^int i 0]
@@ -262,8 +286,136 @@
       (set! proc nil)
       (set! pin nil)
       (set! pout nil)
+      (set! gen (unchecked-inc gen))
+      (set! agentOn false)
+      (.clear kept)
+      (.clear keptList)
       (.flush System/out)
       (.flush System/err)))
+
+  ;; (queue 523) an asked collection (ExtGc/gcAsked, before the finalisers it fires): the C's custom blocks whose Custom is unreachable
+  ;; forgotten, and at no call's depth their addresses sent to the server ('G'), which runs the finalize of those whose operations have
+  ;; one, as the C runtime's sweep does; inside a call (a callback asked for it) they wait for the next asked collection
+  (method ^:public ^:static collected ^void []
+    (when (> (.size cblocks) 0)
+      (System/gc)
+      (let [ks (ArrayList. (.keySet cblocks))]
+        (loop [^int i 0]
+          (when (< i (.size ks))
+            (let [k (.get ks i)]
+              (when (nil? (.get (cast WeakReference (.get cblocks k))))
+                (.remove cblocks k)
+                (.add cbDead k)))
+            (recur (unchecked-inc-int i))))))
+    (when (and (== depth 0) (> (.size cbDead) 0) (or (some? chan) (some? proc)))
+      (let [o (ByteArrayOutputStream.)]
+        (CApi/u8 o 71)
+        (CApi/u32 o (long (.size cbDead)))
+        (loop [^int i 0]
+          (when (< i (.size cbDead))
+            (CApi/u64 o (.longValue (cast Long (.get cbDead i))))
+            (recur (unchecked-inc-int i))))
+        (.clear cbDead)
+        (CApi/exchange o))))
+
+;; ---- the C's threads (queue 530; oicapi's threads.go and wire.go): a thread the C started speaks to the runtime only when it asks.
+  ;; Once the server said the C started one ('t'), an agent (a daemon thread) polls every two milliseconds, holding the runtime's lock
+  ;; and at no call's depth ('P'): the server answers 'N' (nothing), or a C thread's conversation as the session's worker: 'D' u32 dom
+  ;; (answered 'R' 1 when the domain runs, else 0), or 'L' u32 dom (the runtime taken for a thread of that domain: answered 'R' (),
+  ;; then its callbacks 'K', each run on a thread state of that domain, until its release 'N'). The lock stays the agent's for the
+  ;; whole conversation, as a registered C thread holds the master lock from its acquire to its release.
+
+  (method ^:static startAgent ^void []
+    (when (not agentOn)
+      (set! agentOn true)
+      (let [g gen
+            t (Thread. (lambda Runnable []
+                         (loop []
+                           (when (== g gen)
+                             (try (Thread/sleep 2) (catch InterruptedException e nil))
+                             (Gil/lock)
+                             (try
+                               (when (and (== g gen) (== depth 0) (some? proc)) (CApi/poll))
+                               (catch Throwable e nil)
+                               (finally (Gil/unlock)))
+                             (recur)))))]
+        (.setDaemon t true)
+        (.start t))))
+
+  (method ^:static poll ^void []
+    (set! nodes (ArrayList.))
+    (set! ids (IdentityHashMap.))
+    (set! depth 1)
+    (let [prev (.get Effects/CUR)]
+      (try
+        (let [o (ByteArrayOutputStream.)]
+          (CApi/u8 o 80)
+          (CApi/serveThread (CApi/exchange o)))
+        (finally
+          (.set Effects/CUR prev)
+          (set! depth 0)
+          (set! nodes nil)
+          (set! ids nil)))))
+
+  ;; a C thread's conversation, until its end ('N')
+  (method ^:static serveThread ^void [^CApi rd]
+    (switch (.-op rd)
+      78 nil
+      68 (let [d (.rd32 rd)]
+           (CApi/serveThread (CApi/answer 82 (Long/valueOf (if (Effects/domainRuns d) 1 0)))))
+      76 (let [d (.rd32 rd)]
+           (.set Effects/CUR (TState. nil (Effects/domainOf d)))
+           (CApi/serveThread (CApi/answer 82 Rt/UNIT)))
+      75 (let [f (.get rd) n (unchecked-int (.rd32 rd)) a (new Object/1 n)]
+           (loop [^int i 0] (when (< i n) (aset a i (.get rd)) (recur (unchecked-inc-int i))))
+           (CApi/serveThread (CApi/apply f a)))
+      81 (let [v (.get Rt/named (Rt/utf8 (.rdBytes rd (unchecked-int (.rd32 rd)))))]
+           (CApi/serveThread (if (nil? v) (CApi/answer 78 nil) (CApi/answer 82 v))))
+      (throw (Rt/internal (java-str "the C API: a C thread's message " (.-op rd))))))
+  ;; ---- (queue 527) Marshal of the C's custom blocks (extern_custom, intern's CODE_CUSTOM_LEN): the operations' serialize and
+  ;; deserialize run by the server ('S', 'D'), as ocamlopt's runtime calls them; at any depth (a callback may marshal), the reply's
+  ;; nodes in the call's session or, outside a call, one of its own
+
+  ;; the C custom block c's operations' serialize: Object/1 [its bytes, Long the 32-bit size, Long the 64-bit size], nil when its
+  ;; operations have none
+  (method ^:public ^:static serialize [^Custom c]
+    (if (not (CApi/open))
+      nil
+      (let [top (== depth 0)]
+        (when top (set! nodes (ArrayList.)) (set! ids (IdentityHashMap.)))
+        (try
+          (let [o (ByteArrayOutputStream.)]
+            (CApi/u8 o 83)
+            (CApi/u64 o (.-addr (cast CBlock (.-v c))))
+            (let [rd (CApi/exchange o)]
+              (switch (.-op rd)
+                78 nil
+                82 (let [b (.rdBytes rd (unchecked-int (.rd32 rd))) s32 (.rd64 rd) s64 (.rd64 rd)]
+                     (new Object/1 [b (Long/valueOf s32) (Long/valueOf s64)]))
+                (CApi/serve rd "caml_serialize" false))))
+          (finally (when top (set! nodes nil) (set! ids nil)))))))
+
+  ;; a custom block of the operations the C registered under the identifier name, deserialized from src's bytes [pos, end) (expected
+  ;; the size recorded): Object/1 [the block, Long the size deserialize returned, Long the bytes it read], nil when none is registered
+  (method ^:public ^:static deserialize [^String name ^byte/1 src ^int pos ^int end ^long expected]
+    (if (not (CApi/open))
+      nil
+      (let [top (== depth 0)]
+        (when top (set! nodes (ArrayList.)) (set! ids (IdentityHashMap.)))
+        (try
+          (let [o (ByteArrayOutputStream.)]
+            (CApi/u8 o 68)
+            (CApi/bytes o (.getBytes name java.nio.charset.StandardCharsets/ISO_8859_1))
+            (CApi/u32 o (long (unchecked-subtract-int end pos)))
+            (.write o src pos (unchecked-subtract-int end pos))
+            (CApi/u64 o expected)
+            (let [rd (CApi/exchange o)]
+              (switch (.-op rd)
+                78 nil
+                82 (let [v (.get rd) size (.rd64 rd) used (.rd64 rd)]
+                     (new Object/1 [v (Long/valueOf size) (Long/valueOf used)]))
+                (CApi/serve rd "caml_deserialize" false))))
+          (finally (when top (set! nodes nil) (set! ids nil)))))))
 
   ;; ---- the call
 

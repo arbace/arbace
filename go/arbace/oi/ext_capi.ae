@@ -25,6 +25,21 @@
     (defer ((fn [] (set! (.-fiber th) fb))))
     (.ApplyN th f args)))
 
+(go/func NewCThread "NewCThread is the thread of a C thread registered with the runtime in the domain dom (caml_c_thread_register_in_domain,
+queue 530): a thread of that domain as Thread.create's, its own Thread.t, counted among the goroutines running OCaml code (the others
+then give up the lock at their polls); nil when no domain dom runs. The caller holds the interpreter's lock.\n"
+  ^{:tag (* Thread)} [^int dom]
+  (let [(values d ok) (aget runningDomains dom)]
+    (when (not ok)
+      (return nil))
+    (inc! threadSeq)
+    (.Add domainsRun 1)
+    (addr (lit Thread :Dom d :sys (Tuple threadSeq)))))
+
+(go/method EndCThread "EndCThread ends a C thread's registration (caml_c_thread_unregister); the caller holds the interpreter's lock.\n"
+  [^{:tag (* Thread)} th]
+  (.Add domainsRun -1))
+
 (go/var ^{:tag (func [(* Custom)] [(slice byte) uint64 uint64 bool]) :doc "CustomSerialize, when set (go/arbace/oicapi), is a C stub's custom block's serialization: its bytes and the sizes its\noperations' serialize gives (32-bit and 64-bit), ok false for a block without one.\n"}
   CustomSerialize)
 
@@ -44,3 +59,47 @@
         (while (and (== (.Load (aget sigArrived sig)) seen) (.Before (time/Now) until))
           (time/Sleep (* 100 time/Microsecond)))))
     nil))
+
+;; ---- gc_ctrl.h's counters and the C's allocations (queue 523, DECISION 516-2 (a) and 520-3 (a): c-api/alloc_async) ----
+;; A block a stub allocates (caml_alloc and the rest, in the boundary's memory) is counted as oi counts OCaml's allocations (allocV:
+;; Gc's words, the simulated minor heap, which an overflow collects), and drives the simulated major heap's cycles: a cycle ends each
+;; time the stubs have allocated a minor heap's worth of words (Gc's minor_heap_size) since the last; its end is a major cycle's for the
+;; finalisers (major_gc.c's cycle end, caml_final_update_*): Go's collection runs and its finalisers are waited for (finCollect), so
+;; that the values found unreachable are fired, and their functions run at the first poll of OCaml's code after the stub returns
+;; (finPending: the thread's tick), not in the C. Divergence: OCaml's own allocations do not drive the simulated major cycles (Go's
+;; collections stand for them in Gc's major_collections, as before).
+
+(go/var ^{:tag int :doc "cMajorUsed is the words the stubs allocated since the simulated major heap's last cycle end.\n"} cMajorUsed)
+(go/var ^{:tag int :doc "cMajorCycles is the simulated major heap's cycles the stubs' allocations ended (counted in Gc's major_collections).\n"} cMajorCycles)
+
+(go/func CAlloc "CAlloc counts a block of wosize words a C stub allocated (queue 523): Gc's words and the simulated minor heap (allocV), and
+the simulated major heap's cycle, whose end fires the finalisers of the values unreachable (finCollect), run at the next poll.\n" [^int wosize]
+  (allocV nil wosize nil)
+  (set! cMajorUsed + (+ wosize 1))
+  (when (< cMajorUsed (AsInt (aget gcControl 0)))
+    (return))
+  (set! cMajorUsed 0)
+  (inc! cMajorCycles)
+  (let [before (.-NumGC (memStats))]
+    (finCollect)
+    (set! gcAbsorbed + (- (conv int (.-NumGC (memStats))) (conv int before)))))
+
+(go/func GcCount "GcCount is gc_ctrl.h's counter k as the C reads it (queue 523; Gc.quick_stat's values, live): 0 major cycles completed
+(caml_major_cycles_completed, caml_stat_major_collections), 1 the heap's words, 2 the top heap's words, 3 the heap's chunks, 4 the minor
+words, 5 the promoted words, 6 the major words, 7 the minor collections; another k is 0.\n" ^int [^int k]
+  (let [s (assert (* Block) (gcStat))
+        at (fn ^int [^int i]
+             (type-switch [x (aget (.-F s) i)]
+               (case [int] (return x))
+               (case [float64] (return (conv int x))))
+             0)]
+    (switch k
+      (case [0] (return (at 4)))
+      (case [1] (return (at 5)))
+      (case [2] (return (at 14)))
+      (case [3] (return (at 6)))
+      (case [4] (return (at 0)))
+      (case [5] (return (at 1)))
+      (case [6] (return (at 2)))
+      (case [7] (return (at 3))))
+    0))

@@ -55,6 +55,8 @@ arbace_crop_paths=(
   go/arbace/hs.ae 'go/arbace/hs/*'
   # x86i's (the x86-64 integer machine, AX5) and the frame of the machine emulators it runs on, a light driver (AXS51 (a))
   go/arbace/x86i.ae 'go/arbace/x86i/*' go/arbace/emu.ae 'go/arbace/emu/*' go/arbace/a64i.ae 'go/arbace/a64i/*'
+  # ci's functions of machine code on x86i (queue 522c): imported by tools/cirun and cf2g's programs, not by the executable's ci
+  go/arbace/cix86.ae 'go/arbace/cix86/*'
   # wai's (the Wasm engine, a light driver; WAS6 (a), WA4)
   go/arbace/wai.ae 'go/arbace/wai/*'
   # pyi's lazy modules (queue 208, 209, 215: the C library host, _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a))

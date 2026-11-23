@@ -7944,3 +7944,151 @@ tarball by Arbace's C, at check time; CPython's recorded trees moved to the orac
   3,736 of 3,736 files in `:lines` and in `:full` (samples, stdlib, site-packages, lib-test, lex-errors, syntax-errors), the 3,846
   mutants of each mode equal CPython 3.14.10 live; a planted native-parser bug (parser.ae's conjunction an Or) fails control.py
   and fnmatch.py in own mode. independence.edn: parse-check's 5,724 cases and the 256 syntax-errors cases without a stated error 1.
+
+## As built: py-capi-1122, the C API natives test_capi's modules reach (2026-11-22, the burst's py-capi stream)
+
+The deferred `:capi-port` (the C API's natives not provided yet) on P1's py-eval-1122 head (9a2b7842a, its executable
+b2a5b50d4819; `go/arbace/pyctypes` is a lazy package, interpreted from the checkout, so no build). Before-run: `bin/pyi check
+--only test_capi` (`PYI_RUNNER=python3`), test_capi 746 of 1,328 pass, `:capi-port` 169, failing 25 (the six "fatal error: out of
+memory" crashes are the run's `ulimit -v 8 GiB`, passes in the record; test_number's three DeprecationWarnings fail only in the
+module's whole run, as do test_run's ten, P1's natives: not this stream's). Proof: `bin/pyi check --only` of those 188 methods
+(the crashes left out), the three controls failing as they must: 102 of the 169 pass, no new failure but test_misc's
+Test_testcapi.test_weakref_capi (a segmentation fault where the native was missing: classed by name).
+
+- **Mapping and dict** (capi_more): the string-keyed forms decode the key as PyUnicode_FromString (its UnicodeDecodeError
+  propagates) and a NULL is null_error's SystemError; PyMapping_HasKey and the rest take only KeyError for absent, the unraisable
+  forms by their own messages; the dict natives take a subclass's instance (PyDict_Check); PyDict_Update and Merge read a dict
+  whose `__iter__` is dict's in place (dict_merge's fast path: a subclass's `__getitem__` not called); PyDict_GetItem(String)
+  report a hash or decode error as unraisable, the hash's own message.
+- **Objects and bytes**: PyObject_Repr and Str give `__repr__`/`__str__`'s result as it is (a str subclass's instance kept),
+  ASCII the repr itself when it is ASCII; PyObject_Bytes takes `__bytes__` (a bytes subclass kept, anything else a TypeError),
+  PyBytes_FromObject refuses an int and a str; PyBytes_Concat(AndDel) over two C-contiguous buffers (NULL w clears), PyBytes_Repr
+  with smartquotes; PyByteArray_Concat over buffers, its FromStringAndSize and Resize past 2**40 a MemoryError.
+- **Unicode**: ensure_unicode's TypeError for split, partition, replace, splitlines, count, find, findchar, tailmatch, contains
+  and translate; count, find, findchar and tailmatch over the code points with ADJUST_INDICES (pyi's str.count counts a lone
+  surrogate of a pair twice: the natives do not rely on it); GetLength and ReadChar's PyErr_BadArgument and ReadChar's 32-bit
+  `(Py_UCS4)-1`; EqualToUTF8(AndSize) compares the strict UTF-8 only when the sizes agree; FromWideChar, AsWideChar,
+  AsWideCharString; WriteChar on a str C holds alone; FromObject copies a subclass's instance; the AsXString encoders'
+  PyErr_BadArgument, FromEncodedObject over a buffer.
+- **Imports, longs, frames**: PyImport_GetMagicNumber is pyi's own importlib's MAGIC_NUMBER; AddModuleObject takes any hashable
+  name (an unhashable one's TypeError); PyImport_Import is `__import__` then sys.modules; ImportModuleLevel(Object)'s level and
+  globals checks; ImportFrozenModule(Object) over `_imp`; PyLong_Export, FreeExport and PyLongWriter (30-bit digits); PyLong_AsVoidPtr
+  refuses `__index__` and gives NULL on an error, FromVoidPtr keeps the handle it names; PyFrame_New.
+- **New natives** (capi_tail.go, registered last): complex (AsCComplex and Real/ImagAsDouble through `__complex__` with its
+  DeprecationWarning, `_Py_c_sum/diff/neg/prod/quot/pow/abs` with C11 Annex G's recovery and the world's errno), PyObject_Print
+  (fwrite into the FILE, musl's F_ERR flag read and cleared), PyStructSequence_NewType (a tuple subclass with its fields as
+  properties), Py_Is, PyGen_GetCode, PyCode_GetCode/Varnames/Cellvars/Freevars, PyMem_Raw*, PyObject_Calloc/Realloc,
+  PyBuffer_FromContiguous, PyThread_tss_* (one thread), PyThread_get_thread_native_id and _ident, PyUnstable_IsImmortal,
+  Py_FrozenMain (exported, reports no frozen program), PyWeakref_GetObject; PyConfig_Set (capi_config) for the sys attributes,
+  its type checks and read-only refusals.
+- **Py_BuildValue** walks the whole format on an error (every argument consumed, each N's reference stolen, the first error
+  given), O& calls the converter, D reads a Py_complex, C checks the range, a dict of an odd count is "Bad dict format".
+- **Mirrors**: a list's sync from C keeps Go's value when C's slots are as last synchronized (Python code a native ran may have
+  resized it: gh-72054's `__index__`), so the deprecated PySlice_GetIndicesEx sees the shortened list.
+
+Left in `:capi-port` (67 of test_capi's, and the other modules' rows): PyConfig_Set of sys.flags' members and int_max_str_digits
+(a new sys.flags object: pyi's flags type cannot be instantiated from a native) and of cpu_count (start-time); the weak reference
+layout (PyWeakref_GET_OBJECT); the exception state natives (PyErr_SetExcInfo, SetHandledException) and PrepReraiseStar; the
+thread natives (PyThread_allocate_lock and C threads); the bytes and str singletons a C result is compared with by `is`; the
+invalid-string checks of release builds; test_getargs' str subclass keywords; the macro PySlice_GetIndicesEx's Py_SIZE read
+after Python code ran in PySlice_Unpack.
+
+### py-capi-1122, round 2: extension modules through the import system, and more of test_capi's natives
+
+The user's decision of 2026-11-22: C extension modules are built by ci into pyi's C world and loaded through the import
+system (`:extension-modules`, 75 methods in the records night's record, by design before).
+
+- **The import system**: `_imp.extension_suffixes()` is `['.arbace-314.so']` (PEP 3149's `.CACHE_TAG.so` with pyi's cache tag
+  `arbace-314`, so no other implementation's extension file is taken for one of the world's); `_imp.create_dynamic` and
+  `exec_dynamic` are the C world's loader's, registered by go/arbace/pyctypes (`SetDynamicLoader`; core
+  go/arbace/py/builtins_capi_api) and loaded with it on the first use. An extension file is an export table: its first line
+  `pyi-c-world ctypestest`, then the world's `PyInit_` (`PyInitU_` and punycode for a non-ASCII name) functions it exports
+  (go/arbace/pyctypes/capi_dynamic: "dynamic module does not define module export function (PyInit_X)" with name and path
+  otherwise, as dlsym's miss). `tools/pyi/lib-dynload/` holds `_testsinglephase.arbace-314.so` and
+  `_testmultiphase.arbace-314.so`; bin/pyi puts the directory on sys.path after the stdlib (CPython's lib-dynload). CPython
+  3.14.10's `Modules/_testsinglephase.c` and `Modules/_testmultiphase.c` (with its clinic header) are built into the world
+  (lib.conf; key ba0de8fa, 27 min 48 s). Single-phase: the init function's module, its `__file__`, m_size -1's dictionary
+  copied for a later load (import_find_extension's m_copy); multi-phase: PyModule_FromDefAndSpec2's create part (the slots
+  checked: unknown IDs, two create slots, two multiple-interpreters or gil slots; Py_mod_create's object, a non-module that
+  asks for state or execution slots refused), PyModule_ExecDef by exec_dynamic once; an unreported exception is the
+  SystemError's `__cause__` (_PyErr_FormatFromCause); an uninitialized definition (PyModuleDef_Init never ran:
+  `ob_type` NULL, PyModuleDef_Init now sets it and m_index) refused; PyState_FindModule/AddModule/RemoveModule by m_index.
+  The empty built-in `_testmultiphase` of PY6b is removed: the module is the world's.
+- **test_capi's natives** (capi_tail and the files they supersede): PyErr_SetString/SetObject/Restore as errors.c's
+  (`_PyErr_SetObject`'s issubclass check through `__subclasscheck__`, the "Normalization failed: type=T args=..." note,
+  PyErr_Restore's traceback), PyErr_WriteUnraisable and FormatUnraisable with err_msg None and the default hook's header on
+  sys.stderr (core: `ExtWriteUnraisableMsg`), PyUnicode_FromFormatV ported whole (flags, width, precision, `*`, the size
+  modifiers, `%c %d %i %o %u %x %X %p %s %ls %U %V %S %R %A %T %#T %N`; PyErr_Format and FormatUnraisable use it),
+  PyUnstable_Exc_PrepReraiseStar (`_PyExc_PrepReraiseStar` over BaseExceptionGroup.split by leaf identity), PyErr_SetExcInfo
+  and SetHandledException (the thread's handled exception), PyConfig_Set of sys.flags' members (a new flags object, core
+  `ExtSetSysFlag`), int_max_str_digits and cpu_count (core `ExtSetCPUCount`), the allocator domains with
+  PyMem_GetAllocator/SetAllocator (a C allocator's functions called for its domain), PyInterpreterState_Get/GetDict,
+  PyUnstable_AtExit (run by Py_EndInterpreter), PyGILState_GetThisThreadState, the code extra, `_PyObject_New(Var)` of a
+  built-in type, a set mirror for PySet_GET_SIZE (fill and used), `__ipow__` with the optional modulo on a C type.
+
+## As built: the code level without positions (2026-11-22, the main host, py-small-1122; the user's (b) of 2026-11-22)
+
+The round trip's level 3 (§5.2, "As built: PY2") compared the code compiled from the original's text and from the print's,
+normalized by `norm_code`; mode `:lines` records no positions and CPython 3.14's code generation follows them (E7 corrected:
+NOPs kept by line, superinstructions fused within a line, exception ranges and jumps split by line), so 30 files were
+`:code-lines`, by design (queue 175's DECISION (a)), and pip's `candidates.py` `:own-code-lines` under pyi's own levels (queue
+431). The user chose (b) on 2026-11-22: level 3 a compile without positions, comparing what the forms record.
+
+- **Live** (CPython; the read cell's records `test/python/roundtrip-{known,results}.edn`): `tools/pydump/codelevel.py` parses each
+  file, sets every node's `lineno`, `col_offset`, `end_lineno` and `end_col_offset` to 1, 0, 1, 0, compiles the tree and digests
+  `pydump.py`'s `norm_code` of it; `bin/repr-python`'s `code_levels` writes the TSVs with that CODE column as `level-*.tsv` in JOBS
+  processes (the helper's TSVs stay as dumped, the costs' and the records' input). Not in `pydump.py`: its digest keys every member
+  of the python-pydump packs, whose CODE column (positions included) stays the oracle's record. Recorded rows
+  (`REPR_PYTHON_RT_LEVELS=recorded`): level 3 implied by level 2 (`compare --recorded`), a compile without positions being a
+  function of the ast without attributes.
+- **Records mode** (pyi's own levels): `own-code` compiles the forms read in mode `:lines` (no positions) instead of the text read
+  in mode `:full`; `bin/pyi compile-check` compiles every corpus file's `:lines` forms already (`compile-known.edn` empty).
+- **The control** (both modes): each control pair's reference print with `__code_control__ = 0` appended (`code_mutants`, rows by
+  `codelevel.py` live; `own-mutant` in records mode): the print's row with the mutant's digests fails level 2, and with the mutant's
+  code beside the print's own ast, level 3.
+- **Proved** on the rows the change can move (a file whose ast is equal compiles to one code without positions): the 30 files and the
+  three corpora's control pairs, `--record --only-list` live and in records mode: all levels pass, the controls fail as they must;
+  roundtrip-known.edn's `:code-lines` and roundtrip-own-known.edn's `:own-code-lines` empty (kept, their texts saying so). An
+  `--only-list` record no longer rewrites `roundtrip-costs.edn`. The read cell: 3,702 to 3,732 passes, by design 34 to 4.
+
+## As built: the moment at a frame's return, gated (2026-11-22, the main host, py-small-1122; the user's (b) of 222's DECISION 1)
+
+"As built: 222" left the moment at `del` alone (DECISION 1 (a) then); the user chose (b) on 2026-11-22: finalization at a frame's
+return, gated so that it costs about nothing while no object with a finalizer waits, measured against the 3% budget.
+`synth/datamodel/del.py` was its case: `[C(1) for _ in [0]] and None` drops a list whose element has a `__del__` inside a lambda,
+and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it at exit (`:finalization`, `:finalization-goi`).
+
+- **The notes** (`go/arbace/py/finalize.go`): an instance whose class has a `__del__` (`trackDel`, from `objectNew` and
+  `wrapInstance`) is noted on its thread with the depth of the frame that made it (`finPendAdd`; `Thread.finPend`, at most 32, and
+  `Thread.finPendDepth`, the deepest note's depth, 0 for none).
+- **The gate** (`eval.go`'s loop, both return paths: every Python frame's return, compiled or on the loop, goes through it):
+  `t.finPendDepth > t.depth` after the depth's decrement, one load and a compare. `__init__`'s own return does not open it (the
+  instance was made at its caller's depth).
+- **The check** (`finAtReturn`): not within a drain (a finalizer's own frames), the gate shut while it runs; goi's slots scrubbed
+  (`scrubSlots`, dropGen's); `runtime.GC()` and `finBarrier` (done once every note of the returned depth moved), the drain, rounds while a
+  finalized note's weak references are left (finVerify's); then `finPendSettle`: a dead note (its record gone or its `__del__` run)
+  dropped, a survivor noted at the caller's depth, at most 3 checks; the time on finSpent's budget (50 ms and a tenth of the wall
+  time, the moment at del's), past it the notes dropped.
+- **Files keep the collection's moment** (`classInfo.delNote`): the first measure found every `open()` and every import's
+  `FileIO` and `BufferedReader` noted (pyi's `_io` is `_pyio`, whose `IOBase.__del__` they inherit): 11 to 23 forced collections at
+  a benchmark's start (GODEBUG=gctrace=1) and +6.9% compiled, +4.0% on the loop (wall, least of 5). A class whose `__del__` is
+  `_pyio`'s is tracked as before and not noted: the benchmarks' runs then have base's collections exactly (bm_chaos 3 with 1
+  forced, bm_float 3 with 1, bm_generators 3 with 0).
+- **The cost** (the 10 benchmarks of 222's table, each compiled by `bin/pyi aot` at base and at the branch, run back to back,
+  base first on odd rounds, 10 rounds, the least; the host loaded, 50-70 on 64 CPUs, so a benchmark's ratio moves by up to 10%):
+
+| sum of the 10 | base ms | branch ms | branch / base |
+|---|---:|---:|---:|
+| compiled, wall | 12,580 | 12,950 | 1.029 |
+| compiled, CPU | 13,120 | 13,469 | 1.027 |
+| the loop, wall | 14,534 | 14,416 | 0.992 |
+| the loop, CPU | 15,130 | 15,080 | 0.997 |
+
+  Under the 3% budget; with no collection added, what is left is the compare (noise beside it).
+- **Proved**: `bin/pyi check --aot --no-pyi --only-list` over del.py and the corpus's programs that make objects with a `__del__`
+  (asyncio's loop: synth/constructs/async.py, synth/paths/async-gen-aclose.py, samples/functions.py; no other program of the corpus
+  defines or imports one): 4 of 4 pass, del.py by its golden text compiled and on the loop; the negative control fails as it must.
+  test_gc, test_weakref and test_finalization by `bin/pyi check --aot --lib-test --fresh --only` at base and at the branch: 194 pass,
+  63 classed, 0 failing both, every row the same (test_trashcan_threads' counts aside, a failure both times). The AOT record's
+  del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
+  build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.

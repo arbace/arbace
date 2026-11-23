@@ -11,7 +11,8 @@
             [arbace.repr.haskell.rename :as rn]
             [arbace.repr.haskell.typecheck :as tc]
             [arbace.repr.haskell.tostg :as tostg]
-            [arbace.repr.haskell.ownface :as ownface])
+            [arbace.repr.haskell.ownface :as ownface]
+            [arbace.repr.haskell.thsplice :as th])
   (:import [java.io File]))
 
 (defn- parse-args [args]
@@ -117,11 +118,85 @@
     (let [{:keys [stop order]} @state]
       (if stop {:stop stop} {:order order}))))
 
+(def ^:dynamic *th*
+  "T13688 (hs-r7): how a quasi-quote's splice is run, {:hsi PATH :libs [DIR...] :image DIR-or-nil} (-main's --hsi,
+  --hsi-libs, --hsi-image: the libraries hsi runs programs over, the front end's own), or nil: a quasi-quote stops the
+  module as before"
+  nil)
+(def ^:dynamic *prog-dir* "The program's directory, the modules' source paths relative to it" nil)
+(def ^:dynamic *flags* "The program's reader flags" [])
+
+(declare compile-module)
+
+(defn- sh-quote [x] (str "'" (str/replace (str x) "'" "'\\''") "'"))
+
+(defn- th-expand!
+  "T13688 (hs-r7): the module dump's quasi-quotes run (GHC.Rename.Splice's runRnSplice, the external interpreter's way): a
+  generated Main (arbace.repr.haskell.thsplice/gen-source: the module's imports, each quote's runQ value printed) read and
+  compiled by this front end over the same interfaces, the program's modules compiled before this one (the quoter's, GHC's
+  stage restriction) and their STG beside its own, run on hsi over the same libraries; each printed value read back,
+  converted (GHC.ThToHs) and put in its quasi-quote's place in the dump. nil (nothing to do, or done), or [stage message]"
+  [dump w nm srcfile ifaces pool units]
+  (let [text (slurp dump)]
+    (when (str/includes? text "HsQuasiQuote")
+      (let [forms (read-string (str "[" text "]"))
+            qqs (vec (th/quasi-quotes forms))]
+        (when (seq qqs)
+          (if-not (and *th* *prog-dir*)
+            [:rename (str (count qqs) " quasi-quote(s): no hsi to run their splices (front build's --hsi)")]
+            (let [gw (str w "/th/" (str/replace nm #"[^A-Za-z0-9_.]" "_"))
+                  _ (.mkdirs (File. ^String (str gw "/nd")))
+                  src (slurp (File. ^String *prog-dir* ^String srcfile))
+                  gf (File. ^String gw "Gen.hs")
+                  _ (spit gf (th/gen-source forms src qqs))
+                  gdump (str gw "/nd/Gen.hs.edn")
+                  gout (str gw "/out")
+                  rd (read-module gf "Gen.hs" *flags* gdump gw "Gen.hs")]
+              (if rd
+                [:rename (str "the splices' program: " (second rd))]
+                (let [cr (try (compile-module gdump gw "Gen.hs" "Gen.hs" ifaces pool units gout "gen" false "main")
+                              (finally (swap! tostg/lib-data dissoc "Main")))]
+                  (if (vector? cr)
+                    [:rename (str "the splices' program: " (name (first cr)) " " (second cr))]
+                    (let [pd (str gout "/stg/gen")
+                          ;; the program's modules compiled before (the quoter's), their STG beside the generated Main's
+                          _ (doseq [[m {:keys [unit file]}] units :when (and (= "main" unit) file (.isFile (File. ^String file)))]
+                              (spit (str pd "/" m ".stg.ae") (slurp file)))
+                          {:keys [hsi libs image]} *th*
+                          mem (Long/parseLong (or (System/getenv "HSI_TH_MEM_GIB") "6"))
+                          cmd (str "ulimit -v " (* mem 1048576) "; ulimit -t 60; exec env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME=" (sh-quote gw)
+                                   " GOMEMLIMIT=" (* mem 768) "MiB timeout -s KILL 180 " (sh-quote hsi) " run"
+                                   (apply str (map #(str " --lib " (sh-quote %)) libs))
+                                   (when image (str " --image " (sh-quote image)))
+                                   " --prog " (sh-quote pd) " --name Main -- < /dev/null 2> " (sh-quote (str gw "/run.err")))
+                          pb (ProcessBuilder. ^java.util.List ["sh" "-c" cmd])
+                          _ (.directory pb (File. ^String gw))
+                          p (.start pb)
+                          outs (slurp (.getInputStream p))
+                          st (.waitFor p)
+                          lines (vec (remove str/blank? (str/split-lines outs)))]
+                      (spit (str gw "/run.out") outs)
+                      (if (or (not= 0 st) (not= (count lines) (count qqs)))
+                        [:rename (str "the splices' program on hsi: status " st ", " (count lines) " of " (count qqs) " values ("
+                                      (let [e (slurp (str gw "/run.err"))] (subs e 0 (min 160 (count e)))) ")")]
+                        (try
+                          (let [vals (mapv th/read-shown lines)
+                                new (th/substitute forms (fn [i ctx]
+                                                           (let [{:keys [span]} (nth qqs i) v (nth vals i)]
+                                                             (case ctx
+                                                               :pat (th/cvt-pat v span)
+                                                               :exp (th/cvt-exp v span)
+                                                               (throw (ex-info (str "thsplice: a " (name ctx) " splice not converted") {}))))))]
+                            (spit dump (binding [*print-length* nil *print-level* nil] (str (str/join "\n" (map pr-str new)) "\n")))
+                            nil)
+                          (catch Throwable e [:rename (str "the splices' values: " (msg e))]))))))))))))))
+
 (defn- compile-module
   "One module through rename, elaboration and STG; pool the program's own modules' interfaces (written into it when
   WRITE-IFACE), units the libraries' {MODULE {:unit :file}} with the program's modules compiled before it: {:r :rr} or
   [stage message]"
   [dump w nm srcfile ifaces pool units out base write-iface & [main-fn]]
+  (or (th-expand! dump w nm srcfile ifaces pool units)
   (let [local (str w "/ifl/" nm)
         dirs (if pool (vec (cons pool ifaces)) ifaces)
         rr (try (binding [rn/*ifdirs* (vec (cons local dirs)) rn/*main-fn* (or main-fn "main")]
@@ -163,7 +238,7 @@
                     {:r r :rr rr})))
             (catch Throwable e
               (when (System/getenv "REPR_HASKELL_FRONT_TRACE") (.printStackTrace e))
-              [:stg (msg e)])))))))
+              [:stg (msg e)]))))))))
 
 (defn build-one
   "FILE (a path) through the front end into OUT; [stage message] when a stage stops it, else [:ok n-errors]. The
@@ -186,6 +261,7 @@
         w (str out "/" base)
         nd (str w "/nd")
         pool (str w "/pool")]
+    (binding [*prog-dir* dir *flags* flags]
     (.mkdirs (File. ^String nd))
     (let [main-dump (str nd "/" nm ".edn")
           read-ok (read-module f nm flags main-dump dir nm)]
@@ -210,7 +286,7 @@
                           r
                           (recur more (assoc units m {:unit "main" :file (str out "/stg/" base "/" m ".stg.ae")}))))))
                   ;; the program's modules are no library's: tostg's constructor cache (by module name) forgets them
-                  (finally (swap! tostg/lib-data #(apply dissoc % @locals)))))))))))
+                  (finally (swap! tostg/lib-data #(apply dissoc % @locals))))))))))))
 
 (defn -main
   "build --ifaces DIR,... --libs DIR,... [--libdir DIR [--sysroot DIR]] -o OUT [--flags \"-XHaskell2010 ...\"] [--plan FILE] FILE.hs[@NAME]...: each program
@@ -227,7 +303,11 @@
         ;; a module needs it)
         inst (when-let [ld (get opts "--libdir")]
                (let [sr (get opts "--sysroot")]
-                 (delay [sr (binding [cpp/*sysroot* sr] (drv/installation ld))])))]
+                 (delay [sr (binding [cpp/*sysroot* sr] (drv/installation ld))])))
+        ;; T13688 (hs-r7): --hsi PATH --hsi-libs DIR,... [--hsi-image DIR]: quasi-quotes' splices run on hsi
+        th-cfg (when-let [h (get opts "--hsi")]
+                 {:hsi h :libs (vec (remove empty? (str/split (or (get opts "--hsi-libs") "") #",")))
+                  :image (get opts "--hsi-image")})]
     (case verb
       "build" (do (doseq [[f flags] (concat (for [f pos] [f flags])
                                            ;; --plan FILE (bin/hsi check --front native, HFS-I1 (a)): a program a line,
@@ -237,7 +317,7 @@
                                                    :let [[f fl] (str/split l #"\t" 2)]]
                                                [f (vec (remove empty? (str/split (or fl "") #"\s+")))])))]
                     (let [t0 (System/currentTimeMillis)
-                          [st m] (try (binding [*inst* inst] (build-one f out ifaces units flags)) (catch Throwable e [:crash (msg e)]))
+                          [st m] (try (binding [*inst* inst *th* th-cfg] (build-one f out ifaces units flags)) (catch Throwable e [:crash (msg e)]))
                           nm (or (second (str/split f #"@" 2)) (str/replace (.getName (File. ^String f)) #"\.l?hs$" ""))]
                       (println nm (name st) (if (= st :ok) "" m) (str "(" (quot (- (System/currentTimeMillis) t0) 100) "ds)"))
                       (flush)))

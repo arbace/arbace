@@ -18,6 +18,7 @@ import (
 	"runtime/debug"
 
 	"arbace/ci"
+	_ "arbace/cix86" // functions of machine code run on x86i (queue 522c)
 	"arbace/crt"
 )
 

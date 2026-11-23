@@ -118,7 +118,13 @@
              ;; parameter list, `template<typename...> class _Tp`)
              (or (:isParameterPack k)
                  (let [t (first (str/split (or (node-text k) "") #"=" 2))
-                       t (if (= "TemplateTemplateParmDecl" (:kind k)) (subs t (inc (long (or (str/last-index-of t ">") -1)))) t)]
+                       t (if (= "TemplateTemplateParmDecl" (:kind k)) (subs t (inc (long (or (str/last-index-of t ">") -1)))) t)
+                       ;; (cpp-rt-own4, the code generator: nor in a non-type parameter's type's template arguments, <optional>'s
+                       ;; `enable_if_t<is_constructible_v<_Tp, _Args...>, bool> = false` is no pack: TpTn... JE before, clang's
+                       ;; Tn...Lb0E)
+                       t (if (and (= "NonTypeTemplateParmDecl" (:kind k)) (not (sema/checking?)))
+                           (loop [t t] (let [u (str/replace t #"<[^<>]*>" "")] (if (= u t) t (recur u))))
+                           t)]
                    (re-find #"\.\.\." t)))
              (assoc :pack true))))))
 
@@ -247,6 +253,47 @@
   (let [v (mod (bigint x) two64)]
     (if (<= v 9223372036854775807) (long v) v)))
 
+;; cpp-rt-own4 (the code generator): a 128-bit integer's constant in the text, {:k :w128 :v exact :u unsigned?}, exact modulo
+;; 2^128 ([conv.integral]/3), made by a cast to __int128 or unsigned __int128 (cast-named, cast-to) and kept apart from the
+;; 64-bit representation: the comparisons, ! && || ?:, unary - and ~, + - * and the shifts of fold-w128 compute it; its value
+;; never leaves the text (eval-text refuses one as its result), so only what it decides does: <type_traits>'
+;; __is_signed_helper's `_Tp(-1) < _Tp(0)` of __int128 and unsigned __int128 (floating_to_chars.cc's __to_chars_i of the
+;; 128-bit mantissa, is_signed<unsigned __int128>). The checker refuses a 128-bit constant as before (cpp-s5b).
+(def ^:private two128 (* 18446744073709551616N 18446744073709551616N))
+(defn- w128? [x] (and (map? x) (= :w128 (:k x))))
+(defn- w128
+  "The 128-bit constant of the exact integer `x` in the signed or unsigned 128-bit type."
+  [x u]
+  (let [m (mod (bigint x) two128)]
+    {:k :w128 :v (if (and (not u) (>= m (quot two128 2))) (- m two128) m) :u (boolean u)}))
+(defn- exact-int
+  "A constant's exact integer: a w128's value, an unsigned 64-bit BigInt's, a long."
+  [x]
+  (cond (w128? x) (:v x) (instance? arbace.lang.BigInt x) x :else (bigint (long x))))
+
+(defn- fold-w128
+  "fold of an operator one of whose operands is a w128 (the others integers): the usual arithmetic conversions to the 128-bit
+  type, unsigned when one operand is unsigned __int128 ([expr.arith.conv]/1.5), exact; another operator a refusal."
+  [o args]
+  (let [u (boolean (some #(and (w128? %) (:u %)) args))
+        [a b c] args
+        va (exact-int a) vb (when (some? b) (exact-int b))
+        cv (fn [x] (:v (w128 x u)))]
+    (case o
+      "!" (if (zero? va) 1 0)
+      "?" (if (zero? va) c b)
+      "&&" (if (and (not (zero? va)) (not (zero? vb))) 1 0)
+      "||" (if (or (not (zero? va)) (not (zero? vb))) 1 0)
+      "<" (if (< (cv va) (cv vb)) 1 0) ">" (if (> (cv va) (cv vb)) 1 0)
+      "<=" (if (<= (cv va) (cv vb)) 1 0) ">=" (if (>= (cv va) (cv vb)) 1 0)
+      "==" (if (== (cv va) (cv vb)) 1 0) "!=" (if (== (cv va) (cv vb)) 0 1)
+      "neg" (w128 (- va) u) "~" (w128 (- -1 va) u)
+      "+" (w128 (+ va vb) u) "-" (w128 (- va vb) u) "*" (w128 (* va vb) u)
+      "<<" (if (<= 0 vb 127) (w128 (* va (bigint (.pow (java.math.BigInteger/valueOf 2) (int vb)))) u) (fail :template "a shift by " vb " in a constant expression"))
+      ">>" (if (<= 0 vb 127) (w128 (bigint (.shiftRight (.toBigInteger ^arbace.lang.BigInt (bigint (cv va))) (int vb))) u)
+               (fail :template "a shift by " vb " in a constant expression"))
+      (fail :template "the operator " o " on a 128-bit constant"))))
+
 (defn- fold
   "An operator applied to constants: its value, or (an operand dependent) the expression {:k :texpr :o o :args [...]}.
   The values are exact integers, one representation (review 1111 #3, cpp-s5b): a long, or an unsigned 64-bit value above
@@ -257,6 +304,7 @@
   exceptions (review 1111 #5)."
   [o args]
   (cond
+    (and (some w128? args) (every? #(or (w128? %) (and (number? %) (not (float? %)))) args)) (fold-w128 o args)
     (not (every? number? args)) {:k :texpr :o o :args (vec args)}
     ;; (gf-cpp: a floating operand, a floating literal's double, makes the operation a double's, the usual arithmetic
     ;; conversions' ([expr.arith.conv]/1.2-1.3): + - * / and the comparisons; ! && || ?: test it against zero; the integer
@@ -303,7 +351,10 @@
   "A constant converted to a builtin integral type named by its words (bool: 0 or 1; the others kept, the slice's
   values fitting)."
   [^String ty v]
-  (cond (map? v) {:k :texpr :o "cast" :type ty :args [v]}
+  (cond (and (w128? v) (not (str/includes? ty "__int128")) (not (str/includes? ty "float")) (not (str/includes? ty "double")))
+        (cast-to ty (let [x (mod (:v v) two64)] (if (<= x 9223372036854775807) (long x) x)))
+        (w128? v) (if (str/includes? ty "__int128") (w128 (:v v) (str/includes? ty "unsigned")) (fail :template "a 128-bit constant converted to " ty))
+        (map? v) {:k :texpr :o "cast" :type ty :args [v]}
         (str/starts-with? ty "bool") (if (falsy? v) 0 1)
         ;; (gf-cpp: a floating type's value a double, float's rounded to float; long double's held as a double)
         (= ty "float") (double (float (dbl v)))
@@ -315,7 +366,9 @@
         (#{"int" "signed" "signed int"} ty) (long (unchecked-int (lng v)))
         (#{"unsigned" "unsigned int"} ty) (bit-and (lng v) 0xffffffff)
         ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal, never computed modulo 2^64)
-        (str/includes? ty "__int128") (fail :template "a constant of type " ty)
+        (str/includes? ty "__int128") (if (and (not (sema/checking?)) (or (number? v) (w128? v)) (not (float? v)))
+                                        (w128 (exact-int v) (str/includes? ty "unsigned"))
+                                        (fail :template "a constant of type " ty))
         ;; (review 1111 #3: unsigned long (long) as unsigned long long's value, fold's representation)
         (str/includes? ty "unsigned") (u64 (lng v))
         :else (lng v)))
@@ -685,11 +738,19 @@
                           (= x close) (if (= 1 d) (str/join " " (map second (subvec ts start (dec @pos)))) (recur (dec d)))
                           :else (recur d))))))]
     (letfn [(cast-named [nm v]
-              (let [ty (abi/unq (sema/resolve-type scope nm))]
-                (cond (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
+              (let [ty (abi/unq (sema/resolve-type scope nm))
+                    wide? (and (abi/integral? ty) (> (* 8 (long (abi/size-of ty))) 64))]
+                (cond (and (w128? v) (not (dependent? ty)))
+                      (cond wide? (w128 (:v v) (not (abi/signed? ty)))
+                            (= :bool (:n ty)) (if (zero? (:v v)) 0 1)
+                            (abi/integral? ty) (cast-named nm (let [x (mod (:v v) two64)] (if (<= x 9223372036854775807) (long x) x)))
+                            :else (fail :template "a 128-bit constant expression " s))
+                      (or (map? v) (dependent? ty)) {:k :texpr :o "cast" :type ty :args [v]}
                       (= :bool (:n ty)) (if (falsy? v) 0 1)
                       ;; (cpp-s5b: a 128-bit type's constant is not evaluated in the text, a refusal)
-                      (and (abi/integral? ty) (> (* 8 (long (abi/size-of ty))) 64)) (fail :template "a 128-bit constant expression " s)
+                      ;; (cpp-rt-own4, the code generator: an exact w128, fold-w128's)
+                      (and wide? (not (sema/checking?)) (not (float? v))) (w128 (exact-int v) (not (abi/signed? ty)))
+                      wide? (fail :template "a 128-bit constant expression " s)
                       ;; (an unsigned 64-bit type's value as fold's: modulo 2^64, a BigInt above Long/MAX_VALUE)
                       (abi/integral? ty) (let [b (* 8 (abi/size-of ty))]
                                            (if (>= b 64) (if (abi/signed? ty) (lng v) (u64 (lng v)))
@@ -843,6 +904,8 @@
                     :else l))))]
       (let [v (expr 0)]
         (when (< (long @pos) (count ts)) (fail :template "constant expression " s))
+        ;; (cpp-rt-own4: a 128-bit constant does not leave the text, fold-w128)
+        (when (w128? v) (fail :template "a 128-bit constant expression " s))
         ;; (review 1111 #3: outside the text a value is its 64-bit pattern, a long, as sema's ce-wrap gives it)
         (if (u64? v) (lng v) v)))))
 
@@ -1070,6 +1133,28 @@
                    (and (< (count tps) (count aps)) (not (sema/new-ttp-matching?)))
                    (some #(nil? (:default %)) (subvec aps (count tps)))))))))
 
+(defn- cx-class-targ
+  "Queue 518 (the checker): a non-type template argument naming a variable of class type, a converted constant expression of
+  the parameter's type `pt` ([temp.arg.nontype]/1, [expr.const]/12): the variable converted by its conversion function and
+  evaluated (its initializer analyzed first when not yet, global-init's), or a refusal: no conversion function, an ill-formed
+  initializer, a value no constant (cpp0x/pr78765.C's `ValueTypeInfo<var>` of `static constexpr ValueType var = 0;`, which had
+  read the initializer's 0 as the argument). Nil when `f` names no such variable."
+  [scope f pt]
+  (when (and (sema/checking?) (symbol? f) (nil? (namespace f)) (map? pt))
+    (when-let [e (first (filter #(= :var (:e %)) (sema/lookup scope (name f))))]
+      (let [vid (:id e) v (sema/var* vid)]
+        (when (and (map? (:ty v)) (abi/class? (abi/unq (:ty v))))
+          (when (and (nil? (:ginit v)) (:init v))
+            (let [i (try (sema/global-init vid)
+                         (catch arbace.lang.ExceptionInfo _
+                           (fail :template "not a constant: " (name f) " (its initializer is ill-formed)")))]
+              (#'sema/upd-var! vid assoc :ginit i)))
+          (let [x (sema/user-conv {:scope scope} {:op :var :id vid :ty (:ty v) :cat :lv} pt false)
+                c (sema/ce-try x true)]
+            (if (and (map? c) (= :int (:op c)) (number? (:v c)))
+              (:v c)
+              (fail :template "not a constant: " (name f) " (an object of class type converted)"))))))))
+
 (defn resolve-arg
   "A template argument's form for the parameter `p` in `scope`."
   [scope p f & [pscope]]
@@ -1093,7 +1178,7 @@
     (let [pt (param-type (or pscope scope) p)]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
-        (value-arg (const-form scope f) (:name p) pt)))))
+        (value-arg (if-some [c (cx-class-targ scope f pt)] c (const-form scope f)) (:name p) pt)))))
 
 (defn- node-arg
   "A TemplateArgument node's argument for the parameter `p` (an explicit specialization's)."
@@ -2093,7 +2178,7 @@
       ;; members)
       (let [drops0 (.get ^java.util.concurrent.atomic.AtomicLong sema/drop-count)]
       (try
-        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid)]
+        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid) sema/*in-signature* false]
           (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
         ;; (queue 487, the checker: an instance whose definition refused stays cached unfinished, its implicit members never
         ;; declared; marked, so that a later default-initialization of it -- the use whose instantiation refused, its type
@@ -2379,7 +2464,21 @@
   err_template_recursion_depth_exceeded)."
   0)
 
-(declare instantiate-class* select-instance! incomplete-instance!)
+(declare instantiate-class* select-instance! incomplete-instance! lazy-instance! drop-layouts!)
+
+(def ^:dynamic *inst-stack*
+  "cpp-rt-own4: the class templates whose specializations are being instantiated, outermost first (a vector of ids)."
+  [])
+
+(defn- lazy-here?
+  "cpp-rt-own4 (the code generator): whether a specialization of `tid` named here is named lazily, not instantiated: in a
+  member function's type (sema's *in-signature*, [temp.inst]/2: naming a specialization there does not instantiate it)
+  while two instantiations of the same template are under way. <valarray>'s _Expr<_Clos, _Tp> declares `_Expr<_UnClos<
+  __unary_plus, std::_Expr, _Clos>, value_type> operator+() const`, each specialization naming the next: clang instantiates
+  none of them until one is used, the analysis had instantiated them until its stack ended (valarray.cc's gslice)."
+  [tid]
+  (and sema/*in-signature* (not (sema/checking?))
+       (>= (count (filter #(= tid %) *inst-stack*)) 2)))
 
 (defn instantiate-class
   "The class of the class template `tid` for the complete arguments `args`: an explicit specialization's, the most
@@ -2421,7 +2520,16 @@
   [tid args]
   (sema/tick!)
   (binding [sema/*decltype-failed* nil] ; (a class's own members' dependent decltypes are not its user's failure)
-  (or (when-let [cid (get-in @*tmpls* [tid :insts args])] {:k :class :id cid})
+  (or (when-let [cid (get-in @*tmpls* [tid :insts args])]
+        ;; (cpp-rt-own4: one named lazily, named again outside any class's instantiation and any member function's type, a use
+        ;; of the unit's own code: instantiated now, in place; inside one it stays named only, its layout refused if needed)
+        (when (and (:lazy-inst (abi/cls cid)) (not sema/*in-signature*) (empty? *inst-stack*))
+          (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "lazy instance" (:name (tmpl tid)) cid "instantiated")))
+          (abi/update-cls! cid dissoc :lazy-inst)
+          (binding [*inst-depth* (inc (long *inst-depth*)) *inst-stack* (conj *inst-stack* tid)]
+            (select-instance! (tmpl tid) args cid))
+          (drop-layouts!))
+        {:k :class :id cid})
       (binding [*inst-depth* (inc (long *inst-depth*))]
       (when (> (long *inst-depth*) 1024)
         (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
@@ -2439,7 +2547,9 @@
                 ;; complex(double, double) and operator=(double) were the primary's, complex_io.cc's)
                 (and (get-in t [:spec-decls args]) (not (contains? (:specs t) args))))
           (incomplete-instance! t args)
-          (select-instance! t args nil)))))))
+          (if (and (lazy-here? tid) (:pattern t) (not (contains? (:specs t) args)))
+            (lazy-instance! t args)
+            (binding [*inst-stack* (conj *inst-stack* tid)] (select-instance! t args nil)))))))))
 
 (defn- select-instance!
   "The class of the template `t` for `args`, its definition chosen ([temp.spec.partial.match]) and declared; `cid0` the class
@@ -2492,6 +2602,22 @@
     (when (and sema/*name-only* *provisional*) (swap! *provisional* update :name-only (fnil conj #{}) cid))
     (when (System/getenv "CPP_TMPL_TRACE")
       (binding [*out* *err*] (println "incomplete instance" (:name t) cid "waiting for its template's definition")))
+    {:k :class :id cid}))
+
+(defn- lazy-instance!
+  "cpp-rt-own4 (lazy-here?): the specialization of `t` for `args` named and not instantiated, an incomplete class marked
+  :lazy-inst, cached as the template's instance; instantiated in place where it is named again outside such a place
+  (instantiate-class*). Its layout is refused while it stays so (abi's layout*), so no code is written from a class
+  never defined."
+  [t args]
+  (let [tid (:id t) cid (next-id)
+        ps (bind-scope (:scope t) (:params t) args nil)
+        cs (new-scope :class ps :cls cid :path (conj (vec (:path ps)) [:cls cid]) :internal (boolean (or (:internal ps) (internal-args? args))))]
+    (swap! abi/*classes* assoc cid {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
+                                    :tmpl tid :targs args :lazy-inst true})
+    (upd-tmpl! tid assoc-in [:insts args] cid)
+    (when (System/getenv "CPP_TMPL_TRACE")
+      (binding [*out* *err*] (println "lazy instance" (:name t) cid)))
     {:k :class :id cid}))
 
 (defn- drop-layouts! []
@@ -3421,7 +3547,14 @@
              (new-scope :tparams scope :internal (:internal scope)))
         fid (#'sema/declare-fn! ps n)
         _ (.remove ^java.util.HashMap (:names ps) (:name n))
-        _ (when cid (upd-fn! fid assoc :inline (boolean (:inline n))))]
+        _ (when cid (upd-fn! fid assoc :inline (boolean (:inline n))))
+        ;; (cpp-rt-own4, the code generator: internal as the template's other specializations are, when the template is static
+        ;; ([temp.expl.spec]: an explicit specialization has its template's linkage) or an argument names a type of internal
+        ;; linkage, as instantiate-fn's: floating_to_chars.cc's `template<> optional<to_chars_result>
+        ;; __handle_special_value<floating_type_float16_t>(...)` of a static template over an unnamed namespace's type, external before)
+        _ (when (and (not (sema/checking?)) (not cid)
+                     (or (= "static" (:storageClass (:pattern t))) (:internal (:scope t)) (internal-args? args)))
+            (upd-fn! fid assoc :internal true))]
     (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t) :tn (tn-types t)} :keep-def-scope true)
     (upd-tmpl! (:id t) assoc-in [:insts args] fid)
     :template))
@@ -3684,6 +3817,10 @@
                            (when (and j (> j (inc k)) (= (str/replace (subs nm 8) #"\s+" "") (str/join "" (subvec ts (inc k) j)))) j))))
         k (first (filter (fn [k] (and (pos? k) (= "::" (ts (dec k)))
                                       (or (op-end k)
+                                          ;; (cpp-rt-own4: a destructor's name its two tokens, `valarray<size_t>::~valarray()`,
+                                          ;; valarray.cc's explicit instantiation of ~valarray, linkonce_odr and no D1 before)
+                                          (and (not var?) (str/starts-with? nm "~") (= "~" (ts k)) (< (+ k 2) n)
+                                               (= (subs nm 1) (ts (inc k))) (= "(" (ts (+ k 2))))
                                           (and (= nm (ts k))
                                                (if var? (or (= k (dec n)) (= "[" (ts (inc k)))) (and (< (inc k) n) (#{"(" "<"} (ts (inc k)))))))))
                          (range n)))]
@@ -3953,7 +4090,15 @@
                   (let [ps (tparams n)
                         cands (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))
                                             (= (pspell ps) (pspell (:params (tmpl (:id %)))))
-                                            (same-cons? (:id %)))
+                                            (same-cons? (:id %))
+                                            ;; (cpp-rt-own4, the code generator: and the member's cv- and ref-qualifiers, which the
+                                            ;; signature compared below leaves out: <optional>'s `value_or(_Up&&) const&` and
+                                            ;; `value_or(_Up&&) &&` had been one template, the second, `opt.value_or(0)` of an
+                                            ;; lvalue then no viable function, floating_to_chars.cc's precision.value_or(0))
+                                            (or (sema/checking?)
+                                                (let [q2 (get-in (:pattern (tmpl (:id %))) [:type :qualType])]
+                                                  (and (= (#'sema/method-const? (str qt)) (#'sema/method-const? (str q2)))
+                                                       (= (#'sema/method-refq (str qt)) (#'sema/method-refq (str q2)))))))
                                       named)]
                     (when (seq cands)
                       (when-let [sig (try (dissoc (sema/resolve-type (bind-scope scope ps nil -1) qt) :cq) (catch arbace.lang.ExceptionInfo x (when (System/getenv "CPP_EQ_TRACE") (binding [*out* *err*] (println "equiv" (:name n) (.getMessage x)))) nil))]

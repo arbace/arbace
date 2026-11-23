@@ -1,0 +1,652 @@
+(ns arbace.asm.macho
+  "Mach-O relocatable objects, written and read (x86-objs, AXS99 (b), the user's decision of 2026-11-22; doc/asm/AMD64-SURVEY.md,
+  \"As built: x86-objs\"): the format's part of the object assembler (arbace.asm.obj's *fmt*) as llvm-project 23.1.5's MC
+  writes Mach-O with llvm-mc -filetype=obj, after llvm/lib/MC/MachObjectWriter.cpp (writeObject, computeSymbolTable,
+  computeSectionAddresses, getPaddingSize, isSymbolRefDifferenceFullyResolvedImpl, writeNlist, getAtom),
+  MCMachOStreamer.cpp (emitLabel's new fragment for an atom, emitSymbolAttribute, emitZerofill, emitDataRegion, finishImpl's
+  atoms), MCParser/DarwinAsmParser.cpp (the section directives and the rest), MCSectionMachO.cpp (ParseSectionSpecifier),
+  MCObjectFileInfo.cpp (initMachOMCObjectFileInfo's sections), MCAsmInfoDarwin.cpp (the prefixes, the alignments in powers of
+  two, isSectionAtomizableBySymbols), MCDwarf.cpp (EmitCompactUnwind, the frames' FDE encoding DW_EH_PE_pcrel) and
+  StringTableBuilder.cpp (MachO's string table), Apache-2.0 WITH LLVM-exception, written again in Arbace; the relocations
+  are the architecture's (arbace.asm.amd64.macho: X86MachObjectWriter). The reader reads a Mach-O object back into data (the
+  header, the load commands, the sections with their addresses and bytes, the relocations, the symbols): the views'
+  (arbace.asm.amd64.objview).
+
+  A Mach-O section is arbace.asm.obj's section named \"SEGMENT,SECTION\" with :macho {:seg :sect :taa :stub}, its ELF type and
+  flags standing for what the generic assembler asks (SHT_NOBITS for a zerofill type, SHF_EXECINSTR for pure_instructions:
+  MCAsmInfoDarwin::useCodeAlign); a symbol's Mach-O attributes are its :bind (STB_GLOBAL: external), :pext, :mflags (the
+  'desc' flags), :alt-entry."
+  (:require [arbace.asm.obj :as o]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the format's numbers (llvm/include/llvm/BinaryFormat/MachO.h)
+
+(def MH_MAGIC 0xfeedface) (def MH_MAGIC_64 0xfeedfacf) (def MH_OBJECT 1) (def MH_SUBSECTIONS_VIA_SYMBOLS 0x2000)
+(def LC_SEGMENT 1) (def LC_SYMTAB 2) (def LC_DYSYMTAB 0xb) (def LC_SEGMENT_64 0x19) (def LC_VERSION_MIN_MACOSX 0x24)
+(def LC_VERSION_MIN_IPHONEOS 0x25) (def LC_DATA_IN_CODE 0x29) (def LC_LINKER_OPTION 0x2d) (def LC_VERSION_MIN_TVOS 0x2f)
+(def LC_VERSION_MIN_WATCHOS 0x30) (def LC_BUILD_VERSION 0x32)
+(def S_REGULAR 0) (def S_ZEROFILL 1) (def S_CSTRING_LITERALS 2) (def S_4BYTE_LITERALS 3) (def S_8BYTE_LITERALS 4)
+(def S_LITERAL_POINTERS 5) (def S_NON_LAZY_SYMBOL_POINTERS 6) (def S_LAZY_SYMBOL_POINTERS 7) (def S_SYMBOL_STUBS 8)
+(def S_MOD_INIT_FUNC_POINTERS 9) (def S_MOD_TERM_FUNC_POINTERS 0xa) (def S_COALESCED 0xb) (def S_GB_ZEROFILL 0xc)
+(def S_INTERPOSING 0xd) (def S_16BYTE_LITERALS 0xe) (def S_THREAD_LOCAL_REGULAR 0x11) (def S_THREAD_LOCAL_ZEROFILL 0x12)
+(def S_THREAD_LOCAL_VARIABLES 0x13) (def S_THREAD_LOCAL_VARIABLE_POINTERS 0x14) (def S_THREAD_LOCAL_INIT_FUNCTION_POINTERS 0x15)
+(def S_ATTR_PURE_INSTRUCTIONS 0x80000000) (def S_ATTR_NO_TOC 0x40000000) (def S_ATTR_STRIP_STATIC_SYMS 0x20000000)
+(def S_ATTR_NO_DEAD_STRIP 0x10000000) (def S_ATTR_LIVE_SUPPORT 0x08000000) (def S_ATTR_SELF_MODIFYING_CODE 0x04000000)
+(def S_ATTR_DEBUG 0x02000000) (def S_ATTR_SOME_INSTRUCTIONS 0x400)
+(def N_UNDF 0) (def N_EXT 1) (def N_ABS 2) (def N_INDR 0xa) (def N_SECT 0xe) (def N_PEXT 0x10)
+
+(defn virtual-type? "MachO::isVirtualSection." [^long t] (contains? #{S_ZEROFILL S_GB_ZEROFILL S_THREAD_LOCAL_ZEROFILL} t))
+
+;; SectionTypeDescriptors' assembler names, by type
+(def section-type-names
+  ["regular" "zerofill" "cstring_literals" "4byte_literals" "8byte_literals" "literal_pointers" "non_lazy_symbol_pointers"
+   "lazy_symbol_pointers" "symbol_stubs" "mod_init_funcs" "mod_term_funcs" "coalesced" "" "interposing" "16byte_literals" ""
+   "" "thread_local_regular" "thread_local_zerofill" "thread_local_variables" "thread_local_variable_pointers"
+   "thread_local_init_function_pointers" ""])
+
+;; SectionAttrDescriptors' assembler names
+(def section-attr-names
+  [["pure_instructions" S_ATTR_PURE_INSTRUCTIONS] ["no_toc" S_ATTR_NO_TOC] ["strip_static_syms" S_ATTR_STRIP_STATIC_SYMS]
+   ["no_dead_strip" S_ATTR_NO_DEAD_STRIP] ["live_support" S_ATTR_LIVE_SUPPORT] ["self_modifying_code" S_ATTR_SELF_MODIFYING_CODE]
+   ["debug" S_ATTR_DEBUG] ["none" 0]])
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; sections (MCContext::getMachOSection: the first made of a name keeps its type and attributes)
+
+(defn macho-of [sec] (:macho @sec))
+
+(defn section!
+  "The section SEG,SECT (made with its type and attributes TAA and stub size the first time), made current."
+  [ctx ^String seg ^String sect ^long taa ^long stub]
+  (let [nm (str seg "," sect)
+        t (bit-and taa 0xff)
+        sec (o/section! ctx nm (if (virtual-type? t) elf/SHT_NOBITS elf/SHT_PROGBITS)
+                        (bit-or elf/SHF_ALLOC (if (pos? (bit-and taa S_ATTR_PURE_INSTRUCTIONS)) elf/SHF_EXECINSTR 0)
+                                (if (= seg "__DATA") elf/SHF_WRITE 0))
+                        0 nil false)]
+    (when-not (:macho @sec) (swap! sec assoc :macho {:seg seg :sect sect :taa taa :stub stub}))
+    sec))
+
+(defn parse-section-specifier
+  "MCSectionMachO::ParseSectionSpecifier: [SEGMENT SECTION TAA STUB] of `SEG,SECT[,TYPE[,ATTR+ATTR...[,STUB]]]`, or throws
+  arbace.asm.obj's error with LLVM's message."
+  [^String spec]
+  (let [parts (vec (map str/trim (str/split spec #"," -1)))
+        part (fn [i] (get parts i ""))
+        [seg sect ty attrs stub] (map part (range 5))]
+    (when (= "" sect) (o/fail "mach-o section specifier requires a segment and section separated by a comma"))
+    (when (> (count sect) 16) (o/fail "mach-o section specifier requires a section whose length is between 1 and 16 characters"))
+    (if (= "" ty)
+      [seg sect 0 0]
+      (let [t (.indexOf ^java.util.List section-type-names ty)
+            _ (when (or (neg? t) (= "" ty)) (o/fail "mach-o section specifier uses an unknown section type"))
+            stubs? (= t S_SYMBOL_STUBS)]
+        (if (= "" attrs)
+          (do (when stubs? (o/fail "mach-o section specifier of type 'symbol_stubs' requires a size specifier"))
+              [seg sect t 0])
+          (let [taa (reduce (fn [a ^String at]
+                              (let [d (first (filter #(= (str/trim at) (first %)) section-attr-names))]
+                                (when-not d (o/fail "mach-o section specifier has invalid attribute"))
+                                (bit-or (long a) (long (second d)))))
+                            t (remove #(= "" %) (str/split attrs #"\+")))]
+            (if (= "" stub)
+              (do (when (= taa S_SYMBOL_STUBS) (o/fail "mach-o section specifier of type 'symbol_stubs' requires a size specifier"))
+                  [seg sect taa 0])
+              (do (when-not (= (bit-and taa 0xff) S_SYMBOL_STUBS)
+                    (o/fail "mach-o section specifier cannot have a stub size specified because it does not have type 'symbol_stubs'"))
+                  (let [n (try (Long/decode stub) (catch Throwable _ (o/fail "mach-o section specifier has a malformed stub size")))]
+                    [seg sect taa n])))))))))
+
+;; DarwinAsmParser's section directives: NAME -> [SEGMENT SECTION TAA ALIGNMENT STUB]
+(def ^:private section-directives
+  {"bss" ["__DATA" "__bss" 0] "const" ["__TEXT" "__const" 0] "static_const" ["__TEXT" "__static_const" 0]
+   "cstring" ["__TEXT" "__cstring" S_CSTRING_LITERALS] "literal4" ["__TEXT" "__literal4" S_4BYTE_LITERALS 4]
+   "literal8" ["__TEXT" "__literal8" S_8BYTE_LITERALS 8] "literal16" ["__TEXT" "__literal16" S_16BYTE_LITERALS 16]
+   "constructor" ["__TEXT" "__constructor" 0] "destructor" ["__TEXT" "__destructor" 0]
+   "fvmlib_init0" ["__TEXT" "__fvmlib_init0" 0] "fvmlib_init1" ["__TEXT" "__fvmlib_init1" 0]
+   "symbol_stub" ["__TEXT" "__symbol_stub" (bit-or S_SYMBOL_STUBS S_ATTR_PURE_INSTRUCTIONS) 0 16]
+   "picsymbol_stub" ["__TEXT" "__picsymbol_stub" (bit-or S_SYMBOL_STUBS S_ATTR_PURE_INSTRUCTIONS) 0 26]
+   "data" ["__DATA" "__data" 0] "static_data" ["__DATA" "__static_data" 0]
+   "non_lazy_symbol_pointer" ["__DATA" "__nl_symbol_ptr" S_NON_LAZY_SYMBOL_POINTERS 4]
+   "lazy_symbol_pointer" ["__DATA" "__la_symbol_ptr" S_LAZY_SYMBOL_POINTERS 4]
+   "thread_local_variable_pointer" ["__DATA" "__thread_ptr" S_THREAD_LOCAL_VARIABLE_POINTERS 4]
+   "dyld" ["__DATA" "__dyld" 0] "mod_init_func" ["__DATA" "__mod_init_func" S_MOD_INIT_FUNC_POINTERS 4]
+   "mod_term_func" ["__DATA" "__mod_term_func" S_MOD_TERM_FUNC_POINTERS 4] "const_data" ["__DATA" "__const" 0]
+   "objc_class" ["__OBJC" "__class" S_ATTR_NO_DEAD_STRIP] "objc_meta_class" ["__OBJC" "__meta_class" S_ATTR_NO_DEAD_STRIP]
+   "objc_cat_cls_meth" ["__OBJC" "__cat_cls_meth" S_ATTR_NO_DEAD_STRIP] "objc_cat_inst_meth" ["__OBJC" "__cat_inst_meth" S_ATTR_NO_DEAD_STRIP]
+   "objc_protocol" ["__OBJC" "__protocol" S_ATTR_NO_DEAD_STRIP] "objc_string_object" ["__OBJC" "__string_object" S_ATTR_NO_DEAD_STRIP]
+   "objc_cls_meth" ["__OBJC" "__cls_meth" S_ATTR_NO_DEAD_STRIP] "objc_inst_meth" ["__OBJC" "__inst_meth" S_ATTR_NO_DEAD_STRIP]
+   "objc_cls_refs" ["__OBJC" "__cls_refs" (bit-or S_ATTR_NO_DEAD_STRIP S_LITERAL_POINTERS) 4]
+   "objc_message_refs" ["__OBJC" "__message_refs" (bit-or S_ATTR_NO_DEAD_STRIP S_LITERAL_POINTERS) 4]
+   "objc_symbols" ["__OBJC" "__symbols" S_ATTR_NO_DEAD_STRIP] "objc_category" ["__OBJC" "__category" S_ATTR_NO_DEAD_STRIP]
+   "objc_class_vars" ["__OBJC" "__class_vars" S_ATTR_NO_DEAD_STRIP] "objc_instance_vars" ["__OBJC" "__instance_vars" S_ATTR_NO_DEAD_STRIP]
+   "objc_module_info" ["__OBJC" "__module_info" S_ATTR_NO_DEAD_STRIP]
+   "objc_class_names" ["__TEXT" "__cstring" S_CSTRING_LITERALS] "objc_meth_var_types" ["__TEXT" "__cstring" S_CSTRING_LITERALS]
+   "objc_meth_var_names" ["__TEXT" "__cstring" S_CSTRING_LITERALS] "objc_selector_strs" ["__OBJC" "__selector_strs" S_CSTRING_LITERALS]
+   "tdata" ["__DATA" "__thread_data" S_THREAD_LOCAL_REGULAR] "text" ["__TEXT" "__text" S_ATTR_PURE_INSTRUCTIONS]
+   "tlv" ["__DATA" "__thread_vars" S_THREAD_LOCAL_VARIABLES]
+   "thread_init_func" ["__DATA" "__thread_init" S_THREAD_LOCAL_INIT_FUNCTION_POINTERS]})
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; symbols (MCSymbolMachO)
+
+(def SF_ReferenceTypeMask 7) (def SF_ReferenceTypeUndefinedLazy 1) (def SF_NoDeadStrip 0x20) (def SF_WeakReference 0x40)
+(def SF_WeakDefinition 0x80) (def SF_SymbolResolver 0x100) (def SF_AltEntry 0x200) (def SF_Cold 0x400)
+
+(defn- modify-flags! [s ^long v ^long mask] (swap! s update :mflags #(bit-or (bit-and (long (or % 0)) (bit-not mask)) v)))
+
+(defn temp?
+  "MCAsmInfoDarwin's InternalSymbolPrefix `L` (and the object assembler's own temporaries, named with a NUL)."
+  [^String n]
+  (or (str/includes? n "\u0000") (str/starts-with? n "L")))
+
+(defn external? [m] (= elf/STB_GLOBAL (:bind m)))
+
+(defn linker-visible?
+  "isSymbolLinkerVisible: not temporary, or used in a relocation."
+  [m]
+  (and (not (:section-sym m)) (or (not (:temp m)) (:used-in-reloc m))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; atoms (MCMachOStreamer::finishImpl, MachObjectWriter::getAtom)
+
+(defn compute-atoms!
+  "Each chunk's atom: the last chunk that an atom-defining symbol (linker visible, in a section, no variable, no alt entry)
+  starts, in each section; kept in ctx's :atoms (chunk -> symbol atom)."
+  [ctx]
+  (let [defining (java.util.IdentityHashMap.)
+        ^java.util.IdentityHashMap atoms (java.util.IdentityHashMap.)]
+    (doseq [n (:order ctx) :let [s (o/symbol! ctx n) m @s]
+            :when (and (linker-visible? m) (:chunk m) (not (:var m)) (not (:alt-entry m)))]
+      (.put defining (:chunk m) s))
+    (doseq [sec (:sections ctx)]
+      (loop [cs (seq (:chunks @sec)) cur nil]
+        (when cs
+          (let [c (first cs) cur (or (.get defining c) cur)]
+            (when cur (.put atoms c cur))
+            (recur (next cs) cur)))))
+    (vreset! (:macho-atoms ctx) atoms)))
+
+(defn chunk-atom [ctx c] (when-let [^java.util.IdentityHashMap a @(:macho-atoms ctx)] (.get a c)))
+
+(defn atomizable?
+  "MCAsmInfoDarwin::isSectionAtomizableBySymbols."
+  [sec]
+  (let [{:keys [seg sect taa]} (macho-of sec) t (bit-and (long taa) 0xff)]
+    (not (or (= t S_CSTRING_LITERALS) (and (= seg "__DATA") (#{"__cfstring" "__objc_classrefs"} sect))
+             (#{S_4BYTE_LITERALS S_8BYTE_LITERALS S_16BYTE_LITERALS S_LITERAL_POINTERS S_NON_LAZY_SYMBOL_POINTERS
+                S_LAZY_SYMBOL_POINTERS S_THREAD_LOCAL_VARIABLE_POINTERS S_MOD_INIT_FUNC_POINTERS S_MOD_TERM_FUNC_POINTERS
+                S_INTERPOSING} t)))))
+
+(defn aliased
+  "findAliasedSymbol: a variable whose value is a symbol's reference followed."
+  [ctx s]
+  (loop [s s k 0]
+    (let [m @s v (:var m)]
+      (if (and v (not (:chunk m)) (< k 64) (or (symbol? v) (and (seq? v) (= 'sym (first v)))))
+        (recur (o/symbol! ctx (o/sym-name v)) (inc k))
+        s))))
+
+(defn sym-chunk
+  "The chunk a symbol is in (a variable's, through its value), or nil."
+  [ctx s]
+  (let [m @s]
+    (cond (:chunk m) (:chunk m)
+          (:var m) (let [v (try (o/value ctx (:var m) 0) (catch Throwable _ nil))]
+                     (when (and v (:add v) (nil? (:sub v))) (sym-chunk ctx (:add v))))
+          :else nil)))
+
+(defn atom-of
+  "getAtom: a linker-visible symbol is its own; an absolute or undefined one has none, nor one in a section not atomized by
+  symbols; else its chunk's."
+  [ctx s]
+  (let [m @s]
+    (cond (linker-visible? m) s
+          :else (let [o (o/sym-offset ctx s 0)]
+                  (when (and o (not= :abs (first o)) (atomizable? (.get ^java.util.ArrayList (:sections ctx) (int (first o)))))
+                    (when-let [c (sym-chunk ctx s)] (chunk-atom ctx c)))))))
+
+(defn pcrel-resolved?
+  "isSymbolRefDifferenceFullyResolvedImpl for a PC-relative fixup of one defined symbol (MCAssembler::evaluateFixup): x86-64's
+  when the symbol and the fixup share their section and atom; i386's (no reliable symbol difference) also when the symbol is
+  temporary, or without .subsections_via_symbols."
+  [ctx v c is64]
+  (let [sa (aliased ctx (:add v))
+        o (o/sym-offset ctx sa 0)]
+    (and o (not= :abs (first o)) (= (first o) (:sec @c))
+         (if is64
+           (identical? (some->> (sym-chunk ctx sa) (chunk-atom ctx)) (chunk-atom ctx c))
+           (or (:temp @sa) (identical? (chunk-atom ctx c) (some->> (sym-chunk ctx sa) (chunk-atom ctx)))
+               (not @(:macho-subsections ctx)))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the section addresses (computeSectionAddresses, getPaddingSize)
+
+(defn section-size ^long [sec] (reduce + 0 (map o/chunk-size (:chunks @sec))))
+(defn- align-to ^long [^long x ^long a] (if (<= a 1) x (* a (quot (+ x (dec a)) a))))
+(defn- bss? [sec] (= elf/SHT_NOBITS (:type @sec)))
+
+(defn compute-addresses!
+  "The layout order (the sections with contents first, then the virtual ones) and each section's address: its predecessor's
+  end aligned, padded to the next section's alignment (as 'gas' does). Sets :macho-addr on each section and ctx's
+  :macho-order."
+  [ctx]
+  (let [secs (vec (:sections ctx))
+        order (vec (concat (remove bss? secs) (filter bss? secs)))]
+    (loop [ss order i 0 at 0]
+      (when (seq ss)
+        (let [s (first ss) a (align-to at (long (:align @s)))
+              end (+ a (section-size s))
+              nxt (get order (inc i))
+              pad (if (or (nil? nxt) (bss? nxt)) 0 (- (align-to end (long (:align @nxt))) end))]
+          (swap! s assoc :macho-addr a :macho-pad pad :macho-layout i)
+          (recur (rest ss) (inc i) (+ end pad)))))
+    (vreset! (:macho-order ctx) order)))
+
+(defn section-address ^long [sec] (long (:macho-addr @sec 0)))
+(defn section-of [ctx ^long i] (.get ^java.util.ArrayList (:sections ctx) (int i)))
+
+(defn symbol-address
+  "getSymbolAddress: a variable evaluated (its symbols' addresses), else its section's address plus its offset."
+  ^long [ctx s]
+  (let [m @s]
+    (if (and (:var m) (not (:chunk m)))
+      (let [v (o/value ctx (:var m) 0)]
+        (+ (long (:c v)) (if (:add v) (symbol-address ctx (:add v)) 0) (if (:sub v) (- (symbol-address ctx (:sub v))) 0)))
+      (let [o (o/sym-offset ctx s 0)]
+        (cond (nil? o) 0
+              (= :abs (first o)) (long (second o))
+              :else (+ (section-address (section-of ctx (first o))) (long (second o))))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the directives (DarwinAsmParser, MCMachOStreamer)
+
+(defn- spec-text [args] (str/join "," (map o/expr-text args)))
+
+(defn- version-of
+  "parseVersion's MAJOR, MINOR[, UPDATE] and an sdk_version: [MAJOR MINOR UPDATE SDK]."
+  [ctx args]
+  (let [cv (fn [e] (long (or (o/const-value (o/resolve-expr ctx e) @(:syms ctx)) (o/unsupported :directive (str "version " (pr-str e))))))
+        nums (vec (take-while #(not (and (symbol? %) (= "sdk_version" (name %)))) args))
+        sdk (drop (inc (count nums)) args)]
+    [(cv (nth nums 0)) (cv (nth nums 1 0)) (if (> (count nums) 2) (cv (nth nums 2)) 0)
+     (when (seq sdk) (mapv cv sdk))]))
+
+(def ^:private platforms
+  {"macos" 1 "ios" 2 "tvos" 3 "watchos" 4 "bridgeos" 5 "macCatalyst" 6 "iossimulator" 7 "tvossimulator" 8
+   "watchossimulator" 9 "driverkit" 10 "xros" 11 "xrsimulator" 12})
+
+(defn zerofill!
+  "emitZerofill: the symbol (when given) aligned and defined in SECTION, SIZE zeros, the current section kept."
+  [ctx sec sym size align]
+  (when-not (bss? sec)
+    (o/fail "The usage of .zerofill is restricted to sections of ZEROFILL type. Use .zero or .space instead."))
+  (let [cur (o/cur-sec ctx) prev @(:prev ctx)]
+    (o/switch! ctx sec)
+    (when sym
+      (o/align! ctx (long align) 0 1 nil false)
+      (o/label! ctx sym)
+      (o/fill! ctx size 1 0))
+    (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev)))
+
+(defn directive
+  "DarwinAsmParser's directives and the generic ones Mach-O reads otherwise, :unhandled for the rest."
+  [ctx ^String h args]
+  (let [cv (fn [e] (let [e (o/resolve-expr ctx e)] (or (o/const-value e @(:syms ctx)) (o/unsupported :expression (str "." h " " (pr-str e))))))
+        attr! (fn [f] (doseq [a args] (let [n (o/sym-name a)] (o/register! ctx n) (f (o/symbol! ctx n)))))]
+    (if-let [[seg sect taa al stub] (section-directives h)]
+      (do (section! ctx seg sect taa (or stub 0))
+          (when al (o/align! ctx al 0 1 nil false)))
+      (case h
+        ("section" "pushsection")
+        (let [[seg sect taa stub] (parse-section-specifier (spec-text args))]
+          (when (= h "pushsection") (vswap! (:stack ctx) conj [(o/cur-sec ctx) @(:prev ctx)]))
+          (section! ctx seg sect taa stub))
+        ;; .align is a power of two (MCAsmInfoDarwin's AlignmentIsInBytes false)
+        "align" (o/directive! ctx (cons 'asm/p2align args))
+        "zerofill" (let [[seg sect s size al] args
+                         sec (section! ctx (o/expr-text seg) (o/expr-text sect) S_ZEROFILL 0)]
+                     ;; (the section made, the previous one current again)
+                     (when-let [p @(:prev ctx)] (o/switch! ctx p))
+                     (when s (zerofill! ctx sec (o/sym-name s) (long (cv size)) (bit-shift-left 1 (long (if al (cv al) 0))))))
+        "tbss" (let [[s size al] args cur (o/cur-sec ctx) prev @(:prev ctx)
+                     sec (section! ctx "__DATA" "__thread_bss" S_THREAD_LOCAL_ZEROFILL 0)]
+                 (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev)
+                 (zerofill! ctx sec (o/sym-name s) (long (cv size)) (bit-shift-left 1 (long (if al (cv al) 0)))))
+        "comm" (let [[s size al] args n (o/sym-name s) sym (o/symbol! ctx n)]
+                 (o/register! ctx n)
+                 (swap! sym assoc :bind elf/STB_GLOBAL :common [(long (cv size)) (if al (bit-shift-left 1 (long (cv al))) 0)]))
+        "lcomm" (let [[s size al] args cur (o/cur-sec ctx) prev @(:prev ctx)
+                      sec (section! ctx "__DATA" "__bss" S_ZEROFILL 0)]
+                  (vreset! (:cur ctx) cur) (vreset! (:prev ctx) prev)
+                  (zerofill! ctx sec (o/sym-name s) (long (cv size)) (bit-shift-left 1 (long (if al (cv al) 0)))))
+        "subsections_via_symbols" (vreset! (:macho-subsections ctx) true)
+        ("macosx_version_min" "ios_version_min" "tvos_version_min" "watchos_version_min")
+        (let [[mj mn up sdk] (version-of ctx args)]
+          (vreset! (:macho-version ctx) {:lc ({"macosx_version_min" LC_VERSION_MIN_MACOSX "ios_version_min" LC_VERSION_MIN_IPHONEOS
+                                               "tvos_version_min" LC_VERSION_MIN_TVOS "watchos_version_min" LC_VERSION_MIN_WATCHOS} h)
+                                         :v [mj mn up] :sdk sdk}))
+        "build_version" (let [p (o/expr-text (first args)) [mj mn up sdk] (version-of ctx (rest args))]
+                          (vreset! (:macho-version ctx) {:lc LC_BUILD_VERSION :platform (or (platforms p) (o/fail "unknown platform name"))
+                                                         :v [mj mn up] :sdk sdk}))
+        "data_region" (let [k (if-let [a (first args)] (case (o/expr-text a) "jt8" 2 "jt16" 3 "jt32" 4 (o/fail "unknown data region type")) 1)
+                            n (o/tmp! ctx)]
+                        (o/label! ctx n)
+                        (.add ^java.util.ArrayList (:macho-regions ctx) (atom {:kind k :start n})))
+        "end_data_region" (let [^java.util.ArrayList rs (:macho-regions ctx)
+                                r (when (pos? (.size rs)) (.get rs (dec (.size rs))))
+                                n (o/tmp! ctx)]
+                            (when (or (nil? r) (:end @r)) (o/fail "Mismatched .end_data_region!"))
+                            (o/label! ctx n)
+                            (swap! r assoc :end n))
+        "linker_option" (.add ^java.util.ArrayList (:macho-options ctx) (vec args))
+        "private_extern" (attr! (fn [s] (swap! s assoc :bind elf/STB_GLOBAL :pext true)))
+        "weak_definition" (attr! (fn [s] (modify-flags! s SF_WeakDefinition SF_WeakDefinition)))
+        "weak_def_can_be_hidden" (attr! (fn [s] (modify-flags! s (bit-or SF_WeakDefinition SF_WeakReference) (bit-or SF_WeakDefinition SF_WeakReference))))
+        "weak_reference" (attr! (fn [s] (when-not (o/defined? ctx s) (modify-flags! s SF_WeakReference SF_WeakReference))))
+        ("no_dead_strip" "reference") (attr! (fn [s] (modify-flags! s SF_NoDeadStrip SF_NoDeadStrip)))
+        "lazy_reference" (attr! (fn [s] (modify-flags! s SF_NoDeadStrip SF_NoDeadStrip)
+                                  (when-not (o/defined? ctx s) (modify-flags! s SF_ReferenceTypeUndefinedLazy SF_ReferenceTypeUndefinedLazy))))
+        "symbol_resolver" (attr! (fn [s] (modify-flags! s SF_SymbolResolver SF_SymbolResolver)))
+        "cold" (attr! (fn [s] (modify-flags! s SF_Cold SF_Cold)))
+        "alt_entry" (attr! (fn [s] (when (o/defined? ctx s) (o/fail ".alt_entry must preceed symbol definition"))
+                             (swap! s assoc :alt-entry true) (modify-flags! s SF_AltEntry SF_AltEntry)))
+        "desc" (let [[s v] args n (o/sym-name s)]
+                 (o/register! ctx n) (swap! (o/symbol! ctx n) assoc :mflags (bit-and (long (cv v)) 0xffff)))
+        ;; MCSA_Weak, MCSA_Hidden, ...: MCMachOStreamer::emitSymbolAttribute refuses them
+        ("weak" "hidden" "protected" "internal" "local") (o/fail "unable to emit symbol attribute")
+        ;; Darwin silently ignores .ident; a .file without a number is not Darwin's (HasSingleParameterDotFile false)
+        "ident" nil
+        "file" (if (and (= 1 (count args)) (string? (first args))) nil :unhandled)
+        ("indirect_symbol" "lsym" "dump" "load" "secure_log_unique" "secure_log_reset" "cg_profile")
+        (o/unsupported :directive (str "." h))
+        :unhandled))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the writer (MachObjectWriter::writeObject)
+
+(defn- out ^java.io.ByteArrayOutputStream [] (java.io.ByteArrayOutputStream.))
+(defn- le! [^java.io.ByteArrayOutputStream o ^long v ^long n] (dotimes [i n] (.write o (int (bit-and (bit-shift-right v (* 8 i)) 0xff)))))
+(defn- name16! [^java.io.ByteArrayOutputStream o ^String s] (let [b (.getBytes s "ISO-8859-1")] (.write o b 0 (min 16 (alength b))) (dotimes [_ (- 16 (min 16 (alength b)))] (.write o 0))))
+(defn- zeros! [^java.io.ByteArrayOutputStream o ^long n] (dotimes [_ n] (.write o 0)))
+
+(defn- undefined? [ctx s] (and (nil? (o/sym-offset ctx s 0)) (not (:section-sym @s))))
+
+(defn symbol-table
+  "computeSymbolTable: [LOCALS EXTERNALS UNDEFINED] of {:sym ATOM :name :sect}, the linker-visible symbols in their
+  registration order, the externals and the undefined sorted by name; each symbol's :macho-index set."
+  [ctx]
+  (let [secs (vec (:sections ctx))
+        index-of (into {} (map-indexed (fn [i s] [s (inc i)]) secs))
+        syms (for [n (:order ctx) :let [s (o/symbol! ctx n) m @s] :when (linker-visible? m)] s)
+        entry (fn [s] (let [o (o/sym-offset ctx s 0)]
+                        {:sym s :name (:name @s) :sect (if (and o (not= :abs (first o))) (index-of (nth secs (first o))) 0)}))
+        ext (for [s syms :when (or (external? @s) (undefined? ctx s))] s)
+        undef (sort-by :name (map entry (filter #(undefined? ctx %) ext)))
+        exts (sort-by :name (map entry (remove #(undefined? ctx %) ext)))
+        locals (map entry (for [s syms :when (not (or (external? @s) (undefined? ctx s)))] s))
+        all (concat locals exts undef)]
+    (doseq [[i e] (map-indexed vector all)] (swap! (:sym e) assoc :macho-index i))
+    [(vec locals) (vec exts) (vec undef)]))
+
+(defn- encoded-flags
+  "getEncodedFlags: the 'desc' flags, a common symbol's alignment in bits 8-11."
+  ^long [ctx s alt?]
+  (let [m @s f (long (or (:mflags m) 0))
+        f (if-let [[_ al] (:common m)]
+            (if (pos? (long al))
+              (let [lg (Long/numberOfTrailingZeros (long al))]
+                (when (> lg 15) (o/fail (str "invalid 'common' alignment '" al "' for '" (:name m) "'")))
+                (bit-or (bit-and f 0xF0FF) (bit-shift-left lg 8)))
+              f)
+            f)]
+    (if alt? (bit-or f SF_AltEntry) f)))
+
+(defn- nlist!
+  "writeNlist."
+  [^java.io.ByteArrayOutputStream o ctx e by-sym soff is64]
+  (let [s (:sym e) m @s a (aliased ctx s) alias? (not (identical? a s))
+        ae (when alias? (get by-sym a))
+        sect (if (and alias? ae) (:sect ae) (:sect e))
+        am @a
+        und (undefined? ctx a)
+        t (cond (and alias? und) N_INDR und N_UNDF (= :abs (first (o/sym-offset ctx a 0))) N_ABS :else N_SECT)
+        t (bit-or t (if (:pext m) N_PEXT 0) (if (or (external? m) (and (not alias?) und)) N_EXT 0))
+        addr (cond (and alias? und) (long (get soff (:name am) 0))
+                   (not und) (symbol-address ctx s)
+                   (:common am) (long (first (:common am)))
+                   :else 0)]
+    (le! o (get soff (:name m)) 4) (.write o (int t)) (.write o (int sect))
+    (le! o (encoded-flags ctx a (and alias? (:alt-entry m))) 2)
+    (le! o addr (if is64 8 4))))
+
+(defn write-object
+  "The Mach-O object of the assembled ctx (MachObjectWriter::writeObject): the header, LC_SEGMENT(_64) with every section,
+  the deployment version's command, LC_DATA_IN_CODE, LC_SYMTAB and LC_DYSYMTAB, the linker options, the sections' data (each
+  padded to the next one's alignment), the relocations (each section's in the reverse of their order), the data regions, the
+  symbols and their string table. CPU: [CPUTYPE CPUSUBTYPE]. Returns the bytes, or {:error :errors} for a fatal error."
+  [ctx is64 [cputype cpusub]]
+  (let [secs (vec (:sections ctx))
+        ^java.util.HashMap relocs (:macho-relocs ctx)
+        [locals exts undef] (symbol-table ctx)
+        all (concat locals exts undef)
+        by-sym (into {} (map (fn [e] [(:sym e) e]) all))
+        {sbytes :bytes soff :offsets} (elf/strtab (map :name all))
+        spad (- (align-to (alength ^bytes sbytes) (if is64 8 4)) (alength ^bytes sbytes))
+        nsyms (count all)
+        version @(:macho-version ctx)
+        ^java.util.ArrayList regions (:macho-regions ctx)
+        options (vec (:macho-options ctx))
+        opt-size (fn [os] (align-to (+ 12 (reduce + 0 (map #(inc (count (str %))) os))) (if is64 8 4)))
+        sec-hdr (if is64 80 68)
+        lcs (+ (if is64 72 56) (* (count secs) sec-hdr)
+               (if version (if (= LC_BUILD_VERSION (:lc version)) 24 16) 0)
+               (if (pos? (.size regions)) 16 0)
+               (if (pos? nsyms) (+ 24 80) 0)
+               (reduce + 0 (map opt-size options)))
+        ncmds (+ 1 (if version 1 0) (if (pos? (.size regions)) 1 0) (if (pos? nsyms) 2 0) (count options))
+        data-start (+ (if is64 32 28) lcs)
+        [dsize dfsize vmsize] (reduce (fn [[ds dfs vm] s]
+                                        (let [a (section-address s) z (section-size s)
+                                              fz (+ (if (bss? s) 0 z) (long (:macho-pad @s 0)))]
+                                          [(if (bss? s) ds (max ds (+ a z))) (if (bss? s) dfs (max dfs (+ a fz))) (max vm (+ a z))]))
+                                      [0 0 0] secs)
+        dpad (- (align-to dfsize (if is64 8 4)) dfsize)
+        dfsize (+ dfsize dpad)
+        rel-of (fn [s] (vec (.get relocs (:index @s))))
+        o (out)]
+    ;; data region not terminated: report_fatal_error, before anything is written
+    (if-let [r (first (filter #(nil? (:end @%)) regions))]
+      {:error "data region not terminated" :errors [{:pos [:fatal] :msg "data region not terminated"}]}
+      (do
+        ;; header
+        (le! o (if is64 MH_MAGIC_64 MH_MAGIC) 4) (le! o cputype 4) (le! o cpusub 4) (le! o MH_OBJECT 4) (le! o ncmds 4) (le! o lcs 4)
+        (le! o (if @(:macho-subsections ctx) MH_SUBSECTIONS_VIA_SYMBOLS 0) 4)
+        (when is64 (le! o 0 4))
+        ;; the segment
+        (le! o (if is64 LC_SEGMENT_64 LC_SEGMENT) 4) (le! o (+ (if is64 72 56) (* (count secs) sec-hdr)) 4) (name16! o "")
+        (if is64
+          (do (le! o 0 8) (le! o vmsize 8) (le! o data-start 8) (le! o dsize 8))
+          (do (le! o 0 4) (le! o vmsize 4) (le! o data-start 4) (le! o dsize 4)))
+        (le! o 7 4) (le! o 7 4) (le! o (count secs) 4) (le! o 0 4)
+        ;; the section headers
+        (loop [ss secs rel-at (+ data-start dfsize)]
+          (when (seq ss)
+            (let [s (first ss) {:keys [seg sect taa stub]} (macho-of s) n (count (rel-of s))
+                  a (section-address s)
+                  flags (bit-or (long taa) (if (:has-insns @s) S_ATTR_SOME_INSTRUCTIONS 0))]
+              (name16! o sect) (name16! o seg)
+              (if is64 (do (le! o a 8) (le! o (section-size s) 8)) (do (le! o a 4) (le! o (section-size s) 4)))
+              (le! o (if (bss? s) 0 (+ data-start a)) 4)
+              (le! o (Long/numberOfTrailingZeros (long (:align @s))) 4)
+              (le! o (if (pos? n) rel-at 0) 4) (le! o n 4) (le! o flags 4)
+              (le! o 0 4) (le! o (long (or stub 0)) 4)
+              (when is64 (le! o 0 4))
+              (recur (rest ss) (+ rel-at (* 8 n))))))
+        ;; the deployment target's version
+        (when version
+          (let [[mj mn up] (:v version) enc (fn [[a b c]] (bit-or (long (or c 0)) (bit-shift-left (long (or b 0)) 8) (bit-shift-left (long a) 16)))
+                sdk (if (:sdk version) (enc (:sdk version)) 0)]
+            (if (= LC_BUILD_VERSION (:lc version))
+              (do (le! o LC_BUILD_VERSION 4) (le! o 24 4) (le! o (:platform version) 4) (le! o (enc [mj mn up]) 4) (le! o sdk 4) (le! o 0 4))
+              (do (le! o (:lc version) 4) (le! o 16 4) (le! o (enc [mj mn up]) 4) (le! o sdk 4)))))
+        (let [nrel (reduce + 0 (map #(count (rel-of %)) secs))
+              rel-end (+ data-start dfsize (* 8 nrel))
+              dic-end (+ rel-end (* 8 (.size regions)))
+              sym-off dic-end
+              str-off (+ sym-off (* nsyms (if is64 16 12)))]
+          (when (pos? (.size regions))
+            (le! o LC_DATA_IN_CODE 4) (le! o 16 4) (le! o rel-end 4) (le! o (* 8 (.size regions)) 4))
+          (when (pos? nsyms)
+            (le! o LC_SYMTAB 4) (le! o 24 4) (le! o sym-off 4) (le! o nsyms 4) (le! o str-off 4)
+            (le! o (+ (alength ^bytes sbytes) spad) 4)
+            (le! o LC_DYSYMTAB 4) (le! o 80 4)
+            (le! o 0 4) (le! o (count locals) 4) (le! o (count locals) 4) (le! o (count exts) 4)
+            (le! o (+ (count locals) (count exts)) 4) (le! o (count undef) 4)
+            (dotimes [_ 12] (le! o 0 4)))
+          (doseq [os options]
+            (let [z (opt-size os) start (.size o)]
+              (le! o LC_LINKER_OPTION 4) (le! o z 4) (le! o (count os) 4)
+              (doseq [x os] (let [b (.getBytes (str x) "ISO-8859-1")] (.write o b 0 (alength b)) (.write o 0)))
+              (zeros! o (- z (- (.size o) start)))))
+          ;; the sections' data, each padded
+          (doseq [s secs]
+            (when-not (bss? s)
+              (let [b (o/section-bytes s)] (.write o b 0 (alength b))))
+            (zeros! o (long (:macho-pad @s 0))))
+          (zeros! o dpad)
+          ;; the relocations: the symbol's index and the extern bit set (computeSymbolTable), reversed
+          (doseq [s secs r (reverse (rel-of s))]
+            (le! o (:w0 r) 4)
+            (le! o (if-let [y (:sym r)]
+                     (bit-or (bit-and (long (:w1 r)) (bit-shift-left -1 24)) (long (:macho-index @y)) (bit-shift-left 1 27))
+                     (long (:w1 r)))
+                 4))
+          ;; the data regions
+          (doseq [r regions]
+            (let [st (symbol-address ctx (o/symbol! ctx (:start @r))) en (symbol-address ctx (o/symbol! ctx (:end @r)))]
+              (le! o st 4) (le! o (- en st) 2) (le! o (:kind @r) 2)))
+          ;; the symbols and the string table
+          (when (pos? nsyms)
+            (doseq [e all] (nlist! o ctx e by-sym soff is64))
+            (.write o ^bytes sbytes 0 (alength ^bytes sbytes))
+            (zeros! o spad))
+          (.toByteArray o))))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the format's part for arbace.asm.obj
+
+(defn init!
+  "initSections (MCStreamer's): __TEXT,__text current, no alignment."
+  [ctx]
+  (section! ctx "__TEXT" "__text" S_ATTR_PURE_INSTRUCTIONS 0)
+  (vreset! (:prev ctx) nil))
+
+(defn before-label!
+  "MCMachOStreamer::emitLabel: an atom-defining (linker-visible) label starts a new fragment; its reference type cleared."
+  [ctx s]
+  (when (linker-visible? @s)
+    (o/add-chunk! (o/cur-sec ctx) (o/data-chunk)))
+  (modify-flags! s 0 SF_ReferenceTypeMask))
+
+(defn add-relocation!
+  "MachObjectWriter::addRelocation: a relocation_info {:w0 :w1 :sym} of section index SEC (its symbol's index set at the
+  writing)."
+  [ctx ^long sec r]
+  (let [^java.util.HashMap m (:macho-relocs ctx)]
+    (when-not (.containsKey m sec) (.put m sec (java.util.ArrayList.)))
+    (.add ^java.util.ArrayList (.get m sec) r)))
+
+(defn state
+  "The writer's state, merged into a new ctx (arbace.asm.obj/new-ctx) by the format's runs."
+  []
+  {:macho-atoms (volatile! nil) :macho-relocs (java.util.HashMap.) :macho-regions (java.util.ArrayList.)
+   :macho-version (volatile! nil) :macho-options (java.util.ArrayList.) :macho-subsections (volatile! false)
+   :macho-order (volatile! [])})
+
+(defn base
+  "The format's part (arbace.asm.obj's *fmt*) less the architecture's: :record-reloc, :compact-unwind!, :write and
+  :pcrel-resolved?'s width come from it (arbace.asm.amd64.macho)."
+  [is64]
+  {:id :macho
+   :state (fn [] (state))
+   :temp? temp?
+   :init! (fn [ctx]
+            ;; the writer's state: atoms, relocations, data regions, version, options, .subsections_via_symbols
+            (init! ctx))
+   :directive directive
+   :before-label before-label!
+   :before-layout compute-atoms!
+   :pcrel-resolved? (fn [ctx v c] (pcrel-resolved? ctx v c is64))
+   :post-layout compute-addresses!
+   :fde-enc 0x10
+   ;; MCAsmInfoDarwin's DwarfFDESymbolsUseAbsDiff (X86MCAsmInfoDarwin sets it): the FDE's symbols through emitAbsValue
+   :fde-abs-diff true
+   :eh-frame-section (fn [ctx] (section! ctx "__TEXT" "__eh_frame"
+                                         (bit-or S_COALESCED S_ATTR_NO_TOC S_ATTR_STRIP_STATIC_SYMS S_ATTR_LIVE_SUPPORT) 0))
+   :debug-section (fn [ctx nm] (section! ctx "__DWARF" (str "__" nm) S_ATTR_DEBUG 0))})
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the reader
+
+(defn- u ^long [^bytes b ^long at ^long n]
+  (loop [i (dec n) v 0] (if (neg? i) v (recur (dec i) (bit-or (bit-shift-left v 8) (bit-and (long (aget b (+ at i))) 0xff))))))
+(defn- name16 ^String [^bytes b ^long at]
+  (let [e (loop [i 0] (if (or (= i 16) (zero? (aget b (+ at i)))) i (recur (inc i))))] (String. b (int at) (int e) "ISO-8859-1")))
+(defn- cstr ^String [^bytes b ^long at]
+  (loop [e at] (if (or (>= e (alength b)) (zero? (aget b e))) (String. b (int at) (int (- e at)) "ISO-8859-1") (recur (inc e)))))
+
+(defn macho? [^bytes b] (and (>= (alength b) 28) (#{MH_MAGIC MH_MAGIC_64} (u b 0 4))))
+
+(defn read-object
+  "A Mach-O little-endian object's bytes as data: {:is64 :cputype :cpusubtype :filetype :flags :sections [{:index :name :seg
+  :raw-name :raw-seg :addr :size :offset :align :reloff :nreloc :flags :reserved1 :reserved2 :reserved3 :data BYTES :relocs
+  [{:w0 :w1 :offset :scattered :pcrel :length :extern :type :symnum :value}]}] :symbols [{:index :name :type :sect :desc
+  :value}] :version {...} :data-in-code [...]}."
+  [^bytes b]
+  (when-not (macho? b) (throw (ex-info "not a Mach-O little-endian object" {:macho/error :not-macho})))
+  (let [is64 (= MH_MAGIC_64 (u b 0 4))
+        ncmds (u b 16 4)
+        hdr (if is64 32 28)
+        cmds (loop [i 0 at hdr out []]
+               (if (= i ncmds) out
+                   (let [c (u b at 4) z (u b (+ at 4) 4)] (recur (inc i) (+ at z) (conj out [c at z])))))
+        relocs (fn [^long off ^long n]
+                 (vec (for [k (range n) :let [w0 (u b (+ off (* 8 k)) 4) w1 (u b (+ off (* 8 k) 4) 4)]]
+                        (if (bit-test w0 31)
+                          {:w0 w0 :w1 w1 :scattered true :offset (bit-and w0 0xffffff) :type (bit-and (bit-shift-right w0 24) 0xf)
+                           :length (bit-and (bit-shift-right w0 28) 3) :pcrel (bit-and (bit-shift-right w0 30) 1) :value w1}
+                          {:w0 w0 :w1 w1 :scattered false :offset w0 :symnum (bit-and w1 0xffffff) :pcrel (bit-and (bit-shift-right w1 24) 1)
+                           :length (bit-and (bit-shift-right w1 25) 3) :extern (bit-and (bit-shift-right w1 27) 1)
+                           :type (bit-and (bit-shift-right w1 28) 0xf)}))))
+        secs (vec (for [[c at] cmds :when (#{LC_SEGMENT LC_SEGMENT_64} c)
+                        :let [n (u b (+ at (if is64 64 48)) 4) s0 (+ at (if is64 72 56))]
+                        k (range n)
+                        :let [h (+ s0 (* k (if is64 80 68)))
+                              [addr size p] (if is64 [(u b (+ h 32) 8) (u b (+ h 40) 8) (+ h 48)] [(u b (+ h 32) 4) (u b (+ h 36) 4) (+ h 40)])
+                              off (u b p 4) fl (u b (+ p 16) 4)
+                              virt (virtual-type? (bit-and fl 0xff))]]
+                    {:name (name16 b h) :seg (name16 b (+ h 16))
+                     :raw-name (vec (java.util.Arrays/copyOfRange b (int h) (int (+ h 16))))
+                     :raw-seg (vec (java.util.Arrays/copyOfRange b (int (+ h 16)) (int (+ h 32))))
+                     :addr addr :size size :offset off :align (u b (+ p 4) 4) :reloff (u b (+ p 8) 4) :nreloc (u b (+ p 12) 4)
+                     :flags fl :reserved1 (u b (+ p 20) 4) :reserved2 (u b (+ p 24) 4) :reserved3 (if is64 (u b (+ p 28) 4) 0)
+                     :data (if virt (byte-array 0) (java.util.Arrays/copyOfRange b (int off) (int (+ off size))))
+                     :relocs (relocs (u b (+ p 8) 4) (u b (+ p 12) 4))}))
+        secs (vec (map-indexed (fn [i s] (assoc s :index i)) secs))
+        symtab (first (filter #(= LC_SYMTAB (first %)) cmds))
+        syms (when symtab
+               (let [at (second symtab) so (u b (+ at 8) 4) n (u b (+ at 12) 4) stro (u b (+ at 16) 4) z (if is64 16 12)]
+                 (vec (for [i (range n) :let [h (+ so (* i z))]]
+                        {:index i :name (cstr b (+ stro (u b h 4))) :strx (u b h 4) :type (u b (+ h 4) 1) :sect (u b (+ h 5) 1)
+                         :desc (u b (+ h 6) 2) :value (u b (+ h 8) (if is64 8 4))}))))
+        dic (first (filter #(= LC_DATA_IN_CODE (first %)) cmds))]
+    {:is64 is64 :cputype (u b 4 4) :cpusubtype (u b 8 4) :filetype (u b 12 4) :flags (u b 24 4)
+     :sections secs :symbols (or syms [])
+     :data-in-code (when dic (let [at (second dic) off (u b (+ at 8) 4) z (u b (+ at 12) 4)]
+                               (vec (for [k (range (quot z 8)) :let [h (+ off (* 8 k))]]
+                                      {:offset (u b h 4) :length (u b (+ h 4) 2) :kind (u b (+ h 6) 2)}))))}))

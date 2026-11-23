@@ -513,22 +513,32 @@
 ^{:go/end 495} (go/func FConst ^F [^float64 v] ^{:go/end 495} (fn ^float64 [(* Frame)] v))
 ^{:go/end 496} (go/func FLocal ^F [^int k] ^{:go/end 496} (fn ^float64 [^{:tag (* Frame)} fr] (aget (.-F fr) k)))
 ^{:go/end 497} (go/func FSet ^F [^int k ^F e] ^{:go/end 497} (fn ^float64 [^{:tag (* Frame)} fr] (let [v (e fr)] (aset (.-F fr) k v) v)))
-^{:go/end 498} (go/func FRound32 ^F [^F e] ^{:go/end 498} (fn ^float64 [^{:tag (* Frame)} fr] (conv float64 (conv float32 (e fr)))))
+^{:go/end 498} (go/func FRound32 ^F [^F e] ^{:go/end 498} (fn ^float64 [^{:tag (* Frame)} fr] (crt/F32ToF64 (crt/F64ToF32 (e fr)))))
+(go/func FRound16 "FRound16 is e rounded to _Float16 (c-rows).\n" ^F [^F e] (fn ^float64 [^{:tag (* Frame)} fr] (crt/F16ToF64 (crt/F64ToF16 (e fr)))))
 ^{:go/end 499} (go/func FNeg ^F [^F e] ^{:go/end 499} (fn ^float64 [^{:tag (* Frame)} fr] (- (e fr))))
 ^{:go/end 505} (go/func FLoad ^F [^string t ^I a]
+  ;; c-rows: _Float16, its binary16 bits as the float64 they are (crt/F16ToF64)
+  (when (== t "f16")
+    (return (fn ^float64 [^{:tag (* Frame)} fr] (crt/F16ToF64 (.Load16 (.-M (.-T fr)) (conv uint64 (a fr)))))))
   (when (== t "f32")
-    (return ^{:go/end 502} (fn ^float64 [^{:tag (* Frame)} fr] (conv float64 (.LoadF32 (.-M (.-T fr)) (conv uint64 (a fr)))))))
+    (return ^{:go/end 502} (fn ^float64 [^{:tag (* Frame)} fr] (crt/F32ToF64 (.LoadF32 (.-M (.-T fr)) (conv uint64 (a fr)))))))
 
   ^{:go/end 504} (fn ^float64 [^{:tag (* Frame)} fr] (.LoadF64 (.-M (.-T fr)) (conv uint64 (a fr)))))
 
 
 ^{:go/end 522} (go/func FStore ^F [^string t ^I a ^F v]
+  (when (== t "f16")
+    (return (fn ^float64 [^{:tag (* Frame)} fr]
+        (let [addr (conv uint64 (a fr))
+              h (crt/F64ToF16 (v fr))]
+          (.Store16 (.-M (.-T fr)) addr h)
+          (crt/F16ToF64 h)))))
   (when (== t "f32")
     (return ^{:go/end 514} (fn ^float64 [^{:tag (* Frame)} fr]
         (let [addr (conv uint64 (a fr))
-            ^{:line 511} x (conv float32 (v fr))]
+            ^{:line 511} x (crt/F64ToF32 (v fr))]
           (.StoreF32 (.-M (.-T fr)) addr x)
-          (conv float64 x)))))
+          (crt/F32ToF64 x)))))
 
 
   ^{:go/end 521} (fn ^float64 [^{:tag (* Frame)} fr]
@@ -544,13 +554,13 @@
   (let [^F f (zero F)]
     (switch op
       (case ["add"]
-        (set! f ^{:go/end 529} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (+ x (b fr))))))
+        (set! f ^{:go/end 529} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (crt/FAdd x (b fr))))))
       (case ["sub"]
-        (set! f ^{:go/end 531} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (- x (b fr))))))
+        (set! f ^{:go/end 531} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (crt/FSub x (b fr))))))
       (case ["mul"]
-        (set! f ^{:go/end 533} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (* x (b fr))))))
+        (set! f ^{:go/end 533} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (crt/FMul x (b fr))))))
       (case ["div"]
-        (set! f ^{:go/end 535} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (/ x (b fr))))))
+        (set! f ^{:go/end 535} (fn ^float64 [^{:tag (* Frame)} fr] (let [x (a fr)] (crt/FDiv x (b fr))))))
       (default
         (panic (+ "ci: no floating operator " op))))
 
@@ -753,6 +763,12 @@
 ^{:go/end 721} (go/func WNot ^W [^crt/WType t ^W a] ^{:go/end 721} (fn ^crt/Wide [^{:tag (* Frame)} fr] (.Not t (a fr))))
 
 ^{:go/end 747} (go/func WCmp ^I [^string op ^crt/WType t ^W a ^W b]
+  (when (.-Float t)
+    (return (fn ^int64 [^{:tag (* Frame)} fr]
+        (let [x (a fr)]
+          (when (.CmpOp t op x (b fr))
+            (return 1))
+          0))))
   ^{:go/end 746} (fn ^int64 [^{:tag (* Frame)} fr]
     ^{:go/breaks [[4 745]]} (let [x (a fr)
         ^{:line 726} c (.Cmp t x (b fr))
@@ -804,9 +820,11 @@
   ^{:go/end 772} (fn ^crt/Wide [^{:tag (* Frame)} fr] (.Conv t (e fr) from)))
 
 
-^{:go/end 780} (go/func W2F ^F [^crt/WType from ^bool f32 ^W e]
-  (when f32
-    (return ^{:go/end 777} (fn ^float64 [^{:tag (* Frame)} fr] (conv float64 (conv float32 (.Float64 from (e fr)))))))
+^{:go/end 780} (go/func W2F "W2F converts a wide value to a floating one: mode 0 double, 1 float, 2 _Float16, each rounded once (queue 522).\n" ^F [^crt/WType from ^int mode ^W e]
+  (when (== mode 1)
+    (return ^{:go/end 777} (fn ^float64 [^{:tag (* Frame)} fr] (conv float64 (.Float32 from (e fr))))))
+  (when (== mode 2)
+    (return (fn ^float64 [^{:tag (* Frame)} fr] (crt/F16ToF64 (.Float16 from (e fr))))))
 
   ^{:go/end 779} (fn ^float64 [^{:tag (* Frame)} fr] (.Float64 from (e fr))))
 

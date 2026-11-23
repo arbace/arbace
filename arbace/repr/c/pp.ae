@@ -40,6 +40,28 @@
 
 (defn- ch [^Tok t] (.-ch t))
 (defn- src ^String [^Tok t] (.-src t))
+
+(defn- mkey
+  "cpp-read (2026-11-22): a macro's name as the macros table keys it, its universal character names as their characters' UTF-8
+  (the ISO-8859-1 text of the bytes, as the lexer spells them): one identifier however its characters are written, as
+  libcpp's identifiers hash ([lex.name]/1 with [lex.charset]: `EN\\u0394` and `EN\u0394`'s UTF-8 name one macro)."
+  ^String [^String nm]
+  (if (neg? (.indexOf nm "\\"))
+    nm
+    (let [b (StringBuilder.) n (.length nm)]
+      (loop [i 0]
+        (if (< i n)
+          (let [c (.charAt nm i)
+                k (when (and (= c \\) (< (inc i) n)) (case (.charAt nm (inc i)) \u 4 \U 8 nil))
+                hex (when (and k (<= (+ i 2 (long k)) n)) (subs nm (+ i 2) (+ i 2 (long k))))]
+            (if (and hex (re-matches #"[0-9A-Fa-f]+" hex)
+                     ;; (a code point a character has: not past U+10FFFF nor a surrogate; such a name stays as written)
+                     (let [v (Long/parseLong hex 16)] (and (<= v 0x10FFFF) (not (<= 0xD800 v 0xDFFF)))))
+              (do (.append b (String. (.getBytes (String. (Character/toChars (Integer/parseInt hex 16))) "UTF-8") "ISO-8859-1"))
+                  (recur (+ i 2 (long k))))
+              (do (.append b c) (recur (inc i)))))
+          (.toString b))))))
+
 (defn- sep ^String [^Tok t] (.-sep t))
 (defn- has-sep? [^Tok t] (pos? (.length ^String (.-sep t))))
 (defn- blank? [^Tok t] (let [c (.-ch t)] (or (= c \space) (= c \newline))))
@@ -56,12 +78,15 @@
 (defn- udl-split
   "Arbace (CX2): a user-defined literal whose ud-suffix is a macro's name, as libcpp reads it
   (is_macro_not_literal_suffix: the suffix is not part of the literal, it is expanded): the literal and
-  the identifier, two tokens; else the token."
+  the identifier, two tokens; else the token. cpp-read (2026-11-22): a suffix of one underscore and another
+  character first stays the literal's whatever it names, as libcpp's maybe_ignore_udl_macro_suffix keeps it
+  (\"user-defined literals outside of namespace std must start with a single underscore\")."
   [macros ^Tok v]
   (let [src (.-src v)
         q (long (.lastIndexOf ^String src (if (= (.-ch v) :UDLSTRING) 34 39)))
         suffix (subs src (inc q))]
-    (if (or (.get ^HashMap macros suffix) (builtin-macro-names suffix))
+    (if (and (not (and (str/starts-with? suffix "_") (not (str/starts-with? suffix "__"))))
+             (or (.get ^HashMap macros suffix) (builtin-macro-names suffix)))
       (let [lit (subs src 0 (inc q))
             first-c (.charAt lit 0)
             wide? (or (= first-c \L) (= first-c \U) (and (= first-c \u) (not= (.charAt lit 1) \8)))
@@ -512,7 +537,7 @@
 (defn- macro
   "cpp.macro: the macro `nm` names at `t`, the builtin ones made as cc makes them; nil."
   [^Cpp c ^Tok t ^String nm]
-  (if-let [m (.get ^HashMap (.-macros c) nm)]
+  (if-let [m (.get ^HashMap (.-macros c) (mkey nm))]
     (case nm
       "__FILE__" (builtin-macro t :STRINGLITERAL (go-quote (let [^String f (nth (lex/tok-position t) 0)]
                                                              ;; the main file entered again (*reentry*) is still the main file
@@ -1804,6 +1829,11 @@
   [^Cpp c line]
   (let [^Tok verb (line 1)
         w (ArrayList.)
+        ;; cpp-read (2026-11-22): before C++26 the directive is GCC's extension in C++, libcpp's pedwarn "#embed before C++26 is a
+        ;; GCC extension" (directives.cc's do_embed), an error under -pedantic-errors
+        _ (when (and (:cxx (.-cfg c)) (= :errors (:pedantic (.-cfg c)))
+                     (not (#{:c++26 :gnu++26 :c++2c :gnu++2c} (:std (.-cfg c)))))
+            (eh c (str (pos-str verb) ": '#embed' before C++26 is a GCC extension")))
         _ (doseq [t (take 1 (filter #(and (= (ch %) :IDENTIFIER) (= (src %) "defined")) (subvec (pop line) 2)))]
             (eh c (str (pos-str t) ": 'defined' in '#embed' parameter")))
         _ (expand c false true (toks (tokens->cpp (subvec (pop line) 2) true (macros-of c))) w)
@@ -1878,7 +1908,7 @@
   (let [s (src nm)]
     (when (and (or (not (protected-macros s)) (= (nth (lex/tok-position nm) 0) "<predefined>"))
                (not (alt-name-error c nm s)))
-      (.put ^HashMap (.-macros c) s (new-macro nm params rl min-args var-arg fn-like)))))
+      (.put ^HashMap (.-macros c) (mkey s) (new-macro nm params rl min-args var-arg fn-like)))))
 
 (defn- va-opt-check!
   "Arbace (CS143): gcc's checks of __VA_OPT__ in the replacement list `rl` of a variadic macro: its parenthesis and the
@@ -1927,7 +1957,7 @@
       (alt-name-error c (line 2) nm)
       (when-not (protected-macros nm)
         (.add ^HashSet (.-undefs c) nm)
-        (.remove ^HashMap (.-macros c) nm)))))
+        (.remove ^HashMap (.-macros c) (mkey nm))))))
 
 (defn- pragma! [^Cpp c x]
   (let [x (vec x)
@@ -2058,7 +2088,12 @@
             (case (x 0)
               :leave (do (slot! c DEPTH (dec (long (slot c DEPTH)))) (pop-tos! c) (recur))
               :text (do (pop-tos! c) (ucn-dollar-check! c (x 1)) (x 1))
-              :nondir (do (pop-tos! c) (record-directive! c (x 1)) (linemarker! c (x 1)) (recur))
+              ;; c-tails: an assembler source (.S, gcc's assembler-with-cpp, libcpp's CLK_ASM, as tools/ppref takes a main file
+              ;; named .S): a line whose `#` begins no directive is text, kept and expanded (_cpp_handle_directive: "# may introduce
+              ;; assembler pseudo-ops"), and `# 33` no linemarker (tcc-pp's 13.S)
+              :nondir (if (some-> ^String (slot c MAIN) (.endsWith ".S"))
+                        (do (pop-tos! c) (x 1))
+                        (do (pop-tos! c) (record-directive! c (x 1)) (linemarker! c (x 1)) (recur)))
               :eof (do (slot! c EOFLINE (x 1))
                        (if (zero? (.size ^ArrayList (.-stack c)))
                          [(x 1)]

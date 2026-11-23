@@ -10,4 +10,6 @@ CAMLextern value caml_process_pending_actions_exn(void);
 CAMLextern int caml_check_pending_actions(void);
 CAMLextern int caml_convert_signal_number(int);
 CAMLextern int caml_rev_convert_signal_number(int);
+/* queue 523: a minor collection requested, at the next allocation OCaml or the C counts (oi's simulated minor heap) */
+CAMLextern void caml_request_minor_gc(void);
 #endif

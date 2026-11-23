@@ -1,0 +1,332 @@
+(ns arbace.asm.amd64.macho
+  "x86-64's and i386's Mach-O part (x86-objs, AXS99 (b)): the relocations as llvm-project 23.1.5's
+  llvm/lib/Target/X86/MCTargetDesc/X86MachObjectWriter.cpp records them (RecordX86_64Relocation, RecordX86Relocation,
+  recordScatteredRelocation, recordTLVPRelocation; MachObjectWriter::recordRelocation's isFixupTargetValid,
+  doesSymbolRequireExternRelocation; MCExpr's rule for a relocation's symbol that is a variable) and the compact unwind
+  encoding as X86AsmBackend.cpp's DarwinX86AsmBackend::generateCompactUnwindEncoding computes it from a frame's CFI, with
+  MCDwarf.cpp's EmitCompactUnwind writing __LD,__compact_unwind; Apache-2.0 WITH LLVM-exception, written again in Arbace.
+  `fmt` is arbace.asm.obj's *fmt* for a Darwin triple."
+  (:require [arbace.asm.obj :as o]
+            [arbace.asm.macho :as m]
+            [arbace.asm.elf :as elf]
+            [arbace.string :as str]))
+
+(set! *warn-on-reflection* true)
+
+;; MachO.h's relocation types
+(def X86_64_RELOC_UNSIGNED 0) (def X86_64_RELOC_SIGNED 1) (def X86_64_RELOC_BRANCH 2) (def X86_64_RELOC_GOT_LOAD 3)
+(def X86_64_RELOC_GOT 4) (def X86_64_RELOC_SUBTRACTOR 5) (def X86_64_RELOC_SIGNED_1 6) (def X86_64_RELOC_SIGNED_2 7)
+(def X86_64_RELOC_SIGNED_4 8) (def X86_64_RELOC_TLV 9)
+(def GENERIC_RELOC_VANILLA 0) (def GENERIC_RELOC_PAIR 1) (def GENERIC_RELOC_SECTDIFF 2) (def GENERIC_RELOC_LOCAL_SECTDIFF 4)
+(def GENERIC_RELOC_TLV 5) (def R_SCATTERED 0x80000000)
+
+(def ^:private riprel-kinds
+  #{:riprel :riprel-movq-load :riprel-movq-load-rex2 :riprel-relax :riprel-relax-rex :riprel-relax-rex2 :riprel-relax-evex})
+
+(defn- log2-size ^long [^long size] (case size 1 0 2 1 4 2 8 3 0))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the relocation's target (MCExpr::evaluateAsRelocatableImpl on Mach-O: a variable whose value is a symbol plus a constant,
+;; or two symbols, is the relocation's symbol itself; one whose value is a section's symbol alone too)
+
+(defn- keep-var?
+  [ctx s]
+  (let [v (binding [o/*keep-var* keep-var?] (try (o/value ctx (:var @s) 0) (catch Throwable _ nil)))]
+    (if (nil? v)
+      true
+      (let [a (:add v) b (:sub v)
+            in-sec (fn [x] (let [r (o/sym-offset ctx x 0)] (and r (not= :abs (first r)))))]
+        (if (and a (nil? b) (in-sec a))
+          true
+          (not (or (and (nil? a) (nil? b)) (and (zero? (long (:c v))) (or (nil? a) (nil? b))))))))))
+
+(defn- target
+  "The fixup's MCValue as Mach-O's writer sees it: its expression evaluated keeping the variables MCExpr keeps, the PC-relative
+  field's bias (arbace.asm.obj/eval-fixup's) taken off."
+  [ctx [_ size e _ pcrel adj] v]
+  (let [t (binding [o/*keep-var* keep-var?] (o/value ctx (if (zero? (long adj)) e (list '+ e adj)) 0))]
+    (if pcrel (update t :c #(- (long %) (long ((:pcrel-bias o/*arch*) size)))) t)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; X86MachObjectWriter
+
+(defn- sec-of [ctx s] (let [r (o/sym-offset ctx s 0)] (when (and r (not= :abs (first r))) (m/section-of ctx (first r)))))
+(defn- ordinal ^long [ctx s] (inc (long (:index @(sec-of ctx s)))))
+(defn- sym-off ^long [ctx s] (let [r (o/sym-offset ctx s 0)] (if r (long (second r)) 0)))
+(defn- undefined? [ctx s] (nil? (o/sym-offset ctx s 0)))
+
+(defn- record-64
+  "RecordX86_64Relocation: the relocation kept (MachObjectWriter::addRelocation) and the field's value returned."
+  [ctx c fx t]
+  (let [[off size _ kind pcrel] fx
+        cm @c
+        sec (m/section-of ctx (:sec cm))
+        riprel (contains? riprel-kinds kind)
+        lg (log2-size size)
+        foff (+ (long (:offset cm)) (long off))
+        faddr (+ (m/section-address sec) foff)
+        cst (long (:c t))
+        spec (:spec t)
+        add! (fn [rel w1] (m/add-relocation! ctx (:sec cm) {:w0 foff :w1 w1 :sym rel}))
+        value (+ cst (if pcrel (bit-shift-left 1 lg) 0))]
+    (cond
+      ;; a constant
+      (and (nil? (:add t)) (nil? (:sub t)))
+      (do (add! nil (bit-or (if pcrel (bit-shift-left 1 24) 0) (bit-shift-left lg 25)
+                            (if pcrel (bit-shift-left 1 27) 0) (bit-shift-left (if pcrel X86_64_RELOC_BRANCH X86_64_RELOC_UNSIGNED) 28)))
+          value)
+      ;; A - B + constant
+      (:sub t)
+      (let [a (:add t) a (if (:temp @a) (m/aliased ctx a) a) ab (m/atom-of ctx a)
+            b (:sub t) b (if (:temp @b) (m/aliased ctx b) b) bb (m/atom-of ctx b)]
+        (when spec (o/fail "unsupported relocation of modified symbol"))
+        (when pcrel (o/fail "unsupported pc-relative relocation of difference"))
+        (when (and ab (identical? ab bb)) (o/fail "unsupported relocation with identical base"))
+        (when (or (undefined? ctx a) (undefined? ctx b))
+          (o/fail (str "unsupported relocation with subtraction expression, symbol '" (:name @(if (undefined? ctx a) a b))
+                       "' can not be undefined in a subtraction expression")))
+        (let [value (+ value (- (m/symbol-address ctx a) (if ab (m/symbol-address ctx ab) 0))
+                       (- (- (m/symbol-address ctx b) (if bb (m/symbol-address ctx bb) 0))))
+              ia (if ab 0 (ordinal ctx a))]
+          (add! ab (bit-or ia (bit-shift-left lg 25) (bit-shift-left X86_64_RELOC_UNSIGNED 28)))
+          (add! bb (bit-or (if bb 0 (ordinal ctx b)) (bit-shift-left lg 25) (bit-shift-left X86_64_RELOC_SUBTRACTOR 28)))
+          value))
+      :else
+      (let [s (:add t)
+            _ (when (and (:temp @s) (not (zero? value)) (not (undefined? ctx s)))
+                (when-let [ss (sec-of ctx s)] (when-not (m/atomizable? ss) (swap! s assoc :used-in-reloc true))))
+            rel (m/atom-of ctx s)
+            in-sec (some? (sec-of ctx s))
+            ;; relocations inside debug sections are local when they can be
+            rel (if (and in-sec (pos? (bit-and (long (:taa (m/macho-of sec))) m/S_ATTR_DEBUG))) nil rel)
+            var? (and (:var @s) (not (:chunk @s)))
+            [value index]
+            (cond rel [(if (identical? rel s) value (+ value (- (sym-off ctx s) (sym-off ctx rel)))) 0]
+                  (and in-sec (not var?)) [(- (+ value (m/symbol-address ctx s)) (if pcrel (+ faddr (bit-shift-left 1 lg)) 0)) (ordinal ctx s)]
+                  var? [::fixed (m/symbol-address ctx s)]
+                  :else (o/fail (str "unsupported relocation of undefined symbol '" (:name @s) "'")))]
+        (if (= value ::fixed)
+          index
+          (let [[pcrel type]
+                (if pcrel
+                  (if riprel
+                    (case spec
+                      "GOTPCREL" [true (if (= kind :riprel-movq-load) X86_64_RELOC_GOT_LOAD X86_64_RELOC_GOT)]
+                      "TLVP" [true X86_64_RELOC_TLV]
+                      nil [true (case (long (- (+ cst (bit-shift-left 1 lg))))
+                                  1 X86_64_RELOC_SIGNED_1 2 X86_64_RELOC_SIGNED_2 4 X86_64_RELOC_SIGNED_4 X86_64_RELOC_SIGNED)]
+                      (o/fail "unsupported symbol modifier in relocation"))
+                    (if spec (o/fail "unsupported symbol modifier in branch relocation") [true X86_64_RELOC_BRANCH]))
+                  (case spec
+                    "GOT" [false X86_64_RELOC_GOT]
+                    "GOTPCREL" [true X86_64_RELOC_GOT]
+                    "TLVP" (o/fail "TLVP symbol modifier should have been rip-rel")
+                    nil (do (when (= kind :signed) (o/fail "32-bit absolute addressing is not supported in 64-bit mode"))
+                            [false X86_64_RELOC_UNSIGNED])
+                    (o/fail "unsupported symbol modifier in relocation")))]
+            (add! rel (bit-or index (if pcrel (bit-shift-left 1 24) 0) (bit-shift-left lg 25) (bit-shift-left type 28)))
+            value))))))
+
+(defn- requires-extern? [ctx s]
+  (or (undefined? ctx s) (pos? (bit-and (long (or (:mflags @s) 0)) m/SF_WeakDefinition))))
+
+(defn- record-scattered
+  "recordScatteredRelocation: [true FIXED] when recorded, [false FIXED] when not (the offset beyond 24 bits)."
+  [ctx c fx t ^long lg ^long fixed]
+  (let [[off _ _ _ pcrel] fx cm @c foff (+ (long (:offset cm)) (long off)) pc (if pcrel 1 0)
+        a (:add t)]
+    (when (undefined? ctx a) (o/fail (str "symbol '" (:name @a) "' can not be undefined in a subtraction expression")))
+    (let [value (m/symbol-address ctx a)
+          fixed (+ fixed (m/section-address (sec-of ctx a)))
+          sb (:sub t)
+          _ (when (and sb (undefined? ctx sb)) (o/fail (str "symbol '" (:name @sb) "' can not be undefined in a subtraction expression")))
+          type (if sb (if (m/external? @a) GENERIC_RELOC_SECTDIFF GENERIC_RELOC_LOCAL_SECTDIFF) GENERIC_RELOC_VANILLA)
+          value2 (if sb (m/symbol-address ctx sb) 0)
+          fixed (if sb (- fixed (m/section-address (sec-of ctx sb))) fixed)]
+      (if (and (not sb) (> foff 0xffffff))
+        [false nil]
+        (do
+          (when sb
+            (when (> foff 0xffffff)
+              (o/fail (str "Section too large, can't encode r_address (0x" (Long/toHexString foff)
+                           ") into 24 bits of scattered relocation entry.")))
+            (m/add-relocation! ctx (:sec cm) {:w0 (bit-or (bit-shift-left GENERIC_RELOC_PAIR 24) (bit-shift-left lg 28) (bit-shift-left pc 30) R_SCATTERED)
+                                              :w1 value2}))
+          (m/add-relocation! ctx (:sec cm) {:w0 (bit-or foff (bit-shift-left type 24) (bit-shift-left lg 28) (bit-shift-left pc 30) R_SCATTERED)
+                                            :w1 value})
+          [true fixed])))))
+
+(defn- record-32
+  "RecordX86Relocation (i386)."
+  [ctx c fx t ^long fixed]
+  (let [[off size _ _ pcrel] fx cm @c foff (+ (long (:offset cm)) (long off)) lg (log2-size size) pc (if pcrel 1 0)
+        a (:add t) sec (m/section-of ctx (:sec cm))]
+    (cond
+      (and a (= "TLVP" (:spec t)))
+      ;; recordTLVPRelocation
+      (let [fixed (if-let [b (:sub t)]
+                    (+ (- (+ (m/section-address sec) foff) (m/symbol-address ctx b)) (long (:c t)) (bit-shift-left 1 lg))
+                    0)]
+        (m/add-relocation! ctx (:sec cm) {:w0 foff :w1 (bit-or (if (:sub t) (bit-shift-left 1 24) 0) (bit-shift-left lg 25) (bit-shift-left GENERIC_RELOC_TLV 28)) :sym a})
+        fixed)
+      (:sub t) (second (record-scattered ctx c fx t lg fixed))
+      :else
+      (let [offset (+ (long (:c t)) (if pcrel (bit-shift-left 1 lg) 0))
+            sc (when (and (not (zero? offset)) a (not (requires-extern? ctx a)))
+                 (record-scattered ctx c fx t lg fixed))]
+        (if (first sc)
+          (second sc)
+          (if (nil? a)
+            (do (m/add-relocation! ctx (:sec cm) {:w0 foff :w1 (bit-or (bit-shift-left pc 24) (bit-shift-left lg 25))}) fixed)
+            (let [vv (when (and (:var @a) (not (:chunk @a))) (o/value ctx (:var @a) 0))
+                  abs (when vv (cond (and (nil? (:add vv)) (nil? (:sub vv))) (:c vv)
+                                     (and (:add vv) (:sub vv)) (+ (long (:c vv)) (- (m/symbol-address ctx (:add vv)) (m/symbol-address ctx (:sub vv))))))]
+              (if abs
+                abs
+                (let [ext (requires-extern? ctx a)
+                      [rel index fixed] (if ext
+                                          [a 0 (if (undefined? ctx a) fixed (- fixed (sym-off ctx a)))]
+                                          [nil (ordinal ctx a) (+ fixed (m/section-address (sec-of ctx a)))])
+                      fixed (if pcrel (- fixed (m/section-address sec)) fixed)]
+                  (m/add-relocation! ctx (:sec cm) {:w0 foff :w1 (bit-or index (bit-shift-left pc 24) (bit-shift-left lg 25)) :sym rel})
+                  fixed)))))))))
+
+(defn record-reloc
+  "MachObjectWriter::recordRelocation for x86: the fixup's target valid (no lone subtracted symbol), then the architecture's;
+  the field's fixed value."
+  [is64 ctx c fx v val]
+  (let [t (target ctx fx v)]
+    (when (and (nil? (:add t)) (:sub t)) (o/fail "unsupported relocation expression"))
+    (if is64 (record-64 ctx c fx t) (record-32 ctx c fx t (long val)))))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the compact unwind encoding (DarwinX86AsmBackend::generateCompactUnwindEncoding; compact_unwind_encoding.h)
+
+(def UNWIND_MODE_BP_FRAME 0x01000000) (def UNWIND_MODE_STACK_IMMD 0x02000000) (def UNWIND_MODE_STACK_IND 0x03000000)
+(def UNWIND_MODE_DWARF 0x04000000)
+
+(def ^:dynamic *unwind*
+  "llvm-mc's options for the compact unwind: {:dwarf :always|:no-compact-unwind|:default|:dwarf-only (--emit-dwarf-unwind)
+  :non-canonical BOOL (-emit-compact-unwind-non-canonical)}."
+  {:dwarf :default :non-canonical false})
+
+;; the DWARF EH register numbers of x86-64 (X86RegisterInfo.td's flavour 0) and the LLVM registers they stand for
+(def ^:private regs64 {0 :rax 1 :rdx 2 :rcx 3 :rbx 4 :rsi 5 :rdi 6 :rbp 7 :rsp 8 :r8 9 :r9 10 :r10 11 :r11 12 :r12 13 :r13 14 :r14 15 :r15 16 :rip})
+;; i386's Darwin EH flavour (EBP 4, ESP 5)
+(def ^:private regs32 {0 :eax 1 :ecx 2 :edx 3 :ebx 4 :ebp 5 :esp 6 :esi 7 :edi})
+
+(defn- canonical-personality? [p] (or (nil? p) (#{"___gxx_personality_v0" "___objc_personality_v0"} p)))
+
+(defn encoding
+  "The frame's compact unwind encoding (0: none; UNWIND_MODE_DWARF: its DWARF FDE)."
+  ^long [fr is64]
+  (let [{:keys [insns signal personality]} fr]
+    (cond
+      (= :dwarf-only (:dwarf *unwind*)) UNWIND_MODE_DWARF
+      signal UNWIND_MODE_DWARF
+      (empty? insns) 0
+      (and (not (canonical-personality? personality)) (not (:non-canonical *unwind*))) UNWIND_MODE_DWARF
+      :else
+      (let [regs (if is64 regs64 regs32)
+            cu-regs (if is64 [:rbx :r12 :r13 :r14 :r15 :rbp] [:ebx :ecx :edx :edi :esi :ebp])
+            cu-num (fn [r] (let [i (.indexOf ^java.util.List cu-regs r)] (if (neg? i) -1 (inc i))))
+            off-size (if is64 8 4) move-size (if is64 3 2) divide (if is64 8 4)
+            push-size (fn [r] (if (#{:r12 :r13 :r14 :r15} r) 2 1))
+            st (reduce (fn [st {:keys [op reg off]}]
+                         (if (= st ::dwarf)
+                           st
+                           (case op
+                             :def-cfa-register (if (not= (regs reg) (if is64 :rbp :ebp))
+                                                 ::dwarf
+                                                 (assoc st :fp true :saved [] :adjust 0 :min Long/MAX_VALUE :ioff (+ (long (:ioff st)) move-size)))
+                             :def-cfa-offset (assoc st :size (quot (long off) divide))
+                             :offset (if (= 6 (count (:saved st)))
+                                       ::dwarf
+                                       (let [r (regs reg)]
+                                         (assoc st :saved (conj (:saved st) r) :adjust (+ (long (:adjust st)) off-size)
+                                                :min (min (long (:min st)) (Math/abs (long off))) :ioff (+ (long (:ioff st)) (long (push-size r))))))
+                             ::dwarf)))
+                       {:fp false :saved [] :adjust 0 :size 0 :min Long/MAX_VALUE :ioff 0}
+                       insns)]
+        (if (= st ::dwarf)
+          UNWIND_MODE_DWARF
+          (let [{:keys [fp saved adjust size min ioff]} st
+                adjust (quot (long adjust) divide)
+                n (count saved)]
+            (if fp
+              (cond (not= (bit-and adjust 0xff) adjust) UNWIND_MODE_DWARF
+                    (and (pos? n) (not= (long min) (* 3 off-size))) UNWIND_MODE_DWARF
+                    :else
+                    (let [enc (reduce (fn [a [i r]] (let [k (cu-num r)] (if (or (= a ::bad) (neg? k)) ::bad (bit-or (long a) (bit-shift-left (bit-and k 7) (* 3 i))))))
+                                      0 (map-indexed vector saved))]
+                      (if (= enc ::bad) UNWIND_MODE_DWARF
+                          (bit-or UNWIND_MODE_BP_FRAME (bit-shift-left (bit-and adjust 0xff) 16) (bit-and (long enc) 0x7fff)))))
+              (let [sub-idx (+ (if is64 3 2) (long ioff))
+                    adjust (inc adjust)
+                    head (cond (= (bit-and (long size) 0xff) size) (bit-or UNWIND_MODE_STACK_IMMD (bit-shift-left (bit-and (long size) 0xff) 16))
+                               (not= (bit-and adjust 7) adjust) ::dwarf
+                               :else (bit-or UNWIND_MODE_STACK_IND (bit-shift-left (bit-and sub-idx 0xff) 16) (bit-shift-left (bit-and adjust 7) 13)))]
+                (if (= head ::dwarf)
+                  UNWIND_MODE_DWARF
+                  ;; the saved registers reversed, renumbered, their permutation (encodeCompactUnwindRegistersWithoutFrame)
+                  ;; (SavedRegs reversed, renumbered, then all six reversed: the saved ones back in their order, right-aligned)
+                  (let [nums (mapv cu-num saved)]
+                    (if (some neg? nums)
+                      UNWIND_MODE_DWARF
+                      (let [full (vec (concat (repeat (- 6 n) 0) nums))
+                            renum (vec (for [i (range 6)]
+                                         (if (< i (- 6 n)) 0
+                                             (- (long (nth full i)) (count (filter #(< (long (nth full %)) (long (nth full i))) (range (- 6 n) i))) 1))))
+                            perm (case n
+                                   6 (+ (* 120 (renum 0)) (* 24 (renum 1)) (* 6 (renum 2)) (* 2 (renum 3)) (renum 4))
+                                   5 (+ (* 120 (renum 1)) (* 24 (renum 2)) (* 6 (renum 3)) (* 2 (renum 4)) (renum 5))
+                                   4 (+ (* 60 (renum 2)) (* 12 (renum 3)) (* 3 (renum 4)) (renum 5))
+                                   3 (+ (* 20 (renum 3)) (* 4 (renum 4)) (renum 5))
+                                   2 (+ (* 5 (renum 4)) (renum 5))
+                                   1 (renum 5)
+                                   0)]
+                        (bit-or (long head) (bit-shift-left (bit-and n 7) 10) (bit-and (long perm) 0x3ff))))))))))))))
+
+(defn compact-unwind!
+  "MCDwarfFrameEmitter::emit's compact unwind (generateCompactUnwindEncodings, EmitCompactUnwind): each frame with an encoding
+  an entry of __LD,__compact_unwind (the start, the length, the encoding, the personality, the LSDA); the frames .eh_frame
+  keeps (all of them on x86: no compact unwind without .eh_frame; with --emit-dwarf-unwind no-compact-unwind those whose
+  encoding is DWARF's)."
+  [is64 ctx frames]
+  (let [ptr (if is64 8 4)
+        encs (mapv #(encoding @% is64) frames)]
+    (when (some pos? encs)
+      (let [sec (m/section! ctx "__LD" "__compact_unwind" m/S_ATTR_DEBUG 0)]
+        (o/ensure-align! sec ptr)
+        (o/data! ctx)
+        (let [ch (o/cur-data! ctx)
+              ^java.util.ArrayList b (:bytes @ch)
+              out! (fn [^long v ^long n] (dotimes [i n] (.add b (bit-and (bit-shift-right v (* 8 i)) 0xff))))
+              sym! (fn [^String nm ^long n] (o/register! ctx nm) (.add ^java.util.ArrayList (:fixups @ch) [(.size b) n (symbol nm) nil false 0]) (out! 0 n))
+              off-of (fn [nm] (long (second (o/sym-offset ctx (o/symbol! ctx nm) 0))))]
+          (while (pos? (mod (.size b) ptr)) (.add b 0))
+          (doseq [[fr enc] (map vector frames encs) :when (pos? (long enc))]
+            (let [fm @fr dwarf-only (= enc UNWIND_MODE_DWARF)
+                  enc (if (and (not dwarf-only) (:lsda fm)) (bit-or (long enc) 0x40000000) enc)]
+              (sym! (:begin fm) ptr)
+              (out! (- (off-of (:end fm)) (off-of (:begin fm))) 4)
+              (out! enc 4)
+              (if (and (not dwarf-only) (:personality fm)) (sym! (:personality fm) ptr) (out! 0 ptr))
+              (let [ls (if (:lsda fm) (o/enc-size (long (:lsda-enc fm))) ptr)]
+                (if (and (not dwarf-only) (:lsda fm)) (sym! (:lsda fm) ls) (out! 0 ls))))))))
+    (if (= :no-compact-unwind (:dwarf *unwind*))
+      (vec (for [[fr enc] (map vector frames encs) :when (= enc UNWIND_MODE_DWARF)] fr))
+      frames)))
+
+;; ---------------------------------------------------------------------------------------------------------------------
+;; the format
+
+(defn fmt
+  "arbace.asm.obj's *fmt* for an x86 Darwin triple (IS64: x86_64, else i386; UNWIND: *unwind*'s options, nil the defaults)."
+  [is64 unwind]
+  (assoc (m/base is64)
+         ;; X86_64MCAsmInfoDarwin::getExprForPersonalitySymbol: sym@GOTPCREL + 4 (i386 MCAsmInfo's default)
+         :personality-expr (when is64 (fn [t] (list '+ (list 'at (symbol t) 'GOTPCREL) 4)))
+         :record-reloc (fn [ctx c fx v val] (record-reloc is64 ctx c fx v val))
+         :compact-unwind! (fn [ctx frames] (binding [*unwind* (merge *unwind* unwind)] (compact-unwind! is64 ctx frames)))
+         :write (fn [ctx] (m/write-object ctx is64 (if is64 [0x01000007 3] [7 3])))))
