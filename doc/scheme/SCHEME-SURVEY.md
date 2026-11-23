@@ -4919,3 +4919,14 @@ the mats' driver (`test/scheme/mats/run.sps`) imports (rnrs), and its mats are e
   specifies a condition's types, not its message's text. Its run still counts in completeness (the judge-cases rule of 2026-11-20).
   (b) Keep it `:design`. (c) Give si's lexical violations Racket's words. This was rejected: they are another implementation's
   unspecified text, and Chez's mats expect Chez's. *Recommended: (a)*.
+
+## As built: SCS4 (d)'s records and SCS38 (a) (2026-11-23, the main host, branch `smalls-1123`, from mac/next `fa635f636`)
+
+- SCS4 (d)'s records made again on the main host, the three programs alone (`bin/si check --only racket/base --only racket/io/ports
+  --only racket/exceptions --record`, then the same with `--aot`; stage 0, the light driver from the checkout): racket/base and
+  racket/io/ports pass at eval and AOT (9 items gone each, the compiled runs the same as the interpreted), so `:chez-exact-zero` and
+  `:chez-console-port` left test/scheme/divergences.edn.
+- SCS38 (a) (the user, 2026-11-23): racket/exceptions' condition-message test leaves the judged cases. `:chez-condition-message`
+  is `:na`, with the written reason that R6RS specifies a condition's types, not its message's text.
+- Cells: eval 2,835 / 3 / 0 (4 n/a) -> 2,837 / 0 / 0 (5 n/a); AOT 2,513 / 3 / 0 (2 n/a) -> 2,515 / 0 / 0 (3 n/a). Scheme's
+  completeness 0.9994 -> 1.0000; maturity and independence 1.
