@@ -181,11 +181,16 @@
   [v x]
   (if (and (number? x) (abi/integral? (abi/unq (:ty v)))) (sema/ce-wrap (:ty v) x) x))
 
+(def ^:private ^:dynamic *enum-lit*
+  "cpp-tzdb: when bound (an atom), the last enumerator const-entity read, [value type]: a conditional's operands of a
+  dependent condition kept typed, {:k :elit}."
+  nil)
+
 (defn- const-entity [scope parts]
   (let [es (if (= 1 (count parts)) (sema/lookup scope (first parts)) (sema/lookup-qualified scope parts))
         e (first es)]
     (case (:e e)
-      :enumerator (:val e)
+      :enumerator (do (when *enum-lit* (reset! *enum-lit* [(:val e) (:ty e)])) (:val e))
       :nttp (cond-> {:k :tparam-v :i (:i e) :tid (:tid e)} (:pack e) (assoc :pack true))
       :texpr (:x e)
       :var (let [v (sema/var* (:id e))]
@@ -906,7 +911,18 @@
               (loop [l (primary)]
                 (let [o (peek) p (get prec o)]
                   (cond
-                    (and (= o "?") (<= minp 0)) (do (next!) (let [a (expr 0) _ (next!) b (expr 0)] (fold "?" [l a b])))
+                    (and (= o "?") (<= minp 0))
+                    (do (next!)
+                        ;; (cpp-tzdb, the code generator: of a dependent condition, an operand that is an enumerator kept with its
+                        ;; type, so that it is mangled L <type> <value> E as clang writes it: <ranges>' subrange's `subrange_kind _Kind =
+                        ;; sized_sentinel_for<_Sent, _It> ? subrange_kind::sized : subrange_kind::unsized`, LNS_13subrange_kindE1E)
+                        (let [typed (fn [] (if (or (sema/checking?) (not (map? l)))
+                                             (expr 0)
+                                             (binding [*enum-lit* (atom nil)]
+                                               (let [v (expr 0) [ev et] @*enum-lit*]
+                                                 (if (and (number? v) et (abi/enum? (abi/unq et)) (= v ev)) {:k :elit :v v :ty (abi/unq et)} v)))))
+                              a (typed) _ (next!) b (typed)]
+                          (fold "?" [l a b])))
                     (and p (> (long p) minp)) (do (next!) (recur (fold o [l (expr p)])))
                     :else l))))]
       (let [v (expr 0)]
@@ -1455,6 +1471,8 @@
   [x b tid]
   (cond
     (and (map? x) (= :tparam-v (:k x)) (= tid (:tid x))) (let [a (get b (:i x))] (cond (nil? a) x (contains? a :val) (:val a) :else a))
+    ;; (cpp-tzdb: an enumerator kept typed in a dependent conditional, its value once substituted)
+    (and (map? x) (= :elit (:k x))) (:v x)
     (and (map? x) (= :texpr (:k x)) (:args x) (not= :sr (:o x)) (not= "cast" (:o x)))
     (let [args (mapv #(subst-value % b tid) (:args x))]
       (if (every? number? args) (let [v (fold (:o x) args)] (if (u64? v) (lng v) v)) (assoc x :args args)))
@@ -3244,7 +3262,21 @@
              :types (into {} (for [a (constraint-texts node)
                                    :let [ty (try (sema/resolve-type s a) (catch Exception _ nil))]
                                    :when (and (map? ty) (:k ty))]
-                               [a ty]))))))
+                               [a ty]))
+             ;; (cpp-tzdb: an unqualified name of a static data member of the enclosing class, mangled as clang writes a
+             ;; declaration's reference, L <the pattern's member's name> E: <ranges>' subrange's constructor `requires
+             ;; (!_S_store_size)`, QntL_ZNS_8subrange13_S_store_sizeEE)
+             :members (into {} (for [x (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) node)
+                                     :when (and (map? x) (= "DeclRefExpr" (:kind x)) (empty? (:qualifier x)) (nil? (:explicitTemplateArgs x)))
+                                     :let [nm (get-in x [:referencedDecl :name])]
+                                     :when (and (string? nm) (not (contains? pnames nm)))
+                                     :let [e (first (try (sema/lookup s nm) (catch Exception _ nil)))]
+                                     :when (= :var (:e e))
+                                     :let [v (sema/var* (:id e)) [k cid] (peek (vec (:path v)))]
+                                     :when (and (= :member-static (:storage v)) (= :cls k))
+                                     :let [c (abi/cls cid)]
+                                     :when (and c (:name c) (:tmpl c))]
+                                 [nm {:path (vec (:path c)) :cls (:name c)}]))))))
 
 (defn member-tq
   "cpp-rt-own3: a templated member function's trailing requires-clause `rc` as abi mangles it after its parameters (sema's

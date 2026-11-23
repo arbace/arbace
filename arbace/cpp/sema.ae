@@ -7840,6 +7840,25 @@
                     (= (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty cf))) (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty bf))))
                     ((:tiebreak @hooks) (:fn c) best 2))))))
 
+(def ^:private ^:dynamic *reversing-eq*
+  "cpp-tzdb: the operand types [y x] of the reversed y == x being resolved (reversed-eq), so that it is not reversed back."
+  nil)
+
+(defn- reversible-eq?
+  "cpp-tzdb (the code generator): whether x == y with no viable candidate may take a reversed one, y == x's ([over.match.oper]/3.4.4,
+  C++20), once (not from inside a reversed one)."
+  [o args]
+  (and (not (checking?)) (= o "==") (= 2 (count args)) (>= (long *cxx-year*) 20) (not= *reversing-eq* (mapv :ty args))
+       (some #(class-id (:ty %)) args)))
+
+(defn- reversed-eq
+  "cpp-tzdb (the code generator): x == y by a reversed candidate, the operator== found for y == x ([over.match.oper]/3.4.4): a
+  string == string_view by <string_view>'s operator==(basic_string_view, __type_identity_t<basic_string_view>), its second
+  parameter taking the string by its conversion function; equality_comparable_with<string_view, const string&>, tzdb.cc's
+  ranges::equal_range over Rule::name (nil when none is viable that way either)."
+  [ctx args]
+  (binding [*reversing-eq* [(:ty (second args)) (:ty (first args))]] (operator-call ctx "==" [(second args) (first args)])))
+
 (defn operator-call
   "An overloaded operator's call ([over.match.oper]): the members of the first operand's class and the non-members found
   by unqualified lookup and ADL; nil when none is viable (the built-in operator then)."
@@ -7869,6 +7888,7 @@
         ;; C++20's rewritten candidate: a != b as !(a == b)
         (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
         (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
+        (reversible-eq? o args) (reversed-eq ctx args)
         :else nil)
       (let [;; one candidate set ([over.match.oper]/3): members as functions of the remaining operands with the object
             ;; as their first, non-members of all
@@ -7894,7 +7914,8 @@
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
                             ;; (CP338 (a): none viable, a != b's rewritten candidate !(a == b), [over.match.oper]/3.4: a
                             ;; class's defaulted operator!= visible in a defaulted <=>'s body, (x <=> y) != 0 of std::strong_ordering)
-                            (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr}))
+                            (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
+                            (reversible-eq? o args) (reversed-eq ctx args))
           ;; (cpp-rt-own4, the code generator: the built-in candidate for two operands of one enumeration type, [over.built]/16's
           ;; operator==(T, T) and the relational ones, exact matches, better than a function reached through a user-defined
           ;; conversion of an operand ([over.match.best]/2.1, [over.ics.rank]/2.1): floating_from_chars.cc's auto_locale, `ec ==
