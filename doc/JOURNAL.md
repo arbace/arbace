@@ -19732,3 +19732,39 @@ cpp-small's :cx/reported guard around cpp-ce2's line-0 header error), the journa
 turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read again on the merged tree: 46 own pass and the control pair
 failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
 5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.
+
+
+## 2026-11-23: cpp-tpl2, the checker's templates (branch `cpp-tpl2-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the templates group of the read cell's 410 deferred rows (the proposal's "templates ~96",
+`.tmp/goal/cpp-na-proposal.md`): the 112 deferred rows under template/, cpp0x/variadic*, alias-decl*, sfinae*, partial
+specializations, typename and template arguments grouped by cause from the own record (test/cpp/check-dg-own-linux-amd64.edn) and
+g++ 15.2's recorded errors (`.tmp/goal/cpp-na-work/gxx/`). The largest cause by far: GCC's explanation of a failed deduction, an
+error at the template's construct ("In substitution of ...") beside the call's "no matching function", which the own front end
+never gave, and the substitution failures themselves, which it mostly took for its own doubt (a call with an unsure drop is not
+diagnosed). Built from the standard's text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2" names each rule.
+
+Checked: each rule on its files and on reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over a dg.edn entry);
+the 459 own passes in the touched directories at the first state, then two runs of `bin/repr-cpp dg --corpus dg-error --front
+native --only` over every own pass with the targets (2,389 files at `e6b85eecb`: 20 to own pass, none lost but the two files past
+300 s under load that cpp-1123 and cpp-ce2 met, cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C, their rows
+kept), then over every own pass and every deferred row (2,685 files at `2eedd719f`: 38 to own pass; two own passes lost to the new
+incomplete-base rule, a closure type as a base, fixed at `7eb29b82f` by leaving closures and unnamed classes out, those six files read
+again); the control pair failing as it must.
+
+The record: `bin/repr-cpp dg --corpus dg-error --front native --only` the 2,685 files `--judge --record` over that run, then the six files
+the closure fix touches `--record` (stage 0, GOMEMLIMIT=3000MiB), the two timeouts' rows kept as recorded passes (as cpp-1123 and cpp-ce2
+did). 38 rows to own pass, none lost. Cells: C++ read 5,872 / 0 / 410 (249 n/a) -> 5,910 / 0 / 372; completeness 0.9770 -> 0.9785,
+independence 0.9666 -> 0.9672 (the read stage 0.835 -> 0.838); eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score
+--record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: GCC's explanations reported at the moment a template drops out (rejected: a drop inside an outer SFINAE context
+would report errors GCC gives none of; they ride on the call's "no viable function" refusal and are reported only when it reaches a
+handler); every refusal in a substituted signature taken as sure (rejected: the slice's own gaps would turn unsure drops into false
+"no matching function" errors; only the constructs [temp.deduct.general]/11 names, and sure-failure?'s list for expressions); a
+partial specialization not deducible dropped (rejected: GCC keeps it as a declaration, so its arguments' class is incomplete, which the
+tests expect); "not more specialized than the primary" by the existing partial ordering (deferred: a wrong ordering would reject valid
+partial specializations, which are everywhere in the headers).
+
+Left: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2", "Left"; the concepts group not begun but for concepts-dr1430.C.
+

@@ -450,6 +450,22 @@
    [:constraint #"^codegen: constraint expression does not have type 'bool'" "atomic constraint must be of type 'bool'"]
    ;; (n-cpp-concepts: [temp.spec.partial.general]/9.2)
    [:template #"^codegen: partial specialization of '.*' does not specialize any template arguments" "partial specialization does not specialize any template arguments"]
+   ;; (cpp-tpl2: [temp.arg.template]/3-4 in a class template's template-id, template.ae's cx-ttp-arg-mismatch?)
+   [:template #"^codegen: a template template argument whose parameters do not match" "type/value mismatch in a template argument list"]
+   ;; (cpp-tpl2: a qualified name of a type a complete class does not declare, sema's resolve-type-form)
+   [:type #"^codegen: unknown type .*: no type named '.*' in the complete class" "no type named in the class"]
+   ;; (cpp-tpl2: [class.copy.ctor]/5, sema's declare-fn!)
+   [:decl #"^codegen: invalid constructor: " "copy constructor must pass its first argument by reference"]
+   ;; (cpp-tpl2: template.ae's template-id, a member class named as a template)
+   [:template #"^codegen: '.*' names a class, which is not a class template" "is not a class template"]
+   ;; (cpp-tpl2: a typename-specifier naming a member class template before C++17, sema's resolve-type-form)
+   [:name #"^codegen: '.*' names a template, which is not a type" "typename specifier refers to a member template, not a type"]
+   ;; (cpp-tpl2: [temp.explicit]/4, template.ae's cx-explicit-var-type!)
+   [:template #"^codegen: type of the explicit instantiation of '.*' does not match declared type" "explicit instantiation does not match the declared type"]
+   ;; (cpp-tpl2: CWG 1430, template.ae's template-id)
+   [:template #"^codegen: pack expansion argument for non-pack parameter of (alias template|concept)" "pack expansion used as argument for non-pack parameter of alias template or concept"]
+   ;; (cpp-tpl2: [temp.spec.partial.match]/3)
+   [:template #"^codegen: template parameters not deducible in partial specialization" "template parameters not deducible in partial specialization"]
    [:undecl #"^codegen: use of undeclared identifier" "use of undeclared identifier"]
    ;; (queue 487: [basic.lookup.general]/1 and /4 through using-directives, [namespace.udir]/2, [namespace.qual]/2)
    [:ambiguous #"^codegen: reference to '.*' is ambiguous" "reference to X is ambiguous"]
@@ -612,6 +628,14 @@
                   n (or (:cx/node (ex-data e)) n)
                   off (get-in n [:range :begin :offset])]
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
+              ;; (cpp-tpl2: a call with no viable function reported with its candidates' substitution failures, each an error at its
+              ;; construct in the template's declaration, as GCC's explanations; arbace.cpp.template/call-candidates)
+              (when rule
+                (doseq [{xm :msg xn :node} (:cx/explain (ex-data e))]
+                  (when-let [xo (get-in xn [:range :begin :offset])]
+                    (when-let [st (sema-starts main starts (get-in xn [:range :begin :file]))]
+                      (let [[l c] (line-col st (long xo))]
+                        (.add out {:line l :col c :kind :error :rule :sema :msg (str "substitution failure (" (subs xm 9 (min 100 (count xm))) ")")}))))))
               (if-let [st (when (and rule off) (sema-starts main starts (get-in n [:range :begin :file])))]
                 (let [[l c] (line-col st (long off))]
                   (when-not (and (= :narrowing cls) (contains? nw-off l))
@@ -4244,10 +4268,22 @@
                                          (not-any? #(= "CXXConstructorDecl" (:kind %)) (:inner r)))
                                 (report! v (str "conversion from 'int' to non-scalar type '" nm "<" as ">' requested"))))))))))
                 (:nodes u) nil)
-    (walk-nodes (fn [c _]
-                  (when (and (= "CallExpr" (:kind c)) (= "__integer_pack" (get-in (first (:inner c)) [:referencedDecl :name])))
-                    (report! c "use of built-in parameter pack '__integer_pack' outside of a template")))
-                (:nodes u) nil)
+    ;; (cpp-tpl2: a call within a template's declaration, an alias template's argument list or a templated function's body, is
+    ;; inside a template: cpp0x/variadic184.C, cpp1z/constexpr-if-lambda3.C had been reported)
+    ;; (a node of the template's copied elsewhere, an alias's expansion the parser keeps on a use, keeps its place: judged by it)
+    (let [inside (java.util.HashSet.) outside (java.util.ArrayList.)]
+      (letfn [(w [x in-t]
+                (cond
+                  (map? x) (let [in-t (or in-t (contains? #{"TypeAliasTemplateDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl"
+                                                            "ClassTemplatePartialSpecializationDecl" "VarTemplatePartialSpecializationDecl"} (:kind x)))]
+                             (when (and (= "CallExpr" (:kind x)) (= "__integer_pack" (get-in (first (:inner x)) [:referencedDecl :name])))
+                               (if in-t (.add inside (off x)) (.add outside x)))
+                             (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))] (w v in-t)))
+                  (or (vector? x) (seq? x)) (doseq [y x] (w y in-t))
+                  :else nil))]
+        (w (:nodes u) false))
+      (doseq [x outside :when (not (.contains inside (off x)))]
+        (report! x "use of built-in parameter pack '__integer_pack' outside of a template")))
     (vec (distinct out))))
 
 (def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
