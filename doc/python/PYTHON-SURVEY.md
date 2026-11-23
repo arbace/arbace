@@ -8106,3 +8106,50 @@ patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s lis
 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
 (`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
 `:finalization-cycle` by design.
+
+## As built: 537, the largest by-design classes at eval: _hashlib over Go's crypto, the pseudo-terminal functions (2026-11-23, the Mac VM, queue 537)
+
+The eval cell's `:kind :design` classes, largest first by the record's rows (test/python/check-lib-test-linux-amd64.edn at next
+fa635f636, classified as `bin/reap` does, the references' outcomes keying `:ref-outcomes`): `:c-accelerators` 1,092 (the main
+host's), `:skipped-by-test` 236, `:extension-modules` 66, `:finalization` 57, `:finalization-cycle` 25, `:coroutines` 20,
+`:ssl-go-tls` 19, `:gc-collector` 14, `:child-is-pyi` 10, `:inline-values` 9, `:fails-under-cpython-too` 8, `:pyio` 7 (535's),
+`:openssl` 6, `:subtest-ids` 6, `:pyio-size-type` 5 (535's), the rest 3 or fewer.
+
+- **`_hashlib` built** (`go/arbace/py/builtins_hashopenssl.ae`): Modules/_hashopenssl.c of CPython 3.14.10 over Go's crypto in
+  place of OpenSSL's EVP interface, as `_ssl` is over Go's crypto/tls (PYS22 (a)). `new`, the twelve `openssl_*` constructors,
+  `HASH` and `HASHXOF` (a subclass), `hmac_new` and `HMAC` (builtins_hmac.go's hmacObject with this module's type; the methods
+  shared by `hmacMethods`), `hmac_digest`, `pbkdf2_hmac` (RFC 8018 over the module's HMAC), `scrypt` (RFC 7914: Salsa20/8,
+  BlockMix, ROMix, with OpenSSL 3's parameter checks and its 32 MiB default memory limit), `compare_digest` (`_operator`'s),
+  `get_fips_mode` (0), `openssl_md_meth_names`, `_constructors`, `UnsupportedDigestmodError`, `_GIL_MINSIZE`. The digests are
+  `py_hashes`' that Go has (md5, sha1, sha2 with the truncated sha512s, sha3, shake, blake2 by hashlib_blake2.go), found by the
+  Python name or OpenSSL's names and aliases without case; OpenSSL's md5-sha1, ripemd160 and sm3 are not offered (absent from
+  `openssl_md_meth_names`). OpenSSL's error-queue words are kept ("[digital envelope routines] unsupported", "no reason
+  supplied" for an HMAC over an XOF or `HASH.digest` of one, scrypt's "memory limit exceeded"). hashlib.py and hmac.py now take
+  it first, as CPython's do.
+- **The pseudo-terminal functions** (`builtins_posix_ext.ae`): `os.posix_openpt`, `grantpt`, `unlockpt`, `ptsname` as
+  posixmodule.c over musl 1.2.6 (grantpt does nothing; unlockpt TIOCSPTLCK 0; ptsname TIOCGPTN's /dev/pts/N; the fildes converter).
+- **Pickling refusals** name the type's tp_name ("cannot pickle '_hashlib.HASH' object", '_md5.md5', 'zlib.Compress').
+- **int() and complex() as 3.14's constructors**: `int(x)` of an int subclass calls its own `__int__` (PyNumber_Long's nb_int;
+  a strict subclass of int returned is deprecated, as for `__index__`); `complex(x)` returns a single exact complex argument as
+  it is, looks `__complex__` up on any type but that one (a complex subclass's too: test_complex's complex0, complex1), warns
+  of a strict subclass of complex returned (Issue #29894), and in complex_new_impl's path (two arguments or keywords) warns of
+  a complex 'real' even without 'imag' and refuses a string ("argument 'real' must be a real number, not str"); cmath's and the
+  C API getargs' `D` take the same warning (PyComplex_AsCComplex).
+
+Proofs (the VM, eval on goi with the checkout's runtime, `bin/pyi check --only`, the negative controls failing as they must in
+each run): test_hmac 143 ok and 3 bigmem skips, test_hashlib 76 ok and 14 skips (CPython's resources), test_os' two
+PseudoterminalTests, test_int, test_complex, test_cmath, test_index, test_capi's test_D, test_uuid and test_urllib2 (two
+timeouts past 300 s at load 30-50, both children of pyi on goi; test_http_body_pipe passes alone); a differential probe of
+`_hashlib` (83 lines) and of `complex()` (70 cases) against python3 3.14.10, equal but the pickling message fixed after.
+The record's rows of the modules run were written from those runs' results (`bin/pyi check --record` refuses a runtime not
+compiled; the main host's next record replaces them): 64 rows to pass, 2 setUpClass skip rows dropped, 3 rows kept as recorded
+(the two timeouts, test_int's timing test). Python eval at next 320e74469 (the user's n/a decisions merged): 40,552 / 1,398 /
+1,585 (4,789 n/a) -> 40,616 / 1,338 / 1,579; `:skipped-by-test` 87 -> 36, `:openssl` 6 -> 0, `:coroutines` 20 -> 17.
+
+What stays (queue 537's report, `.tmp/q537/537-py-design.md` on the VM, its DECISIONs): `:c-accelerators` (the main host's),
+`:extension-modules` (66: built by py-capi-1122 after the record's commit, moved by the next whole record), `:finalization` (57),
+`:finalization-cycle` (13), `:weakref-list` (3) and `:coroutines`' two test_bpo_45813 (reference counting's moment),
+`:coroutines`' 15 test_warnings DeprecatedTests (`:warnings-c`'s cause: no C `_warnings`, whose `warn` reads
+`sys.modules['warnings']` at each call, which BaseTest.setUp swaps; `_py_warnings`' `_wm` does not follow), `:ssl-go-tls` (19),
+`:child-is-pyi` (10), the `_pyio` classes (535's), `:skipped-by-test`'s 36 (among them `_elementtree` 19 and `_zoneinfo` 2:
+accelerators; `_testbuffer` 3; the UTF-8 mode 3; ctypes' complex and dllist 6, the main host's).
