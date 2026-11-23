@@ -157,8 +157,9 @@ END {
   }
   if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
   # toplevel modes (queue 529, DECISION 528-7 (a): the toplevel on oi through oi's Dynlink, judged by the test's own .reference), at oi's
-  # level alone (the light AOT level does not load compiler-libs' typing units in its limit, DECISION 480-1; the compiled level's is the
-  # main host's, 528-8):
+  # level and the compiled level (queue 544, the user's decision (a) of 2026-11-23: the toplevel compiled, each phrase's Lambda loaded as a
+  # plugin by the embedded oi, jdk/ocaml's Oi), not the light AOT level (it does not load compiler-libs' typing units in its limit,
+  # DECISION 480-1):
   # - ocamltex: a header of ocamltest's script action running tools/ocamltex (`script = "[${ocamlrun}] ${ocamlsrcdir}/tools/ocamltex -repo-root
   #   ${ocamlsrcdir} ${readonly_files} -o ${output}"; script with unix, str; check-program-output`, readonly_files the test's TEST.input,
   #   output TEST.output, reference its own .reference, the shared-libraries and no-shared-libraries alternatives the same script): the
@@ -170,7 +171,7 @@ END {
   #   check-program-output`): environment @tool=toplevel @dyncopy=READONLY,... @topmods=F.ml,... @topscript=S.ml:A,... @topall=FILE,...
   #   and OCAMLLIB=_stdlib (the run directory's standard library .cmi files, made on oi: ${ocamlsrcdir}/stdlib's are the build's)
   cxmode = 0; tlmode = 0
-  if (aot == 0 && !dlmode && !odmode) {
+  if ((aot == 0 || aot == 2) && !dlmode && !odmode) {
     tb = FILENAME; sub(/^.*\//, "", tb); sub(/\.mll?$/, "", tb)
     cxmode = 1; cxscript = 0; cxcheck = 0
     for (j = 1; j <= m && cxmode; j++) {
