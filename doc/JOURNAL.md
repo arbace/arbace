@@ -19030,7 +19030,6 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
 
-<<<<<<< HEAD
 ## 2026-11-23: Scheme's last by-design rows: SCS4 (d)'s records, SCS38 (a) (branch `smalls-1123`, from mac/next `fa635f636`)
 
 The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.md).
@@ -19543,7 +19542,6 @@ Then mac/536-py-deferred (`fe8f03006`, the Mac's queue 536: test_audit, test_pat
 goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18) merged, test/python/divergences.edn's
 both sides' class changes kept, reap and crops-score recorded again. 536 makes go/arbace/py export Audit and AuditActive,
 so goi's table and its table check need a gate build: it rides train 2.
-=======
 ## 2026-11-23: queue 536, Python eval's largest deferred classes (the VM; branch `536-py-deferred`)
 
 Brief: `.tmp/worktrees/q/tasks/536-py-deferred.md` (the deferred classes of test/python/divergences.edn, largest first; 537 the
@@ -19601,7 +19599,6 @@ remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild
 - Alternatives left: a wrapper raising FileIO's "open" (withdrawn: 535's _io), ssl's and readline's "open" events (written, withdrawn
   with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
   owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
->>>>>>> mac/536-py-deferred
 
 ## 2026-11-23: cpp-small, C++'s read tail G1, G2 and H built (branch `cpp-small-1123` from mac/next `e52a17d33`)
 
