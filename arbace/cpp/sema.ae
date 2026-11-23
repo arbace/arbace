@@ -8489,6 +8489,230 @@
       (assoc r :cx-at (let [b (get-in n [:range :begin])] (if-let [x (:expansionLoc b)] (assoc (:range n) :begin x) (:range n))))
       r)))
 
+;; ---------------------------------------------------------------------------------------------
+;; __PRETTY_FUNCTION__ as GCC writes it (cpp-1123; the GCC 15.2 manual, "Function Names as Strings": "the signature of the
+;; function as well as its bare name"; the spelling below observed on g++ 15.2 by hand, behaviour only, no GCC code): the
+;; declaration specifiers static and virtual, the return type (none for a constructor, destructor or conversion function),
+;; the qualified name, the parameters, the cv- and ref-qualifiers; a function of a template (a member of a class template's
+;; specialization, a function template's specialization) printed as its pattern, its parameters' names, then
+;; " [with P = A; ...]" binding them, the function template's parameters first, then each enclosing class template's from
+;; the innermost out. Types print as GCC's: `long int`, `long unsigned int`, `char*`, `const char*`, `int (*)(int)`,
+;; `int (&)[3]`, `std::nullptr_t`, `std::vector<std::vector<int> >`, namespaces' `{anonymous}`; a specialization's trailing
+;; arguments that are the standard library's defaults (allocator, char_traits, less, hash, equal_to, default_delete of the
+;; first argument) left out as GCC leaves out an argument equal to its default. A pattern's types print from their
+;; spelling, normalized (GCC prints them from its trees: a spelling's own qualification is kept).
+
+(def ^:private gcc-builtin-names
+  {:bool "bool" :char "char" :schar "signed char" :uchar "unsigned char" :char8 "char8_t" :short "short int"
+   :ushort "short unsigned int" :char16 "char16_t" :int "int" :uint "unsigned int" :char32 "char32_t" :wchar "wchar_t"
+   :long "long int" :ulong "long unsigned int" :llong "long long int" :ullong "long long unsigned int" :i128 "__int128"
+   :u128 "__int128 unsigned" :float "float" :double "double" :ldouble "long double" :void "void" :nullptr "std::nullptr_t"
+   :float16 "_Float16" :float128 "__float128"})
+
+(declare gcc-type-str gcc-spell)
+
+(defn- gcc-tmpl-params
+  "The template `tid`'s parameters ([{:name :kind :qt}]), from arbace.cpp.template's state when it is loaded."
+  [tid]
+  (when-let [v (resolve 'arbace.cpp.template/*tmpls*)]
+    (when-let [a @v] (:params (get @a tid)))))
+
+(defn- gcc-default-arg?
+  "Whether a class specialization's trailing argument `a` is one the standard library's templates default from the
+  first argument `a0` (GCC leaves an argument equal to its default out)."
+  [a a0]
+  (and (abi/class? a)
+       (let [c (abi/cls (:id a))]
+         (and (= "std" (some (fn [p] (when (= :ns (first p)) (second p))) (:path c)))
+              (contains? #{"allocator" "char_traits" "less" "hash" "equal_to" "default_delete"} (:name c))
+              (= [(abi/unq a0)] (mapv abi/unq (:targs c)))))))
+
+(defn- gcc-arg-str ^String [a]
+  (cond
+    (and (map? a) (contains? a :val))
+    (let [v (:val a) t (abi/unq (:ty a))]
+      (cond (= :bool (abi/bn t)) (if (and v (not= 0 v) (not= false v)) "true" "false")
+            (and (#{:char :schar :uchar} (abi/bn t)) (integer? v) (<= 32 (long v) 126)) (str "'" (char (long v)) "'")
+            :else (str v)))
+    (map? a) (gcc-type-str a)
+    :else (str a)))
+
+(defn- gcc-targs-str ^String [args & [tid]]
+  (let [args (vec args)
+        params (when tid (vec (gcc-tmpl-params tid)))
+        ;; a trailing argument equal to its parameter's default: a library default of the first argument's, or one whose
+        ;; default's spelling prints as the argument does (`class U = int`)
+        dflt? (fn [as] (let [i (dec (count as)) a (peek as) d (:default (get params i))]
+                         (or (gcc-default-arg? a (first as))
+                             (and (string? d) (map? a) (not (contains? a :val)) (= (gcc-spell d) (gcc-arg-str a))))))
+        args (loop [as args] (if (and (> (count as) 1) (dflt? as)) (recur (pop as)) as))
+        s (str/join ", " (map gcc-arg-str args))]
+    (str "<" s (if (str/ends-with? s ">") " >" ">"))))
+
+(defn- gcc-scope-str
+  "The qualification of the parts `path` (`ns::C<int>::`), \"\" for the global namespace."
+  ^String [path]
+  (apply str (for [p path]
+               (str (case (first p)
+                      :ns (second p)
+                      :anon "{anonymous}"
+                      :cls (let [c (abi/cls (second p))] (str (:name c) (when (:tmpl c) (gcc-targs-str (:targs c) (:tmpl c)))))
+                      :enum (:name (abi/enm (second p)))
+                      "?")
+                    "::"))))
+
+(defn- gcc-class-name ^String [c]
+  (str (gcc-scope-str (:path c)) (or (:name c) "<unnamed>") (when (:tmpl c) (gcc-targs-str (:targs c) (:tmpl c)))))
+
+(defn- gcc-decl
+  "GCC's spelling of the type `t` around the declarator `d` (\"\" for an abstract one)."
+  ^String [t ^String d]
+  (let [cv (str (when (:c t) "const") (when (and (:c t) (:v t)) " ") (when (:v t) "volatile"))
+        group? (fn [^String s] (boolean (re-find #"^(\*|&|[A-Za-z_{].*::\*)" s)))
+        wrap (fn [^String s] (if (group? s) (str "(" s ")") s))
+        lead (fn [^String base ^String d] (cond (str/blank? d) base
+                                                (or (str/starts-with? d "(") (str/starts-with? d "[")) (str base " " d)
+                                                (re-find #"^[A-Za-z_]" d) (str base " " d)
+                                                :else (str base d)))
+        named (fn [^String n] (lead (if (seq cv) (str cv " " n) n) d))]
+    (case (:k t)
+      :b (named (get gcc-builtin-names (:n t) (name (:n t))))
+      :class (named (gcc-class-name (abi/cls (:id t))))
+      :enum (named (let [e (abi/enm (:id t))] (str (gcc-scope-str (:path e)) (:name e))))
+      :ptr (gcc-decl (:to t) (str "*" (when (seq cv) (str " " cv)) d))
+      :ref (gcc-decl (:to t) (str "&" d))
+      :rref (gcc-decl (:to t) (str "&&" d))
+      :mptr (gcc-decl (:to t) (str (if (map? (:cls t)) (gcc-type-str (:cls t)) (gcc-class-name (abi/cls (:cls t)))) "::*" (when (seq cv) (str " " cv)) d))
+      :arr (gcc-decl (:of t) (str (wrap d) "[" (or (:n t) "") "]"))
+      :fn (gcc-decl (:ret t) (str (wrap d) "(" (str/join ", " (concat (map #(gcc-decl % "") (:ps t)) (when (:va t) ["..."]))) ")"))
+      (:tparam :tdep) (named (str (or (:name t) "?")))
+      (named (or (:name t) "?")))))
+
+(defn gcc-type-str ^String [t] (gcc-decl t ""))
+
+(defn- gcc-builtin-spelling
+  "A run of the builtin type keywords as GCC names the type (`unsigned` unsigned int, `long unsigned` long unsigned int)."
+  ^String [ws]
+  (let [n-long (count (filter #{"long"} ws)) u (some #{"unsigned"} ws) s (some #{"signed"} ws)
+        has (fn [w] (some #{w} ws))]
+    (cond
+      (has "char") (cond u "unsigned char" s "signed char" :else "char")
+      (has "short") (if u "short unsigned int" "short int")
+      (has "double") (if (pos? n-long) "long double" "double")
+      (= 2 n-long) (if u "long long unsigned int" "long long int")
+      (= 1 n-long) (if u "long unsigned int" "long int")
+      u "unsigned int"
+      :else "int")))
+
+(defn- gcc-spell
+  "A type's spelling as written, normalized to GCC's printing: one space between words, none before `*` and `&`, a space
+  after a comma, builtin keyword runs as GCC names them, `T const` as `const T` for a single word."
+  ^String [^String s]
+  (let [toks (re-seq #"[A-Za-z_][A-Za-z_0-9]*|::|\.\.\.|&&|[^\sA-Za-z_0-9]" (str s))
+        kw #{"unsigned" "signed" "short" "long" "int" "char" "double"}
+        toks (loop [ts toks out []]
+               (if-let [t (first ts)]
+                 (if (and (kw t) (not (and (= t "int") (empty? (filter #{"unsigned" "signed" "short" "long"} (take-while kw ts)))
+                                           (not (kw (second ts)))))
+                          (not (and (#{"char" "double"} t) (not (kw (second ts))))))
+                   (let [run (take-while kw ts)] (recur (drop (count run) ts) (conj out (gcc-builtin-spelling run))))
+                   (recur (rest ts) (conj out t)))
+                 out))
+        word? (fn [^String t] (boolean (re-find #"^[A-Za-z_0-9]" t)))]
+    (loop [ts toks prev nil sb (StringBuilder.)]
+      (if-let [^String t (first ts)]
+        (let [sep (cond (nil? prev) ""
+                        (= prev ",") " "
+                        (and (word? prev) (word? t)) " "
+                        (and (= prev ">") (word? t)) " "
+                        (and (#{"*" "&" "&&"} prev) (word? t)) " "
+                        (and (= t "(") (word? prev)) " "
+                        (and (= t "(") (= prev ">")) " "
+                        :else "")]
+          (recur (rest ts) t (.append (.append sb ^String sep) t)))
+        (-> (str sb) (str/replace #"^(\w+) const(?=$|[*&])" "const $1") (str/replace ">>" "> >"))))))
+
+(defn- gcc-split-fn-text
+  "A function type's spelling `R (P, ...) quals`: [R [P ...]] at its outermost parameter list, or nil."
+  [^String qt]
+  (let [s (str qt) n (count s)]
+    ;; the parameter list: the top-level parenthesis whose group is followed only by qualifiers
+    (loop [i 0 depth 0 start -1 found nil]
+      (if (>= i n)
+        (when found
+          (let [[a b] found
+                inner (subs s (inc a) b)
+                ps (loop [j 0 d 0 cur (StringBuilder.) acc []]
+                     (if (>= j (count inner))
+                       (let [c (str/trim (str cur))] (if (seq c) (conj acc c) acc))
+                       (let [ch (.charAt inner j)]
+                         (cond
+                           (and (= ch \,) (zero? d)) (recur (inc j) d (StringBuilder.) (conj acc (str/trim (str cur))))
+                           (#{\( \< \[} ch) (recur (inc j) (inc d) (.append cur ch) acc)
+                           (#{\) \> \]} ch) (recur (inc j) (dec d) (.append cur ch) acc)
+                           :else (recur (inc j) d (.append cur ch) acc)))))]
+            [(str/trim (subs s 0 a)) (if (= ps ["void"]) [] ps)]))
+        (let [ch (.charAt s i)]
+          (cond
+            (and (= ch \() (zero? depth)) (recur (inc i) 1 i found)
+            (#{\( \< \[} ch) (recur (inc i) (inc depth) start found)
+            (and (= ch \)) (= depth 1)) (recur (inc i) 0 -1 (if (re-matches #"\s*(const|volatile|&|&&|noexcept(\(.*\))?|throw\s*\(.*\)|\s)*(->.*)?" (subs s (inc i))) [start i] found))
+            (#{\) \> \]} ch) (recur (inc i) (dec depth) start found)
+            :else (recur (inc i) depth start found)))))))
+
+(defn- gcc-pretty-function
+  "__PRETTY_FUNCTION__ of the function `f` (sema's record), or nil when its parts are not known (the bare name stands)."
+  [f]
+  (let [cid (:cls f)
+        c (when cid (abi/cls cid))]
+    (when-not (or (nil? f) (:lambda c))
+      (let [;; the template parameters bound around the function, innermost first: [[params args] ...]
+            fn-t (when-let [ti (:tinst f)] [(gcc-tmpl-params (:tid ti)) (:args ti)])
+            cls-chain (loop [c c acc []]
+                        (if-not c acc
+                          (recur (some (fn [p] (when (= :cls (first p)) (abi/cls (second p)))) (reverse (:path c)))
+                                 (if (:tmpl c) (conj acc [(gcc-tmpl-params (:tmpl c)) (:targs c)]) acc))))
+            binds (cond->> cls-chain fn-t (cons fn-t))
+            templated? (boolean (seq binds))
+            node (:node f)
+            pattern (when templated? (gcc-split-fn-text (get-in node [:type :qualType])))
+            _ (when (and templated? (not pattern)) (throw (ex-info "no pattern" {})))
+            pname (fn [c] (str (:name c) (when-let [ps (and (:tmpl c) (gcc-tmpl-params (:tmpl c)))]
+                                           (str "<" (str/join ", " (map #(str (:name %) (when (:pack %) "...")) ps)) ">"))))
+            cls-q (when c (str (if templated? (str (gcc-scope-str (:path c)) (pname c)) (gcc-class-name c)) "::"))
+            ns-q (if c cls-q (gcc-scope-str (vec (:path f))))
+            nm (case (:kind f)
+                 :dtor (str "~" (:name c))
+                 :ctor (str (:name c))
+                 :conv (str "operator " (if templated? (gcc-spell (first pattern)) (gcc-type-str (:ret (:ty f)))))
+                 (str (:name f)))
+            nm (if (and (:tinst f) (not (str/starts-with? nm "operator"))) (str/replace nm #"<.*$" "") nm)
+            ps (if templated?
+                 (mapv gcc-spell (second pattern))
+                 (vec (concat (map gcc-type-str (:ps (:ty f))) (when (:va (:ty f)) ["..."]))))
+            ret (when-not (#{:ctor :dtor :conv} (:kind f))
+                  (if templated? (gcc-spell (first pattern)) (gcc-type-str (:ret (:ty f)))))
+            with (when templated?
+                   (str/join "; " (for [[params args] binds :when (seq params)
+                                        [p a] (map vector params args)]
+                                    (str (when (= :value (:kind p)) (str (gcc-spell (:qt p)) " ")) (:name p) " = " (gcc-arg-str a)))))]
+        (str (when (and c (:static f)) "static ") (when (and c (:virtual f)) "virtual ")
+             (when ret (str ret " ")) ns-q nm "(" (str/join ", " ps) ")"
+             (when (:cq f) " const") (when-let [r (:refq f)] (str " " r))
+             (when (seq with) (str " [with " with "]")))))))
+
+(defn- predefined-name
+  "__func__, __FUNCTION__ (the bare name) or __PRETTY_FUNCTION__ (GCC's signature) of the function `f`."
+  ^String [f ^String which]
+  (let [bare (case (:kind f)
+               :dtor (str "~" (:name (abi/cls (:cls f))))
+               :ctor (str (:name (abi/cls (:cls f))))
+               :conv (str "operator " (gcc-type-str (:ret (:ty f))))
+               (let [nm (str (:name f))] (if (str/starts-with? nm "operator") nm (str/replace nm #"<.*$" ""))))]
+    (if (and f (= "__PRETTY_FUNCTION__" which))
+      (or (try (gcc-pretty-function f) (catch Exception _ nil)) bare)
+      (if f bare ""))))
+
 (defn- analyze-node
   [ctx n]
   (tick!)
@@ -8563,7 +8787,8 @@
                         :else (fail :string "a string literal of " (pr-str (:of t)))))
     ;; __func__, __FUNCTION__, __PRETTY_FUNCTION__ ([dcl.fct.def.general]/8): the enclosing function's name (the pretty
     ;; one approximated by the name: G4, the headers' assertions, whose strings no run reads)
-    "PredefinedExpr" (let [nm (or (:name (fnd (:fn-id ctx))) "")]
+    ;; (cpp-1123: each name as GCC gives it, __PRETTY_FUNCTION__ its signature, predefined-name; before, the bare name for all)
+    "PredefinedExpr" (let [nm (predefined-name (fnd (:fn-id ctx)) (str/trim (node-text n)))]
                        {:op :str :s nm :ty (abi/arr (inc (count nm)) (assoc abi/char* :c true)) :cat :lv})
     ;; a requires-expression ([expr.prim.req]): true when each requirement holds, its parameters local names of their
     ;; types; an expression's requirement holds when it analyzes (a substitution failure is false), a type's when it
