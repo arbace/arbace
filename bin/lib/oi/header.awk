@@ -156,6 +156,61 @@ END {
     odmode = (odmode == 2 && odplugins != "")
   }
   if (odmode) { helper = 0; env = env " @ocamldoc=1 @plugins=" odplugins; m = 0 }
+  # toplevel modes (queue 529, DECISION 528-7 (a): the toplevel on oi through oi's Dynlink, judged by the test's own .reference), at oi's
+  # level alone (the light AOT level does not load compiler-libs' typing units in its limit, DECISION 480-1; the compiled level's is the
+  # main host's, 528-8):
+  # - ocamltex: a header of ocamltest's script action running tools/ocamltex (`script = "[${ocamlrun}] ${ocamlsrcdir}/tools/ocamltex -repo-root
+  #   ${ocamlsrcdir} ${readonly_files} -o ${output}"; script with unix, str; check-program-output`, readonly_files the test's TEST.input,
+  #   output TEST.output, reference its own .reference, the shared-libraries and no-shared-libraries alternatives the same script): the
+  #   run is bin/oi's ocamltex on oi (tools/ocamltex.ml over compiler-libs' toplevel, bin/lib/oi/tools.bash), arguments `-repo-root _root
+  #   TEST.input -o TEST.output`, environment @tool=ocamltex @dyncopy=TEST.input, its output TEST.output (tool_output's)
+  # - toplevel: self-contained-toplevel's header (setup-ocamlc.byte-build-env; `module = "F.ml"; ocamlc.byte` each; the `ocaml` script
+  #   action, `test_file = "S.ml"; arguments = "A"; ocaml with ocamlcommon`; then `module = ""; program = ...; libraries += "...
+  #   ocamltoplevel"; all_modules = "..."; ocamlc.byte`; `set OCAMLLIB = "${ocamlsrcdir}/stdlib"; arguments = "ARGS"; run;
+  #   check-program-output`): environment @tool=toplevel @dyncopy=READONLY,... @topmods=F.ml,... @topscript=S.ml:A,... @topall=FILE,...
+  #   and OCAMLLIB=_stdlib (the run directory's standard library .cmi files, made on oi: ${ocamlsrcdir}/stdlib's are the build's)
+  cxmode = 0; tlmode = 0
+  if (aot == 0 && !dlmode && !odmode) {
+    tb = FILENAME; sub(/^.*\//, "", tb); sub(/\.mll?$/, "", tb)
+    cxmode = 1; cxscript = 0; cxcheck = 0
+    for (j = 1; j <= m && cxmode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      if (s == "reference = \"@TSD@/" tb ".reference\"" || s == "output = \"" tb ".output\"" || s == "readonly_files = \"@TSD@/" tb ".input\"") continue
+      if (s == "hasstr" || s == "hasunix" || s == "shared-libraries" || s == "no-shared-libraries" || s == "script with unix, str") continue
+      if (s ~ /^script *= *"(\$VAR )?@OCAMLSRCDIR@\/tools\/ocamltex -repo-root @OCAMLSRCDIR@ \$VAR -o \$VAR"$/) { cxscript = 1; continue }
+      if (s == "check-program-output") { cxcheck = 1; continue }
+      cxmode = 0
+    }
+    if (!(cxscript && cxcheck) || tb !~ /^[A-Za-z0-9_]+$/) cxmode = 0
+    if (!cxmode && hasbuild) {
+      tlmode = 1; tph = 0; tcur = ""; tmods = ""; tsf = ""; tsa = ""; tall = ""; targs = ""; tcopy = ""; tlib = 0; tchk = 0
+      for (j = 1; j <= m && tlmode; j++) {
+        s = trim(st[j]); if (s == "") continue
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+        if (s ~ /^readonly_files *= *"/ && tph == 0) { c = split(v, hm, " "); for (q = 1; q <= c; q++) tcopy = tcopy (tcopy == "" ? "" : ",") hm[q]; continue }
+        if (s == "setup-ocamlc.byte-build-env" && tph == 0) continue
+        if (s ~ /^module *= *"/) { if (tph == 0 && v ~ /^[A-Za-z0-9_]+\.ml$/) { tcur = v; continue } if (tph == 1 && v == "") continue; tlmode = 0; continue }
+        if (s == "ocamlc.byte" && tph == 0 && tcur != "") { tmods = tmods (tmods == "" ? "" : ",") tcur; tcur = ""; continue }
+        if (s == "ocaml_script_as_argument = \"true\"" && tph == 0) continue
+        if (s ~ /^test_file *= *"/ && tph == 0 && v ~ /^[A-Za-z0-9_]+\.ml$/) { tsf = v; continue }
+        if (s ~ /^arguments *= *"/ && tph == 0) { tsa = v; gsub(/ /, ",", tsa); continue }
+        if (s == "ocaml with ocamlcommon" && tph == 0 && tsf != "") { tph = 1; continue }
+        if (s ~ /^program *= *"\$VAR\/[A-Za-z0-9_]+\.exe"$/ && tph == 1) continue
+        if (s ~ /^libraries *\+= *"/ && tph == 1) { c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] == "ocamltoplevel") tlib = 1; else if (hm[q] != "ocamlbytecomp" && hm[q] != "ocamlcommon") tlmode = 0 }; continue }
+        if (s ~ /^all_modules *= *"/ && tph == 1) { tall = v; gsub(/ /, ",", tall); continue }
+        if (s == "ocamlc.byte" && tph == 1 && tall != "" && tlib) { tph = 2; continue }
+        if (s == "set OCAMLLIB = \"@OCAMLSRCDIR@/stdlib\"" && tph == 2) continue
+        if (s ~ /^arguments *= *"/ && tph == 2) { targs = v; continue }
+        if (s == "run" && tph == 2) { tph = 3; continue }
+        if (s == "check-program-output" && tph == 3) { tchk = 1; continue }
+        tlmode = 0
+      }
+      if (!(tph == 3 && tchk) || tmods == "") tlmode = 0
+      if (tlmode) { c = split(tcopy "," tmods "," tsf "," tsa "," tall " " targs, hm, /[, ]/); for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.]*$/) tlmode = 0 }
+    }
+  }
+  if (cxmode) { helper = 0; m = 0; incs = ""; args = "-repo-root _root " tb ".input -o " tb ".output"; env = env " @tool=ocamltex @dyncopy=" tb ".input" }
+  if (tlmode) { helper = 0; m = 0; incs = ""; args = targs; env = env " @tool=toplevel @dyncopy=" tcopy " @topmods=" tmods " @topscript=" tsf ":" tsa " @topall=" tall " OCAMLLIB=_stdlib" }
   # objinfo mode (queue 511: ocamltest's tools as Arbace's own, judged by the test's own .reference): a test at oi's level whose header
   # is ocamltest's compile-only test of a unit's .cmt (compile_only = "true"; setup-ocamlc.byte-build-env; all_modules = "FILES";
   # ocamlc.byte; check-ocamlc.byte-output with flags = "FLAGS", readonly_files and modules copied) followed by `program = "ARGS";
@@ -164,9 +219,30 @@ END {
   # .cmt and .cmti written by Typemod), then ocamlobjinfo's .cmt printing with ARGS; the row's environment @tool=objinfo and
   # @dyncopy=FILE,..., its libraries compiler-libs'; the compiler's own output (ocamlc.out) judged beside it by bin/oi's tool_output. At
   # oi's level alone: the light AOT level does not load compiler-libs' typing units in its limit (queue 480's DECISION 480-1)
+  # complete-exe mode (queue 528, DECISION 528-5: ocamltest's use_runtime = "false" tests, output-complete-obj/github9344 and test2): a
+  # test whose bytecode alternative links the program as a self-contained executable (setup-ocamlc.byte-build-env; flags = "-w -a
+  # -output-complete-exe [FILE.c ...] -ccopt -I${ocamlsrcdir}/runtime"; program = "NAME"; ocamlc.byte, NAME the test's own) and then runs
+  # it, either itself (program = "./NAME") or through a script of its source directory that runs ./NAME (program = "sh
+  # ${test_source_directory}/FILE.sh"; github9344.sh: OCAMLRUNPARAM=b=1, `./github9344 || true`), check-program-output after. The run
+  # is the program's: its C files its stubs (@cstubs=, the readonly files'), the script's run ocamltest's (@runscript=FILE:NAME: bin/oi's
+  # runners write ./NAME as the program and run `sh FILE` in its place, its output and status the row's). oi's level and the light AOT
+  # level (whose C stubs are the `oi capi` server's); the compiled level keeps the class (its runner has no script yet). Anything else
+  # in the alternative: the class
+  cemode = 0
+  if (aot <= 1 && hasbuild && !dlmode && !dpmode && !odmode) for (j = 1; j <= m; j++) if (trim(st[j]) ~ /^use_runtime *= *"false"$/) cemode = 1
+  if (cemode) helper = 0
+  # (queue 528, DECISION 528-6) also ocamltest's ocamlobjinfo test of a plugin (tool-ocamlobjinfo/question: shared-libraries;
+  # setup-ocamlopt.byte-build-env; flags = "-shared"; all_modules = "FILE.ml"; program = "NAME.cmxs"; ocamlopt.byte;
+  # check-ocamlopt.byte-output; ocamlobjinfo; check-program-output): oiobjinfo's `-shared FILES -o NAME.cmxs` writes Arbace's .cmxs (the
+  # plugin header Cmm_helpers.plugin_header gives, after its magic), which its ocamlobjinfo part reads as objinfo's dump_cmxs does.
+  # At oi's level alone: queue 528's probe ran shape-index/index_labels at the light AOT level (bin/oi's o2j_dump and o2j_env_runs take a
+  # tool row there: oiobjinfo translated by o2j, its compiler output judged as oi's) and it was killed at its 140 s CPU limit with 3 GB
+  # resident, so the AOT levels keep the class until the compiled level runs the tools (DECISION 528-8 (a), a task of its own)
+  hasoptbuild = 0
+  for (j = 1; j <= m; j++) if (trim(st[j]) == "setup-ocamlopt.byte-build-env") hasoptbuild = 1
   oimode = 0
-  if (aot == 0 && hasbuild && !dlmode && !dpmode && !odmode) {
-    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0
+  if (aot == 0 && (hasbuild || hasoptbuild) && !dlmode && !dpmode && !odmode && !cemode) {
+    oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0; oisrc = ""; oidst = ""; oicps = ""; oishared = ""; oiopt = 0
     for (j = 1; j <= m && oimode; j++) {
       s = trim(st[j]); if (s == "") continue
       v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
@@ -174,25 +250,77 @@ END {
       if (s ~ /^compile_only *= *"true"$/) { oico = 1; continue }
       if (s ~ /^(readonly_files|modules) *= *"/) { oicopy = oicopy " " v; continue }
       if (s ~ /^all_modules *= *"/) { oimods = v; oicopy = oicopy " " v; continue }
-      if (s == "setup-ocamlc.byte-build-env" || s == "check-ocamlc.byte-output" || s == "check-program-output") continue
+      if (s == "setup-ocamlc.byte-build-env" || s == "check-ocamlc.byte-output" || s == "check-program-output") { if (oiopt && s != "check-program-output") oimode = 0; continue }
+      if (s == "shared-libraries" && hasoptbuild) continue
+      if (s == "setup-ocamlopt.byte-build-env") { if (hasbuild) oimode = 0; oiopt = 1; continue }
+      if (s == "check-ocamlopt.byte-output") { if (!oiopt) oimode = 0; continue }
       if (s ~ /^output *= *"out_objinfo"$/) continue
-      if (s == "ocamlc.byte") { if (oimods == "" || oiobj) oimode = 0; oicomp = 1; continue }
-      if (s ~ /^program *= *"/) { if (!oicomp) oimode = 0; oiprog = v; continue }
+      # (queue 532) ocamltest's copy action before the compile (src = "A"; dst = "B"; copy), kept for the .cmo test below
+      if (s ~ /^(src|dst) *= *"/ && !oicomp) { if (s ~ /^src/) oisrc = v; else oidst = v; continue }
+      if (s == "copy" && !oicomp && oisrc != "" && oidst != "") { oicps = oicps (oicps == "" ? "" : ",") oisrc ":" oidst; oisrc = ""; oidst = ""; continue }
+      if (s == "ocamlc.byte") { if (oiopt || oimods == "" || oiobj) oimode = 0; oicomp = 1; continue }
+      if (s == "ocamlopt.byte") { if (!oiopt || oiflags != "-shared" || oishared == "" || oimods ~ / / || oimods !~ /\.ml$/ || oiobj) oimode = 0; oicomp = 1; oiprog = oishared; continue }
+      if (s ~ /^program *= *"/) { if (oiopt && !oicomp && v ~ /^[A-Za-z0-9_]+\.cmxs$/) { oishared = v; continue }; if (!oicomp) oimode = 0; oiprog = v; continue }
       if (s == "ocamlobjinfo") { if (oiprog == "") oimode = 0; oiobj = 1; continue }
       oimode = 0
     }
-    if (!(oico && oicomp && oiobj)) oimode = 0
+    if (!((oico || oishared != "") && oicomp && oiobj) || (oicps != "" && oiprog !~ /^[A-Za-z0-9_]+\.cmo$/)) oimode = 0
     if (oimode) {
-      c = split(oiflags " " oimods " " oiprog " " oicopy, hm, " ")
-      for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
+      c = split(oiflags " " oimods " " oiprog " " oicopy " " oicps, hm, /[ ,:]/)
+      for (q = 1; q <= c; q++) if (hm[q] != "" && hm[q] !~ /^[A-Za-z0-9_.+-]+$/) oimode = 0
     }
   }
   if (oimode) {
     c = split(oicopy, hm, " "); oicp = ""; delete oiseen
     for (q = 1; q <= c; q++) if (!(hm[q] in oiseen)) { oiseen[hm[q]] = 1; oicp = oicp (oicp == "" ? "" : ",") hm[q] }
     helper = 0; m = 0; incs = " complib"
-    args = trim("-c " oiflags " -nostdlib -I _stdlib " oimods " -objinfo " oiprog); gsub(/ +/, " ", args)
-    env = env " @tool=objinfo @dyncopy=" oicp
+    if (oishared != "") args = trim("-shared -nostdlib -I _stdlib " oimods " -o " oishared " -objinfo -null-crc " oiprog)
+    else args = trim("-c " oiflags " -nostdlib -I _stdlib " oimods " -objinfo " oiprog)
+    gsub(/ +/, " ", args)
+    # (queue 532) the unit's .cmo (program = "U.cmo"): the compile is ocamlc on oi (bin/lib/oi/tools.bash's bytecomp tool), `ocamlc
+    # -nostdlib -I _stdlib FLAGS -c FILES` after the copies (@cmocopy=SRC:DST,...), then ocamlobjinfo's .cmo printing (oiobjinfo, no file
+    # to compile) with ocamltest's -null-crc; environment @tool=cmo @bcflags=FLAG,... @bcmods=FILE,...
+    if (oiprog ~ /^[A-Za-z0-9_]+\.cmo$/) {
+      args = "-objinfo -null-crc " oiprog; bcf = trim(oiflags); gsub(/ +/, ",", bcf); bcm = trim(oimods); gsub(/ +/, ",", bcm)
+      env = env " @tool=cmo @dyncopy=" oicp " @bcflags=" bcf " @bcmods=" bcm (oicps == "" ? "" : " @cmocopy=" oicps)
+    } else env = env " @tool=objinfo @dyncopy=" oicp
+  }
+  # dumpobj mode (queue 532, DECISION 528-13 (a): compiler-libs' bytecomp on oi, judged by the test's own .reference): a test at oi's
+  # level whose header builds its program (`flags = "FLAGS"; setup-ocamlc.byte-build-env; ocamlc.byte; run; check-program-output`) and
+  # whose run hook TEST.run is tools/dumpobj's (`"${ocamlrun}" "${ocamlsrcdir}/tools/dumpobj" -nobanners "${program}" > "${output}"`):
+  # the build is ocamlc on oi (OCaml 5.5.0's driver over compiler-libs' bytecomp, bin/lib/oi/tools.bash), `ocamlc -nostdlib -I _stdlib
+  # FLAGS -o TEST.byte TEST.ml`, and the run the hook's command line, tools/dumpobj on oi, the row's program with `-nobanners
+  # TEST.byte` (no hook); environment @tool=dumpobj @bcflags=FLAG,...
+  dbmode = 0
+  if (aot == 0 && hasbuild && !dlmode && !odmode && !oimode && !cemode) {
+    dbb = FILENAME; sub(/^.*\//, "", dbb); sub(/\.ml$/, "", dbb); hook = FILENAME; sub(/\.mll?$/, ".run", hook)
+    while ((getline hl < hook) > 0) if (trim(hl) == "\"${ocamlrun}\" \"${ocamlsrcdir}/tools/dumpobj\" -nobanners \"${program}\" > \"${output}\"") dbmode = 1
+    close(hook); dbflags = ""; dbstep = 0
+    for (j = 1; j <= m && dbmode; j++) {
+      s = trim(st[j]); if (s == "") continue
+      v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t]+/, " ", v)
+      if (s ~ /^flags *= *"/ && dbstep == 0) { dbflags = v; continue }
+      if (s == "setup-ocamlc.byte-build-env" && dbstep == 0) { dbstep = 1; continue }
+      if (s == "ocamlc.byte" && dbstep == 1) { dbstep = 2; continue }
+      if (s == "run" && dbstep == 2) { dbstep = 3; continue }
+      if (s == "check-program-output" && dbstep == 3) { dbstep = 4; continue }
+      dbmode = 0
+    }
+    if (dbstep != 4 || dbflags !~ /^[A-Za-z0-9_ -]*$/ || dbb !~ /^[A-Za-z0-9_]+$/) dbmode = 0
+  }
+  if (dbmode) { helper = 0; m = 0; incs = ""; args = "-nobanners " dbb ".byte"; gsub(/ /, ",", dbflags); env = env " @tool=dumpobj @bcflags=" dbflags }
+  # ocamlopt-alone mode (queue 528, DECISION 528-3 (a)): a header that is ocamltest's native run alone (flags = "..."; setup-ocamlopt.byte-build-env;
+  # ocamlopt.byte; run; check-program-output, no bytecode alternative: the syntactic-arity tests) runs at the AOT levels, judged as
+  # ocamlopt's run is, as their program (oi's level keeps the class, n/a by 528-2 (a)); with check-ocamlopt.byte-output (the compiler's
+  # output judged: max_arity's warning 5) it keeps the class at the compiled level; at the light level (queue 533, DECISION 528-R1
+  # (a)) the compiler's output is the native typer's warnings (@compout=1, the flags' -w specs @w=SPEC,...: bin/oi's typer runs with
+  # -w), judged against TEST.compilers.reference
+  opmode = 0; opout = 0; wspec = ""
+  if (aot >= 1 && !hasbuild && hasoptbuild) {
+    opmode = 1
+    for (j = 1; j <= m; j++) { s = trim(st[j]); if (s == "") continue
+      if (s == "check-ocamlopt.byte-output" && aot == 1) { opout = 1; continue }
+      if (s !~ /^(flags *= *"[^"]*"|setup-ocamlopt\.byte-build-env|ocamlopt\.byte|run|check-program-output)$/) opmode = 0 }
   }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
@@ -263,6 +391,38 @@ END {
       }
       if (s == "run") { if (!dlinked || drun) cls(""); drun = 1; continue }
     }
+    if (cemode) {
+      if (s ~ /^use_runtime *= *"false"$/ || s == "check-program-output") continue
+      if (s ~ /^readonly_files *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v); cerofiles = " " v " "
+        c = split(v, hm, " "); for (q = 1; q <= c; q++) if (hm[q] !~ /^[A-Za-z0-9_]+\.c$/) cls(s)
+        continue
+      }
+      if (s == "setup-ocamlc.byte-build-env") { if (cesetup) break; cesetup = 1; continue }
+      if (s ~ /^setup-ocamlopt\.(byte|opt)-build-env$/) { if (cerun) break; cls(s) }
+      if (s ~ /^flags *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        c = split(v, fl, " "); ceexe = 0
+        for (q = 1; q <= c; q++) {
+          if (fl[q] == "-w") { q++; continue }
+          if (fl[q] == "-ccopt" && fl[q + 1] == "-I@OCAMLSRCDIR@/runtime") { q++; continue }
+          if (fl[q] == "-output-complete-exe") { ceexe = 1; continue }
+          if (fl[q] ~ /^[A-Za-z0-9_]+\.c$/ && index(cerofiles, " " fl[q] " ")) { cecs = cecs (cecs == "" ? "" : ",") fl[q]; continue }
+          cls("flags " v)
+        }
+        if (!cesetup || !ceexe) cls("flags " v)
+        continue
+      }
+      if (s ~ /^program *= *"/) {
+        v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
+        if (!cecomp) { if (v != hbase) cls(s); ceprog = v; continue }
+        if (v == "./" ceprog) continue
+        if (v ~ /^sh @TSD@\/[A-Za-z0-9_]+\.sh$/) { cescript = v; sub(/^sh @TSD@\//, "", cescript); continue }
+        cls(s)
+      }
+      if (s == "ocamlc.byte") { if (!cesetup || ceprog == "" || cecomp) cls(s); cecomp = 1; continue }
+      if (s == "run") { if (!cecomp || cerun) cls(s); cerun = 1; continue }
+    }
     if (helper) {
       if (s ~ /^readonly_files *= *"/) { roseen = 1; continue }
       if (s == "check-ocamlc.byte-output" || s == "check-program-output") continue
@@ -306,12 +466,13 @@ END {
         c = split(val, fl, " ")
         for (q = 1; q <= c; q++) {
           f = fl[q]
-          if (f == "-w" || f == "-warn-error") { q++; continue }
+          if (f == "-w" || f == "-warn-error") { if (f == "-w") wspec = wspec (wspec == "" ? "" : ",") fl[q + 1]; q++; continue }
           # -g (OC217 (a)): oi's level keeps it, the typer's debugging events its backtraces read; the AOT levels have no
           # backtraces yet (their class)
           # -g at oi's level and at the light level (queue 370: o2j's shadow stack, Bt), not yet the compiled level
           if (f == "-g") { if (aot != 2) flags = flags " -g"; continue }
-          if (f ~ /^-w[+-]/ || f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
+          if (f ~ /^-w[+-]/) { wspec = wspec (wspec == "" ? "" : ",") substr(f, 3); continue }
+          if (f == "-bin-annot" || f == "-bin-annot-occurrences" || f == "-S" || f == "-function-sections") continue
           if (f == "-inline") { q++; continue }
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
@@ -347,11 +508,22 @@ END {
       # compiled level (-v aot=2, OC215 (a)) the C API of its main (test/ocaml/o2j/capi); at the light level (-v aot=1, queue 413) the
       # driver's `oi capi`, which the runtime spawns (OI_CAPI_SERVER)
       if (key == "modules" && val ~ /^[A-Za-z0-9_.]+\.c( +[A-Za-z0-9_.]+\.c)*$/) { cs = val; csclass = key " = " val; gsub(/ +/, ",", cs); env = env " @cstubs=" cs; continue }
+      # (queue 523) C files and OCaml units of the test's directory (gc-roots: globrootsprim.c globroots.ml): at oi's level the units
+      # typed first, in their order, each before the program (bin/oi's oi_one, @mods=FILE,...), the C files its stubs; the AOT levels keep
+      # the class
+      if (key == "modules" && aot == 0 && val ~ /^[A-Za-z0-9_.]+\.(c|ml)( +[A-Za-z0-9_.]+\.(c|ml))*$/ && val ~ /\.c( |$)/ && val ~ /\.ml( |$)/) {
+        c = split(val, hm, " "); cs = ""; mls = ""
+        for (q = 1; q <= c; q++) { if (hm[q] ~ /\.c$/) cs = cs (cs == "" ? "" : ",") hm[q]; else mls = mls (mls == "" ? "" : ",") hm[q] }
+        csclass = key " = " val; env = env " @cstubs=" cs " @mods=" mls; continue
+      }
       # OCAMLRUNPARAM's d (OC193 (a), the user 2026-11-09): oi and the AOT runtime read the domains' limit, so a header that sets d
       # alone (parallel/max_domains1, max_domains2) runs with it in the environment (ocamltest's ocamlrunparam variable, OCAMLRUNPARAM's
       # value: its leading comma an ignored option); l, the stack's limit, likewise (OC216 (a), the user 2026-11-10: oi's and the AOT
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
+      # s, the minor heap's size in words (queue 523): oi's simulated minor heap (Gc's minor_heap_size, OC218's countWords) at oi's level
+      # (statmemprof/user_data_regression's s=100); the AOT levels keep the class
+      if (key == "ocamlrunparam" && val ~ /^,?s=[0-9]+[kMG]?$/ && aot == 0) { env = env " OCAMLRUNPARAM=" val; continue }
       # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
       # (queue 370: at the light level too, Bt's backtraces; not yet the compiled level)
       if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && aot != 2) { env = env " OCAMLRUNPARAM=" val; continue }
@@ -389,6 +561,7 @@ END {
     # a later alternative that skips (lib-threads' "{ include systhreads; hassysthreads; }{ reason = ...; skip; ... }"): the run is the
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
+    if (opmode && (s == "setup-ocamlopt.byte-build-env" || s == "ocamlopt.byte" || s == "run" || s == "check-program-output" || (opout && s == "check-ocamlopt.byte-output"))) continue
     # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it
     if (s == "instrumented-runtime" && aot == 0) continue
     if (s == "bytecode") sawbyte = 1
@@ -396,6 +569,7 @@ END {
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue
     cls(s)
   }
+  if (opmode && opout) env = env " @compout=1" (wspec == "" ? "" : " @w=" wspec)
   if (dlmode) {
     if (!drun) cls("")
     env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
@@ -403,6 +577,11 @@ END {
   if (dpmode) {
     if (!pchk) cls("")
     args = pargs; incs = " complib"; env = env " @depend=1" (pcopy == "" ? "" : " @dyncopy=" pcopy)
+  }
+  if (cemode) {
+    if (!cerun) cls("use_runtime = false")
+    if (cecs != "") env = env " @cstubs=" cecs
+    if (cescript != "") env = env " @runscript=" cescript ":" ceprog
   }
   if (helper) {
     if (!hmain || nruns == 0) cls("")
@@ -413,7 +592,7 @@ END {
   # check-program-output, so TEST.run (@hook=run: swapchan's and tls's sort, delayintr's SIGINT) and TEST.check-program-output
   # (@check=check-program-output: signal's grep) are its hooks; bin/oi's runners run them as actions_helpers.ml's run_hook does
   hook = FILENAME; sub(/\.mll?$/, ".run", hook)
-  if ((getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
+  if (!dbmode && (getline hl < hook) >= 0) { close(hook); env = env " @hook=run" }
   hook = FILENAME; sub(/\.mll?$/, ".check-program-output", hook)
   if ((getline hl < hook) >= 0) { close(hook); env = env " @check=check-program-output" }
   # ocamltest exports its variables to the program's environment (environments.ml's to_system_env; queue 515): a program that reads

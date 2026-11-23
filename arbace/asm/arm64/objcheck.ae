@@ -133,12 +133,15 @@
 
 (defn- reloc-name [t] (get (:reloc-names *target*) t (str "Unknown (" t ")")))
 
+(defn- c32? "An ELF32 target's view (x86-objs, AXS101: i386's)." [] (= 32 (long (:class *target* 64))))
+
 (defn view-objdump-r [o]
   (concat [(str "<stdin>:\tfile format " (:format *target*)) ""]
           (mapcat (fn [rs]
-                    (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:") "OFFSET           TYPE                     VALUE"]
+                    (concat [(str "RELOCATION RECORDS FOR [" (:section (first rs)) "]:")
+                             (if (c32?) "OFFSET   TYPE                     VALUE" "OFFSET           TYPE                     VALUE")]
                             (for [r rs :let [[nm a] (value-text o r)]]
-                              (format "%016x %-24s %s" (:offset r) (reloc-name (:type r))
+                              (format (if (c32?) "%08x %-24s %s" "%016x %-24s %s") (:offset r) (reloc-name (:type r))
                                       (str nm (cond (pos? a) (str "+0x" (Long/toHexString a)) (neg? a) (str "-0x" (Long/toHexString (- a))) :else ""))))
                             [""]))
                   (partition-by :section (:relocs o)))))
@@ -147,11 +150,12 @@
   (concat ["Relocations ["]
           (mapcat (fn [rs]
                     (let [r0 (first rs)
-                          ri (some #(when (and (= elf/SHT_RELA (:type %)) (= (:info %) (:target r0))) (:index %)) (:sections o))]
-                      (concat [(str "  Section (" ri ") .rela" (:section r0) " {")]
+                          ri (some #(when (and (#{elf/SHT_RELA elf/SHT_REL} (:type %)) (= (:info %) (:target r0))) (:index %)) (:sections o))]
+                      ;; (x86-objs, AXS101: a REL section's name and no addend, printRelocation's optional one)
+                      (concat [(str "  Section (" ri ") " (:name (nth (:sections o) ri)) " {")]
                               (for [r rs :let [[nm a] (value-text o r)]]
                                 (str "    0x" (str/upper-case (Long/toHexString (:offset r))) " " (reloc-name (:type r)) " "
-                                     (if (= nm "*ABS*") "-" nm) " 0x" (str/upper-case (Long/toHexString a))))
+                                     (if (= nm "*ABS*") "-" nm) (when-not (:rel r) (str " 0x" (str/upper-case (Long/toHexString a))))))
                               ["  }"])))
                   (partition-by :section (:relocs o)))
           ["]"]))
@@ -194,7 +198,8 @@
         sname (fn [^long i] (cond (= i 0) "Undefined (0x0)" (= i 0xfff1) "Absolute (0xFFF1)" (= i 0xfff2) "Common (0xFFF2)"
                                   :else (str (:name (nth secs i)) " " (str "(" (hexu i) ")"))))]
     (concat
-     ["" "File: <stdin>" (str "Format: " (:format *target*)) (str "Arch: " (:arch *target*)) "AddressSize: 64bit" "LoadName: <Not found>"]
+     ["" "File: <stdin>" (str "Format: " (:format *target*)) (str "Arch: " (:arch *target*)) (str "AddressSize: " (:class *target* 64) "bit")
+      "LoadName: <Not found>"]
      (when (has "-S" "--sections" "--section-headers")
        (concat ["Sections ["]
                (mapcat (fn [s]
@@ -258,7 +263,9 @@
   [o]
   (let [syms (:symbols o)
         nonvis (some #(pos? (bit-and (long (:other %)) (bit-not 3))) syms)
-        cols [0 8 25 31 39 46 (+ 56 (if nonvis 13 0)) (+ 59 (if nonvis 13 0))]
+        ;; (GNUELFDumper's Bias: 8 more columns for a 64-bit value; x86-objs, AXS101: ELF32's)
+        bias (if (c32?) 0 8)
+        cols [0 8 (+ 17 bias) (+ 23 bias) (+ 31 bias) (+ 38 bias) (+ 48 bias (if nonvis 13 0)) (+ 51 bias (if nonvis 13 0))]
         line (fn [fields] (let [sb (StringBuilder.)]
                             (doseq [[c f] (map vector cols fields)]
                               (if (< (.length sb) (long c)) (dotimes [_ (- (long c) (.length sb))] (.append sb \space)) (when (pos? (.length sb)) (.append sb \space)))
@@ -266,9 +273,9 @@
                             (str sb)))]
     (concat
      ["" (str "Symbol table '.symtab' contains " (count syms) " entries:")
-      (str "   Num:    Value          Size Type    Bind   Vis" (if nonvis "                     " "      ") " Ndx Name")]
+      (str "   Num:    Value  " (if (c32?) "" "        ") "Size Type    Bind   Vis" (if nonvis "                     " "      ") " Ndx Name")]
      (for [y syms :let [sh (long (:shndx y)) other (long (:other y))]]
-       (line [(str (format "%6d" (:index y)) ":") (format "%016x" (:value y)) (format "%5d" (:size y))
+       (line [(str (format "%6d" (:index y)) ":") (format (if (c32?) "%08x" "%016x") (:value y)) (format "%5d" (:size y))
               (get {0 "NOTYPE" 1 "OBJECT" 2 "FUNC" 3 "SECTION" 4 "FILE" 5 "COMMON" 6 "TLS" 10 "IFUNC"} (:type y) (str (:type y)))
               (get {0 "LOCAL" 1 "GLOBAL" 2 "WEAK" 10 "UNIQUE"} (:bind y) (str (:bind y)))
               (str (get ["DEFAULT" "INTERNAL" "HIDDEN" "PROTECTED"] (bit-and other 3))
@@ -458,7 +465,13 @@
          (into {} (for [i (range 32)] [(+ 64 i) (str "B" i)]))
          (into {} (for [i (range 32)] [(+ 96 i) (str "Z" i)]))))
 
-(defn- dwarf-reg-name ^String [^long r] (get dwarf-reg-names r (str "reg" r)))
+(def ^:dynamic *frame-target*
+  "The call frame view's target (x86-objs: llvm-objdump --dwarf=frames of an x86 Mach-O object binds its own): nil for
+  AArch64's, else {:reg-name (fn [N]) :cfa-names {OP NAME}}, the registers' names and CallFrameString's for the architecture."
+  nil)
+
+(defn- dwarf-reg-name ^String [^long r]
+  (if-let [f (:reg-name *frame-target*)] (f r) (get dwarf-reg-names r (str "reg" r))))
 
 (defn- hex-min
   "formatv's `{0:x-N}` (and fmt_align's right-aligned zeros): lower hex, no prefix, N digits at least."
@@ -504,9 +517,13 @@
   "DWARFDebugFrame::parse over the section's bytes `d` (`rel` its relocations, `eh?` .eh_frame's format): its entries ({:cie? ...}),
   or :error when the parse fails (llvm-dwarfdump reports it and dumps no entry). Throws ::unbuilt on what this view does not
   print (DWARF64, a DWARF expression)."
-  [^bytes d rel eh?]
+  [^bytes d rel eh? & [addr]]
   (let [n (alength d)
+        ;; the section's address (DWARFDebugFrame's EHFrameAddress: an FDE's PC-relative initial location from it, the
+        ;; personality's and the LSDA's when it is not 0; x86-objs: Mach-O's sections have addresses)
+        addr (long (or addr 0))
         pos (volatile! 0)
+        rel-base (fn [] (if (zero? addr) 0 (+ addr (long @pos))))
         bad (fn [] (throw (ex-info "frame parse" {::parse true})))
         u (fn [^long off ^long size]
             (when (> (+ off size) n) (bad))
@@ -574,7 +591,7 @@
                               (case ch
                                 \L (vswap! st assoc :lsda-enc (take! 1))
                                 \P (do (when (:personality @st) (bad))
-                                       (let [pe (take! 1)] (vswap! st assoc :personality (enc-ptr! pe 0))))
+                                       (let [pe (take! 1)] (vswap! st assoc :personality (enc-ptr! pe (rel-base)))))
                                 \R (vswap! st assoc :fde-enc (take! 1))
                                 (\S \B \G) nil
                                 \z (do (when (pos? (long i)) (bad))
@@ -588,10 +605,10 @@
                         (let [cie (get cies (if eh? (unchecked-subtract sstart id) id))]
                           (if eh?
                             (do (when-not cie (bad))
-                                (let [init (or (enc-ptr! (:fde-enc cie) (long @pos)) 0) rng (or (enc-ptr! (:fde-enc cie) 0) 0)
+                                (let [init (or (enc-ptr! (:fde-enc cie) (+ addr (long @pos))) 0) rng (or (enc-ptr! (:fde-enc cie) 0) 0)
                                       lsda (when (seq (:aug cie))
                                              (let [l (uleb!) ae (+ (long @pos) l)
-                                                   x (when-not (= 0xff (long (:lsda-enc cie))) (enc-ptr! (:lsda-enc cie) 0))]
+                                                   x (when-not (= 0xff (long (:lsda-enc cie))) (enc-ptr! (:lsda-enc cie) (rel-base)))]
                                                (when-not (= ae @pos) (bad))
                                                x))]
                                   {:offset start :length len :cie-ptr id :init init :range rng :cie cie :lsda lsda}))
@@ -606,7 +623,7 @@
   [cfis ^long code ^long data addr]
   (let [at (volatile! addr)]
     (mapv (fn [{:keys [op ops]}]
-            (str "  " (if-let [nm (cfa-names op)] (str "DW_CFA_" nm) "") ":"
+            (str "  " (if-let [nm ((or (:cfa-names *frame-target*) cfa-names) op)] (str "DW_CFA_" nm) "") ":"
                  (apply str (map (fn [t v]
                                    (let [v (long v)]
                                    (case t
@@ -724,23 +741,34 @@
        (when (:lsda e) [(str "  LSDA Address: " (hex-min (:lsda e) 16))])
        (cfi-program-lines (:cfis e) code data (:init e)) [""] (unwind-table-lines cie e) [""]))))
 
-(defn view-dwarfdump-frames
-  "llvm-dwarfdump --debug-frame (-eh-frame, its alias) of an AArch64 object: the file's line, then .debug_frame's and .eh_frame's
-  dumps (each requested, so each headed even when absent), every CIE and FDE with its fields, its program and its unwind table.
-  nil when the object holds what this view does not print (a DWARF expression, DWARF64, a frame section twice or compressed)."
-  [o]
+(defn dwarf-frames-lines
+  "DWARFContext::dump's .debug_frame and .eh_frame (each requested, so each headed even when absent) of the frame sections SECS
+  ([{:name :data BYTES :rel {OFFSET VALUE} :addr :compressed}], the candidates by name: a leading `.` or `_` dropped), every CIE
+  and FDE with its fields, its program and its unwind table; nil when they hold what this view does not print (a DWARF
+  expression, DWARF64, a frame section twice or compressed). Shared with x86-64's Mach-O view (x86-objs)."
+  [secs]
   (try
     (let [frame (fn [nm eh?]
-                  (let [ss (filter #(and (= nm (str/replace (:name %) #"^[._]+" "")) (not= elf/SHT_NOBITS (:type %))) (:sections o))]
-                    (when (or (> (count ss) 1) (some #(pos? (bit-and (long (:flags %)) 0x800)) ss))
+                  (let [ss (filter #(= nm (str/replace (:name %) #"^[._]+" "")) secs)]
+                    (when (or (> (count ss) 1) (some :compressed ss))
                       (throw (ex-info "frame section" {::unbuilt true})))
                     (let [s (first ss)
-                          es (if s (parse-frames (:data s) (frame-relocs o (:index s)) eh?) [])]
+                          es (if s (parse-frames (:data s) (:rel s) eh? (:addr s)) [])]
                       (concat ["" (str "." nm " contents:")]
                               (when-not (= :error es) (cons "" (mapcat #(frame-entry-lines % eh?) es)))))))]
-      (when (= "aarch64" (:arch *target*))
-        (vec (concat [(str "-:\tfile format " (:format *target*))] (frame "debug_frame" false) (frame "eh_frame" true)))))
+      (vec (concat (frame "debug_frame" false) (frame "eh_frame" true))))
     (catch arbace.lang.ExceptionInfo ex (if (::unbuilt (ex-data ex)) nil (throw ex)))))
+
+(defn view-dwarfdump-frames
+  "llvm-dwarfdump --debug-frame (-eh-frame, its alias) of an AArch64 object: the file's line, then dwarf-frames-lines over its
+  sections with contents (their relocations applied as resolveAArch64 does). nil when the object holds what this view does not
+  print."
+  [o]
+  (when (= "aarch64" (:arch *target*))
+    (when-let [ls (dwarf-frames-lines (for [s (:sections o) :when (not= elf/SHT_NOBITS (:type s))]
+                                        {:name (:name s) :data (:data s) :rel (frame-relocs o (:index s)) :addr 0
+                                         :compressed (pos? (bit-and (long (:flags s)) 0x800))}))]
+      (vec (concat [(str "-:\tfile format " (:format *target*))] ls)))))
 
 ;; ---------------------------------------------------------------------------------------------------------------------
 ;; the CHECK lines

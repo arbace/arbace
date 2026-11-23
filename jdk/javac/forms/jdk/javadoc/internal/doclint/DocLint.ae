@@ -1,0 +1,306 @@
+;; Converted from jdk26u src/jdk.javadoc/share/classes/jdk/javadoc/internal/doclint/DocLint.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.javadoc.internal.doclint)
+
+(import '(com.sun.source.tree BlockTree
+                              ClassTree
+                              CompilationUnitTree
+                              LambdaExpressionTree
+                              MethodTree
+                              ModuleTree
+                              PackageTree
+                              Tree
+                              VariableTree)
+        '(com.sun.source.util DocTrees JavacTask TaskEvent TaskListener TreePath TreePathScanner)
+        '(com.sun.tools.javac.api JavacTaskImpl JavacTool)
+        '(com.sun.tools.javac.file JavacFileManager)
+        '(com.sun.tools.javac.main JavaCompiler)
+        '(com.sun.tools.javac.util Context StringUtils$DamerauLevenshteinDistance)
+        '(java.io File IOException PrintWriter)
+        '(java.util ArrayList Collection Comparator LinkedList List Queue)
+        '(java.util.function Function Predicate ToDoubleFunction)
+        '(javax.lang.model.element Name)
+        '(javax.lang.model.util Elements Types)
+        '(javax.tools StandardLocation)
+        '(jdk.javadoc.internal.tool AccessLevel))
+
+(defclass ^:public DocLint
+  :extends com.sun.tools.doclint.DocLint
+
+  (field ^:public ^:static ^:final ^String XMSGS_OPTION "-Xmsgs")
+
+  (field ^:public ^:static ^:final ^String XMSGS_CUSTOM_PREFIX "-Xmsgs:")
+
+  (field ^:private ^:static ^:final ^String STATS "-stats")
+
+  (field ^:public ^:static ^:final ^String XCUSTOM_TAGS_PREFIX "-XcustomTags:")
+
+  (field ^:public ^:static ^:final ^String XCHECK_PACKAGE "-XcheckPackage:")
+
+  (field ^:public ^:static ^:final ^String SEPARATOR ",")
+
+  (method ^:public ^:static main ^void [& ^String/1 args]
+    (let [dl (DocLint.)]
+      (try
+        (.run dl args)
+        (catch BadArgs e (.println System/err (.getMessage e)) (System/exit 1))
+        (catch IOException e
+          (.println System/err (.localize dl "dc.main.ioerror" (.getLocalizedMessage e)))
+          (System/exit 2)))))
+
+  (defclass ^:public BadArgs
+    :extends Exception
+
+    (field ^:private ^:static ^:final ^long serialVersionUID 0)
+
+    (constructor [this ^String code & ^Object/1 args]
+      (super. (.localize DocLint/this code args))
+      (set! (.-code this) code)
+      (set! (.-args this) args))
+
+    (field ^:final ^String code)
+
+    (field ^:final ^:transient ^Object/1 args))
+
+  (method ^:public run :throws [BadArgs IOException] ^void [this & ^String/1 args]
+    (let [out (PrintWriter. System/out)] (try (.run this out args) (finally (.flush out)))))
+
+  (method ^:public run :throws [BadArgs IOException] ^void [this ^PrintWriter out & ^String/1 args]
+    (set! env (Env.))
+    (.processArgs this args)
+    (let [noFiles (.isEmpty javacFiles)]
+      (if needHelp
+          (do (.showHelp this out) (when noFiles (return)))
+          (when noFiles (.println out (.localize this "dc.main.no.files.given")) (return)))
+      (let [tool (JavacTool/create)
+            fm (JavacFileManager. (Context.) false nil)]
+        (.setSymbolFileEnabled fm false)
+        (when (some? javacBootClassPath)
+          (.setLocation fm StandardLocation/PLATFORM_CLASS_PATH javacBootClassPath))
+        (when (some? javacClassPath) (.setLocation fm StandardLocation/CLASS_PATH javacClassPath))
+        (when (some? javacSourcePath)
+          (.setLocation fm StandardLocation/SOURCE_PATH javacSourcePath))
+        (let [task (.getTask tool
+                             out
+                             fm
+                             nil
+                             javacOpts
+                             nil
+                             (.getJavaFileObjectsFromFiles fm javacFiles))
+              ^{:tag (Iterable (? extends CompilationUnitTree))} units (.parse task)]
+          (.enter (cast JavacTaskImpl task))
+          (.init env task)
+          (set! checker (Checker. env))
+          (let [^DeclScanner ds (anon DeclScanner [env]
+                                  (method visitDecl ^void [this ^Tree tree ^Name name]
+                                    (let [p (.getCurrentPath this)
+                                          dc (.getDocCommentTree (.-trees (.-env this)) p)]
+                                      (.scan checker dc p))))]
+            (.scan ds units nil)
+            (.reportStats this out)
+            (let [ctx (.getContext (cast JavacTaskImpl task))
+                  c (JavaCompiler/instance ctx)]
+              (.printCount c "error" (.errorCount c))
+              (.printCount c "warn" (.warningCount c))))))))
+
+  (method processArgs :throws [BadArgs] ^void [this & ^String/1 args]
+    (set! javacOpts (ArrayList.))
+    (set! javacFiles (ArrayList.))
+    (when (== (alength args) 0) (set! needHelp true))
+    (let [^:mutable ^int i 0]
+      (while (< i (alength args))
+        (let [arg (aget args i)]
+          (cond
+            (and (.matches arg "-Xmax(errs|warns)") (< (unchecked-add-int i 1) (alength args)))
+              (if (.matches (aget args (set! i (unchecked-inc-int i))) "[0-9]+")
+                  (do (.add javacOpts arg) (.add javacOpts (aget args i)))
+                  (throw (BadArgs. "dc.bad.value.for.option" arg (aget args i))))
+            (and (or (.equals arg "-target") (.equals arg "-source"))
+                 (< (unchecked-add-int i 1) (alength args)))
+              (do (.add javacOpts arg) (.add javacOpts (aget args (set! i (unchecked-inc-int i)))))
+            (.equals arg STATS) (.setStatsEnabled (.-messages env) true)
+            (and (.equals arg "-bootclasspath") (< (unchecked-add-int i 1) (alength args)))
+              (set! javacBootClassPath (.splitPath this (aget args (set! i (unchecked-inc-int i)))))
+            (and (.equals arg "-classpath") (< (unchecked-add-int i 1) (alength args)))
+              (set! javacClassPath (.splitPath this (aget args (set! i (unchecked-inc-int i)))))
+            (and (.equals arg "-cp") (< (unchecked-add-int i 1) (alength args)))
+              (set! javacClassPath (.splitPath this (aget args (set! i (unchecked-inc-int i)))))
+            (and (.equals arg "-sourcepath") (< (unchecked-add-int i 1) (alength args)))
+              (set! javacSourcePath (.splitPath this (aget args (set! i (unchecked-inc-int i)))))
+            (.equals arg XMSGS_OPTION) (.setOptions (.-messages env) nil)
+            (.startsWith arg XMSGS_CUSTOM_PREFIX)
+              (.setOptions (.-messages env)
+                           (.substring arg (unchecked-add-int (.indexOf arg ":") 1)))
+            (.startsWith arg XCUSTOM_TAGS_PREFIX)
+              (.setCustomTags env (.substring arg (unchecked-add-int (.indexOf arg ":") 1)))
+            (or (or (or (or (.equals arg "-h") (.equals arg "-help")) (.equals arg "--help"))
+                    (.equals arg "-?"))
+                (.equals arg "-usage"))
+              (set! needHelp true)
+            (.startsWith arg "-") (throw (BadArgs. "dc.bad.option" arg))
+            :else
+              (while (< i (alength args))
+                (.add javacFiles
+                      (File. (aget args (let [old-1 i] (set! i (unchecked-inc-int i)) old-1)))))))
+        (set! i (unchecked-inc-int i)))))
+
+  (method showHelp ^void [this ^PrintWriter out]
+    (let [msg (.localize this "dc.main.usage")]
+      (for-each [^String line (.split msg "\n")] (.println out line))))
+
+  (method splitPath ^{:tag (List File)} [this ^String path]
+    (let [^{:tag (List File)} files (ArrayList.)]
+      (for-each [^String f (.split path File/pathSeparator)]
+        (when (> (.length f) 0) (.add files (File. f))))
+      files))
+
+  (field ^{:tag (List File)} javacBootClassPath)
+
+  (field ^{:tag (List File)} javacClassPath)
+
+  (field ^{:tag (List File)} javacSourcePath)
+
+  (field ^{:tag (List String)} javacOpts)
+
+  (field ^{:tag (List File)} javacFiles)
+
+  (field ^boolean needHelp false)
+
+  (method ^:public getName ^String [this] "doclint")
+
+  (method ^:public init ^void [this ^JavacTask task & ^String/1 args]
+    (.init this task args true))
+
+  (method ^:public init ^void [this ^JavacTask task ^String/1 args ^boolean addTaskListener]
+    (set! env (Env.))
+    (.init env task)
+    (.processArgs this env args)
+    (set! checker (Checker. env))
+    (when addTaskListener
+      (let [^DeclScanner ds (anon DeclScanner [env]
+                              (method visitDecl ^void [this ^Tree tree ^Name name]
+                                (let [p (.getCurrentPath this)
+                                      dc (.getDocCommentTree (.-trees (.-env this)) p)]
+                                  (.scan checker dc p))))
+            ^TaskListener tl (anon TaskListener []
+                               (method ^:public started ^void [this ^TaskEvent e]
+                                 (switch (.getKind e)
+                                   ANALYZE
+                                     (let [^:mutable ^CompilationUnitTree tree nil]
+                                       (while (some?
+                                                (set! tree (cast CompilationUnitTree (.poll todo))))
+                                         (.scan ds tree nil)))))
+
+                               (method ^:public finished ^void [this ^TaskEvent e]
+                                 (switch (.getKind e) PARSE (.add todo (.getCompilationUnit e))))
+
+                               (field ^{:tag (Queue CompilationUnitTree)} todo (LinkedList.)))]
+        (.addTaskListener task tl))))
+
+  (method ^:public init ^void [this ^DocTrees trees ^Elements elements ^Types types & ^String/1 args]
+    (set! env (Env.))
+    (.init env trees elements types)
+    (set! (.-strictReferenceChecks env) true)
+    (.processArgs this env args)
+    (set! checker (Checker. env)))
+
+  (method ^:private processArgs ^void [this ^Env env & ^String/1 args]
+    (for-each [^String arg args]
+      (cond
+        (.equals arg XMSGS_OPTION) (.setOptions (.-messages env) nil)
+        (.startsWith arg XMSGS_CUSTOM_PREFIX)
+          (.setOptions (.-messages env) (.substring arg (unchecked-add-int (.indexOf arg ":") 1)))
+        (.startsWith arg XCUSTOM_TAGS_PREFIX)
+          (.setCustomTags env (.substring arg (unchecked-add-int (.indexOf arg ":") 1)))
+        (.startsWith arg XCHECK_PACKAGE)
+          (.setCheckPackages env (.substring arg (unchecked-add-int (.indexOf arg ":") 1)))
+        :else (throw (IllegalArgumentException. arg)))))
+
+  (method ^:public scan ^void [this ^TreePath p]
+    (let [dc (.getDocCommentTree (.-trees env) p)] (.scan checker dc p)))
+
+  (method ^:public shouldCheck ^boolean [this ^CompilationUnitTree unit]
+    (.shouldCheck env unit))
+
+  (method ^:public reportStats ^void [this ^PrintWriter out]
+    (.reportStats (.-messages env) out))
+
+  (field ^Env env)
+
+  (field ^Checker checker)
+
+  (method ^:public ^:static suggestSimilar ^{:tag (List String)} [^{:tag (Collection String)} knownTags
+                                                                  ^String unknownTag]
+    (let [^:const MIN_SIMILARITY (unchecked-divide 2.0 3.0)]
+      (letclass [(^:record Pair [^String tag ^double similarity])]
+        (.toList (.map (.takeWhile (.sorted (.map
+                                              (.distinct (.stream knownTags))
+                                              (lambda Function ^Pair [^String t]
+                                                (Pair. t (DocLint/similarity t unknownTag))))
+                                            (.reversed
+                                              (Comparator/comparingDouble
+                                                (method-ref
+                                                  ToDoubleFunction
+                                                  [Pair]
+                                                  Pair/.similarity))))
+                                   (lambda Predicate ^boolean [^Pair p]
+                                     (>= (Double/compare (.-similarity p) MIN_SIMILARITY) 0)))
+                       (method-ref Function ^String [Pair] Pair/.tag))))))
+
+  (method ^:private ^:static similarity ^double [^String a ^String b]
+    (unchecked-subtract 1.0
+                        (unchecked-divide (double (StringUtils$DamerauLevenshteinDistance/of a b))
+                                          (Math/max (.length a) (.length b)))))
+
+  (method ^:public isValidOption ^boolean [this ^String opt]
+    (cond
+      (.equals opt XMSGS_OPTION) true
+      (.startsWith opt XMSGS_CUSTOM_PREFIX)
+        (Messages$Options/isValidOptions (.substring opt (.length XMSGS_CUSTOM_PREFIX)))
+      (.startsWith opt XCHECK_PACKAGE)
+        (Env/validatePackages (.substring opt (unchecked-add-int (.indexOf opt ":") 1)))
+      :else false))
+
+  (method ^:public isGroupEnabled ^boolean [this ^Messages$Group group ^AccessLevel accessLevel]
+    (.isEnabled (.-messages env) group accessLevel))
+
+  (method ^:private localize ^String [this ^String code & ^Object/1 args]
+    (let [^Messages m (if (some? env) (.-messages env) (Messages. nil))] (.localize m code args)))
+
+  (defclass ^:abstract ^:static DeclScanner
+    :extends (TreePathScanner Void Void)
+
+    (field ^:final ^Env env)
+
+    (constructor ^:public [this ^Env env] (set! (.-env this) env))
+
+    (method ^:abstract visitDecl ^void [this ^Tree tree ^Name name])
+
+    (method ^:public visitPackage ^Void [this ^PackageTree tree ^Void ignore]
+      (.visitDecl this tree nil)
+      (cast Void (.visitPackage super tree ignore)))
+
+    (method ^:public visitClass ^Void [this ^ClassTree tree ^Void ignore]
+      (.visitDecl this tree (.getSimpleName tree))
+      (cast Void (.visitClass super tree ignore)))
+
+    (method ^:public visitMethod ^Void [this ^MethodTree tree ^Void ignore]
+      (.visitDecl this tree (.getName tree))
+      nil)
+
+    (method ^:public visitModule ^Void [this ^ModuleTree tree ^Void ignore]
+      (.visitDecl this tree nil)
+      (cast Void (.visitModule super tree ignore)))
+
+    (method ^:public visitVariable ^Void [this ^VariableTree tree ^Void ignore]
+      (.visitDecl this tree (.getName tree))
+      (cast Void (.visitVariable super tree ignore)))
+
+    (method ^:public visitCompilationUnit ^Void [this ^CompilationUnitTree node ^Void p]
+      (when-not (not (.shouldCheck env node)) (cast Void (.visitCompilationUnit super node p))))
+
+    (method ^:public visitBlock ^Void [this ^BlockTree tree ^Void ignore]
+      nil)
+
+    (method ^:public visitLambdaExpression ^Void [this ^LambdaExpressionTree tree ^Void ignore]
+      nil)))

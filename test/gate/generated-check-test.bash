@@ -22,6 +22,13 @@ case $1 in
     [ "$M" = goi-empty ] && exit 0
     echo "ops$([ "$M" = goi-stale ] && echo X)" > "$2/ops.ae"; echo registry > "$2/registry.ae" ;;
   -m) out=$4; [ "$M" = nothing ] && exit 0
+      # gc's renamed copy (arbace.go.gc generate OUT, 2026-11-22)
+      if [ "$2" = arbace.go.gc ]; then
+        mkdir -p "$out/go/arbace/repr/go/internal/gc/compile"
+        echo "gc$([ "$M" = gc-stale ] && echo X)" > "$out/go/arbace/repr/go/internal/gc/compile/gc.ae"
+        [ "$M" = gc-outside ] && { mkdir -p "$out/arbace"; echo x > "$out/arbace/gc.ae"; }
+        exit 0
+      fi
       mkdir -p "$out/go/arbace/repr/go/godump" "$out/go/arbace/repr/go/internal/syntax"
       for f in godump.ae godump/dump.ae internal/syntax.ae internal/syntax/a.ae; do echo "$f" > "$out/go/arbace/repr/go/$f"; done
       [ "$M" = outside-go ] && { mkdir -p "$out/arbace"; echo x > "$out/arbace/new.ae"; }
@@ -34,8 +41,9 @@ chmod +x "$scratch/fake"
 mk() {
   local d=$1
   mkdir -p "$d/bin/lib" "$d/arbace/lang/go" "$d/go/arbace/goi" "$d/go/arbace/jrt" "$d/test/goi" "$d/test/c2j" \
-    "$d/go/arbace/repr/go/godump" "$d/go/arbace/repr/go/internal/syntax"
-  cp "$src/bin/generated-check" "$d/bin/"; cp "$src/bin/lib/tmpdir.bash" "$d/bin/lib/"
+    "$d/go/arbace/repr/go/godump" "$d/go/arbace/repr/go/internal/syntax" "$d/go/arbace/repr/go/internal/gc/compile"
+  echo gc > "$d/go/arbace/repr/go/internal/gc/compile/gc.ae"
+  cp "$src/bin/generated-check" "$d/bin/"; cp "$src/bin/lib/tmpdir.bash" "$src/bin/lib/gate-cache.bash" "$d/bin/lib/"
   echo N > "$d/arbace/lang/go/CompilerNodes.ae"; echo F > "$d/arbace/lang/go/CompilerAOTFn.ae"
   echo ops > "$d/go/arbace/goi/ops.ae"; echo registry > "$d/go/arbace/goi/registry.ae"
   local r=$d/go/arbace/repr/go
@@ -59,6 +67,8 @@ expect goi-nothing 1 MODE=goi-empty        # finding 2 and 6: a generator that w
 expect modules-stale 1 JRT_STALE=1         # finding 2: bin/jrt modules --check run
 expect outside-go 1 MODE=outside-go        # finding 6: the whole tree of repr/go compared
 expect nothing 1 MODE=nothing              # a generator that writes nothing
+expect gc-stale 1 MODE=gc-stale            # gc's renamed copy compared (2026-11-22)
+expect gc-outside 1 MODE=gc-outside        # and its generator writing outside its tree
 
 # finding 6: the c2j generators run with ARBACE_PATH=$root, whatever the caller's
 expect arbace-path 0 ARBACE_PATH=/elsewhere
@@ -90,6 +100,17 @@ d=$scratch/update-goi; mk "$d"; echo old > "$d/go/arbace/goi/ops.ae"
 FAKE_LOG=$scratch/ug.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/ug.out" 2>&1
 if [ "$(cat "$d/go/arbace/goi/ops.ae")" = ops ]; then echo "ok:   update-goi"
 else echo "FAIL: update-goi: ops.ae not rewritten"; fails=$((fails + 1)); fi
+
+# --update writes gc's stale copy, and refuses a generator writing outside its tree
+d=$scratch/update-gc; mk "$d"
+MODE=gc-stale FAKE_LOG=$scratch/ugc.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/ugc.out" 2>&1
+if [ "$(cat "$d/go/arbace/repr/go/internal/gc/compile/gc.ae")" = gcX ]; then echo "ok:   update-gc"
+else echo "FAIL: update-gc: gc.ae not rewritten"; fails=$((fails + 1)); fi
+d=$scratch/update-gc-outside; mk "$d"
+MODE=gc-outside FAKE_LOG=$scratch/ugo.log "$d/bin/generated-check" --update "$scratch/fake" > "$scratch/ugo.out" 2>&1
+st=$?
+if [ "$st" != 0 ] && [ ! -e "$d/arbace/gc.ae" ]; then echo "ok:   update-gc-outside (status $st, nothing copied)"
+else echo "FAIL: update-gc-outside: status $st"; fails=$((fails + 1)); fi
 
 [ "$fails" = 0 ] && echo "generated-check-test: passed" || echo "generated-check-test: $fails failed"
 exit $((fails > 0))

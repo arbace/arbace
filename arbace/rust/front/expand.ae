@@ -1188,6 +1188,8 @@
                 (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))))
         [(apply list (map expand-form st))]))))
 
+(declare attr-name)
+
 (defn- item-kind-mac? [it] (let [k (fget it :kind)] (and (seq? k) (= 'MacCall (first k)))))
 
 (defn- expand-item [it]
@@ -1197,7 +1199,9 @@
     (not= it (strip-cfg it)) (expand-item (strip-cfg it))
     (item-kind-mac? it) (vec (mapcat expand-item (number-items (expand-mac (second (fget it :kind)) :items))))
     :else (let [k (fget it :kind)
-                _ (when (and (seq? k) (= 'MacroDef (first k)))
+                ;; C4: not a builtin's placeholder definition (collect-user-macros' rule)
+                _ (when (and (seq? k) (= 'MacroDef (first k))
+                             (not (and (contains? std-builtins (second (second k))) (some #(= "rustc_builtin_macro" (attr-name %)) (fget it :attrs)))))
                     ;; a macro_rules! a macro's expansion defines is in scope from there on (textual scoping)
                     (let [[_ idf md] k]
                       (swap! *macros* assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items (second (fget (fget md :body) :tokens)) nil))})))
@@ -1254,7 +1258,12 @@
   (let [acc (atom {})]
     (letfn [(walk [x]
               (cond (seq? x)
-                    (do (when (and (= 'Item (first x)) (= :attrs (second x)) (seq? (fget x :kind)) (= 'MacroDef (first (fget x :kind))))
+                    (do (when (and (= 'Item (first x)) (= :attrs (second x)) (seq? (fget x :kind)) (= 'MacroDef (first (fget x :kind)))
+                                   ;; C4 (2026-11-22): a `#[rustc_builtin_macro]` definition whose expansion is the builtin's (pat.rs'
+                                   ;; own `macro_rules! pattern_type`, a placeholder body) left to the builtin, as rustc's resolver
+                                   ;; binds it (core::pat expanded to nothing before: "the parser: ")
+                                   (not (and (contains? std-builtins (second (second (fget x :kind))))
+                                             (some #(= "rustc_builtin_macro" (attr-name %)) (fget x :attrs)))))
                           (let [[_ idf md] (fget x :kind)
                                 toks (second (fget (fget md :body) :tokens))]
                             (swap! acc assoc (second idf) {:name (second idf) :arms (macro-arms (dump-tts->items toks nil))})))

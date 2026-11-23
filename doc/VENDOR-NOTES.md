@@ -710,7 +710,8 @@ step 4 (2026-10-07); the others came with later work, as each says:
     Upstream still imports it (`clojure/clojure` master `4278bcea`, 2026-10-07); nothing in
     `arbace/`, its tools or Clojure's test suite names the class unqualified. The class still
     exists in JDK 26, so `java.lang.SecurityManager` resolves; the Java forms compiler's own
-    `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`.
+    `java.lang` fallback (SPEC §9.1) is unaffected. Test: `test/native/imports_test.clj`. Reversed on main by hand
+    change 38 (2026-11-22, CDR14 (a)).
 
 12. **Keyword invoke sites are `invokedynamic`** (`doc/MODERN-COMPILER.md` §4.1; 2026-10-07):
     `Compiler$KeywordInvokeExpr/emit` (`arbace/lang/Compiler.clj`) emitted Clojure's hand-written
@@ -1152,6 +1153,35 @@ step 4 (2026-10-07); the others came with later work, as each says:
     made before its namespace is loaded binds its methods' vars (compilation's `clj-1208` at the AOT level;
     `bin/clojure-tests --aot` compiles the fixture `compilation.load-ns` just before `compilation`). The evaluator
     makes no class ahead of its namespace's load, so the eval level keeps the test by design (CDR8 (b)).
+38. **`SecurityManager` a default import again** (2026-11-22, branch `clj-cdr-1122`; doc/CLOJURE-DESIGN-REVIEW.md,
+    CDR14 (a), the user's decision of 2026-11-22): hand change 11 reversed. `arbace/lang/RT.ae`'s `DEFAULT_IMPORTS`
+    has `SecurityManager` again, after `SecurityException`, as upstream's `RT.java` (`clojure/clojure` at
+    `98d735fab02f`, the suite's revision): JDK 26 keeps the class (JEP 486 disables what it guards, its methods throw),
+    and since clj-rows-1122 `java.lang.SecurityManager` is in the shipped world (`test/jrt/jrt_sources.ae`), so
+    Clojure code naming it unqualified compiles as upstream's does. repr/clojure's rule `:security-manager`, which
+    qualified it, is gone with it (doc/REPR-CLOJURE.md). The oracle's `native.ae:410`, which records the frozen v4
+    jar's answer to `(ns-resolve (create-ns 'native.imports.fresh) 'SecurityManager)` (nil: v4 had hand change 11), is a
+    known mismatch of main since v4 (`test/oracle/known-go-amd64-frozen.edn`).
+39. **The evaluator's fns with primitive signatures implement their primitive interfaces** (2026-11-22, branch
+    `clj-cdr-1122`; doc/CLOJURE-DESIGN-REVIEW.md, CDR15 (a), the user's decision of 2026-11-22: doc/go/EVAL-PLAN.md's
+    Q1 (b) in place of Q1 (a)). The analysis is unchanged (`FnMethod.primInterface` still nil: callers call `invoke`,
+    CDR2's casts type them); what changed is the fn object. `arbace/lang/Compiler.ae`: `FnMethod.evalPrimInterface`
+    computes the JVM's `primInterface` of a fixed arglist of at most 4 parameters (nil where the JVM raises a compile
+    error: variadic, more parameters), kept as `FnMethod.evalPrim`; `Evaluator.fnClass` gives a fn with such methods a
+    class made by `Dyn.defineProxyClass` over `Compiler$EvalFn` implementing those interfaces, its objects of EvalFn's
+    DynSub type (`arbace.j2g.model/class-supers`; Dyn's methods for every interface of the world, the nominal check by
+    the class's interfaces), made by the class's constructors (`ObjExpr.evalCtorF`, `evalCtorC`; `CodeRun.newFn`,
+    `newFnClosed` in place of `new EvalFn`), each interface's `invokePrim` slot `Compiler$PrimInvoke` (the fn's
+    `invoke`, the result converted to the primitive by Dyn's dispatch). A fn the Java forms compiler compiles
+    (`arbace.classes.lower/lower-fn`, `arbace.classes.native/fn-class-form`: the class implements its IFn$ interfaces
+    on the JVM) is an ordinary interpreted class extending AFunction or RestFn when it has primitive signatures
+    (`arbace.classes.interp/make-klass`: not a `fnClass`, its objects of DynSub_AFunction or DynSub_RestFn, AFunction
+    and RestFn among class-supers), so that its interpreted `invokePrim` is the interface's. A ^long fn of the REPL is
+    an `IFn$LL` and `.invokePrim` on it runs, as on the JVM (the oracle's `native.ae:233`, `:234`, `:237`). EvalFn
+    having a subclass (its DynSub type), j2g reads its fields through its class interface where the value is typed
+    EvalFn, so the call path reads them where it holds the struct: `CodeRun.fixed` and `arity` take the fn's
+    `FnExpr` (EvalFn's invoke methods pass their own `fe`), and a `Frame` keeps the fn's closed-over values from their
+    first read in a call (`fnClosed`).
 
 ## Dialect divergences
 
@@ -1165,8 +1195,6 @@ the runtime-visible renames are listed once, as repr/clojure's mechanical part.
   `arbace-for-java-26` from v4, hand change 17): Arbace reduces it, seeded with the first item;
   upstream throws `ClassCastException` by design, or, for `eduction`, works or throws depending
   on the JVM's class archive (CLJ-2656).
-- **`SecurityManager` is not a default import** (hand change 11): code naming it unqualified
-  fails to compile; `java.lang.SecurityManager` resolves.
 - **A multimethod's ambiguity message** (hand change 14) names two classes in the order of
   their names, not of the method table.
 - **`bean`** (hand change 15) ignores explicit `BeanInfo` classes: for `javax.swing.JLabel` it

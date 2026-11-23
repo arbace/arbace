@@ -4651,3 +4651,153 @@ holds no class. The read cell 3,143 / 19 / 0 to 3,162 / 0 / 0; OCaml's completen
   oi (cached in `.tmp/oi/warnhelp` by the library's key), a tool of the test as `bin/oi depend` is (476-1 (a)). warnings/mnemonics
   passes at eval and AOT by its own .reference. Over every header at levels 0, 1 and 2 only mnemonics changes.
 - Cells (bin/reap, the matrix not recorded): eval 568 / 48 / 24 -> 569 / 47 / 24, AOT 492 / 59 / 89 -> 498 / 56 / 86.
+
+## As built: queue 528 (2026-11-22, the VM): the user's decisions on the by-design rows, -output-complete-exe, ocamlobjinfo on a .cmxs, the AOT syntactic-arity, uutf
+
+The list of every by-design row at eval and AOT, put to the user as 528-1 to 528-15 (doc/JOURNAL.md, "the user's decisions on
+OCaml's by-design rows"), and what this task built of the answers:
+- **n/a classes** (`:kind :na`, a written reason per program in `:reasons`, `:decided` naming the user's decision; test/crops/score.ae's
+  na-class-problems takes such a class beside OC222 (a)'s `:skips`, test/crops/crops.edn's `:na-rules` says so): `:na-no-header`
+  (528-1: modrec, print_args, weaklifetime_par), `:na-ocamlopt-only-eval` (528-2, eval only: int64-unboxing, unboxed-primitive-args,
+  the three syntactic-arity programs, the suite's callback_effects_domains_gc), `:na-native-code` (528-10 and 528-14: func_sections,
+  native-debugger's gdb and lldb on amd64, the suite's asmcomp/optargs at AOT), `:na-debugger` (528-9: the five debugger scripts,
+  no_debug_event/noev, dynlink/host), `:na-fork` (528-11, as Python's: the five run programs and the suite's two
+  multicore_fork_domain_alone), `:na-timing` (528-15: fmt's styled_perf_bug), first in each divergences file after `:config-skipped`
+  (the eval and AOT files of the run corpus, the suite's and the compiled level's); lib-bigarray-2/bigarrfml joins `:config-skipped`
+  (528-4: its header's has-gfortran.sh, ocamltest-config.edn's `has_gfortran` false on the pinned host). The classes they came from
+  keep their texts; their rows are the n/a classes' now.
+- **-output-complete-exe** (528-5): header.awk's complete-exe mode, a `use_runtime = "false"` test whose bytecode alternative links
+  the program with `-output-complete-exe [FILE.c]` and runs it, itself or through a script of its directory (`@runscript=FILE:NAME`:
+  bin/oi's oi_one and o2j_alone write ./NAME as the program and run `sh FILE` in its place, its output and status the row's;
+  bin/lib/oi/tools.bash's runscript_of); its C files are the program's stubs (`@cstubs=`). output-complete-obj/github9344
+  (OCAMLRUNPARAM=b=1, `./github9344 || true`: "Fatal error: exception Not_found", no backtrace without -g) and test2 (puts.c, at_exit)
+  at oi's level and the light AOT level; the compiled level keeps the class (its runner has no script).
+- **ocamlobjinfo on a .cmxs** (528-6): the objinfo mode takes ocamltest's plugin test (setup-ocamlopt.byte-build-env; flags =
+  "-shared"; program = "NAME.cmxs"; ocamlopt.byte; ocamlobjinfo): test/ocaml/objinfo/oiobjinfo.ml's `-shared FILE.ml -o NAME.cmxs`
+  writes Arbace's .cmxs, Config.cmxs_magic_number then the plugin header Cmm_helpers.plugin_header gives (dynu_imports_cmi
+  Env.imports (), dynu_defines the unit, dynu_imports_cmx the persistent units whose values the typed tree names, with their
+  interfaces' digests, dynu_crc the source's digest: no .cmx is written), and its objinfo part prints it with objinfo's
+  print_cmxs_infos, -null-crc as ocamltest passes it. tool-ocamlobjinfo/question passes at oi's level by its .reference.
+- **The tool rows at AOT** (528-8 (a), a task of its own): the probe ran shape-index/index_labels at the light level, oiobjinfo
+  translated by o2j over compiler-libs' typing units (bin/oi's o2j_dump and o2j_env_runs take a tool row, kept for that task): killed
+  at its 140 s CPU limit with 3 GB resident. header.awk's objinfo mode stays at oi's level; the 19 rows wait on the compiled level.
+- **The syntactic-arity programs at AOT** (528-3): header.awk's ocamlopt-alone mode runs a header that is only `flags; setup-ocamlopt.byte-build-env;
+  ocamlopt.byte; run; check-program-output` at the AOT levels. alloc passes as it was; measure_runtime_arity needed `Obj.raw_field`
+  of a closure's field 1, its clos_info (jdk/ocaml/ocaml/rt/ExtCore.ae: the arity in the top 8 bits, the environment's start, the low
+  bit). max_arity keeps a class, now deferred: its check-ocamlopt.byte-output (warning 5) needs a compiler output judged at AOT.
+- **uutf's examples and utftrip** (528-15): test/ocaml/opam-programs.tsv takes a seventh column, the libraries (unix);
+  examples is a load program (load.reference), utftrip runs `-g utftrip.ml` with cmdliner's units, its verdict a reviewed golden
+  file (golden.edn: "UTF-8\n" from uutf's r_encoding). Both pass at eval and at the light AOT level.
+
+## As built: queue 533 (2026-11-23, the VM): -w in the native typer, max_arity's compiler output at the light AOT level
+
+DECISION 528-R1 (a): the native typer takes `-w SPEC` (arbace.repr.ocaml.typer's lambda verb). SPEC applies over ocamlc's default set
+as Warnings.parse_options does (arbace.repr.ocaml.native's parse-flags; several specs joined by commas). The warnings it makes active
+are printed on stderr after the unit is typed, in ocamlc's batch format (arbace.repr.ocaml.report's warning-report, a blank line
+between reports). A warning that SPEC makes an error (`@N`) is printed as one and ends the run with status 2. Without `-w`, nothing is
+printed, so every other caller's stderr stays as it was.
+- **Which warnings.** The reader's warnings (comment-start, comment-not-end, illegal-backslash, unexpected-docstring, through
+  `lex/*warn*`) and the typer's first warning, 5 (ignored-partial-application). arbace.repr.ocaml.typer.typecore ports
+  Typecore.check_partial_application's warning 5 and its four callers: type_let's bindings to `_`, an exception or an or-pattern of
+  them; type_statement; the `ignore` special case; a match whose cases all need the check. It also ports the delayed check for a
+  type not yet known (add_delayed_check, run after the unit's typing), and a constrained expression's exemption (exp_extra's
+  Texp_constraint, a metadata mark). Warning 10 (non-unit-statement) is not ported.
+- **The runner.** header.awk's ocamlopt-alone mode at the light AOT level takes check-ocamlopt.byte-output and adds `@compout=1` to
+  the row's environment, plus `@w=SPEC,...` with the flags' -w specs. bin/oi's o2j_dump passes `-w` to the typer; o2j_env_runs judges
+  the typer's stderr (D/typer.err) against TEST.compilers.reference (no file: no output), as ocamltest's check does. Output that differs
+  is appended to the row's output, so the row fails. On the oracle's path (`--ocdump`; ocdump reports no warnings) the row is a dump
+  error, "the compiler's output (check-ocamlopt.byte-output) is the native typer's", matched by `:ocamlopt-only`. The compiled level
+  keeps the class.
+- **Result.** syntactic-arity/max_arity passes at the light AOT level: its output equals max_arity.reference, and the typer's
+  warning equals max_arity.compilers.reference byte for byte.
+## As built: queue 527 (2026-11-22, the VM): Marshal of the C's custom blocks at the AOT levels, o2j's shared block constants
+
+- **The wire's 'S' and 'D'** (DECISION 523-2 (a); go/arbace/oicapi/wire.ae's customOp): 'S' u64 the block's address, answered by
+  its operations' serialize (the bytes and the two sizes), 'D' the identifier, the data and the size expected, answered by the
+  registered operations' deserialize (the block as 'c', the size it returned, the bytes it read); 'N' when there are none, 'E', 'X'
+  and 'F' when the C raised, exited or faulted; at any depth, a session of its own outside a call. The server calls oicapi's
+  serialize and deserialize, the ones oi's Marshal calls. The Java runtime's Marshal writes a CBlock Custom as extern_custom does
+  (sharing first, CODE_CUSTOM_LEN, the identifier, the sizes, the bytes; abstract when the operations have no serialize) and reads a
+  CODE_CUSTOM_LEN of an identifier not its own through CApi/deserialize, intern.c's length check after it.
+- **o2j's block constants** (arbace/o2j.ae's const-form, :blocks): one static field a unit for structurally equal block constants,
+  a block's block fields the shared ones, as ocamlopt's Closure labels structured constants (Compilenv.new_structured_constant
+  ~shared:true). const-arg's folding (queue 397) had copied a let-bound constant into each field: lib-marshal/intext's sharing tests
+  (21, 121, 221, 421: `let x = D "sharing" in G(x, x)`) failed.
+- regression/pr3612 and lib-marshal/intext pass at the light AOT level (pr3612 leaves `:c-runtime-decided`, intext aot-known.edn);
+  pr3612's 1,000,001 deserializations, one round trip each, take about 109 CPU seconds on the VM (runtime and server) against the
+  level's 120.
+
+## As built: queue 529 (2026-11-22, the VM): the toplevel on oi through oi's Dynlink, caml-tex and self-contained-toplevel
+
+DECISION 528-7 (a) (the user, 2026-11-22). The toplevel is compiler-libs' own, typed by Arbace's typer and run on oi; only the
+loading of a phrase is Arbace's.
+
+- **The library.** `bin/oi stdlib`'s compiler-libs (`COMPLIB_UNITS`) take the rest of `lambda/` in lambda_SOURCES' order
+  (printlambda, switch, matching, value_rec_compiler, translobj, translattribute, translprim, translcore, translclass, translmod, tmc,
+  simplif, runtimedef) and comp_SOURCES' bytecomp/ units the toplevel's Topcommon links (meta, bytesections, dll, symtable; opcodes,
+  generated by make_opcodes and read by the bytecode back end alone, left out), with the interfaces cmo_format, cmx_format, cmxs_format
+  and instruct (Meta's types). `lambda/runtimedef.ml` is made as the Makefile makes it, by the tarball's `runtime/gen_primitives.sh`
+  over runtime_BYTECODE_C_SOURCES (Unix's) and `lambda/generate_runtimedef.sh`. All 131 library units type (0 refused).
+- **The toplevel** (`bin/lib/oi/tools.bash`'s `toplevel_build`, `.tmp/oi/toplevel` by its key): the tarball's toplevel/ units
+  (genprintval, topcommon, toploop, topprinters, topdirs, byte/topmain against the shared topmain.mli) with two of Arbace's own:
+  `test/ocaml/toplevel/topeval.ml` (from byte/topeval.ml: load_lambda simplifies the phrase's Lambda, wraps it as the unit
+  `OitopN` whose module block's one field is the phrase's value, writes it as oi's forms (tools/ocdump's printer) and gives it to
+  Dynlink's externals on oi, caml_oi_dynlink_parse, link (Symtable's errors) and init; the value is caml_oi_dynlink_global's;
+  eval_ident reads a unit's block the same way and a predefined exception by a phrase of its own; #load takes oi's plugin files) and
+  `test/ocaml/toplevel/trace.ml` (byte/trace.ml with no code pointer: byte/topmain reads one at its initialisation, #trace fails).
+  Toploop's getvalue and setvalue are fields 0 and 1 of the program's Toploop, as Translmod's toploop_ident expects.
+- **The typer.** `while true do ... done` has the expected type (Typecore's Pexp_while; topcommon's read_input_default);
+  `--no-alias-deps` (Clflags.no_alias_deps: tools/ocamltex.cmo's flag in the Makefile, so its `let module P = Parsetree` requires
+  no Parsetree).
+- **oi.** `caml_sys_modify_argv` (the toplevel's override_sys_argv before a script).
+- **header.awk's toplevel modes** (aot=0 alone; over every header at levels 0, 1 and 2 only these three readings change):
+  `ocamltex` (ocamltest's script running tools/ocamltex: arguments `-repo-root _root TEST.input -o TEST.output`, the repo root's
+  stdlib the standard library's .cmi files made on oi; the program linked -linkall as the Makefile links it; the row's output
+  TEST.output then the run's own) and `toplevel` (self-contained-toplevel: foo.cmi by `ocamlc -c` on oi, oiobjinfo; the `ocaml`
+  script action an oi run of gen_cached_cmi.ml over compiler-libs; main.ml linked with Foo, Cached_cmi, compiler-libs and the
+  toplevel; OCAMLLIB the run directory's _stdlib). `bin/oi`'s oi_one passes the row's environment to the tool and runs the tool's
+  units (D/tool.units) before the program.
+- **Results (light).** tool-caml-tex/ellipses, tool-caml-tex/redirections and self-contained-toplevel/main pass by their own
+  .reference at oi's level and leave `:ocamltest-tools`; controls `_control/ocamltex-ellipses-vs-redirections` and
+  `_control/toplevel-main-vs-redirections` differ. `bin/oi check --record --only-list` over the three (check-oi-native.edn's rows moved);
+  the whole `bin/oi check` at the head (481 programs, 2 jobs): 466 pass, 0 failing outside a class, the record's other differences
+  all next's own (statmemprof/custom and user_data_regression pass, the two test_c_thread_register now missing caml/platform.h: queue
+  523's merge, not this change); the whole `bin/oi suite check`: 117 pass, 0 failing, no difference from its record. OCaml eval 577 /
+  47 / 16 -> 580 / 44 / 16 (bin/reap; the matrix not recorded). The typer's two changes, each with its control, fail on the parent
+  and pass here (the report's test). ocamltex's run takes about 0.8 s of oi (the 200 units of the program linked lazily).
+- **The AOT levels keep the class**: the light level does not load compiler-libs' typing units in its limit (DECISION 480-1), and
+  the compiled level's library (o2j clib, which takes every COMPLIB_UNITS unit) is the main host's (528-8).
+
+## As built: queue 532 (2026-11-22, the VM): ocamlc and dumpobj on oi, tool-dumpobj and the .cmo test
+
+DECISION 528-13 (a) (the user, 2026-11-22): compiler-libs' bytecomp as a tool on oi. The bytecode compiler is OCaml's own, unmodified,
+typed by Arbace's typer and run on oi; its rows are judged by their own .reference.
+
+- **ocamlc on oi** (`bin/lib/oi/tools.bash`'s `bytecomp_build`, `.tmp/oi/bytecomp` by its key, outside bin/oi so native_key and
+  `COMPLIB_UNITS` stay 529's): the rest of comp_SOURCES (opcodes, makedepend, compile_common) and ocamlbytecomp_SOURCES (byterntm,
+  instruct, bytegen, printinstr, emitcode, bytelink, bytelibrarian, bytepackager, errors, compile, maindriver), `driver/main.ml` itself
+  (`exit (Maindriver.main Sys.argv Format.err_formatter)`), and `tools/dumpobj.ml` with `tools/opnames.ml`, each typed against its
+  .mli over compiler-libs' interfaces (17 units, none refused, about 3 minutes at 2 jobs). The generated units are made as the
+  Makefile makes them: `tools/make_opcodes.mll` by the native ocamllex, run on oi over `runtime/caml/instruct.h` (`-opcodes`, `-opnames`),
+  `opcodes.mli` by the typer's `ocamlc -i` (`types`), `bytecomp/byterntm.ml` by the native ocamllex. Each program links what its
+  dump requires (`bclib_need`: 130 units for ocamlc, 33 for dumpobj).
+- **The command line** (`bc_ocamlc`): `ocamlc -nostdlib -I _stdlib FLAGS ...` as ocamltest's ocamlc.byte runs it, less `-use-runtime
+  ${ocamlrun}` (Symtable.init would run `ocamlrun -p` for the primitives: the runtime's own list, Runtimedef's, is used, as for any
+  ocamlc without -use-runtime; the shebang line is the only other thing it changes) and `-I runtime`. `_stdlib` is the standard
+  library's .cmi files made on oi (objinfo_build's) with `runtime-launch-info` as stdlib/Makefile makes it for unmangled runtime names
+  (a NUL, then the launcher: Config's launch method is the shebang one, so Bytelink reads the file and writes a sh launcher, never the
+  stub, which is a line here).
+- **oi.** `Obj.raw_field` of a custom block's field 0 (`caml_obj_raw_field`): in C the address of its custom operations, here a word
+  made from the operations' identifier (`customOpsWord` over `customIdent`: "_i", "_j", "_n", a Custom's name), the same for every
+  block of a kind: dumpobj's `same_custom` tells the boxed integers apart by it (`GETGLOBAL 42L`).
+- **header.awk** (aot=0 alone; over every header of the testsuite at levels 0, 1 and 2, 4,542 readings, only these two change):
+  the dumpobj mode (`flags; setup-ocamlc.byte-build-env; ocamlc.byte; run; check-program-output` with the run hook TEST.run being
+  tools/dumpobj's command line: ocamlc on oi builds TEST.byte, the row's program is dumpobj on oi with the hook's arguments
+  `-nobanners TEST.byte`, no hook) and the objinfo mode's .cmo (`src`/`dst`/`copy` before the compile, `program = "U.cmo"`: ocamlc on
+  oi compiles, its messages judged against TEST.compilers.reference by `tool_output`, then oiobjinfo, which now prints a .cmo
+  verbatim as tools/objinfo.ml's print_cmo_infos does, with ocamltest's `-null-crc`).
+- **Rows** (run, `bin/oi check --only-list`): tool-dumpobj/test passes (`GETGLOBAL 42L ... SETGLOBAL compilation unit `Test' ... STOP`,
+  the reference byte for byte) and no-alias-deps/aliases passes (warning 49's two reports byte for byte, then the .cmo's imports in
+  Consistbl's order and its required globals). `:compiler-output` and `:compiler-output-cmo` list no program at oi's level; the AOT
+  levels keep both (528-8: the tools AOT-compiled, the main host's compiled level). Controls: dumpobj's run against the .cmo test's
+  reference and the reverse must differ.
