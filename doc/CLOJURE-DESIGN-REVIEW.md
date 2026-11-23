@@ -489,3 +489,32 @@ closes (`EntityDeclarationImpl` and its closure added to `java-xml-classes.txt`:
 Truly by design, unchanged: `class-files` (test-proxy-method-order and gen-interface-source-file read class files with ASM;
 clj-1208 at the eval level, CDR8 (b)), `tools-deps`, `runtime-source` (AOT), `identity-hash`, `main-since-v4`,
 `method-invoke-message` (RPS19 (a)), `security-providers` (eight providers, each a module of its own).
+
+## Decided (2026-11-22, the user: CDR12-CDR15)
+
+CDR12 (a), CDR13 (a), CDR14 (a) and CDR15 (a), Q1 (b) in place of Q1 (a) (doc/JOURNAL.md, "the user's decisions on the
+burst's by-design and counting questions"). CDR16 stays open (the eval level's clojure-xml and invoke-checks-accessibility).
+
+## As built (2026-11-22, branch `clj-cdr-1122`): CDR12-CDR15
+
+From mac/next `3e8dfe109`; one gate build (`52c31a81c04b`) and the records made from it (doc/JOURNAL.md, "Clojure's decisions
+CDR12-CDR15 built", rounds 1 and 2).
+
+- **CDR12 (a)**: AbstractTableModel, TableModel, EventListenerList, TableModelListener and TableModelEvent in the shipped world
+  (test/jrt/jrt_sources.ae; AbstractTableModel and TableModel derived overlays without their import of javax.swing.*), jdk/ converted
+  afresh (7 forms added), j2g's edge recorded afresh, AbstractTableModel among `arbace.j2g.model/proxy-supers`. java-interop's
+  test-proxy-non-serializable passes at both levels (arbace.inspector's list-model made, its serialization refused).
+- **CDR13 (a)**: every read of a .cljc into a .ae records its conditionals; `:reader-conditionals` reversible.
+- **CDR14 (a)**: SecurityManager among RT's default imports (doc/VENDOR-NOTES.md, hand change 38), `:security-manager` dropped. The
+  oracle's reference has hand change 11, so two of its cases are main-since-v4's now (native.ae:410, state_errors.ae:454).
+- **CDR15 (a)**, Q1 (b) (hand change 39): an evaluated fn with primitive signatures is an object of EvalFn's DynSub type, its class
+  made by `Dyn.defineProxyClass` with the interfaces; a Java forms fn's class with IFn$ interfaces is interpreted as an ordinary class
+  extending AFunction or RestFn. native.ae's three cases pass at eval, diffcheck's three c2j: cases agree. Cost: EvalFn is no longer a
+  leaf class, and an evaluator microbenchmark measured plain evaluated calls about 9% slower, closures 3-5% (doc/JOURNAL.md, round 1).
+- **The deferred items**: `:fn-code-type` passes with the rebuild (serialization 9 of 9 at the AOT level); `:xml-stream`: StAX's
+  EntityDeclarationImpl, NotationDeclarationImpl and DummyEvent in test/clojure/jdk-extra/java-xml-classes.txt (j2g's failures 2 -> 1),
+  but XMLInputFactoryImpl is refused next, for its createXMLEventReader's XMLEventReaderImpl: the event reader's closure (about 20
+  classes of com.sun.xml.internal.stream and its events) and an AOT run left.
+
+The cells (pass / by design / deferred): read 908 / 2 / 0 to 909 / 0 / 0; eval 21,119 / 13 / 2 to 21,121 / 11 / 2; AOT 831 / 5 / 2 to
+833 / 4 / 1.

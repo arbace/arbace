@@ -387,9 +387,9 @@ Prior art:
   - `arbace/repr/clojure{.ae,/}`: `arbace.repr.clojure`, Clojure's bridge (`doc/REPR-CLOJURE.md`;
     `bin/repr-clojure read`, `print`, `roundtrip`, `check`): Clojure source into Arbace's, the
     names of the vendored Clojure, `.clj`/`.cljc` into `.ae`, a table of rules for the dialects'
-    divergences, and back (`print`, each rule reversed; its two one-way rules documented: a
-    `.cljc`'s conditionals resolved, `SecurityManager`'s spelling; `read --full` records a
-    `.cljc`'s conditionals in a comment block at the `.ae`'s end, printed back as the `.cljc`),
+    divergences, and back (`print`, each rule reversed, none one-way since CDR13 (a) and CDR14 (a), 2026-11-22: every
+    read records a `.cljc`'s conditionals in a comment block at the `.ae`'s end, `read --full`'s record, printed back
+    as the `.cljc`, and `SecurityManager` is a default import again),
     Clojure → Arbace → Clojure byte for byte over the frozen `clojure/`, the suite and its
     libraries (`check --roundtrip`, `test/repr/clojure/roundtrip-known.edn`); `bin/clojure-tests`
     translates Clojure's suite with it.

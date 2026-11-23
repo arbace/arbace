@@ -376,11 +376,12 @@ build failure ends the whole gate (the morning's javac-tool). Each held branch's
   groups. Left for the user: read's 137 invalid programs (agreement as pass, n/a, or GC47 (b)), gc in the executable (gc-flags 28,
   gc-phases 7, nowritebarrier), print's 9 self-embedding tests, AOT's issue9608 (RPS31), goi's foreign code 8 and memory 7.
   Next round (drafted, unapplied: `.tmp/patches/nowb.py` in the worktree): nowritebarrier's checks; escape_unique (deferred).
-- **Clojure** (99.7 99.9 100 100, from 99.1; `clj-rows-1122`, 2026-11-22). Fns serialize (FnSer), proxies refuse
-  serialization, `:load-ns` deftypes compiled (CLJ-1208), CDR1's locales and SecurityManager in jdk/; recorded from one build
-  (`3dc7bacc2ceb`): eval 21,119 / 13 / 2, AOT 831 / 5 / 2 (gen-class, CDR2, CDR4 (b), clojure-xml through `:jdk-extra`). Left:
-  `:fn-code-type` (2 AOT assertions, c2j fix `6fdb262a0` waits for the next build), `:xml-stream` (EntityDeclarationImpl in the
-  jdk-extra list); decisions CDR12-CDR16 (doc/CLOJURE-DESIGN-REVIEW.md).
+- **Clojure** (99.84 99.97 100 100; `clj-cdr-1122`, 2026-11-23, after `clj-rows-1122`'s 99.7). CDR12-CDR15 built (doc/CLOJURE-DESIGN-REVIEW.md,
+  "As built (2026-11-22)"): Swing's table model in jdk/, every .cljc's conditionals recorded, SecurityManager a default import again,
+  prim interfaces on evaluated and Java forms fns; one build (`52c31a81c04b`): read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT 833 / 4 / 1.
+  Left: `:xml-stream` (the event reader's closure in the jdk-extra list, then an AOT run); for the user: CDR14's two oracle cases
+  against v4 (keep as main's divergences, or drop the forms), CDR15's evaluated part (plain evaluated calls about 9% slower in the
+  microbenchmark; the Java forms part alone keeps the three cases); CDR16 open.
 - **Go** (98 100 100 100, from 97). Landed: the by-design classes reclassified (round 51 A (a), B (a): weak/unique, types2's two
   and the abridged type literal deferred, the rows with no reference `:na`). Held: `h-go-weak` (`d22d37048`, weak and unique
   importable: j2g and goi's table) and `h-go-noforms` (`aa47291df`, types2's range and slice checks in the gcsyntax driver),
