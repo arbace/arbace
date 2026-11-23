@@ -241,7 +241,9 @@ END {
   hasoptbuild = 0
   for (j = 1; j <= m; j++) if (trim(st[j]) == "setup-ocamlopt.byte-build-env") hasoptbuild = 1
   oimode = 0
-  if (aot == 0 && (hasbuild || hasoptbuild) && !dlmode && !dpmode && !odmode && !cemode) {
+  # (burst 2026-11-23, DECISION 528-8 (a): the tools AOT-compiled at the compiled level, compiler-libs in its library) the mode at the
+  # compiled level too (aot == 2): oiobjinfo translated by o2j and j2g as the row's program; the light level keeps the class (528's probe)
+  if ((aot == 0 || aot == 2) && (hasbuild || hasoptbuild) && !dlmode && !dpmode && !odmode && !cemode) {
     oimode = 1; oiflags = ""; oimods = ""; oicopy = ""; oiprog = ""; oicomp = 0; oiobj = 0; oico = 0; oisrc = ""; oidst = ""; oicps = ""; oishared = ""; oiopt = 0
     for (j = 1; j <= m && oimode; j++) {
       s = trim(st[j]); if (s == "") continue
