@@ -1260,23 +1260,43 @@
   (let [d (some #(when (and (= "Closure" (:kind %)) (= hir-id (:hir-id (:node %)))) %) (c/defs))]
     (str "DefId(0:? ~ " (crate-name) "[????]::" (if d (mir-name d) "?") ")")))
 
+(def ^:dynamic *static-bytes-deferred*
+  "queue 542 (C6): within a library's export (alloc-check --export), a static whose initializer the slice cannot evaluate yet (a
+  const fn's call: `static STDOUT: OnceLock<..> = OnceLock::new()`) is referenced with its value deferred: its allocation names
+  the static by its def path and holds no bytes (`, deferred)`), so a body that only points at it is built (rustc's codegen of
+  such a body names the static's symbol alone), and the static's definition stays the library unit's to make (CTFE not ported)"
+  false)
+
 (defn- intern-static-alloc!
   "reserve_and_set_static_alloc: a static's allocation (its evaluated bytes, its name), one per static; its id"
   [def]
   (when *allocs*
     (let [k [:static def]
           id (or (get-in @*allocs* [:ids k])
-                 (let [[bs align] (static-bytes def) i (:next @*allocs*)]
-                   (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name (second (:data (c/def-of def))) :align align}) (update :next inc)))
+                 (let [[bs align] (if *static-bytes-deferred*
+                                    (try (static-bytes def)
+                                         (catch arbace.lang.ExceptionInfo e
+                                           (if (str/starts-with? (str (.getMessage e)) "build: unsupported a static's value")
+                                             [:deferred 1]
+                                             (throw e))))
+                                    (static-bytes def))
+                       i (:next @*allocs*)
+                       nm (if (= :deferred bs)
+                            (binding [c/*in-value* true] (c/print-def-path def []))
+                            (second (:data (c/def-of def))))]
+                   (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name nm :align align :deferred (= :deferred bs)}) (update :next inc)))
                    (swap! *allocs* assoc-in [:static-bytes i] bs)
                    i))]
       (upd! update :allocs-used (fnil conj #{}) id)
-      (doseq [x (get-in @*allocs* [:static-bytes id]) :when (map? x)] (upd! update :allocs-used conj (:ptr x)))
+      (doseq [x (let [b (get-in @*allocs* [:static-bytes id])] (when (sequential? b) b)) :when (map? x)] (upd! update :allocs-used conj (:ptr x)))
       id)))
 
 (defn- alloc-text
   "write_allocation: an allocation's bytes, sixteen a line (an offset column past sixteen bytes), as ASCII beside"
   [id bytes & [static]]
+  (if (:deferred static)
+    ;; queue 542: a static whose value is deferred: its path, no bytes (build_run's alloc-bytes reads none: the static declared)
+    (str "\nalloc" id " (static: " (:name static) ", deferred)\n")
   (let [n (count bytes)
         w (max 1 (count (Long/toHexString (long n))))
         center (fn [^String t width] (let [pad (max 0 (- width (count t))) l (quot pad 2)]
@@ -1292,7 +1312,7 @@
                     (apply str (repeat (- 16 (count chunk)) "   "))
                     "│ " (apply str (map ascii chunk)) "\n"))]
     (str "\nalloc" id " (" (when static (str "static: " (:name static) ", ")) "size: " n ", align: " (or (:align static) 1) ") {" (if (zero? n) "}\n" "\n")
-         (if (zero? n) "" (str (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes))) "}\n")))))
+         (if (zero? n) "" (str (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes))) "}\n"))))))
 
 (defn- str-unescape
   "A string literal's value from its symbol (unescape_unicode's escapes, a line continuation)"
@@ -3267,7 +3287,7 @@
                        :else nil)
      ;; the allocations' texts and their pointers (a body's are its constants' allocations, transitively)
      :alloc-texts (when *allocs* (into {} (for [id (:allocs-used s)] [id (alloc-text-of id)])))
-     :alloc-deps (when *allocs* (into {} (for [id (:allocs-used s)] [id (vec (keep :ptr (filter map? (get-in @*allocs* [:static-bytes id]))))])))
+     :alloc-deps (when *allocs* (into {} (for [id (:allocs-used s)] [id (vec (keep :ptr (filter map? (let [b (get-in @*allocs* [:static-bytes id])] (when (sequential? b) b)))))])))
      :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)) (:user l) (assoc :user true))) (:locals s))
      :scopes (:source-scopes s)
      :debug (:debug s)

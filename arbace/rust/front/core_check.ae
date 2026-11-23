@@ -823,7 +823,7 @@
 (defn- own-attr-value
   "queue 542: an attribute's string value (`#[link_name = \"realname\"]`), else nil"
   [node nm]
-  (some #(when-let [u (:unparsed %)] (when (= nm (first (str/split u #"[ (=]"))) (second (re-find #"=\s*\"([^\"]*)\"" u)))) (:attrs node)))
+  (some #(when-let [u (:unparsed %)] (when (= nm (first (str/split u #"[ (=]"))) (:eq-str %))) (:attrs node)))
 
 ;; C4 (2026-11-22): an enum's discriminant type and its variants' discriminants, as the helper writes them (tools/rsdump/front.rs:
 ;; `a.repr().int`'s type, else nil; `a.discriminants(tcx)`'s Display): rustc_middle's AdtDef::discriminants, an explicit
@@ -1327,6 +1327,23 @@
              :when (and (number? d) (empty? as))]
          d)))
 
+(defn- deferred-static-ids
+  "queue 542 (C6): the crate's statics FORMS point at with their value deferred (build's `static: PATH, deferred` allocations),
+  by their local def ids, so that export-consts exports their initializers' bodies (the run evaluates them: build-run's
+  eval-static-body)"
+  [forms]
+  (let [ps (set (for [x (tree-seq coll? seq forms)
+                      :when (string? x)
+                      :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" x))]
+                      :when p]
+                  p))]
+    (if (empty? ps)
+      #{}
+      (set (for [d (collect/defs)
+                 :when (str/starts-with? (str (:kind d)) "Static")
+                 :when (ps (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])))]
+             (:id d))))))
+
 (defn- export-consts
   "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the bodies of the crate's constants a built body R names by a local def id,
   each built (construct_const) and exported as a body is, with the constants they name in turn (three levels), {def-path
@@ -1335,7 +1352,7 @@
   constant that does not build is left out (the body stays refused, as before)"
   [r]
   (try
-  (loop [todo (local-const-ids [r]) seen #{} acc {} depth 0]
+  (loop [todo (into (local-const-ids [r]) (deferred-static-ids [r])) seen #{} acc {} depth 0]
     (if (or (empty? todo) (> depth 2))
       acc
       (let [built (for [id todo
@@ -1349,7 +1366,7 @@
                         :when body]
                     [id (def-path-string id) body r])
             seen (into seen todo)]
-        (recur (remove seen (local-const-ids (keep #(nth % 3) built)))
+        (recur (remove seen (into (local-const-ids (keep #(nth % 3) built)) (deferred-static-ids (keep #(nth % 3) built))))
                seen
                (into acc (for [[_ p body] built] [p body]))
                (inc depth)))))

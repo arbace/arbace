@@ -19124,3 +19124,35 @@ test/rust/runtime/ir.sha256). Logs in the VM's `.tmp/q542/logs/lu/` and `lub/`.
   the export: why ptr's keys are not wanted when 16 files run together).
 - Not yet: the 37 statics initialized by a const fn call (lib-unit's build gives no static facts, `:statics {}`, so a body naming a
   static is refused at the build even when exported: CTFE of the initializer and the static's symbol are one piece of work).
+
+## 2026-11-24: 542 (the VM): C6 round 4, statics evaluated, constants, layouts
+
+The coordinator's round 4 (the user keeps 542 running overnight on CPUs 0-3). lib-unit against std's IR at the pin:
+
+- **Statics initialized by a const fn call** (`OnceLock::new()`, `AtomicUsize::new(0)`, `RwLock::new(Hook::Default)`): the export
+  no longer refuses a body that points at one (build's `*static-bytes-deferred*`, bound in alloc-check's --export: the static's
+  allocation `static: PATH, deferred`, no bytes); export-consts exports the initializers' bodies of the statics a body points at
+  (core-check's deferred-static-ids); lib-unit gives each such static its symbol (std-static-symbol of its path) and its value
+  by CTFE (build-run's eval-static-body: eval-promoted on the initializer's own body, its const fn calls by their exported bodies
+  at the call's arguments, eight deep, the aggregates laid out by mono; variant-bytes takes a pointer niche's tag as 64 bits); a
+  const fn no export holds is logged `lib-unit inline wanted` (a static's evaluation), so `lib-unit inline-keys` adds it to the
+  next export (core's Atomic<T>::new, MaybeUninit::uninit, Cell::new; std's futex Mutex/RwLock/Once new). A static whose value
+  stays unevaluated is declared, not defined (its body then differs from rustc's by the static's bytes alone, as the compare
+  writes them). Thread-local statics are not handled (llvm.threadlocal.address).
+- **Constants**: a dependency's integer constant by its interface fact's :value (libc's S_IFMT, EBADF; build-run's
+  iface-const-value, in sized-const-eval and eval-promoted); a promoted ZST constant (a function item `&stat`) and a closure with
+  no capture are empty values; a promoted constant of std's own by eval-local-const.
+- **Layouts std's interface lacks**: lib-unit reads std's and alloc's own passes (native-iface-nodebug.edn) and core's whole pass
+  (core/core-whole-iface.edn: core::sync::atomic's private Align1..Align8) beside the dependencies' facts; mono's pattern-field
+  takes the signed niche types `iN is ..-1 | 0..` (I32NotAllOnes, I64NotAllOnes: OwnedFd's ValidRawFd) as the wrapping range 0 to
+  -2.
+- A `name = "literal"` attribute keeps its literal (lower's :eq-str): `#[link_name]`, cfg_attr's too (errno_location is
+  `__errno_location` on linux), read by mono's foreign-link-name and core-check's facts (std's pass made again for it).
+- core-attrs.txt takes sync/atomic.rs and iter/traits/accum.rs (the atomics' and the sums' macro-made methods, which rsi-build's
+  threads refused as "not in core's sources").
+
+std's 325 items: 124 / 15 / 186 (round 3) -> **153 / 50 / 122** (equal / differ / refused), no item equal before differing now;
+the new differences are mostly items that now build and differ by an atomic method's instantiating crate (`Atomic<T>::load` not
+taken `#[inline]` from core-attrs yet), errno's link name (std's pass again), the remaining unevaluated statics and
+extern "C"'s pair returns. pack-compare-test passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed
+(its known summary, 0 stub calls).
