@@ -19732,3 +19732,30 @@ cpp-small's :cx/reported guard around cpp-ce2's line-0 header error), the journa
 turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read again on the merged tree: 46 own pass and the control pair
 failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
 5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.
+
+## 2026-11-23: ocaml-1123: unboxed-primitive-args' compiled run stopped; the gen mode not in effect; the rerun under one ticket
+
+The coordinator stopped the build worktree's compiled run (about 12:00 to 13:30 under the big lock): its translation process (`o2j
+cprogs`, test/ocaml/o2j/tool.ae) grew to 45 GB in 86 minutes on unboxed-primitive-args' generated program (main.ml's 600 KB of
+Lambda: some thousand externals and their tests), leaving the host 4 GB and blocking the trains. header.awk's gen mode is not in
+effect at any level (60de8bb0d; `gnon` enables it once o2j translates a program of that size in bounded memory); the row keeps
+`:c-api` (deferred) at both AOT levels. The rerun (`.tmp/worktrees/ocaml-b/.tmp/oc/compiled-b.sh`): tool-ocamldoc/t01-t05,
+gc-roots/globroots_sequential, lib-threads/signal and delayintr, and the compiled Dynlink rows the Mac's 544 asks for
+(lib-dynlink-pr4229/main, lib-dynlink-domains/main, lib-dynlink-init-info/test), then the suite's opam/base64/test and
+opam/fmt/test_fmt, all under one big-lock ticket (HEAVY_MEM_GIB=16: the tool rows' shard's j2g peaked at 13.9 GB), every process
+under `ulimit -v` 24 GiB so that a runaway fails fast.
+
+## 2026-11-23: ocaml-1123: the compiled level's tool rows, first run; the compiled reruns split by memory
+
+- The 17 tool rows' compiled run (one shard, 09:12 to 15:17, mostly the lock's queue; j2g 13.9 GB, build-go 3,221 s and 31.8 GB
+  peak: the shard's ocaml.u package holds compiler-libs): no-alias-deps/aliases passes; 15 rows stop in an
+  ExceptionInInitializerError, oiobjinfo's Load_path reading a directory through `Paths.get`, whose default file system initializes
+  StaticProperty through System.getProperties, which calls `Properties.setProperty`, a method j2g's reachability did not reach (its
+  support code calls it); tool-dumpobj/test stops at `Obj.raw_field` of a boxed integer's field 0. Fixed (5de1b38d0): the shards'
+  j2g takes `--root java.util.Properties#setProperty`; the AOT runtime's `caml_obj_raw_field` answers a custom block's field 0 with
+  oi's customOpsWord. The record keeps the run's rows (aliases' pass; the others fail, outside any class) until the rerun.
+- The build worktree's rerun (14:24) was stopped by this session at 15:58: its ocamldoc shard's j2g passed 20 GB against the ticket's
+  declared 16 GiB while the train's gate build compiled a package at 23 GB (MemAvailable 8 GB). Rerun (`ocaml-b`'s
+  `.tmp/oc/compiled-b.sh` at 5de1b38d0): the small rows (gc-roots/globroots_sequential, lib-threads/signal and delayintr, the Dynlink
+  rows pr4229, domains and init-info) and the suite's opam rows under one ticket of 16 GiB, then the compiler-libs programs (ocamldoc's
+  five and the 16 tool rows) in one shard under one ticket of 40 GiB, each under `ulimit -v`.

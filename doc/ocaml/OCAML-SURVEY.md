@@ -4850,6 +4850,8 @@ on `oc-compiled-1122`) and the light level's whole re-records after 533 and 528-
   action runs at the AOT levels; `gen_prog` runs the script on oi once an argument (its output the `compiler_output` file of the run
   directory: stubs.c, main.ml), the last unit of `all_modules` becomes the program, the other .ml its `@mods`, the .c its stubs, built
   from the run directory (`D/cstubs.here`, read by both AOT levels' `cstubs_nodes`).
+  Not in effect (60de8bb0d): the generated program's translation took 7.6 GB at the light level and 45 GB at the compiled level
+  (stopped); header.awk's `gnon` enables the mode once o2j translates it in bounded memory.
 - **A helper of C alone at the AOT levels** (lib-threads/signal, delayintr: sigint.c): built on ci as oi's (`oi_helper`, its own program
   whatever the level), the level's program runs it as `./sigint`.
 - **ocamldoc at the compiled level** (tool-ocamldoc/t01-t05): header.awk's ocamldoc mode at aot=2; `o2j_dump` lists the plugins' Lambda

@@ -329,8 +329,10 @@ END {
   # directory's); environment @gen=SCRIPT:ARG>OUT,... @genmain=ML @dyncopy=READONLY,... @cstubs=C,... @mods=ML,...
   # At the compiled level alone: the generated program (unboxed-primitive-args' main.ml, 600 KB of Lambda) passed 7.6 GB in the light
   # level's one translation process, whose whole run the gate declares at 4 GiB; the light level keeps the class
+  # Not in effect (burst 2026-11-23): at the compiled level too the one translation process (o2j cprogs) grew to 45 GB on it in 86
+  # minutes under the big lock; the mode waits for o2j to translate a program of that size in bounded memory (gnon = 1 enables it)
   gnmode = 0
-  if (aot == 2 && !hasbuild && hasoptbuild) {
+  if (gnon && aot == 2 && !hasbuild && hasoptbuild) {
     gnmode = 1; gscript = ""; garg = ""; gout = ""; gens = ""; gro = ""; gall = ""
     for (j = 1; j <= m && gnmode; j++) {
       s = trim(st[j]); if (s == "") continue
