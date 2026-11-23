@@ -304,7 +304,9 @@
                     (let [k [path (if (#{:fn :fn-tmpl} c) [c sig] c)]]
                       (if (.containsKey qdefs k)
                         (report! n (str "redefinition of '" (:name n) "'"))
-                        (.put qdefs k true))))))]
+                        (.put qdefs k true))))))
+        ;; (cpp-decl2: the namespace region of the class being walked, for its friends' definitions)
+        cur-ns (atom nil)]
     (letfn [(enter! [^java.util.HashMap r rk n path]
               (let [nm (:name n) off (loff n) dc (when (and off (mine? n)) (dclass n))]
                 (when (and nm (not= "" nm) dc)
@@ -340,7 +342,7 @@
                                             [r2 nss2] (or (.get nss k) (let [v [(java.util.HashMap.) (java.util.HashMap.)]] (.put nss k v) v))]
                                         (decls! r2 :ns nss2 (:inner n) (str path (if (= k "") "(anonymous)" k) "::"))))
                   ("UsingDecl" "UsingShadowDecl" "UsingEnumDecl" "NativeDecline") (poison! r n)
-                  (do (enter! r rk n path) (body! n path)))))
+                  (do (enter! r rk n path) (when (= rk :ns) (reset! cur-ns r)) (body! n path)))))
             (class! [n path]
               (let [r (java.util.HashMap.)
                     ;; the members' path: the class's, written in its namespace or qualified (`struct A::B {...}`)
@@ -357,6 +359,20 @@
                     (do (enter! r :class m path) (body! m path))
                     ;; (round 54: a member function template, its definition by its path for an out-of-class one's redefinition)
                     "FunctionTemplateDecl" (do (enter! r :class m path) (body! m path))
+                    ;; (cpp-decl2: a friend function's definition, a body or `= delete`, defines a function of the enclosing
+                    ;; namespace, [class.friend]/6-7: a second definition there is a redefinition, and a deleted one after a
+                    ;; declaration of the function is not its first declaration, [dcl.fct.def.delete]/4: GCC's "redefinition of
+                    ;; 'void foo()'", "deleted definition of 'void bar()' is not first declaration"; cpp0x/pr80259.C)
+                    "FriendDecl" (do (when-let [nr @cur-ns]
+                                       (when-not (re-find #"\(local\)|\(template\)|\(specialization@" path)
+                                         (doseq [f (:inner m)
+                                                 :when (and (= "FunctionDecl" (:kind f)) (fn-def? f) (mine? f) (loff f) (string? (:name f))
+                                                            (not (qualified-name? src (long (loff f)))))]
+                                           (let [dc (dclass f) o (.get ^java.util.HashMap nr (:name f))]
+                                             (when (and (:explicitlyDeleted f) o (= :fn (:cls o)) (not (:def o)) (nth dc 2) (= (nth dc 2) (:sig o)))
+                                               (report! f (str "deleted definition of '" (:name f) "' is not first declaration")))
+                                             (enter! nr :ns f path)))))
+                                     (body! m path))
                     (body! m path)))))
             (body! [n path]
               ;; a declaration's nested regions: a class's members, a function's parameters and body, a template's pattern
