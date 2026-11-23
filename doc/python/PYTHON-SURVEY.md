@@ -8092,3 +8092,78 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   63 classed, 0 failing both, every row the same (test_trashcan_threads' counts aside, a failure both times). The AOT record's
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
+
+## As built: 535, forkserver without os.fork (D1) and the rest of D1-D6 (2026-11-23, the Mac VM, queue 535; the user's "Build them")
+
+The user's word of 2026-11-23 on py-mods' six (D1-D6, doc/AGENDA.md's questions) supersedes the decision of 2026-11-04 (PY6e's
+DECISION (a)) and of 2026-11-22 for the start method forkserver: build it. `os.fork` stays absent (`has_fork_support` False): the
+start method fork and the tests of os.fork itself stay `:fork`, n/a.
+
+**D1, the design.** A forked Go process keeps one thread of a runtime that needs its others (the scheduler's, the collector's
+workers, the netpoller, sysmon): Python code cannot run in it, so a general `os.fork` is not built (the alternative, a fork-safe
+child by a patched Go runtime in `overlay/go`, would only reach the executables built after a re-seed, and stage 0's goi would
+still run the eval cell on the seed's runtime). But the fork server's child does nothing with the server's state that a fresh
+process cannot do again: after `os.fork()` it closes the server's descriptors, clears atexit, restores the signal handlers and runs
+`_serve_one`, which reads the preparation data and the process object from its pipe (`spawn._main`), as a spawned child does.
+So pyi's fork server starts each child as a fresh process of `sys.executable` (`util.spawnv_passfds`, as the server itself was
+started), with the request's descriptors at their numbers (child_r, the alive pipe, the resource tracker's, the client's own); the
+child does the server's preload again (sys.argv, sys.path, `__main__` imported as `__mp_main__` with `_inheriting`, the preload
+modules), clears atexit and registers `util._exit_function` as the forked child does, restores the server's original handlers
+(passed by name: SIG_DFL, SIG_IGN, default_int_handler; the server's SIGINT is ignored and an ignored disposition survives exec)
+and runs `_serve_one`. The server keeps forkserver's protocol unchanged: the authentication, the descriptors received by
+SCM_RIGHTS, the child's pid written to the client, its exit status from the server's SIGCHLD wakeup and `waitpid(-1, WNOHANG)`, the
+child the server's own (its parent pid the server's). Spawn as the default (249's option (b)) was not taken: forkserver works.
+
+**Where.** CPython's `Lib/multiprocessing/forkserver.py` is pinned and unpatched on disk; `arbace/python/libpatch.ae` (new) holds
+pyi's patches of the pinned Lib, applied by `arbace.python.run/compile-source`, the one place every pyi compile goes through (imports,
+exec and compile on goi; the AOT's modules compiled ahead and its compile-server). A patch applies in mode exec to the exact text it
+was written against (3.14.10's file by SHA-256 `12eb380e…`, 3.15.2's `811a5bfc…`, whose preload is its own `_handle_preload`), so
+another text compiles as it is; it replaces one line (`pid = os.fork()` by `pid = _pyi_spawn_one(...)`) and appends
+`_pyi_spawn_one`, `_pyi_serve_one` and `_pyi_preload` after the file's last line, so the module's line numbers are the file's
+(tracebacks and linecache read the file). The patched answer is kept in the IR cache under the key of the source as given, as
+go/arbace/py's aot.go looks the cache up itself by the text it has (the compiled launcher's server first died again on an unpatched
+answer the control had kept under that key); libpatch.ae is in the compiler's digest (arbace.python.run's and bin/pyi's
+`compiler_digest`). `PYI_LIB_PATCHES=0` compiles every source as it is (the control) and keeps no patched source's answer.
+
+**What a fork alone gives, not given (n/a):** the preloaded modules' import runs again in each child, so their import-time side
+effects repeat: test_multiprocessing_forkserver.test_misc's `test_preload_main`, `test_preload_main_sys_argv` and
+`test_std_streams_flushed_after_preload` (mp_preload_main.py, mp_preload_sysargv.py and mp_preload_flush.py count the server's one
+`__mp_main__` import in the output). They are the class `:forkserver-preload`, n/a (the server's memory copied into its child).
+
+**The proofs** (the Mac VM, the checkout's runtime; stage 0 nx's has a stale runtime, so the eval runs are goi's interpretation of
+it and the module runs are AOT's, `bin/pyi check --aot --lib-test --only`, the compiled launcher for the children). A script
+(`.tmp/q535/p/fs1.py`: forkserver, a child's result through a Queue, exit statuses 0 and 7): `bin/pyi run` PASS in 5 min 17 s,
+with `PYI_LIB_PATCHES=0` FAIL ("EOFError: unexpected EOF" at `read_signed`, the parent's behaviour); by the compiled launcher PASS
+in 13 s. The modules against the committed eval record (`.tmp/q535/tools/moves.py`): of 1,651 rows run, 291 that the record does not
+pass pass now (test_multiprocessing_forkserver's test_manager 93, test_processes 105, test_misc about 45; spawn's test_misc and
+concurrent_futures' test_init, test_wait and test_shutdown, the ECHILD cascade gone; test_cprofile's and asyncio's forkserver
+tests; test_sysconfig 2 and the 2 skipped before); none that it passes fails (round 3's two test_set rows, a dict `__ror__` that
+took a set's operand, fixed before round 4). Left in the forkserver modules: the start method fork's (os.fork), the resource
+tracker's signals and test_preload_resources and test_large_pool (`:multiprocessing-children`'s, as spawn's), test_heap, the four
+named ahead in `:multiprocessing`, the three of `:forkserver-preload`. The negative controls of the check failed as they must in
+every round.
+
+**D4 (the runner's limits).** The fork server's children are now pyi processes as spawn's are, so test/python/lib-test-limits.tsv
+gives test_multiprocessing_forkserver's test_manager, test_processes and test_misc spawn's rows (16384 MB; 3600, 7200 and 3600 s).
+
+**D5 (the layout, in part).** `_imp.extension_suffixes()` is CPython's shape: the platform's suffix first, PEP 3149's with the
+triplet (`.arbace-314-x86_64-linux-musl.so`, `aarch64` on arm64; musl's triplet, as Alpine's python3 has it), then py-capi's
+`.arbace-314.so` the C world's export tables are named with (tools/pyi/lib-dynload unchanged). `_sysconfigdata__linux_` gives
+`SOABI` `arbace-314-TRIPLET` and `EXT_SUFFIX` the first suffix (they were `''` and `.so`: since py-capi's suffix test_EXT_SUFFIX_in_vars
+failed unrecorded), `LIBRARY` and `LDLIBRARY` `libpython3.14.a` (a static build's names). test_sysconfig's test_library,
+test_linux_ext_suffix, test_EXT_SUFFIX_in_vars and test_soabi pass. Left in `:venv-and-build` (n/a): the six that ask files of an
+installation or a build tree (DECISION in the report).
+
+**Found on the way (the forkserver modules now run).** dict and set had no reflected wrappers: CPython's add_operators gives
+`__ror__` (and set's `__rand__`, `__rsub__`, `__rxor__`) from the same nb slot, and a manager's DictProxy and SetProxy forward
+`other | proxy` to them (TestSyncManagerTypes' test_dict and test_set under every start method); now `RBinary` of the same function
+with the operands swapped. `_thread.get_native_id()` was the ident (1 in every process's main thread): the main thread's is now the
+process id, as Linux's main thread's tid (test_process_mainthread_native_id).
+
+**The classes.** The committed eval record is the main host's, recorded before 535: its forkserver rows still fail there, so they stay
+classed as they are (`:fork`'s names and ECHILD match, `:multiprocessing`'s "unexpected EOF") until the next record, the classes'
+`:why` saying so; `:multiprocessing` names ahead the four forkserver rows the AOT run fails as spawn's do (TestManagerExceptions' two,
+test_poll_eintr, SharedMemoryServer_ignores_sigint); the three preload tests are the new `:forkserver-preload`, n/a.
+
+**D2, D3, D6.** D3 is py-accel's. D2 (a native `_io`) and D6 (test_fileio's strace shapes) are not built here: the report's
+DECISIONs.

@@ -19029,3 +19029,37 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: queue 535, Python D1-D6: forkserver without os.fork, the rest where feasible (the Mac VM, branch `535-py-d1d6`)
+
+The user's "Build them" of 2026-11-23 on py-mods' six (doc/AGENDA.md's questions; the main session's notes of 2026-11-22) supersedes
+for the start method forkserver the decisions of 2026-11-04 (PY6e's DECISION (a), no os.fork) and 2026-11-22 (the forkserver rows in
+`:fork`, n/a). Base mac/next fa635f636; stage 0 nx's (stale runtime: the eval proofs ran the checkout's runtime interpreted by goi).
+- D1, forkserver (doc/python/PYTHON-SURVEY.md, "As built: 535"): `os.fork` stays absent (a forked Go process keeps one thread of a
+  runtime that needs its others). The fork server starts each child as a fresh process of sys.executable (`util.spawnv_passfds`,
+  the request's descriptors at their numbers), which does the server's preload again and runs `_serve_one` as the forked child does;
+  the server's protocol (pid and exit status to the client, waitpid on SIGCHLD) is unchanged. The change is a patch of the pinned
+  `Lib/multiprocessing/forkserver.py` (3.14.10's and 3.15.2's texts by SHA-256) applied at compile time by the new
+  `arbace/python/libpatch.ae` from `arbace.python.run/compile-source` (eval and AOT alike), one line replaced and three functions
+  appended, the file unpatched on disk; `PYI_LIB_PATCHES=0` withholds it (the control). The IR cache keeps a patched answer under the
+  source's own key (go/arbace/py's aot.go looks the cache up by the text it has): found when the control's unpatched answer, kept
+  under that key, made the compiled launcher's server die again; the control's answers are no longer kept.
+  Alternatives considered: a fork-safe child by a patched Go runtime (overlay/go: the executables of a re-seed only, and the forked
+  child's netpoller, locked threads and goroutines in system calls still lost); spawn as the default start method (249's option
+  (b)): not needed, forkserver works; a zygote child kept ready by the server: the preload's side effects still repeat.
+  Left n/a, needing fork's copy of the server's memory: the three preload tests (the preload's import once in the server).
+- D4: lib-test-limits.tsv gives the forkserver modules spawn's limits (its children are pyi processes as spawn's).
+- D5 in part: `_imp.extension_suffixes()` the platform's suffix first (`.arbace-314-x86_64-linux-musl.so`, aarch64 on arm64), then
+  py-capi's `.arbace-314.so`; `_sysconfigdata__linux_`'s SOABI and EXT_SUFFIX the first, LIBRARY and LDLIBRARY `libpython3.14.a`.
+- Found on the forkserver modules' first run: dict's `__ror__` and set's `__ror__`, `__rand__`, `__rsub__`, `__rxor__` (CPython's
+  add_operators: the reflected wrapper of the same nb slot; a manager's proxies forward `other | proxy` to them), and
+  `_thread.get_native_id()` of the main thread the process id (it was the ident, 1 in every process).
+- D2 (a native `_io`), D6 (strace shapes): not built; DECISIONs in the report. D3: py-accel's.
+- Proofs (doc/python/PYTHON-SURVEY.md, "As built: 535"; logs in the main checkout's .tmp/q535/): fs1.py by `bin/pyi run` PASS
+  (5 min 17 s, goi), with `PYI_LIB_PATCHES=0` FAIL (unexpected EOF), by the compiled launcher PASS (13 s); `bin/pyi check --aot
+  --lib-test --only` rounds 2-4 over the touched modules: 291 rows the eval record does not pass pass, none it passes fails
+  (round 3's two test_set rows, a dict `__ror__` taking a set's left operand, fixed and run again in round 4); every negative control
+  failed as it must. The eval record (the main host's) is not re-recorded here: its forkserver rows stay classed as recorded, the
+  classes saying they leave at the next record; the three preload tests move to the new `:forkserver-preload` (n/a), so Python's
+  eval cell is 40,552 / 1,604 / 1,711 (4,457 n/a), from 40,552 / 1,604 / 1,714 (4,454 n/a); `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`.
