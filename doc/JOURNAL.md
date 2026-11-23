@@ -16901,3 +16901,28 @@ AOT 831 / 5 / 2; Clojure 99.72 complete.
   7 known, as recorded; native.ae 233, 234, 237 pass). Classes: eval less `:swing` and `:q1-boxed-prims`.
 - Cells: read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT unchanged until its run (queued under the heavy lock with diffcheck's native.ae);
   Clojure 99.78 complete. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-23: Clojure's decisions CDR12-CDR15 built, round 2: the AOT level and diffcheck (branch `clj-cdr-1122`)
+
+Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs waited 4.5 hours in bin/heavy-lock's queue (seven jobs).
+- `bin/clojure-tests --aot` on the build 52c31a81c04b (CLOJURE_TESTS_AOT_EXES, J2G_JOBS 8, java.xml's `:jdk-extra` read by javac's tool
+  60886b49; the compile under compile_memlimit): 807 tests, 20,747 assertions, 20,746 pass, 1 error; no regressions; java-interop 44 tests
+  336 pass (CDR12), serialization 9 of 9 77 pass (`:fn-code-type`: c2j's 6fdb262a0 in the build), genclass, compilation with clj-1208,
+  javadoc and clojure-xml as before. reflect's invoke-checks-accessibility still errs: j2g's failures 2 -> 1 with StAX's
+  EntityDeclarationImpl, NotationDeclarationImpl and DummyEvent (XMLStreamReaderImpl translates now), but XMLInputFactoryImpl is refused
+  for XMLEventReaderImpl, which its createXMLEventReader names (j2g's report.edn :analysis-failures). Left `:xml-stream`, deferred, its
+  next step written in the class (the event reader's closure, about 20 classes, then an AOT run): another AOT run was not in this round's
+  budget (one record run, the user's word of 2026-11-22). The two levels: 3 outcomes differ (clojure-xml and clj-1208 pass at AOT and are
+  skipped at eval; invoke-checks-accessibility errs at AOT).
+- `bin/diffcheck forms/native` on the same build: 566 of 566 cases agree; the three `c2j:native.ae` known cases (233, 234, 237) now pass,
+  so test/diffcheck/known.edn loses their group and divergences-aot.edn its class `:q1-compiled-prims`.
+- The AOT reference (test/arbace-go-aot-results.edn): java-interop and serialization's counts from the run's results.edn, the runner's
+  report again on the saved run (no regressions). Classes: AOT less `:swing`, `:fn-code-type`, `:q1-compiled-prims`; `:xml-stream`'s
+  reason rewritten.
+- Cells: read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT 833 / 4 / 1 (831 / 5 / 2 before), print unchanged; Clojure 99.84 complete (99.97
+  without by design). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+- For the user: CDR14 moved one by-design case from the read cell and added two at eval (the oracle's v4 reference has hand change 11;
+  its cases could stay main's known divergences, or the two forms be dropped from native.ae and state_errors.ae with the expected files
+  recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
+  microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
+  the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
