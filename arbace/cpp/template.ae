@@ -3261,6 +3261,7 @@
             _ (when-let [rc (:constraint t)]
                 ;; (n-cpp-concepts, the checker: a member template's, `this` its class's, sema's *constraint-this*)
                 (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false
+                                    sema/*constraint-insts* (if (sema/checking?) (conj sema/*constraint-insts* [tid args]) sema/*constraint-insts*)
                                     sema/*constraint-this* (or sema/*constraint-this*
                                                                (when-let [c (and (sema/checking?) (:cls (:scope t)))] (abi/ptr {:k :class :id c})))]
                             (sema/constraint-satisfied? ps rc))
@@ -3449,6 +3450,40 @@
               (range (min (count ps) (count args))))))
     (catch arbace.lang.ExceptionInfo _ false)))
 
+(def ^:dynamic *explicit-subst*
+  "cpp-small (G1): the substitutions of explicit template arguments into a function template's signature under way, [tid args]."
+  #{})
+
+(defn- cx-explicit-subst!
+  "cpp-small (G1), the checker: [temp.deduct.general]/2-3, a call's explicit template arguments `ex` are substituted into the
+  function template `t`'s type before the rest is deduced; for a deduction that left a parameter undeduced, a signature that
+  holds a decltype is substituted so (the parameters not given standing for themselves), and a substitution that needs itself
+  again, the same template with the same explicit arguments, recurses without end: GCC's fatal \"template instantiation depth
+  exceeds maximum\" (cpp0x/decltype29.C's `decltype (ft<F> (F()))` in ft's own return type, PR c++/44175). Any other failure
+  of the substitution decides nothing here."
+  [t ex]
+  (let [qt (get-in (:pattern t) [:type :qualType])
+        ps (vec (:params t))]
+    (when (and (seq ex) (< (count ex) (count ps)) (not-any? :pack ps) (string? qt) (re-find #"\bdecltype\b" qt))
+      (let [k [(:id t) ex]]
+        (if (contains? *explicit-subst* k)
+          (sema/depth-fatal! (str "substitution of " (:name t)) nil)
+          (binding [*explicit-subst* (conj *explicit-subst* k)]
+            (try (let [s (new-scope :tparams (:scope t) :internal (:internal (:scope t)) :cls (:cls (:scope t)) :extern-c (:extern-c (:scope t)))]
+                   (doseq [[i p] (map-indexed vector ps)]
+                     (enter! s (:name p)
+                             (if (< i (count ex))
+                               (arg-entity p (nth ex i))
+                               (case (:kind p)
+                                 :type {:e :type :ty {:k :tparam :i i :tid (:id t) :name (:name p)} :pos -1}
+                                 :template {:e :ttp :i i :tid (:id t) :pos -1}
+                                 {:e :nttp :i i :tid (:id t) :ty (param-type s p) :pos -1}))))
+                   (binding [sema/*cutoff* (max (long sema/*cutoff*) (long (or (:pos t) 0)))]
+                     (sema/resolve-type (sema/fn-type-scope s (:pattern t)) qt)))
+                 (catch arbace.lang.ExceptionInfo e
+                   (when (:cx/reported (ex-data e)) (throw e))
+                   nil))))))))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
@@ -3480,6 +3515,8 @@
                                                                    {:codegen/refused :template :cx/sure-drop true})))
                                                  (instantiate-fn tid a))
                                                (do
+                                                 ;; (cpp-small, G1, the checker: the explicit arguments substituted into the signature first)
+                                                 (when (sema/checking?) (cx-explicit-subst! t ex))
                                                  ;; (queue 463, the checker: a deduction that fails surely by the algorithm,
                                                  ;; cx-sure-undeduced?, no template argument written)
                                                  (when (and (sema/checking?) (not @u)

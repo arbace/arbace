@@ -58,6 +58,23 @@
 (def ^:dynamic *tmpl-chain* 0)
 ;; (1 in a body analyzed as a virtual function of a class instantiated in another body, arbace.cpp.template/chain-members!)
 (def ^:dynamic *tmpl-slack* 0)
+;; (the checker: an atom set once an infinite instantiation was reported, GCC's fatal error: the unit's analysis stops after the
+;; entry under way, depth-fatal!)
+(def ^:dynamic *fatal* nil)
+
+(defn depth-fatal!
+  "cpp-small (G1), the checker: an instantiation recursion found unbounded (the same substitution re-entered, or constraint
+  satisfactions nested with ever new arguments) reported as GCC's fatal \"template instantiation depth exceeds maximum\" at the
+  node `n` (else the analysis' position), the unit's analysis stopped after the entry under way (*fatal*); then a refusal of
+  the substitution under way thrown."
+  [what n]
+  (when-let [h *on-refusal*]
+    (when-not (some-> *fatal* deref)
+      (h (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of " *max-tmpl-depth* " (" what ")")
+                  {:codegen/refused :depth})
+         (or n (some-> *at* deref)))
+      (when *fatal* (reset! *fatal* true))))
+  (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth (" what ")") {:codegen/refused :depth :cx/reported true})))
 ;; CP329 (a): the dg read's time cap for one file (arbace.repr.cpp.diag binds it: System/nanoTime's deadline, 0 none); past it
 ;; every analysis step throws {:cpp/timeout true}, which the refusals' handlers may catch, so the analysis unwinds with nothing
 ;; more done and the reader, seeing the deadline passed, reports the file's read as :timeout
@@ -1478,6 +1495,12 @@
                           (and (number? v) (not (zero? (double v))))))))))))
 
 (def ^:dynamic *constraint-depth* 0)
+;; (cpp-small: the function templates' specializations whose associated constraints are being checked, [tid args] outermost first,
+;; arbace.cpp.template/instantiate-fn's)
+(def ^:dynamic *constraint-insts* [])
+;; (and the constraint expressions being checked, outermost first: the innermost one not a concept-id is where the recursion is
+;; reported, the requires-expression whose call makes the next specialization)
+(def ^:dynamic *constraint-node* nil)
 (def ^:dynamic *constraint-stack* nil)
 ;; CX12, CP281 (a) (the checker): an atom set when a satisfaction's evaluation met an expression the slice could not analyze
 ;; or evaluate (a refusal read as not satisfied): its false then not sure. A false with the atom unset is the program's own
@@ -1548,8 +1571,17 @@
   ;; clang's "satisfaction of constraint depends on itself", [temp.constr.atomic]/3; the depth bounds it, G5)
   (try (when (> (long *constraint-depth*) 24)
          (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "constraint depth" (pr-str *constraint-stack*))))
+         ;; (cpp-small, G1, the checker: the satisfactions under way the constraints of one function template's specializations, each
+         ;; with arguments not seen before in the chain, a recursion that makes new specializations without end, `foo<N + 1>(t)` in
+         ;; the constraint of foo<N>: GCC's fatal "template instantiation depth exceeds maximum" at the atom being checked,
+         ;; cpp2a/concepts-recursive-sat1.C; the same arguments again stay a satisfaction that depends on itself)
+         (when (checking?)
+           (let [xs *constraint-insts*]
+             (when (and (>= (count xs) 10) (apply = (map first (take-last 10 xs))) (apply distinct? (take-last 10 xs)))
+               (when (System/getenv "CPP_DEPTH_TRACE") (binding [*out* *err*] (println "constraint nodes" (pr-str (map (juxt :kind #(get-in % [:range :begin :offset])) *constraint-node*)))))
+               (depth-fatal! "the constraints' satisfaction" (last (filter #(and (map? %) (:range %) (not (#{"ConceptSpecializationExpr" "DeclRefExpr"} (:kind %)))) *constraint-node*))))))
          (fail :template "a constraint's satisfaction depends on itself"))
-       (binding [*constraint-depth* (inc (long *constraint-depth*))
+       (binding [*constraint-depth* (inc (long *constraint-depth*)) *constraint-node* (if (checking?) (conj (or *constraint-node* []) rc) *constraint-node*)
                  *constraint-stack* (when (System/getenv "CPP_CONCEPT_TRACE") (conj (or *constraint-stack* []) (let [t (str (node-text rc))] (subs t 0 (min 60 (count t))))))]
          ;; (the checker's position stays the call's: the constraint's nodes are the template's)
          (let [a *at* saved (some-> a deref)]
@@ -11255,7 +11287,8 @@ protected:
             *conv-tmpl-cache* (atom {}) *cx-udir-pos* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-names* (when (checking?) (cx-hdr-names nodes))
-            *cx-all-names* (when (checking?) (cx-all-names nodes))]
+            *cx-all-names* (when (checking?) (cx-all-names nodes))
+            *fatal* (when (checking?) (atom false))]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []
@@ -11394,9 +11427,9 @@ protected:
                                      (upd-var! id assoc :ginit (global-init id)))))))]
            (loop [i 0]
              (let [order @*order*]
-               (if (< i (count order))
+               (if (and (< i (count order)) (not (some-> *fatal* deref)))
                  (do (entry! (nth order i)) (recur (inc i)))
-                 (when-let [more (seq (when-let [h (:pending @hooks)] (h)))]
-                   (doseq [x more] (entry! x))
+                 (when-let [more (seq (when-not (some-> *fatal* deref) (when-let [h (:pending @hooks)] (h))))]
+                   (doseq [x more] (when-not (some-> *fatal* deref) (entry! x)))
                    (recur i))))))))
       {:fns @*fns* :vars @*vars* :order @*order* :classes @abi/*classes* :enums @abi/*enums* :ns-tags @abi/*ns-tags* :root root}))))
