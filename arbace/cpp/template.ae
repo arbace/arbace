@@ -2647,6 +2647,24 @@
         (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "'")
                         {:codegen/refused :template :cx/sure-drop true}))))))
 
+(defn- chain-members!
+  "cpp-small (G1), the checker: `f` (a class's instantiation) called, the member functions it gives a definition to analyze
+  (sema's entries) defined at the depth of the body under analysis plus one, as a virtual function's through the vtable is (:inst-vt):
+  observed on g++ 15.2 by hand (behaviour only), `template<int I> struct P { virtual void f() { P<I+1> p; } };` with
+  `template<> struct P<S> {};` and `template struct P<1>;` needs -ftemplate-depth=S-1 and fails below at f<S-1>'s declaration,
+  `instantiating 'void P<I>::f() [with int I = S-1]', possibly from virtual table generation`: the class a body instantiates
+  costs no level of its own there (template/vtable2.C), where a called member's body's does (template/recurse.C)."
+  [f]
+  (if (sema/checking?)
+    (let [k (count @sema/*order*)
+          r (f)
+          d (inc (long sema/*tmpl-chain*))]
+      (doseq [[kind id] (subvec @sema/*order* (min k (count @sema/*order*))) :when (= :fn kind)
+              :let [g (sema/fnd id)] :when (and g (nil? (:inst-chain g)))]
+        (upd-fn! id assoc :inst-chain d :inst-vt true))
+      r)
+    (f)))
+
 (defn- instantiate-class*
   [tid args]
   (sema/tick!)
@@ -2662,8 +2680,9 @@
           (drop-layouts!))
         {:k :class :id cid})
       (binding [*inst-depth* (inc (long *inst-depth*))]
-      (when (> (long *inst-depth*) 1024)
-        (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of 1024 (" (:name (tmpl tid)) ")")
+      ;; (cpp-small, G1: the limit sema's, -ftemplate-depth's for the checker, the class nested in the body being analyzed)
+      (when (> (- (+ (long *inst-depth*) (long sema/*tmpl-chain*)) (long sema/*tmpl-slack*)) (long sema/*max-tmpl-depth*))
+        (throw (ex-info (str "codegen: recursive template instantiation exceeded maximum depth of " sema/*max-tmpl-depth* " (" (:name (tmpl tid)) ")")
                         {:codegen/refused :depth})))
       (let [t (tmpl tid)]
         (class-constraints-check! t args)
@@ -2680,7 +2699,7 @@
           (incomplete-instance! t args)
           (if (and (lazy-here? tid) (:pattern t) (not (contains? (:specs t) args)))
             (lazy-instance! t args)
-            (binding [*inst-stack* (conj *inst-stack* tid)] (select-instance! t args nil)))))))))
+            (binding [*inst-stack* (conj *inst-stack* tid)] (chain-members! #(select-instance! t args nil))))))))))
 
 (defn- select-instance!
   "The class of the template `t` for `args`, its definition chosen ([temp.spec.partial.match]) and declared; `cid0` the class
@@ -3403,6 +3422,7 @@
             _ (when-let [rc (:constraint t)]
                 ;; (n-cpp-concepts, the checker: a member template's, `this` its class's, sema's *constraint-this*)
                 (when-not (binding [sema/*constraint-doubt* d sema/*no-user* false
+                                    sema/*constraint-insts* (if (sema/checking?) (conj sema/*constraint-insts* [tid args]) sema/*constraint-insts*)
                                     sema/*constraint-this* (or sema/*constraint-this*
                                                                (when-let [c (and (sema/checking?) (:cls (:scope t)))] (abi/ptr {:k :class :id c})))]
                             (sema/constraint-satisfied? ps rc))
@@ -3596,6 +3616,40 @@
               (range (min (count ps) (count args))))))
     (catch arbace.lang.ExceptionInfo _ false)))
 
+(def ^:dynamic *explicit-subst*
+  "cpp-small (G1): the substitutions of explicit template arguments into a function template's signature under way, [tid args]."
+  #{})
+
+(defn- cx-explicit-subst!
+  "cpp-small (G1), the checker: [temp.deduct.general]/2-3, a call's explicit template arguments `ex` are substituted into the
+  function template `t`'s type before the rest is deduced; for a deduction that left a parameter undeduced, a signature that
+  holds a decltype is substituted so (the parameters not given standing for themselves), and a substitution that needs itself
+  again, the same template with the same explicit arguments, recurses without end: GCC's fatal \"template instantiation depth
+  exceeds maximum\" (cpp0x/decltype29.C's `decltype (ft<F> (F()))` in ft's own return type, PR c++/44175). Any other failure
+  of the substitution decides nothing here."
+  [t ex]
+  (let [qt (get-in (:pattern t) [:type :qualType])
+        ps (vec (:params t))]
+    (when (and (seq ex) (< (count ex) (count ps)) (not-any? :pack ps) (string? qt) (re-find #"\bdecltype\b" qt))
+      (let [k [(:id t) ex]]
+        (if (contains? *explicit-subst* k)
+          (sema/depth-fatal! (str "substitution of " (:name t)) nil)
+          (binding [*explicit-subst* (conj *explicit-subst* k)]
+            (try (let [s (new-scope :tparams (:scope t) :internal (:internal (:scope t)) :cls (:cls (:scope t)) :extern-c (:extern-c (:scope t)))]
+                   (doseq [[i p] (map-indexed vector ps)]
+                     (enter! s (:name p)
+                             (if (< i (count ex))
+                               (arg-entity p (nth ex i))
+                               (case (:kind p)
+                                 :type {:e :type :ty {:k :tparam :i i :tid (:id t) :name (:name p)} :pos -1}
+                                 :template {:e :ttp :i i :tid (:id t) :pos -1}
+                                 {:e :nttp :i i :tid (:id t) :ty (param-type s p) :pos -1}))))
+                   (binding [sema/*cutoff* (max (long sema/*cutoff*) (long (or (:pos t) 0)))]
+                     (sema/resolve-type (sema/fn-type-scope s (:pattern t)) qt)))
+                 (catch arbace.lang.ExceptionInfo e
+                   (when (:cx/reported (ex-data e)) (throw e))
+                   nil))))))))
+
 (defn call-candidates
   "The specializations the function templates of a call's overload set deduce from its arguments (a template whose
   deduction or substitution fails is not a candidate: [temp.deduct]/8, SFINAE)."
@@ -3627,6 +3681,8 @@
                                                                    {:codegen/refused :template :cx/sure-drop true})))
                                                  (instantiate-fn tid a))
                                                (do
+                                                 ;; (cpp-small, G1, the checker: the explicit arguments substituted into the signature first)
+                                                 (when (sema/checking?) (cx-explicit-subst! t ex))
                                                  ;; (queue 463, the checker: a deduction that fails surely by the algorithm,
                                                  ;; cx-sure-undeduced?, no template argument written)
                                                  (when (and (sema/checking?) (not @u)
@@ -4659,12 +4715,18 @@
   "The :pending hook: the lazy definitions the analyzed bodies reference, made eager ([[:fn id] [:var id] ...])."
   []
   (let [ei (explicit-inst-members!)
-        acc (atom {:fns (set (:fns ei)) :vars (set (:vars ei)) :classes #{}})]
+        acc (atom {:fns (set (:fns ei)) :vars (set (:vars ei)) :classes #{}})
+        chain-of (atom {})]
     (doseq [[id f] @sema/*fns* :when (and (or (:analyzed f) (:tbody f)) (not (contains? @*scanned* [:fn id])))]
       (swap! *scanned* conj [:fn id])
-      ;; (queue 393: a coroutine's ramp's parts too, the promise's and the copies' initializers and the returned object's)
-      (walk-refs acc [(:tbody f) (:tinits f) (:tassign f) (:coro f)])
-      (doseq [v (:statics f)] (walk-refs acc (:sinit (sema/var* v)))))
+      ;; (cpp-small, G1: what this body uses, its depth's next, chain-of)
+      (let [a (atom {:fns #{} :vars #{} :classes #{}}) d (inc (long (or (:inst-chain f) 0)))]
+        ;; (queue 393: a coroutine's ramp's parts too, the promise's and the copies' initializers and the returned object's)
+        (walk-refs a [(:tbody f) (:tinits f) (:tassign f) (:coro f)])
+        (doseq [v (:statics f)] (walk-refs a (:sinit (sema/var* v))))
+        (doseq [x (:fns @a)] (swap! chain-of update [:fn x] (fnil min d) d))
+        (doseq [x (:classes @a)] (swap! chain-of update [:cls x] (fnil min d) d))
+        (swap! acc #(merge-with into % @a))))
     ;; (a destructor or constructor defaulted out of line, G5c's nested_exception::~nested_exception() = default: its class's
     ;; members' and bases' destructors used, as its definition destroys them)
     (doseq [[_ f] @sema/*fns* :when (and (:out-of-line-default f) (:cls f))] (swap! acc update :classes conj (:cls f)))
@@ -4683,6 +4745,11 @@
           out (atom [])]
       (doseq [id fns :let [f (sema/fnd id)] :when (:lazy f)]
         (upd-fn! id dissoc :lazy)
+        ;; (cpp-small, G1: a template's specialization, or a member of a class template's, defined at the depth of the body that
+        ;; uses it, or names its class, plus one; the others at 0)
+        (when (and (sema/checking?) (or (:tinst f) (some-> (:cls f) abi/cls :tmpl)))
+          (when-let [c (or (get @chain-of [:fn id]) (when (:cls f) (get @chain-of [:cls (:cls f)])))]
+            (upd-fn! id #(-> % (assoc :inst-chain c) (dissoc :inst-vt)))))
         ;; a specialization declared before its template was defined (a friend's definition in a class instantiated
         ;; later): its definition taken from the template now, as clang's end-of-unit instantiation sees it
         (when-let [ti (and (not (:body f)) (:tinst f))]

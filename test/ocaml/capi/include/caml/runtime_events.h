@@ -6,7 +6,10 @@
 #define CAML_RUNTIME_EVENTS_H
 #include "mlvalues.h"
 
+#ifndef CAML_CHAR_OS_DEFINED
+#define CAML_CHAR_OS_DEFINED
 typedef char char_os;
+#endif
 
 typedef enum {
   EV_INTERNAL, EV_LIFECYCLE, EV_BEGIN, EV_EXIT, EV_COUNTER, EV_ALLOC, EV_FLUSH
