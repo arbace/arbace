@@ -615,9 +615,16 @@
   (memoize
    (fn [files]
      ;; CPython's recorded outcome of each Lib/test method (ref-cpython314-lib-test*.edn's :outcome lines; an :excluded line :excluded)
-     (into {} (for [f files x (read-forms f)
-                    :when (and (:id x) (not (:module x)) (or (:outcome x) (:excluded x)))]
-                [(:id x) (if (:excluded x) :excluded (:outcome x))])))))
+     ;; and (the user, 2026-11-23, proposal J1) a module row MODULE/* :no-tests when the module's :module line has status 0
+     ;; (or 4, a resource regrtest denied) and the references record no method of it: CPython ran no test of it either
+     (let [xs (for [f files x (read-forms f)] x)
+           with-methods (set (for [x xs :when (and (:id x) (not (:module x)))] (first (str/split (str (:id x)) #"/"))))]
+       (merge (into {} (for [x xs
+                             :when (and (:module x) (#{0 4} (:status x)) (not (with-methods (str (:id x)))))]
+                         [(str (:id x) "/*") :no-tests]))
+              (into {} (for [x xs
+                             :when (and (:id x) (not (:module x)) (or (:outcome x) (:excluded x)))]
+                         [(:id x) (if (:excluded x) :excluded (:outcome x))])))))))
 
 (defn py-ref-annotate
   "A :results source with :py-ref-outcomes true (Python's eval cell): each non-pass entry R's carries :ref-outcome, CPython's
@@ -837,11 +844,21 @@
     (:ids c) (update :tests #(vec (concat % (:ids c))))
     (string? (:match c)) (assoc :match [(re-pattern (:match c))])))
 
+(defn- tests-file
+  "A class's :tests-file (the user, 2026-11-23: Python's :cpython-marked, a list a tool makes from CPython's own sources,
+  test/python/cpython_marked.py): its ids, one a line before a tab, # lines comments, joined to its :tests."
+  [c]
+  (if-let [f (:tests-file c)]
+    (update c :tests #(vec (concat % (for [l (str/split-lines (slurp (path f)))
+                                          :when (and (seq l) (not (str/starts-with? l "#")))]
+                                      (first (str/split l #"\t"))))))
+    c))
+
 (defn- classes-of [f]
   (cond (vector? f) (vec (mapcat classes-of f))
         (exists? f) (let [x (read-edn f)]
                       ;; a map {:classes [...]}: pyi's AOT's classes file (queue 201, PY10)
-                      (if (map? x) (mapv py-aot-class (:classes x)) x))
+                      (if (map? x) (mapv py-aot-class (:classes x)) (mapv tests-file x)))
         :else []))
 
 (defn- at-level?

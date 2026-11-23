@@ -19442,3 +19442,90 @@ __PRETTY_FUNCTION__ from the written signature alone (rejected: the qualificatio
 resolved types where no template is involved); abstract classes judged at the class's completion only (rejected: a class being defined
 is abstract by its own pure functions already, GCC's other/abstract2.C reports inside it); the coroutines flag for every file whose
 options hold two standards (taken only for a driver's -std=c++20 or later, the coordinator's scope).
+
+## 2026-11-23: the big lock's two slots, memory-gated (branch `heavy2-1123` from mac/next `69bb781b5`)
+
+The user decided (2026-11-23) "Two slots, memory-gated": the host's big lock (`bin/heavy-lock`, GTS32 (a)) admits a second
+heavy job when memory permits. Built: the FIFO of tickets unchanged (names, contents, the dead removed by the next waiter),
+in front of two flock slots, `big.lock` (slot 1, still the plain flock agents take with `flock big.lock CMD`) and
+`big.lock.2`; a state file beside each new ticket (`.s-TIME-PID`: wait, 1 or 2, and the need) tells holders from waiters, so
+the head is the first waiter, and holders no longer block the queue. A second job runs only when MemAvailable less 2 GiB, less
+the other holders' declared needs not yet reached (need less process tree RSS), exceeds its `HEAVY_MEM_GIB` (default 24;
+`all`: never beside another); the head that does not fit waits and nothing passes it. The gate passes each step's admission
+as its `HEAVY_MEM_GIB`, and `--concurrent`'s whole-run hold `all`. doc/GATE-SURVEY.md, "As built: the big lock's two slots";
+CLAUDE.md's sentence; the Makefile's `gate-queue` line; `test/gate/heavy-lock-test.bash`.
+
+Interop with the one-slot waiters queued during the change (six at the time): their tickets carry no state file and are read as
+the old protocol's (they wait for every earlier ticket, then for slot 1), so a new waiter after one takes slot 2 only, under
+the memory rule, and never slot 1 before it. Deployed into the main checkout by writing the file beside it and renaming it
+over, so the running bash instances keep reading the old inode.
+
+Alternatives weighed: a counted semaphore in one file (rejected: plain `flock big.lock` users would no longer be excluded);
+renaming tickets to mark holders (rejected: the old waiters compare names and contents); the memory rule on MemAvailable alone,
+as stated (taken with the holders' unreached declarations subtracted: a gate build just started shows almost nothing in
+MemAvailable and reaches ~22 GiB minutes later, so MemAvailable alone would admit a second build into an OOM); probing slot 1
+through /proc/locks (taken only for `--queue`'s display; admission probes with `flock -n`, which is atomic).
+
+## 2026-11-23: Python and C++: the user's n/a decisions of 2026-11-23 (branch `na-apply-1123` from mac/next `e52a17d33`)
+
+The user's decisions (2026-11-23, 13:40 UTC), on the proposals `.tmp/goal/py-na-proposal.md` (Python's eval tail, read-only
+analysis at `69bb781b5`, its row lists `.tmp/goal/pyna/`: `propose.py`, `proposal-ids.json`) and `.tmp/goal/cpp-na-proposal.md`
+(C++'s read tail, `.tmp/goal/cpp-na-work/`), verbatim as relayed:
+
+Python:
+- "TAKE as n/a: A (the 51 test_capi rows needing _testinternalcapi -> :testinternalcapi-absent, before :capi-port claims them),
+  B (:cpython-marked: keyed on CPython 3.14.10's Lib/test decorators @cpython_only/@refcount_test/@impl_detail(cpython=True)/
+  @requires_specialization; the user accepted a TOOL-MADE list: commit the scanning tool (in test/python/, reproducible from the
+  pinned source tree .tmp/repr-python/Python-3.14.10) and its generated list, the class reading the list), C (:remote-debugging ->
+  n/a), D (:bytecode), E (:object-layout), F (:gc-collector -> n/a, reversing the 11-22 by-design call), I (:not-a-case),
+  J1/J2/J3 (:skipped-by-both and :fork extended)."
+- "H: only test_gc's 12 count rows of :finalization-cycle become n/a; the rest stays."
+- "G (:refcount-moment): NOT now (decided after 222 (b) is built)."
+- "Each class with :kind :na and a reason citing CPython's own marking and the user's decision."
+
+C++:
+- "TAKE as n/a: A (4 -fopenmp files into :gcc-dialect's list, per 11-22), B (18: GCC flags enabling a later standard's feature
+  at an earlier -std), C (4 attributes at C++11), D (15 IFNDR [-Wtemplate-body] in never-instantiated templates; only the
+  verified ones, not the 6 instantiated/syntax-error files), E (3 IFNDR constexpr), F (2 IFNDR partial specialization after
+  use). Classes ... with :kind :na, reasons citing the standard."
+- G1, G2 and H are build work (another agent's), not n/a.
+
+Applied (no runs: n/a reclassing only, judged from the records by `bin/reap`):
+
+Python, `test/python/divergences.edn`:
+- A: the 51 test_capi ids (test_unicode 23, test_misc 17, test_exceptions 7, test_complex 2, test_object 1, test_set 1) out of
+  `:capi-port`'s `:tests`; `:testinternalcapi-absent`'s verdict rule takes them.
+- B: `:cpython-marked`, n/a, after `:cpython-only`, its ids read from `test/python/cpython-marked.txt` through a new class key
+  `:tests-file` (bin/reap's `classes-of`, `test/python/libtest_judge.ae`'s `read-classes`, `test/cover/classes.ae`: the file's ids,
+  one a line before a tab, joined to `:tests`). The list is made by `test/python/cpython_marked.py` (python3 -I, CPython's own
+  `ast` over the pinned `.tmp/repr-python/Python-3.14.10/Lib`, no run; `--check FILE` makes it afresh and compares): every id of
+  the record whose method, class or a base class it inherits the method through carries `cpython_only`, `refcount_test`,
+  `impl_detail` (no guard, or `cpython=True`) or `requires_specialization(_ft)` (951 ids, every one a non-pass: the marker's own
+  skip, `:cpython-only`'s, takes most). The class takes the proposal's 52 exactly (capi-port 19, remote-debugging 18,
+  skipped-by-test 11, testcapi 2, specializing 2), and from other n/a classes rows that were n/a already (testinternalcapi-absent
+  107, cpython-implementation-details 50, skipped-by-both 2, remote-debugging-disabled 2); 4 C-accelerator rows (py-accel's)
+  stay `:c-accelerators`', the class being above it. The reap step's inputs name the list.
+- C: `:remote-debugging` n/a (the rest of its 41 rows). D: `:bytecode`, n/a (absorbs `:dis`, removed, and test_code's nine
+  and test_dis's four rows of `:code-objects` and `:code-positions`; `:code-objects` keeps CodeWeakRefTest). E: `:object-layout`,
+  n/a (absorbs `:inline-values`, `:specializing`, `:tuple-id-reuse` and `:pyc-magic`, removed, test_long's `test___sizeof__` from
+  `:core-objects-287`, and the skips naming CPython's build: unicodedata as an external module, "stub loader has no suffixes",
+  `_xxtestfuzz`, "cpython only"). F: `:gc-collector` n/a (as it stands, 14 rows, test_warnings' two FinalizationTest rows among
+  them). H: `:gc-cycle-count`, n/a, before `:finalization-cycle`: test_gc's twelve counts of cyclic garbage. I (:not-a-case):
+  `:fails-under-cpython-too`, `:subtest-ids` and `:tracemalloc-driver-depth` n/a (kept as three classes, each marked; 18 rows).
+  J1: bin/reap's `py-ref-outcomes` gives a module row `MODULE/*` the outcome `:no-tests` when the references' `:module` line has
+  status 0 or 4 and no method of the module is recorded; J2: `:excluded` (record-ref's machine-named skips: 32-bit, musl);
+  `:skipped-by-both`'s `:ref-outcomes` now `[:skipped :excluded :no-tests]` (84 + 44 rows). J3: `:fork`'s two patterns
+  ("requires working os.fork", pty.fork()'s missing os.fork).
+- Not applied: G (`:refcount-moment`); the rest of `:finalization-cycle`.
+
+C++, `test/cpp/divergences-dg.edn` (the read cell's dg source): A and B into `:gcc-dialect`'s `:tests` (4 + 18, with comments);
+new n/a classes after it, by file: `:attribute-before-its-standard` (C: 4; [dcl.attr.grammar]/5 of C++11),
+`:ifndr-uninstantiated-template` (D: 15; [temp.res.general]/6), `:ifndr-constexpr-never-constant` (E: 3; C++11
+[dcl.constexpr]/5), `:ifndr-specialization-after-use` (F: 2; [temp.spec.partial.general]/1, CWG 2179). D's 15 are the
+proposal's hand-read list (forw_enum10, typedef1, lambda-variadic11, tc1/dr176, defarg19 and crash67 excluded); three of them
+(template/memfriend6, cpp0x/vt-34052, template/void14) the proposal called borderline.
+
+Cells (bin/reap --record): Python eval 40,552 / 1,604 / 1,714 (4,454 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a); C++ read
+5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). Alternatives not taken: a hand list for B (the user asked for the
+tool's); a separate `:not-a-case` class gathering I's three (kept apart: their reasons differ, each now n/a); a class of its own
+for J2 (the same rule as `:skipped-by-both`, CPython skipping there too).
