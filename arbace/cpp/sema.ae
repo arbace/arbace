@@ -211,7 +211,9 @@
         (or (nil? p) (< (long p) (long *cutoff*))))))
 
 (defn- cx-own [s ^String nm]
-  (let [es (.get ^java.util.HashMap (:names s) (ucn-name nm))]
+  ;; (cpp-decl2: a scope without names, a using-directive's nominee no declaration made -- `using namespace std;` without a
+  ;; header, lookup/missing-std-include-7.C -- has none of them)
+  (let [es (some-> ^java.util.HashMap (:names s) (.get (ucn-name nm)))]
     (if (= :ns (:kind s)) (filterv #(< (long (or (:pos %) -1)) (long *cutoff*)) es) (vec es))))
 
 (defn- cx-inline-ns? [u] (.containsKey ^java.util.HashMap (:names u) " inline"))
@@ -3151,7 +3153,9 @@
                                (when-not (.containsKey m (:usings scope)) (.put m (:usings scope) (java.util.IdentityHashMap.)))
                                (let [^java.util.IdentityHashMap mm (.get m (:usings scope))]
                                  (when-not (.containsKey mm (:names (:scope e))) (.put mm (:names (:scope e)) (long (or (:_b n) 0)))))))
-                           (.add ^java.util.ArrayList (:usings scope) (:scope e)))
+                           ;; (cpp-decl2: a namespace no declaration made nominates nothing: `using namespace std;` with no
+                           ;; header, lookup/missing-std-include-7.C, had added nil)
+                           (when (:scope e) (.add ^java.util.ArrayList (:usings scope) (:scope e))))
     ;; (a using-declaration naming a dependent base's member, resolved in the specialization: G4)
     ("UsingDecl" "UnresolvedUsingValueDecl" "UnresolvedUsingTypenameDecl")
                 ;; (cpp-s15, CP392 (a): its tokens as the preprocessor gave them when the parser kept them, a macro's
@@ -6439,6 +6443,13 @@
                                                                                            ;; destructible one by value as a parameter of its type (the psABI's
                                                                                            ;; classes, the registers counted on), refuses the others
                                                                                            ;; (err_cannot_pass_non_trivial_c_object_to_vararg)
+                                                                                           ;; (cpp-decl2, the checker: a volatile class object's copy for the
+                                                                                           ;; ellipsis binds no implicit copy constructor's const A&
+                                                                                           ;; ([class.copy.ctor]/7), GCC's "binding reference of type 'const A&'
+                                                                                           ;; to 'volatile A' discards qualifiers": overload/ellipsis3.C, whose
+                                                                                           ;; A(...) had taken it again without end)
+                                                                                           (when (and (checking?) (abi/class? (abi/unq (:ty a))) (:v (:ty a)))
+                                                                                             (fail :varargs "binding a const reference to a volatile object passed through '...' discards qualifiers"))
                                                                                            (when (abi/class? (abi/unq (:ty a)))
                                                                                              (let [id (:id (abi/unq (:ty a)))]
                                                                                                (when-not (and (trivial-copy? id) (trivial-dtor? id)) (fail :varargs "a non-trivial class through ..."))))
@@ -7503,6 +7514,22 @@
         (if (seq r) src (assoc src :items out))))))
 
 
+(def ^:dynamic *nsdmi-active* #{})
+
+(defn- nsdmi-guard
+  "cpp-decl2: the analysis `f` of class `cid`'s field `fl`'s default member initializer, which its own analysis needs again
+  (`int i = sizeof(A{});` in A: A{} uses i's initializer, CWG 1397): in the checker GCC's \"default member initializer for
+  'A::i' required before the end of its enclosing class\", the code generator's refusal; not a recursion without end."
+  [cid fl f]
+  (let [k [cid (:i fl)]]
+    (if (contains? *nsdmi-active* k)
+      (let [e (ex-info (str "codegen: default member initializer for '" (:name (abi/cls cid)) "::" (:name fl) "' required before the end of its enclosing class")
+                       (cond-> {:codegen/refused :nsdmi} (:node fl) (assoc :cx/node (:node fl))))]
+        ;; (reported here, once, the refusal unwinding the analyses that asked it)
+        (when (and (checking?) *on-refusal* (:node fl)) (*on-refusal* e (:node fl)))
+        (throw (ex-info (.getMessage e) (assoc (ex-data e) :cx/reported true))))
+      (binding [*nsdmi-active* (conj *nsdmi-active* k)] (f)))))
+
 (defn- cx-string-fits!
   "cpp-diag-b (2026-11-22): [dcl.init.string]/2, no more initializers than the array has elements, the string literal's
   terminating null among them: GCC's \"initializer-string for 'char [4]' is too long\"."
@@ -7674,7 +7701,7 @@
                                                                (fail :uninit-ref "uninitialized reference member")))]
                                                 ;; (its `this` the aggregate being initialized, [class.mem.general]/11; clang's
                                                 ;; CXXDefaultInitExprScope: :agg-this, the code generator binds it to the object)
-                                                (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d)) ctx :copy)
+                                                (some-> (init-for (:ty s) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (nsdmi-guard (:id tu) (:field s) #(analyze {:scope (:scope c) :cls (:id tu) :this-type (abi/ptr tu)} d))) ctx :copy)
                                                         (assoc :agg-this true)
                                                         ;; (cpp-ce3: the initializer's own range, ce-dmi-at)
                                                         (cond-> (and (checking?) (map? d) (:range d)) (assoc :dmi-range (:range d))))
@@ -11862,7 +11889,7 @@
                                                         (= \= (.charAt src (int i))) dn
                                                         :else nil))))))]
                                    (try (binding [*cx-copy-list* (or *cx-copy-list* cl)]
-                                          (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (analyze ctx dn))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind dn)) :list :copy)))
+                                          (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (nsdmi-guard cid fl #(analyze ctx dn)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind dn)) :list :copy)))
                                         (catch arbace.lang.ExceptionInfo e
                                           (if (and (checking?) *on-refusal* (map? dn) (:range dn)
                                                    (or (:cx/conv-explicit (ex-data e)) (re-find #"from initializer list would use explicit constructor" (str (.getMessage e)))))
