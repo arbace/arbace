@@ -1,0 +1,277 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/MessageToken_v2.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io ByteArrayInputStream IOException InputStream OutputStream)
+        '(java.security MessageDigest)
+        '(java.util Arrays)
+        '(org.ietf.jgss GSSException MessageProp)
+        '(sun.security.jgss GSSToken))
+
+(defclass ^:abstract MessageToken_v2
+  :extends Krb5Token
+
+  (field ^:protected ^:static ^:final ^int TOKEN_HEADER_SIZE 16)
+
+  (field ^:private ^:static ^:final ^int TOKEN_ID_POS 0)
+
+  (field ^:private ^:static ^:final ^int TOKEN_FLAG_POS 2)
+
+  (field ^:private ^:static ^:final ^int TOKEN_EC_POS 4)
+
+  (field ^:private ^:static ^:final ^int TOKEN_RRC_POS 6)
+
+  (field ^:protected ^:static ^:final ^int CONFOUNDER_SIZE 16)
+
+  (field ^:static ^:final ^int KG_USAGE_ACCEPTOR_SEAL 22)
+
+  (field ^:static ^:final ^int KG_USAGE_ACCEPTOR_SIGN 23)
+
+  (field ^:static ^:final ^int KG_USAGE_INITIATOR_SEAL 24)
+
+  (field ^:static ^:final ^int KG_USAGE_INITIATOR_SIGN 25)
+
+  (field ^:private ^:static ^:final ^int FLAG_SENDER_IS_ACCEPTOR 1)
+
+  (field ^:private ^:static ^:final ^int FLAG_WRAP_CONFIDENTIAL 2)
+
+  (field ^:private ^:static ^:final ^int FLAG_ACCEPTOR_SUBKEY 4)
+
+  (field ^:private ^:static ^:final ^int FILLER 0xff)
+
+  (field ^:private ^MessageTokenHeader tokenHeader nil)
+
+  (field ^:private ^int tokenId 0)
+
+  (field ^:private ^int seqNumber)
+
+  (field ^:protected ^byte/1 tokenData)
+
+  (field ^:protected ^int tokenDataLen)
+
+  (field ^:private ^int key_usage 0)
+
+  (field ^:private ^int ec 0)
+
+  (field ^:private ^int rrc 0)
+
+  (field ^byte/1 checksum nil)
+
+  (field ^:private ^boolean confState true)
+
+  (field ^:private ^boolean initiator true)
+
+  (field ^:private ^boolean have_acceptor_subkey false)
+
+  (field ^CipherHelper cipherHelper nil)
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context ^byte/1 tokenBytes
+                                       ^int tokenOffset ^int tokenLen ^MessageProp prop]
+    (this. tokenId context (ByteArrayInputStream. tokenBytes tokenOffset tokenLen) prop))
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context ^InputStream is
+                                       ^MessageProp prop]
+    (.init this tokenId context)
+    (try
+      (when-not confState (.setPrivacy prop false))
+      (set! tokenHeader (MessageTokenHeader. is prop tokenId))
+      (cond
+        (== tokenId Krb5Token/WRAP_ID_v2)
+          (set! key_usage (if (not initiator) KG_USAGE_INITIATOR_SEAL KG_USAGE_ACCEPTOR_SEAL))
+        (== tokenId Krb5Token/MIC_ID_v2)
+          (set! key_usage (if (not initiator) KG_USAGE_INITIATOR_SIGN KG_USAGE_ACCEPTOR_SIGN)))
+      (let [^:mutable ^int minSize 0]
+        (if (and (== tokenId Krb5Token/WRAP_ID_v2) (.getPrivacy prop))
+            (set! minSize
+                  (unchecked-add-int (unchecked-add-int CONFOUNDER_SIZE TOKEN_HEADER_SIZE)
+                                     (.getChecksumLength cipherHelper)))
+            (set! minSize (.getChecksumLength cipherHelper)))
+        (if (== tokenId Krb5Token/MIC_ID_v2)
+            (do
+              (set! tokenDataLen minSize)
+              (set! tokenData (new byte/1 minSize))
+              (MessageToken_v2/readFully is tokenData))
+            (do
+              (set! tokenDataLen (.available is))
+              (if (>= tokenDataLen minSize)
+                  (do
+                    (set! tokenData (new byte/1 tokenDataLen))
+                    (MessageToken_v2/readFully is tokenData))
+                  (let [tmp (new byte/1 minSize)]
+                    (MessageToken_v2/readFully is tmp)
+                    (let [more (.available is)]
+                      (set! tokenDataLen (unchecked-add-int minSize more))
+                      (set! tokenData (Arrays/copyOf tmp tokenDataLen))
+                      (MessageToken_v2/readFully is tokenData minSize more))))))
+        (when (== tokenId Krb5Token/WRAP_ID_v2) (.rotate this))
+        (when (or (== tokenId Krb5Token/MIC_ID_v2)
+                  (and (== tokenId Krb5Token/WRAP_ID_v2) (not (.getPrivacy prop))))
+          (let [chkLen (.getChecksumLength cipherHelper)]
+            (set! checksum (new byte/1 chkLen))
+            (System/arraycopy tokenData
+                              (unchecked-subtract-int tokenDataLen chkLen)
+                              checksum
+                              0
+                              chkLen)
+            (when (and (== tokenId Krb5Token/WRAP_ID_v2) (not (.getPrivacy prop)))
+              (when-not (== chkLen ec)
+                (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                                      -1
+                                      (java-str (MessageToken_v2/getTokenName tokenId)
+                                                ":EC incorrect!"))))))))
+      (catch IOException e
+        (throw
+          (GSSException. GSSException/DEFECTIVE_TOKEN
+                         -1
+                         (java-str (MessageToken_v2/getTokenName tokenId) ":" (.getMessage e)))))))
+
+  (method ^:public ^:final getTokenId ^int [this] tokenId)
+
+  (method ^:public ^:final getKeyUsage ^int [this] key_usage)
+
+  (method ^:public ^:final getConfState ^boolean [this] confState)
+
+  (method ^:public genSignAndSeqNumber :throws [GSSException] ^void [this ^MessageProp prop
+                                                                     ^byte/1 data ^int offset
+                                                                     ^int len]
+    (let [^:mutable qop (.getQOP prop)]
+      (when-not (== qop 0) (set! qop 0) (.setQOP prop qop))
+      (when-not confState (.setPrivacy prop false))
+      (set! tokenHeader (MessageTokenHeader. tokenId (.getPrivacy prop)))
+      (cond
+        (== tokenId Krb5Token/WRAP_ID_v2)
+          (set! key_usage (if initiator KG_USAGE_INITIATOR_SEAL KG_USAGE_ACCEPTOR_SEAL))
+        (== tokenId Krb5Token/MIC_ID_v2)
+          (set! key_usage (if initiator KG_USAGE_INITIATOR_SIGN KG_USAGE_ACCEPTOR_SIGN)))
+      (when (or (== tokenId MessageToken_v2/MIC_ID_v2)
+                (and (not (.getPrivacy prop)) (== tokenId MessageToken_v2/WRAP_ID_v2)))
+        (set! checksum (.getChecksum this data offset len)))
+      (when (and (not (.getPrivacy prop)) (== tokenId MessageToken_v2/WRAP_ID_v2))
+        (let [tok_header (.getBytes tokenHeader)]
+          (aset tok_header 4 (unchecked-byte (unsigned-bit-shift-right-int (alength checksum) 8)))
+          (aset tok_header 5 (unchecked-byte (alength checksum)))))))
+
+  (method ^:public ^:final verifySign :throws [GSSException] ^boolean [this ^byte/1 data ^int offset
+                                                                       ^int len]
+    (let [myChecksum (.getChecksum this data offset len)]
+      (if (MessageDigest/isEqual checksum myChecksum) true false)))
+
+  (method ^:private rotate ^void [this]
+    (when-not (== (unchecked-remainder-int rrc tokenDataLen) 0)
+      (set! rrc (unchecked-remainder-int rrc tokenDataLen))
+      (let [newBytes (new byte/1 tokenDataLen)]
+        (System/arraycopy tokenData rrc newBytes 0 (unchecked-subtract-int tokenDataLen rrc))
+        (System/arraycopy tokenData 0 newBytes (unchecked-subtract-int tokenDataLen rrc) rrc)
+        (set! tokenData newBytes))))
+
+  (method ^:public ^:final getSequenceNumber ^int [this] seqNumber)
+
+  (method getChecksum :throws [GSSException] ^byte/1 [this ^byte/1 data ^int offset ^int len]
+    (let [tokenHeaderBytes (.getBytes tokenHeader)
+          conf_flag (bit-and-int (aget tokenHeaderBytes TOKEN_FLAG_POS) FLAG_WRAP_CONFIDENTIAL)]
+      (when (and (== conf_flag 0) (== tokenId MessageToken_v2/WRAP_ID_v2))
+        (aset tokenHeaderBytes 4 0)
+        (aset tokenHeaderBytes 5 0)
+        (aset tokenHeaderBytes 6 0)
+        (aset tokenHeaderBytes 7 0))
+      (.calculateChecksum cipherHelper tokenHeaderBytes data offset len key_usage)))
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context]
+    (.init this tokenId context)
+    (set! (.-seqNumber this) (.incrementMySequenceNumber context)))
+
+  (method ^:private init :throws [GSSException] ^void [this ^int tokenId ^Krb5Context context]
+    (set! (.-tokenId this) tokenId)
+    (set! (.-confState this) (.getConfState context))
+    (set! (.-initiator this) (.isInitiator context))
+    (set! (.-have_acceptor_subkey this) (== (.getKeySrc context) Krb5Context/ACCEPTOR_SUBKEY))
+    (set! (.-cipherHelper this) (.getCipherHelper context nil)))
+
+  (method ^:protected encodeHeader :throws [IOException] ^void [this ^OutputStream os]
+    (.encode tokenHeader os))
+
+  (method ^:public ^:abstract encode :throws [IOException] ^void [this ^OutputStream os])
+
+  (method ^:protected ^:final getTokenHeader ^byte/1 [this]
+    (.getBytes tokenHeader))
+
+  (defclass MessageTokenHeader
+    (field ^:private ^:final ^int tokenId)
+
+    (field ^:private ^:final ^byte/1 bytes (new byte/1 TOKEN_HEADER_SIZE))
+
+    (constructor :throws [GSSException] ^:public [this ^int tokenId ^boolean conf]
+      (set! (.-tokenId this) tokenId)
+      (aset bytes 0 (unchecked-byte (unsigned-bit-shift-right-int tokenId 8)))
+      (aset bytes 1 (unchecked-byte tokenId))
+      (let [^:mutable ^int flags 0]
+        (set! flags
+              (bit-or-int (bit-or-int (if initiator 0 FLAG_SENDER_IS_ACCEPTOR)
+                                      (if (and conf (not (== tokenId Krb5Token/MIC_ID_v2)))
+                                          FLAG_WRAP_CONFIDENTIAL
+                                          0))
+                          (if have_acceptor_subkey FLAG_ACCEPTOR_SUBKEY 0)))
+        (aset bytes 2 (unchecked-byte flags))
+        (aset bytes 3 (unchecked-byte FILLER))
+        (cond
+          (== tokenId Krb5Token/WRAP_ID_v2)
+            (do
+              (aset bytes 4 (unchecked-byte 0))
+              (aset bytes 5 (unchecked-byte 0))
+              (aset bytes 6 (unchecked-byte 0))
+              (aset bytes 7 (unchecked-byte 0)))
+          (== tokenId Krb5Token/MIC_ID_v2)
+            (loop [^int i 4]
+              (when (< i 8) (aset bytes i (unchecked-byte FILLER)) (recur (unchecked-inc-int i)))))
+        (GSSToken/writeBigEndian seqNumber bytes 12)))
+
+    (constructor :throws [IOException GSSException] ^:public [this ^InputStream is ^MessageProp prop
+                                                              ^int tokId]
+      (GSSToken/readFully is bytes 0 TOKEN_HEADER_SIZE)
+      (set! tokenId (GSSToken/readInt bytes TOKEN_ID_POS))
+      (when-not (== tokenId tokId)
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                              -1
+                              (java-str (Krb5Token/getTokenName tokenId) ":Defective Token ID!"))))
+      (let [^int acceptor_flag (if initiator FLAG_SENDER_IS_ACCEPTOR 0)
+            flag (bit-and-int (aget bytes TOKEN_FLAG_POS) FLAG_SENDER_IS_ACCEPTOR)]
+        (when-not (== flag acceptor_flag)
+          (throw
+            (GSSException. GSSException/DEFECTIVE_TOKEN
+                           -1
+                           (java-str (Krb5Token/getTokenName tokenId) ":Acceptor Flag Error!"))))
+        (let [conf_flag (bit-and-int (aget bytes TOKEN_FLAG_POS) FLAG_WRAP_CONFIDENTIAL)]
+          (.setPrivacy
+            prop
+            (and (== conf_flag FLAG_WRAP_CONFIDENTIAL) (== tokenId Krb5Token/WRAP_ID_v2)))
+          (cond
+            (== tokenId Krb5Token/WRAP_ID_v2)
+              (do
+                (when-not (== (bit-and-int (aget bytes 3) 0xff) FILLER)
+                  (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                                        -1
+                                        (java-str
+                                          (Krb5Token/getTokenName tokenId)
+                                          ":Defective Token Filler!"))))
+                (set! ec (GSSToken/readBigEndian bytes TOKEN_EC_POS 2))
+                (set! rrc (GSSToken/readBigEndian bytes TOKEN_RRC_POS 2)))
+            (== tokenId Krb5Token/MIC_ID_v2)
+              (loop [^int i 3]
+                (if (< i 8)
+                    (if (not (== (bit-and-int (aget bytes i) 0xff) FILLER))
+                        (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                                              -1
+                                              (java-str
+                                                (Krb5Token/getTokenName tokenId)
+                                                ":Defective Token Filler!")))
+                        (recur (unchecked-inc-int i)))
+                    nil)))
+          (.setQOP prop 0)
+          (set! seqNumber (GSSToken/readBigEndian bytes 12 4)))))
+
+    (method ^:public ^:final encode :throws [IOException] ^void [this ^OutputStream os]
+      (.write os bytes))
+
+    (method ^:public ^:final getTokenId ^int [this] tokenId)
+
+    (method ^:public ^:final getBytes ^byte/1 [this] bytes)))

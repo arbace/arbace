@@ -1,0 +1,108 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/WrapToken_v2.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io ByteArrayOutputStream IOException InputStream OutputStream)
+        '(java.util Arrays)
+        '(org.ietf.jgss GSSException MessageProp)
+        '(sun.security.jgss GSSHeader)
+        '(sun.security.krb5 Confounder))
+
+(defclass WrapToken_v2
+  :extends MessageToken_v2
+
+  (field ^byte/1 confounder nil)
+
+  (field ^:private ^:final ^boolean privacy)
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^byte/1 tokenBytes
+                                                ^int tokenOffset ^int tokenLen ^MessageProp prop]
+    (super. Krb5Token/WRAP_ID_v2 context tokenBytes tokenOffset tokenLen prop)
+    (set! (.-privacy this) (.getPrivacy prop)))
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^InputStream is
+                                                ^MessageProp prop]
+    (super. Krb5Token/WRAP_ID_v2 context is prop)
+    (set! (.-privacy this) (.getPrivacy prop)))
+
+  (method ^:public getData :throws [GSSException] ^byte/1 [this]
+    (let [temp (new byte/1 (.-tokenDataLen this))
+          len (.getData this temp 0)]
+      (Arrays/copyOf temp len)))
+
+  (method ^:public getData :throws [GSSException] ^int [this ^byte/1 dataBuf ^int dataBufOffset]
+    (if privacy
+        (do
+          (.decryptData (.-cipherHelper this)
+                        this
+                        (.-tokenData this)
+                        0
+                        (.-tokenDataLen this)
+                        dataBuf
+                        dataBufOffset
+                        (.getKeyUsage this))
+          (unchecked-subtract-int
+            (unchecked-subtract-int
+              (unchecked-subtract-int (.-tokenDataLen this) WrapToken_v2/CONFOUNDER_SIZE)
+              WrapToken_v2/TOKEN_HEADER_SIZE)
+            (.getChecksumLength (.-cipherHelper this))))
+        (let [data_length (unchecked-subtract-int
+                            (.-tokenDataLen this)
+                            (.getChecksumLength (.-cipherHelper this)))]
+          (System/arraycopy (.-tokenData this) 0 dataBuf dataBufOffset data_length)
+          (when-not (.verifySign this dataBuf dataBufOffset data_length)
+            (throw (GSSException. GSSException/BAD_MIC -1 "Corrupt checksum in Wrap token")))
+          data_length)))
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^MessageProp prop
+                                                ^byte/1 dataBytes ^int dataOffset ^int dataLen]
+    (super. Krb5Token/WRAP_ID_v2 context)
+    (set! confounder (Confounder/bytes WrapToken_v2/CONFOUNDER_SIZE))
+    (.genSignAndSeqNumber this prop dataBytes dataOffset dataLen)
+    (when-not (.getConfState context) (.setPrivacy prop false))
+    (set! privacy (.getPrivacy prop))
+    (if (not privacy)
+        (do
+          (set! (.-tokenData this)
+                (new byte/1 (unchecked-add-int dataLen (alength (.-checksum this)))))
+          (System/arraycopy dataBytes dataOffset (.-tokenData this) 0 dataLen)
+          (System/arraycopy (.-checksum this)
+                            0
+                            (.-tokenData this)
+                            dataLen
+                            (alength (.-checksum this))))
+        (set! (.-tokenData this)
+              (.encryptData (.-cipherHelper this)
+                            this
+                            confounder
+                            (.getTokenHeader this)
+                            dataBytes
+                            dataOffset
+                            dataLen
+                            (.getKeyUsage this)))))
+
+  (method ^:public encode :throws [IOException] ^void [this ^OutputStream os]
+    (.encodeHeader this os)
+    (.write os (.-tokenData this)))
+
+  (method ^:public encode :throws [IOException] ^byte/1 [this]
+    (let [bos (ByteArrayOutputStream.
+                (unchecked-add-int MessageToken_v2/TOKEN_HEADER_SIZE (alength (.-tokenData this))))]
+      (.encode this bos)
+      (.toByteArray bos)))
+
+  (method ^:public encode :throws [IOException] ^int [this ^byte/1 outToken ^int offset]
+    (let [token (.encode this)]
+      (System/arraycopy token 0 outToken offset (alength token))
+      (alength token)))
+
+  (method ^:static getSizeLimit :throws [GSSException] ^int [^int qop ^boolean confReq
+                                                             ^int maxTokenSize ^CipherHelper ch]
+    (unchecked-subtract-int
+      (unchecked-subtract-int (GSSHeader/getMaxMechTokenSize WrapToken_v2/OID maxTokenSize)
+                              (unchecked-add-int
+                                (unchecked-add-int
+                                  WrapToken_v2/TOKEN_HEADER_SIZE
+                                  (.getChecksumLength ch))
+                                WrapToken_v2/CONFOUNDER_SIZE))
+      8)))

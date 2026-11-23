@@ -1,0 +1,383 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/PrincipalName.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5)
+
+(import '(java.io IOException)
+        '(java.net InetAddress UnknownHostException)
+        '(java.util ArrayList Arrays Locale)
+        '(jdk.internal.misc Unsafe)
+        '(sun.security.krb5.internal Krb5)
+        '(sun.security.krb5.internal.ccache CCacheOutputStream)
+        '(sun.security.krb5.internal.util KerberosString)
+        '(sun.security.util DerInputStream DerOutputStream DerValue SecurityProperties))
+
+(defclass ^:public PrincipalName
+  :implements [Cloneable]
+
+  (field ^:public ^:static ^:final ^int KRB_NT_UNKNOWN 0)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_PRINCIPAL 1)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_SRV_INST 2)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_SRV_HST 3)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_SRV_XHST 4)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_UID 5)
+
+  (field ^:public ^:static ^:final ^int KRB_NT_ENTERPRISE 10)
+
+  (field ^:public ^:static ^:final ^String TGS_DEFAULT_SRV_NAME "krbtgt")
+
+  (field ^:public ^:static ^:final ^char NAME_COMPONENT_SEPARATOR \/)
+
+  (field ^:public ^:static ^:final ^char NAME_REALM_SEPARATOR \@)
+
+  (field ^:public ^:static ^:final ^char REALM_COMPONENT_SEPARATOR \.)
+
+  (field ^:public ^:static ^:final ^String NAME_COMPONENT_SEPARATOR_STR "/")
+
+  (field ^:public ^:static ^:final ^String NAME_REALM_SEPARATOR_STR "@")
+
+  (field ^:private ^:static ^:final ^boolean NAME_CASE_SENSITIVE_IN_MATCH
+    (.equalsIgnoreCase "true"
+                       (SecurityProperties/getOverridableProperty
+                         "jdk.security.krb5.name.case.sensitive")))
+
+  (field ^:private ^:final ^int nameType)
+
+  (field ^:private ^:final ^String/1 nameStrings)
+
+  (field ^:private ^:final ^Realm nameRealm)
+
+  (field ^:private ^:transient ^String salt nil)
+
+  (constructor ^:public [this ^int nameType ^String/1 nameStrings ^Realm nameRealm]
+    (when (nil? nameRealm) (throw (IllegalArgumentException. "Null realm not allowed")))
+    (PrincipalName/validateNameStrings nameStrings)
+    (set! (.-nameType this) nameType)
+    (set! (.-nameStrings this) (.clone nameStrings))
+    (set! (.-nameRealm this) nameRealm))
+
+  (constructor :throws [RealmException] ^:public [this ^String/1 nameParts ^String realm]
+    (this. KRB_NT_UNKNOWN nameParts (Realm. realm)))
+
+  (method ^:private ^:static validateNameStrings ^void [^String/1 ns]
+    (when (nil? ns) (throw (IllegalArgumentException. "Null nameStrings not allowed")))
+    (when (== (alength ns) 0) (throw (IllegalArgumentException. "Empty nameStrings not allowed")))
+    (for-each [^String s ns]
+      (when (nil? s) (throw (IllegalArgumentException. "Null nameString not allowed")))
+      (when (.isEmpty s) (throw (IllegalArgumentException. "Empty nameString not allowed")))))
+
+  (method ^:public clone [this]
+    (try
+      (let [pName (cast PrincipalName (.clone super))]
+        (.putReference UNSAFE this NAME_STRINGS_OFFSET (.clone nameStrings))
+        pName)
+      (catch CloneNotSupportedException ex (throw (AssertionError. "Should never happen")))))
+
+  (field ^:private ^:static ^:final ^long NAME_STRINGS_OFFSET)
+
+  (field ^:private ^:static ^:final ^Unsafe UNSAFE)
+
+  (static-initializer
+    (try
+      (let [unsafe (Unsafe/getUnsafe)]
+        (set! NAME_STRINGS_OFFSET
+              (.objectFieldOffset unsafe (.getDeclaredField PrincipalName "nameStrings")))
+        (set! UNSAFE unsafe))
+      (catch ReflectiveOperationException e (throw (Error. e)))))
+
+  (method ^:public equals ^boolean [this o]
+    (if (identical? this o)
+        true
+        (if-instance [^PrincipalName other o]
+          (if (.equals nameRealm (.-nameRealm other))
+              (Arrays/equals nameStrings (.-nameStrings other))
+              false)
+          false)))
+
+  (constructor :throws [Asn1Exception IOException] ^:public [this ^DerValue encoding ^Realm realm]
+    (when (nil? realm) (throw (IllegalArgumentException. "Null realm not allowed")))
+    (set! nameRealm realm)
+    (let [^:mutable ^DerValue der nil]
+      (when (nil? encoding) (throw (IllegalArgumentException. "Null encoding not allowed")))
+      (when-not (== (.getTag encoding) DerValue/tag_Sequence)
+        (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (if (== (bit-and-int (.getTag der) 0x1F) 0x00)
+          (let [bint (.getBigInteger (.getData der))] (set! nameType (.intValue bint)))
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (if (== (bit-and-int (.getTag der) 0x01F) 0x01)
+          (let [subDer (.getDerValue (.getData der))]
+            (when-not (== (.getTag subDer) DerValue/tag_SequenceOf)
+              (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+            (let [^{:tag (ArrayList String)} v (ArrayList.)
+                  ^:mutable ^DerValue subSubDer nil]
+              (while (> (.available (.getData subDer)) 0)
+                (set! subSubDer (.getDerValue (.getData subDer)))
+                (let [namePart (.toString (KerberosString. subSubDer))] (.add v namePart)))
+              (set! nameStrings (cast String/1 (.toArray v (new String/1 0))))
+              (PrincipalName/validateNameStrings nameStrings)))
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))))
+
+  (method ^:public ^:static parse :throws [Asn1Exception IOException RealmException] ^PrincipalName [^DerInputStream data
+                                                                                                     ^byte explicitTag
+                                                                                                     ^boolean optional
+                                                                                                     ^:mutable ^Realm realm]
+    (when-not (and optional
+                   (not (== (bit-and-int (unchecked-byte (.peekByte data)) (unchecked-byte 0x1F))
+                            explicitTag)))
+      (let [der (.getDerValue data)]
+        (if (not (== explicitTag (bit-and-int (.getTag der) (unchecked-byte 0x1F))))
+            (throw (Asn1Exception. Krb5/ASN1_BAD_ID))
+            (let [subDer (.getDerValue (.getData der))]
+              (when (nil? realm) (set! realm (Realm/getDefault)))
+              (PrincipalName. subDer realm))))))
+
+  (method ^:private ^:static parseName ^String/1 [^String name]
+    (let [^{:tag (ArrayList String)} tempStrings (ArrayList.)
+          ^:mutable temp name
+          ^:mutable ^int i 0
+          ^:mutable ^int componentStart 0
+          ^:mutable ^String component nil]
+      (while (< i (.length temp))
+        (cond
+          (== (.charAt temp i) NAME_COMPONENT_SEPARATOR)
+            (if (and (> i 0) (== (.charAt temp (unchecked-subtract-int i 1)) \\))
+                (do
+                  (set! temp
+                        (java-str (.substring temp 0 (unchecked-subtract-int i 1))
+                                  (.substring temp i (.length temp))))
+                  (continue))
+                (do
+                  (when (<= componentStart i)
+                    (set! component (.substring temp componentStart i))
+                    (.add tempStrings component))
+                  (set! componentStart (unchecked-add-int i 1))))
+          (== (.charAt temp i) NAME_REALM_SEPARATOR)
+            (if (and (> i 0) (== (.charAt temp (unchecked-subtract-int i 1)) \\))
+                (do
+                  (set! temp
+                        (java-str (.substring temp 0 (unchecked-subtract-int i 1))
+                                  (.substring temp i (.length temp))))
+                  (continue))
+                (do
+                  (when (< componentStart i)
+                    (set! component (.substring temp componentStart i))
+                    (.add tempStrings component))
+                  (set! componentStart (unchecked-add-int i 1))
+                  (break))))
+        (set! i (unchecked-inc-int i)))
+      (when (== i (.length temp))
+        (set! component (.substring temp componentStart i))
+        (.add tempStrings component))
+      (let [result (cast String/1 (.toArray tempStrings (new String/1 0)))] result)))
+
+  (constructor :throws [RealmException] ^:public [this ^String name ^int type
+                                                  ^:mutable ^String realm]
+    (when (nil? name) (throw (IllegalArgumentException. "Null name not allowed")))
+    (let [nameParts (PrincipalName/parseName name)]
+      (PrincipalName/validateNameStrings nameParts)
+      (when (nil? realm) (set! realm (Realm/parseRealmAtSeparator name)))
+      (switch type
+        KRB_NT_SRV_HST
+          (do
+            (when (>= (alength nameParts) 2)
+              (let [^:mutable hostName (aget nameParts 1)
+                    ^:mutable ^Boolean option nil]
+                (try
+                  (set! option
+                        (.getBooleanObject (Config/getInstance)
+                                           "libdefaults"
+                                           "dns_canonicalize_hostname"))
+                  (catch KrbException e (set! option nil)))
+                (when-not (identical? option Boolean/FALSE)
+                  (try
+                    (let [canonicalized (.getCanonicalHostName (InetAddress/getByName hostName))]
+                      (when (.startsWith (.toLowerCase canonicalized Locale/ENGLISH)
+                                         (java-str (.toLowerCase hostName Locale/ENGLISH) "."))
+                        (set! hostName canonicalized)))
+                    (catch UnknownHostException e))
+                  (when (.endsWith hostName ".")
+                    (set! hostName
+                          (.substring hostName 0 (unchecked-subtract-int (.length hostName) 1)))))
+                (aset nameParts 1 (.toLowerCase hostName Locale/ENGLISH))))
+            (set! nameStrings nameParts)
+            (set! nameType type)
+            (if (some? realm)
+                (set! nameRealm (Realm. realm))
+                (let [mapRealm (PrincipalName/mapHostToRealm (aget nameParts 1))]
+                  (if (some? mapRealm)
+                      (set! nameRealm (Realm. mapRealm))
+                      (set! nameRealm (Realm/getDefault))))))
+        (KRB_NT_UNKNOWN KRB_NT_PRINCIPAL
+                        KRB_NT_SRV_INST
+                        KRB_NT_SRV_XHST
+                        KRB_NT_UID
+                        KRB_NT_ENTERPRISE)
+          (do
+            (set! nameStrings nameParts)
+            (set! nameType type)
+            (if (some? realm) (set! nameRealm (Realm. realm)) (set! nameRealm (Realm/getDefault))))
+        (throw (IllegalArgumentException. "Illegal name type")))))
+
+  (constructor :throws [RealmException] ^:public [this ^String name ^int type]
+    (this. name type (cast String nil)))
+
+  (constructor :throws [RealmException] ^:public [this ^String name]
+    (this. name KRB_NT_UNKNOWN))
+
+  (constructor :throws [RealmException] ^:public [this ^String name ^String realm]
+    (this. name KRB_NT_UNKNOWN realm))
+
+  (method ^:public ^:static tgsService :throws [KrbException] ^PrincipalName [^String r1 ^String r2]
+    (PrincipalName. PrincipalName/KRB_NT_SRV_INST
+                    (new String/1 [PrincipalName/TGS_DEFAULT_SRV_NAME r1])
+                    (Realm. r2)))
+
+  (method ^:public getRealmAsString ^String [this] (.getRealmString this))
+
+  (method ^:public getPrincipalNameAsString ^String [this]
+    (let [temp (StringBuilder. (aget nameStrings 0))]
+      (loop [^int i 1]
+        (when (< i (alength nameStrings))
+          (.append temp (aget nameStrings i))
+          (recur (unchecked-inc-int i))))
+      (.toString temp)))
+
+  (method ^:public hashCode ^int [this] (.hashCode (.toString this)))
+
+  (method ^:public getName ^String [this] (.toString this))
+
+  (method ^:public getNameType ^int [this] nameType)
+
+  (method ^:public getNameStrings ^String/1 [this] (.clone nameStrings))
+
+  (method ^:public toByteArray ^byte/2 [this]
+    (let [result (new byte/2 (alength nameStrings))]
+      (loop [^int i 0]
+        (when (< i (alength nameStrings))
+          (aset result i (.getBytes (aget nameStrings i)))
+          (recur (unchecked-inc-int i))))
+      result))
+
+  (method ^:public getRealmString ^String [this] (.toString nameRealm))
+
+  (method ^:public getRealm ^Realm [this] nameRealm)
+
+  (method ^:public getSalt ^String [this]
+    (if (nil? salt)
+        (let [salt (StringBuilder.)]
+          (.append salt (.toString nameRealm))
+          (loop [^int i 0]
+            (when (< i (alength nameStrings))
+              (.append salt (aget nameStrings i))
+              (recur (unchecked-inc-int i))))
+          (.toString salt))
+        salt))
+
+  (method ^:public toString ^String [this]
+    (let [str (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i (alength nameStrings))
+          (when (> i 0) (.append str "/"))
+          (let [^:mutable n (aget nameStrings i)]
+            (set! n (.replace n "@" "\\@"))
+            (.append str n)
+            (recur (unchecked-inc-int i)))))
+      (.append str "@")
+      (.append str (.toString nameRealm))
+      (.toString str)))
+
+  (method ^:public getNameString ^String [this]
+    (let [str (StringBuilder.)]
+      (loop [^int i 0]
+        (when (< i (alength nameStrings))
+          (when (> i 0) (.append str "/"))
+          (.append str (aget nameStrings i))
+          (recur (unchecked-inc-int i))))
+      (.toString str)))
+
+  (method ^:public asn1Encode :throws [Asn1Exception IOException] ^byte/1 [this]
+    (let [bytes (DerOutputStream.)
+          ^:mutable temp (DerOutputStream.)
+          bint (BigInteger/valueOf (.-nameType this))]
+      (.putInteger temp bint)
+      (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true (unchecked-byte 0x00)) temp)
+      (set! temp (DerOutputStream.))
+      (let [der (new DerValue/1 (alength nameStrings))]
+        (loop [^int i 0]
+          (when (< i (alength nameStrings))
+            (aset der i (.toDerValue (KerberosString. (aget nameStrings i))))
+            (recur (unchecked-inc-int i))))
+        (.putSequence temp der)
+        (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true (unchecked-byte 0x01)) temp)
+        (set! temp (DerOutputStream.))
+        (.write temp DerValue/tag_Sequence bytes)
+        (.toByteArray temp))))
+
+  (method ^:public match ^boolean [this ^PrincipalName pname]
+    (if NAME_CASE_SENSITIVE_IN_MATCH
+        (when-not (.equals (.toString (.-nameRealm this)) (.toString (.-nameRealm pname)))
+          (return false))
+        (when-not (.equalsIgnoreCase (.toString (.-nameRealm this)) (.toString (.-nameRealm pname)))
+          (return false)))
+    (if (not (== (alength (.-nameStrings this)) (alength (.-nameStrings pname))))
+        false
+        (do
+          (loop [^int i 0]
+            (when (< i (alength (.-nameStrings this)))
+              (cond
+                NAME_CASE_SENSITIVE_IN_MATCH
+                  (if (not (.equals (aget (.-nameStrings this) i) (aget (.-nameStrings pname) i)))
+                      (return false)
+                      (recur (unchecked-inc-int i)))
+                (not (.equalsIgnoreCase (aget (.-nameStrings this) i)
+                                        (aget (.-nameStrings pname) i)))
+                  (return false)
+                :else (recur (unchecked-inc-int i)))))
+          true)))
+
+  (method ^:public writePrincipal :throws [IOException] ^void [this ^CCacheOutputStream cos]
+    (.write32 cos nameType)
+    (.write32 cos (alength nameStrings))
+    (let [^:mutable ^byte/1 realmBytes nil]
+      (set! realmBytes (.getBytes (.toString nameRealm)))
+      (.write32 cos (alength realmBytes))
+      (.write cos realmBytes 0 (alength realmBytes))
+      (let [^:mutable ^byte/1 bytes nil]
+        (loop [^int i 0]
+          (when (< i (alength nameStrings))
+            (set! bytes (.getBytes (aget nameStrings i)))
+            (.write32 cos (alength bytes))
+            (.write cos bytes 0 (alength bytes))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:public getInstanceComponent ^String [this]
+    (when (and (some? nameStrings) (>= (alength nameStrings) 2)) (String. (aget nameStrings 1))))
+
+  (method ^:static mapHostToRealm ^String [^String name]
+    (let [^:mutable ^String result nil]
+      (try
+        (let [^:mutable ^String subname nil
+              c (Config/getInstance)]
+          (if (some? (set! result (.get c "domain_realm" name)))
+              (return result)
+              (loop [^int i 1]
+                (if (< i (.length name))
+                    (if (and (== (.charAt name i) \.)
+                             (not (== i (unchecked-subtract-int (.length name) 1))))
+                        (do
+                          (set! subname (.substring name i))
+                          (set! result (.get c "domain_realm" subname))
+                          (when-not (some? result)
+                            (set! subname (.substring name (unchecked-add-int i 1)))
+                            (set! result (.get c "domain_realm" subname))
+                            (when-not (some? result) (recur (unchecked-inc-int i)))))
+                        (recur (unchecked-inc-int i)))
+                    nil))))
+        (catch KrbException e))
+      result)))

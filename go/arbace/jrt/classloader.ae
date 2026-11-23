@@ -2,7 +2,8 @@
 ;; no class loading, only the registry of the closed world. The application and platform
 ;; loaders exist as objects so that Class.getClassLoader, ClassLoader.getSystemClassLoader
 ;; (ForkJoinWorkerThread) and Arbace's RT.baseLoader have values; loadClass looks names up in
-;; the registry. Also jdk.internal.foreign.Utils.checkNonNegativeArgument (List.of's check). Since
+;; the registry. (jdk.internal.foreign.Utils.checkNonNegativeArgument, List.of's check, was here until
+;; java-design-1122: Utils is translated since, a derived overlay, with the foreign memory API.) Since
 ;; CDR11 (doc/CLOJURE-DESIGN-REVIEW.md, the user, 2026-11-06) a superclass the Java forms and gen-class
 ;; may extend (arbace.j2g.model/class-supers): its methods are promoted to a DynSub_ClassLoader.
 (in-ns 'go.arbace.jrt)
@@ -22,8 +23,9 @@
     (GetDefinedPackages__Package1 ^{:tag (* RefArray)} [])))
 
 (go/type ClassLoader
-  "ClassLoader is java.lang.ClassLoader (abstract): a parent and a name.\n"
-  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name))
+  "ClassLoader is java.lang.ClassLoader (abstract): a parent, a name and whether it is parallel capable (its class
+registered when it was made: jdk26u's parallelLockMap).\n"
+  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name ^bool parallel))
 
 (go/var ClassLoader_class
   (Define (addr (lit ClassInfo :Name "java.lang.ClassLoader" :Kind KindClass
@@ -32,10 +34,55 @@
 
 (go/method Ctor "Ctor is ClassLoader(): the system class loader as parent.\n"
   [^{:tag (* ClassLoader)} t ^ClassLoader_I this]
-  (set! (.-parent t) appLoader))
+  (set! (.-parent t) appLoader)
+  (set! (.-parallel t) (parallelRegistered (.GetClass__Class this))))
 (go/method Ctor_ClassLoader "Ctor_ClassLoader is ClassLoader(ClassLoader parent).\n"
   [^{:tag (* ClassLoader)} t ^ClassLoader_I this ^ClassLoader_I parent]
-  (set! (.-parent t) parent))
+  (set! (.-parent t) parent)
+  (set! (.-parallel t) (parallelRegistered (.GetClass__Class this))))
+
+;; parallel capable loaders (jdk26u's ClassLoader.ParallelLoaders, registerAsParallelCapable,
+;; isRegisteredAsParallelCapable; java-design-1122): the registered loader classes, ClassLoader itself and the built-in
+;; loaders' from the start; a class is registered when its superclass is
+
+(go/var
+  [^{:tag sync/Mutex} parallelMu]
+  [^{:tag (map (* Class) bool) :doc "parallelLoaders: the loader classes registered as parallel capable.\n"}
+   parallelLoaders (make (map (* Class) bool))])
+
+(go/func parallelRegistered ^bool [^{:tag (* Class)} c]
+  (.Lock parallelMu)
+  (defer (.Unlock parallelMu))
+  (aget parallelLoaders c))
+
+(go/func ClassLoader_RegisterAsParallelCapable__Z
+  "ClassLoader_RegisterAsParallelCapable__Z is ClassLoader.registerAsParallelCapable (protected static, caller
+sensitive): the caller's class (the first frame of the current thread's stack below ClassLoader's) registered when its
+superclass is (ParallelLoaders.register); whether it is registered.\n"
+  ^bool []
+  (let [^{:tag (* Class)} caller nil]
+    (range [_ f (stackFrames (rawFrames (callersAll 1)) (evalTrace) (goiTrace) (interpFrames (interpTrace)) true)]
+      (when (or (== (.-k f) nil) (strings/HasPrefix (.-cls f) "java.lang.ClassLoader"))
+        (continue))
+      (set! caller (.-k f))
+      (break))
+    (when (== caller nil)
+      (return false))
+    (.Lock parallelMu)
+    (defer (.Unlock parallelMu))
+    (when (aget parallelLoaders caller)
+      (return true))
+    (let [sup (.GetSuperclass__Class caller)]
+      (when (and (!= sup nil) (aget parallelLoaders sup))
+        (aset parallelLoaders caller true)
+        (return true)))
+    false))
+
+(go/method IsRegisteredAsParallelCapable__Z
+  "IsRegisteredAsParallelCapable__Z is ClassLoader.isRegisteredAsParallelCapable: whether its class was registered
+when the loader was made.\n"
+  ^bool [^{:tag (* ClassLoader)} t]
+  (.-parallel t))
 
 (go/method Self_ClassLoader ^{:tag (* ClassLoader)} [^{:tag (* ClassLoader)} t] t)
 (go/method GetParent__ClassLoader ^ClassLoader_I [^{:tag (* ClassLoader)} t] (.-parent t))
@@ -86,9 +133,9 @@ loader's class of that name, the registry's; ClassNotFoundException otherwise (C
 
 (go/var
   [^{:tag (* builtinLoader)} platformLoader
-   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :name (Intern "platform")) :cls platformLoader_class))]
+   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :name (Intern "platform") :parallel true) :cls platformLoader_class))]
   [^{:tag (* builtinLoader)} appLoader
-   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :parent platformLoader :name (Intern "app"))
+   (addr (lit builtinLoader :ClassLoader (lit ClassLoader :parent platformLoader :name (Intern "app") :parallel true)
               :cls appLoader_class))])
 
 (go/func ClassLoader_GetSystemClassLoader__ClassLoader
@@ -250,6 +297,135 @@ that name, else null; NullPointerException(\"name cannot be null\").\n"
       (range [i n ks] (aset (.-A a) i (aget m n)))
       a)))
 
+(go/method GetPackage_String__Package
+  "GetPackage_String__Package is ClassLoader.getPackage (protected, deprecated; jdk26u's, java-design-1122): the
+package this loader defined by that name, else its parent's getPackage, else (no parent) the boot loader's: one of
+the registry's classes'; null when none.\n"
+  ^{:tag (* Package)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name]
+  (let [p (.GetDefinedPackage_String__Package t name)]
+    (when (!= p nil) (return p))
+    (when (!= (.-parent t) nil)
+      (return (.GetPackage_String__Package (.Self_ClassLoader (.-parent t)) name)))
+    (when (registeredPackage (.String name))
+      (return (classPackage nil (.String name))))
+    nil))
+
+(go/method GetPackages__Package1
+  "GetPackages__Package1 is ClassLoader.getPackages (protected; jdk26u's, java-design-1122): the packages the
+loader and its ancestors defined, the outermost ancestor's first (jdk26u's order: the boot loader's, then each
+ancestor's, then this loader's).\n"
+  ^{:tag (* RefArray)} [^{:tag (* ClassLoader)} t]
+  (let [^{:tag (slice (* ClassLoader))} chain nil
+        l (.Self_ClassLoader t)]
+    (while (!= l nil)
+      (set! chain (append chain l))
+      (if (== (.-parent l) nil) (set! l nil) (set! l (.Self_ClassLoader (.-parent l)))))
+    (let [^{:tag (slice any)} all nil]
+      (for [i (- (len chain) 1)] (>= i 0) (dec! i)
+        (range [_ p (.-A (.GetDefinedPackages__Package1 (aget chain i)))]
+          (set! all (append all p))))
+      (let [a (NewRefArray Package_class (conv int32 (len all)))]
+        (copy (.-A a) all)
+        a))))
+
+(go/method FindLoadedClass_String__Class
+  "FindLoadedClass_String__Class is ClassLoader.findLoadedClass (protected final; java-design-1122): null for a
+null or empty name or one that is not a binary name (a / or a leading [), as jdk26u's checkName; a loader of the
+closed world defines no class at run time, so a class it was the initiating loader of is the registry's for the
+two built-in loaders and none for another.\n"
+  ^{:tag (* Class)} [^{:tag (* ClassLoader)} t ^{:tag (* String)} name]
+  (when (or (== name nil) (== (len (.-value name)) 0))
+    (return nil))
+  (let [n (.String name)]
+    (when (or (strings/ContainsRune n \/) (strings/HasPrefix n "["))
+      (return nil))
+    (when (and (!= t (addr (.-ClassLoader appLoader))) (!= t (addr (.-ClassLoader platformLoader))))
+      (return nil))
+    (.RLock registryMu)
+    (let [c (aget registry n)]
+      (.RUnlock registryMu)
+      (when (== c nil) (return nil))
+      c)))
+
+;; the assertion status a loader gives its classes (jdk26u's ClassLoader: setDefaultAssertionStatus,
+;; setPackageAssertionStatus, setClassAssertionStatus, clearAssertionStatus and desiredAssertionStatus(String);
+;; java-design-1122): kept by loader, read by Class.desiredAssertionStatus (class.ae)
+
+(go/type assertionStatus
+  "assertionStatus is a loader's assertion settings: the default, by package (\"\" the unnamed one) and by class.\n"
+  (struct ^bool dflt ^{:tag (map string bool)} packages ^{:tag (map string bool)} classes))
+
+(go/var
+  [^{:tag sync/Mutex} assertionMu]
+  [^{:tag (map (* ClassLoader) (* assertionStatus)) :doc "assertions: the loaders' settings, made by their first set call.\n"}
+   assertions (make (map (* ClassLoader) (* assertionStatus)))])
+
+(go/func loaderAssertions
+  "loaderAssertions is loader t's settings, made when absent (jdk26u's initializeJavaAssertionMaps: no -ea, empty).\n"
+  ^{:tag (* assertionStatus)} [^{:tag (* ClassLoader)} t]
+  (let [a (aget assertions t)]
+    (when (== a nil)
+      (set! a (addr (lit assertionStatus :packages (make (map string bool)) :classes (make (map string bool)))))
+      (aset assertions t a))
+    a))
+
+(go/method SetDefaultAssertionStatus_Z__V
+  "SetDefaultAssertionStatus_Z__V is ClassLoader.setDefaultAssertionStatus.\n"
+  [^{:tag (* ClassLoader)} t ^bool enabled]
+  (.Lock assertionMu)
+  (defer (.Unlock assertionMu))
+  (set! (.-dflt (loaderAssertions t)) enabled))
+
+(go/method SetPackageAssertionStatus_String_Z__V
+  "SetPackageAssertionStatus_String_Z__V is ClassLoader.setPackageAssertionStatus: a null name the unnamed package.\n"
+  [^{:tag (* ClassLoader)} t ^{:tag (* String)} name ^bool enabled]
+  (.Lock assertionMu)
+  (defer (.Unlock assertionMu))
+  (let [k ""]
+    (when (!= name nil)
+      (set! k (.String name)))
+    (aset (.-packages (loaderAssertions t)) k enabled)))
+
+(go/method SetClassAssertionStatus_String_Z__V
+  "SetClassAssertionStatus_String_Z__V is ClassLoader.setClassAssertionStatus (a top-level class's binary name).\n"
+  [^{:tag (* ClassLoader)} t ^{:tag (* String)} name ^bool enabled]
+  (.Lock assertionMu)
+  (defer (.Unlock assertionMu))
+  (aset (.-classes (loaderAssertions t)) (.String (NN name)) enabled))
+
+(go/method ClearAssertionStatus__V
+  "ClearAssertionStatus__V is ClassLoader.clearAssertionStatus: the default false, no package or class settings.\n"
+  [^{:tag (* ClassLoader)} t]
+  (.Lock assertionMu)
+  (defer (.Unlock assertionMu))
+  (aset assertions t (addr (lit assertionStatus :packages (make (map string bool)) :classes (make (map string bool))))))
+
+(go/func loaderDesiredAssertionStatus
+  "loaderDesiredAssertionStatus is jdk26u's ClassLoader.desiredAssertionStatus(className) for loader l: the class's
+setting (a nested class's that of its top-level class), else the innermost package's, else the default; ok false when
+the loader has no settings (the VM's answer then: false, no -ea).\n"
+  [^{:tag (* ClassLoader)} l ^string name] :results [^bool st ^bool ok]
+  (.Lock assertionMu)
+  (defer (.Unlock assertionMu))
+  (let [a (aget assertions l)]
+    (when (== a nil)
+      (return false false))
+    (let [n name]
+      (let [i (strings/IndexByte n \$)]
+        (when (>= i 0) (set! n (subslice n _ i))))
+      (let [(values v found) (aget (.-classes a) n)]
+        (when found (return v true)))
+      (let [i (strings/LastIndexByte n \.)]
+        (when (< i 0)
+          (let [(values v found) (aget (.-packages a) "")]
+            (when found (return v true))))
+        (while (> i 0)
+          (set! n (subslice n _ i))
+          (let [(values v found) (aget (.-packages a) n)]
+            (when found (return v true)))
+          (set! i (strings/LastIndexByte n \.))))
+      (return (.-dflt a) true))))
+
 (go/method GetName__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-name p))
 (go/method GetSpecificationTitle__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-specTitle p))
 (go/method GetSpecificationVersion__String ^{:tag (* String)} [^{:tag (* Package)} p] (.-specVersion p))
@@ -302,15 +478,8 @@ specification when not empty.\n"
     v))
 
 (go/func init []
-  (set! (.-IsInstance (.Info Package_class)) Package_InstanceOf))
-
-;; ---------------------------------------------------------------------------------------
-;; jdk.internal.foreign.Utils
-
-(go/func Utils_CheckNonNegativeArgument_J_String__V
-  "Utils_CheckNonNegativeArgument_J_String__V is jdk.internal.foreign.Utils.
-checkNonNegativeArgument: IllegalArgumentException(\"The provided NAME is negative: V\").\n"
-  [^int64 value ^{:tag (* String)} name]
-  (when (< value 0)
-    (panic (IllegalArgumentException_New_String
-             (Concat (Str "The provided ") name (Str " is negative: ") (StrOfLong value))))))
+  (set! (.-IsInstance (.Info Package_class)) Package_InstanceOf)
+  (aset parallelLoaders ClassLoader_class true)
+  (aset parallelLoaders builtinLoader_class true)
+  (aset parallelLoaders platformLoader_class true)
+  (aset parallelLoaders appLoader_class true))

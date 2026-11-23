@@ -1,0 +1,268 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/ccache/CCacheInputStream.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.ccache)
+
+(import '(java.io IOException InputStream)
+        '(java.util ArrayList List StringTokenizer)
+        '(sun.security.krb5 Asn1Exception EncryptionKey PrincipalName Realm RealmException)
+        '(sun.security.krb5.internal AuthorizationData
+                                     AuthorizationDataEntry
+                                     HostAddress
+                                     HostAddresses
+                                     KerberosTime
+                                     Krb5
+                                     KrbApErrException
+                                     Ticket
+                                     TicketFlags)
+        '(sun.security.krb5.internal.util KrbDataInputStream)
+        '(sun.security.util IOUtils))
+
+(defclass ^:public CCacheInputStream
+  :extends KrbDataInputStream
+  :implements [FileCCacheConstants]
+
+  (constructor ^:public [this ^InputStream is] (super. is))
+
+  (method ^:public readTag :throws [IOException] ^Tag [this]
+    (let [buf (new char/1 1024)
+          ^:mutable ^int len 0
+          ^:mutable ^int tag -1
+          ^:mutable ^int taglen 0
+          ^:mutable ^Integer time_offset nil
+          ^:mutable ^Integer usec_offset nil]
+      (set! len (.read this 2))
+      (when (< len 0) (throw (IOException. "stop.")))
+      (when (> len (alength buf)) (throw (IOException. "Invalid tag length.")))
+      (while (> len 0)
+        (set! tag (.read this 2))
+        (set! taglen (.read this 2))
+        (switch tag
+          CCacheInputStream/FCC_TAG_DELTATIME
+            (do (set! time_offset (.read this 4)) (set! usec_offset (.read this 4)))
+          nil)
+        (set! len (unchecked-subtract-int len (unchecked-add-int 4 taglen))))
+      (Tag. len tag time_offset usec_offset)))
+
+  (method ^:public readPrincipal :throws [IOException RealmException] ^PrincipalName [this
+                                                                                      ^int version]
+    (let [^:mutable ^int type 0
+          ^:mutable ^int length 0
+          ^:mutable ^int namelength 0
+          ^:mutable ^String realm nil]
+      (if (== version CCacheInputStream/KRB5_FCC_FVNO_1)
+          (set! type CCacheInputStream/KRB5_NT_UNKNOWN)
+          (set! type (.read this 4)))
+      (set! length (.readLength4 this))
+      (let [^{:tag (List String)} result (ArrayList.)]
+        (when (== version CCacheInputStream/KRB5_FCC_FVNO_1)
+          (set! length (unchecked-dec-int length)))
+        (loop [^int i 0]
+          (when (<= i length)
+            (set! namelength (.readLength4 this))
+            (let [bytes (IOUtils/readExactlyNBytes this namelength)]
+              (.add result (String. bytes))
+              (recur (unchecked-inc-int i)))))
+        (when (.isEmpty result) (throw (IOException. "No realm or principal")))
+        (if (.isRealm this (cast String (.get result 0)))
+            (do
+              (set! realm (cast String (^[int] List/.remove result 0)))
+              (when (.isEmpty result) (throw (IOException. "No principal name components")))
+              (PrincipalName. type
+                              (cast String/1 (.toArray result (new String/1 0)))
+                              (Realm. realm)))
+            (try
+              (PrincipalName. type
+                              (cast String/1 (.toArray result (new String/1 0)))
+                              (Realm/getDefault))
+              (catch RealmException re nil))))))
+
+  (method isRealm ^boolean [this ^String str]
+    (try (let [r (Realm. str)] nil) (catch Exception e (return false)))
+    (let [st (StringTokenizer. str ".")
+          ^:mutable ^String s nil]
+      (while (.hasMoreTokens st)
+        (set! s (.nextToken st))
+        (loop [^int i 0]
+          (if (< i (.length s))
+              (if (>= (.charAt s i) 141) (return false) (recur (unchecked-inc-int i)))
+              nil)))
+      true))
+
+  (method readKey :throws [IOException] ^EncryptionKey [this ^int version]
+    (let [^:mutable ^int keyType 0
+          ^:mutable ^int keyLen 0]
+      (set! keyType (.read this 2))
+      (when (== version CCacheInputStream/KRB5_FCC_FVNO_3) (.read this 2))
+      (set! keyLen (.readLength4 this))
+      (let [bytes (IOUtils/readExactlyNBytes this keyLen)] (EncryptionKey. bytes keyType version))))
+
+  (method readTimes :throws [IOException] ^long/1 [this]
+    (let [times (new long/1 4)]
+      (aset times 0 (unchecked-multiply (long (.read this 4)) 1000))
+      (aset times 1 (unchecked-multiply (long (.read this 4)) 1000))
+      (aset times 2 (unchecked-multiply (long (.read this 4)) 1000))
+      (aset times 3 (unchecked-multiply (long (.read this 4)) 1000))
+      times))
+
+  (method readskey :throws [IOException] ^boolean [this]
+    (not (== (.read this) 0)))
+
+  (method readAddr :throws [IOException KrbApErrException] ^HostAddress/1 [this]
+    (let [^:mutable ^int numAddrs 0
+          ^:mutable ^int addrType 0
+          ^:mutable ^int addrLength 0]
+      (set! numAddrs (.readLength4 this))
+      (when (> numAddrs 0)
+        (let [^{:tag (List HostAddress)} addrs (ArrayList.)]
+          (loop [^int i 0]
+            (when (< i numAddrs)
+              (set! addrType (.read this 2))
+              (set! addrLength (.readLength4 this))
+              (when-not (or (== addrLength 4) (== addrLength 16))
+                (when (some? Krb5/DEBUG) (.println Krb5/DEBUG "Incorrect address format."))
+                (return nil))
+              (let [result (new byte/1 addrLength)]
+                (loop [^int j 0]
+                  (when (< j addrLength)
+                    (aset result j (unchecked-byte (.read this 1)))
+                    (recur (unchecked-inc-int j))))
+                (.add addrs (HostAddress. addrType result))
+                (recur (unchecked-inc-int i)))))
+          (cast HostAddress/1 (.toArray addrs (new HostAddress/1 0)))))))
+
+  (method readAuth :throws [IOException] ^AuthorizationDataEntry/1 [this]
+    (let [^:mutable ^int num 0
+          ^:mutable ^int adtype 0
+          ^:mutable ^int adlength 0]
+      (set! num (.readLength4 this))
+      (when (> num 0)
+        (let [^{:tag (List AuthorizationDataEntry)} auData (ArrayList.)
+              ^:mutable ^byte/1 data nil]
+          (loop [^int i 0]
+            (when (< i num)
+              (set! adtype (.read this 2))
+              (set! adlength (.readLength4 this))
+              (set! data (IOUtils/readExactlyNBytes this adlength))
+              (.add auData (AuthorizationDataEntry. adtype data))
+              (recur (unchecked-inc-int i))))
+          (cast AuthorizationDataEntry/1 (.toArray auData (new AuthorizationDataEntry/1 0)))))))
+
+  (method readData :throws [IOException] ^byte/1 [this]
+    (let [^:mutable ^int length 0]
+      (set! length (.readLength4 this))
+      (when-not (== length 0) (IOUtils/readExactlyNBytes this length))))
+
+  (method readFlags :throws [IOException] ^boolean/1 [this]
+    (let [flags (new boolean/1 (unchecked-add-int Krb5/TKT_OPTS_MAX 1))
+          ^:mutable ^int ticketFlags 0]
+      (set! ticketFlags (.read this 4))
+      (when (== (bit-and-int ticketFlags 0x40000000) CCacheInputStream/TKT_FLG_FORWARDABLE)
+        (aset flags 1 true))
+      (when (== (bit-and-int ticketFlags 0x20000000) CCacheInputStream/TKT_FLG_FORWARDED)
+        (aset flags 2 true))
+      (when (== (bit-and-int ticketFlags 0x10000000) CCacheInputStream/TKT_FLG_PROXIABLE)
+        (aset flags 3 true))
+      (when (== (bit-and-int ticketFlags 0x08000000) CCacheInputStream/TKT_FLG_PROXY)
+        (aset flags 4 true))
+      (when (== (bit-and-int ticketFlags 0x04000000) CCacheInputStream/TKT_FLG_MAY_POSTDATE)
+        (aset flags 5 true))
+      (when (== (bit-and-int ticketFlags 0x02000000) CCacheInputStream/TKT_FLG_POSTDATED)
+        (aset flags 6 true))
+      (when (== (bit-and-int ticketFlags 0x01000000) CCacheInputStream/TKT_FLG_INVALID)
+        (aset flags 7 true))
+      (when (== (bit-and-int ticketFlags 0x00800000) CCacheInputStream/TKT_FLG_RENEWABLE)
+        (aset flags 8 true))
+      (when (== (bit-and-int ticketFlags 0x00400000) CCacheInputStream/TKT_FLG_INITIAL)
+        (aset flags 9 true))
+      (when (== (bit-and-int ticketFlags 0x00200000) CCacheInputStream/TKT_FLG_PRE_AUTH)
+        (aset flags 10 true))
+      (when (== (bit-and-int ticketFlags 0x00100000) CCacheInputStream/TKT_FLG_HW_AUTH)
+        (aset flags 11 true))
+      (when (some? Krb5/DEBUG)
+        (let [^:mutable msg ">>> CCacheInputStream: readFlags() "]
+          (when (= (aget flags 1) true) (set! msg (java-str msg " FORWARDABLE;")))
+          (when (= (aget flags 2) true) (set! msg (java-str msg " FORWARDED;")))
+          (when (= (aget flags 3) true) (set! msg (java-str msg " PROXIABLE;")))
+          (when (= (aget flags 4) true) (set! msg (java-str msg " PROXY;")))
+          (when (= (aget flags 5) true) (set! msg (java-str msg " MAY_POSTDATE;")))
+          (when (= (aget flags 6) true) (set! msg (java-str msg " POSTDATED;")))
+          (when (= (aget flags 7) true) (set! msg (java-str msg " INVALID;")))
+          (when (= (aget flags 8) true) (set! msg (java-str msg " RENEWABLE;")))
+          (when (= (aget flags 9) true) (set! msg (java-str msg " INITIAL;")))
+          (when (= (aget flags 10) true) (set! msg (java-str msg " PRE_AUTH;")))
+          (when (= (aget flags 11) true) (set! msg (java-str msg " HW_AUTH;")))
+          (.println Krb5/DEBUG msg)))
+      flags))
+
+  (method readCred :throws [IOException RealmException KrbApErrException Asn1Exception] [this
+                                                                                         ^int version]
+    (let [^:mutable ^PrincipalName cpname nil]
+      (try (set! cpname (.readPrincipal this version)) (catch Exception e))
+      (when (some? Krb5/DEBUG)
+        (.println Krb5/DEBUG (java-str ">>>DEBUG <CCacheInputStream>  client principal is " cpname)))
+      (let [^:mutable ^PrincipalName spname nil]
+        (try (set! spname (.readPrincipal this version)) (catch Exception e))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG
+                    (java-str ">>>DEBUG <CCacheInputStream> server principal is " spname)))
+        (let [key (.readKey this version)]
+          (when (some? Krb5/DEBUG)
+            (.println Krb5/DEBUG
+                      (java-str ">>>DEBUG <CCacheInputStream> key type: " (.getEType key))))
+          (let [times (.readTimes this)
+                authtime (KerberosTime. (aget times 0))
+                ^KerberosTime starttime (when-not (== (aget times 1) 0)
+                                          (KerberosTime. (aget times 1)))
+                endtime (KerberosTime. (aget times 2))
+                ^KerberosTime renewTill (when-not (== (aget times 3) 0)
+                                          (KerberosTime. (aget times 3)))]
+            (when (some? Krb5/DEBUG)
+              (.println Krb5/DEBUG
+                        (java-str ">>>DEBUG <CCacheInputStream> auth time: "
+                                  (.toString (.toDate authtime))))
+              (.println Krb5/DEBUG
+                        (java-str ">>>DEBUG <CCacheInputStream> start time: "
+                                  (if (nil? starttime) "null" (.toString (.toDate starttime)))))
+              (.println Krb5/DEBUG
+                        (java-str ">>>DEBUG <CCacheInputStream> end time: "
+                                  (.toString (.toDate endtime))))
+              (.println Krb5/DEBUG
+                        (java-str ">>>DEBUG <CCacheInputStream> renew_till time: "
+                                  (if (nil? renewTill) "null" (.toString (.toDate renewTill))))))
+            (let [skey (.readskey this)
+                  flags (.readFlags this)
+                  tFlags (TicketFlags. flags)
+                  addr (.readAddr this)
+                  ^:mutable ^HostAddresses addrs nil]
+              (when (some? addr) (set! addrs (HostAddresses. addr)))
+              (let [auDataEntry (.readAuth this)
+                    ^:mutable ^AuthorizationData auData nil]
+                (when (some? auDataEntry) (set! auData (AuthorizationData. auDataEntry)))
+                (let [ticketData (.readData this)
+                      ticketData2 (.readData this)]
+                  (when-not (or (nil? cpname) (nil? spname))
+                    (try
+                      (when (.equals (.getRealmString spname) "X-CACHECONF:")
+                        (let [nameParts (.getNameStrings spname)]
+                          (when (.equals (aget nameParts 0) "krb5_ccache_conf_data")
+                            (return (CredentialsCache$ConfigEntry.
+                                      (aget nameParts 1)
+                                      ^PrincipalName (when (> (alength nameParts) 2)
+                                                       (PrincipalName. (aget nameParts 2)))
+                                      ticketData)))))
+                      (Credentials. cpname
+                                    spname
+                                    key
+                                    authtime
+                                    starttime
+                                    endtime
+                                    renewTill
+                                    skey
+                                    tFlags
+                                    addrs
+                                    auData
+                                    ^Ticket (when (some? ticketData) (Ticket. ticketData))
+                                    ^Ticket (when (some? ticketData2) (Ticket. ticketData2)))
+                      (catch Exception e
+                        (when (some? Krb5/DEBUG) (.printStackTrace e (.getPrintStream Krb5/DEBUG)))
+                        nil))))))))))))
