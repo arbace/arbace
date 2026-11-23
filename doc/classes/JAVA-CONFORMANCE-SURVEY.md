@@ -5372,3 +5372,39 @@ and `HtmlAttr`, `jdk.javadoc.internal.tool.AccessLevel`, and its resource bundle
   Markdown doc comment, `///`, is checked untransformed; jdk.internal.md's transformer is not in the world).
 - Proven before the tool build: the four bundles generated on J1's tool (`javac-8e45bec2...`, key `d906aaf3`) equal to the build's
   byte for byte; the module's eleven files read by `read-jdk --check --no-javac` on that tool, 11 converted, 0 failed, all native.
+
+**Results on Arbace** (javac's tool `javac-273d4acab196a651b919`, built once at the branch's javac key in one heavy-lock hold
+after the gate's executables `36aab1207a6fe6f3a858`; its build 75 min, peak 26.5 GB):
+- JCS50 (b), `--release N`: proved. Diagnostics 44 of 44 pass (each action's status the JDK javac's, each ref= output the golden
+  file's), classes 2 (t04718 `--release 8`, t06345 `--release 17`), interp 3 (t05857 `--release 16`, t05915 `--release 8`, t06346
+  ReleaseOptionThroughAPI's `--release 11` through javax.tools' API), print 2: t06345 at once; t04718 once the printer stopped declaring
+  `var result = a.equals(b)`, which Java 8 has no `var` for: the printer now types a call of Object's equals, hashCode or toString on a
+  receiver of unknown type (boolean, int, String: no override changes them) where it wrote var. The source sets of t04718 and t06345
+  are javac on Arbace's own now (`bin/java-check sources`, equal to the JDK's); t06352 and t06401 now stop at a duplicate class, as
+  t06351 does. The negative control: `--release 7` and `--release 27` are still "release version N not supported", status 2.
+  `:diag-release` and `:print-release` hold no row, and `:read-platform`'s release pattern is out.
+- JCS52 (a), doclint: built, but not yet in effect. The 8 rows still warn `compiler.warn.doclint.not.available`. A probe on the
+  tool shows why: `ServiceLoader.load(DocLint.class).iterator()` gives jdk.javadoc's DocLint (the variant), but `stream()` gives none,
+  and `DocLint.newDocLint` looks its provider up by `stream()`. Since 2026-11-10 (the Ghidra case study's A4) the tool's
+  `java.util.ServiceLoader` is the program's, `overlay/jdk/java.base`'s registry over `META-INF/arbace/services`, whose `stream()`
+  reads the registry. The tool world's own ServiceLoader (`overlay/jdk/javac/java.base`), which this round changed, is shadowed by
+  the program's in the tool's world, so that change had no effect. The fix for the next tool build: the variant also replaces
+  `stream()`, giving its providers as the program ServiceLoader's `ProviderImpl`s (their classes' no-argument constructors).
+  `:diag-doclint` keeps its 8 rows, with that note.
+- The regeneration (bin/jrt-convert update, bin/javac-vendor convert, bin/clojure-tests --java-fixtures update, bin/java-check
+  --forms update) moved only the four provenance files (reader `83a29bfb`, host the new tool). The reader change of queue 520
+  (`(do q C/f)` before a constant variable) changes no form of jdk/, javac's world, the fixtures or the essential tests: only
+  t05905's, committed with it. javac's forms from J1's tool with the checkout's reader (step A) and from the new tool are byte for
+  byte the same, a fixpoint of the reader.
+
+**Not built in this round** (decided (a) on 2026-10-25, left to a later stream):
+- JCS51 (a), processors (25 rows): a processor has to be a class the interpreter defines from its sources, handed to
+  JavacProcessingEnvironment as an instance. That needs dynamic subclasses (DynSub) of AbstractProcessor and of the compiled classes
+  processors extend in the tool's world, a variant of the processor loading, and the runner mapping a processor class to its
+  source. Three processing tests also crash first on `ClassLoader.getUnnamedModule` (`:diag-closed-world`).
+- JCS53 (a), the command line and the file manager (12 rows; `-encoding ascii` and a jar on `--module-path` stay refused): in jdk26u
+  `Arguments.getFileObjects` casts the file manager to JavacFileManager, and `Main.compile` hands the file manager's options only to a
+  BaseFileManager. The `source.no.system.modules.path` warning (t06697, t07420, t07622) needs `BaseFileManager.isDefaultSystemModulesPath`.
+  Raw diagnostics' short file names (t06452, t07536) need PathFileObject file objects. `-XDexpectKeys` (t06660) and the error count
+  after a plug-in error (t07527) come with `Main.compile` itself. It changes every javac command line on Arbace, so its proof is
+  whole runs of the classes, diagnostics and print levels.
