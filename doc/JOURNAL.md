@@ -19129,3 +19129,15 @@ built from pinned sources. Applied at AOT here: test/ocaml/divergences-suite-aot
 `:opam-not-run`); the Mac applies it at eval (539's follow-up). Alternative not taken: (b) by design until a b0 release carries the API.
 opam/re/expect and sexplib0_test stay `:opam-not-run` until the Mac's 539 follow-up (the Jane Street closure: ppxlib, base,
 ppx_expect, ppx_inline_test) merges; their AOT rows follow it.
+
+## 2026-11-23: ocaml-1123: unboxed-primitive-args' compiled run stopped; the gen mode not in effect; the rerun under one ticket
+
+The coordinator stopped the build worktree's compiled run (about 12:00 to 13:30 under the big lock): its translation process (`o2j
+cprogs`, test/ocaml/o2j/tool.ae) grew to 45 GB in 86 minutes on unboxed-primitive-args' generated program (main.ml's 600 KB of
+Lambda: some thousand externals and their tests), leaving the host 4 GB and blocking the trains. header.awk's gen mode is not in
+effect at any level (60de8bb0d; `gnon` enables it once o2j translates a program of that size in bounded memory); the row keeps
+`:c-api` (deferred) at both AOT levels. The rerun (`.tmp/worktrees/ocaml-b/.tmp/oc/compiled-b.sh`): tool-ocamldoc/t01-t05,
+gc-roots/globroots_sequential, lib-threads/signal and delayintr, and the compiled Dynlink rows the Mac's 544 asks for
+(lib-dynlink-pr4229/main, lib-dynlink-domains/main, lib-dynlink-init-info/test), then the suite's opam/base64/test and
+opam/fmt/test_fmt, all under one big-lock ticket (HEAVY_MEM_GIB=16: the tool rows' shard's j2g peaked at 13.9 GB), every process
+under `ulimit -v` 24 GiB so that a runaway fails fast.
