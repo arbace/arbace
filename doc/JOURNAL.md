@@ -20078,3 +20078,15 @@ Applied in test/java/divergences.edn (java-design-1123):
   jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
   provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
   JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
+## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
+
+The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
+(overlay/jdk/java.base), jdk26u's lazy stream over the loader's getResources (the name checked first; getResources called
+when the stream is consumed, its IOException an UncheckedIOException then), and j2g's class-loader-resource-helpers'
+resources(String) (arbace/j2g/model.ae: a translated loader's own override first, else ClassPathResources'; main.ae roots
+it). jdk/forms' ClassPathResources.ae as bin/jrt-convert predict reads it (only the new method and its imports differ from
+the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 failures; the night's update regenerates
+it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
+a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
+Rides train 2.

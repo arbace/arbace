@@ -15,7 +15,7 @@
  * JDK's class path gives one, though no bytes (the Go build has no class files: opening it fails, so
  * getResourceAsStream answers null, as the JDK's does for a URL it cannot open). ClassLoader's resource
  * methods in translated code call the statics below (j2g's support functions, arbace.j2g.model's
- * class-loader-resource-helpers).
+ * class-loader-resource-helpers); since java-bytecode-1122 resources(String) too.
  * Since GH4 (iii) of that plan: the class path's entries by name. j2g embeds META-INF/arbace/classpath
  * (K NAME a line, one a resource directory in the class path's order: java.class.path is these names,
  * joined by the path separator) and META-INF/arbace/owners (K PATH a line: the entry that has a plain path
@@ -42,6 +42,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -50,12 +51,17 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.List;
+import java.util.Objects;
+import java.util.Spliterator;
+import java.util.Spliterators;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 import sun.net.www.ParseUtil;
 
 /** The resources of the Go build's class path, by URL. */
@@ -423,6 +429,24 @@ public final class ClassPathResources {
         if (name == null)
             throw new NullPointerException();
         return Collections.emptyEnumeration();
+    }
+
+    /**
+     * ClassLoader.resources of a loader (java-bytecode-1122, the user's decision (a) of 2026-11-23): a lazy stream of
+     * the loader's getResources (its own override first, as translated code calls it), getResources called when the
+     * stream is consumed, its IOException an UncheckedIOException then, as jdk26u's ClassLoader.resources; the name
+     * checked first (NullPointerException).
+     */
+    public static Stream<URL> resources(ClassLoader loader, String name) {
+        Objects.requireNonNull(name);
+        int characteristics = Spliterator.NONNULL | Spliterator.IMMUTABLE;
+        return StreamSupport.stream(() -> {
+            try {
+                return Spliterators.spliteratorUnknownSize(loader.getResources(name).asIterator(), characteristics);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }, characteristics, false);
     }
 
     /**
