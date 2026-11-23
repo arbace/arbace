@@ -20206,6 +20206,37 @@ bin/pyi's exec chain); they leave `:io-c-checks` in 545, which reworks that clas
 runtime; 535-2 (b) the C-only checks by design for good; 535-3 (b) the interpreter locked to the leader thread and an exec-only chain;
 535-4 (b) a source-build layout.
 
+## 2026-11-23: a native _io, CPython's Modules/_io ported to Go (queue 545, the Mac VM; the user's 535-2 (a))
+
+The user decided (535-2 (a)) to port `_io` to Go in pyi, `_pyio` staying the Python side. Built on branch 545-py-native-io from
+next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
+- Source: python/cpython, tag v3.14.10, `Modules/_io/` (`_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`,
+  `bufferedio.c`, `textio.c`, `clinic/*.c.h`), from the pinned tarball Python-3.14.10.tar.xz (SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032), and 3.15.2's differences from Python-3.15.2.tar.xz (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), ported by hand into go/arbace/py's `builtins_io*.ae` (the
+  printed runtime edited, read back by `bin/pyi runtime read`); the PSF's license, LICENSE.md (its coverage list extended).
+  `winconsoleio.c` (Windows) is not ported.
+- Two steps, each with its proof: step 1 (3dbf642cf) the bases, BytesIO, StringIO and IncrementalNewlineDecoder with FileIO,
+  the buffered classes, TextIOWrapper and open still `_pyio`'s (test_memoryio on AOT: 176 pass, 0 failing); step 2 the rest and
+  the switch: no `_pyio` import at `_io`'s creation, builtins.open is `_io.open`, the standard streams' types derive from the
+  native TextIOWrapper, BufferedWriter and BufferedReader, `_pyio` out of cImplModules.
+- Runtime changes beyond the port: the _io methods take the instance itself (objectDescr) and a subclass keeps the _io slots
+  that call its methods (class.go); instanceDict answers an _io object's dict (attr.go); every _io type is weakly
+  referenceable and reports HEAPTYPE in `__flags__`; the types without a tp_new of their own in C (all but FileIO, BytesIO,
+  StringIO) have no `__new__` in their dict and `object.__new__` of them makes their value (registry.go's inheritsNew, descr.go's
+  newOrigin, class.go's objectNew); the cycle collector walks the _io objects (finalize.go); wrapInstance tracks a subclass's
+  instance for iobase_finalize unless its class has a `__del__` of its own.
+- Alternatives considered: keeping sys.stdout as the runtime's textFile registered with an ABC (impossible once io's classes
+  are static types: the subclass relation is used instead); making sys.stdout a real TextIOWrapper over FileIO(1) (more
+  faithful, but the runtime's print, REPL, input and readline paths use the textFile's bufio writers: left for later).
+  The hybrid step 1 kept `_pyio`'s loader for one commit only.
+- Proofs (VM, AOT, `bin/pyi check --aot --lib-test --fresh --only`, logs in .tmp/q545/): test_io 631 pass, test_fileio 97,
+  test_file_eintr 18, test_fileinput 57, test_memoryio 177; 0 failing; 64 record rows to pass; the three controls failed as they
+  must. Probes of the standard streams, files, pipes, a child's streams, pickling of subclasses (.tmp/q545/p/).
+- Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
+  classes whose rows pass now keep them until the main host's re-record (their why says so).
+- The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
 ## 2026-11-23: queue 537, Python eval's largest by-design classes: _hashlib over Go's crypto, the pseudo-terminal functions, the rest to the user (the Mac VM)
 
 What: the eval cell's `:kind :design` classes of test/python/divergences.edn, largest first by the committed record's rows
@@ -20285,3 +20316,4 @@ next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
 - Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
   classes whose rows pass now keep them until the main host's re-record (their why says so).
 - The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
