@@ -7219,3 +7219,64 @@
   [:incomplete #"^codegen: invalid use of cv-qualified type 'void' in parameter declaration" "invalid use of cv-qualified type 'void' in parameter declaration"])
 (alter-var-root #'sema-rules conj
   [:init #"^codegen: conversion from .* to non-scalar type '.*' requested" "conversion to non-scalar type requested"])
+
+;; cpp-decl2 (2026-11-23): [dcl.link]/7 (C++23 /6): two declarations of a function or a variable with C language linkage and
+;; one name in different namespaces declare the same entity, and [basic.link]/11 wants their types the same (an array's bound
+;; given once): GCC's "conflicting C language linkage declaration 'long int BAD::i'", at the later declaration's name;
+;; lookup/extern-c-redecl6.C. The main file's namespace-scope declarations in extern "C" (not static), each against the first.
+(defn c-linkage-entities
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)
+        norm (fn [t] (str/replace (str/replace (first (split-exc (str t))) #"\(void\)" "()") #"\s+" ""))
+        arr (fn [^String t] (when-let [[_ e b] (re-matches #"(.*)\[(\d*)\]" t)] [e b]))
+        same? (fn [a b] (or (= a b)
+                            (let [[ea ba] (arr a) [eb bb] (arr b)]
+                              (and ea eb (= ea eb) (or (= "" ba) (= "" bb))))))
+        enter! (fn [path n]
+                 (when (and (#{"FunctionDecl" "VarDecl"} (:kind n)) (string? (:name n)) (seq (:name n))
+                            (not= "static" (:storageClass n)) (= main (get-in n [:loc :file])) (get-in n [:loc :offset])
+                            (not (qualified-name? src (long (get-in n [:loc :offset])))))
+                   (let [k [(:kind n) (:name n)] t (norm (get-in n [:type :qualType]))]
+                     (if-let [[p0 t0] (.get seen k)]
+                       (when (and (not= p0 path) (not (same? t0 t)))
+                         (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                           (.add out {:line l :col c :kind :error :rule :linkage
+                                      :msg (str "conflicting C language linkage declaration '" (:name n) "'")})))
+                       (.put seen k [path t])))))]
+    (letfn [(region! [path lang nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (if (= "C" (:language n)) :c :cpp) (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") lang (:inner n))
+                  ("FunctionDecl" "VarDecl") (when (= :c lang) (enter! path n))
+                  nil)))]
+      (region! "" :cpp (:nodes u)))
+    (vec out)))
+
+(swap! checks conj c-linkage-entities)
+
+;; cpp-decl2 (2026-11-23): [namespace.def.general]/2: a namespace-definition's identifier is looked up in its enclosing namespace
+;; and the inline namespaces of it (transitively, [namespace.def.general]/7's inline namespace set); two namespaces found is GCC's
+;; "'namespace B' is ambiguous", at the definition: lookup/pr94257.C's `inline namespace B { namespace B { } }` reopened as
+;; `namespace B`. One found is the one extended (an inline namespace's member among them). The main file's definitions.
+(defn namespace-ambiguity
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        found (fn found [^java.util.Map m nm]
+                (concat (when-let [e (.get m nm)] [e])
+                        (mapcat (fn [e] (when (:inline e) (found (:sub e) nm))) (vals m))))]
+    (letfn [(walk [^java.util.Map m nodes]
+              (doseq [n nodes :when (= "NamespaceDecl" (:kind n))]
+                (let [nm (or (:name n) "\u0001anon")
+                      fs (if (:isNested n) (keep #(.get m %) [nm]) (distinct (found m nm)))
+                      _ (when (and (>= (count fs) 2) (:name n) (= main (get-in n [:loc :file])) (get-in n [:loc :offset]))
+                          (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                            (.add out {:line l :col c :kind :error :rule :namespace :msg (str "'namespace " nm "' is ambiguous")})))
+                      e (or (first fs)
+                            (let [e {:inline (boolean (:isInline n)) :sub (java.util.LinkedHashMap.)}] (.put m nm e) e))]
+                  (walk (:sub e) (:inner n)))))]
+      (walk (java.util.LinkedHashMap.) (:nodes u)))
+    (vec out)))
+
+(swap! checks conj namespace-ambiguity)
