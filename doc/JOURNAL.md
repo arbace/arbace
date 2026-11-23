@@ -19091,3 +19091,21 @@ Asked through the coordinator from ocaml-1123's report; answered by the user:
   toplevel, the Mac's queue 544. Alternatives not taken: (b) n/a at AOT; (c) by design.
 - ocaml-1123 continues the AOT list: ocamldoc's five rows at the compiled level, int64-unboxing, unboxed-primitive-args, the gc-roots
   tests' `@mods` at the AOT levels, opam base64 and fmt; the Mac's 539 handles backtrace/lazy and user_data_regression at eval.
+
+## 2026-11-23: ocaml-1123, round 2: the user's AOT list (branch `ocaml-1123`; build worktree `.tmp/worktrees/ocaml-b`)
+
+The user's list (the previous entry): the gc-roots tests' `@mods`, int64-unboxing, unboxed-primitive-args, ocamldoc's five rows at
+the compiled level, opam base64 and fmt. One batch of bin/oi edits (its text is the native library's key: each edit costs a rebuild of
+about 50 minutes), written by rename so that the running compiled check kept its file; the light-level runs in a second worktree
+(`ocaml-b`, the branch's head detached), since a run rewrites `.tmp/oi/corpus.tsv`, which the running check's judgment reads.
+- Built (doc/ocaml/OCAML-SURVEY.md, "The user's list after the decisions of 2026-11-23"): `@mods` at the AOT levels (o2j_dump types
+  the units first, oi_mods), the native-only C stubs' class at oi's level alone, header.awk's gen mode with bin/oi's `gen_prog`
+  (unboxed-primitive-args: gen_test.ml run on oi, the generated main and stubs from the run directory), a helper of C alone at the
+  AOT levels (sigint.c, oi_helper), ocamldoc at the compiled level (the plugins in the compiled Dynlink registry, its arguments and
+  output), and the suite's compiled level with C stubs (a shard with the C API's main).
+- Light level (`bin/oi check --aot --only-list`, six programs, no record): gc-roots/globroots_parallel, globroots_parallel_spawn_burn
+  and int64-unboxing/test pass by their own verdicts; globroots_sequential stops at the CPU limit (aot-slow.edn; the compiled level's
+  run is queued); lib-threads/signal and delayintr fail as the light level receives no signal of another process (aot-known.edn,
+  `:unix-java`, OT24 (a); their compiled rows queued: HostSys, OC216 (a)). unboxed-primitive-args' translation passed 7.6 GB, so it
+  was stopped and runs alone under the big lock. The negative controls: each row's record before this change (classed), and the light
+  run's judgment, in which signal and delayintr fail against their own references.
