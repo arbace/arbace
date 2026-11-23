@@ -4846,3 +4846,19 @@ units (a patch kept out of the branch, so that bin/oi and its native_key stay as
 standard library, Unix, Str, compiler-libs' 131 units, the toplevel and ocamltex or main.ml: 68 MB of Java forms) translated by j2g in
 4,548 s at 16.7 GB; the Go package `arbace/lang` it makes (259 MB of Go, every class) took Go's compile past 36 GB in 38 minutes, still
 growing, and was stopped (the host's other jobs). The rows keep their class at both AOT levels.
+
+## As built: queue 544b (2026-11-23, the VM): the compiled level's large shards in Go packages of their own (DECISION 544-1 (a))
+
+- **The split** (arbace.o2j's shard verb: `split?`, `split-packages`): a shard whose library units' forms (OUT/ocaml/u) pass
+  `O2J_SPLIT_BYTES` (default 24 MB; compiler-libs' shard 62 MB, a standard-library shard about 9 MB) gets a `packages.edn`, the input's
+  top-level class -> Go package that j2g already reads (`arbace.j2g.names/compiled-packages`, the compiled namespaces' since S6): the
+  runtime's classes (ocaml/rt) the package `ocaml_rt`, each library unit's class `M_<Unit>` a package of its own, `ou_<Unit>`, each
+  program's classes (ocaml/p<N>) `ocaml_p<N>`; the dispatcher `ocaml.u.Shard`, j2g's entry, stays in `lang`. A unit names only the units
+  linked before it and the runtime, a program its units and the libraries', the dispatcher the programs: no import cycle. `O2J_SPLIT=1`
+  always splits, `0` never. j2g is unchanged, and so is every shard under the threshold.
+- **Why by unit, not by library**: compiler-libs as one package would hold about 150 of the 253 MB of Go the unsplit shard's `lang` had
+  (Go's compile of that one passed 36 GB, queue 544); by unit the largest package is Parser's, 19 MB.
+- **Determinism**: the map is sorted (`sorted-map`), its text the same at each run (the test); j2g's output tree over the split driver's
+  forms at `J2G_JOBS` 2 and 4 is byte for byte the same (6,005 files; `report.edn`'s times alone differ).
+- **Proofs** (run): the plugin driver of queue 544 split (`O2J_SPLIT=1`): j2g 1,024 s at 5.5 GiB, Go's build 510 s at 4.3 GiB (unsplit: 633 s,
+  587 s); the coverage unit as the host's OCaml, the 40 sample programs' outputs equal to the unsplit build's.
