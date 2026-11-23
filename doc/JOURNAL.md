@@ -19076,3 +19076,36 @@ interface. Done here:
 - The worktree's caches named three other roots (q493, q524, the host's rust-c3x), as 524's finding 5: rewritten, core's index made
   again by the pass. Then the std IR at the new pin came from the main host (`.tmp/rsi/std-sgn`, 120 units checked against
   test/rust/runtime/ir.sha256); next runtime-ci, rsi-build's six cases on the own path, the records.
+
+## 2026-11-23: 542 (the VM): C6 at this head, and round 2: foreign functions in the front end
+
+Follows this task's round-1 entry. std's IR at the new pin from the main host (`.tmp/rsi/std-sgn`, 120 units checked against
+test/rust/runtime/ir.sha256). Logs in the VM's `.tmp/q542/logs/lu/` and `lub/`.
+
+- C6's measure at this head, every export made on the VM (`bin/rust-front lib-unit census|keys|export|build|compare`, RSI_STD_DIR
+  the host's std-sgn): std 100 / 3 / 222 (equal / differ / refused) with the first exports (core 249 bodies, alloc 25, std 271 of 424
+  keys), 111 / 15 / 199 after inline-keys and `export core --add` (24 bodies), 112 / 14 / 199 after a second add round; alloc 21 of 25
+  (the host's 116 / 10 / 199 and 21: the four extra differing items inline core's `without_provenance`, `without_provenance_mut`,
+  `ptr::read`, `align_of`, which core's `--add` module run here built none of, `core::ptr ... bodies 0`; the host's add round of
+  2026-11-22 had them).
+- std's 199 refused by cause: 116 not exported (28 "a static's value :call": CTFE of a const fn call in a static's initializer,
+  `OnceLock::new()`; 26 method calls without a callee; about 45 paths to foreign functions: libc's `read`, `write`, `syscall`,
+  `sigaction`, `mmap64`, std's own extern blocks, unwind's `_Unwind_*`), 11 constants unevaluated, 7 promoted constants, 30 layouts
+  std's interface lacks, the rest callees mono refuses.
+- Round 2, foreign functions (the front end never lowered an `extern` block's functions or statics, only its types): lowered
+  (`:foreign`, the block's ABI, unsafe unless `safe`, C-variadic when the last parameter is `...`), defined in resolution's value
+  namespace and in the crates' index (core-check's file-names), collected as `Fn` and `Static` defs without bodies, their interface
+  facts with `:variadic` and `:foreign` (the link name: `#[link_name]`, else the name; a `#[rustc_std_internal_symbol]` one keeps the
+  internal mangling), mono's symbol the link name and `mir-available?` false, a C-variadic call at its function type in codegen
+  (`call i64 (i64, ...) @syscall`); every library crate's StableCrateId computed by Cargo's metadata hash ported (cargo-meta's
+  crate-ids over every target unit: 24 of 24 equal to the IR's unit names, libc 65173193c27cccb2); lib-unit's build reads std's
+  dependencies' facts (RF_EXTRA_IFACE by default: std/deps' libc, hashbrown, unwind); unwind read natively beside libc and hashbrown.
+  libc's pass now holds its foreign functions (583 functions; `libc::unix::read` `:foreign "read"`, `syscall` `:variadic true`).
+  Result: std's export 271 -> 297 bodies, the compare **119 / 20 / 186** at the same core exports as 111 / 15 / 199 (equal: mmap's
+  drop, fs's and path's is_dir and is_file, exit, from_stat64, abort_internal). The new differences, named for the next round:
+  `catch_unwind::cleanup` (extern "C"'s return of a scalar pair cast to `{i64, i64}`, rustc's PassMode::Cast), stat's field
+  offsets (libc's `s!` structs' `#[repr(C)]` from a macro, which mono's source reading does not see), canonicalize's alloca,
+  readlink's `cvt` call.
+- Checks: foreign-test (the probe's extern block lowered, variadic, the link name; libc's id) FAIL at the parent, PASS at the change;
+  pack-compare-test passed, inline-test 15 of 15, `bin/rust-front essential` passed (its known summary, five controls differing, 0
+  stub calls). Built in a side worktree (detached) so that the queued rsi-build kept the round-1 code; cherry-picked after it.
