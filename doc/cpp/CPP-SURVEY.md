@@ -11141,6 +11141,17 @@ types' ranks, the single rows; the parser's recovery only for a general rule). S
   static or friend member function's declarator ([expr.prim.this]/2-3, diag.ae's static-this); a class template's opaque enumeration
   redeclared with another underlying type as written (diag.ae's enum-redecls now in class templates).
 
+- **Later in the round**: a constexpr or constinit reference's referent evaluated (a call of a function not constexpr, a temporary of
+  non-literal type), and a static one bound to an automatic variable no constant; a break or continue out of a statement expression
+  in a constant evaluation sure; a constexpr function whose own constexpr variable is no constant (`:cx-body-error`) called in no
+  constant expression (GCC's "called in a constant expression", cpp2a/inline-asm3.C); a lambda-expression in a non-type template
+  parameter's type (the parser); std::initializer_list of a reference type from a braced list; a friend class named as a namespace of
+  the innermost enclosing namespace (diag.ae's friend-namespace-clash, parse/pr81247-b.C); a definition qualified through a member
+  alias template of a non-dependent type, its template headers too many (diag.ae's alias-qualified-headers, cpp0x/alias-decl-42.C,
+  cpp2a/concepts-pr59200.C); since C++23 a call failing the potential constant check is the variable's error alone only under
+  -Winvalid-constexpr (`*invalid-constexpr-warned*`; without it the inner construct's error stays, cpp23/constexpr-nonlit6.C).
+- The user's decision of 2026-11-24: cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C n/a in `:ifndr-uninstantiated-template`.
+
 Not built, with the cause: the rest of P2564 (escalation of a template's specialization made immediate by its body, and its uses:
 consteval-prop1, -prop2, -prop6, -prop10, -prop19 need the escalation through constructors, default arguments, default member
 initializers and closures, and an immediate invocation's enclosing expression); the extended floating types (ext-floating3, -12,

@@ -20375,3 +20375,44 @@ crash55/57/63/98/99, pr90138, redecl5, typedef4), P2564's immediate escalation (
 GCC's spelling positions inside macros (pr79300, constexpr-ice16), and the single rows of the earlier Left lists. IFNDR eager checks,
 for the user (n/a candidates, 2 files): cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C (a never-instantiated template's
 non-dependent checks).
+
+## 2026-11-24: cpp-sweep (2), the second round: P2564's immediate invocations, the constant evaluator's and the declarations' single rows (branch `cpp-sweep-1124` after next `e78dbdadb`)
+
+The coordinator's second round: the largest causes among the 266 (P2564R3's immediate escalation, the extended floating types'
+conversion ranks, the single rows; the parser's recovery after a broken template head only for one general rule). Built
+(doc/cpp/CPP-SURVEY.md, "As built: cpp-sweep (2)"): cx-immediate-eval! skipping only P2564's immediate-escalating functions, member
+functions' immediate invocations, a conditional's arms outside manifestly constant-evaluated contexts (`*cx-arms-evaluated*`), an
+if's refused one-statement branch reported with the if going on, immediate function addresses among a returned list's initializers;
+volatile reads (evaluation, potential constant check, C++23's error at the variable), static and namespace-scope variables read in
+evaluated calls, new-expressions before C++20, reinterpret_cast between pointers to members; -Winvalid-constexpr as GCC's pedwarn
+(`*invalid-constexpr-error*`), [expr.cond]/2.1's throw operand (its check had asked the other operand), asm in a constexpr function
+before C++20, `this` in a static or friend member's declarator, class templates' opaque enumerations.
+
+Alternatives weighed: for the immediate invocations, building P2564's escalation itself (a template's specialization made immediate
+by its body, then its calls immediate invocations): deferred, the rows that need it (consteval-prop1, -prop2, -prop6, -prop10,
+-prop19) all need it through constructors, default arguments, default member initializers or closures too, none passing with the
+calls alone; for the arms, every function body's expressions taken as non-manifest (rejected: a constexpr local's or static_assert's
+operands nested in a statement are manifest, so the flag is set where the context is known not to be one, and cleared by every
+declaration); for the extended floating types, ranks over float and double (rejected: _Float32 and _Float64 are the same types as
+float and double in the checker, and cpp23/ext-floating17.C's `float32_t f32e = 1.0F64;` needs them apart); for the parser's recovery,
+a poisoned name (rejected for now: GCC declares an erroneous class template in crash57.C, drops the partial specialization in
+crash98.C and crash99.C so a member's use is "incomplete type", and replaces the parameter list elsewhere: no one rule).
+
+The user's decision of 2026-11-24 (relayed by the coordinator): cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C, cpp-sweep's two
+IFNDR candidates (a never-instantiated template's non-dependent checks), n/a in `:ifndr-uninstantiated-template` (class D),
+test/cpp/divergences-dg.edn's :tests and :decided.
+
+Later in the round, each from g++ 15.2's behaviour by hand where named: constexpr and constinit references' referents, a break out of
+a statement expression, `:cx-body-error` (a constexpr function's own constexpr variable failing), a lambda in a non-type template
+parameter's type, std::initializer_list of a reference type, a friend class named as a namespace, headers through a non-dependent
+member alias template, and since C++23 the variable-alone error only under -Winvalid-constexpr (cpp23/constexpr-nonlit2, -6 and -12
+had lost their passes to the unconditional form in the run below; fixed and read again).
+
+Checked: the record run over 2,697 files (the 2,421 own passes and the deferred; 04:56-05:48 UTC at `045deff96`, stage 0,
+GOMEMLIMIT=3000MiB): 2,427 own passes, 5 rows lost there (the two known slow files past 300 s, their pass rows kept; nonlit2, -6 and
+-12, the C++23 position rule, fixed); the later commits read again at the head on the 402 own passes they could touch (naming
+constexpr, consteval, constinit, a statement expression, initializer_list, a friend class, a lambda in decltype or nested template
+headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's line 43, cpp0x/initlist-array4.C's header error at
+line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
+pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
+-nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
