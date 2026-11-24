@@ -19079,3 +19079,33 @@ the allowance's consolidation stopped the task. Interp's rows recorded; the REAP
     `:jrt-filesystem`).
 Alternatives: 543-2 (b), leaving the rows in `:reflection` (not chosen).
 :journal
+## 2026-11-24 — Java's compiled-level reflection: Executable's getAnnotated*, an enum's constructors, Class.describeConstable (queue 564, VM)
+
+543-2 (a)'s compiled part (the user, at the settle), each cause its own commit with its rows:
+- Executable.getAnnotatedReceiverType (t04733): j2g writes the getAnnotated* methods on jrt's Method and Constructor
+  alone (out/type-annotation-calls), and jrt's Executable_I declares none, so a translated call on an Executable was
+  "jrt lacks". Now Executable's four getAnnotated* (return, receiver, parameter and exception types) are
+  m/support-call-helpers: the call is j2g's support function J2g_ExecutableGetAnnotated..., the receiver null-checked,
+  then TypeAnnotationSupport's method, which already takes either (jdk26u's bodies). Alternative: the methods in
+  Executable_I (jrt's hand-written interface), refused: j2g writes them only when TypeAnnotationParser is translated,
+  so jrt's own build and the worlds without it would not compile. The test then stopped at a local class's
+  getConstructors()[0] and an anonymous class's getDeclaredConstructors()[0] (instance context): the member tables
+  now list a local or anonymous class's constructors when it captures nothing (outer instance first, javac's
+  descriptor); one that captures stays out (javac's order of captured parameters not checked here).
+- An enum constructor's parameter annotations (t04717): a --program's member tables listed a constructor only when its
+  javac descriptor had as many parameters as the source one, or one more (an inner member class's outer instance), so
+  an enum's (name and ordinal first) was left out and getDeclaredConstructors() was empty. j2g now lists an enum's
+  constructors with the JVM's parameters; the parameter annotations were already keyed past the leading implicit
+  parameters (JCS351 (a)). jrt's Constructor.newInstance now refuses an enum's, as jdk26u's newInstanceWithCaller
+  ("Cannot reflectively create enum objects"), since the table's entry could otherwise make one.
+- Class.describeConstable (t04712-t04715): out/support-forms writes it on jrt's Class (F26), the REPL's entry found it,
+  but main.ae's world scan did not name it, so a translated call was "jrt lacks". The scan names it now (the support
+  form no longer asks the scan whether jrt has it: the scan is that answer's source), and ClassDesc.ofDescriptor is a
+  root. The four tests then stop at defineClass (AbstractMethodError), as interpreted: :define-bytes, by design.
+Checked: bin/java-check --levels read,compiled over t04712-t04717, t04724, t04733, t04738 (one shard: j2g --program
+with q543's compiled namespaces, JAVA_CHECK_AOT_STALE_OK=1, on q543's arbace-head2, bin/build-go, under the heavy lock;
+two rounds, the second after the local-class fix). t04717 and t04733 compiled pass, t04712-t04715 stop at defineClass,
+t04716, t04724, t04738 still pass. Recorded per cause with bin/java-check --judge --partial --record --levels compiled.
+The read used the main checkout's build-tree platform under the own pin's .pin (no own platform of the pin existed on
+the VM: 563's build of it came out "not the pin's" with the stale shared javac tool), forms only, scratch. Interp
+unchanged (the REPL's entries were there already); jrt's enum guard reaches interp at the next build.
