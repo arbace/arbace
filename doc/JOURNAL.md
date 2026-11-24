@@ -19198,3 +19198,11 @@ under `ulimit -v` 24 GiB so that a runaway fails fast.
   no process host and every spawn failed, as did `CurrentHostFS`'s access and modes and the network's; both now embed jrt's OSHost
   (8bcdee584). Its compiled rerun, with lib-threads/signal and delayintr (their pid and kill may have been the same cause), is queued
   after the split shard (the build worktree's `.tmp/oc/compiled-b4.sh`).
+
+## 2026-11-24: ocaml-1123: the light suite's re-record
+
+`bin/oi suite check --aot --record` (finalize.sh, 21:56 to 01:13): lib-systhreads/testyield passes (the ticket lock); opam/base64/test
+and opam/fmt/test_fmt, out of `:opam-not-run` since queue 531's packages, reach the light level's 120 s of CPU: listed in
+test/ocaml/aot-slow.edn (DECISION 531-5 (a), `:light-speed`; the compiled level judges them), and the run's results judged again by
+test/ocaml/o2j_check.ae on its check.tsv with the list (no rerun; the record's header kept). No other row changed. OCaml AOT
+517 / 23 / 76 -> 518 / 20 / 78.
