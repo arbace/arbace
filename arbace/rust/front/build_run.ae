@@ -230,6 +230,15 @@
   "queue 464: the argument values a callee's body is evaluated with (_1, _2, ..), within *const-call*"
   nil)
 
+(def ^:dynamic *fn-alloc*
+  "queue 542: within a promoted's evaluation, (fn [SYMBOL] ALLOC): a function's allocation (GlobalAlloc::Function) named in the
+  body's data, for a closure reified to a function pointer by CTFE (thread_local!'s LocalKey: its inline const's closure)"
+  nil)
+(def ^:dynamic *closure-fnptr*
+  "queue 542: (fn [CLOSURE-TYPE-FORM] SYMBOL), a closure's ClosureOnceShim's symbol (mono's closure-once-symbol), for CTFE's
+  ClosureFnPointer cast"
+  nil)
+
 (defn eval-promoted
   "RF11 (RF10's slice 5's first part): a promoted constant's body evaluated as rustc's CTFE evaluates it into its allocation, for
   the promoted bodies of straight-line assignments of scalar constants (std's integer constants by std-const-value), copies of
@@ -264,6 +273,9 @@
                             (cond
                               (and (seq? v) (= 'scalar (first v)))
                               (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size) :ty tyf})
+                              ;; queue 542: a local constant's whole value (thread_local!'s LocalKey: a function pointer), as
+                              ;; local-const evaluated it
+                              (map? v) (assoc v :ty tyf)
                               ;; queue 542: a zero-sized constant (a function item's, `&stat` promoted as a ZST): no bytes
                               (and (seq? v) (= 'zst (first v)))
                               {:bytes [] :align 1 :ty tyf}
@@ -333,6 +345,15 @@
                        vt (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv))]
                    (when-not (= 8 (count (:bytes va))) (no "an unsizing cast of a fat pointer" rv))
                    {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])})
+               (if (str/starts-with? (str (second rv)) "PointerCoercion(ClosureFnPointer")
+                 ;; queue 542: a closure reified to a function pointer (thread_local!'s inline const `|init| ..` coerced to
+                 ;; LocalKey's `unsafe fn`): the pointer to its ClosureOnceShim's function allocation (Instance::resolve_closure
+                 ;; at FnOnce, as CTFE's ptr_to_fn reifies it)
+                 (let [[_ _ a tyf] rv
+                       src (when (and (seq? a) (#{'copy 'move} (first a))) (local-ty (loc-of (second a))))
+                       sym (or (when (and src *closure-fnptr*) (*closure-fnptr* src)) (no "a closure's reified pointer without its shim" rv))
+                       fa (or (when *fn-alloc* (*fn-alloc* sym)) (no "a function's allocation outside a promoted" rv))]
+                   {:ty tyf :align 8 :bytes (vec (repeat 8 0)) :relocs [[0 fa]]})
                (if (= "Transmute" (str (second rv)))
                  ;; queue 464: a transmute (the niche types' new_unchecked): the same bytes at the target type, sizes equal
                  (let [[_ _ a tyf] rv va (operand a)
@@ -346,7 +367,7 @@
                            "IntToFloat" (val-bytes kd (if (= 32 (second kd)) (float (.doubleValue (biginteger x))) (.doubleValue (biginteger x))))
                            "FloatToFloat" (val-bytes kd (if (= 32 (second kd)) (float x) (double x)))
                            "FloatToInt" (val-bytes kd (f->int kd x))
-                           (no (str "a cast " kind) rv))}))))]
+                           (no (str "a cast " kind) rv))})))))]
     (loop [bi 0 seen #{}]
       (when (seen bi) (no "a loop" bi))
       (let [blk (nth (:blocks pb) bi)]
@@ -410,6 +431,10 @@
           (case (first t)
             return (if value? (or (get @env 0) (no "no value in _0" pb)) (or @result (no "no borrow in _0" pb)))
             (goto false-edge false-unwind) (recur (second t) (conj seen bi))
+            ;; queue 542: a switch on a scalar (an inline const's `if needs_drop::<T>()`): the target of its value, else otherwise
+            switch (let [[_ d vals other] t v (operand d)
+                         x (scalar-val (or (scalar-kind (:ty v)) [:uint (* 8 (count (:bytes v)))]) (:bytes v))]
+                     (recur (or (some (fn [[cv b]] (when (== (bigint cv) (bigint x)) b)) vals) other) (conj seen bi)))
             ;; RF16: an assertion (a checked operator's overflow flag): its target when the condition is the expected value,
             ;; else the CTFE's error (the promoted fails to evaluate)
             assert (let [[_ c expected _ target] t v (operand c)]
@@ -424,6 +449,12 @@
                    (if (and target (re-matches #"(std|core)::ptr::null(_mut)?::<[^\[]*>" txt) (not (re-find #"dyn |\[|\bstr\b" txt)))
                      (do (swap! env assoc (loc-of dest) {:bytes (vec (repeat 8 0)) :align 8 :ty (local-ty (loc-of dest))})
                          (recur target (conj seen bi)))
+                     ;; queue 542: `mem::needs_drop::<T>()` (the intrinsic's CTFE: Ty::needs_drop), a bool
+                     (if-let [nd (when (and target (re-matches #"(std|core)::mem::needs_drop::<.+>" txt))
+                                   (let [ft (when (seq? f) (:tc (meta (nth f 2 nil)))) ta (when (and (vector? ft) (= :fndef (first ft))) (first (nth ft 2 nil)))]
+                                     (when (vector? ta) (try [(mono/needs-drop-ty ta)] (catch Throwable _ nil)))))]
+                       (do (swap! env assoc (loc-of dest) {:bytes [(if (first nd) 1 0)] :align 1 :ty (local-ty (loc-of dest))})
+                           (recur target (conj seen bi)))
                      ;; `mem::size_of::<T>()` and `mem::align_of::<T>()` (intrinsics::size_of and align_of, as CTFE evaluates them:
                      ;; T's layout, mono's), a usize
                      (if (and target layout-of (re-matches #"(std|core)::mem::(size_of|align_of)::<.+>" txt))
@@ -438,7 +469,7 @@
                          (if cv
                            (do (swap! env assoc (loc-of dest) (assoc cv :ty (local-ty (loc-of dest))))
                                (recur target (conj seen bi)))
-                           (no "a call" t))))))
+                           (no "a call" t)))))))
             (no "a terminator" t))))))))
 
 (defn- slice-len-fn? [d]
@@ -547,8 +578,14 @@
                                                 (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
                                                                             :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
                                                 a))
-                                 {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
-                                                                                  (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false)
+                                 ;; queue 542: a function's allocation (a closure's ClosureOnceShim reified by the constant)
+                                 fn-alloc (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
+                                                      (when-not (some #(= a (first %)) @static-data)
+                                                        (swap! static-data conj [a {:kind :fn :symbol sym}]))
+                                                      a))
+                                 {:keys [bytes align relocs]} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts)]
+                                                                     (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
+                                                                                    (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false))
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false #(str "promoted " idx " of " (:name ours) ": " (.getMessage e))))
                                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                                      (throw e)))
@@ -2278,7 +2315,12 @@
                     ;; RF17: the program's own constants (a `const` item's body, construct_const's, by its text `const NAME`), each
                     ;; evaluated once as CTFE evaluates it (eval-promoted over its built body, _0's value): a scalar's (scalar BITS
                     ;; SIZE), else nil (left unevaluated: codegen refuses it)
-                    const-bodies (into {} (for [[nm b _] bodies :when (and b (= :const (:kind b)))] [(str "const " nm) b]))
+                    ;; (queue 542: a const item's inline consts too, `const NOISY::{constant#0}`: thread_local!'s closure as a
+                    ;; function pointer)
+                    const-bodies (into {} (for [[nm b _] bodies :when (and b (or (= :const (:kind b))
+                                                                                 (and (= :anon-const (:kind b)) (map? (:def b))
+                                                                                      (str/starts-with? (str (:kind (:def b))) "Const"))))]
+                                            [(str "const " nm) b]))
                     const-by-def (into {} (for [[_ b _] bodies :when (and b (= :const (:kind b)) (number? (:id (:def b))))] [(:id (:def b)) b]))
                     const-vals (atom {})
                     local-const (fn local-const [text tyf v]
@@ -2298,13 +2340,31 @@
                                                          (when (empty? (remove c/region? args')) (get const-by-def d'))))))]
                                     (if (contains? @const-vals text)
                                       (get @const-vals text)
-                                      (let [v (try (let [{:keys [bytes relocs ty]} (eval-promoted b nil nil nil nil nil nil local-const true)]
-                                                     (when (and (empty? relocs) (scalar-kind (or ty (:ret b))) (seq bytes))
-                                                       (list 'scalar (bytes->int bytes) (count bytes))))
+                                      (let [;; queue 542: a const fn it calls (std's LocalKey::new) by its exported body at the
+                                            ;; call's arguments, as eval-local-const's
+                                            depth (atom 0)
+                                            call (fn [cd targs vals]
+                                                   (when (and (string? cd) (nil? (get (native-core-map) cd)))
+                                                     (swap! lines conj (str "ctfe wanted " cd)))
+                                                   (when-let [e (and (< @depth 4) (get (native-core-map) cd))]
+                                                     (swap! depth inc)
+                                                     (try (binding [*arg-values* vals]
+                                                            (eval-promoted (:body (core-instance e (vec targs))) nil nil nil nil nil nil local-const true))
+                                                          (catch Throwable x
+                                                            (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "local-const: the call of" cd (.getMessage x))))
+                                                            nil)
+                                                          (finally (swap! depth dec)))))
+                                            v (try (let [{:keys [bytes relocs ty] :as r} (binding [*const-call* call *arg-values* nil]
+                                                                                          (eval-promoted b nil nil nil nil nil nil local-const true))]
+                                                     (cond (and (empty? relocs) (scalar-kind (or ty (:ret b))) (seq bytes))
+                                                           (list 'scalar (bytes->int bytes) (count bytes))
+                                                           ;; queue 542: a value with pointers (a function's allocation, named in the
+                                                           ;; evaluating body's data: not kept across bodies)
+                                                           (and (vector? bytes) *fn-alloc*) (select-keys r [:bytes :align :relocs])))
                                                    (catch Throwable e
                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                      nil))]
-                                        (swap! const-vals assoc text v)
+                                        (when-not (map? v) (swap! const-vals assoc text v))
                                         v)))))
                     ;; RF11: with BUILD_PASS (the batch's SimplifyCfg-pre-optimizations), each body after the ported passes to
                     ;; runtime MIR (arbace.rust.front.passes: PromoteTemps, ElaborateDrops, ElaborateBoxDerefs, ...), as codegen
@@ -2530,7 +2590,32 @@
                                                                              bs))))]
                   ;; RF16: a thread-local static a body names (`(tlsref MUT PATH)`, a nested static of the body's own item, std's
                   ;; RandomState::new's KEYS) given its symbol, mono's v0 of the static's def path (the body's DefId's, then its name)
-                  (let [tls (fn [b]
+                  ;; queue 542: a program's own thread-local static's initializer (thread_local!'s `LazyStorage::new()`) evaluated
+                  ;; as CTFE evaluates it (its built body, the const fns it calls by their exported bodies, the aggregates laid
+                  ;; out by mono): {:bytes :align}, defined by codegen as the unit's thread-local (rustc's codegen_static); else nil
+                  (let [tls-init (memoize
+                                  (fn [p]
+                                    (try
+                                      (if-let [sb (some (fn [[nm b _]] (when (and b (= nm p)) b)) bodies)]
+                                        (let [uv (:unit-variant nf) lay (:layout-of nf) depth (atom 0)
+                                              call (fn [cd targs vals]
+                                                     (when (and (string? cd) (nil? (get (native-core-map) cd)))
+                                                       (swap! lines conj (str "ctfe wanted " cd)))
+                                                     (when-let [e (and (< @depth 8) (get (native-core-map) cd))]
+                                                       (swap! depth inc)
+                                                       (try (binding [*arg-values* vals]
+                                                              (eval-promoted (:body (core-instance e (vec targs))) nil nil uv nil nil lay nil true))
+                                                            (catch Throwable x
+                                                              (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "tls-init: the call of" cd (.getMessage x))))
+                                                              nil)
+                                                            (finally (swap! depth dec)))))
+                                              r (binding [*const-call* call *arg-values* nil] (eval-promoted sb nil nil uv nil nil lay nil true))]
+                                          (if (and (vector? (:bytes r)) (empty? (:relocs r)))
+                                            {:bytes (:bytes r) :align (:align r)}
+                                            {:why (str "a value with pointers " (pr-str (:relocs r)))}))
+                                        {:why "no built body"})
+                                      (catch Throwable e {:why (str (.getMessage e))}))))
+                        tls (fn [b]
                               (let [did (when-let [[_ k p] (re-find #"^DefId\((\d+):\d+ ~ (.*)\)$" (str (:def-id b)))]
                                           (when (not= "0" k) (str/replace p #"\[[0-9a-f]+\]" "")))]
                                 (update b :blocks
@@ -2546,9 +2631,12 @@
                                                     ;; queue 542: a thread-local static of the program's own (thread_local!'s
                                                     ;; `NOISY::{constant#0}::{closure#0}::__RUST_STD_INTERNAL_VAL`), its local def's symbol
                                                     (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)) (nil? did))
-                                                    (let [sym (try (mono/local-static-symbol n (str (nth x 2))) (catch Throwable _ nil))]
+                                                    (let [sym (try (mono/local-static-symbol n (str (nth x 2))) (catch Throwable _ nil))
+                                                          ti (when sym (tls-init (str (nth x 2))))
+                                                          init (when (:bytes ti) ti)]
                                                       (fact! :tlsrefs (some? sym))
-                                                      (if sym (concat x [sym]) x))
+                                                      (fact! :tls-inits (some? init) #(str "the initializer of " (nth x 2) ": " (:why ti)))
+                                                      (if sym (concat x [sym] (when init [init])) x))
                                                     :else x))
                                                 bs)))))]
                     (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))

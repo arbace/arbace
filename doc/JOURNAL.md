@@ -19199,3 +19199,42 @@ extern "C"'s pair returns. pack-compare-test passed, inline-test 15 of 15, forei
   std-vs-panics control differing (6 min, 6.1 GB). Not recorded (this host's records are arm64's).
 - C6: std 171 -> **172 / 32 / 121** (the nth fix; export 345 -> 351 bodies). Checks at the commit: pack-compare-test passed,
   inline-test 15 of 15, `bin/rust-front essential` passed (known summary, 0 stub calls), core-essential its known summary.
+
+## 2026-11-24 — queue 542, round 6: threads.rs's own build (ThreadLocalRef, LocalKey by CTFE, its thread-locals defined), C6's names through globs (VM)
+
+Round 6 of queue 542 (rsi's eval and AOT independence), on the branch 542-rust-own-lowering, at the coordinator's list: threads.rs's
+three needs, then the export's refusals.
+- **ThreadLocalRef**: a `#[thread_local]` static (thread_local!'s `__RUST_STD_INTERNAL_VAL`) is THIR's ThreadLocalRef in the
+  builder, an rvalue `&/*tls*/ PATH` (`(tlsref MUT PATH)`), not a deref of an interned allocation (which refused the static's value,
+  a const fn call). The program's own thread-local gets its local symbol (round 5) and now its initializer, `LazyStorage::new()`,
+  evaluated as CTFE does (its built body; the const fns it calls by their exported bodies; the aggregates laid out by mono's
+  layouts), and codegen defines it in the unit (`internal thread_local global [24 x i8]`, rustc's codegen_static) where it declared
+  it external. tlsrefs 4 of 4, tls-inits 2 of 2.
+- **LocalKey by CTFE**: a const item's inline consts are built (`NOISY::{constant#0}`, construct_const under the item: an
+  InlineConst shares its parent's typeck results); eval-promoted takes `mem::needs_drop::<T>()` (mono's needs-drop within a solver),
+  a switch on a scalar, and a ClosureFnPointer cast (the pointer to the closure's ClosureOnceShim's function allocation, named in the
+  evaluating body's data: `*fn-alloc*`, `*closure-fnptr*`); a local constant's whole value (a pointer, not only a scalar) and the
+  const fns it calls (std's LocalKey::new). main's promoted `&LOCAL` and `&NOISY` now point at exactly the record's shims
+  (`<LOCAL::{constant#0}::{closure#1} as FnOnce<..>>::call_once`, NOISY's closure#0). The const fns no record's instance names
+  (LocalKey::new, LazyStorage::new) are logged `ctfe wanted DEF` and exported by `bin/rust-front lib-export --keys KEYS std
+  .tmp/rust-front/std/native-std-ctfe.edn` (2 bodies, 30 s), which rsi-build's `--native-core` takes beside the rsi exports.
+- A std macro's closure (thread_local!'s `|__rust_std_internal_init| ..`, its span in std's sources) gets rustc's type text
+  (`{closure@std/src/sys/thread_local/native/mod.rs:92:21: 92:47}`, typeck's macro-closure-text from RF_MONO_LIB's file), and mono's
+  closure-def finds it by that text, the same text for every thread-local told apart by the closure type's signature.
+- rsi-build of threads.rs (rsi11): **own** (1 of 1 from Arbace's MIR; closure-shims 4/4, every program body ours). But its run
+  segfaults (status 139, nothing printed): in the first `join`, JoinInner::join's drop of its Thread finds the Arc's Inner already
+  freed (a CString drop at 0x1e), a reference one short somewhere on the program's side or the native bodies it takes (the bodies
+  checked: main::{closure#0}, {closure#1}, {closure#0}::{closure#0} as expected; the std natives taken are equal to the record's
+  instances). Not found this round: the merged builds keep threads.rs from the pack, so the eval check stays 6 of 6 passing with 5 of
+  6 own (eval3 at the merge with threads own: 5 pass, threads fails as above; the merge restored).
+- C6 (the export's refusals): the names now carry a crate's macro-made items through glob re-exports: with-core-names keeps the
+  index's globs as the map's metadata, and with-adt-names and a new with-value-names add a macro-made struct, function or constant
+  (sys/path/unix.rs' `path_separator_bytes!`: `is_sep_byte`; libc's `s! {}` structs) to its module and to the modules that glob it,
+  to a fixpoint; a dependency's later interface round reads its own round's names as std's does. A path pattern to another crate's
+  integer constant (`libc::EINTR =>`) is a constant pattern of its interface value; a C string literal (`c"main"`: &CStr, the bytes
+  with the NUL) is typed and built; closure_analyze does not enter a nested item (sys::pal::unix::init's `fn
+  sanitize_standard_fds`). The std export 351 -> 363 bodies (73 refused); **C6 std 172 / 32 / 121 -> 175 / 31 / 119**. Still
+  refused: libc's foreign functions whose signatures name types of its deeper modules (`poll`, `writev`, `lseek`: 122 of unix/mod.rs'
+  373 functions have no fact; the names reach them, the cause not found), so getrandom and sanitize_standard_fds; backtrace's 59 items
+  wait on gimli, addr2line and object read natively (not started: about 113k lines).
+- The dependencies' passes (std/deps) rebuilt: libc 583 -> 606 functions, 254 -> 288 ADTs.

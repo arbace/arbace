@@ -548,14 +548,32 @@
                (reduce (fn [m [p {:keys [globs]}]]
                          (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
                        m names))
-        globs? (some :globs (vals names))]
+        globs? (some :globs (vals names))
+        ;; queue 542: the glob re-exports kept as the map's metadata (with-value-names adds a macro-made item to the modules
+        ;; that glob its module)
+        gm (merge (:globs (meta std-names)) (into {} (for [[p {:keys [globs]}] names :when (seq globs)] [p (vec globs)])))]
+    (vary-meta
     ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export;
     ;; queue 400: then on to a fixpoint, at most 8: libc's chain of globs, libc -> unix -> linux_like -> linux -> musl -> b64
     ;; -> x86_64)
     (if globs?
       (loop [m (reduce (fn [m _] (glob (reexport m))) m [1 2 3]) n 3]
         (let [m2 (glob (reexport m))] (if (or (= m2 m) (>= n 8)) m2 (recur m2 (inc n)))))
-      (reduce (fn [m _] (reexport m)) m [1 2]))))
+      (reduce (fn [m _] (reexport m)) m [1 2]))
+    assoc :globs gm)))
+
+(defn- add-globbed
+  "queue 542: CHILD (a {:ns :name :kind :path}) added to the module MP of the names M unless it has one of that namespace and
+  name, then to the modules that glob MP (with-core-names' :globs metadata), to a fixpoint"
+  ([m mp child] (add-globbed m mp child 0))
+  ([m mp child depth]
+   (let [e (get m mp)]
+     (if (or (nil? e) (not= "Mod" (:kind e)) (> depth 8)
+             (some #(and (= (:ns child) (:ns %)) (= (:name child) (:name %))) (:children e)))
+       m
+       (reduce (fn [m q] (add-globbed m q child (inc depth)))
+               (assoc m mp (update e :children conj child))
+               (for [[q gs] (:globs (meta m)) :when (some #{mp} gs)] q))))))
 
 (defn with-adt-names
   "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
@@ -569,13 +587,29 @@
                   has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
               (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p (str *crate* "::"))))
                 m
-                (assoc m mp (update e :children into
-                                    (cond-> []
-                                      (not (has? :type)) (conj {:ns :type :name nm :kind "Struct" :path p})
-                                      (and ck (not (has? :value))) (conj {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))))
+                ;; (queue 542: and in the modules that glob its module, as with-core-names' globs took the index's names:
+                ;; libc's `s! { pub struct sockaddr .. }` in linux_like, which unix's `pub use self::linux_like::*` re-exports)
+                (cond-> (add-globbed m mp {:ns :type :name nm :kind "Struct" :path p})
+                  ck (add-globbed mp {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))
           names adts))
 
-(defn with-native-names [names native] (with-adt-names names (:adts native)))
+(defn with-value-names
+  "queue 542 (C6): the names with the crate's macro-made free functions and constants as their modules' children where missing
+  (sys/path/unix.rs' `path_separator_bytes!(b'/')`: `is_sep_byte`, `SEPARATORS`, which the index, read unexpanded, lacks, so
+  path.rs' `use crate::sys::path::is_sep_byte` through sys/path's `pub use unix::*` did not resolve): from the native
+  interface's :fns and :consts, each a module's own item (an impl's or a function's nested items are not a module's children)"
+  [names native]
+  (let []
+    (reduce (fn [m [p kind]]
+              (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))]
+                (if (or (nil? mp) (not (str/starts-with? p (str *crate* "::"))) (str/includes? nm "{"))
+                  m
+                  (add-globbed m mp {:ns :value :name nm :kind kind :path p}))))
+            names
+            (concat (for [[p _] (:fns native)] [p "Fn"])
+                    (for [[p _] (:consts native)] [p "Const { is_type_const: false }"])))))
+
+(defn with-native-names [names native] (with-value-names (with-adt-names names (:adts native)) native))
 
 (defn with-native-std
   "RF20: std's names with the native interface's type aliases (their types and generics) added, and its macro-made

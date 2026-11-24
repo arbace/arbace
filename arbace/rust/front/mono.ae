@@ -309,8 +309,12 @@
 (declare print-def-path! print-type! print-const! def-kind generic-def? item-name-of local-trait-by-path form->ty)
 
 (defn closure-def
-  "RF14: the local closure whose type's text (typeck's `{closure@FILE:L:C: L:C}`) is TEXT: its definition's id, or nil"
-  [^String text]
+  "RF14: the local closure whose type's text (typeck's `{closure@FILE:L:C: L:C}`) is TEXT: its definition's id, or nil; queue
+  542: a std macro's closure (thread_local!'s `{closure@std/src/sys/thread_local/native/mod.rs:92:21: 92:47}`, the same text
+  for every thread-local) by its text in std's sources, several told apart by SIG (the closure type's signature: typeck's of
+  each candidate)"
+  ([text] (closure-def text nil))
+  ([^String text sig]
   (when-let [[_ a b c d] (re-find #":(\d+):(\d+): (\d+):(\d+)\}$" text)]
     (let [want (mapv parse-long [a b c d])]
       (let [cls (filter #(= "Closure" (:kind %)) (c/defs))]
@@ -318,7 +322,18 @@
         (or (some (fn [d] (when (= want (some->> (try (#'tc/closure-decl-span (:node d)) (catch Throwable _ nil)) (take 4) (mapv long))) (:id d))) cls)
             (some (fn [d] (let [sp (:span (:node d))]
                             (when (and (vector? sp) (= (subvec want 0 2) (mapv long (take 2 sp)))) (:id d))))
-                  cls))))))
+                  cls)
+            (let [ms (filter #(= text (try (#'tc/macro-closure-text (:node %)) (catch Throwable _ nil))) cls)]
+              (cond (= 1 (count ms)) (:id (first ms))
+                    (and (seq ms) (map? sig))
+                    (let [norm (fn [x] (erase-regions x))
+                          sig-of (fn [d] (try (let [res (tc/body-results (build/typeck-root d))
+                                                    ct (:ty (get res (:hir-id (:node d))))]
+                                                (when (vector? ct) (nth ct 2 nil)))
+                                              (catch Throwable _ nil)))
+                          hits (filter #(= (norm (select-keys sig [:inputs :output])) (some-> (sig-of %) (select-keys [:inputs :output]) norm)) ms)]
+                      (when (= 1 (count hits)) (:id (first hits))))
+                    :else nil))))))))
 
 (defn- path-append-ns! [m prefix! ns dis nm]
   (push! m (str "N" ns)) (prefix!) (push! m (disambiguator dis)) (push! m (ident nm)))
@@ -449,7 +464,7 @@
             ;; queue 464: a library closure (the export's data): its path at its parent's arguments
             :closure (if (c/lib-closure? t)
                        (default-print-def-path! m (second t) (vec (nth t 3)))
-                     (let [d (closure-def (second t))]
+                     (let [d (closure-def (second t) (nth t 2 nil))]
                        (when (or (nil? d) (and (nil? (nth t 3 nil))
                                                (generic-def? (loop [x (:parent (c/def-of d))] (if (#{"Closure" "InlineConst"} (:kind (c/def-of x))) (recur (:parent (c/def-of x))) x)))))
                          (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
@@ -2090,7 +2105,7 @@
               :else (throw (ex-info "mono: a closure of a lesser kind" {:fact :callee}))))
       (and fk (vector? self) (= :closure (first self)))
       (let [ck (or (when *closure-kinds* (get @*closure-kinds* (second self))) (throw (ex-info "mono: a closure's kind (its body not built)" {:fact :callee})))
-            cd (or (closure-def (second self)) (throw (ex-info "mono: a closure's definition" {:fact :callee})))]
+            cd (or (closure-def (second self) (nth self 2 nil)) (throw (ex-info "mono: a closure's definition" {:fact :callee})))]
         (cond (or (= ck fk) (and (= ck :fn) (= fk :fn-mut))) [cd (or (nth self 3 nil) [])]   ; (RF17: a generic function's closure at its arguments)
               (= fk :fn-once) [d args "closure-once-shim"]
               :else (throw (ex-info "mono: a closure of a lesser kind" {:fact :callee}))))
@@ -2640,7 +2655,7 @@
   [t args]
   (cond
     (and (vector? t) (= :closure (first t)) (= 3 (count t)))
-    (let [d (closure-def (second t))]
+    (let [d (closure-def (second t) (nth t 2 nil))]
       (if (and d (generic-def? (enclosing-fn d)))
         [:closure (second t) (erase-regions (c/subst* (nth t 2) args)) (vec args)]
         t))
@@ -3065,6 +3080,12 @@
                          :after-dbg [] :term '(return)}]
                :allocs "" :alloc-data []})))))))
 
+(defn needs-drop-ty
+  "queue 542: Ty::needs_drop of the type T (the needs_drop intrinsic's CTFE: an inline const's `if needs_drop::<T>()`), within a
+  solver of the program"
+  [t]
+  (tc/with-solver (solver-def) (fn [] (build/needs-drop? t))))
+
 (defn closure-once-symbol
   "RF17 (RFP50 (a)'s first part): the symbol of a closure's reified function pointer (codegen's ClosureFnPointer cast:
   Instance::resolve_closure at FnOnce, the closure's ClosureOnceShim, `<{closure} as FnOnce<(ARGS,)>>::call_once` at the
@@ -3076,7 +3097,7 @@
       (fn []
         (let [t (or (:tc (meta tyf)) (form->ty tyf))
               sig (when (and (vector? t) (= :closure (first t))) (nth t 2 nil))]
-          (when (and (map? sig) (vector? (:inputs sig)) (closure-def (second t)))
+          (when (and (map? sig) (vector? (:inputs sig)) (closure-def (second t) sig))
             (v0-mangle "core::ops::function::FnOnce::call_once" [(erase-regions t) [:tuple (erase-regions (:inputs sig))]] true)))))))
 
 ;; ---------------------------------------------------------------------------------------------

@@ -500,8 +500,11 @@
           ;; a static: the deref of its allocation's pointer (StaticRef: `&T`, `*mut T` for a mutable one)
           (and (= :local (first rd)) (str/starts-with? (str (nth rd 2)) "Static"))
           (let [mut? (str/includes? (str (nth rd 2)) "mutability: Mut")
-                pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])]
-            (mk e :deref ty :arg (mk e :static-ref pt :def (second rd))))
+                pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])
+                ;; queue 542: a `#[thread_local]` static (thread_local!'s `__RUST_STD_INTERNAL_VAL`): ThreadLocalRef, an rvalue
+                ;; (`&/*tls*/ VAL`), not an allocation's pointer
+                tls? (some #(= "thread_local" (:unparsed %)) (:attrs (:node (c/def-of (second rd)))))]
+            (mk e :deref ty :arg (mk e (if tls? :thread-local-ref :static-ref) pt :def (second rd) :mut mut?)))
           ;; RF13d: `Self` as a unit struct's value (Res::SelfCtor): a ZstLiteral with its user type (`const ZeroSized: T`)
           (and (= :self-alias (first rd)) (= :adt (first ty)))
           (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
@@ -1370,6 +1373,12 @@
     ("ByteStr" "ByteStrRaw")
     (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
       [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t (list 'raw-bytes (intern-alloc! bs))])
+    ;; queue 542 (C6): a C string literal (`c"/dev/null"`): &CStr's fat pointer to its bytes with the NUL, its length counting
+    ;; the NUL (rustc's lit_to_const: CStr's bytes_with_nul), printed `c"..."`
+    ("CStr" "CStrRaw")
+    (let [raw? (= "CStrRaw" (str (:lit-kind lit)))
+          bs (vec (concat (or (:bytes lit) (byte-unesc (str (:symbol lit)) raw?)) [0]))]
+      [:const (str "const c\"" (apply str (map escape-ascii (butlast bs))) "\"") t (list 'raw-str (intern-alloc! bs))])
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn fn-const-text
@@ -1675,7 +1684,7 @@
     :scope nil
     (:field :deref :index :var-ref :upvar-ref :value-type-ascription) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
-    (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
+    (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op :thread-local-ref) :rvalue
     (:literal :zst-literal :named-const :static-ref :const-op :const-param) :constant))
 
 (declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
@@ -1882,6 +1891,8 @@
                    names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
                [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
+    ;; queue 542: Rvalue::ThreadLocalRef, the static by its def path (build-run gives it its symbol)
+    :thread-local-ref [bb (list 'tlsref (if (:mut x) "mut " "") (binding [c/*in-value* true] (c/print-def-path (:def x) [])))]
     (:literal :zst-literal :named-const :static-ref :const-op :const-param) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
@@ -3201,7 +3212,9 @@
       (walk-hir body f false)
       (let [var-tys (into {} var-tys) modes (into {} modes)]
         (letfn [(visit [x]
-                  (when (map? x)
+                  ;; (queue 542: not into a nested item, `fn sanitize_standard_fds` in std's sys::pal::unix::init: its closures
+                  ;; are its own body's, typed by its own typeck results)
+                  (when (and (map? x) (not (and (= :stmt (:node x)) (= :item (:kind x)))))
                     (doseq [c (hir-children x)] (visit c))
                     (when (and (= :expr (:node x)) (= :closure (:kind x)))
                       (analyze-closure! x var-tys modes))))]
@@ -3461,7 +3474,8 @@
                                          :else (doseq [v (vals x)] (w v)))
                          (sequential? x) (doseq [v x] (w v))
                          :else nil))]
-      (w (:body (:node d))))
+      ;; (queue 542: a const or static item's own, in its initializer: thread_local!'s `NOISY::{constant#0}`)
+      (w (or (:body (:node d)) (:expr (:node d)))))
     (sort-by #(or (:index-path %) [(:index %)]) (fn [a b] (compare (vec a) (vec b))) @acc)))
 
 (defn build-inline-const
