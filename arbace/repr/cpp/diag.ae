@@ -338,7 +338,13 @@
                         (if-let [m (when-not (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)) (nil? (:storageClass n)) (not (:tls n))
                                                   (or (re-find #"(?:26|2c)$" (str (:std u))) (not (some #{"-pedantic-errors"} (:args u)))))
                                      (conflict rk o dc n))]
-                          (report! n m)
+                          (do (report! n m)
+                              ;; (cpp-singles: GCC's note at the earlier declaration, which a dg-error's later branch may take,
+                              ;; arbace.repr.cpp.dg/alt-hits: cpp0x/override2.C's `has a previous declaration|previously declared
+                              ;; here`)
+                              (when-let [po (and (map? (:node o)) (mine? (:node o)) (loff (:node o)))]
+                                (let [[l c] (line-col starts (long po))]
+                                  (.add out {:line l :col c :kind :note :rule :redefinition :msg (str "'" nm "' previously declared here")}))))
                           (if (and (= nm "_") (= rk :block) (= "VarDecl" (:kind n)))
                             (.put r nm {:cls (first dc) :def (second dc) :sig (nth dc 2) :node n})
                             (when (and (second dc) (not (:def o)) (= (first dc) (:cls o))) (.put r nm (assoc o :def true :sig (nth dc 2))))))
@@ -7417,7 +7423,9 @@
        :lines (into (sorted-map) (frequencies (map :line es)))
        :other (:other r 0) :fatal 0
        :message (if-let [e (first es)] (format-diag main e) "")
-       :diags (mapv #(format-diag main %) es)})))
+       :diags (mapv #(format-diag main %) es)
+       ;; (cpp-singles: the notes too, for the dg-errors' later branches, arbace.repr.cpp.dg/read-own's alt-hits)
+       :notes (mapv #(format-diag main %) (filter #(= :note (:kind %)) (:diags r)))})))
 
 ;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
 (alter-var-root #'sema-rules conj
@@ -7609,3 +7617,44 @@
   [:varargs #"^codegen: binding a const reference to a volatile object passed through" "binding reference discards qualifiers"])
 (alter-var-root #'sema-rules conj
   [:null-object #"^codegen: invalid access to non-static data member '.*' of NULL object" "invalid access to non-static data member of NULL object"])
+
+;; cpp-singles (2026-11-24): DR 1612 ([expr.prim.lambda.capture]/? of C++14-C++23, "an entity that is a member of an anonymous union
+;; shall not be captured"): in a lambda's compound-statement, a member of an anonymous union of automatic storage declared in an
+;; enclosing block outside the lambda, named there (the native parser's MemberExpr over the union's unnamed variable), is captured,
+;; implicitly or explicitly: GCC's "cannot capture member 'a' of anonymous union", at the name's first use in the lambda.
+;; cpp0x/lambda/lambda-anon1.C. A static anonymous union's members are not captured; unevaluated operands not told apart.
+
+(defn anon-union-captures
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :lambda-capture :msg msg}))))
+        anon-members (fn [ds]
+                       ;; a DeclStmt's anonymous union of automatic storage: its members' names
+                       (let [xs (:inner ds)]
+                         (when (and (vector? xs)
+                                    (some #(and (= "CXXRecordDecl" (:kind %)) (= "union" (:tagUsed %)) (nil? (:name %)) (:completeDefinition %)) xs)
+                                    (some #(and (= "VarDecl" (:kind %)) (:isImplicit %) (not (#{"static" "extern"} (:storageClass %)))) xs))
+                           (for [r xs :when (= "CXXRecordDecl" (:kind r)) f (:inner r) :when (and (= "FieldDecl" (:kind f)) (string? (:name f)) (seq (:name f)))]
+                             (:name f)))))]
+    (letfn [(walk [x env cap seen]
+              (cond
+                (map? x)
+                (cond
+                  (= "LambdaExpr" (:kind x)) (let [seen (java.util.HashSet.)] (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (walk v env env seen)))
+                  (and cap (= "MemberExpr" (:kind x)) (contains? cap (:name x))
+                       (let [o (first (:inner x))] (and (= "DeclRefExpr" (:kind o)) (= "" (get-in o [:referencedDecl :name])))))
+                  (do (when (.add ^java.util.HashSet seen (:name x))
+                        (report! x (str "cannot capture member '" (:name x) "' of anonymous union")))
+                      (doseq [y (rest (:inner x))] (walk y env cap seen)))
+                  (= "CompoundStmt" (:kind x))
+                  (loop [ys (:inner x) env env]
+                    (when-let [y (first ys)]
+                      (walk y env cap seen)
+                      (recur (rest ys) (if (= "DeclStmt" (:kind y)) (into env (anon-members y)) env))))
+                  :else (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (walk v env cap seen)))
+                (or (vector? x) (seq? x)) (doseq [y x] (walk y env cap seen))
+                :else nil))]
+      (walk (:nodes u) #{} nil nil))
+    (vec out)))
+
+(swap! checks conj anon-union-captures)

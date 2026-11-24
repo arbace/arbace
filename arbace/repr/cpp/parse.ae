@@ -247,6 +247,9 @@
 ;; name's first part) whose lookup passed the class without finding a member it declares later, to the first use's offset];
 ;; arbace.repr.cpp.diag/changes-meaning reads them off the class's node (:_cm-uses)
 (def ^:dynamic *cm-scopes* nil)
+;; cpp-singles: a declaration in a class whose noexcept-specifier is no complete-class context ([class.mem.general]/7 names a
+;; member function's alone): an alias-declaration's type, a friend function's declaration (fn-quals)
+(def ^:dynamic *ncc-noexcept* false)
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -3724,6 +3727,14 @@
                         (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x))))))]
               (skip-balanced! p)
               (let [txt (tok-text-this p (inc ob) (- (ix p) 2))]
+                ;; (cpp-singles: outside a complete-class context an unqualified name of the operand is looked up where it
+                ;; stands, a member declared later not found: GCC's "'B' was not declared in this scope", at the name;
+                ;; cpp0x/noexcept71.C's alias template and friend function template; a class with a dependent base aside)
+                (when (and *ncc-noexcept* (not (skim? p)) (= (+ (long ob) 2) (dec (long (ix p)))) (main-tok? p (inc (long ob)))
+                           (not (dep-bases? p)))
+                  (let [^T t (tok-at p (inc (long ob)))]
+                    (when (and (identical? :id (.-k t)) (nil? (lookup (scope p) (.-s t))))
+                      (soft-diag! p (inc (long ob)) (str "'" (.-s t) "' was not declared in this scope")))))
                 (when (map? x) (.put ^HashMap (stv p DECLTYPES) (str "noexcept:" (str/replace txt #"\s+" "")) x))
                 (recur (str q " noexcept(" txt ")") (assoc m :noexcept true))))
             (recur (str q " noexcept") (assoc m :noexcept true))))
@@ -4103,6 +4114,17 @@
     (adv! p)
     (let [attrs (attr-nodes p)
           qn (when (name-start? p) (parse-name p :parse))
+          ;; (cpp-singles: a class-head-name `X<args>` whose X names no class template ([temp.expl.spec]/? with [class.pre]/1, a
+          ;; simple-template-id names a class template's specialization): GCC's "'X' is not a class template", at the class-key,
+          ;; the arguments dropped and the class taken by its name, so the rest of the unit is analyzed; cpp0x/override2.C's
+          ;; `struct undeclared<int> final { };`)
+          _ (when (and qn (= 1 (count (:parts qn))) (not (:g qn)) (:s (peek (:parts qn))) (nil? (:args (peek (:parts qn)))) (is? p "<")
+                       (not (skim? p)) (main-tok? p kb) (not (tmpl-ent? (:ent qn))) (not (tmpl-ent? (lookup (scope p) (:s (peek (:parts qn)))))))
+              (when-let [c (angle-close p (ix p))]
+                (let [^T t (tok-at p (inc (long c)))]
+                  (when (or (t= t "{") (t= t ":") (and (identical? :id (.-k t)) (#{"final" "__final"} (.-s t))))
+                    (soft-diag! p kb (str "'" (:s (peek (:parts qn))) "' is not a class template"))
+                    (seek! p (inc (long c)))))))
           fin (when (and qn (or (id-is? p "final") (id-is? p "__final")) (or (is-at? p 1 "{") (is-at? p 1 ":")
                                                                              ;; (round 54: `final final`, the class-virt-specifier twice)
                                                                              (and (or (id-is-at? p 1 "final") (id-is-at? p 1 "__final")) (or (is-at? p 2 "{") (is-at? p 2 ":")))))
@@ -4748,7 +4770,7 @@
       (loop [out (if pre [pre] [])]
         (let [ctor (and (nil? base0) (ctor-name-here? p (if (= ctx :member) :member :top)))
               guide (and (nil? base0) (guide-here? p))
-              d (parse-declarator p (if (= ctx :member) :either :named))
+              d (binding [*ncc-noexcept* (boolean (and (= ctx :member) (:friend ds)))] (parse-declarator p (if (= ctx :member) :either :named)))
               chain (name-chain d)
               qn (:name (last chain))
               lp (peek (:parts qn))
@@ -6068,7 +6090,7 @@
                                 (t= t "{") (do (soft-diag! p i0 "types may not be defined in alias template declarations") true)
                                 :else (recur (inc k)))))))
               ds (parse-decl-specs p :alias)
-              ad (parse-declarator p :abstract)
+              ad (binding [*ncc-noexcept* (= :class (sc/kind-of (sc/decl-scope (scope p))))] (parse-declarator p :abstract))
               ty (vectorized (build-type (or (ds-type ds) (perr p "an alias's type")) ad) (concat (:attrs ds) (:attrs ad)))
               e (last-ix p)]
           ;; (round 54: [dcl.typedef]/2, an alias template's defining-type-id defines no class or enumeration: GCC's "types may not
