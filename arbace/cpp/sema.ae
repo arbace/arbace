@@ -2652,14 +2652,44 @@
                                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
     ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
     ;; [dcl.enum]/5 and [basic.scope.enum]: a scoped enumeration's too, <charconv>'s `general = fixed | scientific`)
-    (let [neg (atom false)]
+    (let [neg (atom false)
+          ;; (cpp-read, 2026-11-24: the enumerators' values for [dcl.enum]/7 below)
+          vals (atom [])]
       (loop [[c & more] (filter #(= "EnumConstantDecl" (:kind %)) (kids n)) v 0 bs (new-scope :enum scope :path (:path scope))]
         (when c
           ;; (cpp-s14: an enumerator's attributes are no initializer: <ios_base.h>'s `enum __attribute__((__flag_enum__))
           ;; _Ios_Openmode`, the native parser's NativeAttr before an enumerator's value)
-          (let [v (if-let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))] (const-int bs x) v)
+          (let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))
+                ;; (cpp-read: an initializer past 64 bits, an __int128's, is no standard integer type's value: [dcl.enum]/7 below
+                ;; under D342-4 (a), the enumerator 0 then)
+                wide (atom false)
+                v (if x
+                    (if (checking?)
+                      (try (const-int bs x)
+                           (catch arbace.lang.ExceptionInfo ex
+                             (cond
+                               (and (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped)
+                                    (re-find #"a 128-bit value outside 64 bits" (str (ex-message ex))))
+                               (do (reset! wide true) 0)
+                               ;; (cpp-read, 2026-11-24, the checker: [dcl.enum]/2, an enumerator's initializer is a constant
+                               ;; expression: one surely not (a call of a non-constexpr function, of the function whose body
+                               ;; declares the enumeration, ...) is GCC's "enumerator value for 'a' is not an integer constant", at
+                               ;; the enumerator, its value 0 then; cpp1y/constexpr-recursion1.C)
+                               (and (:codegen/not-constant (ex-data ex)) (:cx/sure (ex-data ex)) *on-refusal*)
+                               (do (*on-refusal* (ex-info (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
+                                                          {:codegen/refused :enum})
+                                                 c)
+                                   0)
+                               :else (throw ex))))
+                      (const-int bs x))
+                    v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
             (when (neg? (long v)) (reset! neg true))
+            ;; (an unsigned long or unsigned long long initializer's value past long's, held as a negative long)
+            (swap! vals conj (cond @wide :wide
+                                   (and (integer? v) (neg? (long v)) x (re-find #"^unsigned long( long)?( int)?$" (str/trim (str (get-in x [:type :qualType])))))
+                                   (+ (bigint v) (bigint (.shiftLeft java.math.BigInteger/ONE 64)))
+                                   :else v))
             ;; (queue 484, the checker: [basic.scope.declarative]/5, [dcl.enum]: two enumerators of one name in an enumeration,
             ;; `enum E { e, e };`, DRs/dr2530.C; g++'s "redefinition of", at the second)
             (when (and (checking?) (seq (.get ^java.util.HashMap (:names es) (ucn-name (:name c)))))
@@ -2695,7 +2725,22 @@
       ;; integer type ([dcl.enum]/7; Sema's ActOnEnumBody), which a bit-field of it reads zero-extended: <format>'s _Spec's
       ;; `_Align _M_align : 2` held _Align_right, 2, read back as -2, and "{:>6}" padded on the left's other side)
       (when (and (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])) (not @neg))
-        (swap! abi/*enums* assoc-in [id :nonneg] true)))
+        (swap! abi/*enums* assoc-in [id :nonneg] true))
+      ;; (cpp-read, 2026-11-24, the checker: [dcl.enum]/7, an enumeration without a fixed underlying type whose enumerators' values
+      ;; no standard integer type represents -- a negative one beside one above long long's maximum, or one past unsigned long
+      ;; long's -- is ill-formed (D342-4 (a): the standard's rule, no extended integer type): GCC's "no integral type can represent all
+      ;; of the enumerator values for 'E'", at the enumeration's closing brace; init/enum1.C)
+      (when (and (checking?) (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])) (seq @vals))
+        (let [bs (concat (map #(bigint (if (boolean? %) (if % 1 0) %)) (filter #(or (integer? %) (boolean? %)) @vals))
+                         ;; (a value past 64 bits: past every standard type's)
+                         (when (some #{:wide} @vals) [(inc (bigint (.shiftLeft java.math.BigInteger/ONE 64)))]))
+              lo (when (seq bs) (apply min bs)) hi (when (seq bs) (apply max bs))
+              m63 (dec (.shiftLeft java.math.BigInteger/ONE 63)) m64 (dec (.shiftLeft java.math.BigInteger/ONE 64))]
+          (when (and lo (or (and (neg? lo) (> hi (bigint m63))) (< lo (- (inc (bigint m63)))) (> hi (bigint m64))))
+            (let [end (get-in n [:range :end])]
+              (*on-refusal* (ex-info (str "codegen: no integral type can represent all of the enumerator values for '" (or nm "<unnamed>") "'")
+                                     {:codegen/refused :enum})
+                            (if (and (map? end) (:offset end)) (assoc n :range {:begin end}) n)))))))
     t))
 
 (declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)
@@ -4869,7 +4914,11 @@
                ;; `enum E { a = f3 () };` -- is not a constant, GCC's "called in a constant expression before its definition is
                ;; complete", [expr.const]/5.3: the analysis had recursed until the stack overflowed, fatal on stage 0's Go)
                (when (and (not (:tbody f)) (contains? *ce-analyzing* (:id f)))
-                 (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))
+                 ;; (cpp-read, 2026-11-24: sure, as "used before its definition" below: GCC's error, cpp1y/constexpr-recursion1.C)
+                 (if (and *ce-in-call* (not *ce-fold*))
+                   (ub! e "'" (:name f) "' called in a constant expression before its definition is complete")
+                   (do (ce-top-sure! "'" (:name f) "' called in a constant expression before its definition is complete")
+                       (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))))
                (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false *ce-analyzing* (conj *ce-analyzing* (:id f))] (analyze-fn! (:id f)))))
                ;; (cpp-ce3, the checker: a constexpr function of the main file not defined yet where the evaluation is,
                ;; [expr.const]/5.3, GCC's "used before its definition")
@@ -14215,6 +14264,13 @@ protected:
                           :fn (let [f (fnd id)]
                                 (when-not (or (:lazy f) (:analyzed f))
                                   (cond
+                                    ;; (cpp-read, 2026-11-24, the checker: a template specialization's definition that only bodies
+                                    ;; which reported errors use is not instantiated, GCC's limit_bad_template_recursion (errors
+                                    ;; since the enclosing instantiation of a non-constexpr function began stop the instantiation
+                                    ;; of further definitions): template/recurse3.C's f<T, N+1> after T(0) = 0's error, no
+                                    ;; instantiation depth error; `pending` marks them, :cx-bad-parent)
+                                    (and (:cx-bad-parent f) (checking?))
+                                    (upd-fn! id assoc :analyzed true)
                                     (and (:body f) (not (:tbody f)) (not (:cx-no-body f)))
                                     (do (upd-fn! id assoc :analyzed true)
                                         (binding [*tmpl-chain* (long (or (:inst-chain f) 0)) *tmpl-slack* (if (:inst-vt f) 1 0)]
@@ -14228,12 +14284,21 @@ protected:
                                                           {:codegen/refused :depth})
                                                  (let [n (:node f) l (:loc n)]
                                                    (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n)))
-                                              (try (cx-literal-signature! id)
-                                                   (analyze-fn! id)
-                                                   (cx-potential-constant! id)
-                                                   (cx-ctor-c17-inits! id)
-                                                   (catch arbace.lang.ExceptionInfo e
-                                                     (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
+                                              (let [errd (atom false)
+                                                    h (fn [& xs] (reset! errd true) (apply h xs))]
+                                                ;; (cpp-read: the body under analysis, for a constant evaluation's call of it before its
+                                                ;; definition is complete, [expr.const]/5.3)
+                                                (binding [*on-refusal* h *ce-analyzing* (conj *ce-analyzing* id)]
+                                                  (try (cx-literal-signature! id)
+                                                       (analyze-fn! id)
+                                                       (cx-potential-constant! id)
+                                                       (cx-ctor-c17-inits! id)
+                                                       (catch arbace.lang.ExceptionInfo e
+                                                         (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
+                                                ;; (cpp-read: a template specialization's non-constexpr body that reported an error,
+                                                ;; for `pending`'s :cx-bad-parent)
+                                                (when (and @errd (:tinst f) (not (:cx-espec f)) (not (:constexpr f)) (not (:consteval f)))
+                                                  (upd-fn! id assoc :cx-errored true))))
                                             (analyze-fn! id))))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))

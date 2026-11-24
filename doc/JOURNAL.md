@@ -21048,3 +21048,30 @@ test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before t
 t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
 notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
 `bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
+
+## 2026-11-24: cpp-read, the C++ read cell's deferred rows: 15 of 221 by the own front end (branch cpp-read-1124)
+
+- Base: mac/next a6da0aadf with cpp-rind-1124 (fcb746014) merged, so that the own front end's files (parse.ae, diag.ae, sema.ae)
+  carry both streams' rules and the branches merge cleanly. The read cell: 6,062 pass / 0 by design / 221 deferred (248 n/a), the
+  221 all dg rows: own-diag 204, syntax-own 9, gcc-own-rules 8 (the token check has none). Each row's class, review group and own
+  verdict listed in the branch's .tmp/classes.md: accepted 99 (no error: a Sema rule missing), missed 66, both 31, extra 17,
+  timeout 5, crash 1, stopped 1.
+- Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-read, the read cell's deferred rows"), each from the standard's text or GCC's
+  documented behaviour as the tests state it, no GCC code: libcpp's C++20 pedwarns for __VA_OPT__ and empty variadic arguments
+  with #pragma GCC diagnostic's ignored state; g++'s __has_cpp_attribute answers for the own front end; placeholder return types
+  of explicit specializations and instantiations ([dcl.spec.auto.general]/13); GCC's bad template recursion limit; [dcl.enum]/7
+  and enumerators surely not constant; a call of the function under analysis in a constant expression; member typedefs declared
+  twice; C++98's integral constant expressions; GCC's loop pragmas; no member template in a local class; GCC's silence after an
+  erroneous declaration (a declined declaration's name, an erroneous entity's uses).
+- Alternatives considered: a parser-level error entity for declined declarations (declaring the name so that later uses parse) was
+  left for the text-level filter over the diagnostics, which keeps the native reader's trees unchanged; the uninstantiated
+  template's definition-time checks (recursion1/2's f1) were left, the checker analyzing instantiations alone.
+- Recorded: the 16 rows by `bin/repr-cpp dg --corpus dg-error --front native --only` (the 15 and auto-fn10.C) `--record` into
+  test/cpp/check-dg-own-linux-amd64.edn, the other rows kept; `bin/reap --record`: C++ read 6,062/0/221 -> 6,077 pass / 0 by design /
+  206 deferred (248 n/a); `bin/crops-score --record` (C++ completeness 0.9851 -> 0.9857, independence 0.9696 -> 0.9700), `--judge
+  --strict` and `bin/records-check`: 0 problems.
+- Checked: each rule's rows and the files its rule can reach (the regression lists: __has_cpp_attribute's 10 files, variadic macros,
+  explicit specializations with auto, instantiation-context files, duplicate typedefs, C++98 files, enums, local classes, files with
+  standard headers): no recorded own pass lost to these rules (addr_builtin-1.C's [odr-internal] extra is cpp-rind's rule, and
+  diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C time out on cpp-rind's head too: its branch's to settle). The
+  whole dg-error part by the own front end at a1d4d9402 runs detached at the hand-off (.tmp/NEXT.md); its verdict is not taken here.

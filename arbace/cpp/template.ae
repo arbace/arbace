@@ -3852,6 +3852,16 @@
              (let [norm (fn [f] [(mapv #(unspelled (abi/unq %)) (:ps f)) (unspelled (abi/unq (:ret f))) (boolean (:va f))])]
                (not= (norm st) (norm ty))))))))
 
+(defn- cx-placeholder-mismatch?
+  "cpp-read (2026-11-24), the checker: [dcl.spec.auto.general]/13, whether the declaration `n` of a specialization or explicit
+  instantiation declares its return type with a placeholder (auto or decltype(auto), no trailing return type) where every template
+  of `ts` declares none, or with none where every one declares one."
+  [n ts]
+  (let [ph? (fn [qt] (let [qt (str qt)] (boolean (and (re-find #"^(auto|decltype\(auto\)) *\(" qt) (not (re-find #"\) -> " qt))))))
+        sp (ph? (get-in n [:type :qualType]))]
+    (boolean (and (seq ts) (string? (get-in n [:type :qualType]))
+                  (every? (fn [t] (let [q (get-in (:pattern t) [:type :qualType])] (and (string? q) (not= sp (ph? q))))) ts)))))
+
 (defn- explicit-fn-spec!
   "An explicit specialization of a function template (template <> R f<args>(...) {...}): its template found by name
   and its arguments from the TemplateArgument kids and deduction from its type ([temp.deduct.decl])."
@@ -3875,8 +3885,13 @@
                        (when-let [args (finish-deduction t @b)]
                          (when-not (cx-spec-type-differs? t args ty) [t args]))))
                    (catch arbace.lang.ExceptionInfo _ (reset! doubt true) nil))))
+        ;; (cpp-read, 2026-11-24, the checker: [dcl.spec.auto.general]/13, a specialization of a function template whose declared
+        ;; return type uses a placeholder where every template of the name declares none, or the reverse: no template matches it,
+        ;; GCC's "template-id ... does not match any template declaration", cpp1y/auto-fn47.C's `template <> auto foo<0>()` of
+        ;; `T foo()`, cpp1y/auto-fn10.C's `template<> short f<short>(short)` of `auto f(T)`)
+        ph-mismatch (and (sema/checking?) (seq ts) (cx-placeholder-mismatch? n (keep #(tmpl (:id %)) ts)))
         ;; of the templates it could specialize, the most specialized ([temp.deduct.decl]/1, [temp.func.order])
-        found (keep try1 ts)
+        found (if ph-mismatch [] (keep try1 ts))
         np (count (:ps (dissoc (sema/resolve-type scope (get-in n [:type :qualType])) :cq)))
         best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)
         [t args] (or (first best) (first found)
@@ -3885,7 +3900,8 @@
                        ;; that no function template of its name matches -- none declared, or each deduction failing by the
                        ;; algorithm alone, no type deduced from a placeholder and no pack; g++'s "template-id ... does not match
                        ;; any template declaration", template/spec39.C; reported at the declaration, then the refusal as before)
-                       (let [rep (when (and (sema/checking?) (not @doubt)
+                       (let [rep (when (or ph-mismatch
+                                         (and (sema/checking?) (not @doubt)
                                   (not (re-find #"\b(auto|decltype)\b" (str (get-in n [:type :qualType]))))
                                   (every? (fn [e] (let [t (tmpl (:id e))]
                                                     ;; (queue 514: or template parameter packs that no function parameter
@@ -3895,7 +3911,7 @@
                                                              (try (not-any? #(and (map? %) (= :pack-exp (:k %))) (:ps (sym-sig t)))
                                                                   (catch arbace.lang.ExceptionInfo _ false)))
                                                          (not (re-find #"\b(auto|decltype)\b" (str (get-in (:pattern t) [:type :qualType])))))))
-                                          ts))
+                                          ts)))
                          (sema/*on-refusal* (ex-info (str "codegen: explicit specialization of '" (:name n) "' matches no template declaration")
                                                      {:codegen/refused :template})
                                             ;; (at the declarator's name, as GCC: template/crash9.C's `template<>` on the line before)
@@ -3918,7 +3934,9 @@
         _ (when (and (not (sema/checking?)) (not cid)
                      (or (= "static" (:storageClass (:pattern t))) (:internal (:scope t)) (internal-args? args)))
             (upd-fn! fid assoc :internal true))]
-    (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t) :tn (tn-types t)} :keep-def-scope true)
+    (upd-fn! fid assoc :tinst {:tid (:id t) :args args :tsig (sym-sig t) :tn (tn-types t)} :keep-def-scope true
+             ;; (cpp-read: an explicit specialization, no instantiation: sema's :cx-errored is an instantiation's alone)
+             :cx-espec true)
     (upd-tmpl! (:id t) assoc-in [:insts args] fid)
     :template))
 
@@ -4273,7 +4291,11 @@
                                                  (or ctor? (= (boolean (:cq g)) (boolean (re-find #"\)\s*const\b[^()]*$" (str fts))))))))
                                  (concat (:ctors qc) (:methods qc))))))
         doubt (atom false)
-        found (when (and ft (abi/fn? ft) (not (and (not targs) (= 1 (count ms)) (not (sema/checking?)))))
+        ;; (cpp-read, 2026-11-24, the checker: [dcl.spec.auto.general]/13 as for an explicit specialization, cpp1y/auto-fn10.C's
+        ;; `template char f<char>(char);` of `auto f(T)`)
+        phm (and (sema/checking?) (seq es) (every? #(and (= :tmpl (:e %)) (= :fn (:tk %))) es)
+                 (cx-placeholder-mismatch? {:type {:qualType fts}} (keep #(tmpl (:id %)) es)))
+        found (when (and (not phm) ft (abi/fn? ft) (not (and (not targs) (= 1 (count ms)) (not (sema/checking?)))))
                 (keep (fn [e]
                         (when (and (= :tmpl (:e e)) (= :fn (:tk e)))
                           (let [t (tmpl (:id e))]
@@ -4288,7 +4310,8 @@
         ;; name that no function template of that name matches -- each deduction failing by the algorithm alone, no
         ;; placeholder, decltype or pack, nothing else of that name: GCC's "template-id ... does not match any template
         ;; declaration", as queue 484's rule for an explicit specialization)
-        _ (when (and (sema/checking?) ft (abi/fn? ft) (empty? found) (not @doubt) (not (re-find #"::" text))
+        _ (when (or phm
+                    (and (sema/checking?) ft (abi/fn? ft) (empty? found) (not @doubt) (not (re-find #"::" text))
                      (seq es) (every? #(and (= :tmpl (:e %)) (= :fn (:tk %))) es)
                      (not (re-find #"\b(auto|decltype)\b" (str fts)))
                      (every? (fn [e] (let [t (tmpl (:id e))]
@@ -4296,7 +4319,7 @@
                                             ;; (no forwarding reference: T&& collapsed with T = X& is the slice's gap,
                                             ;; cpp23/elision7.C)
                                             (not (re-find #"\b(auto|decltype)\b|&&" (str (get-in (:pattern t) [:type :qualType])))))))
-                             es))
+                             es)))
             (sema/*on-refusal* (ex-info (str "codegen: explicit instantiation of '" fname "' matches no template declaration")
                                         {:codegen/refused :template})
                                n))]
@@ -4912,7 +4935,9 @@
                               ;; (cpp-tpl2, the checker: the specializations named as template arguments, decl-arg's :cx-odr)
                               (when (sema/checking?) (keep (fn [[id f]] (when (and (:cx-odr f) (not (:analyzed f))) id)) @sema/*fns*)))
                    :vars (set (:vars ei)) :classes #{}})
-        chain-of (atom {})]
+        chain-of (atom {})
+        ;; (cpp-read, 2026-11-24, the checker: the definitions only errored specializations' bodies use, sema's :cx-bad-parent)
+        used-bad (atom #{}) used-good (atom #{})]
     (doseq [[id f] @sema/*fns* :when (and (or (:analyzed f) (:tbody f)) (not (contains? @*scanned* [:fn id])))]
       (swap! *scanned* conj [:fn id])
       ;; (cpp-small, G1: what this body uses, its depth's next, chain-of)
@@ -4921,6 +4946,7 @@
         (walk-refs a [(:tbody f) (:tinits f) (:tassign f) (:coro f)])
         (doseq [v (:statics f)] (walk-refs a (:sinit (sema/var* v))))
         (doseq [x (:fns @a)] (swap! chain-of update [:fn x] (fnil min d) d))
+        (swap! (if (:cx-errored f) used-bad used-good) into (:fns @a))
         (doseq [x (:classes @a)] (swap! chain-of update [:cls x] (fnil min d) d))
         (swap! acc #(merge-with into % @a))))
     ;; (a destructor or constructor defaulted out of line, G5c's nested_exception::~nested_exception() = default: its class's
@@ -4943,6 +4969,8 @@
           out (atom [])]
       (doseq [id fns :let [f (sema/fnd id)] :when (:lazy f)]
         (upd-fn! id dissoc :lazy)
+        (when (and (sema/checking?) (:tinst f) (not (:cx-espec f)) (contains? @used-bad id) (not (contains? @used-good id)))
+          (upd-fn! id assoc :cx-bad-parent true))
         ;; (cpp-small, G1: a template's specialization, or a member of a class template's, defined at the depth of the body that
         ;; uses it, or names its class, plus one; the others at 0)
         (when (and (sema/checking?) (or (:tinst f) (some-> (:cls f) abi/cls :tmpl)))
