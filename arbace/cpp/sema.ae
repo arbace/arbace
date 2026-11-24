@@ -2664,10 +2664,23 @@
                 ;; under D342-4 (a), the enumerator 0 then)
                 wide (atom false)
                 v (if x
-                    (if (and (checking?) (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped))
+                    (if (checking?)
                       (try (const-int bs x)
                            (catch arbace.lang.ExceptionInfo ex
-                             (if (re-find #"a 128-bit value outside 64 bits" (str (ex-message ex))) (do (reset! wide true) 0) (throw ex))))
+                             (cond
+                               (and (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped)
+                                    (re-find #"a 128-bit value outside 64 bits" (str (ex-message ex))))
+                               (do (reset! wide true) 0)
+                               ;; (cpp-read, 2026-11-24, the checker: [dcl.enum]/2, an enumerator's initializer is a constant
+                               ;; expression: one surely not (a call of a non-constexpr function, of the function whose body
+                               ;; declares the enumeration, ...) is GCC's "enumerator value for 'a' is not an integer constant", at
+                               ;; the enumerator, its value 0 then; cpp1y/constexpr-recursion1.C)
+                               (and (:codegen/not-constant (ex-data ex)) (:cx/sure (ex-data ex)) *on-refusal*)
+                               (do (*on-refusal* (ex-info (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
+                                                          {:codegen/refused :enum})
+                                                 c)
+                                   0)
+                               :else (throw ex))))
                       (const-int bs x))
                     v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
@@ -4901,7 +4914,11 @@
                ;; `enum E { a = f3 () };` -- is not a constant, GCC's "called in a constant expression before its definition is
                ;; complete", [expr.const]/5.3: the analysis had recursed until the stack overflowed, fatal on stage 0's Go)
                (when (and (not (:tbody f)) (contains? *ce-analyzing* (:id f)))
-                 (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))
+                 ;; (cpp-read, 2026-11-24: sure, as "used before its definition" below: GCC's error, cpp1y/constexpr-recursion1.C)
+                 (if (and *ce-in-call* (not *ce-fold*))
+                   (ub! e "'" (:name f) "' called in a constant expression before its definition is complete")
+                   (do (ce-top-sure! "'" (:name f) "' called in a constant expression before its definition is complete")
+                       (not-constant "'" (:name f) "' called in a constant expression before its definition is complete"))))
                (when-not (:tbody f) (when (:body f) (binding [*ce-manifest* false *ce-analyzing* (conj *ce-analyzing* (:id f))] (analyze-fn! (:id f)))))
                ;; (cpp-ce3, the checker: a constexpr function of the main file not defined yet where the evaluation is,
                ;; [expr.const]/5.3, GCC's "used before its definition")
@@ -14269,7 +14286,9 @@ protected:
                                                    (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n)))
                                               (let [errd (atom false)
                                                     h (fn [& xs] (reset! errd true) (apply h xs))]
-                                                (binding [*on-refusal* h]
+                                                ;; (cpp-read: the body under analysis, for a constant evaluation's call of it before its
+                                                ;; definition is complete, [expr.const]/5.3)
+                                                (binding [*on-refusal* h *ce-analyzing* (conj *ce-analyzing* id)]
                                                   (try (cx-literal-signature! id)
                                                        (analyze-fn! id)
                                                        (cx-potential-constant! id)
