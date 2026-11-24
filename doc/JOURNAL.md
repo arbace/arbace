@@ -19263,3 +19263,14 @@ Round 7 of queue 542, at the coordinator's list (threads.rs's segfault, then lib
   functions; unix/mod.rs's functions without a fact 122 -> 31 (`poll`, `lseek`, `writev` among the written). A CORE_TRACE line
   names a function the native interface does not write and why.
 - C6 std: 175 / 31 / 119 -> **178 / 39 / 108** (export 369 bodies, 67 refused): more items built, some of them differing.
+
+## 2026-11-24 — ci: a goto loop's back edge resumes in the same frame (queue 542, round 8; VM)
+
+ci's statement lists (go/arbace/ci/stmt.ae) resumed a jump to a label of their own list by `Seq.from` calling `Seq.Enter`, which
+called `Seq.from` again: every turn of a goto loop cost two Go frames, and a long loop overflowed the 1 GB Go stack (threads.rs's own
+build, whose loops lower to goto back edges: 8.4M frames of Seq.from/Seq.Enter on one list; the C sample below too). `from` now finds
+the label's statement and enters it in the same frame, continuing after it (Enter's own loop as before); the semantics unchanged.
+Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ... goto again;`) by `bin/ci run` overflows with the
+old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
+--aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
+executables, and the host's C records rerun on its train.
