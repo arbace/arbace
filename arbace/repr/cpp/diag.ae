@@ -7773,3 +7773,45 @@
     (vec (distinct out))))
 
 (swap! checks conj block-extern-conflicts)
+
+;; cpp-rind (2026-11-24): [dcl.link]/7 (C++23 /6): functions of one name declared with C language linkage in any namespaces are one
+;; function, so their declarations agree in type: two of other parameter types are GCC's "conflicting C language linkage declaration
+;; 'float Bob::fabsf(float, float)'", at the later one (lookup/extern-c-hidden.C); and /6 with [basic.link]: a variable first declared
+;; with C++ language linkage and then in an `extern "C"` declaration of the same scope, GCC's "conflicting declaration of 'int i' with
+;; 'C' linkage" (lookup/linkage1.C). The main file's declarations, by name.
+(defn c-linkage-agreement
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        cfns (java.util.HashMap.)
+        vars (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :c-linkage :msg msg}))))
+        ps-of (fn [n] (let [t (str/replace (str (get-in n [:type :qualType])) #"\s+" " ") i (.indexOf t "(")]
+                        (when (pos? i) (subs t i))))
+        nothrow? (fn [^String ps] (boolean (re-find #"\)\s*(throw\s*\(\s*\)|noexcept)\s*$" ps)))
+        bare (fn [^String ps] (str/replace ps #"\)\s*(throw\s*\(\s*\)|noexcept)\s*$" ")"))]
+    (letfn [(w [nodes lang path]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  "LinkageSpecDecl" (w (:inner n) (:language n) path)
+                  "NamespaceDecl" (w (:inner n) lang (conj path (or (:name n) "")))
+                  "FunctionDecl"
+                  (when (and (= "C" lang) (string? (:name n)) (mine-at n main) (not (str/includes? (str (:name n)) "::")))
+                    (when-let [ps (ps-of n)]
+                      ;; (the parameters' disagreement is linkage-conflicts' ("conflicting C language linkage declaration");
+                      ;; here the same parameters with another exception specification, lookup/extern-c-redecl.C)
+                      (if-let [[ops on] (.get cfns (:name n))]
+                        (when (and (= (bare ops) (bare ps)) (not= (nothrow? ops) (nothrow? ps)))
+                          (report! n (str "conflicting C language linkage declaration of '" (:name n) "' (exception specifications)")))
+                        (.put cfns (:name n) [ps n]))))
+                  "VarDecl"
+                  (when (and (string? (:name n)) (mine-at n main))
+                    (let [k [path (:name n)] old (.get vars k)]
+                      (cond (nil? old) (.put vars k (or lang "C++"))
+                            (and (= "C++" old) (= "C" lang)) (report! n (str "conflicting declaration of '" (:name n) "' with 'C' linkage"))
+                            :else nil)))
+                  nil)))]
+      (w (:nodes u) nil []))
+    (vec (distinct out))))
+
+(swap! checks conj c-linkage-agreement)
