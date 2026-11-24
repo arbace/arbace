@@ -8155,3 +8155,50 @@ run's errors came from a second `--only` run of the same worktree cleaning the s
 other way on the VM: test_deeply_nested_deepcopy is past 600 s with py interpreted (`:runner-limits`, `:slow-on-goi`: it passes on
 the main host's compiled runtime) and test_cyclic_gc fails whole and alone (`:finalization-collect`; the main host's whole-module
 runs failed it too).
+
+## As built: 557, the AOT's deferred row and the eval classes nobody owned (2026-11-24, the Mac VM, queue 557)
+
+The classes of `test/python/divergences.edn` by rows on next a6da0aadf's record (`bin/pyi divergences --table`, `--methods`), each
+with its owner this round (the main host's py-core, py-os, py-design, py-accel and py-goi; the VM's 545, 550, 551b, 552, 553, 554
+and 557b): the table is the report's. What nobody owned and pyi could fix:
+
+- **The AOT's one deferred row, synth/datamodel/del.py, is stale.** The amd64 record has it `:as-pyi` (compiled, loop and pyi on
+  goi alike, none the golden text). Since py-small-1122 (222's moment at a frame's return) the compiled run and the loop print the
+  golden text (`bin/pyi check --aot --no-pyi --only synth/datamodel/del.py` on the VM: 1 pass), and the judge passes a program whose
+  compiled and loop runs are the reference even when pyi's differs (`:pyi-differs`). pyi on goi still prints `after del` before
+  `del 2` (`bin/pyi run`, the VM). The row is the main host's next whole `bin/pyi check --aot --record`; `:finalization-goi` of
+  divergences-aot.edn goes after it, as its :decided says.
+- **`:source-decoding`: test_source_encoding's nine rows.** Four causes. The main file of `bin/pyi run` was read as bytes with no
+  new-line translation (`arbace.python`'s run-dump), so a triple-quoted CR LF kept its CR and a lone CR broke the `:full` tokens'
+  positions; the bytes are now translated first (CR LF and CR to LF), as compile()'s source already was (astjson/read-forms). A
+  coding spec's charset that decodes leniently (Shift_JIS's illegal sequence) gave text: `native/source-text` now hands a source its
+  charset does not decode strictly to Python's codec (the `:charset` path), and the runtime turns that codec's LookupError,
+  ValueError or UnicodeDecodeError into the file tokenizer's SyntaxError (`fileInitError`, as `_PyTokenizer_raise_init_error`: the
+  error's str, the file, line 0, offset -1; the lookup's codecs.decode() hint dropped, as fp_setreadl's). exec() of bytes: the
+  cookie's name is normalized as get_normal_name (`iso-8859-1-xxx...` is iso-8859-1), and every cookie of the first two lines is
+  made inert once the text is decoded (a second line's cookie, or a second cookie on the first line, was read again by the host's
+  reader). The utf8_mode and c_locale rows are 553's; email's, quopri's and difflib's stay. The nine pass on the VM (a run of the
+  whole module that reached the default 3600 s after 62 passes, the nine among them); the module's record is the main host's
+  (its child processes take 2-3 min each on goi).
+- **`:inlined-comprehensions` (2): `_PyCompile_TweakInlinedComprehensionScopes` outside class bodies.** A name whose scope inside an
+  inlined comprehension differs from the enclosing block's (not FREE inside, not CELL inside and FREE outside) is now resolved the
+  comprehension's way in any block, not only in a class body; a function's second comprehension read a global through the local
+  slot its first comprehension had made (test_listcomps' test_multiple_comprehension_name_reuse, test_type_annotations'
+  test_complex_comprehension_inlining_exec).
+- **`:annotate-rest` (2).** A function's `__annotate__` and `__annotations__` went through funcattrs.go's fast path, which neither
+  checked the value (`function___annotate___set_impl`: not deleted, callable or None, a callable dropping the cached annotations)
+  nor the result (`__annotate__ returned non-dict`); a type's `__annotations__` set or deleted now pops `__annotate_func__` and the
+  class body's own `__annotate__` (type_set_annotations, gh-132285).
+- **`:compiler-errors` (1): co_flags' future bits.** The IR's code objects carry `:future-annotations` and `:future-barry-as-bdfl`
+  when the module imports them (compute_code_flags: CO_FUTURE_ANNOTATIONS, CO_FUTURE_BARRY_AS_BDFL in every code object), so
+  codeop's Compile learns a future import from co_flags (test_codeop's test_future_imports); code.replace(co_flags=...) keeps them.
+- Records: test_listcomps, test_type_annotations and test_codeop written whole (5 methods now pass); the eval cell 40,827 / 1,404 /
+  1,308 -> 40,832 / 1,405 / 1,302.
+- **`:ref-empty-skip` (1) removed.** test_selectors' SelectSelectorTestCase.test_modify_unregister skips itself (`skipTest("")`) on
+  every platform; judged by its own verdict (queue 234) the row is `:skipped-by-test`'s.
+- Not taken: `:pickle-builtin-reference` (py-core's, train 5; pyi already pickles the builtins, `str.maketrans`,
+  `bytearray.maketrans` and a class's `__new__` as CPython does, probed: those six rows look stale), `:compileall-pyc` and
+  `:tools-misc` (557b), `:traceback-objects` (`:with-exit-traceback`'s cause, py-core's: `__exit__` gets no traceback),
+  `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
+  docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
+  test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).

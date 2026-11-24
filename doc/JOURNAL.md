@@ -20892,3 +20892,31 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   and records-check 0 problems. Nothing in the records changes.
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
+
+## 2026-11-24: queue 557, Python's AOT deferred row and the eval classes nobody owned (the VM; branch `557-py-unowned` from mac/next a6da0aadf)
+
+- Classified first: every deferred and design class of `test/python/divergences.edn` by rows on the record (`bin/pyi divergences
+  --table`, `--methods`), each with its owner this round; the table went to the main session and is the report's. The main session
+  then gave `:compileall-pyc` and `:tools-misc` to 557b, every `:design` class to the host's py-design, and
+  `:pickle-builtin-reference` to py-core (train 5).
+- The AOT cell's one deferred row, synth/datamodel/del.py (`:as-pyi` in the amd64 record), is stale. On the VM, `bin/pyi check --aot
+  --no-pyi --only synth/datamodel/del.py` gives 1 pass: the compiled run and the loop print the golden text since py-small-1122. pyi on goi
+  still differs, which the judge tolerates (`:pyi-differs`). The row waits for the host's whole `--aot --record`, and
+  `:finalization-goi` goes after it.
+- e0c675f0b: `:ref-empty-skip` removed. Its one row, a test that skips itself on every platform, is now `:skipped-by-test`'s.
+- c2aa57923 `:source-decoding`: test_source_encoding's nine rows (new-lines of the main file; a strict decoding check that hands
+  the source to Python's codec; the file tokenizer's init error; get_normal_name; every cookie made inert).
+- 69fe0070a `:inlined-comprehensions`: the comprehension's own scopes outside class bodies too
+  (`_PyCompile_TweakInlinedComprehensionScopes`).
+- 51c5f1801 `:annotate-rest` (a function's `__annotate__` checks; type_set_annotations pops `__annotate__`) and `:compiler-errors`
+  (CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL in co_flags through the IR's flags).
+- Proofs: one script per change, failing on the parent and passing on the change (pyi runs of the cases against python3's output;
+  the report's appendix). Then whole-module checks with `PYI_RUNNER=python3`: test_listcomps (66 of 66 pass), test_type_annotations
+  (48 pass, test_no_cell skipped) and test_codeop (13 of 13), their rows written by `bin/pyi check --judge DIR --record` over run
+  directories holding those modules alone (3f7327b59: 5 methods now pass). test_source_encoding is left for the main host's record:
+  its child processes take 2-3 min each on goi, so the module ran past the default 3600 s (62 pass, the nine rows among them, then
+  the timeout); the second run, with `PYI_LIB_TEST_TIMEOUT=14400`, was stopped at the allowance's limit. `:source-decoding` keeps
+  its nine rows until that record.
+- Alternatives considered: for the main file's new-lines, translating inside `native/read-dump` (repr/python's corpus reader, whose
+  `:full` mode prints the original bytes back) was rejected in favour of pyi's run-dump alone. For a lenient charset, a decoding
+  error of pyi's own (the codec's message ported) was rejected for Python's codec, which already gives CPython's message.
