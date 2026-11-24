@@ -20349,3 +20349,59 @@ must. bin/reap --record (0 problems; the matrix's five Clojure lines were stale 
 records), bin/crops-score --record, then --judge --strict and bin/records-check: 0 problems. bin/pyi runtime check (goi
 interprets the merged runtime) was still running at the commit: its timeouts under the pin are load, and c-codecs.py's
 `bytearray + bytes` Go panic under goi (fine on AOT) is train-2's own: the same panic at a6f6fdbf3 and before 545.
+
+## 2026-11-23: queue 551, the user's decisions 537-2 (a), 537-3 (a), 545-1 (b) and three n/a classes (the Mac VM)
+
+The user's decisions of 2026-11-23 (through the main session): 537-2 (a), 537-3 (a), 545-1 (b), and :builtin-modules,
+:runs-where-cpython-skips and :host-clock n/a (:subinterpreters left for queue 553). Branch 551-py-finalization-warnings from
+545-py-native-io 6b27c238a, with 537-py-design 63ecfd842 merged in (744f48926: conflicts in py.ae's :files and :init-order, the
+scores, the matrix, the journal and the survey; the merge's py.ae lacked builtins_hashopenssl in :files, which the runtime read of
+3e40893a5 makes again).
+
+- _warnings (537-3 (a)): Python/_warnings.c of CPython 3.14.10 ported to Go, go/arbace/py/builtins_warnings.ae (the stub of
+  builtins_imp.go, a warn calling warnings.warn, removed). warnings.py now imports its C names from it, as CPython's does, so a
+  warning reads sys.modules['warnings']'s filters, onceregistry, defaultaction, _showwarnmsg and WarningMessage at each call
+  (get_warnings_attr): test_warnings' BaseTest.setUp puts py_warnings there, which _py_warnings' own warn (its _wm) never saw.
+  Studied: cpython v3.14.10 Python/_warnings.c, Python/clinic/_warnings.c.h, Lib/warnings.py, Lib/_py_warnings.py,
+  Lib/test/test_warnings/__init__.py. The lock is an RLock of _thread (C's _PyRecursiveMutex); the context variable a ContextVar
+  named _warnings_context; get_source_line through _PyImport_BlessMyLoader's checks (gh-86298). The shutdown's own path once the
+  warnings module is gone (pylifecycle.go's finalWarn) is unchanged. Alternative: keep _py_warnings alone and make its warn read
+  sys.modules['warnings'] (a patch of the standard library: refused, pyi runs CPython's Lib unchanged).
+- The standard streams (545-1 (b)): at the start (init_sys_streams, an atStartHook first in the list, once the import system can
+  import the encodings package: a TextIOWrapper made while sys is created, before importlib stands, broke _bootstrap._setup's
+  _fix_up_module, seen in a probe), sys.stdin, sys.stdout and sys.stderr and their __std*__ become create_stdio's
+  TextIOWrapper(Buffered*(FileIO(fd, closefd=False))): raw named <stdin>/<stdout>/<stderr>, newline "\n", line buffering for a
+  terminal and for stderr, write_through and no buffer under -u, mode "w"/"r", encoding and errors stdioConfig's. input() flushes
+  the real stdout, the REPL's prompt flushes both (flush_io), readline's check takes the real streams, SystemExit's message goes
+  to sys.stderr's write (handle_system_exit). The runtime's textFile stays for an interpreter that writes elsewhere, a closed
+  descriptor, the REPL (Repl, which runs no start hooks) and tamago. Studied: cpython v3.14.10 Python/pylifecycle.c
+  (init_sys_streams, create_stdio, flush_std_files).
+- n/a (the user's): :finalization-cycle, :weakref-list, :builtin-modules, :runs-where-cpython-skips, :host-clock (divergences.edn
+  and divergences-315.edn), each :decided naming the decision and the reason given in queue 537's report.
+
+## 2026-11-24: queue 551b, 537-2's rest of :finalization n/a, :warnings-c down to one row, test_warnings and test_print recorded (the Mac VM)
+
+The main session's narrowed scope of 2026-11-24: :finalization's remaining rows n/a (537-2), :warnings-c, _warnings, and
+whole-module records of test_warnings and test_print; test_sys and test_cmd_line are the main host's py-os, :coroutines (with
+its two test_bpo_45813 rows) the main host's py-core, left alone. Branch 551b-py-finalization-warnings from py-mac-1123
+5d93b6732, which carries 551's work (78170d088) and 25c00615c's fix of _warnings' get_source_line.
+
+- 537-2 (a): :finalization (divergences.edn and divergences-315.edn) is n/a: owner "none (n/a: the user, 2026-11-23)", the
+  reason (reference counting's moment, which pyi's Go-collected objects do not have) appended to :decided. The class keeps its
+  :tests: 30 of its 80 are passes in the record (queue 222's DELETE_FAST collection; "rows it makes pass stay passes"), the
+  other 50 (545's eight test_error_through_destructor rows among them) n/a now. No finalization module was rerun: 551's run A
+  (the 65 non-pass ids, 2026-11-23) passed none of them but test_coroutines' test_fatal_coro_warning, a module py-core
+  records. test_os's test_fd_finalization is :child-is-pyi's, not this class's, and stays there.
+- :warnings-c: with Python/_warnings.c's port the class's 17 C rows pass (CWarnTests' gh-86298 checks and test_accelerated,
+  _WarningsTests' default action, filters, once registry and _showwarnmsg, the environment-variable tests); the class keeps
+  PyWarningsDisplayTests.test_tracemalloc alone (tracemalloc's object tracebacks), title and why rewritten.
+- The records: bin/pyi check over test_warnings and test_print whole (eval, PYI_RUNNER=python3). The first run at load 25
+  (seven other agents, CPUs 0-7) cut test_warnings off at its 3,600 s cap after BootstrapTest.test_issue_8766 passed its 300 s
+  test timeout: the test starts two pyi children, each 90-105 s under goi at that load (measured alone: `tools/pyi/python3 -c
+  pass` with the test's PYTHONPATH, 87 s), so the cap was load, not a hang. Run again alone with PYI_LIB_TEST_TEST_TIMEOUT=900
+  and PYI_LIB_TEST_TIMEOUT=10800: test_warnings 201 methods, 186 pass, 15 classed (cpython-only 6, skipped-by-test 6,
+  pyi-command-line 2, warnings-c 1), 0 failing, 3,632 s; test_print (the first run) 9 pass; the three negative controls failed
+  as they must. Recorded by `bin/pyi check --judge DIR --record` over a copy of the run's directory holding the whole modules
+  (its only.txt removed, test_print's files added): 0 regressions, 33 now pass (the 17 C rows and test_warnings'
+  DeprecatedTests, 15, which :coroutines' match had covered). bin/reap --record (0 problems), bin/crops-score --record, then
+  --judge --strict, and bin/records-check: 0 problems.
