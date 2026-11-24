@@ -3019,6 +3019,13 @@
                   "CharacterLiteral" (when (number? (:value x)) (long (:value x)))
                   "UnaryOperator" (when (#{"-" "+"} (:opcode x)) (when-let [v (lit (first (:inner x)))] (if (= "-" (:opcode x)) (- (long v)) v)))
                   "DeclRefExpr" (.get consts (get-in x [:referencedDecl :name]))
+                  ;; (cpp-rind: a floating literal cast to a 64-bit integer type, its value truncated, [conv.fpint]/1;
+                  ;; cpp0x/Wnarrowing17.C's `(long long int) 1e10`)
+                  ("CStyleCastExpr" "CXXFunctionalCastExpr" "CXXStaticCastExpr")
+                  (let [ws (get-in x [:_t :w]) y (strip (first (filter map? (:inner x))))]
+                    (when (and (some #{"long"} ws) (not (some #{"double" "float"} ws)) (= "FloatingLiteral" (:kind y)))
+                      (when-let [d (try (Double/parseDouble (str/replace (str (:value y)) #"[fFlL]$" "")) (catch Exception _ nil))]
+                        (when (< (Math/abs (double d)) 9.0E18) (long d)))))
                   nil)))
         _ (walk-nodes (fn [n _]
                         (case (:kind n)
@@ -3048,6 +3055,25 @@
                   (c body))
                 (vec acc)))
             (judge [sw]
+              ;; (cpp-rind: [stmt.switch]/2 from C++11, each case's constant a converted constant expression of the condition's
+              ;; adjusted (promoted) type, so no narrowing ([expr.const]/12, [dcl.init.list]/7.4): a value that type cannot
+              ;; represent is GCC's "narrowing conversion of '2149056512' from 'unsigned int' to 'int'", at the label; the
+              ;; condition a variable of a fundamental integral type; cpp0x/Wnarrowing17.C)
+              (let [cnd (some #(when (and (map? %) (= "DeclRefExpr" (:kind %))) %) (butlast (:inner sw)))
+                    ws (when (= :b (get-in cnd [:_ent :ty :t])) (get-in cnd [:_ent :ty :w]))
+                    nl (count (filter #{"long"} ws))
+                    [rlo rhi tn] (cond (or (empty? ws) (some #{"float" "double" "__int128" "wchar_t" "char8_t" "char16_t" "char32_t"} ws)) nil
+                                       (>= nl 1) (if (some #{"unsigned"} ws) [0 Long/MAX_VALUE "long unsigned int"] [Long/MIN_VALUE Long/MAX_VALUE "long int"])
+                                       (and (some #{"unsigned"} ws) (not-any? #{"short" "char" "bool"} ws)) [0 4294967295 "unsigned int"]
+                                       :else [-2147483648 2147483647 "int"])]
+                (when (and rlo (>= (long (cxx-year (:std u))) 11))
+                  (doseq [cs (cases (last (:inner sw)))
+                          :let [v (lit (first (:inner cs)))]
+                          :when (and v (not (<= (long rlo) (long v) (long rhi))))]
+                    (when-let [o (get-in cs [:range :begin :offset])]
+                      (when (= main (or (get-in cs [:range :begin :file]) main))
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :case-value :msg (str "narrowing conversion of '" v "' to '" tn "'")})))))))
               (let [seen (java.util.ArrayList.)]
                 (doseq [cs (cases (last (:inner sw)))
                         :let [in (vec (:inner cs))
@@ -7502,3 +7528,55 @@
   [:varargs #"^codegen: binding a const reference to a volatile object passed through" "binding reference discards qualifiers"])
 (alter-var-root #'sema-rules conj
   [:null-object #"^codegen: invalid access to non-static data member '.*' of NULL object" "invalid access to non-static data member of NULL object"])
+
+;; cpp-rind (2026-11-24): [basic.def.odr]/11 (C++23 /12) with [basic.link]/4: a function of internal linkage -- declared `static` at
+;; namespace scope, or declared in an unnamed namespace, a static member function of a class defined there among them -- that is
+;; odr-used is defined in its translation unit; GCC's "'int {anonymous}::A::bar()' used but never defined" (a pedwarn, an error
+;; under the dg harness's -pedantic-errors), at the declaration. A use counted only where GCC emits it: in the body of a namespace-
+;; scope function that is no inline, constexpr or consteval function nor a template's (an uninstantiated or unemitted body refers to
+;; nothing), outside an unevaluated operand; inline and virtual functions, and any name the file defines anywhere, not judged
+;; (ext/visibility/anon7.C).
+(defn internal-undefined
+  [u starts ^String src ^String main]
+  (when (some #{"-pedantic-errors"} (:args u))
+    (let [out (java.util.ArrayList.)
+          decls (java.util.HashMap.)
+          defined (java.util.HashSet.)
+          uses (java.util.HashSet.)
+          body? (fn [n] (or (:explicitlyDefaulted n) (:explicitlyDeleted n) (some #(= "CompoundStmt" (:kind %)) (:inner n))
+                            (some #(= "CXXTryStmt" (:kind %)) (:inner n))))
+          plain (fn [nm] (last (str/split (str nm) #"::")))
+          fn-kinds #{"FunctionDecl" "CXXMethodDecl"}]
+      ;; definitions anywhere, by name
+      (walk-nodes (fn [n _] (when (and (fn-kinds (:kind n)) (string? (:name n)) (body? n)) (.add defined (plain (:name n))))) (:nodes u) nil)
+      (letfn [(unevaluated? [n] (#{"UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "CXXTypeidExpr" "DecltypeExpr" "RequiresExpr"} (:kind n)))
+              (uses! [x]
+                (cond (map? x) (when-not (unevaluated? x)
+                                 (when (and (#{"DeclRefExpr" "MemberExpr"} (:kind x)) (string? (get-in x [:referencedDecl :name])))
+                                   (.add uses (plain (get-in x [:referencedDecl :name]))))
+                                 (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (uses! v)))
+                      (sequential? x) (doseq [y x] (uses! y))
+                      :else nil))
+              (internal! [n]
+                (when (and (string? (:name n)) (not (body? n)) (not (:inline n)) (not (:virtual n)) (not (:isImplicit n))
+                           (not (:constexpr n)) (not (:consteval n)) (mine-at n main))
+                  (.putIfAbsent decls (plain (:name n)) n)))
+              (region! [nodes anon]
+                (doseq [n nodes :when (map? n)]
+                  (case (:kind n)
+                    "NamespaceDecl" (region! (:inner n) (or anon (nil? (:name n)) (= "" (:name n))))
+                    "LinkageSpecDecl" (region! (:inner n) anon)
+                    "FunctionDecl" (do (when (or anon (= "static" (:storageClass n))) (internal! n))
+                                       (when (and (body? n) (not (:inline n)) (not (:constexpr n)) (not (:consteval n)))
+                                         (uses! (:inner n))))
+                    "CXXRecordDecl" (when (and anon (:completeDefinition n) (string? (:name n)) (seq (:name n)))
+                                      (doseq [m (:inner n) :when (and (= "CXXMethodDecl" (:kind m)) (= "static" (:storageClass m)))]
+                                        (internal! m)))
+                    nil)))]
+        (region! (:nodes u) false))
+      (doseq [[nm n] decls :when (and (.contains uses nm) (not (.contains defined nm)))]
+        (let [[l c] (line-col starts (long (mine-at n main)))]
+          (.add out {:line l :col c :kind :error :rule :odr-internal :msg (str "'" nm "' used but never defined")})))
+      (vec out))))
+
+(swap! checks conj internal-undefined)
