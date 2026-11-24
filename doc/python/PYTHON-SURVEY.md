@@ -8093,6 +8093,17 @@ and CPython prints `del 1` before the caller prints `0 -> None`; pyi printed it 
   del.py row (and the eval cell's loop column) moves at the next whole `bin/pyi check --aot --record` (whole only, on the gate's
   build at the checkout's key); `:finalization-goi` and the synth `:finalization` test go then.
 
+## As built: 521 and 525 merged, the C accelerators in the executable (2026-11-23, the main host, py-accel-1122)
+
+Queues 521 (`_datetime` and `_decimal` from CPython 3.14.10's own C, built by ci into the world ctypestest, compiled into the executable
+through goi's table: `bin/pyi-clib aot-forms`, `go/arbace/clib/ctypestest/aot`, `go/arbace/clib/worlds`; DECISION 521-2 (b)) and 525
+(the gaps those modules exposed, DECISION 521-3 (a)) merged on next with two fixes: j2g's program copy now takes arbace/clib,
+arbace/pyctypes, arbace/clib/worlds and the world's packages, and the world is built again on next's ci builder (queue 522's soft-float
+long double). On `a179a8e5c`'s build (521's world, before the rebuild) the eval of test_datetime, test_types and test_decimal gives 1,905 of 1,969 methods passing, 0
+failing (999 more than the record); the classes: `:c-accelerators` now covers _pickle and _json alone, and the 13 test_datetime methods
+_datetime's C reaches beyond pyi's C API and C world are the deferred `:c-accelerator-gaps` (fromisoformat's NULL dereference, a lone
+surrogate through PyUnicode_FromFormat's %c, the C world's local zone names without tzset, subclass constructors, one timedelta
+computation, subinterpreters). PYI_C_ACCEL=0 runs the pure twins as before.
 ## As built: the user's n/a decisions of 2026-11-23 (na-apply-1123)
 
 The user's decisions on the eval tail's proposal (A-F, H's test_gc counts, I, J1-J3 taken; G not now; doc/JOURNAL.md, "Python and
@@ -8155,3 +8166,235 @@ run's errors came from a second `--only` run of the same worktree cleaning the s
 other way on the VM: test_deeply_nested_deepcopy is past 600 s with py interpreted (`:runner-limits`, `:slow-on-goi`: it passes on
 the main host's compiled runtime) and test_cyclic_gc fails whole and alone (`:finalization-collect`; the main host's whole-module
 runs failed it too).
+
+## As built: 535, forkserver without os.fork (D1) and the rest of D1-D6 (2026-11-23, the Mac VM, queue 535; the user's "Build them")
+
+The user's word of 2026-11-23 on py-mods' six (D1-D6, doc/AGENDA.md's questions) supersedes the decision of 2026-11-04 (PY6e's
+DECISION (a)) and of 2026-11-22 for the start method forkserver: build it. `os.fork` stays absent (`has_fork_support` False): the
+start method fork and the tests of os.fork itself stay `:fork`, n/a.
+
+**D1, the design.** A forked Go process keeps one thread of a runtime that needs its others (the scheduler's, the collector's
+workers, the netpoller, sysmon): Python code cannot run in it, so a general `os.fork` is not built (the alternative, a fork-safe
+child by a patched Go runtime in `overlay/go`, would only reach the executables built after a re-seed, and stage 0's goi would
+still run the eval cell on the seed's runtime). But the fork server's child does nothing with the server's state that a fresh
+process cannot do again: after `os.fork()` it closes the server's descriptors, clears atexit, restores the signal handlers and runs
+`_serve_one`, which reads the preparation data and the process object from its pipe (`spawn._main`), as a spawned child does.
+So pyi's fork server starts each child as a fresh process of `sys.executable` (`util.spawnv_passfds`, as the server itself was
+started), with the request's descriptors at their numbers (child_r, the alive pipe, the resource tracker's, the client's own); the
+child does the server's preload again (sys.argv, sys.path, `__main__` imported as `__mp_main__` with `_inheriting`, the preload
+modules), clears atexit and registers `util._exit_function` as the forked child does, restores the server's original handlers
+(passed by name: SIG_DFL, SIG_IGN, default_int_handler; the server's SIGINT is ignored and an ignored disposition survives exec)
+and runs `_serve_one`. The server keeps forkserver's protocol unchanged: the authentication, the descriptors received by
+SCM_RIGHTS, the child's pid written to the client, its exit status from the server's SIGCHLD wakeup and `waitpid(-1, WNOHANG)`, the
+child the server's own (its parent pid the server's). Spawn as the default (249's option (b)) was not taken: forkserver works.
+
+**Where.** CPython's `Lib/multiprocessing/forkserver.py` is pinned and unpatched on disk; `arbace/python/libpatch.ae` (new) holds
+pyi's patches of the pinned Lib, applied by `arbace.python.run/compile-source`, the one place every pyi compile goes through (imports,
+exec and compile on goi; the AOT's modules compiled ahead and its compile-server). A patch applies in mode exec to the exact text it
+was written against (3.14.10's file by SHA-256 `12eb380e…`, 3.15.2's `811a5bfc…`, whose preload is its own `_handle_preload`), so
+another text compiles as it is; it replaces one line (`pid = os.fork()` by `pid = _pyi_spawn_one(...)`) and appends
+`_pyi_spawn_one`, `_pyi_serve_one` and `_pyi_preload` after the file's last line, so the module's line numbers are the file's
+(tracebacks and linecache read the file). The patched answer is kept in the IR cache under the key of the source as given, as
+go/arbace/py's aot.go looks the cache up itself by the text it has (the compiled launcher's server first died again on an unpatched
+answer the control had kept under that key); libpatch.ae is in the compiler's digest (arbace.python.run's and bin/pyi's
+`compiler_digest`). `PYI_LIB_PATCHES=0` compiles every source as it is (the control) and keeps no patched source's answer.
+
+**What a fork alone gives, not given (n/a):** the preloaded modules' import runs again in each child, so their import-time side
+effects repeat: test_multiprocessing_forkserver.test_misc's `test_preload_main`, `test_preload_main_sys_argv` and
+`test_std_streams_flushed_after_preload` (mp_preload_main.py, mp_preload_sysargv.py and mp_preload_flush.py count the server's one
+`__mp_main__` import in the output). They are the class `:forkserver-preload`, n/a (the server's memory copied into its child).
+
+**The proofs** (the Mac VM, the checkout's runtime; stage 0 nx's has a stale runtime, so the eval runs are goi's interpretation of
+it and the module runs are AOT's, `bin/pyi check --aot --lib-test --only`, the compiled launcher for the children). A script
+(`.tmp/q535/p/fs1.py`: forkserver, a child's result through a Queue, exit statuses 0 and 7): `bin/pyi run` PASS in 5 min 17 s,
+with `PYI_LIB_PATCHES=0` FAIL ("EOFError: unexpected EOF" at `read_signed`, the parent's behaviour); by the compiled launcher PASS
+in 13 s. The modules against the committed eval record (`.tmp/q535/tools/moves.py`): of 1,651 rows run, 291 that the record does not
+pass pass now (test_multiprocessing_forkserver's test_manager 93, test_processes 105, test_misc about 45; spawn's test_misc and
+concurrent_futures' test_init, test_wait and test_shutdown, the ECHILD cascade gone; test_cprofile's and asyncio's forkserver
+tests; test_sysconfig 2 and the 2 skipped before); none that it passes fails (round 3's two test_set rows, a dict `__ror__` that
+took a set's operand, fixed before round 4). Left in the forkserver modules: the start method fork's (os.fork), the resource
+tracker's signals and test_preload_resources and test_large_pool (`:multiprocessing-children`'s, as spawn's), test_heap, the four
+named ahead in `:multiprocessing`, the three of `:forkserver-preload`. The negative controls of the check failed as they must in
+every round.
+
+**D4 (the runner's limits).** The fork server's children are now pyi processes as spawn's are, so test/python/lib-test-limits.tsv
+gives test_multiprocessing_forkserver's test_manager, test_processes and test_misc spawn's rows (16384 MB; 3600, 7200 and 3600 s).
+
+**D5 (the layout, in part).** `_imp.extension_suffixes()` is CPython's shape: the platform's suffix first, PEP 3149's with the
+triplet (`.arbace-314-x86_64-linux-musl.so`, `aarch64` on arm64; musl's triplet, as Alpine's python3 has it), then py-capi's
+`.arbace-314.so` the C world's export tables are named with (tools/pyi/lib-dynload unchanged). `_sysconfigdata__linux_` gives
+`SOABI` `arbace-314-TRIPLET` and `EXT_SUFFIX` the first suffix (they were `''` and `.so`: since py-capi's suffix test_EXT_SUFFIX_in_vars
+failed unrecorded), `LIBRARY` and `LDLIBRARY` `libpython3.14.a` (a static build's names). test_sysconfig's test_library,
+test_linux_ext_suffix, test_EXT_SUFFIX_in_vars and test_soabi pass. Left in `:venv-and-build` (n/a): the six that ask files of an
+installation or a build tree (DECISION in the report).
+
+**Found on the way (the forkserver modules now run).** dict and set had no reflected wrappers: CPython's add_operators gives
+`__ror__` (and set's `__rand__`, `__rsub__`, `__rxor__`) from the same nb slot, and a manager's DictProxy and SetProxy forward
+`other | proxy` to them (TestSyncManagerTypes' test_dict and test_set under every start method); now `RBinary` of the same function
+with the operands swapped. `_thread.get_native_id()` was the ident (1 in every process's main thread): the main thread's is now the
+process id, as Linux's main thread's tid (test_process_mainthread_native_id).
+
+**The classes.** The committed eval record is the main host's, recorded before 535: its forkserver rows still fail there, so they stay
+classed as they are (`:fork`'s names and ECHILD match, `:multiprocessing`'s "unexpected EOF") until the next record, the classes'
+`:why` saying so; `:multiprocessing` names ahead the four forkserver rows the AOT run fails as spawn's do (TestManagerExceptions' two,
+test_poll_eintr, SharedMemoryServer_ignores_sigint); the three preload tests are the new `:forkserver-preload`, n/a.
+
+**D2, D3, D6.** D3 is py-accel's. D2 (a native `_io`) and D6 (test_fileio's strace shapes) are not built here: the report's
+DECISIONs.
+
+## As built: 545, a native _io: CPython's Modules/_io ported to Go (2026-11-23, the Mac VM, queue 545; the user's 535-2 (a))
+
+pyi's `io` was `_pyio` (§6.6, PY6a): `_io` re-exported `_pyio`'s classes. Since 545 `_io` is CPython's C module ported to Go
+in go/arbace/py, and `_pyio` is the Python side only (test_io's Py* classes, as in CPython).
+- **The port.** CPython 3.14.10's `Modules/_io` (tag v3.14.10, the pinned tarball, SHA-256 de414a57...b72032), with 3.15.2's
+  differences under `py315()` (fileio's `truncate` mode string and readall's readable check, StringIO.truncate's `pos`,
+  CHECK_CLOSED raising IS_CLOSED's error and close by IS_CLOSED, textio's write): `builtins_io.ae` (_iomodule.c: open, open_code,
+  text_encoding, DEFAULT_BUFFER_SIZE 128 KiB, UnsupportedOperation a class of (OSError, ValueError) named `io`'s, the shared
+  converters: clinic's Py_ssize_t, int, str, the r/w buffers, PyNumber_AsOff_t), `builtins_io_iobase.ae` (iobase.c's _IOBase and
+  _RawIOBase, _BufferedIOBase, _TextIOBase), `builtins_io_bytesio.ae`, `builtins_io_stringio.ae` (with textio.c's
+  IncrementalNewlineDecoder and `_PyIO_find_line_ending`), `builtins_io_fileio.ae`, `builtins_io_buffered.ae` (BufferedReader,
+  Writer, Random, RWPair), `builtins_io_textio.ae`, `builtins_io_zguard.ae` (the getsets' type check, the types that inherit
+  object's tp_new). Error messages, the C-only checks (uninitialized objects, detached buffers, gh-143008/142594's buffer
+  checks, readinto's argument types, the misbehaving raw's OSError, reentrant calls), `_finalizing`, the pickling refusals
+  and the 3.14 clinic messages are C's.
+- **Objects.** The types are static (one set for every interpreter, where CPython's are each module's heap types; their
+  `__flags__` say HEAPTYPE as CPython's do, so copyreg's `_reduce_ex` walks past them). Every instance holds iobase's
+  `__dict__` (instanceDict, `ioDictOf`) and takes weak references. A subclass's instance keeps the Go value
+  (`Instance.value`); the _io methods are `objectDescr` (they get the instance itself) and a subclass's _io slots (repr,
+  iteration, `__init__`) keep the instance, so C's calls of `self`'s methods find a subclass's (class.go's fixupSlots).
+  BytesIO's buffer is a slice (no copy-on-write: only CPython-only tests see it); getbuffer's view is a memoryview of a
+  `_BytesIOBuffer` that counts its exports (buffer_export.go). StringIO's buffer is code points, accumulated as a string
+  while every write appends. The buffered lock is ENTER_BUFFERED's: a reentrant call from the same thread (a signal
+  handler's) is "reentrant call inside %R", another thread waits with the GIL released. FileIO's reads and writes are
+  `_Py_read`/`_Py_write` over os.read's and os.write's interruptible waits (readInterruptible, writeInterruptible); a write
+  to descriptor 1 or 2 flushes the runtime's buffered standard streams first, as os.write does.
+- **Finalization.** iobase_finalize is the Go finalizer (TrackFinalizer) of an exact FileIO, buffered object, TextIOWrapper
+  or base instance, and of every subclass's instance (wrapInstance), except a class with a Python `__del__` of its own
+  (slot_tp_finalize; `_IOBase.__del__` is the base's). The cycle collector walks the _io objects (finalize.go's cyIsNode and
+  cyTraverse), so `f.f = f` dies at `gc.collect()` with its ResourceWarning. The moment at the last reference stays Go's:
+  test_io's eight test_error_through_destructor (C and Py) move to `:finalization`.
+- **The standard streams** stay the runtime's own text streams (sys.go's textFile over the interpreter's bufio writers), now
+  instances of types deriving from the native TextIOWrapper, BufferedWriter and BufferedReader (create_stdio's types):
+  `isinstance(sys.stdout, io.TextIOWrapper)` holds without ABC registration; a native method or getset the stream does not
+  define is the descriptor's TypeError on it (`sys.stdout.detach()`, CPython's detaches).
+- **_pyio is no longer code that stands for C** (pylifecycle.go's cImplModules: `_py_warnings` alone), so its frames are traced
+  and profiled as Python's, as in CPython.
+- **The open audit event**: FileIO's `__init__` calls `sys.audit("open", name, mode, flags)` (PySys_Audit); queue 536's audit
+  hooks answer it once merged (test_audit's test_open row).
+- **Proved** on the VM (AOT, `bin/pyi check --aot --lib-test --fresh --only`): test_io 631 pass (590 in the record), test_fileio
+  97 (92), test_file_eintr 18 (12), test_fileinput 57 (56), test_memoryio 177 (166); 0 failing, no row the record passes
+  fails; the controls fail as they must (.tmp/q545/aot-final.log, from the committed forms after the merge with next). 64 rows of the record move to pass at the main host's re-record (`:io-c-checks` 38,
+  `:runner-limits` 7 (CSignalsTest's and PySignalsTest's writes: interruptible now), `:io-memory-c` 6, `:buffer-exports` 5,
+  `:data-model` 4, `:pyio` 4).
+- **Classes**: `:strace-leader` (n/a, 535-3 (a): test_fileio's two test_syscalls_read); `:io-c-checks`, `:io-memory-c`, `:pyio`,
+  `:pyio-size-type` and `:pyio-buffered` keep their rows until the re-record (their why says so).
+
+## As built: 537, the largest by-design classes at eval: _hashlib over Go's crypto, the pseudo-terminal functions (2026-11-23, the Mac VM, queue 537)
+
+The eval cell's `:kind :design` classes, largest first by the record's rows (test/python/check-lib-test-linux-amd64.edn at next
+fa635f636, classified as `bin/reap` does, the references' outcomes keying `:ref-outcomes`): `:c-accelerators` 1,092 (the main
+host's), `:skipped-by-test` 236, `:extension-modules` 66, `:finalization` 57, `:finalization-cycle` 25, `:coroutines` 20,
+`:ssl-go-tls` 19, `:gc-collector` 14, `:child-is-pyi` 10, `:inline-values` 9, `:fails-under-cpython-too` 8, `:pyio` 7 (535's),
+`:openssl` 6, `:subtest-ids` 6, `:pyio-size-type` 5 (535's), the rest 3 or fewer.
+
+- **`_hashlib` built** (`go/arbace/py/builtins_hashopenssl.ae`): Modules/_hashopenssl.c of CPython 3.14.10 over Go's crypto in
+  place of OpenSSL's EVP interface, as `_ssl` is over Go's crypto/tls (PYS22 (a)). `new`, the twelve `openssl_*` constructors,
+  `HASH` and `HASHXOF` (a subclass), `hmac_new` and `HMAC` (builtins_hmac.go's hmacObject with this module's type; the methods
+  shared by `hmacMethods`), `hmac_digest`, `pbkdf2_hmac` (RFC 8018 over the module's HMAC), `scrypt` (RFC 7914: Salsa20/8,
+  BlockMix, ROMix, with OpenSSL 3's parameter checks and its 32 MiB default memory limit), `compare_digest` (`_operator`'s),
+  `get_fips_mode` (0), `openssl_md_meth_names`, `_constructors`, `UnsupportedDigestmodError`, `_GIL_MINSIZE`. The digests are
+  `py_hashes`' that Go has (md5, sha1, sha2 with the truncated sha512s, sha3, shake, blake2 by hashlib_blake2.go), found by the
+  Python name or OpenSSL's names and aliases without case; OpenSSL's md5-sha1, ripemd160 and sm3 are not offered (absent from
+  `openssl_md_meth_names`). OpenSSL's error-queue words are kept ("[digital envelope routines] unsupported", "no reason
+  supplied" for an HMAC over an XOF or `HASH.digest` of one, scrypt's "memory limit exceeded"). hashlib.py and hmac.py now take
+  it first, as CPython's do.
+- **The pseudo-terminal functions** (`builtins_posix_ext.ae`): `os.posix_openpt`, `grantpt`, `unlockpt`, `ptsname` as
+  posixmodule.c over musl 1.2.6 (grantpt does nothing; unlockpt TIOCSPTLCK 0; ptsname TIOCGPTN's /dev/pts/N; the fildes converter).
+- **Pickling refusals** name the type's tp_name ("cannot pickle '_hashlib.HASH' object", '_md5.md5', 'zlib.Compress').
+- **int() and complex() as 3.14's constructors**: `int(x)` of an int subclass calls its own `__int__` (PyNumber_Long's nb_int;
+  a strict subclass of int returned is deprecated, as for `__index__`); `complex(x)` returns a single exact complex argument as
+  it is, looks `__complex__` up on any type but that one (a complex subclass's too: test_complex's complex0, complex1), warns
+  of a strict subclass of complex returned (Issue #29894), and in complex_new_impl's path (two arguments or keywords) warns of
+  a complex 'real' even without 'imag' and refuses a string ("argument 'real' must be a real number, not str"); cmath's and the
+  C API getargs' `D` take the same warning (PyComplex_AsCComplex).
+
+Proofs (the VM, eval on goi with the checkout's runtime, `bin/pyi check --only`, the negative controls failing as they must in
+each run): test_hmac 143 ok and 3 bigmem skips, test_hashlib 76 ok and 14 skips (CPython's resources), test_os' two
+PseudoterminalTests, test_int, test_complex, test_cmath, test_index, test_capi's test_D, test_uuid and test_urllib2 (two
+timeouts past 300 s at load 30-50, both children of pyi on goi; test_http_body_pipe passes alone); a differential probe of
+`_hashlib` (83 lines) and of `complex()` (70 cases) against python3 3.14.10, equal but the pickling message fixed after.
+The record's rows of the modules run whole were written by `bin/pyi check --judge DIR --record` over a directory of those
+runs (test_hmac, test_hashlib, test_uuid, test_urllib2, test_int, test_index, test_complex, test_cmath; as queue 536 recorded):
+test_uuid's test_unix_getnode_from_libuuid and test_urllib2's test_http_body_pipe recorded as the VM's load timeouts
+(`:runner-limits`; the second passes alone), the two setUpClass skip rows of test_hmac gone. The rows of modules run by id
+(test_os' PseudoterminalTests, test_capi's test_D) wait for the main host's whole record. Python eval at next 320e74469 (the
+user's n/a decisions merged): 40,552 / 1,398 / 1,585 (4,789 n/a) -> 40,611 / 1,341 / 1,581; `:skipped-by-test` 87 -> 38,
+`:openssl` 6 -> 0, `:coroutines` 20 -> 18.
+
+What stays (queue 537's report, `.tmp/q537/537-py-design.md` on the VM, its DECISIONs): `:c-accelerators` (the main host's),
+`:extension-modules` (66: built by py-capi-1122 after the record's commit, moved by the next whole record), `:finalization` (57),
+`:finalization-cycle` (13), `:weakref-list` (3) and `:coroutines`' two test_bpo_45813 (reference counting's moment),
+`:coroutines`' 15 test_warnings DeprecatedTests (`:warnings-c`'s cause: no C `_warnings`, whose `warn` reads
+`sys.modules['warnings']` at each call, which BaseTest.setUp swaps; `_py_warnings`' `_wm` does not follow), `:ssl-go-tls` (19),
+`:child-is-pyi` (10), the `_pyio` classes (535's), `:skipped-by-test`'s 36 (among them `_elementtree` 19 and `_zoneinfo` 2:
+accelerators; `_testbuffer` 3; the UTF-8 mode 3; ctypes' complex and dllist 6, the main host's).
+
+## As built: 545, a native _io: CPython's Modules/_io ported to Go (2026-11-23, the Mac VM, queue 545; the user's 535-2 (a))
+
+pyi's `io` was `_pyio` (§6.6, PY6a): `_io` re-exported `_pyio`'s classes. Since 545 `_io` is CPython's C module ported to Go
+in go/arbace/py, and `_pyio` is the Python side only (test_io's Py* classes, as in CPython).
+- **The port.** CPython 3.14.10's `Modules/_io` (tag v3.14.10, the pinned tarball, SHA-256 de414a57...b72032), with 3.15.2's
+  differences under `py315()` (fileio's `truncate` mode string and readall's readable check, StringIO.truncate's `pos`,
+  CHECK_CLOSED raising IS_CLOSED's error and close by IS_CLOSED, textio's write): `builtins_io.ae` (_iomodule.c: open, open_code,
+  text_encoding, DEFAULT_BUFFER_SIZE 128 KiB, UnsupportedOperation a class of (OSError, ValueError) named `io`'s, the shared
+  converters: clinic's Py_ssize_t, int, str, the r/w buffers, PyNumber_AsOff_t), `builtins_io_iobase.ae` (iobase.c's _IOBase and
+  _RawIOBase, _BufferedIOBase, _TextIOBase), `builtins_io_bytesio.ae`, `builtins_io_stringio.ae` (with textio.c's
+  IncrementalNewlineDecoder and `_PyIO_find_line_ending`), `builtins_io_fileio.ae`, `builtins_io_buffered.ae` (BufferedReader,
+  Writer, Random, RWPair), `builtins_io_textio.ae`, `builtins_io_zguard.ae` (the getsets' type check, the types that inherit
+  object's tp_new). Error messages, the C-only checks (uninitialized objects, detached buffers, gh-143008/142594's buffer
+  checks, readinto's argument types, the misbehaving raw's OSError, reentrant calls), `_finalizing`, the pickling refusals
+  and the 3.14 clinic messages are C's.
+- **Objects.** The types are static (one set for every interpreter, where CPython's are each module's heap types; their
+  `__flags__` say HEAPTYPE as CPython's do, so copyreg's `_reduce_ex` walks past them). Every instance holds iobase's
+  `__dict__` (instanceDict, `ioDictOf`) and takes weak references. A subclass's instance keeps the Go value
+  (`Instance.value`); the _io methods are `objectDescr` (they get the instance itself) and a subclass's _io slots (repr,
+  iteration, `__init__`) keep the instance, so C's calls of `self`'s methods find a subclass's (class.go's fixupSlots).
+  BytesIO's buffer is a slice (no copy-on-write: only CPython-only tests see it); getbuffer's view is a memoryview of a
+  `_BytesIOBuffer` that counts its exports (buffer_export.go). StringIO's buffer is code points, accumulated as a string
+  while every write appends. The buffered lock is ENTER_BUFFERED's: a reentrant call from the same thread (a signal
+  handler's) is "reentrant call inside %R", another thread waits with the GIL released. FileIO's reads and writes are
+  `_Py_read`/`_Py_write` over os.read's and os.write's interruptible waits (readInterruptible, writeInterruptible); a write
+  to descriptor 1 or 2 flushes the runtime's buffered standard streams first, as os.write does.
+- **Finalization.** iobase_finalize is the Go finalizer (TrackFinalizer) of an exact FileIO, buffered object, TextIOWrapper
+  or base instance, and of every subclass's instance (wrapInstance), except a class with a Python `__del__` of its own
+  (slot_tp_finalize; `_IOBase.__del__` is the base's). The cycle collector walks the _io objects (finalize.go's cyIsNode and
+  cyTraverse), so `f.f = f` dies at `gc.collect()` with its ResourceWarning. The moment at the last reference stays Go's:
+  test_io's eight test_error_through_destructor (C and Py) move to `:finalization`.
+- **The standard streams** stay the runtime's own text streams (sys.go's textFile over the interpreter's bufio writers), now
+  instances of types deriving from the native TextIOWrapper, BufferedWriter and BufferedReader (create_stdio's types):
+  `isinstance(sys.stdout, io.TextIOWrapper)` holds without ABC registration; a native method or getset the stream does not
+  define is the descriptor's TypeError on it (`sys.stdout.detach()`, CPython's detaches).
+- **_pyio is no longer code that stands for C** (pylifecycle.go's cImplModules: `_py_warnings` alone), so its frames are traced
+  and profiled as Python's, as in CPython.
+- **The open audit event**: FileIO's `__init__` calls `sys.audit("open", name, mode, flags)` (PySys_Audit); queue 536's audit
+  hooks answer it once merged (test_audit's test_open row).
+- **Proved** on the VM (AOT, `bin/pyi check --aot --lib-test --fresh --only`): test_io 631 pass (590 in the record), test_fileio
+  97 (92), test_file_eintr 18 (12), test_fileinput 57 (56), test_memoryio 177 (166); 0 failing, no row the record passes
+  fails; the controls fail as they must (.tmp/q545/aot-final.log, from the committed forms after the merge with next). 64 rows of the record move to pass at the main host's re-record (`:io-c-checks` 38,
+  `:runner-limits` 7 (CSignalsTest's and PySignalsTest's writes: interruptible now), `:io-memory-c` 6, `:buffer-exports` 5,
+  `:data-model` 4, `:pyio` 4).
+- **Classes**: `:strace-leader` (n/a, 535-3 (a): test_fileio's two test_syscalls_read); `:io-c-checks`, `:io-memory-c`, `:pyio`,
+  `:pyio-size-type` and `:pyio-buffered` keep their rows until the re-record (their why says so).
+
+
+## As built: _elementtree and _zoneinfo in the C world, ctypes' complex types (2026-11-24, the main host, py-accel-1122)
+
+The Mac's 537 routed the C-accelerator and ctypes rows here (DECISION 537-6 (a)). The world ctypestest also builds CPython's
+`Modules/_zoneinfo.c` and `Modules/_elementtree.c` (glue as 521's) and the tarball's Expat C; `_elementtree` reaches Expat
+through `pyexpat.expat_CAPI`, which the glue makes over the world's Expat since pyi's pyexpat is Go (`pyi_expat_install`, called
+by pyctypes before the module's PyInit). pyctypes gained ctypes' complex types (`D`, `F`, `G`), `_ctypes.dllist`, and the C API
+natives the new modules called (`PyType_GetModuleState`, `PyObject_SelfIter`, `_PyThreadState_GetCurrent`, `Py_ReprEnter`,
+`Py_ReprLeave`, `_PyErr_ChainExceptions1`). On the targeted AOT runs: test_xml_etree_c 231 / 23 / 0, test_zoneinfo 244 / 33 / 0,
+ctypes' 7 ids 5 / 2 / 0. Left in `:elementtree-c` (deferred, 6): XMLPullParser's flush and small-chunk events, a deep deepcopy's C
+stack, an Element's weak reference, a Go panic in TreeBuilder's late tail. The world's aot forms (11.5 MB of node program) now
+need more than 8 GiB to print.

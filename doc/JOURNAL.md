@@ -19029,6 +19029,64 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+## 2026-11-23: py-accel, queues 521 and 525 merged with j2g's program copy; the eval measured; :c-accelerators narrowed
+
+Branch `py-accel-1122` (mac): 521's `6db3dd0cb` (CPython's `_datetimemodule.c` and `_decimal.c` with libmpdec built by ci into pyi's
+C world ctypestest, its cf2g package committed as Go forms and linked into the executable through `arbace/clib/worlds` in goi's table,
+DECISION 521-2 (b)) and 525's `8d2a609d1` (the 18 pyi gaps 521's modules exposed, DECISION 521-3 (a)) merged on next `ead97197e`;
+`5a4c223da` (runtime_state counts clib and pyctypes), `1627e8fba`/`a179a8e5c` (j2g's program copy takes arbace/clib, arbace/pyctypes,
+arbace/clib/worlds and the world's packages: the gate build had failed with "package arbace/clib is not in std"); `b5c6f40e6` (the world
+built again on next's ci builder: queue 522's soft-float adds musl's long double code, so `bin/pyi-clib verify ctypestest` on the merged
+tree differed from 521's nodes.ae, key and aot forms; new Key 4422cb00...). Its own gate build (key `5ee95bf34622f0956ee2`) gives way to
+train 1 (the user: records share gate builds): `bin/pyi-clib verify ctypestest` and the record wait for the train's executables.
+
+Measured on `a179a8e5c`'s gate build (`2399c5e5`, the world of 521 compiled; valid for classing, not for the record): `bin/pyi check
+test_datetime test_types test_decimal test_bool test_getopt` (one at a time): 2,010 methods, 1,946 pass, 64 classed, 0 failing, 0
+regressions, 999 now pass (test_datetime 1,058 / 50 / 0 in 688 s, 4 driver runs: 3 crashes in test_fromisoformat_fails; test_types
+126 / 3 / 0 in 58 s; test_decimal 721 / 11 / 0 in 250 s; the controls failed as they must); 5.3 GB peak, 19 min. test_logging (2 at once
+with other modules, a loaded host): driver starts 24.1 s and 27.6 s wall (26.0 and 13.9 s CPU) against 10.8 s before (py-eval's run):
+not conclusive under the load; to measure again alone.
+
+`test/python/divergences.edn`: `:c-accelerators` narrowed to _pickle and _json (every test_datetime and test_decimal id removed: 682
+pass now, 6 skipped are other classes'; the matches "requires C version" and "_datetime" removed, "_decimal" narrowed to the two
+stale rows' messages, "requires _decimal" (test_functools) and "C _decimal module required" (test_int), until their modules rerun);
+the 13 real gaps go to a new deferred class `:c-accelerator-gaps` (fromisoformat's NULL dereference in the C world, U+FFFD for a lone
+surrogate through PyUnicode_FromFormat's %c, musl's offset zone names with no tzset in the C world, subclass constructors keeping
+tzinfo, one timedelta computation, no subinterpreters). Judged again on the run (`bin/pyi check --judge`, nothing run).
+
+Merged with next (fa635f636; the coordinator: py-accel-w's own build cancelled, the branch rides train 2): next's py-eval and py-capi
+had added xxlimited, xxlimited_35, _testmultiphase and _testsinglephase to the same world, so lib.conf takes both sides' files and the
+world is built again (`bin/pyi-clib build ctypestest` on a179a8e5c's gate exe: Key fdb2a32c..., 9.9 MB of node program, its cf2g aot
+forms; 3 h 20 min, most of it waiting for the big lock, 5.9 GB). go/arbace/py and pyctypes were merged on their printed Go (git
+merge-file over base ead97197e; three conflicts: builtins_ctypes_api.go's lazy modules and capi.go's native tables both kept,
+capi_objects.go's PyImport_Import next's, which returns the leaf module as 521's importLeaf did), go vet clean, and read back in one hold
+of the big lock (REPR_GO_JOBS=4; a first read at 32 jobs outside the lock had been killed for the host's memory); files only one side
+changed read back byte for byte as that side's. gotable.edn lists both sides' packages. Left for train 2's executables: `bin/pyi-clib
+verify ctypestest`, the three modules' eval with `--record`, reap, crops-score and records-check.
+
+## 2026-11-23: py-accel, `:c-accelerator-gaps` fixed (the coordinator's follow-up while train 2 waits)
+
+The 13 test_datetime methods `_datetime`'s C reached beyond pyi (classed earlier today), probed with `bin/pyi aot` against the
+host's CPython 3.14.10:
+- **fromisoformat's crash (3).** `_sanitize_isoformat_str` replaces a surrogate separator through `PyUnicode_WriteChar`; pyctypes'
+  WriteChar took the str's runes as `[]rune(s.String())`, and pyi's str text is WTF-8, so each lone surrogate became three U+FFFD
+  and the index landed elsewhere: '2009\ud80002\ud80028' then encoded to UTF-8 and the parser crashed at address 0, and
+  '2009-02-03\ud80004:05' (CPython: datetime(2009, 2, 3, 4, 5)) was refused. Now `s.Runes()` (a copy where written); the same
+  `[]rune(s.String())` in five other pyctypes places (keepWide, translateCharmap, ctypes' u/U setters, a c_wchar array's value)
+  takes `s.Runes()` too.
+- **The timedelta computation (1).** pyctypes' `_PyLong_DivmodNear` turned Go's Euclidean quotient into floor division the wrong
+  way for a negative divisor (q+1 for q-1): (3us) / -2 gave 0, not -2us. Unit-tested on twelve sign cases.
+- **astimezone's zone names (2) and the subclass constructors (3).** Arbace's pyconfig.h lacked `HAVE_STRUCT_TM_TM_ZONE`
+  (configure's answer for this target), so `_datetime` took the zone's name from musl's strftime %Z, which gives none: a naive
+  datetime's local zone became the UTC singleton, `astimezone(timezone.utc)` returned self unchanged (the subclass constructors'
+  failure) and named zones printed as "UTC-05:00". Defined; the world built again once (Key 78da3543..., `bin/pyi-clib build
+  ctypestest` on a179a8e5c's gate exe).
+- **isoformat with a surrogate separator (3)** passes already on the merge: py-capi's PyUnicode_FromFormatV keeps runes.
+- The subinterpreter test (1) stays in `:c-accelerator-gaps` (no subinterpreters).
+pyctypes' Go edited on its printed text and read back (one hold of the big lock); the diff is the seven changed lines.
+Proof: `bin/pyi check --aot --lib-test --fresh --only` on the 13 ids (the AOT module from the new world's committed aot forms and the
+read-back pyctypes): 12 pass, 1 classed (the subinterpreter test), 0 failing; the three controls fail as they must. `:c-accelerator-gaps`
+now holds that one method. The records wait for train 2's executables, as before.
 
 ## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
 
@@ -20037,6 +20095,48 @@ Applied in test/java/divergences.edn (java-design-1123):
   null, their defaults "missing element"), before its proxies' serialization; t04444 SubclassGC needs a class loader's classes
   unloaded (JD3's loader). Both stay deferred.
 
+## 2026-11-23: java-design-1123: XML in javac's tool world, the measured closure (plan, nothing built yet)
+
+- The user's (b) of today: java.xml's parsers, DOM, transform, XPath, validation and StAX, and java.xml.crypto's XML signature,
+  in javac's tool world (overlay/jdk/javac/closure.txt, read by `bin/javac-vendor convert` into jdk/javac/forms), the XML tests
+  routed there as F6 and JD4 route javac's API tests (bin/java-check's tool_re: their sources naming javax.xml's parsers,
+  transform, xpath, validation, stream, catalog and crypto, org.w3c.dom, org.xml.sax; at interp on javac's tool, at compiled
+  in javac-world shards).
+- The closure measured as JN7.2 measured the SAX parser's: the 15 XML tests (t08077-t08081, t08083, t08088-t08096) compiled
+  by the jdk26u build's javac and run by its java with `-Xshare:off -Xlog:class+load` (`.tmp/jd/xmlload/run.py`, each test's
+  renamed sources as test/java/ref-jdk26.edn's :files give them): 1,007 java.xml and 162 java.xml.crypto classes loaded, 803
+  top-level source files beyond the shipped world's (jdk/sources.txt), javac's (jdk/javac/sources.txt) and the closure's
+  (684 java.xml, 119 java.xml.crypto; about 247,000 lines; BCEL's generic 173, XSLTC's compiler 57, XPath's functions 42,
+  Xerces' schema datatypes 35, ...); `.tmp/jd/xmlload/need.txt`. Still to add: the classes their members' descriptors name and
+  their supertypes (j2g translates a call only when its descriptor's classes are in the world), found by
+  `bin/javac-vendor check`'s refusals, and the factories found by name (FactoryFinder's defaults, the XML signature's
+  providers) rooted for reflection, as round 2 rooted the default DatatypeFactory.
+- XSLTC (the XSLT tests t08091, t08093, t08096's transform) compiles a stylesheet to class files with BCEL and defines them:
+  JD3's class-file loader and interpreter in the tool's world as well.
+- Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
+  with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
+  GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
 ## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
 
 The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
@@ -20048,6 +20148,46 @@ the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 fa
 it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
 a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
 Rides train 2.
+
+## 2026-11-23: queue 538, Java's read and print deferred rows (repr/java; branch `538-java-read-print`, the VM)
+
+The brief: close the read cell's 49 deferred rows and the print cell's 7 in test/java/divergences.edn by fixing repr/java.
+- The read cell's 49 are not repr/java's. Its sources are the read, classes and diagnostics levels. Read and classes pass 3,325 of 3,325,
+  so all 49 are diagnostics rows: javac on Arbace's own Java and world (`:diag-processors` 25, `:diag-doclint` 8, `:diag-file-manager`
+  8, `:diag-command-line` 4, `:diag-closed-world` 4). Their fixes are in overlay/jdk/javac and need a new tool build each. The
+  user's decision of 2026-11-23 loads JCS51's processors through JD3's bytecode loader, which is the host's. None was changed here.
+- The print cell's 7 were looked at one by one (java-check print, javac on Arbace's errors, the class files' code by java.print's
+  code-lines). Three pass now:
+  - t05474 (`arbace/repr/java/print.ae`, `raw-lambda-arg-cast`): `x -> jobs(x)`. x is an implicit lambda parameter that the forms tag
+    with the raw Collection. Passed for jobs(Collection<Integer>), it made javac's call unchecked and its result an erased Stream, so the
+    next lambda's `job` was typed Object. The printer now writes `jobs((Collection<Integer>) x)`. This applies only to a lambda's
+    parameter, the one candidate, and a parameter of the same class parameterized without type variables. The converter drops the
+    cast again (the same erasure).
+  - t05691 (print.ae, `raw-rooted?`, `raw-recv-mref-cast`): `queue.stream().mapToInt(Integer::intValue)` on a local printed raw (the
+    source's `var`). The raw receiver's parameter is the raw ToIntFunction, so the method reference was typed applyAsInt(Object). An
+    unbound method reference whose recorded instantiated types are not Object, passed to a call on a raw receiver, is now cast to its
+    interface instantiated: `(ToIntFunction<Integer>) Integer::intValue`.
+  - t06244 (`arbace/repr/java/convert.ae` `method-ref-form`, print.ae `method-ref-text`): `(new E<Short>())::xI`. javac null-checks a
+    bound method reference's receiver unless it is a bare new (Attr.makeNullCheck tests the tree's tag, without skipping parentheses).
+    The original's parentheses gave Objects.requireNonNull, which the printed `new E<Short>()::xI` lost. The converter now marks such a
+    receiver `^:null-check` (a PARENS around a NEWCLASS), and the printer writes the parentheses back. **This moves repr/java's reader
+    hash** (83a29bfb -> b45f7ace). In jdk26u's sources the shape occurs only in a comment of java.base and in langtools tests outside
+    the corpus but this one, so jdk/'s forms should not change. The provenance files want the host's regeneration, as for 520.
+  - Left, each with a DECISION in the report (.tmp/q538/538-java-read-print.md):
+    - t05503: raw `new ArrayList()` against the diamond. The forms keep neither.
+    - t05125: a colon switch's locals share one scope, so the local slots differ from the arrow form the printer writes.
+    - t03567: `|`, `&` and `^` of pure booleans are read as or/and, as `||` and `&&` would be.
+    - t06072: `x.f = x.f + 1` against `+=` through an inner class's accessors (access$N and iadd moved).
+    Each is a shape the forms do not record.
+- javac's tool: the cleanup of 2026-11-23 removed the VM's only arm64 arbace-javac (q403's), so one was built here.
+  `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` took 4 h 01 min with a 26.6 GB peak: a first build, the
+  namespaces compiled, a compiled first build, repr/java's reader compiled, then the tool. Key 380d25064878 (the checkout plus these
+  edits). It is shared at .tmp/shared/javac-arm64/.
+- Proofs: `bin/java-check --levels read,print --only '^(t03567|t05125|t05474|t05503|t05691|t06072|t06244|t03208|t03209) '`. Before
+  (q403's tool, next fa635f636): the seven as recorded. After: t05474, t05691 and t06244 pass; the other four as recorded; read 9 of
+  9 pass; control c00001 differs. `--judge --partial --record`: 3 now passing, 0 regressions.
+- Cells: print 3,318 / 0 / 7 -> 3,321 / 0 / 4; read 7,795 / 0 / 49 unchanged; Java completeness 0.9632 -> 0.9634. `bin/reap
+  --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
 
 ## 2026-11-23: queue 540b, the user's decisions on 540 and a stale C++ row (the VM; branch `540b-c-cpp-print` from 540-c-cpp-print b2fc220c8)
 
@@ -20077,3 +20217,230 @@ The user's decisions of 2026-11-23 on queue 540's report:
 - Cells recorded here: C print 4,844 / 0 / 11 (1 n/a), from 4,844 / 1 / 11. `bin/reap --record`, `bin/crops-score --record` and
   `--judge --strict`, `bin/records-check`: 0 problems. Every other row moves with the main host's records (540's list, with
   limits-caselabels.c among the passes of the torture-compile records, read and print).
+
+## 2026-11-23: queue 535, Python D1-D6: forkserver without os.fork, the rest where feasible (the Mac VM, branch `535-py-d1d6`)
+
+The user's "Build them" of 2026-11-23 on py-mods' six (doc/AGENDA.md's questions; the main session's notes of 2026-11-22) supersedes
+for the start method forkserver the decisions of 2026-11-04 (PY6e's DECISION (a), no os.fork) and 2026-11-22 (the forkserver rows in
+`:fork`, n/a). Base mac/next fa635f636; stage 0 nx's (stale runtime: the eval proofs ran the checkout's runtime interpreted by goi).
+- D1, forkserver (doc/python/PYTHON-SURVEY.md, "As built: 535"): `os.fork` stays absent (a forked Go process keeps one thread of a
+  runtime that needs its others). The fork server starts each child as a fresh process of sys.executable (`util.spawnv_passfds`,
+  the request's descriptors at their numbers), which does the server's preload again and runs `_serve_one` as the forked child does;
+  the server's protocol (pid and exit status to the client, waitpid on SIGCHLD) is unchanged. The change is a patch of the pinned
+  `Lib/multiprocessing/forkserver.py` (3.14.10's and 3.15.2's texts by SHA-256) applied at compile time by the new
+  `arbace/python/libpatch.ae` from `arbace.python.run/compile-source` (eval and AOT alike), one line replaced and three functions
+  appended, the file unpatched on disk; `PYI_LIB_PATCHES=0` withholds it (the control). The IR cache keeps a patched answer under the
+  source's own key (go/arbace/py's aot.go looks the cache up by the text it has): found when the control's unpatched answer, kept
+  under that key, made the compiled launcher's server die again; the control's answers are no longer kept.
+  Alternatives considered: a fork-safe child by a patched Go runtime (overlay/go: the executables of a re-seed only, and the forked
+  child's netpoller, locked threads and goroutines in system calls still lost); spawn as the default start method (249's option
+  (b)): not needed, forkserver works; a zygote child kept ready by the server: the preload's side effects still repeat.
+  Left n/a, needing fork's copy of the server's memory: the three preload tests (the preload's import once in the server).
+- D4: lib-test-limits.tsv gives the forkserver modules spawn's limits (its children are pyi processes as spawn's).
+- D5 in part: `_imp.extension_suffixes()` the platform's suffix first (`.arbace-314-x86_64-linux-musl.so`, aarch64 on arm64), then
+  py-capi's `.arbace-314.so`; `_sysconfigdata__linux_`'s SOABI and EXT_SUFFIX the first, LIBRARY and LDLIBRARY `libpython3.14.a`.
+- Found on the forkserver modules' first run: dict's `__ror__` and set's `__ror__`, `__rand__`, `__rsub__`, `__rxor__` (CPython's
+  add_operators: the reflected wrapper of the same nb slot; a manager's proxies forward `other | proxy` to them), and
+  `_thread.get_native_id()` of the main thread the process id (it was the ident, 1 in every process).
+- D2 (a native `_io`), D6 (strace shapes): not built; DECISIONs in the report. D3: py-accel's.
+- Proofs (doc/python/PYTHON-SURVEY.md, "As built: 535"; logs in the main checkout's .tmp/q535/): fs1.py by `bin/pyi run` PASS
+  (5 min 17 s, goi), with `PYI_LIB_PATCHES=0` FAIL (unexpected EOF), by the compiled launcher PASS (13 s); `bin/pyi check --aot
+  --lib-test --only` rounds 2-4 over the touched modules: 291 rows the eval record does not pass pass, none it passes fails
+  (round 3's two test_set rows, a dict `__ror__` taking a set's left operand, fixed and run again in round 4); every negative control
+  failed as it must. The eval record (the main host's) is not re-recorded here: its forkserver rows stay classed as recorded, the
+  classes saying they leave at the next record; the three preload tests move to the new `:forkserver-preload` (n/a), so Python's
+  eval cell is 40,552 / 1,604 / 1,711 (4,457 n/a), from 40,552 / 1,604 / 1,714 (4,454 n/a); `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`.
+
+## 2026-11-23: queue 535's decisions (the user's, through the main session)
+
+535-1 (a): forkserver's three preload tests (test_misc's test_preload_main, test_preload_main_sys_argv; test_processes'
+test_std_streams_flushed_after_preload) n/a in `:forkserver-preload`, as built: they count import-time output a forked child inherits
+from the server's single import, which pyi's fresh children redo. 535-2 (a): a native _io, CPython's Modules/_io (FileIO, Buffered*,
+TextIOWrapper, BytesIO, StringIO) ported to Go, as queue 545, test_io's C classes judged; _pyio stays the Py* side. 535-3 (a):
+test_fileio's two test_syscalls_read rows n/a (strace without -f sees only the thread-group leader, and pyi reaches its interpreter through
+bin/pyi's exec chain); they leave `:io-c-checks` in 545, which reworks that class. 535-4 (a): the six test_sysconfig rows of
+`:venv-and-build` stay n/a (an installation's or build tree's files pyi does not have). Alternatives considered: 535-1 (b) a fork-safe Go
+runtime; 535-2 (b) the C-only checks by design for good; 535-3 (b) the interpreter locked to the leader thread and an exec-only chain;
+535-4 (b) a source-build layout.
+
+## 2026-11-23: a native _io, CPython's Modules/_io ported to Go (queue 545, the Mac VM; the user's 535-2 (a))
+
+The user decided (535-2 (a)) to port `_io` to Go in pyi, `_pyio` staying the Python side. Built on branch 545-py-native-io from
+next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
+- Source: python/cpython, tag v3.14.10, `Modules/_io/` (`_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`,
+  `bufferedio.c`, `textio.c`, `clinic/*.c.h`), from the pinned tarball Python-3.14.10.tar.xz (SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032), and 3.15.2's differences from Python-3.15.2.tar.xz (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), ported by hand into go/arbace/py's `builtins_io*.ae` (the
+  printed runtime edited, read back by `bin/pyi runtime read`); the PSF's license, LICENSE.md (its coverage list extended).
+  `winconsoleio.c` (Windows) is not ported.
+- Two steps, each with its proof: step 1 (3dbf642cf) the bases, BytesIO, StringIO and IncrementalNewlineDecoder with FileIO,
+  the buffered classes, TextIOWrapper and open still `_pyio`'s (test_memoryio on AOT: 176 pass, 0 failing); step 2 the rest and
+  the switch: no `_pyio` import at `_io`'s creation, builtins.open is `_io.open`, the standard streams' types derive from the
+  native TextIOWrapper, BufferedWriter and BufferedReader, `_pyio` out of cImplModules.
+- Runtime changes beyond the port: the _io methods take the instance itself (objectDescr) and a subclass keeps the _io slots
+  that call its methods (class.go); instanceDict answers an _io object's dict (attr.go); every _io type is weakly
+  referenceable and reports HEAPTYPE in `__flags__`; the types without a tp_new of their own in C (all but FileIO, BytesIO,
+  StringIO) have no `__new__` in their dict and `object.__new__` of them makes their value (registry.go's inheritsNew, descr.go's
+  newOrigin, class.go's objectNew); the cycle collector walks the _io objects (finalize.go); wrapInstance tracks a subclass's
+  instance for iobase_finalize unless its class has a `__del__` of its own.
+- Alternatives considered: keeping sys.stdout as the runtime's textFile registered with an ABC (impossible once io's classes
+  are static types: the subclass relation is used instead); making sys.stdout a real TextIOWrapper over FileIO(1) (more
+  faithful, but the runtime's print, REPL, input and readline paths use the textFile's bufio writers: left for later).
+  The hybrid step 1 kept `_pyio`'s loader for one commit only.
+- Proofs (VM, AOT, `bin/pyi check --aot --lib-test --fresh --only`, logs in .tmp/q545/): test_io 631 pass, test_fileio 97,
+  test_file_eintr 18, test_fileinput 57, test_memoryio 177; 0 failing; 64 record rows to pass; the three controls failed as they
+  must. Probes of the standard streams, files, pipes, a child's streams, pickling of subclasses (.tmp/q545/p/).
+- Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
+  classes whose rows pass now keep them until the main host's re-record (their why says so).
+- The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
+## 2026-11-23: queue 537, Python eval's largest by-design classes: _hashlib over Go's crypto, the pseudo-terminal functions, the rest to the user (the Mac VM)
+
+What: the eval cell's `:kind :design` classes of test/python/divergences.edn, largest first by the committed record's rows
+(test/python/check-lib-test-linux-amd64.edn at next fa635f636, classified as `bin/reap` classifies them; `:c-accelerators`,
+the ctypes classes, the cap-crash modules and del.py the main host's, D1-D6 queue 535's, every `:deferred` class queue 536's),
+each built in pyi or brought to the user as n/a with why.
+
+Built (go/arbace/py, written as Go in `bin/pyi runtime print`'s module and read back):
+- `_hashlib` (`builtins_hashopenssl.ae`), CPython 3.14.10's Modules/_hashopenssl.c over Go's crypto in place of OpenSSL's EVP
+  interface, as `_ssl` is over Go's crypto/tls (PYS22 (a), the precedent): hashlib.py and hmac.py take it first, test_hmac's 49
+  OpenSSL rows of `:skipped-by-test` and test_hashlib's 6 of `:openssl` run. Studied: cpython v3.14.10 Modules/_hashopenssl.c,
+  Modules/clinic/_hashopenssl.c.h, Lib/hashlib.py, Lib/hmac.py, Lib/test/support/hashlib_helper.py; RFC 8018 §5.2 (PBKDF2),
+  RFC 7914 §3-§5 (scrypt); OpenSSL 3's scrypt parameter checks as python3 3.14.10 on this VM shows them. Alternatives: (a) keep
+  `:openssl` and the OpenSSL rows by design (PY6d's choice of the built-in modules alone): no, the user's goal is 100% and the
+  module is buildable on Go's crypto; (b) link OpenSSL through ci: a C world's libcrypto is a crop of its own, and nothing in the
+  tests needs OpenSSL itself.
+- `os.posix_openpt`, `grantpt`, `unlockpt`, `ptsname` (posixmodule.c over musl 1.2.6).
+- the pickling refusal of a built-in data type names its tp_name (`'_hashlib.HASH'`, `'_md5.md5'`, `'zlib.Compress'`).
+- `int()` of an int subclass calls its `__int__` (PyNumber_Long's nb_int; test_int's test_int_returns_int_subclass and
+  test_int_subclass_with_int), `complex()` follows actual_complex_new and complex_new_impl (a single exact complex returned as it
+  is, `__complex__` on any other type, the strict-subclass DeprecationWarning, the two-argument path's type checks and warnings;
+  cmath's and getargs' `D` warn too): test_complex's test_constructor and test_capi's test_D, three of `:coroutines`' rows that
+  its catch-all match took. Studied: cpython v3.14.10 Objects/complexobject.c (actual_complex_new, complex_new_impl,
+  try_complex_special_method), Objects/abstract.c (PyNumber_Long).
+
+Found, not built (the report's DECISIONs): test_warnings' 15 DeprecatedTests in `:coroutines` are `:warnings-c`'s cause (no C
+`_warnings`, whose warn reads `sys.modules['warnings']` at each call; BaseTest.setUp swaps it): a Go `_warnings` (Python/_warnings.c)
+would serve them and `:warnings-c` (536's class). The user's n/a decisions of 2026-11-23 (next 320e74469, merged before the record)
+took `:skipped-by-test`'s counting rows (J1/J2: 149 rows), `:gc-collector`, `:inline-values`, `:tuple-id-reuse`, `:specializing`,
+`:pyc-magic`, `:subtest-ids`, `:fails-under-cpython-too` and test_gc's cycle counts, which this task had as DECISION 537-1 and
+n/a candidates.
+
+Proofs: `bin/pyi check --only` on the VM (goi, the checkout's runtime), four runs, the negative controls failing in each (logs
+`.tmp/q537/check-537{,b,c,d}.log`). The record's rows of the modules run written from those runs' results (64 to pass; `--record`
+refuses a runtime that is not compiled, so the main host's next record replaces them). Python eval at 320e74469: 40,552 / 1,398 /
+1,585 -> 40,616 / 1,338 / 1,579 (4,789 n/a); `bin/reap --record`, `bin/crops-score --record` (Python 98.12 -> 98.16),
+`--judge --strict` and `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 537's record rows written again by `bin/pyi check --judge DIR --record` (correction of the entry above)
+
+The coordinator's request: the rows the entry above says were transcribed from the runs' results (`merge_record.py`) are written
+instead by the judge's own `--record` over one directory holding the modules the runs covered whole (`.tmp/q537/judge-rec`:
+test_hmac, test_hashlib, test_uuid and test_urllib2 of the first run, test_index of the second, test_complex and test_cmath of
+the fourth, test_int of a fifth run alone, whose timing test passed there), as queue 536 recorded. `--record` refuses an `--only`
+run, so test_os' two PseudoterminalTests rows and test_capi's test_D stay as next has them until the main host's whole record.
+Two rows recorded as timeouts at the VM's load (test_uuid's test_unix_getnode_from_libuuid, test_urllib2's test_http_body_pipe,
+class `:runner-limits`). Python eval: 40,552 / 1,398 / 1,585 -> 40,611 / 1,341 / 1,581 (not 40,616 / 1,338 / 1,579);
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-23: a native _io, CPython's Modules/_io ported to Go (queue 545, the Mac VM; the user's 535-2 (a))
+
+The user decided (535-2 (a)) to port `_io` to Go in pyi, `_pyio` staying the Python side. Built on branch 545-py-native-io from
+next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
+- Source: python/cpython, tag v3.14.10, `Modules/_io/` (`_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`,
+  `bufferedio.c`, `textio.c`, `clinic/*.c.h`), from the pinned tarball Python-3.14.10.tar.xz (SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032), and 3.15.2's differences from Python-3.15.2.tar.xz (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), ported by hand into go/arbace/py's `builtins_io*.ae` (the
+  printed runtime edited, read back by `bin/pyi runtime read`); the PSF's license, LICENSE.md (its coverage list extended).
+  `winconsoleio.c` (Windows) is not ported.
+- Two steps, each with its proof: step 1 (3dbf642cf) the bases, BytesIO, StringIO and IncrementalNewlineDecoder with FileIO,
+  the buffered classes, TextIOWrapper and open still `_pyio`'s (test_memoryio on AOT: 176 pass, 0 failing); step 2 the rest and
+  the switch: no `_pyio` import at `_io`'s creation, builtins.open is `_io.open`, the standard streams' types derive from the
+  native TextIOWrapper, BufferedWriter and BufferedReader, `_pyio` out of cImplModules.
+- Runtime changes beyond the port: the _io methods take the instance itself (objectDescr) and a subclass keeps the _io slots
+  that call its methods (class.go); instanceDict answers an _io object's dict (attr.go); every _io type is weakly
+  referenceable and reports HEAPTYPE in `__flags__`; the types without a tp_new of their own in C (all but FileIO, BytesIO,
+  StringIO) have no `__new__` in their dict and `object.__new__` of them makes their value (registry.go's inheritsNew, descr.go's
+  newOrigin, class.go's objectNew); the cycle collector walks the _io objects (finalize.go); wrapInstance tracks a subclass's
+  instance for iobase_finalize unless its class has a `__del__` of its own.
+- Alternatives considered: keeping sys.stdout as the runtime's textFile registered with an ABC (impossible once io's classes
+  are static types: the subclass relation is used instead); making sys.stdout a real TextIOWrapper over FileIO(1) (more
+  faithful, but the runtime's print, REPL, input and readline paths use the textFile's bufio writers: left for later).
+  The hybrid step 1 kept `_pyio`'s loader for one commit only.
+- Proofs (VM, AOT, `bin/pyi check --aot --lib-test --fresh --only`, logs in .tmp/q545/): test_io 631 pass, test_fileio 97,
+  test_file_eintr 18, test_fileinput 57, test_memoryio 177; 0 failing; 64 record rows to pass; the three controls failed as they
+  must. Probes of the standard streams, files, pipes, a child's streams, pickling of subclasses (.tmp/q545/p/).
+- Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
+  classes whose rows pass now keep them until the main host's re-record (their why says so).
+- The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
+
+## 2026-11-23: py-mac-1123, the Python branches consolidated on train-2 (the Mac VM, for train 2)
+
+Train 2 (origin/train-2 a6f6fdbf3) left out every Python branch: 535-py-d1d6, 537-py-design and 545-py-native-io each conflicted
+with next in go/arbace/py/*.ae (Go forms whose :go/comments carry positions) and overlapped each other. As their owner, branch
+py-mac-1123 from a6f6fdbf3 merges, in order, origin/535-py-d1d6 (37bbae6f3, 0e609fbe1), origin/537-py-design (63ecfd842,
+211857567), origin/545-py-native-io (6b27c238a, 02f5ad799) and 551-py-finalization-warnings (74c3c59e4, 78170d088).
+
+The method (queue 482's and py-mods-1122's, 70e3ebc79 and e80fd1ca6 on origin/py-mods-1122): each conflicted go/arbace/py file
+printed in its package at the merge base, ours and theirs (git archive of each side's go/arbace/py, bin/repr-go print of py.ae;
+a file printed alone loses its layout, tried first and dropped), the three Go files merged by git merge-file, the package printed
+from the working tree with the merged Go put over it, then go/arbace/py read back in mode :full (bin/repr-go read --full --tests,
+as bin/pyi runtime read; builtins_os_other kept in py.ae as runtime_read_other merges it): builtins_capi_api and builtins_thread
+(535; one hunk differing only in the line numbers of a struct printed with line directives, ours taken), class and sys (545),
+builtins_imp, interp and sys (551) merged with no Go conflict; py.ae made again by each read-back, which changed no other file.
+The scripts: .tmp/qpy/resolve_ae.sh, readback.sh, pyae_union.py (the union of both sides' files for the print). Records and
+classes: divergences.edn's :fork took 535's :why and train-2's :decided and :match; the eval record is train-2's with 537's 64
+changed and 2 removed rows applied by id (537's writer had reordered the file); the journal and the survey keep both sides;
+scores and matrix are recorded again on the merge.
+
+The checks on the merge (the VM, pinned to four CPUs for the night): gofmt and go vet of the printed py, pyctypes and clib (clean
+but the five generated nodes.go of clib, as before), go test ./py ok; bin/pyi check --aot over the modules each branch touched
+(535: forkserver's test_manager, test_misc, test_processes, test_sysconfig, test_set, test_dict; 537: test_hmac, test_hashlib,
+test_os's two pseudo-terminal rows, test_int, test_complex, test_cmath; 545: test_io, test_fileio, test_file_eintr,
+test_fileinput, test_memoryio; 551: test_warnings, test_sys): 21 modules, 2,870 methods, 2,619 pass, 246 classed, 5 failing,
+all five test_warnings', which 25c00615c fixes (_PyImport_BlessMyLoader calls importlib's _bless_my_loader, as import.c does,
+where the port had a Go stand-in; no source line for a <string> file, as _Py_DisplaySourceLine fails to open it; test_tracemalloc
+named in :warnings-c), then test_warnings again: 227 pass, 15 classed, 0 failing; the three negative controls failed as they
+must. bin/reap --record (0 problems; the matrix's five Clojure lines were stale on train-2 a6f6fdbf3 itself, recorded from its
+records), bin/crops-score --record, then --judge --strict and bin/records-check: 0 problems. bin/pyi runtime check (goi
+interprets the merged runtime) was still running at the commit: its timeouts under the pin are load, and c-codecs.py's
+`bytearray + bytes` Go panic under goi (fine on AOT) is train-2's own: the same panic at a6f6fdbf3 and before 545.
+
+## 2026-11-24: py-accel, _elementtree and _zoneinfo in the C world, ctypes' complex types and dllist; mac/py-mac-1123 merged
+
+The rows the Mac's 537 routed here (DECISION 537-6 (a): _elementtree 19, _zoneinfo 2, ctypes' complex and dllist 6):
+- **The world** (tools/pyi/clib/ctypestest/lib.conf; Key d65251e1..., 11.5 MB of node program, was 9.9): CPython 3.14.10's
+  `Modules/_zoneinfo.c` and `Modules/_elementtree.c` through glue files as 521's (`accel_zoneinfo.c`, `accel_elementtree.c`,
+  NDEBUG), and the tarball's Expat C (`Modules/expat/xcs.c`, `xmlparse.c`, `xmlrole.c`, `xmltok.c`, Makefile.pre.in's
+  LIBEXPAT_OBJS, its expat_config.h: XML_POOR_ENTROPY). pyi's pyexpat is a Go port with no C functions, so the glue makes
+  `pyexpat.expat_CAPI` itself over the world's Expat (pyexpat.c's table and unknown-encoding handler copied) and pyctypes
+  calls it (`pyi_expat_install`) before PyInit__elementtree; `_Py_HashSecret` (the one undefined data symbol) is defined
+  zero there: Expat then picks its own salt. A first build stopped on that symbol (bin/pyi-clib's undefined check).
+- **pyctypes**: the modules registered (PYI_C_ACCEL=0 leaves them out with _datetime and _decimal); ctypes' `D`, `F` and
+  `G` simple types (c_double_complex, c_float_complex, c_longdouble_complex: two parts in the type of d, f and g, passed to
+  ci as a struct of them, the byte-swapped variants for D and F, the type characters "cbBhHiIlLdDFGfuzZqQPOv?g" as 3.14's
+  where libffi has complex); `_ctypes.dllist` (callproc.c's over dl_iterate_phdr: the program "", the world's musl as
+  "libc.so", then each name dlopen opened); the C API's `PyType_GetModuleState`, `PyObject_SelfIter`,
+  `_PyThreadState_GetCurrent`, `Py_ReprEnter`/`Py_ReprLeave` (over py's new ExtReprEnter/ExtReprLeave) and
+  `_PyErr_ChainExceptions1`, found missing by the runs (124, 82, 1 and 1 test_xml_etree_c methods stopped on them).
+- LICENSE.md: the world's 521 accelerators, libmpdec (its BSD 2-Clause notice, a new section) and this Expat named.
+- **mac/py-mac-1123** (5d93b6732: 535, 537, 545, 551 and test_warnings' fix, from train-2 a6f6fdbf3) merged into
+  py-accel-w-1122: go/arbace/py on its printed Go (git merge-file over fa635f636, no text conflict: the four .ae conflicts
+  were positions), vet clean, read back; pyctypes merged by git (theirs changed only capi_getargs).
+Proofs (`bin/pyi check --aot --lib-test --fresh --only`, the drivers from the committed forms, under the big lock: the world's
+aot forms now need more than 8 GiB to print, a first run hit the cap): on the merged tree test_datetime 1,069 / 39 / 0,
+test_decimal 721 / 11 / 0, test_types 127 / 2 / 0, test_zoneinfo 244 / 33 / 0 (the C classes pass; gc.is_tracked of the C
+type to n/a :gc-collector), ctypes' 7 ids 5 pass, 2 classed (test_lists_updates skips by its own rule when _ctypes_test is
+loaded; test_csqrt, which now runs, to :ctypes-port: _ctypes_test's my_csqrt* need _Py_FFI_SUPPORT_C_COMPLEX and an 8-byte
+long double is not ci's), test_xml_etree_c (see the last run below); the controls fail as they must. New deferred class
+`:elementtree-c` (6: XMLPullParser's flush and small-chunk events, a deep deepcopy overflowing the C world's stack, an
+Element's weak reference, a Go panic in TreeBuilder's late tail). Records: train 3's executables.
+The last run (pyctypes with PyObject_SelfIter and _PyErr_ChainExceptions1): test_xml_etree_c 231 pass, 23 classed (:elementtree-c
+6, cpython-only 9, skipped-by-test 6, finalization-collect 1, subtest-ids 1), 0 failing; the record held 19 "requires
+_elementtree" rows of it, and the module's other C classes now run.
+Correction to today's first py-accel entry: `:c-accelerators` keeps its old `:match` and `:tests` for now. The record still holds
+test_datetime's, test_decimal's and test_types' rows from before 521 (700 not-run, 127 "No module named '_datetime'"), which
+reap must class until train 3's executables record those modules; the narrowing to _pickle and _json lands with that record.
+`bin/reap --record` (matrix unchanged), `bin/crops-score --record`, `--judge --strict` and `bin/records-check` report 0 problems.
