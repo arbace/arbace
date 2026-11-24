@@ -20375,3 +20375,17 @@ crash55/57/63/98/99, pr90138, redecl5, typedef4), P2564's immediate escalation (
 GCC's spelling positions inside macros (pr79300, constexpr-ice16), and the single rows of the earlier Left lists. IFNDR eager checks,
 for the user (n/a candidates, 2 files): cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C (a never-instantiated template's
 non-dependent checks).
+
+## 2026-11-24: java-design-rec-1124: java-design-1123's train-1 records alone, on next
+
+Asked by the coordinator: next takes java-design's train-1 records before its unbuilt code (XML in javac's tool world, the
+jrt-convert fixes, JD7, the native-method and clone fixes: train 3's). Branch java-design-rec-1124 from mac/next (e78dbdadb):
+- test/java/divergences.edn: java-design-1123's class changes merged three ways over train 1's commit (d9217f672): the user's
+  decisions of 2026-11-23 (JMX, JDI, desktop and smartcardio n/a; XML, the class-file API, zip and synthetic lambdas deferred;
+  :design-also-na, :design-also-compiled-na, :design-also-smartcardio), :jd1123-next-train and :assert-default; java-bytecode's
+  changes kept. In :design-also's and :design-also-compiled's :tests the two streams had each removed ids: an id stays only
+  when both kept it.
+- The records: java-design's saved results of train 1's runs (compiled1-t1, compiled-javac-t1, the heavy interp row,
+  interp1-t1; .tmp/jd/res-*-t1 in java-design's worktree) judged and recorded on next (bin/java-check --judge --partial
+  --record): each test's row the run's, the others next's. The four tests both streams recorded (t04540, t04541, t04542,
+  t06029) have the same rows in both. Compiled 59 now passing, interp 19, no regression.
