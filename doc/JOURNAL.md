@@ -19146,3 +19146,14 @@ processor rows are left to the host's JD3 bytecode loader (the user's JCS51 deci
   (proc.processor.cant.instantiate). Their golden outputs need the processor to run, which is JCS51's work (the host's JD3 loader).
   The jrt change would also be a runtime change, outside javac's tool build. So no row moves without processors, and the rows stay
   in `:diag-closed-world`.
+- **549b's tool and proofs (2026-11-24).**
+  - One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` (f83f974bc): 4 h 25 min wall including the lock's
+    queue, 27.6 GB peak. Key 97f949b1, which the build recorded and which is the checkout's. `bin/javac-vendor check --from`: no
+    failures. Shared at `.tmp/shared/javac-arm64/`, replacing 549's.
+  - `bin/java-check --levels diagnostics --only` over the 24 rows of 549's four classes and the control pair: t07463 now passes,
+    the 20 of 549 still pass, t07545, t07546 and t07552 are as recorded, and c00002 differs as a control must. Recorded with
+    `--judge --partial --record`: 1 now passing, 0 regressions.
+  - A regression sample of 102 tests (every 20th diagnostics test, every 80th classes test) at read, classes, diagnostics and print:
+    every test as recorded except t07512 (`--release 15`, no ct.sym on the VM). t07512 fails the same way on 549's tool.
+  - Cells: read 7,815 / 0 / 29 -> 7,816 / 0 / 28. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+    `bin/records-check`: 0 problems.
