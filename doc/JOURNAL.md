@@ -19274,3 +19274,13 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24 — queue 542, round 8: the five eval cases rebuilt at the new layouts; threads.rs's livelock (VM)
+
+- The five eval cases rebuilt at e737be800's layouts (rsi15: intrinsics, panics, std, unwind, vectors, each own) and the eval check
+  run over all six (`bin/rsi check --front own --corpus samples`, the merged builds with threads.rs from the pack): **6 of 6 pass, 5
+  of 6 own**, the std-vs-panics control differing (6.1 GB). No regression from the ArcInner, Mutex, repr(align) and Align8 layouts.
+- threads.rs (own, rsi14) with ci's goto-loop fix (0c28eb66c): no overflow now, but the run livelocks before printing: one goroutine
+  busy at 100% in a futex wait (FUTEX_WAIT_BITSET_PRIVATE, expected value 0xffffffff, Parker's PARKED or musl's join wait) on
+  0x7f0000000128, which is neither in the TLS block (it ends near 0xb8) nor plainly a static; ci's dumps carry no Rust frame names.
+  Open.
