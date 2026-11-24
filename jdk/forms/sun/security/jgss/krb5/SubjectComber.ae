@@ -1,0 +1,135 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/SubjectComber.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.util ArrayList Iterator List Set)
+        '(javax.security.auth DestroyFailedException Subject)
+        '(javax.security.auth.kerberos KerberosKey KerberosPrincipal KerberosTicket KeyTab)
+        '(sun.security.krb5 KerberosSecrets)
+        '(sun.security.krb5.internal Krb5))
+
+(defclass SubjectComber
+  (constructor ^:private [this])
+
+  (method ^:static find :type-params [T] ^T [^Subject subject ^String serverPrincipal
+                                             ^String clientPrincipal ^{:tag (Class T)} credClass]
+    (.cast credClass (SubjectComber/findAux subject serverPrincipal clientPrincipal credClass true)))
+
+  (method ^:static findMany :type-params [T] ^{:tag (List T)} [^Subject subject
+                                                               ^String serverPrincipal
+                                                               ^String clientPrincipal
+                                                               ^{:tag (Class T)} credClass]
+    (cast List (SubjectComber/findAux subject serverPrincipal clientPrincipal credClass false)))
+
+  (method ^:private ^:static findAux :type-params [T] [^Subject subject
+                                                       ^:mutable ^String serverPrincipal
+                                                       ^:mutable ^String clientPrincipal
+                                                       ^{:tag (Class T)} credClass ^boolean oneOnly]
+    (when (some? subject)
+      (let [^{:tag (List T)} answer (when-not oneOnly ^List (ArrayList.))]
+        (cond
+          (identical? credClass KeyTab)
+            (let [^{:tag (Iterator KeyTab)} iterator (.iterator
+                                                       (.getPrivateCredentials subject KeyTab))]
+              (while (.hasNext iterator)
+                (let [t (cast KeyTab (.next iterator))]
+                  (when (and (some? serverPrincipal) (.isBound t))
+                    (let [name (.getPrincipal t)]
+                      (if (some? name)
+                          (when-not (.equals serverPrincipal (.getName name)) (continue))
+                          (let [^:mutable found false]
+                            (for-each [^KerberosPrincipal princ (.getPrincipals
+                                                                  subject
+                                                                  KerberosPrincipal)]
+                              (when (.equals (.getName princ) serverPrincipal)
+                                (set! found true)
+                                (break)))
+                            (when-not found (continue))))))
+                  (when (some? Krb5/DEBUG)
+                    (.println Krb5/DEBUG (java-str "Found " (.getSimpleName credClass) " " t)))
+                  (if oneOnly (return t) (.add answer (.cast credClass t))))))
+          (identical? credClass KerberosKey)
+            (let [^{:tag (Iterator KerberosKey)} iterator (.iterator
+                                                            (.getPrivateCredentials
+                                                              subject
+                                                              KerberosKey))]
+              (while (.hasNext iterator)
+                (let [t (cast KerberosKey (.next iterator))
+                      name (.getName (.getPrincipal t))]
+                  (when (or (nil? serverPrincipal) (.equals serverPrincipal name))
+                    (when (some? Krb5/DEBUG)
+                      (.println Krb5/DEBUG
+                                (java-str "Found " (.getSimpleName credClass) " for " name)))
+                    (if oneOnly (return t) (.add answer (.cast credClass t)))))))
+          (identical? credClass KerberosTicket)
+            (let [^{:tag (Set Object)} pcs (.getPrivateCredentials subject)]
+              (locking pcs
+                (let [^{:tag (Iterator Object)} iterator (.iterator pcs)]
+                  (while (.hasNext iterator)
+                    (let [obj (.next iterator)]
+                      (when-instance [^KerberosTicket ticket obj]
+                        (when (some? Krb5/DEBUG)
+                          (.println Krb5/DEBUG
+                                    (java-str "Found ticket for "
+                                              (.getClient ticket)
+                                              " to go to "
+                                              (.getServer ticket)
+                                              " expiring on "
+                                              (.getEndTime ticket))))
+                        (if (not (.isCurrent ticket))
+                            (when-not (.isReadOnly subject)
+                              (.remove iterator)
+                              (try
+                                (.destroy ticket)
+                                (when (some? Krb5/DEBUG)
+                                  (.println Krb5/DEBUG
+                                            (java-str
+                                              "Removed and destroyed the expired Ticket \n"
+                                              ticket)))
+                                (catch DestroyFailedException dfe
+                                  (when (some? Krb5/DEBUG)
+                                    (.println Krb5/DEBUG
+                                              (java-str
+                                                "Expired ticket not destroyed successfully. "
+                                                dfe))))))
+                            (let [serverMatch (SubjectComber/findServerMatch serverPrincipal ticket)]
+                              (when (some? serverMatch)
+                                (let [clientMatch (SubjectComber/findClientMatch
+                                                    clientPrincipal
+                                                    ticket)]
+                                  (when (some? clientMatch)
+                                    (if oneOnly
+                                        (return ticket)
+                                        (do
+                                          (when (nil? clientPrincipal)
+                                            (set! clientPrincipal clientMatch))
+                                          (when (nil? serverPrincipal)
+                                            (set! serverPrincipal serverMatch))
+                                          (.add answer (.cast credClass ticket))))))))))))))))
+        answer)))
+
+  (method ^:private ^:static findServerMatch ^String [^String input ^KerberosTicket ticket]
+    (let [serverAlias (.kerberosTicketGetServerAlias
+                        (KerberosSecrets/getJavaxSecurityAuthKerberosAccess)
+                        ticket)]
+      (cond
+        (some? input)
+          (when (or (and (some? serverAlias) (.equals input (.getName serverAlias)))
+                    (.equals input (.getName (.getServer ticket))))
+            input)
+        (some? serverAlias) (.getName serverAlias)
+        :else (.getName (.getServer ticket)))))
+
+  (method ^:private ^:static findClientMatch ^String [^String input ^KerberosTicket ticket]
+    (let [access (KerberosSecrets/getJavaxSecurityAuthKerberosAccess)
+          clientAlias (.kerberosTicketGetClientAlias access ticket)
+          proxy (.kerberosTicketGetProxy access ticket)]
+      (cond
+        (some? input)
+          (when (or (or (and (some? clientAlias) (.equals input (.getName clientAlias)))
+                        (and (some? proxy) (.equals input (.getName (.getClient proxy)))))
+                    (and (nil? proxy) (.equals input (.getName (.getClient ticket)))))
+            input)
+        (some? clientAlias) (.getName clientAlias)
+        (some? proxy) (.getName (.getClient proxy))
+        :else (.getName (.getClient ticket))))))

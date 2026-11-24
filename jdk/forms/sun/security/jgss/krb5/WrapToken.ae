@@ -1,0 +1,262 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/WrapToken.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io ByteArrayOutputStream IOException InputStream OutputStream)
+        '(org.ietf.jgss GSSException MessageProp)
+        '(sun.security.jgss GSSHeader)
+        '(sun.security.krb5 Confounder))
+
+(defclass WrapToken
+  :extends MessageToken
+
+  (field ^:static ^:final ^int CONFOUNDER_SIZE 8)
+
+  (field ^:static ^:final ^byte/2 pads
+    (new byte/2
+         [nil
+          [0x01]
+          [0x02 0x02]
+          [0x03 0x03 0x03]
+          [0x04 0x04 0x04 0x04]
+          [0x05 0x05 0x05 0x05 0x05]
+          [0x06 0x06 0x06 0x06 0x06 0x06]
+          [0x07 0x07 0x07 0x07 0x07 0x07 0x07]
+          [0x08 0x08 0x08 0x08 0x08 0x08 0x08 0x08]]))
+
+  (field ^:private ^boolean readTokenFromInputStream true)
+
+  (field ^:private ^InputStream is nil)
+
+  (field ^:private ^byte/1 tokenBytes nil)
+
+  (field ^:private ^int tokenOffset 0)
+
+  (field ^:private ^int tokenLen 0)
+
+  (field ^:private ^byte/1 dataBytes nil)
+
+  (field ^:private ^int dataOffset 0)
+
+  (field ^:private ^int dataLen 0)
+
+  (field ^:private ^:final ^int dataSize)
+
+  (field ^byte/1 confounder nil)
+
+  (field ^byte/1 padding nil)
+
+  (field ^:private ^:final ^boolean privacy)
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^byte/1 tokenBytes
+                                                ^int tokenOffset ^int tokenLen ^MessageProp prop]
+    (super. Krb5Token/WRAP_ID context tokenBytes tokenOffset tokenLen prop)
+    (set! (.-readTokenFromInputStream this) false)
+    (set! (.-tokenBytes this) tokenBytes)
+    (set! (.-tokenOffset this) tokenOffset)
+    (set! (.-tokenLen this) tokenLen)
+    (set! (.-privacy this) (.getPrivacy prop))
+    (set! dataSize
+          (unchecked-subtract-int (.getMechTokenLength (.getGSSHeader this))
+                                  (.getKrb5TokenSize this))))
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^InputStream is
+                                                ^MessageProp prop]
+    (super. Krb5Token/WRAP_ID context is prop)
+    (set! (.-is this) is)
+    (set! (.-privacy this) (.getPrivacy prop))
+    (set! dataSize
+          (unchecked-subtract-int (.getMechTokenLength (.getGSSHeader this)) (.getTokenSize this))))
+
+  (method ^:public getData :throws [GSSException] ^byte/1 [this]
+    (let [temp (new byte/1 dataSize)]
+      (.getData this temp 0)
+      (let [retVal (new byte/1
+                        (unchecked-subtract-int
+                          (unchecked-subtract-int dataSize (alength confounder))
+                          (alength padding)))]
+        (System/arraycopy temp 0 retVal 0 (alength retVal))
+        retVal)))
+
+  (method ^:public getData :throws [GSSException] ^int [this ^byte/1 dataBuf ^int dataBufOffset]
+    (if readTokenFromInputStream
+        (.getDataFromStream this dataBuf dataBufOffset)
+        (.getDataFromBuffer this dataBuf dataBufOffset))
+    (unchecked-subtract-int (unchecked-subtract-int dataSize (alength confounder))
+                            (alength padding)))
+
+  (method ^:private getDataFromBuffer :throws [GSSException] ^void [this ^byte/1 dataBuf
+                                                                    ^int dataBufOffset]
+    (let [gssHeader (.getGSSHeader this)
+          dataPos (unchecked-add-int (unchecked-add-int tokenOffset (.getLength gssHeader))
+                                     (.getTokenSize this))]
+      (when (> (unchecked-add-int dataPos dataSize) (unchecked-add-int tokenOffset tokenLen))
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                              -1
+                              (java-str "Insufficient data in "
+                                        (WrapToken/getTokenName (.getTokenId this))))))
+      (set! confounder (new byte/1 CONFOUNDER_SIZE))
+      (if privacy
+          (.decryptData (.-cipherHelper this)
+                        this
+                        tokenBytes
+                        dataPos
+                        dataSize
+                        dataBuf
+                        dataBufOffset)
+          (do
+            (System/arraycopy tokenBytes dataPos confounder 0 CONFOUNDER_SIZE)
+            (let [^:mutable ^int padSize (aget tokenBytes
+                                               (unchecked-subtract-int
+                                                 (unchecked-add-int dataPos dataSize)
+                                                 1))]
+              (when (< padSize 0) (set! padSize 0))
+              (when (> padSize 8) (set! padSize (unchecked-remainder-int padSize 8)))
+              (set! padding (aget pads padSize))
+              (System/arraycopy tokenBytes
+                                (unchecked-add-int dataPos CONFOUNDER_SIZE)
+                                dataBuf
+                                dataBufOffset
+                                (unchecked-subtract-int
+                                  (unchecked-subtract-int dataSize CONFOUNDER_SIZE)
+                                  padSize)))))
+      (when-not (.verifySignAndSeqNumber this
+                                         confounder
+                                         dataBuf
+                                         dataBufOffset
+                                         (unchecked-subtract-int
+                                           (unchecked-subtract-int dataSize CONFOUNDER_SIZE)
+                                           (alength padding))
+                                         padding)
+        (throw (GSSException. GSSException/BAD_MIC
+                              -1
+                              "Corrupt checksum or sequence number in Wrap token")))))
+
+  (method ^:private getDataFromStream :throws [GSSException] ^void [this ^byte/1 dataBuf
+                                                                    ^int dataBufOffset]
+    (set! confounder (new byte/1 CONFOUNDER_SIZE))
+    (try
+      (if privacy
+          (.decryptData (.-cipherHelper this) this is dataSize dataBuf dataBufOffset)
+          (do
+            (WrapToken/readFully is confounder)
+            (if (.isArcFour (.-cipherHelper this))
+                (do
+                  (set! padding (aget pads 1))
+                  (WrapToken/readFully is
+                                       dataBuf
+                                       dataBufOffset
+                                       (unchecked-subtract-int
+                                         (unchecked-subtract-int dataSize CONFOUNDER_SIZE)
+                                         1)))
+                (let [numBlocks (unchecked-subtract-int
+                                  (unchecked-divide-int
+                                    (unchecked-subtract-int dataSize CONFOUNDER_SIZE)
+                                    8)
+                                  1)
+                      ^:mutable offset dataBufOffset]
+                  (loop [^int i 0]
+                    (when (< i numBlocks)
+                      (WrapToken/readFully is dataBuf offset 8)
+                      (set! offset (unchecked-add-int offset 8))
+                      (recur (unchecked-inc-int i))))
+                  (let [finalBlock (new byte/1 8)]
+                    (WrapToken/readFully is finalBlock)
+                    (let [^int padSize (aget finalBlock 7)]
+                      (set! padding (aget pads padSize))
+                      (System/arraycopy finalBlock
+                                        0
+                                        dataBuf
+                                        offset
+                                        (unchecked-subtract-int (alength finalBlock) padSize))))))))
+      (catch IOException e
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                              -1
+                              (java-str (WrapToken/getTokenName (.getTokenId this))
+                                        ": "
+                                        (.getMessage e))))))
+    (when-not (.verifySignAndSeqNumber this
+                                       confounder
+                                       dataBuf
+                                       dataBufOffset
+                                       (unchecked-subtract-int
+                                         (unchecked-subtract-int dataSize CONFOUNDER_SIZE)
+                                         (alength padding))
+                                       padding)
+      (throw (GSSException. GSSException/BAD_MIC
+                            -1
+                            "Corrupt checksum or sequence number in Wrap token"))))
+
+  (method ^:private getPadding ^byte/1 [this ^int len]
+    (let [^:mutable ^int padSize 0]
+      (if (.isArcFour (.-cipherHelper this))
+          (set! padSize 1)
+          (do
+            (set! padSize (unchecked-remainder-int len 8))
+            (set! padSize (unchecked-subtract-int 8 padSize))))
+      (aget pads padSize)))
+
+  (constructor :throws [GSSException] ^:public [this ^Krb5Context context ^MessageProp prop
+                                                ^byte/1 dataBytes ^int dataOffset ^int dataLen]
+    (super. Krb5Token/WRAP_ID context)
+    (set! confounder (Confounder/bytes CONFOUNDER_SIZE))
+    (set! padding (.getPadding this dataLen))
+    (set! dataSize
+          (unchecked-add-int (unchecked-add-int (alength confounder) dataLen) (alength padding)))
+    (set! (.-dataBytes this) dataBytes)
+    (set! (.-dataOffset this) dataOffset)
+    (set! (.-dataLen this) dataLen)
+    (.genSignAndSeqNumber this prop confounder dataBytes dataOffset dataLen padding)
+    (when-not (.getConfState context) (.setPrivacy prop false))
+    (set! privacy (.getPrivacy prop)))
+
+  (method ^:public encode :throws [IOException GSSException] ^void [this ^OutputStream os]
+    (.encode super os)
+    (if (not privacy)
+        (do (.write os confounder) (.write os dataBytes dataOffset dataLen) (.write os padding))
+        (.encryptData (.-cipherHelper this) this confounder dataBytes dataOffset dataLen padding os)))
+
+  (method ^:public encode :throws [IOException GSSException] ^byte/1 [this]
+    (let [bos (ByteArrayOutputStream. (unchecked-add-int dataSize 50))]
+      (.encode this bos)
+      (.toByteArray bos)))
+
+  (method ^:public encode :throws [IOException GSSException] ^int [this ^byte/1 outToken
+                                                                   ^:mutable ^int offset]
+    (let [bos (ByteArrayOutputStream.)]
+      (.encode super bos)
+      (let [header (.toByteArray bos)]
+        (System/arraycopy header 0 outToken offset (alength header))
+        (set! offset (unchecked-add-int offset (alength header)))
+        (if (not privacy)
+            (do
+              (System/arraycopy confounder 0 outToken offset (alength confounder))
+              (set! offset (unchecked-add-int offset (alength confounder)))
+              (System/arraycopy dataBytes dataOffset outToken offset dataLen)
+              (set! offset (unchecked-add-int offset dataLen))
+              (System/arraycopy padding 0 outToken offset (alength padding)))
+            (.encryptData (.-cipherHelper this)
+                          this
+                          confounder
+                          dataBytes
+                          dataOffset
+                          dataLen
+                          padding
+                          outToken
+                          offset))
+        (unchecked-add-int
+          (unchecked-add-int (unchecked-add-int (alength header) (alength confounder)) dataLen)
+          (alength padding)))))
+
+  (method ^:protected getKrb5TokenSize :throws [GSSException] ^int [this]
+    (unchecked-add-int (.getTokenSize this) dataSize))
+
+  (method ^:protected getSealAlg :throws [GSSException] ^int [this ^boolean conf ^int qop]
+    (if (not conf) WrapToken/SEAL_ALG_NONE (.getSealAlg (.-cipherHelper this))))
+
+  (method ^:static getSizeLimit :throws [GSSException] ^int [^int qop ^boolean confReq
+                                                             ^int maxTokenSize ^CipherHelper ch]
+    (unchecked-subtract-int
+      (unchecked-subtract-int (GSSHeader/getMaxMechTokenSize WrapToken/OID maxTokenSize)
+                              (unchecked-add-int (WrapToken/getTokenSize ch) CONFOUNDER_SIZE))
+      8)))

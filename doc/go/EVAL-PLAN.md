@@ -285,6 +285,8 @@ hand change 39) the analysis is still Q1 (a)'s, but a fn with primitive signatur
 evaluated one is an object of EvalFn's DynSub type, its class made by `Dyn.defineProxyClass` with the interfaces, each
 `invokePrim` its `invoke` converted; a Java forms fn's class (which implements them, as on the JVM) is interpreted as an
 ordinary class extending AFunction or RestFn, objects of their DynSub types, rather than as `CF$FnObj`.
+Since 2026-11-23 (CDR15 (b), the user) the evaluated half is withdrawn (it cost plain evaluated calls about 9%): an
+evaluated fn is Q1 (a)'s again, EvalFn a leaf; the Java forms fns keep their interfaces.
 
 ## 4. What the evaluator needs from the others
 
