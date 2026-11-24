@@ -19362,3 +19362,11 @@ IR at the pin, their items are: rustc_demangle 45, gimli 11, miniz_oxide 8, addr
   originals in .tmp/q561/orig/.
 - Not recorded (arm64). Left: rustc_demangle's 20, memchr's layouts, then miniz_oxide, object, gimli and addr2line. The report is
   .tmp/q561/561-rust-backtrace-crates.md.
+
+## 2026-11-24 — Rust's backtrace crates: the vendored-locs question answered at the settle (queue 561, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287): (a), the ./vendor/ caller-location rule applies to
+  every vendored crate, not only to the backtrace crates of 561. The rest of 561 (miniz_oxide, object, gimli, addr2line, and
+  rustc_demangle's remaining rows) follows it.
+Alternatives: a rule per crate (not chosen).
+:journal
