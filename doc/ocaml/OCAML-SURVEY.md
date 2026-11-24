@@ -4946,8 +4946,8 @@ oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferr
   dies with the boundary's memory, as bigarray.c's finalizer frees it; the C heap had grown past 1.5 GB and Go's collector ran without
   pause at the memory limit). Over 900 s before, 65 s now (CPU 73 s); passes, out of `oi-slow.edn`.
 - **Left in `:speed`** (measured on this host, alone, OI_TIMEOUT 1800, CPU seconds against the check's 120): ast-invariants/test 216 s
-  (pass), parallel/fib_threads 744 s (pass: fib 42 in four domains, about 1.7 billion interpreted calls), opam/uutf/test_uutf (see the
-  journal). Their profile is the interpreter's own: frames and argument slices allocated per call (`newFrame` and `makeslice` about 40 %
+  (pass), parallel/fib_threads 744 s (pass: fib 42 in four domains, about 1.7 billion interpreted calls), opam/uutf/test_uutf
+  1,390 s (pass). Their profile is the interpreter's own: frames and argument slices allocated per call (`newFrame` and `makeslice` about 40 %
   of ast-invariants' CPU) and Go's marking; a frame pool would give about 1.5x, not the 1.8x ast-invariants needs nor fib_threads' 6x.
 - **Left in `:gc-and-memory`**: weak-ephe-final/ephetest3, whose keys are Int64 values hash-consed in a weak set: oi's boxed integers are
   Go values in an interface (no identity of their own; Go's static array for 0-255 and its tiny allocator for the rest), so their weak

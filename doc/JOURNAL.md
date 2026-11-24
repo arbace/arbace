@@ -20509,3 +20509,10 @@ alone. Built and measured in the worktree with ARBACE_HOST_EXE=/root/arbace/targ
   `:opam-not-run` rows by design; darkening_work and backtrace_dynlink n/a (539b-2, 539b-3); the Jane Street rows the Mac's.
 - A slip: one measuring command's second half ran in the `next` worktree (a `&` split the `cd`), so a `bin/oi suite check` there built
   that tree's native library under `.tmp/oi` (scratch only, no tracked file); the permission system refused to stop it by PID.
+
+## 2026-11-24: ocaml-eval: opam/uutf/test_uutf measured
+
+`bin/oi suite check --only opam/uutf/test_uutf` at OI_TIMEOUT=1800, alone: passes in 1,390 s of CPU (23 min 12 s user, 1 min 12 s
+system), about 11.6 times the check's 120 s: its loops run every Unicode scalar value through each encoder and decoder. With the entry
+above's two (ast-invariants/test 216 s, parallel/fib_threads 744 s) the three left in `:speed` pass on oi given the time; none is within
+reach of a local optimisation of the interpreter.
