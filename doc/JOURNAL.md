@@ -20228,3 +20228,27 @@ Alternatives weighed: a self-dependent satisfaction detected by the concept and 
 that needs it, concepts-recursive-sat4.C, never reaches its friends' constraints, so nothing proved it, and the slice's own re-entries
 through unfinished classes could make it a false error); an ill-formed concept registered as false (left for the atom's rule: the parser
 keeps the type's name as the constraint's expression).
+
+## 2026-11-24: py-goi: goi's append(s, t...) evaluated its slice twice (pyi's `bytearray + bytes` under goi); f-struct's gc.collect() count left (branch `py-goi-1123` from next `58959ee49`)
+
+The Mac's `bin/pyi runtime check` of py-mac-1123 (5d93b6732, also at train-2 a6f6fdbf3) failed two smoke programs under goi.
+
+c-codecs.py: `bytearray(b'ab') + b'cd'` raised "SystemError: pyi: Go panic: ... nil pointer dereference" on goi (pyi's compiled
+runtime passes). Narrowed on stage 0 (`bin/pyi run` of probes, then `bin/goi run` of reduced Go forms): bytearray's `Binary[BinAdd]`,
+`append(append([]byte(nil), ba(a).b...), y...)`, and in plain Go `fmt.Println(append(id(a.b), y...))` panics while
+`z := append(id(a.b), y...)` and `append(id(a.b), 5)` do not. The cause is goi's back end, `go/arbace/goi/expr.ae`'s `AppendSpread`:
+it evaluated its slice operand `s` twice, once for the value and again for `growCheck`'s length test. A call there ran twice (gc runs
+it once), and a variable that call's argument kills as its last use in the statement (the builder's `kill-arg`, `KillR`: the first
+evaluation clears `a`'s slot) reads nil the second time. Fix: `s` evaluated once, its value given to both. Added the interpreter test
+`test/goi/run/go/t/appendspread.ae` (a call in the slice operand counted, pyi's shape through an interface parameter and a two-result
+return); its `.out`/`.err`/`.exit` are gc's run of the forms printed by repr/go (TamaGo's go1.27.1), and the executable without the fix
+fails it (`calls` 2, then the panic): its negative control. The back end is Go forms compiled into the executable (not a namespace
+RT.toolSource reloads), so the fix is proved by the next train's build: `bin/goi test` and `bin/pyi runtime check` (c-codecs.py) on it.
+Alternative weighed: a builder-side workaround (no kill inside an append's slice operand); rejected, the double evaluation is wrong by
+itself (a side effect runs twice).
+
+f-struct.py: line 13 prints `gc.collect()`, CPython 3.14.10 38 (the unreachable objects its cycle collector found at that point:
+typing's and the import machinery's garbage), pyi 0 (`builtins_gc.ae`'s collect returns `finCollect()`, the finalizable objects Go's
+collector freed). The number is CPython's cycle collector's internal state, not a defined result: the user's `:gc-collector` n/a class
+of 2026-11-23 (refcount/gc internals). Not changed; left to the user (the program could print `isinstance(gc.collect(), int)` with its
+outcome re-recorded, or the row be classed).
