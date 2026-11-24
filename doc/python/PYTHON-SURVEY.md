@@ -8431,4 +8431,15 @@ modules, 595 methods) passed 40 of the 127 rows already (the record predates py-
 - **Proved** (the main host, pyi's AOT, `bin/pyi check --aot --lib-test --fresh --only` over the same 39 modules; the three
   negative controls failing as they must): 288 -> 332 pass, 0 failing, no row of the base's run lost; the launcher's direct
   probes (.tmp/os/t5.py, t8.py) and goi's path (`bin/pyi python` interpreting the checkout's runtime: -c's coding, a CR CR CR LF
-  script, a double coding spec, a non-UTF-8 script path, -O).
+  script, a double coding spec, a non-UTF-8 script path, -O); then 13 modules the later changes touch, whole (3,425 methods,
+  3,212 pass), and test_source_encoding whole again (every row passes). On the compiled path alone, and not on goi's:
+  test_subprocess's test_close_fds and test_pass_fds (the compiled launcher's compile server holds fds 6-13 in the child),
+  test_threading's test_can_interrupt_tight_loops and test_signal's test_stress_modifying_handlers (a compiled tight loop never
+  switches threads), test_cmd_line_script's two null-byte messages.
+- **Left, and whose**: test_regrtest's test_add_python_opts (`_testcapi.config_get('buffered_stdio')` in pyctypes'
+  capi_config, py-accel's world, should read the runtime's -u, -W, -b and -E); test_asyncio's three
+  SelectorEventLoopSignalTests (an OSError subclass's class attribute `errno` over the instance's field: py-core's exception
+  model); test_python_malloc_stats (pymalloc's statistics: proposed n/a); a signal interrupting a blocking socket write
+  (test_sendall_interrupted, test_wsgiref's test_interrupted_write: Go restarts the system call); the wakeup-fd tests
+  (_testcapi), test_jit_is_active (_testinternalcapi), test_c_locale_coercion's two (the UTF-8 mode's stdio errors, 553's),
+  test_compileall's test_workers (ProcessPoolExecutor, 535's), the end's finalization rows (the Mac's).

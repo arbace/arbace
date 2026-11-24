@@ -20349,3 +20349,104 @@ must. bin/reap --record (0 problems; the matrix's five Clojure lines were stale 
 records), bin/crops-score --record, then --judge --strict and bin/records-check: 0 problems. bin/pyi runtime check (goi
 interprets the merged runtime) was still running at the commit: its timeouts under the pin are load, and c-codecs.py's
 `bytearray + bytes` Go panic under goi (fine on AOT) is train-2's own: the same panic at a6f6fdbf3 and before 545.
+
+## 2026-11-24: py-os-1124, Python's processes, command line and OS rows (the burst's host stream py-os)
+
+Base mac/py-mac-1123 (5d93b6732), so its go/arbace/py merges with train 3. Scope (the coordinator's): the eval rows of processes,
+the command line and the OS (the record's :pyi-command-line, :source-decoding, :os-and-files-misc, :signal-timing,
+:run-dir-zip-main, :compileall-pyc, :pyi-main-module, :interactive-mode, :socket-gaps, :hash-algorithm; test_sys and test_cmd_line
+whole, from the Mac's 551), and the library-gap skips outside the others' streams. Grouped by cause from
+test/python/check-lib-test-linux-amd64.edn with divergences.edn's first-class rule (.tmp/goal/pyna/classify.py pointed at the base).
+
+The baseline on the base (pyi's AOT path, `bin/pyi check --aot --lib-test --only` over the 127 scope ids and test_cmd_line,
+test_cmd_line_script, test_source_encoding, test_compileall and test_sys whole; .tmp/os/base.log): many rows of the record pass
+already (py-eval-1122's -X cpu_count and int_max_str_digits, py-mods-1122's __main__ loader, 545's _io, 551's standard streams):
+test_shutil's six zero-copy tests, test_gzip's three, test_json's two broken pipes, test_argparse's six FileType('rb') and two
+zip-directory runs, test_cmd_line_script's six, test_cmd_line's cpu_count, int_max_str_digits and non-interactive buffering,
+test_subprocess's communicate errors (once format keeps surrogates, below), test_os's two pseudo-terminal tests (537's).
+
+Built (go/arbace/py, printed, edited, read back; arbace/python, arbace/repr/python; bin/pyi; tools/pyi/python3):
+- the environment the caller gave: tools/pyi/python3 and the compiled launcher's wrapper keep it in PYI_ENTRY_ENV before bin/pyi
+  adds its own (their shell's PWD and SHLVL undone), posix.environ is it, the added names hidden from os.environ and
+  os.reload_environ until the program sets them (test_subprocess's test_empty_env);
+- sys.argv's bytes (PYI_ARGV) decoded with surrogateescape (test_cmd_line's test_invalid_utf8_arg); -c's command not UTF-8: "Unable
+  to decode the command from the command line:" and status 1 (test_undecodable_code); -c's coding spec ignored
+  (PyCF_IGNORE_COOKIE, native/*ignore-cookie*: test_coding); -mMOD and -cCMD joined (test_quopri's -mquopri);
+- PYTHONPATH (getpath's _Py_abspath, after sys.path[0]; test_large_PYTHONPATH, argparse's module runs, test_cmd_line_script's
+  zip packages, inspect's undecodable path, compileall's no-args run);
+- -O, -OO and PYTHONOPTIMIZE: the compiler's *optimize* (asserts out and __debug__ False from 1, docstrings out from 2), every
+  compile's mode +opt1/+opt2 (the IR cache keys it), compile()'s optimize argument, builtins.__debug__, sys.flags.optimize
+  (compileall's opt-1/opt-2 paths and hard-link dedup, test_support's optim args, test_sys_flags_set);
+- sys.flags from -v, -d, -B and PYTHONVERBOSE, PYTHONDEBUG, PYTHONDONTWRITEBYTECODE (_Py_get_env_flag), hash_randomization from
+  PYTHONHASHSEED and -R; hashes randomized when PYTHONHASHSEED is unset (CPython's default; bin/pyi's own verbs export
+  PYTHONHASHSEED=0 and PYTHONDONTWRITEBYTECODE=1 when unset, the references' environment): test_hash_randomization, test_hash's
+  three test_null_hash, test_sys_flags_set and _not_set;
+- -X importtime (import time lines, cached at 2, the start's error for another value), -X pycache_prefix and PYTHONPYCACHEPREFIX;
+- os.abort dies by SIGABRT (fhDie: SIG_DFL first; test_run_abort), restore_signals (SIGPIPE and SIGXFSZ Go's for the fork, so
+  the child starts with SIG_DFL; test_restore_signals), AF_UNIX getsockname/getpeername with the address's length (Linux
+  abstract names holding NULs: TestLinuxAbstractNamespace's three);
+- str.format keeps surrogates (buildString as code points: difflib's diff_bytes, test_email's five, test_subprocess's two
+  communicate errors); sys.displayhook's unencodable repr written with backslashreplace (test_displayhook_unencodable);
+- source decoding: get_normal_name for exec()'s bytes (test_long_coding_name), every coding spec of the first two lines made inert
+  in a decoded source (test_double_coding_line, _same_line), a script's CR LF and lone CR as LF (test_crlf, crcrlf, crcrcrlf);
+  a script whose path is not UTF-8 read by a prologue (test_cmd_line_script's test_non_ascii); a path inside a zip file is a
+  main importer (argparse's test_directory_in_zipfile);
+- the future features compile() and the REPL inherit (co_flags' CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL, +futA/+futB
+  modes, scope's *inherited-features*, the parser's barry flag): test_future_stmt's REPL, pyrepl's two future tests; ast.parse
+  of a tree too deep for encoding/json is the parser's MemoryError (pyrepl's test_runsource_compile_error);
+- atexit as atexitmodule.c: callbacks run from a copy, reported by sys.unraisablehook, unregister by the comparison's order
+  (test_atexit's test_general).
+- bin/pyi's AOT module keeps the libraries cf2g compiled (clib/LIB/aot, by their nodes' key) across a runtime change (15 minutes
+  saved each).
+
+- a script's coding spec whose bytes the host's charset decodes only by replacing goes to the runtime's own codec
+  (`native/source-text`'s strict CharsetDecoder check, :charset), and the runtime reports a script's decoding error as the file
+  tokenizer does (the codec's message as the SyntaxError, a codec that is no text encoding a SyntaxError): test_source_encoding's
+  test_coding_spec_decode_error and _non_text_encoding;
+- SIGINT's default_int_handler installed at the start (not over an inherited SIG_IGN): test_subprocess's test_send_signal;
+  compile(), exec() and eval() of a str holding a lone surrogate, and str.encode's and bytes.decode's arguments, the UTF-8
+  codec's UnicodeEncodeError (test_code_module's test_unicode_error, test_email's test_invalid_character_in_charset).
+
+Verified on pyi's AOT (the runtime compiled with the change; `bin/pyi check --aot --lib-test --fresh --only`, the controls failing
+as they must each time): the base's 39 modules 288 -> 332 pass, no row of the base's run lost (.tmp/os/v1-run on this host);
+then the modules the later changes touch, whole (test_cmd_line, test_code_module, test_subprocess, test_signal, test_pyrepl,
+test_email, test_source_encoding, test_atexit, test_codecs, test_str, test_future, test_threading, test_hash: 3,425 methods,
+3,212 pass, 210 classed, 3 in no class; .tmp/os/v2-run), against the eval record: 30 rows to pass, and five the record passes
+that this run does not: test_subprocess's test_close_fds and test_pass_fds (the compiled launcher's child keeps its compile
+server's pipes and pidfd at fds 6-13, which the parent's numbers meet; goi's child compiles in process, so the eval path has
+none), test_threading's test_can_interrupt_tight_loops, test_signal's test_stress_modifying_handlers and test_email's
+test_long_lines (CPU-bound under a load average of 70 on the host; rerun below). Direct probes on the compiled launcher (.tmp/os/t5.py: the empty environment, the flags, -O/-OO, three
+random hashes, PYTHONPATH, pycache_prefix, the undecodable command, argv's bytes, importtime, os.abort's -6, restore_signals'
+SigIgn, format, an abstract socket name, the REPL's barry; t6.py: KeyboardInterrupt at SIGINT; t8.py: compileall's opt-1/opt-2
+files and hard links, PYTHONPATH) and on goi's path (`bin/pyi python` interpreting the checkout's runtime: -c's coding spec, a CR
+CR CR LF script, a double coding spec, a non-UTF-8 script path, -O). gofmt, go vet and go test of the printed runtime clean
+(hash_test's PYTHONHASHSEED=0 cases take the zero key themselves now).
+
+Not built, and why: test_regrtest's test_add_python_opts (its worker asserts `_testcapi.config_get('buffered_stdio') == 0`:
+pyctypes' capi_config, py-accel's world, should read py's stdioUnbuffered, warnoptions, bytes_warning and use_environment);
+test_asyncio's three SelectorEventLoopSignalTests (an OSError subclass's class attribute `errno` must win over the instance's
+member field: the exception model, py-core's); test_socket's test_socket_type (gc.is_tracked of a type) and test_hash's
+test_hashable (object() and Hashable): py-core's; test_signal's wakeup-fd tests import _testcapi; test_sys's test_jit_is_active
+imports _testinternalcapi; test_signal's test__thread_interrupt_main and test_regrtest's test_unraisable_exc are the end's
+finalization (the Mac's); test_c_locale_coercion's two are the UTF-8 mode's stdio errors (the Mac's 553); test_compileall's
+test_workers needs ProcessPoolExecutor (535's); test_sendall_interrupted and test_wsgiref's test_interrupted_write need a
+signal to interrupt a blocking socket write (Go restarts the system call); test_cmd_line's test_python_malloc_stats prints
+pymalloc's statistics (CPython's allocator: proposed n/a); test_os's test_closerange and test_socket's test_aead_aes_gcm
+skip on this host (an fd hole; the kernel has no gcm(aes)). The library-gap skips: none outside the others' streams left
+buildable (the remaining :skipped-by-test rows are _elementtree, _tkinter, gdb, _zoneinfo, ctypes, _testbuffer, zstd's
+threads, the UTF-8 mode, Windows/BSD/Solaris/Apple, resources, and subtest ids CPython skips too).
+
+Then test_source_encoding and test_cmd_line_script whole and the two CPU-bound tests again (.tmp/os/v3): test_source_encoding
+all pass (its decoding errors too); test_cmd_line_script's two null-byte rows stay the compiled path's own (the AOT main
+decodes in Go: "source code string cannot contain null bytes"; the record passes them on goi's path); test_threading's
+test_can_interrupt_tight_loops and test_signal's test_stress_modifying_handlers fail again on the compiled path, which runs a
+tight loop as compiled Go with no switch to the other thread; on goi's path (bin/pyi check, the checkout's runtime
+interpreted) V4_PLACEHOLDER.
+
+Records: none written here (the train's build records them). Ready for train 3: py-os-1124. Expected eval rows to move to pass
+(the record's non-passes that pass in these runs, 92, listed in .tmp/os/expected-pass.txt of the worktree: test_cmd_line 15,
+test_argparse 9, test_source_encoding 9, test_cmd_line_script 8, test_subprocess 8, test_email 6, test_shutil 6, test_pyrepl 4,
+test_socket 3, test_gzip 3, test_hash 3, and test_json, test_os, test_buffer, test_code_module, test_quopri 2 each, and
+test_future, test_inspect, test_atexit, test_difflib, test_regrtest, test_support, test_tempfile, test_tools 1 each; 40 of them
+passed on the base already), and on goi's path, which these compiled runs could not exercise (test_compileall imports
+_testmultiphase on the compiled path), test_compileall's eight -O, PYTHONPATH and hard-link rows (shown by .tmp/os/t8.py).
