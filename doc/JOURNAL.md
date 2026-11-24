@@ -20513,3 +20513,23 @@ headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's
 line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
 pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
 -nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
+
+## 2026-11-24: queue 544c, a split shard's program units each a Go package; the toplevel rows pass at the compiled level (the VM)
+
+Branch `544c-ocaml-split-names` from origin/next 440cf0273 (544 and 544b merged through ocaml-1123).
+- The host's ocamldoc shard found 544b's naming fault: a program's units shared the package `ocaml_p<N>`, and unit Odoc_class's class
+  `M_Odoc_class` met j2g's class object of unit Odoc's class, of the same Go name (`Go name M_Odoc_class declared more than once in
+  package ocaml_p17`). Fixed in arbace.o2j's split-packages: a program's own unit a package of its own (`ocaml_p<N>_u_<Unit>`), a plugin
+  likewise (`ocaml_p<N>_d_<Unit>`), the main class alone in `ocaml_p<N>`. Considered: naming the classes apart in j2g (a `_J`-like suffix
+  for classes of a compiled package that is not c2j's): rejected, j2g's change moves every key and the shipped build's names; renaming
+  packages `aot_...` for j2g's A_..._A names: rejected, it brings c2j's static-initializer check (jrt.StartCheck). The per-unit packages
+  are acyclic as the libraries' are (a unit names only those linked before it).
+- Proofs (run): a reproducer (units Odoc, Odoc_class, Repro): before, j2g's collision in `ocaml_p1`; after, 0 collisions, j2g 980 s at
+  5.2 GiB, Go's build 760 s at 8.4 GiB, the program prints `odoc/odoc_class: 63`. The naming test fails on the parent and passes.
+- The three toplevel rows at the compiled level (`bin/oi check --aot --level compiled --only-list`, the whole run under bin/heavy-lock):
+  j2g 3,437 s at 16.2 GB, Go's build 1,602 s at 8.3 GB; caml-tex's ellipses and redirections and self-contained-toplevel/main pass by
+  their own .reference, the same as oi. Recorded by record-only of the run's rows into check-aot-compiled-native.edn, out of
+  divergences-aot-compiled.edn's `:ocamltest-tools`; two controls at that level, which differ. The AOT cell counts the compiled level
+  (cells.edn's `:other-level`): OCaml AOT 518 / 20 / 78 -> 521 / 17 / 78, completeness 0.9561 -> 0.9573. `bin/reap --record`,
+  `bin/crops-score --record`, then `bin/reap`, `crops-score --judge --strict` and `bin/records-check`: 0 problems.
+- Memory: the rows' j2g ran beside another worktree's (20 GB); MemAvailable fell to 8 GB for a few minutes; the coordinator had it finish.
