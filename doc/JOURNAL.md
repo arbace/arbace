@@ -19029,3 +19029,39 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
   recorded again from the frozen jar). CDR15's evaluated fns: EvalFn no longer a leaf costs plain evaluated calls about 9% in the
   microbenchmark; the three oracle cases need only the Java forms part (a Java forms fn's class interpreted as an ordinary class), so
   the evaluated part could be withdrawn, with the speed back, if the user prefers Q1 (b) for the Java forms' fns alone.
+
+## 2026-11-23: Java's jrt open causes (queue 543, the VM; branch `543-java-jrt-causes`)
+
+The brief's causes, on next fa635f636. Built here (commit 170761555):
+- CountDownLatch and Semaphore are jdk26u's (over the translated AbstractQueuedSynchronizer, in the closure since JC5),
+  jrt's hand-written ones removed with their reflection tables, manifest rows, Semaphore's serial twins and jrt's
+  tests of them; both in j2g's class-supers (a test's own latch or semaphore; Semaphore's protected reducePermits).
+  Alternative considered: JC4c's class interfaces on jrt's Go types (Ctor_ methods, manifest rows by hand); not
+  taken: the JDK's own classes give the protected members and the serial form with no Go.
+- ForkJoinPool's delayed tasks (JDK 25): schedule (Runnable, Callable), scheduleAtFixedRate, scheduleWithFixedDelay,
+  cancelDelayedTasksOnShutdown in jrt's own Java ForkJoinPools (a waiter task per delayed task, executed in the pool
+  at once, so the pool does not terminate while one waits, as the JDK's), j2g's fjp-support methods (a void one
+  now written without a return) and their reflection entries for the interpreter.
+- jdk.charsets whole: its 17 sources (share:jdk.charsets) and the 107 files its build generates (gensrc:jdk.charsets:
+  build.tools.charsetmapping's extcs and hkscs, bin/jrt-convert's generate step), ExtendedCharsets the extended
+  provider (Charset's variant), each charset made by jrt's JrtExtCharsets (AbstractCharsetProvider's variant), as
+  F8 did for the standard ones. Not sjis0213.dat (x-SJIS_0213, x-MS932_0213 found, their coding failing).
+- The Buddhist and Japanese calendars: jdk26u's BuddhistCalendar, JapaneseImperialCalendar, LocalGregorianCalendar;
+  jrt's Calendar makes them as jdk26u's createCalendar and Calendar.Builder do, with jdk26u's field masks, getZone
+  and isFullyNormalized; GregorianCalendar's month lengths package-private; JIC's computeTime a variant (a zone that
+  is no ZoneInfo without TimeZone.getOffsets, which TimeZone's variant cuts).
+- jdk.zipfs (12 files): its provider installed through the closed-world ServiceLoader (FileSystemProvider jdk26u's
+  again, its overlay and derivation removed; jdk/provides.txt, bin/jrt provides now reading a module whose first
+  directive is a provides: jdk.zipfs's and jdk.charsets' lines were missed).
+- jrt's ReentrantLock condition is named ReentrantLock$ConditionObject, so AbstractQueuedSynchronizer$ConditionObject
+  is jdk26u's, translated (MyOwnSynchronizer's new ConditionObject()).
+Not built: System.Logger (JCS250 (a), decided: jrt's hand-written types, 1.5 days; an overlay class named
+System$Logger was tried and withdrawn: javac on the converter's tree then resolves System.Logger nowhere else);
+stack-trace line numbers, type-annotation reflection and MethodParameters, the jrt: file system: DECISIONs 543-1 to
+543-3 in the report.
+Follow-ups (2026-11-24): build 4 (07122002d) fixed the first run's findings: ForkJoinPool's delayed tasks now run in trigger
+order (one driver per pool), Calendar.getCalendarType is jdk26u's, and jdk/data carries sjis0213.dat (the tests that enumerate
+the charsets had hit SJIS_0213's missing table). Interp on 37 tests: 11 now passing (t05222, t05398, t05461, t05462, t05653,
+t05691, t05707, t08152, t08176, t08178, t08179), 0 regressions, controls differ; t04789 and t04809 load and stop at JMX
+(:design-also). The compiled run built no program (its build-go under the heavy lock left no output) and was not repeated:
+the allowance's consolidation stopped the task. Interp's rows recorded; the REAP matrix, scores and compiled rows left.
