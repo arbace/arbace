@@ -20577,3 +20577,20 @@ or narrowing, the targets, the control pair): 289 own passes, every recorded own
 Recorded from run 2 (`--judge --record`): own pass 2,438 -> 2,440, ext-floating3 and -17, none lost. `bin/repr-cpp pp-check
 --essential` and `target verify` unchanged. reap and crops-score recorded: C++ read 6,035 / 0 / 248 -> 6,037 / 0 / 246;
 records-check 0 problems.
+
+## 2026-11-24: queue 540c, sqlite3.c's offsetof inside a macro (the VM; branch `540c-c-print-offsetof` from next 3d9bcb313)
+
+On the main host's compiled build, sqlite3.c reads whole. Its level 1 differed at `offsetof(BtCursor, BTCURSOR_FIRST_UNINIT)` and gcc
+rejected the print. The cause: `#define BTCURSOR_FIRST_UNINIT pBt` stands inside struct BtCursor's member list, where the print keeps no
+directive (place-directives! places them only between statement-list items, initializer and enumerator elements). The recovered
+invocation then names a macro the print does not define.
+- repr/c (convert.ae): compute-groups! is given the main file's struct and union member lists (struct-bodies). An invocation one of
+  whose identifiers has its last #define before it inside one of them is printed expanded (dropped-define?): `(offsetof BtCursor
+  :pBt)`, printed `__builtin_offsetof(BtCursor, pBt)`.
+- The reproducer off3.c has a struct with `#define FIRST pBt` among its members, `offsetof(S, FIRST)` and `p->FIRST`:
+  - on 540b's code the print `offsetof(S, FIRST)` is rejected by gcc ("'S' has no member named 'FIRST'");
+  - now the print is `__builtin_offsetof(S, pBt)` and `p->pBt`, gcc accepts it, and the forms read back equal;
+  - an invocation whose macro is defined at file scope (`offsetof(S, LATER)`) is still printed as itself.
+- sqlite3.c moves from :eval-limits to :macro-context (CS82's class: a recovered invocation means another thing where the print
+  stands). Its whole read is the main host's (the compiled build; on the VM the evaluated read is past the budget): `bin/repr-c
+  roundtrip --corpus sqlite --record` with ARBACE_HOST_EXE set to the gate's executable.

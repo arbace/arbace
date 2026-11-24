@@ -2237,6 +2237,36 @@
         (when-not (some (fn [[a v]] (and (<= (long a) (long off)) (< (long off) (long (:to v))) (.contains claimed (:seq v)))) spans)
           (refuse :macro-directive "a directive among a macro invocation's arguments, the invocation printed expanded"))))))
 
+(defn- struct-bodies
+  "Queue 540c: the main file's struct and union member lists, a TreeMap from each list's first offset to its end: a directive
+  there is inside an item, which the print does not keep (place-directives!)."
+  [root]
+  (let [m (java.util.TreeMap.) stack (java.util.ArrayDeque.)]
+    (when root (.push stack root))
+    (loop []
+      (when-not (.isEmpty stack)
+        (let [x (.pop stack)]
+          (when (instance? HashMap x)
+            (when (= (nt x) "StructOrUnionSpecifier")
+              (when-let [l (g x :StructDeclarationList)]
+                (let [a (min-po l) e (max-end l)]
+                  (when (< a e)
+                    (let [prev (.get m (Long/valueOf a))]
+                      (.put m (Long/valueOf a) (Long/valueOf (max e (long (or prev 0))))))))))
+            (doseq [c (children x)] (when (instance? HashMap c) (.push stack c)))))
+        (recur)))
+    m))
+
+(defn- dropped-define?
+  "Queue 540c: the main file's last #define of `nm` before offset `po` stands inside a struct or union member list (`bodies`,
+  struct-bodies), so the print does not keep it: sqlite3.c's `#define BTCURSOR_FIRST_UNINIT pBt` inside struct BtCursor."
+  [^java.util.TreeMap bodies ^String nm ^long po]
+  (when-let [^java.util.TreeMap t (some-> ^HashMap (cx :fn-macros) (.get nm))]
+    (when-let [e (.lowerEntry t (Long/valueOf po))]
+      (let [d (long (.getKey e))]
+        (when-let [b (.floorEntry bodies (Long/valueOf d))]
+          (< d (long (.getValue b))))))))
+
 (defn- compute-groups!
   "The invocations' token groups of the main file: (cx :groups) maps a group's first sequence number to
   {:max last-seq :text invocation-text}. Queue 371: an invocation whose arguments hold a directive line (#if ... #endif inside
@@ -2244,7 +2274,7 @@
   invocation's (place-directives! leaves them to its text); its text keeps each such line on a line of its own (group-text),
   and an invocation whose directives do not make whole conditional families (mac-dir-1.c's `f (` / `#if f(1)` / `0))` /
   `#else` / `1))` / `#endif`, the family ending after the invocation) makes no group: it is printed expanded."
-  [all-toks]
+  [all-toks bodies]
   (let [^bytes src (cx :main-bytes)
         n (alength src)
         src-at (fn [^long po ^String s]
@@ -2313,7 +2343,10 @@
                         (when dirs?
                           (.put ^java.util.TreeMap (cx :macro-spans) (Long/valueOf po) {:to (+ (.-po lt) (count (.-src lt))) :seq (.-seq t)}))
                         (when (and (or (not dirs?) (conditionals-closed? toks dline))
-                                   (or (not line?) (and (not dirs?) (= ln (nth (lex/position mf (.-po lt)) 1)))))
+                                   (or (not line?) (and (not dirs?) (= ln (nth (lex/position mf (.-po lt)) 1))))
+                                   ;; queue 540c: a name of the invocation whose #define the print drops (one inside a struct's
+                                   ;; member list) would not expand in the print: the invocation is printed expanded
+                                   (not (some (fn [^Tok x] (and (= (.-ch x) :IDENTIFIER) (dropped-define? bodies (.-src x) po))) toks)))
                           (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
                                                   ;; the next token's (CS82 (b): a run of groups over a concatenated literal)
                                                   :next (when (< j cnt) (.-seq ^PTok (ts j)))
@@ -2480,7 +2513,7 @@
                                    (.put m (Long/valueOf (long sq)) (into (or (.get m (Long/valueOf (long sq))) []) ps)))
                                  m)}]
         (compute-ranges! ranges tree)
-        (let [groups (when main-file (compute-groups! (tu-tokens tree)))
+        (let [groups (when main-file (compute-groups! (tu-tokens tree) (struct-bodies tree)))
               eds (vec (remove #(contains? #{"<builtin>" "<predefined>"} (item-file %)) eds))
               ;; CS275 (a): a declaration whose other files' tokens all come from files it includes inside it is the main file's
               ;; when each such #include stands between the items of a statement list (the print writes it there, the
