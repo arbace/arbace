@@ -54,6 +54,11 @@
           (recur (rest ss)))))
     tree))
 
+(def ^:dynamic *barry*
+  "PyPARSE_BARRY_AS_BDFL inherited (compile()'s CO_FUTURE_BARRY_AS_BDFL, the REPL's earlier import; py-os-1124): <> is
+  NOTEQUAL from the start"
+  false)
+
 (defn parse-source
   "compile(SOURCE, ...)'s parse of a str source (_PyTokenizer_FromUTF8: no coding spec; new-lines translated, exec
   input ending in one) in `mode` :exec, :eval, :single or :func_type; opts :type-comments, :incomplete, :feature
@@ -67,6 +72,7 @@
         g (grammar)
         p (pk/set-feature-version (pk/parser t (:keywords g) (:soft-keywords g) (:type-comments opts) (contains? #{:single :eval} mode)) (long (or (:feature opts) -1)))
         p (if (= mode :single) (pk/set-single p (:dont-imply-dedent opts)) p)
+        _ (when *barry* (pk/set-barry! p))
         rule (case mode :exec (:file g) :eval (:eval g) :single (:interactive g) :func_type (:func_type g))
         tree (pk/run-parser p rule {:incomplete (:incomplete opts) :single (= mode :single)})]
     (if (#{:exec :single} mode) (future-check tree) tree)))
@@ -78,6 +84,7 @@
         t (if (str/ends-with? t "\n") t (str t "\n"))
         g (grammar)
         p (pk/parser t (:keywords g) (:soft-keywords g) type-comments)]
+    (when *barry* (pk/set-barry! p))
     (future-check (pk/run-parser p (:file g)))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -706,6 +713,11 @@
   (let [n (-> (str/lower-case cs) (str/replace #"[^a-z0-9.]+" "_") (str/replace #"^_|_$" ""))]
     (or (contains? python-codecs n) (contains? python-codecs (str/replace n "." "_")))))
 
+(def ^:dynamic *ignore-cookie*
+  "PyCF_IGNORE_COOKIE (py-os-1124): the source is UTF-8 whatever its coding spec says (-c's command, pymain_run_command;
+  test_cmd_line's test_coding)"
+  false)
+
 (defn source-text
   "compile()'s reading of a source's bytes, ast.parse's (Python/pythonrun.c's _Py_SourceAsString, then
   string_tokenizer.c's decode_str: new-lines translated, the BOM, the coding spec of the first two lines, the text
@@ -740,11 +752,11 @@
                        {:error ["SyntaxError" (str "encoding problem: " cs " with BOM") lineno 0 lineno
                                 (byte-offset->char line size) line]})
                      :else {:cs cs})))
-          r1 (when n1 (spec 1 a (- (long n1) a)))
+          r1 (when (and n1 (not *ignore-cookie*)) (spec 1 a (- (long n1) a)))
           r (cond
               (:error r1) r1
               (:cs r1) r1
-              (and (nil? r1) n2) (spec 2 (inc (long n1)) (- (long n2) (long n1)))
+              (and (nil? r1) n2 (not *ignore-cookie*)) (spec 2 (inc (long n1)) (- (long n2) (long n1)))
               :else nil)]
       (cond
         (:error r) r
@@ -772,7 +784,7 @@
   (let [{:keys [error] stext :text} (source-text bs)]
     (if error
       (str (error-text error) "\n")
-      (let [{:keys [text encoding]} (let [d (try (lex/decode-source bs) (catch Throwable _ nil))]
+      (let [{:keys [text encoding]} (let [d (when-not *ignore-cookie* (try (lex/decode-source bs) (catch Throwable _ nil)))]
                                       (if (and d (:text d)) d {:text stext :encoding "utf-8"}))]
         (try
           (let [tree (parse-text stext false)

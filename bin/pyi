@@ -229,6 +229,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 caller_pwd=$PWD
 cd "$root"
+# py-os-1124: pyi's hashes are CPython's, randomized when PYTHONHASHSEED is unset (go/arbace/py's hash.go); bin/pyi's own
+# verbs run with PYTHONHASHSEED=0 when it is unset (deterministic, as the references' runs), so their children inherit
+# it, and only sys.executable (bin/pyi python) started with an environment that drops it is randomized, as CPython is
+# likewise PYTHONDONTWRITEBYTECODE=1, the references' (sys.flags.dont_write_bytecode, which -B and the variable set since
+# py-os-1124; pyi writes no bytecode cache in any case)
+[ "${1:-}" = python ] || export PYTHONHASHSEED="${PYTHONHASHSEED-0}" PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE-1}"
 
 WORK="$root/.tmp/repr-python/pyi"
 SYNTH="$root/test/python/synth"
@@ -438,7 +444,7 @@ launcher_py() {
   # platform.libc_ver(sys.executable) reads the next line as tools/pyi/python3's (test.support.linked_to_musl)
   printf '#!/bin/sh
 # bin/pyi'"'"'s compiled launcher (queue 284): pyi'"'"'s C library semantics are musl'"'"'s, ld-musl-%s.so.1
-PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
+PYI_ENTRY_ENV=$(env -u PYI_ENTRY_ENV -0 | tr '"'"'\\0\\n'"'"' '"'"'\\036\\035'"'"') PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
 ' \
     "$arch" "$exe" "$w" "$AOT/compiler.sh" "$root/bin/pyi" > "$w.$$"
   chmod +x "$w.$$"; mv "$w.$$" "$w"
@@ -872,6 +878,9 @@ cmd_python() {
     case $1 in
       -c) code=$2; have=c; shift 2; break ;;
       -m) mod=$2; have=m; shift 2; break ;;
+      # -mMOD and -cCMD joined (py-os-1124: test_quopri's "-mquopri")
+      -m?*) mod=${1#-m}; have=m; shift; break ;;
+      -c?*) code=${1#-c}; have=c; shift; break ;;
       # -X options to the runtime (sys._xoptions, -X faulthandler; queue 220), -W options too (sys.warnoptions; queue 328)
       -X) xopts+="$2"$'\n'; shift 2 ;;
       -X*) xopts+="${1#-X}"$'\n'; shift ;;
@@ -887,6 +896,9 @@ cmd_python() {
         # -E and -I: sys.flags.ignore_environment, -I sys.flags.isolated too (PYI_START_FLAGS, queue 296)
         case ${o%%[cm]*} in *E*) sflags+=E ;; esac
         case ${o%%[cm]*} in *I*) sflags+=I ;; esac  # and no site hook before the REPL (queue 298)
+        # -O (each), -v, -d, -B and -R (py-os-1124): sys.flags' optimize (the compiler's level), verbose, debug,
+        # dont_write_bytecode and hash randomization under PYTHONHASHSEED=0
+        local lv=${o%%[cm]*}; lv=${lv//[^OvdBR]/}; sflags+=$lv
         # -b, -bb: sys.flags.bytes_warning and the BytesWarning filter (PYI_BYTES_WARNING; queue 328)
         local bs=${o%%[cm]*}; bs=${bs//[^b]/}; bwarn=$((bwarn + ${#bs}))
         # -E and -I: the runtime's start ignores PYTHONFAULTHANDLER and PYTHONTRACEMALLOC (queue 220)
@@ -940,7 +952,16 @@ cmd_python() {
     # in the -m mode file (sys.path[0] the working directory, set to the path's by the prologue)
     f) case $file in /*) src=$file ;; *) src=$caller_pwd/$file ;; esac; argv0=$file
        local abs=$src
-       if [ -d "$src" ] || { [ -f "$src" ] && pyi_is_zip "$src"; }; then
+       # a path inside a zip file (py-os-1124, test_argparse's test_directory_in_zipfile: ARCHIVE.zip/package/subpackage)
+       # is a main importer too, zipimport's path hook taking it
+       local inzip="" zp=$src
+       if [ ! -e "$src" ]; then
+         while [ "$zp" != "${zp%/*}" ] && [ -n "${zp%/*}" ]; do
+           zp=${zp%/*}
+           if [ -e "$zp" ]; then { [ -f "$zp" ] && pyi_is_zip "$zp"; } && inzip=1; break; fi
+         done
+       fi
+       if [ -d "$src" ] || [ -n "$inzip" ] || { [ -f "$src" ] && pyi_is_zip "$src"; }; then
          src=$d/__pyi_m.py
          printf "(lambda s, p: (s.path.insert(0, p) if s.flags.safe_path else s.path.__setitem__(0, p), __import__('runpy')._run_module_as_main('__main__', False)))(__import__('sys'), %s)\n" "$(pyi_pystr "$abs")" > "$src"
        elif [ -f "$src" ] && pyi_is_pyc "$src"; then
@@ -971,6 +992,28 @@ def __pyi_pyc(file, dir):
 __pyi_pyc(*__pyi_pyc_args)
 PYI_PYC
          } > "$src"
+       elif [ -f "$src" ] && case $(pyi_pystr "$src") in *'\udc'*) true ;; *) false ;; esac; then
+         # a script whose path is not UTF-8 (py-os-1124, test_cmd_line_script's test_non_ascii): the host reads files by
+         # its strings, which lose such a byte, so a prologue reads and compiles it as run_file does, its path the
+         # surrogate-escaped str (__file__, the code's filename, sys.path[0]'s directory)
+         local real; real=$(realpath "$src")
+         src=$d/__pyi_m.py
+         { printf '__pyi_script_args = (%s, %s)\n' "$(pyi_pystr "$abs")" "$(pyi_pystr "${real%/*}")"
+           cat <<'PYI_SCRIPT'
+def __pyi_script(file, dir):
+    import sys, importlib.machinery
+    g = sys.modules["__main__"].__dict__
+    del g["__pyi_script"], g["__pyi_script_args"]
+    if not sys.flags.safe_path and sys.path:
+        sys.path[0] = dir
+    with open(file, "rb") as f:
+        code = compile(f.read(), file, "exec")
+    g["__file__"], g["__cached__"] = file, None
+    g["__loader__"] = importlib.machinery.SourceFileLoader("__main__", file)
+    exec(code, g)
+__pyi_script(*__pyi_script_args)
+PYI_SCRIPT
+         } > "$src"
        fi ;;
   esac
   # pymain_run_file's message: the program's name and the file made absolute (config's run_filename)
@@ -993,6 +1036,8 @@ PYI_PYC
   local lib; lib=$(stdlib_lib)
   echo $$ > "$d/pid"
   cd "$caller_pwd"
+  # sys.argv's bytes (py-os-1124): the runtime decodes them with surrogateescape, as Py_DecodeLocale does
+  local av="$argv0" a1; for a1 in "$@"; do av+=$'\x1f'"$a1"; done; export PYI_ARGV="$av"
   if [ -n "$xopts" ]; then export PYI_XOPTIONS="$xopts"; else unset PYI_XOPTIONS; fi
   if [ -n "$wopts" ]; then export PYI_WARNOPTIONS="$wopts"; else unset PYI_WARNOPTIONS; fi
   if [ "$bwarn" -gt 0 ]; then export PYI_BYTES_WARNING=$bwarn; else unset PYI_BYTES_WARNING; fi
@@ -1159,11 +1204,21 @@ aot_module_rebuild() {
     # cf2g (bin/pyi-clib aot: arbace/clib/bzip2/aot, its init registering the compiled functions); liblzma's and
     # _lzma's likewise, and zstd's and _zstd's, SQLite's and _sqlite3's (queue 215)
     local p
+    # the libraries cf2g compiled (clib/LIB/aot, kept by their nodes' digest, bin/pyi-clib aot's nodes.key) set aside and
+    # put back, so a change to the runtime alone does not compile them again (about 15 minutes; py-os-1124)
+    rm -rf "$AOT/clib-kept"; mkdir -p "$AOT/clib-kept"
+    for p in bzip2 xz zstd sqlite ctypestest; do
+      [ ! -d "$AOT/mod/clib/$p/aot" ] || mv "$AOT/mod/clib/$p/aot" "$AOT/clib-kept/$p"
+    done
     # queue 244: ctypes's world (clib/ctypestest, compiled by cf2g too) and _ctypes's package (pyctypes)
     for p in ci crt clib clib/bzip2 clib/xz clib/zstd clib/sqlite clib/ctypestest pybz2 pylzma pyzstd pysqlite3 pyctypes; do
       rm -rf "$AOT/mod/$p"; mkdir -p "$AOT/mod/$p"
       for f in "$AOT/rt/$p"/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/$p/" ;; esac; done
     done
+    for p in bzip2 xz zstd sqlite ctypestest; do
+      [ ! -d "$AOT/clib-kept/$p" ] || mv "$AOT/clib-kept/$p" "$AOT/mod/clib/$p/aot"
+    done
+    rm -rf "$AOT/clib-kept"
     for p in bzip2 xz zstd sqlite ctypestest; do
       "$root/bin/pyi-clib" aot "$p" "$AOT/mod/clib/$p/aot" || die "bin/pyi-clib aot $p failed"
     done
