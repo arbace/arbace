@@ -20513,3 +20513,39 @@ headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's
 line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
 pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
 -nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
+
+## 2026-11-24: cpp-extfloat, C++23's extended floating-point types in the own front end (branch `cpp-extfloat-1124` from mac/next `440cf0273`)
+
+The burst's C++ read stream for [basic.extended.fp] (P1467R9), built from cpp-sweep (3)'s design note (doc/cpp/CPP-SURVEY.md, "As
+built: cpp-extfloat"). Each rule from the standard's text and g++ 15.2's behaviour, probed by hand with the host's g++ (Alpine
+15.2.0) where named; no GCC or clang code read.
+
+Found: Arbace's own C++ target already defines GCC's extended-floating macros in its GNU half (test/cpp/predef.ae from
+c/target/abi.edn's :floats and cpp/target/dialect.edn's :from-year; `bin/repr-cpp target verify` unchanged), but the own front end
+reads the clang half, as the native reader does, which has none of them. Decision: the own front end (arbace.repr.cpp.diag) adds the
+GNU half's extended-floating lines the clang half lacks (`native/*gnu-floats*`), and takes GCC's suffixes and _FloatN keywords
+(`lit/*gnu-floats*`); the native-check against clang's AST and the code generator keep the clang half. Alternatives weighed: the
+clang half defining them (rejected: it is clang 23's reading of the target, held to clang by `target oracle`); the own front end
+switched to the GNU half whole (rejected for this stream: __clang__, __GNUC__ and every other macro change for the 2,438 own passes,
+a decision of its own); the macros only from C++23 (rejected: GCC defines the __FLTnn_ and __BFLT16_ families at every standard,
+and libstdc++'s c++config.h reads __BFLT16_DIG__).
+
+Built: the types :float32, :float64, :float128n (_Float128, distinct from __float128 as in GCC's C++), :float32x, :float64x, :bf16 with
+sizes, LLVM types and manglings (DF32_, DF64_, DF128_, DF32x, DF64x, DF16b, g++'s); [conv.rank]'s floating ranks and subranks by format
+(subranks _Float32x < _Float64, __float128 < _Float128 from g++'s usual arithmetic conversions); [conv.double]/1's lesser-rank
+conversions GCC's -Wnarrowing pedwarn (an error under -pedantic-errors, -Werror=narrowing, -Werror) and in overload resolution viable
+only alone (g++ by hand); [over.ics.rank]/4.5; [dcl.init.list]/7.2's floating narrowing by ranks, and a requirement's non-constant
+narrowing its substitution failure; a namespace-scope constexpr variable of any type usable in constant expressions (its entry had kept
+only :cx-constexpr, so `constexpr float fx` was "not usable", a bug ext-floating3.C's static_asserts met).
+
+Not built: cpp23/ext-floating12.C, whose <complex> at C++23 is past the read's 300 s (a probe of <complex> with four conversions past
+15 minutes in Sema): the checker's speed over <complex>, left with its cause.
+
+Checked (stage 0, GOMEMLIMIT 1500-2000 MiB, `bin/repr-cpp dg --corpus dg-error --front native --only LIST`): run 1, 291 files (the
+own passes naming a floating type, including a standard header, or read at C++23/26, the targets and the control pair, before the
+narrowing rules): 287 own passes, the two known slow files (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C) past
+300 s as earlier streams met them (their pass rows kept); run 2 at the head, 291 files (the own passes naming requires, a floating type
+or narrowing, the targets, the control pair): 289 own passes, every recorded own pass kept, the control pair failing as it must.
+Recorded from run 2 (`--judge --record`): own pass 2,438 -> 2,440, ext-floating3 and -17, none lost. `bin/repr-cpp pp-check
+--essential` and `target verify` unchanged. reap and crops-score recorded: C++ read 6,035 / 0 / 248 -> 6,037 / 0 / 246;
+records-check 0 problems.
