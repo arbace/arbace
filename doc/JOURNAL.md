@@ -20288,3 +20288,27 @@ Alternatives weighed: a self-dependent satisfaction detected by the concept and 
 that needs it, concepts-recursive-sat4.C, never reaches its friends' constraints, so nothing proved it, and the slice's own re-entries
 through unfinished classes could make it a false error); an ill-formed concept registered as false (left for the atom's rule: the parser
 keeps the type's name as the constraint's expression).
+
+## 2026-11-24: Clojure's records on train 1's build: CDR15 (b), CDR16 (a), `:xml-stream`; Clojure 100 complete (branch `clj-1123`)
+
+The burst's build train 1 (one gate build of next and the ready branches, clj-1123 among them at d50e02e71: fb29d2672f0d7bf945b6,
+built with ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace, whose bytes gate_key hashes). The branch merged the train's
+d9217f672 (the journal's appends unioned) and mac/next 58959ee49 (the matrix and scores taken from next, recorded again below);
+next's later embedded crops' Go forms move the branch's own key, so the runs were made in a record worktree at dc1a6c337 (the
+branch with the train alone), whose key is the build's (`.tmp/probe/records2.sh` there; logs kept in its `.tmp/probe`).
+- The oracle on the four files CDR14 and CDR17-CDR19 changed: 2077 of 2077, as the known file says; native.ae:233, 234 and 237 pass
+  (the Java forms half kept). Smoke: an evaluated ^long fn is no IFn$LL and computes (25).
+- CDR15 (b)'s speed: the pre-CDR15 executables were pruned, so the bench compared the train's executable with stage 0 (an older build,
+  no hand change 39), interleaved, three runs each on a loaded host: calls 731-1021 vs 694-1114 ms, closures 799-1182 vs 751-1208, map
+  361-650 vs 346-623: equal within the noise (about 10%); a clean measure needs a quiet host and two builds of one tree (not run: no
+  extra build in the burst).
+- `bin/clojure-tests --aot --list` (clojure-xml, reflect; under bin/heavy-lock, HEAVY_MEM_GIB 24, 3 h 17 in the queue; j2g 258 s,
+  build-go 202 s): reflect 5 tests 7 assertions all pass ("improved": invoke-checks-accessibility, the event reader's closure),
+  clojure-xml 1 of 1; no regressions. test/arbace-go-aot-results.edn's reflect row recorded.
+- CDR16 (a): `--jdk-extra-build` (the AOT run's cached executable) and the two namespaces at the eval level: clojure-xml 1 of 1, reflect
+  5 tests 7 assertions; test/arbace-go-results.edn records them. The control: the reference on the test build alone (eval-plain.edn
+  overlaid) passes, reflect 4 tests and clojure-xml not run. Found: a relative CLOJURE_TESTS_GO_EXTRA ran nothing (exit 127: each
+  namespace's process runs in the suite's directory), as suite-go-xml's command gives it; bin/clojure-tests now makes it absolute.
+- Classes `:xml`, `:xml-stream` (eval) and `:xml-stream` (AOT) gone. `bin/reap --record`, `bin/crops-score --record`; `--judge --strict`
+  and `bin/records-check`: 0 problems. Clojure: read 909 / 0 / 0, eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), print 1031 / 0 / 0;
+  completeness 100.0 (99.84 at fa635f636).

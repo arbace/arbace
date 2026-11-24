@@ -575,3 +575,24 @@ expected files recorded again from the frozen jar, as CDR14), CDR20 (b) and CDR2
   `:tools-deps` (D6, CDR9); AOT's `:class-files`, `:tools-deps` and `:runtime-source` (2026-11-02).
 - Cells: eval 21,121 / 9 / 2 to 21,122 / 0 / 2 (5 n/a; native.ae:652 passes), AOT 833 / 4 / 1 to 833 / 0 / 1 (4 n/a). The deferred
   rows (`:xml`, `:xml-stream` at eval, `:xml-stream` at AOT) wait for the train's build (CDR16 (a), the event reader's closure).
+
+## As built (2026-11-24, branch `clj-1123`): CDR15 (b), CDR16 (a) and `:xml-stream` on train-1's build
+
+The runs on the shared build of train 1 (fb29d2672f0d, made with stage 0 as the host), from a record worktree at dc1a6c337
+(clj-1123 merged with train 1's d9217f672, whose key is the build's); the branch carries mac/next 58959ee49 beside.
+- The oracle's four changed files (native, state_errors, polymorphism, strings): 2077 of 2077 match, the known file's none there;
+  native.ae:233, 234, 237 (the Java forms half of hand change 39) pass. An evaluated `^long` fn is no `IFn$LL` (CDR15 (b)).
+- CDR15 (b)'s speed: no pre-CDR15 build of the same tree was left (pruned), so the microbenchmark (`.tmp/probe/bench.ae` of the
+  worktree: 6M plain evaluated calls, 6M closure calls, a map over 2M) ran on the train's executable against stage 0 (an older
+  build without hand change 39) on a loaded host, three runs interleaved: calls 731-1021 against 694-1114 ms, closures 799-1182
+  against 751-1208, map 361-650 against 346-623: the same within the host's noise (about 10%); the 9% of hand change 39's
+  evaluated half is neither shown nor excluded by it, and the code is as before hand change 39 on the evaluator's path.
+- `:xml-stream`: `bin/clojure-tests --aot --list` (clojure-xml, reflect) on the build: reflect 5 tests, 7 assertions, all pass
+  (invoke-checks-accessibility 2 of 2), clojure-xml 1 of 1; the AOT reference's reflect row recorded so.
+- CDR16 (a): `--jdk-extra-build` (cached by key from the AOT run) and the two namespaces at the eval level on it: clojure-xml 1 of 1,
+  reflect 5 tests 7 assertions; test/arbace-go-results.edn records them (clojure-xml out of `:skipped`, the skipped test gone); the
+  same reference on the test build alone (eval-plain.edn's overlay) still passes (reflect 4 tests, clojure-xml not run): the control.
+  A relative CLOJURE_TESTS_GO_EXTRA ran nothing (each namespace runs in the suite's directory: exit 127, which the --full step's
+  own relative path would have hit); bin/clojure-tests makes it absolute.
+- Classes: `:xml` and `:xml-stream` gone. Cells: eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), read 909 / 0 / 0, print
+  1031 / 0 / 0: Clojure 100.0 complete.
