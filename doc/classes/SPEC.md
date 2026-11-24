@@ -2193,3 +2193,15 @@ repr/java's `print` (`arbace.repr.java.print`, `bin/repr-java print`, since 2026
    prints a declaration that is the one recorded (its hash the recorded one) as its text, a class
    through its own text with its members in their spans, and one that is not anew: an unedited
    file is the original byte for byte, and javac compiles it to the original's class files.
+
+7. **Java lines** (`bin/repr-java read --line-numbers`, since 2026-11-24, java-stack-1124; the Java
+   check's reads). The forms of the expressions that call carry their Java line as `^{:java/line N}`:
+   a method invocation the line of its `(` (javac's `pos`, where `Gen.visitApply` marks the line,
+   after the arguments), a class instance or array creation and a method reference (its bound
+   receiver's null check) the line of theirs; each top-level `defclass`'s name carries its file as
+   `^{:java/source "F.java"}` (javac's `SourceFile`). They are a record, as `:java/at`: the round
+   trip's and the print level's comparisons leave them out, and the printer ignores them. The
+   analyzer takes a class whose top-level class has `:java/source` as read with its lines: its
+   nodes' `:line` is the forms' `:java/line` alone (never the forms file's line), which j2g's line
+   tables and the interpreter's frames (`Compiler$CF$Frame.line`) give stack traces. Without the
+   option (jdk/'s forms, the corpora) nothing changes.

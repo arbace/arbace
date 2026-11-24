@@ -5408,3 +5408,48 @@ after the gate's executables `36aab1207a6fe6f3a858`; its build 75 min, peak 26.5
   Raw diagnostics' short file names (t06452, t07536) need PathFileObject file objects. `-XDexpectKeys` (t06660) and the error count
   after a plug-in error (t07527) come with `Main.compile` itself. It changes every javac command line on Arbace, so its proof is
   whole runs of the classes, diagnostics and print levels.
+
+## As built: java-stack-1124, stack traces' lines, StackWalker's frames, reflection's access checks (2026-11-24; branch `java-stack-1124`, from next `903ef1ab2`)
+
+The `:stack` class (interp 7 rows, compiled 10) and the reflection rows that need the caller class (t07688, t04829).
+Written ahead of the train's records: the rows each change should move are named, the records are the train's.
+
+- **Where a frame's line comes from.** The JDK's from the class file's LineNumberTable (javac marks each statement and
+  each method invocation after its arguments, `Gen.visitApply`). The Java forms kept no Java line (SPEC §14, 3); the
+  interpreter gave -1 ("Line number: ...a(ChainedExceptions.java)"), j2g's code the forms file's name and line
+  ("File name: ...a(J_t04701_ChainedExceptions.ae:36)"). Now: `bin/repr-java read --line-numbers` (SPEC §14, 7) records
+  `^{:java/line N}` on the forms of invocations (javac's `pos`, the `(`), creations and method references, and
+  `^{:java/source "F.java"}` on each top-level class; `bin/java-check`'s `read_opts` passes it (every read of the
+  check: read, nread, print's reads, `--forms`; the read cache re-keys, test/java/forms/ is regenerated). The analyzer
+  (`body-actx`'s `:java-lines`) takes such a class's node lines from `:java/line` alone (`:line` and `:java-line`).
+  - interp: `Compiler$CF$Node.line` and `Frame.line`; a call node (CallI, CallV, CallR, NewI, NewR, CtorCall,
+    SuperCtor, SuperCall, MakeLambda) stores its line into its frame before the receiver's null check and again after
+    its arguments (`Node.at`); `arbace.classes.interp/node` gives each call node the innermost Java line around it,
+    through `Rt/setLine` looked up by name (the tools' host evaluates interp.ae on the seed's runtime: the TRAP of train
+    3; nil on a runtime without it); `Rt/snapshot` keeps each frame's line with its Meth, `describe` gives six slots,
+    jrt's `interpFrames` reads the sixth.
+  - compiled: j2g's ClassInfo `:Source` from the outermost class's `:java/source` (`java-source`); jrt's `frameOf`
+    names a registered frame's file by its class's Source when that is a `.java` name (`javaSource`); a nested call
+    or creation on a later Java line than its statement's gets `:j2g/line` on its Go form (`expr`), gc's line table
+    then giving it its own line (T7024096).
+- **StackWalker's frames** (jrt's `stackFrames`): the interpreter's frames pop the reflective call under them once per
+  group (each of them popped again, so a program's `m.invoke(...)` frame went with the interpreter's own: HiddenFrames'
+  "No reflection frame", t04613 interp); in a walk jrt's method-handle invokers (`jdk.internal.jrt.Invokers`) and a
+  lambda's class (`$$Lambda`) are hidden (GetCallerClassTest's `invokeExact`, t04612 both levels; HiddenFrames' "Hidden
+  frames are shown", t04613 compiled); a compiled `main` the evaluator called (run.ae's launch at the compiled level)
+  has no frame below it, as an interpreted main entered from outside (WalkFunction's `arbace.core$apply` frame, t04618
+  compiled). j2g's frame table lists a method whose name does not start with a lower case letter (the demangler lowers
+  it: GenerifyStackTraces' `A()` shown as `a`, t04684 compiled).
+- **Reflection's access checks** (jrt's reflect.ae, `checkMemberAccess`): Method.invoke, Constructor.newInstance and
+  Field's accessors without setAccessible check jdk26u's `Reflection.verifyMemberAccess` (the nest by the top-level
+  class's name, protected through a subclass and JLS 6.6.2's target rule, package access by package name, a class
+  file's public flag), the message `newIllegalAccessException`'s; the caller (`reflectCaller`) is the program's class
+  whose code made the call: the first Go frame outside jrt (a compiled class's), or for the interpreter the first Java
+  frame of `stackFrames` past the reflection frames. The run time's and the JDK's callers (Clojure's evaluator and
+  Reflector, the translated JDK) are not checked, nor an unknown one: a lenient default where the JVM would refuse.
+- Rows each change should move (the train's records): t04701, t06142, t06143 at both levels and t06329 interp (lines);
+  t04612 both, t04613 both, t04618 and t04684 compiled (walks); t07688 and t04829 both (access). Not addressed:
+  t04614 compiled (MultiThreadStackWalk's Marker frame, not reproduced without a compiled run), t08164 (a charset
+  encoder's failure that prints `Thread.dumpStack`'s "Stack trace": :stack by its match only), t04611 (the 7-argument
+  StackTraceElement constructor, in jrt since java-design-1122: its records predate it), t06329 compiled (refused: the
+  ClassFile API).

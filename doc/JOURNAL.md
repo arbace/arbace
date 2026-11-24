@@ -20942,3 +20942,27 @@ both. The records need no change.
   test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
   t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
   3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+## 2026-11-24: java-stack-1124, Java's stack traces' lines, StackWalker's frames and reflection's access checks
+
+Branch `java-stack-1124` from mac/next `903ef1ab2`; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-stack-1124", and
+doc/classes/SPEC.md §14, 7. Goal: Java's `:stack` class (interp 7, compiled 10 rows) and the access-check rows t07688, t04829.
+- Lines. The Java forms keep no Java positions (SPEC §14, 3), so neither level could give a frame's line. Chosen: an opt-in
+  read option, `bin/repr-java read --line-numbers`, recording `^{:java/line N}` on the forms that call (javac's invocation
+  pos, the `(`; creations; method references) and `^{:java/source F}` on each top-level class, passed by `bin/java-check`'s
+  reads only. Alternatives: a lines layout of the `.ae` text as repr/go's mode `:lines` (the forms file on the Java lines;
+  much more of the writer, the pretty layout lost); the line on every form (noise, and jdk/'s forms would all change); a
+  side table of .ae lines to Java lines (a second artifact to keep in step). jdk/ and the corpora stay unchanged, so JDK
+  frames keep the forms file's lines; making them Java's is a later choice (a user decision below).
+- The interpreter's frames carry the line of their latest call (javac's rule: after the arguments); interp.ae reaches the new
+  `Rt/setLine` by name (the tools' host evaluates interp.ae on the seed's runtime). j2g names a class's source file from
+  `:java/source`, and a nested call on a later line gets its own Go line.
+- StackWalker: the interpreter's reflective-call popping once per group (it popped a program's `m.invoke` frame), jrt's MH
+  invokers and lambda classes hidden in a walk, no frame below a compiled `main` the evaluator launched, j2g's frame table
+  for methods named with an upper-case first letter.
+- Access checks: jdk26u's Reflection.verifyMemberAccess in jrt's Method.invoke, Constructor.newInstance and Field's
+  accessors, for the program's own callers (the run time's and the JDK's not checked: the JVM's Clojure would reflect
+  through public members, and jrt's variants were never checked).
+- Checks (light): the read of ChainedExceptions with `--line-numbers` (lines as javac's), printed back by repr/java's printer;
+  arbace.classes.analyze/interp and arbace.j2g.* load on stage 0; `bin/jrt build --package jrt` (go build, vet) and the jrt
+  tests of the frames and the access rule; a probe at interp on the gate's executable `40a4745332aacf54acab` (no runtime
+  change: frames as before) showing the MH and reflection walks the fixes address. No gate build: ready for the train.
