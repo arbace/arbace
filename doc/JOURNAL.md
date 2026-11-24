@@ -19164,3 +19164,49 @@ t07545, t07546 and t07552 (javac on Arbace's closed-world processing tests) go t
 through JD3's bytecode loader (the main host's): their golden output needs the processor to run, which getUnnamedModule alone would not
 give. Routing, not n/a: the rows stay deferred in their class until that work lands. Alternative considered: adding
 ClassLoader.getUnnamedModule to jrt here (reaches only proc.processor.cant.instantiate).
+
+## 2026-11-24: queue 556b, the user's 538-1 to 538-4 (Java print)
+
+The user answered report 538's four print DECISIONs (2026-11-24, via the main session; brief
+`tasks/556b-java-print-decisions.md`). Built on 549b-java-module-path 8bc7e8303 (538's print fixes, 549, 549b; train 4).
+- **538-1 (b): t05503 stays deferred** in `:print-type-arguments` until JFS75 (b)'s model carries type arguments. Nothing built. The
+  alternative was recording a raw `new C()` as `^:raw` (this moves the reader hash and many jdk/ forms).
+- **538-3 (a), c91403791: `& | ^` kept on pure boolean operands.**
+  - `arbace/repr/java/convert.ae`'s `logic-form` marks `^:eager`:
+    - the `(and a b)` / `(or a b)` of two pure operands;
+    - every `^`, `(not (= a b))`, whose operands are both evaluated anyway.
+  - `arbace/repr/java/print.ae` prints the marked forms as `&`, `|` and `^`, which javac compiles to iand/ior/ixor, where `&&`, `||`
+    and `!=` branch. The meaning is the unmarked form's.
+  - It moves repr/java's reader hash, so jdk/, jdk/javac, test/java/forms and the fixtures' forms need the host's regeneration
+    batch, as for 538-0.
+  - No tool build was needed: javac's tool loads the changed converter from the checkout (RT.toolSource; the shared arm64 tool,
+    key 97f949b1, run with REPR_JAVA_STALE_OK=1).
+  - The alternative was naming the difference a by-design kind (538-3 (b)).
+- **538-2 (a), 0b19a54fa: a local's slot named.** `test/java/print.ae` gains the kind "a local's slot (a switch's case-group locals
+  in one scope or in each arm's)", in `class-kinds` and in `:print-classes`' pattern.
+  - `counted-kinds`' `slots-only?` names it when two class files' code lines are equal but for their locals' slots (branch and
+    switch targets aside), in methods with a switch.
+  - Each method's slots must map as a function from the original's to the printed Java's.
+  - The alternative was printing the colon form back (538-2 (b)), a larger change on both sides.
+- **538-4 (a), 9bc4c1ffc: RP2 (a)'s compound assignment extended to an inner class's accessor.**
+  - `counted-kinds` compares the lines with the accessors' `access$N` numbered alike.
+  - The written-out side's outer instance (aload, getfield this$N), getter call and iadd/isub, against the compound side's one
+    accessor (the outer instance dup'ed), are the compound kind. So is a renumbering alone.
+  - The alternative was keeping it deferred (538-4 (b)).
+- **Proofs (run, VM):**
+  - `bin/java-check --levels read,print --only` over t03567, t05125, t06072, t05503, t03208 and t03209: t03567, t05125 and t06072
+    pass at print; t05503 fails as recorded; c00001 differs, as a control must.
+  - The kinds' controls are a probe ns over the real class files and their mutations (`.tmp/q556/tools/ctl556.ae`): a slot mapped
+    two ways, no switch, an opcode changed, imul for iadd, a field read for this$0. All are unnamed, and both real cases are named.
+    On 8bc7e8303's print.ae the two real cases are unnamed.
+  - A print regression sample of 122 tests (every 40th print test, plus 40 whose sources use boolean `& | ^`): read 122/122 as
+    recorded; print 121 pass, 1 regression.
+- **The regression, t03457 (cr6712835):** it leaves the named kinds.
+  - Its equals() now compiles to the original's ixor, so no goto differs in Tester_Class_7 any more.
+  - That class's `<init>` difference was already there at 8bc7e8303 (run on its sources): a char field's `&=` of a `|=`, an extra
+    local and dup_x1/pop. Only the set-level control-flow rule, which names a class by any differing goto or return line, had
+    covered it.
+  - Recorded as it is now, in `:print-classes-unnamed`, to triage.
+- **Records:** `--judge --partial --record` of both runs, which re-records the sample's rows; several fuzz tests now have fewer
+  differing class files. Java print, the cell, 3321/0/4 -> 3323/0/2. `bin/reap --record`, `bin/crops-score --record` and
+  `--judge --strict`, `bin/records-check`: 0 problems.
