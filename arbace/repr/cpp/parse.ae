@@ -4971,6 +4971,10 @@
                            (empty? (mapcat :ptrs chain)) (empty? (mapcat :sufs chain))
                            (let [tt (some-> base0 :ent :ty)] (and (map? tt) (= :f (:t tt)) (re-find #"const|volatile|&" (str (:q tt))))))
                       (soft-diag! p ni (str "non-member function '" (or nm "") "' cannot have cv-qualifier"))
+                      ;; ([dcl.constexpr]/? : a constexpr destructor is C++20's: before it GCC's "'constexpr' destructors only
+                      ;; available with '-std=c++20'", at the specifier (an error under -pedantic-errors); cpp0x/locations1.C)
+                      (and fs (:dtor lp) (:constexpr ds) (< (.-year p) 2020) (:b ds))
+                      (pedantic-diag! p (long (:b ds)) "'constexpr' destructors only available with '-std=c++20'")
                       ;; ([class.compare.default]/1 is C++20's: a comparison operator defaulted before it is GCC's pedwarn "defaulted
                       ;; 'operator==' only available with '-std=c++20'", an error under -pedantic-errors; cpp0x/spaceship-eq1.C)
                       (and fs (#{"==" "!=" "<" ">" "<=" ">=" "<=>"} (:op lp)) (is? p "=") (is-at? p 1 "default") (< (.-year p) 2020))
@@ -6457,7 +6461,11 @@
       (do (skip-balanced! p) (expect! p ";") [])
       (do (expect! p "(")
           (let [c (with-gt p true (parse-assign-expr p))
-                m (when (accept! p ",") (with-gt p true (parse-assign-expr p)))]
+                m (when (accept! p ",") (with-gt p true (parse-assign-expr p)))
+                ;; (cpp-rind: a static_assert-declaration without its message is C++17's: before it GCC's pedwarn "'static_assert'
+                ;; without a message only available with '-std=c++17'", an error under -pedantic-errors; cpp0x/static_assert8.C)
+                _ (when (and (nil? m) (is? p ")") (< (.-year p) 2017) (main-tok? p b))
+                    (pedantic-diag! p b "'static_assert' without a message only available with '-std=c++17'"))]
             (expect! p ")")
             (let [e (last-ix p)]
               (expect! p ";")
@@ -6849,8 +6857,24 @@
                       (and (or (is? p "&") (is? p "=")) (or (is-at? p 1 "]") (is-at? p 1 ","))) (do (adv! p) (recur inits))
                       ;; the init-captures' initializers (the converter finds each by its offset; clang lists one for every
                       ;; capture, a simple one's the variable it names, which the forms do not need)
-                      (is? p "this") (do (adv! p) (recur inits))
-                      (and (is? p "*") (is-at? p 1 "this")) (do (adv! p) (adv! p) (recur inits))
+                      (is? p "this") (do ;; (cpp-rind: `this` captured explicitly beside a `=` capture-default is C++20's (P0409):
+                                         ;; before it GCC's pedwarn "explicit by-copy capture of 'this' with by-copy capture default only
+                                         ;; available with '-std=c++20'", an error under -pedantic-errors; cpp1z/lambda-this1.C)
+                                         (when (and (t= (tok-at p (inc b)) "=") (< (.-year p) 2020) (not (skim? p)) (main-tok? p (ix p)))
+                                           (pedantic-diag! p (ix p) "explicit by-copy capture of 'this' with by-copy capture default only available with '-std=c++20'"))
+                                         ;; (cpp-rind: [expr.prim.lambda.capture]/2, `this` captured once: GCC's "already captured 'this'
+                                         ;; in lambda expression")
+                                         (when (and (some #(t= (tok-at p %) "this") (range (inc b) (ix p))) (not (skim? p)) (main-tok? p (ix p)))
+                                           (soft-diag! p (ix p) "already captured 'this' in lambda expression"))
+                                         (adv! p) (recur inits))
+                      (and (is? p "*") (is-at? p 1 "this")) (do ;; (cpp-rind: a *this capture is C++17's: before it GCC's pedwarn
+                                                                    ;; "'*this' capture only available with '-std=c++17'", an error under
+                                                                    ;; -pedantic-errors; cpp1z/lambda-this1.C)
+                                                                    (when (and (< (.-year p) 2017) (not (skim? p)) (main-tok? p (ix p)))
+                                                                      (pedantic-diag! p (ix p) "'*this' capture only available with '-std=c++17'"))
+                                                                    (when (and (some #(t= (tok-at p %) "this") (range (inc b) (ix p))) (not (skim? p)) (main-tok? p (ix p)))
+                                                                      (soft-diag! p (ix p) "already captured 'this' in lambda expression"))
+                                                                    (adv! p) (adv! p) (recur inits))
                       :else
                       (let [amp (accept! p "&")]
                           (accept! p "...")
