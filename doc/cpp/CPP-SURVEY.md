@@ -11018,3 +11018,33 @@ syntax errors (the parser's recovery). concepts-placeholder5.C needs a never-ins
 auto(x)); concepts-friend2.C an operator== lookup sure of no candidate; concepts-explicit-spec7.C A<int>::B<int>'s qualifier.
 Overload resolution's, passed to cpp-decl2: concepts-return-req1.C, concepts-memfun4.C (ambiguity by constraints), template/crash126.C's
 line 12 (copy-initialization from a prvalue before C++17).
+
+## As built: cpp-decl2 (3), overload resolution by constraints and the left list (2026-11-24; branch `cpp-decl2-1123` after next `97a71ba55`)
+
+The coordinator's third round: cpp-tpl2's three overload-resolution rows (concepts' satisfaction stays cpp-tpl2's) and the left list.
+
+- [over.match.best.general]/2.6 (CWG 2789) and [temp.func.order]/6: constraints order two candidates only between equivalent function
+  parameter lists (template.ae's more-specialized-fn?: as many parameters, an ellipsis in both or neither; f() requires C<T> against
+  f(...) ambiguous, cpp2a/concepts-return-req1.C) and never between members of different classes (`*no-constraint-order*`, tiebreak).
+- Using-declarations ([namespace.udecl]/14): a base member a using-declaration brought in is no declaration the class's own member
+  redeclares (find-redecl had merged S::f into B::f), and the class's member hides it only with the same trailing requires-clause
+  (`cx-udecl-hide!`, either order); an implicit object parameter of a member without ref-qualifier is not compared with an rvalue
+  reference's binding ([over.ics.rank]/3.2.3: `B::g(this S&&)` against `S::g()`); explicit object parameters of another class type
+  declared in the checker (B<>'s `g(this S<T>&&)` had dropped B<> whole); -Wno-error=c++23-extensions makes the explicit object
+  parameter's pedwarn no error.
+- [class.member.lookup]/6: a function or data member found in two bases' classes is an ambiguous lookup (class-lookup, the main file's
+  classes); a built-in operator's class operand with conversion functions to one type from several bases an ambiguous conversion
+  (class->scalar). cpp2a/concepts-memfun4.C.
+- Before C++17 a copy from a prvalue of the class that no constructor can take ([class.temporary]/1, cx-elided-copy!), and the
+  declaration-or-expression disambiguation taking a class template's template-id for no declarator-id (`A<int, int>(A<int, int>());` an
+  expression, template/crash126.C).
+- A virtual base's data member through a null pointer constant or in offsetof (GCC's "invalid access to non-static data member ... of
+  NULL object"), and a braced list's several refused elements each reported (other/offsetof8.C).
+
+Checked: the record run over the same 2,706 files (23:56-01:16 UTC): own pass 2,364 -> 2,377 with the kept timeout rows, none lost (parse/
+error17.C and concepts/diagnostic1.C nearer: one line each left); 4 rows to own pass (cpp2a/concepts-memfun4, concepts-return-req1,
+template/crash126, other/offsetof8); mac/next merged (cpp-tpl2 (3), 5 rows), the 9 rows read again on the merged tree, all passing, the
+control pair failing. C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a); completeness 0.9810 -> 0.9812.
+
+Left: overload/using2.C, cpp0x/implicit-trivial1.C, lambda-anon1.C, noexcept71.C, tc1/dr147.C, override2.C, parse/access13.C,
+inherit/virtual2.C, cpp0x/pr66443-cxx11.C and init/ptrfn2.C (GCC's places), cpp23/ext-floating*.

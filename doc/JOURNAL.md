@@ -20251,3 +20251,23 @@ the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 fa
 it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
 a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
 Rides train 2.
+
+## 2026-11-24: cpp-decl2 (3), overload resolution by constraints, member lookup ambiguity, and the left list (branch `cpp-decl2-1123` after next `97a71ba55`)
+
+The coordinator handed over three rows from cpp-tpl2 (concepts-return-req1, concepts-memfun4, crash126's line 12; the satisfaction of
+constraints stays cpp-tpl2's, coordinated through mac/next only). Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl2 (3)"): the more
+constrained template only between equivalent parameter lists ([temp.func.order]/6.2) and never between members of different classes
+(CWG 2789); using-declared base members neither redeclared by nor hidden from the class's own unless the requires-clause agrees
+([namespace.udecl]/14); [over.ics.rank]/3.2.3's exclusion of implicit object parameters without ref-qualifier; ambiguous member
+lookup across bases and ambiguous conversion functions of several bases; explicit object parameters of another class kept in the
+checker; pre-C++17 elided copies with no viable constructor; a template-id as no declarator-id; the NULL object member access and
+offsetof through a virtual base; several refused list elements each reported.
+
+Alternatives weighed: for the using-declaration, keeping find-redecl's merge and comparing the constraint at overload resolution
+(rejected: the merge replaced the base member's definition by the derived one's, a wrong function for the code generator too); for the
+list elements, a placeholder value per refused element (rejected: its conversion would make errors of its own; the elements are
+reported and the declaration still refused).
+
+Checked: the record run 23:56-01:16 UTC over 2,706 files: own pass 2,364 -> 2,377 (the two timeouts' rows kept), none lost, 4 rows to
+own pass; mac/next merged (cpp-tpl2 (3)), the 9 rows read again on the merged tree, all pass; the control pair fails as it must. `bin/reap --record`, `bin/crops-score
+--record`, `--judge --strict`, `bin/records-check`: 0 problems; C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a), completeness 0.9810 -> 0.9812.
