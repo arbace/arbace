@@ -19262,3 +19262,26 @@ Built on 556b-java-print-decisions 326cd1f02. Both fixes move repr/java's reader
   week's allowance).
 - **The 128-test sample** at read and print: print has 2 now passing (t06039, t06072), 4 reasons changed (fuzz rows) and 0
   regressions; read is as recorded. Recorded with `--judge --partial --record`.
+
+## 2026-11-24: queue 556d, the ?: arms' promotion (from the main session)
+
+Built on 556c's 1e042215a.
+
+**Census** of the 128-test sample's unnamed `code:` reasons (`.tmp/q556/tools/census.ae`, `census.txt`), by class file:
+- A widening cast in a ?: arm: i2s 5, l2f/i2l 1, l2d/i2l 1, f2d/i2f 1 (7 classes, 5 tests).
+- A literal arm loaded as another constant: 3 classes (t03453 ldc float, t03457 and t03567 ldc2_w double).
+- t03457's char `&=` temporary: 1 class.
+
+**f19b5580a, the promotion shape.**
+- `convert.ae`'s `conditional` marks `^:promoted` a primitive branch that the coercion widened to the ?:'s type.
+- `print.ae` prints the branch without the cast (`promoted-branches`, in `cond-text` and `target-text`). javac writes an i2s for an
+  explicit `(short)` of a byte, and none for the promotion.
+- A returned or yielded `if` with such a branch is printed as the source's ?:, not as if statements, so its forms round-trip.
+- Explicit casts stay: t03567's `(short) (byte) 'S'` arm is printed as written. That is the negative control.
+- The change moves repr/java's reader hash, and `^:promoted` marks every mixed-type numeric ?: in jdk/ (the host's regeneration
+  batch).
+
+**The sample** at read and print: t03454 and t03455 now pass, 3 reasons changed, 0 regressions; read is as recorded. Recorded with
+`--judge --partial --record`.
+
+**Left** (written up; the week's allowance): the literal arms (t03453, t03457, t03567) and t03457's char `&=` temporary.
