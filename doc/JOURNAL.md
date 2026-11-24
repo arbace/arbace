@@ -20557,3 +20557,17 @@ without the conflict markers 9b60ce498 had left; the survey's markers, which thi
   only), test_posix (test_posix_spawnp past the 8 GB cap on goi), test_unicodedata (failed_import past the cap after the
   module's heavy tests), and every row covered by id alone. Python eval 40,827 / 1,404 / 1,308 -> 40,829 / 1,404 / 1,306.
   `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 553's two DECISIONs applied (the VM; branch `553-py-subinterp-testbuffer`)
+
+- **DECISION 553-1 (a), the user: n/a.** test_subprocess's test_pass_fds_redirected leaves `:child-is-pyi` for a new n/a class,
+  `:go-runtime-descriptors`: Go's runtime opens its network poller's two descriptors (epoll and eventfd, at 3 and 4) before any
+  Python runs, in every pyi process, so a child listing its open descriptors (fd_status.py) sees them beside the passed ones.
+  Not taken: (b) a patch to Go's runtime moving them above 255 in pyi's two builds, (c) keeping it by design.
+- **DECISION 553-2 (a), the main session, by the same rule as the user's 537-2: test_os' BytesFwalkTests.test_fd_finalization
+  goes to `:finalization`** (reference counting's moment: closing the wrapper generator unwinds its frame, and CPython closes the
+  inner os.fwalk generator, which closes its directory descriptors, when the frame's for-loop drops it; pyi when Go's collector
+  finds it). Not taken: (b) closing the generators a frame's for-loops hold as it unwinds (wrong when another reference holds one).
+- Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
+  -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
+  `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
