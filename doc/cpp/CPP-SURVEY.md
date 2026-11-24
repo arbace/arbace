@@ -11188,3 +11188,48 @@ literal pointer comparisons of cpp1y/constexpr-89074-3.C (a global's, a literal'
   types not both standard GCC's pedwarn "converting to ... with greater conversion rank" (-Wnarrowing: an error under -pedantic-errors
   or -Werror=narrowing), and overload resolution's [over.ics.rank]/4.3 (a conversion to a type of equal rank better, of equal subrank
   better still: ext-floating12.C).
+
+## As built: cpp-singles, the Left lists' single rows (2026-11-24; branch `cpp-singles-1124` from mac/next `440cf0273`)
+
+The burst's C++ read stream "cpp-singles": the single-row causes of today's Left lists (one file each, diagnosed), cheapest first,
+P2564's escalation, the extended floating types, the read-independence inputs, the printer and the parser's recovery after a broken
+template head left to their streams. Each rule from the standard's text and g++ 15.2's behaviour (the tests' records, and the host's
+g++ by hand on probes where named); no GCC or clang code read. The checker's (arbace.cpp.sema with *on-refusal* bound, `checking?`),
+diag.ae's tree checks and the parser's diagnostics; the code generator's paths unchanged (each new sema or template branch under
+`checking?`).
+
+- **Special members and access**: an implicit copy constructor ([class.copy.ctor]/10.2) whose subobject's chosen constructor is
+  inaccessible is deleted surely (`cx-access-deleted?`), its use "use of deleted function" and its reason at the class, as
+  cx-deleted-implicit! reports a subobject's deleted member (cpp0x/implicit-trivial1.C; the move constructor stays queue 509's
+  unsure deletion); a constructor odr-used by an initialization its access error leaves out still instantiated (`:cx-odr-used`, the
+  lazy instantiation's round: cpp1y/pr66690.C's D<int>::D()).
+- **GCC's places**: a subobject's implicit initialization refused in a constructor with mem-initializers at the last mem-initializer's
+  closing token (cpp0x/pr66443-cxx11.C), a base's inaccessible default constructor without mem-initializers at the body's brace
+  (`base-default-init`); an array element of an empty aggregate from a non-class expression, brace elision leaving it over, GCC's
+  "initializer for 's' must be brace-enclosed" at the list's closing brace (`cx-empty-agg-elide!`, init/ptrfn2.C); a constinit
+  variable's implicit call of a function not constexpr (a converting constructor of the temporary a reference binds) also at the
+  initializer (`:cx-init-range`, cpp2a/constinit11.C's line 43); <initializer_list>'s own error, the pointer to a reference type,
+  an error outside the main file (`:cx/header-error`, cpp0x/initlist-array4.C).
+- **Declarations and names (the parser)**: access declarations (`A::E::V;`, [class.access.dcl] of C++98, GCC's deprecated form in
+  every mode) read as the using-declarations they stand for (`access-decl?`); an unscoped enumerator in a class where a
+  using-declarator named a variable or a dependent value conflicts ([basic.scope.scope]/4, parse/access13.C); [class.qual]/2's
+  `A::A` where a type stands names the constructor (DR 147), a qualified constructor name outside its class with no parameter list
+  "expected constructor, destructor, or type conversion", and `template<> template<> A<char>::A<char>(char)` no longer taken for
+  that error (tc1/dr147.C); a noexcept-specifier outside a complete-class context, an alias-declaration's or a friend function's,
+  looks a member declared later up in vain ("'B' was not declared in this scope", cpp0x/noexcept71.C); `struct X<int> final {}` of a
+  non-template X GCC's "'X' is not a class template", the class taken (cpp0x/override2.C); a base-clause naming a non-template with
+  template arguments gives the class-specifier up, the class declared incomplete (inherit/virtual2.C); a parameter with two type
+  specifiers declares no name (init/new52.C); a class-head-name qualified by its own namespace, GCC's "extra qualification not
+  allowed" (parse/qualified2.C).
+- **diag.ae's checks**: DR 1612's members of an anonymous union captured by a lambda (`anon-union-captures`,
+  cpp0x/lambda/lambda-anon1.C); a static member function of a derived class over a base's virtual function of the same signature,
+  both GCC's errors (`static-overrides`, inherit/pure1.C); a redefinition's note at the earlier declaration, which a dg-error's later
+  top-level branch takes as g++'s notes do (arbace.repr.cpp.dg/read-own's alt-hits over the own notes: override2.C's `has a previous
+  declaration|previously declared here`).
+- **Templates and the rest**: a final base in a class template's specialization (cpp0x/override2.C's D4<B2>); an explicit
+  specialization of a constructor template found among the class's :ctor-tmpls; an explicit specialization qualified by a member
+  class template's specialization (`A<int>::B<int>::g`, ool-qualifier's nested-name-specifier read backward over template-ids:
+  cpp2a/concepts-explicit-spec7.C); a VLA's bound analyzed so its immediate invocations are evaluated (cpp2a/consteval34.C's line 25);
+  C++23's auto(x) a prvalue of the operand's decayed type (cpp23/concepts-err1.C); a friend class declaration makes no function ADL
+  could find, so the associated namespaces stay sure (sure-assoc-nss: cpp2a/concepts-friend2.C's operator== surely missing);
+  __builtin_conj's type (other/error26.C).
