@@ -19156,3 +19156,29 @@ under `ulimit -v` 24 GiB so that a runaway fails fast.
   `.tmp/oc/compiled-b.sh` at 5de1b38d0): the small rows (gc-roots/globroots_sequential, lib-threads/signal and delayintr, the Dynlink
   rows pr4229, domains and init-info) and the suite's opam rows under one ticket of 16 GiB, then the compiler-libs programs (ocamldoc's
   five and the 16 tool rows) in one shard under one ticket of 40 GiB, each under `ulimit -v`.
+
+## 2026-11-24: ocaml-1123: the compiled reruns' results; ocamldoc's shard too large; the light whole re-record held back
+
+- Small rows at the compiled level (`ocaml-b`, one ticket of 16 GiB): lib-dynlink-pr4229/main, lib-dynlink-domains/main and
+  lib-dynlink-init-info/test pass (the Mac's 544); gc-roots/globroots_sequential times out at 120 s of CPU here too;
+  lib-threads/signal and delayintr receive no signal at the compiled level either ("No signal received": OC216 (a)'s HostSys signals
+  do not reach these tests' sigint helper's kill). The rows are merged into `test/ocaml/check-aot-compiled-native.edn` (no cell moves:
+  the Dynlink rows pass at the light level already).
+- The suite's compiled opam rows: built (shard of two, build-go 22.2 GB peak); opam/fmt/test_fmt exits 0 and opam/base64/test 1, but
+  the compiled suite judged them against references they have none of (fixed, ec2f3e2c3: the compiled suite's judgment by the tests'
+  own verdicts, as the light one's; its record not re-judged yet). base64's two failures are its `base64` command (bos's run_io:
+  "run ['base64']: No such file or directory" at the compiled level; /bin/base64 is a symlink to coreutils: ExtProc's lookPath or jrt's
+  ProcessBuilder at this level).
+- The compiler-libs programs in one shard (ocamldoc's five beside the 16 tool rows, one ticket of 40 GiB): j2g 4,489 s at 25.0 GB,
+  then Go's compile of the shard's package passed 45 GB and was stopped by this session (MemAvailable 9 GB) before `ulimit -v` would have
+  failed it and the shard's bisection rebuilt its halves. The 16 tool rows run again alone (their first build peaked at 31.8 GB; one
+  ticket of 36 GiB, `ocaml-b`'s `.tmp/oc/compiled-b2.sh`, queued). ocamldoc's five wait on a smaller shard package (ocaml.u holds every
+  clib unit a shard's programs reach in one Go package: the Go compiler's memory grows with it).
+- The light level's whole re-record (`bin/oi check --aot --record`, finalize.sh, 15:17 to 21:56 on a loaded host): +3 passes as
+  expected (globroots_parallel, globroots_parallel_spawn_burn, int64-unboxing), delayintr and signal in `:unix-java`, globroots_sequential
+  slow; but four rows regress outside any class: lib-marshal/intext_par and regression/pr3612 time out (each passed at 193-210 s of
+  wall on 2026-11-22, near the limit), weak-ephe-final/weaklifetime fails its line-53 assertion (a weak pointer full more than two
+  collections after its erase: the simulated collections' timing), statmemprof/custom now finishes with a different output (its known
+  entry's kind is the timeout). A passing row stays a pass: the record is held back (the run kept as the worktree's
+  `.tmp/oc/check-aot-native.light-run.edn`) until the four are rerun alone on a quiet host, with the ticket lock (Gil.ae) suspected for
+  the two parallel ones and checked against the old lock.
