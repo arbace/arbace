@@ -7361,6 +7361,10 @@
     (when-let [fid (or (when (= :ctor (:i r)) (:fn r)) (when (= :ctor (:i (:then r))) (:fn (:then r))) (:cx-ctor r))]
       (let [f (fnd fid)]
         (when (and (#{:private :protected} (:access f)) (:cls f) (not (:implicit f)))
+          ;; (cpp-singles: the constructor is odr-used all the same, [basic.def.odr]/? -- access is checked after overload
+          ;; resolution, the choice stands --, so a class template's member constructor is instantiated though the error
+          ;; leaves the initialization out: its own errors reported, cpp1y/pr66690.C's D<int>::D(); instantiate-lazy's)
+          (when (:lazy f) (upd-fn! fid assoc :cx-odr-used true))
           (if (:cx-global ctx)
             (fail :access "'" (:name f) "' is a " (name (:access f)) " member of '" (:name (abi/cls (:cls f))) "'")
             (cx-access! ctx (:cls f) (:name f) (:access f) nil nil))))))
@@ -12431,6 +12435,19 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Functions' bodies
 
+;; (cpp-singles, the checker: a base's default-initialization by a user-provided constructor without mem-initializers, whose
+;; constructor is inaccessible: GCC's access error at the body's opening brace, where it checks the deferred accesses, not at the
+;; declarator as its other errors there; cpp1y/pr66690.C's D<int>::D() over the private B::B())
+(defn- base-default-init
+  [t ctx f]
+  (if (and (checking?) (not (:implicit f)) (not (:defaulted f)) (empty? (:inits f)) (get-in (:body f) [:range :begin :offset]))
+    (try (init-for t nil ctx :default)
+         (catch arbace.lang.ExceptionInfo e
+           (if (and (= :access (:codegen/refused (ex-data e))) (not (:cx/node (ex-data e))))
+             (throw (ex-info (.getMessage e) (assoc (ex-data e) :cx/node {:range {:begin (get-in (:body f) [:range :begin])}})))
+             (throw e))))
+    (init-for t nil ctx :default)))
+
 (defn- ctor-inits
   "A constructor's mem-initializers as [{:base bid :init} ...] and [{:field i :init} ...] in initialization order."
   [ctx f]
@@ -12490,11 +12507,11 @@
                            x (get given [:base (:cls b)])]
                        {:base (:cls b) :idx i :at (get at-of [:base (:cls b)]) :init (cond (contains? (:pre-inits f) (:cls b)) (get (:pre-inits f) (:cls b))
                                                          (contains? given [:base (:cls b)]) (init-of t x)
-                                                         :else (init-for t nil ctx :default))})))
+                                                         :else (base-default-init t ctx f))})))
        ;; the virtual bases, which the complete object's constructor initializes ([class.base.init]/7)
        :vbases (vec (for [v (abi/vbases-init cid)]
                       (let [t {:k :class :id v}]
-                        {:base v :init (if (contains? given [:base v]) (init-of t (get given [:base v])) (init-for t nil ctx :default))})))
+                        {:base v :init (if (contains? given [:base v]) (init-of t (get given [:base v])) (base-default-init t ctx f))})))
        :fields (vec (for [fl (:fields c)]
                       (let [x (get given [:field (:name fl)])]
                         {:field (:i fl) :at (get at-of [:field (:name fl)])
