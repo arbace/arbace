@@ -3362,7 +3362,16 @@
             (cond
               (nil? qn) (assoc ds :e (last-ix p))
               (or (:op lp) (:dtor lp) (:conv lp) (:lit lp)) (do (seek! p save) (assoc ds :e (last-ix p)))
-              (type-ent? e) (recur (assoc ds :type (pack-indexed p {:t :n :s (name-str p qn) :ent e :qn qn})) words)
+              (type-ent? e) (do ;; (cpp-singles: [class.qual]/2, a nested-name-specifier nominating class C followed by C names
+                                ;; C's constructor, not the injected-class-name, where a declaration's type stands (DR 147; DR 318's
+                                ;; elaborated-type-specifier, base-specifier and mem-initializer aside): GCC's "'N1::A::A' names the
+                                ;; constructor, not the type", at the name, the declaration taken; tc1/dr147.C's `A::A a;`)
+                                (let [ps (:parts qn) n (count ps)]
+                                  (when (and decl-ctx (>= n 2) (:s lp) (nil? (:args lp)) (= (:s lp) (:s (nth ps (- n 2))))
+                                             (nil? (:args (nth ps (- n 2)))) (type-ent? (:q qn)) (not (:tparam (:q qn)))
+                                             (id? p) (not (skim? p)) (main-tok? p save))
+                                    (soft-diag! p save (str "'" (name-str p qn) "' names the constructor, not the type"))))
+                                (recur (assoc ds :type (pack-indexed p {:t :n :s (name-str p qn) :ent e :qn qn})) words))
               (and (concept-ent? e) (or (is? p "auto") (and (is? p "decltype") (is-at? p 2 "auto"))))
               (let [cn (name-str p qn)]
                 (if (is? p "auto") (adv! p) (dotimes [_ 4] (adv! p)))
@@ -4359,6 +4368,15 @@
                                  x (when (accept! p "=") (if (skim? p) (do (skip-until! p #{"," "}"}) nil) (parse-cond-expr p)))
                                  n (node p "EnumConstantDecl" b (last-ix p) {:name cn :loc (loc p b) :inner (vec (concat as (when x [x])))})]
                              (sc/declare! es {:k :var :name cn :enumerator true})
+                             ;; (cpp-singles: [basic.scope.scope]/4, an unscoped enumeration's enumerator in a class scope where a
+                             ;; using-declarator (or an access declaration) named a variable or, through a dependent qualifier, a
+                             ;; value: the two correspond and conflict, GCC's "'V' conflicts with a previous declaration" at the
+                             ;; enumerator; parse/access13.C)
+                             (when-let [o (and (not scoped) (= ctx :member) (not (skim? p)) (main-tok? p b)
+                                               (get (sc/names-of (sc/decl-scope (scope p))) cn))]
+                               (when (and (or (and (:udecl o) (= :var (:k o))) (and (:udecl-dep o) (:unres o)))
+                                          (not (:enumerator o)))
+                                 (soft-diag! p b (str "'" cn "' conflicts with a previous declaration"))))
                              (when-not scoped (declare! p {:k :var :name cn :enumerator true}))
                              (recur (conj out n))))
                          :else (perr p "an enumerator")))))
@@ -4756,6 +4774,14 @@
               nm (when qn (name-plain qn))
               nn (:s lp)
               e0 (long (:e d))
+              ;; (cpp-singles: a qualified constructor name outside its class with no parameter-declaration-clause after it, the
+              ;; parenthesis an initializer's -- `template<> A<int>::A<int>(A<int>::x);`, whose x is no type --: no declaration
+              ;; [class.ctor.general]/1 derives; GCC's "expected constructor, destructor, or type conversion before '(' token", at
+              ;; the parenthesis; tc1/dr147.C)
+              _ (when (and ctor (nil? fs) (#{:top} ctx) qn (> (count (:parts qn)) 1) (:i lp) (not (skim? p)) (main-tok? p (long (:i lp))))
+                  (let [k (inc (long (or (:ae lp) (:i lp))))]
+                    (when (t= (tok-at p k) "(")
+                      (soft-diag! p k "expected constructor, destructor, or type conversion before '(' token"))))
               ;; (round 54: DR2237, C++20's [class.ctor.general]/1 and [class.dtor]/1: a constructor's or destructor's declarator-id
               ;; is no simple-template-id; GCC's pedwarn, -Wtemplate-id-cdtor)
               _ (when (and fs (>= (.-year p) 2020) (:args lp) (or (and ctor (= ctx :member) (not (and (:friend ds) (> (count (:parts qn)) 1)))) (:dtor lp)))
@@ -5047,9 +5073,12 @@
               ;; (round 54: [class.qual]/2, `X<T>::X<T>()`: the name after a nested-name-specifier nominating X is X's constructor,
               ;; which takes no template arguments; GCC's "names the constructor, not the type")
               ;; (queue 365: not when the qualifier is a namespace, `template<> int f::f<int>(int)` of namespace f's function f)
+              ;; (cpp-singles: not in an explicit specialization of a member template, `template<> template<> A<char>::A<char>(char);`
+              ;; of A's constructor template, which GCC takes: tc1/dr147.C)
               _ (when (and fs qn (:args lp) (:s lp) (>= (count (:parts qn)) 2)
                            (= (:s lp) (:s (nth (:parts qn) (- (count (:parts qn)) 2))))
-                           (not= :ns (:k (:q qn))))
+                           (not= :ns (:k (:q qn)))
+                           (not (and tmpl (zero? (long (:n tmpl 0))) (>= (long (:depth tmpl 1)) 2))))
                   (soft-diag! p (long (:i lp)) (str "'" (:s lp) "::" (:s lp) "' names the constructor, not the type")))
               ;; (round 54, second pass: [dcl.spec.auto.general], a function declared with a placeholder return type is not virtual;
               ;; GCC's "virtual function cannot have deduced return type")
@@ -5836,7 +5865,7 @@
                                                             :type-concept (= "TemplateTypeParmDecl" (:kind (first ps)))})
                     [(node p "ConceptDecl" hb e (cond-> {:name nm :loc (loc p ni) :inner ps} cx (assoc :constraintExpr cx)))])))
             :else
-            (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps})
+            (do (st! p THDR {:names (vec (remove nil? names)) :n (count names) :params ps :depth depth})
                 (let [ns (try (parse-external-decl p (if (= ctx :member) :member :top)) (finally (st! p THDR nil)))
                       ws (mapv #(cond-> (wrap-template p % hb ob ps names depth) rc (assoc :requiresClause rc)) ns)]
                   ;; (round 54: [temp.param]/14, a primary class, variable or alias template's parameter pack is its last parameter)
@@ -5998,9 +6027,12 @@
                      (range (:b a) (inc (long (:e a))))))
     false))
 
-(defn- parse-using [^P p]
+(defn- parse-using
+  ([^P p] (parse-using p false))
+  ([^P p access?]
   (let [b (ix p)]
-    (adv! p)
+    ;; (cpp-singles: an access declaration, `A::E::V;` in a class, is a using-declaration without its keyword, access-decl?)
+    (when-not access? (adv! p))
     (cond
       (is? p "namespace")
       (do (adv! p)
@@ -6113,7 +6145,21 @@
                                               (if *full-headers* {:_text (tok-text p b e)} {})))]
                       (if (accept! p ",") (recur out) out))))]
         (expect! p ";")
-        out))))
+        out)))))
+
+(defn- access-decl?
+  "cpp-singles: whether the member-declaration at the cursor is an access declaration, a qualified-id alone before `;` (C++98's
+  [class.access.dcl], removed by C++11, which GCC takes in every mode with its warning \"access declarations are deprecated in
+  favor of using-declarations\", as the using-declaration it stands for: parse/access13.C's `A::E::V;`)."
+  [^P p]
+  (loop [i (ix p) want-id true colons 0]
+    (let [^T t (tok-at p i)]
+      (cond
+        (and want-id (= :id (.-k t))) (recur (inc i) false colons)
+        (and want-id (= 0 colons) (t= t "::") (= i (ix p))) (recur (inc i) true 1)
+        (and (not want-id) (t= t "::")) (recur (inc i) true (inc colons))
+        (and (not want-id) (t= t ";")) (and (pos? colons) (not (t= (tok-at p (ix p)) "::")))
+        :else false))))
 
 (defn- parse-static-assert [^P p]
   (let [b (ix p)]
@@ -6209,6 +6255,7 @@
           (when (and (= ctx :block) (not (skim? p)) (main-tok? p b) (not (is-at? p 2 "="))) (soft-diag! p b "'namespace' definition is not allowed here"))
           (parse-namespace p))
       (t= t "using") (parse-using p)
+      (and (= ctx :member) (not (skim? p)) (access-decl? p)) (parse-using p true)
       ;; (cpp-read, 2026-11-22: a using-directive's attribute-specifier-seq, [namespace.udir]/1)
       (and (t= t "[") (is-at? p 1 "[")
            (let [save (ix p)] (attr-nodes p) (let [r (and (is? p "using") (is-at? p 1 "namespace"))] (seek! p save) r)))

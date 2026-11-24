@@ -3292,7 +3292,9 @@
                 ;; (cpp-s15, CP392 (a): its tokens as the preprocessor gave them when the parser kept them, a macro's
                 ;; expansion where its name stands: <vector>'s `using _GLIBCXX_STD_C::vector;`)
                 (let [t (or (:_text n) (node-text n))
-                      [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
+                      [_ target] (or (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
+                                     ;; (cpp-singles: an access declaration, the using-declaration without its keyword, `C::x;`)
+                                     (re-find #"^\s*([^;\s][^;]*);?\s*$" (or t "")))
                       ;; (cpp-s4: a pack expansion, `using _Build_FUN<_Ind, _Tp, _Ti>::_S_fun...;` of variant's _Build_FUNs,
                       ;; [namespace.udecl]/1, [temp.variadic]/5: the declaration once per element of the packs its qualifier
                       ;; names, the members each one finds together)
@@ -7953,6 +7955,21 @@
       [out items]
       (let [[x r] (elide-sub (first ts) items)] (recur (rest ts) r (conj out x))))))
 
+;; (cpp-singles, the checker: [dcl.init.aggr]/16, an array's element of an aggregate class with no element (no base, no named
+;; non-static data member) from an expression of a type that is no class: no implicit conversion makes the element from it, so
+;; its braces are elided and the class takes no item, the expression left over; GCC's "initializer for 's' must be
+;; brace-enclosed" at the list's closing brace, init/ptrfn2.C's `s array[] = { (fptr1)0 };`)
+(defn- cx-empty-agg-elide!
+  [el items src]
+  (let [u (abi/unq el)]
+    (when (and (checking?) (abi/class? u) (:list-end src) (aggregate? u) (empty? (aggr-subs u 0)))
+      (when-let [x (some #(when (and (map? %) (not (#{:init-list :default-init :value-init} (:op %))) (:ty %)
+                                     (not (abi/class? (abi/unq (abi/non-ref (:ty %))))) (not= :init-list (:k (:ty %))))
+                            %)
+                         items)]
+        (throw (ex-info (str "codegen: initializer for '" (:name (abi/cls (:id u))) "' must be brace-enclosed")
+                        {:codegen/refused :init :cx/node {:range {:begin (:list-end src) :end (:list-end src)}}}))))))
+
 (defn- brace-elide
   "The braced list `src` for the aggregate `u` with its elided braces restored (fully braced), when some are elided."
   [u src]
@@ -8094,7 +8111,8 @@
               ;; (cpp-diag-b, 2026-11-22: C++98's [dcl.init.aggr]/? takes a scalar element from an expression: braces around one are
               ;; GCC's "braces around scalar initializer"; C++11's list-initialization takes them, [dcl.init.list]/3.9)
               _ (when (and (checking?) (< (long *cxx-year*) 11) (abi/scalar? (abi/unq el)) (some #(= :init-list (:op %)) items))
-                  (fail :scalar-braces "braces around scalar initializer"))]
+                  (fail :scalar-braces "braces around scalar initializer"))
+              _ (cx-empty-agg-elide! el items src)]
           (if (and (= 1 (count items)) (= :str (:op (first items))) (#{:char :schar :uchar :char8 :wchar :char16 :char32} (abi/bn (abi/unq el))))
             (do (cx-string-fits! (first items) tu) {:i :string :e (first items) :n (:n tu)})
             ;; (the elements not written value-initialized: analyzed only when there are some, [dcl.init.aggr]/5)
@@ -11361,6 +11379,8 @@
                      (and (:_desigs n) (some some? (:_desigs n))) (assoc :desigs (:_desigs n) :desig-node n)
                      ;; (cpp-decl2: the elements' nodes, an array element's error at its element)
                      (checking?) (assoc :item-nodes (vec (kids n)))
+                     ;; (cpp-singles: the list's closing brace, the place of GCC's errors at its end, cx-empty-agg-elide!)
+                     (and (checking?) (get-in n [:range :end :offset])) (assoc :list-end (get-in n [:range :end]))
                      ;; (cpp-ce2: a union's member the list initializes, the semantic form's `field`: its designator's)
                      (get-in n [:field :name]) (assoc :field (get-in n [:field :name])))
     ;; a default member initializer's place in a semantic list (the native parser's fill, [dcl.init.aggr]/5.1): the
@@ -12701,6 +12721,14 @@
             ;; function's analysis left, init/pr29043.C; with mem-initializers GCC's place is theirs, left as before)
             _ (when (and (checking?) *at* (= :ctor (:kind f)) (not (:implicit f)) (:range (:node f)) (empty? (:inits f)))
                 (reset! *at* (:node f)))
+            ;; (cpp-singles: with mem-initializers, GCC's place of such a refusal is the mem-initializer-list's last token, the
+            ;; last mem-initializer's closing parenthesis or brace: a base initialized before any mem-initializer's expression is
+            ;; analyzed had the last node of an earlier function, cpp0x/pr66443-cxx11.C's `C::C () : A( 1 )` over B's deleted
+            ;; default constructor)
+            _ (when (and (checking?) *at* (= :ctor (:kind f)) (not (:implicit f)) (seq (:inits f)))
+                (let [r (some #(or (:range %) (:_range %)) (reverse (:inits f)))]
+                  (when-let [e (:end r)]
+                    (when (:offset e) (reset! *at* {:range {:begin e :end e}})))))
             inits (when (= :ctor (:kind f)) (when-not (:implicit f) (trace #(ctor-inits ctx f))))
             ;; (CP362 (a), the user 2026-11-11: a consteval constructor's body, which only checks (basic_format_string's runs
             ;; the format string's scanner at compile time), is not evaluated by the code generator: the immediate invocation
@@ -13043,6 +13071,20 @@
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The program
+
+;; (cpp-singles, the checker: an implicit copy constructor ([class.copy.ctor]/10.2) whose subobject's constructor, chosen by
+;; overload resolution from the copy's source, is inaccessible from the class is deleted surely, so that its use is GCC's "use of
+;; deleted function" and its reason, the access error, is reported at the class where it is implicitly defined ("'A::A(T&) [with
+;; T = A]' is private within this context" on the class's line, cpp0x/implicit-trivial1.C). The move constructor stays queue 509's
+;; unsure deletion (a deleted defaulted move constructor is no candidate, [class.copy.ctor]/10), as do the assignments and the
+;; default constructor; a class of a header, a template's specialization or a closure not judged.
+(defn- cx-access-deleted?
+  [id e]
+  (let [f (fnd id) c (abi/cls (:cls f)) p0 (first (:ps (:ty f)))]
+    (boolean (and (checking?) (:implicit f) (= :access (:codegen/refused (ex-data e))) (= :ctor (:kind f)) (not (:cx-move f))
+                  (= 1 (count (:ps (:ty f)))) (= :ref (:k p0)) (= (:cls f) (class-id (:to p0)))
+                  (string? (:name c)) (:cx-node c) (not (header-node? (:cx-node c))) (not (:header c)) (not (:targs c)) (not (:lambda c))
+                  (re-find #"^codegen: '[^']+' is a (private|protected) member of " (str (.getMessage e)))))))
 
 (defn analyze-implicit!
   "An implicit (or defaulted) special member's definition (analyze-implicit*!); a deleted call in it is the member's
@@ -13580,7 +13622,8 @@ protected:
                                                  (upd-fn! id assoc :deleted true :tinits nil
                                                           :deleted-sure (boolean (and (checking?) (or (re-find #"call to a deleted function" (str (.getMessage e)))
                                                                                                       ;; (queue 510: a subobject surely without a default constructor)
-                                                                                                      (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e))))))
+                                                                                                      (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e)))
+                                                                                                      (cx-access-deleted? id e))))
                                                           ;; (queue 463: the subobject's deleted member, for cx-deleted-implicit!)
                                                           :cx-sub-deleted (when (and (checking?)
                                                                                      ;; (an assignment deleted for a reference or const member, [class.copy.assign]/7.2-3:
@@ -13588,6 +13631,9 @@ protected:
                                                                                      (not (and (= "operator=" (:name (fnd id)))
                                                                                                (some #(or (abi/ref? (:ty %)) (:c (:ty %))) (:fields (abi/cls (:cls (fnd id))))))))
                                                                             (or (second (re-find #"call to a deleted function (\S+)" (str (.getMessage e))))
+                                                                                ;; (cpp-singles: the subobject's inaccessible copy constructor, cx-access-deleted?)
+                                                                                (when (cx-access-deleted? id e)
+                                                                                  (second (re-find #"^codegen: '([^']+)' is a " (str (.getMessage e)))))
                                                                                 ;; (queue 510: the subobject surely without a default constructor,
                                                                                 ;; GCC's "no matching function for call to 'B1::B1()'" at the class)
                                                                                 (when (and (= :ctor (:kind (fnd id))) (:cx/no-default-sure (ex-data e)))
