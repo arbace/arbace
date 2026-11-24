@@ -5635,6 +5635,15 @@
                   (throw (ex-info (.getMessage x#) (assoc d# :cx/at ~use)))
                   (throw x#))))))))
 
+(defn- ce-mutable-member
+  "cpp-rind: [class.copy]'s trivial copy reads every non-static data member: the first mutable one of class `cid`, its bases' and
+  its class-type members' ([name of its class, name]), or nil."
+  [cid ^long depth]
+  (when-let [c (and (< depth 8) (abi/cls cid))]
+    (or (some (fn [fl] (when (and (:mutable fl) (:name fl)) [(:name c) (:name fl)])) (:fields c))
+        (some (fn [b] (ce-mutable-member (:cls b) (inc depth))) (:bases c))
+        (some (fn [fl] (let [t (abi/unq (:ty fl))] (when (and (abi/class? t) (not (:mutable fl))) (ce-mutable-member (:id t) (inc depth))))) (:fields c)))))
+
 (defn- ce-init
   "CP378 (a): the value an initializer (init-for's) gives an object, a reference or a parameter of type `t` (nil: the
   initializer's own expression's type)."
@@ -5653,7 +5662,14 @@
                    (if (:to i) (update l ::path into (or (ce-base-path (:id (abi/unq (:ty i))) (:to i)) (not-constant "a base subobject"))) l))
       :ctor (if cls? (ce-construct (:id u) (:fn i) (:args i) env nil) (not-constant "a constructor's call for " (pr-str t)))
       :zero-then (if cls? (ce-construct (:id u) (:fn (:then i)) (:args (:then i)) env (ce-zero-of u)) (not-constant "an initializer :zero-then"))
-      :copy (ce-glvalue (:e i) env)
+      :copy (do
+              ;; (cpp-rind, the checker: [expr.const]/5.9 (C++14 on) and /2 of C++11, a trivial copy reads every subobject, and a
+              ;; mutable one of an object whose lifetime began outside the evaluation -- a namespace-scope variable's -- is no
+              ;; constant: GCC's "mutable 'S::n' is not usable in a constant expression"; cpp0x/constexpr-mutable2.C)
+              (when (and (checking?) cls? (= :var (:op (:e i))) (not (contains? env (:id (:e i)))))
+                (when-let [[c f] (ce-mutable-member (:id u) 0)]
+                  (ub! (:e i) "mutable '" c "::" f "' is not usable in a constant expression")))
+              (ce-glvalue (:e i) env))
       :zero (if u (ce-zero-of u) 0)
       :none (if cls? {::cls (:id u)} 0)
       ;; (cpp-rt-own2: an array of characters from a string literal, its code units and zeros to its bound, [dcl.init.string]:
