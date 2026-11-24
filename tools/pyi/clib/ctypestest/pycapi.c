@@ -212,3 +212,16 @@ void *PyExc_ZeroDivisionError;
 void *PyExc_BaseExceptionGroup;
 void *PyExc_EncodingWarning;
 void *PyExc_PythonFinalizationError;
+
+/* _PyDateTime_InitTypes (Modules/_datetimemodule.c; queue 521): CPython's core readies the datetime module's static types
+   and fills their dicts (timedelta.min, date.max, timezone.utc, ...) once at the interpreter's start
+   (Python/pylifecycle.c's pycore_init_types), before any PyInit__datetime; arbace/pyctypes calls this before the
+   module's first PyInit. Its PyStatus (Include/cpython/initconfig.h)
+   by value, its _type (0: _PyStatus_TYPE_OK) returned. */
+struct pyi_status { int _type; const char *func; const char *err_msg; int exitcode; };
+struct pyi_status _PyDateTime_InitTypes(void *interp);
+int pyi_datetime_init_types(void)
+{
+    struct pyi_status s = _PyDateTime_InitTypes((void *)0);
+    return s._type;
+}

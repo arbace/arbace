@@ -28,6 +28,9 @@
 #define SIZEOF_LONG_DOUBLE 16
 #define SIZEOF_PID_T 4
 #define SIZEOF_TIME_T 8
+/* configure's answer for this target (musl's struct tm has tm_zone and tm_gmtoff): _datetime's local timezone takes the
+   zone's name and offset from the struct tm _PyTime_localtime fills, not from strftime's %Z (py-accel, 2026-11-23) */
+#define HAVE_STRUCT_TM_TM_ZONE 1
 #define SIZEOF__BOOL 1
 #define ALIGNOF_MAX_ALIGN_T 16
 #define WITH_DOC_STRINGS 1

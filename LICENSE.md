@@ -231,6 +231,14 @@ covers what.
   `Modules/clinic/_csv.c.h`, and of `Modules/mmapmodule.c`'s UNIX paths with `Modules/clinic/mmapmodule.c.h`, from the same release
   tarball, by hand on 2026-11-05: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF
   License Agreement for Python 3.14 (text below).
+- `go/arbace/py/builtins_io.ae`, `builtins_io_iobase.ae`, `builtins_io_bytesio.ae`, `builtins_io_stringio.ae`,
+  `builtins_io_fileio.ae`, `builtins_io_buffered.ae`, `builtins_io_textio.ae` and `builtins_io_zguard.ae` (queue 545, the
+  user's 535-2 (a): pyi's module `_io`, the C side of io; doc/python/PYTHON-SURVEY.md, "As built: 545"): ports to Go of
+  CPython 3.14.10's `Modules/_io/_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`, `bufferedio.c` and
+  `textio.c`, with their `Modules/_io/clinic/*.c.h`, from the same release tarball (SHA-256 de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032),
+  with 3.15.2's differences from its tarball (SHA-256 8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), by
+  hand on 2026-11-23: Copyright (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement
+  for Python 3.14 (text below).
 - `go/arbace/py/builtins_faulthandler.ae`, `builtins_lsprof.ae`, `builtins_termios.ae`, `builtins_tracemalloc.ae` and
   `monitoring.ae` (queue 220, PYS22 (a): pyi's modules `faulthandler`, `_lsprof`, `termios`, `_tracemalloc` and
   sys.monitoring's call-family events; doc/python/PYTHON-SURVEY.md, "As built: 220"): ports to Go of CPython 3.14.10's
@@ -614,7 +622,12 @@ covers what.
   the full API's mode, and since queue 456 its `Modules/_testclinic.c` (with `Modules/clinic/_testclinic.c.h` and
   `_testclinic_depr.c.h`), `Modules/_testclinic_limited.c` (with its clinic header) and `Modules/_testbuffer.c`, and
   since py-capi-1122 its `Modules/_testmultiphase.c` (with `Modules/clinic/_testmultiphase.c.h`) and
-  `Modules/_testsinglephase.c` (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
+  `Modules/_testsinglephase.c` (and the accelerators: since queue 521 its `Modules/_datetimemodule.c` and `Modules/_decimal/_decimal.c`,
+  the latter over libmpdec, `Modules/_decimal/libmpdec/` (Copyright (c) 2008-2020 Stefan Krah, under the BSD 2-Clause License,
+  section "libmpdec: BSD 2-Clause License" below), and since py-accel (2026-11-23) its `Modules/_zoneinfo.c` and
+  `Modules/_elementtree.c`, the latter over the tarball's Expat, `Modules/expat/` (under the MIT License, section "Expat: MIT
+  License" below), through the glue files `tools/pyi/clib/ctypestest/accel_*.c`, whose `accel_elementtree.c` copies
+  `Modules/pyexpat.c`'s capsule table and unknown-encoding handler, under the PSF License Agreement) (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
   functions), compiled against its `Include/` in the limited API's mode
   (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256 `de414a57...b72032`; Copyright
   (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement, section "CPython: the PSF
@@ -4230,7 +4243,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## Expat: MIT License
 
 The `COPYING` of Expat 2.9.0 as CPython 3.14.10 vendors it (`Modules/expat/COPYING`); it covers `go/arbace/expat.ae`
-and `go/arbace/expat/` (above):
+and `go/arbace/expat/`, and Expat's C as `go/arbace/clib/ctypestest/` holds it built (above):
 
 ```
 Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper
@@ -4425,6 +4438,38 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## libmpdec: BSD 2-Clause License
+
+The notice of libmpdec as CPython 3.14.10 vendors it (`Modules/_decimal/libmpdec/`, each file's header); it covers that
+library as `go/arbace/clib/ctypestest/` holds it built (above):
+
+```
+Copyright (c) 2008-2020 Stefan Krah. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
 ```
 
 ## musl: MIT License
