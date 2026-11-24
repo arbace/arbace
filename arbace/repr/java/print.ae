@@ -2099,6 +2099,27 @@
 
 (declare recv-instantiated)
 
+(defn- marked-compound
+  "For a ^:compound (set! P V) (a compound assignment on a boxed place, queue 556c): [OP rhs-form] of Java's P OP= rhs,
+  V read as the converter writes P OP rhs (narrowed, its boolean & | through temporaries, ^ as (not (= P rhs))); else nil."
+  [env place v]
+  (let [v (strip-tag v)
+        v (if (and (seq? v) (= 2 (count v)) (#{"unchecked-byte" "unchecked-short" "unchecked-char" "unchecked-int"
+                                                  "unchecked-long" "unchecked-float"} (str (head v))))
+            (strip-tag (second v)) v)
+        h (str (head v))]
+    (cond
+      (and (= h "let") (= 3 (count v)) (= 4 (count (second v))) (#{"and" "or"} (str (head (nth v 2)))))
+      [(if (= "and" (str (head (nth v 2)))) "&" "|") (nth (second v) 3)]
+      (and (#{"and" "or"} h) (= 3 (count v))) [(if (= "and" h) "&" "|") (nth v 2)]
+      (and (= h "not") (is? (second v) '=) (= 3 (count (second v)))) ["^" (nth (second v) 2)]
+      (and (compound-ops h) (= 3 (count v))) [(compound-ops h) (nth v 2)]
+      :else nil)))
+
+(def ^:dynamic *prefix-stmt*
+  "True while a statement (set! P (inc P)) marked ^:prefix is printed: ++P, as the source wrote it (queue 556c)."
+  false)
+
 (defn- assign-text
   "Java's assignment of `v` to place text `pt` for place form `place` (a value)."
   [env place pt v value?]
@@ -2111,7 +2132,7 @@
                                          (#{"unchecked-byte" "unchecked-short" "unchecked-char"} (str (head (strip-tag v)))))
                             c))]
     (if (#{"++" "--"} op)
-      (e (if value? P-UNARY P-POSTFIX) (if value? (str op pt) (str pt op)))
+      (e (if (or value? *prefix-stmt*) P-UNARY P-POSTFIX) (if (or value? *prefix-stmt*) (str op pt) (str pt op)))
       (e P-ASSIGN (str pt " " op " " (if (and opn (long-ops opn))
                                        (long-literal-text env rhs P-ASSIGN)
                                        (ex-text env rhs P-ASSIGN)))))
@@ -3999,7 +4020,13 @@
   "An expression statement's text (an assignment written as one: x++, not ++x)."
   [env x]
   (cond
-    (is? x 'set!) (second (assign-text env (second x) (place-text env (second x)) (nth x 2) false))
+    ;; ^:compound: the source's compound assignment on a boxed place, P OP= rhs (queue 556c)
+    (and (is? x 'set!) (:compound (meta x)) (marked-compound env (second x) (nth x 2)))
+    (let [[op rhs] (marked-compound env (second x) (nth x 2))]
+      (str (place-text env (second x)) " " op "= " (ex-text env rhs P-ASSIGN)))
+    ;; ^:prefix: the source's ++x as a statement on a boxed place, whose code javac makes without x++'s old value (queue 556c)
+    (is? x 'set!) (second (binding [*prefix-stmt* (boolean (:prefix (meta x)))]
+                            (assign-text env (second x) (place-text env (second x)) (nth x 2) false)))
     (is? x 'aset) (let [[_ a & more] x
                         place (apply list 'aget a (butlast more))]
                     (second (assign-text env place (place-text env place) (last more) false)))
