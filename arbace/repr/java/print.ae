@@ -1932,6 +1932,8 @@
                     (and c (re-find #"\*|[+-]L|[+-]T" targs)
                          (= (str/replace c "/" ".") (erase (:scope env) tform)))))))))
 
+(declare promoted-branches)
+
 (defn target-text
   "Form `x` where Java converts it to jtype `jt` (of declared type form `tform`, when known): an
   integer literal there that the forms left unboxed is a long (the converter boxes an int
@@ -2008,7 +2010,8 @@
      (str "(" (fi-instance-text env x) ") " (second (ex env x)))
      (and tform (conditional-form? x) (#{"if" "when" "when-not"} (str (head x))) (nil? (meta-tag x)))
      (let [[_ c a b] (case (str (head x)) "if" x "when" (cons 'if (when-branches x)) "when-not" (list 'if (nth x 1) nil (nth x 2)))
-           [a b] (unbox-branches env a b)]
+           [a b] (unbox-branches env a b)
+           [a b] (promoted-branches env a b)]
        (str (ex-text env c P-OR) " ? " (target-text env a jt tform) " : "
             ;; the false branch is a conditional expression (or a lambda): an assignment there
             ;; is parenthesized, c ? a : (x = b)
@@ -2273,8 +2276,17 @@
   [(if (and (boxing-call? a) (non-wrapper-ref? env b)) (second a) a)
    (if (and (boxing-call? b) (non-wrapper-ref? env a)) (second b) b)])
 
+(defn- promoted-branches
+  "The branches of a ?: without the widening the converter wrote for its binary numeric promotion, ^:promoted
+  (queue 556d): Java's promotion widens implicitly (javac writes an i2s for an explicit (short) of a byte, none for
+  the promotion)."
+  [env a b]
+  (let [w (fn [x] (if (and (seq? x) (= 2 (count x)) (:promoted (meta x))) (second x) x))]
+    [(w a) (w b)]))
+
 (defn- cond-text [env c a b]
-  (let [[a b] (unbox-branches env a b)]
+  (let [[a b] (unbox-branches env a b)
+        [a b] (promoted-branches env a b)]
     (e P-COND (str (ex-text env c P-OR) " ? " (ex-text env a P-ASSIGN) " : " (ex-text env b P-COND)))))
 
 (declare pattern-text)
@@ -3472,7 +3484,13 @@
         "do" (body-lines env (rest x) ctx)
         "let" (let-lines env x ctx)
         "letclass" (letclass-lines env x ctx)
-        "if" (let [[_ c a b] x] (if-lines env c a b ctx))
+        "if" (let [[_ c a b] x]
+               ;; a value whose branch the converter widened by the ?:'s promotion (^:promoted) is the source's ?:,
+               ;; printed as one (as if statements its branches' widenings would be written; queue 556d)
+               (if (and (#{:return :yield} ctx) (some #(and (seq? %) (:promoted (meta %))) [a b])
+                        (expr-form? env x))
+                 (value-stmt env x ctx)
+                 (if-lines env c a b ctx)))
         "if-not" (let [[_ c a b] x] (if-lines env (list 'not c) a b ctx))
         "when" (let [[w c & body] x
                      ;; (arbace.core/when (some? x) ...) without a local named when in scope: the
