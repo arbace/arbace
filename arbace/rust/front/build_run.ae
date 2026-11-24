@@ -360,9 +360,17 @@
                  ;; RF16: a thin pointer to a trait object (`&Dog as &dyn Animal`): the pointer, then its vtable's allocation (mono's,
                  ;; as the runtime body's casts take theirs)
                  (let [[_ _ a tyf] rv va (operand a)
-                       vt (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv))]
+                       ;; (queue 566 (C6 L1): an array's pointer to a slice's, `&[u8; N] as &[u8]`: the pointer, then N, as CTFE's
+                       ;; unsize_into writes the metadata: sys::path's `str::from_utf8(&[b'/'])`)
+                       n (let [st (:tc (meta (:ty va))) tt (:tc (meta tyf))]
+                           (when (and (vector? st) (#{:ref :ptr} (first st)) (vector? tt) (vector? (last tt)) (= :slice (first (last tt))))
+                             (let [pt (last st)] (when (and (vector? pt) (= :array (first pt)) (vector? (nth pt 2 nil)) (= :cval (first (nth pt 2))))
+                                                   (parse-long (str (second (nth pt 2))))))))
+                       vt (when-not n (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv)))]
                    (when-not (= 8 (count (:bytes va))) (no "an unsizing cast of a fat pointer" rv))
-                   {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])})
+                   (if n
+                     {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (le-bytes n 8))) :relocs (vec (:relocs va))}
+                     {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])}))
                (if (str/starts-with? (str (second rv)) "PointerCoercion(ClosureFnPointer")
                  ;; queue 542: a closure reified to a function pointer (thread_local!'s inline const `|init| ..` coerced to
                  ;; LocalKey's `unsafe fn`): the pointer to its ClosureOnceShim's function allocation (Instance::resolve_closure
