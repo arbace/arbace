@@ -19478,3 +19478,24 @@ Applied in test/java/divergences.edn (java-design-1123):
   managers, is javac's tool world's), sun.net.www.protocol.http.spnego.NegotiateCallbackHandler in the world (GSSUtil.login
   names it), java.lang.WrongThreadException in the world, SunJGSS in ProviderConfig's variant (398a8833f). The forms come from
   `bin/jrt-convert update` itself (queued under the lock: `.tmp/jd/jrt-update.sh`).
+
+## 2026-11-24: java-design-1123: t04725's annotation elements and its proxies' serial form; SubclassGC's unloading (not built)
+
+- Annotation UnitTest (t04725) failed first on its byte, short and float elements and defaults: the Java forms write javac's
+  (byte) 1 as (unchecked-byte 1), and arbace.classes.analyze's ann-value took any list headed by a symbol for a nested
+  annotation ("Unknown annotation: unchecked-byte", the value left out, the default missing). Now a nested annotation only where
+  the element's type is not primitive (4ada4b190). Interpreted on the day harness (train 1's executable fb29d2672f0d with the
+  checkout's analyzer and interpreter): every annotation check of the test passes; it then stops at serialization.
+- Its serialization: jrt's annotation objects (AnnotationObj, a proxy-like class per type, JCS210) were no Serializable and had
+  no Proxy field h to serialization ("NotSerializableException: t04725.$Proxy1"); now an annotation object is Serializable (as
+  a Proxy is), DynFields gives proxyHandlerField its handler, and the handler has AnnotationInvocationHandler's serial form
+  (serialVersionUID 6182022883658399397, type and memberValues as a LinkedHashMap in the annotation's order), read back through
+  annotationHandler_New_Class_Map once both fields are read; its readObject's checks of the members against the type are not
+  made (JCS291's left part). `bin/jrt build`: jrt compiles. Proved by the next train's run (t04725 in .tmp/jd/interp-t2.list
+  and compiled-t2.list).
+- SubclassGC (t04444) passes up to its check that a class a URLClassLoader defined (the bytecode loader's, JD3) is collected
+  once its loader and objects are unreachable: jrt and the dynamic classes keep every class reachable (j2g_dyn's dynClasses map,
+  the loader's table, ClassInfo registries). Unloading needs those to hold a loader-defined class weakly (Go's weak.Pointer and
+  runtime.AddCleanup) and WeakReference to a Class cleared when it goes: a change to java-bytecode's loader and jrt's registries,
+  left for a decision with that stream. Not built. t04308 passes already.
+- The interp speed rows (11: exhaustive loops interpreted past 600 s of CPU) need a faster interpreter; not started.
