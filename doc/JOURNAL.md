@@ -20376,6 +20376,94 @@ Applied in test/java/divergences.edn (java-design-1123):
   null, their defaults "missing element"), before its proxies' serialization; t04444 SubclassGC needs a class loader's classes
   unloaded (JD3's loader). Both stay deferred.
 
+## 2026-11-23: java-design-1123: XML in javac's tool world, the measured closure (plan, nothing built yet)
+
+- The user's (b) of today: java.xml's parsers, DOM, transform, XPath, validation and StAX, and java.xml.crypto's XML signature,
+  in javac's tool world (overlay/jdk/javac/closure.txt, read by `bin/javac-vendor convert` into jdk/javac/forms), the XML tests
+  routed there as F6 and JD4 route javac's API tests (bin/java-check's tool_re: their sources naming javax.xml's parsers,
+  transform, xpath, validation, stream, catalog and crypto, org.w3c.dom, org.xml.sax; at interp on javac's tool, at compiled
+  in javac-world shards).
+- The closure measured as JN7.2 measured the SAX parser's: the 15 XML tests (t08077-t08081, t08083, t08088-t08096) compiled
+  by the jdk26u build's javac and run by its java with `-Xshare:off -Xlog:class+load` (`.tmp/jd/xmlload/run.py`, each test's
+  renamed sources as test/java/ref-jdk26.edn's :files give them): 1,007 java.xml and 162 java.xml.crypto classes loaded, 803
+  top-level source files beyond the shipped world's (jdk/sources.txt), javac's (jdk/javac/sources.txt) and the closure's
+  (684 java.xml, 119 java.xml.crypto; about 247,000 lines; BCEL's generic 173, XSLTC's compiler 57, XPath's functions 42,
+  Xerces' schema datatypes 35, ...); `.tmp/jd/xmlload/need.txt`. Still to add: the classes their members' descriptors name and
+  their supertypes (j2g translates a call only when its descriptor's classes are in the world), found by
+  `bin/javac-vendor check`'s refusals, and the factories found by name (FactoryFinder's defaults, the XML signature's
+  providers) rooted for reflection, as round 2 rooted the default DatatypeFactory.
+- XSLTC (the XSLT tests t08091, t08093, t08096's transform) compiles a stylesheet to class files with BCEL and defines them:
+  JD3's class-file loader and interpreter in the tool's world as well.
+- Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
+  with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
+  GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
+## 2026-11-24: java-design-1123: train 1's rows recorded; the XML edge proved; jrt-convert's refusals fixed
+
+- Train 1 (d9217f672: next + java-design-1123 at 0ad52db70 + clj-1123 + java-bytecode-1122 + smalls2-1123; executables
+  fb29d2672f0d7bf945b6, javac's tool javac-f170fb32cd7e14aa55f8) built on its fourth attempt (19:50 on 2026-11-23); my
+  session-train1.sh had stopped at its first failure (10:16) and ran again at 22:03, in java-design-b1 at train 1's commit (the
+  key checked): compiled rows of rounds 1-3 and the class-file API's (compiled1-t1, 81 rows), JD4's javac-API tests
+  (compiled-javac-t1, 57), the heavy interp row (t05445) and the interp rows (interp1-t1, 49). Judged and recorded partially
+  (bin/java-check --judge --partial --record): compiled 62 now passing, interp 22, no regression; JD4: 40 of the 57 pass compiled.
+- Rows whose cause the branch built after train 1's commit, classed `:jd1123-next-train` (deferred) until the next train's
+  runs: the FFM rows (WrongThreadException not in the world), the datatype rows (JdkXmlConfig), Kerberos' three (SunJGSS not
+  among the providers); `:assert-default` (deferred): t06029, assertions on where the JDK's run (no -ea) had them off.
+- Java: eval 3,109 / 51 / 119 -> 3,131 / 33 / 120 (41 n/a), AOT 3,079 / 54 / 161 -> 3,141 / 33 / 122 (29 n/a); completeness
+  96.9 -> 97.5 (97.9 without by design); crops-score --judge --strict and records-check pass.
+- The XML edge proved (the coordinator's ask after train 2): train 2's conversion of javac's world with XML (1,627 sources,
+  java.xml 904, java.xml.crypto 119, 0 failed) laid into jdk/javac, its provenance written by javac-vendor's own function,
+  `bin/javac-vendor edge` under one lock ticket: the names check (9,919 classes, none twice), then j2g's --record-edge on the
+  frozen JVM: 731 classes beyond jdk/edge.edn, status 0 (.tmp/jd/xml-edge-proof.log). jdk/javac put back as committed after it:
+  train 3 converts afresh.
+- Train 2's `bin/jrt-convert update` refused the Kerberos and datatype slices (17 javac errors) and found four FFM package
+  files other than a fresh convert's: ProviderList and krb5's Config now derived overlays (the native GSS wrapper's and
+  macOS's SCDynamicStore branches dropped: the classes those name are natives of other platforms or libraries),
+  SecuritySupport.readConfig reading the JAXP configuration files itself (JdkXmlConfig, with its catalog and security
+  managers, is javac's tool world's), sun.net.www.protocol.http.spnego.NegotiateCallbackHandler in the world (GSSUtil.login
+  names it), java.lang.WrongThreadException in the world, SunJGSS in ProviderConfig's variant (398a8833f). The forms come from
+  `bin/jrt-convert update` itself (queued under the lock: `.tmp/jd/jrt-update.sh`).
+
+## 2026-11-24: java-design-1123: t04725's annotation elements and its proxies' serial form; SubclassGC's unloading (not built)
+
+- Annotation UnitTest (t04725) failed first on its byte, short and float elements and defaults: the Java forms write javac's
+  (byte) 1 as (unchecked-byte 1), and arbace.classes.analyze's ann-value took any list headed by a symbol for a nested
+  annotation ("Unknown annotation: unchecked-byte", the value left out, the default missing). Now a nested annotation only where
+  the element's type is not primitive (4ada4b190). Interpreted on the day harness (train 1's executable fb29d2672f0d with the
+  checkout's analyzer and interpreter): every annotation check of the test passes; it then stops at serialization.
+- Its serialization: jrt's annotation objects (AnnotationObj, a proxy-like class per type, JCS210) were no Serializable and had
+  no Proxy field h to serialization ("NotSerializableException: t04725.$Proxy1"); now an annotation object is Serializable (as
+  a Proxy is), DynFields gives proxyHandlerField its handler, and the handler has AnnotationInvocationHandler's serial form
+  (serialVersionUID 6182022883658399397, type and memberValues as a LinkedHashMap in the annotation's order), read back through
+  annotationHandler_New_Class_Map once both fields are read; its readObject's checks of the members against the type are not
+  made (JCS291's left part). `bin/jrt build`: jrt compiles. Proved by the next train's run (t04725 in .tmp/jd/interp-t2.list
+  and compiled-t2.list).
+- SubclassGC (t04444) passes up to its check that a class a URLClassLoader defined (the bytecode loader's, JD3) is collected
+  once its loader and objects are unreachable: jrt and the dynamic classes keep every class reachable (j2g_dyn's dynClasses map,
+  the loader's table, ClassInfo registries). Unloading needs those to hold a loader-defined class weakly (Go's weak.Pointer and
+  runtime.AddCleanup) and WeakReference to a Class cleared when it goes: a change to java-bytecode's loader and jrt's registries,
+  left for a decision with that stream. Not built. t04308 passes already.
+- The interp speed rows (11: exhaustive loops interpreted past 600 s of CPU) need a faster interpreter; not started.
 ## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
 
 The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
@@ -20387,6 +20475,63 @@ the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 fa
 it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
 a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
 Rides train 2.
+## 2026-11-23: an assert runs while its class's initialization is in progress (t06029; the user's decision, train 3)
+
+The user confirmed (2026-11-23, relayed by the coordinator) building :assert-before-init: assertion status per class as
+the JVM has it. javac compiles assert to a test of the class's static $assertionsDisabled, which <clinit> sets from
+desiredAssertionStatus(); before <clinit> completes the field is still false, so an assert in a class whose initialization
+is in progress runs (Attach.java: U, initialized as V's superclass, calls V.assertsEnabled(); JLS 12.4.2, 14.10). Built,
+write-ahead of train 3's build: the interpreter's :assert (arbace/classes/interp.ae) is (if (and (AssertOn k) (not test))
+(throw (new AssertionError msg))) with Compiler$CF$AssertOn, on while the Klass's state is not done (CF$Klass.initDone,
+new); j2g's :assert (arbace/j2g/code.ae) tests (or (not J2g_AssertionsDisabled) (not (.Done C_init))) for a translated
+class with non-trivial initialization (a class with an assert always has it: :uses-assert); an interface's asserts follow
+the global flag as before (javac's holder class is not translated). No class runs with assertions enabled
+(Class.desiredAssertionStatus stays false). Proof due on train 3's build: t06029 at interp and compiled, and the Java
+essential checks. Branch java-bytecode-assert-1123 (from java-bytecode-1122 731924212).
+## 2026-11-23: JCS51 on train 1's tool, 18 of 25; the Filer's generated sources (java-bytecode-assert-1123, train 3)
+
+JCS51's 25 processing tests at the diagnostics level on train 1's javac tool (javac-f170fb32cd7e, d9217f672): 18 pass, recorded
+on java-bytecode-1122 (660ab0f75), :diag-processors narrowed to the 7 left. Three of the seven stop on the Filer's generated
+sources: javac on Arbace's file manager had no SOURCE_OUTPUT (getJavaFileForOutput's IOException, BrokenEnumConstructor's
+output, and the generated classes missing in GenerateAndError and WErrorGen). Built for train 3: SOURCE_OUTPUT (no -s on
+Arbace) goes to CLASS_OUTPUT's directory, else the current directory, as jdk26u's JavacFileManager.getFileForOutput puts a
+generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java at baf63fb, read for the
+behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
+committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
+method) is left for after train 3's run.
+## 2026-11-23: an interpreted interface's method on a proxy (JCS51's TestElementsAnnotatedWith; train 3)
+
+t07544 (TestElementsAnnotatedWith) on train 1's tool stopped on AbstractMethodError jdk.proxy1.$Proxy0.names(): javac's
+AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the test's processor defined from its class file
+(annot/AnnotatedElementInfo), and the processor's invokeinterface of names() on it reached CallV's reflective path, where the
+proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
+with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
+as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
+
+## 2026-11-24: java-design-1123: a class defined from bytes goes with its loader (SubclassGC, t04444; built, rides train 3)
+
+The coordinator handed java-bytecode's loader and jrt's registries to this stream (java-bytecode finished; its last branch,
+java-bytecode-assert-1123 at 25fa51e29, merged into java-design-1123: assert-before-init, the Filer's SOURCE_OUTPUT, proxies'
+interface calls; :assert-default left for its :assert-before-init). SubclassGC (jdk/java/io/Serializable/subclassGC, bug
+6232010) defines an ObjectOutputStream subclass through a URLClassLoader from test.classes, drops the loader, the class and
+the stream, and expects System.gc() to enqueue a WeakReference to the class within a second (JLS 12.7: a class is unloaded
+when its defining loader is collected). Every table that named the class kept it:
+- jrt: definingLoaders (class -> loader) and loaderClasses (loader -> classes) are now fields, the class's loader and the
+  loader's classes (ClassLoader.classes; the boot loader's in bootClasses); definedPackages, which kept every loader that
+  defined a package (URLClassLoader does at each class), is the loader's own (ClassLoader.packages); a class of a loader other
+  than the built-in ones (null, application, platform) leaves the registry for weakRegistry (weak.Pointer: ForName and
+  Class.getDeclaredClasses find it while it lives); the decoded annotations, attributes and generic repositories, five sync.Map
+  tables keyed by every ClassInfo, are in the ClassInfo (classCaches).
+- j2g_dyn (arbace.j2g.dyn, dyncf): dynClasses (class -> DynClass) and cfNews are gone: a class keeps its DynClass in
+  ClassInfo.Dyn, the allocation in DynClass.CfNew.
+- arbace.lang.Bytecode: CLASSES and BY_LOADER are WeakHashMaps whose values hold the BytecodeClass and the classes weakly
+  (WeakReference); KLASSES is gone (a Klass's BytecodeClass is its info).
+The class and its loader keep each other, nothing else keeps them; the built-in loaders' classes stay strong. jrt's
+WeakReference was already over Go's weak pointers and runtime.AddCleanup (F17). `bin/jrt build`: jrt compiles on amd64 and
+arm64. Not provable by the day harness (jrt, j2g_dyn and Bytecode are compiled into the executable): t04444 is in the next
+train's lists (.tmp/jd/interp-t2.list, compiled-t2.list), with t04308 as a control of the defining path. Alternatives not
+taken: clearing the tables when a loader is collected (a cleanup on the loader: the tables themselves kept it); a weak table
+keyed by class beside the strong ones (its values named the class).
 
 ## 2026-11-24: cpp-decl2 (3), overload resolution by constraints, member lookup ambiguity, and the left list (branch `cpp-decl2-1123` after next `97a71ba55`)
 

@@ -5408,3 +5408,25 @@ after the gate's executables `36aab1207a6fe6f3a858`; its build 75 min, peak 26.5
   Raw diagnostics' short file names (t06452, t07536) need PathFileObject file objects. `-XDexpectKeys` (t06660) and the error count
   after a plug-in error (t07527) come with `Main.compile` itself. It changes every javac command line on Arbace, so its proof is
   whole runs of the classes, diagnostics and print levels.
+
+## As built: java-design-1122/1123, the by-design rows built (2026-11-22 to 2026-11-24; branch `java-design-1123`)
+
+The user's decisions of 2026-11-22 (JD1-JD9) and 2026-11-23 (JMX, JDI, desktop and smartcardio n/a; serialization at the
+compiled level, XML in javac's tool world, the class-file API, zip and javac's synthetic lambdas built; JCS51's processors
+through JD3's loader). doc/JOURNAL.md's entries of those days are the record; in short:
+- **Built and recorded (train 1, d9217f672):** round 1 (the JVM's array limit, StackTraceElement's module constructor,
+  ClassLoader's getPackage(s) and findLoadedClass, URLClassLoader.addURL, java.base's XML parser: Properties' XML form),
+  round 2 (Kerberos and GSS-API, javax.xml.datatype), round 3 (the foreign memory API's segments, layouts and arenas),
+  System.setProperties for translated code, JD4 (the tests naming javac's API at the compiled level in shards with javac's
+  world: 40 of 57 pass). Java eval 3,109 / 116 / 100 -> 3,131 / 33 / 120, AOT 3,079 / 155 / 91 -> 3,141 / 33 / 122
+  (pass / by design / deferred; the n/a rows out of the denominators).
+- **Built, waiting for train 3's build:** JD7 (javac's synthetic lambda methods in reflection, `arbace.classes.analyze/
+  synthetic-lambdas`; protected method references of another package made lambdas), Dyn's clone through an interface, an own
+  native method's UnsatisfiedLinkError, Reference subclasses' super.clone(), annotation elements of primitive types written
+  as conversions, annotation objects' serial form, classes defined from bytes collected with their loader (SubclassGC), the
+  Kerberos and datatype slices javac-clean (derived overlays of ProviderList, krb5's Config and SecuritySupport;
+  NegotiateCallbackHandler, WrongThreadException and UnsatisfiedLinkError in the world; SunJGSS among the providers), XML's
+  closure in javac's tool world (803 files of java.xml and java.xml.crypto, the classes loaded by name rooted, the XML tests
+  routed to the tool; j2g's names checked unique by `bin/javac-vendor names` before any run).
+- **Left:** the 11 interpreted speed rows (a faster interpreter), the XMLDSig provider in the tool's service registry and
+  XSLTC's translets on JD3's loader (after train 3's conversion), the rows `:jd1123-next-train` holds until train 3's runs.

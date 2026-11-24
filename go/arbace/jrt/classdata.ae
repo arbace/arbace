@@ -42,7 +42,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "classdata.go"
-  :imports [[hex "encoding/hex"] [strconv "strconv"] [strings "strings"] [sort "sort"] [sync "sync"]])
+  :imports [[hex "encoding/hex"] [strconv "strconv"] [strings "strings"] [sort "sort"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The decoded attributes
@@ -66,22 +66,21 @@
   "paramRecord: a MethodParameters attribute: the names (nil for none), the flags, whether an index was not a Utf8.\n"
   (struct ^{:tag (slice (* String))} names ^{:tag (slice int32)} flags ^bool bad))
 
-(go/var ^{:tag sync/Map :doc "classAttrsCache: *ClassInfo -> *classAttrs, decoded once.\n"} classAttrsCache)
-(go/var ^{:tag sync/Map :doc "genericRepos: *ClassInfo -> the class's ClassRepository (Class.genericInfo), or a member's by key.\n"} genericRepos)
-
-(go/type memberRepoKey (struct ^{:tag (* ClassInfo)} info ^string key))
+;; a class's decoded attributes (\"attrs\"), its ClassRepository (\"generic\") and its members' (\"m:KEY\") are in its
+;; ClassInfo's caches (classCaches; tables of every class before java-design-1123)
 
 (go/func forgetClassAttrs
   "forgetClassAttrs drops what was decoded from class info's earlier data (SetAnnotations).\n"
   [^{:tag (* ClassInfo)} info]
-  (.Delete classAttrsCache info)
-  (.Delete genericRepos info)
-  ;; the members' repositories of info
-  (.Range genericRepos (fn ^bool [^any k ^any v]
-                         (let [(values mk ok) (assert memberRepoKey k)]
-                           (when (and ok (== (.-info mk) info))
-                             (.Delete genericRepos k)))
-                         true)))
+  (let [m (classCaches info)]
+    (.Delete m "attrs")
+    (.Delete m "generic")
+    ;; the members' repositories of info
+    (.Range m (fn ^bool [^any k ^any v]
+                (let [(values ks ok) (assert string k)]
+                  (when (and ok (strings/HasPrefix ks "m:"))
+                    (.Delete m k)))
+                true))))
 
 (go/var ^{:doc "handSignatures: the Signature attributes of jrt's hand-written generic classes, which no encoder
 writes (jdk26u's, as javap prints them, less the interfaces jrt's classes do not implement:
@@ -103,7 +102,7 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
 
 (go/func attrsOf "attrsOf: c's decoded attributes.\n" ^{:tag (* classAttrs)} [^{:tag (* Class)} c]
   (let [info (.-info c)
-        (values v ok) (.Load classAttrsCache info)]
+        (values v ok) (.Load (classCaches info) "attrs")]
     (when ok (return (assert (* classAttrs) v)))
     (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))
                        :params (make (map string (* paramRecord)))))]
@@ -164,7 +163,7 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
                       (aset (.-throws d) key ts)))))))))
       (when (== (.-sig d) "")
         (set! (.-sig d) (aget handSignatures (.-Name info))))
-      (let [(values w _) (.LoadOrStore classAttrsCache info d)]
+      (let [(values w _) (.LoadOrStore (classCaches info) "attrs" d)]
         (assert (* classAttrs) w)))))
 
 ;; ---------------------------------------------------------------------------------------
@@ -345,6 +344,11 @@ primitive type.\n"
       (range [_ x registry]
         (when (and (== (.-Declaring (.-info x)) c) (!= (.-Kind (.-info x)) KindArray))
           (set! out (append out x))))
+      ;; and the live classes loaders defined from bytes (dyn.ae's weakRegistry)
+      (range [_ w weakRegistry]
+        (let [x (.Value w)]
+          (when (and (!= x nil) (== (.-Declaring (.-info x)) c) (!= (.-Kind (.-info x)) KindArray))
+            (set! out (append out x)))))
       (.RUnlock registryMu)
       (sort/Slice out (fn ^bool [^int i ^int j] (< (.-Name (.-info (aget out i))) (.-Name (.-info (aget out j)))))))
     (classArray out)))
@@ -378,11 +382,11 @@ Signature (ClassRepository.NONE).\n"
   ^any [^{:tag (* Class)} c]
   (let [sig (.genericSignature c)]
     (when (== sig "") (return nil))
-    (let [(values v ok) (.Load genericRepos (.-info c))]
+    (let [(values v ok) (.Load (classCaches (.-info c)) "generic")]
       (when ok (return v))
       (let [r (ReflectSupport_ClassRepository_Class_String__O c (Str sig))]
         (when (== r nil) (return nil))
-        (let [(values w _) (.LoadOrStore genericRepos (.-info c) r)]
+        (let [(values w _) (.LoadOrStore (classCaches (.-info c)) "generic" r)]
           w)))))
 
 (go/func memberRepo
@@ -391,12 +395,13 @@ class; nil without a Signature.\n"
   ^any [^{:tag (* Class)} c ^string key ^{:tag (func [(* String)] [any])} mk]
   (let [sig (aget (.-sigs (attrsOf c)) key)]
     (when (== sig "") (return nil))
-    (let [k (lit memberRepoKey :info (.-info c) :key key)
-          (values v ok) (.Load genericRepos k)]
+    (let [k (+ "m:" key)
+          cm (classCaches (.-info c))
+          (values v ok) (.Load cm k)]
       (when ok (return v))
       (let [r (mk (Str sig))]
         (when (== r nil) (return nil))
-        (let [(values w _) (.LoadOrStore genericRepos k r)]
+        (let [(values w _) (.LoadOrStore cm k r)]
           w)))))
 
 (go/func typeArray
