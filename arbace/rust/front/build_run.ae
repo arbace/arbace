@@ -225,6 +225,14 @@
                 :else (throw (ex-info (str "allocation " id ": " b) {})))
           {:bytes bytes :relocs relocs})))))
 
+(defn- init-text
+  "queue 566 (C6 L1): an evaluated value's init mask as an allocation's :init text (its padding uninitialized: variant-bytes'
+  :init, const_alloc_to_llvm's undef runs), all initialized when the value carries none of its length"
+  [{:keys [bytes init]}]
+  (if (and (sequential? init) (= (count init) (count bytes)))
+    (apply str (map #(if (zero? (long %)) "0" "1") init))
+    (apply str (repeat (count bytes) "1"))))
+
 (declare iface-const-value eval-local-const)
 (def ^:dynamic *const-call*
   "queue 464 (462-4 (a)): within eval-local-const, a call of a const fn evaluated as CTFE does: (fn [DEF TYPE-ARGS ARG-VALUES])
@@ -596,17 +604,17 @@
                                                                            :init (apply str (repeat (count bs) "1")) :relocs []}])
                                                [a (count bs)]))
                                  nest-n (atom 0)
-                                 nest-alloc (fn [{:keys [bytes align relocs]}]
+                                 nest-alloc (fn [{:keys [bytes align relocs] :as v}]
                                               (let [a (str "allocP" idx "n" (swap! nest-n inc))]
                                                 (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
-                                                                            :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                                            :init (init-text v) :relocs (vec (or relocs []))}])
                                                 a))
                                  ;; queue 542: a function's allocation (a closure's ClosureOnceShim reified by the constant)
                                  fn-alloc (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
                                                       (when-not (some #(= a (first %)) @static-data)
                                                         (swap! static-data conj [a {:kind :fn :symbol sym}]))
                                                       a))
-                                 {:keys [bytes align relocs]} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts) *data-alloc* nest-alloc]
+                                 {:keys [bytes align relocs] :as pv} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts) *data-alloc* nest-alloc]
                                                                      (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
                                                                                     (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false))
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false #(str "promoted " idx " of " (:name ours) ": " (.getMessage e))))
@@ -615,7 +623,7 @@
                                  a (str "allocP" idx)]
                              (when-let [f (:const! facts)] (f true))
                              (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
-                                                         :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                         :init (init-text pv) :relocs (vec (or relocs []))}])
                              (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
                            x)))))
         ;; RFP44 (a): an unsizing cast to a trait object carries its vtable's allocation (codegen's pair's second half): mono's
@@ -707,11 +715,11 @@
                                ;; interned allocation
                                (if-let [w (when-let [cw (:const-whole facts)]
                                             (let [n (atom 0)
-                                                  da (fn [{:keys [bytes align relocs]}]
+                                                  da (fn [{:keys [bytes align relocs] :as v}]
                                                        (let [a (str "allocK" (Math/abs (long (hash (second x)))) "n" (swap! n inc))]
                                                          (swap! static-data conj [a {:kind :memory :align (or align 1) :mutable false
                                                                                      :bytes (apply str (map #(format "%02x" %) bytes))
-                                                                                     :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                                                     :init (init-text v) :relocs (vec (or relocs []))}])
                                                          a))
                                                   fa (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
                                                                  (when-not (some #(= a (first %)) @static-data)
@@ -1305,7 +1313,7 @@
                        (when-let [pb (get (:promoted-bodies b) idx)]
                          (when (and (vector? pt) (#{:ref :ptr} (first pt)) (vector? (last pt)) (not (#{:slice :str :dyn} (first (last pt)))))
                            (let [r (eval-promoted pb raw-alloc *data-alloc* unit-variant nil nil lay lc false)]
-                             {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (*data-alloc* (select-keys r [:bytes :align :relocs]))]]})))
+                             {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (*data-alloc* (select-keys r [:bytes :align :relocs :init]))]]})))
                        (let [[d2 as] (:nc (meta v)) d2 (if (string? d2) d2 (:inline-def (meta v)))]
                          (when (and (string? d2) (empty? as))
                            (or (iface-const-value d2) (eval-local-const d2 #{})
@@ -1326,7 +1334,7 @@
                               (finally (swap! depth dec))))))
               r (binding [*const-call* call *arg-values* nil]
                   (eval-promoted b raw-alloc *data-alloc* unit-variant nil nil lay lc true))]
-          (when (vector? (:bytes r)) (select-keys r [:bytes :align :relocs])))
+          (when (vector? (:bytes r)) (select-keys r [:bytes :align :relocs :init])))
         (catch Throwable e
           (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-const-whole:" d (.getMessage e))))
           nil)
