@@ -19229,3 +19229,14 @@ compiled, oi embedded, each phrase's Lambda loaded as a plugin at run time. Bran
   (259 MB of Go) passed 36 GB in 38 minutes and was stopped. bin/oi and header.awk are left unchanged (their patch is in the report:
   editing bin/oi rebuilds the main host's library), the rows keep their class at both AOT levels, no record changes, and the cells are as
   before (OCaml AOT 513 / 22 / 82). DECISION 544-1 (report 544) asks how the compiled toplevel is to be built.
+
+## 2026-11-24: ocaml-1123: the split shard (544b) on ocamldoc: a j2g name collision
+
+The 24 compiler-libs programs (the 16 tool rows, ocamldoc's five, 544's three toplevel rows) in one shard on 544b's per-unit Go packages
+(o2j wrote packages.edn), one ticket of 28 GiB: j2g ran 89 minutes at up to 27.4 GB (as unsplit: the split changes the packages, not
+j2g's work), then reported `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21: ocamldoc's five programs;
+Odoc_class.go and j2g_classes.go: the unit Odoc_class's class and its name in the program package's class table). Stopped by this session
+before the shard's bisection rebuilt its halves. A fault of the split's naming for a program package that holds a unit named like a
+generated class (544b, the Mac's paused task); the tool and toplevel programs' packages reported nothing. The compiled rerun of
+lib-threads/signal and delayintr and of the suite's opam base64 and fmt on the host fix (8bcdee584) is queued alone (`ocaml-b`'s
+`.tmp/oc/compiled-b4.sh`, one ticket of 24 GiB).
