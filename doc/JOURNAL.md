@@ -20966,3 +20966,17 @@ collector marks (t03385: measured, a spinning get keeps its referent through eve
 being unspecified), LDAP's CertStore and UnixLoginModule (t05346, t07867; recommended: t07867 n/a, t05346 deferred under
 JCS234 (a)), and logging (System.Logger is JCS250 (a), not started here, an overlay `System$Logger` named as an
 alternative; t05778 n/a recommended; t05766 java-stack-1124's).
+
+## 2026-11-24: the user's decisions JMS1-JMS4 (java-misc-1124)
+
+The user decided java-misc-1124's proposals (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124"):
+- JMS1 (a): finalization is built: a Go finalizer hands the object to a Java thread "Finalizer", and runFinalization
+  starts a secondary thread (built on this branch, its entry below);
+- JMS2: t03385 (Test7190310) n/a;
+- JMS3: t07867 (AllPlatforms) n/a; t05346 (GetInstance's LDAP CertStore) stays deferred under JCS234 (a);
+- JMS4: t05778 (java/util/logging/Reflect) n/a; System.Logger as an overlay `java/lang/System$Logger.java` translated by
+  j2g, built by the Mac (not on this branch).
+test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before the world's classes) names t03385, t05778 and
+t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
+notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
+`bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
