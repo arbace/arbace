@@ -1111,6 +1111,7 @@
               (fail :template "not a template: " nm))
       (fail :template "not a template: " nm))))))
 
+(declare fnaddr-specs)
 (defn- decl-arg
   "The argument of a pointer or reference non-type parameter of type `pt` ([temp.arg.nontype]): a function or a
   variable named (&F, F, &v, v for a reference), {:decl [:fn|:var id] :ty pt :mangled s}, or a null pointer; in a
@@ -1136,6 +1137,16 @@
             e (first es)]
         (case (:e e)
           :nttp {:k :tparam-v :i (:i e) :tid (:tid e)}
+          ;; (cpp-tpl2, the checker: a function template's name, its specialization of the parameter's function type
+          ;; ([temp.arg.nontype]/1 with [over.over]/2, [temp.deduct.funcaddr]) taken, an odr-use ([basic.def.odr]/4): its
+          ;; definition instantiated and analyzed, template/fn-ptr3a.C's A<f>, fn-ptr5.C's A<&B::f>)
+          :tmpl (let [want (if (or (abi/ptr? pt) (abi/ref? pt) (abi/mptr? pt)) (:to pt) pt)
+                      tids (keep #(when (and (= :tmpl (:e %)) (= :fn (:tk %))) (:id %)) es)
+                      fid (when (and (sema/checking?) (abi/fn? want) (seq tids)) (first (fnaddr-specs {:tmpls tids} want)))]
+                  (if fid
+                    (do (upd-fn! fid assoc :cx-odr true)
+                        {:decl [:fn fid] :ty pt :mangled (abi/mangle-fn (sema/fnd fid)) :ref (boolean (abi/ref? pt))})
+                    (fail :template "a pointer argument " text)))
           :declconst {:decl (:decl e) :ty pt :mangled (:mangled e) :ref (boolean (abi/ref? pt))}
           :fn (let [want (if (abi/ptr? pt) (:to pt) (:to pt))
                     fid (or (some #(let [g (sema/fnd (:id %))]
@@ -1291,7 +1302,11 @@
 ]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
-        (value-arg (if-some [c (cx-class-targ scope f pt)] c (const-form scope f)) (:name p) pt)))))
+        (or ;; (cpp-tpl2, the checker: a member function template's address for a pointer to member function, decl-arg's
+            ;; odr-use, template/fn-ptr5.C)
+            (when (and (sema/checking?) (abi/mptr? pt) (abi/fn? (:to pt)))
+              (try (let [r (decl-arg scope pt f)] (when (= :fn (first (:decl r))) r)) (catch arbace.lang.ExceptionInfo _ nil)))
+            (value-arg (if-some [c (cx-class-targ scope f pt)] c (const-form scope f)) (:name p) pt))))))
 
 (defn- node-arg
   "A TemplateArgument node's argument for the parameter `p` (an explicit specialization's)."
@@ -4812,7 +4827,10 @@
   "The :pending hook: the lazy definitions the analyzed bodies reference, made eager ([[:fn id] [:var id] ...])."
   []
   (let [ei (explicit-inst-members!)
-        acc (atom {:fns (set (:fns ei)) :vars (set (:vars ei)) :classes #{}})
+        acc (atom {:fns (into (set (:fns ei))
+                              ;; (cpp-tpl2, the checker: the specializations named as template arguments, decl-arg's :cx-odr)
+                              (when (sema/checking?) (keep (fn [[id f]] (when (and (:cx-odr f) (not (:analyzed f))) id)) @sema/*fns*)))
+                   :vars (set (:vars ei)) :classes #{}})
         chain-of (atom {})]
     (doseq [[id f] @sema/*fns* :when (and (or (:analyzed f) (:tbody f)) (not (contains? @*scanned* [:fn id])))]
       (swap! *scanned* conj [:fn id])

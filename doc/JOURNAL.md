@@ -20206,3 +20206,25 @@ fails as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --st
   entry's kind is the timeout). A passing row stays a pass: the record is held back (the run kept as the worktree's
   `.tmp/oc/check-aot-native.light-run.edn`) until the four are rerun alone on a quiet host, with the ticket lock (Gil.ae) suspected for
   the two parallel ones and checked against the old lock.
+
+## 2026-11-24: cpp-tpl2's third round: generic lambdas' constraints, requires-clauses' grammar, odr-uses by template arguments (branch `cpp-tpl2-1123` from next `61d0b412e`)
+
+The coordinator's next round after next took the second (`61d0b412e`): the concepts rows left in the stream's area, then the first
+round's remaining template rows; the overload-resolution rows (concepts-return-req1.C, concepts-memfun4.C, template/crash126.C's line
+12) passed to cpp-decl2. Built from the standard's text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2 (3)".
+The parser's skip of a requires-clause had taken `C<T> (T t)` in a lambda's template-head for a call, the parameter list lost (a false
+"use of undeclared identifier 't'"); a requires-clause is now read by its own grammar (primary expressions joined by && and ||), and a
+call, a subscript or a `!` there is GCC's "expression must be enclosed in parentheses" (a built-in trait's call excepted). A generic
+lambda's requires-clauses and constrained placeholders now constrain its call operator template, and a closure's call with no viable
+operator() is "no match for call". A function template's name as a template argument is an odr-use of its deduced specialization.
+
+Checked: each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files): 5 to own pass,
+four own passes lost to the enclose rule on built-in traits' calls, fixed and read again; the control pair failing as it must. The
+record: `--judge --record` over the run and over the five files' run, the two timeouts' rows kept. mac/next merged (cpp-decl2 (2): C++
+read 5,970 / 0 / 314) without conflict; both streams' 15 new own passes read again on the merged tree, all passing. C++ read 5,975 / 0
+/ 309 (247 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: a self-dependent satisfaction detected by the concept and arguments under way (written, then left out: the test
+that needs it, concepts-recursive-sat4.C, never reaches its friends' constraints, so nothing proved it, and the slice's own re-entries
+through unfinished classes could make it a false error); an ill-formed concept registered as false (left for the atom's rule: the parser
+keeps the type's name as the constraint's expression).
