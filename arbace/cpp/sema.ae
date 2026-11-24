@@ -3711,6 +3711,46 @@
              :else (some #(when (cx-dtor-not-constexpr % (conj seen id)) (str "subobject of class '" (:name (abi/cls %)) "' has a non-'constexpr' destructor"))
                          (class-like-members id)))))))
 
+(declare analyze-implicit!)
+
+(defn- cx-cmp-defaulted? [f]
+  (boolean (and (checking?) (:defaulted f) (not (:constexpr f)) (not (:deleted f)) (not (:implicit f))
+                (#{"==" "<=>" "!=" "<" ">" "<=" ">="} (:op f)) (:node f) (not (header-node? (:node f))))))
+
+(defn- cx-cmp-body!
+  "cpp-sweep: the analyzed body of the defaulted comparison `fid` (analyze-implicit!, once), or nil when it does not analyze."
+  [fid]
+  (let [f (fnd fid)]
+    (or (:tbody f)
+        (when-not (or (:analyzed f) (:params f))
+          (upd-fn! fid assoc :analyzed true)
+          (try (analyze-implicit! fid) (:tbody (fnd fid))
+               (catch arbace.lang.ExceptionInfo _ (upd-fn! fid dissoc :analyzed) nil))))))
+
+(defn cx-cmp-not-constexpr
+  "cpp-sweep (the checker): for a defaulted comparison operator not declared constexpr ([class.compare.default]/3 of C++20),
+  the name of the function surely not constexpr its definition calls (directly, or through another such operator), or nil."
+  ([fid] (cx-cmp-not-constexpr fid #{}))
+  ([fid seen]
+   (let [f (fnd fid)]
+     (when (and (cx-cmp-defaulted? f) (not (seen fid)))
+       (when-let [b (cx-cmp-body! fid)]
+         (some (fn [x] (when (and (map? x) (= :call (:op x)) (:fn x))
+                         (let [g (fnd (:fn x))]
+                           (cond (and (not (:constexpr g)) (not (:consteval g)) (not (:implicit g)) (not (:defaulted g)) (not (:tinst g))
+                                      (:node g) (not (header-node? (:node g))) (not (str/starts-with? (str (:name g)) "__")))
+                                 (:name g)
+                                 (cx-cmp-defaulted? g) (when (cx-cmp-not-constexpr (:id g) (conj seen fid)) (:name g))
+                                 :else nil))))
+               (tree-seq coll? #(if (map? %) (vals %) (seq %)) b)))))))
+
+(defn- cx-cmp-constexpr?
+  "cpp-sweep: whether the defaulted comparison `fid` is constexpr by [class.compare.default]/3 (C++20): its definition calls no
+  function surely not constexpr (cx-cmp-not-constexpr)."
+  [fid]
+  (let [f (fnd fid)]
+    (boolean (and (>= (long *cxx-year*) 20) (cx-cmp-defaulted? f) (cx-cmp-body! fid) (not (cx-cmp-not-constexpr fid))))))
+
 (defn- cx-defaulted-not-constexpr
   "cpp-sweep (the checker): why the special member `f` of the class `id`, defaulted on its first declaration, would not be
   constexpr implicitly, or nil (constexpr, or not known surely): a destructor (C++20) by cx-dtor-not-constexpr; a default
@@ -4675,7 +4715,22 @@
                        c (when (ce-loc? o) (::cell (ce-res o)))]
                    (when (and c (get-in @*ce-heap* [c :freed]))
                      (ub! e "use of allocated storage after deallocation in a constant expression"))))
-               (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))))
+               ;; (cpp-sweep, the checker: a defaulted comparison operator not declared constexpr is constexpr when it can be,
+               ;; [class.compare.default]/3 of C++20 (implicitly constexpr since C++23, [dcl.constexpr]/5): one whose definition
+               ;; calls a function surely not constexpr is GCC's "call to non-'constexpr' function" at the call, its definition's
+               ;; call the explanation at its declaration, cx-cmp-not-constexpr; else evaluated as a constexpr function:
+               ;; cpp2a/spaceship-eq3.C, spaceship-constexpr1.C)
+               (when-let [why (and (checking?) (>= (long *cxx-year*) 20) (cx-cmp-not-constexpr (:id f)))]
+                 (when (and *on-refusal* (:node f) (not (header-node? (:node f))) (not (:cx-cmp-nc-reported f)))
+                   (upd-fn! (:id f) assoc :cx-cmp-nc-reported true)
+                   (*on-refusal* (ex-info (str "codegen: expression is not a constant expression (call to non-'constexpr' function '" why "')")
+                                          {:codegen/refused :constexpr :cx/node (:node f)})
+                                 (:node f)))
+                 (if (>= (long *cxx-year*) 23)
+                   (ub! e "call to non-'constexpr' function '" why "'")
+                   (ub! e "call to non-'constexpr' function '" (:name f) "'")))
+               (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))
+                                  (cx-cmp-constexpr? (:id f))))
                          (:virtual e))
                  (not-constant "a call of " (:name f)))
                ;; (h-cpp-read: a call from within the function's own definition, before its body is analyzed -- f3's
