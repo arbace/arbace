@@ -11160,3 +11160,31 @@ conversions with them); the parser's recovery after a broken template head: GCC'
 class template whose uses are silent, a partial specialization dropped so its member's use is "incomplete type", a template
 parameter list replaced), no one rule found for several rows; a VLA bound's immediate invocation (consteval34.C line 25), the
 literal pointer comparisons of cpp1y/constexpr-89074-3.C (a global's, a literal's suffix merging).
+
+## cpp-sweep (3): the two large pieces left, their design (2026-11-24; not built, the stream's notes for the next agent)
+
+- **P2564R3's escalation** (consteval-prop1, -prop2, -prop6, -prop10, -prop19): round 2 made cx-immediate-eval! skip only the
+  immediate-escalating functions. What is left is the escalation itself and its uses, and every one of the five files needs more than
+  calls of free functions: (1) in an escalating function's analysis an immediate invocation that is surely no constant (the parameter
+  reads round 1 made sure) or a consteval function's address marks the function immediate (`:cx-escalated`, to a fixpoint as diag.ae's
+  immediate-addresses does on the text) instead of being evaluated; (2) a call of an escalated function from a non-escalating context is
+  an immediate invocation (cx-immediate-eval! as for :consteval), its address "taking address of an immediate function"; (3) the same
+  for constructors: init-for's :ctor of a consteval constructor (consteval-prop1's `C c(t)`, `Y y2(g)`) or of an escalated constructor
+  template's specialization (`A::A(auto)`, `Y2(auto)`), at the variable; (4) default arguments: their immediate invocations evaluated in
+  the caller's context (now *cx-no-imm* at 6872), escalating the caller when it is escalating (prop2's hh<int> via h<T>(), prop10's f3
+  via f2<int>()); (5) default member initializers: a constructor that uses one (ctor-inits' init-of of (:init fl), now *cx-no-imm*)
+  evaluates its immediate invocations at the constructor's position, a defaulted constructor escalating (prop6's SS::SS(), X() = default
+  then `X x;`); (6) closures: a lambda's call operator escalated, its conversion to a pointer to function "returns address of immediate
+  function" (prop1's pl1, pl2); (7) prop19's `f(1)(2) + r`: the enclosing expression of an immediate-escalating subexpression is the
+  immediate invocation.
+- **The extended floating types** (ext-floating3, -12, -17): beside the checker's types (arbace.cpp.abi maps _Float32 and _Float64 to
+  float and double; only :float16 and :float128 are their own), the inputs: C++'s own target (cpp/target/host, made by
+  test/cpp/predef.ae from c/target/abi.edn and cpp/target/dialect.edn) defines none of __STDCPP_FLOAT16_T__, __STDCPP_FLOAT32_T__,
+  __STDCPP_FLOAT64_T__, __STDCPP_FLOAT128_T__, __STDCPP_BFLOAT16_T__ nor the __FLT32_*/__FLT64_*/__FLT128_* macros, so ext-floating3.C
+  stops at its `#error Unexpected set of floating point types` (that is cpp-rind's inputs, to coordinate); then the lexer's F16, F32,
+  F64, F128, BF16 suffixes and <stdfloat>'s aliases, types :float32 :float64 :bf16 of their own (abi's size, alignment, LLVM type,
+  Itanium mangling DF32_, DF64_, DF16b), [conv.rank]'s floating ranks (float = _Float32 in rank, _Float32's subrank greater; long double
+  between double and _Float128 on x86-64; bfloat16 and _Float16 unordered), implicit conversions to a lesser or unordered rank between
+  types not both standard GCC's pedwarn "converting to ... with greater conversion rank" (-Wnarrowing: an error under -pedantic-errors
+  or -Werror=narrowing), and overload resolution's [over.ics.rank]/4.3 (a conversion to a type of equal rank better, of equal subrank
+  better still: ext-floating12.C).
