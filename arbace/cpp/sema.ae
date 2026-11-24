@@ -4772,6 +4772,10 @@
                  ;; (CP378 (a): a member of an object, a base subobject, a temporary, a call's or a conditional's lvalue)
                  (#{:field :base-lv :temp :call :cond :mfield} (:op x))
                  (ce-get (ce-lv x env))
+                 ;; (queue 567, the checker: a comma expression's lvalue read, [expr.comma]/1 -- its right operand's object after the
+                 ;; left is evaluated: `return assert(v), v;`, cpp0x/constexpr-ice16.C; the code generator's folds unchanged)
+                 (and (= :comma (:op x)) (checking?))
+                 (ce-get (ce-lv x env))
                  ;; (cpp-rt-own3: since C++23 a reference variable outside the evaluation refers to an unknown object, P2280R4,
                  ;; *ce-unknown*'s: the code generator's alone)
                  (and (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (not (checking?)) (>= (long *cxx-year*) 23)
@@ -5689,7 +5693,16 @@
   [f]
   (boolean (and (checking?) f (not (:constexpr f)) (not (:consteval f)) (not (:implicit f)) (not (:defaulted f)) (not (:tinst f))
                 (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda)))
-                (:node f) (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))))
+                (:node f)
+                (or (and (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))
+                    ;; (queue 567: a function the C library's headers declare -- C has no constexpr, so none of them is one, and GCC
+                    ;; folds only its __builtin_ names -- with no definition in the unit: musl's __assert_fail, which `assert`
+                    ;; calls when its condition is false, GCC's "call to non-'constexpr' function", cpp0x/constexpr-ice16.C; not
+                    ;; libstdc++'s headers nor the compiler's own include directories)
+                    (and (header-node? (:node f)) (nil? (:cls f)) (not (:body f)) (not (:tbody f))
+                         (not (str/starts-with? (str (:name f)) "__builtin"))
+                         (let [fl (str (:file (loc-of (get-in (:node f) [:range :begin]))))]
+                           (and (re-find #"/usr/include/" fl) (not (re-find #"/c\+\+/|/lib/gcc/|/lib/clang/" fl)))))))))
 
 (defn- ce-undefined?
   "cpp-ce3 (the checker): whether the constexpr function `f` of the main file has no definition yet where the evaluation is
@@ -13706,6 +13719,17 @@
              ;; of a non-union class a constexpr constructor left uninitialized makes the variable's initializer no constant
              ;; expression, GCC's error at the variable; cpp2a/constexpr-init1.C's s2)
              (when-let [m (and (map? o) (cx-indeterminate-member o))]
+               ;; (queue 567: before C++20, [dcl.constexpr]/4.5 with /6 of C++17: a class template's specialization whose constexpr
+               ;; constructor leaves the member uninitialized is still constexpr but no call of it is a constant expression; GCC
+               ;; explains the variable's error by the rule's own error at the constructor's body, as cx-ctor-c17-inits! gives it
+               ;; for a plain class: cpp0x/constexpr-template2.C)
+               (let [f (when (= :ctor (:i i)) (fnd (:fn i)))
+                     body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner (:node f)))]
+                 (when (and f *on-refusal* (< (long *cxx-year*) 20) (or (:tinst f) (and (:cls f) (not (cx-plain-class? (:cls f))))) (:constexpr f) (= :ctor (:kind f)) (not (:delegate (:tinits f)))
+                            body (not (header-node? body)))
+                   (*on-refusal* (ex-info (str "codegen: member '" m "' must be initialized by mem-initializer in 'constexpr' constructor")
+                                          {:codegen/refused :constexpr :cx/node body})
+                                 body)))
                (throw (ex-info (str "not a constant: the member '" m "' is not initialized") {:codegen/not-constant true :cx/sure true})))
              ;; (cpp-sweep: [expr.const]/13, the object's value holds no pointer to a temporary of its initializer, which dies at
              ;; the full-expression's end: before C++17 `constexpr A b = A();` copies the temporary's `this`, GCC's error at the
