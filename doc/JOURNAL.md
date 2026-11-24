@@ -19161,3 +19161,29 @@ Round 1's entry (2026-11-22) has the build and the eval level. The heavy runs wa
     and the metaquot driver are not reached.
   - Records: the two n/a reclasses give OCaml eval 598 / 2 / 8 with 68 n/a, completeness 0.9529 -> 0.9537. bin/reap,
     crops-score --judge --strict and records-check: 0 problems.
+
+## 2026-11-24: queue 546b, ppxlib's bootstrap on oi, T1 of 539b-1 done (the VM)
+
+- Resumed from 546's stop: ppxlib_ast's ast.ml overflowed the stack in env's find-unit. Fixed in env without a lazy address or an
+  in-progress guard: components resolve an alias to a module inside an earlier sibling through that sibling, so find-unit is not
+  re-entered (e56701f26, repro m1_self_alias). Those two options were left as larger changes than the case needed.
+- Then, unit by unit through ppxlib's src, the metaquot lifters and metaquot, six more typer fixes, each its own commit:
+  - f0f37b441 (m2) and 0960d2d1d (m5): a unit's paths substituted into its class declarations and class types;
+  - f94deaee8 (m3): nested with-unit-stamps go on from the outer counter;
+  - 6a62f0595 (m4): a method override without a type is declared with a fresh variable;
+  - d7742c8d8 (c26): nondep's expansions of a generic node are made generic;
+  - 97182fad0: a unit's interface is read with none of a class's shared type variables. Its repro is on ppxlib's staged sources and
+    stays outside the tree (the task's tests/ppxlib-shared-tyvars.bash: FAIL on the parent, PASS on the fix).
+- `bin/oi ppx gen`: gen_ast_pattern and gen_ast_builder run on oi over ast/ast.ml. Their two units are byte for byte the output of
+  the generators built from the pinned sources by the VM's ocamlc (probed).
+- test/ocaml/ppx-programs.tsv: the metaquot driver's 175 units (2e2628308, WIP; its subject is replaced by this round's final
+  commit).
+- `bin/oi ppx check` (run; the log is `.tmp/q539/logs/ppx-check-4.log`):
+  - the driver on oi over test/metaquot/run.t's coalesce.ml and pat.ml: 2 of 2 pass;
+  - the control (coalesce's output against pat's expected output) differs;
+  - 30.5 minutes, run without bin/heavy-lock. The coordinator's call: it is capped at GOMEMLIMIT 4000MiB, under the heavy threshold,
+    and the queue's head was a 4-hour build.
+- Checks: typer-check 79 of 79; the native library 131 built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict
+  and records-check 0 problems. Nothing in the records changes.
+- Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
+  Their ppx rows then move from deferred.
