@@ -19156,3 +19156,22 @@ the new differences are mostly items that now build and differ by an atomic meth
 taken `#[inline]` from core-attrs yet), errno's link name (std's pass again), the remaining unevaluated statics and
 extern "C"'s pair returns. pack-compare-test passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed
 (its known summary, 0 stub calls).
+
+## 2026-11-24: 542 (the VM): C6 round 4, the rest of the night
+
+- Two more export rounds (c9: core --add of the statics' wanted const fns, std's pass made again for the link names; c10: alloc's
+  BTreeMap::new and std's futex locks, ReentrantLock::new): the statics GLOBAL_PANIC_COUNT, the HOOKs, STDOUT's OnceLock, stderr's
+  INSTANCE, CLEANUP and the rest evaluate (4 left: ENV_LOCK and stack_overflow's LOCK and THREAD_INFO, a call not exported yet;
+  DTORS, a non-scalar operand; COUNTER, its initializer's body not exported). `__errno_location` named by cfg_attr's link_name.
+- mono: a macro-made core function core-attrs names is a function (def-kind), so Atomic<T>'s `#[inline]` methods are
+  instantiated in std as rustc does (e7ab3679a); core-attrs.txt takes sync/atomic.rs and iter/traits/accum.rs.
+- C1 for threads.rs: a FnPtrShim's local function item (thread_local!'s `__rust_std_internal_init_fn`) and a local function a
+  record library body calls directly (by the record's path) are collected (4cd9d0ccb and this commit), and the functions the
+  record's library bodies name by symbol (:fn-symbol, callee symbols) join std-fn-syms; threads.rs's missing local instances 4 -> 2
+  (left: its thread_local closure, `NOISY::{constant#0}::{closure#0}`, whose symbol under the anonymous constant mono does not
+  match yet). std.rs still stops at `drop_glue<SplitWhitespace>`: mono cannot normalize `<IsWhitespace as Pattern>::Searcher`
+  through core's blanket impl `impl<F: FnMut(char) -> bool> Pattern for F` (the facts hold IsWhitespace's Fn impls; the solver's
+  selection of a param-self impl with Fn-trait predicates is the next item), so needs-drop assumes a glue rustc never emits.
+- std's 325 items: **171 equal**, 32 differ, 122 refused (124 / 15 / 186 at round 3). Checks at the commit: pack-compare-test
+  passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed (its known summary, 0 stub calls). rsi-build of
+  std.rs and threads.rs under the big lock at this head: both still from the pack (above); peak process 3.2 GB.
