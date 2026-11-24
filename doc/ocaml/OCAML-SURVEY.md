@@ -4955,3 +4955,22 @@ oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferr
   documentation) or boxed integers with an identity in oi (a representation change).
 - Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
   changed but ephetest's row; `bin/oi test`.
+## As built: queue 544c (2026-11-24, the VM): a split shard's program units each a Go package of their own
+
+- **The fault** (the host's ocamldoc shard, 2026-11-24): with 544b's split a program's units shared one Go package, `ocaml_p<N>`, so
+  unit Odoc_class's class `M_Odoc_class` met j2g's member of unit Odoc's class, its class object `M_Odoc_class` (j2g_classes.go):
+  `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21). Within a library unit's package `ou_<Unit>` no such
+  name can meet another: a unit's member classes are `M_<Unit>$F<n>`, j2g's members `_class`, `_New`, `_Init` and the like.
+- **The fix** (arbace.o2j's split-packages): a program's own unit is a package of its own, `ocaml_p<N>_u_<Unit>`, a plugin
+  `ocaml_p<N>_d_<Unit>`, the main class alone in `ocaml_p<N>`. A unit names only units linked before it, a plugin the program's
+  units, the main class all of them: still no import cycle; the map still sorted.
+- **Proofs** (run): a reproducer program (units Odoc, Odoc_class, Repro): before the fix j2g reports the collision in `ocaml_p1`; after it 0
+  collisions, j2g 980 s at 5.2 GiB, Go's build 760 s at 8.4 GiB, and the program prints `odoc/odoc_class: 63` (Odoc.twice (fun x -> x * 3) 7).
+  The naming test fails on the parent and passes here; the split test (its program unit's package now `ocaml_p1_u_Oiplug`) passes.
+- **The three toplevel rows at the compiled level** (`bin/oi check --aot --level compiled --only-list` under `bin/heavy-lock`, the tree
+  of origin/next 440cf0273 with the fix): their shard split (169 unit packages, the programs' units by unit), j2g 3,437 s at 16.2 GB, Go's
+  build 1,602 s at 8.3 GB (the largest package Parser's, 19 MB of Go; unsplit, queue 544, Go's compile of one package passed 36 GB);
+  tool-caml-tex/ellipses, tool-caml-tex/redirections and self-contained-toplevel/main pass by their own .reference, "same" against oi.
+  Recorded into check-aot-compiled-native.edn (record-only of the run's rows), out of divergences-aot-compiled.edn's `:ocamltest-tools`;
+  the controls `_control/ocamltex-ellipses-vs-redirections` and `_control/toplevel-main-vs-redirections` at this level differ, as they
+  must. The compiled level is in no REAP cell: OCaml's cells do not move.
