@@ -3062,6 +3062,11 @@
                       (#{"VarDecl" "FunctionDecl" "TypedefDecl" "TypeAliasDecl"} (:kind n))
                       (re-find #"not a constant" (str (.getMessage e))))
                  nil
+                 ;; (cpp-sweep: a namespace-scope structured binding declaration, which the slice does not declare, dropped
+                 ;; and the unit going on, its later errors kept: cpp2a/consteval3.C's `consteval auto [ b, c ] = ...`)
+                 (and (checking?) (not (:cls scope)) (not (header-node? n)) (= "DecompositionDecl" (:kind n))
+                      (re-find #"^codegen: declaration DecompositionDecl" (str (.getMessage e))))
+                 nil
                  :else (throw e))))))
         (declare-node*! scope n)))))
 
@@ -4165,6 +4170,13 @@
   [l]
   (let [l (ce-res l)]
   (when (and *ce-dead* (contains? @*ce-dead* (::cell l))) (ce-sure! "accessing an object outside its lifetime"))
+  ;; (cpp-sweep, the checker: [expr.const]/5.9 with /4, a read of a namespace-scope or static member variable not usable in
+  ;; constant expressions, or of its subobject -- not constexpr, not a const integral one -- sure: GCC's "the value of 'b' is not
+  ;; usable in a constant expression", cpp0x/constexpr-ex3.C's b.t)
+  (when (and (= ::unknown @(::cell l)) (checking?) (::uvar l))
+    (let [v (var* (::uvar l))]
+      (when (and (:name v) (not (:constexpr v)) (not (:cx-constexpr v)) (not (and (:c (:ty v)) (abi/integral? (:ty v)))))
+        (ce-sure! "the value of '" (:name v) "' is not usable in a constant expression"))))
   (when (= ::unknown @(::cell l)) (not-constant "a read of an object of unknown value"))
   (let [p (::path l) v @(::cell l)
         x (loop [x v ks (seq p)]
@@ -5289,7 +5301,7 @@
                ;; (cpp-ce2, the checker: a namespace-scope or static member variable not usable in constant expressions, its lvalue
                ;; alone, *ce-unknown*'s: its address formed, compared, deleted -- a read or a write of it no constant)
                (and (checking?) (not (abi/ref? (:ty v))) (#{:global :member-static} (:storage v)))
-               (ce-unknown-loc [:var (:id e)])
+               (assoc (ce-unknown-loc [:var (:id e)]) ::uvar (:id e))
                ;; (cpp-rt-own3: an object of a variable outside the evaluation, its lvalue alone, *ce-unknown*'s)
                (and (not (checking?)) (not (abi/ref? (:ty v))) (#{:local :param :global :static-local :member-static} (:storage v)))
                (ce-unknown-loc [:var (:id e)])
