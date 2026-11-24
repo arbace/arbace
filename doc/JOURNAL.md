@@ -20691,4 +20691,9 @@ arbace/repr/cpp/types.ae), no printer or parser change. doc/cpp/CPP-SURVEY.md, "
 target-aarch64-1_a.C passed already on mac/next (the Mac's queue 540b). The five HotSpot files pass levels 1 and 5
 (`bin/repr-cpp roundtrip-corpus hotspot-x86-linux-all --only-list`) and leave the known file; no HotSpot list is recorded
 (hotspot-x86-linux-every-25, 50 files, about 25 minutes at 2 jobs: left as an option).
-Records: the own round trip's lists rerun whole on stage 0 with `--record-results` (no failure, none lost): still running at handback: gxx-dg-essential 33/33, gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326 done (records unchanged), libstdcxx-testsuite-every-40, gxx-dg-every-10 and the modules part (`bin/repr-cpp dg --corpus modules --record`) running (.tmp/lists.sh, .tmp/lists.log in the worktree).
+Records: the own round trip's lists rerun whole on stage 0 with `--record-results`, before the merge: gxx-dg-essential 33/33,
+gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326, libstdcxx-testsuite-every-40 244/244, gxx-dg-every-10 1,807/1,807
+(its three forms-differ rows to pass), samples 9/9; the modules part 1,180/1,181: gxx-modules/modules/part-4_c.C crashed in the
+printer (`print: a name: (decltype (cpp/text "f"))`), the same on the base 7de5de3ec, a recorded pass lost on next: queue 540b's
+fix (f8bac5010, mac/540b-c-cpp-print, not on next) taken, its arbace/repr/cpp/print.ae hunk alone (a decltype-specifier as a
+nested name's first part). After merging mac/next 8a321eee2 and the fix: gxx-dg-essential 33/33, gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326; gxx-dg-every-10 and the modules part were still running at handback (.tmp/lists2.log).

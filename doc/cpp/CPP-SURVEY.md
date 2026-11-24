@@ -11364,3 +11364,5 @@ the native parser are unchanged.
 - target-aarch64-1_a.C passed already on mac/next (the Mac's queue 540b, decltype as a nested-name prefix); re-recorded.
 - The five HotSpot files pass the own judge's levels 1 and 5 (`roundtrip-corpus hotspot-x86-linux-all --only-list`, 2 jobs, about
   6 minutes) and leave the known file (no HotSpot list is recorded: its every-25 list's 50 files are about 25 minutes, left).
+- gxx-modules' part-4_c.C (a recorded pass that crashed on next, `decltype (f)::inner x;`): queue 540b's printer fix (f8bac5010's
+  arbace/repr/cpp/print.ae hunk: a decltype-specifier as a nested name's first part) taken; the rest of that commit (repr/c) stays 540b's.
