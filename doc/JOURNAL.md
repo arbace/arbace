@@ -20972,3 +20972,8 @@ doc/classes/SPEC.md §14, 7. Goal: Java's `:stack` class (interp 7, compiled 10 
   `bin/provenance-check` asks the regeneration of jdk/, jdk/javac/ and the fixtures (provenance only expected, the option being
   off for them): queued under the big lock as `.tmp/regen.sh` in the worktree (`bin/jrt-convert update`, `bin/javac-vendor
   convert`, `bin/clojure-tests --java-fixtures update` on javac's tool f170fb32 with the checkout's namespaces).
+- (later) Decisions, the coordinator's (2026-11-24; neither an n/a): (a) JDK frames keep the forms file's lines (jdk/ is read
+  without `--line-numbers`; only the tests' own frames get Java lines); (a) reflection's access checks stay lenient for the run
+  time's and the JDK's callers (only the program's own classes checked). The queued regeneration (`.tmp/regen.sh`) was cancelled
+  by the coordinator: train 4 regenerates the provenance once for every reader-hash change it merges (538, 549, 549b, 556d's
+  ^:final and this branch) on a fresh javac tool; until then `bin/provenance-check` fails on this branch alone.
