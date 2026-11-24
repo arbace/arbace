@@ -19210,3 +19210,28 @@ The user answered report 538's four print DECISIONs (2026-11-24, via the main se
 - **Records:** `--judge --partial --record` of both runs, which re-records the sample's rows; several fuzz tests now have fewer
   differing class files. Java print, the cell, 3321/0/4 -> 3323/0/2. `bin/reap --record`, `bin/crops-score --record` and
   `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 556b, DECISION 556b-1 (a) (the main session's): the print judge's flow rule narrowed
+
+`test/java/print.ae`'s `class-differences` named a whole class "a value's control flow" when any goto or return line differed,
+covering every other difference in it (t03457's `<init>`, report 556b's finding 1). The decision makes it count instead:
+- A differing goto or return names flow only through `counted-kinds`, when every differing instruction is a flow instruction or
+  another named kind's. Otherwise the difference is unnamed, shown by a line of no flow instruction.
+- A switch whose arms differ keeps the set-level naming: fall-through repeats arbitrary instructions.
+- The alternative was keeping the rule and t03457 alone deferred (556b-1 (b)).
+
+**Proved (run):** `.tmp/q556/flowctl.sh` calls class-differences on two real class files:
+- t06072's NonDirectSuper.class, where only flow differs, is named. It is named before and after.
+- t03457's Tester_Class_7 at 8bc7e8303, where flow differs alongside `<init>`'s extra local, is unnamed. It was named before the
+  change (the script fails on the parent and passes on the change).
+
+**The 128-test sample** (556b's 122 plus the six rows) at print against the record: 6 more leave the named kinds, all in
+`:print-classes-unnamed`, to triage:
+- t03453, t03454, t03455, t03567, and more of t03457's classes: hotspot's fuzz tests, where ?: against if moves the arms' loads,
+  stores, constants and conversions, which the counted flow kind does not admit.
+- t06039: a boxed compound assignment on a generic field, printed through a temporary.
+- t06072: its accessor hosts. `X.super.f` and `X.super.m()` in X go through access$N in the original and are direct in the printed
+  `super.f`.
+
+Recorded with `--judge --partial --record`. The whole print level's re-judge is the host's, on train 4's build: it will move more
+rows.
