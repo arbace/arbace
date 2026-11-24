@@ -4924,7 +4924,11 @@
                                         (not (and (checking?) (>= (long *cxx-year*) 20))))
                                (not-constant "a local with a destructor (" (:name v) ")"))
                            val (ce-full-expr (cond
-                                 emp? ::empty
+                                 ;; (cpp-sweep, the checker: an empty class's user-provided constructor still run, its errors the
+                                 ;; evaluation's: cpp1y/constexpr-diag1.C's `Jam j;` whose Jam() calls a function not constexpr)
+                                 emp? (do (when (and (checking?) (= :ctor (:i init)) (:body (fnd (:fn init))))
+                                            (ce-init (:ty v) init @env))
+                                          ::empty)
                                  arr? (let [xs (mapv el (:items init))]
                                         (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
                                  (and (abi/arr? at) (= :string (:i init))) (ce-init (:ty v) init @env)
@@ -5572,9 +5576,13 @@
           c (abi/cls cid)
           cell (atom (or start {::cls cid}))
           env2 (assoc (ce-args-env f args env) ::this {::cell cell ::path []} ::ret abi/void ::fn fid)
-          ti (:tinits f)]
+          ti (:tinits f)
+          p0 (some-> *ce-pos* deref)]
       ;; (h-cpp-consteval: a mem-initializer's errors at the constructor)
       (when-let [r (some-> (:node f) :range)] (when *ce-pos* (reset! *ce-pos* r)))
+      ;; (cpp-sweep, the checker: a constructor failing the potential constant check, cx-pce-bad?, whose evaluation fails surely: GCC's
+      ;; "'constexpr Jam::Jam()' called in a constant expression" at the construction too, as for a call; cpp1y/constexpr-diag1.C)
+      (try
       (binding [*ce-in-call* true *ce-mi-at* nil]
         (if-let [d (:delegate ti)]
           (reset! cell (ce-adopt! cell [] (ce-init {:k :class :id cid} d env2)))
@@ -5586,6 +5594,13 @@
                   (when-not (and (= :none (:i (:init fl))) (not (abi/class? (abi/unq ft))))
                     (swap! cell assoc (:field fl) (ce-adopt! cell [(:field fl)] (ce-store ft (binding [*ce-mi-at* (:at fl)] (ce-init ft (:init fl) env2))))))))))
         (ce-exec (:tbody f) env2))
+      (catch arbace.lang.ExceptionInfo x
+        (let [d (ex-data x)]
+          (when (and (checking?) *on-refusal* (:cx/sure d) (not (:cx/pce d)) p0 (cx-pce-bad? fid))
+            (*on-refusal* (ex-info (str "codegen: expression is not a constant expression ('" (:name f) "' called in a constant expression)")
+                                   {:codegen/refused :constexpr :cx/node {:range p0}})
+                          nil))
+          (throw (if (and (checking?) (:cx/sure d) (cx-pce-bad? fid)) (ex-info (.getMessage x) (assoc d :cx/pce true)) x)))))
       ;; (cpp-ce2, the checker: the value tagged with its cell, which its place aliases, ce-adopt!)
       (ce-made @cell cell)))))
 
