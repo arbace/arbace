@@ -19182,3 +19182,19 @@ under `ulimit -v` 24 GiB so that a runaway fails fast.
   entry's kind is the timeout). A passing row stays a pass: the record is held back (the run kept as the worktree's
   `.tmp/oc/check-aot-native.light-run.edn`) until the four are rerun alone on a quiet host, with the ticket lock (Gil.ae) suspected for
   the two parallel ones and checked against the old lock.
+
+## 2026-11-24: ocaml-1123: the four light regressions are the host's, not the branch's; the light record committed; base64's spawn
+
+- The four rows the light whole re-record failed (lib-marshal/intext_par, regression/pr3612/pr3612, weak-ephe-final/weaklifetime,
+  statmemprof/custom), rerun alone (one job, the build worktree): the same results with the ticket lock (Gil.ae), with the old lock
+  (382cc9a9a's parent) and with the base's whole runtime (fa635f636's jdk/ocaml): intext_par and pr3612 stop at 120 s of CPU, weaklifetime
+  fails its line-53 assertion, custom finishes with another output. Neither the lock nor this branch's runtime: their passes were
+  recorded by queue 527 and OT31 (a) on the Mac's arm64 VM, which this amd64 host does not reproduce under its load. The light record
+  (`check-aot-native.edn`) is committed from the whole run with these four rows kept as recorded (a passing row stays a pass; the
+  question of a host's record for these four is the coordinator's): OCaml AOT 514 / 21 / 81 -> 517 / 23 / 76 (gc-roots' two parallel
+  tests and int64-unboxing pass; delayintr and signal `:unix-java`, by design; the c-api class 9 -> 3).
+- opam/base64/test's `run ['base64']: No such file or directory` at the compiled level: the compiled main's hosts (`execHost`, and
+  `capiHost` for programs with C stubs) embedded jrt's Host interface, so jrt's `CurrentHostProc` (a type assertion to HostProc) found
+  no process host and every spawn failed, as did `CurrentHostFS`'s access and modes and the network's; both now embed jrt's OSHost
+  (8bcdee584). Its compiled rerun, with lib-threads/signal and delayintr (their pid and kill may have been the same cause), is queued
+  after the split shard (the build worktree's `.tmp/oc/compiled-b4.sh`).
