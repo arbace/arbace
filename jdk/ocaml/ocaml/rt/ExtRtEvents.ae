@@ -6,9 +6,9 @@
 ;; full_major, compaction call ExtRtEvents/explicit), the lifecycle events, the program's user events; a cursor on the
 ;; process's own ring reads them from its start, read_poll calling the callbacks. Divergences as oi's (doc/ocaml/OCAML-SURVEY.md,
 ;; "As built: OC219 (a)"): the JVM's own collections and the C runtime's other phases, counters and allocation buckets are not
-;; emitted; one ring for all domains; another process's file is not mapped. An event is an Object/1 [pos words dom ts kind id
-;; data utype payload] (longs boxed, payload a byte/1 or nil), kind 0 runtime_begin, 1 runtime_end, 4 lifecycle, 5 user, -1
-;; padding.
+;; emitted (but the allocation buckets since ocaml-aot, 2026-11-24, as oi's since queue 516); one ring for all domains; another process's
+;; file is not mapped. An event is an Object/1 [pos words dom ts kind id data utype payload] (longs boxed, payload a byte/1, an
+;; EV_ALLOC's long/1 of counts, or nil), kind 0 runtime_begin, 1 runtime_end, 3 alloc, 4 lifecycle, 5 user, -1 padding.
 
 (in-ns 'ocaml.rt)
 
@@ -25,6 +25,12 @@
   (field ^:static ^long size 65536)
   (field ^:static ^long t0 0)
   (field ^:static ^:final ^ArrayList users (ArrayList.))
+  ;; the allocation buckets (ocaml-aot, 2026-11-24; oi's reBuckets since queue 516): the instrumented runtime's caml_ev_alloc, each
+  ;; counted allocation's wosize in its bucket while the ring is active (one a size below 10 words, one a decade below 100, the last the
+  ;; rest), written as one EV_ALLOC (kind 3) at each major cycle's end (stw_cycle_all_domains' CAML_EV_ALLOC_FLUSH), bucket 0 never
+  ;; reset as there. The counted allocations reach ExtGc/memprofAlloc once memprofSampling is set, which the ring's start sets (the
+  ;; translated programs' inline allocations test that flag alone)
+  (field ^:static ^:final ^long/1 buckets (new long/1 20))
 
   (method ^:public ^:static init ^void []
     (when (not inited)
@@ -47,6 +53,7 @@
     (set! paused false)
     (.clear ring)
     (.clear users)
+    (java.util.Arrays/fill buckets 0)
     (set! head 0)
     (set! tail 0))
 
@@ -66,6 +73,7 @@
       (set! tail 0)
       (set! enabled true)
       (set! paused false)
+      (set! ExtGc/memprofSampling true)
       (ExtRtEvents/write 0 4 0 (ExtRtEvents/pid) 0 nil 1)))
 
   (method ^:static active ^boolean [] (and enabled (not paused)))
@@ -86,6 +94,18 @@
           (.remove ring 0)
           (set! head (if (.isEmpty ring) tail (ExtRtEvents/ev (.get ring 0) 0)))))))
 
+  ;; caml_ev_alloc: an allocation of wosize words counted in its bucket while the ring is active
+  (method ^:public ^:static alloc ^void [^long wosize]
+    (when (and (> wosize 0) (ExtRtEvents/active))
+      (let [b (cond (< wosize 10) wosize (< (unchecked-subtract wosize 10) 90) (unchecked-add (unchecked-divide wosize 10) 9) :else 19)]
+        (aset buckets (unchecked-int b) (unchecked-inc (aget buckets (unchecked-int b)))))))
+  ;; caml_ev_alloc_flush: the buckets written as one EV_ALLOC (its payload a long/1 of the counts), then emptied but the first
+  (method ^:static allocFlush ^void []
+    (when (ExtRtEvents/active)
+      (let [c (.clone buckets)]
+        (loop [^int i 1] (when (< i 20) (aset buckets i 0) (recur (unchecked-inc-int i))))
+        (ExtRtEvents/write (ExtRtEvents/dom) 3 0 0 0 c 20))))
+
   (method ^:static ev ^long [e ^int i] (.longValue (cast Long (aget (cast Object/1 e) i))))
   (method ^:static dom ^long [] (.-id (.-dom (Effects/st))))
   (method ^:static phase ^void [^boolean begin ^long ph]
@@ -101,6 +121,7 @@
     (when compact
       (ExtRtEvents/phase true 44)
       (ExtRtEvents/phase false 44))
+    (ExtRtEvents/allocFlush)
     (ExtRtEvents/phase false 28))
   ;; an asked collection's events (gc_ctrl.c): 0 Gc.minor, 1 Gc.major, 2 Gc.full_major, 3 Gc.compact
   (method ^:public ^:static explicit ^void [^int kind]
@@ -174,6 +195,13 @@
         (or (== kind 0) (== kind 1))
         (let [f (ExtRtEvents/callback cbs (unchecked-int kind))]
           (when (some? f) (Rt/ap3 f d ts (Long/valueOf id))))
+        (== kind 3)
+        (let [f (ExtRtEvents/callback cbs 3)]
+          (when (some? f)
+            (let [c (cast long/1 (aget (cast Object/1 e) 8))
+                  a (new Object/1 (alength c))]
+              (loop [^int i 0] (when (< i (alength c)) (aset a i (Long/valueOf (aget c i))) (recur (unchecked-inc-int i))))
+              (Rt/ap3 f d ts (Block. 0 a)))))
         (== kind 4)
         (let [f (ExtRtEvents/callback cbs 4)]
           (when (some? f)

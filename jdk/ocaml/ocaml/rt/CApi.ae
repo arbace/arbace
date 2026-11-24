@@ -428,6 +428,22 @@
   (method ^:public ^:static nativeCall [^String name ^String reprs ^Object/1 args] (CApi/call3 name reprs args false))
   (method ^:static none ^RuntimeException [^String name ^boolean prim] (if prim (Rt/unsupported name) (Rt/missing name)))
 
+;; a C program that embeds OCaml (ocaml-aot, 2026-11-24; oi's level since queue 539: embedded/cmcaml): the server runs the stubs' own
+  ;; main ('C' "__oi_embed", wire.go's wireEmbed) with start, a closure that runs the units' initialisation inits (once: startup.c counts
+  ;; the nested caml_startup calls), which its caml_main or caml_startup applies by a callback; main's status, or -1 when there are no
+  ;; stubs or they have no main of their own (the server's 'N'), and Main/run initialises the units itself
+  (method ^:public ^:static embed ^long [^Runnable inits]
+    (if (not (CApi/open))
+      -1
+      (let [ran (new boolean/1 1)
+            start (Rt/native 1 (lambda Code [^Object/1 a]
+                                 (when (not (aget ran 0))
+                                   (aset ran 0 true)
+                                   (.run inits))
+                                 Rt/UNIT))
+            v (CApi/call3 "__oi_embed" "" (new Object/1 [start]) false)]
+        (if (nil? v) -1 (Rt/l v)))))
+
   (method ^:static call3 [^String name ^String reprs ^Object/1 args ^boolean prim]
     (when (not (CApi/open)) (throw (CApi/none name prim)))
     (when (== depth 0)
@@ -443,8 +459,14 @@
         (CApi/u32 o (alength args))
         (loop [^int i 0] (when (< i (alength args)) (CApi/put o (aget args i)) (recur (unchecked-inc-int i))))
         (let [v (CApi/serve (CApi/exchange o) name prim)]
-          ;; the signals the C sent itself, handled as OCaml's runtime does when an external returns
-          (when (not (== ExtSignal/pending 0)) (ExtSignal/process))
+          ;; the signals the C sent itself, handled as OCaml's runtime does after an external returns: at the next poll point, an
+          ;; allocation (ExtSignal/allocPoll, the translated programs' inline allocations through Rt/block by ExtGc/memprofSampling) or
+          ;; a call's or loop's turn (Rt/force); before ocaml-aot (2026-11-24) at the return itself, so callback/signals_alloc's handler
+          ;; ran before the code between the external and the allocation
+          (when (not (== ExtSignal/pending 0))
+            (set! ExtSignal/allocPoll true)
+            (set! ExtGc/memprofSampling true)
+            (Rt/force))
           v))
       (finally
         (set! depth (unchecked-dec-int depth))
@@ -458,7 +480,7 @@
       82 (.get rd)
       69 (throw (Exn. (.get rd)))
       88 (throw (Exit. (unchecked-int (.rd32 rd))))
-      78 (throw (CApi/none name prim))
+      78 (if (.equals "__oi_embed" name) nil (throw (CApi/none name prim)))
       70 (throw (Fatal. (Rt/utf8 (.rdBytes rd (unchecked-int (.rd32 rd)))) 125))
       84 (let [t pending] (set! pending nil) (throw (if (some? t) t (Rt/internal "the C API: an unwound call"))))
       75 (let [f (.get rd) n (unchecked-int (.rd32 rd)) a (new Object/1 n)]

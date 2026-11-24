@@ -23,9 +23,17 @@
   (field ^:public ^:static ^boolean memprofSampling false)
   (field ^:static ^long forcedMajorCount 0)
   (field ^:static ^:final ^Object/1 gcControl
-    (new Object/1 [(Long/valueOf 262144) (Long/valueOf 0) (Long/valueOf 120) (Long/valueOf 0) (Long/valueOf 0)
+    (new Object/1 [(Long/valueOf (ExtGc/minorHeapInit)) (Long/valueOf 0) (Long/valueOf 120) (Long/valueOf 0) (Long/valueOf 0)
                    (Long/valueOf (ExtCore/stackWords)) (Long/valueOf 0) (Long/valueOf 0) (Long/valueOf 44)
                    (Long/valueOf 100) (Long/valueOf 8192)]))
+  ;; the minor heap's initial size in words (ocaml-aot, 2026-11-24; oi's minorHeapInit since queue 523): OCAMLRUNPARAM's s normalized as
+  ;; domain.c's caml_norm_minor_heap_size (at least Max_young_wosize + 1, rounded up to whole 4 KiB pages, the reference host's), else
+  ;; 256 Ki: Gc's minor_heap_size and the simulated minor heap's (memprofAlloc)
+  (method ^:static minorHeapInit ^long []
+    (let [s (ExtCore/runParam 115)]
+      (if (> s 0)
+        (let [t (if (< s 257) 257 s)] (unchecked-multiply (unchecked-divide (unchecked-add t 511) 512) 512))
+        262144)))
   (field ^:static ^:final ^String/1 tweakNames (new String/1 ["mark_stack_prune_factor" "small_heap_limit"]))
   (field ^:static ^:final ^long/1 tweakVals (new long/1 [32 128]))
   (field ^:static ^:final ^long/1 tweakInit (new long/1 [32 128]))
@@ -55,6 +63,9 @@
         (when (some? r)
           (when (identical? r canary)
             (set! cycles (unchecked-add cycles 1))
+            ;; (ocaml-aot, 2026-11-24) a collection counted in Gc's minor_collections is an EV_MINOR span of the ring too, so a
+            ;; program that compares the two (lib-runtime-events/test_instrumented's diff_minors) sees the same collections
+            (when (ExtRtEvents/active) (ExtRtEvents/minor))
             (set! canary (ExtGc/canaryRef)))
           (recur))))
     cycles)
@@ -64,6 +75,7 @@
     (set! majorAsked (unchecked-add majorAsked majors))
     (set! compactions (unchecked-add compactions compacts))
     (set! forcedMajorCount (unchecked-add forcedMajorCount forced))
+    (ExtGc/youngClear)
     (ExtGc/weakCollect)
     ;; the C's dead custom blocks finalized (queue 523), as the sweep calls them, before Gc.finalise's functions
     (CApi/collected)
@@ -99,6 +111,7 @@
       ;; a new minor heap size empties the simulated minor heap (caml_set_minor_heap_wsz: a minor collection)
       (when (and (> (alength f) 0) (not (== (Rt/l (aget f 0)) (Rt/l (aget gcControl 0)))))
         (set! minorUsed 0)
+        (ExtGc/youngClear)
         (set! minorDue true))
       (loop [^int i 0]
         (when (< i n) (aset gcControl i (aget f i)) (recur (unchecked-inc-int i))))
@@ -402,6 +415,17 @@
   (field ^:static ^double memprofNext 0.0)
   (field ^:static ^long memprofRng 42)
   (field ^:static ^long minorUsed 0)
+  ;; the young values (ocaml-aot, 2026-11-24; oi's youngSet since queue 461, lazy/minor_major_force): Obj.is_shared
+  ;; (caml_obj_is_shared) is false for a block in the simulated minor heap. Once a program asks (its first is_shared, which finds
+  ;; every value made before it old, and sets memprofSampling so that every counted allocation reaches memprofAlloc), the counted
+  ;; minor allocations are kept in youngSet until the simulated minor heap's next collection (or an asked one) empties it
+  (field ^:static ^boolean youngTrack false)
+  (field ^:static ^:final ^java.util.IdentityHashMap youngSet (java.util.IdentityHashMap.))
+  (method ^:static youngClear ^void [] (when youngTrack (.clear youngSet)))
+  (method ^:public ^:static isShared ^boolean [x]
+    (if (not youngTrack)
+      (do (set! youngTrack true) (set! memprofSampling true) true)
+      (or (not (or (instance? Block x) (instance? double/1 x) (instance? byte/1 x))) (not (.containsKey youngSet x)))))
   (field ^:static ^boolean minorDue false)
   (field ^:static ^:final ^ArrayList mpMinor (ArrayList.))
   (field ^:static ^:final ^ArrayList mpMajor (ArrayList.))
@@ -436,12 +460,16 @@
   ;; memprofSample: an allocation whose value is not at hand (taken as dead at the next minor collection when tracked)
   (method ^:public ^:static memprofSample ^void [^long wosize] (ExtGc/memprofAlloc wosize nil))
   (method ^:public ^:static memprofAlloc ^void [^long wosize v]
+    ;; the ring's allocation buckets (the instrumented runtime's caml_ev_alloc; ExtRtEvents/alloc, no-op unless the ring is active)
+    (ExtRtEvents/alloc wosize)
     (let [st (ExtGc/mpState) ^:mutable full false]
       (when (<= wosize 256)
         (set! minorUsed (unchecked-add minorUsed (unchecked-inc wosize)))
         (when (> minorUsed (Rt/l (aget gcControl 0)))
           (set! minorUsed (unchecked-inc wosize))
-          (set! full true)))
+          (ExtGc/youngClear)
+          (set! full true))
+        (when (and youngTrack (some? v)) (.put youngSet v Boolean/TRUE)))
       (if (ExtGc/mpInCb st)
         (when full (set! minorDue true))
         (do
@@ -574,6 +602,8 @@
   ;; Main/reset's part: no profile, no samples, no tracked values, the words counted from zero (a batch's next program)
   (method ^:public ^:static memprofReset ^void []
     (set! memprofSampling false)
+    (set! youngTrack false)
+    (.clear youngSet)
     (set! memprofPending 0)
     (set! minorUsed 0)
     (set! minorDue false)

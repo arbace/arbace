@@ -522,8 +522,9 @@ END {
           # -I of the compiler's source directories (parsing/, toplevel/: their .cmi files): compiler-libs' units are on the path (OT21 (b))
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
           # -runtime-variant=i (queue 516, DECISION 511-2 (a)): the instrumented runtime, whose allocation buckets oi's ring emits
-          # (ext_runtime_events.go's reAlloc) at oi's level; the AOT levels keep the class
-          if (f == "-runtime-variant=i" && aot == 0) continue
+          # (ext_runtime_events.go's reAlloc) at oi's level, and since ocaml-aot (2026-11-24) the AOT levels' runtime's ring too
+          # (ExtRtEvents/alloc)
+          if (f == "-runtime-variant=i") continue
           if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           cls("flags " val)
         }
@@ -568,8 +569,8 @@ END {
       # runtime's call depth); the other parameters (b=, ...) keep the class
       if (key == "ocamlrunparam" && val ~ /^,?[dl]=[0-9]+$/) { env = env " OCAMLRUNPARAM=" val; continue }
       # s, the minor heap's size in words (queue 523): oi's simulated minor heap (Gc's minor_heap_size, OC218's countWords) at oi's level
-      # (statmemprof/user_data_regression's s=100); the AOT levels keep the class
-      if (key == "ocamlrunparam" && val ~ /^,?s=[0-9]+[kMG]?$/ && aot == 0) { env = env " OCAMLRUNPARAM=" val; continue }
+      # (statmemprof/user_data_regression's s=100), and since ocaml-aot (2026-11-24) the AOT levels' runtime's (ExtGc's minorHeapInit)
+      if (key == "ocamlrunparam" && val ~ /^,?s=[0-9]+[kMG]?$/) { env = env " OCAMLRUNPARAM=" val; continue }
       # b, the backtraces' recording (OC217 (a)): oi's level records them (its backtrace stack over the typer's debugging events)
       # (queue 370: at the light level too, Bt's backtraces; not yet the compiled level)
       if (key == "ocamlrunparam" && val ~ /^,?b=[0-9]+$/ && aot != 2) { env = env " OCAMLRUNPARAM=" val; continue }
@@ -608,8 +609,9 @@ END {
     # first alternative's, read up to here (OT9's fifth fix); a test whose only branch skips stays a class
     if (s == "skip" && incs != "") break
     if (opmode && (s == "setup-ocamlopt.byte-build-env" || s == "ocamlopt.byte" || s == "run" || s == "check-program-output" || (opout && s == "check-ocamlopt.byte-output"))) continue
-    # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it
-    if (s == "instrumented-runtime" && aot == 0) continue
+    # instrumented-runtime (queue 516): the pinned host has libcamlruni.a, so ocamltest runs the test; oi's level takes it, and the AOT
+    # levels since ocaml-aot (2026-11-24)
+    if (s == "instrumented-runtime") continue
     if (s == "bytecode") sawbyte = 1
     if (s == "native") sawnative = 1
     if (s == "bytecode" || s == "native" || s == "no-tsan" || s == "not-target-windows" || s == "multicore" || s == "native-compiler" || s == "arch64" || s == "not-macos" || s == "no-flambda" || s == "linux" || s == "not-windows" || s == "not-bsd" || s == "not_macos_amd64_tsan" || s == "hasunix" || s == "hassysthreads" || s == "hasstr") continue

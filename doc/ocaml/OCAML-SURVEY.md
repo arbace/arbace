@@ -5014,3 +5014,12 @@ done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 
 - **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
   native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
   problems. No record changes: the ppx programs are not rows of the suite corpus.
+
+## As built: ocaml-aot (2026-11-24, branch `ocaml-aot-1124`, from mac/next `a6da0aadf` with mac/ocaml-1123): the AOT cell's n/a decisions, ports in progress
+
+- The user's decisions 539-1 (a), 539b-2, 539b-3 (a) and ephetest3's n/a hold at the AOT level too: test/ocaml/divergences-aot.edn's
+  `:na-native-dynlink`, `:na-gc-pacing`, `:na-boxed-identity` (539/14/63 -> 539/13/60, 64 n/a).
+- bin/oi's run corpus and selection in `bin/lib/oi/corpus.bash`: each writer's corpus a file of its own renamed into place, a program
+  selected once (concurrent checks doubled `.tmp/oi/corpus.tsv`).
+- Written, not yet run or recorded (doc/JOURNAL.md, 2026-11-24, ocaml-aot): the AOT runtime's ports of oi's thread exit, young set,
+  allocation buckets, OCAMLRUNPARAM s, the stub's signal at the next allocation and the embedding of OCaml in a C main.

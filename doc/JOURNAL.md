@@ -20902,3 +20902,37 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   split program unit and plugin its own Go package), one ticket of 30 GiB after b5 (`ocaml-b`'s `.tmp/oc/compiled-b6.sh`), its rows
   merged alone (`.tmp/oc/merge-ocamldoc.sh`, the ids of ocamldoc.txt only). Each merge records the matrix and scores and commits only
   when reap, crops-score --judge --strict and records-check report 0 problems.
+
+## 2026-11-24: ocaml-aot: OCaml's AOT cell, the user's n/a decisions at the AOT level, the runtime's ports of oi's eval fixes, bin/oi's corpus race
+
+Branch `ocaml-aot-1124` from mac/next `a6da0aadf`, with mac/ocaml-1123 (`07f1300ad`: b4's and b5's compiled rows) merged first. The
+coordinator's brief (.tmp/goal/burst-1123-brief.md): the AOT cell, 539 / 14 / 63 (60 n/a) at the start, the rows the other streams own
+left alone (the ocaml worktree's b5 and b6, the oc-compiled chain's whole compiled record, the Mac's 539b/546b, the four host-sensitive
+rows). The deferred rows by class: the worktree's `.tmp/classes.md`.
+- **The user's decisions applied at the AOT level** (the brief lists them as the user's: 539-1 (a), 539b-2, 539b-3 (a), ephetest3 n/a):
+  test/ocaml/divergences-aot.edn gets `:na-native-dynlink` (lib-dynlink-native/main, from `:c-runtime-internals`; backtrace/backtrace_dynlink,
+  from `:dynlink-decided`), `:na-gc-pacing` (misc/darkening_work) and `:na-boxed-identity` (weak-ephe-final/ephetest3), the same rows'
+  classes at oi's level, with the AOT level's reasons (no level of Arbace makes ocamlopt's .cmxs; the AOT runtime's major collections are
+  Go's; a boxed integer's identity is unspecified whatever a level's boxes are). 539/14/63 -> 539/13/60 (64 n/a). Alternative not taken:
+  waiting for the user to restate them per level (the reasons do not depend on the level).
+- **bin/oi's corpus race** (the bug ocaml-eval's entry of 2026-11-24 found): `bin/oi check` and `bin/oi suite check` both run cmd_corpus,
+  and two of them at once in one checkout appended the same rows to `.tmp/oi/corpus.tsv` (each truncated it, then both appended): the corpus
+  listed every program twice and two jobs ran a program in one run directory. cmd_corpus and the selection move to `bin/lib/oi/corpus.bash`
+  (sourced as ocamldoc.bash and tools.bash, so a later edit leaves native_key alone; this one moves it once): each writer builds its corpus
+  in a file of its own (`$BASHPID`: a background subshell's `$$` is its parent's, which the first test caught) and renames it into place,
+  the suite's corpus and actions.tsv likewise, and select_from takes a program once. Proof: `.tmp/q/corpus-race.bash`, two cmd_corpus at
+  once in one directory: before, 1,088 rows, 544 ids twice, and a doubled corpus selected twice; after, 544 rows, none twice, one each.
+  Left: the corpus file is still one for the three header levels (oi's, light, compiled), so a check and a check --aot at once in one
+  checkout can read the other level's rows; not changed (a corpus file per level would touch every reader of corpus.tsv).
+- **Ports of oi's eval fixes to the AOT runtime, written, not yet run** (WIP, the burst's wrap-up at 93% of the allowance; the light run
+  `.tmp/q/run1.sh` was still reading ci's musl forms for the C stubs, a new repr/c key, when it stopped being watched): the thread's escaped
+  exception silent (ExtThread; statmemprof/thread_exit_in_callback, oi's queue 539); Obj.is_shared's young set (ExtGc/isShared, oi's
+  queue 461) with o2j's makelazyblock and makeforwardblock allocated through Rt/block (lazy/minor_major_force); the ring's allocation
+  buckets and EV_ALLOC, the canary's collections as EV_MINOR spans, header.awk's -runtime-variant=i and instrumented-runtime at the AOT
+  levels (lib-runtime-events/test_instrumented, oi's queue 516); OCAMLRUNPARAM's s at the AOT levels (ExtGc/minorHeapInit;
+  statmemprof/user_data_regression); a stub's self-sent signal handled at the next allocation (ExtSignal/allocPoll, CApi's call3;
+  callback/signals_alloc); a C program that embeds OCaml at the AOT levels (wire.go's "__oi_embed", CApi/embed, Main/run; embedded/cmcaml).
+  The arbace/o2j.ae edit moves gate_key (arbace.o2j is embedded): the compiled level's rows of these need the train's build. Nothing of
+  them is recorded; the next step is `.tmp/NEXT.md`'s.
+- n/a candidates for the user (the report): backtrace/lazy, typing-modules/struct_include_optimisation, statmemprof/discard_in_callback
+  (ocamlopt's inlined frames, transl_store's allocations, Comballoc's combined allocations: ocamlopt's own code, as 528-14's optargs).
