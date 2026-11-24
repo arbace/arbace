@@ -274,7 +274,8 @@
         flags (or (get comp-syms nm) (get (:symbols b) nm 0))
         scope (sc/scope-of* flags)
         hidden (get (:hidden @u) nm)
-        [fast deref global named] (case what :load [:load-fast :load-deref :load-global (if comp-syms :load-global :load-name)]
+        ;; codegen_nameop: LOAD_GLOBAL for an implicit global of a comprehension inlined in a class body
+        [fast deref global named] (case what :load [:load-fast :load-deref :load-global (if (and comp-syms (= btype :class)) :load-global :load-name)]
                                     :store [:store-fast :store-deref :store-global :store-name]
                                     :del [:delete-fast :delete-deref :delete-global :delete-name])]
     (cond
@@ -1783,8 +1784,20 @@
                              (emit! u :store-fast (local-index u nm)))))]
           (build! u)
           (emit! u :swap 2)
-          (when (and (= :class (:type @(:block @u))) (nil? saved-syms))
-            (swap! u assoc :comp-syms (:symbols @block)))
+          ;; _PyCompile_TweakInlinedComprehensionScopes: in a class body (not within another inlined comprehension) every
+          ;; name the comprehension's way; elsewhere a name whose scope differs inside (not FREE inside, not CELL inside
+          ;; and FREE outside), as a function's comprehension that reads a global its earlier comprehension bound as
+          ;; its own (queue 557: test_listcomps' test_multiple_comprehension_name_reuse)
+          (if (and (= :class (:type @(:block @u))) (nil? saved-syms))
+            (swap! u assoc :comp-syms (:symbols @block))
+            (let [outer (:symbols @(:block @u))
+                  tweaked (into {} (for [[nm f] (:symbols @block)
+                                         :let [sc (sc/scope-of* f)
+                                               osc (sc/scope-of* (or (get saved-syms nm) (get outer nm 0)))]
+                                         :when (and (not= sc osc) (not= sc 4) (not (and (= sc 5) (= osc 4))))]
+                                     [nm f]))]
+              (when (seq tweaked)
+                (swap! u assoc :comp-syms (merge saved-syms tweaked)))))
           (comp-loops! u gens 0 #(elt! u %) 0 eloc)
           (swap! u assoc :hidden saved :comp-syms saved-syms)
           (when (pos? k)
