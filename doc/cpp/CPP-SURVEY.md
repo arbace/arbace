@@ -11372,7 +11372,8 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   defined out of a complete class without bases that declares none of the name ("no declaration matches"); member classes defined
   with their own class's qualification, class names and members qualified by `::` alone; member class templates without arguments and
   undeclared members as qualifiers; explicit instantiations with a definition or of an operator-function-id without a function
-  declarator; non-member functions defaulted; `-fno-char8_t` from C++20. The standards' new features used early, GCC's pedwarns (errors
+  declarator; non-member functions defaulted; `auto` from empty braces; function definitions in blocks; C99 array designators
+  (pedantic, `__extension__` spared) and floating designator indices; `-fno-char8_t` from C++20. The standards' new features used early, GCC's pedwarns (errors
   under the harness's -pedantic-errors): variadic templates and inline namespaces before C++11, `decltype(auto)` before C++14, a
   `static_assert` without a message and `*this` captures before C++17, constexpr destructors, defaulted comparisons and `this`
   captured beside `=` before C++20, nested namespace definitions before C++17.
@@ -11385,7 +11386,8 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   virtual bases; duplicate labels and gotos to labels defined nowhere; labels in constexpr functions before C++23 (pedantic); case
   labels' narrowing to the condition's promoted type (C++11), floating case labels, integers for scoped enumerations and scoped
   enumerators for integers; definitions of implicitly-declared constructors and destructors (a class that declares none); friend
-  definitions with default arguments that are not their function's only declaration.
+  definitions with default arguments that are not their function's only declaration; member functions overloaded with and without a
+  ref-qualifier; block-scope variable length arrays under -pedantic-errors; discarded warn_unused_result calls under -Werror.
 - **The checker** (sema.ae, template.ae): constructors delegating to themselves; `auto x{e}` deduced from e and `auto x = {a, b}` as
   std::initializer_list<E> (the second had been a false "excess elements in scalar initializer"); void conditions (a statement
   expression ending in a statement, a throw-expression); pointer arithmetic outside an object's one element; casts from `void*` in
@@ -11395,7 +11397,8 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   qualification conversion (DR 330; a false error before); scalars and arrays from parenthesized braced lists or array expressions;
   value-initialized reference members; non-static data members named outside their class's member functions; `&` and `++` of an
   rvalue reported (the refusal had had no rule); `->` on a class without operator->; functional casts to array types; member functions
-  assigned to; an instance's data member of a function type; `auto*` deduced
+  assigned to; an instance's data member of a function type; parenthesized aggregate initialization's array elements (no brace
+  elision); `auto*` deduced
   from no pointer or from no return statement; the composite pointer type of class pointers in `?:` (unrelated ones an error);
   explicit instantiation definitions' member functions analyzed (a class whose member was left out by an error not, its uses being
   the cascade); three stack overflows turned into errors or refusals (a constructor call needed again by its own argument's
