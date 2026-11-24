@@ -403,7 +403,10 @@ public class FileManager implements JavaFileManager {
 
     @Override
     public JavaFileObject getJavaFileForOutput(Location location, String className, JavaFileObject.Kind kind, FileObject sibling) throws IOException {
-        File dir = outputDir(location);
+        File dir = outputDir(sourceOutput(location));
+        if (dir == null && location == StandardLocation.SOURCE_OUTPUT && !multiModule) {
+            dir = new File(".");
+        }
         if (dir == null && location == StandardLocation.CLASS_OUTPUT && !multiModule) {
             return new Obj(besideSibling(className, kind, sibling), kind, null);
         }
@@ -411,6 +414,15 @@ public class FileManager implements JavaFileManager {
             throw new IOException("no output location " + location + " for " + className);
         }
         return new Obj(new File(dir, className.replace('.', '/') + kind.extension), kind, null);
+    }
+
+    /**
+     * The location whose directory an output goes to: SOURCE_OUTPUT's (no -s on Arbace) is CLASS_OUTPUT's, else the
+     * current directory, as javac's own JavacFileManager.getFileForOutput puts a generated source (an annotation
+     * processor's Filer: JCS51).
+     */
+    static Location sourceOutput(Location location) {
+        return location == StandardLocation.SOURCE_OUTPUT ? StandardLocation.CLASS_OUTPUT : location;
     }
 
     static String relative(String packageName, String relativeName) {
@@ -425,8 +437,8 @@ public class FileManager implements JavaFileManager {
 
     @Override
     public FileObject getFileForOutput(Location location, String packageName, String relativeName, FileObject sibling) throws IOException {
-        File dir = outputDir(location);
-        if (dir == null && location == StandardLocation.CLASS_OUTPUT && !multiModule) {
+        File dir = outputDir(sourceOutput(location));
+        if (dir == null && (location == StandardLocation.CLASS_OUTPUT || location == StandardLocation.SOURCE_OUTPUT) && !multiModule) {
             // F6: without -d, javac's JavacFileManager resolves it against the current directory
             dir = new File(".");
         }

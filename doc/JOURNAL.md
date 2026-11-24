@@ -19499,3 +19499,46 @@ Applied in test/java/divergences.edn (java-design-1123):
   runtime.AddCleanup) and WeakReference to a Class cleared when it goes: a change to java-bytecode's loader and jrt's registries,
   left for a decision with that stream. Not built. t04308 passes already.
 - The interp speed rows (11: exhaustive loops interpreted past 600 s of CPU) need a faster interpreter; not started.
+## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
+
+The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
+(overlay/jdk/java.base), jdk26u's lazy stream over the loader's getResources (the name checked first; getResources called
+when the stream is consumed, its IOException an UncheckedIOException then), and j2g's class-loader-resource-helpers'
+resources(String) (arbace/j2g/model.ae: a translated loader's own override first, else ClassPathResources'; main.ae roots
+it). jdk/forms' ClassPathResources.ae as bin/jrt-convert predict reads it (only the new method and its imports differ from
+the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 failures; the night's update regenerates
+it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
+a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
+Rides train 2.
+## 2026-11-23: an assert runs while its class's initialization is in progress (t06029; the user's decision, train 3)
+
+The user confirmed (2026-11-23, relayed by the coordinator) building :assert-before-init: assertion status per class as
+the JVM has it. javac compiles assert to a test of the class's static $assertionsDisabled, which <clinit> sets from
+desiredAssertionStatus(); before <clinit> completes the field is still false, so an assert in a class whose initialization
+is in progress runs (Attach.java: U, initialized as V's superclass, calls V.assertsEnabled(); JLS 12.4.2, 14.10). Built,
+write-ahead of train 3's build: the interpreter's :assert (arbace/classes/interp.ae) is (if (and (AssertOn k) (not test))
+(throw (new AssertionError msg))) with Compiler$CF$AssertOn, on while the Klass's state is not done (CF$Klass.initDone,
+new); j2g's :assert (arbace/j2g/code.ae) tests (or (not J2g_AssertionsDisabled) (not (.Done C_init))) for a translated
+class with non-trivial initialization (a class with an assert always has it: :uses-assert); an interface's asserts follow
+the global flag as before (javac's holder class is not translated). No class runs with assertions enabled
+(Class.desiredAssertionStatus stays false). Proof due on train 3's build: t06029 at interp and compiled, and the Java
+essential checks. Branch java-bytecode-assert-1123 (from java-bytecode-1122 731924212).
+## 2026-11-23: JCS51 on train 1's tool, 18 of 25; the Filer's generated sources (java-bytecode-assert-1123, train 3)
+
+JCS51's 25 processing tests at the diagnostics level on train 1's javac tool (javac-f170fb32cd7e, d9217f672): 18 pass, recorded
+on java-bytecode-1122 (660ab0f75), :diag-processors narrowed to the 7 left. Three of the seven stop on the Filer's generated
+sources: javac on Arbace's file manager had no SOURCE_OUTPUT (getJavaFileForOutput's IOException, BrokenEnumConstructor's
+output, and the generated classes missing in GenerateAndError and WErrorGen). Built for train 3: SOURCE_OUTPUT (no -s on
+Arbace) goes to CLASS_OUTPUT's directory, else the current directory, as jdk26u's JavacFileManager.getFileForOutput puts a
+generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java at baf63fb, read for the
+behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
+committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
+method) is left for after train 3's run.
+## 2026-11-23: an interpreted interface's method on a proxy (JCS51's TestElementsAnnotatedWith; train 3)
+
+t07544 (TestElementsAnnotatedWith) on train 1's tool stopped on AbstractMethodError jdk.proxy1.$Proxy0.names(): javac's
+AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the test's processor defined from its class file
+(annot/AnnotatedElementInfo), and the processor's invokeinterface of names() on it reached CallV's reflective path, where the
+proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
+with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
+as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
