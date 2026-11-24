@@ -2652,14 +2652,31 @@
                                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
     ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
     ;; [dcl.enum]/5 and [basic.scope.enum]: a scoped enumeration's too, <charconv>'s `general = fixed | scientific`)
-    (let [neg (atom false)]
+    (let [neg (atom false)
+          ;; (cpp-read, 2026-11-24: the enumerators' values for [dcl.enum]/7 below)
+          vals (atom [])]
       (loop [[c & more] (filter #(= "EnumConstantDecl" (:kind %)) (kids n)) v 0 bs (new-scope :enum scope :path (:path scope))]
         (when c
           ;; (cpp-s14: an enumerator's attributes are no initializer: <ios_base.h>'s `enum __attribute__((__flag_enum__))
           ;; _Ios_Openmode`, the native parser's NativeAttr before an enumerator's value)
-          (let [v (if-let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))] (const-int bs x) v)
+          (let [x (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids c)))
+                ;; (cpp-read: an initializer past 64 bits, an __int128's, is no standard integer type's value: [dcl.enum]/7 below
+                ;; under D342-4 (a), the enumerator 0 then)
+                wide (atom false)
+                v (if x
+                    (if (and (checking?) (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped))
+                      (try (const-int bs x)
+                           (catch arbace.lang.ExceptionInfo ex
+                             (if (re-find #"a 128-bit value outside 64 bits" (str (ex-message ex))) (do (reset! wide true) 0) (throw ex))))
+                      (const-int bs x))
+                    v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
             (when (neg? (long v)) (reset! neg true))
+            ;; (an unsigned long or unsigned long long initializer's value past long's, held as a negative long)
+            (swap! vals conj (cond @wide :wide
+                                   (and (integer? v) (neg? (long v)) x (re-find #"^unsigned long( long)?( int)?$" (str/trim (str (get-in x [:type :qualType])))))
+                                   (+ (bigint v) (bigint (.shiftLeft java.math.BigInteger/ONE 64)))
+                                   :else v))
             ;; (queue 484, the checker: [basic.scope.declarative]/5, [dcl.enum]: two enumerators of one name in an enumeration,
             ;; `enum E { e, e };`, DRs/dr2530.C; g++'s "redefinition of", at the second)
             (when (and (checking?) (seq (.get ^java.util.HashMap (:names es) (ucn-name (:name c)))))
@@ -2695,7 +2712,22 @@
       ;; integer type ([dcl.enum]/7; Sema's ActOnEnumBody), which a bit-field of it reads zero-extended: <format>'s _Spec's
       ;; `_Align _M_align : 2` held _Align_right, 2, read back as -2, and "{:>6}" padded on the left's other side)
       (when (and (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])) (not @neg))
-        (swap! abi/*enums* assoc-in [id :nonneg] true)))
+        (swap! abi/*enums* assoc-in [id :nonneg] true))
+      ;; (cpp-read, 2026-11-24, the checker: [dcl.enum]/7, an enumeration without a fixed underlying type whose enumerators' values
+      ;; no standard integer type represents -- a negative one beside one above long long's maximum, or one past unsigned long
+      ;; long's -- is ill-formed (D342-4 (a): the standard's rule, no extended integer type): GCC's "no integral type can represent all
+      ;; of the enumerator values for 'E'", at the enumeration's closing brace; init/enum1.C)
+      (when (and (checking?) (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])) (seq @vals))
+        (let [bs (concat (map #(bigint (if (boolean? %) (if % 1 0) %)) (filter #(or (integer? %) (boolean? %)) @vals))
+                         ;; (a value past 64 bits: past every standard type's)
+                         (when (some #{:wide} @vals) [(inc (bigint (.shiftLeft java.math.BigInteger/ONE 64)))]))
+              lo (when (seq bs) (apply min bs)) hi (when (seq bs) (apply max bs))
+              m63 (dec (.shiftLeft java.math.BigInteger/ONE 63)) m64 (dec (.shiftLeft java.math.BigInteger/ONE 64))]
+          (when (and lo (or (and (neg? lo) (> hi (bigint m63))) (< lo (- (inc (bigint m63)))) (> hi (bigint m64))))
+            (let [end (get-in n [:range :end])]
+              (*on-refusal* (ex-info (str "codegen: no integral type can represent all of the enumerator values for '" (or nm "<unnamed>") "'")
+                                     {:codegen/refused :enum})
+                            (if (and (map? end) (:offset end)) (assoc n :range {:begin end}) n)))))))
     t))
 
 (declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)

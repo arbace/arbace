@@ -572,6 +572,8 @@
    [:name #"^codegen: unknown name \S+: no member of the complete class" "no member named in the class"]
    ;; (queue 368: [dcl.enum]/5, an implicit enumerator value past a fixed underlying type's range)
    [:enum #"^codegen: enumerator value '.*' is outside the range of underlying type" "enumerator value is outside the range of its underlying type"]
+   ;; (cpp-read: [dcl.enum]/7)
+   [:enum #"^codegen: no integral type can represent all of the enumerator values" "no integral type can represent all of the enumerator values"]
    ;; (round 54: [class.mi]/3)
    [:base #"^codegen: duplicate base type" "base class specified more than once as a direct base class"]
    ;; (CP368 (a): a member of a class being defined, clang's err_field_incomplete_or_sizeless; the instantiation depth,
@@ -5183,6 +5185,24 @@
                                    (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true)))
                           (add! n "invalid conversion from 'int' to a pointer type")))))
                   (:nodes u) nil))
+    ;; (cpp-read, 2026-11-24: C++98's [expr.const]/1, an integral constant expression uses no function call and no comma operator,
+    ;; but in sizeof's operand -- even in an unevaluated operand of ?: (C++11's core constant expressions take both): GCC's "a function
+    ;; call cannot appear in a constant-expression", "a comma operator cannot appear in a constant-expression", at a case label and a
+    ;; bit-field's width; parse/constant1.C)
+    (when (< (long year) 11)
+      (let [bad? (fn bad? [e]
+                   (cond (not (map? e)) false
+                         (= "UnaryExprOrTypeTraitExpr" (:kind e)) false
+                         (#{"CallExpr" "CXXMemberCallExpr" "CXXOperatorCallExpr"} (:kind e)) true
+                         (and (= "BinaryOperator" (:kind e)) (= "," (:opcode e))) true
+                         :else (boolean (some bad? (filter map? (:inner e))))))]
+        (walk-nodes (fn [n _]
+                      (case (:kind n)
+                        "CaseStmt" (when (bad? (first (:inner n))) (add! n "a function call or comma operator cannot appear in a constant-expression"))
+                        "FieldDecl" (when (and (:isBitfield n) (bad? (first (filter map? (:inner n)))))
+                                      (add! n "a function call or comma operator cannot appear in a constant-expression"))
+                        nil))
+                    (:nodes u) nil)))
     (walk-nodes (fn [n _]
                   (case (:kind n)
                     "CaseStmt" (let [in (:inner n)] (judge n (first in) nil) (when (= 3 (count in)) (judge n (second in) nil)))
@@ -5193,6 +5213,26 @@
     (vec out)))
 
 (swap! checks conj constant-ub)
+
+;; cpp-read (2026-11-24): GCC's loop pragmas (`#pragma GCC ivdep`, `#pragma GCC unroll N`, extend.texi's "Loop-Specific Pragmas")
+;; apply to the for, while or do loop that follows; a for loop without a condition there is GCC's "missing loop condition in loop with
+;; 'GCC ivdep' pragma before ';' token", at the loop (parse/ivdep.C). From the main file's text: the pragma's line, then the next
+;; line that is not blank, a comment or another pragma.
+
+(defn loop-pragmas
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ls (vec (str/split-lines src))]
+    (doseq [i (range (count ls))
+            :let [[_ which] (re-find #"^\s*#\s*pragma\s+GCC\s+(ivdep|unroll)\b" (ls i))]
+            :when which]
+      (when-let [j (first (filter #(not (re-find #"^\s*($|//|/\*|#\s*pragma\b)" (ls %))) (range (inc i) (count ls))))]
+        (when (re-find #"^\s*for\s*\([^;()]*;\s*;" (ls j))
+          (.add out {:line (inc j) :col 1 :kind :error :rule :loop-pragma
+                     :msg (str "missing loop condition in loop with 'GCC " which "' pragma before ';' token")}))))
+    (vec out)))
+
+(swap! checks conj loop-pragmas)
 
 ;; [expr.new]/6-7: in a new-expression's type every array bound past the first is a converted constant expression: a function
 ;; parameter there is GCC's "array size in new-expression must be constant", at the new-expression.
