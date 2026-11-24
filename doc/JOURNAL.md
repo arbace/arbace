@@ -20990,3 +20990,24 @@ the skim cache is a cache; so the only way up is the own front end passing those
   directives and clauses into the front end. The rest of the gap is the checker's depth: overload resolution and template
   instantiation diagnostics, uninstantiated templates' non-dependent constructs (definition-time checks), units with a syntax error
   (the checker does not run after a decline), and a long tail of single rows.
+
+## 2026-11-24: C++'s read: the dialect rows counted out, cpp-read's six rows re-read (branch `cpp-rind-1124`)
+
+- The user's decision (2026-11-24, through the burst's coordinator): the dg rows of the dialects Arbace's C++ does not take
+  (CP399 (a): OpenMP, -fpermissive, -fms-extensions, -fcontracts) that only clang's dumps pass are counted out of the read stage's
+  independence judge's cases, as the failing ones already are by `:gcc-dialect` (n/a). Built: `test/cpp/dg-dialect-out.edn`, a row
+  each with its kind (`:by-design`), level and reason, made from the records by one rule (own `:fail`, clang `:pass`, no `:na` class
+  naming it, the file's directory or dg-options naming the flag), 72 rows (-fopenmp 67, -fcontracts 2, -fpermissive 2,
+  -fms-extensions 1; the 81 of the earlier report counted 9 gomp rows `:gcc-dialect` already takes out); `test/crops/score.ae`'s
+  count-from leaves a fact's `:out-of-cases` ids out of the counted rows as its `:out` classes' (a row the own record passes stays
+  counted); the C++ read fact names it (`:out-of-cases {:file "test/cpp/dg-dialect-out.edn" :cases 72}`). Their rows stay in both
+  records and reap counts clang's passes as before (the read cell unchanged).
+- dg-r03 (233 of the non-passing rows) recorded: 40 rows to own pass, none lost. dg-r02 died before its read: nothing recorded.
+- cpp-read's six rows re-read with `--only` and recorded as they ran: addr_builtin-1.C passes again (the `[odr-internal]` error is
+  dropped when the unit has another error: GCC's "used but never defined" is the symbol table's, which an erroneous call never
+  reaches; the rule fires alone only on ext/visibility/anon7.C), cpp1y/pr63996.C passes, ext/constexpr-vla3.C fails (its earlier
+  pass was the VLA rule's error before the `__extension__` fix: the false pass removed), ext/constexpr-vla1.C fails;
+  cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C time out at 300 s (own passes on next: some rule of this branch
+  is slow over libstdc++'s <string> and <map>; recorded as timeouts, the next cycle's first item).
+- C++ read independence 0.870 -> 0.877 (2,751 own of 4,278 counted rows, 214 n/a and 72 out: (1934 + 2751 + 0.5 x 1527) / 6212), C++ independence 0.9736 -> 0.9750;
+  the cells unchanged (read 6,063 / 0 / 221).
