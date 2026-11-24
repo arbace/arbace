@@ -273,9 +273,9 @@ suite_dump_native() {
     n=$(suite_unit_file "$u"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     case $n in *.mli) continue ;; esac
     if [ -n "$ck" ]; then
-      ck=$( { echo "$ck $n"; sha256sum < "$d/$n"; [ -f "$d/$b.mli" ] && sha256sum < "$d/$b.mli"; } | sha256sum | cut -c1-40); kf=$OI_DUMP_CACHE/$ck
+      ck=$( { echo "$ck $n"; sha256sum < "$d/$n"; if [ -f "$d/$b.mli" ]; then sha256sum < "$d/$b.mli"; fi; } | sha256sum | cut -c1-40); kf=$OI_DUMP_CACHE/$ck
       if [ -s "$kf/$U.ae" ]; then
-        cp "$kf/$U.ae" "$d/"; [ -f "$kf/$b.cmi.ae" ] && cp "$kf/$b.cmi.ae" "$d/"; : > "$d/$n.typer.err"
+        cp "$kf/$U.ae" "$d/"; if [ -f "$kf/$b.cmi.ae" ]; then cp "$kf/$b.cmi.ae" "$d/"; fi; : > "$d/$n.typer.err"
         echo "$d/$U.ae" >> "$d/units.list"; continue
       fi
     fi
@@ -289,7 +289,7 @@ suite_dump_native() {
       echo "typer $n: $(typer_err_text "$d/$n.typer.err")" > "$d/error"; return
     fi
     if [ -n "$ck" ]; then
-      rm -rf "$kf.new"; mkdir -p "$kf.new"; cp "$d/$U.ae" "$kf.new/"; [ -f "$d/$b.cmi.ae" ] && cp "$d/$b.cmi.ae" "$kf.new/"
+      rm -rf "$kf.new"; mkdir -p "$kf.new"; cp "$d/$U.ae" "$kf.new/"; if [ -f "$d/$b.cmi.ae" ]; then cp "$d/$b.cmi.ae" "$kf.new/"; fi
       rm -rf "$kf"; mv "$kf.new" "$kf"
     fi
     echo "$d/$U.ae" >> "$d/units.list"

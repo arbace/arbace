@@ -113,7 +113,10 @@ cmd_ppx_jst_config() {
   v+=("POSIX_TIMERS $(ctest posix_timers_code posix_timers_code.c)" "CLOCK_GETCPUCLOCKID $(ctest clock_getcpuclockid_code clock_getcpuclockid_code.c)")
   # thread_id_code's sprintf: the first method of 1 and 2 that builds, else -1
   local m tid=-1
-  for m in 1 2; do sed "s|%d|$m|; s|%s|$src/src/thread_id.h|" "$d/t/thread_id_code.c" > "$d/t/thread_id_$m.c"; [ "$(ctest thread_id_$m thread_id_$m.c)" = 1 ] && { tid=$m; break; }; done
+  # (discover names thread_id.h by its absolute path, Sys.getcwd's; repr/c's preprocessor joins an absolute quoted name to each
+  # directory of the search, so the header is copied beside the programs and named by its file name, the same text included)
+  cp "$src/src/thread_id.h" "$d/t/thread_id.h"
+  for m in 1 2; do sed "s|%d|$m|; s|%s|thread_id.h|" "$d/t/thread_id_code.c" > "$d/t/thread_id_$m.c"; [ "$(ctest thread_id_$m thread_id_$m.c)" = 1 ] && { tid=$m; break; }; done
   v+=("THREAD_ID_METHOD =$tid")
   # LINUX_EXT: ocaml_config_var system, oi's "linux" (Sys.os_type Unix, the C API's target)
   v+=("LINUX_EXT 1")
