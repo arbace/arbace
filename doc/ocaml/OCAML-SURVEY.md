@@ -4955,3 +4955,7 @@ oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferr
   documentation) or boxed integers with an identity in oi (a representation change).
 - Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
   changed but ephetest's row; `bin/oi test`.
+- **The user's decisions (2026-11-24)**: ephetest3 n/a (`:na-boxed-identity`: a boxed integer's identity is unspecified); the three speed
+  rows under their own CPU limits, `test/ocaml/oi-cpu-caps.tsv` (1.5 times their CPU measured alone: ast-invariants/test 320 s,
+  parallel/fib_threads 1140 s, opam/uutf/test_uutf 2020 s), read by oi_one and suite_oi_one (the larger of OI_TIMEOUT and the cap), in
+  oi_key; the rows judged by their own verdicts and recorded passing. Left deferred: lib-dynlink-bytecode/main (`:dynlink-decided`).
