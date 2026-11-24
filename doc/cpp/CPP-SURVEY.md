@@ -11373,7 +11373,8 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   with their own class's qualification, class names and members qualified by `::` alone; member class templates without arguments and
   undeclared members as qualifiers; explicit instantiations with a definition or of an operator-function-id without a function
   declarator; non-member functions defaulted; `auto` from empty braces; function definitions in blocks; C99 array designators
-  (pedantic, `__extension__` spared) and floating designator indices; `-fno-char8_t` from C++20. The standards' new features used early, GCC's pedwarns (errors
+  (pedantic, `__extension__` spared) and floating designator indices; a class template's name without arguments under a pointer or
+  reference declarator (its injected name aside); `-fno-char8_t` from C++20. The standards' new features used early, GCC's pedwarns (errors
   under the harness's -pedantic-errors): variadic templates and inline namespaces before C++11, `decltype(auto)` before C++14, a
   `static_assert` without a message and `*this` captures before C++17, constexpr destructors, defaulted comparisons and `this`
   captured beside `=` before C++20, nested namespace definitions before C++17.
@@ -11388,7 +11389,7 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   enumerators for integers; definitions of implicitly-declared constructors and destructors (a class that declares none); friend
   definitions with default arguments that are not their function's only declaration; member functions overloaded with and without a
   ref-qualifier; block-scope variable length arrays under -pedantic-errors; discarded warn_unused_result calls under -Werror; explicit
-  specializations of function templates defined twice.
+  specializations of function templates and variable templates defined twice.
 - **The checker** (sema.ae, template.ae): constructors delegating to themselves; `auto x{e}` deduced from e and `auto x = {a, b}` as
   std::initializer_list<E> (the second had been a false "excess elements in scalar initializer"); void conditions (a statement
   expression ending in a statement, a throw-expression); pointer arithmetic outside an object's one element; casts from `void*` in
