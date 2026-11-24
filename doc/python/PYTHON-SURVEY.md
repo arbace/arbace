@@ -8398,3 +8398,24 @@ natives the new modules called (`PyType_GetModuleState`, `PyObject_SelfIter`, `_
 ctypes' 7 ids 5 / 2 / 0. Left in `:elementtree-c` (deferred, 6): XMLPullParser's flush and small-chunk events, a deep deepcopy's C
 stack, an Element's weak reference, a Go panic in TreeBuilder's late tail. The world's aot forms (11.5 MB of node program) now
 need more than 8 GiB to print.
+
+## As built: 554, the C API group: the stale rows recorded, PyLong_FromString (2026-11-24, the Mac VM, queue 554)
+
+The group's classes (`:capi-port` 244, `:testcapi` 95, `:extension-modules` 66, `:testcapi-behaviour` 10, `:extension-subinterp-check`
+5, `:capi-refcounts` 3, `:capi-singletons` 2, `:capi-gc-tracked` 2) held mostly rows recorded before PyConfig_Get (test_compile's 160
+`:capi-port` rows stopped at its import), before py-capi-1122's natives and before `_testbuffer` was built (test_buffer's 73 `:testcapi`
+skips, "ndarray object required").
+
+- **Recorded** (whole-module `bin/pyi check` on the VM, the checkout's runtime on goi, `--judge DIR --record`, controls failing as
+  they must): test_compile (154 pass of 185), test_buffer (61 more pass), test_import, test_code, test_tracemalloc, test_call,
+  test_bool, test_getopt: 216 rows to pass. Python eval 40,886 / 1,332 / 1,292 -> 41,102 / 1,319 / 1,070.
+- **PyLong_FromString** (capi_more): ASCII digits only, a non-ASCII byte is "invalid literal for int() with base N" with the base
+  a base-0 prefix gives (test_capi's test_long_fromstring).
+- **Classes**: `:boolop-truth-calls` (new, deferred, py-core): test_compound's `__bool__` called twice in `a and b or c`;
+  test_compile_ast, test_consts_in_conditionals and test_folding_type_param into `:bytecode` (n/a).
+- **Left for the host's record**: test_capi whole (about 90 of the group's rows; the VM's goi run needs many hours) and
+  test_importlib (the 52 `:extension-modules` rows of `_testsinglephase`/`_testmultiphase`, built since py-capi-1122 round 2).
+- **Left for owners**: PyFunction_SetClosure of a tuple of non-cells (pyi's Function keeps []*Cell: py-core), type `__flags__`'
+  Py_TPFLAGS_HAVE_VECTORCALL inheritance and loss on `__call__` (test_call's TestPEP590: py-core), PyContext_Enter's prev of a
+  thread with no context yet (test_watchers' test_exit_base_context: py-core's contextvars), `sys._is_immortal` (test_bytes'
+  test_resize), `_testcapi.W_STOPCODE` (test_subprocess: py-os).

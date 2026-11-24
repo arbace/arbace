@@ -20789,3 +20789,25 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24 — Python's C API group: the records first, PyLong_FromString (queue 554, VM)
+
+The C API group (`:capi-port` 244, `:testcapi` 95, `:extension-modules` 66, `:testcapi-behaviour` 10 and the small ones, about
+438 rows) was mostly stale: the record predates PyConfig_Get (n-py-eval, 11-19), py-capi-1122's two rounds and `_testbuffer`
+(queue 456). Whole-module `bin/pyi check` runs on this base (83447c4c0 + this branch), the checkout's runtime interpreted by goi
+on the VM's stage 0, judged and recorded with `bin/pyi check --judge DIR --record`: test_compile, test_import, test_code,
+test_tracemalloc, test_buffer, test_call and the controls' test_bool and test_getopt (the three controls failing as they
+must). 216 rows move to pass: test_compile's 154 (its import no longer stops at PyConfig_Get), test_buffer's 61 (`_testbuffer`'s
+ndarray), test_import's and test_tracemalloc's. Python eval 40,886 / 1,332 / 1,292 -> 41,102 / 1,319 / 1,070.
+- Code: pyctypes' PyLong_FromString refuses a non-ASCII byte as long_from_string_base does (int() of a str takes Unicode
+  digits, the C function ASCII ones), with CPython's message and the base a base-0 prefix resolves (test_capi's
+  test_long_fromstring; probe against python3 3.14.10's own `_testlimitedcapi`).
+- Classes: test_compile's new non-passes: code equality, co_consts folding and dis of a tuple constant into `:bytecode` (n/a,
+  the user's 2026-11-23 decision covers them); gh-124285's test_compound (an operand's `__bool__` asked twice in a mixed
+  and/or chain) into the new deferred `:boolop-truth-calls` for py-core.
+- The record: the writer reorders the file; the changed rows were applied in the committed order. test_import's four
+  script-shadowing tests timed out at the VM's load (children of pyi on goi, 300 s): their passing rows are kept as recorded.
+  test_buffer's 17 rows past the 8 GiB cap under goi are recorded as the run gave them (classed).
+- Not recorded here: test_capi (its whole run on goi at this load needs many hours: 650-1150 s per driver start, the codec
+  handler tests past 8 GiB) and test_importlib (1,342 methods; its 52 `:extension-modules` rows): the host's record.
+Alternatives: PYI_RUNTIME=compiled on stage 0's runtime (fast, but not the checkout's: refused for a record).
