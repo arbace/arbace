@@ -114,7 +114,8 @@ suite_stage() {
 suite_needs_build() {
   local id=$1 base=$2 u=$3
   case $id in opam/*) ;; *) return 1 ;; esac
-  if [ -f "$base/$u" ]; then grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune"
+  # (queue 547) or by ppx rewriters, `(preprocess (pps ...))`: the text their driver wrote on oi (bin/oi ppx pp, OI_PPX_PP)
+  if [ -f "$base/$u" ]; then grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune" || { tr '\n' ' ' < "$(dirname "$base/$u")/dune" | grep -q '(preprocess *(pps'; } 2> /dev/null
   else local s=$base/${u%.*}; [ ! -f "$s.mly" ] && [ ! -f "$s.mll" ] && [ -f "$(dirname "$base/$u")/dune" ]; fi
 }
 
@@ -260,9 +261,24 @@ suite_dump_native() {
   done
   # the program's libraries (unix, threads, str, compiler-libs, testing) after its own directory, by their sources' interfaces
   inc=$d; [ -n "$incs" ] && inc="$d:$(inc_dirs "$incs")"
+  # (queue 547) OI_DUMP_CACHE=DIR (bin/oi ppx's programs, which share sexplib0, ppxlib and base's hundreds of units): each unit's
+  # outputs kept under a key chained from the earlier units' (the native library's key, the flags and libraries, the unit's file and
+  # its .mli), so a program whose units begin as another's types only from where they differ; unset, every unit is typed
+  local ck="" kf
+  if [ -n "${OI_DUMP_CACHE:-}" ]; then
+    [ -s "$LIB/key" ] || { echo "typer: OI_DUMP_CACHE without the native library's key ($LIB/key)" > "$d/error"; return; }
+    mkdir -p "$OI_DUMP_CACHE"; ck=$( { cat "$LIB/key"; echo "$nf|$incs"; } | sha256sum | cut -c1-40)
+  fi
   for u in $units; do
     n=$(suite_unit_file "$u"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     case $n in *.mli) continue ;; esac
+    if [ -n "$ck" ]; then
+      ck=$( { echo "$ck $n"; sha256sum < "$d/$n"; [ -f "$d/$b.mli" ] && sha256sum < "$d/$b.mli"; } | sha256sum | cut -c1-40); kf=$OI_DUMP_CACHE/$ck
+      if [ -s "$kf/$U.ae" ]; then
+        cp "$kf/$U.ae" "$d/"; [ -f "$kf/$b.cmi.ae" ] && cp "$kf/$b.cmi.ae" "$d/"; : > "$d/$n.typer.err"
+        echo "$d/$U.ae" >> "$d/units.list"; continue
+      fi
+    fi
     local extra=""
     # OC184 (a): a unit without an .mli of its own leaves its typed signature as data, a native .cmi (NAME.cmi.ae, read back by the
     # typer's find-unit as OCaml reads a .cmi), not Printtyp's text as an .mli (OI_SUITE_SIG_TEXT=1: the printed interface, as before)
@@ -271,6 +287,10 @@ suite_dump_native() {
     else extra="--cmi-out $d/$b.cmi.ae"; fi
     if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --file "$n" "$n" > "$U.ae" 2> "$n.typer.err"); then
       echo "typer $n: $(typer_err_text "$d/$n.typer.err")" > "$d/error"; return
+    fi
+    if [ -n "$ck" ]; then
+      rm -rf "$kf.new"; mkdir -p "$kf.new"; cp "$d/$U.ae" "$kf.new/"; [ -f "$d/$b.cmi.ae" ] && cp "$d/$b.cmi.ae" "$kf.new/"
+      rm -rf "$kf"; mv "$kf.new" "$kf"
     fi
     echo "$d/$U.ae" >> "$d/units.list"
   done

@@ -20892,3 +20892,38 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   and records-check 0 problems. Nothing in the records changes.
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
+
+## 2026-11-24 — ppx_expect on oi, cycle 2 in progress: the staging for S2 and S3 (queue 539, VM)
+
+Queue 547, cycle 2, stopped at the hand-back with runs pending.
+- base_load's run, pending from cycle 1, never ran its program. Its C stubs' node build had been killed while musl's forms cache
+  was being read again (that cache's key had moved since 11-23). `bin/ci musl ensure` read it again (CI_THREADS=7, about 25 min).
+- suite_dump_native gets OI_DUMP_CACHE=DIR, set by default for bin/oi ppx's programs. Each unit's outputs are kept under a key
+  chained from the earlier units' key, the native library's key, the flags, the libraries, and the unit's own file and .mli. A program
+  whose units begin as another's then types only from the point where they differ: base alone takes about 50 min to type, and it is
+  shared by base_load, the drivers and the test program. The alternative, retyping per program, costs about an hour a program.
+- prep's build-unit: a library whose dune file has `(preprocess (pps ...))` gets the text its driver wrote on oi, from
+  OI_PPX_PP/PKG/REL. It fails when that text is missing. suite_needs_build sends such units to build-into.
+- `bin/oi ppx pp [DRIVER...]` runs over test/ocaml/ppx-pp.tsv's rows (DRIVER PKG LIB ARGS FILES).
+  - It runs each driver on oi as dune does: `--cookie library-name="LIB"`, `-corrected-suffix .ppx-corrected -diff-cmd -`, and
+    `--impl` or `--intf`. Dune's -dump-ast is left out, so the text is printed.
+  - The run is in a copy of the package, so units keep their own locations. `@with=` puts a rule-made file beside them
+    (jst-config's config.h).
+  - The libraries that dune preprocesses with (pps ppxlib.metaquot ppxlib.traverse) take the metaquot driver, because none of their
+    files derives traverse.
+- `bin/oi ppx jst-config` ports jst-config's discover.ml, held to its SHA-256.
+  - Each of its C programs is built for oi's own C target by test/ocaml/capi/cnodes.ae --program; a build that succeeds sets that
+    switch. C_define.import is done as `#ifndef N #error`.
+  - The header is written as dune-configurator's gen_header_file writes it. That format is recalled from memory: dune-configurator is
+    not in the pinned set (a Low).
+- cstubs_nodes takes -IDIR words, whose headers go into its key: time_now's stubs include config.h and jane-street-headers'
+  ocaml_utils.h.
+- New rows in ppx-programs.tsv, made by scratch tooling (.tmp/q539/547/rows/compose.py over base_load's and metaquot_driver's units,
+  with wsort.py's link order):
+  - time_now_driver: D1, ppx_base's rewriters plus ppx_optcomp and dune's ppx main (test/ocaml/opam/ppx_driver.ml);
+  - expect_driver: D2, ppx_expect with ppx_inline_test, its libname and ppx_here's expander, plus the runtime libraries it links;
+  - expect_tests: S3, re's lib_test/expect as the wrapped library re_tests over re_private (re's lib), linked with the runtimes and
+    ppx_expect's evaluator. Its main is dune's generated `let () = Ppx_inline_test_lib.exit ();;`
+    (test/ocaml/opam/inline_test_main.ml). It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`.
+- None of these rows has run yet. prep.ae and bin/oi are in the native key, so the library was rebuilt and the chain
+  (.tmp/q539/547/chain1.sh) was running at the hand-back.
