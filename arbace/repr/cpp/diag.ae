@@ -7403,6 +7403,69 @@
         (for [a args :let [[_ n] (re-matches #"-flifetime-dse=(\d+)" a)] :when (and n (> (Long/parseLong n) 2))]
           "argument to '-flifetime-dse=' is not between 0 and 2"))))
 
+(defn- declined-name
+  "cpp-read (2026-11-24): the name a declaration the parser declined declares, from its text `t`: a template's or a
+  declaration's class key's name (`template<int(> struct A;`), else the identifier before its declarator's first parenthesis at
+  depth 0 (`fk (XE..., SW);`), outside a template-head's angle brackets; nil when none is plain."
+  [^String t]
+  (let [t (str/replace t #"(?s)/\*.*?\*/|//[^\n]*" " ")
+        ;; the template-heads dropped: `template` and its <...>, nested
+        body (loop [s (str/trim t)]
+               (if-let [[_ rest] (re-find #"(?s)^template\s*<(.*)$" s)]
+                 (let [n (count rest)
+                       e (loop [i 0 d 1] (cond (>= i n) n
+                                               (= \< (.charAt ^String rest i)) (recur (inc i) (inc d))
+                                               (= \> (.charAt ^String rest i)) (if (= 1 d) i (recur (inc i) (dec d)))
+                                               :else (recur (inc i) d)))]
+                   (recur (str/trim (subs rest (min n (inc e))))))
+                 s))]
+    (or (second (re-find #"^(?:\w+\s+)*?(?:struct|class|union|enum(?:\s+(?:class|struct))?)\s+([A-Za-z_]\w*)\s*(?:[;{:<]|$)" body))
+        (when-not (re-find #"^(?:struct|class|union|enum|typedef|using|namespace|friend|static_assert|extern\s+\"|asm)\b" body)
+          (second (re-find #"^[^(<{;=]*?\b([A-Za-z_]\w*)\s*\(" body))))))
+
+(defn- declined-names-silent
+  "cpp-read (2026-11-24): GCC declares a declaration's name after the syntax errors that end it, so its later uses give no error
+  of their own (template/crash57.C's `A<char> a;` after `template<int(> struct A;`, cpp0x/pr89900-3.C's `fk (0)` after `fk (XE...,
+  SW)`); the native parser declines the declaration, so the errors on another, later line that name it, an undeclared
+  identifier, or a syntax error at the name or in its template argument list (`A<`), are dropped."
+  [ds u ^String src ^java.util.ArrayList starts ^String main]
+  (let [names (java.util.ArrayList.)]
+    (walk-nodes (fn [x _]
+                  (when (= "NativeDecline" (:kind x))
+                    (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset])]
+                      (when (and b e (= main (or (get-in x [:range :begin :file]) main)) (<= 0 (long b) (long e) (dec (.length src))))
+                        (when-let [nm (declined-name (subs src (long b) (inc (long e))))]
+                          (.add names [nm (first (line-col starts (long e)))]))))))
+                (:nodes u) nil)
+    ;; (the parser's errors that leave a declaration's entity erroneous in GCC, error_mark_node its type or its missing default
+    ;; arguments, so that its uses are silent: template/incomplete10.C's `extern S s;` then `s.x`, other/default2.C's foo(0),
+    ;; ext/anon-struct5.C's static member of an anonymous struct named in a member function; the Sema errors on a later line
+    ;; whose text names it dropped)
+    (doseq [d ds :when (= :syntax (:rule d))
+            :let [m (str (:msg d))
+                  nm (some #(second (re-find % m)) [#"^'([A-Za-z_]\w*)' has incomplete type"
+                                                   #"^default argument missing for a parameter of '([A-Za-z_]\w*)'"
+                                                   #"^static data member '([A-Za-z_]\w*)' in unnamed class"])]
+            :when nm]
+      (.add names [nm (:line d) :uses]))
+    (if (.isEmpty names)
+      ds
+      (vec (remove (fn [d]
+                     (let [l (long (:line d))]
+                       (some (fn [[nm el uses]]
+                               (and (> l (long el))
+                                    (or (= (str (:msg d)) (str "use of undeclared identifier '" nm "'"))
+                                        (and uses (#{:sema :undeclared} (:rule d))
+                                             (let [ls (long (.get starts (dec l)))
+                                                   le (let [i (.indexOf src "\n" (int ls))] (if (neg? i) (.length src) i))]
+                                               (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\b")) (subs src ls le))))
+                                        (and (= :syntax (:rule d))
+                                             (let [ls (long (.get starts (dec l)))
+                                                   before (subs src ls (min (.length src) (+ ls (max 0 (dec (long (:col d)))))))]
+                                               (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote nm) "\\s*(<[^;{}()]*)?$")) before))))))
+                             names)))
+                   ds)))))
+
 (defn diagnose
   "The diagnostics of the C++ file at `path` (named `main`, as the oracle names it), read at the standard `std` with the
   options `args`: {:diags [...] :other n (errors outside the main file) :declines n} or {:refused why :message m}."
@@ -7501,8 +7564,9 @@
                                     (do (.add given [nm (:line d) inner]) false))))))
                           ds))]
       ;; (cpp-gnu: a check's error with no line, :line 0, an implicit declaration's, counted with those outside the main file)
+      (let [ds (declined-names-silent ds u src starts main)]
       {:diags (vec (remove #(= 0 (:line %)) ds))
-       :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)})
+       :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)}))
     (catch arbace.lang.ExceptionInfo e
       (if-let [g (or (:cpp/gap (ex-data e)) (when (:cpp/parse (ex-data e)) :parse))]
         {:refused g :message (ex-message e)}
