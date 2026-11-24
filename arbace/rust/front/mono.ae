@@ -636,6 +636,8 @@
                    {:align align :offset offset :offsets (vec (repeat n 0)) :niche nil :avail 0N}
                    order)
         {:keys [align offset offsets niche]} st
+        ;; queue 542: repr(align(N)) raises the alignment (and so the size), as univariant's `repr.align`
+        align (max (long align) (long (or (:align repr) 1)))
         size (align-to offset align)
         sized (not (and (= kind :maybe-unsized) (pos? n) (unsized? (peek fields))))
         nz (vec (keep-indexed (fn [i f] (when-not (zst? f) [i f])) fields))
@@ -805,7 +807,7 @@
 
 ;; the types' layouts (layout_of_uncached) over the type checker's types, regions erased
 
-(declare src-enum-repr-c?)
+(declare src-enum-repr-c? src-adt)
 (defn- adt-repr
   "ReprOptions of an ADT: :c, :transparent, :int (\"u8\" ...), :packed, :align (the samples' and std's interfaces carry
   repr(C), repr(transparent) and repr(int); std's structs' reprs are not in its interface: repr(Rust))"
@@ -820,6 +822,17 @@
     (let [r (:repr (get (:adts c/*si*) adt))]
       (cond-> {} (and (string? r) (re-matches #"[iu](8|16|32|64|128|size)" r)) (assoc :int r)
                  (= "C" r) (assoc :c true)
+                 ;; queue 542: a known std struct its sources declare `#[repr(C)]` (alloc's `ArcInner<T>`: strong, weak, data in
+                 ;; that order, as std's compiled code reads them; std's interface writes no repr for its own crates' structs, and
+                 ;; laid out as repr(Rust) the data went first: threads.rs's first join dropped a Thread whose Arc's counts our
+                 ;; code and std's read at different offsets)
+                 (and (nil? r) (tc/std-adt-known? adt) (#{"Struct" "Union"} (str (:kind (get (:adts c/*si*) adt))))
+                      (:c (:repr (try (src-adt adt) (catch Throwable _ nil)))))
+                 (assoc :c true)
+                 ;; queue 542: and its `repr(align(N))` (mpmc's CachePadded: 128 on x86_64, std's channels' fields at its offsets)
+                 (and (tc/std-adt-known? adt) (#{"Struct" "Union"} (str (:kind (get (:adts c/*si*) adt))))
+                      (:align (:repr (try (src-adt adt) (catch Throwable _ nil)))))
+                 (assoc :align (:align (:repr (src-adt adt))))
                  ;; C6-4 (rust-c6c): an enum the sources declare `#[repr(C)]` without an integer (the interface's :repr, the
                  ;; helper's `repr().int`, is nil for it): its tag c_int as rustc lays it out (backtrace's uw::_Unwind_Reason_Code,
                  ;; trace_fn's `ret i32`), not the smallest integer
@@ -1020,7 +1033,16 @@
                  senum (when (and (string? adt) (not (tc/std-adt-known? adt))) (let [s (src-adt adt)] (when (:enum s) s)))
                  enum? (or (tc/enum? adt) (some? senum))
                  cell? (contains? #{(c/lang "unsafe_cell") (c/lang "unsafe_pinned")} adt)
-                 maybe-unsized (and (not enum?) (seq (first (variant-fields adt args))) (not (sized-ty? (peek (first (variant-fields adt args))))))
+                 maybe-unsized (and (not enum?) (seq (first (variant-fields adt args)))
+                                    (or (not (sized-ty? (peek (first (variant-fields adt args)))))
+                                        ;; queue 542: rustc decides MaybeUnsized on the declared last field (type_of at the identity:
+                                        ;; `data: UnsafeCell<T>` with `T: ?Sized`), not the instance's: std's Mutex<u64> keeps its
+                                        ;; fields' order up to the last (inner, poison, data at 0, 4, 8), as std's compiled code reads it
+                                        (and (string? adt) (tc/std-adt-known? adt)
+                                             (let [ups (:unsized-params (try (src-adt adt) (catch Throwable _ nil)))
+                                                   lf (peek (:fields (first (:variants (get (:adts c/*si*) adt)))))]
+                                               (and (seq ups) lf
+                                                    (some (fn [u] (str/includes? (pr-str (second lf)) (str "\"" u "\""))) ups))))))
                  l (if (:simd repr)
                      (simd-layout (first (variant-fields adt args)) (first vs))
                      (layout-of-struct-or-enum repr vs enum? cell? (when enum? (if senum (:discrs senum) (tc/discriminant-values adt))) (not maybe-unsized)))]
@@ -1196,7 +1218,10 @@
 
 (def ^:private core-cfg {"panic" #{"unwind"} "target_os" #{"linux"} "target_arch" #{"x86_64"} "target_pointer_width" #{"64"}
                          "target_family" #{"unix"} "target_env" #{"musl"} "target_endian" #{"little"} "target_vendor" #{"unknown"}
-                         "target_has_atomic" #{"8" "16" "32" "64" "ptr"} "unix" true})
+                         "target_has_atomic" #{"8" "16" "32" "64" "ptr"} "unix" true
+                         ;; queue 542: core's atomics' `#[cfg(target_has_atomic_load_store = "64")] #[repr(C, align(8))] struct
+                         ;; Align8<T>` (x86_64's load-store atomics, as target_has_atomic)
+                         "target_has_atomic_load_store" #{"8" "16" "32" "64" "ptr"}})
 
 (defn- cfg? [[nm v kids]]
   (case nm
@@ -1414,15 +1439,23 @@
 (defn- repr-flags
   "queue 524 (C3): an item's repr flags (`#[repr(C)]`, transparent, packed): {:c true ...}"
   [it]
+  ;; (queue 542: every meta item of the repr, `align(N)` among them (`#[repr(C, align(8))]`), and a `cfg_attr(PRED, repr(..))`
+  ;; whose predicate holds: mpmc's CachePadded, `#[cfg_attr(any(target_arch = "x86_64", ..), repr(align(128)))]`)
   (into {} (for [a (fget it :attrs)
                  :let [k (fget a :kind) item (when (and (seq? k) (= 'Normal (first k))) (fget (second k) :item))
                        nm (when item (second (fget (last (fget (fget item :path) :segments)) :ident)))
                        args (when item (fget item :args))]
-                 :when (and (= nm "repr") (seq? args) (= 'Delimited (first args)))
-                 m (meta-items (fget (second args) :tokens))
-                 :let [f (get {"C" :c "transparent" :transparent "packed" :packed} (str (first m)))]
-                 :when f]
-             [f true])))
+                 :when (and (#{"repr" "cfg_attr"} nm) (seq? args) (= 'Delimited (first args)))
+                 :let [ms (meta-items (fget (second args) :tokens))
+                       ms (if (= nm "repr") ms
+                              (when (cfg? (first ms))
+                                (mapcat (fn [[n _ kids]] (when (= n "repr") kids)) (rest ms))))]
+                 m ms
+                 :let [n (str (first m))
+                       f (get {"C" :c "transparent" :transparent "packed" :packed} n)
+                       al (when (= n "align") (some-> (first (nth m 2 nil)) second parse-long))]
+                 :when (or f al)]
+             (if al [:align al] [f true]))))
 
 (defn- repr-int
   "queue 524 (C3): an item's repr(INT) (`#[repr(u8)]`): the integer's name, or nil"
@@ -1595,6 +1628,9 @@
                            :union (= 'Union (item-kind it))
                            :mod (vec (butlast segs))
                            :params (mapv #(second (fget % :ident)) (fget gens :params))
+                           ;; queue 542: the type parameters declared `?Sized` (`Mutex<T: ?Sized>`), rustc's StructKind::MaybeUnsized
+                           :unsized-params (set (for [g (fget gens :params) :when (re-find #"\bMaybe\b" (pr-str (fget g :bounds)))]
+                                                  (str (second (fget g :ident)))))
                            ;; queue 524 (C3): VariantData::Struct's fields are named (`(Struct :fields [..] :recovered No)`), Tuple's
                            ;; positional (`(Tuple [..] ID)`): a braced struct's fields were read as `:fields` before (none found)
                            :fields (cond (and (seq? vd) (= 'Struct (first vd))) (mapv #(fget % :ty) (or (fget vd :fields) []))

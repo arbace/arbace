@@ -19238,3 +19238,28 @@ three needs, then the export's refusals.
   373 functions have no fact; the names reach them, the cause not found), so getrandom and sanitize_standard_fds; backtrace's 59 items
   wait on gimli, addr2line and object read natively (not started: about 113k lines).
 - The dependencies' passes (std/deps) rebuilt: libc 583 -> 606 functions, 254 -> 288 ADTs.
+
+## 2026-11-24 — queue 542, round 7: threads.rs's segfault was layouts (ArcInner, Mutex, repr(align)); libc's foreign functions (VM)
+
+Round 7 of queue 542, at the coordinator's list (threads.rs's segfault, then libc's foreign functions without facts).
+- **The segfault**: the own build's layout table against the record's (6183 types): 50 differ, all alloc's `ArcInner<T>` and
+  around it. ArcInner is `#[repr(C)]` in alloc's sources, but std's interface writes no repr for its own crates' structs, so mono
+  laid it out as repr(Rust), the data first: std's compiled code and our unit read the Arc's counts at different offsets (the
+  first join's drop of a Thread found its Inner freed). mono's adt-repr now takes a known std struct's repr(C) and repr(align(N))
+  from its sources. Then the rest of the table: std's `Mutex<T: ?Sized>` laid out as rustc's StructKind::MaybeUnsized (decided on
+  the declared last field, `UnsafeCell<T>` with T ?Sized, not the instance's: inner, poison, data at 0, 4, 8; ours put data first);
+  repr-flags reads every meta item of a repr (`repr(C, align(8))`) and a `cfg_attr(PRED, repr(..))` whose predicate holds
+  (mpmc's CachePadded, 128 on x86_64); univariant honours repr(align); the cfg knows `target_has_atomic_load_store` (core's
+  `Align8<T>` was cfg'd out of its source, so its repr(C) and memory ABI were lost). A probe of each type matches the record.
+- threads.rs (rsi14, own): the segfault is gone; the run now overflows ci's Go stack (1 GB) before printing, in a futex wait
+  (address 0x7f0000000128): not found this round. The merged builds keep threads.rs from the pack (eval 6 of 6, 5 of 6 own).
+- The function-by-function diff of the own IR against rustc's x.ll (the samples pack, pinned at 0c3c91860: its threads.rs x.ll
+  sha256 a0801fe4.. is the pin's) is noisy, not stale: rustc's -O0 always-inliner inlines `#[inline(always)]` callees
+  (ManuallyDrop::new, which wraps MaybeDangling in the pinned core, so x.ll's catch_unwind calls MaybeDangling::new; NonNull's
+  as_ptr, ..), which our program builds call; the drop glues and JoinInner::join call the same functions in both.
+- **libc's foreign functions**: the late resolver did not visit a foreign block's items (late.rs visits them), so their
+  signatures' glob-imported types (`wchar_t`, `off_t`, `nfds_t`, ..) had no resolution; and with-native-std now gives the native
+  interface's ADTs and aliases their kinds (a macro-made `s! {}` struct named through another module had none). libc 606 -> 821
+  functions; unix/mod.rs's functions without a fact 122 -> 31 (`poll`, `lseek`, `writev` among the written). A CORE_TRACE line
+  names a function the native interface does not write and why.
+- C6 std: 175 / 31 / 119 -> **178 / 39 / 108** (export 369 bodies, 67 refused): more items built, some of them differing.
