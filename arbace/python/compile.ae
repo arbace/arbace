@@ -24,6 +24,11 @@
 
 (def ^:dynamic *mode* "The compile mode: :exec, :eval or :single (compile-source)" :exec)
 
+(def ^:dynamic *optimize*
+  "The optimization level, compile()'s optimize and -O's count (c_optimize; queue 557b): 1 drops the asserts and makes
+  __debug__ False, 2 the docstrings too (the docstring statement is no statement of the body whatever the level)"
+  0)
+
 (def ^:dynamic *warnings*
   "The compiler's SyntaxWarnings, an atom of [MSG LINENO OFFSET END-LINENO END-OFFSET] in the order made (codegen's
   _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
@@ -1071,14 +1076,14 @@
     (symbol? x) (case x None (load-const! u nil) True (load-const! u true) False (load-const! u false)
                   ... (load-const! u :ellipsis)
                   ;; a constant, whatever builtins hold (optimize_format's neighbour in codegen: Name __debug__ in Load)
-                  __debug__ (load-const! u true)
+                  __debug__ (load-const! u (< *optimize* 1))
                   (name-op! u (str x) :load))
     (integer? x) (load-const! u x)
     (string? x) (load-const! u x)
     (seq? x)
     (let [[h p o _] (node x)]
       (case h
-        name (if (= "__debug__" (ident (first p))) (load-const! u true) (name-op! u (ident (first p)) :load))
+        name (if (= "__debug__" (ident (first p))) (load-const! u (< *optimize* 1)) (name-op! u (ident (first p)) :load))
         const (expr! u (first p))
         int (load-const! u (digits->int (first p)))
         float (load-const! u (Double/parseDouble (str/replace (first p) "_" "")))
@@ -1372,7 +1377,7 @@
                 (let [ann (function-annotations! u2 args (:returns o))
                       code (function-code! u2 block :function nm args
                                            (fn [cu]
-                                             (when-let [d (docstring body)] (swap! cu #(-> % (assoc :docstring d) (update :flags conj :has-docstring))))
+                                             (when-let [d (and (< *optimize* 2) (docstring body))] (swap! cu #(-> % (assoc :docstring d) (update :flags conj :has-docstring))))
                                              ;; the docstring is no statement of the body (codegen_function_body)
                                              (stmts! cu (if (docstring body) (rest body) body))
                                              (no-loc! cu #(do (load-const! cu nil) (emit! cu :return nil))))
@@ -1465,7 +1470,7 @@
                                                  (emit! cu :build-set 0) (emit! cu :store-deref (deref-index cu "__conditional_annotations__")))
                                                (when (and (:future-annotations *table*) (annotations-used? body))
                                                  (emit! cu :setup-annotations nil))
-                                               (when-let [d (docstring body)]
+                                               (when-let [d (and (< *optimize* 2) (docstring body))]
                                                  ;; codegen_body: at the docstring's location (queue 248: its line alone before)
                                                  (at-node! cu (first body) #(load-const! cu d))
                                                  (no-loc! cu #(name-op! cu "__doc__" :store)))
@@ -2239,13 +2244,15 @@
       assert (let [[t m] p]
                (when (let [[th tp _ _] (when (seq? t) (node t))] (and (= th 'tuple) (seq (first tp))))
                  (warn! "assertion is always true, perhaps remove parentheses?"))
+               ;; codegen_assert: nothing under -O, the warning above made whatever the level
+               (when (< *optimize* 1)
                (let [js (atom []) _ (jump-if! u t js true) d (depth u)]
                  (emit! u :call-intrinsic [:assertion-error 0])
                  (when (some? m) (expr! u m) (emit! u :call [1 nil]))
                  ;; codegen_assert: the raise at the test's location (the traceback's caret line under the test)
                  (at-node! u t #(emit! u :raise 1))
                  (set-depth! u d)
-                 (doseq [j @js] (label! u j))))
+                 (doseq [j @js] (label! u j)))))
       import (import! u (first p) (:lazy o))
       import-from (import-from! u x)
       (global nonlocal) nil
@@ -3032,7 +3039,7 @@
           (at-node! u (first body) #(do (emit! u :build-set 0) (name-op! u "__conditional_annotations__" :store))))
         (when (and (:future-annotations *table*) (annotations-used? body)) (emit! u :setup-annotations nil))
         ;; Interactive (mode single) has no docstring: a lone string statement is displayed (compiler_mod)
-        (when-let [d (and (not= *mode* :single) (docstring body))]
+        (when-let [d (and (not= *mode* :single) (< *optimize* 2) (docstring body))]
           (at-node! u (first body) #(load-const! u d))
           (no-loc! u #(name-op! u "__doc__" :store)))
         (stmts! u (if (and (not= *mode* :single) (docstring body)) (rest body) body))
