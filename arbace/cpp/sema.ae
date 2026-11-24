@@ -6878,6 +6878,8 @@
     (remove #(let [f (fnd %)] (and (:deleted f) (or (:cx-move f) (not (:deleted-sure f))))) (:ctors (abi/cls id)))
     (remove #(:deleted (fnd %)) (:ctors (abi/cls id)))))
 
+(def ^:dynamic *cx-default-active* #{})
+
 (defn- call-args
   "The parameters' initializers for a call of `f` with the typed arguments `args` (default arguments analyzed in the
   function's scope)."
@@ -6917,8 +6919,16 @@
               ;; (cpp-decl2: a default argument `{...}` for a reference to an abstract class, its temporary at the call)
               (when (and (checking?) (map? d) (= "InitListExpr" (:kind d)) (abi/ref? (nth ps i)))
                 (when-let [at (some-> *at* deref)] (cx-abstract! (abi/non-ref (nth ps i)) at "a temporary")))
-              ;; (cpp-ce3: a default argument's immediate invocations not evaluated here, cx-immediate-eval!)
-              (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
+              ;; (cpp-rind, the checker: [dcl.fct.default]/9's default argument evaluated at each call, one that calls the
+              ;; function itself with that argument defaulted again recurses without end: GCC's "recursive evaluation of default
+              ;; argument for 'int foo(T, int)'", overload/defarg1.C, whose analysis had overflowed the stack)
+              (let [k [(:name f) (:ty f) i]]
+                (when (and (checking?) (contains? *cx-default-active* k))
+                  (throw (ex-info (str "codegen: recursive evaluation of default argument for '" (:name f) "'")
+                                  (cond-> {:codegen/refused :default-arg} (and (map? d) (:range d)) (assoc :cx/node d)))))
+                (binding [*cx-default-active* (if (checking?) (conj *cx-default-active* k) *cx-default-active*)]
+                  ;; (cpp-ce3: a default argument's immediate invocations not evaluated here, cx-immediate-eval!)
+                  (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))))
 
 (defn init-list-elem
   "E when the type `t` (cv-qualified, or a reference to it) is std::initializer_list<E>, else nil."
