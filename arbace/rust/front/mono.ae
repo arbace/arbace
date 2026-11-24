@@ -346,12 +346,42 @@
   (push! m (disambiguator (u64 (if local? (:id *local*) (crate-id nm)))))
   (push! m (ident nm)))
 
+(def ^:dynamic *v0-binder*
+  "queue 566 (C6 L1): within a trait object's binder (v0's in_binder: `G`), {:depth {REGION DEPTH} :end N}: its bound regions
+  ([:re-bound ..] in the order they appear, rustc's vars), each printed `L` and 1 + (N - 1 - DEPTH) as print_region writes it"
+  nil)
+
+(defn- bound-in-binder? [r] (and *v0-binder* (vector? r) (contains? (:depth *v0-binder*) r)))
+
+(defn- print-region! [m r]
+  (push! m "L")
+  (push! m (if (bound-in-binder? r)
+             (let [{:keys [depth end]} *v0-binder*] (integer-62 (+ 1 (- (dec (long end)) (long (get depth r))))))
+             (integer-62 0))))
+
+(defn- binder-regions
+  "The bound regions of X in the order they first appear, not those under a nested trait object or fn pointer (their own binder)"
+  [x]
+  (let [acc (java.util.LinkedHashSet.)]
+    (letfn [(w [x] (cond (and (vector? x) (= :re-bound (first x))) (.add acc x)
+                         (and (vector? x) (#{:dyn :fnptr} (first x))) nil
+                         (map? x) (doseq [v (vals x)] (w v))
+                         (coll? x) (doseq [y x] (w y))
+                         :else nil))]
+      (w x))
+    (vec acc)))
+
 (defn- print-generic-args! [m prefix! args]
-  (let [args (filter type-arg? args)]   ; mono: every region is erased, so none is printed
+  (let [;; (queue 566: within a binder whose regions the arguments name, every region printed, an erased one `L_`:
+        ;; path_generic_args' print_regions)
+        regions? (some bound-in-binder? args)
+        args (if regions? args (filter type-arg? args))]   ; mono: every region is erased, so none is printed
     (if (empty? args)
       (prefix!)
       (do (push! m "I") (prefix!)
-          (doseq [a args] (if (and (vector? a) (#{:cval :cparam} (first a))) (do (push! m "K") (print-const! m a)) (print-type! m a)))
+          (doseq [a args] (cond (c/region? a) (print-region! m a)
+                                (and (vector? a) (#{:cval :cparam} (first a))) (do (push! m "K") (print-const! m a))
+                                :else (print-type! m a)))
           (push! m "E")))))
 
 (defn- print-impl-path! [m d args]
@@ -432,7 +462,7 @@
         (backref! m i)
         (let [start (pos-of m)]
           (case (first t)
-            :ref (do (push! m (if (nth t 2) "Q" "R")) (print-type! m (nth t 3)))
+            :ref (do (push! m (if (nth t 2) "Q" "R")) (when (bound-in-binder? (second t)) (print-region! m (second t))) (print-type! m (nth t 3)))
             :ptr (do (push! m (if (second t) "O" "P")) (print-type! m (nth t 2)))
             :array (do (push! m "A") (print-type! m (second t)) (print-const! m (nth t 2)))
             :slice (do (push! m "S") (print-type! m (second t)))
@@ -440,16 +470,22 @@
             (:adt :fndef) (print-def-path! m (second t) (nth t 2))
             ;; RF14: a trait object (print_dyn_existential: the principal at a dummy Self, each projection `p` and its name and
             ;; term, the auto traits, then the region, erased: `L_`); one with bound regions (a binder's `G`) refused
-            :dyn (let [{:keys [principal projections autos]} (second t)]
-                   (when (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t))
+            ;; (queue 566 (C6 L1): one binder's bound regions, `for<'a, 'b> Fn(&'a PanicHookInfo<'b>)`, as in_binder writes them:
+            ;; `G` and their count less one, each region by its depth; a nested binder's or the object's own region bound, refused)
+            :dyn (let [{:keys [principal projections autos]} (second t)
+                       regs (binder-regions (second t))]
+                   (when (or (and (seq regs) *v0-binder*) (and (vector? (nth t 2 nil)) (= :re-bound (first (nth t 2))))
+                             (some #(and (vector? %) (= :re-bound (first %)) (not (some #{%} regs))) (tree-seq coll? seq (second t))))
                      (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
                    (push! m "D")
-                   (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
-                   (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
-                   ;; RF15: the auto traits in rustc's interned order (ExistentialPredicate::stable_cmp: by DefPathHash), which
-                   ;; for core's markers is Sync before Send (rustc 1.99.1's hashes; the record's symbols show it); others after,
-                   ;; in their written order
-                   (doseq [a (sort-by #(get auto-trait-rank (str %) 9) autos)] (print-def-path! m a []))
+                   (when (seq regs) (push! m "G") (push! m (integer-62 (dec (count regs)))))
+                   (binding [*v0-binder* (when (seq regs) {:depth (zipmap regs (range)) :end (count regs)})]
+                     (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
+                     (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
+                     ;; RF15: the auto traits in rustc's interned order (ExistentialPredicate::stable_cmp: by DefPathHash), which
+                     ;; for core's markers is Sync before Send (rustc 1.99.1's hashes; the record's symbols show it); others after,
+                     ;; in their written order
+                     (doseq [a (sort-by #(get auto-trait-rank (str %) 9) autos)] (print-def-path! m a [])))
                    (push! m "E") (push! m "L_"))
             ;; RF14: a fn pointer (`F`, `U` when unsafe, its inputs, `E`, its output); another ABI's or one with bound regions
             ;; (a binder's `G`) refused
