@@ -4,6 +4,7 @@
 
 (import '(java.util ArrayList Collection Collections List Map WeakHashMap)
         '(java.util.concurrent CancellationException
+                               DelayQueue
                                Delayed
                                ExecutionException
                                ExecutorCompletionService
@@ -160,42 +161,73 @@
     (when-not (identical? pool (ForkJoinPool/commonPool))
       (.put CANCEL_ON_SHUTDOWN pool Boolean/TRUE)))
 
+  (field ^:private ^:static ^:final ^{:tag (Map ForkJoinPool Scheduler)} SCHEDULERS
+    (Collections/synchronizedMap (WeakHashMap.)))
+
   (method ^:private ^:static start :type-params [T] ^{:tag (ScheduledTask T)} [^ForkJoinPool pool
                                                                                ^{:tag (ScheduledTask T)} task]
     (when (.isShutdown pool) (throw (RejectedExecutionException.)))
-    (.execute pool (Waiter. task))
-    task)
+    (let [^:mutable ^Scheduler s nil]
+      (locking SCHEDULERS
+        (set! s (cast Scheduler (.get SCHEDULERS pool)))
+        (when (nil? s) (set! s (Scheduler. pool)) (.put SCHEDULERS pool s)))
+      (set! (.-scheduler task) s)
+      (.add s task)
+      task))
 
-  (defclass ^:private ^:static ^:final Waiter
+  (defclass ^:private ^:static ^:final Scheduler
+    (field ^:final ^ForkJoinPool pool)
+
+    (field ^:final ^{:tag (DelayQueue (ScheduledTask ?))} queue (DelayQueue.))
+
+    (field ^boolean driving)
+
+    (constructor [this ^ForkJoinPool pool] (set! (.-pool this) pool))
+
+    (method add ^void [this ^{:tag (ScheduledTask ?)} t]
+      (let [^:mutable ^boolean start false]
+        (locking this (.add queue t) (set! start (not driving)) (set! driving true))
+        (when start
+          (try
+            (.execute pool (Driver. this))
+            (catch [RuntimeException Error] e
+              (locking this (.remove queue t) (set! driving false))
+              (throw e))))))
+
+    (method next :throws [InterruptedException] ^{:tag (ScheduledTask ?)} [this]
+      (while true
+        (locking this (when (.isEmpty queue) (set! driving false) (return nil)))
+        (when (.isShutdown pool)
+          (let [cancelAll (.containsKey CANCEL_ON_SHUTDOWN pool)]
+            (for-each [^{:tag (ScheduledTask ?)} t (cast
+                                                     ScheduledTask/1
+                                                     (.toArray queue (new ScheduledTask/1 0)))]
+              (when (or cancelAll (not (== (.-period t) 0))) (.cancel t false)))))
+        (let [^{:tag (ScheduledTask ?)} t (cast ScheduledTask
+                                                (.poll queue 20 TimeUnit/MILLISECONDS))]
+          (when (and (some? t) (not (.isDone t))) (return t))))))
+
+  (defclass ^:private ^:static ^:final Driver
     :extends (ForkJoinTask Void)
 
-    (field ^:private ^:final ^{:tag (ScheduledTask ?)} task)
+    (field ^:private ^:final ^Scheduler scheduler)
 
-    (constructor [this ^{:tag (ScheduledTask ?)} task]
-      (set! (.-task this) task))
+    (constructor [this ^Scheduler scheduler]
+      (set! (.-scheduler this) scheduler))
 
     (method ^:public getRawResult ^Void [this] nil)
 
     (method ^:protected setRawResult ^void [this ^Void v])
 
     (method ^:protected exec ^boolean [this]
-      (let [^{:tag (ScheduledTask ?)} t task]
-        (while true
-          (while true
-            (when (.isDone t) (return true))
-            (when (and (.isShutdown (.-pool t))
-                       (or (not (== (.-period t) 0)) (.containsKey CANCEL_ON_SHUTDOWN (.-pool t))))
-              (.cancel t false)
-              (return true))
-            (let [left (unchecked-subtract (.-when t) (System/nanoTime))]
-              (when (<= left 0) (break))
-              (try
-                (.get t (Math/min left 20000000) TimeUnit/NANOSECONDS)
-                (catch [TimeoutException
-                        InterruptedException
-                        ExecutionException
-                        CancellationException] ignore))))
-          (when-not (.runOnce t) (return true))))))
+      (try
+        (let [^:mutable ^{:tag (ScheduledTask ?)} t nil]
+          (while (some? (set! t (.next scheduler)))
+            (when (.runOnce t) (.add (.-queue scheduler) t))))
+        (catch InterruptedException e
+          (locking scheduler (set! (.-driving scheduler) false))
+          (.interrupt (Thread/currentThread))))
+      true))
 
   (defclass ^:static ^:final ScheduledTask
     :extends (ForkJoinTask T)
@@ -211,6 +243,8 @@
     (field ^:final ^long period)
 
     (field ^:volatile ^long when)
+
+    (field ^Scheduler scheduler)
 
     (field ^T result)
 
@@ -248,6 +282,12 @@
                       (set! when (unchecked-add when period))
                       (set! when (unchecked-subtract (System/nanoTime) period)))
                   true)))))
+
+    (method ^:public cancel ^boolean [this ^boolean mayInterruptIfRunning]
+      (let [c (.cancel super mayInterruptIfRunning)
+            s scheduler]
+        (arbace.core/when (some? s) (.remove (.-queue s) this))
+        c))
 
     (method ^:public getDelay ^long [this ^TimeUnit unit]
       (.convert unit (unchecked-subtract when (System/nanoTime)) TimeUnit/NANOSECONDS))

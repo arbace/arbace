@@ -968,8 +968,10 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         nextStamp = newStamp;
     }
 
+    // jdk26u's: the class's name (a calendar of a program's own, CalendarTypeTest's Koyomi); GregorianCalendar,
+    // BuddhistCalendar and JapaneseImperialCalendar override it (queue 543; "gregory" until then)
     public String getCalendarType() {
-        return "gregory";
+        return this.getClass().getName();
     }
 
     @Override

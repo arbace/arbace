@@ -11,13 +11,14 @@
  * Since queue 543 also ForkJoinPool's delayed tasks (JDK 25's schedule, scheduleAtFixedRate,
  * scheduleWithFixedDelay, cancelDelayedTasksOnShutdown), which return a ScheduledFuture jrt's
  * own build cannot name: a scheduled task is a ForkJoinTask and ScheduledFuture (the user's
- * handle) and a waiter, a task executed in the pool at once (a worker of its own, as every task
- * given to jrt's pool from outside), which waits for the trigger time or the handle's
- * cancellation, then runs the action and completes the handle. As the JDK's: the pool does not
- * terminate while a delayed task waits, a one-shot task still runs after shutdown unless
- * cancelDelayedTasksOnShutdown was called, a periodic one stops at shutdown, a periodic task's
- * exception completes its handle exceptionally, a delay is from the call (fixed rate: from the
- * first trigger; fixed delay: from the end of the previous run).
+ * handle) in its pool's delay queue (DelayQueue: by trigger time), which one driver task of the
+ * pool, executed in the pool while the queue holds a task, takes in order and runs, one at a time,
+ * as the JDK's DelayScheduler enables them in order (a pool of one worker then runs them in that
+ * order). As the JDK's: the pool does not terminate while a delayed task waits, a one-shot task
+ * still runs after shutdown unless cancelDelayedTasksOnShutdown (or shutdownNow) was called, a
+ * periodic one stops at shutdown, a periodic task's exception completes its handle exceptionally,
+ * a cancelled task leaves the queue, a delay is from the call (fixed rate: from the first trigger;
+ * fixed delay: from the end of the previous run).
  * doInvokeAny follows the code of AbstractExecutorService's, from
  * https://github.com/openjdk/jdk26u at baf63fb,
  * src/java.base/share/classes/java/util/concurrent/AbstractExecutorService.java (Oracle's GNU
@@ -41,6 +42,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.Future;
+import java.util.concurrent.DelayQueue;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -220,19 +222,85 @@ public final class ForkJoinPools {
             CANCEL_ON_SHUTDOWN.put(pool, Boolean.TRUE);
     }
 
+    /** The pools' delay queues and drivers. */
+    private static final Map<ForkJoinPool, Scheduler> SCHEDULERS =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
     private static <T> ScheduledTask<T> start(ForkJoinPool pool, ScheduledTask<T> task) {
         if (pool.isShutdown())
             throw new java.util.concurrent.RejectedExecutionException();
-        pool.execute(new Waiter(task));
+        Scheduler s;
+        synchronized (SCHEDULERS) {
+            s = SCHEDULERS.get(pool);
+            if (s == null) {
+                s = new Scheduler(pool);
+                SCHEDULERS.put(pool, s);
+            }
+        }
+        task.scheduler = s;
+        s.add(task);
         return task;
     }
 
-    /** The waiter of a scheduled task: waits for its trigger time or its end, then runs it (again, when periodic). */
-    private static final class Waiter extends ForkJoinTask<Void> {
-        private final ScheduledTask<?> task;
+    /** A pool's delay queue and whether its driver runs. */
+    private static final class Scheduler {
+        final ForkJoinPool pool;
+        final DelayQueue<ScheduledTask<?>> queue = new DelayQueue<>();
+        boolean driving; // under this
 
-        Waiter(ScheduledTask<?> task) {
-            this.task = task;
+        Scheduler(ForkJoinPool pool) {
+            this.pool = pool;
+        }
+
+        void add(ScheduledTask<?> t) {
+            boolean start;
+            synchronized (this) {
+                queue.add(t);
+                start = !driving;
+                driving = true;
+            }
+            if (start) {
+                try {
+                    pool.execute(new Driver(this));
+                } catch (RuntimeException | Error e) {
+                    synchronized (this) {
+                        queue.remove(t);
+                        driving = false;
+                    }
+                    throw e;
+                }
+            }
+        }
+
+        /** The next task to run, or null when the queue is empty (the driver then ends). */
+        ScheduledTask<?> next() throws InterruptedException {
+            for (;;) {
+                synchronized (this) {
+                    if (queue.isEmpty()) {
+                        driving = false;
+                        return null;
+                    }
+                }
+                if (pool.isShutdown()) {
+                    boolean cancelAll = CANCEL_ON_SHUTDOWN.containsKey(pool);
+                    for (ScheduledTask<?> t : queue.toArray(new ScheduledTask<?>[0]))
+                        if (cancelAll || t.period != 0L)
+                            t.cancel(false);
+                }
+                // in slices, so that a shutdown is seen
+                ScheduledTask<?> t = queue.poll(20L, TimeUnit.MILLISECONDS);
+                if (t != null && !t.isDone())
+                    return t;
+            }
+        }
+    }
+
+    /** A pool's driver: runs its delayed tasks in trigger order, a periodic one queued again. */
+    private static final class Driver extends ForkJoinTask<Void> {
+        private final Scheduler scheduler;
+
+        Driver(Scheduler scheduler) {
+            this.scheduler = scheduler;
         }
 
         public Void getRawResult() {
@@ -243,28 +311,19 @@ public final class ForkJoinPools {
         }
 
         protected boolean exec() {
-            ScheduledTask<?> t = task;
-            for (;;) {
-                // wait for the trigger, in slices so that a shutdown is seen
-                for (;;) {
-                    if (t.isDone())
-                        return true;
-                    if (t.pool.isShutdown() && (t.period != 0L || CANCEL_ON_SHUTDOWN.containsKey(t.pool))) {
-                        t.cancel(false);
-                        return true;
-                    }
-                    long left = t.when - System.nanoTime();
-                    if (left <= 0L)
-                        break;
-                    try {
-                        t.get(Math.min(left, 20_000_000L), TimeUnit.NANOSECONDS);
-                    } catch (TimeoutException | InterruptedException | ExecutionException
-                             | CancellationException ignore) {
-                    }
+            try {
+                ScheduledTask<?> t;
+                while ((t = scheduler.next()) != null) {
+                    if (t.runOnce())
+                        scheduler.queue.add(t);
                 }
-                if (!t.runOnce())
-                    return true;
+            } catch (InterruptedException e) {
+                synchronized (scheduler) {
+                    scheduler.driving = false;
+                }
+                Thread.currentThread().interrupt();
             }
+            return true;
         }
     }
 
@@ -278,6 +337,7 @@ public final class ForkJoinPools {
         final Callable<? extends T> callable;
         final long period;
         volatile long when;
+        Scheduler scheduler;
         T result;
 
         ScheduledTask(ForkJoinPool pool, Runnable runnable, Callable<? extends T> callable, long delay, long period) {
@@ -332,7 +392,16 @@ public final class ForkJoinPools {
             return true;
         }
 
-        public long getDelay(TimeUnit unit) {
+        /** Cancelled, the task leaves its pool's delay queue (the JDK's removes it from its heap). */
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            boolean c = super.cancel(mayInterruptIfRunning);
+            Scheduler s = scheduler;
+            if (s != null)
+                s.queue.remove(this);
+            return c;
+        }
+
+                public long getDelay(TimeUnit unit) {
             return unit.convert(when - System.nanoTime(), TimeUnit.NANOSECONDS);
         }
 
