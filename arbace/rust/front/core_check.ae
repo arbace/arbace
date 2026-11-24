@@ -394,9 +394,18 @@
 (defn macros-for
   "The macro table as the expansion's std macros for a file: each name's definition from the nearest file (the same file
   excluded: the file's own are its user macros), by the longest common directory prefix"
-  [table ^String file]
+  [table ^String file & [shadowed]]
   (into {} (for [[nm ds] table
-                 :let [ds (remove #(= file (:file %)) ds)]
+                 :let [ds (remove #(= file (:file %)) ds)
+                       ;; queue 561 (C6 L3): SHADOWED (a backtrace crate's run: std's macro names) drops a definition of such a
+                       ;; name outside its textual scope (its module file's subtree): rustc-demangle's v0.rs `macro_rules! write`
+                       ;; (a compile_error! guard) is not lib.rs' write!, core's is
+                       ds (if (and shadowed (shadowed nm))
+                            (remove (fn [{^String df :file}]
+                                      (let [mdir (if (re-find #"/(lib|mod)\.rs$" df) (.getParent (File. df)) (subs df 0 (- (count df) 3)))]
+                                        (not (str/starts-with? file (str mdir "/")))))
+                                    ds)
+                            ds)]
                  :when (seq ds)]
              (let [common (fn [^String a ^String b] (count (take-while true? (map = a b))))
                    ;; RF19: of the files equally near, the shallowest (num/mod.rs: `#[macro_use] mod uint_macros;`'s uint_impl!,
@@ -1194,7 +1203,8 @@
         (let [mc (atom {}) sites (atom {})
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
-                              (ex/expand-file file 2024 (merge (ex/load-std-macros std-file) (macros-for table file)))))
+                              (ex/expand-file file 2024 (let [sm (ex/load-std-macros std-file)]
+                                                         (merge sm (macros-for table file (when (some #{*crate*} backtrace-crates) (set (keys sm)))))))))
               vtext (ex/virtual-text)
               res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
                                                     ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)
