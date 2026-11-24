@@ -2563,7 +2563,7 @@
                     (and (checking?) (:cls home) (#{:private :protected} *member-access*)) (assoc :cx-access *member-access*))
             ;; (CX12, the checker: the type's member names' access, an unqualified declarator at namespace scope)
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
-                (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl {:range (:range n)}))]
+                (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl (cond-> {:range (:range n)} (:loc n) (assoc :loc (:loc n)))))]
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (cond
                                  ;; (cpp-rt-own3: and an inline variable anywhere, [dcl.inline]/6, defined when odr-used, linkonce_odr)
@@ -4044,6 +4044,22 @@
 ;; one there ([expr.const]/16, P2564R3's immediate function context excludes it), evaluated (cpp2a/consteval11.C's `int h = 0 ?
 ;; bar (7) : 1;`); a nested declaration or statement binds it again
 (def ^:dynamic *cx-arms-evaluated* false)
+;; cpp-p2564 (the checker): P2564R3's immediate escalation ([expr.const]/16-18; GCC applies it in C++20 too), judged in a unit whose
+;; text names consteval (*cx-consteval-unit*, bound by analyze-program): an immediate-escalating function of the main file (a
+;; closure's call operator, a defaulted special member, a constexpr function made by a template's instantiation) whose body has an
+;; immediate-escalating expression -- an immediate invocation surely not constant, the address of an immediate function -- is an
+;; immediate function (:cx-escalated), its calls and its address then as a consteval function's (cx-immediate-eval!,
+;; cx-ctor-immediate!, cx-addr-escalation!). *cx-at-override*: the range every expression analyzed takes as its position for the
+;; constant evaluation's diagnostics (a default argument's at its call, a default member initializer's at its constructor: GCC's
+;; places), and the place of an immediate invocation's error there. *cx-imm-pending*: while a namespace-scope variable's
+;; initializer is analyzed, the immediate invocations that return an immediate function's address, judged by the whole
+;; initializer's constant evaluation (constant initialization makes it manifestly constant-evaluated, [expr.const]/20).
+;; *ce-fnptr*: the evaluator's function addresses ({::fnp id}) and calls through them, in that judgment alone.
+(def ^:dynamic *cx-consteval-unit* false)
+(def ^:dynamic *cx-at-override* nil)
+(def ^:dynamic *cx-imm-pending* nil)
+(def ^:dynamic *ce-fnptr* false)
+(declare cx-addr-escalation! cx-ctor-immediate! cx-closure-conv! cx-p2564? cx-main-fn? cx-imm-addrs cx-addr-report!)
 
 (def ^:dynamic *ce-point*
   "cpp-ce3 (the checker): the range of the declaration whose initializer or condition the evaluation is of (a constexpr or
@@ -4375,6 +4391,8 @@
       (ce-loc? v) (if (abi/ptr? t) v (if (= :bool (abi/bn t)) 1 (not-constant "a pointer as " (pr-str t))))
       ;; (cpp-ce2: a pointer to data member's value)
       (and (map? v) (contains? v ::mdata)) (if (abi/mptr? t) v (not-constant "a pointer to member as " (pr-str t)))
+      ;; (cpp-p2564: a function's address, *ce-fnptr*'s)
+      (and (map? v) (contains? v ::fnp)) (if (abi/ptr? t) v (not-constant "a function's address as " (pr-str t)))
       ;; (cpp-rt-own2: the address of an object of static storage duration, ce-object's: a pointer's value alone)
       (ce-gaddr? v) (if (abi/ptr? t) v (not-constant "an address as " (pr-str t)))
       (= :bool (abi/bn t)) (if (if (number? v) (not (zero? (double v))) v) 1 0)
@@ -4914,6 +4932,13 @@
                                          java.math.BigInteger/ZERO (range n))]
                            (ce-wrap t r))
                   (not-constant "the bit operation " (:which e))))
+       ;; (cpp-p2564, the checker: a function's address and a call through it, in global-init's judgment of P2564's enclosing
+       ;; expression alone, *ce-fnptr*)
+       :fnaddr (if (and *ce-fnptr* (:fn e)) {::fnp (:fn e)} (not-constant "the expression :fnaddr"))
+       :icall (let [p (when *ce-fnptr* (ev (:callee e)))]
+                (if-let [fid (and (map? p) (::fnp p))]
+                  (ev {:op :call :fn fid :args (:args e) :ty (:ty e) :cat (:cat e) :cx-at (:cx-at e)})
+                  (not-constant "the expression :icall")))
        (not-constant "the expression " (:op e))))))
 
 
@@ -5793,7 +5818,10 @@
       (or (first (filter same? fs))
           ;; the templates' specializations deduced from the target type ([over.over]/2: a non-template preferred)
           (when-let [h (and (seq (:tmpls e)) (:fnaddr-specs @hooks))] (first (filter same? (h e ft)))))
-      (when (= 1 (count fs)) (first fs)))))
+      (or (when (= 1 (count fs)) (first fs))
+          ;; (cpp-p2564, the checker: a template-id naming one specialization with no target type, `auto p = &f0<int>;`)
+          (when-let [h (and (empty? fs) (= 1 (count (:tmpls e))) (:targs-text e) (cx-p2564?) (:fnaddr-explicit-specs @hooks))]
+            (let [r (distinct (h e))] (when (= 1 (count r)) (first r))))))))
 
 (defn mptr-fn-node [fid]
   (let [f (fnd fid)]
@@ -6311,10 +6339,10 @@
                       _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
                       _ (swap! *fns* assoc ivid (merge base-f {:id ivid :name "__invoke" :kind :method :static true :ty ft :param-names []
                                                                :tinst (assoc (:tinst f) :tid [:invoke tid])}))
-                      call (method-call {:scope (:scope base-f)} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false)
+                      call (binding [*cx-no-imm* true] (method-call {:scope (:scope base-f)} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false))
                       ret-s (if (abi/void? ret) {:s :return :void-e call} {:s :return :init (init-for ret call {:scope (:scope base-f)} :copy)})]
                   (upd-fn! ivid assoc :params ipids :tbody {:s :block :items [{:s :decl :var lv :init {:i :none}} ret-s]})
-                  (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false}
+                  (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false} :cx-callop fid
                                                         ;; (mangled as clang's specialization of the conversion function
                                                         ;; template, `template <class T> operator auto (*)(T)() const`)
                                                         :tinst (assoc (:tinst f) :tid [:conv tid] :tsig {:k :fn :ret nil :ps [] :va false})
@@ -6901,7 +6929,14 @@
               (when (and (checking?) (map? d) (= "InitListExpr" (:kind d)) (abi/ref? (nth ps i)))
                 (when-let [at (some-> *at* deref)] (cx-abstract! (abi/non-ref (nth ps i)) at "a temporary")))
               ;; (cpp-ce3: a default argument's immediate invocations not evaluated here, cx-immediate-eval!)
-              (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* true] (analyze (assoc ctx :scope (:scope f)) d)) ctx :copy)))))))
+              ;; (cpp-p2564: in a consteval unit, a default argument of the main file's evaluated in the caller's context,
+              ;; [expr.const]/16-18 with P2564R3: an escalating caller escalates, another's error at the call; its positions the
+              ;; call's, GCC's place)
+              (let [own (and (cx-p2564?) (map? d) (not (header-node? d)) (or (nil? (:fn-id ctx)) (cx-main-fn? (fnd (:fn-id ctx)))))
+                    at (when own (or *cx-at-override* (some-> *at* deref :range)))]
+                (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* (if own *cx-no-imm* true) *cx-at-override* (if own at *cx-at-override*)]
+                                       (analyze (assoc ctx :scope (:scope f)) d))
+                          ctx :copy))))))))
 
 (defn init-list-elem
   "E when the type `t` (cv-qualified, or a reference to it) is std::initializer_list<E>, else nil."
@@ -7822,7 +7857,7 @@
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
-          (and (:consteval f) (abi/empty-class? id)) {:i :none}
+          (and (:consteval f) (abi/empty-class? id) (not (and (cx-p2564?) (cx-main-fn? f)))) {:i :none}
           :else {:i :ctor :fn fid :args (call-args f args ctx)}))))
 
 (defn- cx-no-default-sure?
@@ -9171,6 +9206,7 @@
   [ctx fid obj args virtual-ok]
   (let [f (fnd (deduced! fid))
         _ (cx-immediate-call! ctx f)
+        _ (cx-closure-conv! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
     ;; (cpp-sweep, the checker: a member function's immediate invocation evaluated as a free function's is, cx-immediate-eval!:
     ;; cpp2a/consteval-memfn1.C's `s.size(-1)` whose body throws)
@@ -10120,12 +10156,18 @@
         cs (new-scope :class (:scope ctx) :cls id :path (conj path [:cls id]))
         t {:k :class :id id}
         _ (swap! abi/*classes* assoc id (cond-> {:id id :name nil :mname mname :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true}
+                                          ;; (cpp-p2564: the lambda-expression's place, cx-main-fn?)
+                                          (and (checking?) (:range n)) (assoc :cx-lambda-node {:range (:range n)})
                                           ;; (cpp-rt-own2: the parameters, mangled in the enclosing name's substitutions, abi's part-name)
                                           ul? (assoc :ul [ps k])))
         fid (next-id)
         base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id]) :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}
         _ (swap! *fns* assoc fid (merge base-f {:id fid :name "operator()" :kind :method :op "()" :ty {:k :fn :ret ret :ps ps :va false}
-                                                :cq (not mutable) :param-names (mapv :name pn)}))
+                                                :cq (not mutable) :param-names (mapv :name pn)}
+                                               ;; (cpp-p2564, the checker: the call operator's default arguments, as a function's,
+                                               ;; [expr.prim.lambda.closure]/3: consteval-prop1.C's `[] (int u = undef ()) {...}()`)
+                                               (when (and (checking?) (some #(seq (kids %)) pn))
+                                                 {:defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)})))
         _ (enter! cs "operator()" {:e :fn :id fid :pos -1})
         _ (abi/update-cls! id update :methods (fnil conj []) fid)
         _ (swap! *order* conj [:fn fid])
@@ -10164,6 +10206,7 @@
         ret (:ret (:ty (fnd fid)))
         ret (if (= :auto (:k ret)) abi/void ret)
         _ (upd-fn! fid #(-> % (assoc-in [:ty :ret] ret) (assoc :params pids :tbody body-s :nrvo (nrvo-var body-s) :statics @(:statics lctx))))
+        _ (cx-addr-escalation! fid)
         _ (finish-class! id)
         _ (cx-closure-members! id (not (str/blank? intro)))
         _ (doseq [m (:methods (abi/cls id)) :let [g (fnd m)] :when (:implicit g)]
@@ -10178,11 +10221,12 @@
             lv (next-id)
             _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
             _ (swap! *fns* assoc ivid (merge base-f {:id ivid :name "__invoke" :kind :method :static true :ty ft :param-names []}))
-            call (method-call {:scope cs} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false)
+            ;; (cpp-p2564: the invoker's call of the operator, a closure member's, no immediate invocation of its own)
+            call (binding [*cx-no-imm* true] (method-call {:scope cs} fid {:op :var :id lv :ty t :cat :lv} (mapv var-node ipids) false))
             ret-s (if (abi/void? ret) {:s :return :void-e call} {:s :return :init (init-for ret call {:scope cs} :copy)})]
         (upd-fn! ivid assoc :params ipids :tbody {:s :block :items [{:s :decl :var lv :init {:i :none}} ret-s]})
         (swap! *fns* assoc cvid (merge base-f {:id cvid :name "operator function" :kind :conv :cq true :ty {:k :fn :ret (abi/ptr ft) :ps [] :va false}
-                                              :param-names [] :params []
+                                              :param-names [] :params [] :cx-callop fid
                                               :tbody {:s :block :items [{:s :return :init {:i :expr :e {:op :fnaddr :fn ivid :ty (abi/ptr ft) :cat :pr}}}]}}))
         (abi/update-cls! id update :methods (fnil conj []) cvid)))
     {:op :temp-obj :init {:i :list :cls id :items (mapv second inits) :fields-used (mapv first inits)} :ty t :cat :pr})))
@@ -10278,7 +10322,8 @@
         ;; (its specializations of internal linkage outside an inline function, as the non-generic operator is)
         cs (new-scope :class (:scope ctx) :cls id :path (conj path [:cls id]) :internal (not inline?))
         t {:k :class :id id}
-        _ (swap! abi/*classes* assoc id {:id id :name nil :mname nil :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true})
+        _ (swap! abi/*classes* assoc id (cond-> {:id id :name nil :mname nil :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true}
+                                          (and (checking?) (:range n)) (assoc :cx-lambda-node {:range (:range n)})))
         ;; the call operator template, declared in the closure as a member template is (the :declare hook)
         _ (let [h (or (:declare @hooks) (fail :generic-lambda "a generic lambda without templates"))]
             (h cs (cond-> {:kind "FunctionTemplateDecl" :name "operator()" :inner (conj tps pattern) :_b (:_b n)}
@@ -10486,8 +10531,9 @@
     ;; (CX12, the checker: a binary operator's position kept, for the constant evaluation's diagnostics)
     ;; (h-cpp-consteval: and an assignment's, an increment's)
     ;; (a begin inside a macro's expansion, its expansion's location: the line the diagnostic is on)
-    (if (and (checking?) (map? r) (:op r) (not (#{:int :float :str :null} (:op r))) (:range n) (not (:cx-at r)))
-      (assoc r :cx-at (let [b (get-in n [:range :begin])] (if-let [x (:expansionLoc b)] (assoc (:range n) :begin x) (:range n))))
+    ;; (cpp-p2564: a default argument's or a default member initializer's at its use, *cx-at-override*)
+    (if (and (checking?) (map? r) (:op r) (not (#{:int :float :str :null} (:op r))) (:range n) (or *cx-at-override* (not (:cx-at r))))
+      (assoc r :cx-at (or *cx-at-override* (let [b (get-in n [:range :begin])] (if-let [x (:expansionLoc b)] (assoc (:range n) :begin x) (:range n)))))
       r)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -10976,7 +11022,9 @@
       (or (when (and (class-operand? e) (not= o "&")) (operator-call ctx o (if (and (#{"++" "--"} o) (:isPostfix n)) [e {:op :int :v 0 :ty abi/int* :cat :pr}] [e])))
           (when (class-operand? e) (no-operator! ctx o [e]))
           (case o
-            "&" (cond (= :fnset (:op e)) (let [f (first (:fns e))]
+            "&" (cond (= :fnset (:op e)) (let [f (or (first (:fns e))
+                                                     ;; (cpp-p2564, the checker: a template-id naming one specialization, fn-matching)
+                                                     (when (and (empty? (:fns e)) (cx-p2564?)) (fn-matching e nil)))]
                                            ;; (queue 380, W3d: the address of an overloaded name keeps its set, :set, for the
                                            ;; target type to choose from, [over.over]/1: debug.cc's `pretty_print(ctx, s,
                                            ;; &print_string)` of print_string's two overloads; the first stands alone)
@@ -11963,6 +12011,8 @@
                                                       (decl-init ctx id d))]
                                            (cx-dtor-access! ctx (:ty (var* id)))
                                            (cx-check-constant! (var* id) init)
+                                           ;; (cpp-p2564: an immediate constructor's call, an immediate invocation)
+                                           (cx-ctor-immediate! ctx (var* id) init d)
                                            init)
                                          (catch arbace.lang.ExceptionInfo x
                                            (when (and (checking?) (:codegen/refused (ex-data x)) (:name d) (not (has-auto? (:ty (var* id)))))
@@ -12504,7 +12554,12 @@
                                                         (= \= (.charAt src (int i))) dn
                                                         :else nil))))))]
                                    (try (binding [*cx-copy-list* (or *cx-copy-list* cl)]
-                                          (init-for (:ty fl) (let [d (binding [*cx-no-imm* true] (nsdmi-guard cid fl #(analyze ctx dn)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind dn)) :list :copy)))
+                                          ;; (cpp-p2564: in a consteval unit a main-file constructor's default member initializer has its
+                                          ;; immediate invocations evaluated in the constructor's context, at its place (a defaulted one's
+                                          ;; declaration, an implicit one's class), [expr.const]/16-18: prop6's SS::SS(), X() = default)
+                                          (init-for (:ty fl) (let [own (and (cx-p2564?) (cx-main-fn? f) (not (header-node? dn)))
+                                                                   at (when own (or (some-> (if (and (:defaulted f) (not (:implicit f))) (:node f) (or (when-not (:implicit f) (:node f)) (:cx-node c))) :range)))
+                                                                   d (binding [*cx-no-imm* (not own) *cx-at-override* (if own (or *cx-at-override* at) *cx-at-override*)] (nsdmi-guard cid fl #(analyze ctx dn)))] (if (= :init-list (:op d)) d d)) ctx (if (= "InitListExpr" (:kind dn)) :list :copy)))
                                         (catch arbace.lang.ExceptionInfo e
                                           (if (and (checking?) *on-refusal* (map? dn) (:range dn)
                                                    (or (:cx/conv-explicit (ex-data e)) (re-find #"from initializer list would use explicit constructor" (str (.getMessage e)))))
@@ -12722,6 +12777,8 @@
                    (update body :handlers (fn [hs] (mapv (fn [h] (update h :body (fn [b] {:s :block :items [b {:s :expr :e {:op :throw :ty abi/void :cat :pr}}]}))) hs)))
                    body)]
         (upd-fn! fid assoc :params pids :tbody body :tinits inits :nrvo (when body (nrvo-var body)) :statics @(:statics ctx))
+        ;; (cpp-p2564: an immediate function's address in it, P2564's escalation or its error)
+        (cx-addr-escalation! fid)
         ;; (a generic lambda's body with no return statement: void, [expr.prim.lambda.closure]/4's deduction)
         ;; (cpp-s3: any function's declared `auto` with no return statement in its body, [dcl.spec.auto.general]/10:
         ;; pr77550.C's `static auto construct(_Alloc, _Tp p2, _Args) { _S_construct(p2); }`)
@@ -13048,7 +13105,8 @@
   "An implicit (or defaulted) special member's definition (analyze-implicit*!); a deleted call in it is the member's
   deletion, no use of the deleted function (queue 463: cx-deleted-implicit! reports at a use only)."
   [fid]
-  (binding [*cx-in-implicit* true] (analyze-implicit*! fid)))
+  (binding [*cx-in-implicit* true] (analyze-implicit*! fid))
+  (cx-addr-escalation! fid))
 
 (defn- immediate-address
   "CP310 (b): the immediate function whose address the typed expression `e` is (a pointer to it, a pointer to member
@@ -13199,32 +13257,203 @@
              (when (and (vector? o) (every? map? o)) (ce-destroy-cells! (map atom (rseq o))))))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x)))))
 
+;; cpp-p2564 (the checker): P2564R3's immediate escalation ([expr.const]/16-18), *cx-consteval-unit* above.
+
+(defn- cx-p2564? [] (and (checking?) *cx-consteval-unit* (>= (long *cxx-year*) 20)))
+
+(defn- cx-imm-escalating?
+  "[expr.const]/18: whether the function `g` is immediate-escalating, its immediate invocations no full-expressions of their own:
+  a closure's member (its call operator), a constexpr function made by a template's instantiation, a header's or one no plain
+  class has (cpp-sweep's judgment), and in a consteval unit a defaulted or implicit special member, constexpr or not."
+  [g]
+  (boolean
+   (or (and (:cls g) (some-> (abi/cls (:cls g)) :lambda))
+       (and (cx-p2564?) (or (:implicit g) (:defaulted g)) (or (#{:ctor :dtor} (:kind g)) (= "operator=" (:name g))))
+       (and (:constexpr g) (or (:tinst g) (:implicit g) (:defaulted g) (not (:node g)) (header-node? (:node g))
+                               (and (:cls g) (not (cx-plain-class? (:cls g))))
+                               (and (:friend-cls g) (not (cx-plain-class? (:friend-cls g)))))))))
+
+(defn- cx-main-fn?
+  "Whether the function `g` is the main file's (an implicit member: its class's)."
+  [g]
+  (if-let [n (:node g)]
+    (not (header-node? n))
+    (let [c (some-> (:cls g) abi/cls) cn (when c (or (:cx-node c) (:cx-lambda-node c)))] (boolean (and c (not (:header c)) cn (not (header-node? cn)))))))
+
+(defn- cx-esc-markable?
+  "Whether the escalation of the function `g` is judged: an immediate-escalating function of the main file, no consteval one."
+  [g]
+  (boolean (and g (cx-p2564?) (not (:consteval g)) (cx-imm-escalating? g) (cx-main-fn? g))))
+
+(defn- cx-escalate! [g] (when-not (:cx-escalated (fnd (:id g))) (upd-fn! (:id g) assoc :cx-escalated true)))
+
+(defn- cx-analyze-early!
+  "The definition of the function `f` analyzed where a use asks whether it escalated (a template's specialization is analyzed
+  after the declarations otherwise): its body or, an implicit or defaulted member, its implicit definition; a refusal undoes it,
+  the entry's analysis then reporting it in order. The analysis' position restored."
+  [f]
+  (let [fid (:id f) f (fnd fid)]
+    (when (and (not (:tbody f)) (not (:tinits f)) (not (:cx-early f)) (not (:analyzing f)) (not (:deleted f))
+               (not (contains? *ce-analyzing* fid))
+               (or (and (:body f) (not (:cx-no-body f))) (and (or (:implicit f) (:defaulted f)) (not (:params f)))))
+      (let [a *at* saved (some-> a deref)]
+        (upd-fn! fid assoc :cx-early true)
+        (try (binding [*cx-no-imm* false *unevaluated* false *ce-analyzing-imm* false *cx-at-override* nil *cx-imm-pending* nil
+                       *ce-manifest* false *cx-arms-evaluated* false *ce-analyzing* (conj *ce-analyzing* fid)
+                       *tmpl-chain* (long (or (:inst-chain f) 0)) *tmpl-slack* (if (:inst-vt f) 1 0)]
+               (if (and (:body f) (not (:implicit f)))
+                 (analyze-fn! fid)
+                 (analyze-implicit! fid))
+               (upd-fn! fid assoc :analyzed true))
+             (catch arbace.lang.ExceptionInfo e
+               (when (:cpp/timeout (ex-data e)) (throw e))
+               (swap! *fns* assoc fid (assoc f :cx-early true)))
+             (finally (when a (reset! a saved))))))))
+
+(defn- cx-escalated?
+  "Whether the function `f` is an immediate function by P2564's escalation (its definition analyzed first when it is not yet)."
+  [f]
+  (boolean (and f (cx-esc-markable? f)
+                (do (cx-analyze-early! f) (:cx-escalated (fnd (:id f)))))))
+
+(defn- cx-imm-fn? [f] (boolean (and f (or (:consteval f) (cx-escalated? f)))))
+
+(defn- cx-imm-context?
+  "Whether the context `ctx` is an immediate function context: a consteval function's, or one escalated."
+  [ctx]
+  (let [g (some-> (:fn-id ctx) fnd)] (boolean (and g (or (:consteval g) (:cx-escalated g))))))
+
+(defn- cx-imm-addrs
+  "[expr.const]/17.1: the function address nodes of the typed tree `x` naming an immediate function (consteval, or escalated)
+  that are no operand of an immediate invocation."
+  [x]
+  (let [out (java.util.ArrayList.)]
+    ((fn w [x]
+       (cond (map? x) (case (:op x)
+                        :fnaddr (when-let [f (some-> (:fn x) fnd)] (when (cx-imm-fn? f) (.add out x)))
+                        :call (when-not (cx-imm-fn? (some-> (:fn x) fnd))
+                                (doseq [[k v] x :when (and (coll? v) (not (#{:ty :cx-at} k)))] (w v)))
+                        (doseq [[k v] x :when (and (coll? v) (not (#{:ty :fty :cx-at :range} k)))] (w v)))
+             (sequential? x) (doseq [y x] (w y))
+             :else nil))
+     x)
+    (vec out)))
+
+(defn- cx-addr-report!
+  "An escalated function's address taken outside an immediate function context: GCC's \"taking address of an immediate
+  function\", at the address (else `n`)."
+  [addrs n]
+  (when-let [h *on-refusal*]
+    (doseq [a addrs :let [f (fnd (:fn a))] :when (and (not (:consteval f)) (:cx-escalated f))]
+      (h (ex-info (str "codegen: taking address of an immediate function '" (:name f) "'")
+                  {:codegen/refused :constexpr :cx/node (if (:cx-at a) {:range (:cx-at a)} n)})
+         nil))))
+
+(defn- cx-addr-escalation!
+  "After the definition of the function `fid` is analyzed: an escalating one taking an immediate function's address escalates;
+  another (no consteval one) taking an escalated one's is ill-formed."
+  [fid]
+  (when (cx-p2564?)
+    (let [f (fnd fid)]
+      (cond (or (:consteval f) (:cx-escalated f)) nil
+            (cx-esc-markable? f) (when (seq (cx-imm-addrs [(:tbody f) (:tinits f)])) (cx-escalate! f))
+            (and (not (cx-imm-escalating? f)) (cx-main-fn? f)) (cx-addr-report! (cx-imm-addrs [(:tbody f) (:tinits f)]) (:node f))
+            :else nil))))
+
+(defn- cx-imm-sure
+  "The sure refusal of the immediate invocation `node`'s constant evaluation, or nil."
+  [node]
+  (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true] (ce-eval node) nil)
+               (catch arbace.lang.ExceptionInfo x x))]
+    (when (:cx/sure (ex-data x)) x)))
+
+(defn- cx-imm-error!
+  "An immediate invocation of `f` surely no constant expression (`x` its evaluation's refusal): the operation's own error where it
+  is, then GCC's \"call to consteval function 'f(...)' is not a constant expression\" thrown (at *cx-at-override* when bound)."
+  [f x]
+  (let [d (ex-data x) m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
+    (when-let [at (:cx/at d)]
+      (when-let [h *on-refusal*]
+        (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
+    (if-let [o *cx-at-override*]
+      (throw (ex-info (str "codegen: call to consteval function '" (:name f) "' is not a constant expression")
+                      {:codegen/refused :constexpr :cx/node {:range o}}))
+      (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression"))))
+
+(defn- cx-ctor-immediate!
+  "cpp-p2564 (the checker): a variable `v` (its declaration `n`) initialized by `i`, a call of an immediate constructor (a consteval
+  one, or one escalated: [expr.const]/16's implicit invocation) outside an immediate function context, neither constexpr nor
+  constinit (their initializers are manifestly constant-evaluated): an immediate invocation, the object's construction evaluated;
+  surely no constant, an escalating function escalates, another's is GCC's \"call to consteval function\" at the variable, the
+  operation's own error beside."
+  [ctx v i n]
+  (when (and (cx-p2564?) (map? i) (or (= :ctor (:i i)) (and (= :zero-then (:i i)) (= :ctor (:i (:then i)))))
+             (not *unevaluated*) (not *cx-no-imm*) (not *ce-analyzing-imm*)
+             (not (:cx-constexpr v)) (not (:cx-constinit v)) (not (:constexpr v)) (not (abi/ref? (:ty v))))
+    ;; (a value-initialization's zeroing then its constructor, :zero-then: the constructor's)
+    (let [f (fnd (:fn (if (= :ctor (:i i)) i (:then i))))]
+      (when (and f (cx-imm-fn? f) (not (cx-imm-context? ctx)))
+        (let [g (some-> (:fn-id ctx) fnd)
+              sure (fn [] (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true *ce-steps* (atom 0) *ce-wide* true
+                                                 *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])
+                                                 *ce-heap* (atom {}) *ce-moved* (atom {}) *ce-unknown* (atom {})]
+                                         (ce-init (:ty v) i {}) nil)
+                                       (catch arbace.lang.ExceptionInfo x x))]
+                            (when (:cx/sure (ex-data x)) x)))]
+          (cond
+            (and g (cx-imm-escalating? g)) (when (and (cx-esc-markable? g) (sure)) (cx-escalate! g))
+            :else (when-let [x (sure)]
+                    (let [d (ex-data x) m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
+                      (when-let [h *on-refusal*]
+                        (when-let [at (:cx/at d)]
+                          (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil))
+                        ;; (at the declarator's name, GCC's place: `struct S2 { ... } s2;`)
+                        (h (ex-info (str "codegen: call to consteval function '" (:name f) "' is not a constant expression")
+                                    {:codegen/refused :constexpr
+                                     :cx/node (let [l (:loc n)] (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n))})
+                           nil))))))))))
+
+(defn- cx-closure-conv!
+  "cpp-p2564 (the checker): a closure's conversion function `f` to a pointer to function, its call operator escalated: the
+  conversion returns an immediate function's address ([expr.const]/16-18), an escalating context escalating, another's
+  GCC's \"call to consteval function ... returns address of immediate function\"."
+  [ctx f]
+  (when-let [op (and (cx-p2564?) (= :conv (:kind f)) (:cx-callop f))]
+    (let [o (fnd op)]
+      (when (and (:cx-escalated o) (not *unevaluated*) (not *cx-no-imm*) (not *ce-analyzing-imm*) (not (cx-imm-context? ctx)))
+        (let [g (some-> (:fn-id ctx) fnd)]
+          (if (and g (cx-imm-escalating? g))
+            (when (cx-esc-markable? g) (cx-escalate! g))
+            (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression (it returns address of immediate function '" (:name o) "')")))))))
+
 (defn- cx-immediate-eval!
   "cpp-ce3 (the checker): an immediate invocation ([expr.const]/16-17: a call of a consteval function in no immediate function
   context: not in a consteval function, not in an immediate-escalating one, a constexpr function or a lambda's call operator,
   P2564R3, and in no unevaluated operand) is a full-expression that is a constant expression: the call `node` evaluated, an
   evaluation the program's own operation makes surely not constant GCC's \"call to consteval function 'f(...)' is not a constant
-  expression\" at the call, the operation's own error beside it. The call node returned."
+  expression\" at the call, the operation's own error beside it. The call node returned.
+  cpp-p2564: a call of an escalated function too; in an escalating function of the main file (cx-esc-markable?) such an
+  invocation surely not constant, or one returning an immediate function's address, escalates the function instead; at a
+  namespace-scope variable's initializer one returning an immediate function's address is judged by the whole initializer
+  (*cx-imm-pending*, global-init)."
   [ctx f node]
-  (when (and (checking?) (:consteval f) (not (:cx-imm-error f)) (not *unevaluated*) (not *ce-analyzing-imm*) (not *cx-no-imm*)
+  (when (and (checking?) (not *unevaluated*) (not *ce-analyzing-imm*) (not *cx-no-imm*)
              (not (and (:cls ctx) (not (:fn-id ctx))))
-             (let [g (some-> (:fn-id ctx) fnd)]
-               ;; (cpp-sweep: P2564R3's immediate-escalating functions alone, [expr.const]/18 -- a closure's call operator, a
-               ;; defaulted special member, a constexpr function made by a template's instantiation -- not a constexpr function
-               ;; that is none: its immediate invocations evaluated, cpp2a/consteval34.C's foo, consteval-prop1.C's f3)
-               (not (and g (or (:consteval g) (and (:cls g) (some-> (abi/cls (:cls g)) :lambda))
-                               (and (:constexpr g) (or (:tinst g) (:implicit g) (:defaulted g) (not (:node g)) (header-node? (:node g))
-                                                       (and (:cls g) (not (cx-plain-class? (:cls g))))
-                                                       (and (:friend-cls g) (not (cx-plain-class? (:friend-cls g)))))))))))
-    (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true] (ce-eval node) nil)
-                 (catch arbace.lang.ExceptionInfo x x))
-          d (some-> x ex-data)]
-      (when (:cx/sure d)
-        (let [m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
-          (when-let [at (:cx/at d)]
-            (when-let [h *on-refusal*]
-              (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
-          (fail :constexpr "call to consteval function '" (:name f) "' is not a constant expression")))))
+             (or (and (:consteval f) (not (:cx-imm-error f))) (and (not (:consteval f)) (cx-escalated? f))))
+    (let [g (some-> (:fn-id ctx) fnd)]
+      (cond
+        (and g (or (:consteval g) (:cx-escalated g))) nil
+        ;; (cpp-sweep: P2564R3's immediate-escalating functions alone, [expr.const]/18 -- a closure's call operator, a
+        ;; defaulted special member, a constexpr function made by a template's instantiation -- not a constexpr function
+        ;; that is none: its immediate invocations evaluated, cpp2a/consteval34.C's foo, consteval-prop1.C's f3)
+        (and g (cx-imm-escalating? g))
+        (when (and (cx-esc-markable? g) (or (cx-imm-sure node) (returned-immediate (:id f))))
+          (cx-escalate! g))
+        :else
+        (if-let [x (cx-imm-sure node)]
+          (cx-imm-error! f x)
+          (when-let [r (and *cx-imm-pending* (cx-p2564?) (returned-immediate (:id f)))]
+            (swap! *cx-imm-pending* conj [node f r]))))))
   node)
 
 (defn- sassert-unsure-node?
@@ -13289,13 +13518,26 @@
     ;; (queue 463, the checker: a refusal with no node of its own -- a default-initialized variable's constructor or
     ;; destructor, cx-ctor-access! and cx-dtor-access! -- at the variable's declaration, not the last node analyzed before)
     (when (and (checking?) *at* (:cx-decl v)) (reset! *at* (:cx-decl v)))
-    (binding [*cutoff* Long/MAX_VALUE]
+    (binding [*cutoff* Long/MAX_VALUE *cx-imm-pending* (when (cx-p2564?) (atom []))]
       (let [i (cond
                 (nil? init) (init-for (:ty v) nil ctx :value)
                 :else (decl-init ctx vid (assoc (or (:node v) {}) :init (:init-style v) :inner [init] :kind "VarDecl")))
             _ (cx-dtor-access! ctx (:ty (var* vid)))
             ;; (cpp-ce: the variable as decl-init left it, an `auto` one's deduced type -- a scalar's initializer checked)
-            _ (cx-check-constant! (var* vid) i)]
+            _ (cx-check-constant! (var* vid) i)
+            ;; (cpp-p2564: an immediate constructor's call; an escalated function's address; an immediate invocation returning an
+            ;; immediate function's address, no constant expression unless the whole initializer is one -- constant initialization,
+            ;; manifestly constant-evaluated ([expr.const]/20): cpp2a/consteval-prop19.C's `f(1)(2)` and `f(1)(2) + r`)
+            _ (when (cx-p2564?)
+                (cx-ctor-immediate! ctx (var* vid) i (:cx-decl v))
+                (when-not (or (:cx-constexpr (var* vid)) (:cx-constinit (var* vid)))
+                  (cx-addr-report! (cx-imm-addrs i) (:cx-decl v))
+                  (when-let [[node f r] (first @*cx-imm-pending*)]
+                    (when-not (and (= :expr (:i i))
+                                   (try (binding [*ce-fnptr* true *ce-manifest* true *ce-point* (:cx-range (var* vid))] (ce-eval (:e i)) true)
+                                        (catch arbace.lang.ExceptionInfo _ false)))
+                      (throw (ex-info (str "codegen: call to consteval function '" (:name f) "' is not a constant expression (immediate evaluation returns address of immediate function '" (:name r) "')")
+                                      {:codegen/refused :constexpr :cx/node (if (:cx-at node) {:range (:cx-at node)} (:cx-decl v))}))))))]
         ;; a scalar initialized by a constant expression: constant initialization ([basic.start.static])
         ;; (CP378 (a): a constexpr variable's or a const integral one's initializer manifestly constant-evaluated)
         (if (and (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))) (or (not (#{:int :float :null} (:op (:e i)))) (:ice (:e i))))
@@ -13486,7 +13728,9 @@ protected:
             *cx-hdr-ns* (when (checking?) (java.util.IdentityHashMap.))
             *cx-hdr-names* (when (checking?) (cx-hdr-names nodes))
             *cx-all-names* (when (checking?) (cx-all-names nodes))
-            *fatal* (when (checking?) (atom false))]
+            *fatal* (when (checking?) (atom false))
+            ;; (cpp-p2564: P2564's escalation judged in a unit that names consteval)
+            *cx-consteval-unit* (boolean (and (checking?) (re-find #"\bconsteval\b" src)))]
     (do
       ((or (:wrap @hooks) (fn [f] (f)))
        (fn []

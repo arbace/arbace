@@ -11188,3 +11188,48 @@ literal pointer comparisons of cpp1y/constexpr-89074-3.C (a global's, a literal'
   types not both standard GCC's pedwarn "converting to ... with greater conversion rank" (-Wnarrowing: an error under -pedantic-errors
   or -Werror=narrowing), and overload resolution's [over.ics.rank]/4.3 (a conversion to a type of equal rank better, of equal subrank
   better still: ext-floating12.C).
+
+## As built: cpp-p2564, P2564R3's immediate escalation (2026-11-24; branch `cpp-p2564-1124` from mac/next `440cf0273`)
+
+cpp-sweep (3)'s first design built, in arbace/cpp/sema.ae (the checker alone, `(checking?)`), judged in a unit whose text names
+`consteval` from C++20 on (`*cx-consteval-unit*`, analyze-program; GCC applies [expr.const]/16-18 of C++23 in C++20 too). Sources:
+the standard's [expr.const]/16-20 (N4950) and P2564R3, g++ 15.2's diagnostics as the dg directives of gcc-15.2.0's
+g++.dg/cpp2a/consteval-prop*.C state them; no GCC code read.
+
+- **Escalation** (steps 1 and 2): an immediate-escalating function of the main file (`cx-esc-markable?`: a closure's member, a
+  constexpr function made by a template's instantiation, a defaulted or implicit special member, constexpr or not) whose analysis meets
+  an immediate invocation surely not constant (a parameter's read), one returning an immediate function's address, or an immediate
+  function's address outside an immediate invocation's operands (`cx-imm-addrs`, after analyze-fn!, analyze-implicit! and a lambda's
+  body) is marked `:cx-escalated`; its calls are then immediate invocations as a consteval function's (cx-immediate-eval!), its body an
+  immediate function context. A use asking for it analyzes the definition first (`cx-analyze-early!`: a template's specialization is
+  otherwise analyzed after the declarations; a refusal undoes it, the entry's analysis reporting it in order). An escalated function's
+  address outside an immediate function context is "taking address of an immediate function" (`cx-addr-report!`, a namespace-scope
+  variable's initializer and a function's body; diag.ae's text check keeps the consteval ones); `auto p = &f<int>;` with no target type
+  names its one specialization (template.ae's `fnaddr-explicit-specs`, consteval units).
+- **Constructors** (3): a variable initialized by an immediate constructor (consteval, or escalated; a value-initialization's
+  `:zero-then` too), neither constexpr nor constinit, is an immediate invocation, the construction evaluated (`cx-ctor-immediate!`): an
+  escalating context escalates, another's error at the declarator's name; a main file's consteval constructor of an empty class keeps
+  its call (it had been `{:i :none}`).
+- **Default arguments** (4): a main-file default argument's immediate invocations are evaluated in the caller's context, its positions
+  the call's (`*cx-at-override*`, analyze*'s `:cx-at`): prop10's `f2<int>()` in g an error at the call, in f3<int> its escalation;
+  prop2's hh<int> escalated by h<T>()'s `id(x)`, its call at line 45 the error, x's read at line 41.
+- **Default member initializers** (5): a main-file constructor analyzes its members' initializers with their immediate invocations
+  evaluated at its place (a defaulted one's declaration, an implicit one's class): prop6's SS::SS() the error with side_effect()'s
+  call, `X() = default` escalated and `X x;` the error with undef's at X(); prop1's S2 (a closure's default argument in the initializer:
+  the call operator's default arguments are now kept, `[] (int u = undef ()) {...}()` had refused the unit).
+- **Closures** (6): a closure's conversion to a pointer to function whose call operator escalated is an immediate invocation returning
+  an immediate function's address (`cx-closure-conv!`; the static invoker's own call of the operator no immediate invocation).
+- **The enclosing expression** (7): at a namespace-scope variable an immediate invocation returning an immediate function's address is
+  judged by the whole initializer (`*cx-imm-pending*`): constant initialization makes it manifestly constant-evaluated
+  ([expr.const]/20), so prop19's `int r = f(1)(2);` holds and `f(1)(2) + r` is the error; the evaluator follows function addresses
+  and calls through them in that judgment alone (`*ce-fnptr*`, `{::fnp id}`).
+
+Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8 to own pass; C++ read 6,035 / 0 / 248 ->
+6,040 / 0 / 243. Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
+constexpr, those with a lambda's default argument, the control pair DRs/dr2082.C and dr1423.C, the two slow files): no own pass lost
+but the two slow files past their 300 s (udlit-suffix-neg, missing-header-pr110164, their pass rows kept), the control pair failing as
+recorded; cpp2a/spaceship-synth9.C's failing row reads differently, the same on the base (not recorded here).
+
+Not built: an aggregate initialization's default member initializer as an immediate invocation (prop2's k<int>, GCC's xfail);
+consteval lambdas' conversions and a consteval function's address in a block (diag.ae's text check as before); the escalation of a
+header's functions (left immediate-escalating, never marked).

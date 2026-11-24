@@ -20513,3 +20513,32 @@ headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's
 line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
 pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
 -nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
+
+## 2026-11-24: cpp-p2564, P2564R3's immediate escalation in the own front end (branch `cpp-p2564-1124` from mac/next `440cf0273`)
+
+Built cpp-sweep (3)'s seven steps (doc/cpp/CPP-SURVEY.md, "As built: cpp-p2564") in arbace/cpp/sema.ae, the checker alone and only in
+a unit whose text names consteval from C++20 on: escalation of the main file's immediate-escalating functions (`:cx-escalated`) by an
+immediate invocation surely not constant, one returning an immediate function's address, or an immediate function's address; their
+calls immediate invocations, their address an error; constructors' immediate invocations at a variable (`cx-ctor-immediate!`); default
+arguments' and default member initializers' immediate invocations evaluated in the caller's or constructor's context, their positions
+the call's or the constructor's (`*cx-at-override*`, GCC's places); a closure's conversion with an escalated call operator; and the
+enclosing expression of prop19 as a namespace-scope initializer's constant initialization (`*cx-imm-pending*`, `*ce-fnptr*`). Beside
+them: a lambda's call operator keeps its default arguments in the checker, `auto p = &f<int>;` names its one specialization
+(template.ae's `fnaddr-explicit-specs`), a main-file consteval constructor of an empty class keeps its call, diag.ae's rule "taking
+address of an immediate function". Sources: N4950 [expr.const]/16-20, P2564R3, the dg directives of gcc-15.2.0's
+g++.dg/cpp2a/consteval-prop*.C (the pinned tarball); no GCC code read.
+
+Alternatives: a definition's analysis in order with escalation decided at the end of the unit and its uses judged again (rejected: the
+uses' errors are reported where they are analyzed, a second pass doubles every error); escalation for every unit (rejected: the early
+analysis of a template's specialization changes the order of every constexpr template's analysis, so it is kept to units that can
+escalate); the whole-initializer judgment by the evaluator's function pointers everywhere (rejected: comparisons and calls through
+pointers had been "not constant" for every file, kept to that judgment); prop19 by a syntactic rule on `f(1)(2)` (rejected for the
+standard's own reason, constant initialization).
+
+Checked (stage 0, GOMEMLIMIT=3000MiB): the 358 dg-error files the change can touch (own rows naming consteval, own passes naming
+constexpr or with a lambda's default argument, the control pair, the two slow files): 7 rows to own pass (consteval-prop1, -prop2,
+-prop6, -prop10, -prop19, -prop7, -prop8), no own pass lost but udlit-suffix-neg and missing-header-pr110164 past 300 s (rows kept),
+DRs/dr2082.C and dr1423.C failing as recorded; cpp2a/spaceship-synth9.C's failing row reads otherwise on the base too. Recorded:
+`bin/repr-cpp dg --corpus dg-error --front native --only` the 7 files `--record`; C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243;
+`bin/reap --record`, `bin/crops-score --record` (C++ completeness 0.9835 -> 0.9837), `--judge --strict` and `bin/records-check` 0
+problems.
