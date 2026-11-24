@@ -614,7 +614,12 @@ covers what.
   the full API's mode, and since queue 456 its `Modules/_testclinic.c` (with `Modules/clinic/_testclinic.c.h` and
   `_testclinic_depr.c.h`), `Modules/_testclinic_limited.c` (with its clinic header) and `Modules/_testbuffer.c`, and
   since py-capi-1122 its `Modules/_testmultiphase.c` (with `Modules/clinic/_testmultiphase.c.h`) and
-  `Modules/_testsinglephase.c` (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
+  `Modules/_testsinglephase.c` (and the accelerators: since queue 521 its `Modules/_datetimemodule.c` and `Modules/_decimal/_decimal.c`,
+  the latter over libmpdec, `Modules/_decimal/libmpdec/` (Copyright (c) 2008-2020 Stefan Krah, under the BSD 2-Clause License,
+  section "libmpdec: BSD 2-Clause License" below), and since py-accel (2026-11-23) its `Modules/_zoneinfo.c` and
+  `Modules/_elementtree.c`, the latter over the tarball's Expat, `Modules/expat/` (under the MIT License, section "Expat: MIT
+  License" below), through the glue files `tools/pyi/clib/ctypestest/accel_*.c`, whose `accel_elementtree.c` copies
+  `Modules/pyexpat.c`'s capsule table and unknown-encoding handler, under the PSF License Agreement) (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
   functions), compiled against its `Include/` in the limited API's mode
   (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256 `de414a57...b72032`; Copyright
   (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement, section "CPython: the PSF
@@ -4230,7 +4235,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ## Expat: MIT License
 
 The `COPYING` of Expat 2.9.0 as CPython 3.14.10 vendors it (`Modules/expat/COPYING`); it covers `go/arbace/expat.ae`
-and `go/arbace/expat/` (above):
+and `go/arbace/expat/`, and Expat's C as `go/arbace/clib/ctypestest/` holds it built (above):
 
 ```
 Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper
@@ -4425,6 +4430,38 @@ LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
 ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## libmpdec: BSD 2-Clause License
+
+The notice of libmpdec as CPython 3.14.10 vendors it (`Modules/_decimal/libmpdec/`, each file's header); it covers that
+library as `go/arbace/clib/ctypestest/` holds it built (above):
+
+```
+Copyright (c) 2008-2020 Stefan Krah. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
 ```
 
 ## musl: MIT License
