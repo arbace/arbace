@@ -1572,6 +1572,14 @@
       (seq binds) (str (type-text sc fi) "<" (str/join ", " (map #(type-text sc (get binds % 'Object)) tps)) ">")
       :else (type-text sc fi))))
 
+(defn- super-text
+  "super, or X.super for ^:qualified super: the source's qualifier naming the current class X (queue 556c, t06072:
+  javac reaches X.super's members through access$N accessors, super's directly)."
+  [env s]
+  (if-let [n (and (:qualified (meta s)) (:class-name env))]
+    (str (last (str/split n #"\\.")) ".super")
+    "super"))
+
 (defn- receiver-text
   "The text before .m or .f for receiver form `r`, or nil for an unqualified member of this
   instance or of an enclosing anonymous one."
@@ -1584,7 +1592,7 @@
     (and (seq? r) (nil? (meta-tag r)) (or (is? r 'switch) (and (is? r 'label) (is? (nth r 2 nil) 'switch))))
     (ex-text (assoc env :standalone-switch true) r P-POSTFIX)
     (and (symbol? r) (meta-tag r)) (ex-text env r P-POSTFIX)
-    (= r 'super) "super"
+    (= r 'super) (super-text env r)
     (and (symbol? r) (nil? (namespace r)) (= (name r) (:recv env))) (if (:field? env) "this" nil)
     (and (symbol? r) (nil? (namespace r)) (contains? (:outer-recvs env) (name r))) nil
     ;; an anonymous class's this, which Java cannot name: its members by simple name (javac
@@ -2047,8 +2055,15 @@
                                  "unchecked-long" "unchecked-float"} (str (head v)))
                      (= 2 (count v)))
         inner (if narrow? (second v) v)
-        h (str (head inner))]
+        h (str (head inner))
+        ;; a field of a qualified super (X.super.f: X/super, or ^:qualified super in X itself) is written out: javac
+        ;; reaches it through access$N accessors, a getter and a setter for f = f + x, one accessor for f += x (queue 556c,
+        ;; t06072)
+        qsuper? (and (seq? place) (= 2 (count place)) (symbol? (first place)) (str/starts-with? (name (first place)) ".-")
+                     (let [r (second place)]
+                       (and (symbol? r) (= "super" (name r)) (or (namespace r) (:qualified (meta r))))))]
     (cond
+      qsuper? nil
       (and (seq? inner) (incs h) (= 2 (count inner)) (read-of? env (second inner) place)
            (or (not narrow?) (#{"unchecked-inc-int" "unchecked-dec-int"} h)))
       [(incs h) nil]
@@ -2374,7 +2389,7 @@
       (let [t (meta-tag x)
             r (cond
                 (and (nil? (namespace x)) (= (name x) (:recv env))) (e P-PRIMARY "this")
-                (= x 'super) (e P-PRIMARY "super")
+                (= x 'super) (e P-PRIMARY (super-text env x))
                 (local? env x) (e P-PRIMARY (or (:java (get (:locals env) (name x))) (ident x)))
                 (and (nil? (namespace x)) (contains? (:fields env) (name x))) (e P-PRIMARY (ident x))
                 (and (nil? (namespace x)) (contains? (:outer-recvs env) (name x))) (e P-PRIMARY "this")
