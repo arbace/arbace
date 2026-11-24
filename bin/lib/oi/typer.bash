@@ -168,7 +168,7 @@ cmd_check_native() {
   local out=$OI_DIR/check-native.tsv
   # the selection's rows in a file, OI_SELECTED, as ocamlc's path keeps them (bin/oi's cmd_check): oi_check.ae's -only modes record the
   # selected programs the header classes too
-  selected > "$OI_DIR/selected-native.tsv"; export OI_SELECTED=$OI_DIR/selected-native.tsv
+  selected > "$OI_DIR/selected-native.tsv"; need_selection "$OI_DIR/selected-native.tsv"; export OI_SELECTED=$OI_DIR/selected-native.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' "$OI_SELECTED" | xargs -0 -r -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"
   # its key, so check --aot's oi column takes these rows (oi_rows_for), as the oracle path's check.tsv

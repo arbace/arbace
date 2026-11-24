@@ -304,15 +304,33 @@
                     (let [k [path (if (#{:fn :fn-tmpl} c) [c sig] c)]]
                       (if (.containsKey qdefs k)
                         (report! n (str "redefinition of '" (:name n) "'"))
-                        (.put qdefs k true))))))]
+                        (.put qdefs k true))))))
+        ;; (cpp-decl2: the namespace region of the class being walked, for its friends' definitions; and the namespace
+        ;; functions declared so far by region, name and signature, for a deleted friend's earlier declaration)
+        cur-ns (atom nil)
+        ns-fns (java.util.HashMap.)]
     (letfn [(enter! [^java.util.HashMap r rk n path]
               (let [nm (:name n) off (loff n) dc (when (and off (mine? n)) (dclass n))]
                 (when (and nm (not= "" nm) dc)
                   (if (qualified-name? src (long off))
-                    (when-let [q (qualifier src (long off))] (qdef! n (str path q "::" nm)))
+                    (if-let [q (qualifier src (long off))]
+                      (qdef! n (str path q "::" nm))
+                      ;; (cpp-decl2: a class template's member defined out of its class, `template <int N> int Z<N>::var37;`,
+                      ;; its template-head non-empty and its arguments identifiers: the pattern's member, "(template)::Z::var37",
+                      ;; the class walk's path for the template's own members; cpp1z/inline-var2.C)
+                      (let [b (long (or (get-in n [:range :begin :offset]) off))
+                            before (str (subs src (max 0 (- b 200)) b) "\u0001" (subs src (min b (long off)) (long off)))
+                            head (subs src (max 0 (- (long off) 200)) (long off))]
+                        (when-let [[_ cn args] (re-find #"(\w+)\s*<\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*>\s*::\s*$" head)]
+                          (when (and (re-find #"template\s*<[^<>]*[A-Za-z_][^<>]*>" (subs before (inc (.indexOf ^String before "\u0001"))))
+                                     (not-any? #{"int" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "void" "wchar_t"
+                                                 "char8_t" "char16_t" "char32_t" "auto"}
+                                               (map str/trim (str/split args #","))))
+                            (qdef! n (str "(template)::" cn "::" nm))))))
                     (do
                       ;; (a static data member in its class is declared, not defined: [class.static.data]/3)
-                      (when (and (= rk :class) (not= "VarDecl" (:kind n))) (qdef! n (str path nm)))
+                      ;; (cpp-decl2: an inline static data member's declaration is its definition, [class.static.data]/4)
+                      (when (and (= rk :class) (or (not= "VarDecl" (:kind n)) (:inline n))) (qdef! n (str path nm)))
                       (if-let [o (.get r nm)]
                         ;; (cpp-diag-a: C++26's name-independent declarations, P2169 [basic.scope.scope]/5-6: a block-scope variable
                         ;; named _ of automatic storage conflicts with no earlier declaration, and takes the name's place; GCC
@@ -340,7 +358,12 @@
                                             [r2 nss2] (or (.get nss k) (let [v [(java.util.HashMap.) (java.util.HashMap.)]] (.put nss k v) v))]
                                         (decls! r2 :ns nss2 (:inner n) (str path (if (= k "") "(anonymous)" k) "::"))))
                   ("UsingDecl" "UsingShadowDecl" "UsingEnumDecl" "NativeDecline") (poison! r n)
-                  (do (enter! r rk n path) (body! n path)))))
+                  (do (enter! r rk n path)
+                      (when (= rk :ns)
+                        (reset! cur-ns r)
+                        (when (and (= "FunctionDecl" (:kind n)) (string? (:name n)) (mine? n) (loff n) (not (qualified-name? src (long (loff n)))))
+                          (when-let [sg (nth (dclass n) 2 nil)] (.put ns-fns [(System/identityHashCode r) (:name n) sg] (fn-def? n)))))
+                      (body! n path)))))
             (class! [n path]
               (let [r (java.util.HashMap.)
                     ;; the members' path: the class's, written in its namespace or qualified (`struct A::B {...}`)
@@ -357,6 +380,24 @@
                     (do (enter! r :class m path) (body! m path))
                     ;; (round 54: a member function template, its definition by its path for an out-of-class one's redefinition)
                     "FunctionTemplateDecl" (do (enter! r :class m path) (body! m path))
+                    ;; (cpp-decl2: a friend function's definition, a body or `= delete`, defines a function of the enclosing
+                    ;; namespace, [class.friend]/6-7: a second definition there is a redefinition, and a deleted one after a
+                    ;; declaration of the function is not its first declaration, [dcl.fct.def.delete]/4: GCC's "redefinition of
+                    ;; 'void foo()'", "deleted definition of 'void bar()' is not first declaration"; cpp0x/pr80259.C)
+                    "FriendDecl" (do (when-let [nr @cur-ns]
+                                       (when-not (re-find #"\(local\)|\(template\)|\(specialization@" path)
+                                         (doseq [f (:inner m)
+                                                 :when (and (= "FunctionDecl" (:kind f)) (fn-def? f) (mine? f) (loff f) (string? (:name f))
+                                                            (not (qualified-name? src (long (loff f)))))]
+                                           (let [dc (dclass f) o (.get ^java.util.HashMap nr (:name f))
+                                                 k [(System/identityHashCode nr) (:name f) (nth dc 2)]]
+                                             (when (and (:explicitlyDeleted f) (nth dc 2)
+                                                        (or (and o (= :fn (:cls o)) (not (:def o)) (= (nth dc 2) (:sig o)))
+                                                            (false? (.get ns-fns k))))
+                                               (report! f (str "deleted definition of '" (:name f) "' is not first declaration")))
+                                             (when (nth dc 2) (.put ns-fns k true))
+                                             (enter! nr :ns f path)))))
+                                     (body! m path))
                     (body! m path)))))
             (body! [n path]
               ;; a declaration's nested regions: a class's members, a function's parameters and body, a template's pattern
@@ -450,6 +491,24 @@
    [:constraint #"^codegen: constraint expression does not have type 'bool'" "atomic constraint must be of type 'bool'"]
    ;; (n-cpp-concepts: [temp.spec.partial.general]/9.2)
    [:template #"^codegen: partial specialization of '.*' does not specialize any template arguments" "partial specialization does not specialize any template arguments"]
+   ;; (cpp-tpl2: [temp.arg.template]/3-4 in a class template's template-id, template.ae's cx-ttp-arg-mismatch?)
+   [:template #"^codegen: a template template argument whose parameters do not match" "type/value mismatch in a template argument list"]
+   ;; (cpp-tpl2: a qualified name of a type a complete class does not declare, sema's resolve-type-form)
+   [:type #"^codegen: unknown type .*: no type named '.*' in the complete class" "no type named in the class"]
+   ;; (cpp-tpl2: [expr.prim.id.general]/4, sema's expression statements and requirements)
+   [:expr #"^codegen: invalid use of non-static member function" "reference to non-static member function must be called"]
+   ;; (cpp-tpl2: [class.copy.ctor]/5, sema's declare-fn!)
+   [:decl #"^codegen: invalid constructor: " "copy constructor must pass its first argument by reference"]
+   ;; (cpp-tpl2: template.ae's template-id, a member class named as a template)
+   [:template #"^codegen: '.*' names a class, which is not a class template" "is not a class template"]
+   ;; (cpp-tpl2: a typename-specifier naming a member class template before C++17, sema's resolve-type-form)
+   [:name #"^codegen: '.*' names a template, which is not a type" "typename specifier refers to a member template, not a type"]
+   ;; (cpp-tpl2: [temp.explicit]/4, template.ae's cx-explicit-var-type!)
+   [:template #"^codegen: type of the explicit instantiation of '.*' does not match declared type" "explicit instantiation does not match the declared type"]
+   ;; (cpp-tpl2: CWG 1430, template.ae's template-id)
+   [:template #"^codegen: pack expansion argument for non-pack parameter of (alias template|concept)" "pack expansion used as argument for non-pack parameter of alias template or concept"]
+   ;; (cpp-tpl2: [temp.spec.partial.match]/3)
+   [:template #"^codegen: template parameters not deducible in partial specialization" "template parameters not deducible in partial specialization"]
    [:undecl #"^codegen: use of undeclared identifier" "use of undeclared identifier"]
    ;; (queue 487: [basic.lookup.general]/1 and /4 through using-directives, [namespace.udir]/2, [namespace.qual]/2)
    [:ambiguous #"^codegen: reference to '.*' is ambiguous" "reference to X is ambiguous"]
@@ -477,6 +536,8 @@
    [:union #"^codegen: initializations for multiple members of" "initializing multiple members of union"]
    ;; (round 54: [dcl.array]/1, an array of unknown bound initialized by {})
    [:array #"^codegen: zero-size array" "zero-size array"]
+   ;; (cpp-small, G2: [expr.new]/8, arbace.cpp.sema/cx-new-size!)
+   [:array #"^codegen: size '[0-9]+' of array exceeds maximum object size" "size of array exceeds maximum object size"]
    ;; (round 54: [basic.def]/5)
    [:incomplete #"^codegen: variable has incomplete type" "variable has incomplete type"]
    [:incomplete #"^codegen: incomplete result type" "incomplete result type in function definition"]
@@ -494,7 +555,7 @@
    [:incomplete #"^codegen: invalid use of incomplete type '" "invalid use of incomplete type"]
    ;; (queue 484: a value trait's precondition, [meta.unary.prop], [meta.rel])
    [:incomplete #"^codegen: incomplete type '.*' in the type trait" "incomplete type used in type trait expression"]
-   [:depth #"^codegen: recursive template instantiation exceeded maximum depth" "recursive template instantiation exceeded maximum depth of 1024"]
+   [:depth #"^codegen: recursive template instantiation exceeded maximum depth" "template instantiation depth exceeds maximum"]
    [:nomatch #"^codegen: no match for 'operator" "invalid operands: no viable overloaded operator"]
    [:adl #"^codegen: call to function '.*' that is neither visible" "call to function that is neither visible in the template definition nor found by argument-dependent lookup"]
    [:init #"^codegen: no default constructor for " "no matching constructor for initialization"]
@@ -583,7 +644,17 @@
         dl (resolve 'arbace.cpp.sema/*deadline*)
         ad (resolve 'arbace.cpp.sema/*analyze-depth*)
         cd (resolve 'arbace.cpp.sema/*constexpr-depth*)
+        ;; (cpp-ce3: GCC's -fconstexpr-loop-limit=N, else its 262144)
+        cll (resolve 'arbace.cpp.sema/*constexpr-loop-limit*)
+        clln (or (some #(when-let [[_ d] (re-find #"^-fconstexpr-loop-limit=(\d+)$" (str %))] (Long/parseLong d)) (concat (:args u) *driver-args*)) 262144)
+        ;; (cpp-small, G1: GCC's -ftemplate-depth=N, or its old spelling -ftemplate-depth-N, the last given; else GCC's 900)
+        md* (resolve 'arbace.cpp.sema/*max-tmpl-depth*)
+        ;; (cpp-tpl2: GCC's -fconcepts-diagnostics-depth=N, the last given, else 1)
+        cdd (resolve 'arbace.cpp.sema/*concepts-diag-depth*)
+        cddn (or (last (keep #(when-let [[_ d] (re-find #"^-fconcepts-diagnostics-depth=(\d+)$" (str %))] (Long/parseLong d)) (:args u))) 1)
+        tdn (or (last (keep #(when-let [[_ d] (re-find #"^-ftemplate-depth[-=](\d+)$" (str %))] (Long/parseLong d)) (:args u))) 900)
         permissive (boolean (some #{"-fpermissive"} (:args u)))
+        nesting (boolean (some #(re-find #"^-fdiagnostics-set-output=.*experimental-nesting=yes" (str %)) (:args u)))
         cdn (or (some #(when-let [[_ d] (re-find #"^-fconstexpr-depth=(\d+)$" (str %))] (Long/parseLong d)) (:args u)) 512)
         ;; (queue 412: the main file's lines where `#pragma GCC diagnostic ignored "-Wnarrowing"` is in force, push and pop
         ;; kept: GCC's narrowing permerror is silenced there)
@@ -597,6 +668,7 @@
                      (recur (rest ls) (inc i) on stack (if on (conj out i) out)))
                    out))
         h (fn [e n]
+            (when-not (:cx/reported (ex-data e)) ; (cpp-small: an error reported where it was found, arbace.cpp.sema/depth-fatal!)
             (let [cls (:codegen/refused (ex-data e)) m (str (ex-message e))
                   ;; (a refusal over a type the slice leaves undeduced or dependent is the slice's, not the program's)
                   rule (when-not (re-find #":k :(auto|dep|tparam)" m) (some (fn [[c re d]] (when (and (= c cls) (re-find re m)) d)) sema-rules))
@@ -606,10 +678,26 @@
                   n (or (:cx/node (ex-data e)) n)
                   off (get-in n [:range :begin :offset])]
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
-              (when-let [st (when (and rule off) (sema-starts main starts (get-in n [:range :begin :file])))]
+              ;; (cpp-tpl2: a call with no viable function reported with its candidates' substitution failures, each an error at its
+              ;; construct in the template's declaration, as GCC's explanations; arbace.cpp.template/call-candidates)
+              ;; (not under GCC's nested text output, -fdiagnostics-set-output=text:experimental-nesting=yes: there they are
+              ;; the nested output a test reads by dg-begin-multiline-output, concepts/nested-diagnostics-1.C)
+              (when (and rule (not nesting))
+                (doseq [{xm :msg xn :node} (:cx/explain (ex-data e))]
+                  (when-let [xo (get-in xn [:range :begin :offset])]
+                    (when-let [st (sema-starts main starts (get-in xn [:range :begin :file]))]
+                      (let [[l c] (line-col st (long xo))]
+                        (.add out {:line l :col c :kind :error :rule :sema :msg (str "substitution failure (" (subs xm 9 (min 100 (count xm))) ")")}))))))
+              (if-let [st (when (and rule off) (sema-starts main starts (get-in n [:range :begin :file])))]
                 (let [[l c] (line-col st (long off))]
                   (when-not (and (= :narrowing cls) (contains? nw-off l))
-                    (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")}))))))]
+                    (.add out {:line l :col c :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ")")})))
+                ;; (cpp-ce2: a constant evaluation's error at an operation of a file the test includes from its own directory, a
+                ;; relative name -- g++.dg/cpp2a/construct_at.h's std::construct_at -- is GCC's error there: an error outside the main
+                ;; file, line 0; a system header's left out, as before)
+                (let [f (str (get-in n [:range :begin :file]))]
+                  (when (and rule off (= :constexpr cls) (:cx/node (ex-data e)) (seq f) (not= f main) (not (str/starts-with? f "/")))
+                    (.add out {:line 0 :col 0 :kind :error :rule :sema :msg (str rule " (" (subs m 9 (min 100 (count m))) ") in " f)})))))))]
     ;; CP325 (a): a unit's refusal (the slice's, :codegen/refused or a type's :cpp/gap, or a constant the evaluation does not reach) leaves the
     ;; unit with the errors found before it, as before; anything else thrown is a crash of the analysis, the file's read
     ;; then a failing :crash with its message (arbace.repr.cpp.dg/read-own), never an acceptance. CP329 (a): past the
@@ -618,7 +706,7 @@
       (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u)))
                       ;; (queue 412: [dcl.init.list]/7, GCC's permerror; nothing or a warning under these)
                       nw (not (some #{"-Wno-narrowing" "-fpermissive" "-Wno-error=narrowing"} (:args u)))
-                      dl (long *deadline*) ad (long-array 1) cd cdn
+                      dl (long *deadline*) ad (long-array 1) cd cdn cll clln md* tdn cdd cddn
                       ;; (queue 518: GCC's -fnew-ttp-matching and -fno-new-ttp-matching, the last given)
                       ntm (last (keep {"-fnew-ttp-matching" true "-fno-new-ttp-matching" false} (:args u)))}
         (sema (:nodes u) (:root u) src))
@@ -1285,7 +1373,12 @@
                        (when bad
                          (cond (#{:inst :uninst} friend-of) (when (= :inst friend-of) (report! f (:name f)))
                                (#{:inst :uninst} ofr) (when (= :inst ofr) (report! of (:name of)))
-                               :else (report! f (:name f)))))
+                               :else (report! f (:name f)))
+                         ;; (cpp-decl2: the later declaration's specification is the one the next is held to, as GCC's
+                         ;; merged declaration keeps it: cpp0x/noexcept46.C's friend g() noexcept(true) after friend g()
+                         ;; noexcept(false) after g() noexcept(true))
+                         (when-not (or (#{:inst :uninst} friend-of) (#{:inst :uninst} ofr))
+                           (.put decls k [f c friend-of]))))
                      (.put decls k [f c friend-of]))))
         instantiated? (fn [rec nm]
                         (let [e (get-in rec [:range :end :offset])]
@@ -4232,10 +4325,22 @@
                                          (not-any? #(= "CXXConstructorDecl" (:kind %)) (:inner r)))
                                 (report! v (str "conversion from 'int' to non-scalar type '" nm "<" as ">' requested"))))))))))
                 (:nodes u) nil)
-    (walk-nodes (fn [c _]
-                  (when (and (= "CallExpr" (:kind c)) (= "__integer_pack" (get-in (first (:inner c)) [:referencedDecl :name])))
-                    (report! c "use of built-in parameter pack '__integer_pack' outside of a template")))
-                (:nodes u) nil)
+    ;; (cpp-tpl2: a call within a template's declaration, an alias template's argument list or a templated function's body, is
+    ;; inside a template: cpp0x/variadic184.C, cpp1z/constexpr-if-lambda3.C had been reported)
+    ;; (a node of the template's copied elsewhere, an alias's expansion the parser keeps on a use, keeps its place: judged by it)
+    (let [inside (java.util.HashSet.) outside (java.util.ArrayList.)]
+      (letfn [(w [x in-t]
+                (cond
+                  (map? x) (let [in-t (or in-t (contains? #{"TypeAliasTemplateDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl"
+                                                            "ClassTemplatePartialSpecializationDecl" "VarTemplatePartialSpecializationDecl"} (:kind x)))]
+                             (when (and (= "CallExpr" (:kind x)) (= "__integer_pack" (get-in (first (:inner x)) [:referencedDecl :name])))
+                               (if in-t (.add inside (off x)) (.add outside x)))
+                             (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))] (w v in-t)))
+                  (or (vector? x) (seq? x)) (doseq [y x] (w y in-t))
+                  :else nil))]
+        (w (:nodes u) false))
+      (doseq [x outside :when (not (.contains inside (off x)))]
+        (report! x "use of built-in parameter pack '__integer_pack' outside of a template")))
     (vec (distinct out))))
 
 (def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
@@ -4263,8 +4368,11 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         year (cxx-year (:std u))
+        pe? (boolean (some #{"-pedantic-errors"} (:args u)))
         names-of (fn [decls] (into {} (for [d decls :let [nm (:name d)] :when (and (string? nm) (seq nm) (or (conflicting-kinds (:kind d)) (#{"ParmVarDecl" "BindingDecl"} (:kind d)))
-                                                                                  (not (and (= nm "_") (>= (long year) 2026))))]
+                                                                                  ;; (cpp-1123: before C++26 a name-independent `_` is GCC's pedwarn alone,
+                                                                                  ;; an error under -pedantic-errors only: cpp26/name-independent-decl2.C, -8.C)
+                                                                                  (not (and (= nm "_") (or (>= (long year) 2026) (not pe?)))))]
                                         [nm d])))
         stmt-decls (fn [s] (case (:kind s)
                              "DeclStmt" (mapcat #(cond (= "DecompositionDecl" (:kind %)) (filter (fn [b] (= "BindingDecl" (:kind b))) (:inner %))
@@ -4721,7 +4829,10 @@
     (walk-nodes (fn [n parent]
                   (when (and (= "VarDecl" (:kind n)) (string? (:name n)) (not (:init n))
                              (not (#{"extern"} (:storageClass n)))
-                             (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent)))
+                             ;; (cpp-decl2: an inline static data member's declaration in its class is its definition, [dcl.inline]/?
+                             ;; with [class.static.data]/4: cpp1z/inline-var2.C's `static inline const int var25;`)
+                             (or (and (:inline n) (#{"CXXRecordDecl"} (:kind parent)))
+                                 (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl" "LinkageSpecDecl" "VarTemplateDecl"} (:kind parent))))
                              (empty? (filter map? (:inner n))))
                     (let [t (str (get-in n [:type :qualType]))
                           b (strip t)]
@@ -5457,7 +5568,7 @@
                       (when (:isExplicitObjectParameter (first ps))
                         (let [qt (str (get-in m [:type :qualType]))
                               q (or (fn-tail-quals qt) "")
-                              t (or (text m) "")
+                              ^String t (or (text m) "")
                               ;; the declarator's text after its parameter list, before the body or the end
                               tail (let [i (.lastIndexOf t ")" (int (let [j (.indexOf t "{")] (if (neg? j) (count t) j))))] (if (neg? i) "" (subs t (inc i))))
                               ov (re-find #"\boverride\b" (str/replace tail #"\{.*" ""))
@@ -6001,8 +6112,8 @@
                 (loop [i (long i) depth 0]
                   (when (< i (count t))
                     (let [c (.charAt t (int i))]
-                      (cond (= c open) (recur (inc i) (inc depth))
-                            (= c close) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                      (cond (= (int c) (int open)) (recur (inc i) (inc depth))
+                            (= (int c) (int close)) (if (= 1 depth) i (recur (inc i) (dec depth)))
                             :else (recur (inc i) depth))))))]
     (walk-nodes
      (fn [n _]
@@ -6459,7 +6570,9 @@
            (when (and b e (mine? n) (< (long b) (long e) n-src))
              (let [t (subs src (long b) (inc (long e)))
                    ty (if (= "TypeAliasDecl" (:kind n)) (second (re-find #"(?s)=(.*)$" t)) t)]
-               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
+               ;; (cpp-1123: a decl-specifier keyword before auto is no type-constraint: `static auto constexpr value` in an alias's
+               ;; class, cpp0x/alias-decl-16.C)
+               (when (and ty (re-find #"(?:^|[\s(<,])(?!const\b|volatile\b|typedef\b|using\b|static\b|constexpr\b|inline\b|extern\b|thread_local\b|mutable\b|constinit\b|consteval\b|friend\b|register\b|virtual\b|explicit\b)[A-Za-z_][\w:]*(?:<[^>]*>)?\s+auto\b" ty))
                  (at! n "invalid use of constrained 'auto' type")))))
          nil))
      (:nodes u) nil)
@@ -6485,7 +6598,7 @@
                             (let [c (.charAt t i)]
                               (cond
                                 (and q (= c \\)) (recur (+ i 2) depth start acc q)
-                                q (recur (inc i) depth start acc (if (= c q) nil q))
+                                q (recur (inc i) depth start acc (if (= (int c) (int q)) nil q))
                                 (or (= c \") (= c \')) (recur (inc i) depth start acc c)
                                 (#{\( \[ \{} c) (recur (inc i) (inc depth) start acc nil)
                                 (and (#{\) \] \}} c) (zero? depth)) (conj acc (subs t start i))
@@ -6497,11 +6610,28 @@
          (when (= "InitListExpr" (:kind n))
            (let [b (get-in n [:range :begin :offset]) e (get-in n [:range :end :offset])]
              (when (and b e (= main (get-in n [:range :begin :file])) (< (long b) (long e) n-src) (= \{ (.charAt src (int b))))
-               (let [cs (remove str/blank? (map str/trim (clauses (subs src (long b) (inc (long e))))))
-                     desig? (fn [^String c] (boolean (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)))]
-                 (when (and (seq cs) (not-any? #(str/starts-with? % "[") cs) (not-any? #(str/includes? % "#") cs))
+               (let [lt (subs src (long b) (inc (long e)))
+                     ;; (cpp-decl2: an #embed directive among the clauses, [cpp.embed]/9-10: its prefix, the resource's
+                     ;; bytes (at most its limit; two or more when no limit is given) and its suffix as the clauses it
+                     ;; expands to, so a designated prefix before the bytes mixes designated and plain clauses: cpp/embed-14.C)
+                     emb (boolean (re-find #"(?m)^\s*#\s*embed\b" lt))
+                     lt (if emb
+                          (str/replace lt #"(?m)^\s*#\s*embed\b([^\n]*)"
+                                       (fn [[_ ^String d]]
+                                         (let [arg (fn [k] (second (re-find (re-pattern (str "\\b" k "\\s*\\(([^)]*)\\)")) d)))
+                                               lim (some-> (arg "limit") str/trim (#(try (Long/decode ^String %) (catch Exception _ nil))))
+                                               bytes (cond (nil? lim) " 0, 0" (zero? (long lim)) "" (= 1 (long lim)) " 0" :else " 0, 0")]
+                                           (if (str/blank? bytes)
+                                             (str " " (or (arg "if_empty") "") " ")
+                                             (str " " (or (arg "prefix") "") bytes (or (arg "suffix") "") " ")))))
+                          lt)
+                     cs (remove str/blank? (map str/trim (clauses lt)))
+                     desig? (fn [^String c] (boolean (or (re-find #"^\.\s*[A-Za-z_]\w*\s*(?:=|\{)" c)
+                                                         (and emb (re-find #"^\[[^\[\]]*\]\s*=(?!=)" c)))))]
+                 (when (and (seq cs) (or emb (not-any? #(str/starts-with? % "[") cs)) (or emb (not-any? #(str/includes? % "#") cs)))
                    (let [ds (filter desig? cs)
-                         [l c] (line-col starts (long b))]
+                         ;; (an #embed's list: GCC's place, the first clause that differs, the directive's bytes)
+                         [l c] (line-col starts (long (if emb (+ (long b) (.indexOf ^String (subs src (long b) (inc (long e))) "#")) b)))]
                      (when (and (seq ds) (some (complement desig?) cs))
                        (.add out {:line l :col c :kind :error :rule :designator
                                   :msg "either all initializer clauses should be designated or none of them should be"}))
@@ -6640,7 +6770,7 @@
 (defn name-independent-uses
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
-        new-frame (fn [] (java.util.HashMap. {:ext 0 :ind 0}))
+        new-frame (fn ^java.util.HashMap [] (java.util.HashMap. {:ext 0 :ind 0}))
         add! (fn [^java.util.HashMap fr kind] (.put fr kind (inc (long (.get fr kind)))))
         decl! (fn [fr d]
                 (case (:kind d)
@@ -6701,7 +6831,7 @@
                             (let [[ln c] (line-col starts o)]
                               (.add out {:line ln :col c :kind :error :rule :name-independent :msg "lambda parameter '_' previously declared as a capture"})))
                           (when (and b (>= (count caps) 2))
-                            (stmts (:inner b) (list (doto (new-frame) (.put :ind (count caps))))))))))
+                            (stmts (:inner b) (list (doto ^java.util.HashMap (new-frame) (.put :ind (count caps))))))))))
                   (:nodes u) nil))
     ;; structured bindings and template parameters that are not name-independent ([basic.scope.scope]/5: a static or namespace-scope
     ;; structured binding, a template parameter): one named twice is "redeclaration of 'auto _'", "redefinition of 'int _'"
@@ -6953,6 +7083,68 @@
 
 (swap! checks conj assume-expansions)
 
+;; ---------------------------------------------------------------------------------------------
+;; cpp-decl (2026-11-23): lookup, declarations and classes (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl")
+
+;; [over.literal]/3: a literal operator's parameter-declaration-clause is one of (const char*), (unsigned long long int), (long
+;; double), (char), (wchar_t), (char8_t), (char16_t), (char32_t), (const C*, std::size_t) for those five character types; no ellipsis.
+;; [over.literal]/5: a literal operator template's is empty. [lex.ext]/3 (a numeric literal: a raw literal operator or a numeric
+;; literal operator template but not both), GCC's at the declaration: "... conflicts with raw literal operator" and the reverse.
+;; A parameter whose type names an identifier the rule does not know (a typedef) leaves the declaration unjudged.
+
+(def ^:private udl-words #{"const" "volatile" "char" "wchar_t" "char8_t" "char16_t" "char32_t" "bool" "short" "int" "long" "signed"
+                           "unsigned" "float" "double" "void" "std" "size_t" "__size_t" "decltype" "sizeof" "auto" "nullptr_t"})
+
+(defn- udl-judgeable? [^String q] (every? udl-words (re-seq #"[A-Za-z_]\w*" q)))
+
+(defn- udl-size? [^String q]
+  (let [q (str/trim q)]
+    (or (#{"std::size_t" "size_t" "__size_t" "unsigned long" "long unsigned" "unsigned long int" "long unsigned int"} q)
+        (str/starts-with? q "decltype(sizeof"))))
+
+(defn- udl-list-ok? [qs variadic]
+  (and (not variadic)
+       (case (count qs)
+         1 (contains? #{"const char *" "unsigned long long" "long double" "char" "wchar_t" "char8_t" "char16_t" "char32_t"} (first qs))
+         2 (and (contains? #{"const char *" "const wchar_t *" "const char8_t *" "const char16_t *" "const char32_t *"} (first qs))
+                (udl-size? (second qs)))
+         false)))
+
+(defn literal-operators
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        raws (java.util.HashMap.) tmpls (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :literal-operator :msg msg}))))
+        fdecl (fn [f tmpl]
+                (let [nm (str (:name f))
+                      ps (filter #(= "ParmVarDecl" (:kind %)) (:inner f))
+                      qs (mapv #(str/trim (str (get-in % [:type :qualType]))) ps)]
+                  (when (and (str/starts-with? nm "operator\"\"") (every? udl-judgeable? qs) (not (:_qn f)))
+                    (if tmpl
+                      (do (when (seq qs) (report! f (str "literal operator template '" nm "' has invalid argument list")))
+                          (when (empty? qs)
+                            (if-let [r (.get raws nm)] (report! f (str "literal operator template '" nm "' conflicts with raw literal operator '" r "'"))
+                                (.put tmpls nm nm))))
+                      (if (udl-list-ok? qs (:variadic f))
+                        (when (= qs ["const char *"])
+                          (if (.get tmpls nm) (report! f (str "raw literal operator '" nm "' conflicts with literal operator template"))
+                              (.put raws nm nm)))
+                        (report! f (str "'" (get-in f [:type :qualType]) " " nm "' has invalid argument list")))))))
+        w (fn w [xs]
+            (doseq [x xs]
+              (case (:kind x)
+                ("NamespaceDecl" "LinkageSpecDecl") (w (:inner x))
+                "FunctionDecl" (fdecl x false)
+                "FunctionTemplateDecl" (when-let [f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner x))]
+                                         (when (some #(and (= "NonTypeTemplateParmDecl" (:kind %)) (:isParameterPack %)) (:inner x))
+                                           (fdecl f true)))
+                nil)))]
+    (w (:nodes u))
+    (vec out)))
+
+(swap! checks conj literal-operators)
+
 (defn- pp-diag
   "A preprocessor error `FILE:LINE:COL: msg` (the port's) as a diagnostic, the main file's alone (nil else)."
   [^String main ^String e]
@@ -7093,3 +7285,189 @@
        :other (:other r 0) :fatal 0
        :message (if-let [e (first es)] (format-diag main e) "")
        :diags (mapv #(format-diag main %) es)})))
+
+;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
+(alter-var-root #'sema-rules conj
+  [:name #"^codegen: '.*' is not a class, struct, or union type" "is not a class, struct, or union type"])
+
+;; cpp-1123 (2026-11-23): the checker's objects of abstract class types ([class.abstract]/3, arbace.cpp.sema/cx-abstract!)
+(alter-var-root #'sema-rules conj
+  [:abstract #"^codegen: cannot declare .* to be of abstract type" "cannot declare to be of abstract type"]
+  [:base #"^codegen: cannot derive from 'final' base" "cannot derive from 'final' base"])
+
+;; cpp-ce2 (2026-11-23): the checker's __builtin_bit_cast ([bit.cast]/1, arbace.cpp.sema/bit-cast-expr: GCC's diagnostics)
+(alter-var-root #'sema-rules conj
+  [:bit-cast #"^codegen: '__builtin_bit_cast' (source|destination) (type|size) " "invalid __builtin_bit_cast"]
+  [:incomplete #"^codegen: '[^']*' has incomplete type$" "variable has incomplete type"])
+
+;; cpp-decl2 (2026-11-23): the checker's initialization, lookup, special member and overload rules (arbace.cpp.sema)
+(alter-var-root #'sema-rules conj
+  [:init #"^codegen: designator order for field '.*' does not match declaration order" "designator order does not match declaration order"])
+(alter-var-root #'sema-rules conj
+  [:uninit #"^codegen: uninitialized (const|reference) member '.*' in a constructor" "uninitialized const or reference member in a constructor"])
+(alter-var-root #'sema-rules conj
+  ;; (a non-member operator=, (), [] or -> the checker did not declare, arbace.cpp.sema/declare-fn!: GCC's "'operator=' not defined")
+  [:name #"^codegen: unknown name operator(=|\(\)|\[\]|->)$" "not defined"])
+(alter-var-root #'sema-rules conj
+  [:incomplete #"^codegen: invalid use of cv-qualified type 'void' in parameter declaration" "invalid use of cv-qualified type 'void' in parameter declaration"])
+(alter-var-root #'sema-rules conj
+  [:init #"^codegen: conversion from .* to non-scalar type '.*' requested" "conversion to non-scalar type requested"])
+
+;; cpp-decl2 (2026-11-23): [dcl.link]/7 (C++23 /6): two declarations of a function or a variable with C language linkage and
+;; one name in different namespaces declare the same entity, and [basic.link]/11 wants their types the same (an array's bound
+;; given once): GCC's "conflicting C language linkage declaration 'long int BAD::i'", at the later declaration's name;
+;; lookup/extern-c-redecl6.C. The main file's namespace-scope declarations in extern "C" (not static), each against the first.
+(defn c-linkage-entities
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)
+        norm (fn [t] (str/replace (str/replace (first (split-exc (str t))) #"\(void\)" "()") #"\s+" ""))
+        arr (fn [^String t] (when-let [[_ e b] (re-matches #"(.*)\[(\d*)\]" t)] [e b]))
+        same? (fn [a b] (or (= a b)
+                            (let [[ea ba] (arr a) [eb bb] (arr b)]
+                              (and ea eb (= ea eb) (or (= "" ba) (= "" bb))))))
+        enter! (fn [path n]
+                 (when (and (#{"FunctionDecl" "VarDecl"} (:kind n)) (string? (:name n)) (seq (:name n))
+                            (not= "static" (:storageClass n)) (= main (get-in n [:loc :file])) (get-in n [:loc :offset])
+                            (not (qualified-name? src (long (get-in n [:loc :offset])))))
+                   (let [k [(:kind n) (:name n)] t (norm (get-in n [:type :qualType]))]
+                     (if-let [[p0 t0] (.get seen k)]
+                       (when (and (not= p0 path) (not (same? t0 t)))
+                         (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                           (.add out {:line l :col c :kind :error :rule :linkage
+                                      :msg (str "conflicting C language linkage declaration '" (:name n) "'")})))
+                       (.put seen k [path t])))))]
+    (letfn [(region! [path lang nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (if (= "C" (:language n)) :c :cpp) (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") lang (:inner n))
+                  ("FunctionDecl" "VarDecl") (when (= :c lang) (enter! path n))
+                  nil)))]
+      (region! "" :cpp (:nodes u)))
+    (vec out)))
+
+(swap! checks conj c-linkage-entities)
+
+;; cpp-decl2 (2026-11-23): [namespace.def.general]/2: a namespace-definition's identifier is looked up in its enclosing namespace
+;; and the inline namespaces of it (transitively, [namespace.def.general]/7's inline namespace set); two namespaces found is GCC's
+;; "'namespace B' is ambiguous", at the definition: lookup/pr94257.C's `inline namespace B { namespace B { } }` reopened as
+;; `namespace B`. One found is the one extended (an inline namespace's member among them). The main file's definitions.
+(defn namespace-ambiguity
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        found (fn found [^java.util.Map m nm]
+                (concat (when-let [e (.get m nm)] [e])
+                        (mapcat (fn [e] (when (:inline e) (found (:sub e) nm))) (vals m))))]
+    (letfn [(walk [^java.util.Map m nodes]
+              (doseq [n nodes :when (= "NamespaceDecl" (:kind n))]
+                (let [nm (or (:name n) "\u0001anon")
+                      fs (if (:isNested n) (keep #(.get m %) [nm]) (distinct (found m nm)))
+                      _ (when (and (>= (count fs) 2) (:name n) (= main (get-in n [:loc :file])) (get-in n [:loc :offset]))
+                          (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+                            (.add out {:line l :col c :kind :error :rule :namespace :msg (str "'namespace " nm "' is ambiguous")})))
+                      e (or (first fs)
+                            (let [e {:inline (boolean (:isInline n)) :sub (java.util.LinkedHashMap.)}] (.put m nm e) e))]
+                  (walk (:sub e) (:inner n)))))]
+      (walk (java.util.LinkedHashMap.) (:nodes u)))
+    (vec out)))
+
+(swap! checks conj namespace-ambiguity)
+(alter-var-root #'sema-rules conj
+  [:virtual #"^codegen: (non-)?deleted function '.*' overriding (non-)?deleted function" "deleted and non-deleted functions overriding each other"])
+(alter-var-root #'sema-rules conj
+  [:uninit #"^codegen: uninitialized const in 'new'" "uninitialized const in new"])
+
+;; cpp-decl2 (2026-11-23): an enumeration's declarations ([dcl.enum]/3-5): each redeclaration scoped or unscoped as the first
+;; ("scoped/unscoped mismatch in enum 'E1'"), of the same underlying type when both are fixed (a scoped one's int when none is
+;; written: "different underlying type in enum 'E4'"), one definition ("multiple definition of 'enum E6'"), an
+;; opaque-enum-declaration's name a simple identifier ("opaque-enum-specifier must use a simple identifier"), and a definition
+;; by a qualified name in a scope that encloses the enumeration's ([dcl.enum]/4: "declaration of 'enum class N1::E6' in namespace
+;; 'N2' which does not enclose 'N1'"); at the later declaration's name. cpp0x/forw_enum6.C. The main file's namespaces and classes,
+;; templates not followed.
+(defn enum-redecls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (get-in n [:loc :offset])]
+                              (let [[l c] (line-col starts (long o))]
+                                (.add out {:line l :col c :kind :error :rule :enum-redecl :msg msg}))))
+        ut (fn [n] (some-> (get-in n [:fixedUnderlyingType :qualType]) str str/trim (str/replace #"\s+" " ")))]
+    (letfn [(region! [path nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  "LinkageSpecDecl" (region! path (:inner n))
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") (:inner n))
+                  "CXXRecordDecl" (when (and (string? (:name n)) (:completeDefinition n)) (region! (str path (:name n) "::") (:inner n)))
+                  "EnumDecl" (when (and (string? (:name n)) (seq (:name n)) (= main (get-in n [:loc :file])))
+                               (let [q (:_equal n)
+                                     k (if q
+                                         (let [nested (str path (str/join "::" q) "::" (:name n))
+                                               glob (str (str/join "::" q) "::" (:name n))]
+                                           (cond (.containsKey seen nested) nested
+                                                 (.containsKey seen glob) glob
+                                                 :else nested))
+                                         (str path (:name n)))]
+                                 (when (and q (not (:_body n)))
+                                   (report! n "opaque-enum-specifier must use a simple identifier"))
+                                 (when (and q (:_body n) (seq path) (not (str/starts-with? k path)) (.containsKey seen k))
+                                   (report! n (str "declaration of 'enum " (:name n) "' in '" (subs path 0 (- (count path) 2))
+                                                   "' which does not enclose '" (str/join "::" q) "'")))
+                                 (when-not (or (and q (not (:_body n)))
+                                               ;; (a definition refused as not enclosed defines nothing)
+                                               (and q (:_body n) (seq path) (not (str/starts-with? k path)) (.containsKey seen k)))
+                                   (if-let [o (.get seen k)]
+                                     (cond
+                                       (not= (boolean (:scopedEnumTag o)) (boolean (:scopedEnumTag n)))
+                                       (report! n (str "scoped/unscoped mismatch in enum '" (:name n) "'"))
+                                       (and (ut o) (ut n) (not= (ut o) (ut n)))
+                                       (report! n (str "different underlying type in enum '" (:name n) "'"))
+                                       (and (:_body o) (:_body n) (or (not q) (str/starts-with? k path)))
+                                       (report! n (str "multiple definition of 'enum " (:name n) "'"))
+                                       :else (when (:_body n) (.put seen k n)))
+                                     (.put seen k n)))))
+                  nil)))]
+      (region! "" (:nodes u)))
+    (vec out)))
+
+(swap! checks conj enum-redecls)
+
+;; cpp-decl2 (2026-11-23): [basic.def.odr]/11 (C++23 /12): an inline variable odr-used in a translation unit is defined there; an
+;; `extern inline` declaration at namespace scope never defined in the file whose name is used outside an unevaluated operand
+;; (sizeof, alignof, decltype, noexcept, typeid) is GCC's "odr-used inline variable 'var19' is not defined", at the declaration;
+;; cpp1z/inline-var2.C. Read off the main file's text after the declaration.
+(defn odr-inline-vars
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (java.util.ArrayList.)
+        defined (java.util.HashSet.)]
+    (letfn [(region! [nodes]
+              (doseq [n nodes]
+                (case (:kind n)
+                  ("LinkageSpecDecl" "NamespaceDecl") (region! (:inner n))
+                  "VarDecl" (when (and (string? (:name n)) (= main (get-in n [:loc :file])))
+                              (if (and (:inline n) (= "extern" (:storageClass n)) (not (:init n)) (empty? (filter map? (:inner n))))
+                                (.add decls n)
+                                (when (or (:init n) (not= "extern" (:storageClass n))) (.add defined (:name n)))))
+                  nil)))]
+      (region! (:nodes u)))
+    (doseq [n decls :when (not (.contains defined (:name n)))
+            :let [e (long (or (get-in n [:range :end :offset]) (get-in n [:loc :offset])))
+                  m (re-matcher (re-pattern (str "\\b" (java.util.regex.Pattern/quote (:name n)) "\\b")) (subs src (min (count src) (inc e))))]]
+      (when (loop []
+              (if (.find m)
+                (let [i (+ (inc e) (.start m))
+                      before (subs src (max 0 (- i 40)) i)]
+                  (if (re-find #"(?:sizeof|alignof|__alignof__|decltype|noexcept|typeid)\s*\(\s*$|extern\s+inline[^;]*$|//[^\n]*$" before)
+                    (recur)
+                    true))
+                false))
+        (let [[l c] (line-col starts (long (get-in n [:loc :offset])))]
+          (.add out {:line l :col c :kind :error :rule :odr-inline :msg (str "odr-used inline variable '" (:name n) "' is not defined")}))))
+    (vec out)))
+
+(swap! checks conj odr-inline-vars)
+(alter-var-root #'sema-rules conj
+  [:nsdmi #"^codegen: default member initializer for '.*' required before the end of its enclosing class" "default member initializer required before the end of its enclosing class"])
+(alter-var-root #'sema-rules conj
+  [:varargs #"^codegen: binding a const reference to a volatile object passed through" "binding reference discards qualifiers"])

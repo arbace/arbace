@@ -3167,3 +3167,31 @@ pass by their own verdicts given time; HES102 is a technical fix; the user's "co
 The record: the 17 capped rows and the ten control subjects in one `--only --record` run at the default limit (27 pass, the eleven
 controls failing as they must). Rows moved: `:speed` 14 to 3, `:own-speed` 4 to 1, `:no-reference` 31 to 28 (bspt, fulsom, pic); the
 eval cell 896 / 31 / 19 to 913 / 28 / 5 (4 n/a); Haskell's completeness 0.986786 to 0.991279 (0.9986 without by design).
+
+## As built: the program's CAFs collected (2026-11-23, branch `smalls2-1123`, the user's decision (b) on unpack_sums_6)
+
+testsuite/unboxedsums/unpack_sums_6 ran out of memory on the own libraries at the check's 16 GiB (15.4 GB in use after 172 s of
+CPU). The user's decision of 2026-11-23: (b), fix hsi so that what the program no longer uses stops holding memory (alternative
+not taken: n/a as a fragile timing test, all.T's `fragile(22504)`). The cause was not a frame's dead slots: GHC's -O0 floats
+`makeUnlayered magnitude` and `makeLayered magnitude` to the top level, CAFs (`unlayeredInts_67`, `layeredInts_70` in the STG),
+and hsi's globals are Go roots, so the evaluated CAF held the head of the 10-million-cell list while `sumUnlayered` walked it.
+GHC's collector keeps a CAF only while a live closure's or frame's SRT names it (and a blackholed thunk has none), so GHC
+frees the list cell by cell.
+- `go/arbace/hs/cafgc.ae` (new): the loader records the top-level thunks of the program's own unit (`main:`; `noteCAF`, from
+  the forms' and the images' loaders). Between slices of the outermost scheduler (`schedDepth` 1: never inside an in-call's
+  nested schedule, whose Go frames hold values the mark does not see), every 64 slices, `cafCheck` reads the Go heap's size
+  (runtime/metrics); past a floor (1 GiB, `HSI_CAF_FLOOR_MB`; then twice the heap at the last collection) `collectCAFs` marks
+  from every thread not done, the return registers, the run queue, the sleepers, the descriptors' waiters, the stable
+  pointers, the sparks, every weak pointer's key, value and finalizers, the C API's objects and identities, the static
+  pointer table and the blackholes' waiters, with rts.go's marker in its `caf` mode (a thunk under evaluation marks only
+  its evaluating thread and waiters: its frames hold what it still reads), and reverts each evaluated program CAF the mark
+  did not reach: `L` its code again, `Ind` and `Free` nil, its value left to Go's collector. Re-entered, it evaluates again,
+  as GHCi's revertCAFs (by the mark no live code can enter it). The libraries' CAFs (stdout and the other handles, the
+  closures Go names by name) are never reverted. `HSI_CAF_GC=0` turns it off (set inside HSI_EXE's wrapper: bin/hsi check
+  runs hsi under `env -i`).
+- Runs (the own libraries, 6 GiB cap, 600 s): unpack_sums_6 completes in 104.8 s of CPU at a 2.4 GB peak; the negative control
+  (the same build, `HSI_CAF_GC=0`) runs out of memory at 5 GB in 45 s. On the pack's libraries, the program at 1,000,000 cells:
+  peak 1.28 GB with a 200 MB floor, 2.03 GB off.
+- The program's own verdict is a timing comparison (the unlayered sum's time below the layered one's), which -O0 leaves a coin
+  flip (no UNPACK without -O): the first run exited 0, the capped record run 1 (`:differs [:status]`), so the record keeps its
+  row until the verdict's question is settled (the coordinator's, with the rate measured over further runs).

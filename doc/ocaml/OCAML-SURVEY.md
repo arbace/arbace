@@ -4801,3 +4801,62 @@ typed by Arbace's typer and run on oi; its rows are judged by their own .referen
   Consistbl's order and its required globals). `:compiler-output` and `:compiler-output-cmo` list no program at oi's level; the AOT
   levels keep both (528-8: the tools AOT-compiled, the main host's compiled level). Controls: dumpobj's run against the .cmo test's
   reference and the reverse must differ.
+
+## As built: the burst of 2026-11-23 (branch `ocaml-1123`, from mac/next `fa635f636`): AOT at the level a case needs, the tools at the compiled level, the ticket lock
+
+The coordinator's scope: OCaml's AOT cell (82 deferred, 22 by design at `fa635f636`), the compiled chain (oc-compiled's chain2, running
+on `oc-compiled-1122`) and the light level's whole re-records after 533 and 528-R3; the eval rows went to the Mac (539).
+
+- **AOT at the level a case needs** (528-8 (a), the user 2026-11-22, generalized by the burst's coordinator: "AOT at the level the
+  rows need"): `bin/reap`'s sources take `:other-level {:file F :what W}`; a classed non-pass of the light level's record (a class not
+  of kind `:na`) that the compiled level's native record F passes counts as a pass of the AOT cell (`reap.main`'s `other-level-pick`;
+  an F not recorded yet takes nothing, the source's detail says so). OCaml's two AOT sources name `check-aot-compiled-native.edn` and
+  `check-suite-aot-compiled-native.edn`, the native path's compiled records (`bin/oi check --aot --level compiled --record`, and the
+  suite's). `bin/crops-score --self-test` holds the rule's case and four controls (an `:na` class's case, a case the compiled record
+  fails, one it lacks, an unclassed entry). With chain2's old oracle-path record (`check-aot-compiled.edn`, 2026-11-05) the rule would
+  have taken 15 light-speed and light-depth cases; it reads only the native records.
+- **The tools at the compiled level** (528-8 (a)): header.awk's objinfo mode (the 13 shape-index and uid-deps rows, uids/intf_uids_test,
+  tool-ocamlobjinfo/question, no-alias-deps/aliases' .cmo) and dumpobj mode run at aot=2 too (the light level keeps the class: 528's
+  probe); `bin/oi`'s compiled check dumps oiobjinfo (`oi_tool_prog ... o2j`, the .cmo's too now) as the row's program, links
+  compiler-libs from clib (the row's `complib`, `@UNIT`s), a tool's own units (`D/tool.units`: dumpobj's bytecomp units) as
+  `c2_tool_units` lists them, and judges the tool's compiler output (`tool_output`) after the run, as `o2j_env_runs` does at the light level.
+  def838bc9's `heavy_run` around a shard's build-go is taken onto the branch (bin/j2g takes the lock around its own run).
+- **The runtime's lock a ticket lock** (528-14 (a), testyield): `jdk/ocaml/ocaml/rt/Gil.ae` serves the threads that ask for the lock in
+  the order they asked (`acquire`, `release`); `yield` gives it to the first waiting ticket and asks again behind the others. The old
+  lock's notifyAll let a thread woken from `await` (Thread.join's main) take a turn, which satisfied the yielder's "turn moved" without
+  another OCaml thread running (testyield printed "Thread N ran M consecutive iters" lines, 2169 bytes).
+- **Runs.** testyield at the light level (`bin/oi suite check --aot --only-list`, one program): passes, "same" as oi (the record's
+  fail, 2169 bytes with the old lock, is its control); it leaves aot-known.edn (the compiled level's known entry stays until a
+  compiled run of the ticket lock). Left running at hand-back (`.tmp/oc/chain.sh` in the worktree, log `.tmp/oc/chain.log`): the 17
+  tool rows at the compiled level (`.tmp/oc/tools.txt`: the objinfo mode's 16 and tool-dumpobj/test; one shard, j2g and build-go each
+  under the big lock; `--record` into `check-aot-compiled-native.edn`, seeded empty so that no oracle-path row enters it), then the
+  light level's whole re-records (`bin/oi check --aot --record`, `bin/oi suite check --aot --record`, one job).
+- **Left.** ocamldoc's five rows and the toplevel's three (caml-tex, self-contained-toplevel) at the compiled level: ocamldoc's
+  plugin needs the compiled level's Dynlink registry (dynplugins) and the run's ocamldoc.args and ocamldoc_output in c2_programs;
+  the toplevel loads each phrase's Lambda as a plugin at run time, which a compiled program can do only with oi inside it (a question
+  for the user). The C-stub rows of native-only tests (int64-unboxing's unboxed externals, unboxed-primitive-args' generated stubs),
+  the gc-roots tests' `@mods` at the AOT levels, opam/base64 and fmt (light-speed at the light level; chain2's tree predates 531's
+  staging, so their compiled rows need a run of this tree).
+
+### The user's list after the decisions of 2026-11-23 (the counting rule (a); the toplevel rows the Mac's 544)
+
+- **The gc-roots tests' `@mods` at the AOT levels** (globroots_sequential, globroots_parallel, globroots_parallel_spawn_burn): header.awk's
+  modules rule (C files and OCaml units of the test's directory) at every level; bin/oi's `o2j_dump` types the units first (`oi_mods`,
+  as oi_one), writes them to `D/dynmains.txt` (translated with the program, at both AOT levels) and types the program against their
+  interfaces (`o2j_dump_file`'s sixth argument, the run directory).
+- **Native-only C stubs at the AOT levels** (int64-unboxing/test): header.awk's class for a native-only test with C stubs is oi's alone;
+  the AOT levels call such an external by its native name with unboxed words (o2j's `native:` calls, `CApi/nativeCall`, OC199 (a)).
+- **The gen mode** (unboxed-primitive-args/test, 528-3 (a)): a native header that generates its program with ocamltest's `ocaml` script
+  action runs at the AOT levels; `gen_prog` runs the script on oi once an argument (its output the `compiler_output` file of the run
+  directory: stubs.c, main.ml), the last unit of `all_modules` becomes the program, the other .ml its `@mods`, the .c its stubs, built
+  from the run directory (`D/cstubs.here`, read by both AOT levels' `cstubs_nodes`).
+  Not in effect (60de8bb0d): the generated program's translation took 7.6 GB at the light level and 45 GB at the compiled level
+  (stopped); header.awk's `gnon` enables the mode once o2j translates it in bounded memory.
+- **A helper of C alone at the AOT levels** (lib-threads/signal, delayintr: sigint.c): built on ci as oi's (`oi_helper`, its own program
+  whatever the level), the level's program runs it as `./sigint`.
+- **ocamldoc at the compiled level** (tool-ocamldoc/t01-t05): header.awk's ocamldoc mode at aot=2; `o2j_dump` lists the plugins' Lambda
+  in `D/dynplugins.txt` (the compiled level's Dynlink registry); the compiled check takes the run's arguments (`D/ocamldoc.args`), the
+  program's interface digests (`OI_DYNLINK_IMPORTS`) and judges ocamldoc's output (`ocamldoc_output`); a program's main units of clib's
+  libraries are `@UNIT`s (`c2_tool_units` over `D/dynmains.txt`: ocamldoc's compiler-libs, unix, str, dynlink).
+- **The suite's compiled level takes C stubs** (opam/base64/test, opam/fmt/test_fmt: queue 531's `@cstubs`): their node program and a
+  shard with the C API's main, as the run corpus's (OC215 (a)).
