@@ -12632,17 +12632,26 @@
         ;; subobject GCC's explanation at it when the deleted operator is used ("no match for 'operator=='"), cx-cmp-explain;
         ;; a refusal the slice is unsure of propagates as before: cpp2a/spaceship-eq14.C, spaceship-synth-neg2.C)
         explain (atom [])
+        synth (atom nil)
         sure-fail? (fn [x] (let [m (str (ex-message x))]
                              (and (checking?) (:codegen/refused (ex-data x)) (not (re-find #"unsure|:k :(auto|dep|tparam)" m))
-                                  (re-find #"^codegen: (no match for 'operator|no viable function|cannot convert .* implicitly|no viable conversion|no operator|no conversion function of)" m))))
+                                  (re-find #"^codegen: (no match for 'operator|no viable function|cannot convert .* implicitly|no viable conversion|no operator|no conversion function of|ambiguous call)" m))))
         bin (fn [o x y & [sub]]
               (if-let [where (and (checking?) sub (::where (meta sub)))]
                 (try (bin0 o x y)
                      (catch arbace.lang.ExceptionInfo ex
                        (when (System/getenv "CPP_CMP_TRACE") (binding [*out* *err*] (println "cmp sub failed:" (ex-message ex))))
-                       (if (sure-fail? ex)
-                         (do (swap! explain conj {:msg (str "no match for 'operator" o "' (operand types are '" (::what (meta sub)) "')") :node where}) nil)
-                         (throw ex))))
+                       (cond
+                         (not (sure-fail? ex)) (throw ex)
+                         ;; ([class.spaceship]/1: a declared comparison category return type synthesizes a missing <=> from ==
+                         ;; and <, P1186R3: no failure unless one of them fails surely too; a synthesized one the slice does not
+                         ;; build, the definition refused as before once no other subobject deletes it, synth)
+                         (and (= "<=>" o) (not (re-find #"^codegen: ambiguous call" (str (ex-message ex))))
+                              (let [r (abi/unq (abi/non-ref (:ret (:ty f))))]
+                                (and (abi/class? r) (#{"partial_ordering" "weak_ordering" "strong_ordering"} (:name (abi/cls (:id r))))))
+                              (not (some #(try (bin0 % x y) false (catch arbace.lang.ExceptionInfo ex2 (sure-fail? ex2))) ["==" "<"])))
+                         (do (swap! synth #(or % ex)) nil)
+                         :else (do (swap! explain conj {:msg (str "no match for 'operator" o "' (operand types are '" (::what (meta sub)) "')") :node where}) nil))))
                 (bin0 o x y)))
         ;; (queue 510, the checker: a defaulted == or <=> defined as deleted, not refused, so a use of it is the error,
         ;; resolve-overload*'s CX12 rule: GCC's "use of deleted function" at the use)
@@ -12695,6 +12704,15 @@
                               (swap! explain conj {:msg (str "three-way comparison of '" (::what (meta sub)) "' does not convert to the declared return type") :node (::where (meta sub))}))))
                         (when (seq @explain)
                           (swap! explain conj {:msg "invalid 'static_cast' to the declared return type" :node (:node f)})))
+                    ;; (cpp-sweep: a declared comparison category type: a subobject's three-way comparison of a weaker category
+                    ;; does not convert to it ([cmp.categories]: strong to weak to partial alone), the operator deleted, GCC's
+                    ;; error at the subobject: cpp2a/spaceship-p1186.C's F over E's partial_ordering)
+                    _ (when (and (checking?) (category? declared0))
+                        (let [rank {"partial_ordering" 0 "weak_ordering" 1 "strong_ordering" 2}
+                              rn (fn [t] (rank (:name (abi/cls (:id (abi/unq (abi/non-ref t)))))))]
+                          (doseq [[x sub] (map vector cs subs) :when (and x (category? (:ty x)) (::where (meta sub)))]
+                            (when (< (long (rn (:ty x))) (long (rn declared0)))
+                              (swap! explain conj {:msg (str "three-way comparison of '" (::what (meta sub)) "' does not convert to the declared return type") :node (::where (meta sub))})))))
                     nm (fn [t] (:name (abi/cls (class-id t))))
                     declared (:ret (:ty f))
                     ;; (queue 510, the checker: an auto return type and a subobject whose three-way comparison's type is no
@@ -12708,6 +12726,7 @@
                                 (remove nil? cs)))]
                 (cond
                   (seq @explain) (deleted! "a subobject's three-way comparison not usable")
+                  @synth (throw @synth)
                   bad
                   (deleted! "a subobject's three-way comparison of no comparison category type")
                   :else
