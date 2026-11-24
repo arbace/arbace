@@ -20903,6 +20903,7 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   merged alone (`.tmp/oc/merge-ocamldoc.sh`, the ids of ocamldoc.txt only). Each merge records the matrix and scores and commits only
   when reap, crops-score --judge --strict and records-check report 0 problems.
 
+<<<<<<< HEAD
 ## 2026-11-24: ocaml-aot: OCaml's AOT cell, the user's n/a decisions at the AOT level, the runtime's ports of oi's eval fixes, bin/oi's corpus race
 
 Branch `ocaml-aot-1124` from mac/next `a6da0aadf`, with mac/ocaml-1123 (`07f1300ad`: b4's and b5's compiled rows) merged first. The
@@ -20936,3 +20937,17 @@ rows). The deferred rows by class: the worktree's `.tmp/classes.md`.
   them is recorded; the next step is `.tmp/NEXT.md`'s.
 - n/a candidates for the user (the report): backtrace/lazy, typing-modules/struct_include_optimisation, statmemprof/discard_in_callback
   (ocamlopt's inlined frames, transl_store's allocations, Comballoc's combined allocations: ocamlopt's own code, as 528-14's optargs).
+=======
+## 2026-11-24: ocaml-aot: the user's decisions on the AOT cell's ocamlopt-only rows; the eval decisions at both levels
+
+The user's decisions (2026-11-24, through the coordinator, on ocaml-aot's report):
+- backtrace/lazy, typing-modules/struct_include_optimisation and statmemprof/discard_in_callback are n/a under `:na-native-code`, the
+  same reasoning as 528-14 (asmcomp/optargs): they test what ocamlopt's own code does (its inlined frame of CamlinternalLazy.force_lazy_block
+  in the backtrace's .reference; transl_store's included structures, which make no block; Comballoc's combined allocations, which a
+  callback that discards the profile ends), where the AOT levels translate the bytecode Lambda. Not taken: (b) building ocamlopt's
+  behaviour into o2j. test/ocaml/divergences-aot.edn's `:na-native-code` lists the first two, divergences-suite-aot.edn's the third;
+  `:backtrace-references` keeps no program (`:programs []`, so its `^fail output differs` matches nothing else).
+- The eval n/a decisions (539-1, 539b-2, 539b-3, ephetest3) stay applied at both levels, as branch `ocaml-aot-1124` applied them (8ce07bec1).
+- OCaml AOT 539 / 13 / 60 (64 n/a) -> 539 / 13 / 57 (67 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+  `bin/records-check`: 0 problems. Branch `ocaml-aot-na-1124` from 8ce07bec1, without the WIP ports (5a7a53e91, on `ocaml-aot-1124`).
+>>>>>>> ocaml-aot-na-1124
