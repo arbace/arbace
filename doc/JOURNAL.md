@@ -20792,3 +20792,22 @@ The user's decisions of 2026-11-23 on queue 540's report:
 - Cells recorded here: C print 4,844 / 0 / 11 (1 n/a), from 4,844 / 1 / 11. `bin/reap --record`, `bin/crops-score --record` and
   `--judge --strict`, `bin/records-check`: 0 problems. Every other row moves with the main host's records (540's list, with
   limits-caselabels.c among the passes of the torture-compile records, read and print).
+
+## 2026-11-24: train 2's Java interp rows recorded; its compiled and C rows queued (records stream rec-t2-1124)
+
+Train 2 (mac/train-2 0d38b81b0, merged into next 7e3d2ff9a; executables 40a4745332aacf54acab, built with
+ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace). next's own key moved (the C++ crop's embedded namespaces), so the runs
+are made in a detached record worktree at 0d38b81b0 (.tmp/worktrees/rec-t2-at, key 40a4745332aacf54acab; scripts and logs in its
+.tmp/r), judged and recorded on branch rec-t2-1124 from next.
+- Java interp (java-design's train-2 lists, less t04725 and t04444, train 4's): `bin/java-check --levels interp --list` of t06144,
+  t06157, t06306 (JD7, javac's synthetic lambda methods), t05330 (Dyn clone), t04823 (ReferenceClone) and t03208 (the controls'
+  subject), on javac's tool javac-f170fb32 (REPR_JAVA_STALE_OK=1: train 2's tool was still building; the tests' forms came from
+  the read cache): 6 of 6 pass, controls c00001 and c00004 differ as they must. `bin/java-check --judge --partial --record`: 5 now
+  passing, 0 regressions. test/java/divergences.edn: :interp-clone's :tests emptied (its :match kept), t04823 out of
+  :j2g-unresolved (it passed compiled already). Java eval 3,142 / 23 / 119 -> 3,147 / 23 / 114.
+- Queued under bin/heavy-lock (the queue held by train 2's javac tool build and five earlier jobs): the compiled rows (t04308,
+  t06144, t06157, t06306, t04443, t04832, t03208, and java-bytecode's t04543, resources), .tmp/r/compiled.sh; C's torture-compile
+  round trip and tree check on train 2's compiled host for queue 540b (limits-caselabels.c), .tmp/r/c.sh (REPR_C_THREADS=2,
+  ulimit 22 GiB, GOMEMLIMIT 18 GiB, HEAVY_MEM_GIB=22), its record files first set to next's. .tmp/r/finish.sh judges and copies
+  them into the branch when both end.
+- `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
