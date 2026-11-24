@@ -202,10 +202,16 @@
                              #(let [t (cc/crate-index (remove :vendored mods))]
                                 (println (str *tag* ":") dep "'s index over" (count mods) "files:" (count (:macros t)) "macros," (count (:names t)) "modules")
                                 t))
-               names (cc/with-core-names (resolve/load-std-names std-file) (:names index))
-               std (assoc (cc/with-core-kinds (collect/load-std std-file) (:names index)) :mods names)
+               ;; queue 561: a backtrace crate's pass reads the names and facts of the dependencies read before it (miniz_oxide's
+               ;; adler2, object's memchr, addr2line's gimli); libc's, hashbrown's and unwind's as before
+               bt (some #{dep} cc/backtrace-crates)
+               base (cond-> (resolve/load-std-names std-file) bt (cc/with-core-names (:names acc)))
+               names (cc/with-core-names base (:names index))
+               std (assoc (cc/with-core-kinds (cond-> (collect/load-std std-file) bt (cc/with-core-kinds (:names acc))) (:names index)) :mods names)
+               std (cond-> std bt (cc/with-native-std (:native acc)))
+               si (cond-> si-full bt (cc/with-native-iface (:native acc)))
                native (cached (str d "-iface.edn")
-                              #(pass dep lib-dir {:std-file std-file :std std :si si-full :table (:macros index) :names names :index (:names index)}
+                              #(pass dep lib-dir {:std-file std-file :std std :si si :table (:macros index) :names names :index (:names index)}
                                      mods (map :path mods) rounds))]
            (println (format (str *tag* ": %s: %d module files, %d functions, %d ADTs, %d aliases, %d traits, %d impls")
                             dep (count mods) (count (:fns native)) (count (:adts native)) (count (:aliases native))
@@ -213,7 +219,12 @@
            (-> acc
                (update :names merge (cc/with-adt-names (:names index) (:adts native)))
                (update :native #(merge-with merge % native))))))
-     {:names {} :native {}} cc/dep-crates)))
+     {:names {} :native {}}
+     ;; queue 561: the backtrace crates only with DEPS_BACKTRACE (1: all seven; else a comma list of them, each with the ones
+     ;; before it it names); std's pass and the other deps' as before without it
+     (let [b (System/getenv "DEPS_BACKTRACE")
+           want (cond (= "1" b) (set cc/backtrace-crates) (seq b) (set (str/split b #",")) :else #{})]
+       (remove #(and (some #{%} cc/backtrace-crates) (not (want %))) cc/dep-crates)))))
 
 (defn crate-setup
   "The pass's inputs over front-dir's std-names and std-iface, the crate's index (cached in CACHE-DIR/index.edn): {:std-file
