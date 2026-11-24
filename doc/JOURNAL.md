@@ -20892,3 +20892,13 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   and records-check 0 problems. Nothing in the records changes.
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
+
+## 2026-11-24: ocaml-1123: b4's compiled rows on the host fix; the queued tool and ocamldoc runs
+
+- b4 (the build worktree at 8bcdee584, the compiled main's hosts embedding jrt's OSHost): opam/base64/test and opam/fmt/test_fmt pass at
+  the compiled level by their own verdicts (base64's `base64` spawned); lib-threads/signal and delayintr still fail there ("No signal
+  received": the hosts were not their cause). Their rows enter the branch's compiled records with b5's (`.tmp/oc/merge-compiled.sh`).
+- b5: the 16 tool rows on 5de1b38d0 in their own shard (one ticket of 30 GiB), queued. b6: ocamldoc's five on next 7e3d2ff9a (544c: each
+  split program unit and plugin its own Go package), one ticket of 30 GiB after b5 (`ocaml-b`'s `.tmp/oc/compiled-b6.sh`), its rows
+  merged alone (`.tmp/oc/merge-ocamldoc.sh`, the ids of ocamldoc.txt only). Each merge records the matrix and scores and commits only
+  when reap, crops-score --judge --strict and records-check report 0 problems.
