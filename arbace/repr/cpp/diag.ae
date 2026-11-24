@@ -58,23 +58,59 @@
   an earlier parameter, [basic.scope.param], DR 2082; the parser declares them with the body)."
   #{})
 
+(def ^:dynamic *walk-cache*
+  "queue 567: an atom diagnose binds for a unit, {:root the unit's :nodes, :list its walk once made}: each node with its parent
+  and *params* in walk order, so that every check's walk of the unit's whole tree replays it."
+  nil)
+
+(defn- walk-flat
+  "The nodes walk-nodes visits from `x`, in its order: an ArrayList of [node parent params] arrays."
+  ^java.util.ArrayList [x]
+  (let [out (java.util.ArrayList.)]
+    (letfn [(w [x parent params]
+              (cond
+                (map? x) (let [kind? (:kind x)
+                               _ (when kind? (.add out (object-array [x parent params])))
+                               p (if kind? x parent)
+                               inner (:inner x)
+                               ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
+                               params (if ps (into params ps) params)]
+                           (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (w v p params)) nil) nil x))
+                (vector? x) (reduce (fn [_ y] (w y parent params) nil) nil x)
+                (seq? x) (doseq [y x] (w y parent params))
+                :else nil))]
+      (w x nil *params*))
+    out))
+
 (defn- walk-nodes
   "Calls (f node parent) for every node of the tree `x` (maps with :kind, through every map and vector value)."
   ;; (queue 567: *params* rebound only where a node's :inner has a parameter, and the map's entries reduced, not destructured
-  ;; by doseq: about 130 checks walk the whole unit, libstdc++'s headers with it, and the walk was most of a check's time,
-  ;; cpp0x/udlit-suffix-neg.C's <string> past 300 s)
+  ;; by doseq; and the unit's whole tree walked once a unit, *walk-cache*: about 130 checks walk it, libstdc++'s headers with
+  ;; it, and the walk was most of a check's time, cpp0x/udlit-suffix-neg.C's <string> past 300 s)
   [f x parent]
-  (cond
-    (map? x) (let [kind? (:kind x)
-                   _ (when kind? (f x parent))
-                   p (if kind? x parent)
-                   inner (:inner x)
-                   ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
-                   go (fn [] (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (walk-nodes f v p)) nil) nil x))]
-               (if ps (binding [*params* (into *params* ps)] (go)) (go)))
-    (vector? x) (reduce (fn [_ y] (walk-nodes f y parent) nil) nil x)
-    (seq? x) (doseq [y x] (walk-nodes f y parent))
-    :else nil))
+  (if-let [^java.util.ArrayList lst (when (and *walk-cache* (nil? parent) (empty? *params*))
+                                      (let [{r :root l :list} @*walk-cache*]
+                                        (when (and r (identical? r x))
+                                          (or l (let [l (walk-flat x)] (swap! *walk-cache* assoc :list l) l)))))]
+    (let [n (.size lst) base *params*]
+      (loop [i 0]
+        (when (< i n)
+          (let [pp (aget ^objects (.get lst i) 2)
+                j (loop [j (inc i)] (if (and (< j n) (identical? pp (aget ^objects (.get lst j) 2))) (recur (inc j)) j))
+                run (fn [] (loop [k i] (when (< k j) (let [^objects e (.get lst k)] (f (aget e 0) (aget e 1))) (recur (inc k)))))]
+            (if (identical? pp base) (run) (binding [*params* pp] (run)))
+            (recur j)))))
+    (cond
+      (map? x) (let [kind? (:kind x)
+                     _ (when kind? (f x parent))
+                     p (if kind? x parent)
+                     inner (:inner x)
+                     ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
+                     go (fn [] (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (walk-nodes f v p)) nil) nil x))]
+                 (if ps (binding [*params* (into *params* ps)] (go)) (go)))
+      (vector? x) (reduce (fn [_ y] (walk-nodes f y parent) nil) nil x)
+      (seq? x) (doseq [y x] (walk-nodes f y parent))
+      :else nil)))
 
 (def ^:private literal-kinds
   #{"IntegerLiteral" "FloatingLiteral" "StringLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "CXXNullPtrLiteralExpr"})
@@ -7572,9 +7608,11 @@
   options `args`: {:diags [...] :other n (errors outside the main file) :declines n} or {:refused why :message m}."
   [^String path ^String main ^String std args]
   (try
+    (binding [*walk-cache* (atom nil)]
     (let [sema? (not= "0" (System/getenv "REPR_CPP_DIAG_SEMA"))
           u (assoc (binding [ps/*full-headers* sema? native/*gnu-floats* true lit/*gnu-floats* true] (native/parse-file path main std args))
                    :dir (.getParent (.getAbsoluteFile (java.io.File. path))) :std std :args (vec args))
+          _ (reset! *walk-cache* {:root (:nodes u)})
           src (latin1 path)
           starts (line-starts src)
           pps (keep #(pp-diag main (str %)) (:pp-errors u))
@@ -7670,7 +7708,7 @@
       ;; (cpp-gnu: a check's error with no line, :line 0, an implicit declaration's, counted with those outside the main file)
       (let [ds (incomplete-qualifier-bodies-silent (declined-names-silent ds u src starts main) src starts)]
       {:diags (vec (remove #(= 0 (:line %)) ds))
-       :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)}))
+       :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)})))
     (catch arbace.lang.ExceptionInfo e
       (if-let [g (or (:cpp/gap (ex-data e)) (when (:cpp/parse (ex-data e)) :parse))]
         {:refused g :message (ex-message e)}
