@@ -7942,3 +7942,40 @@
     (vec (distinct out))))
 
 (swap! checks conj implicit-special-definitions)
+
+;; cpp-rind (2026-11-24): [dcl.fct.default]/4 (C++23 /4): a friend declaration that specifies a default argument is a definition and
+;; the function's only declaration in the translation unit: another declaration of that function, a friend's in a class or one at
+;; namespace scope, before or after, is GCC's "friend declaration 'int foo(bool)' specifies default arguments and isn't the only
+;; declaration", at the later one (other/friend10.C, friend11.C, friend13.C). Functions by name and parameter types as written.
+(defn friend-default-only
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        decls (java.util.ArrayList.) ; [key node friend-with-defaults?]
+        key-of (fn [n] [(:name n) (str/replace (str (get-in n [:type :qualType])) #"\s+" "")])
+        dflt? (fn [n] (some #(and (= "ParmVarDecl" (:kind %)) (= "c" (:init %))) (:inner n)))
+        fnode (fn [x] (cond (= "FunctionDecl" (:kind x)) x
+                            (= "FunctionTemplateDecl" (:kind x)) (some #(when (= "FunctionDecl" (:kind %)) %) (:inner x))
+                            :else nil))]
+    (letfn [(w [nodes]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  ("FunctionDecl" "FunctionTemplateDecl")
+                  (when-let [f (fnode n)] (when (string? (:name f)) (.add decls [(key-of f) f false])))
+                  "FriendDecl" (doseq [x (:inner n) :when (map? x)]
+                                 (when-let [f (fnode x)]
+                                   (when (and (string? (:name f)) (not (str/includes? (str (:name f)) "::")))
+                                     (.add decls [(key-of f) f (boolean (and (dflt? f) (some #(= "CompoundStmt" (:kind %)) (:inner f))))]))))
+                  ("CXXRecordDecl" "NamespaceDecl" "LinkageSpecDecl" "ClassTemplateDecl") (w (:inner n))
+                  nil)))]
+      (w (:nodes u)))
+    (let [ds (vec (sort-by #(long (or (mine-at (second %) main) -1)) decls))]
+      (doseq [[k n fd] ds :when fd
+              [k2 n2 _] ds :when (and (= k k2) (not (identical? n n2)))]
+        (let [later (if (< (long (or (mine-at n main) 0)) (long (or (mine-at n2 main) 0))) n2 n)]
+          (when-let [o (mine-at later main)]
+            (let [[l c] (line-col starts o)]
+              (.add out {:line l :col c :kind :error :rule :friend-default
+                         :msg (str "friend declaration '" (first k) "' specifies default arguments and isn't the only declaration")}))))))
+    (vec (distinct out))))
+
+(swap! checks conj friend-default-only)
