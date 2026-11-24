@@ -6116,6 +6116,16 @@
             (and (not (abi/fn? (abi/unq ft))) (not (abi/fn? (abi/unq tt))) (cx-sure-scalar? (abi/unq ft)) (cx-sure-scalar? (abi/unq tt))
                  (or (not= (abi/unq ft) (abi/unq tt)) (and (:c ft) (not (:c tt))) (and (:v ft) (not (:v tt)))))
             (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (another member type)")
+            ;; (cpp-rind: a pointer to member function converts to none of another function type, [conv.mem]/2 keeping the
+            ;; member's type T (C++17's [conv.fctptr] taking only noexcept away); judged when every parameter and result type is
+            ;; one the checker judges, the qualifiers left to the rule below: conversion/ptrmem7.C)
+            (and (abi/fn? (abi/unq ft)) (abi/fn? (abi/unq tt))
+                 (let [x (abi/unq ft) y (abi/unq tt)
+                       sure? (fn [t] (let [t (abi/non-ref t)] (or (abi/void? (abi/unq t)) (and (not (abi/fn? (abi/unq t))) (cx-sure-scalar? t)))))]
+                   (and (every? sure? (cons (:ret x) (:ps x))) (every? sure? (cons (:ret y) (:ps y)))
+                        (or (not= (abi/unq (:ret x)) (abi/unq (:ret y))) (not= (mapv abi/unq (:ps x)) (mapv abi/unq (:ps y)))
+                            (not= (boolean (:va x)) (boolean (:va y)))))))
+            (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (another member function type)")
             (not= a b) (cx-mptr-base! b a true)
             :else nil))
         ;; (cpp-diag-b, round 2: [conv.ptr]/2 converts object pointers alone to cv void*, and nothing converts void* back: a
@@ -6178,6 +6188,12 @@
       (and (= :nullptr (abi/bn to)) (abi/integral? from) (null-constant? e)) {:op :null :ty to :cat :pr}
       (and (abi/mptr? to) (abi/mptr? from) (abi/derived-from? (:cls to) (:cls from)))
       {:op :mptr-adj :e e :off (second (abi/base-path (:cls to) (:cls from))) :ty to :cat :pr}
+      ;; (cpp-rind: [conv.qual]/3, a pointer to data member of one class whose member type gains cv-qualifiers, `const int D::* q =
+      ;; &D::x;`, a qualification conversion; it had been refused as no conversion, a false error)
+      (and (abi/mptr? to) (abi/mptr? from) (= (:cls to) (:cls from)) (not (abi/fn? (abi/unq (:to to))))
+           (= (abi/unq (:to to)) (abi/unq (:to from)))
+           (or explicit? (and (or (:c (:to to)) (not (:c (:to from)))) (or (:v (:to to)) (not (:v (:to from)))))))
+      (cast-node e :noop to)
       (and (abi/ptr? to) (abi/ptr? from))
       (let [fc (class-id (:to from)) tc (class-id (:to to))]
         (cond
@@ -11760,6 +11776,12 @@
            (init-for t ci ctx (if (= :init-list (:op ci)) :list :copy)))
       pre (init-for t pre ctx (if (= :init-list (:op pre)) :list :copy))
       (nil? init) (init-for t nil ctx :default)
+      ;; (cpp-rind, the checker: [dcl.init.general]/16.9 (C++23 /16.9), a scalar or a reference to one direct-initialized by a
+      ;; parenthesized braced-init-list, `int a({0});`: the braced list no expression a scalar converts from, GCC's "cannot convert
+      ;; '<brace-enclosed initializer list>' to 'int'"; cpp0x/initlist56.C)
+      (and (checking?) (= "call" (:init n)) (abi/scalar? (abi/unq (abi/non-ref t)))
+           (let [as (if (= "ParenListExpr" (:kind init)) (kids init) [init])] (and (= 1 (count as)) (= "InitListExpr" (:kind (first as))))))
+      (fail :conversion "cannot convert '<brace-enclosed initializer list>' implicitly to a scalar in a parenthesized initializer")
       (= "call" (:init n)) (init-for t (cond (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init))
                                              ;; (cpp-s11: `U u({3, 4});`, the native parser's CXXConstructExpr of the
                                              ;; declaration's own type, untyped, around its arguments: they are the
