@@ -19124,3 +19124,25 @@ processor rows are left to the host's JD3 bytecode loader (the user's JCS51 deci
 - **Cells:** read 7,795 / 0 / 49 -> 7,815 / 0 / 29. Java completeness 0.9634 -> 0.9640. `bin/reap --record`, `bin/crops-score
   --record`, `--judge --strict`, `bin/records-check`: 0 problems. `bin/provenance-check` reports the same as at 538: reader b45f7ace,
   the host's regeneration.
+
+## 2026-11-24: queue 549b (and 555), javac on Arbace's --module-path; the user's decisions 549-1 to 549-3 (branch `549b-java-module-path`, the VM)
+
+- **The user's decisions of 2026-11-24 on report 549:**
+  - 549-1 (a): the tool key rewritten to the checkout's (a3e3fd09) is accepted.
+  - 549-2 (a): Main's counts after an early error stay an emulation until JCS53 (a)'s full form, where the file manager is a
+    JavacFileManager under javac's Main.compile.
+  - 549-3 (b): --module-path goes through BaseFileManager's Locations, so a missing element warns as javac's does.
+- **549-3 (b) as built** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/Main.java`):
+  - A --module-path whose elements all do not exist is accepted. Once the file manager has javac's context, it is handed to
+    `BaseFileManager.handleOption(Option.MODULE_PATH, ...)`, as Main.compile hands a file manager its deferred options.
+  - Locations' ModulePathLocationHandler then warns `path.element.not.found` for each element (lint `path`), as javac does
+    (t07463: -Xlint:path -Werror --module-path missing.jar).
+  - A module path naming an existing file or directory stays refused (status 2): there is no jar file system and the file manager
+    serves no module path.
+  - Main.ae was read by `read-jdk --check --no-javac` on 549's tool. The other six overlay files came out byte for byte the committed
+    forms.
+- **Queue 555, folded in and stopped, not built.** The three closed-world rows (t07545 t07546 t07552) each run `-processor X` over a
+  processor class built by `@build`. With `ClassLoader.getUnnamedModule` added to jrt, they would only reach `:diag-processors`
+  (proc.processor.cant.instantiate). Their golden outputs need the processor to run, which is JCS51's work (the host's JD3 loader).
+  The jrt change would also be a runtime change, outside javac's tool build. So no row moves without processors, and the rows stay
+  in `:diag-closed-world`.
