@@ -17,7 +17,7 @@ done
 # path types a program's units: m1, an alias in a unit's interface to a module inside an earlier sibling (queue 546b, env's find-unit);
 # m2, a class whose methods name a module of its unit, inherited from another unit (queue 546b, env's subst-items); m3, an interface
 # (.mli, typed with --intf) whose class inherits another unit's class read inside it (queue 546b, nested with-unit-stamps); m4, a method!
-# without a type overriding an inherited polymorphic method (queue 546b, typeclass's first pass); m6, `include module type of F (struct ... end)` whose module type names F's parameter, read from another unit (queue 547, nondep of module types); m7, a class of an opened module inherited unqualified (queue 547, open-components); m5, a class type whose methods name
+# without a type overriding an inherited polymorphic method (queue 546b, typeclass's first pass); m6, `include module type of F (struct ... end)` whose module type names F's parameter, read from another unit (queue 547, nondep of module types); m7, a class of an opened module inherited unqualified (queue 547, open-components); m8, a value typed by another unit's class, re-exported through a unit without an interface (queue 547, components' class paths); m5, a class type whose methods name
 # a module of its unit, inherited by another unit's interface (queue 546b, subst-items)
 for d in "$D"/*/; do
   [ -f "$d/units" ] || continue
