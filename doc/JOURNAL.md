@@ -20817,3 +20817,10 @@ are made in a detached record worktree at 0d38b81b0 (.tmp/worktrees/rec-t2-at, k
   equal (limits-caselabels.c 706,054 nodes, its :eval-depth entry removed). The record files were next's before the runs; copied into
   the branch. C read 5,474 / 0 / 1 -> 5,475 / 0 / 0, print 4,853 / 0 / 2 -> 4,854 / 0 / 1 (left: sqlite3.c). reap, crops-score --record
   and --judge --strict: 0 problems.
+- (later) Java compiled (.tmp/r/compiled.sh in rec-t2-at, under bin/heavy-lock: j2g 22 s, bin/build-go 1,574 s, runs 768 s): t04308,
+  t04443 (serialization), t04543 (resources, java-bytecode), t06144 and t06306 (JD7) and t03208 pass; t06157 (CaptureVarOrder: an
+  anonymous class's captured constructor, CaptureVarOrder$1.<init>(String,int,Object), not found) and t04832 (jrt lacks
+  Executable.accessFlags()) still fail, in their classes. `--judge --partial --record`: 5 now passing, 0 regressions, controls differ.
+  test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
+  t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
+  3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
