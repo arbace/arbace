@@ -4615,6 +4615,10 @@
                    ;; (cpp-sweep, the checker: C++11's [expr.const]/2, an lvalue-to-rvalue conversion of a mutable subobject is
                    ;; no core constant expression (C++14 allows one whose object began its lifetime within the evaluation):
                    ;; GCC's "mutable 'A::m' is not usable in a constant expression" at the read, cpp0x/constexpr-mutable3.C)
+                   ;; (cpp-sweep, the checker: [expr.const]/5.10, an lvalue-to-rvalue conversion of a volatile glvalue, sure: GCC's
+                   ;; "lvalue-to-rvalue conversion of a volatile lvalue ... in a constant expression", cpp23/constexpr-nonlit13.C)
+                   _ (when (and (checking?) (map? (:ty x)) (:v (:ty x)) (not (abi/ref? (:ty x))))
+                       (ub! x "lvalue-to-rvalue conversion of a volatile lvalue is not a constant expression"))
                    _ (when (and (checking?) (= 11 (long *cxx-year*)) (= :field (:op x)))
                        (let [fl (get-in (abi/cls (:cls x)) [:fields (:i x)])]
                          (when (:mutable fl)
@@ -5816,7 +5820,9 @@
       ;; a function lvalue: its address; *p of a function pointer p: p itself
       ;; (cpp-s14: a call's :fn is the function called, not the one its reference result designates)
       (abi/fn? t) (if (= :deref (:op e)) (:e e) {:op :fnaddr :e e :fn (when-not (= :call (:op e)) (:fn e)) :ty (abi/ptr t) :cat :pr})
-      (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e)))))
+      ;; (cpp-sweep, the checker: not a volatile one, whose read is no constant expression, [expr.const]/5.10)
+      (and (= :var (:op e)) (:c t) (abi/integral? t) (:init (var* (:id e))) (not= :local (:storage (var* (:id e))))
+           (not (and (checking?) (:v t))))
       ;; (cpp-s13: a 128-bit constant outside 64 bits too, its i128 constant: __numeric_traits_integer<__int128>::__max)
       (let [c (try (binding [*ce-wide* (boolean (wide? t))] (var-const-int (:id e))) (catch arbace.lang.ExceptionInfo _ nil))]
         (if c {:op :int :v (if (wide-value? c) (wide-literal c) c) :ty (abi/unq t) :cat :pr} {:op :load :e e :ty (abi/unq t) :cat :pr}))
@@ -11257,7 +11263,12 @@
         (scalar-list-cast ctx t (analyze-args ctx (kids k)))
         :else (let [a (analyze ctx k)
                     _ (cx-named-cast! (:kind n) t a)
-                    r (cast-expr ctx t a true)]
+                    ;; (cpp-sweep, the checker: a reinterpret_cast between pointer to member types, [expr.reinterpret.cast]/10,
+                    ;; which the slice's conversions refuse: a cast of its own, no constant expression, cpp0x/pr85437-2.C)
+                    r (if (and (checking?) (= "CXXReinterpretCastExpr" (:kind n)) (abi/mptr? (abi/unq t)) (some-> a :ty abi/unq abi/mptr?)
+                               (= (boolean (abi/fn? (:to (abi/unq t)))) (boolean (abi/fn? (:to (abi/unq (:ty a)))))))
+                        {:op :cast :ck :noop :e (rv a) :ty (abi/unq t) :cat :pr}
+                        (cast-expr ctx t a true))]
                 ;; (h-cpp-consteval, the checker: a reinterpret_cast's own conversion, marked for the constant evaluation)
                 (cond
                   (and (checking?) (= "CXXReinterpretCastExpr" (:kind n)) (#{:cast :reinterpret-lv} (:op r))
