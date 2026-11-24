@@ -81,6 +81,25 @@
       (let [n (atom -1)] (w (fv f :generics) [] n) (w (fv f :sig) [] n) (w (fv f :body) [] n)))
     m))
 
+(defn- anon-consts-index-of
+  "queue 542: anon-consts-index over the forms XS of an item that is not a fn (a const's generics, type and value; a static's)"
+  [xs]
+  (let [m (java.util.IdentityHashMap.)]
+    (letfn [(w [x pre n]
+              (cond (seq? x)
+                    (case (first x)
+                      AnonConst (let [path (conj pre (swap! n inc))]
+                                  (.put m x path)
+                                  (let [n2 (atom -1)] (doseq [y (rest x)] (w y path n2))))
+                      Item nil
+                      (if (and (= 'Expr (first x)) (= 'Closure (head (fv x :kind))))
+                        nil
+                        (doseq [y (rest x)] (w y pre n))))
+                    (vector? x) (doseq [y x] (w y pre n))
+                    :else nil))]
+      (let [n (atom -1)] (doseq [x xs] (w x [] n))))
+    m))
+
 (defn- next-id [] (when *owner* [(first @*owner*) (second (swap! *owner* update 1 inc))]))
 (defn- node [m] (assoc m :hir-id (next-id)))
 (defmacro ^:private with-owner [& body]
@@ -909,8 +928,11 @@
         Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (lower-ty (fv c :ty))
                                                :generics (lower-generics (fv c :generics))
                                                :expr (some-> (some-val (fv c :body)) lower-expr)}))
-        Type (let [t (second k)] (merge base {:kind :type :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
-                                             :bounds (mapv lower-bound (fv t :bounds)) :ty (some-> (some-val (fv t :ty)) lower-ty)}))
+        ;; queue 542: a macro's associated type (`pattern_methods!`'s `type Searcher<$a> = $t;` in core's
+        ;; `impl<F: FnMut(char) -> bool> Pattern for F`), which the expansion parses as an item (ItemKind::TyAlias), as the Type
+        ;; it is in the impl
+        (Type TyAlias) (let [t (second k)] (merge base {:kind :type :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
+                                                       :bounds (mapv lower-bound (fv t :bounds)) :ty (some-> (some-val (fv t :ty)) lower-ty)}))
         (merge base {:kind :err})))))
 
 (defn- lower-item-1 [it]
@@ -948,11 +970,14 @@
                                   :safety (let [s (fv t :safety)] (when (and (seq? s) (= 'Unsafe (first s))) :unsafe))
                                   :auto (= 'Yes (fv t :is_auto))
                                   :bounds (mapv lower-bound (fv t :bounds)) :items (mapv lower-assoc-item (fv t :items))}))
-             Const (let [c (second k)] (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (binding [*sig* true] (lower-ty (fv c :ty)))
-                                                    :generics (lower-generics (fv c :generics))
-                                                    :expr (some-> (some-val (fv c :body)) lower-expr)}))
-             Static (let [s (second k)] (merge base {:kind :static :ident (id-name (fv s :ident)) :ty (binding [*sig* true] (lower-ty (fv s :ty)))
-                                                     :mutbl (= 'Mut (fv s :mutability)) :expr (some-> (some-val (fv s :expr)) lower-expr)}))
+             ;; queue 542: a const item's inline consts indexed as a fn's are (thread_local!'s `LocalKey::new(const { .. })`)
+             Const (let [c (second k)] (binding [*anon-index* (anon-consts-index-of [(fv c :generics) (fv c :ty) (fv c :body)])]
+                                         (merge base {:kind :const :ident (id-name (fv c :ident)) :ty (binding [*sig* true] (lower-ty (fv c :ty)))
+                                                      :generics (lower-generics (fv c :generics))
+                                                      :expr (some-> (some-val (fv c :body)) lower-expr)})))
+             Static (let [s (second k)] (binding [*anon-index* (anon-consts-index-of [(fv s :ty) (fv s :expr)])]
+                                          (merge base {:kind :static :ident (id-name (fv s :ident)) :ty (binding [*sig* true] (lower-ty (fv s :ty)))
+                                                       :mutbl (= 'Mut (fv s :mutability)) :expr (some-> (some-val (fv s :expr)) lower-expr)})))
              TyAlias (let [t (second k)] (merge base {:kind :ty-alias :ident (id-name (fv t :ident)) :generics (lower-generics (fv t :generics))
                                                       :ty (some-> (some-val (fv t :ty)) lower-ty)}))
              Mod (let [[_ _ id mk] k]
