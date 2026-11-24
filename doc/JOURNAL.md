@@ -20892,3 +20892,32 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   and records-check 0 problems. Nothing in the records changes.
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
+
+## 2026-11-24: java-rows-1124: Math.pow's huge exponents and the empty synchronized method; Java's deferred rows classed (the burst)
+
+The burst's Java eval/AOT stream (branch `java-rows-1124` from mac/next a6da0aadf). Eval 3,147 / 23 / 114 and AOT 3,152 / 22 / 122
+deferred rows classed by test/java/divergences.edn (a classifier over the records, the reap rule), the scopes other branches own
+subtracted (java-design-1123's FFM/Kerberos/XML/serialization/class-file API/zip and :jd1123-next-train, java-speed-1124's speed
+rows, java-bytecode-assert's t06029, train 2's synthetic lambdas, the Mac's read rows). Two causes built:
+
+- `go/arbace/jrt/math.ae`: Math.pow is jdk26u's `FdLibm.Pow.compute(x, y, false)` (Math.java:755), StrictMath.pow
+  `compute(x, y)`, FDLIBM 5.3's compat. jrt used the compat constants for both; in the huge-|y| branch (|y| > ~2^31, x near 1)
+  the non-compat split of 1/ln2 is 21 bits (0x1.71547p0) and its tail 0x1.94ae0bf85ddf4p-22 (JDK-8301202's fix). jdk26u's
+  PowLargeExpTests (t04583, :jrt-math, both levels) probes exactly these. `TestPowLargeExp` (math_test.ae): its two cases within
+  2 ulps; the control (Math.pow with compat) fails it, 0x1.ffffe0bc9e614p+915 against 0x1.ffffe0bc9e399p+915.
+  `bin/jrt test --package jrt` (TestDoubles, TestFloats, TestMath*, TestNoFusion, TestPowLargeExp) passes; its test data made
+  from the frozen jar (`bin/jrt testdata`, FROZEN_JAR the main checkout's).
+- `arbace/classes/interp.ae`: a void method without body forms took no monitor when synchronized; it now does, as a method with
+  a body (JLS 8.4.3.6). jdk26u's StringBuffer/TestSynchronization (t04668, :jrt-strings, interp; compiled passed) self-tests on
+  its own `public synchronized void sync_shouldnt_be_tested() {}`: a thread calling it while main holds the receiver must be
+  BLOCKED. Checked on train 3's executable (40a4745332aacf54acab) with the checkout's analyzer on ARBACE_PATH (RT.toolSource):
+  t04668 status 0; without the change status 1 (the control). A probe (an empty and a non-empty synchronized method, direct and
+  by reflection) BLOCKED in every case after, TERMINATED for the empty one before.
+
+Expected rows (the train's records): eval +2 (t04583, t04668), AOT +1 (t04583). Not recorded here: both need a gate build.
+
+Classed but not built (the table in the report): :reflection 10/12, :stack 7/10, :security 7/7, charsets 5/5, :jrt-dates 4/4,
+:threads 4/3, :logging 3/4 (JCS155 (a)), :references 3/2, the extends rows 4/2, :repl-sibling 2/0 (cyclic packages: the eager
+ImportExpr), :net 2/2, the rest single rows. Decisions put to the user: jdk.charsets into the world (F8's second step), reflection
+of world classes' private members for the tests that read them (t07882, t07910), host-dependent stdout (t04983's network
+interfaces, t07657's java.home, t03503's identity hashes), the jrt: file system (t08098, t08102, t08103).
