@@ -37,7 +37,10 @@
 (def ^:dynamic *on-refusal* nil)
 ;; (queue 463: within an implicit special member's definition, analyze-implicit!)
 (def ^:dynamic *cx-in-implicit* false)
-(def ^:dynamic *pedantic-errors* false) ; CP311 (a): -pedantic-errors given, an extension's diagnostic an error (the checker)
+(def ^:dynamic *pedantic-errors* false)
+;; cpp-sweep: GCC's -Winvalid-constexpr (a constexpr function no invocation of which is constant, its non-literal signature,
+;; before C++23) an error: -pedantic-errors, -Werror=invalid-constexpr or -Werror given (arbace.repr.cpp.diag binds it)
+(def ^:dynamic *invalid-constexpr-error* true) ; CP311 (a): -pedantic-errors given, an extension's diagnostic an error (the checker)
 ;; queue 365: -pedantic, -Wpedantic or -pedantic-errors given (the checker): GCC's diagnostics of the GNU extensions it otherwise
 ;; accepts silently (a zero-size array)
 (def ^:dynamic *pedantic* false)
@@ -10338,9 +10341,15 @@
   ;; 'void'")
   (when (and (checking?) (some? (:ty a)) (some? (:ty b))
              (not= (abi/void? (abi/unq (:ty a))) (abi/void? (abi/unq (:ty b))))
-             (not (#{:throw :rethrow} (:op (if (abi/void? (abi/unq (:ty a))) b a)))))
+             ;; (cpp-sweep: the operand of type void is the throw-expression, [expr.cond]/2.1; the other had been asked:
+             ;; cpp23/constexpr-nonlit8.C's `b ? throw 0 : 0`)
+             (not (#{:throw :rethrow} (:op (if (abi/void? (abi/unq (:ty a))) a b)))))
     (fail :cond-void "an operand of the conditional operator is of type 'void', the other neither a throw-expression nor of type 'void'"))
   (cond
+    ;; (cpp-sweep, the checker: [expr.cond]/2.1, a throw-expression operand: the result the other's, its type and value category)
+    (and (checking?) (some? (:ty a)) (some? (:ty b)) (not= (abi/void? (abi/unq (:ty a))) (abi/void? (abi/unq (:ty b))))
+         (#{:throw :rethrow} (:op (if (abi/void? (abi/unq (:ty a))) a b))))
+    (let [o (if (abi/void? (abi/unq (:ty a))) b a)] {:op :cond :c c :then a :else b :ty (:ty o) :cat (:cat o)})
     (and (lv? a) (lv? b) (= (:ty a) (:ty b))) {:op :cond :c c :then a :else b :ty (:ty a) :cat :lv}
     (and (abi/class? (abi/unq (:ty a))) (= (abi/unq (:ty a)) (abi/unq (:ty b))))
     {:op :cond :c c :then (if (= :pr (:cat a)) a {:op :temp-obj :init (init-for (abi/unq (:ty a)) a ctx :copy) :ty (abi/unq (:ty a)) :cat :pr})
@@ -13384,7 +13393,7 @@ protected:
   closure's member (g++ 15.2 by hand: a declaration without a definition not judged either)."
   [id]
   (let [f (fnd id)]
-    (when (and (checking?) *on-refusal* *pedantic-errors* (< (long *cxx-year*) 23) (:constexpr f) (not (:consteval f))
+    (when (and (checking?) *on-refusal* *invalid-constexpr-error* (< (long *cxx-year*) 23) (:constexpr f) (not (:consteval f))
                (not (:tinst f)) (not (:implicit f)) (:node f) (not (header-node? (:node f)))
                (or (nil? (:cls f)) (cx-plain-class? (:cls f))) (or (nil? (:friend-cls f)) (cx-plain-class? (:friend-cls f))))
       (let [bad (or (first (keep-indexed (fn [i t] (when (cx-non-literal t) (str "invalid type for parameter " (inc i) " of 'constexpr' function '" (:name f) "'")))
@@ -13428,7 +13437,9 @@ protected:
   "The potential constant check of the constexpr function `id`'s analyzed body (above), its finding an error."
   [id]
   (let [f (fnd id)]
-    (when (and (checking?) (:constexpr f) (not (:consteval f)) (not (:tinst f)) (:tbody f) (< (long *cxx-year*) 23)
+    ;; (cpp-sweep: GCC's -Winvalid-constexpr pedwarn, an error under -pedantic-errors or -Werror=invalid-constexpr alone, a warning
+    ;; else: cpp23/constexpr-nonlit8.C's dg-options "")
+    (when (and (checking?) *invalid-constexpr-error* (:constexpr f) (not (:consteval f)) (not (:tinst f)) (:tbody f) (< (long *cxx-year*) 23)
                (:node f) (not (header-node? (:node f))) (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda))))
       (when-let [[m at] (binding [*ce-steps* (atom 0) *ce-pos* nil *ce-dead* nil *ce-temps* nil *ce-const* nil] (pce-stmt (:tbody f)))]
         (when-let [h *on-refusal*]
