@@ -20819,4 +20819,8 @@ gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326, libstdcxx-testsuit
 (its three forms-differ rows to pass), samples 9/9; the modules part 1,180/1,181: gxx-modules/modules/part-4_c.C crashed in the
 printer (`print: a name: (decltype (cpp/text "f"))`), the same on the base 7de5de3ec, a recorded pass lost on next: queue 540b's
 fix (f8bac5010, mac/540b-c-cpp-print, not on next) taken, its arbace/repr/cpp/print.ae hunk alone (a decltype-specifier as a
-nested name's first part). After merging mac/next 8a321eee2 and the fix: gxx-dg-essential 33/33, gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326; gxx-dg-every-10 and the modules part were still running at handback (.tmp/lists2.log).
+nested name's first part). After merging mac/next 8a321eee2 and the fix, whole runs with `--record-results`: gxx-dg-essential 33/33,
+gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326, gxx-dg-every-10 1,807/1,807, the modules part 1,181/1,181
+(target-aarch64-1_a.C to pass); libstdcxx-testsuite-every-40 244/244 before the merge, not rerun. Merged mac/next 7e3d2ff9a
+(540b's same print.ae hunk now on next too). `bin/reap --record`, `bin/crops-score --record`; `--judge --strict` and
+`bin/records-check`: 0 problems. C++ print 3,886 / 0 / 9 -> 3,890 / 0 / 0; C++ completeness 0.9845 -> 0.9851.
