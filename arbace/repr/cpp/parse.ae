@@ -4930,6 +4930,18 @@
                       ;; 'auto'" / "unable to deduce"; cpp0x/initlist75.C, initlist80.C)
                       (and (nil? fs) (#{:auto :dta} (:t base0)) (some :a (mapcat :sufs chain)) (not (:typedef ds)))
                       (soft-diag! p ni (str "'" (or nm "") "' declared as array of 'auto'"))
+                      ;; ([dcl.fct.def.default]/1 with [dcl.fct]/? : a function with an ellipsis is no special member to default:
+                      ;; GCC's "'A::A(...)' cannot be defaulted", at the name; cpp0x/defaulted8.C)
+                      (and fs (:va fs) (is? p "=") (is-at? p 1 "default") (= ctx :member))
+                      (soft-diag! p ni (str "'" (or (:s lp) nm) "' cannot be defaulted"))
+                      ;; ([dcl.type.auto.deduct]/5 (C++23 [dcl.spec.auto.general]/? ): decltype(auto) is the declared type alone, no
+                      ;; cv-qualifier with it: GCC's "'decltype(auto)' cannot be cv-qualified", at the specifiers; cpp1y/auto-fn59.C)
+                      (and (= :dta (:t base0)) (or (:c ds) (:v ds)) (:b ds))
+                      (soft-diag! p (long (:b ds)) "'decltype(auto)' cannot be cv-qualified")
+                      ;; ([dcl.typedef]/? with [dcl.spec.auto.general]/? : a typedef declares no placeholder type: GCC's "typedef
+                      ;; declared 'auto'", at the name; cpp1y/pr60384.C)
+                      (and (:typedef ds) (= :auto (:t base0)) (not (and fs (:trailing fs))))
+                      (soft-diag! p ni "typedef declared 'auto'")
                       ;; ([class.qual]/2, `X::X` as a declaration's type names X's constructor, no type: GCC's "'X::X' names the
                       ;; constructor, not the type", at the declaration; diagnostic/pr105483.C)
                       (and (#{:block :top} ctx) (nil? fs) (not (:typedef ds))
@@ -6089,7 +6101,8 @@
   (let [s (sc/decl-scope (scope p))
         old (when nm (sc/find-in s nm))
         old (if (= :ns (:k old)) old nil)
-        e (or old {:k :ns :name nm :scope (sc/new-scope :ns s nil)})]
+        ;; (cpp-rind: whether a namespace's first definition was inline, for the rule in parse-namespace)
+        e (or old {:k :ns :name nm :scope (sc/new-scope :ns s nil) :inline-ns (boolean inline) :inline-ns-known true})]
     (when-not old (when nm (sc/declare! s e)))
     (when (or inline (nil? nm)) (sc/add-inline! s (:scope e)))
     e))
@@ -6147,6 +6160,12 @@
             parts (if (empty? parts) [{:name nil :i b :inline inline}] (update parts 0 assoc :inline inline))
             open (fn open [ps]
                    (let [{:keys [name i] inl :inline} (first ps)
+                         ;; (cpp-rind: [namespace.def.general]/? (C++23 /3): a namespace is inline at its first definition or never:
+                         ;; `inline namespace X {}` after `namespace X {}` is GCC's "inline namespace must be specified at initial
+                         ;; definition", at the name; cpp0x/pr79369.C)
+                         _ (when-let [old (and name inl (not (skim? p)) (main-tok? p (long i)) (get (sc/names-of (sc/decl-scope (scope p))) name))]
+                             (when (and (= :ns (:k old)) (not (:alias old)) (not (:inline-ns old)) (some? (:inline-ns-known old)))
+                               (soft-diag! p (long i) "inline namespace must be specified at initial definition")))
                          ;; (cpp-rind: a namespace definition whose name is a namespace alias of its scope, [namespace.def]/2's
                          ;; original namespace name: GCC's "namespace 'M' conflicts with a previous declaration", at the name;
                          ;; parse/namespace-alias-1.C)
@@ -6527,6 +6546,10 @@
   DecompositionDecl, the names declared."
   [^P p]
   (let [ds (parse-decl-specs p :block)
+        ;; (cpp-rind: [stmt.pre]/? (C++23 /5): a condition's decl-specifier-seq has no storage class but constexpr: GCC's
+        ;; "'static' invalid in condition", at the specifier; cpp0x/constexpr-condition.C)
+        _ (when (and (:storage ds) (:b ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) (str "'" (:storage ds) "' invalid in condition")))
         base (or (ds-type ds) (perr p "a condition's type"))]
     (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
       ;; a structured binding declaration as a condition (C++26's P0963, an extension before)
