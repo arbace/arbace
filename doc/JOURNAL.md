@@ -20811,3 +20811,11 @@ ndarray), test_import's and test_tracemalloc's. Python eval 40,886 / 1,332 / 1,2
 - Not recorded here: test_capi (its whole run on goi at this load needs many hours: 650-1150 s per driver start, the codec
   handler tests past 8 GiB) and test_importlib (1,342 methods; its 52 `:extension-modules` rows): the host's record.
 Alternatives: PYI_RUNTIME=compiled on stage 0's runtime (fast, but not the checkout's: refused for a record).
+
+## 2026-11-24 — Python's C API group: DECISION 554-1 answered at the settle (queue 554, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287): 554-1 (a). test_compile's three code-format rows
+  (code equality, co_consts folding, dis of a tuple constant) stay in `:bytecode` (n/a), as committed in c1013fa1c: the
+  decision of 2026-11-23 names code equality and dis listings. Nothing changes in the record.
+Alternatives: (b) a deferred class of their own, the rows back to deferred until pyi's code view matches CPython's (not chosen).
+:journal
