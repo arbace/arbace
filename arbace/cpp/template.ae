@@ -2611,7 +2611,16 @@
   type). A parameter named only in a non-deduced context is not judged."
   [t pt n]
   (when-let [h (when (and (sema/checking?) (not (sema/header-node? n))) sema/*on-refusal*)]
-    (let [names (set (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (pr-str (:forms pt))))
+    (let [tps (vec (:params t))
+          ;; (queue 567: [temp.deduct.type]/5.3, a non-type template argument in which a subexpression references a template
+          ;; parameter is a non-deduced context: at a non-type parameter's position only an argument that is the parameter's
+          ;; name alone, or its pack expansion, names it deducibly; `A<T, T{}>` deduces no T, cpp0x/nondeduced7.C)
+          nt? (fn [i] (let [q (when (seq tps) (nth tps (min (long i) (dec (count tps)))))] (and q (not (#{:type :template} (:kind q))))))
+          names (set (mapcat (fn [i f]
+                               (if (and (nt? i) (not (symbol? f)) (not (and (seq? f) (= 'pack-expand (first f)) (symbol? (second f)))))
+                                 []
+                                 (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (pr-str f))))
+                             (range) (:forms pt)))
           bad (filter #(or (str/blank? (str (:name %))) (not (contains? names (str (:name %))))) (:params pt))]
       (when (seq bad)
         (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))]
@@ -2619,6 +2628,29 @@
                       {:codegen/refused :template :cx/node at})
              n))
         true))))
+
+(defn- cx-partial-nontype-involves!
+  "queue 567 (the checker), [temp.class.spec]/8.1 of C++11 and C++14 (CWG 1315 dropped it in C++17): a partially specialized
+  non-type argument expression shall not involve a template parameter of the partial specialization except when it is a simple
+  identifier: GCC's \"template argument 'T{}' involves template parameter(s)\", at the declaration `n` (cpp0x/nondeduced7.C's
+  `A<T, T{}>`). True when reported."
+  [t forms params n]
+  (when-let [h (when (and (sema/checking?) (< (long sema/*cxx-year*) 17) (not (sema/header-node? n))) sema/*on-refusal*)]
+    (let [tps (vec (:params t))
+          pn (set (keep #(not-empty (str (:name %))) params))
+          bad (first (keep-indexed
+                      (fn [i f]
+                        (let [q (when (seq tps) (nth tps (min (long i) (dec (count tps)))))]
+                          (when (and q (not (#{:type :template} (:kind q))) (not (symbol? f))
+                                     (not (and (seq? f) (= 'pack-expand (first f)) (symbol? (second f))))
+                                     (some pn (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (if (and (seq? f) (= 'cpp/text (first f))) (str (second f)) (pr-str f)))))
+                            f)))
+                      forms))]
+      (when bad
+        (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))
+              txt (if (and (seq? bad) (= 'cpp/text (first bad))) (str/replace (str (second bad)) #"\s+" "") (pr-str bad))]
+          (h (ex-info (str "codegen: template argument '" txt "' involves template parameter(s)") {:codegen/refused :template :cx/node at}) n)
+          true)))))
 
 (defn- more-constrained-partial?
   [p1 p2]
@@ -4690,7 +4722,14 @@
           pid (next-id)
           params (tparams n)
           ss (bind-scope (:scope t) params nil pid)
-          args (partial-args ss t (template-text-args n))]
+          args (try (partial-args ss t (template-text-args n))
+                    (catch arbace.lang.ExceptionInfo x
+                      ;; (queue 567: arguments the slice cannot evaluate -- `A<T, T{}>`'s T{} -- judged for deducibility first,
+                      ;; [temp.spec.partial.match]/3, GCC's error at the declaration before the refusal: cpp0x/nondeduced7.C)
+                      (when (sema/checking?)
+                        (or (cx-partial-nontype-involves! t (template-text-args n) params n)
+                            (cx-partial-undeducible! t {:params params :forms (template-text-args n)} n)))
+                      (throw x)))]
       ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
       ;; iterator_traits<_Tp*>) is the same one, its definition kept (G4); its requires-clause its constraint (P14 (b))
       ;; (CP311 (a)'s measure: two partial specializations of the same arguments that differ in their constraints are two,
@@ -4714,7 +4753,7 @@
             pt (cond-> {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                         :forms (template-text-args n) :tmpl t}
                  (seq nx) (assoc :nx nx))]
-        (when-not same (identity-partial-check! t pt n))
+        (when-not same (identity-partial-check! t pt n) (cx-partial-nontype-involves! t (:forms pt) params n))
         (let [pt (if (and (not same) (cx-partial-undeducible! t pt n)) (assoc pt :node (dissoc n :completeDefinition) :cx-undeducible true) pt)]
         (if same
           (when (:completeDefinition n)
