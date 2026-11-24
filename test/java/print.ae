@@ -232,6 +232,36 @@
 (def ^:private kind-qual "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)")
 (def ^:private kind-compound "a compound assignment written out or not (s = s + x against s += x)")
 (def ^:private kind-owner "a static member's owner (named through the class that inherits it or the class that declares it)")
+;; the user's 538-2 (a) (2026-11-24, queue 556b): a switch's case-group locals, one scope (a colon switch's block) or
+;; each arm's (the printed arrows'), numbered from other slots
+(def ^:private kind-slot "a local's slot (a switch's case-group locals in one scope or in each arm's)")
+
+(defn- slots-only?
+  "538-2 (a): whether the code lines a and b differ by their locals' slots alone, in methods with a switch: the
+  same number of lines, each pair equal but for the slot of a load, store or iinc (aload_1 read as aload 1) and
+  the branches' and the switches' targets, at least one slot differing, and each method's slots mapped as a
+  function from a's to b's (one original slot one printed slot; the arms' locals may share one printed slot)."
+  [a b]
+  (let [slot-re #"^(.*: )((?:wide )?(?:[ailfd](?:load|store)|iinc))[ _](\d+)(.*)$"
+        untarget (fn [l] (str/replace l #"L\d+" "L"))
+        parts (fn [l] (when-let [[_ m op n more] (re-matches slot-re l)] [m op (parse-long n) more]))
+        method (fn [l] (second (re-find #"^(.*?): " l)))]
+    (and (= (count a) (count b))
+         (let [pairs (map vector a b)
+               diffs (remove (fn [[x y]] (= (untarget x) (untarget y))) pairs)
+               ps (map (fn [[x y]] [(parts x) (parts y)]) diffs)]
+           (and (seq diffs)
+                (every? (fn [[px py]] (and px py (= (px 0) (py 0)) (= (str/replace (px 1) #"_" " ") (str/replace (py 1) #"_" " "))
+                                             (= (px 3) (py 3)) (not= (px 2) (py 2))))
+                        ps)
+                ;; each method's slot map a function, over all its slot lines (the unchanged too)
+                (every? (fn [[_ ls]] (every? (fn [[_ ys]] (= 1 (count (distinct (map (comp second second) ys)))))
+                                             (group-by (comp first second) ls)))
+                        (group-by (fn [[m _]] m)
+                                  (for [[x y] pairs :let [px (parts x) py (parts y)] :when (and px py)]
+                                    [(px 0) [(px 2) (py 2)]])))
+                (let [ms (set (map (comp method first) diffs))]
+                  (every? (fn [m] (some #(and (= m (method %)) (re-find #": (tableswitch|lookupswitch) " %)) a)) ms)))))))
 
 (defn- counted-kinds
   "h-java-readprint (2026-11-17): the kinds of the differences of the method code lines a and b counted, each
@@ -277,7 +307,8 @@
       (and (empty? ds) owner?) [kind-owner]
       (empty? ds) ["the order of the code (the same instructions)"]
       (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)
-                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner)))))
+                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner))
+      (slots-only? a b) [kind-slot])))
 
 (defn class-differences
   "Short reasons for the differences of class file c in the trees c1 and c2, named as
@@ -309,7 +340,8 @@
     "the order of the code (the same instructions)"
     "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)"
     "a compound assignment written out or not (s = s + x against s += x)"
-    "a static member's owner (named through the class that inherits it or the class that declares it)"})
+    "a static member's owner (named through the class that inherits it or the class that declares it)"
+    "a local's slot (a switch's case-group locals in one scope or in each arm's)"})
 
 (defn classes-note?
   "JCV11 (b) (the user, 2026-11-08; RPS9 (a) reopened): whether the classes step's reason WHY is a sub-level note,
