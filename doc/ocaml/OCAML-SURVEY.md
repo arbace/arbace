@@ -4955,3 +4955,62 @@ oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferr
   documentation) or boxed integers with an identity in oi (a representation change).
 - Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
   changed but ephetest's row; `bin/oi test`.
+## As built: queue 544c (2026-11-24, the VM): a split shard's program units each a Go package of their own
+
+- **The fault** (the host's ocamldoc shard, 2026-11-24): with 544b's split a program's units shared one Go package, `ocaml_p<N>`, so
+  unit Odoc_class's class `M_Odoc_class` met j2g's member of unit Odoc's class, its class object `M_Odoc_class` (j2g_classes.go):
+  `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21). Within a library unit's package `ou_<Unit>` no such
+  name can meet another: a unit's member classes are `M_<Unit>$F<n>`, j2g's members `_class`, `_New`, `_Init` and the like.
+- **The fix** (arbace.o2j's split-packages): a program's own unit is a package of its own, `ocaml_p<N>_u_<Unit>`, a plugin
+  `ocaml_p<N>_d_<Unit>`, the main class alone in `ocaml_p<N>`. A unit names only units linked before it, a plugin the program's
+  units, the main class all of them: still no import cycle; the map still sorted.
+- **Proofs** (run): a reproducer program (units Odoc, Odoc_class, Repro): before the fix j2g reports the collision in `ocaml_p1`; after it 0
+  collisions, j2g 980 s at 5.2 GiB, Go's build 760 s at 8.4 GiB, and the program prints `odoc/odoc_class: 63` (Odoc.twice (fun x -> x * 3) 7).
+  The naming test fails on the parent and passes here; the split test (its program unit's package now `ocaml_p1_u_Oiplug`) passes.
+- **The three toplevel rows at the compiled level** (`bin/oi check --aot --level compiled --only-list` under `bin/heavy-lock`, the tree
+  of origin/next 440cf0273 with the fix): their shard split (169 unit packages, the programs' units by unit), j2g 3,437 s at 16.2 GB, Go's
+  build 1,602 s at 8.3 GB (the largest package Parser's, 19 MB of Go; unsplit, queue 544, Go's compile of one package passed 36 GB);
+  tool-caml-tex/ellipses, tool-caml-tex/redirections and self-contained-toplevel/main pass by their own .reference, "same" against oi.
+  Recorded into check-aot-compiled-native.edn (record-only of the run's rows), out of divergences-aot-compiled.edn's `:ocamltest-tools`;
+  the controls `_control/ocamltex-ellipses-vs-redirections` and `_control/toplevel-main-vs-redirections` at this level differ, as they
+  must. The compiled level is in no REAP cell: OCaml's cells do not move.
+- **The user's decisions (2026-11-24)**: ephetest3 n/a (`:na-boxed-identity`: a boxed integer's identity is unspecified); the three speed
+  rows under their own CPU limits, `test/ocaml/oi-cpu-caps.tsv` (1.5 times their CPU measured alone: ast-invariants/test 320 s,
+  parallel/fib_threads 1140 s, opam/uutf/test_uutf 2020 s), read by oi_one and suite_oi_one (the larger of OI_TIMEOUT and the cap), in
+  oi_key; the rows judged by their own verdicts and recorded passing. Left deferred: lib-dynlink-bytecode/main (`:dynlink-decided`).
+## As built: ppxlib's bootstrap (queues 546, 546b, 2026-11-23/24, the VM): T1 of DECISION 539b-1, the metaquot driver on oi
+
+DECISION 539b-1 (the user, 2026-11-23): ppxlib, then ppx_expect, then ppx_jane, in that order. T1, ppxlib 0.39.0's own build, is
+done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 (ppx_expect with base, stdio and time_now) and T3
+(ppx_jane) are their own tasks.
+
+- **Ports** (546; arbace.repr.ocaml.prep, each held to its source's SHA-256): ppxlib's pp/pp.exe in both variants (astlib's and
+  ast's), astlib/config/gen.ml's ast-version, ocaml-compiler-libs v0.17.0's ocaml_common.ml, and ocaml_shadow.ml over ocamlcommon's
+  modules (a strict subset of the host's file: deprecation aliases only).
+- **The programs** (test/ocaml/ppx-programs.tsv, opam-programs.tsv's format; `bin/oi ppx gen|check`, bin/lib/oi/ppx.bash):
+  - src/gen's gen_ast_pattern and gen_ast_builder run on oi over ast/ast.ml. ast_pattern_generated.ml and ast_builder_generated.ml,
+    kept in `.tmp/oi/ppx/gen`, are byte for byte the output of the same generators built from the pinned sources by the VM's ocamlc
+    (probed).
+  - The metaquot driver (test/metaquot/driver.ml: Ppxlib.Driver.standalone with ppxlib.metaquot linked) is 175 units in ocamldep
+    -sort's order: sexplib0, astlib, ppxlib_ast, ppxlib's src with the two generated units, the metaquot lifters and metaquot.
+    `bin/oi ppx check` runs it on oi over test/metaquot/run.t's two cram cases, coalesce.ml and pat.ml. Each output and exit status
+    must equal the cram's expected output line for line. Its negative control judges case 1's output against case 2's expected
+    output, which must differ. Result (546b, run): 2 of 2 pass, and the control differs. The whole check takes 30.5 minutes, the
+    library's types included.
+- **Typer fixes** (each with a sample in test/ocaml/typer-repros that ocamlc accepts and the typer before the fix refuses;
+  `run.bash ROOT`):
+  - 546: find_record_qual; constrained abbreviations expanded by instance; declarations fully generic; no abbreviation memo under
+    GADT equations (types/fresh-depth); nested package constraints; a module-unpacking parameter typed in a scope of its own; no
+    link of an object to a scoped module's abbreviation.
+  - 546b, env:
+    - components resolve an alias to a module inside an earlier sibling through that sibling, so find-unit no longer re-enters a
+      unit being loaded (m1);
+    - nested with-unit-stamps go on from the outer counter (m3).
+  - 546b, a unit's paths substituted into its class declarations (m2) and its class types (m5).
+  - 546b, an override without a type declared with a fresh variable (m4).
+  - 546b, nondep's expansions of a generic node made generic (c26).
+  - 546b, a unit's interface read with none of the class's shared type variables. Its repro is on ppxlib's staged sources and is
+    not committed: the task's tests/ppxlib-shared-tyvars.bash.
+- **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
+  native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
+  problems. No record changes: the ppx programs are not rows of the suite corpus.

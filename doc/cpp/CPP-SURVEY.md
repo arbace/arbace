@@ -11224,8 +11224,10 @@ g++.dg/cpp2a/consteval-prop*.C state them; no GCC code read.
   ([expr.const]/20), so prop19's `int r = f(1)(2);` holds and `f(1)(2) + r` is the error; the evaluator follows function addresses
   and calls through them in that judgment alone (`*ce-fnptr*`, `{::fnp id}`).
 
-Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8 to own pass; C++ read 6,035 / 0 / 248 ->
-6,040 / 0 / 243. Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
+Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8: seven rows to own pass in
+test/cpp/check-dg-own-linux-amd64.edn (own pass 2,438 -> 2,445), but five in the read cell: -prop7 and -prop8 already passed the dg check
+(`:pass "compile"`, not :own-diag) and were counted, so C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243 and :own-diag 231 -> 226 (doc/JOURNAL.md,
+"2026-11-24: cpp-p2564's count"). Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
 constexpr, those with a lambda's default argument, the control pair DRs/dr2082.C and dr1423.C, the two slow files): no own pass lost
 but the two slow files past their 300 s (udlit-suffix-neg, missing-header-pr110164, their pass rows kept), the control pair failing as
 recorded; cpp2a/spaceship-synth9.C's failing row reads differently, the same on the base (not recorded here).
@@ -11412,3 +11414,31 @@ instantiation's deeper diagnostics (no viable or ambiguous calls in instantiatio
 part of function types), definition-time checks of uninstantiated templates' non-dependent constructs (GCC diagnoses them, the
 checker analyzes instantiations alone), units with a syntax error (the checker does not run after the parser declines a construct),
 and the long tail of single rows.
+## As built: cpp-print, the print cell's last nine rows (2026-11-24; branch `cpp-print-1124` from mac/next `7de5de3ec`)
+
+The burst's C++ print stream: the print cell at 3,886 pass / 0 / 9 deferred, its nine rows the own round trip's four recorded
+`forms-differ` (gxx-dg-every-10's coroutines/ramp-return-a.C, cpp0x/attr-no_unique_address1.C, parse/template30.C; gxx-modules-all's
+target-aarch64-1_a.C) and the known file's five HotSpot files no record holds (three `forms-differ`, two `print-rejected`, classes of the
+clang judge's era). All causes were the converter's (arbace.repr.cpp.convert, its token reader arbace.repr.cpp.types); the printer and
+the native parser are unchanged.
+
+- **A split `>` ends a node** (template30.C, ramp-return-a.C): the native parser, as clang, gives the `>` it splits from a `>>`, `>=` or
+  `>>=` lexeme a token-split location (spelled in the scratch space, its expansion the whole lexeme), so a node the first half ends
+  (`z<int>=0`, `z<int>>0`, `std::coroutine_handle<promise<int>> _handle` read as an expression) was a macro node whose text ran on into
+  the lexeme's rest (`z<int>=`), printed as a text operand that read back otherwise. `convert` now first makes every such location the
+  main file's one `>` (`plain-split-gts`): the node converts by its structure (`(<> z int)`), printed and read back the same.
+- **`semi-end` past a body** (attr-no_unique_address1.C): a text form's end ran past a `[[` or `alignas` after a `}` to the next `;`,
+  taking the next declaration or statement into it (`void corge () {}` then `[[no_unique_address]] void garply () {} int grault (...);`
+  twice in the forms; `for (...) {}` then `[[no_unique_address]] asm ("");`). After a `}` a `[[` or `alignas` begins the next item.
+- **GNU's local labels** (c-c++-common's Wdangling-pointer-9.c and musttail28.c, recorded passes lost on next since cpp-gnu's
+  `__label__` DeclStmt, 2026-11-22): a LabelDecl's range is its name alone; the DeclStmt is its whole text (`__label__ L;`).
+- **An object-like macro ending a callee** (HotSpot's opto/memnode.cpp: `phase->MakeConX(offset)`, `#define MakeConX longcon`):
+  `macro-extent` took the call's own argument list as the invocation's; while a call's callee is converted (`*call-end*`, the call no
+  macro node) an extent that would end exactly at the call's end stops at the macro's name.
+- **Comments in a written name** (HotSpot's runtime/jniHandles.cpp: `resolve_impl<DECORATORS_NONE, true /* external_guard */>`):
+  `types/tokens` read `/ *` as punctuators; a comment is white space.
+- target-aarch64-1_a.C passed already on mac/next (the Mac's queue 540b, decltype as a nested-name prefix); re-recorded.
+- The five HotSpot files pass the own judge's levels 1 and 5 (`roundtrip-corpus hotspot-x86-linux-all --only-list`, 2 jobs, about
+  6 minutes) and leave the known file (no HotSpot list is recorded: its every-25 list's 50 files are about 25 minutes, left).
+- gxx-modules' part-4_c.C (a recorded pass that crashed on next, `decltype (f)::inner x;`): queue 540b's printer fix (f8bac5010's
+  arbace/repr/cpp/print.ae hunk: a decltype-specifier as a nested name's first part) taken; the rest of that commit (repr/c) stays 540b's.

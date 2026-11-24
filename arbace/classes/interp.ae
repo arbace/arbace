@@ -1604,6 +1604,26 @@
         (set! (.-params m) (into-array Class (concat lead-cls (seq (.-params m)) trail-cls)))
         (set! (.-implicit m) (int-array (concat [(count lead) (count cis)] lead cis)))))))
 
+(def ^:private cfgo-class
+  "arbace.lang.Compiler$CFGo, the Go host's natives, on the Go build; nil on the JVM."
+  (delay (try (Class/forName "arbace.lang.Compiler$CFGo") (catch Throwable _ nil))))
+
+(defn- publish-synthetic-lambdas!
+  "Class k's synthetic lambda methods as javac makes them (arbace.classes.analyze/synthetic-lambdas; the user's
+  JD7, 2026-11-23): member table entries that getDeclaredMethods lists, private and synthetic, static unless the
+  lambda uses this. The interpreter runs a lambda as its own class's method, so an entry throws when invoked."
+  [^arbace.lang.Compiler$CF$Klass k]
+  (when-let [cfgo @cfgo-class]
+    (when (and (.-cls k) (a/decl (.-iname k)))
+      (doseq [{:keys [name desc flags]} (a/synthetic-lambdas (.-iname k))]
+        (let [[ps r] (t/parse-method-desc desc)]
+          (arbace.lang.Reflector/invokeStaticMethod
+            ^Class cfgo "setMethod"
+            (object-array [(.-cls k) name (into-array Class (map sig-class ps)) (sig-class r) (int flags)
+                           (fn [& _]
+                             (throw (UnsupportedOperationException.
+                                      (str name ": javac's synthetic lambda method, run by the lambda's own class here"))))])))))))
+
 (defn- publish-members!
   [^arbace.lang.Compiler$CF$Klass k]
   (let [h (host)
@@ -1634,7 +1654,8 @@
       (doseq [f (drop (count (:own-fields info)) (:fields info))]
         (.addField h k (:name f) (sig-class (:desc f)) (int 0x1010) (int (field-index k (:name f))) false))
       (doseq [[i f] (map-indexed vector (:statics info))]
-        (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int i) true)))))
+        (.addField h k (:name f) (sig-class (:desc f)) (int (:flags f)) (int i) true)))
+    (publish-synthetic-lambdas! k)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; a compilation

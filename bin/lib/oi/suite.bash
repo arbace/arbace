@@ -275,6 +275,10 @@ suite_dump_native() {
 # suite_oi_one ID FLAGS INCS ARGS ENV BASE UNITS: "ID<TAB>STATUS<TAB>SHA<TAB>BYTES<TAB>SECONDS<TAB>NOTE"
 suite_oi_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5 base=$6 units=$7
+  # (2026-11-24, the user: per-row CPU caps as Haskell's HES97 (a)) a program of test/ocaml/oi-cpu-caps.tsv runs under its own CPU limit,
+  # about 1.5 times the CPU it took measured alone, when that is above TIMEOUT; oi_wall, oi_status and oi_limit_kill read the local TIMEOUT
+  local cap; cap=$(awk -F'\t' -v id="$id" -v t="$TIMEOUT" '!/^#/ && $1 == id && $2 + 0 > t { t = $2 + 0 } END { print t }' "$root/test/ocaml/oi-cpu-caps.tsv")
+  local TIMEOUT=$cap
   suite_dump "$id" "$flags" "$incs" "$base" "$units"
   local d=$S/run/$id
   if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")"; return; fi
