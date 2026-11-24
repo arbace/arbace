@@ -21118,3 +21118,44 @@ Not built, with estimates:
   - MethodParameters under -parameters (t04832, t05910; repr/java, the interpreter, jrt and j2g). About a day.
   - Package annotations: defpackage is a no-op (t04730).
   - Reflective access checks need the caller class (t07688, t04829; the :stack work).
+
+## 2026-11-24: java-rows-1124: CountDownLatch and Semaphore extendable; the rest of threads and -parameters planned
+
+**Built (478a6c1b2).** jrt's hand-written CountDownLatch and Semaphore are now non-leaf, as JC4c made AtomicReference and
+ThreadLocal:
+- class interfaces `CountDownLatch_I` and `Semaphore_I`;
+- the constructors as subclasses call them (`Ctor_I`, `Ctor_I_Z`);
+- `Impl_ToString`;
+- Semaphore's protected `reducePermits`, with jdk26u's "Permit count underflow" Error and IllegalArgumentException for a negative
+  reduction;
+- InstanceOf through the interfaces, and serial_locks through `Semaphore_I`;
+- both classes in `arbace.j2g.model/class-supers`, so they get a DynSub type. The interpreter's `canExtend` and `superCall`, and
+  generics.edn's `:protected`, come from that and from the regenerated manifest (`bin/jrt manifest`: `reducePermits (I)V
+  protected`).
+
+Checks: `bin/jrt test --package jrt` with TestSubclassedSemaphoreAndLatch (an embedding struct built by the Ctors, the underflow
+and the negative reduction) passes, and so do TestCountDownLatch and TestSemaphore. Expected rows, once train 4 builds it:
+- t05653 (Timer/Args's latches): interp's `:interp-extends`, compiled's `:j2g-go`;
+- t05707 (PermitOverflow's Sem): interp's `:threads`, compiled's `:j2g-go`.
+
+**Not built, the designs found:**
+- **ForkJoinPool.schedule (t05691).** jdk26u's ForkJoinPool is a ScheduledExecutorService. jrt's pool is hand-written, and it
+  names ScheduledFuture, Delayed and ScheduledExecutorService only through stand-ins: new stand-ins (standin_executor.ae's way), a
+  ScheduledForkJoinTask over a timer that submits the task unless it is cancelled, and the delayed tasks counted in the pool's
+  termination (jdk26u's close lets them run after shutdown). Only a j2g run can try the stand-ins' method sets. Half a day.
+- **ScopedValue (t04607).** It needs the bindings on jrt's hand-written Thread (jdk26u's scopedValueBindings). About a day.
+- **-parameters (t04832, t05910).**
+  - The reader records nothing of javac's `-parameters`. The tests' `:javac ["-parameters"]` reach the read, but no form says so.
+  - A class mark from repr/java (both fronts, javac's and the native one) and W records written by
+    `arbace.classes.annot/attribute-lines` give both levels the MethodParameters: classdata.ae's executableParameters and j2g's
+    GetParameters already read W records.
+  - The W records follow javac's ClassWriter: names only under `-parameters` (or for a record's canonical constructor), flags
+    whenever an extra parameter is SYNTHETIC or MANDATED. Lower.outerThisDef makes the outer instance MANDATED for an anonymous
+    class's constructor and a non-private inner member class's, else SYNTHETIC; captured locals are FINAL|SYNTHETIC; enum
+    constructors' name and ordinal are SYNTHETIC, valueOf's name MANDATED.
+  - It touches repr/java, so it waits until the queued `jdk/` conversion has written its provenance. About half a day.
+- **Package annotations (t04730).** `defpackage` is a no-op (core_classes.ae), and jrt's Package has no annotations. Needed:
+  - a registration at load for the interpreter (a runtime change);
+  - j2g translating `defpackage` for the compiled level;
+  - Package's getAnnotation* over the registered data.
+- **Reflective access checks (t07688, t04829).** They need the caller class, which is the :stack work.
