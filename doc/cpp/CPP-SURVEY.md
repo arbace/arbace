@@ -11441,3 +11441,40 @@ instantiation's deeper diagnostics (no viable or ambiguous calls in instantiatio
 part of function types), definition-time checks of uninstantiated templates' non-dependent constructs (GCC diagnoses them, the
 checker analyzes instantiations alone), units with a syntax error (the checker does not run after the parser declines a construct),
 and the long tail of single rows.
+
+## As built: cpp-read, the read cell's deferred rows (2026-11-24; branch `cpp-read-1124` from mac/next `a6da0aadf`, with `cpp-rind-1124` merged)
+
+The read cell at the base: 6,062 pass / 0 by design / 221 deferred (248 n/a). The 221 are all dg rows (the token check has none):
+own-diag 204, syntax-own 9, gcc-own-rules 8; each listed by class, the own-diag-review group and the own front end's verdict in the
+branch's `.tmp/classes.md` (accepted 99: no error at all, a Sema rule missing; missed 66; both 31; extra 17; timeout 5; crash and
+stopped 1 each). The rules built, each from the standard's text or GCC's documented behaviour as the tests state it (no GCC code):
+
+- The shared preprocessor (arbace.repr.c.pp, C++ only): libcpp's pedwarns before C++20 under -pedantic-errors, `__VA_OPT__` in a
+  macro definition and a variadic macro invoked with no argument for its `...`, in the main file, silenced by `#pragma GCC diagnostic
+  ignored "-Wc++20-extensions"` or `"-Wpedantic"` (the pragma's push, pop, ignored, warning and error kept as the preprocessor's
+  state): cpp0x/va-opt1.C.
+- The own front end answers `__has_cpp_attribute` as g++ 15 does (the target's has.tsv g++ column: carries_dependency 0, no clang::
+  attribute), the native reader keeping clang's: cpp0x/attr-carries_dependency1.C.
+- The checker (arbace.cpp.template, arbace.cpp.sema): [dcl.spec.auto.general]/13, an explicit specialization or instantiation
+  whose return type uses a placeholder where the templates' do not, or the reverse, matches no template (cpp1y/auto-fn47.C,
+  auto-fn10.C); GCC's limit_bad_template_recursion, a specialization's definition that only errored implicit instantiations'
+  bodies use is not instantiated (template/recurse3.C: no depth error after `T(0) = 0`'s); [dcl.enum]/7, no standard integer type for
+  the enumerators (a negative one beside one past long long's maximum, one past unsigned long long's or an __int128 value;
+  init/enum1.C), and an enumerator's initializer surely not constant ("enumerator value for 'a' is not an integer constant"),
+  among them a call of the function whose body is being analyzed ("called in a constant expression before its definition is
+  complete"; cpp1y/constexpr-recursion1.C's and -2.C's non-template f3, their template f1 left: a definition-time check).
+- The checks (arbace.repr.cpp.diag): a member typedef declared twice in a class ([class.mem.general]/6, template/typedef1.C);
+  C++98's integral constant expressions without a function call or a comma operator outside sizeof, at case labels and bit-field
+  widths (parse/constant1.C); GCC's loop pragmas (`ivdep`, `unroll`) before a for loop without a condition (parse/ivdep.C);
+  GCC's silence after an erroneous declaration: a declaration the native parser declined has its name (a class key's, or the
+  declarator's before its first parenthesis) given no later "undeclared" error nor a syntax error at it or in its template
+  argument list (template/crash55.C, crash57.C, cpp0x/pr89900-3.C), and the entity of a declaration the parser flagged
+  "has incomplete type", "default argument missing" or "static data member in unnamed class" has its uses' Sema errors on later
+  lines dropped (template/incomplete10.C, other/default2.C, ext/anon-struct5.C).
+- The parser: [temp.mem]/2, no member template in a local class, the declaration declined at `template` and skipped as GCC does
+  (template/crash63.C).
+
+15 of the 221 pass by the own front end (and cpp1y/auto-fn10.C, a row clang's record passed); left: 206, the long tail by group in
+`.tmp/classes.md` (constant evaluation 39, templates 24, overload 22, lookup 22, incomplete 10, syntax-only 9, GNU rules 8, ...): GCC's
+error recovery after syntax errors, definition-time checks of uninstantiated templates, overload diagnostics in instantiations and
+the constant evaluator's explanations at their inner lines.
