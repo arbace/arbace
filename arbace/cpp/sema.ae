@@ -9127,7 +9127,7 @@
       (upd-fn! fid dissoc :analyzing))
     fid))
 
-(declare cx-immediate-call!)
+(declare cx-immediate-call! cx-immediate-eval!)
 
 (defn- method-call
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
@@ -9135,8 +9135,11 @@
   (let [f (fnd (deduced! fid))
         _ (cx-immediate-call! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
-    {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
-     :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))}))
+    ;; (cpp-sweep, the checker: a member function's immediate invocation evaluated as a free function's is, cx-immediate-eval!:
+    ;; cpp2a/consteval-memfn1.C's `s.size(-1)` whose body throws)
+    (cx-immediate-eval! ctx f
+      {:op :call :fn fid :obj o :args (call-args f args ctx) :virtual (and virtual-ok (:virtual f) (not (:static f)))
+       :ty (abi/non-ref (:ret (:ty f))) :cat (let [r (:ret (:ty f))] (case (:k r) :ref :lv :rref :xv :pr))})))
 
 (defn- cx-immediate-call!
   "CP310 (b), the checker: an immediate invocation ([expr.const]/16: a call of an immediate function outside one) is a
@@ -12992,8 +12995,13 @@
   "CP310 (b): an immediate function the function `fid`'s return statements return the address of, or nil (its body as
   analyzed)."
   [fid]
-  (let [f (fnd fid)]
-    (some (fn [x] (when (and (map? x) (= :return (:s x)) (= :expr (get-in x [:init :i]))) (immediate-address (get-in x [:init :e]))))
+  (let [f (fnd fid)
+        ;; (cpp-sweep: also an address among a returned braced list's or class object's initializers, `return { 5, foo };`,
+        ;; [expr.const]/18's constituent values: cpp2a/consteval7.C's baz)
+        in-init (fn [i] (some (fn [y] (when (map? y) (or (when (= :expr (:i y)) (immediate-address (:e y))) (immediate-address y))))
+                              (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (select-keys % [:items :args :init :e :then :fill])) (seq %)) i)))]
+    (some (fn [x] (when (and (map? x) (= :return (:s x)))
+                    (if (= :expr (get-in x [:init :i])) (immediate-address (get-in x [:init :e])) (in-init (:init x)))))
           (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (select-keys % [:items :then :else :body :init :s])) (seq %)) (:tbody f)))))
 
 (defn- cx-sure-error!
@@ -13054,7 +13062,7 @@
     (*on-refusal* (ex-info (str "codegen: the type of 'constexpr' variable '" (:name v) "' is not literal (" why ")")
                            {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})
                   nil))
-  (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)))
+  (when (and (checking?) (:cx-constexpr v) (#{:expr :copy} (:i i)))
     (let [e (:e i)
           imm (immediate-address e)
           inv (when (and (nil? imm) (= :call (:op e)) (:consteval (fnd (:fn e)))) (returned-immediate (:fn e)))]
