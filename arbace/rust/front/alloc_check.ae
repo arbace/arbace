@@ -375,16 +375,28 @@
       ;; body at the run, build-run's pack-compare); a line a module (wanted, built, refused, and why)
       "--export"
       (let [[lib front cache modules-file out keys-file] args
-            mods (read-modules modules-file)
-            setup (crate-setup crate front cache mods lib)
+            ;; queue 561 (C6 L3): a dependency crate (a backtrace crate) over std's deps' caches (CACHE std's, CACHE/deps/CRATE-*):
+            ;; its module list and index there, the deps' names and facts (deps-setup) its setup and its native interface
+            dep? (some #{crate} cc/dep-crates)
+            mods (if dep? (read-string (slurp (str cache "/deps/" crate "-modules.edn"))) (read-modules modules-file))
+            si-full (collect/load-std-iface (str front "/std-iface.edn"))
+            deps (when dep? (deps-setup lib (str front "/std-names.edn") si-full cache))
+            setup (if dep?
+                    (let [std-file (str front "/std-names.edn")
+                          index (read-string (slurp (str cache "/deps/" crate "-index.edn")))
+                          names (cc/with-core-names (cc/with-core-names (resolve/load-std-names std-file) (:names deps)) (:names index))]
+                      {:std-file std-file :names names :table (:macros index) :index (:names index)
+                       :std (assoc (cc/with-native-std (cc/with-core-kinds (cc/with-core-kinds (collect/load-std std-file) (:names deps)) (:names index)) (:native deps)) :mods names)
+                       :si (cc/with-native-iface si-full (:native deps))})
+                    (crate-setup crate front cache mods lib))
             mod-paths (map :path mods)
             by-path (into {} (for [m mods] [(:path m) m]))
-            si-full (collect/load-std-iface (str front "/std-iface.edn"))
             nf (File. (str cache "/native-iface-nodebug.edn"))   ; queue 462: the pass without debug assertions
-            native (if (.exists nf)
-                     (read-string (slurp nf))
-                     (let [n (pass crate lib setup mods mod-paths (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2")))]
-                       (spit nf (pr-str n)) n))
+            native (cond
+                     dep? (:native deps)
+                     (.exists nf) (read-string (slurp nf))
+                     :else (let [n (pass crate lib setup mods mod-paths (Long/parseLong (or (System/getenv "ALLOC_IFACE_ROUNDS") "2")))]
+                             (spit nf (pr-str n)) n))
             ;; queue 443: core's traits' associated constants (LIB_CORE_CONSTS, core/src files; LIB_CORE_DIR, LIB_CORE_CACHE
             ;; core-check's copy and caches), which std's interface lacks and the bodies name (`T::IS_ZST`)
             native (if-let [cf (System/getenv "LIB_CORE_CONSTS")]
