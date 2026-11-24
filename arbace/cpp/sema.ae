@@ -6615,11 +6615,36 @@
   [cands args obj]
   (resolve-overload* (map (fn [c] [c args obj true]) (distinct cands)) (count args)))
 
+(declare strip-positions)
+
 (defn resolve-overload*
   "The best viable of the candidates `cs` ([fn-id args obj] each: a member operator's with its object, a non-member's
   with every operand, [over.match.oper]/3), `n` the operands' count, or a refusal."
   [cs ^long n0]
-  (let [cands (map first cs)
+  (let [;; (cpp-sweep, the checker: [dcl.link]/6, functions of C language linkage of one name declared in different namespaces
+        ;; are one function: its declarations brought in by using-declarations one candidate, no ambiguity; a call that uses a
+        ;; default argument the declarations give differently is GCC's "call to 'void f(int)' uses the default argument for
+        ;; parameter 1, which is not yet defined"/"default argument mismatch": overload/extern-C-1.C)
+        cs (if-not (checking?)
+             cs
+             (let [key (fn [[cid]] (let [f (fnd cid)]
+                                     (when (and (= :c (:linkage f)) (nil? (:cls f)) (:name f))
+                                       [(:name f) (mapv abi/unq (:ps (:ty f))) (boolean (:va (:ty f)))])))
+                   groups (group-by key cs)]
+               (vec (keep (fn [c]
+                            (if-let [k (key c)]
+                              (let [g (get groups k)]
+                                (when (identical? c (first g))
+                                  (when (> (count (distinct (map first g))) 1)
+                                    (let [nargs (count (second c)) ps (:ps (:ty (fnd (first c))))]
+                                      (when (< nargs (count ps))
+                                        (let [ds (map (fn [[cid]] (mapv #(when % (strip-positions %)) (drop nargs (:defaults (fnd cid))))) g)]
+                                          (when (> (count (distinct ds)) 1)
+                                            (fail :overload "default argument mismatch in overload resolution for '" (:name (fnd (first c))) "'"))))))
+                                  c))
+                              c))
+                          cs))))
+        cands (map first cs)
         viable (for [[cid args obj prefix] cs
                      :let [f (fnd cid)
                            ps (:ps (:ty f))
