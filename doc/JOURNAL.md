@@ -19148,6 +19148,66 @@ Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 
   jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
   the patch in `.tmp/jd/doclint-stream-variant.patch`.
 
+## 2026-11-23: the user's decisions CDR14 and CDR15 (b); Clojure's stream of the burst, round 1 (branch `clj-1123`)
+
+The user's decisions of 2026-11-23 (relayed by the burst's coordinator; doc/CLOJURE-DESIGN-REVIEW.md, "Decided (2026-11-23)"):
+- **CDR14**: the two oracle forms that differ from the frozen v4 jar since hand change 38 (native.ae:410, a fresh namespace resolving
+  SecurityManager; state_errors.ae:454, its ns-map counting 106 names, v4's 105) dropped, the expected files recorded again from the
+  frozen jar, so that they stop being main-since-v4's by design. Alternative (the 2026-11-23 entry's other option): keep them known.
+- **CDR15 (b)**: the evaluated half of hand change 39 withdrawn (evaluated fns with primitive signatures as EvalFn's DynSub type; it
+  cost plain evaluated calls about 9%), the Java forms half that the oracle's three native.ae cases need kept; the speed to be
+  verified on the next build.
+
+Done from mac/next `fa635f636` (cells before, pass / by design / deferred: read 909 / 0 / 0, eval 21,121 / 11 / 2, AOT 833 / 4 / 1,
+print 1031 / 0 / 0), stage 0 and the frozen jar only (no gate build: since 09:20 the burst's gate builds are shared, one build train):
+- CDR14 (`8761f6df5`): each dropped form's line a comment, so that every other case keeps its id (test/diffcheck/known.edn and the
+  box's known file name cases by line); `bin/oracle record forms/native forms/state_errors` on the frozen jar (built from its tag in the
+  worktree, 4 min): 282 and 803 cases, one fewer each, every other case's record unchanged (compared without the ids). The oracle's known
+  file and diffcheck's lose the two (diffcheck's `:interned-at-load` held state_errors.ae:454 too); main-since-v4's reason rewritten.
+- CDR15 (b) (`8761f6df5`): arbace/lang/Compiler.ae as before `a018ba617` (the reverse of its Compiler.ae diff: EvalFn a leaf, no fnClass
+  proxy, PrimInvoke, newFn/newFnClosed, evalPrimInterface, Frame.fnClosed; CodeRun.fixed and arity take the fn again), arbace.j2g.dyn's
+  defineFnField as before, Compiler$EvalFn out of arbace.j2g.model/class-supers (AFunction and RestFn stay: the Java forms half,
+  arbace.classes.interp/make-klass unchanged). doc/VENDOR-NOTES.md hand change 39 and doc/go/EVAL-PLAN.md amended. The microbenchmark
+  `.tmp/probe/bench.ae` of the worktree (6M plain evaluated calls, 6M closure calls, a map over 2M; the previous round's bench2.ae was
+  not kept) on a pre-CDR15 build (8bfa5cd4, loaded host): call 804-928 ms, closure 841-932, map 337-506; the run on the train's build
+  pending.
+- `:xml-stream`'s next step (`8761f6df5`): j2g refused XMLInputFactoryImpl, whose createXMLEventReader and createFilteredReader name
+  XMLEventReaderImpl, EventFilterSupport and XMLStreamFilterImpl; those three and the java.xml classes their Class constants name, to a
+  fixpoint (`javap -v` over jdk26u's build image: 24 classes, the event allocator, the eleven events of com.sun.xml.internal.stream.events,
+  their javax.xml.stream.events interfaces, ReadOnlyIterator, EventReaderDelegate, XMLConstants) appended to
+  test/clojure/jdk-extra/java-xml-classes.txt. Checked without a build: `bin/java-project read` of java-xml.edn (javac's tool 60886b49,
+  273 files converted, 0 failed) and `bin/j2g --analyze-only --program` of its forms with the suite's edges on stage 0: 8,510 classes
+  analyzed, 0 analysis failures (17.7 min; the previous AOT run's whole-program j2g had 1, XMLInputFactoryImpl).
+- CDR16 (a), the coordinator's word to build it (the option the review recommends after round 53 (1)): the eval reference records
+  namespaces.txt's java.xml rows from the extended test executable; bin/clojure-tests overlays test/clojure/jdk-extra/eval-plain.edn on
+  test/arbace-go-results.edn when CLOJURE_TESTS_GO_EXTRA is unset (clojure-xml skipped, reflect's invoke-checks-accessibility skipped with
+  its 2 assertions), so the essential suite-go on the test build alone still passes; the `--full` step `suite-go-xml` (chain go, after
+  suite-aot, whose extended executable it reuses by key) runs them on `--jdk-extra-build`'s executable. Checked: the overlay on a
+  pre-CDR15 test build (reflect's 4 tests pass; clojure-xml run by name errs as before, a regression, the control), the planner's
+  `bin/gate --full --plan` (suite-go-xml planned), test/gate's costs, chain-needs and declared-env tests.
+- `bin/clojure-tests --aot --list FILE`: a part of the suite compiled alone as --essential's subset is, against the whole AOT reference
+  (no skipped-test overlay, no strict controls): the AOT record of a change to two namespaces without the whole suite's 40 GB compile.
+- Proposed for the user: CDR17-CDR21, the by-design rows left (doc/CLOJURE-DESIGN-REVIEW.md, "Proposed (2026-11-23)").
+- Records left for the train's build (`.tmp/probe/records.sh TRAIN` in the worktree): the bench, the oracle's two files, `--aot --list`
+  (clojure-xml, reflect), the eval java.xml rows on the extended executable; then the references, classes, reap and crops-score.
+
+## 2026-11-23: the user's decisions CDR17-CDR21: the Clojure crop's last by-design rows dropped or n/a (branch `clj-1123`)
+
+The user accepted every recommendation of doc/CLOJURE-DESIGN-REVIEW.md, "Proposed (2026-11-23)" (relayed by the burst's coordinator):
+CDR17 (main-since-v4's last two), CDR18 (identity-hash) and CDR19 (method-invoke-message): the forms dropped and the expected files
+recorded again from the frozen jar, as CDR14; CDR20 (security providers) and CDR21 (class-files, tools-deps, runtime-source): n/a under
+their recorded decisions (SC4; D13 and CDR8 (b); D6 and CDR9; the user's of 2026-11-02). Alternatives were in the proposal (an overlay of
+main's answers for CDR17, aligning jrt's message for CDR19, the providers' classes for CDR20, keeping them by design).
+- Built on stage 0 and the frozen jar alone (no gate build): polymorphism.ae:176, state_errors.ae:542 and strings.ae:408 made comments
+  (the case ids of every other form unchanged); of native.ae:652 only `(outcome #(call-qualified 5 "c"))`, the element whose message
+  differed (the form's other checks kept). `bin/oracle record forms/native forms/state_errors forms/polymorphism forms/strings`: 282, 802,
+  532 and 461 cases, the three dropped and native.ae:652's form and value without the element, nothing else (compared without the ids).
+  test/oracle/known-go-amd64-frozen.edn keeps only the providers' case; the parked box's known file and test/diffcheck/known.edn lose the
+  four (diffcheck's identity-hash group with them). Classes: eval drops `:identity-hash`, `:main-since-v4`, `:method-invoke-message` and
+  marks `:security-providers`, `:class-files`, `:tools-deps` `:na`; AOT drops its diffcheck pair's `:identity-hash` and marks `:class-files`,
+  `:tools-deps`, `:runtime-source` `:na`.
+- Cells: eval 21,121 / 9 / 2 to 21,122 / 0 / 2 (5 n/a), AOT 833 / 4 / 1 to 833 / 0 / 1 (4 n/a); read and print unchanged. Left: the three
+  deferred rows, for the train's build (`.tmp/probe/records.sh train-1`, its watcher running).
 ## 2026-11-22: classes defined from class-file bytes (JD3): the loader, the interpreter and the verifier (java-bytecode-1122)
 
 The user's decision JD3 of 2026-11-22 (the entry above): Java classes defined from class-file bytes built in full, a
@@ -20389,3 +20449,27 @@ jrt-convert fixes, JD7, the native-method and clone fixes: train 3's). Branch ja
   interp1-t1; .tmp/jd/res-*-t1 in java-design's worktree) judged and recorded on next (bin/java-check --judge --partial
   --record): each test's row the run's, the others next's. The four tests both streams recorded (t04540, t04541, t04542,
   t06029) have the same rows in both. Compiled 59 now passing, interp 19, no regression.
+
+## 2026-11-24: Clojure's records on train 1's build: CDR15 (b), CDR16 (a), `:xml-stream`; Clojure 100 complete (branch `clj-1123`)
+
+The burst's build train 1 (one gate build of next and the ready branches, clj-1123 among them at d50e02e71: fb29d2672f0d7bf945b6,
+built with ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace, whose bytes gate_key hashes). The branch merged the train's
+d9217f672 (the journal's appends unioned) and mac/next 58959ee49 (the matrix and scores taken from next, recorded again below);
+next's later embedded crops' Go forms move the branch's own key, so the runs were made in a record worktree at dc1a6c337 (the
+branch with the train alone), whose key is the build's (`.tmp/probe/records2.sh` there; logs kept in its `.tmp/probe`).
+- The oracle on the four files CDR14 and CDR17-CDR19 changed: 2077 of 2077, as the known file says; native.ae:233, 234 and 237 pass
+  (the Java forms half kept). Smoke: an evaluated ^long fn is no IFn$LL and computes (25).
+- CDR15 (b)'s speed: the pre-CDR15 executables were pruned, so the bench compared the train's executable with stage 0 (an older build,
+  no hand change 39), interleaved, three runs each on a loaded host: calls 731-1021 vs 694-1114 ms, closures 799-1182 vs 751-1208, map
+  361-650 vs 346-623: equal within the noise (about 10%); a clean measure needs a quiet host and two builds of one tree (not run: no
+  extra build in the burst).
+- `bin/clojure-tests --aot --list` (clojure-xml, reflect; under bin/heavy-lock, HEAVY_MEM_GIB 24, 3 h 17 in the queue; j2g 258 s,
+  build-go 202 s): reflect 5 tests 7 assertions all pass ("improved": invoke-checks-accessibility, the event reader's closure),
+  clojure-xml 1 of 1; no regressions. test/arbace-go-aot-results.edn's reflect row recorded.
+- CDR16 (a): `--jdk-extra-build` (the AOT run's cached executable) and the two namespaces at the eval level: clojure-xml 1 of 1, reflect
+  5 tests 7 assertions; test/arbace-go-results.edn records them. The control: the reference on the test build alone (eval-plain.edn
+  overlaid) passes, reflect 4 tests and clojure-xml not run. Found: a relative CLOJURE_TESTS_GO_EXTRA ran nothing (exit 127: each
+  namespace's process runs in the suite's directory), as suite-go-xml's command gives it; bin/clojure-tests now makes it absolute.
+- Classes `:xml`, `:xml-stream` (eval) and `:xml-stream` (AOT) gone. `bin/reap --record`, `bin/crops-score --record`; `--judge --strict`
+  and `bin/records-check`: 0 problems. Clojure: read 909 / 0 / 0, eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), print 1031 / 0 / 0;
+  completeness 100.0 (99.84 at fa635f636).
