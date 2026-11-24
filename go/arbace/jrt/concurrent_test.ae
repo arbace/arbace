@@ -748,3 +748,51 @@ Error, a negative reduction IllegalArgumentException; the latch counts down as N
     (.CountDown__V li)
     (when (or (!= (.GetCount__J li) 0) (not (.Await_J_TimeUnit__Z li 5 TimeUnit_MILLISECONDS)) (not (CountDownLatch_InstanceOf l)))
       (.Error t "a subclassed latch"))))
+
+(go/func TestForkJoinPoolSchedule
+  "TestForkJoinPoolSchedule: java-rows-1124's ForkJoinPool.schedule (AscendingOrderAfterReplace's shape): delayed tasks run in
+the order of their delays, a cancelled one never, close waits for the delayed ones; a periodic task runs again until
+cancelled; schedule after shutdown is rejected; a Callable's result.\n"
+  [^{:tag (* testing/T)} t]
+  (let [p (ForkJoinPool_New_I 1)
+        ^{:tag sync/Mutex} mu (zero sync/Mutex)
+        got (make (slice int) 0)
+        delays (lit (slice int) 60 90 30 120 75)
+        fs (make (slice ScheduledFuture) 0)]
+    (range [_ d delays]
+      (let [d d]
+        (set! fs (append fs (.Schedule_Runnable_J_TimeUnit__ScheduledFuture
+                              p (RunnableOf (fn [] (.Lock mu) (set! got (append got d)) (.Unlock mu)))
+                              (conv int64 d) TimeUnit_MILLISECONDS)))))
+    (when (!= (.GetDelayedTaskCount__J p) 5)
+      (.Errorf t "delayed tasks %d" (.GetDelayedTaskCount__J p)))
+    (when (not (.Cancel_Z__Z (aget fs 3) true))
+      (.Error t "cancel"))
+    (when (not (.IsCancelled__Z (aget fs 3)))
+      (.Error t "isCancelled"))
+    (when (<= (.GetDelay_TimeUnit__J (aget fs 1) TimeUnit_MILLISECONDS) 0)
+      (.Error t "getDelay"))
+    (.Close__V p)
+    (.Lock mu)
+    (let [want (lit (slice int) 30 60 75 90)]
+      (if (!= (len got) (len want))
+        (.Errorf t "ran %v, want %v" got want)
+        (range [i w want]
+          (when (!= (aget got i) w) (.Errorf t "ran %v, want %v" got want)))))
+    (.Unlock mu)
+    (when (not (.IsTerminated__Z p))
+      (.Error t "not terminated"))
+    (when (!= (res (fn ^string [] (.Schedule_Runnable_J_TimeUnit__ScheduledFuture p (RunnableOf (fn [])) 1 TimeUnit_MILLISECONDS) "x"))
+              "!java.util.concurrent.RejectedExecutionException")
+      (.Error t "schedule after shutdown")))
+  (let [p (ForkJoinPool_New_I 1)
+        ^atomic/Int32 n (zero atomic/Int32)
+        f (.ScheduleAtFixedRate_Runnable_J_J_TimeUnit__ScheduledFuture p (RunnableOf (fn [] (.Add n 1))) 1 5 TimeUnit_MILLISECONDS)
+        c (.Schedule_Callable_J_TimeUnit__ScheduledFuture p (callableOf (fn ^any [] (Str "v"))) 1 TimeUnit_MILLISECONDS)]
+    (time/Sleep (* 60 time/Millisecond))
+    (.Cancel_Z__Z f false)
+    (when (< (.Load n) 3)
+      (.Errorf t "periodic runs %d" (.Load n)))
+    (when (!= (.String (assert (* String) (.Get__O c))) "v")
+      (.Error t "callable's result"))
+    (.Close__V p)))
