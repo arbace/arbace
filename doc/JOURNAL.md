@@ -20469,3 +20469,12 @@ The user decided (2026-11-24, through the coordinator) py-os-1124's two question
   test_sendall_interrupted. For test_sendall_interrupted and test_wsgiref's test_interrupted_write (a server's send of
   SOCK_MAX_SIZE bytes interrupted by SIGUSR1 from the client's thread, its handler returning).
 The branch rides train 5 (train 3 was already queued) with the Mac's 550, 552, 553 and 551b and py-core.
+Verified on pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`, the controls failing as they must): test_wsgiref and
+test_socket whole with the first version (835 methods, 635 pass, 0 in no class; to pass against the eval record:
+test_sendall_interrupted, test_interrupted_write, test_name_closed_socketio and the three abstract-namespace rows; the two
+LinuxKernelCryptoAPI hangs found there), then with the families restricted those two, test_sendall_interrupted,
+_with_timeout and test_interrupted_write: 5 of 5 pass; a direct probe (.tmp/os/t9.py): a raising SIGALRM handler ends a 16 MiB
+sendall with ZeroDivisionError, a returning one lets a 4 MiB sendall finish. `bin/pyi divergences` classes the record's
+test_python_malloc_stats row in `:pymalloc-stats`. Ready for train 5 (with the expected rows of the entry above, plus
+test_socket's test_sendall_interrupted and test_name_closed_socketio and test_wsgiref's test_interrupted_write; one row,
+test_python_malloc_stats, from deferred to n/a: bin/reap and bin/crops-score to record on the train's merge).
