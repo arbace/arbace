@@ -82,6 +82,12 @@ java-project-test: ## the Java project model's fixtures: test/programs/java-proj
 java-project-fetch: ## the pinned Maven artifacts of Arbace's own Java fixtures (JUnit, hamcrest-core) into the main checkout's .tmp/maven, checked by size and SHA-256 (bin/java-project fetch; FROM=DIR copies from a local repository)
 	bin/java-project fetch $(if $(FROM),--from $(FROM),)
 
+bytecode-check: ## classes defined from class-file bytes: test/bytecode's programs run, its verifier cases and 900 mutants judged by arbace.lang.Bytecode against the JDK's results, with the negative control (bin/bytecode-check [EXE]; seconds; doc/classes/BYTECODE-SURVEY.md)
+	bin/bytecode-check $(EXE)
+
+bytecode-record: ## rewrites test/bytecode/expected.edn: the programs on jdk26u's java and HotSpot's verdicts of the mutants (bin/bytecode-check --record-jdk [EXE])
+	bin/bytecode-check --record-jdk $(EXE)
+
 jrt-files-check: ## go/arbace/jrt.ae's file lists against go/arbace/jrt's files, with its negative control (bin/jrt files-check --control; seconds)
 	bin/jrt files-check --control
 jrt-deflate: ## jrt's Deflater against the JDK's recorded bytes, 171 pairs, with its negative control (bin/jrt deflate [EXE]; seconds)
@@ -170,7 +176,7 @@ gate-subsets-check: ## GD2: the committed subsets against the rule's, exit 1 on 
 	bin/gate-subsets --check
 gate-demos: ## GTS42 (a): a classes file and a j2g comment changed in a scratch worktree, the full plan of each (after the builds it needs), reverted (bin/gate-demos; RECORD=test/gate/clean-TAG.edn)
 	bin/gate-demos $(if $(RECORD),--record $(RECORD))
-gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock waiting in turn, oldest first (FIFO in front of the flock, GT5; bin/heavy-lock --queue)
+gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock, oldest first, each with its slot (1 or 2) or waiting (FIFO in front of two memory-gated slots, GT5, 2026-11-23; bin/heavy-lock --queue)
 	bin/heavy-lock --queue
 cover-build: ## GT8.3: the cover build, the gate's executable and test build with Go's coverage of the crops' code under check, kept in ARBACE_GATE_EXES/cover-KEY20 (bin/cover build; heavy: run under the host's lock)
 	bin/cover build
@@ -1132,6 +1138,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
 .PHONY: j2g-unit
+.PHONY: bytecode-check bytecode-record
 .PHONY: program-mutant build-go-mutant-test
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)

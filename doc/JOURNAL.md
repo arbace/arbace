@@ -19087,3 +19087,1360 @@ pyctypes' Go edited on its printed text and read back (one hold of the big lock)
 Proof: `bin/pyi check --aot --lib-test --fresh --only` on the 13 ids (the AOT module from the new world's committed aot forms and the
 read-back pyctypes): 12 pass, 1 classed (the subinterpreter test), 0 failing; the three controls fail as they must. `:c-accelerator-gaps`
 now holds that one method. The records wait for train 2's executables, as before.
+
+## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
+
+Branch `java-design-1122` from mac/next `99b2c942a`, next `7aa328e67` merged (queue 517's three rounds). Scope: test/java/divergences.edn's
+by-design and harness-design classes at interp and compiled, :speed-hang and :speed-hang-compiled, and queue 517's leftovers
+(DECISIONs 517-1 (a), 517-2 (a), reach.ae's class literals, t05150). doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-design-1122"
+lists what was built: the JVM's array limit and StringBuilder's growth limit (jrt), StackTraceElement's module constructor, ClassLoader's
+getPackage(s), findLoadedClass, parallel-capable registration and assertion status, URLClassLoader.addURL's duplicates, URLClassLoader,
+StandardMBean and FileLock extendable, a class literal rooting its class's initializer and constructors (j2g's reach.ae), and three
+world slices: java.base's XML parser (Properties' XML form), java.security.jgss's shared classes (Kerberos, GSS-API), javax.xml.datatype
+(with jdk.xml.internal.SecuritySupport moved out of javac's world); j2g's renames for their eight names the world held; java-check's
+uncaught rule taken to main's thread group (517-2 (a)); :synthetic-lambdas by design (517-1 (a)). Sources studied: jdk26u at baf63fb
+(/root/jdk26u): the slices' files, src/hotspot/share/oops/arrayOop.hpp (max_array_length), java/lang/AbstractStringBuilder.java and
+jdk/internal/util/ArraysSupport.java (newCapacity, newLength), java/lang/ClassLoader.java (ParallelLoaders, the assertion maps,
+getPackages), sun/rmi/runtime/NewThreadAction.java (the system group), jtreg's MainWrapper's rule as run.ae describes it.
+
+The world's forms were read by `bin/jrt-convert predict` (repr/java's vendoring read with context, javac's tool 8e45bec2 under
+REPR_JAVA_STALE_OK) and laid into jdk/forms write-ahead (`bin/jrt-convert verify` at the next night); jdk/sources.txt, the provenance
+counts, the module table (bin/jrt modules), jdk/provides.txt (bin/jrt provides) and jrt's manifest (bin/jrt manifest) regenerated.
+The foreign memory API's slice (jdk.internal.foreign and java.lang.foreign without the linker; Utils and AbstractMemorySegmentImpl
+derived overlays; a native segment's buffer over its block, jdk.internal.jrt.NativeArrays) waits on branch `java-design-ffm-1122`:
+three of its files (Utils, LayoutPath, AbstractLayout) read only with the whole closure as context, the convert step's chunked read
+(about 10 GiB), which the build session makes first.
+
+Not proven yet: the build (j2g's edge recorded afresh, then `bin/arbace-go --build`) and the compiled rows run in one heavy-lock
+session queued at 07:36 behind four sessions; the interp rows run on its executable after it. This checkpoint's records: :synthetic-lambdas
+(6 rows deferred -> design); reap 0 problems; crops-score --judge --strict, records-check 0 problems; Java completeness 0.9612 (next's).
+
+## 2026-11-22: java-design-1122: the first heavy session (14:00-14:45 UTC) built nothing; fixed; the second queued
+
+The session (java-design-b1's .tmp/build.sh under bin/heavy-lock, queued at 07:36, its turn at 13:54) ran:
+- the foreign memory API's forms: the convert step's chunked read of the whole closure (1,595 s) read every file of the slice but
+  three: jdk.internal.foreign's Utils and LayoutPath and layout/AbstractLayout call MethodHandles.filterValue, collectCoordinates
+  and insertCoordinates, which jrt's java.lang.invoke (overlay/jdk, F15) has not: javac's attribution errs and the converter's
+  model asserts (javac_model.ae:155). Fixed on `java-design-ffm-1122`: LayoutPath and AbstractLayout derived overlays and
+  Utils's derivation extended, each such statement a throw (test/jrt/derive.ae; the var handle combinators are not in the Go
+  build); not a reader limit.
+- candidate 4f3abed9f: `bin/j2g-edge update`'s j2g run refused duplicate Go names, three of round 1's XML parser
+  (jdk.internal.org.xml.sax's ContentHandler and Attributes beside java.net's and javax.naming.directory's, jdk.internal.util.xml.impl's
+  Pair beside java.net.http's): the names check of round 2 had looked at the new slices alone. Renamed (arbace/j2g/names.ae:
+  Sax_ContentHandler, Sax_Attributes, Xml_Pair; a96273ac5), and the session's last candidate pointed at that commit.
+- a96273ac5: the edge recorded (184 classes beyond jdk/edge.edn's; jdk/edge.edn, jdk/javac/edge.edn and its provenance's
+  :jdk-edge committed as 8986f75ac), then the build: repr/go's printer refused jrt's setPackageAssertionStatus (`(if ...)` in
+  an expression position). Fixed (956dae9c4); the changed jrt files printed and gofmt'ed by hand since (bin/repr-go print).
+  The build's gocache_trim cut the shared Go cache from 17.5 to 11.5 GB at its start (queue 517's finding 2).
+The session ended with the lock released; the second (the same script: the FFM forms first, then the candidates' edge, build and
+compiled rows; interp rows on its executable after it) is queued behind ten sessions. No row moved; records as at the checkpoint.
+
+## 2026-11-22: java-design-1122: the user's JD1-JD9 applied (journal 195fafabb's decisions)
+
+- n/a classes keyed on their rows (test/java/divergences.edn, :kind :na, each with its reason): :launcher-tests (JD1: t08310,
+  t08312-t08322, out of :jvm-tools), :hotspot-diagnostic and :hotspot-beans (JD5: their kind :na), :jit-loops (JD6: the 15
+  hotspot/jtreg/compiler tests of :speed-hang, and t03713, t03743 of :speed-hang-compiled; timeouts only), :heap-sized-output (JD2:
+  t07649, out of :memory-limit).
+- t05291 a wall-clock limit: bin/java-check's test_wall, a timeouts.txt line "NAME SECONDS wall" runs the test under SECONDS of wall
+  time and no CPU limit (limited_cpu unlimited); ThreadSafetyTest at 240 s; test/java/timeouts-test.bash checks the call, the
+  exports and the line (40 checks pass). Its rows run in the queued session (bin/java-check from the built commit).
+- t04683 and t05126 stay in :speed-hang(-compiled), deferred as jrt bugs. JD8, JD9 left as they are; JD7 by design; JD3 to the new
+  java-bytecode stream (the define-bytes rows left to it). JD4 (javac's API at the compiled level) is this stream's next.
+- crops-score found a bug the n/a classes exposed: cell-rows took a record row's second element as its result, which in Java's rows
+  ([ID NAME RESULT REASON]) is the jtreg name, so every id an :na class names counted n/a in every cell (read 0.9950, print 0.9940,
+  AOT 0.9980). row-result takes the row's first keyword after the id (else the second element, OCaml's string results); a self-test
+  case with its control (the old rule takes the passing row). No other crop's score moved.
+Cells: Java eval 3,106 / 120 / 99 -> 3,106 / 101 / 84 (34 n/a), AOT 3,079 / 158 / 88 -> 3,079 / 139 / 86 (21 n/a); completeness 0.9612
+-> 0.9651 (exact 0.965067), independence 1.0. reap, crops-score (--self-test, --judge --strict), records-check: 0 problems.
+
+## 2026-11-22: java-design-1122: JD4 (a), javac's API at the compiled level (write-ahead: its rows run in the queued session)
+
+- The user's JD4 (a): the 56 tests whose sources name javac's API (bin/java-check's tool_test rule: com.sun.tools.javac,
+  com.sun.source, javax.tools, javax.lang.model, javax.annotation.processing, java.util.spi.ToolProvider; langtools-run 42,
+  jdk-other 11, jdk-run 3) now build at the compiled level as javac's tool is built. bin/java-check's javac_tests writes
+  WORK/javac.list before java.check/shards, which puts those tests into shards of their own (marked WORK/j2g/sK/javac; a split
+  shard's halves keep the mark); compiled_shard gives such a shard's j2g run javac's world beside the tests' forms and the compiled
+  namespaces (jdk/javac/forms, overlay/jdk/javac/variants, jdk/edge.edn and jdk/javac/edge.edn: bin/arbace-go --build-java's
+  inputs) and keeps the program by key in .tmp/java-check/javac-prog/KEY (the javac world's files, AOT.key, the j2g executable,
+  the tests' forms keys), reused while the key holds; the runs get the platform property as on the tool
+  (-Djdk.internal.jrt.javac.platform, tool_exe's bin/repr-java platform-dir, now set for the compiled level too).
+- Alternatives considered: one program a test (56 j2g runs of javac's world, 28-40 GB each: hours); running the compiled level's
+  javac tests on javac's tool (that is the interp level's F6, not the compiled level); the javac world in every shard (every
+  compiled part pays javac's j2g). Chosen: the user's one program, cached by key.
+- Probe (--analyze-only, t05992 and the control t03208): javac.list holds t05992 alone; s0 = t03208, s1 = t05992 marked javac.
+  The gate's java-compiled-full declares the javac world's files as inputs; the three parts with javac tests at 45 GiB until a
+  night measures them (javac's tool build's j2g, 28.6-40.8 GB).
+- Their rows (.tmp/jd/compiled-javac.list: the 56 and the control t03208) run in the queued heavy session after the build. Today
+  at compiled: 23 :design-also-compiled, 17 :javac-api, 11 :launcher-tests (n/a), 2 :jvm-tools, 1 :classfile, 1 :classloading,
+  1 pass.
+
+## 2026-11-23: java-design-1123: the gate build's failure found (an import cycle) and fixed; FFM merged; the session queued
+
+- The failure of java-design's build at 00:53 (java-design-b1's `.tmp/build.sh`, its log in the ffm worktree's
+  `ffm-session.log`; both candidates, c8b77a3a4 with FFM and fad2ae534 without): `bin/build-go`'s "import cycle not allowed":
+  `arbace/jrt` imported `arbace/lang` from `j2g_classes.ae`. Round 2 put java.security.jgss in the world; its sun.security.jgss
+  classes are JDK packages (package jrt), but org.ietf.jgss, the GSS-API itself, was not in `arbace.j2g.names/pkg-of`'s JDK
+  prefixes, so its eight classes went to package lang as a user's (`J_org_ietf_jgss_Oid_J`) and jrt's krb5 classes referenced
+  them (lang imports cinterp, which imports jrt). Fixed in general: `pkg-of` takes `org/ietf/` as a JDK package (16211f7e8).
+  Alternative not taken: renaming the classes into jrt by the renames table (eight entries for what is a package rule).
+- Branch `java-design-1123` from `java-design-1122` (fad2ae534), mac/next (fa635f636) merged: conflicts in the journal (both
+  sides), `jdk/edge.edn` (the branch's, a superset), the provenance files (counts summed by hand: jdk/ 3,827 sources and 4,067
+  forms with FFM; javac's 824 and 915, next's less SecuritySupport), `test/reap/matrix.edn` and `test/crops/scores.edn` (next's,
+  recorded again after the rows). No `bin/jrt-convert update`: queue 520's reader change (835e66a3 -> 83a29bfb) moved no form
+  of jdk/ (JCS52 (a)'s As built), so the branch's forms read by the older reader stand; `jrt-convert verify` of the night
+  checks it.
+- `java-design-ffm-1122` (c8b77a3a4, round 3: the foreign memory API's segments, layouts and arenas, its derived overlays and
+  forms) merged (1770213dc): its build had failed on the same cycle, after j2g translated it. jrt's hand-written
+  `Utils_CheckNonNegativeArgument` stand-in retired as the branch did; `bin/jrt-convert derive --check` of the five derived
+  overlays: same.
+- j2g: `System.setProperties(Properties)` for translated code (m/j2g-static?, out.ae; b3fe74719): GetSystemProperties (t04794)
+  compiled stopped at "jrt lacks java.lang.System.setProperties"; J2g_SystemSetProperties existed for the interpreter's path.
+- Queued under the big lock (`.tmp/jd/session-1123.sh` in the java-design worktree, run in java-design-b1 detached at
+  b3fe74719): `bin/j2g-edge update` (committed there), `bin/arbace-go --gate-build` (amd64), then bin/java-check's compiled
+  level on java-design's lists (compiled1: round 1-3's rows; compiled-javac: JD4's 56 tests naming javac's API, one program
+  with javac's world) and the heavy interp row (t05445); then outside the lock the interp rows (interp1, 2 jobs,
+  `session-1123-light.sh`); then `.tmp/jd/post-1123.sh` judges and records them (partial), reap, crops-score, records-check.
+- Scope (the coordinator, 2026-11-23): the Mac (538) takes Java's read 49 and print 7 deferred rows; this stream keeps JD4 and
+  the eval/AOT rows that are not the bytecode VM's (JD3, java-bytecode). The doclint finding of the day (the tool's
+  ServiceLoader variant also replacing `stream()`, its providers as `ProviderImpl`s; `bin/jrt-convert vet --forms-add
+  jdk/javac/forms --variants overlay/jdk/javac/variants ServiceLoader.ae` vets a javac-world variant by day) left for the Mac,
+  the patch in `.tmp/jd/doclint-stream-variant.patch`.
+
+## 2026-11-22: classes defined from class-file bytes (JD3): the loader, the interpreter and the verifier (java-bytecode-1122)
+
+The user's decision JD3 of 2026-11-22 (the entry above): Java classes defined from class-file bytes built in full, a
+class-file loader with a bytecode interpreter and verifier. Branch java-bytecode-1122 from mac/next 195fafabb; the
+design note doc/classes/BYTECODE-SURVEY.md (the rows, where it goes, the loader, the interpreter, the verifier, the
+stages, what it does not do; its "As built: stages 1-3").
+
+Design taken: a class defined from bytes is an interpreted class of the Java forms' interpreter (a Compiler$CF$Klass made
+through the host, Compiler$CFGo$GoHost on Go: Dyn objects, Dyn's slots, the member tables, CF$Klass.init's JLS 12.4.2,
+the shadow stack of stack traces), its methods CF$Meths whose body (BytecodeBody, a CF$Node) runs their bytecode; the
+loader, the interpreter and the verifier are Java forms in arbace/lang (Bytecode.ae, BytecodeFile.ae, BytecodeCode.ae,
+BytecodeVerifier.ae), translated into the executable and into every program, so they mix with the Java forms' classes
+and the world's through one class model. Alternatives not taken: the interpreter in jrt as Go forms (no access to CF's
+Klass, Meth and Frame: a second object model); decompiling class files into Java forms (JCS302's (b): structured control
+flow from any bytecode, and a verifier still needed); java.lang.classfile's parser and its verifier port (the class-file
+API in every program; the brief asks the verifier ported from the JVMS).
+
+Written from the JVMS (Java SE 26 edition: chapter 4's format, 4.8's format checks, 4.10.1's type checking rules,
+4.10.2's inference, chapter 5's loading, linking and resolution, chapter 6's instructions); HotSpot (openjdk/jdk26u
+src/hotspot/share/classfile/classFileParser.cpp, verifier.cpp, prims/jvm.cpp's JVM_GetMethodParameters) read for its
+messages and its failover and padding rules only, no code copied. jdk26u's Java reused as the world has it:
+sun.reflect.annotation.AnnotationParser and AnnotationType (annotations of a class defined from bytes),
+java.lang.reflect.Executable's verifyParameters rules (ported into j2g's getParameters).
+
+Built (stages 1-3, write-ahead of the rows' build; doc/classes/BYTECODE-SURVEY.md, "As built: stages 1-3"):
+- arbace/lang/BytecodeFile.ae (the parser, JVMS 4.1-4.8 with HotSpot's ClassFormatError texts), Bytecode.ae (define:
+  name, prohibited package, duplicate per loader, superclass and interfaces through the defining loader, the Klass's
+  layout, methods, vtable, publishing, enums, the attributes as jrt's data with new W records for MethodParameters,
+  BytecodeAnnotations over jdk26u's AnnotationParser, linking on CF$Klass's new linker field), BytecodeCode.ae (every
+  instruction of JVMS 6.5; field and method resolution; invokedynamic for LambdaMetafactory (metafactory,
+  altMetafactory), StringConcatFactory, ObjectMethods, SwitchBootstraps, ConstantBootstraps' constants; jsr/ret),
+  BytecodeVerifier.ae (4.10.1 type checking with the StackMapTable and the protected check, version 50 failing over to
+  4.10.2 inference, jsr/ret by modified locals).
+- jrt: go/arbace/jrt/defineclass.ae (new), classloader.ae (ClassLoader.self; loadClass by delegation; findClass in
+  ClassLoader_I), reflect.ae (getClassLoader's defining loader, forName through a user loader, JDK annotation types'
+  proxies as jrt's annotation objects), annotation.ae (SetAnnotationSource, ExceptionProxy members thrown, proxies'
+  annotation type), classdata.ae (W records, executableParameters, getDeclaringClass through the loader); manifest
+  regenerated (bin/jrt manifest: defineClass x3, findClass, resolveClass).
+- j2g: dyncf.ae's natives setAnnotationSource, setInit, setDefiningLoader; main.ae Class.describeConstable known to
+  compiled call sites, ClassDesc.ofDescriptor rooted; out.ae getParameters over W records (jdk26u's verifyParameters).
+- overlay/jdk MethodHandles.Lookup.defineClass through arbace.lang.Bytecode.define (reflectively); jdk/forms'
+  MethodHandles.ae as bin/jrt-convert predict reads it (j2g's analysis of the predicted world: 0 failures).
+- bin/bytecode-check (make bytecode-check, bytecode-record; test/bytecode): javac's programs, a version 49 class, a
+  jsr/ret class, the rows' verifier classes and 900 mutants against the JDK's results (test/bytecode/expected.edn,
+  HotSpot -Xverify:all), with a negative control.
+Proofs so far (light, no build): the Java forms interpreted at the REPL of the gate executable 92a96093a59c (.tmp/dev's
+harness): the programs' output byte for byte the JDK's; GetSimpleNameTest's twelve classes' simple names jdk26u's;
+bin/bytecode-check on that harness: all pass, control fails as it must (1,200 earlier mutants also agreed with HotSpot,
+after fixes: invokedynamic's zero bytes, max_locals vs arguments, StackMapTable format errors, exception-table offsets,
+switch padding before version 51); bin/jrt build and the jrt tests of Loader, Reflect, Proxy, Annotation, Classdata,
+Package, Manifest pass; bin/reap --record, bin/crops-score --record and --judge --strict, bin/records-check: 0 problems,
+no record changed.
+Not yet proved: the rows (one bin/arbace-go --build queued under bin/heavy-lock, .tmp/bin/build.sh, which also runs
+bin/bytecode-check and java-check interp and compiled over the 11 rows' tests and 60 regression tests of class loaders
+and type annotations, saved for --judge). Left: defineHiddenClass, defineClass(String, ByteBuffer, ...), line numbers
+in bytecode frames; NoSuchFieldError, BootstrapMethodError, ClassCircularityError, UnsupportedClassVersionError (not in
+the world: their superclasses stand for them).
+## 2026-11-23: JD3's rows built and run (build #2); JCS51's processors through the class-file loader (java-bytecode-1122)
+
+Build #2 of java-bytecode-1122 at 65c1bc58c (bin/arbace-go --build under the big lock, the build worktree
+.tmp/worktrees/java-bytecode-build; 22 GB peak, about 2 h 20 min with the queue): bin/bytecode-check on the built executable
+passes (programs, verifier cases, 900 mutants as HotSpot, the control failing). bin/java-check interp and compiled over the 11
+rows' tests and 60 regression tests (saved, not recorded: the records are taken on the train's shared build, the user's rule of
+2026-11-23): compiled, all 11 JD3 tests pass (22 rows' compiled half) and t04878, t07643, t06005 beside them, no regression;
+interp, 7 of the 11 pass with t04878 and t07643, t04712-t04715 failing on AnnotationTypeMismatchExceptionProxy.generateException
+left untranslated, and t04538 (ExceptionHidingLoader) regressed (forName through a loader whose loadClass returns null returned
+null). Both fixed (3860d35e1): j2g roots the three ExceptionProxies' generateException (main.ae; jrt's annotation members call
+it, no Java code of the world does); jrt's Class.forName(name, init, loader) throws ClassNotFoundException for a null, as
+HotSpot's SystemDictionary does. Merged mac/next fa635f636 (cb65d32ea; the journal kept both). doc/classes/BYTECODE-SURVEY.md,
+"As built: stage 4, the rows' first build".
+
+The user's decision of 2026-11-23 (relayed by the coordinator): JCS51's annotation processors (:diag-processors, 25 diagnostics
+rows) are loaded from their class files through JD3's loader, with an AbstractProcessor subclass (DynSub) in javac's tool world,
+instead of JCS51 (a)'s processors given as sources. Built (write-ahead of javac's tool build): javac on Arbace's file manager
+(overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/FileManager.java) answers getClassLoader(location) with a DirLoader over
+the location's directories (it answered null: NameProcessIterator's loadClass failed, proc.processor.cant.instantiate), which
+defines NAME.class by ClassLoader.defineClass, as JavacFileManager's URLClassLoader does (jdk26u
+src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java, getClassLoader, read for the behaviour, no code
+copied); its forms read by bin/repr-java read-jdk --check --no-javac of the overlay's six files (the five unchanged ones byte for
+byte the committed forms). j2g: javax/annotation/processing/AbstractProcessor on model/class-supers (javac's tool world alone, as
+F6's). None of the 25 tests checked the processors' other needs yet (javac's processing environment through reflection's member
+tables, Module.addReads in ensureReadable); the proof is javac's tool built at the train's executable and bin/java-check
+--levels diagnostics over the 25. Alternatives not taken: JCS51 (a)'s sources-to-forms path (superseded by the user); a
+closed list of processors compiled into the tool (JCS51 (c)). The class-file API rows at the compiled level (t05992-t06008,
+t06042, t06043, t06072, t06156, t06329, t06390) need no class-file loader: they read class files with java.lang.classfile and
+com.sun.tools.javac.Main, which the compiled world lacks (JD4's javac world at the compiled level, and java.lang.classfile in the
+shipped world); they pass at interp.
+
+## 2026-11-23: Scheme's last by-design rows: SCS4 (d)'s records, SCS38 (a) (branch `smalls-1123`, from mac/next `fa635f636`)
+
+The burst's smalls stream (C, Scheme, Haskell tails; .tmp/goal/burst-1123-brief.md).
+- SCS4 (d) (the user, 2026-11-22; built by queue 519, 743fd799b and ea98d1599: (rnrs)'s `/` and `angle` give R6RS's answers, the
+  console is two ports) had left `:chez-exact-zero` and `:chez-console-port` matching nothing, "kept until the records are made
+  again on the main host". Made: `bin/si check --only racket/base --only racket/io/ports --only racket/exceptions --record` and the
+  same with `--aot` (stage 0; the record's other 48 and 50 entries kept): racket/base and racket/io/ports pass at both levels, the
+  compiled runs equal to the interpreted ones; the two classes removed. No other program run: nothing else changed.
+- SCS38 (a) (the user, 2026-11-23, through the coordinator; doc/scheme/SCHEME-SURVEY.md, "As built: SCS4 (d)", Proposed): the
+  racket/exceptions test that compares a lexical violation's condition-message text with Racket's own words leaves the judged
+  cases: `:chez-condition-message` `:kind :na`, its reason written in the class (R6RS specifies a condition's types, not its
+  message's text). Alternatives not taken: (b) keep it by design; (c) give si's lexical violations Racket's words (another
+  implementation's unspecified text; Chez's mats expect Chez's).
+- Cells: Scheme eval 2,835 / 3 / 0 -> 2,837 / 0 / 0 (5 n/a), AOT 2,513 / 3 / 0 -> 2,515 / 0 / 0 (3 n/a); completeness 0.9994 ->
+  1.0000 (100), independence 1.0. Runs: `bin/si divergences` (no run), bin/reap --record (0 problems), bin/crops-score --record,
+  --judge --strict (0 problems), bin/records-check.
+
+## 2026-11-23: C's "about 80 rows the Mac did not run" are synth-c23's 79, run on the main host: pass, records unchanged (smalls-1123)
+
+queue 522c's report (the Mac, 2026-11-22) counted 2,275 eval and 2,279 AOT passes in its whole runs against records of 2,359 rows and
+left "about 80 rows" to the main host. They are synth-c23's 79 programs: bin/lib/ci/check's default corpus list (`all`, queue 150)
+does not name synth-c23 (test/c/corpora.edn's :synth-c23, GT8.6), so a whole `bin/ci check` without `--corpus` never runs it (07dfe5c2f
+ran it beside the whole runs). Run on next's tree (fa635f636; the tools' host the gate executable 8bfa5cd4, whose repr/c and arbace/c
+equal next's; tools/cirun built from the checkout): `bin/ci check --corpus synth-c23 --record` 79 of 79 pass and `check --aot --corpus
+synth-c23 --record` 79 of 79 (compiled equal to interpreted), the controls holding (decl-alignment against decl-abstract-declarators'
+gcc run differs). Both records unchanged byte for byte, so C's eval 2,355 / 0 / 0 and AOT 2,358 / 0 / 0 stand. Not changed: the
+default list (adding synth-c23 to `all` would make every whole run 79 programs longer; the gate's c-check parts name their corpora).
+
+## 2026-11-23: ocaml-1123, OCaml's AOT cell at the level a case needs, the tools at the compiled level, the ticket lock (branch `ocaml-1123`, from mac/next `fa635f636`)
+
+The burst's OCaml stream (the coordinator's brief .tmp/goal/burst-1123-brief.md; scope after 09:00: the AOT cell, the compiled chain
+and the light level's whole re-records; the eval rows the Mac's, queue 539). Before: OCaml AOT 513 / 22 / 82 (59 n/a).
+- **The AOT cell judged at the level a case needs** (528-8 (a), the user 2026-11-22: the tool rows at the compiled level where the
+  light level does not fit; the coordinator: "AOT at the level the rows need"): `bin/reap`'s `:other-level` source key (test/reap/main.ae's
+  `other-level-pick`): a classed light-level non-pass (no `:na` class) that the compiled level's native record passes is a pass. Read
+  from `test/ocaml/check-aot-compiled-native.edn` and `check-suite-aot-compiled-native.edn` (the native path's compiled records; the
+  oracle path's 2026-11-05 `check-aot-compiled.edn` is not read: it would have taken 15 cases). A record not there yet takes nothing.
+  `bin/crops-score --self-test` holds the rule with four controls. Alternatives not taken: any class (also `:na`); a list of marked
+  classes (`:compiled-level`, first written, dropped: a case either AOT level passes is an AOT pass whatever its light class); the light
+  level's CPU limit raised for the slow programs (the night's budget).
+- **The tools at the compiled level**: header.awk's objinfo and dumpobj modes at aot=2; bin/oi's compiled check judges the tool's
+  compiler output after the run, links a tool's own units (tool.units), and takes def838bc9's heavy_run around build-go.
+- **The runtime's lock a ticket lock** (528-14 (a): testyield): jdk/ocaml/ocaml/rt/Gil.ae.
+- **Proofs**: `bin/reap` 0 problems (the matrix unchanged until the records land: the native compiled records are not there yet);
+  `bin/crops-score --self-test` passes (the rule's case and its four controls); testyield passes at the light level by its own
+  verdict (its record's fail the control).
+- **Left running** (detached, the worktree's `.tmp/oc/chain.sh`, log `.tmp/oc/chain.log`): the 17 tool rows at the compiled level
+  (queued 9th for the big lock at 09:3x), then the light level's whole re-records. After it: commit check-aot-compiled-native.edn,
+  check-aot-native.edn, check-suite-aot-native.edn and aot-known.edn's stale entries, then `bin/reap --record`, `bin/crops-score
+  --record`, `bin/records-check`. chain2 (oc-compiled) writes the whole native compiled records from its older tree: at its merge, its
+  file first, then this branch's 17 rows (`--record --only-list .tmp/oc/tools.txt` again, or the rows copied).
+
+## 2026-11-23: the user's decisions on ocaml-1123's two questions
+
+Asked through the coordinator from ocaml-1123's report; answered by the user:
+- The counting rule: (a), an AOT case passes when either AOT level (the light level or the compiled level) passes it (`bin/reap`'s
+  `:other-level`, as built on ocaml-1123). Alternative not taken: (b) only the tool rows at the compiled level.
+- The toplevel rows at AOT (tool-caml-tex/ellipses, redirections, self-contained-toplevel/main): (a), oi embedded in the compiled
+  toplevel, the Mac's queue 544. Alternatives not taken: (b) n/a at AOT; (c) by design.
+- ocaml-1123 continues the AOT list: ocamldoc's five rows at the compiled level, int64-unboxing, unboxed-primitive-args, the gc-roots
+  tests' `@mods` at the AOT levels, opam base64 and fmt; the Mac's 539 handles backtrace/lazy and user_data_regression at eval.
+
+## 2026-11-23: ocaml-1123, round 2: the user's AOT list (branch `ocaml-1123`; build worktree `.tmp/worktrees/ocaml-b`)
+
+The user's list (the previous entry): the gc-roots tests' `@mods`, int64-unboxing, unboxed-primitive-args, ocamldoc's five rows at
+the compiled level, opam base64 and fmt. One batch of bin/oi edits (its text is the native library's key: each edit costs a rebuild of
+about 50 minutes), written by rename so that the running compiled check kept its file; the light-level runs in a second worktree
+(`ocaml-b`, the branch's head detached), since a run rewrites `.tmp/oi/corpus.tsv`, which the running check's judgment reads.
+- Built (doc/ocaml/OCAML-SURVEY.md, "The user's list after the decisions of 2026-11-23"): `@mods` at the AOT levels (o2j_dump types
+  the units first, oi_mods), the native-only C stubs' class at oi's level alone, header.awk's gen mode with bin/oi's `gen_prog`
+  (unboxed-primitive-args: gen_test.ml run on oi, the generated main and stubs from the run directory), a helper of C alone at the
+  AOT levels (sigint.c, oi_helper), ocamldoc at the compiled level (the plugins in the compiled Dynlink registry, its arguments and
+  output), and the suite's compiled level with C stubs (a shard with the C API's main).
+- Light level (`bin/oi check --aot --only-list`, six programs, no record): gc-roots/globroots_parallel, globroots_parallel_spawn_burn
+  and int64-unboxing/test pass by their own verdicts; globroots_sequential stops at the CPU limit (aot-slow.edn; the compiled level's
+  run is queued); lib-threads/signal and delayintr fail as the light level receives no signal of another process (aot-known.edn,
+  `:unix-java`, OT24 (a); their compiled rows queued: HostSys, OC216 (a)). unboxed-primitive-args' translation passed 7.6 GB, so it
+  was stopped and runs alone under the big lock. The negative controls: each row's record before this change (classed), and the light
+  run's judgment, in which signal and delayintr fail against their own references.
+
+## 2026-11-23: ocaml-1123, round 2 corrected: unboxed-primitive-args at the compiled level alone
+
+The previous entry's light run of unboxed-primitive-args alone under the big lock was not made: header.awk's gen mode is the compiled
+level's alone (c6bca5151), as the generated program's Lambda (600 KB) took the light level's one translation process past 7.6 GB and
+the gate declares the light level's whole run (oi-aot, oi-suite-aot) at 4 GiB; the light level keeps its class (`:c-api`, deferred),
+and the compiled level's pass counts by the counting rule (a). Queued at hand-back (the build worktree's `.tmp/oc/compiled-b.sh`, log
+`.tmp/oc/chain-b.log`): the compiled level's run of tool-ocamldoc/t01-t05, gc-roots/globroots_sequential, lib-threads/signal,
+delayintr and unboxed-primitive-args, whole under the big lock (its translation process), `--record`; then the suite's compiled run
+of opam/base64/test and opam/fmt/test_fmt (`--record`). In the branch's worktree (`.tmp/oc/finalize.sh`, log `.tmp/oc/finalize.log`),
+after the 17 tool rows' compiled run (`.tmp/oc/chain.log`'s "tools: exit"): the light level's whole re-records.
+
+## 2026-11-23: ocaml-1123: 539-2 (a) at AOT, opam/cmdliner/test_arg n/a
+
+The user decided 539-2 (a) (the Mac's 539 report, through the coordinator): opam/cmdliner/test_arg is n/a, since it needs
+B0_testing.Test.Snapshot.exp_loc, which no released b0 provides (b0 0.0.6 is opam-repository's newest at 5c9b817c5), so it cannot be
+built from pinned sources. Applied at AOT here: test/ocaml/divergences-suite-aot.edn's `:na-unreleased-dependency` (the row leaves
+`:opam-not-run`); the Mac applies it at eval (539's follow-up). Alternative not taken: (b) by design until a b0 release carries the API.
+opam/re/expect and sexplib0_test stay `:opam-not-run` until the Mac's 539 follow-up (the Jane Street closure: ppxlib, base,
+ppx_expect, ppx_inline_test) merges; their AOT rows follow it.
+## 2026-11-23: queue 540, C's and C++'s print rows (the VM; branch `540-c-cpp-print` from next fa635f636)
+
+C's print level had 12 deferred rows, its read level 5 (test/repr/c/roundtrip-known.edn, parse-check-known.edn). C++'s print level had
+10 (the own records, plus the hotspot files no record holds). The VM has no compiled host for the checkout's repr/c: stage 0 evaluates
+the namespaces the checkout changed (RT.toolSource). So the rows that need a compiled host (the evaluator's 10,000-call depth, the read
+budget) are left to the main host's records, as its findings say.
+- repr/c (convert.ae): an invocation whose expansion holds __LINE__ was printed expanded. It is now printed as itself after
+  `#line N /*arbace*/`, N the invocation's presumed line (lex/position, #line applied), when the invocation stands on one line; one over
+  several lines is still printed expanded (gcc's __LINE__ there need not be the port's). The reread computes the same N from the
+  print's #line, so the :c/macro texts are equal, and place-directives! drops the marked directive. __COUNTER__ is still printed expanded.
+  - sqlite's shell.c: its asserts no longer bring musl's `#define stderr (stderr)` back expanded. Levels 1-2 pass (they differed).
+  - quickjs's unicode_gen.c: its last `assert(0);` is one expansion again, and its gcc -O0 object equals the original's (the VM's
+    aarch64 gcc, by hand; the recorded l3 is amd64's, the main host's to record again).
+  - shell.c's level 3 still differs, by gcc -O0's layout-dependent branches at a one-line `if( zCol==0 ) continue;` that the print
+    lays over two lines (shown by hand: the print with that line joined moves the difference to the next such function). That is
+    CS81 (a)'s "rest", so shell.c moves from :macro-context to :objects, by design (DECISION 540-2 in the report).
+- bin/lib/repr-c/roundtrip: REPR_C_MAX_NEST defaults to 20,000, as parse-check sets it (the main host's suggestion). On a compiled host,
+  limits-declparen.c, -exprparen.c, -pointer.c and -structnest.c pass levels 1-2 (the main host's run: 167 s, 2.8 GB). An evaluated host
+  stops at the evaluator's depth as before (the VM: limits-exprparen.c, "panic: stack overflow", 6 s). limits-caselabels.c nests
+  100,000 labeled statements, past the bound, and stays (DECISION 540-1).
+- repr/cpp (print.ae): a text form whose text begins with `#` (or `%:`) is printed on the line before it. It is never a directive (a
+  directive is c/directive), and at a line's start the reread took it for one: g++.old-deja's g++.other/crash41.C, `int a; #// ...`.
+  It now passes level 1 (gxx-old-deja-every-10 --only-list).
+- repr/cpp (native.ae) with arbace.repr.c.pp/preprocess's new :closed-token: after a failed #include closes the stream, the token cc's
+  shift returned with it (the first after the directive's line) is dropped for C++. Clang's fatal error stops there, and the token
+  read alone made `(cpp/text "export")` out of the print's `export module M;`. gxx-modules' target-aarch64-1_a.C now passes level 1.
+  C's token and tree checks are unchanged: `stream` and `preprocess`'s tokens are as before.
+- Left: the other three recorded C++ rows (gxx-dg's template30.C, attr-no_unique_address1.C, ramp-return-a.C) still fail level 1 at
+  head. reap's "improvements until --record-results" is wrong for them: the own judge classes them by rule, and the known file never
+  listed them. template30's comes from the split `>` that the native parser locates in clang's scratch space, so the converter takes
+  `z<int>` for macro text. That is the native parser's location model, the C++ read's. The five hotspot files need jdk26u's build tree
+  (gensrc), which the VM lacks.
+- Records here: roundtrip-known.edn (shell.c :objects), the classes' texts in test/c/divergences-print.edn, matrix.edn and scores.edn
+  (`bin/reap --record`, `bin/crops-score --record`). The results rows are the main host's: `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip
+  --corpus quickjs,sqlite --record` and the torture-compile corpus on the gate's executable, `bin/repr-c parse-check --corpus
+  torture-compile --record` there, and `--record-results` for gxx-old-deja-every-10 and gxx-modules-all.
+
+## 2026-11-23: queue 540 merged onto next (branch `smalls2-1123`), DECISION 540-2's n/a applied
+
+mac/540-c-cpp-print (b2fc220c8, the VM's partial: C's shell.c and unicode_gen.c at levels 1-2, C++'s crash41.C and
+target-aarch64-1_a.C, the round trip's REPR_C_MAX_NEST at 20,000) merged onto next 28740dc3b; the journal's one conflict (two
+entries appended at once) kept both. The user's decisions on its questions (2026-11-23, through the coordinator): 540-2, shell.c's
+level-3 difference (gcc -O0's branches following a one-line `if( zCol==0 ) continue;` the :lines print lays over two lines), is n/a,
+not by design: a class of its own, `:objects-layout` `:kind :na` (test/c/divergences-print.edn; test/repr/c/roundtrip-known.edn's
+shell.c entry and class text), and `:objects` back to its asm-label text (a guard class, no member). 540-1, limits-caselabels.c's
+iterative label chains, is the VM's build. Cells (bin/reap --record): C print 4,844 / 0 / 12 -> 4,844 / 0 / 11 (1 n/a).
+bin/crops-score --record, --judge --strict, bin/records-check: 0 problems. The rows that need a compiled host (quickjs.c,
+libunicode.c, the four limits files, unicode_gen.c's level 3, and 540-3's 16 GiB runs: limits-externdecl.c, pr46534.c,
+sqlite3.c) wait for a gate executable built from this tree (the build train): stage 0 and next's gate executable both evaluate
+540's convert.ae from the checkout.
+
+## 2026-11-23: Haskell's eff/VS at the check's 16 GiB: passes at its own cap (smalls2-1123)
+
+hs-pkgs-1122 left nofib/real/eff/VS in divergences-own.edn's :own-speed-no-pack: killed at the 60 s, and its 600 s measurement ran out
+of the light runs' 8 GiB. Run under the big-job lock at the check's 16 GiB (hs-pkgs' .tmp/hp/vs-both.sh, in the hs-pkgs worktree,
+whose own libraries' pools and STG are built there; hsi's sources equal next's): the 600 s measurement through the timing wrapper
+passed at 96.4 s of CPU (63.7 s of wall), so its cap is 150 s (HES97 (a)'s 1.5 times, rounded up to 10 s), and `bin/hsi check --libs
+own --corpus nofib --only nofib/real/eff/VS --record` at that cap passed (61.5 s); its row copied into test/haskell/check-hsi-own.edn,
+`nofib/real/eff/VS 150 96.4` into test/haskell/cpu-caps.tsv, the id out of :own-speed-no-pack. Haskell eval 948 / 0 / 4 -> 949 / 0 / 3
+(18 n/a); completeness 0.9989 -> 0.9992. Left: unpack_sums_6 (:own-speed; out of memory at 8 GiB, its 16 GiB run queued under the
+lock), T23071 and secretary (the user's decision (b) of 2026-11-23: measured at 3000 s under the lock, capped if they finish, else
+(a): an optimizer for the own libraries' STG). bin/reap --record, bin/crops-score --record, --judge --strict, bin/records-check: 0
+problems.
+
+## 2026-11-23: C's CT1 recorded: sqlite3.c and 13.S judged by the own pp reference (smalls2-1123)
+
+The user's decision of 2026-11-22 (CT1: ppref's agreement counted as the token check's own verdict) and counting3-1122's rule
+(`:own-elsewhere`'s `:reason-re "pp ref"`) waited for a run. Under the big-job lock: `bin/repr-cpp ppref build` (GCC 15.2.0's libcpp
+behind tools/ppref, built by Arbace's own C++ code generator, repr/c, cf2g and TamaGo's go into the main checkout's .tmp/ppref, at
+this branch's key, queue 540's repr/c included), then `REPR_C_PP_JUDGE=own bin/repr-c check --tokens --corpus tcc-pp,sqlite
+--record` (the tools' host the gate executable 8bfa5cd4, 540's changed repr/c evaluated from the checkout): tcc-pp 22 files (lex
+equal 21, 13.S's lex differs as cc's scanner does; pp equal 21, 13.S "ref"), sqlite 2 (pp: shell.c equal, sqlite3.c "ref");
+test/repr/c/pp-check-results.edn's two rows "pp gcc" -> "pp ref", the known file unchanged. Cells (bin/reap --record): C read
+5,468 / 2 / 5 -> 5,470 / 0 / 5 (the tree check's pp-known row follows its token row, count-once); completeness 0.9991 -> 0.9992.
+The 5 deferred (eval-depth: gcc's limits-*.c at 10,000 levels) are the VM's queue 540 (round 2 on the train's compiled host).
+bin/crops-score --record, --judge --strict, bin/records-check: 0 problems.
+
+C++'s gxx-modules-all round trip (`bin/repr-cpp dg --corpus modules --record`, queue 540's second C++ row) was run and not
+recorded: 1,180 of 1,181 pass (target-aarch64-1_a.C among them), but part-4_c.C, a pass in the record, crashes in the print
+("print: a name: (decltype (cpp/text \"f\"))" after `import foo;`), a regression of queue 540's native.ae change (the token after
+a closed stream dropped) or its printer change, sent back to the VM; the record keeps its pass row until then.
+
+## 2026-11-23: hsi collects the program's unreachable CAFs (unpack_sums_6's memory, the user's decision (b)) (smalls2-1123)
+
+The user's decision of 2026-11-23 on testsuite/unboxedsums/unpack_sums_6 (out of memory at 16 GiB): (b) fix hsi so dead values stop
+holding memory, then measure and cap. The cause found was a CAF, not a frame's dead locals: GHC -O0 floats the program's
+`makeUnlayered magnitude` to the top level, and hsi's evaluated CAFs were Go roots for the whole run, so the 10-million-cell list
+stayed. Built (go/arbace/hs/cafgc.ae new, rts.ae's marker `caf` mode, load.ae's and image.ae's `noteCAF`, machine.ae's
+`schedDepth` and `cafCheck`; edited as Go by `bin/hsi runtime print`, read back by `bin/hsi runtime read`; fdwait.ae restored, its
+committed hand comment the read does not keep; go/arbace/hs is a crop path, out of every key): past a 1 GiB Go heap (then twice
+the last), hsi marks from its roots, a blackholed thunk's code not followed (GHC's blackhole has no SRT), and reverts the program's
+own (unit main) evaluated CAFs the mark did not reach, as GHCi's revertCAFs; the libraries' CAFs never. Alternatives not taken:
+reverting every CAF (stdout's handle and the RTS's named closures would be at risk of a second evaluation); a CAF list never
+collected but cleared after main's first reference (not GHC's rule). Proof: unpack_sums_6 on the own libraries at a 6 GiB cap
+completes (104.8 s of CPU, 2.4 GB peak); its negative control, the same build with HSI_CAF_GC=0, runs out of memory at 5 GB. Its
+own verdict is a timing comparison that -O0 leaves to chance (all.T marks the test fragile(22504)): exit 0 on the first run, 1 on
+the capped record run (not recorded); further runs measure the rate for the coordinator. doc/haskell/HASKELL-EVAL-SURVEY.md, "As
+built: the program's CAFs collected".
+
+## 2026-11-23: Haskell's T23071 passes at its own cap of 1,310 s (the user's decision (b)) (smalls2-1123)
+
+The user's decision of 2026-11-23 on T23071 and secretary (killed at 600 s of CPU on the own libraries): (b) measure at 3000 s under
+the big-job lock, cap each at 1.5 times its CPU if it finishes, else (a), an optimizer for the own libraries' STG. smalls' long.sh
+(in the hs-pkgs worktree, the own libraries built there, 16 GiB, the timing wrapper): T23071 (a million prints of listThreads: the
+own libraries' -O0 Handle layer, a flat profile of interpretation, 92% in runSlice) passed at 869.8 s of CPU (752 s of wall); its
+cap 1,310 s; `bin/hsi check --libs own --only testsuite/primops/should_run/T23071 --record` at that cap passed (761 s): the row
+copied into test/haskell/check-hsi-own.edn, `T23071 1310 869.8` into test/haskell/cpu-caps.tsv (kept listed in :speed and
+:own-speed, as the classes keep their programs that pass at caps). Haskell eval 949 / 0 / 3 -> 950 / 0 / 2 (18 n/a);
+completeness 0.9992 -> 0.9995. secretary's 3000 s run follows under the same lock. bin/reap --record, bin/crops-score --record,
+--judge --strict, bin/records-check: 0 problems.
+
+## 2026-11-23: unpack_sums_6 n/a as a fragile timing test; secretary passes at its own cap of 1,580 s (smalls2-1123)
+
+- The user's decision of 2026-11-23 on testsuite/unboxedsums/unpack_sums_6, after hsi's CAF collection (entry above) let it complete:
+  (a), n/a as a fragile timing test (all.T's fragile(22504)); the CAF collection stays. Its exit status is whether the unlayered
+  sum took less time than the layered one, which -O0 (no UNPACK) leaves to chance: 3 of 5 runs exit 0 on hsi. A class of its own,
+  test/haskell/divergences.edn's `:fragile-timing` `:kind :na` (`:results [:fail]`, its id), so a failing run counts outside
+  both denominators; :own-speed no longer lists it; its cap 160 s (104.8 s of CPU measured at 6 GiB) in test/haskell/cpu-caps.tsv.
+  Recorded with the CAF-collecting hsi (`--only --record` at the cap): this run exited 0, a pass (90 s). Alternatives not taken:
+  keep it deferred; record whichever verdict a run gives.
+- secretary (the user's decision (b) of 2026-11-23, with T23071): its 3000 s run under the lock passed at 1,047.6 s of CPU; cap 1,580
+  s; `--only --record` at the cap passed (1,083 s): the row copied into test/haskell/check-hsi-own.edn, `secretary 1580 1047.6`
+  into cpu-caps.tsv, the id out of :own-speed-no-pack and out of test/haskell/eval-out.edn (a program leaves when it passes: 5 -> 4
+  out; test/crops/independence.edn's :out-of-cases :cases 4).
+- Cells: Haskell eval 950 / 0 / 2 -> 952 / 0 / 0 (18 n/a); completeness 0.9995 -> 1.0000 (100), independence 1.0. bin/reap --record,
+  bin/crops-score --record, --judge --strict, --self-test, bin/records-check: 0 problems. The option (a) for secretary and T23071, an optimizer for the own
+  libraries' STG (HES100 (b)), is not needed for completeness.
+
+## 2026-11-23: two Haskell harness fixes from the VM's queue 541 (smalls2-1123)
+
+The coordinator's request, from the VM's closed queue 541 (reports/541-hs-eval.md on the queue branch, findings 1 and 3):
+- bin/lib/hsi/check's wall cap was three times a run's CPU limit, whatever the host's load: on the VM (load 35-43 on 8 cores, hsi at
+  20-25 % of a core) secretary was killed at 1,530 s of wall with 321 s of its 510 s of CPU, and the VM raised HSI_CPU_CAPS for the
+  wall's sake to record. Now `wall_cap CPU`: a backstop for a run that stops using the CPU, three times the CPU limit while the host's
+  load is at most its cores, times the load per core (rounded up) above (the 1-minute load average, nproc; HSI_WALL_FACTOR sets the
+  factor); every hsi run of the check takes it (the program's run, the AOT profile's run, a test's generator's run). Alternatives not
+  taken: a fixed margin (max(3 x, cap + N): still short at a fifth of a core for long caps); no wall cap when HSI_JOBS=1 (a hung run
+  would hold the night). Test: test/haskell/hsi/wall-cap-test.bash (by hand; the main host idle and loaded, the VM's load, the VM's
+  secretary within the cap), its control the old rule falling short of the VM's run; with wall_cap made the old fixed 3 x, the test
+  fails 4 of its 7 lines, as it must. One check run (samples/Arrays) through the changed script passes.
+- bin/lib/repr-haskell/lib-stg --ifaces own read the plan lib-check left (.tmp/repr-haskell/lib-check/own/PKG/plan.txt), which names
+  its sources and closures by absolute paths of the checkout lib-check ran in; a pool copied or moved from another checkout failed
+  every module on a missing file (the VM's worktree moved from q488). Now such a plan is refused at once, the paths it names listed,
+  with the command that makes it here (`bin/repr-haskell lib-check --ifaces own [--package P]`). Alternative not taken: rebasing the
+  paths (the closures' own files may hold them too; a rebuild is the sure way). Test: a plan naming another worktree's .tmp (the
+  hs-pkgs worktree's, which names hs-r7-run's) refused with exit 1 and its paths; the same plan's paths made this checkout's passes
+  the check (`--only` an empty list: 0 modules, exit 0). The hs-pkgs worktree's own pools are such a plan: its lib-stg would now refuse.
+## 2026-11-23: queue 539, OCaml's eval level: four deferred rows closed, the rest left with why (the VM)
+
+- Base mac/next fa635f636, branch 539-ocaml-eval. The eval cell's 19 non-passes (15 deferred, 4 by design) were triaged from the
+  committed records (no base runs). Four deferred rows pass now, by changes to oi (go/arbace/oi, go/arbace/oicapi, the driver
+  test/ocaml/oi/cmd/main.ae and the C API test/ocaml/capi). No package variable of oi changed (no :init-order change).
+- backtrace/lazy (:backtrace-references): oi now gives the bytecode's frames. ocamlc's run, read from OCaml 5.5.0's
+  bytecomp/bytegen.ml (comp_expr's Levent Lev_after: the event is put on the continuation; Llet's body is followed by add_pop's POP),
+  prints "Called from unknown location" where the return address of the inline lazy force's call to
+  CamlinternalLazy.force_lazy_block has no event. Two rules follow. First, a call in no tail position without an event, in a unit
+  compiled with -g, is a slot of unknown location. The Compiler's `debug` is set when the unit's form holds an event with the native
+  typer's information (hasEvent). Second, an event after a let marks no call. Before, oi gave test1's own event to the forced call and
+  no frame to test2's. The output is now ocamlc's recorded run byte for byte (774 bytes).
+  Regression set: the 36 passing programs whose reference or source prints backtraces, plus c-api and lib-systhreads. All 36 still
+  pass (log .tmp/q539/logs/run-bt.log).
+- embedded/cmcaml (:c-runtime-decided, OC221 (a)): caml_startup embedding at oi's level. misc.h gains char_os and, under
+  CAML_INTERNALS, main_os as main (as runtime/caml/misc.h has). runtime.c's caml_main and caml_startup call the native
+  __oi_caml_main, and caml_shutdown does nothing. main.c marks itself with __oi_no_main, so oicapi.OwnMain tells the stubs' own main
+  apart from it. The driver then runs oi.RunEmbedded with oicapi.Embed:
+  - the C's main runs on ci with the program's argv, as one outermost call of the boundary;
+  - the OCaml program's initialisation runs at its first caml_main;
+  - callbacks run on oi's thread;
+  - the program's at_exit runs once main returns.
+  Before, cmmain.c did not read (char_os unknown).
+- statmemprof/thread_exit_in_callback (suite, :gc-and-memory): oi's thread start printed "Thread N killed on uncaught exception"
+  for an exception that escapes thread.ml's wrapper. Here that is the memprof callback's second Thread.Exit, raised at
+  check_memprof_cb's allocation inside the wrapper's Exit handler. otherlibs/systhreads/st_stubs.c's caml_thread_start ignores
+  caml_callback_exn's result, so the thread now ends silently. test/ocaml/oi-known.edn loses the row's entry (STALE once it passed).
+- statmemprof/user_data_regression (:runtime-parameters): no change. Queue 523's header.awk rule for OCAMLRUNPARAM's s already runs
+  it, but check-oi-native.edn had not been recorded since. It passes.
+- Recorded with --record --only-list: check-oi-native.edn's 3 rows and check-suite-oi-native.edn's 1 row. Controls:
+  compare-vs-evaluation-order and main-vs-usemultdef both differ, as they must. Then the matrix and scores: OCaml eval 597 / 4 / 11
+  (593 / 4 / 15 before), completeness 0.9501 -> 0.9517. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+- Left, with why, in the report (.tmp/q539/539-ocaml-eval.md):
+  - :speed's 5 rows: interpretation cost, e.g. subarraystub's 41,001 C calls each copying a 262 KB bigarray through ci;
+  - :gc-and-memory's 4: the major collector's own work, Memprof's custom blocks, an ephemeron key reachable only from its data;
+  - :dynlink-decided's 2: .cma loading with ocamlmklib, and native backtraces;
+  - the 4 design rows, brought to the user as n/a: natdynlink, b0, ppx_expect and Base.
+  The AOT levels keep their classes (the host's).
+
+## 2026-11-23: queue 539b, OCaml's eval level, follow-up (the VM)
+
+- The user's decisions of 2026-11-23 on 539's DECISION blocks:
+  - 539-1 (a): lib-dynlink-native/main is n/a at eval. It moves to the new class :na-native-dynlink in test/ocaml/divergences.edn, so
+    :c-runtime-internals at eval now lists no program.
+  - 539-2 (a): cmdliner/test_arg is n/a. It moves to the new class :na-unreleased in divergences-suite.edn.
+  - 539-3: pin and build the Jane Street closure so that re/expect and sexplib0_test run.
+- The closure was already pinned. I computed it from the pinned versions' opam files in opam-repository 5c9b817c5, for ppx_compare,
+  ppx_expect, ppx_here, ppx_sexp_conv, ppx_sexp_value, ppx_inline_test, ppxlib, base, expect_test_helpers_core and sexplib0, counting
+  runtime depends only (no with-test, with-doc or with-dev-setup). All of it is among queue 531's 73 :opam- pins, except three that
+  these two tests do not need:
+  - core: only expect_test_helpers_core's core part;
+  - num: only sexplib.num;
+  - ocamlformat: with-dev-setup only.
+  No tarball needed fetching.
+- What is missing is a ppx toolchain on oi, not sources. Its stages, sized from the packages' dune files:
+  1. ppxlib's own build:
+     - astlib's and ast's pp_rewrite (IF_AT_LEAST and OCAML_VERSION rewriting) and astlib/config/gen.ml's ast-version, as prep
+       rules held to their SHA-256;
+     - src/gen's gen_ast_pattern and gen_ast_builder, run on oi over ast.ml with compiler-libs' Parse and Pprintast;
+     - skip_hash_bang.mll by the native ocamllex;
+     - the ppxlib_metaquot driver, which bootstraps ppxlib.traverse.
+  2. The rewriters preprocessed by metaquot and traverse, and drivers linked from them, for three tests' sets:
+     - ppx_expect alone (re's lib_test/expect);
+     - ppx_compare, ppx_expect, ppx_here, ppx_sexp_conv and ppx_sexp_value (sexplib0_test);
+     - ppx_jane, about 35 rewriters (expect_test_helpers_base, which also needs sexp_pretty).
+     Plus ppx_base with ppx_optcomp, for time_now.
+  3. The runtime libraries, with their C stubs on ci: base (143 units, 6 C files), stdio, parsexp, sexplib, sexp_pretty, time_now
+     (C), ppx_expect's runtime (C), ppx_inline_test's runtime-lib and config, and the ppx runtime-libs.
+  4. The two tests: dune's inline_tests runner main, judged by status and no .corrected file.
+  This is several queue tasks; the report proposes a split (DECISION 539b-1). This round did none of the stages.
+- bin/oi, in one change:
+  - need_selection: an --only or --only-list that takes no program now stops the check with an error, where before it judged 0
+    programs and exited 0;
+  - lib_unit_native: a unit that is typed but not written, or a typer killed with no message or by a full disk or memory, is now a
+    broken build. libs_native then fails before the key is written, instead of the unit being listed as the typer's refusal.
+  Tests (copies extracted from bin/oi, or bin/oi itself): .tmp/q539/tests/libs-native-broken.bash fails 4 cases on the parent and
+  passes on the change; only-empty.bash passes.
+- statmemprof/custom passes at eval and is now recorded. The fix is queue 523's sampling of custom blocks; the record was stale, and
+  Memprof's RNG is seeded, so the result is deterministic. The control compare-vs-evaluation-order differs.
+- The deferred rows I did not close, with why:
+  - misc/darkening_work: oi's major_collections is Go's NumGC, and the interpreter's own garbage drives it. evalArgs' slice of each
+    primitive call alone makes the writes' run 72 cycles longer. Closing it means counting major cycles from OCaml's own allocations,
+    which would change every Gc statistic oi prints (DECISION 539b-2).
+  - backtrace/backtrace_dynlink: native-only (ocamlopt, .cmxs). Proposed n/a, as 539-1 (DECISION 539b-3).
+  - lib-dynlink-bytecode/main: needs ocamlmklib's .cma with C stubs, loaded dynamically, in three runs (main, static, custom).
+    OC220 (a)'s next step.
+  - weak-ephe-final/ephetest and ephetest3: an ephemeron whose key is reachable only from its own data; Go's weak pointers cannot
+    express that.
+  - :speed's 5 rows: interpretation cost.
+- Records: check-oi-native.edn's statmemprof/custom row, the matrix and the scores. OCaml eval 598 / 2 / 10 (66 n/a), completeness
+  0.9517 -> 0.9529. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+
+## 2026-11-23: cpp-1123, the burst's C++ stream (branch `cpp-1123` from mac/next `fa635f636`)
+
+The coordinator's brief: C++'s independence gaps (the read stage's own path, the lowered runtime's last unit, eval's and AOT's by-design
+row), then the 503 deferred read rows by cause, print's 10 (moved to the Mac's 540 during the day). Five agents were started (cpp-ce,
+cpp-ov, cpp-tpl, cpp-decl on the read rows by family, cpp-tzdb on the runtime unit); the user's rules of 08:45-08:50 (the host near
+OOM; one worktree a stream, no parallel copies) stopped the four read agents after about 25 minutes: their WIP commits (cpp-ce
+4eaba194e, cpp-decl 11a79edbe, cpp-tpl 46b42f0dc; cpp-ov wrote nothing) were merged into cpp-1123 and proven here with the stream's
+own rules; cpp-tzdb went on as the stream's one build worktree. A shared slot wrapper (`.tmp/an/cpp-slot` of the worktree: two slots)
+held the stream to two processes above 1 GB.
+
+What was built (doc/cpp/CPP-SURVEY.md, "As built: cpp-1123", the details):
+- __PRETTY_FUNCTION__ as GCC writes it (sema.ae predefined-name, gcc-pretty-function, gcc-type-str; the GCC 15.2 manual's "Function
+  Names as Strings", the spelling observed on g++ 15.2 by hand, no GCC code): a 17-case program's strings equal g++'s, and
+  gxx-dg-run/template/pretty1.C's own route now writes g++'s "X<T>::X() [with T = void]", which should turn eval's and AOT's one
+  :oracle-text design row into a pass. Not recorded yet: the sampling's check needs a lowered runtime at the tree's key (a runtime-build,
+  with tzdb's, on a later train).
+- The own front end's rules from the standard (sema.ae, the checker's mode): implicitly deleted copy assignment for const non-class or
+  reference members ([class.copy.assign]/7.2-7.3) and copy constructor for rvalue reference members ([class.copy.ctor]/10.1), reported
+  at the class by cx-deleted-implicit!; abstract class types ([class.abstract]/2-3: variables, members, function definitions' parameter
+  and return types, thrown objects, prvalues of calls and explicit conversions); final bases ([class.pre]/5); a scoped enumeration in a
+  contextual conversion to bool; a pointer, pointer to member or std::nullptr_t converted to an arithmetic type.
+- The stopped agents' WIP proven and kept: cpp-ce's constant evaluation (a namespace-scope auto constexpr variable's initializer checked;
+  a constant scalar's object readable through a pointer), cpp-decl's literal operators ([over.literal]/3, /5, [lex.ext]/3), cpp-tpl's
+  `>=` closing a template argument list ([temp.names]/4) and T::x on a non-class argument.
+- Five own passes next had broken (their rows recorded on cpp-diag-a and cpp-diag-b, merged in parallel on 11-22) fixed: a static
+  operator() or operator[] before C++23 GCC's pedwarn (cpp23/subscript11.C), a name-independent _ redeclared in a block before C++26 an
+  error under -pedantic-errors alone (cpp26/name-independent-decl2.C, -8.C), a decl-specifier keyword before auto no type-constraint
+  (cpp0x/alias-decl-16.C), a reinterpret_cast between a pointer and an integer no potential-constant failure (cpp1y/constexpr-82304.C,
+  g++ 15.2 by hand); diag.ae's five reflection warnings hinted away.
+- The dg harness: GCC's driver leaves coroutines on after an earlier -std=c++20 (`g++ -std=c++20 -std=c++17 -dM -E` defines
+  __cpp_impl_coroutine, by hand), so a file of a driver whose flags hold -std=c++20 or later (coroutines.exp) run below C++20 by its own
+  options gets -fcoroutines (dg.ae file-run), which the own front end takes (native.ae: the co_ keywords and __cpp_impl_coroutine);
+  coroutines/co-await-void_type.C, the read cell's one :gxx-disagrees row (the coordinator's request). Control: coroutines/pr95616-0.C
+  (C++20) and cpp1z/fold1.C (dg.exp's driver) keep their flags.
+- For the runtime's last unit, c++20/tzdb.cc (with cpp-tzdb-1123's code generator rules): numeric literals with the standard library's
+  suffixes (0min, 24h: parse.ae, a ud-suffix without an underscore when a literal operator of it is in scope), their literal operator
+  templates ([lex.ext]/3-4: sema.ae), and an instantiated integral_constant's `T{}` in constant text (template.ae; <bits/parse_numbers.h>).
+
+Correction to my report of the day: template/nontype10.C was already n/a (:host-dependent-expectation, 499-2 (a), 2026-11-20); the
+user's decision (a) of today on it changes nothing. The read cell's one :gxx-disagrees row is coroutines/co-await-void_type.C (above).
+
+Proofs (stage 0, no gate executable, light): each rule on its files and on valid programs by the probe (arbace.repr.cpp.dg's verdict
+over each file's dg.edn entry); regressions over every own pass of the record, three times (reg2 at 7115e2baf, reg3 at 9a19c03a3 with
+the both-fail and candidate lists, 2,775 files), no own pass lost beyond cpp0x/udlit-suffix-neg.C and
+diagnostic/missing-header-pr110164.C, which exceed the probe's 300 s under load as cpp-gnu found (their rows kept); then the record run
+at the head over the own passes, the new ones, co-await-void_type.C and the control pair DRs/dr2082.C, DRs/dr1423.C.
+The record run (12:10-12:33 UTC, `bin/repr-cpp dg --corpus dg-error --front native --only` 2,228 files `--record`): own pass 2,225, 16
+rows to own pass (defaulted17, rv-copy1, ref-qual8, abstract2, abstract8, scoped_enum_examples, constexpr-reinterpret2,
+constexpr-nonlit12, udlit-args-neg, udlit-operator-neg, parse/template30, cpp0x/override3, cpp1z/register1, cpp26/constexpr-voidptr4,
+cpp2a/constexpr-dynamic10, init/array58), no own pass lost, co-await-void_type.C now read with its header (its row "missed: accepted",
+the checker's coroutine diagnostic at C++17 left), the control failing as it must. mac/next merged twice (d55d627c5, fd1ff41f5; native.ae's
+queue 540 failed-#include token kept beside the coroutines keywords), the 21 own passes of failed includes and modules run on the merged
+tree: 21 of 21.
+
+Cells: C++ read 5,821 / 0 / 503 -> 5,834 / 0 / 490 (207 n/a); completeness 0.9734 -> 0.9740 (floored 97), independence 0.9652 ->
+0.9654 (floored 96; the read stage 0.828 -> 0.829); eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score --record`,
+`--judge --strict`, `bin/records-check`: 0 problems.
+
+Left, by cause (the read cell's 490 deferred): template definitions' non-dependent checks (GCC's eager ones), constraint satisfaction at
+calls, the constant evaluator (unions' active members, __builtin_bit_cast, lifetimes, dynamic_cast), designated initializers in overload
+resolution (sema ignores :_desigs), an implicit member deleted after a non-viable subobject call (unsure today), errors at a macro's
+spelling line (init/pr43064-2.C), C++17's coroutine checks (co-await-void_type.C). tzdb.cc (cpp-tzdb-1123, `30abf2bea` with
+cpp-1123 merged; not landed): after the literal and integral_constant rules the unit stops in _S_read_leap_seconds at
+`sys_seconds secs(sys_days(ymd) + days(1));`, time_point's converting constructor template missing from the candidates; reduced cases
+(t31-t33) generate with clang's names, and the bisect over the unit's text (t34-t37) puts the cause in the analysis of
+time_zone::_M_get_sys_info's body before it (an order-dependent state: with that body stubbed the unit stops earlier, at the anonymous
+`quoted`'s friend operator>>'s `ws(in)`, "a non-const reference to a temporary"). pretty1's record and tzdb wait for a later train's
+runtime-build.
+
+Alternatives weighed: four family agents in parallel (stopped by the user's rule of 08:50: one worktree a stream); GCC's
+__PRETTY_FUNCTION__ from the written signature alone (rejected: the qualification GCC prints is the type's, not the spelling's, so
+resolved types where no template is involved); abstract classes judged at the class's completion only (rejected: a class being defined
+is abstract by its own pure functions already, GCC's other/abstract2.C reports inside it); the coroutines flag for every file whose
+options hold two standards (taken only for a driver's -std=c++20 or later, the coordinator's scope).
+
+## 2026-11-23: the big lock's two slots, memory-gated (branch `heavy2-1123` from mac/next `69bb781b5`)
+
+The user decided (2026-11-23) "Two slots, memory-gated": the host's big lock (`bin/heavy-lock`, GTS32 (a)) admits a second
+heavy job when memory permits. Built: the FIFO of tickets unchanged (names, contents, the dead removed by the next waiter),
+in front of two flock slots, `big.lock` (slot 1, still the plain flock agents take with `flock big.lock CMD`) and
+`big.lock.2`; a state file beside each new ticket (`.s-TIME-PID`: wait, 1 or 2, and the need) tells holders from waiters, so
+the head is the first waiter, and holders no longer block the queue. A second job runs only when MemAvailable less 2 GiB, less
+the other holders' declared needs not yet reached (need less process tree RSS), exceeds its `HEAVY_MEM_GIB` (default 24;
+`all`: never beside another); the head that does not fit waits and nothing passes it. The gate passes each step's admission
+as its `HEAVY_MEM_GIB`, and `--concurrent`'s whole-run hold `all`. doc/GATE-SURVEY.md, "As built: the big lock's two slots";
+CLAUDE.md's sentence; the Makefile's `gate-queue` line; `test/gate/heavy-lock-test.bash`.
+
+Interop with the one-slot waiters queued during the change (six at the time): their tickets carry no state file and are read as
+the old protocol's (they wait for every earlier ticket, then for slot 1), so a new waiter after one takes slot 2 only, under
+the memory rule, and never slot 1 before it. Deployed into the main checkout by writing the file beside it and renaming it
+over, so the running bash instances keep reading the old inode.
+
+Alternatives weighed: a counted semaphore in one file (rejected: plain `flock big.lock` users would no longer be excluded);
+renaming tickets to mark holders (rejected: the old waiters compare names and contents); the memory rule on MemAvailable alone,
+as stated (taken with the holders' unreached declarations subtracted: a gate build just started shows almost nothing in
+MemAvailable and reaches ~22 GiB minutes later, so MemAvailable alone would admit a second build into an OOM); probing slot 1
+through /proc/locks (taken only for `--queue`'s display; admission probes with `flock -n`, which is atomic).
+
+## 2026-11-23: Python and C++: the user's n/a decisions of 2026-11-23 (branch `na-apply-1123` from mac/next `e52a17d33`)
+
+The user's decisions (2026-11-23, 13:40 UTC), on the proposals `.tmp/goal/py-na-proposal.md` (Python's eval tail, read-only
+analysis at `69bb781b5`, its row lists `.tmp/goal/pyna/`: `propose.py`, `proposal-ids.json`) and `.tmp/goal/cpp-na-proposal.md`
+(C++'s read tail, `.tmp/goal/cpp-na-work/`), verbatim as relayed:
+
+Python:
+- "TAKE as n/a: A (the 51 test_capi rows needing _testinternalcapi -> :testinternalcapi-absent, before :capi-port claims them),
+  B (:cpython-marked: keyed on CPython 3.14.10's Lib/test decorators @cpython_only/@refcount_test/@impl_detail(cpython=True)/
+  @requires_specialization; the user accepted a TOOL-MADE list: commit the scanning tool (in test/python/, reproducible from the
+  pinned source tree .tmp/repr-python/Python-3.14.10) and its generated list, the class reading the list), C (:remote-debugging ->
+  n/a), D (:bytecode), E (:object-layout), F (:gc-collector -> n/a, reversing the 11-22 by-design call), I (:not-a-case),
+  J1/J2/J3 (:skipped-by-both and :fork extended)."
+- "H: only test_gc's 12 count rows of :finalization-cycle become n/a; the rest stays."
+- "G (:refcount-moment): NOT now (decided after 222 (b) is built)."
+- "Each class with :kind :na and a reason citing CPython's own marking and the user's decision."
+
+C++:
+- "TAKE as n/a: A (4 -fopenmp files into :gcc-dialect's list, per 11-22), B (18: GCC flags enabling a later standard's feature
+  at an earlier -std), C (4 attributes at C++11), D (15 IFNDR [-Wtemplate-body] in never-instantiated templates; only the
+  verified ones, not the 6 instantiated/syntax-error files), E (3 IFNDR constexpr), F (2 IFNDR partial specialization after
+  use). Classes ... with :kind :na, reasons citing the standard."
+- G1, G2 and H are build work (another agent's), not n/a.
+
+Applied (no runs: n/a reclassing only, judged from the records by `bin/reap`):
+
+Python, `test/python/divergences.edn`:
+- A: the 51 test_capi ids (test_unicode 23, test_misc 17, test_exceptions 7, test_complex 2, test_object 1, test_set 1) out of
+  `:capi-port`'s `:tests`; `:testinternalcapi-absent`'s verdict rule takes them.
+- B: `:cpython-marked`, n/a, after `:cpython-only`, its ids read from `test/python/cpython-marked.txt` through a new class key
+  `:tests-file` (bin/reap's `classes-of`, `test/python/libtest_judge.ae`'s `read-classes`, `test/cover/classes.ae`: the file's ids,
+  one a line before a tab, joined to `:tests`). The list is made by `test/python/cpython_marked.py` (python3 -I, CPython's own
+  `ast` over the pinned `.tmp/repr-python/Python-3.14.10/Lib`, no run; `--check FILE` makes it afresh and compares): every id of
+  the record whose method, class or a base class it inherits the method through carries `cpython_only`, `refcount_test`,
+  `impl_detail` (no guard, or `cpython=True`) or `requires_specialization(_ft)` (951 ids, every one a non-pass: the marker's own
+  skip, `:cpython-only`'s, takes most). The class takes the proposal's 52 exactly (capi-port 19, remote-debugging 18,
+  skipped-by-test 11, testcapi 2, specializing 2), and from other n/a classes rows that were n/a already (testinternalcapi-absent
+  107, cpython-implementation-details 50, skipped-by-both 2, remote-debugging-disabled 2); 4 C-accelerator rows (py-accel's)
+  stay `:c-accelerators`', the class being above it. The reap step's inputs name the list.
+- C: `:remote-debugging` n/a (the rest of its 41 rows). D: `:bytecode`, n/a (absorbs `:dis`, removed, and test_code's nine
+  and test_dis's four rows of `:code-objects` and `:code-positions`; `:code-objects` keeps CodeWeakRefTest). E: `:object-layout`,
+  n/a (absorbs `:inline-values`, `:specializing`, `:tuple-id-reuse` and `:pyc-magic`, removed, test_long's `test___sizeof__` from
+  `:core-objects-287`, and the skips naming CPython's build: unicodedata as an external module, "stub loader has no suffixes",
+  `_xxtestfuzz`, "cpython only"). F: `:gc-collector` n/a (as it stands, 14 rows, test_warnings' two FinalizationTest rows among
+  them). H: `:gc-cycle-count`, n/a, before `:finalization-cycle`: test_gc's twelve counts of cyclic garbage. I (:not-a-case):
+  `:fails-under-cpython-too`, `:subtest-ids` and `:tracemalloc-driver-depth` n/a (kept as three classes, each marked; 18 rows).
+  J1: bin/reap's `py-ref-outcomes` gives a module row `MODULE/*` the outcome `:no-tests` when the references' `:module` line has
+  status 0 or 4 and no method of the module is recorded; J2: `:excluded` (record-ref's machine-named skips: 32-bit, musl);
+  `:skipped-by-both`'s `:ref-outcomes` now `[:skipped :excluded :no-tests]` (84 + 44 rows). J3: `:fork`'s two patterns
+  ("requires working os.fork", pty.fork()'s missing os.fork).
+- Not applied: G (`:refcount-moment`); the rest of `:finalization-cycle`.
+
+C++, `test/cpp/divergences-dg.edn` (the read cell's dg source): A and B into `:gcc-dialect`'s `:tests` (4 + 18, with comments);
+new n/a classes after it, by file: `:attribute-before-its-standard` (C: 4; [dcl.attr.grammar]/5 of C++11),
+`:ifndr-uninstantiated-template` (D: 15; [temp.res.general]/6), `:ifndr-constexpr-never-constant` (E: 3; C++11
+[dcl.constexpr]/5), `:ifndr-specialization-after-use` (F: 2; [temp.spec.partial.general]/1, CWG 2179). D's 15 are the
+proposal's hand-read list (forw_enum10, typedef1, lambda-variadic11, tc1/dr176, defarg19 and crash67 excluded); three of them
+(template/memfriend6, cpp0x/vt-34052, template/void14) the proposal called borderline.
+
+Cells (bin/reap --record): Python eval 40,552 / 1,604 / 1,714 (4,454 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a); C++ read
+5,834 / 0 / 490 (207 n/a) -> 5,834 / 0 / 444 (253 n/a). Alternatives not taken: a hand list for B (the user asked for the
+tool's); a separate `:not-a-case` class gathering I's three (kept apart: their reasons differ, each now n/a); a class of its own
+for J2 (the same rule as `:skipped-by-both`, CPython skipping there too).
+
+## 2026-11-23: the n/a decisions' edge rows back to deferred; queue 536 merged (branch `na-edge-1123` from mac/next `320e74469`)
+
+The user decided (2026-11-23, relayed by the coordinator): "pull out all 5 edge rows, back to deferred so they get built:
+Python test_warnings' 2 FinalizationTest rows (out of :gc-collector), and C++ D's 3 borderline rows memfriend6, vt-34052 and
+void14 (out of :ifndr-uninstantiated-template)". Applied: test_warnings' FinalizationTest test_finalization and
+test_late_resource_warning leave `:gc-collector`'s `:tests` (both pass in the record, so the cell does not move: the names
+were stale; a later failure of theirs is no longer n/a); template/memfriend6.C, cpp0x/vt-34052.C and template/void14.C leave
+`:ifndr-uninstantiated-template` (12 files now), their rows back to the deferred class that matches them (`:own-diag`).
+Then mac/536-py-deferred (`fe8f03006`, the Mac's queue 536: test_audit, test_pathlib, test_xml_etree(_c) recorded again;
+goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18) merged, test/python/divergences.edn's
+both sides' class changes kept, reap and crops-score recorded again. 536 makes go/arbace/py export Audit and AuditActive,
+so goi's table and its table check need a gate build: it rides train 2.
+## 2026-11-23: queue 536, Python eval's largest deferred classes (the VM; branch `536-py-deferred`)
+
+Brief: `.tmp/worktrees/q/tasks/536-py-deferred.md` (the deferred classes of test/python/divergences.edn, largest first; 537 the
+design ones, 535 D1-D6, the main host :c-accelerators, ctypes and the cap-crash modules). Base next fa635f636. The classes by rows
+(bin/pyi divergences --table on the base's record): capi-port 314 (pyctypes' natives: the main host's), goi-liveness-fallthrough 255,
+multiprocessing 199 and multiprocessing-children 84 (535's), testcapi 97, runner-limits 77, host-memory 62, io-c-checks 48 (535's),
+remote-debugging 41, ordered-dict-c 31, goi-stub-table 31 (an executable rebuild), dbm-sqlite3-locking 30, ... audit-hooks 23.
+
+- **goi-liveness-fallthrough (254 of its 255 rows): stale rows, re-recorded.** test_xml_etree's and test_xml_etree_c's 254 rows
+  were kept from the records night of 2026-11-19 when the re-record of 2026-11-22 (bbea63978) left both modules out (their
+  whole-module runs failed test_cyclic_gc on gc timing); goi's fix cfd69a6d2 was in that re-record's executable. Run on the VM at
+  this branch (bin/pyi check --only, goi interpreting py and expat): every one of the 254 passes. The record's two modules were
+  written again from that run (bin/pyi check --judge DIR --record over a copy holding the two modules alone), xml_etree_c's eight
+  IOTest and Iterparse rows from a second run of them alone (see Runs). Four rows fail on the VM in both runs and are recorded so
+  (see Records). The class keeps test_multiprocessing_spawn's test_rapid_restart (535's area).
+- **audit-hooks: PEP 578's hooks called** (go/arbace/py/audit.go: sys.addaudithook's list, PySys_Audit as `Audit`, sys.audit's
+  checks, addaudithook's own "sys.addaudithook" event and its refusal by an Exception) and the events audit-tests.py checks:
+  marshal.dumps/loads/load, object.__setattr__ (check_set_special_type_attr's __name__, __qualname__, __bases__, __module__, __doc__,
+  __type_params__; __class__'s assignment), mmap.__new__, _posixsubprocess.fork_exec, sys.excepthook (a hook's RuntimeError ends the
+  display), sys.unraisablehook (a user's hook), socket.gethostname/__new__/bind, gc.get_objects/get_referrers/get_referents,
+  sys._getframe, sys._getframemodulename, _thread.start_new_thread/start_joinable_thread, syslog.openlog/syslog/setlogmask/closelog
+  (the implicit openlog's own event, and its facility LOG_USER: 22-11's note), time.sleep, sys.monitoring.register_callback; pickle's
+  and sqlite3's are their modules' own sys.audit calls. Left in the class: test_cantrace (a hook's __cantrace__: pyi's tracer is not
+  suspended while a hook runs) and test_open (FileIO's "open": pyi's _io is _pyio, whose FileIO audits none; a wrapper of _pyio's
+  FileIO.__init__ was written and withdrawn, as 535 owns _io's work this round).
+- **os-and-files-misc: os.fspath of a str or bytes subclass's instance** returns it as it is (PyOS_FSPath's PyUnicode_Check):
+  test_pathlib's six test_str_subclass_common rows pass.
+- **dbm-sqlite3-locking: not closed; crt left as it was.** The main host's lead (crt's fcntl F_GETLK leaves l_type, so SQLite sees a
+  conflict) is right as far as it goes: with F_UNLCK answered (`bin/ci run` of a probe: F_WRLCK before, F_UNLCK after), SQLite's
+  WAL index proceeds to mmap its -shm file MAP_SHARED, which crt refuses (ENODEV), so the rows fail on "disk I/O error" and
+  test_dbm's test_clear, a pass, fails. With crt's mmap of a file added too (a copy, a shared writable one written back at munmap,
+  as emu's fileMap; `bin/ci run` probe against gcc's), WAL works (a probe's connect, journal_mode=wal, CREATE, REPLACE), but the
+  dbm rows still fail: dbm.sqlite3 leaves `PRAGMA journal_mode = wal`'s and `__setitem__`'s cursors unclosed, which CPython's
+  reference count resets at once and pyi's collector does not, so a statement stays active, the write is not committed when the
+  database is closed, and whichdb reads an empty file. Both crt changes were withdrawn (crt is the C crop's; no row gained, one
+  lost); the patch and the analysis are in the report's DECISION 536-1.
+- **Runs** (the VM, arm64, its load 20-38; stage 0 nx's, goi interpreting the checkout's py; the runner by python3,
+  PYI_RUNNER=python3, after a crt change had the compiled runner's AOT module and its C libraries rebuilt twice): `bin/pyi check
+  --only` of the five modules and pathlib's six rows (logs .tmp/q536/check1.log, judge1.log), of test_dbm and test_dbm_sqlite3 on
+  the crt patch (check-dbm.log: no row gained, test_uri_substitutions lost), then test_audit and test_pathlib whole with the xml
+  modules' timing rows and xml_etree_c's eight IOTest and Iterparse rows again (checkF.log; 85 min, test_audit 5,125 s alone); the
+  three negative controls failed as they must in every run. xml_etree_c's eight rows errored in the first run on "No such file or
+  directory: '@test_1036_tmpæ'": my second `--only` run in the same worktree shared and cleaned `.tmp/t6i` (and overwrote
+  `.tmp/repr-python/pyi/check-only.txt`, so the first run's judge was redone with its own list: `--judge`); they pass alone.
+- **Records**: `bin/pyi check --judge DIR --record` over two directories holding only the recorded modules (test_audit and
+  test_pathlib from the last run; the xml modules from the first, xml_etree_c's eight rows from the last). Not recorded: test_dbm
+  and test_dbm_sqlite3 (crt unchanged). Two VM-only rows each way: test_deeply_nested_deepcopy past 600 s with py interpreted
+  (classed :runner-limits and :slow-on-goi; the main host's compiled run passes it) and test_cyclic_gc (named in
+  :finalization-collect: the main host's whole-module runs failed it too). The record's writer put the four modules' rows in its
+  own order, hence a long diff of moved lines; the rows that changed are 291.
+- **Numbers**: Python eval 40,552 / 1,604 / 1,714 -> 40,827 / 1,610 / 1,437 (the six design rows: C14N subtests the xml modules
+  now reach, skipped by the test); goi-liveness-fallthrough 255 -> 1, audit-hooks 23 -> 2, os-and-files-misc 24 -> 18. Python's
+  completeness 0.9794 -> 0.9810. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict` and
+  `bin/records-check`: 0 problems.
+- Alternatives left: a wrapper raising FileIO's "open" (withdrawn: 535's _io), ssl's and readline's "open" events (written, withdrawn
+  with it: no test passes on them while FileIO raises none), suspending the tracer while a hook runs (test_cantrace; the tracer's
+  owner), crt's file mmap and F_GETLK (DECISION 536-1 in the report).
+
+## 2026-11-23: cpp-small, C++'s read tail G1, G2 and H built (branch `cpp-small-1123` from mac/next `e52a17d33`)
+
+- **What**: the user's decision of 2026-11-23 on the read tail's proposal (`.tmp/goal/cpp-na-proposal.md`, classes G1, G2, H):
+  built in Arbace's own front end, not n/a. G1, the template instantiation depth ([temp.inst]/17; GCC's -ftemplate-depth, 900 by
+  default, the option honoured): arbace.cpp.sema's `*max-tmpl-depth*`, `*tmpl-chain*`, `*tmpl-slack*`, `depth-fatal!`, `*fatal*`,
+  arbace.cpp.template's `pending` (a specialization's definition at its user's body's depth plus one), `chain-members!`,
+  `instantiate-class*`'s check, `cx-explicit-subst!` ([temp.deduct.general]/2-3's explicit arguments substituted first: the same
+  substitution re-entered is endless) and `constraint-satisfied?`'s endless satisfactions with new arguments; the timeouts of
+  template/vtable2.C and cpp0x/alias-decl-55.C are now the expected error (alias-decl-55 in seconds). G2, [expr.new]/8 with GCC's
+  limit 2^63 - 8 (PTRDIFF_MAX from c/target/abi.edn plus one less the cookie): `cx-new-size!`, with GNU's `__typeof__ (sizeof 0)`,
+  abi's byte layout for a class without bit-fields and align-of of an array without its size. H: the unnamed union's `{`, #embed's
+  elements at the list's closing brace (64 bytes or more, but the first and last), "the value of 'v' is not usable" at the read.
+  Also an elaborated-type-specifier in a function body declares its class there (decltype29's `ft<struct a*, 0>`).
+- **How decided**: every place and threshold from g++ 15.2's behaviour by hand on probes (`.tmp/probe/` of the worktree; no GCC code
+  read), recorded in the code's comments and doc/cpp/CPP-SURVEY.md, "As built: cpp-small". The depth model was fitted to measured
+  thresholds: a called member's chain needs -ftemplate-depth=S-1 and fails at the class the body instantiates; the vtable chain from
+  an explicit instantiation needs S-1 too and fails at the virtual function's declaration (so a class a vtable-reached body
+  instantiates costs no level). Alternatives considered: n/a for G1 (the proposal's option; the user chose build); a stack-depth
+  cut of the infinite cases alone (it would not give -ftemplate-depth's finite limits, pr23510 and recurse).
+- **Records**: `bin/repr-cpp dg --corpus dg-error --front native --only` the 12 rows and the control pair `--record` (stage 0,
+  GOMEMLIMIT=3000MiB); `test/cpp/divergences-dg.edn`'s :gcc-own-rules lost alias-decl-55, concepts-recursive-sat1, pr23510, recurse
+  and vtable2. C++ read 5,834 / 0 / 447 -> 5,846 / 0 / 435 (250 n/a); completeness 0.9755 -> 0.9760, independence 0.9658 -> 0.9660.
+  The own passes rerun twice (2,227 and the targets): none lost; udlit-suffix-neg.C and missing-header-pr110164.C pass 300 s on
+  mac/next's tree as on this one (the host's load; rows kept). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` and
+  `bin/records-check`: 0 problems.
+- Noticed, not mine: mac/next's doc/JOURNAL.md holds merge conflict markers (lines 19033, 19546, 19604: `<<<<<<< HEAD`, `=======`,
+  `>>>>>>> mac/536-py-deferred`) from 9b60ce498's merge; left for the coordinator.
+## 2026-11-23: queue 546, the user's decisions on 539b's rows; ppxlib's bootstrap on oi begins (the VM)
+
+- The user's decisions of 2026-11-23 on 539b's DECISION blocks:
+  - 539b-2: n/a (the user's choice, neither listed option). misc/darkening_work moves to the new class :na-gc-pacing in
+    test/ocaml/divergences.edn. oi keeps Go's NumGC as Gc's major_collections; there is no simulated major heap.
+  - 539b-3 (a): backtrace/backtrace_dynlink is n/a at eval. It joins :na-native-dynlink (native-dynlink and ocamlopt's .cmxs, no
+    bytecode alternative), and :dynlink-decided keeps lib-dynlink-bytecode/main alone.
+  - 539b-1: build all three stages in order. This task, 546, is T1: ppxlib's bootstrap on oi. T2 (ppx_expect with base, stdio and
+    time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test) follow as tasks of their own.
+- 546's T1, where it stopped (the VM, 2026-11-23):
+  - The user's decision 539b-2 is n/a: the main session's relay first named it "(a)", corrected to the user's own choice, which was
+    neither listed option.
+  - prep ports ppxlib's own sources, each held to its SHA-256:
+    - astlib's and ast's pp_rewrite.mll/pp.ml and astlib/config/gen.ml's ast-version (arbace.repr.ocaml.prep's ppxlib-pp). Proof
+      (probe): on all 72 files (astlib/*.ml(i), ast/versions.ml(i)), byte for byte the output of pp.exe built from the pinned
+      sources by the VM's OCaml 5.5.
+    - ocaml-compiler-libs v0.17.0's src/gen/gen.ml with read_cma.ml (ocaml_common.ml, from the tarball's Makefile's ocamlcommon
+      units). Proof (probe): byte for byte the VM's gen.exe on ocamlcommon.cma.
+    - src/shadow/gen/gen.ml (ocaml_shadow.ml) over ocamlcommon's modules only: a subset, line for line, of the host's
+      (ocamlbytecomp's, ocamltoplevel's and ocamloptcomp's 157 modules left out). It only adds deprecation aliases, so it does not
+      change which programs compile.
+  - bin/oi ppx gen|check, bin/lib/oi/ppx.bash and test/ocaml/ppx-programs.tsv: the generators and the metaquot driver as programs
+    on oi; the metaquot driver judged against test/metaquot/run.t's two cram cases, with a negative control.
+  - Seven typer fixes (test/ocaml/typer-repros, each sample checked against ocamlc), each failing on the typer before it:
+    1. find_record_qual;
+    2. constrained abbreviations expanded by instance;
+    3. declarations fully generic;
+    4. no abbreviation memo under GADT equations: a per-node memo, as OCaml's, overflowed the stack on typer-check's class samples,
+       so the fresh expansion is scoped to GADT patterns and branches instead (types/fresh-depth);
+    5. nested package constraints;
+    6. a parameter that unpacks a module typed in a scope of its own;
+    7. no link of an object to a scoped module's abbreviation.
+    typer-check after each step: 79 of 79 at the end; the native library rebuilt with 0 refused.
+  - Where T1 stops: astlib's 77 units and ppxlib_ast's versions, ast_helper_lite and import type. ast/ast.ml overflows the stack in
+    env's find-unit: Ppxlib_ast__Import's components resolve alias addresses eagerly and re-enter the unit being computed (1,242
+    nested calls). It needs lazy alias addresses, or a guard for a unit in progress. ppxlib's src (34 units), the generators' runs
+    and the metaquot driver are not reached.
+  - Records: the two n/a reclasses give OCaml eval 598 / 2 / 8 with 68 n/a, completeness 0.9529 -> 0.9537. bin/reap,
+    crops-score --judge --strict and records-check: 0 problems.
+## 2026-11-23: cpp-ce2, the checker's constant evaluator (branch `cpp-ce2-1123` from mac/next `69bb781b5`)
+
+The burst's C++ read stream "cpp-ce2" (the coordinator's brief: the constant evaluator's gaps, the largest cause group of the read
+cell's deferred rows; cpp-rt owns c++20/tzdb.cc and the runtime build). All in arbace/cpp/sema.ae's checker mode (`checking?`), with
+two parser and two diag additions; the code generator's folds unchanged but for one lookup. The rules from the standard's text
+([expr.const], [basic.life], [bit.cast], [expr.dynamic.cast], [expr.new], [expr.delete], [class.dtor], [class.temporary],
+[class.union.general], [dcl.init.aggr], [temp.point]) and GCC 15.2's behaviour as the tests record it; no GCC or clang code read.
+
+- Unions: arbace/repr/cpp/parse.ae `designate` keeps a union's one designated element's member as the InitListExpr's `field`
+  (clang's semantic form); Sema's "InitListExpr" carries it as :field and the aggregate branch initializes that member; an empty
+  list takes a default member initializer's member ([dcl.init.aggr]/5). cpp2a/constexpr-union7.C's `g({.f = 3.14})` now reaches C++17's
+  "change of the active member".
+- Pointers to data members evaluated ({::mdata [class path]}, `.*`/`->*`'s :mfield): cpp2a/constexpr-98122.C.
+- __builtin_bit_cast: the native parser's BuiltinExpr keeps the type-id and operand (:_bitcast, :_bctype; the converter writes its text
+  as before); Sema's `bit-cast-expr` (GCC's static errors: incomplete types, a variable's at its declaration, not trivially copyable,
+  array destination, sizes) and the evaluator's `ce-bit-cast` (the type rules of [bit.cast]/3; the object representation as bits,
+  padding, unnamed bit-fields and uninitialized members indeterminate; [bit.cast]/2's indeterminate result for unsigned char and
+  std::byte, else GCC's "accessing uninitialized byte at offset N"). The code generator's mode refuses it as before.
+- Lifetimes and destructors: explicit destructor and pseudo-destructor calls end lifetimes; reads, writes and destruction of an ended
+  object are GCC's "outside its lifetime"; from C++20 a block's, a full-expression's temporaries' and a call's by-value parameters'
+  class objects are destroyed by their constexpr destructors; a return statement's temporary dies at its end, a reference variable's
+  lives with its block; an implicit or first-declaration-defaulted constructor is constexpr from C++20 (no virtual bases).
+- Objects made in place: a constructor's or a `this`-taking aggregate's cell aliases the place its value is first put in (`ce-made`,
+  `ce-adopt!`, `ce-res`), so a pointer the construction kept locates the object (cpp1y/constexpr-tracking-const11.C); a constexpr
+  namespace-scope or static local class variable is one cell per evaluation (`&g == &g`).
+- dynamic_cast (P1327R1, `ce-dyncast`) and pointer conversions to a base and down to a derived class.
+- Allocation (P0784R7): `ce-new`, `ce-delete`, `ce-heap-end!` (GCC's deallocation errors, "refers to a result of 'operator new'",
+  "allocated storage has not been deallocated" at the new-expression); std::construct_at's placement new; a namespace-scope variable's
+  address an unknown object's. In a function template's specialization the global operator new is looked up at the point of
+  instantiation (construct_at.h declares its placement form after std::construct_at): a false "no matching operator new" gone.
+- diag: a constant evaluation's error in a header of the test's own directory counted outside the main file (line 0), as GCC reports
+  it there (cpp2a/constexpr-union6.C); :bit-cast and "'v' has incomplete type" rules.
+
+Checked: each rule on its files and reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over the file's dg.edn entry);
+regressions over the record's own passes (187 files twice, then all 2,227 at `002f57e1c`: no own pass lost but
+cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s under load, as cpp-1123 found); the control pair failing
+as it must; mac/next merged (`320e74469`, the user's n/a decisions: C++ read 5,834 / 0 / 444, 253 n/a).
+
+The record run (13:59-16:00 UTC, `bin/repr-cpp dg --corpus dg-error --front native --only` 2,920 files `--record`: the own passes,
+the read cell's both-fail rows, the targets and the control pair; stage 0, GOMEMLIMIT=3000MiB): 37 rows to own pass (the targets of
+the unions, bit_cast, lifetime, dynamic_cast and allocation groups, and incidentally cpp1y/constexpr-nsdmi7a.C, pr94066.C, pr94066-3.C,
+cpp2a/constexpr-new13.C, gomp/pr34964.C), none lost; cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s
+again under the host's load (a rerun with REPR_CPP_DG_TIMEOUT=900 ran past 30 minutes and was stopped; the base tree `69bb781b5` reads
+the first past 240 s by hand too): their recorded rows kept, as cpp-1123 did. Cells: C++ read 5,834 / 0 / 444 (253 n/a) -> 5,860 / 0 /
+419 (252 n/a); completeness 0.9756 -> 0.9766 (floored 97), independence 0.9658 -> 0.9664 (floored 96; the read stage 0.831 -> 0.834);
+eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Left in the scope: constexpr-dynamic11.C, -dynamic17.C (an object under construction's dynamic type: a base is built in a cell of its
+own), bit-cast2.C (a never-instantiated template's non-dependent checks), cpp1y/constexpr-union3.C, -union4.C (a default member
+initializer's error at the variable), cpp0x/union1.C, lambda/lambda-anon1.C (declaration rules).
+
+Alternatives weighed: in-place construction by passing the destination location into ce-construct (rejected for now: every caller of
+ce-init would change; the alias on first placement gives the same locations for the cases the tests make); counting every Sema error in
+a non-main file as GCC's (rejected: a wrong evaluation in a system header would fail passing tests; the test's own headers only); the
+bit_cast's bytes as whole bytes (rejected: bit-fields and unnamed bit-fields need bits, bit-cast5.C, bit-cast13.C); placement new only
+inside std::construct_at (taken for every placement new of the reserved form from C++20: no false error, at most an acceptance GCC
+refuses outside construct_at before C++26).
+
+## 2026-11-23: cpp-ce2 merged with cpp-small (branch `cpp-ce2-1123`)
+
+mac/next (`8674189b3`, with cpp-small's read rules: C++ read 5,846 / 0 / 435) merged into cpp-ce2-1123; two code conflicts resolved by
+keeping both sides (sema.ae's "InitListExpr": cpp-small's embedded positions and cpp-ce2's union :field; diag.ae's sema-errors handler:
+cpp-small's :cx/reported guard around cpp-ce2's line-0 header error), the journal and survey by union. The 48 rows the two streams
+turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read again on the merged tree: 46 own pass and the control pair
+failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
+5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.
+
+## 2026-11-23: ClassLoader's remaining members in jrt (the user's decision (a); java-bytecode-1122)
+
+The user decided (a) on the question of java-bytecode's report (relayed by the coordinator): the ClassLoader members the
+:classloading rows still lack are added to jrt rather than kept by design. Built at stage 0, no gate build
+(go/arbace/jrt/defineclass.ae, written from jdk26u's java.lang.ClassLoader at baf63fb as documented behaviour, no code
+copied): findLoadedClass (protected final: the loader's defined class, a built-in loader's the registry's; null for null, ""
+and a name with /), getPackage(String) (protected, deprecated: the loader's own, else its parent's, a built-in loader's the
+registry's packages), getPackages() (the loader's and its ancestors', the eldest first; the boot loader's not listed),
+registerAsParallelCapable() (protected static, caller-sensitive: the caller found on jrt's stack walk, StackWalker's
+frames, ClassLoader's own frames skipped; registered when its superclass is; IllegalStateException for a caller that is not
+a ClassLoader subclass, jdk26u's IllegalCallerException being a class of the world jrt cannot name) and
+isRegisteredAsParallelCapable() (the loader object's class; ClassLoader and the built-in loaders registered),
+setClassAssertionStatus, setPackageAssertionStatus, setDefaultAssertionStatus and clearAssertionStatus (recorded; no class
+of the Go build runs with assertions enabled, so Class.desiredAssertionStatus stays false). The non-final ones are in
+ClassLoader_I (the member tables call them through it); bin/jrt manifest regenerated manifest.edn, manifest_test.ae and
+reflect_tables.ae. Proof: bin/jrt build (amd64) and bin/jrt test -run TestLoaderMembers|TestPackages|TestClassLoaders
+(TestLoaderMembers new: GetPackage.java's view over a child and parent loader, findLoadedClass, parallel capability, the
+assertion records) pass. The rows (t04540, t04541, t06029; t03295 and t04542 also need a class file as a resource and a
+Java forms subclass of URLClassLoader) are judged on the train's build. resources(String) (t04543) is not built yet: its
+stream is lazy over the loader's own getResources, which jrt cannot call virtually nor build a Stream for; it needs a static
+of jrt's own Java (jdk.internal.jrt.ClassPathResources.resources, jdk/forms predicted) and j2g's resource helpers.
+
+## 2026-11-23: the user's decisions on Java's remaining by-design classes; their rows classed
+
+Relayed by the coordinator (the user, 2026-11-23): JDI (JD9) and AWT/Swing (desktop) are n/a; JMX is n/a; serialization (its
+compiled level), XML (JD8, reversing 2026-11-22's "stays"), javac's synthetic lambdas (JD7, reversing DECISION 517-1 (a)), the
+class-file API and the jrt: image (:zip) are to be built; annotation processors from class files (JCS51) go through JD3's
+class-file loader (java-bytecode's stream), not JCS51 (a)'s interpreted sources. Alternatives not taken: keeping them by design.
+
+Applied in test/java/divergences.edn (java-design-1123):
+- `:jmx`, `:jdi`, `:desktop`: kind `:na`.
+- `:xml`, `:classfile`, `:zip`, `:synthetic-lambdas`: kind `:world` (deferred: to be built).
+- `:design-also` and `:design-also-compiled` (JCS129 (a)'s by-design-beside-its-cause lists): their tests' sources (test/java/
+  ref-jdk26.edn's `:files` in jdk26u at the platform's pin) scanned for the features' packages; a test naming javax.management,
+  com.sun.jdi or java.awt/javax.swing moved to new n/a classes `:design-also-na` (32 interpreted) and `:design-also-compiled-na`
+  (39 compiled); the two naming javax.smartcardio (t08070, t08073; no decision changed JCS97 (a)) to `:design-also-smartcardio`
+  (`:design`); the rest stay, kind `:world` (they wait for serialization, XML, the class-file API, class loading).
+- `bin/reap --record`: Java eval 3,109 / 116 / 100 -> 3,109 / 51 / 119 (46 n/a), AOT 3,079 / 155 / 91 -> 3,079 / 54 / 161
+  (31 n/a; the branch's JD1, JD2, JD5, JD6 n/a classes included); `bin/crops-score --record`: Java completeness 96.9 (97.6 without
+  by design); `--judge --strict` and `bin/records-check` pass. By design left: class loading and defineClass (JD3's), FFM and
+  Kerberos (being built on this branch), the harness's (jvm-tools, memory-limit, flaky-timeout), j2g-reflection, smartcardio,
+  diffcheck's corpus-own exclusions.
+
+## 2026-11-23: java-design-1123: JD7 built (javac's synthetic lambda methods in reflection); Dyn's clone; train 1's session
+
+- JD7 (the user's BUILD of 2026-11-23): `arbace.classes.analyze/synthetic-lambdas` lists a class's lambdas as javac's
+  LambdaToMethod makes their methods: the name analyze-lambda already gave (lambda$M$N, javac's per-prefix index, used until
+  now for SerializedLambda), the captured locals first in the order the body first names them then the instantiated
+  descriptor's parameters (erased), private and synthetic, static unless the body uses this. The interpreter publishes them
+  as member table entries (`Compiler$CFGo.setMethod`, an entry that throws when invoked: the lambda runs as its own class's
+  method), j2g lists them in a program's own classes' member tables as `m` lines (jrt's throwing entry). Method references
+  to a protected method declared in another package are made lambdas as javac's TransTypes makes them
+  (`needsConversionToLambda`'s `isProtectedInSuperClassOfEnclosingClassInOtherPackage`; analyze-method-ref's bound, unbound and
+  static references through `ref-as-lambda`), which numbers ProtectedInaccessibleMethodRefTest2's three as javac does.
+  Alternatives considered: invocable synthetic methods (a second entry point to every lambda body; no test calls them);
+  names computed apart from the analysis (the analyzer already numbers them for serialization).
+- Proved by day without a build: `.tmp/jd/dev/arbace-dev`, the executable 2399c5e5's with the checkout's
+  `arbace/classes/analyze.ae` and `interp.ae` evaluated over its own before test/java/run.ae (the interp level's harness for a
+  change to the Java forms' front end alone): t06144 PrivateLambdas, t06157 CaptureVarOrder, t06306
+  ProtectedInaccessibleMethodRefTest2 pass, the control t03208 passes, the negative controls c00001 and c00004 differ. The
+  compiled level waits for a train's build.
+- j2g: Dyn's `Clone__O` calls the interpreted class's own `clone()` by its key (`DynClass.ByKey`), else Object's refusal:
+  compiled code cloning an interpreted object through an interface that declares `clone()` public (BuildOddSel t05330:
+  PKIXParameters clones its CertSelector). Waits for a train.
+- The class-file API's compiled rows (t06042 and its kin: "Unable to resolve symbol: ClassFile/of") are stale: the API is in
+  the world since F26, and `bin/java-check --analyze-only` of t06042 on the checkout refuses none of its classes; their rows run
+  with train 1's.
+- Train 1 (the coordinator's: next + java-design-1123 at 0ad52db70 + clj-1123, one edge update and one gate build) builds this
+  branch's FFM, Kerberos, XML parser, setProperties and JD4; `.tmp/jd/session-train1.sh` waits for its build, runs the compiled
+  and interp rows on its executables in java-design-b1 (the compiled ones under one heavy-lock ticket), then
+  `.tmp/jd/post-1123.sh` merges train 1 and records them.
+
+## 2026-11-23: the user's decisions on XML's place and smartcardio; java-design-1123's scope; the unlinked native, Reference's clone
+
+- The user (relayed by the coordinator, 2026-11-23): XML is built in javac's tool world (java-design's option (b): the tests
+  naming java.xml run on javac's tool at interp, as F6's javac-API tests do, and in javac-world shards at compiled, as JD4's;
+  the shipped program does not grow); javax.smartcardio is n/a. The Mac (queue 543) takes jrt's open causes (CountDownLatch and
+  Semaphore extendable, ForkJoinPool.schedule, System.Logger, the jdk.charsets charsets, the Buddhist calendar, stack traces'
+  line numbers, type annotations' reflection, the ConditionObject name, the jrt: and zipfs providers); java-design keeps XML in
+  the tool world, serialization at compiled, t04823, JD7 and Dyn's clone, and train 1's records. Alternatives not taken for XML:
+  the shipped world (a third to a half more of jdk/forms in every build), a world and executable of its own.
+- `:smartcardio` and `:design-also-smartcardio`: kind `:na`. `bin/reap --record`: the cells unchanged (no row of the two fails
+  today); `crops-score --judge --strict` and `records-check` pass.
+- An own native method that nothing implements (SubclassTest's AbstractObjectInputStream.allocateNewObject, t04443;
+  MethodAccessFlagTest's m4, t04832; both compiled, "Go does not compile: undefined: ..._native"): j2g's body throws
+  UnsatisfiedLinkError, named as HotSpot names an unlinked native ('R C.m(P, ...)'), as the JVM does when it is called
+  (decls/method-forms); reach.ae roots UnsatisfiedLinkError's constructor for it. java.lang.UnsatisfiedLinkError entered the
+  world (test/jrt/jrt_sources.ae's jd1123-sources, jdk/sources.txt, jdk/forms/java/lang/UnsatisfiedLinkError.ae read by
+  `bin/repr-java read-jdk --no-javac` on javac's tool: the same forms as the vendoring read but the header's path, checked on
+  ThreadDeath; the provenance's counts 3,828 and 4,068). Waits for a train.
+- t04823 ReferenceClone: a SoftReference, WeakReference or PhantomReference subclass's super.clone() was Object's shallow copy
+  (dyn/clone-call: jrt's manifest lists no clone for the references, so impl-of found Object's); now jrt's reference's own
+  Clone__O (CloneNotSupportedException, Reference.clone's), for a DynSub of a Reference subclass whose jrt struct has one.
+  Waits for a train.
+- Found, not built: t04725 (annotation UnitTest) fails first on annotation elements of type byte, short and float (their values
+  null, their defaults "missing element"), before its proxies' serialization; t04444 SubclassGC needs a class loader's classes
+  unloaded (JD3's loader). Both stay deferred.
+
+## 2026-11-23: java-design-1123: XML in javac's tool world, the measured closure (plan, nothing built yet)
+
+- The user's (b) of today: java.xml's parsers, DOM, transform, XPath, validation and StAX, and java.xml.crypto's XML signature,
+  in javac's tool world (overlay/jdk/javac/closure.txt, read by `bin/javac-vendor convert` into jdk/javac/forms), the XML tests
+  routed there as F6 and JD4 route javac's API tests (bin/java-check's tool_re: their sources naming javax.xml's parsers,
+  transform, xpath, validation, stream, catalog and crypto, org.w3c.dom, org.xml.sax; at interp on javac's tool, at compiled
+  in javac-world shards).
+- The closure measured as JN7.2 measured the SAX parser's: the 15 XML tests (t08077-t08081, t08083, t08088-t08096) compiled
+  by the jdk26u build's javac and run by its java with `-Xshare:off -Xlog:class+load` (`.tmp/jd/xmlload/run.py`, each test's
+  renamed sources as test/java/ref-jdk26.edn's :files give them): 1,007 java.xml and 162 java.xml.crypto classes loaded, 803
+  top-level source files beyond the shipped world's (jdk/sources.txt), javac's (jdk/javac/sources.txt) and the closure's
+  (684 java.xml, 119 java.xml.crypto; about 247,000 lines; BCEL's generic 173, XSLTC's compiler 57, XPath's functions 42,
+  Xerces' schema datatypes 35, ...); `.tmp/jd/xmlload/need.txt`. Still to add: the classes their members' descriptors name and
+  their supertypes (j2g translates a call only when its descriptor's classes are in the world), found by
+  `bin/javac-vendor check`'s refusals, and the factories found by name (FactoryFinder's defaults, the XML signature's
+  providers) rooted for reflection, as round 2 rooted the default DatatypeFactory.
+- XSLTC (the XSLT tests t08091, t08093, t08096's transform) compiles a stylesheet to class files with BCEL and defines them:
+  JD3's class-file loader and interpreter in the tool's world as well.
+- Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
+  with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
+  GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
+## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
+
+The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
+(overlay/jdk/java.base), jdk26u's lazy stream over the loader's getResources (the name checked first; getResources called
+when the stream is consumed, its IOException an UncheckedIOException then), and j2g's class-loader-resource-helpers'
+resources(String) (arbace/j2g/model.ae: a translated loader's own override first, else ClassPathResources'; main.ae roots
+it). jdk/forms' ClassPathResources.ae as bin/jrt-convert predict reads it (only the new method and its imports differ from
+the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 failures; the night's update regenerates
+it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
+a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
+Rides train 2.
+
+## 2026-11-23: queue 538, Java's read and print deferred rows (repr/java; branch `538-java-read-print`, the VM)
+
+The brief: close the read cell's 49 deferred rows and the print cell's 7 in test/java/divergences.edn by fixing repr/java.
+- The read cell's 49 are not repr/java's. Its sources are the read, classes and diagnostics levels. Read and classes pass 3,325 of 3,325,
+  so all 49 are diagnostics rows: javac on Arbace's own Java and world (`:diag-processors` 25, `:diag-doclint` 8, `:diag-file-manager`
+  8, `:diag-command-line` 4, `:diag-closed-world` 4). Their fixes are in overlay/jdk/javac and need a new tool build each. The
+  user's decision of 2026-11-23 loads JCS51's processors through JD3's bytecode loader, which is the host's. None was changed here.
+- The print cell's 7 were looked at one by one (java-check print, javac on Arbace's errors, the class files' code by java.print's
+  code-lines). Three pass now:
+  - t05474 (`arbace/repr/java/print.ae`, `raw-lambda-arg-cast`): `x -> jobs(x)`. x is an implicit lambda parameter that the forms tag
+    with the raw Collection. Passed for jobs(Collection<Integer>), it made javac's call unchecked and its result an erased Stream, so the
+    next lambda's `job` was typed Object. The printer now writes `jobs((Collection<Integer>) x)`. This applies only to a lambda's
+    parameter, the one candidate, and a parameter of the same class parameterized without type variables. The converter drops the
+    cast again (the same erasure).
+  - t05691 (print.ae, `raw-rooted?`, `raw-recv-mref-cast`): `queue.stream().mapToInt(Integer::intValue)` on a local printed raw (the
+    source's `var`). The raw receiver's parameter is the raw ToIntFunction, so the method reference was typed applyAsInt(Object). An
+    unbound method reference whose recorded instantiated types are not Object, passed to a call on a raw receiver, is now cast to its
+    interface instantiated: `(ToIntFunction<Integer>) Integer::intValue`.
+  - t06244 (`arbace/repr/java/convert.ae` `method-ref-form`, print.ae `method-ref-text`): `(new E<Short>())::xI`. javac null-checks a
+    bound method reference's receiver unless it is a bare new (Attr.makeNullCheck tests the tree's tag, without skipping parentheses).
+    The original's parentheses gave Objects.requireNonNull, which the printed `new E<Short>()::xI` lost. The converter now marks such a
+    receiver `^:null-check` (a PARENS around a NEWCLASS), and the printer writes the parentheses back. **This moves repr/java's reader
+    hash** (83a29bfb -> b45f7ace). In jdk26u's sources the shape occurs only in a comment of java.base and in langtools tests outside
+    the corpus but this one, so jdk/'s forms should not change. The provenance files want the host's regeneration, as for 520.
+  - Left, each with a DECISION in the report (.tmp/q538/538-java-read-print.md):
+    - t05503: raw `new ArrayList()` against the diamond. The forms keep neither.
+    - t05125: a colon switch's locals share one scope, so the local slots differ from the arrow form the printer writes.
+    - t03567: `|`, `&` and `^` of pure booleans are read as or/and, as `||` and `&&` would be.
+    - t06072: `x.f = x.f + 1` against `+=` through an inner class's accessors (access$N and iadd moved).
+    Each is a shape the forms do not record.
+- javac's tool: the cleanup of 2026-11-23 removed the VM's only arm64 arbace-javac (q403's), so one was built here.
+  `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` took 4 h 01 min with a 26.6 GB peak: a first build, the
+  namespaces compiled, a compiled first build, repr/java's reader compiled, then the tool. Key 380d25064878 (the checkout plus these
+  edits). It is shared at .tmp/shared/javac-arm64/.
+- Proofs: `bin/java-check --levels read,print --only '^(t03567|t05125|t05474|t05503|t05691|t06072|t06244|t03208|t03209) '`. Before
+  (q403's tool, next fa635f636): the seven as recorded. After: t05474, t05691 and t06244 pass; the other four as recorded; read 9 of
+  9 pass; control c00001 differs. `--judge --partial --record`: 3 now passing, 0 regressions.
+- Cells: print 3,318 / 0 / 7 -> 3,321 / 0 / 4; read 7,795 / 0 / 49 unchanged; Java completeness 0.9632 -> 0.9634. `bin/reap
+  --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 540b, the user's decisions on 540 and a stale C++ row (the VM; branch `540b-c-cpp-print` from 540-c-cpp-print b2fc220c8)
+
+The user's decisions of 2026-11-23 on queue 540's report:
+- 540-1 (b): limits-caselabels.c's label chains are to be built iteratively;
+- 540-2: shell.c's level-3 difference is n/a: gcc's layout-dependent code, not by design;
+- 540-3: the main host records the compiled-host rows.
+- gxx-modules' part-4_c.C crashed in print ("print: a name: (decltype (cpp/text \"f\"))") on next fa635f636 already: f's type comes
+  from the module foo, which is not read, so decltype's operand is a text form. The record's pass (806ab6625, 2026-11-10) was stale
+  (the main host's correction). repr/cpp's name-str now prints a decltype-specifier as a nested-name-specifier's first part
+  (`decltype(f)::inner`), as base-str prints the type. The whole modules part at head: 1,181 of 1,181 pass, levels 1 and 5. The run
+  ends with "1 recorded non-passes ... now pass: write the record again": the record is the main host's, `bin/repr-cpp dg --corpus
+  modules --record`.
+- 540-1 (b): arbace.repr.c.parse's labeled-statement takes a chain of labels in a loop:
+  - each label whose statement is another label (statement's dispatch, read from the lookahead alone) takes the next;
+  - the chain is then linked from the inside out, each label's declaration or error in the recursion's order;
+  - the tree is cc's: the port's trees (`bin/repr-c parse`) of six files with label chains, among them a generated one of 1,500 case
+    labels, are byte for byte the parent's.
+  The converter's stmt-items* walks the chain in a loop too: each label's group, its form, the next label's directives; the innermost
+  statement's lone-form rule as before. The forms of a file of every label kind are the parent's.
+  - limits-caselabels.c (100,000 case labels), on the evaluated host: the port's tree whole in 88 s; the round trip's levels 1 and 2
+    equal.
+  - parse-check's tree against cc's needs cc's dump (ccdump from go-whim), which the VM lacks: the main host's
+    `bin/repr-c parse-check --corpus torture-compile --record`.
+- 540-2: a class `:objects-layout`, kind n/a, in test/repr/c/roundtrip-known.edn and test/c/divergences-print.edn. shell.c moves to it,
+  `:objects` takes back its own text, and arbace.repr.c.rtcheck/oracle-classes and the driver's deferral name it.
+- Cells recorded here: C print 4,844 / 0 / 11 (1 n/a), from 4,844 / 1 / 11. `bin/reap --record`, `bin/crops-score --record` and
+  `--judge --strict`, `bin/records-check`: 0 problems. Every other row moves with the main host's records (540's list, with
+  limits-caselabels.c among the passes of the torture-compile records, read and print).
+
+## 2026-11-23: queue 535, Python D1-D6: forkserver without os.fork, the rest where feasible (the Mac VM, branch `535-py-d1d6`)
+
+The user's "Build them" of 2026-11-23 on py-mods' six (doc/AGENDA.md's questions; the main session's notes of 2026-11-22) supersedes
+for the start method forkserver the decisions of 2026-11-04 (PY6e's DECISION (a), no os.fork) and 2026-11-22 (the forkserver rows in
+`:fork`, n/a). Base mac/next fa635f636; stage 0 nx's (stale runtime: the eval proofs ran the checkout's runtime interpreted by goi).
+- D1, forkserver (doc/python/PYTHON-SURVEY.md, "As built: 535"): `os.fork` stays absent (a forked Go process keeps one thread of a
+  runtime that needs its others). The fork server starts each child as a fresh process of sys.executable (`util.spawnv_passfds`,
+  the request's descriptors at their numbers), which does the server's preload again and runs `_serve_one` as the forked child does;
+  the server's protocol (pid and exit status to the client, waitpid on SIGCHLD) is unchanged. The change is a patch of the pinned
+  `Lib/multiprocessing/forkserver.py` (3.14.10's and 3.15.2's texts by SHA-256) applied at compile time by the new
+  `arbace/python/libpatch.ae` from `arbace.python.run/compile-source` (eval and AOT alike), one line replaced and three functions
+  appended, the file unpatched on disk; `PYI_LIB_PATCHES=0` withholds it (the control). The IR cache keeps a patched answer under the
+  source's own key (go/arbace/py's aot.go looks the cache up by the text it has): found when the control's unpatched answer, kept
+  under that key, made the compiled launcher's server die again; the control's answers are no longer kept.
+  Alternatives considered: a fork-safe child by a patched Go runtime (overlay/go: the executables of a re-seed only, and the forked
+  child's netpoller, locked threads and goroutines in system calls still lost); spawn as the default start method (249's option
+  (b)): not needed, forkserver works; a zygote child kept ready by the server: the preload's side effects still repeat.
+  Left n/a, needing fork's copy of the server's memory: the three preload tests (the preload's import once in the server).
+- D4: lib-test-limits.tsv gives the forkserver modules spawn's limits (its children are pyi processes as spawn's).
+- D5 in part: `_imp.extension_suffixes()` the platform's suffix first (`.arbace-314-x86_64-linux-musl.so`, aarch64 on arm64), then
+  py-capi's `.arbace-314.so`; `_sysconfigdata__linux_`'s SOABI and EXT_SUFFIX the first, LIBRARY and LDLIBRARY `libpython3.14.a`.
+- Found on the forkserver modules' first run: dict's `__ror__` and set's `__ror__`, `__rand__`, `__rsub__`, `__rxor__` (CPython's
+  add_operators: the reflected wrapper of the same nb slot; a manager's proxies forward `other | proxy` to them), and
+  `_thread.get_native_id()` of the main thread the process id (it was the ident, 1 in every process).
+- D2 (a native `_io`), D6 (strace shapes): not built; DECISIONs in the report. D3: py-accel's.
+- Proofs (doc/python/PYTHON-SURVEY.md, "As built: 535"; logs in the main checkout's .tmp/q535/): fs1.py by `bin/pyi run` PASS
+  (5 min 17 s, goi), with `PYI_LIB_PATCHES=0` FAIL (unexpected EOF), by the compiled launcher PASS (13 s); `bin/pyi check --aot
+  --lib-test --only` rounds 2-4 over the touched modules: 291 rows the eval record does not pass pass, none it passes fails
+  (round 3's two test_set rows, a dict `__ror__` taking a set's left operand, fixed and run again in round 4); every negative control
+  failed as it must. The eval record (the main host's) is not re-recorded here: its forkserver rows stay classed as recorded, the
+  classes saying they leave at the next record; the three preload tests move to the new `:forkserver-preload` (n/a), so Python's
+  eval cell is 40,552 / 1,604 / 1,711 (4,457 n/a), from 40,552 / 1,604 / 1,714 (4,454 n/a); `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`.
+
+## 2026-11-23: queue 535's decisions (the user's, through the main session)
+
+535-1 (a): forkserver's three preload tests (test_misc's test_preload_main, test_preload_main_sys_argv; test_processes'
+test_std_streams_flushed_after_preload) n/a in `:forkserver-preload`, as built: they count import-time output a forked child inherits
+from the server's single import, which pyi's fresh children redo. 535-2 (a): a native _io, CPython's Modules/_io (FileIO, Buffered*,
+TextIOWrapper, BytesIO, StringIO) ported to Go, as queue 545, test_io's C classes judged; _pyio stays the Py* side. 535-3 (a):
+test_fileio's two test_syscalls_read rows n/a (strace without -f sees only the thread-group leader, and pyi reaches its interpreter through
+bin/pyi's exec chain); they leave `:io-c-checks` in 545, which reworks that class. 535-4 (a): the six test_sysconfig rows of
+`:venv-and-build` stay n/a (an installation's or build tree's files pyi does not have). Alternatives considered: 535-1 (b) a fork-safe Go
+runtime; 535-2 (b) the C-only checks by design for good; 535-3 (b) the interpreter locked to the leader thread and an exec-only chain;
+535-4 (b) a source-build layout.
+
+## 2026-11-23: a native _io, CPython's Modules/_io ported to Go (queue 545, the Mac VM; the user's 535-2 (a))
+
+The user decided (535-2 (a)) to port `_io` to Go in pyi, `_pyio` staying the Python side. Built on branch 545-py-native-io from
+next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
+- Source: python/cpython, tag v3.14.10, `Modules/_io/` (`_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`,
+  `bufferedio.c`, `textio.c`, `clinic/*.c.h`), from the pinned tarball Python-3.14.10.tar.xz (SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032), and 3.15.2's differences from Python-3.15.2.tar.xz (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), ported by hand into go/arbace/py's `builtins_io*.ae` (the
+  printed runtime edited, read back by `bin/pyi runtime read`); the PSF's license, LICENSE.md (its coverage list extended).
+  `winconsoleio.c` (Windows) is not ported.
+- Two steps, each with its proof: step 1 (3dbf642cf) the bases, BytesIO, StringIO and IncrementalNewlineDecoder with FileIO,
+  the buffered classes, TextIOWrapper and open still `_pyio`'s (test_memoryio on AOT: 176 pass, 0 failing); step 2 the rest and
+  the switch: no `_pyio` import at `_io`'s creation, builtins.open is `_io.open`, the standard streams' types derive from the
+  native TextIOWrapper, BufferedWriter and BufferedReader, `_pyio` out of cImplModules.
+- Runtime changes beyond the port: the _io methods take the instance itself (objectDescr) and a subclass keeps the _io slots
+  that call its methods (class.go); instanceDict answers an _io object's dict (attr.go); every _io type is weakly
+  referenceable and reports HEAPTYPE in `__flags__`; the types without a tp_new of their own in C (all but FileIO, BytesIO,
+  StringIO) have no `__new__` in their dict and `object.__new__` of them makes their value (registry.go's inheritsNew, descr.go's
+  newOrigin, class.go's objectNew); the cycle collector walks the _io objects (finalize.go); wrapInstance tracks a subclass's
+  instance for iobase_finalize unless its class has a `__del__` of its own.
+- Alternatives considered: keeping sys.stdout as the runtime's textFile registered with an ABC (impossible once io's classes
+  are static types: the subclass relation is used instead); making sys.stdout a real TextIOWrapper over FileIO(1) (more
+  faithful, but the runtime's print, REPL, input and readline paths use the textFile's bufio writers: left for later).
+  The hybrid step 1 kept `_pyio`'s loader for one commit only.
+- Proofs (VM, AOT, `bin/pyi check --aot --lib-test --fresh --only`, logs in .tmp/q545/): test_io 631 pass, test_fileio 97,
+  test_file_eintr 18, test_fileinput 57, test_memoryio 177; 0 failing; 64 record rows to pass; the three controls failed as they
+  must. Probes of the standard streams, files, pipes, a child's streams, pickling of subclasses (.tmp/q545/p/).
+- Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
+  classes whose rows pass now keep them until the main host's re-record (their why says so).
+- The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
+## 2026-11-23: queue 537, Python eval's largest by-design classes: _hashlib over Go's crypto, the pseudo-terminal functions, the rest to the user (the Mac VM)
+
+What: the eval cell's `:kind :design` classes of test/python/divergences.edn, largest first by the committed record's rows
+(test/python/check-lib-test-linux-amd64.edn at next fa635f636, classified as `bin/reap` classifies them; `:c-accelerators`,
+the ctypes classes, the cap-crash modules and del.py the main host's, D1-D6 queue 535's, every `:deferred` class queue 536's),
+each built in pyi or brought to the user as n/a with why.
+
+Built (go/arbace/py, written as Go in `bin/pyi runtime print`'s module and read back):
+- `_hashlib` (`builtins_hashopenssl.ae`), CPython 3.14.10's Modules/_hashopenssl.c over Go's crypto in place of OpenSSL's EVP
+  interface, as `_ssl` is over Go's crypto/tls (PYS22 (a), the precedent): hashlib.py and hmac.py take it first, test_hmac's 49
+  OpenSSL rows of `:skipped-by-test` and test_hashlib's 6 of `:openssl` run. Studied: cpython v3.14.10 Modules/_hashopenssl.c,
+  Modules/clinic/_hashopenssl.c.h, Lib/hashlib.py, Lib/hmac.py, Lib/test/support/hashlib_helper.py; RFC 8018 §5.2 (PBKDF2),
+  RFC 7914 §3-§5 (scrypt); OpenSSL 3's scrypt parameter checks as python3 3.14.10 on this VM shows them. Alternatives: (a) keep
+  `:openssl` and the OpenSSL rows by design (PY6d's choice of the built-in modules alone): no, the user's goal is 100% and the
+  module is buildable on Go's crypto; (b) link OpenSSL through ci: a C world's libcrypto is a crop of its own, and nothing in the
+  tests needs OpenSSL itself.
+- `os.posix_openpt`, `grantpt`, `unlockpt`, `ptsname` (posixmodule.c over musl 1.2.6).
+- the pickling refusal of a built-in data type names its tp_name (`'_hashlib.HASH'`, `'_md5.md5'`, `'zlib.Compress'`).
+- `int()` of an int subclass calls its `__int__` (PyNumber_Long's nb_int; test_int's test_int_returns_int_subclass and
+  test_int_subclass_with_int), `complex()` follows actual_complex_new and complex_new_impl (a single exact complex returned as it
+  is, `__complex__` on any other type, the strict-subclass DeprecationWarning, the two-argument path's type checks and warnings;
+  cmath's and getargs' `D` warn too): test_complex's test_constructor and test_capi's test_D, three of `:coroutines`' rows that
+  its catch-all match took. Studied: cpython v3.14.10 Objects/complexobject.c (actual_complex_new, complex_new_impl,
+  try_complex_special_method), Objects/abstract.c (PyNumber_Long).
+
+Found, not built (the report's DECISIONs): test_warnings' 15 DeprecatedTests in `:coroutines` are `:warnings-c`'s cause (no C
+`_warnings`, whose warn reads `sys.modules['warnings']` at each call; BaseTest.setUp swaps it): a Go `_warnings` (Python/_warnings.c)
+would serve them and `:warnings-c` (536's class). The user's n/a decisions of 2026-11-23 (next 320e74469, merged before the record)
+took `:skipped-by-test`'s counting rows (J1/J2: 149 rows), `:gc-collector`, `:inline-values`, `:tuple-id-reuse`, `:specializing`,
+`:pyc-magic`, `:subtest-ids`, `:fails-under-cpython-too` and test_gc's cycle counts, which this task had as DECISION 537-1 and
+n/a candidates.
+
+Proofs: `bin/pyi check --only` on the VM (goi, the checkout's runtime), four runs, the negative controls failing in each (logs
+`.tmp/q537/check-537{,b,c,d}.log`). The record's rows of the modules run written from those runs' results (64 to pass; `--record`
+refuses a runtime that is not compiled, so the main host's next record replaces them). Python eval at 320e74469: 40,552 / 1,398 /
+1,585 -> 40,616 / 1,338 / 1,579 (4,789 n/a); `bin/reap --record`, `bin/crops-score --record` (Python 98.12 -> 98.16),
+`--judge --strict` and `bin/records-check`: 0 problems.
+
+## 2026-11-23: queue 537's record rows written again by `bin/pyi check --judge DIR --record` (correction of the entry above)
+
+The coordinator's request: the rows the entry above says were transcribed from the runs' results (`merge_record.py`) are written
+instead by the judge's own `--record` over one directory holding the modules the runs covered whole (`.tmp/q537/judge-rec`:
+test_hmac, test_hashlib, test_uuid and test_urllib2 of the first run, test_index of the second, test_complex and test_cmath of
+the fourth, test_int of a fifth run alone, whose timing test passed there), as queue 536 recorded. `--record` refuses an `--only`
+run, so test_os' two PseudoterminalTests rows and test_capi's test_D stay as next has them until the main host's whole record.
+Two rows recorded as timeouts at the VM's load (test_uuid's test_unix_getnode_from_libuuid, test_urllib2's test_http_body_pipe,
+class `:runner-limits`). Python eval: 40,552 / 1,398 / 1,585 -> 40,611 / 1,341 / 1,581 (not 40,616 / 1,338 / 1,579);
+`bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-23: a native _io, CPython's Modules/_io ported to Go (queue 545, the Mac VM; the user's 535-2 (a))
+
+The user decided (535-2 (a)) to port `_io` to Go in pyi, `_pyio` staying the Python side. Built on branch 545-py-native-io from
+next fa635f636, then merged with next 320e74469 (the user's n/a decisions).
+- Source: python/cpython, tag v3.14.10, `Modules/_io/` (`_iomodule.c`, `iobase.c`, `bytesio.c`, `stringio.c`, `fileio.c`,
+  `bufferedio.c`, `textio.c`, `clinic/*.c.h`), from the pinned tarball Python-3.14.10.tar.xz (SHA-256
+  de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032), and 3.15.2's differences from Python-3.15.2.tar.xz (SHA-256
+  8b5536d280142ecf6cdfe15d12a21ba1c65e300bbf7b28a8d0cdb849575797de), ported by hand into go/arbace/py's `builtins_io*.ae` (the
+  printed runtime edited, read back by `bin/pyi runtime read`); the PSF's license, LICENSE.md (its coverage list extended).
+  `winconsoleio.c` (Windows) is not ported.
+- Two steps, each with its proof: step 1 (3dbf642cf) the bases, BytesIO, StringIO and IncrementalNewlineDecoder with FileIO,
+  the buffered classes, TextIOWrapper and open still `_pyio`'s (test_memoryio on AOT: 176 pass, 0 failing); step 2 the rest and
+  the switch: no `_pyio` import at `_io`'s creation, builtins.open is `_io.open`, the standard streams' types derive from the
+  native TextIOWrapper, BufferedWriter and BufferedReader, `_pyio` out of cImplModules.
+- Runtime changes beyond the port: the _io methods take the instance itself (objectDescr) and a subclass keeps the _io slots
+  that call its methods (class.go); instanceDict answers an _io object's dict (attr.go); every _io type is weakly
+  referenceable and reports HEAPTYPE in `__flags__`; the types without a tp_new of their own in C (all but FileIO, BytesIO,
+  StringIO) have no `__new__` in their dict and `object.__new__` of them makes their value (registry.go's inheritsNew, descr.go's
+  newOrigin, class.go's objectNew); the cycle collector walks the _io objects (finalize.go); wrapInstance tracks a subclass's
+  instance for iobase_finalize unless its class has a `__del__` of its own.
+- Alternatives considered: keeping sys.stdout as the runtime's textFile registered with an ABC (impossible once io's classes
+  are static types: the subclass relation is used instead); making sys.stdout a real TextIOWrapper over FileIO(1) (more
+  faithful, but the runtime's print, REPL, input and readline paths use the textFile's bufio writers: left for later).
+  The hybrid step 1 kept `_pyio`'s loader for one commit only.
+- Proofs (VM, AOT, `bin/pyi check --aot --lib-test --fresh --only`, logs in .tmp/q545/): test_io 631 pass, test_fileio 97,
+  test_file_eintr 18, test_fileinput 57, test_memoryio 177; 0 failing; 64 record rows to pass; the three controls failed as they
+  must. Probes of the standard streams, files, pipes, a child's streams, pickling of subclasses (.tmp/q545/p/).
+- Classes: `:strace-leader` (n/a, the user's 535-3 (a)); test_io's eight test_error_through_destructor to `:finalization`; the
+  classes whose rows pass now keep them until the main host's re-record (their why says so).
+- The "open" audit event (queue 536's request): FileIO calls sys.audit("open", name, mode, flags); 536's hooks answer it once merged.
+
+
+## 2026-11-23: py-mac-1123, the Python branches consolidated on train-2 (the Mac VM, for train 2)
+
+Train 2 (origin/train-2 a6f6fdbf3) left out every Python branch: 535-py-d1d6, 537-py-design and 545-py-native-io each conflicted
+with next in go/arbace/py/*.ae (Go forms whose :go/comments carry positions) and overlapped each other. As their owner, branch
+py-mac-1123 from a6f6fdbf3 merges, in order, origin/535-py-d1d6 (37bbae6f3, 0e609fbe1), origin/537-py-design (63ecfd842,
+211857567), origin/545-py-native-io (6b27c238a, 02f5ad799) and 551-py-finalization-warnings (74c3c59e4, 78170d088).
+
+The method (queue 482's and py-mods-1122's, 70e3ebc79 and e80fd1ca6 on origin/py-mods-1122): each conflicted go/arbace/py file
+printed in its package at the merge base, ours and theirs (git archive of each side's go/arbace/py, bin/repr-go print of py.ae;
+a file printed alone loses its layout, tried first and dropped), the three Go files merged by git merge-file, the package printed
+from the working tree with the merged Go put over it, then go/arbace/py read back in mode :full (bin/repr-go read --full --tests,
+as bin/pyi runtime read; builtins_os_other kept in py.ae as runtime_read_other merges it): builtins_capi_api and builtins_thread
+(535; one hunk differing only in the line numbers of a struct printed with line directives, ours taken), class and sys (545),
+builtins_imp, interp and sys (551) merged with no Go conflict; py.ae made again by each read-back, which changed no other file.
+The scripts: .tmp/qpy/resolve_ae.sh, readback.sh, pyae_union.py (the union of both sides' files for the print). Records and
+classes: divergences.edn's :fork took 535's :why and train-2's :decided and :match; the eval record is train-2's with 537's 64
+changed and 2 removed rows applied by id (537's writer had reordered the file); the journal and the survey keep both sides;
+scores and matrix are recorded again on the merge.
+
+The checks on the merge (the VM, pinned to four CPUs for the night): gofmt and go vet of the printed py, pyctypes and clib (clean
+but the five generated nodes.go of clib, as before), go test ./py ok; bin/pyi check --aot over the modules each branch touched
+(535: forkserver's test_manager, test_misc, test_processes, test_sysconfig, test_set, test_dict; 537: test_hmac, test_hashlib,
+test_os's two pseudo-terminal rows, test_int, test_complex, test_cmath; 545: test_io, test_fileio, test_file_eintr,
+test_fileinput, test_memoryio; 551: test_warnings, test_sys): 21 modules, 2,870 methods, 2,619 pass, 246 classed, 5 failing,
+all five test_warnings', which 25c00615c fixes (_PyImport_BlessMyLoader calls importlib's _bless_my_loader, as import.c does,
+where the port had a Go stand-in; no source line for a <string> file, as _Py_DisplaySourceLine fails to open it; test_tracemalloc
+named in :warnings-c), then test_warnings again: 227 pass, 15 classed, 0 failing; the three negative controls failed as they
+must. bin/reap --record (0 problems; the matrix's five Clojure lines were stale on train-2 a6f6fdbf3 itself, recorded from its
+records), bin/crops-score --record, then --judge --strict and bin/records-check: 0 problems. bin/pyi runtime check (goi
+interprets the merged runtime) was still running at the commit: its timeouts under the pin are load, and c-codecs.py's
+`bytearray + bytes` Go panic under goi (fine on AOT) is train-2's own: the same panic at a6f6fdbf3 and before 545.
+
+## 2026-11-24: py-accel, _elementtree and _zoneinfo in the C world, ctypes' complex types and dllist; mac/py-mac-1123 merged
+
+The rows the Mac's 537 routed here (DECISION 537-6 (a): _elementtree 19, _zoneinfo 2, ctypes' complex and dllist 6):
+- **The world** (tools/pyi/clib/ctypestest/lib.conf; Key d65251e1..., 11.5 MB of node program, was 9.9): CPython 3.14.10's
+  `Modules/_zoneinfo.c` and `Modules/_elementtree.c` through glue files as 521's (`accel_zoneinfo.c`, `accel_elementtree.c`,
+  NDEBUG), and the tarball's Expat C (`Modules/expat/xcs.c`, `xmlparse.c`, `xmlrole.c`, `xmltok.c`, Makefile.pre.in's
+  LIBEXPAT_OBJS, its expat_config.h: XML_POOR_ENTROPY). pyi's pyexpat is a Go port with no C functions, so the glue makes
+  `pyexpat.expat_CAPI` itself over the world's Expat (pyexpat.c's table and unknown-encoding handler copied) and pyctypes
+  calls it (`pyi_expat_install`) before PyInit__elementtree; `_Py_HashSecret` (the one undefined data symbol) is defined
+  zero there: Expat then picks its own salt. A first build stopped on that symbol (bin/pyi-clib's undefined check).
+- **pyctypes**: the modules registered (PYI_C_ACCEL=0 leaves them out with _datetime and _decimal); ctypes' `D`, `F` and
+  `G` simple types (c_double_complex, c_float_complex, c_longdouble_complex: two parts in the type of d, f and g, passed to
+  ci as a struct of them, the byte-swapped variants for D and F, the type characters "cbBhHiIlLdDFGfuzZqQPOv?g" as 3.14's
+  where libffi has complex); `_ctypes.dllist` (callproc.c's over dl_iterate_phdr: the program "", the world's musl as
+  "libc.so", then each name dlopen opened); the C API's `PyType_GetModuleState`, `PyObject_SelfIter`,
+  `_PyThreadState_GetCurrent`, `Py_ReprEnter`/`Py_ReprLeave` (over py's new ExtReprEnter/ExtReprLeave) and
+  `_PyErr_ChainExceptions1`, found missing by the runs (124, 82, 1 and 1 test_xml_etree_c methods stopped on them).
+- LICENSE.md: the world's 521 accelerators, libmpdec (its BSD 2-Clause notice, a new section) and this Expat named.
+- **mac/py-mac-1123** (5d93b6732: 535, 537, 545, 551 and test_warnings' fix, from train-2 a6f6fdbf3) merged into
+  py-accel-w-1122: go/arbace/py on its printed Go (git merge-file over fa635f636, no text conflict: the four .ae conflicts
+  were positions), vet clean, read back; pyctypes merged by git (theirs changed only capi_getargs).
+Proofs (`bin/pyi check --aot --lib-test --fresh --only`, the drivers from the committed forms, under the big lock: the world's
+aot forms now need more than 8 GiB to print, a first run hit the cap): on the merged tree test_datetime 1,069 / 39 / 0,
+test_decimal 721 / 11 / 0, test_types 127 / 2 / 0, test_zoneinfo 244 / 33 / 0 (the C classes pass; gc.is_tracked of the C
+type to n/a :gc-collector), ctypes' 7 ids 5 pass, 2 classed (test_lists_updates skips by its own rule when _ctypes_test is
+loaded; test_csqrt, which now runs, to :ctypes-port: _ctypes_test's my_csqrt* need _Py_FFI_SUPPORT_C_COMPLEX and an 8-byte
+long double is not ci's), test_xml_etree_c (see the last run below); the controls fail as they must. New deferred class
+`:elementtree-c` (6: XMLPullParser's flush and small-chunk events, a deep deepcopy overflowing the C world's stack, an
+Element's weak reference, a Go panic in TreeBuilder's late tail). Records: train 3's executables.
+The last run (pyctypes with PyObject_SelfIter and _PyErr_ChainExceptions1): test_xml_etree_c 231 pass, 23 classed (:elementtree-c
+6, cpython-only 9, skipped-by-test 6, finalization-collect 1, subtest-ids 1), 0 failing; the record held 19 "requires
+_elementtree" rows of it, and the module's other C classes now run.
+Correction to today's first py-accel entry: `:c-accelerators` keeps its old `:match` and `:tests` for now. The record still holds
+test_datetime's, test_decimal's and test_types' rows from before 521 (700 not-run, 127 "No module named '_datetime'"), which
+reap must class until train 3's executables record those modules; the narrowing to _pickle and _json lands with that record.
+`bin/reap --record` (matrix unchanged), `bin/crops-score --record`, `--judge --strict` and `bin/records-check` report 0 problems.

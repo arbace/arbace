@@ -447,6 +447,145 @@
     (.append out "(* file preprocessed in 0.000s *)\n")
     (.toString out)))
 
+;; ---------------------------------------------------------------------------------------------
+;; ppxlib 0.39.0's own build (queue 546, the user's 539b-1: ppxlib's bootstrap on oi). Its source rewriter, pp/pp_rewrite.mll
+;; with pp/pp.ml, in its two variants (astlib's: IF_CURRENT, IF_AT_LEAST, IF_NOT_AT_LEAST; ast's: OCAML_VERSION and IF_AT_LEAST),
+;; and the version astlib's rule reads (astlib/config/gen.ml's ast-version), ported and held to their SHA-256 (by path under the
+;; package, ppxlib-sha256); ocaml-compiler-libs v0.17.0's two generated units (src/gen/gen.ml's ocaml_common.ml from
+;; ocamlcommon.cma's units, src/shadow/gen/gen.ml's ocaml_shadow.ml from compiler-libs' .cmi and .cma) made from the tarball's
+;; Makefile, the units the archives hold (ocaml-common-units).
+
+(def ppxlib-sha256
+  "The SHA-256 of ppxlib's and ocaml-compiler-libs' programs the rules port, by their path under the package's directory"
+  {"ppxlib/astlib/pp/pp_rewrite.mll" "bd4635f9765e727c31602a88a1886eb8f64024b97cde73fb86e1fdf33a3d5af7"
+   "ppxlib/astlib/pp/pp.ml" "649400f15732b6c447e4038adeaf6d1f84eac2faf3dba29083b504391256c1bc"
+   "ppxlib/ast/pp/pp_rewrite.mll" "ae019036e1f313b1761241c625100d1a2b336e21564a12635ad3b274b283c16b"
+   "ppxlib/ast/pp/pp.ml" "66972260910aa27fdf50d8adfb12ac5f570fd67e0914e5112bf087ce0e1bfabb"
+   "ppxlib/astlib/config/gen.ml" "b1f56e0121d7b078342780a15338ff19cd49589deacd8bd771e9ef09897fa000"
+   "ppxlib/ast/supported_version/supported_version.ml" "62deacddd481e53fb173a02df39646ebbcad7328668ac3b5d2966f33fd8111fe"
+   "ocaml-compiler-libs/src/gen/gen.ml" "e53c71d68afdd83a2eaf5d438c5909ccd80a15a4a09ec29f98ca39ec4605090c"
+   "ocaml-compiler-libs/src/shadow/gen/gen.ml" "eca51f7bc77a0add6f21de77b21edf6265b0d2c24e40d897080ce507a9323fd8"
+   "ocaml-compiler-libs/src/read_cma/read_cma.ml" "06d62a37f540233cd66b935e6c7102f19170d38c17b63b3027ff96d67c61972c"})
+
+(defn- held-at!
+  "ROOT/REL (REL a key of ppxlib-sha256, its first segment the package's directory, ROOT that directory) is the program the port follows"
+  [^File root ^String rel]
+  (let [f (File. root ^String (subs rel (inc (.indexOf rel "/"))))]
+    (cond (not (.exists f)) (failwith (str "no " (.getPath f) ": the rule's program is not its source"))
+          (not= (get ppxlib-sha256 rel) (sha256 (read-bytes (.getPath f)))) (failwith (str (.getPath f) " is not the program the port follows")))))
+
+(def ^:private pp-if-current (Pattern/compile "\\(\\*IF_CURRENT ([^*]*)\\*\\)"))
+(def ^:private pp-at-least-astlib (Pattern/compile "\\(\\*IF_AT_LEAST ([^* ]*) ((?:[^*]|\\*[^)])*)\\*\\)"))
+(def ^:private pp-not-at-least (Pattern/compile "\\(\\*IF_NOT_AT_LEAST ([^* ]*) ((?:[^*]|\\*[^)])*)\\*\\)"))
+(def ^:private pp-at-least-ast (Pattern/compile "\\(\\*IF_AT_LEAST ([^* ]*) ([^*]*)\\*\\)"))
+
+(defn- spaces [n] (apply str (repeat n \space)))
+
+(defn ppxlib-pp
+  "ppxlib's pp/pp.exe VERSION FILE on TEXT: `# 1 \"FILE\"` then pp_rewrite's rule, VARIANT :astlib (astlib/pp: IF_CURRENT for
+  ast_VERSION.ml, IF_AT_LEAST, IF_NOT_AT_LEAST) or :ast (ast/pp: OCAML_VERSION padded to its 13 columns, IF_AT_LEAST). Each comment
+  that applies becomes spaces and its text, the columns kept; ocamllex's longest match, the rules in their order on a tie; a
+  version is compared as OCaml compares strings"
+  [^String text variant ^String version ^String file]
+  (let [n (count text)
+        out (StringBuilder.)
+        is-current (= (.getName (File. file)) (str "ast_" version ".ml"))
+        rules (if (= variant :astlib)
+                [[pp-if-current (fn [^Matcher m] (if is-current (str (spaces 13) (.group m 1) "  ") (.group m)))]
+                 [pp-at-least-astlib (fn [^Matcher m] (let [v (.group m 1)]
+                                                        (if (<= (compare v version) 0)
+                                                          (str (spaces 14) (spaces (inc (count v))) (.group m 2) "  ") (.group m))))]
+                 [pp-not-at-least (fn [^Matcher m] (let [v (.group m 1)]
+                                                     (if-not (<= (compare v version) 0)
+                                                       (str (spaces 18) (spaces (inc (count v))) (.group m 2) "  ") (.group m))))]]
+                [[pp-at-least-ast (fn [^Matcher m] (let [v (.group m 1)]
+                                                     (if (<= (compare v version) 0)
+                                                       (str (spaces 14) (spaces (inc (count v))) (.group m 2) "  ") (.group m))))]])]
+    (.append out (str "# 1 " (ocaml-quote file) "\n"))
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt text i)]
+          (cond
+            (and (= variant :ast) (= c \O) (.startsWith text "OCAML_VERSION" i))
+            (do (.append out (format "%-13s" version)) (recur (+ i 13)))
+            (and (= c \() (< (inc i) n) (= \* (.charAt text (inc i))))
+            (let [best (reduce (fn [best [^Pattern pat f]]
+                                 (let [m (.matcher pat text)]
+                                   (.region m i n)
+                                   (if (and (.lookingAt m) (or (nil? best) (> (.end m) (:end best))))
+                                     {:end (.end m) :text (f m)} best)))
+                               nil rules)]
+              (if best
+                (do (.append out ^String (:text best)) (recur (long (:end best))))
+                (do (.append out c) (recur (inc i)))))
+            :else (do (.append out c) (recur (inc i)))))))
+    (.toString out)))
+
+(defn- ppxlib-ast-version
+  "astlib/config/gen.ml's ast-version for OCaml 5.5: (5, 5) -> \"505\""
+  [^File root]
+  (held-at! root "ppxlib/astlib/config/gen.ml")
+  (let [t (read-text (.getPath (File. root "astlib/config/gen.ml")))]
+    (when-not (re-find #"\| 5, 5 -> \"505\"" t) (failwith "astlib/config/gen.ml has no (5, 5) -> 505"))
+    "505"))
+
+(defn- ppxlib-version-int
+  "ast/pp/pp.ml's version for %{ocaml_version} 5.5.0: Supported_version.of_string's (5, 5), to_int's 505"
+  [^File root]
+  (held-at! root "ppxlib/ast/supported_version/supported_version.ml")
+  (let [t (read-text (.getPath (File. root "ast/supported_version/supported_version.ml")))]
+    (when-not (and (re-find #"\(5, 5\);" t) (re-find #"let to_int \(a, b\) = \(a \* 100\) \+ b" t))
+      (failwith "ast/supported_version/supported_version.ml does not list (5, 5) or to_int changed"))
+    "505"))
+
+(defn ocaml-common-units
+  "The units of the tarball TOP's compilerlibs/ocamlcommon.cma in link order: the Makefile's ocamlcommon_SOURCES (utils, parsing,
+  typing, lambda, comp), each implementation's (.ml, .mly, .mll) module"
+  [^String top]
+  (let [mk (read-text (str top "/Makefile"))
+        block (fn [nm] (let [m (re-find (re-pattern (str "(?ms)^" nm "_SOURCES = (.*?)(?:\\n\\n|\\n[a-z#])")) mk)]
+                         (when-not m (failwith (str "Makefile: no " nm "_SOURCES")))
+                         (second m)))
+        words (fn [nm] (let [b (block nm)
+                             pre (second (re-find #"\$\(addprefix ([a-z_]+/)," b))]
+                         (for [w (re-seq #"[A-Za-z0-9_/]+\.(?:mli|ml|mly|mll)" b)] (if (and pre (not (str/includes? w "/"))) (str pre w) w))))]
+    (vec (distinct (for [nm ["utils" "parsing" "typing" "lambda" "comp"]
+                         w (words nm)
+                         :when (re-find #"\.(ml|mly|mll)$" w)
+                         :let [b (str/replace (last (str/split w #"/")) #"\.(ml|mly|mll)$" "")]]
+                     (str (str/upper-case (subs b 0 1)) (subs b 1)))))))
+
+(defn ocaml-common-intf-only
+  "The interfaces without an implementation of ocamlcommon_SOURCES (parsetree.mli, outcometree.mli, ...), as modules"
+  [^String top]
+  (let [mk (read-text (str top "/Makefile"))
+        ws (for [nm ["utils" "parsing" "typing" "lambda" "comp"]
+                 :let [m (re-find (re-pattern (str "(?ms)^" nm "_SOURCES = (.*?)(?:\\n\\n|\\n[a-z#])")) mk)]
+                 w (re-seq #"[A-Za-z0-9_/]+\.(?:mli|ml|mly|mll)" (second m))]
+             (last (str/split w #"/")))
+        impl (set (for [w ws :when (re-find #"\.(ml|mly|mll)$" w)] (str/replace w #"\.(ml|mly|mll)$" "")))]
+    (vec (distinct (for [w ws :when (str/ends-with? w ".mli") :let [b (subs w 0 (- (count w) 4))] :when (not (impl b))]
+                     (str (str/upper-case (subs b 0 1)) (subs b 1)))))))
+
+(defn ocaml-common-ml
+  "ocaml-compiler-libs' src/gen/gen.ml -archive ocamlcommon.cma: its text over UNITS (Read_cma.units: sorted by String.compare)"
+  [units]
+  (let [units (sort units)
+        w (reduce max 0 (map count units))]
+    (str "(* This file is automatically generated *)\n\n"
+         (apply str (for [u units] (str "module " (format (str "%-" w "s") u) " = " u "\n"))))))
+
+(defn ocaml-shadow-ml
+  "ocaml-compiler-libs' src/shadow/gen/gen.ml -dir compiler-libs: every exposed module (sorted) an alias of Do_not_use_directly,
+  deprecated, naming the library of the .cma that holds it. LIBS: [[lib-module units] ...] (Ocaml_common ...), EXPOSED: the
+  modules of the .cmi files"
+  [libs exposed]
+  (let [m2l (into {} (for [[l us] libs u us] [u l]))]
+    (str "module Do_not_use_directly = struct end\n"
+         (apply str (for [m (sort exposed)]
+                      (str "module " m " = Do_not_use_directly [@@deprecated \"Accessing this module directly is deprecated"
+                           (if-let [l (m2l m)] (str ", use " l "." m " instead") "") "\"]\n"))))))
+
 (defn- project-root
   "The directory above DIR (or DIR) that holds dune-project: dune's %{project_root}"
   ^File [^File dir]
@@ -479,6 +618,43 @@
     (if (empty? fs) acc
         (if (= "-open" (first fs)) (recur (drop 2 fs) (conj acc (second fs))) (recur (rest fs) acc)))))
 
+(defn- ocaml-top
+  "The tarball's top: OI_OCAML_TOP, else the opam set's sibling ocaml-5.5.0 (.tmp/repr-ocaml/opam/PKG -> .tmp/repr-ocaml/ocaml-5.5.0)"
+  ^String [^File root]
+  (or (System/getenv "OI_OCAML_TOP") (.getPath (File. (.getParentFile (.getParentFile root)) "ocaml-5.5.0"))))
+
+(defn- ppxlib-build
+  "queue 546: the text of a unit of ppxlib's or ocaml-compiler-libs' libraries as their dune files build it, nil when no rule of theirs
+  applies (ROOT the package's directory, REL the unit's path under it)"
+  [^File root ^String rel ^File f]
+  (let [pkg (.getName root)]
+    (cond
+      (and (= pkg "ppxlib") (re-matches #"astlib/[^/]+\.mli?" rel) (.exists f))
+      (do (held-at! root "ppxlib/astlib/pp/pp_rewrite.mll") (held-at! root "ppxlib/astlib/pp/pp.ml")
+          [:ok (ppxlib-pp (read-text (.getPath f)) :astlib (ppxlib-ast-version root) rel)])
+      (and (= pkg "ppxlib") (#{"ast/versions.ml" "ast/versions.mli"} rel))
+      (do (held-at! root "ppxlib/ast/pp/pp_rewrite.mll") (held-at! root "ppxlib/ast/pp/pp.ml")
+          [:ok (ppxlib-pp (read-text (.getPath f)) :ast (ppxlib-version-int root) rel)])
+      ;; src/dune's rules `(run ./gen/gen_ast_pattern.exe %{lib:ppxlib.ast:ast.ml})` and gen_ast_builder's: the files the
+      ;; generators wrote run on oi (bin/oi ppx gen, OI_PPXLIB_GEN)
+      (and (= pkg "ppxlib") (#{"src/ast_pattern_generated.ml" "src/ast_builder_generated.ml"} rel))
+      (let [g (System/getenv "OI_PPXLIB_GEN")
+            gf (when g (File. g (.getName f)))]
+        (if (and gf (.exists gf))
+          [:ok (read-text (.getPath gf))]
+          (failwith (str rel ": made by ppxlib's generator run on oi (bin/oi ppx gen), none in OI_PPXLIB_GEN"))))
+      ;; ast's other modules: the per_module preprocess names versions alone
+      (and (= pkg "ppxlib") (re-matches #"ast/[^/]+\.mli?" rel) (.exists f))
+      [:ok (read-text (.getPath f))]
+      (and (= pkg "ocaml-compiler-libs") (= rel "src/ocaml_common/ocaml_common.ml"))
+      (do (held-at! root "ocaml-compiler-libs/src/gen/gen.ml") (held-at! root "ocaml-compiler-libs/src/read_cma/read_cma.ml")
+          [:ok (ocaml-common-ml (ocaml-common-units (ocaml-top root)))])
+      (and (= pkg "ocaml-compiler-libs") (= rel "src/shadow/ocaml_shadow.ml"))
+      (do (held-at! root "ocaml-compiler-libs/src/shadow/gen/gen.ml") (held-at! root "ocaml-compiler-libs/src/read_cma/read_cma.ml")
+          (let [us (ocaml-common-units (ocaml-top root))]
+            ;; the .cmi oi's compiler-libs gives: ocamlcommon's modules, its interfaces without an implementation too
+            [:ok (ocaml-shadow-ml [["Ocaml_common" us]] (distinct (concat us (ocaml-common-intf-only (ocaml-top root)))))])))))
+
 (defn build-unit
   "The text dune's build compiles for PATH (a unit of a package's library, existing or made by a rule of its directory), as
   [:ok text] or [:fail why]; nil when no build rule of this namespace applies to it"
@@ -489,6 +665,7 @@
         rel (str/replace (subs (.getPath f) (inc (count (.getPath root)))) File/separator "/")]
     (try
       (cond
+        (and (#{"ppxlib" "ocaml-compiler-libs"} (.getName root)) (ppxlib-build root rel f)) (ppxlib-build root rel f)
         (nil? b) nil
         (.exists f)
         (when-let [{:keys [prog flags]} (:pp b)]

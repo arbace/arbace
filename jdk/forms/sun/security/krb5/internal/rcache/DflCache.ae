@@ -1,0 +1,188 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/rcache/DflCache.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.rcache)
+
+(import '(java.io Closeable File IOException)
+        '(java.nio BufferUnderflowException ByteBuffer ByteOrder)
+        '(java.nio.channels SeekableByteChannel)
+        '(java.nio.file Files OpenOption Path StandardCopyOption StandardOpenOption)
+        '(java.nio.file.attribute FileAttribute PosixFilePermission)
+        '(java.util HashSet Set)
+        '(jdk.internal.misc VM)
+        '(sun.security.krb5.internal KerberosTime Krb5 KrbApErrException ReplayCache))
+
+(defclass ^:public DflCache
+  :extends ReplayCache
+
+  (field ^:private ^:static ^:final ^int KRB5_RV_VNO 0x501)
+
+  (field ^:private ^:static ^:final ^int EXCESSREPS 30)
+
+  (field ^:private ^:final ^String source)
+
+  (field ^:private ^:static ^long uid)
+
+  (static-initializer (set! uid (VM/geteuid)))
+
+  (constructor ^:public [this ^String source]
+    (set! (.-source this) source))
+
+  (method ^:private ^:static defaultPath ^String []
+    (System/getProperty "java.io.tmpdir"))
+
+  (method ^:private ^:static defaultFile ^String [^:mutable ^String server]
+    (let [^:mutable slash (.indexOf server \/)]
+      (when (== slash -1) (set! slash (.indexOf server \@)))
+      (when-not (== slash -1) (set! server (.substring server 0 slash)))
+      (when-not (== uid -1) (set! server (java-str server (java-str "_" uid))))
+      server))
+
+  (method ^:private ^:static getFileName ^Path [^:mutable ^String source ^String server]
+    (let [^:mutable ^String path nil
+          ^:mutable ^String file nil]
+      (cond
+        (.equals source "dfl")
+          (do (set! path (DflCache/defaultPath)) (set! file (DflCache/defaultFile server)))
+        (.startsWith source "dfl:")
+          (do
+            (set! source (.substring source 4))
+            (let [^:mutable pos (.lastIndexOf source \/)
+                  pos1 (.lastIndexOf source \\)]
+              (when (> pos1 pos) (set! pos pos1))
+              (cond
+                (== pos -1) (do (set! path (DflCache/defaultPath)) (set! file source))
+                (.isDirectory (File. source))
+                  (do (set! path source) (set! file (DflCache/defaultFile server)))
+                :else (do (set! path nil) (set! file source)))))
+        :else (throw (IllegalArgumentException.)))
+      (.toPath (File. path file))))
+
+  (method ^:public checkAndStore :throws [KrbApErrException] ^void [this ^KerberosTime currTime
+                                                                    ^AuthTimeWithHash time]
+    (try
+      (.checkAndStore0 this currTime time)
+      (catch IOException ioe
+        (let [ke (KrbApErrException. Krb5/KRB_ERR_GENERIC)] (.initCause ke ioe) (throw ke)))))
+
+  (method ^:private ^:synchronized checkAndStore0 :throws [IOException KrbApErrException] ^void [this
+                                                                                                 ^KerberosTime currTime
+                                                                                                 ^AuthTimeWithHash time]
+    (let [p (DflCache/getFileName source (.-server time))
+          ^:mutable ^int missed 0]
+      (with-resources [s (Storage.)]
+        (try
+          (set! missed (.loadAndCheck s p time currTime))
+          (catch IOException ioe (Storage/create p) (set! missed (.loadAndCheck s p time currTime))))
+        (.append s time))
+      (when (> missed EXCESSREPS) (Storage/expunge p currTime))))
+
+  (defclass ^:private ^:static Storage
+    :implements [Closeable]
+
+    (method ^:private ^:static create :throws [IOException] ^void [^Path p]
+      (with-resources [newChan (Storage/createNoClose p)])
+      (Storage/makeMine p))
+
+    (method ^:private ^:static makeMine :throws [IOException] ^void [^Path p]
+      (try
+        (let [^{:tag (Set PosixFilePermission)} attrs (HashSet.)]
+          (.add attrs PosixFilePermission/OWNER_READ)
+          (.add attrs PosixFilePermission/OWNER_WRITE)
+          (Files/setPosixFilePermissions p attrs))
+        (catch UnsupportedOperationException uoe)))
+
+    (method ^:private ^:static createNoClose :throws [IOException] ^SeekableByteChannel [^Path p]
+      (let [newChan (Files/newByteChannel p
+                                          (new OpenOption/1
+                                               [StandardOpenOption/CREATE
+                                                StandardOpenOption/TRUNCATE_EXISTING
+                                                StandardOpenOption/WRITE]))
+            buffer (ByteBuffer/allocate 6)]
+        (.putShort buffer (unchecked-short KRB5_RV_VNO))
+        (.order buffer (ByteOrder/nativeOrder))
+        (.putInt buffer (KerberosTime/getDefaultSkew))
+        (.flip buffer)
+        (.write newChan buffer)
+        newChan))
+
+    (method ^:private ^:static expunge :throws [IOException] ^void [^Path p ^KerberosTime currTime]
+      (let [p2 (Files/createTempFile (.getParent p) "rcache" nil (new FileAttribute/1 []))]
+        (with-resources [oldChan (Files/newByteChannel p (new OpenOption/1 []))
+                         newChan (Storage/createNoClose p2)]
+          (let [^long timeLimit (unchecked-subtract-int
+                                  (.getSeconds currTime)
+                                  (Storage/readHeader oldChan))]
+            (while true
+              (try
+                (let [at (AuthTime/readFrom oldChan)]
+                  (when (> (.-ctime at) timeLimit)
+                    (let [bb (ByteBuffer/wrap (.encode at true))] (.write newChan bb))))
+                (catch BufferUnderflowException e (break))))))
+        (Storage/makeMine p2)
+        (Files/move p2 p StandardCopyOption/REPLACE_EXISTING StandardCopyOption/ATOMIC_MOVE)))
+
+    (field ^SeekableByteChannel chan)
+
+    (method ^:private loadAndCheck :throws [IOException KrbApErrException] ^int [this ^Path p
+                                                                                 ^AuthTimeWithHash time
+                                                                                 ^KerberosTime currTime]
+      (let [^:mutable ^int missed 0]
+        (when (Files/isSymbolicLink p) (throw (IOException. "Symlink not accepted")))
+        (try
+          (let [^{:tag (Set PosixFilePermission)} perms (Files/getPosixFilePermissions p)]
+            (when (and (not (== uid -1))
+                       (not (== (cast Integer (Files/getAttribute p "unix:uid")) uid)))
+              (throw (IOException. "Not mine")))
+            (when (or (or (or (or (or (.contains perms PosixFilePermission/GROUP_READ)
+                                      (.contains perms PosixFilePermission/GROUP_WRITE))
+                                  (.contains perms PosixFilePermission/GROUP_EXECUTE))
+                              (.contains perms PosixFilePermission/OTHERS_READ))
+                          (.contains perms PosixFilePermission/OTHERS_WRITE))
+                      (.contains perms PosixFilePermission/OTHERS_EXECUTE))
+              (throw (IOException. "Accessible by someone else"))))
+          (catch UnsupportedOperationException uoe))
+        (set! chan
+              (Files/newByteChannel p
+                                    (new OpenOption/1
+                                         [StandardOpenOption/WRITE StandardOpenOption/READ])))
+        (let [^long timeLimit (unchecked-subtract-int
+                                (.getSeconds currTime)
+                                (Storage/readHeader chan))
+              ^:mutable pos 0
+              ^:mutable seeNewButNotSame false]
+          (while true
+            (try
+              (set! pos (.position chan))
+              (let [a (AuthTime/readFrom chan)]
+                (cond
+                  (instance? AuthTimeWithHash a)
+                    (cond
+                      (.equals time a) (throw (KrbApErrException. Krb5/KRB_AP_ERR_REPEAT))
+                      (.sameTimeDiffHash time (cast AuthTimeWithHash a))
+                        (set! seeNewButNotSame true))
+                  (.isSameIgnoresHash time a)
+                    (when-not seeNewButNotSame (throw (KrbApErrException. Krb5/KRB_AP_ERR_REPEAT))))
+                (if (< (.-ctime a) timeLimit)
+                    (set! missed (unchecked-inc-int missed))
+                    (set! missed (unchecked-dec-int missed))))
+              (catch BufferUnderflowException e (.position chan pos) (break))))
+          missed)))
+
+    (method ^:private ^:static readHeader :throws [IOException] ^int [^SeekableByteChannel chan]
+      (let [bb (ByteBuffer/allocate 6)]
+        (.read chan bb)
+        (when-not (== (.getShort bb 0) KRB5_RV_VNO)
+          (throw (IOException. "Not correct rcache version")))
+        (.order bb (ByteOrder/nativeOrder))
+        (.getInt bb 2)))
+
+    (method ^:private append :throws [IOException] ^void [this ^AuthTimeWithHash at]
+      (let [^:mutable ^ByteBuffer bb nil]
+        (set! bb (ByteBuffer/wrap (.encode at true)))
+        (.write chan bb)
+        (set! bb (ByteBuffer/wrap (.encode at false)))
+        (.write chan bb)))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when (some? chan) (.close chan))
+      (set! chan nil))))

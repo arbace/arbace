@@ -75,7 +75,13 @@ suite_stage() {
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u"); else suite_wrap_one "$base" "$u" "$d"; fi ;;
+      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
+          # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
+          # DIR by the native ocamllex, then staged as the library's module
+          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && [ -f "$base/$(suite_wrap_path "$u" | sed 's/\.ml$//').mll" ]; then
+            local wg=$d.wgen; mkdir -p "$wg"; suite_gen "$base/$(suite_wrap_path "$u")" "$wg"
+            [ -f "$wg/$(basename "$(suite_wrap_path "$u")")" ] && suite_wrap_one "$base" "$u" "$d" "$wg/$(basename "$(suite_wrap_path "$u")")"
+          else suite_wrap_one "$base" "$u" "$d"; fi ;;
       *) if suite_needs_build "$id" "$base" "$u"; then build+=("$base/$u")
          elif [ -f "$base/$u" ]; then cp "$base/$u" "$d/"
          else suite_gen "$base/$u" "$d"; fi ;;
@@ -99,6 +105,7 @@ suite_stage() {
       rm -rf "$d.wbuild"
     fi
   fi
+  rm -rf "$d.wgen"
 }
 
 # suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,
@@ -328,7 +335,7 @@ cmd_suite_check() {
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; suite_native_env
   export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$S/check.tsv
-  suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
+  suite_selected > "$S/selected.tsv"; need_selection "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0, $7, 0, $8, 0 }' "$OI_SELECTED" | xargs -0 -r -n 7 -P "$JOBS" bash -c 'suite_oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$S/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
@@ -350,10 +357,11 @@ cmd_suite_check_compiled() {
   # check-suite-aot-compiled-native.edn (suite_results)
   cmd_stdlib > "$OI_DIR/stdlib.log"; cmd_build; cmd_suite_corpus > "$S/corpus.log"; cmd_aot_clib; suite_native_env
   export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
-  suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
+  suite_selected > "$S/selected.tsv"; need_selection "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   C2=$S/compiled; rm -rf "$C2"; mkdir -p "$C2"
   C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
+  c2_capi_main
   suite_selected | awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $7, 0, $8, 0 }' | xargs -0 -r -n 5 -P 4 bash -c 'suite_dump "$@"' _
   : > "$C2/cprogs.list"; : > "$C2/progs.tsv"
   local id kind flags incs args env base units d n=0 out=$C2/check.tsv
@@ -361,10 +369,18 @@ cmd_suite_check_compiled() {
   while IFS=$'\037' read -r id kind flags incs args env base units; do
     d=$S/run/$id
     if [ -f "$d/error" ]; then printf '%s\t-\t-\t0\t0\tdump: %s\n' "$id" "$(cat "$d/error")" >> "$out.new"; continue; fi
+    # (burst 2026-11-23) the program's C stubs (queue 531's @cstubs, relative to BASE) at this level: their node program (cstubs_nodes),
+    # OI_CSTUBS in the run's environment, the ninth field 1 (a shard of its own with the C API's main, as the run corpus's, OC215 (a))
+    local cs="" kv nodes capi=0
+    for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
+    if [ -n "$cs" ]; then
+      if nodes=$(cstubs_nodes "$base" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
+      else printf '%s\t-\t-\t0\t0\tcstubs: %s\n' "$id" "$(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" >> "$out.new"; continue; fi
+    fi
     n=$((n + 1))
     # the library units from ocaml.u (OT26 (a), bin/oi's cmd_check_compiled), the seventh field the unix mark (OT25 (a))
     printf 'ocaml.p%s\t%s\t%s%s\n' "$n" "$d/out" "$(inc_units "$incs" $(cat "$d/units.list") | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$(paste -sd'\t' "$d/units.list")" >> "$C2/cprogs.list"
-    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" >> "$C2/progs.tsv"
+    printf '%s\037p%s\037%s\037%s\037%s\037%s\037%s\037\037%s\n' "$id" "$n" "$d" "$args" "$env" "$(tail -1 "$d/units.list")" "$(case " $incs " in *" unix "*) echo 1 ;; *) echo 0 ;; esac)" "$capi" >> "$C2/progs.tsv"
   done < <(suite_selected | awk -F'\t' '$2 == "run"' | tr '\t' '\037')
   c2_programs "$out.new"
   [ "${O2J_PLAN_ONLY:-}" = 1 ] && return 0
@@ -385,7 +401,7 @@ cmd_suite_check_aot() {
   mkdir -p "$O2J/tmp"
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
   export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias; export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
-  suite_selected > "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
+  suite_selected > "$S/selected.tsv"; need_selection "$S/selected.tsv"; export OI_SELECTED=$S/selected.tsv
   oi_rows_for "$S/check.tsv" "$S/oi.tsv" "$S/selected.tsv" suite_oi_one 6 "$S/corpus.tsv"
   local A=$S/aot; rm -rf "$A"; mkdir -p "$A"
   # dump (many at once), translate (one process), run (shards)

@@ -518,3 +518,14 @@ CDR12-CDR15 built", rounds 1 and 2).
 
 The cells (pass / by design / deferred): read 908 / 2 / 0 to 909 / 0 / 0; eval 21,119 / 13 / 2 to 21,121 / 11 / 2; AOT 831 / 5 / 2 to
 833 / 4 / 1.
+
+## Decided (2026-11-23, the user: CDR14, CDR15 amended)
+
+- **CDR14**: the two oracle forms that differ from the frozen v4 jar since hand change 38 (native.ae:410, a fresh namespace
+  resolving `SecurityManager`; state_errors.ae:454, its `ns-map` counting 106 names, v4's 105) are dropped and the expected
+  files recorded again from the frozen jar, so they are no longer main-since-v4's by design.
+- **CDR15 (b)**: the evaluated half of hand change 39 (evaluated fns with primitive signatures as a DynSub type of EvalFn
+  implementing their IFn$ interfaces) is withdrawn, its cost (about 9% on plain evaluated calls) too high; the Java forms half,
+  which the oracle's three native.ae cases need, stays.
+- Then the deferred `:xml-stream` (StAX's event reader's closure in java-xml-classes.txt, an AOT run), CDR16 and the other
+  rows left, by the burst's stream (branch `clj-1123`).

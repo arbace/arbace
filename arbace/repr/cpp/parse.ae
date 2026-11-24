@@ -204,6 +204,20 @@
 (defn- expect! [^P p ^String s] (if (is? p s) (adv! p) (perr p (str "expected " s))))
 
 (defn- skim? [^P p] (boolean (stv p SKIM)))
+;; cpp-tpl (2026-11-23): the lexer splits `>=` and `>>=` into `>` tokens (glued) and a `=`; [lex.pptoken]/3's maximal munch made them one
+;; token, which [temp.names]/4 does not split: such a `>` closes no template argument list (GCC's "'>=' should be '> =' to terminate a
+;; template argument list"), and a `>=` in a template argument is the relational operator (clang's getBinOpPrecedence: greaterequal is
+;; relational whatever GreaterThanIsOperator says)
+(defn- gt-lexeme-at
+  "The lexeme the `>` at offset `k` from the cursor starts: \">=\" or \">>=\" (one of the split tokens), else nil; the second `>` of a
+  `>>=` is its own lexeme's middle: \">>=\" too."
+  [^P p ^long k]
+  (let [^T t (nxt p k)]
+    (when (and (t= t ">") (.-glue t))
+      (let [^T a (nxt p (inc k)) ^T pv (when (pos? (+ (ix p) k)) (nxt p (dec k)))]
+        (cond (and (t= pv ">") (.-glue pv) (= 3 (.-n pv)) (t= a "=")) ">>="
+              (t= a "=") ">="
+              (and (t= a ">") (.-glue a) (is-at? p (+ k 2) "=")) ">>=")))))
 
 (declare scope)
 
@@ -631,6 +645,14 @@
         (and (type-ent? en) (:tmpl en) (nil? (:args (peek (:parts qn))))
              (or (t= n ",") (t= n ">") (t= n "...")))))))
 
+(defn- gt-close-check!
+  "cpp-tpl: a template argument list closed by the first `>` of a `>=` or `>>=` lexeme (or the second of a `>>=`): GCC's
+  \"'>=' should be '> =' to terminate a template argument list\" ([temp.names]/4 splits no such token)."
+  [^P p]
+  (when (and (not (skim? p)) (main-tok? p (ix p)))
+    (when-let [lx (gt-lexeme-at p 0)]
+      (soft-diag! p (ix p) (str "'" lx "' should be '" (if (= lx ">=") "> =" "> >=") "' to terminate a template argument list")))))
+
 (defn parse-template-args
   "A template-argument-list at its <: the arguments ({:k :type :t T}, {:k :expr :x node}, {:k :tmpl :name name}, each with
   :b :e and :pack), the cursor after the > (one half of a split >>)."
@@ -638,7 +660,7 @@
   ([^P p tmpl]
   (adv! p)
   (with-gt p false
-    (if (accept! p ">")
+    (if (do (gt-close-check! p) (accept! p ">"))
       []
       (loop [out []]
         ;; cpp-read (2026-11-22): a `...` before an argument ([temp.variadic]/5's pack expansion follows its pattern): GCC's
@@ -687,7 +709,7 @@
               a (if (accept! p "...") (assoc a :pack true) a)
               out (conj out a)]
           (cond (accept! p ",") (recur out)
-                (accept! p ">") out
+                (do (gt-close-check! p) (accept! p ">")) out
                 :else (perr p "a template argument list"))))))))
 
 (defn- arg-str ^String [^P p a]
@@ -1117,7 +1139,7 @@
                            (if (= r :ambig)
                              (case ctx
                                :paren (if (is? p ")") :ambig :false)
-                               :targ (if (or (is? p ">") (is? p ",") (and (is? p "...") (or (is-at? p 1 ">") (is-at? p 1 ",")))) :ambig :false)
+                               :targ (if (or (and (is? p ">") (not (gt-lexeme-at p 0))) (is? p ",") (and (is? p "...") (or (is-at? p 1 ">") (is-at? p 1 ",")))) :ambig :false)
                                :trailing :ambig
                                :false)
                              r))))))))
@@ -1196,7 +1218,9 @@
     (when (identical? :punct (.-k t))
       (let [s (.-s t)]
         (if (= s ">")
-          (when (not (false? (stv p GTOP)))
+          (if (false? (stv p GTOP))
+            ;; (cpp-tpl: a `>=` lexeme is relational in a template argument too)
+            (when (= ">=" (gt-lexeme-at p 0)) [">=" 2])
             (cond (and (.-glue t) (is-at? p 1 ">") (.-glue (nxt p 1)) (is-at? p 2 "=")) [">>=" 3]
                   (and (.-glue t) (is-at? p 1 ">")) [">>" 2]
                   (and (.-glue t) (is-at? p 1 "=")) [">=" 2]
@@ -1456,7 +1480,17 @@
                                        (and fields (empty? (:bases-order ce)) (< i (count fields))) (get ftypes (fields i))
                                        :else nil))
           head-ok (fn [[k v]] (if arr (and (= k :i) v) (and (= k :f) (some #{v} fields))))
-          placeable (and ds (or arr (and ce (not (:union ce)) (empty? (:bases-order ce))))
+          ;; (cpp-ce2: a union's one designated element, `{.f = 3.14}`: the member it names is the one initialized,
+          ;; [dcl.init.aggr]/3.1 with [dcl.init.aggr]/5's union rule; clang's semantic InitListExpr's `field`, which Sema
+          ;; reads; a nested designator `.s.b = 1` the member's list without braces)
+          un (when (and ce (:union ce) (= 1 (count kids)) (= 1 (count ds)) (first ds) (head-ok (first (first ds))))
+               (let [d (first ds) v (second (first d)) st (get ftypes v) x1 (kids 0)
+                     x2 (if (> (count d) 1)
+                          {:kind "InitListExpr" :inner [x1] :_desigs [(vec (rest d))] :range (:range x1)}
+                          x1)
+                     x2 (if st (designate p st x2) (dissoc x2 :_desigs))]
+                 (assoc (dissoc x :_desigs) :inner [x2] :field {:name v})))
+          placeable (and (nil? un) ds (or arr (and ce (not (:union ce)) (empty? (:bases-order ce))))
                          (every? (fn [d] (or (nil? d) (head-ok (first d)))) ds)
                          (not (some (fn [[d e]] (and (> (count d) 1) (nil? e))) (partition 2 1 ds))))
           slots (when placeable
@@ -1502,7 +1536,7 @@
                                                 :else (dissoc k :_nested :_desigs))))
                           (range n)))
                   (vec (map-indexed (fn [j k] (if (and (nil? ds) (sub-type j)) (designate p (sub-type j) k) k)) kids)))]
-      (assoc (dissoc x :_desigs) :inner inner)))))
+      (or un (assoc (dissoc x :_desigs) :inner inner))))))
 
 (defn- paren-init
   "A direct-initialization's single parenthesized argument `x` for an object of type `t`: a braced list for a class is
@@ -1678,7 +1712,16 @@
         (if (and (re-matches #"(?i)[0-9.][0-9a-z.'+-]*?(i|j)(f|l|u|ul|ll|ull)?|(?i)[0-9.][0-9a-z.'+-]*?(f|l)(i|j)" s)
                  (not (lookup (scope p) (str "operator\"\"" (second (re-find #"([A-Za-z_]+)$" s))))))
           (node p "ImaginaryLiteral" i i {})
-          (let [[_ num sfx] (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)]
+          (let [[_ num sfx] (or (re-find #"^(.*?)(_[A-Za-z0-9_]*)$" s)
+                                ;; (cpp-1123: a suffix without an underscore, the standard library's reserved ones -- <chrono>'s
+                                ;; 0min, <string>'s s -- [lex.ext]/1 with [usrlit.suffix]: the longest numeric prefix whose rest is
+                                ;; an identifier a literal operator in scope has; tzdb.cc's `info.save = 0min;`)
+                                (some (fn [k] (let [num (subs s 0 k) sfx (subs s k)]
+                                                (when (and (re-matches #"[A-Za-z][A-Za-z0-9_]*" sfx)
+                                                           (or (lit/int-literal num) (lit/float-literal num))
+                                                           (lookup (scope p) (str "operator\"\"" sfx)))
+                                                  [s num sfx])))
+                                      (range (dec (count s)) 0 -1)))]
             ;; (round 54, fourth pass: C++98 has no user-defined literal, [lex.icon], [lex.fcon]: a number's identifier suffix is
             ;; GCC's error "invalid suffix \"_mm\" on floating constant", "... on integer constant")
             (when (and num (< (.-year p) 2011))
@@ -1692,8 +1735,8 @@
             (node p "UserDefinedLiteral" i i
                   (if num
                     (if-let [[v] (lit/int-literal num)]
-                      {:_udl {:k :int :suffix sfx :value v}}
-                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v}} {}))
+                      {:_udl {:k :int :suffix sfx :value v :text num}}
+                      (if-let [[v] (lit/float-literal num)] {:_udl {:k :float :suffix sfx :value v :text num}} {}))
                     {}))))))))
 
 (defn- simple-type-start?
@@ -1969,6 +2012,17 @@
                                  (when (and cs (is? p ")")) {:type (qt ty) :path cs}))))]
         (adv! p) (skip-balanced! p)
         (cond-> (text-node p "BuiltinExpr" b) (map? r) (assoc :_offsetof r)))
+      ;; (cpp-ce2: __builtin_bit_cast(T, e) for Sema, clang's BuiltinBitCastExpr, Parser::ParseBuiltinBitCast: a type-id, then an
+      ;; assignment-expression; the node the converter's text all the same, as __builtin_va_arg's)
+      (and (= s "__builtin_bit_cast") *full-headers* (not (skim? p)) (is-at? p 1 "("))
+      (or (try (adv! p) (adv! p)
+               (let [ty (parse-type-id p :paren)]
+                 (when (accept! p ",")
+                   (let [x (with-gt p true (parse-assign-expr p))]
+                     (when (is? p ")") (adv! p)
+                       (assoc (node p "BuiltinExpr" b (last-ix p) {}) :_bitcast x :_bctype (qt ty))))))
+               (catch arbace.lang.ExceptionInfo _ nil))
+          (do (seek! p b) (adv! p) (skip-balanced! p) (text-node p "BuiltinExpr" b)))
       (and (identical? k :kw) (#{"__builtin_va_arg" "__builtin_offsetof" "__builtin_bit_cast" "__builtin_types_compatible_p" "__builtin_convertvector" "__builtin_choose_expr"} s))
       (do (adv! p) (when (is? p "(") (skip-balanced! p)) (text-node p "BuiltinExpr" b))
       ;; (cpp-gnu, 2026-11-22: a type trait's operands are type-ids, the GCC 15.2 manual's "Type Traits": a ( after the trait's own
@@ -4758,9 +4812,13 @@
                       ;; ([class.conv.fct]/1, [over.oper.general]/? , [over.call]/1, [over.sub]/1 before C++23's P1169 and P2589: a
                       ;; conversion function is a non-static member, an operator function a non-static member or a non-member,
                       ;; operator new and delete aside)
+                      ;; (cpp-1123: a static operator() or operator[] before C++23 is GCC's pedwarn "... may be a static member
+                      ;; function only with '-std=c++23'", an error under -pedantic-errors alone; cpp23/subscript11.C)
+                      (and fs (= "static" (:storage ds)) (#{"()" "[]"} (:op lp)) (< (.-year p) 2023))
+                      (pedantic-diag! p (long (:i lp)) (str "'" (name-str p qn) "' may be a static member function only with '-std=c++23'"))
                       (and fs (= "static" (:storage ds)) (or (:conv lp) (:op lp))
                            (not (#{"new" "new[]" "delete" "delete[]"} (:op lp)))
-                           (not (and (#{"()" "[]"} (:op lp)) (>= (.-year p) 2023))))
+                           (not (#{"()" "[]"} (:op lp))))
                       (soft-diag! p (long (:i lp)) (if (or (:conv lp) (#{"=" "()" "[]" "->"} (:op lp)))
                                                      (str "'" (name-str p qn) "' must be a non-static member function")
                                                      (str "'" (name-str p qn) "' must be either a non-static member function or a non-member function")))

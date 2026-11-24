@@ -306,7 +306,13 @@ oi_tool_prog() {
       # shellcheck disable=SC2046
       bc_ocamlc "$d" -nostdlib -I _stdlib $(env_val "$env" @bcflags | tr ',' ' ') -c $(env_val "$env" @bcmods | tr ',' ' ') || true
       mkdir -p "$d/_tool"; cp "$root/test/ocaml/objinfo/oiobjinfo.ml" "$d/_tool/"
-      why=$(oi_dump "$d/_tool" oiobjinfo "" complib) || { echo "cmo: oiobjinfo: $why"; return 1; }
+      if [ "$level" = o2j ]; then
+        # (burst 2026-11-23, 528-8 (a): the compiled level's dump, as objinfo's)
+        o2j_dump_file "$d/_tool" oiobjinfo "" complib
+        grep -q '^(ocaml/error' "$d/_tool/Oiobjinfo.ae" && { echo "cmo: oiobjinfo: $(head -c 200 "$d/_tool/Oiobjinfo.ae" | tr '\n\t"\\' '    ')"; return 1; }
+      else
+        why=$(oi_dump "$d/_tool" oiobjinfo "" complib) || { echo "cmo: oiobjinfo: $why"; return 1; }
+      fi
       mv "$d/_tool/Oiobjinfo.ae" "$d/$u.ae"
       return 0 ;;
     *) echo "tool: $name is not a tool of bin/oi"; return 1 ;;
