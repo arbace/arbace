@@ -20892,3 +20892,30 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   and records-check 0 problems. Nothing in the records changes.
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
+
+## 2026-11-24: queue 559, a conflict-marker check and pyi divergences' shadowed names to 0 (the VM)
+
+- Base mac/next a6da0aadf, branch 559-tooling-markers-shadows. Why: doc and journal merges left git's conflict markers twice
+  this week (9b60ce498: doc/JOURNAL.md 19033-19604 and doc/python/PYTHON-SURVEY.md 8096-8159, `git grep` at that commit finds
+  them), and `bin/pyi divergences` failed on 24 shadowed `:tests` names.
+- (a) `bin/markers-check`: a line of a tracked text file (`git grep -I`) that begins with `<<<<<<< ` or `>>>>>>> ` fails, but at
+  a line of its `EXEMPT` list (path and line text, each with its reason; empty: no tracked file has one at a6da0aadf), then its
+  negative control, a fabricated repository whose `doc.md` has both markers, which must be reported at lines 2 and 6;
+  `bin/markers-check DIR` scans DIR alone. About a second. Not grown into `bin/records-check`: that step is keyed by the records'
+  files, and every tracked file is this check's input, so it is a `:pre :kind :always` step, `markers`, after `makefile`
+  (`test/gate/steps.edn`, `bin/gate`'s `pre_step`, `:crops :shared`, CLAUDE.md's core list, `make markers-check`).
+  Alternative not taken: a keyed step with every file among its `:inputs` (rerun at every commit anyway, and the planner's key
+  over 21,000 files).
+- (b) The 24 shadowed names: 21 of `:testcapi-behaviour`'s `:tests` (d9b0a3b1d's write-ahead for queue 465's `_testinternalcapi`
+  stand-in) whose record rows still fail to import `_testinternalcapi`, taken first by `:testinternalcapi-absent`'s `:match`, and
+  3 of `:multiprocessing-children`'s (test_multiprocessing_main_handling's SpawnCmdLineTest test_script_compiled, test_zipfile,
+  test_zipfile_compiled) whose rows crashed past the runner's memory cap, taken first by `:host-memory`'s `:match`. Each row
+  lands in the class of its recorded reason, so the names are commented out in place (kept for the record that reaches them),
+  no class moved and the first-class rule unchanged. Alternative tried and dropped: moving `:testcapi-behaviour` before
+  `:testinternalcapi-absent` and `:host-memory` after `:multiprocessing-children` moved exactly those 24 rows, but 21 from n/a
+  to deferred: Python eval's judged deferred 1308 -> 1329, `bin/reap` and `bin/crops-score --judge --strict` failing until a
+  `--record`. As done, `bin/pyi divergences --methods` is byte for byte the base's classification; no row's result changes.
+- Checks: `bin/pyi divergences` 0 shadowed, exit 0; `bin/reap` 56 of 56, 0 problems; `bin/crops-score --judge --strict` 0 problems;
+  `bin/records-check` 0 problems; `bin/markers-check` ok and its control; `test/docs/claude-md-test.bash` and
+  `test/gate/costs-test.bash` pass. Keys: gate_key does not move; the keys of the steps over `bin/`, `test/gate/steps.edn`,
+  `bin/gate`, CLAUDE.md or `test/python/` move (claude-md, crops-score, gate-tests, caches-table, records-check, Python's steps).
