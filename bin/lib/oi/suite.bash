@@ -75,6 +75,7 @@ suite_stage() {
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
+      @*+) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
       @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
           # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
           # DIR by the native ocamllex, then staged as the library's module
@@ -126,12 +127,15 @@ suite_needs_build() {
 #   @LIB/PATH>NAME    the same, the module named NAME (dune's copy rules, alcotest's test_iarray.54.ml as test_iarray.ml)
 #   @LIB!PATH         LIB's main module
 #   @LIB=             the alias module Lib__, before LIB's modules
+#   @LIB+             (queue 547) a library without a main module of its own (ocaml_intrinsics_kernel): dune's alias module, which
+#                     is then the library's main module Lib (lib.ml-gen), the same aliases as Lib__, after LIB's modules
 suite_cap() { echo "$(echo "${1:0:1}" | tr a-z A-Z)${1:1}"; }
 suite_unit_file() { # UNIT -> the staged file's name
   local u=$1 p n ext
   case $u in
     =*) basename "${u#=}" ;;
     @*=) echo "${u:1:${#u}-2}__.ml" ;;
+    @*+) echo "${u:1:${#u}-2}.ml" ;;
     @*) [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || { echo "$u"; return; }
         p=${BASH_REMATCH[3]}
         if [ "${BASH_REMATCH[2]}" = '!' ]; then basename "$p"; return; fi

@@ -11,6 +11,7 @@
 #                      oi over the cram cases of ppxlib's test/metaquot/run.t (each `cat > F << EOF` input, then `./driver.exe F`),
 #                      its output against the expected output the cram file holds, line for line; its negative control: a case's
 #                      output judged against another case's expected output must differ
+#   bin/oi ppx run ID  (queue 547) the program ID of ppx-programs.tsv staged, typed and run on oi as the suite runs one; its result line
 
 PPX=$OI_DIR/ppx
 PPX_ROWS=$root/test/ocaml/ppx-programs.tsv
@@ -109,10 +110,11 @@ cmd_ppx_check() {
 }
 
 cmd_ppx() {
-  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check"
+  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID"
   shift
   case $verb in
     gen) cmd_ppx_gen "$@" ;;
+    run) local id=${1:-}; [ -n "$id" ] || die "usage: bin/oi ppx run ID"; shift; ppx_env "$@"; ppx_run "$id" ;;
     check) cmd_ppx_check "$@" ;;
     *) die "unknown ppx verb $verb" ;;
   esac
