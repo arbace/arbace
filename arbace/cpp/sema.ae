@@ -11304,6 +11304,16 @@
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
     (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
+    (if-let [k (and (= "CXXFunctionalCastExpr" (:kind n)) (= "auto" (str/trim (str (get-in n [:type :qualType])))) (= 1 (count (kids n)))
+                    (let [k (first (kids n))] (if (= "InitListExpr" (:kind k)) (when (= 1 (count (kids k))) (first (kids k))) k)))]
+      ;; (cpp-singles: C++23's auto(x) and auto{x}, [expr.type.conv]/1 with [dcl.type.auto.deduct]/2.2 (P0849R8): a prvalue of the
+      ;; operand's decayed type, its result object copy-initialized from it -- cpp23/concepts-err1.C's closure-typed atom
+      ;; `auto([]{})`, of no type before)
+      (let [a (analyze ctx k)
+            t (let [u (abi/non-ref (:ty a))] (cond (abi/arr? u) (abi/ptr (:of u)) (abi/fn? u) (abi/ptr u) :else (abi/unq u)))]
+        (if (abi/class? t)
+          {:op :temp-obj :init (init-for t [a] ctx :copy) :ty t :cat :pr}
+          (cast-expr ctx t a true)))
     (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
           [k] (kids n)
           t (if (and (#{:xvalue "xvalue"} (:valueCategory n)) (not (abi/ref? t))) (abi/rref t) t)
@@ -11341,7 +11351,7 @@
                   ;; reference to an unrelated type)
                   (and (checking?) (= "CStyleCastExpr" (:kind n)) (cx-reinterpret-cast? r))
                   (assoc r :cx-reinterpret true)
-                  :else r)))))
+                  :else r))))))
     ;; queue 439: GNU's compound literal `(T){...}` in C++ (g++.dg's ext/attribute-test-1.C, a vector's), for the code
     ;; generator: a prvalue temporary list-initialized as T{...} is (clang's CompoundLiteralExpr of a C++ class, vector or
     ;; scalar type, materialized where it is used); an array's (an lvalue in GNU C++) is refused. The checker refuses it still.
@@ -11707,6 +11717,11 @@
                     ;; (cpp-rt-own4, the code generator: a VLA, vla-local)
                     (and (not (checking?)) (= :local storage) (:_vla n) (boolean (re-find #"not a constant" (str (.getMessage x)))))
                     (if-let [[t e] (vla-local ctx n qt)] (do (reset! vla e) t) (throw x))
+                    ;; (cpp-singles, the checker: a VLA's bound analyzed, so that its immediate invocations are evaluated,
+                    ;; [expr.const]/16 -- GCC's "call to consteval function 'bar(3)' is not a constant expression" at the call,
+                    ;; cpp2a/consteval34.C's `int a1[bar(3)];` --, the refusal then as before)
+                    (and (checking?) (= :local storage) (map? (first (:_vla n))) (boolean (re-find #"not a constant" (str (.getMessage x)))))
+                    (do (analyze ctx (first (:_vla n))) (throw x))
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
