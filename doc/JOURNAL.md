@@ -20252,3 +20252,12 @@ typing's and the import machinery's garbage), pyi 0 (`builtins_gc.ae`'s collect 
 collector freed). The number is CPython's cycle collector's internal state, not a defined result: the user's `:gc-collector` n/a class
 of 2026-11-23 (refcount/gc internals). Not changed; left to the user (the program could print `isinstance(gc.collect(), int)` with its
 outcome re-recorded, or the row be classed).
+
+## 2026-11-24: py-goi: f-struct.py prints `isinstance(gc.collect(), int)`; its outcome re-recorded (branch `py-goi-1123`)
+
+The coordinator's call on the previous entry's f-struct question, option (a), within the user's `:gc-collector` decision (the
+program is our own runtime program, not CPython's suite): line 13 of `test/python/pyi/f-struct.py` prints
+`isinstance(gc.collect(), int)` in place of the count. Its smoke outcome re-recorded on the main host's CPython 3.14.10 by the runtime
+check's own record mode, `REPR_PYTHON_ORACLE=record PYI_SMOKE_ONLY='^f-struct\.py$' bin/pyi runtime programs`
+(`test/python/records/outcomes/smoke/f-struct.py.{out,meta}`: key 90a01ca12c39ed26, the line now `... True 32 ...`; the control
+subject arith.py's meta, rewritten with only a new date, put back). pyi's run of it on goi is the train's runtime check.
