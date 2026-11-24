@@ -20473,6 +20473,202 @@ branch with the train alone), whose key is the build's (`.tmp/probe/records2.sh`
 - Classes `:xml`, `:xml-stream` (eval) and `:xml-stream` (AOT) gone. `bin/reap --record`, `bin/crops-score --record`; `--judge --strict`
   and `bin/records-check`: 0 problems. Clojure: read 909 / 0 / 0, eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), print 1031 / 0 / 0;
   completeness 100.0 (99.84 at fa635f636).
+## 2026-11-24: cpp-sweep (2), the second round: P2564's immediate invocations, the constant evaluator's and the declarations' single rows (branch `cpp-sweep-1124` after next `e78dbdadb`)
+
+The coordinator's second round: the largest causes among the 266 (P2564R3's immediate escalation, the extended floating types'
+conversion ranks, the single rows; the parser's recovery after a broken template head only for one general rule). Built
+(doc/cpp/CPP-SURVEY.md, "As built: cpp-sweep (2)"): cx-immediate-eval! skipping only P2564's immediate-escalating functions, member
+functions' immediate invocations, a conditional's arms outside manifestly constant-evaluated contexts (`*cx-arms-evaluated*`), an
+if's refused one-statement branch reported with the if going on, immediate function addresses among a returned list's initializers;
+volatile reads (evaluation, potential constant check, C++23's error at the variable), static and namespace-scope variables read in
+evaluated calls, new-expressions before C++20, reinterpret_cast between pointers to members; -Winvalid-constexpr as GCC's pedwarn
+(`*invalid-constexpr-error*`), [expr.cond]/2.1's throw operand (its check had asked the other operand), asm in a constexpr function
+before C++20, `this` in a static or friend member's declarator, class templates' opaque enumerations.
+
+Alternatives weighed: for the immediate invocations, building P2564's escalation itself (a template's specialization made immediate
+by its body, then its calls immediate invocations): deferred, the rows that need it (consteval-prop1, -prop2, -prop6, -prop10,
+-prop19) all need it through constructors, default arguments, default member initializers or closures too, none passing with the
+calls alone; for the arms, every function body's expressions taken as non-manifest (rejected: a constexpr local's or static_assert's
+operands nested in a statement are manifest, so the flag is set where the context is known not to be one, and cleared by every
+declaration); for the extended floating types, ranks over float and double (rejected: _Float32 and _Float64 are the same types as
+float and double in the checker, and cpp23/ext-floating17.C's `float32_t f32e = 1.0F64;` needs them apart); for the parser's recovery,
+a poisoned name (rejected for now: GCC declares an erroneous class template in crash57.C, drops the partial specialization in
+crash98.C and crash99.C so a member's use is "incomplete type", and replaces the parameter list elsewhere: no one rule).
+
+The user's decision of 2026-11-24 (relayed by the coordinator): cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C, cpp-sweep's two
+IFNDR candidates (a never-instantiated template's non-dependent checks), n/a in `:ifndr-uninstantiated-template` (class D),
+test/cpp/divergences-dg.edn's :tests and :decided.
+
+Later in the round, each from g++ 15.2's behaviour by hand where named: constexpr and constinit references' referents, a break out of
+a statement expression, `:cx-body-error` (a constexpr function's own constexpr variable failing), a lambda in a non-type template
+parameter's type, std::initializer_list of a reference type, a friend class named as a namespace, headers through a non-dependent
+member alias template, and since C++23 the variable-alone error only under -Winvalid-constexpr (cpp23/constexpr-nonlit2, -6 and -12
+had lost their passes to the unconditional form in the run below; fixed and read again).
+
+Checked: the record run over 2,697 files (the 2,421 own passes and the deferred; 04:56-05:48 UTC at `045deff96`, stage 0,
+GOMEMLIMIT=3000MiB): 2,427 own passes, 5 rows lost there (the two known slow files past 300 s, their pass rows kept; nonlit2, -6 and
+-12, the C++23 position rule, fixed); the later commits read again at the head on the 402 own passes they could touch (naming
+constexpr, consteval, constinit, a statement expression, initializer_list, a friend class, a lambda in decltype or nested template
+headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's line 43, cpp0x/initlist-array4.C's header error at
+line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
+pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
+-nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
+
+## 2026-11-24: cpp-p2564, P2564R3's immediate escalation in the own front end (branch `cpp-p2564-1124` from mac/next `440cf0273`)
+
+Built cpp-sweep (3)'s seven steps (doc/cpp/CPP-SURVEY.md, "As built: cpp-p2564") in arbace/cpp/sema.ae, the checker alone and only in
+a unit whose text names consteval from C++20 on: escalation of the main file's immediate-escalating functions (`:cx-escalated`) by an
+immediate invocation surely not constant, one returning an immediate function's address, or an immediate function's address; their
+calls immediate invocations, their address an error; constructors' immediate invocations at a variable (`cx-ctor-immediate!`); default
+arguments' and default member initializers' immediate invocations evaluated in the caller's or constructor's context, their positions
+the call's or the constructor's (`*cx-at-override*`, GCC's places); a closure's conversion with an escalated call operator; and the
+enclosing expression of prop19 as a namespace-scope initializer's constant initialization (`*cx-imm-pending*`, `*ce-fnptr*`). Beside
+them: a lambda's call operator keeps its default arguments in the checker, `auto p = &f<int>;` names its one specialization
+(template.ae's `fnaddr-explicit-specs`), a main-file consteval constructor of an empty class keeps its call, diag.ae's rule "taking
+address of an immediate function". Sources: N4950 [expr.const]/16-20, P2564R3, the dg directives of gcc-15.2.0's
+g++.dg/cpp2a/consteval-prop*.C (the pinned tarball); no GCC code read.
+
+Alternatives: a definition's analysis in order with escalation decided at the end of the unit and its uses judged again (rejected: the
+uses' errors are reported where they are analyzed, a second pass doubles every error); escalation for every unit (rejected: the early
+analysis of a template's specialization changes the order of every constexpr template's analysis, so it is kept to units that can
+escalate); the whole-initializer judgment by the evaluator's function pointers everywhere (rejected: comparisons and calls through
+pointers had been "not constant" for every file, kept to that judgment); prop19 by a syntactic rule on `f(1)(2)` (rejected for the
+standard's own reason, constant initialization).
+
+Checked (stage 0, GOMEMLIMIT=3000MiB): the 358 dg-error files the change can touch (own rows naming consteval, own passes naming
+constexpr or with a lambda's default argument, the control pair, the two slow files): 7 rows to own pass (consteval-prop1, -prop2,
+-prop6, -prop10, -prop19, -prop7, -prop8), no own pass lost but udlit-suffix-neg and missing-header-pr110164 past 300 s (rows kept),
+DRs/dr2082.C and dr1423.C failing as recorded; cpp2a/spaceship-synth9.C's failing row reads otherwise on the base too. Recorded:
+`bin/repr-cpp dg --corpus dg-error --front native --only` the 7 files `--record`; C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243;
+`bin/reap --record`, `bin/crops-score --record` (C++ completeness 0.9835 -> 0.9837), `--judge --strict` and `bin/records-check` 0
+problems.
+## 2026-11-24: cpp-extfloat, C++23's extended floating-point types in the own front end (branch `cpp-extfloat-1124` from mac/next `440cf0273`)
+
+The burst's C++ read stream for [basic.extended.fp] (P1467R9), built from cpp-sweep (3)'s design note (doc/cpp/CPP-SURVEY.md, "As
+built: cpp-extfloat"). Each rule from the standard's text and g++ 15.2's behaviour, probed by hand with the host's g++ (Alpine
+15.2.0) where named; no GCC or clang code read.
+
+Found: Arbace's own C++ target already defines GCC's extended-floating macros in its GNU half (test/cpp/predef.ae from
+c/target/abi.edn's :floats and cpp/target/dialect.edn's :from-year; `bin/repr-cpp target verify` unchanged), but the own front end
+reads the clang half, as the native reader does, which has none of them. Decision: the own front end (arbace.repr.cpp.diag) adds the
+GNU half's extended-floating lines the clang half lacks (`native/*gnu-floats*`), and takes GCC's suffixes and _FloatN keywords
+(`lit/*gnu-floats*`); the native-check against clang's AST and the code generator keep the clang half. Alternatives weighed: the
+clang half defining them (rejected: it is clang 23's reading of the target, held to clang by `target oracle`); the own front end
+switched to the GNU half whole (rejected for this stream: __clang__, __GNUC__ and every other macro change for the 2,438 own passes,
+a decision of its own); the macros only from C++23 (rejected: GCC defines the __FLTnn_ and __BFLT16_ families at every standard,
+and libstdc++'s c++config.h reads __BFLT16_DIG__).
+
+Built: the types :float32, :float64, :float128n (_Float128, distinct from __float128 as in GCC's C++), :float32x, :float64x, :bf16 with
+sizes, LLVM types and manglings (DF32_, DF64_, DF128_, DF32x, DF64x, DF16b, g++'s); [conv.rank]'s floating ranks and subranks by format
+(subranks _Float32x < _Float64, __float128 < _Float128 from g++'s usual arithmetic conversions); [conv.double]/1's lesser-rank
+conversions GCC's -Wnarrowing pedwarn (an error under -pedantic-errors, -Werror=narrowing, -Werror) and in overload resolution viable
+only alone (g++ by hand); [over.ics.rank]/4.5; [dcl.init.list]/7.2's floating narrowing by ranks, and a requirement's non-constant
+narrowing its substitution failure; a namespace-scope constexpr variable of any type usable in constant expressions (its entry had kept
+only :cx-constexpr, so `constexpr float fx` was "not usable", a bug ext-floating3.C's static_asserts met).
+
+Not built: cpp23/ext-floating12.C, whose <complex> at C++23 is past the read's 300 s (a probe of <complex> with four conversions past
+15 minutes in Sema): the checker's speed over <complex>, left with its cause.
+
+Checked (stage 0, GOMEMLIMIT 1500-2000 MiB, `bin/repr-cpp dg --corpus dg-error --front native --only LIST`): run 1, 291 files (the
+own passes naming a floating type, including a standard header, or read at C++23/26, the targets and the control pair, before the
+narrowing rules): 287 own passes, the two known slow files (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C) past
+300 s as earlier streams met them (their pass rows kept); run 2 at the head, 291 files (the own passes naming requires, a floating type
+or narrowing, the targets, the control pair): 289 own passes, every recorded own pass kept, the control pair failing as it must.
+Recorded from run 2 (`--judge --record`): own pass 2,438 -> 2,440, ext-floating3 and -17, none lost. `bin/repr-cpp pp-check
+--essential` and `target verify` unchanged. reap and crops-score recorded: C++ read 6,035 / 0 / 248 -> 6,037 / 0 / 246;
+records-check 0 problems.
+
+## 2026-11-24: cpp-singles, the Left lists' single rows (branch `cpp-singles-1124` from mac/next `440cf0273`)
+
+The coordinator's C++ read stream "cpp-singles": the single-row causes the day's Left lists name (cpp-1123, cpp-small, cpp-ce2,
+cpp-ce3, cpp-tpl2 (1)-(3), cpp-decl2 (1)-(3), cpp-sweep (1)-(3)), each one file already diagnosed, cheapest first; P2564's escalation
+(cpp-p2564), the extended floating types, the read-independence inputs, the printer and the parser's recovery after a broken template
+head left out. Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-singles"): implicit copy constructors deleted surely by an inaccessible
+subobject constructor (`cx-access-deleted?`), constructors odr-used despite their access errors (`:cx-odr-used`), GCC's places of a
+subobject's implicit initialization's errors (the last mem-initializer's token, a base's access at the body's brace), an empty
+aggregate's elided braces (`cx-empty-agg-elide!`), a constinit variable's implicit call at its initializer, <initializer_list>'s own
+error outside the main file (`:cx/header-error`); the parser's access declarations, enumerators conflicting with using-declarators,
+DR 147's constructor names, noexcept-specifiers outside complete-class contexts (`*ncc-noexcept*`), `X<args>` class heads of
+non-templates, base-clauses' template-ids of non-templates (the class declared incomplete), parameters with two type specifiers,
+class heads qualified by their own namespace; diag.ae's `anon-union-captures` (DR 1612) and `static-overrides`, notes at earlier
+declarations taken by a dg-error's later branches (read-own's alt-hits over the own notes); final bases in specializations, constructor
+templates' explicit specializations, explicit specializations qualified through a member class template's specialization, VLA bounds'
+immediate invocations, C++23's auto(x), friend classes kept out of ADL's doubt, __builtin_conj's type.
+
+Alternatives weighed: for implicit-trivial1.C, every access-deleted implicit member made surely deleted (rejected: a deleted defaulted
+move constructor is no candidate, cpp2a/implicit-move1.C's derived must not report it; the copy constructor alone); for the notes,
+the own front end's notes counted as errors (rejected: an extra line where g++ has a note; alt-hits takes a note only for an expected
+line's later branch, as gcc-dg.exp's spliced pattern does); for concepts-friend2.C, the friend class check of cpp-tpl2 trusted (it was
+there; the doubt came from sure-assoc-nss, which took any friend as a possible hidden friend function); for nondeduced7.C and
+template/partial-specialization12.C ("not more specialized" against the primary), partial ordering with the primary as a partial
+specialization: not built, the type check of a non-type argument expression's type against the parameter's ([temp.deduct.type]/17)
+is missing in match-args, so the ordering would call A<T, T{}> more specialized; template/crash89.C (a default template argument's
+error at its instantiation): not built, the checker has no "subscripted value is neither array nor pointer" and complete-args'
+const-int does not type the default first.
+Later in the round: a class template's specialization's using-declaration (or access declaration) whose nested-name-specifier names
+a complete class that is no base, GCC's "not a base type" at the declaration (template/crash13.C had passed on the parser's old
+refusal of its access declaration; C++20's enumerators and a dropped incomplete base aside, cpp1z/class-deduction69.C).
+
+Checked: the record run over 2,670 files (the 2,438 own passes and the 232 deferred failing on both fronts; 06:59-08:02 UTC at
+`8078c568e`, stage 0, GOMEMLIMIT=3000MiB, `--only LIST --record`): 2,455 own passes; one pass lost there, template/crash13.C (the access
+declaration rule above, fixed), and the two known slow files past 300 s under load (cpp0x/udlit-suffix-neg.C,
+diagnostic/missing-header-pr110164.C, their pass rows kept as the earlier streams kept them; coroutines/pr104051-0.C's fail row kept
+too); then the 27 own passes with a using-declaration in a template, crash13.C and the control pair read again and recorded at the fix:
+own pass 2,438 -> 2,458, none lost, 20 rows to own pass: cpp0x/implicit-trivial1, initlist-array4, lambda/lambda-anon1, noexcept71,
+override2, pr66443-cxx11, cpp1y/pr66690, cpp23/concepts-err1, cpp2a/concepts-explicit-spec7, concepts-friend2, consteval34, constinit11,
+inherit/pure1, virtual2, init/new52, ptrfn2, other/error26, parse/access13, qualified2, tc1/dr147. mac/next merged (cpp-p2564's 7 rows,
+cpp-extfloat's 2), the 20 rows, crash13, class-deduction69 and the 9 merged rows read again on the merged tree, all passing, the
+control pair (DRs/dr2082.C, dr1423.C) failing. C++ read 6,042 / 0 / 241 -> 6,062 / 0 / 221 (248 n/a); completeness 0.9837 -> 0.9845.
+
+Left (single rows found and not built): template/crash89.C, cpp0x/nondeduced7.C, template/partial-specialization12.C (above);
+overload/using2.C (namespace-scope using-declarations against declarations, seven lines); cpp0x/defaulted10.C (a deleted member
+template's use, line 13); cpp1y/constexpr-89074-3.C (string literals as objects in pointer comparisons); concepts-recursive-sat4.C
+(hidden friend templates by ADL); concepts-lambda2.C, concepts-requires1.C (the parser's recovery); inherit/error4.C (GCC's recovery
+declares a variable named A, hiding the class); overload/error8.C (an ambiguous assignment's candidates' errors at the class);
+cpp0x/pr32127.C (a member with an unexpanded pack dropped, so its use is "not a member").
+
+## 2026-11-24: ocaml-eval: oi's speed and gc rows at the eval level (branch `ocaml-eval-1124` from mac/next `7de5de3ec`)
+
+The burst's OCaml eval stream (the host's OCaml agent owns AOT and bin/oi's compiled level). OCaml eval on next: 598 pass / 2 by design
+(the suite's `:opam-not-run`, by design since OC101) / 8 deferred (`:speed` 5, `:gc-and-memory` 2, `:dynlink-decided` 1). No bin/oi edit
+(its text is in the native library's key); the changes are the driver's Go forms (go/arbace/oi, go/arbace/oicapi), so `bin/oi build`
+alone. Built and measured in the worktree with ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace.
+- weak-ephe-final/ephetest (test6): an asked collection's second phase, the data held by the ephemeron's block keys for one Go collection
+  (ext_sys.ae's ephKeyed, a box in a slot past the key's fields), and Gc.finalise_last as Go cleanups (a Go finaliser keeps a cycle of
+  finalisable values for ever). Alternative tried first and dropped: the data always held by the keys (the ephemeron only a weak pointer);
+  it kept a dead ephemeron's data while its key lived (test7 failed), as Go cannot express "ephemeron and key alive" in one collection;
+  the two phases together give it. Passes.
+- weak-ephe-final/weak_array_par: ephClean scanned the 10,000 keys of the table at each Weak.get; it returns at once without a data.
+  Passes in 41 s.
+- lib-bigarray/subarraystub: profiled (perf) on oi's driver: the C API copied each bigarray element through crt's memory lookup and boxed
+  each element read back; musl's memcpy ran interpreted on ci; and the C heap leaked 180 KB a call (caml_ba_alloc's calloc, never freed
+  once oi had copied the result: 1.5 GB of live heap at 40 s, Go's collector at the memory limit). Now: elements in bulk, unchanged
+  elements and unchanged copies not read back, 16-bit integers from a table boxed once, big blocks' mappings reused, memcpy/memmove/
+  memset native (hostNatives), a managed bigarray's C data freed at the call's end unless a root keeps the block. Over 900 s -> 65 s
+  (73 s CPU). The light AOT level's `oi capi` server shares go/arbace/oicapi (its c-api rows may run faster; not rerun here).
+- Records: `bin/oi check --record --only-list` (ephetest, weak_array_par, subarraystub: pass); oi-slow.edn loses weak_array_par and
+  subarraystub, oi-known.edn ephetest; `:gc-and-memory`'s why updated. Regression: the 108 programs of the run corpus that use the
+  collector, weak values, finalisers or C stubs, judged against the record: none changed but ephetest; `bin/oi test` passes.
+  `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` and `bin/records-check`: 0 problems. OCaml eval 598/2/8 -> 601/2/5;
+  completeness 95.61 -> 95.73. `bin/oi divergences` stops on a pre-existing pin of the AOT level (aot lib-marshal/intext, attested but
+  no longer pinned: not this stream's).
+- Left, measured alone at OI_TIMEOUT=1800 (CPU seconds; the limit is 120): ast-invariants/test 216 (passes), parallel/fib_threads 744
+  (passes; fib 42 in four domains under one GIL and GOMAXPROCS=1), opam/uutf/test_uutf (below). ast-invariants' profile: frames and
+  argument slices allocated a call (newFrame, makeslice, about 40 % of the CPU) and Go's marking; GOGC=400 changed nothing (the driver's
+  heap goal is already several times the live 30 MB). A frame pool is worth about 1.5x: not enough for any of the three; not built.
+- Left in `:gc-and-memory`: ephetest3, whose keys are Int64 values hash-consed through a weak set; oi's boxed integers have no identity
+  (Go's interface values: a static array for 0-255, the tiny allocator for the rest). A question for the user (the report).
+- `:dynlink-decided`: lib-dynlink-bytecode/main, deferred (its plugins need ocamlmklib, C stubs and .cma loading); the suite's two
+  `:opam-not-run` rows by design; darkening_work and backtrace_dynlink n/a (539b-2, 539b-3); the Jane Street rows the Mac's.
+- A slip: one measuring command's second half ran in the `next` worktree (a `&` split the `cd`), so a `bin/oi suite check` there built
+  that tree's native library under `.tmp/oi` (scratch only, no tracked file); the permission system refused to stop it by PID.
+
+## 2026-11-24: ocaml-eval: opam/uutf/test_uutf measured
+
+`bin/oi suite check --only opam/uutf/test_uutf` at OI_TIMEOUT=1800, alone: passes in 1,390 s of CPU (23 min 12 s user, 1 min 12 s
+system), about 11.6 times the check's 120 s: its loops run every Unicode scalar value through each encoder and decoder. With the entry
+above's two (ast-invariants/test 216 s, parallel/fib_threads 744 s) the three left in `:speed` pass on oi given the time; none is within
+reach of a local optimisation of the interpreter.
 
 ## 2026-11-24: cpp-print, C++'s print cell's last nine rows (branch `cpp-print-1124` from mac/next `7de5de3ec`)
 

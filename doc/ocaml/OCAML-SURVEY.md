@@ -4920,3 +4920,38 @@ growing, and was stopped (the host's other jobs). The rows keep their class at b
   forms at `J2G_JOBS` 2 and 4 is byte for byte the same (6,005 files; `report.edn`'s times alone differ).
 - **Proofs** (run): the plugin driver of queue 544 split (`O2J_SPLIT=1`): j2g 1,024 s at 5.5 GiB, Go's build 510 s at 4.3 GiB (unsplit: 633 s,
   587 s); the coverage unit as the host's OCaml, the 40 sample programs' outputs equal to the unsplit build's.
+
+## As built: ocaml-eval (2026-11-24, branch `ocaml-eval-1124`, from mac/next `7de5de3ec`): the eval cell's speed and gc rows
+
+oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferred: `:speed` 5, `:gc-and-memory` 2, `:dynlink-decided` 1.
+- **weak-ephe-final/ephetest** (test6, a key reachable only from its own ephemeron's data): the asked collections get a second phase
+  (`ext_sys.ae`'s `ephKeyed`): one Go collection with each live ephemeron's data held by its block keys alone (a box in `ephLinks`, a
+  slot of the key's fields' array past its length: the block's size and fields stay OCaml's), the ephemeron only a weak pointer to it;
+  then the data back in the ephemerons that live, gone with a key that died. The first phase (the data in the ephemeron) collects an
+  ephemeron reachable only from its data (test7), the second a key reachable only from its data; together OCaml's rule (the data lives
+  while the ephemeron and its keys do), repeated while a phase drops a data. A key that is not a block (a string, a closure) keeps the data
+  in the ephemeron in both phases. With it, `Gc.finalise_last` is a Go cleanup (`runtime.AddCleanup`, the entry its argument) instead of a
+  Go finaliser: a finaliser keeps what its value reaches, so a cycle of finalisable values (test6's key and data) was never collected; a
+  cleanup keeps nothing, and runs after the value's `first` finalisers (Go's rule for an object with both), as finalise.c updates the
+  `last` table after the `first` one. finCollect waits for a sentinel cleanup too. Passes.
+- **weak-ephe-final/weak_array_par** (4 domains, 4,000,000 Weak.get/set over a table of 10,000): `ephClean` returns at once for a weak
+  array or an ephemeron without data (nothing to drop; a collected key reads as unset through its dead flag): each Weak.get scanned the
+  10,000 keys. 41 s, passes; out of `oi-slow.edn`.
+- **lib-bigarray/subarraystub** (41,000 calls of a C stub copying a 2,046 x 44 int16 sub-array, a Gc.minor each): the C API on ci
+  (`go/arbace/oicapi`): a bigarray's elements cross in one slice of ci's memory per call (no lookup per element), an integer element
+  read back equal to the value's is left alone and a 16-bit one comes from a table boxed once (`boxedInt`), a copy the C did not change
+  is not read back (its bytes as written kept, `baSnap`), the big blocks' mappings reused across calls (`bigFree`), musl's memcpy,
+  memmove and memset native on ci's memory (their C, interpreted, was most of the stub), and a bigarray the C allocated with memory of
+  its own (`CAML_BA_MANAGED`, caml_ba_alloc's calloc) has that memory freed when the call ends unless a root keeps the block (the copy
+  dies with the boundary's memory, as bigarray.c's finalizer frees it; the C heap had grown past 1.5 GB and Go's collector ran without
+  pause at the memory limit). Over 900 s before, 65 s now (CPU 73 s); passes, out of `oi-slow.edn`.
+- **Left in `:speed`** (measured on this host, alone, OI_TIMEOUT 1800, CPU seconds against the check's 120): ast-invariants/test 216 s
+  (pass), parallel/fib_threads 744 s (pass: fib 42 in four domains, about 1.7 billion interpreted calls), opam/uutf/test_uutf
+  1,390 s (pass). Their profile is the interpreter's own: frames and argument slices allocated per call (`newFrame` and `makeslice` about 40 %
+  of ast-invariants' CPU) and Go's marking; a frame pool would give about 1.5x, not the 1.8x ast-invariants needs nor fib_threads' 6x.
+- **Left in `:gc-and-memory`**: weak-ephe-final/ephetest3, whose keys are Int64 values hash-consed in a weak set: oi's boxed integers are
+  Go values in an interface (no identity of their own; Go's static array for 0-255 and its tiny allocator for the rest), so their weak
+  keys are never emptied. The user's question (the report): n/a (`==` on immutable values is implementation-defined, Repr.phys_equal's
+  documentation) or boxed integers with an identity in oi (a representation change).
+- Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
+  changed but ephetest's row; `bin/oi test`.
