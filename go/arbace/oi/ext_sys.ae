@@ -179,8 +179,11 @@
 ;; emptied by the collection that finds it unreachable, as OCaml's collector empties it; an immediate, a boxed float or integer (Go
 ;; values without an identity) and an atom stay, as OCaml's static data does. An ephemeron's data stays strong while its keys live;
 ;; the collections the program asks for (gcAsked) clear the data of an ephemeron whose key died (weak.c's ephe_clean), so that the
-;; data is collected in turn. Divergence: the data is held by the ephemeron, not by its key, so a key reachable only from its own
-;; ephemeron's data stays alive while the ephemeron does (OCaml's ephemerons collect it).
+;; data is collected in turn. Since 2026-11-24 (ocaml-eval: weak-ephe-final/ephetest's test6) the asked collections have a second
+;; phase (ephKeyed) in which an ephemeron's block keys hold its data instead (a box in each key's links, ephLinks, a slot of the key's
+;; fields' array past its length, so the block's size and fields stay OCaml's): a key reachable only from its own ephemeron's data
+;; dies then, as OCaml's ephemerons collect it. Between asked collections the data stays the ephemeron's (Go's own cycles keep a
+;; key its data reaches).
 (go/type weakRef "weakRef is a weak key: get gives the value, or nil once it is collected; dead is set by the value's cleanup (and
 by a get or an asked collection that finds it collected). A check reads dead alone: a get makes the value strong for a moment, and
 one made while Go's collector marks keeps the value for that cycle, so a loop of checks would keep it alive for ever.
@@ -231,7 +234,11 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
     (return (not (.Load (.-dead r)))))
   (!= v ephNone))
 
-(go/func ephSlot "ephSlot is a slot's value: a weak key's target, or ephNone once it is collected.\n" ^Value [^Value v]
+(go/func ephSlot "ephSlot is a slot's value: a weak key's target or a data held by the keys, or ephNone once it is collected.\n" ^Value [^Value v]
+  (when [(values x ok) (assert (* ephData) v)] ok
+    (when [b (.Value (.-w x))] (!= b nil)
+      (return (.-d b)))
+    (return ephNone))
   (when [(values r ok) (assert (* weakRef) v)] ok
     (when (.Load (.-dead r))
       (return ephNone))
@@ -242,23 +249,96 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
   v)
 
 (go/func ephClean "ephClean is weak.c's ephe_clean: the keys collected are unset, and the data with them when one was; it reports whether\nit dropped a data.\n" ^bool [^{:tag (* Block)} b]
+  ;; no data (a weak array, an ephemeron without one): nothing to drop, and a collected key reads as unset already (ephSlot,
+  ;; weakLive), so no scan of the keys (weak-ephe-final/weak_array_par: a Weak.get scanned the table's 10,000 keys)
+  (when (== (aget (.-F b) 1) ephNone)
+    (return false))
   (let [dead false]
     (for [i 2] (< i (len (.-F b))) (inc! i)
       (when [(values r ok) (assert (* weakRef) (aget (.-F b) i))] ok
         (when (.Load (.-dead r))
           (aset (.-F b) i ephNone)
           (set! dead true))))
-    (when (and dead (!= (aget (.-F b) 1) ephNone))
+    (when (and dead (!= (ephSlot (aget (.-F b) 1)) ephNone))
       (aset (.-F b) 1 ephNone)
       (return true))
     false))
+
+(go/type ephBox "ephBox is an ephemeron's data held by its block keys (each key's ephLinks): keys the keys that hold it.\n"
+  (struct ^Value d ^{:tag (slice (weak/Pointer Block))} keys))
+
+(go/type ephLinks "ephLinks is the boxes of the ephemerons a block is a key of, kept in the slot past the end of its fields.\n"
+  (struct ^{:tag (slice (* ephBox))} boxes))
+
+(go/type ephData "ephData is an ephemeron's data slot while an asked collection's second phase lets its block keys hold the data (ephKeyed):\na weak pointer to the box.\n"
+  (struct ^{:tag (weak/Pointer ephBox)} w))
+
+(go/func keyLinks "keyLinks is the links of the block k: those in the slot past its fields, else nil, or new ones when mk, its fields moved\nto an array of one more slot.\n" ^{:tag (* ephLinks)} [^{:tag (* Block)} k ^bool mk]
+  (let [n (len (.-F k))]
+    (when (== (cap (.-F k)) (+ n 1))
+      (when [(values l ok) (assert (* ephLinks) (aget (subslice (.-F k) _ (+ n 1)) n))] ok
+        (return l)))
+    (when (not mk)
+      (return nil))
+    (let [l (addr (lit ephLinks))
+          f (make (slice Value) (+ n 1))]
+      (copy f (.-F k))
+      (aset f n l)
+      (set! (.-F k) (subslice f _ n))
+      l)))
+
+(go/type ephMoved "ephMoved is an ephemeron whose data the keys hold for a second phase: the ephemeron and the box, weakly.\n"
+  (struct ^{:tag (weak/Pointer Block)} e ^{:tag (weak/Pointer ephBox)} box))
+
+(go/func ephKeyed "ephKeyed is an asked collection's second phase (2026-11-24, ocaml-eval): Go's collection with each live ephemeron's data
+held by its block keys alone (a box in each key's links, the ephemeron only a weak pointer to it), so that a key reachable only
+from its own ephemeron's data (weak-ephe-final/ephetest's test6) is unreachable; then the data back in the ephemerons that live,
+gone with a key that died. The first phase (Go's collection with the data in the ephemeron) collects an ephemeron reachable only
+from its own data (test7); together, OCaml's ephemerons: the data lives while the ephemeron and its keys do. An ephemeron with no
+block key (a string's, a closure's) keeps its data in both phases. It reports whether a data was dropped. Under ephMu.\n" ^bool []
+  (let [^{:tag (slice ephMoved)} moved nil]
+    (range [_ p ephRegistry]
+      (when [e (.Value p)] (!= e nil)
+        (when [d (aget (.-F e) 1)] (!= d ephNone)
+          (let [^{:tag (slice (* Block))} keys nil]
+            (for [i 2] (< i (len (.-F e))) (inc! i)
+              (when [(values r ok) (assert (* weakRef) (aget (.-F e) i))] (and ok (not (.Load (.-dead r))))
+                (when [(values k ok2) (assert (* Block) ((.-get r)))] ok2
+                  (set! keys (append keys k)))))
+            (when (> (len keys) 0)
+              (let [b (addr (lit ephBox :d d))]
+                (range [_ k keys]
+                  (let [l (keyLinks k true)]
+                    (set! (.-boxes l) (append (.-boxes l) b))
+                    (set! (.-keys b) (append (.-keys b) (^{:inst [Block]} weak/Make k)))))
+                (let [w (^{:inst [ephBox]} weak/Make b)]
+                  (aset (.-F e) 1 (addr (lit ephData :w w)))
+                  (set! moved (append moved (lit ephMoved :e p :box w))))))))))
+    (when (== (len moved) 0)
+      (return false))
+    (runtime/GC)
+    (let [dropped false]
+      (range [_ m moved]
+        (let [b (.Value (.-box m))]
+          (when [e (.Value (.-e m))] (!= e nil)
+            (if (== b nil)
+              (do (aset (.-F e) 1 ephNone)
+                  (set! dropped true))
+              (aset (.-F e) 1 (.-d b))))
+          (when (!= b nil)
+            (range [_ kp (.-keys b)]
+              (when [k (.Value kp)] (!= k nil)
+                (when [l (keyLinks k false)] (!= l nil)
+                  (clear (.-boxes l))
+                  (set! (.-boxes l) (subslice (.-boxes l) _ 0))))))))
+      dropped)))
 
 (go/func ephRegister "ephRegister keeps a weak pointer to a weak array or an ephemeron, which the asked collections clean.\n" [^{:tag (* Block)} b]
   (.Lock ephMu)
   (set! ephRegistry (append ephRegistry (^{:inst [Block]} weak/Make b)))
   (.Unlock ephMu))
 
-(go/func weakCollect "weakCollect is the asked collections' part for the weak keys: Go's collection, then the live ephemerons cleaned (the\ncollected ones forgotten), so that the data of a dead key is unreachable for the collections that follow; again while a cleaning dropped\na data (queue 438: a data that is another ephemeron's key dies in the same collection, as OCaml's ephemeron marking reaches its fixpoint).\n" []
+(go/func weakCollect "weakCollect is the asked collections' part for the weak keys: Go's collection, then the live ephemerons cleaned (the\ncollected ones forgotten), so that the data of a dead key is unreachable for the collections that follow, then the second phase\n(ephKeyed); again while a cleaning dropped a data (queue 438: a data that is another ephemeron's key dies in the same collection, as\nOCaml's ephemeron marking reaches its fixpoint).\n" []
   (when (not weakUsed)
     (return))
   (for [round 0] (< round 32) (inc! round)
@@ -277,6 +357,9 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
             (set! dropped true))
           (set! live (append live p))))
       (set! ephRegistry live)
+      ;; the second phase: the data held by the keys
+      (when (ephKeyed)
+        (set! dropped true))
       (.Unlock ephMu)
       (when (not dropped)
         (return)))))
@@ -725,7 +808,7 @@ one made while Go's collector marks keeps the value for that cycle, so a loop of
 
                   (r "caml_ephe_check_key" checkKey)
                   (r "caml_weak_check" checkKey)
-                  (r "caml_ephe_check_data" ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephClean (AsBlock (aget a 0))) (Bool (!= (aget (.-F (AsBlock (aget a 0))) 1) ephNone))))
+                  (r "caml_ephe_check_data" ^{:go/end 565} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephClean (AsBlock (aget a 0))) (Bool (!= (ephSlot (aget (.-F (AsBlock (aget a 0))) 1)) ephNone))))
                   (r "caml_ephe_blit_key" ^{:go/end 566} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
                   (r "caml_weak_blit" ^{:go/end 567} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a] (ephBlit (aget a 0) (aget a 1) (aget a 2) (aget a 3) (aget a 4))))
                   (r "caml_ephe_blit_data" ^{:go/end 571} (fn ^Value [^{:tag (* Thread)} _ ^{:tag (slice Value)} a]

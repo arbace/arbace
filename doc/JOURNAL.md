@@ -20626,3 +20626,46 @@ template's use, line 13); cpp1y/constexpr-89074-3.C (string literals as objects 
 (hidden friend templates by ADL); concepts-lambda2.C, concepts-requires1.C (the parser's recovery); inherit/error4.C (GCC's recovery
 declares a variable named A, hiding the class); overload/error8.C (an ambiguous assignment's candidates' errors at the class);
 cpp0x/pr32127.C (a member with an unexpanded pack dropped, so its use is "not a member").
+
+## 2026-11-24: ocaml-eval: oi's speed and gc rows at the eval level (branch `ocaml-eval-1124` from mac/next `7de5de3ec`)
+
+The burst's OCaml eval stream (the host's OCaml agent owns AOT and bin/oi's compiled level). OCaml eval on next: 598 pass / 2 by design
+(the suite's `:opam-not-run`, by design since OC101) / 8 deferred (`:speed` 5, `:gc-and-memory` 2, `:dynlink-decided` 1). No bin/oi edit
+(its text is in the native library's key); the changes are the driver's Go forms (go/arbace/oi, go/arbace/oicapi), so `bin/oi build`
+alone. Built and measured in the worktree with ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace.
+- weak-ephe-final/ephetest (test6): an asked collection's second phase, the data held by the ephemeron's block keys for one Go collection
+  (ext_sys.ae's ephKeyed, a box in a slot past the key's fields), and Gc.finalise_last as Go cleanups (a Go finaliser keeps a cycle of
+  finalisable values for ever). Alternative tried first and dropped: the data always held by the keys (the ephemeron only a weak pointer);
+  it kept a dead ephemeron's data while its key lived (test7 failed), as Go cannot express "ephemeron and key alive" in one collection;
+  the two phases together give it. Passes.
+- weak-ephe-final/weak_array_par: ephClean scanned the 10,000 keys of the table at each Weak.get; it returns at once without a data.
+  Passes in 41 s.
+- lib-bigarray/subarraystub: profiled (perf) on oi's driver: the C API copied each bigarray element through crt's memory lookup and boxed
+  each element read back; musl's memcpy ran interpreted on ci; and the C heap leaked 180 KB a call (caml_ba_alloc's calloc, never freed
+  once oi had copied the result: 1.5 GB of live heap at 40 s, Go's collector at the memory limit). Now: elements in bulk, unchanged
+  elements and unchanged copies not read back, 16-bit integers from a table boxed once, big blocks' mappings reused, memcpy/memmove/
+  memset native (hostNatives), a managed bigarray's C data freed at the call's end unless a root keeps the block. Over 900 s -> 65 s
+  (73 s CPU). The light AOT level's `oi capi` server shares go/arbace/oicapi (its c-api rows may run faster; not rerun here).
+- Records: `bin/oi check --record --only-list` (ephetest, weak_array_par, subarraystub: pass); oi-slow.edn loses weak_array_par and
+  subarraystub, oi-known.edn ephetest; `:gc-and-memory`'s why updated. Regression: the 108 programs of the run corpus that use the
+  collector, weak values, finalisers or C stubs, judged against the record: none changed but ephetest; `bin/oi test` passes.
+  `bin/reap --record`, `bin/crops-score --record`, `--judge --strict` and `bin/records-check`: 0 problems. OCaml eval 598/2/8 -> 601/2/5;
+  completeness 95.61 -> 95.73. `bin/oi divergences` stops on a pre-existing pin of the AOT level (aot lib-marshal/intext, attested but
+  no longer pinned: not this stream's).
+- Left, measured alone at OI_TIMEOUT=1800 (CPU seconds; the limit is 120): ast-invariants/test 216 (passes), parallel/fib_threads 744
+  (passes; fib 42 in four domains under one GIL and GOMAXPROCS=1), opam/uutf/test_uutf (below). ast-invariants' profile: frames and
+  argument slices allocated a call (newFrame, makeslice, about 40 % of the CPU) and Go's marking; GOGC=400 changed nothing (the driver's
+  heap goal is already several times the live 30 MB). A frame pool is worth about 1.5x: not enough for any of the three; not built.
+- Left in `:gc-and-memory`: ephetest3, whose keys are Int64 values hash-consed through a weak set; oi's boxed integers have no identity
+  (Go's interface values: a static array for 0-255, the tiny allocator for the rest). A question for the user (the report).
+- `:dynlink-decided`: lib-dynlink-bytecode/main, deferred (its plugins need ocamlmklib, C stubs and .cma loading); the suite's two
+  `:opam-not-run` rows by design; darkening_work and backtrace_dynlink n/a (539b-2, 539b-3); the Jane Street rows the Mac's.
+- A slip: one measuring command's second half ran in the `next` worktree (a `&` split the `cd`), so a `bin/oi suite check` there built
+  that tree's native library under `.tmp/oi` (scratch only, no tracked file); the permission system refused to stop it by PID.
+
+## 2026-11-24: ocaml-eval: opam/uutf/test_uutf measured
+
+`bin/oi suite check --only opam/uutf/test_uutf` at OI_TIMEOUT=1800, alone: passes in 1,390 s of CPU (23 min 12 s user, 1 min 12 s
+system), about 11.6 times the check's 120 s: its loops run every Unicode scalar value through each encoder and decoder. With the entry
+above's two (ast-invariants/test 216 s, parallel/fib_threads 744 s) the three left in `:speed` pass on oi given the time; none is within
+reach of a local optimisation of the interpreter.
