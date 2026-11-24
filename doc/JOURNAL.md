@@ -20842,3 +20842,27 @@ are made in a detached record worktree at 0d38b81b0 (.tmp/worktrees/rec-t2-at, k
   ulimit 22 GiB, GOMEMLIMIT 18 GiB, HEAVY_MEM_GIB=22), its record files first set to next's. .tmp/r/finish.sh judges and copies
   them into the branch when both end.
 - `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: ocaml-eval: the user's decisions on ephetest3 and the speed rows; oi's per-row CPU caps
+
+The user's decisions (2026-11-24, through the coordinator, after next took ocaml-eval at 8a321eee2):
+- weak-ephe-final/ephetest3 is n/a (option (a) of the report): the physical identity of immutable boxed integers is unspecified
+  (Repr.phys_equal). Not taken: (b), boxed integers with an identity in oi. New class `:na-boxed-identity` (test/ocaml/divergences.edn,
+  `:programs` the one row); `:gc-and-memory` holds no program at oi's level now.
+- The three `:speed` rows run under per-row CPU caps of 1.5 times their measured CPU, as Haskell's speed rows (HES97 (a),
+  test/haskell/cpu-caps.tsv), and are judged by their own verdicts. Built: test/ocaml/oi-cpu-caps.tsv (ID, cap, measured CPU); bin/oi's
+  oi_one and bin/lib/oi/suite.bash's suite_oi_one take the larger of OI_TIMEOUT and a program's cap as a local TIMEOUT (so the wall cap,
+  oi_status's four fifths and the "timeout" note follow it); the file is in oi_key, so a cap's change reruns the rows. This edit of bin/oi
+  moves the native library's key (a rebuild of .tmp/oi/lib, about 40 minutes, at the next bin/oi run of each checkout).
+- The measurement, each program alone (OI_JOBS=1, OI_TIMEOUT=2400, one after another on the main host loaded by the other agents), CPU
+  user + system: ast-invariants/test 207.5 s (cap 320), parallel/fib_threads 759.1 s (cap 1140), opam/uutf/test_uutf 1343.6 s (cap 2020).
+  Correction of the entry "ocaml-eval: opam/uutf/test_uutf measured": its run took 1,464 s of CPU (1,391.8 user + 72.4 system), not 1,390
+  (the sum left the minutes of user time at 23 min 11.8 s = 1,391.8 s and forgot the system's).
+- The three rows recorded with `--record` under their caps (bin/oi check for the first two, bin/oi suite check for uutf); oi-slow.edn
+  loses them. lib-dynlink-bytecode/main stays `:dynlink-decided` (deferred), as the user said.
+- Recorded: ast-invariants/test and opam/uutf/test_uutf pass at their caps. parallel/fib_threads failed once (empty output) in a run at
+  OI_JOBS=2: the run corpus (.tmp/oi/corpus.tsv) lists it twice (as many tests whose header has two run blocks: basic/zero_divided_by_n,
+  c-api/alloc_async, the callback tests ...), and oi_one gives both rows one run directory (RUN_DIR/ID), so two jobs at once remove each
+  other's output; pre-existing, not changed here (bin/oi's selection or oi_one's directory is the place to fix it). Recorded again at
+  OI_JOBS=1: passes (each row 11 min of CPU, under its 1140 s cap). OCaml eval 601/2/5 -> 604 pass / 2 by design / 1 deferred
+  (lib-dynlink-bytecode/main), 69 n/a; `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.

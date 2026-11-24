@@ -4974,3 +4974,7 @@ oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferr
   Recorded into check-aot-compiled-native.edn (record-only of the run's rows), out of divergences-aot-compiled.edn's `:ocamltest-tools`;
   the controls `_control/ocamltex-ellipses-vs-redirections` and `_control/toplevel-main-vs-redirections` at this level differ, as they
   must. The compiled level is in no REAP cell: OCaml's cells do not move.
+- **The user's decisions (2026-11-24)**: ephetest3 n/a (`:na-boxed-identity`: a boxed integer's identity is unspecified); the three speed
+  rows under their own CPU limits, `test/ocaml/oi-cpu-caps.tsv` (1.5 times their CPU measured alone: ast-invariants/test 320 s,
+  parallel/fib_threads 1140 s, opam/uutf/test_uutf 2020 s), read by oi_one and suite_oi_one (the larger of OI_TIMEOUT and the cap), in
+  oi_key; the rows judged by their own verdicts and recorded passing. Left deferred: lib-dynlink-bytecode/main (`:dynlink-decided`).
