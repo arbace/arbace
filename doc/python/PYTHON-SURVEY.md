@@ -8136,6 +8136,11 @@ four key-log secrets where OpenSSL writes five (`:ssl-go-tls`, 19 rows). Since 5
   `set_psk_server_callback` as _ssl.c's (the callbacks called on the Python thread, their errors unraisable); the PSK suites
   in the cipher table (kPSK, aPSK, PSK), offered only with this side's callback; `verify_client_post_handshake`; the peer's
   certificates taken again after a read that completed a post-handshake authentication.
+- **Proved** on the VM (AOT, from the committed forms): `bin/pyi check --aot --lib-test --fresh test_ssl test_httplib`: test_ssl
+  184 pass, 22 classed, test_httplib 143 pass, 5 classed, 0 failing; the 19 rows pass, none the record passes fails; the
+  development run of test_asyncio.test_ssl and test_sslproto: no regression. Recorded by `bin/pyi check --judge DIR --record`
+  (the 19 rows alone changed in the record); `:ssl-go-tls` removed (both divergences files). Python eval: pass 40,552 ->
+  40,571, design 1,398 -> 1,379.
 - **The keys and the table**: pyi's runtime imports arbace/pytls, so it is listed in goi's table (arbace/go/table.ae's
   `program-path?`) and copied into the program with go/arbace/py (arbace/j2g/main.ae); `gate_key` moves (those namespaces
   and go/arbace/pytls), `arbace_runtime_key` does not (`arbace_runtime_not`); the gate's `:pyi` host lists it; bin/pyi prints

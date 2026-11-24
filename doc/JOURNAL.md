@@ -19555,6 +19555,9 @@ The user decided (537-4 (a)) to vendor Go's crypto/tls into pyi's ssl and add wh
 - The keys: pyi's runtime imports arbace/pytls, so goi's table lists it (arbace/go/table.ae) and j2g copies it into the
   program (arbace/j2g/main.ae): gate_key moves, the table moves; arbace_runtime_key does not (bin/lib/version.bash's
   arbace_runtime_not); the gate's :pyi host lists go/arbace/pytls; bin/pyi prints, builds and reads it back.
+- Proof and record (2026-11-24, after the night's pause): the whole test_ssl and test_httplib from the committed forms on AOT,
+  0 failing, the 19 rows pass; `bin/pyi check --judge DIR --record` (the record's 19 rows, its order kept), `:ssl-go-tls`
+  removed, `bin/reap --record`, `bin/crops-score --record`: Python eval pass 40,571, design 1,379.
 - Alternatives considered: (b) n/a and (c) by design (537-4's); moving _ssl into a lazy package beside the vendored code
   (pyssl's way), which keeps it out of the program's copy but moves 4,500 lines of glue: not taken, the direct import is
   the smaller change.
