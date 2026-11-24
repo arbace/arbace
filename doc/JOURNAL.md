@@ -19285,3 +19285,25 @@ Built on 556c's 1e042215a.
 `--judge --partial --record`.
 
 **Left** (written up; the week's allowance): the literal arms (t03453, t03457, t03567) and t03457's char `&=` temporary.
+
+## 2026-11-24: queue 556d, the two shapes left (from the main session)
+
+Built on 556d's ec1fc1bd8. All three commits move repr/java's reader hash (the host's regeneration batch).
+- **2a3f35d59 and 6dd9a362d, the literal arms** (t03453, t03567).
+  - The cause: the "promoted constant" was a parenthesized nested ?: that the converter's prettifier folded into a flat `cond`.
+    javac types `(c ? x : y)` by its own branches and widens it once, but types an unparenthesized nested ?: by the outer one's
+    type. So the constant branch was loaded as the outer type's constant: ldc2_w -1.0 for iconst_m1, ldc -7168.0f for sipush plus
+    a later i2f.
+  - The fix: `convert.ae`'s `conditional` marks a primitive branch that is a parenthesized ?: `^:parens`, and the prettifier keeps
+    it apart. `print.ae` parenthesizes it, as it does a `^:promoted` branch that is a ?:. A returned or yielded `if` with such a
+    branch is printed as one ?:.
+  - Proof: t03453 and t03567 pass at print. The forms round-trip (the forms step), which is the negative control: an
+    unparenthesized nested ?: stays unparenthesized, or F2 would differ.
+- **adbc2a924, the char `&=` temporary** (t03457).
+  - The cause: `convert.ae`'s local binding dropped `final` from a non-constant local. javac's Lower reads a final local again as a
+    compound assignment's receiver, and keeps any other receiver in a temporary (astore, dup_x1/pop).
+  - The fix: such a local is `^:final`, and `print.ae` writes `final` for it.
+  - Proof: t03457 passes. Its source's 29 final local declarations print as 29, and no other local is marked.
+- **The 128-test sample** at read and print: t03453, t03457 and t03567 now pass, 0 regressions, read as recorded; c00001 differs.
+  An intermediate run caught a regression in t03454 (its forms: a returned ?: printed as if statements lost the parentheses),
+  fixed by 6dd9a362d. Recorded with `--judge --partial --record`.
