@@ -20980,3 +20980,15 @@ test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before t
 t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
 notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
 `bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
+
+## 2026-11-24: finalization built (JMS1 (a), java-misc-1124)
+
+As the user decided: jrt's `finalize.ae` (RegisterFinalizer, the queue, the daemon thread "Finalizer", runFinalization's
+"Secondary finalizer" after `runtime.blockUntilEmptyFinalizerQueue`), j2g's `finalizable?` registering in the New functions
+of a class whose nearest finalize() is not Object's and not empty, and the interpreter's allocation registering through
+the native `Compiler$CFGo/registerFinalizer` (dyncf). Alternatives considered: registering in the Java constructors of
+every class (a cost for every object; HotSpot registers only finalizable classes' objects), running finalize() on Go's
+finalizer goroutine (a blocking finalize() would stop every Go finalizer of the process: FinThreads blocks one forever),
+and runtime.AddCleanup (its function cannot reach the object, which finalize() needs). Should move FinThreads (t04683)
+and ref/Basic (t04816) at interp and compiled; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124,
+finalization".

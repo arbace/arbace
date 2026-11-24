@@ -9199,3 +9199,26 @@ carries it (arbace/lang and jrt are in gate_key).
   (t05778, both levels) prints LogManager's getDeclaredMethods, private ones included, in HotSpot's order: n/a
   (verdicts.edn: unspecified), recommended. TestInferCaller (t05766, compiled) is java.util.logging's caller inference
   over StackWalker: java-stack-1124's.
+
+### As built: java-misc-1124, finalization (JMS1 (a), the user's decision of 2026-11-24)
+
+- **jrt** (`go/arbace/jrt/finalize.ae`, new): `RegisterFinalizer(x)` puts a Go finalizer on the object's header (the
+  allocation's start) whose only work is to queue the object, rebuilt from the header and its type word (a closure over
+  the object would keep it alive); the daemon thread "Finalizer" of the system thread group (priority 8, started with the
+  first finalizable object, as jdk26u's Finalizer.startFinalizerThread) runs each queued object's finalize(), a
+  translated class's Go method `Finalize__V`, else the member table's method up its superclasses (an interpreted
+  class's), every Throwable ignored (Finalizer.runFinalizer). `System.runFinalization` collects, waits at most a second
+  for Go's finalizer queue to be empty (`runtime.blockUntilEmptyFinalizerQueue`, a linkname target of Go's runtime) and
+  runs what is queued on a thread "Secondary finalizer" the caller waits for over a channel, its interrupt status
+  untouched (FinInterrupt). Go clears weak pointers when it queues an object's finalizer and runs AddCleanup's cleanups
+  once the object is freed: Java's orders for weak and phantom references. TestFinalization (system_test) holds it.
+- **j2g** (`arbace/j2g/decls.ae`, `finalizable?`): a class whose nearest finalize() of its superclass chain is not
+  Object's and has a body (HotSpot's has_finalizer leaves an empty one: ThreadPoolExecutor's) calls
+  `jrt.RegisterFinalizer` in its constructors' New functions before the constructor runs, as the JVM registers at
+  Object.<init>. In the world: CramMD5Base and PlainClient (SASL's password clearing).
+- **The interpreter** (`arbace/lang/Compiler.ae`): `CF$Klass.finalizable` (a finalize() among its virtual methods, decided
+  once) and the Go host's alloc registering the object through the native `Compiler$CFGo/registerFinalizer`
+  (`arbace/j2g/dyncf.ae`). interp.ae is unchanged (the stage-0 rule: no new runtime member named by a tool namespace).
+- Limits: Go never collects a cycle through an object with a finalizer (runtime.SetFinalizer), where the JVM finalizes
+  it; a clone or a deserialized object is not registered; an interpreted class extending a translated one that declares
+  finalize() is not.
