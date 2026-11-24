@@ -20919,3 +20919,13 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   `bin/records-check` 0 problems; `bin/markers-check` ok and its control; `test/docs/claude-md-test.bash` and
   `test/gate/costs-test.bash` pass. Keys: gate_key does not move; the keys of the steps over `bin/`, `test/gate/steps.edn`,
   `bin/gate`, CLAUDE.md or `test/python/` move (claude-md, crops-score, gate-tests, caches-table, records-check, Python's steps).
+## 2026-11-24: cpp-p2564's count, seven rows and five (a correction; queue 560)
+
+The entry "cpp-p2564, P2564R3's immediate escalation in the own front end" and the commit `df842350a`'s subject say "7 rows to own pass"
+(prop1, -2, -6, -10, -19, -7, -8) and "C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243", a difference of 5. Both are right, for two counts: the
+own record test/cpp/check-dg-own-linux-amd64.edn moved seven rows from fail to pass (own pass 2,438 -> 2,445), but the read cell counts a file
+once, and consteval-prop7.C and -prop8.C were `:pass "compile"` in test/cpp/check-dg-linux-amd64.edn already (not :own-diag in
+test/cpp/own-diag-review.edn) and so in the 6,035. Only prop1, -2, -6, -10, -19 left the :own-diag class (231 -> 226) and the read's deferred
+(248 -> 243), and the matrix's dg source 4,101 -> 4,106 and test/crops/scores.edn's 6,035 -> 6,040 say five. Nothing in the records was wrong; the
+text did not say which count a number was. The commit message cannot change; doc/cpp/CPP-SURVEY.md's "As built: cpp-p2564" now states
+both. The records need no change.

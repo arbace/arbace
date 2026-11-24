@@ -11224,8 +11224,10 @@ g++.dg/cpp2a/consteval-prop*.C state them; no GCC code read.
   ([expr.const]/20), so prop19's `int r = f(1)(2);` holds and `f(1)(2) + r` is the error; the evaluator follows function addresses
   and calls through them in that judgment alone (`*ce-fnptr*`, `{::fnp id}`).
 
-Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8 to own pass; C++ read 6,035 / 0 / 248 ->
-6,040 / 0 / 243. Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
+Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8: seven rows to own pass in
+test/cpp/check-dg-own-linux-amd64.edn (own pass 2,438 -> 2,445), but five in the read cell: -prop7 and -prop8 already passed the dg check
+(`:pass "compile"`, not :own-diag) and were counted, so C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243 and :own-diag 231 -> 226 (doc/JOURNAL.md,
+"2026-11-24: cpp-p2564's count"). Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
 constexpr, those with a lambda's default argument, the control pair DRs/dr2082.C and dr1423.C, the two slow files): no own pass lost
 but the two slow files past their 300 s (udlit-suffix-neg, missing-header-pr110164, their pass rows kept), the control pair failing as
 recorded; cpp2a/spaceship-synth9.C's failing row reads differently, the same on the base (not recorded here).
