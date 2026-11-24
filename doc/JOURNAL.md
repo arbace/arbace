@@ -19324,3 +19324,30 @@ executables, and the host's C records rerun on its train.
   (MAIN_SEPARATOR_STR), inline consts of bodies, MAP_FAILED (a pointer), FULL_BACKTRACE_DEFAULT (cfg_select!), UNWIND_DATA_REG (a
   tuple).
 - Not recorded (the VM's records would be -linux-arm64); the main host's amd64 commands are in the queue report.
+
+## 2026-11-24: queue 558 (the VM): Rust C3, the mono facts the six eval cases took from the record
+
+Base 542-rust-own-lowering 57a908970, branch 558-rust-c3. rsi18's builds (RF_FACT_TRACE=1) took 462 facts from the record
+(`rust-front-rsi`): locs 412, layouts 45, consts 3, symbols 2 (the brief's macro-made atomic and accumulate methods no longer among
+them). By cause, largest first, and what was done:
+- **Program calls made by format_args! (244 locs)**: lower-format-args built its `Arguments::new`, `Argument::new_display` and
+  `from_str` calls without the format_args! expression's expansion mark, so a std macro's call (println!) had only a foreign span.
+  rustc's format.rs gives them the macro's syntax context, which span_as_caller_location walks to the outermost call site. The calls
+  now carry the mark (`*fmt-mark*`, lower.ae); probed: every program call of the six has a root-file span.
+- **Native library bodies' calls and asserts (168 locs)**: the exports predated C6-4's :call-loc and 524's macro-argument case. A
+  probe export (core-check CORE_EXPORT_KEYS on slice/raw.rs, slice/mod.rs) gave each call and assert its place. Re-made at this head:
+  `core-export --rsi` (25 min), `--rsi-outside '^(fmt/|iter/|..)|/core_simd/'` (33 min; call-locs 910 -> 1040 over 1018 calls and
+  23 asserts), `lib-export --rsi std`, the ctfe keys. The old files are in /root/arbace-mac/.tmp/q558/orig/.
+- **std::io::Error's layouts (40)**: core::io::error's `mod repr` takes its file by `#[cfg_attr(PRED, path = "..")]`; child-mod-items
+  now reads it when PRED holds. src-ty resolves `self::` and `super::` uses, fn pointers (`unsafe fn(NonNull<dyn error::Error + Send
+  + Sync>)`) and `Self`. Probed: Error, Custom and Result<(), Error> equal the record's layouts.
+- **SimdShuffleIdx (5 layouts)**: a struct local to an inline const in a trait method (`Swizzle::concat_swizzle::{constant#0}`):
+  src-adt finds it through the method's kept items (body-adt-items' depth 12 -> 30). Probed: 64 bytes, align 64, a vector of 16 u32.
+- **TypeId::of::<dyn Any> (3 consts)**: native-core-plan's closure followed `<dyn Any>::is`'s `self.type_id()` to the blanket
+  `impl<T: ?Sized> Any for T` at T = dyn Any, a body rustc never instantiates (the call is Virtual). Now resolve-call and the closure
+  skip a trait method on a trait object (mono/virtual-call?, virtual-fact's rule).
+- **Drop glue shims (2 symbols, 2 locs)**: a shim's header came from the item facts by the name `std::ptr::drop_glue`, which every
+  shim shares. Now it is built natively (mono's symbol, the instance as `Shim(DropGlue(.., Some(T)))`); its call's location is
+  drop_glue's def_span (mono/lib-fn-loc: core/src/ptr/mod.rs 847:1, the record's).
+- rsi19 (the six at d7aad0540 with the re-made exports): see the queue report for the counts. Not recorded (arm64); the main
+  host's commands are in the report.
