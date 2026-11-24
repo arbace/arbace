@@ -8375,3 +8375,60 @@ in go/arbace/py, and `_pyio` is the Python side only (test_io's Py* classes, as 
 - **Classes**: `:strace-leader` (n/a, 535-3 (a): test_fileio's two test_syscalls_read); `:io-c-checks`, `:io-memory-c`, `:pyio`,
   `:pyio-size-type` and `:pyio-buffered` keep their rows until the re-record (their why says so).
 
+
+## As built: py-os-1124, the command line, the environment and the process as CPython's (2026-11-24, the main host, the burst's py-os stream)
+
+The eval rows of processes, the command line and the OS (`:pyi-command-line`, `:source-decoding`, `:os-and-files-misc`,
+`:signal-timing`, `:run-dir-zip-main`, `:compileall-pyc`, `:pyi-main-module`, `:interactive-mode`, `:socket-gaps`,
+`:hash-algorithm`; test_cmd_line and test_sys whole). The base's run (pyi's AOT, `bin/pyi check --aot --lib-test --only`, 39
+modules, 595 methods) passed 40 of the 127 rows already (the record predates py-eval-1122, py-mods-1122, 537, 545 and 551).
+
+- **The caller's environment** (`interp.go`'s entryEnviron): tools/pyi/python3 and the compiled launcher's wrapper keep the
+  environment they were given in `PYI_ENTRY_ENV` (NAME=VALUE records split by \036, a newline as \035) before bin/pyi adds its
+  own; the runtime reads it once, undoes its shell's PWD and SHLVL (busybox sh raises SHLVL, adds PWD when absent) and
+  `posix.environ` is it; the names bin/pyi added stay in the process (the runtime and env=None children read them) but out of
+  `os.environ` and `os.reload_environ()` until the program sets one. Without it (bin/pyi run, a compiled program): the process's.
+- **The command line**: sys.argv's bytes from `PYI_ARGV`, decoded with surrogateescape (Py_DecodeLocale); -c's command not UTF-8
+  is pymain_run_command's "Unable to decode the command from the command line:" and status 1; -c's coding spec ignored
+  (PyCF_IGNORE_COOKIE: `arbace.repr.python.native/*ignore-cookie*` on goi's path, a UTF-8 decode on the compiled path); `-mMOD`
+  and `-cCMD` joined; -O (each), -v, -d, -B and -R passed in `PYI_START_FLAGS`; a script whose path is not UTF-8 read by a
+  prologue (the host reads files by its strings); a path inside a zip file a main importer; a script's CR LF and lone CR read as
+  LF on goi's path (the reader's mode :full keeps a file's line ends for the round trip).
+- **Configuration**: PYTHONPATH after sys.path[0] (getpath's `_Py_abspath`: "" and "." the working directory, a relative entry
+  joined to it, undecodable bytes surrogate-escaped); sys.flags' optimize, verbose, debug and dont_write_bytecode from -O, -v,
+  -d, -B and PYTHONOPTIMIZE, PYTHONVERBOSE, PYTHONDEBUG, PYTHONDONTWRITEBYTECODE (`_Py_get_env_flag`), hash_randomization as
+  `use_hash_seed == 0 || hash_seed != 0`; sys.pycache_prefix from -X pycache_prefix and PYTHONPYCACHEPREFIX; -X importtime
+  (and PYTHONPROFILEIMPORTTIME): import_find_and_load's lines (self and cumulative microseconds, two spaces a level, "cached"
+  lines at 2, the name with backslashreplace, a failed import's line too), another value the start's error. pyi still writes no
+  bytecode cache at import (sys.dont_write_bytecode stays True; the IR cache is the host's).
+- **-O and -OO**: the compiler's `*optimize*` (`arbace.python.compile`): from 1 no assert statement (its "always true" warning
+  kept) and `__debug__` False, from 2 no docstrings (module, class, function); every compile the runtime asks takes the level as
+  the mode's `+opt1`/`+opt2` (the IR cache keys the whole mode), compile()'s `optimize` argument too (compileall's opt-1 and opt-2
+  files and their hard-link deduplication), builtins.`__debug__`, the main module (arbace.python's start asks the runtime's
+  `OptimizeLevel`).
+- **Hashes**: randomized when PYTHONHASHSEED is unset, empty or not a seed, or under -E, -I or -R (CPython's default; queue
+  304 kept them zero-keyed); bin/pyi's own verbs export `PYTHONHASHSEED=0` and `PYTHONDONTWRITEBYTECODE=1` when unset (the
+  references' environment), so their drivers and their children stay deterministic and only a child whose environment drops
+  the variable is randomized, as CPython's.
+- **The future features compile() and the REPL inherit**: co_flags' CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL (the IR's
+  `:future-annotations`, `:future-barry` on every code of a module that imports them), compile()'s flags as the modes `+futA`
+  and `+futB` (scope's `*inherited-features*`, the parser's and tokenizer's barry flag, `peg/set-barry!`), the basic REPL's
+  accumulated features (PyCompilerFlags), ast.parse's CO_FUTURE_BARRY_AS_BDFL; a tree compiled from an AST object is made with
+  `!=` and so compiles without barry's parser.
+- **The process**: os.abort dies by SIGABRT (fhDie: SIG_DFL first); `restore_signals` makes SIGPIPE and SIGXFSZ Go's for the
+  fork (Go's child sets the signals it handles back to SIG_DFL) and ignored again after, so the child starts with them default
+  and a `restore_signals=False` child keeps them ignored; the start installs SIGINT's default_int_handler (not over an inherited
+  SIG_IGN), so a program that never imports signal ends a SIGINT with KeyboardInterrupt; atexit as atexitmodule.c (a copy run,
+  the list cleared after, an exception through sys.unraisablehook, unregister in the comparison's order).
+- **Text**: str.format keeps surrogates (buildString as code points); sys.displayhook writes an unencodable repr with
+  backslashreplace (sys_displayhook_unencodable); compile(), exec() and eval() of a str holding a lone surrogate raise the
+  UTF-8 codec's UnicodeEncodeError; str.encode's and bytes.decode's encoding and errors arguments likewise (getargs' "s");
+  exec()'s bytes take the tokenizer's get_normal_name and a decoded source's every coding spec of its first two lines is made
+  inert; ast.parse of a tree past encoding/json's depth is the parser's MemoryError.
+- **Sockets**: AF_UNIX getsockname and getpeername from the address and its length (Linux abstract names holding NULs).
+- **bin/pyi's AOT module** keeps the libraries cf2g compiled (clib/LIB/aot, by their nodes' key) across a runtime change: a
+  runtime rebuild is the print and copy, not 15 minutes of cf2g.
+- **Proved** (the main host, pyi's AOT, `bin/pyi check --aot --lib-test --fresh --only` over the same 39 modules; the three
+  negative controls failing as they must): 288 -> 332 pass, 0 failing, no row of the base's run lost; the launcher's direct
+  probes (.tmp/os/t5.py, t8.py) and goi's path (`bin/pyi python` interpreting the checkout's runtime: -c's coding, a CR CR CR LF
+  script, a double coding spec, a non-UTF-8 script path, -O).
