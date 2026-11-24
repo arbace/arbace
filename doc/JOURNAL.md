@@ -19235,3 +19235,30 @@ covering every other difference in it (t03457's `<init>`, report 556b's finding 
 
 Recorded with `--judge --partial --record`. The whole print level's re-judge is the host's, on train 4's build: it will move more
 rows.
+
+## 2026-11-24: queue 556c, the print rows 556b-1 (a) exposed, as printer fixes (from the main session)
+
+Built on 556b-java-print-decisions 326cd1f02. Both fixes move repr/java's reader hash (the host's regeneration batch, as for
+538-0).
+- **t06072, ca0cee3fa.**
+  - `convert.ae` keeps `X.super` named in X itself as `^:qualified super`. It was plain `super`, but javac reaches `X.super`'s
+    members through access$N accessors and `super`'s directly.
+  - `print.ae` writes it `X.super` (`super-text`) and does not fold a qualified super's field into a compound assignment: the
+    source's getter and setter, against `+=`'s one accessor.
+  - `test/java/print.ae`, 538-4's accessor shape: the access$N methods' own lines are left out, since they follow their callers.
+    RP2's compound kind now covers an inner class's outer instance (aload, getfield this$N) read again against dup'ed.
+  - Controls C4 and C5 (`.tmp/q556/tools/ctl556.ae`): CurPackagePrivateTest$1 is named; the same with a field read for this$0 is
+    not. C4 fails on the parent. Plain `super.f` in X still prints as `super.f`.
+- **t06039, d615f40ca.**
+  - `convert.ae` marks two forms on a boxed place: a prefix increment used as a statement, `^:prefix` (javac's x++ keeps the old
+    value); and a compound assignment, `^:compound` (the written-out form reads the receiver twice where `P OP= rhs` keeps it in a
+    temporary).
+  - `print.ae` prints `++P` and `P OP= rhs` (`marked-compound`).
+  - The class file is now byte for byte the original's. The test's written-out boolean assignments stay written out, which is the
+    negative control.
+- **Left, the ?: family** (t03453, t03454, t03455, t03457, t03567). The pure ?:/if cases are named by the counted flow kind. What
+  stays unnamed are the numeric promotions of a ?:'s arms, which the converter writes as explicit conversions: `(short) (byte) x`
+  gives an i2s, and also l2d, f2d and l2f beside the arms' branches. Each shape is a fix of its own. Written up, not built (the
+  week's allowance).
+- **The 128-test sample** at read and print: print has 2 now passing (t06039, t06072), 4 reasons changed (fuzz rows) and 0
+  regressions; read is as recorded. Recorded with `--judge --partial --record`.
