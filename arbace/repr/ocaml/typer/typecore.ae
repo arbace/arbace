@@ -1682,6 +1682,23 @@
         [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
     (type-let* env rec svbs))))
 
+(defn- approx-type
+  "(queue 547) Typecore.approx_type: a type expression's shape (arrows, tuples, constructors of the right arity), the rest
+  variables, no type variable bound and no error raised"
+  [env sty]
+  (let [d (:ptyp_desc sty)]
+    (case (d 0)
+      :Ptyp_arrow (let [l (d 1) a (ty/newvar)]
+                    (ty/newty [:Tarrow l (if (ty/is-optional l) (ty/type-option a) a) (approx-type env (d 3))]))
+      :Ptyp_tuple (ty/newty [:Ttuple (mapv (fn [[l t]] [l (approx-type env t)]) (d 1))])
+      :Ptyp_constr (let [p (try (env/lookup env :types (:txt (d 1))) (catch arbace.lang.ExceptionInfo _ nil))
+                         decl (when p (env/find-decl p))]
+                     (if (and p decl (= (count (d 2)) (count (:params decl))))
+                       (ty/tconstr p (mapv #(approx-type env %) (d 2)))
+                       (ty/newvar)))
+      :Ptyp_poly (approx-type env (d 2))
+      (ty/newvar))))
+
 (defn type-approx
   "Typecore.type_approx: a recursive binding's expression's type approximated from its shape before it is typed (its
   parameters' labels and an optional one's option type: a use of the function before its definition, with labels,
@@ -1702,7 +1719,10 @@
                     (recur (next params) tret))))))
           (let [body (d 3)]
             (case (body 0)
-              :Pfunction_body (when-not (d 2) (type-approx env (body 1) ty))
+              ;; (queue 547) a return constraint (`let rec f x : t = ...`): the result's type approximated from it
+              :Pfunction_body (if-let [c (d 2)]
+                                (when (= :Pconstraint (c 0)) (unify! (approx-type env (c 1)) ty "expression"))
+                                (type-approx env (body 1) ty))
               :Pfunction_cases (when-not (d 2)
                                  (when-let [c (first (body 1))]
                                    (let [[_ tret] (split-arrow ty [:Nolabel])] (type-approx env (:pc_rhs c) tret))))
@@ -1714,6 +1734,8 @@
                     (doseq [[[_ e] [_ t]] (map vector (d 1) ts)] (type-approx env e t)))
       :Pexp_ifthenelse (recur env (d 2) ty)
       :Pexp_sequence (recur env (d 2) ty)
+      ;; (queue 547) `(e : t)`: the type's shape
+      :Pexp_constraint (do (type-approx env (d 1) ty) (unify! (approx-type env (d 2)) ty "expression"))
       nil)))
 
 (defn- type-let*
