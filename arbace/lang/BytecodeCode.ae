@@ -1,0 +1,1477 @@
+;; Classes defined from class-file bytes (doc/classes/BYTECODE-SURVEY.md, JD3, the user's decision of 2026-11-22): the
+;; bytecode interpreter, JVMS chapter 6 (6.5's instructions) over the Java forms' interpreter's frames
+;; (Compiler$CF$Frame: a method's locals are its frame's slots by local index, a reference in r, any other value in p:
+;; int-like ones as longs, long, float as a double's bits, double as its bits, as the Java forms' interpreter keeps
+;; them), its calls of interpreted methods by their Compiler$CF$Meth, of the world's by reflection or the host's super
+;; calls, as Compiler$CF$CallV and its kin call them. Written from the JVMS (Java SE 26 edition).
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+
+(in-ns 'arbace.lang)
+
+(import '(java.lang.reflect Array Constructor Field InvocationTargetException Method Modifier))
+
+;; one activation's operand stack (the JVM's slot accounting: a long or double takes two slots, its value in the
+;; first), the pc of the instruction being run and the stack's depth
+(defclass ^:public ^:final BytecodeAct
+  (field ^:public ^:final ^long/1 s)
+  (field ^:public ^:final ^Object/1 r)
+  (field ^:public ^int sp)
+  (field ^:public ^int pc)
+  (constructor ^:public [this ^int n]
+    (set! (.-s this) (new long/1 n))
+    (set! (.-r this) (new Object/1 n))))
+
+;; the object of a new of a class of the world, until its constructor runs (JVMS's uninitialized(Offset))
+(defclass ^:public ^:final BytecodeUninit
+  (field ^:public ^:final ^Class c)
+  (constructor ^:public [this ^Class c] (set! (.-c this) c)))
+
+;; a returnAddress (jsr, ret)
+(defclass ^:public ^:final BytecodeRet
+  (field ^:public ^:final ^int pc)
+  (constructor ^:public [this ^int pc] (set! (.-pc this) pc)))
+
+;; a resolved field reference: kind 0 an interpreted class's instance field (its index), 1 its static (the Klass's
+;; statics and the index), 2 a field of the world (reflection), 3 a protected instance field of a superclass of the
+;; world (the host's superField)
+(defclass ^:public ^:final BytecodeFieldRef
+  (field ^:public ^int kind)
+  (field ^:public ^char t)
+  (field ^:public ^int index)
+  (field ^:public ^Compiler$CF$Klass k)
+  (field ^:public ^Field rf)
+  (field ^:public ^String name)
+  (constructor ^:public [this]))
+
+;; a resolved method reference: kind 0 an interpreted method without dispatch (m), 1 a virtual call (key; m the
+;; resolved interpreted method or nil, rm the world's), 2 a static method of the world (rm), 3 a super call of a
+;; method of a superclass of the world (c, key), 4 a constructor of the world (rc: of a new object; on an object of an
+;; interpreted subclass, the host's superCtor of c)
+(defclass ^:public ^:final BytecodeMethodRef
+  (field ^:public ^int kind)
+  (field ^:public ^Compiler$CF$Meth m)
+  (field ^:public ^String key)
+  (field ^:public ^String name)
+  (field ^:public ^String desc)
+  (field ^:public ^Method rm)
+  (field ^:public ^Constructor rc)
+  (field ^:public ^Class c)
+  ;; the parameters' type chars, the return's, the arguments' slots (the receiver's not counted)
+  (field ^:public ^char/1 ptypes)
+  (field ^:public ^char ret)
+  (field ^:public ^int slots)
+  (field ^:public ^boolean hasThis)
+  (field ^:public ^boolean iface)
+  (constructor ^:public [this]))
+
+;; a resolved invokedynamic call site or dynamic constant: kind 0 a lambda (its class: k), 1 string concatenation
+;; (recipe, constants), 2 ObjectMethods' toString, 3 hashCode, 4 equals (fields: the getters' field references,
+;; names), 5 SwitchBootstraps.typeSwitch, 6 enumSwitch (labels), 7 a constant (value)
+(defclass ^:public ^:final BytecodeIndy
+  (field ^:public ^int kind)
+  (field ^:public ^Compiler$CF$Klass k)
+  (field ^:public ^String recipe)
+  (field ^:public ^Object/1 consts)
+  (field ^:public ^Object/1 labels)
+  (field ^:public ^BytecodeFieldRef/1 fields)
+  (field ^:public ^String/1 names)
+  (field ^:public ^Class recordClass)
+  (field ^:public ^char/1 ptypes)
+  (field ^:public ^int slots)
+  (field ^:public value)
+  (constructor ^:public [this]))
+
+;; a lambda's method (LambdaMetafactory): the implementation method's handle, the captured values' count, the
+;; functional method's return type char
+(defclass ^:public ^:final BytecodeLambda
+  (field ^:public ^int refKind)
+  (field ^:public ^BytecodeMethodRef target)
+  (field ^:public ^int ncaps)
+  (field ^:public ^char ret)
+  (constructor ^:public [this]))
+
+(defclass ^:public ^:final BytecodeCode
+  (field ^:public ^:final ^BytecodeClass bc)
+  (field ^:public ^:final ^BytecodeMember mm)
+  (field ^:public ^:final ^Compiler$CF$Meth meth)
+  (field ^:public ^:final ^byte/1 code)
+  ;; the resolved references by the pc of their instruction
+  (field ^:public ^:final ^Object/1 sites)
+  ;; a lambda's method (no code)
+  (field ^:public ^BytecodeLambda lambda)
+
+  (constructor ^:public [this ^BytecodeClass bc ^BytecodeMember mm ^Compiler$CF$Meth meth]
+    (set! (.-bc this) bc)
+    (set! (.-mm this) mm)
+    (set! (.-meth this) meth)
+    (set! (.-code this) (if (some? mm) (.-code mm) nil))
+    (set! (.-sites this) (new Object/1 (if (and (some? mm) (some? (.-code mm))) (alength (.-code mm)) 0))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; values
+
+  (method ^:public ^:static fbits ^long [^float x] (Double/doubleToRawLongBits (unchecked-double x)))
+  (method ^:public ^:static fval ^float [^long b] (unchecked-float (Double/longBitsToDouble b)))
+  (method ^:public ^:static dbits ^long [^double x] (Double/doubleToRawLongBits x))
+  (method ^:public ^:static dval ^double [^long b] (Double/longBitsToDouble b))
+
+  ;; slot value b of type char t as an object
+  (method ^:public ^:static box [^char t ^long b]
+    (switch t
+      \F (Float/valueOf (BytecodeCode/fval b))
+      \D (Double/valueOf (BytecodeCode/dval b))
+      (Compiler$CF$Rt/box t b)))
+
+  ;; object v as the slot value of type char t
+  (method ^:public ^:static unbox ^long [^char t v]
+    (switch t
+      (\F \D) (Double/doubleToRawLongBits (if (== t \F) (unchecked-double (unchecked-float (Compiler$CF$Rt/toD v))) (Compiler$CF$Rt/toD v)))
+      (Compiler$CF$Rt/narrow t (Compiler$CF$Rt/toJ v))))
+
+  (method ^:public ^:static wide ^boolean [^char t] (or (== t \J) (== t \D)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the code's operands
+
+  (method ^:private s1 ^int [this ^int i] (unchecked-int (aget code i)))
+  (method ^:private u1 ^int [this ^int i] (bit-and-int (aget code i) 0xFF))
+  (method ^:private s2 ^int [this ^int i]
+    (unchecked-int (unchecked-short (bit-or-int (bit-shift-left-int (.u1 this i) 8) (.u1 this (unchecked-inc-int i))))))
+  (method ^:private u2 ^int [this ^int i]
+    (bit-or-int (bit-shift-left-int (.u1 this i) 8) (.u1 this (unchecked-inc-int i))))
+  (method ^:private s4 ^int [this ^int i]
+    (bit-or-int (bit-shift-left-int (.u2 this i) 16) (.u2 this (unchecked-add-int i 2))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; running
+
+  ;; runs the method in frame f (its receiver and arguments in their slots): a reference result returned, any other in
+  ;; f's jl (int-like, long) or jd (float, double)
+  (method ^:public run [this ^Compiler$CF$Frame f]
+    (when (some? lambda) (return (.runLambda this f)))
+    (when (not (.-linked bc)) (Bytecode/link bc))
+    (when (not (== 0 (bit-and-int (.-access mm) 0x0100)))
+      (throw (UnsatisfiedLinkError. (java-str "'" (Bytecode/bin2 (.-desc mm) (.-name mm) (.-name (.-k bc))) "'"))))
+    (if (not (== 0 (bit-and-int (.-access mm) 0x0020)))
+        (let [lock (if (.isStatic mm) (.-cls bc) (aget (.-r f) 0))]
+          (BytecodeCode/monitorEnter lock)
+          (try
+            (.interp this f)
+            (finally (BytecodeCode/monitorExit lock))))
+        (.interp this f)))
+
+  (method ^:public ^:static monitorEnter ^void [o]
+    (when (nil? o) (throw (NullPointerException.)))
+    ;; @dev-strip-begin
+    (Compiler$Evaluator/monitorEnter o)
+    ;; @dev-strip-end
+    )
+
+  (method ^:public ^:static monitorExit ^void [o]
+    (when (nil? o) (throw (NullPointerException.)))
+    ;; @dev-strip-begin
+    (Compiler$Evaluator/monitorExit o)
+    ;; @dev-strip-end
+    )
+
+  (method ^:private interp [this ^Compiler$CF$Frame f]
+    (let [a (BytecodeAct. (unchecked-add-int (.-maxStack mm) 2))]
+      (while true
+        (try
+          (return (.exec this f a))
+          (catch Throwable e
+            (let [h (.handler this (.-pc a) e)]
+              (when (< h 0) (throw e))
+              (aset (.-r a) 0 e)
+              (set! (.-sp a) 1)
+              (set! (.-pc a) h)))))))
+
+  ;; the handler of exception e thrown at pc (JVMS 2.10: the first entry whose range holds pc and whose class e is an
+  ;; instance of), -1 when none
+  (method ^:private handler ^int [this ^int pc ^Throwable e]
+    (let [hs (.-handlers mm)]
+      (loop [^int i 0]
+        (if (< i (alength hs))
+            (if (and (>= pc (aget hs i)) (< pc (aget hs (unchecked-inc-int i))))
+                (let [ct (aget hs (unchecked-add-int i 3))]
+                  (if (or (== ct 0) (.isInstance (.resolveClass this ct) e))
+                      (aget hs (unchecked-add-int i 2))
+                      (recur (unchecked-add-int i 4))))
+                (recur (unchecked-add-int i 4)))
+            -1))))
+
+  ;; the class of Class entry i of the pool, resolved through the defining loader (JVMS 5.4.3.1)
+  (method ^:public resolveClass ^Class [this ^int i]
+    (let [rs (.-resolved bc)
+          c (aget rs i)]
+      (cond
+        (some? c) (cast Class c)
+        ;; the class itself (this_class), not looked up by name
+        (and (== i (.-thisIndex (.-cf bc))) (some? (.-cls bc))) (.-cls bc)
+        :else
+          (let [n (.className (.-cf bc) i)
+                k (Bytecode/loadClass (.-loader bc) n)]
+            (aset rs i k)
+            k))))
+
+  ;; the instructions, from a's pc and stack; the method's result when a return instruction runs
+  (method ^:private exec [this ^Compiler$CF$Frame f ^BytecodeAct a]
+    (let [s (.-s a)
+          r (.-r a)
+          lp (.-p f)
+          lr (.-r f)
+          cf (.-cf bc)
+          ^:mutable ^int pc (.-pc a)
+          ^:mutable ^int sp (.-sp a)]
+      (while true
+        (set! (.-pc a) pc)
+        (let [op (bit-and-int (aget code pc) 0xFF)]
+          (switch op
+            0 (set! pc (unchecked-inc-int pc))
+            1 (do (aset r sp nil) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            (2 3 4 5 6 7 8) (do (aset s sp (unchecked-long (unchecked-subtract-int op 3))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            (9 10) (do (aset s sp (unchecked-long (unchecked-subtract-int op 9))) (set! sp (unchecked-add-int sp 2)) (set! pc (unchecked-inc-int pc)))
+            (11 12 13) (do (aset s sp (BytecodeCode/fbits (unchecked-float (unchecked-subtract-int op 11)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            (14 15) (do (aset s sp (BytecodeCode/dbits (unchecked-double (unchecked-subtract-int op 14)))) (set! sp (unchecked-add-int sp 2)) (set! pc (unchecked-inc-int pc)))
+            16 (do (aset s sp (unchecked-long (.s1 this (unchecked-inc-int pc)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-add-int pc 2)))
+            17 (do (aset s sp (unchecked-long (.s2 this (unchecked-inc-int pc)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-add-int pc 3)))
+            (18 19 20)
+              (let [i (if (== op 18) (.u1 this (unchecked-inc-int pc)) (.u2 this (unchecked-inc-int pc)))
+                    t (.tag cf i)]
+                (switch t
+                  3 (aset s sp (unchecked-long (.intValue (cast Integer (aget (.-vals cf) i)))))
+                  4 (aset s sp (BytecodeCode/fbits (.floatValue (cast Float (aget (.-vals cf) i)))))
+                  5 (aset s sp (.longValue (cast Long (aget (.-vals cf) i))))
+                  6 (aset s sp (BytecodeCode/dbits (.doubleValue (cast Double (aget (.-vals cf) i)))))
+                  8 (aset r sp (.intern (cast String (.constant cf i))))
+                  7 (aset r sp (.resolveClass this i))
+                  (do (set! (.-sp a) sp)
+                      (let [v (.ldcOther this i pc)
+                            d (.natDesc cf (aget (.-ib cf) i))]
+                        (if (== t 17)
+                            (let [ty (Bytecode/tc d)]
+                              (if (== ty \L) (aset r sp v) (aset s sp (BytecodeCode/unbox ty v)))
+                              (set! sp (unchecked-add-int sp (if (BytecodeCode/wide ty) 1 0))))
+                            (aset r sp v)))))
+                (set! sp (unchecked-add-int sp (if (or (== t 5) (== t 6)) 2 1)))
+                (set! pc (unchecked-add-int pc (if (== op 18) 2 3))))
+            (21 23) (do (aset s sp (aget lp (.u1 this (unchecked-inc-int pc)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-add-int pc 2)))
+            (22 24) (do (aset s sp (aget lp (.u1 this (unchecked-inc-int pc)))) (set! sp (unchecked-add-int sp 2)) (set! pc (unchecked-add-int pc 2)))
+            25 (do (aset r sp (aget lr (.u1 this (unchecked-inc-int pc)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-add-int pc 2)))
+            (26 27 28 29) (do (aset s sp (aget lp (unchecked-subtract-int op 26))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            (30 31 32 33) (do (aset s sp (aget lp (unchecked-subtract-int op 30))) (set! sp (unchecked-add-int sp 2)) (set! pc (unchecked-inc-int pc)))
+            (34 35 36 37) (do (aset s sp (aget lp (unchecked-subtract-int op 34))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            (38 39 40 41) (do (aset s sp (aget lp (unchecked-subtract-int op 38))) (set! sp (unchecked-add-int sp 2)) (set! pc (unchecked-inc-int pc)))
+            (42 43 44 45) (do (aset r sp (aget lr (unchecked-subtract-int op 42))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            ;; array loads
+            (46 47 48 49 50 51 52 53)
+              (let [i (unchecked-int (aget s (unchecked-dec-int sp)))
+                    arr (aget r (unchecked-subtract-int sp 2))]
+                (when (nil? arr) (throw (NullPointerException.)))
+                (set! sp (unchecked-subtract-int sp 2))
+                (switch op
+                  46 (aset s sp (unchecked-long (aget (cast int/1 arr) i)))
+                  47 (aset s sp (aget (cast long/1 arr) i))
+                  48 (aset s sp (BytecodeCode/fbits (aget (cast float/1 arr) i)))
+                  49 (aset s sp (BytecodeCode/dbits (aget (cast double/1 arr) i)))
+                  50 (aset r sp (aget (cast Object/1 arr) i))
+                  51 (aset s sp (if (instance? boolean/1 arr)
+                                    (if (aget (cast boolean/1 arr) i) 1 0)
+                                    (unchecked-long (aget (cast byte/1 arr) i))))
+                  52 (aset s sp (unchecked-long (aget (cast char/1 arr) i)))
+                  (aset s sp (unchecked-long (aget (cast short/1 arr) i))))
+                (set! sp (unchecked-add-int sp (if (or (== op 47) (== op 49)) 2 1)))
+                (set! pc (unchecked-inc-int pc)))
+            (54 56) (do (set! sp (unchecked-dec-int sp)) (aset lp (.u1 this (unchecked-inc-int pc)) (aget s sp)) (set! pc (unchecked-add-int pc 2)))
+            (55 57) (do (set! sp (unchecked-subtract-int sp 2)) (aset lp (.u1 this (unchecked-inc-int pc)) (aget s sp)) (set! pc (unchecked-add-int pc 2)))
+            58 (do (set! sp (unchecked-dec-int sp)) (aset lr (.u1 this (unchecked-inc-int pc)) (aget r sp)) (set! pc (unchecked-add-int pc 2)))
+            (59 60 61 62) (do (set! sp (unchecked-dec-int sp)) (aset lp (unchecked-subtract-int op 59) (aget s sp)) (set! pc (unchecked-inc-int pc)))
+            (63 64 65 66) (do (set! sp (unchecked-subtract-int sp 2)) (aset lp (unchecked-subtract-int op 63) (aget s sp)) (set! pc (unchecked-inc-int pc)))
+            (67 68 69 70) (do (set! sp (unchecked-dec-int sp)) (aset lp (unchecked-subtract-int op 67) (aget s sp)) (set! pc (unchecked-inc-int pc)))
+            (71 72 73 74) (do (set! sp (unchecked-subtract-int sp 2)) (aset lp (unchecked-subtract-int op 71) (aget s sp)) (set! pc (unchecked-inc-int pc)))
+            (75 76 77 78) (do (set! sp (unchecked-dec-int sp)) (aset lr (unchecked-subtract-int op 75) (aget r sp)) (set! pc (unchecked-inc-int pc)))
+            ;; array stores
+            (79 80 81 82 83 84 85 86)
+              (let [w (if (or (== op 80) (== op 82)) 2 1)
+                    vi (unchecked-subtract-int sp w)
+                    i (unchecked-int (aget s (unchecked-dec-int vi)))
+                    arr (aget r (unchecked-subtract-int vi 2))]
+                (when (nil? arr) (throw (NullPointerException.)))
+                (switch op
+                  79 (aset (cast int/1 arr) i (unchecked-int (aget s vi)))
+                  80 (aset (cast long/1 arr) i (aget s vi))
+                  81 (aset (cast float/1 arr) i (BytecodeCode/fval (aget s vi)))
+                  82 (aset (cast double/1 arr) i (BytecodeCode/dval (aget s vi)))
+                  83 (let [v (aget r vi)
+                           oa (cast Object/1 arr)]
+                       (when (and (some? v) (not (.isInstance (.getComponentType (.getClass arr)) v)))
+                         (throw (ArrayStoreException. (.getName (.getClass v)))))
+                       (aset oa i v))
+                  84 (if (instance? boolean/1 arr)
+                         (aset (cast boolean/1 arr) i (not (== 0 (bit-and (aget s vi) 1))))
+                         (aset (cast byte/1 arr) i (unchecked-byte (aget s vi))))
+                  85 (aset (cast char/1 arr) i (unchecked-char (aget s vi)))
+                  (aset (cast short/1 arr) i (unchecked-short (aget s vi))))
+                (set! sp (unchecked-subtract-int vi 2))
+                (set! pc (unchecked-inc-int pc)))
+            87 (do (set! sp (unchecked-dec-int sp)) (set! pc (unchecked-inc-int pc)))
+            88 (do (set! sp (unchecked-subtract-int sp 2)) (set! pc (unchecked-inc-int pc)))
+            ;; the stack's slots moved as the JVM's
+            (89 90 91 92 93 94 95)
+              (do (BytecodeCode/shuffle op s r sp)
+                  (set! sp (unchecked-add-int sp (switch op (89 90 91) 1 (92 93 94) 2 0)))
+                  (set! pc (unchecked-inc-int pc)))
+            ;; int arithmetic
+            (96 100 104 108 112 120 122 124 126 128 130)
+              (let [y (unchecked-int (aget s (unchecked-dec-int sp)))
+                    x (unchecked-int (aget s (unchecked-subtract-int sp 2)))
+                    v (switch op
+                        96 (unchecked-add-int x y)
+                        100 (unchecked-subtract-int x y)
+                        104 (unchecked-multiply-int x y)
+                        108 (if (== y 0) (throw (ArithmeticException. "/ by zero")) (if (== y -1) (unchecked-negate-int x) (unchecked-divide-int x y)))
+                        112 (if (== y 0) (throw (ArithmeticException. "/ by zero")) (if (== y -1) 0 (unchecked-remainder-int x y)))
+                        120 (bit-shift-left-int x (bit-and-int y 31))
+                        122 (bit-shift-right-int x (bit-and-int y 31))
+                        124 (unsigned-bit-shift-right-int x (bit-and-int y 31))
+                        126 (bit-and-int x y)
+                        128 (bit-or-int x y)
+                        (bit-xor-int x y))]
+                (set! sp (unchecked-dec-int sp))
+                (aset s (unchecked-dec-int sp) (unchecked-long v))
+                (set! pc (unchecked-inc-int pc)))
+            ;; long arithmetic
+            (97 101 105 109 113 127 129 131)
+              (let [y (aget s (unchecked-subtract-int sp 2))
+                    x (aget s (unchecked-subtract-int sp 4))
+                    v (switch op
+                        97 (unchecked-add x y)
+                        101 (unchecked-subtract x y)
+                        105 (unchecked-multiply x y)
+                        109 (if (== y 0) (throw (ArithmeticException. "/ by zero")) (if (== y -1) (unchecked-negate x) (unchecked-divide x y)))
+                        113 (if (== y 0) (throw (ArithmeticException. "/ by zero")) (if (== y -1) 0 (unchecked-remainder x y)))
+                        127 (bit-and x y)
+                        129 (bit-or x y)
+                        (bit-xor x y))]
+                (set! sp (unchecked-subtract-int sp 2))
+                (aset s (unchecked-subtract-int sp 2) v)
+                (set! pc (unchecked-inc-int pc)))
+            ;; long shifts (an int count)
+            (121 123 125)
+              (let [y (bit-and-int (unchecked-int (aget s (unchecked-dec-int sp))) 63)
+                    x (aget s (unchecked-subtract-int sp 3))]
+                (set! sp (unchecked-dec-int sp))
+                (aset s (unchecked-subtract-int sp 2)
+                      (switch op 121 (bit-shift-left x y) 123 (bit-shift-right x y) (unsigned-bit-shift-right x y)))
+                (set! pc (unchecked-inc-int pc)))
+            ;; float arithmetic
+            (98 102 106 110 114)
+              (let [y (BytecodeCode/fval (aget s (unchecked-dec-int sp)))
+                    x (BytecodeCode/fval (aget s (unchecked-subtract-int sp 2)))
+                    v (switch op
+                        98 (unchecked-add-float x y)
+                        102 (unchecked-subtract-float x y)
+                        106 (unchecked-multiply-float x y)
+                        110 (unchecked-divide-float x y)
+                        (unchecked-remainder-float x y))]
+                (set! sp (unchecked-dec-int sp))
+                (aset s (unchecked-dec-int sp) (BytecodeCode/fbits v))
+                (set! pc (unchecked-inc-int pc)))
+            ;; double arithmetic
+            (99 103 107 111 115)
+              (let [y (BytecodeCode/dval (aget s (unchecked-subtract-int sp 2)))
+                    x (BytecodeCode/dval (aget s (unchecked-subtract-int sp 4)))
+                    v (switch op
+                        99 (unchecked-add x y)
+                        103 (unchecked-subtract x y)
+                        107 (unchecked-multiply x y)
+                        111 (unchecked-divide x y)
+                        (unchecked-remainder x y))]
+                (set! sp (unchecked-subtract-int sp 2))
+                (aset s (unchecked-subtract-int sp 2) (BytecodeCode/dbits v))
+                (set! pc (unchecked-inc-int pc)))
+            116 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (unchecked-negate-int (unchecked-int (aget s i))))) (set! pc (unchecked-inc-int pc)))
+            117 (let [i (unchecked-subtract-int sp 2)] (aset s i (unchecked-negate (aget s i))) (set! pc (unchecked-inc-int pc)))
+            118 (let [i (unchecked-dec-int sp)] (aset s i (BytecodeCode/fbits (unchecked-negate-float (BytecodeCode/fval (aget s i))))) (set! pc (unchecked-inc-int pc)))
+            119 (let [i (unchecked-subtract-int sp 2)] (aset s i (BytecodeCode/dbits (unchecked-negate (BytecodeCode/dval (aget s i))))) (set! pc (unchecked-inc-int pc)))
+            132 (let [n (.u1 this (unchecked-inc-int pc))]
+                  (aset lp n (unchecked-long (unchecked-add-int (unchecked-int (aget lp n)) (.s1 this (unchecked-add-int pc 2)))))
+                  (set! pc (unchecked-add-int pc 3)))
+            ;; conversions
+            133 (do (aset s (unchecked-dec-int sp) (unchecked-long (unchecked-int (aget s (unchecked-dec-int sp))))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            134 (let [i (unchecked-dec-int sp)] (aset s i (BytecodeCode/fbits (unchecked-float (unchecked-int (aget s i))))) (set! pc (unchecked-inc-int pc)))
+            135 (let [i (unchecked-dec-int sp)] (aset s i (BytecodeCode/dbits (unchecked-double (unchecked-int (aget s i))))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            136 (let [i (unchecked-subtract-int sp 2)] (aset s i (unchecked-long (unchecked-int (aget s i)))) (set! sp (unchecked-dec-int sp)) (set! pc (unchecked-inc-int pc)))
+            137 (let [i (unchecked-subtract-int sp 2)] (aset s i (BytecodeCode/fbits (unchecked-float (aget s i)))) (set! sp (unchecked-dec-int sp)) (set! pc (unchecked-inc-int pc)))
+            138 (let [i (unchecked-subtract-int sp 2)] (aset s i (BytecodeCode/dbits (unchecked-double (aget s i)))) (set! pc (unchecked-inc-int pc)))
+            139 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (unchecked-int (BytecodeCode/fval (aget s i))))) (set! pc (unchecked-inc-int pc)))
+            140 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (BytecodeCode/fval (aget s i)))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            141 (let [i (unchecked-dec-int sp)] (aset s i (BytecodeCode/dbits (unchecked-double (BytecodeCode/fval (aget s i))))) (set! sp (unchecked-inc-int sp)) (set! pc (unchecked-inc-int pc)))
+            142 (let [i (unchecked-subtract-int sp 2)] (aset s i (unchecked-long (unchecked-int (BytecodeCode/dval (aget s i))))) (set! sp (unchecked-dec-int sp)) (set! pc (unchecked-inc-int pc)))
+            143 (let [i (unchecked-subtract-int sp 2)] (aset s i (unchecked-long (BytecodeCode/dval (aget s i)))) (set! pc (unchecked-inc-int pc)))
+            144 (let [i (unchecked-subtract-int sp 2)] (aset s i (BytecodeCode/fbits (unchecked-float (BytecodeCode/dval (aget s i))))) (set! sp (unchecked-dec-int sp)) (set! pc (unchecked-inc-int pc)))
+            145 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (unchecked-byte (aget s i)))) (set! pc (unchecked-inc-int pc)))
+            146 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (unchecked-char (aget s i)))) (set! pc (unchecked-inc-int pc)))
+            147 (let [i (unchecked-dec-int sp)] (aset s i (unchecked-long (unchecked-short (aget s i)))) (set! pc (unchecked-inc-int pc)))
+            ;; comparisons
+            148 (let [y (aget s (unchecked-subtract-int sp 2)) x (aget s (unchecked-subtract-int sp 4))]
+                  (set! sp (unchecked-subtract-int sp 3))
+                  (aset s (unchecked-dec-int sp) (unchecked-long (Long/compare x y)))
+                  (set! pc (unchecked-inc-int pc)))
+            (149 150)
+              (let [y (BytecodeCode/fval (aget s (unchecked-dec-int sp))) x (BytecodeCode/fval (aget s (unchecked-subtract-int sp 2)))]
+                (set! sp (unchecked-dec-int sp))
+                (aset s (unchecked-dec-int sp)
+                      (cond (or (Float/isNaN x) (Float/isNaN y)) (if (== op 149) -1 1)
+                            (> x y) 1 (< x y) -1 :else 0))
+                (set! pc (unchecked-inc-int pc)))
+            (151 152)
+              (let [y (BytecodeCode/dval (aget s (unchecked-subtract-int sp 2))) x (BytecodeCode/dval (aget s (unchecked-subtract-int sp 4)))]
+                (set! sp (unchecked-subtract-int sp 3))
+                (aset s (unchecked-dec-int sp)
+                      (cond (or (Double/isNaN x) (Double/isNaN y)) (if (== op 151) -1 1)
+                            (> x y) 1 (< x y) -1 :else 0))
+                (set! pc (unchecked-inc-int pc)))
+            (153 154 155 156 157 158)
+              (let [v (unchecked-int (aget s (unchecked-dec-int sp)))
+                    t (switch op 153 (== v 0) 154 (not (== v 0)) 155 (< v 0) 156 (>= v 0) 157 (> v 0) (<= v 0))]
+                (set! sp (unchecked-dec-int sp))
+                (set! pc (if t (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) (unchecked-add-int pc 3))))
+            (159 160 161 162 163 164)
+              (let [y (unchecked-int (aget s (unchecked-dec-int sp)))
+                    x (unchecked-int (aget s (unchecked-subtract-int sp 2)))
+                    t (switch op 159 (== x y) 160 (not (== x y)) 161 (< x y) 162 (>= x y) 163 (> x y) (<= x y))]
+                (set! sp (unchecked-subtract-int sp 2))
+                (set! pc (if t (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) (unchecked-add-int pc 3))))
+            (165 166)
+              (let [y (aget r (unchecked-dec-int sp))
+                    x (aget r (unchecked-subtract-int sp 2))
+                    t (if (== op 165) (identical? x y) (not (identical? x y)))]
+                (set! sp (unchecked-subtract-int sp 2))
+                (set! pc (if t (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) (unchecked-add-int pc 3))))
+            167 (set! pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))))
+            168 (do (aset r sp (BytecodeRet. (unchecked-add-int pc 3))) (set! sp (unchecked-inc-int sp))
+                    (set! pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc)))))
+            169 (set! pc (.-pc (cast BytecodeRet (aget lr (.u1 this (unchecked-inc-int pc))))))
+            170 (let [b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))
+                      dflt (.s4 this b)
+                      lo (.s4 this (unchecked-add-int b 4))
+                      hi (.s4 this (unchecked-add-int b 8))
+                      v (unchecked-int (aget s (unchecked-dec-int sp)))]
+                  (set! sp (unchecked-dec-int sp))
+                  (set! pc (unchecked-add-int pc (if (or (< v lo) (> v hi))
+                                                     dflt
+                                                     (.s4 this (unchecked-add-int (unchecked-add-int b 12) (unchecked-multiply-int 4 (unchecked-subtract-int v lo))))))))
+            171 (let [b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))
+                      dflt (.s4 this b)
+                      n (.s4 this (unchecked-add-int b 4))
+                      v (unchecked-int (aget s (unchecked-dec-int sp)))
+                      ^:mutable ^int off dflt]
+                  (loop [^int i 0]
+                    (when (< i n)
+                      (let [e (unchecked-add-int (unchecked-add-int b 8) (unchecked-multiply-int 8 i))]
+                        (if (== (.s4 this e) v)
+                            (set! off (.s4 this (unchecked-add-int e 4)))
+                            (recur (unchecked-inc-int i))))))
+                  (set! sp (unchecked-dec-int sp))
+                  (set! pc (unchecked-add-int pc off)))
+            ;; returns
+            (172 173) (do (set! (.-jl f) (aget s (unchecked-subtract-int sp (if (== op 172) 1 2)))) (return nil))
+            174 (do (set! (.-jd f) (unchecked-double (BytecodeCode/fval (aget s (unchecked-dec-int sp))))) (return nil))
+            175 (do (set! (.-jd f) (BytecodeCode/dval (aget s (unchecked-subtract-int sp 2)))) (return nil))
+            176 (return (aget r (unchecked-dec-int sp)))
+            177 (return nil)
+            ;; fields
+            (178 179 180 181)
+              (let [fr (.fieldRef this pc op)
+                    t (.-t fr)
+                    w (if (BytecodeCode/wide t) 2 1)]
+                (switch op
+                  178 (let [v (.getStatic this fr)]
+                        (if (== t \L) (aset r sp v) (aset s sp (BytecodeCode/unbox t v)))
+                        (set! sp (unchecked-add-int sp w)))
+                  179 (do (set! sp (unchecked-subtract-int sp w))
+                          (.putStatic this fr (if (== t \L) (aget r sp) (BytecodeCode/box t (aget s sp)))))
+                  180 (let [o (aget r (unchecked-dec-int sp))]
+                        (when (nil? o) (throw (NullPointerException.)))
+                        (let [v (.getField this fr o)]
+                          (set! sp (unchecked-dec-int sp))
+                          (if (== t \L) (aset r sp v) (aset s sp (BytecodeCode/unbox t v)))
+                          (set! sp (unchecked-add-int sp w))))
+                  (do (set! sp (unchecked-subtract-int sp w))
+                      (let [v (if (== t \L) (aget r sp) (BytecodeCode/box t (aget s sp)))
+                            o (aget r (unchecked-dec-int sp))]
+                        (when (nil? o) (throw (NullPointerException.)))
+                        (.putField this fr o v)
+                        (set! sp (unchecked-dec-int sp)))))
+                (set! pc (unchecked-add-int pc 3)))
+            ;; invocations
+            (182 183 184 185)
+              (do (set! (.-sp a) sp)
+                  (.invoke this f a (.methodRef this pc op) op)
+                  (set! sp (.-sp a))
+                  (set! pc (unchecked-add-int pc (if (== op 185) 5 3))))
+            186 (do (set! (.-sp a) sp)
+                    (.indy this f a pc)
+                    (set! sp (.-sp a))
+                    (set! pc (unchecked-add-int pc 5)))
+            187 (let [c (.resolveClass this (.u2 this (unchecked-inc-int pc)))
+                      k (Bytecode/klassOf c)]
+                  (when (or (.isInterface c) (Modifier/isAbstract (.getModifiers c)))
+                    (throw (Bytecode/error 8 (.getName c))))
+                  (if (some? k)
+                      (do (.init k)
+                          (aset r sp (.alloc (Bytecode/host) k)))
+                      (aset r sp (BytecodeUninit. c)))
+                  (set! sp (unchecked-inc-int sp))
+                  (set! pc (unchecked-add-int pc 3)))
+            188 (let [n (unchecked-int (aget s (unchecked-dec-int sp)))]
+                  (when (< n 0) (throw (NegativeArraySizeException. (String/valueOf n))))
+                  (aset r (unchecked-dec-int sp)
+                        (switch (.u1 this (unchecked-inc-int pc))
+                          4 (new boolean/1 n) 5 (new char/1 n) 6 (new float/1 n) 7 (new double/1 n)
+                          8 (new byte/1 n) 9 (new short/1 n) 10 (new int/1 n) (new long/1 n)))
+                  (set! pc (unchecked-add-int pc 2)))
+            189 (let [n (unchecked-int (aget s (unchecked-dec-int sp)))
+                      c (.resolveClass this (.u2 this (unchecked-inc-int pc)))]
+                  (when (< n 0) (throw (NegativeArraySizeException. (String/valueOf n))))
+                  (aset r (unchecked-dec-int sp) (Array/newInstance c n))
+                  (set! pc (unchecked-add-int pc 3)))
+            190 (let [arr (aget r (unchecked-dec-int sp))]
+                  (when (nil? arr) (throw (NullPointerException.)))
+                  (aset s (unchecked-dec-int sp) (unchecked-long (Array/getLength arr)))
+                  (set! pc (unchecked-inc-int pc)))
+            191 (let [e (aget r (unchecked-dec-int sp))]
+                  (when (nil? e) (throw (NullPointerException.)))
+                  (throw (cast Throwable e)))
+            192 (let [o (aget r (unchecked-dec-int sp))]
+                  (when (some? o)
+                    (let [c (.resolveClass this (.u2 this (unchecked-inc-int pc)))]
+                      (when (not (.isInstance c o))
+                        (.checkCast (Bytecode/host) c o)
+                        (throw (ClassCastException. (java-str "class " (.getName (.getClass o)) " cannot be cast to class " (.getName c)))))))
+                  (set! pc (unchecked-add-int pc 3)))
+            193 (let [o (aget r (unchecked-dec-int sp))]
+                  (aset s (unchecked-dec-int sp)
+                        (if (and (some? o) (.isInstance (.resolveClass this (.u2 this (unchecked-inc-int pc))) o)) 1 0))
+                  (set! pc (unchecked-add-int pc 3)))
+            194 (do (set! sp (unchecked-dec-int sp)) (BytecodeCode/monitorEnter (aget r sp)) (set! pc (unchecked-inc-int pc)))
+            195 (do (set! sp (unchecked-dec-int sp)) (BytecodeCode/monitorExit (aget r sp)) (set! pc (unchecked-inc-int pc)))
+            196 (let [op2 (.u1 this (unchecked-inc-int pc))
+                      n (.u2 this (unchecked-add-int pc 2))]
+                  (switch op2
+                    (21 23) (do (aset s sp (aget lp n)) (set! sp (unchecked-inc-int sp)))
+                    (22 24) (do (aset s sp (aget lp n)) (set! sp (unchecked-add-int sp 2)))
+                    25 (do (aset r sp (aget lr n)) (set! sp (unchecked-inc-int sp)))
+                    (54 56) (do (set! sp (unchecked-dec-int sp)) (aset lp n (aget s sp)))
+                    (55 57) (do (set! sp (unchecked-subtract-int sp 2)) (aset lp n (aget s sp)))
+                    58 (do (set! sp (unchecked-dec-int sp)) (aset lr n (aget r sp)))
+                    169 nil
+                    132 (aset lp n (unchecked-long (unchecked-add-int (unchecked-int (aget lp n)) (.s2 this (unchecked-add-int pc 4)))))
+                    (throw (Bytecode/error 4 (java-str "Bad wide instruction " op2))))
+                  (set! pc (switch op2
+                             169 (.-pc (cast BytecodeRet (aget lr n)))
+                             132 (unchecked-add-int pc 6)
+                             (unchecked-add-int pc 4))))
+            197 (let [c (.resolveClass this (.u2 this (unchecked-inc-int pc)))
+                      nd (.u1 this (unchecked-add-int pc 3))
+                      dims (new int/1 nd)]
+                  (loop [^int i 0]
+                    (when (< i nd)
+                      (let [d (unchecked-int (aget s (unchecked-add-int (unchecked-subtract-int sp nd) i)))]
+                        (when (< d 0) (throw (NegativeArraySizeException. (String/valueOf d))))
+                        (aset dims i d))
+                      (recur (unchecked-inc-int i))))
+                  (let [^:mutable ^Class e c]
+                    (loop [^int i 0]
+                      (when (< i nd)
+                        (set! e (.getComponentType e))
+                        (recur (unchecked-inc-int i))))
+                    (set! sp (unchecked-subtract-int sp nd))
+                    (aset r sp (Array/newInstance e dims))
+                    (set! sp (unchecked-inc-int sp)))
+                  (set! pc (unchecked-add-int pc 4)))
+            (198 199)
+              (let [o (aget r (unchecked-dec-int sp))
+                    t (if (== op 198) (nil? o) (some? o))]
+                (set! sp (unchecked-dec-int sp))
+                (set! pc (if t (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) (unchecked-add-int pc 3))))
+            200 (set! pc (unchecked-add-int pc (.s4 this (unchecked-inc-int pc))))
+            201 (do (aset r sp (BytecodeRet. (unchecked-add-int pc 5))) (set! sp (unchecked-inc-int sp))
+                    (set! pc (unchecked-add-int pc (.s4 this (unchecked-inc-int pc)))))
+            (throw (Bytecode/error 4 (java-str "Bad instruction " op " at " pc))))))))
+
+  ;; dup and its kin, swap (JVMS 6.5) on the stack's slots, sp the depth before
+  (method ^:private ^:static shuffle ^void [^int op ^long/1 s ^Object/1 r ^int sp]
+    (switch op
+      89 (BytecodeCode/mv s r (unchecked-dec-int sp) sp)
+      90 (do (BytecodeCode/mv s r (unchecked-dec-int sp) sp)
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 2) (unchecked-dec-int sp))
+             (BytecodeCode/mv s r sp (unchecked-subtract-int sp 2)))
+      91 (do (BytecodeCode/mv s r (unchecked-dec-int sp) sp)
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 2) (unchecked-dec-int sp))
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 3) (unchecked-subtract-int sp 2))
+             (BytecodeCode/mv s r sp (unchecked-subtract-int sp 3)))
+      92 (do (BytecodeCode/mv s r (unchecked-subtract-int sp 2) sp)
+             (BytecodeCode/mv s r (unchecked-dec-int sp) (unchecked-inc-int sp)))
+      93 (do (BytecodeCode/mv s r (unchecked-dec-int sp) (unchecked-inc-int sp))
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 2) sp)
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 3) (unchecked-dec-int sp))
+             (BytecodeCode/mv s r (unchecked-inc-int sp) (unchecked-subtract-int sp 2))
+             (BytecodeCode/mv s r sp (unchecked-subtract-int sp 3)))
+      94 (do (BytecodeCode/mv s r (unchecked-dec-int sp) (unchecked-inc-int sp))
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 2) sp)
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 3) (unchecked-dec-int sp))
+             (BytecodeCode/mv s r (unchecked-subtract-int sp 4) (unchecked-subtract-int sp 2))
+             (BytecodeCode/mv s r (unchecked-inc-int sp) (unchecked-subtract-int sp 3))
+             (BytecodeCode/mv s r sp (unchecked-subtract-int sp 4)))
+      (do (BytecodeCode/mv s r (unchecked-dec-int sp) sp)
+          (BytecodeCode/mv s r (unchecked-subtract-int sp 2) (unchecked-dec-int sp))
+          (BytecodeCode/mv s r sp (unchecked-subtract-int sp 2)))))
+
+  (method ^:private ^:static mv ^void [^long/1 s ^Object/1 r ^int from ^int to]
+    (aset s to (aget s from))
+    (aset r to (aget r from)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; fields (JVMS 5.4.3.2: the field in the class, its superinterfaces, then its superclasses)
+
+  (method ^:private fieldRef ^BytecodeFieldRef [this ^int pc ^int op]
+    (let [x (aget sites pc)]
+      (if (some? x)
+          (cast BytecodeFieldRef x)
+          (let [fr (.resolveField this (.u2 this (unchecked-inc-int pc)) (or (== op 178) (== op 179)))]
+            (aset sites pc fr)
+            fr))))
+
+  (method ^:public resolveField ^BytecodeFieldRef [this ^int i ^boolean static]
+    (let [cf (.-cf bc)
+          c (.resolveClass this (aget (.-ia cf) i))
+          name (.refName cf i)
+          desc (.refDesc cf i)
+          key (java-str name ":" desc)
+          fr (BytecodeFieldRef.)]
+      (set! (.-t fr) (Bytecode/tc desc))
+      (set! (.-name fr) name)
+      ;; the interpreted classes first, up their superclasses, with their interfaces' statics
+      (loop [^Class x c]
+        (when (some? x)
+          (let [k (Bytecode/klassOf x)]
+            (if (nil? k)
+                nil
+                (let [xb (Bytecode/ofKlass k)]
+                  (if (some? xb)
+                      (let [si (cast Integer (.get (.-staticIndex xb) key))
+                            ii (cast Integer (.get (.-fieldIndex xb) key))]
+                        (cond
+                          (some? si) (do (set! (.-kind fr) 1) (set! (.-k fr) k) (set! (.-index fr) (.intValue si))
+                                         (when (not static) (throw (Bytecode/error 3 (java-str "Expected non-static field " (.getName c) "." name))))
+                                         (return fr))
+                          (some? ii) (do (set! (.-kind fr) 0) (set! (.-k fr) k) (set! (.-index fr) (.intValue ii))
+                                         (when static (throw (Bytecode/error 3 (java-str "Expected static field " (.getName c) "." name))))
+                                         (return fr))
+                          :else (do (when static
+                                      (let [ifs (.getInterfaces x)]
+                                        (loop [^int j 0]
+                                          (when (< j (alength ifs))
+                                            (try
+                                              (let [ir (BytecodeCode/fieldIn this (aget ifs j) name desc)]
+                                                (when (some? ir) (return ir)))
+                                              (catch Throwable _ nil))
+                                            (recur (unchecked-inc-int j))))))
+                                    (recur (.getSuperclass x)))))
+                      ;; a Java forms class: by its layout (arbace.classes.interp's info)
+                      (let [idx (BytecodeCode/interpField k name static)]
+                        (if (>= idx 0)
+                            (do (set! (.-kind fr) (if static 1 0)) (set! (.-k fr) k) (set! (.-index fr) idx) (return fr))
+                            (recur (.getSuperclass x))))))))))
+      ;; the world's
+      (let [rf (BytecodeCode/worldField c name)]
+        (if (some? rf)
+            (do (set! (.-kind fr) 2) (set! (.-rf fr) rf) fr)
+            (if (and (not static) (.isAssignableFrom c (.-cls bc)))
+                (do (set! (.-kind fr) 3) fr)
+                (throw (Bytecode/error 6 (java-str "Class " (.getName c) " does not have member field '" desc " " name "'"))))))))
+
+  ;; a static field name of interface c (or its superinterfaces), as a reference, or nil
+  (method ^:private ^:static fieldIn ^BytecodeFieldRef [^BytecodeCode code ^Class c ^String name ^String desc]
+    (let [k (Bytecode/klassOf c)
+          xb (if (some? k) (Bytecode/ofKlass k) nil)]
+      (if (some? xb)
+          (let [si (cast Integer (.get (.-staticIndex xb) (java-str name ":" desc)))]
+            (if (some? si)
+                (let [fr (BytecodeFieldRef.)]
+                  (set! (.-kind fr) 1) (set! (.-k fr) k) (set! (.-index fr) (.intValue si))
+                  (set! (.-t fr) (Bytecode/tc desc)) (set! (.-name fr) name)
+                  fr)
+                (let [ifs (.getInterfaces c)]
+                  (loop [^int j 0]
+                    (if (< j (alength ifs))
+                        (let [x (BytecodeCode/fieldIn code (aget ifs j) name desc)]
+                          (if (some? x) x (recur (unchecked-inc-int j))))
+                        nil)))))
+          (let [rf (BytecodeCode/worldField c name)]
+            (if (some? rf)
+                (let [fr (BytecodeFieldRef.)]
+                  (set! (.-kind fr) 2) (set! (.-rf fr) rf) (set! (.-t fr) (Bytecode/tc desc)) (set! (.-name fr) name)
+                  fr)
+                nil)))))
+
+  ;; the field of a Java forms class k (its info, arbace.classes.interp's layout), -1 when it has none of that name
+  (method ^:private ^:static interpField ^int [^Compiler$CF$Klass k ^String name ^boolean static]
+    (let [info (.-info k)
+          m (RT/get info (Keyword/intern nil (if static "static-index" "field-index")))
+          i (RT/get m name)]
+      (if (instance? Number i) (.intValue (cast Number i)) -1)))
+
+  ;; a field of a class of the world by reflection: public ones (jrt's member tables), then the declared ones
+  (method ^:private ^:static worldField ^Field [^Class c ^String name]
+    (try
+      (.getField c name)
+      (catch Throwable _
+        (loop [^Class x c]
+          (if (nil? x)
+              nil
+              (let [f (try (.getDeclaredField x name) (catch Throwable _ nil))]
+                (if (some? f) f (recur (.getSuperclass x)))))))))
+
+  (method ^:private getStatic [this ^BytecodeFieldRef fr]
+    (switch (.-kind fr)
+      1 (do (.init (.-k fr)) (aget (.-statics (.-k fr)) (.-index fr)))
+      (do (.setAccessible (.-rf fr) true) (.get (.-rf fr) nil))))
+
+  (method ^:private putStatic ^void [this ^BytecodeFieldRef fr v]
+    (switch (.-kind fr)
+      1 (do (.init (.-k fr)) (aset (.-statics (.-k fr)) (.-index fr) v))
+      (do (.setAccessible (.-rf fr) true) (.set (.-rf fr) nil v))))
+
+  (method ^:private getField [this ^BytecodeFieldRef fr o]
+    (switch (.-kind fr)
+      0 (.field (Bytecode/host) o (.-index fr))
+      2 (do (.setAccessible (.-rf fr) true) (.get (.-rf fr) o))
+      (.superField (Bytecode/host) o (.-name fr) false nil)))
+
+  (method ^:private putField ^void [this ^BytecodeFieldRef fr o v]
+    (switch (.-kind fr)
+      0 (.setField (Bytecode/host) o (.-index fr) v)
+      2 (do (.setAccessible (.-rf fr) true) (.set (.-rf fr) o v))
+      (.superField (Bytecode/host) o (.-name fr) true v)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; methods (JVMS 5.4.3.3, 5.4.3.4, 5.4.6)
+
+  (method ^:private methodRef ^BytecodeMethodRef [this ^int pc ^int op]
+    (let [x (aget sites pc)]
+      (if (some? x)
+          (cast BytecodeMethodRef x)
+          (let [mr (.resolveMethod this (.u2 this (unchecked-inc-int pc)) op)]
+            (aset sites pc mr)
+            mr))))
+
+  ;; an interpreted class's method of key, its own or a superclass's, then its superinterfaces' (the most specific
+  ;; non-abstract one first), nil when none
+  (method ^:public ^:static findMeth ^Compiler$CF$Meth [^Compiler$CF$Klass k ^String key]
+    (let [^:mutable ^Compiler$CF$Klass x k]
+      (while (some? x)
+        (let [m (.declared x key)]
+          (when (some? m) (return m)))
+        (set! x (.-sup x)))
+      (BytecodeCode/findIfaceMeth k key)))
+
+  (method ^:private ^:static findIfaceMeth ^Compiler$CF$Meth [^Compiler$CF$Klass k ^String key]
+    (let [^:mutable ^Compiler$CF$Meth found nil
+          ^:mutable ^Compiler$CF$Klass x k]
+      (while (some? x)
+        (when (some? (.-ifaces x))
+          (loop [^int i 0]
+            (when (< i (alength (.-ifaces x)))
+              (let [ik (aget (.-ifaces x) i)
+                    m (let [d (.declared ik key)] (if (some? d) d (BytecodeCode/findIfaceMeth ik key)))]
+                (when (and (some? m) (== 0 (bit-and-int (.-flags m) 0x000A)))
+                  (when (or (nil? found)
+                            (and (not (== 0 (bit-and-int (.-flags found) 0x0400))) (== 0 (bit-and-int (.-flags m) 0x0400)))
+                            (.isSubclassOf (.-k m) (.-k found)))
+                    (set! found m))))
+              (recur (unchecked-inc-int i)))))
+        (set! x (.-sup x)))
+      found))
+
+  (method ^:public resolveMethod ^BytecodeMethodRef [this ^int i ^int op]
+    (let [cf (.-cf bc)
+          ci (aget (.-ia cf) i)
+          c (.resolveClass this ci)
+          name (.refName cf i)
+          desc (.refDesc cf i)
+          key (java-str name desc)
+          ps (Bytecode/params desc)
+          mr (BytecodeMethodRef.)
+          k (Bytecode/klassOf c)
+          init (.equals name "<init>")]
+      (set! (.-name mr) name)
+      (set! (.-desc mr) desc)
+      (set! (.-key mr) key)
+      (set! (.-c mr) c)
+      (set! (.-iface mr) (.isInterface c))
+      (set! (.-hasThis mr) (not (== op 184)))
+      (set! (.-ret mr) (Bytecode/tc (Bytecode/ret desc)))
+      (let [pt (new char/1 (alength ps))
+            ^:mutable ^int n 0]
+        (loop [^int j 0]
+          (when (< j (alength ps))
+            (aset pt j (Bytecode/tc (aget ps j)))
+            (set! n (unchecked-add-int n (if (BytecodeCode/wide (aget pt j)) 2 1)))
+            (recur (unchecked-inc-int j))))
+        (set! (.-ptypes mr) pt)
+        (set! (.-slots mr) n))
+      ;; JVMS 5.4.3.3: a Methodref of an interface or an InterfaceMethodref of a class
+      (when (and (== op 185) (not (.isInterface c)))
+        (throw (Bytecode/error 3 (java-str "Found class " (.getName c) ", but interface was expected"))))
+      (when (and (some? k) (not init))
+        (let [m (BytecodeCode/findMeth k key)]
+          (when (some? m)
+            (BytecodeCode/checkStatic m op c)
+            (set! (.-m mr) m)
+            (cond
+              (== op 184) (do (set! (.-kind mr) 0) (return mr))
+              (not (== 0 (bit-and-int (.-flags m) 0x0002))) (do (set! (.-kind mr) 0) (return mr))
+              (== op 183)
+                ;; invokespecial of a superclass's method: selected from the current class's superclass (6.5)
+                (let [me (.-k bc)
+                      sk (.-sup me)]
+                  (if (and (not (.isInterface c)) (some? sk) (not (identical? k me)) (.isSubclassOf me k))
+                      (let [sm (BytecodeCode/findMeth sk key)]
+                        (if (some? sm)
+                            (do (set! (.-m mr) sm) (set! (.-kind mr) 0) (return mr))
+                            nil))
+                      (do (set! (.-kind mr) 0) (return mr))))
+              :else (do (set! (.-kind mr) 1) (return mr))))))
+      (when (and (some? k) init)
+        (let [m (.get (.-ctors k) desc)]
+          (if (some? m)
+              (do (set! (.-m mr) (cast Compiler$CF$Meth m)) (set! (.-kind mr) 0) (return mr))
+              (throw (Bytecode/error 5 (java-str "'void " (.getName c) ".<init>" (BytecodeCode/javaParams desc) "'"))))))
+      ;; the world's: c itself, or the nearest class of the world above an interpreted one
+      (let [wc (if (some? k) (.worldSuper k) c)
+            wc (if (nil? wc) Object wc)
+            pcs (new Class/1 (alength ps))]
+        (loop [^int j 0]
+          (when (< j (alength ps))
+            (aset pcs j (Bytecode/descClass (.-loader bc) (aget ps j)))
+            (recur (unchecked-inc-int j))))
+        (if init
+            (let [rc (try (.getDeclaredConstructor wc pcs) (catch Throwable _ nil))]
+              (set! (.-rc mr) rc)
+              (set! (.-c mr) wc)
+              (set! (.-kind mr) 4)
+              (when (and (nil? rc) (not (identical? wc Object)) (not (.isAssignableFrom wc (.-cls bc))))
+                (throw (Bytecode/error 5 (java-str "'void " (.getName c) ".<init>" (BytecodeCode/javaParams desc) "'"))))
+              mr)
+            (let [rm (BytecodeCode/worldMethod wc name pcs)]
+              (set! (.-rm mr) rm)
+              (cond
+                (and (some? rm) (Modifier/isStatic (.getModifiers rm)))
+                  (do (when (not (== op 184))
+                        (throw (Bytecode/error 3 (java-str "Expecting non-static method '" (.getName c) "." name "'"))))
+                      (set! (.-kind mr) 2) mr)
+                (== op 184)
+                  (if (nil? rm)
+                      (throw (Bytecode/error 5 (java-str "'" (BytecodeCode/javaRet desc) " " (.getName c) "." name
+                                                         (BytecodeCode/javaParams desc) "'")))
+                      (throw (Bytecode/error 3 (java-str "Expected static method '" (.getName c) "." name "'"))))
+                (== op 183) (do (set! (.-kind mr) 3) (set! (.-c mr) wc) mr)
+                (nil? rm)
+                  (if (.isAssignableFrom wc (.-cls bc))
+                      (do (set! (.-kind mr) 3) (set! (.-c mr) wc) mr)
+                      (if (some? k)
+                          (do (set! (.-kind mr) 1) mr)
+                          (throw (Bytecode/error 5 (java-str "'" (BytecodeCode/javaRet desc) " " (.getName c) "." name
+                                                             (BytecodeCode/javaParams desc) "'")))))
+                :else (do (set! (.-kind mr) 1) mr)))))))
+
+  (method ^:private ^:static checkStatic ^void [^Compiler$CF$Meth m ^int op ^Class c]
+    (let [st (.-isStatic m)]
+      (when (and (== op 184) (not st))
+        (throw (Bytecode/error 3 (java-str "Expected static method '" (.getName c) "." (.-name m) "'"))))
+      (when (and (not (== op 184)) st)
+        (throw (Bytecode/error 3 (java-str "Expecting non-static method '" (.getName c) "." (.-name m) "'"))))))
+
+  ;; a method of a class of the world by reflection: public ones (with the interfaces'), then the declared ones up
+  ;; the superclasses
+  (method ^:private ^:static worldMethod ^Method [^Class c ^String name ^Class/1 ps]
+    (try
+      (.getMethod c name ps)
+      (catch Throwable _
+        (loop [^Class x c]
+          (if (nil? x)
+              nil
+              (let [m (try (.getDeclaredMethod x name ps) (catch Throwable _ nil))]
+                (if (some? m) m (recur (.getSuperclass x)))))))))
+
+  ;; a descriptor's parameters and return as Java names, for messages ("(int, java.lang.String)")
+  (method ^:public ^:static javaParams ^String [^String desc]
+    (let [ps (Bytecode/params desc)
+          sb (StringBuilder. "(")]
+      (loop [^int i 0]
+        (when (< i (alength ps))
+          (when (> i 0) (.append sb ", "))
+          (.append sb (BytecodeCode/javaType (aget ps i)))
+          (recur (unchecked-inc-int i))))
+      (.append sb ")")
+      (.toString sb)))
+
+  (method ^:public ^:static javaRet ^String [^String desc] (BytecodeCode/javaType (Bytecode/ret desc)))
+
+  (method ^:public ^:static javaType ^String [^String d]
+    (switch (.charAt d 0)
+      \I "int" \J "long" \F "float" \D "double" \Z "boolean" \B "byte" \C "char" \S "short" \V "void"
+      \[ (java-str (BytecodeCode/javaType (.substring d 1)) "[]")
+      (.replace (.substring d 1 (unchecked-dec-int (.length d))) \/ \.)))
+
+  ;; the call of mr (op its instruction), its receiver and arguments on a's stack, its result pushed
+  (method ^:private invoke ^void [this ^Compiler$CF$Frame f ^BytecodeAct a ^BytecodeMethodRef mr ^int op]
+    (let [s (.-s a)
+          r (.-r a)
+          base (unchecked-subtract-int (unchecked-subtract-int (.-sp a) (.-slots mr)) (if (.-hasThis mr) 1 0))
+          o (if (.-hasThis mr) (aget r base) nil)
+          first (if (.-hasThis mr) (unchecked-inc-int base) base)]
+      (when (and (.-hasThis mr) (nil? o)) (throw (NullPointerException.)))
+      (set! (.-sp a) base)
+      ;; a constructor of the world: on a new object, the object made; on an interpreted subclass's object, its part
+      (when (== (.-kind mr) 4)
+        (let [vs (BytecodeCode/boxArgs mr s r first)]
+          (if (instance? BytecodeUninit o)
+              (let [rc (.-rc mr)]
+                (when (nil? rc)
+                  (throw (Bytecode/error 5 (java-str "'void " (.getName (.-c mr)) ".<init>" (BytecodeCode/javaParams (.-desc mr)) "'"))))
+                (.setAccessible rc true)
+                (let [x (try (.newInstance rc vs) (catch InvocationTargetException e (throw (.getCause e))))]
+                  (BytecodeCode/replace o x s r base (.-r f))))
+              (when (not (identical? (.-c mr) Object))
+                (.superCtor (Bytecode/host) o (.-c mr) (.-desc mr) vs)))
+          (return)))
+      ;; an interpreted method: by the receiver's class for a virtual call
+      (let [m (cond
+                (== (.-kind mr) 0) (.-m mr)
+                (== (.-kind mr) 1) (let [k (.klassOf (Bytecode/host) o)]
+                                     (if (some? k) (.virtual k (.-key mr)) nil))
+                :else nil)]
+        (if (some? m)
+            (do (when (and (== op 184) (.-isStatic m)) (.init (.-k m)))
+                (when (nil? (.-body m))
+                  (when (not (== 0 (bit-and-int (.-flags m) 0x0400)))
+                    (throw (Bytecode/error 9 (java-str "Receiver class " (.getName (.getClass o)) " does not define or inherit an implementation of the resolved method '"
+                                                      (if (.-iface mr) "abstract " "abstract ") (BytecodeCode/javaRet (.-desc mr)) " " (.-name mr) (BytecodeCode/javaParams (.-desc mr)) "' of "
+                                                      (if (.-iface mr) "interface " "abstract class ") (.getName (.-c mr)) ".")))))
+                (let [g (.frame m f)
+                      ps (.-pslots m)
+                      pt (.-ptypes m)
+                      ^:mutable ^int x first]
+                  (when (>= (.-self m) 0) (aset (.-r g) (.-self m) o))
+                  (when (some? (.-cslots m)) (Compiler$CF$Meth/capture m g o))
+                  (loop [^int j 0]
+                    (when (< j (alength pt))
+                      (let [t (aget pt j)]
+                        (if (== t \L)
+                            (aset (.-r g) (aget ps j) (aget r x))
+                            (aset (.-p g) (aget ps j) (aget s x)))
+                        (set! x (unchecked-add-int x (if (BytecodeCode/wide (aget (.-ptypes mr) j)) 2 1))))
+                      (recur (unchecked-inc-int j))))
+                  (BytecodeCode/push a (.-ret mr) (.-ret m) m g)))
+            ;; the world's
+            (let [vs (BytecodeCode/boxArgs mr s r first)
+                  res (switch (.-kind mr)
+                        3 (BytecodeCode/superCall o (.-c mr) mr vs)
+                        (let [rm (.-rm mr)]
+                          (when (nil? rm)
+                            (if (and (some? (.klassOf (Bytecode/host) o)) (some? (.worldSuper (.klassOf (Bytecode/host) o))))
+                                (return (BytecodeCode/pushObj a (.-ret mr)
+                                                              (.superCall (Bytecode/host) o (.worldSuper (.klassOf (Bytecode/host) o)) (.-key mr) vs)))
+                                (throw (Bytecode/error 9 (java-str (.getName (.getClass o)) "." (.-key mr))))))
+                          (.setAccessible rm true)
+                          (try
+                            (if (== (.-kind mr) 2) (.invoke rm nil vs) (.invoke rm o vs))
+                            (catch InvocationTargetException e (throw (.getCause e))))))]
+              (BytecodeCode/pushObj a (.-ret mr) res))))))
+
+  ;; a super call of a superclass of the world's method (invokespecial): Object's toString, hashCode and equals on an
+  ;; interpreted object by the host's objectMethod, clone by Rt/cloneOf, the rest by the host's superCall
+  (method ^:private ^:static superCall [o ^Class c ^BytecodeMethodRef mr ^Object/1 vs]
+    (let [h (Bytecode/host)
+          n (.-name mr)]
+      (if (and (identical? c Object) (some? (.klassOf h o)))
+          (cond
+            (.equals n "toString") (.objectMethod h n o nil)
+            (.equals n "hashCode") (.objectMethod h n o nil)
+            (.equals n "equals") (.objectMethod h n o (aget vs 0))
+            (.equals n "clone") (let [x (Compiler$CF$Rt/cloneOf o)] (if (some? x) x (.superCall h o c (.-key mr) vs)))
+            :else (.superCall h o c (.-key mr) vs))
+          (if (some? (.klassOf h o))
+              (.superCall h o c (.-key mr) vs)
+              (let [rm (.-rm mr)]
+                (when (nil? rm) (throw (Bytecode/error 5 (java-str (.getName c) "." (.-key mr)))))
+                (try (.invoke rm o vs) (catch InvocationTargetException e (throw (.getCause e)))))))))
+
+  ;; the arguments of mr from the stack's slots at first, boxed
+  (method ^:private ^:static boxArgs ^Object/1 [^BytecodeMethodRef mr ^long/1 s ^Object/1 r ^int first]
+    (let [pt (.-ptypes mr)
+          vs (new Object/1 (alength pt))
+          ^:mutable ^int x first]
+      (loop [^int j 0]
+        (when (< j (alength pt))
+          (let [t (aget pt j)]
+            (aset vs j (if (== t \L) (aget r x) (BytecodeCode/box t (aget s x))))
+            (set! x (unchecked-add-int x (if (BytecodeCode/wide t) 2 1))))
+          (recur (unchecked-inc-int j))))
+      vs))
+
+  ;; runs interpreted method m in frame g and pushes its result (t: the call's return type char, mt the method's)
+  (method ^:private ^:static push ^void [^BytecodeAct a ^char t ^char mt ^Compiler$CF$Meth m ^Compiler$CF$Frame g]
+    (let [s (.-s a) sp (.-sp a)]
+      (switch (Compiler$CF$Rt/kind mt)
+        \J (let [v (.runJ m g)]
+             (when (not (== t \V))
+               (aset s sp v)
+               (set! (.-sp a) (unchecked-add-int sp (if (== t \J) 2 1)))))
+        \D (let [v (.runD m g)]
+             (when (not (== t \V))
+               (aset s sp (BytecodeCode/dbits v))
+               (set! (.-sp a) (unchecked-add-int sp (if (== t \D) 2 1)))))
+        \V (.runV m g)
+        (let [v (.run m g)]
+          (when (not (== t \V))
+            (if (== t \L)
+                (aset (.-r a) sp v)
+                (aset s sp (BytecodeCode/unbox t v)))
+            (set! (.-sp a) (unchecked-add-int sp (if (BytecodeCode/wide t) 2 1))))))))
+
+  ;; pushes object result v as type char t
+  (method ^:private ^:static pushObj ^void [^BytecodeAct a ^char t v]
+    (let [sp (.-sp a)]
+      (switch t
+        \V nil
+        \L (do (aset (.-r a) sp v) (set! (.-sp a) (unchecked-inc-int sp)))
+        (do (aset (.-s a) sp (BytecodeCode/unbox t v))
+            (set! (.-sp a) (unchecked-add-int sp (if (BytecodeCode/wide t) 2 1)))))))
+
+  ;; the placeholder u replaced by the object x it became, in the stack below n and in the locals
+  (method ^:private ^:static replace ^void [u x ^long/1 s ^Object/1 r ^int n ^Object/1 locals]
+    (loop [^int i 0]
+      (when (< i n)
+        (when (identical? (aget r i) u) (aset r i x))
+        (recur (unchecked-inc-int i))))
+    (loop [^int i 0]
+      (when (< i (alength locals))
+        (when (identical? (aget locals i) u) (aset locals i x))
+        (recur (unchecked-inc-int i)))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; invokedynamic and dynamic constants (JVMS 5.4.3.6): the bootstrap methods of javac's call sites
+
+  (method ^:private indy ^void [this ^Compiler$CF$Frame f ^BytecodeAct a ^int pc]
+    (let [x (aget sites pc)
+          d (if (some? x) (cast BytecodeIndy x) (let [y (.resolveIndy this (.u2 this (unchecked-inc-int pc)))] (aset sites pc y) y))
+          s (.-s a)
+          r (.-r a)
+          base (unchecked-subtract-int (.-sp a) (.-slots d))
+          pt (.-ptypes d)
+          vs (new Object/1 (alength pt))]
+      (loop [^int j 0 ^int i base]
+        (when (< j (alength pt))
+          (let [t (aget pt j)]
+            (aset vs j (if (== t \L) (aget r i) (BytecodeCode/box t (aget s i))))
+            (recur (unchecked-inc-int j) (unchecked-add-int i (if (BytecodeCode/wide t) 2 1))))))
+      (set! (.-sp a) base)
+      (switch (.-kind d)
+        0 (let [h (Bytecode/host)
+                lk (.-k d)
+                o (do (.init lk) (.alloc h lk))]
+            (loop [^int j 0]
+              (when (< j (alength vs))
+                (.setField h o j (aget vs j))
+                (recur (unchecked-inc-int j))))
+            (BytecodeCode/pushObj a \L o))
+        1 (BytecodeCode/pushObj a \L (BytecodeCode/concat (.-recipe d) (.-consts d) vs pt))
+        (2 3 4) (BytecodeCode/pushObj a (switch (.-kind d) 2 \L 3 \I \Z) (BytecodeCode/objectMethod d vs))
+        (5 6) (BytecodeCode/pushObj a \I (Integer/valueOf (BytecodeCode/switchIndex d (aget vs 0) (.intValue (cast Integer (aget vs 1))))))
+        (BytecodeCode/pushObj a \L (.-value d)))))
+
+  ;; a bootstrap method's static argument i of entry e (a constant, a Class, a MethodType's descriptor, a method
+  ;; handle's pool index as an int[] {kind, index})
+  (method ^:private bsmArg [this ^int i]
+    (let [cf (.-cf bc)]
+      (switch (.tag cf i)
+        7 (.resolveClass this i)
+        16 (.utf8 cf (.intValue (cast Integer (aget (.-vals cf) i))))
+        15 (new int/1 [(aget (.-ia cf) i) (aget (.-ib cf) i)])
+        17 (.ldcOther this i -1)
+        (.constant cf i))))
+
+  ;; the name of a method handle's target (its class and name: "java/lang/invoke/LambdaMetafactory.metafactory")
+  (method ^:private handleName ^String [this ^int mh]
+    (let [cf (.-cf bc) ref (aget (.-ib cf) mh)]
+      (java-str (.refClass cf ref) "." (.refName cf ref))))
+
+  (method ^:public resolveIndy ^BytecodeIndy [this ^int i]
+    (let [cf (.-cf bc)
+          e (aget (.-bootstraps cf) (aget (.-ia cf) i))
+          name (.natName cf (aget (.-ib cf) i))
+          desc (.natDesc cf (aget (.-ib cf) i))
+          bsm (.handleName this (aget e 0))
+          d (BytecodeIndy.)
+          ps (Bytecode/params desc)
+          pt (new char/1 (alength ps))
+          ^:mutable ^int n 0]
+      (loop [^int j 0]
+        (when (< j (alength ps))
+          (aset pt j (Bytecode/tc (aget ps j)))
+          (set! n (unchecked-add-int n (if (BytecodeCode/wide (aget pt j)) 2 1)))
+          (recur (unchecked-inc-int j))))
+      (set! (.-ptypes d) pt)
+      (set! (.-slots d) n)
+      (cond
+        (or (.equals bsm "java/lang/invoke/LambdaMetafactory.metafactory")
+            (.equals bsm "java/lang/invoke/LambdaMetafactory.altMetafactory"))
+          (do (set! (.-kind d) 0)
+              (set! (.-k d) (BytecodeCode/lambdaKlass this name desc e (.equals bsm "java/lang/invoke/LambdaMetafactory.altMetafactory")))
+              d)
+        (.equals bsm "java/lang/invoke/StringConcatFactory.makeConcatWithConstants")
+          (let [cs (new Object/1 (unchecked-dec-int (unchecked-dec-int (alength e))))]
+            (set! (.-kind d) 1)
+            (set! (.-recipe d) (cast String (.bsmArg this (aget e 1))))
+            (loop [^int j 2]
+              (when (< j (alength e))
+                (aset cs (unchecked-subtract-int j 2) (.bsmArg this (aget e j)))
+                (recur (unchecked-inc-int j))))
+            (set! (.-consts d) cs)
+            d)
+        (.equals bsm "java/lang/invoke/StringConcatFactory.makeConcat")
+          (let [sb (StringBuilder.)]
+            (loop [^int j 0] (when (< j (alength ps)) (.append sb (unchecked-char 1)) (recur (unchecked-inc-int j))))
+            (set! (.-kind d) 1)
+            (set! (.-recipe d) (.toString sb))
+            (set! (.-consts d) (new Object/1 0))
+            d)
+        (.equals bsm "java/lang/runtime/ObjectMethods.bootstrap")
+          (let [nm (cast String (.bsmArg this (aget e 2)))
+                names (if (.isEmpty nm) (new String/1 0) (.split nm ";"))
+                frs (new BytecodeFieldRef/1 (unchecked-subtract-int (alength e) 3))]
+            (set! (.-kind d) (switch name "toString" 2 "hashCode" 3 4))
+            (set! (.-recordClass d) (cast Class (.bsmArg this (aget e 1))))
+            (loop [^int j 3]
+              (when (< j (alength e))
+                (let [h (cast int/1 (.bsmArg this (aget e j)))]
+                  (aset frs (unchecked-subtract-int j 3) (.resolveField this (aget h 1) false)))
+                (recur (unchecked-inc-int j))))
+            (set! (.-fields d) frs)
+            (set! (.-names d) names)
+            d)
+        (or (.equals bsm "java/lang/runtime/SwitchBootstraps.typeSwitch")
+            (.equals bsm "java/lang/runtime/SwitchBootstraps.enumSwitch"))
+          (let [ls (new Object/1 (unchecked-dec-int (alength e)))]
+            (set! (.-kind d) (if (.endsWith bsm "typeSwitch") 5 6))
+            (loop [^int j 1]
+              (when (< j (alength e))
+                (aset ls (unchecked-dec-int j) (.bsmArg this (aget e j)))
+                (recur (unchecked-inc-int j))))
+            (set! (.-labels d) ls)
+            d)
+        :else (throw (Bytecode/error 10 (java-str "bootstrap method " (.replace bsm \/ \.)
+                                                  " is not in the Go build (doc/classes/BYTECODE-SURVEY.md §4)"))))))
+
+  ;; a dynamic constant (JVMS 4.4.10: CONSTANT_Dynamic by ConstantBootstraps), a MethodType or a MethodHandle
+  (method ^:private ldcOther [this ^int i ^int pc]
+    (let [cf (.-cf bc)
+          rs (.-resolved bc)
+          c (aget rs i)]
+      (when (some? c) (return c))
+      (let [v (switch (.tag cf i)
+                16 (java.lang.invoke.MethodType/fromMethodDescriptorString
+                     (.utf8 cf (.intValue (cast Integer (aget (.-vals cf) i)))) (.-loader bc))
+                17 (let [e (aget (.-bootstraps cf) (aget (.-ia cf) i))
+                         bsm (.handleName this (aget e 0))
+                         name (.natName cf (aget (.-ib cf) i))
+                         desc (.natDesc cf (aget (.-ib cf) i))]
+                     (cond
+                       (.equals bsm "java/lang/invoke/ConstantBootstraps.nullConstant") nil
+                       (.equals bsm "java/lang/invoke/ConstantBootstraps.primitiveClass") (Bytecode/descClass (.-loader bc) name)
+                       (.equals bsm "java/lang/invoke/ConstantBootstraps.enumConstant")
+                         (Enum/valueOf (Bytecode/descClass (.-loader bc) desc) name)
+                       (.equals bsm "java/lang/invoke/ConstantBootstraps.getStaticFinal")
+                         (let [owner (if (> (alength e) 1) (cast Class (.bsmArg this (aget e 1))) (Bytecode/descClass (.-loader bc) desc))
+                               fl (BytecodeCode/worldField owner name)]
+                           (if (some? fl)
+                               (.get fl nil)
+                               (let [k (Bytecode/klassOf owner)
+                                     xb (if (some? k) (Bytecode/ofKlass k) nil)
+                                     si (if (some? xb) (cast Integer (.get (.-staticIndex xb) (java-str name ":" desc))) nil)]
+                                 (when (nil? si) (throw (Bytecode/error 6 name)))
+                                 (.init k)
+                                 (aget (.-statics k) (.intValue si)))))
+                       :else (throw (Bytecode/error 10 (java-str "bootstrap method " (.replace bsm \/ \.)
+                                                                 " is not in the Go build (doc/classes/BYTECODE-SURVEY.md §4)")))))
+                (throw (Bytecode/error 10 (java-str "constant " i " of tag " (.tag cf i) " is not in the Go build"))))]
+        (when (some? v) (aset rs i v))
+        v)))
+
+  ;; StringConcatFactory's recipe: \1 an argument, \2 a constant, the rest the text
+  (method ^:private ^:static concat ^String [^String recipe ^Object/1 consts ^Object/1 vs ^char/1 pt]
+    (let [sb (StringBuilder.)]
+      (loop [^int i 0 ^int ai 0 ^int ci 0]
+        (when (< i (.length recipe))
+          (let [ch (.charAt recipe i)]
+            (cond
+              (== ch (unchecked-char 1))
+                (let [v (aget vs ai)]
+                  (switch (aget pt ai)
+                    \C (.append sb (.charValue (cast Character v)))
+                    \Z (.append sb (.booleanValue (cast Boolean v)))
+                    \L (.append sb (String/valueOf v))
+                    (.append sb (String/valueOf v)))
+                  (recur (unchecked-inc-int i) (unchecked-inc-int ai) ci))
+              (== ch (unchecked-char 2))
+                (do (.append sb (String/valueOf (aget consts ci)))
+                    (recur (unchecked-inc-int i) ai (unchecked-inc-int ci)))
+              :else (do (.append sb ch) (recur (unchecked-inc-int i) ai ci))))))
+      (.toString sb)))
+
+  ;; ObjectMethods' toString, hashCode and equals of a record (java/lang/runtime/ObjectMethods.java's rules)
+  (method ^:private ^:static objectMethod [^BytecodeIndy d ^Object/1 vs]
+    (let [o (aget vs 0)
+          frs (.-fields d)
+          h (Bytecode/host)]
+      (switch (.-kind d)
+        2 (let [sb (StringBuilder. (.getSimpleName (.-recordClass d)))]
+            (.append sb "[")
+            (loop [^int i 0]
+              (when (< i (alength frs))
+                (when (> i 0) (.append sb ", "))
+                (.append sb (aget (.-names d) i))
+                (.append sb "=")
+                (.append sb (String/valueOf (BytecodeCode/readField (aget frs i) o)))
+                (recur (unchecked-inc-int i))))
+            (.append sb "]")
+            (.toString sb))
+        3 (let [^:mutable ^int acc 0]
+            (loop [^int i 0]
+              (when (< i (alength frs))
+                (let [v (BytecodeCode/readField (aget frs i) o)]
+                  (set! acc (unchecked-add-int (unchecked-multiply-int acc 31) (if (nil? v) 0 (.hashCode v)))))
+                (recur (unchecked-inc-int i))))
+            (Integer/valueOf acc))
+        (let [x (aget vs 1)]
+          (Boolean/valueOf
+            (and (some? x) (identical? (.getClass x) (.getClass o))
+                 (loop [^int i 0]
+                   (if (< i (alength frs))
+                       (let [a (BytecodeCode/readField (aget frs i) o)
+                             b (BytecodeCode/readField (aget frs i) x)
+                             t (.-t (aget frs i))]
+                         (if (cond
+                               (== t \F) (== 0 (Float/compare (.floatValue (cast Float a)) (.floatValue (cast Float b))))
+                               (== t \D) (== 0 (Double/compare (.doubleValue (cast Double a)) (.doubleValue (cast Double b))))
+                               :else (java.util.Objects/equals a b))
+                             (recur (unchecked-inc-int i))
+                             false))
+                       true))))))))
+
+  (method ^:private ^:static readField [^BytecodeFieldRef fr o]
+    (switch (.-kind fr)
+      0 (.field (Bytecode/host) o (.-index fr))
+      2 (do (.setAccessible (.-rf fr) true) (.get (.-rf fr) o))
+      (.superField (Bytecode/host) o (.-name fr) false nil)))
+
+  ;; SwitchBootstraps.typeSwitch and enumSwitch: the first label from restart that o matches, -1 for null, the labels'
+  ;; count when none
+  (method ^:private ^:static switchIndex ^int [^BytecodeIndy d o ^int restart]
+    (when (nil? o) (return -1))
+    (let [ls (.-labels d)]
+      (loop [^int i restart]
+        (if (< i (alength ls))
+            (let [l (aget ls i)]
+              (if (cond
+                    (instance? Class l) (.isInstance (cast Class l) o)
+                    (instance? String l) (if (== (.-kind d) 6) (.equals (.name (cast Enum o)) l) (.equals l o))
+                    (instance? Integer l) (cond (instance? Character o) (== (.intValue (cast Integer l)) (unchecked-int (.charValue (cast Character o))))
+                                                (instance? Number o) (and (not (instance? Long o)) (not (instance? Float o)) (not (instance? Double o))
+                                                                          (== (.intValue (cast Integer l)) (.intValue (cast Number o))))
+                                                :else false)
+                    :else (.equals l o))
+                  i
+                  (recur (unchecked-inc-int i))))
+            (alength ls)))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; lambdas (LambdaMetafactory): a class made at run time implementing the functional interface, its method calling
+  ;; the implementation method with the captured values first
+
+  (method ^:private ^:static lambdaKlass ^Compiler$CF$Klass [^BytecodeCode code ^String name ^String desc ^int/1 e ^boolean alt]
+    (let [owner (.-bc code)
+          cf (.-cf owner)
+          h (Bytecode/host)
+          samDesc (.utf8 cf (.intValue (cast Integer (aget (.-vals cf) (aget e 1)))))
+          impl (cast int/1 (.bsmArg code (aget e 2)))
+          iface (Bytecode/descClass (.-loader owner) (Bytecode/ret desc))
+          caps (Bytecode/params desc)
+          n (locking Bytecode/LOCK (let [x Bytecode/lambdas] (set! Bytecode/lambdas (unchecked-inc-int x)) x))
+          k (Compiler$CF$Klass. (java-str (.getName (.-cls owner)) "$$Lambda/0x" (Integer/toHexString n)))
+          ik (Bytecode/klassOf iface)
+          extra (java.util.ArrayList.)
+          bridges (java.util.ArrayList.)]
+      ;; altMetafactory's flags: serializable, markers, bridges
+      (when alt
+        (let [flags (.intValue (cast Integer (.bsmArg code (aget e 4))))
+              ^:mutable ^int j 5]
+          (when (not (== 0 (bit-and-int flags 1))) (.add extra java.io.Serializable))
+          (when (not (== 0 (bit-and-int flags 2)))
+            (let [mc (.intValue (cast Integer (.bsmArg code (aget e j))))]
+              (set! j (unchecked-inc-int j))
+              (loop [^int q 0]
+                (when (< q mc)
+                  (.add extra (.bsmArg code (aget e j)))
+                  (set! j (unchecked-inc-int j))
+                  (recur (unchecked-inc-int q))))))
+          (when (not (== 0 (bit-and-int flags 4)))
+            (let [bcnt (.intValue (cast Integer (.bsmArg code (aget e j))))]
+              (set! j (unchecked-inc-int j))
+              (loop [^int q 0]
+                (when (< q bcnt)
+                  (.add bridges (.bsmArg code (aget e j)))
+                  (set! j (unchecked-inc-int j))
+                  (recur (unchecked-inc-int q))))))))
+      (set! (.-iname k) (.replace (.-name k) \. \/))
+      (set! (.-flags k) 0x1010)
+      (set! (.-superClass k) Object)
+      (let [kl (java.util.ArrayList.) cl (java.util.ArrayList.)]
+        (if (some? ik) (.add kl ik) (.add cl iface))
+        (let [it (.iterator extra)]
+          (while (.hasNext it)
+            (let [x (cast Class (.next it)) xk (Bytecode/klassOf x)]
+              (if (some? xk) (.add kl xk) (.add cl x)))))
+        (set! (.-ifaces k) (cast Compiler$CF$Klass/1 (.toArray kl (new Compiler$CF$Klass/1 0))))
+        (set! (.-interfaces k) (cast Class/1 (.toArray cl (new Class/1 0)))))
+      (set! (.-nfields k) (alength caps))
+      (let [defs (new Object/1 (alength caps))]
+        (loop [^int i 0]
+          (when (< i (alength caps))
+            (aset defs i (Bytecode/zero (aget caps i)))
+            (recur (unchecked-inc-int i))))
+        (set! (.-defaults k) defs))
+      (set! (.-statics k) (new Object/1 0))
+      (set! (.-lambdaHost k) (.-k owner))
+      (let [tn (.refName cf (aget impl 1))]
+        (set! (.-lambdaName k) (if (.startsWith tn "lambda$") tn nil)))
+      ;; the implementation method's reference, resolved as the instruction of its kind would
+      (let [lam (BytecodeLambda.)
+            kind (aget impl 0)
+            op (switch kind 5 182 6 184 7 183 8 183 185)]
+        (set! (.-refKind lam) kind)
+        (set! (.-target lam) (.resolveMethod code (aget impl 1) op))
+        (set! (.-ncaps lam) (alength caps))
+        (let [ds (java.util.ArrayList.)]
+          (.add ds samDesc)
+          (.addAll ds bridges)
+          (let [it (.iterator ds)]
+            (while (.hasNext it)
+              (let [md (cast String (.next it))
+                    m (Compiler$CF$Meth. k name md 0x1)
+                    ps (Bytecode/params md)
+                    pslots (new int/1 (alength ps))
+                    ptypes (new char/1 (alength ps))
+                    ^:mutable ^int slot 1
+                    lc (BytecodeCode. owner nil m)
+                    l2 (BytecodeLambda.)]
+                (loop [^int j 0]
+                  (when (< j (alength ps))
+                    (let [t (Bytecode/tc (aget ps j))]
+                      (aset pslots j slot)
+                      (aset ptypes j t)
+                      (set! slot (unchecked-add-int slot (if (BytecodeCode/wide t) 2 1))))
+                    (recur (unchecked-inc-int j))))
+                (set! (.-refKind l2) (.-refKind lam))
+                (set! (.-target l2) (.-target lam))
+                (set! (.-ncaps l2) (.-ncaps lam))
+                (set! (.-ret l2) (Bytecode/tc (Bytecode/ret md)))
+                (set! (.-lambda lc) l2)
+                (set! (.-pslots m) pslots)
+                (set! (.-ptypes m) ptypes)
+                (set! (.-self m) 0)
+                (set! (.-ret m) (.-ret l2))
+                (set! (.-nr m) slot)
+                (set! (.-np m) slot)
+                (set! (.-body m) (Bytecode/body (.-ret m) lc))
+                (.put (.-methods k) (java-str name md) m))))))
+      (let [c (.define h k)]
+        (set! (.-cls k) c)
+        (Bytecode/vtable k)
+        (let [seen (java.util.HashSet.)
+              it (.iterator (.entrySet (.-vtable k)))]
+          (while (.hasNext it)
+            (let [en (cast java.util.Map$Entry (.next it))
+                  m (cast Compiler$CF$Meth (.getValue en))]
+              (when (.add seen (.getKey en))
+                (Bytecode/lambdaClasses (.-loader owner) m)
+                (.method h k (if (identical? (.-k m) k) m (Bytecode/dispatchOnly m))))))))
+      k))
+
+  ;; a lambda's method: the captured values (the object's fields) and the arguments to the implementation method,
+  ;; converted as LambdaMetafactory adapts them (boxing, unboxing, widening by Meth.invoke and reflection)
+  (method ^:private runLambda [this ^Compiler$CF$Frame f]
+    (let [l lambda
+          h (Bytecode/host)
+          o (aget (.-r f) 0)
+          m meth
+          pt (.-ptypes m)
+          ps (.-pslots m)
+          n (unchecked-add-int (.-ncaps l) (alength pt))
+          all (new Object/1 n)]
+      (loop [^int i 0]
+        (when (< i (.-ncaps l))
+          (aset all i (.field h o i))
+          (recur (unchecked-inc-int i))))
+      (loop [^int j 0]
+        (when (< j (alength pt))
+          (let [t (aget pt j)]
+            (aset all (unchecked-add-int (.-ncaps l) j)
+                  (switch (Compiler$CF$Rt/kind t)
+                    \J (Compiler$CF$Rt/box t (aget (.-p f) (aget ps j)))
+                    \D (BytecodeCode/box (if (== t \F) \F \D) (aget (.-p f) (aget ps j)))
+                    (aget (.-r f) (aget ps j)))))
+          (recur (unchecked-inc-int j))))
+      (let [res (BytecodeCode/callHandle (.-refKind l) (.-target l) all)]
+        (switch (Compiler$CF$Rt/kind (.-ret l))
+          \J (do (set! (.-jl f) (Compiler$CF$Rt/narrow (.-ret l) (Compiler$CF$Rt/toJ res))) nil)
+          \D (do (set! (.-jd f) (if (== (.-ret l) \F) (unchecked-double (unchecked-float (Compiler$CF$Rt/toD res))) (Compiler$CF$Rt/toD res))) nil)
+          \V nil
+          res))))
+
+  ;; calls a method handle of kind (JVMS 5.4.3.5) on the arguments, the receiver first for an instance method
+  (method ^:public ^:static callHandle [^int kind ^BytecodeMethodRef mr ^Object/1 all]
+    (let [h (Bytecode/host)]
+      (if (== kind 8)
+          ;; newInvokeSpecial: a new object of the constructor's class
+          (if (some? (.-m mr))
+              (Compiler$CF$Rt/construct (.-m mr) all)
+              (let [rc (.-rc mr)]
+                (when (nil? rc) (throw (Bytecode/error 5 (java-str (.getName (.-c mr)) ".<init>" (.-desc mr)))))
+                (.setAccessible rc true)
+                (try (.newInstance rc all) (catch InvocationTargetException e (throw (.getCause e))))))
+          (let [static (== kind 6)
+                o (if static nil (aget all 0))
+                args (if static all (java.util.Arrays/copyOfRange all 1 (alength all)))]
+            (when (and (not static) (nil? o)) (throw (NullPointerException.)))
+            (let [m (cond
+                      (== (.-kind mr) 0) (.-m mr)
+                      (== (.-kind mr) 1) (let [k (.klassOf h o)] (if (some? k) (.virtual k (.-key mr)) nil))
+                      :else nil)]
+              (if (some? m)
+                  (.invoke m o args)
+                  (if (== (.-kind mr) 3)
+                      (BytecodeCode/superCall o (.-c mr) mr args)
+                      (let [rm (.-rm mr)]
+                        (when (nil? rm) (throw (Bytecode/error 9 (java-str (.getName (.getClass o)) "." (.-key mr)))))
+                        (.setAccessible rm true)
+                        (try (.invoke rm o args) (catch InvocationTargetException e (throw (.getCause e))))))))))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; stack traces: the source line of pc (LineNumberTable)
+  (method ^:public line ^int [this ^int pc] (.line mm pc)))
