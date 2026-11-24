@@ -7904,3 +7904,41 @@
       (vec (distinct out)))))
 
 (swap! checks conj constexpr-labels)
+
+;; cpp-rind (2026-11-24): [class.mfct]/? with [special]/? : a constructor or destructor defined out of its class is declared in it; a
+;; class that declares none has only the implicit one, which no definition may define: GCC's "definition of implicitly-declared
+;; 'A::A()'", at the definition (other/ctor1.C, ctor2.C, dtor1.C). The main file's namespace-scope classes by name, defined once.
+(defn implicit-special-definitions
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        recs (java.util.HashMap.)
+        dup (java.util.HashSet.)]
+    (letfn [(collect! [nodes]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  "CXXRecordDecl" (when (and (string? (:name n)) (seq (:name n)) (:completeDefinition n))
+                                    (if (.containsKey recs (:name n)) (.add dup (:name n)) (.put recs (:name n) n)))
+                  ("NamespaceDecl" "LinkageSpecDecl") (collect! (:inner n))
+                  nil)))
+            (judge! [nodes]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  ("CXXConstructorDecl" "CXXDestructorDecl")
+                  (let [dtor? (= "CXXDestructorDecl" (:kind n))
+                        cn (str/replace (str (:name n)) #"^~" "")
+                        r (when-not (.contains dup cn) (.get recs cn))]
+                    (when (and r (mine-at n main)
+                               ;; (written `A::A` or `A::~A` with no other qualifier before: a nested class's of the same name not)
+                               (let [o (long (mine-at n main)) before (subs src (max 0 (- o 200)) o)]
+                                 (re-find (re-pattern (str "(?:^|[^:\w])" (java.util.regex.Pattern/quote cn) "\s*::\s*~?\s*$")) before))
+                               (not-any? #(and (map? %) (= (:kind %) (:kind n)) (not (:isImplicit %))) (:inner r)))
+                      (let [[l c] (line-col starts (long (mine-at n main)))]
+                        (.add out {:line l :col c :kind :error :rule :implicit-special
+                                   :msg (str "definition of implicitly-declared '" cn "::" (if dtor? "~" "") cn "()'")}))))
+                  ("NamespaceDecl" "LinkageSpecDecl") (judge! (:inner n))
+                  nil)))]
+      (collect! (:nodes u))
+      (judge! (:nodes u)))
+    (vec (distinct out))))
+
+(swap! checks conj implicit-special-definitions)
