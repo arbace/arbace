@@ -21442,3 +21442,14 @@ native _io: the next record).
   are this tree's (.tmp/p/aotmod.sh).
 Proposal for the coordinator: _pickle.c (and _json.c, which already passes as a thin Go module) built into the C world as
 521's _datetime, by the C world's owner (py-accel): the remaining ~36 failing C-pickle rows.
+
+## 2026-11-24: py-design-1124: D1 and D2 decided; test_import's single-phase tests to :cpython-only
+
+The report's two decisions: D1, the user's (a): test_import's single-phase tests and test_descr's xxsubtype tests (skips by
+check_impl_detail()) are :cpython-only, n/a. test_descr's four already were (:cpython-only's xxsubtype match is before
+:extension-modules); test_import's eight SinglephaseInitTests rows still hold the pre-py-capi-1122 message ("test requires
+_testsinglephase module", which :extension-modules matched), so their ids go into :cpython-only's :tests until the re-record
+gives the cpython_only skip. D2, the coordinator's (a): CPicklingErrorTests.test_bad_state_setter ("only verified in the C
+implementation") stays in :c-accelerators, by design, until _pickle.c exists; _pickle.c into the C world goes to py-accel next
+cycle. bin/reap --record: Python eval design 1,312 -> 1,304, n/a 4,836 -> 4,844; crops-score recorded and judged, records-check
+0 problems. The functools subclass-repr fix stays in the worktree's .tmp/NEXT.md (not in the committed forms).
