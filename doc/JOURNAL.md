@@ -21159,3 +21159,39 @@ and the negative reduction) passes, and so do TestCountDownLatch and TestSemapho
   - j2g translating `defpackage` for the compiled level;
   - Package's getAnnotation* over the registered data.
 - **Reflective access checks (t07688, t04829).** They need the caller class, which is the :stack work.
+
+## 2026-11-24: java-rows-1124: ForkJoinPool's scheduling and ScopedValue in jrt (t05691, t04607)
+
+Both are in jrt's hand-written Go, outside what the queued conversion reads.
+
+**ForkJoinPool's scheduling (63a1c7578).** jdk26u's ForkJoinPool is a ScheduledExecutorService (since JDK 25). AscendingOrderAfterReplace (t05691) schedules
+eleven delayed tasks on a pool of one, cancels one, and closes the pool.
+- jrt's pool, in go/arbace/jrt/fjschedule.ae, now has: schedule(Runnable) and schedule(Callable), scheduleAtFixedRate,
+  scheduleWithFixedDelay, cancelDelayedTasksOnShutdown and getDelayedTaskCount.
+- Each scheduled task is a DelayScheduler$ScheduledForkJoinTask, a ForkJoinTask and ScheduledFuture (getDelay, compareTo by delay).
+  It waits on a Go timer and runs in a worker of the pool when the timer fires.
+- The policies are jdk26u's:
+  - a delayed one-shot task runs after shutdown unless cancelDelayedTasksOnShutdown was called;
+  - periodic tasks are cancelled on shutdown;
+  - termination waits for the delayed tasks;
+  - a periodic task's exec returns false between runs, so runForked runs it again;
+  - cancel takes a waiting task out of the pool's set.
+- jrt's own build gets stand-ins for Delayed, ScheduledFuture and ScheduledExecutorService (standin_scheduled.ae), which the
+  translated interfaces replace in the program.
+- ForkJoinPool's class info and the manifest's class list now give ScheduledExecutorService as its interface.
+- TestForkJoinPoolSchedule, in the order of the delays, passes. It covers: a cancelled task, close waiting, a rejected schedule
+  after shutdown, a periodic task, and a Callable's result.
+
+**ScopedValue (271f11782).** jdk26u's java.lang.ScopedValue (final since JDK 25, JEP 506) is now in go/arbace/jrt/scopedvalue.ae,
+in jrt's hand-written Go:
+- newInstance, where, get, isBound, orElse, orElseThrow; Carrier's where, get, run and call; CallableOp;
+- the bindings are a stack of snapshots on jrt's Thread, removed however run or call ends; a new thread starts with none;
+- hashCode is jdk26u's xor-shift key;
+- the class's generic Signature is in classdata.ae's handSignatures;
+- NoSuchElementException is a stand-in now (test/jrt/standins.ae, `bin/jrt standins`), so that an unbound get throws "ScopedValue
+  not bound", which UnboundValueAfterOOME (t04607) expects after its OutOfMemoryError. jrt's array limit already throws that error.
+
+The manifest's class list (test/jrt/manifest.ae) gains ScopedValue, its Carrier and CallableOp. CountDownLatch and Semaphore stay
+"false" there, their methods promoted as AtomicReference's. TestScopedValue passes, and so does the whole `bin/jrt test --package jrt`.
+
+For the train: jdk/edge.edn may need `bin/j2g-edge update` for the new hand-written classes (as train 3 recorded it afresh).
