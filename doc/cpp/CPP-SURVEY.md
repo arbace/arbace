@@ -11400,7 +11400,7 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   value-initialized reference members; non-static data members named outside their class's member functions; `&` and `++` of an
   rvalue reported (the refusal had had no rule); `->` on a class without operator->; functional casts to array types; member functions
   assigned to; an instance's data member of a function type; parenthesized aggregate initialization's array elements (no brace
-  elision); `auto*` deduced
+  elision); `new` of an array type of unknown bound; `auto*` deduced
   from no pointer or from no return statement; the composite pointer type of class pointers in `?:` (unrelated ones an error);
   explicit instantiation definitions' member functions analyzed (a class whose member was left out by an error not, its uses being
   the cascade); three stack overflows turned into errors or refusals (a constructor call needed again by its own argument's
