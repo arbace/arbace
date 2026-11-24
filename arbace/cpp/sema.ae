@@ -14215,6 +14215,13 @@ protected:
                           :fn (let [f (fnd id)]
                                 (when-not (or (:lazy f) (:analyzed f))
                                   (cond
+                                    ;; (cpp-read, 2026-11-24, the checker: a template specialization's definition that only bodies
+                                    ;; which reported errors use is not instantiated, GCC's limit_bad_template_recursion (errors
+                                    ;; since the enclosing instantiation of a non-constexpr function began stop the instantiation
+                                    ;; of further definitions): template/recurse3.C's f<T, N+1> after T(0) = 0's error, no
+                                    ;; instantiation depth error; `pending` marks them, :cx-bad-parent)
+                                    (and (:cx-bad-parent f) (checking?))
+                                    (upd-fn! id assoc :analyzed true)
                                     (and (:body f) (not (:tbody f)) (not (:cx-no-body f)))
                                     (do (upd-fn! id assoc :analyzed true)
                                         (binding [*tmpl-chain* (long (or (:inst-chain f) 0)) *tmpl-slack* (if (:inst-vt f) 1 0)]
@@ -14228,12 +14235,19 @@ protected:
                                                           {:codegen/refused :depth})
                                                  (let [n (:node f) l (:loc n)]
                                                    (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n)))
-                                              (try (cx-literal-signature! id)
-                                                   (analyze-fn! id)
-                                                   (cx-potential-constant! id)
-                                                   (cx-ctor-c17-inits! id)
-                                                   (catch arbace.lang.ExceptionInfo e
-                                                     (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
+                                              (let [errd (atom false)
+                                                    h (fn [& xs] (reset! errd true) (apply h xs))]
+                                                (binding [*on-refusal* h]
+                                                  (try (cx-literal-signature! id)
+                                                       (analyze-fn! id)
+                                                       (cx-potential-constant! id)
+                                                       (cx-ctor-c17-inits! id)
+                                                       (catch arbace.lang.ExceptionInfo e
+                                                         (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
+                                                ;; (cpp-read: a template specialization's non-constexpr body that reported an error,
+                                                ;; for `pending`'s :cx-bad-parent)
+                                                (when (and @errd (:tinst f) (not (:cx-espec f)) (not (:constexpr f)) (not (:consteval f)))
+                                                  (upd-fn! id assoc :cx-errored true))))
                                             (analyze-fn! id))))
                                     ;; (a closure's implicit members are analyzed, or deleted, where the lambda is)
                                     (and (or (:implicit f) (:defaulted f)) (not (:params f)) (not (:deleted f)))
