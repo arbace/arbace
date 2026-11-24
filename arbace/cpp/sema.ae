@@ -2557,7 +2557,9 @@
             ;; (CX12, the checker: a constexpr variable, its initializer checked as a constant expression)
             v (cond-> v (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n)))
             ;; (h-cpp-consteval, the checker: a constinit variable's initializer a constant expression too, [dcl.constinit]/2)
-            v (cond-> v (and (checking?) (not (:constexpr n)) (:constinit v)) (assoc :cx-constinit true :cx-range (:range n)))
+            v (cond-> v (and (checking?) (not (:constexpr n)) (:constinit v)) (assoc :cx-constinit true :cx-range (:range n)
+                                                                                     ;; (cpp-singles: its initializer's place, cx-sure-error!)
+                                                                                     :cx-init-range (:range (init-kid n))))
             ;; (queue 463, the checker: a static data member's access, [class.access]/1, judged where it is named)
             v (cond-> v (and (checking?) (:cls home)) (assoc :cx-cls (:cls home))
                     (and (checking?) (:cls home) (#{:private :protected} *member-access*)) (assoc :cx-access *member-access*))
@@ -6926,8 +6928,11 @@
     ;; (cpp-sweep, the checker: std::initializer_list<E> of a reference E, its backing array of references ill-formed
     ;; ([dcl.array]/1; the class's pointer members to E too): GCC's "could not convert '{0}' ... to 'std::initializer_list<int&&>'",
     ;; cpp0x/initlist-array4.C)
+    ;; (cpp-singles: and GCC's error in <initializer_list> itself, where the instantiation forms the pointer to the reference
+    ;; type: an error outside the main file, :cx/header-error, arbace.repr.cpp.diag/sema-errors's line 0)
     (when (and (checking?) e (abi/ref? e))
-      (fail :noconv "no viable conversion from a braced list to std::initializer_list of a reference type"))
+      (throw (ex-info "codegen: no viable conversion from a braced list to std::initializer_list of a reference type"
+                      {:codegen/refused :noconv :cx/header-error "forming pointer to reference type"})))
     (when (every? #(ics % e) items)
       {:op :std-init-list :elem e :n (count items) :items (mapv #(init-for e % ctx :copy) items)
        :ty (abi/unq (abi/non-ref t)) :cat :pr})))
@@ -13145,7 +13150,10 @@
       (when (:id v) (upd-var! (:id v) assoc :cx-bad true))
       (let [m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
         (if (:cx-constinit v)
-          (do (when-let [p (or (:cx/at d) (:cx/top d))]
+          ;; (cpp-singles: a call of a function not constexpr that the initializer makes implicitly -- a converting constructor
+          ;; of the temporary a reference binds, `constinit const nonliteral &r5 = 42;` --, which has no place of its own: at the
+          ;; initializer, as GCC: cpp2a/constinit11.C)
+          (do (when-let [p (or (:cx/at d) (:cx/top d) (when (str/starts-with? m "call to non-'constexpr' function") (:cx-init-range v)))]
                 (when-let [h *on-refusal*]
                   (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range p}}) nil)))
               (throw (ex-info (str "codegen: constinit variable '" (:name v) "' does not have a constant initializer (" m ")")
