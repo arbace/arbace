@@ -3040,6 +3040,23 @@
                                            (when v (recur (rest es) v)))))
                           nil))
                       (:nodes u) nil)
+        ;; (cpp-rind: the scoped enumerations' names, a name also another type's not taken)
+        scoped-enums (delay (let [sc (java.util.HashSet.) other (java.util.HashSet.)]
+                              (walk-nodes (fn [n _] (when (and (string? (:name n)) (seq (:name n)))
+                                                      (cond (and (= "EnumDecl" (:kind n)) (:scopedEnumTag n)) (.add sc (:name n))
+                                                            (#{"EnumDecl" "CXXRecordDecl" "TypedefDecl" "TypeAliasDecl" "ClassTemplateDecl"} (:kind n)) (.add other (:name n))
+                                                            :else nil)))
+                                          (:nodes u) nil)
+                              (set (remove #(.contains other %) sc))))
+        ;; (the scoped enumerations' enumerators, a name also declared otherwise not taken)
+        scoped-enumerators (delay (let [sc (java.util.HashSet.) other (java.util.HashSet.)]
+                                    (walk-nodes (fn [n _] (when (= "EnumDecl" (:kind n))
+                                                            (doseq [e (:inner n) :when (and (= "EnumConstantDecl" (:kind e)) (string? (:name e)))]
+                                                              (.add (if (:scopedEnumTag n) sc other) (:name e))))
+                                                    (when (and (#{"VarDecl" "FunctionDecl" "ParmVarDecl" "FieldDecl"} (:kind n)) (string? (:name n)))
+                                                      (.add other (:name n))))
+                                                (:nodes u) nil)
+                                    (set (remove #(.contains other %) sc))))
         named (java.util.HashSet.)
         _ (walk-nodes (fn [n _] (when (= "DeclRefExpr" (:kind n)) (when-let [o (get-in n [:range :begin :offset])] (.add named [(get-in n [:referencedDecl :name]) (long o)])))) (:nodes u) nil)
         instantiated? (fn [t] (let [b (long (or (get-in t [:range :begin :offset]) -1)) e (long (or (get-in t [:range :end :offset]) -1))]
@@ -3066,6 +3083,24 @@
                                        (>= nl 1) (if (some #{"unsigned"} ws) [0 Long/MAX_VALUE "long unsigned int"] [Long/MIN_VALUE Long/MAX_VALUE "long int"])
                                        (and (some #{"unsigned"} ws) (not-any? #{"short" "char" "bool"} ws)) [0 4294967295 "unsigned int"]
                                        :else [-2147483648 2147483647 "int"])]
+                ;; (cpp-rind: [stmt.switch]/2, a case's constant converted to the condition's type: a floating literal never an
+                ;; integral constant expression nor a converted constant expression of an integral type, and an integer literal no
+                ;; converted constant expression of a scoped enumeration ([dcl.enum]/10: no implicit conversion); GCC's "could not
+                ;; convert '1' from 'int' to 'A'", "case label does not reduce to an integer constant"; cpp0x/enum15.C)
+                (let [scoped? (and (= :n (get-in cnd [:_ent :ty :t])) (contains? @scoped-enums (get-in cnd [:_ent :ty :s])))]
+                  (doseq [cs (cases (last (:inner sw)))
+                          :let [k (strip (first (filter map? (:inner cs))))
+                                k (if (and (= "UnaryOperator" (:kind k)) (#{"-" "+"} (:opcode k))) (strip (first (:inner k))) k)]
+                          :when (or (= "FloatingLiteral" (:kind k)) (and scoped? (#{"IntegerLiteral" "CharacterLiteral"} (:kind k)))
+                                    ;; (a scoped enumeration's enumerator in a switch on an integral variable)
+                                    (and (seq ws) (= "DeclRefExpr" (:kind k)) (get-in k [:_ent :enumerator])
+                                         (contains? @scoped-enumerators (get-in k [:referencedDecl :name]))))]
+                    (when-let [o (get-in cs [:range :begin :offset])]
+                      (when (= main (or (get-in cs [:range :begin :file]) main))
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :case-value
+                                     :msg (if (= "FloatingLiteral" (:kind k)) "case label does not reduce to an integer constant"
+                                              (str "could not convert the case value to the condition's type" (when scoped? (str " '" (get-in cnd [:_ent :ty :s]) "'"))))}))))))
                 (when (and rlo (>= (long (cxx-year (:std u))) 11))
                   (doseq [cs (cases (last (:inner sw)))
                           :let [v (lit (first (:inner cs)))]
