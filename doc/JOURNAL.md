@@ -20473,3 +20473,26 @@ branch with the train alone), whose key is the build's (`.tmp/probe/records2.sh`
 - Classes `:xml`, `:xml-stream` (eval) and `:xml-stream` (AOT) gone. `bin/reap --record`, `bin/crops-score --record`; `--judge --strict`
   and `bin/records-check`: 0 problems. Clojure: read 909 / 0 / 0, eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), print 1031 / 0 / 0;
   completeness 100.0 (99.84 at fa635f636).
+
+## 2026-11-24: cpp-print, C++'s print cell's last nine rows (branch `cpp-print-1124` from mac/next `7de5de3ec`)
+
+The burst's C++ print stream. The cell stood at 3,886 pass / 0 / 9 deferred: four recorded `forms-differ` rows of the own round
+trip (gxx-dg-every-10: coroutines/ramp-return-a.C, cpp0x/attr-no_unique_address1.C, parse/template30.C; gxx-modules-all:
+modules/target-aarch64-1_a.C) and five HotSpot files of the known file in no record (stubGenerator_x86_64_cbrt.cpp,
+stubGenerator_x86_64_poly1305.cpp, asm/assembler.cpp `forms-differ`; opto/memnode.cpp, runtime/jniHandles.cpp `print-rejected`).
+Each row's level-1 difference read from the run's forms and forms2; all causes the converter's (arbace/repr/cpp/convert.ae,
+arbace/repr/cpp/types.ae), no printer or parser change. doc/cpp/CPP-SURVEY.md, "As built: cpp-print", has the five fixes:
+- a `>` split from `>>`/`>=`/`>>=` (a token-split location) is made the main file's one `>` before conversion (template30.C,
+  ramp-return-a.C: the node had been a macro text running into the lexeme's rest, `z<int>=`);
+- `semi-end` no longer runs past a `}` into a following `[[`/`alignas` (attr-no_unique_address1.C: corge's text had swallowed
+  garply and grault, the asm statement joined the for);
+- GNU's `__label__ L;` DeclStmt is its whole text (c-c++-common's Wdangling-pointer-9.c and musttail28.c: recorded passes the
+  first whole run showed failing on mac/next itself, the converter given only the LabelDecl's name since cpp-gnu's 2026-11-22
+  parser change; confirmed on the base by the two files run with the change set aside);
+- a callee ending in an object-like macro does not take the call's arguments into its text (`*call-end*`; memnode.cpp's
+  `phase->MakeConX(offset)`);
+- `types/tokens` skips comments (jniHandles.cpp's `true /* external_guard */` template argument).
+target-aarch64-1_a.C passed already on mac/next (the Mac's queue 540b). The five HotSpot files pass levels 1 and 5
+(`bin/repr-cpp roundtrip-corpus hotspot-x86-linux-all --only-list`) and leave the known file; no HotSpot list is recorded
+(hotspot-x86-linux-every-25, 50 files, about 25 minutes at 2 jobs: left as an option).
+Records: the own round trip's lists rerun whole on stage 0 with `--record-results` (no failure, none lost): still running at handback: gxx-dg-essential 33/33, gxx-old-deja-every-10 323/323, c-c++-common-every-10 326/326 done (records unchanged), libstdcxx-testsuite-every-40, gxx-dg-every-10 and the modules part (`bin/repr-cpp dg --corpus modules --record`) running (.tmp/lists.sh, .tmp/lists.log in the worktree).

@@ -11114,3 +11114,30 @@ declares an erroneous entity and stays silent on its uses), P2564's immediate es
 consteval-memfn1), the extended floating types' conversion ranks (ext-floating*), GCC's spelling position inside a macro's definition
 (pr79300, constexpr-ice16), the synthesized <=> from == and < built (P1186; refused as before when usable), and the earlier Left lists'
 single rows. IFNDR eager checks, n/a candidates for the user: cpp2a/bit-cast2.C, cpp2a/concepts-placeholder5.C.
+
+## As built: cpp-print, the print cell's last nine rows (2026-11-24; branch `cpp-print-1124` from mac/next `7de5de3ec`)
+
+The burst's C++ print stream: the print cell at 3,886 pass / 0 / 9 deferred, its nine rows the own round trip's four recorded
+`forms-differ` (gxx-dg-every-10's coroutines/ramp-return-a.C, cpp0x/attr-no_unique_address1.C, parse/template30.C; gxx-modules-all's
+target-aarch64-1_a.C) and the known file's five HotSpot files no record holds (three `forms-differ`, two `print-rejected`, classes of the
+clang judge's era). All causes were the converter's (arbace.repr.cpp.convert, its token reader arbace.repr.cpp.types); the printer and
+the native parser are unchanged.
+
+- **A split `>` ends a node** (template30.C, ramp-return-a.C): the native parser, as clang, gives the `>` it splits from a `>>`, `>=` or
+  `>>=` lexeme a token-split location (spelled in the scratch space, its expansion the whole lexeme), so a node the first half ends
+  (`z<int>=0`, `z<int>>0`, `std::coroutine_handle<promise<int>> _handle` read as an expression) was a macro node whose text ran on into
+  the lexeme's rest (`z<int>=`), printed as a text operand that read back otherwise. `convert` now first makes every such location the
+  main file's one `>` (`plain-split-gts`): the node converts by its structure (`(<> z int)`), printed and read back the same.
+- **`semi-end` past a body** (attr-no_unique_address1.C): a text form's end ran past a `[[` or `alignas` after a `}` to the next `;`,
+  taking the next declaration or statement into it (`void corge () {}` then `[[no_unique_address]] void garply () {} int grault (...);`
+  twice in the forms; `for (...) {}` then `[[no_unique_address]] asm ("");`). After a `}` a `[[` or `alignas` begins the next item.
+- **GNU's local labels** (c-c++-common's Wdangling-pointer-9.c and musttail28.c, recorded passes lost on next since cpp-gnu's
+  `__label__` DeclStmt, 2026-11-22): a LabelDecl's range is its name alone; the DeclStmt is its whole text (`__label__ L;`).
+- **An object-like macro ending a callee** (HotSpot's opto/memnode.cpp: `phase->MakeConX(offset)`, `#define MakeConX longcon`):
+  `macro-extent` took the call's own argument list as the invocation's; while a call's callee is converted (`*call-end*`, the call no
+  macro node) an extent that would end exactly at the call's end stops at the macro's name.
+- **Comments in a written name** (HotSpot's runtime/jniHandles.cpp: `resolve_impl<DECORATORS_NONE, true /* external_guard */>`):
+  `types/tokens` read `/ *` as punctuators; a comment is white space.
+- target-aarch64-1_a.C passed already on mac/next (the Mac's queue 540b, decltype as a nested-name prefix); re-recorded.
+- The five HotSpot files pass the own judge's levels 1 and 5 (`roundtrip-corpus hotspot-x86-linux-all --only-list`, 2 jobs, about
+  6 minutes) and leave the known file (no HotSpot list is recorded: its every-25 list's 50 files are about 25 minutes, left).
