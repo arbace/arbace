@@ -49,20 +49,40 @@
         ((resolve 'arbace.o2j/load-externals!) rt))
       (reset! o2j-loaded true))))
 
+;; the embedded oi (queue 544, jdk/ocaml's Oi): O2J_PLUGIN_INTERP=1 has the runtime interpret a plugin's Lambda (as the compiled level does
+;; for a text its registry lacks, a toplevel phrase's) in place of translating it; its externals by the table arbace.o2j's oi-ext-class
+;; makes (ocaml.u.OiExts, defined at the first "ext-index")
+(def ^:private oi-exts (atom nil))
+
+(defn- oi-exts! []
+  (locking oi-exts
+    (or @oi-exts
+        (do (o2j!)
+            (binding [*ns* *ns*] (doseq [f ((resolve 'arbace.o2j/oi-ext-class))] (eval f)))
+            (reset! oi-exts [(eval '(fn [n] (ocaml.u.OiExts/extIndex n)))
+                             (eval '(fn [i a] (ocaml.u.OiExts/extCall (int i) a)))])))))
+
 (defn- plugin-loader []
   (reify java.util.function.Function
     (apply [_ x]
       (let [^objects x x verb (aget x 0) arg (aget x 1)]
         (case verb
-          "parse" (do (o2j!)
-                      (let [{:keys [name deps refs forms]} ((resolve 'arbace.o2j/plugin-unit) arg)]
-                        (object-array [name (into-array String deps) (into-array String refs) forms nil])))
+          "parse" (if (System/getenv "O2J_PLUGIN_INTERP")
+                    ((eval '(fn [t] (ocaml.rt.Oi/parse t))) arg)
+                    (do (o2j!)
+                        (let [{:keys [name deps refs forms]} ((resolve 'arbace.o2j/plugin-unit) arg)]
+                          (object-array [name (into-array String deps) (into-array String refs) forms nil]))))
           "define" (let [^objects e arg]
-                     (binding [*ns* *ns*] (doseq [f (aget e 3)] (eval f)))
-                     (eval (list 'fn [] (list (symbol (str "ocaml.u.M_" (aget e 0)) "init")))))
-          ;; a unit's module block, nil when its class is not defined
-          "global" (try (.get (.getField (Class/forName (str "ocaml.u.M_" arg)) "G") nil)
-                        (catch Throwable _ nil)))))))
+                     (if-not (sequential? (aget e 3))
+                       (aget e 3)
+                       (do (binding [*ns* *ns*] (doseq [f (aget e 3)] (eval f)))
+                           (eval (list 'fn [] (list (symbol (str "ocaml.u.M_" (aget e 0)) "init")))))))
+          ;; a unit's module block, nil when its class is not defined (an interpreted unit's: Oi's)
+          "global" (or (try (.get (.getField (Class/forName (str "ocaml.u.M_" arg)) "G") nil)
+                            (catch Throwable _ nil))
+                       ((eval '(fn [n] (ocaml.rt.Oi/global n))) arg))
+          "ext-index" ((first (oi-exts!)) arg)
+          "ext-call" (let [^objects c arg] ((second (oi-exts!)) (aget c 0) (aget c 1))))))))
 
 ;; DECISION 453-3 (a), queue 467: the analyser's bodies dropped once built. arbace.classes.interp keeps each class's analysed
 ;; bodies (its declaration's :state, :bodies :clinit :init: the analyser's trees over the reader's forms) after it has built every
