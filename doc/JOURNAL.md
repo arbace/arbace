@@ -19452,3 +19452,29 @@ Applied in test/java/divergences.edn (java-design-1123):
   jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
   provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
   JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
+## 2026-11-24: java-design-1123: train 1's rows recorded; the XML edge proved; jrt-convert's refusals fixed
+
+- Train 1 (d9217f672: next + java-design-1123 at 0ad52db70 + clj-1123 + java-bytecode-1122 + smalls2-1123; executables
+  fb29d2672f0d7bf945b6, javac's tool javac-f170fb32cd7e14aa55f8) built on its fourth attempt (19:50 on 2026-11-23); my
+  session-train1.sh had stopped at its first failure (10:16) and ran again at 22:03, in java-design-b1 at train 1's commit (the
+  key checked): compiled rows of rounds 1-3 and the class-file API's (compiled1-t1, 81 rows), JD4's javac-API tests
+  (compiled-javac-t1, 57), the heavy interp row (t05445) and the interp rows (interp1-t1, 49). Judged and recorded partially
+  (bin/java-check --judge --partial --record): compiled 62 now passing, interp 22, no regression; JD4: 40 of the 57 pass compiled.
+- Rows whose cause the branch built after train 1's commit, classed `:jd1123-next-train` (deferred) until the next train's
+  runs: the FFM rows (WrongThreadException not in the world), the datatype rows (JdkXmlConfig), Kerberos' three (SunJGSS not
+  among the providers); `:assert-default` (deferred): t06029, assertions on where the JDK's run (no -ea) had them off.
+- Java: eval 3,109 / 51 / 119 -> 3,131 / 33 / 120 (41 n/a), AOT 3,079 / 54 / 161 -> 3,141 / 33 / 122 (29 n/a); completeness
+  96.9 -> 97.5 (97.9 without by design); crops-score --judge --strict and records-check pass.
+- The XML edge proved (the coordinator's ask after train 2): train 2's conversion of javac's world with XML (1,627 sources,
+  java.xml 904, java.xml.crypto 119, 0 failed) laid into jdk/javac, its provenance written by javac-vendor's own function,
+  `bin/javac-vendor edge` under one lock ticket: the names check (9,919 classes, none twice), then j2g's --record-edge on the
+  frozen JVM: 731 classes beyond jdk/edge.edn, status 0 (.tmp/jd/xml-edge-proof.log). jdk/javac put back as committed after it:
+  train 3 converts afresh.
+- Train 2's `bin/jrt-convert update` refused the Kerberos and datatype slices (17 javac errors) and found four FFM package
+  files other than a fresh convert's: ProviderList and krb5's Config now derived overlays (the native GSS wrapper's and
+  macOS's SCDynamicStore branches dropped: the classes those name are natives of other platforms or libraries),
+  SecuritySupport.readConfig reading the JAXP configuration files itself (JdkXmlConfig, with its catalog and security
+  managers, is javac's tool world's), sun.net.www.protocol.http.spnego.NegotiateCallbackHandler in the world (GSSUtil.login
+  names it), java.lang.WrongThreadException in the world, SunJGSS in ProviderConfig's variant (398a8833f). The forms come from
+  `bin/jrt-convert update` itself (queued under the lock: `.tmp/jd/jrt-update.sh`).
