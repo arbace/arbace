@@ -19370,3 +19370,41 @@ IR at the pin, their items are: rustc_demangle 45, gimli 11, miniz_oxide 8, addr
   rustc_demangle's remaining rows) follows it.
 Alternatives: a rule per crate (not chosen).
 :journal
+## 2026-11-24 — Rust's backtrace crates, cycle 2: all seven lowered natively, rustc_demangle 35 of 45 (queue 561, VM)
+
+What was done (branch 561-rust-backtrace-crates from ba7dbdaa9; sources: rust-src 1.99.1's library/vendor at the pin, std's IR
+.tmp/rsi/std-sgn checked against test/rust/runtime/ir.sha256):
+- vendored-locs (a), the user's answer: every vendored crate's caller locations at Cargo's `./vendor/` path, the condition in
+  core-check's externalize widened from the backtrace crates to any `library/vendor/` file (1e9620295). std's unit has no
+  `./vendor/` location before or after (hashbrown's and libc's items are not in std's closure), so std's count is unchanged.
+- std's after-count for typeck's d5bae115b/eb5b0a5bb (and 1e9620295): lib-unit export, build, compare of std, 180 equal / 39 differ /
+  106 refused, the same as before; the export built one more body (backtrace_rs::symbolize::gimli::create_mapping: `Mapping::new`
+  found), 370 bodies / 66 refused.
+- The interfaces of miniz_oxide, object, gimli and addr2line made (std-iface --deps with DEPS_BACKTRACE=1), every module :ok, then
+  miniz_oxide's, object's and addr2line's again after resolve's crate dependencies (addr2line 42 -> 73 functions, 19 -> 30 ADTs).
+- Fixes, each gated on a backtrace crate (a dynamic var bound by core-check, or the crate's name), each its own commit:
+  - lower (6dc75728a): a `?` of a macro's expansion text gives its from_residual call the `?` token's span, so the
+    `#[track_caller]` location is the outermost macro call's (rustc's try_span; rustc-demangle's parse! and invalid!: 6 rows);
+  - typeck (a2fe3d0e0): probe_op's inherent candidates from every autoderef step (Formatter's inherent write_str by value at
+    step 0 before fmt::Write's, with Write imported);
+  - build (db0b077dc): a slice pattern in a closure (mem_categorization's PatKind::Slice), was refused (try_parse_str_chars);
+    not gated: it replaces a refusal;
+  - core-check (6a7434557): a backtrace crate's module run at its Cargo edition (rustc-demangle 2015: closures capture whole
+    variables; object, addr2line 2018; adler2, memchr, miniz_oxide 2021; gimli 2024);
+  - build-run (b993b9029): lib-unit's -O0 UnreachableEnumBranching on a field place's discriminant (`if let Ok(ref mut p) =
+    self.parser`), the field's type by the instance body's projections;
+  - resolve (e0ceb116b): the backtrace crates' dependencies in their extern prelude (adler2 for miniz_oxide, memchr for object,
+    gimli for addr2line);
+  - core-check (036076c32): an enum discriminant that casts or names a module constant (miniz_oxide's TINFLStatus).
+  - core's `str::as_bytes` (#[inline(always)]) added to core's export alone (core-inline-keys.txt and the --add run over that one
+    key; not the 28 std-wanted keys of cycle 1).
+- Results (lib-unit compare): adler2 2/0/0 (unchanged), memchr no items, rustc_demangle 25/15/5 -> 35/7/3, miniz_oxide 0/0/8,
+  object 1/1/0, gimli 6/3/2, addr2line 5/3/0: 49 of 74 items equal.
+Left, by cause (the report has each): mono.ae's (rust-l1's file, not edited here): closure symbols of a dependency crate without
+the instantiating crate (def-kind of a `::{closure#N}` path), an upstream `#[inline]` fn's symbol (memchr::memchr), array
+lengths named by constants and a crate's own ADT fields from its sources (miniz_oxide); the runtime pipeline's var_debug_info
+(a `?;`'s non-zero-sized `val` keeps rustc's ControlFlow in memory); promoted constants' padding written initialized (rustc:
+undef); drop glue on the unwind path (gimli's push, addr2line's path_push); miniz_oxide's `core::State` (its own module `core`
+through `use super::*` over the extern crate) and `adler2::Adler32::from_checksum`.
+Alternatives: editing mono.ae for the closure kind (one line), left to the main session as the task asks for files rust-l1
+touches; one ungated typeck change for probing (it is rustc's rule), gated to keep std's records fixed.
