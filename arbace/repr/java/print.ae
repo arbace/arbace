@@ -1371,61 +1371,12 @@
                            (not= "java.lang.Object" (class-binary sc c))))))
           (concat (butlast args) (nth a 2)))))))
 
-(defn- raw-rooted?
-  "Is receiver form `r` of a raw type in the printed Java: a local printed with a generic class's
-  erasure (untagged, or tagged with the bare class), or an instance call on such a receiver (a
-  raw type's members are erased, JLS 4.8)?"
-  [env r]
-  (cond
-    (and (symbol? r) (nil? (namespace r)) (local? env r) (nil? (meta-tag r)))
-    (let [t (:tag (get (:locals env) (name r)))
-          b (local-jtype env r)]
-      (boolean (and (or (nil? t) (symbol? t)) b (not (prim-names b)) (not (str/ends-with? b "[]"))
-                    (or (seq (:tparams (decl-of b))) (pack-generic? b)))))
-    (and (seq? r) (nil? (meta-tag r)) (symbol? (head r)) (nil? (namespace (head r)))
-         (let [hn (name (head r))] (and (str/starts-with? hn ".") (not (str/starts-with? hn ".-")) (> (count hn) 1)
-                                        (not (#{".." ".new" ".super"} hn)))))
-    (raw-rooted? env (second r))
-    :else false))
-
-(defn- raw-recv-mref-cast
-  "The cast \"(F<A>) \" of an unbound method reference argument `a` (C/.m, its function type's
-  instantiated types recorded) of a call on a raw receiver (:raw-recv), or nil: the raw receiver's
-  parameter is the raw interface, whose function type takes Object (queue.stream().mapToInt(
-  Integer::intValue) of a raw queue)."
-  [env a raw?]
-  (when (and raw? (is? a 'method-ref) (nil? (meta-tag a)) (not (is? (second a) '&))
-             (vector? (nth a 2 nil)) (seq (nth a 2))
-             (some #(and (symbol? %) (not (#{'Object 'java.lang.Object} %)) (not (prim-names (str %)))) (nth a 2)))
-    (when-let [t (fi-instance-text (assoc env :all-bound true) a)]
-      (when (str/includes? t "<") (str "(" t ") ")))))
-
-(defn- raw-lambda-arg-cast
-  "The cast \"(C<A>) \" of a lambda's parameter `a` tagged raw C passed at index `i` for the one
-  candidate's parameter declared C<A> without type variables, or nil."
-  [env a cands i]
-  (when (and (symbol? a) (nil? (namespace a)) (nil? (meta-tag a)) (= 1 (count cands))
-             (:lambda (get (:locals env) (name a))))
-    (let [m (first cands) sc (:scope env)
-          j (min i (dec (count (:ps m))))
-          pf (get (:pforms m) j)
-          t (:tag (get (:locals env) (name a)))]
-      (when (and pf (seq? pf) (symbol? t) (symbol? (first pf))
-                 (not (and (:varargs? m) (= j (dec (count (:ps m))))))
-                 (not (get (:ps-mtvar m) j)) (not (get (:ps-ctvar m) j))
-                 (let [b (class-binary sc t)]
-                   (and b (= b (class-binary sc (first pf)))
-                        (or (generic-class? sc t) (pack-generic? b)))))
-        (str "(" (type-text sc pf) ") ")))))
-
 (defn- args-text
   ([env args] (args-text env args nil))
   ([env args cands]
    (if-let [spread (spread-varargs env args cands)]
      (args-text env spread nil)
-   (let [raw-recv? (:raw-recv env)
-         env (dissoc env :raw-recv)
-         ats (mapv (fn [a] (if (integer? a) :int-literal (type-of env a))) args)]
+   (let [ats (mapv (fn [a] (if (integer? a) :int-literal (type-of env a))) args)]
    (str "(" (str/join ", " (map-indexed (fn [i a]
                                           (let [a (arg-form a)
                                                 ;; an erasure cast of a generic value for a parameter that
@@ -1498,18 +1449,6 @@
                                                      (and (seq? df) (symbol? (first df)) (class-binary (:scope env) (first df))
                                                           (some #(and (symbol? %) (= "?" (name %))) (tree-seq coll? seq df)))))
                                               (str "(" (type-text (:scope env) (first (decl-form-of env a))) ") " (ex-text env a P-UNARY))
-                                              ;; queue 538 (t05474): a lambda's parameter, tagged with the raw
-                                              ;; erasure of the parameterized type javac inferred, for the one
-                                              ;; candidate's parameter of that class parameterized without type
-                                              ;; variables (jobs(Collection<Integer>) of x -> jobs(x)): the cast
-                                              ;; (Collection<Integer>) x, else javac's call is unchecked and its
-                                              ;; result erased (Stream<Job> read as Stream, the next lambda's job
-                                              ;; typed Object); the converter drops the cast (the same erasure)
-                                              ;; queue 538 (t05691): a method reference on a raw receiver
-                                              (raw-recv-mref-cast env a raw-recv?)
-                                              (str (raw-recv-mref-cast env a raw-recv?) (second (ex env a)))
-                                              (raw-lambda-arg-cast env a cands i)
-                                              (str (raw-lambda-arg-cast env a cands i) (ex-text env a P-UNARY))
                                               :else (ex-text env a P-ASSIGN))))
                                         args))
         ")")))))
@@ -2546,8 +2485,7 @@
             (e P-POSTFIX (str (when rt (str rt ".")) (ident (subs hn 2)))))
           (and (str/starts-with? hn ".") (> (count hn) 1) (not (#{".." ".new" ".super"} hn)))
           (let [[r & more] args]
-            (call-text (cond-> env (raw-rooted? env r) (assoc :raw-recv true))
-                       (receiver-text env r) (subs hn 1) h more (recv-jtype env r)))
+            (call-text env (receiver-text env r) (subs hn 1) h more (recv-jtype env r)))
           (and (namespace h) (not (#{"arbace.core" "clojure.core"} (namespace h))))
           (let [c (class-text (:scope env) (symbol (namespace h)))]
             (call-text env c hn h args))
@@ -4005,9 +3943,7 @@
       ;; T[]::new, which javac makes a lambda of (SPEC §5.12)
       (e P-POSTFIX (str (type-text sc (second (first body))) "::new"))
       (let [ps (vec (remove #{'&} params))
-            ;; :lambda, a lambda's parameter: its tag is the erasure of the type javac infers
-            ;; (args-text's raw-lambda-arg-cast)
-            env' (reduce (fn [env p] (add-local env p :lambda true)) (assoc (fn-env env) :ret-void void?
+            env' (reduce (fn [env p] (add-local env p)) (assoc (fn-env env) :ret-void void?
                                                                 :ret-jt (if-let [r (:tag pm)] (erase (:scope env) r) "java.lang.Object")
                                                                 :ret-tag (:tag pm))
                          ps)
@@ -4106,9 +4042,7 @@
        (str
         (fi-cast-text env fi)
         (cond
-         recv (let [rt (or (mref-new-recv-text env recv fi mname) (receiver-text env recv) "this")]
-                ;; ^:null-check: the source's parentheses, which make javac null-check the new (queue 538)
-                (str (if (:null-check (meta recv)) (str "(" rt ")") rt) "::" ta mname))
+         recv (str (or (mref-new-recv-text env recv fi mname) (receiver-text env recv) "this") "::" ta mname)
          qual (str qual "::" ta mname)
          :else (str "this::" ta mname))))))
 
