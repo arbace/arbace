@@ -20513,3 +20513,57 @@ headers) and the targets: all pass but the known failures (cpp2a/constinit11.C's
 line 0), the control pair failing. Recorded in that order (`--judge --record`): own pass 2,421 -> 2,438, none lost, 17 rows to own
 pass: cpp0x/alias-decl-42, forw_enum10, pr85437-2, this1, cpp1y/constexpr-84192, constexpr-neg1, constexpr-new, cpp23/constexpr-nonlit5,
 -nonlit8, -nonlit13, cpp2a/concepts-pr59200, consteval-memfn1, consteval11, consteval7, inline-asm3, lambda-uneval14, parse/pr81247-b.
+
+## 2026-11-24: java-speed-1124: the interpreter's hot paths, and RandomAccess for interpreted classes (branch `java-speed-1124`, from next `440cf0273`)
+
+The user's decision of 2026-11-24 (relayed by the coordinator): a faster interpreter, so that the interp level's timeouts that
+are slowness alone (`:speed-hang`'s interp rows outside JD6's `:jit-loops`, n/a) pass within their limits. The rows timing out at
+interp in test/java/check-interp.edn outside `:jit-loops`: t04494 (Character/Supplementary), t04620 (StrictMath/ExhaustingTests),
+t04656 (StringBuffer/ECoreIndexOf#id0), t05126 (FileChannel/InterruptDeadlock: a hang, a jrt bug, not slowness), t05477
+(Collections/BigBinarySearch), t05498 (Collections/RotateHuge), t05714 (DoubleAdderDemo), t05716 (LongAdderDemo), t05718
+(forkjoin/Integrate), t06419 (switchnull/SwitchNull) and t07728 (ReflectOutOfMemoryError, `:oom`, not slowness).
+
+Measured on train 1's executable (`.tmp/gate-exe/fb29d2672f0d7bf945b6`), each test run alone to its end by
+`.tmp/js/stamp.sh` (the main checkout's cached forms, run.ae as bin/java-check runs it, stdout lines time-stamped), and profiled
+by `ARBACE_CPUPROFILE` (a harness `.tmp/js/dev/run-prof.ae` that ends the run by System.exit after N seconds, so that jrt writes
+the profile): CPU seconds, the limit's ceiling being 600 s of CPU (GTS208 (a)):
+- t05714 1,084 s, t05716 871 s (32 threads, 63 x 10^7 interpreted increments on this 64-processor host: NCPU decides the work);
+- t05718's three actions: dynamic 771 s, serial 125 s, fork 755 s (ForkJoinPool of 64 workers);
+- t04656 about 2,200 s (eight exhaustive phases of about 230 s of wall each), t04620 about 1,500 s by its first phases (sqrt's
+  2^22 inputs 70 s of wall; 16 unary and 3 binary cases, the binary ones 2^24 inputs each);
+- t05477: the cause is not speed: Collections.binarySearch took iteratorBinarySearch (a ListIterator over 2^30 elements) because
+  an interpreted class implementing RandomAccess was no RandomAccess in the world's code: Dyn's interfaces left out the
+  interfaces declared from reflection (arbace/j2g/dyn.ae, since c2g's phase 2B), and RandomAccess is the one (a marker);
+- t06419 is 2^32 interpreted calls (testSwitchIntegerBoxExhaustive) and t05498 about 10^10 interpreted calls of MockList.set from
+  Collections.rotate1 (sizes 2^30 and 2^31): exhaustive loops no tree-walking interpreter finishes within 600 s of CPU.
+
+The profiles (t04494, t04620, t04656, t05477, t05498, t05716, t06419): allocation and the collector 20-40% (a Recur's two temporary
+arrays each turn of a loop, a frame's three objects, the reflective calls' boxed arguments), a generic interface assertion
+(jrt.As[Compiler$CF$Node] on each element of a Node[]: assertE2I2, getitab and the itab table's search) 10-14%, reflective calls
+of the world's methods 25-50% where the test calls the JDK (Method.invoke's callWrapping, its defer and recover,
+InvocationTargetException made and unwrapped, the receiver's instance check), Rt/toJ's Number interface assertion and virtual
+call 10% where a loop reads an int field.
+
+Built (arbace/lang/Compiler.ae's CF, arbace/j2g/dyn.ae; no change of the interpreter's semantics):
+- `CF$Cell`: a Node[] kept also as a chain of cells, walked with typed field loads, for Do's statements, Let's initial values,
+  Recur's values and the arguments of CallI, CallV and CallR (`Rt/argsC`, `Rt/boxedC`); the arrays stay (the builder's API);
+- Recur with one or two values stores them without arrays (two through locals, both evaluated before either is stored, as the
+  arrays did), three or more as before;
+- `Host.invoke`: a reflective call of the world's method; the Go host's calls the invoker directly
+  (`Compiler$Evaluator/invokeDirect`, compiled interop's call): no InvocationTargetException, no recover frame (a Go run-time
+  error now reaches the interpreter's catch unmapped, which jrt.Catch maps as callWrapping's did); CallR's and CallV's final
+  reflective call take it, their `Rt/unwrap` catch gone (a callee's own InvocationTargetException, Method.invoke called
+  reflectively, now propagates as it is, where unwrapping it was wrong); CallV's other reflective paths unchanged;
+- `Rt/boxed` without arguments, and a frame without reference or primitive slots, share empty arrays;
+- `Rt/toJ` tests Integer and Long, `Rt/toD` Double, by their final classes before Number;
+- Dyn implements the JDK's interfaces declared from reflection that have no methods (RandomAccess), with the nominal check
+  as for the others.
+Checked: Compiler.ae read and analyzed by j2g (`bin/j2g --lang --jdk jdk/forms --slice '^arbace/lang/Compiler$' --root
+CF's classes`, 0 analysis failures) and the CF methods' Go forms read (the cell walks with no assertion); `bin/j2g-unit`: 223 pass,
+the 7 failures the stage 0 host's older analysis gives (type annotations, invokers), none Dyn's. Not testable before a build (the
+interpreter's nodes are compiled into the executable): ready for the train; the rows' runs and the records on its build.
+Alternatives considered: GOGC=800 for the interp level (ExhaustingTests 191 -> 159 s of CPU in 150 s, 3.8 GB resident: the
+memory, rejected); j2g's `:aget` of an interface element as a non-generic assertion for the whole program (Go caches a static
+assertion site; all of j2g's output changes: left for a later round); a typed reflective call (the arguments unboxed into Go
+values by a native: the arrays it needs cost what the boxing does); frames reused per thread by depth (a call from the world
+back into the interpreter restarts the depth: unsafe without more state).
