@@ -7514,6 +7514,38 @@
                              names)))
                    ds)))))
 
+(defn- incomplete-qualifier-bodies-silent
+  "queue 567: GCC's recovery after a member function definition whose qualifying class is incomplete ([class.mem.general]/? with
+  [basic.def.odr]: `int A<int>::f () {...}` where A<int> has no definition, GCC's \"invalid use of incomplete type\" at the
+  declarator): the definition is dropped with its body, so the body's own errors are not given (template/crash98.C's `return i;`
+  after the partial specialization that declined A<int>). The errors on the lines after the declarator's, through the body's
+  closing brace, dropped."
+  [ds ^String src ^java.util.ArrayList starts]
+  (let [spans (for [d ds :when (= :error (:kind d))
+                    :let [[_ cls] (re-find #"^invalid use of incomplete type.*?'([A-Za-z_][\w:]*)" (str (:msg d)))]
+                    :when cls
+                    :let [l (long (:line d))
+                          ls (long (.get starts (dec l)))
+                          le (let [i (.indexOf src "\n" (int ls))] (if (neg? i) (.length src) i))
+                          line (subs src ls le)]
+                    :when (re-find (re-pattern (str "\\b" (java.util.regex.Pattern/quote (last (str/split cls #"::"))) "\\s*(<[^;{}]*>)?\\s*::\\s*~?[A-Za-z_]\\w*\\s*\\(")) line)
+                    ;; (the declarator's line without its `//` comment, a dg directive's braces; else the body from the next line)
+                    :let [code (let [i (.indexOf line "//")] (if (neg? i) line (subs line 0 i)))
+                          from (if (or (str/includes? code "{") (str/includes? code ";")) ls (inc le))
+                          ob (.indexOf src "{" (int from))
+                          semi (.indexOf src ";" (int from))]
+                    :when (and (pos? ob) (or (neg? semi) (< ob semi)))
+                    :let [cb (loop [i (inc ob) depth 1]
+                               (cond (>= i (.length src)) -1
+                                     (= \{ (.charAt src i)) (recur (inc i) (inc depth))
+                                     (= \} (.charAt src i)) (if (= 1 depth) i (recur (inc i) (dec depth)))
+                                     :else (recur (inc i) depth)))]
+                    :when (pos? cb)]
+                [l (first (line-col starts cb))])]
+    (if (empty? spans)
+      ds
+      (vec (remove (fn [d] (some (fn [[a z]] (< (long a) (long (:line d)) (inc (long z)))) spans)) ds)))))
+
 (defn diagnose
   "The diagnostics of the C++ file at `path` (named `main`, as the oracle names it), read at the standard `std` with the
   options `args`: {:diags [...] :other n (errors outside the main file) :declines n} or {:refused why :message m}."
@@ -7615,7 +7647,7 @@
                                     (do (.add given [nm (:line d) inner]) false))))))
                           ds))]
       ;; (cpp-gnu: a check's error with no line, :line 0, an implicit declaration's, counted with those outside the main file)
-      (let [ds (declined-names-silent ds u src starts main)]
+      (let [ds (incomplete-qualifier-bodies-silent (declined-names-silent ds u src starts main) src starts)]
       {:diags (vec (remove #(= 0 (:line %)) ds))
        :other (+ (long other) (count (driver-errors *driver-args*)) (count (filter #(= 0 (:line %)) ds))) :declines (:declines u)}))
     (catch arbace.lang.ExceptionInfo e
