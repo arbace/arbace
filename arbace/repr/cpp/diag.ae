@@ -7615,3 +7615,52 @@
       (vec out))))
 
 (swap! checks conj internal-undefined)
+
+;; cpp-rind (2026-11-24): [class.union.anon]/1, an anonymous union's member names are declared in the scope where the union is
+;; declared and conflict with that scope's other declarations ([basic.scope.scope]/4): a namespace-scope or block-scope variable
+;; or function of a member's name, before or after the union, or another anonymous union's member; GCC's "redeclaration of
+;; 'int v1'" (or "conflicting declaration"), at the later declaration (lookup/anon6.C, other/anon4.C).
+(defn anon-union-redecls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n nm] (when-let [o (mine-at n main)]
+                             (let [[l c] (line-col starts o)]
+                               (.add out {:line l :col c :kind :error :rule :anon-union :msg (str "redeclaration of '" nm "'")}))))
+        anon-union? (fn [n] (and (= "CXXRecordDecl" (:kind n)) (= "union" (:tagUsed n)) (nil? (:name n)) (:completeDefinition n)))]
+    (letfn [(region! [nodes]
+              ;; the region's declarations in order: [name node anon?]
+              (let [seen (java.util.HashMap.)
+                    xs (vec (mapcat (fn [n] (if (= "DeclStmt" (:kind n)) (filter map? (:inner n)) [n])) (filter map? nodes)))]
+                (doseq [[i n] (map-indexed vector xs)]
+                  (cond
+                    ;; an anonymous union: followed by its implicit variable (not a named object of the union type)
+                    (and (anon-union? n) (let [nx (get xs (inc i))] (and nx (= "VarDecl" (:kind nx)) (:isImplicit nx))))
+                    (doseq [f (:inner n) :when (and (= "FieldDecl" (:kind f)) (string? (:name f)) (seq (:name f)))]
+                      (if (.containsKey seen (:name f))
+                        (report! n (:name f))
+                        (.put seen (:name f) :anon)))
+                    (and (#{"VarDecl" "FunctionDecl"} (:kind n)) (string? (:name n)) (seq (:name n)) (not (:isImplicit n)))
+                    (when (= :anon (.get seen (:name n)))
+                      (report! n (:name n)))
+                    :else nil)
+                  (when (and (#{"VarDecl" "FunctionDecl"} (:kind n)) (string? (:name n)) (seq (:name n)) (not (:isImplicit n))
+                             (not (.containsKey seen (:name n))))
+                    (.put seen (:name n) :decl)))
+                ;; nested regions
+                (doseq [n xs]
+                  (case (:kind n)
+                    "NamespaceDecl" (region! (:inner n))
+                    "FunctionDecl" (doseq [b (:inner n) :when (= "CompoundStmt" (:kind b))] (block! b))
+                    nil))))
+            (block! [b]
+              (region! (:inner b))
+              (doseq [x (:inner b) :when (map? x)] (if (= "CompoundStmt" (:kind x)) (block! x) (stmts! x))))
+            (stmts! [x]
+              (cond (#{"CXXRecordDecl" "LambdaExpr"} (:kind x)) nil
+                    :else (doseq [[k v] x :when (and (not= k :_ent) (coll? v))]
+                            (doseq [y (if (map? v) [v] v) :when (map? y)]
+                              (if (= "CompoundStmt" (:kind y)) (block! y) (when-not (#{"CXXRecordDecl" "LambdaExpr"} (:kind y)) (stmts! y)))))))]
+      (region! (:nodes u)))
+    (vec (distinct out))))
+
+(swap! checks conj anon-union-redecls)
