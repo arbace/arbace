@@ -8491,3 +8491,49 @@
     (vec out)))
 
 (swap! checks conj explicit-spec-redefinitions)
+
+;; queue 567: C++98's [temp.expl.spec]/2: an explicit specialization is declared in the namespace of which the template is a member,
+;; or, for a member template, in the namespace of which its enclosing class is a member (C++11's CWG 374 allows an enclosing
+;; namespace, a qualified declaration): at C++98 a `template<>` declaration at namespace scope whose declarator is qualified by a
+;; namespace the main file declares and that the declaration is not in, GCC's "specialization of '...' in different namespace", at
+;; the qualified name (template/spec36.C's `template <> basic_string MyNS::MyClass::test()` at global scope). The main file's text,
+;; its comments and literals blanked, its braces' depth followed: only declarations at the global scope's depth 0.
+(defn expl-spec-other-namespace
+  [u starts ^String src ^String main]
+  (when (< (long (cxx-year (:std u))) 11)
+    (let [nss (set (keep (fn [n] (when (and (= "NamespaceDecl" (:kind n)) (string? (:name n)) (seq (:name n))) (:name n))) (:nodes u)))]
+      (when (seq nss)
+        (let [b (StringBuilder. src)
+              n (.length src)]
+          ;; (comments and string or character literals blanked, newlines kept)
+          (loop [i 0]
+            (when (< i n)
+              (let [c (.charAt src i)]
+                (cond (and (= c \/) (< (inc i) n) (= \/ (.charAt src (inc i))))
+                      (recur (loop [j i] (if (or (>= j n) (= \newline (.charAt src j))) j (do (.setCharAt b j \space) (recur (inc j))))))
+                      (and (= c \/) (< (inc i) n) (= \* (.charAt src (inc i))))
+                      (recur (loop [j i] (cond (>= j n) j
+                                               (and (= \* (.charAt src j)) (< (inc j) n) (= \/ (.charAt src (inc j)))) (do (.setCharAt b j \space) (.setCharAt b (inc j) \space) (+ j 2))
+                                               :else (do (when-not (= \newline (.charAt src j)) (.setCharAt b j \space)) (recur (inc j))))))
+                      (or (= c \") (= c \'))
+                      (recur (loop [j (inc i)] (cond (>= j n) j
+                                                     (= \\ (.charAt src j)) (do (.setCharAt b j \space) (when (< (inc j) n) (.setCharAt b (inc j) \space)) (recur (+ j 2)))
+                                                     (= c (.charAt src j)) (inc j)
+                                                     (= \newline (.charAt src j)) j
+                                                     :else (do (.setCharAt b j \space) (recur (inc j))))))
+                      :else (recur (inc i))))))
+          (let [code (str b)
+                depth (int-array (inc n))
+                _ (loop [i 0 d 0] (when (< i n) (aset depth i (int d)) (let [c (.charAt code i)] (recur (inc i) (case c \{ (inc d) \} (max 0 (dec d)) d)))))
+                m (re-matcher #"\btemplate\s*<\s*>\s*([^;{}]*?)\b([A-Za-z_]\w*)\s*::" code)
+                out (java.util.ArrayList.)]
+            (while (.find m)
+              (let [nm (.group m 2) at (.start m 2)]
+                (when (and (zero? (aget depth (.start m))) (contains? nss nm)
+                           (not (re-find #"[(=]" (.group m 1))))
+                  (let [[l c] (line-col starts at)]
+                    (.add out {:line l :col c :kind :error :rule :expl-spec
+                               :msg (str "specialization of a member of '" nm "' in different namespace")})))))
+            (vec out)))))))
+
+(swap! checks conj expl-spec-other-namespace)
