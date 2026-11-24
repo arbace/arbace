@@ -20942,3 +20942,51 @@ both. The records need no change.
   test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
   t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
   3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+
+## 2026-11-24: C++'s read independence: the own front end on the dg rows clang's dumps judged (branch `cpp-rind-1124`)
+
+The burst's C++ read-independence stream, from mac/next `7de5de3ec`. C++'s read stage (test/crops/independence.edn's `:read` fact,
+`:count-from` test/cpp/check-dg-own-linux-amd64.edn): the token check's 1,934 files own (pp-ref), each dg row the own front end
+passes by its own dg-error lines own, every other dg row 0.5 (the cell's verdict there clang's recorded dumps, cxxdump-dg-error). At
+the base: 2,421 own of 4,350 counted rows, (1934 + 2421 + 0.5 x 1929) / 6284 = 0.847. Of the 1,929: 1,681 rows clang's dumps pass and
+the own front end does not (this stream's), 248 both fail (the deferred rows, cpp-sweep's). Nothing else of the stage leans on a
+toolchain: libstdc++'s and musl's headers come from the pinned tarballs (bin/repr-cpp target), the target's answers are Arbace's own,
+the skim cache is a cache; so the only way up is the own front end passing those rows.
+
+- Method: the 1,681 taken by the shortest tests first and by cause, each rule from the standard's text and the GCC messages the tests
+  state; no GCC or clang code read. Probes by `.tmp/at.sh` (rind.dump's nodes and diag verbs, the namespaces loaded once) and
+  `bin/repr-cpp dg --front native --only LIST`. The rules: doc/cpp/CPP-SURVEY.md, "As built: cpp-rind". The parser's rules are soft
+  diagnostics (the tree unchanged: no tree check, round trip or code generator input moves); the checker's that could change what
+  the code generator builds are under `checking?` alone (auto x{e}, auto = {..}, DR 1601's ranking, the composite pointer type,
+  explicit instantiations' members), so the cpp-rt stream's runtime build sees the code generator as before.
+- Crashes fixed: empty prefixed character literals (lit.ae), file-scope asm qualifiers (parse.ae's skip-balanced! on a non-bracket),
+  the shared preprocessor's empty token queue at the input's end (arbace/repr/c/pp.ae's ts-shift: C's preprocessor too, an end of file
+  where an index -1 had thrown; no C record moves, C never reached it), two Sema stack overflows (a constructor call needed again by its
+  own argument's conversion; a recursive default argument).
+- False errors removed (these had failed rows the clang record passes): `auto x = {a, b}` ("excess elements in scalar initializer"),
+  `const int D::* q = &D::x;` (no conversion), array references bound by a qualification conversion (DR 330), DR 1601's promotions
+  (a false ambiguity), the composite pointer type of base and derived class pointers in `?:`.
+- Regression probe on the head before the record: 250 random rows the base record passes, all 250 still pass.
+- Later rules (after the draft above), all in the survey's "As built: cpp-rind": the standards' features used early (pedantic),
+  C linkage agreement, implicit special members' definitions, friend default arguments, ref-qualifier overloads, VLAs under
+  -pedantic-errors (`__extension__` spared: a first version had wrongly passed ext/constexpr-vla3.C, the record's row read again is
+  owed, below), explicit specializations defined twice, explicit instantiations' member functions analyzed by the checker, and more.
+- Records: a whole-corpus run with 8 threads under GOMEMLIMIT=3000MiB thrashed in GC (6 GB resident, about 2.5 h and 24 CPU-hours
+  without finishing) and was stopped by its process group, nothing recorded (an earlier stop by PID alone let the script's own step
+  write a record of "no read row" rows: restored from git before anything was committed). The record was then made from whole runs
+  of the non-passing rows (2,097 less the dialect directories' 230 n/a: 1,867, in parts of 3 threads each, GOMEMLIMIT=2800MiB),
+  each part judged with `bin/repr-cpp dg --front native --judge --record` once finished: three quarters recorded (dg-run01's 933,
+  dg-r00's and dg-r01's 234 each); the last two quarters (.tmp/dg-r02, .tmp/dg-r03, 233 each) were still running at the wrap-up.
+  The rows that passed were kept as recorded, checked by samples on the head: 250 + 300 random passing rows and about 300 more chosen
+  by construct (out-of-class definitions, explicit specializations, templates, new-expressions, designators, arrays), one regression
+  found (ext/desig2.C, `__extension__`) and fixed before the runs.
+- Result so far: the own record 2,467 → 2,714 own passes (247 rows to own pass, none lost); C++'s read independence 0.850 → 0.870
+  (crops-score's stage; the stream's base at 7de5de3ec 0.847); the read cell's completeness unchanged (6,063 / 0 / 221: these rows
+  were the clang record's passes already). bin/reap --record, bin/crops-score --record, --judge --strict and bin/records-check: 0
+  problems.
+- Left (decisions for the user): the 81 dialect rows clang's dumps pass (OpenMP 77, -fpermissive 2, -fms-extensions 1, -fcontracts
+  1), which the own front end takes none of by CP399 (a): (a) count them out of the judge's cases as the failing dialect rows are
+  (recommended: the dialect is out of the read level by the user's decision, its passing rows are clang's alone), (b) build OpenMP's
+  directives and clauses into the front end. The rest of the gap is the checker's depth: overload resolution and template
+  instantiation diagnostics, uninstantiated templates' non-dependent constructs (definition-time checks), units with a syntax error
+  (the checker does not run after a decline), and a long tail of single rows.
