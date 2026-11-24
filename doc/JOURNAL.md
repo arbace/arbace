@@ -20441,7 +20441,8 @@ all pass (its decoding errors too); test_cmd_line_script's two null-byte rows st
 decodes in Go: "source code string cannot contain null bytes"; the record passes them on goi's path); test_threading's
 test_can_interrupt_tight_loops and test_signal's test_stress_modifying_handlers fail again on the compiled path, which runs a
 tight loop as compiled Go with no switch to the other thread; on goi's path (bin/pyi check, the checkout's runtime
-interpreted) V4_PLACEHOLDER.
+interpreted; .tmp/os/v4.log) both pass, as does test_subprocess's test_send_signal; test_close_fds there outlived the
+runner's 300 s (three children each starting the interpreted runtime), which the compiled build's train run will settle.
 
 Records: none written here (the train's build records them). Ready for train 3: py-os-1124. Expected eval rows to move to pass
 (the record's non-passes that pass in these runs, 92, listed in .tmp/os/expected-pass.txt of the worktree: test_cmd_line 15,
