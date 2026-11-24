@@ -6016,6 +6016,36 @@
 
 (swap! checks conj static-this)
 
+;; cpp-sweep: [namespace.memdef]/3 with [basic.scope.declarative]/5, a friend class declaration with an unqualified name declares
+;; it in the innermost enclosing namespace: there a namespace of that name is GCC's "'template<...> class N' redeclared as different
+;; kind of entity", at the befriending class's opening brace (parse/pr81247-b.C; the namespace's own member template that names it,
+;; pr81247-c.C, declares N::N, no error). The main file's classes and class templates at namespace scope.
+(defn friend-namespace-clash
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        friend-names (fn [r] (keep (fn [f] (when (= "FriendDecl" (:kind f))
+                                             (some #(when (#{"ClassTemplateDecl" "CXXRecordDecl"} (:kind %)) (:name %)) (:inner f))))
+                                   (:inner r)))
+        walk (fn w [nodes]
+               (let [nss (set (keep #(when (and (= "NamespaceDecl" (:kind %)) (string? (:name %))) (:name %)) nodes))]
+                 (doseq [n nodes :when (map? n)]
+                   (case (:kind n)
+                     ("NamespaceDecl" "LinkageSpecDecl") (w (:inner n))
+                     ("CXXRecordDecl" "ClassTemplateDecl")
+                     (let [r (if (= "ClassTemplateDecl" (:kind n)) (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n)) n)]
+                       (when (and r (:completeDefinition r) (= main (get-in r [:loc :file] main)) (some nss (friend-names r)))
+                         (when-let [o (get-in r [:loc :offset])]
+                           (let [i (.indexOf src "{" (int o))]
+                             (when (< -1 i n-src)
+                               (let [[l c] (line-col starts i)]
+                                 (.add out {:line l :col c :kind :error :rule :redecl :msg "friend class redeclared as different kind of entity (a namespace)"})))))))
+                     nil))))]
+    (walk (remove :_hdr (:nodes u)))
+    (vec out)))
+
+(swap! checks conj friend-namespace-clash)
+
 ;; A constexpr (or consteval) function's body before C++23 ([dcl.constexpr]/3 of C++11 to C++20, P2242 lifting the last of it): no
 ;; definition of a variable of static or thread storage duration ("'b' defined 'static' in 'constexpr' function only available with
 ;; '-std=c++23'"), no goto statement ("'goto' in 'constexpr' function only available with '-std=c++23'"); before C++20 (P1002) no
