@@ -2120,6 +2120,19 @@
              :when fid]
          fid)))
 
+(defn fnaddr-explicit-specs
+  "cpp-p2564 (the checker): the specializations an overload set's template-id names with no target type (`auto p = &f<int>;`,
+  [over.over]/3 with [temp.arg.explicit]/4): each template whose arguments the written ones give all, defaults filling the rest."
+  [e]
+  (vec (for [tid (:tmpls e)
+             :let [t (tmpl tid)
+                   fid (try (when (:targs-text e)
+                              (let [ex (explicit-args t (:targs-text e) (:targs-scope e))]
+                                (when-let [a (finish-deduction t (into {} (map-indexed vector ex)))] (instantiate-fn tid a))))
+                            (catch arbace.lang.ExceptionInfo _ nil))]
+             :when fid]
+         fid)))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Partial ordering ([temp.func.order], [temp.deduct.partial])
 
@@ -3112,8 +3125,30 @@
                                   :else (recur (dec i) d)))))]
                 (when i (when-let [m (re-find #"([A-Za-z_][A-Za-z_0-9]*)\s*$" (subs t 0 i))]
                           ;; the whole nested-name-specifier (S::Y<char>), outer parts plain names
-                          (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))]
-                            [(second m) (str (str/replace (or (second pre) "") #"\s" "") (second m) (subs t i)) nested])))))))))))
+                          (let [pre (re-find #"((?:[A-Za-z_][A-Za-z_0-9]*\s*::\s*)*)$" (subs t 0 (- i (count (first m)))))
+                                ;; (cpp-singles: outer parts that are template-ids too, `A<int>::B<int>::` of an explicit
+                                ;; specialization of a member template of a member class template, concepts-explicit-spec7.C:
+                                ;; the nested-name-specifier read backward over names, `::` and balanced angle brackets)
+                                pre2 (let [^String u (subs t 0 (- i (count (first m))))
+                                           ws? (fn [k] (and (>= k 0) (Character/isWhitespace (.charAt u (int k)))))
+                                           back-ws (fn [k] (loop [k k] (if (ws? k) (recur (dec k)) k)))
+                                           idc? (fn [k] (and (>= k 0) (let [c (.charAt u (int k))] (or (Character/isLetterOrDigit c) (= c \_)))))]
+                                       (loop [k (back-ws (dec (count u))) start (count u)]
+                                         (if (and (>= k 1) (= \: (.charAt u (int k))) (= \: (.charAt u (int (dec k)))))
+                                           (let [k2 (back-ws (- k 2))
+                                                 k3 (if (and (>= k2 0) (= \> (.charAt u (int k2))))
+                                                      (loop [j (dec k2) d 1] (cond (neg? j) nil
+                                                                                   (= \> (.charAt u (int j))) (recur (dec j) (inc d))
+                                                                                   (= \< (.charAt u (int j))) (if (= d 1) (back-ws (dec j)) (recur (dec j) (dec d)))
+                                                                                   :else (recur (dec j) d)))
+                                                      k2)
+                                                 k4 (when (and k3 (idc? k3)) (loop [j k3] (if (idc? (dec j)) (recur (dec j)) j)))]
+                                             (if (and k4 (not (Character/isDigit (.charAt u (int k4)))))
+                                               (recur (back-ws (dec k4)) k4)
+                                               (subs u start)))
+                                           (subs u start))))
+                                pre-s (if (and (sema/checking?) (str/includes? (str pre2) "<") (> (count (str pre2)) (count (str (second pre))))) pre2 (second pre))]
+                            [(second m) (str (str/replace (or pre-s "") #"\s" "") (second m) (subs t i)) nested])))))))))))
 
 (defn- class-key-scope
   "The scope a class template's (or its partial or explicit specialization's) declaration names with a
@@ -3822,7 +3857,12 @@
   and its arguments from the TemplateArgument kids and deduction from its type ([temp.deduct.decl])."
   [scope n & [cid]]
   (let [ts (filter #(and (= :tmpl (:e %)) (= :fn (:tk %)))
-                   (if cid (.get ^java.util.HashMap (:names scope) (:name n)) (sema/lookup scope (:name n))))
+                   (cond
+                     ;; (cpp-singles: a constructor template is its class's :ctor-tmpls, not a name of its scope, as attach-one!
+                     ;; finds it: `template<> template<> A<char>::A<char>(char);`, tc1/dr147.C)
+                     (and cid (sema/checking?) (= "CXXConstructorDecl" (:kind n))) (for [tid (:ctor-tmpls (abi/cls cid))] {:e :tmpl :tk :fn :id tid})
+                     cid (.get ^java.util.HashMap (:names scope) (:name n))
+                     :else (sema/lookup scope (:name n))))
         targs (filter #(= "TemplateArgument" (:kind %)) (kids n))
         doubt (atom false)
         try1 (fn [e]
@@ -4892,7 +4932,9 @@
       (when-not (or (:pending-def v) (and (#{:global :member-static} (:storage v)) (not (:defined v))))
         (let [t (loop [t (abi/non-ref (:ty v))] (if (abi/arr? t) (recur (:of t)) t))] (when (abi/class? (abi/unq t)) (swap! acc update :classes conj (:id t))))))
     (let [classes (reduce into #{} (map class-closure (:classes @acc)))
-          fns (into (:fns @acc)
+          ;; (cpp-singles: a constructor odr-used by an initialization its access error left out, sema's cx-ctor-access!)
+          fns (into (:fns @acc) (keep (fn [[id f]] (when (and (:cx-odr-used f) (:lazy f)) id)) @sema/*fns*))
+          fns (into fns
                     (mapcat (fn [cid] (let [c (abi/cls cid)]
                                          (concat (when (:dtor c) [(:dtor c)]) (when (abi/dynamic? cid) (keep :fn (:vtable c)))
                                                  ;; a deleting destructor's operator delete (the class's own)
@@ -5619,6 +5661,7 @@
                           (when-let [args (finish-deduction t @b)]
                             (try (instantiate-fn tid args) (catch arbace.lang.ExceptionInfo _ nil))))))
          :fnaddr-specs fnaddr-specs
+         :fnaddr-explicit-specs fnaddr-explicit-specs
          :conv-candidates conv-candidates
          :instantiate-class (fn [tid args] (instantiate-class tid args))
          ;; (a transform trait's name, not a function type returning a type named __x: __c_locale ())

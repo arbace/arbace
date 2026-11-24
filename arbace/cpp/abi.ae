@@ -42,7 +42,32 @@
 (defn integral? [t] (or (contains? int-ranks (bn t)) (enum? t)))
 ;; (cpp-s12: clang's extended floating types on x86-64, _Float16 and __float128 ([basic.extended.fp]), named by
 ;; <format>'s _S_to_arg_type under __FLT16_DIG__ and __SIZEOF_FLOAT128__: types of their own, half and fp128)
-(defn floating? [t] (#{:float :double :ldouble :float16 :float128} (bn t)))
+(defn floating? [t] (#{:float :double :ldouble :float16 :float128 :float32 :float64 :float128n :float32x :float64x :bf16} (bn t)))
+
+;; cpp-extfloat (2026-11-24): GCC's extended floating-point types on x86-64 ([basic.extended.fp], P1467R9), the own front end's:
+;; _Float32 :float32, _Float64 :float64, _Float128 :float128n (__float128, GNU's, :float128 stays a type of its own), _Float32x
+;; :float32x, _Float64x :float64x, __bf16 (std::bfloat16_t) :bf16, beside _Float16 :float16. [conv.rank]/2's floating-point
+;; conversion ranks by their formats' sets of values (c/target/abi.edn's :floats): half (p 11, emax 16) and bfloat (p 8, emax
+;; 128) unordered, both below single (float, _Float32) below double (double, _Float32x, _Float64) below the x87's (long double,
+;; _Float64x) below quad (__float128, _Float128); in one format the standard type's subrank least, then as g++ 15.2's usual
+;; arithmetic conversions order them (by hand): _Float32x below _Float64, __float128 below _Float128.
+(def ^:private fp-format {:float16 :half :bf16 :bfloat :float :single :float32 :single :double :double :float32x :double
+                          :float64 :double :ldouble :x87 :float64x :x87 :float128 :quad :float128n :quad})
+(def ^:private fp-order {:half 0 :bfloat 0 :single 1 :double 2 :x87 3 :quad 4})
+(def ^:private fp-subrank {:float32 1 :float32x 1 :float64 2 :float64x 1 :float128 1 :float128n 2})
+(def standard-floating #{:float :double :ldouble})
+
+(defn fp-rank-cmp
+  "[conv.rank]/2's order of the floating-point conversion ranks of the floating types `a` and `b`: -1, 0, 1, or nil (unordered)."
+  [a b]
+  (let [fa (fp-format (bn a)) fb (fp-format (bn b))]
+    (cond (= fa fb) 0
+          (= #{:half :bfloat} #{fa fb}) nil
+          :else (compare (long (fp-order fa)) (long (fp-order fb))))))
+
+(defn fp-format-of "A floating type's format (:half :bfloat :single :double :x87 :quad)." [t] (fp-format (bn t)))
+
+(defn fp-subrank ^long [t] (long (get fp-subrank (bn t) 0)))
 (defn arith? [t] (or (contains? int-ranks (bn t)) (floating? t)))
 (defn mptr? [t] (= :mptr (:k t)))
 (defn mfn-ptr? [t] (and (mptr? t) (= :fn (:k (:to t)))))
@@ -67,7 +92,8 @@
 ;; Sizes and alignments (x86-64 SysV, LP64)
 
 (def ^:private scalar-size {:bool 1 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 4 :uint 4 :char32 4
-                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :i128 16 :u128 16 :float 4 :double 8 :ldouble 16 :float16 2 :float128 16 :nullptr 8})
+                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :i128 16 :u128 16 :float 4 :double 8 :ldouble 16 :float16 2 :float128 16 :nullptr 8
+                            :float32 4 :float64 8 :float128n 16 :float32x 8 :float64x 16 :bf16 2})
 
 (declare layout)
 
@@ -402,6 +428,7 @@
             (:long :ulong :llong :ullong) 'i64
             (:i128 :u128) 'i128
             :float 'float :double 'double :ldouble 'x86_fp80 :float16 'half :float128 'fp128
+            :float32 'float :float64 'double :float128n 'fp128 :float32x 'double :float64x 'x86_fp80 :bf16 'bfloat
             :nullptr 'ptr)
        (:ptr :ref :rref) 'ptr
        :enum (llvm-type (underlying t) value?)
@@ -433,7 +460,8 @@
 
 (def ^:private builtin-codes
   {:void "v" :bool "b" :char "c" :schar "a" :uchar "h" :short "s" :ushort "t" :int "i" :uint "j" :long "l" :ulong "m"
-   :llong "x" :ullong "y" :i128 "n" :u128 "o" :float "f" :double "d" :ldouble "e" :float16 "DF16_" :float128 "g" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
+   :llong "x" :ullong "y" :i128 "n" :u128 "o" :float "f" :double "d" :ldouble "e" :float16 "DF16_" :float128 "g"
+   :float32 "DF32_" :float64 "DF64_" :float128n "DF128_" :float32x "DF32x" :float64x "DF64x" :bf16 "DF16b" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
 
 (defn- seq-id ^String [^long n]
   (if (zero? n) "S_"

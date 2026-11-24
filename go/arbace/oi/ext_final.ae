@@ -25,6 +25,10 @@
 ;; refused by Gc.finalise; floats and boxed integers are Go values in an interface) are accepted and never finalised, as
 ;; OCaml's static data. Divergence (OC11 (a), the order): a value reachable only from another finalisable value is found
 ;; unreachable one Go cycle later (Go's finalisers of a chain run one link a cycle), where OCaml's cycle finds both.
+;; Since 2026-11-24 (ocaml-eval: weak-ephe-final/ephetest's test6) a `last` entry is a cleanup of Go's (runtime.AddCleanup, its
+;; entry the argument): it keeps nothing alive, so a cycle of values with `last` finalisers is collected (a Go finaliser keeps what
+;; its value reaches, a cycle's for ever), and it runs once the value is unreachable after its `first` finalisers ran (Go's rule
+;; for an object with both), as the `last` table is updated after the `first` one.
 
 (go/type finEntry "finEntry is one registration: the function, its order, its table.\n" (struct
     ^{:tag Value} fn
@@ -66,11 +70,35 @@
 (go/func finSet "finSet gives the value v (at address p) its Go finaliser.\n" [^Value v ^uintptr p]
   (runtime/SetFinalizer v (fn [^any x] (finFire p x))))
 
+(go/func finFireLast "finFireLast is a `last` entry's cleanup: the entry fired, with unit.\n" [^finFired e]
+  (.Lock finMu)
+  (set! finBatch (append finBatch e))
+  (.Add finCount -1)
+  (.Store finPending 1)
+  (.Unlock finMu))
+
+(go/func finLastRegister "finLastRegister gives the value v a `last` entry of the function f: a cleanup of Go's.\n" [^Value f ^Value v]
+  (.Lock finMu)
+  (inc! finSeq)
+  (let [e (lit finFired :fn f :arg Unit :seq finSeq :last true)]
+    (.Add finCount 1)
+    (.Unlock finMu)
+    (type-switch [x v]
+      (case [(* Block)] (^{:inst [Block finFired]} runtime/AddCleanup x finFireLast e))
+      (case [(* Bytes)] (^{:inst [Bytes finFired]} runtime/AddCleanup x finFireLast e))
+      (case [(* FloatArray)] (^{:inst [FloatArray finFired]} runtime/AddCleanup x finFireLast e))
+      (case [(* Closure)] (^{:inst [Closure finFired]} runtime/AddCleanup x finFireLast e))
+      (case [(* Custom)] (^{:inst [Custom finFired]} runtime/AddCleanup x finFireLast e))
+      (case [(* Fiber)] (^{:inst [Fiber finFired]} runtime/AddCleanup x finFireLast e)))))
+
 (go/func finalRegister "finalRegister is caml_final_register (last false) and caml_final_register_called_without_value (last true).\n" [^Value f ^Value v ^bool last]
   (when [(values _ ok) (assert int v)] ok
     (InvalidArg "Gc.finalise"))
   (let [p (finAddr v)]
     (when (== p 0)
+      (return))
+    (when last
+      (finLastRegister f v)
       (return))
     (.Lock finMu)
     (inc! finSeq)
@@ -119,12 +147,21 @@
     (return))
   (runtime/GC)
   (let [done (make (chan (struct)))
-        s (addr (lit finSentinel))]
+        cdone (make (chan (struct)))
+        s (addr (lit finSentinel))
+        cs (addr (lit finSentinel))]
     (runtime/SetFinalizer s (fn [^{:tag (* finSentinel)} _] (close done)))
+    ;; the `last` entries' cleanups: a sentinel's cleanup on the same cycle, and the cleanup goroutines given their turn
+    (^{:inst [finSentinel (chan (struct))]} runtime/AddCleanup cs (fn [^{:tag (chan (struct))} c] (close c)) cdone)
     (runtime/GC)
     (select
       (case (<! done))
-      (case (<! (time/After (* 5 time/Second)))))))
+      (case (<! (time/After (* 5 time/Second)))))
+    (select
+      (case (<! cdone))
+      (case (<! (time/After (* 5 time/Second)))))
+    (for [i 0] (< i 4) (inc! i)
+      (runtime/Gosched))))
 
 (go/method runFinalisers "runFinalisers is caml_final_do_calls: the fired entries run one by one, not when a finalisation function runs on this\nthread already; an exception of one ends the calls and is raised.\n" [^{:tag (* Thread)} th]
   (when (.-infinal th)
