@@ -64,30 +64,35 @@
   ;; the classes defined so far
 
   (field ^:static ^:final ^Object LOCK (Object.))
-  ;; Class -> BytecodeClass
-  (field ^:static ^:final ^java.util.IdentityHashMap CLASSES (java.util.IdentityHashMap.))
-  ;; Klass -> BytecodeClass
-  (field ^:static ^:final ^java.util.IdentityHashMap KLASSES (java.util.IdentityHashMap.))
-  ;; defining loader (BOOT for null) -> binary name -> Class
-  (field ^:static ^:final ^java.util.IdentityHashMap BY_LOADER (java.util.IdentityHashMap.))
+  ;; java-design-1123 (SubclassGC, t04444): a class defined from bytes goes when its loader and its objects do, as on the
+  ;; JVM (JLS 12.7), so these tables hold it weakly: the class is kept by its defining loader (jrt's loader object holds
+  ;; the classes it defined), its BytecodeClass by its Klass (Klass.info) and its Klass by the class (jrt's ClassInfo.Dyn)
+  ;; Class -> WeakReference of its BytecodeClass
+  (field ^:static ^:final ^java.util.WeakHashMap CLASSES (java.util.WeakHashMap.))
+  ;; defining loader (BOOT for null) -> binary name -> WeakReference of the Class
+  (field ^:static ^:final ^java.util.WeakHashMap BY_LOADER (java.util.WeakHashMap.))
   (field ^:static ^:final ^Object BOOT (Object.))
   ;; the classes waiting for a class of a loader by name to publish their members again: "loader@name" -> list
   (field ^:static ^:final ^java.util.HashMap WAITING (java.util.HashMap.))
   (field ^:static ^int lambdas)
 
   (method ^:public ^:static ofClass ^BytecodeClass [^Class c]
-    (locking LOCK (cast BytecodeClass (.get CLASSES c))))
+    (let [r (cast java.lang.ref.WeakReference (locking LOCK (.get CLASSES c)))]
+      (if (nil? r) nil (cast BytecodeClass (.get r)))))
 
+  ;; the BytecodeClass of Klass k: its info, a class defined from bytes's (define)
   (method ^:public ^:static ofKlass ^BytecodeClass [^Compiler$CF$Klass k]
-    (locking LOCK (cast BytecodeClass (.get KLASSES k))))
+    (let [i (.-info k)]
+      (if (instance? BytecodeClass i) (cast BytecodeClass i) nil)))
 
   (method ^:static loaderKey [^ClassLoader l] (if (nil? l) BOOT l))
 
   ;; the class loader l defined by binary name n, or nil
   (method ^:public ^:static loaded ^Class [^ClassLoader l ^String n]
     (locking LOCK
-      (let [m (cast java.util.HashMap (.get BY_LOADER (Bytecode/loaderKey l)))]
-        (if (nil? m) nil (cast Class (.get m n))))))
+      (let [m (cast java.util.HashMap (.get BY_LOADER (Bytecode/loaderKey l)))
+            r (if (nil? m) nil (cast java.lang.ref.WeakReference (.get m n)))]
+        (if (nil? r) nil (cast Class (.get r))))))
 
   ;; the interpreted Klass of class c: a class defined from bytes, or a Java forms class the REPL defined
   ;; (arbace.classes.interp's registry); nil for a class of the world
@@ -255,14 +260,13 @@
           (set! (.-cls k) c)
           (set! (.-cls bc) c)
           (locking LOCK
-            (.put CLASSES c bc)
-            (.put KLASSES k bc)
+            (.put CLASSES c (java.lang.ref.WeakReference. bc))
             (let [lk (Bytecode/loaderKey l)
                   ^:mutable ^java.util.HashMap m (cast java.util.HashMap (.get BY_LOADER lk))]
               (when (nil? m)
                 (set! m (java.util.HashMap.))
                 (.put BY_LOADER lk m))
-              (.put m cname c)))
+              (.put m cname (java.lang.ref.WeakReference. c))))
           ;; @dev-strip-begin
           (set! (.-linker k) (anon Runnable [] (method ^:public run ^void [this] (Bytecode/link bc))))
           (Compiler$CFGo/setInit c (anon AFn [] (method ^:public invoke [this] (.init k) nil)))
