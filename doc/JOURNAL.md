@@ -19997,6 +19997,120 @@ turned to own pass (`bin/repr-cpp dg --front native --only`, no record) read aga
 failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read
 5,846 / 0 / 435 (cpp-small's) -> 5,872 / 0 / 410 (249 n/a); completeness 0.9760 -> 0.9770, independence 0.9660 -> 0.9666.
 
+## 2026-11-23: ocaml-1123: unboxed-primitive-args' compiled run stopped; the gen mode not in effect; the rerun under one ticket
+
+The coordinator stopped the build worktree's compiled run (about 12:00 to 13:30 under the big lock): its translation process (`o2j
+cprogs`, test/ocaml/o2j/tool.ae) grew to 45 GB in 86 minutes on unboxed-primitive-args' generated program (main.ml's 600 KB of
+Lambda: some thousand externals and their tests), leaving the host 4 GB and blocking the trains. header.awk's gen mode is not in
+effect at any level (60de8bb0d; `gnon` enables it once o2j translates a program of that size in bounded memory); the row keeps
+`:c-api` (deferred) at both AOT levels. The rerun (`.tmp/worktrees/ocaml-b/.tmp/oc/compiled-b.sh`): tool-ocamldoc/t01-t05,
+gc-roots/globroots_sequential, lib-threads/signal and delayintr, and the compiled Dynlink rows the Mac's 544 asks for
+(lib-dynlink-pr4229/main, lib-dynlink-domains/main, lib-dynlink-init-info/test), then the suite's opam/base64/test and
+opam/fmt/test_fmt, all under one big-lock ticket (HEAVY_MEM_GIB=16: the tool rows' shard's j2g peaked at 13.9 GB), every process
+under `ulimit -v` 24 GiB so that a runaway fails fast.
+
+## 2026-11-23: ocaml-1123: the compiled level's tool rows, first run; the compiled reruns split by memory
+
+- The 17 tool rows' compiled run (one shard, 09:12 to 15:17, mostly the lock's queue; j2g 13.9 GB, build-go 3,221 s and 31.8 GB
+  peak: the shard's ocaml.u package holds compiler-libs): no-alias-deps/aliases passes; 15 rows stop in an
+  ExceptionInInitializerError, oiobjinfo's Load_path reading a directory through `Paths.get`, whose default file system initializes
+  StaticProperty through System.getProperties, which calls `Properties.setProperty`, a method j2g's reachability did not reach (its
+  support code calls it); tool-dumpobj/test stops at `Obj.raw_field` of a boxed integer's field 0. Fixed (5de1b38d0): the shards'
+  j2g takes `--root java.util.Properties#setProperty`; the AOT runtime's `caml_obj_raw_field` answers a custom block's field 0 with
+  oi's customOpsWord. The record keeps the run's rows (aliases' pass; the others fail, outside any class) until the rerun.
+- The build worktree's rerun (14:24) was stopped by this session at 15:58: its ocamldoc shard's j2g passed 20 GB against the ticket's
+  declared 16 GiB while the train's gate build compiled a package at 23 GB (MemAvailable 8 GB). Rerun (`ocaml-b`'s
+  `.tmp/oc/compiled-b.sh` at 5de1b38d0): the small rows (gc-roots/globroots_sequential, lib-threads/signal and delayintr, the Dynlink
+  rows pr4229, domains and init-info) and the suite's opam rows under one ticket of 16 GiB, then the compiler-libs programs (ocamldoc's
+  five and the 16 tool rows) in one shard under one ticket of 40 GiB, each under `ulimit -v`.
+
+## 2026-11-23: cpp-ce3, the checker's constant evaluator: placement new, objects under construction, exact arithmetic (branch `cpp-ce3-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the constant evaluator (arbace/cpp/sema.ae) after cpp-ce2; doc/cpp/CPP-SURVEY.md, "As built: cpp-ce3".
+Each rule from the standard's text and GCC 15.2's behaviour as gxx-dg's tests record it; no GCC or clang code read.
+
+Decision (the user, 2026-11-23): placement new in a constant evaluation is restricted to std::construct_at before C++26, as the
+standard ([expr.const]/5.20.1 of C++20 and C++23) and GCC (is_std_construct_at) do; from C++26 allowed (P2747R2). Built: the evaluator
+knows its calling function (a call's and a constructor's environment carry ::fn; `ce-std-construct-at?`), and the reserved placement
+form outside std::construct_at is GCC's "call to non-'constexpr' function 'void* operator new(std::size_t, void*)'". This replaces
+cpp-ce2's acceptance of every placement new from C++20. Alternative weighed: accepting it until a test needs the refusal (cpp-ce2's
+choice; rejected by the decision: an acceptance GCC refuses is a wrong answer too).
+
+Built (the checker's, `checking?`): the dynamic type of an object under construction ([class.cdtor]/6: `*ce-bases*`, the cells of
+objects whose constructors are building their bases; a dynamic_cast's operand in a constructed base subobject takes that base as its
+most derived object, one in a base not constructed yet GCC's "accessing uninitialized member"); a default member initializer's errors
+at the use (`ce-dmi-at`, the item's :dmi-range); exact 64-bit arithmetic (unsigned modulo 2^64, signed past its range the sure "value
+N is outside the range of representable values"; shared with the code generator's folds, which had thrown Java's ArithmeticException)
+and, found on the way, the signed range check's bounds exact: (bit-shift-left 1 63) is a long's Long/MIN_VALUE, so every 64-bit signed
++, - and * (`5LL + 3LL`) had been "outside the range" in the checker; GCC's -fconstexpr-loop-limit (`ce-loop-limit!`, the step budget
+3,000,000 in the checker so that the limit comes first); "used before its definition" (`ce-undefined?`, `*ce-point*` the evaluated
+declaration's range, `*ce-mi-at*` a mem-initializer's range: the native parser's CXXCtorInitializer keeps it as the private :_range,
+no tree check reads underscore keys); immediate invocations evaluated (`cx-immediate-eval!`, not in an immediate function context, a
+conditional's branch, a default argument or a default member initializer); delete through a base pointer and a member call on freed
+storage; GNU statement expressions evaluated; the potential constant check's do body.
+
+Checked: the probe on each file and on reduced programs; the record run (17:41-19:21 UTC, `bin/repr-cpp dg --corpus dg-error --front
+native --only` 2,881 files `--record`: every own pass and the read cell's both-fail rows; stage 0) then a second record run of the 58
+files naming consteval, the changed rows, the union targets and the control pair after the immediate invocations' exclusions: own pass
+2,273 -> 2,288, no own pass lost but cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C past 300 s under load (their
+pass rows kept, as cpp-ce2 and cpp-small did); the control pair DRs/dr2082.C vs dr1423.C failing as it must. 15 rows to own pass:
+cpp0x/pr71966-1, -2, cpp1y/constexpr-70265-1, -2, -89785-2, -union3, -union4, cpp2a/consteval9, constexpr-dtor4, -dynamic11,
+-dynamic17, -init5, -new12, constinit10, ubsan/vptr-18. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+`bin/records-check`: 0 problems. C++ read 5,872 / 0 / 410 (249 n/a) -> 5,885 / 0 / 398 (248 n/a); completeness 0.9770 -> 0.9775,
+independence 0.9666 -> 0.9668.
+
+Left: bit-cast2.C (out of scope: IFNDR eager template checks), P2564R3's escalation (consteval-prop*), immediate invocations in member
+and constructor calls, consteval11.C's and consteval34.C's calls in a taken branch. Alternatives weighed for the immediate invocations:
+evaluating every consteval call wherever it is analyzed (rejected: a branch never taken, `0 ? bar (3) : 1`, and a default member
+initializer whose error GCC puts at the constructor gave false errors in consteval11.C, consteval34.C, consteval-prop6.C and -prop10.C);
+for the loop limit, extending diag's static rule for never-ending loops to static_assert (rejected: the evaluator's count is general).
+
+mac/next (`e10409e1c`, ocaml-1123's AOT round) merged: the journal by union, `bin/reap --record`, `bin/crops-score --record`, `--judge
+--strict`, `bin/records-check` again: 0 problems, C++ read 5,885 / 0 / 398 (248 n/a) as above.
+
+
+## 2026-11-23: cpp-tpl2, the checker's templates (branch `cpp-tpl2-1123` from mac/next `097078f5b`)
+
+The burst's C++ read stream on the templates group of the read cell's 410 deferred rows (the proposal's "templates ~96",
+`.tmp/goal/cpp-na-proposal.md`): the 112 deferred rows under template/, cpp0x/variadic*, alias-decl*, sfinae*, partial
+specializations, typename and template arguments grouped by cause from the own record (test/cpp/check-dg-own-linux-amd64.edn) and
+g++ 15.2's recorded errors (`.tmp/goal/cpp-na-work/gxx/`). The largest cause by far: GCC's explanation of a failed deduction, an
+error at the template's construct ("In substitution of ...") beside the call's "no matching function", which the own front end
+never gave, and the substitution failures themselves, which it mostly took for its own doubt (a call with an unsure drop is not
+diagnosed). Built from the standard's text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2" names each rule.
+
+Checked: each rule on its files and on reduced valid programs by the probe (arbace.repr.cpp.dg's read-own over a dg.edn entry);
+the 459 own passes in the touched directories at the first state, then two runs of `bin/repr-cpp dg --corpus dg-error --front
+native --only` over every own pass with the targets (2,389 files at `e6b85eecb`: 20 to own pass, none lost but the two files past
+300 s under load that cpp-1123 and cpp-ce2 met, cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C, their rows
+kept), then over every own pass and every deferred row (2,685 files at `2eedd719f`: 38 to own pass; two own passes lost to the new
+incomplete-base rule, a closure type as a base, fixed at `7eb29b82f` by leaving closures and unnamed classes out, those six files read
+again); the control pair failing as it must.
+
+The record: `bin/repr-cpp dg --corpus dg-error --front native --only` the 2,685 files `--judge --record` over that run, then the six files
+the closure fix touches `--record` (stage 0, GOMEMLIMIT=3000MiB), the two timeouts' rows kept as recorded passes (as cpp-1123 and cpp-ce2
+did). 38 rows to own pass, none lost. Cells: C++ read 5,872 / 0 / 410 (249 n/a) -> 5,910 / 0 / 372; completeness 0.9770 -> 0.9785,
+independence 0.9666 -> 0.9672 (the read stage 0.835 -> 0.838); eval, AOT and print unchanged. `bin/reap --record`, `bin/crops-score
+--record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: GCC's explanations reported at the moment a template drops out (rejected: a drop inside an outer SFINAE context
+would report errors GCC gives none of; they ride on the call's "no viable function" refusal and are reported only when it reaches a
+handler); every refusal in a substituted signature taken as sure (rejected: the slice's own gaps would turn unsure drops into false
+"no matching function" errors; only the constructs [temp.deduct.general]/11 names, and sure-failure?'s list for expressions); a
+partial specialization not deducible dropped (rejected: GCC keeps it as a declaration, so its arguments' class is incomplete, which the
+tests expect); "not more specialized than the primary" by the existing partial ordering (deferred: a wrong ordering would reject valid
+partial specializations, which are everywhere in the headers).
+
+Left: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2", "Left"; the concepts group not begun but for concepts-dr1430.C.
+
+## 2026-11-23: cpp-tpl2 merged with cpp-ce3 (branch `cpp-tpl2-1123`)
+
+mac/next (`e08a71302`, with cpp-ce3's constant evaluator rules: C++ read 5,885 / 0 / 398) merged into cpp-tpl2-1123; the code merged
+without conflict (sema.ae, diag.ae, parse.ae), the journal and survey by union, the own record by git's merge (both streams' rows).
+The 53 rows the two streams turned to own pass (38 and 15) read again on the merged tree (`bin/repr-cpp dg --front native --only`, no
+record): 53 own pass and the control pair failing as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+`bin/records-check`: 0 problems. C++ read 5,885 / 0 / 398 (cpp-ce3's) -> 5,923 / 0 / 360 (248 n/a); completeness 0.9790, independence
+0.9674.
 ## 2026-11-23: ClassLoader's remaining members in jrt (the user's decision (a); java-bytecode-1122)
 
 The user decided (a) on the question of java-bytecode's report (relayed by the coordinator): the ClassLoader members the
@@ -20444,3 +20558,190 @@ Correction to today's first py-accel entry: `:c-accelerators` keeps its old `:ma
 test_datetime's, test_decimal's and test_types' rows from before 521 (700 not-run, 127 "No module named '_datetime'"), which
 reap must class until train 3's executables record those modules; the narrowing to _pickle and _json lands with that record.
 `bin/reap --record` (matrix unchanged), `bin/crops-score --record`, `--judge --strict` and `bin/records-check` report 0 problems.
+
+## 2026-11-23: queue 540's C rows on train 1's compiled host: quickjs and sqlite recorded; torture-compile out of memory, again (smalls2-1123)
+
+train-1 (d9217f672, smalls2-1123's 540 merge in it) merged into smalls2-1123 (d42c77793; the journal's conflict, both kept); its gate
+executable /root/arbace/.tmp/gate-exe/fb29d2672f0d7bf945b6/amd64/arbace (540's repr/c compiled in) the tools' host, under the big-job
+lock (.tmp/c/rt540.sh, 17 GiB):
+- `ARBACE_C_JUDGE=gcc bin/repr-c roundtrip --corpus quickjs,sqlite --record` (6 min, 8.9 GB peak): quickjs 10 of 10 pass (quickjs.c:
+  its read rejects as gcc does, CONFIG_VERSION undefined, both reject; libunicode.c's level 2 equal; unicode_gen.c's level 3 equal,
+  540's #line print), their known entries dropped; sqlite: shell.c known, class objects-layout (n/a, 540-2), levels 1-2 equal, 3
+  differs; sqlite3.c now read whole (no read budget compiled) but known: level 1 differs at an offsetof form inside a macro
+  (`etof(BtCursor, BTCURSOR_FIRST_UNINIT)` / `(offsetof BtCursor :pBt)`), its print refused by gcc; its known class is still
+  :eval-limits (the record keeps classes): a print fault for the VM's 540, not a limit. C print 4,844 / 0 / 11 -> 4,847 / 0 / 8.
+- `roundtrip --corpus torture-compile --record` and `parse-check --corpus torture-compile --no-mutants --record` both ran out of
+  memory within two minutes (15.6 GB at the 17 GiB cap; the compiled host reads 8 files at once, the 20,000 bound lets the limits
+  files nest deep); queued again under the lock with 2 threads, 22 GiB and GOMEMLIMIT 18 GiB (.tmp/c/rt540b.sh).
+
+## 2026-11-23: cpp-decl2, initialization, lookup, declarations, special members and overload resolution (branch `cpp-decl2-1123` from mac/next `e08a71302`)
+
+The burst's C++ read stream on the read tail's groups other than templates and the constant evaluator
+(`.tmp/goal/cpp-na-proposal.md`'s "remaining ... to BUILD": initialization, lookup/access/declarations, special members, overload
+resolution). The deferred rows of these groups were probed one by one (the own front end's diagnostics against each file's dg.edn
+entry) and grouped by cause; each rule from the standard's text and g++ 15.2's behaviour as the tests record it, with the host's g++
+15.2 run by hand on three questions (narrowing of class elements: initializer_list elements only, not an aggregate's members; array
+designators mixed with plain clauses: GCC's "either all ... or none" error; `A x = 1` with an explicit constructor); no GCC or clang
+code read. doc/cpp/CPP-SURVEY.md, "As built: cpp-decl2", lists the rules.
+
+Built (arbace/cpp/sema.ae, the checker's unless said; arbace/repr/cpp/parse.ae and diag.ae): designators in overload resolution
+([over.ics.list]/2) and the chosen parameter's designator order; #embed in designated lists; deleted default constructors explained
+down to the uninitialized member, and unions of const members; uninitialized const and reference members in user-provided
+constructors and const-default-constructibility ([dcl.init.general]/7-8, also for new); explicit constructors in copy-initialization
+and default member initializers; inherited constructors' ambiguities; abstract classes created by `{}` default arguments; function
+pointer conversions and cv void parameters; non-member operator=, (), [], ->; C linkage entities across namespaces; namespace
+definitions' ambiguity; explicit and inline-namespace qualification; friend definitions in the redefinition check; friends' pure
+specifiers and defaulted non-special functions; exception specifications against the latest declaration; specifiers before a
+class declared with no declarator; classes and enumerations defined after a using-declarator of their name; non-integral bit-fields
+dropped; deleted and non-deleted overriders; union-like classes' special members deleted for non-trivial variant members, at the
+member; implicit copy constructors over a const member without a const copy constructor; narrowing of initializer_list elements by
+converting constructors; C++20 parenthesized aggregate initialization through a reference; array new's paren-init with an explicit
+default constructor.
+
+Alternatives weighed: for the designators, placing them in the parser for overloaded callees too (rejected: the parser does not know
+the chosen overload; sema ranks, so the order is judged after the choice, as [over.ics.list]/2's note says); for the union rule's place,
+the class (rejected: GCC puts "union member ... with non-trivial" at the member, and a class line is an extra error in union1.C);
+judging every ambiguous inheriting-constructor call (rejected: only when the inherited candidates are all known, the "no viable"
+rule's condition, the hidden ones removed first).
+
+Checked: the record run 20:26-21:25 UTC (`bin/repr-cpp dg --corpus dg-error --front native --only` 2,706 files `--record`: the own passes,
+the deferred rows and the candidates; stage 0, GOMEMLIMIT=3000MiB): own pass 2,288 -> 2,313; cpp0x/union4.C lost (the new union rule
+took a deleted member's) and cpp1y/lambda-generic-variadic2.C's new crash (a header's initializer offset read against the main text),
+both fixed and read again with the 108 recorded files naming `union` (2,316 with the two timeouts' rows kept as earlier streams kept
+them: cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C past 300 s under load); 28 rows to own pass, none lost; the control
+pair failing as it must. mac/next merged (cpp-tpl2's templates, train 1; the record's one conflict, paren-init23 and paren-init26, both
+sides' passes), the 66 rows both streams turned to own pass read again on the merged tree: all pass. `bin/reap --record`,
+`bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems. C++ read 5,923 / 0 / 360 -> 5,951 / 0 / 332 (248 n/a);
+completeness 0.9790 -> 0.9801, independence 0.9674 -> 0.9678.
+
+Left (the survey's list): friend functions in sema (pr62101), opaque enumeration redeclarations (forw_enum6), inline variables
+(inline-var2), implicit moves deleted through overload resolution (pr71979, defaulted20, implicit-trivial1), per-element errors of one
+initializer (array-init1), and smaller ones.
+
+## 2026-11-23: cpp-tpl2's second round, the checker's concepts (branch `cpp-tpl2-1123` from next `2d89c6f19`)
+
+The coordinator's next round after next took the first (`2d89c6f19`): the concepts group of the read cell's deferred rows, then the
+first round's "Left" where safe; cpp-decl2 works on initialization, lookup, special members and overload resolution meanwhile, so this
+round kept to constraints and templates. The 26 deferred rows naming concepts or requires-clauses grouped from the own record and
+g++ 15.2's recorded errors: most need GCC's explanation of an unsatisfied constraint (an error at the atom beside the template
+constraint failure or the call's "no matching function"), a few a rule inside the satisfaction (an access, a call with no object, a
+member function not called, a non-constant atom), one the constraint matching of template template arguments. Built from the standard's
+text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2 (2)".
+
+Checked: each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files) at the round's
+first state: 8 to own pass, two own passes lost (concepts/nested-diagnostics-1.C and -1-truncated.C: their explanations are GCC's nested
+text output, which the tests read by dg-begin-multiline-output) and fixed by reporting none under -fdiagnostics-set-output's nesting;
+the 210 files with a concept or a requires-clause read again after the non-constant atom rule (one crash in a recursion,
+cpp2a/concepts-recursive-sat1.C, fixed by keeping that rule out of recursions) and again with `--record`; the control pair failing as it
+must. The record: `--judge --record` over the 2,688 files' run, then the 210 files `--record`, the two timeouts' rows kept. 9 rows to
+own pass, none lost. mac/next merged (cpp-decl2's rows: C++ read 5,951 / 0 / 332) without conflict; both streams' 37 new own passes
+read again on the merged tree, all passing. C++ read 5,960 / 0 / 323 (248 n/a); completeness 0.9805, independence 0.9680. `bin/reap --record`, `bin/crops-score --record`,
+`--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: every requirement's error as an explanation (rejected: GCC notes them at its default depth 1 and gives the error
+from depth 2); a non-constant atom thrown on as the condition's error (rejected: a static_assert then stopped the unit; the atom's error
+reported and the constraint false gives GCC's lines); the constraint matching of template template arguments by satisfaction with
+symbolic arguments (rejected for subsumption of the normal forms, [temp.arg.template]/4's partial ordering).
+
+## 2026-11-23: cpp-decl2 (2), the stream's left list (branch `cpp-decl2-1123` after next `2c468272c`)
+
+The coordinator's follow-up to cpp-decl2: its left list, templates aside. Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-decl2 (2)"):
+enumeration redeclarations (diag's enum-redecls, the parser's elaborated enum rules, sema's one entity per redeclared enumeration),
+deleted friend definitions (template.ae's friend!, the redefinition check by signature), inline variables (parser, diag's
+redefinitions with inline static members and class templates' out-of-class members, uninit-consts, odr-inline-vars; sema's incomplete
+type), subobjects' copy and move members surely deleted (generalized from synth2's rule to moves, assignments and members defaulted on
+their first declaration, reported at the declaration), an array's element errors at each element, and three crashes made diagnostics
+(CWG 1397's default member initializer, a volatile object through an ellipsis, a nil nominee of a using-directive).
+
+Alternatives weighed: for inline-var2's class template members, keying out-of-class definitions by the template-id's text (rejected: an
+explicit specialization's `Z<0>::x` and a partial one would collide; only a template-head with parameters and identifier arguments maps
+to the pattern's path); for array elements, per-element errors in every aggregate (rejected for now: GCC judges a class aggregate's
+members as one initialization, only the array's elements were needed); for the deleted move members, CWG 1402's "ignored by overload
+resolution" (kept as the checker had it: an implicit move member deleted is no candidate, one defaulted by the user is, as GCC reports
+cpp0x/defaulted20.C).
+
+Checked: the record run 21:55-23:33 UTC over 2,706 files (the own passes, the deferred rows, the candidates; stage 0,
+GOMEMLIMIT=3000MiB): own pass 2,316 -> 2,364 (the two files past 300 s under load keep their pass rows), none lost, 10 rows to own pass.
+mac/next merged (cpp-tpl2 (2), no conflict); the 19 rows the two streams turned read again on the merged tree, all pass; the control pair
+fails as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: C++ read 5,960 / 0 / 323 ->
+5,970 / 0 / 314 (247 n/a).
+## 2026-11-24: ocaml-1123: the compiled reruns' results; ocamldoc's shard too large; the light whole re-record held back
+
+- Small rows at the compiled level (`ocaml-b`, one ticket of 16 GiB): lib-dynlink-pr4229/main, lib-dynlink-domains/main and
+  lib-dynlink-init-info/test pass (the Mac's 544); gc-roots/globroots_sequential times out at 120 s of CPU here too;
+  lib-threads/signal and delayintr receive no signal at the compiled level either ("No signal received": OC216 (a)'s HostSys signals
+  do not reach these tests' sigint helper's kill). The rows are merged into `test/ocaml/check-aot-compiled-native.edn` (no cell moves:
+  the Dynlink rows pass at the light level already).
+- The suite's compiled opam rows: built (shard of two, build-go 22.2 GB peak); opam/fmt/test_fmt exits 0 and opam/base64/test 1, but
+  the compiled suite judged them against references they have none of (fixed, ec2f3e2c3: the compiled suite's judgment by the tests'
+  own verdicts, as the light one's; its record not re-judged yet). base64's two failures are its `base64` command (bos's run_io:
+  "run ['base64']: No such file or directory" at the compiled level; /bin/base64 is a symlink to coreutils: ExtProc's lookPath or jrt's
+  ProcessBuilder at this level).
+- The compiler-libs programs in one shard (ocamldoc's five beside the 16 tool rows, one ticket of 40 GiB): j2g 4,489 s at 25.0 GB,
+  then Go's compile of the shard's package passed 45 GB and was stopped by this session (MemAvailable 9 GB) before `ulimit -v` would have
+  failed it and the shard's bisection rebuilt its halves. The 16 tool rows run again alone (their first build peaked at 31.8 GB; one
+  ticket of 36 GiB, `ocaml-b`'s `.tmp/oc/compiled-b2.sh`, queued). ocamldoc's five wait on a smaller shard package (ocaml.u holds every
+  clib unit a shard's programs reach in one Go package: the Go compiler's memory grows with it).
+- The light level's whole re-record (`bin/oi check --aot --record`, finalize.sh, 15:17 to 21:56 on a loaded host): +3 passes as
+  expected (globroots_parallel, globroots_parallel_spawn_burn, int64-unboxing), delayintr and signal in `:unix-java`, globroots_sequential
+  slow; but four rows regress outside any class: lib-marshal/intext_par and regression/pr3612 time out (each passed at 193-210 s of
+  wall on 2026-11-22, near the limit), weak-ephe-final/weaklifetime fails its line-53 assertion (a weak pointer full more than two
+  collections after its erase: the simulated collections' timing), statmemprof/custom now finishes with a different output (its known
+  entry's kind is the timeout). A passing row stays a pass: the record is held back (the run kept as the worktree's
+  `.tmp/oc/check-aot-native.light-run.edn`) until the four are rerun alone on a quiet host, with the ticket lock (Gil.ae) suspected for
+  the two parallel ones and checked against the old lock.
+
+## 2026-11-24: cpp-tpl2's third round: generic lambdas' constraints, requires-clauses' grammar, odr-uses by template arguments (branch `cpp-tpl2-1123` from next `61d0b412e`)
+
+The coordinator's next round after next took the second (`61d0b412e`): the concepts rows left in the stream's area, then the first
+round's remaining template rows; the overload-resolution rows (concepts-return-req1.C, concepts-memfun4.C, template/crash126.C's line
+12) passed to cpp-decl2. Built from the standard's text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2 (3)".
+The parser's skip of a requires-clause had taken `C<T> (T t)` in a lambda's template-head for a call, the parameter list lost (a false
+"use of undeclared identifier 't'"); a requires-clause is now read by its own grammar (primary expressions joined by && and ||), and a
+call, a subscript or a `!` there is GCC's "expression must be enclosed in parentheses" (a built-in trait's call excepted). A generic
+lambda's requires-clauses and constrained placeholders now constrain its call operator template, and a closure's call with no viable
+operator() is "no match for call". A function template's name as a template argument is an odr-use of its deduced specialization.
+
+Checked: each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files): 5 to own pass,
+four own passes lost to the enclose rule on built-in traits' calls, fixed and read again; the control pair failing as it must. The
+record: `--judge --record` over the run and over the five files' run, the two timeouts' rows kept. mac/next merged (cpp-decl2 (2): C++
+read 5,970 / 0 / 314) without conflict; both streams' 15 new own passes read again on the merged tree, all passing. C++ read 5,975 / 0
+/ 309 (247 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: a self-dependent satisfaction detected by the concept and arguments under way (written, then left out: the test
+that needs it, concepts-recursive-sat4.C, never reaches its friends' constraints, so nothing proved it, and the slice's own re-entries
+through unfinished classes could make it a false error); an ill-formed concept registered as false (left for the atom's rule: the parser
+keeps the type's name as the constraint's expression).
+
+## 2026-11-24: py-goi: goi's append(s, t...) evaluated its slice twice (pyi's `bytearray + bytes` under goi); f-struct's gc.collect() count left (branch `py-goi-1123` from next `58959ee49`)
+
+The Mac's `bin/pyi runtime check` of py-mac-1123 (5d93b6732, also at train-2 a6f6fdbf3) failed two smoke programs under goi.
+
+c-codecs.py: `bytearray(b'ab') + b'cd'` raised "SystemError: pyi: Go panic: ... nil pointer dereference" on goi (pyi's compiled
+runtime passes). Narrowed on stage 0 (`bin/pyi run` of probes, then `bin/goi run` of reduced Go forms): bytearray's `Binary[BinAdd]`,
+`append(append([]byte(nil), ba(a).b...), y...)`, and in plain Go `fmt.Println(append(id(a.b), y...))` panics while
+`z := append(id(a.b), y...)` and `append(id(a.b), 5)` do not. The cause is goi's back end, `go/arbace/goi/expr.ae`'s `AppendSpread`:
+it evaluated its slice operand `s` twice, once for the value and again for `growCheck`'s length test. A call there ran twice (gc runs
+it once), and a variable that call's argument kills as its last use in the statement (the builder's `kill-arg`, `KillR`: the first
+evaluation clears `a`'s slot) reads nil the second time. Fix: `s` evaluated once, its value given to both. Added the interpreter test
+`test/goi/run/go/t/appendspread.ae` (a call in the slice operand counted, pyi's shape through an interface parameter and a two-result
+return); its `.out`/`.err`/`.exit` are gc's run of the forms printed by repr/go (TamaGo's go1.27.1), and the executable without the fix
+fails it (`calls` 2, then the panic): its negative control. The back end is Go forms compiled into the executable (not a namespace
+RT.toolSource reloads), so the fix is proved by the next train's build: `bin/goi test` and `bin/pyi runtime check` (c-codecs.py) on it.
+Alternative weighed: a builder-side workaround (no kill inside an append's slice operand); rejected, the double evaluation is wrong by
+itself (a side effect runs twice).
+
+f-struct.py: line 13 prints `gc.collect()`, CPython 3.14.10 38 (the unreachable objects its cycle collector found at that point:
+typing's and the import machinery's garbage), pyi 0 (`builtins_gc.ae`'s collect returns `finCollect()`, the finalizable objects Go's
+collector freed). The number is CPython's cycle collector's internal state, not a defined result: the user's `:gc-collector` n/a class
+of 2026-11-23 (refcount/gc internals). Not changed; left to the user (the program could print `isinstance(gc.collect(), int)` with its
+outcome re-recorded, or the row be classed).
+
+## 2026-11-24: py-goi: f-struct.py prints `isinstance(gc.collect(), int)`; its outcome re-recorded (branch `py-goi-1123`)
+
+The coordinator's call on the previous entry's f-struct question, option (a), within the user's `:gc-collector` decision (the
+program is our own runtime program, not CPython's suite): line 13 of `test/python/pyi/f-struct.py` prints
+`isinstance(gc.collect(), int)` in place of the count. Its smoke outcome re-recorded on the main host's CPython 3.14.10 by the runtime
+check's own record mode, `REPR_PYTHON_ORACLE=record PYI_SMOKE_ONLY='^f-struct\.py$' bin/pyi runtime programs`
+(`test/python/records/outcomes/smoke/f-struct.py.{out,meta}`: key 90a01ca12c39ed26, the line now `... True 32 ...`; the control
+subject arith.py's meta, rewritten with only a new date, put back). pyi's run of it on goi is the train's runtime check.
