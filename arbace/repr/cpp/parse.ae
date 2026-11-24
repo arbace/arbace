@@ -248,6 +248,14 @@
 ;; arbace.repr.cpp.diag/changes-meaning reads them off the class's node (:_cm-uses)
 (def ^:dynamic *cm-scopes* nil)
 
+;; cpp-rind: [dcl.fct]/22 (C++20 [dcl.spec.auto.general]/2-3), a placeholder `auto` as a parameter's decl-specifier only in a
+;; lambda's parameter-declaration-clause or a function declaration's own one at namespace or class scope (an abbreviated function
+;; template, never in a local class): the depth of the parameter-declaration-clauses being read (a function type's own parameter
+;; of a parameter is depth 2) and the declaration's depth-1 `auto` tokens, judged once its declarator is read
+(def ^:dynamic *param-depth* 0)
+(def ^:dynamic *auto-params* nil)
+
+
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
   [^P p]
@@ -3909,6 +3917,7 @@
 (defn parse-param-list
   "A parameter-declaration-clause, the ( consumed, its ) too: {:params [ParmVarDecl ...] :types [...] :names [...] :va}."
   [^P p]
+  (binding [*param-depth* (inc (long *param-depth*))]
   (with-gt p true
     (cond
       (is? p ")") (do (adv! p) {:params [] :types [] :names [] :va false})
@@ -3931,6 +3940,12 @@
                       (let [bi (loop [i (long (:b ds))] (if (or (t= (tok-at p i) "{") (>= i (long (ix p)))) i (recur (inc i))))]
                         (soft-diag! p bi "types may not be defined in parameter types"))))
                 base (or (ds-type ds) (perr p "a parameter's type"))
+                ;; (cpp-rind: a placeholder parameter of a function type's own parameter, never permitted, GCC's "'auto' parameter not
+                ;; permitted in this context"; one of the outermost clause kept for its declaration, *auto-params*)
+                _ (when (and (= :auto (:t base)) (:auto-i ds) (not (skim? p)) (main-tok? p (long (:auto-i ds))))
+                    (cond (>= (long *param-depth*) 2) (soft-diag! p (long (:auto-i ds)) "'auto' parameter not permitted in this context")
+                          (some? *auto-params*) (.add ^ArrayList *auto-params* (long (:auto-i ds)))
+                          :else nil))
                 d (parse-declarator p :either)
                 ;; (cpp-decl2: [dcl.inline]/1, no inline parameter: GCC's "'var31' declared as an 'inline' parameter")
                 _ (when (and (:inline ds) (not (skim? p)) (main-tok? p (long (:b ds))))
@@ -4022,7 +4037,7 @@
               (accept! p ",") (recur ps tys nms)
               (and (is? p "...") (is-at? p 1 ")")) (do (adv! p) (adv! p) {:params ps :types tys :names nms :va true})
               (accept! p ")") {:params ps :types tys :names nms :va false}
-              :else (perr p "a parameter list"))))))))
+              :else (perr p "a parameter list")))))))))
 
 (defn declare-params!
   ([^P p names] (declare-params! p names nil))
@@ -4730,7 +4745,14 @@
       (loop [out (if pre [pre] [])]
         (let [ctor (and (nil? base0) (ctor-name-here? p (if (= ctx :member) :member :top)))
               guide (and (nil? base0) (guide-here? p))
-              d (parse-declarator p (if (= ctx :member) :either :named))
+              aps (ArrayList.)
+              d (binding [*auto-params* aps *param-depth* 0] (parse-declarator p (if (= ctx :member) :either :named)))
+              ;; (cpp-rind: the declaration's own placeholder parameters, permitted for a function declared at namespace scope or as a
+              ;; member of a class that is no local class; a pointer's, a block-scope function's, a local class's member's not)
+              _ (when (and (seq aps) (not (skim? p))
+                           (or (nil? (fn-suffix-of d)) (= ctx :block)
+                               (and (= ctx :member) (loop [^Scope s (scope p)] (when s (if (#{:block :fparams} (sc/kind-of s)) true (recur (sc/parent-of s))))))))
+                  (doseq [i aps] (soft-diag! p (long i) "'auto' parameter not permitted in this context")))
               chain (name-chain d)
               qn (:name (last chain))
               lp (peek (:parts qn))
@@ -6422,7 +6444,7 @@
   the code generator's mode, G4)."
   [^P p b]
   (with-scope p :block nil
-    (let [pl (when (is? p "(") (adv! p) (parse-param-list p))
+    (let [pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil] (parse-param-list p)))
           _ (when pl (declare-params! p (:names pl) (:types pl)))
           _ (expect! p "{")
           reqs (loop [out []]
@@ -6535,7 +6557,7 @@
             lam-unavail (when (and (is? p "[") (is-at? p 1 "["))
                           (let [a0 (ix p)] (attr-nodes p) (some #(contains? #{"unavailable" "__unavailable__"} (ts (tok-at p %))) (range a0 (ix p)))))
             pi0 (ix p)
-            pl (when (is? p "(") (adv! p) (parse-param-list p))
+            pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil] (parse-param-list p)))
             ;; (round 54, fourth pass: C++11's [expr.prim.lambda]/5, a lambda's parameter-declaration-clause has no default argument
             ;; (allowed from C++14, CWG 974): GCC's pedwarn "default argument specified for lambda parameter", at the '=')
             _ (when (and pl (= 2011 (.-year p)))

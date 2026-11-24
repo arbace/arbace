@@ -4841,6 +4841,11 @@
                  ;; (h-cpp-consteval: a pointer to an object, an array of one element, [expr.add]/4: moved by 0, itself)
                  (if (and (ce-loc? p) (zero? (long (ce-num (ev (:n e)))))) p
                  (do
+                 ;; (cpp-rind, the checker: moved below 0 or past one beyond its one element, undefined, [expr.add]/4.3: GCC's
+                 ;; error naming the index; cpp0x/constexpr-ptrsub2.C's `*(&c - 1)`)
+                 (when (and (checking?) (ce-loc? p) (number? (ce-num (ev (:n e)))))
+                   (let [n (long (ce-num (ev (:n e)))) n (if (= "-" (:o e)) (- n) n)]
+                     (when-not (<= 0 n 1) (ce-sure! "pointer arithmetic outside the bounds of its object (index " n ")"))))
                  (when-not (ce-ptr? p) (not-constant "pointer arithmetic"))
                  (let [n (long (ev (:n e)))] (ce-ptr-add p (if (= "-" (:o e)) (- n) n))))))
        ;; (h-cpp-consteval: a new-expression's array size evaluated first, its own errors; the allocation not evaluated)
@@ -8498,6 +8503,11 @@
   ;; [dcl.enum]/10 with [conv]/4: GCC's "could not convert 'y' from 'Col' to 'bool'"; cpp0x/scoped_enum_examples.C)
   (when (and (checking?) (abi/enum? (abi/unq (:ty e))) (:scoped (abi/enm (:id (abi/unq (:ty e))))))
     (fail :conversion "cannot convert '" (:name (abi/enm (:id (abi/unq (:ty e))))) "' to 'bool' implicitly"))
+  ;; (cpp-rind, the checker: a void expression has no conversion to bool, [conv]/1, [expr.type]: GCC's "could not convert
+  ;; '<statement>' from 'void' to 'bool'", a statement expression ending in a statement or a throw-expression as a condition;
+  ;; other/error19.C, other/error32.C)
+  (when (and (checking?) (abi/void? (abi/unq (:ty e))) (#{:stmt-expr :throw} (:op e)))
+    (fail :conversion "cannot convert void to 'bool' implicitly (could not convert '" (if (= :throw (:op e)) "<throw-expression>" "<statement>") "' from 'void' to 'bool')"))
   (if (abi/class? (abi/unq (:ty e)))
     (convert-scalar (user-conv {:scope *root*} e abi/bool* true) abi/bool* false)
     (convert-scalar (rv e) abi/bool* false)))
@@ -11731,7 +11741,13 @@
                     (= :str (:op a)) (assoc t :n (inc (count (str-units a))))
                     :else t))
             t)
-        pre (when (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init))
+        pre (cond (and init (has-auto? t) (not (#{"call" "list"} (:init n)))) (analyze ctx init)
+                  ;; (cpp-rind, the checker: [dcl.type.auto.deduct]/4 since N3922, `auto x{e}` deduced from its one element e, and
+                  ;; `auto x(e)` from e: the initializer's type, its constant evaluation judged; cpp0x/constexpr-95307.C)
+                  (and (checking?) init (has-auto? t) (= "list" (:init n)) (= "InitListExpr" (:kind init)) (= 1 (count (kids init)))
+                       (not (#{"InitListExpr" "DesignatedInitExpr" "PackExpansionExpr"} (:kind (first (kids init))))))
+                  (analyze ctx (first (kids init)))
+                  :else nil)
         t (if pre (deduce-auto t pre (:scope ctx) "initializer" n) t)
         _ (upd-var! id assoc :ty t)
         ;; (CP311 (a): the initializer a deduced class type was deduced from, analyzed once)
