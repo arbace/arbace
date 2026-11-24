@@ -7664,3 +7664,44 @@
     (vec (distinct out))))
 
 (swap! checks conj anon-union-redecls)
+
+;; cpp-rind (2026-11-24): [dcl.fct.def.default]/2 as C++11-C++17 state it (C++20, P0641, makes most mismatches deleted instead): an
+;; explicitly defaulted copy or move constructor or assignment operator has the implicit declaration's type but for the copy
+;; operations' parameter `C&` for `const C&`: a volatile-qualified parameter, a const or volatile one of a move operation, an
+;; assignment returning another type than `C&`, and in C++11 a constexpr assignment (C++11's constexpr member functions are const)
+;; are GCC's "defaulted declaration 'T::T(volatile T&)' does not match the expected signature", at the declaration
+;; (cpp0x/defaulted51.C, defaulted56.C, defaulted65.C, constexpr-68754.C).
+(defn defaulted-signatures
+  [u starts ^String src ^String main]
+  (let [yr (long (cxx-year (:std u)))
+        out (java.util.ArrayList.)]
+    (when (<= 11 yr 17)
+      (walk-nodes
+        (fn [n _]
+          (when (and (= "CXXRecordDecl" (:kind n)) (string? (:name n)) (seq (:name n)) (:completeDefinition n))
+            (let [cn (:name n)
+                  q (java.util.regex.Pattern/quote cn)
+                  ref-re (re-pattern (str "^((?:const |volatile )*)" q "(?:<.*>)?\\s*(&&?)$"))]
+              (doseq [m (:inner n)
+                      :when (and (#{"CXXConstructorDecl" "CXXMethodDecl"} (:kind m)) (= "default" (:explicitlyDefaulted m)))
+                      :let [ps (filter #(= "ParmVarDecl" (:kind %)) (:inner m))
+                            ctor? (= "CXXConstructorDecl" (:kind m))
+                            assign? (and (= "CXXMethodDecl" (:kind m)) (= "operator=" (:name m)))]
+                      :when (and (or ctor? assign?) (= 1 (count ps)))
+                      :let [pt (str/trim (str (get-in (first ps) [:type :qualType])))
+                            [_ cv rk] (re-matches ref-re pt)
+                            cv (str cv)
+                            ret (when assign? (str/trim (first (str/split (str (get-in m [:type :qualType])) #"\("))))
+                            bad (when rk
+                                  (or (and (= "&" rk) (str/includes? cv "volatile"))
+                                      (and (= "&&" rk) (or (str/includes? cv "const") (str/includes? cv "volatile")))
+                                      (and assign? ret (not (re-matches (re-pattern (str q "(?:<.*>)?\\s*&")) ret)))
+                                      (and assign? (= 11 yr) (:constexpr m))))]
+                      :when bad]
+                (when-let [o (mine-at m main)]
+                  (let [[l c] (line-col starts o)]
+                    (.add out {:line l :col c :kind :error :rule :defaulted :msg (str "defaulted declaration of '" (:name m) "' does not match the expected signature")})))))))
+        (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj defaulted-signatures)
