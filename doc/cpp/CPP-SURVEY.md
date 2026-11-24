@@ -11325,3 +11325,15 @@ diag.ae's tree checks and the parser's diagnostics; the code generator's paths u
   C++23's auto(x) a prvalue of the operand's decayed type (cpp23/concepts-err1.C); a friend class declaration makes no function ADL
   could find, so the associated namespaces stay sure (sure-assoc-nss: cpp2a/concepts-friend2.C's operator== surely missing);
   __builtin_conj's type (other/error26.C).
+- **Later**: a class template's specialization's using-declaration naming a complete class that is no base, "not a base type" at it
+  (template/crash13.C; diag.ae's using-and-consteval-overrides judges the non-template classes).
+
+Checked: the record run over 2,670 files (the own passes and the 232 deferred failing on both fronts) and the using-declarations' 27
+own passes again at the fix (doc/JOURNAL.md, "cpp-singles"): own pass 2,438 -> 2,458, none lost (the two known slow files' pass rows
+kept), 20 rows to own pass, the control pair failing; mac/next merged (cpp-p2564, cpp-extfloat), the rows read again on the merged
+tree. C++ read 6,042 / 0 / 241 -> 6,062 / 0 / 221 (248 n/a); completeness 0.9837 -> 0.9845.
+
+Left: template/crash89.C (a default template argument's error at its instantiation: no "subscripted value is neither array nor
+pointer" in the checker), cpp0x/nondeduced7.C and template/partial-specialization12.C (partial ordering against the primary needs
+[temp.deduct.type]/17's type check of a non-type argument), overload/using2.C, cpp0x/defaulted10.C's line 13, cpp1y/constexpr-89074-3.C,
+concepts-recursive-sat4.C, concepts-lambda2.C, concepts-requires1.C, inherit/error4.C, overload/error8.C, cpp0x/pr32127.C.

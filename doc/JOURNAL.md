@@ -20577,3 +20577,52 @@ or narrowing, the targets, the control pair): 289 own passes, every recorded own
 Recorded from run 2 (`--judge --record`): own pass 2,438 -> 2,440, ext-floating3 and -17, none lost. `bin/repr-cpp pp-check
 --essential` and `target verify` unchanged. reap and crops-score recorded: C++ read 6,035 / 0 / 248 -> 6,037 / 0 / 246;
 records-check 0 problems.
+
+## 2026-11-24: cpp-singles, the Left lists' single rows (branch `cpp-singles-1124` from mac/next `440cf0273`)
+
+The coordinator's C++ read stream "cpp-singles": the single-row causes the day's Left lists name (cpp-1123, cpp-small, cpp-ce2,
+cpp-ce3, cpp-tpl2 (1)-(3), cpp-decl2 (1)-(3), cpp-sweep (1)-(3)), each one file already diagnosed, cheapest first; P2564's escalation
+(cpp-p2564), the extended floating types, the read-independence inputs, the printer and the parser's recovery after a broken template
+head left out. Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-singles"): implicit copy constructors deleted surely by an inaccessible
+subobject constructor (`cx-access-deleted?`), constructors odr-used despite their access errors (`:cx-odr-used`), GCC's places of a
+subobject's implicit initialization's errors (the last mem-initializer's token, a base's access at the body's brace), an empty
+aggregate's elided braces (`cx-empty-agg-elide!`), a constinit variable's implicit call at its initializer, <initializer_list>'s own
+error outside the main file (`:cx/header-error`); the parser's access declarations, enumerators conflicting with using-declarators,
+DR 147's constructor names, noexcept-specifiers outside complete-class contexts (`*ncc-noexcept*`), `X<args>` class heads of
+non-templates, base-clauses' template-ids of non-templates (the class declared incomplete), parameters with two type specifiers,
+class heads qualified by their own namespace; diag.ae's `anon-union-captures` (DR 1612) and `static-overrides`, notes at earlier
+declarations taken by a dg-error's later branches (read-own's alt-hits over the own notes); final bases in specializations, constructor
+templates' explicit specializations, explicit specializations qualified through a member class template's specialization, VLA bounds'
+immediate invocations, C++23's auto(x), friend classes kept out of ADL's doubt, __builtin_conj's type.
+
+Alternatives weighed: for implicit-trivial1.C, every access-deleted implicit member made surely deleted (rejected: a deleted defaulted
+move constructor is no candidate, cpp2a/implicit-move1.C's derived must not report it; the copy constructor alone); for the notes,
+the own front end's notes counted as errors (rejected: an extra line where g++ has a note; alt-hits takes a note only for an expected
+line's later branch, as gcc-dg.exp's spliced pattern does); for concepts-friend2.C, the friend class check of cpp-tpl2 trusted (it was
+there; the doubt came from sure-assoc-nss, which took any friend as a possible hidden friend function); for nondeduced7.C and
+template/partial-specialization12.C ("not more specialized" against the primary), partial ordering with the primary as a partial
+specialization: not built, the type check of a non-type argument expression's type against the parameter's ([temp.deduct.type]/17)
+is missing in match-args, so the ordering would call A<T, T{}> more specialized; template/crash89.C (a default template argument's
+error at its instantiation): not built, the checker has no "subscripted value is neither array nor pointer" and complete-args'
+const-int does not type the default first.
+Later in the round: a class template's specialization's using-declaration (or access declaration) whose nested-name-specifier names
+a complete class that is no base, GCC's "not a base type" at the declaration (template/crash13.C had passed on the parser's old
+refusal of its access declaration; C++20's enumerators and a dropped incomplete base aside, cpp1z/class-deduction69.C).
+
+Checked: the record run over 2,670 files (the 2,438 own passes and the 232 deferred failing on both fronts; 06:59-08:02 UTC at
+`8078c568e`, stage 0, GOMEMLIMIT=3000MiB, `--only LIST --record`): 2,455 own passes; one pass lost there, template/crash13.C (the access
+declaration rule above, fixed), and the two known slow files past 300 s under load (cpp0x/udlit-suffix-neg.C,
+diagnostic/missing-header-pr110164.C, their pass rows kept as the earlier streams kept them; coroutines/pr104051-0.C's fail row kept
+too); then the 27 own passes with a using-declaration in a template, crash13.C and the control pair read again and recorded at the fix:
+own pass 2,438 -> 2,458, none lost, 20 rows to own pass: cpp0x/implicit-trivial1, initlist-array4, lambda/lambda-anon1, noexcept71,
+override2, pr66443-cxx11, cpp1y/pr66690, cpp23/concepts-err1, cpp2a/concepts-explicit-spec7, concepts-friend2, consteval34, constinit11,
+inherit/pure1, virtual2, init/new52, ptrfn2, other/error26, parse/access13, qualified2, tc1/dr147. mac/next merged (cpp-p2564's 7 rows,
+cpp-extfloat's 2), the 20 rows, crash13, class-deduction69 and the 9 merged rows read again on the merged tree, all passing, the
+control pair (DRs/dr2082.C, dr1423.C) failing. C++ read 6,042 / 0 / 241 -> 6,062 / 0 / 221 (248 n/a); completeness 0.9837 -> 0.9845.
+
+Left (single rows found and not built): template/crash89.C, cpp0x/nondeduced7.C, template/partial-specialization12.C (above);
+overload/using2.C (namespace-scope using-declarations against declarations, seven lines); cpp0x/defaulted10.C (a deleted member
+template's use, line 13); cpp1y/constexpr-89074-3.C (string literals as objects in pointer comparisons); concepts-recursive-sat4.C
+(hidden friend templates by ADL); concepts-lambda2.C, concepts-requires1.C (the parser's recovery); inherit/error4.C (GCC's recovery
+declares a variable named A, hiding the class); overload/error8.C (an ambiguous assignment's candidates' errors at the class);
+cpp0x/pr32127.C (a member with an unexpanded pack dropped, so its use is "not a member").
