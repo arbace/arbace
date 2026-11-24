@@ -20271,3 +20271,50 @@ reported and the declaration still refused).
 Checked: the record run 23:56-01:16 UTC over 2,706 files: own pass 2,364 -> 2,377 (the two timeouts' rows kept), none lost, 4 rows to
 own pass; mac/next merged (cpp-tpl2 (3)), the 9 rows read again on the merged tree, all pass; the control pair fails as it must. `bin/reap --record`, `bin/crops-score
 --record`, `--judge --strict`, `bin/records-check`: 0 problems; C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a), completeness 0.9810 -> 0.9812.
+
+## 2026-11-24: cpp-sweep, the C++ read stream's sweep: literal types, defaulted comparisons, the constant evaluator's sure errors (branch `cpp-sweep-1124` from mac/next `a2143d56a`)
+
+The coordinator's brief: one agent for the whole C++ read cell (the previous read agents closed), the 305 deferred rows re-derived by
+cause and built largest first, the parser's recovery second, single rows by cost, IFNDR eager checks listed for the user. The re-derivation:
+`bin/repr-cpp dg --corpus dg-error --front native --only` the 314 deferred files (the cell's 305 rows plus the n/a-by-match ones; stage 0,
+GOMEMLIMIT=3000MiB): 0 own passes, the causes as the earlier streams' Left lists name them; the groups taken: literal types and constexpr
+declarations (C++11's rules among them), defaulted comparisons (13 spaceship files, one mechanism: GCC's explanation of a deleted
+defaulted operator at its use), the constant evaluator's unsure refusals that are sure, then single rows. Built (doc/cpp/CPP-SURVEY.md,
+"As built: cpp-sweep"): arbace/cpp/sema.ae's cx-non-literal and its five rules, cx-defaulted-not-constexpr, constant destruction, local
+arrays of class objects, indeterminate members, parameters and unusable namespace-scope variables read, past-the-end pointer equality,
+thread-local references to temporaries; defaulted comparisons deleted by their subobjects with cx-cmp-explain!, declared return types,
+P1186's synthesis left as before, constexpr-ness by cx-cmp-not-constexpr; template.ae's narrowing of non-type template arguments;
+floating array new sizes, static_cast to arrays of another bound, ordered comparisons with null pointer constants as sure substitution
+failures, incomplete return types' bodies, one C function of several namespaces, GCC's `__x` capture names, C++11's const constexpr
+members, namespace-scope structured bindings; parse.ae's explicit instantiation specifiers and packs of fundamental types; diag.ae's
+std::initializer_list as no template.
+
+Alternatives weighed: for the literal type, clang's isLiteralType with its implicit constexpr default constructor (rejected: g++ is the
+reference, and it takes a class without user-declared constructors as literal whatever its members' privacy or default member
+initializers, probed by hand, so an unsure class is literal here: a missed error, never a false one); for the deleted defaulted
+comparison, reporting the subobject's error at the definition (rejected: GCC reports nothing until the operator is used, then the
+explanation; an unused one in synth-neg7.C has no error); for P1186's synthesized <=> from == and <, building it (deferred: no file
+needs its body, the refusal kept as before when they are usable); for the template argument's narrowing, judging only the main file's
+written arguments (rejected: the default argument's is the test's case; a 64-bit unsigned parameter skipped for the value's representation).
+Tried and reverted: musl's __assert_fail as surely not constexpr (cpp0x/constexpr-ice16.C's line 6 needs the macro's spelling
+position, so no row; the rule's risk not worth it).
+
+Checked: probes by hand against g++ 15.2 (literal types: a class without user-declared constructors literal whatever its members' privacy
+or default member initializers; -Winvalid-constexpr a pedwarn, an error under -pedantic-errors; "temporary of non-literal type" in every
+standard; explicit instantiations' specifiers a permerror; the expansion pattern of `int... a`). The record run over 2,696 files (the
+2,382 own passes and the 314 deferred; 02:52-04:16 UTC at `3b544bbdb`, stage 0, GOMEMLIMIT=3000MiB): 2,402 own passes; 13 rows lost
+there, 11 a narrowing false error on bool parameters (the value -1 the slice gives `true`; the check now leaves bool) and the two known
+slow files past 300 s (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C, their pass rows kept as the earlier streams kept
+them). The later commits read again at the head: the 454 own passes naming constexpr or touched by the later rules (and the later
+targets), the 47 naming consteval, static_assert or constinit without constexpr, the 25 earlier targets and the 12 lost rows: all pass
+(cpp0x/constexpr-generated1.C's C++11 const explicit specialization fixed between), the control pair failing as it must. Recorded in that
+order (`--judge --record` over each run): own pass 2,382 -> 2,421, none lost, 39 rows to own pass (the 38 targets and
+cpp1y/constexpr-local4.C by the parameter reads). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+`bin/records-check`: 0 problems. C++ read 5,979 / 0 / 305 -> 6,018 / 0 / 266 (247 n/a); completeness 0.9812 -> 0.9827, independence
+0.9682 -> 0.9690.
+
+Left (doc/cpp/CPP-SURVEY.md, "As built: cpp-sweep"): the parser's recovery after a broken template head (GCC's erroneous declarations,
+crash55/57/63/98/99, pr90138, redecl5, typedef4), P2564's immediate escalation (consteval-prop*), the extended floating types' ranks,
+GCC's spelling positions inside macros (pr79300, constexpr-ice16), and the single rows of the earlier Left lists. IFNDR eager checks,
+for the user (n/a candidates, 2 files): cpp2a/bit-cast2.C and cpp2a/concepts-placeholder5.C (a never-instantiated template's
+non-dependent checks).

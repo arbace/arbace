@@ -11048,3 +11048,69 @@ control pair failing. C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a); com
 
 Left: overload/using2.C, cpp0x/implicit-trivial1.C, lambda-anon1.C, noexcept71.C, tc1/dr147.C, override2.C, parse/access13.C,
 inherit/virtual2.C, cpp0x/pr66443-cxx11.C and init/ptrfn2.C (GCC's places), cpp23/ext-floating*.
+
+## As built: cpp-sweep, literal types, defaulted comparisons and the constant evaluator's sure errors (2026-11-24; branch `cpp-sweep-1124` from mac/next `a2143d56a`)
+
+The burst's C++ read stream after cpp-decl2 (3) and cpp-tpl2 (3), one agent owning the whole read cell: the 314 deferred dg-error files
+(305 rows of the cell; the record's reasons re-derived by a run of `bin/repr-cpp dg --front native` over them, 0 own passes at the base)
+taken by cause, the largest first. Each rule from the standard's text and g++ 15.2's behaviour (the tests' records, and probes by hand
+with the host's g++ where named); no GCC or clang code read. All of it the checker's (arbace.cpp.sema with *on-refusal* bound, `checking?`),
+but the parser's two rules.
+
+- **Literal types** ([basic.types.general]/10 of C++11-C++23): `cx-non-literal`, the reason a type is surely no literal type in GCC's
+  words (a destructor not trivial before C++20, a user-provided one not constexpr since; user-declared constructors none of which is
+  constexpr and no copy or move one, not an aggregate; a base or non-static data member non-literal or volatile; a union, a closure, a
+  header's or incomplete class, a constructor template, an inheriting or a defaulted default constructor unsure: g++ takes a class
+  without user-declared constructors as literal whatever its members' privacy, default member initializers or virtual functions, probed
+  by hand). Its rules: C++11's enclosing class of a constexpr non-static member function under -pedantic-errors, at each member once
+  the class is complete (cx-plain-class?: no template's specialization), a specialization's explained at a constant evaluation's call
+  of it ("call to non-'constexpr' function" there); a constexpr function definition's parameter and return types before C++23 under
+  -pedantic-errors (`cx-literal-signature!`, GCC's -Winvalid-constexpr pedwarn; a template's specialization, a closure's member and a
+  declaration without a definition not judged); a constexpr variable's type (reported, its initializer still judged); a temporary of
+  non-literal type in a constant evaluation (`:temp-obj`, and a by-value parameter's object, every standard); a variable of non-literal
+  type defined in a constexpr function's body in C++14-C++20.
+- **Defaulted special members declared constexpr** ([dcl.fct.def.default]/3): `cx-defaulted-not-constexpr`, a destructor (C++20) over a
+  virtual base or a subobject's destructor not constexpr (`cx-dtor-not-constexpr`), a default constructor over a virtual base, a
+  subobject's user-provided default constructor not constexpr, or before C++20 a scalar member without a default member initializer:
+  GCC's "explicitly defaulted function ... cannot be declared 'constexpr' because the implicit declaration is not 'constexpr'".
+- **The constant evaluator**: a constexpr variable's constant destruction ([expr.const]/7, C++20: its destructor run after its
+  initializer, an array's elements in reverse); a local array of class objects from a list evaluated (it had been "a local's
+  initializer" unsure); an object with a scalar member a constexpr constructor left uninitialized no constant expression
+  (`cx-indeterminate-member`); C++11's mutable subobject read; a function parameter read outside its function's evaluation, and a read
+  of a namespace-scope or static member variable not usable in constant expressions or of its subobject (`::uvar` on the unknown
+  location), sure; a pointer past the end of one array compared with another's first element ([expr.eq]/3.1, both the pointer and the
+  location forms); a thread-local reference bound to a temporary no constant initializer.
+- **Defaulted comparisons** ([class.compare.default], [class.eq], [class.spaceship]): a subobject whose comparison is surely not usable
+  (no operator function and no conversion: `bin0`'s "no match", an ambiguity, no conversion function) defines the operator as deleted,
+  each such subobject's explanation reported at the deleted operator's use (`cx-cmp-explain!`), as GCC explains; a declared return
+  type R: a scalar one deletes the operator by its all-equal result (static_cast<R>(strong_ordering::equal), GCC's "invalid
+  'static_cast'" at the declaration), a subobject's category result not converting to R (to a scalar, or to a stronger category) deletes
+  it, a declared category type synthesizes a missing <=> from == and < (P1186R3: left to the refusal as before when they are usable);
+  a defaulted == not returning bool taken as deleted. A defaulted comparison not declared constexpr is constexpr when it can be
+  (C++20's [class.compare.default]/3: `cx-cmp-not-constexpr`, `cx-cmp-constexpr?`), else its call in a constant evaluation is GCC's
+  "call to non-'constexpr' function", the function it calls the explanation at its declaration.
+- **Smaller rules**: narrowing of a non-type template argument's value from C++11 (template.ae's value-arg, a written or a default
+  argument, a sure drop in a deduction; a 64-bit unsigned parameter not judged); a floating array new size in a template's
+  specialization; a static_cast to a reference to an array of another bound; an ordered comparison of a pointer with a null pointer
+  constant a sure substitution failure (sure-failure?); a definition whose return type is incomplete not analyzed further; one C
+  function declared in several namespaces one candidate ([dcl.link]/6), its differing default arguments an error when used; GCC's
+  closure capture member names (`__x`) reachable; C++11's constexpr non-static member functions const; a namespace-scope structured
+  binding dropped, not the unit (its later errors kept). The parser: an explicit instantiation's inline, constexpr or consteval
+  specifier ([temp.explicit]/3); a function parameter pack of a fundamental type or decltype(auto) names no pack ([temp.variadic]/5).
+  diag.ae: a class std::initializer_list declared as no template ([support.initlist]/1, gnu-interface).
+- **Later in the round**: C++11-C++17's constexpr constructor initializing every member and base ([dcl.constexpr]/4.5,
+  `cx-ctor-c17-inits!`: a scalar member without mem-initializer or default member initializer, a base with members default-initialized
+  by its trivial implicit constructor); a constructor failing the potential constant check called in a constant evaluation, GCC's
+  "called in a constant expression" at the construction (ce-construct, as a call's :cx/pce); an empty class's user-provided constructor
+  evaluated (a local of empty class had been skipped whole); a constexpr variable's value holding a pointer to its initializer's
+  temporary, before C++17 the copied prvalue's (`constexpr A b = A();` whose A stores `this`).
+
+Checked: the record run over 2,696 files (the own passes and the 314 deferred) and the later commits read again on their touched files at
+the head (doc/JOURNAL.md, "cpp-sweep"): own pass 2,382 -> 2,421, none lost (the two known slow files' pass rows kept), 39 rows to own
+pass, the control pair failing. C++ read 5,979 / 0 / 305 -> 6,018 / 0 / 266 (247 n/a); completeness 0.9812 -> 0.9827.
+
+Left: the parser's recovery after a broken template head (crash55, crash57, crash63, crash98, crash99, pr90138, redecl5, typedef4: GCC
+declares an erroneous entity and stays silent on its uses), P2564's immediate escalation (consteval-prop*, consteval11, consteval34,
+consteval-memfn1), the extended floating types' conversion ranks (ext-floating*), GCC's spelling position inside a macro's definition
+(pr79300, constexpr-ice16), the synthesized <=> from == and < built (P1186; refused as before when usable), and the earlier Left lists'
+single rows. IFNDR eager checks, n/a candidates for the user: cpp2a/bit-cast2.C, cpp2a/concepts-placeholder5.C.
