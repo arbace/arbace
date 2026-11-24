@@ -626,8 +626,10 @@ covers what.
   the latter over libmpdec, `Modules/_decimal/libmpdec/` (Copyright (c) 2008-2020 Stefan Krah, under the BSD 2-Clause License,
   section "libmpdec: BSD 2-Clause License" below), and since py-accel (2026-11-23) its `Modules/_zoneinfo.c` and
   `Modules/_elementtree.c`, the latter over the tarball's Expat, `Modules/expat/` (under the MIT License, section "Expat: MIT
-  License" below), through the glue files `tools/pyi/clib/ctypestest/accel_*.c`, whose `accel_elementtree.c` copies
-  `Modules/pyexpat.c`'s capsule table and unknown-encoding handler, under the PSF License Agreement) (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
+  License" below), and since queue 568 its `Modules/_pickle.c` (with `Modules/clinic/_pickle.c.h`), through the glue files
+  `tools/pyi/clib/ctypestest/accel_*.c`, whose `accel_elementtree.c` copies `Modules/pyexpat.c`'s capsule table and
+  unknown-encoding handler and `accel_pickle.c` `Objects/bytesobject.c`'s `_PyBytesWriter` functions and
+  `Python/codecs.c`'s `Py_hexdigits`, under the PSF License Agreement) (their export tables `tools/pyi/lib-dynload/*.arbace-314.so` list the files' PyInit_
   functions), compiled against its `Include/` in the limited API's mode
   (from the release tarball test/python/corpora.edn pins, `:cpython-3.14.10`, SHA-256 `de414a57...b72032`; Copyright
   (c) 2001 Python Software Foundation, All Rights Reserved, under the PSF License Agreement, section "CPython: the PSF
