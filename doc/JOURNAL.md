@@ -21011,3 +21011,40 @@ the skim cache is a cache; so the only way up is the own front end passing those
   is slow over libstdc++'s <string> and <map>; recorded as timeouts, the next cycle's first item).
 - C++ read independence 0.870 -> 0.877 (2,751 own of 4,278 counted rows, 214 n/a and 72 out: (1934 + 2751 + 0.5 x 1527) / 6212), C++ independence 0.9736 -> 0.9750;
   the cells unchanged (read 6,063 / 0 / 221).
+## 2026-11-24: java-misc-1124, the lazy import and security's small fixes; references and logging as decisions
+
+Branch `java-misc-1124` from next `903ef1ab2` (the burst's Java misc stream: `:repl-sibling`, `:security` but t07882 and
+t07910, which java-rows-1124 did, `:logging`, `:references`). Each test's cause was found on the gate executable
+`40a4745332aacf54acab` with the read level's cache; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124".
+Built, for the train (arbace/lang and jrt move gate_key; no build of the branch was made):
+- the lazy import: `Compiler$ImportExpr/importIn` defers the import of a class not loadable yet whose source on the path
+  declares it (`arbace.classes.native/defer-import`, `arbace.classes.analyze/defer-import!` into `env/source-imports`), so
+  packages that import each other load in either order (t04756, t06388 at interp); proved with the deferral called in
+  place of the cyclic import on the gate executable, and the negative cases (no source, a source that does not declare the
+  class, no package) left to Clojure's ClassNotFoundException; the alternative of ordering the packages in run.ae was
+  rejected (a cycle has no order: each package's first file imports the other's class);
+- OCSP: F2's variant OCSP.ae dropped, jdk26u's getOCSPBytes over HttpURLConnection, in the world since F12 (t05333);
+- java.base's com.sun packages (com.sun.crypto.provider, com.sun.security.ntlm) in java.base by jrt's classPlace, as
+  jdk26u's module graph has them (t05304: SunJCE's module), a reflect_test case;
+- the seed source: jrt's SeedGenerator and the NativePRNG variant read a java.security.egd file as jdk26u's
+  URLSeedGenerator and initIO do (t08235); SeedGenerator's forms by `bin/jrt-convert predict`, the variant vetted.
+Proposed for the user (JMS1-JMS4, with options and recommendations in the survey): finalization (t04683, t04816;
+recommended: build it over Go finalizers handing objects to a Java "Finalizer" thread), a WeakReference read while the
+collector marks (t03385: measured, a spinning get keeps its referent through every System.gc; recommended n/a, its stdout
+being unspecified), LDAP's CertStore and UnixLoginModule (t05346, t07867; recommended: t07867 n/a, t05346 deferred under
+JCS234 (a)), and logging (System.Logger is JCS250 (a), not started here, an overlay `System$Logger` named as an
+alternative; t05778 n/a recommended; t05766 java-stack-1124's).
+
+## 2026-11-24: the user's decisions JMS1-JMS4 (java-misc-1124)
+
+The user decided java-misc-1124's proposals (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124"):
+- JMS1 (a): finalization is built: a Go finalizer hands the object to a Java thread "Finalizer", and runFinalization
+  starts a secondary thread (built on this branch, its entry below);
+- JMS2: t03385 (Test7190310) n/a;
+- JMS3: t07867 (AllPlatforms) n/a; t05346 (GetInstance's LDAP CertStore) stays deferred under JCS234 (a);
+- JMS4: t05778 (java/util/logging/Reflect) n/a; System.Logger as an overlay `java/lang/System$Logger.java` translated by
+  j2g, built by the Mac (not on this branch).
+test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before the world's classes) names t03385, t05778 and
+t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
+notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
+`bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
