@@ -20966,3 +20966,9 @@ doc/classes/SPEC.md §14, 7. Goal: Java's `:stack` class (interp 7, compiled 10 
   arbace.classes.analyze/interp and arbace.j2g.* load on stage 0; `bin/jrt build --package jrt` (go build, vet) and the jrt
   tests of the frames and the access rule; a probe at interp on the gate's executable `40a4745332aacf54acab` (no runtime
   change: frames as before) showing the MH and reflection walks the fixes address. No gate build: ready for the train.
+- (later) The j2g analysis of the whole world with these sources (`bin/j2g --analyze-only`, 8,524 classes, Compiler.ae's CF
+  classes among them): 0 analysis failures. test/java/forms/ read again with `--line-numbers` (`bin/java-check --forms update`,
+  428 tests: their layout and the :java/ items move, nothing else). The reader's hash moved (convert.ae, java.ae), so
+  `bin/provenance-check` asks the regeneration of jdk/, jdk/javac/ and the fixtures (provenance only expected, the option being
+  off for them): queued under the big lock as `.tmp/regen.sh` in the worktree (`bin/jrt-convert update`, `bin/javac-vendor
+  convert`, `bin/clojure-tests --java-fixtures update` on javac's tool f170fb32 with the checkout's namespaces).
