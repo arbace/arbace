@@ -617,6 +617,7 @@
 (def ^:dynamic *elided* :erased) ; what an elided lifetime is: :anon (a signature), :static (a const's type), :erased
 (def ^:dynamic *module* 0)       ; the module whose items an unresolved name is looked up in
 (def ^:dynamic *body* nil)       ; RIND5: the function whose body is being checked (its block items are in scope there)
+(def ^:dynamic *closure-hirs* ()) ; queue 542: the HIR ids of the closures typeck is inside, innermost first (their block items in scope)
 
 (defn- scope-param [nm]
   (some (fn [g] (some #(when (and (= nm (:name %)) (not= :lifetime (:kind %))) %) (all-params g))) *scope*))
@@ -783,6 +784,18 @@
   [n]
   (or (some? (:self n)) (= "self" (:name (:pat (first (:params n)))))))
 
+(defn- closure-item
+  "queue 542: the item named NM a closure typeck is inside defines in its body (*closure-hirs*, innermost first), else nil"
+  [nm]
+  (when-let [h (first *closure-hirs*)]
+    (when-let [cl (some #(when (and (= "Closure" (:kind %)) (= h (:hir-id (:node %)))) %) @*defs*)]
+      ;; the closure, then its owners up to the module (an inline const, the const or fn whose body holds it: thread_local!'s
+      ;; `fn __rust_std_internal_init_fn` in NOISY's initializer block)
+      (loop [o cl]
+        (when (and o (not (:module o)) (not= :crate (first (:data o))))
+          (or (some #(when (and (= (:id o) (:parent %)) (#{[:type nm] [:value nm]} (:data %)) (not (#{"Closure" "InlineConst"} (:kind %)))) (:id %)) @*defs*)
+              (recur (def-of (:parent o)))))))))
+
 (defn res-def
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
@@ -830,6 +843,9 @@
               (let [nm (:ident (first segs))]
                 (cond (= "Self" nm) (if (and *self-ty* (not= *self-ty* [:param 0 "Self"])) [:self-alias] [:self-param])
                       (scope-param nm) [:param (scope-param nm)]
+                      ;; queue 542: an item of an enclosing closure's body (thread_local!'s `static __RUST_STD_INTERNAL_VAL`
+                      ;; in its closure, named from the same expansion: no resolution by span), innermost first
+                      (closure-item nm) (let [id (closure-item nm)] [:local id (:kind (def-of id))])
                       (lookup-name nm (or *body* *module*) true) (let [r (lookup-name nm (or *body* *module*) true)]
                                                        (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
                       (get prim-tys nm) [:prim nm]

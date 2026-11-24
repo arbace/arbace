@@ -19175,3 +19175,27 @@ extern "C"'s pair returns. pack-compare-test passed, inline-test 15 of 15, forei
 - std's 325 items: **171 equal**, 32 differ, 122 refused (124 / 15 / 186 at round 3). Checks at the commit: pack-compare-test
   passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed (its known summary, 0 stub calls). rsi-build of
   std.rs and threads.rs under the big lock at this head: both still from the pack (above); peak process 3.2 GB.
+
+## 2026-11-24: 542 (the VM): round 5, std.rs own, threads.rs's thread_local
+
+- **std.rs's drop_glue<SplitWhitespace>**: core's `impl<F: FnMut(char) -> bool> Pattern for F` writes its `type Searcher<'a>`
+  through `pattern_methods!`, which the expansion parses as an item (ItemKind::TyAlias); lower-assoc-item only took Type, so core's
+  native pass wrote AssocErr and `<IsWhitespace as Pattern>::Searcher` never normalized (needs-drop then assumed a glue rustc never
+  emits). Fixed in lower; core's pass over str/pattern.rs alone (210 of 210 facts equal) merged into the whole pass
+  (/root/arbace-mac/.tmp/q542/core-pass on the VM). std.rs now builds own.
+- **threads.rs**: an inline const is a definition (InlineConst, `{constant#N}`) whose closures are its children, and a const's and
+  a static's inline consts are indexed as a fn's (before, a const item's `const { .. }` lowered to an error and the closures had no
+  definition): thread_local!'s `NOISY::{constant#0}::{closure#0}` gets rustc's symbol. A FnPtrShim's local fn item and a local fn
+  the record's library bodies call or name are collected (round 4); a program's own thread-local static named by a record body
+  gets its local def's symbol; build-const binds its inline consts' owner; typeck and the builder see the items of the enclosing
+  closures' and owners' blocks (collect's closure-item over *closure-hirs*: `static __RUST_STD_INTERNAL_VAL` and `fn
+  __rust_std_internal_init_fn`, named from the macro's expansion without a span resolution). A 4-argument `nth` (pattern reads)
+  that refused std's default_hook and Path::parent in the export fixed.
+- rsi-build of the six (f78b58cc2, then threads.rs at 3112aec44): **5 of 6 own at C1 and C4** (intrinsics, panics, std, unwind,
+  vectors); threads.rs from the pack (its main's promoted `&NOISY` needs the const's value: LocalKey over a closure coerced to a fn
+  pointer; and its closures' thread-local static: the builder makes a plain static reference, rustc a ThreadLocalRef, and the
+  static's initializer `LazyStorage::new()` is a const fn call: the next round). The eval check over them (`bin/rsi check --front
+  own --corpus samples`, RSI_FRONT_DIR the merged builds): **6 of 6 pass**, 5 of 6 programs' codegen units from Arbace's MIR, the
+  std-vs-panics control differing (6 min, 6.1 GB). Not recorded (this host's records are arm64's).
+- C6: std 171 -> **172 / 32 / 121** (the nth fix; export 345 -> 351 bodies). Checks at the commit: pack-compare-test passed,
+  inline-test 15 of 15, `bin/rust-front essential` passed (known summary, 0 stub calls), core-essential its known summary.
