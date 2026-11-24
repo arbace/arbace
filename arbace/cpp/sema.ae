@@ -2630,7 +2630,9 @@
         eacc (when (and (checking?) (= :class (:kind scope)) (:cls scope))
                (or *member-access* (when nm (some #(when (= :type (:e %)) (:access %)) (.get ^java.util.HashMap (:names scope) nm)))))]
     (when-not nm (reset! *last-anon* t))
-    (when-not old-id (swap! abi/*enums* assoc id {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped}))
+    (when-not old-id (swap! abi/*enums* assoc id (cond-> {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped}
+                                                  ;; (cpp-rind: a fixed underlying type, [conv.prom]/4's and DR 1601's)
+                                                  (get-in n [:fixedUnderlyingType :qualType]) (assoc :fixed true))))
     (when (and nm (not old-id)) (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
                                 ;; (queue 492, the checker: a member enumeration's access, check-type-access!)
                                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
@@ -6226,7 +6228,10 @@
     (cond
       (= from to) 0
       (and (abi/arith? to) (or (abi/arith? from) (and (abi/enum? from) (not (:scoped (abi/enm (:id from)))))))
-      (if (= (promote-type from) to)
+      (if (or (= (promote-type from) to)
+              ;; (cpp-rind, the checker: [conv.prom]/4, an unscoped enumeration with a fixed underlying type promotes to that type
+              ;; too, not only to its promoted type: cpp0x/scoped_enum11.C's f4(e2) for f4(short) and f4(long))
+              (and (checking?) (abi/enum? from) (:fixed (abi/enm (:id from))) (= (abi/unq (abi/underlying from)) to)))
         (if (or (abi/enum? from) (contains? abi/int-ranks (abi/bn from))) 1 2)
         (if (and (= :float (abi/bn from)) (= :double (abi/bn to))) 1 2))
       (and (= :bool (abi/bn to)) (or (abi/ptr? from) (abi/arith? from))) 2
@@ -6605,6 +6610,10 @@
                         ;; (cpp-rt-own: what [over.ics.rank]/4 orders among conversions of one rank, better-ics?'s: a pointer's to bool,
                         ;; to cv void*, to a base class's pointer)
                         (and (or (abi/ptr? ft) (abi/mptr? ft)) (= :bool (abi/bn tt))) (assoc :ptr-bool true)
+                        ;; (cpp-rind, the checker: [over.ics.rank]/4.2 (DR 1601), the promotion of an enumeration with a fixed
+                        ;; underlying type to that type before its promotion to the promoted type)
+                        (and (checking?) (= 1 r) (abi/enum? ft) (:fixed (abi/enm (:id ft))) (= (abi/unq (abi/underlying ft)) tt))
+                        (assoc :enum-under true)
                         (and (abi/ptr? ft) (abi/ptr? tt) (abi/void? (:to tt)) (not (abi/void? (:to ft)))) (assoc :ptr-void true)
                         (and (abi/ptr? ft) (abi/ptr? tt) (class-id (:to ft)) (class-id (:to tt))
                              (abi/derived-from? (class-id (:to ft)) (class-id (:to tt))))
@@ -6620,6 +6629,8 @@
              ;; (basic_streambuf*) ambiguous before)
              (and (:ptr-bool b) (not (:ptr-bool a))) true
              (and (:ptr-bool a) (not (:ptr-bool b))) false
+             (and (:enum-under a) (not (:enum-under b))) true
+             (and (:enum-under b) (not (:enum-under a))) false
              (and (:ptr-d2b a) (:ptr-void b)) true
              (and (:ptr-void a) (:ptr-d2b b)) false
              (and (:ptr-d2b a) (:ptr-d2b b) (= (first (:ptr-d2b a)) (first (:ptr-d2b b))) (not= (second (:ptr-d2b a)) (second (:ptr-d2b b))))
