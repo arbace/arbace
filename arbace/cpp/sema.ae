@@ -11802,6 +11802,15 @@
     :ptr (assoc t :to (let [pt (:to (abi/unq (:ty (rv e))))] (if (= :auto (:k (:to t))) (cond-> pt (:c (:to t)) (assoc :c true)) (deduce-auto (:to t) {:op :deref :ty pt :cat :lv}))))
     t)))
 
+(defn- cx-array-paren!
+  "cpp-rind (the checker): [dcl.init.general]/16.5, an array is initialized by a braced list or a string literal: a written
+  parenthesized initializer of one array expression (`s(a)` in a mem-initializer, `string x[1](a);`) is GCC's \"array must be
+  initialized with a brace-enclosed initializer\" (init/array62.C); an implicit copy's member arrays not judged here."
+  [t args]
+  (when (and (checking?) (abi/arr? (abi/unq t)) (= 1 (count args)) (map? (first args)) (not= :str (:op (first args)))
+             (abi/arr? (abi/unq (abi/non-ref (or (:ty (first args)) {})))))
+    (fail :array-init "array must be initialized with a brace-enclosed initializer")))
+
 (defn- decl-init
   "A local declaration's initializer from its node (`:init` c, call or list)."
   [ctx id n]
@@ -11851,6 +11860,9 @@
       (and (checking?) (= "call" (:init n)) (abi/scalar? (abi/unq (abi/non-ref t)))
            (let [as (if (= "ParenListExpr" (:kind init)) (kids init) [init])] (and (= 1 (count as)) (= "InitListExpr" (:kind (first as))))))
       (fail :conversion "cannot convert '<brace-enclosed initializer list>' implicitly to a scalar in a parenthesized initializer")
+      (and (checking?) (= "call" (:init n)) (abi/arr? (abi/unq t)) (not= "ParenListExpr" (:kind init)) (not= "CXXConstructExpr" (:kind init))
+           (let [a (analyze ctx init)] (cx-array-paren! t [a]) false))
+      nil
       (= "call" (:init n)) (init-for t (cond (= "ParenListExpr" (:kind init)) (analyze-args ctx (kids init))
                                              ;; (cpp-s11: `U u({3, 4});`, the native parser's CXXConstructExpr of the
                                              ;; declaration's own type, untyped, around its arguments: they are the
@@ -12485,7 +12497,9 @@
                     ;; [temp.variadic]/5: as many arguments as the pack has; CP332 (a), tuple's constructors)
                     (= "PackExpansionExpr" (:kind x)) (let [as (analyze-args ctx [x])]
                                                         (init-for t as ctx (if (empty? as) :value :direct)))
-                    :else (init-for t [(analyze ctx x)] ctx :direct)))
+                    :else (let [a (analyze ctx x)]
+                            (cx-array-paren! t [a])
+                            (init-for t [a] ctx :direct))))
         deleg (get given [:base cid])
         ;; (round 54, the checker: [class.base.init]/5, a mem-initializer-list initializes at most one member of a union)
         _ (when (and (checking?) (:union c))
