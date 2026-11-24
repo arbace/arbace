@@ -19065,3 +19065,17 @@ the charsets had hit SJIS_0213's missing table). Interp on 37 tests: 11 now pass
 t05691, t05707, t08152, t08176, t08178, t08179), 0 regressions, controls differ; t04789 and t04809 load and stop at JMX
 (:design-also). The compiled run built no program (its build-go under the heavy lock left no output) and was not repeated:
 the allowance's consolidation stopped the task. Interp's rows recorded; the REAP matrix, scores and compiled rows left.
+
+## 2026-11-24 — Java's jrt causes: DECISIONs 543-1 to 543-3 answered at the settle (queue 543, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287):
+  - 543-1 (Java line numbers in stack traces) dropped from 543: built on the main host as java-stack-1124.
+  - 543-2 (a): type-annotation reflection, MethodParameters and receiver types split by cause into small tasks: queue 563
+    (repr/java and jrt at interp: Outer.@A Inner's inner annotation, t04723; package-info's annotations on jrt's Package,
+    t04730; -parameters' MethodParameters, t04832 and t05910, JCS280 (a) reversed) and queue 564 (the compiled level:
+    Executable.getAnnotatedReceiverType through Executable_I, t04733; an enum constructor's parameter annotations, t04717;
+    Class.describeConstable, t04712-t04715). Each cause is its own commit.
+  - 543-3 superseded: the jrt: file system rows are n/a by the user's decision on the main host (java-rows-1124,
+    `:jrt-filesystem`).
+Alternatives: 543-2 (b), leaving the rows in `:reflection` (not chosen).
+:journal
