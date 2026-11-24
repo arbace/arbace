@@ -9008,6 +9008,11 @@
         obj (if (:isArrow n) (deref-node o) o)
         cid (class-id (:ty obj))
         nm (:name n)
+        ;; (cpp-sweep, the checker: GCC names a closure's capture member `__x` for the capture x, a name the program can
+        ;; reach (the closure type's members unspecified, [expr.prim.lambda.closure]/2 and /10): `lambda.__val` is that
+        ;; member as g++ 15.2 takes it, pr85515-1.C)
+        capf (when-let [c (and (checking?) cid (str/starts-with? (str nm) "__") (abi/cls cid))]
+               (when (:lambda c) (some #(when (= (subs (str nm) 2) (:cx-capname %)) %) (:fields c))))
         ;; a qualified member (o.B::f): looked up in B, called without virtual dispatch
         q (if (:_wn n)
             (not-empty (vec (:qualifier n)))
@@ -9017,6 +9022,9 @@
               (when m (vec (map str/trim (remove str/blank? (split-scope (second m))))))))
         qcid (when (seq q) (let [e (first (filter #(= :type (:e %)) (lookup-qualified (:scope ctx) q)))] (class-id (:ty e))))]
     (when-not cid (fail :member "member of a non-class"))
+    (if capf
+      (field-node obj cid (:i capf))
+    (do
     ;; (the rest of CP313 (a): o.B::m names B by its injected-class-name found in o's class, a member of it through the
     ;; bases, [basic.lookup.qual]/1 and [class.access.base]/5: inaccessible through a private base; ::B::m does not)
     (when (and (checking?) qcid (not= qcid cid) (= 1 (count q)) (abi/derived-from? cid qcid)
@@ -9077,7 +9085,7 @@
             (and (seq tm) (:_wn n) (:explicitTemplateArgs n)) (assoc :targs-text (written-targs n nm) :targs-scope (:scope ctx))
             (and (seq tm) (not (:_wn n)) (re-find #"<[^<>]*(?:<[^<>]*>[^<>]*)*>\s*$" t)) (assoc :targs-text (second (re-find #"(?:\.|->)\s*(?:template\s+)?(.*)$" t)) :targs-scope (:scope ctx))))
         (= :enumerator (:e e)) {:op :int :v (:val e) :ty (:ty e) :cat :pr}
-        :else (fail :member "member " nm)))))
+        :else (fail :member "member " nm)))))))
 
 (declare analyze-fn! has-auto?)
 
@@ -9999,7 +10007,7 @@
           (let [src (entity-expr encl [{:e :var :id k}] nil)
                 i (count (:fields (abi/cls lid)))
                 ft (if (= :ref mode) (abi/lref (:ty src)) (abi/non-ref (:ty v)))]
-            (abi/update-cls! lid update :fields conj {:name nil :ty ft :access :private :i i :capture true})
+            (abi/update-cls! lid update :fields conj (cond-> {:name nil :ty ft :access :private :i i :capture true} (checking?) (assoc :cx-capname (:name v))))
             (swap! caps assoc k i)
             (swap! (:inits lam) conj [i (if (= :ref mode) {:i :bind :e src} (init-for ft src encl :copy))])
             (field-node obj lid i)))))))
@@ -10013,7 +10021,7 @@
         byref (= amp "&")
         ft (if byref (abi/lref (:ty e)) (deduce-auto {:k :auto} e))
         i (count (:fields (abi/cls lid)))]
-    (abi/update-cls! lid update :fields conj {:name nil :ty ft :access :private :i i :capture true})
+    (abi/update-cls! lid update :fields conj (cond-> {:name nil :ty ft :access :private :i i :capture true} (checking?) (assoc :cx-capname nm)))
     (swap! (:inits lam) conj [i (if byref {:i :bind :e e} (init-for ft e encl :copy))])
     (enter! fs nm {:e :capfield :i i})))
 
