@@ -6046,6 +6046,37 @@
 
 (swap! checks conj friend-namespace-clash)
 
+;; cpp-sweep: [temp.mem]/1 with [temp.alias]/2, a member's out-of-class definition has one template header for each enclosing class
+;; template its qualifier names: a qualifier through a member alias template whose type names none of the templates' parameters
+;; (`B<T>::C<U>` of `template<class U> using C = A;`) denotes the class A, no template, so its headers are GCC's "too many
+;; template-parameter-lists", at the declaration (cpp0x/alias-decl-42.C, cpp2a/concepts-pr59200.C). The main file's
+;; namespace-scope variable definitions by the parser's header count (:_qtmpl), their qualifier read off the text.
+(defn alias-qualified-headers
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        ;; class template name -> {member alias template name -> its aliased type text}
+        aliases (into {} (for [n (:nodes u) :when (and (= "ClassTemplateDecl" (:kind n)) (string? (:name n)))
+                               :let [r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n))
+                                     tps (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:name %)) (:inner n)))]
+                               :when r]
+                           [(:name n) (into {} (for [a (:inner r) :when (= "TypeAliasTemplateDecl" (:kind a))
+                                                     :let [own (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl"} (:kind %)) (:name %)) (:inner a)))
+                                                           t (some #(when (= "TypeAliasDecl" (:kind %)) (str (get-in % [:type :qualType]))) (:inner a))]
+                                                     :when t]
+                                                 [(:name a) (not (some (into tps own) (re-seq #"[A-Za-z_]\w*" t)))]))]))]
+    (doseq [n (remove :_hdr (:nodes u))
+            :when (and (= "VarDecl" (:kind n)) (pos? (long (or (:_qtmpl n) 0))) (= main (get-in n [:loc :file] main)))
+            :let [b (get-in n [:range :begin :offset]) e (get-in n [:loc :offset])]
+            :when (and b e (< (long b) (long e) (count src)))
+            :let [t (subs src (long b) (long e))
+                  m (re-find #"([A-Za-z_]\w*)\s*<[^<>]*>\s*::\s*([A-Za-z_]\w*)\s*<[^<>]*>\s*::\s*$" t)]
+            :when (and m (true? (get-in aliases [(nth m 1) (nth m 2)])))]
+      (let [[l c] (line-col starts (long e))]
+        (.add out {:line l :col c :kind :error :rule :template :msg "too many template-parameter-lists"})))
+    (vec out)))
+
+(swap! checks conj alias-qualified-headers)
+
 ;; A constexpr (or consteval) function's body before C++23 ([dcl.constexpr]/3 of C++11 to C++20, P2242 lifting the last of it): no
 ;; definition of a variable of static or thread storage duration ("'b' defined 'static' in 'constexpr' function only available with
 ;; '-std=c++23'"), no goto statement ("'goto' in 'constexpr' function only available with '-std=c++23'"); before C++20 (P1002) no
