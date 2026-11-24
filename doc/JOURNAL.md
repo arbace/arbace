@@ -20451,3 +20451,21 @@ test_socket 3, test_gzip 3, test_hash 3, and test_json, test_os, test_buffer, te
 test_future, test_inspect, test_atexit, test_difflib, test_regrtest, test_support, test_tempfile, test_tools 1 each; 40 of them
 passed on the base already), and on goi's path, which these compiled runs could not exercise (test_compileall imports
 _testmultiphase on the compiled path), test_compileall's eight -O, PYTHONPATH and hard-link rows (shown by .tmp/os/t8.py).
+
+## 2026-11-24: py-os-1124: the user's decisions on its two questions, and the interruptible socket send
+
+The user decided (2026-11-24, through the coordinator) py-os-1124's two questions:
+- 1 (a): test_cmd_line's test_python_malloc_stats is n/a, an allocator detail (PYTHONMALLOCSTATS prints the counters of
+  CPython's obmalloc arenas, pools and size classes, which Go's allocator has none of): test/python/divergences.edn's new
+  `:pymalloc-stats` (`:kind :na`), the test taken out of `:pyi-command-line`'s :tests.
+- 2 (a): build interruptible socket writes, non-blocking plus poll as 545 did for FileIO. Built: go/arbace/py's
+  builtins_socket `callWrite`, used by socket.send and sendall: on a blocking socket in the main thread the wait for room is
+  ppoll with the wake pipe (pollWithWake: a signal's handlers run when it arrives, one that raises ends the call with its
+  exception, one that returns lets it go on) and the send itself carries MSG_DONTWAIT, so it never blocks in the kernel, where
+  Go's SA_RESTART handlers would keep it; the descriptor's own flags stay as they are (545's writeInterruptible's rule); a
+  timeout's socket, other threads and families whose poll never reports room (AF_ALG's sock_no_poll: a first version hung
+  test_socket's LinuxKernelCryptoAPI test_hmac_sha1 and test_sha256) keep sock_call's path, the others being AF_UNIX,
+  AF_INET and AF_INET6. test/python/lib-test-skip.tsv no longer skips test_socket's
+  test_sendall_interrupted. For test_sendall_interrupted and test_wsgiref's test_interrupted_write (a server's send of
+  SOCK_MAX_SIZE bytes interrupted by SIGUSR1 from the client's thread, its handler returning).
+The branch rides train 5 (train 3 was already queued) with the Mac's 550, 552, 553 and 551b and py-core.

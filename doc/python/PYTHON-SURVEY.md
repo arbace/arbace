@@ -8425,7 +8425,13 @@ modules, 595 methods) passed 40 of the 127 rows already (the record predates py-
   UTF-8 codec's UnicodeEncodeError; str.encode's and bytes.decode's encoding and errors arguments likewise (getargs' "s");
   exec()'s bytes take the tokenizer's get_normal_name and a decoded source's every coding spec of its first two lines is made
   inert; ast.parse of a tree past encoding/json's depth is the parser's MemoryError.
-- **Sockets**: AF_UNIX getsockname and getpeername from the address and its length (Linux abstract names holding NULs).
+- **Sockets**: AF_UNIX getsockname and getpeername from the address and its length (Linux abstract names holding NULs);
+  send and sendall interruptible (the user's decision 2 (a) of 2026-11-24): on a blocking socket in the main thread the wait
+  for room is ppoll with the wake pipe and the send carries MSG_DONTWAIT, so a signal's handler runs while it waits (its
+  exception ends the call, its return lets it go on), as send(2) under CPython's handlers without SA_RESTART
+  (test_sendall_interrupted, no longer in lib-test-skip.tsv; test_wsgiref's test_interrupted_write).
+- **n/a**: test_cmd_line's test_python_malloc_stats (`:pymalloc-stats`, the user's decision 1 (a) of 2026-11-24: pymalloc's
+  statistics, an allocator detail).
 - **bin/pyi's AOT module** keeps the libraries cf2g compiled (clib/LIB/aot, by their nodes' key) across a runtime change: a
   runtime rebuild is the print and copy, not 15 minutes of cf2g.
 - **Proved** (the main host, pyi's AOT, `bin/pyi check --aot --lib-test --fresh --only` over the same 39 modules; the three
@@ -8439,7 +8445,6 @@ modules, 595 methods) passed 40 of the 127 rows already (the record predates py-
 - **Left, and whose**: test_regrtest's test_add_python_opts (`_testcapi.config_get('buffered_stdio')` in pyctypes'
   capi_config, py-accel's world, should read the runtime's -u, -W, -b and -E); test_asyncio's three
   SelectorEventLoopSignalTests (an OSError subclass's class attribute `errno` over the instance's field: py-core's exception
-  model); test_python_malloc_stats (pymalloc's statistics: proposed n/a); a signal interrupting a blocking socket write
-  (test_sendall_interrupted, test_wsgiref's test_interrupted_write: Go restarts the system call); the wakeup-fd tests
+  model); the wakeup-fd tests
   (_testcapi), test_jit_is_active (_testinternalcapi), test_c_locale_coercion's two (the UTF-8 mode's stdio errors, 553's),
   test_compileall's test_workers (ProcessPoolExecutor, 535's), the end's finalization rows (the Mac's).
