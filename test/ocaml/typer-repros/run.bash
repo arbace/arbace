@@ -15,7 +15,8 @@ done
 # a directory of units (its file `units`: their order), each typed against the earlier ones' native .cmi (--cmi-out), as the suite's native
 # path types a program's units: m1, an alias in a unit's interface to a module inside an earlier sibling (queue 546b, env's find-unit);
 # m2, a class whose methods name a module of its unit, inherited from another unit (queue 546b, env's subst-items); m3, an interface
-# (.mli, typed with --intf) whose class inherits another unit's class read inside it (queue 546b, nested with-unit-stamps)
+# (.mli, typed with --intf) whose class inherits another unit's class read inside it (queue 546b, nested with-unit-stamps); m4, a method!
+# without a type overriding an inherited polymorphic method (queue 546b, typeclass's first pass)
 for d in "$D"/*/; do
   [ -f "$d/units" ] || continue
   n=$(basename "$d"); w=$W/$n; mkdir -p "$w"; cp "$d"/*.ml* "$w/"; ok=1
