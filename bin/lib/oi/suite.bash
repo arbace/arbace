@@ -75,7 +75,13 @@ suite_stage() {
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u"); else suite_wrap_one "$base" "$u" "$d"; fi ;;
+      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
+          # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
+          # DIR by the native ocamllex, then staged as the library's module
+          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && [ -f "$base/$(suite_wrap_path "$u" | sed 's/\.ml$//').mll" ]; then
+            local wg=$d.wgen; mkdir -p "$wg"; suite_gen "$base/$(suite_wrap_path "$u")" "$wg"
+            [ -f "$wg/$(basename "$(suite_wrap_path "$u")")" ] && suite_wrap_one "$base" "$u" "$d" "$wg/$(basename "$(suite_wrap_path "$u")")"
+          else suite_wrap_one "$base" "$u" "$d"; fi ;;
       *) if suite_needs_build "$id" "$base" "$u"; then build+=("$base/$u")
          elif [ -f "$base/$u" ]; then cp "$base/$u" "$d/"
          else suite_gen "$base/$u" "$d"; fi ;;
@@ -99,6 +105,7 @@ suite_stage() {
       rm -rf "$d.wbuild"
     fi
   fi
+  rm -rf "$d.wgen"
 }
 
 # suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,
@@ -382,7 +389,9 @@ cmd_suite_check_compiled() {
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
   [ -n "$ONLY" ] && mode=$mode-only
   local res; res=$(suite_results "$root/test/ocaml/check-suite-aot-compiled.edn" check-suite-aot-compiled)
-  O2J_LEVEL=compiled O2J_KNOWN=$root/test/ocaml/aot-compiled-known.edn O2J_SLOW=$root/test/ocaml/aot-compiled-slow.edn \
+  # (burst 2026-11-23) the tests' own verdicts, as the light level's judgment (the opam set's exit statuses, opam-verdicts.tsv)
+  local own; own=$(own_verdicts aot "$S/corpus.tsv" suite) || exit $?
+  OI_OWN=$own O2J_LEVEL=compiled O2J_KNOWN=$root/test/ocaml/aot-compiled-known.edn O2J_SLOW=$root/test/ocaml/aot-compiled-slow.edn \
     "$(arbace_exe)" "$root/test/ocaml/o2j_check.ae" "$mode" "$out" "$S/corpus.tsv" "$SUITE_REFS" "$S/oi.tsv" \
     "$res" "$root/test/ocaml/divergences-suite-aot-compiled.edn"
 }

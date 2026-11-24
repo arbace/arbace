@@ -1,0 +1,120 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/crypto/DesCbcEType.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.crypto)
+
+(import '(sun.security.krb5 Confounder KrbCryptoException)
+        '(sun.security.krb5.internal Krb5 KrbApErrException))
+
+(defclass ^:abstract DesCbcEType
+  :extends EType
+
+  (method ^:protected ^:abstract calculateChecksum :throws [KrbCryptoException] ^byte/1 [this
+                                                                                         ^byte/1 data
+                                                                                         ^int size])
+
+  (method ^:public blockSize ^int [this] 8)
+
+  (method ^:public keyType ^int [this] Krb5/KEYTYPE_DES)
+
+  (method ^:public keySize ^int [this] 8)
+
+  (method ^:public encrypt :throws [KrbCryptoException] ^byte/1 [this ^byte/1 data ^byte/1 key
+                                                                 ^int usage]
+    (let [ivec (new byte/1 (.keySize this))] (.encrypt this data key ivec usage)))
+
+  (method ^:public encrypt :throws [KrbCryptoException] ^byte/1 [this ^byte/1 data ^byte/1 key
+                                                                 ^byte/1 ivec ^int usage]
+    (when (> (alength key) 8) (throw (KrbCryptoException. "Invalid DES Key!")))
+    (let [new_size (unchecked-add-int (unchecked-add-int (alength data) (.confounderSize this))
+                                      (.checksumSize this))
+          ^:mutable ^byte/1 new_data nil
+          ^:mutable ^byte pad 0]
+      (if (== (unchecked-remainder-int new_size (.blockSize this)) 0)
+          (do
+            (set! new_data (new byte/1 (unchecked-add-int new_size (.blockSize this))))
+            (set! pad (unchecked-byte 8)))
+          (do
+            (set! new_data
+                  (new
+                    byte/1
+                    (unchecked-subtract-int (unchecked-add-int new_size (.blockSize this))
+                                            (unchecked-remainder-int new_size (.blockSize this)))))
+            (set! pad
+                  (unchecked-byte
+                    (unchecked-subtract-int (.blockSize this)
+                                            (unchecked-remainder-int new_size (.blockSize this)))))))
+      (loop [^int i new_size]
+        (when (< i (alength new_data)) (aset new_data i pad) (recur (unchecked-inc-int i))))
+      (let [conf (Confounder/bytes (.confounderSize this))]
+        (System/arraycopy conf 0 new_data 0 (.confounderSize this))
+        (System/arraycopy data 0 new_data (.startOfData this) (alength data))
+        (let [cksum (.calculateChecksum this new_data (alength new_data))]
+          (System/arraycopy cksum 0 new_data (.startOfChecksum this) (.checksumSize this))
+          (let [cipher (new byte/1 (alength new_data))]
+            (Des/cbc_encrypt new_data cipher key ivec true)
+            cipher)))))
+
+  (method ^:public decrypt :throws [KrbApErrException KrbCryptoException] ^byte/1 [this
+                                                                                   ^byte/1 cipher
+                                                                                   ^byte/1 key
+                                                                                   ^int usage]
+    (let [ivec (new byte/1 (.keySize this))] (.decrypt this cipher key ivec usage)))
+
+  (method ^:public decrypt :throws [KrbApErrException KrbCryptoException] ^byte/1 [this
+                                                                                   ^byte/1 cipher
+                                                                                   ^byte/1 key
+                                                                                   ^byte/1 ivec
+                                                                                   ^int usage]
+    (when (> (alength key) 8) (throw (KrbCryptoException. "Invalid DES Key!")))
+    (let [data (new byte/1 (alength cipher))]
+      (Des/cbc_encrypt cipher data key ivec false)
+      (when-not (.isChecksumValid this data)
+        (throw (KrbApErrException. Krb5/KRB_AP_ERR_BAD_INTEGRITY)))
+      data))
+
+  (method ^:private copyChecksumField ^void [this ^byte/1 data ^byte/1 cksum]
+    (loop [^int i 0]
+      (when (< i (.checksumSize this))
+        (aset data (unchecked-add-int (.startOfChecksum this) i) (aget cksum i))
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:private checksumField ^byte/1 [this ^byte/1 data]
+    (let [result (new byte/1 (.checksumSize this))]
+      (loop [^int i 0]
+        (when (< i (.checksumSize this))
+          (aset result i (aget data (unchecked-add-int (.startOfChecksum this) i)))
+          (recur (unchecked-inc-int i))))
+      result))
+
+  (method ^:private resetChecksumField ^void [this ^byte/1 data]
+    (loop [^int i (.startOfChecksum this)]
+      (when (< i (unchecked-add-int (.startOfChecksum this) (.checksumSize this)))
+        (aset data i 0)
+        (recur (unchecked-inc-int i)))))
+
+  (method ^:private generateChecksum :throws [KrbCryptoException] ^byte/1 [this ^byte/1 data]
+    (let [cksum1 (.checksumField this data)]
+      (.resetChecksumField this data)
+      (let [cksum2 (.calculateChecksum this data (alength data))]
+        (.copyChecksumField this data cksum1)
+        cksum2)))
+
+  (method ^:private isChecksumEqual ^boolean [this ^byte/1 cksum1 ^byte/1 cksum2]
+    (cond
+      (identical? cksum1 cksum2) true
+      (or (and (nil? cksum1) (some? cksum2)) (and (some? cksum1) (nil? cksum2))) false
+      (not (== (alength cksum1) (alength cksum2))) false
+      :else
+        (do
+          (loop [^int i 0]
+            (if (< i (alength cksum1))
+                (if (not (== (aget cksum1 i) (aget cksum2 i)))
+                    (return false)
+                    (recur (unchecked-inc-int i)))
+                nil))
+          true)))
+
+  (method ^:protected isChecksumValid :throws [KrbCryptoException] ^boolean [this ^byte/1 data]
+    (let [cksum1 (.checksumField this data)
+          cksum2 (.generateChecksum this data)]
+      (.isChecksumEqual this cksum1 cksum2))))

@@ -82,6 +82,12 @@ java-project-test: ## the Java project model's fixtures: test/programs/java-proj
 java-project-fetch: ## the pinned Maven artifacts of Arbace's own Java fixtures (JUnit, hamcrest-core) into the main checkout's .tmp/maven, checked by size and SHA-256 (bin/java-project fetch; FROM=DIR copies from a local repository)
 	bin/java-project fetch $(if $(FROM),--from $(FROM),)
 
+bytecode-check: ## classes defined from class-file bytes: test/bytecode's programs run, its verifier cases and 900 mutants judged by arbace.lang.Bytecode against the JDK's results, with the negative control (bin/bytecode-check [EXE]; seconds; doc/classes/BYTECODE-SURVEY.md)
+	bin/bytecode-check $(EXE)
+
+bytecode-record: ## rewrites test/bytecode/expected.edn: the programs on jdk26u's java and HotSpot's verdicts of the mutants (bin/bytecode-check --record-jdk [EXE])
+	bin/bytecode-check --record-jdk $(EXE)
+
 jrt-files-check: ## go/arbace/jrt.ae's file lists against go/arbace/jrt's files, with its negative control (bin/jrt files-check --control; seconds)
 	bin/jrt files-check --control
 jrt-deflate: ## jrt's Deflater against the JDK's recorded bytes, 171 pairs, with its negative control (bin/jrt deflate [EXE]; seconds)
@@ -1132,6 +1138,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
 .PHONY: j2g-unit
+.PHONY: bytecode-check bytecode-record
 .PHONY: program-mutant build-go-mutant-test
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)

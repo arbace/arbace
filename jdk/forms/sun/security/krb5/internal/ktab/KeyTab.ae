@@ -1,0 +1,298 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/ktab/KeyTab.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.ktab)
+
+(import '(java.io File FileInputStream FileNotFoundException FileOutputStream IOException)
+        '(java.util ArrayList Arrays Comparator HashMap Map StringTokenizer Vector)
+        '(sun.security.krb5 Config EncryptionKey KrbException PrincipalName RealmException)
+        '(sun.security.krb5.internal KerberosTime Krb5)
+        '(sun.security.krb5.internal.crypto EType))
+
+(defclass ^:public KeyTab
+  :implements [KeyTabConstants]
+
+  (field ^:private ^:static ^String defaultTabName nil)
+
+  (field ^:private ^:static ^{:tag (Map String KeyTab)} map (HashMap.))
+
+  (field ^:private ^boolean isMissing false)
+
+  (field ^:private ^boolean isValid true)
+
+  (field ^:private ^:final ^String tabName)
+
+  (field ^:private ^long lastModified)
+
+  (field ^:private ^int kt_vno KeyTab/KRB5_KT_VNO)
+
+  (field ^:private ^{:tag (Vector KeyTabEntry)} entries (Vector.))
+
+  (constructor ^:private [this ^String filename]
+    (set! tabName filename)
+    (try
+      (set! lastModified (.lastModified (File. tabName)))
+      (with-resources [kis (KeyTabInputStream. (FileInputStream. filename))] (.load this kis))
+      (catch FileNotFoundException e
+        (.clear entries)
+        (set! isMissing true)
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG (java-str "Cannot load keytab " tabName ": " e))))
+      (catch Exception ioe
+        (.clear entries)
+        (set! isValid false)
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG (java-str "Cannot load keytab " tabName ": " ioe))))))
+
+  (method ^:private ^:static ^:synchronized getInstance0 ^KeyTab [^String s]
+    (let [lm (.lastModified (File. s))
+          old (cast KeyTab (.get map s))]
+      (if (and (and (some? old) (.isValid old)) (== (.-lastModified old) lm))
+          old
+          (let [ktab (KeyTab. s)]
+            (cond (.isValid ktab) (do (.put map s ktab) ktab) (some? old) old :else ktab)))))
+
+  (method ^:public ^:static getInstance ^KeyTab [^String s]
+    (if (nil? s) (KeyTab/getInstance) (KeyTab/getInstance0 (KeyTab/normalize s))))
+
+  (method ^:public ^:static getInstance ^KeyTab [^File file]
+    (if (nil? file) (KeyTab/getInstance) (KeyTab/getInstance0 (.getPath file))))
+
+  (method ^:public ^:static getInstance ^KeyTab []
+    (KeyTab/getInstance (KeyTab/getDefaultTabName)))
+
+  (method ^:public isMissing ^boolean [this] isMissing)
+
+  (method ^:public isValid ^boolean [this] isValid)
+
+  (method ^:private ^:static getDefaultTabName ^String []
+    (if (some? defaultTabName)
+        defaultTabName
+        (let [^:mutable ^String kname nil]
+          (try
+            (let [keytab_names (.get (Config/getInstance) "libdefaults" "default_keytab_name")]
+              (when (some? keytab_names)
+                (let [st (StringTokenizer. keytab_names " ")]
+                  (while (.hasMoreTokens st)
+                    (set! kname (KeyTab/normalize (.nextToken st)))
+                    (when (.exists (File. kname)) (break))))))
+            (catch KrbException e (set! kname nil)))
+          (when (nil? kname)
+            (let [^:mutable user_home (System/getProperty "user.home")]
+              (when (nil? user_home) (set! user_home (System/getProperty "user.dir")))
+              (set! kname (java-str user_home File/separator "krb5.keytab"))))
+          (set! defaultTabName kname)
+          kname)))
+
+  (method ^:public ^:static normalize ^String [^String name]
+    (let [^String kname (cond
+                          (and (>= (.length name) 5)
+                               (.equalsIgnoreCase (.substring name 0 5) "FILE:"))
+                            (.substring name 5)
+                          (and (>= (.length name) 9)
+                               (.equalsIgnoreCase (.substring name 0 9) "ANY:FILE:"))
+                            (.substring name 9)
+                          (and (>= (.length name) 7)
+                               (.equalsIgnoreCase (.substring name 0 7) "SRVTAB:"))
+                            (.substring name 7)
+                          :else name)]
+      kname))
+
+  (method ^:private load :throws [IOException RealmException] ^void [this ^KeyTabInputStream kis]
+    (.clear entries)
+    (set! kt_vno (.readVersion kis))
+    (when (== kt_vno KeyTab/KRB5_KT_VNO_1) (.setNativeByteOrder kis))
+    (let [^:mutable ^int entryLength 0
+          ^:mutable ^KeyTabEntry entry nil]
+      (while (> (.available kis) 0)
+        (set! entryLength (.readEntryLength kis))
+        (set! entry (.readEntry kis entryLength kt_vno))
+        (when (some? Krb5/DEBUG)
+          (.println Krb5/DEBUG
+                    (java-str ">>> KeyTab: load() entry length: "
+                              entryLength
+                              "; type: "
+                              (if (some? entry) (.-keyType entry) 0))))
+        (when (some? entry) (.addElement entries entry)))))
+
+  (method ^:public getOneName ^PrincipalName [this]
+    (let [size (.size entries)]
+      (when (> size 0)
+        (.-service (cast KeyTabEntry (.elementAt entries (unchecked-subtract-int size 1)))))))
+
+  (method ^:public readServiceKeys ^EncryptionKey/1 [this ^PrincipalName service]
+    (let [^:mutable ^KeyTabEntry entry nil
+          ^:mutable ^EncryptionKey key nil
+          ^:mutable size (.size entries)
+          ^{:tag (ArrayList EncryptionKey)} keys (ArrayList. size)]
+      (when (some? Krb5/DEBUG) (.println Krb5/DEBUG (java-str "Looking for keys for: " service)))
+      (loop [^int i (unchecked-subtract-int size 1)]
+        (when (>= i 0)
+          (set! entry (cast KeyTabEntry (.elementAt entries i)))
+          (if (.match (.-service entry) service)
+              (cond
+                (EType/isSupported (.-keyType entry))
+                  (do
+                    (set!
+                      key
+                      (EncryptionKey. (.-keyblock entry) (.-keyType entry) (.-keyVersion entry)))
+                    (.add keys key)
+                    (if (some? Krb5/DEBUG)
+                        (do
+                          (.println Krb5/DEBUG
+                                    (java-str "Added key: "
+                                              (.-keyType entry)
+                                              ", version: "
+                                              (.-keyVersion entry)))
+                          (recur (unchecked-dec-int i)))
+                        (recur (unchecked-dec-int i))))
+                (some? Krb5/DEBUG)
+                  (do
+                    (.println Krb5/DEBUG
+                              (java-str "Found unsupported keytype ("
+                                        (.-keyType entry)
+                                        ") for "
+                                        service))
+                    (recur (unchecked-dec-int i)))
+                :else (recur (unchecked-dec-int i)))
+              (recur (unchecked-dec-int i)))))
+      (set! size (.size keys))
+      (let [retVal (cast EncryptionKey/1 (.toArray keys (new EncryptionKey/1 size)))]
+        (Arrays/sort retVal
+                     (anon (Comparator EncryptionKey) []
+                       (method ^:public compare ^int [this ^EncryptionKey o1 ^EncryptionKey o2]
+                         (unchecked-subtract-int
+                           (.intValue (.getKeyVersionNumber o2))
+                           (.intValue (.getKeyVersionNumber o1))))))
+        retVal)))
+
+  (method ^:public findServiceEntry ^boolean [this ^PrincipalName service]
+    (let [^:mutable ^KeyTabEntry entry nil]
+      (loop [^int i 0]
+        (when (< i (.size entries))
+          (set! entry (cast KeyTabEntry (.elementAt entries i)))
+          (if (.match (.-service entry) service)
+              (cond
+                (EType/isSupported (.-keyType entry)) (return true)
+                (some? Krb5/DEBUG)
+                  (do
+                    (.println Krb5/DEBUG
+                              (java-str "Found unsupported keytype ("
+                                        (.-keyType entry)
+                                        ") for "
+                                        service))
+                    (recur (unchecked-inc-int i)))
+                :else (recur (unchecked-inc-int i)))
+              (recur (unchecked-inc-int i)))))
+      false))
+
+  (method ^:public tabName ^String [this] tabName)
+
+  (method ^:public addEntry :throws [KrbException] ^void [this ^PrincipalName service ^char/1 psswd
+                                                          ^int kvno ^boolean append]
+    (.addEntry this service (.getSalt service) psswd kvno append))
+
+  (method ^:public addEntry :throws [KrbException] ^void [this ^PrincipalName service ^String salt
+                                                          ^char/1 psswd ^int kvno ^boolean append]
+    (let [encKeys (EncryptionKey/acquireSecretKeys psswd salt)]
+      (.addEntry this service encKeys kvno append)))
+
+  (method ^:public addEntry :throws [KrbException] ^void [this ^PrincipalName service
+                                                          ^EncryptionKey/1 encKeys
+                                                          ^:mutable ^int kvno ^boolean append]
+    (let [^:mutable ^int maxKvno 0]
+      (loop [^int i (unchecked-subtract-int (.size entries) 1)]
+        (when (>= i 0)
+          (let [e (cast KeyTabEntry (.get entries i))]
+            (if (.match (.-service e) service)
+                (do
+                  (when (> (.-keyVersion e) maxKvno) (set! maxKvno (.-keyVersion e)))
+                  (if (or (not append) (== (.-keyVersion e) kvno))
+                      (do (.removeElementAt entries i) (recur (unchecked-dec-int i)))
+                      (recur (unchecked-dec-int i))))
+                (recur (unchecked-dec-int i))))))
+      (when (== kvno -1) (set! kvno (unchecked-add-int maxKvno 1)))
+      (loop [^int i 0]
+        (when (and (some? encKeys) (< i (alength encKeys)))
+          (let [keyType (.getEType (aget encKeys i))
+                keyValue (.getBytes (aget encKeys i))
+                newEntry (KeyTabEntry. service
+                                       (.getRealm service)
+                                       (KerberosTime. (System/currentTimeMillis))
+                                       kvno
+                                       keyType
+                                       keyValue)]
+            (.addElement entries newEntry)
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:public getEntries ^KeyTabEntry/1 [this]
+    (let [kentries (new KeyTabEntry/1 (.size entries))]
+      (loop [^int i 0]
+        (when (< i (alength kentries))
+          (aset kentries i (cast KeyTabEntry (.elementAt entries i)))
+          (recur (unchecked-inc-int i))))
+      kentries))
+
+  (method ^:public ^:static ^:synchronized create :throws [IOException RealmException] ^KeyTab []
+    (let [dname (KeyTab/getDefaultTabName)] (KeyTab/create dname)))
+
+  (method ^:public ^:static ^:synchronized create :throws [IOException RealmException] ^KeyTab [^String name]
+    (with-resources [kos (KeyTabOutputStream. (FileOutputStream. name))]
+      (.writeVersion kos KeyTab/KRB5_KT_VNO))
+    (KeyTab. name))
+
+  (method ^:public ^:synchronized save :throws [IOException] ^void [this]
+    (with-resources [kos (KeyTabOutputStream. (FileOutputStream. tabName))]
+      (.writeVersion kos kt_vno)
+      (loop [^int i 0]
+        (when (< i (.size entries))
+          (.writeEntry kos (cast KeyTabEntry (.elementAt entries i)))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public deleteEntries ^int [this ^PrincipalName service ^int etype ^int kvno]
+    (let [^:mutable ^int count 0
+          ^{:tag (Map Integer Integer)} highest (HashMap.)]
+      (loop [^int i (unchecked-subtract-int (.size entries) 1)]
+        (when (>= i 0)
+          (let [e (cast KeyTabEntry (.get entries i))]
+            (if (.match service (.getService e))
+                (if (or (== etype -1) (== (.-keyType e) etype))
+                    (cond
+                      (== kvno -2)
+                        (if (.containsKey highest (.-keyType e))
+                            (let [n (.intValue (cast Integer (.get highest (.-keyType e))))]
+                              (if (> (.-keyVersion e) n)
+                                  (do
+                                    (.put highest (.-keyType e) (.-keyVersion e))
+                                    (recur (unchecked-dec-int i)))
+                                  (recur (unchecked-dec-int i))))
+                            (do
+                              (.put highest (.-keyType e) (.-keyVersion e))
+                              (recur (unchecked-dec-int i))))
+                      (or (== kvno -1) (== (.-keyVersion e) kvno))
+                        (do
+                          (.removeElementAt entries i)
+                          (set! count (unchecked-inc-int count))
+                          (recur (unchecked-dec-int i)))
+                      :else (recur (unchecked-dec-int i)))
+                    (recur (unchecked-dec-int i)))
+                (recur (unchecked-dec-int i))))))
+      (when (== kvno -2)
+        (loop [^int i (unchecked-subtract-int (.size entries) 1)]
+          (when (>= i 0)
+            (let [e (cast KeyTabEntry (.get entries i))]
+              (if (.match service (.getService e))
+                  (if (or (== etype -1) (== (.-keyType e) etype))
+                      (let [n (.intValue (cast Integer (.get highest (.-keyType e))))]
+                        (if (not (== (.-keyVersion e) n))
+                            (do
+                              (.removeElementAt entries i)
+                              (set! count (unchecked-inc-int count))
+                              (recur (unchecked-dec-int i)))
+                            (recur (unchecked-dec-int i))))
+                      (recur (unchecked-dec-int i)))
+                  (recur (unchecked-dec-int i)))))))
+      count))
+
+  (method ^:public ^:synchronized createVersion :throws [IOException] ^void [this ^File file]
+    (with-resources [kos (KeyTabOutputStream. (FileOutputStream. file))]
+      (.write16 kos KeyTab/KRB5_KT_VNO))))

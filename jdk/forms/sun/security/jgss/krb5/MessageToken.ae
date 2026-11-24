@@ -1,0 +1,234 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/krb5/MessageToken.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss.krb5)
+
+(import '(java.io ByteArrayInputStream IOException InputStream OutputStream)
+        '(java.security MessageDigest)
+        '(org.ietf.jgss GSSException MessageProp)
+        '(sun.security.jgss GSSHeader GSSToken))
+
+(defclass ^:abstract MessageToken
+  :extends Krb5Token
+
+  (field ^:private ^:static ^:final ^int TOKEN_NO_CKSUM_SIZE 16)
+
+  (field ^:private ^:static ^:final ^int FILLER 0xffff)
+
+  (field ^:static ^:final ^int SGN_ALG_DES_MAC_MD5 0x0000)
+
+  (field ^:static ^:final ^int SGN_ALG_DES_MAC 0x0200)
+
+  (field ^:static ^:final ^int SGN_ALG_HMAC_SHA1_DES3_KD 0x0400)
+
+  (field ^:static ^:final ^int SEAL_ALG_NONE 0xffff)
+
+  (field ^:static ^:final ^int SEAL_ALG_DES 0x0000)
+
+  (field ^:static ^:final ^int SEAL_ALG_DES3_KD 0x0200)
+
+  (field ^:static ^:final ^int SEAL_ALG_ARCFOUR_HMAC 0x1000)
+
+  (field ^:static ^:final ^int SGN_ALG_HMAC_MD5_ARCFOUR 0x1100)
+
+  (field ^:private ^:static ^:final ^int TOKEN_ID_POS 0)
+
+  (field ^:private ^:static ^:final ^int SIGN_ALG_POS 2)
+
+  (field ^:private ^:static ^:final ^int SEAL_ALG_POS 4)
+
+  (field ^:private ^int seqNumber)
+
+  (field ^:private ^boolean confState true)
+
+  (field ^:private ^boolean initiator true)
+
+  (field ^:private ^int tokenId 0)
+
+  (field ^:private ^GSSHeader gssHeader nil)
+
+  (field ^:private ^MessageTokenHeader tokenHeader nil)
+
+  (field ^:private ^byte/1 checksum nil)
+
+  (field ^:private ^byte/1 encSeqNumber nil)
+
+  (field ^:private ^byte/1 seqNumberData nil)
+
+  (field ^CipherHelper cipherHelper nil)
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context ^byte/1 tokenBytes
+                                       ^int tokenOffset ^int tokenLen ^MessageProp prop]
+    (this. tokenId context (ByteArrayInputStream. tokenBytes tokenOffset tokenLen) prop))
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context ^InputStream is
+                                       ^MessageProp prop]
+    (.init this tokenId context)
+    (try
+      (set! gssHeader (GSSHeader. is))
+      (when-not (.equals (.getOid gssHeader) MessageToken/OID)
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN -1 (MessageToken/getTokenName tokenId))))
+      (when-not confState (.setPrivacy prop false))
+      (set! tokenHeader (MessageTokenHeader. is prop))
+      (set! encSeqNumber (new byte/1 8))
+      (MessageToken/readFully is encSeqNumber)
+      (set! checksum (new byte/1 (.getChecksumLength cipherHelper)))
+      (MessageToken/readFully is checksum)
+      (catch IOException e
+        (throw (GSSException. GSSException/DEFECTIVE_TOKEN
+                              -1
+                              (java-str (MessageToken/getTokenName tokenId) ":" (.getMessage e)))))))
+
+  (method ^:public ^:final getGSSHeader ^GSSHeader [this] gssHeader)
+
+  (method ^:public ^:final getTokenId ^int [this] tokenId)
+
+  (method ^:public ^:final getEncSeqNumber ^byte/1 [this] encSeqNumber)
+
+  (method ^:public ^:final getChecksum ^byte/1 [this] checksum)
+
+  (method ^:public ^:final getConfState ^boolean [this] confState)
+
+  (method ^:public genSignAndSeqNumber :throws [GSSException] ^void [this ^MessageProp prop
+                                                                     ^byte/1 optionalHeader
+                                                                     ^byte/1 data ^int offset
+                                                                     ^int len
+                                                                     ^byte/1 optionalTrailer]
+    (let [^:mutable qop (.getQOP prop)]
+      (when-not (== qop 0) (set! qop 0) (.setQOP prop qop))
+      (when-not confState (.setPrivacy prop false))
+      (set! tokenHeader (MessageTokenHeader. tokenId (.getPrivacy prop) qop))
+      (set! checksum (.getChecksum this optionalHeader data offset len optionalTrailer))
+      (set! seqNumberData (new byte/1 8))
+      (if (.isArcFour cipherHelper)
+          (MessageToken/writeBigEndian seqNumber seqNumberData)
+          (MessageToken/writeLittleEndian seqNumber seqNumberData))
+      (when-not initiator
+        (aset seqNumberData 4 (unchecked-byte 0xff))
+        (aset seqNumberData 5 (unchecked-byte 0xff))
+        (aset seqNumberData 6 (unchecked-byte 0xff))
+        (aset seqNumberData 7 (unchecked-byte 0xff)))
+      (set! encSeqNumber (.encryptSeq cipherHelper checksum seqNumberData 0 8))))
+
+  (method ^:public ^:final verifySignAndSeqNumber :throws [GSSException] ^boolean [this
+                                                                                   ^byte/1 optionalHeader
+                                                                                   ^byte/1 data
+                                                                                   ^int offset
+                                                                                   ^int len
+                                                                                   ^byte/1 optionalTrailer]
+    (let [myChecksum (.getChecksum this optionalHeader data offset len optionalTrailer)]
+      (if (MessageDigest/isEqual checksum myChecksum)
+          (do
+            (set! seqNumberData (.decryptSeq cipherHelper checksum encSeqNumber 0 8))
+            (let [^:mutable ^byte directionByte 0]
+              (when initiator (set! directionByte (unchecked-byte 0xff)))
+              (and (and (and (== (aget seqNumberData 4) directionByte)
+                             (== (aget seqNumberData 5) directionByte))
+                        (== (aget seqNumberData 6) directionByte))
+                   (== (aget seqNumberData 7) directionByte))))
+          false)))
+
+  (method ^:public ^:final getSequenceNumber ^int [this]
+    (let [^int sequenceNum (if (.isArcFour cipherHelper)
+                               (MessageToken/readBigEndian seqNumberData 0 4)
+                               (MessageToken/readLittleEndian seqNumberData 0 4))]
+      sequenceNum))
+
+  (method ^:private getChecksum :throws [GSSException] ^byte/1 [this ^byte/1 optionalHeader
+                                                                ^byte/1 data ^int offset ^int len
+                                                                ^byte/1 optionalTrailer]
+    (let [tokenHeaderBytes (.getBytes tokenHeader)
+          existingHeader optionalHeader
+          ^:mutable checksumDataHeader tokenHeaderBytes]
+      (when (some? existingHeader)
+        (set! checksumDataHeader
+              (new byte/1 (unchecked-add-int (alength tokenHeaderBytes) (alength existingHeader))))
+        (System/arraycopy tokenHeaderBytes 0 checksumDataHeader 0 (alength tokenHeaderBytes))
+        (System/arraycopy existingHeader
+                          0
+                          checksumDataHeader
+                          (alength tokenHeaderBytes)
+                          (alength existingHeader)))
+      (.calculateChecksum cipherHelper
+                          (.getSignAlg tokenHeader)
+                          checksumDataHeader
+                          optionalTrailer
+                          data
+                          offset
+                          len
+                          tokenId)))
+
+  (constructor :throws [GSSException] [this ^int tokenId ^Krb5Context context]
+    (.init this tokenId context)
+    (set! (.-seqNumber this) (.incrementMySequenceNumber context)))
+
+  (method ^:private init :throws [GSSException] ^void [this ^int tokenId ^Krb5Context context]
+    (set! (.-tokenId this) tokenId)
+    (set! (.-confState this) (.getConfState context))
+    (set! (.-initiator this) (.isInitiator context))
+    (set! (.-cipherHelper this) (.getCipherHelper context nil)))
+
+  (method ^:public encode :throws [IOException GSSException] ^void [this ^OutputStream os]
+    (set! gssHeader (GSSHeader. MessageToken/OID (.getKrb5TokenSize this)))
+    (.encode gssHeader os)
+    (.encode tokenHeader os)
+    (.write os encSeqNumber)
+    (.write os checksum))
+
+  (method ^:protected getKrb5TokenSize :throws [GSSException] ^int [this]
+    (.getTokenSize this))
+
+  (method ^:protected ^:final getTokenSize :throws [GSSException] ^int [this]
+    (unchecked-add-int TOKEN_NO_CKSUM_SIZE (.getChecksumLength cipherHelper)))
+
+  (method ^:protected ^:static ^:final getTokenSize :throws [GSSException] ^int [^CipherHelper ch]
+    (unchecked-add-int TOKEN_NO_CKSUM_SIZE (.getChecksumLength ch)))
+
+  (method ^:protected ^:abstract getSealAlg :throws [GSSException] ^int [this ^boolean confRequested
+                                                                         ^int qop])
+
+  (defclass MessageTokenHeader
+    (field ^:private ^:final ^int tokenId)
+
+    (field ^:private ^:final ^int signAlg)
+
+    (field ^:private ^:final ^int sealAlg)
+
+    (field ^:private ^:final ^byte/1 bytes (new byte/1 8))
+
+    (constructor :throws [GSSException] ^:public [this ^int tokenId ^boolean conf ^int qop]
+      (set! (.-tokenId this) tokenId)
+      (set! signAlg (.getSgnAlg MessageToken/this qop))
+      (set! sealAlg (.getSealAlg MessageToken/this conf qop))
+      (aset bytes 0 (unchecked-byte (unsigned-bit-shift-right-int tokenId 8)))
+      (aset bytes 1 (unchecked-byte tokenId))
+      (aset bytes 2 (unchecked-byte (unsigned-bit-shift-right-int signAlg 8)))
+      (aset bytes 3 (unchecked-byte signAlg))
+      (aset bytes 4 (unchecked-byte (unsigned-bit-shift-right-int sealAlg 8)))
+      (aset bytes 5 (unchecked-byte sealAlg))
+      (aset bytes 6 (unchecked-byte (unsigned-bit-shift-right-int MessageToken/FILLER 8)))
+      (aset bytes 7 (unchecked-byte MessageToken/FILLER)))
+
+    (constructor :throws [IOException] ^:public [this ^InputStream is ^MessageProp prop]
+      (GSSToken/readFully is bytes)
+      (set! tokenId (GSSToken/readInt bytes TOKEN_ID_POS))
+      (set! signAlg (GSSToken/readInt bytes SIGN_ALG_POS))
+      (set! sealAlg (GSSToken/readInt bytes SEAL_ALG_POS))
+      (let [temp (GSSToken/readInt bytes (unchecked-add-int SEAL_ALG_POS 2))]
+        (switch sealAlg
+          (SEAL_ALG_DES SEAL_ALG_DES3_KD SEAL_ALG_ARCFOUR_HMAC) (.setPrivacy prop true)
+          (.setPrivacy prop false))
+        (.setQOP prop 0)))
+
+    (method ^:public ^:final encode :throws [IOException] ^void [this ^OutputStream os]
+      (.write os bytes))
+
+    (method ^:public ^:final getTokenId ^int [this] tokenId)
+
+    (method ^:public ^:final getSignAlg ^int [this] signAlg)
+
+    (method ^:public ^:final getSealAlg ^int [this] sealAlg)
+
+    (method ^:public ^:final getBytes ^byte/1 [this] bytes))
+
+  (method ^:protected getSgnAlg :throws [GSSException] ^int [this ^int qop]
+    (.getSgnAlg cipherHelper)))

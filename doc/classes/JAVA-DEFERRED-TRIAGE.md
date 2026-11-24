@@ -9076,3 +9076,45 @@ Compiler$CF's nodes) and StackWalker was a cut class. Built, waiting for the mai
   (the frame and its two slot arrays) +20% CPU with the four fields and the top's two stores, +8% with
   the method and caller alone (3 interleaved rounds under load 18-29); stage 0's interpreter makes about
   170 ns a call, mostly those allocations. Queue 416's report has the DECISION.
+
+## As built: java-design-1122 (the burst's Java design stream), 2026-11-22
+
+The by-design and harness-design classes of the interp and compiled levels re-examined, each against what would make
+its tests pass on Arbace, and built where the build is the world's or jrt's (branch `java-design-1122`; queue 517's
+leftovers joined it). The world's slices were read by `bin/jrt-convert predict` (repr/java's vendoring read as the
+convert step reads, with context; the Kerberos module's and the datatypes' read whole) and laid into jdk/forms
+write-ahead: `bin/jrt-convert verify` at the next night compares them with a fresh conversion. j2g's edge was recorded
+afresh (`bin/j2g-edge update`) for their references outside the world.
+
+### Built
+
+- **The JVM's array limit** (go/arbace/jrt/array.ae, `arrayLengthLimit`): a new array (every element type, multianewarray,
+  Array.newInstance) longer than HotSpot's max_array_length (max_jint less the header's two words:
+  src/hotspot/share/oops/arrayOop.hpp) is OutOfMemoryError("Requested array size exceeds VM limit"), whatever the heap.
+  TestCCPAllocateArray (t03220) and MultiAllocateNullCheck (t07723) catch it.
+- **StringBuilder's growth** (stringbuilder.ae, `ensure`): jdk26u's AbstractStringBuilder.newCapacity over
+  ArraysSupport.newLength (SOFT_MAX_ARRAY_LENGTH, then the minimum; past Integer.MAX_VALUE OutOfMemoryError). Before, the
+  capacity doubled past Java's limit until Go's allocator died (HugeToString, t05445: a 16 GiB block).
+- **StackTraceElement** (throwable.ae): the seven-argument constructor and getClassLoaderName, getModuleName,
+  getModuleVersion (PublicConstructor, t04611).
+- **ClassLoader** (classloader.ae): getPackage(String) and getPackages() (protected; GetPackage, t04540), findLoadedClass
+  (LoadNullClass, t04542), registerAsParallelCapable (the caller's class by the stack's frames) and
+  isRegisteredAsParallelCapable (IsParallelCapable, t04541), the assertion status API read by Class.desiredAssertionStatus
+  (langtools' assert/Attach, t06029). URLClassLoader.addURL skips a URL the list holds (AddURLTest, t05044).
+- **Extendable** (arbace/j2g/model.ae, class-supers): URLClassLoader, StandardMBean, FileLock (LoadNullClass, B6827999,
+  AddURLTest, PostExceptionTest, PreRegisterNameTest, DeadlockTest; FileLockConstructor, t05150, queue 517's).
+- **A class literal** (arbace/j2g/reach.ae): roots its class's initializer and a concrete class's constructors,
+  instantiated (queue 517's finding 1, generally: a class named by its literal and made by reflection had stubs).
+- **java.base's XML parser** (test/jrt/jrt_sources.ae, xml-properties-sources: jdk.internal.util.xml and
+  jdk.internal.org.xml.sax): Properties' loadFromXML and storeToXML (t05586 t05590 t05591 t05604 t05587).
+- **Kerberos and GSS-API** (kerberos-sources): java.security.jgss's shared classes but the native GSS wrapper,
+  SCDynamicStoreConfig and HTTP's SPNEGO; j2g's renames for the eight names the world held already (names.ae); the
+  JGSS mechanism factories rooted (ProviderList makes them by name); jdk/provides.txt (bin/jrt provides); the module table.
+- **javax.xml.datatype** (xml-datatype-sources): the API, XMLConstants, QName, Xerces' implementation and
+  jdk.xml.internal.SecuritySupport (moved out of javac's world: overlay/jdk/javac/closure.txt, jdk/javac/forms); the
+  default DatatypeFactory rooted (FactoryFinder's fallback by name).
+- **java-check** (test/java/run.ae): the uncaught exceptions of the main thread's group's threads alone are the test's
+  (DECISION 517-2 (a), jtreg's MainThreadGroup): RMI's accept thread in the system group no longer fails
+  CloseServerSocketOnTermination (t05255); GetObjectName (t04784), an executor thread of main's group, still fails (the
+  control).
+- **divergences.edn**: :synthetic-lambdas by design (DECISION 517-1 (a); t06144 t06157 t06306).
