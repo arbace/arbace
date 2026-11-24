@@ -4033,6 +4033,11 @@
 ;; cpp-ce3: true while a conditional's branch, a default argument or a default member initializer is analyzed: its immediate
 ;; invocations are not evaluated there (a branch not taken; the use's, P2564R3's escalation to the constructor)
 (def ^:dynamic *cx-no-imm* false)
+;; cpp-sweep (the checker): true while an expression statement or an automatic variable's initializer that is neither constexpr nor
+;; const is analyzed, no manifestly constant-evaluated context ([expr.const]/20): an immediate invocation in a conditional's arm is
+;; one there ([expr.const]/16, P2564R3's immediate function context excludes it), evaluated (cpp2a/consteval11.C's `int h = 0 ?
+;; bar (7) : 1;`); a nested declaration or statement binds it again
+(def ^:dynamic *cx-arms-evaluated* false)
 
 (def ^:dynamic *ce-point*
   "cpp-ce3 (the checker): the range of the declaration whose initializer or condition the evaluation is of (a constexpr or
@@ -11012,7 +11017,7 @@
     (let [[c a b] (kids n)
           fa (fn [x] (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
       ;; (cpp-ce3: an immediate invocation in a branch is not evaluated where the branch is analyzed, cx-immediate-eval!)
-      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (binding [*cx-no-imm* true] (fa (analyze ctx a))) (binding [*cx-no-imm* true] (fa (analyze ctx b)))))
+      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx a))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx b)))))
     ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
     ;; bound as an opaque value (a glvalue's address, a class prvalue materialized, else its value), the condition and the
     ;; true operand both that value (clang's OpaqueValueExpr, CodeGenFunction::OpaqueValueMapping)
@@ -11022,7 +11027,7 @@
           x (if (and (= :pr (:cat x)) (abi/class? (abi/unq (:ty x)))) (materialize x) x)
           k (swap! opaque-ids inc)
           ov {:op :opaque :id k :ty (:ty x) :cat (:cat x)}
-          r (cond-node ctx (to-bool ov) ov (binding [*cx-no-imm* true] (analyze ctx y)))]
+          r (cond-node ctx (to-bool ov) ov (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (analyze ctx y)))]
       {:op :bind-opaque :id k :e x :body r :ty (:ty r) :cat (:cat r)})
     "CallExpr"
     (if-let [op (when (= "DeclRefExpr" (:kind (first (kids n))))
@@ -11910,7 +11915,9 @@
                                (cond-> {:s :static-local :var id} (checking?) (assoc :cx-at (:range d)))))
                          (let [;; (queue 492, the checker: a variable whose initialization is refused is declared all the
                                ;; same, as GCC declares it, so the block's later statements find it: `A a2 (a); a2 = a;`)
-                               init (try (let [init (decl-init ctx id d)]
+                               init (try (let [init (binding [*cx-arms-evaluated* (and (checking?) (not (:constexpr d)) (not (:c (:ty (var* id))))
+                                                                                       (not (abi/ref? (:ty (var* id)))))]
+                                                      (decl-init ctx id d))]
                                            (cx-dtor-access! ctx (:ty (var* id)))
                                            (cx-check-constant! (var* id) init)
                                            init)
@@ -12078,7 +12085,8 @@
                      {:s :block :items (vec (mapcat #(let [x (st %)] (if (vector? x) x [x])) (kids n)))})
     "DeclStmt" {:s :block :flat true :items (decl-stmt ctx n)}
     "NullStmt" {:s :null}
-    "ReturnStmt" (let [[e] (kids n)
+    "ReturnStmt" (binding [*cx-arms-evaluated* (checking?)]
+                 (let [[e] (kids n)
                        _ (some-> (:saw-return ctx) (reset! true))
                        rt (:ret (:ty (fnd (:fn-id ctx))))
                        ;; (a deduced return type: auto, and since CP301 (a) auto&, auto&&, auto* -- a generic lambda's
@@ -12134,7 +12142,7 @@
                                                  ;; xvalue alone)
                                                  (cx-implicit-move-init rt a ctx)
                                                  (init-for rt a ctx (if (= :init-list (:op a)) :list :copy)))
-                              :nrvo-var (:nrvo-var a)})))
+                              :nrvo-var (:nrvo-var a)}))))
     "IfStmt" (if (:isConsteval n)
                ;; if consteval ([stmt.if]/4): at run time the branch of a context not constant-evaluated (G4: the
                ;; headers' std::__is_constant_evaluated)
@@ -12172,8 +12180,20 @@
                                                                             (throw x))))))
                                                    (stmt (block-ctx c) (nth ks 1))
                                                    (if (:hasElse n) (stmt (block-ctx c) (nth ks 2)) {:s :null}))]
-                                                [{:s :if :cond (fold-mark (cond-of c cn)) :then (stmt (block-ctx c) (nth ks 1))
-                                                  :else (when (:hasElse n) (stmt (block-ctx c) (nth ks 2)))}])))}))
+                                                ;; (cpp-sweep, the checker: a branch that is one statement, refused, reported and the if going on,
+                                                ;; as a compound statement's statements are: its other branch's errors kept, cpp2a/consteval11.C's
+                                                ;; `if (0) bar (9); else bar (10);`)
+                                                (let [br (fn [x] (if-let [h (when (checking?) *on-refusal*)]
+                                                                   (try (stmt (block-ctx c) x)
+                                                                        (catch arbace.lang.ExceptionInfo e
+                                                                          (if (and (:codegen/refused (ex-data e)) (not= "CompoundStmt" (:kind x)))
+                                                                            (do (when (and (= :constexpr (:codegen/refused (ex-data e))) (:fn-id ctx) (:consteval (fnd (:fn-id ctx))))
+                                                                                  (upd-fn! (:fn-id ctx) assoc :cx-imm-error true))
+                                                                                (h e (some-> *at* deref)) {:s :null})
+                                                                            (throw e))))
+                                                                   (stmt (block-ctx c) x)))]
+                                                  [{:s :if :cond (fold-mark (cond-of c cn)) :then (br (nth ks 1))
+                                                    :else (when (:hasElse n) (br (nth ks 2)))}]))))}))
     "WhileStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                       [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])]
                   (when cvar (fail :stmt "a while condition's declaration (destroyed each iteration)"))
@@ -12327,7 +12347,7 @@
                                            {:ty ct :var id :init init :body (stmt c b)})
                                          {:body (stmt c b)}))))})
     (if (or (str/ends-with? (str (:kind n)) "Expr") (str/ends-with? (str (:kind n)) "Operator") (str/ends-with? (str (:kind n)) "Literal"))
-      (let [x (analyze ctx n)]
+      (let [x (binding [*cx-arms-evaluated* (checking?)] (analyze ctx n))]
         ;; (cpp-tpl2, the checker: [expr.prim.id.general]/4 and [expr.ref]/6.3.2, an expression statement that names
         ;; non-static member functions and does not call them: GCC's "invalid use of non-static member function",
         ;; template/pr84973-2.C's `b;`)
@@ -13126,7 +13146,13 @@
   (when (and (checking?) (:consteval f) (not (:cx-imm-error f)) (not *unevaluated*) (not *ce-analyzing-imm*) (not *cx-no-imm*)
              (not (and (:cls ctx) (not (:fn-id ctx))))
              (let [g (some-> (:fn-id ctx) fnd)]
-               (not (and g (or (:consteval g) (:constexpr g) (and (:cls g) (some-> (abi/cls (:cls g)) :lambda)))))))
+               ;; (cpp-sweep: P2564R3's immediate-escalating functions alone, [expr.const]/18 -- a closure's call operator, a
+               ;; defaulted special member, a constexpr function made by a template's instantiation -- not a constexpr function
+               ;; that is none: its immediate invocations evaluated, cpp2a/consteval34.C's foo, consteval-prop1.C's f3)
+               (not (and g (or (:consteval g) (and (:cls g) (some-> (abi/cls (:cls g)) :lambda))
+                               (and (:constexpr g) (or (:tinst g) (:implicit g) (:defaulted g) (not (:node g)) (header-node? (:node g))
+                                                       (and (:cls g) (not (cx-plain-class? (:cls g))))
+                                                       (and (:friend-cls g) (not (cx-plain-class? (:friend-cls g)))))))))))
     (let [x (try (binding [*ce-manifest* true *ce-point* nil *ce-analyzing-imm* true] (ce-eval node) nil)
                  (catch arbace.lang.ExceptionInfo x x))
           d (some-> x ex-data)]
