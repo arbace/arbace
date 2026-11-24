@@ -19542,3 +19542,28 @@ AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the 
 proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
 with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
 as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
+
+## 2026-11-24: java-design-1123: a class defined from bytes goes with its loader (SubclassGC, t04444; built, rides train 3)
+
+The coordinator handed java-bytecode's loader and jrt's registries to this stream (java-bytecode finished; its last branch,
+java-bytecode-assert-1123 at 25fa51e29, merged into java-design-1123: assert-before-init, the Filer's SOURCE_OUTPUT, proxies'
+interface calls; :assert-default left for its :assert-before-init). SubclassGC (jdk/java/io/Serializable/subclassGC, bug
+6232010) defines an ObjectOutputStream subclass through a URLClassLoader from test.classes, drops the loader, the class and
+the stream, and expects System.gc() to enqueue a WeakReference to the class within a second (JLS 12.7: a class is unloaded
+when its defining loader is collected). Every table that named the class kept it:
+- jrt: definingLoaders (class -> loader) and loaderClasses (loader -> classes) are now fields, the class's loader and the
+  loader's classes (ClassLoader.classes; the boot loader's in bootClasses); definedPackages, which kept every loader that
+  defined a package (URLClassLoader does at each class), is the loader's own (ClassLoader.packages); a class of a loader other
+  than the built-in ones (null, application, platform) leaves the registry for weakRegistry (weak.Pointer: ForName and
+  Class.getDeclaredClasses find it while it lives); the decoded annotations, attributes and generic repositories, five sync.Map
+  tables keyed by every ClassInfo, are in the ClassInfo (classCaches).
+- j2g_dyn (arbace.j2g.dyn, dyncf): dynClasses (class -> DynClass) and cfNews are gone: a class keeps its DynClass in
+  ClassInfo.Dyn, the allocation in DynClass.CfNew.
+- arbace.lang.Bytecode: CLASSES and BY_LOADER are WeakHashMaps whose values hold the BytecodeClass and the classes weakly
+  (WeakReference); KLASSES is gone (a Klass's BytecodeClass is its info).
+The class and its loader keep each other, nothing else keeps them; the built-in loaders' classes stay strong. jrt's
+WeakReference was already over Go's weak pointers and runtime.AddCleanup (F17). `bin/jrt build`: jrt compiles on amd64 and
+arm64. Not provable by the day harness (jrt, j2g_dyn and Bytecode are compiled into the executable): t04444 is in the next
+train's lists (.tmp/jd/interp-t2.list, compiled-t2.list), with t04308 as a control of the defining path. Alternatives not
+taken: clearing the tables when a loader is collected (a cleanup on the loader: the tables themselves kept it); a weak table
+keyed by class beside the strong ones (its values named the class).
