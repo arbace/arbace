@@ -13233,6 +13233,26 @@
   (boolean (some #(and (map? %) (#{"TypeTraitExpr" "UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr" "OffsetOfExpr"} (:kind %)))
                  (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (dissoc % :_t :_ent :range :loc)) (seq %)) n))))
 
+(defn- sassert-false-conjunct
+  "cpp-rind (the checker): GCC places a failed static assertion whose condition is a chain of && at the first operand that
+  evaluates to false (its \"'is_same<int*, int>::value' evaluates to false\"), on that operand's own line when the chain spans
+  several: that operand's node (with a range), or nil (diagnostic/static_assert1.C)."
+  [ctx c]
+  (letfn [(strip [x] (if (#{"ParenExpr" "ImplicitCastExpr" "ExprWithCleanups"} (:kind x)) (strip (first (kids x))) x))
+          (conjuncts [x] (let [x (strip x)]
+                           (if (and (= "BinaryOperator" (:kind x)) (= "&&" (:opcode x)) (= 2 (count (kids x))))
+                             (concat (conjuncts (first (kids x))) (conjuncts (second (kids x))))
+                             [x])))]
+    (let [ks (conjuncts c)]
+      (when (> (count ks) 1)
+        (some (fn [k]
+                (when (and (:range k) (not (sassert-unsure-node? k)))
+                  (let [v (try (binding [*cutoff* Long/MAX_VALUE *constraint-doubt* (atom false) *ce-manifest* true]
+                                 (ce-eval (convert-scalar (rv (analyze ctx k)) abi/bool* false)))
+                               (catch arbace.lang.ExceptionInfo _ nil))]
+                    (when (and (number? v) (zero? (long v))) k))))
+              ks)))))
+
 (defn check-static-assert!
   "CX12 (the checker): a static_assert-declaration ([dcl.pre]/10): its condition analyzed (a refusal of the analysis
   is reported as its own error) and, when it evaluates with no doubt to false, \"static assertion failed\" at the
@@ -13260,7 +13280,7 @@
                   (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
               (throw (ex-info (str "codegen: non-constant condition for static assertion (" m ")") {:codegen/refused :sassert :cx/node n}))))
           (when (and (number? v) (zero? (long v)) (not @d))
-            (throw (ex-info "codegen: static assertion failed" (cond-> {:codegen/refused :sassert :cx/node n} (and (seq @ex) (>= (long *concepts-diag-depth*) 2)) (assoc :cx/explain (vec (distinct @ex))))))))))))
+            (throw (ex-info "codegen: static assertion failed" (cond-> {:codegen/refused :sassert :cx/node (or (sassert-false-conjunct ctx c) n)} (and (seq @ex) (>= (long *concepts-diag-depth*) 2)) (assoc :cx/explain (vec (distinct @ex))))))))))))
 
 (defn- cx-static-member-init?
   "CP321 (a): whether the checker analyzes the static data member `v`'s in-class initializer: a member of a class of the
