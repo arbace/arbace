@@ -14,6 +14,7 @@ package jdk.internal.jrt.javac;
 import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.api.JavacTool;
 import com.sun.tools.javac.main.JavaCompiler;
+import com.sun.tools.javac.main.Option;
 import com.sun.tools.javac.util.Context;
 import com.sun.tools.javac.util.Log;
 import java.io.File;
@@ -33,7 +34,7 @@ import jdk.internal.opt.CommandLine;
  *
  * <pre>
  * Main [--platform DIR]... [-d DIR] [-sourcepath PATH] [-cp PATH] [--patch-module M=PATH]...
- *      [--module-source-path PATH] [--system none] [--module-path ""] [-encoding CHARSET]
+ *      [--module-source-path PATH] [--system none] [--module-path PATH] [-encoding CHARSET]
  *      [JAVAC-OPTION...] [@ARGFILE...] FILE.java...
  * </pre>
  *
@@ -41,7 +42,10 @@ import jdk.internal.opt.CommandLine;
  * system module, as an exploded JDK's jdk/modules; -d, -sourcepath (--source-path), -cp
  * (-classpath, --class-path; default the current directory, as javac's), --patch-module and
  * --module-source-path (javac's module-pattern form) are the file manager's (FileManager),
- * --system none and an empty --module-path are accepted as what the file manager does anyway, and
+ * --system none and an empty --module-path are accepted as what the file manager does anyway, a
+ * --module-path of elements that do not exist is BaseFileManager's (its Locations: each missing
+ * element warned of, path.element.not.found, as javac's command line warns; queue 549b, 549-3 (b)),
+ * one naming an existing file or directory refused (no jar file system, no module path served), and
  * -encoding is the file manager's charset (BaseFileManager's, javac's API hands it the option); every
  * other option is javac's (JavacTool.getTask's, e.g.
  * -g:none, -source, --enable-preview, -XD...). @ARGFILE expands as on javac's command line
@@ -62,6 +66,16 @@ public final class Main {
             fs.add(new File(s.isEmpty() ? "." : s));
         }
         return fs;
+    }
+
+    /** Does module path p name only elements that do not exist (javac then warns of each, and serves none)? */
+    static boolean missingOnly(String p) {
+        for (String s : p.split(File.pathSeparator, -1)) {
+            if (s.isEmpty() || new File(s).exists()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** FSInfo.getCanonicalFile's path: the real one, else the absolute. */
@@ -103,6 +117,7 @@ public final class Main {
         File out = null;
         List<String[]> patches = new ArrayList<>();
         String moduleSourcePath = null;
+        String modulePath = null;
         List<String> opts = new ArrayList<>();
         List<String> files = new ArrayList<>();
         for (int i = 0; i < args.size(); i++) {
@@ -116,7 +131,10 @@ public final class Main {
                 case "--module-source-path" -> moduleSourcePath = args.get(++i);
                 case "--system", "--module-path" -> {
                     String v = args.get(++i);
-                    boolean as = a.equals("--system") ? v.equals("none") : v.isEmpty();
+                    boolean as = a.equals("--system") ? v.equals("none") : v.isEmpty() || missingOnly(v);
+                    if (as && a.equals("--module-path") && !v.isEmpty()) {
+                        modulePath = v;
+                    }
                     if (!as) {
                         err.println("error: unsupported on Arbace: " + a + " " + v);
                         err.flush();
@@ -181,6 +199,11 @@ public final class Main {
             // processed ("reinit with options"), before they are validated
             Context context = task.getContext();
             fm.setContext(context);
+            // javac's Main.compile hands the file manager its options once it has the context
+            // (BaseFileManager.handleOptions): a module path of missing elements, each warned of
+            if (modulePath != null) {
+                fm.handleOption(Option.MODULE_PATH, modulePath);
+            }
             log = Log.instance(context);
             ok = task.call();
             // the context's compiler (the task's cleanup closed it; its counts' printing needs the log alone)
