@@ -6501,6 +6501,17 @@
 
 (declare resolve-overload*)
 
+(defn- cx-cmp-explain!
+  "cpp-sweep (the checker): a defaulted comparison operator defined as deleted for its subobjects (defaulted-comparison!'s
+  :cx-cmp-explain), used: GCC's explanation of each subobject at it (and of the declaration for a return type no comparison
+  category type), once."
+  [fid]
+  (let [f (fnd fid)]
+    (when (and (checking?) *on-refusal* (seq (:cx-cmp-explain f)) (not (:cx-cmp-reported f)))
+      (upd-fn! fid assoc :cx-cmp-reported true)
+      (doseq [{:keys [msg node]} (:cx-cmp-explain f) :when (and node (not (header-node? node)))]
+        (*on-refusal* (ex-info (str "codegen: " msg) {:codegen/refused :nomatch :cx/node node}) node)))))
+
 (declare cx-deleted-implicit!)
 
 (defn resolve-overload
@@ -6579,6 +6590,7 @@
                            (when (and (checking?) (:deleted-sure f)
                                       (or (= 1 (count viable)) (every? #(zero? (long (:rank %))) (second (first best)))))
                              (cx-deleted-implicit! f)
+                             (cx-cmp-explain! (:id f))
                              (fail :overload "call to a deleted function " (:name f) (if (:implicit f) " (implicitly deleted)" "")))
                            ;; (queue 497, the checker: [class.compare.default]/2, a defaulted == of a class with a member of
                            ;; reference type or with variant members (a union, an anonymous union member) is defined as
@@ -6600,6 +6612,7 @@
                              (try (analyze-implicit! b)
                                   (catch arbace.lang.ExceptionInfo _ (upd-fn! b dissoc :analyzed)))
                              (when (and (:deleted (fnd b)) (:deleted-sure (fnd b)))
+                               (cx-cmp-explain! b)
                                (fail :overload "call to a deleted function " (:name f) " (implicitly deleted)")))
                            b)
       (empty? viable)
@@ -12505,9 +12518,32 @@
         a (if member? (deref-node (this-expr ctx)) (var-node (first pids)))
         b (var-node (last pids))
         c (abi/cls cls)
-        subs (concat (for [bb (:bases c)] [(subobject-lv a (:cls bb)) (subobject-lv b (:cls bb))])
-                     (for [fl (:fields c)] [(field-node a cls (:i fl)) (field-node b cls (:i fl))]))
-        bin (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y])) (builtin-binop o (class->scalar ctx x) (class->scalar ctx y))))
+        subs (concat (for [bb (:bases c)] (with-meta [(subobject-lv a (:cls bb)) (subobject-lv b (:cls bb))] {::where (:cx-node c) ::what (:name (abi/cls (:cls bb)))}))
+                     (for [fl (:fields c)] (with-meta [(field-node a cls (:i fl)) (field-node b cls (:i fl))] {::where (:node fl) ::what (str (:name c) "::" (:name fl))})))
+        bin0 (fn [o x y] (or (when (or (class-operand? x) (class-operand? y)) (operator-call ctx o [x y]))
+                             (let [x (class->scalar ctx x) y (class->scalar ctx y)]
+                               ;; (cpp-sweep, the checker: no operator function and an operand of class type still, no conversion
+                               ;; to a built-in operand: no match, sure)
+                               (when (and (checking?) (or (class-operand? x) (class-operand? y)))
+                                 (fail :nomatch "no match for 'operator" o "' (no operator function, no conversion)"))
+                               (builtin-binop o x y))))
+        ;; (cpp-sweep, the checker: [class.compare.default]/1 with [class.eq]/2 and [class.spaceship]/2, a subobject whose
+        ;; comparison is surely not usable -- no operator found, no conversion -- defines the operator as deleted, each such
+        ;; subobject GCC's explanation at it when the deleted operator is used ("no match for 'operator=='"), cx-cmp-explain;
+        ;; a refusal the slice is unsure of propagates as before: cpp2a/spaceship-eq14.C, spaceship-synth-neg2.C)
+        explain (atom [])
+        sure-fail? (fn [x] (let [m (str (ex-message x))]
+                             (and (checking?) (:codegen/refused (ex-data x)) (not (re-find #"unsure|:k :(auto|dep|tparam)" m))
+                                  (re-find #"^codegen: (no match for 'operator|no viable function|cannot convert .* implicitly|no viable conversion|no operator|no conversion function of)" m))))
+        bin (fn [o x y & [sub]]
+              (if-let [where (and (checking?) sub (::where (meta sub)))]
+                (try (bin0 o x y)
+                     (catch arbace.lang.ExceptionInfo ex
+                       (when (System/getenv "CPP_CMP_TRACE") (binding [*out* *err*] (println "cmp sub failed:" (ex-message ex))))
+                       (if (sure-fail? ex)
+                         (do (swap! explain conj {:msg (str "no match for 'operator" o "' (operand types are '" (::what (meta sub)) "')") :node where}) nil)
+                         (throw ex))))
+                (bin0 o x y)))
         ;; (queue 510, the checker: a defaulted == or <=> defined as deleted, not refused, so a use of it is the error,
         ;; resolve-overload*'s CX12 rule: GCC's "use of deleted function" at the use)
         deleted! (fn [why] (upd-fn! fid assoc :deleted true :deleted-sure true :deleted-why why) fid)]
@@ -12528,10 +12564,30 @@
                   (rewritten-relational ctx o [a b]))
               _ (when-not r (fail :overload "a defaulted operator" o " with no usable rewritten candidate"))]
           (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e (to-bool r)}}))
-        "==" (let [e (reduce (fn [acc [x y]] (let [t (to-bool (bin "==" x y))] (if acc {:op :land :l acc :r t :ty abi/bool* :cat :pr} t))) nil subs)
-                   e (or e {:op :int :v 1 :ty abi/bool* :cat :pr})]
-               (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))
-        "<=>" (let [cs (vec (for [[x y] subs] (bin "<=>" x y)))
+        "==" (let [ts (doall (for [[x y :as sub] subs] (bin "==" x y sub)))]
+               (if (seq @explain)
+                 (deleted! "a subobject's comparison not usable")
+                 (let [e (reduce (fn [acc t] (let [t (to-bool t)] (if acc {:op :land :l acc :r t :ty abi/bool* :cat :pr} t))) nil ts)
+                       e (or e {:op :int :v 1 :ty abi/bool* :cat :pr})]
+                   (upd-fn! fid assoc :params pids :tbody {:s :return :init {:i :expr :e e}}))))
+        "<=>" (let [cs (vec (for [[x y :as sub] subs] (bin "<=>" x y sub)))
+                    declared0 (:ret (:ty f))
+                    category? (fn [t] (let [t (abi/unq (abi/non-ref t))]
+                                        (and (abi/class? t) (#{"partial_ordering" "weak_ordering" "strong_ordering"} (:name (abi/cls (:id t)))))))
+                    ;; (cpp-sweep: a declared return type R neither auto nor a comparison category type: each subobject's x <=> y
+                    ;; static_cast to R, [class.spaceship]/1's synthesized three-way comparison of type R; one that does not
+                    ;; convert, or a subobject with no usable <=> at all, deletes the operator, GCC's "invalid 'static_cast'" at
+                    ;; the declaration beside the subobject's: cpp2a/spaceship-err6.C, spaceship-synth-neg6.C, spaceship-synth17.C)
+                    _ (when (and (checking?) (not= :auto (:k declared0)) (not (category? declared0)) (:node f))
+                        (doseq [[x sub] (map vector cs subs) :when x]
+                          (when (category? (:ty x))
+                            (when-not (try (init-for (abi/unq declared0) [x] ctx :copy) true
+                                           (catch arbace.lang.ExceptionInfo ex
+                                             (when (System/getenv "CPP_CMP_TRACE") (binding [*out* *err*] (println "cmp conv failed:" (ex-message ex))))
+                                             (if (sure-fail? ex) false (throw ex))))
+                              (swap! explain conj {:msg (str "three-way comparison of '" (::what (meta sub)) "' does not convert to the declared return type") :node (::where (meta sub))}))))
+                        (when (seq @explain)
+                          (swap! explain conj {:msg "invalid 'static_cast' to the declared return type" :node (:node f)})))
                     nm (fn [t] (:name (abi/cls (class-id t))))
                     declared (:ret (:ty f))
                     ;; (queue 510, the checker: an auto return type and a subobject whose three-way comparison's type is no
@@ -12542,9 +12598,12 @@
                                           (or (abi/scalar? t)
                                               (and (abi/class? t)
                                                    (not (#{"partial_ordering" "weak_ordering" "strong_ordering"} (nm t)))))))
-                                cs))]
-                (if bad
+                                (remove nil? cs)))]
+                (cond
+                  (seq @explain) (deleted! "a subobject's three-way comparison not usable")
+                  bad
                   (deleted! "a subobject's three-way comparison of no comparison category type")
+                  :else
                 (let [rt (if (= :auto (:k declared))
                          (ordering-type (cond (some #(= "partial_ordering" (nm (:ty %))) cs) "partial_ordering"
                                               (some #(= "weak_ordering" (nm (:ty %))) cs) "weak_ordering"
@@ -12555,6 +12614,7 @@
                     e (reduce (fn [acc x] {:op :cond :c (to-bool (bin "!=" x zero)) :then (as-rt x) :else acc :ty rt :cat :pr})
                               {:op :ord :v 0 :ty rt :cat :pr} (reverse cs))]
                 (upd-fn! fid #(-> % (assoc-in [:ty :ret] rt) (assoc :params pids :tbody {:s :return :init {:i :expr :e e}})))))))))
+    (when (seq @explain) (upd-fn! fid assoc :cx-cmp-explain @explain))
     fid))
 
 (defn- analyze-implicit*!
