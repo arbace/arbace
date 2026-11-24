@@ -4470,6 +4470,7 @@
                        (if *ce-in-call* (when (checking?) (ub! e "reinterpret_cast: conversion from pointer type")) (ce-top-sure! "reinterpret_cast: conversion from pointer type")))
                    ;; (h-cpp-consteval, the checker: [expr.const]/5.15, a reinterpret_cast of any kind)
                    _ (when (and (:cx-reinterpret e) (checking?)) (ub! e "'reinterpret_cast' is not a constant expression"))
+                   _ (when (and (:cx-void-cast e) (checking?)) (ub! e "cast from 'void*' is not allowed in a constant expression"))
                    v (ev (:e e))]
                (case (:ck e)
                  (:noop :int :int->fp :fp :fp->int) (if (ce-gaddr? v)
@@ -11260,6 +11261,13 @@
                   ;; reference to an unrelated type)
                   (and (checking?) (= "CStyleCastExpr" (:kind n)) (cx-reinterpret-cast? r))
                   (assoc r :cx-reinterpret true)
+                  ;; (cpp-rind, the checker: [expr.const]/5.14 before C++26, a conversion from cv void* to a pointer-to-object
+                  ;; type, marked for the constant evaluation: GCC's "cast from 'void*' is not allowed"; cpp0x/constexpr-cast4.C)
+                  (and (checking?) (< (long *cxx-year*) 26) (#{"CXXStaticCastExpr" "CStyleCastExpr"} (:kind n)) (= :cast (:op r))
+                       (abi/ptr? (abi/unq (:ty r))) (not (abi/void? (abi/unq (:to (abi/unq (:ty r))))))
+                       (not (abi/fn? (abi/unq (:to (abi/unq (:ty r))))))
+                       (some-> a :ty abi/unq abi/ptr?) (abi/void? (abi/unq (:to (abi/unq (:ty a))))))
+                  (assoc r :cx-void-cast true)
                   :else r)))))
     ;; queue 439: GNU's compound literal `(T){...}` in C++ (g++.dg's ext/attribute-test-1.C, a vector's), for the code
     ;; generator: a prvalue temporary list-initialized as T{...} is (clang's CompoundLiteralExpr of a C++ class, vector or
@@ -12390,7 +12398,14 @@
         (throw (ex-info (str "codegen: call to a deleted function " (:name d) (if (:implicit d) " (implicitly deleted)" ""))
                         (cond-> {:codegen/refused :overload} (:node f) (assoc :cx/node (:node f)))))))
     (if deleg
-      {:delegate (init-of {:k :class :id cid} deleg)}
+      (let [d (init-of {:k :class :id cid} deleg)]
+        ;; (cpp-rind, the checker: [class.base.init]/6, a constructor whose mem-initializer delegates to the constructor itself,
+        ;; the target chosen by overload resolution being the same constructor: GCC's "constructor delegates to itself", at the
+        ;; mem-initializer; cpp0x/dc8.C, template/meminit1.C)
+        (when (and (checking?) (= :ctor (:i d)) (some? (:fn-id ctx)) (= (:fn d) (:fn-id ctx)))
+          (throw (ex-info "codegen: constructor delegates to itself"
+                          (cond-> {:codegen/refused :ctor-deleg} (get at-of [:base cid]) (assoc :cx/node {:range (get at-of [:base cid])})))))
+        {:delegate d})
       {:bases (vec (for [[i b] (map-indexed vector (:bases c)) :when (not (:virtual b))]
                      (let [t {:k :class :id (:cls b)}
                            x (get given [:base (:cls b)])]
