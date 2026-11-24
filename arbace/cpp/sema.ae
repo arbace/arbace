@@ -13313,6 +13313,36 @@ protected:
         (when bad
           (*on-refusal* (ex-info (str "codegen: " bad) {:codegen/refused :constexpr :cx/node (:node f)}) (:node f)))))))
 
+(defn- cx-ctor-c17-inits!
+  "cpp-sweep (the checker): [dcl.constexpr]/4.5 of C++11-C++17 (P1331R2 dropped it in C++20), a constexpr constructor of a class
+  that is no union initializes every non-variant non-static data member and base class subobject: a scalar member without a
+  mem-initializer or default member initializer, or a base default-initialized by its trivial implicit constructor while it has
+  members, is GCC's \"member ... must be initialized by mem-initializer in 'constexpr' constructor\", at the body; a template's
+  specialization and a delegating constructor not judged: cpp0x/constexpr-base8.C."
+  [id]
+  (let [f (fnd id) c (some-> (:cls f) abi/cls) ti (:tinits f)]
+    (when (and (checking?) *on-refusal* (= :ctor (:kind f)) (:constexpr f) (< (long *cxx-year*) 20) (not (:tinst f)) c (not (:union c))
+               ti (not (:delegate ti)) (:node f) (not (header-node? (:node f))) (cx-plain-class? (:cls f)) (not (:implicit f)) (not (:defaulted f)))
+      (let [bad (or (some (fn [{:keys [field init]}]
+                            (let [fl (nth (:fields c) field nil)
+                                  t (when fl (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))))]
+                              (when (and fl (not (:static fl)) (string? (:name fl)) (seq (:name fl)) (not (:anon fl)) (not (:bits fl))
+                                         (abi/scalar? t) (or (nil? init) (= :none (:i init))))
+                                (str "member '" (:name c) "::" (:name fl) "'"))))
+                          (:fields ti))
+                    (some (fn [{:keys [base init]}]
+                            (let [bc (abi/cls base) g (when (= :ctor (:i init)) (fnd (:fn init)))]
+                              (when (and bc (some #(not (:static %)) (:fields bc))
+                                         (or (= :none (:i init)) (and g (:implicit g) (:trivial g))))
+                                (str "member '" (:name c) "::<anonymous>'"))))
+                          (:bases ti)))]
+        (when bad
+          (let [body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner (:node f)))
+                at (or body (:node f))]
+            (*on-refusal* (ex-info (str "codegen: " bad " must be initialized by mem-initializer in 'constexpr' constructor")
+                                   {:codegen/refused :constexpr :cx/node at})
+                          at)))))))
+
 (defn- cx-potential-constant!
   "The potential constant check of the constexpr function `id`'s analyzed body (above), its finding an error."
   [id]
@@ -13386,6 +13416,7 @@ protected:
                                               (try (cx-literal-signature! id)
                                                    (analyze-fn! id)
                                                    (cx-potential-constant! id)
+                                                   (cx-ctor-c17-inits! id)
                                                    (catch arbace.lang.ExceptionInfo e
                                                      (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
                                             (analyze-fn! id))))
