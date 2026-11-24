@@ -20916,5 +20916,6 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   --strict` and `bin/records-check`: 0 problems.
 - Checked: each rule's rows and the files its rule can reach (the regression lists: __has_cpp_attribute's 10 files, variadic macros,
   explicit specializations with auto, instantiation-context files, duplicate typedefs, C++98 files, enums, local classes, files with
-  standard headers) and the whole dg-error part at a1d4d9402 by the own front end; no recorded own pass lost to these rules
-  (addr_builtin-1.C's [odr-internal] extra is cpp-rind's rule, its branch's to settle).
+  standard headers): no recorded own pass lost to these rules (addr_builtin-1.C's [odr-internal] extra is cpp-rind's rule, and
+  diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C time out on cpp-rind's head too: its branch's to settle). The
+  whole dg-error part by the own front end at a1d4d9402 runs detached at the hand-off (.tmp/NEXT.md); its verdict is not taken here.
