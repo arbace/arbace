@@ -2434,7 +2434,14 @@
                         ;; C6-4 (a): RF_DROP_GLUE=1, a drop's glue symbol (runtime-body's :drop-glue); off by default: without
                         ;; it the program's and the native library bodies' drops are plain branches (nothing dropped), and
                         ;; with it unwind.rs's native-std run (rsi-native) faults at its second catch_unwind: the ci leg judges
-                        :drop-glue (when (= "1" (System/getenv "RF_DROP_GLUE")) (fn [t] (mono/drop-glue-symbol n t)))
+                        ;; queue 542 (round 10): with the program's closures' upvars bound, as the facts were made: codegen runs
+                        ;; outside build-program's bindings, where a local closure's upvars were unknown, so needs_drop of a
+                        ;; by-value closure (an FnOnce body's self, `move || { tx.send(..) }`) was false and its drop left out
+                        ;; (the Sender never dropped, the channel's receiver parked for ever: threads.rs's livelock)
+                        :drop-glue (when (= "1" (System/getenv "RF_DROP_GLUE"))
+                                     (fn [t] (binding [build/*closure-tys* (merge build/*closure-tys* (:closure-upvars facts))
+                                                       mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))]
+                                               (mono/drop-glue-symbol n t))))
                         :vtables (:vtables facts) :vtable! (fn [native?] (fact! :vtables native?))
                         :const! (fn ([native?] (fact! :consts native?)) ([native? d] (fact! :consts native? d)))
                         ;; RF15: a promoted ADT value's bytes (an enum's variant: `&Color::Blue`, `&Some(1.5)`) from mono's layout
@@ -2907,7 +2914,13 @@
                   :layout-of (fn [tyf] (in-lib #(mono/type-layout-form n tyf)))
                   :closure-fnptr (fn [tyf] (try (in-lib #(mono/closure-once-symbol n tyf)) (catch Throwable _ nil)))
                   :unit-variant (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
-                  :drop-glue (fn [t] (in-lib #(mono/drop-glue-symbol n t)))}
+                  :drop-glue (fn [t] (in-lib #(mono/drop-glue-symbol n t)))
+                  ;; queue 542 (round 10, C6): a library constant the bodies name unevaluated (std's READ_LIMIT, NSEC_PER_SEC, ...)
+                  ;; as CTFE evaluates it: a dependency's integer constant by its interface fact, else its exported body
+                  ;; (eval-local-const); with it fix-uneval also reads an integer literal from the constant's module source
+                  :local-const (fn [_ _ v] (let [[d as] (:nc (meta v))]
+                                             (when (and (string? d) (empty? as))
+                                               (in-lib #(or (iface-const-value d) (eval-local-const d #{}))))))}
               out (vec (for [[d i why] insts]
                          (if-not i
                            [d nil why]

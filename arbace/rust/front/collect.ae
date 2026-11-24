@@ -857,6 +857,17 @@
                                (resolve-written names *module*))]
                 (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
               :else nil))
+      ;; queue 542 (round 10): a path the resolver left an error (a dependency's pass: libc's unix/mod.rs `crate::pthread_mutex_t`,
+      ;; `crate::tms`, `addrinfo`, named through the root's and unix's globs of other files' macro-made `s! {}` structs, which the
+      ;; resolver's view of the module lacks): by its written path through the module's names, as an expansion's path
+      err (let [names (mapv :ident (:segs path))
+                r2 (try (if (= 1 (count names))
+                          (when-not (or (:lang path) (scope-param (first names))) (lookup-name (first names) (or *body* *module*) true))
+                          (resolve-written names *module*))
+                        (catch Throwable _ nil))]
+            (cond (= :local (first r2)) [:local (second r2) (:kind (def-of (second r2)))]
+                  (and (= :ext (first r2)) (string? (second r2))) [:ext (second r2) (ext-kind (second r2))]
+                  :else [:unresolved (str r)]))
       [:unresolved (str r)])))
 
 (defn- elided-default [] (elided-region))
@@ -944,9 +955,14 @@
                  (if (= "MAX" (str (:ident (second segs)))) (dec m) (if signed? (- m) 0N)))))
           (when (< (long *const-depth*) 16)
             (when-let [r (try (res-def (:path x)) (catch Throwable _ nil))]
-              (when (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
-                (binding [*const-depth* (inc (long *const-depth*))]
-                  (some-> (:expr (:node (def-of (second r)))) eval-int-expr))))))
+              (cond (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
+                    (binding [*const-depth* (inc (long *const-depth*))]
+                      (some-> (:expr (:node (def-of (second r)))) eval-int-expr))
+                    ;; queue 542 (round 10): a constant of another module file of a dependency's pass (libc's
+                    ;; `crate::__SIZEOF_PTHREAD_MUTEX_T`, b64/mod.rs's `40`, in linux/mod.rs's `pthread_mutex_t`): the integer
+                    ;; value the pass's earlier round wrote in the interface's facts
+                    (and (= :ext (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
+                    (let [v (:value (get (:consts *si*) (second r)))] (when (integer? v) (bigint v)))))))
     nil))
 
 (defn const-int-value

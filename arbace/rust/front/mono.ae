@@ -1573,7 +1573,9 @@
   (try
     (when-let [[_ p] (re-matches #"const ([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)" text)]
       (let [segs (str/split p #"::")
-            modp (if (= 1 (count (butlast segs))) (first segs) (std-name-path (vec (butlast segs))))
+            ;; queue 542 (round 10): a private module std's names hide (std::sys::path::unix): its written path, the files
+            ;; module-items finds by rustc's defaults
+            modp (if (= 1 (count (butlast segs))) (first segs) (or (std-name-path (vec (butlast segs))) (str/join "::" (butlast segs))))
             [crate & msegs] (when modp (str/split modp #"::"))
             root (when crate (lib-crate-root crate))
             [items] (when root (module-items root msegs))
@@ -1586,7 +1588,12 @@
                               (cond (and (seq? k) (= 'Lit (first k)) (= 'Integer (fget (second k) :kind))) (fget (second k) :symbol)
                                     (and (seq? k) (= 'Unary (first k)) (= 'Neg (second k))) (when-let [v (lit (nth k 2))] (str "-" v))
                                     :else nil)))
-            sym (when body (lit body))]
+            sym (when body (lit body))
+            ;; queue 542 (round 10): a bool constant's literal too (std's `HAS_PREFIXES: bool = false`)
+            bsym (when (and body (= [:bool] t))
+                   (let [k (fget body :kind)] (when (and (seq? k) (= 'Lit (first k)) (= 'Bool (fget (second k) :kind))) (str (fget (second k) :symbol)))))]
+        (if (#{"true" "false"} bsym)
+          (list 'scalar (if (= "true" bsym) 1 0) 1)
         (when (and sym t (#{:int :uint} (first t)))
           (let [neg (str/starts-with? sym "-")
                 d (str/replace (if neg (subs sym 1) sym) "_" "")
@@ -1596,7 +1603,7 @@
                         :else (bigint (BigInteger. d 10)))
                 bits (if (str/ends-with? (second t) "size") 64 (parse-long (subs (second t) 1)))
                 m (reduce * 1N (repeat bits 2N))]
-            (list 'scalar (mod (if neg (- v) v) m) (quot bits 8))))))
+            (list 'scalar (mod (if neg (- v) v) m) (quot bits 8)))))))
     (catch Throwable _ nil)))
 
 (def ^:private src-adt-cache (atom {}))

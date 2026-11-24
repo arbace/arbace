@@ -326,7 +326,7 @@ alloc_iface() {
 # linux, musl), std's names and std's interface from the pack rust-front-std with every std fact taken out (core's and alloc's
 # facts read from it), its facts into .tmp/rust-front/std/std-iface.edn and compared with the helper's (std-iface.edn.report);
 # queue 400: std's vendored dependencies libc and hashbrown (library/vendor; their names and facts are none of the helper's) read
-# natively first, their module files, index and interface pass (DEPS_IFACE_ROUNDS, default 2; about 20 minutes, libc's 48 files
+# natively first, their module files, index and interface pass (DEPS_IFACE_ROUNDS, default 3; about 20 minutes, libc's 48 files
 # and hashbrown's 17) cached in .tmp/rust-front/std/deps/ (remove it after a change to the reader, the expansion or the
 # collection, as index.edn); STD_DEPS=0 leaves them out (std's names as before)
 #   bin/rust-front std-iface [FILE...]     the pass over std's module files (or FILEs, a module after the ones it names) and the

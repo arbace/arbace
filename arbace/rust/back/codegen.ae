@@ -602,7 +602,8 @@
                     (let [s (read-string txt) n (count (.getBytes ^String s "UTF-8"))]
                       {:pair [{:ty "ptr" :v (ag [:str s])} {:ty "i64" :v n}]})
                     (unsupported (str "const tyconst " txt))))
-      (unsupported (str "const " (first v))))))
+      ;; queue 542 (round 10): an unevaluated constant names itself (lib-unit's refusals by cause)
+      (unsupported (str "const " (first v) (when (= "unevaluated" (name (first v))) (str " " (second c))))))))
 
 (defn fn-callee [f]
   (let [s (ty-struct (nth f 2))]
@@ -1938,6 +1939,22 @@
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
                         "call" (let [[_ f args dest target unwind callee-info0 fn-loc scope] t
+                                     ;; queue 542 (round 10): a call of an `extern "rust-call"` function (a closure's call, call_mut,
+                                     ;; call_once, a ClosureOnceShim's) untuples its last argument, one argument a field, as rustc's
+                                     ;; codegen_call_terminator does for Abi::RustCall; before, the tuple went as one value, right
+                                     ;; only when its layout passed as its fields do (a scalar, a pair of scalars, a ZST): a
+                                     ;; memory tuple ((usize, JoinHandle<bool>) in IntoIter::fold's call of map_fold's closure)
+                                     ;; went by its address (threads.rs's Barrier section: a segmentation fault in memcpy)
+                                     args (let [tt (when (and (seq? f) (= "const" (name (first f)))) (nth f 2 nil))
+                                                lst (last args)
+                                                lt0 (when (seq args) (ty-of lst))
+                                                fields (when (and (seq? lt0) (seq? (nth lt0 2 nil)) (= "tuple" (name (first (nth lt0 2))))) (rest (nth lt0 2)))]
+                                            (if (and (seq? tt) (string? (second tt)) (re-find #"extern \"rust-call\"" (second tt))
+                                                     fields (#{"copy" "move"} (name (first lst))))
+                                              (let [p (second lst)]
+                                                (vec (concat (butlast args)
+                                                             (map-indexed (fn [i ft] (list (first lst) (apply list (concat p [(list 'field i ft)])))) fields))))
+                                              args))
                                      ci0 (when (and (seq? callee-info0) (map? (second callee-info0))) (second callee-info0))
                                      ;; the intrinsics rustc's LLVM backend leaves to their fallback bodies are calls of that instance
                                      fb (when (and (= "intrinsic" (:kind ci0)) (#{"rotate_left" "rotate_right" "type_id_eq"} (:intrinsic ci0)))

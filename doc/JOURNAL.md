@@ -19284,3 +19284,43 @@ executables, and the host's C records rerun on its train.
   busy at 100% in a futex wait (FUTEX_WAIT_BITSET_PRIVATE, expected value 0xffffffff, Parker's PARKED or musl's join wait) on
   0x7f0000000128, which is neither in the TLS block (it ends near 0xb8) nor plainly a static; ci's dumps carry no Rust frame names.
   Open.
+
+## 2026-11-24 — queue 542, round 10: threads.rs own and passing (6 of 6 own), libc's chains, C6's constants (VM)
+
+- **threads.rs's livelock: the producer's Sender was never dropped.** Traced with ci's CI_CALLTRACE (filtered while tracing): the
+  join, Mutex and channel sections run; main received the five values, parked in the sixth recv, and the producer never called
+  `Sender::drop` (no `disconnect`). The closure `move || for i in 0..5 { tx.send(i * i).unwrap(); }` is FnOnce (spawn's bound), its
+  body takes self by value and its MIR (ours as rustc's) ends with `drop(_1)`; codegen asked `drop-glue-symbol` outside
+  build-program's bindings, where a local closure's upvars are unknown, so needs_drop of the closure type was false (copy? of no
+  upvars: true) and the drop became a plain branch. Fix (arbace/rust/front/build_run.ae, the program facts' `:drop-glue`): the
+  program's closures' upvars bound (build/*closure-tys*, mono/*closure-upvars*) as the facts were made. Every by-value closure
+  with a capture that needs drop leaked before (Arcs, Senders); only the channel's disconnect made it visible.
+- **The rust-call ABI's untupling** (arbace/rust/back/codegen.ae): a call of an `extern "rust-call"` function (call_mut, call_once,
+  a closure's) passed its tuple argument as one value; rustc's codegen_call_terminator spreads it, one argument per field (Abi::
+  RustCall). The two agree when the tuple passes as its fields do (a scalar, a pair of scalars, `()`), which is why the other cases
+  ran; a memory tuple went by its address: `(usize, JoinHandle<bool>)` in IntoIter::fold's call of map_fold's closure, threads.rs's
+  Barrier section, a segmentation fault in memcpy. The call now untuples the last argument (field projections of its place) when the
+  callee's type is `extern "rust-call"`.
+- rsi18: all six built own in one run (`bin/rust-front rsi-build --native-core intrinsics panics std threads unwind vectors`, 1 h
+  14 min on CPUs 0-3, 3.07 GB, under the heavy lock); the eval check over them (`RSI_FRONT_DIR=.tmp/rust-front/rsi18 bin/rsi check
+  --front own --corpus samples`): **6 of 6 pass, 6 of 6 own** (threads.rs's output equal to rustc's run), the std-vs-panics control
+  differing, 6.2 GB. Logs: /root/arbace-mac/.tmp/q542/logs/rsi-build18.log, eval-samples18.log.
+- **libc** (31 of unix/mod.rs's functions without a fact, the pthread mutex, condvar and rwlock functions, times, utimes,
+  getaddrinfo, sigaction): three causes. (1) An array length naming another module file's constant (`size: [c_char;
+  crate::__SIZEOF_PTHREAD_MUTEX_T]` in linux/mod.rs, the constant in b64/mod.rs): collect's eval-int-expr took only the file's own
+  constants; an external one is now the value the pass's earlier round wrote in the facts (pthread_mutex_t and the other pthread
+  types written: libc's ADTs 288 -> 302). (2) A path the resolver left an error (`crate::pthread_mutex_t`, `crate::tms`, `addrinfo`,
+  named through the root's and unix's globs of other files' macro-made structs): res-def now resolves it by its written path through
+  the module's names, as an expansion's; and a dependency's later round gives std-path-def the round's re-globbed names (they were
+  the first round's). (3) The chain spans three files (b64's constant, linux's struct, unix's function), so two rounds could not
+  write it: DEPS_IFACE_ROUNDS defaults to 3. The deps pass again (`alloc-check --crate std --deps`, CORE_TRACE=1, 32 min beside
+  other agents): **libc 821 -> 892 functions, 288 -> 304 ADTs; unix/mod.rs's functions without a fact 30 -> 0**; libc's left: sendmmsg
+  and recvmmsg (`crate::mmsghdr`, a fourth link). The new facts in .tmp/rust-front/std/deps leave C6 at 180 / 39 / 106 (no item of
+  the 325 calls the pthread functions); rsi18 was built with the old ones.
+- **C6's constants**: lib-unit's facts had no `:local-const`, so a std constant its bodies name stayed unevaluated; now a
+  dependency's by its interface fact, else its exported body (eval-local-const), and fix-uneval's source literal; src-const-value
+  takes a private module's written path (std's names hide std::sys) and bool literals (HAS_PREFIXES); codegen names an unevaluated
+  constant in its refusal. std **178 / 39 / 108 -> 180 / 39 / 106**; the constants left: READ_LIMIT (an `if cfg!`), &str constants
+  (MAIN_SEPARATOR_STR), inline consts of bodies, MAP_FAILED (a pointer), FULL_BACKTRACE_DEFAULT (cfg_select!), UNWIND_DATA_REG (a
+  tuple).
+- Not recorded (the VM's records would be -linux-arm64); the main host's amd64 commands are in the queue report.
