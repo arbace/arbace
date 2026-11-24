@@ -432,6 +432,10 @@
                                (and (= l 0) value? nest-alloc (not deref?))
                                (let [v (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv))]
                                  (swap! env assoc 0 {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty 0)}))
+                               ;; queue 566 (C6 L1): a constant's own body reborrowing into _0 (`_0 = &(*_1)`, io::const_error!'s
+                               ;; inline const after its promoted): _0 the same pointer
+                               (and (= l 0) value? deref?)
+                               (swap! env assoc 0 (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty 0)))
                                (= l 0) (reset! result (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv)))
                                ;; RF15: `&*p` of a pointer local: the same pointer (a reborrow)
                                deref? (swap! env assoc l (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty l)))
@@ -1293,12 +1297,21 @@
         (let [raw-alloc (fn [kind id]
                           (let [bs (or (alloc-bytes b id) (throw (ex-info (str "no bytes for allocation " id " of " d) {})))]
                             [(*data-alloc* {:bytes bs :align 1 :relocs []}) (count bs)]))
-              lc (fn [_ _ v] (let [[d2 as] (:nc (meta v)) d2 (if (string? d2) d2 (:inline-def (meta v)))]
-                               (when (and (string? d2) (empty? as))
-                                 (or (iface-const-value d2) (eval-local-const d2 #{})
-                                     ;; a constant of another module whose value is a literal in its source (std's HAS_PREFIXES)
-                                     (mono/src-const-value (str "const " d2))
-                                     (eval-const-whole d2 unit-variant lay)))))
+              lc (fn lc [_ tyf v]
+                   (let [idx (when (seq? v) (nth v 3 nil)) pt (:tc (meta tyf))]
+                     (if (integer? idx)
+                       ;; queue 566 (C6 L1): a promoted of the constant's own body (io::const_error!'s `&SimpleMessage` in
+                       ;; Timespec::new's inline const): evaluated into a nested allocation, the constant a thin pointer to it
+                       (when-let [pb (get (:promoted-bodies b) idx)]
+                         (when (and (vector? pt) (#{:ref :ptr} (first pt)) (vector? (last pt)) (not (#{:slice :str :dyn} (first (last pt)))))
+                           (let [r (eval-promoted pb raw-alloc *data-alloc* unit-variant nil nil lay lc false)]
+                             {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (*data-alloc* (select-keys r [:bytes :align :relocs]))]]})))
+                       (let [[d2 as] (:nc (meta v)) d2 (if (string? d2) d2 (:inline-def (meta v)))]
+                         (when (and (string? d2) (empty? as))
+                           (or (iface-const-value d2) (eval-local-const d2 #{})
+                               ;; a constant of another module whose value is a literal in its source (std's HAS_PREFIXES)
+                               (mono/src-const-value (str "const " d2))
+                               (eval-const-whole d2 unit-variant lay)))))))
               depth (atom 0)
               call (fn call [cd targs vals]
                      (let [e (get (native-core-map) cd)]
