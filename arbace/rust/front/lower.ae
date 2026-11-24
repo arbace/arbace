@@ -220,6 +220,11 @@
 ;; Paths and types
 
 (declare lower-ty lower-expr lower-pat lower-block lower-generic-args lower-format-args bind-pat lower-bound)
+;; queue 561 (C6 L3): a `?` of an expansion: its desugaring's calls (Try::branch, FromResidual::from_residual) keep the expansion's
+;; mark, so a #[track_caller] from_residual's location is the outermost macro call's site (rustc's try_span, a QuestionMark
+;; desugaring of the `?` expression's context: expansion_cause walks it to the root), not the macro body's `?`; bound by
+;; core-check for the backtrace crates (rustc-demangle's parse! and invalid!)
+(def ^:dynamic *try-expn-mark* false)
 (def ^:dynamic *fmt-fspan* nil)   ; RF10: the format_args! call's place in std's macros ([FILE l1 c1 l2 c2]), for user type annotations
 
 
@@ -565,12 +570,20 @@
       Try (let [inner (lower-expr (second k))
                 isp (:span inner)
                 unreach [{:unparsed "allow(unreachable_code)"}]
-                branch (call-e (path-e "branch" isp) [inner] isp)
+                ;; queue 561: a `?` of a macro's expansion text (the virtual file's, a span past the root's lines): its
+                ;; from_residual call at the `?` token, whose expansion mark the caller location's root site is read from
+                ;; (externalize's virtual-cause; the whole expression's first token may be a metavariable's, of the root)
+                rsp (if (and *try-expn-mark* (vector? sp) (= 4 (count sp)) (every? number? sp)
+                             (not ((requiring-resolve 'arbace.rust.front.expand/root-span?) sp)))
+                      [(sp 2) (max 1 (dec (long (sp 3)))) (sp 2) (sp 3)]
+                      sp)
+                mk-call (fn [f args sp] (cond-> (call-e f args sp) (and *try-expn-mark* mark) (assoc :expn-mark mark)))
+                branch (mk-call (path-e "branch" isp) [inner] isp)
                 ;; rustc's `residual` binding is a desugaring's (its span marked), `val` the expression's
                 residual (assoc (bind-pat "residual" false sp) :synthesized true)
                 val (bind-pat "val" false sp)
                 brk-arm (arm (lang-struct-pat "Break" [residual] sp)
-                             (e {:kind :ret :expr (call-e (path-e "from_residual" sp) [(e {:kind :path :path {:segs [{:ident "residual"}]} :span sp :synthesized true})] sp)
+                             (e {:kind :ret :expr (mk-call (path-e "from_residual" rsp) [(e {:kind :path :path {:segs [{:ident "residual"}]} :span sp :synthesized true})] rsp)
                                  :span sp :attrs unreach}))
                 cont-arm (arm (lang-struct-pat "Continue" [val] sp) (e {:kind :path :path {:segs [{:ident "val"}]} :span sp :attrs unreach}))]
             (ex {:kind :match :expr branch :arms [brk-arm cont-arm] :source :try}))
