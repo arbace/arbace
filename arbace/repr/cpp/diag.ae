@@ -8221,3 +8221,39 @@
     (vec (distinct out))))
 
 (swap! checks conj ref-qualifier-overloads)
+
+;; cpp-rind (2026-11-24): [dcl.array]/1, an array bound is a converted constant expression: a block-scope array whose bound names a
+;; function parameter or a local variable that is neither const nor constexpr is GNU's variable length array, GCC's pedwarn "ISO C++
+;; forbids variable length array 'a'", an error under -pedantic-errors, at the variable (cpp1y/pr63996.C). sizeof, alignof and
+;; decltype operands aside; a const local's bound not judged (it may be constant).
+(defn vla-pedantic
+  [u starts ^String src ^String main]
+  (when (some #{"-pedantic-errors"} (:args u))
+    (let [out (java.util.ArrayList.)
+          vla? (fn [^String qt runtime]
+                 (some (fn [[_ b]] (some #(contains? runtime %)
+                                         (re-seq #"[A-Za-z_]\w*" (-> b (str/replace #"\b(?:sizeof|alignof|__alignof__|_Alignof|decltype|__typeof__|typeof)\s*\([^()]*\)" "")
+                                                                      (str/replace #"\bsizeof\s+\w+" "")))))
+                       (re-seq #"\[([^\[\]]+)\]" qt)))]
+      (doseq [f (:nodes u) :when (#{"FunctionDecl" "CXXMethodDecl"} (:kind f))]
+        (let [runtime (java.util.HashSet.)]
+          (doseq [pv (:inner f) :when (and (= "ParmVarDecl" (:kind pv)) (string? (:name pv)) (not (re-find #"\bconst\b" (str (get-in pv [:type :qualType])))))]
+            (.add runtime (:name pv)))
+          (letfn [(w [x]
+                    (cond (map? x)
+                          (when-not (#{"LambdaExpr" "CXXRecordDecl"} (:kind x))
+                            (when (= "VarDecl" (:kind x))
+                              (let [qt (str (get-in x [:type :qualType]))]
+                                (when (and (string? (:name x)) (not (#{"extern"} (:storageClass x))) (vla? qt runtime))
+                                  (when-let [o (mine-at x main)]
+                                    (let [[l c] (line-col starts o)]
+                                      (.add out {:line l :col c :kind :error :rule :vla :msg (str "ISO C++ forbids variable length array '" (:name x) "'")}))))
+                                (when (and (string? (:name x)) (not (:constexpr x)) (not (re-find #"^\s*const\b|\bconst\s*$" qt)))
+                                  (.add runtime (:name x)))))
+                            (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (w v)))
+                          (sequential? x) (doseq [y x] (w y))
+                          :else nil))]
+            (doseq [b (:inner f) :when (and (map? b) (= "CompoundStmt" (:kind b)))] (w b)))))
+      (vec (distinct out)))))
+
+(swap! checks conj vla-pedantic)
