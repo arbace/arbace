@@ -4,7 +4,11 @@
  * Linux: NativeSeedGenerator, which reads the file, a URLSeedGenerator) or falls back to
  * ThreadedSeedGenerator (thread scheduling jitter); the Go build's seeds come from the host's
  * random source (jdk.internal.jrt.HostRandom: getrandom(2) through Go's crypto/rand in B1a),
- * what the JDK's Linux generator reads without the file (the box, B1b, has no /dev). The
+ * what the JDK's Linux generator reads without the file (the box, B1b, has no /dev). A seed
+ * source naming another file (java.security.egd or securerandom.source, SunEntries.getSeedSource:
+ * file:/dev/random and file:/dev/urandom are the host's) is read as the JDK's URLSeedGenerator
+ * reads it, one stream from its start (java-misc-1124, StrongSeedReader; a source that cannot be
+ * opened falls back to the host's, as the JDK's falls back to ThreadedSeedGenerator). The
  * system entropy (SHA1PRNG's additional seed material, not observable) is the JDK's but for
  * the network adapters (java.net.NetworkInterface is not in the Go build), hashes a few system
  * properties rather than all (jrt has no System.getProperties() for translated code) and lists
@@ -17,6 +21,10 @@
 package sun.security.provider;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Random;
@@ -35,7 +43,54 @@ abstract class SeedGenerator {
      * Fill result with bytes from the host's random source.
      */
     public static void generateSeed(byte[] result) {
-        HostRandom.fill(result, 0, result.length);
+        InputStream in = Source.STREAM;
+        if (in == null) {
+            HostRandom.fill(result, 0, result.length);
+            return;
+        }
+        synchronized (Source.class) {
+            int read = 0;
+            try {
+                while (read < result.length) {
+                    int count = in.read(result, read, result.length - read);
+                    // /dev/random blocks - should never have EOF
+                    if (count < 0) {
+                        throw new InternalError(
+                            "URLSeedGenerator " + Source.NAME + " reached end of file");
+                    }
+                    read += count;
+                }
+            } catch (IOException ioe) {
+                throw new InternalError("URLSeedGenerator " + Source.NAME +
+                        " generated exception: " + ioe.getMessage(), ioe);
+            }
+        }
+    }
+
+    /**
+     * The seed source when it names a file other than the host's random devices (the JDK's
+     * URLSeedGenerator), opened when the first seed is generated; else STREAM is null.
+     */
+    private static final class Source {
+        static final String NAME = SunEntries.getSeedSource();
+        static final InputStream STREAM = open(NAME);
+
+        private static InputStream open(String egd) {
+            if (egd.isEmpty() || egd.equals(SunEntries.URL_DEV_RANDOM) ||
+                    egd.equals(SunEntries.URL_DEV_URANDOM)) {
+                return null;
+            }
+            try {
+                @SuppressWarnings("deprecation")
+                URL device = new URL(egd);
+                if (device.getProtocol().equalsIgnoreCase("file")) {
+                    return new FileInputStream(SunEntries.getDeviceFile(device));
+                }
+                return device.openStream();
+            } catch (Exception e) {
+                return null;
+            }
+        }
     }
 
     /**

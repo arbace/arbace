@@ -20942,3 +20942,27 @@ both. The records need no change.
   test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
   t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
   3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+
+## 2026-11-24: java-misc-1124, the lazy import and security's small fixes; references and logging as decisions
+
+Branch `java-misc-1124` from next `903ef1ab2` (the burst's Java misc stream: `:repl-sibling`, `:security` but t07882 and
+t07910, which java-rows-1124 did, `:logging`, `:references`). Each test's cause was found on the gate executable
+`40a4745332aacf54acab` with the read level's cache; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124".
+Built, for the train (arbace/lang and jrt move gate_key; no build of the branch was made):
+- the lazy import: `Compiler$ImportExpr/importIn` defers the import of a class not loadable yet whose source on the path
+  declares it (`arbace.classes.native/defer-import`, `arbace.classes.analyze/defer-import!` into `env/source-imports`), so
+  packages that import each other load in either order (t04756, t06388 at interp); proved with the deferral called in
+  place of the cyclic import on the gate executable, and the negative cases (no source, a source that does not declare the
+  class, no package) left to Clojure's ClassNotFoundException; the alternative of ordering the packages in run.ae was
+  rejected (a cycle has no order: each package's first file imports the other's class);
+- OCSP: F2's variant OCSP.ae dropped, jdk26u's getOCSPBytes over HttpURLConnection, in the world since F12 (t05333);
+- java.base's com.sun packages (com.sun.crypto.provider, com.sun.security.ntlm) in java.base by jrt's classPlace, as
+  jdk26u's module graph has them (t05304: SunJCE's module), a reflect_test case;
+- the seed source: jrt's SeedGenerator and the NativePRNG variant read a java.security.egd file as jdk26u's
+  URLSeedGenerator and initIO do (t08235); SeedGenerator's forms by `bin/jrt-convert predict`, the variant vetted.
+Proposed for the user (JMS1-JMS4, with options and recommendations in the survey): finalization (t04683, t04816;
+recommended: build it over Go finalizers handing objects to a Java "Finalizer" thread), a WeakReference read while the
+collector marks (t03385: measured, a spinning get keeps its referent through every System.gc; recommended n/a, its stdout
+being unspecified), LDAP's CertStore and UnixLoginModule (t05346, t07867; recommended: t07867 n/a, t05346 deferred under
+JCS234 (a)), and logging (System.Logger is JCS250 (a), not started here, an overlay `System$Logger` named as an
+alternative; t05778 n/a recommended; t05766 java-stack-1124's).
