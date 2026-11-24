@@ -2676,6 +2676,8 @@
 (declare cx-friend-member-access! cx-friend-class-ns! cx-tparam-access! cx-elab-decl-scope cx-friend-fn-ident!)
 (declare cx-tinst-member-type-access! cx-alias-member-access! cx-base-type-access! cx-member-tparam-access!) ; queue 506
 
+(declare cx-plain-class? cx-non-literal cx-defaulted-not-constexpr)
+
 (defn- declare-class! [scope0 n]
   (let [;; (cpp-rt-own: an elaborated-type-specifier's class, `struct P *p;` a member of S, is declared in the smallest namespace or
         ;; block scope holding it, [basic.scope.pdecl]/7.2 (the parser's :_elab-decl, queue 505's mark, 8c2fa2b4d): libcpp's cpp_reader
@@ -2942,6 +2944,32 @@
       (finish-class! id)
       ;; (CP365 (a): finished, and the provisional instances that waited for it made again)
       (abi/update-cls! id assoc :finished true)
+      ;; (cpp-sweep, the checker: C++11's [dcl.constexpr]/8, the class of a constexpr non-static member function other than a
+      ;; constructor a literal type (DR 1684 dropped it in C++14): GCC's pedwarn, an error under -pedantic-errors, "enclosing
+      ;; class of 'constexpr' non-static member function ... is not a literal type" at each such member, declared or defined,
+      ;; once the class is complete; a class template's specialization not judged here (GCC explains it at a constant
+      ;; evaluation's call instead): cpp1y/constexpr-dr1684.C, cpp0x/constexpr-data1.C)
+      (when (and (checking?) *on-refusal* *pedantic-errors* (= 11 (long *cxx-year*)) (not (header-node? n)) (cx-plain-class? id))
+        (when (cx-non-literal t)
+          (doseq [mid (:methods (abi/cls id))
+                  :let [f (fnd mid)]
+                  :when (and (:constexpr f) (= :method (:kind f)) (not (:static f)) (not (:implicit f)) (:node f) (not (header-node? (:node f))))]
+            (*on-refusal* (ex-info (str "codegen: enclosing class of 'constexpr' non-static member function '" (:name f) "' is not a literal type")
+                                   {:codegen/refused :constexpr :cx/node (:node f)})
+                          (:node f)))))
+      ;; (cpp-sweep, the checker: [dcl.fct.def.default]/3 (C++20; [dcl.constexpr]/3-5 before), a special member defaulted on its
+      ;; first declaration declared constexpr or consteval only when its implicit definition would be constexpr: GCC's
+      ;; "explicitly defaulted function ... cannot be declared 'constexpr' because the implicit declaration is not 'constexpr'"
+      ;; at it, cx-defaulted-not-constexpr: cpp0x/constexpr-diag3.C's Def, cpp2a/consteval3.C's C, cpp2a/constexpr-dtor3.C)
+      (when (and (checking?) *on-refusal* (not (header-node? n)) (cx-plain-class? id) (not (:union (abi/cls id))))
+        (doseq [fid (concat (:ctors (abi/cls id)) (some-> (:dtor (abi/cls id)) vector))
+                :let [f (fnd fid)]
+                :when (and (:constexpr f) (:defaulted f) (not (:ool-defaulted f)) (not (:out-of-line-default f)) (not (:implicit f))
+                           (:node f) (not (header-node? (:node f))) (cx-defaulted-not-constexpr id f))]
+          (*on-refusal* (ex-info (str "codegen: explicitly defaulted function '" (:name f) "' cannot be declared '" (if (:consteval f) "consteval" "constexpr")
+                                      "' because the implicit declaration is not 'constexpr' (" (cx-defaulted-not-constexpr id f) ")")
+                                 {:codegen/refused :constexpr :cx/node (:node f)})
+                        (:node f))))
       (when-let [h (:class-completed @hooks)] (h id))
       (when-not nm (reset! *last-anon* t)))
     t))
@@ -3657,6 +3685,96 @@
                   (every? #(= :public (:access %)) (:fields c))
                   (every? #(= :public (:access %)) (:bases c)))))))
 
+(defn cx-plain-class?
+  "cpp-sweep (the checker): whether the class `id` is no template's specialization nor a member of one, and not local to a
+  function: its enclosing scopes namespaces and such classes."
+  [id]
+  (loop [id id]
+    (let [c (abi/cls id) s (:outer c)]
+      (cond (nil? s) false
+            (= :ns (:kind s)) true
+            (and (= :class (:kind s)) (:cls s)) (recur (:cls s))
+            :else false))))
+
+(defn- cx-user-fn-not-constexpr? [f]
+  (boolean (and f (not (:implicit f)) (not (:defaulted f)) (not (:constexpr f)) (not (:deleted f)))))
+
+(defn cx-dtor-not-constexpr
+  "cpp-sweep (the checker): the reason the destructor of the class `id` is surely not constexpr ([dcl.constexpr]/5 of C++20):
+  a user-provided one not declared constexpr, a virtual base, or (implicit or defaulted) a base's or member's such; else nil."
+  ([id] (cx-dtor-not-constexpr id #{}))
+  ([id seen]
+   (let [c (abi/cls id) d (some-> (:dtor c) fnd)]
+     (when (and c (:finished c) (not (:header c)) (not (:lambda c)) (not (seen id)))
+       (cond (cx-user-fn-not-constexpr? d) (str "'" (:name c) "' has a destructor not declared 'constexpr'")
+             (some :virtual (:bases c)) (str "'" (:name c) "' has a virtual base")
+             :else (some #(when (cx-dtor-not-constexpr % (conj seen id)) (str "subobject of class '" (:name (abi/cls %)) "' has a non-'constexpr' destructor"))
+                         (class-like-members id)))))))
+
+(defn- cx-defaulted-not-constexpr
+  "cpp-sweep (the checker): why the special member `f` of the class `id`, defaulted on its first declaration, would not be
+  constexpr implicitly, or nil (constexpr, or not known surely): a destructor (C++20) by cx-dtor-not-constexpr; a default
+  constructor by a virtual base, a base's or member's default constructor user-provided and not constexpr, or before C++20 a
+  non-static data member of scalar type without a default member initializer ([dcl.constexpr]/4.5 of C++17: every member
+  initialized)."
+  [id f]
+  (let [c (abi/cls id)]
+    (case (:kind f)
+      :dtor (when (>= (long *cxx-year*) 20) (cx-dtor-not-constexpr id))
+      :ctor (when (empty? (:ps (:ty f)))
+              (or (when (some :virtual (:bases c)) (str "'" (:name c) "' has a virtual base"))
+                  (some (fn [m] (let [mc (abi/cls m)
+                                      dc (some #(let [g (fnd %)] (when (empty? (:ps (:ty g))) g)) (:ctors mc))]
+                                  (when (and mc (not (:header mc)) (cx-user-fn-not-constexpr? dc) (empty? (:ctor-tmpls mc)))
+                                    (str "defaulted constructor calls non-'constexpr' '" (:name dc) "'"))))
+                        (class-like-members id))
+                  (when (< (long *cxx-year*) 20)
+                    (some (fn [fl] (let [t (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))]
+                                     (when (and (not (:static fl)) (not (:init fl)) (string? (:name fl)) (seq (:name fl)) (abi/scalar? (abi/unq t)))
+                                       (str "defaulted default constructor does not initialize '" (:name fl) "'"))))
+                          (:fields c)))))
+      nil)))
+
+(defn cx-non-literal
+  "cpp-sweep (the checker): the reason the type `t` is surely no literal type ([basic.types.general]/10 of C++11-C++23), in
+  GCC's words, or nil (literal, or not known surely). A class: a destructor not trivial (before C++20; since, a user-provided
+  one not constexpr), or not an aggregate with user-declared constructors none of which is constexpr and not a copy or move
+  constructor (a constructor template, an inheriting constructor or a defaulted default constructor unsure), or a base or a
+  non-static data member of a non-literal or volatile type; a union, a closure, a header's class and an incomplete one unsure.
+  As g++ 15.2 judges it (probes by hand: a class without user-declared constructors is literal by its implicit default
+  constructor, private members, default member initializers or virtual functions notwithstanding)."
+  ([t] (cx-non-literal t #{}))
+  ([t seen]
+   (let [t (abi/unq t)]
+     (cond
+       (abi/arr? t) (cx-non-literal (:of t) seen)
+       (not (abi/class? t)) nil
+       :else
+       (let [id (:id t) c (abi/cls id) nm (:name c)]
+         (when (and c (:finished c) (string? nm) (not (:lambda c)) (not (:header c)) (not (:union c)) (not (seen id)))
+           (let [seen (conj seen id)
+                 d (some-> (:dtor c) fnd)
+                 user-ctors (remove :implicit (map fnd (:ctors c)))]
+             (cond
+               (and (< (long *cxx-year*) 20) (not (trivial-dtor? id)))
+               (str "'" nm "' has a non-trivial destructor")
+               (and (>= (long *cxx-year*) 20) d (not (:implicit d)) (not (:defaulted d)) (not (:constexpr d)))
+               (str "'" nm "' does not have 'constexpr' destructor")
+               (and (seq user-ctors) (empty? (:ctor-tmpls c)) (empty? (:inherits-ctors c)) (not (:cx-ctor-dropped c))
+                    (not (aggregate? t))
+                    (not-any? #(or (and (:defaulted %) (empty? (:ps (:ty %))))
+                                   (and (:constexpr %) (not (copy-ctor? % id)) (not (move-ctor? % id))))
+                              user-ctors))
+               (str "'" nm "' is not an aggregate, does not have a trivial default constructor, and has no 'constexpr' constructor that is not a copy or move constructor")
+               :else
+               (or (some (fn [b] (when (cx-non-literal {:k :class :id (:cls b)} seen)
+                                   (str "base class '" (:name (abi/cls (:cls b))) "' of '" nm "' is non-literal")))
+                         (:bases c))
+                   (some (fn [fl] (when-not (:static fl)
+                                    (cond (:v (:ty fl)) (str "non-static data member '" nm "::" (:name fl) "' has volatile type")
+                                          (cx-non-literal (:ty fl) seen) (str "non-static data member '" nm "::" (:name fl) "' has non-literal type"))))
+                         (:fields c)))))))))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Constant integers (enumerators, array bounds, case labels)
 
@@ -4268,7 +4386,11 @@
        ;; (CP378 (a): class objects: `this`, an address, a prvalue object, a value-initialized scalar)
        :this (ce-res (or (::this env) (not-constant "this outside a member's evaluation")))
        :addr (or (when *ce-gaddr* (ce-static-addr (:e e) env)) (ce-lv (:e e) env))
-       :temp-obj (ce-init (:ty e) (:init e) env)
+       ;; (cpp-sweep, the checker: a temporary of a type surely not literal, GCC's "temporary of non-literal type 'T' in a
+       ;; constant expression" in every standard (g++ 15.2 by hand), at the evaluation's position: cpp0x/constexpr-friend.C)
+       :temp-obj (do (when (and (checking?) (abi/class? (abi/unq (:ty e))) (cx-non-literal (:ty e)))
+                       (ub! e "temporary of non-literal type '" (:name (abi/cls (:id (abi/unq (:ty e))))) "' in a constant expression"))
+                     (ce-init (:ty e) (:init e) env))
        :zero-val (if (abi/class? (abi/unq t)) (ce-init t {:i :zero} env) 0)
        ;; (cpp-ce2, the checker: a discarded-value conversion to void, [expr.static.cast]/6: the operand evaluated, a glvalue's
        ;; object not read; a pseudo-destructor call of a scalar, [expr.call]/5, ends its object's lifetime, [basic.life]/1.4)
@@ -4408,6 +4530,13 @@
                         :normal 0
                         (not-constant "a jump out of a statement expression"))))
        :load (let [x (:e e)
+                   ;; (cpp-sweep, the checker: C++11's [expr.const]/2, an lvalue-to-rvalue conversion of a mutable subobject is
+                   ;; no core constant expression (C++14 allows one whose object began its lifetime within the evaluation):
+                   ;; GCC's "mutable 'A::m' is not usable in a constant expression" at the read, cpp0x/constexpr-mutable3.C)
+                   _ (when (and (checking?) (= 11 (long *cxx-year*)) (= :field (:op x)))
+                       (let [fl (get-in (abi/cls (:cls x)) [:fields (:i x)])]
+                         (when (:mutable fl)
+                           (ub! x "mutable '" (:name (abi/cls (:cls x))) "::" (:name fl) "' is not usable in a constant expression"))))
                    ;; (cpp-s4: an element of a local constant array, `__found[__i]` of libstdc++'s __find_uniq_type_in_pack,
                    ;; the array a vector of its elements' values in `env`)
                    ax (when (and (= :deref (:op x)) (= :ptradd (:op (:e x))) (= "+" (:o (:e x))) (= :decay (:op (:p (:e x))))
@@ -4521,6 +4650,19 @@
                  (if *ce-in-call*
                    (ub! e "call to non-'constexpr' function '" (:name f) "'")
                    (ce-top-sure! "call to non-constexpr function '" (:name f) "'")))
+               ;; (cpp-sweep, the checker: C++11's [dcl.constexpr]/8 under -pedantic-errors, a constexpr non-static member function
+               ;; of a class surely not literal is no constexpr function: GCC's "call to non-'constexpr' function" at the call, and
+               ;; for a class template's specialization (a plain class's member is reported at its class, declare-class!) its
+               ;; explanation "enclosing class of 'constexpr' non-static member function ... is not a literal type" at the member:
+               ;; cpp0x/constexpr-diag1.C's A<B>().f())
+               (when (and (checking?) *pedantic-errors* (= 11 (long *cxx-year*)) (:constexpr f) (= :method (:kind f)) (not (:static f))
+                          (:cls f) (cx-non-literal {:k :class :id (:cls f)}))
+                 (when (and *on-refusal* (not (cx-plain-class? (:cls f))) (:node f) (not (header-node? (:node f))) (not (:cx-c11-explained f)))
+                   (upd-fn! (:id f) assoc :cx-c11-explained true)
+                   (*on-refusal* (ex-info (str "codegen: enclosing class of 'constexpr' non-static member function '" (:name f) "' is not a literal type")
+                                          {:codegen/refused :constexpr :cx/node (:node f)})
+                                 (:node f)))
+                 (ub! e "call to non-'constexpr' function '" (:name f) "'"))
                ;; (a constexpr member function of an empty class, its object nothing it can read: evaluated without it,
                ;; integral_constant's operator value_type() of `__is_invocable<...>{}`; CP332 (a))
                ;; (CP378 (a): another's on its object, `this` the object's location; a virtual call is not evaluated)
@@ -4692,6 +4834,10 @@
                                  arr? (let [xs (mapv el (:items init))]
                                         (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
                                  (and (abi/arr? at) (= :string (:i init))) (ce-init (:ty v) init @env)
+                                 ;; (cpp-sweep, the checker: a local array of class objects from a list, ce-init's, destroyed at
+                                 ;; the block's end below: cpp2a/constexpr-dtor3.C's f5)
+                                 (and (checking?) (abi/arr? at) (= :list (:i init)) (:n at) (abi/class? (abi/unq (:of at))))
+                                 (ce-init (:ty v) init @env)
                                  (#{:expr :zero :none} (:i init)) (if (and (abi/class? at) (not= :expr (:i init)))
                                                                     (ce-init (:ty v) init @env)
                                                                     ;; (h-cpp-consteval, the checker: a scalar default-initialized,
@@ -5267,6 +5413,10 @@
                   ;; basic_string::max_size()'s `_Alloc_traits::max_size(_M_get_allocator())`, `this` outside a member's evaluation,
                   ;; clang's call of _M_get_allocator() const, folded before; by value, an empty argument nothing reads, as before)
                   (let [pt (:ty (var* pid)) u (abi/unq (abi/non-ref pt))]
+                    ;; (cpp-sweep, the checker: a parameter by value of a type surely not literal, its object a temporary of
+                    ;; non-literal type, GCC's error at the argument: cpp0x/constexpr-diag1.C's f(B()))
+                    (when (and (checking?) (not (abi/ref? pt)) (abi/class? u) (cx-non-literal u))
+                      (ub! (if (map? (:e i)) (:e i) i) "temporary of non-literal type '" (:name (abi/cls (:id u))) "' in a constant expression"))
                     [pid (let [c (atom (if (and (abi/class? u) (abi/empty-class? (:id u)) (or (checking?) (not (abi/ref? pt))))
                                         ::empty
                                         (ce-store pt (ce-init pt i env))))]
@@ -11314,6 +11464,21 @@
         _ (incomplete-var! n ty)
         _ (cx-void-var! n ty)
         _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
+        ;; (cpp-sweep, the checker: [dcl.constexpr]/3.4 of C++14-C++20 (P2242R3 dropped it in C++23), no definition of a variable
+        ;; of non-literal type in a constexpr function's body: GCC's error "variable 'v' of non-literal type 'T' in 'constexpr'
+        ;; function only available with '-std=c++23'" at it (g++ 15.2 by hand, C++14 and C++20); a template's specialization,
+        ;; a closure's member and a header's not judged: cpp2a/constexpr-dtor3.C's t4)
+        _ (when-let [f (and (checking?) *on-refusal* (<= 14 (long *cxx-year*) 20) (= :local storage) (:fn-id ctx) (not (:lambda ctx))
+                            (not (header-node? n)) (not= "static" (:storageClass n)) (not (:tls n)) (not (:constexpr n)) (not (abi/ref? ty))
+                            (let [f (fnd (:fn-id ctx))]
+                              (when (and (:constexpr f) (not (:tinst f)) (not (:implicit f)) (:node f) (not (header-node? (:node f)))
+                                         (or (nil? (:cls f)) (cx-plain-class? (:cls f))) (or (nil? (:friend-cls f)) (cx-plain-class? (:friend-cls f))))
+                                f)))]
+            (when-let [why (cx-non-literal ty)]
+              (*on-refusal* (ex-info (str "codegen: variable '" (:name n) "' of non-literal type in '" (if (:consteval f) "consteval" "constexpr")
+                                          "' function only available with '-std=c++23' (" why ")")
+                                     {:codegen/refused :constexpr :cx/node n})
+                            n)))
         id (next-id)
         ;; (thread_local at block scope implies static, [dcl.stc]/4)
         st (if (or (= "static" (:storageClass n)) (:tls n)) :static-local storage)
@@ -12620,6 +12785,14 @@
   \"constant evaluation returns address of immediate function\") or an immediate invocation that returns one (\"immediate
   evaluation returns ...\", its callee's return statement the address), at the variable."
   [v i]
+  ;; (cpp-sweep: [dcl.constexpr]/10 (C++11-C++23 /6-/9), a constexpr variable's type a literal type: GCC's "the type 'const T'
+  ;; of 'constexpr' variable 'v' is not literal", at the variable; its initializer's evaluation still judged, as its errors are
+  ;; GCC's too: cpp0x/constexpr-diag3.C's obj)
+  (when-let [why (and (checking?) *on-refusal* (:cx-constexpr v) (not (abi/ref? (:ty v))) (cx-non-literal (:ty v)))]
+    (when (:id v) (upd-var! (:id v) assoc :cx-bad true))
+    (*on-refusal* (ex-info (str "codegen: the type of 'constexpr' variable '" (:name v) "' is not literal (" why ")")
+                           {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})
+                  nil))
   (when (and (checking?) (:cx-constexpr v) (= :expr (:i i)))
     (let [e (:e i)
           imm (immediate-address e)
@@ -12634,7 +12807,19 @@
   ;; (h-cpp-consteval: a class object's initializer too, its constructor's evaluation: [dcl.constexpr]/10's full-expression)
   (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (#{:ctor :zero-then :list :copy :expr} (:i i))
              (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v))))
-    (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])] (ce-init (:ty v) i {}))
+    (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
+           (let [o (ce-init (:ty v) i {})]
+             ;; (cpp-sweep: a constexpr variable's constant destruction, [expr.const]/7 of C++20: its destructor evaluated as
+             ;; at its end, ce-destroy-cells!: cpp2a/constexpr-dtor3.C's W1 whose ~W1 meets inline assembly)
+             (when (and (:cx-constexpr v) (map? o) (not (cx-non-literal (:ty v)))) (ce-destroy-cells! [(atom o)]))))
+         (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
+  ;; (cpp-sweep: an array of class objects with non-trivial destructors likewise, its elements destroyed in reverse order,
+  ;; [class.dtor]/14 with [expr.const]/7: cpp2a/constexpr-dtor3.C's W2 w5[3])
+  (when (and (checking?) (:cx-constexpr v) (>= (long *cxx-year*) 20) (= :list (:i i)) (abi/arr? (abi/unq (:ty v)))
+             (let [et (abi/unq (:of (abi/unq (:ty v))))] (and (abi/class? et) (not (trivial-dtor? (:id et))))))
+    (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
+           (let [o (ce-init (:ty v) i {})]
+             (when (and (vector? o) (every? map? o)) (ce-destroy-cells! (map atom (rseq o))))))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x)))))
 
 (defn- cx-immediate-eval!
@@ -12839,6 +13024,24 @@ protected:
         (upd-fn! id assoc :cx-pce r)
         r))))
 
+(defn- cx-literal-signature!
+  "cpp-sweep (the checker): [dcl.constexpr]/3 of C++11-C++20 (P2448R2 dropped it in C++23), a constexpr function's
+  parameter types and return type literal types: GCC's pedwarn -Winvalid-constexpr, an error under -pedantic-errors, at the
+  definition's name (\"invalid type for parameter N of 'constexpr' function\", \"invalid return type 'T' of 'constexpr'
+  function\"); a template's specialization not judged (it is then no constexpr function, [dcl.constexpr]/7 of C++20), nor a
+  closure's member (g++ 15.2 by hand: a declaration without a definition not judged either)."
+  [id]
+  (let [f (fnd id)]
+    (when (and (checking?) *on-refusal* *pedantic-errors* (< (long *cxx-year*) 23) (:constexpr f) (not (:consteval f))
+               (not (:tinst f)) (not (:implicit f)) (:node f) (not (header-node? (:node f)))
+               (or (nil? (:cls f)) (cx-plain-class? (:cls f))) (or (nil? (:friend-cls f)) (cx-plain-class? (:friend-cls f))))
+      (let [bad (or (first (keep-indexed (fn [i t] (when (cx-non-literal t) (str "invalid type for parameter " (inc i) " of 'constexpr' function '" (:name f) "'")))
+                                         (:ps (:ty f))))
+                    (when (and (#{:fn :method} (:kind f)) (cx-non-literal (:ret (:ty f))))
+                      (str "invalid return type of 'constexpr' function '" (:name f) "'")))]
+        (when bad
+          (*on-refusal* (ex-info (str "codegen: " bad) {:codegen/refused :constexpr :cx/node (:node f)}) (:node f)))))))
+
 (defn- cx-potential-constant!
   "The potential constant check of the constexpr function `id`'s analyzed body (above), its finding an error."
   [id]
@@ -12909,7 +13112,8 @@ protected:
                                                           {:codegen/refused :depth})
                                                  (let [n (:node f) l (:loc n)]
                                                    (if (and (map? l) (integer? (:offset l))) (assoc-in n [:range :begin] l) n)))
-                                              (try (analyze-fn! id)
+                                              (try (cx-literal-signature! id)
+                                                   (analyze-fn! id)
                                                    (cx-potential-constant! id)
                                                    (catch arbace.lang.ExceptionInfo e
                                                      (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e)))))
