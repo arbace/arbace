@@ -5977,6 +5977,42 @@
 
 (swap! checks conj immediate-addresses)
 
+;; cpp-sweep: [expr.prim.this]/2-3, `this` appears only within a non-static member function's declaration after its
+;; cv-qualifier-seq (its trailing return type, its noexcept-specifier) or body, or a default member initializer: in a static member
+;; function's or a friend function's declarator GCC's "'this' may not be used in this context", at it (cpp0x/this1.C). The main file's
+;; class members as written, the text from the declarator's name to the body (or the declaration's end), outside comments.
+(defn static-this
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        n-src (count src)
+        check! (fn [n]
+                 (let [b (get-in n [:loc :offset])
+                       body (some #(when (= "CompoundStmt" (:kind %)) %) (:inner n))
+                       e (or (get-in body [:range :begin :offset]) (some-> (get-in n [:range :end :offset]) long inc))]
+                   (when (and b e (= main (get-in n [:loc :file] main)) (= main (get-in n [:range :begin :file] main)) (< (long b) (long e) n-src))
+                     (let [t (subs src (long b) (long e))
+                           t (str/replace t #"//[^\n]*|/\*(?s:.*?)\*/" (fn [m] (apply str (repeat (count m) \space))))
+                           m (re-matcher #"\bthis\b" t)]
+                       (when (.find m)
+                         (let [[l c] (line-col starts (+ (long b) (.start m)))]
+                           (.add out {:line l :col c :kind :error :rule :this :msg "'this' may not be used in this context"})))))))
+        walk (fn w [nodes]
+               (doseq [n nodes :when (map? n)]
+                 (case (:kind n)
+                   ("NamespaceDecl" "LinkageSpecDecl" "ClassTemplateDecl") (w (:inner n))
+                   "CXXRecordDecl" (doseq [m (:inner n)]
+                                     (case (:kind m)
+                                       "CXXMethodDecl" (when (= "static" (:storageClass m)) (check! m))
+                                       "FunctionTemplateDecl" (doseq [f (:inner m) :when (and (= "CXXMethodDecl" (:kind f)) (= "static" (:storageClass f)))] (check! f))
+                                       "FriendDecl" (doseq [f (:inner m) :when (#{"FunctionDecl" "CXXMethodDecl"} (:kind f))] (check! f))
+                                       "CXXRecordDecl" (w [m])
+                                       nil))
+                   nil)))]
+    (walk (remove :_hdr (:nodes u)))
+    (vec (distinct out))))
+
+(swap! checks conj static-this)
+
 ;; A constexpr (or consteval) function's body before C++23 ([dcl.constexpr]/3 of C++11 to C++20, P2242 lifting the last of it): no
 ;; definition of a variable of static or thread storage duration ("'b' defined 'static' in 'constexpr' function only available with
 ;; '-std=c++23'"), no goto statement ("'goto' in 'constexpr' function only available with '-std=c++23'"); before C++20 (P1002) no
