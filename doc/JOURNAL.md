@@ -21416,3 +21416,29 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24: py-design-1124: Python eval's by-design classes tabled; 20 C-pickle skips reclassed; _functools.partial in Go (WIP)
+
+Branch `py-design-1124` from mac/next 903ef1ab2 with mac/train-3 bc5117f08 merged (the trains' runtime: py-accel, the Mac's 535,
+537, 545, 551). The eval cell's :kind :design classes (train-3's matrix, design 1,332): c-accelerators 1,092 (test_datetime 553,
+test_decimal 346 and test_types 129 rows recorded before 521: py-accel built _datetime and _decimal, they leave at train 3's
+record; left _pickle's C classes 56 and 8 others), extension-modules 66 (recorded before py-capi-1122, whose run passes 50 of
+them; the rest cpython_only skips and subinterpreters), finalization 65 (the Mac's 551b, n/a), skipped-by-test 42 (mostly
+utf-8 mode and _testbuffer, the Mac's 553; ctypes, _elementtree and _zoneinfo, py-accel's), ssl-go-tls 19 (552), coroutines
+18 (py-core), child-is-pyi 10 and subinterpreters 3 (553), pyio 7, pyio-size-type 5, pyio-buffered 2 and pickle-core 2 (545's
+native _io: the next record).
+- Reclassed (no run): the 20 test_pickle C-class methods that skip as CPython's own run does (numpy 3, frozendict 6, the cpu
+  resource 3) or as support.cpython_only (8) left :c-accelerators' :tests for :skipped-by-both and :cpython-only (the user's n/a
+  decisions take such skips whatever the pickler). bin/reap --record: Python eval design 1,332 -> 1,312, n/a 4,816 -> 4,836.
+- Built (not yet proved on Lib/test): _functools.partial, Placeholder and _PlaceholderType ported from CPython 3.14.10's
+  Modules/_functoolsmodule.c (partial_new's flattening and Placeholder merge, partial_call, partial_repr with Py_ReprEnter,
+  partial_reduce, partial_setstate's checks, READONLY func/args/keywords, __dict__ that cannot be deleted, __get__, __class_getitem__)
+  into go/arbace/py/builtins_functools. A probe of 25 behaviours (.tmp/p/partial.py) printed CPython 3.14.10's output but for a
+  subclass's repr; the fix (partial in reprOfInstance, __reduce__ and __setstate__ objectDescr) is in the printed Go, its read
+  back into the forms stopped at the coordinator's wrap-up (the worktree's .tmp/NEXT.md). Rows it should move: TestPartialC's and
+  TestPartialCSubclass's test_attributes_unwritable (c-accelerators 2), the C partial's rows of :partial-python and
+  :functools-core (deferred) to be judged.
+- The AOT module built without printing the C world again: its cf2g output copied from py-accel-w's module, whose nodes keys
+  are this tree's (.tmp/p/aotmod.sh).
+Proposal for the coordinator: _pickle.c (and _json.c, which already passes as a thin Go module) built into the C world as
+521's _datetime, by the C world's owner (py-accel): the remaining ~36 failing C-pickle rows.
