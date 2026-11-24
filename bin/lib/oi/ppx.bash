@@ -15,6 +15,8 @@
 #   bin/oi ppx pp [DRIVER...]  (queue 547) the units of test/ocaml/ppx-pp.tsv run through their ppx driver on oi as dune runs it, the
 #                      texts kept in .tmp/oi/ppx/pp/PKG/FILE (OI_PPX_PP), which the staging gives a unit its dune file preprocesses
 #                      by `(pps ...)`
+#   bin/oi ppx jst-config  (queue 547) jst-config's config.h for oi's C target (discover.ml ported), .tmp/oi/ppx/jst-config
+#   bin/oi ppx expect  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its negative control
 
 PPX=$OI_DIR/ppx
 PPX_ROWS=$root/test/ocaml/ppx-programs.tsv
@@ -128,6 +130,49 @@ cmd_ppx_jst_config() {
   echo "oi: ppx jst-config: $d/config.h"; cat "$d/config.h"
 }
 
+# ppx_expect_judge DIR RESULT: re's expect tests judged by their own [%expect] blocks, as dune's runtest does: the runner's status 0
+# and no .corrected file under the source tree DIR (ppx_expect writes FILE.corrected beside a test whose output differs); "pass" or
+# the reason on stdout
+ppx_expect_judge() {
+  local tree=$1 res=$2 st c
+  st=$(cut -f2 <<< "$res"); c=$(cd "$tree" && find . -name '*.corrected' | LC_ALL=C sort | tr '\n' ' ')
+  if [ "$st" = 0 ] && [ -z "$c" ]; then echo pass; else echo "fail: status $st, corrected: ${c:-none}"; fi
+}
+
+# cmd_ppx_expect (queue 547, S3): re's lib_test/expect on oi (the program expect_tests of ppx-programs.tsv: its 27 files rewritten by
+# the ppx_expect driver on oi, bin/oi ppx pp expect_driver), judged by the tests' own expected output (ppx_expect_judge); its negative
+# control: the same program with one [%expect] of test_re.ml altered (a line added to its first block, the file rewritten again by
+# the driver into a pp tree of its own) must fail
+cmd_ppx_expect() {
+  local tree=$PPX/work/re res v
+  [ -s "$OI_PPX_PP/re/lib_test/expect/test_re.ml" ] || die "ppx expect: no rewritten tests (bin/oi ppx pp expect_driver)"
+  find "$tree" -name '*.corrected' -delete 2> /dev/null || true
+  res=$(ppx_run expect_tests); echo "$res"; v=$(ppx_expect_judge "$tree" "$res"); echo "expect_tests: $v"
+  # the control
+  local cpp=$PPX/pp-control ctree=$PPX/work/re-control f=lib_test/expect/test_re.ml cv
+  rm -rf "$cpp" "$ctree"; mkdir -p "$cpp"; cp -a "$OI_PPX_PP/." "$cpp/"; mkdir -p "$ctree"; cp -a "$OPAM/re/." "$ctree/"
+  awk '!done && /\[%expect \{\|/ { sub(/\[%expect \{\|/, "[%expect {| CONTROL"); done = 1 } { print }' "$OPAM/re/$f" > "$ctree/$f"
+  cmp -s "$OPAM/re/$f" "$ctree/$f" && die "ppx expect: the control's alteration changed nothing"
+  ppx_prepare expect_driver
+  (cd "$ctree" && run_redirected "$PD_ENV" "$cpp/control.log" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $PD_TL $(cat "$PD/units.list") -- \
+    --cookie 'library-name="re_tests"' --cookie 'inline_tests="enabled"' -corrected-suffix .ppx-corrected -diff-cmd - -o "$cpp/re/$f" --impl "$f") \
+    || die "ppx expect: the control's rewrite failed: $(head -c 300 "$cpp/control.log")"
+  local cres; cres=$(OI_PPX_PP=$cpp ppx_run_tree expect_tests "$ctree"); echo "$cres"
+  cv=$(ppx_expect_judge "$ctree" "$cres")
+  if [ "$cv" = pass ]; then echo "control (test_re.ml's first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
+  else echo "control (test_re.ml's first [%expect] altered): $cv, as a control must"; fi
+  echo "oi: ppx expect: re/expect $v"
+  [ "$v" = pass ]
+}
+
+# ppx_run_tree ID TREE: ppx_run with the row's source tree (@PPX@/work/re in its ARGS) replaced by TREE
+ppx_run_tree() {
+  local row id flags incs args env base units
+  row=$(ppx_row "$1" | sed "s|$PPX/work/re|$2|g"); [ -n "$row" ] || die "ppx: no program $1 in $PPX_ROWS"
+  IFS=$'\037' read -r id flags incs args env base units <<< "$(tr '\t' '\037' <<< "$row")"
+  suite_oi_one "$id" "$flags" "$incs" "$args" "$env" "$base" "$units"
+}
+
 # ppx_run ID: the program run on oi as the suite runs one (its run directory $S/run/opam/PKG/ID); the result line on stdout
 ppx_run() {
   local row; row=$(ppx_row "$1"); [ -n "$row" ] || die "ppx: no program $1 in $PPX_ROWS"
@@ -217,12 +262,13 @@ cmd_ppx_check() {
 }
 
 cmd_ppx() {
-  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config"
+  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|expect"
   shift
   case $verb in
     gen) cmd_ppx_gen "$@" ;;
     pp) ppx_env; cmd_ppx_pp "$@" ;;
     jst-config) ppx_env; cmd_ppx_jst_config ;;
+    expect) ppx_env; cmd_ppx_expect ;;
     run) local id=${1:-}; [ -n "$id" ] || die "usage: bin/oi ppx run ID"; shift; ppx_env "$@"; ppx_run "$id" ;;
     check) cmd_ppx_check "$@" ;;
     *) die "unknown ppx verb $verb" ;;
