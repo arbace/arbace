@@ -62,7 +62,7 @@
   [f x parent]
   (cond
     (map? x) (do (when (:kind x) (f x parent))
-                 (binding [*params* (if-let [ps (seq (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (when (vector? (:inner x)) (:inner x))))]
+                 (binding [*params* (if-let [ps (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) (when (vector? (:inner x)) (:inner x))))]
                                       (into *params* ps) *params*)]
                    (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
                      (walk-nodes f v (if (:kind x) x parent)))))
@@ -125,7 +125,7 @@
               (cond
                 (map? x) (let [levels (if (contains? block-kinds (:kind x)) (cons (java.util.HashSet.) levels) levels)]
                            (when (:kind x) (f x parent levels))
-                           (binding [*params* (if-let [ps (seq (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (when (vector? (:inner x)) (:inner x))))]
+                           (binding [*params* (if-let [ps (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) (when (vector? (:inner x)) (:inner x))))]
                                                 (into *params* ps) *params*)]
                              (doseq [[k v] x :when (and (not= k :_ent) (or (map? v) (vector? v) (seq? v)))]
                                (w v (if (:kind x) x parent) levels))))
@@ -1096,7 +1096,7 @@
               (case (:kind n)
                 "LambdaBody" (fn-body! (:body n) #{})
                 ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
-                (fn-body! (body-of n) (set (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner n))))
+                (fn-body! (body-of n) (set (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) (:inner n))))
                 nil))]
     (letfn [(decls! [ns]
               (doseq [n ns]
@@ -3881,7 +3881,7 @@
                       tmpl? (or tmpl? (some #(and (= "ParmVarDecl" (:kind %)) (re-find #"\bauto\b" (str (get-in % [:type :qualType])))) (:inner f)))]
                 :when (and (= "FunctionDecl" (:kind f)) (not (:_consteval f))
                            (or (not tmpl?) (some (fn [[nm o]] (and (= nm (:name f)) (or (< (long o) b) (> (long o) e)))) refs)))
-                :let [params (set (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner f)))]]
+                :let [params (set (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) (:inner f)))]]
           (walk-nodes (fn [c _]
                         (when (= "CallExpr" (:kind c))
                           (when-let [h (get fns (get-in (some-> (first (:inner c)) strip) [:referencedDecl :name]))]
@@ -4123,7 +4123,7 @@
          (when (= "CallExpr" (:kind c))
            (when-let [f (get fns (callee c))]
              (when-let [body (and (inline? f) (first (filter #(= "CompoundStmt" (:kind %)) (:inner f))))]
-               (let [ps (vec (keep #(when (= "ParmVarDecl" (:kind %)) (:name %)) (:inner f)))
+               (let [ps (vec (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) (:inner f)))
                      args (vec (rest (:inner c)))
                      lit (fn [a] (let [a (strip a)] (case (:kind a) "IntegerLiteral" (try (Long/parseLong (str (:value a))) (catch Exception _ nil)) "StringLiteral" :str nil)))]
                  (when (and (>= (count args) (count ps)) (every? some? (map lit args)))
@@ -7662,3 +7662,45 @@
     (vec out)))
 
 (swap! checks conj anon-union-captures)
+
+;; cpp-singles (2026-11-24): [class.static.mfct]/2 with [class.virtual]/2: a static member function of a derived class with the name
+;; and parameter-type-list of a virtual function of a base would override it, and a static member function is not virtual: GCC's
+;; "'static void B::foo5()' cannot be declared", at it, and "since 'virtual void A::foo5()' declared in base class", an error at the
+;; base's function too; inherit/pure1.C. Classes of the main file named by a plain name, the bases followed through them; a
+;; template's not judged.
+
+(defn static-overrides
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :static-override :msg msg}))))
+        classes (java.util.HashMap.)
+        _ (walk-nodes (fn [n parent]
+                        (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n) (string? (:name n)) (seq (:name n))
+                                   (not (and parent (#{"ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl"} (:kind parent))))
+                                   (mine-at n main))
+                          (if (.containsKey classes (:name n)) (.put classes (:name n) ::ambiguous) (.put classes (:name n) n))))
+                      (:nodes u) nil)
+        params (fn [m] (let [^String qt (str (get-in m [:type :qualType])) i (.indexOf qt "(")]
+                         (when (pos? i)
+                           (loop [j i d 0]
+                             (when (< j (.length qt))
+                               (let [c (.charAt qt j) d (case c \( (inc d) \) (dec d) d)]
+                                 (if (zero? d) (str/replace (subs qt i (inc j)) #"\s+" "") (recur (inc j) d))))))))
+        virtuals (fn virtuals [n seen]
+                   (mapcat (fn [b] (let [bn (str/trim (str (get-in b [:type :qualType])))
+                                         c (.get classes bn)]
+                                     (when (and (map? c) (re-matches #"[A-Za-z_]\w*" bn) (not (contains? seen bn)))
+                                       (concat (filter #(and (= "CXXMethodDecl" (:kind %)) (:virtual %)) (:inner c))
+                                               (virtuals c (conj seen bn))))))
+                           (:bases n)))]
+    (doseq [[_ n] classes :when (map? n) :when (seq (:bases n))
+            :let [vs (virtuals n #{(:name n)})]
+            :when (seq vs)
+            m (:inner n) :when (and (= "CXXMethodDecl" (:kind m)) (= "static" (:storageClass m)) (string? (:name m)))
+            :let [p (params m) v (first (filter #(and (= (:name %) (:name m)) (= (params %) p)) vs))]
+            :when (and p v)]
+      (report! m (str "'static " (:name n) "::" (:name m) "' cannot be declared"))
+      (report! v (str "since 'virtual " (:name m) "' declared in base class")))
+    (vec out)))
+
+(swap! checks conj static-overrides)
