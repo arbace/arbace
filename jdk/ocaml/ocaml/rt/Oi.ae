@@ -1,0 +1,814 @@
+;; The embedded oi (queue 544, the user's decision (a) of 2026-11-23; doc/ocaml/OCAML-SURVEY.md, "As built: queue 544"): an
+;; interpreter of OCaml's Lambda in the runtime itself, so that a program compiled ahead of time (the compiled level: j2g, Go) loads
+;; a Lambda text nobody translated ahead, a toplevel phrase's, as a plugin at run time. It reads oi's unit forms (the text
+;; caml_oi_dynlink_parse is given: tools/ocdump's Lambda, test/ocaml/toplevel/topeval.ml's printer), compiles them into nodes
+;; (ONode: each variable a slot of its function's frame) and evaluates them over the runtime's own values, so that the plugin's
+;; functions are closures the translated code calls (OiFn), its globals the program's module blocks and its primitives and
+;; externals the runtime's methods the translator (arbace.o2j) calls for the same names. oi's own evaluator (go/arbace/oi/compile.ae)
+;; is the model; the primitives' names and their meaning are o2j's prim-value's.
+;;
+;; The loader's entry (ExtCore's caml_oi_dynlink_parse, _link, _init): Oi/parse gives [NAME DEPS REFS INIT nil], INIT a Runnable that
+;; runs the unit's code (its setglobal stores the unit's module block in Oi/units, which the loaders' "global" answers). An external is
+;; called through the program's loader ("ext-index" a name's index and arity, "ext-call" the call: the compiled level's main class,
+;; arbace.o2j's oi-ext-methods; the light level's runner, test/ocaml/o2j/run.ae), else through the C API as a translated unit's
+;; (CApi/call).
+;;
+;; Not interpreted: tupled functions (as o2j), the debugging events (dropped: no backtrace slots), the static blocks of o2j's
+;; const-arg (an immutable block of constants is made at each evaluation, as ocamlc's code makes it).
+
+(in-ns 'ocaml.rt)
+
+(import '(java.util ArrayList HashMap HashSet))
+
+(defclass ^:public ^:final Oi
+
+  ;; the module blocks of the units interpreted code defined (setglobal)
+  (field ^:public ^:static ^:final ^HashMap units (HashMap.))
+  (method ^:public ^:static global [^String n] (.get units n))
+  (method ^:public ^:static reset ^void [] (.clear units))
+
+  ;; ---- the reader: the subset of Clojure's syntax oi's forms use (lists, vectors, maps, strings, keywords, symbols, integers)
+
+  (method ^:static delim ^boolean [^int c]
+    (or (== c 32) (== c 9) (== c 10) (== c 13) (== c 44) (== c 40) (== c 41) (== c 91) (== c 93) (== c 123) (== c 125)
+        (== c 34) (== c 59)))
+
+  (method ^:static skip ^void [^String s ^int/1 p]
+    (let [n (.length s)]
+      (loop []
+        (when (< (aget p 0) n)
+          (let [c (int (.charAt s (aget p 0)))]
+            (cond
+              (or (== c 32) (== c 9) (== c 10) (== c 13) (== c 44)) (do (aset p 0 (unchecked-inc-int (aget p 0))) (recur))
+              (== c 59) (do (loop [] (when (and (< (aget p 0) n) (not (== (int (.charAt s (aget p 0))) 10)))
+                                       (aset p 0 (unchecked-inc-int (aget p 0))) (recur)))
+                            (recur))
+              :else nil))))))
+
+  (method ^:public ^:static read [^String s ^int/1 p]
+    (Oi/skip s p)
+    (when (>= (aget p 0) (.length s)) (throw (Rt/internal "oi: the Lambda text ends early")))
+    (let [c (int (.charAt s (aget p 0)))]
+      (cond (== c 40) (Oi/readSeq s p 41 0)
+            (== c 91) (Oi/readSeq s p 93 1)
+            (== c 123) (Oi/readSeq s p 125 2)
+            (== c 34) (Oi/readStr s p)
+            :else (Oi/readAtom s p))))
+
+  (method ^:static readSeq [^String s ^int/1 p ^int close ^int kind]
+    (aset p 0 (unchecked-inc-int (aget p 0)))
+    (let [l (ArrayList.)]
+      (loop []
+        (Oi/skip s p)
+        (when (>= (aget p 0) (.length s)) (throw (Rt/internal "oi: the Lambda text ends in a list")))
+        (if (== (int (.charAt s (aget p 0))) close)
+          (do (aset p 0 (unchecked-inc-int (aget p 0)))
+              (OiList. (.toArray l) kind))
+          (do (.add l (Oi/read s p))
+              (recur))))))
+
+  (method ^:static readStr [^String s ^int/1 p]
+    (let [b (StringBuilder.) n (.length s)]
+      (aset p 0 (unchecked-inc-int (aget p 0)))
+      (loop []
+        (when (>= (aget p 0) n) (throw (Rt/internal "oi: the Lambda text ends in a string")))
+        (let [c (int (.charAt s (aget p 0)))]
+          (aset p 0 (unchecked-inc-int (aget p 0)))
+          (cond
+            (== c 34) (.toString b)
+            (== c 92) (let [e (int (.charAt s (aget p 0)))]
+                        (aset p 0 (unchecked-inc-int (aget p 0)))
+                        (cond (== e 110) (.append b (char 10))
+                              (== e 116) (.append b (char 9))
+                              (== e 114) (.append b (char 13))
+                              (== e 98) (.append b (char 8))
+                              (== e 102) (.append b (char 12))
+                              (== e 117) (let [i (aget p 0)]
+                                           (aset p 0 (unchecked-add-int i 4))
+                                           (.append b (unchecked-char (Integer/parseInt (.substring s i (unchecked-add-int i 4)) 16))))
+                              :else (.append b (unchecked-char e)))
+                        (recur))
+            :else (do (.append b (unchecked-char c)) (recur)))))))
+
+  (method ^:static readAtom [^String s ^int/1 p]
+    (let [i (aget p 0) n (.length s)]
+      (loop []
+        (when (and (< (aget p 0) n) (not (Oi/delim (int (.charAt s (aget p 0))))))
+          (aset p 0 (unchecked-inc-int (aget p 0)))
+          (recur)))
+      (let [t (.substring s i (aget p 0))
+            c (if (> (.length t) 0) (int (.charAt t 0)) 0)
+            d (if (> (.length t) 1) (int (.charAt t 1)) 0)]
+        (when (== (.length t) 0) (throw (Rt/internal (java-str "oi: unexpected character in the Lambda text at " i))))
+        (cond
+          (.equals t "nil") nil
+          (or (and (>= c 48) (<= c 57)) (and (== c 45) (>= d 48) (<= d 57)))
+          (try (Long/valueOf (Long/parseLong t)) (catch NumberFormatException _ (OiSym. t)))
+          :else (OiSym. t)))))
+
+  ;; ---- the forms' parts
+
+  ;; the head of list x, its symbol's name, else nil
+  (method ^:static hd ^String [x]
+    (if (and (instance? OiList x) (> (alength (.-xs (cast OiList x))) 0) (instance? OiSym (aget (.-xs (cast OiList x)) 0)))
+      (.-n (cast OiSym (aget (.-xs (cast OiList x)) 0)))
+      nil))
+
+  ;; a node's fields: list x less its head and a trailing map
+  (method ^:static fields ^Object/1 [x]
+    (let [xs (.-xs (cast OiList x))
+          n (alength xs)
+          m (if (and (> n 1) (instance? OiList (aget xs (unchecked-dec-int n))) (== (.-kind (cast OiList (aget xs (unchecked-dec-int n)))) 2))
+              (unchecked-dec-int n) n)]
+      (java.util.Arrays/copyOfRange xs 1 m)))
+
+  (method ^:static elems ^Object/1 [x] (if (nil? x) (new Object/1 0) (.-xs (cast OiList x))))
+
+  (method ^:static str ^String [x]
+    (cond (instance? String x) (cast String x)
+          (instance? OiSym x) (.-n (cast OiSym x))
+          :else (throw (Rt/internal (java-str "oi: not a name in the Lambda text: " x)))))
+
+  (method ^:static lv ^long [x]
+    (if (instance? Long x) (long (cast Long x)) (Long/parseLong (Oi/str x))))
+
+  ;; a global's unit (o2j's global-name): X! and X/n are X
+  (method ^:static globalName ^String [^String s]
+    (let [a (if (.endsWith s "!") (.substring s 0 (unchecked-dec-int (.length s))) s)
+          i (.indexOf a "/")]
+      (if (>= i 0) (.substring a 0 i) a)))
+
+  (method ^:static predef [^String g]
+    (switch g
+      "Out_of_memory" Rt/Out_of_memory "Sys_error" Rt/Sys_error "Failure" Rt/Failure "Invalid_argument" Rt/Invalid_argument
+      "End_of_file" Rt/End_of_file "Division_by_zero" Rt/Division_by_zero "Not_found" Rt/Not_found "Match_failure" Rt/Match_failure
+      "Stack_overflow" Rt/Stack_overflow "Sys_blocked_io" Rt/Sys_blocked_io "Assert_failure" Rt/Assert_failure
+      "Undefined_recursive_module" Rt/Undefined_recursive_module
+      nil))
+
+  ;; ---- constants (o2j's const-init)
+
+  ;; an immstring's payload (a string, its bytes UTF-8, or the bytes' values) as an OCaml string
+  (method ^:static bytesOf [x]
+    (if (instance? OiList x)
+      (let [xs (.-xs (cast OiList x)) n (alength xs) b (new byte/1 n)]
+        (loop [^int i 0] (when (< i n) (aset b i (unchecked-byte (Oi/lv (aget xs i)))) (recur (unchecked-inc-int i))))
+        b)
+      (Rt/ofUtf8 (Oi/str x))))
+
+  (method ^:static pfloat ^double [^String t]
+    (let [t (.replace t "_" "")
+          h (or (.startsWith t "0x") (.startsWith t "0X") (.startsWith t "-0x") (.startsWith t "-0X"))
+          t (if (and h (< (.indexOf t "p") 0) (< (.indexOf t "P") 0)) (java-str t "p0") t)]
+      (Double/parseDouble t)))
+
+  (method ^:static constant [c]
+    (let [h (Oi/hd c) xs (Oi/fields c) a (if (> (alength xs) 0) (aget xs 0) nil)]
+      (switch h
+        "int" (Long/valueOf (Oi/lv a))
+        "char" (Long/valueOf (Oi/lv a))
+        "float" (Double/valueOf (Oi/pfloat (Oi/str a)))
+        "int32" (Integer/valueOf (unchecked-int (Oi/lv a)))
+        "int64" (I64. (Oi/lv a))
+        "nativeint" (NInt. (Oi/lv a))
+        "immstring" (Oi/bytesOf a)
+        "float-array" (let [fs (Oi/elems a) n (alength fs) d (new double/1 n)]
+                        (loop [^int i 0] (when (< i n) (aset d i (Oi/pfloat (Oi/str (aget fs i)))) (recur (unchecked-inc-int i))))
+                        d)
+        "block" (let [fs (Oi/elems (aget xs 1)) n (alength fs) o (new Object/1 n)]
+                  (loop [^int i 0] (when (< i n) (aset o i (Oi/constant (aget fs i))) (recur (unchecked-inc-int i))))
+                  (Rt/block (unchecked-int (Oi/lv a)) o))
+        (throw (Rt/internal (java-str "oi: constant " h))))))
+
+  ;; ---- compiling: the nodes' kinds
+  ;;  0 var (i its slot)                 1 const (v)                       2 apply (a the function, xs the arguments)
+  ;;  3 function (i arity, j frame, a body, is the enclosing slots of its free variables, js its own slots for them, ss their names)
+  ;;  4 let (i slot, a definition, b body)   5 letrec (is slots, xs functions, b body)   6 primitive (i op, j parameter, v, xs)
+  ;;  7 switch (a, xs the constants' cases, ys the tags', c failure)   8 stringswitch (a, ss keys, xs cases, c default)
+  ;;  9 staticraise (i number, xs)   10 staticcatch (a body, i number, is slots, b handler)   11 trywith (a, i slot, b)
+  ;; 12 if (a b c)   13 sequence (xs)   14 while (a b)   15 for (i slot, a lo, b hi, j 1 upward, c body)   16 assign (i slot, a)
+  ;; 17 send (j 1 self, a method, b object, xs)   18 and (a b)   19 or (a b)   20 global (v its unit, w its block once read)
+  ;; 21 setglobal (v, a)   22 raise (j 0 raise, 1 reraise, 2 raise_notrace; a)
+
+  (method ^:static fresh ^int [^OiCtx c]
+    (let [k (.-n c)] (set! (.-n c) (unchecked-inc-int k)) k))
+
+  (method ^:static bind ^int [^OiCtx c ^String id]
+    (let [k (Oi/fresh c)] (.put (.-slots c) id (Integer/valueOf k)) k))
+
+  (method ^:static unbind ^void [^OiCtx c ^String id old]
+    (if (nil? old) (.remove (.-slots c) id) (.put (.-slots c) id old)))
+
+  ;; a variable's slot: its function's, else a free variable's (a slot of the function, read from the enclosing one when the
+  ;; closure is made)
+  (method ^:static slot ^int [^OiCtx c ^String id]
+    (let [s (.get (.-slots c) id)]
+      (cond (some? s) (.intValue (cast Integer s))
+            (nil? (.-parent c)) (throw (Rt/internal (java-str "oi: unbound Lambda variable " id)))
+            :else (let [k (Oi/fresh c)]
+                    (.put (.-slots c) id (Integer/valueOf k))
+                    (.add (.-free c) id)
+                    (.add (.-freeSlots c) (Integer/valueOf k))
+                    k))))
+
+  (method ^:static node ^ONode [^int k ^ONode a ^ONode b ^ONode c]
+    (let [n (ONode. k)] (set! (.-a n) a) (set! (.-b n) b) (set! (.-c n) c) n))
+
+  (method ^:static nodes ^ONode/1 [^OiCtx c x]
+    (let [xs (Oi/elems x) n (alength xs) r (new ONode/1 n)]
+      (loop [^int i 0] (when (< i n) (aset r i (Oi/compile c (aget xs i))) (recur (unchecked-inc-int i))))
+      r))
+
+  (method ^:static ints ^int/1 [^ArrayList l]
+    (let [n (.size l) r (new int/1 n)]
+      (loop [^int i 0] (when (< i n) (aset r i (.intValue (cast Integer (.get l i)))) (recur (unchecked-inc-int i))))
+      r))
+
+  ;; a function node (function :curried [[ID KIND]...] RESULT BODY) in scope c: its own scope, its parameters the first slots
+  (method ^:static compileFn ^ONode [^OiCtx c x]
+    (let [xs (Oi/fields x)
+          ps (Oi/elems (aget xs 1))
+          cc (OiCtx. c)
+          n (ONode. 3)]
+      (when (.equals ":tupled" (Oi/str (aget xs 0))) (throw (Rt/internal "oi: tupled function")))
+      (loop [^int i 0] (when (< i (alength ps)) (Oi/bind cc (Oi/str (aget (Oi/elems (aget ps i)) 0))) (recur (unchecked-inc-int i))))
+      (set! (.-a n) (Oi/compile cc (aget xs 3)))
+      (Oi/markTail (.-a n))
+      (set! (.-i n) (alength ps))
+      (set! (.-j n) (.-n cc))
+      (let [m (.size (.-free cc)) is (new int/1 m) ss (new String/1 m)]
+        (loop [^int i 0]
+          (when (< i m)
+            (aset ss i (cast String (.get (.-free cc) i)))
+            (aset is i (Oi/slot c (aget ss i)))
+            (recur (unchecked-inc-int i))))
+        (set! (.-is n) is)
+        (set! (.-ss n) ss)
+        (set! (.-js n) (Oi/ints (.-freeSlots cc))))
+      n))
+
+  ;; the applications in a function body's tail position (its value's: a let's, a letrec's and a sequence's last, an if's branches, a
+  ;; switch's cases, a staticcatch's body and handler, a trywith's handler) marked tail calls (an apply's j 1)
+  (method ^:static markTail ^void [^ONode n]
+    (when (some? n)
+      (switch (.-k n)
+        2 (set! (.-j n) 1)
+        (4 5) (Oi/markTail (.-b n))
+        7 (do (Oi/markAll (.-xs n)) (Oi/markAll (.-ys n)) (Oi/markTail (.-c n)))
+        8 (do (Oi/markAll (.-xs n)) (Oi/markTail (.-c n)))
+        10 (do (Oi/markTail (.-a n)) (Oi/markTail (.-b n)))
+        11 (Oi/markTail (.-b n))
+        12 (do (Oi/markTail (.-b n)) (Oi/markTail (.-c n)))
+        13 (Oi/markTail (aget (.-xs n) (unchecked-dec-int (alength (.-xs n)))))
+        nil)))
+
+  (method ^:static markAll ^void [^ONode/1 xs]
+    (loop [^int i 0] (when (< i (alength xs)) (Oi/markTail (aget xs i)) (recur (unchecked-inc-int i)))))
+
+  (method ^:static flatten ^void [x ^ArrayList out]
+    (if (.equals "sequence" (Oi/hd x))
+      (let [xs (Oi/fields x)] (loop [^int i 0] (when (< i (alength xs)) (Oi/flatten (aget xs i) out) (recur (unchecked-inc-int i)))))
+      (.add out x)))
+
+  (method ^:public ^:static compile ^ONode [^OiCtx c x]
+    (let [h (Oi/hd x) xs (Oi/fields x)]
+      (when (nil? h) (throw (Rt/internal "oi: not a Lambda node")))
+      (switch h
+        ("var" "mutvar") (let [n (ONode. 0)] (set! (.-i n) (Oi/slot c (Oi/str (aget xs 0)))) n)
+        "const" (let [n (ONode. 1)] (set! (.-v n) (Oi/constant (aget xs 0))) n)
+        "apply" (let [n (ONode. 2)] (set! (.-a n) (Oi/compile c (aget xs 0))) (set! (.-xs n) (Oi/nodes c (aget xs 1))) n)
+        "function" (Oi/compileFn c x)
+        ("let" "mutlet")
+        (let [o (if (.equals h "let") (int 2) (int 1))
+              id (Oi/str (aget xs o))
+              n (ONode. 4)]
+          (set! (.-a n) (Oi/compile c (aget xs (unchecked-inc-int o))))
+          (let [old (.get (.-slots c) id)]
+            (set! (.-i n) (Oi/bind c id))
+            (set! (.-b n) (Oi/compile c (aget xs (unchecked-add-int o 2))))
+            (Oi/unbind c id old))
+          n)
+        "letrec"
+        (let [bs (Oi/elems (aget xs 0))
+              m (alength bs)
+              n (ONode. 5)
+              ids (new String/1 m)
+              olds (new Object/1 m)
+              is (new int/1 m)
+              fs (new ONode/1 m)]
+          (loop [^int i 0]
+            (when (< i m)
+              (aset ids i (Oi/str (aget (Oi/elems (aget bs i)) 0)))
+              (aset olds i (.get (.-slots c) (aget ids i)))
+              (aset is i (Oi/bind c (aget ids i)))
+              (recur (unchecked-inc-int i))))
+          (loop [^int i 0]
+            (when (< i m)
+              (aset fs i (Oi/compileFn c (aget (Oi/elems (aget bs i)) 1)))
+              (recur (unchecked-inc-int i))))
+          (set! (.-is n) is)
+          (set! (.-xs n) fs)
+          (set! (.-b n) (Oi/compile c (aget xs 1)))
+          (loop [^int i 0] (when (< i m) (Oi/unbind c (aget ids i) (aget olds i)) (recur (unchecked-inc-int i))))
+          n)
+        "prim" (Oi/compilePrim c (Oi/str (aget xs 0)) (Oi/elems (aget xs 1)))
+        "switch"
+        (let [n (ONode. 7)
+              nc (unchecked-int (Oi/lv (aget xs 1)))
+              cs (Oi/elems (aget xs 2))
+              nb (unchecked-int (Oi/lv (aget xs 3)))
+              bs (Oi/elems (aget xs 4))
+              cx (new ONode/1 nc)
+              bx (new ONode/1 nb)]
+          (set! (.-a n) (Oi/compile c (aget xs 0)))
+          (loop [^int i 0]
+            (when (< i (alength cs))
+              (let [e (Oi/elems (aget cs i))] (aset cx (unchecked-int (Oi/lv (aget e 0))) (Oi/compile c (aget e 1))))
+              (recur (unchecked-inc-int i))))
+          (loop [^int i 0]
+            (when (< i (alength bs))
+              (let [e (Oi/elems (aget bs i))] (aset bx (unchecked-int (Oi/lv (aget e 0))) (Oi/compile c (aget e 1))))
+              (recur (unchecked-inc-int i))))
+          (set! (.-xs n) cx)
+          (set! (.-ys n) bx)
+          (when (and (> (alength xs) 5) (some? (aget xs 5))) (set! (.-c n) (Oi/compile c (aget xs 5))))
+          n)
+        "stringswitch"
+        (let [n (ONode. 8)
+              cs (Oi/elems (aget xs 1))
+              m (alength cs)
+              ks (new String/1 m)
+              es (new ONode/1 m)]
+          (set! (.-a n) (Oi/compile c (aget xs 0)))
+          (loop [^int i 0]
+            (when (< i m)
+              (let [e (Oi/elems (aget cs i))]
+                (aset ks i (Rt/js (Oi/bytesOf (aget e 0))))
+                (aset es i (Oi/compile c (aget e 1))))
+              (recur (unchecked-inc-int i))))
+          (set! (.-ss n) ks)
+          (set! (.-xs n) es)
+          (when (and (> (alength xs) 2) (some? (aget xs 2))) (set! (.-c n) (Oi/compile c (aget xs 2))))
+          n)
+        "staticraise" (let [n (ONode. 9)] (set! (.-i n) (unchecked-int (Oi/lv (aget xs 0)))) (set! (.-xs n) (Oi/nodes c (aget xs 1))) n)
+        "staticcatch"
+        (let [n (ONode. 10)
+              hv (Oi/elems (aget xs 1))
+              vs (Oi/elems (aget hv 1))
+              m (alength vs)
+              ids (new String/1 m)
+              olds (new Object/1 m)
+              is (new int/1 m)]
+          (set! (.-a n) (Oi/compile c (aget xs 0)))
+          (set! (.-i n) (unchecked-int (Oi/lv (aget hv 0))))
+          (loop [^int i 0]
+            (when (< i m)
+              (aset ids i (Oi/str (aget (Oi/elems (aget vs i)) 0)))
+              (aset olds i (.get (.-slots c) (aget ids i)))
+              (aset is i (Oi/bind c (aget ids i)))
+              (recur (unchecked-inc-int i))))
+          (set! (.-is n) is)
+          (set! (.-b n) (Oi/compile c (aget xs 2)))
+          (loop [^int i 0] (when (< i m) (Oi/unbind c (aget ids i) (aget olds i)) (recur (unchecked-inc-int i))))
+          n)
+        "trywith"
+        (let [n (ONode. 11) id (Oi/str (aget xs 1))]
+          (set! (.-a n) (Oi/compile c (aget xs 0)))
+          (let [old (.get (.-slots c) id)]
+            (set! (.-i n) (Oi/bind c id))
+            (set! (.-b n) (Oi/compile c (aget xs 2)))
+            (Oi/unbind c id old))
+          n)
+        "ifthenelse" (Oi/node 12 (Oi/compile c (aget xs 0)) (Oi/compile c (aget xs 1)) (Oi/compile c (aget xs 2)))
+        "sequence"
+        (let [l (ArrayList.) n (ONode. 13)]
+          (Oi/flatten x l)
+          (let [m (.size l) r (new ONode/1 m)]
+            (loop [^int i 0] (when (< i m) (aset r i (Oi/compile c (.get l i))) (recur (unchecked-inc-int i))))
+            (set! (.-xs n) r))
+          n)
+        "while" (Oi/node 14 (Oi/compile c (aget xs 0)) (Oi/compile c (aget xs 1)) nil)
+        "for"
+        (let [n (ONode. 15) id (Oi/str (aget xs 0))]
+          (set! (.-a n) (Oi/compile c (aget xs 1)))
+          (set! (.-b n) (Oi/compile c (aget xs 2)))
+          (set! (.-j n) (if (.equals ":to" (Oi/str (aget xs 3))) 1 0))
+          (let [old (.get (.-slots c) id)]
+            (set! (.-i n) (Oi/bind c id))
+            (set! (.-c n) (Oi/compile c (aget xs 4)))
+            (Oi/unbind c id old))
+          n)
+        "assign" (let [n (ONode. 16)] (set! (.-i n) (Oi/slot c (Oi/str (aget xs 0)))) (set! (.-a n) (Oi/compile c (aget xs 1))) n)
+        "send"
+        (let [n (ONode. 17)]
+          (set! (.-j n) (if (.equals ":self" (Oi/str (aget xs 0))) 1 0))
+          (set! (.-a n) (Oi/compile c (aget xs 1)))
+          (set! (.-b n) (Oi/compile c (aget xs 2)))
+          (set! (.-xs n) (Oi/nodes c (aget xs 3)))
+          n)
+        "event" (Oi/compile c (aget xs 0))
+        "ifused" (Oi/compile c (aget xs 1))
+        (throw (Rt/internal (java-str "oi: Lambda node " h " not known"))))))
+
+  ;; ---- primitives (o2j's prim-node and prim-value): the node's op and parameter
+
+  (method ^:static intOp ^int [^String n]
+    (switch n
+      "~" 1 "+" 2 "-" 3 "*" 4 "/" 5 "/u" 5 "mod" 6 "mod_unsafe" 6 "and" 7 "or" 8 "xor" 9 "lsl" 10 "lsr" 11 "asr" 12
+      "compare_ints" 13 "int_of_float" 14 "float_of_int" 15 "bswap16" 16 "~." 17 "abs." 18 "+." 19 "-." 20 "*." 21 "/." 22
+      "compare_floats" 23 "compare_bints" 24 "duprecord" 25 "duparray" 25 "duparray_imm" 25
+      0))
+
+  (method ^:static testOp ^int [^String n]
+    (switch n
+      "<" 30 "<=" 31 ">" 32 ">=" 33 "==" 34 "isout" 35 "isint" 36 "==." 37 "<." 38 "<=." 39 ">." 40 ">=." 41
+      0))
+
+  (method ^:static negTest ^String [^String n]
+    (switch n "!=" "==" "!=." "==." "!<." "<." "!<=." "<=." "!>." ">." "!>=." ">=." nil))
+
+  ;; the first number after the name's first space (o2j's num-arg)
+  (method ^:static numArg ^long [^String n]
+    (let [r (.trim (.substring n (unchecked-inc-int (.indexOf n " "))))
+          e (.indexOf r " ")]
+      (Long/parseLong (if (>= e 0) (.substring r 0 e) r))))
+
+  (method ^:static word ^String [^String n]
+    (let [a (.indexOf n " ") b (.indexOf n "[")
+          e (cond (and (>= a 0) (>= b 0)) (Math/min a b) (>= a 0) a (>= b 0) b :else (.length n))]
+      (.substring n 0 e)))
+
+  (method ^:static arrayKind ^String [^String n]
+    (let [i (.indexOf n "[")] (if (< i 0) "gen" (.substring n (unchecked-inc-int i) (.indexOf n "]")))))
+
+  (method ^:static bintKind ^int [^String n]
+    (switch n "Int32" 0 "int32" 0 "Int64" 1 "int64" 1 "Nativeint" 2 "nativeint" 2 -1))
+
+  ;; Bigarray's primitives as the externals they are (o2j's bigarray-ext)
+  (method ^:static bigarrayExt ^String [^String n ^int nargs]
+    (cond (.startsWith n "Bigarray.dim_") (java-str "caml_ba_dim_" (.substring n 13))
+          (.contains n "get16") "caml_ba_uint8_get16"
+          (.contains n "get32") "caml_ba_uint8_get32"
+          (.contains n "get64") "caml_ba_uint8_get64"
+          (.contains n "set16") "caml_ba_uint8_set16"
+          (.contains n "set32") "caml_ba_uint8_set32"
+          (.contains n "set64") "caml_ba_uint8_set64"
+          (.contains n "get") (java-str "caml_ba_get_" (unchecked-dec-int nargs))
+          (.contains n "set") (java-str "caml_ba_set_" (unchecked-subtract-int nargs 2))
+          :else n))
+
+  ;; an external called through the program's loader ("ext-index": its index and arity, (index << 8) | arity, or nil), else the C
+  ;; API's (o2j's external)
+  (method ^:static setExt ^void [^ONode n ^String nm ^int nargs]
+    (let [r (if (nil? Main/loader) nil (.apply Main/loader (new Object/1 ["ext-index" nm])))]
+      (if (nil? r)
+        (do (set! (.-i n) 91) (set! (.-v n) nm))
+        (let [x (long (cast Long r))]
+          (if (== (bit-and x 255) (long nargs))
+            (do (set! (.-i n) 90) (set! (.-j n) (unchecked-int (bit-shift-right x 8))))
+            (do (set! (.-i n) 94) (set! (.-v n) (java-str nm "/" nargs))))))))
+
+  (method ^:static setOp ^void [^ONode n ^String nm ^int nargs]
+    (let [w (Oi/word nm) io (Oi/intOp nm) to (Oi/testOp nm) ng (Oi/negTest nm)]
+      (cond
+        (> io 0) (set! (.-i n) io)
+        (> to 0) (set! (.-i n) to)
+        (some? ng) (do (set! (.-i n) (Oi/testOp ng)) (set! (.-j n) 1))
+        (and (.endsWith nm "+") (.matches nm "-?[0-9]+\\+")) (do (set! (.-i n) 50) (set! (.-v n) (Long/valueOf (Long/parseLong (.substring nm 0 (unchecked-dec-int (.length nm)))))))
+        (.startsWith nm "+:=") (do (set! (.-i n) 51) (set! (.-v n) (Long/valueOf (Long/parseLong (.substring nm 3)))))
+        (.equals nm "not") (set! (.-i n) 52)
+        (or (.equals w "makeblock") (.equals w "makemutable")) (do (set! (.-i n) 53) (set! (.-j n) (unchecked-int (Oi/numArg nm))))
+        (.equals w "makefloatblock") (set! (.-i n) 54)
+        (.equals w "makelazyblock") (set! (.-i n) 55)
+        (.equals w "makeforwardblock") (set! (.-i n) 56)
+        (or (.equals w "field_imm") (.equals w "field_mut") (.equals w "field_int")) (do (set! (.-i n) 57) (set! (.-j n) (unchecked-int (Oi/numArg nm))))
+        (.equals nm "field_computed") (set! (.-i n) 58)
+        (.equals nm "setfield_computed") (set! (.-i n) 60)
+        (.startsWith nm "compare_bints") (set! (.-i n) 24)
+        (.startsWith nm "duparray") (set! (.-i n) 25)
+        (.startsWith nm "setfield_") (if (.contains nm "computed") (set! (.-i n) 60) (do (set! (.-i n) 59) (set! (.-j n) (unchecked-int (Oi/numArg nm)))))
+        (.equals w "floatfield") (do (set! (.-i n) 61) (set! (.-j n) (unchecked-int (Oi/numArg nm))))
+        (.equals w "setfloatfield") (if (.contains nm "computed") (set! (.-i n) 63) (do (set! (.-i n) 62) (set! (.-j n) (unchecked-int (Oi/numArg nm)))))
+        (and (.contains nm ".") (>= (Oi/bintKind (.substring nm 0 (.indexOf nm "."))) 0) (Character/isUpperCase (.charAt nm 0)))
+        (let [k (Oi/bintKind (.substring nm 0 (.indexOf nm "."))) op (.substring nm (unchecked-inc-int (.indexOf nm ".")))]
+          (set! (.-j n) k)
+          (if (.equals op "of_int") (set! (.-i n) 64) (do (set! (.-i n) 65) (set! (.-v n) op))))
+        (.matches nm "(int32|int64|nativeint)_of_(int32|int64|nativeint)")
+        (do (set! (.-i n) 66) (set! (.-j n) (Oi/bintKind (.substring nm 0 (.indexOf nm "_of_")))))
+        (.equals w "array.length") (set! (.-i n) 67)
+        (or (.equals w "makearray") (.equals w "makearray_imm")) (do (set! (.-i n) 68) (set! (.-v n) (Oi/arrayKind nm)))
+        (.equals w "array.get") (set! (.-i n) 69)
+        (.equals w "array.unsafe_get") (set! (.-i n) 70)
+        (.equals w "array.set") (set! (.-i n) 71)
+        (.equals w "array.unsafe_set") (set! (.-i n) 72)
+        (or (.equals nm "string.length") (.equals nm "bytes.length")) (set! (.-i n) 73)
+        (or (.equals nm "string.unsafe_get") (.equals nm "bytes.unsafe_get")) (set! (.-i n) 74)
+        (or (.equals nm "string.get") (.equals nm "bytes.get")) (set! (.-i n) 75)
+        (.equals nm "bytes.unsafe_set") (set! (.-i n) 76)
+        (.equals nm "bytes.set") (set! (.-i n) 77)
+        (.matches nm "(string|bytes)\\.(unsafe_)?get(16|32|64)") (do (set! (.-i n) 78) (set! (.-j n) (unchecked-int (quot (Integer/parseInt (.substring nm (unchecked-subtract-int (.length nm) 2))) 8))))
+        (.matches nm "bytes\\.(unsafe_)?set(16|32|64)") (do (set! (.-i n) 79) (set! (.-j n) (unchecked-int (quot (Integer/parseInt (.substring nm (unchecked-subtract-int (.length nm) 2))) 8))))
+        (or (.equals nm "bytes_to_string") (.equals nm "bytes_of_string") (.equals nm "opaque") (.equals nm "int_as_pointer") (.equals nm "obj_magic")) (set! (.-i n) 80)
+        (.equals nm "ignore") (set! (.-i n) 81)
+        (.startsWith nm "sys.constant_") (do (set! (.-i n) 82) (set! (.-v n) (.substring nm 13)))
+        (.equals nm "atomic_load") (set! (.-i n) 83)
+        (.equals nm "dls_get") (do (Oi/setExt n "caml_domain_dls_get" 1) (when (== (.-i n) 90) (set! (.-i n) 84)))
+        (.equals nm "poll") (set! (.-i n) 85)
+        (.equals nm "perform") (set! (.-i n) 86)
+        (.equals nm "runstack") (set! (.-i n) 87)
+        (.equals nm "resume") (set! (.-i n) 88)
+        (.equals nm "reperform") (set! (.-i n) 89)
+        (or (.startsWith nm "Bigarray.") (.startsWith nm "bigarray.")) (Oi/setExt n (Oi/bigarrayExt nm nargs) nargs)
+        (.startsWith nm "native:") (let [ps (.split nm ":" -1)]
+                                     (set! (.-i n) 92)
+                                     (set! (.-ss n) (new String/1 [(aget ps 1) (java-str (aget ps 2) (aget ps 3))])))
+        :else (let [_ (Oi/setExt n nm nargs)]
+                ;; a name that is no external of the program's: a C stub's primitive (CApi/prim), as o2j's last case
+                (when (and (== (.-i n) 91) (not (.startsWith nm "caml_")))
+                  (set! (.-i n) 93))))))
+
+  (method ^:static compilePrim ^ONode [^OiCtx c ^String nm ^Object/1 args]
+    (cond
+      (.startsWith nm "global ")
+      (let [g (Oi/globalName (.substring nm 7)) p (Oi/predef g)]
+        (if (some? p)
+          (let [n (ONode. 1)] (set! (.-v n) p) n)
+          (let [n (ONode. 20)] (set! (.-v n) g) n)))
+      (.startsWith nm "setglobal ")
+      (let [n (ONode. 21)] (set! (.-v n) (Oi/globalName (.substring nm 10))) (set! (.-a n) (Oi/compile c (aget args 0))) n)
+      (or (.equals nm "&&") (.equals nm "sequand")) (Oi/node 18 (Oi/compile c (aget args 0)) (Oi/compile c (aget args 1)) nil)
+      (or (.equals nm "||") (.equals nm "sequor")) (Oi/node 19 (Oi/compile c (aget args 0)) (Oi/compile c (aget args 1)) nil)
+      (or (.equals nm "raise") (.equals nm "reraise") (.equals nm "raise_notrace"))
+      (let [n (Oi/node 22 (Oi/compile c (aget args 0)) nil nil)]
+        (set! (.-j n) (cond (.equals nm "reraise") 1 (.equals nm "raise_notrace") 2 :else 0))
+        n)
+      :else
+      (let [n (ONode. 6) m (alength args) xs (new ONode/1 m)]
+        (loop [^int i 0] (when (< i m) (aset xs i (Oi/compile c (aget args i))) (recur (unchecked-inc-int i))))
+        (set! (.-xs n) xs)
+        (Oi/setOp n nm m)
+        (when (== (.-i n) 93) (set! (.-v n) nm))
+        n)))
+
+  (method ^:static test ^boolean [^int op ^Object/1 a]
+    (switch op
+      30 (Rt/lt (aget a 0) (aget a 1))
+      31 (Rt/le (aget a 0) (aget a 1))
+      32 (Rt/gt (aget a 0) (aget a 1))
+      33 (Rt/ge (aget a 0) (aget a 1))
+      34 (Rt/eq (aget a 0) (aget a 1))
+      35 (Rt/isout (aget a 0) (aget a 1))
+      36 (Rt/isint (aget a 0))
+      37 (Rt/feq (aget a 0) (aget a 1))
+      38 (Rt/flt (aget a 0) (aget a 1))
+      39 (Rt/fle (aget a 0) (aget a 1))
+      40 (Rt/fgt (aget a 0) (aget a 1))
+      41 (Rt/fge (aget a 0) (aget a 1))
+      (throw (Rt/internal "oi: test"))))
+
+  (method ^:static prim [^ONode n ^Object/1 a]
+    (let [op (.-i n) p (.-j n)]
+      (switch op
+        1 (Rt/neg (aget a 0))
+        2 (Rt/add (aget a 0) (aget a 1))
+        3 (Rt/sub (aget a 0) (aget a 1))
+        4 (Rt/mul (aget a 0) (aget a 1))
+        5 (Rt/div (aget a 0) (aget a 1))
+        6 (Rt/mod (aget a 0) (aget a 1))
+        7 (Rt/land (aget a 0) (aget a 1))
+        8 (Rt/lor (aget a 0) (aget a 1))
+        9 (Rt/lxor (aget a 0) (aget a 1))
+        10 (Rt/lsl (aget a 0) (aget a 1))
+        11 (Rt/lsr (aget a 0) (aget a 1))
+        12 (Rt/asr (aget a 0) (aget a 1))
+        13 (Rt/compareInts (aget a 0) (aget a 1))
+        14 (Rt/intOfFloat (aget a 0))
+        15 (Rt/floatOfInt (aget a 0))
+        16 (Rt/bswap16 (aget a 0))
+        17 (Rt/fneg (aget a 0))
+        18 (Rt/fabs (aget a 0))
+        19 (Rt/fadd (aget a 0) (aget a 1))
+        20 (Rt/fsub (aget a 0) (aget a 1))
+        21 (Rt/fmul (aget a 0) (aget a 1))
+        22 (Rt/fdiv (aget a 0) (aget a 1))
+        23 (Rt/compareFloats (aget a 0) (aget a 1))
+        24 (Rt/compareBints (aget a 0) (aget a 1))
+        25 (Rt/dupc (aget a 0))
+        (30 31 32 33 34 35 36 37 38 39 40 41) (let [t (Oi/test op a)] (Rt/b (if (== p 1) (not t) t)))
+        50 (Rt/offset (aget a 0) (long (cast Long (.-v n))))
+        51 (Rt/setField (aget a 0) 0 (Rt/offset (Rt/field (aget a 0) 0) (long (cast Long (.-v n)))))
+        52 (Rt/b (not (Rt/t (aget a 0))))
+        53 (Rt/block p a)
+        54 (Rt/block 254 a)
+        55 (Block. 246 a)
+        56 (Block. 250 a)
+        57 (Rt/field (aget a 0) p)
+        58 (Rt/field (aget a 0) (Rt/ii (aget a 1)))
+        59 (Rt/setField (aget a 0) p (aget a 1))
+        60 (Rt/setField (aget a 0) (Rt/ii (aget a 1)) (aget a 2))
+        61 (Rt/floatField (aget a 0) p)
+        62 (Rt/setFloatField (aget a 0) p (aget a 1))
+        63 (Rt/setFloatField (aget a 0) (Rt/ii (aget a 1)) (aget a 2))
+        64 (Rt/bintOfInt p (aget a 0))
+        65 (Rt/bint p (cast String (.-v n)) (aget a 0) (if (> (alength a) 1) (aget a 1) nil))
+        66 (Rt/mkb p (Rt/bv (aget a 0)))
+        67 (Rt/alenv (aget a 0))
+        68 (Rt/makeArray (cast String (.-v n)) a)
+        69 (Rt/agetChecked (aget a 0) (aget a 1))
+        70 (Rt/aget (aget a 0) (aget a 1))
+        71 (Rt/asetChecked (aget a 0) (aget a 1) (aget a 2))
+        72 (Rt/aset (aget a 0) (aget a 1) (aget a 2))
+        73 (Rt/slen (aget a 0))
+        74 (Rt/sget (aget a 0) (aget a 1))
+        75 (Rt/sgetChecked (aget a 0) (aget a 1))
+        76 (Rt/sset (aget a 0) (aget a 1) (aget a 2))
+        77 (Rt/ssetChecked (aget a 0) (aget a 1) (aget a 2))
+        78 (Rt/sload (aget a 0) (aget a 1) p)
+        79 (Rt/sstore (aget a 0) (aget a 1) (aget a 2) p)
+        80 (aget a 0)
+        81 Rt/UNIT
+        82 (Rt/sysConstant (cast String (.-v n)))
+        83 (Rt/field (aget a 0) 0)
+        84 (.apply Main/loader (new Object/1 ["ext-call" (new Object/1 [(Long/valueOf (long p)) (new Object/1 [Rt/UNIT])])]))
+        85 (aget a 0)
+        86 (Effects/perform (aget a 0))
+        87 (Effects/runstack (aget a 0) (aget a 1) (aget a 2))
+        88 (Effects/resume (aget a 0) (aget a 1) (aget a 2) (aget a 3))
+        89 (Effects/reperform (aget a 0) (aget a 1) (aget a 2))
+        90 (.apply Main/loader (new Object/1 ["ext-call" (new Object/1 [(Long/valueOf (long p)) a])]))
+        91 (CApi/call (cast String (.-v n)) a)
+        92 (CApi/nativeCall (aget (.-ss n) 0) (aget (.-ss n) 1) a)
+        93 (CApi/prim (cast String (.-v n)) a)
+        94 (throw (Rt/missing (cast String (.-v n))))
+        (throw (Rt/internal (java-str "oi: primitive op " op))))))
+
+  ;; ---- evaluating
+
+  ;; the arguments' values, right to left (as ocamlc's code evaluates them)
+  (method ^:static args ^Object/1 [^ONode/1 xs ^Object/1 fr]
+    (let [m (alength xs) r (new Object/1 m)]
+      (loop [^int i (unchecked-dec-int m)] (when (>= i 0) (aset r i (Oi/ev (aget xs i) fr)) (recur (unchecked-dec-int i))))
+      r))
+
+  (method ^:static mkFn [^ONode n ^Object/1 fr]
+    (let [is (.-is n) m (alength is) env (new Object/1 m)]
+      (loop [^int i 0] (when (< i m) (aset env i (aget fr (aget is i))) (recur (unchecked-inc-int i))))
+      (OiFn. n env)))
+
+  ;; a call with exactly the function's arity: its frame, the parameters first, then its free variables' values
+  (method ^:public ^:static call [^OiFn f ^Object/1 args]
+    (Rt/enter)
+    (let [r (loop [^OiFn f f ^Object/1 args args]
+              (let [n (.-fn f) fr (new Object/1 (.-j n)) js (.-js n) env (.-env f)]
+                (System/arraycopy args 0 fr 0 (alength args))
+                (loop [^int i 0] (when (< i (alength js)) (aset fr (aget js i) (aget env i)) (recur (unchecked-inc-int i))))
+                (let [r (Oi/ev (.-a n) fr)]
+                  (if (instance? OiTail r)
+                    (do (Rt/tick) (recur (.-f (cast OiTail r)) (.-args (cast OiTail r))))
+                    r))))]
+      (Rt/leave)
+      r))
+
+  (method ^:static globalValue [^ONode n]
+    (let [w (.-w n)]
+      (if (some? w)
+        w
+        (let [g (cast String (.-v n))
+              u (.get units g)
+              v (if (some? u) u (ExtCore/unitG g))]
+          (when (nil? v) (throw (Rt/internal (java-str "oi: the global " g " is not initialised"))))
+          (set! (.-w n) v)
+          v))))
+
+  (method ^:public ^:static ev [^ONode n ^Object/1 fr]
+    (switch (.-k n)
+      0 (aget fr (.-i n))
+      1 (.-v n)
+      2 (let [as (Oi/args (.-xs n) fr) f (Oi/ev (.-a n) fr)]
+          ;; a tail call of an interpreted function of that arity: Oi/call's loop makes it
+          (if (and (== (.-j n) 1) (instance? OiFn f) (== (.-arity (cast OiFn f)) (alength as)))
+            (OiTail. (cast OiFn f) as)
+            (Rt/ap f as)))
+      3 (Oi/mkFn n fr)
+      4 (do (aset fr (.-i n) (Oi/ev (.-a n) fr)) (Oi/ev (.-b n) fr))
+      5 (let [is (.-is n) fs (.-xs n) m (alength is)]
+          (loop [^int i 0] (when (< i m) (aset fr (aget is i) (Oi/mkFn (aget fs i) fr)) (recur (unchecked-inc-int i))))
+          ;; the closures' free variables that name the group's functions, set now that they are all made
+          (loop [^int i 0]
+            (when (< i m)
+              (let [f (cast OiFn (aget fr (aget is i))) fis (.-is (aget fs i)) env (.-env f)]
+                (loop [^int k 0]
+                  (when (< k (alength fis))
+                    (loop [^int q 0]
+                      (when (< q m)
+                        (if (== (aget fis k) (aget is q)) (aset env k (aget fr (aget is q))) (recur (unchecked-inc-int q)))))
+                    (recur (unchecked-inc-int k)))))
+              (recur (unchecked-inc-int i))))
+          (Oi/ev (.-b n) fr))
+      6 (Oi/prim n (Oi/args (.-xs n) fr))
+      7 (let [s (Oi/ev (.-a n) fr)
+              t (if (instance? Long s)
+                  (let [i (long (cast Long s))] (if (and (>= i 0) (< i (alength (.-xs n)))) (aget (.-xs n) (unchecked-int i)) nil))
+                  (let [g (.-tag (cast Block s))] (if (< g (alength (.-ys n))) (aget (.-ys n) g) nil)))]
+          (cond (some? t) (Oi/ev t fr)
+                (some? (.-c n)) (Oi/ev (.-c n) fr)
+                :else (throw (Rt/internal "oi: switch: no case"))))
+      8 (let [s (Rt/js (Oi/ev (.-a n) fr)) ks (.-ss n)]
+          (label :ss
+            (loop [^int i 0]
+              (when (< i (alength ks))
+                (when (.equals s (aget ks i)) (break :ss (Oi/ev (aget (.-xs n) i) fr)))
+                (recur (unchecked-inc-int i))))
+            (if (some? (.-c n)) (Oi/ev (.-c n) fr) (throw (Rt/internal "oi: stringswitch: no case")))))
+      9 (throw (OiExit. (.-i n) (Oi/args (.-xs n) fr)))
+      10 (try (Oi/ev (.-a n) fr)
+              (catch OiExit e
+                (if (== (.-n e) (.-i n))
+                  (let [is (.-is n) vs (.-vals e)]
+                    (loop [^int i 0] (when (< i (alength is)) (aset fr (aget is i) (aget vs i)) (recur (unchecked-inc-int i))))
+                    (Oi/ev (.-b n) fr))
+                  (throw e))))
+      ;; the handler runs at the depth the try was entered at; the backtrace's slots above it stashed and cut (o2j's trywith)
+      11 (let [d Rt/depth bs Bt/sp]
+           (try (Oi/ev (.-a n) fr)
+                (catch Throwable e
+                  (set! Rt/depth d)
+                  (let [v (Rt/exnValue e)]
+                    (Bt/stash e bs)
+                    (Bt/unwind bs)
+                    (aset fr (.-i n) v)
+                    (Oi/ev (.-b n) fr)))))
+      12 (if (Rt/t (Oi/ev (.-a n) fr)) (Oi/ev (.-b n) fr) (Oi/ev (.-c n) fr))
+      13 (let [xs (.-xs n) m (unchecked-dec-int (alength xs))]
+           (loop [^int i 0] (when (< i m) (Oi/ev (aget xs i) fr) (recur (unchecked-inc-int i))))
+           (Oi/ev (aget xs m) fr))
+      14 (do (loop [] (when (Rt/t (Oi/ev (.-a n) fr)) (Oi/ev (.-b n) fr) (Rt/tick) (recur)))
+             Rt/UNIT)
+      15 (let [lo (Rt/l (Oi/ev (.-a n) fr)) hi (Rt/l (Oi/ev (.-b n) fr)) up (== (.-j n) 1)]
+           (when (if up (<= lo hi) (>= lo hi))
+             (loop [^long i lo]
+               (Rt/tick)
+               (aset fr (.-i n) (Long/valueOf i))
+               (Oi/ev (.-c n) fr)
+               (when (not (== i hi)) (recur (if up (unchecked-inc i) (unchecked-dec i))))))
+           Rt/UNIT)
+      16 (do (aset fr (.-i n) (Oi/ev (.-a n) fr)) Rt/UNIT)
+      17 (let [as (Oi/args (.-xs n) fr)
+               o (Oi/ev (.-b n) fr)
+               m (Oi/ev (.-a n) fr)
+               all (new Object/1 (unchecked-inc-int (alength as)))]
+           (aset all 0 o)
+           (System/arraycopy as 0 all 1 (alength as))
+           (Rt/ap (Rt/getMethod (== (.-j n) 1) o m) all))
+      18 (Rt/b (and (Rt/t (Oi/ev (.-a n) fr)) (Rt/t (Oi/ev (.-b n) fr))))
+      19 (Rt/b (or (Rt/t (Oi/ev (.-a n) fr)) (Rt/t (Oi/ev (.-b n) fr))))
+      20 (Oi/globalValue n)
+      21 (do (.put units (cast String (.-v n)) (Oi/ev (.-a n) fr)) Rt/UNIT)
+      22 (throw (Bt/raise (Oi/ev (.-a n) fr) 0 (== (.-j n) 1) (== (.-j n) 2)))
+      (throw (Rt/internal (java-str "oi: node kind " (.-k n))))))
+
+  ;; ---- the loader's entry
+
+  ;; the globals code x names (a global's unit, the predefined exceptions left out), in the order it names them, once each
+  (method ^:static refs ^void [x ^HashSet seen ^ArrayList out]
+    (when (instance? OiList x)
+      (let [xs (.-xs (cast OiList x))]
+        (when (and (.equals "prim" (Oi/hd x)) (> (alength xs) 1) (instance? String (aget xs 1)) (.startsWith (cast String (aget xs 1)) "global "))
+          (let [g (Oi/globalName (.substring (cast String (aget xs 1)) 7))]
+            (when (and (nil? (Oi/predef g)) (not (.contains seen g)))
+              (.add seen g)
+              (.add out g))))
+        (loop [^int i 0] (when (< i (alength xs)) (Oi/refs (aget xs i) seen out) (recur (unchecked-inc-int i)))))))
+
+  ;; a plugin's Lambda text (ocaml/lambda (lambda-program MODULE SIZE [REQUIRED...] CODE)): its entry [NAME DEPS REFS INIT nil] (o2j's
+  ;; plugin-unit and plugin-deps: DEPS the units it requires, then the globals its code names; REFS those globals), INIT a Runnable
+  ;; that runs its code
+  (method ^:public ^:static parse ^Object/1 [^String text]
+    (let [top (Oi/read text (new int/1 1))
+          prog (aget (Oi/fields top) 0)
+          ps (Oi/fields prog)
+          required (Oi/elems (aget ps 2))
+          code (aget ps 3)
+          cf (Oi/fields code)
+          nm (Oi/str (aget cf 0))
+          _ (when (or (not (.equals "prim" (Oi/hd code))) (not (.startsWith nm "setglobal ")))
+              (throw (Rt/internal "oi: the unit's code is not a setglobal")))
+          name (Oi/globalName (.substring nm 10))
+          seen (HashSet.)
+          refs (ArrayList.)
+          deps (ArrayList.)]
+      (.add seen name)
+      (Oi/refs code seen refs)
+      (loop [^int i 0]
+        (when (< i (alength required))
+          (let [r (Oi/str (aget required i))] (when (and (not (.equals r name)) (not (.contains deps r))) (.add deps r)))
+          (recur (unchecked-inc-int i))))
+      (loop [^int i 0]
+        (when (< i (.size refs))
+          (when (not (.contains deps (.get refs i))) (.add deps (.get refs i)))
+          (recur (unchecked-inc-int i))))
+      (let [c (OiCtx. nil)
+            body (Oi/compile c code)
+            size (.-n c)
+            run (lambda Runnable [] (Oi/ev body (new Object/1 size)))]
+        (new Object/1 [name (.toArray deps (new String/1 0)) (.toArray refs (new String/1 0)) run nil])))))
