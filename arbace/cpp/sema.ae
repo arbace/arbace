@@ -3050,7 +3050,7 @@
                ;; (queue 497: and an out-of-line member declaration no member of its class matches)
                (cond
                  ;; (cpp-tpl2: and one whose class template's template template argument surely does not match, [temp.arg.template]/3-4)
-                 (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches '|a template template argument whose parameters do not match|pack expansion argument for non-pack parameter of alias template|'.*' names a class, which is not a class template|invalid constructor: |could not convert an expression of type int to a pointer in a converted constant expression|unknown type .*: no type named '.*' in the complete class)" (str (.getMessage e)))
+                 (re-find #"^codegen: (template constraint failure for|placeholder constraints not satisfied|reference to '.*' is ambiguous|invalid use of incomplete type|no declaration matches '|a template template argument whose parameters do not match|pack expansion argument for non-pack parameter of alias template|'.*' names a class, which is not a class template|invalid constructor: |could not convert an expression of type int to a pointer in a converted constant expression|narrowing conversion of '-?\d+' to the template parameter's type|unknown type .*: no type named '.*' in the complete class)" (str (.getMessage e)))
                  (do (*on-refusal* e n) nil)
                  ;; (queue 518: a namespace-scope variable's, function's or alias's declaration whose template argument is no
                  ;; constant, `S<f()> s;`, cpp0x/pr78765.C's ValueTypeInfo<var>: dropped without a word and the unit going on, as
@@ -4542,12 +4542,28 @@
                   ;; (CP378 (a): pointers to objects equal when they locate the same subobject)
                   a (ce-res a) b (ce-res b)
                   [a b] (cond (and (ce-loc? a) (ce-loc? b) (#{"==" "!="} (:o e)))
-                              (if (and (identical? (::cell a) (::cell b)) (= (::path a) (::path b))) [0 0] [0 1])
+                              (do ;; (cpp-sweep: [expr.eq]/3.1 as below, two local arrays' elements by their cells)
+                                  (when (and (checking?) (not (identical? (::cell a) (::cell b))))
+                                    (let [ix (fn [l] (let [p (::path l) v (try @(::cell l) (catch Exception _ nil))]
+                                                       (when (and (= 1 (count p)) (integer? (first p)) (vector? v)) [(long (first p)) (count v)])))
+                                          [ia na] (ix a) [ib nb] (ix b)]
+                                      (when (and ia ib (or (and (= ia na) (zero? ib)) (and (= ib nb) (zero? ia))))
+                                        (ub! e "a pointer past the end of an array compared with another array's first element is not a constant expression"))))
+                                  (if (and (identical? (::cell a) (::cell b)) (= (::path a) (::path b))) [0 0] [0 1]))
                               (and (or (ce-loc? a) (ce-loc? b)) (#{"==" "!="} (:o e)) (= 0 (if (ce-loc? a) b a))) [0 1]
                               (or (ce-loc? a) (ce-loc? b)) (not-constant "a pointer to an object compared")
                               (and (ce-ptr? a) (ce-ptr? b))
                               (if (ce-same-base? a b) [(::i a) (::i b)]
-                                  (if (#{"==" "!="} (:o e)) [0 1] (not-constant "pointers into different arrays compared")))
+                                  (if (#{"==" "!="} (:o e))
+                                    (do ;; (cpp-sweep, the checker: [expr.eq]/3.1, a pointer past the end of one array against
+                                        ;; the first element of another is unspecified, no constant expression (they may be
+                                        ;; adjacent): GCC's "... is not a constant expression", cpp1y/constexpr-89074-1.C)
+                                        (when (and (checking?)
+                                                   (let [end? (fn [p] (try (= (long (::i p)) (count (ce-elems p))) (catch Exception _ false)))]
+                                                     (or (and (end? a) (zero? (long (::i b)))) (and (end? b) (zero? (long (::i a)))))))
+                                          (ub! e "a pointer past the end of an array compared with another array's first element is not a constant expression"))
+                                        [0 1])
+                                    (not-constant "pointers into different arrays compared")))
                               (or (ce-ptr? a) (ce-ptr? b))
                               (if (and (#{"==" "!="} (:o e)) (= 0 (if (ce-ptr? a) b a))) [0 1] (not-constant "a pointer compared"))
                               :else [a b])
@@ -4634,8 +4650,10 @@
                      ;; ([expr.const]/5.9: an lvalue-to-rvalue conversion of a variable not usable in constant expressions,
                      ;; [expr.const]/4: neither constexpr nor a const integral or enumeration one -- a plain variable, a
                      ;; const double)
+                     ;; (cpp-sweep: a function parameter's too, outside the evaluation of its function's call, GCC's "'p' is not
+                     ;; a constant expression": cpp0x/constexpr-ref13.C's array_size_ptr(param))
                      (do (when (and v (not (:constexpr v)) (not (:c (:ty v))) (not (abi/ref? (:ty v)))
-                                    (#{:global :local :static-local :member-static} (:storage v)) (:name v))
+                                    (#{:global :local :static-local :member-static :param} (:storage v)) (:name v))
                            (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression"))
                          (when (and v (not (:constexpr v)) (:c (:ty v)) (abi/floating? (:ty v)) (= :global (:storage v)) (:name v))
                            (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression"))
@@ -9771,6 +9789,14 @@
         init (if (and (= :ctor (:i init)) (empty? (:args init)) (nil? initn)) init init)]
     (when (and nexpr initn (not= "InitListExpr" (:kind initn))) nil)
     (when (and nexpr (checking?)) (cx-new-size! ctx n nexpr et))
+    ;; (cpp-sweep, the checker: [expr.new]/8, the expression of a noptr-new-declarator of integral or unscoped enumeration
+    ;; type, or a class converted to one: a floating one, a template's specialization's among them (the parser's check judges
+    ;; the non-dependent ones), GCC's "size in array new must have integral type": diagnostic/integral-array-size-1.C)
+    (when (and nexpr (checking?))
+      (let [nv (try (rv (analyze ctx nexpr)) (catch arbace.lang.ExceptionInfo _ nil))
+            nt (some-> nv :ty abi/unq)]
+        (when (and nt *on-refusal* (abi/arith? nt) (not (abi/integral? nt)) (not (abi/enum? nt)))
+          (*on-refusal* (ex-info "codegen: size in array new must have integral type" {:codegen/refused :new :cx/node nexpr}) nexpr))))
     ;; (cpp-decl2, the checker: C++20's parenthesized initialization of an array by a new-expression, [dcl.init.general]/16.5,
     ;; its elements copy-initialized from the expressions; g++ 15.2 takes the elements past them as copy-list-initialized from
     ;; {}, so an explicit default constructor is its "converting to 'T' from initializer list would use explicit constructor":
@@ -12891,6 +12917,21 @@
             (throw (ex-info (str "codegen: constexpr variable '" (:name v) "' must be initialized by a constant expression (" m ")")
                             {:codegen/refused :constexpr :cx/node {:range (or (:cx/at d) (:cx-range v))}}))))))))
 
+(defn- cx-indeterminate-member
+  "cpp-sweep (the checker): the name of a scalar non-static data member of the evaluated object `o` (a class's value, its
+  bases' and class members' values in it) that holds no value, or nil; a union's, an empty or anonymous member's not judged."
+  [o]
+  (when-let [c (abi/cls (::cls o))]
+    (when-not (:union c)
+      (or (some (fn [fl]
+                  (when (and (not (:static fl)) (string? (:name fl)) (seq (:name fl)) (not (:anon fl)) (not (abi/ref? (:ty fl))))
+                    (let [t (abi/unq (:ty fl)) x (get o (:i fl))]
+                      (cond (abi/scalar? t) (when (nil? x) (str (:name c) "::" (:name fl)))
+                            (and (abi/class? t) (map? x) (::cls x)) (cx-indeterminate-member x)
+                            :else nil))))
+                (:fields c))
+          (some (fn [b] (let [x (get o [:b (:cls b)])] (when (and (map? x) (::cls x)) (cx-indeterminate-member x)))) (:bases c))))))
+
 (defn cx-check-constant!
   "CX12 (the checker): a constexpr variable's scalar initializer `i` evaluated ([dcl.constexpr]/10: a constant
   expression); an evaluation the program's own operation makes not constant (ub!) diagnosed at that operation, clang's
@@ -12924,6 +12965,11 @@
              (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v))))
     (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
            (let [o (ce-init (:ty v) i {})]
+             ;; (cpp-sweep: [expr.const]/13-14, a constant expression's object has no indeterminate subobject: a scalar member
+             ;; of a non-union class a constexpr constructor left uninitialized makes the variable's initializer no constant
+             ;; expression, GCC's error at the variable; cpp2a/constexpr-init1.C's s2)
+             (when-let [m (and (map? o) (cx-indeterminate-member o))]
+               (throw (ex-info (str "not a constant: the member '" m "' is not initialized") {:codegen/not-constant true :cx/sure true})))
              ;; (cpp-sweep: a constexpr variable's constant destruction, [expr.const]/7 of C++20: its destructor evaluated as
              ;; at its end, ce-destroy-cells!: cpp2a/constexpr-dtor3.C's W1 whose ~W1 meets inline assembly)
              (when (and (:cx-constexpr v) (map? o) (not (cx-non-literal (:ty v)))) (ce-destroy-cells! [(atom o)]))))
