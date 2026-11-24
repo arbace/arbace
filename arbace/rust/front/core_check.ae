@@ -1369,7 +1369,12 @@
                        (:call-span m) (#(let [cs (:call-span %)
                                               site (ex/virtual-cause cs)
                                               o (ex/virtual-origin cs)
-                                              src (fn [^String f] (if (str/starts-with? f "/") f (str rustc-src-prefix f)))]
+                                              ;; queue 561 (C6 L3): a backtrace crate's file as std's build writes its caller locations,
+                                              ;; Cargo's path of a vendored package (`./vendor/adler2-2.0.1/src/algo.rs`)
+                                              src (fn [^String f] (cond (str/starts-with? f "/") f
+                                                                        (and (some #{*crate*} backtrace-crates) (str/starts-with? f "library/vendor/"))
+                                                                        (str rustc-src-prefix "library/./" (subs f 8))
+                                                                        :else (str rustc-src-prefix f)))]
                                           (cond-> (dissoc % :call-span)
                                             (and site tc/*root-file*) (assoc :call-loc [(src tc/*root-file*) (site 0) (site 1)])
                                             ;; a call written in the body's own file: its own place there
@@ -1514,13 +1519,24 @@
             ;; calls and no entry of their own carries (build-run's lib-unit takes them)
             ;; C6-4: the attributes of the crate's own functions the body calls (a copy's #[inline] decides its symbol's
             ;; instantiating crate: std's `Components::len_before_body`, `Path::has_root`), which no entry of their own carries
+            ;; queue 561 (C6 L3): a backtrace crate's body also carries the attributes of every function of its module file (beneath
+            ;; the callees' own), the impls' methods its operators and trait calls reach (adler2's `#[inline] fn add_assign` of
+            ;; `impl AddAssign for U32X4` under `+=`: a copy, the instantiating crate in its symbol), which a trait method call's :tc
+            ;; does not name
             :callee-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs)]
-                            (into {} (for [x (tree-seq coll? seq [(:blocks r) (vals pbs)])
+                            (merge
+                             (when (some #{*crate*} backtrace-crates)
+                               (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
+                                              :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))
+                                                    a (when p (try (la (:id d)) (catch Throwable _ nil)))]
+                                              :when (seq a)]
+                                          [p a])))
+                             (into {} (for [x (tree-seq coll? seq [(:blocks r) (vals pbs)])
                                            :let [t (when (seq? x) (:tc (meta x)))]
                                            :when (and (vector? t) (= :fndef (first t)) (number? (second t)))
                                            :let [p (try (def-path-string (second t)) (catch Throwable _ nil))]
                                            :when p]
-                                       [p (try (la (second t)) (catch Throwable _ []))])))
+                                       [p (try (la (second t)) (catch Throwable _ []))]))))
             :nested-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs) pre (str (def-path-string (:id (:def b))) "::")]
                             (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
                                            :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))]
