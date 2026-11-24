@@ -176,7 +176,7 @@ gate-subsets-check: ## GD2: the committed subsets against the rule's, exit 1 on 
 	bin/gate-subsets --check
 gate-demos: ## GTS42 (a): a classes file and a j2g comment changed in a scratch worktree, the full plan of each (after the builds it needs), reverted (bin/gate-demos; RECORD=test/gate/clean-TAG.edn)
 	bin/gate-demos $(if $(RECORD),--record $(RECORD))
-gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock waiting in turn, oldest first (FIFO in front of the flock, GT5; bin/heavy-lock --queue)
+gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock, oldest first, each with its slot (1 or 2) or waiting (FIFO in front of two memory-gated slots, GT5, 2026-11-23; bin/heavy-lock --queue)
 	bin/heavy-lock --queue
 cover-build: ## GT8.3: the cover build, the gate's executable and test build with Go's coverage of the crops' code under check, kept in ARBACE_GATE_EXES/cover-KEY20 (bin/cover build; heavy: run under the host's lock)
 	bin/cover build
