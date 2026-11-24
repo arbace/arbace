@@ -8257,3 +8257,33 @@
       (vec (distinct out)))))
 
 (swap! checks conj vla-pedantic)
+
+;; cpp-rind (2026-11-24): GNU's warn_unused_result (the GCC 15.2 manual's "Common Function Attributes"): a call of such a function
+;; whose value an expression statement discards is warned (-Wunused-result, on by default), an error under -Werror=unused-result or
+;; -Werror: GCC's "ignoring return value of 'QByteArray QString::toLocal8Bit() const', declared with attribute 'warn_unused_result'",
+;; at the call (warn/unused-result1-Werror.C). The main file's functions by name; a cast to void discards nothing to warn of.
+(defn unused-result-werror
+  [u starts ^String src ^String main]
+  (when (and (some #{"-Werror=unused-result" "-Werror"} (:args u)) (not (some #{"-Wno-unused-result"} (:args u))))
+    (let [out (java.util.ArrayList.)
+          wur (java.util.HashSet.)]
+      (walk-nodes (fn [n _]
+                    (when (and (#{"FunctionDecl" "CXXMethodDecl"} (:kind n)) (string? (:name n))
+                               (some #(and (= "NativeAttr" (:kind %)) (#{"warn_unused_result" "__warn_unused_result__"} (:_gnu %))) (:inner n)))
+                      (.add wur (:name n))))
+                  (:nodes u) nil)
+      (when (pos? (.size wur))
+        (walk-nodes (fn [n _]
+                      (when (= "CompoundStmt" (:kind n))
+                        (doseq [x (:inner n) :when (and (map? x) (str/ends-with? (str (:kind x)) "CallExpr"))]
+                          (let [callee (first (filter map? (:inner x)))
+                                nm (when (#{"MemberExpr" "DeclRefExpr"} (:kind callee)) (or (:name callee) (get-in callee [:referencedDecl :name])))]
+                            (when (and nm (.contains wur nm))
+                              (when-let [o (mine-at x main)]
+                                (let [[l c] (line-col starts o)]
+                                  (.add out {:line l :col c :kind :error :rule :unused-result
+                                             :msg (str "ignoring return value of '" nm "', declared with attribute 'warn_unused_result'")}))))))))
+                    (:nodes u) nil))
+      (vec (distinct out)))))
+
+(swap! checks conj unused-result-werror)
