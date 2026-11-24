@@ -14,12 +14,14 @@ for f in "$D"/*.ml; do
 done
 # a directory of units (its file `units`: their order), each typed against the earlier ones' native .cmi (--cmi-out), as the suite's native
 # path types a program's units: m1, an alias in a unit's interface to a module inside an earlier sibling (queue 546b, env's find-unit);
-# m2, a class whose methods name a module of its unit, inherited from another unit (queue 546b, env's subst-items)
+# m2, a class whose methods name a module of its unit, inherited from another unit (queue 546b, env's subst-items); m3, an interface
+# (.mli, typed with --intf) whose class inherits another unit's class read inside it (queue 546b, nested with-unit-stamps)
 for d in "$D"/*/; do
   [ -f "$d/units" ] || continue
-  n=$(basename "$d"); w=$W/$n; mkdir -p "$w"; cp "$d"/*.ml "$w/"; ok=1
+  n=$(basename "$d"); w=$W/$n; mkdir -p "$w"; cp "$d"/*.ml* "$w/"; ok=1
   for u in $(cat "$d/units"); do
-    (cd "$w" && ARBACE_PATH=$ROOT "$ARBACE_HOST_EXE" -m arbace.repr.ocaml.typer lambda --simplify --stdlib "$L" --include "$w" --cmi-out "$w/${u%.ml}.cmi.ae" --file "$u" "$u" > /dev/null 2> "$w/$u.err") || { ok=0; echo "FAIL $n/$u: $(grep -v '^Execution\|^$\|Full report\|edn$' "$w/$u.err" | head -1 | cut -c1-160)$(grep -o 'StackOverflowError' "$w/$u.err" | head -1)"; fail=1; break; }
+    x="--cmi-out $w/${u%.ml}.cmi.ae"; [ -f "$w/${u%.ml}.mli" ] && x=--intf
+    (cd "$w" && ARBACE_PATH=$ROOT "$ARBACE_HOST_EXE" -m arbace.repr.ocaml.typer lambda --simplify --stdlib "$L" --include "$w" $x --file "$u" "$u" > /dev/null 2> "$w/$u.err") || { ok=0; echo "FAIL $n/$u: $(grep -v '^Execution\|^$\|Full report\|edn$' "$w/$u.err" | head -1 | cut -c1-160)$(grep -o 'StackOverflowError' "$w/$u.err" | head -1)"; fail=1; break; }
   done
   [ $ok = 1 ] && echo "ok $n"
 done
