@@ -7660,8 +7660,18 @@
                 (doseq [n xs]
                   (case (:kind n)
                     "NamespaceDecl" (region! (:inner n))
-                    "FunctionDecl" (doseq [b (:inner n) :when (= "CompoundStmt" (:kind b))] (block! b))
+                    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl")
+                    (doseq [b (:inner n) :when (= "CompoundStmt" (:kind b))] (block! b))
+                    ;; (a function template's and a class's member functions' bodies too)
+                    ("FunctionTemplateDecl" "ClassTemplateDecl" "CXXRecordDecl")
+                    (doseq [m (:inner n) :when (and (map? m) (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXRecordDecl" "FunctionTemplateDecl"} (:kind m)))]
+                      (if (#{"CXXRecordDecl" "FunctionTemplateDecl"} (:kind m))
+                        (region-nested! m)
+                        (doseq [b (:inner m) :when (= "CompoundStmt" (:kind b))] (block! b))))
                     nil))))
+            (region-nested! [m]
+              (doseq [x (:inner m) :when (and (map? x) (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl"} (:kind x)))]
+                (doseq [b (:inner x) :when (= "CompoundStmt" (:kind b))] (block! b))))
             (block! [b]
               (region! (:inner b))
               (doseq [x (:inner b) :when (map? x)] (if (= "CompoundStmt" (:kind x)) (block! x) (stmts! x))))
@@ -7717,3 +7727,49 @@
     (vec out)))
 
 (swap! checks conj defaulted-signatures)
+
+;; cpp-rind (2026-11-24): [basic.link]/8 (C++23 /11) with [dcl.stc]/? : a block-scope extern declaration (a variable declared extern,
+;; or a function) declares an entity of the enclosing namespace, so it agrees with that namespace's earlier declaration of the name:
+;; a variable of another type is GCC's "conflicting declaration 'char X'", a function of the same parameters and another return type
+;; "ambiguating new declaration of 'char Y(int)'", at the block-scope declaration (lookup/extern-redecl1.C, tls/pr102642.C). The
+;; global namespace's functions' bodies judged; types compared as written by the parser, arrays (an unknown bound) not judged.
+(defn block-extern-conflicts
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        globals (java.util.HashMap.)
+        report! (fn [n msg] (when-let [o (mine-at n main)]
+                              (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :block-extern :msg msg}))))
+        qt (fn [n] (str/replace (str (get-in n [:type :qualType])) #"\s+" " "))
+        split-fn (fn [^String t] (let [i (.indexOf t "(")] (when (pos? i) [(str/trim (subs t 0 i)) (subs t i)])))]
+    (letfn [(block! [x]
+              (cond (map? x)
+                    (case (:kind x)
+                      ("CXXRecordDecl" "LambdaExpr" "ClassTemplateDecl" "FunctionTemplateDecl") nil
+                      "DeclStmt"
+                      (doseq [d (:inner x) :when (and (map? d) (string? (:name d)) (seq (:name d)))]
+                        (let [olds (.get globals (:name d)) o (long (or (mine-at d main) -1))
+                              olds (filter #(< (long (:off %)) o) olds)]
+                          (cond
+                            (and (= "VarDecl" (:kind d)) (= "extern" (:storageClass d)) (not (str/includes? (qt d) "[")))
+                            (when-let [g (first (filter #(= :var (:k %)) olds))]
+                              (when (and (not= (:t g) (qt d)) (not (str/includes? (:t g) "[")))
+                                (report! d (str "conflicting declaration '" (qt d) " " (:name d) "'"))))
+                            (= "FunctionDecl" (:kind d))
+                            (when-let [[r ps] (split-fn (qt d))]
+                              (when (some (fn [g] (and (= :fn (:k g)) (= ps (:ps g)) (not= r (:r g)))) olds)
+                                (report! d (str "ambiguating new declaration of '" (:name d) "'"))))
+                            :else nil)))
+                      (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (block! v)))
+                    (sequential? x) (doseq [y x] (block! y))
+                    :else nil))]
+      (doseq [n (:nodes u) :when (and (map? n) (string? (:name n)) (seq (:name n)) (mine-at n main))]
+        (case (:kind n)
+          "VarDecl" (.put globals (:name n) (conj (vec (.get globals (:name n))) {:k :var :t (qt n) :off (mine-at n main)}))
+          "FunctionDecl" (when-let [[r ps] (split-fn (qt n))]
+                           (.put globals (:name n) (conj (vec (.get globals (:name n))) {:k :fn :r r :ps ps :off (mine-at n main)})))
+          nil))
+      (doseq [n (:nodes u) :when (and (map? n) (= "FunctionDecl" (:kind n)))]
+        (doseq [b (:inner n) :when (and (map? b) (= "CompoundStmt" (:kind b)))] (block! b))))
+    (vec (distinct out))))
+
+(swap! checks conj block-extern-conflicts)
