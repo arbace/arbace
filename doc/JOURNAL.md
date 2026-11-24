@@ -20271,3 +20271,60 @@ reported and the declaration still refused).
 Checked: the record run 23:56-01:16 UTC over 2,706 files: own pass 2,364 -> 2,377 (the two timeouts' rows kept), none lost, 4 rows to
 own pass; mac/next merged (cpp-tpl2 (3)), the 9 rows read again on the merged tree, all pass; the control pair fails as it must. `bin/reap --record`, `bin/crops-score
 --record`, `--judge --strict`, `bin/records-check`: 0 problems; C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a), completeness 0.9810 -> 0.9812.
+## 2026-11-24: ocaml-1123: the four light regressions are the host's, not the branch's; the light record committed; base64's spawn
+
+- The four rows the light whole re-record failed (lib-marshal/intext_par, regression/pr3612/pr3612, weak-ephe-final/weaklifetime,
+  statmemprof/custom), rerun alone (one job, the build worktree): the same results with the ticket lock (Gil.ae), with the old lock
+  (382cc9a9a's parent) and with the base's whole runtime (fa635f636's jdk/ocaml): intext_par and pr3612 stop at 120 s of CPU, weaklifetime
+  fails its line-53 assertion, custom finishes with another output. Neither the lock nor this branch's runtime: their passes were
+  recorded by queue 527 and OT31 (a) on the Mac's arm64 VM, which this amd64 host does not reproduce under its load. The light record
+  (`check-aot-native.edn`) is committed from the whole run with these four rows kept as recorded (a passing row stays a pass; the
+  question of a host's record for these four is the coordinator's): OCaml AOT 514 / 21 / 81 -> 517 / 23 / 76 (gc-roots' two parallel
+  tests and int64-unboxing pass; delayintr and signal `:unix-java`, by design; the c-api class 9 -> 3).
+- opam/base64/test's `run ['base64']: No such file or directory` at the compiled level: the compiled main's hosts (`execHost`, and
+  `capiHost` for programs with C stubs) embedded jrt's Host interface, so jrt's `CurrentHostProc` (a type assertion to HostProc) found
+  no process host and every spawn failed, as did `CurrentHostFS`'s access and modes and the network's; both now embed jrt's OSHost
+  (8bcdee584). Its compiled rerun, with lib-threads/signal and delayintr (their pid and kill may have been the same cause), is queued
+  after the split shard (the build worktree's `.tmp/oc/compiled-b4.sh`).
+
+## 2026-11-24: ocaml-1123: the light suite's re-record
+
+`bin/oi suite check --aot --record` (finalize.sh, 21:56 to 01:13): lib-systhreads/testyield passes (the ticket lock); opam/base64/test
+and opam/fmt/test_fmt, out of `:opam-not-run` since queue 531's packages, reach the light level's 120 s of CPU: listed in
+test/ocaml/aot-slow.edn (DECISION 531-5 (a), `:light-speed`; the compiled level judges them), and the run's results judged again by
+test/ocaml/o2j_check.ae on its check.tsv with the list (no rerun; the record's header kept). No other row changed. OCaml AOT
+517 / 23 / 76 -> 518 / 20 / 78.
+## 2026-11-23: queue 544, the embedded oi: Lambda interpreted by OCaml's runtime itself (the toplevel's AOT, first steps; the VM)
+
+The user's decision (a) for the toplevel rows at the AOT level (caml-tex's ellipses and redirections, self-contained-toplevel): the toplevel
+compiled, oi embedded, each phrase's Lambda loaded as a plugin at run time. Branch `544-ocaml-aot-toplevel` from next fa635f636.
+- What "oi embedded" became: an interpreter of oi's Lambda forms in the runtime's own Java forms (`jdk/ocaml/ocaml/rt/Oi.ae` and six small
+  classes), over the runtime's values. Considered and not taken: embedding go/arbace/oi itself in the compiled program (as the C API's main
+  embeds it): its values are not the runtime's, so a phrase linked against the program's globals (Toploop's getvalue and setvalue, Foo,
+  the standard library) and printed by genprintval would cross a value bridge in both directions (copies, closure handles), with mutable
+  state and exception identity lost; the interpreter in the runtime shares the heap, so a phrase is a plugin as Dynlink's are. Modelled
+  on go/arbace/oi/compile.ae (frames of slots, closures copying their free variables) with o2j's prim-value as the table of primitives.
+- The compiled level: o2j's registry-methods give a text the registry lacks to `Oi/parse`, fall back to `Oi/global`, and carry the
+  externals' table (`extIndex`, `extCall`; no reflection there); the loader is set for a program one of whose units calls
+  `caml_oi_dynlink_parse`. The light level: `O2J_PLUGIN_INTERP=1` (test/ocaml/o2j/run.ae) interprets plugins, for the proofs; the checks
+  keep the translation. The runtime gains `caml_sys_modify_argv`.
+- Proofs (run): a plugin driver at the light level and at the compiled level (j2g 633 s, 5.4 GiB; Go build 587 s, 5.1 GiB); a coverage
+  unit printed as the host's OCaml 5.5 by both loaders; 41 basic/ and basic-more/ programs as plugins: 36 by their .reference, the other
+  five not the interpreter's (3 units the driver does not link, a flag, tailcalls' speed), the compiled outputs equal to the light ones.
+  The test script fails on the parent (no Oi) and passes here. Header readings of the plumbing patch: of 4,533 (levels 0 to 2) only the
+  three rows' at level 2 change.
+- The compiled toplevel did not build on the VM: the three rows' shard took j2g 4,548 s at 16.7 GB, and Go's compile of its one package
+  (259 MB of Go) passed 36 GB in 38 minutes and was stopped. bin/oi and header.awk are left unchanged (their patch is in the report:
+  editing bin/oi rebuilds the main host's library), the rows keep their class at both AOT levels, no record changes, and the cells are as
+  before (OCaml AOT 513 / 22 / 82). DECISION 544-1 (report 544) asks how the compiled toplevel is to be built.
+
+## 2026-11-24: ocaml-1123: the split shard (544b) on ocamldoc: a j2g name collision
+
+The 24 compiler-libs programs (the 16 tool rows, ocamldoc's five, 544's three toplevel rows) in one shard on 544b's per-unit Go packages
+(o2j wrote packages.edn), one ticket of 28 GiB: j2g ran 89 minutes at up to 27.4 GB (as unsplit: the split changes the packages, not
+j2g's work), then reported `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21: ocamldoc's five programs;
+Odoc_class.go and j2g_classes.go: the unit Odoc_class's class and its name in the program package's class table). Stopped by this session
+before the shard's bisection rebuilt its halves. A fault of the split's naming for a program package that holds a unit named like a
+generated class (544b, the Mac's paused task); the tool and toplevel programs' packages reported nothing. The compiled rerun of
+lib-threads/signal and delayintr and of the suite's opam base64 and fmt on the host fix (8bcdee584) is queued alone (`ocaml-b`'s
+`.tmp/oc/compiled-b4.sh`, one ticket of 24 GiB).
