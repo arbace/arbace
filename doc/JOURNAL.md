@@ -20811,3 +20811,9 @@ are made in a detached record worktree at 0d38b81b0 (.tmp/worktrees/rec-t2-at, k
   ulimit 22 GiB, GOMEMLIMIT 18 GiB, HEAVY_MEM_GIB=22), its record files first set to next's. .tmp/r/finish.sh judges and copies
   them into the branch when both end.
 - `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+- (later) C, queue 540b on train 2's compiled host (.tmp/r/c.sh in rec-t2-at, under bin/heavy-lock): `bin/repr-c roundtrip --corpus
+  torture-compile --record` 17.6 min, 17.9 GB peak, 1,791 of 1,791 pass (limits-caselabels.c: read ok, levels 1 and 2 equal, gcc agrees;
+  its known entry removed); `bin/repr-c parse-check --corpus torture-compile --no-mutants --record` 9.4 min, 12.1 GB, 1,791 of 1,791
+  equal (limits-caselabels.c 706,054 nodes, its :eval-depth entry removed). The record files were next's before the runs; copied into
+  the branch. C read 5,474 / 0 / 1 -> 5,475 / 0 / 0, print 4,853 / 0 / 2 -> 4,854 / 0 / 1 (left: sqlite3.c). reap, crops-score --record
+  and --judge --strict: 0 problems.
