@@ -276,7 +276,9 @@
         btype (:type b)
         ;; in a comprehension inlined in a class body its own scopes (_PyCompile_TweakInlinedComprehensionScopes' in_class_block)
         comp-syms (:comp-syms @u)
-        flags (or (get comp-syms nm) (get (:symbols b) nm 0))
+        ;; :temp-syms: an inlined comprehension's names whose scope differs inside (push_inlined_comprehension_state's
+        ;; temp_symbols; py-core-1124)
+        flags (or (get comp-syms nm) (get (:temp-syms @u) nm) (get (:symbols b) nm 0))
         scope (sc/scope-of* flags)
         hidden (get (:hidden @u) nm)
         [fast deref global named] (case what :load [:load-fast :load-deref :load-global (if comp-syms :load-global :load-name)]
@@ -1767,6 +1769,7 @@
                                             (not (sc/has-bit? f sc/DEF_NONLOCAL)))] nm)))
             saved (:hidden @u)
             saved-syms (:comp-syms @u)
+            saved-temp (:temp-syms @u)
             k (count own)]
         (expr! u it0)
         (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
@@ -1796,8 +1799,22 @@
           (emit! u :swap 2)
           (when (and (= :class (:type @(:block @u))) (nil? saved-syms))
             (swap! u assoc :comp-syms (:symbols @block)))
+          ;; push_inlined_comprehension_state: a name whose scope inside differs from the scope outside takes the inside
+          ;; one while the comprehension compiles, but a name free inside (handled as outside) and a cell inside that is
+          ;; free outside (deref either way); restored after (py-core-1124: a name a first comprehension bound in a
+          ;; function, free in a second, was the function's fast local; test_listcomps'
+          ;; test_multiple_comprehension_name_reuse)
+          (let [outer (:symbols @(:block @u))
+                temp (into {} (for [[nm f] (:symbols @block)
+                                    :when (not= nm ".0")
+                                    :let [sc (sc/scope-of* f)
+                                          osc (sc/scope-of* (or (get saved-temp nm) (get outer nm 0)))]
+                                    :when (and (not= sc osc) (not= sc 4) (not (and (= sc 5) (= osc 4))))]
+                                [nm f]))]
+            (when (seq temp)
+              (swap! u assoc :temp-syms (merge saved-temp temp))))
           (comp-loops! u gens 0 #(elt! u %) 0 eloc)
-          (swap! u assoc :hidden saved :comp-syms saved-syms)
+          (swap! u assoc :hidden saved :comp-syms saved-syms :temp-syms saved-temp)
           (when (pos? k)
             (pop-handler! u)
             (let [result-depth (depth u)

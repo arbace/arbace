@@ -1394,10 +1394,24 @@
                                   :when (and nm (str? (first nm)))]
                               [(c-string nm) (or (c-eval (f "ml_flags") {}) 0) (f "ml_doc")]))]
               (recur j (assoc-in out [:methods (ts (inc i))] ents)))
+            ;; py-core-1124: the getset and member tables, for their descriptors' __doc__
+            (and (#{"PyGetSetDef" "PyMemberDef"} t) (= (get ts (+ i 2)) "[") (some #(= "{" %) (take 6 (drop (+ i 3) ts))))
+            (let [k (loop [k (+ i 3)] (if (= (ts k) "{") k (recur (inc k))))
+                  [items j] (brace-items ts k)
+                  names (if (= t "PyGetSetDef") ["name" "get" "set" "doc" "closure"] ["name" "type" "offset" "flags" "doc"])
+                  ents (vec (for [it items :when (= "{" (first it))
+                                  :let [[parts] (brace-items (vec it) 0)
+                                        f (fields-of parts names)
+                                        nm (f "name")]
+                                  :when (and nm (str? (first nm)))]
+                              [(c-string nm) (f "doc")]))]
+              (recur j (assoc-in out [:attrs (ts (inc i))] ents)))
             (and (= t "PyTypeObject") (= (get ts (+ i 2)) "=") (= (get ts (+ i 3)) "{"))
             (let [[items j] (brace-items ts (+ i 3))
                   f (fields-of items type-fields)]
               (recur j (update out :types conj {:var (ts (inc i)) :name (some-> (f "tp_name") strip-casts seq c-string)
+                                                :getset (some-> (f "tp_getset") strip-casts last)
+                                                :members (some-> (f "tp_members") strip-casts last)
                                                 :doc (f "tp_doc") :methods (some-> (f "tp_methods") strip-casts last)
                                                 :new? (let [x (some-> (f "tp_new") strip-casts)] (boolean (and (seq x) (not (#{["0"] ["NULL"]} x)))))})))
             (and (= t "PyType_Slot") (= (get ts (+ i 2)) "[") )
@@ -1505,8 +1519,9 @@
                                                                   "\n" (drop-unfound (inline-local (str py "/" f) #{} (incs-of f [])) sys)))]]
                      (assoc (unit-facts (tokens t) tf) :file f :group (group-of f f) :errors errs)))
         merged (fn [k fs] (apply merge (map k fs)))
-        everywhere {:docs (merged :docs facts) :methods (merged :methods facts) :slots (merged :slots facts)}
-        by-group (into {} (for [[g fs] (group-by :group facts)] [g {:docs (merged :docs fs) :methods (merged :methods fs) :slots (merged :slots fs)}]))
+        everywhere {:docs (merged :docs facts) :methods (merged :methods facts) :slots (merged :slots facts) :attrs (merged :attrs facts)}
+        by-group (into {} (for [[g fs] (group-by :group facts)] [g {:docs (merged :docs fs) :methods (merged :methods fs) :slots (merged :slots fs)
+                                                                    :attrs (merged :attrs fs)}]))
         look (fn [ft k nm] (when nm (or (get-in ft [k nm]) (get-in by-group [(:group ft) k nm]) (get-in everywhere [k nm]))))
         doc-text (fn [ft it] (when it (let [it (strip-casts it)]
                                         (cond (and (seq it) (every? #(str/starts-with? % "\"") it)) (c-string it)
@@ -1519,6 +1534,7 @@
                       (for [ft facts s (:specs ft) :when (:name s) :let [sl (look ft :slots (:slots s))]
                             :when (mods (first (key-of (:name s))))]
                         {:name (:name s) :doc (doc-text ft (get sl "Py_tp_doc")) :methods (some-> (get sl "Py_tp_methods") strip-casts last)
+                         :getset (some-> (get sl "Py_tp_getset") strip-casts last) :members (some-> (get sl "Py_tp_members") strip-casts last)
                          :new? (contains? sl "Py_tp_new") :ft ft})
                       ;; the struct sequences (PyStructSequence_Desc): Objects/structseq.c's tp_methods and tp_new
                       (let [sq (first (filter #(= "Objects/structseq.c" (:file %)) facts))]
@@ -1533,10 +1549,19 @@
         put-doc (fn [k nm doc] (when (and k (not (contains? @seen k)))
                                  (swap! seen conj k)
                                  (when-let [d (doc-without-signature nm doc)] (swap! docs assoc k d))))]
-    (doseq [{:keys [name doc ft] ms :methods new? :new?} types
+    (doseq [{:keys [name doc ft getset members] ms :methods new? :new?} types
             :let [[m q] (key-of name) k (str m "." q)]]
       (put (str "type:" k) (text-signature name doc 0))
       (put-doc (str "type:" k) name doc)
+      ;; the getset and member descriptors' docs (py-core-1124), as given (descr_get_doc: no signature to strip)
+      (doseq [tbl [getset members] :when tbl
+              [nm d] (look ft :attrs tbl)
+              :let [dt (doc-text ft d)]
+              :when (and dt (seq dt))
+              :let [ak (str "attr:" k "." nm)]
+              :when (not (contains? @seen ak))]
+        (swap! seen conj ak)
+        (swap! docs assoc ak dt))
       (doseq [[nm flags d] (look ft :methods ms)]
         (put (str "meth:" k "." nm) (text-signature nm (doc-text ft d) flags))
         (put-doc (str "meth:" k "." nm) nm (doc-text ft d)))
@@ -1577,7 +1602,8 @@
     (str "// Code generated by tools/pyi/runtime_tables.ae (docs) from CPython 3.14.10's built-ins; DO NOT EDIT.\n\n"
          "package py\n\n"
          "// builtinDocs are CPython's __doc__ of its built-in types (type:), the callables in their dicts (meth:) and the\n"
-         "// modules' functions (func:), by textSigs' keys: the internal doc less its signature (_PyType_GetDocFromInternalDoc)\n"
+         "// modules' functions (func:), by textSigs' keys: the internal doc less its signature (_PyType_GetDocFromInternalDoc);\n"
+         "// and of the types' getset and member descriptors (attr:), as given\n"
          "var builtinDocs = map[string]string{\n"
          (str/join (for [[k v] docs] (str "\t" (go-str k) ": " (go-str v) ",\n")))
          "}\n")))
