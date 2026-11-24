@@ -19157,3 +19157,10 @@ processor rows are left to the host's JD3 bytecode loader (the user's JCS51 deci
     every test as recorded except t07512 (`--release 15`, no ct.sym on the VM). t07512 fails the same way on 549's tool.
   - Cells: read 7,815 / 0 / 29 -> 7,816 / 0 / 28. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
     `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 555's rows routed (DECISION 555-1 (a), the main session's)
+
+t07545, t07546 and t07552 (javac on Arbace's closed-world processing tests) go to the processor work, JCS51's annotation processors loaded
+through JD3's bytecode loader (the main host's): their golden output needs the processor to run, which getUnnamedModule alone would not
+give. Routing, not n/a: the rows stay deferred in their class until that work lands. Alternative considered: adding
+ClassLoader.getUnnamedModule to jrt here (reaches only proc.processor.cant.instantiate).
