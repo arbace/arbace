@@ -11387,7 +11387,8 @@ unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code
   labels' narrowing to the condition's promoted type (C++11), floating case labels, integers for scoped enumerations and scoped
   enumerators for integers; definitions of implicitly-declared constructors and destructors (a class that declares none); friend
   definitions with default arguments that are not their function's only declaration; member functions overloaded with and without a
-  ref-qualifier; block-scope variable length arrays under -pedantic-errors; discarded warn_unused_result calls under -Werror.
+  ref-qualifier; block-scope variable length arrays under -pedantic-errors; discarded warn_unused_result calls under -Werror; explicit
+  specializations of function templates defined twice.
 - **The checker** (sema.ae, template.ae): constructors delegating to themselves; `auto x{e}` deduced from e and `auto x = {a, b}` as
   std::initializer_list<E> (the second had been a false "excess elements in scalar initializer"); void conditions (a statement
   expression ending in a statement, a throw-expression); pointer arithmetic outside an object's one element; casts from `void*` in
