@@ -21066,3 +21066,55 @@ Classed but not built (the table in the report): :reflection 10/12, :stack 7/10,
 ImportExpr), :net 2/2, the rest single rows. Decisions put to the user: jdk.charsets into the world (F8's second step), reflection
 of world classes' private members for the tests that read them (t07882, t07910), host-dependent stdout (t04983's network
 interfaces, t07657's java.home, t03503's identity hashes), the jrt: file system (t08098, t08102, t08103).
+
+## 2026-11-24: java-rows-1124: the user's four decisions built (charsets, reflection roots, own verdicts, the jrt: file system)
+
+The user's decisions of 2026-11-24 on java-rows-1124's report:
+
+1. **The charsets the tests name, not the whole of jdk.charsets.**
+   - The closure (test/jrt/jrt_sources.ae) gains:
+     - `ext-charset-sources`: ISO2022_JP, ISO2022_JP_2, MS50220, MS50221 and MSISO2022JP, KIND share:jdk.charsets;
+     - `ext-charset-gensrc`: EUC_JP_Open, MS950, PCK and the five internal JIS tables they decode through
+       (JIS_X_0208_Solaris, JIS_X_0212_Solaris, JIS_X_0208_MS5022X, JIS_X_0212_MS5022X, JIS_X_0208_MS932), KIND gensrc:jdk.charsets.
+   - bin/jrt-convert's generate step makes them with make/modules/jdk.charsets/Gensrc.gmk's extcs step (build.tools.charsetmapping.Main
+     ... extcs charsets stdcs-linux). All eight are byte for byte the JDK build's gensrc (generated.edn :same).
+   - The provider is jrt's own sun.nio.cs.ext.ExtendedCharsets (overlay, Arbace's own; LICENSE.md).
+     - It replaces jdk26u's generated provider, which loads all of jdk.charsets by class name.
+     - It holds the eight charsets' names and aliases (jdk26u's charsets file), aliasesFor (which the charsets' constructors call),
+       charsetForName (case ignored) and charsets().
+     - It constructs the charsets directly, as JrtCharsets does.
+   - The Charset variant's extendedProviders0 gives that provider.
+   - javac on Arbace compiles the 14 files against the platform (`bin/repr-java javac --patch-module java.base=.tmp/jrt/src/java.base`:
+     35 classes, no error).
+   - Expected rows: t08152 (pck), t08176 (ISO-2022-JP and its variants), t08178 (x-eucJP-Open), t08179 (MS950), at eval and AOT.
+   - jdk/: `bin/jrt-convert update` queued under the big lock (.tmp/jrt-update.sh); .tmp/jrt-after.sh then runs `bin/jrt modules`
+     and `bin/jrt provides`, commits jdk/ and pushes.
+   - java-design-1123 (02d35ac1b) was merged in first, so one conversion holds both branches' jdk/.
+2. **Reflection roots.** arbace.j2g.model/reflection-roots is a short list of non-public fields that the member tables list
+   (out.ae's fields), as GraalVM's reflection metadata names what a closed world keeps for reflection:
+   - JceSecurity.isRestricted (FinalRestricted, t07910);
+   - AbstractSaslImpl.logger (CheckAccess, t07882).
+3. **t03503, t04983 and t07657 are judged by jtreg's status.**
+   - java.check's status-by-decision; verdicts.edn regenerated: 3,125 :status, 18 :stdout.
+   - They leave test/java/golden/out.edn (26 cases out) and left.tsv.
+   - The Java judge fact's :out-of-cases is 26 and its :shares 3,304.
+   - Their rows move when the train's records run them.
+4. **:jrt-filesystem is n/a.** It is a new class, before :nio and :design-also-compiled: t08098, t08102 and t08103 at interp and
+   compiled (the jrt: file system's modules and class files, which the Go build has not). Java eval 3,147 / 23 / 111 (44 n/a),
+   AOT 3,152 / 22 / 119 (32 n/a).
+
+Also:
+- The train-3 fix 2aeeffc77 (AssertOn constructed by name) is cherry-picked onto this branch.
+- This branch's own interp.ae change constructs only CF classes the seed has (Monitor, Local).
+- Checked on train 3's executable: t04878 (Proxy nonJavaNames) and t08307 (TimeZone names) already pass. Their rows move with the
+  train's records.
+
+Not built, with estimates:
+- :jrt-dates (t05398, t05461, t05462): jdk26u's JapaneseImperialCalendar, BuddhistCalendar and LocalGregorianCalendar beside jrt's
+  own Calendar and GregorianCalendar (overlays), and Calendar.createCalendar by the locale. About a day.
+- :threads: ScopedValue (t04607), ForkJoinPool.schedule and its ScheduledForkJoinTask in jrt's hand-written pool (t05691),
+  extending Semaphore and CountDownLatch (t05707, t05653). A day or more.
+- :reflection:
+  - MethodParameters under -parameters (t04832, t05910; repr/java, the interpreter, jrt and j2g). About a day.
+  - Package annotations: defpackage is a no-op (t04730).
+  - Reflective access checks need the caller class (t07688, t04829; the :stack work).
