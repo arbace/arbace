@@ -11114,3 +11114,38 @@ declares an erroneous entity and stays silent on its uses), P2564's immediate es
 consteval-memfn1), the extended floating types' conversion ranks (ext-floating*), GCC's spelling position inside a macro's definition
 (pr79300, constexpr-ice16), the synthesized <=> from == and < built (P1186; refused as before when usable), and the earlier Left lists'
 single rows. IFNDR eager checks, n/a candidates for the user: cpp2a/bit-cast2.C, cpp2a/concepts-placeholder5.C.
+
+## As built: cpp-sweep (2), P2564's immediate invocations, the constant evaluator's and the declarations' single rows (2026-11-24; branch `cpp-sweep-1124` after next `e78dbdadb`)
+
+The coordinator's second round: the largest remaining causes among the 266 (P2564R3's immediate escalation, the extended floating
+types' ranks, the single rows; the parser's recovery only for a general rule). Same sources and rules as round 1.
+
+- **Immediate invocations** ([expr.const]/16-18, P2564R3; GCC applies them in C++20 too): `cx-immediate-eval!` now skips only the
+  immediate-escalating functions (a closure's call operator, a defaulted or implicit special member, a constexpr function made by a
+  template's instantiation, a header's) and consteval ones: a plain constexpr function's immediate invocations are evaluated, a
+  parameter read there no constant (cpp2a/consteval34.C's foo, consteval-prop1.C's f3); a member function's immediate invocation too
+  (method-call); in a conditional's arms outside a manifestly constant-evaluated context (an expression statement, a return
+  statement, an automatic variable's initializer neither constexpr nor const: `*cx-arms-evaluated*`) as in its condition; an if's
+  one-statement branch refused is reported and the if goes on (its other branch's errors kept, as a compound statement's statements
+  are). An immediate function's address among a returned braced list's initializers is "immediate evaluation returns address of
+  immediate function" for a constexpr variable of class type too (returned-immediate, cpp2a/consteval7.C).
+- **The constant evaluator**: a volatile glvalue's read ([expr.const]/5.10) sure, its potential constant check's finding too, and
+  since C++23 such a call's error at the variable alone (GCC's explanation a warning there); a const volatile variable never folded;
+  a static or namespace-scope variable not usable in constant expressions read inside an evaluated call sure; before C++20 a
+  new-expression's allocation function no constexpr function (in an evaluation and in a constexpr function's body); a reinterpret_cast
+  between pointer to member types a cast of its own, no constant.
+- **Declarations**: -Winvalid-constexpr (the potential constant check at a definition, the literal signature) an error only under
+  -pedantic-errors, -Werror=invalid-constexpr or -Werror (`*invalid-constexpr-error*`; GCC's pedwarn, a warning in a file whose
+  options drop -pedantic-errors: cpp23/constexpr-nonlit8.C); [expr.cond]/2.1's throw-expression operand, the result the other
+  operand's (its check had asked the wrong operand); an asm-declaration in a constexpr function before C++20 (pedwarn); `this` in a
+  static or friend member function's declarator ([expr.prim.this]/2-3, diag.ae's static-this); a class template's opaque enumeration
+  redeclared with another underlying type as written (diag.ae's enum-redecls now in class templates).
+
+Not built, with the cause: the rest of P2564 (escalation of a template's specialization made immediate by its body, and its uses:
+consteval-prop1, -prop2, -prop6, -prop10, -prop19 need the escalation through constructors, default arguments, default member
+initializers and closures, and an immediate invocation's enclosing expression); the extended floating types (ext-floating3, -12,
+-17): the checker maps _Float32 and _Float64 to float and double, so the conversion ranks need types of their own (the mangling and
+conversions with them); the parser's recovery after a broken template head: GCC's behaviour differs per construct (an erroneous
+class template whose uses are silent, a partial specialization dropped so its member's use is "incomplete type", a template
+parameter list replaced), no one rule found for several rows; a VLA bound's immediate invocation (consteval34.C line 25), the
+literal pointer comparisons of cpp1y/constexpr-89074-3.C (a global's, a literal's suffix merging).
