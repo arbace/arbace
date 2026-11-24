@@ -5408,3 +5408,17 @@ after the gate's executables `36aab1207a6fe6f3a858`; its build 75 min, peak 26.5
   Raw diagnostics' short file names (t06452, t07536) need PathFileObject file objects. `-XDexpectKeys` (t06660) and the error count
   after a plug-in error (t07527) come with `Main.compile` itself. It changes every javac command line on Arbace, so its proof is
   whole runs of the classes, diagnostics and print levels.
+
+## As built: java-speed (1), the interpreter's hot paths (2026-11-24, branch `java-speed-1124`, from next `440cf0273`)
+
+The user's decision of 2026-11-24: the interp level's slowness timeouts outside `:jit-loops` to pass within their limits (600 s of
+CPU at most, GTS208 (a)). Measured and profiled on train 1's build (doc/JOURNAL.md, 2026-11-24, "java-speed-1124"). Built in
+arbace/lang/Compiler.ae's CF: node arrays walked as chains of `CF$Cell` (Do, Let, Recur, the calls' arguments: no generic interface
+assertion per element on Go), Recur's one- and two-value turns without arrays, `Host.invoke` (the Go host's reflective calls by
+`Evaluator.invokeDirect`: no InvocationTargetException, no recover frame), shared empty argument and slot arrays, `Rt/toJ`'s and
+`Rt/toD`'s exact wrapper tests first; in arbace/j2g/dyn.ae, Dyn implements the marker interfaces declared from reflection
+(RandomAccess: BigBinarySearch, t05477, walked 2^30 elements because an interpreted RandomAccess list was none in the world's
+code). The rows' expected standing: t05477 by the RandomAccess fix; t05714, t05716, t05718 (771/125/755 s) within reach (they
+need 1.3-1.8 times); t04494, t04620, t04656 need three times or more (a later round: the reflective calls' boxing, frames, j2g's
+assertions); t06419 (2^32 calls) and t05498 (about 10^10 calls) exhaustive loops, proposed n/a beside `:jit-loops`; t05126 a hang
+(jrt's FileChannel interrupt), t07728 `:oom`, neither slowness. Records on the train's build.
