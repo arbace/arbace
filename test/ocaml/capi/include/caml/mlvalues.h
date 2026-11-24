@@ -30,7 +30,8 @@ typedef double float64;
 #define CAMLprim
 #define CAMLexport
 #define CAMLlocal_export
-#define CAMLweakdef
+/* a weak definition (queue 547: base's am_testing.c, which ppx_inline_test's runner overrides); ci links weak symbols */
+#define CAMLweakdef __attribute__((weak))
 #define CAMLnoret __attribute__((noreturn))
 #define CAMLnoreturn_start
 #define CAMLnoreturn_end __attribute__((noreturn))

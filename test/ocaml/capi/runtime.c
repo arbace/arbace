@@ -24,6 +24,7 @@
 #include "caml/misc.h"
 #include "caml/domain.h"
 #include "caml/domain_state.h"
+#include "caml/hash.h"
 #include "caml/runtime_events_consumer.h"
 
 /* the natives (go/arbace/oicapi) */
@@ -596,3 +597,51 @@ runtime_events_error caml_runtime_events_read_poll(struct caml_runtime_events_cu
 void caml_main(char **argv) { (void) argv; __oi_caml_main(); }
 void caml_startup(char **argv) { (void) argv; __oi_caml_main(); }
 void caml_shutdown(void) { }
+
+/* OCaml's structural hash's mixing steps (queue 547, <caml/hash.h>): MurmurHash3's, as go/arbace/oi/hash.ae mixes, so a stub's
+   fold and oi's Hashtbl.hash agree */
+static uint32_t oi_rotl32(uint32_t x, int n) { return (x << n) | (x >> (32 - n)); }
+uint32_t caml_hash_mix_uint32(uint32_t h, uint32_t d) {
+  d *= 0xcc9e2d51u; d = oi_rotl32(d, 15); d *= 0x1b873593u;
+  h ^= d; h = oi_rotl32(h, 13); return h * 5 + 0xe6546b64u;
+}
+/* a native integer mixed as 32 bits that are the same on a 32-bit platform for a small one */
+uint32_t caml_hash_mix_intnat(uint32_t h, intnat d) { return caml_hash_mix_uint32(h, (uint32_t) ((d >> 32) ^ (d >> 63) ^ d)); }
+uint32_t caml_hash_mix_int64(uint32_t h, int64_t d) {
+  h = caml_hash_mix_uint32(h, (uint32_t) d); return caml_hash_mix_uint32(h, (uint32_t) ((uint64_t) d >> 32));
+}
+/* NaNs mixed as one NaN, -0.0 as 0.0 */
+uint32_t caml_hash_mix_double(uint32_t h, double d) {
+  uint64_t b; memcpy(&b, &d, sizeof b);
+  uint32_t hi = (uint32_t) (b >> 32), lo = (uint32_t) b;
+  if ((hi & 0x7FF00000u) == 0x7FF00000u && (lo | (hi & 0xFFFFFu)) != 0) { hi = 0x7FF00000u; lo = 1; }
+  else if (hi == 0x80000000u && lo == 0) hi = 0;
+  h = caml_hash_mix_uint32(h, lo); return caml_hash_mix_uint32(h, hi);
+}
+uint32_t caml_hash_mix_float(uint32_t h, float d) {
+  uint32_t n; memcpy(&n, &d, sizeof n);
+  if ((n & 0x7F800000u) == 0x7F800000u && (n & 0x007FFFFFu) != 0) n = 0x7F800001u;
+  else if (n == 0x80000000u) n = 0;
+  return caml_hash_mix_uint32(h, n);
+}
+uint32_t caml_hash_mix_string(uint32_t h, value s) {
+  mlsize_t len = caml_string_length(s), i = 0;
+  const unsigned char *p = (const unsigned char *) String_val(s);
+  uint32_t w;
+  for (; i + 4 <= len; i += 4) {
+    w = (uint32_t) p[i] | ((uint32_t) p[i + 1] << 8) | ((uint32_t) p[i + 2] << 16) | ((uint32_t) p[i + 3] << 24);
+    h = caml_hash_mix_uint32(h, w);
+  }
+  w = 0;
+  switch (len & 3) {
+    case 3: w = (uint32_t) p[i + 2] << 16; /* fall through */
+    case 2: w |= (uint32_t) p[i + 1] << 8; /* fall through */
+    case 1: w |= (uint32_t) p[i]; h = caml_hash_mix_uint32(h, w);
+    default: break;
+  }
+  return h ^ (uint32_t) len;
+}
+
+/* <caml/backtrace.h>'s two words (queue 547): oi records backtraces on its own side and sets neither */
+intnat caml_backtrace_pos = 0;
+value caml_backtrace_last_exn = Val_unit;
