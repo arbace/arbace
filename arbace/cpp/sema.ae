@@ -50,6 +50,10 @@
 ;; queue 412 (round 7): [dcl.init.list]/7's narrowing conversions judged (the checker): false under -Wno-narrowing, -fpermissive
 ;; or -Wno-error=narrowing (GCC's permerror then a warning or nothing), and for the code generator
 (def ^:dynamic *narrowing* false)
+;; cpp-extfloat (the checker): GCC's pedwarn on an implicit floating conversion to a lesser or unordered conversion rank between
+;; types not both standard ([conv.double]/1, P1467R9; -Wnarrowing) an error: -pedantic-errors, -Werror=narrowing or -Werror
+;; given, neither -Wno-narrowing nor -Wno-error=narrowing (arbace.repr.cpp.diag binds it)
+(def ^:dynamic *fp-rank-error* false)
 ;; queue 518 (the checker): P0522's matching of template template arguments ([temp.arg.template]/3-4), GCC's -fnew-ttp-matching,
 ;; on by default from C++17; nil: by the standard, true or false: the option given (-fnew-ttp-matching, -fno-new-ttp-matching)
 (def ^:dynamic *new-ttp-matching* nil)
@@ -553,6 +557,8 @@
    ;; _Arg_value union and _S_to_arg_type, under __SIZEOF_INT128__)
    '__int128 :i128 'unsigned-__int128 :u128 '__int128_t :i128 '__uint128_t :u128
    '_Float16 :float16 '__float128 :float128
+   ;; (cpp-extfloat: GCC's extended floating-point types, the own front end's keywords; abi/fp-rank-cmp)
+   '_Float32 :float32 '_Float64 :float64 '_Float128 :float128n '_Float32x :float32x '_Float64x :float64x '__bf16 :bf16
    'float :float 'double :double 'long-double :ldouble 'wchar_t :wchar 'char8_t :char8 'char16_t :char16 'char32_t :char32
    'std/nullptr_t :nullptr 'nullptr_t :nullptr 'decltype/nullptr :nullptr})
 
@@ -1692,7 +1698,7 @@
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero)" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -4690,6 +4696,10 @@
                  (ev x)
                  :else
                  (let [v (when (= :var (:op x)) (var* (:id x)))
+                       ;; (cpp-extfloat: a namespace-scope or static data member's constexpr, which its entry keeps as :cx-constexpr
+                       ;; alone, the checker's: `constexpr float fx = 5.0f; static_assert (fx == 5.0f);` had been "not usable",
+                       ;; cpp23/ext-floating3.C)
+                       v (if (and v (:cx-constexpr v) (not (:constexpr v))) (assoc v :constexpr true) v)
                        init (or (:init v) (:init-node v))]
                    (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v) (and *ce-fold* (abi/floating? (:ty v)))))
                      ;; (its initializer manifestly constant-evaluated: the variable is usable in constant expressions, CP378 (a))
@@ -5897,11 +5907,17 @@
     (fail :type "arithmetic on " (pr-str (select-keys a [:k :n :id])) " and " (pr-str (select-keys b [:k :n :id]))))
   (let [a (promote-type a) b (promote-type b)]
     (cond
-      (or (= :float128 (abi/bn a)) (= :float128 (abi/bn b))) (abi/b :float128)
-      (or (= :ldouble (abi/bn a)) (= :ldouble (abi/bn b))) (abi/b :ldouble)
-      (or (= :double (abi/bn a)) (= :double (abi/bn b))) abi/double*
-      (or (= :float (abi/bn a)) (= :float (abi/bn b))) abi/float*
-      (or (= :float16 (abi/bn a)) (= :float16 (abi/bn b))) (abi/b :float16)
+      ;; ([expr.arith.conv]/1.2-1.3, P1467R9: the floating type of the greater conversion rank, of equal ranks the greater
+      ;; subrank; unordered ranks ill-formed, GCC's "invalid operands")
+      (and (abi/floating? a) (abi/floating? b))
+      (let [c (abi/fp-rank-cmp a b)]
+        (cond (nil? c) (fail :type "invalid operands of types '" (name (abi/bn a)) "' and '" (name (abi/bn b)) "' (unordered conversion ranks)")
+              (pos? (long c)) (abi/b (abi/bn a))
+              (neg? (long c)) (abi/b (abi/bn b))
+              (>= (abi/fp-subrank a) (abi/fp-subrank b)) (abi/b (abi/bn a))
+              :else (abi/b (abi/bn b))))
+      (abi/floating? a) (abi/b (abi/bn a))
+      (abi/floating? b) (abi/b (abi/bn b))
       (= a b) a
       :else
       (let [ra (long (abi/int-ranks (abi/bn a))) rb (long (abi/int-ranks (abi/bn b)))
@@ -6200,6 +6216,22 @@
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (no pointer conversion)")
         :else nil))))
 
+(declare fp-lesser? gcc-type-str)
+
+(defn- fp-rank-pedwarn!
+  "cpp-extfloat (the checker): the implicit conversion of `e` from the floating type `from` to `to`, a lesser or unordered
+  conversion rank between types not both standard (fp-lesser?): GCC's pedwarn \"ISO C++ does not allow converting to 'T' from
+  'F' with greater conversion rank\" [-Wnarrowing], reported where *fp-rank-error* makes it an error (the analysis goes on)."
+  [e from to]
+  (when (and *fp-rank-error* (checking?) *on-refusal* (fp-lesser? from to))
+    (let [n (if-let [r (:cx-at e)] {:range r} (some-> *at* deref))
+          c (abi/fp-rank-cmp to from)]
+      (when n
+        (*on-refusal* (ex-info (str "codegen: narrowing conversion: ISO C++ does not allow converting to '" (gcc-type-str to) "' from '"
+                                    (gcc-type-str from) "' with " (if c "greater" "unordered") " conversion rank")
+                               {:codegen/refused :narrowing :cx/node n})
+                      n)))))
+
 (defn convert-scalar
   "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
   [e t explicit?]
@@ -6224,7 +6256,7 @@
       (and (abi/integral? from) (abi/integral? to)) (if (= (abi/llvm-type from) (abi/llvm-type to)) (cast-node e :noop to) (cast-node e :int to))
       (and (abi/integral? from) (abi/floating? to)) (cast-node e :int->fp to)
       (and (abi/floating? from) (abi/integral? to)) (cast-node e :fp->int to)
-      (and (abi/floating? from) (abi/floating? to)) (cast-node e :fp to)
+      (and (abi/floating? from) (abi/floating? to)) (do (when-not explicit? (fp-rank-pedwarn! e from to)) (cast-node e :fp to))
       (and (abi/ptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
       (and (abi/mptr? to) (null-constant? e)) {:op :null :ty to :cat :pr}
       ;; (queue 492: [conv.ptr]/1, a null pointer constant of integral type converts to std::nullptr_t,
@@ -6256,6 +6288,16 @@
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
 
 (declare ctor-candidates resolve-overload analyze-implicit!)
+
+(defn fp-lesser?
+  "cpp-extfloat: whether converting the floating type `from` to the floating type `to` goes to a lesser or unordered conversion
+  rank between types not both standard, no standard conversion ([conv.double]/1, P1467R9): GCC's pedwarn \"converting to ...
+  with greater conversion rank\" (-Wnarrowing)."
+  [from to]
+  (let [from (abi/unq from) to (abi/unq to)]
+    (boolean (and (abi/floating? from) (abi/floating? to)
+                  (not (and (abi/standard-floating (abi/bn from)) (abi/standard-floating (abi/bn to))))
+                  (let [c (abi/fp-rank-cmp to from)] (or (nil? c) (neg? (long c))))))))
 
 (defn- std-rank
   "The rank of the standard conversion from the prvalue type `from` (expression e) to the non-reference type `to`, or nil."
@@ -6646,12 +6688,27 @@
                         (and (abi/ptr? ft) (abi/ptr? tt) (abi/void? (:to tt)) (not (abi/void? (:to ft)))) (assoc :ptr-void true)
                         (and (abi/ptr? ft) (abi/ptr? tt) (class-id (:to ft)) (class-id (:to tt))
                              (abi/derived-from? (class-id (:to ft)) (class-id (:to tt))))
-                        (assoc :ptr-d2b [(class-id (:to ft)) (class-id (:to tt))])))))))
+                        (assoc :ptr-d2b [(class-id (:to ft)) (class-id (:to tt))])
+                        ;; (cpp-extfloat, the checker: an arithmetic conversion's types, [over.ics.rank]/4.5's; a floating one to a
+                        ;; lesser or unordered rank between types not both standard no standard conversion, [conv.double]/1)
+                        (and (checking?) (= 2 (long r)) (abi/arith? ft) (abi/arith? tt)) (assoc :arith [ft tt])
+                        (and (checking?) (fp-lesser? ft tt)) (assoc :fp-bad true)))))))
+
+(defn- fp-better?
+  "cpp-extfloat (the checker): [over.ics.rank]/4.5 (P1467R9), of the arithmetic conversions `a` and `b` ([from to] each) in one
+  direction from or to one type FP1: a conversion between FP1 and a floating type FP2 of equal rank is better than one between
+  FP1 and T3 when T3 is no floating type, or its rank is not FP1's, or FP2's subrank is greater than T3's."
+  [[af at] [bf bt]]
+  (let [[fp1 fp2 t3] (cond (= af bf) [af at bt] (= at bt) [at af bf] :else nil)]
+    (boolean (and fp1 (abi/floating? fp1) (abi/floating? fp2) (= 0 (abi/fp-rank-cmp fp1 fp2))
+                  (or (not (abi/floating? t3)) (not= 0 (abi/fp-rank-cmp fp1 t3)) (> (abi/fp-subrank fp2) (abi/fp-subrank t3)))))))
 
 (defn- better-ics? [a b]
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
            (cond
+             (and (:arith a) (:arith b) (fp-better? (:arith a) (:arith b))) true
+             (and (:arith a) (:arith b) (fp-better? (:arith b) (:arith a))) false
              ;; (cpp-rt-own: [over.ics.rank]/4.1, a conversion that does not convert a pointer to bool before one that does;
              ;; /4.4.2-4.4.3, a pointer's conversion to its base's before its conversion to void*, and to a nearer base's before
              ;; a farther's: fs_ops.cc's `__os << __x` of a basic_filebuf*, operator<<(bool), (const void*) and
@@ -6766,6 +6823,17 @@
                  ;; (a member operator's object is the first operand, a non-member's first operand its first argument:
                  ;; `prefix` false)
                  [cid (if prefix (cons oc convs) convs)])
+        ;; (cpp-extfloat, the checker: a floating conversion to a lesser or unordered conversion rank between types not both
+        ;; standard is no standard conversion ([conv.double]/1, P1467R9), ics's :fp-bad: g++ 15.2 takes such a candidate only when
+        ;; no other is viable and it is the only one so (with its pedwarn at the conversion), two or more "no matching function"
+        ;; (by hand; cpp23/ext-floating3.C's bar(f128x))
+        viable (if (and (checking?) (some (fn [[_ convs]] (some :fp-bad convs)) viable))
+                 (let [bad? (fn [[_ convs]] (some :fp-bad convs))
+                       good (remove bad? viable)]
+                   (cond (seq good) good
+                         (= 1 (count viable)) viable
+                         :else []))
+                 viable)
         tiebreak (or (:tiebreak @hooks) (constantly false))
         better (fn [[fa a] [fb b]] (and (every? true? (map #(not (better-ics? %2 %1)) a b))
                                         (or (some true? (map better-ics? a b)) (tiebreak fa fb n0))))
@@ -6999,6 +7067,10 @@
     (= ft tt) nil
     (not (abi/arith? tt)) nil
     (and (abi/enum? ft) (:scoped (abi/enm (:id ft)))) nil
+    ;; (cpp-extfloat: [dcl.init.list]/7.2 since P1467R9, a floating type to one whose conversion rank is neither greater than nor
+    ;; equal to its, an extended type's too: :fp-ext, a constant whose value is finite and in the target's range excepted)
+    (and (abi/floating? ft) (abi/floating? tt) (not (and (narrow-fp-rank (abi/bn ft)) (narrow-fp-rank (abi/bn tt)))))
+    (let [c (abi/fp-rank-cmp tt ft)] (when (or (nil? c) (neg? (long c))) :fp-ext))
     (abi/floating? ft) (cond (not (narrow-fp-rank (abi/bn ft))) nil
                              (abi/integral? tt) :always
                              (not (narrow-fp-rank (abi/bn tt))) nil
@@ -7022,6 +7094,9 @@
   [k ft tt v]
   (case k
     :always true
+    :fp-ext (let [d (double v)
+                  mx (case (abi/fp-format-of tt) :half 65504.0 :bfloat 3.3895313892515355E38 :single (double Float/MAX_VALUE) Double/MAX_VALUE)]
+              (and (not (Double/isNaN d)) (not (Double/isInfinite d)) (> (Math/abs d) mx)))
     :fp-range (let [d (double v)]
                 (and (not (Double/isNaN d)) (not (Double/isInfinite d)) (= :float (abi/bn tt))
                      (> (Math/abs d) (double Float/MAX_VALUE))))
@@ -7043,6 +7118,8 @@
                  (:codegen/not-constant d) :nonconst
                  :else :unknown)))))
 
+(def ^:dynamic *cx-requirement* "cpp-extfloat: a requires-expression's expression requirement being analyzed (the checker)" false)
+
 (defn- narrow-check!
   "The initializer `init` (init-for's) of an object of type `t` from the list element `src`: a narrowing conversion refused
   (:narrowing, at the element). `init` returned."
@@ -7056,7 +7133,10 @@
                   (when-let [k (narrowing-kind ft tt)]
                     (let [v (narrow-value e)]
                       (when (cond (= v :unknown) false
-                                  (= v :nonconst) (and *pedantic-errors* (not (abi/enum? ft)))
+                                  ;; (cpp-extfloat: in a requirement's expression the narrowing is the substitution's failure,
+                                  ;; [expr.prim.req.simple]/1 with [dcl.init.list]/3: libstdc++'s C++23 complex<T>(const complex<U>&),
+                                  ;; explicit(!requires(_Up __u) { value_type{__u}; }), cpp23/ext-floating12.C)
+                                  (= v :nonconst) (and (or *pedantic-errors* *cx-requirement*) (not (abi/enum? ft)))
                                   :else (narrows-value? k ft tt v))
                         (throw (ex-info (str "codegen: narrowing conversion from '" (narrow-type-name ft) "' to '" (narrow-type-name tt) "'"
                                              (when (= v :nonconst) " (not a constant)"))
@@ -10554,7 +10634,8 @@
    :ushort "short unsigned int" :char16 "char16_t" :int "int" :uint "unsigned int" :char32 "char32_t" :wchar "wchar_t"
    :long "long int" :ulong "long unsigned int" :llong "long long int" :ullong "long long unsigned int" :i128 "__int128"
    :u128 "__int128 unsigned" :float "float" :double "double" :ldouble "long double" :void "void" :nullptr "std::nullptr_t"
-   :float16 "_Float16" :float128 "__float128"})
+   :float16 "_Float16" :float128 "__float128" :float32 "_Float32" :float64 "_Float64" :float128n "_Float128" :float32x "_Float32x"
+   :float64x "_Float64x" :bf16 "__bf16"})
 
 (declare gcc-type-str gcc-spell)
 
@@ -10852,7 +10933,10 @@
     "CXXBoolLiteralExpr" {:op :int :v (if (:value n) 1 0) :ty abi/bool* :cat :pr}
     "FloatingLiteral" (let [qt (get-in n [:type :qualType])]
                         {:op :float :v (Double/parseDouble (:value n)) :lit (when (= qt "long double") (:value n))
-                         :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) "_Float16" (abi/b :float16) "__float128" (abi/b :float128) abi/double*) :cat :pr})
+                         :ty (case qt "float" abi/float* "long double" (abi/b :ldouble) "_Float16" (abi/b :float16) "__float128" (abi/b :float128)
+                               ;; (cpp-extfloat: GCC's suffixes, arbace.repr.cpp.lit/*gnu-floats*)
+                               "_Float32" (abi/b :float32) "_Float64" (abi/b :float64) "_Float128" (abi/b :float128n)
+                               "_Float32x" (abi/b :float32x) "_Float64x" (abi/b :float64x) "__bf16" (abi/b :bf16) abi/double*) :cat :pr})
     ;; (cpp-s12, CP382 (a): a wide or Unicode literal, L, u, U, as its code units, :units, the element type's width
     ;; each: UTF-32 for U and L (wchar_t on x86-64 Linux), UTF-16 for u, as the parser encoded them; u8's char8_t a narrow
     ;; literal's bytes. <format>'s _GLIBCXX_WIDEN(S) is `_Widen<_CharT>(S, L##S)`, so every char instantiation names the
@@ -10928,7 +11012,7 @@
                                                                                           (re-find #"^codegen: a scope of a non-class" (str (ex-message e)))))
                                                                    false (throw e))))
                                         "NestedRequirement" (constraint-satisfied? (:scope c) (first (:inner r)))
-                                        (let [x (analyze c (first (:inner r)))]
+                                        (let [x (binding [*cx-requirement* (checking?)] (analyze c (first (:inner r))))]
                                           (cond
                                             ;; (CX12, CP281 (a): a compound requirement's return-type-requirement,
                                             ;; [expr.prim.req.compound]/1.3: the type-constraint's immediately-declared
@@ -12707,8 +12791,15 @@
                        {:s :try :body {:s :block :items (cond-> [body] fall (conj fall))} :handlers [{:body ue}]}
                        {:s :label :name "__coro_final" :body {:s :expr :e fin-aw}}]}))
 
+(declare analyze-fn!*)
+
 (defn analyze-fn!
   "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
+  [fid]
+  ;; (cpp-extfloat: a body analyzed while a requirement is (an instantiation it asks) is no requirement's expression)
+  (if *cx-requirement* (binding [*cx-requirement* false] (analyze-fn!* fid)) (analyze-fn!* fid)))
+
+(defn- analyze-fn!*
   [fid]
   (let [f (fnd fid)
         cls (:cls f)

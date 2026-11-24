@@ -19,6 +19,28 @@
   ^String []
   (or (System/getenv "REPR_CPP_HOST") (host/gxx-dir)))
 
+;; cpp-extfloat (2026-11-24): the own front end (arbace.repr.cpp.diag binds this true) reads GCC's dialect, whose x86-64 target has
+;; C++23's extended floating-point types ([basic.extended.fp], P1467R9): its predefined macros are clang's (as the native reader's)
+;; plus the target's extended floating types' that clang lacks, as Arbace's own C++ target's GNU half has them (cpp/target/host's
+;; predefined/gxx, made by test/cpp/predef.ae from c/target/abi.edn's :floats and cpp/target/dialect.edn's :from-year): the
+;; __FLTnn_*, __FLTnnX_* and __BFLT16_* families at every standard and C++23's __STDCPP_FLOATnn_T__ and __STDCPP_BFLOAT16_T__
+(def ^:dynamic *gnu-floats* false)
+
+(def ^:private ext-float-macro #"#define (__STDCPP_B?FLOAT\d+_T__|__B?FLT\d+X?_[A-Z0-9_]+__)\b.*")
+
+(defn- ext-float-lines
+  "The lines of the GNU half's predefined macros of `std` (cpp/target/host/predefined/gxx) of the extended floating types that
+  `text` (clang's) does not define."
+  ^String [^String dir ^String std ^String text]
+  (let [f (java.io.File. (str dir "/predefined/gxx/" std ".h"))]
+    (if-not (.exists f)
+      ""
+      (let [have (set (map second (re-seq #"(?m)^#define (\S+)" text)))]
+        (apply str (for [l (str/split-lines (slurp f))
+                         :let [[_ n] (re-matches ext-float-macro l)]
+                         :when (and n (not (have n)))]
+                     (str l "\n")))))))
+
 (defn- latin1 ^String [^String path]
   (String. (java.nio.file.Files/readAllBytes (.toPath (java.io.File. path))) "ISO-8859-1"))
 
@@ -71,6 +93,7 @@
         [base nm] (if (and (str/ends-with? path (str "/" main)) (not (str/starts-with? main "/")))
                     [(subs path 0 (- (count path) (count main) 1)) main]
                     ["." path])
+        h (cond-> h *gnu-floats* (update-in [:predefined (:std fc)] #(str % (ext-float-lines (host-dir) (:std fc) (str %)))))
         cfg (host/config h fc base)
         t0 (System/nanoTime)
         r (pp/preprocess cfg nm)
@@ -84,7 +107,8 @@
                ;; keeps, is not read (gxx-modules' target-aarch64-1_a.C, `#include <arm_sve.h>` then `export module M;`)
                (ps/tokens (cond-> (:tokens r) (:closed-token r) pop) nm main src (cond-> (ps/keywords year (and gnu (not (some #{"-fno-gnu-keywords"} args))) concepts)
                                                     char8 (conj "char8_t")
-                                                    coroutines (into #{"co_await" "co_return" "co_yield"}))))
+                                                    coroutines (into #{"co_await" "co_return" "co_yield"})
+                                                    *gnu-floats* (into #{"_Float32" "_Float64" "_Float128" "_Float32x" "_Float64x"}))))
         _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: tokens %.2f s" (/ (- (System/nanoTime) t1) 1e9)))))
         u (binding [lit/*char8* char8 ps/*exec-latin1* exec-latin1]
             (ps/parse-unit toks main src year gnu (cond-> [(:std fc)] char8 (conj "-fchar8_t") exec-latin1 (conj "-fexec-charset=ISO-8859-1"))))

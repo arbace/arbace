@@ -11233,3 +11233,51 @@ recorded; cpp2a/spaceship-synth9.C's failing row reads differently, the same on 
 Not built: an aggregate initialization's default member initializer as an immediate invocation (prop2's k<int>, GCC's xfail);
 consteval lambdas' conversions and a consteval function's address in a block (diag.ae's text check as before); the escalation of a
 header's functions (left immediate-escalating, never marked).
+## As built: cpp-extfloat, C++23's extended floating-point types in the own front end (2026-11-24; branch `cpp-extfloat-1124` from mac/next `440cf0273`)
+
+The burst's C++ read stream for [basic.extended.fp] (P1467R9), after cpp-sweep (3)'s design. Each rule from the standard's text and
+g++ 15.2's behaviour (the tests' records and probes by hand with the host's g++, named below); no GCC or clang code read.
+
+- **The target's answers**: Arbace's own C++ target already defines them in its GNU half (cpp/target/host/predefined/gxx, made by
+  test/cpp/predef.ae: c/target/abi.edn's :floats give the __FLT16_*, __FLT32_*, __FLT64_*, __FLT128_*, __FLT32X_*, __FLT64X_* and
+  __BFLT16_* families at every standard, cpp/target/dialect.edn's :from-year 2023 the __STDCPP_FLOAT16_T__, __STDCPP_FLOAT32_T__,
+  __STDCPP_FLOAT64_T__, __STDCPP_FLOAT128_T__ and __STDCPP_BFLOAT16_T__; `bin/repr-cpp target verify`: 37 files as made, no change).
+  The design note's gap was the own front end's input: the native reader reads the target's clang half (as clang 23 reads Arbace's
+  target, CP248 (a)), which has none of them, so cpp23/ext-floating3.C stopped at its `#error`. Now arbace.repr.cpp.diag binds
+  `native/*gnu-floats*`: the predefined macros are the clang half's plus the GNU half's extended-floating ones the clang half lacks
+  (`ext-float-lines`, the same standard's file), so the own front end sees GCC's x86-64 set; the native-check and the code generator
+  (cppi) keep the clang half alone.
+- **The lexer and the keywords** (the own front end alone, `lit/*gnu-floats*` and the keyword set): GCC's suffixes f16, f32, f64,
+  f128, bf16 ([lex.fcon]) and f32x, f64x, q, w: _Float16, _Float32, _Float64, _Float128, __bf16, _Float32x, _Float64x, __float128
+  (q; _Float128 and __float128 distinct types in GCC's C++), long double (w); _Float32, _Float64, _Float128, _Float32x and _Float64x
+  keywords at every standard (g++ 15.2 by hand: types at -std=c++98 too, the suffixes pedantic below C++23, not modelled).
+  `using bfloat16_t = decltype (0.0bf16);` (ext-floating.h, libstdc++'s c++config.h under __BFLT16_DIG__) reads.
+- **The types** (arbace.cpp.abi): :float32, :float64, :float128n (_Float128; :float128 stays GNU's __float128), :float32x, :float64x,
+  :bf16 beside :float16, with their sizes, LLVM types (float, double, fp128, double, x86_fp80, bfloat), GCC's names and Itanium's
+  manglings DF32_, DF64_, DF128_, DF32x, DF64x, DF16b (g++ 15.2's, by hand).
+- **[conv.rank]/2** (`abi/fp-rank-cmp`, `fp-subrank`): ranks by the formats' sets of values, half and bfloat unordered, both below
+  single (float, _Float32) below double (double, _Float32x, _Float64) below the x87's (long double, _Float64x) below quad (__float128,
+  _Float128); in a format the standard type's subrank least, then _Float32x below _Float64 and __float128 below _Float128 (g++ 15.2's
+  usual arithmetic conversions by hand). [expr.arith.conv] by them: the greater rank, then subrank; unordered ranks GCC's "invalid
+  operands" (arith-common).
+- **[conv.double]/1**: a floating conversion to a lesser or unordered rank between types not both standard is no standard conversion
+  (`fp-lesser?`): implicitly GCC's pedwarn "ISO C++ does not allow converting to 'T' from 'F' with greater (unordered) conversion
+  rank" [-Wnarrowing], an error under -pedantic-errors, -Werror=narrowing or -Werror (`*fp-rank-error*`, the :narrowing rule, its
+  #pragma GCC diagnostic too); in overload resolution such a candidate (ics's :fp-bad) is taken only when it is the only viable one,
+  two or more "no matching function" (g++ 15.2 by hand: f(float) alone takes f(1.0F128) with the pedwarn, f(float) and f(double) do
+  not, f(float) and f(long) take long).
+- **[over.ics.rank]/4.5** (`fp-better?`): of two arithmetic conversions from (or to) one type FP1, the one between FP1 and an FP2 of
+  equal rank is better when the other's type T3 is no floating type, of another rank, or of a lesser subrank than FP2's (ics's :arith).
+- **[dcl.init.list]/7.2** since P1467R9: narrowing between floating types where either is extended by the ranks (:fp-ext), a finite
+  constant in the target's range excepted; a requirement's expression narrowing a non-constant is the requirement's substitution
+  failure (`*cx-requirement*`, libstdc++'s C++23 `explicit(!requires(_Up __u) { value_type{__u}; })` of complex), "narrowing
+  conversion from" a sure failure there.
+- **A constexpr variable at namespace scope** usable in constant expressions whatever its type (its entry keeps :cx-constexpr alone;
+  `constexpr float fx = 5.0f; static_assert (fx == 5.0f);` had been "not usable", ext-floating3.C's static_asserts).
+
+Targets: cpp23/ext-floating3.C and cpp23/ext-floating17.C own passes (own pass 2,438 -> 2,440, none lost over two runs of 291 files
+each: the own passes naming a floating type, requires or narrowing, including a standard header or read at C++23/26; C++ read 6,035 /
+0 / 248 -> 6,037 / 0 / 246). Not built, with the cause: cpp23/ext-floating12.C (<complex> and
+<stdfloat> at C++23) past the read's 300 s, and a probe of <complex> alone with four conversions past 15 minutes in Sema (preprocess
+32 s, parse 28 s): the checker's speed over <complex>, not the types; the suffixes' pedantic diagnostics below C++23 (GCC's "'f32' or
+'F32' suffix on floating constant only available with '-std=c++23'"), which no target needs.
