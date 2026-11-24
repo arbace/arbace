@@ -174,12 +174,16 @@
   [l vidx fields]
   (let [vs (:variants l) size (long (:size l))
         buf (long-array size)
+        ;; rust-l1 (C6): the bytes written (the fields' own initialized bytes, the tag's); the rest, padding, uninitialized as in
+        ;; CTFE's allocation (a static's `[9 x i8] zeroinitializer, [3 x i8] undef`)
+        ini (long-array size)
         relocs (atom [])
-        put! (fn [off bs] (doseq [[i b] (map-indexed vector bs)] (aset buf (int (+ (long off) i)) (long b))))
+        put! (fn [off bs] (doseq [[i b] (map-indexed vector bs)] (aset buf (int (+ (long off) i)) (long b)) (aset ini (int (+ (long off) i)) 1)))
         place! (fn [offs]
                  (when (not= (count offs) (count fields)) (throw (ex-info "a variant's fields and its layout's differ" {})))
                  (doseq [[o f] (map vector offs fields)]
                    (put! o (:bytes f))
+                   (when-let [fi (:init f)] (doseq [[i b] (map-indexed vector fi)] (when (zero? (long b)) (aset ini (int (+ (long o) i)) 0))))
                    (doseq [[ro a] (:relocs f)] (swap! relocs conj [(+ (long o) (long ro)) a]))))]
     (case (str (first vs))
       "single" (do (when-not (= vidx (second vs)) (throw (ex-info "another variant" {})))
@@ -200,7 +204,7 @@
           (let [v (mod (bigint tv) (reduce * 1N (repeat bits 2N)))]
             (put! off (for [i (range (quot (long bits) 8))] (.intValue (.and (.shiftRight (biginteger v) (int (* 8 i))) (biginteger 255))))))))
       (throw (ex-info (str "a layout's variants " (pr-str vs)) {})))
-    {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs))}))
+    {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs)) :init (vec (map int ini))}))
 
 (defn- alloc-bytes+relocs
   "RF17: our allocation ID's bytes and its pointers (write_allocation's `╾allocN<imm>╼`, a pointer's 8 bytes): {:bytes [B...]
@@ -233,6 +237,12 @@
 (def ^:dynamic *fn-alloc*
   "queue 542: within a promoted's evaluation, (fn [SYMBOL] ALLOC): a function's allocation (GlobalAlloc::Function) named in the
   body's data, for a closure reified to a function pointer by CTFE (thread_local!'s LocalKey: its inline const's closure)"
+  nil)
+(def ^:dynamic *data-alloc*
+  "rust-l1 (C6): within a body's constant evaluation (a promoted's, or runtime-body's fix-uneval of a named or inline constant),
+  (fn [{:keys [bytes align relocs]}] ALLOC): a nested allocation of the body's data (CTFE's interned memory), its name, for a
+  library constant whose value holds pointers (a &str, a &[&str], LocalKey's function pointer, io::const_error!'s
+  &SimpleMessage)"
   nil)
 (def ^:dynamic *closure-fnptr*
   "queue 542: (fn [CLOSURE-TYPE-FORM] SYMBOL), a closure's ClosureOnceShim's symbol (mono's closure-once-symbol), for CTFE's
@@ -417,6 +427,11 @@
                        ref (let [tp (nth rv 2)
                                  deref? (and (seq? tp) (= 3 (count tp)) (= '(deref) (nth tp 2)))]
                              (cond
+                               ;; rust-l1 (C6): a constant's own body borrowing into _0 (`const { &SimpleMessage::new(..) }`): the
+                               ;; borrowed value a nested allocation, _0 its pointer
+                               (and (= l 0) value? nest-alloc (not deref?))
+                               (let [v (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv))]
+                                 (swap! env assoc 0 {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty 0)}))
                                (= l 0) (reset! result (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv)))
                                ;; RF15: `&*p` of a pointer local: the same pointer (a reborrow)
                                deref? (swap! env assoc l (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty l)))
@@ -544,6 +559,10 @@
                                                                                                   ;; queue 542: a deferred static's value by CTFE
                                                                                                   (when-let [sv (:static-value facts)] (sv nm)))]
                                                              {:bytes (apply str (map #(format "%02x" %) bs))
+                                                              ;; rust-l1 (C6): a CTFE value's uninitialized bytes (padding), undef in the global
+                                                              :init (when-let [sv (:static-value facts)]
+                                                                      (when-not (alloc-bytes+relocs ours id)
+                                                                        (when-let [ini (:init (sv nm))] (when (= (count ini) (count bs)) (apply str ini)))))
                                                               :align (or (when-let [sv (:static-value facts)] (when-not (alloc-bytes+relocs ours id) (:align (sv nm))))
                                                                          (parse-long (or (second (re-find #"align: (\d+)\)" (get (:alloc-texts ours) id))) "1")))
                                                               :relocs (vec (for [[off tid] rs]
@@ -583,7 +602,7 @@
                                                       (when-not (some #(= a (first %)) @static-data)
                                                         (swap! static-data conj [a {:kind :fn :symbol sym}]))
                                                       a))
-                                 {:keys [bytes align relocs]} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts)]
+                                 {:keys [bytes align relocs]} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts) *data-alloc* nest-alloc]
                                                                      (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
                                                                                     (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false))
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false #(str "promoted " idx " of " (:name ours) ": " (.getMessage e))))
@@ -677,7 +696,28 @@
                                             ;; queue 524 (C3): a library constant's integer literal from its module's source
                                             (when (:local-const facts) (mono/src-const-value (second x))))]
                                (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
-                               (do (when-let [f (:const! facts)] (f false #(str "unevaluated " (second x) " in " (:name ours)))) x))
+                               ;; rust-l1 (C6): a library constant's whole value (pointers too: a &str, a tuple, an inline
+                               ;; const's `&SimpleMessage`), each allocation it makes the body's data, the constant itself an
+                               ;; allocation read in place (`(indirect ALLOC 0)`: codegen's alloc-const! reads a scalar or a
+                               ;; pair from its bytes, a memory value by reference), as rustc's codegen takes a constant's
+                               ;; interned allocation
+                               (if-let [w (when-let [cw (:const-whole facts)]
+                                            (let [n (atom 0)
+                                                  da (fn [{:keys [bytes align relocs]}]
+                                                       (let [a (str "allocK" (Math/abs (long (hash (second x)))) "n" (swap! n inc))]
+                                                         (swap! static-data conj [a {:kind :memory :align (or align 1) :mutable false
+                                                                                     :bytes (apply str (map #(format "%02x" %) bytes))
+                                                                                     :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                         a))
+                                                  fa (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
+                                                                 (when-not (some #(= a (first %)) @static-data)
+                                                                   (swap! static-data conj [a {:kind :fn :symbol sym}]))
+                                                                 a))]
+                                              (when-let [r (binding [*data-alloc* da *fn-alloc* fa *closure-fnptr* (:closure-fnptr facts)]
+                                                             (cw (second x) (nth x 2) (nth x 3)))]
+                                                (da r))))]
+                                 (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [(list 'indirect (symbol w) 0)] (drop 4 x))))
+                                 (do (when-let [f (:const! facts)] (f false #(str "unevaluated " (second x) " in " (:name ours)))) x)))
                              x))
         ;; RF17 (RFP50 (a)'s first part): a closure reified as a function pointer (ClosureFnPointer) carries its ClosureOnceShim's
         ;; symbol (mono's), whose body is the record's (a shim of core's FnOnce::call_once)
@@ -830,7 +870,13 @@
     (or (get @native-core-cache f)
         ;; queue 443: several files, `:`-separated (core's, then alloc's and std's from bin/rust-front lib-export)
         (let [m (into {} (for [^String f1 (str/split f #":") :when (.exists (File. f1))
-                               x (read-forms (slurp f1)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
+                               x (read-forms (slurp f1)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)
+                               ;; rust-l1 (C6): an inline const's body (its key `ITEM-{constant#N}`, the export's :def its parent's)
+                               ;; by its own def path, `ITEM::{constant#N}`, not in its parent's place
+                               :let [sfx (second (re-find #"((?:-\{constant#\d+\})+)$" (str (:key e))))
+                                     e (if (and sfx (not (str/ends-with? (str (:def e)) "}")))
+                                         (assoc e :def (str (:def e) (str/replace sfx "-{" "::{")))
+                                         e)]]
                            [(:def e) e]))]
           (swap! native-core-cache assoc f m)
           m))
@@ -1014,11 +1060,37 @@
 
 (defn- has-proj? [t] (boolean (some #(and (vector? %) (= :proj (first %))) (tree-seq coll? seq t))))
 
+(def ^:private opaques-cache (atom {}))
+(defn- export-opaques
+  "rust-l1 (C6): the library's opaque types' hidden types the exports carry (each entry's :opaques), {PATH TYPE}"
+  []
+  (let [m (native-core-map) k (System/identityHashCode m)]
+    (or (get @opaques-cache k)
+        (let [os (into {} (for [e (vals m) [p t] (:opaques e)] [p t]))]
+          (swap! opaques-cache assoc k os)
+          os))))
+
+(defn- reveal-opaques
+  "rust-l1 (C6): T with each library opaque type of a non-generic definer (`[:ext-opaque PATH []]`) its hidden type, as
+  Reveal::All's normalization gives a mono item's types (std's panic_output's `impl io::Write`: Stderr)"
+  [t]
+  (if (and (coll? t) (some #(and (vector? %) (= :ext-opaque (first %))) (tree-seq coll? seq t)))
+    (let [os (export-opaques)]
+      (letfn [(w [x] (cond (and (vector? x) (= :ext-opaque (first x)) (every? #(and (vector? %) (#{:re-erased :re-static} (first %))) (nth x 2 [])))
+                           (if-let [h (get os (second x))] (w h) x)
+                           (vector? x) (mapv w x)
+                           (map? x) (into {} (for [[a b] x] [a (w b)]))
+                           (seq? x) (apply list (map w x))
+                           :else x))]
+        (w t)))
+    t))
+
 (defn- instance-normalize
   "An instance's type: the builtin projections (builtin-normalize), then the rest normalized by the run's solver
-  (*normalize-ty*) when one is left (an associated type of a library impl: `<Chars<'_> as Iterator>::Item`)"
+  (*normalize-ty*) when one is left (an associated type of a library impl: `<Chars<'_> as Iterator>::Item`); rust-l1: the
+  library's opaque types revealed first (reveal-opaques)"
   [t]
-  (let [t (builtin-normalize t)]
+  (let [t (builtin-normalize (reveal-opaques t))]
     (if (and *normalize-ty* (has-proj? t))
       (builtin-normalize (try (*normalize-ty* t) (catch Throwable _ t)))
       t)))
@@ -1060,7 +1132,7 @@
                       (and (re-matches #"core::any::\{impl#\d+\}::of" (str *instance-def*)) (= "::{constant#0}" sfx)
                            (= 1 (count args)) (vector? (first args)) (not (some #(and (vector? %) (#{:param :proj :infer} (first %))) (tree-seq coll? seq (first args)))))
                       (when-let [hx (mono/type-id-hash (first args))] (list 'indirect-type-id hx)))]
-        [text val]))))
+        [text val sfx]))))
 
 (defn- promoted-text
   "queue 512: a promoted constant of the reprinted body (PromoteTemps' `(unevaluated NAME [] IDX)`, NAME the generic body's MIR
@@ -1089,7 +1161,7 @@
         (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
         (= 'const (first y))
         (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
-              [itext ival] (when (and nc (nil? (first nc))) (inline-const tyf v args))
+              [itext ival isfx] (when (and nc (nil? (first nc))) (inline-const tyf v args))
               ptext (promoted-text v args)
               text (cond (and t (= :fndef (first t))) (build/fn-const-text t)
                          itext itext
@@ -1097,7 +1169,15 @@
                          (and nc (nil? (first nc))) (throw (ex-info (str "an inline const outside the reprinted body (" (pr-str (second v)) ")") {}))
                          nc (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (first nc) (second nc))))
                          :else (second y))]
-          (with-meta (apply list 'const text (concat (take 1 (drop 2 y)) (if ival [ival] (drop 3 y)))) m))
+          (with-meta (apply list 'const text (concat (take 1 (drop 2 y))
+                                                     (cond ival [ival]
+                                                           ;; rust-l1 (C6): an inline const of a non-generic item, its export's
+                                                           ;; key beside it (`ITEM::{constant#N}`, the def path of its body in the
+                                                           ;; export), which eval-const-whole evaluates
+                                                           (and isfx (empty? args) (seq? (nth y 3 nil)))
+                                                           (cons (vary-meta (nth y 3) assoc :inline-def (str *instance-def* isfx)) (drop 4 y))
+                                                           :else (drop 3 y))))
+                     m))
         :else (if m (with-meta y m) y)))
     (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
     (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(instance-normalize (c/subst % args)) v) (reprint v args))]))
@@ -1157,7 +1237,7 @@
   [d seen]
   (when-let [cb (and (string? d) (not (seen d)) (get (const-bodies) d))]
     (try
-      (let [b (reprint cb [])
+      (let [b (binding [*instance-def* d] (reprint cb []))   ; rust-l1: its inline consts named under it (thread_local!'s closure)
             lc (fn [_ _ v] (let [[d2 as] (:nc (meta v))] (when (empty? as) (eval-local-const d2 (conj seen d)))))
             lay (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
             ;; queue 464 (462-4 (a)): a call of a const fn (alloc's ZERO_CAP = Cap::new_unchecked(0)): its exported body at
@@ -1184,6 +1264,60 @@
   "queue 542 (C6): an atom of the const fns a static's evaluation called that no export holds (their keys for the next export,
   logged as `lib-unit inline wanted DEF` so that lib-unit inline-keys takes them)"
   nil)
+
+(def ^:private const-whole-depth (atom 0))
+(declare eval-const-whole)
+(defn- const-whole-body
+  "rust-l1 (C6): a library constant's exported body by its def path D: a named constant's (export-consts', const-bodies) or an
+  inline const's (the export's `ITEM::{constant#N}` body, its parent's identity: a non-generic item's), reprinted in the
+  program's crate; nil when the export has none"
+  [d]
+  (if-let [cb (get (const-bodies) d)]
+    (binding [*instance-def* d] (reprint cb []))
+    (when-let [e (when (re-find #"::\{constant#\d+\}$" (str d)) (get (native-core-map) d))]
+      (when-not (pos? (long (or (:generics e) 0)))
+        (binding [*instance-def* (str/replace (str d) #"(::\{constant#\d+\})+$" "")]
+          (:body (core-instance e [])))))))
+
+(defn- eval-const-whole
+  "rust-l1 (C6): a library constant's whole value as CTFE interns it, pointers too (MAIN_SEPARATOR_STR's &str, UNWIND_DATA_REG's
+  tuple, LocalKey's function pointer, io::const_error!'s inline const `&SimpleMessage`): its exported body (const-whole-body)
+  evaluated by eval-promoted with its aggregates laid out by UNIT-VARIANT and LAY, its strings and borrowed temporaries each a
+  nested allocation of the body's data (*data-alloc*), the constants it names in turn and the const fns it calls by their
+  exported bodies (eight calls deep at most): {:bytes :align :relocs}, else nil. Only within *data-alloc*"
+  [d unit-variant lay]
+  (when (and *data-alloc* (string? d) (< @const-whole-depth 6))
+    (when-let [b (const-whole-body d)]
+      (swap! const-whole-depth inc)
+      (try
+        (let [raw-alloc (fn [kind id]
+                          (let [bs (or (alloc-bytes b id) (throw (ex-info (str "no bytes for allocation " id " of " d) {})))]
+                            [(*data-alloc* {:bytes bs :align 1 :relocs []}) (count bs)]))
+              lc (fn [_ _ v] (let [[d2 as] (:nc (meta v)) d2 (if (string? d2) d2 (:inline-def (meta v)))]
+                               (when (and (string? d2) (empty? as))
+                                 (or (iface-const-value d2) (eval-local-const d2 #{})
+                                     ;; a constant of another module whose value is a literal in its source (std's HAS_PREFIXES)
+                                     (mono/src-const-value (str "const " d2))
+                                     (eval-const-whole d2 unit-variant lay)))))
+              depth (atom 0)
+              call (fn call [cd targs vals]
+                     (let [e (get (native-core-map) cd)]
+                       (when (and (nil? e) *ctfe-wanted*) (swap! *ctfe-wanted* conj [cd (vec targs)]))
+                       (when (and e (< @depth 8))
+                         (swap! depth inc)
+                         (try (binding [*arg-values* vals]
+                                (eval-promoted (:body (core-instance e (vec targs))) raw-alloc *data-alloc* unit-variant nil nil lay lc true))
+                              (catch Throwable x
+                                (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-const-whole: the call of" cd (.getMessage x))))
+                                nil)
+                              (finally (swap! depth dec))))))
+              r (binding [*const-call* call *arg-values* nil]
+                  (eval-promoted b raw-alloc *data-alloc* unit-variant nil nil lay lc true))]
+          (when (vector? (:bytes r)) (select-keys r [:bytes :align :relocs])))
+        (catch Throwable e
+          (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-const-whole:" d (.getMessage e))))
+          nil)
+        (finally (swap! const-whole-depth dec))))))
 
 (defn- eval-static-body
   "queue 542 (C6): a static's initializer body CB (the export's, construct_const's) evaluated as CTFE evaluates it into the
@@ -2841,6 +2975,9 @@
                       acc))
               inl-name (fn [d args] (str "lib-inline " d (when (seq args) (pr-str args))))
               ctfe-wanted (atom #{})   ; queue 542: the const fns a static's evaluation wanted
+              ;; rust-l1 (C6): a constant's aggregates laid out by mono, its types' layouts (eval-const-whole)
+              unit-variant* (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
+              lay* (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
               cf (in-lib #(mono/core-facts n (concat (for [[d i] insts :when i] {:def d :args [] :name (str "lib " d) :body (:body i)})
                                                      (for [[d args _ i] inl :when i] {:def d :args args :name (inl-name d args) :body (:body i)}))))
               ;; the function constants' symbols, operands' too (a function reified as a pointer), beside the calls'
@@ -2920,7 +3057,14 @@
                   ;; (eval-local-const); with it fix-uneval also reads an integer literal from the constant's module source
                   :local-const (fn [_ _ v] (let [[d as] (:nc (meta v))]
                                              (when (and (string? d) (empty? as))
-                                               (in-lib #(or (iface-const-value d) (eval-local-const d #{}))))))}
+                                               (in-lib #(or (iface-const-value d) (eval-local-const d #{})
+                                                            ;; rust-l1 (C6): within a promoted's evaluation, a whole value
+                                                            ;; (LocalKey's function pointer: &LOCAL_PANIC_COUNT)
+                                                            (when *data-alloc* (eval-const-whole d unit-variant* lay*)))))))
+                  ;; rust-l1 (C6): a named or inline constant's whole value (eval-const-whole), for fix-uneval
+                  :const-whole (fn [_ _ v] (let [[d as] (:nc (meta v)) d (if (string? d) d (:inline-def (meta v)))]
+                                             (when (and (string? d) (empty? as))
+                                               (in-lib #(eval-const-whole d unit-variant* lay*)))))}
               out (vec (for [[d i why] insts]
                          (if-not i
                            [d nil why]

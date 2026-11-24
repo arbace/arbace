@@ -19324,3 +19324,37 @@ executables, and the host's C records rerun on its train.
   (MAIN_SEPARATOR_STR), inline consts of bodies, MAP_FAILED (a pointer), FULL_BACKTRACE_DEFAULT (cfg_select!), UNWIND_DATA_REG (a
   tuple).
 - Not recorded (the VM's records would be -linux-arm64); the main host's amd64 commands are in the queue report.
+
+## 2026-11-24: rust-l1-1124 (the main host): C6's L1, round 11: constants' whole values, inline consts, statics' padding, two ABI points (WIP)
+
+From 542's head 57a908970 (branch `rust-l1-1124`), on amd64. The VM's caches (queue asset `assets/542-c6-caches.tar.xz`, sha256
+1b217d85..; its absolute paths rewritten to this worktree; the front end's cfg is fixed to x86_64-musl in code, so the facts carry
+over) and std's IR at the pin made again here (`bin/rsi std-build --jobs 4` into the worktree's `.tmp/rsi/std`: 120 units, 56 MB,
+equal to test/rust/runtime/ir.sha256; the main host's std-sgn was gone). The VM's measure reproduced: **std 180 / 39 / 106**.
+
+- `eval-const-whole` (build_run): a library constant's whole value as CTFE interns it (pointers too), its strings and borrowed
+  temporaries nested allocations of the body's data (`*data-alloc*`); runtime-body's fix-uneval makes the constant an allocation read
+  in place (`(indirect ALLOC 0)`), a promoted's evaluation reaches it through :local-const. A constant's own body borrowing into _0
+  (`const { &SimpleMessage::new(..) }`) nests the value. UNWIND_DATA_REG (a tuple), the inline consts, MAP_FAILED and SIG_DFL now
+  evaluate.
+- Inline consts of non-generic items: the export's `ITEM-{constant#N}` keys build their bodies (core-check's module run already did);
+  `native-core-map` files such an entry under `ITEM::{constant#N}` (its :def was its parent's: it replaced the item), reprint marks
+  the unevaluated inline const with `:inline-def`, eval-const-whole evaluates it. `Path::components` is equal.
+- `mono/src-const-value`: `!0`, `0 as T`, parentheses, raw pointer and libc's integer aliases (libc's MAP_FAILED, SIG_DFL); library/'s
+  other crates' roots (unwind's sources, for its `#[repr(C)]` enum).
+- Statics' padding: variant-bytes keeps an init mask (the fields' and the tag's bytes), a deferred static's CTFE value carries it and
+  codegen's static runs split at it (`[9 x i8] zeroinitializer, [3 x i8] undef`, as const_alloc_to_llvm): `env_read_lock` is equal
+  (with sync::poison's `Flag::new` exported, a static's wanted const fn).
+- v0 of an `extern "C"` fn pointer (`KC`, another ABI `K` and its name): getrandom, gettid and thread_local's destructor list build.
+- A fn pointer cast to an integer is PointerExposeProvenance (stack_overflow's `signal_handler as .. as sighandler_t`): its init
+  exports.
+- codegen: an `extern "C"` callee returning a pair of integers or pointers returns `{ i64, i64 }` (PassMode::Cast), stored through
+  a scratch, copied into the layout's place and read back (rustc's store_return); catch_unwind::cleanup's call now matches, its next
+  difference the raw `*mut dyn Any` vtable half's `align 8` (not done).
+- Export opaque types (core_check, not yet proven): a non-generic definer's return-position opaque carried as `[:ext-opaque PATH ARGS]`
+  with its hidden type (`:opaques`, the body's type at the opaque's place), revealed by build_run's instance-normalize; panic_output's
+  export still refused at this head (the walk's fix untested).
+- Measures: full run after the first half (b1): **180 / 44 / 101** (5 refused moved to differ: init, signal_handler,
+  rust_eh_personality_impl, getrandom, gettid); targeted runs after the rest: env_read_lock and Path::components equal (t4, t5).
+  No full run at the head (the allowance's end). Logs `.tmp/logs/lu/`, `.tmp/sub/` of the worktree. Rust's crop paths are out of
+  every gate key: no train needed.

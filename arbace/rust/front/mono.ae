@@ -453,10 +453,15 @@
                    (push! m "E") (push! m "L_"))
             ;; RF14: a fn pointer (`F`, `U` when unsafe, its inputs, `E`, its output); another ABI's or one with bound regions
             ;; (a binder's `G`) refused
-            :fnptr (let [{:keys [inputs output safety abi]} (second t)]
-                     (when (or abi (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t)))
+            ;; rust-l1 (C6): another ABI as v0.rs prints it (`KC` for "C", else `K` and its name with `-` made `_`)
+            :fnptr (let [{:keys [inputs output safety abi]} (second t)
+                         abi (when abi (str/replace (str abi) "\"" ""))]
+                     (when (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t))
                        (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
                      (push! m "F") (when (= :unsafe safety) (push! m "U"))
+                     (cond (or (nil? abi) (= "Rust" abi)) nil
+                           (= "C" abi) (push! m "KC")
+                           :else (do (push! m "K") (push! m (ident (str/replace abi "-" "_")))))
                      (doseq [x inputs] (print-type! m x)) (push! m "E") (print-type! m output))
             ;; RF14: a local closure (its def by its start, the line and column its type's text begins with) in a non-generic function
             ;; (RF17: a generic function's closure at its instance's arguments, `[:closure TEXT SIG ARGS]` (closed-closures):
@@ -1420,7 +1425,9 @@
 
 (defn- lib-crate-root [^String crate]
   (when *lib-dir*
-    (let [f (if (#{"core" "alloc" "std"} crate)
+    (let [f (if (or (#{"core" "alloc" "std"} crate)
+                    ;; rust-l1 (C6): library/'s other crates (unwind's `#[repr(C)] enum _Unwind_Reason_Code`)
+                    (.exists (File. (str *lib-dir* "/" crate "/src/lib.rs"))))
               (str *lib-dir* "/" crate "/src/lib.rs")
               (let [ds (.listFiles (File. (str *lib-dir* "/vendor")))]
                 (some (fn [^File d] (when (re-matches (re-pattern (str "\\Q" crate "\\E-[0-9][0-9.]*")) (.getName d)) (str (.getPath d) "/src/lib.rs")))
@@ -1581,12 +1588,23 @@
             [items] (when root (module-items root msegs))
             it (some #(when (and (= 'Const (item-kind %)) (= (last segs) (item-name %)) (attr-cfg-ok? %)) %) items)
             ci (when it (second (fget it :kind)))
-            tseg (when ci (let [k (fget (fget ci :ty) :kind)] (when (and (seq? k) (= 'Path (first k))) (path-segs (nth k 2)))))
-            t (when (= 1 (count tseg)) (get c/prim-tys (first tseg)))
+            tk (when ci (fget (fget ci :ty) :kind))
+            tseg (when (and (seq? tk) (= 'Path (first tk))) (path-segs (nth tk 2)))
+            ;; rust-l1 (C6): a raw pointer's constant (libc's `MAP_FAILED: *mut c_void = !0 as *mut c_void`) as a usize's bits
+            ;; (codegen's pointer scalar: inttoptr), and libc's integer aliases by their last segment (`sighandler_t`, `c_int`)
+            t (cond (and (seq? tk) (= 'Ptr (first tk))) [:uint "usize"]
+                    (= 1 (count tseg)) (or (get c/prim-tys (first tseg))
+                                           (get {"c_int" [:int "i32"] "c_uint" [:uint "u32"] "c_long" [:int "i64"] "c_ulong" [:uint "u64"]
+                                                 "size_t" [:uint "usize"] "ssize_t" [:int "isize"] "sighandler_t" [:uint "usize"]} (first tseg)))
+                    (seq tseg) (get {"c_int" [:int "i32"] "sighandler_t" [:uint "usize"] "size_t" [:uint "usize"]} (last tseg)))
             body (when ci (let [b (fget ci :body)] (when (and (seq? b) (= 'Some (first b))) (second b))))
             lit (fn lit [e] (let [k (fget e :kind)]
                               (cond (and (seq? k) (= 'Lit (first k)) (= 'Integer (fget (second k) :kind))) (fget (second k) :symbol)
                                     (and (seq? k) (= 'Unary (first k)) (= 'Neg (second k))) (when-let [v (lit (nth k 2))] (str "-" v))
+                                    ;; rust-l1 (C6): `!0` (all ones at the constant's width: -1 wrapped) and `0 as T`, `!0 as T`
+                                    (and (seq? k) (= 'Unary (first k)) (= 'Not (second k))) (when-let [v (lit (nth k 2))] (when (re-matches #"0+" (str/replace v "_" "")) "-1"))
+                                    (and (seq? k) (= 'Cast (first k))) (lit (second k))
+                                    (and (seq? k) (= 'Paren (first k))) (lit (second k))
                                     :else nil)))
             sym (when body (lit body))
             ;; queue 542 (round 10): a bool constant's literal too (std's `HAS_PREFIXES: bool = false`)
