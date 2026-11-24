@@ -7742,12 +7742,28 @@
           (fail :overload "call to a deleted function " (:name (abi/cls id)) " (inherited from " (:name (abi/cls (:cls (fnd fid))))
                 " through multiple base class subobjects)"))))))
 
+(def ^:dynamic *cx-ctor-active* #{})
+
+(declare ctor-init*)
+
 (defn- ctor-init
   "A constructor of class `id` chosen for the arguments `args` by overload resolution, its call's initializer. `nested`:
   the second phase of [over.match.list] with one element itself a list, where a conversion to X by a user-defined
   conversion is not considered for a constructor's first parameter of type X or reference to X ([over.best.ics]/4)."
   ([id args ctx] (ctor-init id args ctx false))
   ([id args ctx nested]
+  ;; (cpp-rind, the checker: a constructor call whose argument's initialization needs the same constructor call again --
+  ;; B from const B by B(const A&), A from B by A(B), B from const B ... ([over.best.ics]/4: a user-defined conversion's own
+  ;; argument takes no other) -- is no conversion, GCC's "no matching function"; it had recursed until the stack overflowed:
+  ;; overload/copy1.C)
+  (let [k (when (checking?) [id (mapv #(when (map? %) [(abi/unq (:ty %)) (:cat %)]) args)])]
+    (when (and k (contains? *cx-ctor-active* k))
+      (fail :overload "no viable function among 1 (a constructor's argument converted by the same constructor call again)"))
+    (binding [*cx-ctor-active* (if k (conj *cx-ctor-active* k) *cx-ctor-active*)]
+      (ctor-init* id args ctx nested)))))
+
+(defn- ctor-init*
+  [id args ctx nested]
   (let [hc (when-let [h (:ctor-candidates @hooks)] (h id args))
         cands (concat (ctor-candidates id) hc)
         ;; (CP323 (a), the checker: the constructors a class inherits by `using B::B;` ([namespace.udecl]/3,
@@ -7835,7 +7851,7 @@
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
           (and (:consteval f) (abi/empty-class? id)) {:i :none}
-          :else {:i :ctor :fn fid :args (call-args f args ctx)}))))
+          :else {:i :ctor :fn fid :args (call-args f args ctx)})))
 
 (defn- cx-no-default-sure?
   "Queue 510 (the checker): whether class `id` surely has no default constructor ([class.default.ctor]/1, [over.match.ctor]):
