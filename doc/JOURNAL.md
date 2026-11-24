@@ -20181,3 +20181,73 @@ GOMEMLIMIT=3000MiB): own pass 2,316 -> 2,364 (the two files past 300 s under loa
 mac/next merged (cpp-tpl2 (2), no conflict); the 19 rows the two streams turned read again on the merged tree, all pass; the control pair
 fails as it must. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: C++ read 5,960 / 0 / 323 ->
 5,970 / 0 / 314 (247 n/a).
+## 2026-11-24: ocaml-1123: the compiled reruns' results; ocamldoc's shard too large; the light whole re-record held back
+
+- Small rows at the compiled level (`ocaml-b`, one ticket of 16 GiB): lib-dynlink-pr4229/main, lib-dynlink-domains/main and
+  lib-dynlink-init-info/test pass (the Mac's 544); gc-roots/globroots_sequential times out at 120 s of CPU here too;
+  lib-threads/signal and delayintr receive no signal at the compiled level either ("No signal received": OC216 (a)'s HostSys signals
+  do not reach these tests' sigint helper's kill). The rows are merged into `test/ocaml/check-aot-compiled-native.edn` (no cell moves:
+  the Dynlink rows pass at the light level already).
+- The suite's compiled opam rows: built (shard of two, build-go 22.2 GB peak); opam/fmt/test_fmt exits 0 and opam/base64/test 1, but
+  the compiled suite judged them against references they have none of (fixed, ec2f3e2c3: the compiled suite's judgment by the tests'
+  own verdicts, as the light one's; its record not re-judged yet). base64's two failures are its `base64` command (bos's run_io:
+  "run ['base64']: No such file or directory" at the compiled level; /bin/base64 is a symlink to coreutils: ExtProc's lookPath or jrt's
+  ProcessBuilder at this level).
+- The compiler-libs programs in one shard (ocamldoc's five beside the 16 tool rows, one ticket of 40 GiB): j2g 4,489 s at 25.0 GB,
+  then Go's compile of the shard's package passed 45 GB and was stopped by this session (MemAvailable 9 GB) before `ulimit -v` would have
+  failed it and the shard's bisection rebuilt its halves. The 16 tool rows run again alone (their first build peaked at 31.8 GB; one
+  ticket of 36 GiB, `ocaml-b`'s `.tmp/oc/compiled-b2.sh`, queued). ocamldoc's five wait on a smaller shard package (ocaml.u holds every
+  clib unit a shard's programs reach in one Go package: the Go compiler's memory grows with it).
+- The light level's whole re-record (`bin/oi check --aot --record`, finalize.sh, 15:17 to 21:56 on a loaded host): +3 passes as
+  expected (globroots_parallel, globroots_parallel_spawn_burn, int64-unboxing), delayintr and signal in `:unix-java`, globroots_sequential
+  slow; but four rows regress outside any class: lib-marshal/intext_par and regression/pr3612 time out (each passed at 193-210 s of
+  wall on 2026-11-22, near the limit), weak-ephe-final/weaklifetime fails its line-53 assertion (a weak pointer full more than two
+  collections after its erase: the simulated collections' timing), statmemprof/custom now finishes with a different output (its known
+  entry's kind is the timeout). A passing row stays a pass: the record is held back (the run kept as the worktree's
+  `.tmp/oc/check-aot-native.light-run.edn`) until the four are rerun alone on a quiet host, with the ticket lock (Gil.ae) suspected for
+  the two parallel ones and checked against the old lock.
+
+## 2026-11-24: cpp-tpl2's third round: generic lambdas' constraints, requires-clauses' grammar, odr-uses by template arguments (branch `cpp-tpl2-1123` from next `61d0b412e`)
+
+The coordinator's next round after next took the second (`61d0b412e`): the concepts rows left in the stream's area, then the first
+round's remaining template rows; the overload-resolution rows (concepts-return-req1.C, concepts-memfun4.C, template/crash126.C's line
+12) passed to cpp-decl2. Built from the standard's text, no GCC or clang code: doc/cpp/CPP-SURVEY.md, "As built: cpp-tpl2 (3)".
+The parser's skip of a requires-clause had taken `C<T> (T t)` in a lambda's template-head for a call, the parameter list lost (a false
+"use of undeclared identifier 't'"); a requires-clause is now read by its own grammar (primary expressions joined by && and ||), and a
+call, a subscript or a `!` there is GCC's "expression must be enclosed in parentheses" (a built-in trait's call excepted). A generic
+lambda's requires-clauses and constrained placeholders now constrain its call operator template, and a closure's call with no viable
+operator() is "no match for call". A function template's name as a template argument is an odr-use of its deduced specialization.
+
+Checked: each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files): 5 to own pass,
+four own passes lost to the enclose rule on built-in traits' calls, fixed and read again; the control pair failing as it must. The
+record: `--judge --record` over the run and over the five files' run, the two timeouts' rows kept. mac/next merged (cpp-decl2 (2): C++
+read 5,970 / 0 / 314) without conflict; both streams' 15 new own passes read again on the merged tree, all passing. C++ read 5,975 / 0
+/ 309 (247 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
+
+Alternatives weighed: a self-dependent satisfaction detected by the concept and arguments under way (written, then left out: the test
+that needs it, concepts-recursive-sat4.C, never reaches its friends' constraints, so nothing proved it, and the slice's own re-entries
+through unfinished classes could make it a false error); an ill-formed concept registered as false (left for the atom's rule: the parser
+keeps the type's name as the constraint's expression).
+## 2026-11-23: queue 540's torture-compile rows recorded on train 1's compiled host (smalls2-1123)
+
+The second try under the big-job lock (.tmp/c/rt540b.sh: REPR_C_THREADS=2, ulimit 22 GiB, GOMEMLIMIT 18 GiB; train 1's gate executable
+the tools' host, 540's REPR_C_MAX_NEST at 20,000): `bin/repr-c roundtrip --corpus torture-compile --record` (16 min, 18.7 GB peak):
+1,790 of 1,791 pass: limits-declparen.c, limits-exprparen.c, limits-pointer.c and limits-structnest.c (levels 1-2 equal),
+limits-externdecl.c and pr46534.c (read whole, no read budget compiled) left the known file; left: limits-caselabels.c (100,000
+nested case labels past the 20,000 bound, stack overflow: the VM's 540-1, iterative label chains). `bin/repr-c parse-check --corpus
+torture-compile --no-mutants --record` (10 min, 10.1 GB): 1,790 of 1,791 equal, the same four limits files' trees equal to cc's
+(66,002, 36,002, 26,002 and 165,998 nodes), left limits-caselabels.c (:eval-depth). Cells: C read 5,470 / 0 / 5 -> 5,474 / 0 / 1, print
+4,847 / 0 / 8 -> 4,853 / 0 / 2 (left: limits-caselabels.c, the VM's; sqlite3.c, a print fault at an offsetof inside a macro, filed
+:eval-limits by the record's kept class, the VM's 540 too); C completeness 0.9994 -> 0.9999. bin/reap --record, bin/crops-score
+--record, --judge --strict, bin/records-check: 0 problems.
+## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
+
+The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
+(overlay/jdk/java.base), jdk26u's lazy stream over the loader's getResources (the name checked first; getResources called
+when the stream is consumed, its IOException an UncheckedIOException then), and j2g's class-loader-resource-helpers'
+resources(String) (arbace/j2g/model.ae: a translated loader's own override first, else ClassPathResources'; main.ae roots
+it). jdk/forms' ClassPathResources.ae as bin/jrt-convert predict reads it (only the new method and its imports differ from
+the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 failures; the night's update regenerates
+it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
+a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
+Rides train 2.

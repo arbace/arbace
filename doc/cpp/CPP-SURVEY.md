@@ -10966,3 +10966,55 @@ merged (cpp-tpl2's concepts, 9 rows), the 19 rows read again on the merged tree,
 Left: cpp1y/pr66690.C and class-deduction107 (access in templates), implicit-trivial1.C (a private constructor template chosen for a
 copy), overload/using2.C (using-declarations conflicting with declarations and each other), lambda-anon1.C, noexcept71.C, offsetof8.C,
 tc1/dr147.C, override2.C, parse/access13.C, inherit/virtual2.C (a base-clause's error recovery), cpp23/ext-floating*.
+
+## As built: cpp-tpl2 (3), generic lambdas' constraints, requires-clauses' grammar, odr-uses by template arguments (2026-11-23; branch `cpp-tpl2-1123` from next `61d0b412e`)
+
+The stream's third round: the concepts rows left in its area, then the first round's remaining template rows. Each rule from the
+standard's text and GCC's behaviour as the tests record it; no GCC or clang code.
+
+- **The parser's requires-clauses** (arbace/repr/cpp/parse.ae): a constraint-logical-or-expression's operands are primary
+  expressions ([temp.pre]/1): skip-requires-clause! no longer takes a `(` after a name for a call (in a lambda's template-head it
+  begins the parameter list, `[]<class T> requires C<T> (T t)`, `*lambda-head-rc*`); elsewhere a `(` or `[` after a name and a
+  `!` are GCC's "expression must be enclosed in parentheses" (cpp2a/concepts-requires20.C); requires-clause! parses by that grammar
+  when a whole expression's parse runs past the clause. A template template parameter's requires-clause is parsed in its
+  parameters' scope (round 2's `:_treq` through the parse, its parameter list destructured as before).
+- **Lambdas** (parse-lambda, sema's generic-lambda-expr): a generic lambda's template-head and trailing requires-clauses kept
+  (`:_glam`'s :rc and :trc, the trailing one parsed with the parameters in scope) and given to its call operator template
+  (:requiresClause, :trailingRequiresClause); a constrained placeholder parameter (`False auto t`) gives its invented template
+  parameter that type-constraint; a call of a closure whose operator() templates all drop out surely is "no match for call"
+  (sema's operator-call, with the drops' explanations); a non-generic lambda's trailing requires-clause outside any template is
+  GCC's "constraints on a non-templated function" ([dcl.decl.general]/4).
+- **Constraints**: a main file's atom naming a type alone is never satisfied (cpp2a/concepts-requires15.C); a name alone of an
+  integral or pointer type other than bool as an atom is GCC's "does not have type 'bool'" ([temp.constr.atomic]/3).
+- **Odr-uses** ([basic.def.odr]/4 with [temp.arg.nontype]/1): a function template's name, or a member function template's address,
+  as a template argument for a pointer (to member) or reference to function names its specialization deduced from the parameter's
+  type ([temp.deduct.funcaddr]), whose definition is then instantiated and analyzed (template/fn-ptr3a.C, fn-ptr5.C).
+- **Expression statements**: one that names non-static member functions and does not call them is "invalid use of non-static
+  member function" ([expr.prim.id.general]/4; template/pr84973-2.C), as round 2's requirement.
+
+### Checked
+
+Each rule on its files and reduced programs by the probe; every own pass and every deferred row (2,688 files at the round's
+head): 5 to own pass, four own passes lost to the enclose rule on built-in traits' calls (`__is_same(T, char)`, a primary expression:
+concepts/diagnostic14.C, cpp2a/concepts-inherit-ctor10.C, -ctor11.C, concepts-pr67217.C), fixed and those files read again (all
+passing); the control pair failing as it must. The record: `--judge --record` over that run, the five files' run `--judge --record`,
+the two timeouts' rows kept. mac/next merged (cpp-decl2 (2): C++ read 5,970 / 0 / 314) without conflict; both streams' 15 new own
+passes read again on the merged tree, all passing.
+
+### The cells
+
+The own record: 5 rows to own pass (cpp2a/concepts-requires15, -requires20, template/fn-ptr3a, fn-ptr5, pr84973-2), none lost. With
+cpp-decl2 (2) merged: C++ read 5,970 / 0 / 314 -> 5,975 / 0 / 309 (247 n/a).
+
+### Left
+
+concepts-lambda2.C now misses only its templated contexts: a closure-typed static data member of a class template (`static
+constexpr auto a = [](auto n) { ... }`, a false "call of a non-function"; the non-template class's case refuses too: initialization's),
+a default member initializer's no-match reported at its line rather than as the class's missing default constructor, a non-generic
+lambda's trailing requires-clause in a template, a generic lambda's conversion to a pointer to function under its constraints.
+concepts-recursive-sat4.C needs a class template's hidden friend templates found by ADL (lookup's). concepts-requires1.C stops at its
+syntax errors (the parser's recovery). concepts-placeholder5.C needs a never-instantiated template's non-dependent placeholder check
+(IFNDR's kind) beside "wrong number of template arguments" in a satisfaction; concepts-err1.C's closure-typed atom (C++23's
+auto(x)); concepts-friend2.C an operator== lookup sure of no candidate; concepts-explicit-spec7.C A<int>::B<int>'s qualifier.
+Overload resolution's, passed to cpp-decl2: concepts-return-req1.C, concepts-memfun4.C (ambiguity by constraints), template/crash126.C's
+line 12 (copy-initialization from a prvalue before C++17).

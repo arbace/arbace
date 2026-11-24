@@ -1716,7 +1716,10 @@
       (let [x (try (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} n)) (catch arbace.lang.ExceptionInfo _ nil))
             t (some-> x :ty abi/non-ref abi/unq)]
         (when (and t (not (dt-dependent? t)) (not= :bool (abi/bn t))
-                   (or (abi/class? t) (and (= :call (:op x)) (or (abi/arith? t) (abi/ptr? t)))))
+                   (or (abi/class? t) (and (= :call (:op x)) (or (abi/arith? t) (abi/ptr? t)))
+                       ;; (cpp-tpl2: a name alone, a non-type template parameter or a variable, of an integral or pointer type
+                       ;; other than bool: `requires N` of an int N, cpp2a/concepts-requires1.C's S1 and S4<int, 0>)
+                       (and (= "DeclRefExpr" k) (or (abi/integral? t) (abi/ptr? t)) (not (header-node? n)))))
           (when-let [h *on-refusal*]
             (h (ex-info "codegen: constraint expression does not have type 'bool'" {:codegen/refused :constraint :cx/node n}) n))
           ::bad)))))
@@ -1777,7 +1780,11 @@
                     nil))
                false)
          ;; (n-cpp-concepts: an atomic constraint whose substitution fails by the program's own error is false, no doubt)
-         (if (sure-failure? e)
+         ;; (cpp-tpl2: and a main file's atom that names a type as its expression, ill-formed, GCC's "expected primary-expression"
+         ;; there, arbace.repr.cpp.diag's type-exprs: never satisfied, cpp2a/concepts-requires15.C)
+         (if (or (sure-failure? e)
+                 (and (checking?) (re-find #"^codegen: name \S+ of kind :type" (str (ex-message e)))
+                      (map? rc) (= "DeclRefExpr" (:kind rc)) (not (header-node? rc))))
            (do ;; (cpp-tpl2: the error recorded as GCC's explanation of the unsatisfied constraint, at the atom, when a caller asks,
                ;; *cx-constraint-explain*: the template constraint failure's or the call's report carries it)
                (when-let [x *cx-constraint-explain*]
@@ -9252,6 +9259,13 @@
     (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)) (pr-str (map #(some-> (class-id (:ty %)) abi/cls ((juxt :name :lambda :targs))) args)))))
     (if (empty? cands)
       (cond
+        ;; (cpp-tpl2, the checker: a call of a class's object whose operator() templates all drop out surely, a closure's
+        ;; constrained call operator, [over.call.object]/1 with [temp.deduct]/8 and [over.match.viable]/3: GCC's "no match for
+        ;; call", with the drops' explanations, call-candidates' meta)
+        (and (= o "()") (checking?) (seq mtmpls) (empty? (second (method-set-of lc nm)))
+             (let [{:keys [sure-drops unsure-drops]} (meta mspecs)] (and sure-drops (pos? (long sure-drops)) (zero? (long (or unsure-drops 0))))))
+        (throw (ex-info (str "codegen: no viable function among " (:sure-drops (meta mspecs)) " for " (count more) " arguments")
+                        (cond-> {:codegen/refused :overload} (seq (:explain (meta mspecs))) (assoc :cx/explain (vec (distinct (:explain (meta mspecs))))))))
         (= o "=") (fail :assign "no operator=")
         ;; C++20's rewritten candidate: a != b as !(a == b)
         (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
@@ -9873,19 +9887,29 @@
         pn (mapv (fn [p]
                    (let [qt (str (get-in p [:type :qualType]))]
                      (if (re-find #"\bauto\b" qt)
-                       (let [nm (str "__lambda_auto_" (swap! inv inc))]
-                         (assoc-in (assoc p :_inv nm :_invpack (boolean (re-find #"\.\.\.\s*$" qt)))
+                       (let [nm (str "__lambda_auto_" (swap! inv inc))
+                             ;; (cpp-tpl2: a constrained placeholder, `False auto t`: the type-constraint the invented
+                             ;; parameter's, [dcl.fct]/22, its spelling taken out of the parameter's type)
+                             [_ tc] (when (checking?) (re-find #"((?:[A-Za-z_]\w*::)*[A-Za-z_]\w*(?:\s*<[^<>]*>)?)\s+auto\b" qt))
+                             tc (when (and tc (not (#{"const" "volatile" "signed" "unsigned"} tc))) tc)
+                             qt (if tc (str/replace-first qt (re-pattern (str (java.util.regex.Pattern/quote tc) "\\s+(?=auto\\b)")) "") qt)]
+                         (assoc-in (cond-> (assoc p :_inv nm :_invpack (boolean (re-find #"\.\.\.\s*$" qt)))
+                                     tc (assoc :_invtc tc))
                                    [:type :qualType] (str/replace-first qt #"\bauto\b" nm)))
                        p)))
                  (:params glam))
         _ (when (some #(re-find #"\bdecltype\s*\(\s*auto" (str (get-in % [:type :qualType]))) pn) (fail :generic-lambda "a decltype(auto) parameter"))
         tps (into explicit-tps (for [p pn :when (:_inv p)]
                                  (cond-> {:kind "TemplateTypeParmDecl" :name (:_inv p) :inner [] :isImplicit true}
-                                   (:_invpack p) (assoc :isParameterPack true))))
+                                   (:_invpack p) (assoc :isParameterPack true)
+                                   (:_invtc p) (assoc :_tc (vec (str/split (str/trim (str/replace (:_invtc p) #"<.*$" "")) #"::"))
+                                                      :_tcargs (str/includes? (:_invtc p) "<") :_tctext (:_invtc p)))))
         tr (when-let [[_ r] (re-find #"->\s*(.+?)\s*$" head)] r)
         qt (str (or tr "auto") " (" (str/join ", " (map #(get-in % [:type :qualType]) pn)) ")" (when-not mutable " const"))
-        pattern {:kind "CXXMethodDecl" :name "operator()" :type {:qualType qt} :inline true
-                 :inner (conj (vec (map #(dissoc % :_inv :_invpack) pn)) body) :_b (:_b n)}
+        pattern (cond-> {:kind "CXXMethodDecl" :name "operator()" :type {:qualType qt} :inline true
+                         :inner (conj (vec (map #(dissoc % :_inv :_invpack :_invtc) pn)) body) :_b (:_b n)}
+                  ;; (cpp-tpl2, the checker: its trailing requires-clause, the parser's :_glam :trc)
+                  (and (checking?) (:trc glam)) (assoc :trailingRequiresClause (:trc glam)))
         encl-f (when (:fn-id ctx) (fnd (:fn-id ctx)))
         inline? (boolean (and encl-f (:inline encl-f) (not (:internal encl-f))))
         ul? (or inline? (boolean (and encl-f (:cls encl-f) (:lambda (abi/cls (:cls encl-f))))))
@@ -9897,7 +9921,9 @@
         _ (swap! abi/*classes* assoc id {:id id :name nil :mname nil :dollar-key (when-not ul? [:fn (:fn-id ctx)]) :path path :scope cs :fields [] :bases [] :outer (:scope ctx) :lambda true})
         ;; the call operator template, declared in the closure as a member template is (the :declare hook)
         _ (let [h (or (:declare @hooks) (fail :generic-lambda "a generic lambda without templates"))]
-            (h cs {:kind "FunctionTemplateDecl" :name "operator()" :inner (conj tps pattern) :_b (:_b n)}))
+            (h cs (cond-> {:kind "FunctionTemplateDecl" :name "operator()" :inner (conj tps pattern) :_b (:_b n)}
+                    ;; (cpp-tpl2, the checker: its template-head's requires-clause, the parser's :_glam :rc)
+                    (and (checking?) (:rc glam)) (assoc :requiresClause (:rc glam)))))
         tid (some #(when (= :tmpl (:e %)) (:id %)) (.get ^java.util.HashMap (:names cs) "operator()"))
         _ (when-not tid (fail :generic-lambda "the call operator template not declared"))
         ;; clang names a closure Ul<the parameters, the template's own>E_ in an inline function's body
@@ -11963,7 +11989,14 @@
                                            {:ty ct :var id :init init :body (stmt c b)})
                                          {:body (stmt c b)}))))})
     (if (or (str/ends-with? (str (:kind n)) "Expr") (str/ends-with? (str (:kind n)) "Operator") (str/ends-with? (str (:kind n)) "Literal"))
-      (full (analyze ctx n))
+      (let [x (analyze ctx n)]
+        ;; (cpp-tpl2, the checker: [expr.prim.id.general]/4 and [expr.ref]/6.3.2, an expression statement that names
+        ;; non-static member functions and does not call them: GCC's "invalid use of non-static member function",
+        ;; template/pr84973-2.C's `b;`)
+        (when (and (checking?) (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
+                   (every? #(let [f (fnd %)] (and (:cls f) (not (:static f)))) (:fns x)))
+          (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+        (full x))
       (fail :stmt "statement " (:kind n)))))
 
 ;; ---------------------------------------------------------------------------------------------

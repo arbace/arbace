@@ -6304,19 +6304,31 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Lambdas, requires-expressions, requires-clauses
 
+(def ^:dynamic *lambda-head-rc* "cpp-tpl2: a lambda's template-head's requires-clause being read (skip-requires-clause!)" false)
+
 (defn skip-requires-clause!
   "A requires-clause at its `requires`: its constraint-logical-or-expression skipped (the converter writes a
   constrained template as its text)."
   [^P p]
   (adv! p)
   (loop []
-    (loop [] (when (is? p "!") (adv! p) (recur)))
+    ;; (cpp-tpl2: [temp.pre]/1, the operands of && and || in a requires-clause are primary expressions: a `!`, or a postfix `(`
+    ;; or `[` after a name, is GCC's "expression must be enclosed in parentheses" (skipped as before); in a lambda's
+    ;; template-head a `(` after the clause begins its parameter list, *lambda-head-rc*)
+    (let [enclose! (fn [] (when (and (not (skim? p)) (main-tok? p (ix p))) (soft-diag! p (ix p) "expression must be enclosed in parentheses")))]
+    (loop [] (when (is? p "!") (enclose!) (adv! p) (recur)))
     (cond
       (is? p "(") (skip-balanced! p)
       (is? p "requires") (do (adv! p) (when (is? p "(") (skip-balanced! p)) (skip-balanced! p))
-      (or (id? p) (is? p "::")) (do (parse-name p :scan) (when (is? p "(") (skip-balanced! p)))
+      (or (id? p) (is? p "::")) (let [builtin (and (id? p) (str/starts-with? (ts (cur p)) "__"))]
+                                  (parse-name p :scan)
+                                  (cond
+                                    ;; (a built-in type trait's call, `__is_same(T, char)`, is a primary expression)
+                                    (and builtin (is? p "(")) (skip-balanced! p)
+                                    (and (or (is? p "(") (is? p "[")) (not (and *lambda-head-rc* (is? p "("))))
+                                    (do (enclose!) (skip-balanced! p))))
       (or (is? p "true") (is? p "false") (identical? :num (tk (cur p)))) (adv! p)
-      :else (perr p "a constraint"))
+      :else (perr p "a constraint")))
     (when (or (is? p "&&") (is? p "||")) (adv! p) (recur))))
 
 (defn- requires-clause!
@@ -6328,7 +6340,17 @@
         _ (skip-requires-clause! p)
         e (ix p)]
     (when (and *full-headers* (not (skim? p)))
-      (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))]
+      (let [x (tentatively p (fn [p] (seek! p (inc b)) (let [x (with-gt p true (parse-expr p))] (when (= (ix p) e) x))))
+            ;; (cpp-tpl2: else by its own grammar, [temp.pre]/1's constraint-logical-or-expression of primary expressions joined
+            ;; by && and ||: a lambda's `requires C<T> (T t)`, whose parameter list a whole expression's parse takes for a call)
+            x (if (map? x)
+                x
+                (tentatively p (fn [p]
+                                 (seek! p (inc b))
+                                 (let [and-e (fn [] (loop [l (with-gt p true (parse-primary p))]
+                                                      (if (is? p "&&") (do (adv! p) (recur (bin-node p "&&" l (with-gt p true (parse-primary p))))) l)))
+                                       x (loop [l (and-e)] (if (is? p "||") (do (adv! p) (recur (bin-node p "||" l (and-e)))) l))]
+                                   (when (= (ix p) e) x)))))]
         (when (map? x) x)))))
 
 (defn- keep-decltypes!
@@ -6466,7 +6488,8 @@
                    (when (is-at? p 1 ">") (soft-diag! p (inc (ix p)) "expected identifier before '>' token"))
                    (let [ts (sc/new-scope :tparams (scope p) nil)]
                      (st! p SCOPE ts) (adv! p) (let [[tns] (parse-template-params p)] (expect! p ">") (vec tns))))
-            _ (when (is? p "requires") (skip-requires-clause! p))
+            ;; (cpp-tpl2: the template-head's requires-clause kept for the generic lambda's call operator template, :_glam's :rc)
+            hrc (when (is? p "requires") (binding [*lambda-head-rc* true] (let [b0 (ix p)] (or (requires-clause! p) (do (when (= b0 (ix p)) (skip-requires-clause! p)) nil)))))
             ;; (cpp-read, 2026-11-22: C++23's attribute-specifier-seq after the lambda-introducer, appertaining to the call
             ;; operator ([expr.prim.lambda.general]/1, P2173R1; GCC takes it in every mode), before the lambda-declarator)
             ;; (cpp-gnu, 2026-11-22: GNU's unavailable among them marks the lambda, arbace.repr.cpp.diag/unavailable's)
@@ -6523,8 +6546,18 @@
                         (when (and (= :f (:t r)) (main-tok? p rb) (not (skim? p)))
                           (soft-diag! p rb "lambda declared as function returning a function"))
                         r))
-            _ (when (is? p "requires") (skip-requires-clause! p))
+            ;; (cpp-tpl2: the trailing requires-clause, its place kept, :_trq; for a generic lambda parsed with the parameters
+            ;; in scope, :_glam's :trc)
+            trq-at (when (is? p "requires") (ix p))
+            trc (when trq-at
+                  (with-scope p :fparams nil
+                    (declare-params! p (:names pl) (:types pl))
+                    (let [b0 (ix p)] (or (requires-clause! p) (do (when (= b0 (ix p)) (skip-requires-clause! p)) nil)))))
             generic (or tmpl (some (fn [t] (some #(= :auto (:t %)) (tree-seq map? (comp vector :of) t))) (:types pl)))
+            ;; (cpp-tpl2: [dcl.decl.general]/4, a lambda's trailing requires-clause on a call operator that is no template,
+            ;; outside any template: GCC's "constraints on a non-templated function", as a function declarator's below)
+            _ (when (and trq-at (not generic) (not (skim? p)) (main-tok? p trq-at) (not (in-template? p)) (not (dep-this? p)))
+                (soft-diag! p trq-at "constraints on a non-templated function"))
             body (let [old (stv p RET)]
                    (st! p RET nil)
                    (try (with-scope p :fparams nil (declare-params! p (:names pl) (:types pl)) (binding [*in-if* false] (parse-compound-stmt p)))
@@ -6536,8 +6569,11 @@
                   ;; in the closure; the native tree keeps the closure empty as before, compared with clang's as it was, and
                   ;; the template's parts as data for the code generator's Sema: the explicit template parameters, the
                   ;; parameters, the operator's type as written)
-                  generic (assoc :_glam {:tparams (if (vector? tmpl) tmpl []) :params (vec (:params pl)) :qt (qt op-type)}))]
-        (node p "LambdaExpr" b (ne body) (cond-> {:inner (vec (concat [rec] inits [body]))} @cexpr (assoc :_cexpr true) lam-unavail (assoc :_unavailable true)))))))
+                  generic (assoc :_glam (cond-> {:tparams (if (vector? tmpl) tmpl []) :params (vec (:params pl)) :qt (qt op-type)}
+                                          hrc (assoc :rc hrc) trc (assoc :trc trc))))]
+        (node p "LambdaExpr" b (ne body) (cond-> {:inner (vec (concat [rec] inits [body]))} @cexpr (assoc :_cexpr true) lam-unavail (assoc :_unavailable true)
+                                           ;; (cpp-tpl2: a non-generic lambda's trailing requires-clause, its place)
+                                           (and trq-at (not generic)) (assoc :_trq (loc p trq-at))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Declaration sequences, recovery, skim mode, the unit
