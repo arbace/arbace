@@ -4142,6 +4142,12 @@
 ;; object of static storage duration, [expr.const]/13's address constant: ce-global-addr; it holds true once one was taken)
 (def ^:dynamic *ce-gaddr* nil)
 
+(def ^:dynamic *vci-active*
+  "cpp-indep: the variables whose initializers var-const-int is evaluating, nested."
+  #{})
+
+(declare ce-sure! not-constant)
+
 (defn- var-const-int
   "A const integral variable's value, its initializer's constant (const-int in its definition's scope), kept on the variable
   once found: a variable's initializer is the same expression at every use, and a class template's static member whose
@@ -4151,7 +4157,14 @@
   (let [v (var* id)]
     (if (contains? v :cint)
       (if *ce-wide* (:cint v) (narrow-out (:cint v)))
-      (let [c (binding [*ce-wide* true] (const-int (or (:def-scope v) *root*) (:init v)))]
+      (let [_ (when (contains? *vci-active* id)
+                ;; (cpp-indep: a variable read in its own initializer is not initialized yet, [basic.life]/? with
+                ;; [expr.const]/5.9: GCC's "the value of 'X' is not usable in a constant expression", "used in its own
+                ;; initializer"; cpp0x/constexpr-diag2.C's `constexpr int X (X);`, a recursion without end before)
+                (if (checking?)
+                  (ce-sure! "the value of '" (:name v) "' is not usable in a constant expression (used in its own initializer)")
+                  (not-constant "a variable in its own initializer")))
+            c (binding [*ce-wide* true *vci-active* (conj *vci-active* id)] (const-int (or (:def-scope v) *root*) (:init v)))]
         (upd-var! id assoc :cint c)
         (if *ce-wide* c (narrow-out c))))))
 
@@ -4933,13 +4946,18 @@
                        ;; cpp23/ext-floating3.C)
                        v (if (and v (:cx-constexpr v) (not (:constexpr v))) (assoc v :constexpr true) v)
                        init (or (:init v) (:init-node v))]
+                   (when (and v (contains? *vci-active* (:id x)))
+                     ;; (cpp-indep: a variable read in its own initializer's evaluation, var-const-int's rule)
+                     (if (checking?)
+                       (ce-sure! "the value of '" (:name v) "' is not usable in a constant expression (used in its own initializer)")
+                       (not-constant "a variable in its own initializer")))
                    (if (and v (:c (:ty v)) init (or (abi/integral? (:ty v)) (:constexpr v) (and *ce-fold* (abi/floating? (:ty v)))))
                      ;; (its initializer manifestly constant-evaluated: the variable is usable in constant expressions, CP378 (a))
-                     (ce-wrap (:ty v) (let [ix (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init)))]
+                     (ce-wrap (:ty v) (let [ix (rv (binding [*cutoff* Long/MAX_VALUE *vci-active* (conj *vci-active* (:id x))] (analyze {:scope (or (:def-scope v) *root*)} init)))]
                                         ;; (cpp-small, H: a const variable, not constexpr, whose initializer is surely not constant:
                                         ;; the value not usable, at the read, [expr.const]/4 and /5.9, as g++ places it, not at the
                                         ;; initializer's operation: cpp23/constexpr-nonlit4.C's `return v;`)
-                                        (try (binding [*ce-manifest* true] (ce-eval ix {}))
+                                        (try (binding [*ce-manifest* true *vci-active* (conj *vci-active* (:id x))] (ce-eval ix {}))
                                              (catch arbace.lang.ExceptionInfo ex
                                                (let [d (ex-data ex)]
                                                  (if (and (checking?) (not (:constexpr v)) (:cx/sure d) (:cx/at d) (:cx-at x) (:name v))
