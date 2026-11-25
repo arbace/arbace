@@ -11534,3 +11534,27 @@ recovery in class templates' instances, which this line does not have yet); the 
 of class templates' specializations (cpp0x/constexpr-non-const-arg2.C's `duration<0>::min()`); the rest of the 198 by group.
 test/cpp/selftest/concepts/r02-qualified-name.C fails at cpp-rind's head already (a constraint's substitution failure given as an
 error at the concept, line 2; cpp-tpl2's explanations): not this branch's, not a dg record row.
+
+## As built: 569, GNU variable-length arrays in the checker's constant evaluator (2026-11-25; queue 569, branch `569-cpp-constexpr-vla` on `567-cpp-read-tail` `826068c3f`)
+
+DECISION 567-1 (a). The rules are the GCC manual's "Variable Length" (GNU C++ takes a block-scope array whose bound is no
+constant, its storage made where the declaration is executed, `sizeof` of it evaluated there) and [expr.const]/5.8 (an
+operation with undefined behaviour is no core constant expression), with [dcl.init.aggr]/3 (no more explicitly initialized
+elements than the array has); no GCC or clang code.
+
+- arbace/cpp/sema.ae, the checker alone: a local VLA, which the checker refused, is declared as the code generator's
+  (`vla-local`: the type `{:k :arr :n nil :vla true}`, its bound kept as `:vla-n`), with a braced list too; its list's
+  elements past the written ones value-initialized (`init-for`'s `:fill`). The constant evaluator's `:decl` evaluates the bound
+  where the declaration is: a negative one, or a list longer than it, is a sure error (GCC's "array subscript value '0' is
+  outside the bounds of array"), else the array has that many elements, so that a subscript past it is the existing bounds
+  check's error. `sizeof` of a VLA variable is a node of its own, `:vla-sizeof`, the evaluated elements' count times an
+  element's size. A VLA with no initializer holds zeros, as a fixed array does in this evaluator (it reads no array element as
+  indeterminate).
+- arbace/cpp/template.ae: a VLA's bound is no constant expression, so it deduces no non-type parameter ([temp.deduct.type]'s
+  bound of an array deduces only a value; GCC's behaviour as ext/vla2.C states it: "no matching function", a sure failure; a
+  constant bound against a VLA the slice's unknown).
+
+Rows: ext/constexpr-vla1.C, -vla2.C, -vla3.C, ext/vla2.C and cpp0x/initlist26.C (the checker's existing "assigning to an array
+from an initializer list", reached once the VLA is declared) to own pass; constexpr-vla1 and -2 out of :gcc-own-rules. The other
+GNU-VLA rows of the corpus need other rules (variably modified types in throw, catch, typeid, lambda captures, class members and
+constexpr variables: ext/vla4.C, cpp1y/vla5.C, ext/vlm2.C, gomp/pr85134.C): left, a DECISION.

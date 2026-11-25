@@ -21116,3 +21116,34 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
 
 - 567-1 (a): GNU variable-length arrays in the C++ constant evaluator are a queue task of their own, not this branch's.
 - 567-2 (a): the next C++ slice, the unexpanded packs, comes after 526-1.
+
+## 2026-11-25 — C++: GNU variable-length arrays in the checker's constant evaluator (queue 569, VM)
+
+- The user's DECISION 567-1 (a). Branch `569-cpp-constexpr-vla` on `567-cpp-read-tail` `826068c3f`. Rules from the GCC manual's
+  "Variable Length" (a block-scope array with a non-constant bound, made where its declaration is executed; `sizeof` of it
+  evaluated there) and [expr.const]/5.8 with [dcl.init.aggr]/3; no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: 569").
+- arbace/cpp/sema.ae, the checker alone: a local VLA, refused until now, is declared as the code generator's (`vla-local`, also
+  with a braced list); the constant evaluator evaluates its bound at the declaration and makes that many elements, a list longer
+  than the bound (or a negative bound) a sure error ("array subscript value ... is outside the bounds"), a subscript past it the
+  existing bounds check's; `sizeof` of a VLA variable is `:vla-sizeof`, the evaluated count times the element's size. A VLA with
+  no initializer holds zeros, as a fixed array does in this evaluator. arbace/cpp/template.ae: a VLA's bound deduces no non-type
+  parameter (a sure failure; ext/vla2.C crashed with a NullPointerException on the nil bound once VLAs were declared). The code
+  generator is unchanged (each change is under `checking?` or reached only from the checker's VLAs).
+- Alternatives considered: declaring VLAs only in constexpr functions (fewer bodies newly checked; the whole-record regression
+  run below showed no need); a VLA's elements indeterminate when not initialized (a read the error, as [basic.indet] says; the
+  evaluator treats a fixed array's the same lenient way, so kept consistent and left); a separate bound cell in the environment
+  for `sizeof` (the array's own vector already holds the count).
+- Rows found by the checker's VLA paths: the record's 106 files with a local array of a non-literal bound, a "vla" name, or
+  `__extension__` / "variable length" in the text. Moved to own pass: ext/constexpr-vla1.C, -vla2.C, -vla3.C, ext/vla2.C and
+  cpp0x/initlist26.C (the existing "assigning to an array from an initializer list", reached once the VLA is declared);
+  constexpr-vla1 and -2 out of :gcc-own-rules (test/cpp/divergences-dg.edn). The other VLA rows need other rules (variably
+  modified types in throw, catch, typeid, captures, members, constexpr variables): a DECISION.
+- Regression list: every recorded own pass (2,815) with the 106 VLA files, one `--only` run (.tmp/q569/r2.log): 2,815 pass, 5
+  moved, 5 recorded passes not passing (cpp0x/pr85147.C, cpp1y/constexpr-neg1.C, cpp23/consteval-if2.C,
+  cpp23/constexpr-nonlit3.C, ext/anon-struct6.C), each failing the same way with the base's sema.ae and template.ae loaded (a
+  probe, .tmp/q569/scripts/pd-base.ae): not this change's, recorded in n-cpp-bd (2026-11-18) and not rerun on this host since;
+  not recorded here, left for the host's whole run.
+- Recorded from the finished `--only` run of the 106 VLA files (.tmp/q569/r3.log, `--judge --record`): 5 rows to own pass, none
+  lost. `bin/reap --record`: C++ read 6,086 / 0 / 198 -> 6,089 / 0 / 195; `bin/crops-score --record`: C++ completeness 0.9860 ->
+  0.9861, read independence 0.882 -> 0.883. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`,
+  `bin/reap`: 0 problems.
