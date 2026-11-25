@@ -11591,3 +11591,29 @@ address (a string literal, a cast to a pointer) is fixed at translation, so no V
 Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C;
 in round 2 template/array9.C. Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class
 template pattern's member bound), other/fold1.C, init/new37.C.
+
+## As built: cpp-indep, the clang-only dg rows by the own front end's causes (2026-11-25; branch `cpp-indep-1125` on `570-cpp-vla-types` `af1703774`)
+
+The read stage's independence counts a dg row 0.5 while only clang's recorded dumps pass it. The rows clang passes and the own
+front end (arbace.repr.cpp.diag) fails, grouped by the own verdict and cause; the rules below each from the standard's text and
+GCC's documented messages, no GCC or clang code.
+
+- arbace/cpp/template.ae: `*fn-substs*`, a function template's signature substitution nested as an instantiation of its own
+  ([temp.inst]/17): re-entered with the same arguments, or past -ftemplate-depth (at the outermost the analysis' stack's end), is
+  GCC's fatal depth error at the innermost call (`*fn-subst-at*`); an explicit instantiation's type keeps its skimmed array bounds.
+- arbace/cpp/sema.ae: `*vci-active*` (a variable read in its own initializer's evaluation, [expr.const]/5.9); cx-read-only! for
+  any const-qualified scalar lvalue in the user's own function bodies ([expr.assign]/1, [expr.pre.incr]/1); copy-list-
+  initialization through a braced argument of a direct-initialization, `new T({...})` and `return {...}` ([over.match.list]/1),
+  an array new's elements past the braced list's from {}; member static_asserts of classes and of specializations for whole
+  arguments, a several-line one judged at its false conjunct; enumerators outside a fixed underlying type and a non-integral
+  enum-base ([dcl.enum]/2, /5); structured bindings of scalars and closures ([dcl.struct.bind]); an aggregate's uninitialized
+  reference member at its list.
+- arbace/repr/cpp/parse.ae: decl-specifier rules (__restrict on a constructor, typedef on a parameter or template parameter,
+  virtual constructors, virtual operator new and delete, virtual in a union, block-scope inline functions, explicit outside a
+  constructor's or conversion function's in-class declaration, a conversion function with parameters, a deduction guide's
+  specifiers, body and scope), a trailing return type after a ptr-operator, a condition declaring a function or an array, a
+  structured binding's initializer forms, class-key agreement ([dcl.type.elab]/4), a literal operator's encoding prefix, a name
+  captured twice, a pointer to a qualified function type, an rvalue-reference handler, using enum of an opaque or dependent
+  enumeration, an inheriting constructor of no direct base.
+- arbace/repr/cpp/diag.ae: constexpr on a non-static member or a parameter; the checks tls-redecls ([dcl.stc]/4) and
+  member-type-access ([class.access.spec]/4); the sema rule of a non-integral enum-base.

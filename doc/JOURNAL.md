@@ -21196,3 +21196,35 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
   files, 2,882 files: 2,824 pass, template/array9.C moved, none lost. Recorded from it (`--judge --record`): array9 to own pass.
   `bin/reap --record`: C++ read 6,090 / 0 / 194 unchanged (array9 already passed by clang's record); `bin/crops-score --record`
   unchanged. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-25 — C++: read independence, the clang-only dg rows by the own front end's causes (cpp-indep, branch `cpp-indep-1125`)
+
+- Goal (the burst's): C++ read independence 0.882, each dg row counting 0.5 while only clang's recorded dumps pass it. The rows
+  clang passes and the own front end fails, less test/cpp/dg-dialect-out.edn's: 1,273 at `af1703774` (929 accepted with an
+  expected error, 210 missing lines, 71 both, 47 extra, 8 crashes, 8 timeouts). Scope: not the 194 deferred rows (cpp-own-1125,
+  the Mac); not cpp-own-1125's areas (constant evaluation, templates, overload, lookup, incomplete types), nor the Mac's 573
+  (recovery, unexpanded packs), 577 (GNU rules), 578 (syntax recovery); from 15:00 the Mac's 584 takes cpp2a, cpp23, concepts,
+  coroutines and modules (the coordinator): of those this branch's rules reach cpp2a/using-enum-2.C (mid-fix then) and, by
+  rules made for other directories, concepts/abbrev6.C, cpp2a/decomp4.C, cpp2a/constinit5.C (kept a pass).
+- Every rule from the standard's text and GCC's documented messages, no GCC or clang code. The causes, one commit each but the
+  last three: the crashes (a function template's signature substitution as an instantiation of its own, GCC's depth error;
+  a variable read in its own initializer; a mem-initializer's typeless construct; an explicit instantiation's skimmed array
+  bounds), the read-only location rule, copy-list-initialization through a braced argument (`m({...})`, `T t({...})`,
+  `new T({...})`, `return {...}`) and an array new's rest from {}, member static_asserts and a several-line one's false
+  conjunct, the parser's decl-specifier rules (__restrict on a constructor, typedef on a parameter, constexpr on a member or
+  parameter, virtual constructors and operator delete, virtual in a union, block-scope inline, explicit outside a constructor,
+  conversion functions with parameters, a ptr-operator before a trailing-return function, a condition declaring a function or
+  array), enumerators outside a fixed underlying type, structured bindings (initializer forms, scalars, closures), class-key
+  agreement, an aggregate's reference member's place; then declaration checks in arbace.repr.cpp.diag (thread_local agreement,
+  member type access) and parser rules (literal operator prefix, a twice-captured name, pointer to a qualified function type,
+  rvalue-reference handler, deduction guides, using enum, inheriting constructors of no direct base).
+- Tried and dropped: a member template-id `T::template B` as a non-type argument (template/qualttp2.C: the refusal swallowed in
+  the class's instantiation), a base-specifier of no class type in a specialization (inherit/base3.C: not reached), a class
+  template's name with a parameter list and no trailing return (cpp1z/class-deduction7.C: parsed as a constructor), the
+  bit-field's place in a specialization (parse/bitfield2.C: the refusal unmapped, GCC's spelled names needed).
+- A regression found and fixed: the read-only location rule, applied in implicit special members' memberwise assignments, refused
+  whole units (15 recorded own passes lost in the first regression run, .tmp/reg1.log: init/uninitialized1.C, const10.C,
+  cpp1y/constexpr-tracking-const4.C, ...); it now judges the user's own function bodies alone. thread_local agreement skips a
+  qualified (static member) definition (cpp2a/constinit5.C). Five recorded own passes fail at `af1703774` itself (checked in a
+  worktree at that commit): cpp1y/constexpr-neg1.C, cpp23/constexpr-nonlit3.C, cpp23/consteval-if2.C, ext/anon-struct6.C,
+  cpp0x/pr85147.C, cpp-own-1125's fixes.
