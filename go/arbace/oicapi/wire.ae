@@ -22,7 +22,8 @@
 ;; 'N' (no such named value), 'T' (a Java throwable the runtime keeps; the C call unwinds). Go to Java: 'R' value (the stub's result),
 ;; 'E' value (it raised), 'X' i32 (the C called exit), 'F' str (a fatal error), 'N' (no stub of that name, or no stubs: OI_CSTUBS
 ;; unset), 'T' (the call unwound for the runtime's throwable), 'K' value, u32 n, n values (a callback: apply the closure), 'Q' str
-;; (caml_named_value); 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
+;; (caml_named_value); (queue 583) 'V' u32 op, str s, u32 n, n i64 (the C consumer of runtime events on the runtime's ring: RuntimeEvents),
+;; answered 'R' a block of integers; 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
 ;; answered 'N' once their finalize ran; (queue 527, Marshal of the C's custom blocks: extern_custom and intern's CODE_CUSTOM_LEN, as
 ;; ocamlopt's runtime calls the operations') 'S' u64 the address (its operations' serialize: 'R', no updates, u32 n, n bytes, u64 the
 ;; 32-bit size, u64 the 64-bit size), 'D' str the identifier, str the data from the identifier's sizes to the message's end, u64 the
@@ -64,7 +65,8 @@
         (set! loadErr (.Error err))
         (return false))
       (set! Apply wireApply)
-      (set! Named wireNamed)))
+      (set! Named wireNamed)
+      (set! RuntimeEvents wireRuntimeEvents)))
   (== loadErr ""))
 
 ;; ---- the wire form
@@ -333,6 +335,36 @@
       (case [\N] (return nil false)))
     (panic (addr (lit unwind)))))
 
+;; A C program that embeds OCaml at the AOT levels (ocaml-aot, 2026-11-24; oi's level since queue 539: embedded/cmcaml): the runtime's
+;; main calls "__oi_embed" with one closure, start, in place of the units' initialisation; the stubs' own main runs (Embed), its caml_main
+;; or caml_startup applying start (the runtime's callback, 'K'), and the call's result is main's status ('R'), or 'N' when the stubs
+;; have no main of their own (OwnMain), and the runtime initialises its units itself
+(go/const ^{:val "__oi_embed"} embedName "__oi_embed")
+
+(go/func wireEmbed "wireEmbed runs the stubs' own main (Embed) with start the runtime's closure f: an exception it raises is the C's.
+"
+  ^oi/Value [^oi/Value f]
+  (conv oi/Value (Embed nil (fn []
+                              (let [(values _ e) (wireApply f (lit (slice oi/Value) oi/Unit))]
+                                (when (!= e nil)
+                                  (panic (addr (lit oi/Exn :V e)))))))))
+
+(go/func wireRuntimeEvents "wireRuntimeEvents is RuntimeEvents: the runtime's ring answers ('V' u32 op, str s, u32 n, n i64; the answer 'R' a block of\nits integer results).\n" ^{:tag (slice int64)} [^int op ^string s ^{:tag (slice int64)} args]
+  (let [ss sess
+        r (ask \V (fn [^{:tag (* wbuf)} w]
+                        (.u32 w op)
+                        (.str w s)
+                        (.u32 w (len args))
+                        (range [_ x args]
+                          (.u64 w (conv uint64 x)))))]
+    (when (== (.u8 r) \R)
+      (let [b (oi/AsBlock (.get ss r))
+            out (make (slice int64) (len (.-F b)))]
+        (range [i x (.-F b)]
+          (aset out i (conv int64 (oi/AsInt x))))
+        (return out)))
+    (panic (addr (lit unwind)))))
+
 (go/func wireRun "wireRun is a worker's call: the stub name with the arguments read from r; its end the worker's last message.\n"
   [^{:tag (* worker)} wk ^string name ^string reprs ^{:tag (slice oi/Value)} args]
   (let [s sess
@@ -363,9 +395,11 @@
                     (.str w (fmt/Sprintf "o2j: the C API: %v" x)))))
               (>! (.-out wk) (.-b w)))))
     (let [^oi/Value v nil]
-      (if (== reprs "")
-        (set! v (Call name args))
-        (set! v (CallRaw name reprs args)))
+      (if (== name embedName)
+        (set! v (wireEmbed (aget args 0)))
+        (if (== reprs "")
+          (set! v (Call name args))
+          (set! v (CallRaw name reprs args))))
       (.u8 w \R)
       (.putUpdates s w)
       (.put s w v))))
@@ -387,7 +421,8 @@
                 args (make (slice oi/Value) n)]
             (for [i 0] (< i n) (inc! i)
               (aset args i (.get s r)))
-            (when (or (not (wireLoad)) (not (Has name)))
+            ;; (ocaml-aot, 2026-11-24) "__oi_embed": the stubs' own main (Embed), when they have one
+            (when (or (not (wireLoad)) (and (== name embedName) (not (OwnMain))) (and (!= name embedName) (not (Has name))))
               (when (== (len (.-workers s)) 0)
                 (set! sess nil))
               (return (lit (slice byte) \N)))
@@ -433,7 +468,7 @@
           (return (.-b w)))))
     (let [out (<! (.-out wk))]
       (switch (aget out 0)
-        (case [\K \Q])
+        (case [\K \Q \V])
         (default
           (set! (.-workers sess) (subslice (.-workers sess) 0 (- (len (.-workers sess)) 1)))
           (when (== (len (.-workers sess)) 0)

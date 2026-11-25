@@ -385,9 +385,138 @@
       (vec (sort-by #(name (second %)) @out))
       @out)))
 
+;; ---------------------------------------------------------------------------------------------
+;; C6 L4.1 (queue 586, 581-1 (a)): the own copy of std's IR. Each define lib-unit's compare judged equal (LIB_UNIT_OWN's files)
+;; replaces rustc's define of its symbol, printed by repr/llvm, its constants renamed to the unit's globals of the same content
+;; (the compare's global map); every other define stays rustc's. The check: each copied unit read back, every define's normal
+;; form (RF3's normalizer, the entry unlabeled) equal to rustc's unit's: the copy is rustc's IR up to names.
+
+(defn- define-span-text
+  "The define's text lines of a printed module (from its `define` line to its closing `}`)"
+  [^String text]
+  (let [ls (str/split-lines text)
+        a (first (keep-indexed (fn [i ^String l] (when (str/starts-with? l "define ") i)) ls))
+        b (first (keep-indexed (fn [i ^String l] (when (and a (> (long i) (long a)) (str/starts-with? l "}")) i)) ls))]
+    (when (and a b) (subvec (vec ls) a (inc b)))))
+
+(defn- rename-globals
+  "FORM's constant globals (OGM's, ours) by the unit's names of the same content (INV: content -> name); nil and the first
+  missing name when one has no such global in the unit"
+  [form ogm inv]
+  (let [missing (volatile! nil)
+        walk (fn walk [x]
+               (cond (and (symbol? x) (= "g" (namespace x)) (contains? ogm x))
+                     (or (get inv (get ogm x)) (do (vreset! missing x) x))
+                     (seq? x) (apply list (map walk x))
+                     (vector? x) (mapv walk x)
+                     :else x))
+        r (walk form)]
+    (if @missing [nil @missing] [r nil])))
+
+(defn- own-in-header
+  "Rustc's define THEIRS with OURS' body and our parameters' names: its linkage, visibility, attributes, metadata and its
+  parameters' types and attributes kept (the normalizer does not compare them; the unit's other defines and the linker do)"
+  [theirs ours]
+  (let [tv (vec theirs) ov (vec ours)
+        ti (.indexOf ^java.util.List tv :body) oi (.indexOf ^java.util.List ov :body)
+        tps (nth tv 3) ops (nth ov 3)]
+    (when (and (pos? ti) (pos? oi) (= (count tps) (count ops)))
+      (apply list (-> tv
+                      (assoc 3 (mapv (fn [tp op] (conj (pop (vec tp)) (peek (vec op)))) tps ops))
+                      (assoc (inc ti) (nth ov (inc oi))))))))
+
+(defn- norm-defines [forms]
+  (let [gm (chk/global-map forms)]
+    (into {} (for [f forms :when (= 'llvm/define (first f))] [(name (second f)) (canon-fp (chk/normalize (entry-unlabeled f) gm))]))))
+
+(defn own-tree
+  "own STD-IR OUT OWN-FILE...: OUT/ir/CRATE/UNIT.ll, std's IR with the own files' equal defines spliced in, OUT/own.tsv
+  (crate, unit, symbol, own|rustc, why), OUT/check.tsv (each copied unit: defines, own, the read back's verdict)"
+  [std-dir out own-files]
+  (let [owns (for [f own-files] (read-string (slurp f)))
+        by-sym (into {} (for [o owns :let [gm (chk/global-map (:globals o))] [sy f] (:defines o) :when f]
+                          [sy {:form f :gm gm :crate (:crate o)}]))
+        tsv (StringBuilder.) chk (StringBuilder.)
+        stats (atom {:units 0 :spliced-units 0 :defines 0 :own 0 :fallback 0 :check-bad 0})]
+    (doseq [^File cd (sort-by #(.getName ^File %) (.listFiles (File. (str std-dir))))
+            :when (.isDirectory cd)
+            ^File f (sort-by #(.getName ^File %) (.listFiles cd)) :when (str/ends-with? (.getName f) ".ll")]
+      (let [crate (.getName cd) unit (.getName f)
+            od (File. (str out "/ir/" crate)) _ (.mkdirs od)
+            dst (str od "/" unit)
+            text (llvm/latin1 (.getPath f))
+            lines (vec (str/split-lines text))
+            n (count lines)
+            spans (loop [i 0 acc (transient [])]
+                    (if (>= i n) (persistent! acc)
+                        (let [^String l (nth lines i)]
+                          (if-let [[_ _ nm] (re-find def-re l)]
+                            (let [j (loop [j i] (if (or (>= j n) (str/starts-with? (nth lines j) "}")) j (recur (inc j))))]
+                              (recur (inc j) (conj! acc [nm i j])))
+                            (recur (inc i) acc)))))
+            hits (filter (fn [[nm]] (contains? by-sym nm)) spans)]
+        (swap! stats update :units inc)
+        (swap! stats update :defines + (count spans))
+        (if (empty? hits)
+          (do (llvm/spit-latin1 dst text)
+              (doseq [[nm] spans] (.append tsv (str crate "\t" unit "\t" nm "\trustc\t\n"))))
+          (let [forms (llvm/read-ll (.getPath f))
+                ugm (chk/global-map forms)
+                inv (reduce (fn [m [k c]] (if (contains? m c) m (assoc m c k))) {} (sort-by (comp str key) ugm))
+                theirs (into {} (for [x forms :when (= 'llvm/define (first x))] [(name (second x)) x]))
+                repl (into {} (for [[nm a b] hits
+                                    :let [{:keys [form gm]} (get by-sym nm)
+                                          [r miss] (rename-globals form gm inv)
+                                          h (when r (own-in-header (get theirs nm) r))
+                                          txt (when h (define-span-text (llvm/print-ll [h])))]]
+                                [nm (if txt [:own txt] [:fallback (cond miss (str "no global of the content of " miss " in the unit")
+                                                                        (nil? h) "the parameters do not match rustc's"
+                                                                        :else "the printer gave no define")])]))
+                out-lines (loop [i 0 [[nm a b] & more :as sp] spans acc (transient [])]
+                            (cond (>= i n) (persistent! acc)
+                                  (and nm (= i a) (= :own (first (get repl nm))))
+                                  (recur (inc (long b)) more (reduce conj! acc (second (get repl nm))))
+                                  (and nm (= i a)) (recur (inc (long b)) more (reduce conj! acc (subvec lines a (inc (long b)))))
+                                  :else (recur (inc i) sp (conj! acc (nth lines i)))))
+                _ (llvm/spit-latin1 dst (str (str/join "\n" out-lines) "\n"))
+                orig (norm-defines forms)
+                back (norm-defines (llvm/read-ll dst))
+                bad (sort (for [[nm o] orig :when (not= o (get back nm))] nm))
+                own-n (count (filter #(= :own (first %)) (vals repl)))]
+            ;; the crossed control (once, the first unit with two own defines of one arity whose rustc forms differ): one's own body
+            ;; under the other's header must not be rustc's up to names
+            (when-not (:control @stats)
+              (let [cands (for [[nm] hits :let [{:keys [form gm]} (get by-sym nm) [r] (rename-globals form gm inv)] :when r] [nm r])
+                    pair (first (for [[x rx] cands [y ry] cands
+                                      :when (and (not= x y) (= (count (nth (vec rx) 3)) (count (nth (vec ry) 3))) (not= (get orig x) (get orig y)))]
+                                  [x y ry]))]
+                (when-let [[x y ry] pair]
+                  (let [h (own-in-header (get theirs x) ry)
+                        c (when h (get (norm-defines (concat (remove #(= 'llvm/define (first %)) forms) [h])) x))]
+                    (swap! stats assoc :control [x y (if (= c (get orig x)) :passed :differs)])))))
+            (swap! stats update :spliced-units inc)
+            (swap! stats update :own + own-n)
+            (swap! stats update :fallback + (- (count repl) own-n))
+            (swap! stats update :check-bad + (count bad))
+            (.append chk (str crate "\t" unit "\t" (count spans) "\t" own-n "\t" (if (empty? bad) "equal" (str "differs " (str/join "," (take 5 bad)))) "\n"))
+            (doseq [[nm] spans]
+              (let [[k why] (get repl nm)]
+                (.append tsv (str crate "\t" unit "\t" nm "\t" (if (= k :own) "own" "rustc") "\t" (if (= k :fallback) why "") "\n"))))))))
+    (spit (str out "/own.tsv") (str tsv))
+    (spit (str out "/check.tsv") (str chk))
+    (let [s @stats]
+      (println (format "lib-unit own: %d units (%d with own defines), %d defines, %d own, %d left rustc's by the splice; check: %s"
+                       (:units s) (:spliced-units s) (:defines s) (:own s) (:fallback s)
+                       (if (zero? (:check-bad s)) "every define of the copy equal to rustc's up to names" (str (:check-bad s) " defines differ"))))
+      (if-let [[x y k] (:control s)]
+        (println (str "lib-unit own control (" y "'s own body under " x "'s header): " (if (= k :differs) "differs, as it must" "PASSED (a bug)")))
+        (println "lib-unit own control: no two own defines to cross"))
+      (System/exit (if (and (zero? (:check-bad s)) (= :differs (nth (:control s) 2 nil))) 0 1)))))
+
 (defn -main [cmd & args]
   (case cmd
     "census" (let [[std & specs] args] (census std specs))
+    "own" (let [[std out & owns] args] (own-tree std out owns))
     "keys" (let [[std crate out & specs] args
                  rows (census std specs)
                  its (filter #(and (= crate (:crate %)) (= :item (:kind %))) rows)
@@ -397,19 +526,30 @@
              (println (format "lib-unit keys: %s: %d items of the closure, %d keys, into %s" crate (count its) (count ks) out)))
     "compare" (binding [cg/*fewer-names* true   ; C6-4: std's IR names no struct type (rustc's -Z fewer-names)
                         ;; rust-c6c: the calls numbered in codegen's order, the inliner's use lists (LIB_UNIT_CALL_SEQ=0: the layout's)
-                        cg/*call-seq* (and (not= "0" (System/getenv "LIB_UNIT_CALL_SEQ")) (not= "0" (System/getenv "LIB_UNIT_INLINE")))]
+                        cg/*call-seq* (and (not= "0" (System/getenv "LIB_UNIT_CALL_SEQ")) (not= "0" (System/getenv "LIB_UNIT_INLINE")))
+                        ;; (queue 581: 572's three codegen rules, *const-index-align*, *consume-fat-pair* and *repeat-ptr-loop*, ungated:
+                        ;; codegen's defaults)
+                        ]
                (let [[std crate uf] args
                     m (read-string (slurp uf))
-                    theirs (ir-forms std crate (keep (fn [[_ b]] (:symbol b)) (:bodies m)))
+                    theirs (ir-forms std crate (concat (keep (fn [[_ b]] (:symbol b)) (:bodies m)) (keep #(nth % 2) (:l2-bodies m))))
                     gl (cg/new-globals (:langsyms m))
                     lt (into {} (:layouts m))
                     inl-bodies (vec (keep #(nth % 3) (:inline-bodies m)))
-                    _ (cg/set-def-symbols! gl (for [b (concat (keep second (:bodies m)) inl-bodies)] (assoc b :form :body)))
+                    l2-bodies (vec (keep #(nth % 3) (:l2-bodies m)))
+                    _ (cg/set-def-symbols! gl (for [b (concat (keep second (:bodies m)) inl-bodies l2-bodies)] (assoc b :form :body)))
                     ours (vec (for [[d b why] (:bodies m)]
                                 (if b
                                   (try [d (:symbol b) (cg/codegen-fn (assoc b :form :body) lt gl) nil]
                                        (catch Throwable e [d (:symbol b) nil (str "codegen: " (or (:codegen/unsupported (ex-data e)) (.getMessage e)))]))
                                   [d nil nil why])))
+                    ;; queue 566 (L2's first slice): the items' callees' instances, codegen'd as the items are, the always-inliner over them too
+                    l2-ours (vec (for [[d args sym b why] (:l2-bodies m)]
+                                   (let [nm (str d (when (seq args) (pr-str args)))]
+                                     (if b
+                                       (try [nm sym (cg/codegen-fn (assoc b :form :body) lt gl) nil]
+                                            (catch Throwable e [nm sym nil (str "codegen: " (or (:codegen/unsupported (ex-data e)) (.getMessage e)))]))
+                                       [nm sym nil why]))))
                     ;; C6-4: LLVM's -O0 pipeline, the always-inliner (arbace.rust.back.inline): the `#[inline(always)]` callees
                     ;; codegen'd and inlined into the items (LIB_UNIT_INLINE=0: not); an item calling one the build lacks refused
                     ours (if (= "0" (System/getenv "LIB_UNIT_INLINE"))
@@ -430,24 +570,50 @@
                                  ;; callees first, as before)
                                  module (binding [inl/*nounwind?* (fn [sym] (or (str/starts-with? (name sym) "llvm.") (false? (get nounwind (name sym)))))]
                                           (inl/inline-module (let [so (not= "0" (System/getenv "LIB_UNIT_SYMBOL_ORDER"))
-                                                                       fs (concat (keep #(nth % 2) ours) (callees-first inl-defs always so))]
+                                                                       fs (concat (keep #(nth % 2) ours) (keep #(nth % 2) l2-ours) (callees-first inl-defs always so))]
                                                                    ;; the module's order, the items and the callees by symbol (the calls'
                                                                    ;; use lists are numbered in it)
                                                                    (if so (sort-by #(name (second %)) fs) fs))
                                                              always))
-                                 by (into {} (map (juxt second identity) module))]
-                             (vec (for [[d sym f why :as o] ours]
-                                    (cond (nil? f) o
-                                          (some missing (inl/callees f)) [d sym nil (str "an #[inline(always)] callee not built: "
-                                                                                       (first (filter missing (inl/callees f))))]
-                                          :else [d sym (get by (second f) f) why])))))
+                                 by (into {} (map (juxt second identity) module))
+                                 through (fn [os] (vec (for [[d sym f why :as o] os]
+                                                         (cond (nil? f) o
+                                                               (some missing (inl/callees f)) [d sym nil (str "an #[inline(always)] callee not built: "
+                                                                                                            (first (filter missing (inl/callees f))))]
+                                                               :else [d sym (get by (second f) f) why]))))]
+                             ;; (queue 566: the L2 callees through the same module, kept as the result's metadata)
+                             (with-meta (through ours) {:l2-inlined (through l2-ours)})))
                     our-gm (chk/global-map (cg/module-extras gl))
+                    l2-rows (judge (or (:l2-inlined (meta ours)) l2-ours) our-gm theirs)
                     rows (judge ours our-gm theirs)
                     ctl (control ours our-gm theirs)]
+                ;; queue 566: LIB_UNIT_DUMP=REGEX writes each matching item's two sides, normalized as judge compares them, one
+                ;; form a line, into LIB_UNIT_DUMP_DIR (default .tmp/lib-unit-dump): DEF.ours and DEF.rustc
+                (when-let [re (some-> (System/getenv "LIB_UNIT_DUMP") re-pattern)]
+                  (let [dir (or (System/getenv "LIB_UNIT_DUMP_DIR") ".tmp/lib-unit-dump")]
+                    (.mkdirs (java.io.File. ^String dir))
+                    (doseq [[d sym f] (concat ours (or (:l2-inlined (meta ours)) l2-ours)) :when (and f (re-find re (str d))) :let [[tf tgm] (get theirs sym) nm (str/replace (str d) #"[^A-Za-z0-9_.{}#-]+" "_")]]
+                      (spit (str dir "/" nm ".ours") (str/join "\n" (map pr-str (canon-fp (chk/normalize (entry-unlabeled f) our-gm)))))
+                      (when tf (spit (str dir "/" nm ".rustc") (str/join "\n" (map pr-str (canon-fp (chk/normalize tf tgm)))))))))
+                ;; queue 586 (C6 L4.1): LIB_UNIT_OWN=FILE writes the equal defines' forms (the items' and L2's, after the inliner)
+                ;; with the module's globals, which `own` splices into the own copy of std's IR
+                (when-let [of (System/getenv "LIB_UNIT_OWN")]
+                  (let [fs (into {} (for [[_ sym f] (concat ours (or (:l2-inlined (meta ours)) l2-ours)) :when f] [sym f]))
+                        eq (distinct (for [[_ sym k] (concat rows l2-rows) :when (= k :equal)] sym))]
+                    (spit of (binding [*print-meta* false]
+                               (pr-str {:crate crate :globals (vec (filter #(= 'llvm/global (first %)) (cg/module-extras gl)))
+                                        :defines (vec (for [sy eq :when (get fs sy)] [sy (get fs sy)]))})))
+                    (println (str "lib-unit own: " (count eq) " equal defines of " crate " into " of))))
                 (doseq [[d sym k why] rows]
                   ;; a difference's text may hold a constant's bytes: control characters printed as `?`, so the log stays text
                   (println (str "lib-unit " (name k) " " d (when sym (str " " sym))
                                 (when why (str " (" (str/replace (subs (str why) 0 (min 400 (count (str why)))) #"[\x00-\x08\x0b-\x1f\x7f]" "?") ")")))))
+                (when (seq l2-rows)
+                  (doseq [[d sym k why] l2-rows]
+                    (println (str "lib-unit l2 " (name k) " " d (when sym (str " " sym))
+                                  (when why (str " (" (str/replace (subs (str why) 0 (min 300 (count (str why)))) #"[\x00-\x08\x0b-\x1f\x7f]" "?") ")")))))
+                  (println (str "lib-unit l2 compare: " crate ": " (count l2-rows) " callees: "
+                                (str/join ", " (for [k [:equal :differs :refused :no-symbol]] (str (count (filter #(= k (nth % 2)) l2-rows)) " " (name k)))))))
                 (println (str "lib-unit compare: " crate ": " (count rows) " items: "
                               (str/join ", " (for [k [:equal :differs :refused :no-symbol]] (str (count (filter #(= k (nth % 2)) rows)) " " (name k))))))
                 (if ctl

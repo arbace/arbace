@@ -160,6 +160,30 @@
       [(when n id) mty (if n (assoc-in env [:modules n] entry) env)])))
 
 
+(declare rewrite-items)
+
+(defn- rewrite-mty
+  "A module's type rewritten by rw (rewrite-items'), nil when it is left as it is: a signature's items, and (queue 547) a
+  functor's parameter and result (base's Map_intf: a functor's signature inside an include's `with type 'k key := 'k`)"
+  [rw mty & [no-scrape]]
+  ;; (queue 547) a functor's parameter and result are rewritten as they are written (not scraped: a named module type, the
+  ;; parameter's Applicative.Lazy_applicative, stays named, its declarations untouched)
+  ;; (queue 547) a module whose type names a module of the signature itself (base's Applicative_intf.Let_syntax:
+  ;; `module Open_on_rhs : Open_on_rhs_intf.S`, Open_on_rhs_intf a sibling, not in the environment) is not expanded
+  ;; but kept, as Subst keeps an Mty_ident: the scrape only reaches the environment's module types
+  ;; (queue 548) an alias is kept, as Subst keeps an Mty_alias (its target is outside the signature): base's `include (Shadow_stdlib
+  ;; : module type of struct include Shadow_stdlib end ... with type 'a ref := 'a ref)` leaves Base.Bigarray an alias of Stdlib's,
+  ;; absent, where its scrape made an absent module with a signature and no address
+  (let [m (cond no-scrape mty
+                (= :Mty_alias (mty 0)) mty
+                :else (try (env/scrape mty) (catch arbace.lang.ExceptionInfo _ mty)))]
+    (case (m 0)
+      :Mty_signature [:Mty_signature (rewrite-items rw (m 1))]
+      :Mty_functor (let [[p res] [(m 1) (m 2)]
+                         p' (when p [(first p) (or (rewrite-mty rw (second p) true) (second p))])]
+                     [:Mty_functor p' (or (rewrite-mty rw res true) res)])
+      nil)))
+
 (defn rewrite-items
   "The signature's types rewritten node by node by rw (values, declarations, exceptions, submodules), the new
   declarations registered"
@@ -181,16 +205,33 @@
                                    [n p d']))
                                (item 1))]
             :exn (assoc item 3 (update (item 3) :args #(mapv rw %)))
-            :module (let [m (env/scrape (item 3))]
-                      (if (= :Mty_signature (m 0)) (assoc item 3 [:Mty_signature (rewrite-items rw (m 1))]) item))
+            :module (if-let [m' (rewrite-mty rw (item 3))] (assoc item 3 m') item)
             item))
         items))
+
+(defn- lid-below-first
+  "A Longident M.rest as rest (the path inside the first module it names)"
+  [lid]
+  (let [q (:txt (lid 1))]
+    (if (= :Lident (q 0)) [:Lident (:txt (lid 2))] [:Ldot {:txt (lid-below-first q)} (lid 2)])))
 
 (defn- with-constraint [env items c]
   (case (c 0)
     :Pwith_type
     (let [parts (env/lid-parts (:txt (c 1)))]
-      (when (> (count parts) 1) (type-error "with-constraints on a submodule's type are outside the slice"))
+      (if (> (count parts) 1)
+        ;; (queue 547) Typemod.merge_constraint through a submodule (`with type 'a IO.t = 'a`, ppx_expect's Expect_test_config): the
+        ;; submodule's signature constrained, its module type that signature
+        (let [c' (assoc c 1 (assoc (c 1) :txt (lid-below-first (:txt (c 1)))))
+              m (first parts)]
+          (when-not (some #(and (= :module (% 0)) (= m (% 1))) items) (type-error (str "The signature has no module " m)))
+          (mapv (fn [item]
+                  (if (and (= :module (item 0)) (= (item 1) m))
+                    (let [sm (env/scrape (item 3))]
+                      (when-not (= :Mty_signature (sm 0)) (type-error (str "The module " m " is not a signature")))
+                      (assoc item 3 [:Mty_signature (with-constraint env (sm 1) c')]))
+                    item))
+                items))
       (mapv (fn [item]
               (if (and (= :type (item 0)) (some #(= (first parts) (first %)) (item 1)))
                 [:type (mapv (fn [[n p d]]
@@ -206,7 +247,7 @@
                                  [n p d]))
                              (item 1))]
                 item))
-            items))
+            items)))
     :Pwith_module
     (let [parts (env/lid-parts (:txt (c 1)))
           e (env/lookup-module env (:txt (c 2)))]
@@ -436,10 +477,13 @@
                               " but is expected to have type " (ty/type-scheme-text t-spec)))
              (throw e))))
     (let [;; a row variable of the specification linked to the rest of its row: that row's own variable
-          row-end (fn [t] (let [t (ty/repr t) d (ty/desc t)] (if (= :Tvariant (d 0)) (ty/repr (ty/row-more (d 1))) t)))
+          ;; (queue 547) its abbreviations expanded, as Ctype.moregen expands the head before it compares (base's Map.Poly.empty:
+          ;; the specification's 'k bound to 'a Comparator.Poly.t = 'a)
+          row-end (fn [t] (let [t (ty/expand-head (ty/repr t)) d (ty/desc t)] (if (= :Tvariant (d 0)) (ty/repr (ty/row-more (d 1))) t)))
           after (map row-end before)]
       (when-not (and (every? ty/tvar? after) (= (count (distinct after)) (count after)))
-        (type-error (str "Signature mismatch: the value " n " is less general than its specification"))))))
+        (type-error (str "Signature mismatch: the value " n " is less general than its specification: it has type "
+                         (ty/type-scheme-text t-impl) ", the specification " (ty/type-scheme-text t-spec)))))))
 
 (defn- runtime-positions
   "Of a signature: each runtime item's key [kind name] to its position (the last of a name wins), and the items by key"
@@ -558,6 +602,14 @@
       (and (= :Mty_ident (m1 0)) (= :Mty_ident (m2 0)) (= (m1 1) (m2 1))) nil
       :else (type-error "Signature mismatch: modules do not match"))))
 
+;; (queue 547) Typemod.package_subtype for Ctype.unify_package: the first package's module type (its constraints manifest)
+;; included in the second's
+(reset! ty/package-subtype
+        (fn [p1 cs1 p2 cs2]
+          (try (include-mty nil (env/modtype-of-package (ty/newty [:Tpackage p1 cs1])) (env/modtype-of-package (ty/newty [:Tpackage p2 cs2])))
+               true
+               (catch arbace.lang.ExceptionInfo _ false))))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; Module expressions (Typemod.type_module)
 
@@ -634,6 +686,10 @@
                                            (item 1))]
                         :exn (let [m (atom {})] (assoc item 3 (update (item 3) :args (fn [as] (mapv #(nd-type m %) as)))))
                         :module (assoc item 3 (nd-mty co (item 3)))
+                        ;; (queue 547) a module type declaration's (Mtype.nondep_modtype_decl, Strict: its types expanded, none
+                        ;; made abstract): base's Type_equal_intf, `include module type of Type_equal_defns (struct ... end)`,
+                        ;; its module type Lift naming the parameter Type_equal
+                        :modtype (if (item 3) (assoc item 3 (nd-mty false (item 3))) item)
                         item))
                     items))
             (nd-mty [co m]
@@ -667,7 +723,10 @@
     (case (d 0)
       :Pmod_ident (let [e (binding [env/*alias-lookup* alias] (env/lookup-module env (:txt (d 1))))
                         p (:path e)
-                        aliasable (not (:functor-arg e))
+                        ;; Env.is_functor_arg: a path whose head is a functor's parameter (`module Attrs = Params.Attrs` in a
+                        ;; functor's body, queue 547's ppx_compare_expander) is no alias: its module type, strengthened
+                        aliasable (not (or (:functor-arg e)
+                                           (and (= :Pdot (p 0)) (:functor-arg (env/find-module [:Pident (ty/path-head p)])))))
                         md {:desc [:Tmod_ident p e] :mty [:Mty_alias p]}
                         emty (when-not (and alias aliasable) (or (:mty e) (:mty (env/find-module p))))]
                     (cond
@@ -818,9 +877,22 @@
         (recur (rest sitems) env' (if ti (conj items ti) items) (into sig its))))))
 
 (defn- unit-root
-  "The root path's name of a unit (Out_type.rewrite_double_underscore_paths: Stdlib__List is Stdlib.List)"
+  "The root path's name of a unit (Out_type.rewrite_double_underscore_paths: Stdlib__List is Stdlib.List; queue 547, any A__b is A.B
+  when the unit A is found and its module B is an alias of A__b, as a dune library's alias module makes it: re_private's
+  Re_private__Emacs, whose exception Parse_error prints as Re_private.Emacs.Parse_error)"
   [uname]
-  (if (str/starts-with? uname "Stdlib__") (str "Stdlib." (subs uname 8)) uname))
+  (if (str/starts-with? uname "Stdlib__")
+    (str "Stdlib." (subs uname 8))
+    (let [i (str/index-of uname "__")]
+      (or (when (and i (pos? i) (< (+ i 2) (count uname)))
+            (let [a (subs uname 0 i) b (subs uname (+ i 2))
+                  b (str (str/upper-case (subs b 0 1)) (subs b 1))
+                  c (try (env/find-unit a) (catch arbace.lang.ExceptionInfo _ nil))
+                  m (when (map? c) (get-in c [:modules b]))
+                  target (cond (string? m) m
+                               (and (map? m) (= :Mty_alias (first (:mty m))) (= :Pident (first ((:mty m) 1)))) (:name (second ((:mty m) 1))))]
+              (when (= target uname) (str a "." b))))
+          uname))))
 
 (defn- expand-escaping!
   "Ctype's scope check for a packed module: an outer variable bound to one of the module's own types (by the
