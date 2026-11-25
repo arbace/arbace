@@ -853,9 +853,35 @@
     (constructor ^:public [this ^String c] (set! (.-c this) c))
 
     (method ^:public eval [this]
-      (let [ns (cast Namespace (.deref RT/CURRENT_NS))]
+      (ImportExpr/importIn (cast Namespace (.deref RT/CURRENT_NS)) c)
+      nil)
+
+    ;; the import of class c into ns: the class, or nil for a lazy import (the REPL's model, JCS8 (b);
+    ;; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the lazy import"): a class not loadable yet whose
+    ;; source on the path declares it (p/C.ae or p/C_class.ae, SPEC §9.2, 3), as a package that imports one
+    ;; importing it back, the Java forms' name for it then (arbace.classes.native's defer-import); else
+    ;; Clojure's ClassNotFoundException. The front end is loaded only when such a file exists
+    (method ^:public ^:static importIn ^Class [^Namespace ns ^String c]
+      (try
         (.importClass ns (RT/classForNameNonLoading c))
-        nil))
+        (catch Exception e
+          (when-not (instance? ClassNotFoundException e) (throw (Util/sneakyThrow e)))
+          (let [d (.indexOf c "$")
+                top (.replace (if (>= d 0) (.substring c 0 d) c) \. \/)
+                found (and (> (.indexOf top "/") 0)
+                           (or (ImportExpr/sourceExists (java-str top "_class.ae"))
+                               (ImportExpr/sourceExists (java-str top ".ae"))))]
+            (if (and found
+                     (RT/booleanCast (.invoke (arbace.lang.Compiler/classForms "defer-import") ns c)))
+              nil
+              (throw (Util/sneakyThrow e)))))))
+
+    (method ^:static sourceExists ^boolean [^String name]
+      (let [in (RT/resourceAsStream (RT/baseLoader) name)]
+        (if (nil? in)
+          false
+          (do (try (.close in) (catch java.io.IOException x nil))
+              true))))
 
     (method ^:public hasJavaClass ^boolean [this] false)
 
@@ -870,7 +896,7 @@
 
     ;; the class, as the compiled import* leaves it (ImportExpr.emit; its eval gives nil)
     (method ^:public evalIn [this ^Compiler$Frame f]
-      (.importClass (cast Namespace (.deref RT/CURRENT_NS)) (RT/classForNameNonLoading c))))
+      (ImportExpr/importIn (cast Namespace (.deref RT/CURRENT_NS)) c)))
 
   (defclass ^:public ^:abstract ^:static LiteralExpr
     :implements [Expr]
@@ -7767,6 +7793,16 @@
 
       ;; whether the class's initialization completed (an assert's enabling: AssertOn)
       (method ^:public initDone ^boolean [this] (== state 2))
+
+      ;; finalization (the user's JMS1 (a), 2026-11-24): whether its objects are finalizable, a finalize() among its
+      ;; virtual methods (its own or an interpreted superclass's), decided once (0 not yet, 1 yes, 2 no)
+      (field ^int fin)
+
+      (method ^:public finalizable ^boolean [this]
+        (when (== fin 0)
+          (set! fin (if (some? (.get vtable "finalize()V")) 1 2)))
+        (== fin 1))
+
       ;; class initialization (JLS 12.4.2, simplified): the superclass first, then the static
       ;; initializer, once; a failed one fails every later use
       (method ^:public init ^void [this]
@@ -9152,10 +9188,13 @@
                             (int (cond (.-iface k) 1 (.-fnClass k) 2 (.-record k) 3 :else 0))
                             k)))
 
+      ;; an object of a class with a finalize() registered for finalization (jrt's finalize.ae; JMS1 (a))
       (method ^:public alloc [this ^CF$Klass k]
         (if (.-fnClass k)
             (CF$FnObj. k (.clone (.-defaults k)))
-            (CFGo/alloc (.-cls k) (.clone (.-defaults k)))))
+            (let [o (CFGo/alloc (.-cls k) (.clone (.-defaults k)))]
+              (when (.finalizable k) (CFGo/registerFinalizer o))
+              o)))
 
       (method ^:public klassOf ^CF$Klass [this o]
         (if (instance? CF$FnObj o)
@@ -9258,6 +9297,8 @@
                                                            ^int flags ^int kind klass])
     ;; a new object of class c (kind 0): its fields the values
     (method ^:public ^:static ^:native alloc [^Class c ^Object/1 values])
+    ;; o finalizable: its finalize() run once Go finds it unreachable (jrt.RegisterFinalizer; JMS1 (a))
+    (method ^:public ^:static ^:native registerFinalizer ^void [o])
     ;; the CF$Klass of o's class when o is an object of an interpreted class, else nil
     (method ^:public ^:static ^:native klassOf [o])
     ;; a method: static (a static entry of the member table) or virtual (Dyn's slot of its name

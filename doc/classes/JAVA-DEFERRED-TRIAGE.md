@@ -9118,3 +9118,107 @@ afresh (`bin/j2g-edge update`) for their references outside the world.
   CloseServerSocketOnTermination (t05255); GetObjectName (t04784), an executor thread of main's group, still fails (the
   control).
 - **divergences.edn**: :synthetic-lambdas by design (DECISION 517-1 (a); t06144 t06157 t06306).
+
+## As built: java-misc-1124 (the lazy import, security's small fixes, the references' design), 2026-11-24 (write-ahead)
+
+Branch `java-misc-1124` from next `903ef1ab2`: four classes of the interp and compiled levels, `:repl-sibling`, `:security`,
+`:logging` and `:references`, each test's cause found on the gate executable `40a4745332aacf54acab` and what is jrt's,
+the world's or the REPL model's built. Nothing here was run on a build of the branch: the rows move with the train that
+carries it (arbace/lang and jrt are in gate_key).
+
+### Built
+
+- **The lazy import** (`:repl-sibling`, t04756 ProtectedMemberDifferentPackage, t06388 ProtectedMemberAccess5; interp).
+  Two packages that import each other (p1's T2 imports p2.T3, which extends p1.T2; z1's Z1 imports z2.Z2$T, whose Z2
+  extends z1.Z1) load in either order under javac; at the REPL the first package's `(import ...)` ran before the other
+  package was defined, a ClassNotFoundException. `arbace.lang.Compiler$ImportExpr` imports through `importIn`: a class not
+  loadable yet whose source on the path declares it (p/C.ae or p/C_class.ae, SPEC §9.2, 3; the front end loaded only when
+  such a file exists) is deferred, `arbace.classes.native/defer-import` over `arbace.classes.analyze/defer-import!` putting
+  its simple name in `env/source-imports` as `import-classes!` does for a source's own imports: the Java forms resolve it
+  through the source path, then to the class once defined. Any other missing class is Clojure's ClassNotFoundException as
+  before (`declares-top?`, factored out of `enter-file!`, decides). Proved on the gate executable with the cyclic imports
+  replaced by the deferral's call (both tests pass: TEST PASSED, status 0), the deferral's negative cases (a package with
+  no source, a class its source does not declare, a name without a package: false) and `importIn`'s own code interpreted
+  (a loadable class imported, the deferred one nil, a missing one CNFE).
+- **OCSP over HttpURLConnection** (AIACheck, t05333): F2's variant `overlay/jdk/variants/OCSP.ae` (getOCSPBytes failing
+  with "the Go build has no HTTP client") dropped: HttpURLConnection is in the world since F12 (Responses, GetResponseCode
+  pass), so jdk26u's getOCSPBytes connects to the certificate's AIA responder, localhost:8888, and its ConnectException (a
+  SocketException) is the cause the test asks for.
+- **java.base's com.sun packages** (DefaultProviderList, t05304): jrt's `classPlace` puts `com.sun.crypto.provider` and
+  `com.sun.security.ntlm` (java.base's only com.sun packages in jdk26u) in module java.base of the bootstrap loader, as the
+  JDK does; SunJCE's class was in the unnamed module, so the test looked for it through ServiceLoader. reflect_test's
+  TestClassLoaders holds it (and another com.sun package unnamed).
+- **The seed source** (StrongSeedReader, t08235): java.security.egd (or securerandom.source) naming a file other than
+  /dev/random and /dev/urandom is read as the JDK's URLSeedGenerator reads it: jrt's SeedGenerator (SHA1PRNG's and the
+  DRBG's seeds) from one stream of it, opened at the first seed (a source that cannot be opened: the host's, as the JDK
+  falls back to ThreadedSeedGenerator), and NativePRNG's mixed kind takes it as its seed file as jdk26u's initIO does
+  (variant `NativePRNG.ae`; vetted, `bin/jrt-convert vet`). SeedGenerator's forms read by `bin/jrt-convert predict`.
+
+### Not built: the user's decisions (JMS1-JMS4, proposed)
+
+- **JMS1 finalization** (`:references`: FinThreads t04683, ref/Basic t04816, both levels). jrt runs no finalizers
+  (System.runFinalization's note: as a JVM with --finalization=disabled, JEP 421). On the gate executable ref/Basic now
+  clears and dequeues its three references and fails only "Test object not finalized" (the recorded "W ... not cleared"
+  was a run where the collection had not found the referent yet); FinThreads waits for a finalizer forever. (a) Build
+  finalization as the JDK's: an object of a class that declares finalize() (j2g knows it at the constructor; the
+  interpreter at definition) gets a Go finalizer (`runtime.SetFinalizer` on its header, the allocation's start) that only
+  hands it to a Java thread "Finalizer" draining a queue (a finalize() that blocks must not hold Go's finalizer goroutine,
+  which the runtime's own files share); runFinalization starts a "Secondary finalizer" thread over the same queue; Go
+  clears weak pointers before an object's finalizer runs and runs AddCleanup's cleanups only once it is freed, which are
+  Java's orders for weak and phantom references. About a day plus a train; +2 tests at each level. (b) n/a: Arbace is a
+  JVM run with --finalization=disabled (finalization deprecated for removal since JDK 18). *Recommended: (a)*: the
+  semantics fit Go's collector and the cost is only for the classes that declare finalize().
+- **JMS2 a reference read while the collector marks** (Test7190310, t03385, both levels; also its stdout). Measured on the
+  gate executable: a thread spinning on WeakReference.get keeps the referent alive through every System.gc(), five in a row
+  (without the spinning thread the first clears it): Go's weak.Pointer.Value during a cycle's mark phase shades the object,
+  and HotSpot's System.gc() is a stop-the-world collection that no get() overlaps. Besides, run.ae ends the process when
+  main returns, where the JVM's launcher waits for the non-daemon threads (this test's two readers print after main).
+  (a) A gate for explicit collections: Reference.get counts itself in and checks an atomic flag, System.gc sets the flag,
+  waits for the gets in flight and runs runtime.GC() with none in progress (two atomics per get: Keyword's and Symbol's
+  tables read WeakReferences), and run.ae waits for the non-daemon threads of main's group after main returns (bounded by
+  the test's limit; every test's run changes, a whole-corpus night); then the test's stdout is three threads' lines in the
+  scheduler's order, which test/java/verdicts.edn already calls unspecified, so it would still need (c). (b) The gate
+  alone, without run.ae's wait. (c) n/a: the test is HotSpot's C2 regression (7190310, Reference.get's intrinsic) and its
+  stdout is unspecified (verdicts.edn, JCS361 (a)). *Recommended: (c)* for t03385; (b) as jrt's own improvement when
+  a test needs it.
+- **JMS3 security's two out of reach** (both levels). GetInstance (t05346) asks for the LDAP CertStore: JNDI's LDAP
+  provider, deferred by JCS234 (a) until JNDI's providers have tests of their own, and java.naming is not in the world
+  (t07869's class). AllPlatforms (t07867) needs jdk.security.auth's UnixLoginModule (UnixSystem's getpwuid and groups, a
+  jrt native) and NTLoginModule's failure, and its stdout is the running user's principals and two stack traces with
+  NTLoginModule's line numbers (verdicts.edn: "host"). (a) Build both: java.naming with LDAP's CertStore (several days,
+  JCS234's reopening) and UnixLoginModule (half a day) whose stdout still differs until stack traces carry Java line
+  numbers (java-stack's). (b) n/a for t07867 (its stdout is the host's), t05346 deferred under JCS234 (a). (c) n/a for
+  both. *Recommended: (b)*.
+- **JMS4 logging** (`:logging`). System.Logger (StressSBTest t04675, LoggerInterfaceTest t04680; both levels) is JCS250 (a),
+  decided: jrt's hand-written `System.Logger`, `Level` and `LoggerFinder` with the defaults as package functions, j2g's
+  first hand-written interface with defaults that translated classes implement; not started here (a day and a half plus a
+  night, its own branch). An alternative to put to the user beside it: the interface translated from an overlay Java file
+  whose top-level name carries the `$` (`java/lang/System$Logger.java`, `public interface System$Logger`, legal Java and
+  the nested class's binary name), so j2g's existing translated defaults serve, with `System.getLogger` as a j2g static
+  over `SystemLoggers.getLogger`; getDeclaringClass and getSimpleName then answer as for a top-level class. Reflect
+  (t05778, both levels) prints LogManager's getDeclaredMethods, private ones included, in HotSpot's order: n/a
+  (verdicts.edn: unspecified), recommended. TestInferCaller (t05766, compiled) is java.util.logging's caller inference
+  over StackWalker: java-stack-1124's.
+
+### As built: java-misc-1124, finalization (JMS1 (a), the user's decision of 2026-11-24)
+
+- **jrt** (`go/arbace/jrt/finalize.ae`, new): `RegisterFinalizer(x)` puts a Go finalizer on the object's header (the
+  allocation's start) whose only work is to queue the object, rebuilt from the header and its type word (a closure over
+  the object would keep it alive); the daemon thread "Finalizer" of the system thread group (priority 8, started with the
+  first finalizable object, as jdk26u's Finalizer.startFinalizerThread) runs each queued object's finalize(), a
+  translated class's Go method `Finalize__V`, else the member table's method up its superclasses (an interpreted
+  class's), every Throwable ignored (Finalizer.runFinalizer). `System.runFinalization` collects, waits at most a second
+  for Go's finalizer queue to be empty (`runtime.blockUntilEmptyFinalizerQueue`, a linkname target of Go's runtime) and
+  runs what is queued on a thread "Secondary finalizer" the caller waits for over a channel, its interrupt status
+  untouched (FinInterrupt). Go clears weak pointers when it queues an object's finalizer and runs AddCleanup's cleanups
+  once the object is freed: Java's orders for weak and phantom references. TestFinalization (system_test) holds it.
+- **j2g** (`arbace/j2g/decls.ae`, `finalizable?`): a class whose nearest finalize() of its superclass chain is not
+  Object's and has a body (HotSpot's has_finalizer leaves an empty one: ThreadPoolExecutor's) calls
+  `jrt.RegisterFinalizer` in its constructors' New functions before the constructor runs, as the JVM registers at
+  Object.<init>. In the world: CramMD5Base and PlainClient (SASL's password clearing).
+- **The interpreter** (`arbace/lang/Compiler.ae`): `CF$Klass.finalizable` (a finalize() among its virtual methods, decided
+  once) and the Go host's alloc registering the object through the native `Compiler$CFGo/registerFinalizer`
+  (`arbace/j2g/dyncf.ae`). interp.ae is unchanged (the stage-0 rule: no new runtime member named by a tool namespace).
+- Limits: Go never collects a cycle through an object with a finalizer (runtime.SetFinalizer), where the JVM finalizes
+  it; a clone or a deserialized object is not registered; an interpreted class extending a translated one that declares
+  finalize() is not.

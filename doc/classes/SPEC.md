@@ -1398,7 +1398,11 @@ from
    class of a later form of the same file is known, as javac compiles a file's classes together
    (JC4, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4"; on Go since then, the path being
    ARBACE_PATH and the embedded sources). A class entered this way that is needed before its form
-   is defined (a superclass) is still an error: §9.2's rule for a top-level `do`.
+   is defined (a superclass) is still an error: §9.2's rule for a top-level `do`. An `(import ...)`
+   of such a class is lazy (2026-11-24, java-misc-1124): when the class cannot be loaded yet but a
+   source on the path declares it, the import maps its simple name for the Java forms
+   (`env/source-imports`) instead of throwing, so packages that import each other load in either
+   order; a class no source declares is Clojure's ClassNotFoundException.
 
 Bytecode refers to classes by name and the JVM resolves names lazily, so a class can be defined
 before the classes it refers to exist, as long as it is not used before. With 3, loading

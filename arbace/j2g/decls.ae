@@ -312,6 +312,21 @@
                              (for [b (:captures @(:state sd))] (:x (c/local-val {:op :local :b b}))))]
                   (c/emit! (apply list (symbol (str "." base)) ss thisv (concat (map :x vals) caps))))))))))))
 
+;; finalization (the user's JMS1 (a), 2026-11-24; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124,
+;; finalization"): jrt.RegisterFinalizer in the constructors' New functions of a finalizable class
+(defn finalizable?
+  "Is class n finalizable as HotSpot has it: the nearest class of its superclass chain that declares finalize() is
+  not Object and its finalize() has a body (an empty one, as ThreadPoolExecutor's, is not registered: HotSpot's
+  has_finalizer leaves a finalize() that only returns)."
+  [n]
+  (let [c (first (filter (fn [c] (some #(and (= "finalize" (:name %)) (= "()V" (:desc %))) (:methods (env/info c))))
+                         (env/superclass-chain n)))]
+    (boolean
+      (and c (not= "java/lang/Object" c)
+           (let [m (some #(when (and (= :method (:kind %)) (= "finalize" (:name %)) (<= (count (:params %)) 1)) %)
+                         (:members (a/decl c)))]
+             (if m (:has-body m) true))))))
+
 (defn ctor-forms
   "The allocation function C_New_... (concrete classes) and the constructor body Ctor_... of
   constructor mm of class n."
@@ -398,9 +413,13 @@
                                (let [top (m/nest-top n)]
                                  (when (and (code-class? n) (not= top n) (m/translated? top) (not (m/trivial-init? top)))
                                    [(list (m/class-sym pkg top "_Init"))]))
-                               [(list 'let ['t (list 'addr (list 'lit (symbol g)))]
-                                      (apply list (symbol (str "." base)) 't (concat (when-not leaf ['t]) (map #(symbol (str %)) new-ps)))
-                                      't)])))]
+                               [(apply list 'let ['t (list 'addr (list 'lit (symbol g)))]
+                                       (concat
+                                         ;; finalization (the user's JMS1 (a), 2026-11-24): registered before the
+                                         ;; constructor runs, as the JVM's at Object.<init>
+                                         (when (finalizable? n) [(list (m/jrt-sym pkg "RegisterFinalizer") 't)])
+                                         [(apply list (symbol (str "." base)) 't (concat (when-not leaf ['t]) (map #(symbol (str %)) new-ps)))
+                                          't]))])))]
         (at-line mm (remove nil? [new-form ctor-form]))))))
 
 ;; ---------------------------------------------------------------------------------------

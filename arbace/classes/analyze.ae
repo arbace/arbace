@@ -4669,29 +4669,35 @@
     "import" (import-classes! *ns* f)
     (eval f)))
 
-(defn- enter-file!
-  "Enters the Java forms of the source file in (an InputStream) as declarations when the file
-  declares top-level class top (enter-from-source!); returns whether it does."
-  [top in]
-  (let [forms (read-source-forms in)
-        ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'arbace.core/in-ns} (first %))) forms))
+(defn- declares-top?
+  "Whether a Java forms file's forms declare top-level class top (an internal name): only a file that
+  does is its source, decided before evaluating anything (enter-file!, defer-import!)."
+  [top forms]
+  (let [ns-form (first (filter #(and (seq? %) (#{'in-ns 'ns 'arbace.core/in-ns} (first %))) forms))
         ns-name* (when ns-form (let [x (second ns-form)] (if (seq? x) (second x) x)))
         class-forms* (for [f forms
                            f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
                            ;; a defclasses' classes (a file's top-level classes, JCS30 (b))
                            f (if (and (seq? f) (symbol? (first f)) (= "defclasses" (name (first f)))) (rest f) [f])
                            :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
-                       (rest f))
-        ;; only a file that declares the class is its source: decided before evaluating anything
-        declares? (and (symbol? ns-name*)
-                       (some (fn [[nm & _ :as cf]]
-                               (and (symbol? nm)
-                                    (= top (let [s (str nm)
-                                                 pkg (get (first (p/split-options (cond-> (rest cf) (vector? (second cf)) rest))) :package)]
-                                             (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
-                                                   (str/includes? s ".") (str/replace s "." "/")
-                                                   :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
-                             class-forms*))
+                       (rest f))]
+    (boolean
+      (and (symbol? ns-name*)
+           (some (fn [[nm & _ :as cf]]
+                   (and (symbol? nm)
+                        (= top (let [s (str nm)
+                                     pkg (get (first (p/split-options (cond-> (rest cf) (vector? (second cf)) rest))) :package)]
+                                 (cond (some? pkg) (str (when (seq (str pkg)) (str (str/replace (str pkg) "." "/") "/")) s)
+                                       (str/includes? s ".") (str/replace s "." "/")
+                                       :else (str (str/replace (munge (name ns-name*)) "." "/") "/" s))))))
+                 class-forms*)))))
+
+(defn- enter-file!
+  "Enters the Java forms of the source file in (an InputStream) as declarations when the file
+  declares top-level class top (enter-from-source!); returns whether it does."
+  [top in]
+  (let [forms (read-source-forms in)
+        declares? (declares-top? top forms)
         ns (when declares?
              (binding [*ns* *ns*]
              (doseq [f forms
@@ -4716,6 +4722,32 @@
     ;; their bridges too, which subclasses being compiled must see (as in class files)
     (doseq [c (supertypes-first new)] (add-bridges! c))
     (boolean declares?)))
+
+;; the lazy import (the REPL's model, JCS8 (b)'s cyclic packages; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the lazy import")
+(defn- source-stream
+  "The source of top-level class top (an internal name) on the path the loader reads, p/C_class.ae
+  then p/C.ae (enter-from-source!'s names), or nil."
+  [top]
+  (some #(arbace.lang.RT/resourceAsStream (arbace.lang.RT/baseLoader) %) [(str top "_class.ae") (str top ".ae")]))
+
+(defn defer-import!
+  "The lazy import: (import 'p.C) of a class that is not loadable yet but whose source on the path
+  declares it (§9.2, 3) maps C as import-classes! maps a source's imports of classes not yet defined
+  (env/source-imports): a name the Java forms resolve through the source path and, once the class is
+  defined, to it. Packages that import each other, as javac compiles them together, load in either
+  order: the first one's import runs before the other package is defined. arbace.lang.Compiler's
+  import (ImportExpr) calls it (through arbace.classes.native) on a ClassNotFoundException and throws
+  that when it returns false (no source declares the class): Clojure's import of a missing class."
+  [ns ^String cname]
+  (let [n (str/replace cname "." "/")
+        top (first (str/split n #"\$"))
+        simple (symbol (subs cname (inc (.lastIndexOf cname "."))))]
+    (boolean
+      (when (and (str/includes? top "/") (not (contains? (ns-map ns) simple)))
+        (when-let [^java.io.InputStream in (source-stream top)]
+          (when (declares-top? top (read-source-forms in))
+            (swap! env/source-imports assoc-in [(ns-name ns) simple] n)
+            true))))))
 
 (defn enter-from-source!
   "Looks up the top-level class of internal name n as a source p/C.ae on the class path, else in

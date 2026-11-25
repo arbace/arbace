@@ -857,7 +857,7 @@ covers what.
   classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
   name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
   with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
-  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `PortConfig.ae` and `RegisteredDomain.ae`, and
   `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
   `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
   names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
