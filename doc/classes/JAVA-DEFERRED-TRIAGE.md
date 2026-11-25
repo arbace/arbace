@@ -9248,3 +9248,21 @@ carries it (arbace/lang and jrt are in gate_key).
 - Limits: Go never collects a cycle through an object with a finalizer (runtime.SetFinalizer), where the JVM finalizes
   it; a clone or a deserialized object is not registered; an interpreted class extending a translated one that declares
   finalize() is not.
+
+## As built: java-tail-1125 (compiled reflection's tail), 2026-11-25 (write-ahead: not built; ready for the train)
+
+j2g alone (no jrt, no runtime, no jdk/ change), each the compiled half of a row the interpreter already passes, or a member
+jrt lacked at both levels:
+- Executable.accessFlags (t04832): `J2g_ExecutableAccessFlags`, a support call (m/support-call-helpers) dispatching to the
+  Method's or Constructor's own accessFlags (JCS273's), as queue 564 did for Executable's getAnnotated*.
+- A local or anonymous class's constructors that capture (t05910 CaptureTest): the member tables list them, javac's
+  descriptor (outer instance, declared parameters, captured locals last; a/ctor-real-desc's order); queue 564 listed the
+  capture-free ones only. A super-outer still stays out.
+- A --program's own class's synthetic fields this$N and val$x, FINAL|SYNTHETIC, javac's order (t06345 DontOptimizeOuterThis),
+  as the interpreter lists them.
+- package-info (t04730): j2g's world expands `(defpackage ^{A ..} p)` into queue 563's package-info interface itself (the
+  tools' host's arbace.core is the seed's, whose defpackage may be the no-op: the stage-0 trap), so the class is translated
+  and jrt's Package finds it.
+- Class.getProtectionDomain (t04873 Basic1; t03296): jdk26u's allPermDomain for every class (no code source, AllPermission),
+  a support method on jrt's Class with its REPL entry, at both levels. t03296 then stops at its code source (it reloads
+  itself through URLClassLoader): named in :classloading (J2G-SPEC §12), as t04681.

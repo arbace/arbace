@@ -22308,3 +22308,28 @@ invocation then names a macro the print does not define.
 - sqlite3.c moves from :eval-limits to :macro-context (CS82's class: a recovered invocation means another thing where the print
   stands). Its whole read is the main host's (the compiled build; on the VM the evaluated read is past the budget): `bin/repr-c
   roundtrip --corpus sqlite --record` with ARBACE_HOST_EXE set to the gate's executable.
+
+## 2026-11-25: java-tail-1125, compiled reflection's tail (branch `java-tail-1125` from mac/train-4 `5a4f7cddb`)
+
+Goal: Java eval/AOT rows nobody owned after train 4 (the coordinator's list: -parameters, package annotations, the :stack,
+:threads, :security, :reflection leftovers). Classified first against train-4's divergences.edn (bin/reap --entries): the
+interp halves of -parameters (t04832, t05910) and package-info (t04730) are queue 563's, in train 4; security's t05304,
+t05333, t08235 java-misc's and t07882, t07910 java-rows', in train 4 (t05346 deferred by JCS234 (a)); threads' t04607,
+t05691, t05653, t05707 java-rows', in train 4; :stack's java-stack's. What was left, built in j2g only (doc/classes/
+JAVA-DEFERRED-TRIAGE.md, "As built: java-tail-1125"):
+- Executable.accessFlags as a support call (t04832 compiled), as queue 564's getAnnotated*.
+- Capturing local and anonymous classes' constructors in the member tables (t05910 compiled), javac's parameter order
+  (outer, declared, captured: Lower's appendList of freevarDefs, first-use order). Alternative: leave them out (564's
+  choice); the order is the analyzer's first use, javac's too for the corpora's single captures.
+- An own class's synthetic fields this$N, val$x in getDeclaredFields (t06345 compiled), javac's order (Lower prepends).
+- defpackage expanded by j2g's world itself (t04730 compiled): not by macroexpand, since the tools' host's arbace.core may
+  hold the seed's no-op defpackage (the stage-0 trap of 11-24).
+- Class.getProtectionDomain (t04873 both levels): the allPermDomain for every class. Alternative: a code source for the
+  program's classes (none exists in the closed world; TestConcurrentPatching, t03296, would then fail at URLClassLoader's
+  load of class files, by design). t03296 named in :classloading.
+Checks (light, stage 0): the j2g namespaces load; world's class-forms expands a defpackage with annotations and none
+without; the names the support forms call (Permissions_New, Add_Permission__V, ProtectionDomain_New_CodeSource_
+PermissionCollection) as nm computes them; bin/reap: Java's cells unchanged. Not run: no j2g of a program (heavy, the
+train's). Left, as decisions or not started: t04849 (getDeclaredMethods' order is HotSpot's, unspecified), t05602
+(StoreDeadlock's stdout is the host's properties), t08164 compiled and t04614 compiled (need a run's output first),
+t04878 (Class.forName through a loader defining "Test+Interface" from bytes: needs a run).
