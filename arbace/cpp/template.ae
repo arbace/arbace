@@ -3513,9 +3513,44 @@
   (let [seen (java.util.HashSet.)]
     (boolean (some #(sema/internal-type? % seen) args))))
 
+(def ^:dynamic *fn-substs*
+  "cpp-indep (the checker): the function templates' signatures being substituted, nested, [tid args] outermost first."
+  [])
+
+(def ^:dynamic *fn-subst-at*
+  "cpp-indep (the checker): an atom of the innermost call position a nested substitution was asked at, under the outermost."
+  nil)
+
+(declare instantiate-fn*)
+
 (defn instantiate-fn
   "The specialization of the function template `tid` for the complete arguments `args`: its declaration (the pattern
-  declared in a scope binding the parameters; its definition analyzed when used), memoized."
+  declared in a scope binding the parameters; its definition analyzed when used), memoized. cpp-indep, the checker: a
+  substitution of a signature is an instantiation of its own ([temp.inst]/17, [implimits]: GCC's -ftemplate-depth), so one
+  that needs itself again, the same template with the same arguments (a decltype in its return type calling it: cpp0x/
+  decltype26.C), or that nests past the limit with ever new arguments (`decltype(ft<F, N-1>(...))`, cpp0x/decltype28.C,
+  decltype64.C), is GCC's fatal \"template instantiation depth exceeds maximum\" at the call that asks for it."
+  [tid args]
+  (if (and (sema/checking?) (not (get-in @*tmpls* [tid :insts args])))
+    (let [k [tid args]
+          what (str "substitution of " (:name (tmpl tid)))]
+      (when (or (some #(= k %) *fn-substs*)
+                (> (+ (count *fn-substs*) (long *inst-depth*) (long sema/*tmpl-chain*)) (long sema/*max-tmpl-depth*)))
+        (sema/depth-fatal! what nil))
+      (if (seq *fn-substs*)
+        (do (some-> *fn-subst-at* (reset! (some-> sema/*at* deref)))
+            (binding [*fn-substs* (conj *fn-substs* k)]
+              (instantiate-fn* tid args)))
+        ;; (the outermost: the analysis' stack may end before the limit, as instantiate-class's; the innermost call that
+        ;; asked for a substitution is the place)
+        (let [a (atom (some-> sema/*at* deref))]
+          (try (binding [*fn-substs* (conj *fn-substs* k) *fn-subst-at* a]
+                 (instantiate-fn* tid args))
+               (catch StackOverflowError _
+                 (sema/depth-fatal! what @a))))))
+    (instantiate-fn* tid args)))
+
+(defn- instantiate-fn*
   [tid args]
   (sema/tick!)
   (or (get-in @*tmpls* [tid :insts args])
