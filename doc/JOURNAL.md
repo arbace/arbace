@@ -21075,3 +21075,39 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
   standard headers): no recorded own pass lost to these rules (addr_builtin-1.C's [odr-internal] extra is cpp-rind's rule, and
   diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C time out on cpp-rind's head too: its branch's to settle). The
   whole dg-error part by the own front end at a1d4d9402 runs detached at the hand-off (.tmp/NEXT.md); its verdict is not taken here.
+
+## 2026-11-24 — C++ read: cpp-rind's timeouts and the read cell's tail (queue 567, VM)
+
+- Base: cpp-rind-1124 `ee0acba05` with cpp-read-1124 `18e6f3f96` merged (`573092cc1`, branch `567-cpp-read-tail`). The merge was
+  not clean (doc/JOURNAL.md, doc/cpp/CPP-SURVEY.md, test/cpp/check-dg-own-linux-amd64.edn, test/crops/scores.edn,
+  test/reap/matrix.edn); the code merged by itself. The journal and the survey kept both sides (cpp-rind's whole, cpp-read's new
+  entries and its section appended; cpp-read's older copies of cpp-rind's and cpp-print's sections dropped, cpp-rind's side
+  holding the same text). The records were not merged by hand: cpp-rind's own record taken, cpp-read's 16 rows run again at the
+  merged tree (`bin/repr-cpp dg --corpus dg-error --front native --only`, 16 of 16 own pass) and recorded from that run (`--judge
+  --record`), then `bin/reap --record`, `bin/crops-score --record`: C++ read 6,078 / 0 / 206, read independence 0.878.
+- Item 1, the libstdc++ timeouts, measured: a probe (.tmp/q567/scripts/time-checks.ae) timed the parse and each check on
+  cpp0x/udlit-suffix-neg.C, and a walk alone over `#include <string>` (.tmp/q567/scripts/walk-count.ae) took 55.8 s here, the
+  same 248,732 nodes and time with next's parse.ae loaded over the head's: the tree is not the cause, the number of whole-tree
+  walks is (cpp-rind added 14 checks, several multi-walk checks 37-62 s each). Fixed in diag.ae alone: walk-nodes without a
+  binding a node (and the undeclared check's walker), then `*walk-cache*`, the unit's walk made once and replayed by every check
+  (the same nodes, parents, order and *params*). Alternatives considered: one shared pass calling every check's callback (a
+  rewrite of about 130 call sites), skipping the headers' subtrees (several checks read the headers' declarations), raising the
+  300 s cap (hides the cost). missing-header-pr110164.C and udlit-suffix-neg.C pass again (the second alone at one thread: the
+  cap is wall time and this host ran at a load of 15-20 on 4 CPUs); cpp1z/class-deduction14.C no longer times out (now a miss at
+  line 16); ext/constexpr-vla1.C and -vla3.C need GNU VLAs in the checker's constant evaluator (DECISION 567-1).
+- Item 2: cpp-rind's dg-r02 list is not on this VM (its runs were the Mac's .tmp/). Its rows are among the record's non-passing
+  rows, so all 1,725 outside test/cpp/dg-dialect-out.edn were run again, a superset.
+- Item 3: rules from the standard's text and GCC's behaviour as the tests and g++'s recorded errors (test/cpp/ref-dg-gxx15.edn,
+  data) state it, no GCC or clang code: the constant evaluator's comma lvalue, the C library's functions not constexpr, a
+  class template's constexpr constructor explained at its body; C++11/14's [temp.class.spec]/8.1 and [temp.deduct.type]/5.3 for
+  partial specializations; C++98's [temp.expl.spec]/2; GCC's silence after a definition qualified by an incomplete class and
+  after an `auto` variable whose deduction failed (doc/cpp/CPP-SURVEY.md, "As built: cpp-read-tail").
+- The regression list (693 recorded own passes chosen by the constructs the rules touch, 250 of them at random) found two passes
+  the merge had lost, both fixed before the final runs: concepts/var-concept7.C (cpp-read's declined-names-silent) and
+  diagnostic/parm1.C (cpp-rind's "use of parameter outside function body" inside sizeof).
+- Recorded from the finished `--only` runs at `d3cab8575` (six chunks of 3 threads, each `--judge --record`, and
+  udlit-suffix-neg.C alone): 693 of 693 regression rows own pass, 48 rows to own pass of the 1,725, none lost (own pass 2,767 ->
+  2,815). `bin/reap --record`: C++ read 6,078 / 0 / 206 -> 6,086 / 0 / 198; `bin/crops-score --record`: C++ completeness 0.9857 ->
+  0.9860, read independence 0.878 -> 0.882. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
+  `bin/markers-check`: 0 problems. `bin/cppi selftest overload-diag concepts-diag`: overload-diag passes, concepts-diag's
+  r02-qualified-name.C fails, as it does with cpp-rind's head's front end loaded (not this branch's; left to the host).

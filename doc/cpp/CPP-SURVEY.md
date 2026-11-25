@@ -11479,3 +11479,58 @@ stopped 1 each). The rules built, each from the standard's text or GCC's documen
 `.tmp/classes.md` (constant evaluation 39, templates 24, overload 22, lookup 22, incomplete 10, syntax-only 9, GNU rules 8, ...): GCC's
 error recovery after syntax errors, definition-time checks of uninstantiated templates, overload diagnostics in instantiations and
 the constant evaluator's explanations at their inner lines.
+
+## As built: cpp-read-tail, cpp-rind's timeouts and the read cell's tail (2026-11-24; queue 567, branch `567-cpp-read-tail` on `cpp-rind-1124` `ee0acba05` with `cpp-read-1124` `18e6f3f96` merged)
+
+The base: cpp-rind's head merged with cpp-read's (the merge commit says how: the docs kept both, the own dg record cpp-rind's
+with cpp-read's 16 rows run again at the merge, reap and crops-score recorded: C++ read 6,078 / 0 / 206).
+
+- **cpp-rind's libstdc++ timeouts** (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C, own passes on next): the
+  parse is not the cause (the same tree, 248,732 nodes on `#include <string>`, at next's parse.ae and at the head); the checks
+  are. About 130 checks walk the whole unit, libstdc++'s headers with it, and arbace.repr.cpp.diag/walk-nodes rebound
+  `*params*` at every map and destructured every entry: 55.8 s a walk on this host, so cpp-rind's 14 new checks were 14 more
+  such walks. Now (a) walk-nodes binds `*params*` only where a node's :inner has a parameter and reduces a map's entries (14.9 s
+  a walk), the undeclared check's own walker the same, and (b) diagnose binds `*walk-cache*`: the first whole-tree walk records
+  each node with its parent and `*params*` in order, every later one replays the list, `*params*` bound once a run of nodes that
+  share it. The callbacks see what they saw. Both files pass in the 300 s cap again on this host (missing-header-pr110164.C in a
+  3-thread chunk, udlit-suffix-neg.C alone at one thread: at three under this host's load it still ran past the cap, the cap being
+  wall time); cpp1z/class-deduction14.C no longer times
+  out (its row is now its own front end's miss at line 16: CTAD's deduction guide substitution through iterator_traits<int>).
+- **The constant evaluator** (arbace.cpp.sema, the checker's): a comma expression's lvalue read (`return e, v;`, [expr.comma]/1:
+  the :load of a :comma had fallen to "a load", unsure); a function the C library's headers declare, with no definition, is
+  surely not constexpr (C has no constexpr; GCC folds only `__builtin_` names): musl's `__assert_fail`, which a false `assert`
+  calls, GCC's "call to non-'constexpr' function" (cpp0x/constexpr-ice16.C); a class template's specialization's constexpr
+  constructor that leaves a scalar member uninitialized is explained, before C++20, by [dcl.constexpr]/4.5's error at its body
+  beside the variable's (cpp0x/constexpr-template2.C, C++17's [dcl.constexpr]/6: the specialization is still constexpr, no call
+  of it a constant expression).
+- **Templates** (arbace.cpp.template): [temp.class.spec]/8.1 of C++11 and C++14 (CWG 1315 dropped it in C++17), a partially
+  specialized non-type argument that involves a parameter of the partial specialization and is not a simple identifier, GCC's
+  "template argument 'T{}' involves template parameter(s)", also where the slice cannot evaluate the argument
+  (cpp0x/nondeduced7.C); [temp.deduct.type]/5.3, a parameter named only inside such an argument is not deduced
+  (cx-partial-undeducible!).
+- **The checks** (arbace.repr.cpp.diag): C++98's [temp.expl.spec]/2, an explicit specialization at the global scope qualified by a
+  namespace (CWG 374 allows an enclosing namespace from C++11), GCC's "specialization of ... in different namespace"
+  (template/spec36.C); GCC's recovery after a member function definition qualified by an incomplete class, its body's errors not
+  given (template/crash98.C); an `auto` variable whose deduction failed has GCC's error type, its later uses silent
+  (cpp1y/auto-fn46.C).
+- **Two recorded own passes the merge had lost**, found by this branch's regression list: concepts/var-concept7.C (cpp-read's
+  declined-names-silent had dropped `A<int> a;`'s error after `template<C...> struct A {};`: GCC declares A with an erroneous
+  parameter there, so a decline at "a template parameter (at 'NAME')" no longer silences the name) and diagnostic/parm1.C
+  (cpp-rind's "use of parameter outside function body" for `int(*)[sizeof(t)]`: unevaluated operands, sizeof, alignof and
+  noexcept, are exempt, as [dcl.fct.default]/9 says of default arguments).
+
+Recorded from finished `--only` runs at `d3cab8575` (3 threads, .tmp/q567's chunks c0-c5 and u1; each chunk then `--judge
+--record`): the regression list, 693 recorded own passes (every own pass whose file has a constexpr evaluation with a comma or a
+standard header, a partial specialization, `incomplete`, an `auto` deduction or an explicit specialization near a namespace, and
+250 more at random), 693 of 693 own pass; and every non-passing row outside test/cpp/dg-dialect-out.edn (1,725; cpp-rind's
+unrecorded dg-r02 quarter among them): 48 to own pass (2,767 -> 2,815), none lost. Of the read cell's 206 deferred, 8 left
+(constexpr-ice16, constexpr-template2, nondeduced7, udlit-suffix-neg, auto-fn46, static_assert4, crash98, spec36): C++ read
+6,078 / 0 / 206 -> 6,086 / 0 / 198, read independence 0.878 -> 0.882, C++ completeness 0.9857 -> 0.9860. The other 40 are rows
+the merged front end passes that no record had run at its head (cpp-rind's dg-r03 quarter had given +40 the same way).
+
+Left: GNU VLAs in the checker's constant evaluator (ext/constexpr-vla1.C, -vla3.C: a DECISION); a declaration with an
+unexpanded parameter pack dropped as GCC drops it, so that its uses fail (cpp0x/pr31434.C, pr31437.C, pr32127.C: member-level
+recovery in class templates' instances, which this line does not have yet); the constant evaluator's undefined member functions
+of class templates' specializations (cpp0x/constexpr-non-const-arg2.C's `duration<0>::min()`); the rest of the 198 by group.
+test/cpp/selftest/concepts/r02-qualified-name.C fails at cpp-rind's head already (a constraint's substitution failure given as an
+error at the concept, line 2; cpp-tpl2's explanations): not this branch's, not a dg record row.
