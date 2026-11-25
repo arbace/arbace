@@ -1,0 +1,492 @@
+;; Converted from jdk26u src/java.xml/share/classes/com/sun/org/apache/xalan/internal/xsltc/dom/MultiDOM.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xalan.internal.xsltc.dom)
+
+(import '(com.sun.org.apache.xalan.internal.xsltc DOM StripFilter TransletException)
+        '(com.sun.org.apache.xalan.internal.xsltc.runtime BasisLibrary)
+        '(com.sun.org.apache.xml.internal.dtm Axis DTM DTMAxisIterator DTMManager)
+        '(com.sun.org.apache.xml.internal.dtm.ref
+           DTMAxisIterNodeList
+           DTMAxisIteratorBase
+           DTMDefaultBase)
+        '(com.sun.org.apache.xml.internal.serializer SerializationHandler)
+        '(com.sun.org.apache.xml.internal.utils SuballocatedIntVector)
+        '(java.util HashMap Map)
+        '(org.w3c.dom Node NodeList))
+
+(defclass ^:public ^:final MultiDOM
+  :implements [DOM]
+
+  (field ^:private ^:static ^:final ^int NO_TYPE (unchecked-subtract-int DOM/FIRST_TYPE 2))
+
+  (field ^:private ^:static ^:final ^int INITIAL_SIZE 4)
+
+  (field ^:private ^DOM/1 _adapters)
+
+  (field ^:private ^DOMAdapter _main)
+
+  (field ^:private ^DTMManager _dtmManager)
+
+  (field ^:private ^int _free)
+
+  (field ^:private ^int _size)
+
+  (field ^:private ^{:tag (Map String Integer)} _documents (HashMap.))
+
+  (defclass ^:private ^:final AxisIterator
+    :extends DTMAxisIteratorBase
+
+    (field ^:private ^:final ^int _axis)
+
+    (field ^:private ^:final ^int _type)
+
+    (field ^:private ^DTMAxisIterator _source)
+
+    (field ^:private ^int _dtmId -1)
+
+    (constructor ^:public [this ^:final ^int axis ^:final ^int type]
+      (set! _axis axis)
+      (set! _type type))
+
+    (method ^:public next ^int [this]
+      (if (nil? _source) AxisIterator/END (.next _source)))
+
+    (method ^:public setRestartable ^void [this ^boolean flag]
+      (when (some? _source) (.setRestartable _source flag)))
+
+    (method ^:public setStartNode ^DTMAxisIterator [this ^:final ^int node]
+      (if (== node DTM/NULL)
+          this
+          (let [dom (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS)]
+            (when (or (nil? _source) (not (== _dtmId dom)))
+              (cond
+                (== _type NO_TYPE) (set! _source (.getAxisIterator (aget _adapters dom) _axis))
+                (== _axis Axis/CHILD) (set! _source (.getTypedChildren (aget _adapters dom) _type))
+                :else (set! _source (.getTypedAxisIterator (aget _adapters dom) _axis _type))))
+            (set! _dtmId dom)
+            (.setStartNode _source node)
+            this)))
+
+    (method ^:public reset ^DTMAxisIterator [this]
+      (when (some? _source) (.reset _source))
+      this)
+
+    (method ^:public getLast ^int [this]
+      (if (some? _source) (.getLast _source) AxisIterator/END))
+
+    (method ^:public getPosition ^int [this]
+      (if (some? _source) (.getPosition _source) AxisIterator/END))
+
+    (method ^:public isReverse ^boolean [this] (Axis/isReverse _axis))
+
+    (method ^:public setMark ^void [this]
+      (when (some? _source) (.setMark _source)))
+
+    (method ^:public gotoMark ^void [this]
+      (when (some? _source) (.gotoMark _source)))
+
+    (method ^:public cloneIterator ^DTMAxisIterator [this]
+      (let [^:final clone (AxisIterator. _axis _type)]
+        (when (some? _source) (set! (.-_source clone) (.cloneIterator _source)))
+        (set! (.-_dtmId clone) _dtmId)
+        clone)))
+
+  (defclass ^:private ^:final NodeValueIterator
+    :extends DTMAxisIteratorBase
+
+    (field ^:private ^DTMAxisIterator _source)
+
+    (field ^:private ^String _value)
+
+    (field ^:private ^boolean _op)
+
+    (field ^:private ^:final ^boolean _isReverse)
+
+    (field ^:private ^int _returnType DOM/RETURN_PARENT)
+
+    (constructor ^:public [this ^DTMAxisIterator source ^int returnType ^String value ^boolean op]
+      (set! _source source)
+      (set! _returnType returnType)
+      (set! _value value)
+      (set! _op op)
+      (set! _isReverse (.isReverse source)))
+
+    (method ^:public isReverse ^boolean [this] _isReverse)
+
+    (method ^:public cloneIterator ^DTMAxisIterator [this]
+      (try
+        (let [clone (cast NodeValueIterator (.clone super))]
+          (set! (.-_source clone) (.cloneIterator _source))
+          (.setRestartable clone false)
+          (.reset clone))
+        (catch CloneNotSupportedException e
+          (BasisLibrary/runTimeError BasisLibrary/ITERATOR_CLONE_ERR (.toString e))
+          nil)))
+
+    (method ^:public setRestartable ^void [this ^boolean isRestartable]
+      (set! (.-_isRestartable this) isRestartable)
+      (.setRestartable _source isRestartable))
+
+    (method ^:public reset ^DTMAxisIterator [this]
+      (.reset _source)
+      (.resetPosition this))
+
+    (method ^:public next ^int [this]
+      (let [^:mutable ^int node 0]
+        (while (not (== (set! node (.next _source)) NodeValueIterator/END))
+          (let [val (.getStringValueX MultiDOM/this node)]
+            (when (= (.equals _value val) _op)
+              (if (== _returnType DOM/RETURN_CURRENT)
+                  (return (.returnNode this node))
+                  (return (.returnNode this (.getParent MultiDOM/this node)))))))
+        NodeValueIterator/END))
+
+    (method ^:public setStartNode ^DTMAxisIterator [this ^int node]
+      (if (.-_isRestartable this)
+          (do (.setStartNode _source (set! (.-_startNode this) node)) (.resetPosition this))
+          this))
+
+    (method ^:public setMark ^void [this] (.setMark _source))
+
+    (method ^:public gotoMark ^void [this] (.gotoMark _source)))
+
+  (constructor ^:public [this ^DOM main]
+    (set! _size INITIAL_SIZE)
+    (set! _free 1)
+    (set! _adapters (new DOM/1 INITIAL_SIZE))
+    (let [adapter (cast DOMAdapter main)]
+      (aset _adapters 0 adapter)
+      (set! _main adapter)
+      (let [dom (.getDOMImpl adapter)]
+        (when (instance? DTMDefaultBase dom)
+          (set! _dtmManager (.getManager (cast DTMDefaultBase dom))))
+        (.addDOMAdapter this adapter false))))
+
+  (method ^:public nextMask ^int [this] _free)
+
+  (method ^:public setupMapping ^void [this ^String/1 names ^String/1 uris ^int/1 types
+                                       ^String/1 namespaces])
+
+  (method ^:public addDOMAdapter ^int [this ^DOMAdapter adapter]
+    (.addDOMAdapter this adapter true))
+
+  (method ^:private addDOMAdapter ^int [this ^DOMAdapter adapter ^boolean indexByURI]
+    (let [dom (.getDOMImpl adapter)
+          ^:mutable ^int domNo 1
+          ^:mutable ^int dtmSize 1
+          ^:mutable ^SuballocatedIntVector dtmIds nil]
+      (cond
+        (instance? DTMDefaultBase dom)
+          (let [dtmdb (cast DTMDefaultBase dom)]
+            (set! dtmIds (.getDTMIDs dtmdb))
+            (set! dtmSize (.size dtmIds))
+            (set! domNo
+                  (unsigned-bit-shift-right-int
+                    (.elementAt dtmIds (unchecked-subtract-int dtmSize 1))
+                    DTMManager/IDENT_DTM_NODE_BITS)))
+        (instance? SimpleResultTreeImpl dom)
+          (let [simpleRTF (cast SimpleResultTreeImpl dom)]
+            (set! domNo
+                  (unsigned-bit-shift-right-int (.getDocument simpleRTF)
+                                                DTMManager/IDENT_DTM_NODE_BITS))))
+      (when (>= domNo _size)
+        (let [oldSize _size]
+          (loop [] (set! _size (unchecked-multiply-int _size 2)) (when (<= _size domNo) (recur)))
+          (let [^:final newArray (new DOMAdapter/1 _size)]
+            (System/arraycopy _adapters 0 newArray 0 oldSize)
+            (set! _adapters newArray))))
+      (set! _free (unchecked-add-int domNo 1))
+      (cond
+        (== dtmSize 1) (aset _adapters domNo adapter)
+        (some? dtmIds)
+          (let [^:mutable ^int domPos 0]
+            (loop [^int i (unchecked-subtract-int dtmSize 1)]
+              (when (>= i 0)
+                (set! domPos
+                      (unsigned-bit-shift-right-int
+                        (.elementAt dtmIds i)
+                        DTMManager/IDENT_DTM_NODE_BITS))
+                (aset _adapters domPos adapter)
+                (recur (unchecked-dec-int i))))
+            (set! domNo domPos)))
+      (when indexByURI (let [uri (.getDocumentURI adapter 0)] (.put _documents uri domNo)))
+      (when (instance? AdaptiveResultTreeImpl dom)
+        (let [adaptiveRTF (cast AdaptiveResultTreeImpl dom)
+              nestedDom (.getNestedDOM adaptiveRTF)]
+          (when (some? nestedDom)
+            (let [newAdapter (DOMAdapter. nestedDom
+                                          (.getNamesArray adapter)
+                                          (.getUrisArray adapter)
+                                          (.getTypesArray adapter)
+                                          (.getNamespaceArray adapter))]
+              (.addDOMAdapter this newAdapter)))))
+      domNo))
+
+  (method ^:public getDocumentMask ^int [this ^String uri]
+    (let [domIdx (cast Integer (.get _documents uri))] (if (nil? domIdx) -1 (.intValue domIdx))))
+
+  (method ^:public getDOMAdapter ^DOM [this ^String uri]
+    (let [domIdx (cast Integer (.get _documents uri))]
+      (when (some? domIdx) (aget _adapters (.intValue domIdx)))))
+
+  (method ^:public getDocument ^int [this] (.getDocument _main))
+
+  (method ^:public getDTMManager ^DTMManager [this] _dtmManager)
+
+  (method ^:public getIterator ^DTMAxisIterator [this]
+    (.getIterator _main))
+
+  (method ^:public getStringValue ^String [this] (.getStringValue _main))
+
+  (method ^:public getChildren ^DTMAxisIterator [this ^:final ^int node]
+    (.getChildren (aget _adapters (.getDTMId this node)) node))
+
+  (method ^:public getTypedChildren ^DTMAxisIterator [this ^:final ^int type]
+    (AxisIterator. Axis/CHILD type))
+
+  (method ^:public getAxisIterator ^DTMAxisIterator [this ^:final ^int axis]
+    (AxisIterator. axis NO_TYPE))
+
+  (method ^:public getTypedAxisIterator ^DTMAxisIterator [this ^:final ^int axis ^:final ^int type]
+    (AxisIterator. axis type))
+
+  (method ^:public getNthDescendant ^DTMAxisIterator [this ^int node ^int n ^boolean includeself]
+    (.getNthDescendant (aget _adapters (.getDTMId this node)) node n includeself))
+
+  (method ^:public getNodeValueIterator ^DTMAxisIterator [this ^DTMAxisIterator iterator ^int type
+                                                          ^String value ^boolean op]
+    (NodeValueIterator. iterator type value op))
+
+  (method ^:public getNamespaceAxisIterator ^DTMAxisIterator [this ^:final ^int axis ^:final ^int ns]
+    (let [iterator (.getNamespaceAxisIterator _main axis ns)] iterator))
+
+  (method ^:public orderNodes ^DTMAxisIterator [this ^DTMAxisIterator source ^int node]
+    (.orderNodes (aget _adapters (.getDTMId this node)) source node))
+
+  (method ^:public getExpandedTypeID ^int [this ^:final ^int node]
+    (if (not (== node DTM/NULL))
+        (.getExpandedTypeID
+          (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+          node)
+        DTM/NULL))
+
+  (method ^:public getNamespaceType ^int [this ^:final ^int node]
+    (.getNamespaceType (aget _adapters (.getDTMId this node)) node))
+
+  (method ^:public getNSType ^int [this ^int node]
+    (.getNSType (aget _adapters (.getDTMId this node)) node))
+
+  (method ^:public getParent ^int [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        DTM/NULL
+        (.getParent (aget _adapters
+                          (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+                    node)))
+
+  (method ^:public getAttributeNode ^int [this ^:final ^int type ^:final ^int el]
+    (if (== el DTM/NULL)
+        DTM/NULL
+        (.getAttributeNode
+          (aget _adapters (unsigned-bit-shift-right-int el DTMManager/IDENT_DTM_NODE_BITS))
+          type
+          el)))
+
+  (method ^:public getNodeName ^String [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        ""
+        (.getNodeName (aget _adapters
+                            (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+                      node)))
+
+  (method ^:public getNodeNameX ^String [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        ""
+        (.getNodeNameX
+          (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+          node)))
+
+  (method ^:public getNamespaceName ^String [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        ""
+        (.getNamespaceName
+          (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+          node)))
+
+  (method ^:public getStringValueX ^String [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        ""
+        (.getStringValueX
+          (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+          node)))
+
+  (method ^:public copy :throws [TransletException] ^void [this ^:final ^int node
+                                                           ^SerializationHandler handler]
+    (when-not (== node DTM/NULL)
+      (.copy (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+             node
+             handler)))
+
+  (method ^:public copy :throws [TransletException] ^void [this ^DTMAxisIterator nodes
+                                                           ^SerializationHandler handler]
+    (let [^:mutable ^int node 0]
+      (while (not (== (set! node (.next nodes)) DTM/NULL))
+        (.copy (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+               node
+               handler))))
+
+  (method ^:public shallowCopy :throws [TransletException] ^String [this ^:final ^int node
+                                                                    ^SerializationHandler handler]
+    (if (== node DTM/NULL)
+        ""
+        (.shallowCopy (aget _adapters
+                            (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+                      node
+                      handler)))
+
+  (method ^:public lessThan ^boolean [this ^:final ^int node1 ^:final ^int node2]
+    (cond
+      (== node1 DTM/NULL) true
+      (== node2 DTM/NULL) false
+      :else
+        (let [^:final dom1 (.getDTMId this node1)
+              ^:final dom2 (.getDTMId this node2)]
+          (if (== dom1 dom2) (.lessThan (aget _adapters dom1) node1 node2) (< dom1 dom2)))))
+
+  (method ^:public characters :throws [TransletException] ^void [this ^:final ^int textNode
+                                                                 ^SerializationHandler handler]
+    (when-not (== textNode DTM/NULL)
+      (.characters (aget _adapters
+                         (unsigned-bit-shift-right-int textNode DTMManager/IDENT_DTM_NODE_BITS))
+                   textNode
+                   handler)))
+
+  (method ^:public setFilter ^void [this ^StripFilter filter]
+    (loop [^int dom 0]
+      (if (< dom _free)
+          (if (some? (aget _adapters dom))
+              (do (.setFilter (aget _adapters dom) filter) (recur (unchecked-inc-int dom)))
+              (recur (unchecked-inc-int dom)))
+          nil)))
+
+  (method ^:public makeNode ^Node [this ^int index]
+    (when-not (== index DTM/NULL) (.makeNode (aget _adapters (.getDTMId this index)) index)))
+
+  (method ^:public makeNode ^Node [this ^DTMAxisIterator iter]
+    (.makeNode _main iter))
+
+  (method ^:public makeNodeList ^NodeList [this ^int index]
+    (when-not (== index DTM/NULL) (.makeNodeList (aget _adapters (.getDTMId this index)) index)))
+
+  (method ^:public makeNodeList ^NodeList [this ^DTMAxisIterator iter]
+    (let [index (.next iter)]
+      (if (== index DTM/NULL)
+          (DTMAxisIterNodeList. nil nil)
+          (do (.reset iter) (.makeNodeList (aget _adapters (.getDTMId this index)) iter)))))
+
+  (method ^:public getLanguage ^String [this ^int node]
+    (.getLanguage (aget _adapters (.getDTMId this node)) node))
+
+  (method ^:public getSize ^int [this]
+    (let [^:mutable ^int size 0]
+      (loop [^int i 0]
+        (when (< i _size)
+          (set! size (unchecked-add-int size (.getSize (aget _adapters i))))
+          (recur (unchecked-inc-int i))))
+      size))
+
+  (method ^:public getDocumentURI ^String [this ^:mutable ^int node]
+    (when (== node DTM/NULL) (set! node DOM/NULL))
+    (.getDocumentURI
+      (aget _adapters (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+      0))
+
+  (method ^:public isElement ^boolean [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        false
+        (.isElement (aget _adapters
+                          (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+                    node)))
+
+  (method ^:public isAttribute ^boolean [this ^:final ^int node]
+    (if (== node DTM/NULL)
+        false
+        (.isAttribute (aget _adapters
+                            (unsigned-bit-shift-right-int node DTMManager/IDENT_DTM_NODE_BITS))
+                      node)))
+
+  (method ^:public getDTMId ^int [this ^int nodeHandle]
+    (if (== nodeHandle DTM/NULL)
+        0
+        (let [^:mutable id (unsigned-bit-shift-right-int nodeHandle DTMManager/IDENT_DTM_NODE_BITS)]
+          (while (and (>= id 2)
+                      (identical? (aget _adapters id)
+                                  (aget _adapters (unchecked-subtract-int id 1))))
+            (set! id (unchecked-dec-int id)))
+          id)))
+
+  (method ^:public getDTM ^DOM [this ^int nodeHandle]
+    (aget _adapters (.getDTMId this nodeHandle)))
+
+  (method ^:public getNodeIdent ^int [this ^int nodeHandle]
+    (.getNodeIdent
+      (aget _adapters (unsigned-bit-shift-right-int nodeHandle DTMManager/IDENT_DTM_NODE_BITS))
+      nodeHandle))
+
+  (method ^:public getNodeHandle ^int [this ^int nodeId]
+    (.getNodeHandle _main nodeId))
+
+  (method ^:public getResultTreeFrag ^DOM [this ^int initSize ^int rtfType]
+    (.getResultTreeFrag _main initSize rtfType))
+
+  (method ^:public getResultTreeFrag ^DOM [this ^int initSize ^int rtfType ^boolean addToManager]
+    (.getResultTreeFrag _main initSize rtfType addToManager))
+
+  (method ^:public getMain ^DOM [this] _main)
+
+  (method ^:public getOutputDomBuilder ^SerializationHandler [this]
+    (.getOutputDomBuilder _main))
+
+  (method ^:public lookupNamespace :throws [TransletException] ^String [this ^int node
+                                                                        ^String prefix]
+    (.lookupNamespace _main node prefix))
+
+  (method ^:public getUnparsedEntityURI ^String [this ^String entity]
+    (.getUnparsedEntityURI _main entity))
+
+  (method ^:public getElementsWithIDs ^{:tag (Map String Integer)} [this]
+    (.getElementsWithIDs _main))
+
+  (method ^:public release ^void [this] (.release _main))
+
+  (method ^:private isMatchingAdapterEntry ^boolean [this ^DOM entry ^DOMAdapter adapter]
+    (let [dom (.getDOMImpl adapter)]
+      (or (identical? entry adapter)
+          (and (and (instance? AdaptiveResultTreeImpl dom) (instance? DOMAdapter entry))
+               (identical? (.getNestedDOM (cast AdaptiveResultTreeImpl dom))
+                           (.getDOMImpl (cast DOMAdapter entry)))))))
+
+  (method ^:public removeDOMAdapter ^void [this ^DOMAdapter adapter]
+    (.remove _documents (.getDocumentURI adapter 0))
+    (let [dom (.getDOMImpl adapter)]
+      (if (instance? DTMDefaultBase dom)
+          (let [ids (.getDTMIDs (cast DTMDefaultBase dom))
+                idsSize (.size ids)]
+            (loop [^int i 0]
+              (when (< i idsSize)
+                (aset _adapters
+                      (unsigned-bit-shift-right-int
+                        (.elementAt ids i)
+                        DTMManager/IDENT_DTM_NODE_BITS)
+                      nil)
+                (recur (unchecked-inc-int i)))))
+          (let [id (unsigned-bit-shift-right-int (.getDocument dom) DTMManager/IDENT_DTM_NODE_BITS)]
+            (if (and (and (> id 0) (< id (alength _adapters)))
+                     (.isMatchingAdapterEntry this (aget _adapters id) adapter))
+                (aset _adapters id nil)
+                (let [^:mutable found false]
+                  (loop [^int i 0]
+                    (if (< i (alength _adapters))
+                        (if (.isMatchingAdapterEntry this (aget _adapters id) adapter)
+                            (do (aset _adapters i nil) (set! found true))
+                            (recur (unchecked-inc-int i)))
+                        nil)))))))))
