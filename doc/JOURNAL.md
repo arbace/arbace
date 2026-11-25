@@ -22357,3 +22357,14 @@ Also: train 4's merge of divergences.edn had left t04789 (ThreadMXBeanProxy) and
 class (bin/reap refused to record): t04789 into :design-also-na (its source names javax.management: the 11-23 n/a),
 t04809 into :design-also, as queue 543 had them and as their compiled rows are. bin/reap --record (Java eval 3,163 / 22 /
 90, 50 n/a; AOT 3,159 / 21 / 108, 37 n/a), bin/crops-score --record and --judge --strict (0 problems), bin/records-check (0).
+
+## 2026-11-25: java-tail-1125, j2g's assert evaluated only when it runs (t06029 compiled)
+
+t06029 (langtools assert/Attach.java) passes interpreted since train 3 (13b2ec250, assert-before-init) and failed compiled
+with "failed 4478095.1": main's V.assertsEnabled() returned true with assertions off. 13b2ec250's j2g half (the assert on
+while the class's C_init is not Done) was right; the cause was older: j2g's :assert translated the condition with cond-expr
+before the `when` that tests the flag, and cond-expr hoists an assignment's store as a statement, so Attach's
+`assert enabled = true` set `enabled` whether the assert ran or not (the message was evaluated early too). Now the
+condition is translated inside the `when` of the flag, and the message inside the `when` of the failed condition (JLS
+14.10: the message only when the condition is false). Checked: arbace.j2g.* load on stage 0; no j2g of a program (the
+train's). Row expected: t06029 compiled passes (:assert-before-init then empty at both levels).
