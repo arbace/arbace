@@ -21069,3 +21069,21 @@ Done:
 
 548-1 (a): ocaml-ppx-expect stays in the weekly tier, skipped by key when its inputs are unchanged, in place of the nightly step
 547f-1 (a) named (bin/gate --nightly runs --full's phases; a nightly-only phase would need a planner change, not made).
+
+## 2026-11-25 — lib-dynlink-bytecode at oi's level: ocamlmklib's libraries, .cma loading, C stubs in plugins (queue 576, VM)
+
+Done (doc/ocaml/OCAML-SURVEY.md, "As built: queue 576"): OC220 (a)'s last bytecode row, lib-dynlink-bytecode/main (OCaml 5.5.0's
+testsuite/tests/lib-dynlink-bytecode, the pinned tarball of test/ocaml/corpora.edn), passes at oi by its own three references.
+- bin/lib/oi/header.awk's dynlink mode, at oi's level alone, reads ocamlmklib's steps, the compile of several files, and the
+  further -linkall and -custom programs, each with its own reference.
+- bin/oi's oi_dynlink writes the libraries (dllNAME.so "OI-DLL 1", NAME.cma "OI-CMA 1" holding its units' .cmo texts). oi_one runs
+  the further programs and judges each against its reference.
+- test/ocaml/dynlink/dynlink.ml loads a .cma, opening its shared libraries first (CAML_LD_LIBRARY_PATH) as byte/dynlink.ml does.
+  The libraries' primitives are the run's stubs on ci, every library's C files in one node program.
+- :dynlink-decided keeps no program at oi's level. Control `_control/dynlink-bytecode-vs-pr4229` added.
+
+Why: the eval cell's last deferred row (606 / 0 / 1). Alternatives:
+- (1) one node program per shared library, its symbols bound only when Dynlink opens it. Not taken: stub2.c calls stub1 in C across
+  the two libraries, which separate node programs on ci cannot link. It would also be more machinery than the corpus observes.
+- (2) the .cma as a list of paths to its .cmo files. Not taken: a bytecode .cma carries its units, so this one holds their texts.
+- The AOT levels keep the class: the AOT cell is the host's (547f-2 (a)).

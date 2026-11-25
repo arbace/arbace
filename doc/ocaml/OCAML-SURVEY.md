@@ -5135,3 +5135,36 @@ Arbace's typer.
 - **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
   sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
   on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).
+
+## As built: queue 576 (2026-11-25, the VM): ocamlmklib's libraries at oi's level, lib-dynlink-bytecode
+
+OC220 (a)'s last bytecode row. `lib-dynlink-bytecode/main` passes at oi by its own verdicts: `main.exe` loads `plug1.cma` and
+`plug2.cma` (their C stubs printing, stub2 calling stub1 in C), marshals the registry's closures of plugin code with `Closures` and
+calls them back (main.reference); `static.exe` (`-linkall registry.cmo plug1.cma plug2.cma`) and `custom.exe` (`-custom -linkall`,
+plug2 first) run and are each judged against their own reference (static.reference, custom.reference).
+
+- **header.awk's dynlink mode, at oi's level alone** (the AOT levels keep the class; the AOT cell is the host's, 547f-2 (a)):
+  - `compile_only = "true"; all_modules = "A.ml B.c ..."; ocamlc.byte`: each .ml a unit step (as `module =`), each .c an object;
+  - `program = NAME; modules = "O.${objext} ..."; ocamlmklib`: NAME's shared library of those objects' C files (`@dyndll=NAME:C+C`);
+  - `program = NAME; modules = "U.cmo ..."; ocamlmklib`: NAME.cma of those units, its dllib `-lNAME` as ocamlmklib records it
+    (`@dyncma=NAME:U+U`);
+  - after the main link and run, each further link (`.cmo` units and `.cma` libraries, a library only with `-linkall`; flags
+    `-linkall`, `-custom`, `-I .`; `use_runtime = "false"`; `output`) and run, with its `reference =` (`@dynruns=REF:ITEM+ITEM`);
+  - the libraries' C files the run's stubs (`@cstubs`), `ld_library_path += "${test_build_directory}"` the run's
+    `CAML_LD_LIBRARY_PATH=.` (the run's directory).
+  Over the testsuite's headers at the three levels only this row's line changes, at oi's level.
+- **bin/oi.** `oi_dynlink` writes `dllNAME.so` ("OI-DLL 1", its C files) and `NAME.cma` ("OI-CMA 1", `dllib -lNAME`, then each
+  unit's .cmo as `unit LENGTH` and its text: the library holds its units, as a bytecode .cma does). `oi_one` runs each further program
+  (the libraries' units, the units, in link order, with the program's libraries) and compares it with its reference; the first that
+  differs (status not 0, or output) is the row's, noted "the program REF (run N) differs from REF.reference".
+- **The platform** (test/ocaml/dynlink/dynlink.ml): `load` reads the file whole; "OI-CMO 1" is a unit as before, "OI-CMA 1" a
+  library: its shared libraries opened first (byte/dynlink.ml's `Dll.open_dlls`: `-lNAME` is `dllNAME.so`, looked up in
+  `CAML_LD_LIBRARY_PATH`'s directories; a missing one, or a file that is not "OI-DLL 1", is `Cannot_open_dynamic_library (Failure
+  "Cannot load shared library ...")`), then its units, each parsed and run in order by dynlink_common.
+- **What is not modelled**: a shared library's primitives are not bound when it is opened. The run's stubs are every library's C
+  files built into one node program on ci (OI_CSTUBS), each stub found by its name when first called, as oi finds any stub. A program
+  that called a plugin's primitive before loading its library would find it here, where ocamlrun fails. No test of the corpus does.
+  dynlink.ml is in native_key, so the native library was rebuilt once (the typing cache of the ppx programs rekeys with it).
+- **Controls**: `_control/dynlink-bytecode-vs-pr4229` (test/ocaml/controls.txt, judge check-oi.edn) differs. Once, in scratch, the
+  pinned tree's static.reference was given an extra line: the row failed with "the program static (run 2) differs from
+  static.reference", and the file was then restored (its SHA-256 checked).
