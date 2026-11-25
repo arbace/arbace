@@ -179,6 +179,7 @@ the code it must reproduce:
   | `:permits` | `permits` | a vector of types |
   | `:type-params` | `<T, U extends B>` | a vector of type parameters (§4.3) |
   | `:package` | `package` | `""` for the unnamed package (dotted names give all others) |
+  | `:parameters` | `javac -parameters` | `true`: the class's and its nested classes' `MethodParameters` record the parameters' names (a top-level class's; repr/java writes it when the read's javac options have `-parameters`; queue 563) |
 
 - **Value.** The form defines the class (and everything nested in it), imports it into the
   namespace under its simple name, and returns the `Class`.
@@ -617,7 +618,10 @@ permitted subclasses are those declared in the same top-level Java form or sourc
 `defmodule` writes `module-info.class` (`ACC_MODULE`, the `Module` attribute; `java.base` is
 required implicitly and marked `MANDATED`, and the versions of required system modules are
 recorded as javac does). `defpackage` writes `package-info.class` for package annotations, a
-synthetic interface as javac makes it. Both only make sense when compiling to files.
+synthetic interface as javac makes it. `defmodule` only makes sense when compiling to files;
+`defpackage` with annotations defines that interface, `package-info` of the namespace's package
+(`ACC_INTERFACE`, `ACC_ABSTRACT`, `ACC_SYNTHETIC`), whose annotations `Package`'s are (jdk26u's
+`Package.getPackageInfo`; amendment, queue 563, 2026-11-24).
 
 ### 4.15 Member macros
 

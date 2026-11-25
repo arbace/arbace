@@ -15,7 +15,7 @@ import java.time.Instant;
  * java.util.Calendar for the Go build, behaving as the JDK's: the fields, their lazy recomputation (set marks the time
  * unset; the time is computed from the fields in the zone current at that moment, as the JDK
  * computes it), the zone, leniency and the week parameters. Every instance is a
- * GregorianCalendar (no Buddhist or Japanese calendars); the week parameters and display names
+ * GregorianCalendar, a BuddhistCalendar or a JapaneseImperialCalendar (jdk26u's, since queue 543); the week parameters and display names
  * are the locale's, from the locale providers (CalendarDataUtility, DateFormatSymbols).
  */
 public abstract class Calendar implements java.io.Serializable, Cloneable, Comparable<Calendar> {
@@ -136,19 +136,49 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
     }
 
     public static Calendar getInstance() {
-        return new GregorianCalendar();
+        Locale aLocale = Locale.getDefault(Locale.Category.FORMAT);
+        return createCalendar(defaultTimeZone(aLocale), aLocale);
     }
 
     public static Calendar getInstance(TimeZone zone) {
-        return new GregorianCalendar(zone);
+        return createCalendar(zone, Locale.getDefault(Locale.Category.FORMAT));
     }
 
     public static Calendar getInstance(Locale aLocale) {
-        return new GregorianCalendar(aLocale);
+        return createCalendar(defaultTimeZone(aLocale), aLocale);
     }
 
     public static Calendar getInstance(TimeZone zone, Locale aLocale) {
-        return new GregorianCalendar(zone, aLocale);
+        return createCalendar(zone, aLocale);
+    }
+
+    // jdk26u's createCalendar without the locale providers' CalendarProvider (queue 543): the locale's "ca"
+    // extension's calendar, else a BuddhistCalendar for th_TH, a JapaneseImperialCalendar for ja_JP_JP, a
+    // GregorianCalendar for any other locale (jdk26u compares the interned strings by identity)
+    private static Calendar createCalendar(TimeZone zone, Locale aLocale) {
+        Calendar cal = null;
+        if (aLocale.hasExtensions()) {
+            String caltype = aLocale.getUnicodeLocaleType("ca");
+            if (caltype != null) {
+                cal = switch (caltype) {
+                    case "buddhist" -> new sun.util.BuddhistCalendar(zone, aLocale);
+                    case "japanese" -> new JapaneseImperialCalendar(zone, aLocale);
+                    case "gregory"  -> new GregorianCalendar(zone, aLocale);
+                    default         -> null;
+                };
+            }
+        }
+        if (cal == null) {
+            if ("th".equals(aLocale.getLanguage()) && "TH".equals(aLocale.getCountry())) {
+                cal = new sun.util.BuddhistCalendar(zone, aLocale);
+            } else if ("JP".equals(aLocale.getVariant()) && "ja".equals(aLocale.getLanguage())
+                       && "JP".equals(aLocale.getCountry())) {
+                cal = new JapaneseImperialCalendar(zone, aLocale);
+            } else {
+                cal = new GregorianCalendar(zone, aLocale);
+            }
+        }
+        return cal;
     }
 
     // jdk26u's defaultTimeZone: the locale's "tz" extension's zone, else the default
@@ -163,8 +193,8 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
     }
 
     /**
-     * jdk26u's Calendar.Builder. jrt's calendars are Gregorian only: the types "gregory" (also
-     * "gregorian") and "iso8601" are built, any other, the JDK's "buddhist" and "japanese" among
+     * jdk26u's Calendar.Builder. The types "gregory" (also "gregorian"), "iso8601", and since queue 543
+     * "buddhist" and "japanese" are built, any other
      * them, is refused with the JDK's IllegalArgumentException for an unknown type.
      */
     public static class Builder {
@@ -337,7 +367,13 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
                     setWeekDefinition(MONDAY, 4);
                     yield gcal;
                 }
-                // jrt has no Buddhist or Japanese calendar
+                // queue 543: jdk26u's Buddhist and Japanese calendars
+                case "buddhist" -> {
+                    var buddhistCalendar = new sun.util.BuddhistCalendar(zone, locale);
+                    buddhistCalendar.clear();
+                    yield buddhistCalendar;
+                }
+                case "japanese" -> new JapaneseImperialCalendar(zone, locale, true);
                 default -> throw new IllegalArgumentException("unknown calendar type: " + type);
             };
             cal.setLenient(lenient);
@@ -418,8 +454,10 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
     }
 
     public static Set<String> getAvailableCalendarTypes() {
-        Set<String> s = new HashSet<>();
+        Set<String> s = new HashSet<>(4);
         s.add("gregory");
+        s.add("buddhist");
+        s.add("japanese");
         return Collections.unmodifiableSet(s);
     }
 
@@ -529,11 +567,35 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         return stamp[field] != UNSET;
     }
 
-    // the fields with display names (jdk26u's masks)
+    // jdk26u's field masks (the fields with display names; since queue 543 the rest, which
+    // JapaneseImperialCalendar's field resolution names)
     static final int ERA_MASK = (1 << ERA);
+    static final int YEAR_MASK = (1 << YEAR);
     static final int MONTH_MASK = (1 << MONTH);
+    static final int WEEK_OF_YEAR_MASK = (1 << WEEK_OF_YEAR);
+    static final int WEEK_OF_MONTH_MASK = (1 << WEEK_OF_MONTH);
+    static final int DAY_OF_MONTH_MASK = (1 << DAY_OF_MONTH);
+    static final int DAY_OF_YEAR_MASK = (1 << DAY_OF_YEAR);
     static final int DAY_OF_WEEK_MASK = (1 << DAY_OF_WEEK);
+    static final int DAY_OF_WEEK_IN_MONTH_MASK = (1 << DAY_OF_WEEK_IN_MONTH);
     static final int AM_PM_MASK = (1 << AM_PM);
+    static final int HOUR_MASK = (1 << HOUR);
+    static final int HOUR_OF_DAY_MASK = (1 << HOUR_OF_DAY);
+    static final int MINUTE_MASK = (1 << MINUTE);
+    static final int SECOND_MASK = (1 << SECOND);
+    static final int MILLISECOND_MASK = (1 << MILLISECOND);
+    static final int ZONE_OFFSET_MASK = (1 << ZONE_OFFSET);
+    static final int DST_OFFSET_MASK = (1 << DST_OFFSET);
+
+    // jdk26u's getZone (queue 543: JapaneseImperialCalendar's)
+    TimeZone getZone() {
+        return zone;
+    }
+
+    // jdk26u's isFullyNormalized (queue 543: JapaneseImperialCalendar's)
+    final boolean isFullyNormalized() {
+        return areFieldsSet && areAllFieldsSet;
+    }
 
     // The display names (jdk26u's getDisplayName, getDisplayNames and their helpers): the
     // locale's names from CalendarDataUtility and DateFormatSymbols
@@ -906,8 +968,10 @@ public abstract class Calendar implements java.io.Serializable, Cloneable, Compa
         nextStamp = newStamp;
     }
 
+    // jdk26u's: the class's name (a calendar of a program's own, CalendarTypeTest's Koyomi); GregorianCalendar,
+    // BuddhistCalendar and JapaneseImperialCalendar override it (queue 543; "gregory" until then)
     public String getCalendarType() {
-        return "gregory";
+        return this.getClass().getName();
     }
 
     @Override

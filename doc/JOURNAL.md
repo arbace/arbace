@@ -22127,3 +22127,85 @@ finalizer goroutine (a blocking finalize() would stop every Go finalizer of the 
 and runtime.AddCleanup (its function cannot reach the object, which finalize() needs). Should move FinThreads (t04683)
 and ref/Basic (t04816) at interp and compiled; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124,
 finalization".
+
+## 2026-11-23: Java's jrt open causes (queue 543, the VM; branch `543-java-jrt-causes`)
+
+The brief's causes, on next fa635f636. Built here (commit 170761555):
+- CountDownLatch and Semaphore are jdk26u's (over the translated AbstractQueuedSynchronizer, in the closure since JC5),
+  jrt's hand-written ones removed with their reflection tables, manifest rows, Semaphore's serial twins and jrt's
+  tests of them; both in j2g's class-supers (a test's own latch or semaphore; Semaphore's protected reducePermits).
+  Alternative considered: JC4c's class interfaces on jrt's Go types (Ctor_ methods, manifest rows by hand); not
+  taken: the JDK's own classes give the protected members and the serial form with no Go.
+- ForkJoinPool's delayed tasks (JDK 25): schedule (Runnable, Callable), scheduleAtFixedRate, scheduleWithFixedDelay,
+  cancelDelayedTasksOnShutdown in jrt's own Java ForkJoinPools (a waiter task per delayed task, executed in the pool
+  at once, so the pool does not terminate while one waits, as the JDK's), j2g's fjp-support methods (a void one
+  now written without a return) and their reflection entries for the interpreter.
+- jdk.charsets whole: its 17 sources (share:jdk.charsets) and the 107 files its build generates (gensrc:jdk.charsets:
+  build.tools.charsetmapping's extcs and hkscs, bin/jrt-convert's generate step), ExtendedCharsets the extended
+  provider (Charset's variant), each charset made by jrt's JrtExtCharsets (AbstractCharsetProvider's variant), as
+  F8 did for the standard ones. Not sjis0213.dat (x-SJIS_0213, x-MS932_0213 found, their coding failing).
+- The Buddhist and Japanese calendars: jdk26u's BuddhistCalendar, JapaneseImperialCalendar, LocalGregorianCalendar;
+  jrt's Calendar makes them as jdk26u's createCalendar and Calendar.Builder do, with jdk26u's field masks, getZone
+  and isFullyNormalized; GregorianCalendar's month lengths package-private; JIC's computeTime a variant (a zone that
+  is no ZoneInfo without TimeZone.getOffsets, which TimeZone's variant cuts).
+- jdk.zipfs (12 files): its provider installed through the closed-world ServiceLoader (FileSystemProvider jdk26u's
+  again, its overlay and derivation removed; jdk/provides.txt, bin/jrt provides now reading a module whose first
+  directive is a provides: jdk.zipfs's and jdk.charsets' lines were missed).
+- jrt's ReentrantLock condition is named ReentrantLock$ConditionObject, so AbstractQueuedSynchronizer$ConditionObject
+  is jdk26u's, translated (MyOwnSynchronizer's new ConditionObject()).
+Not built: System.Logger (JCS250 (a), decided: jrt's hand-written types, 1.5 days; an overlay class named
+System$Logger was tried and withdrawn: javac on the converter's tree then resolves System.Logger nowhere else);
+stack-trace line numbers, type-annotation reflection and MethodParameters, the jrt: file system: DECISIONs 543-1 to
+543-3 in the report.
+Follow-ups (2026-11-24): build 4 (07122002d) fixed the first run's findings: ForkJoinPool's delayed tasks now run in trigger
+order (one driver per pool), Calendar.getCalendarType is jdk26u's, and jdk/data carries sjis0213.dat (the tests that enumerate
+the charsets had hit SJIS_0213's missing table). Interp on 37 tests: 11 now passing (t05222, t05398, t05461, t05462, t05653,
+t05691, t05707, t08152, t08176, t08178, t08179), 0 regressions, controls differ; t04789 and t04809 load and stop at JMX
+(:design-also). The compiled run built no program (its build-go under the heavy lock left no output) and was not repeated:
+the allowance's consolidation stopped the task. Interp's rows recorded; the REAP matrix, scores and compiled rows left.
+
+## 2026-11-24 — Java's jrt causes: DECISIONs 543-1 to 543-3 answered at the settle (queue 543, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287):
+  - 543-1 (Java line numbers in stack traces) dropped from 543: built on the main host as java-stack-1124.
+  - 543-2 (a): type-annotation reflection, MethodParameters and receiver types split by cause into small tasks: queue 563
+    (repr/java and jrt at interp: Outer.@A Inner's inner annotation, t04723; package-info's annotations on jrt's Package,
+    t04730; -parameters' MethodParameters, t04832 and t05910, JCS280 (a) reversed) and queue 564 (the compiled level:
+    Executable.getAnnotatedReceiverType through Executable_I, t04733; an enum constructor's parameter annotations, t04717;
+    Class.describeConstable, t04712-t04715). Each cause is its own commit.
+  - 543-3 superseded: the jrt: file system rows are n/a by the user's decision on the main host (java-rows-1124,
+    `:jrt-filesystem`).
+Alternatives: 543-2 (b), leaving the rows in `:reflection` (not chosen).
+:journal
+## 2026-11-24 — Java: type annotations, package-info and MethodParameters at interp (queue 563, VM)
+
+DECISION 543-2 (a)'s first part, one commit per cause on `563-java-annotations-interp` (base 543's ae548f267), built
+once (`ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build`, 1 h 20 min, 23.2 GB peak) and run at interp on
+the four targets and 91 samples (every recorded annotations, reflection, MethodParameters and typeAnnotations test,
+T6232928, annotations/pos):
+- Outer.@A Inner (t04723, 4fdf60501): repr/java skipped the inner type's annotations as the declaration's when of the
+  same class (`*skip-anns*`) and wrote a non-generic outer's inner type as Outer$Inner, the annotation at the
+  outermost type's path; the analyzer's `(.. ...)` dropped an inner element's annotations. Now an inner member type
+  with annotations of its own is written `(.. Outer ^{A ..} Inner)` (convert's `dotted-inner?`) and types.ae keeps
+  them (path INNER_TYPE, as AnnotatedTypeFactory's nestingForType reads it). Alternative: the analyzer deriving the
+  INNER_TYPE steps of a plain Outer$Inner symbol from its nesting (not chosen: the forms would still lose the
+  same-class annotation, and every compiled program's paths would change at once).
+- package-info (t04730, d849cc046): `defpackage` was a no-op; now it defines the synthetic interface package-info
+  (annotations of context PACKAGE) and jrt's Package delegates its AnnotatedElement methods to that class
+  (jdk26u's getPackageInfo). T6232928 (t05958) passes too. Alternative: a package annotation table in jrt filled
+  by the interpreter's host (not chosen: the class is javac's own model and reflection's Class.forName finds it).
+- MethodParameters (t04832, t05910): JCS280 (a) (synthesized parameters only) reversed by the user for its (b):
+  repr/java writes `:parameters true` on a top-level class when the read's javac options have -parameters
+  (bin/java-check passes the test's -parameters to the read); arbace.classes.annot writes W records per method and
+  constructor by javac's ClassWriter/Lower/TypeEnter rules (this$N MANDATED or SYNTHETIC, $enum$name/$enum$ordinal,
+  declared FINAL, anonymous constructors' super parameters, compact canonical MANDATED, val$x captured locals;
+  names only with -parameters or a record's canonical constructor); jrt decodes them (RecordedParameters) and j2g's
+  getParameters gives them when the count matches. Written in doc/classes/JAVA-DEFERRED-TRIAGE.md, "JCS280 (a)
+  reversed", and SPEC §4.1's option table.
+Rows (interp, `bin/java-check --judge --partial --record`): t04723, t04730, t05958, t04832, t05910 now passing; 0
+regressions (t04876 and t05915 fail on this VM with 543's executable too: the Proxy loader and javac's --release 8
+ct.sym, the environment's). Compiled (6 tests, 6 h on 4 cores): t04723's reason now Executable.getAnnotatedExceptionTypes
+through Executable_I (564's kind), the rest unchanged. The own platform cache was built on the VM by
+`bin/javac-vendor platform-own --gensrc` from the committed pack plus an empty gensrc/jdk.hotspot.agent (the pin lists
+that module's empty listing; the pack has no empty directory, so `platform-cache` fails its own check on a miss), then
+`platform-cache --seed`.

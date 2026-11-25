@@ -11,6 +11,7 @@
         '(java.time Instant)
         '(java.util.concurrent ConcurrentHashMap ConcurrentMap)
         '(java.util.function Function)
+        '(sun.util BuddhistCalendar)
         '(sun.util.locale.provider CalendarDataUtility TimeZoneNameUtility))
 
 (defclass ^:public ^:abstract Calendar
@@ -184,16 +185,39 @@
       (set! firstDayOfWeek (aget data 0))
       (set! minimalDaysInFirstWeek (aget data 1))))
 
-  (method ^:public ^:static getInstance ^Calendar [] (GregorianCalendar.))
+  (method ^:public ^:static getInstance ^Calendar []
+    (let [aLocale (Locale/getDefault Locale$Category/FORMAT)]
+      (Calendar/createCalendar (Calendar/defaultTimeZone aLocale) aLocale)))
 
   (method ^:public ^:static getInstance ^Calendar [^TimeZone zone]
-    (GregorianCalendar. zone))
+    (Calendar/createCalendar zone (Locale/getDefault Locale$Category/FORMAT)))
 
   (method ^:public ^:static getInstance ^Calendar [^Locale aLocale]
-    (GregorianCalendar. aLocale))
+    (Calendar/createCalendar (Calendar/defaultTimeZone aLocale) aLocale))
 
   (method ^:public ^:static getInstance ^Calendar [^TimeZone zone ^Locale aLocale]
-    (GregorianCalendar. zone aLocale))
+    (Calendar/createCalendar zone aLocale))
+
+  (method ^:private ^:static createCalendar ^Calendar [^TimeZone zone ^Locale aLocale]
+    (let [^:mutable ^Calendar cal nil]
+      (when (.hasExtensions aLocale)
+        (let [caltype (.getUnicodeLocaleType aLocale "ca")]
+          (when (some? caltype)
+            (set! cal
+                  (switch caltype
+                    "buddhist" (BuddhistCalendar. zone aLocale)
+                    "japanese" (JapaneseImperialCalendar. zone aLocale)
+                    "gregory" (GregorianCalendar. zone aLocale)
+                    nil)))))
+      (when (nil? cal)
+        (cond
+          (and (.equals "th" (.getLanguage aLocale)) (.equals "TH" (.getCountry aLocale)))
+            (set! cal (BuddhistCalendar. zone aLocale))
+          (and (and (.equals "JP" (.getVariant aLocale)) (.equals "ja" (.getLanguage aLocale)))
+               (.equals "JP" (.getCountry aLocale)))
+            (set! cal (JapaneseImperialCalendar. zone aLocale))
+          :else (set! cal (GregorianCalendar. zone aLocale))))
+      cal))
 
   (method ^:private ^:static defaultTimeZone ^TimeZone [^Locale l]
     (let [defaultTZ (TimeZone/getDefault)
@@ -330,6 +354,11 @@
                                 (.setGregorianChange gcal (Date. Long/MIN_VALUE))
                                 (.setWeekDefinition this MONDAY 4)
                                 gcal)
+                            "buddhist"
+                              (let [buddhistCalendar (BuddhistCalendar. zone locale)]
+                                (.clear buddhistCalendar)
+                                buddhistCalendar)
+                            "japanese" (JapaneseImperialCalendar. zone locale true)
                             (throw (IllegalArgumentException.
                                      (java-str "unknown calendar type: " type))))]
         (.setLenient cal lenient)
@@ -394,7 +423,11 @@
     (DateFormat/getAvailableLocales))
 
   (method ^:public ^:static getAvailableCalendarTypes ^{:tag (Set String)} []
-    (let [^{:tag (Set String)} s (HashSet.)] (.add s "gregory") (Collections/unmodifiableSet s)))
+    (let [^{:tag (Set String)} s (HashSet. 4)]
+      (.add s "gregory")
+      (.add s "buddhist")
+      (.add s "japanese")
+      (Collections/unmodifiableSet s)))
 
   (method ^:protected ^:abstract computeTime ^void [this])
 
@@ -482,11 +515,43 @@
 
   (field ^:static ^:final ^int ERA_MASK (bit-shift-left-int 1 ERA))
 
+  (field ^:static ^:final ^int YEAR_MASK (bit-shift-left-int 1 YEAR))
+
   (field ^:static ^:final ^int MONTH_MASK (bit-shift-left-int 1 MONTH))
+
+  (field ^:static ^:final ^int WEEK_OF_YEAR_MASK (bit-shift-left-int 1 WEEK_OF_YEAR))
+
+  (field ^:static ^:final ^int WEEK_OF_MONTH_MASK (bit-shift-left-int 1 WEEK_OF_MONTH))
+
+  (field ^:static ^:final ^int DAY_OF_MONTH_MASK (bit-shift-left-int 1 DAY_OF_MONTH))
+
+  (field ^:static ^:final ^int DAY_OF_YEAR_MASK (bit-shift-left-int 1 DAY_OF_YEAR))
 
   (field ^:static ^:final ^int DAY_OF_WEEK_MASK (bit-shift-left-int 1 DAY_OF_WEEK))
 
+  (field ^:static ^:final ^int DAY_OF_WEEK_IN_MONTH_MASK
+    (bit-shift-left-int 1 DAY_OF_WEEK_IN_MONTH))
+
   (field ^:static ^:final ^int AM_PM_MASK (bit-shift-left-int 1 AM_PM))
+
+  (field ^:static ^:final ^int HOUR_MASK (bit-shift-left-int 1 HOUR))
+
+  (field ^:static ^:final ^int HOUR_OF_DAY_MASK (bit-shift-left-int 1 HOUR_OF_DAY))
+
+  (field ^:static ^:final ^int MINUTE_MASK (bit-shift-left-int 1 MINUTE))
+
+  (field ^:static ^:final ^int SECOND_MASK (bit-shift-left-int 1 SECOND))
+
+  (field ^:static ^:final ^int MILLISECOND_MASK (bit-shift-left-int 1 MILLISECOND))
+
+  (field ^:static ^:final ^int ZONE_OFFSET_MASK (bit-shift-left-int 1 ZONE_OFFSET))
+
+  (field ^:static ^:final ^int DST_OFFSET_MASK (bit-shift-left-int 1 DST_OFFSET))
+
+  (method getZone ^TimeZone [this] zone)
+
+  (method ^:final isFullyNormalized ^boolean [this]
+    (and areFieldsSet areAllFieldsSet))
 
   (method ^:public getDisplayName ^String [this ^int field ^int style ^Locale locale]
     (when-not (not (.checkDisplayNameParams this
@@ -797,7 +862,8 @@
           (when (== min max) (break))))
       (set! nextStamp newStamp)))
 
-  (method ^:public getCalendarType ^String [this] "gregory")
+  (method ^:public getCalendarType ^String [this]
+    (.getName (.getClass this)))
 
   (method ^:public equals ^boolean [this obj]
     (if (identical? this obj)
