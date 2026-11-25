@@ -5084,8 +5084,13 @@ Arbace's typer.
   - Negative control: test_re.ml's first `[%expect]` is altered and the file is rewritten again by the driver on oi. Its
     test_re.ml.corrected must differ.
   - Result: pass, 27 of 27 files equal, and the control differs.
-- **Records**: opam/re/expect stays "class" in the suite records. The ppx programs are not rows of the suite corpus; see the report's
-  DECISION on how the row enters the records.
+- **Records** (DECISION 547-1 (b), the user's, 2026-11-25): re/expect has a record of its own. `bin/oi ppx expect --record` writes
+  `test/ocaml/check-ppx-oi.edn` (`[PROGRAM RESULT REASON]` as the suite records), only from a passing whole run: re/expect passes and
+  the control differs; any other run records nothing. The suite records' opam/re/expect row stays "class", since the ppx programs are
+  not rows of the suite corpus. reap's OCaml eval cell reads the new record over it (test/reap/cells.edn's `:override` on the suite
+  source, test/reap/main.ae's `override`): the record's row takes the place of the suite row of the same program, a pass counted as one,
+  a non-pass judged by the suite's classes as any other row. A record missing, or naming a program the suite record does not hold, is
+  a problem of reap's.
 
 ## As built: ppx_jane on oi (queue 548, 2026-11-25, the VM): T3 of DECISION 539b-1, sexplib0's test library
 
@@ -5127,4 +5132,6 @@ Arbace's typer.
     overflowed the stack (probe: 10,000,000 iterations).
 - **Result** (`bin/oi ppx expect sexplib0`): pass, sexplib0_test.ml's corrected text equal to the file (its 7 expect tests); the
   control (its first `[%expect]` altered, rewritten again by sexplib0_test_driver on oi) differs.
-- **Records**: opam/sexplib0/sexplib0_test stays "class" until DECISION 547-1 is answered.
+- **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
+  sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
+  on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).

@@ -18,8 +18,10 @@
 #   bin/oi ppx jst-config  (queue 547) jst-config's config.h for oi's C target (discover.ml ported), .tmp/oi/ppx/jst-config
 #   bin/oi ppx lifter  (queue 548) ppx_custom_printf's format_lifter.ml as its gen.ml writes it (ported), .tmp/oi/ppx/lifter; ppx pp
 #                      makes it first
-#   bin/oi ppx expect [re|sexplib0...]  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its
-#                      negative control; (queue 548) sexplib0's test library likewise, rewritten by its pps (ppx_jane's rewriters)
+#   bin/oi ppx expect [--record] [re|sexplib0...]  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks,
+#                      with its negative control; (queue 548) sexplib0's test library likewise, rewritten by its pps (ppx_jane's
+#                      rewriters); --record (DECISION 547-1 (b), the user's) writes test/ocaml/check-ppx-oi.edn from a passing whole
+#                      run: a row for each library run, only when every one passes and its control differs, else records nothing
 
 PPX=$OI_DIR/ppx
 PPX_ROWS=$root/test/ocaml/ppx-programs.tsv
@@ -183,7 +185,11 @@ ppx_expect_spec() {
 # first block, the file rewritten again by the driver into a pp tree of its own) must fail; NAME... re and sexplib0 by default
 cmd_ppx_expect() {
   local name st=0
+  PPX_EXPECT_PASSED=""
   for name in ${*:-re sexplib0}; do ppx_expect_one "$name" || st=1; done
+  if [ "${RECORD:-0}" = 1 ]; then
+    if [ $st = 0 ]; then ppx_expect_record $PPX_EXPECT_PASSED; else echo "oi: ppx expect: not a passing whole run: nothing recorded"; fi
+  fi
   return $st
 }
 
@@ -211,7 +217,25 @@ ppx_expect_one() {
   if [ "${cv%% *}" = pass ]; then echo "control ($(basename "$f")'s first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
   else echo "control ($(basename "$f")'s first [%expect] altered): $cv, as a control must"; fi
   echo "oi: ppx expect: $label $v"
-  [ "${v%% *}" = pass ]
+  [ "${v%% *}" = pass ] || return 1
+  PPX_EXPECT_PASSED="$PPX_EXPECT_PASSED $label"
+  return 0
+}
+
+# ppx_expect_record LABEL... (DECISION 547-1 (b), the user's, 2026-11-25; queue 548: a row for each library run): test/ocaml/check-ppx-oi.edn,
+# the rows of a passing whole run of cmd_ppx_expect alone ([PROGRAM RESULT REASON] as test/ocaml/check-suite-oi-native.edn's, PROGRAM
+# opam/LABEL); reap's OCaml eval cell reads it over the suite record's row of the same program (test/reap/cells.edn's :override)
+ppx_expect_record() {
+  local out=$root/test/ocaml/check-ppx-oi.edn l
+  { echo ";; oi's results of the ppx programs judged by their own tests (bin/oi ppx expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built:"
+    echo ";; ppx_expect on oi\" and \"As built: ppx_jane on oi\"; DECISION 547-1 (b), the user's, 2026-11-25): [PROGRAM RESULT REASON] as"
+    echo ";; test/ocaml/check-suite-oi-native.edn; written only from a passing whole run (each library's tests, preprocessed by its ppx"
+    echo ";; driver on oi, pass by their own [%expect] blocks and each negative control differs): re's lib_test/expect, sexplib0's test"
+    echo ";; library. reap's OCaml eval cell reads it over the suite record's row of the same program. Read with the Clojure reader."
+    echo "["
+    for l in $(tr ' ' '\n' <<< "$*" | sed '/^$/d' | LC_ALL=C sort); do echo " [\"opam/$l\" \"pass\" \"\"]"; done
+    echo "]"; } > "$out.new"
+  mv "$out.new" "$out"; echo "oi: ppx expect: recorded $out"
 }
 
 # ppx_run_tree ID FROM TREE: ppx_run with the row's source tree (FROM, @PPX@/work/PKG, in its ARGS and ENV) replaced by TREE
@@ -311,14 +335,15 @@ cmd_ppx_check() {
 }
 
 cmd_ppx() {
-  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|lifter|expect"
+  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|lifter|expect [--record] [re|sexplib0...]"
   shift
   case $verb in
     gen) cmd_ppx_gen "$@" ;;
     pp) ppx_env; cmd_ppx_pp "$@" ;;
     jst-config) ppx_env; cmd_ppx_jst_config ;;
     lifter) ppx_env; cmd_ppx_lifter; echo "oi: ppx lifter: $PPX/lifter/format_lifter.ml" ;;
-    expect) ppx_env; cmd_ppx_expect "$@" ;;
+    expect) local o=() n=() x; for x in "$@"; do case $x in --*) o+=("$x") ;; *) n+=("$x") ;; esac; done
+            ppx_env "${o[@]}"; cmd_ppx_expect "${n[@]}" ;;
     run) local id=${1:-}; [ -n "$id" ] || die "usage: bin/oi ppx run ID"; shift; ppx_env "$@"; ppx_run "$id" ;;
     check) cmd_ppx_check "$@" ;;
     *) die "unknown ppx verb $verb" ;;
