@@ -20847,3 +20847,8 @@ reproduced by a probe; test_framed_write_sizes_with_delayed_writer past the 300 
 `:dbm-sqlite3-locking`. Judged again on the run (`--judge`): 6 modules, 1,408 methods, 1,253 pass, 155 classed, 0 failing (test_pickle
 938 pass, 76 classed: cpython-only 18, pickle-c-gaps 3, skipped-by-test 55), the controls failing as they must. No record written: there is no AOT lib-test record on arm64, and the eval record is
 the host's.
+
+## 2026-11-25 — the user's DECISION 568-1 (a) (queue 568, VM)
+
+568-1 (a): the thin Go `_pickle` stays, the fallback under `PYI_C_ACCEL=0`; `_pickle` is otherwise CPython's Modules/_pickle.c in the
+C world, as built on this branch. Alternative (b), removing the Go module, not taken.
