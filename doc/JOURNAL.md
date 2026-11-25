@@ -22034,3 +22034,18 @@ child at GOGC 25 (`PYI_CHILD_GOGC`), after py-mp's finding that a spawn child is
 peaks at 1.45 GB instead of 2.0, the same wall, about 30% more CPU. Alternatives: GOGC 50 (1.75 GB), a GOMEMLIMIT per child (a
 soft limit that a busy child passes anyway), cutting the startup heap itself (about 330 MB live: Arbace's 177 MB and the host
 compiler's; larger work, not started). Doc: doc/python/PYTHON-SURVEY.md, "As built: py-limits-1125".
+
+## 2026-11-25: py-limits-1125: the user's decision on test_httpservers' test_get (n/a, `:finalization`)
+
+The user decided (2026-11-25, through the coordinator) py-limits-1125's first question, (a): test_httpservers'
+RequestHandlerLoggingTestCase.test_get is n/a, the timing of reference counting: http.client's will_close response keeps the
+socket open through its makefile until the response is deallocated, which CPython does at the discarded getresponse(), so the
+single-threaded HTTPServer's keep-alive readline sees the EOF there; under Go's collector it waits and tearDown's shutdown() never
+returns. Done: the id in test/python/divergences.edn's `:finalization` (`:kind :na`, before `:runner-limits` in the file, so it is
+that class's: `bin/pyi divergences` shows no shadowed name), its reason beside it and the decision in `:decided`. Also agreed:
+test_email's test_long_lines is fixed, not capped, if train 5's native StringIO leaves it slow; `.tmp/w/list2.txt` is rerun on train
+5's executable when it exists. bin/reap --record and bin/crops-score --record on the branch's tree (train 5's records, which its
+merges had not re-recorded: Python eval 40,886 / 1,304 / 1,292 -> 41,203 / 1,196 / 1,004, n/a 4,934); crops-score --judge --strict
+and records-check 0 problems. mac/next (train 3's merge, 76c4f46c9) is not merged here: it conflicts with train 5 in
+doc/JOURNAL.md, test/python/divergences.edn (`:c-accelerators`), the eval record, test/reap/matrix.edn and test/crops/scores.edn,
+the resolution train 5's conductor makes when train 5 takes next; this branch then merges train 5.
