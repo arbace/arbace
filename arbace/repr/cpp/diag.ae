@@ -8593,3 +8593,67 @@
 (alter-var-root #'sema-rules conj
   [:vla-type #"^codegen: (cannot throw expression of a variably modified type|cannot catch a type of variable size|cannot create type information for a type of variable size|data member '.*' may not have variably modified type|size of array '.*' (is not an integral constant-expression|has non-integral type)|array of runtime bound '.*' cannot be captured by copy|'constexpr' variable '.*' has variably-modified type|array size in new-expression must be constant)"
    "a variably modified type where a type fixed at translation is needed, or an array bound neither constant nor a VLA's"])
+
+;; cpp-indep (2026-11-25): [dcl.stc]/4, thread_local (GNU's __thread alike) in one declaration of a variable is in all of them:
+;; a namespace-scope variable declared again with it after a declaration without it, or without it after one with it, GCC's
+;; "thread-local declaration of 'j' follows non-thread-local declaration" (and the reverse), at the later declaration's name;
+;; tls/diag-3.C. A namespace's own variables by their qualified path; a class's static members not judged.
+(defn tls-redecls
+  "The thread-local agreement check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        seen (java.util.HashMap.)]
+    (letfn [(region! [path nodes]
+              (doseq [n nodes :when (map? n)]
+                (case (:kind n)
+                  "NamespaceDecl" (region! (str path (or (:name n) "(anonymous)") "::") (:inner n))
+                  "LinkageSpecDecl" (region! path (:inner n))
+                  "VarDecl" (when (and (:name n)
+                                       ;; (a qualified name's, a static member's definition, not judged: cpp2a/constinit5.C's T::r1)
+                                       (not (when-let [o (get-in n [:loc :offset])] (qualified-name? src (long o)))))
+                              (let [k (str path (:name n)) t (boolean (:tls n))]
+                                (if (.containsKey seen k)
+                                  (when-let [o (and (not= t (.get seen k)) (mine-at n main))]
+                                    (let [[l c] (line-col starts o)]
+                                      (.add out {:line l :col c :kind :error :rule :tls
+                                                 :msg (str (if t "thread-local" "non-thread-local") " declaration of '" (:name n) "' follows "
+                                                           (if t "non-thread-local" "thread-local") " declaration")})))
+                                  (.put seen k t))))
+                  nil)))]
+      (region! "" (:nodes u)))
+    (vec out)))
+
+(swap! checks conj tls-redecls)
+
+;; cpp-indep (2026-11-25): [class.access.spec]/? (C++23 [class.access.spec]/4), a member redeclared in its class's definition has
+;; the access of its first declaration: a member class, class template or enumeration declared, then defined (or declared again)
+;; under another access-specifier, GCC's "'S::A' redeclared with different access", at the later declaration; parse/access7.C,
+;; cpp0x/enum33.C. Functions (whose overloads may differ) not judged.
+(defn member-type-access
+  "The member types' access agreement check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        tname (fn [m] (case (:kind m)
+                        ("CXXRecordDecl" "EnumDecl") (when (and (string? (:name m)) (not (:isImplicit m)) (not (:_elab-decl m))) [:type (:name m)])
+                        "ClassTemplateDecl" (when (string? (:name m)) [:type (:name m)])
+                        nil))]
+    (walk-nodes
+     (fn [n _]
+       (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n) (mine-at n main))
+         (let [seen (java.util.HashMap.)]
+           (loop [[m & more] (:inner n) acc (if (= "class" (:tagUsed n)) "private" "public")]
+             (when m
+               (if (= "AccessSpecDecl" (:kind m))
+                 (recur more (:access m))
+                 (do (when-let [k (tname m)]
+                       (if-let [a0 (.get seen k)]
+                         (when (and (not= a0 acc) (mine-at m main))
+                           (let [[l c] (line-col starts (mine-at m main))]
+                             (.add out {:line l :col c :kind :error :rule :access
+                                        :msg (str "'" (:name n) "::" (second k) "' redeclared with different access")})))
+                         (.put seen k acc)))
+                     (recur more acc))))))))
+     (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj member-type-access)
