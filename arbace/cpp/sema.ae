@@ -4323,7 +4323,7 @@
             :else (not-constant "a read of an uninitialized object")))
     x)))
 
-(declare ce-fresh-of)
+(declare ce-fresh-of ce-zero-of)
 
 (defn- ce-lhs-steps
   "The path steps the assignment's left operand `x` names by member access and subscripts ([class.union.general]/6's S(E))."
@@ -4555,6 +4555,9 @@
    (let [ev #(ce-eval % env)
          t (:ty e)]
      (case (:op e)
+       ;; (queue 569: sizeof of a VLA, its object's elements counted)
+       :vla-sizeof (let [c (get env (:var e))]
+                     (if (and c (vector? @c)) (* (count @c) (long (:esize e))) (not-constant "the size of a variable-length array outside its evaluation")))
        ;; (CP378 (a): `__builtin_is_constant_evaluated()`, an :int 0 marked :ice, true when manifestly constant-evaluated)
        :int (cond (and (:ice e) *ce-manifest*) 1
                   ;; (cpp-rt-own2: __builtin_constant_p of a value that is no constant: false when manifestly constant-evaluated, else
@@ -5073,6 +5076,17 @@
                            ;; (cpp-s4: a local array of scalars from a list, its elements' values a vector; [dcl.init.aggr]/5's
                            ;; elements without an initializer from the list's filler)
                            at (abi/unq (:ty v))
+                           ;; (queue 569, the checker: GNU's variable-length array, the GCC manual's "Variable Length": its bound
+                           ;; evaluated here, where the declaration is, and the array's elements so many; a braced list longer
+                           ;; than the bound, an access past it ([expr.const]/5.8, undefined: [dcl.init.aggr]/3's explicitly
+                           ;; initialized elements beyond the array's), GCC's "array subscript value ... is outside the bounds")
+                           at (if-let [b (and (:vla at) (checking?) (:vla-n v))]
+                                (let [k (long (ce-num (ce-eval b @env)))]
+                                  (when (neg? k) (ce-sure! "the size of the variable-length array '" (:name v) "' is negative"))
+                                  (when (and (= :list (:i init)) (> (count (:items init)) k))
+                                    (ce-sure! "array subscript value '" k "' is outside the bounds of array '" (:name v) "'"))
+                                  (assoc at :n k))
+                                at)
                            arr? (and (abi/arr? at) (= :list (:i init)) (:n at) (not (abi/class? (abi/unq (:of at)))))
                            el (fn [i] (case (:i i) :expr (ce-wrap (:of at) (ce-eval (:e i) @env)) (:zero :none nil) 0 (not-constant "an element's initializer")))
                            ;; (CP374 (a): a local of an empty class, a captureless lambda's closure, holds nothing to read: its calls
@@ -5095,11 +5109,14 @@
                                           ::empty)
                                  arr? (let [xs (mapv el (:items init))]
                                         (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill init)))))
+                                 ;; (queue 569: a VLA with no list, its elements zero, as a fixed array's are here: the evaluator
+                                 ;; reads no array element as indeterminate)
+                                 (and (:vla at) (:n at) (#{:none :zero} (:i init))) (ce-zero-of at)
                                  (and (abi/arr? at) (= :string (:i init))) (ce-init (:ty v) init @env)
                                  ;; (cpp-sweep, the checker: a local array of class objects from a list, ce-init's, destroyed at
                                  ;; the block's end below: cpp2a/constexpr-dtor3.C's f5)
                                  (and (checking?) (abi/arr? at) (= :list (:i init)) (:n at) (abi/class? (abi/unq (:of at))))
-                                 (ce-init (:ty v) init @env)
+                                 (ce-init (if (:vla at) at (:ty v)) init @env)
                                  (#{:expr :zero :none} (:i init)) (if (and (abi/class? at) (not= :expr (:i init)))
                                                                     (ce-init (:ty v) init @env)
                                                                     ;; (h-cpp-consteval, the checker: a scalar default-initialized,
@@ -8442,7 +8459,8 @@
                                                      (throw e)))))
                                           items))
                         (vec (map-indexed one items)))
-               :fill (when (and (:n tu) (< (count items) (long (:n tu)))) (init-for el nil ctx :value)) :n (:n tu)})))
+               ;; (queue 569: a VLA's elements past the list's value-initialized too, its bound known when it is evaluated)
+               :fill (when (or (and (:n tu) (< (count items) (long (:n tu)))) (:vla tu)) (init-for el nil ctx :value)) :n (:n tu)})))
         (and (abi/class? tu) (aggregate? tu))
         (let [c (abi/cls (:id tu))
               items (:items (brace-elide tu src))
@@ -11844,9 +11862,10 @@
     (let [;; (queue 380, W3d: an operand the parser read as an expression that names a type, type-named-by)
           at (get-in n [:argType :qualType])
           nt (when-not at (type-named-by ctx (first (kids n))))
+          x (when-not (or at nt) (binding [*unevaluated* true] (analyze ctx (first (kids n)))))
           t (cond at (resolve-type (:scope ctx) at)
                   nt nt
-                  :else (:ty (binding [*unevaluated* true] (analyze ctx (first (kids n))))))
+                  :else (:ty x))
           t (abi/non-ref t)
           ;; (queue 484, the checker: [expr.sizeof]/1, [expr.alignof]/1: sizeof or alignof of an incomplete class, or an array
           ;; of one, expr/sizeof3.C; not in a function template's specialization, whose point of instantiation may follow
@@ -11855,7 +11874,11 @@
               (when-let [c (cx-incomplete-cls (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))]
                 (fail :incomplete "invalid application of " (:name n) " to incomplete type '" (:name c) "'")))]
       (case (:name n)
-        "sizeof" {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr}
+        "sizeof" (if-let [vid (and (checking?) (:vla (abi/unq t)) (= :var (:op x)) (:vla-n (var* (:id x))) (:id x))]
+                   ;; (queue 569, the checker: sizeof of a GNU variable-length array, evaluated where it is, the GCC manual's
+                   ;; "Variable Length": its elements' count, known when its declaration was evaluated, times an element's size)
+                   {:op :vla-sizeof :var vid :esize (abi/size-of (:of (abi/unq t))) :ty abi/ulong* :cat :pr}
+                   {:op :int :v (abi/size-of t) :ty abi/ulong* :cat :pr})
         "alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
         ;; GNU's __alignof__: the preferred alignment, x86-64's the ABI's for every type the slice lays out
         "__alignof" {:op :int :v (abi/align-of t) :ty abi/ulong* :cat :pr}
@@ -12077,16 +12100,22 @@
   type {:k :arr :n nil :vla true :of T} and the bound the parser kept (the VarDecl's :_vla, outermost first) analyzed here
   as an integer prvalue, clang's VariableArrayType's size expression, evaluated where the declaration is (codegen's
   local-decl!: llvm.stacksave, a dynamic alloca, llvm.stackrestore at the scope's exits). Nil when the declaration is no
-  such array (the element type must resolve: an inner bound no constant stays the refusal)."
-  [ctx n qt]
+  such array (the element type must resolve: an inner bound no constant stays the refusal).
+  queue 569 (the checker's, `list?`): also one initialized by a braced list, the GCC manual's \"Variable Length\" (GNU C++
+  takes an initializer for a VLA), its elements evaluated by the constant evaluator against the bound evaluated at the
+  declaration (ce-exec's :decl)."
+  ([ctx n qt] (vla-local ctx n qt false))
+  ([ctx n qt list?]
   (let [b (first (:_vla n))
-        f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))]
+        f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))
+        ik (init-kid n)]
     (when (and (map? b) (seq? f) (= 'array (first f)) (= 3 (count f)) (not (number? (second f)))
-               (not= "static" (:storageClass n)) (not (:tls n)) (nil? (init-kid n)))
+               (not= "static" (:storageClass n)) (not (:tls n))
+               (or (nil? ik) (and list? (= "InitListExpr" (:kind ik)))))
       (let [et (resolve-type-form (:scope ctx) (nth f 2))
             e (rv (analyze ctx b))]
         (when (and (abi/integral? (abi/unq (abi/underlying (abi/unq (:ty e))))) (not (abi/class? (abi/unq et))))
-          [(assoc (abi/arr nil et) :vla true) e])))))
+          [(assoc (abi/arr nil et) :vla true) e]))))))
 
 (defn- local-var! [ctx n storage]
   (let [qt (get-in n [:type :qualType])
@@ -12102,8 +12131,10 @@
                     ;; (cpp-singles, the checker: a VLA's bound analyzed, so that its immediate invocations are evaluated,
                     ;; [expr.const]/16 -- GCC's "call to consteval function 'bar(3)' is not a constant expression" at the call,
                     ;; cpp2a/consteval34.C's `int a1[bar(3)];` --, the refusal then as before)
+                    ;; (queue 569, the checker: GNU's VLA, its bound evaluated where it is declared by the constant evaluator,
+                    ;; vla-local's with a braced list too; else the refusal as before)
                     (and (checking?) (= :local storage) (map? (first (:_vla n))) (boolean (re-find #"not a constant" (str (.getMessage x)))))
-                    (do (analyze ctx (first (:_vla n))) (throw x))
+                    (if-let [[t e] (vla-local ctx n qt true)] (do (reset! vla e) t) (do (analyze ctx (first (:_vla n))) (throw x)))
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
