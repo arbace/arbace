@@ -23001,3 +23001,17 @@ per job (not available to the agents' shells here; the watchdog is the backstop)
   is-corresponding-member3/4 and is-pointer-interconvertible-with-class3, whose expected lines our undeclared error had held);
   [expr.sub]'s scalar subscript (crash89's default template argument never reports it); a constexpr constructor with virtual bases
   a sure non-constexpr call (constexpr-ice21 still misses its local-class line).
+## 2026-11-25: the merged C API wire proved at the light level; callback_effects_domains_gc judged at the compiled level only
+
+- next d5633b334 (ocaml-aot, 576 and 583 merged; go/arbace/oicapi/wire.ae keeps ocaml-aot's `__oi_embed` and 583's 'V', the dispatch's
+  cases [K Q V]), oi's C API driver built from that tree: `bin/oi check --aot --only-list` over callback/test1, test2, embedded/cmcaml,
+  lib-runtime-events/test, test_caml, test_caml_exception: 6 of 6 pass; `suite check --aot --only-list` basic-modules/main and
+  basic-multdef/usemultdef pass; the controls re-caml-vs-exception, capi-test1-vs-test2, re-test-vs-caml and main-vs-usemultdef differ
+  as they must; no record row changed (`.tmp/q/wire-main.log`, `wire-suite.log`).
+- DECISION 583-4: the VM's 148.7 s (user CPU on the VM) gave a light cap of about 230 s, under which the row still timed out here (254 s
+  of wall); alone on this host it passes in 275.5 s of CPU (271.3 user, 4.2 system) at 2.8 GB of RSS (`.tmp/q/cb`), and with a 420 s cap
+  (1.5 x) its suite row passed. The user's decision (2026-11-25): callback_effects_domains_gc is judged at the compiled level only (either
+  level's pass counts); the light row stays slow (`:light-speed`, test/ocaml/aot-slow.edn) and no light cap is added for it; the 420 s
+  cap and the passing row were reverted, not committed. The row joins the compiled level's 583 list (tool-ocamldoc/t01-t05,
+  lib-runtime-events/test, lib-threads/delayintr and signal; the suite's callback_effects_domains_gc, recvfrom_linux, recvfrom_unix),
+  run on next's tree after the compiled chain ends.
