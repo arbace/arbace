@@ -2743,6 +2743,34 @@
         parts (remove nil? (concat tcs [rc]))]
     (when (seq parts) (reduce (fn [a b] [:and a b]) parts))))
 
+(defn- cx-partial-pack-checks!
+  "cpp-indep2 (the checker): a class template partial specialization's pack expansions among its arguments `forms` judged against
+  the primary template `t`'s parameters, reported at the declaration `n` (see the rules below); true when one is, :drop when
+  GCC then declares no such specialization (a pack expansion before the last argument)."
+  [t forms n]
+  (when-let [h (when (sema/checking?) sema/*on-refusal*)]
+    (let [forms (vec forms)
+          at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))
+          pack? (fn [f] (and (seq? f) (= 'pack-expand (first f))))
+          r! (fn [msg] (h (ex-info (str "codegen: partial specialization of '" (:name t) "'" msg) {:codegen/refused :template :cx/node at}) n) true)]
+      (cond
+      ;; (cpp-indep2: [temp.deduct.type]/9 with [temp.spec.partial.general]/9.2: an argument that is a pack expansion where the
+      ;; primary template's parameter is no pack, `template<typename... T> struct A<T...>` of `template<typename> struct A`, is
+      ;; deduced from by no non-pack parameter, so the specialization is not more specialized than the primary: GCC's "partial
+      ;; specialization ... is not more specialized than primary template", at its name; cpp0x/variadic83.C)
+        (some (fn [[f q]] (and (pack? f) q (not (:pack q)))) (map vector forms (concat (:params t) (repeat nil))))
+        (r! " is not more specialized than primary template")
+      ;; (cpp-indep2: [temp.spec.partial.general]/9.4, an argument that is a pack expansion is the last argument: GCC's "parameter
+      ;; pack argument 'T ...' must be at the end of the template argument list", at its name; cpp0x/pr32128.C's `A<T..., U...>`)
+        (some pack? (butlast forms))
+        (do (r! ": parameter pack argument must be at the end of the template argument list") :drop)
+      ;; (cpp-indep2: and one past the primary's parameters when none of them is a pack, `template <typename, typename> struct a;`
+      ;; specialized as `a<b, c, d...>`: GCC's "wrong number of template arguments", at its name; cpp0x/variadic178.C)
+        (and (> (count forms) (count (:params t))) (seq (:params t)) (not-any? :pack (:params t))
+             (some pack? (drop (count (:params t)) forms)))
+        (r! (str " has the wrong number of template arguments (" (count forms) ", should be " (count (:params t)) ")"))
+        :else nil))))
+
 (defn- identity-partial-check!
   "n-cpp-concepts (the checker), [temp.spec.partial.general]/9.2: a class template partial specialization whose arguments
   are its own parameters in order (S<T>, zip<Ts...>) is more specialized than the primary template only by its constraints:
@@ -2751,16 +2779,6 @@
   [t pt n]
   (when-let [h (when (sema/checking?) sema/*on-refusal*)]
     (let [forms (vec (:forms pt)) ps (:params pt)]
-      ;; (cpp-indep2: [temp.deduct.type]/9 with [temp.spec.partial.general]/9.2: an argument that is a pack expansion where the
-      ;; primary template's parameter is no pack, `template<typename... T> struct A<T...>` of `template<typename> struct A`, is
-      ;; deduced from by no non-pack parameter, so the specialization is not more specialized than the primary: GCC's "partial
-      ;; specialization ... is not more specialized than primary template", at its name; cpp0x/variadic83.C)
-      (when (some (fn [[f q]] (and (seq? f) (= 'pack-expand (first f)) q (not (:pack q))))
-                  (map vector forms (concat (:params t) (repeat nil))))
-        (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))]
-          (h (ex-info (str "codegen: partial specialization of '" (:name t) "' is not more specialized than primary template")
-                      {:codegen/refused :template :cx/node at})
-             n)))
       (when (and (seq ps) (= (count forms) (count ps) (count (:params t)))
                  (every? true? (map (fn [f p] (if (:pack p)
                                                 (and (seq? f) (= 'pack-expand (first f)) (= (str (second f)) (:name p)))
@@ -5084,7 +5102,8 @@
                       ;; (queue 567: arguments the slice cannot evaluate -- `A<T, T{}>`'s T{} -- judged for deducibility first,
                       ;; [temp.spec.partial.match]/3, GCC's error at the declaration before the refusal: cpp0x/nondeduced7.C)
                       (when (sema/checking?)
-                        (or (cx-partial-nontype-involves! t (template-text-args n) params n)
+                        (or (cx-partial-pack-checks! t (template-text-args n) n)
+                            (cx-partial-nontype-involves! t (template-text-args n) params n)
                             (cx-partial-undeducible! t {:params params :forms (template-text-args n)} n)))
                       (throw x)))]
       ;; a redeclaration of a partial specialization (its declaration, then its definition: <iterator_concepts.h>'s
@@ -5110,13 +5129,19 @@
             pt (cond-> {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t)
                         :forms (template-text-args n) :tmpl t}
                  (seq nx) (assoc :nx nx))]
-        (when-not same (identity-partial-check! t pt n) (cx-partial-nontype-involves! t (:forms pt) params n)
+        ;; (cpp-indep2: a partial specialization its pack expansions make ill-formed is reported and not declared, as GCC drops
+        ;; it: cpp0x/pr32128.C's `A<int>` then of the primary, incomplete)
+        (let [bad (and (not same) (cx-partial-pack-checks! t (:forms pt) n))]
+        (when-not (or same bad) (identity-partial-check! t pt n) (cx-partial-nontype-involves! t (:forms pt) params n)
                        (cx-partial-after-instantiation! t pt n))
-        (let [pt (if (and (not same) (cx-partial-undeducible! t pt n)) (assoc pt :node (dissoc n :completeDefinition) :cx-undeducible true) pt)]
-        (if same
+        (let [pt (if (and (not same) (not bad) (cx-partial-undeducible! t pt n)) (assoc pt :node (dissoc n :completeDefinition) :cx-undeducible true) pt)]
+        (cond
+          (= :drop bad) nil
+          same
           (when (:completeDefinition n)
             (upd-tmpl! tid update :partials (fn [ps] (mapv #(if (identical? % same) pt %) ps))))
-          (upd-tmpl! tid update :partials conj pt))))
+          :else
+          (upd-tmpl! tid update :partials conj pt)))))
       :template)
     "ClassTemplateSpecializationDecl"
     (let [tid (or (some #(when (and (= :tmpl (:e %)) (= :class (:tk %))) (:id %)) (sema/lookup (class-key-scope scope n) (:name n))) (fail :template "no primary template " (:name n)))

@@ -11109,6 +11109,28 @@
                          [(analyze ctx a)]))
                ns)))
 
+(defn- cx-both-operands
+  "cpp-indep2, the checker: a binary operator's two operands analyzed as [l r]; when the left one's analysis is refused, the right
+  one is analyzed too, and when it is refused as well each refusal is reported where it was found and the first thrown as
+  reported (GCC goes on past the erroneous operand and reports both: cpp0x/nullptr46.C's `foo () > nullptr || foo () < nullptr`,
+  an error on each line). Else as before: the left one's refusal thrown."
+  [ctx ln rn]
+  (if-not (and *on-refusal* (checking?))
+    [(analyze ctx ln) (analyze ctx rn)]
+    (let [ok? (fn [e] (let [d (ex-data e)] (and (:codegen/refused d) (not (:cpp/timeout d)) (not (:cx/reported d)))))
+          [l el at-l] (try [(analyze ctx ln) nil nil]
+                           (catch arbace.lang.ExceptionInfo e
+                             (if (ok? e) [nil e (some-> *at* deref)] (throw e))))]
+      (if-not el
+        [l (analyze ctx rn)]
+        (let [er (try (analyze ctx rn) nil
+                      (catch arbace.lang.ExceptionInfo e (if (ok? e) [e (some-> *at* deref)] (throw e))))]
+          (if-not er
+            (throw el)
+            (do (*on-refusal* el (or (:cx/node (ex-data el)) at-l))
+                (*on-refusal* (first er) (or (:cx/node (ex-data (first er))) (second er)))
+                (throw (ex-info (.getMessage ^Throwable el) (assoc (ex-data el) :cx/reported true))))))))))
+
 (defn- cx-list-items
   "cpp-decl2, the checker: a braced list's elements as analyze-args gives them; when an element's analysis is refused, each
   other element is analyzed too and every refusal reported at its element (GCC reports each: other/offsetof8.C's two), the
@@ -12213,7 +12235,7 @@
                             {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
             (fail :operator "unary " o)))))
     "BinaryOperator"
-    (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)
+    (let [o (:opcode n) [ln rn] (kids n) [l r] (cx-both-operands ctx ln rn)
           ;; (cpp-rind, the checker: a member function named as an assignment's left operand, `foo = 0;` with foo a member
           ;; function, [expr.ref]/6.3.2: GCC's "invalid use of member function 'void A::foo(int)'"; parse/error45.C)
           _ (when (and (checking?) (= "=" o) (= :fnset (:op l)) (seq (:fns l))
