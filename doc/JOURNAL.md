@@ -19453,3 +19453,31 @@ The coordinator's second message for 566 (items 1-5), on the same branch, one co
   equal, 3 differ, 459 refused (452 not exported), 6 no symbol**; the not-exported ones are 286 definitions (core 141, alloc 34,
   std 111 keys), the night export's input (lists in the VM's scratch, the report's). Checks at the head: pack-compare-test,
   inline-test 15 of 15, rust-front essential and core-essential (their known summaries), reap 56 of 56, crops-score, records-check.
+
+## 2026-11-25 — Rust C6 L2's night export and its first fixes: L2 18 -> 380 equal, std 217 / 38 / 70 (queue 566, VM)
+
+The coordinator's third message for 566, on the same branch.
+
+- The night export of L2's 286 wanted definitions (core 141, alloc 34, std 111), as keys of lib-unit's exports (cache state,
+  DECISION 566-1 open: the lists are the VM's q566 scratch's `l2-wanted-*.txt`, `r3-added-*-keys.txt`), under the heavy lock,
+  three jobs: `lib-unit export core --add` (166 keys in 49 module files: 138 bodies, 59 equal to rustc's built MIR), alloc by
+  `lib-export --keys` (34 keys: 36 bodies, appended), std's whole export (495 bodies, 64 refused). 17 minutes once the lock came
+  (it waited 33 minutes in the queue). Then the inline-always callees the L2 bodies wanted (`lib-unit inline-keys`: core 30 more,
+  alloc 1; core's `--add` 29 bodies).
+- Fixes, one commit each: L2's callees' bodies (not their instance maps) given to the inline-always collector, a callee with only
+  region arguments no copy; mono's def-kind takes a `{closure#N}` path as a Closure before the interface's functions name it
+  (std's closures called by generic instances, `Option::map`'s: their symbols with the instantiating crate); AbortUnwindingCalls takes
+  an upstream function's ABI and foreignness from its interface fact (libc's `extern "C"` getcwd and readlink: their calls unwind to
+  unreachable, the next block merged as MergingSucc merges; core-essential's summary unchanged); lib-unit's core exports take
+  mem/mod.rs's interface (SizedTypeProperties' constants: Alignment::of's `<T as SizedTypeProperties>::ALIGNMENT` was "a qualified
+  path" without its type; it exports, equal to rustc's built MIR); `LIB_UNIT_DUMP` writes the L2 callees too.
+- DTORS (item 3): with Alignment::of, as_nonzero_usize, NonNull::without_provenance and Unique::from_non_null exported (a wanted
+  loop), its CTFE stops at alloc's ZERO_CAP: `UsizeNoHighBit::new_unchecked`, a macro-made function of core::num::niche_types
+  whose body the export does not hold. Not done.
+- L2's commonest remaining difference (about 20 callees): rustc keeps a block boundary (`call` then `br` to a `ret` block, the
+  never-reached cleanup blocks emitted `unreachable`) where we merge: a generic instance's MIR keeps the generic body's drop and
+  cleanup edges, which codegen at the instance treats as no-ops while MergingSucc still counts them. Studied, not changed.
+- Measures: std's default compare (round h: export, build, compare) **217 / 38 / 70**, from 211 / 44 / 70, no item back; L2
+  (rounds e, f, g, i): 18 -> 333 -> 380 equal of 481 callees.
+- Checks at the head: pack-compare-test, inline-test 15 of 15, rust-front essential and core-essential (their known summaries),
+  reap 56 of 56, crops-score, records-check 9 pairs: all pass. No record changed.
