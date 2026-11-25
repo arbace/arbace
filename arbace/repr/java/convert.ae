@@ -104,10 +104,30 @@
 (defn- annotate [form items]
   (if (seq items) (apply m+ form items) form))
 
+(defn- dotted-inner?
+  "Is class type `t` written as (.. OUTER INNER): an inner (non-static, non-local) member class's type
+  whose enclosing type has type arguments (unless its simple name is in scope and the enclosing type
+  is its own, unannotated), or whose own type annotations sit deeper than its enclosing type's
+  (Outer.@A Inner: the INNER_TYPE step of the annotation's path, JVMS 4.7.20.2; queue 563, t04723)."
+  [env t]
+  (let [outer (m/enclosing-type t)
+        c (m/tsym t)]
+    (boolean
+     (and (m/class-type? outer) (not (m/static? c)) (not (m/local-class? c))
+          (or (seq (type-ann-items env t false))
+              (and (m/allparams? outer)
+                   (not (and (identical? (get (:scope env) (m/simple-name c)) c)
+                             (m/own-type? outer)
+                             ;; an annotated outer is written (round 52, n-java-conv)
+                             (not (type-annotated? outer))))))))))
+
 (defn- type-form*
   [env t elem?]
   (let [tg (tag-name t)
-        anns (type-ann-items env t (and elem? (not (m/array? t))))]
+        dotted (and (m/class-type? t) (dotted-inner? env t))
+        ;; a declaration's TYPE_USE annotations go on the outermost type of (.. OUTER INNER) (javac's
+        ;; TypeAnnotations), not on the inner one: its own are all written
+        anns (type-ann-items env t (and elem? (not (m/array? t)) (not dotted)))]
     (annotate
      (cond
        (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (m/prim-sym t)
@@ -144,12 +164,7 @@
              outer (m/enclosing-type t)
              base (class-ref env c)
              self (if args (apply list base (map #(type-form* env % false) args)) base)]
-         (if (and (m/class-type? outer) (m/allparams? outer)
-                  (not (m/static? c)) (not (m/local-class? c))
-                  (not (and (identical? (get (:scope env) (m/simple-name c)) c)
-                            (m/own-type? outer)
-                            ;; an annotated outer is written (round 52, n-java-conv)
-                            (not (type-annotated? outer)))))
+         (if dotted
            (list '.. (type-form* env outer false)
                  (annotate (if args
                              (apply list (symbol (m/simple-name c)) (map #(type-form* env % false) args))
@@ -157,13 +172,8 @@
                            anns))
            self))
        :else (do (note! :warn/odd-type) (class-ref env (.tsym (object-type)))))
-     ;; the annotations of an inner type of a generic outer go on its element of (.. ...)
-     (when-not (and (m/class-type? t) (m/class-type? (m/enclosing-type t))
-                    (m/allparams? (m/enclosing-type t))
-                    (not (m/static? (m/tsym t))) (not (m/local-class? (m/tsym t)))
-                    (not (and (identical? (get (:scope env) (m/simple-name (m/tsym t))) (m/tsym t))
-                              (m/own-type? (m/enclosing-type t))
-                              (not (type-annotated? (m/enclosing-type t))))))
+     ;; the annotations of an inner type written as (.. ...) go on its element
+     (when-not dotted
        anns))))
 
 (defn type-form
