@@ -128,8 +128,8 @@ suite_needs_build() {
 #   @LIB/PATH>NAME    the same, the module named NAME (dune's copy rules, alcotest's test_iarray.54.ml as test_iarray.ml)
 #   @LIB!PATH         LIB's main module
 #   @LIB=             the alias module Lib__, before LIB's modules
-#   @LIB+             (queue 547) a library without a main module of its own (ocaml_intrinsics_kernel): dune's alias module, which
-#                     is then the library's main module Lib (lib.ml-gen), the same aliases as Lib__, after LIB's modules
+#   @LIB+             (queue 547) a library without a main module of its own (ocaml_intrinsics_kernel, re_private): dune's alias
+#                     module, which is then the library's main module Lib (lib.ml-gen), before LIB's modules, each of which opens it
 suite_cap() { echo "$(echo "${1:0:1}" | tr a-z A-Z)${1:1}"; }
 suite_unit_file() { # UNIT -> the staged file's name
   local u=$1 p n ext
@@ -152,9 +152,13 @@ suite_wrap_one() { # BASE UNIT DIR [SRC]: a wrapped unit staged with its open (S
   local base=$1 u=$2 d=$3 lib src
   [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || return 1
   lib=${BASH_REMATCH[1]}; src=${4:-$base/$(suite_wrap_path "$u")}
+  # the alias module the unit opens: Lib__, or (queue 547) a library without a main module's Lib (@LIB+ among the caller's units:
+  # dune's lib.ml-gen, compiled first and opened by every module, so Out_type.rewrite_double_underscore_paths names an exception
+  # of Lib__M as Lib.M.E)
+  local al; al="$(suite_cap "$lib")__"; case " ${units:-} " in *" @$lib+ "*) al=$(suite_cap "$lib") ;; esac
   # the open on the first line, unless that line is a line directive (a build's `# 1 "FILE"`), which then renumbers what follows it
-  if [ "$(head -c1 "$src")" = '#' ]; then { printf 'open! %s__\n' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"
-  else { printf 'open! %s__ ' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"; fi
+  if [ "$(head -c1 "$src")" = '#' ]; then { printf 'open! %s\n' "$al"; cat "$src"; } > "$d/$(suite_unit_file "$u")"
+  else { printf 'open! %s ' "$al"; cat "$src"; } > "$d/$(suite_unit_file "$u")"; fi
 }
 suite_alias() { # LIB UNITS: the alias module's text
   local lib=$1 u f seen=" "
@@ -321,7 +325,11 @@ suite_oi_one() {
   fi
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
-  (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
+  # (queue 547) @cwd=DIR in ENV: the program run in DIR (dune's inline-test runner runs in the library's directory, where ppx_expect
+  # reads each test's source and writes its .corrected file)
+  local rd=$d
+  for kv in $env; do case $kv in @cwd=*) rd=${kv#@cwd=} ;; esac; done
+  (cd "$rd" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
   t1=$(date +%s.%N); times > "$d/cpu1"
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
   local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")

@@ -131,12 +131,17 @@ cmd_ppx_jst_config() {
 }
 
 # ppx_expect_judge DIR RESULT: re's expect tests judged by their own [%expect] blocks, as dune's runtest does: the runner's status 0
-# and no .corrected file under the source tree DIR (ppx_expect writes FILE.corrected beside a test whose output differs); "pass" or
-# the reason on stdout
+# and every FILE.corrected under the source tree DIR equal to FILE (under -diff-cmd - ppx_expect writes each test file's corrected
+# text, the file itself with its blocks' actual output, and dune diffs the two); "pass (N files)" or the reason on stdout
 ppx_expect_judge() {
-  local tree=$1 res=$2 st c
-  st=$(cut -f2 <<< "$res"); c=$(cd "$tree" && find . -name '*.corrected' | LC_ALL=C sort | tr '\n' ' ')
-  if [ "$st" = 0 ] && [ -z "$c" ]; then echo pass; else echo "fail: status $st, corrected: ${c:-none}"; fi
+  local tree=$1 res=$2 st c n=0 bad=""
+  st=$(cut -f2 <<< "$res")
+  while read -r c; do
+    [ -n "$c" ] || continue
+    n=$((n + 1)); cmp -s "$tree/$c" "$tree/${c%.corrected}" || bad="$bad ${c#./}"
+  done <<< "$(cd "$tree" && find . -name '*.corrected' | LC_ALL=C sort)"
+  if [ "$st" = 0 ] && [ "$n" -gt 0 ] && [ -z "$bad" ]; then echo "pass ($n files' corrected text equal to the file)"
+  else echo "fail: status $st, $n corrected files, differing:${bad:- none}"; fi
 }
 
 # cmd_ppx_expect (queue 547, S3): re's lib_test/expect on oi (the program expect_tests of ppx-programs.tsv: its 27 files rewritten by
@@ -160,10 +165,10 @@ cmd_ppx_expect() {
     || die "ppx expect: the control's rewrite failed: $(head -c 300 "$cpp/control.log")"
   local cres; cres=$(OI_PPX_PP=$cpp ppx_run_tree expect_tests "$ctree"); echo "$cres"
   cv=$(ppx_expect_judge "$ctree" "$cres")
-  if [ "$cv" = pass ]; then echo "control (test_re.ml's first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
+  if [ "${cv%% *}" = pass ]; then echo "control (test_re.ml's first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
   else echo "control (test_re.ml's first [%expect] altered): $cv, as a control must"; fi
   echo "oi: ppx expect: re/expect $v"
-  [ "$v" = pass ]
+  [ "${v%% *}" = pass ]
 }
 
 # ppx_run_tree ID TREE: ppx_run with the row's source tree (@PPX@/work/re in its ARGS) replaced by TREE
