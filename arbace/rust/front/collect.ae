@@ -892,6 +892,10 @@
           (String. cps (int a) (int (- b a))))))))
 
 (def ^:private ^:dynamic *const-depth* 0)
+;; queue 572 (C6 L3): a backtrace crate's constants with the bit operators (`<<`, `>>`, `&`, `|`, `^`: miniz_oxide's
+;; `FAST_LOOKUP_SIZE: u16 = 1 << FAST_LOOKUP_BITS`) and a cast array length (`[i16; FAST_LOOKUP_SIZE as usize]`) evaluated, as
+;; rustc's const evaluation gives them; core-check binds it for the backtrace crates (off for core, alloc and std: 561-2 (a))
+(def ^:dynamic *int-bitops* false)
 
 (defn- eval-int-expr
   "RF12: an integer constant expression of literals (`32 - 1` from a macro's `$n - 1`), as const evaluation gives it; nil
@@ -932,7 +936,13 @@
     :binary (let [a (eval-int-expr (:lhs x)) b (eval-int-expr (:rhs x))]
               (when (and a b)
                 (case (:op x) "+" (+ a b) "-" (when (>= a b) (- a b)) "*" (* a b)
-                      "/" (when (pos? b) (quot a b)) "%" (when (pos? b) (rem a b)) nil)))
+                      "/" (when (pos? b) (quot a b)) "%" (when (pos? b) (rem a b))
+                      "<<" (when (and *int-bitops* (<= 0 b 127)) (bigint (.shiftLeft (biginteger a) (int b))))
+                      ">>" (when (and *int-bitops* (<= 0 b 127)) (bigint (.shiftRight (biginteger a) (int b))))
+                      "&" (when *int-bitops* (bigint (.and (biginteger a) (biginteger b))))
+                      "|" (when *int-bitops* (bigint (.or (biginteger a) (biginteger b))))
+                      "^" (when *int-bitops* (bigint (.xor (biginteger a) (biginteger b))))
+                      nil)))
     (:paren :group) (some-> (:expr x) eval-int-expr)
     ;; C4 (2026-11-22): num_buffer's `$signed::MAX.ilog10() as usize + 2` (the helper's Buf `[MaybeUninit<u8>; 20]` for isize):
     ;; a cast to an integer type of a non-negative value, `.ilog10()` of a positive one, and an integer type's MAX and MIN
@@ -1227,6 +1237,9 @@
     :slice [:slice (lower-ty (:ty t))]
     ;; round 52: a length naming a constant of the crate evaluated (type_of's normalized length: btree's `CAPACITY`, 11)
     :array [:array (lower-ty (:ty t)) (let [c (or (when (and (map? (:len t)) (= :path (:kind (:len t))) (not (scope-param (:ident (peek (:segs (:path (:len t))))))))
+                                                    (some->> (eval-int-expr (:len t)) str (vector :cval)))
+                                                  ;; queue 572: a backtrace crate's cast length (*int-bitops*)
+                                                  (when (and *int-bitops* (map? (:len t)) (= :cast (:kind (:len t))))
                                                     (some->> (eval-int-expr (:len t)) str (vector :cval)))
                                                   (lower-const-arg (:len t)))]
                                         ;; an unevaluated length in another file: its text there
