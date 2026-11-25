@@ -1990,7 +1990,7 @@
       ;; (a concept-id is no atom: normalized into its concept's, checked by its own satisfaction)
       (= "ConceptSpecializationExpr" k) nil
       :else
-      (let [x (try (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} n)) (catch arbace.lang.ExceptionInfo _ nil))
+      (let [x (try (binding [*cutoff* (long (or (:cx-cutoff scope) Long/MAX_VALUE))] (analyze {:scope scope} n)) (catch arbace.lang.ExceptionInfo _ nil))
             t (some-> x :ty abi/non-ref abi/unq)]
         (when (and t (not (dt-dependent? t)) (not= :bool (abi/bn t))
                    (or (abi/class? t) (and (= :call (:op x)) (or (abi/arith? t) (abi/ptr? t)))
@@ -2047,7 +2047,7 @@
                                  ;; (not for a recursion found, nor deep in nested satisfactions: cpp2a/concepts-recursive-sat1.C)
                                  (not= :depth (:codegen/refused (ex-data e))) (not (re-find #"depends on itself" (str (ex-message e))))
                                  (<= (long *constraint-depth*) 1))
-                      (try (let [x (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} rc))]
+                      (try (let [x (binding [*cutoff* (long (or (:cx-cutoff scope) Long/MAX_VALUE))] (analyze {:scope scope} rc))]
                              (binding [*ce-manifest* true] (ce-eval (convert-scalar (rv x) abi/bool* false)))
                              nil)
                            (catch arbace.lang.ExceptionInfo y (when (:cx/sure (ex-data y)) y))))]
@@ -4439,9 +4439,16 @@
                                {:codegen/refused :conversion})
                       n)))))
 
+(def ^:dynamic *cx-concept-cutoff*
+  "Queue 588 (the checker): the cutoff a main file's concept's satisfaction under way binds its lookups to (template.ae's
+  concept-satisfied?), or nil."
+  nil)
+
 (defn const-int [scope n]
   (tick!)
-  (let [e (binding [*cutoff* Long/MAX_VALUE] (rv (analyze {:scope scope} n)))
+  ;; (queue 588: a main file's concept's constraint at its definition's cutoff, the scope's :cx-cutoff, template.ae's
+  ;; concept-satisfied?)
+  (let [e (binding [*cutoff* (long (or (:cx-cutoff scope) Long/MAX_VALUE))] (rv (analyze {:scope scope} n)))
         ;; (queue 518: a variable's braced initializer of one element, the scalar it initializes, [dcl.init.list]/3.9:
         ;; integral_constant's `static constexpr T value {Value};` read by var-const-int in a constraint, cpp2a/concepts-pr67148.C's,
         ;; had been "not a constant: the expression :init-list")
@@ -10503,7 +10510,13 @@
                  cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?))))) (adl-fns args (or (:name callee) (:name (first ms))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
-                 _ (when (and (empty? cands) (empty? (:tmpls callee)) (empty? nontmpl)) (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
+                 ;; (queue 588, the checker: a template argument-dependent lookup found, dropped by its deduction or constraints,
+                 ;; makes the call's "no viable function", judged by resolve-overload with those drops, not an unknown name:
+                 ;; cpp2a/concepts-recursive-sat2.C's foo(t) in Fooable's requirement once the concept's definition binds
+                 ;; its lookup, foo found by ADL alone)
+                 _ (when (and (empty? cands) (empty? (:tmpls callee)) (empty? nontmpl)
+                              (not (and (checking?) (pos? (+ (long (or (:sure-drops (meta tcands)) 0)) (long (or (:unsure-drops (meta tcands)) 0)))))))
+                     (adl-not-found! ctx callee args) (undeclared-call! ctx callee args)
                       ;; (queue 492, the checker: a literal operator's name no lookup finds, called or a user-defined
                       ;; literal's, [over.literal], [lex.ext]/2-8, its arguments of no class type (no ADL candidate either);
                       ;; GCC's "'operator\"\"_X' was not declared in this scope", "unable to find ... literal operator")
@@ -10516,6 +10529,13 @@
                       ;; too, of a name no declaration of the unit has, so neither unqualified lookup nor argument-dependent
                       ;; lookup finds a candidate; with explicit template arguments ([temp.names]/3, P0846) too)
                       (when (and (checking?) (not (:qualified callee)) (not (:obj callee)) (cx-declared-nowhere? (:name callee)))
+                        (fail :undecl "use of undeclared identifier '" (:name callee) "'"))
+                      ;; (queue 588, the checker: in a main file's concept's constraint, at its definition's cutoff, an
+                      ;; unqualified call whose name no declaration before the concept has and argument-dependent lookup finds
+                      ;; nothing for: the substitution surely fails, [temp.dep.candidate]/1; cpp2a/concepts-recursive-sat3.C's
+                      ;; foo(t) for an int)
+                      (when (and (checking?) *cx-concept-cutoff* (= (long *cutoff*) (long *cx-concept-cutoff*))
+                                 (not (:qualified callee)) (not (:obj callee)) (:name callee))
                         (fail :undecl "use of undeclared identifier '" (:name callee) "'"))
                       (fail :name "unknown name " (:name callee)))
                  ;; (a function found twice, through a using-declaration and its class: one candidate; G4)
