@@ -19515,6 +19515,7 @@ The coordinator's third message for 566, on the same branch.
   - 566-1 (b), the keys kept as cache state, was the user's to reject.
   - Committing whole native-*-items.edn files: about 12 MB of exports that depend on the run, against the keys they are made from.
 - bin/reap: 56 of 56, 0 problems, before and after.
+
 ## 2026-11-22: java-design-1122, checkpoint: Java's by-design classes built, the build queued (the burst's Java design stream)
 
 Branch `java-design-1122` from mac/next `99b2c942a`, next `7aa328e67` merged (queue 517's three rounds). Scope: test/java/divergences.edn's
