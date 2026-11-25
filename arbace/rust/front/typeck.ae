@@ -934,6 +934,10 @@
 ;; fmt::Write imported: Formatter's inherent write_str by value at step 0, not Write's); bound true by core-check for the
 ;; backtrace crates, else each step's own impls as before
 (def ^:dynamic *steps-inherent* false)
+(def ^:dynamic *index-steps*
+  "queue 572 (C6 L3): lookup_indexing's steps for a backtrace crate (core-check binds it): the builtin index of an array or
+  slice at any autoderef step (through Box), in order with the steps' Index impls"
+  false)
 
 (defn- method-candidate
   "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
@@ -2213,7 +2217,25 @@
           :index (let [bt (check-expr (:expr e) nil)
                        it (check-expr (:index e) nil)
                        steps (autoderef-steps bt)
-                       hit (first (keep-indexed (fn [i t] (when (#{:array :slice} (first t)) [i t])) steps))]
+                       hit (first (keep-indexed (fn [i t] (when (#{:array :slice} (first t)) [i t])) steps))
+                       ;; queue 572 (*index-steps*, a backtrace crate's): lookup_indexing's try_index_step over every autoderef
+                       ;; step in order (Box's too: addr2line's `self.sequences[i]` on a Box<[LineSequence]> indexes the slice
+                       ;; builtin), the builtin index of an array or slice before the step's Index impl, the first step that
+                       ;; has either
+                       usize-ok? (let [s (shallow it)] (or (= [:uint "usize"] s) (and (tvar? s) (= :int (second s)))))
+                       hit (if (and *index-steps* usize-ok?)
+                             (let [full (autoderef bt) tr (c/lang "index")]
+                               (some (fn [[i t]] (cond (#{:array :slice} (first t)) [:builtin i t full]
+                                                       (impls-for t tr [it]) [:overloaded]
+                                                       :else nil))
+                                     (map-indexed vector full)))
+                             hit)
+                       hit (cond (not *index-steps*) hit
+                                 (= :builtin (first hit)) (let [[_ i t full] hit] (when (pos? i) (adjust! (:expr e) (vec (for [s (rest (take (inc i) full))] ["Deref" s])))) [:done t])
+                                 (= :overloaded (first hit)) nil
+                                 :else hit)]
+                   (if (= :done (first hit))
+                     (do (unify it [:uint "usize"]) (second (second hit)))
                    (if (and hit (let [s (shallow it)] (or (= [:uint "usize"] s) (and (tvar? s) (= :int (second s))))))
                      (do (unify it [:uint "usize"])
                          (let [[i t] hit]
@@ -2228,7 +2250,7 @@
                          (do (adjust! (:expr e) (vec (concat (for [x (rest (take (inc i) steps))] ["Deref" x])
                                                              [["Borrow" [:ref [:re-erased] (boolean *mutable-place*) st]]])))
                              (shallow [:proj (some (fn [[n k p]] (when (= n "Output") p)) (:items (get (:traits c/*si*) tr))) [st it]]))
-                         [:unknown]))))
+                         [:unknown])))))
           ;; check_expr_tuple: an element with an expected type is coerced to it (and has its type)
           :tup (let [ex (some-> expected shallow)
                      exs (when (= :tuple (first ex)) (second ex))]

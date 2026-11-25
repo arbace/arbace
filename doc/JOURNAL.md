@@ -22714,3 +22714,82 @@ rerun under the one-slot lock.
   --judge DIR --record` of this run; 13 test_capi names queue 559 had commented out (write-ahead of the stand-in's record) now named
   in :testcapi-behaviour, since this record reaches them. Java eval 3,148 / 23 / 110, AOT 3,157 / 21 / 115; Python eval 42,743 / 278
   / 1,004 (4,426 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0.
+## 2026-11-25 — Rust C6: L1's rest and L2, std 217 / 38 / 70 -> 221 / 38 / 66, L2 380 -> 391 equal (queue 571, VM)
+
+Branch `571-rust-c6-l1-l2` from 566's 6ffc51528: 565-rust-c3-finish 1119a459a merged first (merge commit, the journal keeping both
+lines' entries), then origin/next 3a67d8dc2 (next's side everywhere; the journal next's, which held every line of ours). The work
+dir: q561's worktree and its `.tmp/rust-front` were gone, so the work dir came from the queue asset `542-c6-caches.tar.xz`
+(std/alloc/core interfaces, the dependencies' facts, core's lib), its absolute paths rewritten to this worktree. 566's fresh
+lib-unit cache was copied, not changed. Baseline (a0, at the 565 merge): std 217 / 38 / 70, L2 380 / 66 / 32 / 3 of 481, every
+verdict 566's.
+
+- The 9 keys 566's logging found: `lib-unit inline-keys CRATE --record` (core +5, std +4), core `export --add`, std's whole export
+  on the merged code (499 bodies, 64 refused, the same rows as 566's but the 4 new). ptr::read_unaligned and count_ones made L2's
+  DwarfReader::read<u8> and round_up equal; MIN_ALIGN let sys::alloc::unix::alloc evaluate (equal). A second round over the next
+  builds' wanted lines: core's run_utf8_validation and the slice iterators of libc's pollfd, std's SEPARATORS (+3, +1).
+- build_run (lib-unit-run): L2's callees take mono's vtables (`vts`) and deferred statics as the items and inline callees do: six
+  `cast PointerCoercion(Unsize, Implicit)` refusals (assert_failed<i32>, <i16>, Result::expect x2: equal; Once::call_once and
+  trace_unsynchronized: differ).
+- mono's vtable-instance: a function item or pointer as an Fn object (`&imp::canonicalize as &dyn Fn(&CStr) -> ..`, sys::fs's
+  with_native_path): call_once its VTableShim, call_mut and call its FnPtrShims (resolve_for_vtable; the IR's vtable
+  `_RNS..9call_once6vtable`, `_RNvY..8call_mut`, `_RNvY..4call`): canonicalize, metadata and read_link equal.
+- build's mirror: a labeled block's breaks target the block's own region (rustc_resolve's `with_resolved_label(label, block.id)`;
+  ast_block's in_breakable_scope is the block's scope), not the expression's: every labeled block was refused ("a break target");
+  sanitize_standard_fds (`'poll: { .. }`) equal.
+- Tried and reverted: repr(packed) in univariant (each field's alignment capped at the pack) with the sources' packed taken for a
+  known std struct (ptr::Unaligned): no verdict moved (DwarfReader::read<T> for T other than u8 still reads Unaligned<T> as a
+  scalar); left for a study of where its layout comes from.
+- Final (m4): std **221 / 38 / 66**, L2 **391 / 67 / 25 / 3 of 486** (sanitize's five callees added), no verdict back. Refusals
+  by reason: items 38 not exported (backtrace_rs's 25 among them: 572's line), 13 no layout (12 of backtrace types, error_string's `[i8; TMPBUF_SZ]`), 10 no callee, 2
+  MAIN_SEPARATOR_STR unevaluated, 1 promoted unevaluated, 1 generic, 1 scalar operation; L2 9 not exported (core::io::error's
+  three, which core's export refuses), 7 no layout, 4 unevaluated (WRITE_ALL_EOF x2, MAIN_SEPARATOR_STR, Components::next's
+  inline const), 3 no symbol, 2 no callee, 1 scalar operation, 1 Unsize cast, 1 inline-always callee.
+- L2's commonest difference stays rustc's MergingSucc over a generic body's unwind edges (cvt<T>, Ord::min/max: a call whose
+  generic cleanup is a drop of T keeps its block boundary in rustc's instance; ours merges): not changed.
+- Alternatives considered: the core export afresh on the merged code (16 minutes; std's export showed the merge moved no row, and
+  the build reads core's bodies as data); a fresh `.tmp/rust-front` (about an hour of passes) instead of 542's asset.
+- Not recorded: lib-unit's numbers are no records; the VM's rows would be -linux-arm64.
+## 2026-11-25 — C6 L3: the backtrace crates' compare continued, miniz_oxide's layouts first (queue 572, VM)
+
+Continues queue 561 (branch 561-rust-backtrace-crates at 43f3cb337), after the user's 561-1 (a) (mono.ae's closure-kind
+fallback and the upstream `#[inline]` symbols are the main session's, rust-l1; miniz_oxide's layouts here) and 561-2 (a) (the
+gated fixes ungated later, one at a time with std's lib-unit compare). Merged origin/next 3a67d8dc2 (565, 566, 561, 570, 548,
+491) on the way, without conflict. Every change below is gated on a backtrace crate (adler2, memchr, rustc_demangle,
+miniz_oxide, object, gimli, addr2line): a dynamic var bound by core-check's run-module, lib-unit's compare or lib-unit's build
+for them, so core's, alloc's and std's paths are unchanged by construction.
+
+The caches: 561's worktree and its `.tmp/rust-front` were gone; core's, alloc's and std's interfaces came from q542's saved
+copy (paths rewritten), core's index from 561's `orig/`, core's, alloc's and std's lib-unit exports read from 566's
+(`.tmp/q566/fresh`, the user's "read 566's lib-unit cache read-only"), core's a copy with two keys added (`export core --add`
+over convert/num.rs and num/mod.rs: `convert-num-{impl#68}-from`, `num-{impl#6}-saturating_sub`). The seven interfaces were
+made again (`DEPS_BACKTRACE=1 bin/rust-front std-iface --deps`), as each interface change needed.
+
+What was wrong and the fix (rustc's rule each time):
+- collect: `FAST_LOOKUP_SIZE: u16 = 1 << FAST_LOOKUP_BITS` had no value (eval-int-expr knew + - * / % only), so HuffmanTable's
+  `[i16; FAST_LOOKUP_SIZE as usize]` was not in the interface: the bit operators and a cast length or repeat count evaluated
+  (`*int-bitops*`). miniz_oxide 10 -> 11 ADTs.
+- resolve: a module file built alone got the prelude's injected `extern crate core;` as a module item, shadowing inflate/core.rs'
+  `use super::*` module `core`, so `core::State` was (err): the injected item stays in the extern prelude only. 11 -> 12 ADTs
+  (DecompressorOxide). Then miniz_oxide's own `#[inline(always)]` callees (lib-unit inline-keys, committed as
+  test/rust/front/lib-unit-miniz_oxide-keys.txt): 0/0/8 -> 4/4/0.
+- codegen: a constant index restricts the place's alignment for its offset (place.rs' project_index); a deref of a memory local's
+  fat pointer loads both halves (codegen_consume); [x; N]'s loop is rustc 1.99's pointer loop (write_operand_repeatedly).
+- build: an overloaded index's caller location is its brackets span (the parser's third field of ExprKind::Index, lower's
+  :brackets), not the base's end. miniz_oxide 8/0/0.
+- core-check: a glob re-export took a module's private `use` imports (gimli's `pub use self::endian_slice::*` re-exported
+  `use core::ops::Range`, so addr2line's `gimli::Range` was core's Range): private imports now reach only the importing module's
+  descendants. gimli 247 -> 250 ADTs, addr2line 30 -> 34.
+- typeck: lookup_indexing's builtin index at any autoderef step in order with the steps' Index impls (Box<[T]>'s slice).
+- build-run: a drop of a reference's pointee (`*path = ..`'s replace) takes its drop glue (codegen branched over it).
+- mono: llvm-type-of nests a scalar-pair struct ADT's fields and a pattern type's base (uncached_llvm_type), Box<[T]>'s gep type.
+- gimli's DW_AT_null and DW_FORM_null by their exported constant bodies (test/rust/front/lib-unit-gimli-keys.txt).
+
+Rows (lib-unit compare against std's IR at the pin, equal/differ/refused), 561's -> now: adler2 2/0/0 -> 2/0/0, rustc_demangle
+35/7/3 -> 37/5/3, miniz_oxide 0/0/8 -> 8/0/0, object 1/1/0 -> 2/0/0, gimli 6/3/2 -> 8/2/1, addr2line 5/3/0 -> 8/0/0: 49 -> 65 of
+74 equal. Left: two upstream-instance symbols (gimli's Wrapping add_assign, assert_failed::<u64, u64>: the main session's,
+561-1 (a)), gimli's const pattern (`constants::DW_AT_location` in allow_section_offset), rustc_demangle's var_debug_info allocas
+(passes.ae), its legacy starts_with call, its two `impl Iterator` refusals.
+
+Alternatives considered: ungating each rule now (561-2 (a) says later, each with std's lib-unit compare); a crate-wide
+`*backtrace*` var in place of one var per rule (kept per rule, so each can be ungated alone); for the private-import rule,
+dropping private uses from the index (they are needed for the module's own resolution).
