@@ -76,10 +76,14 @@ suite_stage() {
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
       @*+) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
+      # (queue 548) a wrapped library's unit a rule of its directory makes and its `(preprocess (pps ...))` rewrites (ppx_custom_printf's
+      # src/format_lifter.ml, gen.ml's): the text its ppx driver wrote on oi from the rule's output (bin/oi ppx pp, OI_PPX_PP/PKG/REL)
+      @*) if suite_ppx_made "$base" "$(suite_wrap_path "$u")"; then suite_wrap_one "$base" "$u" "$d" "$SUITE_PPX_MADE"
+          elif suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
           # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
-          # DIR by the native ocamllex, then staged as the library's module
-          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && [ -f "$base/$(suite_wrap_path "$u" | sed 's/\.ml$//').mll" ]; then
+          # DIR by the native ocamllex, then staged as the library's module; (queue 548) or its ocamlyacc stanza, the .ml and the .mli
+          # (sexplib's src/parser.ml), by the native ocamlyacc
+          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && { [ -f "$base/$(suite_wrap_path "$u" | sed -E 's/\.mli?$//').mll" ] || [ -f "$base/$(suite_wrap_path "$u" | sed -E 's/\.mli?$//').mly" ]; }; then
             local wg=$d.wgen; mkdir -p "$wg"; suite_gen "$base/$(suite_wrap_path "$u")" "$wg"
             [ -f "$wg/$(basename "$(suite_wrap_path "$u")")" ] && suite_wrap_one "$base" "$u" "$d" "$wg/$(basename "$(suite_wrap_path "$u")")"
           else suite_wrap_one "$base" "$u" "$d"; fi ;;
@@ -107,6 +111,19 @@ suite_stage() {
     fi
   fi
   rm -rf "$d.wgen"
+}
+
+# suite_ppx_made BASE PATH (queue 548): PATH (relative to BASE, an opam package's directory) is no file of the package, a rule of its
+# directory's dune file names it among its targets, the stanza preprocesses by `(pps ...)`, and OI_PPX_PP/PKG/REL holds the driver's
+# text (PKG/REL its path under the opam set); SUITE_PPX_MADE that text's file
+suite_ppx_made() {
+  local f=$1/$2 r dn
+  [ -n "${OI_PPX_PP:-}" ] && [ ! -f "$f" ] || return 1
+  dn=$(dirname "$f")/dune; [ -f "$dn" ] || return 1
+  r=$(realpath -m "$f"); r=${r#"$(realpath -m "$OPAM")"/}
+  [ -f "$OI_PPX_PP/$r" ] || return 1
+  tr '\n' ' ' < "$dn" | grep -q "(preprocess *(pps" && tr '\n' ' ' < "$dn" | grep -q "(targets *$(basename "$f"))" || return 1
+  SUITE_PPX_MADE=$OI_PPX_PP/$r
 }
 
 # suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,

@@ -16,7 +16,10 @@
 #                      texts kept in .tmp/oi/ppx/pp/PKG/FILE (OI_PPX_PP), which the staging gives a unit its dune file preprocesses
 #                      by `(pps ...)`
 #   bin/oi ppx jst-config  (queue 547) jst-config's config.h for oi's C target (discover.ml ported), .tmp/oi/ppx/jst-config
-#   bin/oi ppx expect  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its negative control
+#   bin/oi ppx lifter  (queue 548) ppx_custom_printf's format_lifter.ml as its gen.ml writes it (ported), .tmp/oi/ppx/lifter; ppx pp
+#                      makes it first
+#   bin/oi ppx expect [re|sexplib0...]  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its
+#                      negative control; (queue 548) sexplib0's test library likewise, rewritten by its pps (ppx_jane's rewriters)
 
 PPX=$OI_DIR/ppx
 PPX_ROWS=$root/test/ocaml/ppx-programs.tsv
@@ -54,9 +57,15 @@ ppx_prepare() {
 # test/ocaml/ppx-pp.tsv (DRIVER PKG LIB ARGS FILES), those of the DRIVERs named
 cmd_ppx_pp() {
   local only=" $* " drv pkg lib pargs files f st n=0 fail=0 last=""
+  cmd_ppx_lifter
   while IFS=$'\t' read -r drv pkg lib pargs files; do
     case $drv in '#'*|'') continue ;; esac
     [ "$only" = "  " ] || case $only in *" $drv "*) ;; *) continue ;; esac
+    # (queue 548) under OI_PPX_PP_MISSING a row whose texts are all written needs no driver: it is typed only for a row with one missing
+    if [ -n "${OI_PPX_PP_MISSING:-}" ]; then
+      local miss=0; for f in $files; do [ -f "$OI_PPX_PP/$pkg/$f" ] || miss=1; done
+      [ $miss = 1 ] || { for f in $files; do echo "kept $pkg/$f ($drv)"; done; continue; }
+    fi
     [ "$drv" = "$last" ] || { ppx_prepare "$drv"; last=$drv; }
     [ "$pargs" = - ] && pargs=""; pargs=${pargs//@PPX@/$PPX}
     # the driver's directory: the package's files at their paths (dune's _build/default), with the rule-made files the row names
@@ -65,17 +74,29 @@ cmd_ppx_pp() {
     for a in $pargs; do case $a in @with=*) a=${a#@with=}; cp "${a#*=}" "$w/${a%%=*}" || die "ppx pp: $drv: no ${a#*=}" ;; *) ra="$ra $a" ;; esac; done
     for f in $files; do
       local out=$OI_PPX_PP/$pkg/$f k=--impl; case $f in *.mli) k=--intf ;; esac
+      # (queue 548: a text may be empty, the driver's for a file without an item, ppx_assert.mli) OI_PPX_PP_MISSING=1: a text already written is kept (the rows added since a whole run)
+      if [ -n "${OI_PPX_PP_MISSING:-}" ] && [ -f "$out" ]; then echo "kept $pkg/$f ($drv)"; continue; fi
       mkdir -p "$(dirname "$out")"; rm -f "$out" "$out.log"
       st=0
       (cd "$w" && run_redirected "$PD_ENV" "$out.log" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $PD_TL $(cat "$PD/units.list") -- \
         --cookie "library-name=\"$lib\"" $ra -o "$out" $k "$f") || st=$?
       n=$((n + 1))
-      if [ "$st" = 0 ] && [ -s "$out" ]; then echo "pp $pkg/$f ($drv)"
+      if [ "$st" = 0 ] && [ -f "$out" ]; then echo "pp $pkg/$f ($drv)"
       else echo "FAIL $pkg/$f ($drv): status $st: $(head -c 400 "$out.log" | tr '\n' ' ')"; rm -f "$out"; fail=$((fail + 1)); fi
     done
   done < "$root/test/ocaml/ppx-pp.tsv"
   echo "oi: ppx pp: $n files, $fail failures ($OI_PPX_PP)"
   [ $fail = 0 ]
+}
+
+# cmd_ppx_lifter (queue 548): ppx_custom_printf's src/format_lifter.ml as its gen/gen.ml writes it (its rule `(run %{first_dep} -o
+# format_lifter.ml)`), ported by test/ocaml/ppx/format_lifter.ae over the tarball's camlinternalFormatBasics.mli (outside
+# arbace/repr/ocaml, whose sources are in native_key), in .tmp/oi/ppx/lifter/format_lifter.ml, which test/ocaml/ppx-pp.tsv's
+# traverse_driver row puts beside the library's files (@with=); the staging takes the driver's text (suite_stage's rule-made units)
+cmd_ppx_lifter() {
+  local d=$PPX/lifter exe; exe=$(arbace_exe); mkdir -p "$d"
+  ARBACE_PATH="$root" "$exe" "$root/test/ocaml/ppx/format_lifter.ae" "$TOP" "$OPAM/ppx_custom_printf/src/gen/gen.ml" > "$d/format_lifter.ml.new" || die "ppx lifter: gen.ml's port failed"
+  mv "$d/format_lifter.ml.new" "$d/format_lifter.ml"
 }
 
 # ppx_jst_config (queue 547): jst-config's config.h as its src/dune rule makes it, by discover/discover.ml (held to its SHA-256; dune-
@@ -144,37 +165,59 @@ ppx_expect_judge() {
   else echo "fail: status $st, $n corrected files, differing:${bad:- none}"; fi
 }
 
-# cmd_ppx_expect (queue 547, S3): re's lib_test/expect on oi (the program expect_tests of ppx-programs.tsv: its 27 files rewritten by
-# the ppx_expect driver on oi, bin/oi ppx pp expect_driver), judged by the tests' own expected output (ppx_expect_judge); its negative
-# control: the same program with one [%expect] of test_re.ml altered (a line added to its first block, the file rewritten again by
-# the driver into a pp tree of its own) must fail
+# ppx_expect_spec NAME (queue 548): the expect-test libraries bin/oi ppx expect runs, "PROGRAM PKG FILE DRIVER LABEL COOKIE..."
+# (PROGRAM a row of ppx-programs.tsv, PKG its package's directory, FILE the test file the control alters, DRIVER the ppx-pp.tsv driver
+# that rewrites it, COOKIE... the driver's cookies as dune passes them for the library, each NAME=VALUE)
+ppx_expect_spec() {
+  case $1 in
+    re) echo 'expect_tests re lib_test/expect/test_re.ml expect_driver re/expect library-name="re_tests" inline_tests="enabled"' ;;
+    sexplib0) echo 'sexplib0_tests sexplib0 test/sexplib0_test.ml sexplib0_test_driver sexplib0/sexplib0_test library-name="sexplib0_test"' ;;
+    *) die "ppx expect: no expect-test library $1 (re, sexplib0)" ;;
+  esac
+}
+
+# cmd_ppx_expect [NAME...] (queue 547, S3; queue 548: sexplib0's test library): each library's tests on oi (re's lib_test/expect, the
+# program expect_tests of ppx-programs.tsv: its 27 files rewritten by the ppx_expect driver on oi, bin/oi ppx pp expect_driver;
+# sexplib0's test/, sexplib0_tests, rewritten by sexplib0_test_driver: its dune file's pps), judged by the tests' own expected output
+# (ppx_expect_judge); its negative control: the same program with the first [%expect] of one test file altered (a line added to its
+# first block, the file rewritten again by the driver into a pp tree of its own) must fail; NAME... re and sexplib0 by default
 cmd_ppx_expect() {
-  local tree=$PPX/work/re res v
-  [ -s "$OI_PPX_PP/re/lib_test/expect/test_re.ml" ] || die "ppx expect: no rewritten tests (bin/oi ppx pp expect_driver)"
-  find "$tree" -name '*.corrected' -delete 2> /dev/null || true
-  res=$(ppx_run expect_tests); echo "$res"; v=$(ppx_expect_judge "$tree" "$res"); echo "expect_tests: $v"
+  local name st=0
+  for name in ${*:-re sexplib0}; do ppx_expect_one "$name" || st=1; done
+  return $st
+}
+
+ppx_expect_one() {
+  local prog pkg f drv label cookies tree res v c
+  read -r prog pkg f drv label cookies <<< "$(ppx_expect_spec "$1")"
+  tree=$PPX/work/$pkg
+  [ -s "$OI_PPX_PP/$pkg/$f" ] || die "ppx expect: no rewritten tests (bin/oi ppx pp $drv)"
+  # the package's tree as the driver read it (bin/oi ppx pp rewrites rows of other packages into their own trees)
+  rm -rf "$tree"; mkdir -p "$tree"; cp -a "$OPAM/$pkg/." "$tree/"
+  res=$(ppx_run "$prog"); echo "$res"; v=$(ppx_expect_judge "$tree" "$res"); echo "$prog: $v"
   # the control
   # (the driver typed first: suite_stage's loops are the caller's variables' too)
-  ppx_prepare expect_driver
-  local cpp=$PPX/pp-control ctree=$PPX/work/re-control f=lib_test/expect/test_re.ml cv
-  rm -rf "$cpp" "$ctree"; mkdir -p "$cpp"; cp -a "$OI_PPX_PP/." "$cpp/"; mkdir -p "$ctree"; cp -a "$OPAM/re/." "$ctree/"
-  awk '!done && /\[%expect \{\|/ { sub(/\[%expect \{\|/, "[%expect {| CONTROL"); done = 1 } { print }' "$OPAM/re/$f" > "$ctree/$f"
-  cmp -s "$OPAM/re/$f" "$ctree/$f" && die "ppx expect: the control's alteration changed nothing"
+  ppx_prepare "$drv"
+  local cpp=$PPX/pp-control ctree=$PPX/work/$pkg-control cv ca=()
+  for c in $cookies; do ca+=(--cookie "$c"); done
+  rm -rf "$cpp" "$ctree"; mkdir -p "$cpp"; cp -a "$OI_PPX_PP/." "$cpp/"; mkdir -p "$ctree"; cp -a "$OPAM/$pkg/." "$ctree/"
+  awk '!done && /\[%expect \{\|/ { sub(/\[%expect \{\|/, "[%expect {| CONTROL"); done = 1 } { print }' "$OPAM/$pkg/$f" > "$ctree/$f"
+  cmp -s "$OPAM/$pkg/$f" "$ctree/$f" && die "ppx expect: the control's alteration changed nothing"
   (cd "$ctree" && run_redirected "$PD_ENV" "$cpp/control.log" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $PD_TL $(cat "$PD/units.list") -- \
-    --cookie 'library-name="re_tests"' --cookie 'inline_tests="enabled"' -corrected-suffix .ppx-corrected -diff-cmd - -o "$cpp/re/$f" --impl "$f") \
+    "${ca[@]}" -corrected-suffix .ppx-corrected -diff-cmd - -o "$cpp/$pkg/$f" --impl "$f") \
     || die "ppx expect: the control's rewrite failed: $(head -c 300 "$cpp/control.log")"
-  local cres; cres=$(OI_PPX_PP=$cpp ppx_run_tree expect_tests "$ctree"); echo "$cres"
+  local cres; cres=$(OI_PPX_PP=$cpp ppx_run_tree "$prog" "$tree" "$ctree"); echo "$cres"
   cv=$(ppx_expect_judge "$ctree" "$cres")
-  if [ "${cv%% *}" = pass ]; then echo "control (test_re.ml's first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
-  else echo "control (test_re.ml's first [%expect] altered): $cv, as a control must"; fi
-  echo "oi: ppx expect: re/expect $v"
+  if [ "${cv%% *}" = pass ]; then echo "control ($(basename "$f")'s first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
+  else echo "control ($(basename "$f")'s first [%expect] altered): $cv, as a control must"; fi
+  echo "oi: ppx expect: $label $v"
   [ "${v%% *}" = pass ]
 }
 
-# ppx_run_tree ID TREE: ppx_run with the row's source tree (@PPX@/work/re in its ARGS) replaced by TREE
+# ppx_run_tree ID FROM TREE: ppx_run with the row's source tree (FROM, @PPX@/work/PKG, in its ARGS and ENV) replaced by TREE
 ppx_run_tree() {
   local row id flags incs args env base units
-  row=$(ppx_row "$1" | sed "s|$PPX/work/re|$2|g"); [ -n "$row" ] || die "ppx: no program $1 in $PPX_ROWS"
+  row=$(ppx_row "$1" | sed "s|$2|$3|g"); [ -n "$row" ] || die "ppx: no program $1 in $PPX_ROWS"
   IFS=$'\037' read -r id flags incs args env base units <<< "$(tr '\t' '\037' <<< "$row")"
   suite_oi_one "$id" "$flags" "$incs" "$args" "$env" "$base" "$units"
 }
@@ -194,8 +237,8 @@ ppx_env() {
   export OI_PPXLIB_GEN=$PPX/gen OI_OCAML_TOP=$TOP
   # (queue 547) the programs share hundreds of units: their typed outputs kept by chained key (suite_dump_native's OI_DUMP_CACHE)
   export OI_DUMP_CACHE=${OI_DUMP_CACHE:-$PPX/dump-cache} OI_PPX_PP=${OI_PPX_PP:-$PPX/pp}
-  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_alias
-  export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
+  export -f limited_cpu oi_wall oi_status oi_cpu_secs oi_limit_kill suite_oi_one suite_dump suite_dump_native suite_stage suite_gen suite_names suite_cap suite_unit_file suite_wrap_one suite_wrap_path suite_needs_build suite_ppx_made suite_alias
+  export S OI_DIR TESTS TESTLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root OPAM
 }
 
 # the generated units: each generator's run, the file it writes in its run directory kept in $PPX/gen
@@ -268,13 +311,14 @@ cmd_ppx_check() {
 }
 
 cmd_ppx() {
-  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|expect"
+  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|lifter|expect"
   shift
   case $verb in
     gen) cmd_ppx_gen "$@" ;;
     pp) ppx_env; cmd_ppx_pp "$@" ;;
     jst-config) ppx_env; cmd_ppx_jst_config ;;
-    expect) ppx_env; cmd_ppx_expect ;;
+    lifter) ppx_env; cmd_ppx_lifter; echo "oi: ppx lifter: $PPX/lifter/format_lifter.ml" ;;
+    expect) ppx_env; cmd_ppx_expect "$@" ;;
     run) local id=${1:-}; [ -n "$id" ] || die "usage: bin/oi ppx run ID"; shift; ppx_env "$@"; ppx_run "$id" ;;
     check) cmd_ppx_check "$@" ;;
     *) die "unknown ppx verb $verb" ;;
