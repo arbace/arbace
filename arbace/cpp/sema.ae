@@ -1964,7 +1964,7 @@
                 (or (some #(and (map? %) (= "NativeAttr" (:kind %)) (#{"unavailable" "__unavailable__"} (:_gnu %))) (:inner n))
                     (some #(#{"unavailable" "__unavailable__"} (:name %)) (:_gattrs n))))))
 
-(declare explicit-spec*)
+(declare explicit-spec* to-bool)
 
 (defn- explicit-spec
   "A function declaration's explicit-specifier ([dcl.fct.spec]/3): `explicit`, or `explicit(constant-expression)` true
@@ -1991,8 +1991,17 @@
                                           (= c \)) (if (= 1 (long @depth)) i (do (swap! depth dec) (recur (inc i))))
                                           :else (recur (inc i))))))
               x (when end (subs rest 1 end))
-              v (when x (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope x)))
-                             (catch arbace.lang.ExceptionInfo _ nil)))]
+              ;; (queue 584, the checker: the operand the native parser kept, a contextually converted constant expression of
+              ;; type bool, manifestly constant-evaluated, [dcl.fct.spec]/3, [expr.const]/20: analyzed and evaluated as such,
+              ;; a class's conversion to bool and __builtin_is_constant_evaluated() among it; cpp2a/explicit5.C's
+              ;; explicit(W()), is-constant-evaluated8.C)
+              v (when-let [xn (and x (checking?) (get *decltypes* (str "explicit:" (str/replace x #"\s+" ""))))]
+                  (try (let [a (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope :statics (atom [])} xn))
+                             r (ce-try (to-bool a) true)]
+                         (when (and (= :int (:op r)) (number? (:v r))) (:v r)))
+                       (catch Exception _ nil)))
+              v (or v (when x (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope x)))
+                                   (catch arbace.lang.ExceptionInfo _ nil))))]
           (if (number? v) [(not (zero? (double v))) true] [true false]))
         [true true])
       [false true])))
@@ -9083,7 +9092,17 @@
                       (and (checking?) (some-> (:fn-id ctx) fnd :cls) (not (:lambda ctx)))
                       (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)
                              :cx-using (cx-using-map es)))))
-      (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
+      (do
+        ;; (queue 584, the checker: [temp.res.general]/3, a qualified name whose qualifier names a template's type parameter is
+        ;; assumed to name no type outside a type-only context; an instantiation where it names one is ill-formed: GCC's
+        ;; "dependent-name 'T::x' is parsed as a non-type, but instantiation yields a type"; cpp2a/typename3.C's `T::x * i;`)
+        (when (and (checking?) (= :type (:e e)) (seq (:qualifier n)) (string? (first (:qualifier n)))
+                   (loop [sc (:scope ctx)]
+                     (cond (nil? sc) false
+                           (seq (.get ^java.util.HashMap (:names sc) (first (:qualifier n)))) (= :tparams (:kind sc))
+                           :else (recur (:parent sc)))))
+          (fail :typename "dependent-name '" (str/join "::" (:qualifier n)) "::" (:name (:referencedDecl n)) "' is parsed as a non-type, but instantiation yields a type"))
+        (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e))))))
 
 (def ^:private implicit-alloc-fns
   ;; [basic.stc.dynamic.general]/2: the global allocation and deallocation functions implicitly declared in each translation
