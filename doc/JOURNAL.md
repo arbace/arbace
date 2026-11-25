@@ -23290,3 +23290,29 @@ textual scope does not reach a crate-root macro_export); leaving the gate gated 
   passes, 0 lost, no new extra line; concepts-recursive-sat3.C and cpp2a/concepts-var-templ1a.C to own pass; recorded from it
   (`--judge --record`). bin/reap and crops-score recorded: unchanged (both rows passed by clang's record); reap, crops-score
   --judge --strict, records-check, markers-check: 0 problems.
+
+## 2026-11-25 — C++: GNU vector types in the checker and constexpr strings (cpp-vec, 577-1 (a))
+
+- The user's DECISION 577-1 (a) (two rows to the constant-evaluation group). Branch `cpp-vec-1125` from mac/next `864cffa55`, with
+  mac/next `d1bfc0b4e` and `5754ba518` merged before the regression run (`75369eedd`). Rules from the standard and GCC's manual and
+  messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-vec").
+- arbace/cpp/sema.ae, the checker: GNU vector types are no longer refused (the GCC manual's "Using Vector Instructions through
+  Built-in Functions"): resolved as the code generator's {:k :vec}, a local one list-initialized in the constant evaluator, an
+  element read by subscript (`:vec-elem`, an lvalue of the element type), an operator of two vectors or of a vector and a scalar
+  typed as the vector (`:vec-binop`, not evaluated), a constexpr variable of a vector type evaluated; a store into an element is
+  GCC's "not a constant expression" (cpp1y/pr68180.C). A location that is an array's element moves within the array
+  ([expr.add]/4.2; `&"test"[q]` then `+ k` had been "outside the bounds of its object").
+- Constexpr strings (C++26's [dcl.pre]/11-12, P2741R3, and GCC 15's constexpr asm strings): arbace/repr/cpp/parse.ae parses an asm
+  template, constraint or clobber written as a parenthesized constant expression (:_cxstrs); sema's cx-constexpr-string! checks an
+  object M for M.size() and M.data() (members, implicit conversions to std::size_t and const char*) and, when evaluated (an asm's
+  always, a static_assert's message when its condition is false), size(), data() and each data()[i], GCC's errors at the statement
+  and the evaluation's own where it is; arbace/repr/cpp/diag.ae's sema rule :cxstr. cpp1z/constexpr-asm-5.C and cpp26/static_assert1.C.
+- Alternatives considered: a checker-only vector model with its lanes' arithmetic evaluated (not needed by any row; the operators are
+  typed, their evaluation unsure); the constexpr-string check as a diag.ae tree check (it needs member lookup, overload resolution
+  and the evaluator).
+- Checked: the record's 26 vector files, 52 asm files and 55 static_assert-message files (133, .tmp/dg-t1): none lost; then one
+  regression run under the big lock (HEAVY_MEM_GIB=24, two parts of 3 threads, 22:22-22:30 UTC) over every recorded own pass of
+  next (2,937) with those lists and the rows, 2,991 files at `75369eedd`: 2,941 own pass, 0 lost. Recorded from it (`--judge
+  --record`): cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, cpp26/static_assert1.C, ext/vector41.C to own pass (ext/vector6.C already
+  was). `bin/reap --record`: C++ read 6,108 / 0 / 177 -> 6,111 / 0 / 174; `bin/crops-score --record`: C++ completeness 0.9869 ->
+  0.9870, read independence 0.892. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.

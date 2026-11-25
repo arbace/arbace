@@ -11861,3 +11861,23 @@ evaluates in and by `*cx-concept-cutoff*`; type-constraints-satisfied? in the co
 atom-types-check and constraint-satisfied? honor the scope's cutoff; ADL-found templates all dropped make "no viable function";
 at the concept's cutoff a call with no candidate is a sure substitution failure. cpp2a/concepts-recursive-sat3.C (foo(0): Fooable<int>
 false, "no matching function") and concepts-var-templ1a.C to own pass; sat2, sat5 and concepts-pr88395 keep their cycles.
+
+## As built: cpp-vec, GNU vector types in the checker and constexpr strings (2026-11-25; 577-1 (a), branch `cpp-vec-1125` from mac/next `864cffa55`)
+
+- GNU vector types in the checker (the GCC manual's "Using Vector Instructions through Built-in Functions"): resolved as the code
+  generator's {:k :vec :n LANES :of T}; a local vector list-initialized in the constant evaluator (its lanes and zeros to its
+  length); `v[i]` an lvalue of the element type (`:vec-elem`), read in a constant evaluation; a store into an element GCC's "not a
+  constant expression" (cpp1y/pr68180.C); an operator with a vector operand typed as the vector (`:vec-binop`), not evaluated; a
+  constexpr variable of a vector type evaluated as a scalar's is.
+- The constant evaluator: a location that is an array's element moves within the array, 0 to one past its last ([expr.add]/4.2).
+- Constexpr strings, C++26's [dcl.pre]/11-12 (P2741R3) for a static_assert message that is no string-literal (evaluated when the
+  condition is false) and GCC 15's constexpr asm strings (a template, constraint or clobber written as a parenthesized constant
+  expression, parse.ae's :_cxstrs, always evaluated): an object with size() and data() implicitly convertible to std::size_t and
+  const char*, each a constant expression, and each data()[i] below the size (the last first): GCC's "constexpr string must be a
+  string literal or object with 'size' and 'data' members", "... 'size()' must be implicitly convertible to 'std::size_t'", "...
+  'data()' must be implicitly convertible to 'const char*'", "... 'size()' must be a constant expression", "... 'data()' must be a
+  core constant expression", "... 'data()[I]' must be a constant expression", and the evaluation's own error where it is
+  (sema.ae's cx-constexpr-string!; diag.ae's :cxstr).
+
+Rows to own pass: cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, cpp26/static_assert1.C, ext/vector41.C (regression run at `75369eedd`,
+2,991 files: 0 lost); C++ read 6,108 / 0 / 177 -> 6,111 / 0 / 174.
