@@ -179,6 +179,7 @@ the code it must reproduce:
   | `:permits` | `permits` | a vector of types |
   | `:type-params` | `<T, U extends B>` | a vector of type parameters (§4.3) |
   | `:package` | `package` | `""` for the unnamed package (dotted names give all others) |
+  | `:parameters` | `javac -parameters` | `true`: the class's and its nested classes' `MethodParameters` record the parameters' names (a top-level class's; repr/java writes it when the read's javac options have `-parameters`; queue 563) |
 
 - **Value.** The form defines the class (and everything nested in it), imports it into the
   namespace under its simple name, and returns the `Class`.

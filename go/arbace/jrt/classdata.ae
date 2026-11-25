@@ -17,6 +17,10 @@
 ;;   E M NAME DESC T...       a method's or constructor's Exceptions attribute (binary names)
 ;;   E C DESC T...
 ;;   R NAME DESC [SIG]        JCS383 (a): a record class's component (its Record attribute; record.ae), in order
+;;   W M NAME DESC N (P F)... queue 563: a method's or constructor's MethodParameters attribute (DESC with binary
+;;   W C DESC N (P F)...      names): its N parameters, each a name P (- for none, javac's index 0) and its flags F
+;;                            (decimal: FINAL, SYNTHETIC, MANDATED), which Method's and Constructor's getParameters read
+;;                            (RecordedParameters; j2g writes getParameters)
 ;;   A NAME ANN               a component's annotation (decoded with the annotations, annotation.ae)
 ;;   Y T HEX                  JCS271 (b): the class's RuntimeVisibleTypeAnnotations attribute (JVMS 4.7.20) as
 ;;   Y M NAME DESC HEX        the class file holds it, its info's bytes in hex, and its methods', constructors'
@@ -56,7 +60,13 @@
           ^string emDesc
           ^{:tag (map string string) :doc "G records by key: M name desc, C desc, F name\n"} sigs
           ^{:tag (map string (slice string)) :doc "E records by key: M name desc, C desc\n"} throws
-          ^{:tag (slice recordComp) :doc "R records: a record class's components in order (record.ae)\n"} comps))
+          ^{:tag (slice recordComp) :doc "R records: a record class's components in order (record.ae)\n"} comps
+          ^{:tag (map string (slice ParamRecord)) :doc "W records by key: M name desc, C desc\n"} params))
+
+(go/type ParamRecord
+  "ParamRecord is one parameter of a recorded MethodParameters attribute (a W record): its name (Named false: javac
+wrote none) and its flags.\n"
+  (struct ^string Name ^bool Named ^int32 Flags))
 
 (go/var ^{:tag sync/Map :doc "classAttrsCache: *ClassInfo -> *classAttrs, decoded once.\n"} classAttrsCache)
 (go/var ^{:tag sync/Map :doc "genericRepos: *ClassInfo -> the class's ClassRepository (Class.genericInfo), or a member's by key.\n"} genericRepos)
@@ -97,7 +107,8 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
   (let [info (.-info c)
         (values v ok) (.Load classAttrsCache info)]
     (when ok (return (assert (* classAttrs) v)))
-    (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))))]
+    (let [d (addr (lit classAttrs :sigs (make (map string string)) :throws (make (map string (slice string)))
+                       :params (make (map string (slice ParamRecord)))))]
       (when (!= (.-Annots info) "")
         (range [_ line (strings/Split (.-Annots info) "\n")]
           (when (> (len line) 2)
@@ -126,6 +137,19 @@ Class's TypeDescriptor.OfField and Constable, Enum's Constable).\n"} handSignatu
                 (case [\R]
                   (let [n (.word p) ds (.word p) sg (.word p)]
                     (set! (.-comps d) (append (.-comps d) (lit recordComp :name n :desc ds :sig sg)))))
+                (case [\W]
+                  (let [k (.word p)
+                        key ""]
+                    (if (== k "M")
+                      (let [n (.word p) ds (.word p)] (set! key (+ "M " n " " ds)))
+                      (set! key (+ "C " (.word p))))
+                    (let [(values cnt _) (strconv/Atoi (.word p))
+                          rs (make (slice ParamRecord) 0 cnt)]
+                      (for [i 0] (< i cnt) (inc! i)
+                        (let [nm (.word p)
+                              (values fl _) (strconv/Atoi (.word p))]
+                          (set! rs (append rs (lit ParamRecord :Name nm :Named (!= nm "-") :Flags (conv int32 fl))))))
+                      (aset (.-params d) key rs))))
                 (case [\E]
                   (let [k (.word p)
                         key ""]
@@ -444,6 +468,16 @@ out).\n"
       (let [x (ForName n)]
         (when (!= x nil) (set! out (append out x)))))
     (classArray out)))
+
+(go/method RecordedParameters
+  "RecordedParameters is Method's recorded MethodParameters attribute (W), nil when none: the parameters j2g's getParameters
+gives (jdk26u's Executable.getParameters0), else it synthesizes them.\n"
+  ^{:tag (slice ParamRecord)} [^{:tag (* Method)} m]
+  (aget (.-params (attrsOf (.-clazz m))) (.sigKey m)))
+(go/method RecordedParameters
+  "RecordedParameters is Constructor's recorded MethodParameters attribute (W), nil when none.\n"
+  ^{:tag (slice ParamRecord)} [^{:tag (* Constructor)} k]
+  (aget (.-params (attrsOf (.-clazz k))) (.sigKey k)))
 
 (go/method GetExceptionTypes__Class1
   "GetExceptionTypes__Class1 is Method.getExceptionTypes: the recorded Exceptions attribute.\n"

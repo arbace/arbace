@@ -19079,3 +19079,35 @@ the allowance's consolidation stopped the task. Interp's rows recorded; the REAP
     `:jrt-filesystem`).
 Alternatives: 543-2 (b), leaving the rows in `:reflection` (not chosen).
 :journal
+## 2026-11-24 — Java: type annotations, package-info and MethodParameters at interp (queue 563, VM)
+
+DECISION 543-2 (a)'s first part, one commit per cause on `563-java-annotations-interp` (base 543's ae548f267), built
+once (`ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build`, 1 h 20 min, 23.2 GB peak) and run at interp on
+the four targets and 91 samples (every recorded annotations, reflection, MethodParameters and typeAnnotations test,
+T6232928, annotations/pos):
+- Outer.@A Inner (t04723, 4fdf60501): repr/java skipped the inner type's annotations as the declaration's when of the
+  same class (`*skip-anns*`) and wrote a non-generic outer's inner type as Outer$Inner, the annotation at the
+  outermost type's path; the analyzer's `(.. ...)` dropped an inner element's annotations. Now an inner member type
+  with annotations of its own is written `(.. Outer ^{A ..} Inner)` (convert's `dotted-inner?`) and types.ae keeps
+  them (path INNER_TYPE, as AnnotatedTypeFactory's nestingForType reads it). Alternative: the analyzer deriving the
+  INNER_TYPE steps of a plain Outer$Inner symbol from its nesting (not chosen: the forms would still lose the
+  same-class annotation, and every compiled program's paths would change at once).
+- package-info (t04730, d849cc046): `defpackage` was a no-op; now it defines the synthetic interface package-info
+  (annotations of context PACKAGE) and jrt's Package delegates its AnnotatedElement methods to that class
+  (jdk26u's getPackageInfo). T6232928 (t05958) passes too. Alternative: a package annotation table in jrt filled
+  by the interpreter's host (not chosen: the class is javac's own model and reflection's Class.forName finds it).
+- MethodParameters (t04832, t05910): JCS280 (a) (synthesized parameters only) reversed by the user for its (b):
+  repr/java writes `:parameters true` on a top-level class when the read's javac options have -parameters
+  (bin/java-check passes the test's -parameters to the read); arbace.classes.annot writes W records per method and
+  constructor by javac's ClassWriter/Lower/TypeEnter rules (this$N MANDATED or SYNTHETIC, $enum$name/$enum$ordinal,
+  declared FINAL, anonymous constructors' super parameters, compact canonical MANDATED, val$x captured locals;
+  names only with -parameters or a record's canonical constructor); jrt decodes them (RecordedParameters) and j2g's
+  getParameters gives them when the count matches. Written in doc/classes/JAVA-DEFERRED-TRIAGE.md, "JCS280 (a)
+  reversed", and SPEC §4.1's option table.
+Rows (interp, `bin/java-check --judge --partial --record`): t04723, t04730, t05958, t04832, t05910 now passing; 0
+regressions (t04876 and t05915 fail on this VM with 543's executable too: the Proxy loader and javac's --release 8
+ct.sym, the environment's). Compiled (6 tests, 6 h on 4 cores): t04723's reason now Executable.getAnnotatedExceptionTypes
+through Executable_I (564's kind), the rest unchanged. The own platform cache was built on the VM by
+`bin/javac-vendor platform-own --gensrc` from the committed pack plus an empty gensrc/jdk.hotspot.agent (the pin lists
+that module's empty listing; the pack has no empty directory, so `platform-cache` fails its own check on a miss), then
+`platform-cache --seed`.

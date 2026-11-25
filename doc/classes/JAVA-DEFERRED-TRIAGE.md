@@ -6607,6 +6607,32 @@ AnnotationSupport for F14's AnnotationFormatError, tonight's conversion), Parame
 t04869 and t04870 all four analyze. Expected after the night: t04869 (GetAnnotatedTypeTest) and t04870 (NoName) can pass;
 t04723 is no longer refused for Parameter.
 
+## JCS280 (a) reversed: MethodParameters recorded (queue 563, 2026-11-24, the user's DECISION 543-2 (a))
+
+The user reversed JCS280 (a), which synthesized every parameter (arg0 ..., modifiers 0), for its (b): the
+MethodParameters attribute as javac writes it, so that `@compile -parameters` tests (MethodAccessFlagTest t04832,
+CaptureTest t05910) see javac's names and flags.
+
+- **The forms**: repr/java's read, when its javac options have `-parameters` (bin/java-check's read_opts now passes
+  the test's `-parameters` on, which also changes those tests' forms cache key), writes `:parameters true` on each
+  top-level `defclass` (convert's `*parameters*`; SPEC §4.1's options). Parameter names and `^:final` were already
+  in the forms.
+- **The data**: arbace.classes.annot's `W` records (`parameters-lines`, `method-parameters`), beside G and E, per
+  method and constructor, in the descriptor's order: the enclosing instance (`this$N`, FINAL and MANDATED, or
+  SYNTHETIC for a private inner class: Lower.outerThisDef), an anonymous class's qualified creation's `x0`, an enum's
+  `$enum$name` and `$enum$ordinal` (SYNTHETIC), the declared parameters (FINAL; an anonymous constructor takes its
+  superclass constructor's names and flags, TypeEnter's AnonClassConstructorHelper; a compact canonical constructor's
+  are MANDATED; valueOf's `name` MANDATED), the captured locals (`val$x`, FINAL and SYNTHETIC). They are written when
+  javac writes the attribute (ClassWriter's requiresParamNames: `-parameters` or a record's canonical constructor;
+  requiresParamFlags: an implicit parameter SYNTHETIC or MANDATED), names only with requiresParamNames (`-`, javac's
+  index 0, otherwise), and only when as many as the descriptor's parameters.
+- **jrt**: classdata.ae decodes W into `RecordedParameters` of Method and Constructor; j2g's `getParameters`
+  (arbace/j2g/out.ae) gives the recorded parameters when their count is the executable's (a nameless one has name
+  null, Parameter's `arg`+index), else synthesizeAllParams as before. Both levels: the interpreter's host and j2g
+  write the same data (class-data).
+- Interp (arm64, this branch's build): t04832 and t05910 pass. No row of the 91 annotations and reflection tests
+  sampled changed otherwise.
+
 ## JCS301 (b): built by JCS273, the rest named (branch `java-props2`)
 
 F26's JCS301 listed Class/Method/Constructor/Field `accessFlags`, `Parameter`, `getDeclaredClasses` and `Field.getAnnotation` for
