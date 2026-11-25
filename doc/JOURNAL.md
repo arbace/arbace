@@ -19378,3 +19378,8 @@ panics 1). Base 80ed673e4 (558-rust-c3), branch 565-rust-c3-finish, worktree q54
   (`bin/rsi check --front own --corpus samples` on rsi20): 6 of 6 pass, 6 of 6 own, the std-vs-panics control differs. With
   both fixes C3 is done for the six: no mono fact from the record. The core exports were not re-made (none of their bodies'
   facts was refused); the main host re-makes all exports anyway. Not recorded (arm64); the host's commands are in the report.
+
+## 2026-11-25 — the user's DECISION 565-1 (a) (queue 565, VM)
+
+565-1 (a): Build keeps recording value drops' end points only for expression scopes and a body's arguments scope. Drops in the
+other scopes get their spans when a case needs one (none of the six eval cases does).
