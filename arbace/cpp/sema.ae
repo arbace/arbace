@@ -816,7 +816,7 @@
 ;; ([dcl.constexpr]/6: a constant expression's object has a size known at translation); a closure's copy of an array is its
 ;; element-wise copy ([expr.prim.lambda.capture]/15), which a bound known only at run time cannot size.
 
-(declare strip-type-attrs header-node? cx-runtime-bound?)
+(declare strip-type-attrs header-node? cx-runtime-bound? cx-vm?)
 
 (def ^:dynamic *cx-vla*
   "queue 570, the checker: the block scope (the object itself) whose written type may be variably modified -- a local typedef
@@ -838,6 +838,14 @@
                  acc))]
       (when (some #(and (not (number? %)) (cx-runtime-bound? cs %)) bs)
         (ex-info (str "codegen: size of array '" (:name k) "' is not an integral constant-expression") {:codegen/refused :vla-type :cx/node k})))))
+
+(defn- cx-field-vla-type
+  "queue 570-1 (a), the checker: the member `k`'s type with its bounds surely no constant made GNU's VLA type (*cx-vla* the class
+  scope `cs`), kept after cx-field-bound-error's error; nil when it does not resolve so."
+  [cs k]
+  (when (and (checking?) (cx-field-bound-error cs k))
+    (let [t (try (binding [*cx-vla* cs] (resolve-type cs (get-in k [:type :qualType]))) (catch arbace.lang.ExceptionInfo _ nil))]
+      (when (cx-vm? t) t))))
 
 (defn- cx-vm-typeid!
   "queue 570: typeid's operand `n` of a variably modified type, the program's error."
@@ -3016,7 +3024,14 @@
                           (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
                               (when (System/getenv "CPP_HDR_TRACE") (binding [*out* *err*] (println "header drop: an anonymous member of" (:name n) "(its class dropped)"))))
                         (if-let [bad (let [t0 (try (resolve-type cs (get-in k [:type :qualType]))
-                                                   (catch arbace.lang.ExceptionInfo x (or (cx-field-bound-error cs k) (throw x))))]
+                                                   (catch arbace.lang.ExceptionInfo x
+                                                     ;; (queue 570-1 (a): the error reported and the member kept with GNU's
+                                                     ;; VLA type, so that its uses report nothing more; template/array9.C)
+                                                     (if-let [b (cx-field-bound-error cs k)]
+                                                       (if-let [t (cx-field-vla-type cs k)]
+                                                         (do (swap! *order* conj [:cx-error b]) (vary-meta t assoc ::vla-reported true))
+                                                         b)
+                                                       (throw x))))]
                                        (if (instance? arbace.lang.ExceptionInfo t0)
                                          t0
                                        (let [et (loop [t t0] (if (abi/arr? t) (recur (:of t)) t))]
@@ -3065,16 +3080,20 @@
                                                   {:codegen/refused :abstract :cx/node k}))
                                        ;; (queue 570, the checker: a member of a variably modified type, [class.mem.general]: GCC's
                                        ;; "data member may not have variably modified type 'int [n]'"; ext/vlm2.C's typedef)
-                                       (when (and (checking?) (not (header-node? k)) (cx-vm? t0))
-                                         (ex-info (str "codegen: data member '" (:name k) "' may not have variably modified type")
-                                                  {:codegen/refused :vla-type :cx/node k}))))))]
+                                       ;; (queue 570-1 (a): reported, the member kept)
+                                       (when (and (checking?) (not (header-node? k)) (cx-vm? t0) (not (::vla-reported (meta t0))))
+                                         (swap! *order* conj [:cx-error (ex-info (str "codegen: data member '" (:name k) "' may not have variably modified type")
+                                                                                 {:codegen/refused :vla-type :cx/node k})])
+                                         nil)))))]
                           (if (checking?)
                             (do (swap! *order* conj [:cx-error bad])
                                 ;; (cpp-rind: the class marked, its members' bodies not analyzed for an explicit instantiation,
                                 ;; whose uses of the member left out would be the error's cascade: template/instantiate3.C)
                                 (abi/update-cls! id assoc :cx-dropped-field true))
                             (throw bad))
-                          (let [ft (resolve-type cs (get-in k [:type :qualType]))
+                          (let [ft (try (resolve-type cs (get-in k [:type :qualType]))
+                                        ;; (queue 570-1 (a): a member whose bound is surely no constant, reported above, kept)
+                                        (catch arbace.lang.ExceptionInfo x (or (cx-field-vla-type cs k) (throw x))))
                               i (count (:fields (abi/cls id)))
                               _ (when (:isBitfield k) (cx-cce-type! cs (first (kids k)) "a bit-field's width"))
                               bits (when (:isBitfield k) (const-int cs (first (kids k))))
@@ -3089,6 +3108,8 @@
                                                                      ;; (cpp-decl2, the checker: the member's node, a union member's
                                                                      ;; diagnostic's place, cx-deleted-implicit!)
                                                                      (checking?) (assoc :node k)
+                                                                     ;; (queue 570-1 (a): kept with GNU's VLA type, abi's layout's no bytes)
+                                                                     (and (checking?) (cx-vm? ft)) (assoc :cx-vla true)
                                                                      ;; [[no_unique_address]] on a member of class type: potentially
                                                                      ;; overlapping ([intro.object]/8, Itanium §1.1; cpp-gatefix)
                                                                      (and (not bits) (abi/class? (abi/unq ft))
@@ -12263,6 +12284,13 @@
         (when (and (abi/integral? (abi/unq (abi/underlying (abi/unq (:ty e))))) (not (abi/class? (abi/unq et))))
           [(assoc (abi/arr nil et) :vla true) e]))))))
 
+(defn- cx-vm-local-type
+  "queue 570-2 (a), the checker: a block-scope variable's written type `qt` built from a VLA but no VLA itself (a pointer or
+  reference to one; *cx-vla* its scope), else the refusal `x` as before (a VLA vla-local does not take stays refused)."
+  [ctx qt x]
+  (let [t (try (binding [*cx-vla* (:scope ctx)] (resolve-type (:scope ctx) qt)) (catch arbace.lang.ExceptionInfo _ nil))]
+    (if (and t (cx-vm? t) (not (:vla (abi/unq t)))) t (throw x))))
+
 (defn- local-var! [ctx n storage]
   (let [qt (get-in n [:type :qualType])
         ct (ctad-template (:scope ctx) (or (:_ctad n) qt))
@@ -12290,7 +12318,11 @@
                     ;; (queue 569, the checker: GNU's VLA, its bound evaluated where it is declared by the constant evaluator,
                     ;; vla-local's with a braced list too; else the refusal as before)
                     (and (checking?) (= :local storage) (map? (first (:_vla n))) (boolean (re-find #"not a constant" (str (.getMessage x)))))
-                    (if-let [[t e] (vla-local ctx n qt true)] (do (reset! vla e) t) (do (analyze ctx (first (:_vla n))) (throw x)))
+                    (if-let [[t e] (vla-local ctx n qt true)] (do (reset! vla e) t) (do (analyze ctx (first (:_vla n))) (cx-vm-local-type ctx qt x)))
+                    ;; (queue 570-2 (a), the checker: a local pointer or reference to a VLA, `int (*p)[n] = &a;`, declared with its
+                    ;; variably modified type)
+                    (and (checking?) (= :local storage) (boolean (re-find #"not a constant" (str (.getMessage x)))))
+                    (cx-vm-local-type ctx qt x)
                   ;; (CX12, the checker: a class template's name as the type of a variable with no initializer,
                   ;; [dcl.type.class.deduct]: class template argument deduction from no argument, [over.match.class.deduct],
                   ;; succeeds with the template's default arguments alone -- the slice tries T<>, every parameter defaulted)
