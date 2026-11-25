@@ -33,6 +33,8 @@ typedef double float64;
 /* a weak definition (queue 547: base's am_testing.c, which ppx_inline_test's runner overrides); ci links weak symbols */
 #define CAMLweakdef __attribute__((weak))
 #define CAMLnoret __attribute__((noreturn))
+/* the older spelling, after the declarator (queue 547: jane-street-headers' ocaml_utils.h, `... ) Noreturn;`) */
+#define Noreturn __attribute__((noreturn))
 #define CAMLnoreturn_start
 #define CAMLnoreturn_end __attribute__((noreturn))
 #define CAMLunused_start
