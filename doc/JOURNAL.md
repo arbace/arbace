@@ -20980,3 +20980,55 @@ test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before t
 t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
 notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
 `bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
+
+## 2026-11-24 — jrt: java.lang.constant's static-initializer cycle, ConstantDescs initialized at boot (queue 491, VM)
+
+Found by jcs50-release (ee1e99830, test/javac-platform/ctsym-run.ae): ConstantDescs and PrimitiveClassDescImpl
+(jdk/forms/java/lang/constant/ConstantDescs.ae, jdk/forms/jdk/internal/constant/PrimitiveClassDescImpl.ae, jdk26u's)
+initialize each other; entered from PrimitiveClassDescImpl (CreateSymbols' first MethodTypeDesc.ofDescriptor, through
+ConstantUtils.forPrimitiveType) ConstantDescs' CD_int..CD_void are read while PrimitiveClassDescImpl is in progress (null) and
+its BSM_CLASS_DATA_AT (ofConstantBootstrap(..., CD_Object, CD_int)) throws: ExceptionInInitializerError.
+
+What a JDK does, by JLS 12.4.2 (JVMS 5.5) over jdk26u's sources (.tmp/jdk26u at baf63fbe, the platform's pin;
+src/java.base/share/classes): entered from PrimitiveClassDescImpl, as a program's first java.lang.constant use
+MethodTypeDesc.ofDescriptor("(I)V") does (MethodTypeDesc.java:60, MethodTypeDescImpl.java:126 resolveClassDesc,
+ConstantUtils.java:381 forPrimitiveType), PrimitiveClassDescImpl's initializer (PrimitiveClassDescImpl.java:47, new
+PrimitiveClassDescImpl("I")) reaches its constructor (:87, super(ConstantDescs.BSM_PRIMITIVE_CLASS, ..., ConstantDescs.CD_Class)),
+which initializes ConstantDescs; ConstantDescs.java:250's CD_int = PrimitiveClassDescImpl.CD_int is a recursive request
+(12.4.2 step 3: returns at once), null; BSM_CLASS_DATA_AT (ConstantDescs.java:288-290, ofConstantBootstrap(CD_MethodHandles,
+"classDataAt", CD_Object, CD_int); :385 MethodTypeDescImpl.ofTrusted) fails in validateArgument's requireNonNull
+(MethodTypeDescImpl.java:87): ExceptionInInitializerError (step 11). A program with a lambda before: LambdaMetafactory.java:347
+builds an InnerClassLambdaMetafactory, which spins its class with java.lang.classfile (InnerClassLambdaMetafactory.java:310
+ClassFile.of().build) over ConstantDescs' statics (:53 import static java.lang.constant.ConstantDescs.*; :395
+invokespecial(CD_Object, INIT_NAME, MTD_void)), entering ConstantDescs from its own side, and the later call succeeds. So
+the brief's premise, "a JDK initializes ConstantDescs during boot", is not exact: jrt's ClassInit.Run already is 12.4.2's
+procedure, and that rule is what fails; a JDK program escapes it because its first invokedynamic (a lambda, a string
+concatenation) enters the cycle from ConstantDescs' side before, and the Go build has no run-time invokedynamic (j2g and the
+interpreter compile lambdas and concatenation directly). This is reasoning, not a run: the host confirms it on its JDK 26
+(the report gives the command). (A probe on the VM's apk JDK 25 was run and withdrawn: under the user's standing rule that
+JDK only bootstraps JDK 26, so it is no evidence and is not cited.)
+
+Chosen: jrt's boot initializes ConstantDescs (the brief's second option), as the JDK's first invokedynamic would: RunMain
+calls BootInit(bootClasses) before main (go/arbace/jrt/class.ae, thread.ae), bootClasses = [java.lang.constant.ConstantDescs],
+each looked up by name (ForName) and initialized through its ClassInfo.Init when the closed world has it and its
+initialization is not trivial; an exception is not thrown (the class stays failed, a first use throws NoClassDefFoundError
+with it as the cause), so a program that never uses the class is not affected. Of the executables only javac's tool has
+ConstantDescs in its world (its Go name ConstantDescs_clinit in .tmp/shared/javac-arm64/arbace-javac, none in stage 0's
+arbace), so Arbace's own start is unchanged. Alternatives: (b) JLS 12.4.2 alone, no change: exact for a program with no
+invokedynamic before its first java.lang.constant use, wrong for the common program with one (CreateSymbols), and every such
+program would need ctsym-run.ae's workaround; (c) initialize ConstantDescs at the point the JDK would, the program's first
+lambda or concatenation: the most exact, but it needs a hook in every translated lambda and concatenation (j2g), for one
+class. The difference (a) leaves: a program whose first java.lang.constant use precedes any invokedynamic succeeds where the
+JDK throws (a JDK bug's symptom, not a behaviour a program relies on). DECISION 491-1 in the report.
+
+Tests (go/arbace/jrt/object_test.ae): the cycle as two hand-written classes (initCycle: c's initializer stores BSM, reads p's
+CD_int and requires it; p's initializer reads c's BSM); TestInitCycleFromPrimitiveClassDescImpl, the control, enters from p
+with no boot and gets ExceptionInInitializerError with c's CD_int null; TestBootInitConstantDescs requires bootClasses to name
+ConstantDescs, runs BootInit (a name the world lacks passed over) and enters from p: both complete, the same CD_int. With
+BootInit's initialization taken out, TestBootInitConstantDescs fails (.tmp/q491/test-before-fix.log); with it, both pass on
+arm64 under qemu with TestClassInit, TestClassInitConcurrent and TestRunMain (.tmp/q491/test1.log). doc/go/JRT-NOTES.md,
+"Classes initialized at boot". No Java row moves: the conformance check's tests of java.lang.constant (t04743, t04744) fail on
+the JDK and are not in the records, and no row of test/java/check-*.edn cites java.lang.constant or
+PrimitiveClassDescImpl (the class :classfile matches what does); so no --only run. Then
+ctsym-run.ae's first form, (identity java.lang.constant.ConstantDescs/CD_Object), and its comment can go (jcs50-release's
+branch, not edited here).
