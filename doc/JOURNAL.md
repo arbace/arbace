@@ -23104,3 +23104,46 @@ explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-
 `bin/reap --record`: matrix unchanged (C++ read 6,090 / 0 / 194 is clang's record); `bin/crops-score --record`: C++ independence
 0.9766 -> 0.9770, the read stage 0.8830 -> 0.8850; `bin/crops-score --judge --strict`, `bin/reap`, `bin/records-check`,
 `bin/markers-check`: 0 problems.
+
+
+## 2026-11-25 — C++: read independence, the clang-only dg rows by the own front end's causes (cpp-indep, branch `cpp-indep-1125`)
+
+- Goal (the burst's): C++ read independence 0.882, each dg row counting 0.5 while only clang's recorded dumps pass it. The rows
+  clang passes and the own front end fails, less test/cpp/dg-dialect-out.edn's: 1,273 at `af1703774` (929 accepted with an
+  expected error, 210 missing lines, 71 both, 47 extra, 8 crashes, 8 timeouts). Scope: not the 194 deferred rows (cpp-own-1125,
+  the Mac); not cpp-own-1125's areas (constant evaluation, templates, overload, lookup, incomplete types), nor the Mac's 573
+  (recovery, unexpanded packs), 577 (GNU rules), 578 (syntax recovery); from 15:00 the Mac's 584 takes cpp2a, cpp23, concepts,
+  coroutines and modules (the coordinator): of those this branch's rules reach cpp2a/using-enum-2.C (mid-fix then) and, by
+  rules made for other directories, concepts/abbrev6.C, cpp2a/decomp4.C, cpp2a/constinit5.C (kept a pass).
+- Every rule from the standard's text and GCC's documented messages, no GCC or clang code. The causes, one commit each but the
+  last three: the crashes (a function template's signature substitution as an instantiation of its own, GCC's depth error;
+  a variable read in its own initializer; a mem-initializer's typeless construct; an explicit instantiation's skimmed array
+  bounds), the read-only location rule, copy-list-initialization through a braced argument (`m({...})`, `T t({...})`,
+  `new T({...})`, `return {...}`) and an array new's rest from {}, member static_asserts and a several-line one's false
+  conjunct, the parser's decl-specifier rules (__restrict on a constructor, typedef on a parameter, constexpr on a member or
+  parameter, virtual constructors and operator delete, virtual in a union, block-scope inline, explicit outside a constructor,
+  conversion functions with parameters, a ptr-operator before a trailing-return function, a condition declaring a function or
+  array), enumerators outside a fixed underlying type, structured bindings (initializer forms, scalars, closures), class-key
+  agreement, an aggregate's reference member's place; then declaration checks in arbace.repr.cpp.diag (thread_local agreement,
+  member type access) and parser rules (literal operator prefix, a twice-captured name, pointer to a qualified function type,
+  rvalue-reference handler, deduction guides, using enum, inheriting constructors of no direct base).
+- Tried and dropped: a member template-id `T::template B` as a non-type argument (template/qualttp2.C: the refusal swallowed in
+  the class's instantiation), a base-specifier of no class type in a specialization (inherit/base3.C: not reached), a class
+  template's name with a parameter list and no trailing return (cpp1z/class-deduction7.C: parsed as a constructor), the
+  bit-field's place in a specialization (parse/bitfield2.C: the refusal unmapped, GCC's spelled names needed).
+- A regression found and fixed: the read-only location rule, applied in implicit special members' memberwise assignments, refused
+  whole units (15 recorded own passes lost in the first regression run, .tmp/reg1.log: init/uninitialized1.C, const10.C,
+  cpp1y/constexpr-tracking-const4.C, ...); it now judges the user's own function bodies alone. thread_local agreement skips a
+  qualified (static member) definition (cpp2a/constinit5.C). Five recorded own passes fail at `af1703774` itself (checked in a
+  worktree at that commit): cpp1y/constexpr-neg1.C, cpp23/constexpr-nonlit3.C, cpp23/consteval-if2.C, ext/anon-struct6.C,
+  cpp0x/pr85147.C, cpp-own-1125's fixes.
+- The final runs (logs kept in /root/arbace/.tmp/keep/cpp-indep-1125/): every recorded own pass with the moved and target rows,
+  2,886 files on `95e68790f` (.tmp/fin.log): 2,787 pass, 52 rows moved to pass, and 88 recorded passes crashed on the
+  thread_local check (a header's VarDecl offset read against the main text; coroutines/, cpp2a/spaceship-*, ...) and one on the
+  twice-captured rule (cpp26/name-independent-decl2.C's `_`); both fixed, the 88, that row and the 17 targets of the last
+  rules run again (106 files, .tmp/fix1.log): 102 pass, none lost. Recorded from the two runs: the 52 rows the record failed
+  and the runs pass (each a clang-only row), the rest of the record kept (the five rows failing at `af1703774` itself left to
+  cpp-own-1125). `bin/reap --record`: matrix unchanged (the read cell counts clang's passes); `bin/crops-score --record`: C++ read
+  independence 0.8830 -> 0.8870, independence 0.9762 -> 0.9770. `bin/reap`, `bin/crops-score --judge --strict`,
+  `bin/records-check`, `bin/markers-check`: 0 problems. cpp-own-1125's whole own record was not pushed when this was recorded:
+  the merge keeps both (rows by file, these 52 its own passes or this branch's).

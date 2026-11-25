@@ -555,6 +555,10 @@
                                  ;; "expected empty string after 'operator' keyword", the name taken)
                                  (when-not (re-find #"^(u8|u|U|L)?[\"][\"]" s)
                                    (soft-diag! p (ix p) "expected empty string after 'operator' keyword"))
+                                 ;; (cpp-indep: [over.literal]/1, that string-literal has no encoding-prefix: GCC's "invalid encoding
+                                 ;; prefix in literal operator", cpp1y/udlit-enc-prefix-neg.C)
+                                 (when (and (re-find #"^(u8|u|U|L)[\"][\"]" s) (not (skim? p)) (main-tok? p (ix p)))
+                                   (soft-diag! p (ix p) "invalid encoding prefix in literal operator"))
                                  (adv! p)
                                  (if (= s "\"\"")
                                    (let [nm (ts (cur p))]
@@ -2322,7 +2326,9 @@
         ;; (cpp-read, 2026-11-22: before C++20 an array's new-initializer is ( ) or a braced-init-list, P0960 allowing an
         ;; expression-list: GCC's build_new_1 "parenthesized initializer in array new", at the new-expression; the allocated type
         ;; an array by its bounds, a parenthesized type-id or a typedef-name; not in a template, checked at its instantiation)
+        ;; (cpp-indep: `( )` is no expression-list, a class type's empty ParenListExpr none either: expr/anew7.C's new S[1]())
         _ (when (and init (= "call" (second init)) (not= "ImplicitValueInitExpr" (:kind (first init))) (< (.-year p) 2020)
+                     (not (and (= "ParenListExpr" (:kind (first init))) (empty? (:inner (first init)))))
                      (not (skim? p)) (main-tok? p b) (not (in-template? p))
                      (or arr (loop [t ty n 0] (cond (= :a (:t t)) true
                                                     (and (= :n (:t t)) (:ty (:ent t)) (< n 8)) (recur (:ty (:ent t)) (inc n))
@@ -3316,7 +3322,7 @@
             (= s "virtual") (do (adv! p) (recur (assoc ds :virtual true :virtual-i (last-ix p)) words))
             ;; (queue 584: an explicit-specifier's constant-expression parsed tentatively and kept by its text, as a
             ;; noexcept-specifier's: the checker evaluates it, [dcl.fct.spec]/3)
-            (= s "explicit") (do (adv! p)
+            (= s "explicit") (let [i (ix p)] (adv! p)
                                  (when (is? p "(")
                                    (let [ob (ix p)
                                          x (when (and *full-headers* (not (skim? p)))
@@ -3324,7 +3330,7 @@
                                      (skip-balanced! p)
                                      (when (and (map? x) (> (- (long (ix p)) 2) (long ob)))
                                        (.put ^HashMap (stv p DECLTYPES) (str "explicit:" (str/replace (tok-text p (inc (long ob)) (- (long (ix p)) 2)) #"\s+" "")) x))))
-                                 (recur (assoc ds :explicit true) words))
+                                 (recur (assoc ds :explicit true :explicit-i i) words))
             (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true :constexpr-i (last-ix p)) words))
             (= s "consteval") (do (adv! p) (recur (assoc ds :consteval true) words))
             (#{"constinit" "__constinit"} s) (do (adv! p) (recur (assoc ds :constinit true) words))
@@ -3336,7 +3342,8 @@
             ;; "duplicate 'volatile'")
             (#{"const" "__const"} s) (do (when (:c ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :c true :cv-i (or (:cv-i ds) (last-ix p))) words))
             (#{"volatile" "__volatile" "__volatile__"} s) (do (when (:v ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :v true :cv-i (or (:cv-i ds) (last-ix p))) words))
-            (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur ds words))
+            ;; (cpp-indep: GNU's __restrict among the specifiers kept as :rs-spec alone, a constructor's qualifier, other/pr61753.C)
+            (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur (assoc ds :rs-spec true) words))
             (and (contains? builtin-kws s) (nil? (:type ds)))
             (do ;; (cpp-gnu, 2026-11-22: GNU's __int128 is no type of ISO C++, [basic.fundamental]'s standard integer types:
                 ;; GCC's pedwarn "ISO C++ does not support '__int128' for ...", at the keyword, an error under -pedantic-errors
@@ -4005,6 +4012,14 @@
         t3 (if (:nested d) (build-type t2 (:nested d)) t2)]
     (if (and (:pack d) (not (:nested d))) {:t :pk :of t3} t3)))
 
+(defn- skimmed-bounds
+  "cpp-indep: the type `t` with each array bound a skim kept as text only (:sn) written as its bound (:n)."
+  [t]
+  (cond (map? t) (let [t (reduce-kv (fn [m k v] (if (or (map? v) (vector? v)) (assoc m k (skimmed-bounds v)) m)) t t)]
+                   (if (and (= :a (:t t)) (nil? (:n t)) (:sn t)) (assoc t :n (:sn t)) t))
+        (vector? t) (mapv skimmed-bounds t)
+        :else t))
+
 (defn- name-chain [d] (loop [d d out [d]] (if (:nested d) (recur (:nested d) (conj out (:nested d))) out)))
 
 (defn- arr-of-ref?
@@ -4104,6 +4119,10 @@
                 ;; (cpp-diag-b, 2026-11-22: a register parameter in C++17, [diff.cpp14.dcl.dcl]: GCC's pedwarn, as for a variable)
                 _ (when (and (= "register" (:storage ds)) (>= (.-year p) 2017) (not (skim? p)) (main-tok? p (long (:b ds))))
                     (pedantic-diag! p (long (:b ds)) "ISO C++17 does not allow 'register' storage class specifier"))
+                ;; (cpp-indep: [dcl.typedef]/1 with [dcl.fct]/3, a parameter-declaration's decl-specifier-seq holds no typedef:
+                ;; GCC's "typedef declaration invalid in parameter declaration", other/typedef1.C's `void f4(typedef int x)`)
+                _ (when (and (:typedef ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+                    (soft-diag! p (long (:b ds)) "typedef declaration invalid in parameter declaration"))
                 ;; (queue 376: [dcl.fct]/17 (C++23 [dcl.fct]/16), a class or enumeration defined in a parameter's type: GCC's
                 ;; "types may not be defined in parameter types", at the definition's opening brace)
                 _ (when-let [tn (:tag-node ds)]
@@ -4427,6 +4446,15 @@
                   (when-let [te2 (get (sc/names-of (sc/decl-scope (scope p))) nm)]
                     (when (and (:tmpl te2) (:class te2))
                       (soft-diag! p (long (:i lp)) (str "'" kw " " nm "' redeclared as non-template")))))
+              ;; (cpp-indep: [dcl.type.elab]/4, the class-key of an elaborated-type-specifier naming a class agrees with its
+              ;; definition's or declaration's: union for a union, struct or class for the others: GCC's "'union' tag used in
+              ;; naming 'struct B'", at the class-key; other/classkey1.C, diagnostic/wrong-tag-1.C)
+              _ (let [e (if (and lp (:args lp) (not (contains? e :union)) (= 1 (count (:parts qn))) (not (:g qn)))
+                          (let [te (lookup (scope p) (:s lp) true)] (when (:tmpl te) te))
+                          e)]
+                  (when (and e (#{"struct" "class" "union"} kw) (:class e) (:tag e) (not (:tparam e)) (or (not (:dep e)) (:tmpl e)) (contains? e :union)
+                             (not= (boolean (:union e)) (= kw "union")) (not (skim? p)) (main-tok? p (long kb)))
+                    (soft-diag! p (long kb) (str "'" kw "' tag used in naming '" (if (:union e) "union" "struct") " " (:name e) "'"))))
               spec (and alone hdr (:args lp))
               new? (and nm (nil? (:args lp)) (or alone (nil? e)))
               n (when (and (or new? spec) (not (:friend ds)) (not (skim? p)))
@@ -4445,6 +4473,7 @@
                                                                           attrs)))))]
           (when (and new? (not (:friend ds)))
             (let [ent {:k :type :name nm :tag true :class true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
+                       :union (= kw "union")
                        :tps (:params hdr)
                        :tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args (peek (:parts qn))))))}]
               (if alone (declare! p ent) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) ent))))
@@ -4523,6 +4552,12 @@
                   (when-let [te (get (sc/names-of (sc/decl-scope (scope p))) nm)]
                     (when (and (:tmpl te) (:class te))
                       (soft-diag! p (long (:i lp)) (str "'" kw " " nm "' redeclared as non-template")))))
+              ;; (cpp-indep: an explicit specialization's definition's class-key agrees with its template's, [dcl.type.elab]/4
+              ;; with [temp.expl.spec]: other/classkey1.C's `template <> union A<float> {};`)
+              _ (when (and (:args lp) simple (#{"struct" "class" "union"} kw) (not (skim? p)) (main-tok? p (long kb)))
+                  (when-let [te (lookup (scope p) nm true)]
+                    (when (and (:tmpl te) (:class te) (contains? te :union) (not= (boolean (:union te)) (= kw "union")))
+                      (soft-diag! p (long kb) (str "'" kw "' tag used in naming '" (if (:union te) "union" "struct") " " nm "'")))))
               cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
               ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
@@ -4588,7 +4623,7 @@
               cm-uses (when late (HashMap.))
               members (in-scope p cs
                         (let [old (stv p CLS)]
-                          (st! p CLS (cons {:name nm :ent ent :late late} old))
+                          (st! p CLS (cons {:name nm :ent ent :late late :kw kw} old))
                           (try (binding [*this-ok* nil
                                          *cm-scopes* (if late
                                                        (let [m (if *cm-scopes* (java.util.IdentityHashMap. ^java.util.Map *cm-scopes*) (java.util.IdentityHashMap.))]
@@ -4672,7 +4707,8 @@
                            (not (skim? p)) (main-tok? p (long (:i (peek (:parts qn))))))
                   (soft-diag! p (long (:i (peek (:parts qn)))) (str "using typedef-name '" nm "' after 'enum'")))
               es (sc/new-scope :enum (scope p) nil)
-              ent {:k :type :name nm :tag true :scope es}
+              ;; (cpp-indep: an opaque-enum-declaration's entity marked, `using enum`'s rule below)
+              ent (cond-> {:k :type :name nm :tag true :scope es} (not body?) (assoc :opaque true))
               ;; (cpp-decl2: [basic.scope.scope]/4, an enumeration defined in a class scope whose using-declarator named an
               ;; enumeration of that name: GCC's "multiple definition of 'enum D::E'", at the name; lookup/using53.C)
               _ (when-let [o (and nm body? (= 1 (count (:parts qn))) (not (skim? p)) (= ctx :member)
@@ -4924,6 +4960,19 @@
                    (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (parse-braced-init p)) "list"]
                    (is? p "(") (let [ab (ix p) as (paren-args p)] [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"])
                    :else [nil nil])
+        ;; (cpp-indep: [dcl.pre]/8 (C++23 [dcl.pre]/10), a structured binding's initializer is `= e`, `{ e }` or `( e )`, one
+        ;; assignment-expression: GCC's "invalid initializer for structured binding declaration"; `= { ... }` deduces no type
+        ;; it can decompose, "deducing from brace-enclosed initializer list requires #include <initializer_list>" without the
+        ;; header; cpp1z/decomp30.C)
+        _ (when (and x (not (skim? p)) (main-tok? p ib))
+            (cond
+              (and (= init "call") (= "ParenListExpr" (:kind x)) (not= 1 (count (:inner x))))
+              (soft-diag! p ib "invalid initializer for structured binding declaration")
+              (and (= init "list") (= "InitListExpr" (:kind x)) (not= 1 (count (:inner x))))
+              (soft-diag! p ib "invalid initializer for structured binding declaration")
+              (and (= init "c") (= "InitListExpr" (:kind x)))
+              (soft-diag! p ib "invalid initializer for structured binding declaration (a braced list after '=': deducing from brace-enclosed initializer list)")
+              :else nil))
         ;; (cpp-read, 2026-11-22: [dcl.struct.bind]/1 with [basic.scope.pdecl]: a binding is declared before its initializer, so a
         ;; use of its name there is of a binding whose type is not deduced yet, GCC's "use of 'x' before deduction of 'auto'")
         _ (when (and x (not (skim? p)) (main-tok? p ib))
@@ -5233,7 +5282,10 @@
                       ;; ([dcl.fct]/? (C++23 [dcl.fct]/2): a function declared with a trailing return type has the placeholder
                       ;; `auto` alone as its declared return type: GCC's "'f' function with trailing return type has
                       ;; 'decltype(auto)' as its type rather than plain 'auto'", at the declaration; cpp1y/auto-fn52.C)
-                      (and fs (:trailing fs) (map? base0) (or (not= :auto (:t base0)) (:cn base0) (:c ds) (:v ds))
+                      (and fs (:trailing fs) (map? base0) (or (not= :auto (:t base0)) (:cn base0) (:c ds) (:v ds)
+                                                               ;; (cpp-indep: or a ptr-operator before the declarator-id, `auto *f4 () -> int`,
+                                                               ;; cpp0x/trailing2.C)
+                                                               (and (= 1 (count chain)) (seq (:ptrs d))))
                            (not (:conv lp)) (not (:dtor lp)) (not ctor) (not guide))
                       (soft-diag! p (long (:b ds)) (str "'" (or (:s lp) nm) "' function with trailing return type has '"
                                                         (if (= :dta (:t base0)) "decltype(auto)" "another type") "' as its type rather than plain 'auto'"))
@@ -5244,6 +5296,11 @@
                       ;; ([dcl.fct]/6: a function type with a cv-qualifier-seq or ref-qualifier, named by a typedef, is the type of no
                       ;; non-member function: `FIC f;` at namespace scope or as a friend is GCC's "non-member function 'f' cannot have
                       ;; cv-qualifier", at the name; other/cv_func.C, cv_func3.C)
+                      ;; (cpp-indep: nor of a pointer or reference to it, `fn* fp;` for `typedef void fn() const;`: GCC's "forming
+                      ;; pointer to qualified function type", at the name; a pointer to member's is the member function's; other/typedef2.C)
+                      (and (nil? fs) (not (:typedef ds)) (= 1 (count chain)) (seq (:ptrs d)) (#{:p :lr :rr} (:t (first (:ptrs d))))
+                           (let [tt (some-> base0 :ent :ty)] (and (map? tt) (= :f (:t tt)) (re-find #"const|volatile|&" (str (:q tt))))))
+                      (soft-diag! p ni (str "forming " (if (= :p (:t (first (:ptrs d)))) "pointer" "reference") " to qualified function type"))
                       (and (nil? fs) (not (:typedef ds)) (or (#{:top :block} ctx) (and (= ctx :member) (:friend ds)))
                            (empty? (mapcat :ptrs chain)) (empty? (mapcat :sufs chain))
                            (let [tt (some-> base0 :ent :ty)] (and (map? tt) (= :f (:t tt)) (re-find #"const|volatile|&" (str (:q tt))))))
@@ -5334,6 +5391,57 @@
               ;; for function", at the decl-specifiers)
               _ (when (and fs (not (:a fs)) (:tls ds) (not (skim? p)) (not (:typedef ds)))
                   (soft-diag! p (long (:b ds)) (str "storage class 'thread_local' invalid for function" (when nm (str " '" nm "'")))))
+              ;; (cpp-indep: the function specifiers a member function's kind forbids, at the specifier as GCC: [class.ctor.general]/1
+              ;; "constructors cannot be declared 'virtual'", [class.free]/1 an allocation or deallocation function a static member,
+              ;; "'operator delete' cannot be declared 'virtual'", [class.union.general]/2 "function 'f' declared 'virtual' inside a
+              ;; union"; [dcl.inline]/? a block-scope function declaration is not inline, "'inline' specifier invalid for function
+              ;; 'f' declared out of global scope"; [class.conv.fct]/1 a conversion function has no parameters, "'operator int&(int)'
+              ;; must have no arguments"; cpp0x/locations1.C, other/operator2.C)
+              _ (when (and fs (not (:a fs)) qn lp (not (skim? p)) (main-tok? p (long (:b ds))))
+                  (let [np (count (:parts qn))
+                        cc (class-ctx p)
+                        op (when (:op lp) (str/trim (str (:op lp))))]
+                    (when (and (:virtual ds) (= ctx :member) (not (:friend ds)))
+                      (cond
+                        (and (= 1 np) (:s lp) (not (:args lp)) (= (:s lp) (:name cc)))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) "constructors cannot be declared 'virtual'")
+                        (and op (re-matches #"(new|delete)(\s*\[\s*\])?" op))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) (str "'operator " op "' cannot be declared 'virtual'"))
+                        (= "union" (:kw cc))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) (str "function '" (or (:s lp) nm) "' declared 'virtual' inside a union"))
+                        :else nil))
+                    (when (and (= ctx :block) (:inline ds) (= 1 np) (not (:g qn)))
+                      (soft-diag! p (long (or (:inline-i ds) (:b ds))) (str "'inline' specifier invalid for function '" (or (:s lp) nm) "' declared out of global scope")))
+                    ;; ([dcl.fct.spec]/3: explicit in the declaration of a constructor or conversion function in its class's
+                    ;; member-specification alone: GCC's "'explicit' outside class declaration", "'explicit' in friend declaration",
+                    ;; "only declarations of constructors and conversion operators can be 'explicit'"; a deduction guide's
+                    ;; is its own; cpp0x/explicit8.C, explicit9.C)
+                    (when (and (:explicit ds) (not guide))
+                      (let [at (long (or (:explicit-i ds) (:b ds)))]
+                        (cond
+                          (#{:top :block} ctx) (soft-diag! p at "'explicit' outside class declaration")
+                          (and (= ctx :member) (:friend ds)) (soft-diag! p at "'explicit' in friend declaration")
+                          (and (= ctx :member) (not ctor) (not (:conv lp)) (not (:dtor lp)) (= 1 np) (:s lp) (not= (:s lp) (:name cc)))
+                          (soft-diag! p at "only declarations of constructors and conversion operators can be 'explicit'")
+                          :else nil)))
+                    ;; ([temp.deduct.guide]/1, /3: a deduction-guide has no decl-specifier but explicit and no function body, and is
+                    ;; declared in its class template's scope: GCC's "decl-specifier in declaration of
+                    ;; deduction guide", "deduction guide ... must not have a function body", "deduction guide ... must be declared in
+                    ;; the same scope as"; cpp1z/class-deduction10.C, 11, 72)
+                    (when guide
+                      (when (or (:storage ds) (:inline ds) (:constexpr ds) (:consteval ds) (:virtual ds) (:friend ds) (:typedef ds) (:tls ds))
+                        (soft-diag! p (long (:b ds)) (str "decl-specifier in declaration of deduction guide")))
+                      (when (is? p "{")
+                        (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s lp) "' must not have a function body")))
+                      (when-let [te (and (= 1 np) (not (:g qn)) (lookup (scope p) (:s lp)))]
+                        (when (and (:tmpl te) (:class te) (:scope te) (#{:top :tmpl} ctx))
+                          (let [home (sc/enclosing (sc/parent-of (:scope te)) #{:ns :class})
+                                here (sc/enclosing (scope p) #{:ns :class})]
+                            (when (and home here (not (identical? home here)))
+                              (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s lp) "' must be declared in the same scope as '" (:s lp) "'")))))))
+                    (when (and (:conv lp) (= ctx :member) (seq (:types fs)) (not (:va fs))
+                               (not (and (= 1 (count (:types fs))) (= {:t :b :w ["void"]} (select-keys (first (:types fs)) [:t :w])))))
+                      (soft-diag! p (long (:b ds)) (str "'operator " (try (qt (:conv lp)) (catch Exception _ "")) "' must have no arguments")))))
               ;; (cpp-diag-b, 2026-11-22: [class.ctor.general]/1, [class.dtor]/1 and [class.conv.fct]/1: a constructor's, destructor's
               ;; or conversion function's declaration has no return type, so no type-specifier and no ptr-operator before the
               ;; declarator-id: GCC's "return type specification for constructor invalid", "return type specified for 'operator
@@ -5354,7 +5462,7 @@
                       (soft-diag! p (long (:b ds)) (if (= what "conv")
                                                      "return type specified for conversion operator"
                                                      (str "return type specification for " what " invalid")))
-                      (and fs (#{"constructor" "destructor"} what) (nil? base0) (or (:c ds) (:v ds)))
+                      (and fs (#{"constructor" "destructor"} what) (nil? base0) (or (:c ds) (:v ds) (:rs-spec ds)))
                       (soft-diag! p (long (:b ds)) (str "qualifiers are not allowed on declaration of '" (if (= what "destructor") (str "~" (:dtor lp)) (:s lp)) "'"))
                       ;; (a qualified destructor's name: its qualifier a namespace, "is not a class-name"; another class than the
                       ;; one its name names, both classes declared so (no typedef), "as member of")
@@ -6154,6 +6262,9 @@
                  (when nm (str nm (when pack "...")))])
               :else
               (let [ds (parse-decl-specs p :tparam)
+                    ;; (cpp-indep: a template parameter's neither, [temp.param]/1 with [dcl.typedef]/1, template/typedef5.C)
+                    _ (when (and (:typedef ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+                        (soft-diag! p (long (:b ds)) "typedef declaration invalid in parameter declaration"))
                     base (or (ds-type ds) (perr p "a template parameter"))
                     d (parse-declarator p :either)
                     de (ix p)
@@ -6360,9 +6471,11 @@
                         {:names (when fs (:names fs))
                          ;; (G5: a function's name and type, for the code generator)
                          :fname (when (and fs qn) (fn-name p (peek (:parts qn)) false false))
-                         :ftype (when (and fs (ds-type ds)) (try (qt (build-type (ds-type ds) d)) (catch Exception _ nil)))
+                         ;; (cpp-indep: the skimmed array bounds' texts kept, `template void f1 (char [][6]);` is of `char (*)[6]`,
+                         ;; not `char (*)[]`: template/unify2.C)
+                         :ftype (when (and fs (ds-type ds)) (try (qt (skimmed-bounds (build-type (ds-type ds) d))) (catch Exception _ nil)))
                          ;; (queue 367: a constructor's, no decl-specifiers: `template S::basic_string(C*, C*, const allocator<C>&);`)
-                         :fctype (when (and fs (nil? (ds-type ds))) (try (qt (build-type {:t :b :w ["void"]} d)) (catch Exception _ nil)))}))
+                         :fctype (when (and fs (nil? (ds-type ds))) (try (qt (skimmed-bounds (build-type {:t :b :w ["void"]} d))) (catch Exception _ nil)))}))
                     (catch arbace.lang.ExceptionInfo _ nil))
             names (:names fi)
             _ (seek! p b0)
@@ -6666,7 +6779,15 @@
             [(node p "UsingDirectiveDecl" b e {})]))
       (is? p "enum")
       (do (adv! p)
-          (let [qn (or (parse-name p :parse) (perr p "an enumeration's name")) e (last-ix p)]
+          (let [ni (ix p)
+                qn (or (parse-name p :parse) (perr p "an enumeration's name")) e (last-ix p)]
+            ;; (cpp-indep: [enum.udecl]/1, the using-enum-declarator names a non-dependent, complete enumeration: one declared by
+            ;; an opaque-enum-declaration alone is GCC's "'using enum' requires an enum-specifier" error, a dependent one its
+            ;; "'using enum' of dependent type"; cpp2a/using-enum-2.C)
+            (when (and qn (not (skim? p)) (main-tok? p ni))
+              (cond (:opaque (:ent qn)) (soft-diag! p ni "'using enum' of an enumeration declared by an opaque-enum-declaration alone: an enum-specifier is needed")
+                    (and (:q qn) (or (:tparam (:q qn)) (:dep (:q qn)))) (soft-diag! p ni "'using enum' of dependent type")
+                    :else nil))
             (expect! p ";")
             (when-let [s (ent-scope (:ent qn))] (sc/add-using! (sc/decl-scope (scope p)) s))
             [(node p "UsingEnumDecl" b e {})]))
@@ -6720,6 +6841,21 @@
                     ;; (cpp-rind: [namespace.udecl]/1 with [basic.lookup.qual]/1, a using-declarator's nested-name-specifier whose
                     ;; first name no lookup finds and the main file declares nowhere: GCC's "'N' has not been declared", at the name;
                     ;; lookup/using12.C)
+                    ;; (cpp-indep: [namespace.udecl]/3, a using-declarator that names a constructor (`using A::A;`) names it of a
+                    ;; direct base class of the class being defined: GCC's "'A' is not a direct base of 'C'", at the name; a
+                    ;; dependent class's bases not judged; cpp1z/inh-ctor1.C, cpp0x/inh-ctor28.C)
+                    (let [ps (:parts qn) np (count ps) cc (class-ctx p) ce (:ent cc)]
+                      (when (and (>= np 2) ce (not (:dep ce)) (some? (:bases-order ce)) (= :class (sc/kind-of (sc/decl-scope (scope p))))
+                                 (:s (peek ps)) (= (:s (peek ps)) (:s (nth ps (- np 2)))) (nil? (:args (nth ps (- np 2))))
+                                 (not (skim? p)) (main-tok? p (long (:b qn))))
+                        (let [q (:q qn)]
+                          (when (and (type-ent? q) (:class q) (not (:tparam q)) (not (:dep q))
+                                     (not-any? (fn [[bn _]] (= bn (:s (peek ps)))) (:bases-order ce))
+                                     ;; (every base named by its class's own name: a typedef's or alias's not judged)
+                                     (when-let [^HashMap inf (sema/info ce)]
+                                       (every? (fn [b] (let [be (get-in b [:ty :ent])] (and (map? be) (:tag be) (:class be))))
+                                               (or (.get inf :bases) []))))
+                            (soft-diag! p (long (:b qn)) (str "'" (:s (peek ps)) "' is not a direct base of '" (:name cc) "'"))))))
                     (let [f (first (:parts qn))]
                       ;; (cpp-rind: [namespace.udecl]/1, a using-declarator has a nested-name-specifier: `using i;` is GCC's
                       ;; "expected nested-name-specifier before 'i'"; lookup/using15.C)
@@ -6998,6 +7134,10 @@
         _ (when-not qn (perr p "a condition's declarator"))
         nm (name-plain qn)
         ty (build-type base d)
+        ;; (cpp-indep: [stmt.pre]/? (C++23 /5), a condition's declarator specifies no function and no array: GCC's "condition
+        ;; declares a function", "condition declares an array", at the declarator; cpp0x/cond1.C)
+        _ (when (and qn (#{:f :a} (:t ty)) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (or (:i (peek (:parts qn))) (:b ds))) (if (= :f (:t ty)) "condition declares a function" "condition declares an array")))
         [x init] (cond (accept! p "=") [(parse-init-clause p) "c"]
                        (is? p "{") [(parse-braced-init p) "list"]
                        :else (perr p "a condition's initializer"))
@@ -7039,7 +7179,11 @@
         _ (op-param! p d)
         qn (:name (last (name-chain d)))
         nm (name-plain qn)
-        ty (build-type base d)]
+        ty (build-type base d)
+        ;; (cpp-indep: [except.handle]/1, an exception-declaration's type is no rvalue reference: GCC's "cannot declare catch
+        ;; parameter to be of rvalue reference type 'int&&'", at the declaration; cpp0x/catch1.C)
+        _ (when (and (= :rr (:t ty)) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) "cannot declare catch parameter to be of rvalue reference type"))]
     (when nm (declare! p {:k :var :name nm}))
     [ty nm (if qn (long (:i (peek (:parts qn)))) (ix p)) (:b ds)]))
 
@@ -7243,6 +7387,11 @@
                               ;; a capture by copy copies its variable (its class's copy constructor)
                               (when (and (not amp) (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (:ty outer))
                                 (when-let [[c e] (sema/vclass {:kind "DeclRefExpr" :_ent outer} (.-year p))] (use-member! p e :copy)))
+                              ;; (cpp-indep: [expr.prim.lambda.capture]/5, an identifier captured once: GCC's "already captured 'x'
+                              ;; in lambda expression", at the second; cpp1y/lambda-init19.C)
+                              ;; (`_`, C++26's name-independent declaration, P2169, aside: cpp26/name-independent-decl2.C)
+                              (when (and (not= nm "_") (get (sc/names-of (scope p)) nm) (not (skim? p)) (main-tok? p i))
+                                (soft-diag! p i (str "already captured '" nm "' in lambda expression")))
                               (sc/declare! (scope p) (cond-> {:k :var :name nm} (:ty outer) (assoc :ty (:ty outer))))
                               (cond (accept! p "=") (recur (conj inits (parse-init-clause p)))
                                     (is? p "{") (let [bi (ix p) x (parse-braced-init p)
