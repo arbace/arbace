@@ -21643,3 +21643,86 @@ The coordinator's third message for 566, on the same branch.
   - 566-1 (b), the keys kept as cache state, was the user's to reject.
   - Committing whole native-*-items.edn files: about 12 MB of exports that depend on the run, against the keys they are made from.
 - bin/reap: 56 of 56, 0 problems, before and after.
+## 2026-11-24: queue 561, C6 L3 begun: the backtrace crates read natively (adler2 2 of 2 equal, rustc_demangle 25 of 45)
+
+Under the user's C6-1 (a) (doc/rust/FRONTEND-SURVEY.md, "The plan (C6-L1 to C6-L5)", L3), on the VM (arm64), branch
+561-rust-backtrace-crates from 542's 57a908970. The seven crates and their features come from std's build as Cargo resolved it
+(test/rust/front/std-build-units.edn's `:features`; rust-src 1.99.1's library/vendor: adler2-2.0.1, memchr-2.8.3,
+rustc-demangle-0.1.28, miniz_oxide-0.9.1, object-0.39.1, gimli-0.34.0, addr2line-0.27.1). In std's closure, by the census of std's
+IR at the pin, their items are: rustc_demangle 45, gimli 11, miniz_oxide 8, addr2line 8, adler2 2, object 2, memchr 0.
+- Reading: the crates join core-check's dep-crates (`backtrace-crates`, in dependency order). deps-setup reads them only with
+  DEPS_BACKTRACE (1, or a comma list), and each one's pass reads the names and facts of those before it. std's pass, libc's,
+  hashbrown's and unwind's stay as they were. A vendored crate's directory is found by its package name
+  (rustc_demangle → rustc-demangle-0.1.28).
+- Interfaces (3 rounds): adler2 16 fns, 2 ADTs, 15 impls; memchr 26 files, 521 fns, 60 ADTs, 269 impls; rustc_demangle 60 fns,
+  12 ADTs, 23 impls. rustc_demangle's root first failed, because v0.rs's `macro_rules! write` (a compile_error! guard) was taken
+  as lib.rs's write!. For a backtrace crate, a module macro that shadows a std macro now counts only in its module's subtree
+  (macros-for's SHADOWED).
+- Lowering: alloc-check --export takes a backtrace crate over std's deps' caches, and lib-unit export/build take one (its crates'
+  facts in RF_EXTRA_IFACE). Fixes:
+  - typeck: a root file's own ADT gets its inherent impls from the crate's other module files (adler2's `self.compute` was "a
+    method call without its callee"). This also applies to std.
+  - Caller locations use Cargo's `./vendor/...` path.
+  - A backtrace crate's export carries the attributes of its module's functions (an impl method's `#[inline]` under `+=` decides
+    the copy's instantiating crate).
+  - The crates' ADT and module paths are put in the type namespace for mono's printing (adler2's upper-case `U32X4` was printed
+    as a value).
+- **adler2: 2 of 2 equal** (with core's `From<u16>`/`From<u8> for u32` added by `export core --add`).
+  **rustc_demangle: 25 equal, 15 differ, 5 refused of 45.** The refusals:
+  - a slice pattern in a closure (try_parse_str_chars);
+  - a closure or opaque type (print_const_str_literal);
+  - core's `str::as_bytes` not exported.
+
+  The differences: enum layouts (`Result<Parser, ParseError>`'s niche: rustc tags it), the from_residual instance's path, and
+  method probing (`f.write_str` picks `Write::write_str` where rustc takes `Formatter::write_str`: rustc gathers the inherent
+  candidates of every autoderef step before it tries the receiver by value).
+- The moved worktree's caches named q542's paths (core-attrs was then made empty). They were rewritten to q561's, with the
+  originals in .tmp/q561/orig/.
+- Not recorded (arm64). Left: rustc_demangle's 20, memchr's layouts, then miniz_oxide, object, gimli and addr2line. The report is
+  .tmp/q561/561-rust-backtrace-crates.md.
+
+## 2026-11-24 — Rust's backtrace crates: the vendored-locs question answered at the settle (queue 561, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287): (a), the ./vendor/ caller-location rule applies to
+  every vendored crate, not only to the backtrace crates of 561. The rest of 561 (miniz_oxide, object, gimli, addr2line, and
+  rustc_demangle's remaining rows) follows it.
+Alternatives: a rule per crate (not chosen).
+:journal
+## 2026-11-24 — Rust's backtrace crates, cycle 2: all seven lowered natively, rustc_demangle 35 of 45 (queue 561, VM)
+
+What was done (branch 561-rust-backtrace-crates from ba7dbdaa9; sources: rust-src 1.99.1's library/vendor at the pin, std's IR
+.tmp/rsi/std-sgn checked against test/rust/runtime/ir.sha256):
+- vendored-locs (a), the user's answer: every vendored crate's caller locations at Cargo's `./vendor/` path, the condition in
+  core-check's externalize widened from the backtrace crates to any `library/vendor/` file (1e9620295). std's unit has no
+  `./vendor/` location before or after (hashbrown's and libc's items are not in std's closure), so std's count is unchanged.
+- std's after-count for typeck's d5bae115b/eb5b0a5bb (and 1e9620295): lib-unit export, build, compare of std, 180 equal / 39 differ /
+  106 refused, the same as before; the export built one more body (backtrace_rs::symbolize::gimli::create_mapping: `Mapping::new`
+  found), 370 bodies / 66 refused.
+- The interfaces of miniz_oxide, object, gimli and addr2line made (std-iface --deps with DEPS_BACKTRACE=1), every module :ok, then
+  miniz_oxide's, object's and addr2line's again after resolve's crate dependencies (addr2line 42 -> 73 functions, 19 -> 30 ADTs).
+- Fixes, each gated on a backtrace crate (a dynamic var bound by core-check, or the crate's name), each its own commit:
+  - lower (6dc75728a): a `?` of a macro's expansion text gives its from_residual call the `?` token's span, so the
+    `#[track_caller]` location is the outermost macro call's (rustc's try_span; rustc-demangle's parse! and invalid!: 6 rows);
+  - typeck (a2fe3d0e0): probe_op's inherent candidates from every autoderef step (Formatter's inherent write_str by value at
+    step 0 before fmt::Write's, with Write imported);
+  - build (db0b077dc): a slice pattern in a closure (mem_categorization's PatKind::Slice), was refused (try_parse_str_chars);
+    not gated: it replaces a refusal;
+  - core-check (6a7434557): a backtrace crate's module run at its Cargo edition (rustc-demangle 2015: closures capture whole
+    variables; object, addr2line 2018; adler2, memchr, miniz_oxide 2021; gimli 2024);
+  - build-run (b993b9029): lib-unit's -O0 UnreachableEnumBranching on a field place's discriminant (`if let Ok(ref mut p) =
+    self.parser`), the field's type by the instance body's projections;
+  - resolve (e0ceb116b): the backtrace crates' dependencies in their extern prelude (adler2 for miniz_oxide, memchr for object,
+    gimli for addr2line);
+  - core-check (036076c32): an enum discriminant that casts or names a module constant (miniz_oxide's TINFLStatus).
+  - core's `str::as_bytes` (#[inline(always)]) added to core's export alone (core-inline-keys.txt and the --add run over that one
+    key; not the 28 std-wanted keys of cycle 1).
+- Results (lib-unit compare): adler2 2/0/0 (unchanged), memchr no items, rustc_demangle 25/15/5 -> 35/7/3, miniz_oxide 0/0/8,
+  object 1/1/0, gimli 6/3/2, addr2line 5/3/0: 49 of 74 items equal.
+Left, by cause (the report has each): mono.ae's (rust-l1's file, not edited here): closure symbols of a dependency crate without
+the instantiating crate (def-kind of a `::{closure#N}` path), an upstream `#[inline]` fn's symbol (memchr::memchr), array
+lengths named by constants and a crate's own ADT fields from its sources (miniz_oxide); the runtime pipeline's var_debug_info
+(a `?;`'s non-zero-sized `val` keeps rustc's ControlFlow in memory); promoted constants' padding written initialized (rustc:
+undef); drop glue on the unwind path (gimli's push, addr2line's path_push); miniz_oxide's `core::State` (its own module `core`
+through `use super::*` over the extern crate) and `adler2::Adler32::from_checksum`.
+Alternatives: editing mono.ae for the closure kind (one line), left to the main session as the task asks for files rust-l1
+touches; one ungated typeck change for probing (it is rustc's rule), gated to keep std's records fixed.

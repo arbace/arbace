@@ -928,10 +928,18 @@
     (let [n (:node (c/def-of def))] (or (not (contains? n :params)) (c/fn-self-param? n)))
     (not (false? (:self-param (get (:fns c/*si*) def))))))
 
+;; queue 561 (C6 L3): probe_op's inherent candidates are assembled from every autoderef step's type before any step is tried
+;; (assemble_inherent_candidates over the steps), so at a step a later step's inherent method whose self parameter is that step's
+;; adjusted receiver is picked before a trait in scope (rustc-demangle's `f.write_str(..)` on `f: &mut Formatter` with
+;; fmt::Write imported: Formatter's inherent write_str by value at step 0, not Write's); bound true by core-check for the
+;; backtrace crates, else each step's own impls as before
+(def ^:dynamic *steps-inherent* false)
+
 (defn- method-candidate
   "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
-  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]"
-  [t nm autoref]
+  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]; INH-TYS: the types whose inherent impls
+  are candidates (*steps-inherent*: every step's), else T's"
+  [t nm autoref & [inh-tys]]
   (let [recv (case autoref nil t :not [:ref [:re-erased] false t] :mut [:ref [:re-erased] true t])
         try-def (fn [def parent-args]
                   (let [own (vec (drop (count parent-args) (fresh-args def)))
@@ -941,15 +949,17 @@
     (or
      ;; inherent impls
      (let [s (snapshot)]
-       (or (some (fn [[ip args self _]]
-                   (let [s2 (snapshot)]
-                     (if (try-unify self t)
-                       (if-let [[def k] (impl-item ip nm)]
-                         (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
-                         (do (rollback! s2) nil))
-                       nil)))
-                 (concat (local-impls false nil t)
-                         (for [ip (inherent-paths t)] (std-impl-instance ip))))
+       (or (some (fn [u]
+                   (some (fn [[ip args self _]]
+                           (let [s2 (snapshot)]
+                             (if (try-unify self u)
+                               (if-let [[def k] (impl-item ip nm)]
+                                 (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
+                                 (do (rollback! s2) nil))
+                               nil)))
+                         (concat (local-impls false nil u)
+                                 (for [ip (inherent-paths u)] (std-impl-instance ip)))))
+                 (or inh-tys [t]))
            (do (rollback! s) nil)))
      ;; RF13c: a parameter's where clauses (assemble_inherent_candidates_from_param): the bound traits' methods, in scope
      ;; or not (`self.0.fmt(f)` under `T: fmt::Debug` with only the module `fmt` imported), Self the parameter
@@ -1009,7 +1019,7 @@
      (or
     (some (fn [[i t]]
             (some (fn [ar]
-                    (when-let [[def args sig] (method-candidate t nm ar)]
+                    (when-let [[def args sig] (method-candidate t nm ar (when *steps-inherent* steps))]
                       [def args sig (vec (concat (for [s (rest (take (inc i) steps))] ["Deref" s])
                                                  (case ar
                                                    ;; pick_by_value_method: a reference receiver is reborrowed (`&*x`)

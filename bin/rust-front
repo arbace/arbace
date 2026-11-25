@@ -695,12 +695,28 @@ case ${1:-} in
         # run's interface has none, as rsi-build's RF_EXTRA_IFACE gives them (an explicit RF_EXTRA_IFACE kept); round 4: and std's and
         # alloc's own passes (their crate-private ADTs' layouts: fs::File, the futex Mutex and RwLock, FileAttr) and core's whole pass
         # when kept as core/core-whole-iface.edn (alloc-check --crate core --pass: core::sync::atomic's private Align1..Align8)
+        case $c in adler2|memchr|rustc_demangle|miniz_oxide|object|gimli|addr2line) bt=1 ;; *) bt=${LIB_UNIT_BACKTRACE:-0} ;; esac
         if [ -z "${RF_EXTRA_IFACE:-}" ]; then
           xi=""; for f in "$work/std/deps/libc-iface.edn" "$work/std/deps/hashbrown-iface.edn" "$work/std/deps/unwind-iface.edn" "$work/std/native-iface-nodebug.edn" "$work/alloc/native-iface-nodebug.edn" "$work/core/core-whole-iface.edn"; do [ -s "$f" ] && xi=$xi${xi:+:}$f; done
+          # queue 561 (C6 L3): a backtrace crate's build (or LIB_UNIT_BACKTRACE=1, std's) also reads the backtrace crates' facts
+          # made so far (bin/rust-front std-iface --deps with DEPS_BACKTRACE)
+          if [ "$bt" = 1 ]; then
+            for f in adler2 memchr rustc_demangle miniz_oxide object gimli addr2line; do f=$work/std/deps/$f-iface.edn; [ -s "$f" ] && xi=$xi${xi:+:}$f; done
+          fi
           [ -n "$xi" ] && export RF_EXTRA_IFACE=$xi
         fi
         # rust-c6c: the crates' module lists (a module path in the type namespace beside a function of its name)
         lm=""; for o in core alloc std; do [ -s "$work/$o/modules.txt" ] && lm=$lm${lm:+:}$work/$o/modules.txt; done
+        # queue 561 (C6 L3): a backtrace crate's build: those crates' module paths and their ADTs' and aliases' paths, in the type
+        # namespace (mono's ext-value-ns? would print an upper-case name std's names do not list, adler2's U32X4, as a value)
+        if [ "${bt:-0}" = 1 ]; then
+          (cd "$root" && arbace_tool -e "(doseq [c [\"adler2\" \"memchr\" \"rustc_demangle\" \"miniz_oxide\" \"object\" \"gimli\" \"addr2line\"]
+                :let [d \"$work/std/deps/\" mf (java.io.File. (str d c \"-modules.edn\")) nf (java.io.File. (str d c \"-iface.edn\"))]
+                :when (and (.exists mf) (.exists nf))]
+            (doseq [m (read-string (slurp mf))] (println (:path m)))
+            (let [n (read-string (slurp nf))] (doseq [p (sort (concat (keys (:adts n)) (keys (:aliases n))))] (println p))))" 2>&1 | grep -v -E "$filt") > "$lu/backtrace-types.txt" || exit 1
+          lm=$lm${lm:+:}$lu/backtrace-types.txt
+        fi
         cd "$root" && RF_LIB_MODULES=$lm RF_CORE_NATIVE=$nat RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
           GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} GOMAXPROCS=${GOMAXPROCS:-3} \
           arbace_tool -m arbace.rust.front.build-run lib-unit "$lu/crates.edn" "$fd" abort "$c" "$lu/$c-defs.txt" "$lu/$c-unit.edn" 2>&1 | grep -v -E "$filt" | tee "$lu/$c-build.log" | tail -3 ;;
