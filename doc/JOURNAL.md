@@ -22187,3 +22187,21 @@ list ran on an empty corpus. Fixes (bd672c9a7, c3d8d261b):
   is taken once (`me`); the two-file awk there uses `FILENAME == ARGV[1]`. No suite record was written since 8ce07bec1.
 Merged mac/next 3a67d8dc2 (548's oi changes; the survey's two new sections kept). The rerun with `REC=--record .tmp/q/run1.sh`
 (O2J_JOBS=1 OI_JOBS=1) was cut by the host's reboots of 2026-11-25 before its first program; held by the coordinator (OOM).
+
+## 2026-11-25: ocaml-aot recorded: OCaml AOT 539 / 13 / 57 -> 546 / 13 / 50 (67 n/a)
+
+- The AOT light level's per-row CPU caps (c3d4b27bf, aba232ebc): the user's caps of 2026-11-24 (`test/ocaml/oi-cpu-caps.tsv`, oi's level)
+  extended to `bin/oi check --aot` and `suite check --aot` by the coordinator's call (option (a) of my report): `test/ocaml/aot-cpu-caps.tsv`,
+  a program's cap 1.5 times the CPU it took measured alone, rounded up to 10 s; `o2j_alone` (the program alone after the batch's wall
+  limit stopped it) takes the larger of OI_TIMEOUT and the cap, o2j_cpu adds O2J_LOAD_ALLOWANCE as before; the file in `aot_key`. One row:
+  statmemprof/custom 170 s (111.1 s of CPU alone, `.tmp/q/custom`). c3d4b27bf declared `local TIMEOUT` before reading the cap, and set -u
+  ended the run at its first program alone ("TIMEOUT: unbound variable", 15:06, no record written); aba232ebc reads the cap first.
+- Recorded from the whole passing run of `.tmp/q/run1.sh` (`REC=--record`, the lists `.tmp/q/main.txt` and `.tmp/q/suite.txt`, O2J_JOBS=1
+  OI_JOBS=1, 15:07-15:30, on mac/next 3a67d8dc2 merged): the main list 21 of 21 pass (the controls lazy/lazy1, lazy4, the runtime events'
+  test_caml (back to pass), _exception, _reentry, _user_event_signal, statmemprof's alloc_counts, start_stop, restart, exception_callback,
+  moved_while_blocking, lib-obj/reachable_words, weak-ephe-final/finaliser, callback/test1, test_signalhandler stay passes); the suite
+  list's thread_exit_in_callback passes, blocking_in_callback and exception_comballoc as before. Seven rows now pass:
+  lib-runtime-events/test_instrumented, statmemprof/user_data_regression, callback/signals_alloc, lazy/minor_major_force,
+  embedded/cmcaml, statmemprof/custom (check-aot-native.edn) and statmemprof/thread_exit_in_callback (check-suite-aot-native.edn).
+  Their four known entries left `test/ocaml/aot-known.edn` (with signals_alloc's comment). bin/reap: OCaml AOT 546 / 13 / 50 (67 n/a);
+  crops-score recorded (OCaml completeness 97.4%), --judge --strict 0 problems, records-check 0, markers-check ok.

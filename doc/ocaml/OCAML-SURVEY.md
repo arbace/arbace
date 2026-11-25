@@ -5023,6 +5023,12 @@ done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 
   selected once (concurrent checks doubled `.tmp/oi/corpus.tsv`).
 - Written, not yet run or recorded (doc/JOURNAL.md, 2026-11-24, ocaml-aot): the AOT runtime's ports of oi's thread exit, young set,
   allocation buckets, OCAMLRUNPARAM s, the stub's signal at the next allocation and the embedding of OCaml in a C main.
+- Run and recorded 2026-11-25 (doc/JOURNAL.md, "ocaml-aot recorded"): those ports, the ring's buckets only for the instrumented runtime
+  (`O2J_RUNTIME_VARIANT=i` from header.awk's `-runtime-variant=i`), the custom blocks' memory sampled by Gc.Memprof (oi's queue 523:
+  `ExtGc/customMem`, `memprofCustom`, the source in info.source), a bigarray's zero filled by `Arrays/fill`, and the light level's
+  per-row CPU caps (`test/ocaml/aot-cpu-caps.tsv`, the user's caps of 2026-11-24 extended): seven rows pass, 539 / 13 / 57 -> 546 / 13 / 50.
+- `bin/lib/oi/suite.bash`'s corpus names by the PID taken once (`$BASHPID` in a pipeline is the subshell's: the corpus was empty since
+  8ce07bec1); also on its own branch for next, `oi-suite-bashpid-1125`.
 
 ## As built: ppx_expect on oi (queue 547, 2026-11-24/25, the VM): T2 of DECISION 539b-1, re's lib_test/expect
 
