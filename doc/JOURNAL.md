@@ -21070,3 +21070,33 @@ The user's decisions (2026-11-24, through the coordinator, on ocaml-aot's report
 - The eval n/a decisions (539-1, 539b-2, 539b-3, ephetest3) stay applied at both levels, as branch `ocaml-aot-1124` applied them (8ce07bec1).
 - OCaml AOT 539 / 13 / 60 (64 n/a) -> 539 / 13 / 57 (67 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
   `bin/records-check`: 0 problems. Branch `ocaml-aot-na-1124` from 8ce07bec1, without the WIP ports (5a7a53e91, on `ocaml-aot-1124`).
+
+## 2026-11-25: the essential gate on next 5005e8505 failed; its fixes (the main session)
+
+`bin/gate` on next 5005e8505 (run 1, 2026-11-24 15:34 to 11-25 02:15: a build deferred under the 25 GiB disk floor, no check run;
+run 2, 02:25 to 07:50, log `.tmp/gate-next-1124.log`): 53 steps ok, 9 failed, from five causes, each fixed here and checked alone:
+
+- c-c2j, cpp-c2j, pyi-c2j, scheme-c2j ("c2j-check: the host failed"): `arbace/core_proxy.ae` called `Compiler$Dyn/hideMethod`, the
+  native Clojure's FnSer added (b4ab3ebfc, the user's CDR decisions of 2026-11-22), directly; stage 0 evaluates the namespace from the
+  checkout with the seed's runtime, which has no hideMethod: the call failed to compile there, and a reflective one to run (a proxy of a
+  Serializable class is made while the namespaces load). Now looked up once by name (`hide-method`, nil without it: on stage 0 a proxy's
+  writeObject/readObject stay visible, as before FnSer). `bin/ci c2j-check`: ok, 27 sources, 3,638 classes. The same trap as train 3's
+  `Compiler$CF$AssertOn` (2aeeffc77): a namespace stage 0 evaluates must reach a new runtime member by name.
+- goi-aot-essential ("control not judged: ... its subject ... not in this run", all three AOT controls): misc-tails (b0de218cc) brought Go
+  AOT to all passing, so `test/goi/check-aot-known.edn` holds no row and the known file bin/goi writes is empty; `apply_known`'s awk read
+  it with `NR==FNR`, which with an empty first file takes the results as the known rows and prints none: every AOT check's results.tsv
+  came out empty. `FILENAME == ARGV[1]` there and in bin/goi's five other two-file awks of the check's tail (retried, ref-pass, fails).
+  Checked: the three controls' subjects and references at the AOT level, 6 pass, each control fails as it must.
+- oi-essential: `bin/oi pins` ("STALE aot lib-marshal/intext: attested, but no longer pinned"): its pin left aot-known.edn with queue
+  527 (89eeed291); its attested row removed from `test/ocaml/pins-attested.tsv` with a note. `bin/oi pins`: 11 pins, each attested. (Its
+  "left" controls are subjects outside the essential list, not failures; effects/backtrace's native pass against ocamlc's path is a note.)
+- ocaml-read-essential: `ocamllex-check` 29 of 38, 9 .mll unrecorded (546b's ppxlib and sexplib corpora): recorded by hand with the host's
+  ocamllex 5.5.0 (`bin/repr-ocaml ocamllex-check --host --record`): 38 of 38 equal to it byte for byte, the native one 38 of 38 to the record.
+- caches-table ("names no row covers: a.o"): `bin/repr-go`'s gc reference wrote "$d.tmp/a.o", which the coverage scan reads as a `.tmp/`
+  name; written "$d.tmp"/a.o (the directory is $d's sibling, not the checkout's .tmp). `test/gate/caches-test.bash --coverage`: ok.
+- suite-go: not run (an earlier step failed).
+Also merged into next before the rerun: mac/cpp-rind-1124 ee0acba05, mac/ocaml-aot-na-1124 db8d867fd, mac/ocaml-1123 65d1d1445; and the
+big lock's backfill (the user, 2026-11-24 "do 3"): `bin/heavy-lock` lets a later ticket that fits take a free slot beside a holder when no
+earlier waiting ticket fits there (two looks in a row, never while the other slot is free: the head keeps its turn), `HEAVY_LOCK_BACKFILL=0`
+off; `test/gate/heavy-lock-test.bash` case 2 now expects the backfill (its holder 3 s); deployed by atomic rename on 2026-11-24 16:30 and
+proved that evening (the C++ chain's four steps ran beside train 3).
