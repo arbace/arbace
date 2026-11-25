@@ -115,6 +115,12 @@ trap 'rm -f "${q:?}/$me" "${q:?}/.s-$me" "${q:?}/.t-$me"' EXIT
 trap 'exit 143' TERM INT HUP
 exec {f1}>>"$lock" {f2}>>"$lock2" || exit 1
 poll=${HEAVY_LOCK_POLL:-2}
+# the host's slots (2026-11-25, after an OOM; the user): HEAVY_LOCK_SLOTS, else the file LOCK.slots, else 2; at 1 a ticket takes
+# slot 1 alone (no job beside another, no backfill), so one heavy job runs at a time whatever its declaration
+slots=${HEAVY_LOCK_SLOTS:-$(cat "$lock.slots" 2>/dev/null || echo 2)}
+# at 1 the second slot still takes a small job (declared at most HEAVY_LOCK_SMALL_GIB, 8; the user, 2026-11-25), under the memory rule
+small_kib=$(( ${HEAVY_LOCK_SMALL_GIB:-8} * 1048576 ))
+slot2_ok() { [ "$slots" != 1 ] || [ "${1:-$need}" -le "$small_kib" ]; }
 
 # the KiB the other holders (state 1 or 2) declared and have not reached yet: their need less their process tree's RSS
 unreached_kib() {
@@ -164,14 +170,15 @@ while :; do
     avail=${HEAVY_LOCK_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}
     room=$(( avail - 2097152 - $(unreached_kib $live_t) ))
     backfill=1
-    for nk in $ahead_needs; do [ "$nk" -lt "$room" ] && { backfill=; break; }; done
+    for nk in $ahead_needs; do slot2_ok "$nk" || continue; [ "$nk" -lt "$room" ] && { backfill=; break; }; done
+    slot2_ok || backfill=
   fi
   # the head keeps its turn: a backfill tries only after the rule held on two looks in a row
   if [ -n "$backfill" ]; then bf_seen=$(( bf_seen + 1 )); [ "$bf_seen" -ge 2 ] || backfill=; else bf_seen=0; fi
   if [ -z "$waiting_ahead" ] || [ -n "$backfill" ]; then
     # slot 1 unless a one-slot ticket is ahead (it takes slot 1 when its turn comes), else slot 2
     if [ -z "$old_ahead" ] && flock -n "$f1"; then slot=1
-    elif flock -n "$f2"; then slot=2
+    elif slot2_ok && flock -n "$f2"; then slot=2
     fi
     if [ -n "$slot" ]; then
       if [ -n "$backfill" ]; then

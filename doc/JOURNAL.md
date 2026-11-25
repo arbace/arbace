@@ -22948,3 +22948,19 @@ a body, the remaining rounds ran at once); measuring a front-end rule on whole f
 the cache's in numbering and in 17 core bodies the rules do not touch, so the moved bodies were spliced in, each checked equal to
 the cache's at the head first); for L2, marking param-dependent drops in the export (the instance is where the generic body is
 at hand: core-instance).
+
+## 2026-11-25: the big lock's one slot and small slot (after the OOM)
+
+At about 12:03 the host rebooted out of memory: two lock jobs ran at once, one past its declaration (j2g at 21 GB against
+16 declared), beside unlocked heavy work and ten agent processes. The user chose the safeguards: one heavy job at a time, a
+memory watchdog, and then ("Yes, ≤ 8 GiB beside") a second slot for small jobs alone. `bin/heavy-lock` reads the host's slot
+count from `LOCK.slots` (the main checkout's `.tmp/big.lock.slots`, now `1`; `HEAVY_LOCK_SLOTS` over it; 2 when absent, the
+two-slot rule of 2026-11-23 unchanged). At 1, slot 2 takes only a ticket declared at most `HEAVY_LOCK_SMALL_GIB` (default 8),
+still under the memory rule, and backfill considers only such tickets: a big ticket waits for slot 1 whatever the room.
+The watchdog (`.tmp/memguard.sh`, outside the repository) sends SIGTERM to the youngest non-agent process over 2 GB when
+MemAvailable falls under 4 GiB; it has not fired since. The agents' brief gained the memory rules: a process that can pass
+3 GB under the lock with an honest `HEAVY_MEM_GIB` (measured peak x 1.3), outside it at most one process over 1 GB per agent,
+capped at 2.5 GB. `test/gate/heavy-lock-test.bash` case 7: a 20 GiB ticket waits beside a holder with room for it, a 4 GiB one
+runs in slot 2 past it, and `HEAVY_LOCK_SLOTS=1 HEAVY_LOCK_SMALL_GIB=2` keeps a 4 GiB ticket out; every case passes.
+Alternatives: keep two slots with stricter declarations (rejected: a declaration was what failed), or a cgroup memory limit
+per job (not available to the agents' shells here; the watchdog is the backstop).
