@@ -8279,7 +8279,10 @@
           (some #{fid} inh) (let [d (inherit-through! id fid)] {:i :ctor :fn d :args (call-args (fnd d) args ctx)})
           ;; (cpp-s11: a trivial copy or move from a braced list, `T x({...})`, copies the list's temporary, [over.ics.list]:
           ;; the list initializes it, and the initialization is that temporary's)
-          (and (:trivial f) (= 1 (count args)) (= :init-list (:op (first args)))) (init-for {:k :class :id id} (first args) ctx :copy)
+          ;; (cpp-indep, the checker: that parameter's initialization a copy-list-initialization, [over.match.list]/1 with
+          ;; [over.ics.list]: an explicit constructor chosen for it is ill-formed, cx-explicit-list!, cpp0x/initlist4.C's `A a2({1,2})`)
+          (and (:trivial f) (= 1 (count args)) (= :init-list (:op (first args))))
+          (binding [*cx-copy-list* (or *cx-copy-list* (checking?))] (init-for {:k :class :id id} (first args) ctx :copy))
           (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
@@ -10431,6 +10434,10 @@
                (nil? initn) (init-for et nil ctx :default)
                ;; (its pack expansions spliced: new T(std::forward<Args>(args)...), G4)
                (= "ParenListExpr" (:kind initn)) (init-for et (vec (analyze-args ctx (kids initn))) ctx (if (empty? (kids initn)) :value :direct))
+               ;; (cpp-indep, the checker: `new T({...})`, the parser's call style over one braced list, direct-initializes from
+               ;; that list as an argument, [expr.new]/24 with [dcl.init.general]/16.6: a constructor's parameter copy-list-
+               ;; initialized from it, not T{...}; cpp0x/initlist4.C's `new A({1,2})` of an explicit A(int,int))
+               (and (checking?) (= "InitListExpr" (:kind initn)) (= "call" (:initStyle n))) (init-for et [(analyze ctx initn)] ctx :direct)
                (= "InitListExpr" (:kind initn)) (init-for et (analyze ctx initn) ctx :list)
                (= "PackExpansionExpr" (:kind initn)) (let [as (vec (analyze-args ctx [initn]))] (init-for et (when (seq as) as) ctx (if (seq as) :direct :value)))
                :else (init-for et [(analyze ctx initn)] ctx :direct))
@@ -12896,7 +12903,10 @@
                                                  ;; a constructor taking no rvalue reference; C++23's P2266 makes it an
                                                  ;; xvalue alone)
                                                  (cx-implicit-move-init rt a ctx)
-                                                 (init-for rt a ctx (if (= :init-list (:op a)) :list :copy)))
+                                                 ;; (cpp-indep, the checker: `return {...};` copy-list-initializes the result,
+                                                 ;; [stmt.return]/2 with [over.match.list]/1, cx-explicit-list!; cpp0x/initlist4.C)
+                                                 (binding [*cx-copy-list* (or *cx-copy-list* (and (checking?) (= :init-list (:op a)) (or (when (:range e) e) true)))]
+                                                   (init-for rt a ctx (if (= :init-list (:op a)) :list :copy))))
                               :nrvo-var (:nrvo-var a)}))))
     "IfStmt" (if (:isConsteval n)
                ;; if consteval ([stmt.if]/4): at run time the branch of a context not constant-evaluated (G4: the
@@ -13167,6 +13177,11 @@
                     ;; [temp.variadic]/5: as many arguments as the pack has; CP332 (a), tuple's constructors)
                     (= "PackExpansionExpr" (:kind x)) (let [as (analyze-args ctx [x])]
                                                         (init-for t as ctx (if (empty? as) :value :direct)))
+                    ;; (cpp-indep: the native parser's `member({...})`, a typeless CXXConstructExpr over its arguments: direct-
+                    ;; initialization from them, [class.base.init]/7 -- a braced list the argument of a constructor, A's copy
+                    ;; constructor's for an aggregate; cpp0x/constexpr-ice3.C, initlist4.C)
+                    (and (= "CXXConstructExpr" (:kind x)) (nil? (get-in x [:type :qualType])))
+                    (init-for t (mapv #(analyze ctx %) (kids x)) ctx :direct)
                     :else (let [a (analyze ctx x)]
                             (cx-array-paren! t [a])
                             (init-for t [a] ctx :direct))))
