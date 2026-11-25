@@ -22907,3 +22907,44 @@ The AOT cell's design rows (next 01ee9c426: 539 / 13 / 57) by cause, and what wa
 Records: check-aot-native.edn and check-suite-aot-native.edn by `--record --only-list` over the rows (and test_caml for the control),
 stale known entries removed (aot-known.edn, aot-compiled-known.edn), then `bin/reap --record`, `bin/crops-score --record`. OCaml AOT
 539 / 13 / 57 -> 540 / 11 / 58; completeness 0.9709 -> 0.9713.
+
+## 2026-11-25 — Rust C6: 572's rules ungated, codegen first; L2's unwind-edge slice; an L4 plan (queue 581, VM)
+
+Branch 581-rust-c6-ungate on next 01ee9c426 (571 and 572 merged), worktree q572 reused. The user's 572-1 (a) (the codegen rules
+first) and 572-2 (a) (one variable per rule). Measured after each rule by std's lib-unit compare with L2 (571's m4: 221/38/66,
+L2 391 of 486), against std's IR at the pin.
+
+- The cache. q572's work dir held older core, alloc and std interfaces than 571's (libc's of 2026-11-23: a std build on it named
+  libc's functions `unix.malloc`, 199 equal). 571's core, alloc and std interfaces and lib-unit cache were copied in (paths
+  rewritten q571 -> q572), 572's two core bodies spliced into core's export, the backtrace crates' interfaces kept; a build at the
+  head on it gives 571's verdicts exactly.
+- codegen first. 572's `*const-index-align*` held three rules; split into `*const-index-align*` (project_index),
+  `*consume-fat-pair*` (codegen_consume) and `*repeat-ptr-loop*` (write_operand_repeatedly), then each ungated in turn (default
+  true, lib-unit's binding dropped): none moved, has_physical_root equal (222/37/66), none moved. Then mono's
+  `*pair-struct-llty*` (none moved) and build-run's drop of a reference's pointee (io::stdio::cleanup equal: 223/36/66).
+- L2's next slice (571's Left). rustc's codegen_terminator merges a successor only when the terminator has one successor,
+  counting its unwind edge (mergeable_succ over `successors()`), though codegen's nop_landing_pads makes the call plain; a generic
+  body's drop of a parameter's type keeps its landing pad in rustc's MIR (needs_drop unknown before substitution), so the instance
+  keeps the `br`, the pad as an unreached `unreachable` block with the resume block it jumps to (codegen_block_as_unreachable for
+  every unvisited block), and the personality for its terminate unwind. core-instance marks such drops `:param-drop`
+  (build_run.ae), codegen counts them (nop-landing-pads' MIR?, codegen.ae). L2 391 -> 412 equal of 486 (cvt, Ord::min and max,
+  OsString::push, fs::metadata, var_os, File::open, ...); the items unchanged.
+- The five front-end rules. First a probe (an env-gated trace, not committed, of where each rule would change a body; one export
+  round of core, alloc and std): index-steps' hits all take the same overloaded path, private-use's never reaches a glob outside
+  the module's descendants: both ungated without a change by construction. int-bitops fired in core and std, brackets-span in
+  core, the injected extern crate in every module file built alone: each measured by its own export round (env hooks, not
+  committed; the three core exports concurrently), the bodies against the head's: the extern crate none (core 487, alloc 67, std
+  501 equal), brackets-span one core body (bignum's mul_pow2, outside std's closure: std unchanged), int-bitops ten core bodies
+  (fmt::num's buffer lengths `[MaybeUninit<u8>; MAX_DEC_N]` evaluated) and Formatter::get_align newly exported, and std's gimli
+  Cache::new; the moved bodies spliced into the cache, built and compared: unchanged, L2 412 of 487 (Lru's default reached,
+  refused). lower keeps :brackets in every crate.
+- No rule lost an equal; all ten are ungated. Final: std 223/36/66, L2 412/46/26/3 of 487; the backtrace crates 65 of 74 as 572
+  left them; rust-front essential, core-essential and pack-compare-test equal to their known files and passed.
+- L4's plan in the report (the own IR tree from lib-unit's equal defines, the own runtime by runtime-ci under the heavy lock, the
+  ci leg's cases as the judge, then the differing defines).
+
+Alternatives considered: each front-end rule's own whole export round in sequence (about 2.5 h; the probe found which can change
+a body, the remaining rounds ran at once); measuring a front-end rule on whole fresh exports (the head's export differs from
+the cache's in numbering and in 17 core bodies the rules do not touch, so the moved bodies were spliced in, each checked equal to
+the cache's at the head first); for L2, marking param-dependent drops in the export (the instance is where the generic body is
+at hand: core-instance).

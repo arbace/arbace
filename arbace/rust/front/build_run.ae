@@ -778,18 +778,17 @@
                           (list 'assert c e m target (unwind u) (if-let [al (:assert-loc facts)] (al t) loc) 0))
                  ;; C6-4 (a): the drop's glue, drop_glue::<T> of the dropped local's type when it needs drop (facts' :drop-glue,
                  ;; mono's drop-glue-symbol); none (nil) codegen reads as no drop at all: a plain branch
-                 drop (let [[_ p target u r d] t
+                 drop (let [[_ p target u r d pd] t
                             lp (when (seq? p) (last p))
                             ty (when (and (:drop-glue facts) (seq? p))
                                  (cond (= 2 (count p)) (:tc (meta (:ty (nth (:locals ours) (second p) nil))))
                                        ;; queue 566 (C6 L1): a field's place (`(_8 as Some).0` in an unwind path's drop of a moved-from
                                        ;; Option's payload, get_backtrace_style's OsString): the field's type, its projection's
                                        (and (seq? lp) (= 'field (first lp))) (:tc (meta (nth lp 2 nil)))
-                                       ;; queue 572 (C6 L3): a backtrace crate's drop of a reference's pointee (`*path = p.to_string()`'s
-                                       ;; replace, addr2line's path_push: ElaborateDrops leaves an untracked place's drop unconditional):
-                                       ;; the reference's pointee type
-                                       (and (= 3 (count p)) (= '(deref) lp)
-                                            (#{"adler2" "memchr" "rustc_demangle" "miniz_oxide" "object" "gimli" "addr2line"} mono/*lib-crate*))
+                                       ;; queue 572 (C6 L3): a drop of a reference's pointee (`*path = p.to_string()`'s replace, addr2line's
+                                       ;; path_push: ElaborateDrops leaves an untracked place's drop unconditional): the reference's pointee
+                                       ;; type (gated on the backtrace crates by 572, ungated by queue 581, 572-1 (a))
+                                       (and (= 3 (count p)) (= '(deref) lp))
                                        (let [lt (:tc (meta (:ty (nth (:locals ours) (second p) nil))))]
                                          (case (first lt) :ref (nth lt 3 nil) nil))))
                             g (when ty (try (if (= "1" (System/getenv "RF_DROP_GLUE_TRACE"))
@@ -801,7 +800,8 @@
                                                   r))
                                               ((:drop-glue facts) ty))
                                             (catch Throwable e (when (System/getenv "RF_DROP_GLUE_TRACE") (println "rf-drop-glue: no glue for" (pr-str ty) (.getMessage e))) nil)))]
-                        (list 'drop p target (unwind u) r d (when g (list 'glue {:symbol g}))))
+                        ;; (queue 581: core-instance's :param-drop mark kept, after the glue)
+                        (apply list (cond-> ['drop p target (unwind u) r d (when g (list 'glue {:symbol g}))] (= :param-drop pd) (conj :param-drop))))
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
@@ -1518,11 +1518,31 @@
                       x))]
     (update b :blocks (fn [bs] (mapv (fn [blk] (update blk :stmts (fn [ss] (mapv fix ss)))) bs)))))
 
+(defn- mark-param-drops
+  "queue 581 (C6 L2's unwind-edge slice): a generic body's drops of a place whose type names a parameter (the local's, or a field
+  projection's) marked `:param-drop` (the term's 7th element): rustc's MIR of the instance is the generic body's, where such a drop
+  stays (needs_drop unknown) and its landing pad with it; codegen's nop_landing_pads takes the pad as a nop at the instance (a
+  plain call), but MergingSucc still counts the edge (codegen_terminator's mergeable_succ: the terminator's successors)"
+  [body]
+  (let [lt (:local-tys body)
+        param? (fn [t] (boolean (some #(and (vector? %) (= :param (first %))) (tree-seq coll? seq t))))]
+    (update body :blocks
+            (fn [bs]
+              (mapv (fn [blk]
+                      (let [t (:term blk) p (when (seq? t) (second t)) lp (when (seq? p) (last p))]
+                        (if (and (seq? t) (= 'drop (first t)) (= 6 (count t)) (seq? p)
+                                 (param? (cond (= 2 (count p)) (nth lt (second p) nil)
+                                               (and (seq? lp) (= 'field (first lp))) (:tc (meta (nth lp 2 nil)))
+                                               :else nil)))
+                          (assoc blk :term (with-meta (apply list (concat t [:param-drop])) (meta t)))
+                          blk)))
+                    bs)))))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
   (binding [*export-crate* (first (str/split (str (:def entry)) #"::")) *instance-def* (:def entry)]
-  (let [b (sized-const-eval (reprint (:body entry) args))
+  (let [b (sized-const-eval (reprint (cond-> (:body entry) (seq args) mark-param-drops) args))
         ;; queue 479: the locals RemoveZsts takes as zero-sized: rustc's optimized_mir is the generic body's, so a local whose
         ;; type is concrete there (no parameter) and zero-sized by mono's layout (remove_zsts.rs' maybe_zst kinds but fn items
         ;; and `!`, whose constants print otherwise); the instance's arguments make no others ZST
@@ -3241,9 +3261,8 @@
               ;; the layouts from the instances' forms, which carry their types (:tc; runtime-body's walk drops it, and form->ty
               ;; reads a type from the record's DefId texts alone), then from the runtime bodies' for what they add
               ;; C6-4: each layout with its LLVM type without names (std's IR's -Z fewer-names: mono/*llty*)
-              lt (binding [mono/*llty* true
-                           ;; queue 572: a backtrace crate's pair structs nested (mono's *pair-struct-llty*)
-                           mono/*pair-struct-llty* (contains? #{"adler2" "memchr" "rustc_demangle" "miniz_oxide" "object" "gimli" "addr2line"} crate)]
+              ;; (queue 572's pair structs nested, mono's *pair-struct-llty*, ungated by queue 581: its default)
+              lt (binding [mono/*llty* true]
                    ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl) (keep #(nth % 3) l2)))
                                                 (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out) (keep #(nth % 3) l2-out))))))]
           {:bodies out
