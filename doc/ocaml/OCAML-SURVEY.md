@@ -5135,3 +5135,28 @@ Arbace's typer.
 - **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
   sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
   on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).
+
+## As built: queue 583 (2026-11-25, the VM): the AOT cell's 13 by-design rows classified, two built
+
+The AOT cell's 13 design rows by cause (next 01ee9c426: 539 / 13 / 57):
+- **Built** (the light level):
+  - lib-runtime-events/test (`:c-runtime-internals`): the test's C consumer (runtime_events_consumer.h on ci) read the C API server's
+    own oi ring, which the program's collections never reach (minors 0, majors 0, 42 bytes against 44). Now oicapi's `RuntimeEvents`
+    hook (set by the wire's servers, wire.ae's wireLoad) sends __oi_re_control, _cursor and _next to the runtime as a request 'V'
+    (u32 op, str, u32 n, n i64), answered 'R' with a block of integers by ExtRtEvents/consumer over the runtime's own ring (start,
+    pause, resume, are_active; the cursor's E_SUCCESS / E_NO_CURRENT_RING / E_OPEN_FAILURE / E_MAP_FAILURE; the next message, its
+    lost words, padding skipped), as oi's RuntimeEventsControl, Cursor and Next answer on oi's. Handle keeps the worker on a 'V' as on
+    'K' and 'Q'. Passes, "same" against oi; the control `_control/re-test-vs-caml` differs. The class holds no program at this level.
+    The compiled level's main serves the same wire, so its row should pass too (not run: the host's lane).
+  - callback/callback_effects_domains_gc (`:c-primitive`): not a stub of the test's: `external caml_callback` names the C runtime's own
+    function, which ocamlopt links. ExtCore/caml_callback applies f to a on a stack of its own (CApi/apply's rule). The program runs and
+    passes by its own verdict given 900 s (148.7 s of user CPU for the whole check, its main beside a domain compacting without end on the
+    level's one Go thread), but not within the check's 120 s: recorded "slow", `:light-speed` (aot-slow.edn), deferred.
+- **ocamldoc's five** (tool-ocamldoc/t01-t05, `:ocamltest-tools`): 528-8 (a) puts them at the compiled level (the light level does not
+  fit, 480-1). There they stopped on `external caml_unix_gmtime`, which ExtUnix now has (the tm record by days_from_civil's inverse,
+  checked against date(1) on six instants including leap days and 2100). The compiled rerun is heavy (the host's lane).
+- **`:unix-java`'s four** (lib-threads/delayintr and signal; the suite's lib-unix/unix-socket/recvfrom_linux and recvfrom_unix): the
+  light level has no host for the OS's signals or AF_UNIX sockets; the compiled level has HostSys (OC216 (a)). DECISION 583-1.
+- **`:opam-not-run`'s two** (opam/re/expect, opam/sexplib0/sexplib0_test): 547f-2 (a) leaves them until the AOT level runs the ppx
+  programs. DECISION 583-3.
+After it: OCaml AOT 540 / 11 / 58 (67 n/a), completeness 0.9709 -> 0.9713.

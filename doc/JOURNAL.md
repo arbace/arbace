@@ -22290,3 +22290,22 @@ Rows (lib-unit compare against std's IR at the pin, equal/differ/refused), 561's
 Alternatives considered: ungating each rule now (561-2 (a) says later, each with std's lib-unit compare); a crate-wide
 `*backtrace*` var in place of one var per rule (kept per rule, so each can be ungated alone); for the private-import rule,
 dropping private uses from the index (they are needed for the module's own resolution).
+
+## 2026-11-25 — OCaml AOT's 13 by-design rows: classified; lib-runtime-events/test built, callback_effects_domains_gc runs (queue 583, VM)
+
+The AOT cell's design rows (next 01ee9c426: 539 / 13 / 57) by cause, and what was built (doc/ocaml/OCAML-SURVEY.md, "As built: queue
+583"):
+- lib-runtime-events/test (`:c-runtime-internals`, 528-12's "a fix of its own"): its C consumer read the C API server's oi ring, not the
+  program's. oicapi's RuntimeEvents hook and the wire's 'V' now forward __oi_re_control, _cursor and _next to the runtime
+  (ExtRtEvents/consumer, CApi's answer). Passes at the light level; the control `_control/re-test-vs-caml` differs. Alternative not taken:
+  a second ring in the server fed by the runtime's events (every event crossing the pipe, not only the consumer's reads).
+- callback/callback_effects_domains_gc (`:c-primitive`): `external caml_callback` is the C runtime's own function; ExtCore/caml_callback
+  applies it. It passes in 148.7 s of CPU, beyond the check's 120 s: recorded slow, `:light-speed` (aot-slow.edn); per-row caps at
+  this level are DECISION 583-4. Alternative not taken: a C stub on ci (no C of the test's own exists).
+- ExtUnix/caml_unix_gmtime, for ocamldoc's five rows at the compiled level (528-8 (a)), where they stopped on it: their compiled rerun
+  is the host's (heavy). Checked by a probe of the runtime's forms on stage 0 against date(1).
+- The rest, the user's: `:unix-java`'s four at the compiled level (DECISION 583-1), the two ppx programs (547f-2 (a), DECISION 583-3),
+  ocamldoc's five's fallback (DECISION 583-2).
+Records: check-aot-native.edn and check-suite-aot-native.edn by `--record --only-list` over the rows (and test_caml for the control),
+stale known entries removed (aot-known.edn, aot-compiled-known.edn), then `bin/reap --record`, `bin/crops-score --record`. OCaml AOT
+539 / 13 / 57 -> 540 / 11 / 58; completeness 0.9709 -> 0.9713.
