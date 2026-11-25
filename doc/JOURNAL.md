@@ -21968,3 +21968,45 @@ the host's.
 
 568-1 (a): the thin Go `_pickle` stays, the fallback under `PYI_C_ACCEL=0`; `_pickle` is otherwise CPython's Modules/_pickle.c in the
 C world, as built on this branch. Alternative (b), removing the Go module, not taken.
+
+## 2026-11-25: train 5 (Python round 2) assembled: eleven branches on train-3, go/arbace/py merged at the Go level
+
+Branch train-5 from mac/train-3 (2aeeffc77), the burst's train 5 (.tmp/goal/train-3-plan.md's "Train 5" lines): merged in order
+mac/py-core-1124 e0847b7fc, mac/py-os-1124 144761c1c, mac/py-design-1124 cf9f89f08, the Mac's 550-py-sqlite-statements aab180875,
+551b-py-finalization-warnings a2e1214c8, 552-py-tls13 7d5ee9c01, 553-py-subinterp-testbuffer 585a1f7bc, 554-py-capi fce1feee9,
+557b-py-compileall-tools-r2 431dd5eb0 (which holds 557-py-unowned 0be967103) and 568-py-pickle-c c52666fc4.
+
+The method for go/arbace/py, whose forms carry Go positions (mode :full), so that a textual merge of two branches' edits to one
+file shifts the other's positions: each merge commit keeps go/arbace/py{,.ae} at its first parent; the package is printed to Go
+(bin/repr-go print) at every merge base and branch head, merged file by file in Go with git merge-file into one tree
+(.tmp/g/cur/py, the conflicts resolved there), and read back once at the end (bin/pyi runtime read's step, `bin/repr-go read
+--full --tests`) after gofmt, go vet and go test of the printed Go: one commit holds the read.
+
+The overlaps resolved (three branches built the same features independently):
+- -O: py-core (compile()'s optimize as a mode suffix +O1/+O2), py-os (config's optimization_level from -O and PYTHONOPTIMIZE,
+  every compile's +opt1/+opt2 mode, the IR cache keyed by it, compile()'s optimize -1 the interpreter's, the main module at the
+  level, sys.flags.optimize, builtins.__debug__) and 557b (startOptimize, optimizeMode's +ON, a second O in bin/pyi's start
+  flags). Kept: py-os's whole (the most complete: PYTHONOPTIMIZE and imports); 557b's startOptimize, optimizeMode and its O in
+  the start flags dropped (with both, -O counted twice); the compiler's *optimize* is one var, py-core's and 557b's uses being
+  the same as py-os's; 553's compileSourceNamed (compile()'s \N names) takes the level (compileSourceNamedOpt).
+- the future flags: py-os's :future-annotations and :future-barry (the IR names), 557's :future-barry-as-bdfl renamed to them
+  (CodeFutureBarry in Go, code.replace's co_flags kept from 557).
+- inlined comprehensions' scopes: py-core's :temp-syms kept, 557's :comp-syms tweak dropped (the same CPython rule).
+- source decoding: py-os's get_normal_name, cookie neutering and CR LF translation kept over 557's equivalents; 557's
+  fileInitError (a coding spec's codec that cannot read the file, a SyntaxError at line 0) added before py-os's -c branch.
+- function and type annotations, PYTHONPATH, sys.pycache_prefix: py-core's and py-os's kept over 557b's equivalents.
+- built-in docstrings: py-core's table (builtinDoc) after train 3's C extension docs (ExtBuiltinDoc) in __doc__ and
+  __text_signature__.
+- functools.partial: py-design's NEXT.md step 1, the subclass repr and objectDescr __reduce__/__setstate__, applied in the Go.
+- hash.go is py-os's (randomized when PYTHONHASHSEED is unset; bin/pyi's verbs export 0).
+- goi's table, j2g's program copy and arbace_runtime_not: train 3's clib and pyctypes beside 552's pytls.
+- classes: 551b's :finalization :kind :na kept with 553-2's test_fd_finalization; 557/557b's removals of :compiler-errors,
+  :inlined-comprehensions and :compileall-pyc kept; :forkserver-preload's rows kept out of :multiprocessing; :c-accelerators'
+  test_pickle rows those py-design and 568 both kept (39, 568's); bin/pyi divergences' six shadowed names resolved (test_compile's
+  four to queue 554's classes, test_type_check_in_subinterp :c-accelerator-gaps' alone, test_signaldict_repr :c-accelerators'):
+  0 shadowed. The merged namespaces load on stage 0 (arbace.go.table, arbace.j2g.main, arbace.python and its parts, repr/python's
+  native, astjson and peg).
+
+Next (.tmp/train-5.sh under one big-lock ticket, HEAVY_MEM_GIB 30): the read back, bin/j2g-edge update, one gate build, the smoke
+run; then .tmp/records-5.sh (its own ticket, 16): the eval check of the 101 modules the branches name or whose non-passes sit in
+the streams' classes (.tmp/train-5-modules.txt), and the AOT program set whole, recorded after review.
