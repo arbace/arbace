@@ -1112,10 +1112,14 @@
             (t= t ")") (if (= d 1) j (recur (inc j) (dec d)))
             :else (recur (inc j) d)))))
 
+(def ^:dynamic *tentative*
+  "queue 578: true inside a tentative parse (tentatively), whose failure decides between readings: no syntax recovery there."
+  false)
+
 (defn- tentatively
   "Runs (f p) with the cursor put back after."
   [^P p f]
-  (let [b (ix p)] (try (f p) (catch arbace.lang.ExceptionInfo _ :error) (finally (seek! p b)))))
+  (let [b (ix p)] (try (binding [*tentative* true] (f p)) (catch arbace.lang.ExceptionInfo _ :error) (finally (seek! p b)))))
 
 (defn- is-simple-declaration?
   "isCXXSimpleDeclaration: a declaration statement (or a for-range declaration, `allow-for-range`)."
@@ -2969,6 +2973,24 @@
             (and (t= t ";") (<= br 0)) (soft-diag! p j "expected primary-expression before ';' token")
             :else (recur (inc j) d br)))))
 
+(defn- gnu-attr-args!
+  "queue 578: a GNU attribute's arguments at its `(`, read as GCC reads them (the GCC manual's \"Attribute Syntax\": an identifier,
+  or an identifier and a comma-separated list of expressions, or such a list alone): parsed and put back, the clause still skipped
+  whole as before, so that a syntax error inside one -- a lambda's body among the arguments, cpp0x/pr84606.C's `common([] { struct
+  d })` -- is given (the statement's own recovery, or the error the parse stops at); in the main file outside a tentative parse and
+  a skimmed header, with the headers read in full (the dg check's own read)."
+  [^P p]
+  (when (and *full-headers* (not *tentative*) (not (skim? p)) (main-tok? p (ix p)))
+    (let [b (ix p)]
+      (try (adv! p)
+           (when (and (id? p) (or (is-at? p 1 ",") (is-at? p 1 ")"))) (adv! p) (accept! p ","))
+           (loop [] (when-not (is? p ")") (with-gt p true (parse-assign-expr p)) (when (accept! p ",") (recur))))
+           (catch arbace.lang.ExceptionInfo x
+             (let [at (:at (ex-data x))]
+               (when (and (:cpp/parse (ex-data x)) at (main-tok? p (long at)))
+                 (soft-diag! p (long at) (str (:why (ex-data x)))))))
+           (finally (seek! p b))))))
+
 (defn attr-nodes
   "The attribute-specifiers at the cursor: [[...]], __attribute__((...)), alignas(...): their nodes."
   [^P p]
@@ -3049,7 +3071,7 @@
                                      (contains? #{"noinline" "always_inline" "noreturn" "cold" "hot" "flatten" "leaf" "noclone" "returns_twice" "artificial" "noipa"}
                                                 (str/replace (ts (tok-at p b)) #"^__|__$" "")))
                             (soft-diag! p b (str "wrong number of arguments specified for '" (str/replace (ts (tok-at p b)) #"^__|__$" "") "' attribute")))
-                          (adv! p) (when (is? p "(") (attr-args-semicolon! p) (skip-balanced! p))
+                          (adv! p) (when (is? p "(") (when-not (attr-args-semicolon! p) (gnu-attr-args! p)) (skip-balanced! p))
                           (when-not (known-gnu-attr? (ts (tok-at p b))) (unknown-gnu-attr! p b b (t= (tok-at p (inc b)) "(")))
                           (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
                                    (conj out (node p "NativeAttr" b (last-ix p) (cond-> {:_gnu (ts (tok-at p b))}
@@ -3999,6 +4021,18 @@
 
 (defn- declare! [^P p e] (sc/declare! (sc/decl-scope (scope p)) e))
 
+(defn- param-close
+  "queue 578: the index of the `)` that closes the parameter-declaration-clause the cursor is in (its groups nested), or nil when a
+  `;`, `{` or `}` outside them, or the end, comes first."
+  [^P p]
+  (loop [j (ix p) d 0]
+    (let [^T t (tok-at p j)]
+      (cond (identical? :eof (.-k t)) nil
+            (or (t= t "(") (t= t "[")) (recur (inc j) (inc d))
+            (or (t= t ")") (t= t "]")) (if (zero? d) (when (t= t ")") j) (recur (inc j) (dec d)))
+            (or (t= t ";") (t= t "{") (t= t "}")) nil
+            :else (recur (inc j) d)))))
+
 (defn parse-param-list
   "A parameter-declaration-clause, the ( consumed, its ) too: {:params [ParmVarDecl ...] :types [...] :names [...] :va}."
   [^P p]
@@ -4142,6 +4176,16 @@
               (accept! p ",") (recur ps tys nms)
               (and (is? p "...") (is-at? p 1 ")")) (do (adv! p) (adv! p) {:params ps :types tys :names nms :va true})
               (accept! p ")") {:params ps :types tys :names nms :va false}
+              ;; (queue 578: GCC's recovery in a parameter-declaration-clause ([dcl.fct]/3): a parameter followed by neither `,`
+              ;; `...` nor `)` is its error, "expected ',' or '...' before X", and the clause's tokens are skipped to its `)`, the
+              ;; declaration going on with the parameters before, so a function's body is still read (parse/error6.C's
+              ;; `int f(int not) { return 1-not; }`); a decline all the same (the unit's Sema not run), outside a tentative parse
+              ;; and a skimmed header only; no `)` before the declaration's `;`, `{` or `}`, no recovery)
+              (and (not *tentative*) (not (skim? p)) (main-tok? p (ix p)) (param-close p))
+              (let [at (ix p)]
+                (decline! p "declaration: a parameter list" at at)
+                (seek! p (long (param-close p))) (adv! p)
+                {:params ps :types tys :names nms :va false})
               :else (perr p "a parameter list")))))))))
 
 (defn declare-params!
@@ -5078,6 +5122,23 @@
                         (soft-diag! p (long (:i pt)) (if m
                                                        (str "invalid use of template-name '" (:s (first (:parts qn))) "::" (:s pt) "' without an argument list")
                                                        (str "'" (:s (first (:parts qn))) "::" (:s pt) "' has not been declared"))))
+                      ;; (queue 578: [temp.dep.type]/1 and /6 with [basic.lookup.qual]: a qualified declarator-id's nested-name-
+                      ;; specifier names a member of the current instantiation, `template<class T> A<T>::X::X() {}` (A<T>, its
+                      ;; arguments the template-head's parameters in order), that the class template's definition, complete and without
+                      ;; bases, does not declare -- a member whose declaration had a syntax error, which GCC drops, among them: GCC's
+                      ;; error at the part, "'A<T>::X' is not a type"; template/typedef6.C)
+                      (and (= ctx :top) tmpl (= 3 (count (:parts qn))) (not (:g qn)) (:args (first (:parts qn)))
+                           (not (:args (second (:parts qn)))) (not (:tkw (second (:parts qn)))) (:i (second (:parts qn)))
+                           (main-tok? p (long (:i (second (:parts qn)))))
+                           (let [f (first (:parts qn)) q0 (lookup (scope p) (:s f)) nms (:names tmpl)]
+                             (and (map? q0) (:class q0) (:tmpl q0) (not (:incomplete q0)) (:scope q0)
+                                  (some? (:bases-order q0)) (zero? (.size ^ArrayList (:bases-order q0)))
+                                  (seq nms) (= (count nms) (long (:n tmpl))) (:ab f) (:ae f)
+                                  (= (str/replace (tok-text p (inc (long (:ab f))) (dec (long (:ae f)))) #"\s+" "") (str/join "," nms))
+                                  (nil? (sc/find-in (:scope q0) (:s (second (:parts qn))) true))
+                                  (nil? (sc/find-in (:scope q0) (:s (second (:parts qn))) false)))))
+                      (let [f (first (:parts qn)) pt (second (:parts qn))]
+                        (soft-diag! p (long (:i pt)) (str "'" (:s f) "<" (str/join ", " (:names tmpl)) ">::" (:s pt) "' is not a type")))
                       ;; ([dcl.fct]/? (C++23 [dcl.fct]/2): a function declared with a trailing return type has the placeholder
                       ;; `auto` alone as its declared return type: GCC's "'f' function with trailing return type has
                       ;; 'decltype(auto)' as its type rather than plain 'auto'", at the declaration; cpp1y/auto-fn52.C)
