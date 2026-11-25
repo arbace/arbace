@@ -1072,7 +1072,7 @@ oi_mods() {
 export -f oi_mods
 
 oi_dynlink() {
-  local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 src f dir file b U nf="" extra inc
+  local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 dlls=${8:-} cmas=${9:-} src f dir file b U nf="" extra inc e n u
   src=$(dirname "$TESTS/$id")
   [ "${NATIVE:-0}" = 1 ] || { echo "dynlink: plugins on the native path alone"; return 1; }
   for f in $flags; do
@@ -1090,6 +1090,20 @@ oi_dynlink() {
     fi
     if grep -q '^(ocaml/error' "$d/$dir/$U.ae"; then echo "dump: $f: $(head -c 200 "$d/$dir/$U.ae" | tr '\n\t' '  ')"; return 1; fi
     { echo "OI-CMO 1"; sed 's/^/import /' "$d/$dir/$b.imports"; echo lambda; cat "$d/$dir/$U.ae"; } > "$d/$dir/$b.cmo"
+  done
+  # (queue 576) ocamlmklib's libraries (DLLS NAME:C+C,..., CMAS NAME:UNIT+UNIT,...): dllNAME.so the line "OI-DLL 1" and its C files (their
+  # stubs the run's, OI_CSTUBS), NAME.cma the line "OI-CMA 1", its dllib -lNAME as ocamlmklib records it, then each unit's .cmo
+  # ("unit LENGTH" and the text), as test/ocaml/dynlink/dynlink.ml's loader reads a library
+  for e in $(echo "$dlls" | tr ',' ' '); do
+    n=${e%%:*}; { echo "OI-DLL 1"; for f in $(echo "${e#*:}" | tr '+' ' '); do echo "c $f"; done; } > "$d/dll$n.so"
+  done
+  for e in $(echo "$cmas" | tr ',' ' '); do
+    n=${e%%:*}
+    { echo "OI-CMA 1"; echo "dllib -l$n"
+      for u in $(echo "${e#*:}" | tr '+' ' '); do
+        [ -f "$d/$u.cmo" ] || { echo "dynlink: $n.cma's unit $u was not compiled"; return 1; }
+        echo "unit $(wc -c < "$d/$u.cmo")"; cat "$d/$u.cmo"
+      done; } > "$d/$n.cma" || { echo "dynlink: $n.cma's unit was not compiled"; return 1; }
   done
   : > "$d/dynlink.imports"
   local ms; ms=$(echo "$main" | tr ',' ' '); local last=${ms##* } m
@@ -1117,10 +1131,11 @@ oi_one() {
   local why; why=$(mll_gen "$d" "$base") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   # a test that builds plugins (header.awk's dynlink mode, OC220 (a)'s loader): its units built by its ocamlc steps, the main program's
   # before the test's own
-  local dyn="" dynmain="" dyncopy="" mains="" kv
-  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;; esac; done
+  local dyn="" dynmain="" dyncopy="" dyndll="" dyncma="" dynruns="" mains="" kv
+  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;;
+    @dyndll=*) dyndll=${kv#@dyndll=} ;; @dyncma=*) dyncma=${kv#@dyncma=} ;; @dynruns=*) dynruns=${kv#@dynruns=} ;; esac; done
   if [ -n "$dyn" ]; then
-    mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
+    mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy" "$dyndll" "$dyncma") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
     mains=$(echo "$mains" | tr '\n' ' ')
     env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports"
   elif [ -n "$(depend_of "$env")" ]; then
@@ -1194,6 +1209,26 @@ oi_one() {
       mv "$d/oi.out" "$d/oi.out.1"; cp "$d/oi.out.$i" "$d/oi.out"; st=$rst; break
     fi
   done
+  # (queue 576, header.awk's dynlink mode) the further programs the test links of its units and ocamlmklib's libraries (@dynruns=
+  # REF:ITEM+ITEM,...: a unit, or NAME.cma its units, -linkall), each run once and judged against its own reference REF.reference as
+  # ocamltest's check-program-output judges it; the first that differs (status not 0, or its output not the reference) is the row's
+  local dr ditem dfiles dn=0 dnote="" dst U2 dref
+  for dr in $(echo "$dynruns" | tr ',' ' '); do
+    dn=$((dn + 1)); dref=${dr%%:*}; dfiles=""
+    for ditem in $(echo "${dr#*:}" | tr '+' ' '); do
+      case $ditem in
+        *.cma) local ce cu; for ce in $(echo "$dyncma" | tr ',' ' '); do [ "${ce%%:*}" = "${ditem%.cma}" ] || continue
+                 for cu in $(echo "${ce#*:}" | tr '+' ' '); do dfiles="$dfiles $(echo "${cu:0:1}" | tr a-z A-Z)${cu:1}.ae"; done; done ;;
+        *) dfiles="$dfiles $(echo "${ditem:0:1}" | tr a-z A-Z)${ditem:1}.ae" ;;
+      esac
+    done
+    dst=0
+    (cd "$d" && run_redirected "$env" "$d/oi.out.$dref" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $(inc_units "$incs" | tr '\n' ' ') $dfiles --) || dst=$?
+    if [ "$dst" != 0 ] || ! cmp -s "$d/oi.out.$dref" "$(dirname "$TESTS/$id")/$dref.reference"; then
+      mv "$d/oi.out" "$d/oi.out.main"; cp "$d/oi.out.$dref" "$d/oi.out"; st=$dst
+      dnote="the program $dref (run $((dn + 1))) differs from $dref.reference"; break
+    fi
+  done
   t1=$(date +%s.%N); times > "$d/cpu1"
   [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$d" "$d/oi.out"
   [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$d" "$d/oi.out"
@@ -1206,6 +1241,7 @@ oi_one() {
   oi_limit_kill "$st" "$cpu" "$(echo "$t1 - $t0" | bc)" && note="timeout ${TIMEOUT}s"
   st=$(oi_status "$st" "$cpu")
   [ "$i" -gt 1 ] && [ -f "$d/oi.out.1" ] && note="run $i (arguments $r) differs from run 1${note:+; $note}"
+  [ -z "$dnote" ] || note="$dnote${note:+; $note}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
   # keep the outputs that differ, drop the dumps (large)
   rm -f "$d"/*.ae
