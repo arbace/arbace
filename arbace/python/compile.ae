@@ -24,6 +24,11 @@
 
 (def ^:dynamic *mode* "The compile mode: :exec, :eval or :single (compile-source)" :exec)
 
+(def ^:dynamic *optimize*
+  "compile()'s optimization level (py-core-1124; c_optimize, OPTIMIZATION_LEVEL): 1 and up no assert statement and __debug__
+  False, 2 and up no docstring (_PyAST_Preprocess removes the statement)"
+  0)
+
 (def ^:dynamic *warnings*
   "The compiler's SyntaxWarnings, an atom of [MSG LINENO OFFSET END-LINENO END-OFFSET] in the order made (codegen's
   _PyCompile_Warn); compile-source puts them in the module's code object as :warnings, the runtime emits them"
@@ -271,7 +276,9 @@
         btype (:type b)
         ;; in a comprehension inlined in a class body its own scopes (_PyCompile_TweakInlinedComprehensionScopes' in_class_block)
         comp-syms (:comp-syms @u)
-        flags (or (get comp-syms nm) (get (:symbols b) nm 0))
+        ;; :temp-syms: an inlined comprehension's names whose scope differs inside (push_inlined_comprehension_state's
+        ;; temp_symbols; py-core-1124)
+        flags (or (get comp-syms nm) (get (:temp-syms @u) nm) (get (:symbols b) nm 0))
         scope (sc/scope-of* flags)
         hidden (get (:hidden @u) nm)
         [fast deref global named] (case what :load [:load-fast :load-deref :load-global (if comp-syms :load-global :load-name)]
@@ -1070,14 +1077,14 @@
     (symbol? x) (case x None (load-const! u nil) True (load-const! u true) False (load-const! u false)
                   ... (load-const! u :ellipsis)
                   ;; a constant, whatever builtins hold (optimize_format's neighbour in codegen: Name __debug__ in Load)
-                  __debug__ (load-const! u true)
+                  __debug__ (load-const! u (zero? *optimize*))
                   (name-op! u (str x) :load))
     (integer? x) (load-const! u x)
     (string? x) (load-const! u x)
     (seq? x)
     (let [[h p o _] (node x)]
       (case h
-        name (if (= "__debug__" (ident (first p))) (load-const! u true) (name-op! u (ident (first p)) :load))
+        name (if (= "__debug__" (ident (first p))) (load-const! u (zero? *optimize*)) (name-op! u (ident (first p)) :load))
         const (expr! u (first p))
         int (load-const! u (digits->int (first p)))
         float (load-const! u (Double/parseDouble (str/replace (first p) "_" "")))
@@ -1247,7 +1254,13 @@
 (declare docstring-raw)
 
 (defn- docstring [body]
-  (let [d (docstring-raw body)] (if (string? d) (clean-doc d) d)))
+  (when (< *optimize* 2)
+    (let [d (docstring-raw body)] (if (string? d) (clean-doc d) d))))
+
+(defn- has-docstring?
+  "The body begins with a docstring statement, which is no statement of the body (kept or, under -OO, removed)"
+  [body]
+  (some? (docstring-raw body)))
 
 (defn- docstring-raw [body]
   (let [s (first body)]
@@ -1373,7 +1386,7 @@
                                            (fn [cu]
                                              (when-let [d (docstring body)] (swap! cu #(-> % (assoc :docstring d) (update :flags conj :has-docstring))))
                                              ;; the docstring is no statement of the body (codegen_function_body)
-                                             (stmts! cu (if (docstring body) (rest body) body))
+                                             (stmts! cu (if (has-docstring? body) (rest body) body))
                                              (no-loc! cu #(do (load-const! cu nil) (emit! cu :return nil))))
                                            {:firstlineno (decorated-first-line x o)})]
                   (make-function! u2 code (cond-> parts ann (conj :annotate)))))]
@@ -1468,7 +1481,7 @@
                                                  ;; codegen_body: at the docstring's location (queue 248: its line alone before)
                                                  (at-node! cu (first body) #(load-const! cu d))
                                                  (no-loc! cu #(name-op! cu "__doc__" :store)))
-                                               (stmts! cu (if (docstring body) (rest body) body))
+                                               (stmts! cu (if (has-docstring? body) (rest body) body))
                                                ((resolve 'arbace.python.compile/class-annotations!) cu)
                                                ;; the class body's tail: artificial (codegen_class_body's NO_LOCATION)
                                                (set-line! cu nil)
@@ -1756,6 +1769,7 @@
                                             (not (sc/has-bit? f sc/DEF_NONLOCAL)))] nm)))
             saved (:hidden @u)
             saved-syms (:comp-syms @u)
+            saved-temp (:temp-syms @u)
             k (count own)]
         (expr! u it0)
         (at-node! u it0 #(emit! u (if (:async o0) :get-aiter :get-iter) nil))
@@ -1785,8 +1799,22 @@
           (emit! u :swap 2)
           (when (and (= :class (:type @(:block @u))) (nil? saved-syms))
             (swap! u assoc :comp-syms (:symbols @block)))
+          ;; push_inlined_comprehension_state: a name whose scope inside differs from the scope outside takes the inside
+          ;; one while the comprehension compiles, but a name free inside (handled as outside) and a cell inside that is
+          ;; free outside (deref either way); restored after (py-core-1124: a name a first comprehension bound in a
+          ;; function, free in a second, was the function's fast local; test_listcomps'
+          ;; test_multiple_comprehension_name_reuse)
+          (let [outer (:symbols @(:block @u))
+                temp (into {} (for [[nm f] (:symbols @block)
+                                    :when (not= nm ".0")
+                                    :let [sc (sc/scope-of* f)
+                                          osc (sc/scope-of* (or (get saved-temp nm) (get outer nm 0)))]
+                                    :when (and (not= sc osc) (not= sc 4) (not (and (= sc 5) (= osc 4))))]
+                                [nm f]))]
+            (when (seq temp)
+              (swap! u assoc :temp-syms (merge saved-temp temp))))
           (comp-loops! u gens 0 #(elt! u %) 0 eloc)
-          (swap! u assoc :hidden saved :comp-syms saved-syms)
+          (swap! u assoc :hidden saved :comp-syms saved-syms :temp-syms saved-temp)
           (when (pos? k)
             (pop-handler! u)
             (let [result-depth (depth u)
@@ -2226,13 +2254,15 @@
       assert (let [[t m] p]
                (when (let [[th tp _ _] (when (seq? t) (node t))] (and (= th 'tuple) (seq (first tp))))
                  (warn! "assertion is always true, perhaps remove parentheses?"))
+               ;; codegen_assert: nothing under -O, after the warning
+               (when (zero? *optimize*)
                (let [js (atom []) _ (jump-if! u t js true) d (depth u)]
                  (emit! u :call-intrinsic [:assertion-error 0])
                  (when (some? m) (expr! u m) (emit! u :call [1 nil]))
                  ;; codegen_assert: the raise at the test's location (the traceback's caret line under the test)
                  (at-node! u t #(emit! u :raise 1))
                  (set-depth! u d)
-                 (doseq [j @js] (label! u j))))
+                 (doseq [j @js] (label! u j)))))
       import (import! u (first p) (:lazy o))
       import-from (import-from! u x)
       (global nonlocal) nil
@@ -2543,7 +2573,9 @@
 (defn- pattern!
   "pattern*! at the pattern's location (a SyntaxError's)"
   [u x fails]
-  (binding [*pos* (or (pos-of x) *pos*)] (pattern*! u x fails)))
+  ;; codegen_pattern's helpers: each pattern's instructions at its own location, LOC(p) (py-core-1124: test_compile's
+  ;; TestSourcePositions.test_matchcase_*)
+  (binding [*pos* (or (pos-of x) *pos*)] (at-node! u x #(pattern*! u x fails))))
 (defn match-stmt! [u x]
   (let [[_ [subject cases] _ _] (node x)
         ends (atom [])]
@@ -2552,8 +2584,9 @@
       (let [[_ [pt body] co _] (node c)
             d (depth u)
             pl (or (line-of pt) (line-of c))]
-        ;; a case's instructions at its pattern's line (codegen_match_inner's LOC(m->pattern))
-        (when pl (set-line! u pl))
+        ;; a case's instructions at its pattern's location (codegen_match_inner's LOC(m->pattern)), its line when the
+        ;; pattern has no position
+        (if-let [pp (pos-of pt)] (swap! u assoc :line (first pp) :loc pp) (when pl (set-line! u pl)))
         (emit! u :copy 1)
         (let [fails (atom []) stores (atom [])]
           (binding [*allow-irrefutable* (or (some? (:guard co)) (= i (dec (count cases))))
@@ -2570,7 +2603,7 @@
           (emit-nl! u :pop nil)
           (stmts! u body)
           (swap! ends conj (emit-nl! u :jump nil))
-          (when pl (set-line! u pl))
+          (if-let [pp (pos-of pt)] (swap! u assoc :line (first pp) :loc pp) (when pl (set-line! u pl)))
           (if (seq @fails) (fail-ladder! u @fails d) (set-depth! u d)))))
     (emit! u :pop nil)
     (let [end (here u)] (doseq [e @ends] (patch! u e end)))))
@@ -2927,7 +2960,10 @@
   (let [m (flow! @u)
         b @(:block m)]
     {:name (:name m) :qualname (:qualname m) :kind (:kind m)
-     :flags (cond-> (:flags m) (:optimized m) (conj :optimized) (:nested b) (conj :nested))
+     ;; :future-annotations: CO_FUTURE_ANNOTATIONS on every code object of a unit under `from __future__ import annotations`
+     ;; (compute_code_flags' cf_flags & PyCF_MASK; py-core-1124: codeop's Compile learns it, test_codeop's test_future_imports)
+     :flags (cond-> (:flags m) (:optimized m) (conj :optimized) (:nested b) (conj :nested)
+              (:future-annotations *table*) (conj :future-annotations))
      :argcount (:argcount m 0) :posonly (:posonly m 0) :kwonly (:kwonly m 0)
      :locals (:locals m) :cells (:cells m) :frees (:frees m) :names (:names m) :consts (:consts m)
      :docstring (:docstring m) :code (:code m) :handlers (handler-table (:hs-of m)) :lines (:lines m)
@@ -3017,7 +3053,7 @@
         (when-let [d (and (not= *mode* :single) (docstring body))]
           (at-node! u (first body) #(load-const! u d))
           (no-loc! u #(name-op! u "__doc__" :store)))
-        (stmts! u (if (and (not= *mode* :single) (docstring body)) (rest body) body))
+        (stmts! u (if (and (not= *mode* :single) (has-docstring? body)) (rest body) body))
         (if (first body) (at-node! u (first body) #(class-annotations! u ph)) (class-annotations! u ph))
         (no-loc! u #(do (load-const! u nil) (emit! u :return nil)))
         ;; top-level await: the module's code a coroutine's (CO_COROUTINE)

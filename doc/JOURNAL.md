@@ -20789,3 +20789,35 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24: py-core-1124, Python's core objects and builtins (the main host, the burst's py-core stream)
+
+The coordinator's scope (burst of 2026-11-23, .tmp/goal/burst-1123-brief.md): the eval level's "core objects and builtins" and
+"stdlib misc" groups of .tmp/goal/py-na-proposal.md (pure-Python semantics in pyi), with :coroutines from the Mac's 551 and five rows
+py-os handed over; branch py-core-1124 from mac/py-mac-1123 (5d93b6732, the consolidated Python of 535/537/545/551, so that its
+go/arbace/py edits meet train 3's). The record's non-passing rows (test/python/check-lib-test-linux-amd64.edn) classified by
+test/python/divergences.edn's first-class rule (.tmp/goal/pyna/classify.py over this tree): 163 rows in the scope's classes. Each
+cause read in CPython 3.14.10's sources (the pinned tarball) and ported; doc/python/PYTHON-SURVEY.md, "As built: py-core-1124", lists
+them: the built-ins' docstrings as a table Arbace makes (builtins_docs_table.go, tools/pyi/runtime_tables.ae's `docs`, from the same
+reading as textsig; its control), struct sequences as tuple subclasses, a non-dict `__builtins__` (Frame.BuiltinsMap), compile()'s
+optimize (the compiler's *optimize*), inlined comprehensions' temporary scopes, CO_FUTURE_ANNOTATIONS, match patterns at their own
+locations, and about thirty smaller ports (dict views' isdisjoint, deque, int's base, WITH_EXCEPT_START's traceback, complex
+products, % formatting, except* with a subclass's split, exceptions' members, OSError_init, function and type annotations, object's
+and the built-in types' dicts, type names' identity, dict.fromkeys' stored hashes, frozenset, set reprs, dir(), input()).
+
+The method: go/arbace/py printed (`bin/pyi runtime print`), edited as Go (gofmt, go vet clean), read back with `bin/repr-go read --full
+--tests ./py` (bin/pyi runtime read's step for py; the other packages unchanged, builtins_os_other kept); arbace/python edited in
+place. The checks by pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`: the checkout's runtime compiled; stage 0's goi
+would interpret it), first probes against python3 3.14.10, then the scope's rows, then 50 touched modules whole against the eval
+record: no row the record passes fails because of the branch (three differ, the same at the base; test_namespace_order, failing at the base, fixed too); after the last changes the same modules' heaviest whole again, and test_exceptions and test_getopt. The scope's rows: 163, of them 118 pass in the AOT run (and test_input, test_common_format, non_Python_modules, the enum classify row and the three asyncio rows py-os handed over after it); py-os's test_hashable passes, its test_trace (gc.get_referrers), test_socket_type (gc.is_tracked, the collector's) and test_recursion are not built. bin/pyi's AOT module now keeps
+the C libraries' cf2g translations across its rebuilds (bin/pyi-clib aot's key: the node program's and the translator's sources),
+which saved about 10 minutes a runtime change.
+
+Records: the eval record is the main host's on a build at the checkout's key (train), so none is written here; the branch is ready
+for its train (the coordinator: train 5) with the modules listed in the report. Disk: the AOT lib-test drivers (about 250 MB each)
+removed after each module ran.
+
+DECISION for the user (the report's): test_hash's three test_null_hash rows (:hash-algorithm) expect randomized hashes with
+PYTHONHASHSEED unset, CPython's default; pyi keeps the zero key for its deterministic runs (go/arbace/py/hash.go, queue 304).
+(a) randomize when unset, the check and the AOT runs setting PYTHONHASHSEED=0 as the references do; (b) keep, the rows n/a;
+(c) keep, by design. Recommended (a).

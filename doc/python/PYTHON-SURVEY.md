@@ -8398,3 +8398,87 @@ natives the new modules called (`PyType_GetModuleState`, `PyObject_SelfIter`, `_
 ctypes' 7 ids 5 / 2 / 0. Left in `:elementtree-c` (deferred, 6): XMLPullParser's flush and small-chunk events, a deep deepcopy's C
 stack, an Element's weak reference, a Go panic in TreeBuilder's late tail. The world's aot forms (11.5 MB of node program) now
 need more than 8 GiB to print.
+
+## As built: py-core-1124, the core objects' and builtins' rows of the eval level (2026-11-24, the main host, the burst's py-core stream)
+
+The burst's py-core stream (the coordinator's scope: py-na-proposal's "core objects and builtins" and "stdlib misc", with
+:coroutines from the Mac's 551), on mac/py-mac-1123 (5d93b6732). The record's rows of those classes grouped by cause; built, the
+largest causes first:
+
+- **The built-ins' docstrings** (`:builtin-docstrings`, `:docstrings`, functools' test_builtin_update, pydoc's generic-alias and
+  union-type rows). `tools/pyi/runtime_tables.ae`'s textsig reading (queue 357) also makes `builtins_docs_table.go`
+  (`builtinDocs`, gen-tables `docs`, made in the same run as textsig: `bin/pyi runtime gen-tables textsig docs`, the --full step
+  pyi-runtime-textsig): every built-in type's, method's and module function's `__doc__` as `_PyType_GetDocFromInternalDoc` gives it
+  (the internal doc less Argument Clinic's "name(sig)\n--\n\n"), keyed as textSigs (`type:`, `meth:`, `func:`), and the getset and
+  member descriptors' docs (`attr:`, PyGetSetDef's and PyMemberDef's doc, Py_tp_getset and Py_tp_members of the specs too); its
+  control: bin()'s doc one word changed. The runtime reads it: a built-in function's or method descriptor's or classmethod
+  descriptor's `__doc__` (builtinDoc, found as builtinTextSignature finds a signature; a method read from its type's `__dict__`
+  by the type whose dict holds it, builtinDictOwner), a static type's dict's `__doc__` (type_dict_set_doc: its doc, else None as
+  before), a getset or member descriptor's (getsetDoc). Doctest's finder over builtins now finds CPython's 14 objects with
+  examples.
+- **Struct sequences are tuples** (`:struct-sequences`, `:structseq-protocol`'s test_tuple, test_imaplib's Time2Internaldate):
+  a struct sequence type's base is tuple and its value's visible items are its tuple (BaseTuple), so `isinstance(t, tuple)`
+  holds and tuple's methods see them; the types CPython makes by PyStructSequence_NewType (the modules' own, not sys's static
+  ones) take attributes (test_reference_cycle).
+- **A non-dict `__builtins__`** (`:builtin-functions-core`): exec's, eval's and FunctionType's builtins from the globals'
+  `__builtins__` kept as _PyEval_BuiltinsFromGlobals keeps it (a mappingproxy, a dict subclass, any object: Frame.BuiltinsMap,
+  Function.BuiltinsMap), the builtins' loads through it (PyMapping_GetOptionalItem), IMPORT_NAME's `__import__` and
+  LOAD_BUILD_CLASS's lookup too ("__import__ not found"), and _PyEval_GetBuiltin (an iterator's `__reduce__`) the running frame's.
+- **compile()'s optimize** (test_builtin's test_compile): `MODE+O1`, `MODE+O2` to the host's compiler (arbace.python.run),
+  `arbace.python.compile/*optimize*`: no assert statements and `__debug__` False from 1, no docstrings from 2 (the statement
+  removed, as _PyAST_Preprocess does).
+- **Inlined comprehensions' scopes** (`:inlined-comprehensions`): a name whose scope inside the comprehension differs from the
+  unit's takes the inside one while the comprehension compiles (push_inlined_comprehension_state's temp_symbols; but a name free
+  inside, and a cell inside free outside), so a name a first comprehension bound in a function and a second reads free is the
+  global.
+- **CO_FUTURE_ANNOTATIONS** (`:compiler-errors`, test_codeop's test_future_imports): the IR's flag `:future-annotations` on every
+  code object of a unit under `from __future__ import annotations`, co_flags' 0x1000000.
+- Smaller causes, each CPython's function ported: dict views' `isdisjoint` (`:dict-views-set-methods`); deque's `in` and `index`
+  detecting a mutation (RuntimeError), `index`'s message, `n * deque` (`:deque-core`); int()'s base by `__index__` and the digits
+  limit for every base not a power of two (`:int-core`); WITH_EXCEPT_START passing the exception's traceback to `__exit__` (it was
+  None: `:with-exit-traceback`, contextlib's test_contextmanager_traceback); `_Py_c_prod`'s Annex G recovery of infinities
+  (`:complex-core`); bytes' `%f` of a non-float "float argument required", a `*` precision PyLong_AsInt's, `{:zs}`'s message
+  (`:format-messages`); except* calling a subclass's own `split` and checking its answer; a class body's LocalsMap not the
+  globals' map (test_type_aliases' exotic globals); `__contains__ = None` blocking the fallback (`:contains-none-blocks`);
+  BaseException.__setstate__ with a str subclass's key (`:setattr-str-subclass`); the exceptions' members (StopIteration.value
+  ...) as member descriptors; OSError_init a no-op unless oserror_use_init (`:data-model`'s test_new_overridden); the method
+  descriptors of a built-in type read from its `__dict__` (enum's shadowed attributes); object's slot wrappers in its `__dict__`
+  (collections.abc.Hashable of object); dict.fromkeys of a set, frozenset or dict with the stored hashes (`:set-core`);
+  frozenset's keyword refusal for a subclass without `__init__`; set.__repr__ of a subclass naming it (`:pprint-dispatch`); a
+  function's and a type's `__annotate__` and `__annotations__` as typeobject.c and funcobject.c set them, a function's cache
+  outside its `__dict__` (funcAnnotations: functools.update_wrapper's `__dict__` update put type's `__annotations__` descriptor
+  there) (`:annotate-rest`, functools' test_update_type_wrapper); `'%'` after flags an unsupported format character, not a literal
+  (unicode_format_arg); dir() of a dict subclass's locals by its keys(); input()'s flush of a stdout without one cleared; a match
+  statement's patterns at their own locations (codegen_pattern's LOC(p): `:code-positions`' six test_matchcase rows); a static
+  type's `__doc__` its tp_doc whatever its dict holds (property's); a class's `__name__` and `__qualname__` one str object while
+  the text stands (ht_name: inspect.classify_class_attrs finds them by identity, test_enum's test_inspect_classify_class_attrs);
+  type() of an OrderedDict namespace in its order (dict_merge's slow path: test_builtin's test_namespace_order, failing at the
+  base).
+- Tooling: bin/pyi's AOT module keeps the C libraries' cf2g translations across its rebuilds (bin/pyi-clib aot's key now the node
+  program's and the translator's sources): a runtime change no longer translates the five libraries again (about 10 minutes).
+
+- Also: OSError_init's use_init, a subclass's class attribute over an exception's field (OSError's errno: test_asyncio's three
+  SelectorEventLoopSignalTests, py-os's hand-over), input()'s "lost sys.stdin" and "lost sys.stdout", `'%*r'`'s width
+  PY_SSIZE_T_MIN "width too big", the owners of a built-in type's methods and class methods read from its `__dict__`
+  (`__objclass__`; doctest's finder walks them).
+- **Classes**: test_compile imports at this base (PyConfig_Get, 4c48d37c6), its rows run: the four compiler-shape rows named in
+  `:compiler-shapes` (it named none), the two null-byte script rows (the file's message, "source code cannot contain null
+  bytes", from a script run: pyi's command line) in `:source-decoding`. The classes whose rows pass now keep them until the
+  train's re-record (the record is the main host's).
+
+**Proofs** (the main host, pyi's AOT with the checkout's runtime, `bin/pyi check --aot --lib-test --fresh --only`; logs and probes in
+.tmp/core/ of the worktree): probes against python3 3.14.10 (.tmp/core/p/probe1-7: every line equal but the doctest finder's
+count, 758 of CPython's 783 in builtins, inside test_doctest's 750-800, the 14 examples' objects the same); the scope's 163 rows:
+118 pass (run3), the rest listed below; 50 touched modules whole (6,907 methods) against the eval record: 3 rows the record passes
+not passing, all three the same at the base (test_namespace_order, fixed since; test_recursion_error_cleanup, classed;
+test_closerange, the host's descriptors); after the last changes test_builtin, test_enum, test_inspect, test_pydoc, test_format, test_doctest, test_exceptions and test_set whole again (2,589 methods: two rows the exceptions' field rule broke, a slotted exception's and getopt's msg, fixed by narrowing it to a built-in field left None), then test_exceptions, test_getopt and the three asyncio rows (157 methods, 0 failing; the one row differing from the record the same at the base). The negative controls failed as they must in
+every run. `bin/pyi runtime gen-tables textsig docs`: textsig byte for byte, docs Arbace's, both controls differing.
+
+**Left in the scope** (not built here): the finalization and collector rows (WeakSet's five, test_slice's cycle, test_sort's
+mutating __del__, CodeWeakRefTest, test_no_exception_leak, test_structseq's gc tracking, test_coroutines' bpo_45813 pair, pdb's
+frame refleak, test_trace's gc.get_referrers); C accelerators (functools' four reentrant reprs of the C partial, pydoc's _pickle and
+_datetime signatures, plistlib's _datetime message); the subinterpreters' two (the Mac's 553); test_hash's three test_null_hash
+(PYTHONHASHSEED unset: CPython randomizes, pyi keeps the zero key: a DECISION); the command line's (test_support's -O flags,
+test_traceback's two relative file names, the two null-byte scripts); pydoc's help CLI, bad import and object addresses
+(pyi's identity numbers are short: pydoc's stripid wants six hex digits), the namedtuple field descriptor; test_monitoring's
+LoadSuperAttr call event; test_pyclbr's _testmultiphase.
