@@ -22348,3 +22348,46 @@ without the conflict markers 9b60ce498 had left; the survey's markers, which thi
 - Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
   -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
   `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-25 — Python: :coroutines' two refcount rows, :child-is-pyi's records, :c-accelerators' remainder (queue 585, VM)
+
+Brief: `.tmp/worktrees/q/tasks/585-py-accel-coroutines.md` (branch `585-py-accel-coroutines` from next 01ee9c426).
+Not in that base: 537 (the strict-subclass DeprecationWarning: test_int, test_complex, test_capi's test_D), 551/551b
+(`_warnings` in Go: test_warnings' 15 DeprecatedTests, which `:coroutines`' match holds here), 553 (:child-is-pyi's fixes)
+and 568 (C `_pickle`). Done here, without redoing those:
+- Merged origin/553-py-subinterp-testbuffer (585a1f7bc): 553's eight :child-is-pyi rows passed in its probes but no whole
+  record held them. The journal's conflict is a union; nothing else conflicted.
+- `:coroutines`: test_bpo_45813_1 and _2 moved to `:finalization`, as 537-2 (a) names them (the user, 2026-11-23: the moment
+  of reference counting; 551b makes `:finalization` n/a). The class keeps its match line for the rows the merges of 537 and
+  551b will clear. No run: the rows' outcome is unchanged.
+- Whole run: `bin/pyi check --fresh` of test_marshal, test_unicodedata, test_posix, test_subprocess and test_os, with the
+  drivers on goi and the children on the compiled launcher (557b-1 (a); the launcher rebuilt at runtime key 0739f727c096e87e).
+  The run had 1,058 methods: 856 pass, 196 classed and 6 failing. All 8 of 553's rows pass, and test_urandom_failure skips
+  as CPython's does.
+  - test_marshal (64 pass, 15 classed) and test_posix (136 pass, 44 classed) passed whole. They were recorded with
+    `bin/pyi check --judge DIR --record` over those two modules alone: 0 regressions, 3 now pass. Their 3 names left
+    `:child-is-pyi`.
+  - Three modules had failures, so they were not recorded: test_unicodedata (one memory-cap crash), test_subprocess (3)
+    and test_os (2). Probed alone (`--only`):
+    - test_function_checksum and test_fd_leak pass. Both are load effects.
+    - test_timerfd_TFD_TIMER_ABSTIME fails both times: 0.98 s against 1 within 2 places. This is timing on the VM's goi.
+    - test_close_fds, test_pass_fds and test_leak_fast_process_del_killed fail with launcher children. With children on goi
+      (no launcher) they pass, and so do test_bool and test_getopt, the controls' subjects. So they are an artifact of the
+      launcher child, whose Go runtime descriptors land at 5 and 6 after the passed ones. They are not this code.
+  - The host's whole records of these three modules would clear the remaining 5 rows.
+- Python eval 40,829 / 1,403 / 1,306 -> 40,832 / 1,400 / 1,306. `bin/reap --record` and `bin/crops-score --record` were
+  run. `bin/reap`, `crops-score --judge --strict` and `records-check` each give 0 problems.
+- `:c-accelerators`' remainder after 568 (no change):
+  - test_inspect's test_signature_on_builtin_class and test_pickle's test_clear_unpickler_memo_reentrant are 568's C
+    `_pickle`.
+  - These stay by design under the user's decisions (2026-11-04, 465-3):
+    - test_annotationlib's test_type_repr and test_inspect's test_excluding_predicates are `_datetime`'s;
+    - test_types' module and test_int's monster are `_datetime` and `_decimal`;
+    - test_functools' test_c_classes needs `_decimal`.
+  - test_functools' two test_attributes_unwritable need a C partial with READONLY members, against 459-1 (a) (`_functools`
+    stays thin). That is the user's call: DECISION 585-2 in the report.
+
+  Alternatives considered:
+  - Redoing 537's and 551's fixes on this base: not taken. That would duplicate work that is already on its way to next.
+  - Recording test_subprocess with its three launcher failures moved into `:go-runtime-descriptors`: not taken. The
+    host's records, with children on goi, pass them.
