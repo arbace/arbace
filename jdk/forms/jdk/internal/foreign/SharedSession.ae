@@ -1,0 +1,110 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/foreign/SharedSession.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.foreign)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(jdk.internal.invoke MhUtil)
+        '(jdk.internal.misc ScopedMemoryAccess)
+        '(jdk.internal.vm.annotation ForceInline))
+
+(defclass ^:sealed SharedSession
+  :extends MemorySessionImpl
+  :permits [ImplicitSession]
+
+  (field ^:private ^:static ^:final ^ScopedMemoryAccess SCOPED_MEMORY_ACCESS
+    (ScopedMemoryAccess/getScopedMemoryAccess))
+
+  (field ^:private ^:static ^:final ^int CLOSED_ACQUIRE_COUNT -1)
+
+  (constructor [this] (super. nil (SharedResourceList.)))
+
+  (method ^:public ^{ForceInline true} acquire0 ^void [this]
+    (let [^:mutable ^int value 0]
+      (loop []
+        (set! value ^int (^[SharedSession] VarHandle/.getVolatile SharedSession/ACQUIRE_COUNT this))
+        (cond
+          (< value 0) (throw (.sharedSessionAlreadyClosed this))
+          (== value SharedSession/MAX_FORKS) (throw (SharedSession/tooManyAcquires)))
+        (when-not ^boolean (^[SharedSession int int] VarHandle/.compareAndSet
+                             SharedSession/ACQUIRE_COUNT
+                             this
+                             value
+                             (unchecked-add-int value 1))
+          (recur)))))
+
+  (method ^:public ^{ForceInline true} release0 ^void [this]
+    (let [^:mutable ^int value 0]
+      (loop []
+        (set! value ^int (^[SharedSession] VarHandle/.getVolatile SharedSession/ACQUIRE_COUNT this))
+        (when (<= value 0) (throw (.sharedSessionAlreadyClosed this)))
+        (when-not ^boolean (^[SharedSession int int] VarHandle/.compareAndSet
+                             SharedSession/ACQUIRE_COUNT
+                             this
+                             value
+                             (unchecked-subtract-int value 1))
+          (recur)))))
+
+  (method justClose ^void [this]
+    (let [acquireCount ^int (^[SharedSession int int] VarHandle/.compareAndExchange
+                              SharedSession/ACQUIRE_COUNT
+                              this
+                              0
+                              CLOSED_ACQUIRE_COUNT)]
+      (cond
+        (< acquireCount 0) (throw (.sharedSessionAlreadyClosed this))
+        (> acquireCount 0) (throw (SharedSession/alreadyAcquired acquireCount)))
+      ^void (^[SharedSession int] VarHandle/.setVolatile
+              SharedSession/STATE
+              this
+              SharedSession/CLOSED)
+      (.closeScope SCOPED_MEMORY_ACCESS this SharedSession/ALREADY_CLOSED)))
+
+  (method ^:private sharedSessionAlreadyClosed ^IllegalStateException [this]
+    (while (== ^int (^[SharedSession] VarHandle/.getVolatile SharedSession/STATE this)
+               SharedSession/OPEN)
+      (Thread/onSpinWait))
+    (SharedSession/alreadyClosed))
+
+  (defclass ^:static SharedResourceList
+    :extends MemorySessionImpl$ResourceList
+
+    (field ^:static ^:final ^VarHandle FST
+      (MhUtil/findVarHandle (MethodHandles/lookup)
+                            MemorySessionImpl$ResourceList
+                            "fst"
+                            MemorySessionImpl$ResourceList$ResourceCleanup))
+
+    (method add ^void [this ^MemorySessionImpl$ResourceList$ResourceCleanup cleanup]
+      (while true
+        (let [prev
+                ^MemorySessionImpl$ResourceList$ResourceCleanup (^[SharedResourceList] VarHandle/.getVolatile
+                                                                  FST
+                                                                  this)]
+          (when (identical? prev MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST)
+            (throw (MemorySessionImpl/alreadyClosed)))
+          (set! (.-next cleanup) prev)
+          (when ^boolean (^[SharedResourceList MemorySessionImpl$ResourceList$ResourceCleanup MemorySessionImpl$ResourceList$ResourceCleanup] VarHandle/.compareAndSet
+                           FST
+                           this
+                           prev
+                           cleanup)
+            (return)))))
+
+    (method cleanup ^void [this]
+      (if (not (identical? (^[SharedResourceList] VarHandle/.getAcquire FST this)
+                           MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST))
+          (let [^:mutable ^MemorySessionImpl$ResourceList$ResourceCleanup prev nil]
+            (while true
+              (set!
+                prev
+                ^MemorySessionImpl$ResourceList$ResourceCleanup (^[SharedResourceList] VarHandle/.getVolatile
+                                                                  FST
+                                                                  this))
+              (when ^boolean (^[SharedResourceList MemorySessionImpl$ResourceList$ResourceCleanup MemorySessionImpl$ResourceList$ResourceCleanup] VarHandle/.compareAndSet
+                               FST
+                               this
+                               prev
+                               MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST)
+                (break)))
+            (SharedResourceList/cleanup prev))
+          (throw (MemorySessionImpl/alreadyClosed))))))

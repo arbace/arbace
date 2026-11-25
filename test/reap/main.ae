@@ -615,9 +615,16 @@
   (memoize
    (fn [files]
      ;; CPython's recorded outcome of each Lib/test method (ref-cpython314-lib-test*.edn's :outcome lines; an :excluded line :excluded)
-     (into {} (for [f files x (read-forms f)
-                    :when (and (:id x) (not (:module x)) (or (:outcome x) (:excluded x)))]
-                [(:id x) (if (:excluded x) :excluded (:outcome x))])))))
+     ;; and (the user, 2026-11-23, proposal J1) a module row MODULE/* :no-tests when the module's :module line has status 0
+     ;; (or 4, a resource regrtest denied) and the references record no method of it: CPython ran no test of it either
+     (let [xs (for [f files x (read-forms f)] x)
+           with-methods (set (for [x xs :when (and (:id x) (not (:module x)))] (first (str/split (str (:id x)) #"/"))))]
+       (merge (into {} (for [x xs
+                             :when (and (:module x) (#{0 4} (:status x)) (not (with-methods (str (:id x)))))]
+                         [(str (:id x) "/*") :no-tests]))
+              (into {} (for [x xs
+                             :when (and (:id x) (not (:module x)) (or (:outcome x) (:excluded x)))]
+                         [(:id x) (if (:excluded x) :excluded (:outcome x))])))))))
 
 (defn py-ref-annotate
   "A :results source with :py-ref-outcomes true (Python's eval cell): each non-pass entry R's carries :ref-outcome, CPython's
@@ -711,6 +718,72 @@
          (:rows r) (update :rows #(reduce (fn [m id] (assoc m id :pass)) % (keys picked))))
        (vec (remove #(contains? picked (:id %)) es))])
     [r es]))
+
+(defn other-level-record
+  "An :other-level record's rows ([ID RESULT ...], RESULT a string or a keyword) as {ID RESULT-KEYWORD}."
+  [rows]
+  (into {} (for [[id res] rows] [id (if (keyword? res) res (keyword (str res)))])))
+
+(defn other-level-pick
+  "AOT at the level a case needs (OCaml's AOT cell, burst 2026-11-23, after 528-8 (a): the user, 2026-11-22, the tool rows at the
+  compiled level where the light level does not fit): of the classed entries ES (the light level's record), the ids whose every
+  entry is in a class not of kind :na and whose row in M ({ID RESULT}, the compiled level's record of the same corpus) is :pass:
+  a case one of Arbace's two AOT levels passes passes the AOT level."
+  [es m]
+  (set (for [[id g] (group-by :id es)
+             :when (and (every? #(let [c (:class %)] (and c (not= :na (:kind c)))) g) (= :pass (get m id)))]
+         id)))
+
+(defn- other-level
+  "A source's :other-level {:file F :what W}: its classed entries ES that the other level's record F passes (other-level-pick)
+  taken out and counted in :pass and :rows; [R ES]. F not there yet: nothing taken out (the detail says so)."
+  [src r es]
+  (if-let [{:keys [file what]} (:other-level src)]
+    (let [m (if (exists? file) (other-level-record (read-edn file)) {})
+          picked (other-level-pick es m)]
+      ;; (an other level not recorded yet: no case passes there, said in the detail, not a problem)
+      [(cond-> (-> r (assoc :other-level-picked picked)
+                   (update :detail #(str % (when % "; ") (if (exists? file) (str (count picked) " classed cases pass at " what " (" file ")")
+                                                             (str what " not recorded yet (" file ")")))))
+         (:pass r) (update :pass + (count picked))
+         (:rows r) (update :rows #(reduce (fn [m id] (assoc m id :pass)) % picked)))
+       (vec (remove #(contains? picked (:id %)) es))])
+    [r es]))
+
+(defn override-rows
+  "An :override record's rows ([ID RESULT REASON ...], RESULT a string) as {ID [RESULT-KEYWORD REASON]}."
+  [rows]
+  (into {} (for [[id res why] rows] [(str id) [(keyword (str res)) (str why)]])))
+
+(defn override-apply
+  "DECISION 547-1 (b) (the user, 2026-11-25): the result R of a source (:pass, :ids, :entries) with the rows M (override-rows', a
+  check of its own over some of the source's cases: OCaml's bin/oi ppx expect --record) in place of the source's rows of the same
+  ids: each id's entries dropped, a pass counted where M's row passes, an entry of M's result and reason where it does not (judged
+  by the cell's classes as the source's); an id of M the source does not hold is a problem. [R STRAY]."
+  [r m]
+  (let [ids (set (:ids r))
+        hit (set (filter ids (keys m)))
+        had-entry (set (keep #(when (hit (:id %)) (:id %)) (:entries r)))
+        was-pass (count (remove had-entry hit))
+        now-pass (count (filter #(= :pass (first (m %))) hit))]
+    [(cond-> (assoc r :entries (vec (concat (remove #(hit (:id %)) (:entries r))
+                                            (for [id (sort hit) :let [[res why] (m id)] :when (not= :pass res)] (entry id res why)))))
+       (:pass r) (update :pass + (- now-pass was-pass)))
+     (vec (sort (remove ids (keys m))))]))
+
+(defn- override
+  "A source's :override {:file F :what W}: F's rows in place of the source's (override-apply), before the classes judge them. F
+  not there: a problem (the source's cases would be judged without the check that answers them)."
+  [src r]
+  (if-let [{:keys [file what]} (:override src)]
+    (if-not (exists? file)
+      (update r :results-problems (fnil conj []) (str (:name src) ": no " file " (" what ")"))
+      (let [m (override-rows (read-edn file))
+            [r2 stray] (override-apply r m)]
+        (cond-> (update r2 :detail #(str % (when % "; ") (count m) " rows of " what " in place of this record's (" file ")"))
+          (seq stray) (update :results-problems (fnil into [])
+                              (for [id stray] (str (:name src) ": " file "'s " id " is no case of " (:file src)))))))
+    r))
 
 ;; Python's row (queue 201, PY10; doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"): bin/pyi check --aot's record
 ;; (test/python/check-aot-linux-ARCH.edn, arbace.python.aot's judge: one map a line, :id, :result :pass, :classed (:class
@@ -806,11 +879,21 @@
     (:ids c) (update :tests #(vec (concat % (:ids c))))
     (string? (:match c)) (assoc :match [(re-pattern (:match c))])))
 
+(defn- tests-file
+  "A class's :tests-file (the user, 2026-11-23: Python's :cpython-marked, a list a tool makes from CPython's own sources,
+  test/python/cpython_marked.py): its ids, one a line before a tab, # lines comments, joined to its :tests."
+  [c]
+  (if-let [f (:tests-file c)]
+    (update c :tests #(vec (concat % (for [l (str/split-lines (slurp (path f)))
+                                          :when (and (seq l) (not (str/starts-with? l "#")))]
+                                      (first (str/split l #"\t"))))))
+    c))
+
 (defn- classes-of [f]
   (cond (vector? f) (vec (mapcat classes-of f))
         (exists? f) (let [x (read-edn f)]
                       ;; a map {:classes [...]}: pyi's AOT's classes file (queue 201, PY10)
-                      (if (map? x) (mapv py-aot-class (:classes x)) x))
+                      (if (map? x) (mapv py-aot-class (:classes x)) (mapv tests-file x)))
         :else []))
 
 (defn- at-level?
@@ -995,10 +1078,14 @@
             ;; (the user, 2026-11-22: CPython's recorded outcome beside each Python eval non-pass; the :rejected files' own verdicts)
             r (cond-> r (:py-ref-outcomes src) (py-ref-annotate (py-ref-outcomes (let [x (:py-ref src)] (if (vector? x) x [x])))))
             r (own-verdicts src r)
+            ;; (DECISION 547-1 (b), the user, 2026-11-25: a check of its own answers some of the record's cases)
+            r (override src r)
             classes (classes-of cf)
             es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; (CR1 (a), the user 2026-11-22: a file known where the reference is wrong that passes by its own verdict elsewhere)
             [r es] (own-elsewhere src r es)
+            ;; burst 2026-11-23 (528-8 (a)'s rule): a classed light-level case the compiled level passes
+            [r es] (other-level src r es)
             ;; :per-file (the token check's three sections, queue 122 finding 4): a file the known file lists at several levels
             ;; is one non-pass, of its deferred class when any is (the worst kind), else of its first; an entry in no class stays
             es (if (:per-file src) (per-file es) es)
@@ -1300,9 +1387,16 @@
                (concat
                 (when-not (= 12 (:pass r)) ["agreement: the agreeing entry of a marked class must count as passes"])
                 (when-not (= ["b" "c"] (mapv :id left)) ["agreement: an entry without :agree, or of an unmarked class, must stay"])
-                (when-not (= [{:pass 10} (vec (rest es))] (agreement {:pass 10} (vec (rest es)))) ["agreement: nothing to pick leaves the source as it is"]))))]
+                (when-not (= [{:pass 10} (vec (rest es))] (agreement {:pass 10} (vec (rest es)))) ["agreement: nothing to pick leaves the source as it is"])))
+             ;; DECISION 547-1 (b) (the user, 2026-11-25): an override's rows replace the source's of the same ids
+             (let [r {:pass 1 :ids ["p" "c" "d"] :entries [(entry "c" :class "ppx") (entry "d" :class "x")]}
+                   [r1 s1] (override-apply r (override-rows [["c" "pass" ""] ["p" "fail" "broke"] ["z" "pass" ""]]))]
+               (concat
+                (when-not (= 1 (:pass r1)) ["override: a class row the override passes must count as a pass, a pass it fails not"])
+                (when-not (= [["d" :class] ["p" :fail]] (mapv (juxt :id :result) (:entries r1))) ["override: the override's non-pass must replace the source's row"])
+                (when-not (= ["z"] s1) ["override: an id the source does not hold must be a stray"]))))]
     (doseq [b bad] (println "reap self-test: FAIL" b))
-    (when (empty? bad) (println "reap self-test: ok (8 cases)"))
+    (when (empty? bad) (println "reap self-test: ok (11 cases)"))
     (empty? bad)))
 
 (defn -main [& args]

@@ -121,6 +121,9 @@
            ;; cpp-compl: `< ::D`, not `<::D`: before C++11 `<:` is the digraph of `[` (g++.old-deja g++.pt/ttp23.C, C++98)
            (str (name-str (second x)) (if (.startsWith s ":") "< " "<") s (if (.endsWith s ">") " >" ">")))
       pack-expand (str (name-str (second x)) "...")
+      ;; queue 540b: a decltype-specifier as a nested-name-specifier's first part (`decltype (f)::inner x;`, gxx-modules'
+      ;; part-4_c.C, whose f's type an unread module gives), printed as base-str prints the type
+      decltype (str "decltype(" (expr-str (second x) 17) ")")
       (fail "a name" x))
     :else (fail "a name" x)))
 
@@ -527,6 +530,19 @@
         [s d] (fn-declarator x ps true)]
     (str (join-sp s d) (when (:pure m) " = 0") ";")))
 
+;; queue 540: a text form whose text begins with `#` (or `%:`) is no directive (a directive is c/directive): a stray `#` the
+;; original wrote after code on its line (g++.old-deja's g++.other/crash41.C, `int a; #// ...`). At a line's start the reread would
+;; take it for a directive, so it is printed on the line before it, after a space, when that line holds no `//`
+(defn- text-line! [^StringBuilder b ^String t]
+  (let [n (.length b)
+        lt (str/triml t)
+        prev (when (and (or (str/starts-with? lt "#") (str/starts-with? lt "%:")) (pos? n) (= (.charAt b (dec n)) \newline))
+               (let [i (loop [i (- n 2)] (if (or (neg? i) (= (.charAt b i) \newline)) i (recur (dec i))))]
+                 (.substring b (inc i) (dec n))))]
+    (if (and prev (not (str/blank? prev)) (not (str/includes? prev "//")) (not (str/starts-with? (str/triml prev) "#")))
+      (do (.setLength b (dec n)) (.append b " ") (.append b t) (.append b "\n"))
+      (line b t))))
+
 (defn- line-directive!
   "A macro invocation's text keeps the line it stood at: `#line N` before it (its expansion may use __LINE__)."
   [^StringBuilder b f]
@@ -591,7 +607,7 @@
                        (line b "{")
                        (doseq [x (rest f)] (item! b x))
                        (line b "}"))
-        cpp/text (do (line-directive! b f) (line b (second f)))
+        cpp/text (do (line-directive! b f) (text-line! b (second f)))
         cpp/instantiate (let [ib (StringBuilder.)]
                           (binding [*indent* 0] (item! ib (second f)))
                           (line b (str (when (:extern m) "extern ") "template " (str/triml (str/trimr (str ib))))))
@@ -802,7 +818,7 @@
           return (line b (if (seq args) (str "return " (expr-str (first args) 17 m 1) ";") "return;"))
           co-return (line b (if (seq args) (str "co_return " (expr-str (first args) 17 m 1) ";") "co_return;"))
           c/expr (line b (str (expr-str (first args) 17 m 1) ";"))
-          cpp/text (do (line-directive! b s) (line b (second s)))
+          cpp/text (do (line-directive! b s) (text-line! b (second s)))
           cpp/try (let [[_ blk & cs] s]
                     (line b "try")
                     (block! b (rest blk))

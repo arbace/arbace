@@ -337,9 +337,10 @@ import jdk.internal.misc.Unsafe;
     }
 
     // The JDK's constructors over memory addresses (Buffer's JavaNioAccess: JNI's NewDirectByteBuffer,
-    // memory segments' buffers): the Go build has no memory addressed so
+    // memory segments' buffers): a native memory segment's (java-design-1122) shares the bytes of jrt's
+    // native block at addr (Unsafe.allocateMemory's, go/arbace/jrt/nativemem.ae) as its array
     DirectByteBuffer(long addr, int cap, Object obj, MemorySegment segment) {
-        this(addr, cap);
+        this(jdk.internal.jrt.NativeArrays.bytes(addr, cap), 0, cap, segment);
     }
 
     DirectByteBuffer(long addr, int cap, Object obj, java.io.FileDescriptor fd, boolean isSync,
@@ -2159,6 +2160,207 @@ import java.lang.module.ModuleDescriptor;
 (def ^:private swing-derivations
   [(swing-derivation "AbstractTableModel") (swing-derivation "TableModel")])
 
+;; java-design-1122 (the burst's Java by-design stream, 2026-11-22): jdk.internal.foreign.Utils for the foreign memory API's
+;; segments (test/jrt/jrt_sources.ae, ffm-sources): its static initializer looked up three method handles of the
+;; address layouts' var handles (SharedUtils.unboxSegment, Utils.longToAddress by MethodHandles.Lookup.findStatic), which
+;; java.lang.invoke's segment views alone use (makeRawSegmentViewVarHandleInternal, not in the Go build); the derived
+;; Utils keeps the address carrier long and the handles null, so the class initializes (MemorySessionImpl's, the
+;; segments' and List.of's checks, until then jrt's hand-written checkNonNegativeArgument)
+(def ^:private ffm-utils-derivation
+  {:path "jdk/internal/foreign/Utils.java" :from "src/java.base/share/classes/jdk/internal/foreign/Utils.java"
+   :header "/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122): jdk26u's jdk.internal.foreign.Utils
+ * (https://github.com/openjdk/jdk26u at baf63fb, src/java.base/share/classes/jdk/internal/foreign/Utils.java),
+ * derived mechanically (test/jrt/derive.ae, the replacement asserted once): its static initializer does not look up
+ * the address layouts' method handles (java.lang.invoke's segment views are not in the Go build): the address
+ * carrier is long, the three handles null. The change Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * jdk26u's notice follows.
+ */
+"
+   :ops [["    static {
+        MethodHandles.Lookup lookup = MethodHandles.lookup();
+        String unboxSegmentName;
+        Class<?> rawAddressType;
+        if (Unsafe.getUnsafe().addressSize() == 8) {
+            unboxSegmentName = \"unboxSegment\";
+            rawAddressType = long.class;
+        } else {
+            assert Unsafe.getUnsafe().addressSize() == 4 : Unsafe.getUnsafe().addressSize();
+            unboxSegmentName = \"unboxSegment32\";
+            rawAddressType = int.class;
+        }
+        ADDRESS_CARRIER_TYPE = rawAddressType;
+        try {
+            LONG_TO_CARRIER = lookup.findStatic(SharedUtils.class, unboxSegmentName,
+                    MethodType.methodType(rawAddressType, MemorySegment.class));
+            LONG_TO_ADDRESS_TARGET = lookup.findStatic(Utils.class, \"longToAddress\",
+                    MethodType.methodType(MemorySegment.class, rawAddressType, AddressLayout.class));
+            LONG_TO_ADDRESS_NO_TARGET = lookup.findStatic(Utils.class, \"longToAddress\",
+                    MethodType.methodType(MemorySegment.class, rawAddressType));
+        } catch (Throwable ex) {
+            throw new ExceptionInInitializerError(ex);
+        }
+    }
+"
+          "    static {
+        // Arbace: no method handles of the address layouts' var handles (java.lang.invoke's segment views)
+        ADDRESS_CARRIER_TYPE = long.class;
+        LONG_TO_CARRIER = null;
+        LONG_TO_ADDRESS_TARGET = null;
+        LONG_TO_ADDRESS_NO_TARGET = null;
+    }
+" 1]
+         ["            handle = MethodHandles.filterValue(handle, LONG_TO_CARRIER, longToAddressAdapter);"
+          "            throw new UnsupportedOperationException(\"a var handle combinator (java.lang.invoke's are not in the Go build)\");" 1]]})
+
+;; java-design-1122: jdk.internal.foreign.AbstractMemorySegmentImpl, its accessors at a value layout without the layout's
+;; var handle (java.lang.invoke's segment views are not in the Go build): each get and set (and at an index) through
+;; private helpers that make jdk26u's SegmentVarHandle checks and X-VarHandleSegmentView's ScopedMemoryAccess calls
+(def ^:private ffm-amsi-derivation
+  {:path "jdk/internal/foreign/AbstractMemorySegmentImpl.java"
+   :from "src/java.base/share/classes/jdk/internal/foreign/AbstractMemorySegmentImpl.java"
+   :header "/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122): jdk26u's
+ * jdk.internal.foreign.AbstractMemorySegmentImpl (https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/jdk/internal/foreign/AbstractMemorySegmentImpl.java), derived mechanically
+ * (test/jrt/derive.ae, each replacement asserted as often as the table says): the accessors at a value layout
+ * (get, set, getAtIndex, setAtIndex) go through private helpers that check as jdk26u's SegmentVarHandle and access
+ * as its X-VarHandleSegmentView template (ScopedMemoryAccess at the layout's byte order), not through the layout's
+ * var handle (java.lang.invoke's segment views are not in the Go build); an address layout's access is refused. The
+ * changes Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.
+ */
+"
+   :ops [[#"layout\.varHandle\(\)\.get\(\(MemorySegment\)this, ([^;]+)\);" "vhGet(layout, $1);" 18]
+         [#"layout\.varHandle\(\)\.set\(\(MemorySegment\)this, (.+), value\);" "vhSet(layout, $1, value);" 18]
+         ["    // accessors\n" "    // Arbace (java-design-1122): a value layout's access without its var handle (java.lang.invoke's segment views,
+    // VarHandleSegmentAs*, are not in the Go build): jdk26u's SegmentVarHandle.checkSegment (checkEnclosingLayout: the
+    // bounds, read-only and alignment checks), then X-VarHandleSegmentView's ScopedMemoryAccess call at the layout's
+    // byte order (a boolean as a byte, Utils.byteToBoolean's; float and double as their raw bits); an address layout's
+    // access is not here (its var handle adapts a long into a segment)
+    private static final ScopedMemoryAccess VH_ACCESS = ScopedMemoryAccess.getScopedMemoryAccess();
+
+    private long vhAt(ValueLayout layout, long offset, boolean readOnly) {
+        checkEnclosingLayout(offset, layout, readOnly);
+        return unsafeGetOffset() + offset;
+    }
+
+    private static boolean vhBig(ValueLayout layout) {
+        return layout.order() == ByteOrder.BIG_ENDIAN;
+    }
+
+    private byte vhGet(ValueLayout.OfByte layout, long offset) {
+        return VH_ACCESS.getByte(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true));
+    }
+
+    private void vhSet(ValueLayout.OfByte layout, long offset, byte value) {
+        VH_ACCESS.putByte(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value);
+    }
+
+    private boolean vhGet(ValueLayout.OfBoolean layout, long offset) {
+        return VH_ACCESS.getByte(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true)) != 0;
+    }
+
+    private void vhSet(ValueLayout.OfBoolean layout, long offset, boolean value) {
+        VH_ACCESS.putByte(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value ? (byte) 1 : (byte) 0);
+    }
+
+    private char vhGet(ValueLayout.OfChar layout, long offset) {
+        return VH_ACCESS.getCharUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true), vhBig(layout));
+    }
+
+    private void vhSet(ValueLayout.OfChar layout, long offset, char value) {
+        VH_ACCESS.putCharUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value, vhBig(layout));
+    }
+
+    private short vhGet(ValueLayout.OfShort layout, long offset) {
+        return VH_ACCESS.getShortUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true), vhBig(layout));
+    }
+
+    private void vhSet(ValueLayout.OfShort layout, long offset, short value) {
+        VH_ACCESS.putShortUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value, vhBig(layout));
+    }
+
+    private int vhGet(ValueLayout.OfInt layout, long offset) {
+        return VH_ACCESS.getIntUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true), vhBig(layout));
+    }
+
+    private void vhSet(ValueLayout.OfInt layout, long offset, int value) {
+        VH_ACCESS.putIntUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value, vhBig(layout));
+    }
+
+    private float vhGet(ValueLayout.OfFloat layout, long offset) {
+        return Float.intBitsToFloat(VH_ACCESS.getIntUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true),
+                vhBig(layout)));
+    }
+
+    private void vhSet(ValueLayout.OfFloat layout, long offset, float value) {
+        VH_ACCESS.putIntUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false),
+                Float.floatToRawIntBits(value), vhBig(layout));
+    }
+
+    private long vhGet(ValueLayout.OfLong layout, long offset) {
+        return VH_ACCESS.getLongUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, true), vhBig(layout));
+    }
+
+    private void vhSet(ValueLayout.OfLong layout, long offset, long value) {
+        VH_ACCESS.putLongUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false), value, vhBig(layout));
+    }
+
+    private double vhGet(ValueLayout.OfDouble layout, long offset) {
+        return Double.longBitsToDouble(VH_ACCESS.getLongUnaligned(sessionImpl(), unsafeGetBase(),
+                vhAt(layout, offset, true), vhBig(layout)));
+    }
+
+    private void vhSet(ValueLayout.OfDouble layout, long offset, double value) {
+        VH_ACCESS.putLongUnaligned(sessionImpl(), unsafeGetBase(), vhAt(layout, offset, false),
+                Double.doubleToRawLongBits(value), vhBig(layout));
+    }
+
+    private MemorySegment vhGet(AddressLayout layout, long offset) {
+        throw new UnsupportedOperationException(\"an address layout's access: no var handles in the Go build\");
+    }
+
+    private void vhSet(AddressLayout layout, long offset, MemorySegment value) {
+        throw new UnsupportedOperationException(\"an address layout's access: no var handles in the Go build\");
+    }
+
+    // accessors
+" 1]]})
+
+;; java-design-1122: LayoutPath and AbstractLayout for the foreign memory API's layouts: their var handle combinators
+;; (MethodHandles.collectCoordinates, insertCoordinates: not in jrt's java.lang.invoke) refused, the rest jdk26u's
+(def ^:private ffm-layoutpath-derivation
+  {:path "jdk/internal/foreign/LayoutPath.java" :from "src/java.base/share/classes/jdk/internal/foreign/LayoutPath.java"
+   :header "/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122): jdk26u's jdk.internal.foreign.LayoutPath
+ * (https://github.com/openjdk/jdk26u at baf63fb, src/java.base/share/classes/jdk/internal/foreign/LayoutPath.java),
+ * derived mechanically (test/jrt/derive.ae, each replacement asserted once): a path's dereference var handle does not
+ * combine coordinates (MethodHandles.collectCoordinates and insertCoordinates are not in the Go build): refused. The
+ * changes Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.
+ */
+"
+   :ops [["            handle = MethodHandles.collectCoordinates(handle, 2, offsetAdapter);    // (MS, long)"
+          "            throw new UnsupportedOperationException(\"a var handle combinator (java.lang.invoke's are not in the Go build)\");" 1]
+         ["                handle = MethodHandles.insertCoordinates(handle, 1, 0);"
+          "                throw new UnsupportedOperationException(\"a var handle combinator (java.lang.invoke's are not in the Go build)\");" 1]
+         ["                handle = MethodHandles.collectCoordinates(handle, 0, adapter);"
+          "                throw new UnsupportedOperationException(\"a var handle combinator (java.lang.invoke's are not in the Go build)\");" 1]]})
+
+(def ^:private ffm-abstractlayout-derivation
+  {:path "jdk/internal/foreign/layout/AbstractLayout.java"
+   :from "src/java.base/share/classes/jdk/internal/foreign/layout/AbstractLayout.java"
+   :header "/*
+ * Arbace (overlay/jdk, doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122): jdk26u's
+ * jdk.internal.foreign.layout.AbstractLayout (https://github.com/openjdk/jdk26u at baf63fb,
+ * src/java.base/share/classes/jdk/internal/foreign/layout/AbstractLayout.java), derived mechanically (test/jrt/derive.ae,
+ * the replacement asserted once): arrayElementVarHandle does not combine coordinates (MethodHandles.collectCoordinates
+ * is not in the Go build): refused. The change Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's
+ * notice follows.
+ */
+"
+   :ops [["        return MethodHandles.collectCoordinates(varHandle(elements), 1, scaleHandle());"
+          "        throw new UnsupportedOperationException(\"a var handle combinator (java.lang.invoke's are not in the Go build)\");" 1]]})
+
 (def derivations
   "Each derived overlay: :path below overlay/jdk/java.base, :from (jdk26u's file, relative to the checkout),
   :ops [[OLD NEW COUNT] or a function ...] (OLD a string or a regex, found exactly COUNT times, every one
@@ -2220,7 +2422,8 @@ import java.lang.module.ModuleDescriptor;
   hjd-derivations
   mx-derivations
   async-derivations
-  swing-derivations))
+  swing-derivations
+  [ffm-utils-derivation ffm-amsi-derivation ffm-layoutpath-derivation ffm-abstractlayout-derivation]))
 
 ;; ---------------------------------------------------------------------------------------
 

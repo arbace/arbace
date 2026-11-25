@@ -142,6 +142,16 @@
         exact (filter (fn [c] (or (not closed) (= (count ids) (count (ty/label-all c))))) with-ids)]
     (cond (seq exact) exact (seq with-ids) with-ids :else cands)))
 
+(defn- record-first-lid
+  "The first label of a record expression or pattern as Typecore.type_label_a_list looks it up: qualified by find_record_qual's
+  module, the first qualified label's, when it is unqualified (`{e with a = x; M.b = y}`: a is M.a; queue 546, ppxlib's migrations)"
+  [fields]
+  (let [lid (:txt (first (first fields)))
+        q (first (for [[l _] fields :let [x (:txt l)] :when (= :Ldot (x 0))] (x 1)))]
+    (if (and q (= :Lident (lid 0)))
+      [:Ldot q {:txt (lid 1)}]
+      lid)))
+
 (defn lookup-label
   "A label by its name, the expected record type's first (an inline record's labels are only reached so); without an
   expected record type, the first label of a record expression or pattern chosen among the records that have all its
@@ -227,7 +237,11 @@
                       true)
         i1 (do (reify! t2) (record-equation! t1 t2) (add-gadt-equation! (first i1) (second i1) t2) true)
         i2 (do (reify! t1) (record-equation! t1 t2) (add-gadt-equation! (first i2) (second i2) t1) true)
-        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0)))
+        ;; (queue 547) Ctype.unify3's Tvariant pair in pattern mode: rows that do not unify (an existential's row against a GADT
+        ;; constructor's index, ppx_expect's Test_node `match behavior with Expect ...`) both reified, accepted unless Ctype.mcomp
+        ;; finds them incompatible (record_equation)
+        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0))
+            (and (= :Tvariant ((ty/desc t1) 0)) (= :Tvariant ((ty/desc t2) 0))))
         (do (reify! t1) (reify! t2)
             (try (ty/mcomp t1 t2) (record-equation! t1 t2) true
                  (catch arbace.lang.ExceptionInfo e (if (= :incompatible (:unify (ex-data e))) false (throw e)))))
@@ -443,7 +457,13 @@
             _ (if (:res c)
                 (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
                 (unify! tres expected "pattern"))
-            sarg (when-let [a (d 2)] (second a))
+            sarg0 (when-let [a (d 2)] (second a))
+            ;; Typecore's Ppat_construct (queue 548: ppx_log's `Pconst_integer (_ : string * char option)`): `C (p : t)` of a
+            ;; constructor of several arguments, the constraint the arguments' tuple (solve_Ppat_construct's existential_styp with
+            ;; no type names: t unified with their tuple), p split as the arguments
+            [sarg csty] (if (and sarg0 (> (:arity c) 1) (= :Ppat_constraint ((:ppat_desc sarg0) 0)))
+                          [((:ppat_desc sarg0) 1) ((:ppat_desc sarg0) 2)]
+                          [sarg0 nil])
             sargs (cond
                     (nil? sarg) []
                     (and (> (:arity c) 1) (= :Ppat_tuple ((:ppat_desc sarg) 0))) (mapv second ((:ppat_desc sarg) 1))
@@ -452,10 +472,12 @@
                     :else [sarg])]
         (when-not (= (count sargs) (:arity c))
           (type-error (str "The constructor " (:name c) " expects " (:arity c) " argument(s)")))
+        (when csty
+          (unify! (annot-type env csty) (ty/newty [:Ttuple (mapv (fn [t] [nil t]) targs)]) "pattern"))
         (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
       :Ppat_record
       (let [fields (d 1)
-            l0 (lookup-label env (:txt (first (first fields))) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
+            l0 (lookup-label env (record-first-lid fields) expected (mapv (fn [[lid _]] (lid-name (:txt lid))) fields)
                              (= :Closed (d 2)))
             [res _ args] (instance-label l0)
             _ (unify! res expected "pattern")
@@ -483,7 +505,22 @@
       :Ppat_constraint (if (and (= :Ptyp_poly ((:ptyp_desc (d 2)) 0)) (= :Ppat_var ((:ppat_desc (d 1)) 0)))
                          ;; an explicitly polymorphic variable: its type the scheme, each use an instance (polymorphic
                          ;; recursion); its definition typed against an instance
-                         (let [scheme (env/make-generic! (env/transl-type env (atom {}) (d 2)))
+                         ;; (queue 548) only the poly's own variables are generic: a `_` of the annotation (parsexp's
+                         ;; `let raise_error : type a b. (a, b) Automaton_state.t -> _ = ...`) is a variable of the current level
+                         ;; that the definition's type fills, as Typecore's type_let instantiates the Tpoly's univars alone and
+                         ;; shares the rest (instance_poly), the let's generalization making it generic
+                         (let [tv (atom {})
+                               t (env/transl-type env tv (d 2))
+                               bound (set (keep (fn [v] (some-> (get @tv (:txt v)) ty/repr)) ((:ptyp_desc (d 2)) 1)))
+                               seen (java.util.IdentityHashMap.)
+                               _ ((fn go [t] (let [t (ty/repr t)]
+                                               (when-not (.containsKey seen t)
+                                                 (.put seen t true)
+                                                 (when-not (and (ty/tvar? t) (not (contains? bound t)))
+                                                   (when-not (= ty/generic-level (ty/level t)) (ty/set-level! t ty/generic-level)))
+                                                 (run! go (ty/children (ty/desc t))))))
+                                  t)
+                               scheme (ty/repr t)
                                n (:txt ((:ppat_desc (d 1)) 1)) id (ty/ident-create n)]
                            (unify! (ty/instance scheme) expected "pattern")
                            (swap! vars conj [n id scheme])
@@ -664,10 +701,10 @@
   [p t]
   (let [ok (atom false) eqs (atom [])]
     (binding [*equations* eqs]
-      (try
+      (ty/fresh-scope #(try
         (ty/try-unify (check-cex p t (fn [] (reset! ok true)))
                       (throw (ex-info "undo" {:unify :undo})))
-        (finally (undo-equations! @eqs))))
+        (finally (undo-equations! @eqs)))))
     @ok))
 
 (defn- gadt-rows? [rows]
@@ -1042,13 +1079,15 @@
                                      (ty/with-scope
                                        (let [eqs (atom [])
                                              [vbs env'] (binding [*let-equations* eqs *defer-unpack* true] (type-let env (d 1) (d 2)))
-                                             body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                                             body (try (let [k #(type-expect env' (d 3) expected)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                                                   (finally (undo-equations! @eqs)))]
                                          (unify! outer (:type body) "expression")
                                          [vbs body])))]
                     (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))
                   (let [eqs (atom [])
                         [vbs env'] (binding [*let-equations* eqs] (type-let env (d 1) (d 2)))
-                        body (try (type-expect env' (d 3) expected) (finally (undo-equations! @eqs)))]
+                        body (try (let [k #(type-expect env' (d 3) expected)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                                                   (finally (undo-equations! @eqs)))]
                     (mkexp [:Texp_let (d 1) vbs body] (:type body) loc))))
       :Pexp_function (let [sbody (if-let [c (d 2)]
                                    (if (and (= :Pfunction_body ((d 3) 0)) (= :Pconstraint (c 0)))
@@ -1120,7 +1159,10 @@
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
-            l0 (lookup-label env (:txt (first (first fields))) (or (and init (:type init)) expected)
+            ;; Typecore's Pexp_record: the expected type when it is a known record type, else the type of the record copied
+            ;; from (`with`) (queue 547: ppxlib_jane's `Ast_helper.with_default_loc { loc with loc_ghost = true }`, loc unannotated)
+            l0 (lookup-label env (record-first-lid fields)
+                             (if (or (nil? init) (and expected (expected-type-path expected))) expected (:type init))
                              (mapv (fn [[lid _]] (lid-name (:txt lid))) fields) (nil? init-s))
             [res _ args] (instance-label l0)
             _ (unify! res expected "expression")
@@ -1363,7 +1405,7 @@
   ([env targ tres scases computation] (type-cases env targ tres scases computation nil))
   ([env targ tres scases computation conts]
   (let [typed (mapv (fn [c] (let [vars (atom []) eqs (atom [])
-                                  p (binding [*equations* eqs] (type-pat-generalized env (:pc_lhs c) targ vars))
+                                  p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env (:pc_lhs c) targ vars)))
                                   done @eqs
                                   ;; the equations' types, kept for the case's body, then taken back
                                   now (mapv (fn [[path _]] [path (env/find-decl path)]) done)]
@@ -1376,10 +1418,12 @@
                   ext-env (if cont (add-pattern-vars env' [cont]) env')]
               (doseq [[path decl] now] (env/add-decl! path decl))
               (try
-                (cond-> {:lhs p
-                         :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
-                         :rhs (type-expect ext-env (:pc_rhs c) tres)}
-                  cont (assoc :cont (cont 1)))
+                (let [body #(cond-> {:lhs p
+                                     :guard (when-let [g (:pc_guard c)] (type-expect env' g (ty/type-bool)))
+                                     :rhs (type-expect ext-env (:pc_rhs c) tres)}
+                              cont (assoc :cont (cont 1)))]
+                  ;; (queue 546) under the pattern's equations, abbreviations expand afresh (ty/fresh-depth)
+                  (if (seq now) (ty/fresh-scope body) (body)))
                 (finally (undo-equations! before)))))
           typed (or conts (repeat nil))))))
 
@@ -1425,11 +1469,23 @@
                           (do (when (ty/is-optional l) (unify! (ty/type-option (ty/newvar)) targ "parameter"))
                               [targ nil]))
             vars (atom []) eqs (atom [])
-            p (binding [*equations* eqs] (type-pat-generalized env spat tint vars))
-            _ (pressure-variants! [p])
-            env' (add-pattern-vars env @vars)
-            ;; a GADT parameter's equations hold over the rest of the function
-            [params body _] (try (type-function env' (rest sparams) sbody tret) (finally (undo-equations! @eqs)))
+            typed (fn []
+                    (let [p (binding [*equations* eqs] (ty/fresh-scope #(type-pat-generalized env spat tint vars)))
+                          _ (pressure-variants! [p])
+                          env' (add-pattern-vars env @vars)
+                          ;; a GADT parameter's equations hold over the rest of the function
+                          r (try (let [k #(type-function env' (rest sparams) sbody tret)] (if (seq @eqs) (ty/fresh-scope k) (k)))
+                                 (finally (undo-equations! @eqs)))]
+                      [p r]))
+            ;; (queue 546) Typecore's type_cases for a parameter that unpacks modules (`((module A) : t) -> ...`): its modules
+            ;; scoped at a level of their own, the result unified with a variable of the outer level, so that a type A.n leaving
+            ;; the function is expanded (or escapes), as the let with module patterns does (ppxlib's versions.ml, immediate_migration)
+            [p [params body _]] (if (unpack-pattern? spat)
+                                  (let [outer (ty/newvar)]
+                                    (ty/with-local-level
+                                      (ty/with-scope
+                                        (let [r (typed)] (unify! outer tret "function") r))))
+                                  (typed))
             param {:kind (if dflt [:opt p dflt] [:pat p]) :label l :loc (:pparam_loc sp)
                    :param (if dflt (ty/ident-create "*opt*") (name-pattern "param" [p]))
                    :partial (partiality [{:lhs p}] (:type p))}]
@@ -1652,9 +1708,26 @@
       (let [vb (first svbs)
             e (type-exp env (:pvb_expr vb))
             vars (atom [])
-            p (binding [*equations* *let-equations*] (type-pat env (:pvb_pat vb) (:type e) vars))]
+            p (binding [*equations* *let-equations*] (ty/fresh-scope #(type-pat env (:pvb_pat vb) (:type e) vars)))]
         [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
     (type-let* env rec svbs))))
+
+(defn- approx-type
+  "(queue 547) Typecore.approx_type: a type expression's shape (arrows, tuples, constructors of the right arity), the rest
+  variables, no type variable bound and no error raised"
+  [env sty]
+  (let [d (:ptyp_desc sty)]
+    (case (d 0)
+      :Ptyp_arrow (let [l (d 1) a (ty/newvar)]
+                    (ty/newty [:Tarrow l (if (ty/is-optional l) (ty/type-option a) a) (approx-type env (d 3))]))
+      :Ptyp_tuple (ty/newty [:Ttuple (mapv (fn [[l t]] [l (approx-type env t)]) (d 1))])
+      :Ptyp_constr (let [p (try (env/lookup env :types (:txt (d 1))) (catch arbace.lang.ExceptionInfo _ nil))
+                         decl (when p (env/find-decl p))]
+                     (if (and p decl (= (count (d 2)) (count (:params decl))))
+                       (ty/tconstr p (mapv #(approx-type env %) (d 2)))
+                       (ty/newvar)))
+      :Ptyp_poly (approx-type env (d 2))
+      (ty/newvar))))
 
 (defn type-approx
   "Typecore.type_approx: a recursive binding's expression's type approximated from its shape before it is typed (its
@@ -1676,7 +1749,10 @@
                     (recur (next params) tret))))))
           (let [body (d 3)]
             (case (body 0)
-              :Pfunction_body (when-not (d 2) (type-approx env (body 1) ty))
+              ;; (queue 547) a return constraint (`let rec f x : t = ...`): the result's type approximated from it
+              :Pfunction_body (if-let [c (d 2)]
+                                (when (= :Pconstraint (c 0)) (unify! (approx-type env (c 1)) ty "expression"))
+                                (type-approx env (body 1) ty))
               :Pfunction_cases (when-not (d 2)
                                  (when-let [c (first (body 1))]
                                    (let [[_ tret] (split-arrow ty [:Nolabel])] (type-approx env (:pc_rhs c) tret))))
@@ -1688,6 +1764,8 @@
                     (doseq [[[_ e] [_ t]] (map vector (d 1) ts)] (type-approx env e t)))
       :Pexp_ifthenelse (recur env (d 2) ty)
       :Pexp_sequence (recur env (d 2) ty)
+      ;; (queue 547) `(e : t)`: the type's shape
+      :Pexp_constraint (do (type-approx env (d 1) ty) (unify! (approx-type env (d 2)) ty "expression"))
       nil)))
 
 (defn- type-let*

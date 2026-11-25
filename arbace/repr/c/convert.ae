@@ -1829,18 +1829,32 @@
         items
         (case (cs st)
           :StatementLabeled
-          (let [ls (g st :LabeledStatement)
-                lbl (at ls (case (cs ls)
-                             :LabeledStatementLabel (list 'label (keyword (tsrc (g ls :Token))))
-                             :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
-                             :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
-                             :LabeledStatementDefault (list 'default)))
-                lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))
-                inner (g ls :Statement)
-                lbl (if (and inner (= (cs inner) :StatementExpr)) ; GNU attributes after the label before `}` (CS144)
-                      (with-attrs lbl :c/attrs (g (g inner :ExpressionStatement) :LabelAttributeSpecifierList))
-                      lbl)]
-            (into [lbl] (when-let [s (g ls :Statement)] (stmt-items s))))
+          ;; queue 540b: a chain of labels (gcc's limits-caselabels.c: 100,000) in a loop, as the recursion through stmt-items
+          ;; took it: each label's group claimed, its form, then the next label's directives (dirs-at) and the next label; the
+          ;; innermost label's statement by stmt-items, and its items' rule (a lone form carries the statement's invocation)
+          (let [out (java.util.ArrayList.)]
+            (loop [st st t0 nil first? true]
+              (let [t (if first? nil (or (group-of st) (group-semi st)))
+                    ls (g st :LabeledStatement)
+                    lbl (at ls (case (cs ls)
+                                 :LabeledStatementLabel (list 'label (keyword (tsrc (g ls :Token))))
+                                 :LabeledStatementCaseLabel (L 'case (expr (g ls :ConstantExpression)))
+                                 :LabeledStatementRange (L 'case (expr (g ls :ConstantExpression)) (expr (g ls :ConstantExpression2)))
+                                 :LabeledStatementDefault (list 'default)))
+                    lbl (with-attrs lbl :c/attrs (g st :AttributeSpecifierList))
+                    inner (g ls :Statement)
+                    lbl (if (and inner (= (cs inner) :StatementExpr)) ; GNU attributes after the label before `}` (CS144)
+                          (with-attrs lbl :c/attrs (g (g inner :ExpressionStatement) :LabelAttributeSpecifierList))
+                          lbl)]
+                (if (and inner (= (cs inner) :StatementLabeled))
+                  (do (.add out lbl)
+                      (doseq [d (dirs-at inner 0)] (.add out d))
+                      (recur inner t false))
+                  (let [rest-items (when inner (stmt-items inner))]
+                    (if (and t (not first?) (empty? rest-items))
+                      (.add out (addm lbl {:c/macro-stmt t}))
+                      (do (.add out lbl) (doseq [x rest-items] (.add out x))))))))
+            (vec out))
           :StatementCompound [(at st (Lv (cons 'do (compound-items (g st :CompoundStatement)))))]
           :StatementExpr
           (let [es (g st :ExpressionStatement)
@@ -1978,6 +1992,13 @@
       (.append b (.-src t)))
     (utf8-decode (str b))))
 
+;; queue 540: the print's `#line N /*arbace*/` before an invocation whose expansion holds __LINE__ (compute-groups!): the print's,
+;; not a directive of the program's
+(defn- line-mark? [d]
+  (let [^bytes src (cx :main-bytes)
+        a (long (:off d)) e (min (alength src) (long (or (:end d) (alength src))))]
+    (boolean (re-matches #"#line [0-9]+ /\*arbace\*/\r?\n?" (String. src (int a) (int (- e a)) "ISO-8859-1")))))
+
 (defn- verb-of [d] (when-let [^Tok t (second (:tokens d))] (.-src t)))
 
 (defn- define-form [toks]
@@ -2032,7 +2053,7 @@
   the list's head, list-with-dirs; not ci's read). A conditional family that does not fall between the items of one list is
   left out (:full keeps it); so is any directive inside an item."
   [tu-items layer]
-  (let [dls (directive-lines)
+  (let [dls (remove line-mark? (directive-lines))
         executed (set (keep #(when (and (= (:file %) (cx :main-name)) (not= (:directive %) "enter")) (:off %)) layer))
         ;; conditional families: the offsets of each family's lines, by nesting
         fam (HashMap.) ; off -> family id
@@ -2262,9 +2283,8 @@
               j (loop [j (inc i)] (if (and (< j cnt) (= (.-po ^PTok (ts j)) po)) (recur (inc j)) j))
               k (- j i)]
           (when (and (or (> k 1) (not (src-at po (.-src t))))
-                     ;; an expansion holding __LINE__'s or __COUNTER__'s value is printed expanded: the
-                     ;; invocation would give the print's line
-                     (not (some (fn [x] (when-let [m (.-m ^PTok x)] (#{"__LINE__" "__COUNTER__"} (.-src ^Tok (:name m)))))
+                     ;; an expansion holding __COUNTER__'s value is printed expanded: the invocation would count again
+                     (not (some (fn [x] (when-let [m (.-m ^PTok x)] (= "__COUNTER__" (.-src ^Tok (:name m)))))
                                 (subvec ts i j))))
             (let [q (if (< j cnt) (.-po ^PTok (ts j)) n)
                   si (java.util.Arrays/binarySearch starts po)]
@@ -2294,14 +2314,24 @@
                           end (if (and (> end2 end) (or (every? #{\)} between) balanced?)) end2 end)]
                       (let [toks (subvec sts si (inc end))
                             ^Tok lt (sts end)
-                            dirs? (some #(dline (.-po ^Tok %)) toks)]
+                            dirs? (some #(dline (.-po ^Tok %)) toks)
+                            ;; queue 540: an expansion holding __LINE__'s value is printed as its invocation after `#line N
+                            ;; /*arbace*/`, N the invocation's line (its presumed line: the reread of the print gives the same N),
+                            ;; so that __LINE__ gives the original's line again (gcc -O0 gives every token of the expansion the
+                            ;; invocation's place, as the original's: unicode_gen.c's last `assert(0);`), when the invocation
+                            ;; stands on one line (gcc's __LINE__ of an invocation over several lines is not the port's); else it
+                            ;; is printed expanded, as before. The reread drops the directive (place-directives!)
+                            line? (some (fn [x] (when-let [m (.-m ^PTok x)] (= "__LINE__" (.-src ^Tok (:name m))))) (subvec ts i j))
+                            ^CFile mf (cx :main-file)
+                            ln (when line? (nth (lex/position mf (.-po ^Tok (sts si))) 1))]
                         (when dirs?
                           (.put ^java.util.TreeMap (cx :macro-spans) (Long/valueOf po) {:to (+ (.-po lt) (count (.-src lt))) :seq (.-seq t)}))
-                        (when (or (not dirs?) (conditionals-closed? toks dline))
+                        (when (and (or (not dirs?) (conditionals-closed? toks dline))
+                                   (or (not line?) (and (not dirs?) (= ln (nth (lex/position mf (.-po lt)) 1)))))
                           (.put groups (.-seq t) {:max (.-seq ^PTok (ts (dec j)))
                                                   ;; the next token's (CS82 (b): a run of groups over a concatenated literal)
                                                   :next (when (< j cnt) (.-seq ^PTok (ts j)))
-                                                  :text (group-text toks dline)})))))))))
+                                                  :text (str (when line? (str "\n#line " ln " /*arbace*/\n")) (group-text toks dline))})))))))))
           (recur j))))
     groups))
 

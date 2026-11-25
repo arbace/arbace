@@ -219,8 +219,9 @@ step() {  # step NAME HEAVY COMMAND...: one step, logged, timed, measured (GT1);
     ae=(ARBACE_LOADED_LOG="$logs/$name.loaded" GATE_AUDITED=1)
   fi
   [ -n "${GATE_CPU_LOG:-}" ] && { rm -f "${logs:?}/$name.cpu.tsv"; ae+=(ARBACE_CPU_LOG="$logs/$name.cpu.tsv"); }
-  # the lock first, then the clock: the start file is written once the step holds the lock
-  "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
+  # the lock first, then the clock: the start file is written once the step holds the lock; the step's admission is its
+  # need at the big lock (HEAVY_MEM_GIB: bin/heavy-lock's second slot, 2026-11-23), a :heavy :inner step's tools' too
+  ${GATE_STEP_MEM_GIB:+env HEAVY_MEM_GIB=$GATE_STEP_MEM_GIB} "${pre[@]}" bash -c 'date +%s > "$1"; shift; exec "$@"' gate-step "$logs/$name.start" \
     env -u GATE_AUDITED ${GATE_STEP_MEM_GIB:+GATE_STEP_MEM_GIB=$GATE_STEP_MEM_GIB} ${hv:+ARBACE_HEAVY_HELD=1} HEAVY_LOCK_WAITS="$logs/$name.waits" ${ae[@]+"${ae[@]}"} ${tr[@]+"${tr[@]}"} \
     /usr/bin/time -v -o "$logs/$name.time" "$@" > "$logs/$name.log" 2>&1 &
   pid=$!

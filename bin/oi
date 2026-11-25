@@ -109,7 +109,7 @@
 #                                  the expect check (suite expect), as the gate's ocaml-judges step; --no-expect (GT9) leaves out the expect
 #                                  action's whole runs (suite expect, judges_test's two whole-run cases), the clean run's
 #
-# Environment: O2J_JOBS (check --aot's processes, default 2), O2J_LOAD_ALLOWANCE (CPU seconds the rerun of a program that timed out gets beyond OI_TIMEOUT, default 20; `bin/oi aot-cpu` prints the limits, `bin/oi key` and `suite key` the key of oi's rows), O2J_GOMEMLIMIT and O2J_GOGC (the light level's runs, default 2500MiB and off: DECISION 453-1 (a), queue 467; Go's collector was 60-70% of their CPU over the library's live heap at 1500MiB, DECISION 397-1 (a)'s; the translator's and the compiled programs' 900MiB), OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120), OI_GOMEMLIMIT (default
+# Environment: O2J_JOBS (check --aot's processes, default 2), O2J_LOAD_ALLOWANCE (CPU seconds the rerun of a program that timed out gets beyond OI_TIMEOUT, default 20; `bin/oi aot-cpu` prints the limits, `bin/oi key` and `suite key` the key of oi's rows), O2J_GOMEMLIMIT and O2J_GOGC (the light level's runs, default 2500MiB and off: DECISION 453-1 (a), queue 467; Go's collector was 60-70% of their CPU over the library's live heap at 1500MiB, DECISION 397-1 (a)'s; the translator's and the compiled programs' 900MiB), OI_JOBS (default 3), OI_TIMEOUT (seconds a program, default 120; a program of test/ocaml/oi-cpu-caps.tsv its own when larger), OI_GOMEMLIMIT (default
 # 400MiB: the light tier), ARBACE_HOST_EXE (stage 0 for the judgment and repr/go's print).
 set -euo pipefail
 # `bin/oi stdlib --ocamlc`: the library of the oracle's path (ocamlc and ocdump), in lib-ocamlc beside the native one
@@ -117,6 +117,9 @@ if [ "${1:-}" = stdlib ] && [ "${2:-}" = --ocamlc ]; then OI_STDLIB=ocamlc; fi
 root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/limit.bash"
+# the host's big-job lock around a compiled shard's build-go alone when asked (ARBACE_HEAVY_CMD; bin/j2g takes it around
+# its own run): the compiled check holds the lock a shard at a time, never for its whole run (2026-11-22, def838bc9)
+. "$root/bin/lib/heavy.bash"
 
 OI_DIR=$root/.tmp/oi
 OCD=$root/.tmp/ocdump/ocdump
@@ -283,9 +286,14 @@ complib_need() {
 # headers' sources and the target's; built once (a lock around the build: jobs of one check share it); its path on stdout. cstubs_nodes DIR
 # FILES --program: a C program of its own (a test's helper, OC201 (a)), linked with musl alone, for oi cmain
 cstubs_nodes() {
-  local dir=$1 files k out f mode=${3:-}
+  local dir=$1 files k out f mode=${3:-} incs=""
   files=$(echo "$2" | tr ',' ' ')
+  # (queue 547) a word -IDIR of FILES (relative to DIR or absolute) is an include directory of the stubs (time_now's config.h, which
+  # jst-config's rule makes, and jane-street-headers' include/); its headers are in the key
+  for f in $files; do case $f in -I*) incs="$incs $f" ;; esac; done
+  files=$(for f in $files; do case $f in -I*) ;; *) echo "$f" ;; esac; done)
   k=$( { for f in $files; do sha256sum < "$dir/$f"; done
+         for f in $incs; do (cd "$dir" && find "${f#-I}" -maxdepth 1 -name '*.h' -type f | LC_ALL=C sort | xargs -r cat) | sha256sum; done
          (cd "$root" && find test/ocaml/capi -type f | LC_ALL=C sort | xargs sha256sum); echo "${ARBACE_C_TARGET:-arbace} $mode"; } | sha256sum | cut -c1-20)
   out=$OI_DIR/cstubs/$k.nodes
   mkdir -p "$OI_DIR/cstubs"
@@ -294,7 +302,7 @@ cstubs_nodes() {
     if [ ! -s "$out" ]; then
       . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
       ( . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
-        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $files ) || exit 1
+        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $incs $files ) || exit 1
       mv "$out.new" "$out"
     fi
   ) 8> "$OI_DIR/cstubs/build.lock" || return 1
@@ -665,9 +673,13 @@ libs_native() {
     if [ ! -f "$COMPLIB/$m.ml" ]; then echo "$m	no $m.ml (parsing/lexer.mll's ocamllex failed)" >> "$COMPLIB/failed.txt"; continue; fi
     printf '%s %s %s -\n' "$COMPLIB" "$m" "$COMPLIB" >> "$tasks"
   done
-  # the units are typed independently (each reads the others' interfaces, not their Lambda): OI_LIB_JOBS processes at once (default 3)
+  # the units are typed independently (each reads the others' interfaces, not their Lambda): OI_LIB_JOBS processes at once (default 3);
+  # a refusal is the typer's verdict (failed.txt), a unit not written (queue 539b: a full disk, a killed process) leaves the library
+  # incomplete: the build fails and its key is not written, so the next run builds it again
+  rm -f "$OI_DIR/libs-native.broken"
   export -f lib_unit_native typer_ns typer_err_text arbace_exe native_dir die; export OI_DIR OI_STDLIB root
   xargs -a "$tasks" -r -L 1 -P "${OI_LIB_JOBS:-3}" bash -c 'lib_unit_native "$1" "$2" "$3" "$4" || true' _
+  if [ -s "$OI_DIR/libs-native.broken" ]; then cat "$OI_DIR/libs-native.broken" >&2; die "stdlib: library units not written ($OI_DIR/libs-native.broken)"; fi
   local ok bad; ok=$(grep -c ' built ' "$log" || true); bad=$(cat "$UNIXLIB/failed.txt" "$THREADLIB/failed.txt" "$STRLIB/failed.txt" "$RELIB/failed.txt" "$DYNLIB/failed.txt" "$COMPLIB/failed.txt" 2>&1 | grep -c '	' || true)
   echo "oi: stdlib: the other libraries natively: $ok units built, $bad refused ($log; DIR/failed.txt)"
 }
@@ -679,9 +691,14 @@ lib_unit_native() {
   M="$(echo "${m:0:1}" | tr a-z A-Z)${m:1}"; t0=$(date +%s)
   # a unit the typer does not finish in OI_LIB_TIMEOUT seconds (default 240) is refused as one it rejects
   if (cd "$d" && OI_TYPER_TIMEOUT=${OI_LIB_TIMEOUT:-240} typer_ns lambda --simplify --debug --intf --stdlib "$(native_dir)" --include "$incs" $nf --file "$m.ml" "$m.ml" > "$M.ae.new" 2> "$m.typer.err"); then
-    mv "$d/$M.ae.new" "$d/$M.ae"; echo "$d/$M built $(( $(date +%s) - t0 )) s" >> "$OI_DIR/libs-native.log"; return 0
+    if [ -s "$d/$M.ae.new" ] && mv "$d/$M.ae.new" "$d/$M.ae"; then echo "$d/$M built $(( $(date +%s) - t0 )) s" >> "$OI_DIR/libs-native.log"; return 0; fi
+    echo "$d/$M: typed, but its Lambda not written" >> "$OI_DIR/libs-native.broken"; return 2
   fi
   rm -f "$d/$M.ae.new"
+  # (queue 539b) the host's failure, not the typer's verdict: the unit is not refused, the build is broken
+  if grep -qa 'No space left on device\|Cannot allocate memory\|Killed' "$d/$m.typer.err" 2>/dev/null || [ ! -s "$d/$m.typer.err" ]; then
+    echo "$d/$M: not written: $(typer_err_text "$d/$m.typer.err" 2>/dev/null)" >> "$OI_DIR/libs-native.broken"; return 2
+  fi
   printf '%s\t%s\n' "$m" "$(typer_err_text "$d/$m.typer.err")" >> "$d/failed.txt"
   echo "$d/$M FAIL $(( $(date +%s) - t0 )) s: $(typer_err_text "$d/$m.typer.err")" >> "$OI_DIR/libs-native.log"; return 1
 }
@@ -798,6 +815,8 @@ cmd_depend() {
 . "$root/bin/lib/oi/ocamldoc.bash"
 # ocamltest's other tools on oi (queue 511): bin/lib/oi/tools.bash, header.awk's tool mode (@tool=NAME), outside this script as ocamldoc's
 . "$root/bin/lib/oi/tools.bash"
+# the run corpus and the selection (2026-11-24, ocaml-aot): bin/lib/oi/corpus.bash, outside this script as ocamldoc's
+. "$root/bin/lib/oi/corpus.bash"
 
 # the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
 # toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
@@ -828,29 +847,7 @@ cmd_repl() {
 
 # ---- the corpus ----
 
-cmd_corpus() {
-  # the headers alone: the tarball, no ocamlc and no ocdump (the oracle's paths call need_tree themselves)
-  mkdir -p "$OI_DIR"; need_source
-  local out=$OI_DIR/corpus.tsv r b h
-  # header.awk's level: 0 oi's, 1 the light AOT level, 2 the compiled level (OC215 (a): its main runs a test's C stubs)
-  local aotv=${AOT:-0}; [ "$aotv" = 1 ] && [ "${LEVEL:-light}" = compiled ] && aotv=2
-  : > "$out"
-  # the tests with a .reference, and (OC203 (a)) those whose check is their check-program-output hook (ocamltest's check of the
-  # output then the hook's, not the reference's: lib-threads/signal)
-  # and (OC197 (a)) the tests whose main file is a .mll (a TEST header in it), with or without a .reference (none: an empty output)
-  for r in $({ cd "$TESTS" && find . \( -name '*.reference' -o -name '*.check-program-output' \) | sed 's/\.[a-z-]*$//'; grep -l '^(\* TEST' $(find . -name '*.mll') | sed 's/\.mll$//'; } | LC_ALL=C sort -u); do
-    b=${r#./}
-    [ -f "$TESTS/$b.ml" ] || [ -f "$TESTS/$b.mll" ] || continue
-    # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
-    h=$(awk -v aot="$aotv" -f "$root/bin/lib/oi/header.awk" "$(test_src "$b")")
-    # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
-    # fix): one row a program across the two corpora, the REAP cell counting it once
-    case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$(test_src "$b")") in run*) continue ;; esac ;; esac
-    printf '%s\t%s\n' "$b" "$h" >> "$out"
-  done
-  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, a check hook or a main .mll, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
-}
-
+# cmd_corpus (the run corpus, .tmp/oi/corpus.tsv): bin/lib/oi/corpus.bash, outside this script as ocamldoc's
 opts() {
   # TY24 (a) (doc/ocaml/TYPER.md): the path bin/oi check takes without --native or --ocdump, OI_CHECK_DEFAULT: native (the
   # switch made on ocaml-90, 2026-11-07; the night's whole-corpus record before it reaches next), ocdump the oracle's path
@@ -874,13 +871,14 @@ opts() {
   done
 }
 
-# select_from CORPUS: the rows of CORPUS (ID<TAB>...) the selection takes: --only-list's ids, --only's regexp, else all
-# (the header's ${ocamlsrcdir}, @OCAMLSRCDIR@ in the corpus files, is the pinned tree's path in the rows the runs read: OT21 (b))
-select_from() {
-  if [ -n "${ONLY_LIST:-}" ]; then awk -F'\t' 'FNR == NR { sub(/[ \t]*#.*/, ""); if ($0 != "") want[$0] = 1; next } $1 in want' "$ONLY_LIST" "$1"
-  elif [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$1" || true; else cat "$1"; fi | sed "s|@OCAMLSRCDIR@|$TOP|g"
+# select_from, selected: bin/lib/oi/corpus.bash
+# need_selection FILE: a selection (--only, --only-list) whose rows in FILE are none is an error, not a check of nothing (queue 539b:
+# --only's ERE is matched from an id's start, ^[^TAB]*(RE), so an anchored '^...$' took nothing and the check passed on 0 programs)
+need_selection() {
+  [ -s "$1" ] && return 0
+  { [ -z "${ONLY:-}" ] && [ -z "${ONLY_LIST:-}" ]; } && return 0
+  die "the selection (${ONLY_LIST:+--only-list $ONLY_LIST}${ONLY_LIST:-${ONLY:+--only $ONLY}}) takes no program of the corpus (--only's ERE is matched as ^[^TAB]*(RE))"
 }
-selected() { select_from "$OI_DIR/corpus.tsv"; }
 
 # ref_one ID FLAGS INCS ARGS ENV: compile and run the original with ocamlc and ocamlopt
 ref_one() {
@@ -1080,6 +1078,10 @@ export -f oi_dynlink typer_err_text
 
 oi_one() {
   local id=$1 flags=$2 incs=$3 args=$4 env=$5
+  # (2026-11-24, the user: per-row CPU caps as Haskell's HES97 (a)) a program of test/ocaml/oi-cpu-caps.tsv runs under its own CPU limit,
+  # about 1.5 times the CPU it took measured alone, when that is above TIMEOUT; oi_wall, oi_status and oi_limit_kill read the local TIMEOUT
+  local cap; cap=$(awk -F'\t' -v id="$id" -v t="$TIMEOUT" '!/^#/ && $1 == id && $2 + 0 > t { t = $2 + 0 } END { print t }' "$root/test/ocaml/oi-cpu-caps.tsv")
+  local TIMEOUT=$cap
   local d=${RUN_DIR:-$OI_DIR/run}/$id src; src=$(test_src "$id")
   rm -rf "$d"; mkdir -p "$d"
   local base; base=$(basename "$id")
@@ -1197,7 +1199,7 @@ oi_key() {
   if [ "$1" = "$S/corpus.tsv" ]; then
     p=$(cat "$OPAM_PINS") || { echo "oi: key: the opam pins $OPAM_PINS cannot be read (bin/repr-ocaml corpus fetch)" >&2; return 1; }
   fi
-  l=$(sha256sum "$root"/bin/lib/oi/* "$root/bin/lib/limit.bash") || { echo "oi: key: bin/lib cannot be hashed" >&2; return 1; }
+  l=$(sha256sum "$root"/bin/lib/oi/* "$root/bin/lib/limit.bash" "$root/test/ocaml/oi-cpu-caps.tsv") || { echo "oi: key: bin/lib cannot be hashed" >&2; return 1; }
   c=$(sha256sum < "$1") || { echo "oi: key: the corpus $1 cannot be read" >&2; return 1; }
   printf '%s\n' "$f" "$s" "timeout=$TIMEOUT gomemlimit=$GOMEMLIMIT gomaxprocs=$GOMAXPROCS" "$p" "$l" "$c" | sha256sum | cut -d' ' -f1
 }
@@ -1236,7 +1238,7 @@ cmd_check() {
   # (cstubs_nodes, the C API's build, runs stage 0 from the checkout)
   export -f oi_one limited_cpu arbace_exe; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   local out=$OI_DIR/check.tsv
-  selected > "$OI_DIR/selected.tsv"; export OI_SELECTED=$OI_DIR/selected.tsv
+  selected > "$OI_DIR/selected.tsv"; need_selection "$OI_DIR/selected.tsv"; export OI_SELECTED=$OI_DIR/selected.tsv
   awk -F'\t' '$2 == "run" { printf "%s%c%s%c%s%c%s%c%s%c", $1, 0, $3, 0, $4, 0, $5, 0, $6, 0 }' "$OI_SELECTED" | xargs -0 -r -n 5 -P "$JOBS" bash -c 'oi_one "$@"' _ > "$out.new"
   LC_ALL=C sort "$out.new" > "$out"; rm -f "$out.new"; oi_key "$OI_DIR/corpus.tsv" > "$out.key"
   local mode=judge; [ "$RECORD" = 1 ] && mode=record
@@ -1502,6 +1504,12 @@ o2j_helpers() {
   for kv in $env; do
     case $kv in @helper=*) ;; *) continue ;; esac
     kv=${kv#@helper=}; name=${kv%%:*}; ml=${kv#*:}; ml=${ml%.ml}
+    # (burst 2026-11-23) a helper of C alone (lib-threads' sigint.c): built on ci as oi's (oi_helper: its own program, the level's
+    # program runs it as ./NAME); a build that fails makes the test's row
+    case ",${kv#*:}," in *.ml,*) ;; *)
+      local why; why=$(oi_helper "$id" "$d" "$kv" "$flags" "$incs") || echo "$why" > "$d/helper.why"
+      continue ;;
+    esac
     rm -rf "$d/helper/$name"; mkdir -p "$d/helper/$name"
     cp "$(dirname "$TESTS/$id")/$ml.ml" "$d/helper/$name/"
     o2j_dump_file "$d/helper/$name" "$ml" "$flags" "$incs"
@@ -1566,6 +1574,9 @@ o2j_dump() {
     fi
     echo "$why" > "$d/ocamldoc.args"; cp "$ODOC/units.txt" "$d/dynmains.txt"
     local f; for f in "$d"/*.cmo; do cp "$f" "${f%.cmo}.cmxs"; done
+    # (burst 2026-11-23) the plugins' Lambda, the compiled level's registry (the light level loads the .cmxs' Lambda itself)
+    : > "$d/dynplugins.txt"
+    for f in $(plugins_of "$env" | tr ',' ' '); do f=${f%.ml}; echo "$d/$(echo "${f:0:1}" | tr a-z A-Z)${f:1}.ae" >> "$d/dynplugins.txt"; done
     return 0
   fi
   # header.awk's objinfo mode at this level (queue 528, DECISION 528-8 (a)): oiobjinfo translated as the row's program (oi_tool_prog's
@@ -1588,8 +1599,51 @@ o2j_dump() {
   if [ -n "$(compout_of "$env")" ] && [ "${NATIVE:-0}" != 1 ]; then
     printf '(ocaml/error "%s")\n' "the compiler's output (check-ocamlopt.byte-output) is the native typer's: ocdump reports no warnings" > "$d/$u.ae"; return 0
   fi
+  # (burst 2026-11-23) the AOT levels' generated program (header.awk's gen mode: unboxed-primitive-args): the test's script run on oi
+  # for each of its arguments, its output a file of the run directory (ocamltest's `ocaml` action with compiler_output), then the
+  # generated main unit dumped as the test's program (test.ml is its header alone), its C stubs built from the run directory (D/cstubs.here)
+  local gen=""; for kv in $env; do case $kv in @gen=*) gen=${kv#@gen=} ;; esac; done
+  if [ -n "$gen" ]; then
+    why=$(gen_prog "$id" "$d" "$gen" "$env") || { printf '(ocaml/error "%s")\n' "$(echo "${why#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0; }
+  fi
+  # (burst 2026-11-23) the test's own OCaml units (header.awk's @mods=FILE,...: modules beside C stubs, the gc-roots tests) at the AOT
+  # levels: typed in their order before the program (oi_mods, as oi_one's), translated with it (D/dynmains.txt), the program typed
+  # against their interfaces
+  local mods=""; for kv in $env; do case $kv in @mods=*) mods=${kv#@mods=} ;; esac; done
+  if [ -n "$mods" ]; then
+    local own
+    own=$(oi_mods "$id" "$d" "$flags" "$incs" "$mods") || { printf '(ocaml/error "%s")\n' "$(echo "${own#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0; }
+    printf '%s\n' $own > "$d/dynmains.txt"
+    o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")" "$d"
+    return 0
+  fi
   o2j_dump_file "$d" "$base" "$flags" "$incs" "$(wspec_of "$env")"
 }
+
+# gen_prog ID D GEN ENV (burst 2026-11-23): header.awk's gen mode (@gen=SCRIPT:ARG>OUT,...): SCRIPT (the test's, ocaml_script_as_argument)
+# run on oi once an ARG, its standard output D/OUT (compiler_output); the readonly files (@dyncopy) copied beside; the generated main
+# (@genmain=FILE) becomes D/BASE.ml, the program; D/cstubs.here marks the C stubs as the run directory's. Status 1 with the reason
+gen_prog() {
+  local id=$1 d=$2 gen=$3 env=$4 src base sc g a o f main=""
+  src=$(dirname "$TESTS/$id"); base=$(basename "$id")
+  for kv in $env; do case $kv in @dyncopy=*) for f in $(echo "${kv#@dyncopy=}" | tr ',' ' '); do cp "$src/$f" "$d/"; done ;; @genmain=*) main=${kv#@genmain=} ;; esac; done
+  sc=${gen%%:*}; cp "$src/$sc" "$d/"
+  local S; S=$(echo "${sc:0:1}" | tr a-z A-Z)${sc:1}; S=${S%.ml}
+  o2j_dump_file "$d" "${sc%.ml}" "" ""
+  grep -q '^(ocaml/error' "$d/$S.ae" && { echo "gen: $sc: $(head -c 160 "$d/$S.ae" | tr '\n\t' '  ')"; return 1; }
+  local lib=${LIB_NATIVE:-$LIB}
+  for g in $(echo "${gen#*:}" | tr ',' ' '); do
+    a=${g%%>*}; o=${g#*>}
+    # shellcheck disable=SC2046
+    (cd "$d" && limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" "$S.ae" -- "$a") > "$d/$o" 2> "$d/gen-$a.err" \
+      || { echo "gen: $sc $a on oi: $(head -c 160 "$d/gen-$a.err" | tr '\n\t' '  ')"; return 1; }
+  done
+  rm -f "$d/$S.ae"
+  [ -n "$main" ] && [ -f "$d/$main" ] || { echo "gen: no generated main $main"; return 1; }
+  cp "$d/$main" "$d/$base.ml"; : > "$d/cstubs.here"
+  return 0
+}
+export -f gen_prog
 
 # compout_of ENV: 1 when ENV is a row whose compiler's output is judged (header.awk's @compout=1, queue 533), else nothing; wspec_of ENV:
 # its -w specs (@w=SPEC,...), as one -w of the native typer (arbace.repr.ocaml.typer splits it at the commas)
@@ -1609,7 +1663,7 @@ export -f compout_of wspec_of compout_output
 # o2j_dump_file D BASE FLAGS INCS [WSPEC]: D/BASE.ml's Lambda into D/U.ae (U its module), natively or by ocdump; a refusal is the dump's
 # error form; WSPEC (queue 533): the native typer's -w, its warnings in D/typer.err
 o2j_dump_file() {
-  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-}
+  local d=$1 base=$2 flags=$3 incs=$4 wspec=${5:-} own=${6:-}
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   local I; I=$(inc_I "$incs")
   if [ "${NATIVE:-0}" = 1 ]; then
@@ -1619,6 +1673,8 @@ o2j_dump_file() {
       case $f in -nolabels) nf="$nf --nolabels" ;; -unsafe) nf="$nf --unsafe" ;; -safer-matching) nf="$nf --safer-matching" ;; -g) nf="$nf --debug" ;; -no-strict-formats) ;; *) bad=$f ;; esac
     done
     local inc=""; [ -n "$incs" ] && inc="--include $(inc_dirs "$incs")"
+    # (burst 2026-11-23) OWN: the test's own units' directory (header.awk's @mods, typed before the program by oi_mods)
+    if [ -n "$own" ]; then if [ -n "$inc" ]; then inc="$inc:$own"; else inc="--include $own"; fi; fi
     [ -n "$wspec" ] && nf="$nf -w $wspec"
     if [ -n "$bad" ]; then printf '(ocaml/error "typer: flag %s not modelled")\n' "$bad" > "$d/$u.ae"
     elif ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" $inc $nf --file "$base.ml" "$base.ml" > "$u.ae" 2> typer.err); then
@@ -1674,7 +1730,7 @@ cmd_check_aot() {
   export -f typer_ns arbace_exe die native_dir; export NATIVE LIB_NATIVE TESTLIB_NATIVE RUN_DIR OI_STDLIB root TOP
   # oi's rows for the same programs, from this oi build (review 008's finding 1)
   export -f oi_one limited_cpu; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT
-  mkdir -p "$O2J"; selected > "$O2J/selected.tsv"; export OI_SELECTED=$O2J/selected.tsv
+  mkdir -p "$O2J"; selected > "$O2J/selected.tsv"; need_selection "$O2J/selected.tsv"; export OI_SELECTED=$O2J/selected.tsv
   local oirows=$OI_DIR/check.tsv; [ "$NATIVE" = 1 ] && oirows=$OI_DIR/check-native.tsv
   oi_rows_for "$oirows" "$O2J/oi.tsv" "$O2J/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
   local jobs=${O2J_JOBS:-2}
@@ -1701,7 +1757,8 @@ cmd_check_aot() {
     rm -f "$d/cstubs.why"
     for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
     if [ -n "$cs" ]; then
-      if nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes OI_CAPI_SERVER=$EXE"
+      local csdir; csdir=$(dirname "$TESTS/$id"); [ -f "$d/cstubs.here" ] && csdir=$d
+      if nodes=$(cstubs_nodes "$csdir" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes OI_CAPI_SERVER=$EXE"
       else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/cstubs.why"; continue; fi
     fi
     # (header.awk's ocamldoc mode, queue 480: ocamldoc's arguments and its program's interface digests)
@@ -1834,15 +1891,18 @@ c2_build() {
     done < "$od/files.txt"
   done
   o2j shard "$s/forms" $(printf 'ocaml.%s ' "$@") > "$s/shard.log" 2>&1 || { echo "o2j shard: $(tail -1 "$s/shard.log")" > "$s/why"; return 1; }
+  # (burst 2026-11-23) Properties.setProperty a root: j2g's System.getProperties (its support code) calls it, which reachability does
+  # not see; a program that reaches java.nio.file's default file system (Paths.get: ExtSys's read_directory, compiler-libs' Load_path)
+  # initializes StaticProperty through it
   (cd "$root" && J2G_GO_EXE=$(arbace_exe) GOMAXPROCS=${O2J_BUILD_PROCS:-4} J2G_JOBS=2 GOMEMLIMIT=${O2J_J2G_MEM:-1700MiB} \
-     /usr/bin/time -f '%e s %M KB' -o "$s/j2g.time" bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --main test/ocaml/o2j/main $capi_main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
+     /usr/bin/time -f '%e s %M KB' -o "$s/j2g.time" bin/j2g --jdk jdk/forms --input "$s/forms" --root 'ocaml.u.Shard#main' --root 'java.util.Properties#setProperty' --main test/ocaml/o2j/main $capi_main --out "$s/j2g") > "$s/j2g.log" 2>&1 \
     || { echo "j2g: $(grep -v '^\s' "$s/j2g.log" | tail -1 | head -c 200)" > "$s/why"; return 1; }
   # a class of the program's that j2g could not analyze (its report's failures name ocaml/ classes) is the shard's failure
   if grep -q '"class ocaml/[^"]*failed analysis' "$s/j2g/report.edn"; then
     echo "j2g: $(grep -o '"class ocaml/[^"]*: analysis failed[^"]*"' "$s/j2g/report.edn" | sort -u | head -1 | head -c 200)" > "$s/why"; return 1
   fi
   (cd "$root" && REPR_GO_EXE=$(arbace_exe) GOMAXPROCS=${O2J_BUILD_PROCS:-4} GOFLAGS=-p=2 GOMEMLIMIT=1800MiB GOCACHE=$O2J/gocache \
-     /usr/bin/time -f '%e s %M KB' -o "$s/build.time" bin/build-go --line-file --arch "$C2_ARCH" --work "$s/work" -o "$s/prog" --overlay "$C2_OVERLAY" --root "$root/x509roots" \
+     heavy_run /usr/bin/time -f '%e s %M KB' -o "$s/build.time" bin/build-go --line-file --arch "$C2_ARCH" --work "$s/work" -o "$s/prog" --overlay "$C2_OVERLAY" --root "$root/x509roots" \
      --main arbace/cmd/ocamlprog "$s/j2g/prog") > "$s/build.log" 2>&1 \
     || { echo "build: $(grep -v '^\s' "$s/build.log" | tail -1 | head -c 200)" > "$s/why"; return 1; }
   rm -rf "$s/work" "$s/forms"
@@ -1859,6 +1919,19 @@ c2_shard() {
   local h=$(($# / 2))
   c2_shard "${s}a" "${@:1:$h}"
   c2_shard "${s}b" "${@:$((h + 1))}"
+}
+
+# c2_tool_units FILE (burst 2026-11-23): a tool's units (one path a line) as cprogs.list's fields, each followed by a tab: a unit of the
+# libraries clib translated (the stdlib's, unix, threads, str, runtime_events, dynlink, compiler-libs, testing) @UNIT, any other its path
+c2_tool_units() {
+  local f dir
+  while read -r f; do
+    [ -n "$f" ] || continue; dir=$(dirname "$f")
+    case $dir in
+      "${LIB_NATIVE:-$LIB}"|"$LIB"|"$UNIXLIB"|"$THREADLIB"|"$STRLIB"|"$RELIB"|"$DYNLIB"|"$COMPLIB"|"${TESTLIB_NATIVE:-$TESTLIB}"|"$TESTLIB") printf '@%s\t' "$(basename "$f" .ae)" ;;
+      *) printf '%s\t' "$f" ;;
+    esac
+  done < "$1"
 }
 
 # c2_bytes PKG DIR: the bytes of program PKG's translated forms (DIR/out) and of the library units it links (cprogs.list's row)
@@ -1938,6 +2011,10 @@ c2_programs() {
            run_redirected "$env" "$d/o2j.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$prog" $args) || st=$? ;;
     esac
     case " $env " in *" @check=check-program-output "*) hook_check "$id" "$d" "$d/o2j.out" "$env" ;; esac
+    # (burst 2026-11-23, 528-8 (a): header.awk's objinfo mode at this level, the compiler's output judged beside the tool's, as
+    # o2j_env_runs' at the light level)
+    [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$d" "$d/o2j.out"
+    [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$d" "$d/o2j.out"
     t1=$(date +%s.%N); times > "$d/cpu1"
     local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")
     note=$(grep -a -m1 -o 'o2j: .*' "$d/o2j.out" | head -c 300 | tr '\t' ' ' || true)
@@ -1969,7 +2046,7 @@ cmd_check_compiled() {
   fi
   export -f oi_one limited_cpu arbace_exe o2j_dump_file o2j_helpers; export OI_DIR TESTS TESTLIB UNIXLIB TIMEOUT EXE LIB OCD GOMEMLIMIT root
   mkdir -p "$O2J"; rm -rf "$C2"; mkdir -p "$C2/run"
-  selected > "$C2/selected.tsv"; export OI_SELECTED=$C2/selected.tsv
+  selected > "$C2/selected.tsv"; need_selection "$C2/selected.tsv"; export OI_SELECTED=$C2/selected.tsv
   local oirows=$OI_DIR/check.tsv; [ "$NATIVE" = 1 ] && oirows=$OI_DIR/check-native.tsv
   oi_rows_for "$oirows" "$C2/oi.tsv" "$C2/selected.tsv" oi_one 4 "$OI_DIR/corpus.tsv"
   C2_OVERLAY=$(cd "$root" && ARBACE_HOST_EXE=$(arbace_exe) bin/jrt overlay | tail -1) || die "bin/jrt overlay"
@@ -1994,10 +2071,20 @@ cmd_check_compiled() {
     # (a plugin test's main program units before its own and its plugins as +DUMP, the registry's, queue 373-1; its run reads the
     # program's interface digests)
     local dm=""
-    [ -s "$d/dynmains.txt" ] && dm=$(sed 's/$/\t/' "$d/dynmains.txt" | tr -d '\n')
+    # (burst 2026-11-23) the main units of clib's libraries as @UNIT (ocamldoc's: compiler-libs, unix, str, dynlink), the others its own
+    [ -s "$d/dynmains.txt" ] && dm=$(c2_tool_units "$d/dynmains.txt")
     [ -s "$d/dynplugins.txt" ] && dm="$dm$(sed 's/^/+/; s/$/\t/' "$d/dynplugins.txt" | tr -d '\n')"
     case " $env " in *" @dyn="*) env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports" ;; esac
+    # (burst 2026-11-23, 528-8 (a)) header.awk's ocamldoc mode at this level: the run's arguments (o2j_dump's D/ocamldoc.args) and the
+    # program's interface digests for Dynlink's checks of the plugins (the registry's: D/dynplugins.txt)
+    if [ -n "$(ocamldoc_of "$env")" ]; then args=$(cat "$d/ocamldoc.args"); env="$env OI_DYNLINK_IMPORTS=$ODOC/main.imports"; fi
+    # (burst 2026-11-23, 528-8 (a)) a tool's own units (oi_tool_prog's D/tool.units, in link order: dumpobj's) in place of its includes':
+    # those of clib's libraries as @UNIT, the tool's others translated into its package
+    if [ -s "$d/tool.units" ]; then
+      printf 'ocaml.p%s\t%s\t%s%s%s\n' "$n" "$d/out" "$(c2_tool_units "$d/tool.units")" "$dm" "$d/$u.ae" >> "$C2/cprogs.list"
+    else
     printf 'ocaml.p%s\t%s\t%s%s%s\n' "$n" "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed -e 's|.*/|@|' -e 's/\.ae$/\t/' | tr -d '\n')" "$dm" "$d/$u.ae" >> "$C2/cprogs.list"
+    fi
     # the OCaml helpers of its header (OC206 (a)): a package each, in the test's shard, named by the helper's executable (pN:NAME, the eighth
     # field); a helper refused by the dump makes the test's row (C2/run/ID/helper.why)
     local hps="" hn hm hu
@@ -2017,7 +2104,8 @@ cmd_check_compiled() {
     local cs="" kv capi=0 nodes
     for kv in $env; do case $kv in @cstubs=*) cs=${kv#@cstubs=} ;; esac; done
     if [ -n "$cs" ] && [ ! -s "$d/helper.why" ]; then
-      if nodes=$(cstubs_nodes "$(dirname "$TESTS/$id")" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
+      local csdir; csdir=$(dirname "$TESTS/$id"); [ -f "$d/cstubs.here" ] && csdir=$d
+      if nodes=$(cstubs_nodes "$csdir" "$cs" 2> "$d/cnodes.err"); then env="$env OI_CSTUBS=$nodes"; capi=1
       else echo "cstubs: $(grep -v '^Reflection\|^Auto-boxing\|recur arg' "$d/cnodes.err" | tail -1 | head -c 200 | tr '\t' ' ')" > "$d/helper.why"; fi
     fi
     # the seventh field: 1 for a program that includes unix (OT25 (a): at most O2J_SHARD_UNIX of them a shard)
@@ -2176,6 +2264,7 @@ cmd_judges_test() {
 
 # ---- the suite (O7)
 . "$root/bin/lib/oi/suite.bash"
+. "$root/bin/lib/oi/ppx.bash"
 # ---- the native front end (doc/ocaml/TYPER.md)
 . "$root/bin/lib/oi/typer.bash"
 # the directories the verbs redirect into before they run (re-review 042 and 049: `bin/oi key` and `suite key` open .tmp/oi/corpus.log and
@@ -2219,6 +2308,7 @@ case $cmd in
   aot-clib) cmd_aot_clib; echo "oi: aot-clib: $(wc -l < "$O2J/clib-missing.txt") missing externals lines, in $C2_LIB" ;;
   aot-run) cmd_aot_run "$@" ;;
   suite) cmd_suite "$@" ;;
+  ppx) cmd_ppx "$@" ;;
   judges-test) cmd_judges_test "$@" ;;
   *) die "unknown command $cmd" ;;
 esac

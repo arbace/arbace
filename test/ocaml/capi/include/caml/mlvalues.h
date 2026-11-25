@@ -8,6 +8,15 @@
 
 #include <stddef.h>
 #include <stdint.h>
+/* (queue 547) what OCaml's <caml/mlvalues.h> includes on the way (misc.h's stdlib.h, stdarg.h and limits.h, domain_state.h's
+   stdio.h), which a stub may rely on: ppx_expect's runtime stubs' fflush(stdout) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <limits.h>
+/* (queue 547) and its config.h, as OCaml's does first: ARCH_SIXTYFOUR for a stub that reads it after <caml/mlvalues.h> alone
+   (jane-street-headers' ocaml_utils.h: caml_alloc_int63 is Val_long on 64 bits, else a boxed int64) */
+#include "config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,8 +39,11 @@ typedef double float64;
 #define CAMLprim
 #define CAMLexport
 #define CAMLlocal_export
-#define CAMLweakdef
+/* a weak definition (queue 547: base's am_testing.c, which ppx_inline_test's runner overrides); ci links weak symbols */
+#define CAMLweakdef __attribute__((weak))
 #define CAMLnoret __attribute__((noreturn))
+/* the older spelling, after the declarator (queue 547: jane-street-headers' ocaml_utils.h, `... ) Noreturn;`) */
+#define Noreturn __attribute__((noreturn))
 #define CAMLnoreturn_start
 #define CAMLnoreturn_end __attribute__((noreturn))
 #define CAMLunused_start

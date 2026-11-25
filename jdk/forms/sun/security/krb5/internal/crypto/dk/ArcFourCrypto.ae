@@ -1,0 +1,269 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/crypto/dk/ArcFourCrypto.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal.crypto.dk)
+
+(import '(java.security GeneralSecurityException MessageDigest NoSuchAlgorithmException)
+        '(java.util Arrays)
+        '(javax.crypto Cipher Mac SecretKey)
+        '(javax.crypto.spec IvParameterSpec SecretKeySpec)
+        '(sun.security.krb5 Confounder KrbCryptoException)
+        '(sun.security.krb5.internal.crypto KeyUsage)
+        '(sun.security.provider MD4))
+
+(defclass ^:public ArcFourCrypto
+  :extends DkCrypto
+
+  (field ^:private ^:static ^:final ^boolean debug false)
+
+  (field ^:private ^:static ^:final ^int confounderSize 8)
+
+  (field ^:private ^:static ^:final ^byte/1 ZERO_IV (new byte/1 [0 0 0 0 0 0 0 0]))
+
+  (field ^:private ^:static ^:final ^int hashSize 16)
+
+  (field ^:private ^:final ^int keyLength)
+
+  (constructor ^:public [this ^int length] (set! keyLength length))
+
+  (method ^:protected getKeySeedLength ^int [this] keyLength)
+
+  (method ^:protected randomToKey ^byte/1 [this ^byte/1 in] in)
+
+  (method ^:public stringToKey :throws [GeneralSecurityException] ^byte/1 [this ^char/1 passwd]
+    (.stringToKey this passwd nil))
+
+  (method ^:private stringToKey :throws [GeneralSecurityException] ^byte/1 [this ^char/1 secret
+                                                                            ^byte/1 opaque]
+    (when (and (some? opaque) (> (alength opaque) 0))
+      (throw (RuntimeException. "Invalid parameter to stringToKey")))
+    (let [^:mutable ^byte/1 passwd nil
+          ^:mutable ^byte/1 digest nil]
+      (try
+        (set! passwd (ArcFourCrypto/charToUtf16 secret))
+        (let [md (MD4/getInstance)] (.update md passwd) (set! digest (.digest md)))
+        (finally (when (some? passwd) (Arrays/fill passwd (unchecked-byte 0)))))
+      digest))
+
+  (method ^:protected getCipher :throws [GeneralSecurityException] ^Cipher [this ^byte/1 key
+                                                                            ^:mutable ^byte/1 ivec
+                                                                            ^int mode]
+    (when (nil? ivec) (set! ivec ZERO_IV))
+    (let [secretKey (SecretKeySpec. key "ARCFOUR")
+          cipher (Cipher/getInstance "ARCFOUR")
+          encIv (IvParameterSpec. ivec 0 (alength ivec))]
+      (.init cipher mode secretKey encIv)
+      cipher))
+
+  (method ^:public getChecksumLength ^int [this] hashSize)
+
+  (method ^:protected getHmac :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 key
+                                                                          ^byte/1 msg]
+    (let [^SecretKey keyKi (SecretKeySpec. key "HmacMD5")
+          m (Mac/getInstance "HmacMD5")]
+      (.init m keyKi)
+      (let [hash (.doFinal m msg)] hash)))
+
+  (method ^:public calculateChecksum :throws [GeneralSecurityException] ^byte/1 [this
+                                                                                 ^byte/1 baseKey
+                                                                                 ^int usage
+                                                                                 ^byte/1 input
+                                                                                 ^int start ^int len]
+    (when debug (.println System/err (java-str "ARCFOUR: calculateChecksum with usage = " usage)))
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [^:mutable ^byte/1 Ksign nil]
+      (try
+        (let [ss (.getBytes "signaturekey")
+              new_ss (new byte/1 (unchecked-add-int (alength ss) 1))]
+          (System/arraycopy ss 0 new_ss 0 (alength ss))
+          (set! Ksign (.getHmac this baseKey new_ss)))
+        (catch Exception e (throw (GeneralSecurityException. "Calculate Checksum Failed!" e))))
+      (let [salt (.getSalt this usage)
+            ^:mutable ^MessageDigest messageDigest nil]
+        (try
+          (set! messageDigest (MessageDigest/getInstance "MD5"))
+          (catch NoSuchAlgorithmException e
+            (throw (GeneralSecurityException. "Calculate Checksum Failed!" e))))
+        (.update messageDigest salt)
+        (.update messageDigest input start len)
+        (let [md5tmp (.digest messageDigest)
+              hmac (.getHmac this Ksign md5tmp)]
+          (when debug (ArcFourCrypto/traceOutput "hmac" hmac 0 (alength hmac)))
+          (cond
+            (== (alength hmac) (.getChecksumLength this)) hmac
+            (> (alength hmac) (.getChecksumLength this))
+              (let [buf (new byte/1 (.getChecksumLength this))]
+                (System/arraycopy hmac 0 buf 0 (alength buf))
+                buf)
+            :else
+              (throw (GeneralSecurityException.
+                       (java-str "checksum size too short: "
+                                 (alength hmac)
+                                 "; expecting : "
+                                 (.getChecksumLength this)))))))))
+
+  (method ^:public encryptSeq :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                             ^byte/1 baseKey
+                                                                                             ^int usage
+                                                                                             ^byte/1 checksum
+                                                                                             ^byte/1 plaintext
+                                                                                             ^int start
+                                                                                             ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [salt (new byte/1 4)
+          ^:mutable kSeq (.getHmac this baseKey salt)]
+      (set! kSeq (.getHmac this kSeq checksum))
+      (let [cipher (Cipher/getInstance "ARCFOUR")
+            secretKey (SecretKeySpec. kSeq "ARCFOUR")]
+        (.init cipher Cipher/ENCRYPT_MODE secretKey)
+        (let [output (.doFinal cipher plaintext start len)] output))))
+
+  (method ^:public decryptSeq :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                             ^byte/1 baseKey
+                                                                                             ^int usage
+                                                                                             ^byte/1 checksum
+                                                                                             ^byte/1 ciphertext
+                                                                                             ^int start
+                                                                                             ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (let [salt (new byte/1 4)
+          ^:mutable kSeq (.getHmac this baseKey salt)]
+      (set! kSeq (.getHmac this kSeq checksum))
+      (let [cipher (Cipher/getInstance "ARCFOUR")
+            secretKey (SecretKeySpec. kSeq "ARCFOUR")]
+        (.init cipher Cipher/DECRYPT_MODE secretKey)
+        (let [output (.doFinal cipher ciphertext start len)] output))))
+
+  (method ^:public encrypt :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                          ^byte/1 baseKey
+                                                                                          ^int usage
+                                                                                          ^byte/1 ivec
+                                                                                          ^byte/1 new_ivec
+                                                                                          ^byte/1 plaintext
+                                                                                          ^int start
+                                                                                          ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (when debug (.println System/err (java-str "ArcFour: ENCRYPT with key usage = " usage)))
+    (let [confounder (Confounder/bytes confounderSize)
+          plainSize (.roundup this (unchecked-add-int (alength confounder) len) 1)
+          toBeEncrypted (new byte/1 plainSize)]
+      (System/arraycopy confounder 0 toBeEncrypted 0 (alength confounder))
+      (System/arraycopy plaintext start toBeEncrypted (alength confounder) len)
+      (let [k1 (new byte/1 (alength baseKey))]
+        (System/arraycopy baseKey 0 k1 0 (alength baseKey))
+        (let [salt (.getSalt this usage)
+              k2 (.getHmac this k1 salt)
+              checksum (.getHmac this k2 toBeEncrypted)
+              k3 (.getHmac this k2 checksum)
+              cipher (Cipher/getInstance "ARCFOUR")
+              secretKey (SecretKeySpec. k3 "ARCFOUR")]
+          (.init cipher Cipher/ENCRYPT_MODE secretKey)
+          (let [output (.doFinal cipher toBeEncrypted 0 (alength toBeEncrypted))
+                result (new byte/1 (unchecked-add-int hashSize (alength output)))]
+            (System/arraycopy checksum 0 result 0 hashSize)
+            (System/arraycopy output 0 result hashSize (alength output))
+            result)))))
+
+  (method ^:public encryptRaw :throws [GeneralSecurityException KrbCryptoException] ^byte/1 [this
+                                                                                             ^byte/1 baseKey
+                                                                                             ^int usage
+                                                                                             ^byte/1 seqNum
+                                                                                             ^byte/1 plaintext
+                                                                                             ^int start
+                                                                                             ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (when debug (.println System/err (java-str "\nARCFOUR: encryptRaw with usage = " usage)))
+    (let [klocal (new byte/1 (alength baseKey))]
+      (loop [^int i 0]
+        (when (<= i 15)
+          (aset klocal i (unchecked-byte (bit-xor-int (aget baseKey i) 0xF0)))
+          (recur (unchecked-inc-int i))))
+      (let [salt (new byte/1 4)
+            ^:mutable kcrypt (.getHmac this klocal salt)]
+        (set! kcrypt (.getHmac this kcrypt seqNum))
+        (let [cipher (Cipher/getInstance "ARCFOUR")
+              secretKey (SecretKeySpec. kcrypt "ARCFOUR")]
+          (.init cipher Cipher/ENCRYPT_MODE secretKey)
+          (let [output (.doFinal cipher plaintext start len)] output)))))
+
+  (method ^:public decrypt :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 baseKey
+                                                                       ^int usage ^byte/1 ivec
+                                                                       ^byte/1 ciphertext ^int start
+                                                                       ^int len]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (when debug (.println System/err (java-str "\nARCFOUR: DECRYPT using key usage = " usage)))
+    (let [k1 (new byte/1 (alength baseKey))]
+      (System/arraycopy baseKey 0 k1 0 (alength baseKey))
+      (let [salt (.getSalt this usage)
+            k2 (.getHmac this k1 salt)
+            checksum (new byte/1 hashSize)]
+        (System/arraycopy ciphertext start checksum 0 hashSize)
+        (let [k3 (.getHmac this k2 checksum)
+              cipher (Cipher/getInstance "ARCFOUR")
+              secretKey (SecretKeySpec. k3 "ARCFOUR")]
+          (.init cipher Cipher/DECRYPT_MODE secretKey)
+          (let [plaintext (.doFinal cipher
+                                    ciphertext
+                                    (unchecked-add-int start hashSize)
+                                    (unchecked-subtract-int len hashSize))
+                calculatedHmac (.getHmac this k2 plaintext)]
+            (when debug
+              (ArcFourCrypto/traceOutput "calculated Hmac"
+                                         calculatedHmac
+                                         0
+                                         (alength calculatedHmac))
+              (ArcFourCrypto/traceOutput "message Hmac" ciphertext 0 hashSize))
+            (let [^:mutable cksumFailed false]
+              (when (>= (alength calculatedHmac) hashSize)
+                (loop [^int i 0]
+                  (if (< i hashSize)
+                      (if (not (== (aget calculatedHmac i) (aget ciphertext i)))
+                          (do
+                            (set! cksumFailed true)
+                            (when debug (.println System/err "Checksum failed !")))
+                          (recur (unchecked-inc-int i)))
+                      nil)))
+              (when cksumFailed (throw (GeneralSecurityException. "Checksum failed")))
+              (let [output (new byte/1 (unchecked-subtract-int (alength plaintext) confounderSize))]
+                (System/arraycopy plaintext confounderSize output 0 (alength output))
+                output)))))))
+
+  (method ^:public decryptRaw :throws [GeneralSecurityException] ^byte/1 [this ^byte/1 baseKey
+                                                                          ^int usage ^byte/1 ivec
+                                                                          ^byte/1 ciphertext
+                                                                          ^int start ^int len
+                                                                          ^byte/1 seqNum]
+    (when-not (KeyUsage/isValid usage)
+      (throw (GeneralSecurityException. (java-str "Invalid key usage number: " usage))))
+    (when debug (.println System/err (java-str "\nARCFOUR: decryptRaw with usage = " usage)))
+    (let [klocal (new byte/1 (alength baseKey))]
+      (loop [^int i 0]
+        (when (<= i 15)
+          (aset klocal i (unchecked-byte (bit-xor-int (aget baseKey i) 0xF0)))
+          (recur (unchecked-inc-int i))))
+      (let [salt (new byte/1 4)
+            ^:mutable kcrypt (.getHmac this klocal salt)
+            sequenceNum (new byte/1 4)]
+        (System/arraycopy seqNum 0 sequenceNum 0 (alength sequenceNum))
+        (set! kcrypt (.getHmac this kcrypt sequenceNum))
+        (let [cipher (Cipher/getInstance "ARCFOUR")
+              secretKey (SecretKeySpec. kcrypt "ARCFOUR")]
+          (.init cipher Cipher/DECRYPT_MODE secretKey)
+          (let [output (.doFinal cipher ciphertext start len)] output)))))
+
+  (method ^:private getSalt ^byte/1 [this ^int usage]
+    (let [ms_usage (.arcfour_translate_usage this usage)
+          salt (new byte/1 4)]
+      (aset salt 0 (unchecked-byte (bit-and-int ms_usage 0xff)))
+      (aset salt 1 (unchecked-byte (bit-and-int (bit-shift-right-int ms_usage 8) 0xff)))
+      (aset salt 2 (unchecked-byte (bit-and-int (bit-shift-right-int ms_usage 16) 0xff)))
+      (aset salt 3 (unchecked-byte (bit-and-int (bit-shift-right-int ms_usage 24) 0xff)))
+      salt))
+
+  (method ^:private arcfour_translate_usage ^int [this ^int usage]
+    (switch usage 3 8 9 8 23 13 usage)))

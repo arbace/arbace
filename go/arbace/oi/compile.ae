@@ -50,7 +50,23 @@
 (go/type Compiler "Compiler compiles one unit's Lambda against a program's globals.\n" (struct
     ^{:line 50 :tag (* Program)} P
     ^{:line 51 :tag string} Unit
-    ^{:line 52 :tag (map string int)} Missing)) ; externals not implemented, by name: their calls fail at run time
+    ^{:line 52 :tag (map string int)} Missing ; externals not implemented, by name: their calls fail at run time
+    ^bool debug)) ; the unit holds the native typer's debugging events (compiled with -g, queue 539): a call without one is a frame of unknown location
+
+(go/func hasEvent "hasEvent tells whether the form f holds a debugging event with the native typer's information, (event L [INFO]).\n" ^bool [^any f]
+  (when [(values l ok) (assert SList f)] ok
+    (when (and (>= (len l) 3) (== (aget l 0) (conv any (conv Sym "event"))))
+      (when [(values v ok2) (assert SVec (aget l 2))] (and ok2 (>= (len v) 8))
+        (return true)))
+    (range [_ x l]
+      (when (hasEvent x)
+        (return true)))
+    (return false))
+  (when [(values v ok) (assert SVec f)] ok
+    (range [_ x v]
+      (when (hasEvent x)
+        (return true))))
+  false)
 
 
 ^{:go/end 57} (go/method newScope ^{:tag (* scope)} [^{:tag (* Compiler)} c ^{:tag (* scope)} parent ^string name]
@@ -218,7 +234,9 @@
           (case ["resume"]
             (return (.applyFn s resumeFn (assert SVec (aget a 1)) tail)))
           (case ["reperform"]
-            (return (.applyFn s reperformFn (assert SVec (aget a 1)) tail))))
+            (return (.applyFn s reperformFn (assert SVec (aget a 1)) tail)))
+          (case ["&&" "||"]
+            (return (.seqop s (assert string (aget a 0)) (assert SVec (aget a 1)) tail))))
 
         (return (.prim s (assert string (aget a 0)) (assert SVec (aget a 1)) f)))
       (case ["switch"]
@@ -366,6 +384,11 @@
         ^{:line 344} f (.inner s fn)]
       (when (and (!= ev nil) (not tail))
         (return (.applyEvNode s f args ev)))
+      ;; (queue 539) a call in no tail position without an event, in a unit compiled with -g: bytegen's return address there has no
+      ;; event, a frame of unknown location (Matching's and Translcore's inline lazy force, backtrace/lazy)
+      (when (and (not tail) (.-debug (.-unit s)))
+        (newBtSlot nil)
+        (return (.applyEvNode s f args btUnknownPrim)))
       (.applyNode s f args tail))))
 
 
@@ -381,6 +404,9 @@ event nearest the code); around an application or a primitive, their slot entere
       (switch ih
         (case ["event"]
           (return (.expr s inner tail)))
+        ;; (queue 539) a let's body is followed by its POP (bytegen's add_pop), so the event is at no call's return address: no slot
+        (case ["let" "mutlet" "letrec"]
+          (return (.expr s inner false)))
         (case ["apply" "prim"]
           (when (== ih "prim")
             (set! (.-prim sl) true))

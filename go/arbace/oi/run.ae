@@ -4,7 +4,8 @@
     ^{:line 4} [fmt "fmt"]
     ^{:line 5} [io "io"]
     ^{:line 6} [os "os"]
-    ^{:line 7} [sort "sort"]])
+    ^{:line 7} [sort "sort"]
+    [debug "runtime/debug"]])
 
 
 ;; Running a program as ocamlc's executable does: the library's units the program needs (by the
@@ -69,6 +70,12 @@
 
 
 ^{:go/end 90} (go/func RunProgram "RunProgram links and runs prog against lib with the arguments argv; it returns the exit\nstatus. The program's own output goes through its channels; oi's reports go to stderr.\n" ^int [^{:tag (slice (* CompUnit))} lib ^{:tag (slice (* CompUnit))} prog ^{:tag (slice string)} argv ^io/Writer stderr]
+  (RunEmbedded lib prog argv stderr nil))
+
+(go/func RunEmbedded "RunEmbedded is RunProgram for a C program that embeds OCaml (queue 539, embedded/cmcaml: the C stubs' own main,
+whose caml_main or caml_startup runs the OCaml program's initialisation): cmain runs the C's main for oi's thread th, start the units'
+initialisation once; the C's status, then the program's at_exit. A nil cmain is RunProgram's run.
+" ^int [^{:tag (slice (* CompUnit))} lib ^{:tag (slice (* CompUnit))} prog ^{:tag (slice string)} argv ^io/Writer stderr ^{:tag (func [(* Thread) (func [])] [int])} cmain]
   (let [p (NewProgram argv)
       (values units err) (Link lib prog)]
     (when (!= err nil)
@@ -95,7 +102,37 @@
         (defer (reDestroy))
         ;; OCAMLRUNPARAM's b (OC217 (a))
         (btInit)
+        (when (!= cmain nil)
+          (return (.runEmbedded p th codes stderr cmain)))
         (.runInits p th units codes stderr)))))
+
+
+(go/method runEmbedded "runEmbedded runs the C's main by cmain (RunEmbedded): start, called by its caml_main or caml_startup, runs the
+units' initialisation at its first call (startup.c counts the nested ones); an initialisation that does not complete ends the run with
+its status (an exit's, or caml_fatal_uncaught_exception's after its report); an exception the C lets through is OCaml's fatal one.
+" [^{:tag (* Program)} p ^{:tag (* Thread)} th ^{:tag (slice (* Code))} codes ^io/Writer stderr ^{:tag (func [(* Thread) (func [])] [int])} cmain] :results [^int status]
+  (set! status 0)
+  (let [ran false
+        start (fn []
+                (when ran
+                  (return))
+                (set! ran true)
+                (let [st 0]
+                  (when (not (protect th stderr (addr st) (fn []
+                                                           (range [_ c codes]
+                                                             (set! (.-cur th) c)
+                                                             (.RunInit p th c)))))
+                    (panic (addr (lit ExitSignal :Code st))))))
+        cst 0
+        ok (protect th stderr (addr status) (fn [] (set! cst (cmain th start))))]
+    (when (not ok)
+      (return status))
+    (set! status cst)
+    ;; std_exit
+    (protect th stderr (addr status) (fn []
+        (when [(values f ok2) (NamedValue "Pervasives.do_at_exit")] ok2
+          (.Apply th f Unit))))
+    status))
 
 
 ^{:go/end 110} (go/method runInits [^{:tag (* Program)} p ^{:tag (* Thread)} th ^{:tag (slice (* CompUnit))} units ^{:tag (slice (* Code))} codes ^io/Writer stderr] :results [^int status]
@@ -151,7 +188,9 @@
                 (when (!= (.-cur th) nil)
                   (set! where (+ " (in " (.-Name (.-cur th)) ")")))
 
-                (fmt/Fprintf stderr "oi: go panic: %v%s\n" r where))))))))
+                (fmt/Fprintf stderr "oi: go panic: %v%s\n" r where)
+                (when (!= (os/Getenv "OI_PANIC_STACK") "")
+                  (fmt/Fprintf stderr "%s" (debug/Stack))))))))))
 
 
 

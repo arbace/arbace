@@ -1,0 +1,157 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/NetClient.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal)
+
+(import '(java.io BufferedInputStream BufferedOutputStream IOException)
+        '(java.net DatagramPacket
+                   DatagramSocket
+                   InetAddress
+                   InetSocketAddress
+                   PortUnreachableException
+                   Socket
+                   SocketException
+                   UnknownHostException)
+        '(sun.security.util IOUtils))
+
+(defclasses
+  (defclass ^:public ^:abstract NetClient
+    :implements [AutoCloseable]
+
+    (method ^:public ^:static getInstance :throws [IOException] ^NetClient [^String protocol
+                                                                            ^String hostname
+                                                                            ^int port ^int timeout]
+      (if (.equals protocol "TCP")
+          (TCPClient. hostname port timeout)
+          (UDPClient. hostname port timeout)))
+
+    (method ^:public ^:abstract send :throws [IOException] ^void [this ^byte/1 data])
+
+    (method ^:public ^:abstract receive :throws [IOException] ^byte/1 [this])
+
+    (method ^:public ^:abstract close :throws [IOException] ^void [this]))
+
+  (defclass TCPClient
+    :extends NetClient
+
+    (field ^:private ^Socket tcpSocket)
+
+    (field ^:private ^BufferedOutputStream out)
+
+    (field ^:private ^BufferedInputStream in)
+
+    (constructor :throws [IOException] [this ^String hostname ^int port ^int timeout]
+      (set! tcpSocket (Socket.))
+      (.connect tcpSocket (InetSocketAddress. hostname port) timeout)
+      (set! out (BufferedOutputStream. (.getOutputStream tcpSocket)))
+      (set! in (BufferedInputStream. (.getInputStream tcpSocket)))
+      (.setSoTimeout tcpSocket timeout))
+
+    (method ^:public send :throws [IOException] ^void [this ^byte/1 data]
+      (let [lenField (new byte/1 4)]
+        (TCPClient/intToNetworkByteOrder (alength data) lenField 0 4)
+        (.write out lenField)
+        (.write out data)
+        (.flush out)))
+
+    (method ^:public receive :throws [IOException] ^byte/1 [this]
+      (let [lenField (new byte/1 4)
+            count (.readFully this lenField 4)]
+        (if (not (== count 4))
+            (do
+              (when (some? Krb5/DEBUG)
+                (.println Krb5/DEBUG ">>>DEBUG: TCPClient could not read length field"))
+              nil)
+            (let [len (TCPClient/networkByteOrderToInt lenField 0 4)]
+              (when (some? Krb5/DEBUG)
+                (.println Krb5/DEBUG (java-str ">>>DEBUG: TCPClient reading " len " bytes")))
+              (if (<= len 0)
+                  (do
+                    (when (some? Krb5/DEBUG)
+                      (.println
+                        Krb5/DEBUG
+                        (java-str ">>>DEBUG: TCPClient zero or negative length field: " len)))
+                    nil)
+                  (try
+                    (IOUtils/readExactlyNBytes in len)
+                    (catch IOException ioe
+                      (when (some? Krb5/DEBUG)
+                        (.println Krb5/DEBUG
+                                  (java-str ">>>DEBUG: TCPClient could not read complete packet ("
+                                            len
+                                            "/"
+                                            count
+                                            ")")))
+                      nil)))))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.close tcpSocket))
+
+    (method ^:private readFully :throws [IOException] ^int [this ^byte/1 inBuf ^:mutable ^int total]
+      (let [^:mutable ^int count 0
+            ^:mutable ^int pos 0]
+        (while (> total 0)
+          (set! count (.read in inBuf pos total))
+          (when (== count -1) (return (if (== pos 0) -1 pos)))
+          (set! pos (unchecked-add-int pos count))
+          (set! total (unchecked-subtract-int total count)))
+        pos))
+
+    (method ^:private ^:static networkByteOrderToInt ^int [^byte/1 buf ^int start ^int count]
+      (when (> count 4) (throw (IllegalArgumentException. "Cannot handle more than 4 bytes")))
+      (let [^:mutable ^int answer 0]
+        (loop [^int i 0]
+          (when (< i count)
+            (set! answer (bit-shift-left-int answer 8))
+            (set! answer
+                  (bit-or-int answer
+                              (bit-and-int (int (aget buf (unchecked-add-int start i))) 0xff)))
+            (recur (unchecked-inc-int i))))
+        answer))
+
+    (method ^:private ^:static intToNetworkByteOrder ^void [^:mutable ^int num ^byte/1 buf
+                                                            ^int start ^int count]
+      (when (> count 4) (throw (IllegalArgumentException. "Cannot handle more than 4 bytes")))
+      (loop [^int i (unchecked-subtract-int count 1)]
+        (when (>= i 0)
+          (aset buf (unchecked-add-int start i) (unchecked-byte (bit-and-int num 0xff)))
+          (set! num (unsigned-bit-shift-right-int num 8))
+          (recur (unchecked-dec-int i))))))
+
+  (defclass UDPClient
+    :extends NetClient
+
+    (field ^InetAddress iaddr)
+
+    (field ^int iport)
+
+    (field ^int bufSize 65507)
+
+    (field ^DatagramSocket dgSocket)
+
+    (field ^DatagramPacket dgPacketIn)
+
+    (constructor :throws [UnknownHostException SocketException] [this ^String hostname ^int port
+                                                                 ^int timeout]
+      (set! iaddr (InetAddress/getByName hostname))
+      (set! iport port)
+      (set! dgSocket (DatagramSocket.))
+      (.setSoTimeout dgSocket timeout)
+      (.connect dgSocket iaddr iport))
+
+    (method ^:public send :throws [IOException] ^void [this ^byte/1 data]
+      (let [dgPacketOut (DatagramPacket. data (alength data) iaddr iport)]
+        (.send dgSocket dgPacketOut)))
+
+    (method ^:public receive :throws [IOException] ^byte/1 [this]
+      (let [ibuf (new byte/1 bufSize)]
+        (set! dgPacketIn (DatagramPacket. ibuf (alength ibuf)))
+        (try
+          (.receive dgSocket dgPacketIn)
+          (catch SocketException e
+            (when (instance? PortUnreachableException e) (throw e))
+            (.receive dgSocket dgPacketIn)))
+        (let [data (new byte/1 (.getLength dgPacketIn))]
+          (System/arraycopy (.getData dgPacketIn) 0 data 0 (.getLength dgPacketIn))
+          data)))
+
+    (method ^:public close ^void [this] (.close dgSocket))))
