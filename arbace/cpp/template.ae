@@ -548,7 +548,10 @@
    "__is_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
    "__is_nothrow_destructible" (fn [_ [a]] (not (or (abi/void? (abi/unq a)) (abi/fn? a) (and (abi/arr? a) (nil? (:n a))))))
    "__is_trivially_destructible" (fn [_ [a]] (and (not (abi/void? (abi/unq a))) (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?)))
-   "__has_trivial_destructor" (fn [_ [a]] (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?))
+   ;; (queue 584: the GCC manual's "Type Traits": true for a trivial type or a reference, else a class with a trivial destructor
+   ;; or an array of one; false for cv void and a function type, cpp2a/concepts-traits1.C's f7<void>())
+   "__has_trivial_destructor" (fn [_ [a]] (and (not (abi/void? (abi/unq a))) (not (abi/fn? (abi/unq a)))
+                                               (trivial-class? (loop [t a] (if (abi/arr? t) (recur (:of t)) t)) sema/trivial-dtor?)))
    ;; (cpp-tzdb: GNU's, a trivial default constructor, clang's HasTrivialDefaultConstructor: <bits/stl_tempbuf.h>'s
    ;; __uninitialized_construct_buf_dispatch<__has_trivial_constructor(_Tp)>, tzdb.cc's ranges::stable_sort)
    "__has_trivial_constructor" (fn [_ [a]] (let [u (abi/unq (loop [t a] (if (abi/arr? t) (recur (:of t)) t)))]
@@ -663,6 +666,32 @@
                              (cx-incomplete-class d))))]
       (when bad
         (throw (ex-info (str "codegen: incomplete type '" (:name bad) "' in the type trait " nm) {:codegen/refused :incomplete}))))))
+
+(defn- cx-gnu-old-trait
+  "Queue 584, the checker: GNU's older traits as the GCC manual's \"Type Traits\" defines them, where the answer does not
+  ask whether a class's special members may throw or are trivial: __has_trivial_assign(T) false for a const or reference T,
+  else true when __is_trivial(T); __has_trivial_copy(T) true for a reference or when __is_trivial(T);
+  __has_trivial_constructor(T) true when __is_trivial(T); __has_nothrow_assign, __has_nothrow_copy and
+  __has_nothrow_constructor true when their __has_trivial_ counterpart is (__has_nothrow_assign false for a const or
+  reference T); else, for a type that is no class or union nor an array of one, false. nil (not decided) otherwise
+  (cpp2a/concepts-traits1.C's f1<void>() ... f7<void>(), no match)."
+  [scope ^String nm t]
+  (let [ref? (abi/ref? t)
+        c? (and (not ref?) (:c t))
+        el (abi/unq (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))
+        trivial? (boolean ((value-traits "__is_trivial") scope [t]))
+        classy? (and (not ref?) (abi/class? el))
+        triv (fn [k] (case k
+                       :assign (cond (or ref? c?) false trivial? true classy? nil :else false)
+                       :copy (cond (or ref? trivial?) true classy? nil :else false)
+                       :ctor (cond trivial? true classy? nil :else false)))]
+    (case nm
+      "__has_trivial_assign" (triv :assign)
+      "__has_trivial_copy" (triv :copy)
+      "__has_nothrow_assign" (if (or ref? c?) false (triv :assign))
+      "__has_nothrow_copy" (triv :copy)
+      "__has_nothrow_constructor" (triv :ctor)
+      nil)))
 
 (defn trait-value
   "A value trait's constant (0 or 1) of its type arguments' forms, or a dependent {:k :texpr :o :trait} in a template's
@@ -849,7 +878,9 @@
                   (let [_ (next!) txt (run "(" ")")
                         ts (try (trait-args scope (mapv #(list 'cpp/text %) (split-top-commas txt))) (catch arbace.lang.ExceptionInfo _ nil))]
                     (when (and ts (not-any? dependent? ts)) (cx-trait-incomplete! t ts))
-                    (fail :template "not a constant: " t))
+                    (if-some [v (when (and ts (= 1 (count ts)) (not-any? dependent? ts)) (cx-gnu-old-trait scope t (first ts)))]
+                      (if v 1 0)
+                      (fail :template "not a constant: " t)))
                   ;; a value trait (G4): __is_same(T, U), its arguments types
                   (and (= k :id) (= "(" (peek)) (contains? value-traits t))
                   (let [_ (next!) txt (run "(" ")")]
@@ -1611,6 +1642,8 @@
 (declare deduce-by-type-match)
 (def ^:dynamic *satisfaction* nil)
 (def ^:dynamic *unstable* nil) ; cpp-s8: an atom set when a satisfaction asked about a class still being defined (not memoized)
+;; queue 584 (the checker): the concepts' satisfactions under way, [tid canonical-args] each (concept-satisfied?'s key)
+(def ^:dynamic *cx-concepts-entered* #{})
 
 ;; CX12 (second slice, the checker: sema/checking?): a template's deduction that gives no candidate is the program's
 ;; error only for the reasons below, each sure ([temp.deduct.type]'s mismatches of a member function's qualifiers or a
@@ -3471,13 +3504,26 @@
   (if-let [args (if (< (count args0) (count (:params c)))
                   (try (complete-args c (vec args0)) (catch arbace.lang.ExceptionInfo _ nil))
                   args0)]
-  (let [k [(:id c) (canonical args)]
-        eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
+  (let [k [(:id c) (canonical args)]]
+  ;; (queue 584, the checker: a concept's satisfaction that needs itself, the same concept with the same arguments again under
+  ;; way, has no value, [temp.constr.atomic]/3's evaluation never ends; GCC reports "satisfaction of atomic constraint ...
+  ;; depends on itself" at the innermost atomic constraint of the cycle, and the satisfaction is false, surely: the templates
+  ;; it guards are no candidates, cpp2a/concepts-recursive-sat2.C, -sat5.C, concepts-pr88395.C)
+  (if (and (sema/checking?) (contains? *cx-concepts-entered* k))
+    (let [at (last (filter #(and (map? %) (:range %) (not (#{"ConceptSpecializationExpr" "DeclRefExpr"} (:kind %)))) sema/*constraint-node*))]
+      (when-let [h sema/*on-refusal*]
+        (when (and at (not (sema/header-node? at)))
+          (h (ex-info (str "codegen: satisfaction of atomic constraint depends on itself (concept '" (:name c) "')")
+                      {:codegen/refused :constraint :cx/node at})
+             at)))
+      false)
+  (let [eval1 (fn [] (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "enter concept" (:name c) (pr-str (canonical args)))))
                      (let [d (atom false)
                            ;; (cpp-tpl2: its atoms' sure errors kept with the answer, given again to each asker,
                            ;; sema's *cx-constraint-explain*)
                            ex (when (sema/checking?) (atom []))
-                           r (binding [sema/*constraint-doubt* d sema/*cx-constraint-explain* ex]
+                           r (binding [sema/*constraint-doubt* d sema/*cx-constraint-explain* ex
+                                       *cx-concepts-entered* (if (sema/checking?) (conj *cx-concepts-entered* k) *cx-concepts-entered*)]
                                (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
                        [r @d (some-> ex deref seq vec)]))
         [r d ex] (if-let [m *satisfaction*]
@@ -3498,7 +3544,7 @@
     (when (System/getenv "CPP_CONCEPT_TRACE") (binding [*out* *err*] (println "concept" (:name c) (pr-str (canonical args)) "=>" r (if d "(doubt)" "") (pr-str (keep #(when (and (map? %) (= :class (:k %))) [(:id %) (select-keys (abi/cls (:id %)) [:defining :finished :complete])]) (tree-seq coll? seq args))))))
     (when d (sema/doubt!))
     (when-let [xs (when (and (seq ex) (not r)) sema/*cx-constraint-explain*)] (swap! xs into ex))
-    r)
+    r)))
   (do (sema/doubt!) true)))
 
 (defn- type-constraints-satisfied?

@@ -579,6 +579,8 @@
    [:constraint #"^codegen: invalid parameter type 'void' in a requires-expression" "invalid parameter type 'void'"]
    ;; (n-cpp-concepts: [temp.constr.atomic]/3)
    [:constraint #"^codegen: constraint expression does not have type 'bool'" "atomic constraint must be of type 'bool'"]
+   ;; (queue 584: a concept's satisfaction that needs itself, arbace.cpp.template/concept-satisfied?)
+   [:constraint #"^codegen: satisfaction of atomic constraint depends on itself" "satisfaction of atomic constraint depends on itself"]
    ;; (n-cpp-concepts: [temp.spec.partial.general]/9.2)
    [:template #"^codegen: partial specialization of '.*' does not specialize any template arguments" "partial specialization does not specialize any template arguments"]
    ;; (cpp-tpl2: [temp.arg.template]/3-4 in a class template's template-id, template.ae's cx-ttp-arg-mismatch?)
@@ -8237,10 +8239,13 @@
 (defn constexpr-labels
   [u starts ^String src ^String main]
   (when (and (some #{"-pedantic-errors"} (:args u)) (<= 14 (long (cxx-year (:std u))) 20))
-    (let [out (java.util.ArrayList.)]
+    (let [out (java.util.ArrayList.)
+          ;; (queue 584: a label a goto of the same body jumps to is not reported, the goto is, as g++ 15.2's recorded errors
+          ;; have it, test/cpp/ref-dg-gxx15.edn's cpp23/constexpr-nonlit1.C)
+          targets (atom #{})]
       (letfn [(body! [x]
                 (cond (map? x) (when-not (#{"LambdaExpr" "CXXRecordDecl"} (:kind x))
-                                 (when (and (= "LabelStmt" (:kind x)) (string? (:name x)))
+                                 (when (and (= "LabelStmt" (:kind x)) (string? (:name x)) (not (contains? @targets (:name x))))
                                    (when-let [o (mine-at x main)]
                                      (let [[l c] (line-col starts o)]
                                        (.add out {:line l :col c :kind :error :rule :constexpr-label :msg "label definition in 'constexpr' function only available with '-std=c++23'"}))))
@@ -8249,7 +8254,10 @@
                       :else nil))]
         (walk-nodes (fn [n _]
                       (when (and (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind n)) (:constexpr n))
-                        (doseq [b (:inner n) :when (and (map? b) (= "CompoundStmt" (:kind b)))] (body! b))))
+                        (doseq [b (:inner n) :when (and (map? b) (= "CompoundStmt" (:kind b)))]
+                          (reset! targets (set (keep #(when (and (map? %) (= "GotoStmt" (:kind %))) (:label %))
+                                                     (tree-seq coll? #(if (map? %) (vals %) (seq %)) b))))
+                          (body! b))))
                     (:nodes u) nil))
       (vec (distinct out)))))
 
