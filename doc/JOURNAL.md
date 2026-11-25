@@ -22368,3 +22368,33 @@ before the `when` that tests the flag, and cond-expr hoists an assignment's stor
 condition is translated inside the `when` of the flag, and the message inside the `when` of the failed condition (JLS
 14.10: the message only when the condition is false). Checked: arbace.j2g.* load on stage 0; no j2g of a program (the
 train's). Row expected: t06029 compiled passes (:assert-before-init then empty at both levels).
+
+## 2026-11-25: train 4 (Java) assembled: the merges, the shared causes once, the user's n/a for the exhaustive loops
+
+Branch `train-4` from `mac/train-3` (2aeeffc77): first the revert of 83447c4c0 (java-design's XML and the Mac's 538 back), then
+java-rows-1124 (978914d3d, with java-design-1123), 556d (458e0a229: 538, 549, 549b, 556b-556d), java-stack-1124 (b0a2b4838),
+java-misc-1124 (02da870be), 563 (61a394458) and 564 (9fb41b11c), both on 543's ae548f267 (543-1 dropped by the answers), 562
+(0d3a778be), java-speed-1124 (ffedb8ab3), 540c (4fff52656, sqlite3.c's print), then java-tail-1125 (fd5f7b47f, a fast-forward).
+- 543 and java-rows-1124 built three causes twice. Kept java-rows' (the coordinator agreed, 2026-11-25): the jdk.charsets charsets
+  the tests name with jrt's own ExtendedCharsets (the user's decision of 2026-11-24: not the whole module; 543's whole jdk.charsets,
+  JrtExtCharsets, CsExtAbstractCharsetProvider and sjis0213.dat left out), jrt's hand-written CountDownLatch and Semaphore made
+  non-leaf (not jdk26u's over the translated AbstractQueuedSynchronizer), ForkJoinPool's scheduling in fjschedule.ae (not
+  ForkJoinPools' waiter tasks and j2g's fjp-support methods). Kept 543's other causes: the Buddhist and Japanese calendars,
+  jdk.zipfs (FileSystemProvider jdk26u's again), ReentrantLock$ConditionObject's name, `bin/jrt provides`' module header fix and
+  j2g's Zipfs renames. Alternative: 543's versions (jdk26u's classes over AQS, the whole charsets module), not taken: the user's
+  charsets decision and java-rows' jrt tests.
+- 563's MethodParameters records take java-bytecode-1122's W format and reader (names quoted by annot's enc-string, jrt's
+  executableParameters with jdk26u's verifyParameters): one record, one getParameters; 563's ParamRecord and RecordedParameters
+  dropped. 564's Class.describeConstable root and support form duplicated java-bytecode-1122's: train 3's kept.
+- Hand merges: FileManager.java's header (549's BaseFileManager and JCS51's DirLoader), Compiler.ae (Klass's initDone and
+  finalizable; Frame's line and java-speed's NOREFS/NOPRIMS; the calls with java-speed's argsC, boxedC and Rt/HOST's invoke and
+  java-stack's Node.at), reflect.ae (java-stack's access check, then 564's enum guard), check-diagnostics.edn ours (JCS51's
+  processor rows, to be run again on the train's tool).
+- The user's decision of 2026-11-24 on java-speed-1124's report (the train plan's train 4 line): t06419 (SwitchNull) and t05498
+  (RotateHuge) n/a at interp, the class `:exhaustive-loops` before `:speed-hang`, which no longer names them.
+- Checks before the build: every changed tool namespace (arbace.classes.*, arbace.j2g.*, arbace.repr.java.*, arbace.repr.c.convert)
+  loads on stage 0 (the stage-0 trap of 11-24); `bin/jrt test --package jrt` passes on amd64 (arm64 under qemu-aarch64 fails
+  TestChannelMulticast, TestOperatingSystemFacts and the negative-index messages of TestExceptionCases and TestRuntimeErrorMessages:
+  the emulator's, no gate step, none of the train's changes near them).
+- Then, under one big-lock ticket (.tmp/t4/train-4.sh): one provenance batch over every reader-hash mover on train 3's javac tool,
+  one gate build, the smoke run, javac's tool at the new key, `bin/javac-vendor verify`; the records after.
