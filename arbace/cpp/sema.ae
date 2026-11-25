@@ -1784,6 +1784,42 @@
            (if (cx-recoverable? e) (cx-dropped! cs k) (throw e))))
     (f)))
 
+(defn cx-unexpanded-packs
+  "Queue 573 (the checker): the names of `packs` (a set) the type text `s` names outside a pack expansion, [temp.variadic]/5
+  (arbace.repr.cpp.diag's unexpanded-in-text, the rule the checker's caller reports by; nil when that namespace is not
+  loaded, outside the checker)."
+  [packs s]
+  (when (and (seq packs) (seq s))
+    (when-let [f (some-> (find-ns 'arbace.repr.cpp.diag) (ns-resolve 'unexpanded-in-text))]
+      (f packs s))))
+
+(defn cx-sans-noexcept
+  "Queue 573: a function type's text up to its noexcept-specifier, if any."
+  ^String [^String s]
+  (if-let [m (re-find #"(?s)^(.*?)\s*\bnoexcept\b" s)] (second m) s))
+
+(defn- cx-pack-dropped-member?
+  "Queue 573 (567-2 (a), the checker): whether the member node `k` of the class `id`, a main file's class template's
+  specialization, declares a type that names a pack of the template's head (the class's :cx-packs) outside a pack
+  expansion, ill-formed by [temp.variadic]/5 (diag.ae reports it at the pattern). GCC drops such a member from the class
+  after its error, so a later use of it is an error of its own: cpp0x/pr32127.C's `A<int>::i` \"is not a member\",
+  cpp0x/pr31437.C's `A<int> a(0)` with the constructor gone \"no matching function\". Not recorded among the dropped names
+  (cx-dropped!): those later errors are GCC's too. A member template's own parameters hide the class's packs of their names."
+  [id k]
+  (when (and (checking?) (not (header-node? k)) (not (:isImplicit k))
+             (#{"FieldDecl" "VarDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl" "FunctionDecl" "TypedefDecl"
+                "TypeAliasDecl" "FunctionTemplateDecl"} (:kind k)))
+    (let [c (abi/cls id)
+          packs (:cx-packs c)]
+      (when (and (seq packs) (:targs c) (not (:header c)))
+        (let [[packs x] (if (= "FunctionTemplateDecl" (:kind k))
+                          (let [tps (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (kids k))]
+                            [(reduce (fn [s p] (if (:name p) (if (:isParameterPack p) (conj s (:name p)) (disj s (:name p))) s)) packs tps)
+                             (first (filter #(#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXConversionDecl"} (:kind %)) (kids k)))])
+                          [packs k])]
+          ;; (a function's noexcept-specifier left out: GCC reports its pack there and keeps the member, cpp0x/noexcept66.C)
+          (boolean (and x (cx-unexpanded-packs packs (cx-sans-noexcept (str (get-in x [:type :qualType])))))))))))
+
 (defn- fn-op [^String nm] (when (str/starts-with? nm "operator") (let [o (str/trim (subs nm 8))] (when (seq o) o))))
 
 (defn- param-nodes [n] (filter #(= "ParmVarDecl" (:kind %)) (kids n)))
@@ -3105,6 +3141,9 @@
           ;; the slice or the program, is dropped and its class goes on, as GCC drops an erroneous member declaration; its name
           ;; and its class's recorded (cx-dropped!), so that the cascades it leaves are not reported. Before, the refusal left
           ;; the class, the class's declaration was refused, and the unit with it)
+          ;; (queue 573: a class template's specialization's member that names a pack unexpanded, cx-pack-dropped-member?: not
+          ;; declared)
+          (when-not (cx-pack-dropped-member? id k)
           (cx-member-recover! cs id k (fn []
           (when (and (checking?) (#{"FieldDecl" "TypedefDecl" "TypeAliasDecl"} (:kind k)))
             (cx-member-type-access! cs id k)
@@ -3252,7 +3291,7 @@
                              (catch arbace.lang.ExceptionInfo x
                                (when (re-find #"^codegen: template constraint failure for" (str (ex-message x)))
                                  (*on-refusal* x (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))))))))))
-                (binding [*member-access* @access] (declare-node! cs k))))))))
+                (binding [*member-access* @access] (declare-node! cs k)))))))))
         (finally (abi/update-cls! id dissoc :defining))))
       ;; (round 54, the checker: at most one variant member of a union with a default member initializer,
       ;; [class.mem.general]/11: GCC's "initializations for multiple members of 'A'", at the union)

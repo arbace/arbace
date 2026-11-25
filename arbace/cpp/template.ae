@@ -2348,7 +2348,10 @@
     ;; (queue 392: an explicit specialization marked :espec, a class with a key function, codegen's key-fn)
     (swap! abi/*classes* assoc cid (cond-> {:id cid :name (:name t) :path (:path ps) :scope cs :fields [] :bases [] :outer ps
                                             :union (= "union" (:tagUsed node)) :tmpl tid :targs args :header (sema/header-node? node)}
-                                     explicit? (assoc :espec true)))
+                                     explicit? (assoc :espec true)
+                                     ;; (queue 573, the checker: the names of the parameter packs its pattern's head declares,
+                                     ;; sema's cx-pack-dropped-member?)
+                                     (sema/checking?) (assoc :cx-packs (set (keep #(when (:pack %) (:name %)) params)))))
     (enter! ps (:name t) {:e :type :ty {:k :class :id cid} :pos -1})
     (upd-tmpl! tid assoc-in [:insts args] cid)
     (when-let [nm (System/getenv "CPP_INST_TRACE")]
@@ -4468,6 +4471,19 @@
                             {:codegen/refused :template :cx/node rc})
                    rc)))))))))
 
+(defn- cx-pack-signature-check!
+  "Queue 573 (567-2 (a), the checker): a main file's function template whose declared type (its parameters' and return types)
+  names one of its own template parameter packs outside a pack expansion, ill-formed by [temp.variadic]/5 (diag.ae's
+  unexpanded-packs reports it, GCC's \"parameter packs not expanded with '...'\"): GCC goes on with the parameter's type an
+  error, so the template is no viable candidate of a later call (its \"no matching function\", cpp0x/pr31434.C's foo(0)):
+  marked :cx-bad, call-candidates' sure drop."
+  [t]
+  (when (sema/checking?)
+    (let [p (:pattern t) packs (set (keep #(when (:pack %) (:name %)) (:params t)))]
+      (when (and p (seq packs) (not (sema/header-node? p))
+                 (sema/cx-unexpanded-packs packs (sema/cx-sans-noexcept (str (get-in p [:type :qualType])))))
+        (upd-tmpl! (:id t) assoc :cx-bad true)))))
+
 (defn- cx-bad-member-template?
   "Queue 526 (the checker): whether the FunctionTemplateDecl `n`, a member of a main file's class template's specialization
   (the class scope `scope`), has a template parameter list that does not resolve there (a non-type parameter's type refused)."
@@ -4622,6 +4638,7 @@
                                     ;; (the rest of CP313 (a): a member template's access, its specializations')
                                     :access (when (:cls scope) sema/*member-access*)})
           (cx-alias-pack-check! (tmpl tid))
+          (cx-pack-signature-check! (tmpl tid))
           ;; a constructor template is found through its class (class-init's candidates), not by name
           (if ctor?
             (abi/update-cls! (:cls scope) update :ctor-tmpls (fnil conj []) tid)
