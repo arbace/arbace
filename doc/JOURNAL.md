@@ -21007,3 +21007,15 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   crops-score --judge --strict, records-check: 0 problems.
 - For the main host: whole records of test_email, test_unittest, test_contextlib, test_pdb and test_pickle (pickle-builtin-reference's
   nine pass on the VM). DECISION 574-1 (the user's): trace's two and test_pdb_frame_refleak need gc.get_referrers, empty by 241-3 (a).
+
+## 2026-11-25 — the user's DECISIONs 574-1 (a) and 574-2 (queue 574, VM)
+
+- 574-1 (a), the user's: trace's TestCallers.test_loop_caller_importing and TestFuncs.test_inst_method_calling (out of
+  `:tools-misc`) and test_pdb's test_pdb_frame_refleak (out of `:doctests`, whose match took it) are a `:design` class,
+  `:gc-referrers-empty`: gc.get_referrers answers empty by 241-3 (a) (no registry of containers). The class stands before
+  `:doctests` so that it takes the doctest row first. Mirrored in divergences-315.edn. Alternative (b), revisiting 241-3 with a
+  registry, not taken.
+- 574-2, the user's: keep. f_lineno is None at a function's instruction with the IR's line 0 and stays 0 at module level
+  (7949c2058).
+- Judged again from the records, with no new run: bin/reap --record, bin/crops-score --record. Python eval 40,855 / 1,405 / 1,279 ->
+  40,855 / 1,408 / 1,276. bin/reap, crops-score --judge --strict and records-check: 0 problems.
