@@ -22445,3 +22445,22 @@ on train 3's tool and are the host's to record; this entry is the four left.
   in every program; a list of interfaces not taken.
 - 575-3 (a): the four rows' record (t07544, t07545, t07546, t07552), made on a tool of train-3 with this branch, is accepted now;
   train 4's tool reruns their diagnostics after its edge is recorded again (System$Logger), as the confirmation.
+
+## 2026-11-25 — Java run leftovers t08164, t04614, t04878: WIP (queue 582, VM)
+
+WIP, handed back before the proving run finished. Train-4 (268287e6e) does not build: j2g stops at "Undeclared functional of
+class java.lang.System$Logger" (jdk/edge.edn not recorded since 562). For a scratch arm64 build only, the edge was given
+`:functional false` for System$Logger by hand (Logger is not @FunctionalInterface); that change is not committed: the host's
+`bin/j2g-edge update` records it.
+- t08164 (FindOneCharEncoderBugs), interp and compiled: 543's interp output shows 170 failed checks, one per charset, all
+  `check(dcb.isDirect())` on ByteBuffer.allocateDirect(..).asCharBuffer(); 340 passed; no encoding differs. Cause JCS152 (a)
+  (a direct buffer is a heap buffer, isDirect false). Classed under :nio by :tests; :stack's match "Exception: Stack trace"
+  (JC1's, which took only this row) dropped so that the row is classed by its cause. Alternative: isDirect true on the views
+  of a direct buffer, against JCS152 (a): the user's (DECISION 582-1).
+- t04614 (MultiThreadStackWalk), compiled: "Expected Marker at 991, found Test". Hypothesis: a class inheriting a default
+  method has a forwarder (*T).m calling the interface's package function J_m (J2G-SPEC §5.4), and jrt's stack frames dropped
+  only the Impl_ forwarders, so Test.walk's forwarder added one frame of class Test above Call.walk, shifting the Marker.
+  jrt's stackFrames now drops a default method's forwarder too (isDefaultForwarder: callee J_M of an interface J that T
+  implements). Not yet proved by a finished run.
+- t04878 (Proxy nonJavaNames): journal entries of 11-23 and 11-24 found it passing on train 3's executable; train-4's
+  Class.forName(name, init, loader) calls the loader's loadClass. Its row waits for the run.
