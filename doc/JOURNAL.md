@@ -23001,3 +23001,36 @@ per job (not available to the agents' shells here; the watchdog is the backstop)
   is-corresponding-member3/4 and is-pointer-interconvertible-with-class3, whose expected lines our undeclared error had held);
   [expr.sub]'s scalar subscript (crash89's default template argument never reports it); a constexpr constructor with virtual bases
   a sure non-constexpr call (constexpr-ice21 still misses its local-class line).
+
+
+## 2026-11-25 — C++: diag's checks by node kind on units with large headers (queue 580, VM)
+
+The user's DECISION 578-1 (a): cpp1z/constexpr-asm-3.C read in 7 min on the VM, diag's checks most of it over <string>.
+- Measured first (.tmp/q580/prof-base.out, the unit parsed once, each check timed, its walks of the unit's root timed apart):
+  the walk cache of queue 567 already made `walk-nodes`' replay cheap (276,190 nodes replayed in 0.06 s; all the checks' root
+  walks 8.3 s of 140.8 s). The time was the checks' own context-carrying walks (`(letfn [(w [x ...]) ...])` over every map entry
+  of the tree: ~20 checks at 5-9 s each), which no cache replays: their state (enclosing loop, function, variables, template)
+  is the walk's. So an index by kind of the flat list alone, 578's proposal as written, would have saved little.
+- Built instead (arbace/repr/cpp/diag.ae): `kind-index`, the walk cache's index by node kind, made once a unit on first use:
+  each map and collection the root reaches (not through :_ent, a superset of every walk's) to the BitSet of the kinds of the nodes
+  under it, equal sets shared (asm3: 0.47 s, 179,311 collections, 91 kinds); `reaches-fn KINDS`, a predicate false of a subtree
+  the index knows holds none of a check's kinds (true without an index or for an object outside the root), and `walk-kinds`,
+  walk-nodes skipping such subtrees. Each costly walk now skips the subtrees holding none of the kinds it acts at, its context
+  still taken from the ancestors it visits: stray-jumps (BreakStmt, ContinueStmt), unavailable (DeclRefExpr, MemberExpr, and the
+  typed declarations and casts when a type is unavailable), object-sizes (VarDecl), gnu-asm, operand-types, labels-as-values
+  (LabelDecl, AddrLabelExpr, IndirectGotoStmt), case-values (SwitchStmt), read-only-modify, builtin-operator-new and integer-pack
+  (CallExpr), anon-union-redecls (CXXRecordDecl, its blocks and statements), uninit-consts', covariant-returns' and
+  flexible-arrays' class collection (CXXRecordDecl), builtin-values, gnu-packed, duplicate-labels (LabelStmt, GotoStmt),
+  anon-union-captures (MemberExpr; outside a lambda also LambdaExpr), builtin-launder (walk-kinds CallExpr), redefinitions'
+  stmt! (the kinds of the regions it enters) and undeclared (DeclRefExpr: parse.ae puts :_undecl on a DeclRefExpr alone).
+- Alternatives: kind lists over walk-nodes' flat list (each check's callback called only for its kinds): the root walks are 7.5 s
+  of the remaining 11 s on asm3, mostly the callbacks' own work; left, a follow-up if wanted. Memoizing each check's walk: the
+  state differs per check.
+- Proof (.tmp/q580/): every check's output and Sema's, per row, written before (the base, 79509867e's diag.ae) and after, compared
+  byte for byte: 414 rows (the 7 <string>/<iostream> rows that read, every 8th recorded own pass, 53 rows whose dg-error lines are
+  the changed checks' messages), all equal; each changed check has output on at least one of them (coverage.txt, coverage2.txt).
+  Times (parse / checks / sema, s): constexpr-asm-3 13.8/203.4/18.5 -> 14.7/22.2/18.8, udlit-suffix-neg 11.4/183.4/12.6 ->
+  11.2/18.9/12.4, initlist92 10.4/180.8/11.5 -> 10.6/20.3/11.8, missing-std-include-3 14.5/198.5/18.3 -> 14.4/21.0/18.6,
+  tm/inherit2 18.1/191.6 -> 17.3/23.0. The dg check on constexpr-asm-3 (`--only`, one thread): own pass, read 53 s (was past
+  the 300 s cap); recorded from that run (`--judge --record`): test/cpp/check-dg-own-linux-amd64.edn's row to :pass. No other
+  record touched: the full own regression is cpp-vm-1125's.
