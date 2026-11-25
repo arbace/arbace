@@ -601,6 +601,8 @@
    [:template #"^codegen: template parameters not deducible in partial specialization" "template parameters not deducible in partial specialization"]
    ;; (queue 567: [temp.class.spec]/8.1 of C++11/14, arbace.cpp.template/cx-partial-nontype-involves!)
    [:template #"^codegen: template argument '.*' involves template parameter" "template argument involves template parameter(s)"]
+   ;; (cpp-own: [temp.spec.partial.general]/1, arbace.cpp.template/cx-partial-after-instantiation!)
+   [:template #"^codegen: partial specialization of '.*' after instantiation of" "partial specialization after instantiation"]
    [:undecl #"^codegen: use of undeclared identifier" "use of undeclared identifier"]
    ;; (queue 487: [basic.lookup.general]/1 and /4 through using-directives, [namespace.udir]/2, [namespace.qual]/2)
    [:ambiguous #"^codegen: reference to '.*' is ambiguous" "reference to X is ambiguous"]
@@ -5317,7 +5319,7 @@
    [:string-long #"^codegen: initializer-string for" "initializer-string is too long"]
    [:named-cast #"^codegen: invalid ('const_cast' from|cast from) type" "invalid cast"]
    [:fn-arith #"^codegen: pointer to a function used in arithmetic" "pointer to a function used in arithmetic"]
-   [:delete-arg #"^codegen: (type of the argument given to 'delete'|cannot delete a function)" "invalid argument to delete"]
+   [:delete-arg #"^codegen: (type of the argument given to 'delete'|cannot delete a function|ambiguous default type conversion)" "invalid argument to delete"]
    [:cond-void #"^codegen: an operand of the conditional operator is of type 'void'" "void operand of the conditional operator"]
    [:ptr-cmp #"^codegen: comparison between distinct pointer types" "comparison between distinct pointer types lacks a cast"]
    [:mptr-base #"^codegen: (pointer to member conversion via virtual base|'.*' is an (ambiguous|inaccessible) base of)" "invalid pointer to member conversion"]
@@ -7525,10 +7527,15 @@
   identifier, or a syntax error at the name or in its template argument list (`A<`), are dropped."
   [ds u ^String src ^java.util.ArrayList starts ^String main]
   (let [names (java.util.ArrayList.)]
-    (walk-nodes (fn [x _]
+    (walk-nodes (fn [x parent]
                   (when (= "NativeDecline" (:kind x))
                     (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset])]
-                      (when (and b e (= main (or (get-in x [:range :begin :file]) main)) (<= 0 (long b) (long e) (dec (.length src))))
+                      ;; (cpp-own, 2026-11-25: not a member template a class declines at its template-head: GCC declares no
+                      ;; template member then, and a use qualified by the class is "does not name a template type",
+                      ;; cpp0x/pr85147.C's `A<int>::B<> b;` after `template<template<...T> class...> struct B {};` in A)
+                      (when (and b e (= main (or (get-in x [:range :begin :file]) main)) (<= 0 (long b) (long e) (dec (.length src)))
+                                 (not (and (= "CXXRecordDecl" (:kind parent))
+                                           (re-find #"^\s*template\s*<" (subs src (long b) (inc (long e)))))))
                         (when-let [nm (declined-name (subs src (long b) (inc (long e))))]
                           (let [bl (first (line-col starts (long b))) el (first (line-col starts (long e)))]
                             ;; (queue 567: not when the parser declined at a template parameter whose type is a name no lookup
@@ -8233,23 +8240,28 @@
 
 ;; cpp-rind (2026-11-24): [dcl.constexpr]/3 of C++14-C++20 (P2242 lifts it in C++23): a constexpr function's body holds no label
 ;; definition (case and default labels aside): GCC's pedwarn "label definition in 'constexpr' function only available with
-;; '-std=c++23'", an error under -pedantic-errors, at the label; cpp1y/constexpr-label.C.
+;; '-std=c++23'", an error under -pedantic-errors, at the label; cpp1y/constexpr-label.C. (cpp-own, 2026-11-25: a label that a goto
+;; of the same body names is not diagnosed: the goto's own error, constexpr-pre23-bodies', is the pair's one diagnostic, as
+;; cpp23/constexpr-nonlit3.C and cpp1y/constexpr-neg1.C state it: their labels expect none.)
 (defn constexpr-labels
   [u starts ^String src ^String main]
   (when (and (some #{"-pedantic-errors"} (:args u)) (<= 14 (long (cxx-year (:std u))) 20))
     (let [out (java.util.ArrayList.)]
-      (letfn [(body! [x]
+      (letfn [(gotos [b] (let [s (java.util.HashSet.)]
+                           (walk-nodes (fn [x _] (when (and (= "GotoStmt" (:kind x)) (string? (:label x))) (.add s (:label x)))) [b] nil)
+                           s))
+              (body! [^java.util.Set gs x]
                 (cond (map? x) (when-not (#{"LambdaExpr" "CXXRecordDecl"} (:kind x))
-                                 (when (and (= "LabelStmt" (:kind x)) (string? (:name x)))
+                                 (when (and (= "LabelStmt" (:kind x)) (string? (:name x)) (not (.contains gs (:name x))))
                                    (when-let [o (mine-at x main)]
                                      (let [[l c] (line-col starts o)]
                                        (.add out {:line l :col c :kind :error :rule :constexpr-label :msg "label definition in 'constexpr' function only available with '-std=c++23'"}))))
-                                 (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (body! v)))
-                      (sequential? x) (doseq [y x] (body! y))
+                                 (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (body! gs v)))
+                      (sequential? x) (doseq [y x] (body! gs y))
                       :else nil))]
         (walk-nodes (fn [n _]
                       (when (and (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} (:kind n)) (:constexpr n))
-                        (doseq [b (:inner n) :when (and (map? b) (= "CompoundStmt" (:kind b)))] (body! b))))
+                        (doseq [b (:inner n) :when (and (map? b) (= "CompoundStmt" (:kind b)))] (body! (gotos b) b))))
                     (:nodes u) nil))
       (vec (distinct out)))))
 

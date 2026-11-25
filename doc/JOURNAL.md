@@ -22964,3 +22964,40 @@ capped at 2.5 GB. `test/gate/heavy-lock-test.bash` case 7: a 20 GiB ticket waits
 runs in slot 2 past it, and `HEAVY_LOCK_SLOTS=1 HEAVY_LOCK_SMALL_GIB=2` keeps a 4 GiB ticket out; every case passes.
 Alternatives: keep two slots with stricter declarations (rejected: a declaration was what failed), or a cgroup memory limit
 per job (not available to the agents' shells here; the watchdog is the backstop).
+
+## 2026-11-25 — C++: the whole own dg record on amd64, 569-3's five rows, and the read tail (cpp-own)
+
+- Branch `cpp-own-1125` from mac/570-cpp-vla-types `af1703774` (569, 567, cpp-rind and cpp-read in it). Rules from the standard and
+  GCC's behaviour as the tests state it, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-own").
+- The whole own dg record on this host: `bin/repr-cpp dg --corpus dg-error --front native --only` over eight parts of the record's
+  4,564 files (every eighth), REPR_CPP_THREADS=3 and GOMEMLIMIT=3000MiB, from a frozen run tree (.tmp/worktrees/cpp-own-run,
+  detached at the head under test, so the development tree could change), each part under the host's big lock (HEAVY_MEM_GIB=12,
+  one lock turn a part: the rules after the 11-25 OOM), each judged and recorded alone (`--judge --record`) once finished. Parts 1
+  and 2 ran first at `af1703774` (before the host's reboot at 12:03, which killed parts 3 and 4): 364 and 349 own passes, the only
+  recorded passes lost 569-3's constexpr-nonlit3.C and constexpr-neg1.C; the rest, and parts 1 and 2 again, at `2847d4ef8` (the branch with mac/next `e6d623367` merged).
+- 569-3 (a)'s five: they fail on amd64 too, each by a rule of cpp-rind or cpp-read, and are fixed: cpp23/consteval-if2.C (a
+  consteval if's first branch that is no compound statement), ext/anon-struct6.C (a function in an anonymous struct), cpp0x/
+  pr85147.C (declined-names-silent left a member template declined at its template-head silent), cpp23/constexpr-nonlit3.C and
+  cpp1y/constexpr-neg1.C (constexpr-labels gave a label a goto names an error of its own).
+- The tail: template/delete2.C ([expr.delete]/1, [conv]/5), template/partial8.C ([temp.spec.partial.general]/1), cpp0x/
+  constexpr-50060.C (C++11's [expr.const]/2: assignments), warn/forward-inner.C (qualified elaborated declarations), tc1/dr176.C
+  (`::X` undeclared; a dependent base's injected name, [temp.dep.general]/3). Each change checked on its rows and the files its
+  rule can reach (the C++11 constexpr files, 262; the qualified elaborated declarations, 14; global qualifications and derived
+  class templates, 162): none lost; then the whole run.
+- Alternatives considered: recording the base's whole run and the fixes' rows apart (two records to merge; the whole run at the
+  final head covers every change at once, so it was moved to the head before its parts started); a whole-unit `::X` check against
+  every declaration of the file (declared-at-top-in-main? keeps GCC's silence after a failed global declaration); the [conv]/5 rule
+  for every class operand (kept to a conversion function template among the candidates, the test's case).
+- Left, looked at (survey): partial-specialization3, crash89, attr-assume9, pr82401, using-enum-7, constexpr-ice21, spec8.
+- Recorded from the eight finished parts at `2847d4ef8` (one lock turn, 18:10-18:49 UTC, two parts at a time, HEAVY_MEM_GIB=24:
+  the coordinator's call), each `--judge --record`: own pass 2,829 -> 2,840, no recorded own pass lost (569-3's five pass again);
+  11 rows to own pass: the five above's tail rows, cpp1z/constexpr-asm-3.C, cpp2a/concepts-pr67774.C, cpp2a/concepts-uneval5.C,
+  gomp/atomic-14.C, gomp/pr58567.C and other/anon-union5.C (by next's merged changes and these rules); five timeouts of the old
+  record are now misses (template/pr69961a.C, cpp1y/complex_literals1a.C, gomp/unroll-2.C and others: the walk cache). `bin/reap
+  --record`: C++ read 6,090 / 0 / 194 -> 6,096 / 0 / 189; `bin/crops-score --record`: C++ completeness 0.9862 -> 0.9864, read
+  independence 0.883 -> 0.884, independence 0.9766 -> 0.9768. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
+  `bin/markers-check`: 0 problems.
+- Tried and dropped (each lost a recorded pass or fired nowhere): g++'s builtins of cpp/target/dialect.edn never undeclared (cost
+  is-corresponding-member3/4 and is-pointer-interconvertible-with-class3, whose expected lines our undeclared error had held);
+  [expr.sub]'s scalar subscript (crash89's default template argument never reports it); a constexpr constructor with virtual bases
+  a sure non-constexpr call (constexpr-ice21 still misses its local-class line).

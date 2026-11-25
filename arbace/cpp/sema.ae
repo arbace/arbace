@@ -5019,12 +5019,17 @@
                            (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression"))
                          (not-constant "a load"))))))
        ;; (CP378 (a): the place a local's, or an object's subobject through ce-lv: `this->_M_len -= __n`)
-       :assign (let [x (:l e) l (ce-lv x env)
+       ;; (cpp-own, 2026-11-25, the checker: C++11's [expr.const]/2, an assignment or a compound assignment is no core constant
+       ;; expression -- C++14's N3652 allows one to an object whose lifetime began within the evaluation: GCC's "... is not a
+       ;; constant expression" at it, cpp0x/constexpr-50060.C's mem-initializer `x ((y = 1, 0.8125))`)
+       :assign (let [_ (when (and (checking?) (= 11 (long *cxx-year*))) (ub! e "an assignment is not a constant expression in C++11"))
+                     x (:l e) l (ce-lv x env)
                      v (if (abi/class? (abi/unq (:ty x))) (ce-glvalue (:r e) env) (ce-wrap (:ty x) (ev (:r e))))]
                  (ce-check-const! e l)
                  (ce-union-write! e x l)
                  (ce-put! l v))
-       :cassign (let [x (:l e) l (ce-lv x env)
+       :cassign (let [_ (when (and (checking?) (= 11 (long *cxx-year*))) (ub! e "a compound assignment is not a constant expression in C++11"))
+                      x (:l e) l (ce-lv x env)
                       _ (ce-check-const! e l)
                       old (ce-get l)
                       r (ev (:r e))]
@@ -12293,7 +12298,22 @@
                           ;; function")
                           _ (when (checking?)
                               (let [t (abi/unq (:ty e))]
-                                (cond (or (nil? t) (abi/class? t) (#{:dep :auto :tparam} (:k t))) nil
+                                (cond (or (nil? t) (#{:dep :auto :tparam} (:k t))) nil
+                                      ;; (cpp-own, 2026-11-25: [expr.delete]/1 with [conv]/5, a class operand contextually implicitly
+                                      ;; converted to a pointer to object type: its non-explicit conversion functions to one, a
+                                      ;; conversion function template returning a pointer among them, name more than one type --
+                                      ;; GCC's "ambiguous default type conversion from 'B<int>'", template/delete2.C)
+                                      (abi/class? t)
+                                      (when-let [cid (class-id t)]
+                                        (let [obj-ptr? (fn [r] (let [r (abi/unq (abi/non-ref r))] (and (abi/ptr? r) (not (abi/fn? (abi/unq (:to r)))))))
+                                              rs (distinct (for [f (distinct (conv-fns cid)) :let [g (fnd f)]
+                                                                 :when (and (not (:explicit g)) (obj-ptr? (:ret (:ty g))))]
+                                                             (abi/unq (abi/non-ref (:ret (:ty g))))))
+                                              ts (filter #(let [pt (:pattern ((requiring-resolve (quote arbace.cpp.template/tmpl)) %))]
+                                                            (and (not (:explicit pt)) (re-find #"\*\s*(?:const\s*)?\(\)" (str (get-in pt [:type :qualType])))))
+                                                         (conv-tmpls cid))]
+                                          (when (and (> (+ (count rs) (count ts)) 1) (seq ts) (not (:header (abi/cls cid))))
+                                            (fail :delete-arg "ambiguous default type conversion from '" (:name (abi/cls cid)) "'"))))
                                       (not (abi/ptr? t)) (when (cx-sure-scalar? t) (fail :delete-arg "type of the argument given to 'delete', expected pointer"))
                                       (abi/fn? (abi/unq (:to t))) (fail :delete-arg "cannot delete a function")
                                       :else nil)))
