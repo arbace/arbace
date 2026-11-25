@@ -22157,3 +22157,22 @@ and test/crops/scores.edn taken from next and recorded again (`bin/reap --record
   `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
 - mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
 Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
+
+## 2026-11-25: cpp-tzdb settled: the sampling's two stray rows and the inputs' 13 lost rows were one wrong command; mac/next merged
+
+The records chain of 2026-11-24 (`.tmp/tz/chain.sh`) ran `bin/cppi check --sample 25 --record` and `--aot --sample 25 --record` without
+`--corpus gxx-dg-run` (the gate's sampling parts name it, test/gate/steps.edn's cpp-check-oracle): bin/cppi check's default corpora are
+samples and runtime, so it sampled every 25th of those, runtime/atomics.cpp and samples/auto.cpp, and its --record (a sampling's own
+record, rows replaced by corpus) added them to check{,-aot}-every-25{,-times}-linux-amd64.edn, where test/cpp/ref-gxx15.edn's sample does
+not hold them (bin/reap's 2 cases), and rewrote {eval,aot}-inputs-linux-amd64.edn's samples and runtime rows with the two alone (13 rows
+lost: eval and AOT independence 0.999 -> 0.966 in 97d35d9bf's scores). No corpus or list had changed. Settled: the six files back at
+a2143d56a (mac/next's, unchanged since); the two programs passed as check-linux-amd64.edn records them, and every lost row was
+{:ir :own :ci-target :own}, a fact of the program's IR route, not of the runtime. Kept: test/cpp/runtime/inputs-linux-amd64.edn
+(c++20/tzdb.cc :ir :own, the chain's runtime-inputs --record after the 198-of-198 own build). Nothing rerun.
+mac/next 3a67d8dc2 merged: arbace/cpp/sema.ae's four conflicts kept both sides (cpp-tzdb's *class-ids* beside next's declares; the
+default argument's :def-scope inside cpp-rind's recursion guard and cpp-p2564's caller context; *copy-init-ctors*'s explicit filter in
+cpp-rind's ctor-init*; cpp-p2564's consteval condition with cpp-tzdb's closing), loaded on stage 0 (arbace.cpp.codegen); the journal and
+the survey both. bin/reap --record (56 of 56, 0 problems), crops-score --record and --judge --strict, records-check (0 problems),
+markers-check: C++ eval and AOT independence 0.999 -> 1.0 (C++ independence 0.9762 -> 0.9766), cells unchanged (eval 81/1/0, AOT 81/1/0).
+Not run (the coordinator's memory hold after the 12:03 OOM): the merged tree's runtime build, which confirms tzdb.cc by our route on
+next's code generator: the first gate's cpp-runtime builds it (runtime-judge, every unit; cpp-key's key then keeps it).
