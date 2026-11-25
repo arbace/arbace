@@ -74,7 +74,10 @@ path in it, and three builds at three places (two scratch directories and `.tmp/
   so its panics' texts are the judge's), and the workspace manifest's own per-package settings overridden (`--config`, which Cargo
   takes over the manifest): `compiler_builtins` at 16 codegen units (the manifest's 10,000 made 337 units), the backtrace crates at
   `opt-level 0` (the manifest's `"s"`);
-- the flags: `-Csave-temps -Cembed-bitcode=yes -Zforce-unstable-if-unmarked`; the package `sysroot`, its features;
+- the flags: `-Csave-temps -Cembed-bitcode=yes -Zforce-unstable-if-unmarked`, and since C3X-1 (b) (the user, 2026-11-23;
+  FRONTEND-SURVEY, "As built: C3X-1 (b)") `-Zshare-generics=no`: each std crate instantiates its own generic instances and exports
+  none, so a program's -O0 build shares none either (120 units since, 56 MB; the clang pin moved to the host's 23.1.6, which gave the
+  110 units of the old flags byte for byte); the package `sysroot`, its features;
 - the IR: each codegen unit's bitcode made IR text by `clang -S -emit-llvm`, `test/rust/runtime/ir.sha256` (`CRATE/UNIT.ll`): 110
   units of 25 crates (the package `sysroot`'s own unit and std's dylib's allocator shim left out), 51 MB, 45 s of Cargo on 8 jobs.
 

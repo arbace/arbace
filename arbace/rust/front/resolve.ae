@@ -189,9 +189,14 @@
 (def crate-deps
   "RIND9 (a): the library's crates a crate being built depends on, whose macros' `$crate` names them (core's own build none:
   every macro it expands is core's, whatever crate std-names lists it under)"
-  {"alloc" #{"core"} "std" #{"core" "alloc" "libc" "hashbrown"}
-   ;; queue 400: std's vendored dependencies (library/vendor) built natively before std (alloc-check's deps pass)
-   "libc" #{"core"} "hashbrown" #{"core" "alloc"}})
+  {"alloc" #{"core"} "std" #{"core" "alloc" "libc" "hashbrown" "unwind"}
+   ;; queue 400: std's vendored dependencies (library/vendor) built natively before std (alloc-check's deps pass); queue 542:
+   ;; unwind (library/unwind, its `uw::_Unwind_*` foreign functions)
+   "libc" #{"core"} "hashbrown" #{"core" "alloc"} "unwind" #{"core" "libc"}
+   ;; queue 561 (C6 L3): std's backtrace crates, their Cargo.toml's dependencies at std's features (rustc-dep-of-std):
+   ;; miniz_oxide's `adler2::Adler32`, object's memchr, addr2line's gimli
+   "adler2" #{"core"} "memchr" #{"core"} "rustc_demangle" #{"core"} "miniz_oxide" #{"core" "alloc" "adler2"}
+   "object" #{"core" "alloc" "memchr"} "gimli" #{"core" "alloc"} "addr2line" #{"core" "alloc" "gimli"}})
 
 (def root-extern-aliases
   "round 54 (RIND9 (a), std): a crate root's `extern crate C as A;`, which puts A in the extern prelude of every module
@@ -329,9 +334,16 @@
                       (define! m :type nm r)))
       ;; RF13b: a foreign block's types (`extern { type VTable; }`), ForeignTy in the type namespace (rustc's
       ;; build_reduced_graph_for_foreign_item); its functions and statics are not defined yet
-      ForeignMod (doseq [fi (fv (second k) :items) :let [fk (fv fi :kind)] :when (= 'TyAlias (head fk))]
-                   (let [nm (id-name (fv (second fk) :ident))]
-                     (define! m :type nm {:t :local-def :kind "ForeignTy" :span (ident-span-at (fv fi :span) (fv (second fk) :ident))})))
+      ;; queue 542 (C6): its functions (DefKind::Fn) and statics in the value namespace too
+      ForeignMod (doseq [fi (fv (second k) :items) :let [fk (fv fi :kind)]]
+                   (let [idf (fv (second fk) :ident) nm (when idf (id-name idf))]
+                     (case (head fk)
+                       TyAlias (define! m :type nm {:t :local-def :kind "ForeignTy" :span (ident-span-at (fv fi :span) idf)})
+                       Fn (define! m :value nm {:t :local-def :kind "Fn" :span (ident-span-at (fv fi :span) idf)})
+                       Static (define! m :value nm {:t :local-def :span (ident-span-at (fv fi :span) idf)
+                                                    :kind (str "Static { safety: " (let [sf (fv (second fk) :safety)] (if (and (seq? sf) (= 'Safe (first sf))) "Safe" "Unsafe"))
+                                                               ", mutability: " (if (= 'Mut (fv (second fk) :mutability)) "Mut" "Not") ", nested: false }")})
+                       nil)))
       Use (let [tree (second k)]
             (if (some #(= "prelude_import" (some-> % (fv :kind) second (fv :item) (fv :path) segs first seg-name)) (fv item :attrs))
               (reset! *prelude* (std-module-res (str/join "::" (map seg-name (segs (fv tree :prefix))))))
@@ -765,6 +777,13 @@
                 (binding [*ribs* [{:module (:mod r)}]]
                   (doseq [it (second mk)] (walk-item it)))))
         Use (report-use item)
+        ;; queue 542 (C6): a foreign block's functions' signatures and statics' types (late.rs' resolve_item visits the foreign
+        ;; items: libc's `pub fn poll(fds: *mut pollfd, nfds: nfds_t, ..)`, whose glob-imported types had no resolution)
+        ForeignMod (doseq [fi (fv (second k) :items) :let [fk (fv fi :kind)]]
+                     (case (head fk)
+                       Fn (binding [*ribs* (item-ribs)] (walk-fn (second fk)))
+                       Static (walk-ty (fv (second fk) :ty))
+                       nil))
         nil))))
 
 (defn walk-assoc [it]
