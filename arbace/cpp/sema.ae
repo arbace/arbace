@@ -12042,7 +12042,22 @@
                           ;; function")
                           _ (when (checking?)
                               (let [t (abi/unq (:ty e))]
-                                (cond (or (nil? t) (abi/class? t) (#{:dep :auto :tparam} (:k t))) nil
+                                (cond (or (nil? t) (#{:dep :auto :tparam} (:k t))) nil
+                                      ;; (cpp-own, 2026-11-25: [expr.delete]/1 with [conv]/5, a class operand contextually implicitly
+                                      ;; converted to a pointer to object type: its non-explicit conversion functions to one, a
+                                      ;; conversion function template returning a pointer among them, name more than one type --
+                                      ;; GCC's "ambiguous default type conversion from 'B<int>'", template/delete2.C)
+                                      (abi/class? t)
+                                      (when-let [cid (class-id t)]
+                                        (let [obj-ptr? (fn [r] (let [r (abi/unq (abi/non-ref r))] (and (abi/ptr? r) (not (abi/fn? (abi/unq (:to r)))))))
+                                              rs (distinct (for [f (distinct (conv-fns cid)) :let [g (fnd f)]
+                                                                 :when (and (not (:explicit g)) (obj-ptr? (:ret (:ty g))))]
+                                                             (abi/unq (abi/non-ref (:ret (:ty g))))))
+                                              ts (filter #(let [pt (:pattern ((requiring-resolve (quote arbace.cpp.template/tmpl)) %))]
+                                                            (and (not (:explicit pt)) (re-find #"\*\s*(?:const\s*)?\(\)" (str (get-in pt [:type :qualType])))))
+                                                         (conv-tmpls cid))]
+                                          (when (and (> (+ (count rs) (count ts)) 1) (seq ts) (not (:header (abi/cls cid))))
+                                            (fail :delete-arg "ambiguous default type conversion from '" (:name (abi/cls cid)) "'"))))
                                       (not (abi/ptr? t)) (when (cx-sure-scalar? t) (fail :delete-arg "type of the argument given to 'delete', expected pointer"))
                                       (abi/fn? (abi/unq (:to t))) (fail :delete-arg "cannot delete a function")
                                       :else nil)))
