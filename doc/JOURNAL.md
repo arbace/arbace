@@ -20951,3 +20951,11 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   test_buffer's two, reindent, test_interpreters' test_modified_arg); its :why was updated. Mirrored in divergences-315.edn.
 - bin/reap --record, bin/crops-score --record: Python eval 40,832 / 1,405 / 1,302 -> 40,843 / 1,405 / 1,291; bin/reap,
   crops-score --judge --strict, records-check: 0 problems.
+
+## 2026-11-25 — the user's DECISIONs 557b-1 (a) and 557b-2 (queue 557b, VM)
+
+- 557b-1 (a): the VM's records of test_compileall, test_support and test__interpreters stand, recorded from a run whose children ran
+  on the compiled launcher with the drivers on goi (c35fc031a's rows). The host's next whole record confirms them. Alternative (b),
+  goi-alone runs with the rows waiting for the host, not taken.
+- 557b-2: keep. callSpecial and slot `__call__` keep the C level's guard: a deep loop of slot wrappers raises "Stack overflow
+  (used N kB)" at 10,000 levels, as CPython 3.14 does, not "maximum recursion depth exceeded" at the recursion limit.
