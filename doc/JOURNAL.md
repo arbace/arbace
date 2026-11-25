@@ -22333,3 +22333,27 @@ PermissionCollection) as nm computes them; bin/reap: Java's cells unchanged. Not
 train's). Left, as decisions or not started: t04849 (getDeclaredMethods' order is HotSpot's, unspecified), t05602
 (StoreDeadlock's stdout is the host's properties), t08164 compiled and t04614 compiled (need a run's output first),
 t04878 (Class.forName through a loader defining "Test+Interface" from bytes: needs a run).
+
+## 2026-11-25: java-tail-1125, the user's three decisions (t04849, t05602, t03296) applied
+
+The user's decisions of 2026-11-25 on java-tail-1125's report:
+1. t04849 (SignatureTest) n/a: it prints getDeclaredMethods in HotSpot's order (main first; the javadoc: "not sorted and not
+   in any particular order") and a Type[]'s identity hash. Into :jms-na's :tests beside t05778 (LogManager's methods in
+   HotSpot's order).
+2. t05602 (StoreDeadlock) judged by its own verdict, its status within its timeout. Why our run printed 0 bytes:
+   test/java/run.ae calls System.exit as soon as main returns, and StoreDeadlock's main only starts its two threads
+   (Properties.store(System.out) of the system properties, TimeZone.getTimeZone): they were ended before they printed, at
+   both levels (status 0, stdout empty). The JDK's record ran the launcher, which waits for the non-daemon threads
+   (DestroyJavaVM) before it exits; jtreg's MainWrapper exits after main, as run.ae. Built: run.ae joins the main group's
+   non-daemon threads after main for the tests of its `join-tests` (t05602 alone: a general wait would change every
+   test's end, unmeasured), so a deadlock is a timeout; java.check's status-by-decision names it (verdicts.edn :status,
+   `bin/java-check verdicts`), its out.edn and left.tsv entries removed (test/crops/independence.edn's out-of-cases 26 -> 24).
+   Checked on stage 0: join-threads! waits for a sleeping non-daemon thread and not for a daemon one. Its row moves when
+   recorded (still :threads, :differ, until then).
+3. t03296 (TestConcurrentPatching) n/a, not by design: it reloads its own class from its class files through a URLClassLoader
+   over its CodeSource's directory, and a Go build has no class files of the program, as the jrt: file system's rows have
+   no run-time image. Out of :classloading into a new n/a class :class-files-na.
+Also: train 4's merge of divergences.edn had left t04789 (ThreadMXBeanProxy) and t04809 (MyOwnSynchronizer) in no interp
+class (bin/reap refused to record): t04789 into :design-also-na (its source names javax.management: the 11-23 n/a),
+t04809 into :design-also, as queue 543 had them and as their compiled rows are. bin/reap --record (Java eval 3,163 / 22 /
+90, 50 n/a; AOT 3,159 / 21 / 108, 37 n/a), bin/crops-score --record and --judge --strict (0 problems), bin/records-check (0).
