@@ -8788,3 +8788,43 @@ and 557b): the table is the report's. What nobody owned and pyi could fix:
   `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
   docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
   test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).
+
+## As built: py-capi-1125, the C API's last natives of `:capi-port` and C threads (2026-11-25, the main host, the burst's py-capi stream)
+
+The classes `:capi-port` (84 rows) and `:extension-modules` (53) at train 5's base (c3efeae13): 76 of test_capi's, 52 of
+test_importlib's extension tests, and one each of test_inspect, test_call, test_clinic, test_code, test_ctypes, test_pickle,
+test_traceback and two of test_threading_local. Most were recorded before py-capi-1122's natives and its extension loader
+(test_importlib's "Requires dynamic loading support"); py-capi-1122's own `--only` runs (kept in `.tmp/kept/py-capi`) left 25 of
+them failing. The natives this stream adds (`go/arbace/pyctypes/capi_rest.go`, after CPython 3.14.10's sources; the PSF's license):
+
+- **PyErr_Display, PyErr_DisplayException** (Python/pythonrun.c's `_PyErr_Display`): a traceback given beside an exception with none
+  put on it, then `traceback._print_exception_bltin`, which colorizes as `_colorize` says (test_traceback's
+  test_colorized_traceback_is_the_default through `_testcapi.exception_print`); `sys.__excepthook__` when it cannot run.
+- **PyErr_Print, PyErr_PrintEx** (`_PyErr_PrintEx`): a SystemExit exits (atexit's functions, the streams flushed); `sys.last_exc`
+  and the legacy three; the audit event `sys.excepthook`; the hook called, its own failure displayed with the original.
+- **PyCode_Addr2Line**: `co_firstlineno` for a negative offset, else the line of the `co_lines()` range that holds the offset (-1
+  for none): test_code's test_co_branches through `_testcapi.code_offset_to_line`.
+- **Py_UniversalNewlineFgets** (`_Py_UniversalNewlineFgetsWithSize`): the bytes by the world's `fread`, `\r` and `\r\n` read as `\n`,
+  musl's ungetc done in place (the FILE's `rpos` stepped back, F_EOF cleared): the world links no getc.
+- **PyThread's locks and C threads**: a `PyThread_type_lock` is pyi's `_thread.lock` (acquire blocks with the GIL released, as
+  CPython's callers wrap it in Py_BEGIN_ALLOW_THREADS; timed and non-blocking forms; release of a free lock quiet, as the
+  semaphore lock's post), `PyThread_start_new_thread(func, arg)` a `_thread` thread whose body runs `func(arg)` on a C thread
+  of its own (`ci.Thread` on a 1 MiB stack mapped in the world, the main thread's thread-local objects), so the GIL serializes it
+  with the others; the world's entries from Go (`World.Call`, `push`, `guard`) take the running Python thread's C thread
+  (`World.thread`), so each thread's C frames stay on its own stack (test_threading_local's clear race,
+  `_testcapi.call_in_temporary_c_thread`; test_misc's TestThreadState, `_test_thread_state`).
+- **PySlice_Unpack around `__index__`**: when a slice index is no int or None, the mirrors are synchronized around the call as
+  around a call into C, so the macro PySlice_GetIndicesEx's `Py_SIZE` after it sees the list `__index__` resized (gh-72054,
+  test_slice's GetIndicesExMacroTest.test_getindicesex_seq).
+
+- **c_longdouble** (ffi.go, cfield.go; the coordinator's report of train 3's records): queue 522's builder (CR3 (a)) made ci's
+  long double x87's 80-bit extended in 16 bytes, a wide value of ci's; the world rebuilt with it (d65251e1) took pyctypes'
+  doubles for long doubles, so tf_D, tf_bD and _testfunc_D_bhilfD gave 0.0. TLongDouble is 16 bytes aligned to 16, passed as
+  ci's 'w' (its memory's two words), the 'g' field through crt's x87 conversions (`WType{N: 80, Float: true}`), 'G' two of them;
+  c_longdouble is no longer c_double's alias (ctypes aliases it when the sizes agree), as on CPython's x86-64.
+
+The measure: `bin/pyi check --only` of the two classes' 137 rows, test_misc's four TestThreadState methods and test_ctypes whole, on
+train 5's executable (b85611b74343, go/arbace/py, libm, ci, crt and clib its own; pyctypes interpreted from the checkout), judged,
+not recorded (`.tmp/run-only.sh`, `.tmp/only-2.txt`; its results the record's rows when it has run: the night's record or the train's `--judge DIR --record`). Not this stream's: test_call's Py_TPFLAGS_METHOD_DESCRIPTOR and
+test_getargs' str subclass keywords (pyi's call passes keyword names as plain strs: py-core), test_pickle's memo MemoryError
+(`_testcapi.set_nomemory`, queue 568's), the reference counts and singletons `:capi-refcounts` and `:capi-singletons` keep.
