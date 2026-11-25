@@ -22127,3 +22127,39 @@ and test/crops/scores.edn taken from next and recorded again (`bin/reap --record
   `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
 - mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
 Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
+
+## 2026-11-25: cpp-key: the gate's cpp-runtime builds the lowered runtime only when it is stale; its key closed by the build's load closure
+
+Why: the gate's `cpp-runtime` build step took 163 and 128 minutes in next's two runs at the same commit 5005e8505 (.tmp/gate-next-1124.run1.log,
+run2.log; run2 with go-build cached), and started again at cad9434f5 (gate-next-1125.log, killed). Not the gate's key (a `:kind :build`
+step runs its command whenever a check that runs needs it) and not the executable's (runtime_key hashes the tools' host, stage 0, unchanged):
+the step's command was `bin/cppi runtime-build && bin/cppi runtime-ci`, and `runtime-build` has no key check of its own, so every gate
+rebuilt all 198 units (since CP403 (a)'s flip, rt_ours_glob's 197 by gen-batch: "IR 9250 s"). GT9's comment ("4-5 min when stale")
+shows the intent was a build when stale, cheap to skip checking while the build took minutes. Besides, the key's records-mode lines
+named the host's `/usr/include/*.h` and `apk list musl-dev musl`, which moved after the host's upgrade (cpp-tzdb's runtime of 11-24:
+`differs: /usr/include/*.h` today) though no records-mode build reads a host header (ORS12 (a), ORS27, CP400 (a)).
+
+What (branch cpp-key-1125 from mac/next cad9434f5):
+- test/gate/steps.edn and crops/cpp.edn: cpp-runtime's command `bin/cppi runtime-ci` alone (it runs runtime_build when runtime_key_check
+  fails or the lowered C is missing, and now prints the inputs that moved).
+- bin/cppi runtime_key [OUT]: the hand-made namespace lines (arbace/cpp/*, repr/cpp/*.ae, repr/llvm, repr/c, two of arbace/c) replaced
+  by OUT's load closure, OUT/loaded: runtime_build records RT.load's ARBACE_LOADED_LOG over its tools' runs (the audit's own log when set,
+  read from its end), rt_closure maps scriptbases to the checkout's files (test/ for -p test), a namespace the host embeds that RT.toolSource
+  does not reload (the core, arbace.string: the host's copy runs) as `embedded  FILE`, keyed by the host's digest; rt_closure_lines hashes
+  the rest, and a file edited during the build is a line no checkout matches. No closure recorded: stale (one build after this merge).
+  As bin/arbace-go's reader_key (round 54). Added: the IR pack's pin, the gcc, llvm-project and musl tarballs' pins, test/oracle-records'
+  libraries, bin/lib/{tools,host}.bash, ci-fresh.bash, both sysroot scripts, bin/lib/ci/musl, cpp/target/ and c/include/ whole (the
+  native parser reads cpp/target/host and clang-builtins.edn, which were not keyed), test/c/host/headers.sha256, runtime_ir's and the
+  records' functions' text, the startup scripts; the host headers only under CPPI_LIVE.
+- test/gate/cpp-runtime-key-test.bash (gate-tests): the closure's classes, current, stale by a closure file and named, not by an embedded
+  entry, no closure stale, the edit-during-build line, the step's command; gate-tests' :inputs gain the files it reads.
+
+Checked: `bin/cppi runtime-key` on a fabricated OUT (a closure from requiring the build's namespaces on stage 0): current at 83891a83d,
+current at a commit on it touching arbace/genclass.ae, arbace/go/check.ae, arbace/repr/cpp/dg.ae, arbace/repr/ocaml.ae and bin/goi
+(the old key's digest moved there, b1fa54c1 -> 8373b92a, by dg.ae alone), stale naming arbace/cpp/codegen.ae, arbace/repr/c/lex.ae or
+cpp/target on a change to each; the new test and gate-key-crops, gate-cache, plan-logic, crop-tier tests pass; `bin/gate --plan` reads
+the step (build cpp-runtime, needed by cpp-essential). Saving: each gate that needs cpp-runtime with the runtime's inputs unchanged,
+128-163 min -> seconds (the key and runtime-ci's own); a C++ change still rebuilds (2-2.7 h, unchanged).
+Alternatives: keeping the hand-made list complete (it missed arbace/c/build.ae, musl.ae and cpp/target/host: the closure cannot miss what
+the build loads); a precomputed static require closure (misses requiring-resolve's namespaces); keying the core's checkout files (a core
+edit stage 0 never reads would rebuild for hours).
