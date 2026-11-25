@@ -20407,6 +20407,36 @@ reported and the declaration still refused).
 Checked: the record run 23:56-01:16 UTC over 2,706 files: own pass 2,364 -> 2,377 (the two timeouts' rows kept), none lost, 4 rows to
 own pass; mac/next merged (cpp-tpl2 (3)), the 9 rows read again on the merged tree, all pass; the control pair fails as it must. `bin/reap --record`, `bin/crops-score
 --record`, `--judge --strict`, `bin/records-check`: 0 problems; C++ read 5,975 / 0 / 309 -> 5,979 / 0 / 305 (247 n/a), completeness 0.9810 -> 0.9812.
+
+## 2026-11-23: cpp-tzdb: c++20/tzdb.cc by Arbace's own code generator, its names clang's; pretty1 out of check-known (branch `cpp-tzdb-1123`)
+
+DECISION cpp-rt-own4-1 (a) carried through (doc/cpp/CPP-SURVEY.md, "As built: cpp-tzdb"). The branch had stopped at
+`sys_seconds secs(sys_days(ymd) + days(1))` with time_point's converting constructor template missing, and, its preceding
+function stubbed, at `struct quoted`'s friend. Both traced, not guessed: the first was [over.best.ics]/4's standard-conversions-only
+reaching into a converting constructor template's deduction and a trait's value, which cached is_convertible<days, seconds> false
+(a class instance, so every later use saw it); the second no order at all, the implicit default constructor of a class with a
+reference member, which is deleted. Then, probe by probe on the whole unit (25 minutes each; reduced cases against clang 23.1.5's IR
+by the host's clang++ with rt_ir's flags, by hand, the oracle), twelve rules for the generation and eleven for the names: the first
+generated IR differed from the pack's in 106 names, the last in none (1,066 of 1,066, names.sh's approximation of check.ae's
+defined-names). Three of the name rules fix miscompiles that other units may hit too: a trivial copy constructor reached through
+another class's conversion function had copied the source's bytes (`sys_days{y/mwdl}`), path::string() had called itself (a
+template-id's call took the non-template), and an unsigned 64-bit subtraction in the evaluator threw on the host.
+
+Kept to the code generator where the checker's records were made with the old rule (the deleted default constructor, a trivial
+class's default constructor, the immediate invocations, the template-id candidates, the specializations' default arguments); the
+deduction context, traits, alias constraints, default template arguments' cutoff, nested class ids and decltype of a reference apply to
+both. The own dg check (bin/repr-cpp dg --front native --only): 303 files at 30abf2bea's tree with the fixes (every 8th own pass, the
+trait and alias-template files), 288 own passes as recorded; after merging mac/next (097078f5b, cpp-ce2 and cpp-small: one conflict
+in sema's ce-lv, resolved keeping both branches) 314 files at another offset, 299 as recorded; no own pass lost.
+gxx-dg/diagnostic/missing-header-pr110164.C does not finish on mac/next itself (69bb781b5 in a throwaway worktree: over 1,100 s), a
+pre-existing hang, not this branch's.
+
+Records: rt_ours_glob takes c++20/tzdb.cc; test/cpp/check-known.edn loses pretty1 (GCC's __PRETTY_FUNCTION__ since 5651dd62a). The
+runtime build and the sampling's records run detached under bin/heavy-lock (`.tmp/tz/chain.sh` of the worktree: runtime-build,
+runtime-inputs --record, check --sample 25 --record, check --aot --sample 25 --record; each step's status in `.tmp/tz/chain/status`);
+the lock's queue held five jobs when it started (18:28 UTC). Left for that run: reap, crops-score (--record, --judge --strict),
+records-check, and this journal's results.
+
 ## 2026-11-24: ocaml-1123: the four light regressions are the host's, not the branch's; the light record committed; base64's spawn
 
 - The four rows the light whole re-record failed (lib-marshal/intext_par, regression/pr3612/pr3612, weak-ephe-final/weaklifetime,
@@ -22163,3 +22193,21 @@ the step (build cpp-runtime, needed by cpp-essential). Saving: each gate that ne
 Alternatives: keeping the hand-made list complete (it missed arbace/c/build.ae, musl.ae and cpp/target/host: the closure cannot miss what
 the build loads); a precomputed static require closure (misses requiring-resolve's namespaces); keying the core's checkout files (a core
 edit stage 0 never reads would rebuild for hours).
+## 2026-11-25: cpp-tzdb settled: the sampling's two stray rows and the inputs' 13 lost rows were one wrong command; mac/next merged
+
+The records chain of 2026-11-24 (`.tmp/tz/chain.sh`) ran `bin/cppi check --sample 25 --record` and `--aot --sample 25 --record` without
+`--corpus gxx-dg-run` (the gate's sampling parts name it, test/gate/steps.edn's cpp-check-oracle): bin/cppi check's default corpora are
+samples and runtime, so it sampled every 25th of those, runtime/atomics.cpp and samples/auto.cpp, and its --record (a sampling's own
+record, rows replaced by corpus) added them to check{,-aot}-every-25{,-times}-linux-amd64.edn, where test/cpp/ref-gxx15.edn's sample does
+not hold them (bin/reap's 2 cases), and rewrote {eval,aot}-inputs-linux-amd64.edn's samples and runtime rows with the two alone (13 rows
+lost: eval and AOT independence 0.999 -> 0.966 in 97d35d9bf's scores). No corpus or list had changed. Settled: the six files back at
+a2143d56a (mac/next's, unchanged since); the two programs passed as check-linux-amd64.edn records them, and every lost row was
+{:ir :own :ci-target :own}, a fact of the program's IR route, not of the runtime. Kept: test/cpp/runtime/inputs-linux-amd64.edn
+(c++20/tzdb.cc :ir :own, the chain's runtime-inputs --record after the 198-of-198 own build). Nothing rerun.
+mac/next 3a67d8dc2 merged: arbace/cpp/sema.ae's four conflicts kept both sides (cpp-tzdb's *class-ids* beside next's declares; the
+default argument's :def-scope inside cpp-rind's recursion guard and cpp-p2564's caller context; *copy-init-ctors*'s explicit filter in
+cpp-rind's ctor-init*; cpp-p2564's consteval condition with cpp-tzdb's closing), loaded on stage 0 (arbace.cpp.codegen); the journal and
+the survey both. bin/reap --record (56 of 56, 0 problems), crops-score --record and --judge --strict, records-check (0 problems),
+markers-check: C++ eval and AOT independence 0.999 -> 1.0 (C++ independence 0.9762 -> 0.9766), cells unchanged (eval 81/1/0, AOT 81/1/0).
+Not run (the coordinator's memory hold after the 12:03 OOM): the merged tree's runtime build, which confirms tzdb.cc by our route on
+next's code generator: the first gate's cpp-runtime builds it (runtime-judge, every unit; cpp-key's key then keeps it).
