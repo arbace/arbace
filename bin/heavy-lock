@@ -11,8 +11,8 @@
 #   then takes a slot: slot 1 when free, else slot 2. A job that would run beside another (the other slot held) is admitted
 #   only when its declared need fits: MemAvailable less 2 GiB, less what the other slot's holders declared and have not
 #   reached yet (their declared need less their process tree's RSS), above HEAVY_MEM_GIB (default 24: a gate build peaks
-#   at about 22 GiB; `all`: the host's MemTotal, a job that never runs beside another). The head that does not fit waits,
-#   and no later ticket passes it. CMD runs with ARBACE_HEAVY_HELD=1 (the tools inside take no lock of their own: GTS31
+#   at about 22 GiB; `all`: the host's MemTotal, a job that never runs beside another). The head that does not fit waits;
+#   a later ticket that fits passes it only to run beside a holder (backfill, since 2026-11-24). CMD runs with ARBACE_HEAVY_HELD=1 (the tools inside take no lock of their own: GTS31
 #   (b), bin/lib/heavy.bash) and ARBACE_HEAVY_SLOT, its status the command's; the ticket goes when CMD ends.
 #   With ARBACE_HEAVY_HELD set already, CMD runs at once (the caller holds the lock).
 #
@@ -143,31 +143,50 @@ fits() {
   [ $(( avail - 2097152 - un )) -gt "$need" ]
 }
 
-announced= memsaid= slot=
+announced= memsaid= slot= backfill= bf_seen=0 memmsg=
 while :; do
   live_t=$(tickets)
-  waiting_ahead= old_ahead=
+  waiting_ahead= old_ahead= ahead_needs=
   for t in $live_t; do
     [ "$t" = "$me" ] && break
-    read -r _ s _ <<< "$(state "$t")"
+    read -r _ s nk <<< "$(state "$t")"
     case ${s:-} in
-      wait) waiting_ahead=1 ;;
+      wait) waiting_ahead=1; ahead_needs="$ahead_needs ${nk:-0}" ;;
       1|2) ;;
       *) old_ahead=1 ;;   # the one-slot version's ticket: it waits for slot 1 or holds it
     esac
   done
-  if [ -z "$waiting_ahead" ]; then
+  # backfill (2026-11-24): when a slot is free beside a holder and no earlier waiting ticket fits there (each needs
+  # more than MemAvailable less 2 GiB less the holders' unreached need), a later ticket that fits takes it, so a small
+  # job runs beside a big one instead of idling behind a head that cannot fit; HEAVY_LOCK_BACKFILL=0 turns it off
+  backfill=
+  if [ -n "$waiting_ahead" ] && [ -z "$old_ahead" ] && [ "${HEAVY_LOCK_BACKFILL:-1}" != 0 ] && [ -n "$(lock_holders)" ]; then
+    avail=${HEAVY_LOCK_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}
+    room=$(( avail - 2097152 - $(unreached_kib $live_t) ))
+    backfill=1
+    for nk in $ahead_needs; do [ "$nk" -lt "$room" ] && { backfill=; break; }; done
+  fi
+  # the head keeps its turn: a backfill tries only after the rule held on two looks in a row
+  if [ -n "$backfill" ]; then bf_seen=$(( bf_seen + 1 )); [ "$bf_seen" -ge 2 ] || backfill=; else bf_seen=0; fi
+  if [ -z "$waiting_ahead" ] || [ -n "$backfill" ]; then
     # slot 1 unless a one-slot ticket is ahead (it takes slot 1 when its turn comes), else slot 2
     if [ -z "$old_ahead" ] && flock -n "$f1"; then slot=1
     elif flock -n "$f2"; then slot=2
     fi
     if [ -n "$slot" ]; then
+      if [ -n "$backfill" ]; then
+        # a backfill runs only beside a holder: with the other slot free the head may run alone, so give way
+        if [ "$slot" = 1 ]; then other=$f2; else other=$f1; fi
+        if ! flock -n "$other"; then fits $live_t && break
+        else flock -u "$other"; fi
+      else
       # alone (slot 1 taken, slot 2 free): no memory rule; beside another: its need must fit
       if [ "$slot" = 1 ] && flock -n "$f2" && flock -u "$f2"; then break; fi
       fits $live_t && break
+      fi
       [ "$slot" = 1 ] && flock -u "$f1" || flock -u "$f2"
       slot=
-      [ -z "$memsaid" ] && echo "heavy-lock: next in turn for $lock, waiting for memory to run beside the other slot's job ($memmsg)" >&2
+      [ -z "$memsaid" ] && [ -n "$memmsg" ] && echo "heavy-lock: next in turn for $lock, waiting for memory to run beside the other slot's job ($memmsg)" >&2
       memsaid=1
     fi
   fi

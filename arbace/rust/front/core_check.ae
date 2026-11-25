@@ -249,12 +249,39 @@
     ;; has `libc_unstable_musl_v1_2_3`, core-cfg's; nothing 32-bit)
     "libc" (assoc core-cfg "feature" #{"rustc-dep-of-std" "align" "rustc-std-workspace-core"} "freebsd12" true "musl_v1_2_3" true)
     "hashbrown" (assoc core-cfg "feature" #{"rustc-dep-of-std" "nightly" "core" "alloc" "rustc-internal-api"})
+    ;; queue 561 (C6 L3, C6-1 (a)): the seven backtrace crates, at the features std's build gives them
+    ;; (test/rust/front/std-build-units.edn's :features, Cargo's resolution of std's `backtrace` feature)
+    "adler2" (assoc core-cfg "feature" #{"core" "rustc-dep-of-std"})
+    "memchr" (assoc core-cfg "feature" #{"core" "rustc-dep-of-std"})
+    "rustc_demangle" (assoc core-cfg "feature" #{"core" "rustc-dep-of-std"})
+    "miniz_oxide" (assoc core-cfg "feature" #{"alloc" "core" "rustc-dep-of-std"})
+    "object" (assoc core-cfg "feature" #{"alloc" "archive" "coff" "core" "elf" "macho" "pe" "read_core" "rustc-dep-of-std" "unaligned" "xcoff"})
+    "gimli" (assoc core-cfg "feature" #{"read" "read-core" "rustc-dep-of-std"})
+    "addr2line" (assoc core-cfg "feature" #{"alloc" "core" "rustc-dep-of-std"})
     core-cfg))
 
 (def dep-crates
   "queue 400: std's dependency crates read natively from library/vendor (their names and interfaces, which the helper's
   std-names and std-iface do not hold): their `pub use m::*` re-exports and macro-declared modules taken as std's"
-  ["libc" "hashbrown"])
+  ;; queue 542 (C6): and unwind (library/unwind: libunwind's foreign functions std's personality and backtrace call as `uw::`)
+  ;; queue 561 (C6 L3): and the seven backtrace crates (backtrace-crates), each after the ones it depends on
+  ["libc" "hashbrown" "unwind" "adler2" "memchr" "rustc_demangle" "miniz_oxide" "object" "gimli" "addr2line"])
+
+(def backtrace-crates
+  "queue 561 (C6 L3, C6-1 (a)): std's backtrace crates among dep-crates, in their dependencies' order (adler2 before miniz_oxide,
+  memchr before object, gimli before addr2line); read by deps-setup only with DEPS_BACKTRACE=1, each pass over the names and
+  facts of the dependencies read before it"
+  ["adler2" "memchr" "rustc_demangle" "miniz_oxide" "object" "gimli" "addr2line"])
+
+(def backtrace-editions
+  "queue 561 (C6 L3): the backtrace crates' editions, their Cargo.toml's (rustc-demangle 0.1.28 names none: 2015); the others' 2024"
+  {"adler2" 2021 "memchr" 2021 "rustc_demangle" 2015 "miniz_oxide" 2021 "object" 2018 "gimli" 2024 "addr2line" 2018})
+
+(defn crate-edition
+  "The edition the module run's collection and bodies take: a backtrace crate's own (closures capture whole variables before
+  2021: rustc-demangle's Ident Display's closures), else 2024 (core's, alloc's, std's and their other dependencies', as before)"
+  []
+  (get backtrace-editions *crate* 2024))
 
 (defn std-like?
   "std or one of its vendored dependencies (round 54's std-only readings: glob re-exports, #[path] from the declaring file)"
@@ -269,7 +296,8 @@
     (if (.exists own)
       (.getCanonicalPath own)
       (let [ds (sort-by #(.getName ^File %) (seq (.listFiles (File. (str lib-dir "/vendor")))))
-            d (some (fn [^File d] (when (re-matches (re-pattern (str "\\Q" crate "\\E-[0-9][0-9.]*")) (.getName d)) d)) ds)]
+            ;; queue 561: a crate's directory by its package name (rustc_demangle's rustc-demangle-0.1.28)
+            d (some (fn [^File d] (when (some #(re-matches (re-pattern (str "\\Q" % "\\E-[0-9][0-9.]*")) (.getName d)) [crate (str/replace crate "_" "-")]) d)) ds)]
         (when-not d (throw (ex-info (str "no crate " crate " under " lib-dir " (nor its vendor/)") {})))
         (.getCanonicalPath (File. (str (.getPath ^File d) "/src/lib.rs")))))))
 
@@ -376,9 +404,18 @@
 (defn macros-for
   "The macro table as the expansion's std macros for a file: each name's definition from the nearest file (the same file
   excluded: the file's own are its user macros), by the longest common directory prefix"
-  [table ^String file]
+  [table ^String file & [shadowed]]
   (into {} (for [[nm ds] table
-                 :let [ds (remove #(= file (:file %)) ds)]
+                 :let [ds (remove #(= file (:file %)) ds)
+                       ;; queue 561 (C6 L3): SHADOWED (a backtrace crate's run: std's macro names) drops a definition of such a
+                       ;; name outside its textual scope (its module file's subtree): rustc-demangle's v0.rs `macro_rules! write`
+                       ;; (a compile_error! guard) is not lib.rs' write!, core's is
+                       ds (if (and shadowed (shadowed nm))
+                            (remove (fn [{^String df :file}]
+                                      (let [mdir (if (re-find #"/(lib|mod)\.rs$" df) (.getParent (File. df)) (subs df 0 (- (count df) 3)))]
+                                        (not (str/starts-with? file (str mdir "/")))))
+                                    ds)
+                            ds)]
                  :when (seq ds)]
              (let [common (fn [^String a ^String b] (count (take-while true? (map = a b))))
                    ;; RF19: of the files equally near, the shallowest (num/mod.rs: `#[macro_use] mod uint_macros;`'s uint_impl!,
@@ -420,6 +457,15 @@
                     Static (add! m "Mod" {:ns :value :name nm :path p
                                           :kind (str "Static { safety: Safe, mutability: " (if (= 'Mut (fget (second k) :mutability)) "Mut" "Not") ", nested: false }")})
                     TyAlias (add! m "Mod" {:ns :type :name nm :kind "TyAlias" :path p})
+                    ;; queue 542 (C6): a foreign block's functions, statics and types in its module (libc's `read`, `syscall`)
+                    ForeignMod (doseq [fi (fget (second k) :items) :let [fk (fget fi :kind)] :when (and (seq? fk) (cfg-on? fi))]
+                                 (let [fnm (second (fget (second fk) :ident)) fp (str m "::" fnm)]
+                                   (case (head fk)
+                                     Fn (add! m "Mod" {:ns :value :name fnm :kind "Fn" :path fp})
+                                     Static (add! m "Mod" {:ns :value :name fnm :path fp
+                                                           :kind (str "Static { safety: Unsafe, mutability: " (if (= 'Mut (fget (second fk) :mutability)) "Mut" "Not") ", nested: false }")})
+                                     TyAlias (add! m "Mod" {:ns :type :name fnm :kind "ForeignTy" :path fp})
+                                     nil)))
                     (Struct Union) (do (add! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p})
                                        (when-let [ck (and (= 'Struct (head k)) (ctor-kind (nth k 3)))]
                                          (add! m "Mod" {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))
@@ -538,14 +584,32 @@
                (reduce (fn [m [p {:keys [globs]}]]
                          (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
                        m names))
-        globs? (some :globs (vals names))]
+        globs? (some :globs (vals names))
+        ;; queue 542: the glob re-exports kept as the map's metadata (with-value-names adds a macro-made item to the modules
+        ;; that glob its module)
+        gm (merge (:globs (meta std-names)) (into {} (for [[p {:keys [globs]}] names :when (seq globs)] [p (vec globs)])))]
+    (vary-meta
     ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export;
     ;; queue 400: then on to a fixpoint, at most 8: libc's chain of globs, libc -> unix -> linux_like -> linux -> musl -> b64
     ;; -> x86_64)
     (if globs?
       (loop [m (reduce (fn [m _] (glob (reexport m))) m [1 2 3]) n 3]
         (let [m2 (glob (reexport m))] (if (or (= m2 m) (>= n 8)) m2 (recur m2 (inc n)))))
-      (reduce (fn [m _] (reexport m)) m [1 2]))))
+      (reduce (fn [m _] (reexport m)) m [1 2]))
+    assoc :globs gm)))
+
+(defn- add-globbed
+  "queue 542: CHILD (a {:ns :name :kind :path}) added to the module MP of the names M unless it has one of that namespace and
+  name, then to the modules that glob MP (with-core-names' :globs metadata), to a fixpoint"
+  ([m mp child] (add-globbed m mp child 0))
+  ([m mp child depth]
+   (let [e (get m mp)]
+     (if (or (nil? e) (not= "Mod" (:kind e)) (> depth 8)
+             (some #(and (= (:ns child) (:ns %)) (= (:name child) (:name %))) (:children e)))
+       m
+       (reduce (fn [m q] (add-globbed m q child (inc depth)))
+               (assoc m mp (update e :children conj child))
+               (for [[q gs] (:globs (meta m)) :when (some #{mp} gs)] q))))))
 
 (defn with-adt-names
   "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
@@ -559,19 +623,41 @@
                   has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
               (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p (str *crate* "::"))))
                 m
-                (assoc m mp (update e :children into
-                                    (cond-> []
-                                      (not (has? :type)) (conj {:ns :type :name nm :kind "Struct" :path p})
-                                      (and ck (not (has? :value))) (conj {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))))
+                ;; (queue 542: and in the modules that glob its module, as with-core-names' globs took the index's names:
+                ;; libc's `s! { pub struct sockaddr .. }` in linux_like, which unix's `pub use self::linux_like::*` re-exports)
+                (cond-> (add-globbed m mp {:ns :type :name nm :kind "Struct" :path p})
+                  ck (add-globbed mp {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))
           names adts))
 
-(defn with-native-names [names native] (with-adt-names names (:adts native)))
+(defn with-value-names
+  "queue 542 (C6): the names with the crate's macro-made free functions and constants as their modules' children where missing
+  (sys/path/unix.rs' `path_separator_bytes!(b'/')`: `is_sep_byte`, `SEPARATORS`, which the index, read unexpanded, lacks, so
+  path.rs' `use crate::sys::path::is_sep_byte` through sys/path's `pub use unix::*` did not resolve): from the native
+  interface's :fns and :consts, each a module's own item (an impl's or a function's nested items are not a module's children)"
+  [names native]
+  (let []
+    (reduce (fn [m [p kind]]
+              (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))]
+                (if (or (nil? mp) (not (str/starts-with? p (str *crate* "::"))) (str/includes? nm "{"))
+                  m
+                  (add-globbed m mp {:ns :value :name nm :kind kind :path p}))))
+            names
+            (concat (for [[p _] (:fns native)] [p "Fn"])
+                    (for [[p _] (:consts native)] [p "Const { is_type_const: false }"])))))
+
+(defn with-native-names [names native] (with-value-names (with-adt-names names (:adts native)) native))
 
 (defn with-native-std
   "RF20: std's names with the native interface's type aliases (their types and generics) added, and its macro-made
   structs (with-native-names)"
   [std native]
-  (cond-> (update std :mods with-native-names native)
+  (cond-> (-> (update std :mods with-native-names native)
+              ;; queue 542: the kinds of the native interface's ADTs and aliases where std's names lack them (a dependency's
+              ;; macro-made `s! { pub struct iovec .. }`, named through another module: collect's ext-kind had none, and the
+              ;; foreign functions naming it, libc's writev, had no fact)
+              (update :kinds (fn [k] (merge (into {} (concat (for [[p a] (:adts native) :when (:kind a)] [p (:kind a)])
+                                                             (for [[p _] (:aliases native)] [p "TyAlias"])))
+                                            k))))
     (seq (:aliases native)) (-> (update :aliases #(merge (:aliases native) %))
                                 (update :generics #(merge (:alias-generics native) %)))
     ;; queue 512 (503-1): and its crate-private traits' generics (cmp/bytewise.rs' BytewiseEq<Rhs = Self>), where std's names
@@ -810,6 +896,11 @@
 (defn- own-attr? [node nm]
   (boolean (some #(when-let [u (:unparsed %)] (= nm (first (str/split u #"[ (=]")))) (:attrs node))))
 
+(defn- own-attr-value
+  "queue 542: an attribute's string value (`#[link_name = \"realname\"]`), else nil"
+  [node nm]
+  (some #(when-let [u (:unparsed %)] (when (= nm (first (str/split u #"[ (=]"))) (:eq-str %))) (:attrs node)))
+
 ;; C4 (2026-11-22): an enum's discriminant type and its variants' discriminants, as the helper writes them (tools/rsdump/front.rs:
 ;; `a.repr().int`'s type, else nil; `a.discriminants(tcx)`'s Display): rustc_middle's AdtDef::discriminants, an explicit
 ;; discriminant's value (its anonymous constant evaluated: literals, `-`, `<<`, `|`, the crate's integer constants), else the
@@ -825,6 +916,15 @@
                       "|" (.or (biginteger a) (biginteger b)) "&" (.and (biginteger a) (biginteger b)) "^" (.xor (biginteger a) (biginteger b))
                       "/" (when-not (zero? b) (quot a b)) "%" (when-not (zero? b) (rem a b)) nil)))
     (:paren :group) (some-> (:expr x) disr-value)
+    ;; queue 561 (C6 L3): a backtrace crate's cast discriminant (miniz_oxide's TINFLStatus `Done = TINFL_STATUS_DONE as i8`),
+    ;; the operand's value, wrapped to the enum's repr by enum-repr-discrs
+    :cast (when (some #{*crate*} backtrace-crates) (disr-value (:expr x)))
+    ;; and a constant of the module by its name (`TINFL_STATUS_DONE`, `const TINFL_STATUS_DONE: i32 = 0;`), its expression's value
+    :path (or (collect/const-int-value x)
+              (when (and (some #{*crate*} backtrace-crates) (= 1 (count (:segs (:path x)))))
+                (let [nm (str (:ident (first (:segs (:path x)))))
+                      d (some #(when (and (str/starts-with? (str (:kind %)) "Const") (= nm (str (second (:data %))))) %) (collect/defs))]
+                  (some-> d :node :expr disr-value))))
     (collect/const-int-value x)))
 
 (defn- enum-repr-discrs
@@ -959,14 +1059,20 @@
                    [ins out] (sig-sty (:id d) sig path-of)
                    preds (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))]
                (if (and (every? some? ins) out)
-                 (assoc-in acc [:fns p] {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
-                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
+                 (assoc-in acc [:fns p] (cond-> {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
+                                         :inputs ins :output out :variadic (boolean (:variadic sig)) :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
                                          ;; C4: `#[rustc_comptime]` (the intrinsics align_of, field_offset ..) a const fn too (is_const_fn)
                                          :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_comptime"))
                                          ;; C4: is_promotable_const_fn and NEVER_UNWIND from the function's own attributes
                                          :promotable (and (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_promotable"))
-                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true})
-                 acc))
+                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true}
+                                         ;; queue 542 (C6): a foreign function (no body; its symbol its link name), as std's interface
+                                         ;; does not write it: :foreign its link name (`#[link_name = ".."]`, else its own)
+                                         (:foreign (:node d)) (assoc :foreign (or (own-attr-value (:node d) "link_name") (second (:data d))))))
+                 (do (when (System/getenv "CORE_TRACE")
+                       (println "native-iface: fn" p "not written:" (pr-str (map-indexed (fn [i t] [i (when (nil? t) (pr-str (nth (:inputs sig) i nil)))]) ins))
+                                (when (nil? out) (str "output " (pr-str (:output sig))))))
+                     acc)))
              (and (#{"Struct" "Enum" "Union"} (:kind d)) (not (get (:adts si) p)))
              (let [g (collect/generics-of (:id d))
                    n (:node d)
@@ -985,7 +1091,13 @@
                    (if (and (= "Enum" (:kind d)) (nil? rd))
                      acc
                      (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self false :variants variants :native true}
-                                               rd (merge rd)))))
+                                               rd (merge rd)
+                                               ;; queue 542 (C6): a dependency's `#[repr(C)]` struct or union (libc's `s! { .. }`, its
+                                               ;; repr from the macro, which mono's source reading does not see), as mono's adt-repr
+                                               ;; reads :repr "C"; std's own crates keep the helper's shape (no repr(C) in it)
+                                               (and (some #{*crate*} dep-crates) (#{"Struct" "Union"} (:kind d))
+                                                    (some #(and (string? %) (= "ReprC" %)) (mapcat :toks (:attrs n))))
+                                               (assoc :repr "C")))))
                  (do (when (System/getenv "CORE_TRACE")
                        (println "native-iface: ADT" p "not written:"
                                 (pr-str (for [f (:fields (:data n))] [(:ident f) (collect/type-of (some #(when (and (= (:id d) (:parent %)) (= "Field" (:kind %)) (= (:ident f) (second (:data %)))) (:id %)) (collect/defs)))]))
@@ -1104,13 +1216,16 @@
       ;; prelude::rust_2024::*;`, std-names' std::prelude), core's and alloc's core's; std's features its cfg's (crate-cfg)
       (binding [ex/*cfg-names* (crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (prelude-crate) ex/*def-order* (atom 0)
                 ex/*raw-block-frags* (boolean (some #{*crate*} dep-crates))
+                lower/*try-expn-mark* (boolean (some #{*crate*} backtrace-crates))
+                tc/*steps-inherent* (boolean (some #{*crate*} backtrace-crates))
                 resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)
                 ;; queue 417: std's interface pass keeps its type aliases of an impl Trait as aliases (*free-aliases*)
                 collect/*free-aliases* (boolean (and *collect-only* (= "std" *crate*)))]
         (let [mc (atom {}) sites (atom {})
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
-                              (ex/expand-file file 2024 (merge (ex/load-std-macros std-file) (macros-for table file)))))
+                              (ex/expand-file file 2024 (let [sm (ex/load-std-macros std-file)]
+                                                         (merge sm (macros-for table file (when (some #{*crate*} backtrace-crates) (set (keys sm)))))))))
               vtext (ex/virtual-text)
               res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
                                                     ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)
@@ -1124,7 +1239,7 @@
               hir (stage stages :lower #(lower/lower-crate crate res-map {:file rel-file :mark-crates @mc :std-generics (lower/load-std-generics std-file)}))]
           (binding [tc/*root-file* rel-file build/*root-file* rel-file build/*expn-sites* @sites build/*span-origin* ex/virtual-origin]
             (stage stages :collect
-                   #(collect/with-crate hir res-map std {:source vtext :edition 2024 :si si}
+                   #(collect/with-crate hir res-map std {:source vtext :edition (crate-edition) :si si}
                       (fn []
                         (swap! stages assoc :collect :ok)
                         (reset! native (try (native-iface path si) (catch Throwable e (when (System/getenv "CORE_TRACE") (.printStackTrace e)) nil)))
@@ -1151,8 +1266,8 @@
                               (swap! out conj
                                      (on-body
                                      (try [[nm (body-key path d)] (if (const-kind? d)
-                                                (build/build-const d {:overflow-checks false :edition 2024})
-                                                (build/build-body d {:overflow-checks false :edition 2024 :root-cache (atom {})})) nil]
+                                                (build/build-const d {:overflow-checks false :edition (crate-edition)})
+                                                (build/build-body d {:overflow-checks false :edition (crate-edition) :root-cache (atom {})})) nil]
                                           (catch Throwable e
                                             (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
                                             [[nm (body-key path d)] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))])))))
@@ -1163,7 +1278,7 @@
                                         :when (and (or (nil? only) (re-find only inm)) (or (nil? *only-key?*) (*only-key?* ik)))]
                                   (swap! out conj
                                          (on-body
-                                          (try [[inm ik] (build/build-inline-const d ic {:overflow-checks false :edition 2024 :root-cache (atom {})}) nil]
+                                          (try [[inm ik] (build/build-inline-const d ic {:overflow-checks false :edition (crate-edition) :root-cache (atom {})}) nil]
                                                (catch Throwable e
                                                  (when (System/getenv "BUILD_TRACE") (.printStackTrace e))
                                                  [[inm ik] nil (str (or (:what (ex-data e)) (.getMessage e) e)) (pr-str (:x (ex-data e)))])))))))))))))))
@@ -1203,6 +1318,9 @@
                    :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    :ctor (recur (collect/def-of (:parent d)) (cons "{constructor#0}" acc))
+                   ;; queue 566 (C6 L1): an inline const's definition (collect's InlineConst), a closure's parent within it
+                   ;; (thread_local!'s `LOCAL_PANIC_COUNT::{constant#0}::{closure#1}`, as rustc's def path and v0 name it)
+                   :anon (recur (collect/def-of (:parent d)) (cons (str "{constant#" (or (:disamb d) 0) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
     (str/join "::" (concat (str/split resolve/*crate-path* #"::") segs))))
 
@@ -1222,6 +1340,42 @@
                               :args (collect/identity-args (collect/generics-of (loop [x id] (let [d (collect/def-of x)] (if (= "Closure" (:kind d)) (recur (:parent d)) x))))))])))))
 
 (declare ext-ty)
+(def ^:dynamic *export-opaques*
+  "rust-l1 (C6): an atom {OPAQUE-PATH HIDDEN-TYPE} of the crate's own opaque types an exported body names (a return-position
+  `impl Trait` of a non-generic function: std's panic_output's `Option<impl io::Write>`), each with its hidden type as its
+  defining function's typeck gives it (type_of of the opaque), in the crate's paths; nil (or no hidden type): the opaque type
+  refuses the export, as before"
+  nil)
+
+(defn- match-opaque
+  "The part of the type B at the opaque type ID's place in the declared output O, O and B walked in step; nil when absent"
+  [o b id]
+  (cond (and (vector? o) (= :opaque (first o)) (= id (nth o 2 nil))) b
+        (and (vector? o) (vector? b) (= (count o) (count b)) (or (not (keyword? (first o))) (= (first o) (first b))))
+        (some (fn [[x y]] (match-opaque x y id)) (map vector o b))
+        (and (map? o) (map? b)) (some (fn [k] (match-opaque (get o k) (get b k) id)) (keys o))
+        :else nil))
+
+(defn- opaque-path
+  "rust-l1: an opaque type's def path as the interface names it (`std::sys::stdio::unix::panic_output::{opaque#0}`)"
+  [id]
+  (let [od (collect/def-of id)] (str (def-path-string (:parent od)) "::{opaque#" (or (:disamb od) 0) "}")))
+
+(defn- opaque-hidden
+  "rust-l1 (C6): the hidden type of the crate's opaque type T (`[:opaque CLAUSES ID ARGS]`) when its definer is a non-generic
+  function with a body: the body's type (its typeck root's) at the opaque's place in the function's declared output"
+  [t]
+  (let [id (nth t 2) od (collect/def-of id) d (when od (collect/def-of (:parent od)))]
+    (when (and d (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d))
+               (empty? (:params (collect/generics-of (:id d)))))
+      (let [out (:output (tc/erased-sig (:id d)))
+            res (tc/body-results d)
+            bt (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty)]
+        (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "opaque-hidden:" (pr-str out) (pr-str bt))))
+        (when bt
+          (let [h (match-opaque out bt id)]
+            (when (and h (not-any? #(and (vector? %) (#{:infer :opaque :err} (first %))) (tree-seq coll? seq [h]))) h)))))))
+
 (defn- ext-closure
   "queue 464 (462-3 (a) 1): a closure type of the crate's own as data, `[:closure DEF-PATH [:fnsig INPUTS OUTPUT] ARGS [:upvars
   TYPE..] KIND]`: its definition's path, its signature, its parent's arguments (the typeck root's identity, substituted at the
@@ -1247,7 +1401,20 @@
     (map? t) (into {} (for [[k v] t] [k (ext-ty v)]))
     (not (vector? t)) t
     (and (= :closure (first t)) *export-closures*) (ext-closure t)
-    (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
+    ;; rust-l1 (C6): the crate's own opaque type with a hidden type (opaque-hidden): `[:ext-opaque PATH ARGS]`, its hidden type in
+    ;; *export-opaques*, which the entry carries (:opaques) and the run reveals
+    (and (= :opaque (first t)) (number? (nth t 2 nil)) *export-opaques*
+         (let [p (opaque-path (nth t 2))]
+           (when-not (contains? @*export-opaques* p)
+             (swap! *export-opaques* assoc p nil)
+             (swap! *export-opaques* assoc p (try (some-> (opaque-hidden t) ext-ty)
+                                                  (catch Throwable e (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "export-opaque:" p (.getMessage e)))) nil)))
+             (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "export-opaque:" p (pr-str t) "->" (pr-str (get @*export-opaques* p))))))
+           (get @*export-opaques* p)))
+    [:ext-opaque (opaque-path (nth t 2)) (mapv ext-ty (nth t 3 []))]
+    (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t)))
+    (do (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "ext-ty refused:" (pr-str t) (some? *export-opaques*))))
+        (throw (ex-info "a closure or opaque type" {:carry false})))
     (and (keyword? (first t)) (#{:adt :fndef :proj} (first t)) (number? (second t)))
     (into [(first t) (def-path-string (second t))] (map ext-ty (drop 2 t)))
     (= :dyn (first t))
@@ -1275,7 +1442,16 @@
                        (:call-span m) (#(let [cs (:call-span %)
                                               site (ex/virtual-cause cs)
                                               o (ex/virtual-origin cs)
-                                              src (fn [^String f] (if (str/starts-with? f "/") f (str rustc-src-prefix f)))]
+                                              ;; queue 561 (C6 L3): a vendored crate's file as std's build writes its caller locations,
+                                              ;; Cargo's path of a vendored package (`./vendor/adler2-2.0.1/src/algo.rs`); every vendored
+                                              ;; crate's (hashbrown's and libc's too: std's IR's `./vendor/hashbrown-0.17.1/..`), the
+                                              ;; user's vendored-locs (a), 2026-11-24
+                                              src (fn [^String f] (cond (str/starts-with? f "/") f
+                                                                        (str/starts-with? f "library/vendor/")
+                                                                        (str rustc-src-prefix "library/./" (subs f 8))
+                                                                        :else (str rustc-src-prefix f)))
+                                              _ (when (System/getenv "RF_CALLLOC_TRACE")
+                                                  (println "call-loc-trace" (pr-str cs) (pr-str site) (pr-str o) (ex/root-span? cs)))]
                                           (cond-> (dissoc % :call-span)
                                             (and site tc/*root-file*) (assoc :call-loc [(src tc/*root-file*) (site 0) (site 1)])
                                             ;; a call written in the body's own file: its own place there
@@ -1289,7 +1465,8 @@
                                             (assoc :call-loc [(src tc/*root-file*) (o 0) (o 1)])))))]
                (if m (with-meta y m) y))
     (vector? x) (let [y (mapv externalize x)] (if (meta x) (with-meta y (cond-> (meta x) (:tc (meta x)) (update :tc ext-ty))) y))
-    (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data} k))]
+    ;; queue 565: a body's :drop-spans (build's, its own file's [line col]) stay out: the program's drops alone take them
+    (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data :drop-spans} k))]
                         [k (if (#{:local-tys} k) (mapv ext-ty v) (externalize v))]))
     :else x))
 
@@ -1303,6 +1480,26 @@
              :when (and (number? d) (empty? as))]
          d)))
 
+(defn- deferred-static-ids
+  "queue 542 (C6): the crate's statics FORMS point at with their value deferred (build's `static: PATH, deferred` allocations),
+  by their local def ids, so that export-consts exports their initializers' bodies (the run evaluates them: build-run's
+  eval-static-body)"
+  [forms]
+  (let [ps (into (set (for [x (tree-seq coll? seq forms)
+                            :when (string? x)
+                            :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" x))]
+                            :when p]
+                        p))
+                 ;; queue 566 (C6 L1): and a thread-local static's (`(tlsref MUT PATH)`, build's ThreadLocalRef: list::DTORS), whose
+                 ;; initializer the run defines the unit's thread-local with
+                 (for [x (tree-seq coll? seq forms) :when (and (seq? x) (= 'tlsref (first x)) (string? (nth x 2 nil)))] (nth x 2)))]
+    (if (empty? ps)
+      #{}
+      (set (for [d (collect/defs)
+                 :when (str/starts-with? (str (:kind d)) "Static")
+                 :when (ps (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])))]
+             (:id d))))))
+
 (defn- export-consts
   "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the bodies of the crate's constants a built body R names by a local def id,
   each built (construct_const) and exported as a body is, with the constants they name in turn (three levels), {def-path
@@ -1311,23 +1508,63 @@
   constant that does not build is left out (the body stays refused, as before)"
   [r]
   (try
-  (loop [todo (local-const-ids [r]) seen #{} acc {} depth 0]
+  (loop [todo (into (local-const-ids [r]) (deferred-static-ids [r])) seen #{} acc {} depth 0]
     (if (or (empty? todo) (> depth 2))
       acc
       (let [built (for [id todo
                         :let [d (try (collect/def-of id) (catch Throwable _ nil))]
                         :when (and d (const-kind? d))
-                        :let [b (try (build/build-const d {:overflow-checks false :edition 2024}) (catch Throwable _ nil))
+                        :let [tr (fn [what e] (when (System/getenv "RF_EXPORT_CONST_TRACE")
+                                                (binding [*out* *err*] (println "export-consts:" (def-path-string id) what (if (instance? Throwable e) (str (.getMessage ^Throwable e) " " (pr-str (ex-data e))) (pr-str e)))))
+                                   nil)
+                              b (try (build/build-const d {:overflow-checks false :edition (crate-edition)}) (catch Throwable e (tr "build" e)))
                               r (when b (try (let [st (:stages b) lp (last (filter #(contains? st %) passes/pass-names))]
                                                (get-in st [lp (passes/body-key b)]))
-                                             (catch Throwable _ nil)))
-                              body (when (and r (not (:error r))) (try (externalize (dissoc r :stages)) (catch Throwable _ nil)))]
-                        :when body]
-                    [id (def-path-string id) body r])
+                                             (catch Throwable e (tr "passes" e))))
+                              _ (when (:error r) (tr "error" (:error r)))
+                              body (when (and r (not (:error r))) (try (externalize (dissoc r :stages)) (catch Throwable e (tr "externalize" e))))
+                              ;; queue 566 (C6 L1): the constant's own inline consts (`ITEM::{constant#N}`, thread_local!'s
+                              ;; `const { .. }` fn pointer in LOCAL_PANIC_COUNT's LocalKey), each built and exported beside it under its
+                              ;; path, which the run's eval-const-whole finds by the reprinted constant's :inline-def
+                              ics (when body
+                                    (for [ic (try (build/inline-consts d) (catch Throwable e (tr "inline consts" e)))
+                                          :let [ip (str (def-path-string id) (build/inline-const-suffix ic))
+                                                ib (try (build/build-inline-const d ic {:overflow-checks false :edition (crate-edition) :root-cache (atom {})})
+                                                        (catch Throwable e (tr (str "build " ip) e)))
+                                                ir (when ib (try (let [st (:stages ib) lp (last (filter #(contains? st %) passes/pass-names))]
+                                                                   (get-in st [lp (passes/body-key ib)]))
+                                                                 (catch Throwable e (tr (str "passes " ip) e))))
+                                                ibody (when (and ir (not (:error ir)))
+                                                        (try (binding [*export-closures* (root-closures-of ib)]
+                                                               (externalize (dissoc ir :stages :root-closures :upvar-tys)))
+                                                             (catch Throwable e (tr (str "externalize " ip) e))))]
+                                          :when ibody]
+                                      [nil ip ibody ir]))]
+                        :when body
+                        e (cons [id (def-path-string id) body r] ics)]
+                    e)
+            ;; queue 566 (C6 L1): a foreign static with a `#[linkage]` (std's weak!: `#[linkage = "extern_weak"] static getrandom`), no
+            ;; initializer to build: marked {:foreign-static {:name LINK-NAME :linkage L}} under its paths, the run's indirection
+            ;; through `_rust_extern_with_linkage_` (rustc_codegen_llvm's check_and_apply_linkage)
+            fstat (for [id todo
+                        :let [d (try (collect/def-of id) (catch Throwable _ nil)) n (:node d)]
+                        :when (and d (str/starts-with? (str (:kind d)) "Static") (map? n) (:foreign n) (own-attr-value n "linkage"))
+                        :let [p (def-path-string id)
+                              pp (try (binding [collect/*in-value* true] (collect/print-def-path id [])) (catch Throwable _ nil))
+                              v {:foreign-static {:name (or (own-attr-value n "link_name") (str (second (:data d)))) :linkage (own-attr-value n "linkage")}}]
+                        k (distinct (cons p (when pp [(str (first (str/split p #"::")) "::" pp)])))]
+                    [k v])
+            acc (into acc fstat)
             seen (into seen todo)]
-        (recur (remove seen (local-const-ids (keep #(nth % 3) built)))
+        (recur (remove seen (into (local-const-ids (keep #(nth % 3) built)) (deferred-static-ids (keep #(nth % 3) built))))
                seen
-               (into acc (for [[_ p body] built] [p body]))
+               (into acc (for [[id p body] built
+                               ;; queue 566 (C6 L1): a static also by the path its allocation prints (`static: thread::id::ThreadId::new::COUNTER`,
+                               ;; an impl's function's nested static: the def path has `{impl#0}`), by which the run asks for its value
+                               k (distinct (cons p (when (and id (str/starts-with? (str (:kind (collect/def-of id))) "Static"))
+                                                     (when-let [pp (try (binding [collect/*in-value* true] (collect/print-def-path id [])) (catch Throwable _ nil))]
+                                                       [(str (first (str/split p #"::")) "::" pp)]))))]
+                           [k body]))
                (inc depth)))))
   (catch Throwable _ nil)))
 
@@ -1374,7 +1611,7 @@
         pbs (into {} (for [[kk pb] (get st last-pass) :when (and (str/starts-with? kk pre) (not (:error pb)))] [(:promoted pb) pb]))]
     (if (or (nil? r) (:error r))
       {:key k :refused (str "the passes: " (or (:error r) (str "no body after " last-pass)))}
-      (try (binding [*export-closures* (root-closures-of b)]
+      (try (binding [*export-closures* (root-closures-of b) *export-opaques* (atom {})]
             (let [;; C6-4: each Assert's span (build's :assert-span, which the passes keep the terminator but not its metadata
                   ;; of: build-run's aspans), by its condition, expected value and message, put back on the passes' terminator as
                   ;; a call's span, which externalize makes its caller location (:call-loc), the panic's Location
@@ -1403,13 +1640,24 @@
             ;; calls and no entry of their own carries (build-run's lib-unit takes them)
             ;; C6-4: the attributes of the crate's own functions the body calls (a copy's #[inline] decides its symbol's
             ;; instantiating crate: std's `Components::len_before_body`, `Path::has_root`), which no entry of their own carries
+            ;; queue 561 (C6 L3): a backtrace crate's body also carries the attributes of every function of its module file (beneath
+            ;; the callees' own), the impls' methods its operators and trait calls reach (adler2's `#[inline] fn add_assign` of
+            ;; `impl AddAssign for U32X4` under `+=`: a copy, the instantiating crate in its symbol), which a trait method call's :tc
+            ;; does not name
             :callee-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs)]
-                            (into {} (for [x (tree-seq coll? seq [(:blocks r) (vals pbs)])
+                            (merge
+                             (when (some #{*crate*} backtrace-crates)
+                               (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
+                                              :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))
+                                                    a (when p (try (la (:id d)) (catch Throwable _ nil)))]
+                                              :when (seq a)]
+                                          [p a])))
+                             (into {} (for [x (tree-seq coll? seq [(:blocks r) (vals pbs)])
                                            :let [t (when (seq? x) (:tc (meta x)))]
                                            :when (and (vector? t) (= :fndef (first t)) (number? (second t)))
                                            :let [p (try (def-path-string (second t)) (catch Throwable _ nil))]
                                            :when p]
-                                       [p (try (la (second t)) (catch Throwable _ []))])))
+                                       [p (try (la (second t)) (catch Throwable _ []))]))))
             :nested-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs) pre (str (def-path-string (:id (:def b))) "::")]
                             (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
                                            :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))]
@@ -1420,7 +1668,9 @@
              ;; queue 464 (462-3 (a) 2): a closure's own body, with its upvars' types and kind (the run lays its type out
              ;; from the type's data; these are the body's own, for a check)
              (:upvar-tys b) (assoc :upvar-tys (mapv ext-ty (:upvar-tys b)))
-             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e)))))
+             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e))
+             ;; rust-l1 (C6): the crate's opaque types its forms name, with their hidden types (the run reveals them)
+             true (as-> e (if-let [os (not-empty (into {} (filter second @*export-opaques*)))] (assoc e :opaques os) e)))))
            (catch Throwable e {:key k :refused (str (or (.getMessage e) e))})))))
 
 ;; ---------------------------------------------------------------------------------------------
