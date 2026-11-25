@@ -1,0 +1,149 @@
+;; jrt: java.lang.ScopedValue (java-rows-1124; jdk26u's java/lang/ScopedValue.java, final since JDK 25, JEP 506): a value
+;; bound for the extent of Carrier.run or call on the current thread. The bindings are a stack of snapshots on jrt's Thread
+;; (scopedBindings), each a carrier's chain of key and value, searched from the innermost; jdk26u's per-thread cache and its
+;; inheritance by StructuredTaskScope's forks (not in the Go build) are not here. A new Thread starts with no bindings, as
+;; jdk26u's. hashCode is the key's own number (jdk26u's generateKey: a Marsaglia xor-shift of a shared seed).
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "scopedvalue.go"
+  :imports [[atomic "sync/atomic"]])
+
+(go/type ScopedValue "ScopedValue is java.lang.ScopedValue: its hash, the key's identity.\n"
+  (struct Object ^int32 hash))
+
+(go/type ScopedValue_Carrier
+  "ScopedValue_Carrier is java.lang.ScopedValue$Carrier: one key and its value, and the carrier it extends (where's chain).\n"
+  (struct Object ^{:tag (* ScopedValue)} key ^any value ^{:tag (* ScopedValue_Carrier)} prev))
+
+(go/type ScopedValue_CallableOp "ScopedValue_CallableOp is java.lang.ScopedValue$CallableOp.\n"
+  (interface Object_I
+    (Is_ScopedValue_CallableOp [])
+    (Call__O ^any [])))
+
+(go/type svSnapshot "svSnapshot: one Carrier.run or call's bindings on its thread, and the enclosing ones.\n"
+  (struct ^{:tag (* ScopedValue_Carrier)} carrier ^{:tag (* svSnapshot)} prev))
+
+(go/var
+  [ScopedValue_class
+   (Define (addr (lit ClassInfo :Name "java.lang.ScopedValue" :Kind KindClass
+                      :Modifiers (bit-or AccPublic AccFinal) :Super Object_class :Go "arbace/jrt.ScopedValue")))]
+  [ScopedValue_Carrier_class
+   (Define (addr (lit ClassInfo :Name "java.lang.ScopedValue$Carrier" :Kind KindClass
+                      :Modifiers (bit-or AccPublic AccStatic AccFinal) :Super Object_class
+                      :Declaring ScopedValue_class :Simple "Carrier" :Go "arbace/jrt.ScopedValue_Carrier")))]
+  [ScopedValue_CallableOp_class
+   (Define (addr (lit ClassInfo :Name "java.lang.ScopedValue$CallableOp" :Kind KindInterface
+                      :Modifiers (bit-or AccPublic AccStatic AccInterface AccAbstract)
+                      :Declaring ScopedValue_class :Simple "CallableOp" :Go "arbace/jrt.ScopedValue_CallableOp")))]
+  [^{:tag atomic/Int32 :doc "svSeed: the keys' shared seed (jdk26u's ScopedValue.nextKey)\n"} svSeed])
+
+(go/func svNextKey "svNextKey is jdk26u's generateKey: the next xor-shift of the seed.\n" ^int32 []
+  (while true
+    (let [old (.Load svSeed)
+          ^int32 x old]
+      (when (== x 0) (set! x (conv int32 0xf0f0f0f)))
+      (set! x (bit-xor x (>> x 12)))
+      (set! x (bit-xor x (<< x 9)))
+      (set! x (bit-xor x (>> x 23)))
+      (when (.CompareAndSwap svSeed old x)
+        (return x)))))
+
+(go/func ScopedValue_NewInstance__ScopedValue "ScopedValue_NewInstance__ScopedValue is ScopedValue.newInstance().\n"
+  ^{:tag (* ScopedValue)} []
+  (addr (lit ScopedValue :hash (svNextKey))))
+
+(go/func ScopedValue_Where_ScopedValue_O__ScopedValue_Carrier
+  "ScopedValue_Where_ScopedValue_O__ScopedValue_Carrier is ScopedValue.where(key, value): a carrier of the one binding.\n"
+  ^{:tag (* ScopedValue_Carrier)} [^{:tag (* ScopedValue)} key ^any value]
+  (addr (lit ScopedValue_Carrier :key (NN key) :value value)))
+
+(go/method find
+  "find is the value bound to v on the current thread, innermost first, and whether there is one.\n"
+  [^{:tag (* ScopedValue)} v] :results [^any value ^bool ok]
+  (let [s (.-scopedBindings (CurrentThread))]
+    (while (!= s nil)
+      (let [c (.-carrier s)]
+        (while (!= c nil)
+          (when (== (.-key c) v)
+            (return (.-value c) true))
+          (set! c (.-prev c))))
+      (set! s (.-prev s))))
+  (return nil false))
+
+(go/method Get__O "Get__O is get(): NoSuchElementException \"ScopedValue not bound\" when unbound.\n"
+  ^any [^{:tag (* ScopedValue)} v]
+  (let [(values x ok) (.find v)]
+    (when (not ok)
+      (panic (NoSuchElementException_New_String (Str "ScopedValue not bound"))))
+    x))
+(go/method IsBound__Z ^bool [^{:tag (* ScopedValue)} v] (let [(values _ ok) (.find v)] ok))
+(go/method OrElse_O__O "OrElse_O__O is orElse(other): NullPointerException for a null other.\n"
+  ^any [^{:tag (* ScopedValue)} v ^any other]
+  (when (== other nil) (panic (NPE)))
+  (let [(values x ok) (.find v)]
+    (when ok (return x))
+    other))
+(go/method OrElseThrow_Supplier__O "OrElseThrow_Supplier__O is orElseThrow(supplier): the supplier's exception when unbound.\n"
+  ^any [^{:tag (* ScopedValue)} v ^Supplier s]
+  (when (== s nil) (panic (NPE)))
+  (let [(values x ok) (.find v)]
+    (when ok (return x))
+    (let [e (.Get__O s)]
+      (when (== e nil) (panic (NPE)))
+      (panic e))))
+(go/method HashCode__I ^int32 [^{:tag (* ScopedValue)} v] (.-hash v))
+(go/method Ref ^any [^{:tag (* ScopedValue)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ScopedValue)} t] ScopedValue_class)
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* ScopedValue)} t] (Object_toString t))
+(go/method Clone__O ^any [^{:tag (* ScopedValue)} t] (panic (CloneNotSupported t)))
+
+(go/method Where_ScopedValue_O__ScopedValue_Carrier
+  "Where_ScopedValue_O__ScopedValue_Carrier is Carrier.where(key, value): a carrier of this one's bindings and the new one.\n"
+  ^{:tag (* ScopedValue_Carrier)} [^{:tag (* ScopedValue_Carrier)} c ^{:tag (* ScopedValue)} key ^any value]
+  (addr (lit ScopedValue_Carrier :key (NN key) :value value :prev c)))
+
+(go/method Get_ScopedValue__O
+  "Get_ScopedValue__O is Carrier.get(key): the carrier's own binding of key (the latest), else NoSuchElementException.\n"
+  ^any [^{:tag (* ScopedValue_Carrier)} c ^{:tag (* ScopedValue)} key]
+  (let [x c]
+    (while (!= x nil)
+      (when (== (.-key x) key)
+        (return (.-value x)))
+      (set! x (.-prev x))))
+  (panic (NoSuchElementException_New_String (Str "No mapping present"))))
+
+(go/method bind
+  "bind runs f with the carrier's bindings on top of the current thread's, taking them off however f ends.\n"
+  [^{:tag (* ScopedValue_Carrier)} c ^{:tag (func [])} f]
+  (let [t (CurrentThread)
+        prev (.-scopedBindings t)]
+    (set! (.-scopedBindings t) (addr (lit svSnapshot :carrier c :prev prev)))
+    (defer ((fn [] (set! (.-scopedBindings t) prev))))
+    (f)))
+
+(go/method Run_Runnable__V "Run_Runnable__V is Carrier.run(op).\n" [^{:tag (* ScopedValue_Carrier)} c ^Runnable op]
+  (when (== op nil) (panic (NPE)))
+  (.bind c (fn [] (.Run__V op))))
+
+(go/method Call_ScopedValue_CallableOp__O "Call_ScopedValue_CallableOp__O is Carrier.call(op): op's result, its exception thrown.\n"
+  ^any [^{:tag (* ScopedValue_Carrier)} c ^ScopedValue_CallableOp op]
+  (when (== op nil) (panic (NPE)))
+  (let [^any r nil]
+    (.bind c (fn [] (set! r (.Call__O op))))
+    r))
+
+(go/method Ref ^any [^{:tag (* ScopedValue_Carrier)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* ScopedValue_Carrier)} t] ScopedValue_Carrier_class)
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* ScopedValue_Carrier)} t] (Object_toString t))
+(go/method Clone__O ^any [^{:tag (* ScopedValue_Carrier)} t] (panic (CloneNotSupported t)))
+
+(go/func ScopedValue_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ScopedValue) x)] ok))
+(go/func ScopedValue_Carrier_InstanceOf ^bool [^any x] (let [(values _ ok) (assert (* ScopedValue_Carrier) x)] ok))
+(go/func ScopedValue_CallableOp_InstanceOf ^bool [^any x]
+  (let [(values _ ok) (assert ScopedValue_CallableOp x)] (dynNominal x ScopedValue_CallableOp_class ok)))
+
+(go/func init []
+  (set! (.-IsInstance (.Info ScopedValue_class)) ScopedValue_InstanceOf)
+  (set! (.-IsInstance (.Info ScopedValue_Carrier_class)) ScopedValue_Carrier_InstanceOf)
+  (set! (.-IsInstance (.Info ScopedValue_CallableOp_class)) ScopedValue_CallableOp_InstanceOf))
