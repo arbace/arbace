@@ -2,27 +2,31 @@
 
 (in-ns 'jdk.internal.jrt.javac)
 
-(import '(java.io ByteArrayOutputStream
+(import '(com.sun.tools.javac.api ClientCodeWrapper$Trusted)
+        '(com.sun.tools.javac.file ArbaceFileObject BaseFileManager)
+        '(com.sun.tools.javac.main Option)
+        '(java.io ByteArrayOutputStream
                   File
                   FileInputStream
                   FileOutputStream
                   IOException
                   InputStream
-                  OutputStream)
+                  OutputStream
+                  OutputStreamWriter
+                  Writer)
+        '(java.net URI)
         '(java.util ArrayList Arrays Collections Iterator LinkedHashMap LinkedHashSet List Map Set)
         '(javax.tools FileObject
-                      JavaFileManager
                       JavaFileManager$Location
                       JavaFileObject
                       JavaFileObject$Kind
-                      SimpleJavaFileObject
                       StandardLocation))
 
-(defclass ^:public FileManager
-  :implements [JavaFileManager]
+(defclass ^:public ^{ClientCodeWrapper$Trusted true} FileManager
+  :extends BaseFileManager
 
-  (defclass ^:public ^:static ^:final Obj
-    :extends SimpleJavaFileObject
+  (defclass ^:public ^:static ^:final ^{ClientCodeWrapper$Trusted true} Obj
+    :extends ArbaceFileObject
 
     (field ^:final ^File file)
 
@@ -30,29 +34,49 @@
 
     (field ^:final ^String binaryName)
 
-    (constructor [this ^File file ^JavaFileObject$Kind kind ^String binaryName]
-      (super. (.toURI (.getAbsoluteFile file)) kind)
+    (field ^:final ^JavaFileObject$Kind kind)
+
+    (constructor [this ^BaseFileManager fm ^File file ^JavaFileObject$Kind kind ^String binaryName]
+      (super. fm (.normalize (.toPath (.getAbsoluteFile file))))
       (set! (.-file this) file)
       (set! (.-path this) (.getAbsolutePath file))
-      (set! (.-binaryName this) binaryName))
+      (set! (.-binaryName this) binaryName)
+      (set! (.-kind this) kind))
+
+    (method ^:protected binaryName ^String [this] binaryName)
+
+    (method ^:protected content :throws [IOException] ^byte/1 [this]
+      (FileManager/bytes file))
+
+    (method ^:public getCharContent :throws [IOException] ^CharSequence [this
+                                                                         ^boolean ignoreEncodingErrors]
+      (when (identical? kind JavaFileObject$Kind/SOURCE)
+        (when-instance [^FileManager fm (.-fileManager this)] (set! (.-sourceRead fm) true)))
+      (.getCharContent super ignoreEncodingErrors))
 
     (method ^:public getName ^String [this] (.getPath file))
+
+    (method ^:public getKind ^JavaFileObject$Kind [this] kind)
+
+    (method ^:public toUri ^URI [this] (.toURI (.getAbsoluteFile file)))
 
     (method ^:public openInputStream :throws [IOException] ^InputStream [this]
       (FileInputStream. file))
 
     (method ^:public openOutputStream :throws [IOException] ^OutputStream [this]
+      (.flushCache (.-fileManager this) this)
       (let [dir (.getParentFile file)]
         (when (and (and (and (some? dir) (not (.isDirectory dir))) (not (.mkdirs dir)))
                    (not (.isDirectory dir)))
           (throw (IOException. (java-str "cannot create the directory " dir))))
         (FileOutputStream. file)))
 
-    (method ^:public getCharContent :throws [IOException] ^CharSequence [this
-                                                                         ^boolean ignoreEncodingErrors]
-      (String. (FileManager/bytes file) "UTF-8"))
+    (method ^:public openWriter :throws [IOException] ^Writer [this]
+      (OutputStreamWriter. (.openOutputStream this)))
 
     (method ^:public getLastModified ^long [this] (.lastModified file))
+
+    (method ^:public delete ^boolean [this] (.delete file))
 
     (method ^:public toString ^String [this] (.getPath file)))
 
@@ -104,8 +128,11 @@
 
   (field ^boolean multiModule)
 
+  (field ^:volatile ^boolean sourceRead)
+
   (constructor ^:public [this ^{:tag (List File)} sourcePath ^{:tag (List File)} classPath
                          ^File classOutput]
+    (super. nil)
     (set! (.-sourcePath this) sourcePath)
     (set! (.-classPath this) classPath)
     (set! (.-classOutput this) classOutput))
@@ -174,7 +201,7 @@
           nil)))
 
   (method ^:public source ^Obj [this ^File f]
-    (Obj. f JavaFileObject$Kind/SOURCE nil))
+    (Obj. this f JavaFileObject$Kind/SOURCE nil))
 
   (method dirs ^{:tag (List File)} [this ^JavaFileManager$Location location]
     (if-instance [^ModuleLoc m location]
@@ -185,10 +212,14 @@
         (identical? location StandardLocation/CLASS_PATH) classPath
         (identical? location StandardLocation/CLASS_OUTPUT)
           (if (or (nil? classOutput) multiModule) (List/of) (List/of classOutput))
+        (identical? location StandardLocation/PLATFORM_CLASS_PATH)
+          (let [^{:tag (List File)} ds (ArrayList.)]
+            (for-each [^ModuleLoc m (.values system)] (.addAll ds (.-dirs m)))
+            ds)
         :else (List/of))))
 
-  (method ^:static listDir ^void [^File root ^String pkg ^{:tag (Set JavaFileObject$Kind)} kinds
-                                  ^boolean recurse ^{:tag (List JavaFileObject)} out]
+  (method listDir ^void [this ^File root ^String pkg ^{:tag (Set JavaFileObject$Kind)} kinds
+                         ^boolean recurse ^{:tag (List JavaFileObject)} out]
     (let [^File dir (if (.isEmpty pkg) root (File. root (.replace pkg \. \/)))
           fs (.listFiles dir)]
       (when (some? fs)
@@ -197,11 +228,12 @@
           (let [n (.getName f)]
             (if (.isDirectory f)
                 (when recurse
-                  (FileManager/listDir root
-                                       ^String (if (.isEmpty pkg) n (java-str pkg "." n))
-                                       kinds
-                                       true
-                                       out))
+                  (.listDir this
+                            root
+                            ^String (if (.isEmpty pkg) n (java-str pkg "." n))
+                            kinds
+                            true
+                            out))
                 (for-each [^JavaFileObject$Kind k kinds]
                   (when (and (not (identical? k JavaFileObject$Kind/OTHER))
                              (.endsWith n (.-extension k)))
@@ -211,7 +243,10 @@
                                                (.length n)
                                                (.length (.-extension k))))]
                       (.add out
-                            (Obj. f k ^String (if (.isEmpty pkg) simple (java-str pkg "." simple))))
+                            (Obj. this
+                                  f
+                                  k
+                                  ^String (if (.isEmpty pkg) simple (java-str pkg "." simple))))
                       (break))))))))))
 
   (defclass ^:static ^:final DirLoader
@@ -244,8 +279,7 @@
                                                            ^{:tag (Set JavaFileObject$Kind)} kinds
                                                            ^boolean recurse]
     (let [^{:tag (List JavaFileObject)} out (ArrayList.)]
-      (for-each [^File r (.dirs this location)]
-        (FileManager/listDir r packageName kinds recurse out))
+      (for-each [^File r (.dirs this location)] (.listDir this r packageName kinds recurse out))
       out))
 
   (method ^:public inferBinaryName ^String [this ^JavaFileManager$Location location
@@ -257,7 +291,12 @@
     (identical? a b))
 
   (method ^:public handleOption ^boolean [this ^String current ^{:tag (Iterator String)} remaining]
-    false)
+    (if (not (.equals current "-encoding"))
+        false
+        (do
+          (when-not (.hasNext remaining)
+            (throw (IllegalArgumentException. (java-str "error: " current " requires an argument"))))
+          (.handleOption this Option/ENCODING (cast String (.next remaining))))))
 
   (method ^:public hasLocation ^boolean [this ^JavaFileManager$Location location]
     (cond
@@ -268,6 +307,7 @@
       (identical? location StandardLocation/SYSTEM_MODULES) (not (.isEmpty system))
       (identical? location StandardLocation/PATCH_MODULE_PATH) (not (.isEmpty patches))
       (identical? location StandardLocation/MODULE_SOURCE_PATH) multiModule
+      (identical? location StandardLocation/PLATFORM_CLASS_PATH) (not (.isEmpty system))
       :else false))
 
   (method find ^File [this ^JavaFileManager$Location location ^String relative]
@@ -278,7 +318,7 @@
   (method ^:public getJavaFileForInput ^JavaFileObject [this ^JavaFileManager$Location location
                                                         ^String className ^JavaFileObject$Kind kind]
     (let [f (.find this location (java-str (.replace className \. \/) (.-extension kind)))]
-      (when (some? f) ^JavaFileObject (Obj. f kind className))))
+      (when (some? f) ^JavaFileObject (Obj. this f kind className))))
 
   (method ^:static besideSibling ^File [^String className ^JavaFileObject$Kind kind
                                         ^FileObject sibling]
@@ -299,11 +339,14 @@
         (set! dir (File. ".")))
       (if (and (and (nil? dir) (identical? location StandardLocation/CLASS_OUTPUT))
                (not multiModule))
-          (Obj. (FileManager/besideSibling className kind sibling) kind nil)
+          (Obj. this (FileManager/besideSibling className kind sibling) kind nil)
           (do
             (when (nil? dir)
               (throw (IOException. (java-str "no output location " location " for " className))))
-            (Obj. (File. dir (java-str (.replace className \. \/) (.-extension kind))) kind nil)))))
+            (Obj. this
+                  (File. dir (java-str (.replace className \. \/) (.-extension kind)))
+                  kind
+                  nil)))))
 
   (method ^:static sourceOutput ^JavaFileManager$Location [^JavaFileManager$Location location]
     (if (identical? location StandardLocation/SOURCE_OUTPUT) StandardLocation/CLASS_OUTPUT location))
@@ -316,7 +359,7 @@
   (method ^:public getFileForInput ^FileObject [this ^JavaFileManager$Location location
                                                 ^String packageName ^String relativeName]
     (let [f (.find this location (FileManager/relative packageName relativeName))]
-      (when (some? f) ^FileObject (Obj. f JavaFileObject$Kind/OTHER nil))))
+      (when (some? f) ^FileObject (Obj. this f JavaFileObject$Kind/OTHER nil))))
 
   (method ^:public getFileForOutput :throws [IOException] ^FileObject [this
                                                                        ^JavaFileManager$Location location
@@ -331,7 +374,8 @@
         (set! dir (File. ".")))
       (when (nil? dir)
         (throw (IOException. (java-str "no output location " location " for " relativeName))))
-      (Obj. (File. dir (FileManager/relative packageName relativeName))
+      (Obj. this
+            (File. dir (FileManager/relative packageName relativeName))
             JavaFileObject$Kind/OTHER
             nil)))
 
@@ -339,7 +383,8 @@
 
   (method ^:public close ^void [this])
 
-  (method ^:public isSupportedOption ^int [this ^String option] -1)
+  (method ^:public isSupportedOption ^int [this ^String option]
+    (if (.equals option "-encoding") 1 -1))
 
   (method ^:public getLocationForModule ^JavaFileManager$Location [this
                                                                    ^JavaFileManager$Location location

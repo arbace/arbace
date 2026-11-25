@@ -1572,6 +1572,14 @@
       (seq binds) (str (type-text sc fi) "<" (str/join ", " (map #(type-text sc (get binds % 'Object)) tps)) ">")
       :else (type-text sc fi))))
 
+(defn- super-text
+  "super, or X.super for ^:qualified super: the source's qualifier naming the current class X (queue 556c, t06072:
+  javac reaches X.super's members through access$N accessors, super's directly)."
+  [env s]
+  (if-let [n (and (:qualified (meta s)) (:class-name env))]
+    (str (last (str/split n #"\\.")) ".super")
+    "super"))
+
 (defn- receiver-text
   "The text before .m or .f for receiver form `r`, or nil for an unqualified member of this
   instance or of an enclosing anonymous one."
@@ -1584,7 +1592,7 @@
     (and (seq? r) (nil? (meta-tag r)) (or (is? r 'switch) (and (is? r 'label) (is? (nth r 2 nil) 'switch))))
     (ex-text (assoc env :standalone-switch true) r P-POSTFIX)
     (and (symbol? r) (meta-tag r)) (ex-text env r P-POSTFIX)
-    (= r 'super) "super"
+    (= r 'super) (super-text env r)
     (and (symbol? r) (nil? (namespace r)) (= (name r) (:recv env))) (if (:field? env) "this" nil)
     (and (symbol? r) (nil? (namespace r)) (contains? (:outer-recvs env) (name r))) nil
     ;; an anonymous class's this, which Java cannot name: its members by simple name (javac
@@ -1924,6 +1932,8 @@
                     (and c (re-find #"\*|[+-]L|[+-]T" targs)
                          (= (str/replace c "/" ".") (erase (:scope env) tform)))))))))
 
+(declare promoted-branches)
+
 (defn target-text
   "Form `x` where Java converts it to jtype `jt` (of declared type form `tform`, when known): an
   integer literal there that the forms left unboxed is a long (the converter boxes an int
@@ -2000,12 +2010,13 @@
      (str "(" (fi-instance-text env x) ") " (second (ex env x)))
      (and tform (conditional-form? x) (#{"if" "when" "when-not"} (str (head x))) (nil? (meta-tag x)))
      (let [[_ c a b] (case (str (head x)) "if" x "when" (cons 'if (when-branches x)) "when-not" (list 'if (nth x 1) nil (nth x 2)))
-           [a b] (unbox-branches env a b)]
-       (str (ex-text env c P-OR) " ? " (target-text env a jt tform) " : "
+           [a b] (unbox-branches env a b)
+           [a b] (promoted-branches env a b)]
+       (str (ex-text env c P-OR) " ? " (let [t (target-text env a jt tform)] (if (or (::paren (meta a)) (:parens (meta a))) (str "(" t ")") t)) " : "
             ;; the false branch is a conditional expression (or a lambda): an assignment there
             ;; is parenthesized, c ? a : (x = b)
             (let [t (target-text env b jt tform)]
-              (if (or (is? b 'set!) (is? b 'aset)
+              (if (or (is? b 'set!) (is? b 'aset) (::paren (meta b)) (:parens (meta b))
                       (and (is? b 'let) (= :assign (first (expand-temps env b)))))
                 (str "(" t ")")
                 t))))
@@ -2047,8 +2058,15 @@
                                  "unchecked-long" "unchecked-float"} (str (head v)))
                      (= 2 (count v)))
         inner (if narrow? (second v) v)
-        h (str (head inner))]
+        h (str (head inner))
+        ;; a field of a qualified super (X.super.f: X/super, or ^:qualified super in X itself) is written out: javac
+        ;; reaches it through access$N accessors, a getter and a setter for f = f + x, one accessor for f += x (queue 556c,
+        ;; t06072)
+        qsuper? (and (seq? place) (= 2 (count place)) (symbol? (first place)) (str/starts-with? (name (first place)) ".-")
+                     (let [r (second place)]
+                       (and (symbol? r) (= "super" (name r)) (or (namespace r) (:qualified (meta r))))))]
     (cond
+      qsuper? nil
       (and (seq? inner) (incs h) (= 2 (count inner)) (read-of? env (second inner) place)
            (or (not narrow?) (#{"unchecked-inc-int" "unchecked-dec-int"} h)))
       [(incs h) nil]
@@ -2084,6 +2102,27 @@
 
 (declare recv-instantiated)
 
+(defn- marked-compound
+  "For a ^:compound (set! P V) (a compound assignment on a boxed place, queue 556c): [OP rhs-form] of Java's P OP= rhs,
+  V read as the converter writes P OP rhs (narrowed, its boolean & | through temporaries, ^ as (not (= P rhs))); else nil."
+  [env place v]
+  (let [v (strip-tag v)
+        v (if (and (seq? v) (= 2 (count v)) (#{"unchecked-byte" "unchecked-short" "unchecked-char" "unchecked-int"
+                                                  "unchecked-long" "unchecked-float"} (str (head v))))
+            (strip-tag (second v)) v)
+        h (str (head v))]
+    (cond
+      (and (= h "let") (= 3 (count v)) (= 4 (count (second v))) (#{"and" "or"} (str (head (nth v 2)))))
+      [(if (= "and" (str (head (nth v 2)))) "&" "|") (nth (second v) 3)]
+      (and (#{"and" "or"} h) (= 3 (count v))) [(if (= "and" h) "&" "|") (nth v 2)]
+      (and (= h "not") (is? (second v) '=) (= 3 (count (second v)))) ["^" (nth (second v) 2)]
+      (and (compound-ops h) (= 3 (count v))) [(compound-ops h) (nth v 2)]
+      :else nil)))
+
+(def ^:dynamic *prefix-stmt*
+  "True while a statement (set! P (inc P)) marked ^:prefix is printed: ++P, as the source wrote it (queue 556c)."
+  false)
+
 (defn- assign-text
   "Java's assignment of `v` to place text `pt` for place form `place` (a value)."
   [env place pt v value?]
@@ -2096,7 +2135,7 @@
                                          (#{"unchecked-byte" "unchecked-short" "unchecked-char"} (str (head (strip-tag v)))))
                             c))]
     (if (#{"++" "--"} op)
-      (e (if value? P-UNARY P-POSTFIX) (if value? (str op pt) (str pt op)))
+      (e (if (or value? *prefix-stmt*) P-UNARY P-POSTFIX) (if (or value? *prefix-stmt*) (str op pt) (str pt op)))
       (e P-ASSIGN (str pt " " op " " (if (and opn (long-ops opn))
                                        (long-literal-text env rhs P-ASSIGN)
                                        (ex-text env rhs P-ASSIGN)))))
@@ -2237,9 +2276,31 @@
   [(if (and (boxing-call? a) (non-wrapper-ref? env b)) (second a) a)
    (if (and (boxing-call? b) (non-wrapper-ref? env a)) (second b) b)])
 
+(defn- promoted-branches
+  "The branches of a ?: without the widening the converter wrote for its binary numeric promotion, ^:promoted
+  (queue 556d): Java's promotion widens implicitly (javac writes an i2s for an explicit (short) of a byte, none for
+  the promotion)."
+  [env a b]
+  (let [w (fn [x] (if (and (seq? x) (= 2 (count x)) (:promoted (meta x)))
+                    (let [y (second x)]
+                      ;; a promoted ?: branch that is itself a ?: was parenthesized: javac types (c ? b1 : b2) by its
+                      ;; own branches and widens it, an unparenthesized nested ?: by the outer one's (its constant
+                      ;; branch loaded as the promoted type's constant: ldc2_w -1.0 for iconst_m1; queue 556d, t03567)
+                      (if (and (seq? y) (#{"if" "if-not"} (str (head y))) (instance? arbace.lang.IObj y))
+                        (vary-meta y assoc ::paren true)
+                        y))
+                    x))]
+    [(w a) (w b)]))
+
+(defn- paren-text
+  "Branch `x`'s text at precedence `p`, in parentheses when promoted-branches marked it ::paren."
+  [env x p]
+  (if (or (::paren (meta x)) (:parens (meta x))) (str "(" (ex-text env x P-ASSIGN) ")") (ex-text env x p)))
+
 (defn- cond-text [env c a b]
-  (let [[a b] (unbox-branches env a b)]
-    (e P-COND (str (ex-text env c P-OR) " ? " (ex-text env a P-ASSIGN) " : " (ex-text env b P-COND)))))
+  (let [[a b] (unbox-branches env a b)
+        [a b] (promoted-branches env a b)]
+    (e P-COND (str (ex-text env c P-OR) " ? " (paren-text env a P-ASSIGN) " : " (paren-text env b P-COND)))))
 
 (declare pattern-text)
 
@@ -2374,7 +2435,7 @@
       (let [t (meta-tag x)
             r (cond
                 (and (nil? (namespace x)) (= (name x) (:recv env))) (e P-PRIMARY "this")
-                (= x 'super) (e P-PRIMARY "super")
+                (= x 'super) (e P-PRIMARY (super-text env x))
                 (local? env x) (e P-PRIMARY (or (:java (get (:locals env) (name x))) (ident x)))
                 (and (nil? (namespace x)) (contains? (:fields env) (name x))) (e P-PRIMARY (ident x))
                 (and (nil? (namespace x)) (contains? (:outer-recvs env) (name x))) (e P-PRIMARY "this")
@@ -2418,6 +2479,9 @@
           (= hn "not")
           (let [a (first args)]
             (cond
+              ;; ^:eager (not (= p q)): the source's boolean ^ (the user's 538-3 (a), queue 556b: ixor, not !='s branches)
+              (and (:eager (meta x)) (is? a '=) (= 3 (count a)))
+              (e P-BXOR (str (ex-text env (second a) P-BXOR) " ^ " (ex-text env (nth a 2) (inc P-BXOR))))
               (and (seq? a) (#{"==" "=" "identical?"} (str (head a))) (= 3 (count a)) (nil? (meta-tag a)))
               (let [[_ p q] a
                     un (fn [y] (if (and (is? y 'unchecked-float) (not= "double" (type-of env (second y)))) (second y) y))
@@ -2425,7 +2489,10 @@
                 (e P-EQ (str (ref-operand-text env (str (head a)) p P-EQ) " != " (ref-operand-text env (str (head a)) q (inc P-EQ)))))
               :else (e P-UNARY (unary-text "!" (ex env a)))))
           (#{"and" "or"} hn)
-          (let [[op p] (if (= hn "and") ["&&" P-AND] ["||" P-OR])]
+          (let [eager? (and (:eager (meta x)) (= 2 (count args)))
+                ;; ^:eager: the source's non-short-circuit & | on pure operands (538-3 (a), queue 556b)
+                [op p] (cond (and eager? (= hn "and")) ["&" P-BAND] eager? ["|" P-BOR]
+                             (= hn "and") ["&&" P-AND] :else ["||" P-OR])]
             (if (= 2 (count args))
               (e p (str (ex-text env (first args) p) " " op " " (ex-text env (second args) (inc p))))
               (ex env (reduce (fn [a b] (list h a b)) args))))
@@ -2914,7 +2981,7 @@
   `forms`."
   [env s init init? & [forms]]
   (let [m (meta s)]
-    (str (when (:const m) "final ") (annotations-text (:scope env) m)
+    (str (when (or (:const m) (:final m)) "final ") (annotations-text (:scope env) m)
          (local-type-text env s init forms) " " (ident s)
          (when init? (str " = " (target-text env init (some->> (tag-of s) (erase (:scope env))) (tag-of s)))) ";")))
 
@@ -3430,7 +3497,13 @@
         "do" (body-lines env (rest x) ctx)
         "let" (let-lines env x ctx)
         "letclass" (letclass-lines env x ctx)
-        "if" (let [[_ c a b] x] (if-lines env c a b ctx))
+        "if" (let [[_ c a b] x]
+               ;; a value whose branch the converter widened by the ?:'s promotion (^:promoted), or a parenthesized ?: (^:parens), is the source's ?:,
+               ;; printed as one (as if statements its branches' widenings would be written; queue 556d)
+               (if (and (#{:return :yield} ctx) (some #(and (seq? %) (or (:promoted (meta %)) (:parens (meta %)))) [a b])
+                        (expr-form? env x))
+                 (value-stmt env x ctx)
+                 (if-lines env c a b ctx)))
         "if-not" (let [[_ c a b] x] (if-lines env (list 'not c) a b ctx))
         "when" (let [[w c & body] x
                      ;; (arbace.core/when (some? x) ...) without a local named when in scope: the
@@ -3978,7 +4051,13 @@
   "An expression statement's text (an assignment written as one: x++, not ++x)."
   [env x]
   (cond
-    (is? x 'set!) (second (assign-text env (second x) (place-text env (second x)) (nth x 2) false))
+    ;; ^:compound: the source's compound assignment on a boxed place, P OP= rhs (queue 556c)
+    (and (is? x 'set!) (:compound (meta x)) (marked-compound env (second x) (nth x 2)))
+    (let [[op rhs] (marked-compound env (second x) (nth x 2))]
+      (str (place-text env (second x)) " " op "= " (ex-text env rhs P-ASSIGN)))
+    ;; ^:prefix: the source's ++x as a statement on a boxed place, whose code javac makes without x++'s old value (queue 556c)
+    (is? x 'set!) (second (binding [*prefix-stmt* (boolean (:prefix (meta x)))]
+                            (assign-text env (second x) (place-text env (second x)) (nth x 2) false)))
     (is? x 'aset) (let [[_ a & more] x
                         place (apply list 'aget a (butlast more))]
                     (second (assign-text env place (place-text env place) (last more) false)))

@@ -21756,3 +21756,240 @@ The manifest's class list (test/jrt/manifest.ae) gains ScopedValue, its Carrier 
 "false" there, their methods promoted as AtomicReference's. TestScopedValue passes, and so does the whole `bin/jrt test --package jrt`.
 
 For the train: jdk/edge.edn may need `bin/j2g-edge update` for the new hand-written classes (as train 3 recorded it afresh).
+## 2026-11-23: queue 549, javac on Arbace's doclint, file manager and command line (538-5; branch `549-java-doclint-fm`, the VM)
+
+The read cell's 49 deferred rows were all at the diagnostics level, in javac on Arbace's own Java (JCS52 (a), JCS53 (a)). The 25
+processor rows are left to the host's JD3 bytecode loader (the user's JCS51 decision of 2026-11-23).
+- **doclint** (`overlay/jdk/javac/variants/ServiceLoader.ae`). The tool's ServiceLoader is the program's. Its `stream()` read the
+  registry, so `DocLint.newDocLint` found no provider ("As built: JCS52 (a)"). The variant now replaces `stream()`: each of
+  `providers()` becomes a `Provider` whose `get()` makes a new instance (`fresh`, its own `j2g/add`: one member to each).
+- **The file manager** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/{FileManager,StandardFileManager,Main}.java`, new
+  `com/sun/tools/javac/file/ArbaceFileObject.java`):
+  - `FileManager` is a `BaseFileManager` that javac trusts (`@ClientCodeWrapper.Trusted`), so javac no longer wraps it. `Arguments`
+    therefore gives its warnings for a default platform (source.no.system.modules.path, source.no.bootclasspath).
+  - Its file objects are `PathFileObject`s, through `ArbaceFileObject`. That class sits in javac's package because
+    `inferBinaryName` and `getSibling` are package-private there. A raw diagnostic then names a file by its short name, and two
+    objects for one path are equal.
+  - Once it has javac's context its characters are decoded by `BaseFileManager.decode`, which handles `-encoding`.
+  - `-source 8`'s platform class path is now the system modules' classes.
+- **The command line** (`Main.run`):
+  - The file manager gets the task's context before `call`, as `Main.compile`'s "reinit with options" does.
+  - `-XDexpectKeys` is judged as `Main.compile` judges it.
+  - After an error in the task's preparation the counts are printed. `JavacTaskImpl.doCall` returns before `JavaCompiler.compile`,
+    whose end prints them; `Main.compile` goes on into it. "Before" is detected as no source read.
+  - `-encoding` is passed to javac's API and handled by the file manager.
+- **javac's forms.** The seven overlay files were read by `bin/repr-java read-jdk --check --no-javac` on the 538 tool (7 of 7
+  converted). The unchanged CtSymFileManager and ReleasePlatforms came out byte for byte the committed forms. SystemCompiler's
+  `javax.tools.JavaCompiler` is now qualified, because Main's new import of javac's `JavaCompiler` shares the package's namespace.
+  The package file `com/sun/tools/javac/file.ae` loads ArbaceFileObject after PathFileObject, as names.ae's topo-order does.
+  `sources.txt` and the provenance's counts were updated. The host's `bin/javac-vendor convert`/`verify` makes them afresh.
+- **The tool.** One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java`: 5 h 43 min wall, about 1 h 40 min of it
+  waiting for the lock, 27.5 GB peak. The compiled namespaces (aot-javac) were reused.
+  - The first-stage tool, tried at once, showed the refused ServiceLoader: `j2g/add` takes one member, and `fresh` had shared the
+    first one. The fix (a32b29bcf) went in 14 s before the final j2g read the variants ("3 replaced, 0 cut, 2 added"; 49,347
+    classes analyzed, no failures).
+  - The build recorded its start's key, 6e6db5f5. The key now written beside the tool is the checkout's, a3e3fd09.
+  - `bin/javac-vendor check --from`: no failures. Shared at `.tmp/shared/javac-arm64/`, replacing 538's.
+- **Exploratory probes, not evidence.** Before the build I ran the overlay's Java on Alpine's openjdk25 as a stand-in. The user
+  restricts that JDK to bootstrapping a JDK 26 build (2026-11-02), so those runs prove nothing. They were deleted, and none of
+  their numbers is used.
+- **Proofs** on the new tool, with `bin/java-check --levels diagnostics --only` over the 24 rows of the four classes and the
+  control pair t06443/t06444 (`.tmp/q549/after/`):
+  - 21 now pass: doclint 8; file manager 8 (t06452 t06697 t07420 t07442 t07462 t07478 t07536 t07622); command line 3 (t06660
+    t07527 t07621); closed world t07440, which already passed on 538's tool.
+  - t07463 is still refused (a jar on `--module-path`, JCS53 (a)). The processing tests t07545, t07546 and t07552 still crash on
+    `getUnnamedModule`.
+  - The control c00002 differs, as it must.
+  - Before: the same 26 on 538's tool (`.tmp/q549/base/`), the rows as recorded.
+- **A regression sample** on the new tool, 202 tests (every 10th diagnostics test, every 40th classes test), read, classes,
+  diagnostics and print:
+  - Read, classes and print: every test as recorded.
+  - Diagnostics: 110 as recorded and 3 of this task's rows now passing.
+  - 6 `--release N` tests fail. They fail the same way on 538's tool: this VM has no own platform cache, so no ct.sym. That is the
+    environment, not a regression; they were not recorded.
+- **Cells:** read 7,795 / 0 / 49 -> 7,815 / 0 / 29. Java completeness 0.9634 -> 0.9640. `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`: 0 problems. `bin/provenance-check` reports the same as at 538: reader b45f7ace,
+  the host's regeneration.
+
+## 2026-11-24: queue 549b (and 555), javac on Arbace's --module-path; the user's decisions 549-1 to 549-3 (branch `549b-java-module-path`, the VM)
+
+- **The user's decisions of 2026-11-24 on report 549:**
+  - 549-1 (a): the tool key rewritten to the checkout's (a3e3fd09) is accepted.
+  - 549-2 (a): Main's counts after an early error stay an emulation until JCS53 (a)'s full form, where the file manager is a
+    JavacFileManager under javac's Main.compile.
+  - 549-3 (b): --module-path goes through BaseFileManager's Locations, so a missing element warns as javac's does.
+- **549-3 (b) as built** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/Main.java`):
+  - A --module-path whose elements all do not exist is accepted. Once the file manager has javac's context, it is handed to
+    `BaseFileManager.handleOption(Option.MODULE_PATH, ...)`, as Main.compile hands a file manager its deferred options.
+  - Locations' ModulePathLocationHandler then warns `path.element.not.found` for each element (lint `path`), as javac does
+    (t07463: -Xlint:path -Werror --module-path missing.jar).
+  - A module path naming an existing file or directory stays refused (status 2): there is no jar file system and the file manager
+    serves no module path.
+  - Main.ae was read by `read-jdk --check --no-javac` on 549's tool. The other six overlay files came out byte for byte the committed
+    forms.
+- **Queue 555, folded in and stopped, not built.** The three closed-world rows (t07545 t07546 t07552) each run `-processor X` over a
+  processor class built by `@build`. With `ClassLoader.getUnnamedModule` added to jrt, they would only reach `:diag-processors`
+  (proc.processor.cant.instantiate). Their golden outputs need the processor to run, which is JCS51's work (the host's JD3 loader).
+  The jrt change would also be a runtime change, outside javac's tool build. So no row moves without processors, and the rows stay
+  in `:diag-closed-world`.
+- **549b's tool and proofs (2026-11-24).**
+  - One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` (f83f974bc): 4 h 25 min wall including the lock's
+    queue, 27.6 GB peak. Key 97f949b1, which the build recorded and which is the checkout's. `bin/javac-vendor check --from`: no
+    failures. Shared at `.tmp/shared/javac-arm64/`, replacing 549's.
+  - `bin/java-check --levels diagnostics --only` over the 24 rows of 549's four classes and the control pair: t07463 now passes,
+    the 20 of 549 still pass, t07545, t07546 and t07552 are as recorded, and c00002 differs as a control must. Recorded with
+    `--judge --partial --record`: 1 now passing, 0 regressions.
+  - A regression sample of 102 tests (every 20th diagnostics test, every 80th classes test) at read, classes, diagnostics and print:
+    every test as recorded except t07512 (`--release 15`, no ct.sym on the VM). t07512 fails the same way on 549's tool.
+  - Cells: read 7,815 / 0 / 29 -> 7,816 / 0 / 28. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+    `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 555's rows routed (DECISION 555-1 (a), the main session's)
+
+t07545, t07546 and t07552 (javac on Arbace's closed-world processing tests) go to the processor work, JCS51's annotation processors loaded
+through JD3's bytecode loader (the main host's): their golden output needs the processor to run, which getUnnamedModule alone would not
+give. Routing, not n/a: the rows stay deferred in their class until that work lands. Alternative considered: adding
+ClassLoader.getUnnamedModule to jrt here (reaches only proc.processor.cant.instantiate).
+
+## 2026-11-24: queue 556b, the user's 538-1 to 538-4 (Java print)
+
+The user answered report 538's four print DECISIONs (2026-11-24, via the main session; brief
+`tasks/556b-java-print-decisions.md`). Built on 549b-java-module-path 8bc7e8303 (538's print fixes, 549, 549b; train 4).
+- **538-1 (b): t05503 stays deferred** in `:print-type-arguments` until JFS75 (b)'s model carries type arguments. Nothing built. The
+  alternative was recording a raw `new C()` as `^:raw` (this moves the reader hash and many jdk/ forms).
+- **538-3 (a), c91403791: `& | ^` kept on pure boolean operands.**
+  - `arbace/repr/java/convert.ae`'s `logic-form` marks `^:eager`:
+    - the `(and a b)` / `(or a b)` of two pure operands;
+    - every `^`, `(not (= a b))`, whose operands are both evaluated anyway.
+  - `arbace/repr/java/print.ae` prints the marked forms as `&`, `|` and `^`, which javac compiles to iand/ior/ixor, where `&&`, `||`
+    and `!=` branch. The meaning is the unmarked form's.
+  - It moves repr/java's reader hash, so jdk/, jdk/javac, test/java/forms and the fixtures' forms need the host's regeneration
+    batch, as for 538-0.
+  - No tool build was needed: javac's tool loads the changed converter from the checkout (RT.toolSource; the shared arm64 tool,
+    key 97f949b1, run with REPR_JAVA_STALE_OK=1).
+  - The alternative was naming the difference a by-design kind (538-3 (b)).
+- **538-2 (a), 0b19a54fa: a local's slot named.** `test/java/print.ae` gains the kind "a local's slot (a switch's case-group locals
+  in one scope or in each arm's)", in `class-kinds` and in `:print-classes`' pattern.
+  - `counted-kinds`' `slots-only?` names it when two class files' code lines are equal but for their locals' slots (branch and
+    switch targets aside), in methods with a switch.
+  - Each method's slots must map as a function from the original's to the printed Java's.
+  - The alternative was printing the colon form back (538-2 (b)), a larger change on both sides.
+- **538-4 (a), 9bc4c1ffc: RP2 (a)'s compound assignment extended to an inner class's accessor.**
+  - `counted-kinds` compares the lines with the accessors' `access$N` numbered alike.
+  - The written-out side's outer instance (aload, getfield this$N), getter call and iadd/isub, against the compound side's one
+    accessor (the outer instance dup'ed), are the compound kind. So is a renumbering alone.
+  - The alternative was keeping it deferred (538-4 (b)).
+- **Proofs (run, VM):**
+  - `bin/java-check --levels read,print --only` over t03567, t05125, t06072, t05503, t03208 and t03209: t03567, t05125 and t06072
+    pass at print; t05503 fails as recorded; c00001 differs, as a control must.
+  - The kinds' controls are a probe ns over the real class files and their mutations (`.tmp/q556/tools/ctl556.ae`): a slot mapped
+    two ways, no switch, an opcode changed, imul for iadd, a field read for this$0. All are unnamed, and both real cases are named.
+    On 8bc7e8303's print.ae the two real cases are unnamed.
+  - A print regression sample of 122 tests (every 40th print test, plus 40 whose sources use boolean `& | ^`): read 122/122 as
+    recorded; print 121 pass, 1 regression.
+- **The regression, t03457 (cr6712835):** it leaves the named kinds.
+  - Its equals() now compiles to the original's ixor, so no goto differs in Tester_Class_7 any more.
+  - That class's `<init>` difference was already there at 8bc7e8303 (run on its sources): a char field's `&=` of a `|=`, an extra
+    local and dup_x1/pop. Only the set-level control-flow rule, which names a class by any differing goto or return line, had
+    covered it.
+  - Recorded as it is now, in `:print-classes-unnamed`, to triage.
+- **Records:** `--judge --partial --record` of both runs, which re-records the sample's rows; several fuzz tests now have fewer
+  differing class files. Java print, the cell, 3321/0/4 -> 3323/0/2. `bin/reap --record`, `bin/crops-score --record` and
+  `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 556b, DECISION 556b-1 (a) (the main session's): the print judge's flow rule narrowed
+
+`test/java/print.ae`'s `class-differences` named a whole class "a value's control flow" when any goto or return line differed,
+covering every other difference in it (t03457's `<init>`, report 556b's finding 1). The decision makes it count instead:
+- A differing goto or return names flow only through `counted-kinds`, when every differing instruction is a flow instruction or
+  another named kind's. Otherwise the difference is unnamed, shown by a line of no flow instruction.
+- A switch whose arms differ keeps the set-level naming: fall-through repeats arbitrary instructions.
+- The alternative was keeping the rule and t03457 alone deferred (556b-1 (b)).
+
+**Proved (run):** `.tmp/q556/flowctl.sh` calls class-differences on two real class files:
+- t06072's NonDirectSuper.class, where only flow differs, is named. It is named before and after.
+- t03457's Tester_Class_7 at 8bc7e8303, where flow differs alongside `<init>`'s extra local, is unnamed. It was named before the
+  change (the script fails on the parent and passes on the change).
+
+**The 128-test sample** (556b's 122 plus the six rows) at print against the record: 6 more leave the named kinds, all in
+`:print-classes-unnamed`, to triage:
+- t03453, t03454, t03455, t03567, and more of t03457's classes: hotspot's fuzz tests, where ?: against if moves the arms' loads,
+  stores, constants and conversions, which the counted flow kind does not admit.
+- t06039: a boxed compound assignment on a generic field, printed through a temporary.
+- t06072: its accessor hosts. `X.super.f` and `X.super.m()` in X go through access$N in the original and are direct in the printed
+  `super.f`.
+
+Recorded with `--judge --partial --record`. The whole print level's re-judge is the host's, on train 4's build: it will move more
+rows.
+
+## 2026-11-24: queue 556c, the print rows 556b-1 (a) exposed, as printer fixes (from the main session)
+
+Built on 556b-java-print-decisions 326cd1f02. Both fixes move repr/java's reader hash (the host's regeneration batch, as for
+538-0).
+- **t06072, ca0cee3fa.**
+  - `convert.ae` keeps `X.super` named in X itself as `^:qualified super`. It was plain `super`, but javac reaches `X.super`'s
+    members through access$N accessors and `super`'s directly.
+  - `print.ae` writes it `X.super` (`super-text`) and does not fold a qualified super's field into a compound assignment: the
+    source's getter and setter, against `+=`'s one accessor.
+  - `test/java/print.ae`, 538-4's accessor shape: the access$N methods' own lines are left out, since they follow their callers.
+    RP2's compound kind now covers an inner class's outer instance (aload, getfield this$N) read again against dup'ed.
+  - Controls C4 and C5 (`.tmp/q556/tools/ctl556.ae`): CurPackagePrivateTest$1 is named; the same with a field read for this$0 is
+    not. C4 fails on the parent. Plain `super.f` in X still prints as `super.f`.
+- **t06039, d615f40ca.**
+  - `convert.ae` marks two forms on a boxed place: a prefix increment used as a statement, `^:prefix` (javac's x++ keeps the old
+    value); and a compound assignment, `^:compound` (the written-out form reads the receiver twice where `P OP= rhs` keeps it in a
+    temporary).
+  - `print.ae` prints `++P` and `P OP= rhs` (`marked-compound`).
+  - The class file is now byte for byte the original's. The test's written-out boolean assignments stay written out, which is the
+    negative control.
+- **Left, the ?: family** (t03453, t03454, t03455, t03457, t03567). The pure ?:/if cases are named by the counted flow kind. What
+  stays unnamed are the numeric promotions of a ?:'s arms, which the converter writes as explicit conversions: `(short) (byte) x`
+  gives an i2s, and also l2d, f2d and l2f beside the arms' branches. Each shape is a fix of its own. Written up, not built (the
+  week's allowance).
+- **The 128-test sample** at read and print: print has 2 now passing (t06039, t06072), 4 reasons changed (fuzz rows) and 0
+  regressions; read is as recorded. Recorded with `--judge --partial --record`.
+
+## 2026-11-24: queue 556d, the ?: arms' promotion (from the main session)
+
+Built on 556c's 1e042215a.
+
+**Census** of the 128-test sample's unnamed `code:` reasons (`.tmp/q556/tools/census.ae`, `census.txt`), by class file:
+- A widening cast in a ?: arm: i2s 5, l2f/i2l 1, l2d/i2l 1, f2d/i2f 1 (7 classes, 5 tests).
+- A literal arm loaded as another constant: 3 classes (t03453 ldc float, t03457 and t03567 ldc2_w double).
+- t03457's char `&=` temporary: 1 class.
+
+**f19b5580a, the promotion shape.**
+- `convert.ae`'s `conditional` marks `^:promoted` a primitive branch that the coercion widened to the ?:'s type.
+- `print.ae` prints the branch without the cast (`promoted-branches`, in `cond-text` and `target-text`). javac writes an i2s for an
+  explicit `(short)` of a byte, and none for the promotion.
+- A returned or yielded `if` with such a branch is printed as the source's ?:, not as if statements, so its forms round-trip.
+- Explicit casts stay: t03567's `(short) (byte) 'S'` arm is printed as written. That is the negative control.
+- The change moves repr/java's reader hash, and `^:promoted` marks every mixed-type numeric ?: in jdk/ (the host's regeneration
+  batch).
+
+**The sample** at read and print: t03454 and t03455 now pass, 3 reasons changed, 0 regressions; read is as recorded. Recorded with
+`--judge --partial --record`.
+
+**Left** (written up; the week's allowance): the literal arms (t03453, t03457, t03567) and t03457's char `&=` temporary.
+
+## 2026-11-24: queue 556d, the two shapes left (from the main session)
+
+Built on 556d's ec1fc1bd8. All three commits move repr/java's reader hash (the host's regeneration batch).
+- **2a3f35d59 and 6dd9a362d, the literal arms** (t03453, t03567).
+  - The cause: the "promoted constant" was a parenthesized nested ?: that the converter's prettifier folded into a flat `cond`.
+    javac types `(c ? x : y)` by its own branches and widens it once, but types an unparenthesized nested ?: by the outer one's
+    type. So the constant branch was loaded as the outer type's constant: ldc2_w -1.0 for iconst_m1, ldc -7168.0f for sipush plus
+    a later i2f.
+  - The fix: `convert.ae`'s `conditional` marks a primitive branch that is a parenthesized ?: `^:parens`, and the prettifier keeps
+    it apart. `print.ae` parenthesizes it, as it does a `^:promoted` branch that is a ?:. A returned or yielded `if` with such a
+    branch is printed as one ?:.
+  - Proof: t03453 and t03567 pass at print. The forms round-trip (the forms step), which is the negative control: an
+    unparenthesized nested ?: stays unparenthesized, or F2 would differ.
+- **adbc2a924, the char `&=` temporary** (t03457).
+  - The cause: `convert.ae`'s local binding dropped `final` from a non-constant local. javac's Lower reads a final local again as a
+    compound assignment's receiver, and keeps any other receiver in a temporary (astore, dup_x1/pop).
+  - The fix: such a local is `^:final`, and `print.ae` writes `final` for it.
+  - Proof: t03457 passes. Its source's 29 final local declarations print as 29, and no other local is marked.
+- **The 128-test sample** at read and print: t03453, t03457 and t03567 now pass, 0 regressions, read as recorded; c00001 differs.
+  An intermediate run caught a regression in t03454 (its forms: a returned ?: printed as if statements lost the parentheses),
+  fixed by 6dd9a362d. Recorded with `--judge --partial --record`.

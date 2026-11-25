@@ -735,8 +735,10 @@
     (cond
       (= nm "class") (r (class-literal env (qtype)) (erasure (attr/type-of t :types/class-literal)))
       (= nm "this") (r (this-of env (m/tsym (qtype))) (erasure (attr/type-of t :types/this)))
+      ;; X.super in X itself: ^:qualified super, the source's qualifier, through which javac reaches the member by an
+      ;; access$N accessor (queue 556c, t06072); the same super otherwise
       (= nm "super") (r (if (identical? (m/tsym (qtype)) (current-class env))
-                          'super
+                          (m+ 'super :qualified)
                           (member (class-ref env (m/tsym (qtype))) "super"))
                         (erasure (attr/type-of t :types/this)))
       (#{"TYP" "PCK"} (m/kind sym)) (r (if (= "TYP" (m/kind sym)) (class-ref env sym) (symbol (m/sstr sym))) :type)
@@ -976,7 +978,7 @@
              (let [head (cond-> (member (class-ref env head-class) nm)
                           pin? (m+ (param-tags env m)))
                    call (apply list head afs)]
-               (if (and recv (not (identical? recv 'super))) (list 'do recv call) call))
+               (if (and recv (not (= recv 'super))) (list 'do recv call) call))
              poly?
              ;; the call site descriptor: param-tags from javac's call site types, the
              ;; result type as a tag on the call
@@ -1145,7 +1147,10 @@
       (coerce env x p))))
 
 (defn- logic-form
-  "Java's non-short-circuit boolean & | ^ over results `a` and `b`."
+  "Java's non-short-circuit boolean & | ^ over results `a` and `b`. The user's 538-3 (a) (2026-11-24, queue 556b):
+  where the operands are evaluated in place (both pure, or ^ always) the form is marked ^:eager, the source's
+  non-short-circuit operator, which javac compiles to iand/ior/ixor where && || != branch (t03567); its meaning is
+  the unmarked form's, the operands being pure (& |) or both evaluated (^)."
   [env tg a b]
   (let [both-pure (and (pure? (:f a)) (pure? (:f b)))
         build (fn [x y] (case tg
@@ -1154,7 +1159,7 @@
                           "BITXOR" (list (h env 'not) (list '= x y))))]
     (note! :form/boolean-logic)
     (if (or both-pure (= tg "BITXOR"))
-      (build (:f a) (:f b))
+      (m+ (build (:f a) (:f b)) :eager)
       (let [ta (gensym! env "a") tb (gensym! env "b")]
         (list 'let [ta (:f a) tb (:f b)] (build ta tb))))))
 
@@ -1508,7 +1513,11 @@
               (list (h env 'java-str) (:get p) (concat-operand env (tr/f t :rhs) rhs))
               (narrow-to env (binary-op env base [pa pb] (erasure result) cur rhs) (erasure result) lt))]
     (note! (keyword "op" tg))
-    (r (with-binds (:binds p) ((:set p) val)) (or (:set-t p) lt))))
+    ;; a compound assignment on a boxed place: ^:compound, javac's code for it keeps the place's receiver in a
+    ;; temporary where the written-out assignment reads it twice (queue 556c, t06039)
+    (r (with-binds (:binds p) (let [sf ((:set p) val)]
+                                (if (and (not (prim? lt)) (m/unboxed lt) (seq? sf)) (m+ sf :compound) sf)))
+       (or (:set-t p) lt))))
 
 (defn- inc-dec [env t value?]
   (let [tg (tr/tag-name t)
@@ -1536,7 +1545,11 @@
          (if (and value? post?)
          (let [old (gensym! env "old")]
            (list 'let (into (vec (:binds p)) [old g]) setf old))
-         (with-binds (:binds p) setf)))
+         ;; ++x as a statement on a boxed place: ^:prefix, javac's code for it keeps no old value as x++'s
+         ;; does (queue 556c, t06039)
+         (with-binds (:binds p) (if (and (not value?) (not post?) (not (prim? lt)) (seq? setf))
+                                  (m+ setf :prefix)
+                                  setf))))
        (if (and value? (not post?) (:set-t p)) (:set-t p) lt))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -1758,7 +1771,15 @@
         branch (fn [x]
                  (if (and (prim? target) (= :lit-int (:t x)) (#{"INT"} (tag-name target)))
                    (:f x)
-                   (let [f (coerce env x target true)]
+                   (let [f (coerce env x target true)
+                         ;; a primitive branch widened to the ?:'s type by its binary numeric promotion: ^:promoted,
+                         ;; Java's implicit widening, printed without the cast (javac writes an i2s for an explicit
+                         ;; (short) of a byte, none for the promotion; queue 556d)
+                         f (if (and (prim? target) (m/type? (:t x)) (prim? (:t x)) (not (same? (:t x) target))
+                                    (seq? f) (= 2 (count f)) (identical? (second f) (:f x))
+                                    (#{"short" "int" "long" "float" "double"} (str (first f))))
+                             (m+ f :promoted)
+                             f)]
                      ;; reference branches of other types than the whole: hint to it
                      (if (and (not (prim? target)) (identical? f (:f x)) (m/type? (:t x))
                               (not (same? (:t x) target)))
@@ -1766,7 +1787,15 @@
                        f))))]
     (note! :form/if)
     (cond-> (r (if c
-                 (list 'if c (branch a) (branch b))
+                 (let [;; a primitive ?: branch that is a parenthesized ?:: ^:parens, kept apart by the prettifier and
+                       ;; printed in parentheses (javac types (c ? x : y) by its own branches, an unparenthesized nested
+                       ;; ?: by the outer one's: t03453's i2f after the branches against a float constant; queue 556d)
+                       pb (fn [part f]
+                            (let [pt (tr/f t part)]
+                              (if (and (prim? target) (tr/is? pt :PARENS) (tr/is? (tr/skip-parens pt) :CONDEXPR) (seq? f))
+                                (if (some #{:promoted} (f/items f)) f (m+ f :parens))
+                                f)))]
+                   (list 'if c (pb :truepart (branch a)) (pb :falsepart (branch b))))
                  (cond-form env (tr/f t :cond) (fn [e] (branch (ex e (tr/f t :truepart)))) (fn [e] (branch (ex e (tr/f t :falsepart))))))
                (if (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))
       (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) (assoc :vals (concat (:vals a) (:vals b))))))
@@ -2107,7 +2136,10 @@
                  (if (prim? decl) (m/prim-sym decl) (type-form env (erasure decl)))))
         sf (apply m+ s (concat (when (and mut? (not const?)) [:mutable])
                                (when const? [:const])
-                               (when (m/has-flag? sym d/FINAL) (when-not const? nil))
+                               ;; a declared final local not constant: ^:final (javac's Lower reads a final local
+                               ;; again where it keeps another receiver of a compound assignment in a temporary:
+                               ;; t03457's var_122.var_92 &= ...; queue 556d)
+                               (when (and (m/has-flag? sym d/FINAL) (not const?) (not mut?)) [:final])
                                (annotation-items env (tr/f (tr/f d :mods) :annotations))
                                (when tg [[:tag tg]])))]
     (note! (if mut? :form/mutable-local :form/local))
@@ -3560,6 +3592,8 @@
             (if (and (seq? c) (= 'nil? (first c)) (= 2 (count c)))
               (keep-meta y (apply list (sh 'when) (list (sh 'some?) (second c)) (splice b)))
               (keep-meta y (apply list (sh 'when-not) c (splice b))))
+            (and (some #{:parens} (f/items b)))
+            y
             (or (and (if-head? b 'if) (= 4 (count b))) (if-head? b 'cond)
                 (and (if-head? b 'when) (= 3 (count b))))
             (let [tail (cond
