@@ -8106,6 +8106,7 @@ patterns more; test_capi's 51 `_testinternalcapi` rows out of `:capi-port`'s lis
 n/a) -> 40,552 / 1,398 / 1,585 (4,789 n/a). Refresh the list with the record: `python3 -I test/python/cpython_marked.py`
 (`--check test/python/cpython-marked.txt` compares). Left as decided: `:refcount-moment` (G) after 222 (b), and the rest of
 `:finalization-cycle` by design.
+
 ## As built: 536, the largest deferred classes of the eval level (2026-11-23, the Mac VM, queue 536)
 
 The deferred classes of `test/python/divergences.edn` by rows on next fa635f636's record (`bin/pyi divergences --table`), less those

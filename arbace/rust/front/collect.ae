@@ -302,7 +302,7 @@
     (case (:kind it)
       :fn (let [id (add-def! {:parent parent :data [:value nm] :kind "Fn" :node it :ident-span isp})]
             (collect-opaques! id it)
-            (walk-body! (:body it) id))
+            (when-not (:foreign it) (walk-body! (:body it) id)))
       (:struct :union)
       (let [id (add-def! {:parent parent :data [:type nm] :kind (if (= :struct (:kind it)) "Struct" "Union") :node it :ident-span isp})]
         (when-let [ck (and (= :struct (:kind it)) (ctor-kind (:data it)))]
@@ -326,8 +326,9 @@
       :const (let [id (add-def! {:parent parent :data [:value nm] :kind "Const { is_type_const: false }" :node it :ident-span isp})]
                (walk-body! (:expr it) id))
       :static (let [id (add-def! {:parent parent :data [:value nm] :node it :ident-span isp
-                                  :kind (str "Static { safety: Safe, mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
-                (walk-body! (:expr it) id))
+                                  ;; queue 542: a foreign static's safety its block's (unsafe unless marked `safe`)
+                                  :kind (str "Static { safety: " (if (= :unsafe (:safety it)) "Unsafe" "Safe") ", mutability: " (if (:mutbl it) "Mut" "Not") ", nested: false }")})]
+                (when (:expr it) (walk-body! (:expr it) id)))
       :ty-alias (add-def! {:parent parent :data [:type nm] :kind "TyAlias" :node it :ident-span isp})
       :foreign-ty (add-def! {:parent parent :data [:type nm] :kind "ForeignTy" :node it :ident-span isp})
       :mod (let [id (add-def! {:parent parent :data [:type nm] :kind "Mod" :node it :ident-span isp :module true})]
@@ -346,6 +347,9 @@
               (cond
                 (map? x) (let [expn (or expn (when (or (= :foreign (:span x)) (:expansion x)) (or (:hir-id x) [0 0])))]
                            (cond (and (= :expr (:node x)) (= :closure (:kind x))) (.add acc [:closure x expn])
+                                 ;; queue 542: an inline const (`const { .. }`): a definition of its own (DefKind::InlineConst,
+                                 ;; `{constant#N}`), its closures its children (thread_local!'s `NOISY::{constant#0}::{closure#0}`)
+                                 (and (= :expr (:node x)) (= :const-block (:kind x))) (.add acc [:const-block x expn])
                                  (and (= :stmt (:node x)) (= :item (:kind x))) (.add acc [:item (:item x) expn])
                                  (= :item (:node x)) (.add acc [:item x expn])
                                  :else (doseq [v (vals x)] (walk v expn))))
@@ -361,6 +365,8 @@
       :closure (let [id (add-def! {:parent parent :data [:closure] :kind "Closure" :node n})]
                  (walk-body! (:params n) id)
                  (walk-body! (:body n) id))
+      :const-block (let [id (add-def! {:parent parent :data [:anon] :kind "InlineConst" :node n})]
+                     (walk-body! (:expr n) id))
       :item (collect-item! parent n))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -456,6 +462,7 @@
           (str/starts-with? (str k) "Ctor") (:parent d)
           (= "Field" k) (:parent d)
           (= "Closure" k) (:parent d)
+          (= "InlineConst" k) (:parent d)
           (= "OpaqueTy" k) (:parent d)
           :else nil)))
 
@@ -610,6 +617,7 @@
 (def ^:dynamic *elided* :erased) ; what an elided lifetime is: :anon (a signature), :static (a const's type), :erased
 (def ^:dynamic *module* 0)       ; the module whose items an unresolved name is looked up in
 (def ^:dynamic *body* nil)       ; RIND5: the function whose body is being checked (its block items are in scope there)
+(def ^:dynamic *closure-hirs* ()) ; queue 542: the HIR ids of the closures typeck is inside, innermost first (their block items in scope)
 
 (defn- scope-param [nm]
   (some (fn [g] (some #(when (and (= nm (:name %)) (not= :lifetime (:kind %))) %) (all-params g))) *scope*))
@@ -776,6 +784,18 @@
   [n]
   (or (some? (:self n)) (= "self" (:name (:pat (first (:params n)))))))
 
+(defn- closure-item
+  "queue 542: the item named NM a closure typeck is inside defines in its body (*closure-hirs*, innermost first), else nil"
+  [nm]
+  (when-let [h (first *closure-hirs*)]
+    (when-let [cl (some #(when (and (= "Closure" (:kind %)) (= h (:hir-id (:node %)))) %) @*defs*)]
+      ;; the closure, then its owners up to the module (an inline const, the const or fn whose body holds it: thread_local!'s
+      ;; `fn __rust_std_internal_init_fn` in NOISY's initializer block)
+      (loop [o cl]
+        (when (and o (not (:module o)) (not= :crate (first (:data o))))
+          (or (some #(when (and (= (:id o) (:parent %)) (#{[:type nm] [:value nm]} (:data %)) (not (#{"Closure" "InlineConst"} (:kind %)))) (:id %)) @*defs*)
+              (recur (def-of (:parent o)))))))))
+
 (defn res-def
   "A path's resolution as [:local ID KIND] [:ext PATH KIND] [:prim N] [:param P] [:self-alias] [:self-param] or nil"
   [path]
@@ -823,6 +843,9 @@
               (let [nm (:ident (first segs))]
                 (cond (= "Self" nm) (if (and *self-ty* (not= *self-ty* [:param 0 "Self"])) [:self-alias] [:self-param])
                       (scope-param nm) [:param (scope-param nm)]
+                      ;; queue 542: an item of an enclosing closure's body (thread_local!'s `static __RUST_STD_INTERNAL_VAL`
+                      ;; in its closure, named from the same expansion: no resolution by span), innermost first
+                      (closure-item nm) (let [id (closure-item nm)] [:local id (:kind (def-of id))])
                       (lookup-name nm (or *body* *module*) true) (let [r (lookup-name nm (or *body* *module*) true)]
                                                        (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
                       (get prim-tys nm) [:prim nm]
@@ -834,6 +857,17 @@
                                (resolve-written names *module*))]
                 (if (= :local (first r)) [:local (second r) (:kind (def-of (second r)))] [:ext (second r) (ext-kind (second r))]))
               :else nil))
+      ;; queue 542 (round 10): a path the resolver left an error (a dependency's pass: libc's unix/mod.rs `crate::pthread_mutex_t`,
+      ;; `crate::tms`, `addrinfo`, named through the root's and unix's globs of other files' macro-made `s! {}` structs, which the
+      ;; resolver's view of the module lacks): by its written path through the module's names, as an expansion's path
+      err (let [names (mapv :ident (:segs path))
+                r2 (try (if (= 1 (count names))
+                          (when-not (or (:lang path) (scope-param (first names))) (lookup-name (first names) (or *body* *module*) true))
+                          (resolve-written names *module*))
+                        (catch Throwable _ nil))]
+            (cond (= :local (first r2)) [:local (second r2) (:kind (def-of (second r2)))]
+                  (and (= :ext (first r2)) (string? (second r2))) [:ext (second r2) (ext-kind (second r2))]
+                  :else [:unresolved (str r)]))
       [:unresolved (str r)])))
 
 (defn- elided-default [] (elided-region))
@@ -921,9 +955,14 @@
                  (if (= "MAX" (str (:ident (second segs)))) (dec m) (if signed? (- m) 0N)))))
           (when (< (long *const-depth*) 16)
             (when-let [r (try (res-def (:path x)) (catch Throwable _ nil))]
-              (when (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
-                (binding [*const-depth* (inc (long *const-depth*))]
-                  (some-> (:expr (:node (def-of (second r)))) eval-int-expr))))))
+              (cond (and (= :local (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
+                    (binding [*const-depth* (inc (long *const-depth*))]
+                      (some-> (:expr (:node (def-of (second r)))) eval-int-expr))
+                    ;; queue 542 (round 10): a constant of another module file of a dependency's pass (libc's
+                    ;; `crate::__SIZEOF_PTHREAD_MUTEX_T`, b64/mod.rs's `40`, in linux/mod.rs's `pthread_mutex_t`): the integer
+                    ;; value the pass's earlier round wrote in the interface's facts
+                    (and (= :ext (first r)) (re-matches #"Const( \{.*\})?" (str (nth r 2))))
+                    (let [v (:value (get (:consts *si*) (second r)))] (when (integer? v) (bigint v)))))))
     nil))
 
 (defn const-int-value
@@ -1467,6 +1506,7 @@
       :impl (str "{impl#" (:disamb d) "}")
       :closure (str "{closure#" (:disamb d) "}")
       :opaque (str "{opaque#" (:disamb d) "}")
+      :anon (str "{constant#" (:disamb d) "}")   ; queue 542: an inline const's definition
       :ctor ""
       "")))
 
@@ -1807,7 +1847,9 @@
           {:inputs inputs
            :output (if (:output f) (binding [*elided* (or fixed :anon)] (lower-ty (:output f))) unit)
            :safety (:safety (:header f))
-           :abi (:abi (:header f))})))))
+           :abi (:abi (:header f))
+           ;; queue 542: a foreign function's `...` (C-variadic: its calls take more arguments than its inputs)
+           :variadic (boolean (:variadic f))})))))
 
 (defn ext-ctor-sig
   "A std constructor's signature: its variant's fields to its ADT at the ADT's identity arguments"
@@ -1848,7 +1890,8 @@
                 (if m
                   (early-regions
                   {:inputs (mapv sty->ty (:inputs m)) :output (sty->ty (:output m))
-                   :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))}
+                   :safety (when (= "Unsafe" (:safety m)) :unsafe) :abi (when-not (= "Rust" (:abi m)) (str/replace (str (:abi m)) "\"" ""))
+                   :variadic (boolean (:variadic m))}
                   d)
                   (or (get *native-sigs* d) {:inputs [] :output [:err (str "no sig " d)]})))))
 

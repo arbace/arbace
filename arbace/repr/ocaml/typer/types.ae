@@ -40,10 +40,15 @@
 (def unit-stamp (atom unit-stamp-base))
 (defmacro with-unit-stamps
   "body with identifiers stamped in the units' range (the units' interfaces outlive a program's stamps)"
+  ;; (queue 546b) nested (a unit's interface read while another's is: c.mli's inherited class from b's .cmi), the stamps go on from
+  ;; the outer's counter: restarting at unit-stamp, which the outer has not advanced yet, stamped two units' identifiers alike (a
+  ;; class's object abbreviation `fold` found b's type `T.fold`)
   [& body]
-  `(let [saved# @stamp]
-     (reset! stamp @unit-stamp)
-     (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#)))))
+  `(if (>= @stamp unit-stamp-base)
+     (do ~@body)
+     (let [saved# @stamp]
+       (reset! stamp @unit-stamp)
+       (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#))))))
 (defn ident-create [name] {:name name :stamp (swap! stamp inc)})
 (defn ident-rename [id] (ident-create (:name id)))
 (defn ident-global [name] {:name name :stamp 0 :global true})
@@ -659,6 +664,9 @@
 ;; erased first: each type whose path names id expanded in place (try_expand_safe, the node linked to its expansion) with id
 ;; bound to a module of the package's type, its constraints manifest (bind-functor-param, set by the env namespace); one
 ;; that does not expand cannot escape (the unification fails)
+(def package-subtype
+  "(fn [p1 constraints1 p2 constraints2]): Typemod's package_subtype, true when the first package's module type is included in the
+  second's (set by the typemod namespace)" (atom nil))
 (def bind-functor-param "(fn [id pack-path constraints f]): f called with id bound to a module of the package's type, then id's entry restored" (atom nil))
 
 (declare unify-error)
@@ -753,6 +761,13 @@
           (and (= :Tpackage (d1 0) (d2 0)) (= (map first (d1 2)) (map first (d2 2)))
                (or (= (d1 1) (d2 1)) (= (*normalize-modtype-path* (d1 1)) (*normalize-modtype-path* (d2 1)))))
           (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
+          ;; (queue 547) Ctype.unify_package otherwise: the constraints unified, then each package's module type included in the
+          ;; other's (!package_subtype, Typemod's: two module types alike under different paths, base's Hashtbl_intf.Key.S and
+          ;; Hashable_intf.Key)
+          (and (= :Tpackage (d1 0) (d2 0)) (= (map first (d1 2)) (map first (d2 2))) @package-subtype)
+          (do (unify-list (mapv second (d1 2)) (mapv second (d2 2)))
+              (when-not (and (@package-subtype (d1 1) (d1 2) (d2 1) (d2 2)) (@package-subtype (d2 1) (d2 2) (d1 1) (d1 2)))
+                (unify-error t1 t2)))
           ;; Ctype.unify3's Tfunctor pair: the labels and packages equal, the results with the second's parameter
           ;; renamed to the first's
           (and (= :Tfunctor (d1 0) (d2 0)) (= (d1 1) (d2 1)) (= (map first (d1 4)) (map first (d2 4)))
@@ -787,10 +802,15 @@
           (unify-list (mapv second (d1 1)) (mapv second (d2 1)))
           ;; Ctype.unify3: the first type linked to the second before their rows are unified (so that a recursive
           ;; type's unification ends), its description restored on failure
-          (= :Tvariant (d1 0) (d2 0)) (let [saved @t1]
-                                        (link! t1 t2)
-                                        (try (unify-row (d1 1) (d2 1))
-                                             (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))
+          (= :Tvariant (d1 0) (d2 0)) (let [go #(let [saved @t1]
+                                                  (link! t1 t2)
+                                                  (try (unify-row (d1 1) (d2 1))
+                                                       (catch arbace.lang.ExceptionInfo e (reset! t1 saved) (throw e))))]
+                                        ;; (queue 547) in pattern mode (a GADT equation possible) a failure backtracked, then the
+                                        ;; pattern's equation (Ctype.unify3's snapshot, reify, mcomp and record_equation)
+                                        (if *gadt-equation*
+                                          (when-not (try-unify (go)) (unify-error t1 t2))
+                                          (go)))
           (= :Tfield (d1 0) (d2 0)) (unify-fields t1 t2)
           ;; Ctype.unify's polytypes: their universal variables paired (as fresh variables shared by both bodies)
           (and (= :Tpoly (d1 0) (d2 0)) (= (count (d1 2)) (count (d2 2))))

@@ -6153,3 +6153,24 @@ DECISION C3X-1: std's units' upstream generic instances (share-generics), 21 of 
 - (c) read each crate's exported generic symbols from the pinned rlibs' rmeta (exported_symbols), as std-crates-rsi.edn was read before
       C6-2 (b): about a day, exact, but a record of rustc's build (C6 stays rustc's unless counted as the build's description)
 ```
+
+## As built: C3X-1 (b), std without shared generics (2026-11-23, branch `rust-indep-1123`; WIP)
+
+The user's decision of 2026-11-23: (b). `test/rust/runtime/std.edn`'s RUSTFLAGS take `-Zshare-generics=no`; std's IR re-pinned (120
+units, 56 MB; the clang pin the host's 23.1.6, which gives the old flags' 110 units byte for byte); the StableCrateIds unchanged (the
+native Cargo metadata hash still equal, 31 of 31 units), the SVHs and rlib names moved (`std-crates-rsi.edn`); the samples' and the
+synthetic corpus's IR packs re-made (x.ll moved, shim.ll not); rust-front-rsi's members byte for byte the old (its keys moved). C6's
+lib-unit compare against the new IR, the units of rust-c3x: **std 116 of 325 equal** (101), 10 differ (25: the share-generics' 21 gone
+but for alloc's to_uppercase), 199 refused; alloc 21 of 25; core not compared again. Left: the lowered std at the new pin, the six cases
+built again on the own path (C1 with C4's native interface and names), the eval, synthetic and AOT records; the UI pack where its
+sources are (JOURNAL 2026-11-23, rust-indep-1123).
+
+## As built: C6's L1, round 11 (2026-11-24, branch `rust-l1-1124`, WIP)
+
+The constants left by round 10 evaluated by CTFE with their pointers (`eval-const-whole` in build_run: a constant an allocation
+read in place, its nested allocations the body's data); a non-generic item's inline consts exported as bodies of their own
+(`ITEM::{constant#N}`); statics' padding undef (an init mask through variant-bytes to codegen's runs); v0 of `extern "C"` fn
+pointers; fn pointer to integer casts; `extern "C"` pair returns as `{ i64, i64 }` (PassMode::Cast); libc's pointer constants from
+source; export opaque types with their hidden types (`:opaques`, untested). std 180 / 39 / 106 -> 180 / 44 / 101 at the first half
+(b1), then env_read_lock and Path::components equal in targeted runs; no full run at the head. Left of L1: the doc/JOURNAL.md entry of
+2026-11-24 and the worktree's `.tmp/NEXT.md`.

@@ -4860,3 +4860,278 @@ on `oc-compiled-1122`) and the light level's whole re-records after 533 and 528-
   libraries are `@UNIT`s (`c2_tool_units` over `D/dynmains.txt`: ocamldoc's compiler-libs, unix, str, dynlink).
 - **The suite's compiled level takes C stubs** (opam/base64/test, opam/fmt/test_fmt: queue 531's `@cstubs`): their node program and a
   shard with the C API's main, as the run corpus's (OC215 (a)).
+## As built: queue 544 (2026-11-23, the VM): the embedded oi, Lambda interpreted by the runtime itself (the toplevel's AOT, first steps)
+
+The user's decision (a) of 2026-11-23: the toplevel at the AOT level is the toplevel compiled, oi embedded in it, each phrase's Lambda
+loaded as a plugin at run time. Built here: the embedded oi and its loading at both AOT levels. Not reached: the three toplevel rows at the
+compiled level, whose program does not build on the VM (below, DECISION 544-1).
+
+- **The embedded oi** (`jdk/ocaml/ocaml/rt/Oi.ae` with `OiSym`, `OiList`, `ONode`, `OiCtx`, `OiExit`, `OiTail`, `OiFn`): an interpreter
+  of oi's Lambda forms (the text `caml_oi_dynlink_parse` is given: tools/ocdump's Lambda, topeval.ml's printer) written in the runtime's
+  own Java forms, over the runtime's values, so that a phrase's functions are closures the translated code calls (`OiFn`, a `Closure`),
+  its globals the program's module blocks (`ExtCore/unitG`, the loader's "global") and its primitives and externals the runtime methods o2j
+  calls for the same names (o2j's prim-value read as ops). A reader (lists, vectors, maps, strings, keywords, integers), a compiler to nodes
+  (each variable a slot of its function's frame, a closure's free variables copied when it is made, a letrec's closures set after they are
+  made) and an evaluator: static exits as `OiExit`, trywith as o2j's (depth and backtrace stack restored), tail calls of interpreted
+  functions in constant stack (`OiTail`, Oi/call's loop). `Oi/parse` gives the loader's entry [NAME DEPS REFS INIT nil] (o2j's plugin-deps),
+  INIT a Runnable; setglobal stores the unit's block in `Oi/units` (`Oi/global`, which the loaders' "global" answers; `Main/reset` clears it).
+  Not interpreted: tupled functions (as o2j), the debugging events (dropped), o2j's static blocks (an immutable block of constants is made
+  at each evaluation, as ocamlc's code makes it). go/arbace/oi itself is not embedded: its values are not the runtime's, and a phrase links
+  against the program's globals.
+- **The externals.** The runtime has no reflection at the compiled level, so the program's main class carries the table
+  (`arbace.o2j/oi-ext-methods`: `extIndex`, a name's index and arity, `extCall`, the call by index, over the runtime's externals), reached by
+  the loader's verbs "ext-index" and "ext-call"; an external not there is the C API's (`CApi/call`), as in a translated unit.
+- **The compiled level** (`arbace.o2j`'s registry-methods): a plugin's text the registry lacks is `Oi/parse`'s (it was a Failure), "global"
+  falls back to `Oi/global`, and the loader is set for a program that links Dynlink or one of whose own units calls `caml_oi_dynlink_parse`
+  (`calls-oi-loader?`: topeval.ml, a driver of plugins).
+- **The light level** (`test/ocaml/o2j/run.ae`): `O2J_PLUGIN_INTERP=1` has the runner interpret plugins in place of translating them (the
+  externals' table `ocaml.u.OiExts`, `oi-ext-class`, defined at the first use); the checks keep the translation.
+- **The runtime**: `caml_sys_modify_argv` (ExtSys, oi's since queue 529; the executable's name kept), used by the toplevel's
+  override_sys_argv before a script.
+
+**Proofs (run, the VM, arm64).** A driver (`oiplug.ml`: each argument a Lambda unit's text, parsed, linked and initialised through the
+dynlink externals) at the light level loads a coverage unit (closures, letrec, exceptions, switches, string switches, loops, records,
+float arrays, boxed integers, lazy, polymorphic variants, or-patterns, functors, objects with inheritance, Hashtbl, labels, Format) by the
+embedded oi and by o2j's translation: both print what the host's OCaml 5.5 prints. 41 testsuite programs of basic/ and basic-more/ typed
+by the native typer and loaded as plugins by the embedded oi: 36 pass by their .reference; 3 name units the driver does not link (Link
+errors, the same by translation), safer_matching needs its -safer-matching flag (the same output by translation), tailcalls is correct and
+slow (its 10^7-step loops interpreted). The same driver built at the compiled level (o2j cprogs over clib, j2g 633 s and 5.4 GiB, Go's build
+587 s and 5.1 GiB; no class of the runtime refused): the coverage unit as the host's OCaml, the 41 programs as at the light level, each
+output equal to the light level's (tailcalls past 120 s).
+
+**The compiled toplevel (DECISION 544-1).** With header.awk's toplevel modes at aot=2 and bin/oi's compiled level taking a tool row's
+units (a patch kept out of the branch, so that bin/oi and its native_key stay as they are), the three rows' shard (each program the
+standard library, Unix, Str, compiler-libs' 131 units, the toplevel and ocamltex or main.ml: 68 MB of Java forms) translated by j2g in
+4,548 s at 16.7 GB; the Go package `arbace/lang` it makes (259 MB of Go, every class) took Go's compile past 36 GB in 38 minutes, still
+growing, and was stopped (the host's other jobs). The rows keep their class at both AOT levels.
+
+## As built: queue 544b (2026-11-23, the VM): the compiled level's large shards in Go packages of their own (DECISION 544-1 (a))
+
+- **The split** (arbace.o2j's shard verb: `split?`, `split-packages`): a shard whose library units' forms (OUT/ocaml/u) pass
+  `O2J_SPLIT_BYTES` (default 24 MB; compiler-libs' shard 62 MB, a standard-library shard about 9 MB) gets a `packages.edn`, the input's
+  top-level class -> Go package that j2g already reads (`arbace.j2g.names/compiled-packages`, the compiled namespaces' since S6): the
+  runtime's classes (ocaml/rt) the package `ocaml_rt`, each library unit's class `M_<Unit>` a package of its own, `ou_<Unit>`, each
+  program's classes (ocaml/p<N>) `ocaml_p<N>`; the dispatcher `ocaml.u.Shard`, j2g's entry, stays in `lang`. A unit names only the units
+  linked before it and the runtime, a program its units and the libraries', the dispatcher the programs: no import cycle. `O2J_SPLIT=1`
+  always splits, `0` never. j2g is unchanged, and so is every shard under the threshold.
+- **Why by unit, not by library**: compiler-libs as one package would hold about 150 of the 253 MB of Go the unsplit shard's `lang` had
+  (Go's compile of that one passed 36 GB, queue 544); by unit the largest package is Parser's, 19 MB.
+- **Determinism**: the map is sorted (`sorted-map`), its text the same at each run (the test); j2g's output tree over the split driver's
+  forms at `J2G_JOBS` 2 and 4 is byte for byte the same (6,005 files; `report.edn`'s times alone differ).
+- **Proofs** (run): the plugin driver of queue 544 split (`O2J_SPLIT=1`): j2g 1,024 s at 5.5 GiB, Go's build 510 s at 4.3 GiB (unsplit: 633 s,
+  587 s); the coverage unit as the host's OCaml, the 40 sample programs' outputs equal to the unsplit build's.
+
+## As built: ocaml-eval (2026-11-24, branch `ocaml-eval-1124`, from mac/next `7de5de3ec`): the eval cell's speed and gc rows
+
+oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferred: `:speed` 5, `:gc-and-memory` 2, `:dynlink-decided` 1.
+- **weak-ephe-final/ephetest** (test6, a key reachable only from its own ephemeron's data): the asked collections get a second phase
+  (`ext_sys.ae`'s `ephKeyed`): one Go collection with each live ephemeron's data held by its block keys alone (a box in `ephLinks`, a
+  slot of the key's fields' array past its length: the block's size and fields stay OCaml's), the ephemeron only a weak pointer to it;
+  then the data back in the ephemerons that live, gone with a key that died. The first phase (the data in the ephemeron) collects an
+  ephemeron reachable only from its data (test7), the second a key reachable only from its data; together OCaml's rule (the data lives
+  while the ephemeron and its keys do), repeated while a phase drops a data. A key that is not a block (a string, a closure) keeps the data
+  in the ephemeron in both phases. With it, `Gc.finalise_last` is a Go cleanup (`runtime.AddCleanup`, the entry its argument) instead of a
+  Go finaliser: a finaliser keeps what its value reaches, so a cycle of finalisable values (test6's key and data) was never collected; a
+  cleanup keeps nothing, and runs after the value's `first` finalisers (Go's rule for an object with both), as finalise.c updates the
+  `last` table after the `first` one. finCollect waits for a sentinel cleanup too. Passes.
+- **weak-ephe-final/weak_array_par** (4 domains, 4,000,000 Weak.get/set over a table of 10,000): `ephClean` returns at once for a weak
+  array or an ephemeron without data (nothing to drop; a collected key reads as unset through its dead flag): each Weak.get scanned the
+  10,000 keys. 41 s, passes; out of `oi-slow.edn`.
+- **lib-bigarray/subarraystub** (41,000 calls of a C stub copying a 2,046 x 44 int16 sub-array, a Gc.minor each): the C API on ci
+  (`go/arbace/oicapi`): a bigarray's elements cross in one slice of ci's memory per call (no lookup per element), an integer element
+  read back equal to the value's is left alone and a 16-bit one comes from a table boxed once (`boxedInt`), a copy the C did not change
+  is not read back (its bytes as written kept, `baSnap`), the big blocks' mappings reused across calls (`bigFree`), musl's memcpy,
+  memmove and memset native on ci's memory (their C, interpreted, was most of the stub), and a bigarray the C allocated with memory of
+  its own (`CAML_BA_MANAGED`, caml_ba_alloc's calloc) has that memory freed when the call ends unless a root keeps the block (the copy
+  dies with the boundary's memory, as bigarray.c's finalizer frees it; the C heap had grown past 1.5 GB and Go's collector ran without
+  pause at the memory limit). Over 900 s before, 65 s now (CPU 73 s); passes, out of `oi-slow.edn`.
+- **Left in `:speed`** (measured on this host, alone, OI_TIMEOUT 1800, CPU seconds against the check's 120): ast-invariants/test 216 s
+  (pass), parallel/fib_threads 744 s (pass: fib 42 in four domains, about 1.7 billion interpreted calls), opam/uutf/test_uutf
+  1,390 s (pass). Their profile is the interpreter's own: frames and argument slices allocated per call (`newFrame` and `makeslice` about 40 %
+  of ast-invariants' CPU) and Go's marking; a frame pool would give about 1.5x, not the 1.8x ast-invariants needs nor fib_threads' 6x.
+- **Left in `:gc-and-memory`**: weak-ephe-final/ephetest3, whose keys are Int64 values hash-consed in a weak set: oi's boxed integers are
+  Go values in an interface (no identity of their own; Go's static array for 0-255 and its tiny allocator for the rest), so their weak
+  keys are never emptied. The user's question (the report): n/a (`==` on immutable values is implementation-defined, Repr.phys_equal's
+  documentation) or boxed integers with an identity in oi (a representation change).
+- Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
+  changed but ephetest's row; `bin/oi test`.
+## As built: queue 544c (2026-11-24, the VM): a split shard's program units each a Go package of their own
+
+- **The fault** (the host's ocamldoc shard, 2026-11-24): with 544b's split a program's units shared one Go package, `ocaml_p<N>`, so
+  unit Odoc_class's class `M_Odoc_class` met j2g's member of unit Odoc's class, its class object `M_Odoc_class` (j2g_classes.go):
+  `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21). Within a library unit's package `ou_<Unit>` no such
+  name can meet another: a unit's member classes are `M_<Unit>$F<n>`, j2g's members `_class`, `_New`, `_Init` and the like.
+- **The fix** (arbace.o2j's split-packages): a program's own unit is a package of its own, `ocaml_p<N>_u_<Unit>`, a plugin
+  `ocaml_p<N>_d_<Unit>`, the main class alone in `ocaml_p<N>`. A unit names only units linked before it, a plugin the program's
+  units, the main class all of them: still no import cycle; the map still sorted.
+- **Proofs** (run): a reproducer program (units Odoc, Odoc_class, Repro): before the fix j2g reports the collision in `ocaml_p1`; after it 0
+  collisions, j2g 980 s at 5.2 GiB, Go's build 760 s at 8.4 GiB, and the program prints `odoc/odoc_class: 63` (Odoc.twice (fun x -> x * 3) 7).
+  The naming test fails on the parent and passes here; the split test (its program unit's package now `ocaml_p1_u_Oiplug`) passes.
+- **The three toplevel rows at the compiled level** (`bin/oi check --aot --level compiled --only-list` under `bin/heavy-lock`, the tree
+  of origin/next 440cf0273 with the fix): their shard split (169 unit packages, the programs' units by unit), j2g 3,437 s at 16.2 GB, Go's
+  build 1,602 s at 8.3 GB (the largest package Parser's, 19 MB of Go; unsplit, queue 544, Go's compile of one package passed 36 GB);
+  tool-caml-tex/ellipses, tool-caml-tex/redirections and self-contained-toplevel/main pass by their own .reference, "same" against oi.
+  Recorded into check-aot-compiled-native.edn (record-only of the run's rows), out of divergences-aot-compiled.edn's `:ocamltest-tools`;
+  the controls `_control/ocamltex-ellipses-vs-redirections` and `_control/toplevel-main-vs-redirections` at this level differ, as they
+  must. The compiled level is in no REAP cell: OCaml's cells do not move.
+- **The user's decisions (2026-11-24)**: ephetest3 n/a (`:na-boxed-identity`: a boxed integer's identity is unspecified); the three speed
+  rows under their own CPU limits, `test/ocaml/oi-cpu-caps.tsv` (1.5 times their CPU measured alone: ast-invariants/test 320 s,
+  parallel/fib_threads 1140 s, opam/uutf/test_uutf 2020 s), read by oi_one and suite_oi_one (the larger of OI_TIMEOUT and the cap), in
+  oi_key; the rows judged by their own verdicts and recorded passing. Left deferred: lib-dynlink-bytecode/main (`:dynlink-decided`).
+## As built: ppxlib's bootstrap (queues 546, 546b, 2026-11-23/24, the VM): T1 of DECISION 539b-1, the metaquot driver on oi
+
+DECISION 539b-1 (the user, 2026-11-23): ppxlib, then ppx_expect, then ppx_jane, in that order. T1, ppxlib 0.39.0's own build, is
+done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 (ppx_expect with base, stdio and time_now) and T3
+(ppx_jane) are their own tasks.
+
+- **Ports** (546; arbace.repr.ocaml.prep, each held to its source's SHA-256): ppxlib's pp/pp.exe in both variants (astlib's and
+  ast's), astlib/config/gen.ml's ast-version, ocaml-compiler-libs v0.17.0's ocaml_common.ml, and ocaml_shadow.ml over ocamlcommon's
+  modules (a strict subset of the host's file: deprecation aliases only).
+- **The programs** (test/ocaml/ppx-programs.tsv, opam-programs.tsv's format; `bin/oi ppx gen|check`, bin/lib/oi/ppx.bash):
+  - src/gen's gen_ast_pattern and gen_ast_builder run on oi over ast/ast.ml. ast_pattern_generated.ml and ast_builder_generated.ml,
+    kept in `.tmp/oi/ppx/gen`, are byte for byte the output of the same generators built from the pinned sources by the VM's ocamlc
+    (probed).
+  - The metaquot driver (test/metaquot/driver.ml: Ppxlib.Driver.standalone with ppxlib.metaquot linked) is 175 units in ocamldep
+    -sort's order: sexplib0, astlib, ppxlib_ast, ppxlib's src with the two generated units, the metaquot lifters and metaquot.
+    `bin/oi ppx check` runs it on oi over test/metaquot/run.t's two cram cases, coalesce.ml and pat.ml. Each output and exit status
+    must equal the cram's expected output line for line. Its negative control judges case 1's output against case 2's expected
+    output, which must differ. Result (546b, run): 2 of 2 pass, and the control differs. The whole check takes 30.5 minutes, the
+    library's types included.
+- **Typer fixes** (each with a sample in test/ocaml/typer-repros that ocamlc accepts and the typer before the fix refuses;
+  `run.bash ROOT`):
+  - 546: find_record_qual; constrained abbreviations expanded by instance; declarations fully generic; no abbreviation memo under
+    GADT equations (types/fresh-depth); nested package constraints; a module-unpacking parameter typed in a scope of its own; no
+    link of an object to a scoped module's abbreviation.
+  - 546b, env:
+    - components resolve an alias to a module inside an earlier sibling through that sibling, so find-unit no longer re-enters a
+      unit being loaded (m1);
+    - nested with-unit-stamps go on from the outer counter (m3).
+  - 546b, a unit's paths substituted into its class declarations (m2) and its class types (m5).
+  - 546b, an override without a type declared with a fresh variable (m4).
+  - 546b, nondep's expansions of a generic node made generic (c26).
+  - 546b, a unit's interface read with none of the class's shared type variables. Its repro is on ppxlib's staged sources and is
+    not committed: the task's tests/ppxlib-shared-tyvars.bash.
+- **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
+  native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
+  problems. No record changes: the ppx programs are not rows of the suite corpus.
+
+## As built: ppx_expect on oi (queue 547, 2026-11-24/25, the VM): T2 of DECISION 539b-1, re's lib_test/expect
+
+T2 of DECISION 539b-1 is done. re's expect tests are rewritten by ppx_expect's driver, built from the opam set and run on oi, and they
+run on oi. Each is judged by its own `[%expect]` blocks, as dune's runtest judges them. No host ppx is used, and every unit is typed by
+Arbace's typer.
+
+- **S1, base and stdio** (cycle 1): 273 units type (typer fixes c27-c32 and m6). `bin/oi ppx run base_load` loads them on oi with their
+  C stubs on ci, and prints "loaded".
+  - oi's C API gained caml/hash.h (the structural hash's mixes, as go/arbace/oi/hash.ae computes them), caml/backtrace.h (two words
+    oi never sets), caml/version.h, config.h's ARCH_INT*_TYPE, and Noreturn.
+  - CAMLweakdef is a weak definition, which ci links.
+  - The headers add the part of SSE2's emmintrin.h that ocaml_intrinsics_kernel uses.
+  - caml/mlvalues.h now includes what OCaml's does on the way: config.h first, then stdio.h, stdlib.h, stdarg.h and limits.h.
+    time_now's stubs need config.h to see ARCH_SIXTYFOUR.
+- **The ppx texts** (`bin/oi ppx pp [DRIVER...]`, test/ocaml/ppx-pp.tsv):
+  - A unit whose dune file has `(preprocess (pps ...))` gets the text its driver writes on oi. The driver runs as dune's ppx.driver
+    runs it: `--cookie library-name="LIB"`, `-corrected-suffix .ppx-corrected -diff-cmd -`, and `--impl` or `--intf`. Dune's
+    `-dump-ast` is left out, so the text is printed.
+  - The driver runs in a copy of the package, so a unit's locations stay its own.
+  - prep's build-unit takes the text from OI_PPX_PP/PKG/REL (.tmp/oi/ppx/pp).
+  - The metaquot driver rewrites ppx_compare's, ppx_enumerate's, ppx_hash's and ppx_globalize's expanders, ppx_sexp_conv's
+    expander, ppx_inline_test and ppx_expect (37 files).
+    - ppx_sexp_conv's dune also names ppxlib.traverse. None of its files derives traverse, so the metaquot driver alone gives the
+      same text.
+  - `time_now_driver` (D1) is ppx_base's rewriters plus ppx_optcomp and dune's ppx main. It rewrites time_now.
+    - time_now's `[%%import "config.h"]` is jst-config's config.h, made by `bin/oi ppx jst-config`.
+    - That verb ports discover.ml, held to its SHA-256. Each of discover's C programs is built for oi's own C target by cnodes.ae
+      (`--program`), and a program that builds sets its switch.
+    - The header is written in dune-configurator's gen_header_file format, which is recalled from memory: dune-configurator is not in
+      the pinned set.
+  - `expect_driver` (D2) is ppx_expect with ppx_inline_test, its libname, ppx_here's expander and the runtime libraries. It rewrites
+    re's 27 test files with `--cookie inline_tests="enabled"`.
+- **The programs' typing** (OI_DUMP_CACHE, set by the ppx verbs):
+  - Each unit's outputs are kept under a key chained from the earlier units', the native library's key, the flags and the libraries.
+  - Programs that share sexplib0, base, stdio and ppxlib therefore type only from where they differ. Base alone is about 50 minutes
+    on 8 cores.
+- **Typer fixes**, each with a repro in test/ocaml/typer-repros that ocamlc accepts and the parent typer refuses:
+  - c33: a record copied from (`with`) takes the expected record type first (ppxlib_jane).
+  - m7: opening a module opens its classes (ppx_compare_expander's `inherit type_is_recursive`).
+  - c34: a module bound to a submodule of a functor's parameter is no alias (Env.is_functor_arg).
+  - m8: a module's components give its classes' object types the module's path, so a value typed by a class keeps a path a later
+    process finds through a signature kept as data (`assert_no_attributes_in : Ast_traverse0.iter`).
+  - c35: a with-constraint on a submodule's type (Expect_test_config).
+  - c36: in pattern mode, two rows that do not unify are reified and recorded as an equation unless incompatible (a GADT indexed by an
+    existential's row, ppx_expect's Test_node).
+  - A unit A__b's exceptions are named A.B.E when A's module B aliases it (Out_type.rewrite_double_underscore_paths). This one was
+    probed against ocamlc and has no typer-repro.
+- **ppx_expect's runtime on oi's C path**:
+  - Its stubs redirect stdout and stderr into a file with dup and dup2 on io.h's `struct channel` fd, and read the position with
+    lseek.
+  - crt's HostFds (set by oi's C API over the process's own streams) makes close, lseek, dup, dup2 and dup3 act on the host's
+    descriptors for the standard streams and for any descriptor the program's table does not hold.
+  - A channel crosses to C as a custom block whose data points to a struct channel holding its fd and offset (oi.ChannelFd).
+  - oi's channels write the host's descriptors, so the redirection is real.
+  - caml_sys_error was added to the C runtime.
+- **oi**: `%string_unsafe_get` past a string's end reads OCaml's block padding (zeros, then the padding length). re's
+  Compile.Stream.feed reads the byte at the string's length before a bound check raises.
+- **S3** (`bin/oi ppx expect`):
+  - The program `expect_tests` is staged as dune builds the inline-test runner:
+    - re_private (re's lib copied), a main-less wrapped library whose alias module Re_private comes first and is opened by its
+      modules;
+    - re_tests, likewise;
+    - the runtimes, ppx_expect's evaluator, str, and the runner's main `let () = Ppx_inline_test_lib.exit ();;`.
+  - It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`, in the library's directory of a copy of re (`@cwd=`).
+  - Judgment: status 0, and every `FILE.corrected` (ppx_expect under `-diff-cmd -` writes each test file's text with its actual
+    outputs) equal to `FILE`.
+  - Negative control: test_re.ml's first `[%expect]` is altered and the file is rewritten again by the driver on oi. Its
+    test_re.ml.corrected must differ.
+  - Result: pass, 27 of 27 files equal, and the control differs.
+- **Records** (DECISION 547-1 (b), the user's, 2026-11-25): re/expect has a record of its own. `bin/oi ppx expect --record` writes
+  `test/ocaml/check-ppx-oi.edn` (`[PROGRAM RESULT REASON]` as the suite records), only from a passing whole run: re/expect passes and
+  the control differs; any other run records nothing. The suite records' opam/re/expect row stays "class", since the ppx programs are
+  not rows of the suite corpus. reap's OCaml eval cell reads the new record over it (test/reap/cells.edn's `:override` on the suite
+  source, test/reap/main.ae's `override`): the record's row takes the place of the suite row of the same program, a pass counted as one,
+  a non-pass judged by the suite's classes as any other row. A record missing, or naming a program the suite record does not hold, is
+  a problem of reap's.
+
+## As built: ppx_jane on oi (queue 548, 2026-11-25, the VM): T3 of DECISION 539b-1, sexplib0's test library
+
+- **The drivers** (test/ocaml/ppx-programs.tsv), each a library's `(pps ...)` as dune links it, on oi; D1's (time_now_driver's) units
+  less ppx_optcomp come first, so the typed prefix (base, stdio, ppxlib, ppx_base) is shared by key (OI_DUMP_CACHE):
+  - traverse_driver: the metaquot driver with ppxlib.traverse (ppx_custom_printf's pps);
+  - base_mq_driver: ppx_base with metaquot (ppx_string), and the ppx_base libraries (capitalization, sexp_pretty, ppx_assert's,
+    ppx_hash's and ppx_module_timer's runtimes), a superset of ppx_base by metaquot, whose `[%expr]` they do not use;
+  - log_mq_driver: ppx_log's kernel and ppx_string_conv (ppx_compare ppx_enumerate ppx_expect ppx_fields_conv ppx_let ppx_sexp_conv
+    ppx_sexp_value ppx_string, metaquot);
+  - splittable_random_driver and base_quickcheck_driver: those libraries' pps. (jane_driver was tried first for them: its superset
+    adds ppx_module_timer's and ppx_expect's per-file code, Ppx_module_timer_runtime and Ppx_expect_runtime, which dune's build does not.)
+  - sexplib0_test_driver: sexplib0/test's pps (ppx_compare ppx_expect ppx_here ppx_sexp_conv ppx_sexp_value);
+  - jane_driver: ppx_jane's bin/main.ml (`Ppxlib.Driver.standalone ()`), ppx_jane_kernel's 22 rewriters, ppx_expect, ppx_log,
+    ppx_quickcheck and ppx_stable, with the runtimes their libraries link (ppx_compare's, ppx_enumerate's, ppx_string's): 655 units (word count of the row).
+  - The drivers' outer units carry ppx_base (D1's prefix) beyond a library's own pps: its derivers act on `[@@deriving]` alone.
+- **ppx-pp.tsv**: the metaquot driver's rows for the 20 libraries of ppx_jane's closure that use metaquot (ppxlib's traverse too),
+  then each other library's under its driver: 137 files beyond 547's 67, all rewritten on oi.
+- **ppx_custom_printf's format_lifter.ml** (its rule runs gen/gen.ml, which prints CamlinternalFormatBasics' types through the
+  toplevel): gen.ml ported in test/ocaml/ppx/format_lifter.ae (held to its SHA-256; `bin/oi ppx lifter`), the .mli's declarations
+  with the re-export equations the toplevel prints, as one group with `[@@deriving traverse_lift]`; compared with the host's
+  toplevel once: the same declarations but neutral_concat's two tags in the other order. The port lives outside arbace/repr/ocaml,
+  whose sources are in native_key (a change there retypes every cached unit). The traverse driver rewrites it; the staging takes the
+  driver's text for a rule-made unit (suite_stage's suite_ppx_made).
+- **The staging**: a wrapped library's ocamlyacc units (sexplib's parser.mly) generated by the native ocamlyacc, as its ocamllex
+  units were; sexplib's main-less alias module with the 12 modules the program needs.
+- **The program** sexplib0_tests: dune's inline-test runner of sexplib0_test (no `(inline_tests)` stanza in the opam release: run as
+  dune would run one), with expect_test_helpers_base, base_quickcheck, splittable_random, re, parsexp, sexplib, sexp_pretty and the
+  runtimes the rewritten texts name (ppx_sexp_conv's, ppx_compare's, ppx_assert's, ppx_bench's, fieldslib, ppx_module_timer's,
+  ppx_quickcheck's): 469 units (words of the row).
+- **Gaps**, each with its fix and a repro that fails on the parent:
+  - c37 (typecore): `C (p : t1 * t2)` of a constructor of two arguments (ppx_log's `Pconst_integer (_ : string * char option)`).
+  - m9 (typemod): a destructive type substitution over a signature scraped its module aliases into absent modules without an
+    address (base's `include (Shadow_stdlib : module type of struct include Shadow_stdlib end ... with type 'a ref := 'a ref)`),
+    so `Bigarray.Array1.create` under `open! Base` did not translate.
+  - c38 (typecore): an explicitly polymorphic annotation's `_` (parsexp's `let raise_error : type a b. ... -> _`) was made
+    generic, so an application's arguments lost their expected types.
+  - oi: `&&` and `||` compiled their second operand out of tail position; sexplib0's must_escape over a 5,000,000-byte atom
+    overflowed the stack (probe: 10,000,000 iterations).
+- **Result** (`bin/oi ppx expect sexplib0`): pass, sexplib0_test.ml's corrected text equal to the file (its 7 expect tests); the
+  control (its first `[%expect]` altered, rewritten again by sexplib0_test_driver on oi) differs.
+- **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
+  sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
+  on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).

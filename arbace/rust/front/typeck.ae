@@ -394,6 +394,20 @@
       :dyn (str "dyn:" (first (:principal (second t))))
       nil)))
 
+;; queue 561 (C6 L3): the interface's inherent impls of T's key; for the root file's own ADT, those of its interface path
+;; that another module file of the crate holds (adler2's `self.compute(bytes)` in lib.rs on its Adler32, the method in
+;; algo.rs' `impl Adler32`), the root file's own impls left to local-impls
+(defn- inherent-paths [t]
+  (let [st (shallow t)]
+    (if (and (= :adt (first st)) (number? (second st)))
+      ;; the root file's own impls (local ones, or of the root module itself) left out, should the interface hold them too (an
+      ;; out-of-line module the file declares, adler2's algo, is another file's: its impls kept)
+      (when-let [p (c/ext-of-local (second st))]
+        (let [cp @(requiring-resolve 'arbace.rust.front.resolve/*crate-path*)]
+          (remove (fn [ip] (let [par (c/path-parent ip)] (or (c/local-def-of-ext ip) (= par cp))))
+                  (get (:inherent c/*si*) p))))
+      (when-let [k (self-key t)] (get (:inherent c/*si*) k)))))
+
 (defn- std-impl-instance
   "A std impl instantiated: [impl-path args self-ty trait-ref]"
   [ip]
@@ -518,7 +532,7 @@
                                            :else (get (:trait-impls c/*si*) trait)))]
                             (std-impl-instance ip))))
                 (concat (local-impls false nil t)
-                        (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
+                        (for [ip (inherent-paths t)] (std-impl-instance ip))))]
     ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
     ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
     (let [vars? (or (has-var? t) (some has-var? targs))
@@ -914,10 +928,18 @@
     (let [n (:node (c/def-of def))] (or (not (contains? n :params)) (c/fn-self-param? n)))
     (not (false? (:self-param (get (:fns c/*si*) def))))))
 
+;; queue 561 (C6 L3): probe_op's inherent candidates are assembled from every autoderef step's type before any step is tried
+;; (assemble_inherent_candidates over the steps), so at a step a later step's inherent method whose self parameter is that step's
+;; adjusted receiver is picked before a trait in scope (rustc-demangle's `f.write_str(..)` on `f: &mut Formatter` with
+;; fmt::Write imported: Formatter's inherent write_str by value at step 0, not Write's); bound true by core-check for the
+;; backtrace crates, else each step's own impls as before
+(def ^:dynamic *steps-inherent* false)
+
 (defn- method-candidate
   "At one step type T with receiver adjustment AUTOREF (nil, :not, :mut): the method named NM of an inherent impl, then of a
-  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]"
-  [t nm autoref]
+  trait in scope, whose self parameter's type is the adjusted receiver: [def args sig]; INH-TYS: the types whose inherent impls
+  are candidates (*steps-inherent*: every step's), else T's"
+  [t nm autoref & [inh-tys]]
   (let [recv (case autoref nil t :not [:ref [:re-erased] false t] :mut [:ref [:re-erased] true t])
         try-def (fn [def parent-args]
                   (let [own (vec (drop (count parent-args) (fresh-args def)))
@@ -927,15 +949,17 @@
     (or
      ;; inherent impls
      (let [s (snapshot)]
-       (or (some (fn [[ip args self _]]
-                   (let [s2 (snapshot)]
-                     (if (try-unify self t)
-                       (if-let [[def k] (impl-item ip nm)]
-                         (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
-                         (do (rollback! s2) nil))
-                       nil)))
-                 (concat (local-impls false nil t)
-                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+       (or (some (fn [u]
+                   (some (fn [[ip args self _]]
+                           (let [s2 (snapshot)]
+                             (if (try-unify self u)
+                               (if-let [[def k] (impl-item ip nm)]
+                                 (or (when (#{"AssocFn"} k) (try-def def args)) (do (rollback! s2) nil))
+                                 (do (rollback! s2) nil))
+                               nil)))
+                         (concat (local-impls false nil u)
+                                 (for [ip (inherent-paths u)] (std-impl-instance ip)))))
+                 (or inh-tys [t]))
            (do (rollback! s) nil)))
      ;; RF13c: a parameter's where clauses (assemble_inherent_candidates_from_param): the bound traits' methods, in scope
      ;; or not (`self.0.fmt(f)` under `T: fmt::Debug` with only the module `fmt` imported), Self the parameter
@@ -995,7 +1019,7 @@
      (or
     (some (fn [[i t]]
             (some (fn [ar]
-                    (when-let [[def args sig] (method-candidate t nm ar)]
+                    (when-let [[def args sig] (method-candidate t nm ar (when *steps-inherent* steps))]
                       [def args sig (vec (concat (for [s (rest (take (inc i) steps))] ["Deref" s])
                                                  (case ar
                                                    ;; pick_by_value_method: a reference receiver is reborrowed (`&*x`)
@@ -1035,7 +1059,7 @@
                     (do (rollback! s) nil))
                   nil)))
             (concat (local-impls false nil t)
-                    (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+                    (for [ip (inherent-paths t)] (std-impl-instance ip))))
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
                 (if (and (str/starts-with? (str k) "AssocConst") (or (number? def) (get (:consts c/*si*) def)))
@@ -1193,6 +1217,8 @@
       ;; (format_args!'s template: its bytes; a written literal: its symbol's escapes cooked)
       "ByteStr" [:ref [:re-erased] false [:array [:uint "u8"] [:cval (str (if (:bytes l) (count (:bytes l)) (byte-count (str (:symbol l)))))]]]
       "Byte" [:uint "u8"]
+      ;; queue 542 (C6): a C string literal (`c"main"`, std's sys::pal::unix::init): &'static CStr
+      ("CStr" "CStrRaw") [:ref [:re-static] false [:adt "core::ffi::c_str::CStr" []]]
       [:unknown])))
 
 (defn- std-adt-of
@@ -1215,19 +1241,23 @@
            (let [raw [:adt (second r) (fresh-args (second r))]]
              (when *user-self* (reset! *user-self* raw))
              (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs)))))))
-    (when (= 2 (count segs))
+    ;; (queue 566 (C6 L1): or a longer one whose prefix is no ADT, an alias: `libc::c_int::MAX`, the prefix's partial resolution
+    ;; at its span, std's READ_LIMIT)
+    (when (>= (count segs) 2)
       (let [sp (:span path)
-            base-name (:ident (first segs))
+            bsegs (vec (butlast segs))
+            base-name (str/join "::" (map :ident bsegs))
             psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
-            base-res (or (get c/*res* psp) (:res path))
-            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))
+            base-res (or (get c/*res* psp) (when (= 2 (count segs)) (:res path)))
+            bty (when (or (= 2 (count segs)) base-res)
+                  (try (body-ty {:kind :path :path {:segs bsegs :res base-res :span psp}}) (catch Throwable _ nil)))
             ;; queue 472: a struct, enum or union written without arguments as a value path's self type (`Box::from_raw_in`):
             ;; every parameter a fresh variable, the defaulted ones too (a type position's lowering takes the defaults: Box's
             ;; A was Global, so try_new_uninit_in's `Box::from_raw_in(ptr, alloc)` at `Box<_, Global>`, its Result's error
             ;; type left `_`), as for a longer path above
             bty (let [st (some-> bty shallow)
-                      r (when (and (= :adt (first st)) (empty? (:args (:args (first segs)))) (not= "Self" base-name))
-                          (try (c/res-def {:segs [(first segs)] :res base-res :span psp}) (catch Throwable _ nil)))]
+                      r (when (and (= :adt (first st)) (empty? (:args (:args (peek bsegs)))) (not= "Self" base-name))
+                          (try (c/res-def {:segs bsegs :res base-res :span psp}) (catch Throwable _ nil)))]
                   (if (and (#{:ext :local} (first r)) (#{"Struct" "Enum" "Union"} (nth r 2)))
                     [:adt (second st) (fresh-args (second st))]
                     bty))
@@ -1236,7 +1266,7 @@
             _ (when (and *user-self* bty)
                 (reset! *user-self* (let [st (shallow bty)]
                                       ;; (RF13c: `Self` is the impl's self type as it is: `Self::new_unchecked` in an impl for NonZero<u8>)
-                                      (if (and (= :adt (first st)) (empty? (:args (:args (first segs)))) (not= "Self" base-name))
+                                      (if (and (= :adt (first st)) (empty? (:args (:args (peek bsegs)))) (not= "Self" base-name))
                                         [:adt (second st) (fresh-args (second st))]
                                         bty))))]
         (when (and bty (not (#{:err :unknown} (first bty))))
@@ -1767,16 +1797,37 @@
               [(second args) (or (some (fn [[ad _ term]] (when (= "core::ops::function::FnOnce::Output" ad) term)) projections) (fresh :ty))]))))
       :else nil)))
 
+(defn- macro-closure-text
+  "queue 542: a std macro's closure (thread_local!'s `|__rust_std_internal_init| ..`, its :fspan [FILE l1 c1 l2 c2] in std's
+  sources): its type's text as rustc prints it, the fn_decl_span (`move`, then the parameters' bars) in the library's trimmed
+  path (`{closure@std/src/sys/thread_local/native/mod.rs:92:21: 92:47}`), read from RF_MONO_LIB's file; else nil"
+  [e]
+  (let [[f l1 c1] (:fspan e) lib (System/getenv "RF_MONO_LIB")
+        i (when (string? f) (.lastIndexOf ^String f "/library/"))]
+    (when (and lib i (not (neg? (long i))) (number? l1) (number? c1))
+      (let [rel (subs f (+ (long i) 9)) file (java.io.File. (str lib "/" rel))]
+        (when (.exists file)
+          (when-let [^String line (nth (str/split-lines (slurp file)) (dec (long l1)) nil)]
+            (let [st (dec (long c1))
+                  s (subs line (min st (count line)))
+                  [pre s] (if (str/starts-with? s "move ") (let [t (str/triml (subs s 5))] [(- (count s) (count t)) t]) [0 s])]
+              (when (str/starts-with? s "|")
+                (let [j (if (str/starts-with? s "||") 1 (str/index-of s "|" 1))]
+                  (when j
+                    (str "{closure@" rel ":" l1 ":" c1 ": " l1 ":" (+ (long c1) (long pre) (long j) 1) "}")))))))))))
+
 (defn- check-closure [e expected]
   (let [[ins out] (or (deduce-closure-sig expected) [nil nil])
         ptys (vec (map-indexed (fn [i p] (if (and (:ty p) (not= :infer (:kind (:ty p)))) (body-ty (:ty p)) (or (nth ins i nil) (fresh :ty)))) (:params e)))
         ret (if (:output e) (body-ty (:output e)) (or out (fresh :ty)))
         env (atom {})]
     (doseq [[p t] (map vector (:params e) ptys)] (check-pat (:pat p) t env :none))
-    (binding [*env* (conj *env* @env) *ret* ret *ret-pushed* (atom 0) *loops* nil]
+    (binding [*env* (conj *env* @env) *ret* ret *ret-pushed* (atom 0) *loops* nil
+              c/*closure-hirs* (cons (:hir-id e) c/*closure-hirs*)]
       (let [bt (check-expr (:body e) ret)] (ret-coerce! (:body e) bt)))
     (let [sp (closure-decl-span e)
-          text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}") "{closure}")]
+          text (if (and sp *root-file*) (str "{closure@" *root-file* ":" (sp 0) ":" (sp 1) ": " (sp 2) ":" (sp 3) "}")
+                   (or (macro-closure-text e) "{closure}"))]
       (when *closures* (swap! *closures* conj {:text text :node e :env *env* :kind (deduced-kind expected)}))
       ;; RF10: the kind the expectation gives it (else closure_analyze's, arbace.rust.front.build/closure-analyze)
       (note! e :closure-kind (deduced-kind expected))
@@ -2397,6 +2448,14 @@
             (unify ex t)
             (when-let [v (and (#{:int :uint} (first (shallow t))) (some-> (:expr (:node d)) c/const-int-value))]
               (note! p :const-value v))))
+        ;; queue 542 (C6): a path to another crate's integer constant (std's `libc::EINTR =>`): its interface fact's type and
+        ;; value (the dependency's native pass evaluated it), the same constant pattern
+        (when (and (= :ext (first rd)) (= :path (:kind p)) (str/starts-with? (str (nth rd 2)) "Const"))
+          (when-let [f (get (:consts c/*si*) (second rd))]
+            (let [t (erase (c/sty->ty (:ty f)))]
+              (unify ex t)
+              (when (and (#{:int :uint} (first (shallow t))) (integer? (:value f)))
+                (note! p :const-value (:value f))))))
         (when (and (= :local (first rd)) (not (and (= :path (:kind p)) (str/starts-with? (str (nth rd 2)) "Const"))))
           (let [[_ id k] rd d (c/def-of id)
                 ;; a constructor's resolution finds its variant (the same identifier) or struct
