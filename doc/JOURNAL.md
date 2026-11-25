@@ -20968,3 +20968,30 @@ Queue 547, cycle 2, continued from 1387eccfd. Each item below has its own commit
 - **Checks**: oi's 38 C-API programs (the run corpus's @cstubs rows), `bin/oi check --only-list`, all pass on the native path after the
   header changes.
 - **Records**: the suite's opam/re/expect row stays "class". How a ppx program enters the records is the user's DECISION, in the report.
+
+## 2026-11-25 — ppx_jane on oi: sexplib0's test library passes by its own expect blocks (queue 548, VM)
+
+Queue 548 (T3 of DECISION 539b-1), on 547's head 6e6290954. Survey: doc/ocaml/OCAML-SURVEY.md, "As built: ppx_jane on oi".
+
+- **Drivers**: seven rows of test/ocaml/ppx-programs.tsv (traverse_driver, base_mq_driver, log_mq_driver, splittable_random_driver,
+  base_quickcheck_driver, sexplib0_test_driver, jane_driver), each a library's `(pps ...)`, composed from D1's units (less
+  ppx_optcomp) so the typed prefix is shared by OI_DUMP_CACHE's chained key. The rows are composed by scratch tooling over 547's
+  mk.py (dune's link order by the host's ocamldep, as 547's). A driver per pps set was kept where a superset changes the output:
+  jane_driver first rewrote splittable_random and base_quickcheck, and its ppx_module_timer and ppx_expect added per-file code
+  (Ppx_module_timer_runtime, Ppx_expect_runtime) dune's build does not; those two got their own drivers. Where the superset only
+  adds metaquot (base_mq_driver for ppx_base's libraries) or ppx_base's derivers (every driver's D1 prefix), the outputs are dune's,
+  as those act on their own syntax alone.
+- **ppx-pp.tsv**: 20 libraries under the metaquot driver, then each other library's rows; all 204 texts of the table written on oi (137 beyond 547's 67). An empty
+  .mli's text is empty (ppx_assert.mli): the pass check now takes the driver's status with the file present.
+- **format_lifter.ml**: ppx_custom_printf's rule runs gen.ml, which needs the toplevel. Ported (test/ocaml/ppx/format_lifter.ae)
+  from camlinternalFormatBasics.mli's declarations with the toplevel's re-export equations; checked once against the host's
+  toplevel output (equal up to neutral_concat's tag order). First written into prep.ae: reverted, since arbace/repr/ocaml/*.ae is in
+  native_key and the edit invalidated the whole typing cache (the library was rebuilt, the cache then hit again).
+- **Typer gaps**, each committed alone with a repro that fails on the parent: c37 (a constructor's arguments under a tuple
+  constraint, ppx_log), m9 (module aliases kept by a destructive type substitution, base's Shadow_stdlib include), c38 (a
+  polymorphic annotation's `_` filled by the definition, parsexp). Gaps after the first were found by typing the staged units by
+  hand with the patched typer (547's type-one approach), so the full retyping ran once per batch.
+- **oi**: `&&`/`||` now keep a tail call in their second operand (sexplib0's must_escape over a 5 MB atom overflowed the stack).
+- **Result**: `bin/oi ppx expect sexplib0` passes (sexplib0_test.ml's corrected text equal to the file); the control (first
+  `[%expect]` altered, rewritten on oi) differs. `bin/oi ppx expect` takes re and sexplib0 (both by default).
+- **Records**: none changed; sexplib0_test stays "class" pending DECISION 547-1. The host's commands are in the report.
