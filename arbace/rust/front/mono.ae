@@ -2489,6 +2489,11 @@
         res (if (and (pos? (count offs)) (> (long (:size l)) off)) (conj res (padding-filler-ty (- (long (:size l)) off) prev)) res)]
     (apply list (if packed 'packed 'struct) res)))
 
+(def ^:dynamic *pair-struct-llty*
+  "queue 572 (C6 L3): llvm-type-of gives a struct ADT of a scalar pair layout its fields' struct (uncached_llvm_type), not the
+  pair's flat one; lib-unit's build binds it for a backtrace crate"
+  false)
+
 (defn llvm-type-of
   "C6-4: a type's LLVM type as rustc_codegen_llvm's layout.llvm_type writes it with fewer names (type_of.rs): a scalar its
   memory type (bool i8), a scalar pair the struct of both, an array the array of its element's, a union or a primitive one
@@ -2498,7 +2503,20 @@
   (let [t (erase-regions t) l (layout-of t) abi (:abi l) f (:fields l)]
     (case (first abi)
       :scalar (prim-llty (:prim (second abi)))
-      :pair (list 'struct (prim-llty (:prim (nth abi 1))) (prim-llty (:prim (nth abi 2))))
+      :pair (or
+             ;; queue 572 (C6 L3): a backtrace crate's unit: a struct ADT of a scalar pair layout as uncached_llvm_type makes it,
+             ;; its fields' struct (struct_llfields, nested: addr2line's LineSequence's Box<[LineRow]>), a pair's flat struct
+             ;; where a field is not known
+             ;; and a pattern type of a pair (NonNull's `*const T is !null` of a slice): its one field, the base type, as
+             ;; field_ty_or_layout gives a pattern type's
+             (when (and *pair-struct-llty* (#{:pat-notnull :pat} (first t)))
+               (some->> (llvm-type-of (second t)) (list 'struct)))
+             (when (and *pair-struct-llty* (= :adt (first t)) (map? f) (= :single (first (:variants l))))
+               (let [fts (nth (variant-fields (second t) (nth t 2)) (second (:variants l)) nil)]
+                 (when (and fts (= (count fts) (count (:offsets f))))
+                   (let [lts (mapv (fn [ft] [(layout-of ft) (llvm-type-of ft)]) fts)]
+                     (when (every? second lts) (struct-llfields l (fn [i] (nth lts i))))))))
+             (list 'struct (prim-llty (:prim (nth abi 1))) (prim-llty (:prim (nth abi 2)))))
       (cond
         (or (= :primitive f) (and (vector? f) (= :union (first f)))) (list 'struct (padding-filler-ty (:size l) (:align l)))
         (and (vector? f) (= :array (first f))) (when-let [e (llvm-type-of (second t))] (list 'array (nth f 2) e))
