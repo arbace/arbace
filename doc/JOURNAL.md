@@ -22127,3 +22127,39 @@ and test/crops/scores.edn taken from next and recorded again (`bin/reap --record
   `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
 - mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
 Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
+
+## 2026-11-25 — Rust C6: L1's rest and L2, std 217 / 38 / 70 -> 221 / 38 / 66, L2 380 -> 391 equal (queue 571, VM)
+
+Branch `571-rust-c6-l1-l2` from 566's 6ffc51528: 565-rust-c3-finish 1119a459a merged first (merge commit, the journal keeping both
+lines' entries), then origin/next 3a67d8dc2 (next's side everywhere; the journal next's, which held every line of ours). The work
+dir: q561's worktree and its `.tmp/rust-front` were gone, so the work dir came from the queue asset `542-c6-caches.tar.xz`
+(std/alloc/core interfaces, the dependencies' facts, core's lib), its absolute paths rewritten to this worktree. 566's fresh
+lib-unit cache was copied, not changed. Baseline (a0, at the 565 merge): std 217 / 38 / 70, L2 380 / 66 / 32 / 3 of 481, every
+verdict 566's.
+
+- The 9 keys 566's logging found: `lib-unit inline-keys CRATE --record` (core +5, std +4), core `export --add`, std's whole export
+  on the merged code (499 bodies, 64 refused, the same rows as 566's but the 4 new). ptr::read_unaligned and count_ones made L2's
+  DwarfReader::read<u8> and round_up equal; MIN_ALIGN let sys::alloc::unix::alloc evaluate (equal). A second round over the next
+  builds' wanted lines: core's run_utf8_validation and the slice iterators of libc's pollfd, std's SEPARATORS (+3, +1).
+- build_run (lib-unit-run): L2's callees take mono's vtables (`vts`) and deferred statics as the items and inline callees do: six
+  `cast PointerCoercion(Unsize, Implicit)` refusals (assert_failed<i32>, <i16>, Result::expect x2: equal; Once::call_once and
+  trace_unsynchronized: differ).
+- mono's vtable-instance: a function item or pointer as an Fn object (`&imp::canonicalize as &dyn Fn(&CStr) -> ..`, sys::fs's
+  with_native_path): call_once its VTableShim, call_mut and call its FnPtrShims (resolve_for_vtable; the IR's vtable
+  `_RNS..9call_once6vtable`, `_RNvY..8call_mut`, `_RNvY..4call`): canonicalize, metadata and read_link equal.
+- build's mirror: a labeled block's breaks target the block's own region (rustc_resolve's `with_resolved_label(label, block.id)`;
+  ast_block's in_breakable_scope is the block's scope), not the expression's: every labeled block was refused ("a break target");
+  sanitize_standard_fds (`'poll: { .. }`) equal.
+- Tried and reverted: repr(packed) in univariant (each field's alignment capped at the pack) with the sources' packed taken for a
+  known std struct (ptr::Unaligned): no verdict moved (DwarfReader::read<T> for T other than u8 still reads Unaligned<T> as a
+  scalar); left for a study of where its layout comes from.
+- Final (m4): std **221 / 38 / 66**, L2 **391 / 67 / 25 / 3 of 486** (sanitize's five callees added), no verdict back. Refusals
+  by reason: items 38 not exported (backtrace_rs's 25 among them: 572's line), 13 no layout (12 of backtrace types, error_string's `[i8; TMPBUF_SZ]`), 10 no callee, 2
+  MAIN_SEPARATOR_STR unevaluated, 1 promoted unevaluated, 1 generic, 1 scalar operation; L2 9 not exported (core::io::error's
+  three, which core's export refuses), 7 no layout, 4 unevaluated (WRITE_ALL_EOF x2, MAIN_SEPARATOR_STR, Components::next's
+  inline const), 3 no symbol, 2 no callee, 1 scalar operation, 1 Unsize cast, 1 inline-always callee.
+- L2's commonest difference stays rustc's MergingSucc over a generic body's unwind edges (cvt<T>, Ord::min/max: a call whose
+  generic cleanup is a drop of T keeps its block boundary in rustc's instance; ours merges): not changed.
+- Alternatives considered: the core export afresh on the merged code (16 minutes; std's export showed the merge moved no row, and
+  the build reads core's bodies as data); a fresh `.tmp/rust-front` (about an hour of passes) instead of 542's asset.
+- Not recorded: lib-unit's numbers are no records; the VM's rows would be -linux-arm64.
