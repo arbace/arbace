@@ -22446,21 +22446,36 @@ on train 3's tool and are the host's to record; this entry is the four left.
 - 575-3 (a): the four rows' record (t07544, t07545, t07546, t07552), made on a tool of train-3 with this branch, is accepted now;
   train 4's tool reruns their diagnostics after its edge is recorded again (System$Logger), as the confirmation.
 
-## 2026-11-25 — Java run leftovers t08164, t04614, t04878: WIP (queue 582, VM)
+## 2026-11-25 — Java run leftovers t08164, t04614, t04878 (queue 582, VM)
 
-WIP, handed back before the proving run finished. Train-4 (268287e6e) does not build: j2g stops at "Undeclared functional of
-class java.lang.System$Logger" (jdk/edge.edn not recorded since 562). For a scratch arm64 build only, the edge was given
-`:functional false` for System$Logger by hand (Logger is not @FunctionalInterface); that change is not committed: the host's
-`bin/j2g-edge update` records it.
-- t08164 (FindOneCharEncoderBugs), interp and compiled: 543's interp output shows 170 failed checks, one per charset, all
-  `check(dcb.isDirect())` on ByteBuffer.allocateDirect(..).asCharBuffer(); 340 passed; no encoding differs. Cause JCS152 (a)
-  (a direct buffer is a heap buffer, isDirect false). Classed under :nio by :tests; :stack's match "Exception: Stack trace"
-  (JC1's, which took only this row) dropped so that the row is classed by its cause. Alternative: isDirect true on the views
-  of a direct buffer, against JCS152 (a): the user's (DECISION 582-1).
-- t04614 (MultiThreadStackWalk), compiled: "Expected Marker at 991, found Test". Hypothesis: a class inheriting a default
-  method has a forwarder (*T).m calling the interface's package function J_m (J2G-SPEC §5.4), and jrt's stack frames dropped
-  only the Impl_ forwarders, so Test.walk's forwarder added one frame of class Test above Call.walk, shifting the Marker.
-  jrt's stackFrames now drops a default method's forwarder too (isDefaultForwarder: callee J_M of an interface J that T
-  implements). Not yet proved by a finished run.
-- t04878 (Proxy nonJavaNames): journal entries of 11-23 and 11-24 found it passing on train 3's executable; train-4's
-  Class.forName(name, init, loader) calls the loader's loadClass. Its row waits for the run.
+Branch `582-java-run-leftovers` from mac/train-4 268287e6e. Proved by one --only run on an arm64 build of train-4 plus this
+branch: `bin/java-check --levels read,interp,compiled --only 't08164|t04614|t04878'`.
+
+The scratch build. Train-4 does not build as it stands: j2g stops at "Undeclared functional of class java.lang.System$Logger",
+because jdk/edge.edn has not been recorded since 562 brought System$Logger into the world. For this build only, the edge was given
+`:functional false` for System$Logger by hand (Logger is not @FunctionalInterface), then restored. That change is not committed:
+recording the edge is the host's `bin/j2g-edge update`.
+
+The read level ran on 575's javac tool (train-3 plus 575; `REPR_JAVA_STALE_OK=1`), since train-4 has no tool on the VM.
+
+- **t04614 (MultiThreadStackWalk), compiled: fixed.** The failure was "Expected Marker at 991, found Test".
+  - The cause: Test inherits Call's default walk. j2g gives it a forwarder `(*T).m` that calls the interface's package function
+    `J_m` (J2G-SPEC §5.4). jrt's stackFrames dropped only the forwarders that call Impl_, so this one showed as a frame of class
+    Test above Call.walk, one frame before the Marker.
+  - The fix, in go/arbace/jrt/throwable.ae: isDefaultForwarder drops the frame of `pkg.(*T).M` when its callee is `J_M` of an
+    interface J that T implements. HotSpot has no such frame.
+  - Throwable traces lose the same frame.
+  - Alternative considered: have j2g register the forwarders as FrameElide in its frame table. That means one entry per
+    forwarder in every program, where jrt can tell them apart by their names.
+  - It passes at all three levels. It is out of :stack's :tests.
+- **t04878 (Proxy nonJavaNames): passes at interp and compiled.** No change was needed: train-4's
+  `Class.forName(name, init, loader)` calls the loader's loadClass.
+- **t08164 (FindOneCharEncoderBugs), interp and compiled: classed.**
+  - The test asserts `ByteBuffer.allocateDirect(..).asCharBuffer().isDirect()`. That is false by JCS152 (a): a direct buffer is
+    a heap buffer. One check fails per charset (170 failed, 340 passed in 543's interp output), and no encoding differs.
+  - Classed under :nio by :tests. :stack's match "Exception: Stack trace" (JC1's, matching only this row) is dropped, so that the
+    row is classed by its cause.
+  - Making the views answer isDirect true is the user's choice (DECISION 582-1).
+
+Recorded: `bin/java-check --judge --partial --record --levels interp,compiled` (interp: 1 now passing; compiled: 2 now passing;
+levels-known: t04614 resolved). Then `bin/reap --record` (56 of 56 cells, 0 problems) and `bin/records-check` (0 problems).
