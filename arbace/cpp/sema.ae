@@ -9221,7 +9221,7 @@
 (defn- cx-read-only!
   "h-cpp-consteval (the checker): [expr.assign]/1, the left operand of an assignment a modifiable lvalue: not a variable of a
   const-qualified scalar type (GCC's \"assignment of read-only variable\")."
-  [l & [what]]
+  [l & [what ctx]]
   (when (and (checking?) (= :var (:op l)) (:c (:ty l)) (not (abi/ref? (:ty l))) (abi/scalar? (abi/unq (:ty l))))
     (when-let [v (var* (:id l))]
       (when (and (:name v) (:c (:ty v)) (not (abi/ref? (:ty v))))
@@ -9230,7 +9230,11 @@
   ;; [expr.assign]/1, [expr.pre.incr]/1: a comma's, a call's returning a reference to const, a dereferenced pointer to const,
   ;; a member of a const object but a mutable one -- GCC's "assignment of read-only location", other/const5.C's `(0, i) = 1`,
   ;; concepts/abbrev6.C's `f(5) = 0` of `const auto& f(auto)`)
-  (when (and (checking?) (not= :var (:op l)) (#{:lv :xv} (:cat l)))
+  ;; (only in the user's own code: a function's body that is neither implicit nor defaulted -- an implicitly declared copy
+  ;; assignment's memberwise `=` of a const member is the deletion's business, [class.copy.assign]/10, its unit's analysis
+  ;; otherwise refused; init/uninitialized1.C, cpp1y/constexpr-tracking-const4.C)
+  (when (and (checking?) (not= :var (:op l)) (#{:lv :xv} (:cat l)) ctx
+             (let [f (some-> (:fn-id ctx) fnd)] (and f (not (:implicit f)) (not (:defaulted f)) (not (:header f)))))
     (let [t (abi/non-ref (:ty l))]
       (when (and (map? t) (:c t) (abi/scalar? (abi/unq t)))
         (fail :assign (or what "assignment") " of read-only location")))))
@@ -9245,7 +9249,7 @@
                 (if (= :init-list (:op r))
                   (fail :assign "assigning to an array from an initializer list")
                   (fail :assign "invalid array assignment")))
-              (cx-read-only! l)
+              (cx-read-only! l nil ctx)
               (if-let [cx (let [t (abi/unq (:ty l)) rr (when-not (= :init-list (:op r)) (rv r))]
                             (when (and (= :complex (:k t)) rr (abi/arith? (abi/unq (:ty rr))) (lv? l))
                               ;; (cpp-rt-own: a real value assigned to a GNU complex, its real part the value and its imaginary
@@ -9283,8 +9287,8 @@
                           (convert-scalar (if (and (abi/class? (abi/unq (:ty r))) (not (abi/class? t))) (user-conv ctx r t false) r) t false)))]
                 {:op :assign :l l :r r :ty (:ty l) :cat :lv})))))
 
-(defn- compound-node [o l r]
-  (cx-read-only! l)
+(defn- compound-node [o l r & [ctx]]
+  (cx-read-only! l nil ctx)
   (let [lt (abi/unq (:ty l)) r (rv r)]
     (if (abi/ptr? lt)
       {:op :cassign :o o :l l :r (convert-scalar r abi/long* false) :ct lt :ty (:ty l) :cat :lv :ptr true}
@@ -11634,7 +11638,7 @@
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
             ("++" "--") (do (when-not (lv? e) (fail :incdec "++ of an rvalue"))
-                            (cx-read-only! e (if (= o "++") "increment" "decrement"))
+                            (cx-read-only! e (if (= o "++") "increment" "decrement") ctx)
                             ;; (cpp-diag-b, 2026-11-22: [expr.pre.incr]/1, [expr.post.incr]/1: the operand of ++ is no bool since
                             ;; C++17 (deprecated before), of -- never: GCC's "use of an operand of type 'bool' in 'operator--' is
                             ;; forbidden")
@@ -11698,7 +11702,7 @@
               {:op :ccompound :o (subs o 0 1) :l l :r (convert-scalar r et false) :ty (:ty l) :cat :lv}))
           (when (or (class-operand? l) (class-operand? r)) (operator-call ctx o [l r]))
           (when (or (class-operand? l) (class-operand? r)) (no-operator! ctx o [l r]))
-          (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r))))
+          (compound-node (subs o 0 (dec (count o))) l (class->scalar ctx r) ctx)))
     "ConditionalOperator"
     ;; (cpp-rt-own: an operand naming one function, an overload set of one, is its address, [expr.cond]/7 after the
     ;; function-to-pointer conversion: libcpp's macro.cc `(kind == CPP_time_kind::FIXED ? gmtime : localtime) (&tt)`, "call
