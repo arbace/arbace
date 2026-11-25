@@ -415,8 +415,13 @@
                   (when (and def (#{:fn :tag :var :fn-tmpl} c) (or (not (#{:fn :fn-tmpl} c)) sig) (mine? n))
                     (let [k [path (if (#{:fn :fn-tmpl} c) [c sig] c)]]
                       (if (.containsKey qdefs k)
-                        (report! n (str "redefinition of '" (:name n) "'"))
-                        (.put qdefs k true))))))
+                        (do (report! n (str "redefinition of '" (:name n) "'"))
+                            ;; (cpp-def: GCC's note at the first definition, which a dg-error's later branch may take,
+                            ;; arbace.repr.cpp.dg/alt-hits: cpp0x/defaulted10.C's `previously|declared`)
+                            (when-let [po (let [o (.get qdefs k)] (and (map? o) (mine? o) (loff o)))]
+                              (let [[l c] (line-col starts (long po))]
+                                (.add out {:line l :col c :kind :note :rule :redefinition :msg (str "'" (:name n) "' previously declared here")}))))
+                        (.put qdefs k n))))))
         ;; (cpp-decl2: the namespace region of the class being walked, for its friends' definitions; and the namespace
         ;; functions declared so far by region, name and signature, for a deleted friend's earlier declaration)
         cur-ns (atom nil)
@@ -5017,6 +5022,129 @@
 
 (swap! checks conj unsized-arrays)
 
+;; (cpp-def: the nested-name-specifier that ends `head`, a declaration's text before its declarator-id: `::`, `A<U>::`, `N::X<1>::Y::`,
+;; scanned backwards over names and balanced template argument lists; nil when the name is unqualified)
+(defn- qual-suffix [^String head]
+  (let [kw #{"int" "void" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "auto" "const" "volatile" "friend"
+             "inline" "static" "constexpr" "consteval" "typename" "class" "struct" "union" "enum" "virtual" "explicit" "template" "extern"}
+        ws (fn [^long i] (loop [i i] (if (and (pos? i) (Character/isWhitespace (.charAt head (dec i)))) (recur (dec i)) i)))
+        idb (fn [^long i] (loop [j i] (if (and (pos? j) (let [c (.charAt head (dec j))] (or (Character/isLetterOrDigit c) (= c \_)))) (recur (dec j)) j)))]
+    (loop [i (ws (count head)) start nil]
+      (if (and (>= i 2) (= "::" (subs head (- i 2) i)))
+        (let [j (ws (- i 2))
+              ;; a template argument list before the ::
+              k (if (and (pos? j) (= \> (.charAt head (dec j))))
+                  (loop [k (dec j) d 0]
+                    (cond (neg? k) -1
+                          (= \> (.charAt head k)) (recur (dec k) (inc d))
+                          (= \< (.charAt head k)) (if (= 1 d) (ws k) (recur (dec k) (dec d)))
+                          (#{\; \{ \}} (.charAt head k)) -1
+                          :else (recur (dec k) d)))
+                  j)
+              m (if (neg? (long k)) k (idb k))]
+          (cond (neg? (long k)) (when start (subs head start))
+                (and (< (long m) (long k)) (not (kw (subs head m k))) (not (Character/isDigit (.charAt head m)))) (recur (ws m) m)
+                ;; a leading :: alone
+                (= m k) (subs head (- i 2))
+                :else (subs head (- i 2))))
+        (when start (subs head start))))))
+
+;; cpp-def: qualified friend declarations. [dcl.meaning.general]/1 with [temp.friend]/1: a friend function declared by a
+;; qualified-id refers to a function the qualifier's class or namespace declared before, a non-template one or a specialization of a
+;; function template (GCC's "no declaration matches", "... should have been declared inside"); a member of a class template's
+;; specialization A<U> matches a member of A by its kind (a member template or not: the friend's template-heads beyond those its
+;; qualifier's template-ids take) and type; [temp.friend]/5: a template friend naming a member of a dependent type does so through
+;; a nested-name-specifier ending with a simple-template-id, so not through the template's injected-class-name after it
+;; (`X<N>::X::foo`, GCC's "... declared as friend"). Judged only where every candidate is the main file's and their kinds and
+;; parameter counts (or types of builtin words alone) decide it: a class template without bases, no using-declaration of the name.
+(defn friend-qualified
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        top (:nodes u)
+        in-main? (fn [n] (= main (or (get-in n [:range :begin :file]) main)))
+        ctd (into {} (for [n top :when (and (= "ClassTemplateDecl" (:kind n)) (in-main? n))
+                           :let [r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n))]
+                           :when (and r (:completeDefinition r))]
+                       [(:name n) [n r]]))
+        fdecl (fn [n] (if (= "FunctionTemplateDecl" (:kind n)) (some #(when (#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) %) (:inner n)) n))
+        params (fn [f] (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
+        nparams (fn [f] (let [ps (params f) t (str (get-in f [:type :qualType]))]
+                          (when-not (or (str/includes? t "...") (some #(seq (remove (fn [x] (not (map? x))) (:inner %))) ps)) (count ps))))
+        builtin? (fn [^String t] (every? #{"void" "int" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "const" "volatile"}
+                                         (re-seq #"[A-Za-z_]\w*" t)))
+        report! (fn [o msg] (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :friend-qual :msg msg})))]
+    (walk-nodes
+      (fn [n _]
+        (when (and (= "FriendDecl" (:kind n)) (in-main? n))
+          (let [d (first (filter map? (:inner n)))
+                f (when d (fdecl d))
+                nm (:name f)
+                o (get-in f [:loc :offset])
+                b (get-in n [:range :begin :offset])]
+            (when (and f (string? nm) o b (#{"FunctionDecl" "CXXMethodDecl"} (:kind f)) (re-matches #"[A-Za-z_]\w*" nm) (< (long b) (long o)))
+              (let [head (subs src (long b) (long o))
+                    qual (qual-suffix head)
+                    heads (count (re-seq #"\btemplate\s*<" (subs head 0 (- (count head) (count (or qual ""))))))
+                    templated (or (= "FunctionTemplateDecl" (:kind d)) (pos? (long (or (:_qtmpl f) 0))))]
+                (when qual
+                  (cond
+                    ;; [temp.friend]/5: X<N>::X::foo
+                    (and templated (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*([A-Za-z_]\w*)\s*::\s*$" qual)
+                         (let [[_ a b2] (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*([A-Za-z_]\w*)\s*::\s*$" qual)] (= a b2)))
+                    (report! o (str "member '" (str/replace qual #"\s+" "") nm "' declared as friend through the injected-class-name, no template-id"))
+                    ;; ::f, a namespace-scope function of the main file
+                    (and (re-matches #"::\s*" qual) (not= "FunctionTemplateDecl" (:kind d)) (zero? heads))
+                    (let [cands (for [x top :when (#{"FunctionDecl" "FunctionTemplateDecl"} (:kind x)) :when (= nm (:name x))
+                                      :when (< (long (or (get-in x [:range :begin :offset]) 0)) (long b))] x)
+                          k (nparams f)]
+                      (when (and k (seq cands) (every? in-main? cands)
+                                 (every? (fn [x] (let [kx (nparams (fdecl x))] (and kx (not= kx k)))) cands))
+                        (report! o (str "no declaration matches '" (get-in f [:type :qualType]) "' named '::" nm "'"))))
+                    ;; A<...>::f, a member of a class template's specialization
+                    :else
+                    (when-let [[_ cn] (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*$" qual)]
+                      (when-let [[_ r] (get ctd cn)]
+                        (let [ms (filter #(= nm (:name %)) (:inner r))
+                              own (max 0 (- heads (long (or (:_qtmpl f) 0))))
+                              ft (str (get-in f [:type :qualType]))]
+                          (when (and (seq ms) (empty? (:bases r))
+                                     (every? #(#{"CXXMethodDecl" "FunctionTemplateDecl"} (:kind %)) ms)
+                                     (every? (fn [m]
+                                               (let [mt (if (= "FunctionTemplateDecl" (:kind m)) 1 0)
+                                                     mf (fdecl m)
+                                                     t (str (get-in mf [:type :qualType]))]
+                                                 (or (not= mt own)
+                                                     (and (= 0 mt) (builtin? t) (builtin? ft) (not= (str/replace t #"\s+" "") (str/replace ft #"\s+" "")))
+                                                     (let [k1 (nparams mf) k2 (nparams f)] (and k1 k2 (not= k1 k2))))))
+                                             ms))
+                            (report! o (str "no declaration matches '" ft "' named '" (str/replace qual #"\s+" "") nm "'")))))))))))))
+      top nil)
+    (vec out)))
+
+(swap! checks conj friend-qualified)
+
+;; cpp-def: [expr.call]/1, the postfix-expression of a call has function type, pointer to function type or a class type: an
+;; explicit conversion to an arithmetic type -- GNU's complex types among them, the GCC manual's "Complex Numbers" -- called is
+;; GCC's "expression cannot be used as a function" (other/error29.C).
+(defn arithmetic-calls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        strip (fn strip [x] (if (= "ParenExpr" (:kind x)) (strip (first (filter map? (:inner x)))) x))]
+    (walk-nodes (fn [n _]
+                  (when (= "CallExpr" (:kind n))
+                    (let [c (strip (first (filter map? (:inner n))))]
+                      (when (and (#{"CStyleCastExpr" "CXXFunctionalCastExpr" "CXXStaticCastExpr"} (:kind c))
+                                 (= :b (get-in c [:_t :t])) (seq (get-in c [:_t :w]))
+                                 (not-any? #{"void" "auto" "decltype" "__typeof__" "typeof" "__typeof"} (get-in c [:_t :w])))
+                        (when-let [o (mine-at n main)]
+                          (let [[l cl] (line-col starts o)]
+                            (.add out {:line l :col cl :kind :error :rule :call-arith
+                                       :msg (str "'(" (get-in c [:type :qualType]) ")' cannot be used as a function")})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj arithmetic-calls)
+
 ;; [class.union.general]/? : a union has no base classes and is no base class: GCC's "derived union 'U' invalid", at the union, and
 ;; "base type 'U' fails to be a struct or class type", at the derived class; a base named by a union's name the file defines once
 ;; (no class of that name beside it).
@@ -7154,6 +7282,19 @@
                                         (at! n (str "'" nm "' is not an enumerated type")))))
                   nil)))]
       (walk (:nodes u) nil false))
+    ;; (cpp-def: before C++20's P1099R5, which lets a using-declarator name an enumerator through its enumeration, a
+    ;; using-declaration outside a class names a namespace's member: one whose nested-name-specifier is an enumeration of the unit
+    ;; (no class or namespace of its name) is GCC's "'e' is not a namespace or unscoped enum", cpp0x/using-enum-3.C's block scope)
+    (when (< (long (cxx-year (:std u))) 20)
+      (walk-nodes (fn [n parent]
+                    (when (and (= "UsingDecl" (:kind n)) (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl"} (:kind parent))))
+                      (when-let [t (or (:_text n) (text n))]
+                        (let [t (str/replace (str/replace t #"^\s*using\s+" "") #"^typename\s+" "")
+                              parts (map str/trim (str/split (str/replace t #";\s*$" "") #"::"))
+                              q (first parts)]
+                          (when (and (= 2 (count parts)) (.contains enums q) (not (.containsKey classes q)) (not (.contains namespaces q)))
+                            (at! n (str "'" q "' is not a namespace or unscoped enum")))))))
+                  (:nodes u) nil))
     (vec (distinct out))))
 
 (swap! checks conj using-and-consteval-overrides)

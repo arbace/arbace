@@ -681,6 +681,51 @@
     (when-let [lx (gt-lexeme-at p 0)]
       (soft-diag! p (ix p) (str "'" lx "' should be '" (if (= lx ">=") "> =" "> >=") "' to terminate a template argument list")))))
 
+
+(defn- nttp-arg-check!
+  "cpp-def: a template argument `a` (an expression) for the non-type template parameter `tp` (its declaration's node):
+  [temp.param]/6, a non-type template-parameter of a non-reference scalar type is a prvalue, so no operand of the built-in
+  unary & (GCC's \"lvalue required as unary '&' operand\"); and C++98's rules for a value-dependent argument (ISO/IEC
+  14882:2003 [temp.arg.nontype]/1 with [expr.const]/1): an integral constant-expression names a non-type template-parameter of
+  integral or enumeration type only, sizeof's operand aside (GCC's \"... is not a valid template argument for type 'int' because
+  it is a non-constant expression\"), and the argument of a pointer parameter is the name of a non-type template-parameter or
+  `&` id-expression, so no other expression of a template-parameter (GCC's \"could not convert template argument\")."
+  [^P p a tp]
+  (when (and tp (= "NonTypeTemplateParmDecl" (:kind tp)) (not (:isParameterPack tp)))
+    (let [nttp (fn [x] (let [e (:_ent x)] (when (and (= "DeclRefExpr" (:kind x)) (:tparam e) (= :var (:k e))) e)))
+          ety (fn [e] (str (some-> (:ty e) qt)))
+          scalar? (fn [^String t] (and (not (str/includes? t "&")) (not (str/includes? t "("))
+                                       (or (str/includes? t "*")
+                                           (re-matches #"(const |volatile )*(unsigned |signed )?(bool|char|wchar_t|char8_t|char16_t|char32_t|short|int|long|long long|long int|short int|long long int|float|double|long double|unsigned|signed)( const| volatile)*" t))))
+          strip (fn strip [x] (if (= "ParenExpr" (:kind x)) (strip (first (:inner x))) x))
+          ;; the expressions of template-parameters in x, outside sizeof's and alignof's operands
+          refs (fn refs [x] (cond (not (map? x)) nil
+                                  (nttp x) [x]
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (mapcat refs (:inner x))))
+          addr (fn addr [x] (cond (not (map? x)) nil
+                                  (and (= "UnaryOperator" (:kind x)) (= "&" (:opcode x)) (not (:isPostfix x))
+                                       (some-> (nttp (strip (first (:inner x)))) ety scalar?))
+                                  x
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (some addr (:inner x))))
+          x (:x a)
+          pt (str (get-in tp [:type :qualType]))
+          ptr? (boolean (re-find #"\*\s*(const\s*|volatile\s*)*$" pt))
+          int? (and (not ptr?) (not (re-find #"[&\[(<:]" pt)))]
+      (if-let [u (addr x)]
+        (soft-diag! p (long (or (:_b u) (:b a))) "lvalue required as unary '&' operand")
+        (when (< (.-year p) 2011)
+          (let [rs (refs x)]
+            (cond
+              (and int? (some #(re-find #"[*\[]" (ety (nttp %))) rs))
+              (soft-diag! p (long (:b a)) (str "'" (tok-text p (:b a) (:e a)) "' is not a valid template argument for type '" pt "' because it is a non-constant expression"))
+              (and ptr? (seq rs)
+                   (let [s (strip x)]
+                     (not (or (nttp s)
+                              (and (= "UnaryOperator" (:kind s)) (= "&" (:opcode s)) (= "DeclRefExpr" (:kind (strip (first (:inner s))))))))))
+              (soft-diag! p (long (:b a)) (str "could not convert template argument '" (tok-text p (:b a) (:e a)) "' to '" pt "'")))))))))
+
 (defn parse-template-args
   "A template-argument-list at its <: the arguments ({:k :type :t T}, {:k :expr :x node}, {:k :tmpl :name name}, each with
   :b :e and :pack), the cursor after the > (one half of a split >>)."
@@ -734,6 +779,8 @@
                               false)]
                     (when bad
                       (soft-diag! p b (str "type/value mismatch at argument " (inc i) " in template parameter list for '" (:name tmpl) "'")))))
+              _ (when (and tmpl (= :expr (:k a)) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b))
+                  (nttp-arg-check! p a (get (vec (:tps tmpl)) (count out))))
               a (if (accept! p "...") (assoc a :pack true) a)
               out (conj out a)]
           (cond (accept! p ",") (recur out)
@@ -3293,7 +3340,11 @@
                 (and (identical? :id (.-k t)) (.equals nm (.-s t)) (main-tok? p i)
                      (let [^T pv (tok-at p (dec i)) ^T nx (tok-at p (inc i))]
                        (or (and (t= pv "using") (t= nx "="))
-                           (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                           (and (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                                ;; (cpp-def: a type template-parameter, `template <class T, class S>`, declares its name in its
+                                ;; template alone, no failed declaration's: template/pr70466-1.C's `S::*` in another template)
+                                (not (and (#{"class" "typename"} (.-s pv)) (>= i 2) (#{"<" ","} (.-s (tok-at p (- i 2))))
+                                          (#{"," ">" "=" ">>"} (.-s nx)))))
                            (and (or (t= nx ";") (t= nx "[") (t= nx ",") (t= nx ")") (t= nx "("))
                                 (loop [j (dec i)] (cond (< j (max 0 (- i 64))) false
                                                         (or (t= (tok-at p j) ";") (t= (tok-at p j) "{") (t= (tok-at p j) "}")) false
