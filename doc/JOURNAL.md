@@ -20968,3 +20968,33 @@ Queue 547, cycle 2, continued from 1387eccfd. Each item below has its own commit
 - **Checks**: oi's 38 C-API programs (the run corpus's @cstubs rows), `bin/oi check --only-list`, all pass on the native path after the
   header changes.
 - **Records**: the suite's opam/re/expect row stays "class". How a ppx program enters the records is the user's DECISION, in the report.
+
+## 2026-11-25 — re/expect's own record, read by reap's OCaml eval cell: DECISION 547-1 (b) (queue 547, VM)
+
+DECISION 547-1 was how re's lib_test/expect, which passes on oi through ppx_expect's driver (`bin/oi ppx expect`, the entry above),
+enters the records. The user's answer, 2026-11-25 (the queue's tasks/ANSWERS.md): (b), "its own record, `bin/oi ppx expect --record`
+-> test/ocaml/check-ppx-oi.edn, read by reap's OCaml eval cell". The alternatives were (a), making opam/re/expect a run row of the suite
+corpus, so that every oi suite check would need the hours-long ppx chain first, and (c), keeping the class and naming the pass in its
+reason only, outside the records.
+
+- `bin/oi ppx expect --record` (bin/lib/oi/ppx.bash, ppx_expect_record) writes test/ocaml/check-ppx-oi.edn, `[PROGRAM RESULT REASON]` as
+  check-suite-oi-native.edn's rows. It writes only from a passing whole run, with re/expect passing and the negative control differing;
+  any other run records nothing and says so.
+- reap (test/reap/main.ae): a source's `:override {:file F :what W}` puts F's rows in place of the source's rows of the same ids
+  (override-apply), before the cell's classes judge them. A pass counts as a pass. A non-pass is an entry of its own result and reason,
+  judged like any other row. A missing F, or an id that F holds and the source does not, is a problem. Three self-test cases were added
+  (11 in all). test/reap/cells.edn gives the OCaml eval cell's suite source `:override` on check-ppx-oi.edn. The alternative was a third
+  source of the cell: it would count opam/re/expect twice, once as the suite row's class and once as a pass. Reusing `:other-level`,
+  AOT's rule for classed cases another level passes, was also set aside: it can take out only classed cases, so a failing ppx row would
+  leave the class standing.
+- The record comes from one whole chain in this worktree. The pinned OCaml and opam tarballs were copied from 548's worktree and checked
+  by their pins. The dump cache, keyed by the native library's key and each unit's text, was copied as a seed. The chain was
+  `bin/ci musl ensure`, `bin/oi ppx gen`, `bin/oi ppx jst-config`, `OI_TIMEOUT=600 bin/oi ppx pp` (67 files, 0 failures) and then
+  `OI_TIMEOUT=1200 bin/oi ppx expect --record`. re/expect passes, 27 files' corrected text equal to the file. The control, test_re.ml's
+  first `[%expect]` altered, differs in test_re.ml.corrected, as a control must. The record's one row is `["opam/re/expect" "pass" ""]`.
+- bin/reap at the base, 6e6290954: 56 of 56 cells, 0 problems, OCaml eval 604 / 2 / 1. With the override and the record, OCaml eval is
+  605 / 1 / 1. The suite source has 126 passes and 6 not; the class opam-not-run drops from 2 to 1, leaving sexplib0_test. The judgment
+  then differed from test/reap/matrix.edn (5 problems), so `bin/reap --record` and `bin/crops-score --record` (OCaml's completeness
+  0.9602 to 0.9606) were rerun. After them, bin/reap reports 0 problems, `bin/crops-score --judge --strict` 0 problems and
+  bin/records-check 0.
+- The survey's "As built: ppx_expect on oi" Records bullet now describes the record.

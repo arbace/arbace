@@ -16,7 +16,9 @@
 #                      texts kept in .tmp/oi/ppx/pp/PKG/FILE (OI_PPX_PP), which the staging gives a unit its dune file preprocesses
 #                      by `(pps ...)`
 #   bin/oi ppx jst-config  (queue 547) jst-config's config.h for oi's C target (discover.ml ported), .tmp/oi/ppx/jst-config
-#   bin/oi ppx expect  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its negative control
+#   bin/oi ppx expect [--record]  (queue 547, S3) re's lib_test/expect run on oi, judged by its own [%expect] blocks, with its
+#                      negative control; --record (DECISION 547-1 (b), the user's) writes test/ocaml/check-ppx-oi.edn from a passing
+#                      whole run (re/expect passes and the control differs), else records nothing
 
 PPX=$OI_DIR/ppx
 PPX_ROWS=$root/test/ocaml/ppx-programs.tsv
@@ -168,7 +170,25 @@ cmd_ppx_expect() {
   if [ "${cv%% *}" = pass ]; then echo "control (test_re.ml's first [%expect] altered): passes: the judgment passes what differs"; v="fail: the control passed"
   else echo "control (test_re.ml's first [%expect] altered): $cv, as a control must"; fi
   echo "oi: ppx expect: re/expect $v"
-  [ "${v%% *}" = pass ]
+  [ "${v%% *}" = pass ] || { [ "$RECORD" = 1 ] && echo "oi: ppx expect: not a passing whole run: nothing recorded"; return 1; }
+  [ "$RECORD" = 1 ] && ppx_expect_record
+  return 0
+}
+
+# ppx_expect_record (DECISION 547-1 (b), the user's, 2026-11-25): test/ocaml/check-ppx-oi.edn, the rows of a passing whole run of
+# cmd_ppx_expect alone ([PROGRAM RESULT REASON] as test/ocaml/check-suite-oi-native.edn's); reap's OCaml eval cell reads it over the
+# suite record's row of the same program (test/reap/cells.edn's :override)
+ppx_expect_record() {
+  local out=$root/test/ocaml/check-ppx-oi.edn
+  { echo ";; oi's results of the ppx programs judged by their own tests (bin/oi ppx expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built:"
+    echo ";; ppx_expect on oi\"; DECISION 547-1 (b), the user's, 2026-11-25): [PROGRAM RESULT REASON] as test/ocaml/check-suite-oi-native.edn;"
+    echo ";; written only from a passing whole run (re's lib_test/expect, its 27 files preprocessed by ppx_expect's driver on oi, passes by"
+    echo ";; its own [%expect] blocks and the negative control differs). reap's OCaml eval cell reads it over the suite record's row of the"
+    echo ";; same program. Read with the Clojure reader."
+    echo "["
+    echo ' ["opam/re/expect" "pass" ""]'
+    echo "]"; } > "$out.new"
+  mv "$out.new" "$out"; echo "oi: ppx expect: recorded $out"
 }
 
 # ppx_run_tree ID TREE: ppx_run with the row's source tree (@PPX@/work/re in its ARGS) replaced by TREE
@@ -268,13 +288,13 @@ cmd_ppx_check() {
 }
 
 cmd_ppx() {
-  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|expect"
+  local verb=${1:-}; [ -n "$verb" ] || die "usage: bin/oi ppx gen|check|run ID|pp [DRIVER...]|jst-config|expect [--record]"
   shift
   case $verb in
     gen) cmd_ppx_gen "$@" ;;
     pp) ppx_env; cmd_ppx_pp "$@" ;;
     jst-config) ppx_env; cmd_ppx_jst_config ;;
-    expect) ppx_env; cmd_ppx_expect ;;
+    expect) ppx_env "$@"; cmd_ppx_expect ;;
     run) local id=${1:-}; [ -n "$id" ] || die "usage: bin/oi ppx run ID"; shift; ppx_env "$@"; ppx_run "$id" ;;
     check) cmd_ppx_check "$@" ;;
     *) die "unknown ppx verb $verb" ;;

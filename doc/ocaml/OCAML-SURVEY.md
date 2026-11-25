@@ -5084,5 +5084,10 @@ Arbace's typer.
   - Negative control: test_re.ml's first `[%expect]` is altered and the file is rewritten again by the driver on oi. Its
     test_re.ml.corrected must differ.
   - Result: pass, 27 of 27 files equal, and the control differs.
-- **Records**: opam/re/expect stays "class" in the suite records. The ppx programs are not rows of the suite corpus; see the report's
-  DECISION on how the row enters the records.
+- **Records** (DECISION 547-1 (b), the user's, 2026-11-25): re/expect has a record of its own. `bin/oi ppx expect --record` writes
+  `test/ocaml/check-ppx-oi.edn` (`[PROGRAM RESULT REASON]` as the suite records), only from a passing whole run: re/expect passes and
+  the control differs; any other run records nothing. The suite records' opam/re/expect row stays "class", since the ppx programs are
+  not rows of the suite corpus. reap's OCaml eval cell reads the new record over it (test/reap/cells.edn's `:override` on the suite
+  source, test/reap/main.ae's `override`): the record's row takes the place of the suite row of the same program, a pass counted as one,
+  a non-pass judged by the suite's classes as any other row. A record missing, or naming a program the suite record does not hold, is
+  a problem of reap's.
