@@ -21025,3 +21025,16 @@ Queue 548 (T3 of DECISION 539b-1), on 547's head 6e6290954. Survey: doc/ocaml/OC
 - **Result**: `bin/oi ppx expect sexplib0` passes (sexplib0_test.ml's corrected text equal to the file); the control (first
   `[%expect]` altered, rewritten on oi) differs. `bin/oi ppx expect` takes re and sexplib0 (both by default).
 - **Records**: none changed; sexplib0_test stays "class" pending DECISION 547-1. The host's commands are in the report.
+
+## 2026-11-25 — sexplib0_test's own record beside re/expect's: OCaml eval 606 / 0 / 1 (queue 548 round 2, VM)
+
+547's follow-up 43efed387 (DECISION 547-1 (b), the user's: `bin/oi ppx expect --record` writes test/ocaml/check-ppx-oi.edn, which reap's
+OCaml eval cell reads over the suite rows through `:override`) merged into 548-ocaml-ppx-jane with a merge commit. The conflicts were
+bin/lib/oi/ppx.bash (548's table of expect libraries against 547's single program), this journal (both entries kept) and the survey.
+The record is now a row per library run (opam/re/expect, opam/sexplib0/sexplib0_test), written only when every one passes and each
+control differs; otherwise nothing is recorded. The alternative, a row per library whatever the other's result, was not taken: the
+brief and 547-1 (b) record from a passing whole run. The merge left native_key alone (bin/oi and arbace/repr/ocaml unchanged), so the
+typing cache stayed warm. One whole run, `OI_TIMEOUT=1200 bin/oi ppx expect --record`, passed both (re 27 of 27, sexplib0_test 1 of 1,
+both controls differ) and wrote the two rows. Then `bin/reap --record` and `bin/crops-score --record`: OCaml eval goes from
+605 / 1 / 1 to 606 / 0 / 1, the suite source from 126 / 6 to 127 / 5, and opam-not-run leaves the eval cell. `bin/reap` (56 of 56,
+0 problems), `bin/crops-score --judge --strict` (0 problems) and `bin/records-check` (9 pairs, 0 problems) pass.
