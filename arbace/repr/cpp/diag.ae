@@ -4530,7 +4530,248 @@
         (report! x "use of built-in parameter pack '__integer_pack' outside of a template")))
     (vec (distinct out))))
 
-(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack]))
+;; Queue 577 (2026-11-25): GCC's __atomic built-ins' arguments where every argument is known (the GCC 15.2 manual's "Built-in
+;; Functions for Memory Model Aware Atomic Operations": the generic __atomic_load (3 arguments), __atomic_store (3),
+;; __atomic_exchange (4) and __atomic_compare_exchange (6) take pointers to objects of one size, their memory orders integers;
+;; the _n forms and the fetch operations take a pointer to an integral type, then their values and orders), with the words GCC's
+;; errors have in the tests' dg-error lines (template/builtin-atomic-overloads5.C, -6.C). A call none of whose arguments names a
+;; template parameter is checked where it is written, also in a template's argument list (GCC's "fully specified" call): the
+;; partial specializations' arguments, the only place the parser keeps such a call as tokens alone (`decltype(__atomic_load
+;; (int()))`). An error is given at the line its `(` is spelled on, a macro's definition line when a macro wrote it (the
+;; tokens' spellings, arbace.repr.cpp.native/*spellings*), the first one a call breaks, in the order the tests state:
+;; - the generic forms: the number of arguments ("incorrect number of arguments to function 'F'"); argument 1 a pointer to a
+;;   non-void object ("argument 1 of 'F' must be a non-void pointer type"), of nonzero size ("... must be a pointer to a nonzero
+;;   size object"); each other pointer argument a pointer ("argument N of 'F' must be a pointer type"), not to a function ("...
+;;   must not be a pointer to a function"), to an object of argument 1's size ("size mismatch in argument N of 'F'"), the output
+;;   (load's 2, exchange's 3, compare_exchange's 2) not to a const one ("... must not be a pointer to a 'const' type"), none to a
+;;   volatile one ("... must not be a pointer to a 'volatile' type"); each memory order an integer ("non-integer memory model
+;;   argument N of 'F'"; a value out of range is a warning only, -Winvalid-memory-model);
+;; - the _n forms and the fetch operations: an argument ("too few arguments to function 'F'"), argument 1 a pointer ("operand
+;;   type 'T' is incompatible with argument 1 of 'F'"), then the number ("too few ..." / "too many arguments to function 'F'").
+;; The template argument list the call breaks is invalid: "template argument N is invalid" for the argument the call is in, at
+;; its first token, and for each enclosing argument list's argument at the `>` closing the list inside it (the tests' lines).
+;; An argument the check does not know the type of (other than `T()`, `std::declval<T>()` and a number) leaves the call alone.
+(def ^:private atomic-generic {"__atomic_load" {:n 3 :ptrs [2] :out 2 :orders [3]}
+                               "__atomic_store" {:n 3 :ptrs [2] :out nil :orders [3]}
+                               "__atomic_exchange" {:n 4 :ptrs [2 3] :out 3 :orders [4]}
+                               "__atomic_compare_exchange" {:n 6 :ptrs [2 3] :out 2 :orders [5 6]}})
+
+(def ^:private atomic-sized
+  (into {"__atomic_load_n" 2 "__atomic_store_n" 3 "__atomic_exchange_n" 3 "__atomic_compare_exchange_n" 6}
+        (for [op ["add" "sub" "and" "xor" "or" "nand"] nm [(str "__atomic_fetch_" op) (str "__atomic_" op "_fetch")]] [nm 3])))
+
+(def ^:private atomic-type-words
+  #{"void" "bool" "char" "short" "int" "long" "signed" "unsigned" "float" "double" "wchar_t" "char8_t" "char16_t" "char32_t" "__int128"})
+
+(defn atomic-builtin-args
+  "The __atomic built-ins' arguments' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [^objects toks (:toks u) ^longs spell (:spell u)
+        out (java.util.ArrayList.)]
+    (when (and toks spell)
+      (let [n (alength toks)
+            ts (fn ^String [i] (.-s ^arbace.repr.cpp.parse.T (aget toks (int i))))
+            tk (fn [i] (.-k ^arbace.repr.cpp.parse.T (aget toks (int i))))
+            line-of (fn [i] (let [i (long i) so (aget spell (int i))
+                                  ^arbace.repr.cpp.parse.T t (aget toks (int i))]
+                              (cond (>= so 0) (first (line-col starts so))
+                                    (and (= main (.-f t)) (nil? (.-mac t))) (first (line-col starts (.-o t)))
+                                    :else nil)))
+            report! (fn [i msg] (when-let [l (line-of i)] (.add out {:line l :col 1 :kind :error :rule :atomic-args :msg msg})))
+            classes (java.util.HashMap.) tdefs (java.util.HashMap.)
+            _ (walk-nodes (fn [x _]
+                            (case (:kind x)
+                              "CXXRecordDecl" (when (and (string? (:name x)) (or (:completeDefinition x) (not (.containsKey classes (:name x)))))
+                                                (.put classes (:name x) x))
+                              ("TypedefDecl" "TypeAliasDecl") (when (string? (:name x)) (.put tdefs (:name x) (str (get-in x [:type :qualType]))))
+                              nil))
+                          (:nodes u) nil)
+            words (fn [^String s] (vec (re-seq #"[A-Za-z_]\w*|::|[*&()\[\]<>,]|\d+" s)))
+            ;; a type of the tokens' texts `ws`: {:k :int|:float|:void|:class|:ptr|:fnptr ...}, or nil
+            int-words (fn [ws] (let [s (set ws)]
+                                 (cond (s "char") 1 (s "bool") 1 (s "short") 2 (s "__int128") 16 (s "long") 8
+                                       (some s ["int" "signed" "unsigned" "wchar_t" "char32_t"]) 4 (s "char16_t") 2 (s "char8_t") 1 :else nil)))
+            ty (fn ty [ws depth]
+                 (let [ws (vec ws)
+                       ws (if (and (= "std" (first ws)) (= "::" (second ws))) (subvec ws 2) ws)]
+                   (cond
+                     (> (long depth) 8) nil
+                     (re-matches #"[^(]*\(\s*\*\s*\)\s*\(.*\)" (str/join " " ws)) {:k :fnptr}
+                     (= "*" (peek ws)) (when-let [t (ty (pop ws) (inc (long depth)))] {:k :ptr :to t})
+                     :else
+                     (let [cv (set (filter #{"const" "volatile"} ws))
+                           ws (vec (remove #{"const" "volatile" "class" "struct" "typename"} ws))]
+                       (cond
+                         (some #{"*" "&" "(" "[" "<"} ws) nil
+                         (and (seq ws) (every? atomic-type-words ws))
+                         (let [s (str/join " " ws)]
+                           (cond (= ws ["void"]) {:k :void :cv cv}
+                                 (some #{"float" "double"} ws) (when-let [z (float-type-size s)] {:k :float :name s :size z :cv cv})
+                                 (int-words ws) {:k :int :name s :size (int-words ws) :cv cv}
+                                 :else nil))
+                         (and (= 1 (count ws)) (.containsKey tdefs (first ws)))
+                         (when-let [t (ty (words (.get tdefs (first ws))) (inc (long depth)))] (update t :cv (fnil into #{}) cv))
+                         (and (= 1 (count ws)) (#{"__UINT64_TYPE__" "__UINT32_TYPE__"} (first ws)))
+                         (if (= "__UINT64_TYPE__" (first ws)) {:k :int :name "unsigned long" :size 8 :cv cv} {:k :int :name "unsigned int" :size 4 :cv cv})
+                         (and (= 1 (count ws)) (.containsKey classes (first ws)))
+                         (let [c (.get classes (first ws))
+                               fs (filter #(= "FieldDecl" (:kind %)) (:inner c))
+                               simple (and (:completeDefinition c) (empty? (:bases c))
+                                           (every? #(#{"FieldDecl" "CXXRecordDecl" "AccessSpecDecl"} (:kind %)) (:inner c)))
+                               fsz (fn [f] (let [q (str (get-in f [:type :qualType]))
+                                                 [_ el k] (re-matches #"(.*?)\s*\[(\d+)\]" q)
+                                                 el (or el q)
+                                                 ew (words el)
+                                                 z (when (every? atomic-type-words ew) (if (some #{"float" "double"} ew) (float-type-size (str/join " " ew)) (int-words ew)))]
+                                             (when z (* (long z) (if k (Long/parseLong k) 1)))))
+                               szs (map fsz fs)]
+                           {:k :class :name (first ws) :complete (boolean (:completeDefinition c)) :cv cv
+                            :size (when (and simple (every? some? szs)) (if (empty? fs) 1 (reduce + 0 szs)))})
+                         :else nil)))))
+            ;; an argument's type from its tokens i..j (exclusive): nil when unknown
+            arg-ty (fn [^long i ^long j]
+                     (let [ws (mapv ts (range i j))
+                           ws (if (and (= "std" (first ws)) (= "::" (second ws))) (subvec ws 2) ws)]
+                       (cond
+                         (and (= 1 (count ws)) (identical? :num (tk i)))
+                         (if (re-find #"[.eEpP]" (first ws)) {:k :float :name "double" :size 8} {:k :int :name "int" :size 4})
+                         (and (>= (count ws) 5) (= "declval" (first ws)) (= "<" (second ws)) (= [">" "(" ")"] (subvec ws (- (count ws) 3))))
+                         (ty (subvec ws 2 (- (count ws) 3)) 0)
+                         (and (>= (count ws) 3) (= ["(" ")"] (subvec ws (- (count ws) 2))) (not (some #{"(" ")" "<"} (subvec ws 0 (- (count ws) 2)))))
+                         (ty (subvec ws 0 (- (count ws) 2)) 0)
+                         :else nil)))
+            tname (fn [t] (case (:k t) :class (:name t) (:int :float) (:name t) :void "void" nil))
+            ;; the first error of the call of `nm` with argument types `as` (a vector, entries possibly nil): a message or nil
+            judge (fn [^String nm as]
+                    (let [na (count as)]
+                      (if-let [{want :n ptrs :ptrs outi :out orders :orders} (atomic-generic nm)]
+                        (cond
+                          (not= na want) (str "incorrect number of arguments to function '" nm "'")
+                          (some nil? as) nil
+                          :else
+                          (let [a1 (first as)]
+                            (cond
+                              (or (not= :ptr (:k a1)) (= :void (:k (:to a1)))) (str "argument 1 of '" nm "' must be a non-void pointer type")
+                              (not (#{:int :float :class} (:k (:to a1)))) nil
+                              (= 0 (:size (:to a1))) (str "argument 1 of '" nm "' must be a pointer to a nonzero size object")
+                              :else
+                              (or (some (fn [k]
+                                          (let [a (nth as (dec (long k)))]
+                                            (cond
+                                              (= :fnptr (:k a)) (str "argument " k " of '" nm "' must not be a pointer to a function")
+                                              (not= :ptr (:k a)) (str "argument " k " of '" nm "' must be a pointer type")
+                                              (= :fnptr (:k (:to a))) (str "argument " k " of '" nm "' must not be a pointer to a function")
+                                              (and (:size (:to a)) (:size (:to a1)) (not= (long (:size (:to a))) (long (:size (:to a1)))))
+                                              (str "size mismatch in argument " k " of '" nm "'")
+                                              (and (= k outi) (contains? (:cv (:to a)) "const")) (str "argument " k " of '" nm "' must not be a pointer to a 'const' type")
+                                              (contains? (:cv (:to a)) "volatile") (str "argument " k " of '" nm "' must not be a pointer to a 'volatile' type")
+                                              :else nil)))
+                                        ptrs)
+                                  (some (fn [k] (when (= :float (:k (nth as (dec (long k))))) (str "non-integer memory model argument " k " of '" nm "'"))) orders)))))
+                        (when-let [want (atomic-sized nm)]
+                          (let [a1 (first as)]
+                            (cond
+                              (zero? na) (str "too few arguments to function '" nm "'")
+                              (nil? a1) nil
+                              (not= :ptr (:k a1)) (when-let [s (tname a1)] (str "operand type '" s "' is incompatible with argument 1 of '" nm "'"))
+                              (not (and (= :int (:k (:to a1))) (#{1 2 4 8 16} (:size (:to a1))))) nil
+                              (< na (long want)) (str "too few arguments to function '" nm "'")
+                              (> na (long want)) (str "too many arguments to function '" nm "'")
+                              :else nil))))))]
+        (walk-nodes
+         (fn [x _]
+           (when-let [[b e] (and (= "ClassTemplatePartialSpecializationDecl" (:kind x)) (:_b x) (:_e x) [(long (:_b x)) (min (long (:_e x)) (dec n))])]
+             (let [tps (set (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner x)))
+                   ;; the specialization's argument list: the `<` after its name, past its template head
+                   start (some (fn [i] (when (and (= (:name x) (ts i)) (= "<" (ts (inc i))) (#{"struct" "class" "union"} (ts (dec i)))) (inc i)))
+                               (range (inc b) e))]
+               (when start
+                 ;; frames: [:angle argi first-token-of-arg] or [:paren]
+                 (loop [i (inc (long start)) frames [[:angle 1 (inc (long start))]]]
+                   (when (and (<= i e) (seq frames))
+                     (let [s (ts i) top (peek frames)]
+                       (cond
+                         (and (identical? :id (tk i)) (or (atomic-generic s) (atomic-sized s)) (< (inc i) e) (= "(" (ts (inc i))))
+                         (let [lp (inc i)
+                               ;; the arguments, at depth 0 of the call's parentheses
+                               [args rp] (loop [j (inc lp) d 0 a (inc lp) acc []]
+                                           (if (> j e) [nil nil]
+                                               (let [s (ts j)]
+                                                 (cond (#{"(" "[" "{"} s) (recur (inc j) (inc d) a acc)
+                                                       (and (#{")" "]" "}"} s) (pos? d)) (recur (inc j) (dec d) a acc)
+                                                       (= ")" s) [(if (and (empty? acc) (= a j)) [] (conj acc [a j])) j]
+                                                       (and (= "," s) (zero? d)) (recur (inc j) d (inc j) (conj acc [a j]))
+                                                       :else (recur (inc j) d a acc)))))]
+                           (if-not rp
+                             nil
+                             (do
+                               (when-not (some (fn [[a z]] (some #(contains? tps (ts %)) (range a z))) args)
+                                 (when-let [msg (judge s (mapv (fn [[a z]] (arg-ty a z)) args))]
+                                   (report! lp msg)
+                                   ;; the enclosing argument lists' arguments, innermost first
+                                   (let [angles (filter #(= :angle (first %)) frames)
+                                         inner (last angles)]
+                                     (when inner (report! (nth inner 2) (str "template argument " (second inner) " is invalid")))
+                                     ;; an enclosing list's argument at the `>` closing the list inside it
+                                     (let [av (vec angles)]
+                                       (loop [k (dec (count av)) j (inc (long rp)) a 0]
+                                         (when (and (pos? k) (<= j e))
+                                           (let [s (ts j)]
+                                             (cond (and (= "<" s) (#{:id :kw} (tk (dec j)))) (recur k (inc j) (inc a))
+                                                   (and (= ">" s) (pos? a)) (recur k (inc j) (dec a))
+                                                   (= ">" s) (do (report! j (str "template argument " (second (nth av (dec k))) " is invalid"))
+                                                                 (recur (dec k) (inc j) 0))
+                                                   :else (recur k (inc j) a)))))))))
+                               (recur (inc (long rp)) frames))))
+                         (= "<" s) (if (and (pos? i) (#{:id :kw} (tk (dec i)))) (recur (inc i) (conj frames [:angle 1 (inc i)])) (recur (inc i) frames))
+                         (= ">" s) (if (= :angle (first top)) (recur (inc i) (pop frames)) (recur (inc i) frames))
+                         (#{"(" "[" "{"} s) (recur (inc i) (conj frames [:paren]))
+                         (#{")" "]" "}"} s) (recur (inc i) (if (= :paren (first top)) (pop frames) frames))
+                         (and (= "," s) (= :angle (first top))) (recur (inc i) (conj (pop frames) [:angle (inc (long (second top))) (inc i)]))
+                         :else (recur (inc i) frames)))))))))
+         (:nodes u) nil)))
+    (vec (distinct out))))
+
+;; Queue 577 (2026-11-25): GCC's vector manglings before ABI version 4 (the GCC 15.2 manual's -fabi-version: "Version 4, which
+;; first appeared in G++ 4.5, implements a standard mangling for vector types"; before it a vector type's mangled name gives its
+;; element type, not its size, abi/mangle41.C's PR c++/41959): with -fabi-version=1, 2 or 3 (the last such option, among the
+;; g++ options too, *driver-args*; 0 is the latest), two functions of one name in one namespace whose parameter types differ only in vectors of one element type and
+;; different sizes have one mangled name, GCC's "'D' conflicts with a previous mangle" at the later one's name.
+(defn abi-vector-manglings
+  "The pre-version-4 vector manglings' check of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [abi (last (keep #(when-let [[_ v] (re-matches #"-fabi-version=(\d+)" (str %))] (Long/parseLong v)) (concat (:args u) *driver-args*)))
+        out (java.util.ArrayList.)]
+    (when (and abi (<= 1 (long abi) 3))
+      (let [vecs (into {} (for [n (:nodes u) :when (= "TypedefDecl" (:kind n))
+                                :let [a (some #(when (= "vector_size" (gnu-attr-name %)) %) (gnu-attrs-of n))]
+                                :when a]
+                            [(:name n) [(str (:_arg a)) (str/trim (str/replace (str (get-in n [:type :qualType])) #"^\s*__attribute__\s*\(\(.*\)\)\s*" ""))]]))
+            vec-el (fn [^String qt]
+                     (let [q (str/trim (str/replace qt #"\b(?:const|volatile)\b" ""))]
+                       (if-let [[_ el] (vecs q)]
+                         el
+                         (when-let [[_ _ el] (re-matches #"__attribute__\s*\(\(\s*__vector_size__\s*\(\s*(\d+)\s*\)\s*\)\)\s*(.*)" q)] (str/trim el)))))
+            params (fn [f] (vec (for [p (:inner f) :when (= "ParmVarDecl" (:kind p))] (str (get-in p [:type :qualType])))))
+            same-mangling? (fn [pa pb]
+                             (and (= (count pa) (count pb)) (not= pa pb)
+                                  (every? true? (map (fn [a b] (or (= a b) (let [ea (vec-el a) eb (vec-el b)] (and ea (= ea eb))))) pa pb))))]
+        (letfn [(scope [nodes]
+                  (let [fns (filter #(and (= "FunctionDecl" (:kind %)) (string? (:name %)) (= main (get-in % [:loc :file]))) nodes)]
+                    (doseq [[i b] (map-indexed vector fns)
+                            :let [pb (params b)
+                                  a (some #(when (and (= (:name %) (:name b)) (same-mangling? (params %) pb)) %) (take i fns))]
+                            :when a]
+                      (when-let [o (get-in b [:loc :offset])]
+                        (let [[l c] (line-col starts (long o))
+                              [_ ret] (re-find #"^(.*?)\s*\(" (str (get-in b [:type :qualType])))]
+                          (.add out {:line l :col c :kind :error :rule :abi-mangling
+                                     :msg (str "'" ret " " (:name b) "(" (str/join ", " pb) ")' conflicts with a previous mangle")}))))
+                    (doseq [ns nodes :when (= "NamespaceDecl" (:kind ns))] (scope (:inner ns)))))]
+          (scope (:nodes u)))))
+    (vec out)))
+
+(def checks (atom [type-exprs undeclared redefinitions gnu-attrs constexpr-bodies constexpr-redecls jumps coroutines template-heads exception-specs unions nsdmi-uses linkage-conflicts alloc-templates tparam-shadows undeduced-uses friend-default-targs auto-void-returns unexpanded-packs builtin-fp-args reinterpret-prvalues gnu-rules changes-meaning eh-runtime musttail flexible-arrays unavailable trait-signatures pragmas labels-as-values case-values stmt-expr-constexpr gnu-asm gnu-packed gnu-interface object-sizes vla-types operand-types fixed-point-literals gnu-inline-and-abi va-arg-pack read-only-modify constexpr-options satisfaction-changes old-inheriting-ctors builtin-operator-new invocable-traits error-attr-calls builtin-values builtin-launder coroutine-handle-interface integer-pack atomic-builtin-args abi-vector-manglings]))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; cpp-diag-b (2026-11-22): the checks of the burst's stream cpp-diag-b, appended to `checks` (each rule from the standard, GCC's
@@ -7617,7 +7858,10 @@
   (try
     (binding [*walk-cache* (atom nil)]
     (let [sema? (not= "0" (System/getenv "REPR_CPP_DIAG_SEMA"))
-          u (assoc (binding [ps/*full-headers* sema? native/*gnu-floats* true lit/*gnu-floats* true] (native/parse-file path main std args))
+          u (assoc (binding [ps/*full-headers* sema? native/*gnu-floats* true lit/*gnu-floats* true
+                             ;; (queue 577: the tokens' spellings, for atomic-builtin-args, in a file that calls an __atomic built-in)
+                             native/*spellings* (str/includes? (latin1 path) "__atomic_")]
+                     (native/parse-file path main std args))
                    :dir (.getParent (.getAbsoluteFile (java.io.File. path))) :std std :args (vec args))
           _ (reset! *walk-cache* {:root (:nodes u)})
           src (latin1 path)
