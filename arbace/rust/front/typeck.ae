@@ -394,6 +394,20 @@
       :dyn (str "dyn:" (first (:principal (second t))))
       nil)))
 
+;; queue 561 (C6 L3): the interface's inherent impls of T's key; for the root file's own ADT, those of its interface path
+;; that another module file of the crate holds (adler2's `self.compute(bytes)` in lib.rs on its Adler32, the method in
+;; algo.rs' `impl Adler32`), the root file's own impls left to local-impls
+(defn- inherent-paths [t]
+  (let [st (shallow t)]
+    (if (and (= :adt (first st)) (number? (second st)))
+      ;; the root file's own impls (local ones, or of the root module itself) left out, should the interface hold them too (an
+      ;; out-of-line module the file declares, adler2's algo, is another file's: its impls kept)
+      (when-let [p (c/ext-of-local (second st))]
+        (let [cp @(requiring-resolve 'arbace.rust.front.resolve/*crate-path*)]
+          (remove (fn [ip] (let [par (c/path-parent ip)] (or (c/local-def-of-ext ip) (= par cp))))
+                  (get (:inherent c/*si*) p))))
+      (when-let [k (self-key t)] (get (:inherent c/*si*) k)))))
+
 (defn- std-impl-instance
   "A std impl instantiated: [impl-path args self-ty trait-ref]"
   [ip]
@@ -518,7 +532,7 @@
                                            :else (get (:trait-impls c/*si*) trait)))]
                             (std-impl-instance ip))))
                 (concat (local-impls false nil t)
-                        (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))]
+                        (for [ip (inherent-paths t)] (std-impl-instance ip))))]
     ;; candidate assembly and winnowing (select.rs): a goal with inference variables in it that two impls match is
     ;; ambiguous (no impl selected, nothing bound; the obligation stays pending), else the one impl that matches
     (let [vars? (or (has-var? t) (some has-var? targs))
@@ -935,7 +949,7 @@
                          (do (rollback! s2) nil))
                        nil)))
                  (concat (local-impls false nil t)
-                         (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+                         (for [ip (inherent-paths t)] (std-impl-instance ip))))
            (do (rollback! s) nil)))
      ;; RF13c: a parameter's where clauses (assemble_inherent_candidates_from_param): the bound traits' methods, in scope
      ;; or not (`self.0.fmt(f)` under `T: fmt::Debug` with only the module `fmt` imported), Self the parameter
@@ -1035,7 +1049,7 @@
                     (do (rollback! s) nil))
                   nil)))
             (concat (local-impls false nil t)
-                    (when-let [k (self-key t)] (for [ip (get (:inherent c/*si*) k)] (std-impl-instance ip)))))
+                    (for [ip (inherent-paths t)] (std-impl-instance ip))))
       (some (fn [tr]
               (when-let [[def k] (trait-item tr nm)]
                 (if (and (str/starts-with? (str k) "AssocConst") (or (number? def) (get (:consts c/*si*) def)))
@@ -1217,19 +1231,23 @@
            (let [raw [:adt (second r) (fresh-args (second r))]]
              (when *user-self* (reset! *user-self* raw))
              (probe-assoc-fn [:adt (second r) (fresh-args (second r))] (:ident (peek segs)))))))
-    (when (= 2 (count segs))
+    ;; (queue 566 (C6 L1): or a longer one whose prefix is no ADT, an alias: `libc::c_int::MAX`, the prefix's partial resolution
+    ;; at its span, std's READ_LIMIT)
+    (when (>= (count segs) 2)
       (let [sp (:span path)
-            base-name (:ident (first segs))
+            bsegs (vec (butlast segs))
+            base-name (str/join "::" (map :ident bsegs))
             psp (when (vector? sp) [(nth sp 0) (nth sp 1) (nth sp 0) (+ (long (nth sp 1)) (count base-name))])
-            base-res (or (get c/*res* psp) (:res path))
-            bty (try (body-ty {:kind :path :path {:segs [(first segs)] :res base-res :span psp}}) (catch Throwable _ nil))
+            base-res (or (get c/*res* psp) (when (= 2 (count segs)) (:res path)))
+            bty (when (or (= 2 (count segs)) base-res)
+                  (try (body-ty {:kind :path :path {:segs bsegs :res base-res :span psp}}) (catch Throwable _ nil)))
             ;; queue 472: a struct, enum or union written without arguments as a value path's self type (`Box::from_raw_in`):
             ;; every parameter a fresh variable, the defaulted ones too (a type position's lowering takes the defaults: Box's
             ;; A was Global, so try_new_uninit_in's `Box::from_raw_in(ptr, alloc)` at `Box<_, Global>`, its Result's error
             ;; type left `_`), as for a longer path above
             bty (let [st (some-> bty shallow)
-                      r (when (and (= :adt (first st)) (empty? (:args (:args (first segs)))) (not= "Self" base-name))
-                          (try (c/res-def {:segs [(first segs)] :res base-res :span psp}) (catch Throwable _ nil)))]
+                      r (when (and (= :adt (first st)) (empty? (:args (:args (peek bsegs)))) (not= "Self" base-name))
+                          (try (c/res-def {:segs bsegs :res base-res :span psp}) (catch Throwable _ nil)))]
                   (if (and (#{:ext :local} (first r)) (#{"Struct" "Enum" "Union"} (nth r 2)))
                     [:adt (second st) (fresh-args (second st))]
                     bty))
@@ -1238,7 +1256,7 @@
             _ (when (and *user-self* bty)
                 (reset! *user-self* (let [st (shallow bty)]
                                       ;; (RF13c: `Self` is the impl's self type as it is: `Self::new_unchecked` in an impl for NonZero<u8>)
-                                      (if (and (= :adt (first st)) (empty? (:args (:args (first segs)))) (not= "Self" base-name))
+                                      (if (and (= :adt (first st)) (empty? (:args (:args (peek bsegs)))) (not= "Self" base-name))
                                         [:adt (second st) (fresh-args (second st))]
                                         bty))))]
         (when (and bty (not (#{:err :unknown} (first bty))))

@@ -1270,6 +1270,9 @@
                    :impl (recur (collect/def-of (:parent d)) (cons (str "{impl#" (:disamb d) "}") acc))
                    :closure (recur (collect/def-of (:parent d)) (cons (str "{closure#" (:disamb d) "}") acc))
                    :ctor (recur (collect/def-of (:parent d)) (cons "{constructor#0}" acc))
+                   ;; queue 566 (C6 L1): an inline const's definition (collect's InlineConst), a closure's parent within it
+                   ;; (thread_local!'s `LOCAL_PANIC_COUNT::{constant#0}::{closure#1}`, as rustc's def path and v0 name it)
+                   :anon (recur (collect/def-of (:parent d)) (cons (str "{constant#" (or (:disamb d) 0) "}") acc))
                    (recur (collect/def-of (:parent d)) acc))))]
     (str/join "::" (concat (str/split resolve/*crate-path* #"::") segs))))
 
@@ -1289,6 +1292,42 @@
                               :args (collect/identity-args (collect/generics-of (loop [x id] (let [d (collect/def-of x)] (if (= "Closure" (:kind d)) (recur (:parent d)) x))))))])))))
 
 (declare ext-ty)
+(def ^:dynamic *export-opaques*
+  "rust-l1 (C6): an atom {OPAQUE-PATH HIDDEN-TYPE} of the crate's own opaque types an exported body names (a return-position
+  `impl Trait` of a non-generic function: std's panic_output's `Option<impl io::Write>`), each with its hidden type as its
+  defining function's typeck gives it (type_of of the opaque), in the crate's paths; nil (or no hidden type): the opaque type
+  refuses the export, as before"
+  nil)
+
+(defn- match-opaque
+  "The part of the type B at the opaque type ID's place in the declared output O, O and B walked in step; nil when absent"
+  [o b id]
+  (cond (and (vector? o) (= :opaque (first o)) (= id (nth o 2 nil))) b
+        (and (vector? o) (vector? b) (= (count o) (count b)) (or (not (keyword? (first o))) (= (first o) (first b))))
+        (some (fn [[x y]] (match-opaque x y id)) (map vector o b))
+        (and (map? o) (map? b)) (some (fn [k] (match-opaque (get o k) (get b k) id)) (keys o))
+        :else nil))
+
+(defn- opaque-path
+  "rust-l1: an opaque type's def path as the interface names it (`std::sys::stdio::unix::panic_output::{opaque#0}`)"
+  [id]
+  (let [od (collect/def-of id)] (str (def-path-string (:parent od)) "::{opaque#" (or (:disamb od) 0) "}")))
+
+(defn- opaque-hidden
+  "rust-l1 (C6): the hidden type of the crate's opaque type T (`[:opaque CLAUSES ID ARGS]`) when its definer is a non-generic
+  function with a body: the body's type (its typeck root's) at the opaque's place in the function's declared output"
+  [t]
+  (let [id (nth t 2) od (collect/def-of id) d (when od (collect/def-of (:parent od)))]
+    (when (and d (#{"Fn" "AssocFn"} (str (:kind d))) (map? (:node d)) (:body (:node d))
+               (empty? (:params (collect/generics-of (:id d)))))
+      (let [out (:output (tc/erased-sig (:id d)))
+            res (tc/body-results d)
+            bt (some-> (:ty (get res [(first (:hir-id (:node d))) :body])) tc/erase-ty)]
+        (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "opaque-hidden:" (pr-str out) (pr-str bt))))
+        (when bt
+          (let [h (match-opaque out bt id)]
+            (when (and h (not-any? #(and (vector? %) (#{:infer :opaque :err} (first %))) (tree-seq coll? seq [h]))) h)))))))
+
 (defn- ext-closure
   "queue 464 (462-3 (a) 1): a closure type of the crate's own as data, `[:closure DEF-PATH [:fnsig INPUTS OUTPUT] ARGS [:upvars
   TYPE..] KIND]`: its definition's path, its signature, its parent's arguments (the typeck root's identity, substituted at the
@@ -1314,7 +1353,20 @@
     (map? t) (into {} (for [[k v] t] [k (ext-ty v)]))
     (not (vector? t)) t
     (and (= :closure (first t)) *export-closures*) (ext-closure t)
-    (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t))) (throw (ex-info "a closure or opaque type" {:carry false}))
+    ;; rust-l1 (C6): the crate's own opaque type with a hidden type (opaque-hidden): `[:ext-opaque PATH ARGS]`, its hidden type in
+    ;; *export-opaques*, which the entry carries (:opaques) and the run reveals
+    (and (= :opaque (first t)) (number? (nth t 2 nil)) *export-opaques*
+         (let [p (opaque-path (nth t 2))]
+           (when-not (contains? @*export-opaques* p)
+             (swap! *export-opaques* assoc p nil)
+             (swap! *export-opaques* assoc p (try (some-> (opaque-hidden t) ext-ty)
+                                                  (catch Throwable e (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "export-opaque:" p (.getMessage e)))) nil)))
+             (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "export-opaque:" p (pr-str t) "->" (pr-str (get @*export-opaques* p))))))
+           (get @*export-opaques* p)))
+    [:ext-opaque (opaque-path (nth t 2)) (mapv ext-ty (nth t 3 []))]
+    (and (keyword? (first t)) (#{:closure :opaque :coroutine} (first t)))
+    (do (when (System/getenv "RF_EXPORT_CONST_TRACE") (binding [*out* *err*] (println "ext-ty refused:" (pr-str t) (some? *export-opaques*))))
+        (throw (ex-info "a closure or opaque type" {:carry false})))
     (and (keyword? (first t)) (#{:adt :fndef :proj} (first t)) (number? (second t)))
     (into [(first t) (def-path-string (second t))] (map ext-ty (drop 2 t)))
     (= :dyn (first t))
@@ -1378,11 +1430,14 @@
   by their local def ids, so that export-consts exports their initializers' bodies (the run evaluates them: build-run's
   eval-static-body)"
   [forms]
-  (let [ps (set (for [x (tree-seq coll? seq forms)
-                      :when (string? x)
-                      :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" x))]
-                      :when p]
-                  p))]
+  (let [ps (into (set (for [x (tree-seq coll? seq forms)
+                            :when (string? x)
+                            :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" x))]
+                            :when p]
+                        p))
+                 ;; queue 566 (C6 L1): and a thread-local static's (`(tlsref MUT PATH)`, build's ThreadLocalRef: list::DTORS), whose
+                 ;; initializer the run defines the unit's thread-local with
+                 (for [x (tree-seq coll? seq forms) :when (and (seq? x) (= 'tlsref (first x)) (string? (nth x 2 nil)))] (nth x 2)))]
     (if (empty? ps)
       #{}
       (set (for [d (collect/defs)
@@ -1404,17 +1459,57 @@
       (let [built (for [id todo
                         :let [d (try (collect/def-of id) (catch Throwable _ nil))]
                         :when (and d (const-kind? d))
-                        :let [b (try (build/build-const d {:overflow-checks false :edition 2024}) (catch Throwable _ nil))
+                        :let [tr (fn [what e] (when (System/getenv "RF_EXPORT_CONST_TRACE")
+                                                (binding [*out* *err*] (println "export-consts:" (def-path-string id) what (if (instance? Throwable e) (str (.getMessage ^Throwable e) " " (pr-str (ex-data e))) (pr-str e)))))
+                                   nil)
+                              b (try (build/build-const d {:overflow-checks false :edition 2024}) (catch Throwable e (tr "build" e)))
                               r (when b (try (let [st (:stages b) lp (last (filter #(contains? st %) passes/pass-names))]
                                                (get-in st [lp (passes/body-key b)]))
-                                             (catch Throwable _ nil)))
-                              body (when (and r (not (:error r))) (try (externalize (dissoc r :stages)) (catch Throwable _ nil)))]
-                        :when body]
-                    [id (def-path-string id) body r])
+                                             (catch Throwable e (tr "passes" e))))
+                              _ (when (:error r) (tr "error" (:error r)))
+                              body (when (and r (not (:error r))) (try (externalize (dissoc r :stages)) (catch Throwable e (tr "externalize" e))))
+                              ;; queue 566 (C6 L1): the constant's own inline consts (`ITEM::{constant#N}`, thread_local!'s
+                              ;; `const { .. }` fn pointer in LOCAL_PANIC_COUNT's LocalKey), each built and exported beside it under its
+                              ;; path, which the run's eval-const-whole finds by the reprinted constant's :inline-def
+                              ics (when body
+                                    (for [ic (try (build/inline-consts d) (catch Throwable e (tr "inline consts" e)))
+                                          :let [ip (str (def-path-string id) (build/inline-const-suffix ic))
+                                                ib (try (build/build-inline-const d ic {:overflow-checks false :edition 2024 :root-cache (atom {})})
+                                                        (catch Throwable e (tr (str "build " ip) e)))
+                                                ir (when ib (try (let [st (:stages ib) lp (last (filter #(contains? st %) passes/pass-names))]
+                                                                   (get-in st [lp (passes/body-key ib)]))
+                                                                 (catch Throwable e (tr (str "passes " ip) e))))
+                                                ibody (when (and ir (not (:error ir)))
+                                                        (try (binding [*export-closures* (root-closures-of ib)]
+                                                               (externalize (dissoc ir :stages :root-closures :upvar-tys)))
+                                                             (catch Throwable e (tr (str "externalize " ip) e))))]
+                                          :when ibody]
+                                      [nil ip ibody ir]))]
+                        :when body
+                        e (cons [id (def-path-string id) body r] ics)]
+                    e)
+            ;; queue 566 (C6 L1): a foreign static with a `#[linkage]` (std's weak!: `#[linkage = "extern_weak"] static getrandom`), no
+            ;; initializer to build: marked {:foreign-static {:name LINK-NAME :linkage L}} under its paths, the run's indirection
+            ;; through `_rust_extern_with_linkage_` (rustc_codegen_llvm's check_and_apply_linkage)
+            fstat (for [id todo
+                        :let [d (try (collect/def-of id) (catch Throwable _ nil)) n (:node d)]
+                        :when (and d (str/starts-with? (str (:kind d)) "Static") (map? n) (:foreign n) (own-attr-value n "linkage"))
+                        :let [p (def-path-string id)
+                              pp (try (binding [collect/*in-value* true] (collect/print-def-path id [])) (catch Throwable _ nil))
+                              v {:foreign-static {:name (or (own-attr-value n "link_name") (str (second (:data d)))) :linkage (own-attr-value n "linkage")}}]
+                        k (distinct (cons p (when pp [(str (first (str/split p #"::")) "::" pp)])))]
+                    [k v])
+            acc (into acc fstat)
             seen (into seen todo)]
         (recur (remove seen (into (local-const-ids (keep #(nth % 3) built)) (deferred-static-ids (keep #(nth % 3) built))))
                seen
-               (into acc (for [[_ p body] built] [p body]))
+               (into acc (for [[id p body] built
+                               ;; queue 566 (C6 L1): a static also by the path its allocation prints (`static: thread::id::ThreadId::new::COUNTER`,
+                               ;; an impl's function's nested static: the def path has `{impl#0}`), by which the run asks for its value
+                               k (distinct (cons p (when (and id (str/starts-with? (str (:kind (collect/def-of id))) "Static"))
+                                                     (when-let [pp (try (binding [collect/*in-value* true] (collect/print-def-path id [])) (catch Throwable _ nil))]
+                                                       [(str (first (str/split p #"::")) "::" pp)]))))]
+                           [k body]))
                (inc depth)))))
   (catch Throwable _ nil)))
 
@@ -1461,7 +1556,7 @@
         pbs (into {} (for [[kk pb] (get st last-pass) :when (and (str/starts-with? kk pre) (not (:error pb)))] [(:promoted pb) pb]))]
     (if (or (nil? r) (:error r))
       {:key k :refused (str "the passes: " (or (:error r) (str "no body after " last-pass)))}
-      (try (binding [*export-closures* (root-closures-of b)]
+      (try (binding [*export-closures* (root-closures-of b) *export-opaques* (atom {})]
             (let [;; C6-4: each Assert's span (build's :assert-span, which the passes keep the terminator but not its metadata
                   ;; of: build-run's aspans), by its condition, expected value and message, put back on the passes' terminator as
                   ;; a call's span, which externalize makes its caller location (:call-loc), the panic's Location
@@ -1507,7 +1602,9 @@
              ;; queue 464 (462-3 (a) 2): a closure's own body, with its upvars' types and kind (the run lays its type out
              ;; from the type's data; these are the body's own, for a check)
              (:upvar-tys b) (assoc :upvar-tys (mapv ext-ty (:upvar-tys b)))
-             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e)))))
+             k (as-> e (if-let [cs (not-empty (export-consts [r (vals pbs)]))] (assoc e :consts cs) e))
+             ;; rust-l1 (C6): the crate's opaque types its forms name, with their hidden types (the run reveals them)
+             true (as-> e (if-let [os (not-empty (into {} (filter second @*export-opaques*)))] (assoc e :opaques os) e)))))
            (catch Throwable e {:key k :refused (str (or (.getMessage e) e))})))))
 
 ;; ---------------------------------------------------------------------------------------------

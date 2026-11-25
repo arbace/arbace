@@ -21453,3 +21453,193 @@ panics 1). Base 80ed673e4 (558-rust-c3), branch 565-rust-c3-finish, worktree q54
 
 565-1 (a): Build keeps recording value drops' end points only for expression scopes and a body's arguments scope. Drops in the
 other scopes get their spans when a case needs one (none of the six eval cases does).
+## 2026-11-24: rust-l1-1124 (the main host): C6's L1, round 11: constants' whole values, inline consts, statics' padding, two ABI points (WIP)
+
+From 542's head 57a908970 (branch `rust-l1-1124`), on amd64. The VM's caches (queue asset `assets/542-c6-caches.tar.xz`, sha256
+1b217d85..; its absolute paths rewritten to this worktree; the front end's cfg is fixed to x86_64-musl in code, so the facts carry
+over) and std's IR at the pin made again here (`bin/rsi std-build --jobs 4` into the worktree's `.tmp/rsi/std`: 120 units, 56 MB,
+equal to test/rust/runtime/ir.sha256; the main host's std-sgn was gone). The VM's measure reproduced: **std 180 / 39 / 106**.
+
+- `eval-const-whole` (build_run): a library constant's whole value as CTFE interns it (pointers too), its strings and borrowed
+  temporaries nested allocations of the body's data (`*data-alloc*`); runtime-body's fix-uneval makes the constant an allocation read
+  in place (`(indirect ALLOC 0)`), a promoted's evaluation reaches it through :local-const. A constant's own body borrowing into _0
+  (`const { &SimpleMessage::new(..) }`) nests the value. UNWIND_DATA_REG (a tuple), the inline consts, MAP_FAILED and SIG_DFL now
+  evaluate.
+- Inline consts of non-generic items: the export's `ITEM-{constant#N}` keys build their bodies (core-check's module run already did);
+  `native-core-map` files such an entry under `ITEM::{constant#N}` (its :def was its parent's: it replaced the item), reprint marks
+  the unevaluated inline const with `:inline-def`, eval-const-whole evaluates it. `Path::components` is equal.
+- `mono/src-const-value`: `!0`, `0 as T`, parentheses, raw pointer and libc's integer aliases (libc's MAP_FAILED, SIG_DFL); library/'s
+  other crates' roots (unwind's sources, for its `#[repr(C)]` enum).
+- Statics' padding: variant-bytes keeps an init mask (the fields' and the tag's bytes), a deferred static's CTFE value carries it and
+  codegen's static runs split at it (`[9 x i8] zeroinitializer, [3 x i8] undef`, as const_alloc_to_llvm): `env_read_lock` is equal
+  (with sync::poison's `Flag::new` exported, a static's wanted const fn).
+- v0 of an `extern "C"` fn pointer (`KC`, another ABI `K` and its name): getrandom, gettid and thread_local's destructor list build.
+- A fn pointer cast to an integer is PointerExposeProvenance (stack_overflow's `signal_handler as .. as sighandler_t`): its init
+  exports.
+- codegen: an `extern "C"` callee returning a pair of integers or pointers returns `{ i64, i64 }` (PassMode::Cast), stored through
+  a scratch, copied into the layout's place and read back (rustc's store_return); catch_unwind::cleanup's call now matches, its next
+  difference the raw `*mut dyn Any` vtable half's `align 8` (not done).
+- Export opaque types (core_check, not yet proven): a non-generic definer's return-position opaque carried as `[:ext-opaque PATH ARGS]`
+  with its hidden type (`:opaques`, the body's type at the opaque's place), revealed by build_run's instance-normalize; panic_output's
+  export still refused at this head (the walk's fix untested).
+- Measures: full run after the first half (b1): **180 / 44 / 101** (5 refused moved to differ: init, signal_handler,
+  rust_eh_personality_impl, getrandom, gettid); targeted runs after the rest: env_read_lock and Path::components equal (t4, t5).
+  No full run at the head (the allowance's end). Logs `.tmp/logs/lu/`, `.tmp/sub/` of the worktree. Rust's crop paths are out of
+  every gate key: no train needed.
+
+## 2026-11-24 — Rust C6 L1's rest, rust-l1-1124 continued: std 197 / 48 / 80 (queue 566, VM)
+
+From the host's `rust-l1-1124` (f78094c18, its round 11 WIP), branch `566-rust-c6-l1`, in the VM's worktree q561 with 561's caches
+(the front end's cfg is fixed to x86_64-musl, so the arm64 VM measures what amd64 does). std's IR at the pin from
+`.tmp/rsi/std-sgn` (test/rust/runtime/ir.sha256).
+
+- First 561's typeck inherent-paths (d5bae115b, then its fix eb5b0a5bb, both the one function), cherry-picked as 2fbb73aad and
+  52e07584f: 561 had measured std unchanged with them.
+- The user's 561-1 (a), rust-l1's part, in mono.ae: def-kind calls a path ending in `::{closure#N}` that the kinds table does not
+  list a Closure (a dependency crate's closure mangled with the instantiating crate, rustc_demangle's `demangle::{closure#1}`);
+  ext-attrs reads a crate vendored in library/vendor through lib-crate-root (memchr's `#[inline] memchr::memchr::memchr` reaches
+  attrs-of, so object's instance carries object's crate), lib-crate-root matching a package name's `-` for the crate's `_`.
+  Checked: `ext-attrs "memchr::memchr::memchr"` is `["inline"]`; std's unit is byte for byte the same with and without the change
+  (a build of each). The backtrace crates' runs need 561's branch: not rerun here.
+- Measure at the start (export, build, compare at the head plus these): **183 / 48 / 94** (the host's last full measure 180/44/101
+  was before its second half).
+- Resume note 1-2: the wanted keys added to the export's inline keys (`std-inline-keys.txt`: sync::poison's Flag::new, the inline
+  consts `Path::components::{constant#0}`, `Components::next::{constant#0}`, `Timespec::new::{constant#0}`,
+  `current_exe::{constant#0}`, then LocalKey::new `thread-local-{impl#4}-new` and `sys-backtrace-FULL_BACKTRACE_DEFAULT`) and core's
+  three (`core-inline-keys.txt`: `ptr::mut_ptr::{impl#0}::add`, `slice::index::{impl#1}::index_mut`, `mem::maybe_dangling::{impl#0}::new`,
+  `lib-unit export core --add`). With the codegen fix below: 187 / 48 / 90 (env_read_lock, Path::components, get_stack,
+  catch_unwind::cleanup equal).
+- Note 5: a raw `*mut dyn` pointer's vtable half takes `align 8` (pair-align: pointee_info_at's vtable, as for a reference).
+- Note 3, LOCAL_PANIC_COUNT (thread_local!'s LocalKey constant), five changes: export-consts exports a constant's own inline consts
+  beside it (`ITEM::{constant#N}` in :consts); build-inline-const carries its typeck root's closures and export-consts binds them, so
+  the inline const's closures are written as data (was "a closure or opaque type"); def-path-string names collect's InlineConst
+  (`{constant#N}`), so the closure is `LOCAL_PANIC_COUNT::{constant#0}::{closure#1}` as rustc's v0 has it (`NCNK..0s_0`);
+  closure-once-symbol takes an exported closure by its def path and its `[:fnsig ..]` data; codegen writes an allocation of one
+  pointer alone as that pointer (const_alloc_to_llvm's single chunk: `@anon.. = constant ptr @<{closure} as FnOnce>::call_once`).
+  LocalKey::new exported, the five panic_count items are equal.
+- Note 2's promoteds: eval-const-whole evaluates the constant's own promoteds (a thin pointer to a nested allocation: io::const_error!'s
+  `&SimpleMessage`), eval-promoted a constant's reborrow into _0 (`_0 = &(*_1)`), and the nested and promoted allocations keep the
+  value's init mask (`[9 x i8] .., [7 x i8] undef`). Timespec::new and current_exe are equal. (This is also 561's finding 5, the
+  promoted padding, on the runtime body's side.)
+- Note 7, partly: const-bodies takes the export's own constant entries, so another module's constant exported by its key evaluates
+  (FULL_BACKTRACE_DEFAULT: get_backtrace_style refused -> differs). READ_LIMIT's export still fails at `libc::c_int::MAX` (a re-export of
+  core::ffi the deps index lacks); MAIN_SEPARATOR_STR needs `str::from_utf8` in CTFE (sys::path's macro): not done.
+- Note 4 (panic_output's opaque) turned out to work at this head: its export is no longer refused. What followed was in -O0's
+  RemoveZsts: the locals it drops are the generic body's zero-sized ones, and an exported opaque type (`[:ext-opaque ..]`, Stderr
+  behind `impl Write`) was not taken as one, so `_3 = move ((_1 as Some).0)` stayed and the Option went to memory. Taking it as
+  optimized_mir does (revealed) makes key::unix::fail and LazyKey::lazy_init equal, and default_hook, panic_with_hook, resume_unwind
+  and reset_sigpipe compare further.
+- Measure at the head: **197 / 48 / 80** (round c, a full export, build and compare). No row went back from b to c.
+  get_backtrace_style and set_hook differ at their first alloca (rustc's 16 bytes, ours 1), not studied.
+- Not done: note 6 (rust_eh_personality_impl), the statics (COUNTER, the extern-weak statics' `ptr @getrandom`, DTORS), L2's first
+  slice. The user's 561-2 (a) is kept: 561's gated fixes stay gated.
+- Tooling: one subset build on a regex of std-keys.txt, the keys restored from a master copy after each run (an early version
+  backed up a subset over the full list; it was rebuilt from std-export-keys.txt less the inline keys, 325 keys, as the compare
+  counts them). Rust's crop paths are in no gate key. No record was written: the VM writes only -linux-arm64 Rust records, and the
+  lib-unit numbers are not records.
+
+## 2026-11-25 — Rust C6 L1 continued, L2's first slice: std 211 / 44 / 70 (queue 566, VM)
+
+The coordinator's second message for 566 (items 1-5), on the same branch, one commit per change.
+
+- Item 1 (the first alloca, rustc 16 bytes, ours 1): it was the personality slot of a landing pad we did not have. A drop of a
+  field's place in an unwind path (`drop((_8 as Some).0)`) had no glue (lib-unit took glue for plain locals only), so the
+  cleanup was a no-op and the call stayed a call. The field projection's type gives the glue: get_backtrace_style equal. set_hook's
+  glue was refused by v0: a trait object with bound regions (`Box<dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Sync + Send>`).
+  mono now prints v0's binder (in_binder's `G` with the count less one, each bound region `L` by its depth, a generic argument
+  list printing its regions once a binder's region is among them): `DG0_..RL1_..L0_` as std's IR; set_hook equal.
+  `LIB_UNIT_DUMP=REGEX` writes an item's two sides as the judge normalizes them, for differences past the first line.
+- Item 2: READ_LIMIT's `libc::c_int::MAX` (the resolver had it right, `core::ffi::primitives::c_int`): typeck's
+  type-relative-value took a prefix of more than one segment only when it was an ADT; now any prefix, at its partial
+  resolution's span. FileDesc's read, read_buf and write equal. MAIN_SEPARATOR_STR: two CTFE steps done (a constant's entry by its
+  instance with its promoteds; an array pointer unsized to a slice's in eval-promoted), then it stops in `str::from_utf8`'s
+  run_utf8_validation (const_eval_select's const arm, slice indexing in CTFE): not done.
+- Item 3, statics: COUNTER (a static nested in an impl's function: the export filed it under its def path with `{impl#0}`, the
+  run asked by the printed path; export-consts files a static under both) and ON_BROKEN_PIPE_USED (another module's static, its
+  own key; const-bodies takes the export's static entries): ThreadId::new and reset_sigpipe equal. Thread-local statics
+  (`tlsref`): lib-unit gives them their v0 symbol and their initializer's CTFE value, the export their bodies (deferred-static-ids
+  takes tlsref's paths): thread::current's drop_current, id::get, id::set equal. DTORS (list::register, run) now differ: its
+  initializer's CTFE needs alloc's Vec::new_in and RawVec::new_in (exported) and core's Alignment::of, which core's export
+  refuses. The extern-weak statics (weak!): the export marks a foreign static with `#[linkage]` (`{:foreign-static {:name
+  :linkage}}`); lib-unit reads it through `_rust_extern_with_linkage_HASH_NAME`, an internal global holding the symbol's address,
+  as rustc_codegen_llvm's check_and_apply_linkage does; codegen writes a one-pointer static as that pointer and declares the symbol
+  `extern_weak global i8`; check's global-map leaves an extern_weak declaration its name (it has no content). getrandom, gettid,
+  linux_like::register equal.
+- Item 4, note 6 (rust_eh_personality_impl): the `ret` is i32 now on both sides; what is left is sign_lpad's
+  `#[rustc_force_inline]`, which rustc's MIR inliner (rustc_mir_transform's ForceInline, at every opt level) inlines. Arbace has
+  no MIR inliner; the LLVM-level always-inliner would leave a branch that MIR inlining does not. Not done (a port of the inliner).
+- Item 5, L2's first slice: `LIB_UNIT_L2=1` builds the callees the unit's items call (mono/unit-callees: instances std's units
+  define, a generic instance, a cross-crate-inlinable definition, or std's own; not foreign items), each its export's body
+  instantiated by core-instance, their own `#[inline(always)]` callees inlined as the items' are, judged apart against std's IR
+  (`lib-unit l2` rows, `lib-unit l2 compare:`); the callees with no export are logged `lib-unit l2 wanted` (the next export's keys,
+  the night run). The default measure is unchanged by it.
+- Measure (round d: std's export, build and compare): **211 / 44 / 70**, from 197 / 48 / 80; no item went back.
+- The keys added stay cache state (DECISION 566-1 open): std's inline keys READ_LIMIT and ON_BROKEN_PIPE_USED; alloc's
+  `vec-{impl#1}-new_in`, `raw_vec-{impl#2}-new_in` (their bodies appended to native-alloc-items.edn by `lib-export --keys`); core's
+  `mem-alignment-{impl#0}-of` (refused by core's export).
+- L2's first measure (round e, `LIB_UNIT_L2=1`, the same export): the items' numbers unchanged (211 / 44 / 70), **486 callees: 18
+  equal, 3 differ, 459 refused (452 not exported), 6 no symbol**; the not-exported ones are 286 definitions (core 141, alloc 34,
+  std 111 keys), the night export's input (lists in the VM's scratch, the report's). Checks at the head: pack-compare-test,
+  inline-test 15 of 15, rust-front essential and core-essential (their known summaries), reap 56 of 56, crops-score, records-check.
+
+## 2026-11-25 — Rust C6 L2's night export and its first fixes: L2 18 -> 380 equal, std 217 / 38 / 70 (queue 566, VM)
+
+The coordinator's third message for 566, on the same branch.
+
+- The night export of L2's 286 wanted definitions (core 141, alloc 34, std 111), as keys of lib-unit's exports (cache state,
+  DECISION 566-1 open: the lists are the VM's q566 scratch's `l2-wanted-*.txt`, `r3-added-*-keys.txt`), under the heavy lock,
+  three jobs: `lib-unit export core --add` (166 keys in 49 module files: 138 bodies, 59 equal to rustc's built MIR), alloc by
+  `lib-export --keys` (34 keys: 36 bodies, appended), std's whole export (495 bodies, 64 refused). 17 minutes once the lock came
+  (it waited 33 minutes in the queue). Then the inline-always callees the L2 bodies wanted (`lib-unit inline-keys`: core 30 more,
+  alloc 1; core's `--add` 29 bodies).
+- Fixes, one commit each: L2's callees' bodies (not their instance maps) given to the inline-always collector, a callee with only
+  region arguments no copy; mono's def-kind takes a `{closure#N}` path as a Closure before the interface's functions name it
+  (std's closures called by generic instances, `Option::map`'s: their symbols with the instantiating crate); AbortUnwindingCalls takes
+  an upstream function's ABI and foreignness from its interface fact (libc's `extern "C"` getcwd and readlink: their calls unwind to
+  unreachable, the next block merged as MergingSucc merges; core-essential's summary unchanged); lib-unit's core exports take
+  mem/mod.rs's interface (SizedTypeProperties' constants: Alignment::of's `<T as SizedTypeProperties>::ALIGNMENT` was "a qualified
+  path" without its type; it exports, equal to rustc's built MIR); `LIB_UNIT_DUMP` writes the L2 callees too.
+- DTORS (item 3): with Alignment::of, as_nonzero_usize, NonNull::without_provenance and Unique::from_non_null exported (a wanted
+  loop), its CTFE stops at alloc's ZERO_CAP: `UsizeNoHighBit::new_unchecked`, a macro-made function of core::num::niche_types
+  whose body the export does not hold. Not done.
+- L2's commonest remaining difference (about 20 callees): rustc keeps a block boundary (`call` then `br` to a `ret` block, the
+  never-reached cleanup blocks emitted `unreachable`) where we merge: a generic instance's MIR keeps the generic body's drop and
+  cleanup edges, which codegen at the instance treats as no-ops while MergingSucc still counts them. Studied, not changed.
+- Measures: std's default compare (round h: export, build, compare) **217 / 38 / 70**, from 211 / 44 / 70, no item back; L2
+  (rounds e, f, g, i): 18 -> 333 -> 380 equal of 481 callees.
+- Checks at the head: pack-compare-test, inline-test 15 of 15, rust-front essential and core-essential (their known summaries),
+  reap 56 of 56, crops-score, records-check 9 pairs: all pass. No record changed.
+
+## 2026-11-25 — Rust C6 lib-unit: the wanted keys committed as test data, a fresh cache gives round 3's numbers (queue 566, VM)
+
+- DECISION 566-1 (a), the user's (the queue's ANSWERS.md, 2026-11-25): log the keys that eval-const-whole wants too, and commit the
+  lists as test data. Before this, the keys the builds wanted (the always-inliner's callees, a static's CTFE, L2's callees) lived
+  only in the cache, in `.tmp/rust-front/lib-unit/CRATE-inline-keys.txt`, so a fresh cache could not rebuild round 3's exports.
+- build_run.ae: a new dynamic, `*const-wanted*`. A constant's whole evaluation (eval-const-whole) adds two kinds of entries to it: a
+  const fn it calls that no export holds, and a constant it names that has no exported body. lib-unit-main logs each entry as
+  `lib-unit const wanted DEF (not exported; a constant's evaluation)`, the way L2 logs `lib-unit l2 wanted`. It is bound around the
+  `:local-const` and `:const-whole` evaluations of lib-unit-run. It only logs, so no output changes.
+- bin/rust-front:
+  - `test/rust/front/lib-unit-{core,alloc,std}-keys.txt` hold 233, 40 and 132 keys. They are round 3's cache files, sorted.
+  - Every `lib-unit export CRATE` reads its list beside CRATE-keys.txt (from std's IR) and the cache's CRATE-inline-keys.txt.
+  - `inline-keys CRATE` also takes the `l2` and `const` wanted lines.
+  - `inline-keys CRATE --record` merges the cache's keys into the committed list.
+  - `LIB_UNIT_DIR` names another cache directory.
+  - No gate step runs lib-unit, so test/gate/steps.edn declares nothing new.
+- The proof was a fresh cache (`LIB_UNIT_DIR` set to the VM's q566 scratch `fresh/`), run under the heavy lock, 30 minutes:
+  - `keys` core, alloc and std: the same files as the cache's.
+  - Full exports of core (507 keys, 83 module files, 478 bodies), alloc (67 bodies) and std (495 bodies). The key sets are the same
+    as the cache's. Std's bodies are the same byte for byte.
+  - Core's and alloc's bodies differ from the cache's only in numbering that depends on the run: unevaluated constants' and ADTs'
+    ids, alloc ids, anonymous regions, and line numbers in the expanded modules. One extra nested attribute also appears
+    (panic_nounwind_fmt's panic_impl). The cache's bodies came from `--add` and `--keys` runs over fewer modules.
+  - Std's build and compare give **217 / 38 / 70**, and L2 gives **380 / 66 / 32 / 3 of 481**. These are round 3's numbers, and
+    every item and callee has the same verdict as in rounds h and i.
+- The new logging names four constants: `std::path::MAIN_SEPARATOR`, `std::sys::path::unix::SEPARATORS_STR`,
+  `std::sys::alloc::MIN_ALIGN` and `core::io::error::{impl#1}::WRITE_ALL_EOF`. The last two are L2's unevaluated refusals.
+  `inline-keys` over the fresh logs finds 9 keys beyond the lists (core 5, std 4). They are left for the next export round
+  (`inline-keys CRATE --record`, then export), so that this proof stays at round 3's lists.
+- Alternatives considered:
+  - 566-1 (b), the keys kept as cache state, was the user's to reject.
+  - Committing whole native-*-items.edn files: about 12 MB of exports that depend on the run, against the keys they are made from.
+- bin/reap: 56 of 56, 0 problems, before and after.

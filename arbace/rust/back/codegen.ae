@@ -720,6 +720,10 @@
           live (filter #(not (zst? (layout lt (nth (ty-struct t) (inc %))))) order)
           ft (when-let [f (nth live i nil)] (nth (ty-struct t) (inc f)))]
       (when ft (ref-align lt ft)))
+  (if (and (= i 1) (= "ptr" (ty-kind t)) (= "dyn" (ty-kind (pointee-type t))))
+    ;; queue 566 (C6 L1): a raw `*mut dyn Trait`'s vtable half too (pointee_info_at: a vtable is always valid; its data half
+    ;; none), catch_unwind::cleanup's `Box::from_raw(*mut dyn Any)` argument `ptr align 8`
+    8
   (when (or (= "ref" (ty-kind t)) (and (= "adt" (ty-kind t)) (= "std::boxed::Box" (second (ty-struct t)))))
     (let [pt (if (= "ref" (ty-kind t)) (pointee-type t) (first (nth (ty-struct t) 3))) pk (ty-kind pt)]
       (cond
@@ -728,7 +732,7 @@
         ;; a struct with an unsized tail behind a fat pointer: the struct's own alignment, when the table has its layout
         (and (= i 0) (= pk "adt") (get lt (second pt)))
         (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
-        :else nil)))))))
+        :else nil))))))))
 
 (defn ret-attrs-of
   "The attributes of a returned value: zeroext for bool, align for a reference."
@@ -853,13 +857,26 @@
                                    (when-let [bs (:bytes a)]
                                      (let [n (quot (count bs) 2)
                                            byte-str (fn [from to] (apply str (map #(char (Integer/parseInt (subs bs (* 2 %) (+ 2 (* 2 %))) 16)) (range from to))))
-                                           run (fn [from to] (let [ty (list 'array (- to from) 'i8)]
-                                                               [ty (if (every? #{\0} (subs bs (* 2 from) (* 2 to))) 'zeroinitializer (list 'c-string (byte-str from to)))]))
+                                           sinit (:init a)
+                                           run1 (fn [from to] (let [ty (list 'array (- to from) 'i8)]
+                                                                [ty (cond (and sinit (every? #(= \0 (nth sinit %)) (range from to))) 'undef
+                                                                          (every? #{\0} (subs bs (* 2 from) (* 2 to))) 'zeroinitializer
+                                                                          :else (list 'c-string (byte-str from to)))]))
+                                           ;; rust-l1 (C6): a static's uninitialized bytes (its :init, a CTFE value's padding) a run of
+                                           ;; their own, undef, as const_alloc_to_llvm splits the allocation at its init mask's changes
+                                           runs (fn [from to]
+                                                  (if (or (nil? sinit) (= from to))
+                                                    [(run1 from to)]
+                                                    (loop [i from start from out []]
+                                                      (cond (= i to) (conj out (run1 start to))
+                                                            (and (> i start) (not= (nth sinit i) (nth sinit (dec i)))) (recur (inc i) i (conj out (run1 start i)))
+                                                            :else (recur (inc i) start out)))))
+                                           run (fn [from to] (let [rs (runs from to)] (if (= 1 (count rs)) (first rs) (into [:runs] rs))))
                                            relocs (sort-by first (:relocs a))]
                                        (when-not (get-in @gl [:statics sy])
                                          ;; (a placeholder first: a static whose pointers lead back to it)
                                          (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array n 'i8) 'zeroinitializer :linkage :internal :align (:align a)))
-                                         (if (empty? relocs)
+                                         (if (and (empty? relocs) (not= :runs (first (run 0 n))))
                                            (vswap! gl assoc-in [:statics sy]
                                                    (list 'llvm/global sy (list 'array n 'i8) (second (run 0 n)) :linkage :internal :constant (not (:mutable a)) :align (:align a)))
                                            ;; RF17: a static holding pointers (`static GREETING: &str = "hi"`): codegen_static's
@@ -868,19 +885,28 @@
                                            (let [segs (loop [pos 0 rs relocs out []]
                                                         (cond
                                                           (and (empty? rs) (= pos n)) out
-                                                          (empty? rs) (conj out (run pos n))
+                                                          (empty? rs) (into out (runs pos n))
                                                           :else (let [[off tid] (first rs)]
                                                                   (recur (+ off 8) (rest rs)
-                                                                         (cond-> out (> off pos) (conj (run pos off)) true (conj [:ptr tid]))))))
+                                                                         (cond-> out (> off pos) (into (runs pos off)) true (conj [:ptr tid]))))))
                                                  tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
                                                  vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
                                              (vswap! gl assoc-in [:statics sy]
-                                                     (list 'llvm/global sy (apply list 'packed tys) (apply list 'packed vals)
-                                                           :linkage :internal :constant (not (:mutable a)) :align (:align a))))))))
+                                                     ;; (queue 566: one pointer alone is that value, const_alloc_to_llvm's single chunk:
+                                                     ;; `_rust_extern_with_linkage_getrandom = internal global ptr @getrandom`)
+                                                     (if (and (= 1 (count segs)) (= :ptr (first (first segs))))
+                                                       (list 'llvm/global sy 'ptr (second (first vals))
+                                                             :linkage :internal :constant (not (:mutable a)) :align (:align a))
+                                                       (list 'llvm/global sy (apply list 'packed tys) (apply list 'packed vals)
+                                                             :linkage :internal :constant (not (:mutable a)) :align (:align a)))))))))
                                    ;; RF13: another crate's static (std's WHITESPACE_MAP) declared external, as rustc's codegen unit
-                                   ;; declares it
+                                   ;; declares it; (queue 566: a foreign static with a linkage, `@getrandom = extern_weak global i8`,
+                                   ;; as check_and_apply_linkage declares it)
                                    (when-not (or (:bytes a) (get-in @gl [:statics sy]))
-                                     (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :align 1)))
+                                     (vswap! gl assoc-in [:statics sy]
+                                             (if (= "extern_weak" (:linkage a))
+                                               (list 'llvm/global sy 'i8 :linkage :extern_weak)
+                                               (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :align 1))))
                                    sy)
                          :memory
                          (if (and (string? (:bytes a)) (zero? (count (:bytes a))) (not (:mutable a)))
@@ -933,7 +959,11 @@
                                                           :int-ptr ['ptr (int-ptr (second x))]
                                                           [(first x) (second x)]))
                                                 segs)]
-                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a)))))))
+                                 ;; queue 566 (C6 L1): one pointer alone is that value, not a struct (const_alloc_to_llvm's `if let
+                                 ;; &[data] = &*llvals { data }`): LocalKey's `ptr @<{closure} as FnOnce>::call_once`
+                                 (if (and (= 1 (count segs)) (#{:ptr :int-ptr} (first (first segs))))
+                                   (intern-const! gl 'ptr (second (first vals)) (:align a))
+                                   (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))))
                          (unsupported "allocation of this kind")))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
         alloc-const! (fn [id off l]
@@ -2464,7 +2494,18 @@
                                              argfs)
                                      dl (nth lay (place-local dest))
                                      dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
-                                     ret (llvm-type dl)
+                                     ;; rust-l1 (C6): an `extern "C"` callee returning a pair of integers or pointers (std's
+                                     ;; `__rust_panic_cleanup`'s `*mut dyn Any`): the x86-64 SysV ABI's PassMode::Cast, the value an
+                                     ;; integer register a eightbyte (`{ i64, i64 }`), stored through a scratch and copied into a
+                                     ;; place of the layout, then read back (rustc_codegen_ssa's store_return: DirectOperand under a
+                                     ;; cast, store_arg's store_cast, load_operand)
+                                     c-cast (let [tt (when (and (seq? f) (= "const" (name (first f)))) (nth f 2 nil))]
+                                              (when (and (seq? tt) (string? (second tt)) (re-find #"extern \"C(-unwind)?\"" (second tt))
+                                                         (= :pair (:kind dl)) (not (indirect? dl)) (= 16 (:size dl))
+                                                         (every? #(#{:int :ptr} (:prim %)) (take 2 (:pair dl)))
+                                                         (empty? (place-projs dest)) (not (contains? mem (place-local dest))))
+                                                '(struct i64 i64)))
+                                     ret (or c-cast (llvm-type dl))
                                      ret-attrs (when-let [ra (ret-attrs-of lt (place-type body dest) dl)] [:ret-attrs ra])
                                      unw (when can-unwind (unwind-block! b unwind))
                                      rbb (if unw (if target (if (zero? target) "start" (str "bb" target)) nil) bb)
@@ -2482,14 +2523,20 @@
                                                 :scalar (let [r (fresh!)]
                                                           (emit! bb (list '= r instr-form))
                                                           (assign-in! rbb dest {:ty (:imm (:scalar dl)) :v r}))
-                                                :pair (if (indirect? dl)
+                                                :pair (if c-cast
+                                                        (let [tmp (scratch! (:size dl) (:align dl)) r (fresh!) sc (scratch! 16 8)]
+                                                          (emit! bb (list '= r instr-form))
+                                                          (emit! rbb (list 'store [c-cast r] ['ptr sc] :align 8))
+                                                          (memcpy! rbb {:ptr tmp :align (:align dl)} {:ptr sc :align 8} 16)
+                                                          (assign-in! rbb dest (load-place! rbb {:ptr tmp :align (:align dl) :ly dl})))
+                                                      (if (indirect? dl)
                                                         (do (emit! bb instr-form)
                                                             (when sret-tmp (assign-in! rbb dest (load-place! rbb sret-tmp))))
                                                         (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
                                                         (emit! bb (list '= r instr-form))
                                                         (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
                                                         (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
-                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]})))
+                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))))
                                                 :memory (if (indirect? dl)
                                                           (emit! bb instr-form)
                                                           (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]

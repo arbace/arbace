@@ -346,12 +346,42 @@
   (push! m (disambiguator (u64 (if local? (:id *local*) (crate-id nm)))))
   (push! m (ident nm)))
 
+(def ^:dynamic *v0-binder*
+  "queue 566 (C6 L1): within a trait object's binder (v0's in_binder: `G`), {:depth {REGION DEPTH} :end N}: its bound regions
+  ([:re-bound ..] in the order they appear, rustc's vars), each printed `L` and 1 + (N - 1 - DEPTH) as print_region writes it"
+  nil)
+
+(defn- bound-in-binder? [r] (and *v0-binder* (vector? r) (contains? (:depth *v0-binder*) r)))
+
+(defn- print-region! [m r]
+  (push! m "L")
+  (push! m (if (bound-in-binder? r)
+             (let [{:keys [depth end]} *v0-binder*] (integer-62 (+ 1 (- (dec (long end)) (long (get depth r))))))
+             (integer-62 0))))
+
+(defn- binder-regions
+  "The bound regions of X in the order they first appear, not those under a nested trait object or fn pointer (their own binder)"
+  [x]
+  (let [acc (java.util.LinkedHashSet.)]
+    (letfn [(w [x] (cond (and (vector? x) (= :re-bound (first x))) (.add acc x)
+                         (and (vector? x) (#{:dyn :fnptr} (first x))) nil
+                         (map? x) (doseq [v (vals x)] (w v))
+                         (coll? x) (doseq [y x] (w y))
+                         :else nil))]
+      (w x))
+    (vec acc)))
+
 (defn- print-generic-args! [m prefix! args]
-  (let [args (filter type-arg? args)]   ; mono: every region is erased, so none is printed
+  (let [;; (queue 566: within a binder whose regions the arguments name, every region printed, an erased one `L_`:
+        ;; path_generic_args' print_regions)
+        regions? (some bound-in-binder? args)
+        args (if regions? args (filter type-arg? args))]   ; mono: every region is erased, so none is printed
     (if (empty? args)
       (prefix!)
       (do (push! m "I") (prefix!)
-          (doseq [a args] (if (and (vector? a) (#{:cval :cparam} (first a))) (do (push! m "K") (print-const! m a)) (print-type! m a)))
+          (doseq [a args] (cond (c/region? a) (print-region! m a)
+                                (and (vector? a) (#{:cval :cparam} (first a))) (do (push! m "K") (print-const! m a))
+                                :else (print-type! m a)))
           (push! m "E")))))
 
 (defn- print-impl-path! [m d args]
@@ -432,7 +462,7 @@
         (backref! m i)
         (let [start (pos-of m)]
           (case (first t)
-            :ref (do (push! m (if (nth t 2) "Q" "R")) (print-type! m (nth t 3)))
+            :ref (do (push! m (if (nth t 2) "Q" "R")) (when (bound-in-binder? (second t)) (print-region! m (second t))) (print-type! m (nth t 3)))
             :ptr (do (push! m (if (second t) "O" "P")) (print-type! m (nth t 2)))
             :array (do (push! m "A") (print-type! m (second t)) (print-const! m (nth t 2)))
             :slice (do (push! m "S") (print-type! m (second t)))
@@ -440,23 +470,34 @@
             (:adt :fndef) (print-def-path! m (second t) (nth t 2))
             ;; RF14: a trait object (print_dyn_existential: the principal at a dummy Self, each projection `p` and its name and
             ;; term, the auto traits, then the region, erased: `L_`); one with bound regions (a binder's `G`) refused
-            :dyn (let [{:keys [principal projections autos]} (second t)]
-                   (when (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t))
+            ;; (queue 566 (C6 L1): one binder's bound regions, `for<'a, 'b> Fn(&'a PanicHookInfo<'b>)`, as in_binder writes them:
+            ;; `G` and their count less one, each region by its depth; a nested binder's or the object's own region bound, refused)
+            :dyn (let [{:keys [principal projections autos]} (second t)
+                       regs (binder-regions (second t))]
+                   (when (or (and (seq regs) *v0-binder*) (and (vector? (nth t 2 nil)) (= :re-bound (first (nth t 2))))
+                             (some #(and (vector? %) (= :re-bound (first %)) (not (some #{%} regs))) (tree-seq coll? seq (second t))))
                      (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
                    (push! m "D")
-                   (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
-                   (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
-                   ;; RF15: the auto traits in rustc's interned order (ExistentialPredicate::stable_cmp: by DefPathHash), which
-                   ;; for core's markers is Sync before Send (rustc 1.99.1's hashes; the record's symbols show it); others after,
-                   ;; in their written order
-                   (doseq [a (sort-by #(get auto-trait-rank (str %) 9) autos)] (print-def-path! m a []))
+                   (when (seq regs) (push! m "G") (push! m (integer-62 (dec (count regs)))))
+                   (binding [*v0-binder* (when (seq regs) {:depth (zipmap regs (range)) :end (count regs)})]
+                     (when principal (print-def-path! m (first principal) (into [[:dummy-self]] (second principal))))
+                     (doseq [[ad _ term] projections] (push! m "p") (push! m (ident (item-name-of ad))) (print-type! m term))
+                     ;; RF15: the auto traits in rustc's interned order (ExistentialPredicate::stable_cmp: by DefPathHash), which
+                     ;; for core's markers is Sync before Send (rustc 1.99.1's hashes; the record's symbols show it); others after,
+                     ;; in their written order
+                     (doseq [a (sort-by #(get auto-trait-rank (str %) 9) autos)] (print-def-path! m a [])))
                    (push! m "E") (push! m "L_"))
             ;; RF14: a fn pointer (`F`, `U` when unsafe, its inputs, `E`, its output); another ABI's or one with bound regions
             ;; (a binder's `G`) refused
-            :fnptr (let [{:keys [inputs output safety abi]} (second t)]
-                     (when (or abi (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t)))
+            ;; rust-l1 (C6): another ABI as v0.rs prints it (`KC` for "C", else `K` and its name with `-` made `_`)
+            :fnptr (let [{:keys [inputs output safety abi]} (second t)
+                         abi (when abi (str/replace (str abi) "\"" ""))]
+                     (when (some #(and (vector? %) (= :re-bound (first %))) (tree-seq coll? seq t))
                        (throw (ex-info (str "mono: v0 of the type " (pr-str t)) {:fact :symbol})))
                      (push! m "F") (when (= :unsafe safety) (push! m "U"))
+                     (cond (or (nil? abi) (= "Rust" abi)) nil
+                           (= "C" abi) (push! m "KC")
+                           :else (do (push! m "K") (push! m (ident (str/replace abi "-" "_")))))
                      (doseq [x inputs] (print-type! m x)) (push! m "E") (print-type! m output))
             ;; RF14: a local closure (its def by its start, the line and column its type's text begins with) in a non-generic function
             ;; (RF17: a generic function's closure at its instance's arguments, `[:closure TEXT SIG ARGS]` (closed-closures):
@@ -1359,6 +1400,7 @@
                        items))
         ["inline"]))))
 
+(declare lib-crate-root)
 (defn ext-attrs
   "core's (or alloc's) item at the def path P: its attribute names, or nil when the sources do not hold it as an item"
   [^String p]
@@ -1367,9 +1409,11 @@
     (get @attr-cache ck)
     (let [r (try
               (let [[crate & segs] (str/split p #"::")
-                    root (str *lib-dir* "/" crate "/src")
-                    lib (str root "/lib.rs")]
-                (when (and *lib-dir* (.exists (File. lib)))
+                    ;; queue 566 (561-1 (a)): a crate vendored in library/vendor too (memchr's `#[inline] memchr::memchr::memchr`,
+                    ;; which object instantiates: its symbol with object's crate), by lib-crate-root as RFP58's reader finds it
+                    lib (lib-crate-root crate)
+                    root (when lib (.getParent (File. ^String lib)))]
+                (when lib
                   (loop [items (parse-rs lib) dir root file lib segs segs]
                     (let [s (first segs)]
                       (cond
@@ -1430,10 +1474,12 @@
 
 (defn- lib-crate-root [^String crate]
   (when *lib-dir*
-    (let [f (if (#{"core" "alloc" "std"} crate)
+    (let [f (if (or (#{"core" "alloc" "std"} crate)
+                    ;; rust-l1 (C6): library/'s other crates (unwind's `#[repr(C)] enum _Unwind_Reason_Code`)
+                    (.exists (File. (str *lib-dir* "/" crate "/src/lib.rs"))))
               (str *lib-dir* "/" crate "/src/lib.rs")
               (let [ds (.listFiles (File. (str *lib-dir* "/vendor")))]
-                (some (fn [^File d] (when (re-matches (re-pattern (str "\\Q" crate "\\E-[0-9][0-9.]*")) (.getName d)) (str (.getPath d) "/src/lib.rs")))
+                (some (fn [^File d] (when (re-matches (re-pattern (str (str/join "[-_]" (map #(str "\\Q" % "\\E") (str/split crate #"_"))) "-[0-9][0-9.]*")) (.getName d)) (str (.getPath d) "/src/lib.rs")))
                       (sort-by #(.getName ^File %) (seq ds)))))]
       (when (and f (.exists (File. ^String f))) f))))
 
@@ -1606,12 +1652,23 @@
             [items] (when root (module-items root msegs))
             it (some #(when (and (= 'Const (item-kind %)) (= (last segs) (item-name %)) (attr-cfg-ok? %)) %) items)
             ci (when it (second (fget it :kind)))
-            tseg (when ci (let [k (fget (fget ci :ty) :kind)] (when (and (seq? k) (= 'Path (first k))) (path-segs (nth k 2)))))
-            t (when (= 1 (count tseg)) (get c/prim-tys (first tseg)))
+            tk (when ci (fget (fget ci :ty) :kind))
+            tseg (when (and (seq? tk) (= 'Path (first tk))) (path-segs (nth tk 2)))
+            ;; rust-l1 (C6): a raw pointer's constant (libc's `MAP_FAILED: *mut c_void = !0 as *mut c_void`) as a usize's bits
+            ;; (codegen's pointer scalar: inttoptr), and libc's integer aliases by their last segment (`sighandler_t`, `c_int`)
+            t (cond (and (seq? tk) (= 'Ptr (first tk))) [:uint "usize"]
+                    (= 1 (count tseg)) (or (get c/prim-tys (first tseg))
+                                           (get {"c_int" [:int "i32"] "c_uint" [:uint "u32"] "c_long" [:int "i64"] "c_ulong" [:uint "u64"]
+                                                 "size_t" [:uint "usize"] "ssize_t" [:int "isize"] "sighandler_t" [:uint "usize"]} (first tseg)))
+                    (seq tseg) (get {"c_int" [:int "i32"] "sighandler_t" [:uint "usize"] "size_t" [:uint "usize"]} (last tseg)))
             body (when ci (let [b (fget ci :body)] (when (and (seq? b) (= 'Some (first b))) (second b))))
             lit (fn lit [e] (let [k (fget e :kind)]
                               (cond (and (seq? k) (= 'Lit (first k)) (= 'Integer (fget (second k) :kind))) (fget (second k) :symbol)
                                     (and (seq? k) (= 'Unary (first k)) (= 'Neg (second k))) (when-let [v (lit (nth k 2))] (str "-" v))
+                                    ;; rust-l1 (C6): `!0` (all ones at the constant's width: -1 wrapped) and `0 as T`, `!0 as T`
+                                    (and (seq? k) (= 'Unary (first k)) (= 'Not (second k))) (when-let [v (lit (nth k 2))] (when (re-matches #"0+" (str/replace v "_" "")) "-1"))
+                                    (and (seq? k) (= 'Cast (first k))) (lit (second k))
+                                    (and (seq? k) (= 'Paren (first k))) (lit (second k))
                                     :else nil)))
             sym (when body (lit body))
             ;; queue 542 (round 10): a bool constant's literal too (std's `HAS_PREFIXES: bool = false`)
@@ -1903,12 +1960,17 @@
 
 (defn- def-kind [d]
   (if (number? d) (str (:kind (c/def-of d)))
-      (cond (contains? (:fns c/*si*) d) (if (re-find #"\{impl#\d+\}::[^:]+$|::[A-Z][^:]*::[^:]+$" d) "AssocFn" "Fn")
+      (cond ;; queue 566 (C6 L2): a closure by its path's last segment first, though the interface's functions name it (std's
+            ;; `rsplit_file_at_dot::{closure#0}`, called by an instance of Option::map: its symbol with the instantiating crate)
+            (re-find #"::\{closure#\d+\}$" d) "Closure"
+            (contains? (:fns c/*si*) d) (if (re-find #"\{impl#\d+\}::[^:]+$|::[A-Z][^:]*::[^:]+$" d) "AssocFn" "Fn")
             ;; RF12-P6: a function of core built natively (a nested one's too: `write_volatile::precondition_check`)
             (contains? *native-attrs* d) (if (re-find #"\{impl#\d+\}::[^:]+$" d) "AssocFn" "Fn")
             ;; queue 542: a macro-made function core's attributes after expansion name (core-attrs: the atomics' methods)
             (contains? *macro-attrs* d) (if (re-find #"\{impl#\d+\}::[^:]+$" d) "AssocFn" "Fn")
-            :else (str (get (:kinds c/*std*) d)))))
+            ;; queue 566 (561-1 (a)): a closure the kinds table does not list (a dependency crate's, rustc_demangle's
+            ;; `demangle::{closure#1}`) is a Closure by its path's last segment, so its symbol carries the instantiating crate
+            :else (str (or (get (:kinds c/*std*) d) (when (re-find #"::\{closure#\d+\}$" d) "Closure"))))))
 
 (defn- generic-def? [d]
   (let [g (c/generics-any d)]
@@ -3070,6 +3132,25 @@
                   :when (and (nil? shim) (not (intrinsic? d)) ((:names (attrs-of d)) "inline(always)"))]
               [d (erase-regions args) (try (instance-symbol {:def d :args (erase-regions args)}) (catch Throwable _ nil))])))))))
 
+(defn unit-callees
+  "queue 566 (C6 L2's first slice): within build-program's bindings, every callee of BODIES' calls that resolves to an item's instance
+  (no shim, no intrinsic, not `#[inline(always)]`: inline-always-callees' own), [[def args symbol]] each once, in order: the copies
+  and instances the unit's items reach, which std's units define when the instance is std's (a generic or cross-crate-inlinable
+  definition instantiated in std)"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn []
+      (vec (distinct
+            (for [b bodies blk (:blocks b) :let [ft (call-fndef (:term blk))] :when ft
+                  :let [[_ d0 args0] ft
+                        r (try (resolve-instance d0 (erase-regions args0)) (catch Throwable _ nil))]
+                  :when r
+                  :let [[d args shim] r]
+                  :when (and (nil? shim) (not (intrinsic? d)) (not ((:names (attrs-of d)) "inline(always)")))
+                  :let [sym (try (instance-symbol {:def d :args (erase-regions args)}) (catch Throwable _ nil))]
+                  :when sym]
+              [d (erase-regions args) sym])))))))
+
 (defn const-fsyms
   "C6: within build-program's bindings, the symbols of every function constant BODIES name, calls' and operands' (a function
   reified as a pointer: `custom_owner_from_box`'s drop function), {text symbol-or-error}, as core-facts' :fsyms gives the calls'"
@@ -3207,8 +3288,14 @@
     (tc/with-solver (solver-def)
       (fn []
         (let [t (or (:tc (meta tyf)) (form->ty tyf))
-              sig (when (and (vector? t) (= :closure (first t))) (nth t 2 nil))]
-          (when (and (map? sig) (vector? (:inputs sig)) (closure-def (second t) sig))
+              sig (when (and (vector? t) (= :closure (first t))) (nth t 2 nil))
+              ;; (queue 566: an exported closure's signature as data, `[:fnsig INPUTS OUTPUT]`, core-check's ext-closure)
+              sig (if (and (vector? sig) (= :fnsig (first sig)) (vector? (second sig))) {:inputs (second sig) :output (nth sig 2 nil)} sig)]
+          ;; (queue 566: or an upstream or exported closure by its def path, core-check's ext-closure's `[:closure PATH ..]`:
+          ;; thread_local!'s `LOCAL_PANIC_COUNT::{constant#0}::{closure#1}` reified by its LocalKey's inline const)
+          (when (and (map? sig) (vector? (:inputs sig))
+                     (or (and (string? (second t)) (re-find #"::\{closure#\d+\}$" (second t)))
+                         (closure-def (second t) sig)))
             (v0-mangle "core::ops::function::FnOnce::call_once" [(erase-regions t) [:tuple (erase-regions (:inputs sig))]] true)))))))
 
 ;; ---------------------------------------------------------------------------------------------
