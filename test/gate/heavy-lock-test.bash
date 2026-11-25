@@ -55,13 +55,13 @@ before B start A end && ok "1: B started while A ran" || bad "1: B did not run b
 grep -q 'slot 1' <<< "$qs" && grep -q 'slot 2' <<< "$qs" && grep -q 'waiting' <<< "$qs" && ok "1: --queue names slot 1, slot 2 and the waiter" || bad "1: --queue: $qs"
 ls -A "$D/big.lock.queue" | grep -v '^\.err$' | grep -q . && bad "1: tickets left: $(ls -A "$D/big.lock.queue")" || ok "1: no ticket or state file left"
 
-# 2. the memory rule; FIFO kept behind a head that does not fit
+# 2. the memory rule; a later ticket that fits backfills beside the holder ahead of a head that does not fit
 case_dir mem; export HEAVY_LOCK_MEMAVAIL_KIB=$((10 * G))
-run A 1.5 1; sleep 0.3; run B 0.5 20; sleep 0.3; run C 0.3 1
+run A 3 1; sleep 0.3; run B 0.5 20; sleep 0.3; run C 0.3 1
 sleep 0.4; grep -q 'waiting for memory' "$D/stderr" && ok "2: the head says it waits for memory" || bad "2: no memory message"
 wait
 before A end B start && ok "2: B (20 GiB, 10 available) waited for A" || bad "2: B ran beside A: $(cat "$LOG")"
-before B start C start && ok "2: C (1 GiB, would fit beside A) did not pass B" || bad "2: C passed B: $(cat "$LOG")"
+before C start B start && before C start A end && ok "2: C (1 GiB, fits beside A) backfilled ahead of B, beside A" || bad "2: C did not backfill: $(cat "$LOG")"
 [ "$(slot B)" = 1 ] && ok "2: B ran alone in slot 1" || bad "2: B's slot $(slot B)"
 
 # 3. FIFO with room for one job only

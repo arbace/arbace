@@ -11224,8 +11224,10 @@ g++.dg/cpp2a/consteval-prop*.C state them; no GCC code read.
   ([expr.const]/20), so prop19's `int r = f(1)(2);` holds and `f(1)(2) + r` is the error; the evaluator follows function addresses
   and calls through them in that judgment alone (`*ce-fnptr*`, `{::fnp id}`).
 
-Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8 to own pass; C++ read 6,035 / 0 / 248 ->
-6,040 / 0 / 243. Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
+Rows: cpp2a/consteval-prop1, -prop2, -prop6, -prop10, -prop19 (the targets) and -prop7, -prop8: seven rows to own pass in
+test/cpp/check-dg-own-linux-amd64.edn (own pass 2,438 -> 2,445), but five in the read cell: -prop7 and -prop8 already passed the dg check
+(`:pass "compile"`, not :own-diag) and were counted, so C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243 and :own-diag 231 -> 226 (doc/JOURNAL.md,
+"2026-11-24: cpp-p2564's count"). Checked on the 358 dg-error files the change can touch (every own row of a file naming consteval, the own passes naming
 constexpr, those with a lambda's default argument, the control pair DRs/dr2082.C and dr1423.C, the two slow files): no own pass lost
 but the two slow files past their 300 s (udlit-suffix-neg, missing-header-pr110164, their pass rows kept), the control pair failing as
 recorded; cpp2a/spaceship-synth9.C's failing row reads differently, the same on the base (not recorded here).
@@ -11338,6 +11340,80 @@ pointer" in the checker), cpp0x/nondeduced7.C and template/partial-specializatio
 [temp.deduct.type]/17's type check of a non-type argument), overload/using2.C, cpp0x/defaulted10.C's line 13, cpp1y/constexpr-89074-3.C,
 concepts-recursive-sat4.C, concepts-lambda2.C, concepts-requires1.C, inherit/error4.C, overload/error8.C, cpp0x/pr32127.C.
 
+## As built: cpp-rind, the read stage's independence: the own front end on the dg rows clang's dumps judged (2026-11-24; branch `cpp-rind-1124` from mac/next `7de5de3ec`)
+
+The burst's C++ read-independence stream. C++'s read stage is judged own on the token check's 1,934 files (pp-ref) and on the dg check's
+files the own front end passes by their own dg-error lines (test/cpp/check-dg-own-linux-amd64.edn, `:count-from`); every other dg row
+counts 0.5, the cell's verdict there clang's recorded dumps' (cxxdump-dg-error). At the base 2,421 of the 4,350 counted rows were own
+(0.847); 1,681 of the 1,929 others were rows clang's dumps pass and the own front end does not, the rest the deferred rows both fail
+(cpp-sweep's). This stream took the 1,681, by the shortest tests first and by cause, each rule from the standard's text and GCC's
+messages as the tests state them; no GCC or clang code read. The parser's rules (arbace.repr.cpp.parse, soft diagnostics: the tree
+unchanged), the front end's checks (arbace.repr.cpp.diag, `checks`) and the code generator's Sema as the checker (arbace.cpp.sema,
+`checking?` alone where a rule could change what the code generator builds):
+
+- **Declarations, by the parser**: a variable or static member declared `auto` with no initializer, a non-static data member's
+  placeholder type, arrays of `auto`, `decltype(auto)` cv-qualified or with a trailing return type, any trailing return type on another
+  declared type than plain `auto`, `typedef auto`; `auto` parameters outside an abbreviated function template or a lambda (a function
+  type's own parameters, pointers to functions, block-scope functions, local classes' members); in-class initializers of non-const
+  static members and of static const arrays; mutable references; static data members of local classes; static functions at block
+  scope; `static` on an out-of-class static member definition; a class's own member functions as its friends; friend data members;
+  arrays of references (variables and parameters); earlier parameters in a later parameter's array bound; operator-function-ids and
+  literal-operator-ids of variables; literal operators with C linkage; operator functions with an ellipsis; default arguments in
+  out-of-class definitions of members of templates; explicitly defaulted variadic constructors; storage classes in conditions;
+  declarator-ids qualified by a template parameter (also a template template parameter's specialization), an enumeration or a
+  typedef of no class; `X::X` as a declaration's type; specializing a member without `template<>`; class templates redeclared as
+  non-templates and classes defined again as templates; duplicate template parameter names; `enum E;` with no previous declaration,
+  an unnamed enumeration's enum-base, unnamed scoped enumerations, an enum-head-name qualified by a template parameter, the class
+  being defined named with its arguments; names a complete class without bases, an enumeration or a namespace does not declare;
+  using-declarations without a nested-name-specifier, of an undeclared qualifier, of `::B` the global namespace does not declare, of a
+  namespace; pointers to members of undeclared classes; namespace aliases against namespaces (both orders); inline namespaces after a
+  non-inline first definition; nested namespace definitions before C++17 (pedantic); standard attributes after a namespace's name;
+  init-captures from `{}`, `{a, b}` or `()`; lambda parameters named as captures; captures of non-variables; `this` captured twice;
+  empty character constants (u'', U'', u8'': the literal had crashed the reader); file-scope `asm` with qualifiers (had crashed);
+  non-member functions of cv-qualified function typedefs, static member functions defined out of class with one; member functions
+  defined out of a complete class without bases that declares none of the name ("no declaration matches"); member classes defined
+  with their own class's qualification, class names and members qualified by `::` alone; member class templates without arguments and
+  undeclared members as qualifiers; explicit instantiations with a definition or of an operator-function-id without a function
+  declarator; non-member functions defaulted; `auto` from empty braces; function definitions in blocks; C99 array designators
+  (pedantic, `__extension__` spared) and floating designator indices; a class template's name without arguments under a pointer or
+  reference declarator (its injected name aside); `-fno-char8_t` from C++20. The standards' new features used early, GCC's pedwarns (errors
+  under the harness's -pedantic-errors): variadic templates and inline namespaces before C++11, `decltype(auto)` before C++14, a
+  `static_assert` without a message and `*this` captures before C++17, constexpr destructors, defaulted comparisons and `this`
+  captured beside `=` before C++20, nested namespace definitions before C++17.
+- **Checks over the tree** (diag.ae): `main` deleted; internal functions (static, or an unnamed namespace's, static members there)
+  odr-used and never defined (under -pedantic-errors, the uses in emitted bodies only); anonymous unions' member names against their
+  scope's declarations (namespace, block, templates' and members' bodies); block-scope extern declarations against the namespace's
+  (another variable type, a function of another return type); C language linkage: one function's exception specifications, a variable
+  first declared with C++ linkage; explicitly defaulted copy and move operations' signatures in C++11-C++17 (volatile, cv moves,
+  by-value or wrong-returning assignments, C++11 constexpr assignments); constexpr constructors and destructors of classes with
+  virtual bases; duplicate labels and gotos to labels defined nowhere; labels in constexpr functions before C++23 (pedantic); case
+  labels' narrowing to the condition's promoted type (C++11), floating case labels, integers for scoped enumerations and scoped
+  enumerators for integers; definitions of implicitly-declared constructors and destructors (a class that declares none); friend
+  definitions with default arguments that are not their function's only declaration; member functions overloaded with and without a
+  ref-qualifier; block-scope variable length arrays under -pedantic-errors; discarded warn_unused_result calls under -Werror; explicit
+  specializations of function templates and variable templates defined twice.
+- **The checker** (sema.ae, template.ae): constructors delegating to themselves; `auto x{e}` deduced from e and `auto x = {a, b}` as
+  std::initializer_list<E> (the second had been a false "excess elements in scalar initializer"); void conditions (a statement
+  expression ending in a statement, a throw-expression); pointer arithmetic outside an object's one element; casts from `void*` in
+  constant expressions before C++26; trivial copies of objects with mutable members in constant expressions; a failed static
+  assertion of `&&` at its false operand; DR 1601's promotion of fixed enumerations (a false ambiguity before); pointers to data
+  members gaining cv-qualifiers (a false error before), pointers to member functions of another type; array references bound by a
+  qualification conversion (DR 330; a false error before); scalars and arrays from parenthesized braced lists or array expressions;
+  value-initialized reference members; non-static data members named outside their class's member functions; `&` and `++` of an
+  rvalue reported (the refusal had had no rule); `->` on a class without operator->; functional casts to array types; member functions
+  assigned to; an instance's data member of a function type; parenthesized aggregate initialization's array elements (no brace
+  elision); `new` of an array type of unknown bound; `auto*` deduced
+  from no pointer or from no return statement; the composite pointer type of class pointers in `?:` (unrelated ones an error);
+  explicit instantiation definitions' member functions analyzed (a class whose member was left out by an error not, its uses being
+  the cascade); three stack overflows turned into errors or refusals (a constructor call needed again by its own argument's
+  conversion, a recursive default argument; the shared preprocessor's empty queue at the input's end, `_Pragma` last).
+
+Left: the 81 rows of the dialects (OpenMP 77, -fpermissive 2, -fms-extensions 1, -fcontracts 1) that clang's dumps pass and the own
+front end, which takes none of them by the user's choice (:gcc-dialect, CP399 (a)), does not; overload resolution and template
+instantiation's deeper diagnostics (no viable or ambiguous calls in instantiations, deleted functions through templates, noexcept as
+part of function types), definition-time checks of uninstantiated templates' non-dependent constructs (GCC diagnoses them, the
+checker analyzes instantiations alone), units with a syntax error (the checker does not run after the parser declines a construct),
+and the long tail of single rows.
 ## As built: cpp-print, the print cell's last nine rows (2026-11-24; branch `cpp-print-1124` from mac/next `7de5de3ec`)
 
 The burst's C++ print stream: the print cell at 3,886 pass / 0 / 9 deferred, its nine rows the own round trip's four recorded

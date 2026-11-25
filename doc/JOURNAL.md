@@ -20893,6 +20893,161 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
 
+## 2026-11-24: queue 559, a conflict-marker check and pyi divergences' shadowed names to 0 (the VM)
+
+- Base mac/next a6da0aadf, branch 559-tooling-markers-shadows. Why: doc and journal merges left git's conflict markers twice
+  this week (9b60ce498: doc/JOURNAL.md 19033-19604 and doc/python/PYTHON-SURVEY.md 8096-8159, `git grep` at that commit finds
+  them), and `bin/pyi divergences` failed on 24 shadowed `:tests` names.
+- (a) `bin/markers-check`: a line of a tracked text file (`git grep -I`) that begins with `<<<<<<< ` or `>>>>>>> ` fails, but at
+  a line of its `EXEMPT` list (path and line text, each with its reason; empty: no tracked file has one at a6da0aadf), then its
+  negative control, a fabricated repository whose `doc.md` has both markers, which must be reported at lines 2 and 6;
+  `bin/markers-check DIR` scans DIR alone. About a second. Not grown into `bin/records-check`: that step is keyed by the records'
+  files, and every tracked file is this check's input, so it is a `:pre :kind :always` step, `markers`, after `makefile`
+  (`test/gate/steps.edn`, `bin/gate`'s `pre_step`, `:crops :shared`, CLAUDE.md's core list, `make markers-check`).
+  Alternative not taken: a keyed step with every file among its `:inputs` (rerun at every commit anyway, and the planner's key
+  over 21,000 files).
+- (b) The 24 shadowed names: 21 of `:testcapi-behaviour`'s `:tests` (d9b0a3b1d's write-ahead for queue 465's `_testinternalcapi`
+  stand-in) whose record rows still fail to import `_testinternalcapi`, taken first by `:testinternalcapi-absent`'s `:match`, and
+  3 of `:multiprocessing-children`'s (test_multiprocessing_main_handling's SpawnCmdLineTest test_script_compiled, test_zipfile,
+  test_zipfile_compiled) whose rows crashed past the runner's memory cap, taken first by `:host-memory`'s `:match`. Each row
+  lands in the class of its recorded reason, so the names are commented out in place (kept for the record that reaches them),
+  no class moved and the first-class rule unchanged. Alternative tried and dropped: moving `:testcapi-behaviour` before
+  `:testinternalcapi-absent` and `:host-memory` after `:multiprocessing-children` moved exactly those 24 rows, but 21 from n/a
+  to deferred: Python eval's judged deferred 1308 -> 1329, `bin/reap` and `bin/crops-score --judge --strict` failing until a
+  `--record`. As done, `bin/pyi divergences --methods` is byte for byte the base's classification; no row's result changes.
+- Checks: `bin/pyi divergences` 0 shadowed, exit 0; `bin/reap` 56 of 56, 0 problems; `bin/crops-score --judge --strict` 0 problems;
+  `bin/records-check` 0 problems; `bin/markers-check` ok and its control; `test/docs/claude-md-test.bash` and
+  `test/gate/costs-test.bash` pass. Keys: gate_key does not move; the keys of the steps over `bin/`, `test/gate/steps.edn`,
+  `bin/gate`, CLAUDE.md or `test/python/` move (claude-md, crops-score, gate-tests, caches-table, records-check, Python's steps).
+## 2026-11-24: cpp-p2564's count, seven rows and five (a correction; queue 560)
+
+The entry "cpp-p2564, P2564R3's immediate escalation in the own front end" and the commit `df842350a`'s subject say "7 rows to own pass"
+(prop1, -2, -6, -10, -19, -7, -8) and "C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243", a difference of 5. Both are right, for two counts: the
+own record test/cpp/check-dg-own-linux-amd64.edn moved seven rows from fail to pass (own pass 2,438 -> 2,445), but the read cell counts a file
+once, and consteval-prop7.C and -prop8.C were `:pass "compile"` in test/cpp/check-dg-linux-amd64.edn already (not :own-diag in
+test/cpp/own-diag-review.edn) and so in the 6,035. Only prop1, -2, -6, -10, -19 left the :own-diag class (231 -> 226) and the read's deferred
+(248 -> 243), and the matrix's dg source 4,101 -> 4,106 and test/crops/scores.edn's 6,035 -> 6,040 say five. Nothing in the records was wrong; the
+text did not say which count a number was. The commit message cannot change; doc/cpp/CPP-SURVEY.md's "As built: cpp-p2564" now states
+both. The records need no change.
+- (later) C, queue 540b on train 2's compiled host (.tmp/r/c.sh in rec-t2-at, under bin/heavy-lock): `bin/repr-c roundtrip --corpus
+  torture-compile --record` 17.6 min, 17.9 GB peak, 1,791 of 1,791 pass (limits-caselabels.c: read ok, levels 1 and 2 equal, gcc agrees;
+  its known entry removed); `bin/repr-c parse-check --corpus torture-compile --no-mutants --record` 9.4 min, 12.1 GB, 1,791 of 1,791
+  equal (limits-caselabels.c 706,054 nodes, its :eval-depth entry removed). The record files were next's before the runs; copied into
+  the branch. C read 5,474 / 0 / 1 -> 5,475 / 0 / 0, print 4,853 / 0 / 2 -> 4,854 / 0 / 1 (left: sqlite3.c). reap, crops-score --record
+  and --judge --strict: 0 problems.
+- (later) Java compiled (.tmp/r/compiled.sh in rec-t2-at, under bin/heavy-lock: j2g 22 s, bin/build-go 1,574 s, runs 768 s): t04308,
+  t04443 (serialization), t04543 (resources, java-bytecode), t06144 and t06306 (JD7) and t03208 pass; t06157 (CaptureVarOrder: an
+  anonymous class's captured constructor, CaptureVarOrder$1.<init>(String,int,Object), not found) and t04832 (jrt lacks
+  Executable.accessFlags()) still fail, in their classes. `--judge --partial --record`: 5 now passing, 0 regressions, controls differ.
+  test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
+  t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
+  3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+
+## 2026-11-24: C++'s read independence: the own front end on the dg rows clang's dumps judged (branch `cpp-rind-1124`)
+
+The burst's C++ read-independence stream, from mac/next `7de5de3ec`. C++'s read stage (test/crops/independence.edn's `:read` fact,
+`:count-from` test/cpp/check-dg-own-linux-amd64.edn): the token check's 1,934 files own (pp-ref), each dg row the own front end
+passes by its own dg-error lines own, every other dg row 0.5 (the cell's verdict there clang's recorded dumps, cxxdump-dg-error). At
+the base: 2,421 own of 4,350 counted rows, (1934 + 2421 + 0.5 x 1929) / 6284 = 0.847. Of the 1,929: 1,681 rows clang's dumps pass and
+the own front end does not (this stream's), 248 both fail (the deferred rows, cpp-sweep's). Nothing else of the stage leans on a
+toolchain: libstdc++'s and musl's headers come from the pinned tarballs (bin/repr-cpp target), the target's answers are Arbace's own,
+the skim cache is a cache; so the only way up is the own front end passing those rows.
+
+- Method: the 1,681 taken by the shortest tests first and by cause, each rule from the standard's text and the GCC messages the tests
+  state; no GCC or clang code read. Probes by `.tmp/at.sh` (rind.dump's nodes and diag verbs, the namespaces loaded once) and
+  `bin/repr-cpp dg --front native --only LIST`. The rules: doc/cpp/CPP-SURVEY.md, "As built: cpp-rind". The parser's rules are soft
+  diagnostics (the tree unchanged: no tree check, round trip or code generator input moves); the checker's that could change what
+  the code generator builds are under `checking?` alone (auto x{e}, auto = {..}, DR 1601's ranking, the composite pointer type,
+  explicit instantiations' members), so the cpp-rt stream's runtime build sees the code generator as before.
+- Crashes fixed: empty prefixed character literals (lit.ae), file-scope asm qualifiers (parse.ae's skip-balanced! on a non-bracket),
+  the shared preprocessor's empty token queue at the input's end (arbace/repr/c/pp.ae's ts-shift: C's preprocessor too, an end of file
+  where an index -1 had thrown; no C record moves, C never reached it), two Sema stack overflows (a constructor call needed again by its
+  own argument's conversion; a recursive default argument).
+- False errors removed (these had failed rows the clang record passes): `auto x = {a, b}` ("excess elements in scalar initializer"),
+  `const int D::* q = &D::x;` (no conversion), array references bound by a qualification conversion (DR 330), DR 1601's promotions
+  (a false ambiguity), the composite pointer type of base and derived class pointers in `?:`.
+- Regression probe on the head before the record: 250 random rows the base record passes, all 250 still pass.
+- Later rules (after the draft above), all in the survey's "As built: cpp-rind": the standards' features used early (pedantic),
+  C linkage agreement, implicit special members' definitions, friend default arguments, ref-qualifier overloads, VLAs under
+  -pedantic-errors (`__extension__` spared: a first version had wrongly passed ext/constexpr-vla3.C, the record's row read again is
+  owed, below), explicit specializations defined twice, explicit instantiations' member functions analyzed by the checker, and more.
+- Records: a whole-corpus run with 8 threads under GOMEMLIMIT=3000MiB thrashed in GC (6 GB resident, about 2.5 h and 24 CPU-hours
+  without finishing) and was stopped by its process group, nothing recorded (an earlier stop by PID alone let the script's own step
+  write a record of "no read row" rows: restored from git before anything was committed). The record was then made from whole runs
+  of the non-passing rows (2,097 less the dialect directories' 230 n/a: 1,867, in parts of 3 threads each, GOMEMLIMIT=2800MiB),
+  each part judged with `bin/repr-cpp dg --front native --judge --record` once finished: three quarters recorded (dg-run01's 933,
+  dg-r00's and dg-r01's 234 each); the last two quarters (.tmp/dg-r02, .tmp/dg-r03, 233 each) were still running at the wrap-up.
+  The rows that passed were kept as recorded, checked by samples on the head: 250 + 300 random passing rows and about 300 more chosen
+  by construct (out-of-class definitions, explicit specializations, templates, new-expressions, designators, arrays), one regression
+  found (ext/desig2.C, `__extension__`) and fixed before the runs.
+- Result so far: the own record 2,467 → 2,714 own passes (247 rows to own pass, none lost); C++'s read independence 0.850 → 0.870
+  (crops-score's stage; the stream's base at 7de5de3ec 0.847); the read cell's completeness unchanged (6,063 / 0 / 221: these rows
+  were the clang record's passes already). bin/reap --record, bin/crops-score --record, --judge --strict and bin/records-check: 0
+  problems.
+- Left (decisions for the user): the 81 dialect rows clang's dumps pass (OpenMP 77, -fpermissive 2, -fms-extensions 1, -fcontracts
+  1), which the own front end takes none of by CP399 (a): (a) count them out of the judge's cases as the failing dialect rows are
+  (recommended: the dialect is out of the read level by the user's decision, its passing rows are clang's alone), (b) build OpenMP's
+  directives and clauses into the front end. The rest of the gap is the checker's depth: overload resolution and template
+  instantiation diagnostics, uninstantiated templates' non-dependent constructs (definition-time checks), units with a syntax error
+  (the checker does not run after a decline), and a long tail of single rows.
+
+## 2026-11-24: C++'s read: the dialect rows counted out, cpp-read's six rows re-read (branch `cpp-rind-1124`)
+
+- The user's decision (2026-11-24, through the burst's coordinator): the dg rows of the dialects Arbace's C++ does not take
+  (CP399 (a): OpenMP, -fpermissive, -fms-extensions, -fcontracts) that only clang's dumps pass are counted out of the read stage's
+  independence judge's cases, as the failing ones already are by `:gcc-dialect` (n/a). Built: `test/cpp/dg-dialect-out.edn`, a row
+  each with its kind (`:by-design`), level and reason, made from the records by one rule (own `:fail`, clang `:pass`, no `:na` class
+  naming it, the file's directory or dg-options naming the flag), 72 rows (-fopenmp 67, -fcontracts 2, -fpermissive 2,
+  -fms-extensions 1; the 81 of the earlier report counted 9 gomp rows `:gcc-dialect` already takes out); `test/crops/score.ae`'s
+  count-from leaves a fact's `:out-of-cases` ids out of the counted rows as its `:out` classes' (a row the own record passes stays
+  counted); the C++ read fact names it (`:out-of-cases {:file "test/cpp/dg-dialect-out.edn" :cases 72}`). Their rows stay in both
+  records and reap counts clang's passes as before (the read cell unchanged).
+- dg-r03 (233 of the non-passing rows) recorded: 40 rows to own pass, none lost. dg-r02 died before its read: nothing recorded.
+- cpp-read's six rows re-read with `--only` and recorded as they ran: addr_builtin-1.C passes again (the `[odr-internal]` error is
+  dropped when the unit has another error: GCC's "used but never defined" is the symbol table's, which an erroneous call never
+  reaches; the rule fires alone only on ext/visibility/anon7.C), cpp1y/pr63996.C passes, ext/constexpr-vla3.C fails (its earlier
+  pass was the VLA rule's error before the `__extension__` fix: the false pass removed), ext/constexpr-vla1.C fails;
+  cpp0x/udlit-suffix-neg.C and diagnostic/missing-header-pr110164.C time out at 300 s (own passes on next: some rule of this branch
+  is slow over libstdc++'s <string> and <map>; recorded as timeouts, the next cycle's first item).
+- C++ read independence 0.870 -> 0.877 (2,751 own of 4,278 counted rows, 214 n/a and 72 out: (1934 + 2751 + 0.5 x 1527) / 6212), C++ independence 0.9736 -> 0.9750;
+  the cells unchanged (read 6,063 / 0 / 221).
+## 2026-11-24: java-misc-1124, the lazy import and security's small fixes; references and logging as decisions
+
+Branch `java-misc-1124` from next `903ef1ab2` (the burst's Java misc stream: `:repl-sibling`, `:security` but t07882 and
+t07910, which java-rows-1124 did, `:logging`, `:references`). Each test's cause was found on the gate executable
+`40a4745332aacf54acab` with the read level's cache; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124".
+Built, for the train (arbace/lang and jrt move gate_key; no build of the branch was made):
+- the lazy import: `Compiler$ImportExpr/importIn` defers the import of a class not loadable yet whose source on the path
+  declares it (`arbace.classes.native/defer-import`, `arbace.classes.analyze/defer-import!` into `env/source-imports`), so
+  packages that import each other load in either order (t04756, t06388 at interp); proved with the deferral called in
+  place of the cyclic import on the gate executable, and the negative cases (no source, a source that does not declare the
+  class, no package) left to Clojure's ClassNotFoundException; the alternative of ordering the packages in run.ae was
+  rejected (a cycle has no order: each package's first file imports the other's class);
+- OCSP: F2's variant OCSP.ae dropped, jdk26u's getOCSPBytes over HttpURLConnection, in the world since F12 (t05333);
+- java.base's com.sun packages (com.sun.crypto.provider, com.sun.security.ntlm) in java.base by jrt's classPlace, as
+  jdk26u's module graph has them (t05304: SunJCE's module), a reflect_test case;
+- the seed source: jrt's SeedGenerator and the NativePRNG variant read a java.security.egd file as jdk26u's
+  URLSeedGenerator and initIO do (t08235); SeedGenerator's forms by `bin/jrt-convert predict`, the variant vetted.
+Proposed for the user (JMS1-JMS4, with options and recommendations in the survey): finalization (t04683, t04816;
+recommended: build it over Go finalizers handing objects to a Java "Finalizer" thread), a WeakReference read while the
+collector marks (t03385: measured, a spinning get keeps its referent through every System.gc; recommended n/a, its stdout
+being unspecified), LDAP's CertStore and UnixLoginModule (t05346, t07867; recommended: t07867 n/a, t05346 deferred under
+JCS234 (a)), and logging (System.Logger is JCS250 (a), not started here, an overlay `System$Logger` named as an
+alternative; t05778 n/a recommended; t05766 java-stack-1124's).
+
+## 2026-11-24: the user's decisions JMS1-JMS4 (java-misc-1124)
+
+The user decided java-misc-1124's proposals (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124"):
+- JMS1 (a): finalization is built: a Go finalizer hands the object to a Java thread "Finalizer", and runFinalization
+  starts a secondary thread (built on this branch, its entry below);
+- JMS2: t03385 (Test7190310) n/a;
+- JMS3: t07867 (AllPlatforms) n/a; t05346 (GetInstance's LDAP CertStore) stays deferred under JCS234 (a);
+- JMS4: t05778 (java/util/logging/Reflect) n/a; System.Logger as an overlay `java/lang/System$Logger.java` translated by
+  j2g, built by the Mac (not on this branch).
+test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before the world's classes) names t03385, t05778 and
+t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
+notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
+`bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
 ## 2026-11-24: ocaml-1123: b4's compiled rows on the host fix; the queued tool and ocamldoc runs
 
 - b4 (the build worktree at 8bcdee584, the compiled main's hosts embedding jrt's OSHost): opam/base64/test and opam/fmt/test_fmt pass at
@@ -20949,3 +21104,33 @@ The user's decisions (2026-11-24, through the coordinator, on ocaml-aot's report
 - The eval n/a decisions (539-1, 539b-2, 539b-3, ephetest3) stay applied at both levels, as branch `ocaml-aot-1124` applied them (8ce07bec1).
 - OCaml AOT 539 / 13 / 60 (64 n/a) -> 539 / 13 / 57 (67 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
   `bin/records-check`: 0 problems. Branch `ocaml-aot-na-1124` from 8ce07bec1, without the WIP ports (5a7a53e91, on `ocaml-aot-1124`).
+
+## 2026-11-25: the essential gate on next 5005e8505 failed; its fixes (the main session)
+
+`bin/gate` on next 5005e8505 (run 1, 2026-11-24 15:34 to 11-25 02:15: a build deferred under the 25 GiB disk floor, no check run;
+run 2, 02:25 to 07:50, log `.tmp/gate-next-1124.log`): 53 steps ok, 9 failed, from five causes, each fixed here and checked alone:
+
+- c-c2j, cpp-c2j, pyi-c2j, scheme-c2j ("c2j-check: the host failed"): `arbace/core_proxy.ae` called `Compiler$Dyn/hideMethod`, the
+  native Clojure's FnSer added (b4ab3ebfc, the user's CDR decisions of 2026-11-22), directly; stage 0 evaluates the namespace from the
+  checkout with the seed's runtime, which has no hideMethod: the call failed to compile there, and a reflective one to run (a proxy of a
+  Serializable class is made while the namespaces load). Now looked up once by name (`hide-method`, nil without it: on stage 0 a proxy's
+  writeObject/readObject stay visible, as before FnSer). `bin/ci c2j-check`: ok, 27 sources, 3,638 classes. The same trap as train 3's
+  `Compiler$CF$AssertOn` (2aeeffc77): a namespace stage 0 evaluates must reach a new runtime member by name.
+- goi-aot-essential ("control not judged: ... its subject ... not in this run", all three AOT controls): misc-tails (b0de218cc) brought Go
+  AOT to all passing, so `test/goi/check-aot-known.edn` holds no row and the known file bin/goi writes is empty; `apply_known`'s awk read
+  it with `NR==FNR`, which with an empty first file takes the results as the known rows and prints none: every AOT check's results.tsv
+  came out empty. `FILENAME == ARGV[1]` there and in bin/goi's five other two-file awks of the check's tail (retried, ref-pass, fails).
+  Checked: the three controls' subjects and references at the AOT level, 6 pass, each control fails as it must.
+- oi-essential: `bin/oi pins` ("STALE aot lib-marshal/intext: attested, but no longer pinned"): its pin left aot-known.edn with queue
+  527 (89eeed291); its attested row removed from `test/ocaml/pins-attested.tsv` with a note. `bin/oi pins`: 11 pins, each attested. (Its
+  "left" controls are subjects outside the essential list, not failures; effects/backtrace's native pass against ocamlc's path is a note.)
+- ocaml-read-essential: `ocamllex-check` 29 of 38, 9 .mll unrecorded (546b's ppxlib and sexplib corpora): recorded by hand with the host's
+  ocamllex 5.5.0 (`bin/repr-ocaml ocamllex-check --host --record`): 38 of 38 equal to it byte for byte, the native one 38 of 38 to the record.
+- caches-table ("names no row covers: a.o"): `bin/repr-go`'s gc reference wrote "$d.tmp/a.o", which the coverage scan reads as a `.tmp/`
+  name; written "$d.tmp"/a.o (the directory is $d's sibling, not the checkout's .tmp). `test/gate/caches-test.bash --coverage`: ok.
+- suite-go: not run (an earlier step failed).
+Also merged into next before the rerun: mac/cpp-rind-1124 ee0acba05, mac/ocaml-aot-na-1124 db8d867fd, mac/ocaml-1123 65d1d1445; and the
+big lock's backfill (the user, 2026-11-24 "do 3"): `bin/heavy-lock` lets a later ticket that fits take a free slot beside a holder when no
+earlier waiting ticket fits there (two looks in a row, never while the other slot is free: the head keeps its turn), `HEAVY_LOCK_BACKFILL=0`
+off; `test/gate/heavy-lock-test.bash` case 2 now expects the backfill (its holder 3 s); deployed by atomic rename on 2026-11-24 16:30 and
+proved that evening (the C++ chain's four steps ran beside train 3).
