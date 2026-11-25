@@ -4741,6 +4741,8 @@
     (let [v (var* (::uvar l))]
       (when (and (:name v) (not (:constexpr v)) (not (:cx-constexpr v)) (not (and (:c (:ty v)) (abi/integral? (:ty v)))))
         (ce-sure! "the value of '" (:name v) "' is not usable in a constant expression"))))
+  (when (and (= ::unknown @(::cell l)) (checking?) (::uref l))
+    (ce-sure! "'" (:name (var* (::uref l))) "' is not a constant expression"))
   (when (= ::unknown @(::cell l)) (not-constant "a read of an object of unknown value"))
   (let [p (::path l) v @(::cell l)
         x (loop [x v ks (seq p)]
@@ -5272,6 +5274,12 @@
                  (and (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (not (checking?)) (>= (long *cxx-year*) 23)
                       (#{:local :param :global :static-local :member-static} (:storage (var* (:id x)))))
                  (ce-unknown-loc [:ref (:id x)])
+                 ;; (cpp-def, the checker: P2280R4, which GCC applies from C++20, a function parameter of reference type outside
+                 ;; its call's evaluation refers to an unknown object: its member functions called that read nothing, its object
+                 ;; read surely no constant (ce-get's ::uref), a virtual call on it too; cpp2a/constexpr-ref1.C's swam)
+                 (and (checking?) (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (>= (long *cxx-year*) 20)
+                      (= :param (:storage (var* (:id x)))) (:name (var* (:id x))))
+                 (assoc (ce-unknown-loc [:ref (:id x)]) ::uref (:id x))
                  ;; (h-cpp-consteval: an assignment's lvalue read, `return (u.i = 42);`: the value stored)
                  (and (#{:assign :cassign} (:op x)) (not (abi/class? (abi/unq (:ty x)))))
                  (ev x)
@@ -5423,6 +5431,12 @@
                ;; constant expression: GCC's "'__builtin_unreachable()' is not a constant expression" at the call, ubsan/pr63956.C)
                (when (and (checking?) (= "abort" (:name f)) (not (:constexpr f)) (not (:cls f)))
                  (ub! e "'__builtin_unreachable()' is not a constant expression"))
+               ;; (cpp-def, the checker: P2280R4, a virtual call on an object of unknown dynamic type, a reference parameter's
+               ;; outside its call, surely no constant expression: cpp2a/constexpr-ref1.C's `swam.lochte()`)
+               (when (and (checking?) (:virtual e) (:obj e))
+                 (let [o (try (ce-lv (:obj e) env) (catch arbace.lang.ExceptionInfo _ nil))]
+                   (when (and (ce-loc? o) (::uref o) (empty? (::path o)))
+                     (ub! e "virtual call on '" (:name (var* (::uref o))) "', an object of unknown dynamic type, is not a constant expression"))))
                (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))
                                   (cx-cmp-constexpr? (:id f))))
                          (:virtual e))
@@ -6093,6 +6107,16 @@
     :reinterpret-lv (cond (and (:cx-reinterpret e) (checking?)) (ub! e "'reinterpret_cast' is not a constant expression")
                           (= (abi/unq (:ty e)) (abi/unq (abi/non-ref (:ty (:e e))))) (ce-lv (:e e) env)
                           :else (not-constant "a reinterpret_cast's lvalue"))
+    ;; (cpp-def, the checker: [expr.typeid]/3 with P2280R4, typeid of a polymorphic glvalue through a reference whose object
+    ;; the evaluation does not know -- a namespace-scope reference with no initializer here, `extern Swim& trident;` -- asks a
+    ;; dynamic type no constant expression gives: GCC's "... is not a constant expression", cpp2a/constexpr-ref1.C)
+    :typeid (let [x (:e e)
+                  ;; (a reference's object: *ref, the analyzer's deref of the reference's load)
+                  x (if (and (= :deref (:op x)) (= :load (:op (:e x))) (= :var (:op (:e (:e x)))) (:raw (:e (:e x)))) (:e (:e x)) x)
+                  v (when (= :var (:op x)) (var* (:id x)))]
+              (if (and (checking?) v (abi/ref? (:ty v)) (#{:global :member-static} (:storage v)) (nil? (or (:init v) (:init-node v))) (:name v))
+                (ub! e "'" (:name v) "' is not a constant expression")
+                (not-constant "the object of :typeid")))
     (not-constant "the object of " (:op e))))
 
 (defn- ce-glvalue
