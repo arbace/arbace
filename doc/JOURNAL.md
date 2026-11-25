@@ -19481,3 +19481,37 @@ The coordinator's third message for 566, on the same branch.
   (rounds e, f, g, i): 18 -> 333 -> 380 equal of 481 callees.
 - Checks at the head: pack-compare-test, inline-test 15 of 15, rust-front essential and core-essential (their known summaries),
   reap 56 of 56, crops-score, records-check 9 pairs: all pass. No record changed.
+
+## 2026-11-25 — Rust C6 lib-unit: the wanted keys committed as test data, a fresh cache gives round 3's numbers (queue 566, VM)
+
+- DECISION 566-1 (a), the user's (the queue's ANSWERS.md, 2026-11-25): log the keys that eval-const-whole wants too, and commit the
+  lists as test data. Before this, the keys the builds wanted (the always-inliner's callees, a static's CTFE, L2's callees) lived
+  only in the cache, in `.tmp/rust-front/lib-unit/CRATE-inline-keys.txt`, so a fresh cache could not rebuild round 3's exports.
+- build_run.ae: a new dynamic, `*const-wanted*`. A constant's whole evaluation (eval-const-whole) adds two kinds of entries to it: a
+  const fn it calls that no export holds, and a constant it names that has no exported body. lib-unit-main logs each entry as
+  `lib-unit const wanted DEF (not exported; a constant's evaluation)`, the way L2 logs `lib-unit l2 wanted`. It is bound around the
+  `:local-const` and `:const-whole` evaluations of lib-unit-run. It only logs, so no output changes.
+- bin/rust-front:
+  - `test/rust/front/lib-unit-{core,alloc,std}-keys.txt` hold 233, 40 and 132 keys. They are round 3's cache files, sorted.
+  - Every `lib-unit export CRATE` reads its list beside CRATE-keys.txt (from std's IR) and the cache's CRATE-inline-keys.txt.
+  - `inline-keys CRATE` also takes the `l2` and `const` wanted lines.
+  - `inline-keys CRATE --record` merges the cache's keys into the committed list.
+  - `LIB_UNIT_DIR` names another cache directory.
+  - No gate step runs lib-unit, so test/gate/steps.edn declares nothing new.
+- The proof was a fresh cache (`LIB_UNIT_DIR` set to the VM's q566 scratch `fresh/`), run under the heavy lock, 30 minutes:
+  - `keys` core, alloc and std: the same files as the cache's.
+  - Full exports of core (507 keys, 83 module files, 478 bodies), alloc (67 bodies) and std (495 bodies). The key sets are the same
+    as the cache's. Std's bodies are the same byte for byte.
+  - Core's and alloc's bodies differ from the cache's only in numbering that depends on the run: unevaluated constants' and ADTs'
+    ids, alloc ids, anonymous regions, and line numbers in the expanded modules. One extra nested attribute also appears
+    (panic_nounwind_fmt's panic_impl). The cache's bodies came from `--add` and `--keys` runs over fewer modules.
+  - Std's build and compare give **217 / 38 / 70**, and L2 gives **380 / 66 / 32 / 3 of 481**. These are round 3's numbers, and
+    every item and callee has the same verdict as in rounds h and i.
+- The new logging names four constants: `std::path::MAIN_SEPARATOR`, `std::sys::path::unix::SEPARATORS_STR`,
+  `std::sys::alloc::MIN_ALIGN` and `core::io::error::{impl#1}::WRITE_ALL_EOF`. The last two are L2's unevaluated refusals.
+  `inline-keys` over the fresh logs finds 9 keys beyond the lists (core 5, std 4). They are left for the next export round
+  (`inline-keys CRATE --record`, then export), so that this proof stays at round 3's lists.
+- Alternatives considered:
+  - 566-1 (b), the keys kept as cache state, was the user's to reject.
+  - Committing whole native-*-items.edn files: about 12 MB of exports that depend on the run, against the keys they are made from.
+- bin/reap: 56 of 56, 0 problems, before and after.
