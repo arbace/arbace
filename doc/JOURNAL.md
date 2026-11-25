@@ -22127,3 +22127,27 @@ and test/crops/scores.edn taken from next and recorded again (`bin/reap --record
   `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
 - mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
 Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
+
+## 2026-11-25 — goi's digest keeps a listed package's dot imports: pyctypes' `Object` (queue 579, VM)
+
+- The finding (Arbace, the main session): with arbace/pyctypes listed in goi's table (queue 521, 6db3dd0cb, on its branches),
+  goi's std check (test/goi/std.ae, the full gate's `goi` step) fails `:compiled arbace/pyctypes` with "not supported by goi yet:
+  a value of type invalid type" for every exported func whose signature names `Object` (Str_, DelItemOf, ...); NUM_BITS passes.
+- Why: pyctypes' files import arbace/py as a dot import (`. "arbace/py"`), so `Object` is py.Object written unqualified.
+  arbace.go.table/digest-forms keeps a file's import only when a kept declaration uses its name as a qualifier (used-quals); a
+  dot import's name `.` is never one, so every digest file of pyctypes lost its import of arbace/py, and the checker of goi's REPL
+  (the digest session) resolved `Object` in pyctypes' own scope: no such declaration, an invalid type, which goi's builder
+  refuses (arbace/go/build.ae's desc1). interpret-forms (the interpretable packages' digests) already keeps `_` and `.` imports.
+- Fix (arbace/go/table.ae, digest-forms): a dot import is kept when the file's kept declarations name, unqualified, an exported
+  member of the dot-imported package (its index's types, funcs, vars or consts; any exported name the package does not declare
+  when that package is not in the environment). No package listed on next has a dot import, so next's table is unchanged;
+  the fix acts when 521's listing of pyctypes arrives.
+- Alternative not taken: leaving pyctypes out of the compiled std check (or unlisting it). The package is meant to be compiled
+  (521's DECISION 521-2 (b): the C world at compiled speed); its members' types were wrong in the digest, so every caller of them
+  at the REPL, not only the std check, would have hit the invalid type. The digest was the bug.
+- Proof (.tmp/q579/digest-proof.ae on stage 0, tamago/arm64 over tamago/goroot, pyctypes taken as a program path as 521 does):
+  the digest's pyctypes files keep 6 dot imports of arbace/py; checked as goi's digest session checks it, Str_ is
+  func(py.Object) string and DelItemOf func(py.Object, py.Object) error; the same digest less its dot imports (the old one) gives
+  func(invalid type) string and func(invalid type, invalid type) error (the negative control); NUM_BITS func(uint64) uint64 in both.
+  The step's own command (bin/goi test --gc's std.ae) needs an executable whose table lists pyctypes: the main host's, after
+  this merges with 521's listing.
