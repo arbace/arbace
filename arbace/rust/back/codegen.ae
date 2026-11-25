@@ -209,8 +209,11 @@
 (defn nop-landing-pads
   "find_noop_landing_pads (rustc_mir_transform/remove_noop_landing_pads.rs): the cleanup blocks that do nothing but resume: their
   statements trivial (or writes of a local, a drop flag), their terminator a goto, resume, switch or false edge whose
-  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call."
-  [blocks]
+  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call. With MIR?
+  (queue 581) the pads rustc's MIR no longer has: a drop marked `:param-drop` (core-instance: a generic body's drop of a
+  parameter's type, which the instance's MIR keeps) is no nop, so its edge stays one for MergingSucc"
+  ([blocks] (nop-landing-pads blocks false))
+  ([blocks mir?]
   (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter" "bidh" "raw"}
         ok-stmt (fn [st] (let [st (if (= "dbg-stmt" (name (first st))) (second st) st) k (name (first st))]
                            (or (trivial k)
@@ -224,10 +227,10 @@
                                          (let [t (:term blk) all-nop (fn [] (every? nops (successors t)))]
                                            (case (name (first t))
                                              ("resume" "goto" "switch" "false-edge" "false-unwind") (all-nop)
-                                             "drop" (and (nil? (nth t 6)) (all-nop))
+                                             "drop" (and (nil? (nth t 6)) (not (and mir? (= :param-drop (nth t 7 nil)))) (all-nop))
                                              false)))]
                           b))]
-        (if (= nops' nops) nops (recur nops'))))))
+        (if (= nops' nops) nops (recur nops')))))))
 
 (defn const-switch-bits
   "Body::try_const_mono_switchint: the value a block's switchInt is decided by when its discriminant is a constant, a runtime
@@ -814,6 +817,24 @@
   [gl name ret params]
   (vswap! gl assoc-in [:decls name] (list 'llvm/declare name ret params)))
 
+(def ^:dynamic *const-index-align*
+  "queue 572 (C6 L3): place.rs' project_index: an index that is a constant restricts the place's alignment for its offset
+  (index times the element's size: `r.table_sizes[0]` keeps the struct's align 8), else for the element's size; gated on the
+  backtrace crates by 572, ungated by queue 581 (572-1 (a): every crate, every program; false: the element's size alone)"
+  true)
+
+(def ^:dynamic *consume-fat-pair*
+  "queue 572 (C6 L3), its own var since queue 581 (572-2 (a)): a deref of a memory local's fat pointer loads both halves
+  (operand.rs' codegen_consume, load_operand: the metadata's load unused); gated on the backtrace crates by 572, ungated by queue
+  581 (572-1 (a): every crate, every program; false: the data pointer's half alone)"
+  true)
+
+(def ^:dynamic *repeat-ptr-loop*
+  "queue 572 (C6 L3), its own var since queue 581 (572-2 (a)): `[x; N]`'s loop as rustc 1.99's write_operand_repeatedly writes
+  it, a pointer loop from the place's element 0 to its element N; gated on the backtrace crates by 572, ungated by queue 581
+  (572-1 (a): every crate, every program; false: the index loop of before)"
+  true)
+
 (def ^:dynamic *call-seq*
   "rust-c6c: lib-unit's compare binds it true: every call and invoke carries `:cseq N`, its creation's place in the body (the
   inliner's use-list order; arbace.rust.back.inline strips it)"
@@ -835,7 +856,10 @@
         ;; C6-4: an edge into a landing pad that does nothing is no edge (RemoveNoopLandingPads made it `unwind continue` in
         ;; rustc's MIR before codegen): a call whose cleanup is one has its return target alone, which MergingSucc merges
         ;; (CustomOwner::into_raw's `forget` then `return`, one LLVM block)
-        real-succs (fn [t] (vec (remove nops (successors t))))
+        ;; queue 581: but an edge rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is
+        ;; one: codegen_terminator's mergeable_succ counts it (Ord::min::<usize>'s, cvt::<i32>'s `br` after the call)
+        mir-nops (nop-landing-pads blocks true)
+        real-succs (fn [t] (vec (remove mir-nops (successors t))))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (real-succs (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (real-succs t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -1104,6 +1128,10 @@
                     (let [l (place-local p) projs (place-projs p)
                           base (if (and (seq projs) (= "deref" (proj-kind (first projs))))
                                  (let [ptr (cond
+                                             ;; queue 572: a memory local's fat pointer consumed whole (codegen_consume's
+                                             ;; load_operand: both halves loaded, the metadata's load unused) for a backtrace crate
+                                             (and *consume-fat-pair* (contains? mem l) (= :pair (:kind (nth lay l))))
+                                             (:v (first (:pair (load-place! bb {:ptr (get-in @st [:allocas l]) :align (:align (nth lay l)) :ly (nth lay l)}))))
                                              (and (contains? mem l) (= :pair (:kind (nth lay l))))
                                              (:v (load-scalar! bb (first (:pair (nth lay l))) (get-in @st [:allocas l]) (:align (nth lay l))))
                                              (contains? mem l)
@@ -1132,7 +1160,8 @@
                                                 r (fresh!)]
                                             (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
                                             (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
-                                            {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
+                                            {:ptr r :align (restrict-align (:align pl) (if (and *const-index-align* (integer? idx)) (* (long idx) (long (:size el))) (:size el)))
+                                             :ly el :ty (second (ty-struct (:ty pl)))})
                                   "cindex" (let [[_ off _ from-end] e
                                                  _ (when-not (:array (:ly pl)) (unsupported "constant index of a slice"))
                                                  el (layout lt (second (ty-struct (:ty pl))))
@@ -1697,6 +1726,24 @@
                                                   cur (get (:redir @st) bb bb)
                                                   hdr (new-block! "repeat_loop_header") bdy (new-block! "repeat_loop_body") nxt (new-block! "repeat_loop_next")
                                                   i (fresh!) k (fresh!) off (fresh!) ep (fresh!) nx (fresh!)]
+                                              (if *repeat-ptr-loop*
+                                                ;; queue 572 (a backtrace crate's lib-unit compare): write_operand_repeatedly as rustc
+                                                ;; 1.99's builder writes it, a pointer loop: start and end as the place's elements 0
+                                                ;; and N, the current element's pointer the header's phi, `!=` the end, the next one
+                                                ;; element on
+                                                (let [ety (backend-type lt gl (second (ty-struct (place-type body p))))
+                                                      s0 (fresh!) e0 (fresh!)]
+                                                  (emit! bb (list '= s0 (list 'getelementptr :inbounds :nuw ety ['ptr (:ptr pl)] ['i64 0])))
+                                                  (emit! bb (list '= e0 (list 'getelementptr :inbounds :nuw ety ['ptr (:ptr pl)] ['i64 n])))
+                                                  (emit! bb (list 'br (symbol (str "%" hdr))))
+                                                  (emit! hdr (list '= i (list 'phi 'ptr [s0 (symbol (str "%" cur))] [nx (symbol (str "%" bdy))])))
+                                                  (emit! hdr (list '= k (list 'icmp :ne 'ptr i e0)))
+                                                  (emit! hdr (list 'br 'i1 k (symbol (str "%" bdy)) (symbol (str "%" nxt))))
+                                                  (store-val! bdy {:ptr i :align (restrict-align (:align pl) (:size el)) :ly el} v)
+                                                  (emit! bdy (list '= nx (list 'getelementptr :inbounds ety ['ptr i] ['i64 1])))
+                                                  (emit! bdy (list 'br (symbol (str "%" hdr))))
+                                                  (vswap! st assoc-in [:redir bb] nxt))
+                                              (do
                                               (emit! bb (list 'br (symbol (str "%" hdr))))
                                               (emit! hdr (list '= i (list 'phi 'i64 [0 (symbol (str "%" cur))] [nx (symbol (str "%" bdy))])))
                                               (emit! hdr (list '= k (list 'icmp :ult 'i64 i n)))
@@ -1706,7 +1753,7 @@
                                               (store-val! bdy {:ptr ep :align (restrict-align (:align pl) (:size el)) :ly el} v)
                                               (emit! bdy (list '= nx (list 'add :nuw 'i64 i 1)))
                                               (emit! bdy (list 'br (symbol (str "%" hdr))))
-                                              (vswap! st assoc-in [:redir bb] nxt))))))
+                                              (vswap! st assoc-in [:redir bb] nxt))))))))
                                     ssa-dest (when-let [v (rvalue! bb r dly)] (assign! bb p v))
                                     ;; rustc codegens the destination place before the rvalue
                                     :else (let [pl (if (zst? dly) nil (place-of! bb p))
@@ -2628,9 +2675,16 @@
                   (recur m)))))))
       ;; the blocks no traversal reached (and no merge took) are codegen'd as `unreachable`, in index order; a no-op landing pad
       ;; is no block (RemoveNoopLandingPads, -O0's o1 pass before rustc's codegen, made it dead and SimplifyCfg removed it: since
-      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run)
-      (doseq [b (range (count blocks))]
-        (when-not (or (some #{b} order) (contains? (:skip @st) b) (contains? nops b))
+      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run); queue 581: but a pad
+      ;; rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is one, unreached
+      ;; (and a no-op pad such a kept pad jumps to, the resume block, is kept with it: RemoveNoopLandingPads redirects only unwind
+      ;; edges into no-op pads, a jump into one goes to the resume block)
+      (doseq [b (range (count blocks))
+              :let [kept-nop? (fn [b] (some (fn [i] (let [t (:term (nth blocks i))]
+                                                      (and (not (contains? mir-nops i)) (:cleanup (nth blocks i))
+                                                           (some #{b} (remove #{(unwind-cleanup t)} (successors t))))))
+                                            (range (count blocks))))]]
+        (when-not (or (some #{b} order) (contains? (:skip @st) b) (and (contains? mir-nops b) (not (kept-nop? b))))
           (let [nm (if (zero? b) "start" (str "bb" b))]
             (llbb! b)
             (emit! nm '(unreachable)))))
@@ -2642,6 +2696,13 @@
             rl (first lay)]
         (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
                (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra])
-                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks))))
+                       ;; (queue 581: or a kept pad, a parameter's drop, whose unwind terminates: codegen_mir's personality for a
+                       ;; mono-reachable block's UnwindAction::Terminate)
+                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks)))
+                                 (some (fn [i] (and (contains? nops i) (not (contains? mir-nops i))
+                                                    (let [t (:term (nth blocks i))
+                                                          u (case (name (first t)) ("call" "assert") (nth t 5 nil) "drop" (nth t 3 nil) "false-unwind" (nth t 2 nil) nil)]
+                                                      (and (seq? u) (= "terminate" (name (first u)))))))
+                                       (range (count blocks))))
                          [:personality ['ptr (symbol "g" "rust_eh_personality")]])
                        [:body (vec bbs)]))))))

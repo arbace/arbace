@@ -401,6 +401,33 @@
             (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros (fget (parse-file file) :items) file)))
           {} files))
 
+(def ^:private macro-use-mods
+  "queue 589: a module file's `#[macro_use] mod NAME;` declarations, the names (memoized by file)"
+  (memoize (fn [^String f]
+             (if (.exists (File. f))
+               (set (for [it (try (fget (parse-text (slurp f)) :items) (catch Throwable _ nil))
+                          :let [k (fget it :kind)]
+                          :when (and (= 'Mod (head k)) (some #(= "macro_use" (attr-path-name %)) (fget it :attrs)))]
+                      (second (nth k 2))))
+               #{}))))
+
+(defn- macro-scope-dir
+  "queue 589: the directory a macro_rules! of module file DF is in textual scope beneath: its module's (lib.rs' or mod.rs'
+  directory, a foo.rs's foo/), and while its module is declared `#[macro_use] mod NAME;` in its parent module file, the
+  parent's (rustc's textual scope: a #[macro_use] module's macros stay in scope after it in the parent; core's
+  `#[macro_use] mod macros;` makes macros/mod.rs' panic!, assert! and the rest the whole crate's)"
+  ^String [^String df]
+  (let [f (File. df) nm (.getName f)]
+    (if (#{"lib.rs" "main.rs"} nm)
+      (.getParent f)
+      (let [[own mname pdir] (if (= "mod.rs" nm)
+                               (let [d (.getParentFile f)] [(.getPath d) (.getName d) (.getParent d)])
+                               [(subs df 0 (- (count df) 3)) (subs nm 0 (- (count nm) 3)) (.getParent f)])
+            parent (some #(when (.exists (File. ^String %)) %) [(str pdir "/mod.rs") (str pdir "/lib.rs") (str pdir ".rs")])]
+        (if (and parent (contains? (macro-use-mods parent) mname))
+          (macro-scope-dir parent)
+          own)))))
+
 (defn macros-for
   "The macro table as the expansion's std macros for a file: each name's definition from the nearest file (the same file
   excluded: the file's own are its user macros), by the longest common directory prefix"
@@ -411,9 +438,12 @@
                        ;; name outside its textual scope (its module file's subtree): rustc-demangle's v0.rs `macro_rules! write`
                        ;; (a compile_error! guard) is not lib.rs' write!, core's is
                        ds (if (and shadowed (shadowed nm))
-                            (remove (fn [{^String df :file}]
-                                      (let [mdir (if (re-find #"/(lib|mod)\.rs$" df) (.getParent (File. df)) (subs df 0 (- (count df) 3)))]
-                                        (not (str/starts-with? file (str mdir "/")))))
+                            (remove (fn [{^String df :file dsite :def-site}]
+                                      ;; (queue 589: a #[macro_use] module's scope its parent's, macro-scope-dir; a macro 2.0, :def-site,
+                                      ;; has no textual scope: `$crate::panic::panic_2021!` resolves by its path from anywhere)
+                                      (and (nil? dsite)
+                                           (let [mdir (macro-scope-dir df)]
+                                             (not (str/starts-with? file (str mdir "/"))))))
                                     ds)
                             ds)]
                  :when (seq ds)]
@@ -489,7 +519,8 @@
                             (let [mk (nth k 3)] (when (= 'Loaded (head mk)) (walk (second mk) p))))
                     ;; a re-export (`pub(crate) use self::index_range::IndexRange;`): its target by the written path, whose
                     ;; definitions with-core-names copies under the name (imports.rs' single imports, textually)
-                    Use (letfn [(abs [segs]
+                    Use (let [private-use? (= 'Inherited (fget (fget it :vis) :kind))]
+                        (letfn [(abs [segs]
                                   (let [[f & r] segs]
                                     (case f
                                       ("crate" "$crate") (into [*crate*] r)
@@ -519,7 +550,10 @@
                                                    segs (if self? (pop segs) segs)
                                                    target (abs segs) nm (or rn (last segs))]
                                                (when (and target (not= "self" (last segs)) (> (count target) 1))
-                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj []) [nm (str/join "::" target)])))))
+                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj [])
+                                                                                     ;; queue 572: a private import marked (gated on the backtrace crates by 572,
+                                                                                     ;; ungated by queue 581, 572-1 (a))
+                                                                                     (cond-> [nm (str/join "::" target)] private-use? (conj :private)))))))
                                       Nested (doseq [x (fget kk :items)] (tree (if (= 'tuple (head x)) (second x) x) segs))
                                       ;; round 54 (RIND9 (a), std): a glob re-export (sys/pal/mod.rs' `pub use self::unix::*;`,
                                       ;; sys/fd's, sys/fs's), its module's names copied by with-core-names; std's alone (core's
@@ -529,7 +563,7 @@
                                                (when (> (count target) 1)
                                                  (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :globs (fnil conj []) (str/join "::" target)))))))
                                       nil)))]
-                          (tree (second k) []))
+                          (tree (second k) [])))
                     nil))))]
       (walk items path))
     @acc))
@@ -572,17 +606,25 @@
                             path))))
         reexport (fn [m]
                    (reduce (fn [m [p {:keys [reexports]}]]
-                             (reduce (fn [m [nm target]]
+                             (reduce (fn [m [nm target priv]]
                                        (let [i (.lastIndexOf ^String target "::")
                                              parent (module-of m (subs target 0 i)) tn (subs target (+ i 2))
                                              defs (filter #(= tn (:name %)) (:children (get m parent)))]
-                                         (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
+                                         (if (seq defs) (add m p "Mod" (mapv #(cond-> (assoc % :name nm) priv (assoc :private-use true)) defs)) m)))
                                      m reexports))
                            m names))
         ;; round 54: a glob re-export's module's names, under the module's own (add keeps the module's own first)
         glob (fn [m]
                (reduce (fn [m [p {:keys [globs]}]]
-                         (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
+                         ;; queue 572: a glob takes a module's private imports only into its descendants
+                         ;; (rustc's glob imports the names visible from the importing module: gimli's `pub use
+                         ;; self::endian_slice::*` not endian_slice's `use core::ops::Range`, so `gimli::Range` is rnglists')
+                         (reduce (fn [m target] (if-let [e (get m (module-of m target))]
+                                                  (add m p "Mod" (if (str/starts-with? (str p "::") (str target "::"))
+                                                                   (:children e)
+                                                                   (remove :private-use (:children e))))
+                                                  m))
+                                 m globs))
                        m names))
         globs? (some :globs (vals names))
         ;; queue 542: the glob re-exports kept as the map's metadata (with-value-names adds a macro-made item to the modules
@@ -916,12 +958,12 @@
                       "|" (.or (biginteger a) (biginteger b)) "&" (.and (biginteger a) (biginteger b)) "^" (.xor (biginteger a) (biginteger b))
                       "/" (when-not (zero? b) (quot a b)) "%" (when-not (zero? b) (rem a b)) nil)))
     (:paren :group) (some-> (:expr x) disr-value)
-    ;; queue 561 (C6 L3): a backtrace crate's cast discriminant (miniz_oxide's TINFLStatus `Done = TINFL_STATUS_DONE as i8`),
-    ;; the operand's value, wrapped to the enum's repr by enum-repr-discrs
-    :cast (when (some #{*crate*} backtrace-crates) (disr-value (:expr x)))
+    ;; queue 561 (C6 L3): a cast discriminant (miniz_oxide's TINFLStatus `Done = TINFL_STATUS_DONE as i8`), the operand's
+    ;; value, wrapped to the enum's repr by enum-repr-discrs (gated on the backtrace crates by 561, ungated by queue 586)
+    :cast (disr-value (:expr x))
     ;; and a constant of the module by its name (`TINFL_STATUS_DONE`, `const TINFL_STATUS_DONE: i32 = 0;`), its expression's value
     :path (or (collect/const-int-value x)
-              (when (and (some #{*crate*} backtrace-crates) (= 1 (count (:segs (:path x)))))
+              (when (= 1 (count (:segs (:path x))))
                 (let [nm (str (:ident (first (:segs (:path x)))))
                       d (some #(when (and (str/starts-with? (str (:kind %)) "Const") (= nm (str (second (:data %))))) %) (collect/defs))]
                   (some-> d :node :expr disr-value))))
@@ -1216,8 +1258,6 @@
       ;; prelude::rust_2024::*;`, std-names' std::prelude), core's and alloc's core's; std's features its cfg's (crate-cfg)
       (binding [ex/*cfg-names* (crate-cfg) ex/*virtual* (atom nil) ex/*prelude-crate* (prelude-crate) ex/*def-order* (atom 0)
                 ex/*raw-block-frags* (boolean (some #{*crate*} dep-crates))
-                lower/*try-expn-mark* (boolean (some #{*crate*} backtrace-crates))
-                tc/*steps-inherent* (boolean (some #{*crate*} backtrace-crates))
                 resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)
                 ;; queue 417: std's interface pass keeps its type aliases of an impl Trait as aliases (*free-aliases*)
                 collect/*free-aliases* (boolean (and *collect-only* (= "std" *crate*)))]
@@ -1225,7 +1265,7 @@
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
                               (ex/expand-file file 2024 (let [sm (ex/load-std-macros std-file)]
-                                                         (merge sm (macros-for table file (when (some #{*crate*} backtrace-crates) (set (keys sm)))))))))
+                                                         (merge sm (macros-for table file (set (keys sm))))))))
               vtext (ex/virtual-text)
               res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
                                                     ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)
@@ -1640,13 +1680,14 @@
             ;; calls and no entry of their own carries (build-run's lib-unit takes them)
             ;; C6-4: the attributes of the crate's own functions the body calls (a copy's #[inline] decides its symbol's
             ;; instantiating crate: std's `Components::len_before_body`, `Path::has_root`), which no entry of their own carries
-            ;; queue 561 (C6 L3): a backtrace crate's body also carries the attributes of every function of its module file (beneath
+            ;; queue 561 (C6 L3): a body also carries the attributes of every function of its module file (gated on the backtrace crates
+            ;; by 561, ungated by queue 586, 581-3 (a); beneath
             ;; the callees' own), the impls' methods its operators and trait calls reach (adler2's `#[inline] fn add_assign` of
             ;; `impl AddAssign for U32X4` under `+=`: a copy, the instantiating crate in its symbol), which a trait method call's :tc
             ;; does not name
             :callee-attrs (let [la (requiring-resolve 'arbace.rust.front.mono/local-attrs)]
                             (merge
-                             (when (some #{*crate*} backtrace-crates)
+                             (do
                                (into {} (for [d (collect/defs) :when (#{"Fn" "AssocFn"} (str (:kind d)))
                                               :let [p (try (def-path-string (:id d)) (catch Throwable _ nil))
                                                     a (when p (try (la (:id d)) (catch Throwable _ nil)))]

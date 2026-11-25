@@ -17,7 +17,9 @@
    it (caml_oi_dynlink_link: a global no unit defines Undefined_global, one not initialised Uninitialized_global; then compiled), then
    runs its initialisation outside it (caml_oi_dynlink_init), an exception wrapped as Library's_module_initializers_failed; finish hides
    a private load's units (caml_oi_dynlink_hide, Symtable.hide_additions). A file that does not start with the header is not a bytecode
-   file. The unit's own primitives (cu_primitives, unsafe_module) are not known from its Lambda: a plugin is never unsafe here. *)
+   file. The unit's own primitives (cu_primitives, unsafe_module) are not known from its Lambda: a plugin is never unsafe here.
+   A library (queue 576, doc/ocaml/OCAML-SURVEY.md "As built: queue 576"): ocamlmklib's NAME.cma as bin/oi writes it ("OI-CMA 1",
+   split_cma), its shared libraries opened before its units are read, as byte/dynlink.ml's load opens lib_dllibs. *)
 
 module DC = Dynlink_common
 module DT = Dynlink_types
@@ -30,6 +32,8 @@ external init_unit : int -> unit = "caml_oi_dynlink_init"
 external hide_unit : int -> unit = "caml_oi_dynlink_hide"
 
 let magic = "OI-CMO 1"
+let cma_magic = "OI-CMA 1"
+let dll_magic = "OI-DLL 1"
 
 (* the main program's interface digests (OI_DYNLINK_IMPORTS), NAME DIGEST a line *)
 let program_imports () =
@@ -114,40 +118,102 @@ module Oi = struct
         (DT.Error (Library's_module_initializers_failed exn))
         (Printexc.get_raw_backtrace ())
 
-  let read_header ic file_name =
-    let line () =
-      try input_line ic with End_of_file -> raise (DT.Error (Not_a_bytecode_file file_name))
+  (* a .cmo's text: its interface imports and its Lambda *)
+  let split_cmo file_name text =
+    let n = String.length text in
+    let bad () = raise (DT.Error (Not_a_bytecode_file file_name)) in
+    let rec go pos first acc =
+      match String.index_from_opt text pos '\n' with
+      | None -> bad ()
+      | Some j ->
+        let l = String.sub text pos (j - pos) in
+        if first then (if l <> magic then bad () else go (j + 1) false acc)
+        else if l = "lambda" then List.rev acc, String.sub text (j + 1) (n - j - 1)
+        else match String.split_on_char ' ' l with
+          | ["import"; n; "-"] -> go (j + 1) false ((n, None) :: acc)
+          | ["import"; n; c] -> go (j + 1) false ((n, Some c) :: acc)
+          | _ -> bad ()
     in
-    if line () <> magic then raise (DT.Error (Not_a_bytecode_file file_name));
-    let rec go acc =
-      let l = line () in
-      if l = "lambda" then List.rev acc
-      else match String.split_on_char ' ' l with
-        | ["import"; n; "-"] -> go ((n, None) :: acc)
-        | ["import"; n; c] -> go ((n, Some c) :: acc)
-        | _ -> raise (DT.Error (Not_a_bytecode_file file_name))
+    go 0 true []
+
+  (* (queue 576) a library, the file bin/oi writes where ocamlmklib writes NAME.cma: the line "OI-CMA 1", its shared libraries
+     ("dllib -lNAME", lib_dllibs), then each unit ("unit LENGTH" and the unit's .cmo text of that length), as bytecode's library
+     holds its units' code and their names *)
+  let split_cma file_name text =
+    let n = String.length text in
+    let bad () = raise (DT.Error (Not_a_bytecode_file file_name)) in
+    let rec go pos dlls units =
+      if pos >= n then List.rev dlls, List.rev units
+      else match String.index_from_opt text pos '\n' with
+        | None -> bad ()
+        | Some j ->
+          match String.split_on_char ' ' (String.sub text pos (j - pos)) with
+          | ["dllib"; d] -> go (j + 1) (d :: dlls) units
+          | ["unit"; len] ->
+            let len = match int_of_string_opt len with Some l when l >= 0 && j + 1 + l <= n -> l | _ -> bad () in
+            go (j + 1 + len) dlls (String.sub text (j + 1) len :: units)
+          | _ -> bad ()
     in
-    go []
+    let start = String.length cma_magic + 1 in
+    if n < start then bad () else go start [] []
+
+  (* a library's shared library (Dll.open_dlls For_execution): -lNAME is dllNAME.so, found in CAML_LD_LIBRARY_PATH's directories
+     (ocamltest's ld_library_path), else the name as given; the file bin/oi writes where ocamlmklib writes it (the line "OI-DLL 1",
+     its C files). Its primitives are the run's C stubs (OI_CSTUBS, every library's C files on ci), each found by its name when first
+     called, as oi finds any stub's *)
+  let open_dll d =
+    let name =
+      if String.length d > 2 && String.sub d 0 2 = "-l"
+      then "dll" ^ String.sub d 2 (String.length d - 2) ^ ".so" else d
+    in
+    let dirs =
+      match Sys.getenv_opt "CAML_LD_LIBRARY_PATH" with
+      | None | Some "" -> []
+      | Some p -> String.split_on_char ':' p
+    in
+    let full =
+      if not (Filename.is_implicit name) then name
+      else match List.find_opt (fun dir -> Sys.file_exists (Filename.concat dir name)) dirs with
+        | Some dir -> Filename.concat dir name
+        | None -> name
+    in
+    let fail () = failwith ("Cannot load shared library " ^ name) in
+    match open_in_bin full with
+    | exception Sys_error _ -> fail ()
+    | ic ->
+      let l = try input_line ic with End_of_file -> "" in
+      close_in ic;
+      if l <> dll_magic then fail ()
 
   let load ~filename:file_name ~priv =
-    let ic =
-      try open_in_bin file_name
-      with exc -> raise (DT.Error (Cannot_open_dynamic_library exc))
+    let text =
+      match open_in_bin file_name with
+      | exception exc -> raise (DT.Error (Cannot_open_dynamic_library exc))
+      | ic ->
+        match really_input_string ic (in_channel_length ic) with
+        | s -> close_in ic; s
+        | exception exc -> close_in_noerr ic; raise (DT.Error (Cannot_open_dynamic_library exc))
+    in
+    let first = match String.index_opt text '\n' with Some i -> String.sub text 0 i | None -> text in
+    let cmos =
+      if first = magic then [text]
+      else if first = cma_magic then begin
+        let dlls, cmos = split_cma file_name text in
+        (try List.iter open_dll dlls
+         with exn -> raise (DT.Error (Cannot_open_dynamic_library exn)));
+        cmos
+      end else raise (DT.Error (Not_a_bytecode_file file_name))
     in
     try
-      let imports = read_header ic file_name in
-      let text = really_input_string ic (in_channel_length ic - pos_in ic) in
-      close_in ic;
-      let unit, name, deps = parse_unit text in
-      let ui = { Unit_header.name; file = file_name; imports; deps = Array.to_list deps; unit } in
-      (priv, [unit]), [ui]
+      let uis = List.map (fun t ->
+          let imports, lambda = split_cmo file_name t in
+          let unit, name, deps = parse_unit lambda in
+          { Unit_header.name; file = file_name; imports; deps = Array.to_list deps; unit }) cmos
+      in
+      (priv, List.map (fun (u : Unit_header.t) -> u.unit) uis), uis
     with
-    | DT.Error _ as exc ->
-      close_in_noerr ic;
-      raise exc
-    | exc ->
-      close_in_noerr ic;
-      raise (DT.Error (Cannot_open_dynamic_library exc))
+    | DT.Error _ as exc -> raise exc
+    | exc -> raise (DT.Error (Cannot_open_dynamic_library exc))
 
   let unsafe_get_global_value ~bytecode_or_asm_symbol =
     global_value bytecode_or_asm_symbol

@@ -5015,6 +5015,21 @@ done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 
   native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
   problems. No record changes: the ppx programs are not rows of the suite corpus.
 
+## As built: ocaml-aot (2026-11-24, branch `ocaml-aot-1124`, from mac/next `a6da0aadf` with mac/ocaml-1123): the AOT cell's n/a decisions, ports in progress
+
+- The user's decisions 539-1 (a), 539b-2, 539b-3 (a) and ephetest3's n/a hold at the AOT level too: test/ocaml/divergences-aot.edn's
+  `:na-native-dynlink`, `:na-gc-pacing`, `:na-boxed-identity` (539/14/63 -> 539/13/60, 64 n/a).
+- bin/oi's run corpus and selection in `bin/lib/oi/corpus.bash`: each writer's corpus a file of its own renamed into place, a program
+  selected once (concurrent checks doubled `.tmp/oi/corpus.tsv`).
+- Written, not yet run or recorded (doc/JOURNAL.md, 2026-11-24, ocaml-aot): the AOT runtime's ports of oi's thread exit, young set,
+  allocation buckets, OCAMLRUNPARAM s, the stub's signal at the next allocation and the embedding of OCaml in a C main.
+- Run and recorded 2026-11-25 (doc/JOURNAL.md, "ocaml-aot recorded"): those ports, the ring's buckets only for the instrumented runtime
+  (`O2J_RUNTIME_VARIANT=i` from header.awk's `-runtime-variant=i`), the custom blocks' memory sampled by Gc.Memprof (oi's queue 523:
+  `ExtGc/customMem`, `memprofCustom`, the source in info.source), a bigarray's zero filled by `Arrays/fill`, and the light level's
+  per-row CPU caps (`test/ocaml/aot-cpu-caps.tsv`, the user's caps of 2026-11-24 extended): seven rows pass, 539 / 13 / 57 -> 546 / 13 / 50.
+- `bin/lib/oi/suite.bash`'s corpus names by the PID taken once (`$BASHPID` in a pipeline is the subshell's: the corpus was empty since
+  8ce07bec1); also on its own branch for next, `oi-suite-bashpid-1125`.
+
 ## As built: ppx_expect on oi (queue 547, 2026-11-24/25, the VM): T2 of DECISION 539b-1, re's lib_test/expect
 
 T2 of DECISION 539b-1 is done. re's expect tests are rewritten by ppx_expect's driver, built from the opam set and run on oi, and they
@@ -5135,3 +5150,60 @@ Arbace's typer.
 - **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
   sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
   on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).
+
+## As built: queue 576 (2026-11-25, the VM): ocamlmklib's libraries at oi's level, lib-dynlink-bytecode
+
+OC220 (a)'s last bytecode row. `lib-dynlink-bytecode/main` passes at oi by its own verdicts: `main.exe` loads `plug1.cma` and
+`plug2.cma` (their C stubs printing, stub2 calling stub1 in C), marshals the registry's closures of plugin code with `Closures` and
+calls them back (main.reference); `static.exe` (`-linkall registry.cmo plug1.cma plug2.cma`) and `custom.exe` (`-custom -linkall`,
+plug2 first) run and are each judged against their own reference (static.reference, custom.reference).
+
+- **header.awk's dynlink mode, at oi's level alone** (the AOT levels keep the class; the AOT cell is the host's, 547f-2 (a)):
+  - `compile_only = "true"; all_modules = "A.ml B.c ..."; ocamlc.byte`: each .ml a unit step (as `module =`), each .c an object;
+  - `program = NAME; modules = "O.${objext} ..."; ocamlmklib`: NAME's shared library of those objects' C files (`@dyndll=NAME:C+C`);
+  - `program = NAME; modules = "U.cmo ..."; ocamlmklib`: NAME.cma of those units, its dllib `-lNAME` as ocamlmklib records it
+    (`@dyncma=NAME:U+U`);
+  - after the main link and run, each further link (`.cmo` units and `.cma` libraries, a library only with `-linkall`; flags
+    `-linkall`, `-custom`, `-I .`; `use_runtime = "false"`; `output`) and run, with its `reference =` (`@dynruns=REF:ITEM+ITEM`);
+  - the libraries' C files the run's stubs (`@cstubs`), `ld_library_path += "${test_build_directory}"` the run's
+    `CAML_LD_LIBRARY_PATH=.` (the run's directory).
+  Over the testsuite's headers at the three levels only this row's line changes, at oi's level.
+- **bin/oi.** `oi_dynlink` writes `dllNAME.so` ("OI-DLL 1", its C files) and `NAME.cma` ("OI-CMA 1", `dllib -lNAME`, then each
+  unit's .cmo as `unit LENGTH` and its text: the library holds its units, as a bytecode .cma does). `oi_one` runs each further program
+  (the libraries' units, the units, in link order, with the program's libraries) and compares it with its reference; the first that
+  differs (status not 0, or output) is the row's, noted "the program REF (run N) differs from REF.reference".
+- **The platform** (test/ocaml/dynlink/dynlink.ml): `load` reads the file whole; "OI-CMO 1" is a unit as before, "OI-CMA 1" a
+  library: its shared libraries opened first (byte/dynlink.ml's `Dll.open_dlls`: `-lNAME` is `dllNAME.so`, looked up in
+  `CAML_LD_LIBRARY_PATH`'s directories; a missing one, or a file that is not "OI-DLL 1", is `Cannot_open_dynamic_library (Failure
+  "Cannot load shared library ...")`), then its units, each parsed and run in order by dynlink_common.
+- **What is not modelled**: a shared library's primitives are not bound when it is opened. The run's stubs are every library's C
+  files built into one node program on ci (OI_CSTUBS), each stub found by its name when first called, as oi finds any stub. A program
+  that called a plugin's primitive before loading its library would find it here, where ocamlrun fails. No test of the corpus does.
+  dynlink.ml is in native_key, so the native library was rebuilt once (the typing cache of the ppx programs rekeys with it).
+- **Controls**: `_control/dynlink-bytecode-vs-pr4229` (test/ocaml/controls.txt, judge check-oi.edn) differs. Once, in scratch, the
+  pinned tree's static.reference was given an extra line: the row failed with "the program static (run 2) differs from
+  static.reference", and the file was then restored (its SHA-256 checked).
+## As built: queue 583 (2026-11-25, the VM): the AOT cell's 13 by-design rows classified, two built
+
+The AOT cell's 13 design rows by cause (next 01ee9c426: 539 / 13 / 57):
+- **Built** (the light level):
+  - lib-runtime-events/test (`:c-runtime-internals`): the test's C consumer (runtime_events_consumer.h on ci) read the C API server's
+    own oi ring, which the program's collections never reach (minors 0, majors 0, 42 bytes against 44). Now oicapi's `RuntimeEvents`
+    hook (set by the wire's servers, wire.ae's wireLoad) sends __oi_re_control, _cursor and _next to the runtime as a request 'V'
+    (u32 op, str, u32 n, n i64), answered 'R' with a block of integers by ExtRtEvents/consumer over the runtime's own ring (start,
+    pause, resume, are_active; the cursor's E_SUCCESS / E_NO_CURRENT_RING / E_OPEN_FAILURE / E_MAP_FAILURE; the next message, its
+    lost words, padding skipped), as oi's RuntimeEventsControl, Cursor and Next answer on oi's. Handle keeps the worker on a 'V' as on
+    'K' and 'Q'. Passes, "same" against oi; the control `_control/re-test-vs-caml` differs. The class holds no program at this level.
+    The compiled level's main serves the same wire, so its row should pass too (not run: the host's lane).
+  - callback/callback_effects_domains_gc (`:c-primitive`): not a stub of the test's: `external caml_callback` names the C runtime's own
+    function, which ocamlopt links. ExtCore/caml_callback applies f to a on a stack of its own (CApi/apply's rule). The program runs and
+    passes by its own verdict given 900 s (148.7 s of user CPU for the whole check, its main beside a domain compacting without end on the
+    level's one Go thread), but not within the check's 120 s: recorded "slow", `:light-speed` (aot-slow.edn), deferred.
+- **ocamldoc's five** (tool-ocamldoc/t01-t05, `:ocamltest-tools`): 528-8 (a) puts them at the compiled level (the light level does not
+  fit, 480-1). There they stopped on `external caml_unix_gmtime`, which ExtUnix now has (the tm record by days_from_civil's inverse,
+  checked against date(1) on six instants including leap days and 2100). The compiled rerun is heavy (the host's lane).
+- **`:unix-java`'s four** (lib-threads/delayintr and signal; the suite's lib-unix/unix-socket/recvfrom_linux and recvfrom_unix): the
+  light level has no host for the OS's signals or AF_UNIX sockets; the compiled level has HostSys (OC216 (a)). DECISION 583-1.
+- **`:opam-not-run`'s two** (opam/re/expect, opam/sexplib0/sexplib0_test): 547f-2 (a) leaves them until the AOT level runs the ppx
+  programs. DECISION 583-3.
+After it: OCaml AOT 540 / 11 / 58 (67 n/a), completeness 0.9709 -> 0.9713.

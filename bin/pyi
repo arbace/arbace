@@ -304,6 +304,28 @@ runtime_c_from_source() {
   elif ! git -C "$root" diff --quiet "$commit" -- go/arbace/ci.ae go/arbace/ci; then echo arbace/ci
   fi
 }
+# runtime_clib_from_source EXE CSET SET (queue 521, DECISION 521-2 (b)): the C library host and _ctypes's package, listed in
+# goi's table since 521 (pyctypes imports py, ci, crt and clib; clib ci and crt), for ARBACE_GOI_FROM_SOURCE: arbace/clib (its
+# interpreted copy never sees the compiled worlds' registrations: the node program is loaded, the fallback) when ci or crt
+# come from source (CSET) or go/arbace/clib differs from EXE's commit (a world's node program or its compiled package with
+# it), arbace/pyctypes with it and when py comes from source (SET) or go/arbace/pyctypes differs; nothing when EXE lists no
+# arbace/pyctypes (an executable before 521: both interpreted from their forms on first import, as lazy modules)
+runtime_clib_from_source() {
+  local exe=$1 cset=$2 set=$3 v commit k f out="" clib=""
+  k=$(stat -L -c '%n %s %Y %i' "$exe" | sha256sum | cut -c1-16); f="$WORK/exe-version/$k.pyctypes"
+  if [ ! -s "$f" ]; then
+    mkdir -p "$WORK/exe-version" "$WORK/tmp"
+    (cd "$WORK/tmp" && ARBACE_PATH= "$exe" -e '(println (boolean (some #{"arbace/pyctypes"} (arbace.lang.GoInterp/paths))))' 2>/dev/null | tail -1) > "$f.$$" || true
+    mv -f "$f.$$" "$f"
+  fi
+  [ "$(cat "$f")" = true ] || return 0
+  v=$(exe_version "$exe"); commit=$(sed -n 's/.*:commit "\([0-9a-f]*\)".*/\1/p' <<< "$v")
+  if [ -n "$cset" ] || [ -z "$commit" ] || grep -q ':dirty true' <<< "$v" || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null \
+     || ! git -C "$root" diff --quiet "$commit" -- go/arbace/clib.ae go/arbace/clib; then clib=1; fi
+  if [ -n "$clib" ]; then out=arbace/clib,arbace/pyctypes
+  elif [ -n "$set" ] || ! git -C "$root" diff --quiet "$commit" -- go/arbace/pyctypes.ae go/arbace/pyctypes; then out=arbace/pyctypes; fi
+  echo "$out"
+}
 runtime_from_source() {
   local verb=${1:-} exe v commit set="" why
   if [ -z "${ARBACE_GOI_FROM_SOURCE+x}" ]; then
@@ -335,6 +357,11 @@ runtime_from_source() {
         set="$cset,$set"; why="$why; go/${cset//,/ and go\/} differ from the executable's"
       fi
     fi
+    if [ "${PYI_RUNTIME:-auto}" != compiled ]; then
+      local xset
+      xset=$(runtime_clib_from_source "$exe" "${cset:-}" "$set")
+      if [ -n "$xset" ]; then set="$xset${set:+,$set}"; why="$why; go/${xset//,/ and go\/} interpreted"; fi
+    fi
     export ARBACE_GOI_FROM_SOURCE=$set
     if [ -z "${PYI_RUNTIME_NOTED:-}" ] && [ "$verb" != python ] && { [ -n "$set" ] || { [ "$verb" != run ] && [ "$verb" != repl ]; }; }; then
       if [ -n "$set" ]; then echo "pyi: the checkout's runtime (${set//,/ and }) interpreted by goi: $why" >&2
@@ -346,7 +373,8 @@ runtime_from_source() {
 # runtime_state (queue 321, on runtime_from_source since the merge with next's h-pyi-runtime): which pyi runtime the
 # tools' host runs here, after runtime_from_source decided (ARBACE_GOI_FROM_SOURCE). Prints
 #   interpreted       the executable lists no arbace/py (before W2): goi interprets the checkout's runtime
-#   compiled COMMIT   listed, none from source, and the checkout's runtime packages (go/arbace/{py,libm,ci,crt}) are COMMIT's
+#   compiled COMMIT   listed, none from source, and the checkout's runtime packages (go/arbace/{py,libm,ci,crt}, and since
+#                     queue 521 clib and pyctypes when the executable lists arbace/pyctypes) are COMMIT's
 #   checkout COMMIT   listed at COMMIT, the checkout's go/arbace/py (and libm) interpreted from source (runtime_from_source):
 #                     the checkout's runtime, at goi's speed and with goi's own divergences
 #   stale COMMIT N    what runs compiled is not the checkout's: N files of the packages not loaded from source differ from
@@ -362,7 +390,11 @@ runtime_state() {
   if [ -z "$commit" ] || grep -q ':dirty true' <<< "$v" || ! git -C "$root" cat-file -e "$commit^{commit}" 2>/dev/null; then
     case $src in *,arbace/py,*) echo "checkout ${commit:--}" ;; *) echo "stale ${commit:--} ?" ;; esac; return
   fi
-  for p in py libm ci crt; do case $src in *",arbace/$p,"*) ;; *) pkgs+=("go/arbace/$p.ae" "go/arbace/$p") ;; esac; done
+  # queue 521 (finding 6): an executable that lists arbace/pyctypes compiles clib (with the worlds) and pyctypes too
+  local ps=(py libm ci crt)
+  out=$(cd "$WORK/tmp" && ARBACE_PATH= "$(arbace_exe)" -e '(println (boolean (some #{"arbace/pyctypes"} (arbace.lang.GoInterp/paths))))' 2>/dev/null | tail -1) || true
+  [ "$out" != true ] || ps+=(clib pyctypes)
+  for p in "${ps[@]}"; do case $src in *",arbace/$p,"*) ;; *) pkgs+=("go/arbace/$p.ae" "go/arbace/$p") ;; esac; done
   # every package from source: nothing runs compiled (an empty pathspec would diff the whole checkout)
   n=0; [ ${#pkgs[@]} = 0 ] || n=$( { git -C "$root" diff --name-only "$commit" -- "${pkgs[@]}"; git -C "$root" ls-files --others --exclude-standard -- "${pkgs[@]}"; } | wc -l)
   if [ "$n" != 0 ]; then echo "stale $commit $n"
@@ -1189,12 +1221,12 @@ SH
   chmod +x "$AOT/compiler.sh"
 }
 # compiler_digest: arbace.python.run's compiler-digest (the key of its IR cache), the SHA-256 of each compiler source's
-# name and text, NUL-terminated: compile, ir, scope and run, then arbace/repr/python's namespaces in name order
+# name and text, NUL-terminated: compile, ir, scope, run and libpatch (queue 535), then arbace/repr/python's namespaces in name order
 compiler_digest() {
   local f
   # under REPR_PYTHON_VERSION=3.15 the reader's version first (queue 237; arbace.python.run's compiler-digest)
   { [ "${REPR_PYTHON_VERSION:-}" != 3.15 ] || printf 'REPR_PYTHON_VERSION=3.15\0'
-    for f in arbace/python/compile.ae arbace/python/ir.ae arbace/python/scope.ae arbace/python/run.ae \
+    for f in arbace/python/compile.ae arbace/python/ir.ae arbace/python/scope.ae arbace/python/run.ae arbace/python/libpatch.ae \
              $(cd "$root" && ls arbace/repr/python/*.ae | LC_ALL=C sort); do
       [ -f "$root/$f" ] || continue
       printf '%s\0' "$f"; cat "$root/$f"; printf '\0'
@@ -2435,7 +2467,7 @@ cmd_table_check() {
     esac
   done
   (cd "$root" && ARBACE_PATH="$root" GOMEMLIMIT=${PYI_TABLE_GOMEMLIMIT:-$("$root/bin/gate-policy" mem 4GiB)} \
-     "$host" "$root/test/python/table_check.ae" "$root/go/arbace/gotable.edn" "$w/out" arbace/libm,arbace/py,arbace/crt,arbace/ci \
+     "$host" "$root/test/python/table_check.ae" "$root/go/arbace/gotable.edn" "$w/out" arbace/libm,arbace/py,arbace/crt,arbace/ci,arbace/clib,arbace/pyctypes,arbace/clib/worlds \
        "${args[@]}" $tables) 2>&1 | { grep -v '^Reflection warning\|recur arg\|^Auto-boxing' || true; } | tee "$w/table-check.log"
   local rc=${PIPESTATUS[0]}
   echo "table-check: $((SECONDS - t0)) s"
