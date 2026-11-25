@@ -369,6 +369,7 @@ END {
   }
   psetup = 0; pargs = ""; pdone = 0; pchk = 0; pcopy = ""
   dsetup = 0; dcwd = ""; dnext = ""; dmod = ""; dmods = ""; dlibs = ""; dsteps = ""; dmain = ""; dlinked = 0; drun = 0; dcopy = ""
+  dco = 0; dmk = 0; dprog = ""; dmkmods = ""; ddll = ""; dcma = ""; dlinkall = 0; dpend = ""; drn = 0; drnext = 0; dldpath = 0
   hprog = ""; hmods = ""; hsetup = 0; hmain = 0; hargs = ""; nruns = 0; runs = ""; hbase = FILENAME; sub(/^.*\//, "", hbase); sub(/\.mll?$/, "", hbase)
   for (j = 1; j <= m; j++) {
     s = trim(st[j]); if (s == "") continue
@@ -397,6 +398,81 @@ END {
       cls(s)
     }
     if (dlmode) {
+      # (queue 576) ocamlmklib's libraries at oi's level (lib-dynlink-bytecode): a compile of several files (compile_only = "true";
+      # all_modules = "A.ml B.c ..."; ocamlc.byte: each .ml a unit as module = steps are, each .c an object), `program = NAME; modules =
+      # "O.${objext} ..."; ocamlmklib` NAME's shared library of those objects' C files (dllNAME.so, @dyndll=NAME:C+C,...), `program =
+      # NAME; modules = "U.cmo ..."; ocamlmklib` NAME.cma of those units, its dllib -lNAME as ocamlmklib records it (@dyncma=NAME:U+U,...);
+      # after the main program's link and run, each further link (`all_modules = "U.cmo NAME.cma ..."`, flags -linkall, -custom, -I .,
+      # use_runtime = "false") and run a program of those units with every library's units linked (-linkall), judged against its own
+      # reference (`reference = "${test_source_directory}/REF.reference"`; @dynruns=REF:ITEM+ITEM,...); the libraries' C files the run's
+      # stubs (@cstubs), ld_library_path += test_build_directory the run's CAML_LD_LIBRARY_PATH (the run's directory). The AOT levels keep
+      # the class
+      if (aot == 0) {
+        if (s ~ /^ld_library_path *\+= *"\$VAR"$/) { dldpath = 1; continue }
+        if (s ~ /^compile_only *= *"(true|false)"$/) { dco = (s ~ /"true"/); continue }
+        if (s ~ /^modules *= *"/) { v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); dmkmods = trim(v); continue }
+        if (s == "ocamlmklib") {
+          if (!dsetup || dlinked || dcwd != "" || dprog !~ /^[A-Za-z0-9_]+$/ || (dprog in dmkdone)) cls("")
+          c = split(dmkmods, hm, " "); if (c == 0) cls(""); x = ""; ko = 0
+          for (q = 1; q <= c; q++) {
+            b = hm[q]
+            if (b ~ /^[A-Za-z0-9_]+\.\$VAR$/) { sub(/\.\$VAR$/, "", b); if (!(b in dcobj)) cls(""); x = x (x == "" ? "" : "+") b ".c"; ko++ }
+            else if (b ~ /^[A-Za-z0-9_]+\.cmo$/) { sub(/\.cmo$/, "", b); if (!(b in dcml)) cls(""); x = x (x == "" ? "" : "+") b }
+            else cls("")
+          }
+          if (ko && ko != c) cls("")
+          if (ko) { if (dprog in ddllset) cls(""); ddllset[dprog] = 1; ddll = ddll (ddll == "" ? "" : ",") dprog ":" x }
+          else { dmkdone[dprog] = 1; dcma = dcma (dcma == "" ? "" : ",") dprog ":" x }
+          dmk = 1; continue
+        }
+        if (s == "ocamlc.byte" && dco) {
+          if (!dsetup || dlinked || dcwd != "") cls("")
+          c = split(dmods, hm, " "); if (c == 0) cls("")
+          for (q = 1; q <= c; q++) {
+            b = hm[q]
+            if (b ~ /^[A-Za-z0-9_]+\.ml$/) { dsteps = dsteps (dsteps == "" ? "" : ",") b; sub(/\.ml$/, "", b); dcml[b] = 1 }
+            else if (b ~ /^[A-Za-z0-9_]+\.c$/) { sub(/\.c$/, "", b); dcobj[b] = 1 }
+            else cls("")
+          }
+          continue
+        }
+        if (dlinked && dmk) {
+          if (s ~ /^flags *= *"/) {
+            v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); c = split(v, hm, " ")
+            for (q = 1; q <= c; q++) {
+              if (hm[q] == "-linkall") { dlinkall = 1; continue }
+              if (hm[q] == "-custom") continue
+              if (hm[q] == "-I" && hm[q + 1] == ".") { q++; continue }
+              cls("flags " v)
+            }
+            continue
+          }
+          if (s ~ /^use_runtime *= *"false"$/) continue
+          if (s ~ /^output *= *"[A-Za-z0-9_]+\.output"$/) continue
+          if (s ~ /^reference *= *"@TSD@\/[A-Za-z0-9_]+\.reference"$/) {
+            v = s; sub(/^[^"]*"@TSD@\//, "", v); sub(/\.reference"$/, "", v)
+            if (drn == 0) { if (v != hbase) cls(""); continue }
+            if (drnext <= drn) cls(""); drref[drn] = v; continue
+          }
+          if (s ~ /^arguments *= *"/ && drun) cls("")
+          if (s == "ocamlc.byte") {
+            if (!drun || dcwd != "" || dpend != "" || dmods == "") cls("")
+            c = split(dmods, hm, " "); x = ""; kc = 0
+            for (q = 1; q <= c; q++) {
+              b = hm[q]
+              if (b ~ /^[A-Za-z0-9_]+\.cmo$/) { sub(/\.cmo$/, "", b); if (!(b in dcml)) cls(""); x = x (x == "" ? "" : "+") b }
+              else if (b ~ /^[A-Za-z0-9_]+\.cma$/) { sub(/\.cma$/, "", b); if (!(b in dmkdone)) cls(""); x = x (x == "" ? "" : "+") b ".cma"; kc++ }
+              else cls("")
+            }
+            if (kc && !dlinkall) cls("")
+            dpend = x; dlinkall = 0; continue
+          }
+          if (s == "run" && drun) {
+            if (dpend == "") cls("")
+            drn++; dritems[drn] = dpend; drref[drn] = hbase; drnext = drn + 1; dpend = ""; continue
+          }
+        }
+      }
       if (s ~ /^(readonly_files|subdirectories) *= *"/) {
         v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v); gsub(/[ \t\\]+/, " ", v)
         c = split(v, hm, " "); for (q = 1; q <= c; q++) { if (hm[q] !~ /^[A-Za-z0-9_.]+$/) cls(""); dcopy = dcopy (dcopy == "" ? "" : ",") hm[q] }
@@ -408,6 +484,7 @@ END {
       if (s ~ /^(cwd|module|program|all_modules|libraries) *= *"/) {
         v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); v = trim(v)
         if (s ~ /^cwd/) dnext = v
+        else if (s ~ /^program/) { dprog = v; drnext = 0 }
         else if (s ~ /^module/) dmod = v
         else if (s ~ /^all_modules/) dmods = v
         else if (s ~ /^libraries/) { if (v != "" && v != "dynlink") cls("libraries = " v); dlibs = v }
@@ -622,6 +699,17 @@ END {
   if (dlmode) {
     if (!drun) cls("")
     env = env " @dyn=" dsteps " @dynmain=" dmain (dcopy == "" ? "" : " @dyncopy=" dcopy)
+    # (queue 576) ocamlmklib's libraries and the further runs
+    if (dmk) {
+      if (dpend != "") cls("")
+      x = ""; c = split(ddll, hm, ","); for (q = 1; q <= c; q++) { v = hm[q]; sub(/^[^:]*:/, "", v); gsub(/\+/, ",", v); x = x (x == "" ? "" : ",") v }
+      if (ddll != "") env = env " @dyndll=" ddll
+      if (dcma != "") env = env " @dyncma=" dcma
+      if (x != "") env = env " @cstubs=" x
+      x = ""; for (q = 1; q <= drn; q++) x = x (x == "" ? "" : ",") drref[q] ":" dritems[q]
+      if (x != "") env = env " @dynruns=" x
+    }
+    if (dldpath) env = env " CAML_LD_LIBRARY_PATH=."
   }
   if (dpmode) {
     if (!pchk) cls("")
