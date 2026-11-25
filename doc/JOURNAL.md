@@ -21838,3 +21838,70 @@ Alternatives: PYI_RUNTIME=compiled on stage 0's runtime (fast, but not the check
   decision of 2026-11-23 names code equality and dis listings. Nothing changes in the record.
 Alternatives: (b) a deferred class of their own, the rows back to deferred until pyi's code view matches CPython's (not chosen).
 :journal
+
+## 2026-11-24: queue 557, Python's AOT deferred row and the eval classes nobody owned (the VM; branch `557-py-unowned` from mac/next a6da0aadf)
+
+- Classified first: every deferred and design class of `test/python/divergences.edn` by rows on the record (`bin/pyi divergences
+  --table`, `--methods`), each with its owner this round; the table went to the main session and is the report's. The main session
+  then gave `:compileall-pyc` and `:tools-misc` to 557b, every `:design` class to the host's py-design, and
+  `:pickle-builtin-reference` to py-core (train 5).
+- The AOT cell's one deferred row, synth/datamodel/del.py (`:as-pyi` in the amd64 record), is stale. On the VM, `bin/pyi check --aot
+  --no-pyi --only synth/datamodel/del.py` gives 1 pass: the compiled run and the loop print the golden text since py-small-1122. pyi on goi
+  still differs, which the judge tolerates (`:pyi-differs`). The row waits for the host's whole `--aot --record`, and
+  `:finalization-goi` goes after it.
+- e0c675f0b: `:ref-empty-skip` removed. Its one row, a test that skips itself on every platform, is now `:skipped-by-test`'s.
+- c2aa57923 `:source-decoding`: test_source_encoding's nine rows (new-lines of the main file; a strict decoding check that hands
+  the source to Python's codec; the file tokenizer's init error; get_normal_name; every cookie made inert).
+- 69fe0070a `:inlined-comprehensions`: the comprehension's own scopes outside class bodies too
+  (`_PyCompile_TweakInlinedComprehensionScopes`).
+- 51c5f1801 `:annotate-rest` (a function's `__annotate__` checks; type_set_annotations pops `__annotate__`) and `:compiler-errors`
+  (CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL in co_flags through the IR's flags).
+- Proofs: one script per change, failing on the parent and passing on the change (pyi runs of the cases against python3's output;
+  the report's appendix). Then whole-module checks with `PYI_RUNNER=python3`: test_listcomps (66 of 66 pass), test_type_annotations
+  (48 pass, test_no_cell skipped) and test_codeop (13 of 13), their rows written by `bin/pyi check --judge DIR --record` over run
+  directories holding those modules alone (3f7327b59: 5 methods now pass). test_source_encoding is left for the main host's record:
+  its child processes take 2-3 min each on goi, so the module ran past the default 3600 s (62 pass, the nine rows among them, then
+  the timeout); the second run, with `PYI_LIB_TEST_TIMEOUT=14400`, was stopped at the allowance's limit. `:source-decoding` keeps
+  its nine rows until that record.
+- Alternatives considered: for the main file's new-lines, translating inside `native/read-dump` (repr/python's corpus reader, whose
+  `:full` mode prints the original bytes back) was rejected in favour of pyi's run-dump alone. For a lenient charset, a decoding
+  error of pyi's own (the codec's message ported) was rejected for Python's codec, which already gives CPython's message.
+
+## 2026-11-24 — Python: compileall-pyc and tools-misc, -O in pyi and the rest (queue 557b, VM)
+
+- Rebased the WIP d92326f8a onto 557's final head 0be967103 (557-py-unowned) and split it in two: 61298096f, -O and -OO
+  (bin/pyi python counts each O into PYI_START_FLAGS; sys.flags.optimize, builtins.__debug__, compileSource's mode +O1/+O2,
+  compile()'s optimize; the compiler drops asserts and folds __debug__ at 1, docstrings at 2, after CPython's codegen), and
+  00cdf6a34, _interpreters' argument messages (PyArg_ParseTupleAndKeywords' "_interpreters.NAME() argument N", 3.14.10's
+  Modules/_interpretersmodule.c). The WIP's own journal entry was dropped in the rebase (its conflict) and replaced by this one.
+- Tested, then fixed what the runs showed:
+  - 4ae592b3c: bin/pyi run's main module is compiled by the host (arbace.python's start-run), not by compileSource, so it now
+    binds arbace.python.compile/*optimize* from PYI_START_FLAGS too (a probe's assert still ran under -O).
+  - fab5cbad8: callSpecial and the __call__ slot counted a level on Thread.depth, the Python frames' depth that
+    sys.setrecursionlimit's check reads; CPython 3.14 guards them on the machine's stack (_Py_EnterRecursiveCall), so they
+    now use enterRecursiveCall (cdepth). test_support's test_recursion: "cannot set the recursion limit to 18 at the
+    recursion depth 18" under unittest. test_descr's test_recursive_call and test_repr_as_str still raise (cStackLevels).
+  - a41346216: sys.pycache_prefix from -X pycache_prefix=PATH, else PYTHONPYCACHEPREFIX (config_init_pycache_prefix).
+  - 24a64a2dd: PYTHONPATH's entries on sys.path after sys.path[0], made absolute (Modules/getpath.py), not under -E or -I
+    (withPythonPath in RunModule). Both for compileall's test_no_args_compiles_path.
+- The runs: on goi alone test_compileall is out of reach (the first run hit 14,400 s with 60 of 145 tests, each child a
+  2-minute goi start on the loaded 4-core VM). So the drivers stayed on goi (PYI_RUNNER=python3) and their children ran
+  the checkout's runtime compiled: bin/pyi launcher (the AOT module rebuilt, about 25-30 min) and PYI_LAUNCHER,
+  PYI_LAUNCHER_PY and PYI_LAUNCHER_COMPILER exported, which bin/pyi python's launcher branch takes. The same runtime
+  sources either way. test_compileall then took 20 min. Alternative not taken: a gate build of the executable with the
+  runtime compiled (the record's own setting), two Go-hosted builds on the 4-core arm64 VM.
+- The final whole run at 24a64a2dd: 3 modules, 286 methods, 263 pass, 23 classed, 0 failing, 11 now pass. The rows were written
+  by `bin/pyi check --judge DIR --record` (c35fc031a). `:compileall-pyc` is empty and removed. Its last rows, compileall's
+  test_workers (-j 0: ProcessPoolExecutor on the forkserver, the read_signed EOF), went to `:multiprocessing` by name.
+  `:tools-misc` keeps its 11 rows not run here (trace's gc.get_referrers, pyclbr's _pickle, test_unittest's three,
+  test_buffer's two, reindent, test_interpreters' test_modified_arg); its :why was updated. Mirrored in divergences-315.edn.
+- bin/reap --record, bin/crops-score --record: Python eval 40,832 / 1,405 / 1,302 -> 40,843 / 1,405 / 1,291; bin/reap,
+  crops-score --judge --strict, records-check: 0 problems.
+
+## 2026-11-25 — the user's DECISIONs 557b-1 (a) and 557b-2 (queue 557b, VM)
+
+- 557b-1 (a): the VM's records of test_compileall, test_support and test__interpreters stand, recorded from a run whose children ran
+  on the compiled launcher with the drivers on goi (c35fc031a's rows). The host's next whole record confirms them. Alternative (b),
+  goi-alone runs with the rows waiting for the host, not taken.
+- 557b-2: keep. callSpecial and slot `__call__` keep the C level's guard: a deep loop of slot wrappers raises "Stack overflow
+  (used N kB)" at 10,000 levels, as CPython 3.14 does, not "maximum recursion depth exceeded" at the recursion limit.
