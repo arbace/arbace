@@ -209,8 +209,11 @@
 (defn nop-landing-pads
   "find_noop_landing_pads (rustc_mir_transform/remove_noop_landing_pads.rs): the cleanup blocks that do nothing but resume: their
   statements trivial (or writes of a local, a drop flag), their terminator a goto, resume, switch or false edge whose
-  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call."
-  [blocks]
+  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call. With MIR?
+  (queue 581) the pads rustc's MIR no longer has: a drop marked `:param-drop` (core-instance: a generic body's drop of a
+  parameter's type, which the instance's MIR keeps) is no nop, so its edge stays one for MergingSucc"
+  ([blocks] (nop-landing-pads blocks false))
+  ([blocks mir?]
   (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter" "bidh" "raw"}
         ok-stmt (fn [st] (let [st (if (= "dbg-stmt" (name (first st))) (second st) st) k (name (first st))]
                            (or (trivial k)
@@ -224,10 +227,10 @@
                                          (let [t (:term blk) all-nop (fn [] (every? nops (successors t)))]
                                            (case (name (first t))
                                              ("resume" "goto" "switch" "false-edge" "false-unwind") (all-nop)
-                                             "drop" (and (nil? (nth t 6)) (all-nop))
+                                             "drop" (and (nil? (nth t 6)) (not (and mir? (= :param-drop (nth t 7 nil)))) (all-nop))
                                              false)))]
                           b))]
-        (if (= nops' nops) nops (recur nops'))))))
+        (if (= nops' nops) nops (recur nops')))))))
 
 (defn const-switch-bits
   "Body::try_const_mono_switchint: the value a block's switchInt is decided by when its discriminant is a constant, a runtime
@@ -853,7 +856,10 @@
         ;; C6-4: an edge into a landing pad that does nothing is no edge (RemoveNoopLandingPads made it `unwind continue` in
         ;; rustc's MIR before codegen): a call whose cleanup is one has its return target alone, which MergingSucc merges
         ;; (CustomOwner::into_raw's `forget` then `return`, one LLVM block)
-        real-succs (fn [t] (vec (remove nops (successors t))))
+        ;; queue 581: but an edge rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is
+        ;; one: codegen_terminator's mergeable_succ counts it (Ord::min::<usize>'s, cvt::<i32>'s `br` after the call)
+        mir-nops (nop-landing-pads blocks true)
+        real-succs (fn [t] (vec (remove mir-nops (successors t))))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (real-succs (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (real-succs t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -2669,9 +2675,16 @@
                   (recur m)))))))
       ;; the blocks no traversal reached (and no merge took) are codegen'd as `unreachable`, in index order; a no-op landing pad
       ;; is no block (RemoveNoopLandingPads, -O0's o1 pass before rustc's codegen, made it dead and SimplifyCfg removed it: since
-      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run)
-      (doseq [b (range (count blocks))]
-        (when-not (or (some #{b} order) (contains? (:skip @st) b) (contains? nops b))
+      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run); queue 581: but a pad
+      ;; rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is one, unreached
+      ;; (and a no-op pad such a kept pad jumps to, the resume block, is kept with it: RemoveNoopLandingPads redirects only unwind
+      ;; edges into no-op pads, a jump into one goes to the resume block)
+      (doseq [b (range (count blocks))
+              :let [kept-nop? (fn [b] (some (fn [i] (let [t (:term (nth blocks i))]
+                                                      (and (not (contains? mir-nops i)) (:cleanup (nth blocks i))
+                                                           (some #{b} (remove #{(unwind-cleanup t)} (successors t))))))
+                                            (range (count blocks))))]]
+        (when-not (or (some #{b} order) (contains? (:skip @st) b) (and (contains? mir-nops b) (not (kept-nop? b))))
           (let [nm (if (zero? b) "start" (str "bb" b))]
             (llbb! b)
             (emit! nm '(unreachable)))))
@@ -2683,6 +2696,13 @@
             rl (first lay)]
         (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
                (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra])
-                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks))))
+                       ;; (queue 581: or a kept pad, a parameter's drop, whose unwind terminates: codegen_mir's personality for a
+                       ;; mono-reachable block's UnwindAction::Terminate)
+                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks)))
+                                 (some (fn [i] (and (contains? nops i) (not (contains? mir-nops i))
+                                                    (let [t (:term (nth blocks i))
+                                                          u (case (name (first t)) ("call" "assert") (nth t 5 nil) "drop" (nth t 3 nil) "false-unwind" (nth t 2 nil) nil)]
+                                                      (and (seq? u) (= "terminate" (name (first u)))))))
+                                       (range (count blocks))))
                          [:personality ['ptr (symbol "g" "rust_eh_personality")]])
                        [:body (vec bbs)]))))))
