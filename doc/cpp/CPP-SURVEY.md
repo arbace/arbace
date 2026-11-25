@@ -11442,3 +11442,152 @@ the native parser are unchanged.
   6 minutes) and leave the known file (no HotSpot list is recorded: its every-25 list's 50 files are about 25 minutes, left).
 - gxx-modules' part-4_c.C (a recorded pass that crashed on next, `decltype (f)::inner x;`): queue 540b's printer fix (f8bac5010's
   arbace/repr/cpp/print.ae hunk: a decltype-specifier as a nested name's first part) taken; the rest of that commit (repr/c) stays 540b's.
+
+## As built: cpp-read, the read cell's deferred rows (2026-11-24; branch `cpp-read-1124` from mac/next `a6da0aadf`, with `cpp-rind-1124` merged)
+
+The read cell at the base: 6,062 pass / 0 by design / 221 deferred (248 n/a). The 221 are all dg rows (the token check has none):
+own-diag 204, syntax-own 9, gcc-own-rules 8; each listed by class, the own-diag-review group and the own front end's verdict in the
+branch's `.tmp/classes.md` (accepted 99: no error at all, a Sema rule missing; missed 66; both 31; extra 17; timeout 5; crash and
+stopped 1 each). The rules built, each from the standard's text or GCC's documented behaviour as the tests state it (no GCC code):
+
+- The shared preprocessor (arbace.repr.c.pp, C++ only): libcpp's pedwarns before C++20 under -pedantic-errors, `__VA_OPT__` in a
+  macro definition and a variadic macro invoked with no argument for its `...`, in the main file, silenced by `#pragma GCC diagnostic
+  ignored "-Wc++20-extensions"` or `"-Wpedantic"` (the pragma's push, pop, ignored, warning and error kept as the preprocessor's
+  state): cpp0x/va-opt1.C.
+- The own front end answers `__has_cpp_attribute` as g++ 15 does (the target's has.tsv g++ column: carries_dependency 0, no clang::
+  attribute), the native reader keeping clang's: cpp0x/attr-carries_dependency1.C.
+- The checker (arbace.cpp.template, arbace.cpp.sema): [dcl.spec.auto.general]/13, an explicit specialization or instantiation
+  whose return type uses a placeholder where the templates' do not, or the reverse, matches no template (cpp1y/auto-fn47.C,
+  auto-fn10.C); GCC's limit_bad_template_recursion, a specialization's definition that only errored implicit instantiations'
+  bodies use is not instantiated (template/recurse3.C: no depth error after `T(0) = 0`'s); [dcl.enum]/7, no standard integer type for
+  the enumerators (a negative one beside one past long long's maximum, one past unsigned long long's or an __int128 value;
+  init/enum1.C), and an enumerator's initializer surely not constant ("enumerator value for 'a' is not an integer constant"),
+  among them a call of the function whose body is being analyzed ("called in a constant expression before its definition is
+  complete"; cpp1y/constexpr-recursion1.C's and -2.C's non-template f3, their template f1 left: a definition-time check).
+- The checks (arbace.repr.cpp.diag): a member typedef declared twice in a class ([class.mem.general]/6, template/typedef1.C);
+  C++98's integral constant expressions without a function call or a comma operator outside sizeof, at case labels and bit-field
+  widths (parse/constant1.C); GCC's loop pragmas (`ivdep`, `unroll`) before a for loop without a condition (parse/ivdep.C);
+  GCC's silence after an erroneous declaration: a declaration the native parser declined has its name (a class key's, or the
+  declarator's before its first parenthesis) given no later "undeclared" error nor a syntax error at it or in its template
+  argument list (template/crash55.C, crash57.C, cpp0x/pr89900-3.C), and the entity of a declaration the parser flagged
+  "has incomplete type", "default argument missing" or "static data member in unnamed class" has its uses' Sema errors on later
+  lines dropped (template/incomplete10.C, other/default2.C, ext/anon-struct5.C).
+- The parser: [temp.mem]/2, no member template in a local class, the declaration declined at `template` and skipped as GCC does
+  (template/crash63.C).
+
+15 of the 221 pass by the own front end (and cpp1y/auto-fn10.C, a row clang's record passed); left: 206, the long tail by group in
+`.tmp/classes.md` (constant evaluation 39, templates 24, overload 22, lookup 22, incomplete 10, syntax-only 9, GNU rules 8, ...): GCC's
+error recovery after syntax errors, definition-time checks of uninstantiated templates, overload diagnostics in instantiations and
+the constant evaluator's explanations at their inner lines.
+
+## As built: cpp-read-tail, cpp-rind's timeouts and the read cell's tail (2026-11-24; queue 567, branch `567-cpp-read-tail` on `cpp-rind-1124` `ee0acba05` with `cpp-read-1124` `18e6f3f96` merged)
+
+The base: cpp-rind's head merged with cpp-read's (the merge commit says how: the docs kept both, the own dg record cpp-rind's
+with cpp-read's 16 rows run again at the merge, reap and crops-score recorded: C++ read 6,078 / 0 / 206).
+
+- **cpp-rind's libstdc++ timeouts** (cpp0x/udlit-suffix-neg.C, diagnostic/missing-header-pr110164.C, own passes on next): the
+  parse is not the cause (the same tree, 248,732 nodes on `#include <string>`, at next's parse.ae and at the head); the checks
+  are. About 130 checks walk the whole unit, libstdc++'s headers with it, and arbace.repr.cpp.diag/walk-nodes rebound
+  `*params*` at every map and destructured every entry: 55.8 s a walk on this host, so cpp-rind's 14 new checks were 14 more
+  such walks. Now (a) walk-nodes binds `*params*` only where a node's :inner has a parameter and reduces a map's entries (14.9 s
+  a walk), the undeclared check's own walker the same, and (b) diagnose binds `*walk-cache*`: the first whole-tree walk records
+  each node with its parent and `*params*` in order, every later one replays the list, `*params*` bound once a run of nodes that
+  share it. The callbacks see what they saw. Both files pass in the 300 s cap again on this host (missing-header-pr110164.C in a
+  3-thread chunk, udlit-suffix-neg.C alone at one thread: at three under this host's load it still ran past the cap, the cap being
+  wall time); cpp1z/class-deduction14.C no longer times
+  out (its row is now its own front end's miss at line 16: CTAD's deduction guide substitution through iterator_traits<int>).
+- **The constant evaluator** (arbace.cpp.sema, the checker's): a comma expression's lvalue read (`return e, v;`, [expr.comma]/1:
+  the :load of a :comma had fallen to "a load", unsure); a function the C library's headers declare, with no definition, is
+  surely not constexpr (C has no constexpr; GCC folds only `__builtin_` names): musl's `__assert_fail`, which a false `assert`
+  calls, GCC's "call to non-'constexpr' function" (cpp0x/constexpr-ice16.C); a class template's specialization's constexpr
+  constructor that leaves a scalar member uninitialized is explained, before C++20, by [dcl.constexpr]/4.5's error at its body
+  beside the variable's (cpp0x/constexpr-template2.C, C++17's [dcl.constexpr]/6: the specialization is still constexpr, no call
+  of it a constant expression).
+- **Templates** (arbace.cpp.template): [temp.class.spec]/8.1 of C++11 and C++14 (CWG 1315 dropped it in C++17), a partially
+  specialized non-type argument that involves a parameter of the partial specialization and is not a simple identifier, GCC's
+  "template argument 'T{}' involves template parameter(s)", also where the slice cannot evaluate the argument
+  (cpp0x/nondeduced7.C); [temp.deduct.type]/5.3, a parameter named only inside such an argument is not deduced
+  (cx-partial-undeducible!).
+- **The checks** (arbace.repr.cpp.diag): C++98's [temp.expl.spec]/2, an explicit specialization at the global scope qualified by a
+  namespace (CWG 374 allows an enclosing namespace from C++11), GCC's "specialization of ... in different namespace"
+  (template/spec36.C); GCC's recovery after a member function definition qualified by an incomplete class, its body's errors not
+  given (template/crash98.C); an `auto` variable whose deduction failed has GCC's error type, its later uses silent
+  (cpp1y/auto-fn46.C).
+- **Two recorded own passes the merge had lost**, found by this branch's regression list: concepts/var-concept7.C (cpp-read's
+  declined-names-silent had dropped `A<int> a;`'s error after `template<C...> struct A {};`: GCC declares A with an erroneous
+  parameter there, so a decline at "a template parameter (at 'NAME')" no longer silences the name) and diagnostic/parm1.C
+  (cpp-rind's "use of parameter outside function body" for `int(*)[sizeof(t)]`: unevaluated operands, sizeof, alignof and
+  noexcept, are exempt, as [dcl.fct.default]/9 says of default arguments).
+
+Recorded from finished `--only` runs at `d3cab8575` (3 threads, .tmp/q567's chunks c0-c5 and u1; each chunk then `--judge
+--record`): the regression list, 693 recorded own passes (every own pass whose file has a constexpr evaluation with a comma or a
+standard header, a partial specialization, `incomplete`, an `auto` deduction or an explicit specialization near a namespace, and
+250 more at random), 693 of 693 own pass; and every non-passing row outside test/cpp/dg-dialect-out.edn (1,725; cpp-rind's
+unrecorded dg-r02 quarter among them): 48 to own pass (2,767 -> 2,815), none lost. Of the read cell's 206 deferred, 8 left
+(constexpr-ice16, constexpr-template2, nondeduced7, udlit-suffix-neg, auto-fn46, static_assert4, crash98, spec36): C++ read
+6,078 / 0 / 206 -> 6,086 / 0 / 198, read independence 0.878 -> 0.882, C++ completeness 0.9857 -> 0.9860. The other 40 are rows
+the merged front end passes that no record had run at its head (cpp-rind's dg-r03 quarter had given +40 the same way).
+
+Left: GNU VLAs in the checker's constant evaluator (ext/constexpr-vla1.C, -vla3.C: a DECISION); a declaration with an
+unexpanded parameter pack dropped as GCC drops it, so that its uses fail (cpp0x/pr31434.C, pr31437.C, pr32127.C: member-level
+recovery in class templates' instances, which this line does not have yet); the constant evaluator's undefined member functions
+of class templates' specializations (cpp0x/constexpr-non-const-arg2.C's `duration<0>::min()`); the rest of the 198 by group.
+test/cpp/selftest/concepts/r02-qualified-name.C fails at cpp-rind's head already (a constraint's substitution failure given as an
+error at the concept, line 2; cpp-tpl2's explanations): not this branch's, not a dg record row.
+
+## As built: 569, GNU variable-length arrays in the checker's constant evaluator (2026-11-25; queue 569, branch `569-cpp-constexpr-vla` on `567-cpp-read-tail` `826068c3f`)
+
+DECISION 567-1 (a). The rules are the GCC manual's "Variable Length" (GNU C++ takes a block-scope array whose bound is no
+constant, its storage made where the declaration is executed, `sizeof` of it evaluated there) and [expr.const]/5.8 (an
+operation with undefined behaviour is no core constant expression), with [dcl.init.aggr]/3 (no more explicitly initialized
+elements than the array has); no GCC or clang code.
+
+- arbace/cpp/sema.ae, the checker alone: a local VLA, which the checker refused, is declared as the code generator's
+  (`vla-local`: the type `{:k :arr :n nil :vla true}`, its bound kept as `:vla-n`), with a braced list too; its list's
+  elements past the written ones value-initialized (`init-for`'s `:fill`). The constant evaluator's `:decl` evaluates the bound
+  where the declaration is: a negative one, or a list longer than it, is a sure error (GCC's "array subscript value '0' is
+  outside the bounds of array"), else the array has that many elements, so that a subscript past it is the existing bounds
+  check's error. `sizeof` of a VLA variable is a node of its own, `:vla-sizeof`, the evaluated elements' count times an
+  element's size. A VLA with no initializer holds zeros, as a fixed array does in this evaluator (it reads no array element as
+  indeterminate).
+- arbace/cpp/template.ae: a VLA's bound is no constant expression, so it deduces no non-type parameter ([temp.deduct.type]'s
+  bound of an array deduces only a value; GCC's behaviour as ext/vla2.C states it: "no matching function", a sure failure; a
+  constant bound against a VLA the slice's unknown).
+
+Rows: ext/constexpr-vla1.C, -vla2.C, -vla3.C, ext/vla2.C and cpp0x/initlist26.C (the checker's existing "assigning to an array
+from an initializer list", reached once the VLA is declared) to own pass; constexpr-vla1 and -2 out of :gcc-own-rules. The other
+GNU-VLA rows of the corpus need other rules (variably modified types in throw, catch, typeid, lambda captures, class members and
+constexpr variables: ext/vla4.C, cpp1y/vla5.C, ext/vlm2.C, gomp/pr85134.C): left, a DECISION.
+
+## As built: 570, the other GNU variable-length-array rules in the checker (2026-11-25; queue 570, branch `570-cpp-vla-types` on `569-cpp-constexpr-vla` `01e38f918`)
+
+DECISION 569-1 (a). The GCC manual's "Variable Length": GNU C++ takes an automatic array whose bound is no constant expression, its
+storage made where the declaration is executed; a type built from one is variably modified (C's term). C++ has no such types (every
+bound a converted constant expression, [dcl.array]/1), so where the standard needs a type fixed at translation one is ill-formed:
+the exception object ([except.throw]/3) and a handler ([except.handle]/1), typeid's operand ([expr.typeid]: its std::type_info is
+a static object), a non-static data member ([class.mem.general]; a member's bound is never a VLA's, VLAs being automatic variables),
+a constexpr variable ([dcl.constexpr]/6), a bound past the first in array new ([expr.new]/8); a closure's copy of an array is
+element-wise ([expr.prim.lambda.capture]/10, /15), which a run-time bound cannot size. A bound that reads no variable yet holds an
+address (a string literal, a cast to a pointer) is fixed at translation, so no VLA's, and no integral constant expression either
+(a pointer converted to an integer, [expr.const]/5.15). No GCC or clang code.
+
+- arbace/cpp/sema.ae, the checker alone: `cx-vm?`, `cx-runtime-bound?` (sure only when every operand is read -- no unevaluated
+  operand, conditional, short circuit, address, call or qualified name in the text -- and one names a parameter or a variable
+  neither const nor a reference, [expr.const]/4, /10), `cx-address-bound?`, and `*cx-vla*`, the block scope (the object) of a
+  local typedef or alias, a handler or typeid's type, where resolve-type-form's array makes `{:k :arr :n nil :vla true}` for such a
+  bound. The errors: GCC's "cannot throw expression of type", "cannot catch type ... of variable size", "cannot create type
+  information ... variable size", "data member may not have variably modified type", "'constexpr' variable ... has
+  variably-modified type", "array of runtime bound cannot be captured by copy", "size of array ... is not an integral
+  constant-expression" (a member's bound, an address bound), "size of array ... has non-integral type", "array size in
+  new-expression must be constant"; `new A` of a VLA typedef alone (GNU's array new) the slice's refusal.
+- arbace/repr/cpp/diag.ae: the sema rule :vla-type; vla-pedantic (-pedantic-errors' "ISO C++ forbids variable length array") over
+  constructors', destructors' and conversion functions' bodies too.
+
+- Round 2 (the user's 570-1 (a), 570-2 (a)): a member reported for its bound or its variably modified type is kept, with GNU's
+  VLA type (`cx-field-vla-type`), marked :cx-vla, laid out with no bytes by arbace/cpp/abi.ae (the checker sets it alone), so its
+  uses report nothing more; a block-scope variable whose type is built from a VLA but is none itself (`int (*p)[n] = &a;`) is
+  declared with that type (`cx-vm-local-type`), sizeof of it abi's refusal.
+
+Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C;
+in round 2 template/array9.C. Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class
+template pattern's member bound), other/fold1.C, init/new37.C.

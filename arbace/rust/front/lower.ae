@@ -220,7 +220,13 @@
 ;; Paths and types
 
 (declare lower-ty lower-expr lower-pat lower-block lower-generic-args lower-format-args bind-pat lower-bound)
+;; queue 561 (C6 L3): a `?` of an expansion: its desugaring's calls (Try::branch, FromResidual::from_residual) keep the expansion's
+;; mark, so a #[track_caller] from_residual's location is the outermost macro call's site (rustc's try_span, a QuestionMark
+;; desugaring of the `?` expression's context: expansion_cause walks it to the root), not the macro body's `?`; bound by
+;; core-check for the backtrace crates (rustc-demangle's parse! and invalid!)
+(def ^:dynamic *try-expn-mark* false)
 (def ^:dynamic *fmt-fspan* nil)   ; RF10: the format_args! call's place in std's macros ([FILE l1 c1 l2 c2]), for user type annotations
+(def ^:dynamic *fmt-mark* nil)    ; queue 558 (C3): the format_args! expression's expansion mark, its calls' (their caller location)
 
 
 (defn- res-at [span] (get *res* span))
@@ -565,12 +571,20 @@
       Try (let [inner (lower-expr (second k))
                 isp (:span inner)
                 unreach [{:unparsed "allow(unreachable_code)"}]
-                branch (call-e (path-e "branch" isp) [inner] isp)
+                ;; queue 561: a `?` of a macro's expansion text (the virtual file's, a span past the root's lines): its
+                ;; from_residual call at the `?` token, whose expansion mark the caller location's root site is read from
+                ;; (externalize's virtual-cause; the whole expression's first token may be a metavariable's, of the root)
+                rsp (if (and *try-expn-mark* (vector? sp) (= 4 (count sp)) (every? number? sp)
+                             (not ((requiring-resolve 'arbace.rust.front.expand/root-span?) sp)))
+                      [(sp 2) (max 1 (dec (long (sp 3)))) (sp 2) (sp 3)]
+                      sp)
+                mk-call (fn [f args sp] (cond-> (call-e f args sp) (and *try-expn-mark* mark) (assoc :expn-mark mark)))
+                branch (mk-call (path-e "branch" isp) [inner] isp)
                 ;; rustc's `residual` binding is a desugaring's (its span marked), `val` the expression's
                 residual (assoc (bind-pat "residual" false sp) :synthesized true)
                 val (bind-pat "val" false sp)
                 brk-arm (arm (lang-struct-pat "Break" [residual] sp)
-                             (e {:kind :ret :expr (call-e (path-e "from_residual" sp) [(e {:kind :path :path {:segs [{:ident "residual"}]} :span sp :synthesized true})] sp)
+                             (e {:kind :ret :expr (mk-call (path-e "from_residual" rsp) [(e {:kind :path :path {:segs [{:ident "residual"}]} :span sp :synthesized true})] rsp)
                                  :span sp :attrs unreach}))
                 cont-arm (arm (lang-struct-pat "Continue" [val] sp) (e {:kind :path :path {:segs [{:ident "val"}]} :span sp :attrs unreach}))]
             (ex {:kind :match :expr branch :arms [brk-arm cont-arm] :source :try}))
@@ -596,9 +610,12 @@
       Break (let [[_ l v] k] (ex {:kind :break :label (label-name l) :expr (some-> (some-val v) lower-expr)}))
       Continue (ex {:kind :continue :label (label-name (second k))})
       ;; :expansion: a macro's output (RF7: the def collector meets its closures when the expansion is collected)
+      ;; queue 558 (C3): the calls it makes carry its mark (rustc's format.rs gives them the macro's syntax context, macsp's:
+      ;; span_as_caller_location walks it to the outermost macro call, println!'s site), not only a foreign span
       FormatArgs (-> (binding [*fmt-fspan* (let [s (fv x :span)]
                                              (when (and (seq? s) (= 'span (first s)) (string? (second s)) (not (str/starts-with? (second s) "<")))
-                                               (vec (take 5 (rest s)))))]
+                                               (vec (take 5 (rest s)))))
+                               *fmt-mark* mark]
                        (lower-format-args (second k) sp))
                      (update :attrs into attrs) (assoc :expansion true))
       (ex {:kind :err :ast (if (seq? k) (first k) k)}))))
@@ -726,6 +743,8 @@
   {'Display "new_display" 'Debug "new_debug" 'LowerExp "new_lower_exp" 'UpperExp "new_upper_exp" 'Octal "new_octal"
    'Pointer "new_pointer" 'Binary "new_binary" 'LowerHex "new_lower_hex" 'UpperHex "new_upper_hex"})
 
+(defn- fmt-call [m] (e (cond-> m *fmt-mark* (assoc :expn-mark *fmt-mark*))))
+
 (defn- lower-format-args [fa sp]
   (let [allow-const (empty? (fa-args fa))
         {:keys [tpl args]} (-> {:tpl (fa-template fa) :args (fa-args fa)} flatten-fa inline-literals)
@@ -742,7 +761,7 @@
               (recur (inc i) (str incomplete (:lit pc)) bc implicit)
               (let [s (str incomplete (:lit pc))]
                 (if (and (= (inc i) (count tpl)) (empty? bc))
-                  (e {:kind :call :span sp
+                  (fmt-call {:kind :call :span sp
                       :func (e {:kind :path :path (lang-path* ["format_arguments" (if allow-const "from_str" "from_str_nonconst")]) :span sp :fspan *fmt-fspan*})
                       :args [(e {:kind :lit :lit {:lit-kind 'Str :value s} :span fa-span})]})
                   (let [bs (utf8 s)
@@ -782,7 +801,7 @@
         (let [bc (conj bc 0)
               template (e {:kind :lit :lit {:lit-kind 'ByteStr :bytes bc} :span sp})
               args-path (fn [] (e {:kind :path :path {:segs [{:ident "args"}]} :span sp}))
-              call-new (fn [args-e] (e {:kind :call :span sp :func (e {:kind :path :path (lang-path* ["format_arguments" "new"]) :span sp :fspan *fmt-fspan*})
+              call-new (fn [args-e] (fmt-call {:kind :call :span sp :func (e {:kind :path :path (lang-path* ["format_arguments" "new"]) :span sp :fspan *fmt-fspan*})
                                         :args [template (e {:kind :addr-of :expr args-e :span sp})]}))
               unsafe-block (fn [x] (e {:kind :block :span sp :block (node {:node :block :stmts [] :expr x :span sp :rules :unsafe-generated})}))]
           (if (empty? args)
@@ -792,7 +811,7 @@
                   arr (e {:kind :array :span sp
                           :exprs (vec (for [[[ai ty] psp] @argmap]
                                         (if (< -1 ai (count args))
-                                          (e {:kind :call :span sp
+                                          (fmt-call {:kind :call :span sp
                                               :func (e {:kind :path :path (lang-path* ["format_argument" (if (= ty :usize) "from_usize" (new-fns ty))]) :span (if (vector? psp) psp sp)})
                                               :args [(e {:kind :field :expr (args-path) :ident (str ai) :span sp})]})
                                           (e {:kind :err :span sp}))))})

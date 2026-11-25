@@ -465,7 +465,8 @@
    "ppxlib/ast/supported_version/supported_version.ml" "62deacddd481e53fb173a02df39646ebbcad7328668ac3b5d2966f33fd8111fe"
    "ocaml-compiler-libs/src/gen/gen.ml" "e53c71d68afdd83a2eaf5d438c5909ccd80a15a4a09ec29f98ca39ec4605090c"
    "ocaml-compiler-libs/src/shadow/gen/gen.ml" "eca51f7bc77a0add6f21de77b21edf6265b0d2c24e40d897080ce507a9323fd8"
-   "ocaml-compiler-libs/src/read_cma/read_cma.ml" "06d62a37f540233cd66b935e6c7102f19170d38c17b63b3027ff96d67c61972c"})
+   "ocaml-compiler-libs/src/read_cma/read_cma.ml" "06d62a37f540233cd66b935e6c7102f19170d38c17b63b3027ff96d67c61972c"
+   "base/src/select-random-repr/select.ml" "21c9d3565f7ed91f496ac5766073f7cdcd9e4eece52529b25706b35f7eab94cc"})
 
 (defn- held-at!
   "ROOT/REL (REL a key of ppxlib-sha256, its first segment the package's directory, ROOT that directory) is the program the port follows"
@@ -602,6 +603,8 @@
             run (when (and (vector? ppa) (= "action" (first ppa))) (second ppa))]
         {:pp (when (and (vector? run) (= "run" (first run)) (= "%{input-file}" (last run)) (= 3 (count run)))
                {:prog (nth run 1) :flags (vec (rest (field lib "flags")))})
+         ;; queue 547: `(preprocess (pps REWRITER... FLAG...))`, a ppx driver's text (bin/oi ppx pp)
+         :pps (when (and (vector? ppa) (= "pps" (first ppa))) (vec (rest ppa)))
          :rules (vec (for [x xs :when (and (vector? x) (= "rule" (first x)))
                            r [(let [t (second (field x "targets")) a (second (field x "action"))]
                                 (when (and t (vector? a) (= ["run" "./gen.exe"] a)) {:kind :gen :target t}))
@@ -666,7 +669,24 @@
     (try
       (cond
         (and (#{"ppxlib" "ocaml-compiler-libs"} (.getName root)) (ppxlib-build root rel f)) (ppxlib-build root rel f)
+        ;; queue 547: base's src/dune rule `(run %{ocaml} select-random-repr/select.ml -ocaml-version %{ocaml_version} -o random_repr.ml)`:
+        ;; select.ml writes its first {|...|} text when (major, minor) >= (5, 0), as Printf.fprintf writes a format without conversions
+        (and (= "base" (.getName root)) (= rel "src/random_repr.ml"))
+        (do (held-at! root "base/src/select-random-repr/select.ml")
+            (when (neg? (compare [(nth ocaml-version 0) (nth ocaml-version 1)] [5 0])) (failwith "select.ml's text for OCaml before 5.0 is not ported"))
+            (let [t (read-text (.getPath (File. root "src/select-random-repr/select.ml")))
+                  m (re-find #"(?s)\{\|(.*?)\|\}" t)]
+              (when (or (nil? m) (str/includes? (second m) "%")) (failwith "select.ml's 5.x text is not a format without conversions"))
+              [:ok (second m)]))
         (nil? b) nil
+        ;; queue 547: a library its dune file preprocesses by ppx rewriters (`(preprocess (pps ...))`): the text their driver,
+        ;; built from the opam set and run on oi, wrote for the unit (bin/oi ppx pp: OI_PPX_PP/PKG/REL, PKG the package's directory)
+        (and (:pps b) (.exists f))
+        (let [g (System/getenv "OI_PPX_PP")
+              gf (when g (File. (File. g (.getName root)) rel))]
+          (if (and gf (.exists gf))
+            [:ok (read-text (.getPath gf))]
+            (failwith (str rel ": preprocessed by " (str/join " " (:pps b)) " (bin/oi ppx pp), none in OI_PPX_PP"))))
         (.exists f)
         (when-let [{:keys [prog flags]} (:pp b)]
           (when-not (re-find #"(^|/)cpp/cpp\.exe$" prog) (failwith (str "the library's preprocessor is " prog ", not containers' cpp")))

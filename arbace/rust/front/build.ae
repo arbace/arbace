@@ -1477,6 +1477,11 @@
                        (let [tgt (nth @blocks (:next node))] (when (not= tgt b) (goto! b tgt))))))))
     @blocks))
 
+;; queue 565 (C3): a region scope's span where it is known (an expression's scope, a body's arguments scope), so a value's drop
+;; carries schedule_drop's source info, the scope's end point (`end_point(region_scope.span)`): the span drop elaboration's
+;; Drop::drop call takes (its caller location, the record's loc); only the body file's own spans ([l1 c1 l2 c2])
+(defn- note-region-span! [region sp] (when (and (vector? sp) (= 4 (count sp))) (upd! assoc-in [:region-spans region] sp)))
+
 (defn- push-scope! [region] (upd! update :scopes conj {:region region :source-scope (:source-scope (st)) :drops [] :moved [] :cached nil}))
 
 (defn- scope-index [region]
@@ -1561,6 +1566,7 @@
   `(let [ss# (:source-scope (st))
          _# (lint-scope! (:lint ~x))
          _# (push-scope! (:region ~x))
+         _# (note-region-span! (:region ~x) (:span ~x))
          r# (do ~@body)
          [bb# v#] (if (vector? r#) r# [r# nil])
          bb# (pop-scope! (:region ~x) bb#)]
@@ -1573,6 +1579,8 @@
   (let [ss (:scopes (st))
         i (or (last (keep-indexed (fn [i s] (when (= region (:region s)) i)) ss)) (unsupported "a drop's scope" region))]
     (when (= kind :value)
+      (when-let [[_ _ l2 c2] (get (:region-spans (st)) region)]
+        (when-not (get (:drop-spans (st)) local) (upd! assoc-in [:drop-spans local] [l2 (max 1 (dec c2))])))
       (doseq [j (range i (count ss))] (upd! assoc-in [:scopes j :cached] nil)))
     (upd! update-in [:scopes i :drops] conj {:local local :kind kind})))
 
@@ -3062,7 +3070,18 @@
       :binding (when (:sub p) (cat-pattern pl (:sub p) op))
       :guard (cat-pattern pl (:pat p) op)
       (:ref :box) (cat-pattern (cat-deref pl) (:pat p) op)
-      :slice (unsupported "a slice pattern in a closure")
+      ;; queue 561 (C6 L3): mem_categorization's PatKind::Slice: the elements before and after the `..` at the place's element
+      ;; (an Index projection), the `..`'s own pattern (`rest @ ..`) at a Subslice (rustc-demangle's `[a, b] => [a, b]` in a
+      ;; closure)
+      :slice (let [t (p-ty pl)
+                   el (when (#{:slice :array} (first t)) (second t))
+                   _ (when-not el (unsupported "a slice pattern of a type with no element" t))
+                   rest? (fn [sp] (or (= :rest (:kind sp)) (and (= :binding (:kind sp)) (= :rest (:kind (:sub sp))))))
+                   ep (cat-projection pl el [:index])]
+               (doseq [sp (:pats p)]
+                 (if (rest? sp)
+                   (when (= :binding (:kind sp)) (cat-pattern (cat-projection pl (pat-ty-adjusted sp) [:subslice]) sp op))
+                   (cat-pattern ep sp op))))
       nil)))
 
 (defn euv-walk-pat [dp p has-guard]
@@ -3081,6 +3100,9 @@
                   (when (and (not (str/starts-with? (str (nth rd 2 "")) "Ctor(")) (not (re-find #"Const" (str (nth rd 2 nil)))) (multivariant? (p-ty pl))) (read-discr)))
           (:lit :range) (read-discr)
           (:struct :tuple-struct) (when (multivariant? (p-ty pl)) (read-discr))
+          ;; queue 561: a slice pattern reads the length unless it is `[..]` or of an array (walk_pat's PatKind::Slice)
+          :slice (let [ps (:pats p) t (loop [t (p-ty pl)] (if (= :ref (first t)) (recur (nth t 3)) t))]
+                   (when-not (or (and (= 1 (count ps)) (= :rest (:kind (first ps)))) (= :array (first t))) (read-discr)))
           nil)))))
 
 ;; analyze_closure's processing
@@ -3290,7 +3312,9 @@
 (defn- finish
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
-  (let [b (finish* d name kind n-args ret)]
+  (let [b (finish* d name kind n-args ret)
+        ;; queue 565: the values' drop spans by local (schedule-drop!'s), for ElaborateDrops' Drop::drop calls
+        b (if-let [ds (not-empty (:drop-spans (st)))] (assoc b :drop-spans ds) b)]
     (if *after-finish* (*after-finish* b) b)))
 
 (defn- finish*
@@ -3591,6 +3615,7 @@
             (upd! update :source-scopes conj [nil nil])
             (let [call-site [(:hir-id body-expr) :call-site]
                   arg-scope [(:hir-id body-expr) :arguments]]
+              (note-region-span! arg-scope (:span body-expr))
               (in-scope call-site
                 (let [ret-block
                       (in-breakable-scope nil (place 0)

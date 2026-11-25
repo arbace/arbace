@@ -1196,7 +1196,8 @@
     (letfn [(walk [x depth]
               (cond (and (seq? x) (= 'Item (first x)) (keyword? (second x)) (seq? (fget x :kind)) (#{'Struct 'Enum 'Union 'Use} (first (fget x :kind)))) (.add acc x)
                     (and (seq? x) (= 'Item (first x)) (keyword? (second x))) nil   ; a nested function's own items are its own
-                    (> depth 12) nil
+                    ;; (queue 558: 30, an inline const's items in a call's argument: simd_shuffle's index vector, SimdShuffleIdx)
+                    (> depth 30) nil
                     (seq? x) (doseq [y x] (walk y (inc depth)))
                     (vector? x) (doseq [y x] (walk y (inc depth)))
                     :else nil))]
@@ -1295,9 +1296,18 @@
 (defn- child-mod-items [items dir file nm]
   (when-let [m (some #(when (and (= 'Mod (item-kind %)) (= nm (second (nth (fget % :kind) 2)))) %) items)]
     (let [k (fget m :kind) mk (nth k 3)
-          path-attr (some (fn [a] (let [item (fget (second (fget a :kind)) :item)]
-                                    (when (= "path" (second (fget (last (fget (fget item :path) :segments)) :ident)))
-                                      (let [args (fget item :args)] (when (= 'Eq (first args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol)))))))
+          path-attr (some (fn [a] (let [item (fget (second (fget a :kind)) :item)
+                                        anm (second (fget (last (fget (fget item :path) :segments)) :ident))
+                                        args (fget item :args)]
+                                    (cond (= "path" anm)
+                                          (when (= 'Eq (first args)) (str (fget (second (fget (fget args :expr) :kind)) :symbol)))
+                                          ;; queue 558 (C3): `#[cfg_attr(PRED, path = "..")]` whose predicate holds (core's io::error's
+                                          ;; `mod repr`, repr_bitpacked.rs on a 64-bit target: std::io::Error's Repr and its layout)
+                                          (and (= "cfg_attr" anm) (seq? args) (= 'Delimited (first args)))
+                                          (let [ms (meta-items (fget (second args) :tokens))]
+                                            (when (cfg? (first ms))
+                                              (some (fn [[n lit _]] (when (and (= n "path") lit) (str/replace lit #"^\"|\"$" ""))) (rest ms))))
+                                          :else nil)))
                           (fget m :attrs))
           own-dir (if (re-find #"/(lib|mod)\.rs$" file) dir (str dir "/" (str/replace (.getName (File. ^String file)) #"\.rs$" "")))]
       (if (and (seq? mk) (= 'Loaded (first mk)) (= 'Yes (nth mk 2)))
@@ -1537,6 +1547,21 @@
                 f (some #(when (.exists (File. ^String %)) %) [(str own-dir "/" s ".rs") (str own-dir "/" s "/mod.rs")])]
             (when f (recur (parse-rs f) (.getParent (File. ^String f)) f (rest segs)))))))))
 
+(defn lib-fn-loc
+  "queue 558 (C3): a library function's def_span start (its item's span, the visibility's start) at the def path P
+  (`core::ptr::drop_glue`), as a shim's caller location takes it: [FILE LINE COL], FILE the module file below library/
+  (`core/src/ptr/mod.rs`), or nil"
+  [^String p]
+  (try
+    (let [[crate & segs] (str/split p #"::")]
+      (when-let [root (lib-crate-root crate)]
+        (when-let [[items _ f] (module-items root (vec (butlast segs)))]
+          (when-let [it (some #(when (and (= (last segs) (fn-item-name %)) (attr-cfg-ok? %)) %) items)]
+            (let [sp (fget it :span) i (.lastIndexOf ^String f "/library/")]
+              (when (and (vector? sp) (number? (first sp)))
+                [(if (neg? i) f (subs f (+ i 9))) (first sp) (second sp)]))))))
+    (catch Throwable _ nil)))
+
 (def ^:private repr-c-cache (atom {}))
 (defn- src-enum-repr-c?
   "C6-4 (rust-c6c): whether the library's sources declare the enum at the def path P `#[repr(C)]` (its module's items from the
@@ -1683,11 +1708,27 @@
                                                                                  (let [b (fget (second (fget % :kind)) :body)] (and (seq? b) (= 'LocalItems (first b)))))
                                                                         %)
                                                                      mitems)]
-                                                   [(into (vec (second (fget (second (fget fi :kind)) :body))) (filter #(= 'Use (item-kind %)) mitems)) d f]))))]
+                                                   [(into (vec (second (fget (second (fget fi :kind)) :body))) (filter #(= 'Use (item-kind %)) mitems)) d f])))
+                                             ;; queue 558 (C3): a definition local to a trait's or an impl's method, inside its inline
+                                             ;; const (`core_simd::swizzle::Swizzle::concat_swizzle::{constant#0}::SimdShuffleIdx`,
+                                             ;; simd_shuffle's index vector): the module the longest prefix, the method by the last
+                                             ;; segment before the name that is no `{constant#N}`, its kept items
+                                             (let [msegs (loop [k (- (count segs) 2)] (cond (< k 1) nil (module-items root (vec (take k segs))) (vec (take k segs)) :else (recur (dec k))))
+                                                   fnm (last (remove #(str/starts-with? % "{") (drop (count msegs) (butlast segs))))]
+                                               (when (and msegs fnm (< (inc (count msegs)) (dec (count segs))))
+                                                 (when-let [[mitems d f] (module-items root msegs)]
+                                                   (when-let [fi (some #(when (and (seq? %) (= 'Item (first %))
+                                                                                   (try (and (= 'Fn (item-kind %)) (= fnm (fn-item-name %))
+                                                                                             (let [b (fget (second (fget % :kind)) :body)] (and (seq? b) (= 'LocalItems (first b)))))
+                                                                                        (catch Throwable _ false)))
+                                                                          %)
+                                                                       (tree-seq #(or (seq? %) (vector? %)) seq mitems))]
+                                                     [(into (vec (second (fget (second (fget fi :kind)) :body))) (filter #(= 'Use (item-kind %)) mitems)) d f])))))]
                     (let [nm (last segs)]
                       (if-let [it (some #(when (and (#{'Struct 'Union} (item-kind %)) (= nm (item-name %)) (attr-cfg-ok? %)) %) items)]
                         (let [[_ _ gens vd] (fget it :kind)]
                           {:simd (boolean (repr-simd? it))
+                           :path p
                            :repr (repr-flags it)
                            :union (= 'Union (item-kind it))
                            :mod (vec (butlast segs))
@@ -1723,6 +1764,7 @@
                                                     :else (throw (ex-info "mono: a discriminant not a literal" {})))))
                                 discrs (loop [vs vs prev -1 acc []] (if-let [v (first vs)] (let [d (or (lit v) (inc prev))] (recur (rest vs) d (conj acc d))) acc))]
                             {:enum true
+                             :path p
                              :int (repr-int it)
                              :repr (repr-flags it)
                              :mod (vec (butlast segs))
@@ -1753,6 +1795,10 @@
         resolve (fn [segs]
                   (let [full (if-let [u (get (:uses s) (first segs))] (into u (rest segs)) segs)
                         full (if (= "crate" (first full)) (into [(:crate s)] (rest full)) full)
+                        ;; queue 558 (C3): `use self::repr::Repr;` (core::io::error), the module's own path
+                        full (if (= "self" (first full)) (into (into [(:crate s)] (:mod s)) (rest full)) full)
+                        ;; and `use super::{Custom, ErrorData};` (its repr module), the parent's
+                        full (if (= "super" (first full)) (into (into [(:crate s)] (butlast (:mod s))) (rest full)) full)
                         ;; hashbrown's lib.rs: `extern crate alloc as stdalloc;`
                         full (if (and (= "hashbrown" (:crate s)) (= "stdalloc" (first full))) (into ["alloc"] (rest full)) full)]
                     (or (known (std-name-path full))
@@ -1779,6 +1825,9 @@
         (cond
           (and (= 1 (count segs)) (pidx (first segs))) (nth args (pidx (first segs)))
           (and (= 1 (count segs)) (get c/prim-tys (first segs))) (get c/prim-tys (first segs))
+          ;; queue 558 (C3): `Self`, the definition itself at its arguments (core::io::error::Custom's `outer_drop: unsafe
+          ;; fn(NonNull<Self>)`)
+          (and (= ["Self"] segs) (:path s)) [:adt (:path s) (vec args)]
           :else (when-let [p (resolve segs)]
                   (let [given (or (gargs (last pseg)) [])]
                     (when (every? some? given)
@@ -1805,6 +1854,16 @@
       (and (seq? k) (= 'Slice (first k)))
       (when-let [el (src-ty s args (second k))] [:slice el])
       (and (seq? k) (= 'Paren (first k))) (src-ty s args (second k))
+      ;; queue 558 (C3): a fn pointer (`unsafe fn(NonNull<dyn error::Error + Send + Sync>)`, std::io::Error's Custom): collect's
+      ;; [:fnptr SIG], its inputs and output read as the fields' types (no binder: a lifetime erased)
+      (and (seq? k) (= 'FnPtr (first k)))
+      (let [ft (second k) d (fget ft :decl)
+            ins (mapv #(src-ty s args (fget % :ty)) (fget d :inputs))
+            o (fget d :output)
+            out (if (and (seq? o) (= 'Ty (first o))) (src-ty s args (second o)) [:tuple []])
+            sf (fget ft :safety) ext (fget ft :ext)]
+        (when (and (every? some? ins) out (or (= 'None ext) (nil? ext)) (empty? (fget ft :generic_params)))
+          [:fnptr {:inputs ins :output out :safety (when (and (seq? sf) (= 'Unsafe (first sf))) :unsafe) :abi nil}]))
       ;; queue 524 (C3): a trait object (`dyn Any + Send` in catch_unwind's Data): its principal and auto traits by their def
       ;; paths (std's names), no projection, the region erased
       (and (seq? k) (= 'TraitObject (first k)))
@@ -3159,6 +3218,12 @@
                   (let [[d' a' shim] (resolve-instance d args)] (when (and (not shim) (not= d' d)) [d' a']))))))
        (catch Throwable _ nil)))
 
+(defn virtual-call?
+  "queue 558 (C3): whether the call of D at ARGS is a trait method on a trait object (Instance::try_resolve's Virtual, virtual-fact's
+  rule): no body of its own is reached"
+  [d args]
+  (boolean (and (let [a (first args)] (and (vector? a) (= :dyn (first a)))) (try (trait-method? d) (catch Throwable _ false)))))
+
 (defn resolve-call
   "queue n-rust-dyn: a native library body's call of a trait method D at ARGS (`<[T] as SliceIndex<..>>::get_unchecked`,
   concrete once the instance's arguments are known) resolved as the collector resolves it (Instance::try_resolve: the impl's
@@ -3167,7 +3232,10 @@
   [n d args]
   (try (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
         (tc/with-solver (solver-def)
-         (fn [] (when (trait-method? d)
+         ;; queue 558 (C3): a trait method on a trait object is Virtual (virtual-fact's rule): no body to follow (`<dyn Any>::is`'s
+         ;; `self.type_id()` reached the blanket `impl<T: ?Sized> Any for T` at T = dyn Any, a body rustc never instantiates,
+         ;; whose `TypeId::of::<dyn Any>` constant was taken from the record)
+         (fn [] (when (and (trait-method? d) (not (virtual-call? d args)))
                   (let [[d' a' shim] (resolve-instance d (erase-regions args))] (when (and (not shim) (not= d' d)) [d' (vec a')]))))))
        (catch Throwable _ nil)))
 

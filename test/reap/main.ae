@@ -750,6 +750,41 @@
        (vec (remove #(contains? picked (:id %)) es))])
     [r es]))
 
+(defn override-rows
+  "An :override record's rows ([ID RESULT REASON ...], RESULT a string) as {ID [RESULT-KEYWORD REASON]}."
+  [rows]
+  (into {} (for [[id res why] rows] [(str id) [(keyword (str res)) (str why)]])))
+
+(defn override-apply
+  "DECISION 547-1 (b) (the user, 2026-11-25): the result R of a source (:pass, :ids, :entries) with the rows M (override-rows', a
+  check of its own over some of the source's cases: OCaml's bin/oi ppx expect --record) in place of the source's rows of the same
+  ids: each id's entries dropped, a pass counted where M's row passes, an entry of M's result and reason where it does not (judged
+  by the cell's classes as the source's); an id of M the source does not hold is a problem. [R STRAY]."
+  [r m]
+  (let [ids (set (:ids r))
+        hit (set (filter ids (keys m)))
+        had-entry (set (keep #(when (hit (:id %)) (:id %)) (:entries r)))
+        was-pass (count (remove had-entry hit))
+        now-pass (count (filter #(= :pass (first (m %))) hit))]
+    [(cond-> (assoc r :entries (vec (concat (remove #(hit (:id %)) (:entries r))
+                                            (for [id (sort hit) :let [[res why] (m id)] :when (not= :pass res)] (entry id res why)))))
+       (:pass r) (update :pass + (- now-pass was-pass)))
+     (vec (sort (remove ids (keys m))))]))
+
+(defn- override
+  "A source's :override {:file F :what W}: F's rows in place of the source's (override-apply), before the classes judge them. F
+  not there: a problem (the source's cases would be judged without the check that answers them)."
+  [src r]
+  (if-let [{:keys [file what]} (:override src)]
+    (if-not (exists? file)
+      (update r :results-problems (fnil conj []) (str (:name src) ": no " file " (" what ")"))
+      (let [m (override-rows (read-edn file))
+            [r2 stray] (override-apply r m)]
+        (cond-> (update r2 :detail #(str % (when % "; ") (count m) " rows of " what " in place of this record's (" file ")"))
+          (seq stray) (update :results-problems (fnil into [])
+                              (for [id stray] (str (:name src) ": " file "'s " id " is no case of " (:file src)))))))
+    r))
+
 ;; Python's row (queue 201, PY10; doc/python/PYTHON-SURVEY.md §10.1, "As built: PY10"): bin/pyi check --aot's record
 ;; (test/python/check-aot-linux-ARCH.edn, arbace.python.aot's judge: one map a line, :id, :result :pass, :classed (:class
 ;; :as-pyi, :reference-excluded or a class of test/python/divergences-aot.edn) or :failed, :reason, :pyi-ms, :pyi-differs)
@@ -1043,6 +1078,8 @@
             ;; (the user, 2026-11-22: CPython's recorded outcome beside each Python eval non-pass; the :rejected files' own verdicts)
             r (cond-> r (:py-ref-outcomes src) (py-ref-annotate (py-ref-outcomes (let [x (:py-ref src)] (if (vector? x) x [x])))))
             r (own-verdicts src r)
+            ;; (DECISION 547-1 (b), the user, 2026-11-25: a check of its own answers some of the record's cases)
+            r (override src r)
             classes (classes-of cf)
             es (for [e (:entries r)] (let [c (classify-entry classes e)] (assoc e :class c :kind (when c (kind-of cell c)))))
             ;; (CR1 (a), the user 2026-11-22: a file known where the reference is wrong that passes by its own verdict elsewhere)
@@ -1350,9 +1387,16 @@
                (concat
                 (when-not (= 12 (:pass r)) ["agreement: the agreeing entry of a marked class must count as passes"])
                 (when-not (= ["b" "c"] (mapv :id left)) ["agreement: an entry without :agree, or of an unmarked class, must stay"])
-                (when-not (= [{:pass 10} (vec (rest es))] (agreement {:pass 10} (vec (rest es)))) ["agreement: nothing to pick leaves the source as it is"]))))]
+                (when-not (= [{:pass 10} (vec (rest es))] (agreement {:pass 10} (vec (rest es)))) ["agreement: nothing to pick leaves the source as it is"])))
+             ;; DECISION 547-1 (b) (the user, 2026-11-25): an override's rows replace the source's of the same ids
+             (let [r {:pass 1 :ids ["p" "c" "d"] :entries [(entry "c" :class "ppx") (entry "d" :class "x")]}
+                   [r1 s1] (override-apply r (override-rows [["c" "pass" ""] ["p" "fail" "broke"] ["z" "pass" ""]]))]
+               (concat
+                (when-not (= 1 (:pass r1)) ["override: a class row the override passes must count as a pass, a pass it fails not"])
+                (when-not (= [["d" :class] ["p" :fail]] (mapv (juxt :id :result) (:entries r1))) ["override: the override's non-pass must replace the source's row"])
+                (when-not (= ["z"] s1) ["override: an id the source does not hold must be a stray"]))))]
     (doseq [b bad] (println "reap self-test: FAIL" b))
-    (when (empty? bad) (println "reap self-test: ok (8 cases)"))
+    (when (empty? bad) (println "reap self-test: ok (11 cases)"))
     (empty? bad)))
 
 (defn -main [& args]
