@@ -21147,3 +21147,36 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
   lost. `bin/reap --record`: C++ read 6,086 / 0 / 198 -> 6,089 / 0 / 195; `bin/crops-score --record`: C++ completeness 0.9860 ->
   0.9861, read independence 0.882 -> 0.883. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`,
   `bin/reap`: 0 problems.
+
+## 2026-11-25 — C++: the other GNU variable-length-array rules in the checker (queue 570, VM)
+
+- The user's DECISION 569-1 (a). Branch `570-cpp-vla-types` on `569-cpp-constexpr-vla` `01e38f918`. Rules from the GCC manual's
+  "Variable Length" and the C++ standard, restated in doc/cpp/CPP-SURVEY.md, "As built: 570"; no GCC or clang code. 569-2 (a)
+  kept (an uninitialized local array element reads as zero); 569-3 (a): the five own passes that fail at 569's base on this VM
+  (cpp0x/pr85147.C, cpp1y/constexpr-neg1.C, cpp23/consteval-if2.C, cpp23/constexpr-nonlit3.C, ext/anon-struct6.C) left to the host.
+- arbace/cpp/sema.ae, the checker alone: `cx-vm?` (a VLA type, or a pointer, reference or array built from one);
+  `cx-runtime-bound?` (a bound whose every operand is read and one names a parameter or a variable neither const nor a reference:
+  surely no constant expression); `*cx-vla*`, the block scope whose written type may be variably modified (a local typedef or
+  alias, a handler's type, typeid's type operand), where such a bound makes the VLA type instead of the refusal. Errors: a thrown
+  object of a VM type (reported, the analysis going on), a handler of one, typeid of one (type or expression), a non-static data
+  member of one, a constexpr variable of one, a VLA captured by copy (`[r]`, `[=]`), a member's array bound surely no constant
+  (a local class's `int ar[1][i]`), a local array's bound that reads no variable yet holds an address (`(long) "h"`, the offsetof
+  idiom; the variable declared all the same), a VLA bound of floating or pointer type, and array new of a VM element type
+  (`new A[5]`, `new (A[0])`; `new A` alone, GNU's array new, the slice's refusal). arbace/repr/cpp/diag.ae: the sema rule
+  :vla-type for those messages, and the -pedantic-errors VLA check (vla-pedantic) over constructors', destructors' and conversion
+  functions' bodies too (ext/vla1.C's out-of-line A::A).
+- Alternatives considered: every block-scope type resolution making VLA types (it would bypass vla-local's evaluated bound for
+  `int a[n]` and reach code that sizes arrays: kept to the three places that need it); a syntactic check over the trees' qualType
+  strings, as vla-pedantic is (a typedef's VLA would need its own tracking; the checker's types carry it); dropping a member whose
+  bound is no constant, as the checker drops other ill-formed members, kept (template/array9.C's destructor then names the dropped
+  members: two extra errors, a row that failed before and fails now).
+- Regression list: every recorded own pass (2,820) with the 106 VLA files of 569 and the 62 files whose dg-error lines name these
+  rules' words, one `--only` run (.tmp/q570/r1.log, 2,887 files): 2,822 pass, 7 moved, 0 lost but the five of 569-3 (a). After
+  array new's rule, the same list less the five (.tmp/q570/r3.log, 2,882 files): 2,823 pass, 8 moved, none lost; recorded from it
+  (`--judge --record`): cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C and
+  parse/array-size2.C to own pass; template/array9.C stays a failure (missed to extra). `bin/reap --record`: C++ read 6,089 / 0 /
+  195 -> 6,090 / 0 / 194 (dg 4,155 -> 4,156 pass); `bin/crops-score --record`: C++ completeness 0.9861 -> 0.9862.
+  `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+- Left: template/varmod1.C (a VM type as a deduced template argument), template/error41.C and template/array15.C (a class
+  template pattern's member bound), other/fold1.C (a const whose initializer is in error), init/new37.C (a template's array new),
+  and a local pointer to a VLA (`int (*p)[n]`), still refused at its declaration with a false error at a later use (at the base too).

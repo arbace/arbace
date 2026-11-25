@@ -11558,3 +11558,32 @@ Rows: ext/constexpr-vla1.C, -vla2.C, -vla3.C, ext/vla2.C and cpp0x/initlist26.C 
 from an initializer list", reached once the VLA is declared) to own pass; constexpr-vla1 and -2 out of :gcc-own-rules. The other
 GNU-VLA rows of the corpus need other rules (variably modified types in throw, catch, typeid, lambda captures, class members and
 constexpr variables: ext/vla4.C, cpp1y/vla5.C, ext/vlm2.C, gomp/pr85134.C): left, a DECISION.
+
+## As built: 570, the other GNU variable-length-array rules in the checker (2026-11-25; queue 570, branch `570-cpp-vla-types` on `569-cpp-constexpr-vla` `01e38f918`)
+
+DECISION 569-1 (a). The GCC manual's "Variable Length": GNU C++ takes an automatic array whose bound is no constant expression, its
+storage made where the declaration is executed; a type built from one is variably modified (C's term). C++ has no such types (every
+bound a converted constant expression, [dcl.array]/1), so where the standard needs a type fixed at translation one is ill-formed:
+the exception object ([except.throw]/3) and a handler ([except.handle]/1), typeid's operand ([expr.typeid]: its std::type_info is
+a static object), a non-static data member ([class.mem.general]; a member's bound is never a VLA's, VLAs being automatic variables),
+a constexpr variable ([dcl.constexpr]/6), a bound past the first in array new ([expr.new]/8); a closure's copy of an array is
+element-wise ([expr.prim.lambda.capture]/10, /15), which a run-time bound cannot size. A bound that reads no variable yet holds an
+address (a string literal, a cast to a pointer) is fixed at translation, so no VLA's, and no integral constant expression either
+(a pointer converted to an integer, [expr.const]/5.15). No GCC or clang code.
+
+- arbace/cpp/sema.ae, the checker alone: `cx-vm?`, `cx-runtime-bound?` (sure only when every operand is read -- no unevaluated
+  operand, conditional, short circuit, address, call or qualified name in the text -- and one names a parameter or a variable
+  neither const nor a reference, [expr.const]/4, /10), `cx-address-bound?`, and `*cx-vla*`, the block scope (the object) of a
+  local typedef or alias, a handler or typeid's type, where resolve-type-form's array makes `{:k :arr :n nil :vla true}` for such a
+  bound. The errors: GCC's "cannot throw expression of type", "cannot catch type ... of variable size", "cannot create type
+  information ... variable size", "data member may not have variably modified type", "'constexpr' variable ... has
+  variably-modified type", "array of runtime bound cannot be captured by copy", "size of array ... is not an integral
+  constant-expression" (a member's bound, an address bound), "size of array ... has non-integral type", "array size in
+  new-expression must be constant"; `new A` of a VLA typedef alone (GNU's array new) the slice's refusal.
+- arbace/repr/cpp/diag.ae: the sema rule :vla-type; vla-pedantic (-pedantic-errors' "ISO C++ forbids variable length array") over
+  constructors', destructors' and conversion functions' bodies too.
+
+Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C.
+Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class template pattern's member
+bound), template/array9.C (its dropped members named by the destructor: missed to extra), other/fold1.C, init/new37.C, and a local
+pointer to a VLA (`int (*p)[n]`, refused at its declaration, a false error at a later use, as at the base).
