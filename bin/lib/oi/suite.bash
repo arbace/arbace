@@ -29,18 +29,18 @@ cmd_suite_corpus() {
   mkdir -p "$S"; need_source; cmd_corpus > "$OI_DIR/corpus.log"
   local out=$S/corpus.tsv
   # the testsuite's run programs the run corpus of O5 does not hold
-  suite_actions > "$S/actions.tsv"
+  suite_actions > "$S/actions.tsv.$BASHPID"; mv -f "$S/actions.tsv.$BASHPID" "$S/actions.tsv"
   awk -F'\t' 'NR == FNR { if ($2 == "run") o5[$1] = 1; next }
     $2 == "run" && !($1 in o5) {
       dir = $1; sub(/[^\/]*$/, "", dir); name = $1; sub(/.*\//, "", name)
       units = ""; n = split($7, m, " "); for (i = 1; i <= n; i++) units = units (units == "" ? "" : " ") dir m[i]
       units = units (units == "" ? "" : " ") $1 ".ml"
       printf "%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $3, $4, $5, $6, "'"$TESTS"'", units
-    }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts"
+    }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts.$BASHPID"
   # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS [ENV [INCS]]; ENV since 2026-11-20, judge-rest: the
   # environment a reviewed golden file's output depends on, test/ocaml/opam/golden.edn's :env; INCS since queue 531: the libraries of
   # OCaml's distribution the program links, unix, as a testsuite row's), a package whose sources are not fetched out
-  : > "$out.opam"
+  : > "$out.opam.$BASHPID"
   # every package of the set extracted, else the 33 opam rows would leave the corpus unseen (review 008's finding 4)
   local pkg
   for pkg in $(grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | cut -f1 | LC_ALL=C sort -u); do
@@ -49,9 +49,10 @@ cmd_suite_corpus() {
   if [ -d "$OPAM" ]; then
     # (a seventh column INCS, queue 528 and queue 531 alike: the libraries the program links, as header.awk's include names them: unix)
     grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
-      NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
+      NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam.$BASHPID"
   fi
-  cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"
+  # (each writer its own files, renamed into place: two bin/oi processes at once must not append to one corpus, bin/lib/oi/corpus.bash)
+  cat "$out.ts.$BASHPID" "$out.opam.$BASHPID" | LC_ALL=C sort > "$out.$BASHPID"; rm -f "$out.ts.$BASHPID" "$out.opam.$BASHPID"; mv -f "$out.$BASHPID" "$out"
   echo "oi: suite corpus: $(awk -F'\t' '$2 == "run"' "$out" | wc -l) programs ($(grep -c '^opam/' "$out") of the opam set), $(awk -F'\t' '$2 == "class"' "$out" | wc -l) classed ($out)"
 }
 

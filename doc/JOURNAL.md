@@ -21048,3 +21048,25 @@ test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before t
 t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
 notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
 `bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
+## 2026-11-24: ocaml-1123: b4's compiled rows on the host fix; the queued tool and ocamldoc runs
+
+- b4 (the build worktree at 8bcdee584, the compiled main's hosts embedding jrt's OSHost): opam/base64/test and opam/fmt/test_fmt pass at
+  the compiled level by their own verdicts (base64's `base64` spawned); lib-threads/signal and delayintr still fail there ("No signal
+  received": the hosts were not their cause). Their rows enter the branch's compiled records with b5's (`.tmp/oc/merge-compiled.sh`).
+- b5: the 16 tool rows on 5de1b38d0 in their own shard (one ticket of 30 GiB), queued. b6: ocamldoc's five on next 7e3d2ff9a (544c: each
+  split program unit and plugin its own Go package), one ticket of 30 GiB after b5 (`ocaml-b`'s `.tmp/oc/compiled-b6.sh`), its rows
+  merged alone (`.tmp/oc/merge-ocamldoc.sh`, the ids of ocamldoc.txt only). Each merge records the matrix and scores and commits only
+  when reap, crops-score --judge --strict and records-check report 0 problems.
+
+## 2026-11-24: ocaml-aot: the user's decisions on the AOT cell's ocamlopt-only rows; the eval decisions at both levels
+
+The user's decisions (2026-11-24, through the coordinator, on ocaml-aot's report):
+- backtrace/lazy, typing-modules/struct_include_optimisation and statmemprof/discard_in_callback are n/a under `:na-native-code`, the
+  same reasoning as 528-14 (asmcomp/optargs): they test what ocamlopt's own code does (its inlined frame of CamlinternalLazy.force_lazy_block
+  in the backtrace's .reference; transl_store's included structures, which make no block; Comballoc's combined allocations, which a
+  callback that discards the profile ends), where the AOT levels translate the bytecode Lambda. Not taken: (b) building ocamlopt's
+  behaviour into o2j. test/ocaml/divergences-aot.edn's `:na-native-code` lists the first two, divergences-suite-aot.edn's the third;
+  `:backtrace-references` keeps no program (`:programs []`, so its `^fail output differs` matches nothing else).
+- The eval n/a decisions (539-1, 539b-2, 539b-3, ephetest3) stay applied at both levels, as branch `ocaml-aot-1124` applied them (8ce07bec1).
+- OCaml AOT 539 / 13 / 60 (64 n/a) -> 539 / 13 / 57 (67 n/a). `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+  `bin/records-check`: 0 problems. Branch `ocaml-aot-na-1124` from 8ce07bec1, without the WIP ports (5a7a53e91, on `ocaml-aot-1124`).
