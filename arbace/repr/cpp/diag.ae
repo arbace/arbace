@@ -112,6 +112,64 @@
       (seq? x) (doseq [y x] (walk-nodes f y parent))
       :else nil)))
 
+(defn- kind-index
+  "queue 580: the walk cache's index by node kind, made once a unit on first use: [ids sets], ids the unit's kinds numbered
+  (a HashMap), sets an IdentityHashMap from each map and collection the unit's root reaches (through every collection value
+  but :_ent's, a superset of what any walk below visits) to the BitSet of the kinds of the nodes in it, itself among them (equal
+  sets shared). nil when no cache is bound."
+  []
+  (when-let [c *walk-cache*]
+    (let [{r :root ix :kinds} @c]
+      (or ix
+          (when r
+            (let [ids (java.util.HashMap.) sets (java.util.IdentityHashMap.) shared (java.util.HashMap.)]
+              (letfn [(m [x]
+                        (or (.get sets x)
+                            (let [b (java.util.BitSet.)]
+                              (if (map? x)
+                                (do (when-let [k (:kind x)]
+                                      (.set b (int (or (.get ids k) (let [i (.size ids)] (.put ids k i) i)))))
+                                    (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (coll? v)) (.or b ^java.util.BitSet (m v))) nil) nil x))
+                                (doseq [y x] (when (coll? y) (.or b ^java.util.BitSet (m y)))))
+                              (let [b (or (.get shared b) (do (.put shared b b) b))]
+                                (.put sets x b)
+                                b))))]
+                (when (coll? r) (m r)))
+              (let [ix [ids sets]] (swap! *walk-cache* assoc :kinds ix) ix)))))))
+
+(defn- reaches-fn
+  "queue 580: a predicate for a walk that acts only at nodes of the kinds `ks` (its context taken from their ancestors): true of a
+  map or collection that may hold such a node, false of one the unit's kind index knows holds none (a subtree the walk skips:
+  nothing it would do there). Always true without the index (no cache bound, an object outside the unit's root)."
+  [ks]
+  (if-let [[^java.util.HashMap ids ^java.util.IdentityHashMap sets] (kind-index)]
+    (let [need (java.util.BitSet.)]
+      (doseq [k ks] (when-let [i (.get ids k)] (.set need (int i))))
+      (fn [x] (if-let [^java.util.BitSet b (.get sets x)] (.intersects b need) true)))
+    (fn [_] true)))
+
+(defn- walk-kinds
+  "queue 580: walk-nodes for an `f` that acts only at nodes of the kinds `ks`: the same calls in the same order but those in the
+  subtrees the unit's kind index knows hold no such node, which f would pass over (the unit's root replays the walk cache)."
+  [ks f x parent]
+  (if (and *walk-cache* (nil? parent) (empty? *params*) (identical? x (:root @*walk-cache*)))
+    (walk-nodes f x parent)
+    (let [reach? (reaches-fn ks)]
+      (letfn [(w [x parent]
+                (when (reach? x)
+                  (cond
+                    (map? x) (let [kind? (:kind x)
+                                   _ (when kind? (f x parent))
+                                   p (if kind? x parent)
+                                   inner (:inner x)
+                                   ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
+                                   go (fn [] (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (w v p)) nil) nil x))]
+                               (if ps (binding [*params* (into *params* ps)] (go)) (go)))
+                    (vector? x) (reduce (fn [_ y] (w y parent) nil) nil x)
+                    (seq? x) (doseq [y x] (w y parent))
+                    :else nil)))]
+        (w x parent)))))
+
 (def ^:private literal-kinds
   #{"IntegerLiteral" "FloatingLiteral" "StringLiteral" "CharacterLiteral" "CXXBoolLiteralExpr" "CXXNullPtrLiteralExpr"})
 
@@ -159,13 +217,17 @@
         ;; declares is found by no ADL either, [basic.lookup.argdep]/4: ADL finds declarations, hidden friends among them)
         declared (delay (let [hs (java.util.HashSet.)]
                           (walk-nodes (fn [n _] (when-let [nm (:name n)] (when (string? nm) (.add hs nm)))) (:nodes u) nil)
-                          hs))]
+                          hs))
+        reach? (reaches-fn #{"DeclRefExpr"})]
     ;; (round 54, third pass: GCC's suppression of a repeated error, its unqualified_name_lookup_error's declaration of the
     ;; name in the innermost block scope: an undeclared name is reported once in a block and the blocks it encloses, a later
     ;; use there found; a compound statement, a selection or iteration statement's own scope, a handler and a function each a
     ;; block, [basic.scope.block]/1; at namespace scope every use)
     (letfn [(w [x parent levels]
               (cond
+                ;; (queue 580: the parser's :_undecl is a DeclRefExpr's alone, parse.ae's id-expression; a subtree without one
+                ;; skipped)
+                (not (reach? x)) nil
                 ;; (queue 567: as walk-nodes, *params* rebound only where a parameter is, the entries reduced)
                 (map? x) (let [levels (if (contains? block-kinds (:kind x)) (cons (java.util.HashSet.) levels) levels)
                                _ (when (:kind x) (f x parent levels))
@@ -358,7 +420,9 @@
         ;; (cpp-decl2: the namespace region of the class being walked, for its friends' definitions; and the namespace
         ;; functions declared so far by region, name and signature, for a deleted friend's earlier declaration)
         cur-ns (atom nil)
-        ns-fns (java.util.HashMap.)]
+        ns-fns (java.util.HashMap.)
+        ;; (queue 580: stmt! acts only at the regions it enters; a subtree without one of their kinds skipped)
+        region? (reaches-fn #{"CompoundStmt" "LambdaExpr" "CXXRecordDecl" "FunctionDecl" "CXXMethodDecl"})]
     (letfn [(enter! [^java.util.HashMap r rk n path]
               (let [nm (:name n) off (loff n) dc (when (and off (mine? n)) (dclass n))]
                 (when (and nm (not= "" nm) dc)
@@ -487,6 +551,7 @@
             (stmt! [x]
               ;; any other node: its nested blocks (a lambda's body, a statement expression) and local classes, each a region
               (cond
+                (not (region? x)) nil
                 (map? x) (case (:kind x)
                            "CompoundStmt" (block! (java.util.HashMap.) (:inner x))
                            "LambdaExpr" (doseq [y (:inner x)] (when-not (= "CXXRecordDecl" (:kind y)) (stmt! y)))
@@ -2610,8 +2675,11 @@
         ;; the records: by their class-key's offset (an unnamed one's type names it), by name; the parents of each, and those in
         ;; templates' patterns
         by-off (java.util.HashMap.) by-name (java.util.HashMap.) parent-of (java.util.IdentityHashMap.) in-tmpl (java.util.IdentityHashMap.)
+        ;; (queue 580: only classes are taken; a subtree without one skipped)
+        reach? (reaches-fn #{"CXXRecordDecl"})
         _ (letfn [(idx [x par tmpl]
                     (cond
+                      (not (reach? x)) nil
                       (map? x) (let [rec? (and (= "CXXRecordDecl" (:kind x)) (:completeDefinition x))
                                      tmpl (or tmpl (#{"ClassTemplateDecl" "ClassTemplatePartialSpecializationDecl" "FunctionTemplateDecl"} (:kind x)))]
                                  (when rec?
@@ -2840,10 +2908,17 @@
                               (when (= main (or (get-in n [:loc :file]) (get-in n [:range :begin :file]) main))
                                 (let [[l c] (line-col starts (long o))]
                                   (.add out {:line l :col c :kind :error :rule :unavailable :msg msg})))))
-        type-hit (fn [^String qt hidden] (first (filter #(and (not (contains? hidden %)) (re-find (re-pattern (str "(?<![\\w:])" (java.util.regex.Pattern/quote %) "\\b")) qt)) types)))]
+        type-hit (fn [^String qt hidden] (first (filter #(and (not (contains? hidden %)) (re-find (re-pattern (str "(?<![\\w:])" (java.util.regex.Pattern/quote %) "\\b")) qt)) types)))
+        ;; (queue 580: the kinds reported at below, the types' only when there is an unavailable type; a subtree without one skipped)
+        reach? (reaches-fn (into #{"DeclRefExpr" "MemberExpr"}
+                                 (when (seq types)
+                                   ["VarDecl" "FieldDecl" "ParmVarDecl" "TypedefDecl" "TypeAliasDecl" "FunctionDecl" "CXXMethodDecl"
+                                    "CXXTemporaryObjectExpr" "CXXFunctionalCastExpr" "CXXUnresolvedConstructExpr" "CXXScalarValueInitExpr" "CStyleCastExpr"
+                                    "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXNewExpr"])))]
     (when (or (seq types) (seq values) (seq members) (seq lams))
       (letfn [(w [x parent hidden in-unav]
                 (cond
+                  (not (reach? x)) nil
                   (map? x)
                   (let [k (:kind x)
                         hidden (if (#{"ClassTemplateDecl" "FunctionTemplateDecl" "TypeAliasTemplateDecl" "VarTemplateDecl" "ClassTemplatePartialSpecializationDecl"} k)
@@ -3052,9 +3127,12 @@
                                   (.add out {:line l :col c :kind :error :rule :label-value :msg msg})))))
         records (into #{} (keep #(when (and (= "CXXRecordDecl" (:kind %)) (:name %)) (:name %)) (:nodes u)))
         globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) (str (get-in n [:type :qualType]))]))
-        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))]
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        ;; (queue 580: the kinds reported at or for below, a label declaration's statement; a subtree without one skipped)
+        reach? (reaches-fn #{"LabelDecl" "AddrLabelExpr" "IndirectGotoStmt"})]
     (letfn [(w [x in-fn tmpl vars]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       tmpl (or tmpl (#{"FunctionTemplateDecl" "ClassTemplateDecl"} k))
@@ -3163,7 +3241,8 @@
         named (java.util.HashSet.)
         _ (walk-nodes (fn [n _] (when (= "DeclRefExpr" (:kind n)) (when-let [o (get-in n [:range :begin :offset])] (.add named [(get-in n [:referencedDecl :name]) (long o)])))) (:nodes u) nil)
         instantiated? (fn [t] (let [b (long (or (get-in t [:range :begin :offset]) -1)) e (long (or (get-in t [:range :end :offset]) -1))]
-                                (some (fn [[nm o]] (and (= nm (:name t)) (or (< (long o) b) (> (long o) e)))) named)))]
+                                (some (fn [[nm o]] (and (= nm (:name t)) (or (< (long o) b) (> (long o) e)))) named)))
+        reach? (reaches-fn #{"SwitchStmt"})]
     (letfn [(cases [body]
               ;; the case labels of a switch's body, not of the switches nested in it
               (let [acc (java.util.ArrayList.)]
@@ -3225,7 +3304,9 @@
                           (.add out {:line l :col c :kind :error :rule :case-value :msg "duplicate (or overlapping) case value"})))))
                   (.add seen [lo hi]))))
             (w [x tmpl]
-              (cond (map? x) (let [tmpl (if (#{"FunctionTemplateDecl" "ClassTemplateDecl"} (:kind x)) x tmpl)]
+              ;; (queue 580: only a switch is judged; a subtree without one skipped)
+              (cond (not (reach? x)) nil
+                    (map? x) (let [tmpl (if (#{"FunctionTemplateDecl" "ClassTemplateDecl"} (:kind x)) x tmpl)]
                                (when (and (= "SwitchStmt" (:kind x)) (or (nil? tmpl) (and (= "FunctionTemplateDecl" (:kind tmpl)) (instantiated? tmpl))))
                                  (judge x))
                                (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tmpl)))
@@ -3291,9 +3372,12 @@
         cls-of (fn [^String qt] (get records (-> qt (str/replace #"\b(?:const|volatile|struct|class)\b" "") (str/replace #"\s*&+\s*$" "") str/trim)))
         globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))
         strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
-        reg-only? (fn [^String c] (let [c (str/replace c #"[\"=+&%*#!?,]" "")] (and (seq c) (re-matches #"[rqQRabcdSDxyftulYvk]+" c))))]
+        reg-only? (fn [^String c] (let [c (str/replace c #"[\"=+&%*#!?,]" "")] (and (seq c) (re-matches #"[rqQRabcdSDxyftulYvk]+" c))))
+        ;; (queue 580: the kinds reported at below; a subtree without one skipped)
+        reach? (reaches-fn #{"GCCAsmStmt" "UnaryOperator"})]
     (letfn [(w [x vars cls]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       fn? (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl"} k)
@@ -3386,7 +3470,9 @@
                                  (:inner r)))
         globals (into {} (for [n (:nodes u) :when (and (#{"VarDecl"} (:kind n)) (string? (:name n)))] [(:name n) n]))
         fns (group-by :name (filter #(= "FunctionDecl" (:kind %)) (:nodes u)))
-        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))]
+        strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
+        ;; (queue 580: the kinds reported at below; a subtree without one skipped)
+        reach? (reaches-fn #{"CallExpr" "ReturnStmt" "CXXCtorInitializer"})]
     (letfn [(info [e vars cls]
               ;; [type packed?] of an lvalue expression: a variable, a member access through one, `this`'s members
               (let [e (strip e)]
@@ -3404,6 +3490,7 @@
                   nil)))
             (w [x vars cls fnode]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       fn? (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl"} k)
@@ -3618,10 +3705,13 @@
                       (when (and es (every? some? ds))
                         (reduce #(.multiply ^java.math.BigInteger %1 ^java.math.BigInteger %2) (java.math.BigInteger/valueOf (long es)) ds)))))
         too-big? (fn [v] (and v (pos? (.compareTo ^java.math.BigInteger v max-size))))
-        tmpls (into {} (for [t (:nodes u) :when (= "ClassTemplateDecl" (:kind t))] [(:name t) t]))]
+        tmpls (into {} (for [t (:nodes u) :when (= "ClassTemplateDecl" (:kind t))] [(:name t) t]))
+        ;; (queue 580: a variable fails first, its later uses then reported; a subtree without a variable skipped)
+        reach? (reaches-fn #{"VarDecl"})]
     ;; variables (a failed one's later uses in its block)
     (letfn [(w [x]
-              (cond (map? x) (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v))
+              (cond (not (reach? x)) nil
+                    (map? x) (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v))
                     (vector? x) (loop [ys x failed #{}]
                                   (when-let [y (first ys)]
                                     (when (seq failed)
@@ -3732,9 +3822,12 @@
                       (int-type-size base) {:k (if vec? :vector :int) :el base :fl false}
                       :else nil)))
         strip (fn strip [x] (if (#{"ImplicitCastExpr" "ParenExpr"} (:kind x)) (strip (first (:inner x))) x))
-        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))]
+        globals (into {} (for [n (:nodes u) :when (and (= "VarDecl" (:kind n)) (string? (:name n)))] [(:name n) n]))
+        ;; (queue 580: the kinds reported at below; a subtree without one skipped)
+        reach? (reaches-fn #{"ConditionalOperator" "ArraySubscriptExpr" "CXXNewExpr" "SwitchStmt" "UnaryOperator" "BinaryOperator" "CompoundAssignOperator"})]
     (letfn [(w [x vars]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       vars (if (#{"FunctionDecl" "CXXMethodDecl"} k)
@@ -3926,9 +4019,12 @@
         report! (fn [n msg] (when-let [o (get-in n [:range :begin :offset])]
                               (when (= main (or (get-in n [:range :begin :file]) main))
                                 (let [[l c] (line-col starts (long o))]
-                                  (.add out {:line l :col c :kind :error :rule :read-only :msg msg})))))]
+                                  (.add out {:line l :col c :kind :error :rule :read-only :msg msg})))))
+        ;; (queue 580: the kinds reported at below; a subtree without one skipped)
+        reach? (reaches-fn #{"UnaryOperator" "BinaryOperator" "CompoundAssignOperator"})]
     (letfn [(w [x vars]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       vars (cond (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "LambdaExpr"} k)
@@ -4171,9 +4267,12 @@
         user (for [f (:nodes u) :when (and (= "FunctionDecl" (:kind f)) (#{"operator new" "operator delete"} (:name f)))]
                [(:name f) (mapv #(pkind (str (get-in % [:type :qualType]))) (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))])
         fits? (fn [ak pk] (case ak (:int :float) (= pk :arith) :ptr (= pk :ptr) :dep (#{:arith :ptr} pk) :align (= pk :align) :nothrow (= pk :nothrow) false))
-        viable? (fn [aks pks] (and (= (count aks) (count pks)) (every? boolean (map fits? aks pks))))]
+        viable? (fn [aks pks] (and (= (count aks) (count pks)) (every? boolean (map fits? aks pks))))
+        ;; (queue 580: only a call is reported; a subtree without one skipped)
+        reach? (reaches-fn #{"CallExpr"})]
     (letfn [(w [x vars tps]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       tps (if (= "FunctionTemplateDecl" k) (into tps (keep #(when (= "TemplateTypeParmDecl" (:kind %)) (:name %)) (:inner x))) tps)
@@ -4344,9 +4443,12 @@
         direct? (fn [^String nm] (and libs (re-matches #"__builtin_\w+" nm) (not (contains? libs (subs nm 10))) (not (contains? declared nm))
                                       (some? (re-find #"^__builtin_(?:trap|unreachable|abort_|return_address|frame_address|expect|prefetch|constant_p|clear_cache|debugtrap|ia32_\w+|choose_expr|va_\w+|unpredictable)" nm))))
         report! (fn [o msg] (when o (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :builtin-value :msg msg}))))
-        off (fn [n] (when (= main (or (get-in n [:range :begin :file]) main)) (get-in n [:range :begin :offset])))]
+        off (fn [n] (when (= main (or (get-in n [:range :begin :file]) main)) (get-in n [:range :begin :offset])))
+        ;; (queue 580: the kinds reported at below; a subtree without one skipped)
+        reach? (reaches-fn #{"DeclRefExpr" "VarDecl"})]
     (letfn [(w [x parent uneval]
               (cond
+                (not (reach? x)) nil
                 (map? x)
                 (let [k (:kind x)
                       uneval (or uneval (and (= "UnaryExprOrTypeTraitExpr" k)) (#{"CXXNoexceptExpr" "DecltypeType"} k))]
@@ -4407,7 +4509,8 @@
               npre (count (take-while #(not (:isParameterPack %)) tps))
               params (vec (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
               pvars (into {} (for [p params :when (string? (:name p))] [(:name p) (str (get-in p [:type :qualType]))]))]
-          (walk-nodes (fn [c _]
+          (walk-kinds #{"CallExpr"}
+                      (fn [c _]
                         (when (launder? c)
                           (let [args (rest (:inner c))
                                 plain (count (remove #(= "PackExpansionExpr" (:kind %)) args))
@@ -4431,7 +4534,8 @@
                                         (report! c "argument is not a pointer to object type"))))))
                               :else nil))))
                       (:inner f) nil))
-        (walk-nodes (fn [c _]
+        (walk-kinds #{"CallExpr"}
+                    (fn [c _]
                       (when (launder? c)
                         (let [args (vec (rest (:inner c)))]
                           (cond (not= 1 (count args)) (report! c "wrong number of arguments to '__builtin_launder'")
@@ -4515,9 +4619,11 @@
     ;; (cpp-tpl2: a call within a template's declaration, an alias template's argument list or a templated function's body, is
     ;; inside a template: cpp0x/variadic184.C, cpp1z/constexpr-if-lambda3.C had been reported)
     ;; (a node of the template's copied elsewhere, an alias's expansion the parser keeps on a use, keeps its place: judged by it)
-    (let [inside (java.util.HashSet.) outside (java.util.ArrayList.)]
+    ;; (queue 580: only a call is taken; a subtree without one skipped)
+    (let [inside (java.util.HashSet.) outside (java.util.ArrayList.) reach? (reaches-fn #{"CallExpr"})]
       (letfn [(w [x in-t]
                 (cond
+                  (not (reach? x)) nil
                   (map? x) (let [in-t (or in-t (contains? #{"TypeAliasTemplateDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "VarTemplateDecl"
                                                             "ClassTemplatePartialSpecializationDecl" "VarTemplatePartialSpecializationDecl"} (:kind x)))]
                              (when (and (= "CallExpr" (:kind x)) (= "__integer_pack" (get-in (first (:inner x)) [:referencedDecl :name])))
@@ -4937,8 +5043,11 @@
   (let [out (java.util.ArrayList.)
         recs (java.util.HashMap.)
         dup (java.util.HashSet.)
+        ;; (queue 580: the classes taken; a subtree without one skipped)
+        reach? (reaches-fn #{"CXXRecordDecl"})
         _ (letfn [(w [x in-tmpl]
-                    (cond (map? x) (let [k (:kind x)
+                    (cond (not (reach? x)) nil
+                          (map? x) (let [k (:kind x)
                                          in-tmpl (or in-tmpl (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl"} k))]
                                      (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)))
                                        (if (or (.containsKey recs (:name x)) in-tmpl)
@@ -5184,9 +5293,12 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         loops #{"ForStmt" "WhileStmt" "DoStmt" "CXXForRangeStmt"}
-        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :jump :msg msg}))))]
+        report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :jump :msg msg}))))
+        ;; (queue 580: only a break or a continue is reported; a subtree without one skipped)
+        reach? (reaches-fn #{"BreakStmt" "ContinueStmt"})]
     (letfn [(w [x in-loop in-switch in-fn]
-              (cond (map? x)
+              (cond (not (reach? x)) nil
+                    (map? x)
                     (let [k (:kind x)]
                       (cond
                         (= k "BreakStmt") (when (and in-fn (not in-loop) (not in-switch)) (report! x "break statement not within loop or switch"))
@@ -5217,8 +5329,11 @@
   (let [out (java.util.ArrayList.)
         recs (java.util.HashMap.)
         dup (java.util.HashSet.)
+        ;; (queue 580: the classes taken; a subtree without one skipped)
+        reach? (reaches-fn #{"CXXRecordDecl"})
         _ (letfn [(w [x tm]
-                    (cond (map? x) (let [k (:kind x) tm (or tm (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl"} k))]
+                    (cond (not (reach? x)) nil
+                          (map? x) (let [k (:kind x) tm (or tm (#{"ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl" "ClassTemplateSpecializationDecl"} k))]
                                      (when (and (= "CXXRecordDecl" k) (string? (:name x)) (seq (:name x)) (:completeDefinition x))
                                        (if (or tm (.containsKey recs (:name x))) (.add dup (:name x)) (.put recs (:name x) x)))
                                      (doseq [[kk v] x :when (and (not= kk :_ent) (or (map? v) (vector? v)))] (w v tm)))
@@ -8236,7 +8351,9 @@
         report! (fn [n nm] (when-let [o (mine-at n main)]
                              (let [[l c] (line-col starts o)]
                                (.add out {:line l :col c :kind :error :rule :anon-union :msg (str "redeclaration of '" nm "'")}))))
-        anon-union? (fn [n] (and (= "CXXRecordDecl" (:kind n)) (= "union" (:tagUsed n)) (nil? (:name n)) (:completeDefinition n)))]
+        anon-union? (fn [n] (and (= "CXXRecordDecl" (:kind n)) (= "union" (:tagUsed n)) (nil? (:name n)) (:completeDefinition n)))
+        ;; (queue 580: a region reports only after an anonymous union of its own, a class; a block or statement without one skipped)
+        reach? (reaches-fn #{"CXXRecordDecl"})]
     (letfn [(region! [nodes]
               ;; the region's declarations in order: [name node anon?]
               (let [seen (java.util.HashMap.)
@@ -8273,10 +8390,12 @@
               (doseq [x (:inner m) :when (and (map? x) (#{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl"} (:kind x)))]
                 (doseq [b (:inner x) :when (= "CompoundStmt" (:kind b))] (block! b))))
             (block! [b]
-              (region! (:inner b))
-              (doseq [x (:inner b) :when (map? x)] (if (= "CompoundStmt" (:kind x)) (block! x) (stmts! x))))
+              (when (reach? b)
+                (region! (:inner b))
+                (doseq [x (:inner b) :when (map? x)] (if (= "CompoundStmt" (:kind x)) (block! x) (stmts! x)))))
             (stmts! [x]
-              (cond (#{"CXXRecordDecl" "LambdaExpr"} (:kind x)) nil
+              (cond (not (reach? x)) nil
+                    (#{"CXXRecordDecl" "LambdaExpr"} (:kind x)) nil
                     :else (doseq [[k v] x :when (and (not= k :_ent) (coll? v))]
                             (doseq [y (if (map? v) [v] v) :when (map? y)]
                               (if (= "CompoundStmt" (:kind y)) (block! y) (when-not (#{"CXXRecordDecl" "LambdaExpr"} (:kind y)) (stmts! y)))))))]
@@ -8421,14 +8540,18 @@
 (defn duplicate-labels
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
-        fn-kinds #{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl"}]
+        fn-kinds #{"FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl"}
+        ;; (queue 580: only labels and gotos are taken; a subtree without one skipped)
+        reach? (reaches-fn #{"LabelStmt" "GotoStmt"})]
     (letfn [(body! [b]
+              (when (reach? b)
               (let [seen (java.util.HashSet.)
                     ;; (cpp-rind: and a goto's label defined nowhere in its function, [stmt.goto]/1: GCC's "label 'lab' used but
                     ;; not defined", at the goto; ext/timevar1.C)
                     gotos (java.util.ArrayList.)]
                 (letfn [(w [x]
-                          (cond (map? x)
+                          (cond (not (reach? x)) nil
+                                (map? x)
                                 (cond
                                   (= "LambdaExpr" (:kind x)) (doseq [y (:inner x) :when (and (map? y) (= "CompoundStmt" (:kind y)))] (body! y))
                                   (#{"CXXRecordDecl" "ClassTemplateDecl"} (:kind x)) (top! [x])
@@ -8446,9 +8569,9 @@
                   (doseq [g gotos :when (not (.contains seen (:label g)))]
                     (when-let [o (mine-at g main)]
                       (let [[l c] (line-col starts o)]
-                        (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")})))))))
+                        (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")}))))))))
             (top! [nodes]
-              (doseq [n nodes :when (map? n)]
+              (doseq [n nodes :when (and (map? n) (reach? n))]
                 (cond (fn-kinds (:kind n)) (doseq [b (:inner n) :when (and (map? b) (#{"CompoundStmt" "CXXTryStmt"} (:kind b)))] (body! b))
                       (#{"NamespaceDecl" "LinkageSpecDecl" "CXXRecordDecl" "ClassTemplateDecl" "FunctionTemplateDecl" "ClassTemplatePartialSpecializationDecl"} (:kind n))
                       (top! (:inner n))
@@ -8590,9 +8713,14 @@
                                     (some #(and (= "CXXRecordDecl" (:kind %)) (= "union" (:tagUsed %)) (nil? (:name %)) (:completeDefinition %)) xs)
                                     (some #(and (= "VarDecl" (:kind %)) (:isImplicit %) (not (#{"static" "extern"} (:storageClass %)))) xs))
                            (for [r xs :when (= "CXXRecordDecl" (:kind r)) f (:inner r) :when (and (= "FieldDecl" (:kind f)) (string? (:name f)) (seq (:name f)))]
-                             (:name f)))))]
+                             (:name f)))))
+        ;; (queue 580: only a member access is reported, and only inside a lambda; a subtree without one, or outside a lambda
+        ;; without a lambda, skipped)
+        reach-m? (reaches-fn #{"MemberExpr"})
+        reach-l? (reaches-fn #{"LambdaExpr"})]
     (letfn [(walk [x env cap seen]
               (cond
+                (not (and (reach-m? x) (or cap (reach-l? x)))) nil
                 (map? x)
                 (cond
                   (= "LambdaExpr" (:kind x)) (let [seen (java.util.HashSet.)] (doseq [[k v] x :when (and (not= k :_ent) (coll? v))] (walk v env env seen)))
