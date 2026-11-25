@@ -401,6 +401,33 @@
             (reduce (fn [m [nm d]] (update m nm (fnil conj []) d)) m (file-macros (fget (parse-file file) :items) file)))
           {} files))
 
+(def ^:private macro-use-mods
+  "queue 589: a module file's `#[macro_use] mod NAME;` declarations, the names (memoized by file)"
+  (memoize (fn [^String f]
+             (if (.exists (File. f))
+               (set (for [it (try (fget (parse-text (slurp f)) :items) (catch Throwable _ nil))
+                          :let [k (fget it :kind)]
+                          :when (and (= 'Mod (head k)) (some #(= "macro_use" (attr-path-name %)) (fget it :attrs)))]
+                      (second (nth k 2))))
+               #{}))))
+
+(defn- macro-scope-dir
+  "queue 589: the directory a macro_rules! of module file DF is in textual scope beneath: its module's (lib.rs' or mod.rs'
+  directory, a foo.rs's foo/), and while its module is declared `#[macro_use] mod NAME;` in its parent module file, the
+  parent's (rustc's textual scope: a #[macro_use] module's macros stay in scope after it in the parent; core's
+  `#[macro_use] mod macros;` makes macros/mod.rs' panic!, assert! and the rest the whole crate's)"
+  ^String [^String df]
+  (let [f (File. df) nm (.getName f)]
+    (if (#{"lib.rs" "main.rs"} nm)
+      (.getParent f)
+      (let [[own mname pdir] (if (= "mod.rs" nm)
+                               (let [d (.getParentFile f)] [(.getPath d) (.getName d) (.getParent d)])
+                               [(subs df 0 (- (count df) 3)) (subs nm 0 (- (count nm) 3)) (.getParent f)])
+            parent (some #(when (.exists (File. ^String %)) %) [(str pdir "/mod.rs") (str pdir "/lib.rs") (str pdir ".rs")])]
+        (if (and parent (contains? (macro-use-mods parent) mname))
+          (macro-scope-dir parent)
+          own)))))
+
 (defn macros-for
   "The macro table as the expansion's std macros for a file: each name's definition from the nearest file (the same file
   excluded: the file's own are its user macros), by the longest common directory prefix"
@@ -411,9 +438,12 @@
                        ;; name outside its textual scope (its module file's subtree): rustc-demangle's v0.rs `macro_rules! write`
                        ;; (a compile_error! guard) is not lib.rs' write!, core's is
                        ds (if (and shadowed (shadowed nm))
-                            (remove (fn [{^String df :file}]
-                                      (let [mdir (if (re-find #"/(lib|mod)\.rs$" df) (.getParent (File. df)) (subs df 0 (- (count df) 3)))]
-                                        (not (str/starts-with? file (str mdir "/")))))
+                            (remove (fn [{^String df :file dsite :def-site}]
+                                      ;; (queue 589: a #[macro_use] module's scope its parent's, macro-scope-dir; a macro 2.0, :def-site,
+                                      ;; has no textual scope: `$crate::panic::panic_2021!` resolves by its path from anywhere)
+                                      (and (nil? dsite)
+                                           (let [mdir (macro-scope-dir df)]
+                                             (not (str/starts-with? file (str mdir "/"))))))
                                     ds)
                             ds)]
                  :when (seq ds)]
@@ -1235,7 +1265,7 @@
               crate (stage stages :expand
                            #(binding [ex/*mark-crates* mc ex/*sites* sites]
                               (ex/expand-file file 2024 (let [sm (ex/load-std-macros std-file)]
-                                                         (merge sm (macros-for table file (when (some #{*crate*} backtrace-crates) (set (keys sm)))))))))
+                                                         (merge sm (macros-for table file (set (keys sm))))))))
               vtext (ex/virtual-text)
               res (stage stages :resolve #(binding [resolve/*def-sites* (into {} (for [[k v] @mc :when (and (vector? k) (= :def-site (first k)))] [(second k) v]))
                                                     ;; RIND9 (a): a macro's `$crate` by its crate (alloc's: core's macros name core)

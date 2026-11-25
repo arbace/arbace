@@ -23251,3 +23251,24 @@ explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-
   cpp0x/constexpr-non-const-arg2.C; cpp1z/constexpr-asm-3.C by 580. Alternatives: a recovery inside tentative parses (would change
   which reading wins), keeping attributes' arguments in the tree (a tree change for no row).
 - 580's entry (queue 580, above) is its own; its "As built" is in the survey with this one.
+## 2026-11-25 — Rust C6: the shadowed-macro gate ungated with rustc's textual scope (queue 589, VM)
+
+On 586-1 (a), relayed by Arbace. Why ungating 561's shadowed-macro names (macros-for's SHADOWED: a std macro name's crate
+definitions dropped outside their module file's subtree) lost core::result::unwrap_failed's core-check equal: for core every
+macro name is a std one, and the subtree rule dropped all of core's own definitions outside their files (586's probe: every
+core file), so unwrap_failed's `panic!("{msg}: {error:?}")` expanded with std-names' panic_2021 instead of core's
+`pub macro panic_2021` (core/src/panic.rs), its format_args' user type annotation at another span. Two rules of rustc's
+resolution were missing: a `#[macro_use] mod NAME;` module's macro_rules! stay in textual scope in its parent after the
+declaration (core's `#[macro_use] mod macros;` in lib.rs makes panic!, assert! and the rest the whole crate's), and a macro 2.0
+has no textual scope (resolved by path, `$crate::panic::panic_2021!`). core-check's macro-scope-dir now climbs a module's
+`#[macro_use]` declarations (the parent module file's, memoized), and a :def-site definition is never dropped; the gate's
+binding is gone (every crate shadows).
+- core-check's one case (CORE_ONLY=unwrap_failed over result.rs): differ before the fix, :equal-alloc-ids after.
+- One export round of core, alloc and std at the head against 586's round X: no body moved but fmt::write (steps-inherent,
+  already in the cache) and the two Clone::clone bodies 586 added, so std's lib-unit (224/35/66, L2 413 of 487) cannot move and
+  was not rerun. core-essential equal to its known file. The backtrace crates' bodies cannot move: the rule was already theirs,
+  their `#[macro_use]` modules define no std macro name (object's unsafe_impl_pod!, gimli's define_section!, memchr's log!) and
+  none defines a macro 2.0.
+
+Alternatives considered: exempting every #[macro_export] macro from the shadowing (wider than rustc: a bare name outside the
+textual scope does not reach a crate-root macro_export); leaving the gate gated (586-1's (a) asked for the cause first).
