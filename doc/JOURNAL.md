@@ -21064,3 +21064,8 @@ Done:
 - **Plans**: `bin/gate --weekly --plan` runs it ("the weekly tier; key c41a0c7838b2, 1251 files; never passed"). The `--nightly`,
   `--full` and essential plans do not list it. The audit was not run: strace over an hour of the step's thousands of processes would
   take hours.
+
+## 2026-11-25 — the user's DECISION 548-1 (a) (queue 548, VM)
+
+548-1 (a): ocaml-ppx-expect stays in the weekly tier, skipped by key when its inputs are unchanged, in place of the nightly step
+547f-1 (a) named (bin/gate --nightly runs --full's phases; a nightly-only phase would need a planner change, not made).
