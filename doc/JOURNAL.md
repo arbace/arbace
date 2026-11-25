@@ -20789,3 +20789,39 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-25: train 3's records (rec-t3-1125)
+
+Train 3 (mac/train-3 2aeeffc77; executables /root/arbace/.tmp/gate-exe/df179e3b1e1037f0172f/amd64, javac's tool
+javac-6de487c09a0f62d41c61, built with ARBACE_HOST_EXE=/root/arbace/target/seed/amd64/arbace; this worktree's gate key the same).
+Runs under bin/heavy-lock (scripts and logs in the worktree's .tmp/r/); the first round died in the host's OOM of 12:03 and was
+rerun under the one-slot lock.
+- Java (commit 11589dd1e): interp, diagnostics and compiled by `bin/java-check --levels L --list --save`, judged with `--judge
+  --partial --record`. t06029 (assert-before-init) passes interpreted, still fails compiled ("failed 4478095.1": j2g's :assert):
+  :assert-before-init now `:levels [:compiled]`. Six of :diag-processors' seven rows pass on train 3's tool (t07541, t07548, t07550,
+  t07553, t07555, t07558); t07544 still stops on AbstractMethodError $Proxy0.names(): the processor's call goes through
+  BytecodeCode.invoke (the class-file interpreter), not CallV, which 25fa51e29 fixed. The controls failed as they must.
+- Python eval: `bin/pyi check --fresh --record` of the 34 modules of py-accel (test_datetime, test_types, test_decimal,
+  test_xml_etree_c, test_zoneinfo, test_ctypes), the Mac's 535 (forkserver, spawn misc, concurrent_futures, test_cprofile,
+  test_asyncio.test_events, test_sysconfig, test_set, test_dict), 537 (test_hmac ... test_warnings, whole: their --only rows
+  too) and 545 (test_io, test_fileio, test_file_eintr, test_fileinput, test_memoryio), on the gate executable (the checkout's
+  runtime compiled), 4 at once: 8,346 methods, 7,416 pass, 1,868 rows now pass. Then `--judge DIR --record` after the classes:
+  - 20 test_capi rows now run (their modules import past _testinternalcapi, no longer :testinternalcapi-absent's) and differ:
+    named in :testcapi-behaviour (deferred).
+  - 3 REGRESSIONS, test_ctypes' c_longdouble results (test_longdouble, test_longdouble_plus, test_longdoubleresult: 0.0): named in
+    :ctypes-port, for py-accel (its D/F/G types). test_xml_etree_c's 6 now-C rows in :elementtree-c and two skips (closerange,
+    reparse deferral) taken by their skip classes.
+  - :c-accelerators narrowed to _pickle and _json (the _decimal/_datetime/"requires C version" matches and the test_datetime and
+    test_decimal names removed); :fork's 125 names of the 535 modules the record passes removed (the ECHILD match kept: 10 rows);
+    535's four forkserver rows moved from :multiprocessing to :multiprocessing-children.
+  Python eval 40,886 / 1,332 / 1,292 (4,816 n/a) -> 42,743 / 278 / 1,004 (4,426 n/a). Python's AOT cell holds programs only (no
+  Lib/test AOT record exists): 545's AOT re-record not run.
+- `bin/pyi-clib verify ctypestest`: the node program and its cf2g forms equal but for the build's Key (d65251e1... committed,
+  16fea24b... built; the aot files' header names the nodes' digest): the inputs moved, not the build. Left for the next train
+  (go/arbace/clib is in gate_key).
+- goi: `bin/goi test`'s interpreter programs 26 of 26 (appendspread, py-goi's fix), the REPL 127; goi std's `arbace/pyctypes`
+  fails ("a value of type invalid type" for its exported functions over Object, Str_, DelItemOf): pyctypes' table entry, likely
+  since it was listed (the step's last pass, 2026-11-16, had 104 compiled packages, now 113).
+- Not recorded: C's whole eval check (3 timeouts under load, regressions of no row: discarded; the user's redundancy review: no
+  C row can move from train 3, the gate proves it), the table check and runtime check (verifications, the gate's).
+- `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check`: 0 problems.
