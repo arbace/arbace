@@ -26,6 +26,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import javax.lang.model.SourceVersion;
 import javax.tools.JavaFileObject;
 import jdk.internal.opt.CommandLine;
 
@@ -76,6 +77,13 @@ public final class Main {
             }
         }
         return true;
+    }
+
+    /** Option.SOURCEFILE's class name: a legal type name, or MODULE/TYPE. */
+    static boolean className(String s) {
+        int sep = s.indexOf('/');
+        return sep != -1 ? SourceVersion.isName(s.substring(0, sep)) && SourceVersion.isName(s.substring(sep + 1))
+                : SourceVersion.isName(s);
     }
 
     /** FSInfo.getCanonicalFile's path: the real one, else the absolute. */
@@ -179,13 +187,20 @@ public final class Main {
         // javac's API cannot do it here, it wraps each of a client's file objects apart (ClientCodeWrapper)
         List<JavaFileObject> units = new ArrayList<>();
         Set<String> named = new HashSet<>();
+        // a name that is not a .java file but a type's (or MODULE/TYPE), a class for annotation processing, as
+        // javac's Option.SOURCEFILE takes it (helper.addClassName; queue 575, @compile/process's class names)
+        List<String> classNames = new ArrayList<>();
         for (String f : files) {
+            if (!f.endsWith(".java") && className(f)) {
+                classNames.add(f);
+                continue;
+            }
             File file = new File(f);
             if (named.add(canonical(file))) {
                 units.add(fm.source(file));
             }
         }
-        if (units.isEmpty()) {
+        if (units.isEmpty() && classNames.isEmpty()) {
             err.println("error: no source files");
             err.flush();
             return 2;
@@ -194,7 +209,7 @@ public final class Main {
         Log log;
         JavaCompiler comp;
         try {
-            JavacTaskImpl task = (JavacTaskImpl) JavacTool.create().getTask(err, fm, null, opts, null, units);
+            JavacTaskImpl task = (JavacTaskImpl) JavacTool.create().getTask(err, fm, null, opts, classNames.isEmpty() ? null : classNames, units);
             // javac's Main.compile: the file manager given the context once the options are
             // processed ("reinit with options"), before they are validated
             Context context = task.getContext();
