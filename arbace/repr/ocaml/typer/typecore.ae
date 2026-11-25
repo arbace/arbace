@@ -237,7 +237,11 @@
                       true)
         i1 (do (reify! t2) (record-equation! t1 t2) (add-gadt-equation! (first i1) (second i1) t2) true)
         i2 (do (reify! t1) (record-equation! t1 t2) (add-gadt-equation! (first i2) (second i2) t1) true)
-        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0)))
+        ;; (queue 547) Ctype.unify3's Tvariant pair in pattern mode: rows that do not unify (an existential's row against a GADT
+        ;; constructor's index, ppx_expect's Test_node `match behavior with Expect ...`) both reified, accepted unless Ctype.mcomp
+        ;; finds them incompatible (record_equation)
+        (or (= :Tconstr ((ty/desc t1) 0)) (= :Tconstr ((ty/desc t2) 0))
+            (and (= :Tvariant ((ty/desc t1) 0)) (= :Tvariant ((ty/desc t2) 0))))
         (do (reify! t1) (reify! t2)
             (try (ty/mcomp t1 t2) (record-equation! t1 t2) true
                  (catch arbace.lang.ExceptionInfo e (if (= :incompatible (:unify (ex-data e))) false (throw e)))))
@@ -453,7 +457,13 @@
             _ (if (:res c)
                 (binding [ty/*gadt-equation* add-equation] (unify! tres expected "pattern"))
                 (unify! tres expected "pattern"))
-            sarg (when-let [a (d 2)] (second a))
+            sarg0 (when-let [a (d 2)] (second a))
+            ;; Typecore's Ppat_construct (queue 548: ppx_log's `Pconst_integer (_ : string * char option)`): `C (p : t)` of a
+            ;; constructor of several arguments, the constraint the arguments' tuple (solve_Ppat_construct's existential_styp with
+            ;; no type names: t unified with their tuple), p split as the arguments
+            [sarg csty] (if (and sarg0 (> (:arity c) 1) (= :Ppat_constraint ((:ppat_desc sarg0) 0)))
+                          [((:ppat_desc sarg0) 1) ((:ppat_desc sarg0) 2)]
+                          [sarg0 nil])
             sargs (cond
                     (nil? sarg) []
                     (and (> (:arity c) 1) (= :Ppat_tuple ((:ppat_desc sarg) 0))) (mapv second ((:ppat_desc sarg) 1))
@@ -462,6 +472,8 @@
                     :else [sarg])]
         (when-not (= (count sargs) (:arity c))
           (type-error (str "The constructor " (:name c) " expects " (:arity c) " argument(s)")))
+        (when csty
+          (unify! (annot-type env csty) (ty/newty [:Ttuple (mapv (fn [t] [nil t]) targs)]) "pattern"))
         (mk [:Tpat_construct c (mapv (fn [p t] (type-pat env p t vars)) sargs targs)] expected))
       :Ppat_record
       (let [fields (d 1)
@@ -493,7 +505,22 @@
       :Ppat_constraint (if (and (= :Ptyp_poly ((:ptyp_desc (d 2)) 0)) (= :Ppat_var ((:ppat_desc (d 1)) 0)))
                          ;; an explicitly polymorphic variable: its type the scheme, each use an instance (polymorphic
                          ;; recursion); its definition typed against an instance
-                         (let [scheme (env/make-generic! (env/transl-type env (atom {}) (d 2)))
+                         ;; (queue 548) only the poly's own variables are generic: a `_` of the annotation (parsexp's
+                         ;; `let raise_error : type a b. (a, b) Automaton_state.t -> _ = ...`) is a variable of the current level
+                         ;; that the definition's type fills, as Typecore's type_let instantiates the Tpoly's univars alone and
+                         ;; shares the rest (instance_poly), the let's generalization making it generic
+                         (let [tv (atom {})
+                               t (env/transl-type env tv (d 2))
+                               bound (set (keep (fn [v] (some-> (get @tv (:txt v)) ty/repr)) ((:ptyp_desc (d 2)) 1)))
+                               seen (java.util.IdentityHashMap.)
+                               _ ((fn go [t] (let [t (ty/repr t)]
+                                               (when-not (.containsKey seen t)
+                                                 (.put seen t true)
+                                                 (when-not (and (ty/tvar? t) (not (contains? bound t)))
+                                                   (when-not (= ty/generic-level (ty/level t)) (ty/set-level! t ty/generic-level)))
+                                                 (run! go (ty/children (ty/desc t))))))
+                                  t)
+                               scheme (ty/repr t)
                                n (:txt ((:ppat_desc (d 1)) 1)) id (ty/ident-create n)]
                            (unify! (ty/instance scheme) expected "pattern")
                            (swap! vars conj [n id scheme])
@@ -1132,7 +1159,10 @@
       :Pexp_record
       (let [fields (d 1) init-s (d 2)
             init (when init-s (type-exp env init-s))
-            l0 (lookup-label env (record-first-lid fields) (or (and init (:type init)) expected)
+            ;; Typecore's Pexp_record: the expected type when it is a known record type, else the type of the record copied
+            ;; from (`with`) (queue 547: ppxlib_jane's `Ast_helper.with_default_loc { loc with loc_ghost = true }`, loc unannotated)
+            l0 (lookup-label env (record-first-lid fields)
+                             (if (or (nil? init) (and expected (expected-type-path expected))) expected (:type init))
                              (mapv (fn [[lid _]] (lid-name (:txt lid))) fields) (nil? init-s))
             [res _ args] (instance-label l0)
             _ (unify! res expected "expression")
@@ -1682,6 +1712,23 @@
         [[{:pat p :expr e :attrs nil}] (add-pattern-vars env @vars)])
     (type-let* env rec svbs))))
 
+(defn- approx-type
+  "(queue 547) Typecore.approx_type: a type expression's shape (arrows, tuples, constructors of the right arity), the rest
+  variables, no type variable bound and no error raised"
+  [env sty]
+  (let [d (:ptyp_desc sty)]
+    (case (d 0)
+      :Ptyp_arrow (let [l (d 1) a (ty/newvar)]
+                    (ty/newty [:Tarrow l (if (ty/is-optional l) (ty/type-option a) a) (approx-type env (d 3))]))
+      :Ptyp_tuple (ty/newty [:Ttuple (mapv (fn [[l t]] [l (approx-type env t)]) (d 1))])
+      :Ptyp_constr (let [p (try (env/lookup env :types (:txt (d 1))) (catch arbace.lang.ExceptionInfo _ nil))
+                         decl (when p (env/find-decl p))]
+                     (if (and p decl (= (count (d 2)) (count (:params decl))))
+                       (ty/tconstr p (mapv #(approx-type env %) (d 2)))
+                       (ty/newvar)))
+      :Ptyp_poly (approx-type env (d 2))
+      (ty/newvar))))
+
 (defn type-approx
   "Typecore.type_approx: a recursive binding's expression's type approximated from its shape before it is typed (its
   parameters' labels and an optional one's option type: a use of the function before its definition, with labels,
@@ -1702,7 +1749,10 @@
                     (recur (next params) tret))))))
           (let [body (d 3)]
             (case (body 0)
-              :Pfunction_body (when-not (d 2) (type-approx env (body 1) ty))
+              ;; (queue 547) a return constraint (`let rec f x : t = ...`): the result's type approximated from it
+              :Pfunction_body (if-let [c (d 2)]
+                                (when (= :Pconstraint (c 0)) (unify! (approx-type env (c 1)) ty "expression"))
+                                (type-approx env (body 1) ty))
               :Pfunction_cases (when-not (d 2)
                                  (when-let [c (first (body 1))]
                                    (let [[_ tret] (split-arrow ty [:Nolabel])] (type-approx env (:pc_rhs c) tret))))
@@ -1714,6 +1764,8 @@
                     (doseq [[[_ e] [_ t]] (map vector (d 1) ts)] (type-approx env e t)))
       :Pexp_ifthenelse (recur env (d 2) ty)
       :Pexp_sequence (recur env (d 2) ty)
+      ;; (queue 547) `(e : t)`: the type's shape
+      :Pexp_constraint (do (type-approx env (d 1) ty) (unify! (approx-type env (d 2)) ty "expression"))
       nil)))
 
 (defn- type-let*

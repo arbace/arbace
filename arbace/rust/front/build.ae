@@ -500,8 +500,11 @@
           ;; a static: the deref of its allocation's pointer (StaticRef: `&T`, `*mut T` for a mutable one)
           (and (= :local (first rd)) (str/starts-with? (str (nth rd 2)) "Static"))
           (let [mut? (str/includes? (str (nth rd 2)) "mutability: Mut")
-                pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])]
-            (mk e :deref ty :arg (mk e :static-ref pt :def (second rd))))
+                pt (if mut? [:ptr true ty] [:ref [:re-erased] false ty])
+                ;; queue 542: a `#[thread_local]` static (thread_local!'s `__RUST_STD_INTERNAL_VAL`): ThreadLocalRef, an rvalue
+                ;; (`&/*tls*/ VAL`), not an allocation's pointer
+                tls? (some #(= "thread_local" (:unparsed %)) (:attrs (:node (c/def-of (second rd)))))]
+            (mk e :deref ty :arg (mk e (if tls? :thread-local-ref :static-ref) pt :def (second rd) :mut mut?)))
           ;; RF13d: `Self` as a unit struct's value (Res::SelfCtor): a ZstLiteral with its user type (`const ZeroSized: T`)
           (and (= :self-alias (first rd)) (= :adt (first ty)))
           (mk e :zst-literal ty :user-ty (:user-ty (r-of e)) :fspan (:fspan e))
@@ -745,7 +748,7 @@
                         :args [(mirror-expr f) {:k :tuple :ty tt :fields (mapv mirror-expr (:args e)) :span (:span e) :tsi (:hir-id e)}]
                         :from-hir true :fn-span (:span e)))
                   (mk e :call ty :fun (mirror-expr f) :args (mapv mirror-expr (:args e)) :from-hir true :fn-span (:span e)))))
-      :method (let [[def args] (or (:callee (r-of e)) (unsupported "a method call without its callee"))
+      :method (let [[def args] (or (:callee (r-of e)) (unsupported (str "a method call without its callee: " (:ident (:seg e)))))
                     fty [:fndef def args]]
                 (mk e :call ty :fun {:k :zst-literal :ty fty :span (or (method-ident-span e) (:span e)) :tsi (:hir-id e) :user-ty (:user-ty (r-of e))}
                     :args (into [(mirror-expr (:receiver e))] (map mirror-expr (:args e))) :from-hir true
@@ -1260,23 +1263,43 @@
   (let [d (some #(when (and (= "Closure" (:kind %)) (= hir-id (:hir-id (:node %)))) %) (c/defs))]
     (str "DefId(0:? ~ " (crate-name) "[????]::" (if d (mir-name d) "?") ")")))
 
+(def ^:dynamic *static-bytes-deferred*
+  "queue 542 (C6): within a library's export (alloc-check --export), a static whose initializer the slice cannot evaluate yet (a
+  const fn's call: `static STDOUT: OnceLock<..> = OnceLock::new()`) is referenced with its value deferred: its allocation names
+  the static by its def path and holds no bytes (`, deferred)`), so a body that only points at it is built (rustc's codegen of
+  such a body names the static's symbol alone), and the static's definition stays the library unit's to make (CTFE not ported)"
+  false)
+
 (defn- intern-static-alloc!
   "reserve_and_set_static_alloc: a static's allocation (its evaluated bytes, its name), one per static; its id"
   [def]
   (when *allocs*
     (let [k [:static def]
           id (or (get-in @*allocs* [:ids k])
-                 (let [[bs align] (static-bytes def) i (:next @*allocs*)]
-                   (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name (second (:data (c/def-of def))) :align align}) (update :next inc)))
+                 (let [[bs align] (if *static-bytes-deferred*
+                                    (try (static-bytes def)
+                                         (catch arbace.lang.ExceptionInfo e
+                                           (if (str/starts-with? (str (.getMessage e)) "build: unsupported a static's value")
+                                             [:deferred 1]
+                                             (throw e))))
+                                    (static-bytes def))
+                       i (:next @*allocs*)
+                       nm (if (= :deferred bs)
+                            (binding [c/*in-value* true] (c/print-def-path def []))
+                            (second (:data (c/def-of def))))]
+                   (swap! *allocs* #(-> % (assoc-in [:ids k] i) (assoc-in [:static i] {:name nm :align align :deferred (= :deferred bs)}) (update :next inc)))
                    (swap! *allocs* assoc-in [:static-bytes i] bs)
                    i))]
       (upd! update :allocs-used (fnil conj #{}) id)
-      (doseq [x (get-in @*allocs* [:static-bytes id]) :when (map? x)] (upd! update :allocs-used conj (:ptr x)))
+      (doseq [x (let [b (get-in @*allocs* [:static-bytes id])] (when (sequential? b) b)) :when (map? x)] (upd! update :allocs-used conj (:ptr x)))
       id)))
 
 (defn- alloc-text
   "write_allocation: an allocation's bytes, sixteen a line (an offset column past sixteen bytes), as ASCII beside"
   [id bytes & [static]]
+  (if (:deferred static)
+    ;; queue 542: a static whose value is deferred: its path, no bytes (build_run's alloc-bytes reads none: the static declared)
+    (str "\nalloc" id " (static: " (:name static) ", deferred)\n")
   (let [n (count bytes)
         w (max 1 (count (Long/toHexString (long n))))
         center (fn [^String t width] (let [pad (max 0 (- width (count t))) l (quot pad 2)]
@@ -1292,7 +1315,7 @@
                     (apply str (repeat (- 16 (count chunk)) "   "))
                     "│ " (apply str (map ascii chunk)) "\n"))]
     (str "\nalloc" id " (" (when static (str "static: " (:name static) ", ")) "size: " n ", align: " (or (:align static) 1) ") {" (if (zero? n) "}\n" "\n")
-         (if (zero? n) "" (str (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes))) "}\n")))))
+         (if (zero? n) "" (str (apply str (map-indexed (fn [i ch] (line (* 16 i) ch)) (partition-all 16 bytes))) "}\n"))))))
 
 (defn- str-unescape
   "A string literal's value from its symbol (unescape_unicode's escapes, a line continuation)"
@@ -1350,6 +1373,12 @@
     ("ByteStr" "ByteStrRaw")
     (let [bs (or (:bytes lit) (byte-unesc (str (:symbol lit)) (= "ByteStrRaw" (str (:lit-kind lit)))))]
       [:const (str "const b\"" (apply str (map escape-ascii bs)) "\"") t (list 'raw-bytes (intern-alloc! bs))])
+    ;; queue 542 (C6): a C string literal (`c"/dev/null"`): &CStr's fat pointer to its bytes with the NUL, its length counting
+    ;; the NUL (rustc's lit_to_const: CStr's bytes_with_nul), printed `c"..."`
+    ("CStr" "CStrRaw")
+    (let [raw? (= "CStrRaw" (str (:lit-kind lit)))
+          bs (vec (concat (or (:bytes lit) (byte-unesc (str (:symbol lit)) raw?)) [0]))]
+      [:const (str "const c\"" (apply str (map escape-ascii (butlast bs))) "\"") t (list 'raw-str (intern-alloc! bs))])
     (unsupported "a literal" (:lit-kind lit))))
 
 (defn fn-const-text
@@ -1448,6 +1477,11 @@
                        (let [tgt (nth @blocks (:next node))] (when (not= tgt b) (goto! b tgt))))))))
     @blocks))
 
+;; queue 565 (C3): a region scope's span where it is known (an expression's scope, a body's arguments scope), so a value's drop
+;; carries schedule_drop's source info, the scope's end point (`end_point(region_scope.span)`): the span drop elaboration's
+;; Drop::drop call takes (its caller location, the record's loc); only the body file's own spans ([l1 c1 l2 c2])
+(defn- note-region-span! [region sp] (when (and (vector? sp) (= 4 (count sp))) (upd! assoc-in [:region-spans region] sp)))
+
 (defn- push-scope! [region] (upd! update :scopes conj {:region region :source-scope (:source-scope (st)) :drops [] :moved [] :cached nil}))
 
 (defn- scope-index [region]
@@ -1532,6 +1566,7 @@
   `(let [ss# (:source-scope (st))
          _# (lint-scope! (:lint ~x))
          _# (push-scope! (:region ~x))
+         _# (note-region-span! (:region ~x) (:span ~x))
          r# (do ~@body)
          [bb# v#] (if (vector? r#) r# [r# nil])
          bb# (pop-scope! (:region ~x) bb#)]
@@ -1544,6 +1579,8 @@
   (let [ss (:scopes (st))
         i (or (last (keep-indexed (fn [i s] (when (= region (:region s)) i)) ss)) (unsupported "a drop's scope" region))]
     (when (= kind :value)
+      (when-let [[_ _ l2 c2] (get (:region-spans (st)) region)]
+        (when-not (get (:drop-spans (st)) local) (upd! assoc-in [:drop-spans local] [l2 (max 1 (dec c2))])))
       (doseq [j (range i (count ss))] (upd! assoc-in [:scopes j :cached] nil)))
     (upd! update-in [:scopes i :drops] conj {:local local :kind kind})))
 
@@ -1655,7 +1692,7 @@
     :scope nil
     (:field :deref :index :var-ref :upvar-ref :value-type-ascription) :place
     (:logical :match :if :let :never-to-any :use :adt :borrow :raw-borrow :call :loop :block :break :continue :return) :into
-    (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op) :rvalue
+    (:array :tuple :closure :unary :binary :cast :pointer-coercion :repeat :assign :assign-op :thread-local-ref) :rvalue
     (:literal :zst-literal :named-const :static-ref :const-op :const-param) :constant))
 
 (declare lower-let-expr in-if-then-scope ast-block-stmts primary-bindings then-else-break-default as-operand as-temp as-place as-rvalue stmt-expr then-else-break match-expr expr-into-pattern declare-bindings
@@ -1806,6 +1843,9 @@
         (and (= :char (first from)) (integral? to)) "IntToInt"
         (and (= [:uint "u8"] from) (= :char (first to))) "IntToInt"
         (and (= :ptr (first from)) (integral? to)) "PointerExposeProvenance"
+        ;; rust-l1 (C6): a function pointer's address (CastTy::FnPtr to Int: stack_overflow's `signal_handler as unsafe extern
+        ;; "C" fn(..) as sighandler_t`)
+        (and (= :fnptr (first from)) (integral? to)) "PointerExposeProvenance"
         (and (integral? from) (= :ptr (first to))) "PointerWithExposedProvenance"
         (and (= :fndef (first from)) (= :fnptr (first to))) "PointerCoercion(ReifyFnPointer(Safe), AsCast)"
         (and (integral? from) (= :float (first to))) "IntToFloat"
@@ -1862,6 +1902,8 @@
                    names (if (seq (:upvar-names info)) (mapv str (:upvar-names info)) (mapv str (range (count os))))]
                [bb (list 'aggregate (list 'closure text [] (vec (take (count os) names)) span) (mapv op-form os))])
     (:assign :assign-op) (let [bb (blk (stmt-expr bb x nil))] [bb (use-rv unit-const)])
+    ;; queue 542: Rvalue::ThreadLocalRef, the static by its def path (build-run gives it its symbol)
+    :thread-local-ref [bb (list 'tlsref (if (:mut x) "mut " "") (binding [c/*in-value* true] (c/print-def-path (:def x) [])))]
     (:literal :zst-literal :named-const :static-ref :const-op :const-param) [bb (use-rv (as-constant x))]
     ;; the rest: an operand (into a temporary)
     (let [[bb o] (as-operand bb scope x :no)] [bb (use-rv o)])))
@@ -3028,7 +3070,18 @@
       :binding (when (:sub p) (cat-pattern pl (:sub p) op))
       :guard (cat-pattern pl (:pat p) op)
       (:ref :box) (cat-pattern (cat-deref pl) (:pat p) op)
-      :slice (unsupported "a slice pattern in a closure")
+      ;; queue 561 (C6 L3): mem_categorization's PatKind::Slice: the elements before and after the `..` at the place's element
+      ;; (an Index projection), the `..`'s own pattern (`rest @ ..`) at a Subslice (rustc-demangle's `[a, b] => [a, b]` in a
+      ;; closure)
+      :slice (let [t (p-ty pl)
+                   el (when (#{:slice :array} (first t)) (second t))
+                   _ (when-not el (unsupported "a slice pattern of a type with no element" t))
+                   rest? (fn [sp] (or (= :rest (:kind sp)) (and (= :binding (:kind sp)) (= :rest (:kind (:sub sp))))))
+                   ep (cat-projection pl el [:index])]
+               (doseq [sp (:pats p)]
+                 (if (rest? sp)
+                   (when (= :binding (:kind sp)) (cat-pattern (cat-projection pl (pat-ty-adjusted sp) [:subslice]) sp op))
+                   (cat-pattern ep sp op))))
       nil)))
 
 (defn euv-walk-pat [dp p has-guard]
@@ -3043,10 +3096,13 @@
                   (if (re-find #"Const" (str (nth rd 2 nil)))
                     (when-not (str/starts-with? (str (nth rd 2 nil)) "Ctor(") (read-discr))
                     nil)
-                  (when (and (str/starts-with? (str (nth rd 2 nil "")) "Ctor(") (multivariant? (p-ty pl))) (read-discr))
-                  (when (and (not (str/starts-with? (str (nth rd 2 nil "")) "Ctor(")) (not (re-find #"Const" (str (nth rd 2 nil)))) (multivariant? (p-ty pl))) (read-discr)))
+                  (when (and (str/starts-with? (str (nth rd 2 "")) "Ctor(") (multivariant? (p-ty pl))) (read-discr))
+                  (when (and (not (str/starts-with? (str (nth rd 2 "")) "Ctor(")) (not (re-find #"Const" (str (nth rd 2 nil)))) (multivariant? (p-ty pl))) (read-discr)))
           (:lit :range) (read-discr)
           (:struct :tuple-struct) (when (multivariant? (p-ty pl)) (read-discr))
+          ;; queue 561: a slice pattern reads the length unless it is `[..]` or of an array (walk_pat's PatKind::Slice)
+          :slice (let [ps (:pats p) t (loop [t (p-ty pl)] (if (= :ref (first t)) (recur (nth t 3)) t))]
+                   (when-not (or (and (= 1 (count ps)) (= :rest (:kind (first ps)))) (= :array (first t))) (read-discr)))
           nil)))))
 
 ;; analyze_closure's processing
@@ -3181,7 +3237,9 @@
       (walk-hir body f false)
       (let [var-tys (into {} var-tys) modes (into {} modes)]
         (letfn [(visit [x]
-                  (when (map? x)
+                  ;; (queue 542: not into a nested item, `fn sanitize_standard_fds` in std's sys::pal::unix::init: its closures
+                  ;; are its own body's, typed by its own typeck results)
+                  (when (and (map? x) (not (and (= :stmt (:node x)) (= :item (:kind x)))))
                     (doseq [c (hir-children x)] (visit c))
                     (when (and (= :expr (:node x)) (= :closure (:kind x)))
                       (analyze-closure! x var-tys modes))))]
@@ -3206,7 +3264,7 @@
 ;; A closure's typeck root (its outermost enclosing body owner) and the root's results with its closures' captures
 
 (defn typeck-root [d]
-  (loop [d d] (if (= "Closure" (:kind d)) (recur (c/def-of (:parent d))) d)))
+  (loop [d d] (if (#{"Closure" "InlineConst"} (:kind d)) (recur (c/def-of (:parent d))) d)))
 
 (defn root-analysis
   "A typeck root's results and closure_analyze's captures, kept in CACHE (an atom, or nil): {:res RES :closures INFO}"
@@ -3254,7 +3312,9 @@
 (defn- finish
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
-  (let [b (finish* d name kind n-args ret)]
+  (let [b (finish* d name kind n-args ret)
+        ;; queue 565: the values' drop spans by local (schedule-drop!'s), for ElaborateDrops' Drop::drop calls
+        b (if-let [ds (not-empty (:drop-spans (st)))] (assoc b :drop-spans ds) b)]
     (if *after-finish* (*after-finish* b) b)))
 
 (defn- finish*
@@ -3267,7 +3327,7 @@
                        :else nil)
      ;; the allocations' texts and their pointers (a body's are its constants' allocations, transitively)
      :alloc-texts (when *allocs* (into {} (for [id (:allocs-used s)] [id (alloc-text-of id)])))
-     :alloc-deps (when *allocs* (into {} (for [id (:allocs-used s)] [id (vec (keep :ptr (filter map? (get-in @*allocs* [:static-bytes id]))))])))
+     :alloc-deps (when *allocs* (into {} (for [id (:allocs-used s)] [id (vec (keep :ptr (filter map? (let [b (get-in @*allocs* [:static-bytes id])] (when (sequential? b) b)))))])))
      :locals (mapv (fn [l] (cond-> {:mut (:mut l) :scope (:scope l) :ty (ty-form (:ty l))} (:user-ty l) (assoc :user-ty (:user-ty l)) (:user l) (assoc :user true))) (:locals s))
      :scopes (:source-scopes s)
      :debug (:debug s)
@@ -3401,7 +3461,7 @@
         x (:expr n)]
     (tc/with-solver d
       (fn []
-        (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil *names* {}
+        (binding [*edition* (or (:edition opts) 2024) *res* res *self-var* nil *names* {} *body-def* (:id d)   ; queue 542: its inline consts named under it
                   *closure-info* {} *upvars* #{} *captures* []
                   *tree* (binding [*rt* (atom {:parent {} :var {} :cx {:parent nil :var-parent nil}})]
                            (enter-scope! [(:hir-id x) :call-site])
@@ -3441,7 +3501,8 @@
                                          :else (doseq [v (vals x)] (w v)))
                          (sequential? x) (doseq [v x] (w v))
                          :else nil))]
-      (w (:body (:node d))))
+      ;; (queue 542: a const or static item's own, in its initializer: thread_local!'s `NOISY::{constant#0}`)
+      (w (or (:body (:node d)) (:expr (:node d)))))
     (sort-by #(or (:index-path %) [(:index %)]) (fn [a b] (compare (vec a) (vec b))) @acc)))
 
 (defn build-inline-const
@@ -3473,7 +3534,11 @@
               (terminate! bb '(return))
               (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                 (when-let [r (nth blocks 0)] (terminate! r '(resume))))
-              (finish d name :anon-const 0 t))))))))
+              ;; queue 566 (C6 L1): the typeck root's closures, as build-body's (core-check's export writes a closure type's
+              ;; data from them: thread_local!'s `const { .. }` closure in LOCAL_PANIC_COUNT's)
+              (cond-> (finish d name :anon-const 0 t)
+                (seq closures) (assoc :root-closures (into {} (for [[hid ci] closures :when (= :closure (first (:ty ci)))]
+                                                                [(second (:ty ci)) {:hir-id hid :kind (:kind ci) :upvars (mapv :ty (:captures ci))}])))))))))))
 
 (defn anon-const-body
   "An anonymous constant of an array type's length or a repeat's count (`[T; 3]`, `[x; 3]`): its literal as usize"
@@ -3526,6 +3591,9 @@
         (binding [*edition* ed
                   *self-var* nil *names* {}
                   *body-def* (when-not closure? (:id d))
+                  ;; queue 542: a closure's own and its enclosing closures' block items in scope for res-def (typeck's
+                  ;; *closure-hirs*: thread_local!'s `__RUST_STD_INTERNAL_VAL` in its closure)
+                  c/*closure-hirs* (loop [x d acc []] (if (= "Closure" (:kind x)) (recur (c/def-of (:parent x)) (conj acc (:hir-id (:node x)))) (apply list acc)))
                   *res* res
                   *closure-info* closures
                   *closure-tys* (into {} (for [[_ ci] closures :when (= :closure (first (:ty ci)))] [(second (:ty ci)) (mapv :ty (:captures ci))]))
@@ -3547,6 +3615,7 @@
             (upd! update :source-scopes conj [nil nil])
             (let [call-site [(:hir-id body-expr) :call-site]
                   arg-scope [(:hir-id body-expr) :arguments]]
+              (note-region-span! arg-scope (:span body-expr))
               (in-scope call-site
                 (let [ret-block
                       (in-breakable-scope nil (place 0)
