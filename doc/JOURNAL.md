@@ -22043,6 +22043,14 @@ again: it built what py-capi-1122's own runs (.tmp/kept/py-capi) still left fail
 - Left (not this stream's): test_call's Py_TPFLAGS_METHOD_DESCRIPTOR and test_getargs' str subclass keywords (py-core), test_pickle's
   memo MemoryError (queue 568's _testcapi.set_nomemory).
 
-Measure: bin/pyi check --only of the classes' 137 rows, TestThreadState's four and test_ctypes whole on train 5's executable
-(b85611b74343), queued under the lock as a small job (.tmp/run-only.sh, .tmp/only-2.txt in py-capi's worktree), judged, not recorded.
+- Found by the measure: PyThread_allocate_lock's cell was a cbuf (freed by Go's collector too), so PyThread_free_lock freed it
+  twice and musl's heap broke (test_thread_gilstate_in_clear, then test_pyweakref_getref, faulting); now the world's malloc'd
+  memory. Added the world's lock while a C thread lives (one Python thread inside C at a time, given up in
+  PyThread_acquire_lock's wait; errIndicator and touched kept across it).
 
+Measure (judged, not recorded): before, on train 5's executable (its own compiled pyctypes), 124 of the 137 rows pass, 4 skip
+as CPython on Linux, 9 fail (six this stream's, three py-core's); after, through check --aot --lib-test with the checkout's
+pyctypes (the gate's executable compiles its own copy: the eval rows move at the next train's build), the six pass,
+TestThreadState's four pass, test_ctypes loses no recorded pass and its long double methods pass. Expected at the next record:
+:capi-port 84 -> 3, :extension-modules 53 -> 0. Not recorded here: train 5's records run (test_capi, test_importlib whole) is the
+train's, and this stream's rows need a build with its pyctypes.

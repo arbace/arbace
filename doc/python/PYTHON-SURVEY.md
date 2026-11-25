@@ -8823,8 +8823,21 @@ them failing. The natives this stream adds (`go/arbace/pyctypes/capi_rest.go`, a
   ci's 'w' (its memory's two words), the 'g' field through crt's x87 conversions (`WType{N: 80, Float: true}`), 'G' two of them;
   c_longdouble is no longer c_double's alias (ctypes aliases it when the sizes agree), as on CPython's x86-64.
 
-The measure: `bin/pyi check --only` of the two classes' 137 rows, test_misc's four TestThreadState methods and test_ctypes whole, on
-train 5's executable (b85611b74343, go/arbace/py, libm, ci, crt and clib its own; pyctypes interpreted from the checkout), judged,
-not recorded (`.tmp/run-only.sh`, `.tmp/only-2.txt`; its results the record's rows when it has run: the night's record or the train's `--judge DIR --record`). Not this stream's: test_call's Py_TPFLAGS_METHOD_DESCRIPTOR and
-test_getargs' str subclass keywords (pyi's call passes keyword names as plain strs: py-core), test_pickle's memo MemoryError
-(`_testcapi.set_nomemory`, queue 568's), the reference counts and singletons `:capi-refcounts` and `:capi-singletons` keep.
+- **PyThread_type_lock's cell** is the world's malloc'd 8 bytes (a cbuf's finalizer had freed them a second time: musl's heap
+  corrupted, test_thread_gilstate_in_clear and then test_pyweakref_getref faulting in the same driver), and **the world's lock**:
+  while a C thread lives, one Python thread at a time is inside the C world (World.Call or a C thread's start to its return,
+  nested Python included), given up only in PyThread_acquire_lock's wait, with the error indicator and the mirrors' `touched`
+  kept across it (both are the world's, not a thread's).
+
+Measured (judged, not recorded; `bin/pyi check --only`, the two classes' 137 rows, test_misc's four TestThreadState methods,
+test_ctypes whole):
+- **Before**, on train 5's executable (b85611b74343: its pyctypes compiled, none of this stream's): 124 of the 137 pass already
+  (the rows predate py-capi-1122 and its extension loader), 4 skip as CPython does on Linux (test_importlib's case-sensitivity
+  tests: "requires a case-insensitive filesystem"), 9 fail: test_threading_local's two clear races, test_file's
+  universalnewlinefgets, test_slice's macro getindicesex_seq, test_code's co_branches, test_traceback's colorized default
+  (this stream's), test_call's method descriptor flag and test_getargs' two str subclass keywords (py-core's).
+- **After**, the same lists through `check --aot --lib-test` (the drivers compiled with the checkout's pyctypes; the gate's
+  executable compiles its own copy, so the eval path waits for the next train's build): the six pass, TestThreadState's four
+  pass, test_ctypes 555+ pass with no row of the record's passes lost (37 of its non-passes pass), its four long double
+  methods pass; left the three py-core rows. Expected on the record at the next train: `:capi-port` 84 -> 3 (test_call's and
+  test_getargs' two), `:extension-modules` 53 -> 0 (48 pass, 4 to the skip classes, test_ctypes' fortran_contiguous passes).
