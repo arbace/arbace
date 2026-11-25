@@ -23204,3 +23204,21 @@ explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-
   cpp0x/constexpr-non-const-arg2.C; cpp1z/constexpr-asm-3.C by 580. Alternatives: a recovery inside tentative parses (would change
   which reading wins), keeping attributes' arguments in the tree (a tree change for no row).
 - 580's entry (queue 580, above) is its own; its "As built" is in the survey with this one.
+
+## 2026-11-25 — C++: a concept's requirement looked up at the concept's definition (queue 588, VM)
+
+- The user's 584-1 (a): cpp2a/concepts-recursive-sat3.C's `foo(t)` in Fooable's requirement found the foo declared after the
+  concept, so Fooable<int> recursed into itself (an extra "depends on itself"). [temp.res.general]/6 with [temp.dep.candidate]/1:
+  the unqualified lookup of a dependent call's name in a concept's constraint is made at its definition, a later declaration
+  found only by argument-dependent lookup at the point of instantiation. Built (checker only; no GCC or clang code): a main
+  file's concept records its end (template.ae, `:cx-cutoff`); its satisfaction evaluates in a scope that carries it (sema.ae's
+  const-int, atom-types-check, constraint-satisfied?) and binds `*cx-concept-cutoff*`; a template's own type-constraints stay in
+  its own context (type-constraints-satisfied?, unbounded); a call whose ADL-found templates were all dropped is "no viable
+  function"; at a concept's cutoff a call with no candidate at all is a sure substitution failure.
+- Tried first and dropped: the concept's start as the cutoff (hid the concept from the templates whose constraints name it:
+  sat2 accepted), and the cutoff without the type-constraints' own context (concepts-pr88395.C's member template's `Concept T`
+  unresolved, satisfied by doubt).
+- One regression run (`--only`, every recorded own pass and every concepts file, 3,015 files; .tmp/q588/fin.log): 2,937 own
+  passes, 0 lost, no new extra line; concepts-recursive-sat3.C and cpp2a/concepts-var-templ1a.C to own pass; recorded from it
+  (`--judge --record`). bin/reap and crops-score recorded: unchanged (both rows passed by clang's record); reap, crops-score
+  --judge --strict, records-check, markers-check: 0 problems.
