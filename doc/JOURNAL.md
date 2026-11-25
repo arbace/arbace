@@ -21228,3 +21228,13 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
   qualified (static member) definition (cpp2a/constinit5.C). Five recorded own passes fail at `af1703774` itself (checked in a
   worktree at that commit): cpp1y/constexpr-neg1.C, cpp23/constexpr-nonlit3.C, cpp23/consteval-if2.C, ext/anon-struct6.C,
   cpp0x/pr85147.C, cpp-own-1125's fixes.
+- The final runs (logs kept in /root/arbace/.tmp/keep/cpp-indep-1125/): every recorded own pass with the moved and target rows,
+  2,886 files on `95e68790f` (.tmp/fin.log): 2,787 pass, 52 rows moved to pass, and 88 recorded passes crashed on the
+  thread_local check (a header's VarDecl offset read against the main text; coroutines/, cpp2a/spaceship-*, ...) and one on the
+  twice-captured rule (cpp26/name-independent-decl2.C's `_`); both fixed, the 88, that row and the 17 targets of the last
+  rules run again (106 files, .tmp/fix1.log): 102 pass, none lost. Recorded from the two runs: the 52 rows the record failed
+  and the runs pass (each a clang-only row), the rest of the record kept (the five rows failing at `af1703774` itself left to
+  cpp-own-1125). `bin/reap --record`: matrix unchanged (the read cell counts clang's passes); `bin/crops-score --record`: C++ read
+  independence 0.8830 -> 0.8870, independence 0.9762 -> 0.9770. `bin/reap`, `bin/crops-score --judge --strict`,
+  `bin/records-check`, `bin/markers-check`: 0 problems. cpp-own-1125's whole own record was not pushed when this was recorded:
+  the merge keeps both (rows by file, these 52 its own passes or this branch's).

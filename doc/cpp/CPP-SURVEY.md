@@ -11617,3 +11617,7 @@ GCC's documented messages, no GCC or clang code.
   enumeration, an inheriting constructor of no direct base.
 - arbace/repr/cpp/diag.ae: constexpr on a non-static member or a parameter; the checks tls-redecls ([dcl.stc]/4) and
   member-type-access ([class.access.spec]/4); the sema rule of a non-integral enum-base.
+
+52 clang-only rows to own pass (.tmp/keep/cpp-indep-1125/moved.txt in the main checkout); C++ read independence 0.8830 -> 0.8870.
+Left: the timeouts (the 300 s cap under the host's load), template/qualttp2.C, inherit/base3.C, cpp1z/class-deduction7.C,
+parse/bitfield2.C, and the long tail of one-row rules.
