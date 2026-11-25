@@ -266,6 +266,9 @@
 ;; their texts; the parser takes them with the next token it pulls (stream's :pragmas), gcc's deferred pragmas as tokens. CS299 (a):
 ;; every file's but the main one's, each [text entry] (entry: the index in the layer of its file's enter record)
 (def ^:const PRAGMAS 12)
+;; Arbace (cpp-read, 2026-11-24): #pragma GCC diagnostic's state for the preprocessor's own pedwarns, {:ignored #{"-W..."} :saved
+;; [earlier states]} (push and pop as libcpp's pragma handler gives them to the diagnostic machinery)
+(def ^:const DIAG 13)
 
 (deftype Cpp [cfg ^HashMap macros ^HashMap mstack ^HashMap groups ^HashSet undefs ^ArrayList stack
               ^objects o ^ArrayList errs ^ArrayList warns ^ArrayList layer ^HashMap files ^HashSet once])
@@ -277,6 +280,17 @@
 (defn- eh [^Cpp c msg] (.add ^ArrayList (.-errs c) msg))
 (defn- slot [^Cpp c k] (aget ^objects (.-o c) k))
 (defn- slot! [^Cpp c k v] (aset ^objects (.-o c) k v))
+
+(defn- cxx20-pedwarn?
+  "Arbace (cpp-read, 2026-11-24): whether a C++20 feature's use at token `t` is an error: C++ before C++20 under -pedantic-errors,
+  `t` in the main file (libcpp gives no pedwarn in a system header), -Wc++20-extensions and -Wpedantic not ignored by #pragma GCC
+  diagnostic (libcpp's CPP_W_CXX20_EXTENSIONS pedwarns)."
+  [^Cpp c ^Tok t]
+  (let [cfg (.-cfg c)]
+    (boolean (and (:cxx cfg) (= :errors (:pedantic cfg))
+                  (re-find #"\+\+(98|03|0x|11|1y|14|1z|17)$" (name (or (:std cfg) :none)))
+                  (when-let [^CFile f (.-pf t)] (= (.-name f) (slot c MAIN)))
+                  (let [ig (:ignored (slot c DIAG))] (not (or (contains? ig "-Wc++20-extensions") (contains? ig "-Wpedantic"))))))))
 
 (defn- pop-tos! [^Cpp c]
   (let [^ArrayList s (.-stack c) n (.size s)]
@@ -702,7 +716,13 @@
                             (do (eh c (str (pos-str rparen) ": too many macro arguments"))
                                 (when (= (ret) ::more) (recur ts)))
                             :else
-                            (let [sub (binding [*paste-at* t] (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) []))]
+                            (let [;; Arbace (cpp-read, 2026-11-24): a variadic macro invoked with no argument for its "...": libcpp's
+                                  ;; pedwarn before C++20 (_cpp_arguments_ok, "requires at least one argument for the \"...\" in a
+                                  ;; variadic macro"), for a macro the main file defines (cpp0x/va-opt1.C)
+                                  _ (when (and (pos? (long (:var m))) (<= (count args) (long (:var m)))
+                                               (cxx20-pedwarn? c rparen) (cxx20-pedwarn? c (:name m)))
+                                      (eh c (str (pos-str rparen) ": ISO C++11 requires at least one argument for the \"...\" in a variadic macro")))
+                                  sub (binding [*paste-at* t] (subst c eval m (:rl m) (:params m) args (hs-add (hs-cap hs (.-hs rparen)) s) []))]
                               (ts-prepend ts (mapv #(lex/with-pos % t) sub))
                               (recur ts)))))
                     (when (= (ret) ::more) (recur ts))))))))))))
@@ -1953,6 +1973,10 @@
         (if (and (= (ch (ln 0)) \() (not (has-sep? (ln 0))))
           (let [[fp rl0 min-args va] (parse-macro-params c (pop ln))]
             (when (and fp (>= (long va) 0)) (va-opt-check! c rl0))
+            ;; Arbace (cpp-read, 2026-11-24): libcpp's pedwarn "__VA_OPT__ is not available until C++20" (cpp0x/va-opt1.C)
+            (when-let [^Tok v (first (filter #(and (= (ch %) :IDENTIFIER) (= (src %) "__VA_OPT__")) rl0))]
+              (when (and fp (>= (long va) 0) (cxx20-pedwarn? c v))
+                (eh c (str (pos-str v) ": __VA_OPT__ is not available until C++20"))))
             (define-macro! c nm fp (tokens->cpp (trim rl0) true (macros-of c)) min-args va true))
           (define-macro! c nm nil (tokens->cpp (trim (pop ln)) true (macros-of c)) -1 -1 false))))))
 
@@ -1986,14 +2010,25 @@
       ;; queue 136 (review 130's finding 2): the change recorded at the pragma's offset, for the converter to judge each of the
       ;; file's forms by its place (the lines before the pragma are no system header's); not when the pragma's token stands in
       ;; another file (a _Pragma from another file's macro)
-      "GCC" (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
+      ;; Arbace (cpp-read, 2026-11-24): #pragma GCC diagnostic push, pop and ignored "-W...", for the pedwarns below
+      "GCC" (if (and (> (count x) 4) (= (src (x 3)) "diagnostic"))
+              (let [st (or (slot c DIAG) {:ignored #{} :saved []})
+                    w (when (and (> (count x) 5) (= (ch (x 5)) :STRINGLITERAL)) (let [v (src (x 5))] (subs v 1 (dec (count v)))))]
+                (case (src (x 4))
+                  "push" (slot! c DIAG (update st :saved conj (:ignored st)))
+                  "pop" (when (seq (:saved st)) (slot! c DIAG {:ignored (peek (:saved st)) :saved (pop (:saved st))}))
+                  "ignored" (when w (slot! c DIAG (update st :ignored conj w)))
+                  ("warning" "error") (when w (slot! c DIAG (update st :ignored disj w)))
+                  nil))
+            (when (and (> (count x) 3) (= (src (x 3)) "system_header"))
               (let [^Included cur (slot c INCLUDED)]
                 (when (and cur (.-using cur))
                   (slot! c INCLUDED (Included. (.-using cur) true (.-path cur) (.-entry cur)))
                   (let [^Tok t (x 0)]
                     (when (= (some-> ^CFile (.-pf t) .-name) (.-path cur))
-                      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system true}))))))
+                      (record! c {:directive "system" :file (.-path cur) :entry (.-entry cur) :off (.-po t) :system true})))))))
       nil)))
+
 
 ;; ---------------------------------------------------------------------------------------------
 ;; The machine (cpp.nextLine)
@@ -2143,7 +2178,7 @@
 ;; The stream (cpp.rune, cpp.shift, tokenizer.token; cc's Preprocess)
 
 (defn- new-cpp ^Cpp [cfg sources ^String main]
-  (let [o (object-array 13)]
+  (let [o (object-array 14)]
     (aset o SOURCES sources)
     (aset o PRAGMAS (ArrayList.))
     (aset o DEPTH (Long/valueOf 0))

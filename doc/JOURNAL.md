@@ -21726,3 +21726,151 @@ undef); drop glue on the unwind path (gimli's push, addr2line's path_push); mini
 through `use super::*` over the extern crate) and `adler2::Adler32::from_checksum`.
 Alternatives: editing mono.ae for the closure kind (one line), left to the main session as the task asks for files rust-l1
 touches; one ungated typeck change for probing (it is rustc's rule), gated to keep std's records fixed.
+
+## 2026-11-24: cpp-read, the C++ read cell's deferred rows: 15 of 221 by the own front end (branch cpp-read-1124)
+
+- Base: mac/next a6da0aadf with cpp-rind-1124 (fcb746014) merged, so that the own front end's files (parse.ae, diag.ae, sema.ae)
+  carry both streams' rules and the branches merge cleanly. The read cell: 6,062 pass / 0 by design / 221 deferred (248 n/a), the
+  221 all dg rows: own-diag 204, syntax-own 9, gcc-own-rules 8 (the token check has none). Each row's class, review group and own
+  verdict listed in the branch's .tmp/classes.md: accepted 99 (no error: a Sema rule missing), missed 66, both 31, extra 17,
+  timeout 5, crash 1, stopped 1.
+- Built (doc/cpp/CPP-SURVEY.md, "As built: cpp-read, the read cell's deferred rows"), each from the standard's text or GCC's
+  documented behaviour as the tests state it, no GCC code: libcpp's C++20 pedwarns for __VA_OPT__ and empty variadic arguments
+  with #pragma GCC diagnostic's ignored state; g++'s __has_cpp_attribute answers for the own front end; placeholder return types
+  of explicit specializations and instantiations ([dcl.spec.auto.general]/13); GCC's bad template recursion limit; [dcl.enum]/7
+  and enumerators surely not constant; a call of the function under analysis in a constant expression; member typedefs declared
+  twice; C++98's integral constant expressions; GCC's loop pragmas; no member template in a local class; GCC's silence after an
+  erroneous declaration (a declined declaration's name, an erroneous entity's uses).
+- Alternatives considered: a parser-level error entity for declined declarations (declaring the name so that later uses parse) was
+  left for the text-level filter over the diagnostics, which keeps the native reader's trees unchanged; the uninstantiated
+  template's definition-time checks (recursion1/2's f1) were left, the checker analyzing instantiations alone.
+- Recorded: the 16 rows by `bin/repr-cpp dg --corpus dg-error --front native --only` (the 15 and auto-fn10.C) `--record` into
+  test/cpp/check-dg-own-linux-amd64.edn, the other rows kept; `bin/reap --record`: C++ read 6,062/0/221 -> 6,077 pass / 0 by design /
+  206 deferred (248 n/a); `bin/crops-score --record` (C++ completeness 0.9851 -> 0.9857, independence 0.9696 -> 0.9700), `--judge
+  --strict` and `bin/records-check`: 0 problems.
+- Checked: each rule's rows and the files its rule can reach (the regression lists: __has_cpp_attribute's 10 files, variadic macros,
+  explicit specializations with auto, instantiation-context files, duplicate typedefs, C++98 files, enums, local classes, files with
+  standard headers): no recorded own pass lost to these rules (addr_builtin-1.C's [odr-internal] extra is cpp-rind's rule, and
+  diagnostic/missing-header-pr110164.C and cpp0x/udlit-suffix-neg.C time out on cpp-rind's head too: its branch's to settle). The
+  whole dg-error part by the own front end at a1d4d9402 runs detached at the hand-off (.tmp/NEXT.md); its verdict is not taken here.
+
+## 2026-11-24 — C++ read: cpp-rind's timeouts and the read cell's tail (queue 567, VM)
+
+- Base: cpp-rind-1124 `ee0acba05` with cpp-read-1124 `18e6f3f96` merged (`573092cc1`, branch `567-cpp-read-tail`). The merge was
+  not clean (doc/JOURNAL.md, doc/cpp/CPP-SURVEY.md, test/cpp/check-dg-own-linux-amd64.edn, test/crops/scores.edn,
+  test/reap/matrix.edn); the code merged by itself. The journal and the survey kept both sides (cpp-rind's whole, cpp-read's new
+  entries and its section appended; cpp-read's older copies of cpp-rind's and cpp-print's sections dropped, cpp-rind's side
+  holding the same text). The records were not merged by hand: cpp-rind's own record taken, cpp-read's 16 rows run again at the
+  merged tree (`bin/repr-cpp dg --corpus dg-error --front native --only`, 16 of 16 own pass) and recorded from that run (`--judge
+  --record`), then `bin/reap --record`, `bin/crops-score --record`: C++ read 6,078 / 0 / 206, read independence 0.878.
+- Item 1, the libstdc++ timeouts, measured: a probe (.tmp/q567/scripts/time-checks.ae) timed the parse and each check on
+  cpp0x/udlit-suffix-neg.C, and a walk alone over `#include <string>` (.tmp/q567/scripts/walk-count.ae) took 55.8 s here, the
+  same 248,732 nodes and time with next's parse.ae loaded over the head's: the tree is not the cause, the number of whole-tree
+  walks is (cpp-rind added 14 checks, several multi-walk checks 37-62 s each). Fixed in diag.ae alone: walk-nodes without a
+  binding a node (and the undeclared check's walker), then `*walk-cache*`, the unit's walk made once and replayed by every check
+  (the same nodes, parents, order and *params*). Alternatives considered: one shared pass calling every check's callback (a
+  rewrite of about 130 call sites), skipping the headers' subtrees (several checks read the headers' declarations), raising the
+  300 s cap (hides the cost). missing-header-pr110164.C and udlit-suffix-neg.C pass again (the second alone at one thread: the
+  cap is wall time and this host ran at a load of 15-20 on 4 CPUs); cpp1z/class-deduction14.C no longer times out (now a miss at
+  line 16); ext/constexpr-vla1.C and -vla3.C need GNU VLAs in the checker's constant evaluator (DECISION 567-1).
+- Item 2: cpp-rind's dg-r02 list is not on this VM (its runs were the Mac's .tmp/). Its rows are among the record's non-passing
+  rows, so all 1,725 outside test/cpp/dg-dialect-out.edn were run again, a superset.
+- Item 3: rules from the standard's text and GCC's behaviour as the tests and g++'s recorded errors (test/cpp/ref-dg-gxx15.edn,
+  data) state it, no GCC or clang code: the constant evaluator's comma lvalue, the C library's functions not constexpr, a
+  class template's constexpr constructor explained at its body; C++11/14's [temp.class.spec]/8.1 and [temp.deduct.type]/5.3 for
+  partial specializations; C++98's [temp.expl.spec]/2; GCC's silence after a definition qualified by an incomplete class and
+  after an `auto` variable whose deduction failed (doc/cpp/CPP-SURVEY.md, "As built: cpp-read-tail").
+- The regression list (693 recorded own passes chosen by the constructs the rules touch, 250 of them at random) found two passes
+  the merge had lost, both fixed before the final runs: concepts/var-concept7.C (cpp-read's declined-names-silent) and
+  diagnostic/parm1.C (cpp-rind's "use of parameter outside function body" inside sizeof).
+- Recorded from the finished `--only` runs at `d3cab8575` (six chunks of 3 threads, each `--judge --record`, and
+  udlit-suffix-neg.C alone): 693 of 693 regression rows own pass, 48 rows to own pass of the 1,725, none lost (own pass 2,767 ->
+  2,815). `bin/reap --record`: C++ read 6,078 / 0 / 206 -> 6,086 / 0 / 198; `bin/crops-score --record`: C++ completeness 0.9857 ->
+  0.9860, read independence 0.878 -> 0.882. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
+  `bin/markers-check`: 0 problems. `bin/cppi selftest overload-diag concepts-diag`: overload-diag passes, concepts-diag's
+  r02-qualified-name.C fails, as it does with cpp-rind's head's front end loaded (not this branch's; left to the host).
+
+## 2026-11-25 — the user's DECISIONs 567-1 (a) and 567-2 (a) (queue 567, VM)
+
+- 567-1 (a): GNU variable-length arrays in the C++ constant evaluator are a queue task of their own, not this branch's.
+- 567-2 (a): the next C++ slice, the unexpanded packs, comes after 526-1.
+
+## 2026-11-25 — C++: GNU variable-length arrays in the checker's constant evaluator (queue 569, VM)
+
+- The user's DECISION 567-1 (a). Branch `569-cpp-constexpr-vla` on `567-cpp-read-tail` `826068c3f`. Rules from the GCC manual's
+  "Variable Length" (a block-scope array with a non-constant bound, made where its declaration is executed; `sizeof` of it
+  evaluated there) and [expr.const]/5.8 with [dcl.init.aggr]/3; no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: 569").
+- arbace/cpp/sema.ae, the checker alone: a local VLA, refused until now, is declared as the code generator's (`vla-local`, also
+  with a braced list); the constant evaluator evaluates its bound at the declaration and makes that many elements, a list longer
+  than the bound (or a negative bound) a sure error ("array subscript value ... is outside the bounds"), a subscript past it the
+  existing bounds check's; `sizeof` of a VLA variable is `:vla-sizeof`, the evaluated count times the element's size. A VLA with
+  no initializer holds zeros, as a fixed array does in this evaluator. arbace/cpp/template.ae: a VLA's bound deduces no non-type
+  parameter (a sure failure; ext/vla2.C crashed with a NullPointerException on the nil bound once VLAs were declared). The code
+  generator is unchanged (each change is under `checking?` or reached only from the checker's VLAs).
+- Alternatives considered: declaring VLAs only in constexpr functions (fewer bodies newly checked; the whole-record regression
+  run below showed no need); a VLA's elements indeterminate when not initialized (a read the error, as [basic.indet] says; the
+  evaluator treats a fixed array's the same lenient way, so kept consistent and left); a separate bound cell in the environment
+  for `sizeof` (the array's own vector already holds the count).
+- Rows found by the checker's VLA paths: the record's 106 files with a local array of a non-literal bound, a "vla" name, or
+  `__extension__` / "variable length" in the text. Moved to own pass: ext/constexpr-vla1.C, -vla2.C, -vla3.C, ext/vla2.C and
+  cpp0x/initlist26.C (the existing "assigning to an array from an initializer list", reached once the VLA is declared);
+  constexpr-vla1 and -2 out of :gcc-own-rules (test/cpp/divergences-dg.edn). The other VLA rows need other rules (variably
+  modified types in throw, catch, typeid, captures, members, constexpr variables): a DECISION.
+- Regression list: every recorded own pass (2,815) with the 106 VLA files, one `--only` run (.tmp/q569/r2.log): 2,815 pass, 5
+  moved, 5 recorded passes not passing (cpp0x/pr85147.C, cpp1y/constexpr-neg1.C, cpp23/consteval-if2.C,
+  cpp23/constexpr-nonlit3.C, ext/anon-struct6.C), each failing the same way with the base's sema.ae and template.ae loaded (a
+  probe, .tmp/q569/scripts/pd-base.ae): not this change's, recorded in n-cpp-bd (2026-11-18) and not rerun on this host since;
+  not recorded here, left for the host's whole run.
+- Recorded from the finished `--only` run of the 106 VLA files (.tmp/q569/r3.log, `--judge --record`): 5 rows to own pass, none
+  lost. `bin/reap --record`: C++ read 6,086 / 0 / 198 -> 6,089 / 0 / 195; `bin/crops-score --record`: C++ completeness 0.9860 ->
+  0.9861, read independence 0.882 -> 0.883. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`,
+  `bin/reap`: 0 problems.
+
+## 2026-11-25 — C++: the other GNU variable-length-array rules in the checker (queue 570, VM)
+
+- The user's DECISION 569-1 (a). Branch `570-cpp-vla-types` on `569-cpp-constexpr-vla` `01e38f918`. Rules from the GCC manual's
+  "Variable Length" and the C++ standard, restated in doc/cpp/CPP-SURVEY.md, "As built: 570"; no GCC or clang code. 569-2 (a)
+  kept (an uninitialized local array element reads as zero); 569-3 (a): the five own passes that fail at 569's base on this VM
+  (cpp0x/pr85147.C, cpp1y/constexpr-neg1.C, cpp23/consteval-if2.C, cpp23/constexpr-nonlit3.C, ext/anon-struct6.C) left to the host.
+- arbace/cpp/sema.ae, the checker alone: `cx-vm?` (a VLA type, or a pointer, reference or array built from one);
+  `cx-runtime-bound?` (a bound whose every operand is read and one names a parameter or a variable neither const nor a reference:
+  surely no constant expression); `*cx-vla*`, the block scope whose written type may be variably modified (a local typedef or
+  alias, a handler's type, typeid's type operand), where such a bound makes the VLA type instead of the refusal. Errors: a thrown
+  object of a VM type (reported, the analysis going on), a handler of one, typeid of one (type or expression), a non-static data
+  member of one, a constexpr variable of one, a VLA captured by copy (`[r]`, `[=]`), a member's array bound surely no constant
+  (a local class's `int ar[1][i]`), a local array's bound that reads no variable yet holds an address (`(long) "h"`, the offsetof
+  idiom; the variable declared all the same), a VLA bound of floating or pointer type, and array new of a VM element type
+  (`new A[5]`, `new (A[0])`; `new A` alone, GNU's array new, the slice's refusal). arbace/repr/cpp/diag.ae: the sema rule
+  :vla-type for those messages, and the -pedantic-errors VLA check (vla-pedantic) over constructors', destructors' and conversion
+  functions' bodies too (ext/vla1.C's out-of-line A::A).
+- Alternatives considered: every block-scope type resolution making VLA types (it would bypass vla-local's evaluated bound for
+  `int a[n]` and reach code that sizes arrays: kept to the three places that need it); a syntactic check over the trees' qualType
+  strings, as vla-pedantic is (a typedef's VLA would need its own tracking; the checker's types carry it); dropping a member whose
+  bound is no constant, as the checker drops other ill-formed members, kept (template/array9.C's destructor then names the dropped
+  members: two extra errors, a row that failed before and fails now).
+- Regression list: every recorded own pass (2,820) with the 106 VLA files of 569 and the 62 files whose dg-error lines name these
+  rules' words, one `--only` run (.tmp/q570/r1.log, 2,887 files): 2,822 pass, 7 moved, 0 lost but the five of 569-3 (a). After
+  array new's rule, the same list less the five (.tmp/q570/r3.log, 2,882 files): 2,823 pass, 8 moved, none lost; recorded from it
+  (`--judge --record`): cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C and
+  parse/array-size2.C to own pass; template/array9.C stays a failure (missed to extra). `bin/reap --record`: C++ read 6,089 / 0 /
+  195 -> 6,090 / 0 / 194 (dg 4,155 -> 4,156 pass); `bin/crops-score --record`: C++ completeness 0.9861 -> 0.9862.
+  `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+- Left: template/varmod1.C (a VM type as a deduced template argument), template/error41.C and template/array15.C (a class
+  template pattern's member bound), other/fold1.C (a const whose initializer is in error), init/new37.C (a template's array new),
+  and a local pointer to a VLA (`int (*p)[n]`), still refused at its declaration with a false error at a later use (at the base too).
+
+## 2026-11-25 — C++: 570's round 2, the user's DECISIONs 570-1 (a) and 570-2 (a) (queue 570, VM)
+
+- The user's DECISION 570-1 (a): a non-static data member whose bound is surely no constant (cx-field-bound-error) is reported and
+  kept, with GNU's VLA type (`cx-field-vla-type`, *cx-vla* the class scope), marked :cx-vla, which arbace/cpp/abi.ae's layout gives
+  no bytes (the checker sets it alone), so the class and the member's uses go on; a member of a typedef's variably modified type is
+  reported the same way and kept. template/array9.C's destructor now names its members with no error. Dropping it with no further
+  error had needed the destructor's uses silenced one by one; a layout refusal (tried first) made ext/vla1.C's `} s;` fail and
+  its `s.ar[0][0]` a new, unpruned error.
+- The user's DECISION 570-2 (a): a block-scope variable whose type is built from a VLA but is none itself (`int (*p)[n] = &a;`) is
+  declared with that type (`cx-vm-local-type`, *cx-vla* its scope); a VLA that vla-local does not take stays refused; sizeof of
+  such a type stays abi's refusal (no false error): the probe .tmp/q570/probes/vla-types-ok.C passes.
+- One regression run (.tmp/q570/r4.log): every recorded own pass (2,828 less 569-3's five), the 106 VLA files and 570's rule
+  files, 2,882 files: 2,824 pass, template/array9.C moved, none lost. Recorded from it (`--judge --record`): array9 to own pass.
+  `bin/reap --record`: C++ read 6,090 / 0 / 194 unchanged (array9 already passed by clang's record); `bin/crops-score --record`
+  unchanged. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
