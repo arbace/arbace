@@ -8788,3 +8788,19 @@ and 557b): the table is the report's. What nobody owned and pyi could fix:
   `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
   docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
   test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).
+
+## As built: py-cli-1125, the command-line classes at train 5 and the children with no environment (2026-11-25, the main host)
+
+`:pyi-command-line`, `:run-dir-zip-main`, `:pyi-main-module` and `:interactive-mode` list 90 rows; the eval record holds 41 of them
+as non-passes (20, 9, 8 and 4) and 49 as passes. At train 5's head (the gate executable b85611b74343b609b2a4, the runtime compiled,
+`bin/pyi check --only` of the 90 rows, 14 modules, 131 methods) 129 pass, 2 are classed and none fails: py-os-1124's command line,
+environment and process (argv's bytes, -X importtime, pycache_prefix, hash randomization, runpy's __main__ and zipimport, directory
+and zip mains, `.pyc` scripts, the caller's environment in os.environ) and the REPL's future flags serve 39 of the 41. The two left
+were test_subprocess's test_empty_env (ProcessTestCase and NoPoll): a child started with `env={}` is `tools/pyi/python3` with no
+ARBACE_HOST_EXE, so bin/pyi python took a stage 0 whose compiled runtime is another commit's and interpreted the checkout's
+go/arbace/py by goi, which cannot import `weak` (pytls). `adopt_host_env` (bin/pyi, the `python` verb, before runtime_from_source)
+takes the host's choice from the nearest ancestor whose /proc/PID/environ holds ARBACE_HOST_EXE (with ARBACE_GOI_FROM_SOURCE,
+PYI_RUNTIME, PYI_RUNTIME_NOTED, PYI_GOMEMLIMIT, PYI_THREADS): the way an installed python3 works in any environment, here the
+host that started the run. No ancestor with one: the default as before; os.environ stays what the caller gave. Measured: the two
+rows and four neighbours that strip the environment (test_one_environment_variable, test_env, test_communicate_errors x2) pass.
+Left to the record: the classes' lists keep the 90 names until the eval record runs these modules; every row measured passes.

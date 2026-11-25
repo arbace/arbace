@@ -22010,3 +22010,28 @@ The overlaps resolved (three branches built the same features independently):
 Next (.tmp/train-5.sh under one big-lock ticket, HEAVY_MEM_GIB 30): the read back, bin/j2g-edge update, one gate build, the smoke
 run; then .tmp/records-5.sh (its own ticket, 16): the eval check of the 101 modules the branches name or whose non-passes sit in
 the streams' classes (.tmp/train-5-modules.txt), and the AOT program set whole, recorded after review.
+
+## 2026-11-25 — Python: the command-line classes measured on train 5's executable; env-stripped children find their host (py-cli-1125)
+
+The four classes of bin/pyi python's command line (`:pyi-command-line` 20 non-pass rows in the eval record, `:run-dir-zip-main` 9,
+`:pyi-main-module` 8, `:interactive-mode` 4: 41 of the 90 rows the classes list; the rest recorded passes) measured at train 5's
+head (b6be9b74b, the gate executable b85611b74343b609b2a4, `bin/pyi check --only` of the 90 rows, 14 modules, 131 methods, the
+runtime compiled): 129 pass, 2 classed, 0 failing, 39 of the 41 now pass. They were py-os-1124's (the command line, the
+environment and the process as CPython's) and its neighbours' work, merged in train 5; the record they are judged against
+predates it. What was left, test_subprocess's test_empty_env (two rows, ProcessTestCase and NoPoll): the child that the test starts
+with `env={}` is `tools/pyi/python3`, and with no ARBACE_HOST_EXE it takes the checkout's or the main checkout's stage 0, whose
+compiled runtime is another commit's, so bin/pyi runs the checkout's go/arbace/py interpreted by goi, which cannot import `weak`
+(go/arbace/pytls): the child printed a Go check error and nothing else (`eval` of an empty stdout: "invalid syntax (<string>, line
+0)"). The same fault would have taken every test that starts a child with a stripped environment (test_one_environment_variable,
+test_env, ...) at the next record on any host whose stage 0 is not the gate's build.
+
+Decision: `adopt_host_env` in bin/pyi (the `python` verb only, before runtime_from_source): when ARBACE_HOST_EXE is absent, the
+nearest ancestor process whose /proc/PID/environ holds one gives it, with ARBACE_GOI_FROM_SOURCE, PYI_RUNTIME, PYI_RUNTIME_NOTED,
+PYI_GOMEMLIMIT and PYI_THREADS, as the child would have inherited them; no such ancestor: the default as before. os.environ stays
+what the caller gave (PYI_ENTRY_ENV). Alternatives: a per-run wrapper as sys.executable embedding the host's paths (the compiled
+launcher's way, queue 284): changes sys.executable for every module of the universe, rejected for the risk against 529 modules;
+a state file in .tmp/repr-python/pyi naming the running host: global state read by any later bare call, rejected for staleness.
+Measured: `bin/pyi check --only` of test_empty_env x2, test_one_environment_variable, test_env, test_communicate_errors x2: 47
+methods, 47 pass, 0 failing; the same call before the change failed both test_empty_env rows. The classes' :tests lists are not
+touched (the rows pass; the lists leave with the record, as the other classes' did): the train's record run of the 90 rows
+(a list of MODULE/TEST-ID lines, 14 modules) measures them.
