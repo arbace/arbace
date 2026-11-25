@@ -578,7 +578,10 @@
         proj (mapv (fn [e] (if (= "index" (k e)) (list 'index (f (second e))) e)) (place-proj p))]
     (mk-place l proj)))
 
-(defn- map-operand-places [o f] (case (k o) ("copy" "move") (list (first o) (f (second o))) o))
+;; queue 565 (C3): the operand's metadata kept (a call through a function pointer, `(self.inner)(None)`, carries its :call-span
+;; on its `(move (place N))`, the call's caller location: Derefer and ElaborateBoxDerefs rebuilt it without)
+(defn- map-operand-places [o f]
+  (case (k o) ("copy" "move") (keep-meta o (list (first o) (f (second o)))) o))
 
 (defn- map-rvalue-places
   "super_rvalue's places, in order, each replaced by (F place)"
@@ -1673,7 +1676,7 @@
                     r (new-temp! rt)
                     u (new-temp! [:tuple []])]
                 (new-block! (= :in-cleanup unwind)
-                            (list 'call (drop-fn-operand t) [(list 'move (mk-place r []))] (mk-place u []) succ (into-action unwind))
+                            (list 'call (cond-> (drop-fn-operand t) (:span d) (vary-meta assoc :call-span (:span d))) [(list 'move (mk-place r []))] (mk-place u []) succ (into-action unwind))
                             [(list 'assign (mk-place r []) (list 'ref :mut (:place d)))])))
             (open-drop-for-box-contents [d t succ unwind]
               (let [inner (first (nth t 2))
@@ -1732,7 +1735,11 @@
                                  (= "unreachable" (k u)) [:to (unreachable-cleanup!)]
                                  (= "terminate" (k u)) [:to (terminate-block! (second u))])]
                 (seek! [bb (count (:stmts blk))])
-                (elaborate-drop {:place p :path path :succ target :unwind unwind} bb))))))
+                ;; queue 565 (C3): the drop's source info (build's schedule_drop span by local, :drop-spans), which every
+                ;; block DropCtxt makes for it takes: a Drop::drop call's :call-span, its caller location
+                (elaborate-drop (cond-> {:place p :path path :succ target :unwind unwind}
+                                  (get (:drop-spans body) (place-local p)) (assoc :span (get (:drop-spans body) (place-local p))))
+                                bb))))))
       (let [set-flag! (fn [loc path v] (when-let [f (get @flags path)] (add-assign! loc (mk-place f []) (list 'use (bool-const v)))))]
         ;; drop_flags_on_init
         (doseq [[_ f] (sort-by key @flags)] (add-assign! [0 0] (mk-place f []) (list 'use (bool-const false))))

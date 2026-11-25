@@ -6153,3 +6153,14 @@ DECISION C3X-1: std's units' upstream generic instances (share-generics), 21 of 
 - (c) read each crate's exported generic symbols from the pinned rlibs' rmeta (exported_symbols), as std-crates-rsi.edn was read before
       C6-2 (b): about a day, exact, but a record of rustc's build (C6 stays rustc's unless counted as the build's description)
 ```
+
+## As built: C3X-1 (b), std without shared generics (2026-11-23, branch `rust-indep-1123`; WIP)
+
+The user's decision of 2026-11-23: (b). `test/rust/runtime/std.edn`'s RUSTFLAGS take `-Zshare-generics=no`; std's IR re-pinned (120
+units, 56 MB; the clang pin the host's 23.1.6, which gives the old flags' 110 units byte for byte); the StableCrateIds unchanged (the
+native Cargo metadata hash still equal, 31 of 31 units), the SVHs and rlib names moved (`std-crates-rsi.edn`); the samples' and the
+synthetic corpus's IR packs re-made (x.ll moved, shim.ll not); rust-front-rsi's members byte for byte the old (its keys moved). C6's
+lib-unit compare against the new IR, the units of rust-c3x: **std 116 of 325 equal** (101), 10 differ (25: the share-generics' 21 gone
+but for alloc's to_uppercase), 199 refused; alloc 21 of 25; core not compared again. Left: the lowered std at the new pin, the six cases
+built again on the own path (C1 with C4's native interface and names), the eval, synthetic and AOT records; the UI pack where its
+sources are (JOURNAL 2026-11-23, rust-indep-1123).

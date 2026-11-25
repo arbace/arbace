@@ -21100,3 +21100,356 @@ big lock's backfill (the user, 2026-11-24 "do 3"): `bin/heavy-lock` lets a later
 earlier waiting ticket fits there (two looks in a row, never while the other slot is free: the head keeps its turn), `HEAVY_LOCK_BACKFILL=0`
 off; `test/gate/heavy-lock-test.bash` case 2 now expects the backfill (its holder 3 s); deployed by atomic rename on 2026-11-24 16:30 and
 proved that evening (the C++ chain's four steps ran beside train 3).
+## 2026-11-23: rust-indep-1123: C3X-1 (b) decided and the re-pin's first half built (WIP, handed to the Mac)
+
+- Decision (the user, 2026-11-23): C3X-1 (b), std's reference built with `-Zshare-generics=no` (each crate keeps its own
+  instantiations and exports none), over (a) every upstream crate's whole mono collection natively (8-12 days) and (c) the rlibs'
+  exported symbols read (a record of rustc's build). Also standing: C6-5 (a), the library build's units a description as data.
+- Built (branch `rust-indep-1123` from mac/next `fa635f636`, which carries the rust-c6-1120 line back with 512's fix:
+  `bbe3c5eec`, `512be0226`): `test/rust/runtime/std.edn` `:rustflags` + `-Zshare-generics=no`, `:clang` moved to the host's
+  "Alpine clang version 23.1.6" (the old flags' build with it gave the 110 pinned units byte for byte); `bin/rsi std-build --update`:
+  120 units, 56 MB (`test/rust/runtime/ir.sha256`); the crates' StableCrateIds unchanged (the cgu names `core.f4c9..`, `alloc.58bf..`),
+  their SVHs and file names moved: `bin/rust-front std-crates --rsi` rewrote `test/rust/front/std-crates-rsi.edn`, `std-crates --units`
+  left `std-build-units.edn` unchanged, `std-crates --native`: 31 of 31 units' -C metadata equal, the three identities the computed ones.
+- The programs' IR packs re-made against it (`bin/rsi ir-pack --corpus samples`, `--corpus synthetic`: every x.ll moved, every shim.ll
+  the same). The UI pack (`test/rust/ir/ui.sha256`, the every-40th, :clean-only) was never made on this host and has no UI sources here:
+  its pin is stale until `bin/rsi ir-pack --corpus ui --sample 40` where the sources are.
+- `bin/rust-front records make rsi`: the pack rust-front-rsi is byte for byte the old one (`4159566a..`: the records were already made
+  with the program's `-Zshare-generics=no`); only its keys moved (std-crates-rsi.edn's SVHs), `test/rust/records/rust-front-rsi.tsv`.
+- C6's measure against the new IR (`bin/rust-front lib-unit compare`, the units rust-c3x built, light): std 116 of 325 equal (101
+  before), 10 differ (25), 199 refused; alloc 21 of 25 as before (to_uppercase still differs); the crossed controls differing. std's
+  10: trace_fn, the two write_fmt, the three take_box, realloc_fallback, args, _print_fmt, hashmap_random_keys.
+- `bin/rsi`'s std_ir_dir and lib-unit's lookup also take the main checkout's `.tmp/rsi/std-*/` at the pin, so that commits before
+  and after the re-pin each find their std (make the new one there with `RSI_STD_DIR=/root/arbace/.tmp/rsi/std-sgn bin/rsi std-build`).
+- Not run (the user moved Rust's own lowering to the Mac, 2026-11-23): the lowered std at the new pin (`bin/rsi runtime-ci`, under the
+  lock), the six cases built again on the own path with the native interface and names (C1, C4: `RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=..
+  RF_EXTRA_IFACE=core/native-iface.edn:std/deps/hashbrown-iface.edn:std/deps/libc-iface.edn RF_DROP_GLUE=1 RF11_BATCH=1 bin/rust-front
+  rsi-build --native-core` over the six, threads too since the atomic intrinsics), then `bin/rsi check --record --front own --corpus
+  samples` (RSI_FRONT_DIR from that build), the synthetic record and `check --aot --record --corpus samples`. Until then the rsi
+  records stand from the old packs: the branch is WIP, not for next. Scores unchanged (Rust 100 / 80; eval and AOT 0.5).
+
+## 2026-11-23: 542 (the VM): core's whole interface pass for C4's switch, std-iface-native's guard
+
+Follows rust-indep-1123's entry (branch `542-rust-own-lowering` from `0c3c91860`). The inputs handed over (rust-front's core, alloc
+and std exports and native passes, np5's std-names.edn) held as core's `native-iface.edn` RF12-P7's core-check supplement (1,084
+functions: what the helper's interface lacks), which `bin/rust-front std-iface-native` takes by default: its first run gave core 0 of
+27,498 facts (alloc 3,863 of 3,863, std 4,644 of 4,644), so a `RF_NATIVE_IFACE=1` build from it would have run with no native core
+interface. Done here:
+- core's whole pass made again on the VM as rust-c4-1122's np5 chain made it (`alloc-check --crate core --pass`, one round, the
+  front's std-names np5's native names; 1 h 30 min, 3.57 GB): **27,194 of 27,498 facts equal** to the helper's (169 differ, 135
+  missing; the control differing), the survey's bound for np5 with the post-np5 fixes (27,062 + 59 + 1 + 72), now measured whole.
+  Left as the survey lists them: io::error's and io_slice's `cfg_select!` modules, legacy_int_modules' constants, core_simd's ops and
+  to_bytes, the Thin alias bound.
+- `bin/rust-front std-iface-native` refuses a core file of fewer than `CORE_IFACE_MIN_FNS` (10,000) functions, naming core's pass and
+  `CORE_NATIVE_IFACE` (the supplement assembled before; the parent assembles it, the change refuses it and takes the pass). The
+  alternative, a new default path for core's pass, was not taken: no script writes the pass to a fixed place yet.
+- The worktree's caches named three other roots (q493, q524, the host's rust-c3x), as 524's finding 5: rewritten, core's index made
+  again by the pass. Then the std IR at the new pin came from the main host (`.tmp/rsi/std-sgn`, 120 units checked against
+  test/rust/runtime/ir.sha256); next runtime-ci, rsi-build's six cases on the own path, the records.
+
+## 2026-11-23: 542 (the VM): C6 at this head, and round 2: foreign functions in the front end
+
+Follows this task's round-1 entry. std's IR at the new pin from the main host (`.tmp/rsi/std-sgn`, 120 units checked against
+test/rust/runtime/ir.sha256). Logs in the VM's `.tmp/q542/logs/lu/` and `lub/`.
+
+- C6's measure at this head, every export made on the VM (`bin/rust-front lib-unit census|keys|export|build|compare`, RSI_STD_DIR
+  the host's std-sgn): std 100 / 3 / 222 (equal / differ / refused) with the first exports (core 249 bodies, alloc 25, std 271 of 424
+  keys), 111 / 15 / 199 after inline-keys and `export core --add` (24 bodies), 112 / 14 / 199 after a second add round; alloc 21 of 25
+  (the host's 116 / 10 / 199 and 21: the four extra differing items inline core's `without_provenance`, `without_provenance_mut`,
+  `ptr::read`, `align_of`, which core's `--add` module run here built none of, `core::ptr ... bodies 0`; the host's add round of
+  2026-11-22 had them).
+- std's 199 refused by cause: 116 not exported (28 "a static's value :call": CTFE of a const fn call in a static's initializer,
+  `OnceLock::new()`; 26 method calls without a callee; about 45 paths to foreign functions: libc's `read`, `write`, `syscall`,
+  `sigaction`, `mmap64`, std's own extern blocks, unwind's `_Unwind_*`), 11 constants unevaluated, 7 promoted constants, 30 layouts
+  std's interface lacks, the rest callees mono refuses.
+- Round 2, foreign functions (the front end never lowered an `extern` block's functions or statics, only its types): lowered
+  (`:foreign`, the block's ABI, unsafe unless `safe`, C-variadic when the last parameter is `...`), defined in resolution's value
+  namespace and in the crates' index (core-check's file-names), collected as `Fn` and `Static` defs without bodies, their interface
+  facts with `:variadic` and `:foreign` (the link name: `#[link_name]`, else the name; a `#[rustc_std_internal_symbol]` one keeps the
+  internal mangling), mono's symbol the link name and `mir-available?` false, a C-variadic call at its function type in codegen
+  (`call i64 (i64, ...) @syscall`); every library crate's StableCrateId computed by Cargo's metadata hash ported (cargo-meta's
+  crate-ids over every target unit: 24 of 24 equal to the IR's unit names, libc 65173193c27cccb2); lib-unit's build reads std's
+  dependencies' facts (RF_EXTRA_IFACE by default: std/deps' libc, hashbrown, unwind); unwind read natively beside libc and hashbrown.
+  libc's pass now holds its foreign functions (583 functions; `libc::unix::read` `:foreign "read"`, `syscall` `:variadic true`).
+  Result: std's export 271 -> 297 bodies, the compare **119 / 20 / 186** at the same core exports as 111 / 15 / 199 (equal: mmap's
+  drop, fs's and path's is_dir and is_file, exit, from_stat64, abort_internal). The new differences, named for the next round:
+  `catch_unwind::cleanup` (extern "C"'s return of a scalar pair cast to `{i64, i64}`, rustc's PassMode::Cast), stat's field
+  offsets (libc's `s!` structs' `#[repr(C)]` from a macro, which mono's source reading does not see), canonicalize's alloca,
+  readlink's `cvt` call.
+- Checks: foreign-test (the probe's extern block lowered, variadic, the link name; libc's id) FAIL at the parent, PASS at the change;
+  pack-compare-test passed, inline-test 15 of 15, `bin/rust-front essential` passed (its known summary, five controls differing, 0
+  stub calls). Built in a side worktree (detached) so that the queued rsi-build kept the round-1 code; cherry-picked after it.
+
+## 2026-11-23: 542 (the VM): C6 round 3, libc's repr(C) and core's ptr callees
+
+- A dependency's `#[repr(C)]` structs and unions now carry `:repr "C"` in its native interface facts (core-check's ADT facts, for
+  libc, hashbrown and unwind only: std's own crates keep the helper's shape): libc's `s! { .. }` structs take their repr from the
+  macro, which mono's source reading (src-adt) never sees, so stat's fields were reordered (st_mode at 128 for rustc's 24). libc's
+  pass now writes 252 repr(C) ADTs. lib-unit compare: FileType's and size's field offsets equal (std 119 -> 121).
+- `bin/rust-front lib-unit export core --add` over its 16 module files built no body for core::ptr (`core::ptr ... bodies 0`), while
+  core-check over ptr/mod.rs alone (`CORE_EXPORT_KEYS` without_provenance, without_provenance_mut, read) exports all three (2 equal to
+  rustc's built MIR) and mem/mod.rs alone align_of: appended to the export by hand (the add round's own mechanism, `cat` onto
+  native-core-items.edn), with the round-2 add's two bodies: std 121 -> **124 equal**, 15 differ, 186 refused (stack_overflow's
+  `Handler::null`, eh's read_encoded_pointer and find_eh_action now equal). The multi-file run's loss is not diagnosed (a finding for
+  the export: why ptr's keys are not wanted when 16 files run together).
+- Not yet: the 37 statics initialized by a const fn call (lib-unit's build gives no static facts, `:statics {}`, so a body naming a
+  static is refused at the build even when exported: CTFE of the initializer and the static's symbol are one piece of work).
+
+## 2026-11-24: 542 (the VM): C6 round 4, statics evaluated, constants, layouts
+
+The coordinator's round 4 (the user keeps 542 running overnight on CPUs 0-3). lib-unit against std's IR at the pin:
+
+- **Statics initialized by a const fn call** (`OnceLock::new()`, `AtomicUsize::new(0)`, `RwLock::new(Hook::Default)`): the export
+  no longer refuses a body that points at one (build's `*static-bytes-deferred*`, bound in alloc-check's --export: the static's
+  allocation `static: PATH, deferred`, no bytes); export-consts exports the initializers' bodies of the statics a body points at
+  (core-check's deferred-static-ids); lib-unit gives each such static its symbol (std-static-symbol of its path) and its value
+  by CTFE (build-run's eval-static-body: eval-promoted on the initializer's own body, its const fn calls by their exported bodies
+  at the call's arguments, eight deep, the aggregates laid out by mono; variant-bytes takes a pointer niche's tag as 64 bits); a
+  const fn no export holds is logged `lib-unit inline wanted` (a static's evaluation), so `lib-unit inline-keys` adds it to the
+  next export (core's Atomic<T>::new, MaybeUninit::uninit, Cell::new; std's futex Mutex/RwLock/Once new). A static whose value
+  stays unevaluated is declared, not defined (its body then differs from rustc's by the static's bytes alone, as the compare
+  writes them). Thread-local statics are not handled (llvm.threadlocal.address).
+- **Constants**: a dependency's integer constant by its interface fact's :value (libc's S_IFMT, EBADF; build-run's
+  iface-const-value, in sized-const-eval and eval-promoted); a promoted ZST constant (a function item `&stat`) and a closure with
+  no capture are empty values; a promoted constant of std's own by eval-local-const.
+- **Layouts std's interface lacks**: lib-unit reads std's and alloc's own passes (native-iface-nodebug.edn) and core's whole pass
+  (core/core-whole-iface.edn: core::sync::atomic's private Align1..Align8) beside the dependencies' facts; mono's pattern-field
+  takes the signed niche types `iN is ..-1 | 0..` (I32NotAllOnes, I64NotAllOnes: OwnedFd's ValidRawFd) as the wrapping range 0 to
+  -2.
+- A `name = "literal"` attribute keeps its literal (lower's :eq-str): `#[link_name]`, cfg_attr's too (errno_location is
+  `__errno_location` on linux), read by mono's foreign-link-name and core-check's facts (std's pass made again for it).
+- core-attrs.txt takes sync/atomic.rs and iter/traits/accum.rs (the atomics' and the sums' macro-made methods, which rsi-build's
+  threads refused as "not in core's sources").
+
+std's 325 items: 124 / 15 / 186 (round 3) -> **153 / 50 / 122** (equal / differ / refused), no item equal before differing now;
+the new differences are mostly items that now build and differ by an atomic method's instantiating crate (`Atomic<T>::load` not
+taken `#[inline]` from core-attrs yet), errno's link name (std's pass again), the remaining unevaluated statics and
+extern "C"'s pair returns. pack-compare-test passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed
+(its known summary, 0 stub calls).
+
+## 2026-11-24: 542 (the VM): C6 round 4, the rest of the night
+
+- Two more export rounds (c9: core --add of the statics' wanted const fns, std's pass made again for the link names; c10: alloc's
+  BTreeMap::new and std's futex locks, ReentrantLock::new): the statics GLOBAL_PANIC_COUNT, the HOOKs, STDOUT's OnceLock, stderr's
+  INSTANCE, CLEANUP and the rest evaluate (4 left: ENV_LOCK and stack_overflow's LOCK and THREAD_INFO, a call not exported yet;
+  DTORS, a non-scalar operand; COUNTER, its initializer's body not exported). `__errno_location` named by cfg_attr's link_name.
+- mono: a macro-made core function core-attrs names is a function (def-kind), so Atomic<T>'s `#[inline]` methods are
+  instantiated in std as rustc does (e7ab3679a); core-attrs.txt takes sync/atomic.rs and iter/traits/accum.rs.
+- C1 for threads.rs: a FnPtrShim's local function item (thread_local!'s `__rust_std_internal_init_fn`) and a local function a
+  record library body calls directly (by the record's path) are collected (4cd9d0ccb and this commit), and the functions the
+  record's library bodies name by symbol (:fn-symbol, callee symbols) join std-fn-syms; threads.rs's missing local instances 4 -> 2
+  (left: its thread_local closure, `NOISY::{constant#0}::{closure#0}`, whose symbol under the anonymous constant mono does not
+  match yet). std.rs still stops at `drop_glue<SplitWhitespace>`: mono cannot normalize `<IsWhitespace as Pattern>::Searcher`
+  through core's blanket impl `impl<F: FnMut(char) -> bool> Pattern for F` (the facts hold IsWhitespace's Fn impls; the solver's
+  selection of a param-self impl with Fn-trait predicates is the next item), so needs-drop assumes a glue rustc never emits.
+- std's 325 items: **171 equal**, 32 differ, 122 refused (124 / 15 / 186 at round 3). Checks at the commit: pack-compare-test
+  passed, inline-test 15 of 15, foreign-test PASS, `bin/rust-front essential` passed (its known summary, 0 stub calls). rsi-build of
+  std.rs and threads.rs under the big lock at this head: both still from the pack (above); peak process 3.2 GB.
+
+## 2026-11-24: 542 (the VM): round 5, std.rs own, threads.rs's thread_local
+
+- **std.rs's drop_glue<SplitWhitespace>**: core's `impl<F: FnMut(char) -> bool> Pattern for F` writes its `type Searcher<'a>`
+  through `pattern_methods!`, which the expansion parses as an item (ItemKind::TyAlias); lower-assoc-item only took Type, so core's
+  native pass wrote AssocErr and `<IsWhitespace as Pattern>::Searcher` never normalized (needs-drop then assumed a glue rustc never
+  emits). Fixed in lower; core's pass over str/pattern.rs alone (210 of 210 facts equal) merged into the whole pass
+  (/root/arbace-mac/.tmp/q542/core-pass on the VM). std.rs now builds own.
+- **threads.rs**: an inline const is a definition (InlineConst, `{constant#N}`) whose closures are its children, and a const's and
+  a static's inline consts are indexed as a fn's (before, a const item's `const { .. }` lowered to an error and the closures had no
+  definition): thread_local!'s `NOISY::{constant#0}::{closure#0}` gets rustc's symbol. A FnPtrShim's local fn item and a local fn
+  the record's library bodies call or name are collected (round 4); a program's own thread-local static named by a record body
+  gets its local def's symbol; build-const binds its inline consts' owner; typeck and the builder see the items of the enclosing
+  closures' and owners' blocks (collect's closure-item over *closure-hirs*: `static __RUST_STD_INTERNAL_VAL` and `fn
+  __rust_std_internal_init_fn`, named from the macro's expansion without a span resolution). A 4-argument `nth` (pattern reads)
+  that refused std's default_hook and Path::parent in the export fixed.
+- rsi-build of the six (f78b58cc2, then threads.rs at 3112aec44): **5 of 6 own at C1 and C4** (intrinsics, panics, std, unwind,
+  vectors); threads.rs from the pack (its main's promoted `&NOISY` needs the const's value: LocalKey over a closure coerced to a fn
+  pointer; and its closures' thread-local static: the builder makes a plain static reference, rustc a ThreadLocalRef, and the
+  static's initializer `LazyStorage::new()` is a const fn call: the next round). The eval check over them (`bin/rsi check --front
+  own --corpus samples`, RSI_FRONT_DIR the merged builds): **6 of 6 pass**, 5 of 6 programs' codegen units from Arbace's MIR, the
+  std-vs-panics control differing (6 min, 6.1 GB). Not recorded (this host's records are arm64's).
+- C6: std 171 -> **172 / 32 / 121** (the nth fix; export 345 -> 351 bodies). Checks at the commit: pack-compare-test passed,
+  inline-test 15 of 15, `bin/rust-front essential` passed (known summary, 0 stub calls), core-essential its known summary.
+
+## 2026-11-24 — queue 542, round 6: threads.rs's own build (ThreadLocalRef, LocalKey by CTFE, its thread-locals defined), C6's names through globs (VM)
+
+Round 6 of queue 542 (rsi's eval and AOT independence), on the branch 542-rust-own-lowering, at the coordinator's list: threads.rs's
+three needs, then the export's refusals.
+- **ThreadLocalRef**: a `#[thread_local]` static (thread_local!'s `__RUST_STD_INTERNAL_VAL`) is THIR's ThreadLocalRef in the
+  builder, an rvalue `&/*tls*/ PATH` (`(tlsref MUT PATH)`), not a deref of an interned allocation (which refused the static's value,
+  a const fn call). The program's own thread-local gets its local symbol (round 5) and now its initializer, `LazyStorage::new()`,
+  evaluated as CTFE does (its built body; the const fns it calls by their exported bodies; the aggregates laid out by mono's
+  layouts), and codegen defines it in the unit (`internal thread_local global [24 x i8]`, rustc's codegen_static) where it declared
+  it external. tlsrefs 4 of 4, tls-inits 2 of 2.
+- **LocalKey by CTFE**: a const item's inline consts are built (`NOISY::{constant#0}`, construct_const under the item: an
+  InlineConst shares its parent's typeck results); eval-promoted takes `mem::needs_drop::<T>()` (mono's needs-drop within a solver),
+  a switch on a scalar, and a ClosureFnPointer cast (the pointer to the closure's ClosureOnceShim's function allocation, named in the
+  evaluating body's data: `*fn-alloc*`, `*closure-fnptr*`); a local constant's whole value (a pointer, not only a scalar) and the
+  const fns it calls (std's LocalKey::new). main's promoted `&LOCAL` and `&NOISY` now point at exactly the record's shims
+  (`<LOCAL::{constant#0}::{closure#1} as FnOnce<..>>::call_once`, NOISY's closure#0). The const fns no record's instance names
+  (LocalKey::new, LazyStorage::new) are logged `ctfe wanted DEF` and exported by `bin/rust-front lib-export --keys KEYS std
+  .tmp/rust-front/std/native-std-ctfe.edn` (2 bodies, 30 s), which rsi-build's `--native-core` takes beside the rsi exports.
+- A std macro's closure (thread_local!'s `|__rust_std_internal_init| ..`, its span in std's sources) gets rustc's type text
+  (`{closure@std/src/sys/thread_local/native/mod.rs:92:21: 92:47}`, typeck's macro-closure-text from RF_MONO_LIB's file), and mono's
+  closure-def finds it by that text, the same text for every thread-local told apart by the closure type's signature.
+- rsi-build of threads.rs (rsi11): **own** (1 of 1 from Arbace's MIR; closure-shims 4/4, every program body ours). But its run
+  segfaults (status 139, nothing printed): in the first `join`, JoinInner::join's drop of its Thread finds the Arc's Inner already
+  freed (a CString drop at 0x1e), a reference one short somewhere on the program's side or the native bodies it takes (the bodies
+  checked: main::{closure#0}, {closure#1}, {closure#0}::{closure#0} as expected; the std natives taken are equal to the record's
+  instances). Not found this round: the merged builds keep threads.rs from the pack, so the eval check stays 6 of 6 passing with 5 of
+  6 own (eval3 at the merge with threads own: 5 pass, threads fails as above; the merge restored).
+- C6 (the export's refusals): the names now carry a crate's macro-made items through glob re-exports: with-core-names keeps the
+  index's globs as the map's metadata, and with-adt-names and a new with-value-names add a macro-made struct, function or constant
+  (sys/path/unix.rs' `path_separator_bytes!`: `is_sep_byte`; libc's `s! {}` structs) to its module and to the modules that glob it,
+  to a fixpoint; a dependency's later interface round reads its own round's names as std's does. A path pattern to another crate's
+  integer constant (`libc::EINTR =>`) is a constant pattern of its interface value; a C string literal (`c"main"`: &CStr, the bytes
+  with the NUL) is typed and built; closure_analyze does not enter a nested item (sys::pal::unix::init's `fn
+  sanitize_standard_fds`). The std export 351 -> 363 bodies (73 refused); **C6 std 172 / 32 / 121 -> 175 / 31 / 119**. Still
+  refused: libc's foreign functions whose signatures name types of its deeper modules (`poll`, `writev`, `lseek`: 122 of unix/mod.rs'
+  373 functions have no fact; the names reach them, the cause not found), so getrandom and sanitize_standard_fds; backtrace's 59 items
+  wait on gimli, addr2line and object read natively (not started: about 113k lines).
+- The dependencies' passes (std/deps) rebuilt: libc 583 -> 606 functions, 254 -> 288 ADTs.
+
+## 2026-11-24 — queue 542, round 7: threads.rs's segfault was layouts (ArcInner, Mutex, repr(align)); libc's foreign functions (VM)
+
+Round 7 of queue 542, at the coordinator's list (threads.rs's segfault, then libc's foreign functions without facts).
+- **The segfault**: the own build's layout table against the record's (6183 types): 50 differ, all alloc's `ArcInner<T>` and
+  around it. ArcInner is `#[repr(C)]` in alloc's sources, but std's interface writes no repr for its own crates' structs, so mono
+  laid it out as repr(Rust), the data first: std's compiled code and our unit read the Arc's counts at different offsets (the
+  first join's drop of a Thread found its Inner freed). mono's adt-repr now takes a known std struct's repr(C) and repr(align(N))
+  from its sources. Then the rest of the table: std's `Mutex<T: ?Sized>` laid out as rustc's StructKind::MaybeUnsized (decided on
+  the declared last field, `UnsafeCell<T>` with T ?Sized, not the instance's: inner, poison, data at 0, 4, 8; ours put data first);
+  repr-flags reads every meta item of a repr (`repr(C, align(8))`) and a `cfg_attr(PRED, repr(..))` whose predicate holds
+  (mpmc's CachePadded, 128 on x86_64); univariant honours repr(align); the cfg knows `target_has_atomic_load_store` (core's
+  `Align8<T>` was cfg'd out of its source, so its repr(C) and memory ABI were lost). A probe of each type matches the record.
+- threads.rs (rsi14, own): the segfault is gone; the run now overflows ci's Go stack (1 GB) before printing, in a futex wait
+  (address 0x7f0000000128): not found this round. The merged builds keep threads.rs from the pack (eval 6 of 6, 5 of 6 own).
+- The function-by-function diff of the own IR against rustc's x.ll (the samples pack, pinned at 0c3c91860: its threads.rs x.ll
+  sha256 a0801fe4.. is the pin's) is noisy, not stale: rustc's -O0 always-inliner inlines `#[inline(always)]` callees
+  (ManuallyDrop::new, which wraps MaybeDangling in the pinned core, so x.ll's catch_unwind calls MaybeDangling::new; NonNull's
+  as_ptr, ..), which our program builds call; the drop glues and JoinInner::join call the same functions in both.
+- **libc's foreign functions**: the late resolver did not visit a foreign block's items (late.rs visits them), so their
+  signatures' glob-imported types (`wchar_t`, `off_t`, `nfds_t`, ..) had no resolution; and with-native-std now gives the native
+  interface's ADTs and aliases their kinds (a macro-made `s! {}` struct named through another module had none). libc 606 -> 821
+  functions; unix/mod.rs's functions without a fact 122 -> 31 (`poll`, `lseek`, `writev` among the written). A CORE_TRACE line
+  names a function the native interface does not write and why.
+- C6 std: 175 / 31 / 119 -> **178 / 39 / 108** (export 369 bodies, 67 refused): more items built, some of them differing.
+
+## 2026-11-24 — ci: a goto loop's back edge resumes in the same frame (queue 542, round 8; VM)
+
+ci's statement lists (go/arbace/ci/stmt.ae) resumed a jump to a label of their own list by `Seq.from` calling `Seq.Enter`, which
+called `Seq.from` again: every turn of a goto loop cost two Go frames, and a long loop overflowed the 1 GB Go stack (threads.rs's own
+build, whose loops lower to goto back edges: 8.4M frames of Seq.from/Seq.Enter on one list; the C sample below too). `from` now finds
+the label's statement and enters it in the same frame, continuing after it (Enter's own loop as before); the semantics unchanged.
+Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ... goto again;`) by `bin/ci run` overflows with the
+old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
+--aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
+executables, and the host's C records rerun on its train.
+
+## 2026-11-24 — queue 542, round 8: the five eval cases rebuilt at the new layouts; threads.rs's livelock (VM)
+
+- The five eval cases rebuilt at e737be800's layouts (rsi15: intrinsics, panics, std, unwind, vectors, each own) and the eval check
+  run over all six (`bin/rsi check --front own --corpus samples`, the merged builds with threads.rs from the pack): **6 of 6 pass, 5
+  of 6 own**, the std-vs-panics control differing (6.1 GB). No regression from the ArcInner, Mutex, repr(align) and Align8 layouts.
+- threads.rs (own, rsi14) with ci's goto-loop fix (0c28eb66c): no overflow now, but the run livelocks before printing: one goroutine
+  busy at 100% in a futex wait (FUTEX_WAIT_BITSET_PRIVATE, expected value 0xffffffff, Parker's PARKED or musl's join wait) on
+  0x7f0000000128, which is neither in the TLS block (it ends near 0xb8) nor plainly a static; ci's dumps carry no Rust frame names.
+  Open.
+
+## 2026-11-24 — queue 542, round 10: threads.rs own and passing (6 of 6 own), libc's chains, C6's constants (VM)
+
+- **threads.rs's livelock: the producer's Sender was never dropped.** Traced with ci's CI_CALLTRACE (filtered while tracing): the
+  join, Mutex and channel sections run; main received the five values, parked in the sixth recv, and the producer never called
+  `Sender::drop` (no `disconnect`). The closure `move || for i in 0..5 { tx.send(i * i).unwrap(); }` is FnOnce (spawn's bound), its
+  body takes self by value and its MIR (ours as rustc's) ends with `drop(_1)`; codegen asked `drop-glue-symbol` outside
+  build-program's bindings, where a local closure's upvars are unknown, so needs_drop of the closure type was false (copy? of no
+  upvars: true) and the drop became a plain branch. Fix (arbace/rust/front/build_run.ae, the program facts' `:drop-glue`): the
+  program's closures' upvars bound (build/*closure-tys*, mono/*closure-upvars*) as the facts were made. Every by-value closure
+  with a capture that needs drop leaked before (Arcs, Senders); only the channel's disconnect made it visible.
+- **The rust-call ABI's untupling** (arbace/rust/back/codegen.ae): a call of an `extern "rust-call"` function (call_mut, call_once,
+  a closure's) passed its tuple argument as one value; rustc's codegen_call_terminator spreads it, one argument per field (Abi::
+  RustCall). The two agree when the tuple passes as its fields do (a scalar, a pair of scalars, `()`), which is why the other cases
+  ran; a memory tuple went by its address: `(usize, JoinHandle<bool>)` in IntoIter::fold's call of map_fold's closure, threads.rs's
+  Barrier section, a segmentation fault in memcpy. The call now untuples the last argument (field projections of its place) when the
+  callee's type is `extern "rust-call"`.
+- rsi18: all six built own in one run (`bin/rust-front rsi-build --native-core intrinsics panics std threads unwind vectors`, 1 h
+  14 min on CPUs 0-3, 3.07 GB, under the heavy lock); the eval check over them (`RSI_FRONT_DIR=.tmp/rust-front/rsi18 bin/rsi check
+  --front own --corpus samples`): **6 of 6 pass, 6 of 6 own** (threads.rs's output equal to rustc's run), the std-vs-panics control
+  differing, 6.2 GB. Logs: /root/arbace-mac/.tmp/q542/logs/rsi-build18.log, eval-samples18.log.
+- **libc** (31 of unix/mod.rs's functions without a fact, the pthread mutex, condvar and rwlock functions, times, utimes,
+  getaddrinfo, sigaction): three causes. (1) An array length naming another module file's constant (`size: [c_char;
+  crate::__SIZEOF_PTHREAD_MUTEX_T]` in linux/mod.rs, the constant in b64/mod.rs): collect's eval-int-expr took only the file's own
+  constants; an external one is now the value the pass's earlier round wrote in the facts (pthread_mutex_t and the other pthread
+  types written: libc's ADTs 288 -> 302). (2) A path the resolver left an error (`crate::pthread_mutex_t`, `crate::tms`, `addrinfo`,
+  named through the root's and unix's globs of other files' macro-made structs): res-def now resolves it by its written path through
+  the module's names, as an expansion's; and a dependency's later round gives std-path-def the round's re-globbed names (they were
+  the first round's). (3) The chain spans three files (b64's constant, linux's struct, unix's function), so two rounds could not
+  write it: DEPS_IFACE_ROUNDS defaults to 3. The deps pass again (`alloc-check --crate std --deps`, CORE_TRACE=1, 32 min beside
+  other agents): **libc 821 -> 892 functions, 288 -> 304 ADTs; unix/mod.rs's functions without a fact 30 -> 0**; libc's left: sendmmsg
+  and recvmmsg (`crate::mmsghdr`, a fourth link). The new facts in .tmp/rust-front/std/deps leave C6 at 180 / 39 / 106 (no item of
+  the 325 calls the pthread functions); rsi18 was built with the old ones.
+- **C6's constants**: lib-unit's facts had no `:local-const`, so a std constant its bodies name stayed unevaluated; now a
+  dependency's by its interface fact, else its exported body (eval-local-const), and fix-uneval's source literal; src-const-value
+  takes a private module's written path (std's names hide std::sys) and bool literals (HAS_PREFIXES); codegen names an unevaluated
+  constant in its refusal. std **178 / 39 / 108 -> 180 / 39 / 106**; the constants left: READ_LIMIT (an `if cfg!`), &str constants
+  (MAIN_SEPARATOR_STR), inline consts of bodies, MAP_FAILED (a pointer), FULL_BACKTRACE_DEFAULT (cfg_select!), UNWIND_DATA_REG (a
+  tuple).
+- Not recorded (the VM's records would be -linux-arm64); the main host's amd64 commands are in the queue report.
+
+## 2026-11-24: queue 558 (the VM): Rust C3, the mono facts the six eval cases took from the record
+
+Base 542-rust-own-lowering 57a908970, branch 558-rust-c3. rsi18's builds (RF_FACT_TRACE=1) took 462 facts from the record
+(`rust-front-rsi`): locs 412, layouts 45, consts 3, symbols 2 (the brief's macro-made atomic and accumulate methods no longer among
+them). By cause, largest first, and what was done:
+- **Program calls made by format_args! (244 locs)**: lower-format-args built its `Arguments::new`, `Argument::new_display` and
+  `from_str` calls without the format_args! expression's expansion mark, so a std macro's call (println!) had only a foreign span.
+  rustc's format.rs gives them the macro's syntax context, which span_as_caller_location walks to the outermost call site. The calls
+  now carry the mark (`*fmt-mark*`, lower.ae); probed: every program call of the six has a root-file span.
+- **Native library bodies' calls and asserts (168 locs)**: the exports predated C6-4's :call-loc and 524's macro-argument case. A
+  probe export (core-check CORE_EXPORT_KEYS on slice/raw.rs, slice/mod.rs) gave each call and assert its place. Re-made at this head:
+  `core-export --rsi` (25 min), `--rsi-outside '^(fmt/|iter/|..)|/core_simd/'` (33 min; call-locs 910 -> 1040 over 1018 calls and
+  23 asserts), `lib-export --rsi std`, the ctfe keys. The old files are in /root/arbace-mac/.tmp/q558/orig/.
+- **std::io::Error's layouts (40)**: core::io::error's `mod repr` takes its file by `#[cfg_attr(PRED, path = "..")]`; child-mod-items
+  now reads it when PRED holds. src-ty resolves `self::` and `super::` uses, fn pointers (`unsafe fn(NonNull<dyn error::Error + Send
+  + Sync>)`) and `Self`. Probed: Error, Custom and Result<(), Error> equal the record's layouts.
+- **SimdShuffleIdx (5 layouts)**: a struct local to an inline const in a trait method (`Swizzle::concat_swizzle::{constant#0}`):
+  src-adt finds it through the method's kept items (body-adt-items' depth 12 -> 30). Probed: 64 bytes, align 64, a vector of 16 u32.
+- **TypeId::of::<dyn Any> (3 consts)**: native-core-plan's closure followed `<dyn Any>::is`'s `self.type_id()` to the blanket
+  `impl<T: ?Sized> Any for T` at T = dyn Any, a body rustc never instantiates (the call is Virtual). Now resolve-call and the closure
+  skip a trait method on a trait object (mono/virtual-call?, virtual-fact's rule).
+- **Drop glue shims (2 symbols, 2 locs)**: a shim's header came from the item facts by the name `std::ptr::drop_glue`, which every
+  shim shares. Now it is built natively (mono's symbol, the instance as `Shim(DropGlue(.., Some(T)))`); its call's location is
+  drop_glue's def_span (mono/lib-fn-loc: core/src/ptr/mod.rs 847:1, the record's).
+- rsi19 (the six at d7aad0540 with the re-made exports): see the queue report for the counts. Not recorded (arm64); the main
+  host's commands are in the report.
+
+## 2026-11-24 — Rust C3's last record facts: a pointer call's location, a Drop::drop's (queue 565, VM)
+
+Continuing 558 (C3: no mono fact from the record for the six eval cases), whose rsi19 left 9 facts, all locs (threads 8,
+panics 1). Base 80ed673e4 (558-rust-c3), branch 565-rust-c3-finish, worktree q542.
+- **threads.rs, 8 locs**: std's `LocalKey::try_with` calls `(self.inner)(None)` through a function pointer; in the std export it
+  was the only one of 111 calls without :call-loc. Build gives the call's operand `(move (place 8))` its :call-span, but the
+  passes' `map-operand-places` (Derefer, ElaborateBoxDerefs, PromoteTemps) rebuilt the operand list without its metadata, so
+  externalize saw no span. A const operand is never rebuilt, so only pointer calls lost it. Fixed (passes.ae, keep-meta); the
+  std export re-made (`lib-export --rsi std`, same 65 keys, every key built as before): 111 of 111 calls with :call-loc,
+  try_with's at local.rs 462:37. Alternative considered: deriving the location in build-run from the record's terms (rejected:
+  a record fact by another road).
+- **panics.rs, 1 loc**: `<Box<String> as Drop>::drop` in `main::{closure#8}::{closure#0}` (`.map(|s| *s)`), a call drop
+  elaboration makes for the open drop of a Box whose contents moved out. rustc gives it the drop terminator's source info,
+  schedule_drop's `end_point(region_scope.span)`. Build now notes a region scope's span where it is known (an expression's
+  scope, a body's arguments scope: the body expression's span), records each value drop's end point by local (`:drop-spans`,
+  on the body only when non-empty), and ElaborateDrops gives every DropCtxt map of that drop the span, which
+  destructor-call-block puts on its Drop::drop operand as :call-span (build.ae, passes.ae). Probed: [17 76], the record's
+  `(loc "test/rust/eval/panics.rs" 17 76)`. Externalize leaves :drop-spans out of the exports (core_check.ae): they are
+  the body's own file's [line col], which build-run reads as the root file's. Alternative: spans on the drop terminators
+  (rejected: the passes rebuild terminators and drop their metadata; a local's value drop is scheduled once, so by local is
+  exact).
+- rsi20 (the six at this head with the re-made std export; 558's rsi19 flags, 2 h 31 min, 3.17 GB, under the heavy lock):
+  every fact native in all six (locs 776/345/1998/1468/302/1595 of as many; `fact-refused` lines 0, from 9). The eval check
+  (`bin/rsi check --front own --corpus samples` on rsi20): 6 of 6 pass, 6 of 6 own, the std-vs-panics control differs. With
+  both fixes C3 is done for the six: no mono fact from the record. The core exports were not re-made (none of their bodies'
+  facts was refused); the main host re-makes all exports anyway. Not recorded (arm64); the host's commands are in the report.
+
+## 2026-11-25 — the user's DECISION 565-1 (a) (queue 565, VM)
+
+565-1 (a): Build keeps recording value drops' end points only for expression scopes and a body's arguments scope. Drops in the
+other scopes get their spans when a case needs one (none of the six eval cases does).

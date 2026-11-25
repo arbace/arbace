@@ -254,7 +254,8 @@
 (def dep-crates
   "queue 400: std's dependency crates read natively from library/vendor (their names and interfaces, which the helper's
   std-names and std-iface do not hold): their `pub use m::*` re-exports and macro-declared modules taken as std's"
-  ["libc" "hashbrown"])
+  ;; queue 542 (C6): and unwind (library/unwind: libunwind's foreign functions std's personality and backtrace call as `uw::`)
+  ["libc" "hashbrown" "unwind"])
 
 (defn std-like?
   "std or one of its vendored dependencies (round 54's std-only readings: glob re-exports, #[path] from the declaring file)"
@@ -420,6 +421,15 @@
                     Static (add! m "Mod" {:ns :value :name nm :path p
                                           :kind (str "Static { safety: Safe, mutability: " (if (= 'Mut (fget (second k) :mutability)) "Mut" "Not") ", nested: false }")})
                     TyAlias (add! m "Mod" {:ns :type :name nm :kind "TyAlias" :path p})
+                    ;; queue 542 (C6): a foreign block's functions, statics and types in its module (libc's `read`, `syscall`)
+                    ForeignMod (doseq [fi (fget (second k) :items) :let [fk (fget fi :kind)] :when (and (seq? fk) (cfg-on? fi))]
+                                 (let [fnm (second (fget (second fk) :ident)) fp (str m "::" fnm)]
+                                   (case (head fk)
+                                     Fn (add! m "Mod" {:ns :value :name fnm :kind "Fn" :path fp})
+                                     Static (add! m "Mod" {:ns :value :name fnm :path fp
+                                                           :kind (str "Static { safety: Unsafe, mutability: " (if (= 'Mut (fget (second fk) :mutability)) "Mut" "Not") ", nested: false }")})
+                                     TyAlias (add! m "Mod" {:ns :type :name fnm :kind "ForeignTy" :path fp})
+                                     nil)))
                     (Struct Union) (do (add! m "Mod" {:ns :type :name nm :kind (str (head k)) :path p})
                                        (when-let [ck (and (= 'Struct (head k)) (ctor-kind (nth k 3)))]
                                          (add! m "Mod" {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))
@@ -538,14 +548,32 @@
                (reduce (fn [m [p {:keys [globs]}]]
                          (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
                        m names))
-        globs? (some :globs (vals names))]
+        globs? (some :globs (vals names))
+        ;; queue 542: the glob re-exports kept as the map's metadata (with-value-names adds a macro-made item to the modules
+        ;; that glob its module)
+        gm (merge (:globs (meta std-names)) (into {} (for [[p {:keys [globs]}] names :when (seq globs)] [p (vec globs)])))]
+    (vary-meta
     ;; two rounds: a re-export of a re-export (with globs, three rounds of both: sys::fs's `pub use unix::*` of a re-export;
     ;; queue 400: then on to a fixpoint, at most 8: libc's chain of globs, libc -> unix -> linux_like -> linux -> musl -> b64
     ;; -> x86_64)
     (if globs?
       (loop [m (reduce (fn [m _] (glob (reexport m))) m [1 2 3]) n 3]
         (let [m2 (glob (reexport m))] (if (or (= m2 m) (>= n 8)) m2 (recur m2 (inc n)))))
-      (reduce (fn [m _] (reexport m)) m [1 2]))))
+      (reduce (fn [m _] (reexport m)) m [1 2]))
+    assoc :globs gm)))
+
+(defn- add-globbed
+  "queue 542: CHILD (a {:ns :name :kind :path}) added to the module MP of the names M unless it has one of that namespace and
+  name, then to the modules that glob MP (with-core-names' :globs metadata), to a fixpoint"
+  ([m mp child] (add-globbed m mp child 0))
+  ([m mp child depth]
+   (let [e (get m mp)]
+     (if (or (nil? e) (not= "Mod" (:kind e)) (> depth 8)
+             (some #(and (= (:ns child) (:ns %)) (= (:name child) (:name %))) (:children e)))
+       m
+       (reduce (fn [m q] (add-globbed m q child (inc depth)))
+               (assoc m mp (update e :children conj child))
+               (for [[q gs] (:globs (meta m)) :when (some #{mp} gs)] q))))))
 
 (defn with-adt-names
   "RF20: the names with core's structs as their modules' children where missing: the type and its constructor
@@ -559,19 +587,41 @@
                   has? (fn [ns] (some #(and (= ns (:ns %)) (= nm (:name %))) (:children e)))]
               (if (or (nil? e) (not= "Struct" (:kind a)) (not (str/starts-with? p (str *crate* "::"))))
                 m
-                (assoc m mp (update e :children into
-                                    (cond-> []
-                                      (not (has? :type)) (conj {:ns :type :name nm :kind "Struct" :path p})
-                                      (and ck (not (has? :value))) (conj {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))))
+                ;; (queue 542: and in the modules that glob its module, as with-core-names' globs took the index's names:
+                ;; libc's `s! { pub struct sockaddr .. }` in linux_like, which unix's `pub use self::linux_like::*` re-exports)
+                (cond-> (add-globbed m mp {:ns :type :name nm :kind "Struct" :path p})
+                  ck (add-globbed mp {:ns :value :name nm :kind (str "Ctor(Struct, " ck ")") :path (str p "::{constructor#0}")})))))
           names adts))
 
-(defn with-native-names [names native] (with-adt-names names (:adts native)))
+(defn with-value-names
+  "queue 542 (C6): the names with the crate's macro-made free functions and constants as their modules' children where missing
+  (sys/path/unix.rs' `path_separator_bytes!(b'/')`: `is_sep_byte`, `SEPARATORS`, which the index, read unexpanded, lacks, so
+  path.rs' `use crate::sys::path::is_sep_byte` through sys/path's `pub use unix::*` did not resolve): from the native
+  interface's :fns and :consts, each a module's own item (an impl's or a function's nested items are not a module's children)"
+  [names native]
+  (let []
+    (reduce (fn [m [p kind]]
+              (let [i (.lastIndexOf ^String p "::") mp (when (pos? i) (subs p 0 i)) nm (when (pos? i) (subs p (+ i 2)))]
+                (if (or (nil? mp) (not (str/starts-with? p (str *crate* "::"))) (str/includes? nm "{"))
+                  m
+                  (add-globbed m mp {:ns :value :name nm :kind kind :path p}))))
+            names
+            (concat (for [[p _] (:fns native)] [p "Fn"])
+                    (for [[p _] (:consts native)] [p "Const { is_type_const: false }"])))))
+
+(defn with-native-names [names native] (with-value-names (with-adt-names names (:adts native)) native))
 
 (defn with-native-std
   "RF20: std's names with the native interface's type aliases (their types and generics) added, and its macro-made
   structs (with-native-names)"
   [std native]
-  (cond-> (update std :mods with-native-names native)
+  (cond-> (-> (update std :mods with-native-names native)
+              ;; queue 542: the kinds of the native interface's ADTs and aliases where std's names lack them (a dependency's
+              ;; macro-made `s! { pub struct iovec .. }`, named through another module: collect's ext-kind had none, and the
+              ;; foreign functions naming it, libc's writev, had no fact)
+              (update :kinds (fn [k] (merge (into {} (concat (for [[p a] (:adts native) :when (:kind a)] [p (:kind a)])
+                                                             (for [[p _] (:aliases native)] [p "TyAlias"])))
+                                            k))))
     (seq (:aliases native)) (-> (update :aliases #(merge (:aliases native) %))
                                 (update :generics #(merge (:alias-generics native) %)))
     ;; queue 512 (503-1): and its crate-private traits' generics (cmp/bytewise.rs' BytewiseEq<Rhs = Self>), where std's names
@@ -810,6 +860,11 @@
 (defn- own-attr? [node nm]
   (boolean (some #(when-let [u (:unparsed %)] (= nm (first (str/split u #"[ (=]")))) (:attrs node))))
 
+(defn- own-attr-value
+  "queue 542: an attribute's string value (`#[link_name = \"realname\"]`), else nil"
+  [node nm]
+  (some #(when-let [u (:unparsed %)] (when (= nm (first (str/split u #"[ (=]"))) (:eq-str %))) (:attrs node)))
+
 ;; C4 (2026-11-22): an enum's discriminant type and its variants' discriminants, as the helper writes them (tools/rsdump/front.rs:
 ;; `a.repr().int`'s type, else nil; `a.discriminants(tcx)`'s Display): rustc_middle's AdtDef::discriminants, an explicit
 ;; discriminant's value (its anonymous constant evaluated: literals, `-`, `<<`, `|`, the crate's integer constants), else the
@@ -959,14 +1014,20 @@
                    [ins out] (sig-sty (:id d) sig path-of)
                    preds (vec (keep #(clause->sty % path-of) (collect/explicit-clauses (:id d))))]
                (if (and (every? some? ins) out)
-                 (assoc-in acc [:fns p] {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
-                                         :inputs ins :output out :variadic false :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
+                 (assoc-in acc [:fns p] (cond-> {:generics (generics-sty g) :parent-count 0 :has-self false :predicates preds
+                                         :inputs ins :output out :variadic (boolean (:variadic sig)) :safety (if (= :unsafe (:safety sig)) "Unsafe" "Safe")
                                          ;; C4: `#[rustc_comptime]` (the intrinsics align_of, field_offset ..) a const fn too (is_const_fn)
                                          :abi (str "\"" (or (:abi sig) "Rust") "\"") :const (or (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_comptime"))
                                          ;; C4: is_promotable_const_fn and NEVER_UNWIND from the function's own attributes
                                          :promotable (and (= :const (get-in (:node d) [:header :constness])) (own-attr? (:node d) "rustc_promotable"))
-                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true})
-                 acc))
+                                         :nounwind (own-attr? (:node d) "rustc_nounwind") :native true}
+                                         ;; queue 542 (C6): a foreign function (no body; its symbol its link name), as std's interface
+                                         ;; does not write it: :foreign its link name (`#[link_name = ".."]`, else its own)
+                                         (:foreign (:node d)) (assoc :foreign (or (own-attr-value (:node d) "link_name") (second (:data d))))))
+                 (do (when (System/getenv "CORE_TRACE")
+                       (println "native-iface: fn" p "not written:" (pr-str (map-indexed (fn [i t] [i (when (nil? t) (pr-str (nth (:inputs sig) i nil)))]) ins))
+                                (when (nil? out) (str "output " (pr-str (:output sig))))))
+                     acc)))
              (and (#{"Struct" "Enum" "Union"} (:kind d)) (not (get (:adts si) p)))
              (let [g (collect/generics-of (:id d))
                    n (:node d)
@@ -985,7 +1046,13 @@
                    (if (and (= "Enum" (:kind d)) (nil? rd))
                      acc
                      (assoc-in acc [:adts p] (cond-> {:kind (:kind d) :generics (generics-sty g (:id d) path-of) :parent-count 0 :has-self false :variants variants :native true}
-                                               rd (merge rd)))))
+                                               rd (merge rd)
+                                               ;; queue 542 (C6): a dependency's `#[repr(C)]` struct or union (libc's `s! { .. }`, its
+                                               ;; repr from the macro, which mono's source reading does not see), as mono's adt-repr
+                                               ;; reads :repr "C"; std's own crates keep the helper's shape (no repr(C) in it)
+                                               (and (some #{*crate*} dep-crates) (#{"Struct" "Union"} (:kind d))
+                                                    (some #(and (string? %) (= "ReprC" %)) (mapcat :toks (:attrs n))))
+                                               (assoc :repr "C")))))
                  (do (when (System/getenv "CORE_TRACE")
                        (println "native-iface: ADT" p "not written:"
                                 (pr-str (for [f (:fields (:data n))] [(:ident f) (collect/type-of (some #(when (and (= (:id d) (:parent %)) (= "Field" (:kind %)) (= (:ident f) (second (:data %)))) (:id %)) (collect/defs)))]))
@@ -1275,7 +1342,9 @@
                        (:call-span m) (#(let [cs (:call-span %)
                                               site (ex/virtual-cause cs)
                                               o (ex/virtual-origin cs)
-                                              src (fn [^String f] (if (str/starts-with? f "/") f (str rustc-src-prefix f)))]
+                                              src (fn [^String f] (if (str/starts-with? f "/") f (str rustc-src-prefix f)))
+                                              _ (when (System/getenv "RF_CALLLOC_TRACE")
+                                                  (println "call-loc-trace" (pr-str cs) (pr-str site) (pr-str o) (ex/root-span? cs)))]
                                           (cond-> (dissoc % :call-span)
                                             (and site tc/*root-file*) (assoc :call-loc [(src tc/*root-file*) (site 0) (site 1)])
                                             ;; a call written in the body's own file: its own place there
@@ -1289,7 +1358,8 @@
                                             (assoc :call-loc [(src tc/*root-file*) (o 0) (o 1)])))))]
                (if m (with-meta y m) y))
     (vector? x) (let [y (mapv externalize x)] (if (meta x) (with-meta y (cond-> (meta x) (:tc (meta x)) (update :tc ext-ty))) y))
-    (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data} k))]
+    ;; queue 565: a body's :drop-spans (build's, its own file's [line col]) stay out: the program's drops alone take them
+    (map? x) (into {} (for [[k v] x :when (not (#{:def :stages :alloc-data :drop-spans} k))]
                         [k (if (#{:local-tys} k) (mapv ext-ty v) (externalize v))]))
     :else x))
 
@@ -1303,6 +1373,23 @@
              :when (and (number? d) (empty? as))]
          d)))
 
+(defn- deferred-static-ids
+  "queue 542 (C6): the crate's statics FORMS point at with their value deferred (build's `static: PATH, deferred` allocations),
+  by their local def ids, so that export-consts exports their initializers' bodies (the run evaluates them: build-run's
+  eval-static-body)"
+  [forms]
+  (let [ps (set (for [x (tree-seq coll? seq forms)
+                      :when (string? x)
+                      :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" x))]
+                      :when p]
+                  p))]
+    (if (empty? ps)
+      #{}
+      (set (for [d (collect/defs)
+                 :when (str/starts-with? (str (:kind d)) "Static")
+                 :when (ps (binding [collect/*in-value* true] (collect/print-def-path (:id d) [])))]
+             (:id d))))))
+
 (defn- export-consts
   "queue 462 (448-4 (a) 5, DECISION 448-3 (a)): the bodies of the crate's constants a built body R names by a local def id,
   each built (construct_const) and exported as a body is, with the constants they name in turn (three levels), {def-path
@@ -1311,7 +1398,7 @@
   constant that does not build is left out (the body stays refused, as before)"
   [r]
   (try
-  (loop [todo (local-const-ids [r]) seen #{} acc {} depth 0]
+  (loop [todo (into (local-const-ids [r]) (deferred-static-ids [r])) seen #{} acc {} depth 0]
     (if (or (empty? todo) (> depth 2))
       acc
       (let [built (for [id todo
@@ -1325,7 +1412,7 @@
                         :when body]
                     [id (def-path-string id) body r])
             seen (into seen todo)]
-        (recur (remove seen (local-const-ids (keep #(nth % 3) built)))
+        (recur (remove seen (into (local-const-ids (keep #(nth % 3) built)) (deferred-static-ids (keep #(nth % 3) built))))
                seen
                (into acc (for [[_ p body] built] [p body]))
                (inc depth)))))
