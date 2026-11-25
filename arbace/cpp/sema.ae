@@ -4653,6 +4653,20 @@
     (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true :cx/sure true :cx/at (some-> *ce-pos* deref)}))
     (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true}))))
 
+;; (cpp-def, the checker: [expr.eq]/3, two functions' addresses compared by == or != -- each operand a function's name, its
+;; function-to-pointer conversion -- equal when they are one function's: 1 or 0, else nil; cpp1y/constexpr-89074-3.C's
+;; `fn1 != fn1`, `fn1 == fn2`)
+(declare checking?)
+(defn- ce-fn-cmp [e]
+  (when (and (checking?) (#{"==" "!="} (:o e)))
+    (let [f (fn f [x] (cond (not (map? x)) nil
+                            (= :fnaddr (:op x)) (when (and (:fn x) (nil? (:e x))) (:fn x))
+                            (and (= :cast (:op x)) (= :noop (:ck x))) (f (:e x))
+                            :else nil))
+          a (f (:l e)) b (f (:r e))]
+      (when (and a b)
+        (if (= (= a b) (= "==" (:o e))) 1 0)))))
+
 (defn- not-constant [& msg] (when (System/getenv "CPP_NC_STACK") (.printStackTrace (Exception. ^String (apply str msg)))) (throw (ex-info (apply str "not a constant: " msg) {:codegen/not-constant true})))
 
 (defn- ce-ptr?
@@ -5123,7 +5137,7 @@
                                  "%" (if (zero? b) (if (checking?) (ub! e "division by zero") (not-constant "division by zero")) (if u (Long/remainderUnsigned a b) (rem a b)))
                                  "<<" (bit-shift-left a b) ">>" (if u (unsigned-bit-shift-right a b) (bit-shift-right a b))
                                  "&" (bit-and a b) "|" (bit-or a b) "^" (bit-xor a b)))))))
-       :cmp (let [a (ev (:l e)) b (ev (:r e))
+       :cmp (if-some [r (ce-fn-cmp e)] r (let [a (ev (:l e)) b (ev (:r e))
                   ;; (CP374 (a): pointers of one array by their indices; a pointer and a null pointer unequal)
                   ;; (CP378 (a): pointers to objects equal when they locate the same subobject)
                   a (ce-res a) b (ce-res b)
@@ -5131,12 +5145,34 @@
                               (do ;; (cpp-sweep: [expr.eq]/3.1 as below, two local arrays' elements by their cells)
                                   (when (and (checking?) (not (identical? (::cell a) (::cell b))))
                                     (let [ix (fn [l] (let [p (::path l) v (try @(::cell l) (catch Exception _ nil))]
-                                                       (when (and (= 1 (count p)) (integer? (first p)) (vector? v)) [(long (first p)) (count v)])))
+                                                       (when (and (= 1 (count p)) (integer? (first p)) (or (vector? v) (::arr-n l)))
+                                                         [(long (first p)) (or (::arr-n l) (count v))])))
                                           [ia na] (ix a) [ib nb] (ix b)]
                                       (when (and ia ib (or (and (= ia na) (zero? ib)) (and (= ib nb) (zero? ia))))
                                         (ub! e "a pointer past the end of an array compared with another array's first element is not a constant expression"))))
+                                  ;; (cpp-def, the checker: two string literals' characters whose suffixes are the same may be one
+                                  ;; object's, [lex.string]/9 with [intro.object]/9: unspecified, no constant; :cmp's pointers' rule)
+                                  (when (and (checking?) (not (identical? (::cell a) (::cell b))) (::lit-chars a) (::lit-chars b)
+                                             (= 1 (count (::path a))) (= 1 (count (::path b))))
+                                    (let [ia (long (first (::path a))) ib (long (first (::path b))) xa (::lit-chars a) xb (::lit-chars b)]
+                                      (when (and (< ia (count xa)) (< ib (count xb)) (= (subvec xa ia) (subvec xb ib)))
+                                        (ub! e "pointers into string literals that may overlap compared"))))
                                   (if (and (identical? (::cell a) (::cell b)) (= (::path a) (::path b))) [0 0] [0 1]))
                               (and (or (ce-loc? a) (ce-loc? b)) (#{"==" "!="} (:o e)) (= 0 (if (ce-loc? a) b a))) [0 1]
+                              ;; (cpp-def, the checker: a local array's element against a pointer into another array, a string
+                              ;; literal's or a variable's: distinct objects unequal, [expr.eq]/3.1's past-the-end pointer of one
+                              ;; against the first element of the other unspecified, no constant: cpp1y/constexpr-89074-3.C)
+                              (and (checking?) (#{"==" "!="} (:o e)) (or (and (ce-loc? a) (ce-ptr? b)) (and (ce-ptr? a) (ce-loc? b))))
+                              (let [[l q] (if (ce-loc? a) [a b] [b a])
+                                    pth (::path l) cv (try @(::cell l) (catch Exception _ nil))
+                                    [il nl] (when (and (= 1 (count pth)) (integer? (first pth)) (vector? cv)) [(long (first pth)) (count cv)])
+                                    iq (long (::i q))
+                                    nq (try (count (ce-elems q)) (catch Exception _ nil))]
+                                (cond (identical? (::cell l) (::base q)) (if il [il iq] (not-constant "a pointer to an object compared"))
+                                      (and il nq (or (and (= il nl) (zero? iq)) (and (= iq (long nq)) (zero? il))))
+                                      (ub! e "a pointer past the end of an array compared with another array's first element is not a constant expression")
+                                      (and il nq) [0 1]
+                                      :else (not-constant "a pointer to an object compared")))
                               (or (ce-loc? a) (ce-loc? b)) (not-constant "a pointer to an object compared")
                               (and (ce-ptr? a) (ce-ptr? b))
                               (if (ce-same-base? a b) [(::i a) (::i b)]
@@ -5148,6 +5184,13 @@
                                                    (let [end? (fn [p] (try (= (long (::i p)) (count (ce-elems p))) (catch Exception _ false)))]
                                                      (or (and (end? a) (zero? (long (::i b)))) (and (end? b) (zero? (long (::i a)))))))
                                           (ub! e "a pointer past the end of an array compared with another array's first element is not a constant expression"))
+                                        ;; (cpp-def, the checker: [lex.string]/9 with [intro.object]/9, two string literals' objects may
+                                        ;; overlap, so pointers into them whose suffixes are the same characters, `&"abcde"[3]` and
+                                        ;; `&"fabcde"[4]`, may be equal: unspecified, no constant; cpp1y/constexpr-89074-3.C's f7)
+                                        (when (and (checking?) (::lit a) (::lit b) (vector? (::base a)) (vector? (::base b)))
+                                          (let [ia (long (::i a)) ib (long (::i b)) xa (::base a) xb (::base b)]
+                                            (when (and (< ia (count xa)) (< ib (count xb)) (= (subvec xa ia) (subvec xb ib)))
+                                              (ub! e "pointers into string literals that may overlap compared"))))
                                         [0 1])
                                     (not-constant "pointers into different arrays compared")))
                               (or (ce-ptr? a) (ce-ptr? b))
@@ -5157,7 +5200,7 @@
                         (cond (or (wide-value? a) (wide-value? b)) (compare (bigint a) (bigint b))
                               (or (abi/signed? (:ct e)) (wide? (:ct e))) (compare (long a) (long b))
                               :else (Long/compareUnsigned (long a) (long b))))]
-              (if (case (:o e) "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) 1 0))
+              (if (case (:o e) "<" (neg? c) ">" (pos? c) "<=" (<= c 0) ">=" (>= c 0) "==" (zero? c) "!=" (not (zero? c))) 1 0)))
        :land (if (and (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
        :lor (if (or (not (zero? (ce-num (ev (:l e))))) (not (zero? (ce-num (ev (:r e)))))) 1 0)
        :cond (if (zero? (ce-num (ev (:c e)))) (ev (:else e)) (ev (:then e)))
@@ -5463,6 +5506,13 @@
                       (let [xs (mapv el (:items i))]
                         {::base (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill i)))) ::i 0})
                       (not-constant "the decay of a global array")))
+                  ;; (cpp-def, the checker: an array of static storage duration not usable in constant expressions, its address
+                  ;; alone -- [expr.const]/13's address constant: elements' addresses formed and compared, none read -- a pointer into
+                  ;; its unknown object, *ce-unknown*'s, its bound kept: cpp1y/constexpr-89074-3.C's `&a[0] == &v[4]`)
+                  (and (checking?) (= :var (:op a)) (not (contains? env (:id a)))
+                       (let [v (var* (:id a))] (and v (not (abi/ref? (:ty v))) (:n (abi/unq (:ty v))) (#{:global :member-static} (:storage v)))))
+                  (let [n (long (:n (abi/unq (:ty (var* (:id a))))))]
+                    {::base (assoc (ce-unknown-loc [:var (:id a)]) ::uvar (:id a) ::arr-n n) ::i 0 ::n n})
                   ;; (h-cpp-consteval: an array subobject, a member's, an element's: its location)
                   (#{:field :deref :base-lv :reinterpret-lv} (:op a))
                   (let [l (ce-lv a env) n (:n (abi/unq (abi/non-ref (:ty a))))]
@@ -6013,7 +6063,10 @@
                    ;; (an element of a local array in its cell; of a string literal, its characters, in a cell of their own:
                    ;; a reference bound to one, char_traits' eq(const char_type&, const char_type&))
                    (ce-ptr? p) (let [b (::base p)]
-                                 (if (ce-loc? b) (update b ::path conj (::i p)) {::cell (if (vector? b) (atom b) b) ::path [(::i p)]}))
+                                 (if (ce-loc? b) (update b ::path conj (::i p))
+                                     (cond-> {::cell (if (vector? b) (atom b) b) ::path [(::i p)]}
+                                       ;; (cpp-def: a string literal's characters, for the overlap rule of :cmp)
+                                       (and (vector? b) (::lit p)) (assoc ::lit-chars b))))
                    :else (not-constant "an object through a pointer")))
     :field (update (ce-lv (:obj e) env) ::path conj (:i e))
     ;; (cpp-vec: a vector's element, its lanes a vector as an array's elements)
