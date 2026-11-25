@@ -11851,3 +11851,13 @@ constexpr-asm-3); the time was about twenty checks' own context-carrying walks, 
 `reaches-fn KINDS` and `walk-kinds` let each of 21 costly checks skip the subtrees that hold none of the kinds it acts on, its
 context still from the ancestors it visits. Every check's output and Sema's equal byte for byte before and after on 414 rows
 (.tmp/q580/dump-*); the checks over a `<string>` unit about 10x cheaper (constexpr-asm-3 203 s -> 22 s); constexpr-asm-3 an own pass.
+
+## As built: 588, a concept's requirement looked up at its definition (2026-11-25; queue 588, branch `588-cpp-concept-lookup` on `cpp-vm-1125` `df905a552`)
+
+584-1 (a), the user's: in a main file's concept, the constraint-expression's names are bound at the concept's definition
+([temp.res.general]/6), the unqualified name of a dependent call looked up there and by argument-dependent lookup at the point of
+instantiation ([temp.dep.candidate]/1). template.ae: the concept's `:cx-cutoff` (its end), carried by the scope its satisfaction
+evaluates in and by `*cx-concept-cutoff*`; type-constraints-satisfied? in the constrained template's own context. sema.ae: const-int,
+atom-types-check and constraint-satisfied? honor the scope's cutoff; ADL-found templates all dropped make "no viable function";
+at the concept's cutoff a call with no candidate is a sure substitution failure. cpp2a/concepts-recursive-sat3.C (foo(0): Fooable<int>
+false, "no matching function") and concepts-var-templ1a.C to own pass; sat2, sat5 and concepts-pr88395 keep their cycles.
