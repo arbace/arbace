@@ -21874,3 +21874,179 @@ touches; one ungated typeck change for probing (it is rustc's rule), gated to ke
   files, 2,882 files: 2,824 pass, template/array9.C moved, none lost. Recorded from it (`--judge --record`): array9 to own pass.
   `bin/reap --record`: C++ read 6,090 / 0 / 194 unchanged (array9 already passed by clang's record); `bin/crops-score --record`
   unchanged. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+## 2026-11-24 — ppx_expect on oi, cycle 2 in progress: the staging for S2 and S3 (queue 539, VM)
+
+Queue 547, cycle 2, stopped at the hand-back with runs pending.
+- base_load's run, pending from cycle 1, never ran its program. Its C stubs' node build had been killed while musl's forms cache
+  was being read again (that cache's key had moved since 11-23). `bin/ci musl ensure` read it again (CI_THREADS=7, about 25 min).
+- suite_dump_native gets OI_DUMP_CACHE=DIR, set by default for bin/oi ppx's programs. Each unit's outputs are kept under a key
+  chained from the earlier units' key, the native library's key, the flags, the libraries, and the unit's own file and .mli. A program
+  whose units begin as another's then types only from the point where they differ: base alone takes about 50 min to type, and it is
+  shared by base_load, the drivers and the test program. The alternative, retyping per program, costs about an hour a program.
+- prep's build-unit: a library whose dune file has `(preprocess (pps ...))` gets the text its driver wrote on oi, from
+  OI_PPX_PP/PKG/REL. It fails when that text is missing. suite_needs_build sends such units to build-into.
+- `bin/oi ppx pp [DRIVER...]` runs over test/ocaml/ppx-pp.tsv's rows (DRIVER PKG LIB ARGS FILES).
+  - It runs each driver on oi as dune does: `--cookie library-name="LIB"`, `-corrected-suffix .ppx-corrected -diff-cmd -`, and
+    `--impl` or `--intf`. Dune's -dump-ast is left out, so the text is printed.
+  - The run is in a copy of the package, so units keep their own locations. `@with=` puts a rule-made file beside them
+    (jst-config's config.h).
+  - The libraries that dune preprocesses with (pps ppxlib.metaquot ppxlib.traverse) take the metaquot driver, because none of their
+    files derives traverse.
+- `bin/oi ppx jst-config` ports jst-config's discover.ml, held to its SHA-256.
+  - Each of its C programs is built for oi's own C target by test/ocaml/capi/cnodes.ae --program; a build that succeeds sets that
+    switch. C_define.import is done as `#ifndef N #error`.
+  - The header is written as dune-configurator's gen_header_file writes it. That format is recalled from memory: dune-configurator is
+    not in the pinned set (a Low).
+- cstubs_nodes takes -IDIR words, whose headers go into its key: time_now's stubs include config.h and jane-street-headers'
+  ocaml_utils.h.
+- New rows in ppx-programs.tsv, made by scratch tooling (.tmp/q539/547/rows/compose.py over base_load's and metaquot_driver's units,
+  with wsort.py's link order):
+  - time_now_driver: D1, ppx_base's rewriters plus ppx_optcomp and dune's ppx main (test/ocaml/opam/ppx_driver.ml);
+  - expect_driver: D2, ppx_expect with ppx_inline_test, its libname and ppx_here's expander, plus the runtime libraries it links;
+  - expect_tests: S3, re's lib_test/expect as the wrapped library re_tests over re_private (re's lib), linked with the runtimes and
+    ppx_expect's evaluator. Its main is dune's generated `let () = Ppx_inline_test_lib.exit ();;`
+    (test/ocaml/opam/inline_test_main.ml). It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`.
+- None of these rows has run yet. prep.ae and bin/oi are in the native key, so the library was rebuilt and the chain
+  (.tmp/q539/547/chain1.sh) was running at the hand-back.
+
+## 2026-11-25 — ppx_expect on oi done: S1's base_load, S2's drivers, S3's re/expect pass (queue 539, VM)
+
+Queue 547, cycle 2, continued from 1387eccfd. Each item below has its own commit, and each typer fix has a repro in test/ocaml/typer-repros.
+
+- **S1's base_load**: status 0, "loaded". Three problems stood in the way, fixed in this order:
+  - OI_DUMP_CACHE's key chain broke under set -e and pipefail;
+  - base's stubs needed caml/hash.h, caml/backtrace.h, caml/version.h, emmintrin.h's four SSE2 intrinsics, ARCH_INT*_TYPE and a
+    weak CAMLweakdef;
+  - jst-config's thread_id test named its header by an absolute path, which repr/c's preprocessor joins to each search directory.
+    It now names a copy by its file name.
+- **S2, the drivers**:
+  - The metaquot driver rewrote 37 expander and rewriter files.
+  - D1 (ppx_base plus ppx_optcomp) rewrote time_now. `[%%import "config.h"]` selected the 64-bit, POSIX-timer branch.
+  - D2 (ppx_expect) rewrote re's 28 test files.
+  - Typing the drivers' extra units showed six typer gaps, fixed as c33 (record `with` takes the expected type first), m7 (open
+    brings classes), c34 (no alias to a functor parameter's submodule), m8 (classes' object types get their module's path in its
+    components), c35 (with-constraint on a submodule's type) and c36 (rows in pattern mode reified into an equation).
+  - typer-check stays 79 of 79, and the repro runner passes.
+- **S3, ppx_expect's runtime stubs on oi's C path**:
+  - crt's HostFds: close, lseek, dup, dup2 and dup3 on the host's descriptors for the standard streams and for descriptors the C
+    program did not open itself.
+  - A channel crosses to C as a struct channel holding its fd and offset.
+  - caml_sys_error was added.
+  - The alternative was oi-native implementations of the four stubs, as ppx_expect's runtime.js does for js_of_ocaml. It was not
+    taken: the task asked for the C path, and oi's channels already write the host's descriptors.
+- **Then four faults, each found by the run**:
+  - capi's mlvalues.h did not include config.h. time_now's caml_alloc_int63 therefore boxed an int64 of twice the clock. Probed with
+    a small program: Time_now now prints the clock.
+  - String.unsafe_get past a string's end panicked in oi. OCaml reads the block's padding there, and re's Stream.feed relies on it.
+    oi now returns the padding.
+  - The runner must run in the library's directory, where ppx_expect reads the tests' sources (`@cwd=`).
+  - Exception names: an A__b unit's exception is A.B.E when A aliases it (Out_type.rewrite_double_underscore_paths beyond Stdlib__).
+    re_private and re_tests, both main-less, are now staged as dune does: the alias module Lib first, opened by the modules.
+- **The judgment**: `-diff-cmd -` makes ppx_expect write every test file's corrected text, so the check is each .corrected equal to its
+  file.
+- **The result** (`bin/oi ppx expect`): re/expect passes, 27 of 27 files. The control, test_re.ml's first `[%expect]` altered and
+  rewritten again on oi, differs.
+- **Checks**: oi's 38 C-API programs (the run corpus's @cstubs rows), `bin/oi check --only-list`, all pass on the native path after the
+  header changes.
+- **Records**: the suite's opam/re/expect row stays "class". How a ppx program enters the records is the user's DECISION, in the report.
+
+## 2026-11-25 — re/expect's own record, read by reap's OCaml eval cell: DECISION 547-1 (b) (queue 547, VM)
+
+DECISION 547-1 was how re's lib_test/expect, which passes on oi through ppx_expect's driver (`bin/oi ppx expect`, the entry above),
+enters the records. The user's answer, 2026-11-25 (the queue's tasks/ANSWERS.md): (b), "its own record, `bin/oi ppx expect --record`
+-> test/ocaml/check-ppx-oi.edn, read by reap's OCaml eval cell". The alternatives were (a), making opam/re/expect a run row of the suite
+corpus, so that every oi suite check would need the hours-long ppx chain first, and (c), keeping the class and naming the pass in its
+reason only, outside the records.
+
+- `bin/oi ppx expect --record` (bin/lib/oi/ppx.bash, ppx_expect_record) writes test/ocaml/check-ppx-oi.edn, `[PROGRAM RESULT REASON]` as
+  check-suite-oi-native.edn's rows. It writes only from a passing whole run, with re/expect passing and the negative control differing;
+  any other run records nothing and says so.
+- reap (test/reap/main.ae): a source's `:override {:file F :what W}` puts F's rows in place of the source's rows of the same ids
+  (override-apply), before the cell's classes judge them. A pass counts as a pass. A non-pass is an entry of its own result and reason,
+  judged like any other row. A missing F, or an id that F holds and the source does not, is a problem. Three self-test cases were added
+  (11 in all). test/reap/cells.edn gives the OCaml eval cell's suite source `:override` on check-ppx-oi.edn. The alternative was a third
+  source of the cell: it would count opam/re/expect twice, once as the suite row's class and once as a pass. Reusing `:other-level`,
+  AOT's rule for classed cases another level passes, was also set aside: it can take out only classed cases, so a failing ppx row would
+  leave the class standing.
+- The record comes from one whole chain in this worktree. The pinned OCaml and opam tarballs were copied from 548's worktree and checked
+  by their pins. The dump cache, keyed by the native library's key and each unit's text, was copied as a seed. The chain was
+  `bin/ci musl ensure`, `bin/oi ppx gen`, `bin/oi ppx jst-config`, `OI_TIMEOUT=600 bin/oi ppx pp` (67 files, 0 failures) and then
+  `OI_TIMEOUT=1200 bin/oi ppx expect --record`. re/expect passes, 27 files' corrected text equal to the file. The control, test_re.ml's
+  first `[%expect]` altered, differs in test_re.ml.corrected, as a control must. The record's one row is `["opam/re/expect" "pass" ""]`.
+- bin/reap at the base, 6e6290954: 56 of 56 cells, 0 problems, OCaml eval 604 / 2 / 1. With the override and the record, OCaml eval is
+  605 / 1 / 1. The suite source has 126 passes and 6 not; the class opam-not-run drops from 2 to 1, leaving sexplib0_test. The judgment
+  then differed from test/reap/matrix.edn (5 problems), so `bin/reap --record` and `bin/crops-score --record` (OCaml's completeness
+  0.9602 to 0.9606) were rerun. After them, bin/reap reports 0 problems, `bin/crops-score --judge --strict` 0 problems and
+  bin/records-check 0.
+- The survey's "As built: ppx_expect on oi" Records bullet now describes the record.
+
+## 2026-11-25 — ppx_jane on oi: sexplib0's test library passes by its own expect blocks (queue 548, VM)
+
+Queue 548 (T3 of DECISION 539b-1), on 547's head 6e6290954. Survey: doc/ocaml/OCAML-SURVEY.md, "As built: ppx_jane on oi".
+
+- **Drivers**: seven rows of test/ocaml/ppx-programs.tsv (traverse_driver, base_mq_driver, log_mq_driver, splittable_random_driver,
+  base_quickcheck_driver, sexplib0_test_driver, jane_driver), each a library's `(pps ...)`, composed from D1's units (less
+  ppx_optcomp) so the typed prefix is shared by OI_DUMP_CACHE's chained key. The rows are composed by scratch tooling over 547's
+  mk.py (dune's link order by the host's ocamldep, as 547's). A driver per pps set was kept where a superset changes the output:
+  jane_driver first rewrote splittable_random and base_quickcheck, and its ppx_module_timer and ppx_expect added per-file code
+  (Ppx_module_timer_runtime, Ppx_expect_runtime) dune's build does not; those two got their own drivers. Where the superset only
+  adds metaquot (base_mq_driver for ppx_base's libraries) or ppx_base's derivers (every driver's D1 prefix), the outputs are dune's,
+  as those act on their own syntax alone.
+- **ppx-pp.tsv**: 20 libraries under the metaquot driver, then each other library's rows; all 204 texts of the table written on oi (137 beyond 547's 67). An empty
+  .mli's text is empty (ppx_assert.mli): the pass check now takes the driver's status with the file present.
+- **format_lifter.ml**: ppx_custom_printf's rule runs gen.ml, which needs the toplevel. Ported (test/ocaml/ppx/format_lifter.ae)
+  from camlinternalFormatBasics.mli's declarations with the toplevel's re-export equations; checked once against the host's
+  toplevel output (equal up to neutral_concat's tag order). First written into prep.ae: reverted, since arbace/repr/ocaml/*.ae is in
+  native_key and the edit invalidated the whole typing cache (the library was rebuilt, the cache then hit again).
+- **Typer gaps**, each committed alone with a repro that fails on the parent: c37 (a constructor's arguments under a tuple
+  constraint, ppx_log), m9 (module aliases kept by a destructive type substitution, base's Shadow_stdlib include), c38 (a
+  polymorphic annotation's `_` filled by the definition, parsexp). Gaps after the first were found by typing the staged units by
+  hand with the patched typer (547's type-one approach), so the full retyping ran once per batch.
+- **oi**: `&&`/`||` now keep a tail call in their second operand (sexplib0's must_escape over a 5 MB atom overflowed the stack).
+- **Result**: `bin/oi ppx expect sexplib0` passes (sexplib0_test.ml's corrected text equal to the file); the control (first
+  `[%expect]` altered, rewritten on oi) differs. `bin/oi ppx expect` takes re and sexplib0 (both by default).
+- **Records**: none changed; sexplib0_test stays "class" pending DECISION 547-1. The host's commands are in the report.
+
+## 2026-11-25 — sexplib0_test's own record beside re/expect's: OCaml eval 606 / 0 / 1 (queue 548 round 2, VM)
+
+547's follow-up 43efed387 (DECISION 547-1 (b), the user's: `bin/oi ppx expect --record` writes test/ocaml/check-ppx-oi.edn, which reap's
+OCaml eval cell reads over the suite rows through `:override`) merged into 548-ocaml-ppx-jane with a merge commit. The conflicts were
+bin/lib/oi/ppx.bash (548's table of expect libraries against 547's single program), this journal (both entries kept) and the survey.
+The record is now a row per library run (opam/re/expect, opam/sexplib0/sexplib0_test), written only when every one passes and each
+control differs; otherwise nothing is recorded. The alternative, a row per library whatever the other's result, was not taken: the
+brief and 547-1 (b) record from a passing whole run. The merge left native_key alone (bin/oi and arbace/repr/ocaml unchanged), so the
+typing cache stayed warm. One whole run, `OI_TIMEOUT=1200 bin/oi ppx expect --record`, passed both (re 27 of 27, sexplib0_test 1 of 1,
+both controls differ) and wrote the two rows. Then `bin/reap --record` and `bin/crops-score --record`: OCaml eval goes from
+605 / 1 / 1 to 606 / 0 / 1, the suite source from 126 / 6 to 127 / 5, and opam-not-run leaves the eval cell. `bin/reap` (56 of 56,
+0 problems), `bin/crops-score --judge --strict` (0 problems) and `bin/records-check` (9 pairs, 0 problems) pass.
+
+## 2026-11-25 — the ppx programs' record rerun by the weekly gate: ocaml-ppx-expect (queue 548 round 3, VM)
+
+The user's decisions of 2026-11-25:
+- 547f-1 (a): a night step outside the gate reruns test/ocaml/check-ppx-oi.edn, keyed on its inputs.
+- 547f-2 (a): the OCaml AOT cell is left alone (re/expect and sexplib0_test stay opam-not-run there) until the AOT level can run
+  the ppx programs.
+
+Done:
+- **The step** ocaml-ppx-expect in test/gate/steps.edn (beside ocaml-judges, in the crops' :ocaml list, a waiver among the controls).
+  - Its command: `bin/ci musl ensure`, `bin/oi ppx gen`, `jst-config`, `pp` (every text), then `bin/oi ppx expect --record` with the
+    record written aside, `OI_PPX_RECORD_OUT=$GATE_OUT/...` (new in bin/lib/oi/ppx.bash). The step then compares it with the
+    committed file (`cmp`).
+  - It fails when either library does not pass, when a control passes (nothing is recorded, so the cmp has no file) or when the
+    record differs. The checkout is never written.
+  - Its inputs: :ocaml (bin/oi, bin/lib/oi/, arbace/repr/ocaml/, test/ocaml/ with the ppx tables and the record), :ocaml-run (oi's Go
+    forms, the C API), :ocaml-capi (ppx_expect's and base's stubs on ci) and the corpora's pin.
+- **The tier is :weekly** (GD3), not the nightly one. The nightly tier holds every --full step, and the planner has no nightly-only
+  phase. A :weekly step with :also-changed would also run on plain --full. And a cold run is 3 to 4 hours on 4 cores, since each
+  change to the typer, oi or bin/oi rekeys the whole typing cache, which most nights' OCaml work would bring.
+  - The alternative was a planner change for a nightly-only phase. It was not taken: GD3 already names the weekly tier for long
+    keyed checks.
+  - Warm, the command took 58.7 min with a peak RSS of 1.22 GiB (:mem-gib 2, not heavy), and its record equalled the committed one.
+- **Plans**: `bin/gate --weekly --plan` runs it ("the weekly tier; key c41a0c7838b2, 1251 files; never passed"). The `--nightly`,
+  `--full` and essential plans do not list it. The audit was not run: strace over an hour of the step's thousands of processes would
+  take hours.
+
+## 2026-11-25 — the user's DECISION 548-1 (a) (queue 548, VM)
+
+548-1 (a): ocaml-ppx-expect stays in the weekly tier, skipped by key when its inputs are unchanged, in place of the nightly step
+547f-1 (a) named (bin/gate --nightly runs --full's phases; a nightly-only phase would need a planner change, not made).
