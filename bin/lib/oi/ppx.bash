@@ -149,11 +149,12 @@ cmd_ppx_expect() {
   find "$tree" -name '*.corrected' -delete 2> /dev/null || true
   res=$(ppx_run expect_tests); echo "$res"; v=$(ppx_expect_judge "$tree" "$res"); echo "expect_tests: $v"
   # the control
+  # (the driver typed first: suite_stage's loops are the caller's variables' too)
+  ppx_prepare expect_driver
   local cpp=$PPX/pp-control ctree=$PPX/work/re-control f=lib_test/expect/test_re.ml cv
   rm -rf "$cpp" "$ctree"; mkdir -p "$cpp"; cp -a "$OI_PPX_PP/." "$cpp/"; mkdir -p "$ctree"; cp -a "$OPAM/re/." "$ctree/"
   awk '!done && /\[%expect \{\|/ { sub(/\[%expect \{\|/, "[%expect {| CONTROL"); done = 1 } { print }' "$OPAM/re/$f" > "$ctree/$f"
   cmp -s "$OPAM/re/$f" "$ctree/$f" && die "ppx expect: the control's alteration changed nothing"
-  ppx_prepare expect_driver
   (cd "$ctree" && run_redirected "$PD_ENV" "$cpp/control.log" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $PD_TL $(cat "$PD/units.list") -- \
     --cookie 'library-name="re_tests"' --cookie 'inline_tests="enabled"' -corrected-suffix .ppx-corrected -diff-cmd - -o "$cpp/re/$f" --impl "$f") \
     || die "ppx expect: the control's rewrite failed: $(head -c 300 "$cpp/control.log")"

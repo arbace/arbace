@@ -14,6 +14,9 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <limits.h>
+/* (queue 547) and its config.h, as OCaml's does first: ARCH_SIXTYFOUR for a stub that reads it after <caml/mlvalues.h> alone
+   (jane-street-headers' ocaml_utils.h: caml_alloc_int63 is Val_long on 64 bits, else a boxed int64) */
+#include "config.h"
 
 #ifdef __cplusplus
 extern "C" {

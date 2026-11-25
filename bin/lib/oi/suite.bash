@@ -94,7 +94,7 @@ suite_stage() {
     # (the two queues composed: a wrapped library's unit that dune preprocesses is built first, by library into a directory beside DIR so
     # that two libraries' modules of one name stay apart, then staged as Lib__M with its open from the build's text)
     if [ ${#wbuild[@]} -gt 0 ]; then
-      local lib libs="" files w
+      local lib libs="" files w f
       for u in "${wbuild[@]}"; do lib=${u#@}; lib=${lib%%[/!]*}; case " $libs " in *" $lib "*) ;; *) libs="$libs $lib" ;; esac; done
       for lib in $libs; do
         w=$d.wbuild/$lib; mkdir -p "$w"; files=()
