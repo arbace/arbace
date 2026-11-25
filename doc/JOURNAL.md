@@ -22161,3 +22161,29 @@ and test/crops/scores.edn taken from next and recorded again (`bin/reap --record
   `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
 - mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
 Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
+
+## 2026-11-25: ocaml-aot, the WIP ports' regressions fixed (not yet recorded)
+
+The light run of 2026-11-24 (`.tmp/q/run1.sh`, judged, the main list `.tmp/q/main.txt`) passed five deferred rows
+(lib-runtime-events/test_instrumented, statmemprof/user_data_regression, callback/signals_alloc, lazy/minor_major_force,
+embedded/cmcaml), regressed lib-runtime-events/test_caml (pass -> timeout 120 s of CPU) and left statmemprof/custom failing; its suite
+list ran on an empty corpus. Fixes (bd672c9a7, c3d8d261b):
+- test_caml: `ExtRtEvents/start` set `ExtGc/memprofSampling`, which sends every allocation of the translated programs down
+  `memprofAlloc` (the ThreadLocal state, the simulated minor heap), so that the ring's allocation buckets were counted. The C runtime
+  counts them only in its instrumented variant (caml_ev_alloc and CAML_EV_ALLOC_FLUSH are no-ops otherwise): header.awk now puts
+  `O2J_RUNTIME_VARIANT=i` in the run's environment for `-runtime-variant=i` at the AOT levels (oi's level unchanged: its rows' key does not
+  move), and the ring counts, flushes and sets the sampling flag only then. Alternative: a cheaper bucket count beside memprofAlloc's
+  path (kept for later; the variant is what OCaml does).
+- statmemprof/custom: the AOT runtime had no custom-block sampling (info.source always Normal, so the tracker's `source <> Custom` filter
+  counted nothing). Ported oi's queue 523 (go/arbace/oi/ext_sys.ae `customMem`, `memprofCustom`, `memprofSampleW`): `ExtGc/customMem`
+  (custom_minor_ratio's minor collection, custom_minor_max_size's major blocks) and `memprofCustom` (the memory's words rounded up, no
+  header) from `caml_ba_create` (source Custom) and `Unix.map_file` (Map_file); an entry carries its source as an eighth field. Its output
+  is now the reference's, but at 182 s of CPU: `BigArray/create` filled 300,000 arrays of 256 elements one interpreted `aset` at a time;
+  an immutable zero (Double, Integer, Long) is now filled by `Arrays/fill` (fresh objects kept for int64, nativeint, complex): 111 s alone
+  (`.tmp/q/custom`), under the light level's 120 s cap with little room. If it times out in the check: a per-row CPU cap at the AOT level
+  as oi's `test/ocaml/oi-cpu-caps.tsv` (the user's decision of 2026-11-24 covers oi's level only) is a decision for the user.
+- `bin/lib/oi/suite.bash`'s corpus (since 8ce07bec1, on next): its file names used `$BASHPID` inside pipelines, where it is the
+  subshell's PID, so `cat` read two missing files and the suite's corpus was written empty (the opam rows went to a stray file). The PID
+  is taken once (`me`); the two-file awk there uses `FILENAME == ARGV[1]`. No suite record was written since 8ce07bec1.
+Merged mac/next 3a67d8dc2 (548's oi changes; the survey's two new sections kept). The rerun with `REC=--record .tmp/q/run1.sh`
+(O2J_JOBS=1 OI_JOBS=1) was cut by the host's reboots of 2026-11-25 before its first program; held by the coordinator (OOM).
