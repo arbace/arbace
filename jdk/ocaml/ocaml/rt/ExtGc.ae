@@ -440,8 +440,11 @@
         (cast Object/1 x))))
   (method ^:static mpInCb ^boolean [^Object/1 st] (.booleanValue (cast Boolean (aget st 1))))
   (method ^:static mpPush ^void [^Object/1 st ^long kind ^long n ^long size ^boolean major p r e]
+    (ExtGc/mpPushSrc st kind n size major p r e 0))
+  ;; (an entry's eighth field the allocation's source, info.source: 0 Normal, 2 Custom, 3 Map_file)
+  (method ^:static mpPushSrc ^void [^Object/1 st ^long kind ^long n ^long size ^boolean major p r e ^long src]
     (.add (cast ArrayList (aget st 0))
-          (new Object/1 [(Long/valueOf kind) (Long/valueOf n) (Long/valueOf size) (Boolean/valueOf major) p r e]))
+          (new Object/1 [(Long/valueOf kind) (Long/valueOf n) (Long/valueOf size) (Boolean/valueOf major) p r e (Long/valueOf src)]))
     (set! memprofPending (unchecked-inc-int memprofPending))
     (Rt/force))
   (method ^:static mpStatus ^long [p] (Rt/l (aget (cast Object/1 p) 2)))
@@ -467,6 +470,7 @@
         (set! minorUsed (unchecked-add minorUsed (unchecked-inc wosize)))
         (when (> minorUsed (Rt/l (aget gcControl 0)))
           (set! minorUsed (unchecked-inc wosize))
+          (set! customMinorExtra 0)
           (ExtGc/youngClear)
           (set! full true))
         (when (and youngTrack (some? v)) (.put youngSet v Boolean/TRUE)))
@@ -482,18 +486,45 @@
             (ExtGc/memprofRun))))))
   ;; the samples of an allocation of v by the profile p, its callback queued
   (method ^:static memprofDraw ^void [^Object/1 st p ^long wosize v]
+    (ExtGc/memprofDrawW st p (unchecked-inc wosize) wosize v (> wosize 256) 0))
+  ;; memprofDrawW: nw words sampled (a block's with its header; a custom block's memory alone, queue 523's memprofSampleW), reported as
+  ;; size wosize, from the source src (0 Normal, 2 Custom, 3 Map_file)
+  (method ^:static memprofDrawW ^void [^Object/1 st p ^long nw ^long wosize v ^boolean major ^long src]
     (let [lambda (Rt/d (aget (cast Object/1 p) 1)) ^:mutable n 0]
       (if (>= lambda 1.0)
-        (set! n (unchecked-inc wosize))
+        (set! n nw)
         (when (> lambda 0.0)
-          (set! memprofNext (- memprofNext (double (unchecked-inc wosize))))
+          (set! memprofNext (- memprofNext (double nw)))
           (loop []
             (when (<= memprofNext 0.0)
               (set! n (unchecked-inc n))
               (set! memprofNext (+ memprofNext (ExtGc/memprofGeom lambda)))
               (recur)))))
       (when (> n 0)
-        (ExtGc/mpPush st 0 n wosize (> wosize 256) p (if (nil? v) nil (WeakReference. v)) nil))))
+        (ExtGc/mpPushSrc st 0 n wosize major p (if (nil? v) nil (WeakReference. v)) nil src))))
+  ;; the custom blocks' memory (ocaml-aot, 2026-11-25; oi's customMem and memprofCustom since queue 523, statmemprof/custom): custom.c's
+  ;; caml_alloc_custom_mem of v, whose memory outside the heap is bytes: at most custom_minor_max_size bytes the block is the minor
+  ;; heap's and its memory counts towards a minor collection (custom_minor_ratio percent of the minor heap's bytes, then a collection at
+  ;; the next counted allocation), more the major heap's; then memprof.c's caml_memprof_sample_block of its memory (its words rounded
+  ;; up, no header) from the source Custom (2), or Map_file (3) for Unix.map_file's; nothing when no profile samples, or in a callback
+  (field ^:static ^long customMinorExtra 0)
+  (method ^:public ^:static customMem ^void [v ^long bytes]
+    (let [major (> bytes (Rt/l (aget gcControl 10)))]
+      (when (and (not major) (> bytes 0))
+        (set! customMinorExtra (unchecked-add customMinorExtra bytes))
+        (when (>= customMinorExtra (unchecked-divide (unchecked-multiply (unchecked-multiply (Rt/l (aget gcControl 0)) 8) (Rt/l (aget gcControl 9))) 100))
+          (set! customMinorExtra 0)
+          (set! minorUsed (Rt/l (aget gcControl 0)))))
+      (ExtGc/memprofCustom v bytes 2 major)))
+  (method ^:public ^:static memprofCustom ^void [v ^long bytes ^long src ^boolean major]
+    (when memprofSampling
+      (let [st (ExtGc/mpState) w (unchecked-divide (unchecked-add bytes 7) 8)]
+        (when (and (> w 0) (not (ExtGc/mpInCb st)))
+          (let [p (ExtGc/mpDomProf)]
+            (when (and (some? p) (== (ExtGc/mpStatus p) 0))
+              (ExtGc/memprofDrawW st p w w v major src)))
+          (when (> (.size (cast ArrayList (aget st 0))) 0)
+            (ExtGc/memprofRun))))))
   ;; a tracked value lives after System/gc: its weak reference not cleared (none: a value without an identity, taken as dead)
   (method ^:static mpAlive ^boolean [r]
     (and (some? r) (some? (.get (cast WeakReference r)))))
@@ -529,6 +560,7 @@
     (when memprofSampling
       (let [st (ExtGc/mpState)]
         (set! minorUsed 0)
+        (set! customMinorExtra 0)
         (when (or (> (.size mpMinor) 0) (and (> majors 0) (> (.size mpMajor) 0)))
           (System/gc))
         (ExtGc/memprofMinorGC st true)
@@ -582,7 +614,7 @@
         ;; a sample of a profile stopped or replaced since gets no callback (the block is not tracked)
         (when (and (identical? p (ExtGc/mpDomProf)) (== (ExtGc/mpStatus p) 0))
           (let [major (.booleanValue (cast Boolean (aget smp 3)))
-                info (Block. 0 (new Object/1 [(aget smp 1) (aget smp 2) (Long/valueOf 0) (Block. 0 (new Object/1 0))]))
+                info (Block. 0 (new Object/1 [(aget smp 1) (aget smp 2) (aget smp 7) (Block. 0 (new Object/1 0))]))
                 r (Rt/ap1 (aget tf (if major 1 0)) info)]
             (when (instance? Block r)
               (let [e (new Object/1 [p (aget smp 5) (aget (.-f (cast Block r)) 0) (Boolean/valueOf major)])]
@@ -606,6 +638,7 @@
     (.clear youngSet)
     (set! memprofPending 0)
     (set! minorUsed 0)
+    (set! customMinorExtra 0)
     (set! minorDue false)
     (.clear mpMinor)
     (.clear mpMajor)

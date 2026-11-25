@@ -523,8 +523,9 @@ END {
           if (f == "-I" && fl[q + 1] ~ /^@OCAMLSRCDIR@\//) { q++; continue }
           # -runtime-variant=i (queue 516, DECISION 511-2 (a)): the instrumented runtime, whose allocation buckets oi's ring emits
           # (ext_runtime_events.go's reAlloc) at oi's level, and since ocaml-aot (2026-11-24) the AOT levels' runtime's ring too
-          # (ExtRtEvents/alloc)
-          if (f == "-runtime-variant=i") continue
+          # (ExtRtEvents/alloc), told by O2J_RUNTIME_VARIANT=i in the run's environment: the AOT runtime counts the buckets only for
+          # the instrumented runtime, as the C runtime does (every allocation down the sampling path made test_caml time out)
+          if (f == "-runtime-variant=i") { if (aot != 0) env = env " O2J_RUNTIME_VARIANT=i"; continue }
           if (f == "-unsafe" || f == "-rectypes" || f == "-no-strict-formats" || f == "-strict-formats" || f == "-principal" || f == "-strict-sequence" || f == "-nolabels" || f == "-nopervasives" || f == "-no-alias-deps" || f == "-safer-matching") { flags = flags " " f; continue }
           cls("flags " val)
         }

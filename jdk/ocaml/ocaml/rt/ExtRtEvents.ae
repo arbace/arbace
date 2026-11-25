@@ -17,6 +17,10 @@
 (defclass ^:public ^:final ExtRtEvents
   (field ^:static ^boolean inited false)
   (field ^:static ^boolean enabled false)
+  ;; the instrumented runtime (-runtime-variant=i; bin/lib/oi/header.awk puts O2J_RUNTIME_VARIANT=i in the run's environment): only it
+  ;; counts the allocation buckets (caml_ev_alloc and CAML_EV_ALLOC_FLUSH are no-ops in the C runtime's other variants), so only its
+  ;; ring sends the translated programs' allocations down ExtGc/memprofAlloc (lib-runtime-events/test_caml timed out on that path)
+  (field ^:static ^boolean instrumented false)
   (field ^:static ^boolean paused false)
   (field ^:static ^String loc nil)
   (field ^:static ^:final ^ArrayList ring (ArrayList.))
@@ -36,6 +40,7 @@
     (when (not inited)
       (set! inited true)
       (set! t0 (System/nanoTime))
+      (set! instrumented (.equals "i" (System/getenv "O2J_RUNTIME_VARIANT")))
       (let [e (ExtCore/runParam 101)]
         (set! size (if (or (< e 0) (> e 30)) 65536 (bit-shift-left 1 e))))
       (when (some? (System/getenv "OCAML_RUNTIME_EVENTS_START"))
@@ -73,7 +78,7 @@
       (set! tail 0)
       (set! enabled true)
       (set! paused false)
-      (set! ExtGc/memprofSampling true)
+      (when instrumented (set! ExtGc/memprofSampling true))
       (ExtRtEvents/write 0 4 0 (ExtRtEvents/pid) 0 nil 1)))
 
   (method ^:static active ^boolean [] (and enabled (not paused)))
@@ -96,12 +101,12 @@
 
   ;; caml_ev_alloc: an allocation of wosize words counted in its bucket while the ring is active
   (method ^:public ^:static alloc ^void [^long wosize]
-    (when (and (> wosize 0) (ExtRtEvents/active))
+    (when (and instrumented (> wosize 0) (ExtRtEvents/active))
       (let [b (cond (< wosize 10) wosize (< (unchecked-subtract wosize 10) 90) (unchecked-add (unchecked-divide wosize 10) 9) :else 19)]
         (aset buckets (unchecked-int b) (unchecked-inc (aget buckets (unchecked-int b)))))))
   ;; caml_ev_alloc_flush: the buckets written as one EV_ALLOC (its payload a long/1 of the counts), then emptied but the first
   (method ^:static allocFlush ^void []
-    (when (ExtRtEvents/active)
+    (when (and instrumented (ExtRtEvents/active))
       (let [c (.clone buckets)]
         (loop [^int i 1] (when (< i 20) (aset buckets i 0) (recur (unchecked-inc-int i))))
         (ExtRtEvents/write (ExtRtEvents/dom) 3 0 0 0 c 20))))
