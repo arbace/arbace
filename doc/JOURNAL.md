@@ -22308,3 +22308,42 @@ invocation then names a macro the print does not define.
 - sqlite3.c moves from :eval-limits to :macro-context (CS82's class: a recovered invocation means another thing where the print
   stands). Its whole read is the main host's (the compiled build; on the VM the evaluated read is past the budget): `bin/repr-c
   roundtrip --corpus sqlite --record` with ARBACE_HOST_EXE set to the gate's executable.
+
+## 2026-11-25 — JCS51's last processor rows: t07544 and 555's t07545, t07546, t07552 (queue 575, VM)
+
+Branch `575-java-processor-rows`, rebased by the coordinator's word onto mac/train-4 5a4f7cddb (it holds 549b; the first merge of
+549b into next cad9434f5 was dropped). The six other :diag-processors rows (t07541, t07548, t07550, t07553, t07555, t07558) pass
+on train 3's tool and are the host's to record; this entry is the four left.
+- The tool: train-4's javac tool build stops in j2g on "Undeclared functional of class java.lang.System$Logger: not in the
+  declared edge" (queue 562's JMS4 System.Logger entered the world; jdk/edge.edn is the host's to record on the frozen JVM). So
+  the rows were proved on tools built from mac/train-3 2aeeffc77 with this branch's commits applied (scratch worktree
+  .tmp/q575/t3, `ARBACE_AOT=0 ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java`: no compiled reader, which
+  javac's diagnostics do not use; six rounds, 12-36 min each), each round's failure the next fix:
+  1. jrt: ClassLoader.getUnnamedModule (the application loader's the unnamed module Class.getModule answers, another loader's
+     its own) and Module.addExports (the module itself: nothing is encapsulated in the closed world), for
+     JavacProcessingEnvironment.initProcessorLoader's ModuleHelper.addExports under -XDaccessInternalAPI (t07545, t07546,
+     t07552). This is the shipped runtime's change 555-1's option (b) named; the user's (a) gave the rows to the processor
+     work, which needs it. TestClassLoaders checks both (`bin/jrt test --arch arm64 -run ...`, then the test alone).
+  2. The bytecode interpreter (arbace/lang/BytecodeCode.ae): a virtual call of an interpreted interface's method on an
+     object of the world asks the receiver class's method, then a proxy's handler (as CallV does since 25fa51e29, which the
+     bytecode path lacked: t07544's AbstractMethodError $Proxy0.names()), and a proxy's method by name and parameters when
+     the key's return type does not name it (t07545's enum E defined from bytes); Class.forName(String) by the caller's
+     defining loader (caller-sensitive: InheritedAnnotation on the processor's class path).
+  3. j2g: javac's AnnotationProxyMaker's three ExceptionProxies' generateException rooted (t07545, t07546, as 3860d35e1
+     rooted sun.reflect.annotation's); a cut class's superinterfaces in its ClassInfo and an annotation type's kind
+     KindAnnotation (Class.forName("java.lang.SuppressWarnings").asSubclass(Annotation.class), RoundEnvironment's
+     isAnnotation check: t07544); the language model's nine Preview visitors on class-supers in javac's tool world
+     (TestMissingElement's visitors extend them: t07552); Iface.super.m() of a world interface's default method from an
+     interpreted class through dyn's new dynIfaceDefaults table (Host.superCall: RoundEnvironment.super.
+     getElementsAnnotatedWithAny, t07544).
+  4. javac on Arbace's Main: a name that is not a .java file but a type's a class for annotation processing, as javac's
+     Option.SOURCEFILE takes it (@compile/process -proc:only Foo, t07544's last action); Main.ae read by `bin/repr-java
+     read-jdk --check --no-javac` of the overlay's seven files on the round-4 tool (the others as committed, but two
+     with-resources' ^:final from train-4's reader in FileManager.ae and CtSymFileManager.ae, left to the host's convert).
+- The rows: `bin/java-check --levels diagnostics --only 't07544|t07545|t07546|t07552'` on the last tool (key 1f506e46): 4 of 4
+  pass; the other 18 processing tests of the corpus pass on it too (no regression). Recorded with `--judge --partial --record`
+  in this tree; :diag-processors' tests the six, :diag-closed-world's why amended. `bin/reap --record` did not write (two
+  interp problems already on train-4, t04789 and t04809); crops-score not recorded for that reason; records-check 0 problems.
+- Alternatives: adding RoundEnvironment alone to a DynSub list (an interface has no DynSub); a variant of
+  initProcessorLoader skipping addExports (javac's code changed instead of the runtime's missing members); waiting for the
+  host's train-4 edge before any build (no proof until then).
