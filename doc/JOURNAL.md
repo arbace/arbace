@@ -20789,3 +20789,61 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24 — pyi: _pickle is CPython's own Modules/_pickle.c in the C world (queue 568, VM)
+
+Branch `568-py-pickle-c` from train-3 `2aeeffc77`, built the way queue 521 built `_datetime` (the user's decision of
+2026-11-22 reversing PY6g's DECISION 1; py-design-1124's D2). No hand port: CPython 3.14.10's `Modules/_pickle.c` (the
+tarball test/python/corpora.edn pins, `:cpython-3.14.10`) is compiled by ci into the world `ctypestest` and loaded as `_pickle`.
+
+- **The world.** `tools/pyi/clib/ctypestest/accel_pickle.c` includes `Modules/_pickle.c` (and its `clinic/_pickle.c.h`) with NDEBUG,
+  as the other accelerators' glue. `_pickle` is an extension module of CPython's (Py_BUILD_CORE_MODULE) that calls the internal
+  `_PyBytesWriter` (raw-unicode-escape): its functions are `Objects/bytesobject.c`'s own, lines 3528-3581 and 3618-3791 of the same
+  tarball, copied unchanged into the glue (the debug-only consistency check, 3582-3617, out under NDEBUG), with `Python/codecs.c`'s
+  `Py_hexdigits` (line 28). `pycapi.c` defines `_PyNone_Type`, `_PyNotImplemented_Type`, `PyEllipsis_Type` and
+  `PyPickleBuffer_Type`. The symbols the module needs were listed first by gcc (`nm -u` of the glue against the world's node
+  program and pyctypes' native table, dumped by a throwaway Go test): 19 functions and the five data symbols. The world built again
+  (`bin/pyi-clib build ctypestest`, Key f4b726d1..., 12.0 MB of node program, its cf2g aot forms; 1 h 03 min, 3.9 GB) by a copy of
+  bin/pyi-clib without `ARBACE_PATH_FIRST` (`.tmp/q568/pyi-clib-nopf`): on nx's stage 0 the checkout's builder still fails on
+  `Compiler$Dyn/hideMethod` (521's finding 7), so stage 0's embedded arbace/c built it, as 521's coordinator did; the host's
+  `bin/pyi-clib verify ctypestest` is the proof of the key.
+- **pyctypes** (`capi_pickle.go`, each after CPython's function of the same name): PyIter_Check, PyMemoryView_FromObject,
+  PyOS_double_to_string, PySys_Audit, _PyErr_FormatNote, _PyEval_GetBuiltin, _PyLong_NumBits, _PyLong_AsByteArray,
+  _PyLong_FromByteArray, _PyMem_Strdup, _PyObject_GenericGetAttrWithDict, _PySet_NextEntryRef, _PySet_Update,
+  _PySys_GetRequiredAttr, _PySys_GetSizeOf, _PyUnicode_Equal, _PyUnicode_EqualToASCIIString, _PyUnicode_InternMortal (sys.intern's
+  string, test_attribute_name_interning) and _Py_CheckRecursiveCall; `_pickle`'s 37 `_Py_ID` identifiers, their offsets gcc's
+  `offsetof` over `pycore_global_strings.h` (checked against 521's `isoformat`, 26848). The four types are bound (types.NoneType,
+  NotImplementedType, EllipsisType, pyi's PickleBuffer). The thread state is `sizeof(_PyThreadStateImpl)`, 936 bytes: the inline
+  `_Py_MakeRecCheck` of a Py_BUILD_CORE_MODULE module reads `c_stack_soft_limit` at 848, past the 256 bytes it had. A built-in's
+  handle is now a 64-byte PyCMethodObject (`writeCFunction`): `dump()` compares the bound `persistent_id` with its own C function
+  (`PyCFunction_GET_SELF`, `GET_FUNCTION`), which read past the 24-byte proxy head; the first probe faulted at 0x10. `m_ml` is the
+  world's own PyMethodDef (`cMethodDefs`, recorded by addCMethods and the module functions), else one synthesized per name.
+- **py.** `_pickle` is a lazy module of pyctypes; picklebuf.go's thin `_pickle` (queue 227) only under `PYI_C_ACCEL=0`
+  (DECISION 568-1 (a), the coordinator: kept as the fallback); `ExtPickleBufferType` exported.
+- **Forms.** py and pyctypes edited on their printed Go and read back (`.tmp/q568/readback.sh`, `readback-ctypes.sh`: bin/pyi
+  runtime read's steps for those two packages only, the printed tree's other packages being 554's).
+
+Alternatives considered: a hand port of `_pickle` in Go (refused by the task: no hand port); natives in Go for `_PyBytesWriter`
+(CPython's C is plain C over the bytes API the world already mirrors, so it is copied instead); a dict mirror for
+`PyDict_GET_SIZE` (not needed: queue 270's proxies already carry `ma_used`).
+
+Proofs (arm64 VM, AOT; eval needs the host's executable):
+- the probe `.tmp/q568/p/pk1.py` equals the host's CPython 3.14.10 line for line but for an address (protocols 0-5, C against
+  pure both ways, escapes, bytearray, PickleBuffer, file Pickler/Unpickler, the error messages, `__sizeof__`);
+- `bin/pyi check --aot --lib-test --fresh --only` test_pickle, test_copy, test_copyreg, test_shelve (whole modules; 28 min):
+  test_pickle 1,014 methods, 938 pass, 76 classed, 0 failing; test_copy 81/81 and test_copyreg 6/6 pass; the three controls fail as
+  they must. test_shelve: 187 pass, 79 failing, all "error locking protocol" (dbm.sqlite3, `:dbm-sqlite3-locking`'s cause on the
+  compiled level); its control with `PYI_C_ACCEL=0` (the pure pickler, `--fresh --only test_shelve`) fails the same 79 methods,
+  so they are not _pickle's: classed in `:dbm-sqlite3-locking`;
+- test_pickletools is not in the universe (CPython's recorded references hold no test_pickletools rows), so `bin/pyi check` drops it:
+  run on AOT by unittest with regrtest's default resources (`.tmp/q568/p/ptools.py`): 190 run, 0 failures, 0 errors, 14 skipped,
+  CPython 3.14.10's own numbers.
+
+`test/python/divergences.edn`: `:c-accelerators` loses 499 test_pickle rows (they pass on the C pickler, skip as CPython skips them,
+or are `:cpython-only`'s by its match) and keeps the 35 the eval record holds as an error, failure or skip until the host's eval run
+records test_pickle with the world; the three real gaps go to a new deferred class `:pickle-c-gaps` (a list cleared by Python code
+during batch_list, whose mirror's size C does not see; DumpPickle_CLoadPickle.test_optional_frames' fault at address 0, not
+reproduced by a probe; test_framed_write_sizes_with_delayed_writer past the 300 s limit); test_shelve's 79 join
+`:dbm-sqlite3-locking`. Judged again on the run (`--judge`): 6 modules, 1,408 methods, 1,253 pass, 155 classed, 0 failing (test_pickle
+938 pass, 76 classed: cpython-only 18, pickle-c-gaps 3, skipped-by-test 55), the controls failing as they must. No record written: there is no AOT lib-test record on arm64, and the eval record is
+the host's.
