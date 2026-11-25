@@ -8155,3 +8155,75 @@ run's errors came from a second `--only` run of the same worktree cleaning the s
 other way on the VM: test_deeply_nested_deepcopy is past 600 s with py interpreted (`:runner-limits`, `:slow-on-goi`: it passes on
 the main host's compiled runtime) and test_cyclic_gc fails whole and alone (`:finalization-collect`; the main host's whole-module
 runs failed it too).
+
+## As built: 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (2026-11-24, the Mac VM, queue 553; the user's decisions of 2026-11-23 on 537-5 and 537-6)
+
+**Subinterpreters (PEP 734, `concurrent.interpreters`).** The public package is CPython 3.14.10's own
+`Lib/concurrent/interpreters` (pure Python) over pyi's `_interpreters`, `_interpqueues` and `_interpchannels`, ported in queue 230
+("Design: 230", "As built: 230") with each interpreter's own module table, builtins, sys, importlib bootstrap, codecs, atexit,
+locale and the interpreter registers (`_csv`'s, `_asyncio`'s, monitoring's, the at-fork hooks) swapped by `interpSwitch`: an
+`isolated` interpreter's module state is its own, as `Py_mod_multiple_interpreters` modules have it in CPython; what stays process
+wide is immutable or identity bookkeeping (interned strings, small ints, static types, code objects) and the one GIL (230's
+DECISION: an `own` GIL is reported as configuration, isolation without parallelism). This task closes what `:subinterpreters` kept:
+
+- **The moment of a handle's death.** A stdlib interpreter (`_interpreters.create(reqrefs=True)`) ends when the last
+  `Interpreter` handle's `__del__` drops its reference (`decref`), and its items in queues and channels are unbound then (UNBOUND,
+  UNBOUND_ERROR's `ItemInterpreterDestroyed`, UNBOUND_REMOVE). CPython does it at `del interp` by reference counting; pyi's moment at
+  del (queue 222) asks Go's collector at a deletion within a budget of a tenth of the wall time and 50 ms, and past the budget the
+  death waited for the next collection. The rows' failures fit that: in test_interpreters' module runs the budget is spent
+  by the time TestQueueOps and TestSendRecv run, and `del interp` left the interpreter alive, while a probe alone passes (the
+  budget fresh; read, not measured on the main host). Now a deletion past the
+  budget while a subinterpreter is held by handles is owed (`xiDeathOwed`), and the operations whose answer depends on an
+  interpreter's being alive settle it first with one collection round (`xiSettleDeaths`: the queues' get, get_count, is_full,
+  list_all, the channels' recv, get_count, get_info, list_all, list_interpreters). A program with no subinterpreter never owes one;
+  the cost is one collection per owed deletion, at the next such operation.
+- **`_testbuffer`** is ci's since queue 456 (Modules/_testbuffer.c in the C world, its memoryview over Py_buffer since 473):
+  the three `:skipped-by-test` rows ("needs _testbuffer", "No module named '_testbuffer'") and test_buffer's 73 "ndarray object
+  required" rows in `:testcapi` are the 11-19 records night's, before 473; test_capi's two test_number rows and test_ctypes'
+  test_fortran_contiguous pass by id on the VM (their record rows move at the host's whole record, as test_buffer's).
+- **3.14's UTF-8 mode rule** (Python/preconfig.c's preconfig_init_utf8_mode): `sys.flags.utf8_mode` is `-X utf8[=0|1]`, else
+  `PYTHONUTF8` (0 or 1; -E and -I ignore it; another value a fatal error at start, as 3.15's already was), else 1 only under the C
+  or POSIX locale (LC_ALL, LC_CTYPE, LANG; musl's default C.UTF-8). pyi kept 1 before; under the runner's `LC_ALL=C.UTF-8`
+  it is now 0, as CPython's reference runs had it, so open()'s and TextIOWrapper's default encoding is the locale's
+  (`locale.getencoding()`, "UTF-8") and the three tests that skip under UTF-8 mode run and pass. The standard streams' errors
+  are unchanged (stdioConfig: 551's area); test_utf8_mode's test_stdio still wants surrogateescape under `-X utf8`.
+- **The children that are pyi (`:child-is-pyi`, 537-5), case by case:**
+  - test_posix's two test_close_file (posix_spawn with POSIX_SPAWN_CLOSE 0): Go's runtime opens /dev/null on a closed 0, 1 or 2
+    at its start (runtime.checkfds), so the child's `os.fstat(0)` succeeded. `bin/pyi python` sees descriptor 0 closed before
+    Go's runtime starts and says so (`PYI_STDIN_CLOSED`); the runtime closes 0 again before anything runs and `sys.stdin` is
+    None (create_stdio's is_valid_fd).
+  - test_subprocess' test_preexec_at_exit: `_posixsubprocess.fork_exec` raises subprocess_fork_exec_impl's refusals first: a
+    `preexec_fn` at the interpreter's shutdown is PythonFinalizationError "preexec_fn not supported at interpreter shutdown",
+    within a subinterpreter RuntimeError (then pyi's own refusal: no fork).
+  - test_unicodedata's test_unicodedata_unload_reload: the namereplace handler imports unicodedata once per interpreter
+    (`_PyUnicode_GetNameCAPI`'s PyCapsule_Import) and keeps it, so `del sys.modules['unicodedata']` finds it there.
+    test_failed_import_during_compiling: compile(), exec() and eval() of a source holding `\N{` ask the same capsule
+    (compileSourceNamed), as CPython's tokenizer does when it decodes the escape, and when unicodedata does not import a copy
+    of the source whose every `\N{` opens a name no character has is compiled: a decoded escape fails there ("unknown Unicode
+    character name"), a raw string's, a bytes literal's or a comment's text does not, and the failure is the parser's SyntaxError
+    "(unicode error) \N escapes not supported (can't load unicodedata module)" at the escape's place (the compiler's host
+    decodes the names it knows itself, so the runtime sees no escape otherwise; the names it leaves, the IR's `{:named}` parts,
+    ask the capsule as the code loads under compile(), exec() and eval()). A module an import loads is compiled code, as a .pyc
+    is for CPython, and asks nothing (a first version asked at every load: with `sys.modules['unicodedata'] = None` every
+    module holding an escape then failed to load and the child grew past the runner's 8 GB cap). A source with `\N{` only in
+    a raw string or a comment imports unicodedata where CPython would not (sys.modules gains it; nothing else changes).
+  - test_marshal's test_unorderable_set_items_in_code: the bytecode view's add_const keyed constants by their repr, so the two
+    NaN complex numbers `{(nan)*1j, (nan)*2j, 1.5}` folds became one; `_PyCode_ConstantKey` keys a float or complex with a NaN
+    part by the object itself, so a NaN constant now matches only itself (`bcConstNaN`).
+  - test_os' URandomFDTests (test_urandom_failure here, fd_closed and fd_reopened of `:runs-where-cpython-skips`): sysconfig's
+    `HAVE_GETRANDOM`, `HAVE_GETRANDOM_SYSCALL` and `HAVE_GETENTROPY` are 1, as CPython's build on Alpine has them (os.urandom is
+    Go's crypto/rand, the getrandom system call), so they skip as CPython's do.
+  - test_subprocess' test_encoding_warning passes as it is (its row the records night's).
+  - Left: test_pass_fds_redirected (Go's poller holds two descriptors, 3 and 4, in every process: n/a, DECISION 553-1) and
+    test_os' BytesFwalkTests.test_fd_finalization (reference counting's moment, not a child: closing the wrapper generator
+    drops the inner os.fwalk generator, which CPython closes at once: to `:finalization`, under 537-2, DECISION 553-2).
+
+The eval cell: 40,827 / 1,404 / 1,308 before, 40,829 / 1,404 / 1,306 after (pass / design / deferred): only test_utf8_mode was
+recorded from the VM (`bin/pyi check --judge DIR --record` over check B's run of it: test_env_var and test_xoption pass, out of
+`:source-decoding`). The other rows above pass on the VM by id or in whole-module runs that a VM-only result keeps out of the
+record (test_builtin's TestType.test_namespace_order fails on goi alone; test_posix's test_posix_spawnp and test_unicodedata's
+failed_import pass with the runner's memory cap at 16 GB, check C, and crashed at 8 GB in the whole runs); they move at the main
+host's whole record, test_buffer with task 554's. Proofs (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py,
+`PYI_RUNNER=python3`): `bin/pyi check --only` A (ids and whole modules), B (test_unicodedata, test_utf8_mode, test_builtin and
+test_posix whole), C (the VM-only rows alone), the three negative controls failing as they must in B and C; probes of the owed
+death (`del interp` after the budget is spent: qsize 4) and of the `\N` SyntaxError against python3 3.14.10's line.
