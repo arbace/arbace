@@ -19351,3 +19351,30 @@ them). By cause, largest first, and what was done:
   drop_glue's def_span (mono/lib-fn-loc: core/src/ptr/mod.rs 847:1, the record's).
 - rsi19 (the six at d7aad0540 with the re-made exports): see the queue report for the counts. Not recorded (arm64); the main
   host's commands are in the report.
+
+## 2026-11-24 — Rust C3's last record facts: a pointer call's location, a Drop::drop's (queue 565, VM)
+
+Continuing 558 (C3: no mono fact from the record for the six eval cases), whose rsi19 left 9 facts, all locs (threads 8,
+panics 1). Base 80ed673e4 (558-rust-c3), branch 565-rust-c3-finish, worktree q542.
+- **threads.rs, 8 locs**: std's `LocalKey::try_with` calls `(self.inner)(None)` through a function pointer; in the std export it
+  was the only one of 111 calls without :call-loc. Build gives the call's operand `(move (place 8))` its :call-span, but the
+  passes' `map-operand-places` (Derefer, ElaborateBoxDerefs, PromoteTemps) rebuilt the operand list without its metadata, so
+  externalize saw no span. A const operand is never rebuilt, so only pointer calls lost it. Fixed (passes.ae, keep-meta); the
+  std export re-made (`lib-export --rsi std`, same 65 keys, every key built as before): 111 of 111 calls with :call-loc,
+  try_with's at local.rs 462:37. Alternative considered: deriving the location in build-run from the record's terms (rejected:
+  a record fact by another road).
+- **panics.rs, 1 loc**: `<Box<String> as Drop>::drop` in `main::{closure#8}::{closure#0}` (`.map(|s| *s)`), a call drop
+  elaboration makes for the open drop of a Box whose contents moved out. rustc gives it the drop terminator's source info,
+  schedule_drop's `end_point(region_scope.span)`. Build now notes a region scope's span where it is known (an expression's
+  scope, a body's arguments scope: the body expression's span), records each value drop's end point by local (`:drop-spans`,
+  on the body only when non-empty), and ElaborateDrops gives every DropCtxt map of that drop the span, which
+  destructor-call-block puts on its Drop::drop operand as :call-span (build.ae, passes.ae). Probed: [17 76], the record's
+  `(loc "test/rust/eval/panics.rs" 17 76)`. Externalize leaves :drop-spans out of the exports (core_check.ae): they are
+  the body's own file's [line col], which build-run reads as the root file's. Alternative: spans on the drop terminators
+  (rejected: the passes rebuild terminators and drop their metadata; a local's value drop is scheduled once, so by local is
+  exact).
+- rsi20 (the six at this head with the re-made std export; 558's rsi19 flags, 2 h 31 min, 3.17 GB, under the heavy lock):
+  every fact native in all six (locs 776/345/1998/1468/302/1595 of as many; `fact-refused` lines 0, from 9). The eval check
+  (`bin/rsi check --front own --corpus samples` on rsi20): 6 of 6 pass, 6 of 6 own, the std-vs-panics control differs. With
+  both fixes C3 is done for the six: no mono fact from the record. The core exports were not re-made (none of their bodies'
+  facts was refused); the main host re-makes all exports anyway. Not recorded (arm64); the host's commands are in the report.
