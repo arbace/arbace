@@ -20927,3 +20927,44 @@ Queue 547, cycle 2, stopped at the hand-back with runs pending.
     (test/ocaml/opam/inline_test_main.ml). It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`.
 - None of these rows has run yet. prep.ae and bin/oi are in the native key, so the library was rebuilt and the chain
   (.tmp/q539/547/chain1.sh) was running at the hand-back.
+
+## 2026-11-25 — ppx_expect on oi done: S1's base_load, S2's drivers, S3's re/expect pass (queue 539, VM)
+
+Queue 547, cycle 2, continued from 1387eccfd. Each item below has its own commit, and each typer fix has a repro in test/ocaml/typer-repros.
+
+- **S1's base_load**: status 0, "loaded". Three problems stood in the way, fixed in this order:
+  - OI_DUMP_CACHE's key chain broke under set -e and pipefail;
+  - base's stubs needed caml/hash.h, caml/backtrace.h, caml/version.h, emmintrin.h's four SSE2 intrinsics, ARCH_INT*_TYPE and a
+    weak CAMLweakdef;
+  - jst-config's thread_id test named its header by an absolute path, which repr/c's preprocessor joins to each search directory.
+    It now names a copy by its file name.
+- **S2, the drivers**:
+  - The metaquot driver rewrote 37 expander and rewriter files.
+  - D1 (ppx_base plus ppx_optcomp) rewrote time_now. `[%%import "config.h"]` selected the 64-bit, POSIX-timer branch.
+  - D2 (ppx_expect) rewrote re's 28 test files.
+  - Typing the drivers' extra units showed six typer gaps, fixed as c33 (record `with` takes the expected type first), m7 (open
+    brings classes), c34 (no alias to a functor parameter's submodule), m8 (classes' object types get their module's path in its
+    components), c35 (with-constraint on a submodule's type) and c36 (rows in pattern mode reified into an equation).
+  - typer-check stays 79 of 79, and the repro runner passes.
+- **S3, ppx_expect's runtime stubs on oi's C path**:
+  - crt's HostFds: close, lseek, dup, dup2 and dup3 on the host's descriptors for the standard streams and for descriptors the C
+    program did not open itself.
+  - A channel crosses to C as a struct channel holding its fd and offset.
+  - caml_sys_error was added.
+  - The alternative was oi-native implementations of the four stubs, as ppx_expect's runtime.js does for js_of_ocaml. It was not
+    taken: the task asked for the C path, and oi's channels already write the host's descriptors.
+- **Then four faults, each found by the run**:
+  - capi's mlvalues.h did not include config.h. time_now's caml_alloc_int63 therefore boxed an int64 of twice the clock. Probed with
+    a small program: Time_now now prints the clock.
+  - String.unsafe_get past a string's end panicked in oi. OCaml reads the block's padding there, and re's Stream.feed relies on it.
+    oi now returns the padding.
+  - The runner must run in the library's directory, where ppx_expect reads the tests' sources (`@cwd=`).
+  - Exception names: an A__b unit's exception is A.B.E when A aliases it (Out_type.rewrite_double_underscore_paths beyond Stdlib__).
+    re_private and re_tests, both main-less, are now staged as dune does: the alias module Lib first, opened by the modules.
+- **The judgment**: `-diff-cmd -` makes ppx_expect write every test file's corrected text, so the check is each .corrected equal to its
+  file.
+- **The result** (`bin/oi ppx expect`): re/expect passes, 27 of 27 files. The control, test_re.ml's first `[%expect]` altered and
+  rewritten again on oi, differs.
+- **Checks**: oi's 38 C-API programs (the run corpus's @cstubs rows), `bin/oi check --only-list`, all pass on the native path after the
+  header changes.
+- **Records**: the suite's opam/re/expect row stays "class". How a ppx program enters the records is the user's DECISION, in the report.

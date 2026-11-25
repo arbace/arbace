@@ -5014,3 +5014,75 @@ done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 
 - **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
   native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
   problems. No record changes: the ppx programs are not rows of the suite corpus.
+
+## As built: ppx_expect on oi (queue 547, 2026-11-24/25, the VM): T2 of DECISION 539b-1, re's lib_test/expect
+
+T2 of DECISION 539b-1 is done. re's expect tests are rewritten by ppx_expect's driver, built from the opam set and run on oi, and they
+run on oi. Each is judged by its own `[%expect]` blocks, as dune's runtest judges them. No host ppx is used, and every unit is typed by
+Arbace's typer.
+
+- **S1, base and stdio** (cycle 1): 273 units type (typer fixes c27-c32 and m6). `bin/oi ppx run base_load` loads them on oi with their
+  C stubs on ci, and prints "loaded".
+  - oi's C API gained caml/hash.h (the structural hash's mixes, as go/arbace/oi/hash.ae computes them), caml/backtrace.h (two words
+    oi never sets), caml/version.h, config.h's ARCH_INT*_TYPE, and Noreturn.
+  - CAMLweakdef is a weak definition, which ci links.
+  - The headers add the part of SSE2's emmintrin.h that ocaml_intrinsics_kernel uses.
+  - caml/mlvalues.h now includes what OCaml's does on the way: config.h first, then stdio.h, stdlib.h, stdarg.h and limits.h.
+    time_now's stubs need config.h to see ARCH_SIXTYFOUR.
+- **The ppx texts** (`bin/oi ppx pp [DRIVER...]`, test/ocaml/ppx-pp.tsv):
+  - A unit whose dune file has `(preprocess (pps ...))` gets the text its driver writes on oi. The driver runs as dune's ppx.driver
+    runs it: `--cookie library-name="LIB"`, `-corrected-suffix .ppx-corrected -diff-cmd -`, and `--impl` or `--intf`. Dune's
+    `-dump-ast` is left out, so the text is printed.
+  - The driver runs in a copy of the package, so a unit's locations stay its own.
+  - prep's build-unit takes the text from OI_PPX_PP/PKG/REL (.tmp/oi/ppx/pp).
+  - The metaquot driver rewrites ppx_compare's, ppx_enumerate's, ppx_hash's and ppx_globalize's expanders, ppx_sexp_conv's
+    expander, ppx_inline_test and ppx_expect (37 files).
+    - ppx_sexp_conv's dune also names ppxlib.traverse. None of its files derives traverse, so the metaquot driver alone gives the
+      same text.
+  - `time_now_driver` (D1) is ppx_base's rewriters plus ppx_optcomp and dune's ppx main. It rewrites time_now.
+    - time_now's `[%%import "config.h"]` is jst-config's config.h, made by `bin/oi ppx jst-config`.
+    - That verb ports discover.ml, held to its SHA-256. Each of discover's C programs is built for oi's own C target by cnodes.ae
+      (`--program`), and a program that builds sets its switch.
+    - The header is written in dune-configurator's gen_header_file format, which is recalled from memory: dune-configurator is not in
+      the pinned set.
+  - `expect_driver` (D2) is ppx_expect with ppx_inline_test, its libname, ppx_here's expander and the runtime libraries. It rewrites
+    re's 27 test files with `--cookie inline_tests="enabled"`.
+- **The programs' typing** (OI_DUMP_CACHE, set by the ppx verbs):
+  - Each unit's outputs are kept under a key chained from the earlier units', the native library's key, the flags and the libraries.
+  - Programs that share sexplib0, base, stdio and ppxlib therefore type only from where they differ. Base alone is about 50 minutes
+    on 8 cores.
+- **Typer fixes**, each with a repro in test/ocaml/typer-repros that ocamlc accepts and the parent typer refuses:
+  - c33: a record copied from (`with`) takes the expected record type first (ppxlib_jane).
+  - m7: opening a module opens its classes (ppx_compare_expander's `inherit type_is_recursive`).
+  - c34: a module bound to a submodule of a functor's parameter is no alias (Env.is_functor_arg).
+  - m8: a module's components give its classes' object types the module's path, so a value typed by a class keeps a path a later
+    process finds through a signature kept as data (`assert_no_attributes_in : Ast_traverse0.iter`).
+  - c35: a with-constraint on a submodule's type (Expect_test_config).
+  - c36: in pattern mode, two rows that do not unify are reified and recorded as an equation unless incompatible (a GADT indexed by an
+    existential's row, ppx_expect's Test_node).
+  - A unit A__b's exceptions are named A.B.E when A's module B aliases it (Out_type.rewrite_double_underscore_paths). This one was
+    probed against ocamlc and has no typer-repro.
+- **ppx_expect's runtime on oi's C path**:
+  - Its stubs redirect stdout and stderr into a file with dup and dup2 on io.h's `struct channel` fd, and read the position with
+    lseek.
+  - crt's HostFds (set by oi's C API over the process's own streams) makes close, lseek, dup, dup2 and dup3 act on the host's
+    descriptors for the standard streams and for any descriptor the program's table does not hold.
+  - A channel crosses to C as a custom block whose data points to a struct channel holding its fd and offset (oi.ChannelFd).
+  - oi's channels write the host's descriptors, so the redirection is real.
+  - caml_sys_error was added to the C runtime.
+- **oi**: `%string_unsafe_get` past a string's end reads OCaml's block padding (zeros, then the padding length). re's
+  Compile.Stream.feed reads the byte at the string's length before a bound check raises.
+- **S3** (`bin/oi ppx expect`):
+  - The program `expect_tests` is staged as dune builds the inline-test runner:
+    - re_private (re's lib copied), a main-less wrapped library whose alias module Re_private comes first and is opened by its
+      modules;
+    - re_tests, likewise;
+    - the runtimes, ppx_expect's evaluator, str, and the runner's main `let () = Ppx_inline_test_lib.exit ();;`.
+  - It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`, in the library's directory of a copy of re (`@cwd=`).
+  - Judgment: status 0, and every `FILE.corrected` (ppx_expect under `-diff-cmd -` writes each test file's text with its actual
+    outputs) equal to `FILE`.
+  - Negative control: test_re.ml's first `[%expect]` is altered and the file is rewritten again by the driver on oi. Its
+    test_re.ml.corrected must differ.
+  - Result: pass, 27 of 27 files equal, and the control differs.
+- **Records**: opam/re/expect stays "class" in the suite records. The ppx programs are not rows of the suite corpus; see the report's
+  DECISION on how the row enters the records.
