@@ -21038,3 +21038,29 @@ typing cache stayed warm. One whole run, `OI_TIMEOUT=1200 bin/oi ppx expect --re
 both controls differ) and wrote the two rows. Then `bin/reap --record` and `bin/crops-score --record`: OCaml eval goes from
 605 / 1 / 1 to 606 / 0 / 1, the suite source from 126 / 6 to 127 / 5, and opam-not-run leaves the eval cell. `bin/reap` (56 of 56,
 0 problems), `bin/crops-score --judge --strict` (0 problems) and `bin/records-check` (9 pairs, 0 problems) pass.
+
+## 2026-11-25 — the ppx programs' record rerun by the weekly gate: ocaml-ppx-expect (queue 548 round 3, VM)
+
+The user's decisions of 2026-11-25:
+- 547f-1 (a): a night step outside the gate reruns test/ocaml/check-ppx-oi.edn, keyed on its inputs.
+- 547f-2 (a): the OCaml AOT cell is left alone (re/expect and sexplib0_test stay opam-not-run there) until the AOT level can run
+  the ppx programs.
+
+Done:
+- **The step** ocaml-ppx-expect in test/gate/steps.edn (beside ocaml-judges, in the crops' :ocaml list, a waiver among the controls).
+  - Its command: `bin/ci musl ensure`, `bin/oi ppx gen`, `jst-config`, `pp` (every text), then `bin/oi ppx expect --record` with the
+    record written aside, `OI_PPX_RECORD_OUT=$GATE_OUT/...` (new in bin/lib/oi/ppx.bash). The step then compares it with the
+    committed file (`cmp`).
+  - It fails when either library does not pass, when a control passes (nothing is recorded, so the cmp has no file) or when the
+    record differs. The checkout is never written.
+  - Its inputs: :ocaml (bin/oi, bin/lib/oi/, arbace/repr/ocaml/, test/ocaml/ with the ppx tables and the record), :ocaml-run (oi's Go
+    forms, the C API), :ocaml-capi (ppx_expect's and base's stubs on ci) and the corpora's pin.
+- **The tier is :weekly** (GD3), not the nightly one. The nightly tier holds every --full step, and the planner has no nightly-only
+  phase. A :weekly step with :also-changed would also run on plain --full. And a cold run is 3 to 4 hours on 4 cores, since each
+  change to the typer, oi or bin/oi rekeys the whole typing cache, which most nights' OCaml work would bring.
+  - The alternative was a planner change for a nightly-only phase. It was not taken: GD3 already names the weekly tier for long
+    keyed checks.
+  - Warm, the command took 58.7 min with a peak RSS of 1.22 GiB (:mem-gib 2, not heavy), and its record equalled the committed one.
+- **Plans**: `bin/gate --weekly --plan` runs it ("the weekly tier; key c41a0c7838b2, 1251 files; never passed"). The `--nightly`,
+  `--full` and essential plans do not list it. The audit was not run: strace over an hour of the step's thousands of processes would
+  take hours.

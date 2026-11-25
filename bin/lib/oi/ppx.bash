@@ -226,7 +226,9 @@ ppx_expect_one() {
 # the rows of a passing whole run of cmd_ppx_expect alone ([PROGRAM RESULT REASON] as test/ocaml/check-suite-oi-native.edn's, PROGRAM
 # opam/LABEL); reap's OCaml eval cell reads it over the suite record's row of the same program (test/reap/cells.edn's :override)
 ppx_expect_record() {
-  local out=$root/test/ocaml/check-ppx-oi.edn l
+  # (queue 548, 547f-1 (a): the weekly step ocaml-ppx-expect) OI_PPX_RECORD_OUT=FILE writes the record there instead, compared with
+  # the committed one by the step, the checkout left as it was
+  local out=${OI_PPX_RECORD_OUT:-$root/test/ocaml/check-ppx-oi.edn} l
   { echo ";; oi's results of the ppx programs judged by their own tests (bin/oi ppx expect --record; doc/ocaml/OCAML-SURVEY.md, \"As built:"
     echo ";; ppx_expect on oi\" and \"As built: ppx_jane on oi\"; DECISION 547-1 (b), the user's, 2026-11-25): [PROGRAM RESULT REASON] as"
     echo ";; test/ocaml/check-suite-oi-native.edn; written only from a passing whole run (each library's tests, preprocessed by its ppx"
