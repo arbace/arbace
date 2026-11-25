@@ -117,6 +117,49 @@ public final class SystemLoggers {
     }
 
     /**
+     * java.lang.System.getLogger(name) as the Go build answers it (queue 562, the user's JMS4; j2g's System.getLogger
+     * calls it): getLogger(name)'s logger as a java.lang.System.Logger (the top-level overlay System$Logger, whose
+     * Level has this Level's constants in the same order).
+     */
+    public static System.Logger getSystemLogger(String name) {
+        return new SystemLogger(getLogger(name));
+    }
+
+    /** A Logger as a java.lang.System.Logger: the levels mapped by their ordinals, the calls passed on. */
+    private static final class SystemLogger implements System.Logger {
+
+        private final Logger logger;
+
+        SystemLogger(Logger logger) {
+            this.logger = logger;
+        }
+
+        private static Logger.Level level(System.Logger.Level level) {
+            return level == null ? null : Logger.Level.values()[level.ordinal()];
+        }
+
+        @Override
+        public String getName() {
+            return logger.getName();
+        }
+
+        @Override
+        public boolean isLoggable(System.Logger.Level level) {
+            return logger.isLoggable(level(level));
+        }
+
+        @Override
+        public void log(System.Logger.Level level, ResourceBundle bundle, String msg, Throwable thrown) {
+            logger.log(level(level), bundle, msg, thrown);
+        }
+
+        @Override
+        public void log(System.Logger.Level level, ResourceBundle bundle, String format, Object... params) {
+            logger.log(level(level), bundle, format, params);
+        }
+    }
+
+    /**
      * jdk.internal.logger.DefaultLoggerFinder.isSystem(m), as jdk26u answers it: whether the module's loader is a
      * system domain loader (the bootstrap or the platform loader). java.util.logging's Logger and LogManager, derived
      * from jdk26u's (test/jrt/derive.ae, h-java-deferred), ask it here: jdk.internal.logger is not in the Go build.
