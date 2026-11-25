@@ -572,6 +572,15 @@
                              st (let [o (get (:statics facts) nm)]
                                   (if (map? o) o (throw (ex-info (str "no static " nm (if o (str ": " (pr-str o)) " in the record")) {}))))
                              a (str "allocS" id)]
+                         (if (:extern-linkage st)
+                           (let [w (str "allocW" id)]
+                             (swap! static-data conj [w {:kind :static :symbol (:symbol st) :def (:def st) :linkage (:extern-linkage st)}])
+                             ;; (rustc 1.99's name: the local crate's StableCrateId in hex before the symbol)
+                             (swap! static-data conj [a {:kind :static :def (:def st)
+                                                         :symbol (str "_rust_extern_with_linkage_"
+                                                                      (when-let [h (:extern-crate-id st)] (str h "_")) (:symbol st))
+                                                         :bytes "0000000000000000" :init "11111111" :relocs [[0 w]] :mutable true
+                                                         :align nil}]))   ; (no alignment set: LLVM's default for the global)
                          (swap! static-data conj [a (merge {:kind :static :symbol (:symbol st) :def (:def st)}
                                                            ;; its initializer from our own allocation (the static's evaluated bytes)
                                                            ;; (RF17: with its pointers, each to its own allocation's bytes: `&str`'s)
@@ -591,7 +600,7 @@
                                                                                (swap! static-data conj [ta {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) tb))
                                                                                                             :init (apply str (repeat (count tb) "1")) :relocs []}])
                                                                                [off ta])))
-                                                              :mutable true}))])   ; the record does not say `mut`; writable either way at -O0
+                                                              :mutable true}))]))   ; the record does not say `mut`; writable either way at -O0
                          (list 'ptr (symbol a) 0 8))
                        (if (and (seq? x) (#{'raw-str 'raw-bytes} (first x)))
                          ;; a string's or byte string's bytes (allocate_bytes_dedup): rustc's (slice allocN LEN) for &str, a
@@ -3063,8 +3072,14 @@
                                           :when p
                                           ;; the export prints the local crate's paths without it (`panicking::HOOK`): CRATE's own
                                           :let [fp (if (contains? (:crates mono/*crates*) (first (str/split p #"::"))) p (str crate "::" p))]]
-                                      [p (try {:symbol (in-lib #(mono/std-static-symbol n fp)) :def (str "DefId(?:? ~ " fp ")")}
-                                              (catch Throwable x [:error (.getMessage x)]))]))
+                                      [p (if-let [fs (:foreign-static (get (const-bodies) fp))]
+                                           ;; queue 566 (C6 L1): a foreign static with a linkage (weak!'s extern_weak `getrandom`): the
+                                           ;; symbol its link name, read through `_rust_extern_with_linkage_NAME`, an internal global
+                                           ;; holding its address (check_and_apply_linkage)
+                                           {:symbol (:name fs) :def (str "DefId(?:? ~ " fp ")") :extern-linkage (:linkage fs)
+                                            :extern-crate-id (get-in mono/*crates* [:crates crate :stable-crate-id])}
+                                           (try {:symbol (in-lib #(mono/std-static-symbol n fp)) :def (str "DefId(?:? ~ " fp ")")}
+                                                (catch Throwable x [:error (.getMessage x)])))]))
                   ;; queue 542 (C6): a deferred static's value, its exported initializer evaluated (eval-static-body); nil when the
                   ;; export has no body for it or the evaluation refuses (the static then declared, as before)
                   :static-value (let [memo (atom {})]
@@ -3073,7 +3088,7 @@
                                       (get @memo p)
                                       (let [fp (if (contains? (:crates mono/*crates*) (first (str/split p #"::"))) p (str crate "::" p))
                                             cb (or (get (const-bodies) fp) (get (const-bodies) p))
-                                            v (when cb
+                                            v (when (and cb (not (:foreign-static cb)))
                                                 (try (binding [*ctfe-wanted* ctfe-wanted]
                                                        (in-lib #(eval-static-body cb (fn [tyf vidx fields] (variant-bytes (in-lib (fn [] (mono/type-layout-form n tyf))) vidx fields))
                                                                                   (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t))))))
