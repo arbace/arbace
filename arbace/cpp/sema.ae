@@ -3427,6 +3427,7 @@
     t))
 
 (declare declare-node*! cx-access! cx-using-map)
+(declare init-for) ; cpp-def: ce-eval's global arrays
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
@@ -5021,7 +5022,21 @@
                (case (:ck e)
                  (:noop :int :int->fp :fp :fp->int) (if (ce-gaddr? v)
                                                       (if (= :noop (:ck e)) (ce-wrap t v) (not-constant "an address converted"))
-                                                      (ce-wrap t (if (and (= :fp->int (:ck e))) (fp->long v) (from-src (:ty (:e e)) t v))))
+                                                      (do
+                                                      ;; (cpp-def, the checker: [conv.fpint]/1, a floating value whose truncation the
+                                                      ;; integer type cannot represent -- an infinity, a NaN among them -- converts
+                                                      ;; undefined, no constant: GCC's "overflow in constant expression", ubsan/pr63956.C's
+                                                      ;; fn11(__builtin_inf ()))
+                                                      (when (and (checking?) (= :fp->int (:ck e)) (number? v) (abi/integral? t))
+                                                        (let [d (double v)
+                                                              bits (* 8 (long (abi/size-of (abi/underlying (abi/unq t)))))
+                                                              u (not (abi/signed? t))
+                                                              half (.shiftLeft java.math.BigInteger/ONE (int (dec bits)))
+                                                              lo (if u 0N (- (bigint half))) hi (if u (dec (* 2 (bigint half))) (dec (bigint half)))]
+                                                          (when (or (Double/isNaN d) (Double/isInfinite d)
+                                                                    (let [r (bigint (.toBigInteger (java.math.BigDecimal. d)))] (or (< r lo) (> r hi))))
+                                                            (ub! e "overflow in constant expression"))))
+                                                      (ce-wrap t (if (and (= :fp->int (:ck e))) (fp->long v) (from-src (:ty (:e e)) t v)))))
                  :to-bool (if (or (ce-ptr? v) (ce-loc? v) (ce-gaddr? v)) 1 (if (zero? (double v)) 0 1))
                  ;; (cpp-rt-own2: a derived class's address of static storage duration to its non-virtual base's, offset by its place)
                  ;; (cpp-ce2, the checker: a pointer to an object, its base subobject's location, [conv.ptr]/3; a null pointer null)
@@ -5065,6 +5080,9 @@
        :binop (let [a (ev (:l e)) b (ev (:r e))]
                 (if (abi/floating? t)
                   (let [a (double a) b (double b)]
+                    ;; (cpp-def, the checker: [expr.mul]/4, a division by zero is undefined for floating operands too, no
+                    ;; constant expression: GCC's "... is not a constant expression", ubsan/pr63956.C's fn4)
+                    (when (and (checking?) (= "/" (:o e)) (zero? b)) (ub! e "division by zero"))
                     (ce-wrap t (case (:o e) "+" (+ a b) "-" (- a b) "*" (* a b) "/" (/ a b) (not-constant "op " (:o e)))))
                   (let [a (ce-num a) b (ce-num b) u (not (abi/signed? t))]
                     ;; (CX12, the checker: the operations whose result is undefined, ExprConstant's diagnostics)
@@ -5358,6 +5376,10 @@
                    (ub! e "call to non-'constexpr' function '" (:name f) "'")))
                (when (and (checking?) (:cx-body-error f))
                  (ub! e "'" (:name f) "' called in a constant expression"))
+               ;; (cpp-def, the checker: [expr.const]/5.2, a call of abort -- __builtin_unreachable's stand-in, reached -- is no
+               ;; constant expression: GCC's "'__builtin_unreachable()' is not a constant expression" at the call, ubsan/pr63956.C)
+               (when (and (checking?) (= "abort" (:name f)) (not (:constexpr f)) (not (:cls f)))
+                 (ub! e "'__builtin_unreachable()' is not a constant expression"))
                (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))
                                   (cx-cmp-constexpr? (:id f))))
                          (:virtual e))
@@ -5425,6 +5447,22 @@
                                      ;; invocation returns folds back to it, imm-fold)
                                      {::base (into cs (repeat (max 0 (- n (count cs))) 0)) ::i 0 ::lit a})
                   (and (= :var (:op a)) (contains? env (:id a)) (vector? @(get env (:id a)))) {::base (get env (:id a)) ::i 0}
+                  ;; (cpp-def, the checker: a constexpr array of static storage duration, its elements its initializer's values
+                  ;; ([expr.const]/4, usable in constant expressions): ubsan/pr63956.C's fn5 (m1, 4), m1[4] outside its bounds)
+                  (and (checking?) (= :var (:op a)) (not (contains? env (:id a)))
+                       (let [v (var* (:id a))] (and v (or (:constexpr v) (:cx-constexpr v)) (or (:init v) (:init-node v))
+                                                    (:n (abi/unq (:ty v))) (#{:global :member-static} (:storage v)))))
+                  (let [v (var* (:id a))
+                        at (abi/unq (:ty v))
+                        ctx {:scope (or (:def-scope v) *root*)}
+                        i (binding [*cutoff* Long/MAX_VALUE *vci-active* (conj *vci-active* (:id a))]
+                            (init-for (:ty v) (analyze ctx (or (:init v) (:init-node v))) ctx :copy))
+                        el (fn [i] (case (:i i) :expr (ce-wrap (:of at) (binding [*ce-manifest* true *vci-active* (conj *vci-active* (:id a))] (ce-eval (:e i) {})))
+                                     (:zero :none nil) 0 (not-constant "an element's initializer")))]
+                    (if (and (= :list (:i i)) (:n at) (not (abi/class? (abi/unq (:of at)))) (abi/scalar? (abi/unq (:of at))))
+                      (let [xs (mapv el (:items i))]
+                        {::base (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill i)))) ::i 0})
+                      (not-constant "the decay of a global array")))
                   ;; (h-cpp-consteval: an array subobject, a member's, an element's: its location)
                   (#{:field :deref :base-lv :reinterpret-lv} (:op a))
                   (let [l (ce-lv a env) n (:n (abi/unq (abi/non-ref (:ty a))))]
