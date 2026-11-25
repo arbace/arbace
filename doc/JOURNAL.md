@@ -22047,3 +22047,19 @@ Lib/zoneinfo/_zoneinfo.py; doc/python/PYTHON-SURVEY.md's "Design: 241" (its plan
   test_saveall, test_trash_weakref_clear, test_trashcan_threads and test_function_tp_clear_leaves_consistent_state
   (`:gc-collector`), test_threading_local's test_local_refs: for the train's record to confirm. Nothing recorded here (the
   train records from its build); no class of test/python/divergences.edn changed.
+
+## 2026-11-25: Python eval, py-enum lane: a C type's own tp_new as __new__ in its dict (test_enum imports again)
+
+The coordinator's urgent task: test_enum does not import on train 5's executable (`b85611b`): "ReprEnum subclasses must be
+mixed with a data type" (test_enum's `class enum_type(date, ReprEnum)`; enum's `_find_data_type_` asks `'__new__' in
+base.__dict__`, and 521's C `_datetime` date has none). Branch `py-enum-1125` from `py-odict-1125`.
+
+- Source: CPython 3.14.10's Objects/typeobject.c, `type_ready_set_new` and `add_tp_new_wrapper` (a type with its own tp_new, not
+  Py_TPFLAGS_DISALLOW_INSTANTIATION, gets tp_new_wrapper's `__new__` in its dict unless the dict has one; an inherited tp_new
+  none). The Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects, not run there): `py.ExtNewWrapper` and
+  its call in pyctypes' `typeFromSpec`. Not cherry-picked: that commit holds six other unrun changes of queue 587, its wrapper
+  is a bare builtin that needs its descr.go change (built-in `__new__` no longer a staticmethod), and it covers only the spec
+  path while `_datetime`'s types are static (`_PyStaticType_InitForExtension`, pyctypes' `typeReady`).
+- Built: `py.ExtNewWrapper` returns this tree's tp_new_wrapper (`makeSlotWrapper(m, "__new__")`, the staticmethod in
+  `newWrappers`); pyctypes' `addNewWrapper` puts it in the dict in `typeReady` (the C type object's tp_new field before
+  inheritance) and in `typeFromSpec` (the spec's own Py_tp_new), before the methods.

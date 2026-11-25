@@ -8825,3 +8825,16 @@ the C OrderedDict's rows of py-mods-1122 (issue119004, gh-148660, the iterators'
   the `__reduce_ex__` fix; the negative controls failing as they must): the 63 names of the three classes all pass; no row the
   eval record passes fails but those that fail the same on train 5's executable (the C world's `_pickle` and `_datetime`
   rows: the journal's entry lists them). Not recorded here: the train records from its build.
+
+## As built: py-enum-1125, a C type's own tp_new as __new__ in its dict (2026-11-25, the main host, the burst's py-odict lane)
+
+test_enum did not import on train 5 ("ReprEnum subclasses must be mixed with a data type": `class enum_type(date, ReprEnum)` at
+its class level): enum's `_find_data_type_` looks for `'__new__' in base.__dict__`, and the C `_datetime`'s date (521's, CPython's
+own C in the world ctypestest) had none. CPython's `type_ready_set_new` (Objects/typeobject.c) puts `add_tp_new_wrapper`'s
+`__new__` in the dict of a type with a tp_new of its own (not inherited, not Py_TPFLAGS_DISALLOW_INSTANTIATION) when the dict
+has none. arbace/pyctypes does it now for both ways a C type is made: `typeReady` (PyType_Ready and
+`_PyStaticType_InitForExtension`, the static types: its tp_new field before inheritance) and `typeFromSpec` (PyType_FromMetaclass:
+the spec's own Py_tp_new), before the methods as `type_ready_fill_dict` comes after; the wrapper is py's `ExtNewWrapper`, the
+built-in types' tp_new_wrapper (`makeSlotWrapper`'s staticmethod, one per type in `newWrappers`: its type checks, then the C
+tp_new). Taken from the Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects: `ExtNewWrapper` and the
+spec path), rewritten over this tree's staticmethod wrapper and extended to the static types, which `_datetime` uses.
