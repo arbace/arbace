@@ -11683,6 +11683,9 @@ The read tail (cpp-read's groups):
   name (a base template-id whose arguments name a template parameter) not found by the derived template's unqualified lookup, so
   `Base* p;` there is the namespace's template without an argument list (parse.ae, parse-bases and the template-name rule).
 
+Recorded from the whole run at `2847d4ef8` (eight parts, one lock turn): own pass 2,829 -> 2,840, none lost; C++ read 6,090 / 0 /
+194 -> 6,096 / 0 / 189, read independence 0.883 -> 0.884.
+
 Left, looked at: template/partial-specialization3.C (the instantiation is in a template's non-dependent expression, which the
 checker does not analyze before instantiation), template/crash89.C (a default template argument's error is not reported where
 the type is resolved), cpp23/attr-assume9.C (an assumption's expression is not kept by the native parser, so the evaluator cannot
