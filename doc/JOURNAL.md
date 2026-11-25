@@ -22436,3 +22436,12 @@ on train 3's tool and are the host's to record; this entry is the four left.
 - Alternatives: adding RoundEnvironment alone to a DynSub list (an interface has no DynSub); a variant of
   initProcessorLoader skipping addExports (javac's code changed instead of the runtime's missing members); waiting for the
   host's train-4 edge before any build (no proof until then).
+
+## 2026-11-25 — the user's DECISIONs 575-1 (a), 575-2 (a), 575-3 (a) (queue 575, VM)
+
+- 575-1 (a): ClassLoader.getUnnamedModule (one unnamed module per loader) and the no-op Module.addExports stay in jrt, the shipped
+  runtime; the alternative, a javac tool-world variant skipping addExports, not taken.
+- 575-2 (a): j2g's dynIfaceDefaults table stays general (Iface.super.m() on any world interface's default method), at its code size
+  in every program; a list of interfaces not taken.
+- 575-3 (a): the four rows' record (t07544, t07545, t07546, t07552), made on a tool of train-3 with this branch, is accepted now;
+  train 4's tool reruns their diagnostics after its edge is recorded again (System$Logger), as the confirmation.
