@@ -22290,3 +22290,72 @@ Rows (lib-unit compare against std's IR at the pin, equal/differ/refused), 561's
 Alternatives considered: ungating each rule now (561-2 (a) says later, each with std's lib-unit compare); a crate-wide
 `*backtrace*` var in place of one var per rule (kept per rule, so each can be ungated alone); for the private-import rule,
 dropping private uses from the index (they are needed for the module's own resolution).
+
+## 2026-11-25 — C++ read independence for cpp2a, cpp23, concepts, coroutines and modules (queue 584, VM)
+
+Queue 584: the dg-error rows of g++.dg's cpp2a, cpp23, concepts, coroutines and modules that the clang oracle's record passes
+and Arbace's own front end fails (169 at mac/next 01ee9c426 by the two records: cpp2a 135, cpp23 15, concepts 13, coroutines 6,
+modules none: no row of it is in either record), worked by group. Each rule from the standard or from GCC's
+behaviour as the GCC manual, the tests and g++ 15.2's recorded errors (test/cpp/ref-dg-gxx15.edn) state it; no GCC or clang
+code. All in the checker (sema's `checking?`), but where noted.
+
+Rules (arbace/cpp/sema.ae unless named):
+- arbace/cpp/template.ae concept-satisfied?: a concept's satisfaction that needs itself (the same concept and arguments again
+  under way, `*cx-concepts-entered*`) has no value, [temp.constr.atomic]/3: GCC's "satisfaction of atomic constraint ...
+  depends on itself" at the cycle's innermost atomic constraint, the satisfaction false and sure (diag.ae's rule :constraint).
+- operator-call: candidates that were operator templates alone, each dropped surely, class operands without conversion
+  functions (no built-in candidate, [over.match.oper]/3.3, [over.built]): GCC's "no match for 'operator@'" (not the rewritten,
+  assignment, call, subscript, arrow or comma operators).
+- sure-failure?: a unary operator's operand of a type it does not take ([expr.unary.op]/7-10) and a nested-name-specifier's
+  type that is no class ([temp.deduct.general]/11.3) are the program's errors in a requirement, so not satisfied surely.
+- template.ae: GNU's older traits as the GCC manual's "Type Traits" defines them where no question about a class's special
+  members arises (__has_trivial_assign, __has_trivial_copy, __has_nothrow_assign, __has_nothrow_copy,
+  __has_nothrow_constructor, `cx-gnu-old-trait`); __has_trivial_destructor false for void and function types (the code
+  generator too: the manual's definition).
+- user-conv: copy-initialization whose conversion functions are all explicit surely and whose conversion function templates'
+  specializations for the target are each made and explicit ([dcl.fct.spec]/3, [over.match.copy]/1.2): GCC's "cannot convert".
+- explicit-spec*: the explicit-specifier's operand, kept by the native parser (arbace/repr/cpp/parse.ae, "explicit:" in the
+  decltypes table, as noexcept's), analyzed and evaluated as a contextually converted constant expression, manifestly
+  constant-evaluated ([dcl.fct.spec]/3, [expr.const]/20): `explicit(W())` through W's conversion to bool,
+  `explicit(__builtin_is_constant_evaluated())`; the old text evaluation when it gives nothing.
+- ReturnStmt: decltype(auto)'s deduction from `return (x);` with C++23's P2266 ([expr.prim.id.unqual]/4: a possibly
+  parenthesized id-expression of an implicitly movable entity an xvalue), and a reference variable's name its declared type
+  ([dcl.type.decltype]/1.3; the code generator too, both by the standard).
+- decl-stmt and ce-exec: a block-scope extern declaration defines no variable ([basic.def]/2.3), so no static or thread_local
+  definition in a constexpr function's evaluation; diag.ae's constexpr-labels: a label a goto of the same body jumps to is not
+  reported, the goto is (g++ 15.2's recorded errors of cpp23/constexpr-nonlit1.C).
+- RequiresExpr: a void parameter's hard error not reported for a requires-expression inside the fold expression that is the
+  atomic constraint (g++ 15.2's recorded errors of cpp2a/concepts-requires33.C: GCC explains the fold).
+- noexcept-of: the noexcept-specifier's operand a contextually converted constant expression of type bool ([except.spec]/1,
+  [expr.const]/12, P1401R5): an integer constant other than 0 and 1 narrows.
+- decomposition!: a structured binding of a scalar ([dcl.struct.bind]/3-5): "cannot decompose non-array non-class type".
+- name-expr: a qualified name whose qualifier is a template's type parameter, outside a type-only context, naming a type in the
+  instantiation ([temp.res.general]/3): GCC's "dependent-name ... is parsed as a non-type, but instantiation yields a type"
+  (diag.ae's rule :typename).
+- template.ae ClassTemplateSpecializationDecl: an explicit specialization's simple-template-id satisfies the template's
+  associated constraints ([temp.names]/7): "template constraint failure", the specialization declared all the same.
+
+Tried and taken out: coroutine rules (get_return_object's result converted to the return type, [dcl.fct.def.coroutine]/7; both
+return_void and return_value, /6; an awaiter of no class type, [expr.await]/3): the checker's analysis of a coroutine body
+refuses at co_return (`statement CoreturnStmt`), so their errors were dropped with the body; left for a coroutine slice.
+Alternatives considered: making concept requirements look names up at the concept's definition ([temp.dep.candidate]) for
+cpp2a/concepts-recursive-sat3.C (whose foo(0) finds the later template by the slice's lookup and now reports the cycle, extra
+line 4, a fail before too): it would also hide the function templates ADL finds (adl-fns finds functions alone), so not done.
+
+Numbers, from finished `bin/repr-cpp dg --corpus dg-error --front native --only` runs (3 threads; logs in the VM's
+.tmp/q584/): r1 over every recorded own pass (2,829) and the 167 rows the base run (169, `base.log`) left failing, 2,998 files:
+2,851 own passes, 26 moved, 4 recorded passes lost. One was this branch's: cpp2a/concepts-return-req1.C, the sure non-class
+qualifier making `Two<typename T::type>` false where its concept `Two = true` names no parameter; fixed by the concept-id rule
+above (template.ae's :concept-id hook: an argument that fails to form decides nothing when the constraint-expression names none
+of the concept's parameters, [temp.constr.normal]/1.4's parameter mapping). The other three fail alike at the base 01ee9c426
+(its parse.ae, sema.ae, template.ae and diag.ae loaded over the branch's, `pd-base.ae`): cpp0x/pr85147.C, cpp23/consteval-if2.C,
+ext/anon-struct6.C, recorded passes that next already lost; left out of the final list so their record rows stay for the host's
+whole-record run. r2, the same list less those three, 2,995 files: 2,852 own passes, 26 moved, 0 lost; recorded from it with
+`--judge --record` (29 rows changed: the 26 to own pass, three fails' reasons). Moved: concepts/diagnostic20.C, diagnostic6.C,
+diagnostic9.C, cpp23/constexpr-nonlit1.C, decltype1.C, elision5.C, elision6.C, narrowing-bool1.C, cpp2a/concepts-explicit-spec3.C,
+concepts-pr67319.C, concepts-pr88395.C, concepts-recursive-sat2.C, concepts-recursive-sat5.C, concepts-requires33.C,
+concepts-traits1.C, concepts-traits2.C, concepts-uneval5.C (already passing at the base, unrecorded), decomp4.C, explicit1.C,
+explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-evaluated8.C, typename3.C.
+`bin/reap --record`: matrix unchanged (C++ read 6,090 / 0 / 194 is clang's record); `bin/crops-score --record`: C++ independence
+0.9766 -> 0.9770, the read stage 0.8830 -> 0.8850; `bin/crops-score --judge --strict`, `bin/reap`, `bin/records-check`,
+`bin/markers-check`: 0 problems.
