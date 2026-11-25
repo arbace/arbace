@@ -19515,3 +19515,62 @@ The coordinator's third message for 566, on the same branch.
   - 566-1 (b), the keys kept as cache state, was the user's to reject.
   - Committing whole native-*-items.edn files: about 12 MB of exports that depend on the run, against the keys they are made from.
 - bin/reap: 56 of 56, 0 problems, before and after.
+
+## 2026-11-24: queue 558 (the VM): Rust C3, the mono facts the six eval cases took from the record
+
+Base 542-rust-own-lowering 57a908970, branch 558-rust-c3. rsi18's builds (RF_FACT_TRACE=1) took 462 facts from the record
+(`rust-front-rsi`): locs 412, layouts 45, consts 3, symbols 2 (the brief's macro-made atomic and accumulate methods no longer among
+them). By cause, largest first, and what was done:
+- **Program calls made by format_args! (244 locs)**: lower-format-args built its `Arguments::new`, `Argument::new_display` and
+  `from_str` calls without the format_args! expression's expansion mark, so a std macro's call (println!) had only a foreign span.
+  rustc's format.rs gives them the macro's syntax context, which span_as_caller_location walks to the outermost call site. The calls
+  now carry the mark (`*fmt-mark*`, lower.ae); probed: every program call of the six has a root-file span.
+- **Native library bodies' calls and asserts (168 locs)**: the exports predated C6-4's :call-loc and 524's macro-argument case. A
+  probe export (core-check CORE_EXPORT_KEYS on slice/raw.rs, slice/mod.rs) gave each call and assert its place. Re-made at this head:
+  `core-export --rsi` (25 min), `--rsi-outside '^(fmt/|iter/|..)|/core_simd/'` (33 min; call-locs 910 -> 1040 over 1018 calls and
+  23 asserts), `lib-export --rsi std`, the ctfe keys. The old files are in /root/arbace-mac/.tmp/q558/orig/.
+- **std::io::Error's layouts (40)**: core::io::error's `mod repr` takes its file by `#[cfg_attr(PRED, path = "..")]`; child-mod-items
+  now reads it when PRED holds. src-ty resolves `self::` and `super::` uses, fn pointers (`unsafe fn(NonNull<dyn error::Error + Send
+  + Sync>)`) and `Self`. Probed: Error, Custom and Result<(), Error> equal the record's layouts.
+- **SimdShuffleIdx (5 layouts)**: a struct local to an inline const in a trait method (`Swizzle::concat_swizzle::{constant#0}`):
+  src-adt finds it through the method's kept items (body-adt-items' depth 12 -> 30). Probed: 64 bytes, align 64, a vector of 16 u32.
+- **TypeId::of::<dyn Any> (3 consts)**: native-core-plan's closure followed `<dyn Any>::is`'s `self.type_id()` to the blanket
+  `impl<T: ?Sized> Any for T` at T = dyn Any, a body rustc never instantiates (the call is Virtual). Now resolve-call and the closure
+  skip a trait method on a trait object (mono/virtual-call?, virtual-fact's rule).
+- **Drop glue shims (2 symbols, 2 locs)**: a shim's header came from the item facts by the name `std::ptr::drop_glue`, which every
+  shim shares. Now it is built natively (mono's symbol, the instance as `Shim(DropGlue(.., Some(T)))`); its call's location is
+  drop_glue's def_span (mono/lib-fn-loc: core/src/ptr/mod.rs 847:1, the record's).
+- rsi19 (the six at d7aad0540 with the re-made exports): see the queue report for the counts. Not recorded (arm64); the main
+  host's commands are in the report.
+
+## 2026-11-24 — Rust C3's last record facts: a pointer call's location, a Drop::drop's (queue 565, VM)
+
+Continuing 558 (C3: no mono fact from the record for the six eval cases), whose rsi19 left 9 facts, all locs (threads 8,
+panics 1). Base 80ed673e4 (558-rust-c3), branch 565-rust-c3-finish, worktree q542.
+- **threads.rs, 8 locs**: std's `LocalKey::try_with` calls `(self.inner)(None)` through a function pointer; in the std export it
+  was the only one of 111 calls without :call-loc. Build gives the call's operand `(move (place 8))` its :call-span, but the
+  passes' `map-operand-places` (Derefer, ElaborateBoxDerefs, PromoteTemps) rebuilt the operand list without its metadata, so
+  externalize saw no span. A const operand is never rebuilt, so only pointer calls lost it. Fixed (passes.ae, keep-meta); the
+  std export re-made (`lib-export --rsi std`, same 65 keys, every key built as before): 111 of 111 calls with :call-loc,
+  try_with's at local.rs 462:37. Alternative considered: deriving the location in build-run from the record's terms (rejected:
+  a record fact by another road).
+- **panics.rs, 1 loc**: `<Box<String> as Drop>::drop` in `main::{closure#8}::{closure#0}` (`.map(|s| *s)`), a call drop
+  elaboration makes for the open drop of a Box whose contents moved out. rustc gives it the drop terminator's source info,
+  schedule_drop's `end_point(region_scope.span)`. Build now notes a region scope's span where it is known (an expression's
+  scope, a body's arguments scope: the body expression's span), records each value drop's end point by local (`:drop-spans`,
+  on the body only when non-empty), and ElaborateDrops gives every DropCtxt map of that drop the span, which
+  destructor-call-block puts on its Drop::drop operand as :call-span (build.ae, passes.ae). Probed: [17 76], the record's
+  `(loc "test/rust/eval/panics.rs" 17 76)`. Externalize leaves :drop-spans out of the exports (core_check.ae): they are
+  the body's own file's [line col], which build-run reads as the root file's. Alternative: spans on the drop terminators
+  (rejected: the passes rebuild terminators and drop their metadata; a local's value drop is scheduled once, so by local is
+  exact).
+- rsi20 (the six at this head with the re-made std export; 558's rsi19 flags, 2 h 31 min, 3.17 GB, under the heavy lock):
+  every fact native in all six (locs 776/345/1998/1468/302/1595 of as many; `fact-refused` lines 0, from 9). The eval check
+  (`bin/rsi check --front own --corpus samples` on rsi20): 6 of 6 pass, 6 of 6 own, the std-vs-panics control differs. With
+  both fixes C3 is done for the six: no mono fact from the record. The core exports were not re-made (none of their bodies'
+  facts was refused); the main host re-makes all exports anyway. Not recorded (arm64); the host's commands are in the report.
+
+## 2026-11-25 — the user's DECISION 565-1 (a) (queue 565, VM)
+
+565-1 (a): Build keeps recording value drops' end points only for expression scopes and a body's arguments scope. Drops in the
+other scopes get their spans when a case needs one (none of the six eval cases does).

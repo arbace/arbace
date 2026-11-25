@@ -1552,7 +1552,9 @@
   (let [rt [:ref [:re-erased] true t]
         unit (build/ty-form [:tuple []])
         f [:fndef drop-fn []]
-        callee (with-meta (list 'const (str "<" (binding [c/*in-value* false] (c/print-ty t)) " as core::ops::Drop>::drop") (build/ty-form f) '(zst)) {})]
+        ;; queue 558 (C3): the call's caller location the shim's span, drop_glue's def_span (rustc's shim body's source info)
+        callee (with-meta (list 'const (str "<" (binding [c/*in-value* false] (c/print-ty t)) " as core::ops::Drop>::drop") (build/ty-form f) '(zst))
+                 (if-let [l (mono/lib-fn-loc "core::ptr::drop_glue")] {:call-loc l} {}))]
     {:args 1 :ret unit
      :locals [{:mut true :scope 0 :ty unit} {:mut false :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty unit}]
      :scopes [[nil nil nil nil false]] :debug []
@@ -2262,7 +2264,9 @@
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
                                      ;; (queue 483: drop glue is a shim, no body of its def's: *drop-glue-ok?*'s above)
+                                     ;; queue 558 (C3): a virtual call (a trait method on a trait object) reaches no body
                                      :when (and (string? cd) (not (mono/intrinsic? cd)) (not= cd "core::ptr::drop_glue")
+                                                (not (and (= cd cd0) (mono/virtual-call? cd cargs)))
                                                 (or (get nc cd) (mono/mir-available? cd)))]
                                  [cd (vec cargs)])]
                       ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
@@ -2489,7 +2493,8 @@
                                                            rec-bodies))
                                              dfn (when rec (try (mono/drop-shim-plan n t) (catch Throwable _ nil)))]
                                        :when dfn]
-                                   {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true}))
+                                   {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true
+                                    :sym (when (string? (:symbol x)) (:symbol x))}))
                     core-f (when (or (seq core-insts) (seq glue-shims))
                              (binding [mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))
                                        mono/*closure-kinds* (atom (merge (some-> mono/*closure-kinds* deref) (:closure-kinds facts)))
@@ -2615,7 +2620,7 @@
                     statics (into {} (for [[nm m] rec-statics]
                                        [nm (let [o (get (:statics facts) nm)] (if (map? o) (do (fact! :statics true) o) (do (fact! :statics false #(str nm ": " (pr-str o))) m)))]))
                     header (fn [rec]
-                             (let [o (or (get (:items facts) (:name rec)) (get (:items core-f) (:name rec)))]
+                             (let [o (or (:native-header rec) (get (:items facts) (:name rec)) (get (:items core-f) (:name rec)))]
                                (if (and (map? o) (not (mono/error? o)))
                                  (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
                                  (do (fact! :symbols false #(str (:name rec) ": " (pr-str o))) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
@@ -2685,7 +2690,16 @@
                                              core-es (doall (for [[h i] core-items] (assoc (entry h (:body i) "a native body failed at run time") :core true)))
                                              ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
                                              ;; among them), as a core body does
-                                             glue-es (doall (for [g glue-shims] (entry (:rec g) (:body g) "drop glue's shim failed at run time")))
+                                             ;; queue 558 (C3): the shim's header its own (mono's symbol, the instance written as the
+                                             ;; record's `Shim(DropGlue(.., Some(T)))`), not the record's by its name (every shim's
+                                             ;; is `std::ptr::drop_glue`: no item fact of that name)
+                                             glue-es (doall (for [g glue-shims]
+                                                              (entry (assoc (:rec g) :native-header
+                                                                            {:def "std::ptr::drop_glue" :def-id "native core core::ptr::drop_glue"
+                                                                             :instance (str "Shim(DropGlue(core::ptr::drop_glue, Some("
+                                                                                            (binding [c/*in-value* false] (c/print-ty (first (:args g)))) ")))")
+                                                                             :symbol (or (:sym g) (:symbol (:rec g))) :name "std::ptr::drop_glue" :kind :fn})
+                                                                     (:body g) "drop glue's shim failed at run time")))
                                              {:keys [kept] fl :lines} (native-fallback (concat core-es glue-es))]
                                          (doseq [l fl] (swap! lines conj l))
                                          (doall (for [e kept]
