@@ -21718,3 +21718,35 @@ its two test_bpo_45813 rows) the main host's py-core, left alone. Branch 551b-py
   (its only.txt removed, test_print's files added): 0 regressions, 33 now pass (the 17 C rows and test_warnings'
   DeprecatedTests, 15, which :coroutines' match had covered). bin/reap --record (0 problems), bin/crops-score --record, then
   --judge --strict, and bin/records-check: 0 problems.
+
+## 2026-11-23: pyi's _ssl over a vendored crypto/tls: TLS 1.3 post-handshake authentication, PSKs, the exporter secret (queue 552, the Mac VM; the user's 537-4 (a))
+
+The user decided (537-4 (a)) to vendor Go's crypto/tls into pyi's ssl and add what OpenSSL has and Go lacks, for
+`:ssl-go-tls`'s 19 rows. Branch 552-py-tls13 from next 320e74469.
+- Source: https://github.com/usbarmory/tamago-go, tag go1.27.1 (TamaGo's go1.27.1; the GOROOT pinned by seed/goroot.sha256,
+  SHA-256 5745170fd3c83cb77ec88bc50aee8606f0436e718c222b48376b5943ac0cebe5): `src/crypto/tls` (every non-test file but
+  defaults_boring.go and generate_cert.go), `src/vendor/golang.org/x/crypto/{cryptobyte,chacha20poly1305,chacha20,
+  internal/poly1305,internal/alias}` (x/crypto v0.52.1-0.20260526024921-9beb694f9766 per vendor/modules.txt; generic code,
+  no assembly), `src/crypto/internal/fips140/{tls12,tls13}` (over the public crypto/hmac and crypto/hkdf),
+  `src/crypto/tls/internal/fips140tls`; new stubs for crypto/internal/boring, internal/godebug and internal/cpu. Copied into
+  go/arbace/pytls (import path arbace/pytls), converted to Go forms by `bin/repr-go read` (`bin/pyi runtime read-pytls`).
+  The edits are listed in doc/python/pytls-vendor.md and shown by doc/python/pytls-vendor.diff (2,727 lines, against the files
+  as copied); license: Go's BSD 3-Clause (LICENSE.md, coverage list extended).
+- Added to it: `Config.PostHandshakeAuth` (client), `Config.PostHandshakeClientAuth` (server, SSL_VERIFY_POST_HANDSHAKE),
+  `Conn.RequestClientCertificate`, TLS 1.3 external PSKs and TLS 1.2's plain PSK suites (`PSKClientCallback`,
+  `PSKServerCallback`, `PSKIdentityHint`), `EXPORTER_SECRET` in the key log, an `AlertError` from the verification callbacks
+  sent as that alert (and the client's unknown_ca and certificate_expired for its own verification). 17 Go tests, each
+  feature both ways; upstream's tests on a scratch copy: 686 pass, 3 fail by the intended changes, 22 skipped. The vendoring
+  and the features were written by a sub-agent from a brief of mine and reviewed here; the _ssl glue is mine.
+- _ssl (builtins_ssl*.ae): HAS_PHA and HAS_PSK true (3.15's HAS_PSK_TLS13 too); set_psk_client_callback and
+  set_psk_server_callback; the PSK suites in the cipher table; verify_client_post_handshake; a resumed server session's
+  chains as OpenSSL keeps them (the client's certificate alone, no verified chain).
+- The keys: pyi's runtime imports arbace/pytls, so goi's table lists it (arbace/go/table.ae) and j2g copies it into the
+  program (arbace/j2g/main.ae): gate_key moves, the table moves; arbace_runtime_key does not (bin/lib/version.bash's
+  arbace_runtime_not); the gate's :pyi host lists go/arbace/pytls; bin/pyi prints, builds and reads it back.
+- Proof and record (2026-11-24, after the night's pause): the whole test_ssl and test_httplib from the committed forms on AOT,
+  0 failing, the 19 rows pass; `bin/pyi check --judge DIR --record` (the record's 19 rows, its order kept), `:ssl-go-tls`
+  removed, `bin/reap --record`, `bin/crops-score --record`: Python eval pass 40,571, design 1,379.
+- Alternatives considered: (b) n/a and (c) by design (537-4's); moving _ssl into a lazy package beside the vendored code
+  (pyssl's way), which keeps it out of the program's copy but moves 4,500 lines of glue: not taken, the direct import is
+  the smaller change.

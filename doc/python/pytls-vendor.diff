@@ -1,0 +1,2727 @@
+diff -ruN upstream/pytls/arbace_features_test.go vendored/pytls/arbace_features_test.go
+--- upstream/pytls/arbace_features_test.go
++++ vendored/pytls/arbace_features_test.go
+@@ -0,0 +1,728 @@
++// Copyright 2026 The Arbace Authors. Tests of the additions to the vendored
++// copy of crypto/tls (see VENDORED.md); BSD-style license as the Go sources.
++
++package tls
++
++import (
++	"arbace/pytls/internal/tls13"
++	"bytes"
++	"crypto/ecdsa"
++	"crypto/elliptic"
++	"crypto/rand"
++	"crypto/x509"
++	"crypto/x509/pkix"
++	"errors"
++	"fmt"
++	"io"
++	"math/big"
++	"net"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++)
++
++// --- certificates and connections
++
++type arbacePKI struct {
++	roots      *x509.CertPool
++	server     Certificate
++	client     Certificate
++	otherRoots *x509.CertPool // a CA that signed nothing here
++	stranger   Certificate    // a client certificate of another CA
++}
++
++var (
++	arbacePKIOnce sync.Once
++	arbacePKIVal  *arbacePKI
++)
++
++func arbaceNewCA(t *testing.T, name string) (*x509.Certificate, *ecdsa.PrivateKey) {
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber:          big.NewInt(1),
++		Subject:               pkix.Name{CommonName: name},
++		NotBefore:             time.Now().Add(-time.Hour),
++		NotAfter:              time.Now().Add(24 * time.Hour),
++		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
++		BasicConstraintsValid: true,
++		IsCA:                  true,
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
++	if err != nil {
++		t.Fatal(err)
++	}
++	cert, err := x509.ParseCertificate(der)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return cert, key
++}
++
++func arbaceLeaf(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey, name string, usage x509.ExtKeyUsage, serial int64) Certificate {
++	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++	tmpl := &x509.Certificate{
++		SerialNumber: big.NewInt(serial),
++		Subject:      pkix.Name{CommonName: name},
++		DNSNames:     []string{name},
++		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
++		NotBefore:    time.Now().Add(-time.Hour),
++		NotAfter:     time.Now().Add(24 * time.Hour),
++		KeyUsage:     x509.KeyUsageDigitalSignature,
++		ExtKeyUsage:  []x509.ExtKeyUsage{usage},
++	}
++	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return Certificate{Certificate: [][]byte{der}, PrivateKey: key}
++}
++
++func arbaceGetPKI(t *testing.T) *arbacePKI {
++	arbacePKIOnce.Do(func() {
++		ca, caKey := arbaceNewCA(t, "Arbace Test CA")
++		other, otherKey := arbaceNewCA(t, "Arbace Other CA")
++		p := &arbacePKI{roots: x509.NewCertPool(), otherRoots: x509.NewCertPool()}
++		p.roots.AddCert(ca)
++		p.otherRoots.AddCert(other)
++		p.server = arbaceLeaf(t, ca, caKey, "example.test", x509.ExtKeyUsageServerAuth, 2)
++		p.client = arbaceLeaf(t, ca, caKey, "client.test", x509.ExtKeyUsageClientAuth, 3)
++		p.stranger = arbaceLeaf(t, other, otherKey, "stranger.test", x509.ExtKeyUsageClientAuth, 4)
++		arbacePKIVal = p
++	})
++	return arbacePKIVal
++}
++
++// arbaceConnect makes a TCP loopback connection and runs both handshakes.
++func arbaceConnect(t *testing.T, clientConfig, serverConfig *Config) (cli, srv *Conn, cliErr, srvErr error) {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer ln.Close()
++	type accepted struct {
++		c   net.Conn
++		err error
++	}
++	ch := make(chan accepted, 1)
++	go func() {
++		c, err := ln.Accept()
++		ch <- accepted{c, err}
++	}()
++	rawCli, err := net.Dial("tcp", ln.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	a := <-ch
++	if a.err != nil {
++		t.Fatal(a.err)
++	}
++	deadline := time.Now().Add(20 * time.Second)
++	rawCli.SetDeadline(deadline)
++	a.c.SetDeadline(deadline)
++	t.Cleanup(func() { rawCli.Close(); a.c.Close() })
++
++	cli = Client(rawCli, clientConfig)
++	srv = Server(a.c, serverConfig)
++	done := make(chan error, 1)
++	go func() { done <- srv.Handshake() }()
++	cliErr = cli.Handshake()
++	if cliErr != nil {
++		// Let the server see the client's alert, if any.
++		rawCli.Close()
++	}
++	srvErr = <-done
++	return
++}
++
++func arbaceServerConfig(p *arbacePKI) *Config {
++	return &Config{Certificates: []Certificate{p.server}, MinVersion: VersionTLS12}
++}
++
++func arbaceClientConfig(p *arbacePKI) *Config {
++	return &Config{RootCAs: p.roots, ServerName: "example.test", MinVersion: VersionTLS12}
++}
++
++// arbaceExchange writes msg from a and reads it on b.
++func arbaceExchange(t *testing.T, a, b *Conn, msg string) {
++	t.Helper()
++	errc := make(chan error, 1)
++	go func() {
++		_, err := a.Write([]byte(msg))
++		errc <- err
++	}()
++	buf := make([]byte, len(msg))
++	if _, err := io.ReadFull(b, buf); err != nil {
++		t.Fatalf("read %q: %v", msg, err)
++	}
++	if err := <-errc; err != nil {
++		t.Fatalf("write %q: %v", msg, err)
++	}
++	if string(buf) != msg {
++		t.Fatalf("read %q, want %q", buf, msg)
++	}
++}
++
++func arbaceWantErr(t *testing.T, what string, err error, substr string) {
++	t.Helper()
++	if err == nil {
++		t.Fatalf("%s: no error, want one containing %q", what, substr)
++	}
++	if !strings.Contains(err.Error(), substr) {
++		t.Fatalf("%s: error %q, want one containing %q", what, err, substr)
++	}
++}
++
++// --- 1. key log
++
++func TestArbaceKeyLogTLS13(t *testing.T) {
++	p := arbaceGetPKI(t)
++	var cliLog, srvLog bytes.Buffer
++	cc := arbaceClientConfig(p)
++	cc.KeyLogWriter = &cliLog
++	sc := arbaceServerConfig(p)
++	sc.KeyLogWriter = &srvLog
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	arbaceExchange(t, cli, srv, "ping")
++	if v := cli.ConnectionState().Version; v != VersionTLS13 {
++		t.Fatalf("version %x", v)
++	}
++	parse := func(name string, log *bytes.Buffer) map[string]string {
++		lines := strings.Split(strings.TrimSpace(log.String()), "\n")
++		if len(lines) != 5 {
++			t.Fatalf("%s key log: %d lines, want 5:\n%s", name, len(lines), log)
++		}
++		m := map[string]string{}
++		for _, l := range lines {
++			f := strings.Fields(l)
++			if len(f) != 3 {
++				t.Fatalf("%s key log line %q", name, l)
++			}
++			m[f[0]] = f[1] + " " + f[2]
++		}
++		for _, label := range []string{"CLIENT_HANDSHAKE_TRAFFIC_SECRET", "SERVER_HANDSHAKE_TRAFFIC_SECRET",
++			"CLIENT_TRAFFIC_SECRET_0", "SERVER_TRAFFIC_SECRET_0", "EXPORTER_SECRET"} {
++			if m[label] == "" {
++				t.Fatalf("%s key log lacks %s:\n%s", name, label, log)
++			}
++		}
++		return m
++	}
++	cm, sm := parse("client", &cliLog), parse("server", &srvLog)
++	for k, v := range cm {
++		if sm[k] != v {
++			t.Errorf("%s: client %s, server %s", k, v, sm[k])
++		}
++	}
++	// The exporter secret is the one ExportKeyingMaterial uses: RFC 8446,
++	// Section 7.5, recomputed from the logged secret.
++	var secret []byte
++	fmt.Sscanf(strings.Fields(cm["EXPORTER_SECRET"])[1], "%x", &secret)
++	suite := cipherSuiteTLS13ByID(cli.ConnectionState().CipherSuite)
++	derived := tls13.ExpandLabel(suite.hash.New, secret, "EXPERIMENTAL arbace", suite.hash.New().Sum(nil), suite.hash.Size())
++	h := suite.hash.New()
++	h.Write([]byte("ctx"))
++	want := tls13.ExpandLabel(suite.hash.New, derived, "exporter", h.Sum(nil), 16)
++	cst := cli.ConnectionState()
++	got, err := cst.ExportKeyingMaterial("EXPERIMENTAL arbace", []byte("ctx"), 16)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !bytes.Equal(got, want) {
++		t.Errorf("exporter from the logged secret %x, ExportKeyingMaterial %x", want, got)
++	}
++}
++
++// --- 2. post-handshake authentication
++
++func arbacePHAConfigs(p *arbacePKI, auth ClientAuthType, clientCert *Certificate) (*Config, *Config) {
++	cc := arbaceClientConfig(p)
++	cc.PostHandshakeAuth = true
++	if clientCert != nil {
++		cc.Certificates = []Certificate{*clientCert}
++	}
++	sc := arbaceServerConfig(p)
++	sc.PostHandshakeClientAuth = auth
++	sc.ClientAuth = RequireAndVerifyClientCert // deferred: not applied in TLS 1.3
++	sc.ClientCAs = p.roots
++	return cc, sc
++}
++
++func TestArbacePHARequired(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, RequireAndVerifyClientCert, &p.client)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if n := len(srv.ConnectionState().PeerCertificates); n != 0 {
++		t.Fatalf("a certificate was requested during the handshake (%d)", n)
++	}
++	for round := range 2 {
++		if err := srv.RequestClientCertificate(); err != nil {
++			t.Fatal(err)
++		}
++		if err := srv.RequestClientCertificate(); err != ErrPostHandshakeAuthPending {
++			t.Fatalf("second request: %v", err)
++		}
++		arbaceExchange(t, srv, cli, "OK")      // the client answers in Read
++		arbaceExchange(t, cli, srv, "HASCERT") // the server processes it in Read
++		st := srv.ConnectionState()
++		if len(st.PeerCertificates) != 1 || st.PeerCertificates[0].Subject.CommonName != "client.test" {
++			t.Fatalf("round %d: peer certificates %v", round, st.PeerCertificates)
++		}
++		if len(st.VerifiedChains) == 0 {
++			t.Fatalf("round %d: no verified chains", round)
++		}
++	}
++	if len(cli.ConnectionState().PeerCertificates) == 0 {
++		t.Fatal("client lost the server's certificates")
++	}
++}
++
++func TestArbacePHAOptionalNoCert(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, VerifyClientCertIfGiven, nil)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	arbaceExchange(t, cli, srv, "NOCERT")
++	if n := len(srv.ConnectionState().PeerCertificates); n != 0 {
++		t.Fatalf("%d peer certificates", n)
++	}
++}
++
++func TestArbacePHARequiredNoCert(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, RequireAndVerifyClientCert, nil)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	go cli.Write([]byte("HASCERT"))
++	_, err := srv.Read(make([]byte, 16))
++	arbaceWantErr(t, "server read", err, "didn't provide a certificate")
++	_, err = cli.Read(make([]byte, 16))
++	arbaceWantErr(t, "client read", err, "certificate required")
++}
++
++func TestArbacePHAUnknownCA(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, RequireAndVerifyClientCert, nil)
++	// Certificates would be filtered by the CertificateRequest's CA names.
++	cc.GetClientCertificate = func(*CertificateRequestInfo) (*Certificate, error) { return &p.stranger, nil }
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	go cli.Write([]byte("HASCERT"))
++	_, err := srv.Read(make([]byte, 16))
++	arbaceWantErr(t, "server read", err, "certificate signed by unknown authority")
++	_, err = cli.Read(make([]byte, 16))
++	arbaceWantErr(t, "client read", err, "unknown certificate authority")
++}
++
++func TestArbacePHANotOffered(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, RequireAndVerifyClientCert, &p.client)
++	cc.PostHandshakeAuth = false
++	if err := Server(nil, sc).RequestClientCertificate(); err != ErrPostHandshakeAuthHandshake {
++		t.Fatalf("before the handshake: %v", err)
++	}
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if err := srv.RequestClientCertificate(); err != ErrPostHandshakeAuthNotOffered {
++		t.Fatalf("got %v", err)
++	}
++	if err := cli.RequestClientCertificate(); err != ErrPostHandshakeAuthClient {
++		t.Fatalf("on the client: %v", err)
++	}
++	// A CertificateRequest sent anyway is an unexpected message.
++	certReq := &certificateRequestMsgTLS13{
++		certificateRequestContext:    []byte{1, 2, 3},
++		supportedSignatureAlgorithms: supportedSignatureAlgorithms(VersionTLS13, VersionTLS13),
++	}
++	if _, err := srv.writeHandshakeRecord(certReq, nil); err != nil {
++		t.Fatal(err)
++	}
++	_, err := cli.Read(make([]byte, 16))
++	arbaceWantErr(t, "client read", err, "unexpected handshake message")
++	_, err = srv.Read(make([]byte, 16))
++	arbaceWantErr(t, "server read", err, "unexpected message")
++}
++
++func TestArbacePHATLS12(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbacePHAConfigs(p, RequireAndVerifyClientCert, &p.client)
++	cc.MaxVersion = VersionTLS12
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	// TLS 1.2 requests the certificate in the handshake, as ClientAuth says.
++	if n := len(srv.ConnectionState().PeerCertificates); n != 1 {
++		t.Fatalf("%d peer certificates in TLS 1.2", n)
++	}
++	if err := srv.RequestClientCertificate(); err != ErrPostHandshakeAuthNotTLS13 {
++		t.Fatalf("got %v", err)
++	}
++	arbaceExchange(t, cli, srv, "still fine")
++}
++
++// --- 3. external PSKs, TLS 1.3
++
++var (
++	arbacePSKKey   = bytes.Repeat([]byte{0x42}, 32)
++	arbacePSKOther = bytes.Repeat([]byte{0x24}, 32)
++)
++
++func arbacePSK13Configs(clientKey []byte, serverKnows string, withCert bool) (*Config, *Config, *[][]byte) {
++	var hints [][]byte
++	var mu sync.Mutex
++	cc := &Config{
++		InsecureSkipVerify: true,
++		MinVersion:         VersionTLS13,
++		PSKClientCallback: func(hint []byte) ([]byte, []byte, error) {
++			mu.Lock()
++			hints = append(hints, hint)
++			mu.Unlock()
++			return []byte("client-id"), clientKey, nil
++		},
++	}
++	sc := &Config{
++		MinVersion: VersionTLS13,
++		PSKServerCallback: func(identity []byte) ([]byte, error) {
++			if string(identity) == serverKnows {
++				return arbacePSKKey, nil
++			}
++			return nil, nil
++		},
++	}
++	if withCert {
++		sc.Certificates = []Certificate{arbaceGetPKIVal().server}
++	}
++	return cc, sc, &hints
++}
++
++func arbaceGetPKIVal() *arbacePKI { return arbacePKIVal }
++
++func TestArbacePSK13(t *testing.T) {
++	arbaceGetPKI(t)
++	cc, sc, hints := arbacePSK13Configs(arbacePSKKey, "client-id", false)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	arbaceExchange(t, cli, srv, "psk")
++	arbaceExchange(t, srv, cli, "psk back")
++	for name, st := range map[string]ConnectionState{"client": cli.ConnectionState(), "server": srv.ConnectionState()} {
++		if st.Version != VersionTLS13 || !st.DidResume || len(st.PeerCertificates) != 0 {
++			t.Errorf("%s: version %x, DidResume %v, %d peer certificates", name, st.Version, st.DidResume, len(st.PeerCertificates))
++		}
++		if suite := cipherSuiteTLS13ByID(st.CipherSuite); suite == nil || suite.hash.Size() != 32 {
++			t.Errorf("%s: cipher suite %x", name, st.CipherSuite)
++		}
++	}
++	if len(*hints) != 1 || (*hints)[0] != nil {
++		t.Errorf("client callback hints %q, want one nil", *hints)
++	}
++}
++
++func TestArbacePSK13BadKey(t *testing.T) {
++	arbaceGetPKI(t)
++	cc, sc, _ := arbacePSK13Configs(arbacePSKOther, "client-id", false)
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "server", srvErr, "invalid PSK binder")
++	arbaceWantErr(t, "client", cliErr, "error decrypting message") // decrypt_error
++}
++
++func TestArbacePSK13UnknownIdentity(t *testing.T) {
++	arbaceGetPKI(t)
++	// No certificate to fall back on: the handshake fails.
++	cc, sc, _ := arbacePSK13Configs(arbacePSKKey, "someone-else", false)
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr == nil || srvErr == nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	// With a certificate, a full handshake.
++	cc, sc, _ = arbacePSK13Configs(arbacePSKKey, "someone-else", true)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	arbaceExchange(t, cli, srv, "certificate")
++	if cli.ConnectionState().DidResume || len(cli.ConnectionState().PeerCertificates) != 1 {
++		t.Errorf("not a certificate handshake")
++	}
++}
++
++// --- 3. PSK suites, TLS 1.2
++
++var arbacePSKSuites = []uint16{
++	TLS_PSK_WITH_AES_128_GCM_SHA256,
++	TLS_PSK_WITH_AES_256_GCM_SHA384,
++	TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
++	TLS_PSK_WITH_AES_128_CBC_SHA,
++	TLS_PSK_WITH_AES_256_CBC_SHA,
++}
++
++func arbacePSK12Configs(suite uint16, hint string, clientKey []byte) (*Config, *Config, *[][]byte, *[]string) {
++	var hints [][]byte
++	var ids []string
++	cc := &Config{
++		InsecureSkipVerify: true,
++		MaxVersion:         VersionTLS12,
++		CipherSuites:       []uint16{suite},
++		PSKClientCallback: func(h []byte) ([]byte, []byte, error) {
++			hints = append(hints, h)
++			return []byte("client-id"), clientKey, nil
++		},
++	}
++	sc := &Config{
++		MaxVersion:      VersionTLS12,
++		CipherSuites:    arbacePSKSuites,
++		PSKIdentityHint: []byte(hint),
++		PSKServerCallback: func(identity []byte) ([]byte, error) {
++			ids = append(ids, string(identity))
++			if string(identity) == "client-id" {
++				return arbacePSKKey, nil
++			}
++			return nil, nil
++		},
++	}
++	return cc, sc, &hints, &ids
++}
++
++func TestArbacePSK12(t *testing.T) {
++	for _, suite := range arbacePSKSuites {
++		for _, hint := range []string{"", "server-hint"} {
++			t.Run(fmt.Sprintf("%s/hint=%q", CipherSuiteName(suite), hint), func(t *testing.T) {
++				cc, sc, hints, ids := arbacePSK12Configs(suite, hint, arbacePSKKey)
++				cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++				if cliErr != nil || srvErr != nil {
++					t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++				}
++				arbaceExchange(t, cli, srv, "psk12")
++				arbaceExchange(t, srv, cli, "psk12 back")
++				st := cli.ConnectionState()
++				if st.Version != VersionTLS12 || st.CipherSuite != suite || len(st.PeerCertificates) != 0 {
++					t.Errorf("version %x, suite %x, %d peer certificates", st.Version, st.CipherSuite, len(st.PeerCertificates))
++				}
++				if len(*hints) != 1 || string((*hints)[0]) != hint || (hint == "") != ((*hints)[0] == nil) {
++					t.Errorf("client callback hints %q, want %q", *hints, hint)
++				}
++				if len(*ids) != 1 || (*ids)[0] != "client-id" {
++					t.Errorf("server callback identities %q", *ids)
++				}
++			})
++		}
++	}
++}
++
++func TestArbacePSK12WrongKey(t *testing.T) {
++	cc, sc, _, _ := arbacePSK12Configs(TLS_PSK_WITH_AES_128_GCM_SHA256, "", arbacePSKOther)
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "server", srvErr, "bad record MAC")
++	arbaceWantErr(t, "client", cliErr, "bad record MAC")
++	cc, sc, _, _ = arbacePSK12Configs(TLS_PSK_WITH_AES_128_CBC_SHA, "hint", arbacePSKOther)
++	_, _, cliErr, srvErr = arbaceConnect(t, cc, sc)
++	if cliErr == nil || srvErr == nil {
++		t.Fatalf("CBC: handshake: client %v, server %v", cliErr, srvErr)
++	}
++}
++
++func TestArbacePSK12UnknownIdentity(t *testing.T) {
++	cc, sc, _, _ := arbacePSK12Configs(TLS_PSK_WITH_AES_128_GCM_SHA256, "", arbacePSKKey)
++	cc.PSKClientCallback = func([]byte) ([]byte, []byte, error) { return []byte("nobody"), arbacePSKKey, nil }
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "server", srvErr, "unknown PSK identity")
++	arbaceWantErr(t, "client", cliErr, "unknown PSK identity")
++}
++
++func TestArbacePSK12NotEnabled(t *testing.T) {
++	// PSK suites are not offered unless listed in CipherSuites.
++	cc, sc, _, _ := arbacePSK12Configs(TLS_PSK_WITH_AES_128_GCM_SHA256, "", arbacePSKKey)
++	cc.CipherSuites = nil
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "server", srvErr, "no cipher suite supported by both client and server")
++	if cliErr == nil {
++		t.Fatal("client handshake succeeded")
++	}
++	// Nor accepted by a server without the callback.
++	cc, sc, _, _ = arbacePSK12Configs(TLS_PSK_WITH_AES_128_GCM_SHA256, "", arbacePSKKey)
++	sc.PSKServerCallback = nil
++	sc.Certificates = []Certificate{arbaceGetPKI(t).server}
++	_, _, cliErr, srvErr = arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "server", srvErr, "no cipher suite supported by both client and server")
++	if cliErr == nil {
++		t.Fatal("client handshake succeeded")
++	}
++	for _, id := range defaultCipherSuites(true) {
++		if cipherSuiteByID(id).flags&suitePSK != 0 {
++			t.Errorf("default cipher suites list %s", CipherSuiteName(id))
++		}
++	}
++}
++
++// --- 4. alerts from the verification callbacks
++
++func TestArbaceCallbackAlerts(t *testing.T) {
++	p := arbaceGetPKI(t)
++	for _, vers := range []uint16{VersionTLS12, VersionTLS13} {
++		t.Run(VersionName(vers), func(t *testing.T) {
++			// The client's VerifyPeerCertificate.
++			cc, sc := arbaceClientConfig(p), arbaceServerConfig(p)
++			cc.MaxVersion = vers
++			cc.VerifyPeerCertificate = func([][]byte, [][]*x509.Certificate) error {
++				return fmt.Errorf("arbace: no: %w", AlertError(alertUnknownCA))
++			}
++			_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++			arbaceWantErr(t, "client", cliErr, "arbace: no")
++			arbaceWantErr(t, "server", srvErr, "unknown certificate authority")
++
++			// The client's VerifyConnection, a plain error: bad_certificate.
++			cc = arbaceClientConfig(p)
++			cc.MaxVersion = vers
++			cc.VerifyConnection = func(ConnectionState) error { return errors.New("arbace: no") }
++			_, _, cliErr, srvErr = arbaceConnect(t, cc, sc)
++			arbaceWantErr(t, "client", cliErr, "arbace: no")
++			arbaceWantErr(t, "server", srvErr, "bad certificate")
++
++			// The server's VerifyConnection.
++			cc = arbaceClientConfig(p)
++			cc.MaxVersion = vers
++			sc = arbaceServerConfig(p)
++			sc.VerifyConnection = func(ConnectionState) error { return AlertError(alertAccessDenied) }
++			cli, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++			arbaceWantErr(t, "server", srvErr, "access denied")
++			if cliErr == nil { // TLS 1.3: the client learns it on its first read
++				_, cliErr = cli.Read(make([]byte, 1))
++			}
++			arbaceWantErr(t, "client", cliErr, "access denied")
++
++			// The server's VerifyPeerCertificate on a client certificate.
++			cc = arbaceClientConfig(p)
++			cc.MaxVersion = vers
++			cc.Certificates = []Certificate{p.client}
++			sc = arbaceServerConfig(p)
++			sc.ClientAuth = RequireAnyClientCert
++			sc.VerifyPeerCertificate = func([][]byte, [][]*x509.Certificate) error {
++				return AlertError(alertCertificateRevoked)
++			}
++			cli, _, cliErr, srvErr = arbaceConnect(t, cc, sc)
++			arbaceWantErr(t, "server", srvErr, "revoked certificate")
++			if cliErr == nil { // TLS 1.3: the client learns it on its first read
++				_, cliErr = cli.Read(make([]byte, 1))
++			}
++			arbaceWantErr(t, "client", cliErr, "revoked certificate")
++		})
++	}
++}
++
++func TestArbaceUnknownIssuerAlert(t *testing.T) {
++	p := arbaceGetPKI(t)
++	cc, sc := arbaceClientConfig(p), arbaceServerConfig(p)
++	cc.RootCAs = p.otherRoots
++	_, _, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	arbaceWantErr(t, "client", cliErr, "certificate signed by unknown authority")
++	arbaceWantErr(t, "server", srvErr, "unknown certificate authority")
++}
++
++// The deferred request: PostHandshakeClientAuth replaces ClientAuth in a TLS
++// 1.3 handshake whose client offered PHA, and only then.
++func TestArbacePHADeferred(t *testing.T) {
++	p := arbaceGetPKI(t)
++
++	// RequireAnyClientCert deferred: no certificate in the handshake, then a
++	// missing one is a certificate_required alert.
++	cc, sc := arbacePHAConfigs(p, RequireAnyClientCert, nil)
++	cli, srv, cliErr, srvErr := arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	go cli.Write([]byte("X"))
++	_, err := srv.Read(make([]byte, 1))
++	arbaceWantErr(t, "server read", err, "didn't provide a certificate")
++	_, err = cli.Read(make([]byte, 1))
++	arbaceWantErr(t, "client read", err, "certificate required")
++
++	// RequireAnyClientCert deferred, a certificate of an unknown CA: accepted
++	// (no verification), though ClientAuth would verify it.
++	cc, sc = arbacePHAConfigs(p, RequireAnyClientCert, nil)
++	cc.GetClientCertificate = func(*CertificateRequestInfo) (*Certificate, error) { return &p.stranger, nil }
++	cli, srv, cliErr, srvErr = arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if n := len(srv.ConnectionState().PeerCertificates); n != 0 {
++		t.Fatalf("certificate requested in the handshake (%d)", n)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	arbaceExchange(t, cli, srv, "HASCERT")
++	if st := srv.ConnectionState(); len(st.PeerCertificates) != 1 || len(st.VerifiedChains) != 0 {
++		t.Fatalf("%d peer certificates, %d chains", len(st.PeerCertificates), len(st.VerifiedChains))
++	}
++
++	// The client did not offer PHA: ClientAuth applies in the handshake.
++	cc, sc = arbacePHAConfigs(p, RequireAnyClientCert, &p.client)
++	cc.PostHandshakeAuth = false
++	_, srv, cliErr, srvErr = arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if st := srv.ConnectionState(); len(st.PeerCertificates) != 1 || len(st.VerifiedChains) == 0 {
++		t.Fatalf("no verified certificate in the handshake")
++	}
++
++	// PostHandshakeClientAuth NoClientCert: the handshake requests the
++	// certificate (ClientAuth), and a post-handshake request still works,
++	// under ClientAuth.
++	cc, sc = arbacePHAConfigs(p, NoClientCert, &p.client)
++	cli, srv, cliErr, srvErr = arbaceConnect(t, cc, sc)
++	if cliErr != nil || srvErr != nil {
++		t.Fatalf("handshake: client %v, server %v", cliErr, srvErr)
++	}
++	if n := len(srv.ConnectionState().PeerCertificates); n != 1 {
++		t.Fatalf("%d peer certificates after the handshake", n)
++	}
++	if err := srv.RequestClientCertificate(); err != nil {
++		t.Fatal(err)
++	}
++	arbaceExchange(t, srv, cli, "OK")
++	arbaceExchange(t, cli, srv, "AGAIN")
++	if st := srv.ConnectionState(); len(st.PeerCertificates) != 1 || len(st.VerifiedChains) == 0 {
++		t.Fatalf("no verified certificate after the request")
++	}
++}
+diff -ruN upstream/pytls/arbace_keylog_alerts.go vendored/pytls/arbace_keylog_alerts.go
+--- upstream/pytls/arbace_keylog_alerts.go
++++ vendored/pytls/arbace_keylog_alerts.go
+@@ -0,0 +1,46 @@
++// Copyright 2026 The Arbace Authors. Additions to the vendored copy of
++// crypto/tls (see VENDORED.md); BSD-style license as the Go sources.
++
++package tls
++
++import (
++	"arbace/pytls/internal/tls13"
++	"crypto/x509"
++	"errors"
++	"hash"
++)
++
++// writeKeyLogExporterSecret writes the EXPORTER_SECRET line of a TLS 1.3
++// connection to the key log, as OpenSSL does: the exporter_master_secret
++// derived from the transcript through the server Finished.
++func (c *Conn) writeKeyLogExporterSecret(clientRandom []byte, ms *tls13.MasterSecret, transcript hash.Hash) error {
++	if c.config.KeyLogWriter == nil {
++		return nil
++	}
++	secret := tls13.TestingOnlyExporterSecret(ms.ExporterMasterSecret(transcript))
++	return c.config.writeKeyLog(keyLogLabelExporterSecret, clientRandom, secret)
++}
++
++// callbackAlert is the alert sent when VerifyPeerCertificate or
++// VerifyConnection fails: the AlertError the error is or wraps, else
++// bad_certificate.
++func callbackAlert(err error) alert {
++	if a, ok := errors.AsType[AlertError](err); ok {
++		return alert(a)
++	}
++	return alertBadCertificate
++}
++
++// verifyErrorAlert is the alert sent when the peer's chain does not verify,
++// as the server side already chose it for client certificates (and as
++// OpenSSL does): unknown_ca for an unknown issuer, certificate_expired for an
++// expired certificate, else bad_certificate.
++func verifyErrorAlert(err error) alert {
++	if _, ok := errors.AsType[x509.UnknownAuthorityError](err); ok {
++		return alertUnknownCA
++	}
++	if e, ok := errors.AsType[x509.CertificateInvalidError](err); ok && e.Reason == x509.Expired {
++		return alertCertificateExpired
++	}
++	return alertBadCertificate
++}
+diff -ruN upstream/pytls/arbace_pha.go vendored/pytls/arbace_pha.go
+--- upstream/pytls/arbace_pha.go
++++ vendored/pytls/arbace_pha.go
+@@ -0,0 +1,346 @@
++// Copyright 2026 The Arbace Authors. Additions to the vendored copy of
++// crypto/tls (see VENDORED.md); BSD-style license as the Go sources.
++
++package tls
++
++import (
++	"bytes"
++	"context"
++	"crypto"
++	"crypto/hmac"
++	"crypto/rsa"
++	"errors"
++	"hash"
++	"io"
++	"sync"
++)
++
++// TLS 1.3 post-handshake client authentication, RFC 8446, sections 4.2.6,
++// 4.3.2 and 4.6.2.
++
++const extensionPostHandshakeAuth uint16 = 49
++
++// Errors of [Conn.RequestClientCertificate].
++var (
++	// ErrPostHandshakeAuthNotTLS13: the connection is not TLS 1.3
++	// (OpenSSL's WRONG_SSL_VERSION).
++	ErrPostHandshakeAuthNotTLS13 = errors.New("tls: post-handshake authentication requires TLS 1.3")
++	// ErrPostHandshakeAuthNotOffered: the client did not send the
++	// post_handshake_auth extension (OpenSSL's EXTENSION_NOT_RECEIVED).
++	ErrPostHandshakeAuthNotOffered = errors.New("tls: the client did not offer post-handshake authentication")
++	// ErrPostHandshakeAuthPending: a request has not been answered yet
++	// (OpenSSL's REQUEST_PENDING).
++	ErrPostHandshakeAuthPending = errors.New("tls: a post-handshake certificate request is pending")
++	// ErrPostHandshakeAuthHandshake: the handshake has not completed
++	// (OpenSSL's STILL_IN_INIT).
++	ErrPostHandshakeAuthHandshake = errors.New("tls: the handshake has not completed")
++	// ErrPostHandshakeAuthClient: the connection is a client's.
++	ErrPostHandshakeAuthClient = errors.New("tls: post-handshake authentication is requested by servers")
++)
++
++// postHandshakeAuthState is kept on a TLS 1.3 Conn whose client offered
++// post-handshake authentication.
++type postHandshakeAuthState struct {
++	suite *cipherSuiteTLS13
++	// transcript is the handshake's, through the client Finished. Each
++	// exchange starts from a clone of it.
++	transcript hash.Hash
++
++	mu      sync.Mutex
++	pending *pendingCertificateRequest // server: sent, not answered yet
++}
++
++type pendingCertificateRequest struct {
++	context    []byte
++	transcript hash.Hash // through the CertificateRequest
++}
++
++func (c *Conn) savePostHandshakeAuthState(suite *cipherSuiteTLS13, transcript hash.Hash) error {
++	t := cloneHash(transcript, suite.hash)
++	if t == nil {
++		c.sendAlert(alertInternalError)
++		return errors.New("tls: internal error: failed to clone hash")
++	}
++	c.pha = &postHandshakeAuthState{suite: suite, transcript: t}
++	return nil
++}
++
++func (p *postHandshakeAuthState) pendingRequest() bool {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	return p.pending != nil
++}
++
++func (p *postHandshakeAuthState) takePending() *pendingCertificateRequest {
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	pend := p.pending
++	p.pending = nil
++	return pend
++}
++
++// rawHandshakeMessage keeps the bytes of the last handshake message read, as
++// a transcriptHash.
++type rawHandshakeMessage []byte
++
++func (r *rawHandshakeMessage) Write(b []byte) (int, error) {
++	*r = append((*r)[:0], b...)
++	return len(b), nil
++}
++
++// RequestClientCertificate sends a TLS 1.3 post-handshake CertificateRequest
++// (RFC 8446, Section 4.6.2), as OpenSSL's SSL_verify_client_post_handshake.
++// The client's answer (Certificate, CertificateVerify, Finished) is read and
++// processed by a later [Conn.Read], which applies Config.PostHandshakeClientAuth
++// (Config.ClientAuth when it is NoClientCert) to it as the handshake would (a missing certificate when one is required is a
++// certificate_required alert; verification through ClientCAs,
++// VerifyPeerCertificate and VerifyConnection), updates
++// ConnectionState().PeerCertificates and VerifiedChains, and returns any
++// failure as its error.
++//
++// It fails, sending nothing, on a client, before the handshake, on a
++// connection that is not TLS 1.3, when the client did not offer
++// post-handshake authentication, and while an earlier request is pending. It
++// works whether or not a certificate was received in the handshake.
++func (c *Conn) RequestClientCertificate() error {
++	if c.isClient {
++		return ErrPostHandshakeAuthClient
++	}
++	if !c.isHandshakeComplete.Load() {
++		return ErrPostHandshakeAuthHandshake
++	}
++	if c.vers != VersionTLS13 {
++		return ErrPostHandshakeAuthNotTLS13
++	}
++	p := c.pha
++	if p == nil {
++		return ErrPostHandshakeAuthNotOffered
++	}
++	p.mu.Lock()
++	defer p.mu.Unlock()
++	if p.pending != nil {
++		return ErrPostHandshakeAuthPending
++	}
++
++	context := make([]byte, 32)
++	if _, err := io.ReadFull(c.config.rand(), context); err != nil {
++		return err
++	}
++	certReq := &certificateRequestMsgTLS13{
++		certificateRequestContext:        context,
++		supportedSignatureAlgorithms:     supportedSignatureAlgorithms(c.vers, c.vers),
++		supportedSignatureAlgorithmsCert: supportedSignatureAlgorithmsCert(c.vers, c.vers),
++	}
++	if c.config.ClientCAs != nil {
++		certReq.certificateAuthorities = c.config.ClientCAs.Subjects()
++	}
++	transcript := cloneHash(p.transcript, p.suite.hash)
++	if transcript == nil {
++		return errors.New("tls: internal error: failed to clone hash")
++	}
++	if _, err := c.writeHandshakeRecord(certReq, transcript); err != nil {
++		return err
++	}
++	p.pending = &pendingCertificateRequest{context: context, transcript: transcript}
++	return nil
++}
++
++// handlePostHandshakeClientCertificate processes, on a server, the client's
++// answer to RequestClientCertificate, starting with its Certificate message,
++// whose bytes are raw. c.in is locked.
++func (c *Conn) handlePostHandshakeClientCertificate(certMsg *certificateMsgTLS13, raw []byte) error {
++	pend := c.pha.takePending()
++	if pend == nil {
++		c.sendAlert(alertUnexpectedMessage)
++		return c.in.setErrorLocked(errors.New("tls: unexpected post-handshake Certificate"))
++	}
++	c.handshakeMutex.Lock()
++	defer c.handshakeMutex.Unlock()
++	if err := c.processPostHandshakeClientAuth(pend, certMsg, raw); err != nil {
++		return c.in.setErrorLocked(err)
++	}
++	return nil
++}
++
++func (c *Conn) processPostHandshakeClientAuth(pend *pendingCertificateRequest, certMsg *certificateMsgTLS13, raw []byte) error {
++	suite := c.pha.suite
++	if !bytes.Equal(certMsg.requestContext, pend.context) {
++		c.sendAlert(alertIllegalParameter)
++		return errors.New("tls: client answered with a wrong certificate_request_context")
++	}
++	pend.transcript.Write(raw)
++
++	// As serverHandshakeStateTLS13.readClientCertificate.
++	clientAuth := c.config.PostHandshakeClientAuth
++	if clientAuth == NoClientCert {
++		clientAuth = c.config.ClientAuth
++	}
++	if err := c.processCertsFromClientAuth(certMsg.certificate, clientAuth); err != nil {
++		return err
++	}
++	if c.config.VerifyConnection != nil {
++		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
++			c.sendAlert(callbackAlert(err))
++			return err
++		}
++	}
++
++	if len(certMsg.certificate.Certificate) != 0 {
++		msg, err := c.readHandshake(nil)
++		if err != nil {
++			return err
++		}
++		certVerify, ok := msg.(*certificateVerifyMsg)
++		if !ok {
++			c.sendAlert(alertUnexpectedMessage)
++			return unexpectedMessageError(certVerify, msg)
++		}
++		if !isSupportedSignatureAlgorithm(certVerify.signatureAlgorithm, supportedSignatureAlgorithms(c.vers, c.vers)) ||
++			!isSupportedSignatureAlgorithm(certVerify.signatureAlgorithm, signatureSchemesForPublicKey(c.vers, c.peerCertificates[0].PublicKey)) {
++			c.sendAlert(alertIllegalParameter)
++			return errors.New("tls: client certificate used with invalid signature algorithm")
++		}
++		sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerify.signatureAlgorithm)
++		if err != nil {
++			return c.sendAlert(alertInternalError)
++		}
++		if sigType == signaturePKCS1v15 || sigHash == crypto.SHA1 {
++			return c.sendAlert(alertInternalError)
++		}
++		signed := signedMessage(clientSignatureContext, pend.transcript)
++		if err := verifyHandshakeSignature(sigType, c.peerCertificates[0].PublicKey,
++			sigHash, signed, certVerify.signature); err != nil {
++			c.sendAlert(alertDecryptError)
++			return errors.New("tls: invalid signature by the client certificate: " + err.Error())
++		}
++		c.peerSigAlg = certVerify.signatureAlgorithm
++		if err := transcriptMsg(certVerify, pend.transcript); err != nil {
++			return err
++		}
++	}
++
++	msg, err := c.readHandshake(nil)
++	if err != nil {
++		return err
++	}
++	finished, ok := msg.(*finishedMsg)
++	if !ok {
++		c.sendAlert(alertUnexpectedMessage)
++		return unexpectedMessageError(finished, msg)
++	}
++	// The Finished of a post-handshake exchange is keyed from the current
++	// client_application_traffic_secret (RFC 8446, Section 4.4).
++	expected := suite.finishedHash(c.in.trafficSecret, pend.transcript)
++	if !hmac.Equal(expected, finished.verifyData) {
++		c.sendAlert(alertDecryptError)
++		return errors.New("tls: invalid client finished hash in post-handshake authentication")
++	}
++	return nil
++}
++
++// handlePostHandshakeCertificateRequest answers, on a client that offered
++// post-handshake authentication, a CertificateRequest received after the
++// handshake, whose bytes are raw. c.in is locked.
++func (c *Conn) handlePostHandshakeCertificateRequest(certReq *certificateRequestMsgTLS13, raw []byte) error {
++	if err := c.answerPostHandshakeCertificateRequest(certReq, raw); err != nil {
++		return c.in.setErrorLocked(err)
++	}
++	return nil
++}
++
++func (c *Conn) answerPostHandshakeCertificateRequest(certReq *certificateRequestMsgTLS13, raw []byte) error {
++	p := c.pha
++	transcript := cloneHash(p.transcript, p.suite.hash)
++	if transcript == nil {
++		c.sendAlert(alertInternalError)
++		return errors.New("tls: internal error: failed to clone hash")
++	}
++	transcript.Write(raw)
++
++	cert, err := c.getClientCertificate(&CertificateRequestInfo{
++		AcceptableCAs:    certReq.certificateAuthorities,
++		SignatureSchemes: certReq.supportedSignatureAlgorithms,
++		Version:          c.vers,
++		ctx:              context.Background(),
++	})
++	if err != nil {
++		c.sendAlert(alertInternalError)
++		return err
++	}
++
++	// The messages are built first, then written under c.out's lock.
++	var msgs [][]byte
++	add := func(m handshakeMessage) error {
++		data, err := m.marshal()
++		if err != nil {
++			return err
++		}
++		transcript.Write(data)
++		msgs = append(msgs, data)
++		return nil
++	}
++
++	certMsg := &certificateMsgTLS13{
++		requestContext: certReq.certificateRequestContext,
++		certificate:    *cert,
++		scts:           certReq.scts && len(cert.SignedCertificateTimestamps) > 0,
++		ocspStapling:   certReq.ocspStapling && len(cert.OCSPStaple) > 0,
++	}
++	if err := add(certMsg); err != nil {
++		return err
++	}
++
++	if len(cert.Certificate) != 0 {
++		// As clientHandshakeStateTLS13.sendClientCertificate.
++		certVerifyMsg := &certificateVerifyMsg{hasSignatureAlgorithm: true}
++		certVerifyMsg.signatureAlgorithm, err = selectSignatureScheme(c.vers, cert, certReq.supportedSignatureAlgorithms)
++		if err != nil {
++			c.sendAlert(alertHandshakeFailure)
++			return err
++		}
++		sigType, sigHash, err := typeAndHashFromSignatureScheme(certVerifyMsg.signatureAlgorithm)
++		if err != nil {
++			return c.sendAlert(alertInternalError)
++		}
++		signed := signedMessage(clientSignatureContext, transcript)
++		signOpts := crypto.SignerOpts(sigHash)
++		if sigType == signatureRSAPSS {
++			signOpts = &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash, Hash: sigHash}
++		}
++		sig, err := crypto.SignMessage(cert.PrivateKey.(crypto.Signer), c.config.rand(), signed, signOpts)
++		if err != nil {
++			c.sendAlert(alertInternalError)
++			return errors.New("tls: failed to sign handshake: " + err.Error())
++		}
++		certVerifyMsg.signature = sig
++		if err := add(certVerifyMsg); err != nil {
++			return err
++		}
++	}
++
++	if err := c.writePostHandshakeAuthFlight(transcript, add, &msgs); err != nil {
++		return err
++	}
++
++	if len(cert.Certificate) != 0 {
++		c.handshakeMutex.Lock()
++		c.localCertificate = cert.Certificate
++		c.handshakeMutex.Unlock()
++	}
++	return nil
++}
++
++func (c *Conn) writePostHandshakeAuthFlight(transcript hash.Hash, add func(handshakeMessage) error, msgs *[][]byte) error {
++	c.out.Lock()
++	defer c.out.Unlock()
++	finished := &finishedMsg{verifyData: c.pha.suite.finishedHash(c.out.trafficSecret, transcript)}
++	if err := add(finished); err != nil {
++		return err
++	}
++	for _, data := range *msgs {
++		if _, err := c.writeRecordLocked(recordTypeHandshake, data); err != nil {
++			return err
++		}
++	}
++	return nil
++}
+diff -ruN upstream/pytls/arbace_psk.go vendored/pytls/arbace_psk.go
+--- upstream/pytls/arbace_psk.go
++++ vendored/pytls/arbace_psk.go
+@@ -0,0 +1,390 @@
++// Copyright 2026 The Arbace Authors. Additions to the vendored copy of
++// crypto/tls (see VENDORED.md); BSD-style license as the Go sources.
++
++package tls
++
++import (
++	"arbace/pytls/internal/cryptobyte"
++	"arbace/pytls/internal/tls13"
++	"crypto"
++	"crypto/hmac"
++	"crypto/x509"
++	"errors"
++	"fmt"
++	"slices"
++)
++
++// Pre-shared keys: TLS 1.3 external PSKs (RFC 8446, Section 4.2.11) and the
++// TLS 1.2 plain PSK key exchange (RFC 4279, with the suites of RFC 5487 and
++// RFC 7905).
++
++// PSK cipher suites (arbace). They are used only when listed in
++// Config.CipherSuites, by a client with Config.PSKClientCallback and a server
++// with Config.PSKServerCallback.
++const (
++	TLS_PSK_WITH_AES_128_CBC_SHA          uint16 = 0x008c
++	TLS_PSK_WITH_AES_256_CBC_SHA          uint16 = 0x008d
++	TLS_PSK_WITH_AES_128_GCM_SHA256       uint16 = 0x00a8
++	TLS_PSK_WITH_AES_256_GCM_SHA384       uint16 = 0x00a9
++	TLS_PSK_WITH_CHACHA20_POLY1305_SHA256 uint16 = 0xccab
++)
++
++// externalPSKSuite is the cipher suite whose hash a TLS 1.3 external PSK is
++// used with, as OpenSSL does for its psk_client_callback.
++const externalPSKSuite = TLS_AES_128_GCM_SHA256
++
++// loadExternalPSK offers the PSK of Config.PSKClientCallback in a TLS 1.3
++// ClientHello. The returned session stands for it in the handshake state.
++func (c *Conn) loadExternalPSK(hello *clientHelloMsg) (
++	session *SessionState, earlySecret *tls13.EarlySecret, binderKey []byte, err error) {
++	if c.config.PSKClientCallback == nil || c.handshakes != 0 || c.quic != nil ||
++		hello.supportedVersions[0] != VersionTLS13 {
++		return nil, nil, nil, nil
++	}
++	suite := cipherSuiteTLS13ByID(externalPSKSuite)
++	if !slices.ContainsFunc(hello.cipherSuites, func(id uint16) bool {
++		s := cipherSuiteTLS13ByID(id)
++		return s != nil && s.hash == suite.hash
++	}) {
++		return nil, nil, nil, nil
++	}
++	identity, key, err := c.config.PSKClientCallback(nil)
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	if len(identity) == 0 || len(key) == 0 {
++		return nil, nil, nil, nil
++	}
++	if len(identity) > 0xffff {
++		return nil, nil, nil, errors.New("tls: PSK identity too long")
++	}
++
++	session = &SessionState{
++		version:     VersionTLS13,
++		isClient:    true,
++		cipherSuite: externalPSKSuite,
++		createdAt:   uint64(c.config.time().Unix()),
++		secret:      key,
++		externalPSK: true,
++	}
++	hello.pskModes = []uint8{pskModeDHE}
++	hello.pskIdentities = []pskIdentity{{label: identity}} // obfuscated_ticket_age 0
++	hello.pskBinders = [][]byte{make([]byte, suite.hash.Size())}
++
++	earlySecret = tls13.NewEarlySecret(suite.hash.New, key)
++	binderKey = earlySecret.ExternalBinderKey()
++	if err := computeAndUpdatePSK(hello, binderKey, suite.hash.New(), suite.finishedHash); err != nil {
++		return nil, nil, nil, err
++	}
++	return session, earlySecret, binderKey, nil
++}
++
++// checkForExternalPSK accepts a client's external PSK found by
++// Config.PSKServerCallback. done reports whether one was accepted.
++func (hs *serverHandshakeStateTLS13) checkForExternalPSK() (done bool, err error) {
++	c := hs.c
++	if c.config.PSKServerCallback == nil || c.quic != nil || len(hs.clientHello.pskIdentities) == 0 {
++		return false, nil
++	}
++	if !slices.Contains(hs.clientHello.pskModes, pskModeDHE) {
++		return false, nil
++	}
++	if len(hs.clientHello.pskIdentities) != len(hs.clientHello.pskBinders) {
++		c.sendAlert(alertIllegalParameter)
++		return false, errors.New("tls: invalid or missing PSK binders")
++	}
++	if hs.suite.hash != crypto.SHA256 {
++		// External PSKs are used with SHA-256 (see externalPSKSuite).
++		return false, nil
++	}
++
++	for i, identity := range hs.clientHello.pskIdentities {
++		if i >= maxClientPSKIdentities {
++			break
++		}
++		key, err := c.config.PSKServerCallback(identity.label)
++		if err != nil {
++			c.sendAlert(alertInternalError)
++			return false, err
++		}
++		if len(key) == 0 {
++			continue
++		}
++
++		earlySecret := tls13.NewEarlySecret(hs.suite.hash.New, key)
++		binderKey := earlySecret.ExternalBinderKey()
++		transcript := cloneHash(hs.transcript, hs.suite.hash)
++		if transcript == nil {
++			c.sendAlert(alertInternalError)
++			return false, errors.New("tls: internal error: failed to clone hash")
++		}
++		clientHelloBytes, err := hs.clientHello.marshalWithoutBinders()
++		if err != nil {
++			c.sendAlert(alertInternalError)
++			return false, err
++		}
++		transcript.Write(clientHelloBytes)
++		pskBinder := hs.suite.finishedHash(binderKey, transcript)
++		if !hmac.Equal(hs.clientHello.pskBinders[i], pskBinder) {
++			c.sendAlert(alertDecryptError)
++			return false, errors.New("tls: invalid PSK binder")
++		}
++
++		hs.earlySecret = earlySecret
++		c.didResume = true
++		hs.hello.selectedIdentityPresent = true
++		hs.hello.selectedIdentity = uint16(i)
++		hs.usingPSK = true
++		return true, nil
++	}
++	return false, nil
++}
++
++// pskPreMasterSecret is RFC 4279's premaster secret of the plain PSK key
++// exchange: uint16(N) || N zero bytes || uint16(N) || psk.
++func pskPreMasterSecret(psk []byte) []byte {
++	n := len(psk)
++	pms := make([]byte, 2+n+2+n)
++	pms[0], pms[1] = byte(n>>8), byte(n)
++	pms[2+n], pms[3+n] = byte(n>>8), byte(n)
++	copy(pms[4+n:], psk)
++	return pms
++}
++
++// pskKeyAgreement is the TLS 1.2 plain PSK key exchange, RFC 4279, Section 2.
++type pskKeyAgreement struct {
++	hint []byte // the server's identity hint, nil when it sent none
++}
++
++func pskKA(version uint16) keyAgreement {
++	return &pskKeyAgreement{}
++}
++
++func (ka *pskKeyAgreement) generateServerKeyExchange(config *Config, cert *Certificate, clientHello *clientHelloMsg, hello *serverHelloMsg) (*serverKeyExchangeMsg, error) {
++	hint := config.PSKIdentityHint
++	if len(hint) == 0 {
++		return nil, nil
++	}
++	if len(hint) > 0xffff {
++		return nil, errors.New("tls: PSK identity hint too long")
++	}
++	key := make([]byte, 2+len(hint))
++	key[0], key[1] = byte(len(hint)>>8), byte(len(hint))
++	copy(key[2:], hint)
++	return &serverKeyExchangeMsg{key: key}, nil
++}
++
++func (ka *pskKeyAgreement) processClientKeyExchange(config *Config, cert *Certificate, ckx *clientKeyExchangeMsg, version uint16) ([]byte, error) {
++	s := cryptobyte.String(ckx.ciphertext)
++	var identity []byte
++	if !readUint16LengthPrefixed(&s, &identity) || !s.Empty() {
++		return nil, errClientKeyExchange
++	}
++	if config.PSKServerCallback == nil {
++		return nil, alertInternalError
++	}
++	key, err := config.PSKServerCallback(identity)
++	if err != nil {
++		return nil, err
++	}
++	if len(key) == 0 {
++		return nil, fmt.Errorf("tls: unknown PSK identity %q: %w", identity, alertUnknownPSKIdentity)
++	}
++	return pskPreMasterSecret(key), nil
++}
++
++func (ka *pskKeyAgreement) processServerKeyExchange(config *Config, clientHello *clientHelloMsg, serverHello *serverHelloMsg, cert *x509.Certificate, skx *serverKeyExchangeMsg) error {
++	s := cryptobyte.String(skx.key)
++	var hint []byte
++	if !readUint16LengthPrefixed(&s, &hint) || !s.Empty() {
++		return errServerKeyExchange
++	}
++	if len(hint) > 0 {
++		ka.hint = hint
++	}
++	return nil
++}
++
++func (ka *pskKeyAgreement) generateClientKeyExchange(config *Config, clientHello *clientHelloMsg, cert *x509.Certificate) ([]byte, *clientKeyExchangeMsg, error) {
++	if config.PSKClientCallback == nil {
++		return nil, nil, alertInternalError
++	}
++	identity, key, err := config.PSKClientCallback(ka.hint)
++	if err != nil {
++		return nil, nil, err
++	}
++	if len(key) == 0 {
++		return nil, nil, fmt.Errorf("tls: no PSK for the server: %w", alertHandshakeFailure)
++	}
++	if len(identity) > 0xffff {
++		return nil, nil, errors.New("tls: PSK identity too long")
++	}
++	ckx := &clientKeyExchangeMsg{ciphertext: make([]byte, 2+len(identity))}
++	ckx.ciphertext[0], ckx.ciphertext[1] = byte(len(identity)>>8), byte(len(identity))
++	copy(ckx.ciphertext[2:], identity)
++	return pskPreMasterSecret(key), ckx, nil
++}
++
++// errorAlert is the alert err is or wraps, else def.
++func errorAlert(err error, def alert) alert {
++	if a, ok := errors.AsType[alert](err); ok {
++		return a
++	}
++	return def
++}
++
++// fullHandshake is doFullHandshake, or its PSK variant for a PSK suite.
++func (hs *clientHandshakeState) fullHandshake() error {
++	if hs.suite.flags&suitePSK != 0 {
++		return hs.doFullHandshakePSK()
++	}
++	return hs.doFullHandshake()
++}
++
++// doFullHandshakePSK is doFullHandshake for the PSK suites: no Certificate,
++// an optional ServerKeyExchange with the identity hint, no client
++// certificate, a ClientKeyExchange with the identity (RFC 4279, Section 2).
++func (hs *clientHandshakeState) doFullHandshakePSK() error {
++	c := hs.c
++	ka := hs.suite.ka(c.vers)
++
++	msg, err := c.readHandshake(&hs.finishedHash)
++	if err != nil {
++		return err
++	}
++	if skx, ok := msg.(*serverKeyExchangeMsg); ok {
++		if err := ka.processServerKeyExchange(c.config, hs.hello, hs.serverHello, nil, skx); err != nil {
++			c.sendAlert(alertDecodeError)
++			return err
++		}
++		msg, err = c.readHandshake(&hs.finishedHash)
++		if err != nil {
++			return err
++		}
++	}
++	shd, ok := msg.(*serverHelloDoneMsg)
++	if !ok {
++		c.sendAlert(alertUnexpectedMessage)
++		return unexpectedMessageError(shd, msg)
++	}
++
++	if c.config.VerifyConnection != nil {
++		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
++			c.sendAlert(callbackAlert(err))
++			return err
++		}
++	}
++
++	preMasterSecret, ckx, err := ka.generateClientKeyExchange(c.config, hs.hello, nil)
++	if err != nil {
++		c.sendAlert(errorAlert(err, alertInternalError))
++		return err
++	}
++	if _, err := hs.c.writeHandshakeRecord(ckx, &hs.finishedHash); err != nil {
++		return err
++	}
++
++	if hs.serverHello.extendedMasterSecret {
++		c.extMasterSecret = true
++		hs.masterSecret = extMasterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
++			hs.finishedHash.Sum())
++	} else {
++		hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
++			hs.hello.random, hs.serverHello.random)
++	}
++	if err := c.config.writeKeyLog(keyLogLabelTLS12, hs.hello.random, hs.masterSecret); err != nil {
++		c.sendAlert(alertInternalError)
++		return errors.New("tls: failed to write to key log: " + err.Error())
++	}
++
++	hs.finishedHash.discardHandshakeBuffer()
++	return nil
++}
++
++// fullHandshake is doFullHandshake, or its PSK variant for a PSK suite.
++func (hs *serverHandshakeState) fullHandshake() error {
++	if hs.suite.flags&suitePSK != 0 {
++		return hs.doFullHandshakePSK()
++	}
++	return hs.doFullHandshake()
++}
++
++// doFullHandshakePSK is doFullHandshake for the PSK suites (RFC 4279,
++// Section 2): no Certificate nor CertificateRequest, a ServerKeyExchange only
++// when the server has an identity hint.
++func (hs *serverHandshakeState) doFullHandshakePSK() error {
++	c := hs.c
++
++	if hs.clientHello.serverName != "" {
++		hs.hello.serverNameAck = true
++	}
++	hs.hello.ticketSupported = hs.clientHello.ticketSupported && !c.config.SessionTicketsDisabled
++	hs.hello.cipherSuite = hs.suite.id
++
++	hs.finishedHash = newFinishedHash(hs.c.vers, hs.suite)
++	hs.finishedHash.discardHandshakeBuffer()
++	if err := transcriptMsg(hs.clientHello, &hs.finishedHash); err != nil {
++		return err
++	}
++	if _, err := hs.c.writeHandshakeRecord(hs.hello, &hs.finishedHash); err != nil {
++		return err
++	}
++
++	ka := hs.suite.ka(c.vers)
++	skx, err := ka.generateServerKeyExchange(c.config, hs.cert, hs.clientHello, hs.hello)
++	if err != nil {
++		c.sendAlert(alertInternalError)
++		return err
++	}
++	if skx != nil {
++		if _, err := hs.c.writeHandshakeRecord(skx, &hs.finishedHash); err != nil {
++			return err
++		}
++	}
++	if _, err := hs.c.writeHandshakeRecord(new(serverHelloDoneMsg), &hs.finishedHash); err != nil {
++		return err
++	}
++	if _, err := c.flush(); err != nil {
++		return err
++	}
++
++	msg, err := c.readHandshake(&hs.finishedHash)
++	if err != nil {
++		return err
++	}
++	ckx, ok := msg.(*clientKeyExchangeMsg)
++	if !ok {
++		c.sendAlert(alertUnexpectedMessage)
++		return unexpectedMessageError(ckx, msg)
++	}
++	preMasterSecret, err := ka.processClientKeyExchange(c.config, hs.cert, ckx, c.vers)
++	if err != nil {
++		if err == errClientKeyExchange {
++			c.sendAlert(alertDecodeError)
++		} else {
++			c.sendAlert(errorAlert(err, alertInternalError))
++		}
++		return err
++	}
++
++	if c.config.VerifyConnection != nil {
++		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
++			c.sendAlert(callbackAlert(err))
++			return err
++		}
++	}
++
++	if hs.hello.extendedMasterSecret {
++		c.extMasterSecret = true
++		hs.masterSecret = extMasterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
++			hs.finishedHash.Sum())
++	} else {
++		hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret,
++			hs.clientHello.random, hs.hello.random)
++	}
++	if err := c.config.writeKeyLog(keyLogLabelTLS12, hs.clientHello.random, hs.masterSecret); err != nil {
++		c.sendAlert(alertInternalError)
++		return err
++	}
++	return nil
++}
+diff -ruN upstream/pytls/cipher_suites.go vendored/pytls/cipher_suites.go
+--- upstream/pytls/cipher_suites.go
++++ vendored/pytls/cipher_suites.go
+@@ -5,25 +5,23 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/boring"
++	"arbace/pytls/internal/cpu"
+ 	"crypto"
+ 	"crypto/aes"
+ 	"crypto/cipher"
+ 	"crypto/des"
+ 	"crypto/hmac"
+-	"crypto/internal/boring"
+-	fipsaes "crypto/internal/fips140/aes"
+-	"crypto/internal/fips140/aes/gcm"
+ 	"crypto/rc4"
+ 	"crypto/sha1"
+ 	"crypto/sha256"
+ 	_ "crypto/sha512" // for crypto.SHA384
+ 	"fmt"
+ 	"hash"
+-	"internal/cpu"
+ 	"runtime"
+ 	_ "unsafe" // for linkname
+ 
+-	"golang.org/x/crypto/chacha20poly1305"
++	"arbace/pytls/internal/chacha20poly1305"
+ )
+ 
+ // CipherSuite is a TLS cipher suite. Note that most functions in this package
+@@ -87,13 +85,20 @@
+ 		{TLS_RSA_WITH_AES_128_CBC_SHA, "TLS_RSA_WITH_AES_128_CBC_SHA", supportedUpToTLS12, true},
+ 		{TLS_RSA_WITH_AES_256_CBC_SHA, "TLS_RSA_WITH_AES_256_CBC_SHA", supportedUpToTLS12, true},
+ 		{TLS_RSA_WITH_AES_128_CBC_SHA256, "TLS_RSA_WITH_AES_128_CBC_SHA256", supportedOnlyTLS12, true},
++		// arbace: the PSK suites, listed here as every suite that is disabled
++		// by default (they are not insecure as such).
++		{TLS_PSK_WITH_AES_128_CBC_SHA, "TLS_PSK_WITH_AES_128_CBC_SHA", supportedUpToTLS12, true},
++		{TLS_PSK_WITH_AES_256_CBC_SHA, "TLS_PSK_WITH_AES_256_CBC_SHA", supportedUpToTLS12, true},
+ 		{TLS_RSA_WITH_AES_128_GCM_SHA256, "TLS_RSA_WITH_AES_128_GCM_SHA256", supportedOnlyTLS12, true},
+ 		{TLS_RSA_WITH_AES_256_GCM_SHA384, "TLS_RSA_WITH_AES_256_GCM_SHA384", supportedOnlyTLS12, true},
++		{TLS_PSK_WITH_AES_128_GCM_SHA256, "TLS_PSK_WITH_AES_128_GCM_SHA256", supportedOnlyTLS12, true}, // arbace
++		{TLS_PSK_WITH_AES_256_GCM_SHA384, "TLS_PSK_WITH_AES_256_GCM_SHA384", supportedOnlyTLS12, true}, // arbace
+ 		{TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, "TLS_ECDHE_ECDSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
+ 		{TLS_ECDHE_RSA_WITH_RC4_128_SHA, "TLS_ECDHE_RSA_WITH_RC4_128_SHA", supportedUpToTLS12, true},
+ 		{TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA, "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA", supportedUpToTLS12, true},
+ 		{TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256", supportedOnlyTLS12, true},
+ 		{TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256", supportedOnlyTLS12, true},
++		{TLS_PSK_WITH_CHACHA20_POLY1305_SHA256, "TLS_PSK_WITH_CHACHA20_POLY1305_SHA256", supportedOnlyTLS12, true}, // arbace
+ 	}
+ }
+ 
+@@ -131,6 +136,9 @@
+ 	// suiteSHA384 indicates that the cipher suite uses SHA384 as the
+ 	// handshake hash.
+ 	suiteSHA384
++	// suitePSK indicates a plain PSK key exchange (arbace: RFC 4279), used
++	// only with Config.PSKClientCallback or Config.PSKServerCallback.
++	suitePSK
+ )
+ 
+ // A cipherSuite is a TLS 1.0–1.2 cipher suite, and defines the key exchange
+@@ -172,6 +180,12 @@
+ 	{TLS_RSA_WITH_RC4_128_SHA, 16, 20, 0, rsaKA, 0, cipherRC4, macSHA1, nil},
+ 	{TLS_ECDHE_RSA_WITH_RC4_128_SHA, 16, 20, 0, ecdheRSAKA, suiteECDHE, cipherRC4, macSHA1, nil},
+ 	{TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, 16, 20, 0, ecdheECDSAKA, suiteECDHE | suiteECSign, cipherRC4, macSHA1, nil},
++	// arbace: PSK suites (RFC 4279, 5487, 7905).
++	{TLS_PSK_WITH_AES_128_GCM_SHA256, 16, 0, 4, pskKA, suitePSK | suiteTLS12, nil, nil, aeadAESGCM},
++	{TLS_PSK_WITH_AES_256_GCM_SHA384, 32, 0, 4, pskKA, suitePSK | suiteTLS12 | suiteSHA384, nil, nil, aeadAESGCM},
++	{TLS_PSK_WITH_CHACHA20_POLY1305_SHA256, 32, 0, 12, pskKA, suitePSK | suiteTLS12, nil, nil, aeadChaCha20Poly1305},
++	{TLS_PSK_WITH_AES_128_CBC_SHA, 16, 20, 16, pskKA, suitePSK, cipherAES, macSHA1, nil},
++	{TLS_PSK_WITH_AES_256_CBC_SHA, 32, 20, 16, pskKA, suitePSK, cipherAES, macSHA1, nil},
+ }
+ 
+ // selectCipherSuite returns the first TLS 1.0–1.2 cipher suite from ids which
+@@ -310,6 +324,11 @@
+ 	// RC4
+ 	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+ 	TLS_RSA_WITH_RC4_128_SHA,
++
++	// arbace: PSK suites, disabled unless listed in Config.CipherSuites.
++	TLS_PSK_WITH_AES_256_GCM_SHA384, TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
++	TLS_PSK_WITH_AES_128_GCM_SHA256,
++	TLS_PSK_WITH_AES_256_CBC_SHA, TLS_PSK_WITH_AES_128_CBC_SHA,
+ }
+ 
+ var cipherSuitesPreferenceOrderNoAES = []uint16{
+@@ -333,6 +352,11 @@
+ 	TLS_RSA_WITH_AES_128_CBC_SHA256,
+ 	TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+ 	TLS_RSA_WITH_RC4_128_SHA,
++
++	// arbace: PSK suites, disabled unless listed in Config.CipherSuites.
++	TLS_PSK_WITH_AES_256_GCM_SHA384, TLS_PSK_WITH_CHACHA20_POLY1305_SHA256,
++	TLS_PSK_WITH_AES_128_GCM_SHA256,
++	TLS_PSK_WITH_AES_256_CBC_SHA, TLS_PSK_WITH_AES_128_CBC_SHA,
+ }
+ 
+ // disabledCipherSuites are not used unless explicitly listed in Config.CipherSuites.
+@@ -356,6 +380,13 @@
+ 
+ 	// 3DES
+ 	TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA: true,
++
++	// arbace: PSK
++	TLS_PSK_WITH_AES_128_GCM_SHA256:       true,
++	TLS_PSK_WITH_AES_256_GCM_SHA384:       true,
++	TLS_PSK_WITH_CHACHA20_POLY1305_SHA256: true,
++	TLS_PSK_WITH_AES_128_CBC_SHA:          true,
++	TLS_PSK_WITH_AES_256_CBC_SHA:          true,
+ }
+ 
+ var (
+@@ -519,7 +550,7 @@
+ 		aead, err = boring.NewGCMTLS(aes)
+ 	} else {
+ 		boring.Unreachable()
+-		aead, err = gcm.NewGCMForTLS12(aes.(*fipsaes.Block))
++		aead, err = cipher.NewGCM(aes) // arbace: was gcm.NewGCMForTLS12
+ 	}
+ 	if err != nil {
+ 		panic(err)
+@@ -553,7 +584,7 @@
+ 		aead, err = boring.NewGCMTLS13(aes)
+ 	} else {
+ 		boring.Unreachable()
+-		aead, err = gcm.NewGCMForTLS13(aes.(*fipsaes.Block))
++		aead, err = cipher.NewGCM(aes) // arbace: was gcm.NewGCMForTLS13
+ 	}
+ 	if err != nil {
+ 		panic(err)
+diff -ruN upstream/pytls/common.go vendored/pytls/common.go
+--- upstream/pytls/common.go
++++ vendored/pytls/common.go
+@@ -5,6 +5,8 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/fips140tls"
++	"arbace/pytls/internal/godebug"
+ 	"bytes"
+ 	"container/list"
+ 	"context"
+@@ -17,11 +19,9 @@
+ 	"crypto/rand"
+ 	"crypto/rsa"
+ 	"crypto/sha512"
+-	"crypto/tls/internal/fips140tls"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
+-	"internal/godebug"
+ 	"io"
+ 	"net"
+ 	"runtime"
+@@ -838,6 +838,50 @@
+ 	// used for debugging.
+ 	KeyLogWriter io.Writer
+ 
++	// arbace: the fields below are this copy's additions (see VENDORED.md).
++
++	// PostHandshakeAuth, on a client, offers TLS 1.3 post-handshake client
++	// authentication (RFC 8446, Section 4.6.2): the post_handshake_auth
++	// extension is sent, and a CertificateRequest received after the
++	// handshake is answered with a certificate chosen as for one received
++	// during it (GetClientCertificate or Certificates).
++	//
++	// Servers do not use it: a server accepts post-handshake authentication
++	// whenever a TLS 1.3 client offers it (see PostHandshakeClientAuth and
++	// [Conn.RequestClientCertificate]).
++	PostHandshakeAuth bool
++
++	// PostHandshakeClientAuth, on a server, defers client authentication to
++	// after the handshake, as OpenSSL's SSL_VERIFY_POST_HANDSHAKE. When it is
++	// not NoClientCert and a TLS 1.3 client offered post-handshake
++	// authentication, the handshake sends no CertificateRequest, whatever
++	// ClientAuth says, and [Conn.RequestClientCertificate] applies this
++	// policy. In TLS 1.2, or when the client did not offer it, the handshake
++	// applies ClientAuth as usual. When it is NoClientCert,
++	// RequestClientCertificate applies ClientAuth.
++	PostHandshakeClientAuth ClientAuthType
++
++	// PSKClientCallback, on a client, supplies an external pre-shared key
++	// as OpenSSL's psk_client_callback. It is called with the server's
++	// identity hint, nil when there is none (always nil for TLS 1.3, where it
++	// is called while the ClientHello is built), and returns the identity and
++	// the key. An empty key offers no PSK. In TLS 1.3 the PSK is offered with
++	// psk_dhe_ke and SHA-256 (as for TLS_AES_128_GCM_SHA256); in TLS 1.2 it is
++	// used by the PSK cipher suites (RFC 4279), which must be listed in
++	// CipherSuites.
++	PSKClientCallback func(hint []byte) (identity, key []byte, err error)
++
++	// PSKServerCallback, on a server, maps a client's PSK identity to its key,
++	// as OpenSSL's psk_server_callback. A nil key rejects the identity. A
++	// server with PSKServerCallback set needs no certificate for the TLS 1.2
++	// PSK cipher suites (which must be listed in CipherSuites) nor for TLS 1.3
++	// external PSK handshakes.
++	PSKServerCallback func(identity []byte) (key []byte, err error)
++
++	// PSKIdentityHint is the identity hint a TLS 1.2 PSK server sends in its
++	// ServerKeyExchange message; none is sent when it is empty.
++	PSKIdentityHint []byte
++
+ 	// EncryptedClientHelloConfigList is a serialized ECHConfigList. If
+ 	// provided, clients will attempt to connect to servers using Encrypted
+ 	// Client Hello (ECH) using one of the provided ECHConfigs.
+@@ -1042,6 +1086,11 @@
+ 		DynamicRecordSizingDisabled:         c.DynamicRecordSizingDisabled,
+ 		Renegotiation:                       c.Renegotiation,
+ 		KeyLogWriter:                        c.KeyLogWriter,
++		PostHandshakeAuth:                   c.PostHandshakeAuth,
++		PostHandshakeClientAuth:             c.PostHandshakeClientAuth,
++		PSKClientCallback:                   c.PSKClientCallback,
++		PSKServerCallback:                   c.PSKServerCallback,
++		PSKIdentityHint:                     c.PSKIdentityHint,
+ 		EncryptedClientHelloConfigList:      c.EncryptedClientHelloConfigList,
+ 		EncryptedClientHelloRejectionVerify: c.EncryptedClientHelloRejectionVerify,
+ 		EncryptedClientHelloKeys:            c.EncryptedClientHelloKeys,
+@@ -1607,6 +1656,7 @@
+ 	keyLogLabelServerHandshake = "SERVER_HANDSHAKE_TRAFFIC_SECRET"
+ 	keyLogLabelClientTraffic   = "CLIENT_TRAFFIC_SECRET_0"
+ 	keyLogLabelServerTraffic   = "SERVER_TRAFFIC_SECRET_0"
++	keyLogLabelExporterSecret  = "EXPORTER_SECRET" // arbace: as OpenSSL
+ )
+ 
+ func (c *Config) writeKeyLog(label string, clientRandom, secret []byte) error {
+diff -ruN upstream/pytls/conn.go vendored/pytls/conn.go
+--- upstream/pytls/conn.go
++++ vendored/pytls/conn.go
+@@ -120,6 +120,10 @@
+ 	// the rest of the bits are the number of goroutines in Conn.Write.
+ 	activeCall atomic.Int32
+ 
++	// pha is the post-handshake authentication state (arbace), set when the
++	// client offered it in a TLS 1.3 handshake.
++	pha *postHandshakeAuthState
++
+ 	tmp [16]byte
+ }
+ 
+@@ -1306,7 +1310,8 @@
+ 		return c.handleRenegotiation()
+ 	}
+ 
+-	msg, err := c.readHandshake(nil)
++	var raw rawHandshakeMessage // arbace: kept for post-handshake authentication
++	msg, err := c.readHandshake(&raw)
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -1321,6 +1326,14 @@
+ 		return c.handleNewSessionTicket(msg)
+ 	case *keyUpdateMsg:
+ 		return c.handleKeyUpdate(msg)
++	case *certificateRequestMsgTLS13: // arbace
++		if c.isClient && c.pha != nil {
++			return c.handlePostHandshakeCertificateRequest(msg, raw)
++		}
++	case *certificateMsgTLS13: // arbace
++		if !c.isClient && c.pha != nil && c.pha.pendingRequest() {
++			return c.handlePostHandshakeClientCertificate(msg, raw)
++		}
+ 	}
+ 	// The QUIC layer is supposed to treat an unexpected post-handshake CertificateRequest
+ 	// as a QUIC-level PROTOCOL_VIOLATION error (RFC 9001, Section 4.4). Returning an
+diff -ruN upstream/pytls/defaults.go vendored/pytls/defaults.go
+--- upstream/pytls/defaults.go
++++ vendored/pytls/defaults.go
+@@ -5,7 +5,7 @@
+ package tls
+ 
+ import (
+-	"internal/godebug"
++	"arbace/pytls/internal/godebug"
+ 	"slices"
+ 	_ "unsafe" // for linkname
+ )
+diff -ruN upstream/pytls/defaults_fips140.go vendored/pytls/defaults_fips140.go
+--- upstream/pytls/defaults_fips140.go
++++ vendored/pytls/defaults_fips140.go
+@@ -7,10 +7,10 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/boring"
+ 	"crypto/ecdsa"
+ 	"crypto/ed25519"
+ 	"crypto/elliptic"
+-	"crypto/internal/boring"
+ 	"crypto/mldsa"
+ 	"crypto/rsa"
+ 	"crypto/x509"
+diff -ruN upstream/pytls/ech.go vendored/pytls/ech.go
+--- upstream/pytls/ech.go
++++ vendored/pytls/ech.go
+@@ -11,7 +11,7 @@
+ 	"fmt"
+ 	"strings"
+ 
+-	"golang.org/x/crypto/cryptobyte"
++	"arbace/pytls/internal/cryptobyte"
+ )
+ 
+ type echCipher struct {
+diff -ruN upstream/pytls/handshake_client.go vendored/pytls/handshake_client.go
+--- upstream/pytls/handshake_client.go
++++ vendored/pytls/handshake_client.go
+@@ -5,22 +5,22 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/fips140tls"
++	"arbace/pytls/internal/godebug"
++	"arbace/pytls/internal/tls13"
+ 	"bytes"
+ 	"context"
+ 	"crypto"
+ 	"crypto/ecdsa"
+ 	"crypto/ed25519"
+ 	"crypto/hpke"
+-	"crypto/internal/fips140/tls13"
+ 	"crypto/mldsa"
+ 	"crypto/rsa"
+ 	"crypto/subtle"
+-	"crypto/tls/internal/fips140tls"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
+ 	"hash"
+-	"internal/godebug"
+ 	"io"
+ 	"net"
+ 	"slices"
+@@ -94,7 +94,15 @@
+ 		hello.secureRenegotiation = c.clientFinished[:]
+ 	}
+ 
++	// arbace: offer post-handshake client authentication.
++	hello.postHandshakeAuth = config.PostHandshakeAuth && maxVersion >= VersionTLS13 && c.quic == nil
++
+ 	hello.cipherSuites = config.cipherSuites(hasAESGCMHardwareSupport)
++	if config.PSKClientCallback == nil { // arbace: PSK suites need the callback
++		hello.cipherSuites = slices.DeleteFunc(hello.cipherSuites, func(id uint16) bool {
++			return cipherSuiteByID(id).flags&suitePSK != 0
++		})
++	}
+ 	// Don't advertise TLS 1.2-only cipher suites unless we're attempting TLS 1.2.
+ 	if maxVersion < VersionTLS12 {
+ 		hello.cipherSuites = slices.DeleteFunc(hello.cipherSuites, func(id uint16) bool {
+@@ -238,7 +246,13 @@
+ 	if err != nil {
+ 		return err
+ 	}
+-	if session != nil {
++	if session == nil { // arbace: a TLS 1.3 external PSK
++		session, earlySecret, binderKey, err = c.loadExternalPSK(hello)
++		if err != nil {
++			return err
++		}
++	}
++	if session != nil && !session.externalPSK {
+ 		defer func() {
+ 			// If we got a handshake failure when resuming a session, throw away
+ 			// the session ticket. See RFC 5077, Section 3.2.
+@@ -340,6 +354,9 @@
+ 		return hs.handshake()
+ 	}
+ 
++	if session != nil && session.externalPSK { // arbace: not a TLS 1.2 session
++		session = nil
++	}
+ 	hs := &clientHandshakeState{
+ 		c:           c,
+ 		ctx:         ctx,
+@@ -389,6 +406,10 @@
+ 		return nil, nil, nil, nil
+ 	}
+ 	session = cs.session
++	if len(session.peerCertificates) == 0 {
++		// arbace: a session of a PSK handshake has no certificate to check.
++		return nil, nil, nil, nil
++	}
+ 
+ 	// Check that version used for the previous session is still valid.
+ 	versOk := false
+@@ -587,7 +608,7 @@
+ 		// they don't call verifyServerCertificate. See Issue 31641.
+ 		if c.config.VerifyConnection != nil {
+ 			if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-				c.sendAlert(alertBadCertificate)
++				c.sendAlert(callbackAlert(err)) // arbace
+ 				return err
+ 			}
+ 		}
+@@ -598,7 +619,7 @@
+ 			return err
+ 		}
+ 	} else {
+-		if err := hs.doFullHandshake(); err != nil {
++		if err := hs.fullHandshake(); err != nil { // arbace: or PSK
+ 			return err
+ 		}
+ 		if err := hs.establishKeys(); err != nil {
+@@ -1163,7 +1184,7 @@
+ 		}
+ 		chains, err := certs[0].Verify(opts)
+ 		if err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(verifyErrorAlert(err)) // arbace
+ 			return &CertificateVerificationError{UnverifiedCertificates: certs, Err: err}
+ 		}
+ 
+@@ -1190,14 +1211,14 @@
+ 
+ 	if c.config.VerifyPeerCertificate != nil && !echRejected {
+ 		if err := c.config.VerifyPeerCertificate(certificates, c.verifiedChains); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+ 
+ 	if c.config.VerifyConnection != nil && !echRejected {
+ 		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+diff -ruN upstream/pytls/handshake_client_tls13.go vendored/pytls/handshake_client_tls13.go
+--- upstream/pytls/handshake_client_tls13.go
++++ vendored/pytls/handshake_client_tls13.go
+@@ -5,12 +5,12 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/tls13"
+ 	"bytes"
+ 	"context"
+ 	"crypto"
+ 	"crypto/hkdf"
+ 	"crypto/hmac"
+-	"crypto/internal/fips140/tls13"
+ 	"crypto/rsa"
+ 	"crypto/subtle"
+ 	"errors"
+@@ -343,6 +343,9 @@
+ 			// Update binders and obfuscated_ticket_age.
+ 			ticketAge := c.config.time().Sub(time.Unix(int64(hs.session.createdAt), 0))
+ 			hello.pskIdentities[0].obfuscatedTicketAge = uint32(ticketAge/time.Millisecond) + hs.session.ageAdd
++			if hs.session.externalPSK { // arbace: RFC 8446, Section 4.2.11
++				hello.pskIdentities[0].obfuscatedTicketAge = 0
++			}
+ 
+ 			transcript := hs.suite.hash.New()
+ 			transcript.Write([]byte{typeMessageHash, 0, 0, uint8(len(chHash))})
+@@ -598,7 +601,7 @@
+ 		// they don't call verifyServerCertificate. See Issue 31641.
+ 		if c.config.VerifyConnection != nil {
+ 			if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-				c.sendAlert(alertBadCertificate)
++				c.sendAlert(callbackAlert(err)) // arbace
+ 				return err
+ 			}
+ 		}
+@@ -612,6 +615,10 @@
+ 
+ 	certReq, ok := msg.(*certificateRequestMsgTLS13)
+ 	if ok {
++		if len(certReq.certificateRequestContext) != 0 { // arbace: as before, a decode error
++			c.sendAlert(alertDecodeError)
++			return errors.New("tls: non-empty certificate_request_context in the handshake")
++		}
+ 		hs.certReq = certReq
+ 
+ 		msg, err = c.readHandshake(hs.transcript)
+@@ -625,7 +632,7 @@
+ 		c.sendAlert(alertUnexpectedMessage)
+ 		return unexpectedMessageError(certMsg, msg)
+ 	}
+-	if len(certMsg.certificate.Certificate) == 0 {
++	if len(certMsg.certificate.Certificate) == 0 || len(certMsg.requestContext) != 0 { // arbace: context
+ 		c.sendAlert(alertDecodeError)
+ 		return errors.New("tls: received empty certificates message")
+ 	}
+@@ -727,6 +734,10 @@
+ 		return err
+ 	}
+ 
++	if err := c.writeKeyLogExporterSecret(hs.hello.random, hs.masterSecret, hs.transcript); err != nil { // arbace
++		c.sendAlert(alertInternalError)
++		return err
++	}
+ 	c.ekm = hs.suite.exportKeyingMaterial(hs.masterSecret, hs.transcript)
+ 
+ 	return nil
+@@ -820,6 +831,11 @@
+ 	if _, err := hs.c.writeHandshakeRecord(finished, hs.transcript); err != nil {
+ 		return err
+ 	}
++	if hs.hello.postHandshakeAuth { // arbace
++		if err := c.savePostHandshakeAuthState(hs.suite, hs.transcript); err != nil {
++			return err
++		}
++	}
+ 
+ 	c.setWriteTrafficSecret(hs.suite, QUICEncryptionLevelApplication, hs.trafficSecret)
+ 
+diff -ruN upstream/pytls/handshake_messages.go vendored/pytls/handshake_messages.go
+--- upstream/pytls/handshake_messages.go
++++ vendored/pytls/handshake_messages.go
+@@ -11,7 +11,7 @@
+ 	"slices"
+ 	"strings"
+ 
+-	"golang.org/x/crypto/cryptobyte"
++	"arbace/pytls/internal/cryptobyte"
+ )
+ 
+ // The marshalingFunction type is an adapter to allow the use of ordinary
+@@ -98,6 +98,7 @@
+ 	pskBinders                       [][]byte
+ 	quicTransportParameters          []byte
+ 	encryptedClientHello             []byte
++	postHandshakeAuth                bool // arbace: RFC 8446, Section 4.2.6
+ 	// extensions are only populated on the server-side of a handshake
+ 	extensions []uint16
+ }
+@@ -308,6 +309,11 @@
+ 			})
+ 		}
+ 	}
++	if m.postHandshakeAuth {
++		// arbace: RFC 8446, Section 4.2.6
++		exts.AddUint16(extensionPostHandshakeAuth)
++		exts.AddUint16(0) // empty extension_data
++	}
+ 	if len(echOuterExts) > 0 && echInner {
+ 		exts.AddUint16(extensionECHOuterExtensions)
+ 		exts.AddUint16LengthPrefixed(func(exts *cryptobyte.Builder) {
+@@ -668,6 +674,9 @@
+ 			if !extData.ReadBytes(&m.encryptedClientHello, len(extData)) {
+ 				return false
+ 			}
++		case extensionPostHandshakeAuth:
++			// arbace: RFC 8446, Section 4.2.6
++			m.postHandshakeAuth = true
+ 		default:
+ 			// Ignore unknown extensions.
+ 			continue
+@@ -715,6 +724,7 @@
+ 		pskBinders:                       slices.Clone(m.pskBinders),
+ 		quicTransportParameters:          slices.Clone(m.quicTransportParameters),
+ 		encryptedClientHello:             slices.Clone(m.encryptedClientHello),
++		postHandshakeAuth:                m.postHandshakeAuth, // arbace
+ 	}
+ }
+ 
+@@ -1245,6 +1255,7 @@
+ }
+ 
+ type certificateRequestMsgTLS13 struct {
++	certificateRequestContext        []byte // arbace: non-empty only after the handshake
+ 	ocspStapling                     bool
+ 	scts                             bool
+ 	supportedSignatureAlgorithms     []SignatureScheme
+@@ -1258,7 +1269,9 @@
+ 	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+ 		// certificate_request_context (SHALL be zero length unless used for
+ 		// post-handshake authentication)
+-		b.AddUint8(0)
++		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { // arbace
++			b.AddBytes(m.certificateRequestContext)
++		})
+ 
+ 		b.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) {
+ 			if m.ocspStapling {
+@@ -1316,13 +1329,16 @@
+ 	*m = certificateRequestMsgTLS13{}
+ 	s := cryptobyte.String(data)
+ 
+-	var context, extensions cryptobyte.String
++	var extensions cryptobyte.String
+ 	if !s.Skip(4) || // message type and uint24 length field
+-		!s.ReadUint8LengthPrefixed(&context) || !context.Empty() ||
++		!readUint8LengthPrefixed(&s, &m.certificateRequestContext) || // arbace
+ 		!s.ReadUint16LengthPrefixed(&extensions) ||
+ 		!s.Empty() {
+ 		return false
+ 	}
++	if len(m.certificateRequestContext) == 0 {
++		m.certificateRequestContext = nil // arbace
++	}
+ 
+ 	for !extensions.Empty() {
+ 		var extension uint16
+@@ -1459,16 +1475,19 @@
+ }
+ 
+ type certificateMsgTLS13 struct {
+-	certificate  Certificate
+-	ocspStapling bool
+-	scts         bool
++	requestContext []byte // arbace: certificate_request_context
++	certificate    Certificate
++	ocspStapling   bool
++	scts           bool
+ }
+ 
+ func (m *certificateMsgTLS13) marshal() ([]byte, error) {
+ 	var b cryptobyte.Builder
+ 	b.AddUint8(typeCertificate)
+ 	b.AddUint24LengthPrefixed(func(b *cryptobyte.Builder) {
+-		b.AddUint8(0) // certificate_request_context
++		b.AddUint8LengthPrefixed(func(b *cryptobyte.Builder) { // certificate_request_context
++			b.AddBytes(m.requestContext) // arbace
++		})
+ 
+ 		certificate := m.certificate
+ 		if !m.ocspStapling {
+@@ -1524,13 +1543,15 @@
+ 	*m = certificateMsgTLS13{}
+ 	s := cryptobyte.String(data)
+ 
+-	var context cryptobyte.String
+ 	if !s.Skip(4) || // message type and uint24 length field
+-		!s.ReadUint8LengthPrefixed(&context) || !context.Empty() ||
++		!readUint8LengthPrefixed(&s, &m.requestContext) || // arbace
+ 		!unmarshalCertificate(&s, &m.certificate) ||
+ 		!s.Empty() {
+ 		return false
+ 	}
++	if len(m.requestContext) == 0 {
++		m.requestContext = nil // arbace
++	}
+ 
+ 	m.scts = m.certificate.SignedCertificateTimestamps != nil
+ 	m.ocspStapling = m.certificate.OCSPStaple != nil
+diff -ruN upstream/pytls/handshake_server.go vendored/pytls/handshake_server.go
+--- upstream/pytls/handshake_server.go
++++ vendored/pytls/handshake_server.go
+@@ -5,6 +5,7 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/fips140tls"
+ 	"context"
+ 	"crypto"
+ 	"crypto/ecdsa"
+@@ -12,7 +13,6 @@
+ 	"crypto/mldsa"
+ 	"crypto/rsa"
+ 	"crypto/subtle"
+-	"crypto/tls/internal/fips140tls"
+ 	"crypto/x509"
+ 	"errors"
+ 	"fmt"
+@@ -103,7 +103,7 @@
+ 		if err := hs.pickCipherSuite(); err != nil {
+ 			return err
+ 		}
+-		if err := hs.doFullHandshake(); err != nil {
++		if err := hs.fullHandshake(); err != nil { // arbace: or PSK
+ 			return err
+ 		}
+ 		if err := hs.establishKeys(); err != nil {
+@@ -271,6 +271,10 @@
+ 	c.clientProtocol = selectedProto
+ 
+ 	hs.cert, err = c.config.getCertificate(clientHelloInfo(hs.ctx, c, hs.clientHello))
++	if err == errNoCertificates && c.config.PSKServerCallback != nil {
++		// arbace: a PSK server needs no certificate; only PSK suites can be chosen.
++		hs.cert, err = &Certificate{}, nil
++	}
+ 	if err != nil {
+ 		if err == errNoCertificates {
+ 			c.sendAlert(alertUnrecognizedName)
+@@ -423,6 +427,9 @@
+ }
+ 
+ func (hs *serverHandshakeState) cipherSuiteOk(c *cipherSuite) bool {
++	if c.flags&suitePSK != 0 { // arbace
++		return hs.c.config.PSKServerCallback != nil && (hs.c.vers >= VersionTLS12 || c.flags&suiteTLS12 == 0)
++	}
+ 	if c.flags&suiteECDHE != 0 {
+ 		if !hs.ecdheOk {
+ 			return false
+@@ -578,7 +585,7 @@
+ 
+ 	if c.config.VerifyConnection != nil {
+ 		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+@@ -716,7 +723,7 @@
+ 	}
+ 	if c.config.VerifyConnection != nil {
+ 		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+@@ -941,6 +948,12 @@
+ // processCertsFromClient takes a chain of client certificates either from a
+ // certificateMsg message or a certificateMsgTLS13 message and verifies them.
+ func (c *Conn) processCertsFromClient(certificate Certificate) error {
++	return c.processCertsFromClientAuth(certificate, c.config.ClientAuth) // arbace
++}
++
++// processCertsFromClientAuth is processCertsFromClient under the clientAuth
++// policy (arbace: post-handshake authentication has its own).
++func (c *Conn) processCertsFromClientAuth(certificate Certificate, clientAuth ClientAuthType) error {
+ 	certificates := certificate.Certificate
+ 	certs := make([]*x509.Certificate, len(certificates))
+ 	var err error
+@@ -958,7 +971,7 @@
+ 		}
+ 	}
+ 
+-	if len(certs) == 0 && requiresClientCert(c.config.ClientAuth) {
++	if len(certs) == 0 && requiresClientCert(clientAuth) {
+ 		if c.vers == VersionTLS13 {
+ 			c.sendAlert(alertCertificateRequired)
+ 		} else {
+@@ -967,7 +980,7 @@
+ 		return errors.New("tls: client didn't provide a certificate")
+ 	}
+ 
+-	if c.config.ClientAuth >= VerifyClientCertIfGiven && len(certs) > 0 {
++	if clientAuth >= VerifyClientCertIfGiven && len(certs) > 0 {
+ 		opts := x509.VerifyOptions{
+ 			Roots:         c.config.ClientCAs,
+ 			CurrentTime:   c.config.time(),
+@@ -1018,7 +1031,7 @@
+ 
+ 	if c.config.VerifyPeerCertificate != nil {
+ 		if err := c.config.VerifyPeerCertificate(certificates, c.verifiedChains); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+diff -ruN upstream/pytls/handshake_server_tls13.go vendored/pytls/handshake_server_tls13.go
+--- upstream/pytls/handshake_server_tls13.go
++++ vendored/pytls/handshake_server_tls13.go
+@@ -5,20 +5,20 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/fips140tls"
++	"arbace/pytls/internal/tls13"
+ 	"bytes"
+ 	"context"
+ 	"crypto"
+ 	"crypto/hkdf"
+ 	"crypto/hmac"
+ 	"crypto/hpke"
+-	"crypto/internal/fips140/tls13"
+ 	"crypto/rsa"
+-	"crypto/tls/internal/fips140tls"
+ 	"crypto/x509"
++	"encoding/binary"
+ 	"errors"
+ 	"fmt"
+ 	"hash"
+-	"internal/byteorder"
+ 	"io"
+ 	"slices"
+ 	"sort"
+@@ -98,6 +98,11 @@
+ 	if err := hs.readClientFinished(); err != nil {
+ 		return err
+ 	}
++	if hs.clientHello.postHandshakeAuth && c.quic == nil { // arbace
++		if err := c.savePostHandshakeAuthState(hs.suite, hs.transcript); err != nil {
++			return err
++		}
++	}
+ 
+ 	c.isHandshakeComplete.Store(true)
+ 
+@@ -292,6 +297,10 @@
+ func (hs *serverHandshakeStateTLS13) checkForResumption() error {
+ 	c := hs.c
+ 
++	if done, err := hs.checkForExternalPSK(); done || err != nil { // arbace
++		return err
++	}
++
+ 	if c.config.SessionTicketsDisabled {
+ 		return nil
+ 	}
+@@ -819,7 +828,9 @@
+ }
+ 
+ func (hs *serverHandshakeStateTLS13) requestClientCert() bool {
+-	return hs.c.config.ClientAuth >= RequestClientCert && !hs.usingPSK
++	return hs.c.config.ClientAuth >= RequestClientCert && !hs.usingPSK &&
++		// arbace: deferred to Conn.RequestClientCertificate
++		!(hs.c.config.PostHandshakeClientAuth != NoClientCert && hs.clientHello.postHandshakeAuth && hs.c.quic == nil)
+ }
+ 
+ func (hs *serverHandshakeStateTLS13) sendServerCertificate() error {
+@@ -924,6 +935,10 @@
+ 		return err
+ 	}
+ 
++	if err := c.writeKeyLogExporterSecret(hs.clientHello.random, hs.masterSecret, hs.transcript); err != nil { // arbace
++		c.sendAlert(alertInternalError)
++		return err
++	}
+ 	c.ekm = hs.suite.exportKeyingMaterial(hs.masterSecret, hs.transcript)
+ 
+ 	// If we did not request client certificates, at this point we can
+@@ -1013,7 +1028,7 @@
+ 	if _, err := c.config.rand().Read(ageAdd); err != nil {
+ 		return err
+ 	}
+-	m.ageAdd = byteorder.LEUint32(ageAdd)
++	m.ageAdd = binary.LittleEndian.Uint32(ageAdd)
+ 
+ 	if earlyData {
+ 		// RFC 9001, Section 4.6.1
+@@ -1035,7 +1050,7 @@
+ 		// the server requested a client certificate.
+ 		if c.config.VerifyConnection != nil {
+ 			if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-				c.sendAlert(alertBadCertificate)
++				c.sendAlert(callbackAlert(err)) // arbace
+ 				return err
+ 			}
+ 		}
+@@ -1055,6 +1070,10 @@
+ 		c.sendAlert(alertUnexpectedMessage)
+ 		return unexpectedMessageError(certMsg, msg)
+ 	}
++	if len(certMsg.requestContext) != 0 { // arbace: as before, a decode error
++		c.sendAlert(alertDecodeError)
++		return errors.New("tls: non-empty certificate_request_context in the handshake")
++	}
+ 
+ 	if err := c.processCertsFromClient(certMsg.certificate); err != nil {
+ 		return err
+@@ -1062,7 +1081,7 @@
+ 
+ 	if c.config.VerifyConnection != nil {
+ 		if err := c.config.VerifyConnection(c.connectionStateLocked()); err != nil {
+-			c.sendAlert(alertBadCertificate)
++			c.sendAlert(callbackAlert(err)) // arbace
+ 			return err
+ 		}
+ 	}
+diff -ruN upstream/pytls/internal/boring/boring.go vendored/pytls/internal/boring/boring.go
+--- upstream/pytls/internal/boring/boring.go
++++ vendored/pytls/internal/boring/boring.go
+@@ -0,0 +1,19 @@
++// Copyright 2026 The Arbace Authors. Stub replacing a Go-internal package for the
++// vendored copy of crypto/tls (see VENDORED.md).
++
++// Package boring replaces crypto/internal/boring: BoringCrypto is never enabled.
++package boring
++
++import "crypto/cipher"
++
++// Enabled is false: the native Go crypto is always used.
++const Enabled = false
++
++// Unreachable marks code that is unreachable when BoringCrypto is in use.
++func Unreachable() {}
++
++// NewGCMTLS is never called since Enabled is false.
++func NewGCMTLS(cipher.Block) (cipher.AEAD, error) { panic("boringcrypto: not available") }
++
++// NewGCMTLS13 is never called since Enabled is false.
++func NewGCMTLS13(cipher.Block) (cipher.AEAD, error) { panic("boringcrypto: not available") }
+diff -ruN upstream/pytls/internal/chacha20/chacha_generic.go vendored/pytls/internal/chacha20/chacha_generic.go
+--- upstream/pytls/internal/chacha20/chacha_generic.go
++++ vendored/pytls/internal/chacha20/chacha_generic.go
+@@ -12,7 +12,7 @@
+ 	"errors"
+ 	"math/bits"
+ 
+-	"golang.org/x/crypto/internal/alias"
++	"arbace/pytls/internal/alias"
+ )
+ 
+ const (
+diff -ruN upstream/pytls/internal/chacha20/chacha_noasm.go vendored/pytls/internal/chacha20/chacha_noasm.go
+--- upstream/pytls/internal/chacha20/chacha_noasm.go
++++ vendored/pytls/internal/chacha20/chacha_noasm.go
+@@ -2,8 +2,6 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build (!arm64 && !s390x && !ppc64 && !ppc64le) || !gc || purego
+-
+ package chacha20
+ 
+ const bufSize = blockSize
+diff -ruN upstream/pytls/internal/chacha20poly1305/chacha20poly1305_generic.go vendored/pytls/internal/chacha20poly1305/chacha20poly1305_generic.go
+--- upstream/pytls/internal/chacha20poly1305/chacha20poly1305_generic.go
++++ vendored/pytls/internal/chacha20poly1305/chacha20poly1305_generic.go
+@@ -7,9 +7,9 @@
+ import (
+ 	"encoding/binary"
+ 
+-	"golang.org/x/crypto/chacha20"
+-	"golang.org/x/crypto/internal/alias"
+-	"golang.org/x/crypto/internal/poly1305"
++	"arbace/pytls/internal/alias"
++	"arbace/pytls/internal/chacha20"
++	"arbace/pytls/internal/poly1305"
+ )
+ 
+ func writeWithPadding(p *poly1305.MAC, b []byte) {
+diff -ruN upstream/pytls/internal/chacha20poly1305/chacha20poly1305_noasm.go vendored/pytls/internal/chacha20poly1305/chacha20poly1305_noasm.go
+--- upstream/pytls/internal/chacha20poly1305/chacha20poly1305_noasm.go
++++ vendored/pytls/internal/chacha20poly1305/chacha20poly1305_noasm.go
+@@ -2,8 +2,6 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build !amd64 || !gc || purego
+-
+ package chacha20poly1305
+ 
+ func (c *chacha20poly1305) seal(dst, nonce, plaintext, additionalData []byte) []byte {
+diff -ruN upstream/pytls/internal/chacha20poly1305/xchacha20poly1305.go vendored/pytls/internal/chacha20poly1305/xchacha20poly1305.go
+--- upstream/pytls/internal/chacha20poly1305/xchacha20poly1305.go
++++ vendored/pytls/internal/chacha20poly1305/xchacha20poly1305.go
+@@ -8,7 +8,7 @@
+ 	"crypto/cipher"
+ 	"errors"
+ 
+-	"golang.org/x/crypto/chacha20"
++	"arbace/pytls/internal/chacha20"
+ )
+ 
+ type xchacha20poly1305 struct {
+diff -ruN upstream/pytls/internal/cpu/cpu.go vendored/pytls/internal/cpu/cpu.go
+--- upstream/pytls/internal/cpu/cpu.go
++++ vendored/pytls/internal/cpu/cpu.go
+@@ -0,0 +1,17 @@
++// Copyright 2026 The Arbace Authors. Stub replacing a Go-internal package for the
++// vendored copy of crypto/tls (see VENDORED.md).
++
++// Package cpu replaces internal/cpu for crypto/tls's AES-GCM preference alone:
++// the AES and carry-less multiply instructions are assumed present on amd64,
++// arm64 and s390x, the architectures with Go's AES-GCM assembly.
++package cpu
++
++import "runtime"
++
++var X86 = struct {
++	HasAES, HasPCLMULQDQ, HasSSE41, HasSSSE3 bool
++}{runtime.GOARCH == "amd64", runtime.GOARCH == "amd64", runtime.GOARCH == "amd64", runtime.GOARCH == "amd64"}
++
++var ARM64 = struct{ HasAES, HasPMULL bool }{runtime.GOARCH == "arm64", runtime.GOARCH == "arm64"}
++
++var S390X = struct{ HasAES, HasAESCTR, HasGHASH bool }{runtime.GOARCH == "s390x", runtime.GOARCH == "s390x", runtime.GOARCH == "s390x"}
+diff -ruN upstream/pytls/internal/cryptobyte/asn1.go vendored/pytls/internal/cryptobyte/asn1.go
+--- upstream/pytls/internal/cryptobyte/asn1.go
++++ vendored/pytls/internal/cryptobyte/asn1.go
+@@ -11,7 +11,7 @@
+ 	"reflect"
+ 	"time"
+ 
+-	"golang.org/x/crypto/cryptobyte/asn1"
++	"arbace/pytls/internal/cryptobyte/asn1"
+ )
+ 
+ // This file contains ASN.1-related methods for String and Builder.
+diff -ruN upstream/pytls/internal/fips140tls/fipstls.go vendored/pytls/internal/fips140tls/fipstls.go
+--- upstream/pytls/internal/fips140tls/fipstls.go
++++ vendored/pytls/internal/fips140tls/fipstls.go
+@@ -6,17 +6,13 @@
+ package fips140tls
+ 
+ import (
+-	"crypto/fips140"
+ 	"sync/atomic"
+ )
+ 
+ var required atomic.Bool
+ 
+-func init() {
+-	if fips140.Enabled() {
+-		Force()
+-	}
+-}
++// arbace: no init forcing FIPS mode from crypto/fips140.Enabled(): this copy's
++// AES-GCM and key schedules are not the FIPS module's, so Required stays false.
+ 
+ // Force forces crypto/tls to restrict TLS configurations to FIPS-approved settings.
+ // By design, this call is impossible to undo (except in tests).
+diff -ruN upstream/pytls/internal/godebug/godebug.go vendored/pytls/internal/godebug/godebug.go
+--- upstream/pytls/internal/godebug/godebug.go
++++ vendored/pytls/internal/godebug/godebug.go
+@@ -0,0 +1,22 @@
++// Copyright 2026 The Arbace Authors. Stub replacing a Go-internal package for the
++// vendored copy of crypto/tls (see VENDORED.md).
++
++// Package godebug replaces internal/godebug: every setting has its Go 1.27
++// default, which for crypto/tls's settings (tlsmlkem, tlssecpmlkem, tlssha1,
++// fips140ems, tlsmaxrsasize) is the empty value.
++package godebug
++
++// A Setting is a single setting in the $GODEBUG environment variable.
++type Setting struct{ name string }
++
++// New returns a new Setting for the named $GODEBUG setting.
++func New(name string) *Setting { return &Setting{name: name} }
++
++// Name returns the name of the setting.
++func (s *Setting) Name() string { return s.name }
++
++// Value returns the setting's value: always the default, "".
++func (s *Setting) Value() string { return "" }
++
++// IncNonDefault does nothing: there are no runtime metrics here.
++func (s *Setting) IncNonDefault() {}
+diff -ruN upstream/pytls/internal/poly1305/mac_noasm.go vendored/pytls/internal/poly1305/mac_noasm.go
+--- upstream/pytls/internal/poly1305/mac_noasm.go
++++ vendored/pytls/internal/poly1305/mac_noasm.go
+@@ -2,8 +2,6 @@
+ // Use of this source code is governed by a BSD-style
+ // license that can be found in the LICENSE file.
+ 
+-//go:build (!amd64 && !loong64 && !ppc64le && !ppc64 && !s390x) || !gc || purego
+-
+ package poly1305
+ 
+ type mac struct{ macGeneric }
+diff -ruN upstream/pytls/internal/tls12/tls12.go vendored/pytls/internal/tls12/tls12.go
+--- upstream/pytls/internal/tls12/tls12.go
++++ vendored/pytls/internal/tls12/tls12.go
+@@ -5,10 +5,7 @@
+ package tls12
+ 
+ import (
+-	"crypto/internal/fips140"
+-	"crypto/internal/fips140/hmac"
+-	"crypto/internal/fips140/sha256"
+-	"crypto/internal/fips140/sha512"
++	"crypto/hmac"
+ 	"hash"
+ )
+ 
+@@ -24,9 +21,15 @@
+ 	return result
+ }
+ 
++// newHMAC adapts a generic hash constructor to crypto/hmac.New (arbace: the
++// FIPS module's hmac.New was generic).
++func newHMAC[H hash.Hash](h func() H, key []byte) hash.Hash {
++	return hmac.New(func() hash.Hash { return h() }, key)
++}
++
+ // pHash implements the P_hash function, as defined in RFC 5246, Section 5.
+ func pHash[H hash.Hash](hash func() H, result, secret, seed []byte) {
+-	h := hmac.New(hash, secret)
++	h := newHMAC(hash, secret)
+ 	h.Write(seed)
+ 	a := h.Sum(nil)
+ 
+@@ -50,21 +53,5 @@
+ // MasterSecret implements the TLS 1.2 extended master secret derivation, as
+ // defined in RFC 7627 and allowed by SP 800-135, Revision 1, Section 4.2.2.
+ func MasterSecret[H hash.Hash](hash func() H, preMasterSecret, transcript []byte) []byte {
+-	// "The TLS 1.2 KDF is an approved KDF when the following conditions are
+-	// satisfied: [...] (3) P_HASH uses either SHA-256, SHA-384 or SHA-512."
+-	h := hash()
+-	switch any(h).(type) {
+-	case *sha256.Digest:
+-		if h.Size() != 32 {
+-			fips140.RecordNonApproved()
+-		}
+-	case *sha512.Digest:
+-		if h.Size() != 46 && h.Size() != 64 {
+-			fips140.RecordNonApproved()
+-		}
+-	default:
+-		fips140.RecordNonApproved()
+-	}
+-
+ 	return PRF(hash, preMasterSecret, extendedMasterSecretLabel, transcript, masterSecretLength)
+ }
+diff -ruN upstream/pytls/internal/tls13/tls13.go vendored/pytls/internal/tls13/tls13.go
+--- upstream/pytls/internal/tls13/tls13.go
++++ vendored/pytls/internal/tls13/tls13.go
+@@ -7,8 +7,8 @@
+ package tls13
+ 
+ import (
+-	"crypto/internal/fips140/hkdf"
+-	"crypto/internal/fips140deps/byteorder"
++	"crypto/hkdf"
++	"encoding/binary"
+ 	"hash"
+ )
+ 
+@@ -30,20 +30,28 @@
+ 		panic("tls13: label or context too long")
+ 	}
+ 	hkdfLabel := make([]byte, 0, 2+1+len("tls13 ")+len(label)+1+len(context))
+-	hkdfLabel = byteorder.BEAppendUint16(hkdfLabel, uint16(length))
++	hkdfLabel = binary.BigEndian.AppendUint16(hkdfLabel, uint16(length))
+ 	hkdfLabel = append(hkdfLabel, byte(len("tls13 ")+len(label)))
+ 	hkdfLabel = append(hkdfLabel, "tls13 "...)
+ 	hkdfLabel = append(hkdfLabel, label...)
+ 	hkdfLabel = append(hkdfLabel, byte(len(context)))
+ 	hkdfLabel = append(hkdfLabel, context...)
+-	return hkdf.Expand(hash, secret, string(hkdfLabel), length)
++	out, err := hkdf.Expand(hash, secret, string(hkdfLabel), length)
++	if err != nil {
++		panic("tls13: " + err.Error())
++	}
++	return out
+ }
+ 
+ func extract[H hash.Hash](hash func() H, newSecret, currentSecret []byte) []byte {
+ 	if newSecret == nil {
+ 		newSecret = make([]byte, hash().Size())
+ 	}
+-	return hkdf.Extract(hash, newSecret, currentSecret)
++	out, err := hkdf.Extract(hash, newSecret, currentSecret)
++	if err != nil {
++		panic("tls13: " + err.Error())
++	}
++	return out
+ }
+ 
+ func deriveSecret[H hash.Hash](hash func() H, secret []byte, label string, transcript hash.Hash) []byte {
+@@ -81,6 +89,12 @@
+ 	return deriveSecret(s.hash, s.secret, resumptionBinderLabel, nil)
+ }
+ 
++// ExternalBinderKey derives the binder_key of an external PSK (arbace: RFC
++// 8446, Section 7.1, "ext binder").
++func (s *EarlySecret) ExternalBinderKey() []byte {
++	return deriveSecret(s.hash, s.secret, "ext binder", nil)
++}
++
+ // ClientEarlyTrafficSecret derives the client_early_traffic_secret from the
+ // early secret and the transcript up to the ClientHello.
+ func (s *EarlySecret) ClientEarlyTrafficSecret(transcript hash.Hash) []byte {
+diff -ruN upstream/pytls/key_schedule.go vendored/pytls/key_schedule.go
+--- upstream/pytls/key_schedule.go
++++ vendored/pytls/key_schedule.go
+@@ -5,11 +5,11 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/tls13"
+ 	"crypto"
+ 	"crypto/ecdh"
+ 	"crypto/fips140"
+ 	"crypto/hmac"
+-	"crypto/internal/fips140/tls13"
+ 	"crypto/mlkem"
+ 	"errors"
+ 	"hash"
+diff -ruN upstream/pytls/prf.go vendored/pytls/prf.go
+--- upstream/pytls/prf.go
++++ vendored/pytls/prf.go
+@@ -5,9 +5,9 @@
+ package tls
+ 
+ import (
++	"arbace/pytls/internal/tls12"
+ 	"crypto"
+ 	"crypto/hmac"
+-	"crypto/internal/fips140/tls12"
+ 	"crypto/md5"
+ 	"crypto/sha1"
+ 	"crypto/sha256"
+diff -ruN upstream/pytls/ticket.go vendored/pytls/ticket.go
+--- upstream/pytls/ticket.go
++++ vendored/pytls/ticket.go
+@@ -14,7 +14,7 @@
+ 	"errors"
+ 	"io"
+ 
+-	"golang.org/x/crypto/cryptobyte"
++	"arbace/pytls/internal/cryptobyte"
+ )
+ 
+ // A SessionState is a resumable session.
+@@ -100,6 +100,8 @@
+ 
+ 	// TLS 1.0–1.2 only fields.
+ 	curveID CurveID
++
++	externalPSK bool // arbace: a TLS 1.3 external PSK offered by the client, not a ticket
+ }
+ 
+ // Bytes encodes the session, including any private fields, so that it can be
