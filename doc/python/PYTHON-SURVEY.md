@@ -8202,3 +8202,41 @@ and 557b): the table is the report's. What nobody owned and pyi could fix:
   `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
   docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
   test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).
+
+## As built: 574, 557's unowned deferred classes beyond 557b (2026-11-25, the Mac VM, queue 574)
+
+The classes of 557's table that 557b did not take, by size, each built or given an owner:
+
+- **`:pickle-builtin-reference` (9): stale.** The nine pass on the VM at 557b-r2's base (unittest of the nine on goi) and in 568's
+  whole AOT run of test_pickle; the row moves with the main host's next whole test_pickle record (568's "left for the host"). The
+  class goes then.
+- **`:tools-misc` (9 -> 7 by owner).** reindent's test_noargs: the standard streams' TextIOWrapper had no writelines (IOBase's, now
+  given), recorded. testpatch's test_tracebacks: `with`'s exceptional exit gave `__exit__` None for the traceback (below); passes
+  on the VM, test_unittest's record the main host's (its whole run on goi fails three rows that need no change of this round:
+  two weakrefs a test suite's run keeps alive on goi, already `:compiled-flaky`'s on the compiled cell, and a mock test past the
+  runner's 8 GiB cap). Left with owners: test_buffer's two (`_testbuffer`'s PyBUF_* names: 553), test_interpreters'
+  test_modified_arg (subinterpreters: 553), pyclbr's test_others (`_pickle.Pickler` a C class: 568), trace's two (gc.get_referrers
+  empty by 241-3 (a): DECISION 574-1), test_unittest's test_no_exception_leak (`__del__` at gc_collect: 551b).
+- **`:source-decoding`'s unowned rest (8).** str.format built its text through Go's []rune, so a lone surrogate (WTF-8's three bytes)
+  came out as three U+FFFD and a format spec's width counted three; now through the code points (difflib.diff_bytes's header,
+  email's surrogateescaped header values). str.encode's and bytes.decode's encoding and errors now pass clinic's str converter's
+  checks (a lone surrogate a UnicodeEncodeError, a NUL a ValueError), so email's `_encoded_words` reports a CharsetError for a
+  charset of surrogateescaped bytes. bin/pyi python takes `-mMOD` as one argument (quopri's script tests). difflib's and quopri's
+  rows recorded; test_email's five pass on the VM, its record the main host's (the VM has no tzdata: test_variable_tzname skips).
+  Four names the record already passes (test_eof's, three of test_source_encoding's) pruned.
+- **`:with-exit-traceback` (6, py-core's) and `:traceback-objects` (1) and core-objects-287's test_contextlib_async row: one cause.**
+  WITH_EXCEPT_START now passes the exception's `__traceback__` (with.go). test_with's six recorded and the class removed;
+  test_contextlib's and test_contextlib_async's test_contextmanager_traceback pass, the async one recorded (test_contextlib's
+  whole run on goi fails test_nokeepref, a weakref goi keeps alive, with or without this change).
+- **`:audit-hooks` (2 -> 1).** Tracing is off while the hooks run unless a hook's `__cantrace__` is true (sys_audit_tstate), and
+  eval, exec and compile raise the compile and exec events: test_cantrace recorded. test_open stays 545's (the native _io).
+- **`:doctests` (2 -> 1 on the VM).** test_pdb_issue_gh_127321: f_lineno is now None at a function's instruction with the IR's line 0
+  (NO_LOCATION; a module's 0 stays, as CPython's RESUME), so pdb's GH-127321 rule steps past it. test_pdb's record is left to the
+  main host (its whole run passes here, but it would also move a `:host-memory` row, a class the host's lanes own).
+  test_pdb_frame_refleak needs gc.get_referrers (DECISION 574-1).
+- **Left, with reasons:** `:compiled-flaky` (4: timing, the compiled cell's record decides), `:code-objects` (1: a code object's
+  weakref after del, finalization: 551b), `:docstrings` (1: the coroutine type's C docstrings, py-core's `:builtin-docstrings`
+  work; test_generators' stale name pruned).
+- Records: test_audit, test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with written whole
+  from the run whose children ran on the compiled launcher (557b-1 (a)): 12 methods now pass, 0 regressions; the eval cell
+  40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279.

@@ -20959,3 +20959,51 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
   goi-alone runs with the rows waiting for the host, not taken.
 - 557b-2: keep. callSpecial and slot `__call__` keep the C level's guard: a deep loop of slot wrappers raises "Stack overflow
   (used N kB)" at 10,000 levels, as CPython 3.14 does, not "maximum recursion depth exceeded" at the recursion limit.
+
+## 2026-11-25 — pyi: 557's unowned deferred classes beyond 557b (queue 574, VM)
+
+- Scope: 557's table of unowned deferred classes, the ones 557b did not take, by size: :pickle-builtin-reference (9),
+  :tools-misc (9 left), :source-decoding's unowned rest (email 5, quopri 2, difflib 1), :compiled-flaky (4), :audit-hooks (2),
+  :doctests (test_pdb 2), :code-objects, :traceback-objects, :docstrings (1 each). Base 557b-r2 431dd5eb0.
+- Causes found (probes against CPython 3.14.10, .tmp/q574/p/) and fixed in go/arbace/py (printed by bin/pyi runtime print,
+  edited, read back):
+  - format.go, strformat.go, str.go: str.format built its result through Go's []rune and string(), so a lone surrogate
+    (WTF-8's three bytes) became three U+FFFD, and a format spec's width counted the three bytes
+    (utf8.RuneCountInString). Now wtf8String and wtf8Len. difflib.diff_bytes's header line, email's surrogateescaped
+    header values (test_headerregistry's four rows).
+  - strmethods.go: str.encode's and bytes.decode's encoding and errors pass clinic's str converter's checks
+    (clinicStrArg: a lone surrogate a UnicodeEncodeError, a NUL a ValueError); email's _encoded_words then reports a
+    CharsetError for 'utf-8\udce2\udc80\udc9d' instead of decoding as utf-8.
+  - with.go: WITH_EXCEPT_START gave __exit__ None for the traceback; now the exception's (PyException_GetTraceback).
+    contextlib's _GeneratorContextManager.__exit__ puts that traceback back on the exception gen.throw() re-raised, so
+    the re-raised error had no frame (test_contextlib's and test_contextlib_async's test_contextmanager_traceback,
+    mock.patch's test_tracebacks).
+  - audit.go: tracing off while the hooks run, on again for a hook whose __cantrace__ is true (sys_audit_tstate);
+    builtins_exec.go: eval, exec and compile raise the compile and exec events (test_cantrace counts the traced hook calls
+    on them).
+  - sys.go: the standard streams' TextIOWrapper gains IOBase's writelines (reindent.py without arguments).
+  - tbobj.go: f_lineno is None at a function's instruction with the IR's line 0 (NO_LOCATION); a module's line 0 stays 0, as
+    CPython's module RESUME. pdb's GH-127321 rule steps past it (test_pdb_issue_gh_127321).
+  - bin/pyi python: -mMOD and -cCODE as one argument (test_quopri runs [sys.executable, "-mquopri"]); the first c or m of a
+    cluster ends it.
+- Alternatives considered: a narrower with fix in contextlib (no: the runtime's op is where CPython reads the traceback);
+  f_lineno None for every line 0 (no: CPython reports a module's RESUME as 0).
+- The run (.tmp/q574/run/check1.log): 12 modules (test_email, test_unittest, test_pdb, test_audit, test_tools, test_difflib,
+  test_quopri, test_contextlib, test_contextlib_async, and test_bdb, test_sys_settrace, test_with against the f_lineno and with
+  changes), the drivers on goi with the checkout's runtime (PYI_RUNNER=python3), the children on the compiled launcher (557b-1 (a)):
+  3,920 methods, 3,768 pass, 146 classed, 6 failing, 22 now pass. The six, none from this round's changes: test_email's
+  test_variable_tzname (the VM has no tzdata: it skips), test_unittest's two test_garbage_collect_test_after_run and test_contextlib's
+  test_nokeepref (a weakref goi keeps alive: they fail the same with with.ae put back to the base, probed; the TestSuite one is
+  already :compiled-flaky's), test_unittest's test_seal_with_autospec (past the runner's 8 GiB cap under the VM's load), test_bdb's
+  test_bp_after_last_statement (passes alone, probed). So only the seven modules that passed whole were recorded: test_audit,
+  test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with (`bin/pyi check --judge DIR --record`
+  over a copy of the run with those modules, .tmp/q574/run/check1-pass): 12 methods now pass, 0 regressions. test_pdb passed whole
+  too but is left to the host: its record would move a :host-memory row, a class the host's own lanes own (the coordinator).
+- Classes: :with-exit-traceback emptied and removed; :audit-hooks 2 -> 1; :source-decoding's difflib and quopri rows and four names
+  the record already passes pruned; :tools-misc's reindent row and its stale test_warnings name pruned; core-objects-287's
+  test_contextlib_async row pruned; :docstrings' stale test_generators name pruned. Mirrored in divergences-315.edn. The survey's
+  "As built: 574".
+- bin/reap --record, bin/crops-score --record: Python eval 40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279; bin/reap,
+  crops-score --judge --strict, records-check: 0 problems.
+- For the main host: whole records of test_email, test_unittest, test_contextlib, test_pdb and test_pickle (pickle-builtin-reference's
+  nine pass on the VM). DECISION 574-1 (the user's): trace's two and test_pdb_frame_refleak need gc.get_referrers, empty by 241-3 (a).
