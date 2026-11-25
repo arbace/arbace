@@ -23048,3 +23048,206 @@ backtrace crates 65 of 74.
 Alternatives considered: printing our define whole (loses the header rustc's linker and lowering read); a separate round per
 firing gate (try-expn-mark and callee-attrs touch disjoint fields, so they shared one); measuring the macro rule's lib-unit
 anyway (it already loses an equal).
+
+
+## 2026-11-25 — C++: diag's checks by node kind on units with large headers (queue 580, VM)
+
+The user's DECISION 578-1 (a): cpp1z/constexpr-asm-3.C read in 7 min on the VM, diag's checks most of it over <string>.
+- Measured first (.tmp/q580/prof-base.out, the unit parsed once, each check timed, its walks of the unit's root timed apart):
+  the walk cache of queue 567 already made `walk-nodes`' replay cheap (276,190 nodes replayed in 0.06 s; all the checks' root
+  walks 8.3 s of 140.8 s). The time was the checks' own context-carrying walks (`(letfn [(w [x ...]) ...])` over every map entry
+  of the tree: ~20 checks at 5-9 s each), which no cache replays: their state (enclosing loop, function, variables, template)
+  is the walk's. So an index by kind of the flat list alone, 578's proposal as written, would have saved little.
+- Built instead (arbace/repr/cpp/diag.ae): `kind-index`, the walk cache's index by node kind, made once a unit on first use:
+  each map and collection the root reaches (not through :_ent, a superset of every walk's) to the BitSet of the kinds of the nodes
+  under it, equal sets shared (asm3: 0.47 s, 179,311 collections, 91 kinds); `reaches-fn KINDS`, a predicate false of a subtree
+  the index knows holds none of a check's kinds (true without an index or for an object outside the root), and `walk-kinds`,
+  walk-nodes skipping such subtrees. Each costly walk now skips the subtrees holding none of the kinds it acts at, its context
+  still taken from the ancestors it visits: stray-jumps (BreakStmt, ContinueStmt), unavailable (DeclRefExpr, MemberExpr, and the
+  typed declarations and casts when a type is unavailable), object-sizes (VarDecl), gnu-asm, operand-types, labels-as-values
+  (LabelDecl, AddrLabelExpr, IndirectGotoStmt), case-values (SwitchStmt), read-only-modify, builtin-operator-new and integer-pack
+  (CallExpr), anon-union-redecls (CXXRecordDecl, its blocks and statements), uninit-consts', covariant-returns' and
+  flexible-arrays' class collection (CXXRecordDecl), builtin-values, gnu-packed, duplicate-labels (LabelStmt, GotoStmt),
+  anon-union-captures (MemberExpr; outside a lambda also LambdaExpr), builtin-launder (walk-kinds CallExpr), redefinitions'
+  stmt! (the kinds of the regions it enters) and undeclared (DeclRefExpr: parse.ae puts :_undecl on a DeclRefExpr alone).
+- Alternatives: kind lists over walk-nodes' flat list (each check's callback called only for its kinds): the root walks are 7.5 s
+  of the remaining 11 s on asm3, mostly the callbacks' own work; left, a follow-up if wanted. Memoizing each check's walk: the
+  state differs per check.
+- Proof (.tmp/q580/): every check's output and Sema's, per row, written before (the base, 79509867e's diag.ae) and after, compared
+  byte for byte: 414 rows (the 7 <string>/<iostream> rows that read, every 8th recorded own pass, 53 rows whose dg-error lines are
+  the changed checks' messages), all equal; each changed check has output on at least one of them (coverage.txt, coverage2.txt).
+  Times (parse / checks / sema, s): constexpr-asm-3 13.8/203.4/18.5 -> 14.7/22.2/18.8, udlit-suffix-neg 11.4/183.4/12.6 ->
+  11.2/18.9/12.4, initlist92 10.4/180.8/11.5 -> 10.6/20.3/11.8, missing-std-include-3 14.5/198.5/18.3 -> 14.4/21.0/18.6,
+  tm/inherit2 18.1/191.6 -> 17.3/23.0. The dg check on constexpr-asm-3 (`--only`, one thread): own pass, read 53 s (was past
+  the 300 s cap); recorded from that run (`--judge --record`): test/cpp/check-dg-own-linux-amd64.edn's row to :pass. No other
+  record touched: the full own regression is cpp-vm-1125's.
+
+
+## 2026-11-25 — C++ read independence for cpp2a, cpp23, concepts, coroutines and modules (queue 584, VM)
+
+Queue 584: the dg-error rows of g++.dg's cpp2a, cpp23, concepts, coroutines and modules that the clang oracle's record passes
+and Arbace's own front end fails (169 at mac/next 01ee9c426 by the two records: cpp2a 135, cpp23 15, concepts 13, coroutines 6,
+modules none: no row of it is in either record), worked by group. Each rule from the standard or from GCC's
+behaviour as the GCC manual, the tests and g++ 15.2's recorded errors (test/cpp/ref-dg-gxx15.edn) state it; no GCC or clang
+code. All in the checker (sema's `checking?`), but where noted.
+
+Rules (arbace/cpp/sema.ae unless named):
+- arbace/cpp/template.ae concept-satisfied?: a concept's satisfaction that needs itself (the same concept and arguments again
+  under way, `*cx-concepts-entered*`) has no value, [temp.constr.atomic]/3: GCC's "satisfaction of atomic constraint ...
+  depends on itself" at the cycle's innermost atomic constraint, the satisfaction false and sure (diag.ae's rule :constraint).
+- operator-call: candidates that were operator templates alone, each dropped surely, class operands without conversion
+  functions (no built-in candidate, [over.match.oper]/3.3, [over.built]): GCC's "no match for 'operator@'" (not the rewritten,
+  assignment, call, subscript, arrow or comma operators).
+- sure-failure?: a unary operator's operand of a type it does not take ([expr.unary.op]/7-10) and a nested-name-specifier's
+  type that is no class ([temp.deduct.general]/11.3) are the program's errors in a requirement, so not satisfied surely.
+- template.ae: GNU's older traits as the GCC manual's "Type Traits" defines them where no question about a class's special
+  members arises (__has_trivial_assign, __has_trivial_copy, __has_nothrow_assign, __has_nothrow_copy,
+  __has_nothrow_constructor, `cx-gnu-old-trait`); __has_trivial_destructor false for void and function types (the code
+  generator too: the manual's definition).
+- user-conv: copy-initialization whose conversion functions are all explicit surely and whose conversion function templates'
+  specializations for the target are each made and explicit ([dcl.fct.spec]/3, [over.match.copy]/1.2): GCC's "cannot convert".
+- explicit-spec*: the explicit-specifier's operand, kept by the native parser (arbace/repr/cpp/parse.ae, "explicit:" in the
+  decltypes table, as noexcept's), analyzed and evaluated as a contextually converted constant expression, manifestly
+  constant-evaluated ([dcl.fct.spec]/3, [expr.const]/20): `explicit(W())` through W's conversion to bool,
+  `explicit(__builtin_is_constant_evaluated())`; the old text evaluation when it gives nothing.
+- ReturnStmt: decltype(auto)'s deduction from `return (x);` with C++23's P2266 ([expr.prim.id.unqual]/4: a possibly
+  parenthesized id-expression of an implicitly movable entity an xvalue), and a reference variable's name its declared type
+  ([dcl.type.decltype]/1.3; the code generator too, both by the standard).
+- decl-stmt and ce-exec: a block-scope extern declaration defines no variable ([basic.def]/2.3), so no static or thread_local
+  definition in a constexpr function's evaluation; diag.ae's constexpr-labels: a label a goto of the same body jumps to is not
+  reported, the goto is (g++ 15.2's recorded errors of cpp23/constexpr-nonlit1.C).
+- RequiresExpr: a void parameter's hard error not reported for a requires-expression inside the fold expression that is the
+  atomic constraint (g++ 15.2's recorded errors of cpp2a/concepts-requires33.C: GCC explains the fold).
+- noexcept-of: the noexcept-specifier's operand a contextually converted constant expression of type bool ([except.spec]/1,
+  [expr.const]/12, P1401R5): an integer constant other than 0 and 1 narrows.
+- decomposition!: a structured binding of a scalar ([dcl.struct.bind]/3-5): "cannot decompose non-array non-class type".
+- name-expr: a qualified name whose qualifier is a template's type parameter, outside a type-only context, naming a type in the
+  instantiation ([temp.res.general]/3): GCC's "dependent-name ... is parsed as a non-type, but instantiation yields a type"
+  (diag.ae's rule :typename).
+- template.ae ClassTemplateSpecializationDecl: an explicit specialization's simple-template-id satisfies the template's
+  associated constraints ([temp.names]/7): "template constraint failure", the specialization declared all the same.
+
+Tried and taken out: coroutine rules (get_return_object's result converted to the return type, [dcl.fct.def.coroutine]/7; both
+return_void and return_value, /6; an awaiter of no class type, [expr.await]/3): the checker's analysis of a coroutine body
+refuses at co_return (`statement CoreturnStmt`), so their errors were dropped with the body; left for a coroutine slice.
+Alternatives considered: making concept requirements look names up at the concept's definition ([temp.dep.candidate]) for
+cpp2a/concepts-recursive-sat3.C (whose foo(0) finds the later template by the slice's lookup and now reports the cycle, extra
+line 4, a fail before too): it would also hide the function templates ADL finds (adl-fns finds functions alone), so not done.
+
+Numbers, from finished `bin/repr-cpp dg --corpus dg-error --front native --only` runs (3 threads; logs in the VM's
+.tmp/q584/): r1 over every recorded own pass (2,829) and the 167 rows the base run (169, `base.log`) left failing, 2,998 files:
+2,851 own passes, 26 moved, 4 recorded passes lost. One was this branch's: cpp2a/concepts-return-req1.C, the sure non-class
+qualifier making `Two<typename T::type>` false where its concept `Two = true` names no parameter; fixed by the concept-id rule
+above (template.ae's :concept-id hook: an argument that fails to form decides nothing when the constraint-expression names none
+of the concept's parameters, [temp.constr.normal]/1.4's parameter mapping). The other three fail alike at the base 01ee9c426
+(its parse.ae, sema.ae, template.ae and diag.ae loaded over the branch's, `pd-base.ae`): cpp0x/pr85147.C, cpp23/consteval-if2.C,
+ext/anon-struct6.C, recorded passes that next already lost; left out of the final list so their record rows stay for the host's
+whole-record run. r2, the same list less those three, 2,995 files: 2,852 own passes, 26 moved, 0 lost; recorded from it with
+`--judge --record` (29 rows changed: the 26 to own pass, three fails' reasons). Moved: concepts/diagnostic20.C, diagnostic6.C,
+diagnostic9.C, cpp23/constexpr-nonlit1.C, decltype1.C, elision5.C, elision6.C, narrowing-bool1.C, cpp2a/concepts-explicit-spec3.C,
+concepts-pr67319.C, concepts-pr88395.C, concepts-recursive-sat2.C, concepts-recursive-sat5.C, concepts-requires33.C,
+concepts-traits1.C, concepts-traits2.C, concepts-uneval5.C (already passing at the base, unrecorded), decomp4.C, explicit1.C,
+explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-evaluated8.C, typename3.C.
+`bin/reap --record`: matrix unchanged (C++ read 6,090 / 0 / 194 is clang's record); `bin/crops-score --record`: C++ independence
+0.9766 -> 0.9770, the read stage 0.8830 -> 0.8850; `bin/crops-score --judge --strict`, `bin/reap`, `bin/records-check`,
+`bin/markers-check`: 0 problems.
+
+
+## 2026-11-25 — C++: read independence, the clang-only dg rows by the own front end's causes (cpp-indep, branch `cpp-indep-1125`)
+
+- Goal (the burst's): C++ read independence 0.882, each dg row counting 0.5 while only clang's recorded dumps pass it. The rows
+  clang passes and the own front end fails, less test/cpp/dg-dialect-out.edn's: 1,273 at `af1703774` (929 accepted with an
+  expected error, 210 missing lines, 71 both, 47 extra, 8 crashes, 8 timeouts). Scope: not the 194 deferred rows (cpp-own-1125,
+  the Mac); not cpp-own-1125's areas (constant evaluation, templates, overload, lookup, incomplete types), nor the Mac's 573
+  (recovery, unexpanded packs), 577 (GNU rules), 578 (syntax recovery); from 15:00 the Mac's 584 takes cpp2a, cpp23, concepts,
+  coroutines and modules (the coordinator): of those this branch's rules reach cpp2a/using-enum-2.C (mid-fix then) and, by
+  rules made for other directories, concepts/abbrev6.C, cpp2a/decomp4.C, cpp2a/constinit5.C (kept a pass).
+- Every rule from the standard's text and GCC's documented messages, no GCC or clang code. The causes, one commit each but the
+  last three: the crashes (a function template's signature substitution as an instantiation of its own, GCC's depth error;
+  a variable read in its own initializer; a mem-initializer's typeless construct; an explicit instantiation's skimmed array
+  bounds), the read-only location rule, copy-list-initialization through a braced argument (`m({...})`, `T t({...})`,
+  `new T({...})`, `return {...}`) and an array new's rest from {}, member static_asserts and a several-line one's false
+  conjunct, the parser's decl-specifier rules (__restrict on a constructor, typedef on a parameter, constexpr on a member or
+  parameter, virtual constructors and operator delete, virtual in a union, block-scope inline, explicit outside a constructor,
+  conversion functions with parameters, a ptr-operator before a trailing-return function, a condition declaring a function or
+  array), enumerators outside a fixed underlying type, structured bindings (initializer forms, scalars, closures), class-key
+  agreement, an aggregate's reference member's place; then declaration checks in arbace.repr.cpp.diag (thread_local agreement,
+  member type access) and parser rules (literal operator prefix, a twice-captured name, pointer to a qualified function type,
+  rvalue-reference handler, deduction guides, using enum, inheriting constructors of no direct base).
+- Tried and dropped: a member template-id `T::template B` as a non-type argument (template/qualttp2.C: the refusal swallowed in
+  the class's instantiation), a base-specifier of no class type in a specialization (inherit/base3.C: not reached), a class
+  template's name with a parameter list and no trailing return (cpp1z/class-deduction7.C: parsed as a constructor), the
+  bit-field's place in a specialization (parse/bitfield2.C: the refusal unmapped, GCC's spelled names needed).
+- A regression found and fixed: the read-only location rule, applied in implicit special members' memberwise assignments, refused
+  whole units (15 recorded own passes lost in the first regression run, .tmp/reg1.log: init/uninitialized1.C, const10.C,
+  cpp1y/constexpr-tracking-const4.C, ...); it now judges the user's own function bodies alone. thread_local agreement skips a
+  qualified (static member) definition (cpp2a/constinit5.C). Five recorded own passes fail at `af1703774` itself (checked in a
+  worktree at that commit): cpp1y/constexpr-neg1.C, cpp23/constexpr-nonlit3.C, cpp23/consteval-if2.C, ext/anon-struct6.C,
+  cpp0x/pr85147.C, cpp-own-1125's fixes.
+- The final runs (logs kept in /root/arbace/.tmp/keep/cpp-indep-1125/): every recorded own pass with the moved and target rows,
+  2,886 files on `95e68790f` (.tmp/fin.log): 2,787 pass, 52 rows moved to pass, and 88 recorded passes crashed on the
+  thread_local check (a header's VarDecl offset read against the main text; coroutines/, cpp2a/spaceship-*, ...) and one on the
+  twice-captured rule (cpp26/name-independent-decl2.C's `_`); both fixed, the 88, that row and the 17 targets of the last
+  rules run again (106 files, .tmp/fix1.log): 102 pass, none lost. Recorded from the two runs: the 52 rows the record failed
+  and the runs pass (each a clang-only row), the rest of the record kept (the five rows failing at `af1703774` itself left to
+  cpp-own-1125). `bin/reap --record`: matrix unchanged (the read cell counts clang's passes); `bin/crops-score --record`: C++ read
+  independence 0.8830 -> 0.8870, independence 0.9762 -> 0.9770. `bin/reap`, `bin/crops-score --judge --strict`,
+  `bin/records-check`, `bin/markers-check`: 0 problems. cpp-own-1125's whole own record was not pushed when this was recorded:
+  the merge keeps both (rows by file, these 52 its own passes or this branch's).
+
+## 2026-11-25 — C++: 526's recovery merged, the unexpanded packs GCC drops, and the combined branch cpp-vm-1125 (queue 573, VM)
+
+- Merged 526-cpp-recovery dc48d4b60 (round 1 of 518-1 (a): any namespace-scope kind's recovery, member-level recovery,
+  cascades silenced by name) into 570's af1703774 (12381c24e). arbace/cpp/sema.ae's seven conflicts resolved by hand keeping
+  both sides' rules (doc/cpp/CPP-SURVEY.md, "As built: 573"); template.ae's both kept; the own record re-judged for 526's four
+  rows from a finished `--only` run (ext/vector6.C, template/crash125.C to own pass), never hand-merged.
+- 567-2 (a), the user's: [temp.variadic]/5 with GCC's recovery as the g++.dg tests state it (and g++ 15.2 shows on two probes):
+  a function template whose declared type names its own pack unexpanded is no viable candidate (template.ae's
+  `cx-pack-signature-check!`); a class template specialization's member whose declared type names the head's pack unexpanded
+  is not declared (sema.ae's `cx-pack-dropped-member?`, the instance's `:cx-packs`), its name not silenced, so the later uses
+  are errors as GCC's are; a noexcept-specifier left out (cpp0x/noexcept66.C keeps its member). cpp0x/pr31434.C, pr31437.C,
+  pr32127.C, pr31443.C, pr31444.C to own pass. Alternatives: reusing 526's silencing (would have hidden the very errors the
+  tests expect); copying diag.ae's text check into sema (one rule in two places: resolved at run time instead).
+- The coordinator's change of plan made this branch the combined C++ branch: 578-cpp-syntax-recovery 0bc8e3b5b and
+  577-cpp-gnu-rules 6c89df5a7 merged (clean), then next 864cffa55 (cpp-own-1125's whole own record), 580 9727402fb, 584
+  a1da2edfe and cpp-indep-1125 ae13c3505, conflicts resolved by hand keeping both sides' rules: diag.ae's constexpr-labels
+  (cpp-own's and 584's one rule, cpp-own's kept), parse.ae's `explicit` (584's tentative parse with cpp-indep's
+  :explicit-i), sema.ae's class-init (cpp-indep's copy-list binding, then cpp-tzdb's conversion clause) and the
+  static_assert catch (526's recoverable refusal with cpp-indep's member rule); journals and survey the union.
+- One regression run over every recorded own pass and every row the branches claim (3,819 files, scripts/mklist.sh in
+  .tmp/q573) found 39 recorded own passes lost and new extra lines in three failing rows: merge-resolution bugs, fixed, not
+  recorded (fa9509e65): 526's catch-all for an implicit member's refusal had come before the rules that delete it surely and
+  poisoned their classes (36 rows); cpp-indep's same-substitution fatal fired inside a concept's satisfaction before 584's
+  "depends on itself" (3 rows); an instance refused for a constant the evaluation does not reach is :cx-inst-refused now
+  (cpp2a/bitfield2.C's new extra line). The run was made again at the fixed head and recorded from: 3,819 files, 2,935 own
+  passes, 0 lost, recorded with `--judge --record` (own passes 2,906 -> 2,935; .tmp/q573/fin.log, fin-record.log). Two rows that
+  failed before keep new extra lines, cascades of the recovery going on (nontype-class51, omp-constexpr): DECISION 573-1.
+  bin/reap: C++ read 6,090 / 0 / 194 -> 6,108 / 0 / 177; crops-score C++ completeness 0.9862 -> 0.9869, read independence
+  0.8900 -> 0.8920; reap, crops-score --judge --strict, records-check, markers-check: 0 problems.
+
+## 2026-11-25 — C++ read: the GNU rules group (queue 577, VM; recorded on cpp-vm-1125)
+
+- Built (577-cpp-gnu-rules 6c89df5a7, merged into cpp-vm-1125): diag.ae's `atomic-builtin-args`, GCC's __atomic built-ins'
+  argument rules (the GCC 15.2 manual's "Built-in Functions for Memory Model Aware Atomic Operations"), checked for a call with no
+  dependent argument inside a template argument list, its first error at the spelling of the call's `(`, then "template argument
+  N is invalid" for the lists it is in; the preprocessor's copies mapped to their spellings for it (arbace/repr/c/lex.ae's
+  `*spelling*`, inert unless bound; parse.ae's and native.ae's `*spellings*`); and `abi-vector-manglings`, the vector manglings
+  before ABI version 4 (the manual's -fabi-version), "conflicts with a previous mangle". No GCC or clang code.
+- Rows: abi/mangle41.C, template/builtin-atomic-overloads5.C, -6.C to own pass (the combined record); ext/pr84843-1.C, -2.C
+  stay as recorded. test/cpp/divergences-dg.edn's :gcc-own-rules :tests lose those three and cpp0x/variadic-ex14.C and
+  template/ttp16.C (already own passes): cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, ext/type_pack_element4.C left (577-1).
+- Alternatives: the atomic rule over every AtomicExpr of ordinary bodies (577-2 (b): wider regression risk, no row needs it).
+
+## 2026-11-25 — C++ read: the syntax-recovery group (queue 578, VM; recorded on cpp-vm-1125)
+
+- Built (578-cpp-syntax-recovery 0bc8e3b5b on 573's merge, merged into cpp-vm-1125): parse.ae's parameter-list recovery (an
+  error skips to the list's `)`, the declaration going on, GCC's "expected ',' or '...'"; not under a tentative parse,
+  `*tentative*`), `gnu-attr-args!` (GNU attribute arguments parsed as an expression list for their syntax errors, then put back),
+  the current instantiation's undeclared member in a qualified declarator ("is not a type", [temp.dep.type]); diag.ae's
+  `template-self-call-enumerators` ([expr.const]/5.3: a template's own specialization called in an enumerator of its
+  definition); sema.ae's `ce-args-env` evaluating an empty-class argument that is a call. Rules from the standard, the GCC
+  manual and the tests; no GCC or clang code.
+- Rows to own pass: parse/error6.C, cpp0x/pr84606.C, template/typedef6.C, cpp1y/constexpr-recursion1.C, -recursion2.C,
+  cpp0x/constexpr-non-const-arg2.C; cpp1z/constexpr-asm-3.C by 580. Alternatives: a recovery inside tentative parses (would change
+  which reading wins), keeping attributes' arguments in the tree (a tree change for no row).
+- 580's entry (queue 580, above) is its own; its "As built" is in the survey with this one.
