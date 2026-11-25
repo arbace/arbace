@@ -21993,3 +21993,87 @@ Built on 556d's ec1fc1bd8. All three commits move repr/java's reader hash (the h
 - **The 128-test sample** at read and print: t03453, t03457 and t03567 now pass, 0 regressions, read as recorded; c00001 differs.
   An intermediate run caught a regression in t03454 (its forms: a returned ?: printed as if statements lost the parentheses),
   fixed by 6dd9a362d. Recorded with `--judge --partial --record`.
+## 2026-11-24: queue 559, a conflict-marker check and pyi divergences' shadowed names to 0 (the VM)
+
+- Base mac/next a6da0aadf, branch 559-tooling-markers-shadows. Why: doc and journal merges left git's conflict markers twice
+  this week (9b60ce498: doc/JOURNAL.md 19033-19604 and doc/python/PYTHON-SURVEY.md 8096-8159, `git grep` at that commit finds
+  them), and `bin/pyi divergences` failed on 24 shadowed `:tests` names.
+- (a) `bin/markers-check`: a line of a tracked text file (`git grep -I`) that begins with `<<<<<<< ` or `>>>>>>> ` fails, but at
+  a line of its `EXEMPT` list (path and line text, each with its reason; empty: no tracked file has one at a6da0aadf), then its
+  negative control, a fabricated repository whose `doc.md` has both markers, which must be reported at lines 2 and 6;
+  `bin/markers-check DIR` scans DIR alone. About a second. Not grown into `bin/records-check`: that step is keyed by the records'
+  files, and every tracked file is this check's input, so it is a `:pre :kind :always` step, `markers`, after `makefile`
+  (`test/gate/steps.edn`, `bin/gate`'s `pre_step`, `:crops :shared`, CLAUDE.md's core list, `make markers-check`).
+  Alternative not taken: a keyed step with every file among its `:inputs` (rerun at every commit anyway, and the planner's key
+  over 21,000 files).
+- (b) The 24 shadowed names: 21 of `:testcapi-behaviour`'s `:tests` (d9b0a3b1d's write-ahead for queue 465's `_testinternalcapi`
+  stand-in) whose record rows still fail to import `_testinternalcapi`, taken first by `:testinternalcapi-absent`'s `:match`, and
+  3 of `:multiprocessing-children`'s (test_multiprocessing_main_handling's SpawnCmdLineTest test_script_compiled, test_zipfile,
+  test_zipfile_compiled) whose rows crashed past the runner's memory cap, taken first by `:host-memory`'s `:match`. Each row
+  lands in the class of its recorded reason, so the names are commented out in place (kept for the record that reaches them),
+  no class moved and the first-class rule unchanged. Alternative tried and dropped: moving `:testcapi-behaviour` before
+  `:testinternalcapi-absent` and `:host-memory` after `:multiprocessing-children` moved exactly those 24 rows, but 21 from n/a
+  to deferred: Python eval's judged deferred 1308 -> 1329, `bin/reap` and `bin/crops-score --judge --strict` failing until a
+  `--record`. As done, `bin/pyi divergences --methods` is byte for byte the base's classification; no row's result changes.
+- Checks: `bin/pyi divergences` 0 shadowed, exit 0; `bin/reap` 56 of 56, 0 problems; `bin/crops-score --judge --strict` 0 problems;
+  `bin/records-check` 0 problems; `bin/markers-check` ok and its control; `test/docs/claude-md-test.bash` and
+  `test/gate/costs-test.bash` pass. Keys: gate_key does not move; the keys of the steps over `bin/`, `test/gate/steps.edn`,
+  `bin/gate`, CLAUDE.md or `test/python/` move (claude-md, crops-score, gate-tests, caches-table, records-check, Python's steps).
+## 2026-11-24: cpp-p2564's count, seven rows and five (a correction; queue 560)
+
+The entry "cpp-p2564, P2564R3's immediate escalation in the own front end" and the commit `df842350a`'s subject say "7 rows to own pass"
+(prop1, -2, -6, -10, -19, -7, -8) and "C++ read 6,035 / 0 / 248 -> 6,040 / 0 / 243", a difference of 5. Both are right, for two counts: the
+own record test/cpp/check-dg-own-linux-amd64.edn moved seven rows from fail to pass (own pass 2,438 -> 2,445), but the read cell counts a file
+once, and consteval-prop7.C and -prop8.C were `:pass "compile"` in test/cpp/check-dg-linux-amd64.edn already (not :own-diag in
+test/cpp/own-diag-review.edn) and so in the 6,035. Only prop1, -2, -6, -10, -19 left the :own-diag class (231 -> 226) and the read's deferred
+(248 -> 243), and the matrix's dg source 4,101 -> 4,106 and test/crops/scores.edn's 6,035 -> 6,040 say five. Nothing in the records was wrong; the
+text did not say which count a number was. The commit message cannot change; doc/cpp/CPP-SURVEY.md's "As built: cpp-p2564" now states
+both. The records need no change.
+- (later) C, queue 540b on train 2's compiled host (.tmp/r/c.sh in rec-t2-at, under bin/heavy-lock): `bin/repr-c roundtrip --corpus
+  torture-compile --record` 17.6 min, 17.9 GB peak, 1,791 of 1,791 pass (limits-caselabels.c: read ok, levels 1 and 2 equal, gcc agrees;
+  its known entry removed); `bin/repr-c parse-check --corpus torture-compile --no-mutants --record` 9.4 min, 12.1 GB, 1,791 of 1,791
+  equal (limits-caselabels.c 706,054 nodes, its :eval-depth entry removed). The record files were next's before the runs; copied into
+  the branch. C read 5,474 / 0 / 1 -> 5,475 / 0 / 0, print 4,853 / 0 / 2 -> 4,854 / 0 / 1 (left: sqlite3.c). reap, crops-score --record
+  and --judge --strict: 0 problems.
+- (later) Java compiled (.tmp/r/compiled.sh in rec-t2-at, under bin/heavy-lock: j2g 22 s, bin/build-go 1,574 s, runs 768 s): t04308,
+  t04443 (serialization), t04543 (resources, java-bytecode), t06144 and t06306 (JD7) and t03208 pass; t06157 (CaptureVarOrder: an
+  anonymous class's captured constructor, CaptureVarOrder$1.<init>(String,int,Object), not found) and t04832 (jrt lacks
+  Executable.accessFlags()) still fail, in their classes. `--judge --partial --record`: 5 now passing, 0 regressions, controls differ.
+  test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
+  t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
+  3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+## 2026-11-24: java-stack-1124, Java's stack traces' lines, StackWalker's frames and reflection's access checks
+
+Branch `java-stack-1124` from mac/next `903ef1ab2`; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-stack-1124", and
+doc/classes/SPEC.md §14, 7. Goal: Java's `:stack` class (interp 7, compiled 10 rows) and the access-check rows t07688, t04829.
+- Lines. The Java forms keep no Java positions (SPEC §14, 3), so neither level could give a frame's line. Chosen: an opt-in
+  read option, `bin/repr-java read --line-numbers`, recording `^{:java/line N}` on the forms that call (javac's invocation
+  pos, the `(`; creations; method references) and `^{:java/source F}` on each top-level class, passed by `bin/java-check`'s
+  reads only. Alternatives: a lines layout of the `.ae` text as repr/go's mode `:lines` (the forms file on the Java lines;
+  much more of the writer, the pretty layout lost); the line on every form (noise, and jdk/'s forms would all change); a
+  side table of .ae lines to Java lines (a second artifact to keep in step). jdk/ and the corpora stay unchanged, so JDK
+  frames keep the forms file's lines; making them Java's is a later choice (a user decision below).
+- The interpreter's frames carry the line of their latest call (javac's rule: after the arguments); interp.ae reaches the new
+  `Rt/setLine` by name (the tools' host evaluates interp.ae on the seed's runtime). j2g names a class's source file from
+  `:java/source`, and a nested call on a later line gets its own Go line.
+- StackWalker: the interpreter's reflective-call popping once per group (it popped a program's `m.invoke` frame), jrt's MH
+  invokers and lambda classes hidden in a walk, no frame below a compiled `main` the evaluator launched, j2g's frame table
+  for methods named with an upper-case first letter.
+- Access checks: jdk26u's Reflection.verifyMemberAccess in jrt's Method.invoke, Constructor.newInstance and Field's
+  accessors, for the program's own callers (the run time's and the JDK's not checked: the JVM's Clojure would reflect
+  through public members, and jrt's variants were never checked).
+- Checks (light): the read of ChainedExceptions with `--line-numbers` (lines as javac's), printed back by repr/java's printer;
+  arbace.classes.analyze/interp and arbace.j2g.* load on stage 0; `bin/jrt build --package jrt` (go build, vet) and the jrt
+  tests of the frames and the access rule; a probe at interp on the gate's executable `40a4745332aacf54acab` (no runtime
+  change: frames as before) showing the MH and reflection walks the fixes address. No gate build: ready for the train.
+- (later) The j2g analysis of the whole world with these sources (`bin/j2g --analyze-only`, 8,524 classes, Compiler.ae's CF
+  classes among them): 0 analysis failures. test/java/forms/ read again with `--line-numbers` (`bin/java-check --forms update`,
+  428 tests: their layout and the :java/ items move, nothing else). The reader's hash moved (convert.ae, java.ae), so
+  `bin/provenance-check` asks the regeneration of jdk/, jdk/javac/ and the fixtures (provenance only expected, the option being
+  off for them): queued under the big lock as `.tmp/regen.sh` in the worktree (`bin/jrt-convert update`, `bin/javac-vendor
+  convert`, `bin/clojure-tests --java-fixtures update` on javac's tool f170fb32 with the checkout's namespaces).
+- (later) Decisions, the coordinator's (2026-11-24; neither an n/a): (a) JDK frames keep the forms file's lines (jdk/ is read
+  without `--line-numbers`; only the tests' own frames get Java lines); (a) reflection's access checks stay lenient for the run
+  time's and the JDK's callers (only the program's own classes checked). The queued regeneration (`.tmp/regen.sh`) was cancelled
+  by the coordinator: train 4 regenerates the provenance once for every reader-hash change it merges (538, 549, 549b, 556d's
+  ^:final and this branch) on a fresh javac tool; until then `bin/provenance-check` fails on this branch alone.

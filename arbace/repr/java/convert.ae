@@ -46,6 +46,53 @@
   [x t]
   (if *full* (at-span x (tr/start t) (tr/end t)) x))
 
+;; repr/java read --line-numbers (the Java check's reads; doc/classes/SPEC.md §14, 7): the Java line of
+;; the forms that call (a method invocation at javac's pos, its '(', as Gen.visitApply marks it; a
+;; class instance or array creation; a method reference, its bound receiver's null check) recorded
+;; as :java/line, and each top-level class's source file as :java/source (javac's SourceFile), for
+;; the stack traces of the interpreter and of j2g's code. Off (false) for every other read: jdk/'s
+;; forms and the corpora's are unchanged. One read per process: the command line sets it.
+(def line-numbers (atom false))
+
+(def ^:dynamic *line-starts*
+  "The offsets of the lines' starts in the unit's text when line numbers are recorded, else nil."
+  nil)
+
+(defn- line-starts
+  "The offsets at which text's lines start (after \\n, \\r\\n or a lone \\r, as javac's line map)."
+  ^longs [^String text]
+  (let [n (count text)
+        acc (java.util.ArrayList.)]
+    (.add acc (Long/valueOf 0))
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt text i)]
+          (cond
+            (and (= c \return) (< (inc i) n) (= (.charAt text (inc i)) \newline))
+            (do (.add acc (Long/valueOf (+ i 2))) (recur (+ i 2)))
+            (or (= c \newline) (= c \return))
+            (do (.add acc (Long/valueOf (inc i))) (recur (inc i)))
+            :else (recur (inc i))))))
+    (long-array (map long acc))))
+
+(defn line-of
+  "The 1-based line of offset p in the unit's text."
+  ^long [^long p]
+  (let [^longs a *line-starts*
+        i (java.util.Arrays/binarySearch a p)]
+    (if (neg? i) (- (- i) 1) (inc i))))
+
+(defn lined
+  "Result x (a {:f :t}) with its form's Java line, the line of tree t's pos, when line numbers are
+  recorded and the form is a list without one."
+  [x t]
+  (let [form (:f x)]
+    (if (and *line-starts* (seq? form) (instance? arbace.lang.IObj form)
+             (not (some #(and (vector? %) (= [:java :line] (subvec % 0 2))) (f/items form))))
+      (let [p (tr/pos t)]
+        (if (neg? p) x (assoc x :f (m+ form [:java :line (line-of p)]))))
+      x)))
+
 (defn- gensym! [env base]
   (let [n (swap! (:counter env) inc)]
     (symbol (str base "-" n))))
@@ -1820,9 +1867,9 @@
     :LITERAL (literal env t)
     :IDENT (ident env t)
     :SELECT (select env t)
-    :APPLY (invocation env t)
-    :NEWCLASS (new-class env t)
-    :NEWARRAY (new-array env t)
+    :APPLY (lined (invocation env t) t)
+    :NEWCLASS (lined (new-class env t) t)
+    :NEWARRAY (lined (new-array env t) t)
     :INDEXED (let [aa t
                    idx (fn idx [e acc]
                          (let [e (tr/skip-parens e)]
@@ -1842,7 +1889,7 @@
     :TYPETEST (instance-of env t)
     :CONDEXPR (conditional env t)
     :LAMBDA (let [x (lambda-form env t)] (assoc x :f (capture-values env t (:f x))))
-    :REFERENCE (method-ref-form env t)
+    :REFERENCE (lined (method-ref-form env t) t)
     :SWITCH_EXPRESSION (switch-form env t nil)
     (cond
       (tr/assignop? t) (assign-op env t)
@@ -3473,6 +3520,7 @@
     ;; without javac (cu nil, a read without javac, JFS111 (b)): the native tree, its text and source
     (binding [*text* (if cu (:text ju) (:text opts))
               *full* (when (:full opts) (atom 0))
+              *line-starts* (when @line-numbers (line-starts (if cu (:text ju) (:text opts))))
               tr/*end-positions* (when cu (:end-positions ju))
               attr/*twins* (:twins idx)
               attr/*natives* (:natives idx)
@@ -3499,6 +3547,14 @@
                       forms)
               split (when attr/*measure* (attr/split-of forms))
               forms (mapv simplify forms)
+              ;; --line-numbers: each top-level class's source file (javac's SourceFile)
+              forms (if *line-starts*
+                      (mapv (fn [x] (if (and (seq? x) (= 'defclass (first x)))
+                                      (with-meta (apply list 'defclass (m+ (second x) [:java :source file]) (nnext x))
+                                        (meta x))
+                                      x))
+                            forms)
+                      forms)
               pd (package-decl u)
               pkg-anns (when pd (seq (annotation-items env (tr/f pd :annotations))))
               forms (if (and (= file "package-info.java") pkg-anns)

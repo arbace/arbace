@@ -1,0 +1,52 @@
+#!/bin/bash
+# Git's conflict markers left in tracked files (queue 559; doc and journal merges left them twice in a week, 9b60ce498's
+# doc/JOURNAL.md and survey): a line of a tracked text file that begins with "<<<<<<< " or ">>>>>>> " (git's markers with
+# their trailing space; "=======" alone is too common to judge) fails, but at an exempted line (EXEMPT below: one file
+# and line text each, with its reason, never a pattern). Then its negative control: a fabricated repository with a marker
+# in a file must be reported. The :pre step markers of bin/gate, seconds, never keyed: every tracked file is its input.
+#
+# Usage: bin/markers-check            the checkout's tracked files, then the control
+#        bin/markers-check DIR        DIR's tracked files alone (a git work tree), no control
+# Exit status: 0 when no marker is found and the control reports its marker.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+. "$root/bin/lib/tmpdir.bash"
+
+# Exempted lines, "PATH<TAB>LINE" with the reason in a comment above each; none at a6da0aadf (queue 559's git grep).
+EXEMPT=(
+)
+
+re='^(<<<<<<<|>>>>>>>) '
+scan() {  # scan DIR: prints PATH:N:LINE for each marker of DIR's tracked text files not exempted; status 1 on any
+  local dir=$1 hit path rest text e bad=0
+  while IFS= read -r hit; do
+    path=${hit%%:*}; rest=${hit#*:}; text=${rest#*:}
+    for e in "${EXEMPT[@]}"; do [ "$e" = "$path"$'\t'"$text" ] && continue 2; done
+    echo "markers: FAIL $hit"; bad=1
+  done < <(git -C "$dir" grep -I -n -E "$re" 2>/dev/null)
+  return $bad
+}
+
+case ${1:-} in
+  -h|--help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  "") ;;
+  *) scan "$1"; exit $? ;;
+esac
+
+fail=0
+scan "$root" || fail=1
+n=$(git -C "$root" ls-files | wc -l)
+# the negative control: a marker in a fabricated repository's tracked file must be reported
+ctl=$(mktemp -d "$TMPDIR/markers-control.XXXXXX")
+trap 'rm -rf "$ctl"' EXIT
+if git -C "$ctl" init -q 2>/dev/null && printf 'a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> other\n' > "$ctl/doc.md" \
+   && git -C "$ctl" add doc.md && out=$(scan "$ctl"); then
+  echo "markers: CONTROL FAILED: the fabricated marker was not reported"; fail=1
+elif [ "$(printf '%s\n' "$out" | grep -c '^markers: FAIL doc.md:[26]:')" != 2 ]; then
+  echo "markers: CONTROL FAILED: expected doc.md:2 and doc.md:6, got: $out"; fail=1
+else
+  echo "markers: control ok (doc.md:2 and doc.md:6 reported)"
+fi
+[ $fail = 0 ] && echo "markers: ok, $n tracked files, no conflict marker (${#EXEMPT[@]} exempted lines)" \
+  || echo "markers: FAIL"
+exit $fail
