@@ -3016,7 +3016,21 @@
               ;; C6-4 (the always-inliner): the `#[inline(always)]` callees of the items, and theirs, each at its arguments (an
               ;; instance of a generic one), built beside them for the inliner (std's IR holds none of them: LLVM's -O0 pipeline
               ;; inlined and removed them); one the export lacks is wanted (its key named, for the next export)
-              inl (loop [todo (in-lib #(mono/inline-always-callees n (keep (fn [[_ i]] (:body i)) insts))) seen #{} acc []]
+              ;; queue 566 (C6 L2's first slice): with LIB_UNIT_L2, the items' other callees (unit-callees: one level, the instances
+              ;; the items call), each the export's body instantiated (core-instance) where the export has its definition
+              l2-name (fn [d args] (str "lib-l2 " d (when (seq args) (pr-str args))))
+              l2 (when (System/getenv "LIB_UNIT_L2")
+                   (let []
+                     (vec (for [[d args sym] (in-lib #(mono/unit-callees n (keep (fn [[_ i]] (:body i)) insts)))
+                                ;; (the copies std's units define: a generic instance, a cross-crate-inlinable definition, or
+                                ;; std's own; an upstream crate's plain item is that crate's)
+                                :when (and (not (and (empty? args) (some #{d} defs))) (not (in-lib #(mono/foreign-link-name d)))
+                                           (or (seq args) (and (string? d) (str/starts-with? d (str crate "::")))
+                                               (in-lib #(mono/cross-crate-inlinable? d))))
+                                :let [e (when (string? d) (get nc d))
+                                      i (when e (try (in-lib #(core-instance e args)) (catch Throwable _ nil)))]]
+                            [d args sym i (cond i nil e "the instance refused" :else "not exported")]))))
+              inl (loop [todo (in-lib #(mono/inline-always-callees n (concat (keep (fn [[_ i]] (:body i)) insts) (keep #(nth % 3) l2)))) seen #{} acc []]
                     (if-let [[d args sym :as c] (first todo)]
                       (if (or (seen [d args]) (some #{d} defs))
                         (recur (rest todo) seen acc)
@@ -3032,10 +3046,12 @@
               unit-variant* (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
               lay* (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
               cf (in-lib #(mono/core-facts n (concat (for [[d i] insts :when i] {:def d :args [] :name (str "lib " d) :body (:body i)})
-                                                     (for [[d args _ i] inl :when i] {:def d :args args :name (inl-name d args) :body (:body i)}))))
+                                                     (for [[d args _ i] inl :when i] {:def d :args args :name (inl-name d args) :body (:body i)})
+                                                     (for [[d args _ i] l2 :when i] {:def d :args args :name (l2-name d args) :body (:body i)}))))
               ;; the function constants' symbols, operands' too (a function reified as a pointer), beside the calls'
               cf (update cf :fsyms #(merge (in-lib (fn [] (mono/const-fsyms n (concat (keep (fn [x] (:body (second x))) insts)
-                                                                                   (keep (fn [x] (:body (nth x 3))) inl))))) %))
+                                                                                   (keep (fn [x] (:body (nth x 3))) inl)
+                                                                                   (keep (fn [x] (:body (nth x 3))) l2))))) %))
               ;; a caller location's file as the library build writes it: Cargo's trimmed path, relative to library/ (std.edn's
               ;; TRIM_PATHS; the export's :call-loc carries the remap's /rustc/COMMIT/library/ prefix), LIB_UNIT_SRC_PREFIX before
               ;; it (RFP47 (a)'s remap once std.edn takes it: /rustc/COMMIT/library/)
@@ -3152,14 +3168,22 @@
                                                                rb (runtime-body (assoc (:body i) :name nm) {:name nm} nf false)]
                                                            (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i))))) nil]
                                     (catch Throwable x [d args sym nil (str "the runtime body: " (.getMessage x))])))))
+              l2-out (vec (for [[d args sym i why] l2]
+                            (if-not i
+                              [d args sym nil why]
+                              (try [d args sym (in-lib #(let [nm (l2-name d args)
+                                                              rb (runtime-body (assoc (:body i) :name nm) {:name nm} nf false)]
+                                                          (tls-sym (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i)))))) nil]
+                                   (catch Throwable x [d args sym nil (str "the runtime body: " (.getMessage x))])))))
               ;; the layouts from the instances' forms, which carry their types (:tc; runtime-body's walk drops it, and form->ty
               ;; reads a type from the record's DefId texts alone), then from the runtime bodies' for what they add
               ;; C6-4: each layout with its LLVM type without names (std's IR's -Z fewer-names: mono/*llty*)
               lt (binding [mono/*llty* true]
-                   ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl)))
-                                                (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out))))))]
+                   ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl) (keep #(nth % 3) l2)))
+                                                (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out) (keep #(nth % 3) l2-out))))))]
           {:bodies out
            :inline-bodies (vec (for [[d args sym b why] inl-out] [d args sym b why]))
+           :l2-bodies (vec (for [[d args sym b why] l2-out] [d args sym (when b (assoc b :symbol sym)) why]))
            :layouts (vec (for [[t l] lt :when (not (mono/error? l))] [t l]))
            :layout-refusals (vec (for [[t l] lt :when (mono/error? l)] [t (second l)]))
            :langsyms (into {} (for [[k v] (:langsyms facts) :when (not (mono/error? v))] [k v]))
@@ -3179,6 +3203,10 @@
     ;; queue 542: the const fns a static's evaluation called that no export holds, wanted as the inliner's are (lib-unit inline-keys)
     (doseq [[d args] (:ctfe-wanted r)]
       (println (str "lib-unit inline wanted " d (when (seq args) (str " " (pr-str args))) " (not exported; a static's evaluation)")))
+    ;; queue 566 (L2's first slice): the items' callees built (LIB_UNIT_L2), or wanted (their keys for the next export)
+    (doseq [[d args sym b why] (:l2-bodies r)]
+      (println (if b (str "lib-unit l2 built " d (when (seq args) (str " " (pr-str args))) " " sym)
+                   (str "lib-unit l2 " (if (= why "not exported") "wanted " "refused ") d (when (seq args) (str " " (pr-str args))) " (" why ")"))))
     (println (str "lib-unit: " (count (:layouts r)) " layouts, " (count (:layout-refusals r)) " refused"))
     (doseq [[t why] (take 12 (:layout-refusals r))] (println (str "lib-unit layout refused " t ": " (subs (str why) 0 (min 200 (count (str why)))))))
     (println (str "lib-unit: " crate ": " (count (filter second (:bodies r))) " of " (count defs) " items made runtime bodies, into " out))

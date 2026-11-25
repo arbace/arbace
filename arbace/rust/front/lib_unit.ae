@@ -400,16 +400,24 @@
                         cg/*call-seq* (and (not= "0" (System/getenv "LIB_UNIT_CALL_SEQ")) (not= "0" (System/getenv "LIB_UNIT_INLINE")))]
                (let [[std crate uf] args
                     m (read-string (slurp uf))
-                    theirs (ir-forms std crate (keep (fn [[_ b]] (:symbol b)) (:bodies m)))
+                    theirs (ir-forms std crate (concat (keep (fn [[_ b]] (:symbol b)) (:bodies m)) (keep #(nth % 2) (:l2-bodies m))))
                     gl (cg/new-globals (:langsyms m))
                     lt (into {} (:layouts m))
                     inl-bodies (vec (keep #(nth % 3) (:inline-bodies m)))
-                    _ (cg/set-def-symbols! gl (for [b (concat (keep second (:bodies m)) inl-bodies)] (assoc b :form :body)))
+                    l2-bodies (vec (keep #(nth % 3) (:l2-bodies m)))
+                    _ (cg/set-def-symbols! gl (for [b (concat (keep second (:bodies m)) inl-bodies l2-bodies)] (assoc b :form :body)))
                     ours (vec (for [[d b why] (:bodies m)]
                                 (if b
                                   (try [d (:symbol b) (cg/codegen-fn (assoc b :form :body) lt gl) nil]
                                        (catch Throwable e [d (:symbol b) nil (str "codegen: " (or (:codegen/unsupported (ex-data e)) (.getMessage e)))]))
                                   [d nil nil why])))
+                    ;; queue 566 (L2's first slice): the items' callees' instances, codegen'd as the items are, the always-inliner over them too
+                    l2-ours (vec (for [[d args sym b why] (:l2-bodies m)]
+                                   (let [nm (str d (when (seq args) (pr-str args)))]
+                                     (if b
+                                       (try [nm sym (cg/codegen-fn (assoc b :form :body) lt gl) nil]
+                                            (catch Throwable e [nm sym nil (str "codegen: " (or (:codegen/unsupported (ex-data e)) (.getMessage e)))]))
+                                       [nm sym nil why]))))
                     ;; C6-4: LLVM's -O0 pipeline, the always-inliner (arbace.rust.back.inline): the `#[inline(always)]` callees
                     ;; codegen'd and inlined into the items (LIB_UNIT_INLINE=0: not); an item calling one the build lacks refused
                     ours (if (= "0" (System/getenv "LIB_UNIT_INLINE"))
@@ -430,18 +438,21 @@
                                  ;; callees first, as before)
                                  module (binding [inl/*nounwind?* (fn [sym] (or (str/starts-with? (name sym) "llvm.") (false? (get nounwind (name sym)))))]
                                           (inl/inline-module (let [so (not= "0" (System/getenv "LIB_UNIT_SYMBOL_ORDER"))
-                                                                       fs (concat (keep #(nth % 2) ours) (callees-first inl-defs always so))]
+                                                                       fs (concat (keep #(nth % 2) ours) (keep #(nth % 2) l2-ours) (callees-first inl-defs always so))]
                                                                    ;; the module's order, the items and the callees by symbol (the calls'
                                                                    ;; use lists are numbered in it)
                                                                    (if so (sort-by #(name (second %)) fs) fs))
                                                              always))
-                                 by (into {} (map (juxt second identity) module))]
-                             (vec (for [[d sym f why :as o] ours]
-                                    (cond (nil? f) o
-                                          (some missing (inl/callees f)) [d sym nil (str "an #[inline(always)] callee not built: "
-                                                                                       (first (filter missing (inl/callees f))))]
-                                          :else [d sym (get by (second f) f) why])))))
+                                 by (into {} (map (juxt second identity) module))
+                                 through (fn [os] (vec (for [[d sym f why :as o] os]
+                                                         (cond (nil? f) o
+                                                               (some missing (inl/callees f)) [d sym nil (str "an #[inline(always)] callee not built: "
+                                                                                                            (first (filter missing (inl/callees f))))]
+                                                               :else [d sym (get by (second f) f) why]))))]
+                             ;; (queue 566: the L2 callees through the same module, kept as the result's metadata)
+                             (with-meta (through ours) {:l2-inlined (through l2-ours)})))
                     our-gm (chk/global-map (cg/module-extras gl))
+                    l2-rows (judge (or (:l2-inlined (meta ours)) l2-ours) our-gm theirs)
                     rows (judge ours our-gm theirs)
                     ctl (control ours our-gm theirs)]
                 ;; queue 566: LIB_UNIT_DUMP=REGEX writes each matching item's two sides, normalized as judge compares them, one
@@ -456,6 +467,12 @@
                   ;; a difference's text may hold a constant's bytes: control characters printed as `?`, so the log stays text
                   (println (str "lib-unit " (name k) " " d (when sym (str " " sym))
                                 (when why (str " (" (str/replace (subs (str why) 0 (min 400 (count (str why)))) #"[\x00-\x08\x0b-\x1f\x7f]" "?") ")")))))
+                (when (seq l2-rows)
+                  (doseq [[d sym k why] l2-rows]
+                    (println (str "lib-unit l2 " (name k) " " d (when sym (str " " sym))
+                                  (when why (str " (" (str/replace (subs (str why) 0 (min 300 (count (str why)))) #"[\x00-\x08\x0b-\x1f\x7f]" "?") ")")))))
+                  (println (str "lib-unit l2 compare: " crate ": " (count l2-rows) " callees: "
+                                (str/join ", " (for [k [:equal :differs :refused :no-symbol]] (str (count (filter #(= k (nth % 2)) l2-rows)) " " (name k)))))))
                 (println (str "lib-unit compare: " crate ": " (count rows) " items: "
                               (str/join ", " (for [k [:equal :differs :refused :no-symbol]] (str (count (filter #(= k (nth % 2)) rows)) " " (name k))))))
                 (if ctl
