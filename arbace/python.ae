@@ -195,15 +195,26 @@
 (defn- site-dirs [opts]
   (remove empty? (str/split (str (get opts "--site" "")) #":")))
 
+(defn- universal-newlines
+  "A program's bytes with CR LF and a lone CR as LF, as the tokenizer reads a file (py-os-1124: the reader's mode :full
+  keeps a file's own line ends for the round trip, so a CR inside a string literal stayed one: test_source_encoding's
+  test_crlf, test_crcrlf, test_crcrcrlf); the bytes themselves when they hold no CR"
+  ^bytes [^bytes bs]
+  (if (neg? (.indexOf (String. bs "ISO-8859-1") "\r"))
+    bs
+    (.getBytes (str/replace (String. bs "ISO-8859-1") #"\r\n?" "\n") "ISO-8859-1")))
+
 ;; the program's dump: --dump's (the helper's, bin/pyi's PYI_READER=helper), else the native reader's of --file in mode :full
 ;; (queue 213: no CPython in a run; the helper's text, as arbace.python.run reads the modules a program imports)
 (defn- run-dump [opts]
   (if-let [dump (get opts "--dump")]
     (slurp dump)
     (let [f (File. ^String (get opts "--file"))]
-      (with-bindings {(requiring-resolve 'arbace.repr.python.lex/*file-input*) (not= "__pyi_c.py" (.getName f))}
+      ;; -c's command: string input, its coding spec ignored (PyCF_IGNORE_COOKIE; py-os-1124)
+      (with-bindings {(requiring-resolve 'arbace.repr.python.lex/*file-input*) (not= "__pyi_c.py" (.getName f))
+                      (requiring-resolve 'arbace.repr.python.native/*ignore-cookie*) (= "__pyi_c.py" (.getName f))}
         ((requiring-resolve 'arbace.repr.python.native/read-dump)
-         (java.nio.file.Files/readAllBytes (.toPath f)) (.getName f) true true)))))
+         (universal-newlines (java.nio.file.Files/readAllBytes (.toPath f))) (.getName f) true true)))))
 
 (defn- with-start-gc
   "F's value, called with Go's collector at GOGC 200 at least, the environment's setting restored after (queue 298): the
@@ -226,6 +237,10 @@
         _ (require 'arbace.python.run)
         answer (resolve 'arbace.python.run/error-answer)
         file (let [f (get opts "--file")] (if (= "__pyi_c.py" (.getName (File. ^String f))) "<string>" f))
+        ;; py-os-1124: the main module compiled at the runtime's optimization level (-O, PYTHONOPTIMIZE); a runtime
+        ;; compiled before OptimizeLevel has none: 0
+        opt (do ((resolve 'arbace.python.run/require-runtime!))
+                (if-let [f (resolve 'go.arbace.py/OptimizeLevel)] (long (f)) 0))
         text ((resolve 'arbace.python.run/main-answer)
               ;; a coding spec the host has no charset for: the runtime decodes by Python's codec and compiles (queue 228)
               #(try (cv/convert (run-dump opts))
@@ -235,7 +250,7 @@
                   (= d :charset) "charset"
                   (cv/error-form? d) (answer d nil file)
                   :else
-                  (try (ir-text (pc/compile-source d :exec))
+                  (try (ir-text (binding [pc/*optimize* opt] (pc/compile-source d :exec)))
                        (catch Throwable e
                          (if (= 'SyntaxError (:class (ex-data e))) (answer nil e file) (throw e)))))))]
     ;; PY5e: the runtime's compiler (imports, exec, eval) and sys.argv, sys.path (arbace.python.run)
