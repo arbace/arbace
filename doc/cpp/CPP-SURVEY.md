@@ -11583,7 +11583,11 @@ address (a string literal, a cast to a pointer) is fixed at translation, so no V
 - arbace/repr/cpp/diag.ae: the sema rule :vla-type; vla-pedantic (-pedantic-errors' "ISO C++ forbids variable length array") over
   constructors', destructors' and conversion functions' bodies too.
 
-Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C.
-Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class template pattern's member
-bound), template/array9.C (its dropped members named by the destructor: missed to extra), other/fold1.C, init/new37.C, and a local
-pointer to a VLA (`int (*p)[n]`, refused at its declaration, a false error at a later use, as at the base).
+- Round 2 (the user's 570-1 (a), 570-2 (a)): a member reported for its bound or its variably modified type is kept, with GNU's
+  VLA type (`cx-field-vla-type`), marked :cx-vla, laid out with no bytes by arbace/cpp/abi.ae (the checker sets it alone), so its
+  uses report nothing more; a block-scope variable whose type is built from a VLA but is none itself (`int (*p)[n] = &a;`) is
+  declared with that type (`cx-vm-local-type`), sizeof of it abi's refusal.
+
+Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C;
+in round 2 template/array9.C. Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class
+template pattern's member bound), other/fold1.C, init/new37.C.

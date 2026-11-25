@@ -21180,3 +21180,19 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
 - Left: template/varmod1.C (a VM type as a deduced template argument), template/error41.C and template/array15.C (a class
   template pattern's member bound), other/fold1.C (a const whose initializer is in error), init/new37.C (a template's array new),
   and a local pointer to a VLA (`int (*p)[n]`), still refused at its declaration with a false error at a later use (at the base too).
+
+## 2026-11-25 — C++: 570's round 2, the user's DECISIONs 570-1 (a) and 570-2 (a) (queue 570, VM)
+
+- The user's DECISION 570-1 (a): a non-static data member whose bound is surely no constant (cx-field-bound-error) is reported and
+  kept, with GNU's VLA type (`cx-field-vla-type`, *cx-vla* the class scope), marked :cx-vla, which arbace/cpp/abi.ae's layout gives
+  no bytes (the checker sets it alone), so the class and the member's uses go on; a member of a typedef's variably modified type is
+  reported the same way and kept. template/array9.C's destructor now names its members with no error. Dropping it with no further
+  error had needed the destructor's uses silenced one by one; a layout refusal (tried first) made ext/vla1.C's `} s;` fail and
+  its `s.ar[0][0]` a new, unpruned error.
+- The user's DECISION 570-2 (a): a block-scope variable whose type is built from a VLA but is none itself (`int (*p)[n] = &a;`) is
+  declared with that type (`cx-vm-local-type`, *cx-vla* its scope); a VLA that vla-local does not take stays refused; sizeof of
+  such a type stays abi's refusal (no false error): the probe .tmp/q570/probes/vla-types-ok.C passes.
+- One regression run (.tmp/q570/r4.log): every recorded own pass (2,828 less 569-3's five), the 106 VLA files and 570's rule
+  files, 2,882 files: 2,824 pass, template/array9.C moved, none lost. Recorded from it (`--judge --record`): array9 to own pass.
+  `bin/reap --record`: C++ read 6,090 / 0 / 194 unchanged (array9 already passed by clang's record); `bin/crops-score --record`
+  unchanged. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
