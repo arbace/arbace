@@ -3549,8 +3549,18 @@
                            ;; sema's *cx-constraint-explain*)
                            ex (when (sema/checking?) (atom []))
                            r (binding [sema/*constraint-doubt* d sema/*cx-constraint-explain* ex
-                                       *cx-concepts-entered* (if (sema/checking?) (conj *cx-concepts-entered* k) *cx-concepts-entered*)]
-                               (sema/constraint-satisfied? (bind-scope (:scope c) (:params c) args nil) (:expr c)))]
+                                       *cx-concepts-entered* (if (sema/checking?) (conj *cx-concepts-entered* k) *cx-concepts-entered*)
+                                       sema/*cx-concept-cutoff* (:cx-cutoff c)]
+                               ;; (queue 588, 584-1 (a), the checker: a main file's concept's constraint-expression is a
+                               ;; definition's: its non-dependent names, and the unqualified lookup of a dependent call's
+                               ;; name, bound at the concept's definition ([temp.res.general]/6 with [temp.dep.candidate]/1), a
+                               ;; declaration after it found only by argument-dependent lookup at the point of instantiation
+                               ;; (which binds no cutoff); the scope's :cx-cutoff, sema's const-int and constraint-satisfied?:
+                               ;; cpp2a/concepts-recursive-sat3.C's `foo(t)` of an int finds no foo, Fooable<int> is false and
+                               ;; no "depends on itself", while sat2.C's local S still finds the later foo by ADL)
+                               (sema/constraint-satisfied? (cond-> (bind-scope (:scope c) (:params c) args nil)
+                                                             (:cx-cutoff c) (assoc :cx-cutoff (long (:cx-cutoff c))))
+                                                           (:expr c)))]
                        [r @d (some-> ex deref seq vec)]))
         [r d ex] (if-let [m *satisfaction*]
                 (let [v (get @m k ::none)]
@@ -3577,6 +3587,9 @@
   "Each constrained type parameter's concept satisfied by its argument ([temp.param]/4: the immediately-declared
   constraint C<T>)."
   [t args scope]
+  ;; (queue 588: the template's own constraints, in its own context, not at a concept's definition whose satisfaction asks
+  ;; for them: cpp2a/concepts-pr88395.C's S::operator+= `template <Concept T>` found from Concept2's `t += u`)
+  (binding [sema/*cutoff* Long/MAX_VALUE]
   (every? (fn [[p a]]
             (cond
               ;; (n-cpp-concepts, the checker: a constrained pack's arguments each satisfy its concept, [temp.param]/4's
@@ -3598,7 +3611,7 @@
               :else (if-let [c (concept-of t p)]
                       (if (> (count (remove :pack (:params c))) 1) (do (sema/doubt!) true) (concept-satisfied? c [a]))
                       true)))
-          (map vector (:params t) args)))
+          (map vector (:params t) args))))
 
 (defn- name-pack-params!
   "A specialization's parameters from a function parameter pack (Ts... ts): their names, the pack's name standing for
@@ -4943,7 +4956,10 @@
     "ConceptDecl"
     (if-let [cx (:constraintExpr n)]
       (let [tid (next-id)]
-        (swap! *tmpls* assoc tid {:id tid :tk :concept :name (:name n) :scope scope :path (:path scope) :params (tparams n) :expr cx :pos (:_b n)})
+        (swap! *tmpls* assoc tid (cond-> {:id tid :tk :concept :name (:name n) :scope scope :path (:path scope) :params (tparams n) :expr cx :pos (:_b n)}
+                                   ;; (queue 588, the checker: a main file's concept, its names looked up at its definition, concept-satisfied?)
+                                   ;; (the concept's own end: it is visible to the templates whose constraints name it)
+                                   (and (sema/checking?) (not (sema/header-node? n)) (:_e n)) (assoc :cx-cutoff (inc (long (:_e n))))))
         (enter! scope (:name n) {:e :tmpl :tk :concept :id tid :pos (long (or (:_b n) 0))})
         :template)
       (fail :template "a concept without its constraint"))
