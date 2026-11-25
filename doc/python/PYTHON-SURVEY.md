@@ -8585,3 +8585,27 @@ failure, `:sqlite-process-locks`), recorded by `--judge DIR --record`; the probe
 python3's, all three failing on the parent's pyi; py5, a live cursor's write held back, the control against resetting too much) and `.tmp/q550/p/c/test-crt.sh` against gcc's builds (a lock another process holds, a shared
 mapping's coherence before munmap: the controls an always-F_UNLCK fcntl and a copying mmap fail); C's eval and AOT essential subsets
 and the four rows that mmap pass.
+
+## As built: 551, _warnings in Go, the standard streams as TextIOWrappers, 537-2's n/a (2026-11-23, the Mac VM, queue 551)
+
+The user's decisions of 2026-11-23: 537-2 (a), 537-3 (a), 545-1 (b); :builtin-modules, :runs-where-cpython-skips and
+:host-clock n/a (:subinterpreters is queue 553's).
+
+- **_warnings** (`go/arbace/py/builtins_warnings.ae`): Python/_warnings.c of CPython 3.14.10 in Go: warn (setup_context's
+  frames, importlib's bootstrap frames and skip_file_prefixes skipped past the first), warn_explicit (with module_globals'
+  source line through _PyImport_BlessMyLoader's checks), the registry's version, the once registry, the default action,
+  filters searched in the context's list when one is set, else the global list; _showwarnmsg and WarningMessage, or
+  show_warning's own line on sys.stderr when the warnings module is absent; the lock (an _thread.RLock), the
+  _filters_mutated_lock_held version. warnings.py takes them as CPython's does, so each warning reads sys.modules['warnings']
+  at the call (test_warnings' BaseTest.setUp swaps it). The shutdown's finalWarn, once the warnings module is gone, is
+  unchanged.
+- **The standard streams**: at the start (init_sys_streams, the first start hook: the encodings package is importable then;
+  made while sys is created, before importlib, a TextIOWrapper's codec lookup broke `_bootstrap._setup`), sys.stdin,
+  sys.stdout and sys.stderr and their `__std*__` become create_stdio's `TextIOWrapper(Buffered*(FileIO(fd, closefd=False)))`;
+  input() flushes the real stdout, the REPL's prompt flushes both (flush_io), SystemExit's message goes through sys.stderr.
+  The runtime's textFile stays for the REPL (`bin/pyi python` without a program), a closed descriptor and tamago.
+- **n/a**: :finalization-cycle, :weakref-list and the rest of :finalization (reference counting's moment; its 30 rows that
+  pass since queue 222 stay passes), :builtin-modules, :runs-where-cpython-skips, :host-clock (551b, 2026-11-24, for
+  :finalization; :coroutines and its test_bpo_45813 rows are the main host's py-core).
+- **Records** (551b): test_warnings whole, 186 pass, 15 classed, 0 failing; test_print 9 pass. :warnings-c keeps
+  PyWarningsDisplayTests.test_tracemalloc alone (tracemalloc's object tracebacks).
