@@ -1082,6 +1082,26 @@ PYI_SCRIPT
   # /dev/null on it at its start (runtime.checkfds), so the runtime closes it again (PYI_STDIN_CLOSED) before the program
   if { : 9<&0; } 2>/dev/null; then unset PYI_STDIN_CLOSED; else export PYI_STDIN_CLOSED=1; fi
   if [ -n "$sflags" ]; then export PYI_START_FLAGS=$sflags; else unset PYI_START_FLAGS; fi
+  # the signal mask this shell was started with (py-mp-1125): Go's runtime unblocks SIGINT, SIGTERM and its other
+  # signals on its threads before any of the program runs, and a SIGINT or SIGTERM pending then is the process's death by
+  # Go's default action. So the runtime takes the mask from here (PYI_START_SIGBLK, builtins_signal_wait.go's init: those
+  # signals blocked for the program and notified, one that arrives held, sigpending), with the ones already pending
+  # (PYI_START_SIGPND: ShdPnd and SigPnd); a blocked SIGINT or SIGTERM is ignored from here to the exec, which discards
+  # one pending (counted above) and keeps a later one from killing the runtime's start (the runtime reads an inherited
+  # SIG_IGN of SIGHUP alone; its notify replaces this one). resource_tracker's parent blocks SIGINT and SIGTERM around its
+  # spawn, and the test's SIGINT or SIGTERM, sent while this child starts, must be held until its main ignores it.
+  unset PYI_START_SIGBLK PYI_START_SIGPND
+  local sigblk="" sigpnd=0 l v
+  while read -r l v; do
+    case $l in SigBlk:) sigblk=$v ;; ShdPnd:|SigPnd:) case $v in *[!0-9a-fA-F]*|"") ;; *) sigpnd=$(( sigpnd | 16#$v )) ;; esac ;; esac
+  done < "/proc/$$/status" 2>/dev/null || true
+  case $sigblk in ""|*[!0-9a-fA-F]*|0000000000000000) ;; *)
+    export PYI_START_SIGBLK=$sigblk
+    sigpnd=$(( sigpnd & 16#$sigblk ))
+    [ "$sigpnd" = 0 ] || export PYI_START_SIGPND=$(printf '%x' "$sigpnd")
+    if (( 16#$sigblk & 0x2 )); then trap '' INT; fi
+    if (( 16#$sigblk & 0x4000 )); then trap '' TERM; fi ;;
+  esac
   # -i (queue 289): the runtime's REPL after the main module (PYI_INSPECT=1), or as the run (repl, repl-quiet: -q); on a
   # terminal without -i the REPL as the run with sys.flags' inspect and interactive 0 (tty, tty-quiet; queue 313)
   if [ -n "$stdinrepl" ] && [ -n "$inspect" ]; then export PYI_INSPECT=repl${quiet:+-quiet}
