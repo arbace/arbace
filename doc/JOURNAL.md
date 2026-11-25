@@ -22050,3 +22050,80 @@ Done:
 
 548-1 (a): ocaml-ppx-expect stays in the weekly tier, skipped by key when its inputs are unchanged, in place of the nightly step
 547f-1 (a) named (bin/gate --nightly runs --full's phases; a nightly-only phase would need a planner change, not made).
+
+## 2026-11-24 — jrt: java.lang.constant's static-initializer cycle, ConstantDescs initialized at boot (queue 491, VM)
+
+Found by jcs50-release (ee1e99830, test/javac-platform/ctsym-run.ae): ConstantDescs and PrimitiveClassDescImpl
+(jdk/forms/java/lang/constant/ConstantDescs.ae, jdk/forms/jdk/internal/constant/PrimitiveClassDescImpl.ae, jdk26u's)
+initialize each other; entered from PrimitiveClassDescImpl (CreateSymbols' first MethodTypeDesc.ofDescriptor, through
+ConstantUtils.forPrimitiveType) ConstantDescs' CD_int..CD_void are read while PrimitiveClassDescImpl is in progress (null) and
+its BSM_CLASS_DATA_AT (ofConstantBootstrap(..., CD_Object, CD_int)) throws: ExceptionInInitializerError.
+
+What a JDK does, by JLS 12.4.2 (JVMS 5.5) over jdk26u's sources (.tmp/jdk26u at baf63fbe, the platform's pin;
+src/java.base/share/classes): entered from PrimitiveClassDescImpl, as a program's first java.lang.constant use
+MethodTypeDesc.ofDescriptor("(I)V") does (MethodTypeDesc.java:60, MethodTypeDescImpl.java:126 resolveClassDesc,
+ConstantUtils.java:381 forPrimitiveType), PrimitiveClassDescImpl's initializer (PrimitiveClassDescImpl.java:47, new
+PrimitiveClassDescImpl("I")) reaches its constructor (:87, super(ConstantDescs.BSM_PRIMITIVE_CLASS, ..., ConstantDescs.CD_Class)),
+which initializes ConstantDescs; ConstantDescs.java:250's CD_int = PrimitiveClassDescImpl.CD_int is a recursive request
+(12.4.2 step 3: returns at once), null; BSM_CLASS_DATA_AT (ConstantDescs.java:288-290, ofConstantBootstrap(CD_MethodHandles,
+"classDataAt", CD_Object, CD_int); :385 MethodTypeDescImpl.ofTrusted) fails in validateArgument's requireNonNull
+(MethodTypeDescImpl.java:87): ExceptionInInitializerError (step 11). A program with a lambda before: LambdaMetafactory.java:347
+builds an InnerClassLambdaMetafactory, which spins its class with java.lang.classfile (InnerClassLambdaMetafactory.java:310
+ClassFile.of().build) over ConstantDescs' statics (:53 import static java.lang.constant.ConstantDescs.*; :395
+invokespecial(CD_Object, INIT_NAME, MTD_void)), entering ConstantDescs from its own side, and the later call succeeds. So
+the brief's premise, "a JDK initializes ConstantDescs during boot", is not exact: jrt's ClassInit.Run already is 12.4.2's
+procedure, and that rule is what fails; a JDK program escapes it because its first invokedynamic (a lambda, a string
+concatenation) enters the cycle from ConstantDescs' side before, and the Go build has no run-time invokedynamic (j2g and the
+interpreter compile lambdas and concatenation directly). This is reasoning, not a run: the host confirms it on its JDK 26
+(the report gives the command). (A probe on the VM's apk JDK 25 was run and withdrawn: under the user's standing rule that
+JDK only bootstraps JDK 26, so it is no evidence and is not cited.)
+
+Chosen: jrt's boot initializes ConstantDescs (the brief's second option), as the JDK's first invokedynamic would: RunMain
+calls BootInit(bootClasses) before main (go/arbace/jrt/class.ae, thread.ae), bootClasses = [java.lang.constant.ConstantDescs],
+each looked up by name (ForName) and initialized through its ClassInfo.Init when the closed world has it and its
+initialization is not trivial; an exception is not thrown (the class stays failed, a first use throws NoClassDefFoundError
+with it as the cause), so a program that never uses the class is not affected. Of the executables only javac's tool has
+ConstantDescs in its world (its Go name ConstantDescs_clinit in .tmp/shared/javac-arm64/arbace-javac, none in stage 0's
+arbace), so Arbace's own start is unchanged. Alternatives: (b) JLS 12.4.2 alone, no change: exact for a program with no
+invokedynamic before its first java.lang.constant use, wrong for the common program with one (CreateSymbols), and every such
+program would need ctsym-run.ae's workaround; (c) initialize ConstantDescs at the point the JDK would, the program's first
+lambda or concatenation: the most exact, but it needs a hook in every translated lambda and concatenation (j2g), for one
+class. The difference (a) leaves: a program whose first java.lang.constant use precedes any invokedynamic succeeds where the
+JDK throws (a JDK bug's symptom, not a behaviour a program relies on). DECISION 491-1 in the report.
+
+Tests (go/arbace/jrt/object_test.ae): the cycle as two hand-written classes (initCycle: c's initializer stores BSM, reads p's
+CD_int and requires it; p's initializer reads c's BSM); TestInitCycleFromPrimitiveClassDescImpl, the control, enters from p
+with no boot and gets ExceptionInInitializerError with c's CD_int null; TestBootInitConstantDescs requires bootClasses to name
+ConstantDescs, runs BootInit (a name the world lacks passed over) and enters from p: both complete, the same CD_int. With
+BootInit's initialization taken out, TestBootInitConstantDescs fails (.tmp/q491/test-before-fix.log); with it, both pass on
+arm64 under qemu with TestClassInit, TestClassInitConcurrent and TestRunMain (.tmp/q491/test1.log). doc/go/JRT-NOTES.md,
+"Classes initialized at boot". No Java row moves: the conformance check's tests of java.lang.constant (t04743, t04744) fail on
+the JDK and are not in the records, and no row of test/java/check-*.edn cites java.lang.constant or
+PrimitiveClassDescImpl (the class :classfile matches what does); so no --only run. Then
+ctsym-run.ae's first form, (identity java.lang.constant.ConstantDescs/CD_Object), and its comment can go (jcs50-release's
+branch, not edited here).
+
+## 2026-11-25 — the user's DECISION 491-1 (a) (queue 491, VM)
+
+491-1 (a): jrt's boot initializes java.lang.constant.ConstantDescs, as a JDK program's first lambda or concatenation
+would; built on this branch. Not taken: (b) JLS 12.4.2 alone (CreateSymbols keeps needing a workaround) and (c) initializing it at
+the program's first lambda or concatenation (a j2g and interpreter hook in each, for one class). ctsym-run.ae's
+(identity java.lang.constant.ConstantDescs/CD_Object) and its comment can go on jcs50-release's branch.
+
+## 2026-11-25 — next: the Mac's night branches merged (Rust, C++, OCaml, jrt)
+
+Merged into next (from cad9434f5), each with doc/JOURNAL.md's two sides kept by a union of the three stages, test/reap/matrix.edn
+and test/crops/scores.edn taken from next and recorded again (`bin/reap --record`, `bin/crops-score --record`), and `bin/crops-score
+--judge --strict`, `bin/records-check`, `bin/markers-check` at 0 problems before each commit; no gate run (the coordinator's):
+- mac/565-rust-c3-finish 1119a459a (C3's last record facts), mac/566-rust-c6-l1 6ffc51528 (C6 L1's rest, the lib-unit key lists),
+  mac/561-rust-backtrace-crates 43f3cb337 (C6 L3: adler2, rustc_demangle), in that order. Rust's paths are out of every key and no
+  amd64 record moved. 561's conflicts with 566 (which had cherry-picked 561's first two typeck commits): typeck.ae's inherent
+  candidates took 561's later form over `inh-tys`; core_check.ae's caller-location `src` kept 561's vendored-crate paths and 566's
+  `RF_CALLLOC_TRACE`; export-consts kept 566's traced build with its inline consts, each build at `(crate-edition)` as 561 made it
+  (std's edition, 2024, unchanged). Checked by loading typeck, core_check and mono on stage 0; nothing rerun.
+- mac/570-cpp-vla-types af1703774, with 569-cpp-constexpr-vla and 567-cpp-read-tail (and cpp-read-1124): C++ read
+  6,063/0/221 -> 6,090/0/194 (their recorded dg rows merged without conflict).
+- mac/548-ocaml-ppx-jane a6b99af2d, with 547-ocaml-ppx-expect: OCaml eval 604/2/1 -> 606/0/1 (check-ppx-oi.edn through reap's
+  `:override`; the weekly step ocaml-ppx-expect; 547 changes go/arbace/{crt,oi,oicapi}, so gate_key moves; its records were recorded).
+- mac/491-jrt-constantdescs 184234f73: ConstantDescs initialized at boot (491-1 (a)); no row moves (go/arbace/jrt: gate_key moves).
+Alternatives: merging 547 apart from 548 (548 contains it); hand-merging the score files (they are derived: recorded again instead).
