@@ -6254,7 +6254,11 @@
       ;; a call of an interpreted interface's method on an object of the world implementing it
       ;; (jrt's annotation objects of an interpreted annotation type: F14)
       (method ^:public ^:static receiverMethod ^java.lang.reflect.Method [o ^String key]
-        (let [ms (.getMethods (.getClass o))
+        (Rt/classMethod (.getClass o) key))
+
+      ;; the public method of class c with key, or nil (receiverMethod's, proxyMethod's)
+      (method ^:public ^:static classMethod ^java.lang.reflect.Method [^Class c ^String key]
+        (let [ms (.getMethods c)
               n (alength ms)]
           (loop [^int i 0]
             (when (< i n)
@@ -6272,6 +6276,15 @@
                 (if (.equals (.toString sb) key)
                   m
                   (recur (unchecked-inc-int i))))))))
+
+      ;; the method with key of an interface of proxy o's class, or nil: a call of an interpreted interface's method on
+      ;; a proxy (javac's AnnotationProxyMaker over an annotation type defined from bytes, JCS51), for its handler
+      (method ^:public ^:static proxyMethod ^java.lang.reflect.Method [o ^String key]
+        (let [is (.getInterfaces (.getClass o))]
+          (loop [^int i 0]
+            (when (< i (alength is))
+              (let [m (Rt/classMethod (aget is i) key)]
+                (if (some? m) m (recur (unchecked-inc-int i))))))))
 
       ;; Object.clone of o when it is an object of an interpreted class whose superclasses are
       ;; interpreted up to Object: a new object of its class, its fields o's (a shallow copy,
@@ -7211,6 +7224,18 @@
         (Rt/isInstance c k (.eval e f)))
       (method ^:public evalJ ^long [this ^Frame f] (if (.test this f) 1 0)))
 
+    ;; an assert's enabling (JLS 14.10 with javac's $assertionsDisabled; t06029, the user's decision of 2026-11-23):
+    ;; on while k's initialization has not completed (the flag still its default false before <clinit> sets it), off
+    ;; once it has (no class runs with assertions enabled: Class.desiredAssertionStatus is false)
+    (defclass ^:public ^:static AssertOn
+      :extends Node
+      (field ^:public ^:final ^Klass k)
+      (constructor ^:public [this ^Klass k]
+        (set! (.-t this) \Z)
+        (set! (.-k this) k))
+      (method ^:public test ^boolean [this ^Frame f] (not (.initDone k)))
+      (method ^:public evalJ ^long [this ^Frame f] (if (.test this f) 1 0)))
+
 
 
     ;; checkcast
@@ -7717,6 +7742,8 @@
       (method ^:public declared ^Meth [this ^String key]
         (cast Meth (.get methods key)))
 
+      ;; whether the class's initialization completed (an assert's enabling: AssertOn)
+      (method ^:public initDone ^boolean [this] (== state 2))
       ;; class initialization (JLS 12.4.2, simplified): the superclass first, then the static
       ;; initializer, once; a failed one fails every later use
       (method ^:public init ^void [this]
@@ -8094,6 +8121,14 @@
                 (try
                   (return (.invoke m o vs))
                   (catch Throwable e (throw (Rt/unwrap e))))))
+            ;; a proxy of an interpreted interface (JCS51: an annotation of a type defined from bytes, which javac's
+            ;; AnnotationProxyMaker makes): its invocation handler, with the interface's method
+            (when (java.lang.reflect.Proxy/isProxyClass (.getClass o))
+              (let [m (Rt/proxyMethod o key)]
+                (when (some? m)
+                  (try
+                    (return (.invoke (java.lang.reflect.Proxy/getInvocationHandler o) o m vs))
+                    (catch Throwable e (throw (Rt/unwrap e)))))))
             (throw (AbstractMethodError. (java-str (.getName (.getClass o)) "." key))))
           ;; Object.clone of an interpreted object (this.clone() without an override)
           (when (and (identical? (.getDeclaringClass rm) Object) (.equals (.getName rm) "clone"))
