@@ -2541,7 +2541,16 @@
                    (adv! p) (recur (conj qs q)))
                  qs)))
         _ (expect! p "(")
-        lit (fn [] (if (identical? :str (tk (cur p))) (:value (parse-string-literal p)) (perr p "an asm string")))
+        ;; (cpp-vec, 2026-11-25: GCC 15's constexpr asm strings, the template, a constraint or a clobber written as a parenthesized
+        ;; constant expression, `asm ((S {}) :: (T {}) (x))`: parsed, its node kept among :cxstrs for the checker's rule)
+        cxs (atom [])
+        lit (fn [] (cond (identical? :str (tk (cur p))) (:value (parse-string-literal p))
+                         (is? p "(") (do (adv! p)
+                                         (let [x (with-gt p true (parse-expr p))]
+                                           (expect! p ")")
+                                           (swap! cxs conj x)
+                                           {:cx (dec (count @cxs))}))
+                         :else (perr p "an asm string")))
         ;; (h-cpp-read: the template is a string-literal, or C++26's parenthesized constant expression (GCC's constexpr asm):
         ;; GCC's "expected string-literal" else, before the statement is skipped)
         _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) "expected string-literal"))
@@ -2559,7 +2568,7 @@
                                   ;; string-literal: GCC's "expected identifier before numeric constant", "expected string-literal")
                                   (when-not (identical? :id (tk (cur p))) (soft-diag! p (ix p) (str "expected identifier before '" (ts (cur p)) "'")))
                                   (let [s (ts (cur p))] (adv! p) (expect! p "]") s))
-                             _ (when-not (identical? :str (tk (cur p))) (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'")))
+                             _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'")))
                              c (lit)
                              _ (expect! p "(")
                              x (parse-expr p)]
@@ -2573,7 +2582,7 @@
     (expect! p ")")
     {:volatile (boolean (:volatile qs)) :inline (boolean (:inline qs)) :goto (boolean (:goto qs)) :template tmpl
      :outputs (mapv (fn [[n c _]] [n c]) outs) :inputs (mapv (fn [[n c _]] [n c]) ins) :clobbers clob :labels labels
-     :inner (vec (concat (map #(nth % 2) outs) (map #(nth % 2) ins)))}))
+     :inner (vec (concat (map #(nth % 2) outs) (map #(nth % 2) ins))) :cxstrs @cxs}))
 
 (defn- skip-rec!
   "Recovery (cpp-read, 2026-11-22): the cursor on an opener ( [ { after its closer, as GCC's recovery skips (the braces nest,
@@ -2863,7 +2872,9 @@
       ;; what is parsed here, the statement's tokens skipped as before)
       (let [a (when-not (skim? p) (try (parse-asm-parts p) (catch arbace.lang.ExceptionInfo _ (seek! p b) nil)))]
         (when-not a (skip-until! p #{";"}))
-        (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e (if a {:_asm (dissoc a :inner) :inner (:inner a)} {}))))
+        (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e (if a (cond-> {:_asm (dissoc a :inner :cxstrs) :inner (:inner a)}
+                                                                              (seq (:cxstrs a)) (assoc :_cxstrs (:cxstrs a)))
+                                                                      {}))))
       (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__") (and (t= t "__attribute") (is-at? p 1 "(")))
       (let [as (attr-nodes p)
             ;; (cpp-read, 2026-11-22: a label's attributes, [stmt.label]/1: deprecated appertains to no label

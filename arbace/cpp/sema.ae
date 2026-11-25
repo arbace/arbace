@@ -174,6 +174,7 @@
 (def ^:dynamic *last-anon* nil) ; atom: the type of the last unnamed class declared (its member's or variable's type) ; a namespace-scope name declared at or after this token is not visible yet
 
 (declare class-lookup)
+(declare cx-constexpr-string!)
 
 (defn- own-names
   "The entities `nm` names in `scope` and, transitively, in the namespaces its using-directives nominate, each namespace
@@ -13363,7 +13364,13 @@
     ;; (CP338 (a): GNU's asm statement as clang's CodeGenFunction::EmitAsmStmt takes the one at -O0 that the lowering keeps,
     ;; a compiler barrier: an empty template, no outputs, no goto labels, its inputs scalar values in registers (`r`); any
     ;; other a refusal)
-    "GCCAsmStmt" (let [a (or (:_asm n) (fail :stmt "statement GCCAsmStmt"))
+    ;; (cpp-vec: GCC 15's constexpr asm strings, each checked by cx-constexpr-string!; the statement no code in the checker, a
+    ;; refusal in the code generator)
+    "GCCAsmStmt" (if (seq (:_cxstrs n))
+                   (if (checking?)
+                     (do (doseq [x (:_cxstrs n)] (cx-constexpr-string! ctx x n true)) {:s :null})
+                     (fail :stmt "an asm statement with a constexpr string"))
+                 (let [a (or (:_asm n) (fail :stmt "statement GCCAsmStmt"))
                        _ (when (or (seq (:outputs a)) (seq (:labels a)) (:goto a)) (fail :stmt "an asm statement with outputs or labels"))
                        _ (when-not (= "\"\"" (:template a)) (fail :stmt "an asm statement's template " (:template a)))
                        ins (mapv (fn [[nm c] x]
@@ -13381,7 +13388,7 @@
                                           (when-not (#{"memory" "cc"} c) (fail :stmt "an asm clobber " c))
                                           c))
                                 (:clobbers a))]
-                   {:s :asm :ins ins :clobbers cl})
+                   {:s :asm :ins ins :clobbers cl}))
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                        [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
                        _ (when (:hasVar n) (fail :stmt "a switch condition's declaration"))
@@ -14547,6 +14554,73 @@
                     (when (and (number? v) (zero? (long v))) k))))
               ks)))))
 
+;; cpp-vec (2026-11-25, the checker; 577-1 (a)): a constexpr string, C++26's [dcl.pre]/11-12 (P2741R3, a static_assert-declaration's
+;; message) and GCC 15's constexpr asm strings (the GCC manual's "Extended Asm": a template, constraint or clobber written as a
+;; parenthesized constant expression): an object M such that M.size() is implicitly convertible to std::size_t and M.data() to
+;; const char*, each a constant expression, and every M.data()[i] below the size one too. GCC's errors, at the declaration or
+;; statement `at`: "constexpr string must be a string literal or object with 'size' and 'data' members", "constexpr string
+;; 'size()' must be implicitly convertible to 'std::size_t'", "... 'data()' ... to 'const char*'", "constexpr string 'size()' must
+;; be a constant expression", "constexpr string 'data()' must be a core constant expression", "constexpr string 'data()[I]' must
+;; be a constant expression"; the evaluation's own error beside, where it is; a call's own error (a deleted, inaccessible or
+;; unviable size or data) as the call reports it.
+(def ^:private cx-cstr-ptr {:k :ptr :to (assoc abi/char* :c true)})
+
+(defn- cx-constexpr-string!
+  "`eval?`: the size, data and elements evaluated too (a static_assert's message only when its condition is false, [dcl.pre]/12)."
+  [ctx x at eval?]
+  (when-let [h (when (checking?) *on-refusal*)]
+    (let [report! (fn [msg] (h (ex-info (str "codegen: " msg) {:codegen/refused :cxstr :cx/node at}) nil))
+          primary "constexpr string must be a string literal or object with 'size' and 'data' members"
+          member? (fn [^Throwable ex] (re-find #"no member|unknown name|not a member|member of a non-class|request for member" (str (.getMessage ex))))
+          eval! (fn [t i]
+                  (binding [*ce-manifest* true *ce-point* (:range at) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{})
+                            *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
+                    (ce-init t i {})))
+          sure! (fn [^Throwable ex msg]
+                  (let [d (ex-data ex)]
+                    (when (:cx/sure d)
+                      (let [m (subs (str (.getMessage ex)) (min (count "not a constant: ") (count (str (.getMessage ex)))))]
+                        (when-let [p (:cx/at d)]
+                          (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range p}}) nil)))
+                      (report! msg))
+                    (boolean (:cx/sure d))))
+          e (try (rv (analyze ctx x)) (catch arbace.lang.ExceptionInfo ex (h ex at) nil))
+          t (some-> e :ty abi/non-ref abi/unq)]
+      (cond
+        (nil? t) nil
+        (#{:dep :tparam :auto} (:k t)) nil
+        (not (abi/class? t)) (report! primary)
+        :else
+        (let [call (fn [nm] {:kind "CallExpr" :range (:range x)
+                             :inner [{:kind "MemberExpr" :name nm :isArrow false :range (:range x) :inner [x]}]})
+              an (fn [nm] (try (rv (analyze ctx (call nm)))
+                               (catch arbace.lang.ExceptionInfo ex
+                                 (if (member? ex) (report! primary) (h ex at))
+                                 ::bad)))
+              sz (an "size")
+              da (when-not (= ::bad sz) (an "data"))]
+          (when (and (map? sz) (map? da))
+            (let [si (try (init-for abi/ulong* sz ctx :copy)
+                          (catch arbace.lang.ExceptionInfo _ (report! "constexpr string 'size()' must be implicitly convertible to 'std::size_t'") nil))
+                  di (try (init-for cx-cstr-ptr da ctx :copy)
+                          (catch arbace.lang.ExceptionInfo _ (report! "constexpr string 'data()' must be implicitly convertible to 'const char*'") nil))]
+              (when (and si di eval?)
+                (let [n (try (eval! abi/ulong* si)
+                             (catch arbace.lang.ExceptionInfo ex (sure! ex "constexpr string 'size()' must be a constant expression") nil))
+                      pv (when (number? n)
+                           (try (eval! cx-cstr-ptr di)
+                                (catch arbace.lang.ExceptionInfo ex (sure! ex "constexpr string 'data()' must be a core constant expression") nil)))]
+                  (when (and (number? n) (some? pv) (= :expr (:i di)))
+                    (let [n (long n)
+                          elem (fn [k] {:op :load :ty abi/char* :cat :pr
+                                        :e {:op :deref :ty (assoc abi/char* :c true) :cat :lv
+                                            :e {:op :ptradd :o "+" :p (:e di) :n {:op :int :v k :ty abi/long* :cat :pr} :ty cx-cstr-ptr :cat :pr}}})]
+                      ;; (the last first, as GCC reports a string past its object at its last index; then the others, at most 4096)
+                      (some (fn [k] (try (eval! abi/char* {:i :expr :e (elem k)}) false
+                                         (catch arbace.lang.ExceptionInfo ex
+                                           (sure! ex (str "constexpr string 'data()[" k "]' must be a constant expression")))))
+                            (distinct (concat (when (pos? n) [(dec n)]) (range (min n 4096))))))))))))))))
+
 (defn check-static-assert!
   "CX12 (the checker): a static_assert-declaration ([dcl.pre]/10): its condition analyzed (a refusal of the analysis
   is reported as its own error) and, when it evaluates with no doubt to false, \"static assertion failed\" at the
@@ -14573,6 +14647,11 @@
                 (when-let [h *on-refusal*]
                   (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil)))
               (throw (ex-info (str "codegen: non-constant condition for static assertion (" m ")") {:codegen/refused :sassert :cx/node n}))))
+          ;; (cpp-vec: C++26's message that is no string-literal, a constexpr string, [dcl.pre]/11-12: its size and data always
+          ;; checked, evaluated when the condition is false; GCC takes one in every standard, a pedwarn before C++26)
+          (when-let [m (second (kids n))]
+            (when (and (map? m) (:kind m) (not= "StringLiteral" (:kind m)))
+              (cx-constexpr-string! ctx m n (and (number? v) (zero? (long v)) (not @d)))))
           (when (and (number? v) (zero? (long v)) (not @d))
             (throw (ex-info "codegen: static assertion failed" (cond-> {:codegen/refused :sassert :cx/node (or (sassert-false-conjunct ctx c) n)} (and (seq @ex) (>= (long *concepts-diag-depth*) 2)) (assoc :cx/explain (vec (distinct @ex))))))))))))
 
