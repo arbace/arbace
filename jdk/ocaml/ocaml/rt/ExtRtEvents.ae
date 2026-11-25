@@ -139,6 +139,48 @@
         :else (do (ExtRtEvents/phase true 5) (ExtRtEvents/cycle false) (ExtRtEvents/cycle false) (ExtRtEvents/cycle true)
                   (ExtRtEvents/phase false 5)))))
 
+  ;; (queue 583) the C consumer's requests (test/ocaml/capi/runtime.c's __oi_re_control, __oi_re_cursor, __oi_re_next) at the AOT
+  ;; levels, through CApi's 'V': the stubs run beside oi in the C API's server, and the program's ring is this runtime's, as oi's
+  ;; RuntimeEventsControl, RuntimeEventsCursor and RuntimeEventsNext answer them on oi's
+  (method ^:public ^:static consumer ^long/1 [^int op ^String s ^long/1 a]
+    (cond
+      ;; control: 0 start, 1 pause, 2 resume, 3 are_active (1 or 0)
+      (== op 0)
+      (let [c (aget a 0)]
+        (cond (== c 0) (ExtRtEvents/caml_ml_runtime_events_start Rt/UNIT)
+              (== c 1) (ExtRtEvents/caml_ml_runtime_events_pause Rt/UNIT)
+              (== c 2) (ExtRtEvents/caml_ml_runtime_events_resume Rt/UNIT)
+              :else nil)
+        (new long/1 [(if (and (== c 3) (ExtRtEvents/active)) 1 0)]))
+      ;; cursor: [own pid], s the directory: 0 E_SUCCESS, -6 E_NO_CURRENT_RING, -5 E_OPEN_FAILURE, -7 E_MAP_FAILURE (another
+      ;; process's ring is not mapped)
+      (== op 1)
+      (new long/1
+           [(if (== (aget a 0) 1)
+              (if enabled 0 -6)
+              (let [f (File. (java-str s "/" (aget a 1) ".events"))]
+                (cond (not (and (.isFile f) (.canRead f))) -5
+                      (not enabled) -7
+                      (not (.equals (.getCanonicalPath f) (.getCanonicalPath (File. loc)))) -7
+                      :else 0)))])
+      ;; next at the position a[0]: [status next kind dom ts id data], status 0 nothing left, 1 an event, 2 lost events (next
+      ;; the head, data the words lost), -1 no message starts there; padding skipped
+      :else
+      (loop [^long pos (aget a 0)]
+        (cond
+          (> head pos) (new long/1 [2 head 0 0 0 0 (unchecked-subtract head pos)])
+          (>= pos tail) (new long/1 [0 pos 0 0 0 0 0])
+          :else
+          (let [i (ExtRtEvents/find pos)]
+            (if (or (>= i (.size ring)) (not (== (ExtRtEvents/ev (.get ring i) 0) pos)))
+              (new long/1 [-1 pos 0 0 0 0 0])
+              (let [e (.get ring i)
+                    nx (unchecked-add pos (ExtRtEvents/ev e 1))]
+                (if (== (ExtRtEvents/ev e 4) -1)
+                  (recur nx)
+                  (new long/1 [1 nx (ExtRtEvents/ev e 4) (ExtRtEvents/ev e 2) (ExtRtEvents/ev e 3) (ExtRtEvents/ev e 5)
+                               (ExtRtEvents/ev e 6)])))))))))
+
   (method ^:public ^:static caml_ml_runtime_events_start [u] (ExtRtEvents/start) Rt/UNIT)
   (method ^:public ^:static caml_ml_runtime_events_pause [u]
     (when (and enabled (not paused))
