@@ -1183,8 +1183,11 @@
   ;; ext/is_aggregate.C's `vector_size (4 * sizeof (int))`, evaluated by vector-bytes)
   (when (re-find #"vector_size__\s*\(" s0)
     (let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0)]
-      (when (or (checking?) (nil? b) (nil? (vector-bytes scope b))) (fail :type "a GNU vector type (" s0 ")"))))
-  (if-let [[_ b et] (when-not (checking?) (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0))]
+      (when (or (nil? b) (nil? (vector-bytes scope b))) (fail :type "a GNU vector type (" s0 ")"))))
+  ;; (cpp-vec, 2026-11-25: the checker's too, 577-1 (a): the GCC manual's "Using Vector Instructions through Built-in Functions"
+  ;; -- a vector is declared, initialized from a braced list, given its size, its elements read by subscript; what the checker
+  ;; does not model of it, its operators and conversions, it refuses where it meets them, as the code generator does)
+  (if-let [[_ b et] (re-find #"^\s*__attribute__\(\(__vector_size__\((.+)\)\)\)\s+(.*)$" s0)]
     (let [n (long (vector-bytes scope b))
           vec-of (fn [t]
                    (let [e (abi/unq t)
@@ -4947,6 +4950,8 @@
                                  (= :var (:op (:e (:p (:e x))))) (contains? env (:id (:e (:p (:e x))))))
                         @(get env (:id (:e (:p (:e x))))))]
                (cond
+                 ;; (cpp-vec: a vector's element read, its lane's value)
+                 (= :vec-elem (:op x)) (let [v (ce-get (ce-lv x env))] (if (nil? v) (not-constant "a vector's indeterminate element") v))
                  (vector? ax) (let [i (long (ev (:n (:e x))))]
                                 (if (< -1 i (count ax)) (nth ax i) (ce-sure! "array subscript value '" i "' is outside the bounds of array")))
                  ;; (CP374 (a): an element read through a pointer, `__s[0]`, `*__p`)
@@ -5023,13 +5028,19 @@
        ;; expression -- C++14's N3652 allows one to an object whose lifetime began within the evaluation: GCC's "... is not a
        ;; constant expression" at it, cpp0x/constexpr-50060.C's mem-initializer `x ((y = 1, 0.8125))`)
        :assign (let [_ (when (and (checking?) (= 11 (long *cxx-year*))) (ub! e "an assignment is not a constant expression in C++11"))
-                     x (:l e) l (ce-lv x env)
+                     x (:l e)
+                     ;; (cpp-vec, 2026-11-25, the checker: a store into a GNU vector's element is no constant expression in GCC, its
+                     ;; error "... is not a constant expression" at the store, cpp1y/pr68180.C's `v[i]=i`)
+                     _ (when (and (checking?) (= :vec-elem (:op x))) (ub! e "a store into a vector's element is not a constant expression"))
+                     l (ce-lv x env)
                      v (if (abi/class? (abi/unq (:ty x))) (ce-glvalue (:r e) env) (ce-wrap (:ty x) (ev (:r e))))]
                  (ce-check-const! e l)
                  (ce-union-write! e x l)
                  (ce-put! l v))
        :cassign (let [_ (when (and (checking?) (= 11 (long *cxx-year*))) (ub! e "a compound assignment is not a constant expression in C++11"))
-                      x (:l e) l (ce-lv x env)
+                      x (:l e)
+                      _ (when (and (checking?) (= :vec-elem (:op x))) (ub! e "a store into a vector's element is not a constant expression"))
+                      l (ce-lv x env)
                       _ (ce-check-const! e l)
                       old (ce-get l)
                       r (ev (:r e))]
@@ -5040,7 +5051,9 @@
                     (let [ct (:ct e)
                           v (ce-eval {:op :binop :o (:o e) :ty ct :l {:op (if (float? old) :float :int) :v old} :r {:op (if (float? r) :float :int) :v r}} env)]
                       (ce-put! l (ce-wrap (:ty x) v)))))
-       :incdec (let [x (:e e) l (ce-lv x env)
+       :incdec (let [x (:e e)
+                     _ (when (and (checking?) (= :vec-elem (:op x))) (ub! e "a store into a vector's element is not a constant expression"))
+                     l (ce-lv x env)
                      _ (ce-check-const! e l)
                      old (ce-get l)
                      ;; (cpp-ce3: exact, an unsigned 64-bit one modulo 2^64; a signed one's past its range, [expr.pre]/4, the
@@ -5316,6 +5329,8 @@
                                  ;; reads no array element as indeterminate)
                                  (and (:vla at) (:n at) (#{:none :zero} (:i init))) (ce-zero-of at)
                                  (and (abi/arr? at) (= :string (:i init))) (ce-init (:ty v) init @env)
+                                 ;; (cpp-vec, the checker: a local vector from a braced list, ce-init's :vec)
+                                 (and (checking?) (= :vec (:k at)) (= :vec (:i init))) (ce-init (:ty v) init @env)
                                  ;; (cpp-sweep, the checker: a local array of class objects from a list, ce-init's, destroyed at
                                  ;; the block's end below: cpp2a/constexpr-dtor3.C's f5)
                                  (and (checking?) (abi/arr? at) (= :list (:i init)) (:n at) (abi/class? (abi/unq (:of at))))
@@ -5721,6 +5736,10 @@
                                  (if (ce-loc? b) (update b ::path conj (::i p)) {::cell (if (vector? b) (atom b) b) ::path [(::i p)]}))
                    :else (not-constant "an object through a pointer")))
     :field (update (ce-lv (:obj e) env) ::path conj (:i e))
+    ;; (cpp-vec: a vector's element, its lanes a vector as an array's elements)
+    :vec-elem (let [n (long (ce-num (ce-eval (:n e) env))) vt (abi/unq (:ty (:e e)))]
+                (when-not (< -1 n (long (:n vt))) (not-constant "a vector's element outside it"))
+                (update (ce-lv (:e e) env) ::path conj n))
     ;; (cpp-ce2: o.*m of a pointer to data member, ::mdata's path from the object; a null one, [expr.mptr.oper]/6, no constant)
     :mfield (let [l (ce-lv (:obj e) env) m (ce-eval (:m e) env)]
               (if (and (map? m) (::mdata m))
@@ -5755,6 +5774,8 @@
     (cond (= ::empty v) v
           (abi/ref? t) (if (ce-loc? v) v (not-constant "a reference to a value"))
           (or (abi/class? u) (abi/arr? u)) v
+          ;; (cpp-vec: a vector's lanes, as an array's elements)
+          (and (= :vec (:k u)) (vector? v)) v
           (abi/void? u) 0
           ;; (cpp-ce2: an indeterminate scalar, a bit_cast's unsigned char of indeterminate bits, [bit.cast]/2: nil, its read the error)
           (nil? v) nil
@@ -6064,6 +6085,11 @@
                   (ub! (:e i) "mutable '" c "::" f "' is not usable in a constant expression")))
               (ce-glvalue (:e i) env))
       :zero (if u (ce-zero-of u) 0)
+      ;; (cpp-vec: a vector from a braced list, its lanes' values and zeros to its length, as an array's)
+      :vec (if (and u (= :vec (:k u)))
+             (let [xs (mapv #(ce-store (:of u) (ce-eval % env)) (:items i))]
+               (into xs (repeat (- (long (:n u)) (count xs)) (ce-zero-of (:of u)))))
+             (not-constant "a vector's initializer"))
       :none (if cls? {::cls (:id u)} 0)
       ;; (cpp-rt-own2: an array of characters from a string literal, its code units and zeros to its bound, [dcl.init.string]:
       ;; <charconv>'s `constexpr unsigned char __lower_letters[27] = "abcdefghijklmnopqrstuvwxyz";` in _S_make_table())
@@ -9161,8 +9187,18 @@
         e))))
 
 (defn- arith-binop [o l r]
-  (let [l (rv l) r (rv r) ct (arith-common (:ty l) (:ty r))]
-    {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))
+  (let [l (rv l) r (rv r)
+        lv (abi/unq (:ty l)) rv' (abi/unq (:ty r))]
+    (if (and (checking?) (or (= :vec (:k lv)) (= :vec (:k rv'))))
+      ;; (cpp-vec, 2026-11-25, the checker: the GCC manual's "Using Vector Instructions": an operator of two vectors of the same
+      ;; type, or of a vector and a scalar converted to its element type, applies lane by lane, its type the vector's; the
+      ;; checker types it, the constant evaluator does not evaluate it)
+      (let [vt (if (= :vec (:k lv)) lv rv')]
+        (when (and (= :vec (:k lv)) (= :vec (:k rv')) (not= (dissoc lv :c :v) (dissoc rv' :c :v)))
+          (fail :type "arithmetic on two vectors of different types"))
+        {:op :vec-binop :o o :l l :r r :ty (dissoc vt :c :v) :cat :pr})
+      (let [ct (arith-common (:ty l) (:ty r))]
+        {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))))
 
 (defn- to-bool [e]
   ;; (cpp-1123, the checker: a scoped enumeration has no implicit conversion to bool, so no contextual one, [conv.bool],
@@ -12093,6 +12129,11 @@
             (fail :expr "a subscript of " (count is) " expressions")))
     (let [[an in] (kids n) a (analyze ctx an) i (analyze ctx in)]
       (or (when (class-operand? a) (operator-call ctx "[]" [a i]))
+          ;; (cpp-vec, 2026-11-25, the checker: a vector's element by subscript, the GCC manual's "vectors can be subscripted as if
+          ;; the vector were an array with the same number of elements and base type": an lvalue of its element type)
+          (when (and (checking?) (= :vec (:k (abi/unq (:ty a)))))
+            {:op :vec-elem :e a :n (convert-scalar (rv (class->scalar ctx i)) abi/long* false) :ty (:of (abi/unq (:ty a)))
+             :cat (if (= :pr (:cat a)) :xv :lv)})
           (let [i (class->scalar ctx i)]
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
             (cx-subscript-incomplete! p)
@@ -14217,7 +14258,8 @@
     (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
            (ce-init (:ty v) i {}))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
-  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :expr (:i i)) (abi/scalar? (abi/unq (:ty v))))
+  ;; (cpp-vec: and a GNU vector's, cpp1y/pr68180.C's `constexpr float32x4_t v = fill(1.f);`)
+  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :expr (:i i)) (or (abi/scalar? (abi/unq (:ty v))) (= :vec (:k (abi/unq (:ty v))))))
     (try (binding [*ce-manifest* true *ce-point* (:cx-range v)] (ce-eval (:e i)))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
   ;; (h-cpp-consteval: a class object's initializer too, its constructor's evaluation: [dcl.constexpr]/10's full-expression)
