@@ -19409,3 +19409,47 @@ From the host's `rust-l1-1124` (f78094c18, its round 11 WIP), branch `566-rust-c
   backed up a subset over the full list; it was rebuilt from std-export-keys.txt less the inline keys, 325 keys, as the compare
   counts them). Rust's crop paths are in no gate key. No record was written: the VM writes only -linux-arm64 Rust records, and the
   lib-unit numbers are not records.
+
+## 2026-11-25 — Rust C6 L1 continued, L2's first slice: std 211 / 44 / 70 (queue 566, VM)
+
+The coordinator's second message for 566 (items 1-5), on the same branch, one commit per change.
+
+- Item 1 (the first alloca, rustc 16 bytes, ours 1): it was the personality slot of a landing pad we did not have. A drop of a
+  field's place in an unwind path (`drop((_8 as Some).0)`) had no glue (lib-unit took glue for plain locals only), so the
+  cleanup was a no-op and the call stayed a call. The field projection's type gives the glue: get_backtrace_style equal. set_hook's
+  glue was refused by v0: a trait object with bound regions (`Box<dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Sync + Send>`).
+  mono now prints v0's binder (in_binder's `G` with the count less one, each bound region `L` by its depth, a generic argument
+  list printing its regions once a binder's region is among them): `DG0_..RL1_..L0_` as std's IR; set_hook equal.
+  `LIB_UNIT_DUMP=REGEX` writes an item's two sides as the judge normalizes them, for differences past the first line.
+- Item 2: READ_LIMIT's `libc::c_int::MAX` (the resolver had it right, `core::ffi::primitives::c_int`): typeck's
+  type-relative-value took a prefix of more than one segment only when it was an ADT; now any prefix, at its partial
+  resolution's span. FileDesc's read, read_buf and write equal. MAIN_SEPARATOR_STR: two CTFE steps done (a constant's entry by its
+  instance with its promoteds; an array pointer unsized to a slice's in eval-promoted), then it stops in `str::from_utf8`'s
+  run_utf8_validation (const_eval_select's const arm, slice indexing in CTFE): not done.
+- Item 3, statics: COUNTER (a static nested in an impl's function: the export filed it under its def path with `{impl#0}`, the
+  run asked by the printed path; export-consts files a static under both) and ON_BROKEN_PIPE_USED (another module's static, its
+  own key; const-bodies takes the export's static entries): ThreadId::new and reset_sigpipe equal. Thread-local statics
+  (`tlsref`): lib-unit gives them their v0 symbol and their initializer's CTFE value, the export their bodies (deferred-static-ids
+  takes tlsref's paths): thread::current's drop_current, id::get, id::set equal. DTORS (list::register, run) now differ: its
+  initializer's CTFE needs alloc's Vec::new_in and RawVec::new_in (exported) and core's Alignment::of, which core's export
+  refuses. The extern-weak statics (weak!): the export marks a foreign static with `#[linkage]` (`{:foreign-static {:name
+  :linkage}}`); lib-unit reads it through `_rust_extern_with_linkage_HASH_NAME`, an internal global holding the symbol's address,
+  as rustc_codegen_llvm's check_and_apply_linkage does; codegen writes a one-pointer static as that pointer and declares the symbol
+  `extern_weak global i8`; check's global-map leaves an extern_weak declaration its name (it has no content). getrandom, gettid,
+  linux_like::register equal.
+- Item 4, note 6 (rust_eh_personality_impl): the `ret` is i32 now on both sides; what is left is sign_lpad's
+  `#[rustc_force_inline]`, which rustc's MIR inliner (rustc_mir_transform's ForceInline, at every opt level) inlines. Arbace has
+  no MIR inliner; the LLVM-level always-inliner would leave a branch that MIR inlining does not. Not done (a port of the inliner).
+- Item 5, L2's first slice: `LIB_UNIT_L2=1` builds the callees the unit's items call (mono/unit-callees: instances std's units
+  define, a generic instance, a cross-crate-inlinable definition, or std's own; not foreign items), each its export's body
+  instantiated by core-instance, their own `#[inline(always)]` callees inlined as the items' are, judged apart against std's IR
+  (`lib-unit l2` rows, `lib-unit l2 compare:`); the callees with no export are logged `lib-unit l2 wanted` (the next export's keys,
+  the night run). The default measure is unchanged by it.
+- Measure (round d: std's export, build and compare): **211 / 44 / 70**, from 197 / 48 / 80; no item went back.
+- The keys added stay cache state (DECISION 566-1 open): std's inline keys READ_LIMIT and ON_BROKEN_PIPE_USED; alloc's
+  `vec-{impl#1}-new_in`, `raw_vec-{impl#2}-new_in` (their bodies appended to native-alloc-items.edn by `lib-export --keys`); core's
+  `mem-alignment-{impl#0}-of` (refused by core's export).
+- L2's first measure (round e, `LIB_UNIT_L2=1`, the same export): the items' numbers unchanged (211 / 44 / 70), **486 callees: 18
+  equal, 3 differ, 459 refused (452 not exported), 6 no symbol**; the not-exported ones are 286 definitions (core 141, alloc 34,
+  std 111 keys), the night export's input (lists in the VM's scratch, the report's). Checks at the head: pack-compare-test,
+  inline-test 15 of 15, rust-front essential and core-essential (their known summaries), reap 56 of 56, crops-score, records-check.
