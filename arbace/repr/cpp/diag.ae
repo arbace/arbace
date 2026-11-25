@@ -757,6 +757,7 @@
    [:assign #"^codegen: (assignment|increment|decrement) of read-only (variable|location)" "cannot assign to variable with const-qualified type"]
    ;; (queue 412, round 7: [expr.assign]/1, an array as the left operand)
    [:assign #"^codegen: (invalid array assignment|assigning to an array from an initializer list)" "array type is not assignable"]
+   [:member #"^codegen: '.*' is not a base of '" "is not a base of"]
    [:member #"^codegen: no member " "no member named in the class"]
    [:member #"^codegen: member of a non-class" "member reference base type is not a structure or union"]
    [:call #"^codegen: missing argument" "too few arguments to function call"]
@@ -865,8 +866,10 @@
                   ;; (a refusal that names its own node: the constant evaluation's operation)
                   n (or (:cx/node (ex-data e)) n)
                   ;; (cpp-def: a node a macro of the main file expands, GCC's error at the expansion: cpp0x/constexpr-arith-overflow2.C's
-                  ;; `Assert (...)`, a static_assert by a macro)
+                  ;; `Assert (...)`, a static_assert by a macro; for the constant evaluation's errors alone, the evaluator's sure
+                  ;; judgments, the checker's other rules over macro-made code left as they were: cpp0x/decltype3.C)
                   n (if (and (nil? (get-in n [:range :begin :offset])) (get-in n [:range :begin :expansionLoc :offset])
+                             (or (= :constexpr cls) (and (= :sassert cls) (str/starts-with? m "codegen: non-constant condition")))
                              (= main (get-in n [:range :begin :expansionLoc :file])))
                       (assoc-in n [:range :begin] (get-in n [:range :begin :expansionLoc]))
                       n)
@@ -8731,8 +8734,20 @@
                   (w b)
                   (doseq [g gotos :when (not (.contains seen (:label g)))]
                     (when-let [o (mine-at g main)]
-                      (let [[l c] (line-col starts o)]
-                        (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")}))))))))
+                      ;; (cpp-def: a label the tree does not keep, in a GNU statement expression of the same body -- an
+                      ;; assumption's, whose expression the native parser drops -- is the goto's jump into the statement
+                      ;; expression, which the GCC manual's "Statements and Declarations in Expressions" forbids: GCC's "jump to
+                      ;; label 'l1'" at the label; cpp23/attr-assume8.C)
+                      (let [bb (get-in b [:range :begin :offset]) be (get-in b [:range :end :offset])
+                            m (when (and bb be (< (long bb) (long be) (count src)))
+                                (let [mt (re-matcher (re-pattern (str "\\(\\s*\\{[^{}]*?(?<![\\w:])(" (java.util.regex.Pattern/quote (:label g)) ")\\s*:(?!:)"))
+                                                     (subs src (long bb) (long be)))]
+                                  (when (.find mt) (+ (long bb) (.start mt 1)))))]
+                        (if m
+                          (let [[l c] (line-col starts (long m))]
+                            (.add out {:line l :col c :kind :error :rule :label :msg (str "jump to label '" (:label g) "'")}))
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")}))))))))))
             (top! [nodes]
               (doseq [n nodes :when (and (map? n) (reach? n))]
                 (cond (fn-kinds (:kind n)) (doseq [b (:inner n) :when (and (map? b) (#{"CompoundStmt" "CXXTryStmt"} (:kind b)))] (body! b))

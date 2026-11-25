@@ -3427,7 +3427,7 @@
     t))
 
 (declare declare-node*! cx-access! cx-using-map)
-(declare init-for) ; cpp-def: ce-eval's global arrays
+(declare init-for cx-decomposition!) ; cpp-def: ce-eval's global arrays, namespace-scope structured bindings
 
 (def ^:dynamic *retry* nil) ; atom [[scope node] ...]: header declarations to declare again after the headers (G4)
 (def ^:dynamic *main-retry* nil) ; atom [[scope node exception] ...]: the main file's typedefs to declare again (CP338 (a))
@@ -3517,7 +3517,12 @@
                  ;; and the unit going on, its later errors kept: cpp2a/consteval3.C's `consteval auto [ b, c ] = ...`)
                  (and (checking?) (not (:cls scope)) (not (header-node? n)) (= "DecompositionDecl" (:kind n))
                       (re-find #"^codegen: declaration DecompositionDecl" (str (.getMessage e))))
-                 nil
+                 ;; (cpp-def: its [dcl.struct.bind] rules still checked, cx-decomposition!'s own errors alone reported:
+                 ;; cpp1z/decomp55.C's tuple_element<0, A>::type void)
+                 (do (try (cx-decomposition! {:scope scope} n)
+                          (catch arbace.lang.ExceptionInfo x
+                            (when (= :decomp (:codegen/refused (ex-data x))) (*on-refusal* x n))))
+                     nil)
                  ;; (queue 526, 518-1 (a): any main-file declaration of namespace scope the slice or the program refuses, of any
                  ;; kind (a class, a template, an enumeration as well), dropped, its names recorded (cx-dropped!) so that a later
                  ;; refusal that follows from it is not reported (cx-poisoned?); a variable's, function's, typedef's or alias's
@@ -5274,10 +5279,11 @@
                  (and (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (not (checking?)) (>= (long *cxx-year*) 23)
                       (#{:local :param :global :static-local :member-static} (:storage (var* (:id x)))))
                  (ce-unknown-loc [:ref (:id x)])
-                 ;; (cpp-def, the checker: P2280R4, which GCC applies from C++20, a function parameter of reference type outside
-                 ;; its call's evaluation refers to an unknown object: its member functions called that read nothing, its object
-                 ;; read surely no constant (ce-get's ::uref), a virtual call on it too; cpp2a/constexpr-ref1.C's swam)
-                 (and (checking?) (= :var (:op x)) (:raw x) (abi/ref? (:ty x)) (>= (long *cxx-year*) 20)
+                 ;; (cpp-def, the checker: P2280R4, which GCC applies as a defect report from C++11, a function parameter of reference
+                 ;; type outside its call's evaluation refers to an unknown object: its member functions called that read nothing,
+                 ;; its object read surely no constant (ce-get's ::uref), a virtual call on it too; cpp2a/constexpr-ref1.C's swam,
+                 ;; cpp0x/constexpr-ref12.C's arp)
+                 (and (checking?) (= :var (:op x)) (:raw x) (abi/ref? (:ty x))
                       (= :param (:storage (var* (:id x)))) (:name (var* (:id x))))
                  (assoc (ce-unknown-loc [:ref (:id x)]) ::uref (:id x))
                  ;; (h-cpp-consteval: an assignment's lvalue read, `return (u.i = 42);`: the value stored)
@@ -6066,6 +6072,7 @@
                ;; alone, *ce-unknown*'s: its address formed, compared, deleted -- a read or a write of it no constant)
                (and (checking?) (not (abi/ref? (:ty v))) (#{:global :member-static} (:storage v)))
                (assoc (ce-unknown-loc [:var (:id e)]) ::uvar (:id e))
+
                ;; (cpp-rt-own3: an object of a variable outside the evaluation, its lvalue alone, *ce-unknown*'s)
                (and (not (checking?)) (not (abi/ref? (:ty v))) (#{:local :param :global :static-local :member-static} (:storage v)))
                (ce-unknown-loc [:var (:id e)])
@@ -7844,7 +7851,17 @@
                   (let [own (and (cx-p2564?) (map? d) (not (header-node? d)) (or (nil? (:fn-id ctx)) (cx-main-fn? (fnd (:fn-id ctx)))))
                         at (when own (or *cx-at-override* (some-> *at* deref :range)))]
                     (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* (if own *cx-no-imm* true) *cx-at-override* (if own at *cx-at-override*)]
-                                           (analyze (assoc ctx :scope (if (and (:tinst f) (:def-scope f) (not (checking?))) (:def-scope f) (:scope f))) d))
+                                           ;; (cpp-def, the checker: an error of the default argument's own expression is GCC's at the
+                                           ;; default argument, in the declaration, not at the call that uses it ([dcl.fct.default]/5:
+                                           ;; its names bound and its semantic constraints checked where it appears); its conversion to
+                                           ;; the parameter's type still the call's: parse/crash40.C)
+                                           (try (analyze (assoc ctx :scope (if (and (:tinst f) (:def-scope f) (not (checking?))) (:def-scope f) (:scope f))) d)
+                                                (catch arbace.lang.ExceptionInfo x
+                                                  (let [xd (ex-data x)]
+                                                    (if (and (checking?) (:codegen/refused xd) (nil? (:cx/node xd)) (map? d) (not (header-node? d))
+                                                             (get-in d [:range :begin :offset]))
+                                                      (throw (ex-info (ex-message x) (assoc xd :cx/node d)))
+                                                      (throw x))))))
                               ctx :copy))))))))))
 
 (defn init-list-elem
@@ -10202,6 +10219,16 @@
                     (catch arbace.lang.ExceptionInfo _ nil)))]
       (cond
         en {:op :comma :l obj :r en :ty (:ty en) :cat (:cat en)}
+        ;; (cpp-def, the checker: [class.access.base]/6, a non-static member named o.C::m is reached through a conversion of o to
+        ;; the naming class C: a C that is not o's class nor a base of it is GCC's "'C' is not a base of 'B'"; parse/crash40.C)
+        (and (checking?) qcid cid (not= qcid cid) (not (abi/derived-from? cid qcid))
+             (let [c (abi/cls cid)] (and (:complete c) (not (:tmpl c)) (not (:targs c)) (not (:defining c))))
+             (or (= :field (:e e)) (and (seq fids) (every? #(let [f (fnd %)] (and f (not (:static f)))) fids))
+                 ;; (a member function template not declared static, its pattern's storage class)
+                 (and (= :tmpl (:e e)) (= :fn (:tk e)) (empty? fids)
+                      (let [t (some-> (resolve 'arbace.cpp.template/*tmpls*) deref deref (get (:id e)))]
+                        (and t (map? (:pattern t)) (not= "static" (:storageClass (:pattern t))))))))
+        (fail :member "'" (:name (abi/cls qcid)) "' is not a base of '" (:name (abi/cls cid)) "'")
         (= :late-dtor (:e e)) {:op :late-dtor :cls (:cls e) :obj (update (cx-via obj qcid) :ty #(if (map? %) (dissoc % :c :v) %))
                                :qualified (boolean qcid) :ty {:k :overload} :cat :lv}
         ;; (queue 526, the checker: of a class a refusal dropped or changed, cx-dropped-class?, its cascade: no rule)
@@ -13326,7 +13353,16 @@
                    (let [member? (some (fn [[_ e]] (= :tmpl (:e e))) (class-lookup (:id E) "get"))
                          ev (let [x (var-node eid)] (if (= :ref (:k t)) x (assoc x :cat :xv)))]
                      (vec (for [[i b] (map-indexed vector bs)]
-                            (let [r (if member?
+                            (let [;; (cpp-def, the checker: [dcl.struct.bind]/4, the i-th variable a reference to Ti,
+                                  ;; std::tuple_element<i, E>::type: a void Ti, no reference to it, is GCC's
+                                  ;; "'std::tuple_element<0, A>::type' is 'void'"; cpp1z/decomp55.C)
+                                  _ (when (checking?)
+                                      (let [ti (try (resolve-type (:scope ctx) (str "std::tuple_element<" i ", __bindingE" eid ">::type"))
+                                                    (catch arbace.lang.ExceptionInfo _ nil))]
+                                        (when (and (map? ti) (= abi/void (abi/unq ti)))
+                                          (throw (ex-info (str "codegen: cannot decompose: 'std::tuple_element<" i ", " (or (:name (abi/cls (:id E))) "E") ">::type' is 'void'")
+                                                          {:codegen/refused :decomp :cx/node d})))))
+                                  r (if member?
                                       (analyze ctx {:kind "CallExpr" :inner [{:kind "MemberExpr" :name "get" :isArrow false :_wn true :explicitTemplateArgs [(str i)] :inner [ref]}]})
                                       (analyze-call ctx (analyze ctx {:kind "DeclRefExpr" :referencedDecl {:name "get"} :_wn true :explicitTemplateArgs [(str i)]}) [ev]))
                                   bt (if (= :lv (:cat r)) (abi/lref (abi/non-ref (:ty r))) (abi/rref (abi/unq (abi/non-ref (:ty r)))))
@@ -13378,6 +13414,16 @@
         (and t (or (abi/scalar? t) (abi/void? t)) (not (abi/class? t)) (not (abi/arr? t))
              (not-any? #(and (map? %) (#{:tparam :tparam-v :ttp :dep :tdep :texpr :auto :pack-exp} (:k %))) (tree-seq coll? seq t)))
         (err "cannot decompose non-array non-class type " (cx-tyname t))
+        ;; (cpp-def: [dcl.struct.bind]/4 for a namespace-scope one, as the block's analysis checks it: a tuple-like E of the
+        ;; global namespace, its i-th std::tuple_element<i, E>::type void, no reference to it; cpp1z/decomp55.C)
+        (and t (abi/class? t) tuple-like? (nil? (:fn-id ctx))
+             (let [c (abi/cls (:id t))]
+               (and (string? (:name c)) (empty? (:path c)) (not (:targs c)) (not (:tmpl c))
+                    (some (fn [i] (let [ti (try (resolve-type *root* (str "std::tuple_element<" i ", " (:name c) ">::type"))
+                                               (catch arbace.lang.ExceptionInfo _ nil))]
+                                    (and (map? ti) (= abi/void (abi/unq ti)))))
+                          (range (count names))))))
+        (err "cannot decompose: 'std::tuple_element<0, " (:name (abi/cls (:id t))) ">::type' is 'void'")
         ;; (a closure type's, a function template's specialization's too: cpp1z/decomp39.C)
         (and tinst t (abi/class? t) (:lambda (abi/cls (:id t))))
         (err "cannot decompose lambda closure type '" (:name (abi/cls (:id t))) "'")
