@@ -2754,6 +2754,15 @@
         id (or old-id (next-id))
         scoped (boolean (:scopedEnumTag n))
         under (if-let [ft (get-in n [:fixedUnderlyingType :qualType])] (resolve-type scope ft) abi/int*)
+        ;; (cpp-indep, the checker: [dcl.enum]/2, an enum-base names an integral type, a typedef's too: GCC's "underlying type
+        ;; 'float' of 'E6' must be an integral type", at the enumeration; cpp0x/enum_base.C; then int, as GCC goes on)
+        under (if (and (checking?) (get-in n [:fixedUnderlyingType :qualType]) (map? under) (not (header-node? n))
+                       (let [u (abi/unq under)] (and (#{:b :ptr :class :mptr} (:k u)) (not (abi/integral? u)))))
+                (do (*on-refusal* (ex-info (str "codegen: underlying type of '" (or (:name n) "<unnamed>") "' must be an integral type")
+                                           {:codegen/refused :enum})
+                                  n)
+                    abi/int*)
+                under)
         es (or (when old-id (:scope (abi/enm old-id))) (new-scope :enum scope :path (conj (:path scope) [:enum id])))
         t {:k :enum :id id}
         ;; (queue 492, the checker: a member enumeration's access, its own or an earlier declaration's in the class: an opaque
@@ -2801,6 +2810,24 @@
                       (const-int bs x))
                     v)
                 e {:e :enumerator :val v :ty t :pos (long (or (:_b c) 0))}]
+            ;; (cpp-indep, the checker: [dcl.enum]/5, with a fixed underlying type -- a scoped enumeration's int when none is
+            ;; written -- an enumerator's initializer is a converted constant expression of that type, so a value it cannot
+            ;; represent is ill-formed ([expr.const]/12's narrowing): GCC's "enumerator value 500 is outside the range of
+            ;; underlying type 'char'", at the enumerator; cpp0x/enum_base.C, enum27.C)
+            (when (and (checking?) x (integer? v) (not @wide) (or scoped (get-in n [:fixedUnderlyingType :qualType]))
+                       (abi/integral? (abi/unq under)) (not= :bool (abi/bn (abi/underlying (abi/unq under)))))
+              (let [bits (* 8 (abi/size-of under))
+                    sg (abi/signed? under)
+                    xv (if (and (neg? (long v)) (re-find #"^unsigned long( long)?( int)?$" (str/trim (str (get-in x [:type :qualType])))))
+                         (+ (bigint v) (bigint (.shiftLeft java.math.BigInteger/ONE 64)))
+                         (bigint v))
+                    lo (if sg (- (bigint (.shiftLeft java.math.BigInteger/ONE (int (dec bits))))) 0N)
+                    hi (if sg (dec (bigint (.shiftLeft java.math.BigInteger/ONE (int (dec bits))))) (dec (bigint (.shiftLeft java.math.BigInteger/ONE (int bits)))))]
+                (when (and (<= bits 64) (or (< xv lo) (> xv hi)))
+                  (*on-refusal* (ex-info (str "codegen: enumerator value '" xv "' is outside the range of underlying type '"
+                                              (str/trim (str (or (get-in n [:fixedUnderlyingType :qualType]) "int"))) "'")
+                                         {:codegen/refused :enum})
+                                c))))
             (when (neg? (long v)) (reset! neg true))
             ;; (an unsigned long or unsigned long long initializer's value past long's, held as a negative long)
             (swap! vals conj (cond @wide :wide
