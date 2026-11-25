@@ -11694,3 +11694,31 @@ defined out of class), cpp2a/using-enum-7.C (a using-declaration whose qualifier
 specialization, and the name it would have declared), cpp0x/constexpr-ice21.C (a constexpr constructor of a class with virtual bases called
 in a constant expression, and a local class's use of the variable), template/spec8.C (a member class template's explicit specialization declared, not defined, for an
 instance).
+
+## As built: 584, read independence in cpp2a, cpp23, concepts, coroutines and modules (2026-11-25; queue 584, branch `584-cpp-indep-new-std` on next `01ee9c426`)
+
+The rows of the five directories that clang's record passes and the own record fails (169: cpp2a 135, cpp23 15, concepts 13,
+coroutines 6; modules has none in either record), by group. Rules from the standard and from GCC's behaviour as the GCC manual, the
+tests and g++ 15.2's recorded errors (test/cpp/ref-dg-gxx15.edn) state it; no GCC or clang code. The checker alone unless named.
+
+- arbace/cpp/template.ae: concept-satisfied?'s `*cx-concepts-entered*`, a satisfaction that needs itself reported ("satisfaction of
+  atomic constraint ... depends on itself" at the cycle's innermost atom) and false surely; the :concept-id hook, an argument that
+  fails to form deciding nothing when the concept's constraint-expression names none of its parameters ([temp.constr.normal]/1.4);
+  `cx-gnu-old-trait`, GNU's __has_trivial_assign, __has_trivial_copy, __has_nothrow_assign, __has_nothrow_copy and
+  __has_nothrow_constructor by the GCC manual's "Type Traits" where no class's special members are asked; __has_trivial_destructor
+  false for void and function types (the code generator too); an explicit class specialization's constraints ([temp.names]/7).
+- arbace/cpp/sema.ae: operator-call's "no match for 'operator@'" when only operator templates were candidates, all dropped surely,
+  and no built-in candidate applies; sure-failure?'s unary operand ([expr.unary.op]/7-10) and non-class qualifier
+  ([temp.deduct.general]/11.3); user-conv's explicit conversion function templates in copy-initialization; explicit-spec*'s operand
+  analyzed and evaluated as a contextually converted constant expression (the parser's "explicit:" entry); decltype(auto) with
+  P2266 and a reference's declared type; a block-scope extern declaration no static definition in constant evaluation; a fold's
+  requires-expression's void parameter not reported; noexcept's narrowing to bool (P1401R5); a scalar's structured binding;
+  [temp.res.general]/3's "dependent-name ... is parsed as a non-type, but instantiation yields a type".
+- arbace/repr/cpp/parse.ae: the explicit-specifier's constant-expression parsed tentatively and kept by its text (DECLTYPES'
+  "explicit:"), as noexcept's; the tree is unchanged.
+- arbace/repr/cpp/diag.ae: sema rules :constraint ("depends on itself") and :typename; constexpr-labels skips a goto's target label.
+
+26 rows to own pass (the journal lists them); the own record 2,829 -> 2,855 passes, the crops' C++ read stage 0.8830 -> 0.8850.
+Left: the coroutine rows (the checker refuses a body at co_return), designated initializers (desig*), class NTTPs (nontype-class*),
+spaceship rewrites, CTAD with aggregates and DR 2369's order (concepts-nondep1a.C), cpp2a/concepts-recursive-sat3.C (the slice's
+lookup finds a later template from a concept's requirement; [temp.dep.candidate]).

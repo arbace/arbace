@@ -1914,8 +1914,15 @@
                   ;; the operand the native parser kept (G5): analyzed with the parameters in scope, a constant
                   (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
                   (let [x (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
+                        a (when (checking?) (try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))) (catch arbace.lang.ExceptionInfo _ nil)))
                         v (try (ce-try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))))
                                (catch arbace.lang.ExceptionInfo _ nil))]
+                    ;; (queue 584, the checker: the operand a contextually converted constant expression of type bool,
+                    ;; [except.spec]/1 with [expr.const]/12 (P1401R5): an integer constant other than 0 and 1 narrows, GCC's
+                    ;; "narrowing conversion of '2' from 'long unsigned int' to 'bool'"; cpp23/narrowing-bool1.C)
+                    (when-let [h (and a v (= :int (:op v)) (not (#{0 1} (long (:v v)))) (abi/integral? (abi/unq (:ty a)))
+                                      (not= :bool (:n (abi/unq (:ty a)))) (map? x) (not (header-node? x)) *on-refusal*)]
+                      (h (ex-info (str "codegen: narrowing conversion of '" (:v v) "' to 'bool' in a noexcept-specifier") {:codegen/refused :narrowing :cx/node x}) x))
                     (boolean (and v (= :int (:op v)) (not (zero? (long (:v v)))))))
                   :else (let [v (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope e)))
                                      (catch arbace.lang.ExceptionInfo _ nil))]
@@ -1950,12 +1957,13 @@
   is the program's own error ([temp.constr.atomic]/3, [expr.prim.req.simple]/1: a substitution failure, so not satisfied, with
   no doubt): the errors the checker reports as the program's at a statement (arbace.repr.cpp.diag's sema-rules: no member, an
   inaccessible or deleted function, no viable or an ambiguous call, no operator, an undeclared name, a call of a non-function,
-  too few arguments, `*` of a non-pointer, a member of a non-class), and a qualified name no complete class without bases
-  declares (name-expr's); never over a type the slice left dependent or undeduced."
+  too few arguments, `*` of a non-pointer, a member of a non-class; queue 584: a unary operator's operand of a type it does not
+  take, [expr.unary.op]/7-10; a nested-name-specifier's type that is no class, [temp.deduct.general]/11.3), and a qualified name no complete class without bases declares (name-expr's); never over a type
+  the slice left dependent or undeduced."
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero|wrong type argument to unary|'[^']*' is not a class, struct, or union type)" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -2083,7 +2091,7 @@
                 (or (some #(and (map? %) (= "NativeAttr" (:kind %)) (#{"unavailable" "__unavailable__"} (:_gnu %))) (:inner n))
                     (some #(#{"unavailable" "__unavailable__"} (:name %)) (:_gattrs n))))))
 
-(declare explicit-spec*)
+(declare explicit-spec* to-bool)
 
 (defn- explicit-spec
   "A function declaration's explicit-specifier ([dcl.fct.spec]/3): `explicit`, or `explicit(constant-expression)` true
@@ -2110,8 +2118,17 @@
                                           (= c \)) (if (= 1 (long @depth)) i (do (swap! depth dec) (recur (inc i))))
                                           :else (recur (inc i))))))
               x (when end (subs rest 1 end))
-              v (when x (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope x)))
-                             (catch arbace.lang.ExceptionInfo _ nil)))]
+              ;; (queue 584, the checker: the operand the native parser kept, a contextually converted constant expression of
+              ;; type bool, manifestly constant-evaluated, [dcl.fct.spec]/3, [expr.const]/20: analyzed and evaluated as such,
+              ;; a class's conversion to bool and __builtin_is_constant_evaluated() among it; cpp2a/explicit5.C's
+              ;; explicit(W()), is-constant-evaluated8.C)
+              v (when-let [xn (and x (checking?) (get *decltypes* (str "explicit:" (str/replace x #"\s+" ""))))]
+                  (try (let [a (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope :statics (atom [])} xn))
+                             r (ce-try (to-bool a) true)]
+                         (when (and (= :int (:op r)) (number? (:v r))) (:v r)))
+                       (catch Exception _ nil)))
+              v (or v (when x (try (when-let [h (:trait-text @hooks)] (binding [*cutoff* Long/MAX_VALUE] (h scope x)))
+                                   (catch arbace.lang.ExceptionInfo _ nil))))]
           (if (number? v) [(not (zero? (double v))) true] [true false]))
         [true true])
       [false true])))
@@ -5558,8 +5575,9 @@
     :asm (if (checking?) (ub! s "inline assembly is not a constant expression") (not-constant "the statement :asm"))
     :goto (if (checking?) (ub! s "'goto' is not a constant expression") (not-constant "the statement :goto"))
     :static-local (if (checking?)
+                    (if (:cx-extern s) [:normal]
                     (let [v (var* (:var s))]
-                      (ub! s "control passes through definition of '" (:name v) "' with " (if (:tls v) "thread" "static") " storage duration"))
+                      (ub! s "control passes through definition of '" (:name v) "' with " (if (:tls v) "thread" "static") " storage duration")))
                     (not-constant "the statement :static-local"))
     (not-constant "the statement " (:s s)))))
 
@@ -7494,6 +7512,8 @@
   "The class object `e` converted to the non-class type `t` by a conversion function: the call's value."
   [ctx e t explicit?]
   (let [cid (class-id (:ty e))
+        ;; (queue 584: the checker's position, which the conversion function templates' specializations made below move)
+        at0 (some-> *at* deref)
         ;; (queue 518, the checker: an ambiguous choice among the conversion functions, cx-conv-ambiguous?)
         _ (when (cx-conv-ambiguous? cid t explicit? (:c (:ty e)))
             (fail :overload "ambiguous call (the conversion of '" (:name (abi/cls cid)) "' to " (cx-tyname t) " is ambiguous)"))
@@ -7513,6 +7533,17 @@
                                                     (some #(tm? (:cls %)) (:bases c)))))
                                  cid)))
                   (fail :noconv "no viable conversion from '" (:name (abi/cls cid)) "' to " (pr-str (select-keys t [:k :n]))))
+                ;; (queue 584, the checker: in copy-initialization, conversion functions all explicit, surely, and each
+                ;; conversion function template's specialization for the target made and explicit, its explicit-specifier
+                ;; evaluated with the deduced and default arguments, [dcl.fct.spec]/3 with [over.match.copy]/1.2 and
+                ;; [temp.deduct.conv]: no candidate, GCC's "cannot convert"; cpp2a/explicit8.C's explicit(N) operator T())
+                (when (and (checking?) (not explicit?) (not (:lambda (abi/cls cid))) (seq (conv-tmpls cid))
+                           (every? #(let [f (fnd %)] (and (:explicit f) (:explicit-sure f))) (conv-fns cid)))
+                  (let [specs (distinct (conv-specs cid t))]
+                    (when (and (= (count specs) (count (conv-tmpls cid)))
+                               (every? #(let [f (fnd %)] (and (:explicit f) (:explicit-sure f))) specs))
+                      (when-let [a *at*] (reset! a at0))
+                      (fail :noconv "no viable conversion from '" (:name (abi/cls cid)) "' to " (pr-str (select-keys t [:k :n])) " (explicit conversion function templates)"))))
                 (fail :conversion "no conversion function of " (:name (abi/cls cid)) " to " (pr-str t)))
         obj (if (= :pr (:cat e)) (materialize e) e)]
     (rv (method-call ctx fid obj [] true))))
@@ -9220,7 +9251,17 @@
                       (and (checking?) (some-> (:fn-id ctx) fnd :cls) (not (:lambda ctx)))
                       (assoc :member-access true :cx-nc (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls)) :cx-obj (some-> (:fn-id ctx) fnd :cls)
                              :cx-using (cx-using-map es)))))
-      (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e)))))
+      (do
+        ;; (queue 584, the checker: [temp.res.general]/3, a qualified name whose qualifier names a template's type parameter is
+        ;; assumed to name no type outside a type-only context; an instantiation where it names one is ill-formed: GCC's
+        ;; "dependent-name 'T::x' is parsed as a non-type, but instantiation yields a type"; cpp2a/typename3.C's `T::x * i;`)
+        (when (and (checking?) (= :type (:e e)) (seq (:qualifier n)) (string? (first (:qualifier n)))
+                   (loop [sc (:scope ctx)]
+                     (cond (nil? sc) false
+                           (seq (.get ^java.util.HashMap (:names sc) (first (:qualifier n)))) (= :tparams (:kind sc))
+                           :else (recur (:parent sc)))))
+          (fail :typename "dependent-name '" (str/join "::" (:qualifier n)) "::" (:name (:referencedDecl n)) "' is parsed as a non-type, but instantiation yields a type"))
+        (fail :name "name " (:name (:referencedDecl n)) " of kind " (:e e))))))
 
 (def ^:private implicit-alloc-fns
   ;; [basic.stc.dynamic.general]/2: the global allocation and deallocation functions implicitly declared in each translation
@@ -10508,6 +10549,22 @@
              (let [{:keys [sure-drops unsure-drops]} (meta mspecs)] (and sure-drops (pos? (long sure-drops)) (zero? (long (or unsure-drops 0))))))
         (throw (ex-info (str "codegen: no viable function among " (:sure-drops (meta mspecs)) " for " (count more) " arguments")
                         (cond-> {:codegen/refused :overload} (seq (:explain (meta mspecs))) (assoc :cx/explain (vec (distinct (:explain (meta mspecs))))))))
+        ;; (queue 584, the checker: an operator whose only candidates were operator templates, member or found by lookup, each
+        ;; dropped surely -- its deduction failed or its constraints are not satisfied, [temp.deduct]/8, [over.match.viable]/3 --
+        ;; with class operands that have no conversion function, so no built-in candidate applies, [over.match.oper]/3.3 with
+        ;; [over.built]: no viable function, GCC's "no match for 'operator@'"; not the rewritten or the special operators:
+        ;; cpp2a/concepts-recursive-sat5.C's `tab | 1`, concepts-pr88395.C's `a += b`)
+        (and (checking?) (not (#{"=" "," "->" "()" "[]" "==" "!=" "<" ">" "<=" ">=" "<=>"} o)) (not (and (= o "&") (= 1 (count args))))
+             (let [ds [(meta mspecs) (meta tspecs)]]
+               (and (pos? (long (reduce + (map #(long (or (:sure-drops %) 0)) ds))))
+                    (every? #(zero? (long (or (:unsure-drops %) 0))) ds)))
+             (let [cids (keep #(class-id (:ty %)) args)]
+               (and (seq cids) (every? #(and (empty? (conv-fns %)) (empty? (conv-tmpls %))) cids)
+                    (not (some #(= :enum (:k (abi/unq (abi/non-ref (:ty %))))) args)))))
+        (throw (ex-info (str "codegen: no match for '" nm "' (no viable operator template, operand types "
+                             (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")
+                        (cond-> {:codegen/refused :nomatch}
+                          (seq (mapcat #(:explain (meta %)) [mspecs tspecs])) (assoc :cx/explain (vec (distinct (mapcat #(:explain (meta %)) [mspecs tspecs])))))))
         (= o "=") (fail :assign "no operator=")
         ;; C++20's rewritten candidate: a != b as !(a == b)
         (= o "!=") (when-let [c (operator-call ctx "==" args)] {:op :not :e (convert-scalar (rv c) abi/bool* false) :ty abi/bool* :cat :pr})
@@ -11814,7 +11871,10 @@
                                    (reset! void-param true))
                                  (swap! *vars* assoc id {:id id :name (:name pn) :ty pt :storage :local :fn (:fn-id ctx)})
                                  (when (:name pn) (enter! (:scope c) (:name pn) {:e :var :id id})))))
-                           _ (when @void-param
+                           ;; (queue 584: not for a requires-expression inside a fold expression that is the atomic constraint,
+                           ;; [temp.constr.atomic]: GCC explains the fold, its expression false, cpp2a/concepts-requires33.C,
+                           ;; g++ 15.2's recorded errors)
+                           _ (when (and @void-param (not= "CXXFoldExpr" (:kind (last *constraint-node*))))
                                (when-let [h *on-refusal*]
                                  (h (ex-info "codegen: invalid parameter type 'void' in a requires-expression's parameters" {:codegen/refused :constraint :cx/node n}) n)))
                            ;; (CX12, the checker: a requirement the program surely fails is false with no doubt: a type
@@ -13005,6 +13065,10 @@
                  (doseq [[f b] (map vector fs bs)]
                    (bind! b (analyze ctx {:kind "MemberExpr" :name (:name f) :isArrow false :inner [ref]})))
                  [])
+               ;; (queue 584, the checker: E neither an array, nor tuple-like, nor a class, [dcl.struct.bind]/3-5: GCC's "cannot
+               ;; decompose non-array non-class type 'int'"; cpp2a/decomp4.C's `auto [y] = x;` for x an int)
+               (and (checking?) (abi/scalar? E) (not (re-find #":k :(auto|dep|tparam|tdep)" (pr-str E))))
+               (throw (ex-info (str "codegen: cannot decompose non-array non-class type " (cx-tyname E)) {:codegen/refused :decomp :cx/node d}))
                :else (fail :decl "a structured binding of " (pr-str E)))]
     (vec (cons {:s :decl :var eid :init init} more))))
 
@@ -13081,7 +13145,12 @@
                                (cx-check-constant! (var* id) init)
                                (enter! (:scope ctx) (or (:name d) "") {:e :var :id id})
                                (upd-var! id assoc :sinit init)
-                               (cond-> {:s :static-local :var id} (checking?) (assoc :cx-at (:range d)))))
+                               ;; (queue 584, the checker: a block-scope extern declaration defines no variable, [basic.def]/2.3,
+                               ;; so no static or thread_local definition the constant evaluation passes through, [expr.const]/5
+                               ;; of C++23: cpp23/constexpr-nonlit1.C's `extern thread_local int a;`)
+                               (cond-> {:s :static-local :var id}
+                                 (checking?) (assoc :cx-at (:range d))
+                                 (and (checking?) (= "extern" (:storageClass d))) (-> (dissoc :cx-at) (assoc :cx-extern true)))))
                          (let [;; (queue 492, the checker: a variable whose initialization is refused is declared all the
                                ;; same, as GCC declares it, so the block's later statements find it: `A a2 (a); a2 = a;`)
                                init (try (let [init (binding [*cx-arms-evaluated* (and (checking?) (not (:constexpr d)) (not (:c (:ty (var* id))))
@@ -13275,8 +13344,16 @@
                             (let [t (cond (nil? pre) abi/void
                                           ;; (decltype(auto): an unparenthesized name or member access its declared type, else
                                           ;; T& of an lvalue, T&& of an xvalue, T of a prvalue, [dcl.type.decltype]/1)
-                                          (:decltype rt) (let [x (analyze ctx e)]
+                                          ;; (queue 584: C++23's P2266, a possibly parenthesized id-expression naming an
+                                          ;; implicitly movable entity an xvalue there too, [expr.prim.id.unqual]/4:
+                                          ;; `decltype(auto) f(int&& x) { return (x); }` returns int&&, cpp23/elision6.C)
+                                          (:decltype rt) (let [x (p2266-xvalue (analyze ctx e))]
                                                            (cond (and (= "DeclRefExpr" (:kind e)) (= :var (:op x))) (:ty (var* (:id x)))
+                                                                 ;; (queue 584: a reference variable's name, its declared reference
+                                                                 ;; type, [dcl.type.decltype]/1.3: cpp23/decltype1.C's f12, f14)
+                                                                 (and (= "DeclRefExpr" (:kind e)) (= :deref (:op x)) (= :load (get-in x [:e :op]))
+                                                                      (= :var (get-in x [:e :e :op])) (get-in x [:e :e :raw]))
+                                                                 (:ty (var* (get-in x [:e :e :id])))
                                                                  (#{"DeclRefExpr" "MemberExpr"} (:kind e)) (:ty x)
                                                                  (= :lv (:cat x)) (abi/lref (:ty x))
                                                                  (= :xv (:cat x)) (abi/rref (:ty x))
