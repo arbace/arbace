@@ -200,7 +200,14 @@
         child (some-> (System/getenv "REPR_JAVA_CHUNK") not-empty Integer/parseInt)
         [mi others] ((juxt filter remove) #(str/ends-with? % "/module-info.java") files)
         files others
-        work (vec (map-indexed vector (#'rj/chunks others 150)))
+        ;; queue 562's pitfall (train 4): a top-level overlay named by a nested class's binary name
+        ;; (java/lang/System$Logger.java), on another chunk's patch path, hides the platform's member System.Logger
+        ;; from javac's read of that chunk's files (ObjectInputStream, LogManager: "No descriptor for type
+        ;; ResourceBundle"); such files make a chunk of their own, last, which no other chunk's patch path names
+        dollar? (fn [f] (str/includes? (.getName (io/file f)) "$"))
+        work (vec (map-indexed vector (concat (#'rj/chunks (remove dollar? others) 150)
+                                              (when-let [ds (seq (filter dollar? others))] [(vec ds)]))))
+        apart (when (some dollar? others) (dec (count work)))
         procs (when-not child
                 (some-> (System/getenv "REPR_JAVA_PROCS") not-empty Integer/parseInt (#(when (and (pos? %) (> (count work) 1)) %))))]
     (if-not (or child procs)
@@ -232,7 +239,7 @@
                          ppath (str/join File/pathSeparator
                                          (cons (.getCanonicalPath patch)
                                                (when all?
-                                                 (for [[j _] work :when (not= j i)] (.getCanonicalPath (patch-of j))))))
+                                                 (for [[j _] work :when (and (not= j i) (not= j apart))] (.getCanonicalPath (patch-of j))))))
                          copies (get copies-of i)]
                      (try
                        (let [jopts (into ["--patch-module" (str module "=" ppath)
