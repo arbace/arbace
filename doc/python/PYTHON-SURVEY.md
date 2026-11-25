@@ -8555,3 +8555,33 @@ modules, 595 methods) passed 40 of the 127 rows already (the record predates py-
   model); the wakeup-fd tests
   (_testcapi), test_jit_is_active (_testinternalcapi), test_c_locale_coercion's two (the UTF-8 mode's stdio errors, 553's),
   test_compileall's test_workers (ProcessPoolExecutor, 535's), the end's finalization rows (the Mac's).
+
+## As built: 550, dbm.sqlite3's rows: crt's F_GETLK and file mmap as Linux's, statements as CPython's reference counts leave them (2026-11-24, the Mac VM, queue 550)
+
+536's DECISION 536-1, the user's (a); the coordinator approved carrying crt on the branch. `:dbm-sqlite3-locking` (30 rows,
+deferred) is closed: test_dbm 31 ok, test_dbm_sqlite3 25 ok (5 skips), and test_sqlite3's test_table_lock_cursor_non_readonly_select
+passes too (it leaves `:finalization-goi`).
+
+- **The causes, in their order.** With crt as it was, SQLite's WAL could not start: `F_GETLK` answered 0 and left the struct, so the
+  -shm's DMS probe saw a conflict ("locking protocol" at the first write), and a file's mmap was ENODEV. Then two places where pyi's
+  objects outlive CPython's reference counts: close left the connection open until Go finalized its statements (no checkpoint: the
+  database 4096 bytes with -wal and -shm left, CPython's 12288 bytes alone), and dbm.sqlite3's never closed `PRAGMA journal_mode = wal`
+  cursor, stepped to its row, held every later autocommit write back (python3 does the same while such a cursor lives:
+  `.tmp/q550/p/rw4/py5.py`).
+- **crt** (`go/arbace/crt`): F_GETLK asks the host (`hostGetLk`: syscall.FcntlFlock on the description's host file; another process's
+  lock and its holder, else F_UNLCK; the program's own F_SETLK still takes none); mmap of a file is the host's mapping
+  (`hostMapFile`: MAP_SHARED or MAP_PRIVATE, PROT_WRITE as asked) at the guest's address (`Mem.Place`, MAP_FIXED's) as a slab whose
+  bytes are the host's (`Mem.MapFile`; `Mem.Zero` leaves a file's bytes); TamaGo copies the file's bytes in. crt moves gate_key.
+- **pysqlite3** (`go/arbace/pysqlite3`, `py.ExtFinRounds`): close finalizes the statements no cursor is stepping (sqlite3_next_stmt,
+  sqlite3_stmt_busy 0; the handles recorded in `stmts_final`, so a statement's later reset and Go finalizer skip them); a stepping
+  statement stays with the database open, as CPython keeps a live cursor's (test_connection_reinit reads the old database through one).
+  Before a statement that writes, and before COMMIT, when another statement of the connection is still stepping, the runtime's
+  finalizer rounds run, each dead cursor resetting its statement (cursor_finalize); a live cursor's stays.
+
+Proofs (the VM; `bin/pyi check --only` with `PYI_RUNNER=python3`, the three negative controls failing as they must): test_dbm,
+test_dbm_sqlite3 and test_sqlite3 whole (test_sqlite3's module reached its 3,600 s on the six last WindowFunctionTests and
+MultiprocessTests' memory-cap crash; those seven run again alone: six pass, test_ctx_mgr_rollback_if_commit_failed its recorded
+failure, `:sqlite-process-locks`), recorded by `--judge DIR --record`; the probes `.tmp/q550/p/test-pysqlite.sh` (st1, rw4 and py5 equal to
+python3's, all three failing on the parent's pyi; py5, a live cursor's write held back, the control against resetting too much) and `.tmp/q550/p/c/test-crt.sh` against gcc's builds (a lock another process holds, a shared
+mapping's coherence before munmap: the controls an always-F_UNLCK fcntl and a copying mmap fail); C's eval and AOT essential subsets
+and the four rows that mmap pass.

@@ -21614,3 +21614,51 @@ gives the cpython_only skip. D2, the coordinator's (a): CPicklingErrorTests.test
 implementation") stays in :c-accelerators, by design, until _pickle.c exists; _pickle.c into the C world goes to py-accel next
 cycle. bin/reap --record: Python eval design 1,312 -> 1,304, n/a 4,836 -> 4,844; crops-score recorded and judged, records-check
 0 problems. The functools subclass-repr fix stays in the worktree's .tmp/NEXT.md (not in the committed forms).
+
+## 2026-11-23: queue 550, dbm.sqlite3's rows: crt's F_GETLK and file mmap as Linux's, pysqlite3's statements as CPython's reference counts leave them (branch `550-py-sqlite-statements`)
+
+Brief: `.tmp/worktrees/q/tasks/550-py-sqlite-statements.md` (536's DECISION 536-1, the user's (a)), base next 320e74469. 536's analysis
+had the order of causes wrong; a probe settled it (`.tmp/q550/p/st1.py`: connect, PRAGMA journal_mode=wal, CREATE, REPLACE, close):
+with HEAD's crt every variant fails at the first write on "locking protocol" whether the PRAGMA cursor is exhausted, dropped or
+collected; with 536's shelved crt patch all write. So the coordinator approved carrying crt (Arbace's word: no host stream in crt
+now), then the pyi side.
+
+- **crt (go/arbace/crt)**, Linux's semantics: fcntl F_GETLK asks the host (`hostGetLk`, syscall.FcntlFlock on the description's host
+  file: another process's lock and its holder, else F_UNLCK; the program's own take none, as before) and writes struct flock back;
+  mmap of a file is the host's mapping of it (`hostMapFile`, syscall.Mmap MAP_SHARED or MAP_PRIVATE, PROT_WRITE as asked) placed at
+  the guest's address (`Mem.Place`, MAP_FIXED's) as a slab whose bytes are the host's (`Mem.MapFile`, `hostMem.file`: Zero leaves a
+  file's bytes), so a shared mapping's writes are the file's at once and two mappings agree; the host's errno otherwise (ENODEV,
+  EACCES); TamaGo (sys_other) copies the file's bytes in, a private copy. 536's patch (a copy written back at munmap) was replaced by
+  the host's mapping: Linux's coherence, which a copy cannot give. SQLite's unix VFS: the -shm's DMS probe answers F_UNLCK and its
+  regions map MAP_SHARED, so WAL works. crt moves gate_key: the records ride the host's train 2.
+- **pyi (go/arbace/pysqlite3, go/arbace/py)**: CPython frees a cursor and its statement when the last reference goes; pyi's go at a
+  collection. Two places make that observable, both measured: (1) close: sqlite3_close_v2 left a zombie until Go finalized the
+  statements, so a WAL database was never checkpointed (4096 bytes and the -wal and -shm left, where CPython's file is 12288 bytes
+  alone) and a reader with immutable=1 or whichdb saw an empty file; now close finalizes the connection's statements no
+  cursor is stepping (sqlite3_next_stmt's list, sqlite3_stmt_busy 0: the cache's and the finished or dead cursors'; a cursor drops its
+  statement once done), each handle recorded in the connection's `stmts_final` so a later reset and the statement's Go finalizer skip
+  it; a stepping statement stays, the database left open, as CPython leaves a live cursor's (test_connection_reinit reads the old
+  database through one after `__init__`: finalizing it too segfaulted there, the first version's mistake). (2) a
+  write: dbm.sqlite3 never closes its `PRAGMA journal_mode = wal` cursor, stepped once (a row), which CPython resets at once; under pyi
+  it stayed stepping and SQLite held every later autocommit write back (the -wal 0 bytes, a second connection seeing nothing, "database
+  is locked" for a reader of a fresh writer). Now before a statement that writes, and before COMMIT, when another statement of the
+  connection is still stepping, the runtime's finalizer rounds run (`py.ExtFinRounds`, finRounds), each dead cursor resetting its
+  statement (cursor_finalize, queue 241); a live cursor's stays, as CPython's holds the commit back too (`.tmp/q550/p/rw4/py5.py`:
+  python3 itself leaves the -wal at 0 bytes with a live PRAGMA cursor). Alternatives tried: Go weak pointers to keep a registry of a
+  connection's statements (goi does not interpret package weak: "generic over the runtime's weak pointers, out of scope"); a
+  collection at every close (finRounds under goi took seconds a close: test_corrupt_readwrite's 18 opens past 300 s);
+  finalizing every statement at close (test_connection_reinit's segmentation fault).
+- **Runs** (the VM, arm64, stage 0 nx's, goi interpreting py, pysqlite3 and crt from the checkout; the runner by python3): the probes
+  `.tmp/q550/p/test-pysqlite.sh` (st1, rw4 and py5 equal to python3's; the parent's pyi, addde6d33, fails all three: py5's live
+  cursor gave a -wal of 8272 bytes where python3's is 0, and an implementation resetting every stepping statement, a live cursor's
+  too, would commit there: py5 is the over-reset control) and `.tmp/q550/p/c/test-crt.sh` (gcc's builds: getlk-free, getlk-held, mmapfile pass; HEAD's crt fails all three);
+  C's `bin/ci check --only test/c/essential-check.txt`, `check --aot --only test/c/essential-aot.txt` and the four rows that mmap
+  (torture-execute{,-mirror} loop-2f and loop-2g, MAP_ANON) pass, the controls differing as they must; `bin/pyi check --only` of
+  test_dbm, test_dbm_sqlite3 and test_sqlite3 (check4: 31 ok, 25 ok and 502 ok; test_sqlite3's module reached its 3,600 s on its six
+  last WindowFunctionTests after MultiprocessTests' test_ctx_mgr_rollback_if_commit_failed crashed on the runner's 8 GiB cap; those
+  seven run again alone: the six pass, the seventh its recorded failure "1 != 0"), the three negative controls failing as they must.
+  Records: `bin/pyi check --judge DIR --record` over the three modules (the seven rows the second run's): 31 rows now pass (the 30
+  of `:dbm-sqlite3-locking`, gone from test/python/divergences.edn, and test_table_lock_cursor_non_readonly_select, out of
+  `:finalization-goi`); `:sqlite-process-locks` reworded (F_SETLK still takes no lock). Python eval 40,552 / 1,398 / 1,585 ->
+  40,583 / 1,398 / 1,554; completeness 0.9812 -> 0.9814. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score
+  --judge --strict`, `bin/records-check`: 0 problems. crt moves gate_key: the records ride the host's train 2.

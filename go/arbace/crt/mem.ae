@@ -38,7 +38,8 @@
 (go/type hostMem "hostMem is a host's mapping that backs a reservation's slabs (Reserve, queue 311): its bytes B from the guest's address Base,\nlive the bytes of it still mapped in the guest; the host's mapping is returned when none is.\n" (struct
     ^{:tag uint64} Base
     ^{:tag (slice byte)} B
-    ^{:tag uint64} live))
+    ^{:tag uint64} live
+    ^{:tag bool :doc "file: a file's mapping (MapFile, queue 550), its bytes the file's: Zero leaves them\n"} file))
 
 
 (go/const ^{:tag uint64 :val 65536 :doc "hostMin is the size from which Reserve takes the host's mapping, below it Go's memory.\n"} hostMin 65536)
@@ -266,6 +267,26 @@
       s)))
 
 
+(go/method MapFile "MapFile maps the host's mapping b of a file at base (a fixed address, page-aligned; mmapFile, queue 550): the guest's bytes\nthere are the host's, read-only when ro; Unmap returns the host's mapping once none of it is mapped.\n" ^{:tag (* Slab)} [^{:tag (* Mem)} m ^uint64 base ^{:tag (slice byte)} b ^bool ro ^string name]
+  (let [s (addr (lit Slab :Base base :B b :RO ro :Name name :host (addr (lit hostMem :Base base :B b :live (conv uint64 (len b)) :file true))))]
+    (.insert m s)
+    (set! (values (.-last m) (.-prev m)) (values nil nil))
+    s))
+
+
+(go/method Place "Place is the address Mmap would map size bytes at (hint when free and page-aligned, else the next free one after the last\nmapping), not mapped yet (mmapFile, queue 550).\n" ^uint64 [^{:tag (* Mem)} m ^uint64 hint ^uint64 size]
+  (set! size (pageUp size))
+  (when (and (!= hint 0) (== (% hint PageSize) 0) (not (.overlaps m hint size)))
+    (return hint))
+
+  (let [a (.-mapNext m)]
+    (while (.overlaps m a size)
+      (set! a + PageSize))
+
+    (set! (.-mapNext m) (+ a size PageSize)) ; a guard page between mappings
+    a))
+
+
 (go/method release "release gives the host the bytes [lo, hi) of s's host mapping that the guest no longer maps (Unmap): its whole host pages\nthere zeroed and freed (hostZero), the mapping itself returned when nothing of it is mapped.\n" [^{:tag (* Slab)} s ^uint64 lo ^uint64 hi]
   (let [h (.-host s)]
     (when (or (== h nil) (>= lo hi))
@@ -283,6 +304,9 @@
 (go/method Zero "Zero makes the n bytes at a (mapped, in one slab) zeros, the host's whole pages among them freed where the host backs them\n(madvise's MADV_DONTNEED, queue 311).\n" [^{:tag (* Mem)} m ^uint64 a ^uint64 n]
   (let [s (.find m a n)]
     (when (== s nil)
+      (return))
+
+    (when [h (.-host s)] (and (!= h nil) (.-file h)) ; a file's bytes are the file's (queue 550): left as they are
       (return))
 
     (let [o (- a (.-Base s))
