@@ -68,16 +68,20 @@ r=$(run t3); check "a line below the default leaves the default" "$(lims)" "20 4
 mv "$root/test/java/timeouts.txt" "$T/tt"; r=$(run t1); check "no file: the default" "$(lims)" "20 40"; mv "$T/tt" "$root/test/java/timeouts.txt"
 # 5. exported where run_actions is (the xargs subshells)
 check "test_limit and program_tmo in both export -f lines" "$(grep -c '^  export -f .*program_tmo test_limit .*run_actions' "$R/bin/java-check")" "2"
-check "one limited call (run_actions')" "$(grep -c '&& limited ' "$R/bin/java-check")" "1"
+check "one limited call (run_actions', through lcmd)" "$(grep -c '&& "${lcmd\[@\]}" "$lim" ' "$R/bin/java-check")" "1"
+check "lcmd limited unless the line is wall (test_wall)" "$(grep -c 'local lcmd=(limited)$' "$R/bin/java-check")/$(grep -c 'test_wall "$(awk .*lcmd=(limited_cpu unlimited)' "$R/bin/java-check")" "1/1"
+check "test_wall in both export -f lines" "$(grep -c '^  export -f .*test_limit test_wall .*run_actions' "$R/bin/java-check")" "2"
 
 # 6. the committed data
 tt=$R/test/java/timeouts.txt
 # GTS180 (a)'s 14 audit-only lines at 60, and since GTS208 (a) (2026-11-04) java-speed's measured limits, each above 60: 21, and 24 since
 # gate 13c's three :speed tests (t03459, t03897, t08163; the user, 2026-11-14, round 38)
 # and 26 since gate 13e's two (t05123, t05214: 185 and 188 s of CPU alone, 2026-11-15)
-check "timeouts.txt's lines" "$(grep -vc '^#' "$tt" 2>/dev/null)" "40"
+# and 41 since the wall-clock line of MessageDigest's ThreadSafetyTest (t05291; the user's decision of 2026-11-22, JD6)
+check "timeouts.txt's lines" "$(grep -vc '^#' "$tt" 2>/dev/null)" "41"
+check "the wall-clock lines (test_wall)" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$3 == "wall" { print $1 }' | paste -sd' ')" "jdk/java/security/MessageDigest/ThreadSafetyTest.java"
 check "the audit-only lines at 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 == 60' | wc -l)" "14"
-check "java-speed's lines above 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 > 60' | wc -l)" "26"
+check "java-speed's lines above 60" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 > 60 && $3 != "wall"' | wc -l)" "26"
 want=$(for id in t03235 t03314 t03513 t03627 t03628 t03720 t03744 t03756 t03796 t03797 t03798 t03836 t04819 t03686; do
   grep -o "\[\"$id\" \"[^\"]*\"" "$R/test/java/check-interp.edn" | sed 's/.* "//; s/"$//'; done | LC_ALL=C sort)
 check "the 14 held tests' names, as check-interp.edn" "$(grep -v '^#' "$tt" 2>/dev/null | awk '$2 == 60 { print $1 }' | LC_ALL=C sort | md5sum)" "$(md5sum <<< "$want")"

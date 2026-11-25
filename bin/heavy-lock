@@ -1,22 +1,29 @@
 #!/bin/bash
-# The host's big-job lock taken in turn (doc/GATE-SURVEY.md, GTS32 (a), "As built: GT5"): a FIFO of
-# tickets in front of the lock, flock(1) being unfair (an audit queued behind four gates waited three
-# hours). The lock itself stays a plain flock on ARBACE_HEAVY_LOCK (default the main checkout's
-# .tmp/big.lock), so that this and `flock big.lock CMD` exclude each other as before.
+# The host's big-job lock taken in turn (doc/GATE-SURVEY.md, GTS32 (a), "As built: GT5"; two slots since 2026-11-23, "As
+# built: the big lock's two slots"): a FIFO of tickets in front of two flock slots, flock(1) being unfair (an audit queued
+# behind four gates waited three hours). Slot 1 is a plain flock on ARBACE_HEAVY_LOCK (default the main checkout's
+# .tmp/big.lock), so that this and `flock big.lock CMD` exclude each other as before; slot 2 a plain flock on LOCK.2.
 #
 # Usage: bin/heavy-lock CMD [ARG...]
-#   Takes a ticket (LOCK.queue/TIME-PID, TIME the nanoseconds of the arrival: the order), waits until
-#   no earlier ticket is live (a ticket whose process is gone is removed by the next waiter), then
-#   flock LOCK and runs CMD with ARBACE_HEAVY_HELD=1 (the tools inside take no lock of their own:
-#   GTS31 (b), bin/lib/heavy.bash), its status the command's; the ticket goes when CMD ends.
+#   Takes a ticket (LOCK.queue/TIME-PID holding the process's start time, TIME the nanoseconds of the arrival: the order)
+#   and its state beside it (LOCK.queue/.s-TIME-PID: "STARTTIME STATE NEED-KIB", STATE wait, 1 or 2), waits until no
+#   earlier ticket is waiting (a holder's does not count; a ticket whose process is gone is removed by the next waiter),
+#   then takes a slot: slot 1 when free, else slot 2. A job that would run beside another (the other slot held) is admitted
+#   only when its declared need fits: MemAvailable less 2 GiB, less what the other slot's holders declared and have not
+#   reached yet (their declared need less their process tree's RSS), above HEAVY_MEM_GIB (default 24: a gate build peaks
+#   at about 22 GiB; `all`: the host's MemTotal, a job that never runs beside another). The head that does not fit waits;
+#   a later ticket that fits passes it only to run beside a holder (backfill, since 2026-11-24). CMD runs with ARBACE_HEAVY_HELD=1 (the tools inside take no lock of their own: GTS31
+#   (b), bin/lib/heavy.bash) and ARBACE_HEAVY_SLOT, its status the command's; the ticket goes when CMD ends.
 #   With ARBACE_HEAVY_HELD set already, CMD runs at once (the caller holds the lock).
 #
-# With plain flock: an agent running `flock LOCK CMD` takes no ticket. It competes with the head of
-# the queue alone, at the flock: it may come before the head (flock's unfairness, once), never
-# before the rest, and it never waits for the queue. Ticket holders among themselves are served in
-# order of arrival. The queue's state: `bin/heavy-lock --queue` lists the live tickets.
-# Environment: ARBACE_HEAVY_LOCK, HEAVY_LOCK_POLL (seconds between looks at the queue, default 2),
-# HEAVY_LOCK_WAITS (a file the seconds waited are appended to).
+# With plain flock: an agent running `flock LOCK CMD` takes no ticket. It competes for slot 1 with the head of the
+# queue alone (it may come before the head, flock's unfairness, once, never before the rest), it never waits for the
+# queue, and a ticket beside it needs the memory to fit. A ticket of the one-slot version (no state file beside it,
+# 2026-11-23's waiters during the change) waits for every earlier ticket and then for slot 1: a waiter after one takes
+# slot 2 only (never slot 1 before it), and always under the memory rule (the older one will hold slot 1).
+# The queue's state: `bin/heavy-lock --queue` lists the live tickets, each with its slot or "waiting".
+# Environment: ARBACE_HEAVY_LOCK, HEAVY_MEM_GIB, HEAVY_LOCK_POLL (seconds between looks at the queue, default 2),
+# HEAVY_LOCK_WAITS (a file the seconds waited are appended to), HEAVY_LOCK_MEMAVAIL_KIB (MemAvailable's stand-in: the tests).
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 main_root() {
@@ -25,6 +32,7 @@ main_root() {
     && [ "$(basename "$common")" = .git ] && dirname "$common" || echo "$root"
 }
 lock=${ARBACE_HEAVY_LOCK:-$(main_root)/.tmp/big.lock}
+lock2=$lock.2
 q=$lock.queue
 mkdir -p "$q" "$(dirname "$lock")" || exit 1
 
@@ -38,42 +46,162 @@ live() {
   st=$(starttime "$pid") || return 1
   [ "$st" = "$want" ]
 }
-# the live tickets in order, the dead removed
+# a ticket's state file (written before the ticket, so a ticket without one is the one-slot version's)
+state() { cat "$q/.s-$1" 2>"$q/.err"; }
+# the live tickets in order, the dead removed, and the state files of processes gone
 tickets() {
-  local t
+  local t s st
   for t in $(ls "$q" | LC_ALL=C sort); do
     case $t in .*) continue ;; esac
     if live "$t"; then echo "$t"; else rm -f "${q:?}/$t"; fi
   done
+  for s in "$q"/.s-*; do
+    [ -e "$s" ] || continue
+    t=${s##*/.s-}
+    read -r st _ < "$s" 2>"$q/.err" || continue
+    [ "$(starttime "${t##*-}")" = "$st" ] || rm -f "$s"
+  done
+}
+memtotal_kib() { awk '/^MemTotal:/ {print $2}' /proc/meminfo; }
+# the KiB a GiB figure ("24", "1.5", "all") stands for
+need_kib() {
+  if [ "$1" = all ]; then memtotal_kib; return; fi
+  awk -v g="$1" 'BEGIN { if (g !~ /^[0-9]+(\.[0-9]+)?$/) exit 1; printf "%d\n", g * 1048576 }'
+}
+# the slots held by plain flocks seen in /proc/locks (their holders' PIDs, a line a slot: "SLOT PID")
+lock_holders() {
+  local i1 i2
+  i1=$(stat -c %i "$lock" 2>"$q/.err"); i2=$(stat -c %i "$lock2" 2>"$q/.err")
+  awk -v i1="${i1:--}" -v i2="${i2:--}" '$3 != "->" && $2 == "FLOCK" {
+      n = split($6, f, ":"); if (f[n] == i1) print 1, $5; else if (f[n] == i2) print 2, $5 }' /proc/locks
 }
 
 if [ "${1:-}" = --queue ]; then
+  holders=$(lock_holders)
   for t in $(tickets); do
     pid=${t##*-}
-    echo "$t $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>"$q/.err" | cut -c1-160)"
+    read -r _ s nk <<< "$(state "$t")"
+    case ${s:-} in
+      wait) what="waiting (needs $(( nk / 1048576 )) GiB)" ;;
+      1|2) what="slot $s (needs $(( nk / 1048576 )) GiB)" ;;
+      *) # the one-slot version's: its flock(1), a child, holds slot 1, or it waits
+         what="waiting (one-slot version)"
+         for c in $(cat /proc/"$pid"/task/*/children 2>"$q/.err"); do
+           grep -qx "1 $c" <<< "$holders" && what="slot 1 (one-slot version)"
+         done ;;
+    esac
+    echo "$t $what: $(tr '\0' ' ' < "/proc/$pid/cmdline" 2>"$q/.err" | cut -c1-160)"
   done
+  # the plain flocks' holders, no ticket (a ticket's own flock(1) has exited: only a running flock(1) shows here)
+  while read -r s p; do
+    [ -n "${p:-}" ] && [ -e "/proc/$p" ] || continue
+    pp=$(awk '{print $4}' "/proc/$p/stat" 2>"$q/.err")
+    ls "$q" | grep -q -- "-$pp\$" && continue
+    echo "(no ticket) slot $s: $(tr '\0' ' ' < "/proc/$p/cmdline" 2>"$q/.err" | cut -c1-160)"
+  done <<< "$holders"
   exit 0
 fi
 [ $# -gt 0 ] || { sed -n '2,/^set -uo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2; exit 2; }
 [ -n "${ARBACE_HEAVY_HELD:-}" ] && exec "$@"
 
+need=$(need_kib "${HEAVY_MEM_GIB:-24}") || { echo "heavy-lock: HEAVY_MEM_GIB=$HEAVY_MEM_GIB: a number of GiB or all" >&2; exit 2; }
 t0=$(date +%s)
 me=$(date +%s%N)-$$
-starttime $$ > "$q/.$me" && mv "$q/.$me" "$q/$me" || exit 1
-trap 'rm -f "${q:?}/$me"' EXIT
+st0=$(starttime $$) || exit 1
+put_state() { echo "$st0 $1 $need" > "$q/.t-$me" && mv -f "$q/.t-$me" "$q/.s-$me"; }
+put_state wait || exit 1
+echo "$st0" > "$q/.$me" && mv "$q/.$me" "$q/$me" || exit 1
+trap 'rm -f "${q:?}/$me" "${q:?}/.s-$me" "${q:?}/.t-$me"' EXIT
 trap 'exit 143' TERM INT HUP
+exec {f1}>>"$lock" {f2}>>"$lock2" || exit 1
 poll=${HEAVY_LOCK_POLL:-2}
-announced=
+
+# the KiB the other holders (state 1 or 2) declared and have not reached yet: their need less their process tree's RSS
+unreached_kib() {
+  local t s hs=() pg
+  for t in "$@"; do
+    [ "$t" = "$me" ] && continue
+    read -r _ s nk <<< "$(state "$t")"
+    case ${s:-} in 1|2) hs+=("${t##*-}:${nk:-0}") ;; esac
+  done
+  [ ${#hs[@]} -gt 0 ] || { echo 0; return; }
+  pg=$(( $(getconf PAGESIZE) / 1024 ))
+  cat /proc/[0-9]*/stat 2>"$q/.err" | awk -v pg="$pg" -v hs="${hs[*]}" '
+    { pid = $1; l = $0; sub(/^.*\) /, "", l); split(l, f, " "); pp[pid] = f[2]; rss[pid] = f[22] * pg }
+    END { n = split(hs, h, " "); tot = 0
+      for (i = 1; i <= n; i++) { split(h[i], x, ":"); r = 0
+        for (p in pp) { c = p; d = 0; while (c != "" && c != 0 && d < 64) { if (c == x[1]) { r += rss[p]; break }; c = pp[c]; d++ } }
+        if (x[2] > r) tot += x[2] - r }
+      printf "%d\n", tot }'
+}
+# the memory rule for a job beside another
+fits() {
+  local avail un
+  avail=${HEAVY_LOCK_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}
+  un=$(unreached_kib "$@")
+  memmsg="MemAvailable $(( avail / 1048576 )) GiB less 2 GiB less $(( un / 1048576 )) GiB the other holders have not reached, against $(( need / 1048576 )) GiB (HEAVY_MEM_GIB)"
+  [ $(( avail - 2097152 - un )) -gt "$need" ]
+}
+
+announced= memsaid= slot= backfill= bf_seen=0 memmsg=
 while :; do
-  head=$(tickets | head -1)
-  [ "$head" = "$me" ] && break
+  live_t=$(tickets)
+  waiting_ahead= old_ahead= ahead_needs=
+  for t in $live_t; do
+    [ "$t" = "$me" ] && break
+    read -r _ s nk <<< "$(state "$t")"
+    case ${s:-} in
+      wait) waiting_ahead=1; ahead_needs="$ahead_needs ${nk:-0}" ;;
+      1|2) ;;
+      *) old_ahead=1 ;;   # the one-slot version's ticket: it waits for slot 1 or holds it
+    esac
+  done
+  # backfill (2026-11-24): when a slot is free beside a holder and no earlier waiting ticket fits there (each needs
+  # more than MemAvailable less 2 GiB less the holders' unreached need), a later ticket that fits takes it, so a small
+  # job runs beside a big one instead of idling behind a head that cannot fit; HEAVY_LOCK_BACKFILL=0 turns it off
+  backfill=
+  if [ -n "$waiting_ahead" ] && [ -z "$old_ahead" ] && [ "${HEAVY_LOCK_BACKFILL:-1}" != 0 ] && [ -n "$(lock_holders)" ]; then
+    avail=${HEAVY_LOCK_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}
+    room=$(( avail - 2097152 - $(unreached_kib $live_t) ))
+    backfill=1
+    for nk in $ahead_needs; do [ "$nk" -lt "$room" ] && { backfill=; break; }; done
+  fi
+  # the head keeps its turn: a backfill tries only after the rule held on two looks in a row
+  if [ -n "$backfill" ]; then bf_seen=$(( bf_seen + 1 )); [ "$bf_seen" -ge 2 ] || backfill=; else bf_seen=0; fi
+  if [ -z "$waiting_ahead" ] || [ -n "$backfill" ]; then
+    # slot 1 unless a one-slot ticket is ahead (it takes slot 1 when its turn comes), else slot 2
+    if [ -z "$old_ahead" ] && flock -n "$f1"; then slot=1
+    elif flock -n "$f2"; then slot=2
+    fi
+    if [ -n "$slot" ]; then
+      if [ -n "$backfill" ]; then
+        # a backfill runs only beside a holder: with the other slot free the head may run alone, so give way
+        if [ "$slot" = 1 ]; then other=$f2; else other=$f1; fi
+        if ! flock -n "$other"; then fits $live_t && break
+        else flock -u "$other"; fi
+      else
+      # alone (slot 1 taken, slot 2 free): no memory rule; beside another: its need must fit
+      if [ "$slot" = 1 ] && flock -n "$f2" && flock -u "$f2"; then break; fi
+      fits $live_t && break
+      fi
+      [ "$slot" = 1 ] && flock -u "$f1" || flock -u "$f2"
+      slot=
+      [ -z "$memsaid" ] && [ -n "$memmsg" ] && echo "heavy-lock: next in turn for $lock, waiting for memory to run beside the other slot's job ($memmsg)" >&2
+      memsaid=1
+    fi
+  fi
   if [ -z "$announced" ]; then
-    echo "heavy-lock: waiting in turn for $lock ($(tickets | grep -n -x "$me" | cut -d: -f1) in the queue)" >&2
+    echo "heavy-lock: waiting in turn for $lock ($(grep -n -x "$me" <<< "$live_t" | cut -d: -f1) in the queue)" >&2
     announced=1
   fi
   sleep "$poll"
 done
-# once the lock is held: the seconds waited appended to HEAVY_LOCK_WAITS when set (bin/gate's step's
-# .waits: the summary's "its tools waited ... for the lock"), then CMD
-flock "$lock" env ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" bash -c \
-  '[ -z "${HEAVY_LOCK_WAITS:-}" ] || echo $(( $(date +%s) - $1 )) >> "$HEAVY_LOCK_WAITS"; shift; exec "$@"' heavy-lock "$t0" "$@"
+put_state "$slot" || exit 1
+# the slot held: the seconds waited appended to HEAVY_LOCK_WAITS when set (bin/gate's step's .waits: the summary's "its
+# tools waited ... for the lock"), then CMD, which inherits the held slot's descriptor (as flock(1)'s child did), not the other's
+[ -z "${HEAVY_LOCK_WAITS:-}" ] || echo $(( $(date +%s) - t0 )) >> "$HEAVY_LOCK_WAITS"
+if [ "$slot" = 1 ]; then
+  ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=1 "$@" {f2}>&-
+else
+  ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=2 "$@" {f1}>&-
+fi

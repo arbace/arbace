@@ -78,7 +78,7 @@
 #                          contexts set aside, per item; a negative control (EXPAND_VERBOSE=1: the first differences; EXPAND_SPANS=1:
 #                          the root file's spans at context 0 kept; EXPAND_DUMP=DIR: our crates written there; EXPAND_TRACE=1)
 #   bin/rust-front pack-compare-test   queue 443: the instance judge's pure cases (test/rust/front/pack_compare_test.ae)
-#   bin/rust-front lib-unit census|keys CRATE|inline-keys CRATE|export CRATE [--add]|build CRATE|compare CRATE [NAME...]
+#   bin/rust-front lib-unit census|keys CRATE|inline-keys CRATE [--record]|export CRATE [--add]|build CRATE|compare CRATE [NAME...]
 #                          C6, RUST-90 S5 (doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan (write-ahead)",
 #                          "As built: C6's first slice"; arbace.rust.front.lib-unit): census: the closure of std's IR (rsi's std build
 #                          at test/rust/runtime/ir.sha256: RSI_STD_DIR's, the checkout's or the main checkout's .tmp/rsi/std/ir, else
@@ -89,7 +89,10 @@
 #                          identities); compare: codegen's define of each against std's IR's of its symbol, after RF3's normalizer, a
 #                          crossed control; all in .tmp/rust-front/lib-unit/, light (each step under 2.5 GiB); C6-4: inline-keys CRATE
 #                          adds the #[inline(always)] callees the builds wanted to CRATE's next export, `export core --add` exports only
-#                          the keys the export lacks (their module files) and appends them; build takes RF_CORE_ATTRS (core-attrs')
+#                          the keys the export lacks (their module files) and appends them; build takes RF_CORE_ATTRS (core-attrs');
+#                          queue 566 (566-1 (a)): every export reads the committed wanted keys, test/rust/front/lib-unit-CRATE-keys.txt
+#                          (inline-keys also takes `lib-unit l2|const wanted`; --record merges the cache's into that list), and
+#                          LIB_UNIT_DIR names another cache directory
 #   bin/rust-front std-names-native
 #                          C4-1 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: C4-1"; arbace.rust.front.std-names): std's names (the
 #                          helper's std-names.edn's forms) from the crates' sources: core's, alloc's, std_detect's and std's module
@@ -570,7 +573,11 @@ case ${1:-} in
     else echo "std-crates: wrote $out"; fi ;;
   lib-unit)
     shift; sub=${1:-}; shift || true
-    lu=$work/lib-unit; mkdir -p "$lu"
+    # queue 566 (566-1 (a), the user's): LIB_UNIT_DIR another cache directory (a fresh cache rebuilt from the committed lists)
+    lu=${LIB_UNIT_DIR:-$work/lib-unit}; mkdir -p "$lu"
+    # 566-1 (a): the keys the builds wanted (the always-inliner's, a static's or a constant's evaluation's, L2's) committed as test
+    # data, test/rust/front/lib-unit-CRATE-keys.txt, read by every export beside CRATE-keys.txt and the cache's CRATE-inline-keys.txt
+    lib_wanted() { [ -s "$root/test/rust/front/lib-unit-$1-keys.txt" ] && echo "$root/test/rust/front/lib-unit-$1-keys.txt"; }
     # std's IR at the pin: rsi's std build, here or in the main checkout, else the oracle store's pack rust-std-ir
     lib_std_ir() {
       local m d; m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
@@ -599,7 +606,7 @@ case ${1:-} in
       export)
         c=${1:?lib-unit export CRATE}; [ -s "$lu/$c-keys.txt" ] || { echo "lib-unit: no $lu/$c-keys.txt (bin/rust-front lib-unit keys $c)" >&2; exit 1; }
         . "$root/bin/lib/repr-rust/core-build.bash"; libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
-        sort -u "$lu/$c-keys.txt" $( [ -s "$lu/$c-inline-keys.txt" ] && echo "$lu/$c-inline-keys.txt") > "$lu/$c-export-keys.txt"
+        sort -u "$lu/$c-keys.txt" $( [ -s "$lu/$c-inline-keys.txt" ] && echo "$lu/$c-inline-keys.txt") $(lib_wanted "$c") > "$lu/$c-export-keys.txt"
         if [ "$c" = core ]; then
           # rust-c6c: the interface's extra files lib-unit's callees need beside core-iface-extra.txt's (ub_checks.rs)
           export CORE_IFACE_EXTRA=${CORE_IFACE_EXTRA:-test/rust/front/lib-unit-iface-extra.txt}
@@ -643,11 +650,18 @@ case ${1:-} in
       inline-keys)
         # C6-4: the keys of CRATE's `#[inline(always)]` callees the builds wanted (each build's log: `lib-unit inline wanted DEF`,
         # any crate's build: an item of alloc inlines core's), added to CRATE's keys for its next export
-        # ($lu/CRATE-inline-keys.txt, which the export reads beside CRATE-keys.txt; the build's items stay CRATE-keys.txt's)
+        # ($lu/CRATE-inline-keys.txt, which the export reads beside CRATE-keys.txt; the build's items stay CRATE-keys.txt's);
+        # queue 566 (566-1 (a)): L2's and a constant's evaluation's wanted keys too (`lib-unit l2 wanted`, `lib-unit const wanted`),
+        # and `--record` merges the cache's into the committed list, test/rust/front/lib-unit-CRATE-keys.txt
         c=${1:?lib-unit inline-keys CRATE}; touch "$lu/$c-inline-keys.txt"
-        { cat "$lu/$c-inline-keys.txt"; cat "$lu"/*-build.log 2>/dev/null | sed -n "s/^lib-unit inline wanted \($c::[^ ]*\).*/\1/p" | sed "s/^$c:://; s/::/-/g"; } | sort -u > "$lu/$c-inline-keys.txt.new"
+        { cat "$lu/$c-inline-keys.txt"; cat "$lu"/*-build.log 2>/dev/null | sed -n -E "s/^lib-unit (inline|l2|const) wanted ($c::[^ ]*).*/\2/p" | sed "s/^$c:://; s/::/-/g"; } | sort -u > "$lu/$c-inline-keys.txt.new"
         mv "$lu/$c-inline-keys.txt.new" "$lu/$c-inline-keys.txt"
-        echo "lib-unit inline-keys: $c: $(wc -l < "$lu/$c-inline-keys.txt") keys of #[inline(always)] callees wanted" ;;
+        echo "lib-unit inline-keys: $c: $(wc -l < "$lu/$c-inline-keys.txt") keys the builds wanted"
+        if [ "${2:-}" = --record ]; then
+          kf=$root/test/rust/front/lib-unit-$c-keys.txt
+          sort -u "$lu/$c-inline-keys.txt" $( [ -s "$kf" ] && echo "$kf") > "$kf.new" && mv "$kf.new" "$kf"
+          echo "lib-unit inline-keys: $c: $(wc -l < "$kf") keys in test/rust/front/lib-unit-$c-keys.txt"
+        fi ;;
       build)
         c=${1:?lib-unit build CRATE}; std=$(lib_std_ir) || exit 1
         [ -s "$lu/native-$c-items.edn" ] || { echo "lib-unit: no $lu/native-$c-items.edn (bin/rust-front lib-unit export $c)" >&2; exit 1; }

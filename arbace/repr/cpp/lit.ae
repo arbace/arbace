@@ -186,10 +186,12 @@
                               ;; a narrow char is signed: clang keeps its value sign-extended, as an unsigned int
                               [(if (> v 127) (- 4294967296 (- 256 v)) v) "char"])
            :else [(reduce (fn [a u] (bit-and (bit-or (bit-shift-left (long a) 8) (bit-and (long u) 0xff)) 0xffffffff)) 0 us) "int"])
-      "u8" [(long (first us)) (if (char8? year) "char8_t" "char")]
-      "u" [(long (first us)) "char16_t"]
-      "U" [(long (first us)) "char32_t"]
-      "L" [(long (first us)) "wchar_t"])))
+      ;; (cpp-rind: an empty one, `u''`, the lexer's error "empty character constant", valued 0 as GCC recovers; ext/utf16-4.C had
+      ;; crashed here)
+      "u8" [(long (or (first us) 0)) (if (char8? year) "char8_t" "char")]
+      "u" [(long (or (first us) 0)) "char16_t"]
+      "U" [(long (or (first us) 0)) "char32_t"]
+      "L" [(long (or (first us) 0)) "wchar_t"])))
 
 (defn literal-c-chars
   "Round 54, fifth pass: a character or string literal token's text as its prefix and its c-chars (s-chars), each [kind
@@ -326,6 +328,9 @@
                   (str (subs ds 0 whole) "." (subs ds whole))
                   (str "0." (apply str (repeat (- whole) "0")) ds)))))))
 
+;; cpp-extfloat: GCC's floating suffixes (arbace.repr.cpp.diag binds it, the own front end's)
+(def ^:dynamic *gnu-floats* false)
+
 (defn float-literal
   "A floating pp-number's literal: [value type] as clang prints them, or nil when it is not a floating literal."
   [^String s]
@@ -334,14 +339,22 @@
                         (re-matches #"([0-9]*\.[0-9]*(?:[eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)([a-zA-Z0-9]*)" s))]
     (when (and body (re-find #"[0-9]" body))
       (let [sf (str/lower-case sf)
-            t (case sf "" "double" "f" "float" "l" "long double" "f16" "_Float16" "bf16" "__bf16" "f128" "__float128" "q" "__float128" "w" "long double" nil)]
+            t (if *gnu-floats*
+                ;; (cpp-extfloat: GCC's suffixes, [lex.fcon]'s C++23 f16 f32 f64 f128 bf16 and GNU's f32x f64x q w; _Float128 and
+                ;; __float128 distinct types, w __float80's, the x87 format, long double's on x86-64)
+                (case sf "" "double" "f" "float" "l" "long double" "f16" "_Float16" "bf16" "__bf16" "f32" "_Float32" "f64" "_Float64"
+                  "f128" "_Float128" "f32x" "_Float32x" "f64x" "_Float64x" "q" "__float128" "w" "long double" nil)
+                (case sf "" "double" "f" "float" "l" "long double" "f16" "_Float16" "bf16" "__bf16" "f128" "__float128" "q" "__float128" "w" "long double" nil))]
         (when t
           (let [[n d] (exact-value body)]
             (case t
-              "double" [(let [v (.doubleValue (BigDecimal. ^BigInteger n))
-                              x (if (= d BigInteger/ONE) v (Double/parseDouble (if (re-find #"^0[xX]" body) body body)))]
-                          (str x))
-                        "double"]
+              ("double" "_Float64" "_Float32x")
+              [(let [v (.doubleValue (BigDecimal. ^BigInteger n))
+                     x (if (= d BigInteger/ONE) v (Double/parseDouble (if (re-find #"^0[xX]" body) body body)))]
+                 (str x))
+               t]
               "float" (let [[m e] (round-to n d 24)] [(apfloat-string m e 24) "float"])
+              "_Float32" (let [[m e] (round-to n d 24)] [(apfloat-string m e 24) t])
+              ("_Float64x") (let [[m e] (round-to n d 64)] [(apfloat-string m e 64) t])
               "long double" (let [[m e] (round-to n d 64)] [(apfloat-string m e 64) "long double"])
               (let [[m e] (round-to n d 113)] [(apfloat-string m e 113) t]))))))))

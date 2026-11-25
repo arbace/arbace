@@ -4226,6 +4226,24 @@
     (when ser (swap! (state cls) update :serial-nodes (fnil conj []) node))
     node))
 
+;; javac's synthetic lambda methods (the user's decision of 2026-11-23, JD7; java-design-1123): javac lowers each
+;; lambda, and the method references LambdaToMethod and TransTypes make lambdas of, into a private synthetic method of
+;; the class (lambda$M$N, analyze-lambda's :name; the captured locals first in the order the body first names them,
+;; then the descriptor's parameters erased; static unless the body uses this). The Java forms run a lambda as an
+;; adapter, no method; reflection lists these as javac's class file has them (PrivateLambdas, CaptureVarOrder,
+;; ProtectedInaccessibleMethodRefTest2), the interpreter and j2g each publishing them as members that cannot be called
+(defn synthetic-lambdas
+  "Class n's synthetic lambda methods as javac makes them, [{:name :desc :flags}] in the order the analysis met the
+  lambdas (empty before its code is analyzed)."
+  [n]
+  (vec (for [ln (:lambda-nodes @(state n))
+             :let [b (:boundary ln)
+                   caps @(:captures b)
+                   [ps r] (t/parse-method-desc (:inst-desc ln))]]
+         {:name (:name ln)
+          :desc (t/method-desc (concat (map :type caps) ps) r)
+          :flags (bit-or 0x1000 Opcodes/ACC_PRIVATE (if @(:uses-this b) 0 Opcodes/ACC_STATIC))})))
+
 (defn- arg-stub [d] {:op :local :type d :b {:id -1 :type d}})
 
 (defn- desc-tag
@@ -4271,6 +4289,14 @@
   [m args]
   (mapv (fn [a p] (if (t/ref? p) (list 'cast (symbol (t/desc->class-name p)) a) a))
         args (first (t/parse-method-desc (:desc m)))))
+
+(defn- protected-elsewhere?
+  "Is method m protected and declared in another package than the class of the reference (TransTypes'
+  isProtectedInSuperClassOfEnclosingClassInOtherPackage): javac makes the reference a lambda (needsConversionToLambda),
+  a synthetic method of the class (synthetic-lambdas)?"
+  [actx m]
+  (and (has? (:flags m) Opcodes/ACC_PROTECTED)
+       (not= (t/package-of (:owner m)) (t/package-of (:class actx)))))
 
 (defn analyze-method-ref [actx [_ fi & more :as form]]
   (let [[sig more] (if (vector? (first more)) [(first more) (rest more)] [nil more])
@@ -4347,7 +4373,7 @@
             mn (if (str/starts-with? mname ".") (subs mname 1) mname)
             cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va] (select-method actx cands (mapv arg-stub ps) (str "method " mn) param-tags)]
-        (if va
+        (if (or va (protected-elsewhere? actx m))
           ;; javac evaluates and checks the receiver, keeps it in a local and makes a lambda
           ;; capturing it for the variable arity adaptation
           (let [sym (gensym "rec$")
@@ -4370,7 +4396,7 @@
             cands (->> (env/member-methods cn mn) (remove static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va cast?] (select-ref actx cands (mapv arg-stub (rest ps)) (str "method " mn) param-tags)]
         (when (empty? ps) (fail "An unbound method reference needs the receiver as first parameter"))
-        (if (or va cast?)
+        (if (or va cast? (protected-elsewhere? actx m))
           (ref-as-lambda actx fi ps ret (fn [[r & args]] (list* '. r (with-meta (symbol mn) {:param-tags (:param-tags (meta msym))})
                                                                (if cast? (cast-args m args) args))))
         (let [owner (ref-owner cn m)]
@@ -4380,7 +4406,7 @@
       :else
       (let [cands (->> (env/member-methods cn mname) (filter static-flag?) (filter #(env/accessible? (:class actx) %)))
             [m va cast?] (select-ref actx cands (mapv arg-stub ps) (str "static method " mname) param-tags)]
-        (if (or va cast?)
+        (if (or va cast? (protected-elsewhere? actx m))
           (ref-as-lambda actx fi ps ret (fn [args] (list* '. (symbol (str/replace cn "/" ".")) (with-meta (symbol mname) {:param-tags param-tags})
                                                           (if cast? (cast-args m args) args))))
         (assoc base :kind :static :owner (:owner m) :name mname :desc (:desc m) :itf (env/interface? (:owner m)))))))))

@@ -485,8 +485,10 @@
   (m/translated? "java/lang/reflect/Parameter"))
 
 (def parameters-roots
-  "What the getParameters methods j2g writes call (JCS280 (a)): Parameter's constructor, a root of the program."
-  [["java/lang/reflect/Parameter" "<init>" "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V"]])
+  "What the getParameters methods j2g writes call (JCS280 (a)): Parameter's constructor, a root of the program; since
+java-bytecode-1122 MalformedParametersException's (a class defined from bytes' MethodParameters)."
+  [["java/lang/reflect/Parameter" "<init>" "(Ljava/lang/String;ILjava/lang/reflect/Executable;I)V"]
+   ["java/lang/reflect/MalformedParametersException" "<init>" "(Ljava/lang/String;)V"]])
 
 (def access-flags-roots
   "What the accessFlags methods j2g writes call (JCS273): AccessFlagSupport's three methods, roots of the program."
@@ -683,16 +685,15 @@
                           '(.ArrayType__Class c)))])))
      ;; F26: Class as jdk26u's Constable once ClassDesc is in the world: describeConstable is its descriptor's
      ;; ClassDesc (jrt has no hidden classes, whose would be empty)
-     (when (and (m/hand-written? "java/lang/Class") (m/translated? "java/lang/constant/Constable")
+     ;; (jrt's Class defines neither method; main.ae's scan names both for the call sites, java-bytecode-1122, so the
+     ;; scan's method set is no guard here: they are written whenever Optional and ClassDesc are, which main.ae roots)
+     (when (and (m/hand-written? "java/lang/Class")
                 (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/ClassDesc"))
-       (let [have (jrt/struct-methods (:jrt m/*w*) "Class")]
-         (remove nil?
-                 [(when-not (contains? have "Is_Constable") '(go/method Is_Constable [^{:tag (* Class)} c]))
-                  (when-not (contains? have "DescribeConstable__Optional")
-                    '(go/method DescribeConstable__Optional
-                       "DescribeConstable__Optional is Class.describeConstable: Optional.of the ClassDesc of its descriptor.\n"
-                       ^{:tag (* Optional)} [^{:tag (* Class)} c]
-                       (Optional_Of_O__Optional (ClassDesc_OfDescriptor_String__ClassDesc (.DescriptorString__String c)))))])))
+       ['(go/method Is_Constable [^{:tag (* Class)} c])
+        '(go/method DescribeConstable__Optional
+           "DescribeConstable__Optional is Class.describeConstable: Optional.of the ClassDesc of its descriptor.\n"
+           ^{:tag (* Optional)} [^{:tag (* Class)} c]
+           (Optional_Of_O__Optional (ClassDesc_OfDescriptor_String__ClassDesc (.DescriptorString__String c))))])
      ;; Runtime.Version's parts of translated types (JCS304 (b) with JCS293, doc/classes/JAVA-DEFERRED-TRIAGE.md,
      ;; "As built: JCS304 (b), JCS293"): pre, build and optional as Optionals, version as List.of the numbers; jrt's
      ;; Runtime$Version (system.go) holds the parts (main.ae's world-scan names these methods, its roots their calls)
@@ -847,10 +848,25 @@ module is this one, and the packages of module_table.ae for a named module, as a
        (for [t ['Method 'Constructor]]
          (list 'go/method 'GetParameters__Parameter1
                (str "GetParameters__Parameter1 is " t ".getParameters (Executable's): the synthesized parameters, arg0 ... with
-modifiers 0 (jdk26u's synthesizeAllParams: no MethodParameters records in the Go build).\n")
+modifiers 0 (jdk26u's synthesizeAllParams: no MethodParameters records in the Go build); a class defined from bytes'
+MethodParameters (java-bytecode-1122: classdata.ae's W records) by jdk26u's privateGetParameters and verifyParameters.\n")
                (with-meta [(tag 'e (list '* t))] {:tag '(* RefArray)})
                '(let [n (.GetParameterCount__I e)
-                      a (NewRefArray Parameter_class n)]
+                      a (NewRefArray Parameter_class n)
+                      (values names flags bad ok) (executableParameters e)]
+                  (when ok
+                    (when bad
+                      (panic (MalformedParametersException_New_String (Str "Invalid constant pool index"))))
+                    (when (!= (conv int32 (len names)) n)
+                      (panic (MalformedParametersException_New_String (Str "Wrong number of parameters in MethodParameters attribute"))))
+                    (range [i nm names]
+                      (when (and (!= nm nil)
+                                 (or (== (len (.String nm)) 0) (strings/ContainsAny (.String nm) ".;[/")))
+                        (panic (MalformedParametersException_New_String (Str (+ "Invalid parameter name \"" (.String nm) "\"")))))
+                      (when (!= (bit-and (aget flags i) (bit-not (conv int32 0x9010))) 0)
+                        (panic (MalformedParametersException_New_String (Str "Invalid parameter modifiers"))))
+                      (.Store a (conv int32 i) (Parameter_New_String_I_Executable_I nm (aget flags i) e (conv int32 i))))
+                    (return a))
                   (for [i (conv int32 0)] (< i n) (inc! i)
                     (.Store a i (Parameter_New_String_I_Executable_I (Str (+ "arg" (.String (StrOfInt i)))) 0 e i)))
                   (return a)))))
@@ -1026,6 +1042,13 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                 (range [k v kv]
                   (when (!= v nil)
                     (System_SetProperty_String_String__String (Str k) v))))))
+     ;; System.setProperties(props) as translated code calls it (m/j2g-static?; java-design-1123: GetSystemProperties, t04794)
+     (when (and (m/translated? "java/util/Properties") (m/translated? "java/util/Iterator"))
+       (list 'go/func 'System_SetProperties_Properties__V
+             "System_SetProperties_Properties__V is System.setProperties(props) as translated code calls it
+(m/j2g-static?).\n"
+             [(tag 'p (m/go-type :jrt "Ljava/util/Properties;"))]
+             '(J2g_SystemSetProperties p)))
      (when (m/translated? "java/util/Properties")
        (list 'go/func 'System_GetProperties__Properties
              "System_GetProperties__Properties is System.getProperties() as translated code calls it
@@ -1324,7 +1347,14 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
       ;; an abstract class's public constructors, so that reflection finds them as the JVM's
       ;; (Constructor.newInstance: InstantiationException; the evaluator's new of an abstract
       ;; class: InstantiationError), without a body: no object of the class is made in Go
-      {:methods methods :ctors (concat ctors absent-ctors abstract-ctors) :fields fields})))
+      ;; a --program's own class's synthetic lambda methods as javac makes them (the user's JD7, 2026-11-23:
+      ;; a/synthetic-lambdas), listed as absent ones are (m: jrt's entry throws): j2g runs a lambda as its adapter
+      (let [synth (when own
+                    (for [{:keys [name desc flags]} (a/synthetic-lambdas n)
+                          :let [[ps r] (t/parse-method-desc desc)]]
+                      (do (run! cls ps) (cls r)
+                          {:line (str "m" (bit-and flags 0x1fff) " " name " " (dotted-desc desc))})))]
+        {:methods (concat methods synth) :ctors (concat ctors absent-ctors abstract-ctors) :fields fields}))))
 
 (defn class-registration
   "C_class (Define, hierarchy only) and the init function setting its function and table

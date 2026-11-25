@@ -207,3 +207,68 @@
     (.Wait wg)
     (when (or (!= (.Load testD_runs) 1) (!= (.Load bad) 0))
       (.Errorf t "runs %d, %d saw the class uninitialized" (.Load testD_runs) (.Load bad)))))
+
+;; ---------------------------------------------------------------------------------------
+;; A cycle of static initializers completed only from one side (queue 491): java.lang.constant's
+;; ConstantDescs (c) and PrimitiveClassDescImpl (p). p's initializer constructs its instances,
+;; whose constructor reads c's BSM_PRIMITIVE_CLASS; c's initializer stores that, then reads p's
+;; CD_int into its own and needs it (BSM_CLASS_DATA_AT's ofConstantBootstrap: requireNonNull). Entered from p,
+;; JVMS 5.5 gives c a null CD_int and c's initializer fails; BootInit (RunMain) enters it from c.
+
+(go/type initCycle
+  "initCycle is the two classes' states, their statics and their C_Init functions.\n"
+  (struct ^ClassInit cInit ^ClassInit pInit
+          ^any cBSM ^any cInt ^any pInt
+          ^{:tag (func [])} cInitF ^{:tag (func [])} pInitF))
+
+(go/func newInitCycle ^{:tag (* initCycle)} []
+  (let [y (addr (lit initCycle))
+        cClinit (fn []
+                  (set! (.-cBSM y) (Object_New))
+                  ((.-pInitF y))
+                  (set! (.-cInt y) (.-pInt y))
+                  (when (== (.-cInt y) nil)
+                    (panic (NPE))))
+        pClinit (fn []
+                  ((.-cInitF y))
+                  (when (== (.-cBSM y) nil)
+                    (panic (NPE)))
+                  (set! (.-pInt y) (Object_New)))]
+    (set! (.-cInitF y) (fn [] (when (not (.Done (addr (.-cInit y)))) (.Run (addr (.-cInit y)) cClinit))))
+    (set! (.-pInitF y) (fn [] (when (not (.Done (addr (.-pInit y)))) (.Run (addr (.-pInit y)) pClinit))))
+    y))
+
+(go/var
+  [^{:tag (* initCycle)} cycleUnbooted (newInitCycle)]
+  [^{:tag (* initCycle)} cycleBooted (newInitCycle)])
+
+(go/func init []
+  (Define (addr (lit ClassInfo :Name "arbace.test.unbooted.ConstantDescs" :Kind KindClass :Super Object_class
+                     :Init (.-cInitF cycleUnbooted))))
+  (Define (addr (lit ClassInfo :Name "arbace.test.booted.ConstantDescs" :Kind KindClass :Super Object_class
+                     :Init (.-cInitF cycleBooted)))))
+
+(go/func TestInitCycleFromPrimitiveClassDescImpl
+  "The control: entered from PrimitiveClassDescImpl's side with no class initialized at boot, the
+cycle fails as JVMS 5.5 (JLS 12.4.2) has it, as on a JDK for a program whose first use of
+java.lang.constant precedes its first invokedynamic: ConstantDescs' initializer sees CD_int null.\n"
+  [^{:tag (* testing/T)} t]
+  (let [got (res (fn ^string [] ((.-pInitF cycleUnbooted)) "x"))]
+    (when (or (!= got "!java.lang.ExceptionInInitializerError") (!= (.-cInt cycleUnbooted) nil))
+      (.Errorf t "entered from p without boot: %q, c's CD_int %v" got (.-cInt cycleUnbooted)))))
+
+(go/func TestBootInitConstantDescs
+  "BootInit initializes ConstantDescs first, as RunMain does: then the program's entry from
+PrimitiveClassDescImpl's side finds both classes complete, the same CD_int in each.\n"
+  [^{:tag (* testing/T)} t]
+  (let [found false]
+    (range [_ n bootClasses]
+      (when (== n "java.lang.constant.ConstantDescs")
+        (set! found true)))
+    (when (not found)
+      (.Errorf t "bootClasses %v lacks java.lang.constant.ConstantDescs" bootClasses)))
+  ;; a name the closed world lacks is passed over
+  (BootInit (lit (slice string) "arbace.test.NoSuchClass" "arbace.test.booted.ConstantDescs"))
+  (let [got (res (fn ^string [] ((.-pInitF cycleBooted)) "x"))]
+    (when (or (!= got "x") (== (.-cInt cycleBooted) nil) (!= (.-cInt cycleBooted) (.-pInt cycleBooted)))
+      (.Errorf t "entered from p after boot: %q, c's CD_int %v, p's %v" got (.-cInt cycleBooted) (.-pInt cycleBooted)))))

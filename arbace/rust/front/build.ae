@@ -1477,6 +1477,11 @@
                        (let [tgt (nth @blocks (:next node))] (when (not= tgt b) (goto! b tgt))))))))
     @blocks))
 
+;; queue 565 (C3): a region scope's span where it is known (an expression's scope, a body's arguments scope), so a value's drop
+;; carries schedule_drop's source info, the scope's end point (`end_point(region_scope.span)`): the span drop elaboration's
+;; Drop::drop call takes (its caller location, the record's loc); only the body file's own spans ([l1 c1 l2 c2])
+(defn- note-region-span! [region sp] (when (and (vector? sp) (= 4 (count sp))) (upd! assoc-in [:region-spans region] sp)))
+
 (defn- push-scope! [region] (upd! update :scopes conj {:region region :source-scope (:source-scope (st)) :drops [] :moved [] :cached nil}))
 
 (defn- scope-index [region]
@@ -1561,6 +1566,7 @@
   `(let [ss# (:source-scope (st))
          _# (lint-scope! (:lint ~x))
          _# (push-scope! (:region ~x))
+         _# (note-region-span! (:region ~x) (:span ~x))
          r# (do ~@body)
          [bb# v#] (if (vector? r#) r# [r# nil])
          bb# (pop-scope! (:region ~x) bb#)]
@@ -1573,6 +1579,8 @@
   (let [ss (:scopes (st))
         i (or (last (keep-indexed (fn [i s] (when (= region (:region s)) i)) ss)) (unsupported "a drop's scope" region))]
     (when (= kind :value)
+      (when-let [[_ _ l2 c2] (get (:region-spans (st)) region)]
+        (when-not (get (:drop-spans (st)) local) (upd! assoc-in [:drop-spans local] [l2 (max 1 (dec c2))])))
       (doseq [j (range i (count ss))] (upd! assoc-in [:scopes j :cached] nil)))
     (upd! update-in [:scopes i :drops] conj {:local local :kind kind})))
 
@@ -1835,6 +1843,9 @@
         (and (= :char (first from)) (integral? to)) "IntToInt"
         (and (= [:uint "u8"] from) (= :char (first to))) "IntToInt"
         (and (= :ptr (first from)) (integral? to)) "PointerExposeProvenance"
+        ;; rust-l1 (C6): a function pointer's address (CastTy::FnPtr to Int: stack_overflow's `signal_handler as unsafe extern
+        ;; "C" fn(..) as sighandler_t`)
+        (and (= :fnptr (first from)) (integral? to)) "PointerExposeProvenance"
         (and (integral? from) (= :ptr (first to))) "PointerWithExposedProvenance"
         (and (= :fndef (first from)) (= :fnptr (first to))) "PointerCoercion(ReifyFnPointer(Safe), AsCast)"
         (and (integral? from) (= :float (first to))) "IntToFloat"
@@ -3301,7 +3312,9 @@
 (defn- finish
   "Builder::finish: the body map in MIR forms"
   [d name kind n-args ret]
-  (let [b (finish* d name kind n-args ret)]
+  (let [b (finish* d name kind n-args ret)
+        ;; queue 565: the values' drop spans by local (schedule-drop!'s), for ElaborateDrops' Drop::drop calls
+        b (if-let [ds (not-empty (:drop-spans (st)))] (assoc b :drop-spans ds) b)]
     (if *after-finish* (*after-finish* b) b)))
 
 (defn- finish*
@@ -3521,7 +3534,11 @@
               (terminate! bb '(return))
               (let [blocks (build-drop-tree-mir! (:unwind (st)) :unwind nil)]
                 (when-let [r (nth blocks 0)] (terminate! r '(resume))))
-              (finish d name :anon-const 0 t))))))))
+              ;; queue 566 (C6 L1): the typeck root's closures, as build-body's (core-check's export writes a closure type's
+              ;; data from them: thread_local!'s `const { .. }` closure in LOCAL_PANIC_COUNT's)
+              (cond-> (finish d name :anon-const 0 t)
+                (seq closures) (assoc :root-closures (into {} (for [[hid ci] closures :when (= :closure (first (:ty ci)))]
+                                                                [(second (:ty ci)) {:hir-id hid :kind (:kind ci) :upvars (mapv :ty (:captures ci))}])))))))))))
 
 (defn anon-const-body
   "An anonymous constant of an array type's length or a repeat's count (`[T; 3]`, `[x; 3]`): its literal as usize"
@@ -3598,6 +3615,7 @@
             (upd! update :source-scopes conj [nil nil])
             (let [call-site [(:hir-id body-expr) :call-site]
                   arg-scope [(:hir-id body-expr) :arguments]]
+              (note-region-span! arg-scope (:span body-expr))
               (in-scope call-site
                 (let [ret-block
                       (in-breakable-scope nil (place 0)

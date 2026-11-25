@@ -1,0 +1,236 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/ProviderList.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss)
+
+(import '(java.lang.reflect Constructor InvocationTargetException)
+        '(java.security Provider Security)
+        '(java.util ArrayList HashMap HashSet Iterator Objects)
+        '(org.ietf.jgss GSSException Oid)
+        '(sun.security.jgss.spi MechanismFactory)
+        '(sun.security.jgss.wrapper NativeGSSFactory SunNativeProvider))
+
+(defclass ^:public ^:final ProviderList
+  (field ^:private ^:static ^:final ^String PROV_PROP_PREFIX "GssApiMechanism.")
+
+  (field ^:private ^:static ^:final ^int PROV_PROP_PREFIX_LEN (.length PROV_PROP_PREFIX))
+
+  (field ^:private ^:static ^:final ^String SPI_MECH_FACTORY_TYPE
+    "sun.security.jgss.spi.MechanismFactory")
+
+  (field ^:public ^:static ^:final ^Oid DEFAULT_MECH_OID)
+
+  (static-initializer
+    (let [^:mutable ^Oid defOid nil
+          defaultOidStr (System/getProperty "sun.security.jgss.mechanism")]
+      (when (some? defaultOidStr) (set! defOid (GSSUtil/createOid defaultOidStr)))
+      (set! DEFAULT_MECH_OID (if (nil? defOid) GSSUtil/GSS_KRB5_MECH_OID defOid))))
+
+  (field ^:private ^:final ^{:tag (ArrayList PreferencesEntry)} preferences (ArrayList. 5))
+
+  (field ^:private ^:final ^{:tag (HashMap PreferencesEntry MechanismFactory)} factories
+    (HashMap. 5))
+
+  (field ^:private ^:final ^{:tag (HashSet Oid)} mechs (HashSet. 5))
+
+  (field ^:private ^:final ^GSSCaller caller)
+
+  (constructor ^:public [this ^GSSCaller caller ^boolean useNative]
+    (set! (.-caller this) caller)
+    (let [^:mutable ^Provider/1 provList nil]
+      (if useNative
+          (do (set! provList (new Provider/1 1)) (aset provList 0 (SunNativeProvider.)))
+          (set! provList (Security/getProviders)))
+      (loop [^int i 0]
+        (when (< i (alength provList))
+          (let [prov (aget provList i)]
+            (try
+              (.addProviderAtEnd this prov nil)
+              (catch GSSException ge
+                (when (some? GSSUtil/DEBUG)
+                  (GSSUtil/debug (java-str "Error in adding provider " (.getName prov) ": " ge)))))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:private isMechFactoryProperty ^boolean [this ^String prop]
+    (or (.startsWith prop PROV_PROP_PREFIX)
+        (.regionMatches prop true 0 PROV_PROP_PREFIX 0 PROV_PROP_PREFIX_LEN)))
+
+  (method ^:private getOidFromMechFactoryProperty :throws [GSSException] ^Oid [this ^String prop]
+    (let [oidPart (.substring prop PROV_PROP_PREFIX_LEN)] (Oid. oidPart)))
+
+  (method ^:public ^:synchronized getMechFactory :throws [GSSException] ^MechanismFactory [this
+                                                                                           ^:mutable ^Oid mechOid]
+    (when (nil? mechOid) (set! mechOid ProviderList/DEFAULT_MECH_OID))
+    (.getMechFactory this mechOid nil))
+
+  (method ^:public ^:synchronized getMechFactory :throws [GSSException] ^MechanismFactory [this
+                                                                                           ^:mutable ^Oid mechOid
+                                                                                           ^Provider p]
+    (when (nil? mechOid) (set! mechOid ProviderList/DEFAULT_MECH_OID))
+    (if (nil? p)
+        (let [^:mutable ^PreferencesEntry entry nil
+              ^{:tag (Iterator PreferencesEntry)} list (.iterator preferences)]
+          (while (.hasNext list)
+            (set! entry (cast PreferencesEntry (.next list)))
+            (when (.impliesMechanism entry mechOid)
+              (let [retVal (.getMechFactory this entry mechOid)]
+                (when (some? retVal) (return retVal)))))
+          (throw (GSSExceptionImpl. GSSException/BAD_MECH mechOid)))
+        (let [entry (PreferencesEntry. p mechOid)] (.getMechFactory this entry mechOid))))
+
+  (method ^:private getMechFactory :throws [GSSException] ^MechanismFactory [this
+                                                                             ^PreferencesEntry e
+                                                                             ^Oid mechOid]
+    (let [p (.getProvider e)
+          searchEntry (PreferencesEntry. p mechOid)
+          ^:mutable retVal (cast MechanismFactory (.get factories searchEntry))]
+      (when (nil? retVal)
+        (let [prop (java-str PROV_PROP_PREFIX (.toString mechOid))
+              className (.getProperty p prop)]
+          (cond
+            (some? className)
+              (do
+                (set! retVal (ProviderList/getMechFactoryImpl p className mechOid caller))
+                (.put factories searchEntry retVal))
+            (some? (.getOid e))
+              (throw (GSSExceptionImpl. GSSException/BAD_MECH
+                                        (java-str
+                                          "Provider "
+                                          (.getName p)
+                                          " does not support mechanism "
+                                          mechOid))))))
+      retVal))
+
+  (method ^:private ^:static getMechFactoryImpl :throws [GSSException] ^MechanismFactory [^Provider p
+                                                                                          ^String className
+                                                                                          ^Oid mechOid
+                                                                                          ^GSSCaller caller]
+    (try
+      (let [^{:tag (Class ?)} baseClass (Class/forName SPI_MECH_FACTORY_TYPE)
+            cl (.getClassLoader (.getClass p))
+            ^{:tag (Class ?)} implClass (if (some? cl)
+                                            (.loadClass cl className)
+                                            (Class/forName className))]
+        (if (.isAssignableFrom baseClass implClass)
+            (let [^{:tag (Constructor ?)} c (.getConstructor implClass GSSCaller)
+                  mf (cast MechanismFactory (.newInstance c caller))]
+              (when (instance? NativeGSSFactory mf) (.setMech (cast NativeGSSFactory mf) mechOid))
+              mf)
+            (throw (ProviderList/createGSSException
+                     p
+                     className
+                     (java-str "is not a " SPI_MECH_FACTORY_TYPE)
+                     nil))))
+      (catch [ClassNotFoundException
+              NoSuchMethodException
+              InvocationTargetException
+              InstantiationException
+              IllegalAccessException
+              SecurityException] e
+        (throw (ProviderList/createGSSException p className "cannot be created" e)))))
+
+  (method ^:private ^:static createGSSException ^GSSException [^Provider p ^String className
+                                                               ^String trailingMsg ^Exception cause]
+    (let [errClassInfo (java-str className
+                                 " configured by "
+                                 (.getName p)
+                                 " for GSS-API Mechanism Factory ")]
+      (GSSExceptionImpl. GSSException/BAD_MECH (java-str errClassInfo trailingMsg) cause)))
+
+  (method ^:public getMechs ^Oid/1 [this]
+    (cast Oid/1 (.toArray mechs (new Oid/1 []))))
+
+  (method ^:public ^:synchronized addProviderAtFront :throws [GSSException] ^void [this ^Provider p
+                                                                                   ^Oid mechOid]
+    (let [newEntry (PreferencesEntry. p mechOid)
+          ^:mutable ^PreferencesEntry oldEntry nil
+          ^:mutable ^boolean foundSomeMech false
+          ^{:tag (Iterator PreferencesEntry)} list (.iterator preferences)]
+      (while (.hasNext list)
+        (set! oldEntry (cast PreferencesEntry (.next list)))
+        (when (.implies newEntry oldEntry) (.remove list)))
+      (if (nil? mechOid)
+          (set! foundSomeMech (.addAllMechsFromProvider this p))
+          (let [oidStr (.toString mechOid)]
+            (when (nil? (.getProperty p (java-str PROV_PROP_PREFIX oidStr)))
+              (throw (GSSExceptionImpl. GSSException/BAD_MECH
+                                        (java-str
+                                          "Provider "
+                                          (.getName p)
+                                          " does not support "
+                                          oidStr))))
+            (.add mechs mechOid)
+            (set! foundSomeMech true)))
+      (when foundSomeMech (.add preferences 0 newEntry))))
+
+  (method ^:public ^:synchronized addProviderAtEnd :throws [GSSException] ^void [this ^Provider p
+                                                                                 ^Oid mechOid]
+    (let [newEntry (PreferencesEntry. p mechOid)
+          ^:mutable ^PreferencesEntry oldEntry nil
+          ^:mutable ^boolean foundSomeMech false
+          ^{:tag (Iterator PreferencesEntry)} list (.iterator preferences)]
+      (while (.hasNext list)
+        (set! oldEntry (cast PreferencesEntry (.next list)))
+        (when (.implies oldEntry newEntry) (return)))
+      (if (nil? mechOid)
+          (set! foundSomeMech (.addAllMechsFromProvider this p))
+          (let [oidStr (.toString mechOid)]
+            (when (nil? (.getProperty p (java-str PROV_PROP_PREFIX oidStr)))
+              (throw (GSSExceptionImpl. GSSException/BAD_MECH
+                                        (java-str
+                                          "Provider "
+                                          (.getName p)
+                                          " does not support "
+                                          oidStr))))
+            (.add mechs mechOid)
+            (set! foundSomeMech true)))
+      (when foundSomeMech (.add preferences newEntry))))
+
+  (method ^:private addAllMechsFromProvider ^boolean [this ^Provider p]
+    (let [^:mutable ^String prop nil
+          ^:mutable retVal false]
+      (for-each [o (.keySet p)]
+        (set! prop (cast String o))
+        (when (.isMechFactoryProperty this prop)
+          (try
+            (let [mechOid (.getOidFromMechFactoryProperty this prop)]
+              (.add mechs mechOid)
+              (set! retVal true))
+            (catch GSSException e
+              (when (some? GSSUtil/DEBUG)
+                (GSSUtil/debug
+                  (java-str "Ignore the invalid property " prop " from provider " (.getName p))))))))
+      retVal))
+
+  (defclass ^:private ^:static ^:final PreferencesEntry
+    (field ^:private ^Provider p)
+
+    (field ^:private ^Oid oid)
+
+    (constructor [this ^Provider p ^Oid oid]
+      (set! (.-p this) p)
+      (set! (.-oid this) oid))
+
+    (method ^:public equals ^boolean [this other]
+      (if (identical? this other)
+          true
+          (if-instance [^PreferencesEntry that other]
+            (and (.equals (.getName (.-p this)) (.getName (.-p that)))
+                 (Objects/equals (.-oid this) (.-oid that)))
+            false)))
+
+    (method ^:public hashCode ^int [this] (Objects/hash (.getName p) oid))
+
+    (method implies ^boolean [this other]
+      (if-instance [^PreferencesEntry temp other]
+        (or (.equals this temp) (and (.equals (.getName p) (.getName (.-p temp))) (nil? oid)))
+        false))
+
+    (method getProvider ^Provider [this] p)
+
+    (method getOid ^Oid [this] oid)
+
+    (method impliesMechanism ^boolean [this ^Oid oid]
+      (or (nil? (.-oid this)) (.equals (.-oid this) oid)))
+
+    (method ^:public toString ^String [this]
+      (java-str "<" (.getName p) ", " oid ">"))))

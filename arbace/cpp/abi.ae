@@ -42,7 +42,32 @@
 (defn integral? [t] (or (contains? int-ranks (bn t)) (enum? t)))
 ;; (cpp-s12: clang's extended floating types on x86-64, _Float16 and __float128 ([basic.extended.fp]), named by
 ;; <format>'s _S_to_arg_type under __FLT16_DIG__ and __SIZEOF_FLOAT128__: types of their own, half and fp128)
-(defn floating? [t] (#{:float :double :ldouble :float16 :float128} (bn t)))
+(defn floating? [t] (#{:float :double :ldouble :float16 :float128 :float32 :float64 :float128n :float32x :float64x :bf16} (bn t)))
+
+;; cpp-extfloat (2026-11-24): GCC's extended floating-point types on x86-64 ([basic.extended.fp], P1467R9), the own front end's:
+;; _Float32 :float32, _Float64 :float64, _Float128 :float128n (__float128, GNU's, :float128 stays a type of its own), _Float32x
+;; :float32x, _Float64x :float64x, __bf16 (std::bfloat16_t) :bf16, beside _Float16 :float16. [conv.rank]/2's floating-point
+;; conversion ranks by their formats' sets of values (c/target/abi.edn's :floats): half (p 11, emax 16) and bfloat (p 8, emax
+;; 128) unordered, both below single (float, _Float32) below double (double, _Float32x, _Float64) below the x87's (long double,
+;; _Float64x) below quad (__float128, _Float128); in one format the standard type's subrank least, then as g++ 15.2's usual
+;; arithmetic conversions order them (by hand): _Float32x below _Float64, __float128 below _Float128.
+(def ^:private fp-format {:float16 :half :bf16 :bfloat :float :single :float32 :single :double :double :float32x :double
+                          :float64 :double :ldouble :x87 :float64x :x87 :float128 :quad :float128n :quad})
+(def ^:private fp-order {:half 0 :bfloat 0 :single 1 :double 2 :x87 3 :quad 4})
+(def ^:private fp-subrank {:float32 1 :float32x 1 :float64 2 :float64x 1 :float128 1 :float128n 2})
+(def standard-floating #{:float :double :ldouble})
+
+(defn fp-rank-cmp
+  "[conv.rank]/2's order of the floating-point conversion ranks of the floating types `a` and `b`: -1, 0, 1, or nil (unordered)."
+  [a b]
+  (let [fa (fp-format (bn a)) fb (fp-format (bn b))]
+    (cond (= fa fb) 0
+          (= #{:half :bfloat} #{fa fb}) nil
+          :else (compare (long (fp-order fa)) (long (fp-order fb))))))
+
+(defn fp-format-of "A floating type's format (:half :bfloat :single :double :x87 :quad)." [t] (fp-format (bn t)))
+
+(defn fp-subrank ^long [t] (long (get fp-subrank (bn t) 0)))
 (defn arith? [t] (or (contains? int-ranks (bn t)) (floating? t)))
 (defn mptr? [t] (= :mptr (:k t)))
 (defn mfn-ptr? [t] (and (mptr? t) (= :fn (:k (:to t)))))
@@ -67,7 +92,8 @@
 ;; Sizes and alignments (x86-64 SysV, LP64)
 
 (def ^:private scalar-size {:bool 1 :char 1 :schar 1 :uchar 1 :char8 1 :short 2 :ushort 2 :char16 2 :int 4 :uint 4 :char32 4
-                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :i128 16 :u128 16 :float 4 :double 8 :ldouble 16 :float16 2 :float128 16 :nullptr 8})
+                            :wchar 4 :long 8 :ulong 8 :llong 8 :ullong 8 :i128 16 :u128 16 :float 4 :double 8 :ldouble 16 :float16 2 :float128 16 :nullptr 8
+                            :float32 4 :float64 8 :float128n 16 :float32x 8 :float64x 16 :bf16 2})
 
 (declare layout)
 
@@ -90,7 +116,9 @@
     (fail :type "no size for " (pr-str t))))
 
 (defn size-of ^long [t] (long (first (size-align t))))
-(defn align-of ^long [t] (long (second (size-align t))))
+(defn align-of
+  "(cpp-small: an array's its element's, its size not computed: `new char[2][__SIZE_MAX__]`'s element type, init/new44.C)"
+  ^long [t] (if (= :arr (:k t)) (recur (:of t)) (long (second (size-align t)))))
 (defn align-up ^long [^long n ^long a] (* a (quot (+ n (dec a)) a)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -278,9 +306,15 @@
             ;; boundary of T's alignment, a zero-width one aligns the next to T, an unnamed one does not align the class);
             ;; a union's all at 0
             uni (:union c)
+            ;; (cpp-small: a class without bit-fields laid out in bytes, u 1, so that one of up to PTRDIFF_MAX bytes has a
+            ;; layout, init/new46.C's `struct S { char a [__SIZE_MAX__ / 8]; }` (2^61 - 1 bytes, past a long's bits); the
+            ;; offsets the same)
+            u (if (some :bits (:fields c)) 8 1)
             [offb align foffs bitoffs]
             (reduce (fn [[offb align foffs bitoffs] f]
-                      (let [[s a] (size-align (:ty f))
+                      (let [;; (queue 570-1 (a): a member of GNU's VLA type the checker kept after its error, :cx-vla, laid
+                            ;; out with no bytes, so that the class and its uses go on)
+                            [s a] (if (:cx-vla f) [0 (align-of (:ty f))] (size-align (:ty f)))
                             s (long s) a (long a) offb (long offb)
                             start (if uni 0 offb)]
                         (if-let [w (:bits f)]
@@ -295,8 +329,8 @@
                                 ;; so the next member may reuse its tail padding
                                 ovl (:nua f)
                                 emp (and ovl (empty-member? f))
-                                o (if emp 0 (align-up (quot (+ start 7) 8) a))
-                                dsz (quot (+ offb 7) 8)
+                                o (if emp 0 (align-up (quot (+ start (dec u)) u) a))
+                                dsz (quot (+ offb (dec u)) u)
                                 o (if (or uni (empty? (field-empties (:ty f) 0)))
                                     o
                                     (loop [o o]
@@ -308,11 +342,11 @@
                                 es (cond emp nil
                                          ovl (let [fl (layout (:id (unq (:ty f))))] (long (if (:pod fl) (:size fl) (:nvsize fl))))
                                          :else s)]
-                            [(cond (nil? es) offb uni (max offb (* 8 (+ o (long es)))) :else (* 8 (+ o (long es))))
+                            [(cond (nil? es) offb uni (max offb (* u (+ o (long es)))) :else (* u (+ o (long es))))
                              (max (long align) a) (conj foffs o) (conj bitoffs nil)]))))
-                    [(* 8 (long off)) align [] []]
+                    [(* u (long off)) align [] []]
                     (:fields c))
-            dsize0 (quot (+ (long offb) 7) 8)
+            dsize0 (quot (+ (long offb) (dec u)) u)
             nvsize (max dsize0 (long @floor))
             ;; alignas on the class (:align-attr, [dcl.align])
             nvalign (max (long align) (long (or (:align-attr c) 1)))
@@ -396,6 +430,7 @@
             (:long :ulong :llong :ullong) 'i64
             (:i128 :u128) 'i128
             :float 'float :double 'double :ldouble 'x86_fp80 :float16 'half :float128 'fp128
+            :float32 'float :float64 'double :float128n 'fp128 :float32x 'double :float64x 'x86_fp80 :bf16 'bfloat
             :nullptr 'ptr)
        (:ptr :ref :rref) 'ptr
        :enum (llvm-type (underlying t) value?)
@@ -427,7 +462,8 @@
 
 (def ^:private builtin-codes
   {:void "v" :bool "b" :char "c" :schar "a" :uchar "h" :short "s" :ushort "t" :int "i" :uint "j" :long "l" :ulong "m"
-   :llong "x" :ullong "y" :i128 "n" :u128 "o" :float "f" :double "d" :ldouble "e" :float16 "DF16_" :float128 "g" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
+   :llong "x" :ullong "y" :i128 "n" :u128 "o" :float "f" :double "d" :ldouble "e" :float16 "DF16_" :float128 "g"
+   :float32 "DF32_" :float64 "DF64_" :float128n "DF128_" :float32x "DF32x" :float64x "DF64x" :bf16 "DF16b" :nullptr "Dn" :wchar "w" :char8 "Du" :char16 "Ds" :char32 "Di"})
 
 (defn- seq-id ^String [^long n]
   (if (zero? n) "S_"

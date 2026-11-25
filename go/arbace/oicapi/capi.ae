@@ -8,6 +8,8 @@
     [sync "sync"]
     [syscall "syscall"]
     [weak "weak"]
+    [binary "encoding/binary"]
+    [bytes "bytes"]
     [ci "arbace/ci"]
     [crt "arbace/crt"]
     [oi "arbace/oi"]])
@@ -20,6 +22,8 @@
   [tagDoubleArray 254]
   [tagCustom 255]
   [chunkSize (<< 1 20)])
+
+(go/type baSnap "baSnap is a bigarray copy's elements as written: their address and bytes.\n" (struct ^uint64 d ^{:tag (slice byte)} b))
 
 (go/type CBlock "CBlock is a custom block the C allocated (caml_alloc_custom): its address in ci's static memory, kept for the run.\n"
   (struct ^uint64 Addr))
@@ -35,6 +39,16 @@
     ^uint64 cur
     ^uint64 end
     ^{:tag (slice (slice uint64))} big
+    ;; the big blocks' mappings of the calls before, free again, by size (2026-11-24: a mapping a call's big block was fresh memory
+    ;; each call, lib-bigarray/subarraystub's 41,000)
+    ^{:tag (map uint64 (slice uint64))} bigFree
+    ;; the call's bigarray copies: the elements' bytes as written, by the copy's address, so that one the C left alone is not read back
+    ^{:tag (map uint64 baSnap)} snaps
+    ;; the call's bigarrays the C allocated with memory of their own (CAML_BA_MANAGED, caml_ba_alloc's calloc): their data's address
+    ;; by oi's value, freed when the call ends unless a root keeps the block (bigarray.c's caml_ba_finalize once the block is dead: the
+    ;; copy dies with the boundary's memory, oi's value holds the elements; 2026-11-24, ocaml-eval: lib-bigarray/subarraystub's
+    ;; 41,000 results grew the C's heap past 1.5 GB)
+    ^{:tag (map any uint64)} cdata
     ;; the static memory (custom blocks, named values' slots, operations' records)
     ^uint64 scur
     ^uint64 send
@@ -69,7 +83,10 @@
     ^uint64 ts
     ;; the closures given to the C, by the index their copy holds in its first word (queue 530): a C thread may call one back after the
     ;; outermost call that gave it ended (lib-systhreads/test_c_thread_register's closure, unregistered, as OCaml's stays put)
-    ^{:tag (slice (weak/Pointer oi/Closure))} closures))
+    ^{:tag (slice (weak/Pointer oi/Closure))} closures
+    ;; a C program that embeds OCaml (queue 539, Embed): the program's argv, and the OCaml program's initialisation while its main runs
+    ^{:tag (slice string)} argv
+    ^{:tag (func [])} start))
 
 (go/var ^{:tag (* capi)} the)
 
@@ -120,6 +137,10 @@
                       :statics (lit (map uint64 oi/Value)) :wstatics (lit (map uint64 (weak/Pointer oi/Custom)))
                       :roots (lit (map uint64 bool)) :homes (lit (map any uint64)) :named (lit (map string uint64)) :customOps (lit (map string uint64))))]
         (set! (.-StdFiles sys) (lit (array 3 (* os/File)) os/Stdin os/Stdout os/Stderr))
+        ;; (queue 547) the process's own standard streams: a stub's dup2 and lseek on them and on a channel's descriptor are the
+        ;; host's, as oi's channels write the host's descriptors (not the light level's server, whose streams are Stdio's)
+        (when (== Stdio nil)
+          (set! (.-HostFds sys) true))
         (range [_ t tops]
           (when [(values x ok) (assert (slice any) t)] (and ok (> (len x) 5) (== (fmt/Sprint (aget x 0)) "static"))
             (when [(values s ok) (assert string (aget x 5))] (and ok (not (strings/HasPrefix s "[")))
@@ -149,6 +170,7 @@
             (for [k 0] (< k 4) (inc! k)
               (aset (.-ops c) k (.Load64 m (+ a (conv uint64 (* 8 k))))))))
         (set! (.-flush c) (aget (.-ByName p) "__oi_c_flush"))
+        (set! (.-argv c) argv)
         (set! the c)
         (set! oi/ExternalFallback (fn ^oi/Ext [^string name ^int nargs] (.external c name nargs)))
         (set! (.-scratch c) (.allocStatic c 2 tagAbstract))
@@ -203,6 +225,40 @@
       (Flush)
       (return (conv int (conv int32 (.-I r))) nil))))
 
+(go/func OwnMain "OwnMain tells whether the loaded stubs have a main of their own (queue 539: a C program that embeds OCaml,
+embedded/cmcaml); test/ocaml/capi/main.c, linked when they have none, defines __oi_no_main.\n" ^bool []
+  (and (Has "main") (not (Has "__oi_no_main"))))
+
+(go/func Embed "Embed runs the stubs' own main (OwnMain) for oi's thread th, with the program's argv and the environment: its caml_main
+or caml_startup runs start, the OCaml program's initialisation (oi.RunEmbedded's: once), and its callbacks run on th; the whole of main
+is one outermost call of the boundary (its copies live until main returns). main's status; the C's exit an exit of the run.\n"
+  ^int [^{:tag (* oi/Thread)} th ^{:tag (func [])} start]
+  (let [c the
+        f (aget (.-ByName (.-p c)) "main")
+        t (.-Main (.-p c))
+        (values envp _) (.stack c (.-argv c) (os/Environ))
+        av (- envp (conv uint64 (* 8 (+ (len (.-argv c)) 1))))
+        prev (.-th c)]
+    (set! (.-th c) th)
+    (set! (.-start c) start)
+    (inc! (.-depth c))
+    (defer ((fn []
+              (let [r (recover)]
+                (dec! (.-depth c))
+                (when (== (.-depth c) 0)
+                  (.reset c))
+                (set! (.-start c) nil)
+                (set! (.-th c) prev)
+                (when (!= r nil)
+                  (when [(values flt ok) (assert (* crt/Fault) r)] ok
+                    (oi/Internalf "the C main's fault: %s at %#x" (.-Msg flt) (.-Addr flt)))
+                  (when [(values ex ok) (assert (* crt/Exit) r)] ok
+                    (panic (addr (lit oi/ExitSignal :Code (.-Code ex)))))
+                  (panic r))))))
+    (let [r (.Call (.-p c) t f (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 (len (.-argv c)))) (lit ci/Arg :K \i :I (conv int64 av))
+                                   (lit ci/Arg :K \i :I (conv int64 envp))))]
+      (conv int (conv int32 (.-I r))))))
+
 (go/method stack "stack is an initial stack's vector as Linux's: argv's pointers, 0, the environment's, 0, the auxiliary vector\n(AT_PAGESZ, AT_RANDOM); the environment's address and argv[0]'s.\n"
   [^{:tag (* capi)} c ^{:tag (slice string)} argv ^{:tag (slice string)} env] :results [uint64 uint64]
   (let [m (.-m c)
@@ -231,7 +287,13 @@
   ^uint64 [^{:tag (* capi)} c ^uint64 wosize ^int tag]
   (let [n (* 8 (+ wosize 1))]
     (when (> n (/ chunkSize 4))
-      (let [a (.Mmap (.-m c) 0 n)]
+      (let [n (* (/ (+ n 65535) 65536) 65536)
+            a (conv uint64 0)]
+        (if [fs (aget (.-bigFree c) n)] (> (len fs) 0)
+          (do (set! a (aget fs (- (len fs) 1)))
+              (aset (.-bigFree c) n (subslice fs _ (- (len fs) 1)))
+              (.Fill (.-m c) a 0 n))
+          (set! a (.Mmap (.-m c) 0 n)))
         (set! (.-big c) (append (.-big c) (lit (slice uint64) a n)))
         (.Store64 (.-m c) a (bit-or (<< wosize 10) (conv uint64 tag)))
         (return (+ a 8))))
@@ -267,8 +329,20 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
       (range [_ r d]
         (when (aget (.-roots c) r)
           (.Store64 (.-m c) r (.rehome c (.Load64 (.-m c) r)))))))
+  (when (> (len (.-cdata c)) 0)
+    (let [cd (.-cdata c)
+          f (aget (.-ByName (.-p c)) "free")]
+      (set! (.-cdata c) nil)
+      (when (and (!= f nil) (or (!= (.-Code f) nil) (!= (.-Native f) nil)))
+        (range [v d cd]
+          (when [(values _ kept) (aget (.-homes c) v)] (not kept)
+            (.Call (.-p c) (.-Main (.-p c)) f (lit (slice ci/Arg) (lit ci/Arg :K \i :I (conv int64 d)))))))))
+  (when (== (.-bigFree c) nil)
+    (set! (.-bigFree c) (lit (map uint64 (slice uint64)))))
   (range [_ b (.-big c)]
-    (.Unmap (.-m c) (aget b 0) (aget b 1)))
+    (if (< (len (aget (.-bigFree c) (aget b 1))) 4)
+      (aset (.-bigFree c) (aget b 1) (append (aget (.-bigFree c) (aget b 1)) (aget b 0)))
+      (.Unmap (.-m c) (aget b 0) (aget b 1))))
   (set! (.-big c) nil)
   (set! (.-chunk c) 0)
   (set! (.-cur c) 0)
@@ -276,7 +350,8 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
   (set! (.-toC c) (lit (map any uint64)))
   (set! (.-toGo c) (lit (map uint64 oi/Value)))
   (set! (.-seen c) (lit (map uint64 int)))
-  (set! (.-order c) nil))
+  (set! (.-order c) nil)
+  (set! (.-snaps c) nil))
 
 (go/method opsFor "opsFor is the address of a custom operations' record whose identifier is name (static, one a name).\n"
   ^uint64 [^{:tag (* capi)} c ^string name]
@@ -390,13 +465,89 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
             (.Store64 m (+ a 32) 0)
             (range [i dm dims]
               (.Store64 m (+ a (conv uint64 (+ 40 (* 8 i)))) (conv uint64 dm)))
-            (range [i e data]
-              (storeElem m kind (+ d (conv uint64 (* i es))) e)))
+            (storeElems m kind d es data)
+            (when (== (.-snaps c) nil)
+              (set! (.-snaps c) (lit (map uint64 baSnap))))
+            (aset (.-snaps c) a (lit baSnap :d d :b (append (conv (slice byte) nil) (spread (.R m d (conv uint64 (* n es))))))))
           (return))
-        (.Store64 m a (.opsFor c (.-Name x)))))))
+        (.Store64 m a (.opsFor c (.-Name x)))
+        ;; (queue 547) a channel: its data a pointer to a struct channel whose fd (and offset) are the channel's, as a stub that
+        ;; reaches into io.h's struct (ppx_expect's runtime: Channel(v)->fd, then dup2 and lseek on it, the host's descriptors
+        ;; under crt's HostFds) reads them
+        (when [(values fd off ok) (oi/ChannelFd v)] ok
+          (let [st (.alloc c 2 tagAbstract)]
+            (.Store32 m st (conv uint32 fd))
+            (.Store64 m (+ st 8) (conv uint64 off))
+            (.Store64 m (+ a 8) st)))))))
 
 (go/func elemSize "elemSize is caml_ba_element_size of a kind.\n" ^int [^int kind]
   (aget (lit (slice int) 4 8 1 1 2 2 4 8 8 8 8 16 1 2) kind))
+
+;; The bigarray's elements cross in one slice of ci's memory (queue ocaml-eval 2026-11-24: lib-bigarray/subarraystub's 41,000 calls,
+;; each 131,072 elements in and 220,000 out, spent their time in Mem's lookup per element and in Go's collector over a boxed integer
+;; per element read back): an integer element read back equal to the value's is left as it is, and a new one in the 16-bit range is
+;; one of smallInts, boxed once.
+(go/var ^{:tag (slice oi/Value)} smallInts)
+(go/var ^{:tag sync/Once} smallIntsOnce)
+
+(go/func smallIntsInit []
+  (.Do smallIntsOnce (fn []
+                       (let [t (make (slice oi/Value) 98304)]
+                         (for [i 0] (< i 98304) (inc! i)
+                           (aset t i (- i 32768)))
+                         (set! smallInts t)))))
+
+(go/func boxedInt "boxedInt is v as oi's value, without an allocation for a value of a 16-bit element's range (smallIntsInit first).\n" ^oi/Value [^int v]
+  (when (and (>= v -32768) (< v 65536))
+    (return (aget smallInts (+ v 32768))))
+  v)
+
+(go/func storeElems "storeElems stores a bigarray's elements of the kind at d, es bytes each.\n" [^{:tag (* crt/Mem)} m ^int kind ^uint64 d ^int es ^{:tag (slice oi/Value)} data]
+  (when (== (len data) 0)
+    (return))
+  (let [b (.W m d (conv uint64 (* (len data) es)))]
+    (switch kind
+      (case [2 3 12]
+        (range [i e data]
+          (aset b i (conv uint8 (oi/AsInt e)))))
+      (case [4 5]
+        (range [i e data]
+          (.PutUint16 binary/LittleEndian (subslice b (* 2 i)) (conv uint16 (oi/AsInt e)))))
+      (case [8]
+        (range [i e data]
+          (.PutUint64 binary/LittleEndian (subslice b (* 8 i)) (conv uint64 (oi/AsInt e)))))
+      (default
+        (range [i e data]
+          (storeElem m kind (+ d (conv uint64 (* i es))) e))))))
+
+(go/func loadElems "loadElems reads a bigarray's elements of the kind at d, es bytes each, into data (an integer element equal to the one\nthere kept).\n" [^{:tag (* crt/Mem)} m ^int kind ^uint64 d ^int es ^{:tag (slice oi/Value)} data]
+  (when (== (len data) 0)
+    (return))
+  (smallIntsInit)
+  (let [b (.R m d (conv uint64 (* (len data) es)))
+        put (fn [^int i ^int v]
+              (when [(values o ok) (assert int (aget data i))] (and ok (== o v))
+                (return))
+              (aset data i (boxedInt v)))]
+    (switch kind
+      (case [2]
+        (range [i x b]
+          (put i (conv int (conv int8 x)))))
+      (case [3 12]
+        (range [i x b]
+          (put i (conv int x))))
+      (case [4]
+        (range [i _ data]
+          (put i (conv int (conv int16 (.Uint16 binary/LittleEndian (subslice b (* 2 i))))))))
+      (case [5]
+        (range [i _ data]
+          (put i (conv int (.Uint16 binary/LittleEndian (subslice b (* 2 i)))))))
+      (case [8]
+        (range [i _ data]
+          (put i (oi/Int (conv int (.Uint64 binary/LittleEndian (subslice b (* 8 i))))))))
+      (default
+        (range [i _ data]
+          (aset data i (loadElem m kind (+ d (conv uint64 (* i es))))))))))
 
 (go/func storeElem "storeElem stores a bigarray element of the kind at a.\n" [^{:tag (* crt/Mem)} m ^int kind ^uint64 a ^oi/Value e]
   (switch kind
@@ -527,7 +678,10 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
                   ;; (queue 523) memory the collector manages (CAML_BA_MANAGED: caml_ba_alloc's own or given), sampled by Gc.Memprof
                   ;; as the C runtime's caml_ba_alloc does (caml_alloc_custom_mem); an external array's is not
                   (when (== (bit-and flags 0x600) 0x200)
-                    (oi/MemprofCustom (.-th c) v))
+                    (oi/MemprofCustom (.-th c) v)
+                    (when (== (.-cdata c) nil)
+                      (set! (.-cdata c) (lit (map any uint64))))
+                    (aset (.-cdata c) (conv any v) (.Load64 m (+ w 8))))
                   (return v)))))
           (let [v (addr (lit oi/Custom :Name id :V (addr (lit CBlock :Addr w))))]
             (if (!= (.Load64 m (+ ops 8)) 0)
@@ -564,8 +718,10 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
         (when [(values kind _ _ data ok) (oi/BigarrayParts v)] ok
           (let [d (.Load64 m (+ a 8))
                 es (elemSize kind)]
-            (range [i _ data]
-              (aset data i (loadElem m kind (+ d (conv uint64 (* i es))))))))))))
+            (when [(values sn ok) (aget (.-snaps c) a)] (and ok (== (.-d sn) d) (== (len (.-b sn)) (* (len data) es))
+                                                             (bytes/Equal (.-b sn) (.R m d (conv uint64 (* (len data) es)))))
+              (return))
+            (loadElems m kind d es data)))))))
 
 (go/method toCAll "toCAll brings every copy of the call up to date with its value (after a callback: OCaml may have stored into one).\n"
   [^{:tag (* capi)} c]
@@ -769,6 +925,11 @@ here, not a null pointer (queue 478).
       ["__oi_thread_unregister" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.unregister c t))))]
       ["__oi_thread_acquire" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.acquire c t))))]
       ["__oi_thread_release" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a] (ai (conv uint64 (.release c t))))]
+      ;; a C program that embeds OCaml (queue 539): runtime.c's caml_main and caml_startup, the OCaml program's initialisation (Embed)
+      ["__oi_caml_main" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                          (when (!= (.-start c) nil)
+                            ((.-start c)))
+                          (ai 0))]
       ["caml_raise" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                       (.fromCAll c)
                       (oi/Raise (.decode c (arg a 0)))
@@ -1029,7 +1190,18 @@ a scanned block its fields, transitively.\n" ^{:tag (map uint64 bool)} [^{:tag (
       ["close" (fn ^ci/Arg [^{:tag (* ci/Thread)} t ^{:tag (slice ci/Arg)} a]
                  (when [err (syscall/Close (conv int (conv int32 (.-I (aget a 0)))))] (!= err nil)
                    (return (.failErrno c t err)))
-                 (lit ci/Arg :K \i :I 0))])))
+                 (lit ci/Arg :K \i :I 0))]
+      ;; (2026-11-24, ocaml-eval) musl's memcpy, memmove and memset on ci's memory in one move, as the machine's: their C, interpreted
+      ;; a byte or a word a turn, was most of lib-bigarray/subarraystub's stub (2,046 memcpy a call, 41,000 calls)
+      ["memcpy" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                  (.Move (.-m c) (conv uint64 (.-I (aget a 0))) (conv uint64 (.-I (aget a 1))) (conv uint64 (.-I (aget a 2))))
+                  (aget a 0))]
+      ["memmove" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                   (.Move (.-m c) (conv uint64 (.-I (aget a 0))) (conv uint64 (.-I (aget a 1))) (conv uint64 (.-I (aget a 2))))
+                   (aget a 0))]
+      ["memset" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                  (.Fill (.-m c) (conv uint64 (.-I (aget a 0))) (conv byte (.-I (aget a 1))) (conv uint64 (.-I (aget a 2))))
+                  (aget a 0))])))
 
 (go/method failErrno "failErrno is a host native's failure as musl's wrappers return one: errno (its thread's, __errno_location's) set\nto err's number, -1.\n"
   ^ci/Arg [^{:tag (* capi)} c ^{:tag (* ci/Thread)} t ^error err]
