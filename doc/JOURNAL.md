@@ -20920,3 +20920,34 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
 - Alternatives considered: for the main file's new-lines, translating inside `native/read-dump` (repr/python's corpus reader, whose
   `:full` mode prints the original bytes back) was rejected in favour of pyi's run-dump alone. For a lenient charset, a decoding
   error of pyi's own (the codec's message ported) was rejected for Python's codec, which already gives CPython's message.
+
+## 2026-11-24 — Python: compileall-pyc and tools-misc, -O in pyi and the rest (queue 557b, VM)
+
+- Rebased the WIP d92326f8a onto 557's final head 0be967103 (557-py-unowned) and split it in two: 61298096f, -O and -OO
+  (bin/pyi python counts each O into PYI_START_FLAGS; sys.flags.optimize, builtins.__debug__, compileSource's mode +O1/+O2,
+  compile()'s optimize; the compiler drops asserts and folds __debug__ at 1, docstrings at 2, after CPython's codegen), and
+  00cdf6a34, _interpreters' argument messages (PyArg_ParseTupleAndKeywords' "_interpreters.NAME() argument N", 3.14.10's
+  Modules/_interpretersmodule.c). The WIP's own journal entry was dropped in the rebase (its conflict) and replaced by this one.
+- Tested, then fixed what the runs showed:
+  - 4ae592b3c: bin/pyi run's main module is compiled by the host (arbace.python's start-run), not by compileSource, so it now
+    binds arbace.python.compile/*optimize* from PYI_START_FLAGS too (a probe's assert still ran under -O).
+  - fab5cbad8: callSpecial and the __call__ slot counted a level on Thread.depth, the Python frames' depth that
+    sys.setrecursionlimit's check reads; CPython 3.14 guards them on the machine's stack (_Py_EnterRecursiveCall), so they
+    now use enterRecursiveCall (cdepth). test_support's test_recursion: "cannot set the recursion limit to 18 at the
+    recursion depth 18" under unittest. test_descr's test_recursive_call and test_repr_as_str still raise (cStackLevels).
+  - a41346216: sys.pycache_prefix from -X pycache_prefix=PATH, else PYTHONPYCACHEPREFIX (config_init_pycache_prefix).
+  - 24a64a2dd: PYTHONPATH's entries on sys.path after sys.path[0], made absolute (Modules/getpath.py), not under -E or -I
+    (withPythonPath in RunModule). Both for compileall's test_no_args_compiles_path.
+- The runs: on goi alone test_compileall is out of reach (the first run hit 14,400 s with 60 of 145 tests, each child a
+  2-minute goi start on the loaded 4-core VM). So the drivers stayed on goi (PYI_RUNNER=python3) and their children ran
+  the checkout's runtime compiled: bin/pyi launcher (the AOT module rebuilt, about 25-30 min) and PYI_LAUNCHER,
+  PYI_LAUNCHER_PY and PYI_LAUNCHER_COMPILER exported, which bin/pyi python's launcher branch takes. The same runtime
+  sources either way. test_compileall then took 20 min. Alternative not taken: a gate build of the executable with the
+  runtime compiled (the record's own setting), two Go-hosted builds on the 4-core arm64 VM.
+- The final whole run at 24a64a2dd: 3 modules, 286 methods, 263 pass, 23 classed, 0 failing, 11 now pass. The rows were written
+  by `bin/pyi check --judge DIR --record` (c35fc031a). `:compileall-pyc` is empty and removed. Its last rows, compileall's
+  test_workers (-j 0: ProcessPoolExecutor on the forkserver, the read_signed EOF), went to `:multiprocessing` by name.
+  `:tools-misc` keeps its 11 rows not run here (trace's gc.get_referrers, pyclbr's _pickle, test_unittest's three,
+  test_buffer's two, reindent, test_interpreters' test_modified_arg); its :why was updated. Mirrored in divergences-315.edn.
+- bin/reap --record, bin/crops-score --record: Python eval 40,832 / 1,405 / 1,302 -> 40,843 / 1,405 / 1,291; bin/reap,
+  crops-score --judge --strict, records-check: 0 problems.
