@@ -8,6 +8,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
+/* (queue 547) what OCaml's <caml/mlvalues.h> includes on the way (misc.h's stdlib.h, stdarg.h and limits.h, domain_state.h's
+   stdio.h), which a stub may rely on: ppx_expect's runtime stubs' fflush(stdout) */
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
+#include <limits.h>
 
 #ifdef __cplusplus
 extern "C" {

@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <signal.h>
 #include "caml/mlvalues.h"
 #include "caml/memory.h"
@@ -240,6 +241,20 @@ void caml_invalid_argument(const char *msg) { caml_raise_with_string(__oi_predef
 void caml_invalid_argument_value(value msg) { caml_raise_with_arg(__oi_predef(3), msg); }
 void caml_raise_out_of_memory(void) { caml_raise_constant(__oi_predef(0)); }
 void caml_raise_sys_error(value msg) { caml_raise_with_arg(__oi_predef(1), msg); }
+/* sys.c's caml_sys_error (queue 547, ppx_expect's runtime stubs, which declare it themselves): Sys_error "arg: strerror(errno)",
+   or the error's text alone when arg is NO_ARG (Val_int(0)) */
+void caml_sys_error(value arg) {
+  const char *err = strerror(errno);
+  if (arg == Val_int(0)) caml_raise_sys_error(caml_copy_string(err));
+  {
+    mlsize_t n = caml_string_length(arg), e = strlen(err);
+    char *buf = malloc(n + 2 + e + 1);
+    memcpy(buf, String_val(arg), n); memcpy(buf + n, ": ", 2); memcpy(buf + n + 2, err, e + 1);
+    value v = caml_copy_string(buf);
+    free(buf);
+    caml_raise_sys_error(v);
+  }
+}
 void caml_raise_end_of_file(void) { caml_raise_constant(__oi_predef(4)); }
 void caml_raise_zero_divide(void) { caml_raise_constant(__oi_predef(5)); }
 void caml_raise_not_found(void) { caml_raise_constant(__oi_predef(6)); }
