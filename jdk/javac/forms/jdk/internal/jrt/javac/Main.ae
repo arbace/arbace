@@ -7,6 +7,7 @@
         '(com.sun.tools.javac.util Log)
         '(java.io File FileInputStream IOException InputStream PrintWriter)
         '(java.util ArrayList HashSet List Set)
+        '(javax.lang.model SourceVersion)
         '(javax.tools JavaFileObject)
         '(jdk.internal.opt CommandLine))
 
@@ -28,6 +29,13 @@
       (when (or (.isEmpty s) (.exists (File. s))) (return false)))
     true)
 
+  (method ^:static className ^boolean [^String s]
+    (let [sep (.indexOf s \/)]
+      (if (not (== sep -1))
+          (and (SourceVersion/isName (.substring s 0 sep))
+               (SourceVersion/isName (.substring s (unchecked-add-int sep 1))))
+          (SourceVersion/isName s))))
+
   (method ^:static canonical ^String [^File f]
     (try (.getCanonicalPath f) (catch IOException e (.getAbsolutePath f))))
 
@@ -35,7 +43,7 @@
     (let [^{:tag (List String)} out (ArrayList.)]
       (for-each [^String a args]
         (if (and (.startsWith a "@") (not (.startsWith a "@@")))
-            (with-resources [^InputStream in (FileInputStream. (.substring a 1))]
+            (with-resources [^:final ^InputStream in (FileInputStream. (.substring a 1))]
               (CommandLine/loadCmdFile in out))
             (.add out ^String (if (.startsWith a "@@") (.substring a 1) a))))
       out))
@@ -106,18 +114,28 @@
           (for-each [^String/1 p patches] (.addPatch fm (aget p 0) (Main/path (aget p 1))))
           (when (some? moduleSourcePath) (.setModuleSourcePath fm moduleSourcePath))
           (let [^{:tag (List JavaFileObject)} units (ArrayList.)
-                ^{:tag (Set String)} named (HashSet.)]
+                ^{:tag (Set String)} named (HashSet.)
+                ^{:tag (List String)} classNames (ArrayList.)]
             (for-each [^String f files]
-              (let [file (File. f)]
-                (when (.add named (Main/canonical file)) (.add units (.source fm file)))))
-            (if (.isEmpty units)
+              (if (and (not (.endsWith f ".java")) (Main/className f))
+                  (.add classNames f)
+                  (let [file (File. f)]
+                    (when (.add named (Main/canonical file)) (.add units (.source fm file))))))
+            (if (and (.isEmpty units) (.isEmpty classNames))
                 (do (.println err "error: no source files") (.flush err) 2)
                 (let [^:mutable ^Boolean ok nil
                       ^:mutable ^Log log nil
                       ^:mutable ^JavaCompiler comp nil]
                   (try
                     (let [task (cast JavacTaskImpl
-                                     (.getTask (JavacTool/create) err fm nil opts nil units))
+                                     (.getTask (JavacTool/create)
+                                               err
+                                               fm
+                                               nil
+                                               opts
+                                               ^Iterable (when-not (.isEmpty classNames)
+                                                           ^Iterable classNames)
+                                               units))
                           context (.getContext task)]
                       (.setContext fm context)
                       (when (some? modulePath) (.handleOption fm Option/MODULE_PATH modulePath))
