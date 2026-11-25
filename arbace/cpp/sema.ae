@@ -806,6 +806,109 @@
         (cx-subst-fail! "no type named '" nm "' in '" (:name c) "'")
         (fail :type "unknown type " (pr-str f) ": no type named '" nm "' in the complete class '" (:name c) "'")))))
 
+;; ---------------------------------------------------------------------------------------------
+;; queue 570 (the checker): GNU's variable-length arrays, the types built from one (doc/cpp/CPP-SURVEY.md, "As built: 570").
+;; The GCC manual's "Variable Length": GNU C++ takes an automatic array whose bound is no constant expression, its storage
+;; made where the declaration is executed; C's term for a type built from one is variably modified (C23 6.7.7.3). C++ has no
+;; such types: every bound is a converted constant expression ([dcl.array]/1), so a construct the standard asks a complete
+;; object type of, or a type fixed at translation, cannot take one -- a thrown object's and a handler's type ([except.throw]/3,
+;; [except.handle]/1), typeid's operand ([expr.typeid]), a non-static data member ([class.mem.general]), a constexpr variable
+;; ([dcl.constexpr]/6: a constant expression's object has a size known at translation); a closure's copy of an array is its
+;; element-wise copy ([expr.prim.lambda.capture]/15), which a bound known only at run time cannot size.
+
+(declare strip-type-attrs header-node? cx-runtime-bound?)
+
+(def ^:dynamic *cx-vla*
+  "queue 570, the checker: the block scope (the object itself) whose written type may be variably modified -- a local typedef
+  or alias declaration, a handler's type, typeid's type operand --, where an array bound surely no constant expression makes
+  GNU's VLA type {:k :arr :n nil :vla true :of T}, vla-local's, instead of the refusal; nil elsewhere."
+  nil)
+
+(defn- cx-field-bound-error
+  "queue 570, the checker: a non-static data member `k` whose array bound (any of its declarator's) surely is no constant
+  expression (cx-runtime-bound?): a member's bound is a converted constant expression ([dcl.array]/1) and GNU's VLA an
+  automatic variable's alone (the GCC manual's \"Variable Length\"): GCC's \"size of array 'ar' is not an integral
+  constant-expression\", the error the field takes (ext/vla1.C's local class's `int ar[1][i];`). Nil when not sure."
+  [cs k]
+  (when (and (checking?) (not (header-node? k)) (not (:isBitfield k)))
+    (let [f (try (ct/parse-type (strip-type-attrs (get-in k [:type :qualType]))) (catch Exception _ nil))
+          bs (loop [f f acc []]
+               (if (and (seq? f) (#{'array '* '& '&& 'const 'volatile} (first f)))
+                 (recur (last f) (if (and (= 'array (first f)) (= 3 (count f))) (conj acc (second f)) acc))
+                 acc))]
+      (when (some #(and (not (number? %)) (cx-runtime-bound? cs %)) bs)
+        (ex-info (str "codegen: size of array '" (:name k) "' is not an integral constant-expression") {:codegen/refused :vla-type :cx/node k})))))
+
+(defn- cx-vm-typeid!
+  "queue 570: typeid's operand `n` of a variably modified type, the program's error."
+  [n]
+  (throw (ex-info "codegen: cannot create type information for a type of variable size" {:codegen/refused :vla-type :cx/node n})))
+
+(defn cx-vm?
+  "queue 570: the type `t` is variably modified: a VLA type, or a pointer, reference or array built from one."
+  [t]
+  (loop [t t]
+    (cond (not (map? t)) false
+          (:vla t) true
+          (#{:ptr :ref :rref} (:k t)) (recur (:to t))
+          (= :arr (:k t)) (recur (:of t))
+          :else false)))
+
+(def ^:private cx-bound-skip
+  ;; an operand whose value is not read, or whose names a written bound does not show as variables: an unevaluated operand, a
+  ;; conditional or short-circuit operator, an address, a qualified name, a literal, a call's or a functional cast's parenthesis
+  #"\b(?:sizeof|alignof|__alignof__|_Alignof|decltype|typeid|noexcept|__typeof__|typeof|requires|__builtin_\w+)\b|\?|&|\[|\{|::|\"|'|[A-Za-z_]\w*\s*\(")
+
+(defn- cx-runtime-var?
+  "queue 570: the name `parts` (unqualified or qualified) names a variable whose value is never a constant expression's: a
+  function parameter, or a variable neither of reference type nor const-qualified (a constexpr variable is const)
+  ([expr.const]/4, /10: no other variable is usable in constant expressions, and an lvalue-to-rvalue conversion of it is no
+  core constant expression, /5.9)."
+  [scope parts]
+  (let [es (try (if (= 1 (count parts)) (lookup scope (first parts)) (lookup-qualified scope parts)) (catch arbace.lang.ExceptionInfo _ nil))
+        e (first es)]
+    (when (and (= :var (:e e)) (every? #(= :var (:e %)) es))
+      (let [v (var* (:id e)) t (:ty v)]
+        (boolean (and (map? t) (not (abi/ref? t))
+                      (or (= :param (:storage v))
+                          (not (:c (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))))))))))
+
+(defn cx-runtime-bound?
+  "queue 570: the array bound's form `b` (a name, a qualified name, or (cpp/text s), as the type parser keeps it) surely is no
+  constant expression: every operand of it is read and one names a variable cx-runtime-var? says no constant reads (`i`,
+  `n + 1`, `A::i`). Nil when not sure."
+  [scope b]
+  (let [names (cond (symbol? b) [(name-parts b)]
+                    (and (seq? b) (= 'cpp/text (first b)) (string? (second b)) (not (re-find cx-bound-skip (second b))))
+                    (let [toks (re-seq #"->|[A-Za-z_]\w*|\S" (second b))]
+                      (for [[p t] (map vector (cons nil toks) toks)
+                            :when (and (re-matches #"[A-Za-z_]\w*" t) (not (#{"->" "."} p)))]
+                        [t]))
+                    :else nil)]
+    (boolean (some #(cx-runtime-var? scope %) names))))
+
+(def ^:private cx-type-words
+  #{"char" "short" "int" "long" "unsigned" "signed" "bool" "float" "double" "void" "wchar_t" "char8_t" "char16_t" "char32_t"
+    "__int128" "struct" "class" "union" "enum" "const" "volatile" "__SIZE_TYPE__" "__PTRDIFF_TYPE__"})
+
+(defn cx-address-bound?
+  "queue 570: the array bound's form `b` reads no variable and calls nothing, yet holds an address: a string literal or a cast
+  to a pointer type (ext/vla22.C's `(long) \"h\"`, parse/array-size2.C's `(char *) &((struct S *) 0)->b - (char *) 0`). Its
+  value is fixed at translation, so it makes no GNU VLA, whose bound is a value computed at run time; and it is no integral
+  constant expression, a pointer's conversion to an integer being a reinterpret_cast ([expr.const]/5.15) -- GCC's \"size of
+  array 'tbl' is not an integral constant-expression\"."
+  [scope b]
+  (when (and (seq? b) (= 'cpp/text (first b)) (string? (second b)))
+    (let [s (second b)]
+      (and (re-find #"\"|\*\s*\)" s)
+           (not (re-find #"\b(?:sizeof|alignof|__alignof__|_Alignof|decltype|typeid|noexcept|__typeof__|typeof|__builtin_\w+)\b|\?" s))
+           (let [toks (re-seq #"\"(?:[^\"\\]|\\.)*\"|->|::|[A-Za-z_]\w*|\S" s)]
+             (every? (fn [[p t]]
+                       (or (not (re-matches #"[A-Za-z_]\w*" t)) (#{"->" "." "::"} p) (cx-type-words t)
+                           (let [es (try (lookup scope t) (catch arbace.lang.ExceptionInfo _ nil))]
+                             (and (seq es) (every? #(= :type (:e %)) es)))))
+                     (map vector (cons nil toks) toks)))))))
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
@@ -848,14 +951,20 @@
       cpp/attributed (resolve-type-form scope (last f))
       array (if (= 2 (count f))
               (abi/arr nil (doto (resolve-type-form scope (second f)) (->> (cx-formed! :arr))))
-              (abi/arr (let [b (second f)
-                             n (cond (number? b) b (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil)]
-                         ;; (cpp-tpl2, the checker: [temp.deduct.general]/11's "attempting to create an array with ... a size that
-                         ;; is zero or negative", [dcl.array]/1; GCC's words)
-                         (when (and (number? n) (<= (long n) 0) (cx-subst?))
-                           (cx-subst-fail! (if (zero? (long n)) "zero-size array" "size of array is negative")))
-                         n)
-                       (doto (resolve-type-form scope (nth f 2)) (->> (cx-formed! :arr)))))
+              (let [b (second f)
+                    n (cond (number? b) b
+                            ;; (queue 570, the checker: in *cx-vla*'s block scope a bound surely no constant expression is
+                            ;; GNU's VLA's)
+                            (and b (:const-bound @hooks) *cx-vla* (identical? scope *cx-vla*) (checking?))
+                            (try ((:const-bound @hooks) scope b)
+                                 (catch arbace.lang.ExceptionInfo x (if (cx-runtime-bound? scope b) ::vla (throw x))))
+                            (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil)]
+                ;; (cpp-tpl2, the checker: [temp.deduct.general]/11's "attempting to create an array with ... a size that
+                ;; is zero or negative", [dcl.array]/1; GCC's words)
+                (when (and (number? n) (<= (long n) 0) (cx-subst?))
+                  (cx-subst-fail! (if (zero? (long n)) "zero-size array" "size of array is negative")))
+                (let [et (doto (resolve-type-form scope (nth f 2)) (->> (cx-formed! :arr)))]
+                  (if (= ::vla n) (assoc (abi/arr nil et) :vla true) (abi/arr n et)))))
       fn (if-let [tt (when (and (symbol? (nth f 2 nil)) (str/starts-with? (str (nth f 2)) "__") (:is-trait @hooks) ((:is-trait @hooks) (str (nth f 2))))
                        (:trait-type @hooks))]
            ;; a transform trait's type (G4: __remove_cv(T)), spelled as a function type returning the trait's name
@@ -2906,7 +3015,11 @@
                           ;; class's layout refused "no size for nil": <format>'s _Arg_value's union)
                           (do (.incrementAndGet ^java.util.concurrent.atomic.AtomicLong drop-count)
                               (when (System/getenv "CPP_HDR_TRACE") (binding [*out* *err*] (println "header drop: an anonymous member of" (:name n) "(its class dropped)"))))
-                        (if-let [bad (let [et (loop [t (resolve-type cs (get-in k [:type :qualType]))] (if (abi/arr? t) (recur (:of t)) t))]
+                        (if-let [bad (let [t0 (try (resolve-type cs (get-in k [:type :qualType]))
+                                                   (catch arbace.lang.ExceptionInfo x (or (cx-field-bound-error cs k) (throw x))))]
+                                       (if (instance? arbace.lang.ExceptionInfo t0)
+                                         t0
+                                       (let [et (loop [t t0] (if (abi/arr? t) (recur (:of t)) t))]
                                        ;; (CP368 (a): a member of a class still being defined, its own or an enclosing one's,
                                        ;; or a class template's instance being instantiated: an incomplete type,
                                        ;; [class.mem.general]/7, clang's err_field_incomplete_or_sizeless; pr67405.C's `S f;` in
@@ -2949,7 +3062,12 @@
                                        ;; (cpp-1123: a member of an abstract class type or an array of it, [class.abstract]/3)
                                        (when-let [an (and (checking?) (not (header-node? k)) (cx-abstract-type et))]
                                          (ex-info (str "codegen: cannot declare field '" (:name k) "' to be of abstract type '" an "'")
-                                                  {:codegen/refused :abstract :cx/node k}))))]
+                                                  {:codegen/refused :abstract :cx/node k}))
+                                       ;; (queue 570, the checker: a member of a variably modified type, [class.mem.general]: GCC's
+                                       ;; "data member may not have variably modified type 'int [n]'"; ext/vlm2.C's typedef)
+                                       (when (and (checking?) (not (header-node? k)) (cx-vm? t0))
+                                         (ex-info (str "codegen: data member '" (:name k) "' may not have variably modified type")
+                                                  {:codegen/refused :vla-type :cx/node k}))))))]
                           (if (checking?)
                             (do (swap! *order* conj [:cx-error bad])
                                 ;; (cpp-rind: the class marked, its members' bodies not analyzed for an explicit instantiation,
@@ -10260,6 +10378,14 @@
         fa (find-allocation ctx (if nexpr et et) (boolean nexpr) (boolean (:isGlobal n)) (vec pargs))
         ;; the reserved placement form new (p) T: clang's CodeGen uses its argument, calls nothing
         placement (when (:reserved fa) (convert-scalar (rv (first pargs)) (abi/ptr abi/void) false))
+        ;; (queue 570, the checker: a new-expression's type of GNU's VLA type, a local typedef's: `new A[5]` and `new (A[0])`
+        ;; make an array of it, a bound past the first no converted constant expression, [expr.new]/8: GCC's "array size in
+        ;; new-expression must be constant"; `new A` alone GNU's array new of A's bound, the slice's refusal; init/new35.C)
+        _ (when (and (checking?) (or (and nexpr (cx-vm? et))
+                                     (and (map? et) (abi/arr? (abi/unq et)) (not (:vla (abi/unq et))) (cx-vm? (:of (abi/unq et))))))
+            (throw (ex-info "codegen: array size in new-expression must be constant" {:codegen/refused :vla-type :cx/node n})))
+        _ (when (and (checking?) (nil? nexpr) (map? et) (:vla (abi/unq et)))
+            (fail :new-array "a new-expression of a GNU variable-length array type"))
         ;; (cpp-rind, the checker: [expr.new]/1-2, a new-type-id of an array type of unknown bound (a typedef's, `new A` for A =
         ;; int[]) has no size: GCC's "invalid use of array with unspecified bounds"; init/new20.C)
         _ (when (and (checking?) (nil? nexpr) (map? et) (abi/arr? (abi/unq et)) (nil? (:n (abi/unq et))) (nil? initn))
@@ -10442,7 +10568,12 @@
               {:op :int :v c :ty (abi/unq t) :cat :pr}
               (fail :lambda "a variable the lambda does not capture: " (:name v))))
           :else
-          (let [src (entity-expr encl [{:e :var :id k}] nil)
+          (let [;; (queue 570, the checker: a VLA captured by copy, its closure member an array copied element by element,
+                ;; [expr.prim.lambda.capture]/10, /15, which a bound known only at run time cannot size: GCC's "array of runtime
+                ;; bound cannot be captured by copy, only by reference"; cpp1y/vla5.C)
+                _ (when (and (checking?) (= :copy mode) (:vla (abi/unq (abi/non-ref (:ty v)))))
+                    (fail :vla-type "array of runtime bound '" (:name v) "' cannot be captured by copy, only by reference"))
+                src (entity-expr encl [{:e :var :id k}] nil)
                 i (count (:fields (abi/cls lid)))
                 ft (if (= :ref mode) (abi/lref (:ty src)) (abi/non-ref (:ty v)))]
             (abi/update-cls! lid update :fields conj (cond-> {:name nil :ty ft :access :private :i i :capture true} (checking?) (assoc :cx-capname (:name v))))
@@ -11929,8 +12060,14 @@
           _ (when-not ti (fail :rtti "typeid without std::type_info"))
           ti (assoc ti :c true)]
       (if-let [ta (get-in n [:typeArg :qualType])]
-        {:op :typeid :t (abi/unq (abi/non-ref (resolve-type (:scope ctx) ta))) :ty ti :cat :lv}
+        (let [t (binding [*cx-vla* (when (checking?) (:scope ctx))] (resolve-type (:scope ctx) ta))]
+          ;; (queue 570, the checker: typeid of a variably modified type, [expr.typeid]/4-5 (its std::type_info fixed at
+          ;; translation): GCC's "cannot create type information for type 'int (*)[i]' because it involves types of
+          ;; variable size", ext/vla4.C)
+          (when (and (checking?) (cx-vm? t)) (cx-vm-typeid! n))
+          {:op :typeid :t (abi/unq (abi/non-ref t)) :ty ti :cat :lv})
         (let [e (analyze ctx (first (kids n)))
+              _ (when (and (checking?) (cx-vm? (:ty e))) (cx-vm-typeid! n))
               cid (class-id (:ty e))]
           (if (and cid (lv? e) (abi/dynamic? cid))
             {:op :typeid :e e :ty ti :cat :lv}
@@ -11959,6 +12096,10 @@
                      (let [e (analyze ctx k)
                            r (if (abi/class? (abi/unq (:ty e))) e (rv e))
                            t (abi/unq (:ty r))]
+                       ;; (queue 570, the checker: an exception object of a variably modified type, [except.throw]/3: GCC's
+                       ;; "cannot throw expression of type 'int (*)[i]'", at the operand, the analysis going on; ext/vla4.C)
+                       (when (and (checking?) *on-refusal* (cx-vm? t))
+                         (*on-refusal* (ex-info "codegen: cannot throw expression of a variably modified type" {:codegen/refused :vla-type :cx/node k}) k))
                        ;; (queue 463, the checker: the exception object's destructor potentially invoked, [except.throw]/5)
                        ;; (queue 509, the checker: an implicitly movable entity's implicit move, [class.copy.elision]/3)
                        (let [i (if (and (checking?) (abi/class? (abi/unq (:ty e))) (cx-movable-var ctx e))
@@ -12114,6 +12255,11 @@
                (or (nil? ik) (and list? (= "InitListExpr" (:kind ik)))))
       (let [et (resolve-type-form (:scope ctx) (nth f 2))
             e (rv (analyze ctx b))]
+        ;; (queue 570, the checker: a bound of floating-point or pointer type, which no conversion makes an integer's
+        ;; ([dcl.array]/1: a converted constant expression of type std::size_t; GNU's VLA takes an integer bound): GCC's "size
+        ;; of array 'a' has non-integral type 'double'")
+        (when (and (checking?) (let [u (abi/unq (abi/underlying (abi/unq (:ty e))))] (or (abi/floating? u) (abi/ptr? u))))
+          (throw (ex-info (str "codegen: size of array '" (:name n) "' has non-integral type") {:codegen/refused :vla-type :cx/node n})))
         (when (and (abi/integral? (abi/unq (abi/underlying (abi/unq (:ty e))))) (not (abi/class? (abi/unq et))))
           [(assoc (abi/arr nil et) :vla true) e]))))))
 
@@ -12128,6 +12274,16 @@
                     ;; (cpp-rt-own4, the code generator: a VLA, vla-local)
                     (and (not (checking?)) (= :local storage) (:_vla n) (boolean (re-find #"not a constant" (str (.getMessage x)))))
                     (if-let [[t e] (vla-local ctx n qt)] (do (reset! vla e) t) (throw x))
+                    ;; (queue 570, the checker: a bound that reads no variable yet holds an address, cx-address-bound?: GCC's
+                    ;; "size of array 'tbl' is not an integral constant-expression"; ext/vla22.C, parse/array-size2.C)
+                    ;; (reported, the analysis going on, the variable declared as an array of no known bound: its uses report
+                    ;; nothing more)
+                    (and (checking?) *on-refusal* (= :local storage) (:_vla n)
+                         (let [f (try (ct/parse-type (strip-type-attrs qt)) (catch Exception _ nil))]
+                           (and (seq? f) (= 'array (first f)) (= 3 (count f)) (cx-address-bound? (:scope ctx) (second f)))))
+                    (let [et (resolve-type-form (:scope ctx) (nth (ct/parse-type (strip-type-attrs qt)) 2))]
+                      (*on-refusal* (ex-info (str "codegen: size of array '" (:name n) "' is not an integral constant-expression") {:codegen/refused :vla-type :cx/node n}) n)
+                      (assoc (abi/arr nil et) :vla true))
                     ;; (cpp-singles, the checker: a VLA's bound analyzed, so that its immediate invocations are evaluated,
                     ;; [expr.const]/16 -- GCC's "call to consteval function 'bar(3)' is not a constant expression" at the call,
                     ;; cpp2a/consteval34.C's `int a1[bar(3)];` --, the refusal then as before)
@@ -12143,6 +12299,11 @@
                     ;; (queue 500: a specialization surely without a definition, the variable's refusal)
                     :else (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
+        ;; (queue 570, the checker: a constexpr variable of a variably modified type, [dcl.constexpr]/6 with [expr.const]: its
+        ;; object's size is a run-time value, GCC's "'constexpr' variable 'x' has variably-modified type 'const int [i]'";
+        ;; gomp/pr85134.C)
+        _ (when (and (checking?) *on-refusal* (:constexpr n) (or @vla (cx-vm? ty)))
+            (*on-refusal* (ex-info (str "codegen: 'constexpr' variable '" (:name n) "' has variably-modified type") {:codegen/refused :vla-type :cx/node n}) n))
         _ (cx-void-var! n ty)
         _ (when-let [r (cx-sure-incomplete-refusal n ty nil)] (*on-refusal* r n))
         ;; (cpp-sweep, the checker: [dcl.constexpr]/3.4 of C++14-C++20 (P2242R3 dropped it in C++23), no definition of a variable
@@ -12483,7 +12644,10 @@
            ;; a block-scope function declaration (queue 445: the code generator's at its enclosing namespace, *block-fn*)
            "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) {:s :null})
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
-           ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl") (do (declare-node! (:scope ctx) d) {:s :null})
+           ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl")
+           ;; (queue 570, the checker: a block scope's typedef or alias declaration may name a variably modified type, GNU's,
+           ;; ext/vlm2.C's `typedef int X[n];`)
+           (do (binding [*cx-vla* (when (and (checking?) (#{"TypedefDecl" "TypeAliasDecl"} (:kind d))) (:scope ctx))] (declare-node! (:scope ctx) d)) {:s :null})
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
            ;; (queue 497, the checker: in a function template's specialization for arguments with no dependent part too,
            ;; [temp.inst]/11 with [dcl.pre]/10, its failure alone judged -- a sure false value; any other refusal there the
@@ -12881,12 +13045,16 @@
                                        (if vd
                                          (let [;; (queue 487, the checker: a handler's type refused at the handler, GCC's
                                                ;; place for it, not the try statement's: parse/error54.C)
-                                               id (try (local-var! c vd :local)
+                                               id (try (binding [*cx-vla* (when (checking?) (:scope c))] (local-var! c vd :local))
                                                        (catch arbace.lang.ExceptionInfo x
                                                          (throw (if (and (checking?) (= :ambiguous (:codegen/refused (ex-data x))) (not (:cx/node (ex-data x))))
                                                                   (ex-info (.getMessage x) (assoc (ex-data x) :cx/node h))
                                                                   x))))
                                                t (:ty (var* id))
+                                               ;; (queue 570, the checker: a handler of a variably modified type, [except.handle]/1:
+                                               ;; GCC's "cannot catch type 'int (*)[i]' of variable size"; ext/vla4.C)
+                                               _ (when (and (checking?) (cx-vm? t))
+                                                   (throw (ex-info "codegen: cannot catch a type of variable size" {:codegen/refused :vla-type :cx/node h})))
                                                ct (abi/unq (abi/non-ref t))
                                                src {:op :exn-obj :ty ct :cat :lv}
                                                init (cond (abi/ref? t) {:i :bind :e src}
