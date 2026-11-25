@@ -23147,3 +23147,60 @@ explicit10.C, explicit12.C, explicit13.C, explicit5.C, explicit8.C, is-constant-
   independence 0.8830 -> 0.8870, independence 0.9762 -> 0.9770. `bin/reap`, `bin/crops-score --judge --strict`,
   `bin/records-check`, `bin/markers-check`: 0 problems. cpp-own-1125's whole own record was not pushed when this was recorded:
   the merge keeps both (rows by file, these 52 its own passes or this branch's).
+
+## 2026-11-25 — C++: 526's recovery merged, the unexpanded packs GCC drops, and the combined branch cpp-vm-1125 (queue 573, VM)
+
+- Merged 526-cpp-recovery dc48d4b60 (round 1 of 518-1 (a): any namespace-scope kind's recovery, member-level recovery,
+  cascades silenced by name) into 570's af1703774 (12381c24e). arbace/cpp/sema.ae's seven conflicts resolved by hand keeping
+  both sides' rules (doc/cpp/CPP-SURVEY.md, "As built: 573"); template.ae's both kept; the own record re-judged for 526's four
+  rows from a finished `--only` run (ext/vector6.C, template/crash125.C to own pass), never hand-merged.
+- 567-2 (a), the user's: [temp.variadic]/5 with GCC's recovery as the g++.dg tests state it (and g++ 15.2 shows on two probes):
+  a function template whose declared type names its own pack unexpanded is no viable candidate (template.ae's
+  `cx-pack-signature-check!`); a class template specialization's member whose declared type names the head's pack unexpanded
+  is not declared (sema.ae's `cx-pack-dropped-member?`, the instance's `:cx-packs`), its name not silenced, so the later uses
+  are errors as GCC's are; a noexcept-specifier left out (cpp0x/noexcept66.C keeps its member). cpp0x/pr31434.C, pr31437.C,
+  pr32127.C, pr31443.C, pr31444.C to own pass. Alternatives: reusing 526's silencing (would have hidden the very errors the
+  tests expect); copying diag.ae's text check into sema (one rule in two places: resolved at run time instead).
+- The coordinator's change of plan made this branch the combined C++ branch: 578-cpp-syntax-recovery 0bc8e3b5b and
+  577-cpp-gnu-rules 6c89df5a7 merged (clean), then next 864cffa55 (cpp-own-1125's whole own record), 580 9727402fb, 584
+  a1da2edfe and cpp-indep-1125 ae13c3505, conflicts resolved by hand keeping both sides' rules: diag.ae's constexpr-labels
+  (cpp-own's and 584's one rule, cpp-own's kept), parse.ae's `explicit` (584's tentative parse with cpp-indep's
+  :explicit-i), sema.ae's class-init (cpp-indep's copy-list binding, then cpp-tzdb's conversion clause) and the
+  static_assert catch (526's recoverable refusal with cpp-indep's member rule); journals and survey the union.
+- One regression run over every recorded own pass and every row the branches claim (3,819 files, scripts/mklist.sh in
+  .tmp/q573) found 39 recorded own passes lost and new extra lines in three failing rows: merge-resolution bugs, fixed, not
+  recorded (fa9509e65): 526's catch-all for an implicit member's refusal had come before the rules that delete it surely and
+  poisoned their classes (36 rows); cpp-indep's same-substitution fatal fired inside a concept's satisfaction before 584's
+  "depends on itself" (3 rows); an instance refused for a constant the evaluation does not reach is :cx-inst-refused now
+  (cpp2a/bitfield2.C's new extra line). The run was made again at the fixed head and recorded from: 3,819 files, 2,935 own
+  passes, 0 lost, recorded with `--judge --record` (own passes 2,906 -> 2,935; .tmp/q573/fin.log, fin-record.log). Two rows that
+  failed before keep new extra lines, cascades of the recovery going on (nontype-class51, omp-constexpr): DECISION 573-1.
+  bin/reap: C++ read 6,090 / 0 / 194 -> 6,108 / 0 / 177; crops-score C++ completeness 0.9862 -> 0.9869, read independence
+  0.8900 -> 0.8920; reap, crops-score --judge --strict, records-check, markers-check: 0 problems.
+
+## 2026-11-25 — C++ read: the GNU rules group (queue 577, VM; recorded on cpp-vm-1125)
+
+- Built (577-cpp-gnu-rules 6c89df5a7, merged into cpp-vm-1125): diag.ae's `atomic-builtin-args`, GCC's __atomic built-ins'
+  argument rules (the GCC 15.2 manual's "Built-in Functions for Memory Model Aware Atomic Operations"), checked for a call with no
+  dependent argument inside a template argument list, its first error at the spelling of the call's `(`, then "template argument
+  N is invalid" for the lists it is in; the preprocessor's copies mapped to their spellings for it (arbace/repr/c/lex.ae's
+  `*spelling*`, inert unless bound; parse.ae's and native.ae's `*spellings*`); and `abi-vector-manglings`, the vector manglings
+  before ABI version 4 (the manual's -fabi-version), "conflicts with a previous mangle". No GCC or clang code.
+- Rows: abi/mangle41.C, template/builtin-atomic-overloads5.C, -6.C to own pass (the combined record); ext/pr84843-1.C, -2.C
+  stay as recorded. test/cpp/divergences-dg.edn's :gcc-own-rules :tests lose those three and cpp0x/variadic-ex14.C and
+  template/ttp16.C (already own passes): cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, ext/type_pack_element4.C left (577-1).
+- Alternatives: the atomic rule over every AtomicExpr of ordinary bodies (577-2 (b): wider regression risk, no row needs it).
+
+## 2026-11-25 — C++ read: the syntax-recovery group (queue 578, VM; recorded on cpp-vm-1125)
+
+- Built (578-cpp-syntax-recovery 0bc8e3b5b on 573's merge, merged into cpp-vm-1125): parse.ae's parameter-list recovery (an
+  error skips to the list's `)`, the declaration going on, GCC's "expected ',' or '...'"; not under a tentative parse,
+  `*tentative*`), `gnu-attr-args!` (GNU attribute arguments parsed as an expression list for their syntax errors, then put back),
+  the current instantiation's undeclared member in a qualified declarator ("is not a type", [temp.dep.type]); diag.ae's
+  `template-self-call-enumerators` ([expr.const]/5.3: a template's own specialization called in an enumerator of its
+  definition); sema.ae's `ce-args-env` evaluating an empty-class argument that is a call. Rules from the standard, the GCC
+  manual and the tests; no GCC or clang code.
+- Rows to own pass: parse/error6.C, cpp0x/pr84606.C, template/typedef6.C, cpp1y/constexpr-recursion1.C, -recursion2.C,
+  cpp0x/constexpr-non-const-arg2.C; cpp1z/constexpr-asm-3.C by 580. Alternatives: a recovery inside tentative parses (would change
+  which reading wins), keeping attributes' arguments in the tree (a tree change for no row).
+- 580's entry (queue 580, above) is its own; its "As built" is in the survey with this one.

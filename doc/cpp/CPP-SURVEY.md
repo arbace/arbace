@@ -11752,3 +11752,102 @@ GCC's documented messages, no GCC or clang code.
 52 clang-only rows to own pass (.tmp/keep/cpp-indep-1125/moved.txt in the main checkout); C++ read independence 0.8830 -> 0.8870.
 Left: the timeouts (the 300 s cap under the host's load), template/qualttp2.C, inherit/base3.C, cpp1z/class-deduction7.C,
 parse/bitfield2.C, and the long tail of one-row rules.
+
+## As built: 573, 526's recovery merged, and the unexpanded packs GCC drops (2026-11-25; queue 573, branch `cpp-vm-1125` on `570-cpp-vla-types` `af1703774`)
+
+526-cpp-recovery (dc48d4b60: the declaration recovery widened to any namespace-scope kind, member-level recovery in a main file's
+classes, a specialization's bad member template dropped, the dropped names' cascades silenced, `*cx-dropped*`) was merged into
+570's line by hand (12381c24e): arbace/cpp/sema.ae's seven hunks keep both sides' rules (cpp-tpl2's friend constraint check inside
+`cx-member-recover!`, its no-type-named report inside 526's typedef retry, cpp-sweep's DecompositionDecl drop ahead of 526's
+any-kind drop, `:late-dtor` beside the dropped-class cascade, P2564's binding beside the `auto x = {...}` guard, cpp-read's body
+analysis with 526's recoverable-refusal catch, cpp-decl2's `:cx-defaulted-delete` beside the poisoned deletion).
+
+567-2 (a), the user's: [temp.variadic]/5 makes a pack named outside every expansion ill-formed (diag.ae's `unexpanded-packs`
+reports it); the checker now goes on as GCC does after that error (its behaviour as the g++.dg tests state it, and as g++ 15.2
+shows on the probes; no GCC or clang code):
+- a main file's function template whose declared type names one of its own packs unexpanded is no viable candidate (template.ae's
+  `cx-pack-signature-check!`, `:cx-bad`): cpp0x/pr31434.C's `foo(0)` "no matching function";
+- a member of a class template's specialization (data member, static member, function, constructor, typedef, alias, member
+  template) whose declared type names a pack of the class's head unexpanded is not declared (sema.ae's `cx-pack-dropped-member?`
+  over the instance's `:cx-packs`; a member template's own parameters hide the class's of their names): cpp0x/pr32127.C's
+  `A<int>::i` "not a member", cpp0x/pr31437.C's `A<int> a(0)` "no matching function", pr31443.C, pr31444.C. Unlike 526's drops
+  its name is not silenced: the later errors are GCC's too;
+- a function's noexcept-specifier is left out of the text (GCC reports the pack there and keeps the member: cpp0x/noexcept66.C).
+The text check is diag.ae's `unexpanded-in-text`, resolved at run time (sema.ae's `cx-unexpanded-packs`; nil outside the checker).
+
+The combined branch `cpp-vm-1125` then took 578 and 577 (merge commits, no conflicts), next with cpp-own-1125's whole own record,
+580, 584 and cpp-indep-1125 (conflicts in sema.ae, parse.ae and diag.ae resolved keeping both sides' rules), and one regression
+run recorded them all (below, "the combined record").
+
+The combined record (one `--only` run at fa9509e65, 3,819 files: every recorded own pass and every row 573, 577, 578, 580,
+584 and cpp-indep claim, with 526's half b and the three `<string>` timeouts 580 expected to fit; .tmp/q573/fin.log): 2,935
+own passes, 0 lost, recorded from it with `--judge --record` (own passes 2,906 -> 2,935). A first run at 684127dac had lost 39
+recorded own passes, merge-resolution bugs fixed in fa9509e65 and never recorded: 526's catch-all for an implicit member's
+recoverable refusal now comes after the rules that delete the member surely or by their own judgment (it had poisoned their
+classes); cpp-indep's same-substitution fatal is not judged under a concept's satisfaction (584's "depends on itself" reports
+that cycle); an instance refused for a constant the evaluation does not reach is :cx-inst-refused. 526-1's proof: 0 lost, and new
+extra lines in two rows that failed before and fail now, both cascades of 526's recovery going on past an earlier error the unit
+used to stop at (cpp2a/nontype-class51.C's `a0.f(a0)` on a declaration the parser does not read as a variable; gomp/omp-constexpr.C's
+compound assignments in constexpr variables' initializers after the OpenMP directive's error): DECISION 573-1. Rows to own pass:
+573's pr31434, pr31437, pr32127, pr31443, pr31444; 577's abi/mangle41, builtin-atomic-overloads5, -6; 578's six and 580's
+constexpr-asm-3; cpp2a/concepts-pr67774.C (a timeout no longer); template/pr51488.C and others the merged rules move. bin/reap:
+C++ read 6,090 / 0 / 194 -> 6,108 / 0 / 177 (dg 4,156 -> 4,174), :gcc-own-rules 6 -> 3; crops-score: C++ completeness 0.9862 ->
+0.9869, read independence 0.8900 -> 0.8920.
+
+
+## As built: 577, the GNU rules group of the read tail (2026-11-25; queue 577, branch `577-cpp-gnu-rules` on `570-cpp-vla-types` `af1703774`)
+
+The read tail's :gcc-own-rules rows (test/cpp/divergences-dg.edn) left after 569: eight listed, two of them (cpp0x/variadic-ex14.C,
+template/ttp16.C) already own passes (queue 518's -fno-new-ttp-matching), so six. This slice builds the two GNU rules that are
+neither constant evaluation nor templates (the host's) nor recovery and packs (573's); the rules are the GCC 15.2 manual's and the
+tests' dg-error lines, no GCC or clang code.
+
+- GCC's __atomic built-ins' arguments (the manual's "Built-in Functions for Memory Model Aware Atomic Operations"):
+  arbace/repr/cpp/diag.ae's `atomic-builtin-args`. A call none of whose arguments names a template parameter is checked where it
+  is written, also inside a template argument list (GCC's "fully specified" call, which SFINAE does not take): the generic
+  __atomic_load, __atomic_store, __atomic_exchange and __atomic_compare_exchange (their counts 3, 3, 4, 6; argument 1 a pointer
+  to a non-void object of nonzero size; the other pointer arguments pointers, not to functions, to objects of argument 1's size,
+  the output not to a const object, none to a volatile one; the memory orders integers, a value out of range a warning only) and
+  the _n forms and fetch operations (an argument; argument 1 a pointer, "operand type 'T' is incompatible with argument 1";
+  then their counts, "too few" / "too many arguments"); the first error a call breaks, then "template argument N is invalid" for
+  the argument list it is in (at the argument's first token) and each enclosing one (at the `>` closing the list inside it).
+  Kept to the partial specializations' argument tokens, the only place the parser keeps such a call unparsed, and to arguments
+  of the shapes `T()`, `std::declval<T>()` and a number (any other leaves the call alone).
+- A diagnostic in a macro's expansion is GCC's at its spelling (the macro's definition line, the tests' lines 11-53 and 146):
+  the shared preprocessor now keeps, when asked, each copy an expansion makes mapped to the token it was copied from
+  (arbace/repr/c/lex.ae's `*spelling*`, unbound and so inert for C and for every other C++ file), the parser's tokens their
+  spelling offsets in the main file (arbace/repr/cpp/parse.ae's `*spellings*`), and parse-file's result both, `:toks` and
+  `:spell` (arbace/repr/cpp/native.ae's `*spellings*`), bound by diagnose for a file that calls an __atomic built-in.
+- GCC's vector manglings before ABI version 4 (the manual's -fabi-version: "Version 4 ... implements a standard mangling for
+  vector types"): `abi-vector-manglings`, with -fabi-version=1, 2 or 3 two functions of one name in one namespace whose
+  parameters differ only in vectors of one element type and different sizes, "'D' conflicts with a previous mangle".
+
+Rows to own pass (the combined record, cpp-vm-1125): abi/mangle41.C, template/builtin-atomic-overloads5.C, -6.C; ext/pr84843-1.C,
+-2.C stay as recorded. :gcc-own-rules' :tests now cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C and ext/type_pack_element4.C (577-1).
+
+## As built: 578, the read cell's syntax-recovery group (2026-11-25; queue 578, branch `578-cpp-syntax-recovery` on 573's merge `12381c24e`)
+
+The read cell's `:syntax-own` rows (567's list of nine; cpp0x/udlit-suffix-neg.C and cpp1y/auto-fn46.C already passed). Rules from
+the standard, the GCC manual and the tests' own expectations; no GCC or clang code.
+- parse/error6.C: a parameter-declaration-clause's error skips to its `)` and the declaration goes on, as GCC's "expected ',' or
+  '...'" recovery does ([dcl.fct]/3); still a decline, so Sema stays off; not inside a tentative parse (`*tentative*`, bound by
+  `tentatively`) nor in skimmed headers (parse.ae's `param-close`, parse-param-list).
+- cpp0x/pr84606.C: GNU attribute arguments parsed as GCC's expression list (the manual's "Attribute Syntax"), then put back: the
+  tree is unchanged, only syntax errors are added (parse.ae's `gnu-attr-args!`).
+- template/typedef6.C: a qualified declarator-id whose nested-name-specifier names a member of the current instantiation that the
+  complete, baseless class template does not declare, "'A<T>::X' is not a type" ([temp.dep.type]/1, /6; parse.ae).
+- cpp1y/constexpr-recursion1.C, -recursion2.C: inside a function template's definition, an enumerator whose initializer calls the
+  template's own specialization with non-dependent explicit arguments, "called in a constant expression before its definition is
+  complete" ([expr.const]/5.3; diag.ae's `template-self-call-enumerators`).
+- cpp0x/constexpr-non-const-arg2.C: an empty-class argument that is a call is evaluated and its sure errors given ([expr.const]/5,
+  [expr.call]/7), its value still `::empty` (sema.ae's `ce-args-env`).
+- cpp1z/constexpr-asm-3.C was no syntax gap but diag's checks' cost over `<string>` (DECISION 578-1 (a), built by 580).
+
+## As built: 580, diag's checks by node kind (2026-11-25; queue 580, branch `580-cpp-diag-walk-index` on `cpp-vm-1125` `79509867e`)
+
+578-1 (a), the user's. Measured first: 567's walk cache already made the root walks' replay cheap (8.3 s of the checks' 140.8 s on
+constexpr-asm-3); the time was about twenty checks' own context-carrying walks, which no cache replays. diag.ae's `kind-index`
+(built once per unit: each collection under the root mapped to the BitSet of the node kinds beneath it, equal sets shared),
+`reaches-fn KINDS` and `walk-kinds` let each of 21 costly checks skip the subtrees that hold none of the kinds it acts on, its
+context still from the ancestors it visits. Every check's output and Sema's equal byte for byte before and after on 414 rows
+(.tmp/q580/dump-*); the checks over a `<string>` unit about 10x cheaper (constexpr-asm-3 203 s -> 22 s); constexpr-asm-3 an own pass.
