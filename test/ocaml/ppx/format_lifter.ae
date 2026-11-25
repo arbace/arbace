@@ -1,0 +1,58 @@
+;; queue 548: ppx_custom_printf's src/gen/gen.ml ported (its rule `(rule (targets format_lifter.ml) (deps (:first_dep gen/gen.bc))
+;; (action (run %{first_dep} -o format_lifter.ml)))`), run by bin/oi ppx lifter (bin/lib/oi/ppx.bash) as
+;; `EXE test/ocaml/ppx/format_lifter.ae TOP GEN.ML`: the text on stdout. gen.ml (held to its SHA-256 below) runs the phrase
+;; `include CamlinternalFormatBasics;;` in the toplevel, keeps the lines of its output that start with `type ` (and `and ` within a
+;; group), one a declaration under its margin max_int, and writes them as one group, `type D1\nand D2...`, with
+;; `[@@deriving traverse_lift]` after it, parsed as an interface and printed by Pprintast. The toplevel prints each declaration of
+;; the stdlib's camlinternalFormatBasics.mli (TOP/stdlib) with its re-export equation `PARAMS CamlinternalFormatBasics.NAME =`
+;; before a variant or record representation (an abbreviation has none). Here each declaration is the .mli's own text, its comments
+;; taken out and its blanks one space, with that equation: the toplevel's printing of the same declarations up to spelling
+;; (Printtyp's layout, its leading `|`, a polymorphic variant's tags in its order), Pprintast's printing left to the ppx driver that
+;; reads the file (ppx-pp.tsv's traverse_driver row), which prints it again. Compared once with the host's toplevel (queue 548's
+;; report): the same declarations but neutral_concat's tags `Char and `String in the other order.
+(require '[arbace.string :as str])
+
+(def gen-sha256 "648c6b444053336cf13cc785d157e76903069048e4b6bb23776d553aa1e396dc")
+
+(defn strip-comments
+  "TEXT without its comments (nested; a string inside one does not end it), each a blank"
+  [^String t]
+  (let [n (count t) sb (StringBuilder.)]
+    (loop [i 0 depth 0]
+      (if (>= i n) (str sb)
+          (let [c (.charAt t i) c2 (when (< (inc i) n) (.charAt t (inc i)))]
+            (cond
+              (and (= c \() (= c2 \*)) (recur (+ i 2) (inc depth))
+              (and (pos? depth) (= c \*) (= c2 \))) (do (when (= depth 1) (.append sb \space)) (recur (+ i 2) (dec depth)))
+              (= c \")
+              (let [j (loop [j (inc i)] (cond (>= j n) j (= (.charAt t j) \\) (recur (+ j 2)) (= (.charAt t j) \") (inc j) :else (recur (inc j))))]
+                (when (zero? depth) (.append sb (subs t i (min j n)))) (recur j depth))
+              (pos? depth) (recur (inc i) depth)
+              :else (do (.append sb c) (recur (inc i) depth))))))))
+
+(defn format-lifter [^String mli]
+  (let [lines (str/split-lines (strip-comments mli))
+        ;; a declaration: a line that starts with `type ` or `and ` begins one, which runs to the next such line or another item
+        decls (loop [ls lines cur nil acc []]
+                (if (empty? ls) (if cur (conj acc cur) acc)
+                    (let [l (first ls)]
+                      (cond (re-find #"^(type|and) " l) (recur (rest ls) [l] (if cur (conj acc cur) acc))
+                            (re-find #"^(val|external|module|exception|open|include)\b" l) (recur (rest ls) nil (if cur (conj acc cur) acc))
+                            cur (recur (rest ls) (conj cur l) acc)
+                            :else (recur (rest ls) nil acc)))))
+        one (fn [ls]
+              (let [t (str/trim (str/replace (str/join " " ls) #"\s+" " "))
+                    [_ head body] (or (re-matches #"(?s)(?:type|and) (.*?) = (.*)" t) (throw (ex-info (str "no declaration in " t) {})))
+                    nm (last (str/split head #"[ )]"))
+                    params (str/trim (subs head 0 (- (count head) (count nm))))
+                    repr? (re-find #"^(\||\{|[A-Z])" body)]
+                (str head " = " (when repr? (str (when (seq params) (str params " ")) "CamlinternalFormatBasics." nm " = ")) body)))]
+    (when (empty? decls) (throw (ex-info "camlinternalFormatBasics.mli declares no type" {})))
+    (str (str/join "\n" (map-indexed (fn [i d] (str (if (zero? i) "type " "and ") (one d))) decls)) "\n[@@deriving traverse_lift]\n")))
+
+(let [[top gen] *command-line-args*
+      sha (fn [p] (let [md (java.security.MessageDigest/getInstance "SHA-256")]
+                    (apply str (map #(format "%02x" (bit-and % 0xff)) (.digest md (java.nio.file.Files/readAllBytes (java.nio.file.Paths/get p (make-array String 0))))))))]
+  (when-not (= gen-sha256 (sha gen)) (binding [*out* *err*] (println (str gen " is not the gen.ml the port follows"))) (System/exit 1))
+  (print (format-lifter (slurp (str top "/stdlib/camlinternalFormatBasics.mli"))))
+  (flush))

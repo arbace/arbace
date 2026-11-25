@@ -10,7 +10,9 @@
 #   5. plain `flock LOCK CMD`: it holds slot 1, a ticket runs beside it in slot 2 when it fits, and it waits for a ticket in slot 1;
 #   6. the one-slot version's waiters (the file at 903b053e4, when git has it): a ticket runs beside an old holder in slot 2;
 #      with an old ticket at the head waiting for slot 1, a later ticket takes slot 2, never slot 1, and the old one gets slot 1;
-#      an old ticket after a new holder runs when it ends.
+#      an old ticket after a new holder runs when it ends;
+#   7. one slot (LOCK.slots 1, the user, 2026-11-25): a big ticket does not run beside a holder, a small one (at most
+#      HEAVY_LOCK_SMALL_GIB) does, in slot 2, and a small one behind a big waiter backfills beside the holder.
 # Usage: test/gate/heavy-lock-test.bash
 # gate-tests: alone (its jobs hold on each other by time)
 set -uo pipefail
@@ -55,13 +57,13 @@ before B start A end && ok "1: B started while A ran" || bad "1: B did not run b
 grep -q 'slot 1' <<< "$qs" && grep -q 'slot 2' <<< "$qs" && grep -q 'waiting' <<< "$qs" && ok "1: --queue names slot 1, slot 2 and the waiter" || bad "1: --queue: $qs"
 ls -A "$D/big.lock.queue" | grep -v '^\.err$' | grep -q . && bad "1: tickets left: $(ls -A "$D/big.lock.queue")" || ok "1: no ticket or state file left"
 
-# 2. the memory rule; FIFO kept behind a head that does not fit
+# 2. the memory rule; a later ticket that fits backfills beside the holder ahead of a head that does not fit
 case_dir mem; export HEAVY_LOCK_MEMAVAIL_KIB=$((10 * G))
-run A 1.5 1; sleep 0.3; run B 0.5 20; sleep 0.3; run C 0.3 1
+run A 3 1; sleep 0.3; run B 0.5 20; sleep 0.3; run C 0.3 1
 sleep 0.4; grep -q 'waiting for memory' "$D/stderr" && ok "2: the head says it waits for memory" || bad "2: no memory message"
 wait
 before A end B start && ok "2: B (20 GiB, 10 available) waited for A" || bad "2: B ran beside A: $(cat "$LOG")"
-before B start C start && ok "2: C (1 GiB, would fit beside A) did not pass B" || bad "2: C passed B: $(cat "$LOG")"
+before C start B start && before C start A end && ok "2: C (1 GiB, fits beside A) backfilled ahead of B, beside A" || bad "2: C did not backfill: $(cat "$LOG")"
 [ "$(slot B)" = 1 ] && ok "2: B ran alone in slot 1" || bad "2: B's slot $(slot B)"
 
 # 3. FIFO with room for one job only
@@ -112,6 +114,15 @@ if git -C "$here" show 903b053e4:bin/heavy-lock > "$OLD" 2>"$T/git.err"; then
 else
   echo "skip 6: the one-slot version (903b053e4) is not in this clone's history"
 fi
+
+# 7. one slot, and the small slot beside it
+case_dir one-slot; export HEAVY_LOCK_MEMAVAIL_KIB=$((100 * G)); echo 1 > "$D/big.lock.slots"
+run A 2 20; sleep 0.3; run B 0.3 20; sleep 0.3; run S 0.3 4; wait
+before A end B start && ok "7: a big ticket (20 GiB) waited for the holder with room for it" || bad "7: B ran beside A: $(cat "$LOG")"
+before S start A end && [ "$(slot S)" = 2 ] && ok "7: a small ticket (4 GiB) ran beside the holder in slot 2, past the big waiter" || bad "7: S: $(cat "$LOG")"
+case_dir one-slot-env; echo 2 > "$D/big.lock.slots"
+HEAVY_LOCK_SLOTS=1 run A 1.5 20; sleep 0.3; HEAVY_LOCK_SLOTS=1 HEAVY_LOCK_SMALL_GIB=2 run S 0.3 4; wait
+before A end S start && ok "7: HEAVY_LOCK_SLOTS=1 over the file, and HEAVY_LOCK_SMALL_GIB=2 keeps a 4 GiB ticket out of slot 2" || bad "7: env: $(cat "$LOG")"
 unset HEAVY_LOCK_MEMAVAIL_KIB
 
 [ "$fail" = 0 ] && echo "heavy-lock-test: passed" || echo "heavy-lock-test: FAILED"

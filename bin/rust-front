@@ -78,7 +78,7 @@
 #                          contexts set aside, per item; a negative control (EXPAND_VERBOSE=1: the first differences; EXPAND_SPANS=1:
 #                          the root file's spans at context 0 kept; EXPAND_DUMP=DIR: our crates written there; EXPAND_TRACE=1)
 #   bin/rust-front pack-compare-test   queue 443: the instance judge's pure cases (test/rust/front/pack_compare_test.ae)
-#   bin/rust-front lib-unit census|keys CRATE|inline-keys CRATE|export CRATE [--add]|build CRATE|compare CRATE [NAME...]
+#   bin/rust-front lib-unit census|keys CRATE|inline-keys CRATE [--record]|export CRATE [--add]|build CRATE|compare CRATE [NAME...]
 #                          C6, RUST-90 S5 (doc/rust/FRONTEND-SURVEY.md, "C6: the library lowered by Arbace, the plan (write-ahead)",
 #                          "As built: C6's first slice"; arbace.rust.front.lib-unit): census: the closure of std's IR (rsi's std build
 #                          at test/rust/runtime/ir.sha256: RSI_STD_DIR's, the checkout's or the main checkout's .tmp/rsi/std/ir, else
@@ -89,7 +89,10 @@
 #                          identities); compare: codegen's define of each against std's IR's of its symbol, after RF3's normalizer, a
 #                          crossed control; all in .tmp/rust-front/lib-unit/, light (each step under 2.5 GiB); C6-4: inline-keys CRATE
 #                          adds the #[inline(always)] callees the builds wanted to CRATE's next export, `export core --add` exports only
-#                          the keys the export lacks (their module files) and appends them; build takes RF_CORE_ATTRS (core-attrs')
+#                          the keys the export lacks (their module files) and appends them; build takes RF_CORE_ATTRS (core-attrs');
+#                          queue 566 (566-1 (a)): every export reads the committed wanted keys, test/rust/front/lib-unit-CRATE-keys.txt
+#                          (inline-keys also takes `lib-unit l2|const wanted`; --record merges the cache's into that list), and
+#                          LIB_UNIT_DIR names another cache directory
 #   bin/rust-front std-names-native
 #                          C4-1 (a) (doc/rust/FRONTEND-SURVEY.md, "As built: C4-1"; arbace.rust.front.std-names): std's names (the
 #                          helper's std-names.edn's forms) from the crates' sources: core's, alloc's, std_detect's and std's module
@@ -468,7 +471,7 @@ case ${1:-} in
     cd "$root" && arbace_tool -m arbace.rust.front.mono-check "$fd" "$root/test/rust/front/std-crates.edn" "$libsrc" "$md" $ctl "${names[@]}" 2>&1 | grep -v -E '^Reflection warning|recur arg|^Auto-boxing' ;;
   std-iface-native)
     # C4 (doc/rust/FRONTEND-SURVEY.md, "As built: C4's switch"): std's interface assembled from the crates' native passes alone
-    # (core's whole pass: core-check with CORE_IFACE_FILES=all CORE_IFACE_ONLY=1, its native-iface.edn; alloc's: the pass of
+    # (core's whole pass: alloc-check --crate core --pass's file, CORE_NATIVE_IFACE, not core-check's CORE_IFACE_ONLY supplement; alloc's: the pass of
     # alloc-iface or lib-export, native-iface-nodebug.edn or alloc-iface.edn; std's: bin/rust-front std-iface's std-iface.edn) into
     # $work/std-iface-native.edn, then each crate's facts compared with the helper's std-iface, fact by fact (alloc-check --compare)
     shift; filt='^Reflection warning|recur arg|^Auto-boxing'
@@ -477,7 +480,14 @@ case ${1:-} in
     sn=${STD_NATIVE_IFACE:-$work/std/std-iface.edn}
     for f in "$cn" "$an" "$sn"; do [ -n "$f" ] && [ -s "$f" ] || { echo "std-iface-native: a crate's native interface is missing ($f): core-check's whole pass, alloc-iface, std-iface" >&2; exit 1; }; done
     fd=$(records_front) || exit 1
-    cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --assemble "$work/std-iface-native.edn" "core=$cn" "alloc=$an" "std=$sn" 2>&1 | grep -v -E "$filt" || exit 1
+    cd "$root" && GOMEMLIMIT=${GOMEMLIMIT:-2400MiB} arbace_tool -m arbace.rust.front.alloc-check --assemble "$work/std-iface-native.edn" "core=$cn" "alloc=$an" "std=$sn" 2>&1 | grep -v -E "$filt" | tee "$work/std-iface-native.assemble.log" || exit 1
+    # queue 542: core's file must be core's whole pass (alloc-check --crate core --pass: about 17,000 functions), not core-check's
+    # supplement of the same default name (CORE_IFACE_ONLY's native-iface.edn: about 1,100, what the helper's interface lacks)
+    nf=$(sed -n 's/^alloc-iface: --assemble: core from .*: \([0-9]*\) fns.*/\1/p' "$work/std-iface-native.assemble.log")
+    if [ "${nf:-0}" -lt "${CORE_IFACE_MIN_FNS:-10000}" ]; then
+      rm -f "$work/std-iface-native.edn"
+      echo "std-iface-native: $cn holds ${nf:-0} of core's functions: core-check's supplement, not core's whole pass (alloc-check --crate core --pass; CORE_NATIVE_IFACE=FILE names it)" >&2; exit 1
+    fi
     st=0
     for c in core alloc std; do
       cp "$work/std-iface-native.edn" "$work/std-iface-native-$c.edn"
@@ -563,11 +573,15 @@ case ${1:-} in
     else echo "std-crates: wrote $out"; fi ;;
   lib-unit)
     shift; sub=${1:-}; shift || true
-    lu=$work/lib-unit; mkdir -p "$lu"
+    # queue 566 (566-1 (a), the user's): LIB_UNIT_DIR another cache directory (a fresh cache rebuilt from the committed lists)
+    lu=${LIB_UNIT_DIR:-$work/lib-unit}; mkdir -p "$lu"
+    # 566-1 (a): the keys the builds wanted (the always-inliner's, a static's or a constant's evaluation's, L2's) committed as test
+    # data, test/rust/front/lib-unit-CRATE-keys.txt, read by every export beside CRATE-keys.txt and the cache's CRATE-inline-keys.txt
+    lib_wanted() { [ -s "$root/test/rust/front/lib-unit-$1-keys.txt" ] && echo "$root/test/rust/front/lib-unit-$1-keys.txt"; }
     # std's IR at the pin: rsi's std build, here or in the main checkout, else the oracle store's pack rust-std-ir
     lib_std_ir() {
       local m d; m=$(cd "$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/.." && pwd)
-      for d in ${RSI_STD_DIR:+"$RSI_STD_DIR/ir"} "$root/.tmp/rsi/std/ir" "$m/.tmp/rsi/std/ir" \
+      for d in ${RSI_STD_DIR:+"$RSI_STD_DIR/ir"} "$root/.tmp/rsi/std/ir" "$m/.tmp/rsi/std/ir" "$m"/.tmp/rsi/std-*/ir \
                $(. "$root/test/oracle-records/oracle.bash" && ls -d "$(oracle_store)"/unpacked/*/rust-std-ir 2>/dev/null); do
         [ -d "$d" ] && (cd "$d" && sha256sum -c --quiet "$root/test/rust/runtime/ir.sha256" > /dev/null 2>&1) && { echo "$d"; return 0; }
       done
@@ -592,7 +606,7 @@ case ${1:-} in
       export)
         c=${1:?lib-unit export CRATE}; [ -s "$lu/$c-keys.txt" ] || { echo "lib-unit: no $lu/$c-keys.txt (bin/rust-front lib-unit keys $c)" >&2; exit 1; }
         . "$root/bin/lib/repr-rust/core-build.bash"; libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
-        sort -u "$lu/$c-keys.txt" $( [ -s "$lu/$c-inline-keys.txt" ] && echo "$lu/$c-inline-keys.txt") > "$lu/$c-export-keys.txt"
+        sort -u "$lu/$c-keys.txt" $( [ -s "$lu/$c-inline-keys.txt" ] && echo "$lu/$c-inline-keys.txt") $(lib_wanted "$c") > "$lu/$c-export-keys.txt"
         if [ "$c" = core ]; then
           # rust-c6c: the interface's extra files lib-unit's callees need beside core-iface-extra.txt's (ub_checks.rs)
           export CORE_IFACE_EXTRA=${CORE_IFACE_EXTRA:-test/rust/front/lib-unit-iface-extra.txt}
@@ -636,20 +650,31 @@ case ${1:-} in
       inline-keys)
         # C6-4: the keys of CRATE's `#[inline(always)]` callees the builds wanted (each build's log: `lib-unit inline wanted DEF`,
         # any crate's build: an item of alloc inlines core's), added to CRATE's keys for its next export
-        # ($lu/CRATE-inline-keys.txt, which the export reads beside CRATE-keys.txt; the build's items stay CRATE-keys.txt's)
+        # ($lu/CRATE-inline-keys.txt, which the export reads beside CRATE-keys.txt; the build's items stay CRATE-keys.txt's);
+        # queue 566 (566-1 (a)): L2's and a constant's evaluation's wanted keys too (`lib-unit l2 wanted`, `lib-unit const wanted`),
+        # and `--record` merges the cache's into the committed list, test/rust/front/lib-unit-CRATE-keys.txt
         c=${1:?lib-unit inline-keys CRATE}; touch "$lu/$c-inline-keys.txt"
-        { cat "$lu/$c-inline-keys.txt"; cat "$lu"/*-build.log 2>/dev/null | sed -n "s/^lib-unit inline wanted \($c::[^ ]*\).*/\1/p" | sed "s/^$c:://; s/::/-/g"; } | sort -u > "$lu/$c-inline-keys.txt.new"
+        { cat "$lu/$c-inline-keys.txt"; cat "$lu"/*-build.log 2>/dev/null | sed -n -E "s/^lib-unit (inline|l2|const) wanted ($c::[^ ]*).*/\2/p" | sed "s/^$c:://; s/::/-/g"; } | sort -u > "$lu/$c-inline-keys.txt.new"
         mv "$lu/$c-inline-keys.txt.new" "$lu/$c-inline-keys.txt"
-        echo "lib-unit inline-keys: $c: $(wc -l < "$lu/$c-inline-keys.txt") keys of #[inline(always)] callees wanted" ;;
+        echo "lib-unit inline-keys: $c: $(wc -l < "$lu/$c-inline-keys.txt") keys the builds wanted"
+        if [ "${2:-}" = --record ]; then
+          kf=$root/test/rust/front/lib-unit-$c-keys.txt
+          sort -u "$lu/$c-inline-keys.txt" $( [ -s "$kf" ] && echo "$kf") > "$kf.new" && mv "$kf.new" "$kf"
+          echo "lib-unit inline-keys: $c: $(wc -l < "$kf") keys in test/rust/front/lib-unit-$c-keys.txt"
+        fi ;;
       build)
         c=${1:?lib-unit build CRATE}; std=$(lib_std_ir) || exit 1
         [ -s "$lu/native-$c-items.edn" ] || { echo "lib-unit: no $lu/native-$c-items.edn (bin/rust-front lib-unit export $c)" >&2; exit 1; }
         # the crates' identities the compare's IR names them by (each unit's codegen unit name: CRATE.STABLE-CRATE-ID-cgu.N), the
         # compiler's version and triple std-crates-rsi.edn's
-        cd "$root" && arbace_tool -e "(let [b (read-string (slurp \"test/rust/front/std-crates-rsi.edn\"))
+        # queue 542 (C6): the other crates' identities (libc's, unwind's, the backtrace crates': the foreign functions' and the
+        # dependencies' items name them) computed by Cargo's metadata hash ported (std-crates --native), core's, alloc's and std's
+        # the IR's units' as before
+        "$0" std-crates --native > "$lu/std-crates-native.log" 2>&1 || { cat "$lu/std-crates-native.log"; exit 1; }
+        cd "$root" && arbace_tool -e "(let [b (update (read-string (slurp \"test/rust/front/std-crates-rsi.edn\")) :crates merge (:crates (read-string (slurp \"$work/std-crates-native.edn\"))))
               ids (into {} (for [d [\"core\" \"alloc\" \"std\"] :let [f (first (sort (.list (java.io.File. (str \"$std/\" d)))))]]
                              [d {:stable-crate-id (second (re-find #\"\\.([0-9a-f]{16})-cgu\" f)) :unit f}]))]
-          (spit \"$lu/crates.edn\" (pr-str (assoc b :crates ids))))" || exit 1
+          (spit \"$lu/crates.edn\" (pr-str (update b :crates merge ids))))" || exit 1
         sed "s/^/$c-/; s/-/::/g" "$lu/$c-keys.txt" > "$lu/$c-defs.txt"
         fd=$(records_front) || exit 1
         libsrc=${RF_MONO_LIB:-$root/.tmp/repr-rust/apks/rust-src/usr/src/rust/library}; rf_libsrc_take || exit 1
@@ -666,8 +691,32 @@ case ${1:-} in
           if [ ! -s "$work/core/core-attrs.edn" ]; then ( . "$root/bin/lib/repr-rust/core-build.bash"; core_attrs ) || exit 1; fi
           export RF_CORE_ATTRS=$work/core/core-attrs.edn
         fi
+        # queue 542 (C6): std's dependencies' native facts (libc's foreign functions, hashbrown's items: std/deps' passes) where the
+        # run's interface has none, as rsi-build's RF_EXTRA_IFACE gives them (an explicit RF_EXTRA_IFACE kept); round 4: and std's and
+        # alloc's own passes (their crate-private ADTs' layouts: fs::File, the futex Mutex and RwLock, FileAttr) and core's whole pass
+        # when kept as core/core-whole-iface.edn (alloc-check --crate core --pass: core::sync::atomic's private Align1..Align8)
+        case $c in adler2|memchr|rustc_demangle|miniz_oxide|object|gimli|addr2line) bt=1 ;; *) bt=${LIB_UNIT_BACKTRACE:-0} ;; esac
+        if [ -z "${RF_EXTRA_IFACE:-}" ]; then
+          xi=""; for f in "$work/std/deps/libc-iface.edn" "$work/std/deps/hashbrown-iface.edn" "$work/std/deps/unwind-iface.edn" "$work/std/native-iface-nodebug.edn" "$work/alloc/native-iface-nodebug.edn" "$work/core/core-whole-iface.edn"; do [ -s "$f" ] && xi=$xi${xi:+:}$f; done
+          # queue 561 (C6 L3): a backtrace crate's build (or LIB_UNIT_BACKTRACE=1, std's) also reads the backtrace crates' facts
+          # made so far (bin/rust-front std-iface --deps with DEPS_BACKTRACE)
+          if [ "$bt" = 1 ]; then
+            for f in adler2 memchr rustc_demangle miniz_oxide object gimli addr2line; do f=$work/std/deps/$f-iface.edn; [ -s "$f" ] && xi=$xi${xi:+:}$f; done
+          fi
+          [ -n "$xi" ] && export RF_EXTRA_IFACE=$xi
+        fi
         # rust-c6c: the crates' module lists (a module path in the type namespace beside a function of its name)
         lm=""; for o in core alloc std; do [ -s "$work/$o/modules.txt" ] && lm=$lm${lm:+:}$work/$o/modules.txt; done
+        # queue 561 (C6 L3): a backtrace crate's build: those crates' module paths and their ADTs' and aliases' paths, in the type
+        # namespace (mono's ext-value-ns? would print an upper-case name std's names do not list, adler2's U32X4, as a value)
+        if [ "${bt:-0}" = 1 ]; then
+          (cd "$root" && arbace_tool -e "(doseq [c [\"adler2\" \"memchr\" \"rustc_demangle\" \"miniz_oxide\" \"object\" \"gimli\" \"addr2line\"]
+                :let [d \"$work/std/deps/\" mf (java.io.File. (str d c \"-modules.edn\")) nf (java.io.File. (str d c \"-iface.edn\"))]
+                :when (and (.exists mf) (.exists nf))]
+            (doseq [m (read-string (slurp mf))] (println (:path m)))
+            (let [n (read-string (slurp nf))] (doseq [p (sort (concat (keys (:adts n)) (keys (:aliases n))))] (println p))))" 2>&1 | grep -v -E "$filt") > "$lu/backtrace-types.txt" || exit 1
+          lm=$lm${lm:+:}$lu/backtrace-types.txt
+        fi
         cd "$root" && RF_LIB_MODULES=$lm RF_CORE_NATIVE=$nat RF_MONO_LIB=$libsrc RF_EDITION=2021 RF_OVERFLOW_CHECKS=1 BUILD_PASS=SimplifyCfg-pre-optimizations \
           GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} GOMAXPROCS=${GOMAXPROCS:-3} \
           arbace_tool -m arbace.rust.front.build-run lib-unit "$lu/crates.edn" "$fd" abort "$c" "$lu/$c-defs.txt" "$lu/$c-unit.edn" 2>&1 | grep -v -E "$filt" | tee "$lu/$c-build.log" | tail -3 ;;
@@ -838,7 +887,11 @@ case ${1:-} in
       [ -s "$RF_CORE_NATIVE" ] || { echo "rsi-build: no $RF_CORE_NATIVE (bin/rust-front core-export --rsi)"; exit 1; }
       # queue 448: core's defs outside rust-core-built's modules (core-export --rsi-outside), judged at the instance
       [ -s "$work/core/native-core-rsi-outside.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/core/native-core-rsi-outside.edn
-      for c in alloc std; do [ -s "$work/$c/native-$c-rsi.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/$c/native-$c-rsi.edn; done; fi
+      for c in alloc std; do [ -s "$work/$c/native-$c-rsi.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/$c/native-$c-rsi.edn; done
+      # queue 542: the const fns the programs' CTFE calls (std's LocalKey::new, LazyStorage::new: no record's instance names
+      # them; the run logs them `ctfe wanted DEF`), exported by `bin/rust-front lib-export --keys KEYS std
+      # .tmp/rust-front/std/native-std-ctfe.edn` (KEYS: their keys, body-key's)
+      for c in alloc std; do [ -s "$work/$c/native-$c-ctfe.edn" ] && RF_CORE_NATIVE=$RF_CORE_NATIVE:$work/$c/native-$c-ctfe.edn; done; fi
     rw=${RF11_WORK:-$work/rsi}; mkdir -p "$rw"; rm -f "$rw/front.tsv" "$rw/inputs.tsv"
     stubs=$work/stubs; mkdir -p "$stubs"
     for t in rustc rustdoc cargo gcc cc clang; do printf '#!/bin/sh\necho "stub $0 called" >> "%s/stubs.log"\nexit 99\n' "$stubs" > "$stubs/$t"; chmod +x "$stubs/$t"; done

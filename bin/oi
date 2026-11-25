@@ -286,9 +286,14 @@ complib_need() {
 # headers' sources and the target's; built once (a lock around the build: jobs of one check share it); its path on stdout. cstubs_nodes DIR
 # FILES --program: a C program of its own (a test's helper, OC201 (a)), linked with musl alone, for oi cmain
 cstubs_nodes() {
-  local dir=$1 files k out f mode=${3:-}
+  local dir=$1 files k out f mode=${3:-} incs=""
   files=$(echo "$2" | tr ',' ' ')
+  # (queue 547) a word -IDIR of FILES (relative to DIR or absolute) is an include directory of the stubs (time_now's config.h, which
+  # jst-config's rule makes, and jane-street-headers' include/); its headers are in the key
+  for f in $files; do case $f in -I*) incs="$incs $f" ;; esac; done
+  files=$(for f in $files; do case $f in -I*) ;; *) echo "$f" ;; esac; done)
   k=$( { for f in $files; do sha256sum < "$dir/$f"; done
+         for f in $incs; do (cd "$dir" && find "${f#-I}" -maxdepth 1 -name '*.h' -type f | LC_ALL=C sort | xargs -r cat) | sha256sum; done
          (cd "$root" && find test/ocaml/capi -type f | LC_ALL=C sort | xargs sha256sum); echo "${ARBACE_C_TARGET:-arbace} $mode"; } | sha256sum | cut -c1-20)
   out=$OI_DIR/cstubs/$k.nodes
   mkdir -p "$OI_DIR/cstubs"
@@ -297,7 +302,7 @@ cstubs_nodes() {
     if [ ! -s "$out" ]; then
       . "$root/bin/lib/crops/musl-hold.bash"; ci_musl_hold > "$OI_DIR/cstubs/$k.musl.log" 2>&1 || { cat "$OI_DIR/cstubs/$k.musl.log" >&2; exit 1; }
       ( . "$root/bin/lib/repr-c/sysroot.bash"; c_sysroot || exit 1
-        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $files ) || exit 1
+        cd "$dir" && ARBACE_PATH=$root "$(arbace_exe)" "$root/test/ocaml/capi/cnodes.ae" "$root" "$out.new" $mode $incs $files ) || exit 1
       mv "$out.new" "$out"
     fi
   ) 8> "$OI_DIR/cstubs/build.lock" || return 1
@@ -810,6 +815,8 @@ cmd_depend() {
 . "$root/bin/lib/oi/ocamldoc.bash"
 # ocamltest's other tools on oi (queue 511): bin/lib/oi/tools.bash, header.awk's tool mode (@tool=NAME), outside this script as ocamldoc's
 . "$root/bin/lib/oi/tools.bash"
+# the run corpus and the selection (2026-11-24, ocaml-aot): bin/lib/oi/corpus.bash, outside this script as ocamldoc's
+. "$root/bin/lib/oi/corpus.bash"
 
 # the recorded session: test/ocaml/oi/session.ml through the toplevel, its output against the ocaml
 # toplevel's (test/ocaml/oi/session.ref, recorded by ocaml -noprompt -nopromptcont, the banner left out)
@@ -840,29 +847,7 @@ cmd_repl() {
 
 # ---- the corpus ----
 
-cmd_corpus() {
-  # the headers alone: the tarball, no ocamlc and no ocdump (the oracle's paths call need_tree themselves)
-  mkdir -p "$OI_DIR"; need_source
-  local out=$OI_DIR/corpus.tsv r b h
-  # header.awk's level: 0 oi's, 1 the light AOT level, 2 the compiled level (OC215 (a): its main runs a test's C stubs)
-  local aotv=${AOT:-0}; [ "$aotv" = 1 ] && [ "${LEVEL:-light}" = compiled ] && aotv=2
-  : > "$out"
-  # the tests with a .reference, and (OC203 (a)) those whose check is their check-program-output hook (ocamltest's check of the
-  # output then the hook's, not the reference's: lib-threads/signal)
-  # and (OC197 (a)) the tests whose main file is a .mll (a TEST header in it), with or without a .reference (none: an empty output)
-  for r in $({ cd "$TESTS" && find . \( -name '*.reference' -o -name '*.check-program-output' \) | sed 's/\.[a-z-]*$//'; grep -l '^(\* TEST' $(find . -name '*.mll') | sed 's/\.mll$//'; } | LC_ALL=C sort -u); do
-    b=${r#./}
-    [ -f "$TESTS/$b.ml" ] || [ -f "$TESTS/$b.mll" ] || continue
-    # (the AOT levels read a test with C stubs as its class: the C API is oi's alone, the light and compiled levels' runtime has none)
-    h=$(awk -v aot="$aotv" -f "$root/bin/lib/oi/header.awk" "$(test_src "$b")")
-    # a program header.awk classes that the suite's reading runs (modules, readonly data files) is the suite corpus's alone (OT9's third
-    # fix): one row a program across the two corpora, the REAP cell counting it once
-    case $h in class*) case $(awk -f "$root/bin/lib/oi/actions.awk" "$(test_src "$b")") in run*) continue ;; esac ;; esac
-    printf '%s\t%s\n' "$b" "$h" >> "$out"
-  done
-  echo "oi: corpus: $(wc -l < "$out") programs with a .reference, a check hook or a main .mll, $(cut -f2 "$out" | grep -c '^run$' || true) run, $(cut -f2 "$out" | grep -c '^class$' || true) classed by their header ($out)"
-}
-
+# cmd_corpus (the run corpus, .tmp/oi/corpus.tsv): bin/lib/oi/corpus.bash, outside this script as ocamldoc's
 opts() {
   # TY24 (a) (doc/ocaml/TYPER.md): the path bin/oi check takes without --native or --ocdump, OI_CHECK_DEFAULT: native (the
   # switch made on ocaml-90, 2026-11-07; the night's whole-corpus record before it reaches next), ocdump the oracle's path
@@ -886,13 +871,7 @@ opts() {
   done
 }
 
-# select_from CORPUS: the rows of CORPUS (ID<TAB>...) the selection takes: --only-list's ids, --only's regexp, else all
-# (the header's ${ocamlsrcdir}, @OCAMLSRCDIR@ in the corpus files, is the pinned tree's path in the rows the runs read: OT21 (b))
-select_from() {
-  if [ -n "${ONLY_LIST:-}" ]; then awk -F'\t' 'FNR == NR { sub(/[ \t]*#.*/, ""); if ($0 != "") want[$0] = 1; next } $1 in want' "$ONLY_LIST" "$1"
-  elif [ -n "$ONLY" ]; then grep -E "^[^	]*($ONLY)" "$1" || true; else cat "$1"; fi | sed "s|@OCAMLSRCDIR@|$TOP|g"
-}
-selected() { select_from "$OI_DIR/corpus.tsv"; }
+# select_from, selected: bin/lib/oi/corpus.bash
 # need_selection FILE: a selection (--only, --only-list) whose rows in FILE are none is an error, not a check of nothing (queue 539b:
 # --only's ERE is matched from an id's start, ^[^TAB]*(RE), so an anchored '^...$' took nothing and the check passed on 0 programs)
 need_selection() {
@@ -1067,7 +1046,7 @@ oi_mods() {
 export -f oi_mods
 
 oi_dynlink() {
-  local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 src f dir file b U nf="" extra inc
+  local id=$1 d=$2 flags=$3 incs=$4 steps=$5 main=$6 copy=$7 dlls=${8:-} cmas=${9:-} src f dir file b U nf="" extra inc e n u
   src=$(dirname "$TESTS/$id")
   [ "${NATIVE:-0}" = 1 ] || { echo "dynlink: plugins on the native path alone"; return 1; }
   for f in $flags; do
@@ -1085,6 +1064,20 @@ oi_dynlink() {
     fi
     if grep -q '^(ocaml/error' "$d/$dir/$U.ae"; then echo "dump: $f: $(head -c 200 "$d/$dir/$U.ae" | tr '\n\t' '  ')"; return 1; fi
     { echo "OI-CMO 1"; sed 's/^/import /' "$d/$dir/$b.imports"; echo lambda; cat "$d/$dir/$U.ae"; } > "$d/$dir/$b.cmo"
+  done
+  # (queue 576) ocamlmklib's libraries (DLLS NAME:C+C,..., CMAS NAME:UNIT+UNIT,...): dllNAME.so the line "OI-DLL 1" and its C files (their
+  # stubs the run's, OI_CSTUBS), NAME.cma the line "OI-CMA 1", its dllib -lNAME as ocamlmklib records it, then each unit's .cmo
+  # ("unit LENGTH" and the text), as test/ocaml/dynlink/dynlink.ml's loader reads a library
+  for e in $(echo "$dlls" | tr ',' ' '); do
+    n=${e%%:*}; { echo "OI-DLL 1"; for f in $(echo "${e#*:}" | tr '+' ' '); do echo "c $f"; done; } > "$d/dll$n.so"
+  done
+  for e in $(echo "$cmas" | tr ',' ' '); do
+    n=${e%%:*}
+    { echo "OI-CMA 1"; echo "dllib -l$n"
+      for u in $(echo "${e#*:}" | tr '+' ' '); do
+        [ -f "$d/$u.cmo" ] || { echo "dynlink: $n.cma's unit $u was not compiled"; return 1; }
+        echo "unit $(wc -c < "$d/$u.cmo")"; cat "$d/$u.cmo"
+      done; } > "$d/$n.cma" || { echo "dynlink: $n.cma's unit was not compiled"; return 1; }
   done
   : > "$d/dynlink.imports"
   local ms; ms=$(echo "$main" | tr ',' ' '); local last=${ms##* } m
@@ -1112,10 +1105,11 @@ oi_one() {
   local why; why=$(mll_gen "$d" "$base") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$why"; return; }
   # a test that builds plugins (header.awk's dynlink mode, OC220 (a)'s loader): its units built by its ocamlc steps, the main program's
   # before the test's own
-  local dyn="" dynmain="" dyncopy="" mains="" kv
-  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;; esac; done
+  local dyn="" dynmain="" dyncopy="" dyndll="" dyncma="" dynruns="" mains="" kv
+  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;;
+    @dyndll=*) dyndll=${kv#@dyndll=} ;; @dyncma=*) dyncma=${kv#@dyncma=} ;; @dynruns=*) dynruns=${kv#@dynruns=} ;; esac; done
   if [ -n "$dyn" ]; then
-    mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
+    mains=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy" "$dyndll" "$dyncma") || { printf '%s\t-\t-\t0\t0\t%s\n' "$id" "$mains"; return; }
     mains=$(echo "$mains" | tr '\n' ' ')
     env="$env OI_DYNLINK_IMPORTS=$d/dynlink.imports"
   elif [ -n "$(depend_of "$env")" ]; then
@@ -1189,6 +1183,26 @@ oi_one() {
       mv "$d/oi.out" "$d/oi.out.1"; cp "$d/oi.out.$i" "$d/oi.out"; st=$rst; break
     fi
   done
+  # (queue 576, header.awk's dynlink mode) the further programs the test links of its units and ocamlmklib's libraries (@dynruns=
+  # REF:ITEM+ITEM,...: a unit, or NAME.cma its units, -linkall), each run once and judged against its own reference REF.reference as
+  # ocamltest's check-program-output judges it; the first that differs (status not 0, or its output not the reference) is the row's
+  local dr ditem dfiles dn=0 dnote="" dst U2 dref
+  for dr in $(echo "$dynruns" | tr ',' ' '); do
+    dn=$((dn + 1)); dref=${dr%%:*}; dfiles=""
+    for ditem in $(echo "${dr#*:}" | tr '+' ' '); do
+      case $ditem in
+        *.cma) local ce cu; for ce in $(echo "$dyncma" | tr ',' ' '); do [ "${ce%%:*}" = "${ditem%.cma}" ] || continue
+                 for cu in $(echo "${ce#*:}" | tr '+' ' '); do dfiles="$dfiles $(echo "${cu:0:1}" | tr a-z A-Z)${cu:1}.ae"; done; done ;;
+        *) dfiles="$dfiles $(echo "${ditem:0:1}" | tr a-z A-Z)${ditem:1}.ae" ;;
+      esac
+    done
+    dst=0
+    (cd "$d" && run_redirected "$env" "$d/oi.out.$dref" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$lib" $(inc_units "$incs" | tr '\n' ' ') $dfiles --) || dst=$?
+    if [ "$dst" != 0 ] || ! cmp -s "$d/oi.out.$dref" "$(dirname "$TESTS/$id")/$dref.reference"; then
+      mv "$d/oi.out" "$d/oi.out.main"; cp "$d/oi.out.$dref" "$d/oi.out"; st=$dst
+      dnote="the program $dref (run $((dn + 1))) differs from $dref.reference"; break
+    fi
+  done
   t1=$(date +%s.%N); times > "$d/cpu1"
   [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$d" "$d/oi.out"
   [ -z "$(tool_of "$env")" ] || tool_output "$(tool_of "$env")" "$id" "$d" "$d/oi.out"
@@ -1201,6 +1215,7 @@ oi_one() {
   oi_limit_kill "$st" "$cpu" "$(echo "$t1 - $t0" | bc)" && note="timeout ${TIMEOUT}s"
   st=$(oi_status "$st" "$cpu")
   [ "$i" -gt 1 ] && [ -f "$d/oi.out.1" ] && note="run $i (arguments $r) differs from run 1${note:+; $note}"
+  [ -z "$dnote" ] || note="$dnote${note:+; $note}"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$st" "$(sha256sum < "$d/oi.out" | cut -d' ' -f1)" "$(wc -c < "$d/oi.out")" "$(echo "$t1 - $t0" | bc)" "$note"
   # keep the outputs that differ, drop the dumps (large)
   rm -f "$d"/*.ae
@@ -1439,7 +1454,9 @@ o2j_key() {
 
 # the key of an AOT run's rows (re-review 056's finding 2): the translator, the runtime and the stdlib (o2j_key), the limits of the level and the
 # corpus file; written beside check-aot.tsv (bin/oi check --aot) and the suite's, read by `bin/oi pins --attest`
-aot_key() { printf '%s\n' "$(o2j_key)" "timeout=$TIMEOUT load=${O2J_LOAD_ALLOWANCE:-20}" "$(sha256sum < "$1")" | sha256sum | cut -d' ' -f1; }
+aot_key() { printf '%s\n' "$(o2j_key)" "timeout=$TIMEOUT load=${O2J_LOAD_ALLOWANCE:-20}" "$(sha256sum < "$1")" "$(sha256sum < "$root/test/ocaml/aot-cpu-caps.tsv")" | sha256sum | cut -d' ' -f1; }
+# o2j_cap ID: the AOT light level's CPU limit of ID, the larger of TIMEOUT and its row of test/ocaml/aot-cpu-caps.tsv
+o2j_cap() { awk -F'\t' -v id="$1" -v t="$TIMEOUT" '!/^#/ && $1 == id && $2 + 0 > t { t = $2 + 0 } END { print t }' "$root/test/ocaml/aot-cpu-caps.tsv"; }
 
 # the checkout's arbace.o2j (test/ocaml/o2j/tool.ae: -m arbace.o2j ran the host's embedded copy)
 o2j() {
@@ -1477,6 +1494,12 @@ o2j_cpu() { local c=$((TIMEOUT + ${O2J_LOAD_ALLOWANCE:-20})); echo "$c $((c * 4)
 # o2j_alone ID OUT FILES ARGV0 ARGS...: one program alone in a process under o2j_cpu's limits; "timeout" for the status a limit kills with
 o2j_alone() {
   local id=$1 out=$2 files=$3 argv0=$4 st=0 t0 t1; shift 4
+  # (2026-11-25, the user's per-row CPU caps of 2026-11-24 extended to the AOT light level, the coordinator's call) a program of
+  # test/ocaml/aot-cpu-caps.tsv runs alone under its own limit, about 1.5 times the CPU it took measured alone, when above TIMEOUT
+  # (o2j_cpu adds O2J_LOAD_ALLOWANCE to it as to TIMEOUT); the batch's wall limit stops it first, then it runs here
+  # (the cap read before the local TIMEOUT shadows the check's: set -u)
+  local cap; cap=$(o2j_cap "$id")
+  local TIMEOUT=$cap
   t0=$(date +%s.%N)
   case " ${OI_REDIR:-} " in
     *" @hook=run "*)

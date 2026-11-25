@@ -2695,7 +2695,12 @@
     (let [constexpr (accept! p "constexpr")
           neg (when (and (is? p "!") (is-at? p 1 "consteval")) (adv! p) true)]
       (if (accept! p "consteval")
-        (let [a (binding [*in-if* true] (parse-compound-stmt p))
+        (let [;; (cpp-own, 2026-11-25: [stmt.if]/4, a consteval if's first branch that is no compound statement: GCC's "'if
+              ;; consteval' requires compound statement" at it, the statement parsed as one, cpp23/consteval-if2.C)
+              a (binding [*in-if* true]
+                  (if (is? p "{")
+                    (parse-compound-stmt p)
+                    (do (soft-diag! p (ix p) "'if consteval' requires compound statement") (sub-statement p))))
               ;; (cpp-diag-a: [stmt.if]/4, `if consteval`'s else branch is a compound-statement too: GCC's "'if consteval' requires
               ;; compound statement", at the statement)
               e (when (accept! p "else")
@@ -3244,6 +3249,21 @@
                 (t= t "}") (recur (inc j) (dec d))
                 :else (recur (inc j) d)))))))
 
+(defn- declared-at-top-in-main?
+  "cpp-own (2026-11-25): whether the main file names `nm` outside every brace (at its top level, where a declaration of the
+  global namespace's member is): the guard of a `::X` no lookup finds, a failed declaration's cascade."
+  [^P p ^String nm]
+  (let [n (.-cnt p)]
+    (loop [i 0 d 0]
+      (if (>= i n)
+        false
+        (let [^T t (tok-at p i)]
+          (cond (not (main-tok? p i)) (recur (inc i) d)
+                (t= t "{") (recur (inc i) (inc d))
+                (t= t "}") (recur (inc i) (max 0 (dec d)))
+                (and (zero? d) (identical? :id (.-k t)) (.equals nm (.-s t))) true
+                :else (recur (inc i) d)))))))
+
 (defn- declared-in-main?
   "cpp-read (2026-11-22): whether the main file declares a type named `nm` somewhere (`using NM =`, a class-key or enum before
   it, `typedef ... NM;`, `concept NM`): a later use no lookup finds is then a declaration's failure's cascade (GCC declares the
@@ -3490,6 +3510,15 @@
                         (when (and (:s s2) (:i s2) (not (and (= "align_val_t" (:s s2)) (>= (.-year p) 2017))))
                           (soft-diag! p (long (:i s2)) (str "'" (:s s2) "' is not a member of 'std'")))
                         (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared")))))
+                  ;; (cpp-own, 2026-11-25: [basic.lookup.qual]/1 with [namespace.qual]: `::X` names a member of the global namespace,
+                  ;; GCC's "'::X' has not been declared" when it declares none, at the name; the main file declaring X at its top
+                  ;; level nowhere (a failed declaration's cascade aside); tc1/dr176.C's `::Base* p3;` with Base N1's)
+                  (let [f (first (:parts qn))]
+                    (when (and *full-headers* (not (skim? p)) (:g qn) (= 1 (count (:parts qn))) (:s f) (not (:args f)) (:i f)
+                               (main-tok? p (long (:i f)))
+                               (nil? (sc/find-in (stv p ROOT) (:s f) true)) (nil? (sc/find-in (stv p ROOT) (:s f) false))
+                               (not (declared-at-top-in-main? p (:s f))))
+                      (soft-diag! p (long (:i f)) (str "'::" (:s f) "' has not been declared"))))
                   ;; (cpp-rind: a name qualified by a namespace that declares no such member, its inline namespaces' and nominated
                   ;; ones' aside: GCC's "'A::nonexistent' has not been declared", at the name; diagnostic/undeclared1.C)
                   (let [l (peek (:parts qn)) q (:q qn)]
@@ -4242,7 +4271,14 @@
                  (when info (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
                                                                  :acc (or acc (if (= kw "class") "private" "public"))}))
                  ;; (i) a base class template's injected name, found in the derived class, is the base's type
-                 (when (and (:args lp) (:ent qn)) (sc/declare! cs {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}))
+                 ;; (cpp-own, 2026-11-25: marked when its arguments name a template parameter, a dependent base, whose scope
+                 ;; [temp.dep.general]/3 keeps out of the derived template's unqualified lookup: its injected name too)
+                 (when (and (:args lp) (:ent qn))
+                   (sc/declare! cs (cond-> {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}
+                                     (and (= 1 (count (:parts qn))) (:ab lp) (:ae lp)
+                                          (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (lookup (scope p) (.-s t))))))
+                                                (range (long (:ab lp)) (inc (long (:ae lp))))))
+                                     (assoc :dep-base true))))
                  (pack-indexed p {:t :n :s (name-str p qn)})))
           pack (accept! p "...")
           b (cond-> {:type {:qualType (qt ty)} :writtenAccess (or acc "none")} virt (assoc :isVirtual true) pack (assoc :isPackExpansion true))
@@ -4344,6 +4380,27 @@
                      (reduce (fn [e part] (when (:scope e) (sc/find-in (:scope e) (:s part)))) (sc/lookup (scope p) (:s (first ps))) (rest ps)))
                    (when (and qn (= 1 (count (:parts qn))) (not (:g qn))) e))
               tn (:s lp)
+              ;; (cpp-own, 2026-11-25: [basic.lookup.qual]/1 with [dcl.type.elab]: `class C1::C2;` alone, its nested-name-specifier
+              ;; names a namespace or a complete class: a name no lookup finds is GCC's "'N1' has not been declared", a class only
+              ;; declared "incomplete type 'C1' used in nested name specifier", a member of it no class or namespace declares
+              ;; "'C1::C2' has not been declared", at the part; warn/forward-inner.C)
+              _ (when (and alone qual? (not (skim? p)) (main-tok? p (long (:i (first (:parts qn))))))
+                  (let [ps (vec (:parts qn))]
+                    ;; (a class declared again after its definition, `class C1;`, is the complete class: either lookup's entity
+                    ;; complete makes it so)
+                    (loop [i 0 e (let [a (sc/lookup (scope p) (:s (first ps))) b (sc/lookup (scope p) (:s (first ps)) true)]
+                                   (if (and a (not (:incomplete a))) a (or b a)))]
+                      (when (< i (dec (count ps)))
+                        (cond
+                          (nil? e) (soft-diag! p (long (:i (nth ps i)))
+                                               (str "'" (str/join "::" (map :s (subvec ps 0 (inc i)))) "' has not been declared"))
+                          (or (:tparam e) (:dep e) (:tmpl e) (:target e)) nil
+                          (and (:class e) (:incomplete e))
+                          (soft-diag! p (long (:i (nth ps i))) (str "incomplete type '" (str/join "::" (map :s (subvec ps 0 (inc i)))) "' used in nested name specifier"))
+                          (and (:scope e) (or (:class e) (= :ns (:k e))))
+                          (recur (inc i) (let [nm (:s (nth ps (inc i))) a (sc/find-in (:scope e) nm) b (sc/find-in (:scope e) nm true)]
+                                           (if (and a (not (:incomplete a))) a (or b a))))
+                          :else nil)))))
               _ (when (and te tn (nil? (:args lp)) (not (skim? p))
                            (= :type (:k te)) (not (:tag te)) (not (:class te)) (not (:tparam te)) (not (:tmpl te))
                            (not= tn (some-> (:target te) :name))
@@ -4914,6 +4971,17 @@
         (when (and (= "union" (:kw base0)) (not (skim? p))
                    (not-any? #(#{"FieldDecl" "VarDecl" "IndirectFieldDecl"} (:kind %)) (:inner pre)))
           (soft-diag! p (ix p) "anonymous union with no members"))
+        ;; (cpp-own, 2026-11-25: [class.union.anon]/1, no function is declared within an anonymous union, and GNU's anonymous
+        ;; structs take the same rule: GCC's "... invalid; an anonymous struct may only have public non-static data members",
+        ;; at the function's name; ext/anon-struct6.C)
+        (when-not (skim? p)
+          (doseq [m (:inner pre)
+                  :when (and (map? m) (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "FunctionTemplateDecl"} (:kind m))
+                             (not (:isImplicit m)) (:_b m))]
+            (let [o (get-in m [:loc :offset])
+                  i (or (when o (first (filter #(= (long o) (long (.-o ^T (tok-at p %)))) (range (long (:_b m)) (inc (long (:_e m)))))))
+                        (long (:_b m)))]
+              (soft-diag! p (long i) (str "'" (:name m) "' invalid; an anonymous " (:kw base0) " may only have public non-static data members")))))
         (adv! p)
         (when (and (= ctx :member) (skim? p))
           (let [ce (:ent (class-ctx p)) nm (str "\u0001anon" (count (:fields ce)))]
@@ -5185,12 +5253,15 @@
                       ;; ([dcl.type.class.deduct]/1: a class template's name without arguments as a placeholder stands alone in a
                       ;; declaration's type: under a pointer or reference declarator, `Tuple* u;`, GCC's "invalid use of template-name
                       ;; 'Tuple' without an argument list", at the specifiers; the class's own injected name aside; cpp0x/variadic-ex1.C)
+                      ;; (cpp-own, 2026-11-25: and a dependent base's injected name, which unqualified lookup in the derived template
+                      ;; does not find, [temp.dep.general]/3: the enclosing namespace's template then, tc1/dr176.C's `Base* p;`)
                       (and (nil? fs) (#{:top :block :member} ctx) (seq (mapcat :ptrs chain)) (:b ds)
                            (let [tq (:qn (:type ds)) e (:ent (:type ds))]
                              (and (= :n (:t (:type ds))) (= 1 (count (:parts tq))) (nil? (:args (first (:parts tq))))
-                                  (map? e) (:tmpl e) (:class e) (not (:inj e)) (not (:tparam e))
+                                  (map? e) (or (and (:tmpl e) (:class e) (not (:inj e))) (and (= ctx :member) (:dep-base e) (not (skim? p))))
+                                  (not (:tparam e))
                                   (not= (:s (first (:parts tq))) (some-> (stv p CLS) first :name)))))
-                      (soft-diag! p (long (:b ds)) (str "invalid use of template-name '" (name-str p (:qn (:type ds))) "' without an argument list"))
+                      (soft-diag! p (long (:b ds)) (str "invalid use of template-name '" (if (:dep-base (:ent (:type ds))) (:s (first (:parts (:qn (:type ds))))) (name-str p (:qn (:type ds)))) "' without an argument list"))
                       ;; ([dcl.type.auto.deduct]/4: `auto x = {};` and `auto x{};` deduce from no element: GCC's "unable to deduce
                       ;; 'std::initializer_list<auto>' from '{}'", at the name; cpp0x/auto54.C)
                       (and (nil? fs) (= :auto (:t base0)) (nil? (:cn base0)) (not (:typedef ds)) (empty? (mapcat :ptrs chain)) (empty? (mapcat :sufs chain))

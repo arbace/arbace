@@ -100,6 +100,16 @@
 (go/var ^{:tag (func [string] [oi/Value bool]) :doc "Named, when set, is caml_named_value in place of oi's table.\n"}
   Named)
 
+(go/var ^{:tag (func [int string (slice int64)] [(slice int64)]) :doc "RuntimeEvents, when set, answers the C consumer of runtime events (__oi_re_control op 0, __oi_re_cursor 1, __oi_re_next 2,\ntheir arguments as RuntimeEventsControl's, RuntimeEventsCursor's and RuntimeEventsNext's, the results in their order) from the AOT\nruntime's ring in place of oi's (queue 583: a program's events are the runtime's).\n"}
+  RuntimeEvents)
+
+(go/func reNext "reNext is the C consumer's read at pos: RuntimeEvents' (op 2), else oi's RuntimeEventsNext.\n" [^int pos]
+  :results [^int status ^int next ^int kind ^int dom ^int64 ts ^int id ^int64 data]
+  (when (!= RuntimeEvents nil)
+    (let [r (RuntimeEvents 2 "" (lit (slice int64) (conv int64 pos)))]
+      (return (conv int (aget r 0)) (conv int (aget r 1)) (conv int (aget r 2)) (conv int (aget r 3)) (aget r 4) (conv int (aget r 5)) (aget r 6))))
+  (return (oi/RuntimeEventsNext pos)))
+
 (go/func namedValue "namedValue is caml_named_value: Named's, else oi's.\n" [^string name] :results [oi/Value bool]
   (when (!= Named nil)
     (return (Named name)))
@@ -137,6 +147,10 @@
                       :statics (lit (map uint64 oi/Value)) :wstatics (lit (map uint64 (weak/Pointer oi/Custom)))
                       :roots (lit (map uint64 bool)) :homes (lit (map any uint64)) :named (lit (map string uint64)) :customOps (lit (map string uint64))))]
         (set! (.-StdFiles sys) (lit (array 3 (* os/File)) os/Stdin os/Stdout os/Stderr))
+        ;; (queue 547) the process's own standard streams: a stub's dup2 and lseek on them and on a channel's descriptor are the
+        ;; host's, as oi's channels write the host's descriptors (not the light level's server, whose streams are Stdio's)
+        (when (== Stdio nil)
+          (set! (.-HostFds sys) true))
         (range [_ t tops]
           (when [(values x ok) (assert (slice any) t)] (and ok (> (len x) 5) (== (fmt/Sprint (aget x 0)) "static"))
             (when [(values s ok) (assert string (aget x 5))] (and ok (not (strings/HasPrefix s "[")))
@@ -466,7 +480,15 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
               (set! (.-snaps c) (lit (map uint64 baSnap))))
             (aset (.-snaps c) a (lit baSnap :d d :b (append (conv (slice byte) nil) (spread (.R m d (conv uint64 (* n es))))))))
           (return))
-        (.Store64 m a (.opsFor c (.-Name x)))))))
+        (.Store64 m a (.opsFor c (.-Name x)))
+        ;; (queue 547) a channel: its data a pointer to a struct channel whose fd (and offset) are the channel's, as a stub that
+        ;; reaches into io.h's struct (ppx_expect's runtime: Channel(v)->fd, then dup2 and lseek on it, the host's descriptors
+        ;; under crt's HostFds) reads them
+        (when [(values fd off ok) (oi/ChannelFd v)] ok
+          (let [st (.alloc c 2 tagAbstract)]
+            (.Store32 m st (conv uint32 fd))
+            (.Store64 m (+ st 8) (conv uint64 off))
+            (.Store64 m (+ a 8) st)))))))
 
 (go/func elemSize "elemSize is caml_ba_element_size of a kind.\n" ^int [^int kind]
   (aget (lit (slice int) 4 8 1 1 2 2 4 8 8 8 8 16 1 2) kind))
@@ -942,7 +964,10 @@ here, not a null pointer (queue 478).
                                         (copy (.W (.-m c) (arg a 2) (conv uint64 (len b))) b)
                                         (ai (conv uint64 (len b)))))]
       ;; the C consumer of runtime events (runtime_events_consumer.h) over oi's ring (ext_runtime_events.go)
+      ;; (queue 583) at the AOT levels the runtime's ring (RuntimeEvents), whose collections the program's events are
       ["__oi_re_control" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
+                           (when (!= RuntimeEvents nil)
+                             (return (ai (conv uint64 (aget (RuntimeEvents 0 "" (lit (slice int64) (conv int64 (conv int (arg a 0))))) 0)))))
                            (ai (conv uint64 (oi/RuntimeEventsControl (conv int (arg a 0))))))]
       ["__oi_re_cursor" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                           (let [p (arg a 0)
@@ -950,9 +975,13 @@ here, not a null pointer (queue 478).
                                 dir "."]
                             (when (!= p 0)
                               (set! dir (.CString (.-m c) p)))
+                            (when (!= RuntimeEvents nil)
+                              (let [own 0]
+                                (when (and (== p 0) (< pid 0)) (set! own 1))
+                                (return (ai (conv uint64 (aget (RuntimeEvents 1 dir (lit (slice int64) (conv int64 own) (conv int64 pid))) 0))))))
                             (ai (conv uint64 (conv int64 (oi/RuntimeEventsCursor (and (== p 0) (< pid 0)) dir pid))))))]
       ["__oi_re_next" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
-                        (let [(values st next kind dom ts id data) (oi/RuntimeEventsNext (conv int (conv int64 (arg a 0))))
+                        (let [(values st next kind dom ts id data) (reNext (conv int (conv int64 (arg a 0))))
                               out (arg a 1)]
                           (range [i w (lit (slice int64) (conv int64 next) (conv int64 kind) (conv int64 dom) ts (conv int64 id) data)]
                             (.Store64 (.-m c) (+ out (conv uint64 (* 8 i))) (conv uint64 w)))

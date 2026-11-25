@@ -216,6 +216,29 @@ stand-ins.
   itself), so `Run(clinit)` keeps §6.2's signature.
 - Concurrent first uses wait for the initializing thread (tested with 32 goroutines).
 
+**Classes initialized at boot** (queue 491, 2026-11-24). `RunMain` initializes the classes of
+`bootClasses` that the closed world has, before main (`BootInit`, `class.ae`): now one,
+`java.lang.constant.ConstantDescs`. It and `jdk.internal.constant.PrimitiveClassDescImpl` initialize
+each other (jdk26u at baf63fbe, `src/java.base/share/classes`: ConstantDescs.java:250 `CD_int =
+PrimitiveClassDescImpl.CD_int`; PrimitiveClassDescImpl.java:47 `CD_int = new PrimitiveClassDescImpl("I")`, whose
+constructor, :87, reads ConstantDescs' `BSM_PRIMITIVE_CLASS` and `CD_Class`): by JLS 12.4.2 (JVMS 5.5) the cycle
+completes only when ConstantDescs is entered first. Entered from PrimitiveClassDescImpl (a program's first
+use of java.lang.constant `MethodTypeDesc.ofDescriptor("(I)V")`: MethodTypeDescImpl.java:126,
+ConstantUtils.java:381's `forPrimitiveType`), PrimitiveClassDescImpl is in progress, the recursive request
+returns (step 3), ConstantDescs' `CD_int` is null, and its initializer's `BSM_CLASS_DATA_AT` (ConstantDescs.java:288-290,
+`ofConstantBootstrap(..., CD_Object, CD_int)`, :385, `MethodTypeDescImpl.ofTrusted`, MethodTypeDescImpl.java:87's
+`requireNonNull`) throws: `ExceptionInInitializerError` (step 11), on a JDK too by the same rule. A JDK
+program rarely sees it: its first invokedynamic, a lambda (LambdaMetafactory.java:347's
+`new InnerClassLambdaMetafactory`), spins its class with java.lang.classfile over ConstantDescs' statics
+(InnerClassLambdaMetafactory.java:53 `import static java.lang.constant.ConstantDescs.*`, :310 `ClassFile.of().build`,
+:395 `invokespecial(CD_Object, INIT_NAME, MTD_void)`), which enters ConstantDescs from its own side; the Go build has no
+run-time invokedynamic, so jrt enters it at boot instead. The difference left: a program whose first use of
+java.lang.constant precedes its first invokedynamic succeeds where the JDK fails. This is reasoning from the rule
+and the sources, to be confirmed on the host's JDK 26 (queue 491's report). An exception of a boot initialization is
+not thrown (the class stays failed: a first use throws `NoClassDefFoundError` with it as the cause). Tests
+`TestInitCycleFromPrimitiveClassDescImpl` (the control: the cycle without boot fails) and
+`TestBootInitConstantDescs` (`object_test.ae`).
+
 **Arrays.**
 
 - `Store` checks the index first and the store second, as `aastore` does. It skips the check
