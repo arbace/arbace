@@ -21111,3 +21111,8 @@ notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a
   0.9860, read independence 0.878 -> 0.882. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
   `bin/markers-check`: 0 problems. `bin/cppi selftest overload-diag concepts-diag`: overload-diag passes, concepts-diag's
   r02-qualified-name.C fails, as it does with cpp-rind's head's front end loaded (not this branch's; left to the host).
+
+## 2026-11-25 — the user's DECISIONs 567-1 (a) and 567-2 (a) (queue 567, VM)
+
+- 567-1 (a): GNU variable-length arrays in the C++ constant evaluator are a queue task of their own, not this branch's.
+- 567-2 (a): the next C++ slice, the unexpanded packs, comes after 526-1.
