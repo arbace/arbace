@@ -22331,3 +22331,37 @@ a body, the remaining rounds ran at once); measuring a front-end rule on whole f
 the cache's in numbering and in 17 core bodies the rules do not touch, so the moved bodies were spliced in, each checked equal to
 the cache's at the head first); for L2, marking param-dependent drops in the export (the instance is where the generic body is
 at hand: core-instance).
+
+## 2026-11-25 — Rust C6: L4.1, std's own IR copy; 561's backtrace gates ungated (queue 586, VM)
+
+Branch 586-rust-l4-own-std on 581-rust-c6-ungate f2d8d6c0d, worktree q572 and its lib-unit cache reused. The user's 581-1 (a)
+(equal defines first), 581-2 (a) (the VM writes L4.1 and its check, the host runs L4.2-L4.3) and 581-3 (a) (561's gates as 581
+did, a probe round first), relayed by Arbace. Baselines from 581's logs, not re-measured: std 223/36/66, L2 412 of 487, the
+backtrace crates 65 of 74.
+
+- L4.1. lib-unit's compare writes its equal defines (items and L2, after the always-inliner) with the module's globals,
+  CRATE-own.edn; `bin/rust-front lib-unit own` copies std's IR into .tmp/rust-front/lib-unit/own/ir with each such define
+  spliced into its unit. The first try printed our define whole and lost rustc's header (`hidden`, `unnamed_addr`, the
+  attribute groups, `!guid`), which the normalizer does not compare but the linker and the lowering read: the own define now
+  takes rustc's form's header and parameters' attributes, our parameters' names and our body; our constants are renamed to the
+  unit's globals of the same content. own.tsv names each define's source; the check reads every copied unit back and holds each
+  define's normal form (RF3's normalizer, the entry unlabeled) to rustc's, with a crossed control (one own body under another's
+  header must differ). 120 units, 31,684 defines, 684 own (std 619, the backtrace crates 65), 0 left rustc's by the splice, every
+  define of the copy equal; control differs. bin/rsi: std_ir_current takes such a tree (base.sha256 the pin, its units matching
+  its own ir.sha256) and the lowered key carries the copy's digest, the pinned IR's keys unchanged (checked against the base's
+  bin/rsi).
+- 561's gates, a probe round first (env-gated traces, not committed, one export round of core, alloc and std). The cast
+  discriminant never fired: ungated. switch-place-variants is the build's: measured, backtrace_rs print_fileline equal (std
+  224/35/66, L2 413). try-expn-mark, steps-inherent, the macros' shadowed names and the callee attributes fired; their export
+  rounds (env hooks, the three core exports at once; try-expn-mark and callee-attrs shared one round, their changes apart by
+  field): try-expn-mark moved no body (ungated); steps-inherent moved core's fmt::write (spliced, measured: unchanged);
+  callee-attrs moved 453 core, 67 alloc and 449 std bodies' attribute maps (spliced by field, measured: two L2 callees then
+  wanted core's #[inline(always)] Clone::clone for bool and usize, recorded in lib-unit-core-keys.txt and exported by core
+  --add; then unchanged); the macros' shadowed names kept core::result::unwrap_failed's body but lost its equality with rustc's
+  built MIR in core-check (:equal true -> false): it stays gated.
+- The backtrace crates once at the end: 65 of 74. rust-front essential and core-essential once (lower, typeck, core-check and
+  build-run changed).
+
+Alternatives considered: printing our define whole (loses the header rustc's linker and lowering read); a separate round per
+firing gate (try-expn-mark and callee-attrs touch disjoint fields, so they shared one); measuring the macro rule's lib-unit
+anyway (it already loses an equal).
