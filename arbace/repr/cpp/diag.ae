@@ -8590,3 +8590,41 @@
 (alter-var-root #'sema-rules conj
   [:vla-type #"^codegen: (cannot throw expression of a variably modified type|cannot catch a type of variable size|cannot create type information for a type of variable size|data member '.*' may not have variably modified type|size of array '.*' (is not an integral constant-expression|has non-integral type)|array of runtime bound '.*' cannot be captured by copy|'constexpr' variable '.*' has variably-modified type|array size in new-expression must be constant)"
    "a variably modified type where a type fixed at translation is needed, or an array bound neither constant nor a VLA's"])
+
+;; queue 578 (2026-11-25): [temp.res.general]/? with [expr.const]/5.3 and [dcl.enum]/2: in a function template's definition an
+;; enumerator's initializer, a constant expression, that is not value-dependent is evaluated at the definition (GCC's), and a call
+;; there of the template's own specialization with explicit arguments that name no template parameter, `enum E { a = f1<0> () };`
+;; inside `template <int N> constexpr int f1 ()`, calls a function whose definition is not complete yet: GCC's "called in a
+;; constant expression before its definition is complete" (a template not constexpr: "call to non-'constexpr' function"), at the
+;; enumerator; cpp1y/constexpr-recursion1.C, -recursion2.C (the plain function's own call is the checker's, f3's)
+
+(defn template-self-call-enumerators
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        sub (fn sub [x] (if (map? x) (cons x (mapcat sub (:inner x))) (when (sequential? x) (mapcat sub x))))]
+    (walk-nodes (fn [n _]
+                  (when (= "FunctionTemplateDecl" (:kind n))
+                    (let [nm (:name n)
+                          tps (set (keep #(when (#{"NonTypeTemplateParmDecl" "TemplateTypeParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (:inner n)))
+                          fd (first (filter #(= "FunctionDecl" (:kind %)) (:inner n)))]
+                      (when (and (string? nm) fd)
+                        (doseq [ec (sub (:inner fd)) :when (= "EnumConstantDecl" (:kind ec))
+                                :let [xs (mapcat sub (:inner ec))]
+                                :when (and (some (fn [c] (and (= "CallExpr" (:kind c))
+                                                              (let [r (first (:inner c))]
+                                                                (and (= "DeclRefExpr" (:kind r)) (= nm (get-in r [:referencedDecl :name]))
+                                                                     (seq (:explicitTemplateArgs r))
+                                                                     (not-any? (fn [a] (some #(contains? tps %) (re-seq #"[A-Za-z_]\w*" (str a))))
+                                                                               (:explicitTemplateArgs r))))))
+                                                 xs)
+                                           (not-any? (fn [x] (and (= "DeclRefExpr" (:kind x)) (contains? tps (get-in x [:referencedDecl :name])))) xs))]
+                          (when-let [o (mine-at ec main)]
+                            (let [[l c] (line-col starts o)]
+                              (.add out {:line l :col c :kind :error :rule :template-self-call
+                                         :msg (if (:constexpr fd)
+                                                (str "'" nm "' called in a constant expression before its definition is complete")
+                                                (str "call to non-'constexpr' function '" nm "'"))}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj template-self-call-enumerators)
