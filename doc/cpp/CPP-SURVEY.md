@@ -11644,3 +11644,50 @@ address (a string literal, a cast to a pointer) is fixed at translation, so no V
 Rows to own pass: cpp1y/vla5.C, ext/vla1.C, ext/vla4.C, ext/vla22.C, ext/vlm2.C, gomp/pr85134.C, init/new35.C, parse/array-size2.C;
 in round 2 template/array9.C. Left: template/varmod1.C (a VM deduced template argument), template/error41.C and array15.C (a class
 template pattern's member bound), other/fold1.C, init/new37.C.
+
+## As built: cpp-own, the whole own dg record on amd64 and the read tail (2026-11-25; branch `cpp-own-1125` from mac/570-cpp-vla-types `af1703774`)
+
+The own dg record (test/cpp/check-dg-own-linux-amd64.edn) run whole on this host, `bin/repr-cpp dg --corpus dg-error --front native`
+in eight parts of 570 files (every eighth file of the record's order), each `--only` run under the big lock with 3 threads, then
+each part judged and recorded (`--judge --record`) from its finished run alone. 569-3 (a)'s five recorded passes that failed at
+569's base on the VM fail here too, each by a rule of cpp-rind or cpp-read; fixed, from the standard and GCC's behaviour as the
+tests state it, no GCC or clang code:
+
+- cpp23/consteval-if2.C ([stmt.if]/4): a consteval if's first branch that is no compound statement is GCC's "'if consteval'
+  requires compound statement" at it, and is parsed as the statement it is (arbace/repr/cpp/parse.ae, parse-if): `if consteval
+  (true) {}` then reports the expression statement's missing `;` too, and the later lines parse.
+- ext/anon-struct6.C ([class.union.anon]/1; GNU's anonymous structs take it): a function declared in an anonymous union or struct
+  is "... invalid; an anonymous struct may only have public non-static data members", at its name (parse.ae's anonymous branch).
+  cpp-read's silence after `static data member 'i' in unnamed class` had left the line without an error.
+- cpp0x/pr85147.C: cpp-read's declined-names-silent leaves out a member template a class declines at its template-head: GCC
+  declares no member template then, so `A<int>::B<>` is diagnosed (arbace/repr/cpp/diag.ae).
+- cpp23/constexpr-nonlit3.C, cpp1y/constexpr-neg1.C: cpp-rind's constexpr-labels gives no "label definition in 'constexpr'
+  function" for a label a goto of the same body names: the goto's own error is the pair's one diagnostic (diag.ae).
+
+The read tail (cpp-read's groups):
+
+- template/delete2.C ([expr.delete]/1 with [conv]/5): a class operand of delete is contextually implicitly converted to a pointer
+  to object type; when its non-explicit conversion functions to such types, a conversion function template returning a pointer
+  among them, name more than one type, GCC's "ambiguous default type conversion" (arbace/cpp/sema.ae; the rule fires only with a
+  template among the candidates, the case the test states; a header's class left alone).
+- template/partial8.C ([temp.spec.partial.general]/1): a partial specialization declared after the primary template's instance
+  for arguments it matches was made (complete, from the primary; a lazily named one is no instantiation) is GCC's "partial
+  specialization ... after instantiation of ..." at the declaration (arbace/cpp/template.ae, cx-partial-after-instantiation!).
+- cpp0x/constexpr-50060.C (C++11's [expr.const]/2, which N3652 relaxed in C++14): an assignment or a compound assignment is no
+  core constant expression in C++11 (sema.ae's constant evaluator, :assign and :cassign, the checker's).
+- warn/forward-inner.C ([basic.lookup.qual]/1 with [dcl.type.elab]): `class C1::C2;` alone, its nested-name-specifier a name no
+  lookup finds ("'N1' has not been declared"), a class only declared ("incomplete type 'C1' used in nested name specifier"), or a
+  member no class or namespace declares; a class declared again after its definition is the complete one (parse.ae).
+- tc1/dr176.C ([namespace.qual], [temp.dep.general]/3): `::X` when the global namespace declares no X ("'::X' has not been
+  declared"; the main file naming X at its top level nowhere, a failed declaration's cascade aside), and a dependent base's injected
+  name (a base template-id whose arguments name a template parameter) not found by the derived template's unqualified lookup, so
+  `Base* p;` there is the namespace's template without an argument list (parse.ae, parse-bases and the template-name rule).
+
+Left, looked at: template/partial-specialization3.C (the instantiation is in a template's non-dependent expression, which the
+checker does not analyze before instantiation), template/crash89.C (a default template argument's error is not reported where
+the type is resolved), cpp23/attr-assume9.C (an assumption's expression is not kept by the native parser, so the evaluator cannot
+evaluate it), cpp0x/pr82401.C (an opaque member enumeration never defined: its instance's enumerators cannot be told from one
+defined out of class), cpp2a/using-enum-7.C (a using-declaration whose qualifier is no class in a function template's
+specialization, and the name it would have declared), cpp0x/constexpr-ice21.C (a constexpr constructor of a class with virtual bases called
+in a constant expression, and a local class's use of the variable), template/spec8.C (a member class template's explicit specialization declared, not defined, for an
+instance).
