@@ -489,7 +489,8 @@
                             (let [mk (nth k 3)] (when (= 'Loaded (head mk)) (walk (second mk) p))))
                     ;; a re-export (`pub(crate) use self::index_range::IndexRange;`): its target by the written path, whose
                     ;; definitions with-core-names copies under the name (imports.rs' single imports, textually)
-                    Use (letfn [(abs [segs]
+                    Use (let [private-use? (= 'Inherited (fget (fget it :vis) :kind))]
+                        (letfn [(abs [segs]
                                   (let [[f & r] segs]
                                     (case f
                                       ("crate" "$crate") (into [*crate*] r)
@@ -519,7 +520,9 @@
                                                    segs (if self? (pop segs) segs)
                                                    target (abs segs) nm (or rn (last segs))]
                                                (when (and target (not= "self" (last segs)) (> (count target) 1))
-                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj []) [nm (str/join "::" target)])))))
+                                                 (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :reexports (fnil conj [])
+                                                                                     ;; queue 572: a backtrace crate's private import marked
+                                                                                     (cond-> [nm (str/join "::" target)] (and private-use? (some #{*crate*} backtrace-crates)) (conj :private)))))))
                                       Nested (doseq [x (fget kk :items)] (tree (if (= 'tuple (head x)) (second x) x) segs))
                                       ;; round 54 (RIND9 (a), std): a glob re-export (sys/pal/mod.rs' `pub use self::unix::*;`,
                                       ;; sys/fd's, sys/fs's), its module's names copied by with-core-names; std's alone (core's
@@ -529,7 +532,7 @@
                                                (when (> (count target) 1)
                                                  (swap! acc update m (fn [e] (update (or e {:kind "Mod" :children []}) :globs (fnil conj []) (str/join "::" target)))))))
                                       nil)))]
-                          (tree (second k) []))
+                          (tree (second k) [])))
                     nil))))]
       (walk items path))
     @acc))
@@ -572,17 +575,25 @@
                             path))))
         reexport (fn [m]
                    (reduce (fn [m [p {:keys [reexports]}]]
-                             (reduce (fn [m [nm target]]
+                             (reduce (fn [m [nm target priv]]
                                        (let [i (.lastIndexOf ^String target "::")
                                              parent (module-of m (subs target 0 i)) tn (subs target (+ i 2))
                                              defs (filter #(= tn (:name %)) (:children (get m parent)))]
-                                         (if (seq defs) (add m p "Mod" (mapv #(assoc % :name nm) defs)) m)))
+                                         (if (seq defs) (add m p "Mod" (mapv #(cond-> (assoc % :name nm) priv (assoc :private-use true)) defs)) m)))
                                      m reexports))
                            m names))
         ;; round 54: a glob re-export's module's names, under the module's own (add keeps the module's own first)
         glob (fn [m]
                (reduce (fn [m [p {:keys [globs]}]]
-                         (reduce (fn [m target] (if-let [e (get m (module-of m target))] (add m p "Mod" (:children e)) m)) m globs))
+                         ;; queue 572: a backtrace crate's glob takes a module's private imports only into its descendants
+                         ;; (rustc's glob imports the names visible from the importing module: gimli's `pub use
+                         ;; self::endian_slice::*` not endian_slice's `use core::ops::Range`, so `gimli::Range` is rnglists')
+                         (reduce (fn [m target] (if-let [e (get m (module-of m target))]
+                                                  (add m p "Mod" (if (str/starts-with? (str p "::") (str target "::"))
+                                                                   (:children e)
+                                                                   (remove :private-use (:children e))))
+                                                  m))
+                                 m globs))
                        m names))
         globs? (some :globs (vals names))
         ;; queue 542: the glob re-exports kept as the map's metadata (with-value-names adds a macro-made item to the modules
@@ -1218,6 +1229,9 @@
                 ex/*raw-block-frags* (boolean (some #{*crate*} dep-crates))
                 lower/*try-expn-mark* (boolean (some #{*crate*} backtrace-crates))
                 tc/*steps-inherent* (boolean (some #{*crate*} backtrace-crates))
+                tc/*index-steps* (boolean (some #{*crate*} backtrace-crates))
+                collect/*int-bitops* (boolean (some #{*crate*} backtrace-crates))
+                build/*brackets-span* (boolean (some #{*crate*} backtrace-crates))
                 resolve/*crate-path* path collect/*root-crate-override* (prelude-crate)
                 ;; queue 417: std's interface pass keeps its type aliases of an impl Trait as aliases (*free-aliases*)
                 collect/*free-aliases* (boolean (and *collect-only* (= "std" *crate*)))]

@@ -22246,3 +22246,47 @@ verdict 566's.
 - Alternatives considered: the core export afresh on the merged code (16 minutes; std's export showed the merge moved no row, and
   the build reads core's bodies as data); a fresh `.tmp/rust-front` (about an hour of passes) instead of 542's asset.
 - Not recorded: lib-unit's numbers are no records; the VM's rows would be -linux-arm64.
+## 2026-11-25 — C6 L3: the backtrace crates' compare continued, miniz_oxide's layouts first (queue 572, VM)
+
+Continues queue 561 (branch 561-rust-backtrace-crates at 43f3cb337), after the user's 561-1 (a) (mono.ae's closure-kind
+fallback and the upstream `#[inline]` symbols are the main session's, rust-l1; miniz_oxide's layouts here) and 561-2 (a) (the
+gated fixes ungated later, one at a time with std's lib-unit compare). Merged origin/next 3a67d8dc2 (565, 566, 561, 570, 548,
+491) on the way, without conflict. Every change below is gated on a backtrace crate (adler2, memchr, rustc_demangle,
+miniz_oxide, object, gimli, addr2line): a dynamic var bound by core-check's run-module, lib-unit's compare or lib-unit's build
+for them, so core's, alloc's and std's paths are unchanged by construction.
+
+The caches: 561's worktree and its `.tmp/rust-front` were gone; core's, alloc's and std's interfaces came from q542's saved
+copy (paths rewritten), core's index from 561's `orig/`, core's, alloc's and std's lib-unit exports read from 566's
+(`.tmp/q566/fresh`, the user's "read 566's lib-unit cache read-only"), core's a copy with two keys added (`export core --add`
+over convert/num.rs and num/mod.rs: `convert-num-{impl#68}-from`, `num-{impl#6}-saturating_sub`). The seven interfaces were
+made again (`DEPS_BACKTRACE=1 bin/rust-front std-iface --deps`), as each interface change needed.
+
+What was wrong and the fix (rustc's rule each time):
+- collect: `FAST_LOOKUP_SIZE: u16 = 1 << FAST_LOOKUP_BITS` had no value (eval-int-expr knew + - * / % only), so HuffmanTable's
+  `[i16; FAST_LOOKUP_SIZE as usize]` was not in the interface: the bit operators and a cast length or repeat count evaluated
+  (`*int-bitops*`). miniz_oxide 10 -> 11 ADTs.
+- resolve: a module file built alone got the prelude's injected `extern crate core;` as a module item, shadowing inflate/core.rs'
+  `use super::*` module `core`, so `core::State` was (err): the injected item stays in the extern prelude only. 11 -> 12 ADTs
+  (DecompressorOxide). Then miniz_oxide's own `#[inline(always)]` callees (lib-unit inline-keys, committed as
+  test/rust/front/lib-unit-miniz_oxide-keys.txt): 0/0/8 -> 4/4/0.
+- codegen: a constant index restricts the place's alignment for its offset (place.rs' project_index); a deref of a memory local's
+  fat pointer loads both halves (codegen_consume); [x; N]'s loop is rustc 1.99's pointer loop (write_operand_repeatedly).
+- build: an overloaded index's caller location is its brackets span (the parser's third field of ExprKind::Index, lower's
+  :brackets), not the base's end. miniz_oxide 8/0/0.
+- core-check: a glob re-export took a module's private `use` imports (gimli's `pub use self::endian_slice::*` re-exported
+  `use core::ops::Range`, so addr2line's `gimli::Range` was core's Range): private imports now reach only the importing module's
+  descendants. gimli 247 -> 250 ADTs, addr2line 30 -> 34.
+- typeck: lookup_indexing's builtin index at any autoderef step in order with the steps' Index impls (Box<[T]>'s slice).
+- build-run: a drop of a reference's pointee (`*path = ..`'s replace) takes its drop glue (codegen branched over it).
+- mono: llvm-type-of nests a scalar-pair struct ADT's fields and a pattern type's base (uncached_llvm_type), Box<[T]>'s gep type.
+- gimli's DW_AT_null and DW_FORM_null by their exported constant bodies (test/rust/front/lib-unit-gimli-keys.txt).
+
+Rows (lib-unit compare against std's IR at the pin, equal/differ/refused), 561's -> now: adler2 2/0/0 -> 2/0/0, rustc_demangle
+35/7/3 -> 37/5/3, miniz_oxide 0/0/8 -> 8/0/0, object 1/1/0 -> 2/0/0, gimli 6/3/2 -> 8/2/1, addr2line 5/3/0 -> 8/0/0: 49 -> 65 of
+74 equal. Left: two upstream-instance symbols (gimli's Wrapping add_assign, assert_failed::<u64, u64>: the main session's,
+561-1 (a)), gimli's const pattern (`constants::DW_AT_location` in allow_section_offset), rustc_demangle's var_debug_info allocas
+(passes.ae), its legacy starts_with call, its two `impl Iterator` refusals.
+
+Alternatives considered: ungating each rule now (561-2 (a) says later, each with std's lib-unit compare); a crate-wide
+`*backtrace*` var in place of one var per rule (kept per rule, so each can be ungated alone); for the private-import rule,
+dropping private uses from the index (they are needed for the module's own resolution).
