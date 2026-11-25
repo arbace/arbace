@@ -3605,8 +3605,24 @@
                         (enter! scope nm (cond-> (assoc e :pos (long (or (:_b n) 0)))
                                            (and (checking?) (:cls scope)) (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
     ;; (CX12, the checker: a namespace-scope static_assert of the main file checked in the analysis' order)
-    "StaticAssertDecl" (when (and (checking?) (= :ns (:kind scope)) (not (header-node? n)))
-                         (swap! *order* conj [:sassert {:node n :scope scope}]))
+    "StaticAssertDecl" (when (and (checking?) (not (header-node? n)))
+                         (cond
+                           (= :ns (:kind scope)) (swap! *order* conj [:sassert {:node n :scope scope}])
+                           ;; (cpp-indep: a member-declaration's static_assert, [class.mem.general]/1 with [dcl.pre]/10, of a class
+                           ;; that is no template's pattern -- a class's, or a class template's specialization for arguments with no
+                           ;; dependent part, [temp.inst]/3 -- checked in order too, its failure alone judged as a function template
+                           ;; specialization's: cpp0x/static_assert1.C's `class X`, static_assert2.C's accept_evens<1>)
+                           (and (= :class (:kind scope)) (:cls scope)
+                                (let [c (abi/cls (:cls scope))]
+                                  (and c (not (:header c))
+                                       ;; (a specialization's scope binds its parameters; any other class under a template's
+                                       ;; parameters is a pattern's)
+                                       (or (:tmpl c)
+                                           (not (loop [s scope k 0] (when (and s (< k 64)) (or (= :tparams (:kind s)) (recur (:parent s) (inc k)))))))
+                                       (not-any? #(and (map? %) (#{:tparam :tparam-v :ttp :dep :tdep :texpr :auto :pack-exp} (:k %)))
+                                                 (tree-seq coll? seq (:targs c))))))
+                           (swap! *order* conj [:sassert {:node n :scope scope :member true}])
+                           :else nil))
     ("EmptyDecl" "AccessSpecDecl" "FriendDecl") nil
     (if (str/ends-with? (str (:kind n)) "Attr") nil (fail :decl "declaration " (:kind n)))))))
 
@@ -12726,13 +12742,18 @@
                                                ;; substitution judged by what the slice analyzes; cpp2a/spaceship-sfinae3.C)
                                                (not-any? #(and (map? %) (= "RequiresExpr" (:kind %)))
                                                          (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (dissoc % :_t :_ent :range :loc)) (seq %)) d))
-                                               ;; (on one line: GCC reports a failed conjunct where it is written)
                                                (let [b (get-in d [:range :begin :offset]) e (get-in d [:range :end :offset])]
-                                                 (and b e (<= (long b) (long e) (count *src*))
-                                                      (not (str/includes? (subs *src* (int b) (int e)) "\n")))))
-                                      (try (check-static-assert! ctx d)
-                                           (catch arbace.lang.ExceptionInfo x
-                                             (when (= "codegen: static assertion failed" (.getMessage x)) (throw x)))))
+                                                 (and b e (<= (long b) (long e) (count *src*)))))
+                                      ;; (on one line: GCC reports a failed conjunct where it is written; cpp-indep: over several
+                                      ;; lines when the failure is placed at its false conjunct, sassert-false-conjunct's,
+                                      ;; diagnostic/static_assert1.C)
+                                      (let [one-line (let [b (get-in d [:range :begin :offset]) e (get-in d [:range :end :offset])]
+                                                       (not (str/includes? (subs *src* (int b) (int e)) "\n")))]
+                                        (try (check-static-assert! ctx d)
+                                             (catch arbace.lang.ExceptionInfo x
+                                               (when (and (= "codegen: static assertion failed" (.getMessage x))
+                                                          (or one-line (not (identical? d (:cx/node (ex-data x))))))
+                                                 (throw x))))))
                                     (check-static-assert! ctx d))
                                   {:s :null})
            (fail :decl "local declaration " (:kind d)))))))
@@ -14661,9 +14682,14 @@ protected:
                           :cx-error (when-let [h *on-refusal*] (h id nil))
                           ;; (CX12, the checker: a namespace-scope static_assert)
                           :sassert (if-let [h *on-refusal*]
-                                     (try (check-static-assert! {:scope (:scope id) :statics (atom [])} (:node id))
+                                     (try (check-static-assert! (cond-> {:scope (:scope id) :statics (atom [])}
+                                                                  (:member id) (assoc :cls (:cls (:scope id))))
+                                                                (:node id))
                                           (catch arbace.lang.ExceptionInfo e
-                                            (if (:codegen/refused (ex-data e)) (h e (some-> *at* deref)) (throw e))))
+                                            (cond (not (:codegen/refused (ex-data e))) (throw e)
+                                                  ;; (a member's: its failure alone, any other refusal the slice's)
+                                                  (and (:member id) (not= "codegen: static assertion failed" (.getMessage e))) nil
+                                                  :else (h e (some-> *at* deref)))))
                                      nil)
                           :var (let [v (var* id)]
                                  ;; (CP321 (a), the checker: a static data member's in-class initializer, analyzed in its class's
