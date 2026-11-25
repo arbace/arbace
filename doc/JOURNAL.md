@@ -21750,3 +21750,61 @@ The user decided (537-4 (a)) to vendor Go's crypto/tls into pyi's ssl and add wh
 - Alternatives considered: (b) n/a and (c) by design (537-4's); moving _ssl into a lazy package beside the vendored code
   (pyssl's way), which keeps it out of the program's copy but moves 4,500 lines of glue: not taken, the direct import is
   the smaller change.
+
+## 2026-11-24: queue 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (the VM; branch `553-py-subinterp-testbuffer`)
+
+Brief: `.tmp/worktrees/q/tasks/553-py-subinterp-testbuffer.md` (the user's decisions of 2026-11-23 on 537's DECISIONs 537-5 and
+537-6: :subinterpreters' 3 rows, `_testbuffer`'s 3 and 3.14's UTF-8 mode rule from :skipped-by-test, :child-is-pyi's 10 case by
+case). Base next 9b60ce498; paused for the night at 739215eb7 (WIP) and resumed; origin/next 440cf0273 merged (its journal
+without the conflict markers 9b60ce498 had left; the survey's markers, which this branch had removed too, taken as next has it).
+
+- **Subinterpreters (`:subinterpreters`, 3 rows).** `concurrent.interpreters` is CPython's own Lib over pyi's `_interpreters`,
+  `_interpqueues` and `_interpchannels` (queue 230, each interpreter with its own module table, builtins, sys, importlib, codecs,
+  atexit, locale and the interpreter registers swapped by interpSwitch; one GIL, 230's DECISION). The three rows were `del interp`
+  in test_interpreters' module runs leaving the interpreter alive: pyi's moment at del (queue 222) collects at a deletion within a
+  budget of a tenth of the wall time, spent by then (a probe of _mixed alone passes). Now a deletion past the budget while a
+  subinterpreter is held by handles is owed (`xiDeathOwed`), settled by one finRound before the queues' get, get_count, is_full,
+  list_all and the channels' recv, get_count, get_info, list_all, list_interpreters (`xiSettleDeaths`). Alternatives: lifting the
+  budget for every deletion while subinterpreters exist (a collection per deleted tracked object in InterpreterPoolExecutor's
+  programs), recognizing the Interpreter class by name (a stdlib name in the runtime), reference counting (537-2 (b)).
+- **`_testbuffer` (3 rows) and its UTF-8 sibling.** `_testbuffer` has been ci's since queue 456 (473: memoryview over Py_buffer);
+  the rows, and test_buffer's 73 in `:testcapi`, are the 11-19 records night's. Task 554 runs and records test_buffer whole; the
+  test_capi and test_ctypes rows pass by id here. 3.14's UTF-8 mode rule (preconfig_init_utf8_mode) replaces pyi's constant 1:
+  `-X utf8`, `PYTHONUTF8` (-E/-I ignore it; invalid values refused for 3.14 too), else on only under the C or POSIX locale.
+- **`:child-is-pyi` (10), case by case (537-5):** test_posix's two test_close_file (Go's runtime.checkfds opens /dev/null on a
+  closed descriptor 0: `bin/pyi python` sees 0 closed and `PYI_STDIN_CLOSED` makes the runtime close it again before anything
+  runs, `sys.stdin` None), test_subprocess' test_preexec_at_exit (fork_exec's PythonFinalizationError and subinterpreter
+  RuntimeError before pyi's no-fork refusal) and test_encoding_warning (stale), test_marshal's test_unorderable_set_items_in_code
+  (the bytecode view's add_const keyed by repr merged two NaN complex constants: a NaN float or complex now matches only itself,
+  as `_PyCode_ConstantKey`), test_unicodedata's unload_reload (namereplace imports unicodedata once per interpreter, the
+  `_PyUnicode_GetNameCAPI` capsule) and failed_import_during_compiling (compile/exec/eval of a source with `\N{` asks the capsule;
+  on its failure a copy with each `\N{` opening an impossible name tells a decoded escape from raw text, and the error is the
+  parser's "(unicode error) \N escapes not supported (can't load unicodedata module)"; a first version asked at every IR load and
+  broke every module with an escape under `sys.modules['unicodedata'] = None`), test_os' test_urandom_failure (sysconfig's
+  HAVE_GETRANDOM, HAVE_GETRANDOM_SYSCALL, HAVE_GETENTROPY 1: os.urandom is getrandom; with it `:runs-where-cpython-skips`' two
+  URandomFDTests rows). Left for the user: test_pass_fds_redirected (Go's poller holds descriptors 3 and 4; DECISION 553-1, n/a
+  recommended) and BytesFwalkTests.test_fd_finalization (reference counting's moment: DECISION 553-2, to :finalization under 537-2).
+- **Runs** (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py; PYI_RUNNER=python3): check A by id and whole modules
+  (`.tmp/q553/checkA.log`, stopped for the night before test_buffer and test_utf8_mode ended), check B whole (test_unicodedata,
+  test_utf8_mode, test_builtin, test_posix; `.tmp/q553/checkB.log`, controls failed as they must), check C the VM-only rows alone
+  with a 16 GB cap (`.tmp/q553/checkC.log`); probes `.tmp/q553/p/subi2.py` (the budget spent, then `del interp`: qsize 4, PASS)
+  and fail.py (CPython's SyntaxError line).
+- **Records**: `bin/pyi check --judge DIR --record` over a copy of check B holding test_utf8_mode alone (test_env_var and
+  test_xoption pass). Not recorded, for the main host's whole record: test_builtin (its TestType.test_namespace_order fails on goi
+  only), test_posix (test_posix_spawnp past the 8 GB cap on goi), test_unicodedata (failed_import past the cap after the
+  module's heavy tests), and every row covered by id alone. Python eval 40,827 / 1,404 / 1,308 -> 40,829 / 1,404 / 1,306.
+  `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 553's two DECISIONs applied (the VM; branch `553-py-subinterp-testbuffer`)
+
+- **DECISION 553-1 (a), the user: n/a.** test_subprocess's test_pass_fds_redirected leaves `:child-is-pyi` for a new n/a class,
+  `:go-runtime-descriptors`: Go's runtime opens its network poller's two descriptors (epoll and eventfd, at 3 and 4) before any
+  Python runs, in every pyi process, so a child listing its open descriptors (fd_status.py) sees them beside the passed ones.
+  Not taken: (b) a patch to Go's runtime moving them above 255 in pyi's two builds, (c) keeping it by design.
+- **DECISION 553-2 (a), the main session, by the same rule as the user's 537-2: test_os' BytesFwalkTests.test_fd_finalization
+  goes to `:finalization`** (reference counting's moment: closing the wrapper generator unwinds its frame, and CPython closes the
+  inner os.fwalk generator, which closes its directory descriptors, when the frame's for-loop drops it; pyi when Go's collector
+  finds it). Not taken: (b) closing the generators a frame's for-loops hold as it unwinds (wrong when another reference holds one).
+- Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
+  -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
+  `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
