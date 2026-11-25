@@ -1303,6 +1303,12 @@
   logged as `lib-unit inline wanted DEF` so that lib-unit inline-keys takes them)"
   nil)
 
+(def ^:dynamic *const-wanted*
+  "queue 566 (566-1 (a), the user's): an atom of what a library constant's whole evaluation (eval-const-whole) wanted that no
+  export holds: [DEF ARGS] of the const fns it called and [DEF []] of the constants it named, logged as `lib-unit const wanted
+  DEF` (their keys for the next export, which lib-unit inline-keys takes as it takes L2's)"
+  nil)
+
 (def ^:private const-whole-depth (atom 0))
 (declare eval-const-whole)
 (defn- const-whole-body
@@ -1329,7 +1335,9 @@
   exported bodies (eight calls deep at most): {:bytes :align :relocs}, else nil. Only within *data-alloc*"
   [d unit-variant lay]
   (when (and *data-alloc* (string? d) (< @const-whole-depth 6))
-    (when-let [b (const-whole-body d)]
+    (when-let [b (or (const-whole-body d)
+                     ;; queue 566 (566-1 (a)): a constant the export lacks, wanted
+                     (when *const-wanted* (swap! *const-wanted* conj [d []]) nil))]
       (swap! const-whole-depth inc)
       (try
         (let [raw-alloc (fn [kind id]
@@ -1354,6 +1362,7 @@
               call (fn call [cd targs vals]
                      (let [e (get (native-core-map) cd)]
                        (when (and (nil? e) *ctfe-wanted*) (swap! *ctfe-wanted* conj [cd (vec targs)]))
+                       (when (and (nil? e) *const-wanted*) (swap! *const-wanted* conj [cd (vec targs)]))
                        (when (and e (< @depth 8))
                          (swap! depth inc)
                          (try (binding [*arg-values* vals]
@@ -3044,6 +3053,7 @@
                       acc))
               inl-name (fn [d args] (str "lib-inline " d (when (seq args) (pr-str args))))
               ctfe-wanted (atom #{})   ; queue 542: the const fns a static's evaluation wanted
+              const-wanted (atom #{})  ; queue 566 (566-1 (a)): what a constant's whole evaluation wanted (eval-const-whole)
               ;; rust-l1 (C6): a constant's aggregates laid out by mono, its types' layouts (eval-const-whole)
               unit-variant* (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
               lay* (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
@@ -3137,11 +3147,11 @@
                                                (in-lib #(or (iface-const-value d) (eval-local-const d #{})
                                                             ;; rust-l1 (C6): within a promoted's evaluation, a whole value
                                                             ;; (LocalKey's function pointer: &LOCAL_PANIC_COUNT)
-                                                            (when *data-alloc* (eval-const-whole d unit-variant* lay*)))))))
+                                                            (when *data-alloc* (binding [*const-wanted* const-wanted] (eval-const-whole d unit-variant* lay*))))))))
                   ;; rust-l1 (C6): a named or inline constant's whole value (eval-const-whole), for fix-uneval
                   :const-whole (fn [_ _ v] (let [[d as] (:nc (meta v)) d (if (string? d) d (:inline-def (meta v)))]
                                              (when (and (string? d) (empty? as))
-                                               (in-lib #(eval-const-whole d unit-variant* lay*)))))}
+                                               (binding [*const-wanted* const-wanted] (in-lib #(eval-const-whole d unit-variant* lay*))))))}
               ;; queue 566 (C6 L1): a thread-local static the body names (`(tlsref MUT PATH)`, the crate's: list::DTORS), its symbol
               ;; v0's of the library's static, as the program's run writes the program's own
               tls-sym (fn [b] (walk (fn [x] (if (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)))
@@ -3189,7 +3199,8 @@
            :layouts (vec (for [[t l] lt :when (not (mono/error? l))] [t l]))
            :layout-refusals (vec (for [[t l] lt :when (mono/error? l)] [t (second l)]))
            :langsyms (into {} (for [[k v] (:langsyms facts) :when (not (mono/error? v))] [k v]))
-           :ctfe-wanted (vec (sort-by str @ctfe-wanted))})))))
+           :ctfe-wanted (vec (sort-by str @ctfe-wanted))
+           :const-wanted (vec (sort-by str @const-wanted))})))))
 
 (defn lib-unit-main
   "lib-unit CRATES FRONT-DIR N CRATE DEFS-FILE OUT: lib-unit-run over DEFS-FILE's definitions (a def path a line) into OUT"
@@ -3205,6 +3216,9 @@
     ;; queue 542: the const fns a static's evaluation called that no export holds, wanted as the inliner's are (lib-unit inline-keys)
     (doseq [[d args] (:ctfe-wanted r)]
       (println (str "lib-unit inline wanted " d (when (seq args) (str " " (pr-str args))) " (not exported; a static's evaluation)")))
+    ;; queue 566 (566-1 (a)): the const fns and constants a constant's whole evaluation wanted, as L2's are logged
+    (doseq [[d args] (:const-wanted r)]
+      (println (str "lib-unit const wanted " d (when (seq args) (str " " (pr-str args))) " (not exported; a constant's evaluation)")))
     ;; queue 566 (L2's first slice): the items' callees built (LIB_UNIT_L2), or wanted (their keys for the next export)
     (doseq [[d args sym b why] (:l2-bodies r)]
       (println (if b (str "lib-unit l2 built " d (when (seq args) (str " " (pr-str args))) " " sym)
