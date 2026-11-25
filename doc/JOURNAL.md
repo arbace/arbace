@@ -21032,3 +21032,10 @@ the JDK and are not in the records, and no row of test/java/check-*.edn cites ja
 PrimitiveClassDescImpl (the class :classfile matches what does); so no --only run. Then
 ctsym-run.ae's first form, (identity java.lang.constant.ConstantDescs/CD_Object), and its comment can go (jcs50-release's
 branch, not edited here).
+
+## 2026-11-25 — the user's DECISION 491-1 (a) (queue 491, VM)
+
+491-1 (a): jrt's boot initializes java.lang.constant.ConstantDescs, as a JDK program's first lambda or concatenation
+would; built on this branch. Not taken: (b) JLS 12.4.2 alone (CreateSymbols keeps needing a workaround) and (c) initializing it at
+the program's first lambda or concatenation (a j2g and interpreter hook in each, for one class). ctsym-run.ae's
+(identity java.lang.constant.ConstantDescs/CD_Object) and its comment can go on jcs50-release's branch.
