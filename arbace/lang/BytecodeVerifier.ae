@@ -1,0 +1,1052 @@
+;; Classes defined from class-file bytes (doc/classes/BYTECODE-SURVEY.md, JD3, the user's decision of 2026-11-22): the
+;; verifier, JVMS 4.10. Class files of version 50 and later by type checking (4.10.1: the StackMapTable's frames, each
+;; instruction's rule, the exception handlers' rule, the protected check of 4.10.1.8), version 50 failing over to
+;; inference as HotSpot's FailOverToOldVerifier does; older ones by type inference (4.10.2: the data-flow analysis over
+;; the same rules, frames merged at join points, jsr/ret subroutines by the locals they modify). Written from the JVMS
+;; (Java SE 26 edition), its Prolog rules ported clause by clause into one transfer function; HotSpot's verifier
+;; (openjdk/jdk26u src/hotspot/share/classfile/verifier.cpp) read for its messages only, no code copied.
+;;
+;; Verification types are strings: "T" top, "I" int, "F" float, "J" long, "D" double (a long's or double's second
+;; local slot "T"), "N" null, "U" uninitializedThis, "u<offset>" uninitialized(Offset), "r<pc>" a returnAddress of
+;; the subroutine at pc, and a class or array type as its field descriptor ("Ljava/lang/String;", "[I").
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+
+(in-ns 'arbace.lang)
+
+(import '(java.lang.reflect Constructor Field Method Modifier))
+
+;; a frame: the locals (slots) and the operand stack (one entry a value, a long or double one entry), whether this
+;; is uninitialized in a constructor (flagThisUninit), and in inference the locals a subroutine modified
+(defclass ^:public ^:final BytecodeVFrame
+  (field ^:public ^String/1 locals)
+  (field ^:public ^java.util.ArrayList stack)
+  (field ^:public ^boolean thisUninit)
+  (field ^:public ^java.util.BitSet mod)
+  (constructor ^:public [this ^int n]
+    (set! (.-locals this) (new String/1 n))
+    (java.util.Arrays/fill (.-locals this) "T")
+    (set! (.-stack this) (java.util.ArrayList.))
+    (set! (.-mod this) (java.util.BitSet.)))
+  (method ^:public copy ^BytecodeVFrame [this]
+    (let [f (BytecodeVFrame. (alength locals))]
+      (System/arraycopy locals 0 (.-locals f) 0 (alength locals))
+      (.addAll (.-stack f) stack)
+      (set! (.-thisUninit f) thisUninit)
+      (.or (.-mod f) mod)
+      f))
+  (method ^:public stackSize ^int [this]
+    (let [^:mutable ^int n 0]
+      (loop [^int i 0]
+        (when (< i (.size stack))
+          (set! n (unchecked-add-int n (BytecodeVerifier/size (cast String (.get stack i)))))
+          (recur (unchecked-inc-int i))))
+      n))
+  (method ^:public toString ^String [this]
+    (java-str "locals " (java.util.Arrays/toString locals) " stack " stack (if thisUninit " flagThisUninit" ""))))
+
+(defclass ^:public ^:final BytecodeVerifier
+  (field ^:final ^BytecodeClass bc)
+  (field ^:final ^BytecodeFile cf)
+  (field ^:final ^BytecodeMember mm)
+  (field ^:final ^byte/1 code)
+  (field ^:final ^boolean init)
+  (field ^:final ^String thisType)
+  (field ^:final ^String retType)
+  ;; type checking (true) or inference
+  (field ^boolean checking)
+  ;; instruction starts
+  (field ^boolean/1 starts)
+  ;; the StackMapTable's frames by offset (type checking), the merged frames (inference)
+  (field ^BytecodeVFrame/1 frames)
+  (field ^int maxStack)
+  (field ^int maxLocals)
+
+  (constructor ^:private [this ^BytecodeClass bc ^BytecodeMember mm]
+    (set! (.-bc this) bc)
+    (set! (.-cf this) (.-cf bc))
+    (set! (.-mm this) mm)
+    (set! (.-code this) (.-code mm))
+    (set! (.-init this) (.equals (.-name mm) "<init>"))
+    (set! (.-thisType this) (java-str "L" (.-thisName (.-cf bc)) ";"))
+    (set! (.-retType this) (Bytecode/ret (.-desc mm)))
+    (set! (.-maxStack this) (.-maxStack mm))
+    (set! (.-maxLocals this) (.-maxLocals mm)))
+
+  ;; every method of the class (JVMS 4.10): VerifyError naming the method and the reason
+  (method ^:public ^:static verifyClass ^void [^BytecodeClass bc]
+    (let [cf (.-cf bc)]
+      (loop [^int i 0]
+        (when (< i (alength (.-methods cf)))
+          (let [m (aget (.-methods cf) i)]
+            (when (.-hasCode m)
+              (BytecodeVerifier/verifyMethod bc m)))
+          (recur (unchecked-inc-int i))))))
+
+  (method ^:public ^:static verifyMethod ^void [^BytecodeClass bc ^BytecodeMember m]
+    (let [major (.-major (.-cf bc))]
+      (if (>= major 50)
+          (try
+            (.typeCheck (BytecodeVerifier. bc m))
+            (catch Throwable e
+              ;; version 50 fails over to inference (HotSpot's FailOverToOldVerifier)
+              (if (and (== major 50) (BytecodeVerifier/isVerifyError e))
+                  (.infer (BytecodeVerifier. bc m))
+                  (throw e))))
+          (.infer (BytecodeVerifier. bc m)))))
+
+  (method ^:private ^:static isVerifyError ^boolean [^Throwable e]
+    (instance? VerifyError e))
+
+  (method ^:private mname ^String [this]
+    (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)))
+
+  (method ^:private fail ^Throwable [this ^int pc ^String why]
+    (Bytecode/error 4 (java-str "Bad verification at bci " pc " in method '" (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.))
+                                "': " why)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; types
+
+  (method ^:public ^:static size ^int [^String t] (if (or (.equals t "J") (.equals t "D")) 2 1))
+
+  (method ^:public ^:static isRef ^boolean [^String t]
+    (let [c (.charAt t 0)] (or (== c \L) (== c \[) (== c \N))))
+
+  ;; a field descriptor as a verification type (int-like ones int)
+  (method ^:public ^:static ofDesc ^String [^String d]
+    (switch (.charAt d 0)
+      (\Z \B \C \S \I) "I"
+      \F "F" \J "J" \D "D"
+      d))
+
+  (method ^:private load ^Class [this ^String t] (Bytecode/descClass (.-loader bc) t))
+
+  (method ^:private isInterfaceType ^boolean [this ^String t]
+    (and (== (.charAt t 0) \L) (.isInterface (.load this t))))
+
+  ;; isAssignable (4.10.1.2), from to
+  (method ^:public assignable ^boolean [this ^String from ^String to]
+    (cond
+      (.equals from to) true
+      (.equals to "T") true
+      (.equals from "N") (BytecodeVerifier/isRef to)
+      (and (BytecodeVerifier/isRef from) (BytecodeVerifier/isRef to))
+        (cond
+          (.equals to "Ljava/lang/Object;") true
+          (== (.charAt to 0) \L)
+            (if (.isInterfaceType this to)
+                true
+                (if (== (.charAt from 0) \[)
+                    false
+                    (.isAssignableFrom (.load this to) (.load this from))))
+          ;; to an array
+          (== (.charAt from 0) \[)
+            (let [fc (.substring from 1) tc (.substring to 1)]
+              (if (or (BytecodeVerifier/isRef fc) (BytecodeVerifier/isRef tc))
+                  (and (BytecodeVerifier/isRef fc) (BytecodeVerifier/isRef tc) (.assignable this fc tc))
+                  (.equals fc tc)))
+          :else false)
+      :else false))
+
+  ;; the merge of two types at a join point (inference, 4.10.2.2); nil when they cannot merge
+  (method ^:private merge ^String [this ^String a ^String b]
+    (cond
+      (.equals a b) a
+      (.equals a "N") (if (BytecodeVerifier/isRef b) b nil)
+      (.equals b "N") (if (BytecodeVerifier/isRef a) a nil)
+      (and (BytecodeVerifier/isRef a) (BytecodeVerifier/isRef b))
+        (cond
+          (and (== (.charAt a 0) \[) (== (.charAt b 0) \[))
+            (let [x (.substring a 1) y (.substring b 1)]
+              (if (and (BytecodeVerifier/isRef x) (BytecodeVerifier/isRef y))
+                  (let [m (.merge this x y)] (if (some? m) (java-str "[" m) "Ljava/lang/Object;"))
+                  "Ljava/lang/Object;"))
+          (or (== (.charAt a 0) \[) (== (.charAt b 0) \[)) "Ljava/lang/Object;"
+          :else
+            (let [ca (.load this a) cb (.load this b)]
+              (cond
+                (or (.isInterface ca) (.isInterface cb)) "Ljava/lang/Object;"
+                (.isAssignableFrom ca cb) a
+                (.isAssignableFrom cb ca) b
+                :else (loop [^Class x (.getSuperclass ca)]
+                        (cond
+                          (nil? x) "Ljava/lang/Object;"
+                          (.isAssignableFrom x cb) (java-str "L" (.replace (.getName x) \. \/) ";")
+                          :else (recur (.getSuperclass x)))))))
+      :else nil))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the code's structure: instruction starts, lengths (4.9.1)
+
+  (method ^:private u1 ^int [this ^int i] (bit-and-int (aget code i) 0xFF))
+  (method ^:private u2 ^int [this ^int i] (bit-or-int (bit-shift-left-int (.u1 this i) 8) (.u1 this (unchecked-inc-int i))))
+  (method ^:private s2 ^int [this ^int i] (unchecked-int (unchecked-short (.u2 this i))))
+  (method ^:private s4 ^int [this ^int i] (bit-or-int (bit-shift-left-int (.u2 this i) 16) (.u2 this (unchecked-add-int i 2))))
+
+  ;; the length of the instruction at pc, -1 when it is not one
+  (method ^:private length ^int [this ^int pc]
+    (let [op (.u1 this pc)
+          n (alength code)]
+      (cond
+        (or (== op 16) (== op 18) (and (>= op 21) (<= op 25)) (and (>= op 54) (<= op 58)) (== op 169) (== op 188)) 2
+        (or (== op 17) (== op 19) (== op 20) (== op 132) (and (>= op 153) (<= op 168)) (and (>= op 178) (<= op 184))
+            (== op 187) (== op 189) (== op 192) (== op 193) (== op 198) (== op 199)) 3
+        (== op 197) 4
+        (or (== op 185) (== op 186) (== op 200) (== op 201)) 5
+        (== op 196) (if (>= (unchecked-inc-int pc) n) -1 (if (== (.u1 this (unchecked-inc-int pc)) 132) 6 4))
+        (== op 170) (let [b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))]
+                      (if (> (unchecked-add-int b 12) n)
+                          -1
+                          (let [lo (.s4 this (unchecked-add-int b 4)) hi (.s4 this (unchecked-add-int b 8))]
+                            (if (< hi lo) -1 (unchecked-subtract-int (unchecked-add-int (unchecked-add-int b 12) (unchecked-multiply-int 4 (unchecked-inc-int (unchecked-subtract-int hi lo)))) pc)))))
+        (== op 171) (let [b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))]
+                      (if (> (unchecked-add-int b 8) n)
+                          -1
+                          (let [k (.s4 this (unchecked-add-int b 4))]
+                            (if (< k 0) -1 (unchecked-subtract-int (unchecked-add-int (unchecked-add-int b 8) (unchecked-multiply-int 8 k)) pc)))))
+        (<= op 201) 1
+        :else -1)))
+
+  (method ^:private scan ^void [this]
+    (let [n (alength code)]
+      (set! starts (new boolean/1 n))
+      (loop [^int pc 0]
+        (when (< pc n)
+          (let [l (.length this pc)]
+            (when (or (< l 0) (> (unchecked-add-int pc l) n))
+              (throw (.fail this pc (java-str "Bad instruction: " (Integer/toHexString (.u1 this pc))))))
+            (aset starts pc true)
+            (recur (unchecked-add-int pc l)))))
+      ;; the exception table's offsets
+      (let [hs (.-handlers mm)]
+        (loop [^int i 0]
+          (when (< i (alength hs))
+            (let [s (aget hs i) e (aget hs (unchecked-inc-int i)) h (aget hs (unchecked-add-int i 2))]
+              ;; HotSpot's ClassFormatErrors (its verifier's classfile_parse_error)
+              (when (not (aget starts s))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table start_pc " s " in method '" (.mname this) "'"))))
+              (when (and (< e n) (not (aget starts e)))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table end_pc " e " in method '" (.mname this) "'"))))
+              (when (not (aget starts h))
+                (throw (Bytecode/error 0 (java-str "Illegal exception table handler_pc " h " in method '" (.mname this) "'"))))
+              (let [ct (aget hs (unchecked-add-int i 3))]
+                (when (not (== ct 0))
+                  (when (not (.assignable this (java-str "L" (.className cf ct) ";") "Ljava/lang/Throwable;"))
+                    (throw (.fail this h "Catch type is not a subclass of Throwable in exception handler"))))))
+            (recur (unchecked-add-int i 4)))))))
+
+  (method ^:private target ^int [this ^int pc ^int t]
+    (when (or (< t 0) (>= t (alength code)) (not (aget starts t)))
+      (throw (.fail this pc "Illegal target of jump or branch")))
+    t)
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the initial frame (4.10.1.6 methodInitialStackFrame)
+
+  (method ^:private initial ^BytecodeVFrame [this]
+    (let [f (BytecodeVFrame. maxLocals)
+          ps (Bytecode/params (.-desc mm))
+          ^:mutable ^int i 0]
+      (when (not (.isStatic mm))
+        (when (< maxLocals 1) (throw (.fail this 0 "Local variable table overflow")))
+        (if (and init (not (.equals (.-thisName cf) "java/lang/Object")))
+            (do (aset (.-locals f) 0 "U") (set! (.-thisUninit f) true))
+            (aset (.-locals f) 0 thisType))
+        (set! i 1))
+      (loop [^int j 0]
+        (when (< j (alength ps))
+          (let [t (BytecodeVerifier/ofDesc (aget ps j))]
+            (when (> (unchecked-add-int i (BytecodeVerifier/size t)) maxLocals)
+              (throw (.fail this 0 "Local variable table overflow")))
+            (aset (.-locals f) i t)
+            (set! i (unchecked-add-int i (BytecodeVerifier/size t))))
+          (recur (unchecked-inc-int j))))
+      f))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the StackMapTable (4.7.4)
+
+  (method ^:private vtype ^String [this ^java.nio.ByteBuffer b ^int pc]
+    (let [tag (bit-and-int (.get b) 0xFF)]
+      (switch tag
+        0 "T" 1 "I" 2 "F" 3 "D" 4 "J" 5 "N" 6 "U"
+        7 (let [n (.className cf (bit-and-int (.getShort b) 0xFFFF))]
+            (if (== (.charAt n 0) \[) n (java-str "L" n ";")))
+        8 (java-str "u" (bit-and-int (.getShort b) 0xFFFF))
+        (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad verification type tag " tag " in method '"
+                                           (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'"))))))
+
+  ;; the locals of a frame from its listed types (a long or double taking two slots)
+  (method ^:private setLocals ^void [this ^BytecodeVFrame f ^java.util.List ts ^int pc]
+    (java.util.Arrays/fill (.-locals f) "T")
+    (let [^:mutable ^int i 0]
+      (loop [^int j 0]
+        (when (< j (.size ts))
+          (let [t (cast String (.get ts j))]
+            (when (> (unchecked-add-int i (BytecodeVerifier/size t)) maxLocals)
+              (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad type array size in method '"
+                                                 (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'"))))
+            (aset (.-locals f) i t)
+            (set! i (unchecked-add-int i (BytecodeVerifier/size t))))
+          (recur (unchecked-inc-int j))))))
+
+  ;; the listed locals of a frame (a long or double's second slot not listed, trailing tops dropped)
+  (method ^:private listLocals ^java.util.ArrayList [this ^BytecodeVFrame f]
+    (let [l (java.util.ArrayList.)
+          ls (.-locals f)]
+      (loop [^int i 0]
+        (when (< i (alength ls))
+          (let [t (aget ls i)]
+            (.add l t)
+            (recur (unchecked-add-int i (BytecodeVerifier/size t))))))
+      (while (and (> (.size l) 0) (.equals "T" (.get l (unchecked-dec-int (.size l)))))
+        (.remove l (unchecked-dec-int (.size l))))
+      l))
+
+  (method ^:private decodeMap ^void [this ^BytecodeVFrame first]
+    (set! frames (new BytecodeVFrame/1 (alength code)))
+    (let [sm (.-stackMap mm)]
+      (when (some? sm)
+        (let [b (java.nio.ByteBuffer/wrap sm)
+              n (bit-and-int (.getShort b) 0xFFFF)
+              ^:mutable ^BytecodeVFrame prev first
+              ^:mutable ^int off -1]
+          (loop [^int k 0]
+            (when (< k n)
+              (let [ft (bit-and-int (.get b) 0xFF)
+                    f (.copy prev)
+                    _ (.clear (.-stack f))
+                    delta (cond
+                            (< ft 64) ft
+                            (< ft 128) (unchecked-subtract-int ft 64)
+                            (< ft 247) (throw (Bytecode/error 0 (java-str "StackMapTable format error: reserved frame type " ft " in method '"
+                                                                          (Bytecode/bin2 (.-desc mm) (.-name mm) (.replace (.-thisName cf) \/ \.)) "'")))
+                            :else (bit-and-int (.getShort b) 0xFFFF))
+                    pc (unchecked-add-int off (unchecked-inc-int delta))]
+                (set! (.-thisUninit f) false)
+                (cond
+                  (< ft 64) nil
+                  (< ft 128) (.add (.-stack f) (.vtype this b pc))
+                  (== ft 247) (.add (.-stack f) (.vtype this b pc))
+                  (<= ft 250) (let [l (.listLocals this prev)
+                                    c (unchecked-subtract-int 251 ft)]
+                                (when (> c (.size l)) (throw (.fail this pc "StackMapTable error: bad chop frame")))
+                                (loop [^int q 0]
+                                  (when (< q c) (.remove l (unchecked-dec-int (.size l))) (recur (unchecked-inc-int q))))
+                                (.setLocals this f l pc))
+                  (== ft 251) nil
+                  (<= ft 254) (let [l (.listLocals this prev)]
+                                (loop [^int q 0]
+                                  (when (< q (unchecked-subtract-int ft 251)) (.add l (.vtype this b pc)) (recur (unchecked-inc-int q))))
+                                (.setLocals this f l pc))
+                  :else (let [nl (bit-and-int (.getShort b) 0xFFFF)
+                              l (java.util.ArrayList.)]
+                          (loop [^int q 0] (when (< q nl) (.add l (.vtype this b pc)) (recur (unchecked-inc-int q))))
+                          (.setLocals this f l pc)
+                          (let [ns (bit-and-int (.getShort b) 0xFFFF)]
+                            (loop [^int q 0] (when (< q ns) (.add (.-stack f) (.vtype this b pc)) (recur (unchecked-inc-int q)))))))
+                ;; flagThisUninit: uninitializedThis among the locals (4.10.1.4)
+                (loop [^int q 0]
+                  (when (< q (alength (.-locals f)))
+                    (when (.equals "U" (aget (.-locals f) q)) (set! (.-thisUninit f) true))
+                    (recur (unchecked-inc-int q))))
+                (when (or (>= pc (alength code)) (not (aget starts pc)))
+                  (throw (.fail this pc "StackMapTable error: bad offset")))
+                (when (> (.stackSize f) maxStack)
+                  (throw (Bytecode/error 0 (java-str "StackMapTable format error: bad type array size in method '" (.mname this) "'"))))
+                (aset frames pc f)
+                (set! prev f)
+                (set! off pc))
+              (recur (unchecked-inc-int k))))
+          (when (.hasRemaining b)
+            (throw (.fail this 0 "StackMapTable error: extra bytes")))))))
+
+  ;; frameIsAssignable (4.10.1.4)
+  (method ^:private frameAssignable ^boolean [this ^BytecodeVFrame a ^BytecodeVFrame b]
+    (and (== (.size (.-stack a)) (.size (.-stack b)))
+         (or (not (.-thisUninit a)) (.-thisUninit b))
+         (loop [^int i 0]
+           (if (< i (alength (.-locals a)))
+               (if (.assignable this (aget (.-locals a) i) (aget (.-locals b) i)) (recur (unchecked-inc-int i)) false)
+               true))
+         (loop [^int i 0]
+           (if (< i (.size (.-stack a)))
+               (if (.assignable this (cast String (.get (.-stack a) i)) (cast String (.get (.-stack b) i))) (recur (unchecked-inc-int i)) false)
+               true))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; type checking (4.10.1)
+
+  (method ^:private typeCheck ^void [this]
+    (set! checking true)
+    (.scan this)
+    (let [f0 (.initial this)]
+      (.decodeMap this f0)
+      (let [^:mutable ^BytecodeVFrame f f0
+            n (alength code)]
+        (loop [^int pc 0]
+          (when (< pc n)
+            (let [sm (aget frames pc)]
+              (if (some? sm)
+                  (do (when (and (some? f) (not (.frameAssignable this f sm)))
+                        (throw (.fail this pc (java-str "Instruction type does not match stack map (current frame: " f ", stackmap frame: " sm ")"))))
+                      (set! f (.copy sm)))
+                  (when (nil? f)
+                    (throw (.fail this pc "Expecting a stackmap frame at branch target")))))
+            ;; the exception handlers of pc: the locals before the instruction, the catch type on the stack
+            (.handlersFor this pc f)
+            (let [next (.step this pc f)
+                  l (.length this pc)]
+              (set! f next)
+              (recur (unchecked-add-int pc l)))))
+        (when (some? f)
+          (throw (.fail this n "Falling off the end of the code"))))))
+
+  ;; the frames of the handlers whose range holds pc take f's locals with the catch type on the stack
+  (method ^:private handlersFor ^void [this ^int pc ^BytecodeVFrame f]
+    (let [hs (.-handlers mm)]
+      (loop [^int i 0]
+        (when (< i (alength hs))
+          (when (and (>= pc (aget hs i)) (< pc (aget hs (unchecked-inc-int i))))
+            (let [h (aget hs (unchecked-add-int i 2))
+                  ct (aget hs (unchecked-add-int i 3))
+                  e (.copy f)]
+              (.clear (.-stack e))
+              (.add (.-stack e) (if (== ct 0) "Ljava/lang/Throwable;" (java-str "L" (.className cf ct) ";")))
+              (when (> 1 maxStack)
+                (throw (.fail this h "Stack size too large")))
+              (if checking
+                  (let [sm (aget frames h)]
+                    (when (or (nil? sm) (not (.frameAssignable this e sm)))
+                      (throw (.fail this h (java-str "Stack map does not match the one at exception handler " h)))))
+                  (.mergeInto this h e))))
+          (recur (unchecked-add-int i 4))))))
+
+  ;; a branch from pc to t with frame f: type checking, f assignable to t's frame; inference, merged into it
+  (method ^:private branch ^void [this ^int pc ^int t ^BytecodeVFrame f]
+    (.target this pc t)
+    (if checking
+        (let [sm (aget frames t)]
+          (when (nil? sm) (throw (.fail this pc "Expecting a stackmap frame at branch target")))
+          (when (not (.frameAssignable this f sm))
+            (throw (.fail this pc (java-str "Type mismatch at branch target " t " (current frame: " f ", stackmap frame: " sm ")")))))
+        (.mergeInto this t f)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; type inference (4.10.2)
+
+  (field ^java.util.ArrayDeque work)
+  (field ^java.util.HashMap jsrs)
+  (field ^java.util.HashMap rets)
+
+  (method ^:private infer ^void [this]
+    (set! checking false)
+    (when (>= (.-major cf) 51)
+      nil)
+    (.scan this)
+    (set! frames (new BytecodeVFrame/1 (alength code)))
+    (set! work (java.util.ArrayDeque.))
+    (set! jsrs (java.util.HashMap.))
+    (set! rets (java.util.HashMap.))
+    (aset frames 0 (.initial this))
+    (.add work (Integer/valueOf 0))
+    (while (not (.isEmpty work))
+      (let [pc (.intValue (cast Integer (.poll work)))
+            f (.copy (aget frames pc))]
+        (.handlersFor this pc f)
+        (let [next (.step this pc f)]
+          (when (some? next)
+            (let [np (unchecked-add-int pc (.length this pc))]
+              (when (>= np (alength code))
+                (throw (.fail this pc "Falling off the end of the code")))
+              (.mergeInto this np next)))))))
+
+  ;; frame f merged into the frame at pc, pc queued again when it changed
+  (method ^:private mergeInto ^void [this ^int pc ^BytecodeVFrame f]
+    (when (> (.stackSize f) maxStack)
+      (throw (.fail this pc "Stack size too large")))
+    (let [old (aget frames pc)]
+      (if (nil? old)
+          (do (aset frames pc (.copy f))
+              (.add work (Integer/valueOf pc)))
+          (let [^:mutable changed false]
+            (when (not (== (.size (.-stack old)) (.size (.-stack f))))
+              (throw (.fail this pc "Inconsistent stack height")))
+            (loop [^int i 0]
+              (when (< i (.size (.-stack f)))
+                (let [a (cast String (.get (.-stack old) i))
+                      m (.merge this a (cast String (.get (.-stack f) i)))]
+                  (when (nil? m) (throw (.fail this pc "Mismatched stack types")))
+                  (when (not (.equals m a)) (.set (.-stack old) i m) (set! changed true)))
+                (recur (unchecked-inc-int i))))
+            (loop [^int i 0]
+              (when (< i (alength (.-locals f)))
+                (let [a (aget (.-locals old) i)
+                      m (.merge this a (aget (.-locals f) i))
+                      m2 (if (nil? m) "T" m)]
+                  (when (not (.equals m2 a)) (aset (.-locals old) i m2) (set! changed true)))
+                (recur (unchecked-inc-int i))))
+            (when (and (.-thisUninit f) (not (.-thisUninit old)))
+              (set! (.-thisUninit old) true) (set! changed true))
+            (let [b (.clone (.-mod old))]
+              (.or (.-mod old) (.-mod f))
+              (when (not (.equals b (.-mod old))) (set! changed true)))
+            (when changed (.add work (Integer/valueOf pc)))))))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; the instructions' rules (4.10.1.9), f the frame before; the frame after, nil after an instruction that does
+  ;; not fall through (its branches checked or merged here)
+
+  (method ^:private pop ^String [this ^BytecodeVFrame f ^int pc]
+    (when (== 0 (.size (.-stack f))) (throw (.fail this pc "Unable to pop operand off an empty stack")))
+    (cast String (.remove (.-stack f) (unchecked-dec-int (.size (.-stack f))))))
+
+  ;; pops a value assignable to t
+  (method ^:private popAs ^String [this ^BytecodeVFrame f ^int pc ^String t]
+    (let [x (.pop this f pc)]
+      (when (not (.assignable this x t))
+        (throw (.fail this pc (java-str "Type " x " is not assignable to " t))))
+      x))
+
+  (method ^:private popRef ^String [this ^BytecodeVFrame f ^int pc]
+    (let [x (.pop this f pc)]
+      (when (not (BytecodeVerifier/isRef x))
+        (throw (.fail this pc (java-str "Type " x " is not a reference"))))
+      x))
+
+  (method ^:private push ^void [this ^BytecodeVFrame f ^int pc ^String t]
+    (when (not (.equals t "V"))
+      (.add (.-stack f) t)
+      (when (> (.stackSize f) maxStack)
+        (throw (.fail this pc "Operand stack overflow")))))
+
+  (method ^:private local ^String [this ^BytecodeVFrame f ^int pc ^int n ^String t]
+    (when (or (< n 0) (>= (unchecked-add-int n (BytecodeVerifier/size t)) (unchecked-inc-int maxLocals)))
+      (throw (.fail this pc (java-str "Illegal local variable number"))))
+    (let [x (aget (.-locals f) n)]
+      (when (not (.assignable this x t))
+        (throw (.fail this pc (java-str "Bad local variable type: " x " where " t " is expected"))))
+      x))
+
+  ;; a store of t into local n (modifyLocalVariable: a long or double whose half is overwritten becomes top)
+  (method ^:private store ^void [this ^BytecodeVFrame f ^int pc ^int n ^String t]
+    (let [w (BytecodeVerifier/size t)
+          ls (.-locals f)]
+      (when (or (< n 0) (> (unchecked-add-int n w) maxLocals))
+        (throw (.fail this pc "Illegal local variable number")))
+      (when (and (> n 0) (== 2 (BytecodeVerifier/size (aget ls (unchecked-dec-int n)))))
+        (aset ls (unchecked-dec-int n) "T"))
+      (aset ls n t)
+      (.set (.-mod f) n)
+      (when (== w 2)
+        (aset ls (unchecked-inc-int n) "T")
+        (.set (.-mod f) (unchecked-inc-int n)))))
+
+  (method ^:private arrayOf ^String [this ^BytecodeVFrame f ^int pc]
+    (let [a (.pop this f pc)]
+      (when (not (or (.equals a "N") (== (.charAt a 0) \[)))
+        (throw (.fail this pc (java-str "Bad type on operand stack in array load or store: " a))))
+      a))
+
+  (method ^:private returnType ^void [this ^int pc ^String want]
+    (let [r (BytecodeVerifier/ofDesc retType)]
+      (when (not (if (.equals want "A") (BytecodeVerifier/isRef r) (.equals r want)))
+        (throw (.fail this pc "Method expects a different return type")))))
+
+  ;; the class of a Class entry as a type
+  (method ^:private classType ^String [this ^int i]
+    (when (not (== (.tag cf i) 7))
+      (throw (Bytecode/error 4 (java-str "Illegal type at constant pool entry " i " in class " (.replace (.-thisName cf) \/ \.)))))
+    (let [n (.className cf i)]
+      (if (== (.charAt n 0) \[) n (java-str "L" n ";"))))
+
+  (method ^:private step ^BytecodeVFrame [this ^int pc ^BytecodeVFrame f]
+    (let [op (.u1 this pc)]
+      (switch op
+        0 f
+        1 (do (.push this f pc "N") f)
+        (2 3 4 5 6 7 8 16 17) (do (.push this f pc "I") f)
+        (9 10) (do (.push this f pc "J") f)
+        (11 12 13) (do (.push this f pc "F") f)
+        (14 15) (do (.push this f pc "D") f)
+        (18 19 20)
+          (let [i (if (== op 18) (.u1 this (unchecked-inc-int pc)) (.u2 this (unchecked-inc-int pc)))
+                t (.tag cf i)
+                ty (switch t
+                     3 "I" 4 "F" 5 "J" 6 "D" 8 "Ljava/lang/String;"
+                     7 (if (< (.-major cf) 49) nil "Ljava/lang/Class;")
+                     16 "Ljava/lang/invoke/MethodType;"
+                     15 "Ljava/lang/invoke/MethodHandle;"
+                     17 (BytecodeVerifier/ofDesc (.natDesc cf (aget (.-ib cf) i)))
+                     nil)]
+            (when (or (nil? ty) (if (== op 20) (not (== 2 (BytecodeVerifier/size ty))) (== 2 (BytecodeVerifier/size ty))))
+              (throw (.fail this pc "Illegal type in constant pool")))
+            (.push this f pc ty)
+            f)
+        (21 22 23 24 25)
+          (let [n (.u1 this (unchecked-inc-int pc))]
+            (BytecodeVerifier/loadOp this f pc op n)
+            f)
+        (26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45)
+          (let [k (unchecked-subtract-int op 26)]
+            (BytecodeVerifier/loadOp this f pc (unchecked-add-int 21 (unchecked-divide-int k 4)) (unchecked-remainder-int k 4))
+            f)
+        (46 47 48 49 50 51 52 53)
+          (do (.popAs this f pc "I")
+              (let [a (.arrayOf this f pc)]
+                (if (== op 50)
+                    (.push this f pc (if (.equals a "N") "N"
+                                         (let [c (.substring a 1)]
+                                           (when (not (BytecodeVerifier/isRef c)) (throw (.fail this pc "Bad type on operand stack in aaload")))
+                                           c)))
+                    (let [want (switch op 46 "[I" 47 "[J" 48 "[F" 49 "[D" 52 "[C" 53 "[S" "[B")]
+                      (when (and (not (.equals a "N")) (not (.equals a want)) (not (and (== op 51) (.equals a "[Z"))))
+                        (throw (.fail this pc (java-str "Bad type on operand stack in array load: " a))))
+                      (.push this f pc (switch op 47 "J" 48 "F" 49 "D" "I")))))
+              f)
+        (54 55 56 57 58)
+          (let [n (.u1 this (unchecked-inc-int pc))]
+            (BytecodeVerifier/storeOp this f pc op n)
+            f)
+        (59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78)
+          (let [k (unchecked-subtract-int op 59)]
+            (BytecodeVerifier/storeOp this f pc (unchecked-add-int 54 (unchecked-divide-int k 4)) (unchecked-remainder-int k 4))
+            f)
+        (79 80 81 82 83 84 85 86)
+          (let [vt (switch op 80 "J" 81 "F" 82 "D" 83 nil "I")]
+            (if (nil? vt) (.popRef this f pc) (.popAs this f pc vt))
+            (.popAs this f pc "I")
+            (let [a (.arrayOf this f pc)]
+              (when (not (.equals a "N"))
+                (let [ok (switch op
+                           79 (.equals a "[I") 80 (.equals a "[J") 81 (.equals a "[F") 82 (.equals a "[D")
+                           83 (BytecodeVerifier/isRef (.substring a 1))
+                           84 (or (.equals a "[B") (.equals a "[Z"))
+                           85 (.equals a "[C")
+                           (.equals a "[S"))]
+                  (when (not ok) (throw (.fail this pc (java-str "Bad type on operand stack in array store: " a)))))))
+            f)
+        87 (let [x (.pop this f pc)]
+             (when (== 2 (BytecodeVerifier/size x)) (throw (.fail this pc "Bad type on operand stack in pop")))
+             f)
+        88 (let [x (.pop this f pc)]
+             (when (== 1 (BytecodeVerifier/size x))
+               (let [y (.pop this f pc)]
+                 (when (== 2 (BytecodeVerifier/size y)) (throw (.fail this pc "Bad type on operand stack in pop2")))))
+             f)
+        (89 90 91 92 93 94 95) (do (BytecodeVerifier/dupOp this f pc op) f)
+        (96 100 104 108 112 120 122 124 126 128 130)
+          (do (.popAs this f pc "I") (.popAs this f pc "I") (.push this f pc "I") f)
+        (97 101 105 109 113 127 129 131)
+          (do (.popAs this f pc "J") (.popAs this f pc "J") (.push this f pc "J") f)
+        (121 123 125) (do (.popAs this f pc "I") (.popAs this f pc "J") (.push this f pc "J") f)
+        (98 102 106 110 114) (do (.popAs this f pc "F") (.popAs this f pc "F") (.push this f pc "F") f)
+        (99 103 107 111 115) (do (.popAs this f pc "D") (.popAs this f pc "D") (.push this f pc "D") f)
+        116 (do (.popAs this f pc "I") (.push this f pc "I") f)
+        117 (do (.popAs this f pc "J") (.push this f pc "J") f)
+        118 (do (.popAs this f pc "F") (.push this f pc "F") f)
+        119 (do (.popAs this f pc "D") (.push this f pc "D") f)
+        132 (do (.local this f pc (.u1 this (unchecked-inc-int pc)) "I") f)
+        (133 134 135 136 137 138 139 140 141 142 143 144 145 146 147)
+          (let [from (switch op (133 134 135 145 146 147) "I" (136 137 138) "J" (139 140 141) "F" "D")
+                to (switch op (136 139 142 145 146 147) "I" (133 140 143) "J" (134 137 144) "F" "D")]
+            (.popAs this f pc from) (.push this f pc to) f)
+        148 (do (.popAs this f pc "J") (.popAs this f pc "J") (.push this f pc "I") f)
+        (149 150) (do (.popAs this f pc "F") (.popAs this f pc "F") (.push this f pc "I") f)
+        (151 152) (do (.popAs this f pc "D") (.popAs this f pc "D") (.push this f pc "I") f)
+        (153 154 155 156 157 158)
+          (do (.popAs this f pc "I") (.branch this pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) f) f)
+        (159 160 161 162 163 164)
+          (do (.popAs this f pc "I") (.popAs this f pc "I") (.branch this pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) f) f)
+        (165 166)
+          (do (.popRef this f pc) (.popRef this f pc) (.branch this pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) f) f)
+        (198 199)
+          (do (.popRef this f pc) (.branch this pc (unchecked-add-int pc (.s2 this (unchecked-inc-int pc))) f) f)
+        (167 200)
+          (do (.branch this pc (unchecked-add-int pc (if (== op 167) (.s2 this (unchecked-inc-int pc)) (.s4 this (unchecked-inc-int pc)))) f) nil)
+        (168 201) (do (.jsr this pc op f) nil)
+        169 (do (.ret this pc (.u1 this (unchecked-inc-int pc)) f) nil)
+        170 (let [_ (.padding this pc)
+                  b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))
+                  lo (.s4 this (unchecked-add-int b 4))
+                  hi (.s4 this (unchecked-add-int b 8))]
+              (.popAs this f pc "I")
+              (.branch this pc (unchecked-add-int pc (.s4 this b)) f)
+              (loop [^int i 0]
+                (when (<= i (unchecked-subtract-int hi lo))
+                  (.branch this pc (unchecked-add-int pc (.s4 this (unchecked-add-int (unchecked-add-int b 12) (unchecked-multiply-int 4 i)))) f)
+                  (recur (unchecked-inc-int i))))
+              nil)
+        171 (let [_ (.padding this pc)
+                  b (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3))
+                  n (.s4 this (unchecked-add-int b 4))]
+              (.popAs this f pc "I")
+              (.branch this pc (unchecked-add-int pc (.s4 this b)) f)
+              (loop [^int i 0]
+                (when (< i n)
+                  (let [e (unchecked-add-int (unchecked-add-int b 8) (unchecked-multiply-int 8 i))]
+                    (when (and (> i 0) (<= (.s4 this e) (.s4 this (unchecked-subtract-int e 8))))
+                      (throw (.fail this pc "Bad lookupswitch instruction")))
+                    (.branch this pc (unchecked-add-int pc (.s4 this (unchecked-add-int e 4))) f))
+                  (recur (unchecked-inc-int i))))
+              nil)
+        (172 173 174 175 176 177)
+          (do (switch op
+                172 (do (.returnType this pc "I") (.popAs this f pc "I"))
+                173 (do (.returnType this pc "J") (.popAs this f pc "J"))
+                174 (do (.returnType this pc "F") (.popAs this f pc "F"))
+                175 (do (.returnType this pc "D") (.popAs this f pc "D"))
+                176 (do (.returnType this pc "A") (.popAs this f pc retType))
+                (do (when (not (.equals retType "V")) (throw (.fail this pc "Method expects a return value")))
+                    (when (and init (.-thisUninit f))
+                      (throw (.fail this pc "Constructor must call super() or this() before return")))))
+              nil)
+        (178 179 180 181) (do (BytecodeVerifier/fieldOp this f pc op) f)
+        (182 183 184 185 186) (do (BytecodeVerifier/invokeOp this f pc op) f)
+        187 (let [t (.classType this (.u2 this (unchecked-inc-int pc)))]
+              (when (== (.charAt t 0) \[) (throw (.fail this pc "Illegal new instruction")))
+              (.push this f pc (java-str "u" pc))
+              f)
+        188 (let [at (.u1 this (unchecked-inc-int pc))]
+              (.popAs this f pc "I")
+              (.push this f pc (switch at 4 "[Z" 5 "[C" 6 "[F" 7 "[D" 8 "[B" 9 "[S" 10 "[I" 11 "[J"
+                                       (throw (.fail this pc "Illegal newarray instruction"))))
+              f)
+        189 (let [t (.classType this (.u2 this (unchecked-inc-int pc)))]
+              (.popAs this f pc "I")
+              (.push this f pc (java-str "[" t))
+              f)
+        190 (let [a (.pop this f pc)]
+              (when (not (or (.equals a "N") (== (.charAt a 0) \[)))
+                (throw (.fail this pc "Bad type on operand stack in arraylength")))
+              (.push this f pc "I")
+              f)
+        191 (do (.popAs this f pc "Ljava/lang/Throwable;") nil)
+        192 (do (.popRef this f pc) (.push this f pc (.classType this (.u2 this (unchecked-inc-int pc)))) f)
+        193 (do (.popRef this f pc) (.push this f pc "I") f)
+        (194 195) (do (.popRef this f pc) f)
+        196 (let [op2 (.u1 this (unchecked-inc-int pc))
+                  n (.u2 this (unchecked-add-int pc 2))]
+              (cond
+                (and (>= op2 21) (<= op2 25)) (BytecodeVerifier/loadOp this f pc op2 n)
+                (and (>= op2 54) (<= op2 58)) (BytecodeVerifier/storeOp this f pc op2 n)
+                (== op2 132) (.local this f pc n "I")
+                (== op2 169) (do (.ret this pc n f) (return nil))
+                :else (throw (.fail this pc "Bad wide instruction")))
+              f)
+        197 (let [t (.classType this (.u2 this (unchecked-inc-int pc)))
+                  d (.u1 this (unchecked-add-int pc 3))
+                  ^:mutable ^int dims 0]
+              (while (and (< dims (.length t)) (== (.charAt t dims) \[)) (set! dims (unchecked-inc-int dims)))
+              (when (or (< d 1) (< dims d)) (throw (.fail this pc "Illegal dimension in multianewarray instruction")))
+              (loop [^int i 0] (when (< i d) (.popAs this f pc "I") (recur (unchecked-inc-int i))))
+              (.push this f pc t)
+              f)
+        (throw (.fail this pc (java-str "Bad instruction: " (Integer/toHexString op)))))))
+
+  ;; the switches' padding: zero in class files before version 51 (HotSpot's NONZERO_PADDING_BYTES_IN_SWITCH)
+  (method ^:private padding ^void [this ^int pc]
+    (when (< (.-major cf) 51)
+      (loop [^int i (unchecked-inc-int pc)]
+        (when (< i (bit-and-int (unchecked-add-int pc 4) (bit-not-int 3)))
+          (when (not (== 0 (.u1 this i))) (throw (.fail this pc "Non zero padding bytes in switch")))
+          (recur (unchecked-inc-int i))))))
+
+  ;; xload n (op 21-25)
+  (method ^:private ^:static loadOp ^void [^BytecodeVerifier v ^BytecodeVFrame f ^int pc ^int op ^int n]
+    (if (== op 25)
+        (let [x (if (and (>= n 0) (< n (.-maxLocals v))) (aget (.-locals f) n) nil)]
+          (when (or (nil? x) (not (or (BytecodeVerifier/isRef x) (.equals x "U") (.startsWith x "u"))))
+            (throw (.fail v pc (java-str "Bad local variable type: " x " in aload"))))
+          (.push v f pc x))
+        (let [t (switch op 21 "I" 22 "J" 23 "F" "D")]
+          (.local v f pc n t)
+          (.push v f pc t))))
+
+  ;; xstore n (op 54-58)
+  (method ^:private ^:static storeOp ^void [^BytecodeVerifier v ^BytecodeVFrame f ^int pc ^int op ^int n]
+    (if (== op 58)
+        (let [x (.pop v f pc)]
+          (when (not (or (BytecodeVerifier/isRef x) (.equals x "U") (.startsWith x "u") (.startsWith x "r")))
+            (throw (.fail v pc (java-str "Bad type on operand stack in astore: " x))))
+          (.store v f pc n x))
+        (let [t (switch op 54 "I" 55 "J" 56 "F" "D")]
+          (.popAs v f pc t)
+          (.store v f pc n t))))
+
+  ;; dup and its kin (4.10.1.9's forms by the values' categories), swap
+  (method ^:private ^:static dupOp ^void [^BytecodeVerifier v ^BytecodeVFrame f ^int pc ^int op]
+    (let [st (.-stack f)
+]
+      (switch op
+        89 (let [a (.pop v f pc)] (BytecodeVerifier/cat1 v pc a) (.push v f pc a) (.push v f pc a))
+        90 (let [a (.pop v f pc) b (.pop v f pc)] (BytecodeVerifier/cat1 v pc a) (BytecodeVerifier/cat1 v pc b) (.push v f pc a) (.push v f pc b) (.push v f pc a))
+        91 (let [a (.pop v f pc) b (.pop v f pc)]
+             (BytecodeVerifier/cat1 v pc a)
+             (if (== 2 (BytecodeVerifier/size b))
+                 (do (.push v f pc a) (.push v f pc b) (.push v f pc a))
+                 (let [c (.pop v f pc)]
+                   (BytecodeVerifier/cat1 v pc c)
+                   (.push v f pc a) (.push v f pc c) (.push v f pc b) (.push v f pc a))))
+        92 (let [a (.pop v f pc)]
+             (if (== 2 (BytecodeVerifier/size a))
+                 (do (.push v f pc a) (.push v f pc a))
+                 (let [b (.pop v f pc)]
+                   (BytecodeVerifier/cat1 v pc b)
+                   (.push v f pc b) (.push v f pc a) (.push v f pc b) (.push v f pc a))))
+        93 (let [a (.pop v f pc)]
+             (if (== 2 (BytecodeVerifier/size a))
+                 (let [b (.pop v f pc)]
+                   (BytecodeVerifier/cat1 v pc b)
+                   (.push v f pc a) (.push v f pc b) (.push v f pc a))
+                 (let [b (.pop v f pc) c (.pop v f pc)]
+                   (BytecodeVerifier/cat1 v pc b) (BytecodeVerifier/cat1 v pc c)
+                   (.push v f pc b) (.push v f pc a) (.push v f pc c) (.push v f pc b) (.push v f pc a))))
+        94 (let [a (.pop v f pc)]
+             (if (== 2 (BytecodeVerifier/size a))
+                 (let [b (.pop v f pc)]
+                   (if (== 2 (BytecodeVerifier/size b))
+                       (do (.push v f pc a) (.push v f pc b) (.push v f pc a))
+                       (let [c (.pop v f pc)]
+                         (BytecodeVerifier/cat1 v pc c)
+                         (.push v f pc a) (.push v f pc c) (.push v f pc b) (.push v f pc a))))
+                 (let [b (.pop v f pc)]
+                   (BytecodeVerifier/cat1 v pc b)
+                   (let [c (.pop v f pc)]
+                     (if (== 2 (BytecodeVerifier/size c))
+                         (do (.push v f pc b) (.push v f pc a) (.push v f pc c) (.push v f pc b) (.push v f pc a))
+                         (let [d (.pop v f pc)]
+                           (BytecodeVerifier/cat1 v pc d)
+                           (.push v f pc b) (.push v f pc a) (.push v f pc d) (.push v f pc c) (.push v f pc b) (.push v f pc a)))))))
+        (let [a (.pop v f pc) b (.pop v f pc)] (BytecodeVerifier/cat1 v pc a) (BytecodeVerifier/cat1 v pc b) (.push v f pc a) (.push v f pc b)))))
+
+  (method ^:private ^:static cat1 ^void [^BytecodeVerifier v ^int pc ^String x]
+    (when (== 2 (BytecodeVerifier/size x)) (throw (.fail v pc "Bad type on operand stack in dup"))))
+
+  (method ^:private ^:static member ^boolean [^String/1 xs ^String x]
+    (loop [^int i 0]
+      (if (< i (alength xs))
+          (if (.equals (aget xs i) x) true (recur (unchecked-inc-int i)))
+          false)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; fields and methods
+
+  (method ^:private ^:static fieldOp ^void [^BytecodeVerifier v ^BytecodeVFrame f ^int pc ^int op]
+    (let [cf (.-cf v)
+          i (.u2 v (unchecked-inc-int pc))
+          _ (when (not (== (.tag cf i) 9)) (throw (.fail v pc "Illegal constant pool index in field instruction")))
+          owner (.refClass cf i)
+          name (.refName cf i)
+          desc (.refDesc cf i)
+          ft (BytecodeVerifier/ofDesc desc)
+          ot (java-str "L" owner ";")]
+      (switch op
+        178 (.push v f pc ft)
+        179 (.popAs v f pc ft)
+        180 (let [x (.popAs v f pc ot)]
+              (.protectedCheck v pc owner name desc x false)
+              (.push v f pc ft))
+        (do (.popAs v f pc ft)
+            ;; putfield on uninitializedThis of a field of the class itself (4.10.1.9 putfield's second clause)
+            (let [x (.pop v f pc)]
+              (if (and (.equals x "U") (.equals owner (.-thisName cf)))
+                  nil
+                  (do (when (not (.assignable v x ot))
+                        (throw (.fail v pc (java-str "Type " x " is not assignable to " ot))))
+                      (.protectedCheck v pc owner name desc x false))))))))
+
+  (method ^:private ^:static invokeOp ^void [^BytecodeVerifier v ^BytecodeVFrame f ^int pc ^int op]
+    (let [cf (.-cf v)
+          i (.u2 v (unchecked-inc-int pc))
+          t (.tag cf i)
+          _ (when (not (switch op
+                         182 (== t 10)
+                         185 (== t 11)
+                         186 (== t 18)
+                         (or (== t 10) (and (== t 11) (>= (.-major cf) 52)))))
+              (throw (.fail v pc "Illegal constant pool index in invoke instruction")))
+          owner (if (== op 186) nil (.refClass cf i))
+          name (if (== op 186) (.natName cf (aget (.-ib cf) i)) (.refName cf i))
+          desc (if (== op 186) (.natDesc cf (aget (.-ib cf) i)) (.refDesc cf i))
+          ps (Bytecode/params desc)
+          ot (if (nil? owner) nil (if (== (.charAt owner 0) \[) owner (java-str "L" owner ";")))]
+      (when (and (== op 186) (not (== 0 (.u2 v (unchecked-add-int pc 3)))))
+        (throw (.fail v pc "Third and fourth operand bytes of invokedynamic must be zero")))
+      (when (and (.startsWith name "<") (not (and (== op 183) (.equals name "<init>"))))
+        (throw (.fail v pc (java-str "Illegal call to internal method " name))))
+      (when (== op 185)
+        (let [cnt (.u1 v (unchecked-add-int pc 3))
+              ^:mutable ^int slots 1]
+          (loop [^int j 0]
+            (when (< j (alength ps))
+              (set! slots (unchecked-add-int slots (BytecodeVerifier/size (BytecodeVerifier/ofDesc (aget ps j)))))
+              (recur (unchecked-inc-int j))))
+          (when (or (not (== cnt slots)) (not (== 0 (.u1 v (unchecked-add-int pc 4)))))
+            (throw (.fail v pc "Inconsistent args count operand in invokeinterface")))))
+      (loop [^int j (unchecked-dec-int (alength ps))]
+        (when (>= j 0)
+          (.popAs v f pc (BytecodeVerifier/ofDesc (aget ps j)))
+          (recur (unchecked-dec-int j))))
+      (cond
+        (or (== op 184) (== op 186)) nil
+        (and (== op 183) (.equals name "<init>"))
+          (let [x (.pop v f pc)]
+            (cond
+              (.equals x "U")
+                ;; this(), super(): the class itself or its direct superclass
+                (do (when (not (or (.equals owner (.-thisName cf)) (.equals owner (.-superName cf))))
+                      (throw (.fail v pc "Bad <init> method call")))
+                    (BytecodeVerifier/replaceType f x (.-thisType v))
+                    (set! (.-thisUninit f) false))
+              (.startsWith x "u")
+                (let [at (Integer/parseInt (.substring x 1))
+                      nt (.classType v (.u2 v (unchecked-inc-int at)))]
+                  (when (not (.equals nt ot))
+                    (throw (.fail v pc (java-str "Call to wrong <init> method"))))
+                  (BytecodeVerifier/replaceType f x nt)
+                  ;; passesProtectedCheck with the frame after (the stack's top the new object's other reference)
+                  (let [st (.-stack f)
+                        top (if (> (.size st) 0) (cast String (.get st (unchecked-dec-int (.size st)))) nil)]
+                    (.protectedCheck v pc owner name desc top true)))
+              :else (throw (.fail v pc (java-str "Bad type on operand stack in invokespecial: " x)))))
+        (== op 183)
+          (let [x (.pop v f pc)]
+            ;; the class itself, a superclass or a direct superinterface (4.9.2), the receiver of the class's type
+            (when (not (or (.equals owner (.-thisName cf))
+                           (and (== (.charAt ot 0) \L) (not (.isInterface (.load v ot))) (.isAssignableFrom (.load v ot) (.-cls (.-bc v))))
+                           (BytecodeVerifier/member (.-interfaces cf) owner)))
+              (throw (.fail v pc "Bad invokespecial instruction: current class isn't assignable to reference class.")))
+            (when (not (.assignable v x (.-thisType v)))
+              (throw (.fail v pc (java-str "Bad type on operand stack in invokespecial: " x)))))
+        :else
+          (let [x (.pop v f pc)]
+            (when (not (.assignable v x (if (or (== op 185) (== (.charAt ot 0) \[)) (if (== op 185) "Ljava/lang/Object;" ot) ot)))
+              (throw (.fail v pc (java-str "Bad type on operand stack in invoke: " x " is not " ot))))
+            (when (== op 182) (.protectedCheck v pc owner name desc x false))))
+      (.push v f pc (BytecodeVerifier/ofDesc (Bytecode/ret desc)))))
+
+  (method ^:private ^:static replaceType ^void [^BytecodeVFrame f ^String x ^String to]
+    (loop [^int i 0]
+      (when (< i (alength (.-locals f)))
+        (when (.equals x (aget (.-locals f) i)) (aset (.-locals f) i to))
+        (recur (unchecked-inc-int i))))
+    (loop [^int i 0]
+      (when (< i (.size (.-stack f)))
+        (when (.equals x (.get (.-stack f) i)) (.set (.-stack f) i to))
+        (recur (unchecked-inc-int i)))))
+
+  ;; the runtime package of internal name n
+  (method ^:private ^:static pkg ^String [^String n]
+    (let [i (.lastIndexOf n "/")] (if (< i 0) "" (.substring n 0 i))))
+
+  ;; passesProtectedCheck (4.10.1.8): a protected member of a superclass in another runtime package, accessed on a
+  ;; target whose type is not the current class (or a subclass), fails
+  (method ^:private protectedCheck ^void [this ^int pc ^String owner ^String name ^String desc ^String target ^boolean ctor]
+    (when (== (.charAt owner 0) \[) (return))
+    (let [me (.-cls bc)
+          dn (.replace owner \/ \.)
+          ;; the member class among the current class's (loaded) superclasses, by name (superclassChain)
+          oc (loop [^Class x (.getSuperclass me)]
+               (cond (nil? x) nil
+                     (.equals (.getName x) dn) x
+                     :else (recur (.getSuperclass x))))]
+      (when (nil? oc) (return))
+      ;; a protected member of that name and descriptor in a superclass of another package
+      (when (.equals (BytecodeVerifier/pkg owner) (BytecodeVerifier/pkg (.-thisName cf))) (return))
+      (when (not (BytecodeVerifier/declaresProtected oc name desc ctor)) (return))
+      (when (or (nil? target) (not (.assignable this target thisType)))
+        (throw (.fail this pc (java-str "Bad access to protected data in " (if ctor "invokespecial" "getfield/putfield/invokevirtual")))))))
+
+  ;; whether class c declares a protected member name desc (a constructor when ctor)
+  (method ^:private ^:static declaresProtected ^boolean [^Class c ^String name ^String desc ^boolean ctor]
+    (let [bc (Bytecode/ofClass c)]
+      (if (some? bc)
+          (let [ms (if (== (.charAt desc 0) \() (.-methods (.-cf bc)) (.-fields (.-cf bc)))]
+            (loop [^int i 0]
+              (if (< i (alength ms))
+                  (let [m (aget ms i)]
+                    (if (and (.equals (.-name m) name) (.equals (.-desc m) desc))
+                        (not (== 0 (bit-and-int (.-access m) 0x0004)))
+                        (recur (unchecked-inc-int i))))
+                  false)))
+          (try
+            (cond
+              ctor (let [ks (.getDeclaredConstructors c)]
+                     (loop [^int i 0]
+                       (if (< i (alength ks))
+                           (let [k (aget ks i)]
+                             (if (and (.equals (BytecodeVerifier/descOf (.getParameterTypes k) Void/TYPE) desc)
+                                      (Modifier/isProtected (.getModifiers k)))
+                                 true
+                                 (recur (unchecked-inc-int i))))
+                           false)))
+              (== (.charAt desc 0) \()
+                (let [ms (.getDeclaredMethods c)]
+                  (loop [^int i 0]
+                    (if (< i (alength ms))
+                        (let [m (aget ms i)]
+                          (if (and (.equals (.getName m) name)
+                                   (.equals (BytecodeVerifier/descOf (.getParameterTypes m) (.getReturnType m)) desc)
+                                   (Modifier/isProtected (.getModifiers m)))
+                              true
+                              (recur (unchecked-inc-int i))))
+                        false)))
+              :else (let [fl (.getDeclaredField c name)] (Modifier/isProtected (.getModifiers fl))))
+            (catch Throwable _ false)))))
+
+  (method ^:private ^:static descOf ^String [^Class/1 ps ^Class r]
+    (let [sb (StringBuilder. "(")]
+      (loop [^int i 0]
+        (when (< i (alength ps))
+          (.append sb (.descriptorString (aget ps i)))
+          (recur (unchecked-inc-int i))))
+      (.append sb ")")
+      (.append sb (.descriptorString r))
+      (.toString sb)))
+
+  ;; ---------------------------------------------------------------------------------------------
+  ;; jsr and ret (inference only: type checking forbids them, 4.10.1)
+
+  (method ^:private jsr ^void [this ^int pc ^int op ^BytecodeVFrame f]
+    (when checking (throw (.fail this pc "jsr is not allowed with a StackMapTable")))
+    (let [t (.target this pc (unchecked-add-int pc (if (== op 168) (.s2 this (unchecked-inc-int pc)) (.s4 this (unchecked-inc-int pc)))))
+          g (.copy f)]
+      (.put jsrs (Integer/valueOf pc) (.copy f))
+      (.push this g pc (java-str "r" t))
+      (.clear (.-mod g))
+      (.mergeInto this t g)
+      ;; the subroutine's rets already seen, again with this caller
+      (let [rs (cast java.util.ArrayList (.get rets (Integer/valueOf t)))]
+        (when (some? rs)
+          (let [it (.iterator rs)]
+            (while (.hasNext it) (.add work (.next it))))))))
+
+  (method ^:private ret ^void [this ^int pc ^int n ^BytecodeVFrame f]
+    (when checking (throw (.fail this pc "ret is not allowed with a StackMapTable")))
+    (when (or (< n 0) (>= n maxLocals)) (throw (.fail this pc "Illegal local variable number")))
+    (let [x (aget (.-locals f) n)]
+      (when (not (.startsWith x "r")) (throw (.fail this pc "Bad local variable type in ret")))
+      (let [t (Integer/parseInt (.substring x 1))
+            ^:mutable ^java.util.ArrayList rs (cast java.util.ArrayList (.get rets (Integer/valueOf t)))]
+        (when (nil? rs) (set! rs (java.util.ArrayList.)) (.put rets (Integer/valueOf t) rs))
+        (when (not (.contains rs (Integer/valueOf pc))) (.add rs (Integer/valueOf pc)))
+        ;; each caller of the subroutine continues after its jsr: the locals the subroutine modified from here, the
+        ;; rest from the caller
+        (let [it (.iterator (.entrySet jsrs))]
+          (while (.hasNext it)
+            (let [e (cast java.util.Map$Entry (.next it))
+                  jpc (.intValue (cast Integer (.getKey e)))
+                  jop (.u1 this jpc)
+                  jt (unchecked-add-int jpc (if (== jop 168) (.s2 this (unchecked-inc-int jpc)) (.s4 this (unchecked-inc-int jpc))))]
+              (when (== jt t)
+                (let [caller (cast BytecodeVFrame (.getValue e))
+                      g (.copy caller)]
+                  (.clear (.-stack g))
+                  (.addAll (.-stack g) (.-stack f))
+                  (loop [^int i 0]
+                    (when (< i (alength (.-locals g)))
+                      (when (.get (.-mod f) i) (aset (.-locals g) i (aget (.-locals f) i)))
+                      (recur (unchecked-inc-int i))))
+                  (.or (.-mod g) (.-mod f))
+                  (.mergeInto this (unchecked-add-int jpc (if (== jop 168) 3 5)) g))))))))))

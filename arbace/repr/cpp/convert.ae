@@ -106,6 +106,11 @@
             d (- (count (filter #(= \( %) t)) (count (filter #(= \) %) t)))]
         (max 0 d)))))
 
+;; cpp-print (2026-11-24): while a call's callee is converted, the end of the call's plain text (the call itself no macro node):
+;; a callee whose last token comes from an object-like macro (`phase->MakeConX(offset)`, HotSpot's `#define MakeConX longcon`) is
+;; followed by the call's own argument list, which is not the macro's: its extent stops at the macro's name
+(def ^:dynamic *call-end* nil)
+
 (defn macro-extent
   "A macro node's text in the main file: from its first token's expansion to its last's, an invocation's argument
   list included (the expansion location is the macro's name: a ( after it opens the arguments), and the arguments its
@@ -125,6 +130,7 @@
                              :else (recur (inc k) d)))
                      e0))
                  e0)
+            e1 (if (and *call-end* (not= e1 e0) (= e1 (long *call-end*))) e0 e1)
             ;; CP265: the macro named at the last token's expansion leaves parentheses open: the text up to their `)`
             e2 (if (macro-loc? (:end r))
                  (let [o (long (:offset e)) tl (long (:tokLen e))
@@ -153,7 +159,10 @@
     (cond
       (and (< j (.length s)) (= \; (.charAt s (int j)))) (inc j)
       (and (not= jc j) (< jc (.length s)) (= \; (.charAt s (int jc)))) (inc jc)
-      (re-find #"^(__attribute__|__attribute|__asm__|__asm|asm|alignas|__declspec|\[\[)" (subs s (int j) (min (.length s) (+ (int j) 14))))
+      ;; cpp-print (2026-11-24): not a `[[` or alignas after a text that ends with its `}` (a function's or a statement's body): that
+      ;; begins the next declaration or statement (`void corge () {}` then `[[a]] void garply ...`, `for (...) {}` then `[[a]] asm ("");`)
+      (and (re-find #"^(__attribute__|__attribute|__asm__|__asm|asm|alignas|__declspec|\[\[)" (subs s (int j) (min (.length s) (+ (int j) 14))))
+           (not (and (pos? e) (= \} (.charAt s (int (dec e)))) (re-find #"^(alignas|\[\[)" (subs s (int j) (min (.length s) (+ (int j) 7)))))))
       (let [k (loop [k (long j) d 0]
                 (if (>= k (.length s))
                   nil
@@ -847,7 +856,7 @@
                      (= (get-in sf [:range :end :offset]) (get-in (first (kids sf)) [:range :end :offset])))
               ;; an implicit conversion through a conversion function: the object as written
               (ex (first (kids sf)))
-              (callee-form (ex f) (exs (args-of as)))))
+              (callee-form (binding [*call-end* (when-not (macro-node? n) (second (rng n)))] (ex f)) (exs (args-of as)))))
           "CXXOperatorCallExpr"
           (let [op (operator-of n)
                 as (vec (args-of (rest (kids n))))
@@ -1918,14 +1927,18 @@
   "A DeclStmt's binding forms: one declaration, or (cpp/decls ...) for several in one statement."
   [n]
   (let [ds (kids n)
-        fs (vec (mapcat #(decl-forms % :local) ds))]
-    (if (> (count ds) 1)
+        ;; cpp-print (2026-11-24): GNU's local label declaration (`__label__ L1, L2;`, the native parser's DeclStmt of LabelDecls,
+        ;; cpp-gnu): a LabelDecl's range is its name alone, so the statement is its whole text, `__label__` and the ; included
+        fs (when-not (some #(= "LabelDecl" (kind %)) ds) (vec (mapcat #(decl-forms % :local) ds)))]
+    (cond
+      (nil? fs) [(text-form n "DeclStmt/label" true)]
+      (> (count ds) 1)
       (if-let [g (group-of ds :local)]
         [g]
       (if (or (some #(#{"CXXRecordDecl" "EnumDecl"} (kind %)) ds) (some #(or (and (seq? %) (= (first %) 'cpp/text)) (:cpp/macro (meta %))) fs))
         [(text-form n "DeclStmt/record" true)]
         [(apply list 'cpp/decls fs)]))
-      fs)))
+      :else fs)))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; Items and directives
@@ -2116,6 +2129,25 @@
                :when (or (zero? (long (:depth d))) (and executed (contains? executed (long (line-of (:off d))))))]
            (assoc d :form (directive-form d))))))
 
+;; cpp-print (2026-11-24): a `>` split from a `>>`, `>=` or `>>=` lexeme (the native parser's and clang's token-split location: spelled
+;; in the scratch space, its expansion the lexeme in the main file) is the main file's one `>` it stands for: a node it ends (a
+;; template-id closed by the first half, `z<int>>0`, `z<int>=0`, `std::coroutine_handle<promise<int>> _handle` read as an expression)
+;; is plain text, converted as its structure, not a macro invocation whose text runs on into the lexeme's rest
+(defn- split-gt-loc [l]
+  (let [x (:expansionLoc l) o (:offset x)]
+    (if (and o (= "<scratch space>" (get-in l [:spellingLoc :file])) (= *main* (:file x)) (< (long o) (.length ^String *src*))
+             (= \> (.charAt ^String *src* (int o))))
+      {:offset o :file *main* :tokLen 1}
+      l)))
+
+(defn- plain-split-gts [n]
+  (cond (map? n) (if (and (:spellingLoc n) (:expansionLoc n))
+                   (split-gt-loc n)
+                   (persistent! (reduce-kv (fn [m k v] (if (or (map? v) (vector? v) (seq? v)) (assoc! m k (plain-split-gts v)) m)) (transient n) n)))
+        (vector? n) (mapv plain-split-gts n)
+        (seq? n) (doall (map plain-split-gts n))
+        :else n))
+
 (defn convert
   "The main file's forms from the kept declarations `nodes` (tools/cxxdump's lines after its header) and the file's
   text `src` (one char a byte), its name `main` as clang was given it: {:forms [...] :texts {kind count}}. `executed`
@@ -2128,6 +2160,7 @@
               *line-dirs* (vec (for [d (directive-lines src) :when (and (= "line" (:verb d)) (zero? (long (:depth d))))
                                      :let [m (re-find #"^#\s*line\s+(\d[\d']*)" (:text d))] :when m]
                                  [(:end d) (Long/parseLong (str/replace (second m) "'" ""))]))]
-      (let [its (items-of nodes :top)
+      (let [nodes (plain-split-gts nodes)
+            its (items-of nodes :top)
             pairs (place-offs its)]
         {:forms (mapv second pairs) :offsets (mapv first pairs) :texts @texts}))))

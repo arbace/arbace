@@ -4801,3 +4801,216 @@ typed by Arbace's typer and run on oi; its rows are judged by their own .referen
   Consistbl's order and its required globals). `:compiler-output` and `:compiler-output-cmo` list no program at oi's level; the AOT
   levels keep both (528-8: the tools AOT-compiled, the main host's compiled level). Controls: dumpobj's run against the .cmo test's
   reference and the reverse must differ.
+
+## As built: the burst of 2026-11-23 (branch `ocaml-1123`, from mac/next `fa635f636`): AOT at the level a case needs, the tools at the compiled level, the ticket lock
+
+The coordinator's scope: OCaml's AOT cell (82 deferred, 22 by design at `fa635f636`), the compiled chain (oc-compiled's chain2, running
+on `oc-compiled-1122`) and the light level's whole re-records after 533 and 528-R3; the eval rows went to the Mac (539).
+
+- **AOT at the level a case needs** (528-8 (a), the user 2026-11-22, generalized by the burst's coordinator: "AOT at the level the
+  rows need"): `bin/reap`'s sources take `:other-level {:file F :what W}`; a classed non-pass of the light level's record (a class not
+  of kind `:na`) that the compiled level's native record F passes counts as a pass of the AOT cell (`reap.main`'s `other-level-pick`;
+  an F not recorded yet takes nothing, the source's detail says so). OCaml's two AOT sources name `check-aot-compiled-native.edn` and
+  `check-suite-aot-compiled-native.edn`, the native path's compiled records (`bin/oi check --aot --level compiled --record`, and the
+  suite's). `bin/crops-score --self-test` holds the rule's case and four controls (an `:na` class's case, a case the compiled record
+  fails, one it lacks, an unclassed entry). With chain2's old oracle-path record (`check-aot-compiled.edn`, 2026-11-05) the rule would
+  have taken 15 light-speed and light-depth cases; it reads only the native records.
+- **The tools at the compiled level** (528-8 (a)): header.awk's objinfo mode (the 13 shape-index and uid-deps rows, uids/intf_uids_test,
+  tool-ocamlobjinfo/question, no-alias-deps/aliases' .cmo) and dumpobj mode run at aot=2 too (the light level keeps the class: 528's
+  probe); `bin/oi`'s compiled check dumps oiobjinfo (`oi_tool_prog ... o2j`, the .cmo's too now) as the row's program, links
+  compiler-libs from clib (the row's `complib`, `@UNIT`s), a tool's own units (`D/tool.units`: dumpobj's bytecomp units) as
+  `c2_tool_units` lists them, and judges the tool's compiler output (`tool_output`) after the run, as `o2j_env_runs` does at the light level.
+  def838bc9's `heavy_run` around a shard's build-go is taken onto the branch (bin/j2g takes the lock around its own run).
+- **The runtime's lock a ticket lock** (528-14 (a), testyield): `jdk/ocaml/ocaml/rt/Gil.ae` serves the threads that ask for the lock in
+  the order they asked (`acquire`, `release`); `yield` gives it to the first waiting ticket and asks again behind the others. The old
+  lock's notifyAll let a thread woken from `await` (Thread.join's main) take a turn, which satisfied the yielder's "turn moved" without
+  another OCaml thread running (testyield printed "Thread N ran M consecutive iters" lines, 2169 bytes).
+- **Runs.** testyield at the light level (`bin/oi suite check --aot --only-list`, one program): passes, "same" as oi (the record's
+  fail, 2169 bytes with the old lock, is its control); it leaves aot-known.edn (the compiled level's known entry stays until a
+  compiled run of the ticket lock). Left running at hand-back (`.tmp/oc/chain.sh` in the worktree, log `.tmp/oc/chain.log`): the 17
+  tool rows at the compiled level (`.tmp/oc/tools.txt`: the objinfo mode's 16 and tool-dumpobj/test; one shard, j2g and build-go each
+  under the big lock; `--record` into `check-aot-compiled-native.edn`, seeded empty so that no oracle-path row enters it), then the
+  light level's whole re-records (`bin/oi check --aot --record`, `bin/oi suite check --aot --record`, one job).
+- **Left.** ocamldoc's five rows and the toplevel's three (caml-tex, self-contained-toplevel) at the compiled level: ocamldoc's
+  plugin needs the compiled level's Dynlink registry (dynplugins) and the run's ocamldoc.args and ocamldoc_output in c2_programs;
+  the toplevel loads each phrase's Lambda as a plugin at run time, which a compiled program can do only with oi inside it (a question
+  for the user). The C-stub rows of native-only tests (int64-unboxing's unboxed externals, unboxed-primitive-args' generated stubs),
+  the gc-roots tests' `@mods` at the AOT levels, opam/base64 and fmt (light-speed at the light level; chain2's tree predates 531's
+  staging, so their compiled rows need a run of this tree).
+
+### The user's list after the decisions of 2026-11-23 (the counting rule (a); the toplevel rows the Mac's 544)
+
+- **The gc-roots tests' `@mods` at the AOT levels** (globroots_sequential, globroots_parallel, globroots_parallel_spawn_burn): header.awk's
+  modules rule (C files and OCaml units of the test's directory) at every level; bin/oi's `o2j_dump` types the units first (`oi_mods`,
+  as oi_one), writes them to `D/dynmains.txt` (translated with the program, at both AOT levels) and types the program against their
+  interfaces (`o2j_dump_file`'s sixth argument, the run directory).
+- **Native-only C stubs at the AOT levels** (int64-unboxing/test): header.awk's class for a native-only test with C stubs is oi's alone;
+  the AOT levels call such an external by its native name with unboxed words (o2j's `native:` calls, `CApi/nativeCall`, OC199 (a)).
+- **The gen mode** (unboxed-primitive-args/test, 528-3 (a)): a native header that generates its program with ocamltest's `ocaml` script
+  action runs at the AOT levels; `gen_prog` runs the script on oi once an argument (its output the `compiler_output` file of the run
+  directory: stubs.c, main.ml), the last unit of `all_modules` becomes the program, the other .ml its `@mods`, the .c its stubs, built
+  from the run directory (`D/cstubs.here`, read by both AOT levels' `cstubs_nodes`).
+  Not in effect (60de8bb0d): the generated program's translation took 7.6 GB at the light level and 45 GB at the compiled level
+  (stopped); header.awk's `gnon` enables the mode once o2j translates it in bounded memory.
+- **A helper of C alone at the AOT levels** (lib-threads/signal, delayintr: sigint.c): built on ci as oi's (`oi_helper`, its own program
+  whatever the level), the level's program runs it as `./sigint`.
+- **ocamldoc at the compiled level** (tool-ocamldoc/t01-t05): header.awk's ocamldoc mode at aot=2; `o2j_dump` lists the plugins' Lambda
+  in `D/dynplugins.txt` (the compiled level's Dynlink registry); the compiled check takes the run's arguments (`D/ocamldoc.args`), the
+  program's interface digests (`OI_DYNLINK_IMPORTS`) and judges ocamldoc's output (`ocamldoc_output`); a program's main units of clib's
+  libraries are `@UNIT`s (`c2_tool_units` over `D/dynmains.txt`: ocamldoc's compiler-libs, unix, str, dynlink).
+- **The suite's compiled level takes C stubs** (opam/base64/test, opam/fmt/test_fmt: queue 531's `@cstubs`): their node program and a
+  shard with the C API's main, as the run corpus's (OC215 (a)).
+## As built: queue 544 (2026-11-23, the VM): the embedded oi, Lambda interpreted by the runtime itself (the toplevel's AOT, first steps)
+
+The user's decision (a) of 2026-11-23: the toplevel at the AOT level is the toplevel compiled, oi embedded in it, each phrase's Lambda
+loaded as a plugin at run time. Built here: the embedded oi and its loading at both AOT levels. Not reached: the three toplevel rows at the
+compiled level, whose program does not build on the VM (below, DECISION 544-1).
+
+- **The embedded oi** (`jdk/ocaml/ocaml/rt/Oi.ae` with `OiSym`, `OiList`, `ONode`, `OiCtx`, `OiExit`, `OiTail`, `OiFn`): an interpreter
+  of oi's Lambda forms (the text `caml_oi_dynlink_parse` is given: tools/ocdump's Lambda, topeval.ml's printer) written in the runtime's
+  own Java forms, over the runtime's values, so that a phrase's functions are closures the translated code calls (`OiFn`, a `Closure`),
+  its globals the program's module blocks (`ExtCore/unitG`, the loader's "global") and its primitives and externals the runtime methods o2j
+  calls for the same names (o2j's prim-value read as ops). A reader (lists, vectors, maps, strings, keywords, integers), a compiler to nodes
+  (each variable a slot of its function's frame, a closure's free variables copied when it is made, a letrec's closures set after they are
+  made) and an evaluator: static exits as `OiExit`, trywith as o2j's (depth and backtrace stack restored), tail calls of interpreted
+  functions in constant stack (`OiTail`, Oi/call's loop). `Oi/parse` gives the loader's entry [NAME DEPS REFS INIT nil] (o2j's plugin-deps),
+  INIT a Runnable; setglobal stores the unit's block in `Oi/units` (`Oi/global`, which the loaders' "global" answers; `Main/reset` clears it).
+  Not interpreted: tupled functions (as o2j), the debugging events (dropped), o2j's static blocks (an immutable block of constants is made
+  at each evaluation, as ocamlc's code makes it). go/arbace/oi itself is not embedded: its values are not the runtime's, and a phrase links
+  against the program's globals.
+- **The externals.** The runtime has no reflection at the compiled level, so the program's main class carries the table
+  (`arbace.o2j/oi-ext-methods`: `extIndex`, a name's index and arity, `extCall`, the call by index, over the runtime's externals), reached by
+  the loader's verbs "ext-index" and "ext-call"; an external not there is the C API's (`CApi/call`), as in a translated unit.
+- **The compiled level** (`arbace.o2j`'s registry-methods): a plugin's text the registry lacks is `Oi/parse`'s (it was a Failure), "global"
+  falls back to `Oi/global`, and the loader is set for a program that links Dynlink or one of whose own units calls `caml_oi_dynlink_parse`
+  (`calls-oi-loader?`: topeval.ml, a driver of plugins).
+- **The light level** (`test/ocaml/o2j/run.ae`): `O2J_PLUGIN_INTERP=1` has the runner interpret plugins in place of translating them (the
+  externals' table `ocaml.u.OiExts`, `oi-ext-class`, defined at the first use); the checks keep the translation.
+- **The runtime**: `caml_sys_modify_argv` (ExtSys, oi's since queue 529; the executable's name kept), used by the toplevel's
+  override_sys_argv before a script.
+
+**Proofs (run, the VM, arm64).** A driver (`oiplug.ml`: each argument a Lambda unit's text, parsed, linked and initialised through the
+dynlink externals) at the light level loads a coverage unit (closures, letrec, exceptions, switches, string switches, loops, records,
+float arrays, boxed integers, lazy, polymorphic variants, or-patterns, functors, objects with inheritance, Hashtbl, labels, Format) by the
+embedded oi and by o2j's translation: both print what the host's OCaml 5.5 prints. 41 testsuite programs of basic/ and basic-more/ typed
+by the native typer and loaded as plugins by the embedded oi: 36 pass by their .reference; 3 name units the driver does not link (Link
+errors, the same by translation), safer_matching needs its -safer-matching flag (the same output by translation), tailcalls is correct and
+slow (its 10^7-step loops interpreted). The same driver built at the compiled level (o2j cprogs over clib, j2g 633 s and 5.4 GiB, Go's build
+587 s and 5.1 GiB; no class of the runtime refused): the coverage unit as the host's OCaml, the 41 programs as at the light level, each
+output equal to the light level's (tailcalls past 120 s).
+
+**The compiled toplevel (DECISION 544-1).** With header.awk's toplevel modes at aot=2 and bin/oi's compiled level taking a tool row's
+units (a patch kept out of the branch, so that bin/oi and its native_key stay as they are), the three rows' shard (each program the
+standard library, Unix, Str, compiler-libs' 131 units, the toplevel and ocamltex or main.ml: 68 MB of Java forms) translated by j2g in
+4,548 s at 16.7 GB; the Go package `arbace/lang` it makes (259 MB of Go, every class) took Go's compile past 36 GB in 38 minutes, still
+growing, and was stopped (the host's other jobs). The rows keep their class at both AOT levels.
+
+## As built: queue 544b (2026-11-23, the VM): the compiled level's large shards in Go packages of their own (DECISION 544-1 (a))
+
+- **The split** (arbace.o2j's shard verb: `split?`, `split-packages`): a shard whose library units' forms (OUT/ocaml/u) pass
+  `O2J_SPLIT_BYTES` (default 24 MB; compiler-libs' shard 62 MB, a standard-library shard about 9 MB) gets a `packages.edn`, the input's
+  top-level class -> Go package that j2g already reads (`arbace.j2g.names/compiled-packages`, the compiled namespaces' since S6): the
+  runtime's classes (ocaml/rt) the package `ocaml_rt`, each library unit's class `M_<Unit>` a package of its own, `ou_<Unit>`, each
+  program's classes (ocaml/p<N>) `ocaml_p<N>`; the dispatcher `ocaml.u.Shard`, j2g's entry, stays in `lang`. A unit names only the units
+  linked before it and the runtime, a program its units and the libraries', the dispatcher the programs: no import cycle. `O2J_SPLIT=1`
+  always splits, `0` never. j2g is unchanged, and so is every shard under the threshold.
+- **Why by unit, not by library**: compiler-libs as one package would hold about 150 of the 253 MB of Go the unsplit shard's `lang` had
+  (Go's compile of that one passed 36 GB, queue 544); by unit the largest package is Parser's, 19 MB.
+- **Determinism**: the map is sorted (`sorted-map`), its text the same at each run (the test); j2g's output tree over the split driver's
+  forms at `J2G_JOBS` 2 and 4 is byte for byte the same (6,005 files; `report.edn`'s times alone differ).
+- **Proofs** (run): the plugin driver of queue 544 split (`O2J_SPLIT=1`): j2g 1,024 s at 5.5 GiB, Go's build 510 s at 4.3 GiB (unsplit: 633 s,
+  587 s); the coverage unit as the host's OCaml, the 40 sample programs' outputs equal to the unsplit build's.
+
+## As built: ocaml-eval (2026-11-24, branch `ocaml-eval-1124`, from mac/next `7de5de3ec`): the eval cell's speed and gc rows
+
+oi's eval cell on next: 598 pass / 2 by design / 8 deferred (68 n/a); the deferred: `:speed` 5, `:gc-and-memory` 2, `:dynlink-decided` 1.
+- **weak-ephe-final/ephetest** (test6, a key reachable only from its own ephemeron's data): the asked collections get a second phase
+  (`ext_sys.ae`'s `ephKeyed`): one Go collection with each live ephemeron's data held by its block keys alone (a box in `ephLinks`, a
+  slot of the key's fields' array past its length: the block's size and fields stay OCaml's), the ephemeron only a weak pointer to it;
+  then the data back in the ephemerons that live, gone with a key that died. The first phase (the data in the ephemeron) collects an
+  ephemeron reachable only from its data (test7), the second a key reachable only from its data; together OCaml's rule (the data lives
+  while the ephemeron and its keys do), repeated while a phase drops a data. A key that is not a block (a string, a closure) keeps the data
+  in the ephemeron in both phases. With it, `Gc.finalise_last` is a Go cleanup (`runtime.AddCleanup`, the entry its argument) instead of a
+  Go finaliser: a finaliser keeps what its value reaches, so a cycle of finalisable values (test6's key and data) was never collected; a
+  cleanup keeps nothing, and runs after the value's `first` finalisers (Go's rule for an object with both), as finalise.c updates the
+  `last` table after the `first` one. finCollect waits for a sentinel cleanup too. Passes.
+- **weak-ephe-final/weak_array_par** (4 domains, 4,000,000 Weak.get/set over a table of 10,000): `ephClean` returns at once for a weak
+  array or an ephemeron without data (nothing to drop; a collected key reads as unset through its dead flag): each Weak.get scanned the
+  10,000 keys. 41 s, passes; out of `oi-slow.edn`.
+- **lib-bigarray/subarraystub** (41,000 calls of a C stub copying a 2,046 x 44 int16 sub-array, a Gc.minor each): the C API on ci
+  (`go/arbace/oicapi`): a bigarray's elements cross in one slice of ci's memory per call (no lookup per element), an integer element
+  read back equal to the value's is left alone and a 16-bit one comes from a table boxed once (`boxedInt`), a copy the C did not change
+  is not read back (its bytes as written kept, `baSnap`), the big blocks' mappings reused across calls (`bigFree`), musl's memcpy,
+  memmove and memset native on ci's memory (their C, interpreted, was most of the stub), and a bigarray the C allocated with memory of
+  its own (`CAML_BA_MANAGED`, caml_ba_alloc's calloc) has that memory freed when the call ends unless a root keeps the block (the copy
+  dies with the boundary's memory, as bigarray.c's finalizer frees it; the C heap had grown past 1.5 GB and Go's collector ran without
+  pause at the memory limit). Over 900 s before, 65 s now (CPU 73 s); passes, out of `oi-slow.edn`.
+- **Left in `:speed`** (measured on this host, alone, OI_TIMEOUT 1800, CPU seconds against the check's 120): ast-invariants/test 216 s
+  (pass), parallel/fib_threads 744 s (pass: fib 42 in four domains, about 1.7 billion interpreted calls), opam/uutf/test_uutf
+  1,390 s (pass). Their profile is the interpreter's own: frames and argument slices allocated per call (`newFrame` and `makeslice` about 40 %
+  of ast-invariants' CPU) and Go's marking; a frame pool would give about 1.5x, not the 1.8x ast-invariants needs nor fib_threads' 6x.
+- **Left in `:gc-and-memory`**: weak-ephe-final/ephetest3, whose keys are Int64 values hash-consed in a weak set: oi's boxed integers are
+  Go values in an interface (no identity of their own; Go's static array for 0-255 and its tiny allocator for the rest), so their weak
+  keys are never emptied. The user's question (the report): n/a (`==` on immutable values is implementation-defined, Repr.phys_equal's
+  documentation) or boxed integers with an identity in oi (a representation change).
+- Checks: the 108 programs of the run corpus that use the collector, weak values, finalisers or C stubs (`.tmp/regress.txt`), none
+  changed but ephetest's row; `bin/oi test`.
+## As built: queue 544c (2026-11-24, the VM): a split shard's program units each a Go package of their own
+
+- **The fault** (the host's ocamldoc shard, 2026-11-24): with 544b's split a program's units shared one Go package, `ocaml_p<N>`, so
+  unit Odoc_class's class `M_Odoc_class` met j2g's member of unit Odoc's class, its class object `M_Odoc_class` (j2g_classes.go):
+  `Go name M_Odoc_class declared more than once in package ocaml_p17` (and p18-p21). Within a library unit's package `ou_<Unit>` no such
+  name can meet another: a unit's member classes are `M_<Unit>$F<n>`, j2g's members `_class`, `_New`, `_Init` and the like.
+- **The fix** (arbace.o2j's split-packages): a program's own unit is a package of its own, `ocaml_p<N>_u_<Unit>`, a plugin
+  `ocaml_p<N>_d_<Unit>`, the main class alone in `ocaml_p<N>`. A unit names only units linked before it, a plugin the program's
+  units, the main class all of them: still no import cycle; the map still sorted.
+- **Proofs** (run): a reproducer program (units Odoc, Odoc_class, Repro): before the fix j2g reports the collision in `ocaml_p1`; after it 0
+  collisions, j2g 980 s at 5.2 GiB, Go's build 760 s at 8.4 GiB, and the program prints `odoc/odoc_class: 63` (Odoc.twice (fun x -> x * 3) 7).
+  The naming test fails on the parent and passes here; the split test (its program unit's package now `ocaml_p1_u_Oiplug`) passes.
+- **The three toplevel rows at the compiled level** (`bin/oi check --aot --level compiled --only-list` under `bin/heavy-lock`, the tree
+  of origin/next 440cf0273 with the fix): their shard split (169 unit packages, the programs' units by unit), j2g 3,437 s at 16.2 GB, Go's
+  build 1,602 s at 8.3 GB (the largest package Parser's, 19 MB of Go; unsplit, queue 544, Go's compile of one package passed 36 GB);
+  tool-caml-tex/ellipses, tool-caml-tex/redirections and self-contained-toplevel/main pass by their own .reference, "same" against oi.
+  Recorded into check-aot-compiled-native.edn (record-only of the run's rows), out of divergences-aot-compiled.edn's `:ocamltest-tools`;
+  the controls `_control/ocamltex-ellipses-vs-redirections` and `_control/toplevel-main-vs-redirections` at this level differ, as they
+  must. The compiled level is in no REAP cell: OCaml's cells do not move.
+- **The user's decisions (2026-11-24)**: ephetest3 n/a (`:na-boxed-identity`: a boxed integer's identity is unspecified); the three speed
+  rows under their own CPU limits, `test/ocaml/oi-cpu-caps.tsv` (1.5 times their CPU measured alone: ast-invariants/test 320 s,
+  parallel/fib_threads 1140 s, opam/uutf/test_uutf 2020 s), read by oi_one and suite_oi_one (the larger of OI_TIMEOUT and the cap), in
+  oi_key; the rows judged by their own verdicts and recorded passing. Left deferred: lib-dynlink-bytecode/main (`:dynlink-decided`).
+## As built: ppxlib's bootstrap (queues 546, 546b, 2026-11-23/24, the VM): T1 of DECISION 539b-1, the metaquot driver on oi
+
+DECISION 539b-1 (the user, 2026-11-23): ppxlib, then ppx_expect, then ppx_jane, in that order. T1, ppxlib 0.39.0's own build, is
+done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 (ppx_expect with base, stdio and time_now) and T3
+(ppx_jane) are their own tasks.
+
+- **Ports** (546; arbace.repr.ocaml.prep, each held to its source's SHA-256): ppxlib's pp/pp.exe in both variants (astlib's and
+  ast's), astlib/config/gen.ml's ast-version, ocaml-compiler-libs v0.17.0's ocaml_common.ml, and ocaml_shadow.ml over ocamlcommon's
+  modules (a strict subset of the host's file: deprecation aliases only).
+- **The programs** (test/ocaml/ppx-programs.tsv, opam-programs.tsv's format; `bin/oi ppx gen|check`, bin/lib/oi/ppx.bash):
+  - src/gen's gen_ast_pattern and gen_ast_builder run on oi over ast/ast.ml. ast_pattern_generated.ml and ast_builder_generated.ml,
+    kept in `.tmp/oi/ppx/gen`, are byte for byte the output of the same generators built from the pinned sources by the VM's ocamlc
+    (probed).
+  - The metaquot driver (test/metaquot/driver.ml: Ppxlib.Driver.standalone with ppxlib.metaquot linked) is 175 units in ocamldep
+    -sort's order: sexplib0, astlib, ppxlib_ast, ppxlib's src with the two generated units, the metaquot lifters and metaquot.
+    `bin/oi ppx check` runs it on oi over test/metaquot/run.t's two cram cases, coalesce.ml and pat.ml. Each output and exit status
+    must equal the cram's expected output line for line. Its negative control judges case 1's output against case 2's expected
+    output, which must differ. Result (546b, run): 2 of 2 pass, and the control differs. The whole check takes 30.5 minutes, the
+    library's types included.
+- **Typer fixes** (each with a sample in test/ocaml/typer-repros that ocamlc accepts and the typer before the fix refuses;
+  `run.bash ROOT`):
+  - 546: find_record_qual; constrained abbreviations expanded by instance; declarations fully generic; no abbreviation memo under
+    GADT equations (types/fresh-depth); nested package constraints; a module-unpacking parameter typed in a scope of its own; no
+    link of an object to a scoped module's abbreviation.
+  - 546b, env:
+    - components resolve an alias to a module inside an earlier sibling through that sibling, so find-unit no longer re-enters a
+      unit being loaded (m1);
+    - nested with-unit-stamps go on from the outer counter (m3).
+  - 546b, a unit's paths substituted into its class declarations (m2) and its class types (m5).
+  - 546b, an override without a type declared with a fresh variable (m4).
+  - 546b, nondep's expansions of a generic node made generic (c26).
+  - 546b, a unit's interface read with none of the class's shared type variables. Its repro is on ppxlib's staged sources and is
+    not committed: the task's tests/ppxlib-shared-tyvars.bash.
+- **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
+  native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
+  problems. No record changes: the ppx programs are not rows of the suite corpus.

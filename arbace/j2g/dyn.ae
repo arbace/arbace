@@ -338,11 +338,24 @@
   "Object.clone of t, a DynSub_C of class n (round 54): C's clone with t as this, a jrt class's own
   (its Clone__O on the struct, as Reference's CloneNotSupportedException), else Object's (CloneShallow)."
   [n]
-  (let [impl (m/impl-of n ["clone" "()Ljava/lang/Object;"])]
+  (let [impl (m/impl-of n ["clone" "()Ljava/lang/Object;"])
+        ;; a jrt class whose clone jrt's manifest does not list (Reference's protected one, java-design-1123: t04823
+        ;; ReferenceClone's SoftReference, WeakReference and PhantomReference subclasses, whose super.clone() was
+        ;; Object's shallow copy) but whose struct has its own Clone__O: that one, as for a promoted clone
+        hw (first (filter m/hand-written? (m/superclass-chain n)))
+        scan (:jrt m/*w*)
+        ;; Reference declares clone() (it throws): jrt's references' Clone__O is it; another jrt class's Clone__O is
+        ;; Object's refusal for a class that is not Cloneable, which a Cloneable subclass's super.clone() passes
+        hw-clone? (and hw (some #{"java/lang/ref/Reference"} (m/superclass-chain hw))
+                       (some #(contains? (get (:methods scan) %) "Clone__O")
+                                (take-while #(and (some? %) (not= "Object" %))
+                                            (iterate #(get (:embeds scan) %) (m/go-name hw)))))]
     (case (:kind impl)
       (:class :jrt-impl) '(.Impl_Clone__O t t)
       :promoted (list '.Clone__O (list (symbol (str ".-" (m/go-name n))) 't))
-      '(.CloneShallow t))))
+      (if hw-clone?
+        (list '.Clone__O (list (symbol (str ".-" (m/go-name n))) 't))
+        '(.CloneShallow t)))))
 
 (defn- sub-forms
   "The Go type DynSub_C of the proxies of class n, its methods and its slot table. It embeds C's
@@ -418,22 +431,15 @@ boxed, through its invoke of that arity.\n"
   compiled fn's field (EVAL-NOTES.md, \"Locals clearing\"); settable when not primitive. (Apart
   from forms, whose constants would not fit in one class.)"
   []
-  ;; the fn's struct: o itself while EvalFn is a leaf, else through its class interface (CDR15 (a): EvalFn among
-  ;; class-supers, a fn with primitive signatures an object of its DynSub type)
-  (let [evalfn (if (m/leaf? "arbace/lang/Compiler$EvalFn")
-                 '(assert (* Compiler_EvalFn) o)
-                 '(.Self_Compiler_EvalFn (assert Compiler_EvalFn_I o)))]
-    (list 'go/func (symbol (native-name "defineFnField" "(Ljava/lang/Class;Ljava/lang/String;ILjava/lang/Class;)V"))
-          [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'i 'int32) (tag 'ft '(* jrt/Class))]
-          (list 'let ['info '(.Info c)
-                      'k 'i
-                      'fi (list 'lit 'jrt/FieldInfo :Name '(.String (jrt/NN name)) :Type 'ft :Modifiers 0
-                                :Get (list 'fn (with-meta [(tag 'o 'any)] {:tag 'any})
-                                           (list 'aget (list '.-A (list '.-F_closed evalfn)) 'k)))]
-                (list 'when '(not (.IsPrimitive__Z ft))
-                      (list 'set! '(.-Set fi) (list 'fn [(tag 'o 'any) (tag 'v 'any)]
-                                                    (list '.Store (list '.-F_closed evalfn) 'k 'v))))
-                '(set! (.-Fields info) (append (.-Fields info) fi))))))
+  (list 'go/func (symbol (native-name "defineFnField" "(Ljava/lang/Class;Ljava/lang/String;ILjava/lang/Class;)V"))
+        [(tag 'c '(* jrt/Class)) (tag 'name '(* jrt/String)) (tag 'i 'int32) (tag 'ft '(* jrt/Class))]
+        '(let [info (.Info c)
+               k i
+               fi (lit jrt/FieldInfo :Name (.String (jrt/NN name)) :Type ft :Modifiers 0
+                       :Get (fn ^any [^any o] (aget (.-A (.-F_closed (assert (* Compiler_EvalFn) o))) k)))]
+           (when (not (.IsPrimitive__Z ft))
+             (set! (.-Set fi) (fn [^any o ^any v] (.Store (.-F_closed (assert (* Compiler_EvalFn) o)) k v))))
+           (set! (.-Fields info) (append (.-Fields info) fi)))))
 
 (defn- aot-fn-fields-native
   "Compiler$Dyn.defineAOTFnFields: the class of the compiled fns of one code gets the code
@@ -574,7 +580,14 @@ interfaces made at run time).\n"
    '(go/method DynFields ^{:tag (* (slice any))} [^{:tag (* dynCore)} t] (addr (.-F t)))
    '(go/method Ref ^any [^{:tag (* Dyn)} t] (when (== t nil) (return nil)) t)
    '(go/method GetClass__Class ^{:tag (* jrt/Class)} [^{:tag (* Dyn)} t] (.-Cls (.-D t)))
-   '(go/method Clone__O ^any [^{:tag (* Dyn)} t] (panic (jrt/CloneNotSupported t)))
+   ;; clone() of an interpreted class extending Object, called through an interface that declares it public (CertSelector's,
+   ;; t05330: PKIXParameters clones its target constraints): the class's own clone by its key, else Object's refusal
+   '(go/method Clone__O ^any [^{:tag (* Dyn)} t]
+      (let [f (aget (.-ByKey (.-D t)) "clone()Ljava/lang/Object;")]
+        (when (!= f nil)
+          (let [r (.Invoke_O__O f t)]
+            (when (!= r dynSuper) (return r)))))
+      (panic (jrt/CloneNotSupported t)))
    '(go/method ToString__String ^{:tag (* jrt/String)} [^{:tag (* Dyn)} t]
       (let [f (aget (.-Slots (.-D t)) 0)]
         (when (!= f nil)

@@ -12,7 +12,7 @@ CLOJURE_TESTS_GO ?= target/arbace-go/amd64/arbace-tests
 
 .PHONY: help seed-check stage0 seed-verify reseed build build-tests build-java smoke repl fixpoint goi-table goi-table-size \
   box box-smoke box-oracle box-suite box-goi box-tools box-rebuild box-convert mac-bundle mac-bundle-convert arm64-vm-check arm64-vm-goi \
-  program programs-check programs-essential gate gate-full gate-full-parallel night night-plan gate-weekly-plan gate-plan gate-costs gate-why gate-audit gate-prune gate-prune-worktrees gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-subsets gate-subsets-check gate-demos java-check-judge provenance-check reap crops-score records-check hooks suite oracle diffcheck generated-check gate-tests verify jdk-verify jrt-derive-check edge-verify javac-verify javac-classes javac-modules javac-platform-build fixtures-verify tamago-verify java-project-test javac-gensrc javac-platform-gensrc javac-descriptors java-project-fetch jrt-deflate jrt-files-check \
+  program programs-check programs-essential gate gate-full gate-full-parallel night night-plan gate-weekly-plan gate-plan gate-costs gate-why gate-audit gate-prune gate-prune-worktrees gate-queue corpus-dedup cover-build gate-clean gate-full-clean gate-full-clean-only gate-clean-plan gate-pins gate-full-concurrent gate-full-clean-lanes gate-lanes-plan gate-mem-check gate-subsets gate-subsets-check gate-demos java-check-judge provenance-check reap crops-score records-check markers-check hooks suite oracle diffcheck generated-check gate-tests verify jdk-verify jrt-derive-check edge-verify javac-verify javac-classes javac-modules javac-platform-build fixtures-verify tamago-verify java-project-test javac-gensrc javac-platform-gensrc javac-descriptors java-project-fetch jrt-deflate jrt-files-check \
   toolchain-verify box-vendor-verify x509roots-verify repr-go-roundtrip repr-go-roundtrip-text repr-go-native-check \
   repr-java-check repr-java-roundtrip repr-java-text repr-java-jdk repr-java-parse-check repr-java-front-check repr-java-attr-check repr-java-nojavac-check repr-java-closure-check repr-java-platform-pack repr-java-platform-check repr-clojure-check repr-clojure-roundtrip repr-haskell-roundtrip repr-haskell-iface repr-haskell-text repr-haskell-layout repr-haskell-test repr-rust-roundtrip repr-rust-iface repr-rust-text repr-rust-pretty repr-rust-behaviour repr-rust-code repr-rust-all repr-rust-test repr-cpp-host-record repr-cpp-host-check repr-cpp-pins-check repr-cpp-target-gen repr-cpp-target-verify repr-cpp-target-oracle repr-cpp-record-dumps repr-cpp-verify-dumps repr-cpp-cxxdump-build repr-cpp-cxxdump-test repr-cpp-spec-check repr-cpp-c2j-check repr-scheme-c2j-check repr-ocaml-c2j-check repr-cpp-pp-check repr-cpp-ppref-build repr-cpp-ppref-fidelity repr-cpp-pp-record repr-cpp-cxxdump-check repr-cpp-roundtrip repr-cpp-roundtrip-corpus repr-cpp-pp-essential repr-cpp-roundtrip-essential repr-cpp-pp-record-results repr-llvm-roundtrip cppi-lower-check cppi-lower-corpus cppi-lower-essential cpp-essential cppi-runtime-build cppi-testsuite cppi-selftest cppi-run cppi-runtime-ci cppi-record-ref cppi-check cppi-check-aot cppi-route-compare cppi-divergences cppi-divergences-aot repr-c-host-record repr-c-host-check repr-c-ccdump repr-c-check repr-c-record repr-c-parse-check repr-c-read repr-c-print repr-c-roundtrip repr-c-corpus-dedup repr-c-record-gcc repr-c-c23 ci-diagnose ci-run ci-check ci-check-aot ci-dg ci-dg-essential ci-judge-test ci-c2j-check ci-cinterp-check ci-aot-translate ci-repl-session ci-divergences ci-musl ci-runtime ci-cirun-build ci-annot ci-annotations ci-annotations-record ci-record-ref ci-synth ci-synth-check goi-annotations goi-test goi-check goi-check-aot goi-check-aot-essential goi-check-nethttp goi-check-nethttp-arbace goi-divergences goi-divergences-aot java-check java-check-compiled java-check-analyze java-check-compiled-essential java-check-print java-check-nread java-check-diagnostics java-check-essential java-check-ref alpine-check alpine-test clean \
   java-check-oracle java-check-rejudge java-check-stale java-verdicts java-golden ci-musl-lock-test \
@@ -81,6 +81,12 @@ java-project-test: ## the Java project model's fixtures: test/programs/java-proj
 
 java-project-fetch: ## the pinned Maven artifacts of Arbace's own Java fixtures (JUnit, hamcrest-core) into the main checkout's .tmp/maven, checked by size and SHA-256 (bin/java-project fetch; FROM=DIR copies from a local repository)
 	bin/java-project fetch $(if $(FROM),--from $(FROM),)
+
+bytecode-check: ## classes defined from class-file bytes: test/bytecode's programs run, its verifier cases and 900 mutants judged by arbace.lang.Bytecode against the JDK's results, with the negative control (bin/bytecode-check [EXE]; seconds; doc/classes/BYTECODE-SURVEY.md)
+	bin/bytecode-check $(EXE)
+
+bytecode-record: ## rewrites test/bytecode/expected.edn: the programs on jdk26u's java and HotSpot's verdicts of the mutants (bin/bytecode-check --record-jdk [EXE])
+	bin/bytecode-check --record-jdk $(EXE)
 
 jrt-files-check: ## go/arbace/jrt.ae's file lists against go/arbace/jrt's files, with its negative control (bin/jrt files-check --control; seconds)
 	bin/jrt files-check --control
@@ -170,7 +176,7 @@ gate-subsets-check: ## GD2: the committed subsets against the rule's, exit 1 on 
 	bin/gate-subsets --check
 gate-demos: ## GTS42 (a): a classes file and a j2g comment changed in a scratch worktree, the full plan of each (after the builds it needs), reverted (bin/gate-demos; RECORD=test/gate/clean-TAG.edn)
 	bin/gate-demos $(if $(RECORD),--record $(RECORD))
-gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock waiting in turn, oldest first (FIFO in front of the flock, GT5; bin/heavy-lock --queue)
+gate-queue: ## the host's big-job lock's queue: the tickets of bin/heavy-lock, oldest first, each with its slot (1 or 2) or waiting (FIFO in front of two memory-gated slots, GT5, 2026-11-23; bin/heavy-lock --queue)
 	bin/heavy-lock --queue
 cover-build: ## GT8.3: the cover build, the gate's executable and test build with Go's coverage of the crops' code under check, kept in ARBACE_GATE_EXES/cover-KEY20 (bin/cover build; heavy: run under the host's lock)
 	bin/cover build
@@ -190,6 +196,8 @@ reap: ## the REAP matrix: read, eval, AOT, print for Clojure, Java, Go, C, C++, 
 	bin/reap
 records-check: ## the records against their known files, judge-only: a :known row no known file lists, a stale entry, an unclassed row (bin/records-check; GD4, seconds)
 	bin/records-check
+markers-check: ## no git conflict marker ("<<<<<<< " or ">>>>>>> " at a line's start) in a tracked file, with its negative control (bin/markers-check; seconds)
+	bin/markers-check
 hooks: ## the opt-in pre-commit hook: bin/records-check when a commit touches a known, results or divergences file (bin/records-check --install-hook; the user's choice)
 	bin/records-check --install-hook
 crops-score: ## each crop's completeness, maturity and independence as percentages, from the recorded results (bin/crops-score [ARGS="--newest|--ref REF|--crop C|--tsv"]; doc/CROPS-SCORE.md; no runs, seconds)
@@ -1132,6 +1140,7 @@ repr-ocaml-check: ## O2's check: the round trip over the default corpora and ove
 
 ## OCaml's row of the REAP matrix and its gate steps (O8, doc/ocaml/OCAML-SURVEY.md, "As built: O8 (write-ahead)")
 .PHONY: j2g-unit
+.PHONY: bytecode-check bytecode-record
 .PHONY: program-mutant build-go-mutant-test
 .PHONY: repr-ocaml-record-results ocaml-read-essential oi-essential oi-divergences-all ocaml-essential ocaml-judges
 repr-ocaml-record-results: ## the round trip over every corpus at every level, recording the read and print levels' test/ocaml/{read,print}-results.edn (bin/repr-ocaml roundtrip --cmi --record-results all)

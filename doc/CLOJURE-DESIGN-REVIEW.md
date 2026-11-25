@@ -518,3 +518,81 @@ CDR12-CDR15 built", rounds 1 and 2).
 
 The cells (pass / by design / deferred): read 908 / 2 / 0 to 909 / 0 / 0; eval 21,119 / 13 / 2 to 21,121 / 11 / 2; AOT 831 / 5 / 2 to
 833 / 4 / 1.
+
+## Decided (2026-11-23, the user: CDR14, CDR15 amended)
+
+- **CDR14**: the two oracle forms that differ from the frozen v4 jar since hand change 38 (native.ae:410, a fresh namespace
+  resolving `SecurityManager`; state_errors.ae:454, its `ns-map` counting 106 names, v4's 105) are dropped and the expected
+  files recorded again from the frozen jar, so they are no longer main-since-v4's by design.
+- **CDR15 (b)**: the evaluated half of hand change 39 (evaluated fns with primitive signatures as a DynSub type of EvalFn
+  implementing their IFn$ interfaces) is withdrawn, its cost (about 9% on plain evaluated calls) too high; the Java forms half,
+  which the oracle's three native.ae cases need, stays.
+- Then the deferred `:xml-stream` (StAX's event reader's closure in java-xml-classes.txt, an AOT run), CDR16 and the other
+  rows left, by the burst's stream (branch `clj-1123`).
+
+## Proposed (2026-11-23): CDR17-CDR21, the by-design rows left
+
+What CDR14-CDR16 leave not passing at eval and AOT, all by design; each needs the user's word to become a pass or n/a
+(doc/CROPS-SCORE.md: a row is n/a only by a decision in doc/JOURNAL.md).
+
+**CDR17. main-since-v4's last two (eval, the oracle, 2 cases).** polymorphism.ae:176 (MultiFn names two ambiguous classes in
+the order of their names, hand change 14, ac8b9718) and state_errors.ae:542 (main's loaders look for `.ae` first, so the
+not-found message names `.ae`). (a) As CDR14: drop the two forms and record the expected files again from the frozen jar; (b)
+record main's answers for them in an overlay the oracle reads beside the v4 expected files; (c) keep. Recommended (a), as CDR14.
+
+**CDR18. identity-hash (eval 1, the oracle; and diffcheck's pair, not counted).** `(hash (StringBuilder. "x"))` records
+HotSpot's identity hash, which no implementation reproduces (nor HotSpot across runs with another thread history). (a) Drop
+the form (CDR14's way); (b) n/a; (c) keep. Recommended (a).
+
+**CDR19. method-invoke-message (eval 1, the oracle).** jrt's Method.invoke words a wrong receiver as JDK 26's
+DirectMethodHandleAccessor does; the v4 jar's run said "object is not an instance of java.lang.String". (a) Drop the form; (b)
+align jrt's message with the v4 record (it would differ from the JDK 26 message Java's conformance tests see); (c) keep (RPS19
+(a)). Recommended (a): the JDK 26 wording is the right one.
+
+**CDR20. security-providers (eval 1, the oracle).** The Go build lists SUN, SunRsaSign, SunEC and SunJCE; java.security names
+eight more (SunJSSE, SunJGSS, SunSASL, XMLDSig, SunPCSC, JdkLDAP, JdkSASL, SunPKCS11), each a module of its own but SunJSSE.
+(a) The eight providers' classes in the shipped world as providers whose services fail when used (days, the closure of each
+module's provider class); (b) n/a (SC4); (c) keep. Recommended (b).
+
+**CDR21. The class files, tools.deps and run-time sources (eval 4, AOT 4).** `:class-files` (clj-1208 at eval,
+test-proxy-method-order and gen-interface-source-file read class files with ASM: D13, no class files), `:tools-deps`
+(arbace.repl.deps adds jars at run time: D6, CDR9), `:runtime-source` (AOT: a file the test writes at run time loads from
+source). (a) n/a, each by its recorded decision; (b) keep as by design. Recommended (a): they test what Arbace decided not to
+have (class files, jars) or what no AOT build can (a source made after the build).
+
+## Decided (2026-11-23, the user: CDR17-CDR21) and as built (branch `clj-1123`)
+
+The user accepted every recommendation of "Proposed (2026-11-23)": CDR17 (a), CDR18 (a), CDR19 (a) (the forms dropped and the
+expected files recorded again from the frozen jar, as CDR14), CDR20 (b) and CDR21 (a) (n/a under their recorded decisions).
+- Dropped, each line made a comment so that every other case keeps its id: polymorphism.ae:176 (the ambiguous `(class-ambig "s")`),
+  state_errors.ae:542 (`(require 'no.such.namespace)`), strings.ae:408 (`(hash (StringBuilder. "x"))`), and of native.ae:652 only the
+  element that differed, `(outcome #(call-qualified 5 "c"))` (its message; the form's other checks stay, the next one comparing the
+  same call's outcome with Reflector's). `bin/oracle record forms/native forms/state_errors forms/polymorphism forms/strings` on the
+  frozen jar: one case fewer in each of the three, native.ae:652's record its form and value less that element, nothing else changed.
+  The known files (the Go build's, the parked box's, diffcheck's) lose the four and their emptied groups; the classes
+  `:identity-hash` (eval and AOT's diffcheck pair), `:main-since-v4` and `:method-invoke-message` go.
+- n/a (`:kind :na`, outside the denominators): eval's `:security-providers` (SC4), `:class-files` (D13; clj-1208 at eval CDR8 (b)) and
+  `:tools-deps` (D6, CDR9); AOT's `:class-files`, `:tools-deps` and `:runtime-source` (2026-11-02).
+- Cells: eval 21,121 / 9 / 2 to 21,122 / 0 / 2 (5 n/a; native.ae:652 passes), AOT 833 / 4 / 1 to 833 / 0 / 1 (4 n/a). The deferred
+  rows (`:xml`, `:xml-stream` at eval, `:xml-stream` at AOT) wait for the train's build (CDR16 (a), the event reader's closure).
+
+## As built (2026-11-24, branch `clj-1123`): CDR15 (b), CDR16 (a) and `:xml-stream` on train-1's build
+
+The runs on the shared build of train 1 (fb29d2672f0d, made with stage 0 as the host), from a record worktree at dc1a6c337
+(clj-1123 merged with train 1's d9217f672, whose key is the build's); the branch carries mac/next 58959ee49 beside.
+- The oracle's four changed files (native, state_errors, polymorphism, strings): 2077 of 2077 match, the known file's none there;
+  native.ae:233, 234, 237 (the Java forms half of hand change 39) pass. An evaluated `^long` fn is no `IFn$LL` (CDR15 (b)).
+- CDR15 (b)'s speed: no pre-CDR15 build of the same tree was left (pruned), so the microbenchmark (`.tmp/probe/bench.ae` of the
+  worktree: 6M plain evaluated calls, 6M closure calls, a map over 2M) ran on the train's executable against stage 0 (an older
+  build without hand change 39) on a loaded host, three runs interleaved: calls 731-1021 against 694-1114 ms, closures 799-1182
+  against 751-1208, map 361-650 against 346-623: the same within the host's noise (about 10%); the 9% of hand change 39's
+  evaluated half is neither shown nor excluded by it, and the code is as before hand change 39 on the evaluator's path.
+- `:xml-stream`: `bin/clojure-tests --aot --list` (clojure-xml, reflect) on the build: reflect 5 tests, 7 assertions, all pass
+  (invoke-checks-accessibility 2 of 2), clojure-xml 1 of 1; the AOT reference's reflect row recorded so.
+- CDR16 (a): `--jdk-extra-build` (cached by key from the AOT run) and the two namespaces at the eval level on it: clojure-xml 1 of 1,
+  reflect 5 tests 7 assertions; test/arbace-go-results.edn records them (clojure-xml out of `:skipped`, the skipped test gone); the
+  same reference on the test build alone (eval-plain.edn's overlay) still passes (reflect 4 tests, clojure-xml not run): the control.
+  A relative CLOJURE_TESTS_GO_EXTRA ran nothing (each namespace runs in the suite's directory: exit 127, which the --full step's
+  own relative path would have hit); bin/clojure-tests makes it absolute.
+- Classes: `:xml` and `:xml-stream` gone. Cells: eval 21,124 / 0 / 0 (5 n/a), AOT 834 / 0 / 0 (4 n/a), read 909 / 0 / 0, print
+  1031 / 0 / 0: Clojure 100.0 complete.

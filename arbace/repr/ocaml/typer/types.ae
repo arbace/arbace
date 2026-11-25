@@ -31,7 +31,7 @@
 ;; Identifiers and paths (typing/ident.ml, typing/path.ml)
 
 (def stamp (atom 1000))
-(declare abbrev-memo)
+(declare abbrev-memo unify)
 (def scope-windows
   "Identifiers' scopes (Ident.create_scoped): [first-stamp last-stamp-or-nil scope] of each local structure item of an
   expression (`let module`, a local open), the identifiers stamped in it scoped there" (atom []))
@@ -40,10 +40,15 @@
 (def unit-stamp (atom unit-stamp-base))
 (defmacro with-unit-stamps
   "body with identifiers stamped in the units' range (the units' interfaces outlive a program's stamps)"
+  ;; (queue 546b) nested (a unit's interface read while another's is: c.mli's inherited class from b's .cmi), the stamps go on from
+  ;; the outer's counter: restarting at unit-stamp, which the outer has not advanced yet, stamped two units' identifiers alike (a
+  ;; class's object abbreviation `fold` found b's type `T.fold`)
   [& body]
-  `(let [saved# @stamp]
-     (reset! stamp @unit-stamp)
-     (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#)))))
+  `(if (>= @stamp unit-stamp-base)
+     (do ~@body)
+     (let [saved# @stamp]
+       (reset! stamp @unit-stamp)
+       (try (do ~@body) (finally (reset! unit-stamp @stamp) (reset! stamp saved#))))))
 (defn ident-create [name] {:name name :stamp (swap! stamp inc)})
 (defn ident-rename [id] (ident-create (:name id)))
 (defn ident-global [name] {:name name :stamp 0 :global true})
@@ -466,6 +471,27 @@
 
 (def ^:dynamic *find-type* (fn [p] nil))
 
+(defn expand-decl
+  "Ctype.expand_abbrev's subst: the manifest of decl applied to args. Parameters that are all variables are substituted; a
+  declaration with constrained parameters (`type 'a get_case = 'x constraint 'a = < case : 'x; .. >`, ppxlib's versions.ml; queue 546)
+  has its parameters and manifest instantiated together (instance_parameterized_type) and the instances unified with the
+  arguments, so a variable the constraints bind is the argument's and fresh at each expansion"
+  [decl args]
+  (if (every? #(= :Tvar ((desc (repr %)) 0)) (:params decl))
+    (subst (:params decl) args (:manifest decl))
+    (let [is (instance-list (conj (vec (:params decl)) (:manifest decl)))]
+      (dorun (map unify (butlast is) args))
+      (last is))))
+
+(def fresh-depth
+  "(queue 546) Above 0 while a GADT pattern or a case under its local equations is typed: abbreviations expand afresh there, not
+  through abbrev-memo, whose shared expansions pattern mode's links and reify (and the equations' unifications in the body) would
+  change for the program's other uses" (atom 0))
+
+(defn fresh-scope "f called with fresh-depth raised" [f]
+  (swap! fresh-depth inc)
+  (try (f) (finally (swap! fresh-depth dec))))
+
 (def abbrev-memo
   "Ctype's memorized abbreviations: the expansion of a path applied to the same argument nodes, shared (so that the
   unification of recursive types through abbreviations ends)" (atom {}))
@@ -480,8 +506,10 @@
       (if (= :Tconstr (d 0))
         (let [decl (*find-type* (d 1))]
           (if (and decl (:manifest decl))
-            (let [fresh #(subst (:params decl) (d 2) (:manifest decl))
-                  e (if (:local-abstract decl)
+            (let [fresh #(expand-decl decl (d 2))
+                  ;; (queue 546) a declaration with constrained parameters expands afresh: its expansion unifies, so a memorized one
+                  ;; would carry another context's bindings (a GADT branch's local equations)
+                  e (if (or (:local-abstract decl) (pos? @fresh-depth) (not (every? #(= :Tvar ((desc (repr %)) 0)) (:params decl))))
                       (fresh)
                       (let [k [(d 1) (mapv repr (d 2))]
                             [e0 d0] (get @abbrev-memo k)
@@ -648,7 +676,7 @@
                           (if (and (= :Tconstr (d 0)) (path-mentions? id (d 1)))
                             (let [decl (*find-type* (d 1))]
                               (if (and decl (:manifest decl))
-                                (let [e (subst (:params decl) (d 2) (:manifest decl))]
+                                (let [e (expand-decl decl (d 2))]
                                   (link! t e)
                                   (swap! seen disj t)
                                   (go e))
@@ -706,6 +734,11 @@
           (let [saved @t1 e (expand-head t2)]
             (link! t1 t2)
             (try (unify-fields (d1 1) ((desc e) 1)) (catch arbace.lang.ExceptionInfo x (reset! t1 saved) (throw x))))
+          ;; (queue 546) an abbreviation of a scoped module (an unpacked `(module A)`'s A.types) first and the object second:
+          ;; the object (an annotation's, a newtype's result) not linked to it, as unify3 links t1's expansion to t2 (linked, the
+          ;; function's result named its own A, which then leaked its locally abstract types; ppxlib's versions.ml)
+          (and (= :Tconstr (d1 0)) (= :Tobject (d2 0)) (ident-scope (path-head (d1 1))) (= :Tobject ((desc (expand-head t1)) 0)))
+          (unify-fields ((desc (expand-head t1)) 1) (d2 1))
           (and (= :Tconstr (d1 0)) (= :Tobject (d2 0)) (= :Tobject ((desc (expand-head t1)) 0)))
           (let [saved @t2 e (expand-head t1)]
             (link! t2 t1)
@@ -934,7 +967,7 @@
 ;; Coercions (Ctype.build_subtype, enlarge_type)
 
 (defn- expand-abbrev-once [t]
-  (let [d (desc t) decl (*find-type* (d 1))] (subst (:params decl) (d 2) (:manifest decl))))
+  (let [d (desc t) decl (*find-type* (d 1))] (expand-decl decl (d 2))))
 
 (defn- build-subtype
   "Ctype.build_subtype without objects: [supertype change], change 0 Unchanged, 1 Equiv, 2 Changed"

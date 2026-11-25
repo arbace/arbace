@@ -1,0 +1,59 @@
+;; Converted from jdk26u src/java.base/share/classes/jdk/internal/foreign/ConfinedSession.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.internal.foreign)
+
+(import '(java.lang.invoke MethodHandles VarHandle)
+        '(jdk.internal.invoke MhUtil)
+        '(jdk.internal.vm.annotation ForceInline))
+
+(defclass ^:final ConfinedSession
+  :extends MemorySessionImpl
+
+  (field ^:private ^int asyncReleaseCount 0)
+
+  (field ^:static ^:final ^VarHandle ASYNC_RELEASE_COUNT
+    (MhUtil/findVarHandle (MethodHandles/lookup) "asyncReleaseCount" Integer/TYPE))
+
+  (constructor ^:public [this ^Thread owner]
+    (super. owner (ConfinedResourceList.)))
+
+  (method ^:public ^{ForceInline true} acquire0 ^void [this]
+    (.checkValidState this)
+    (when (== (.-acquireCount this) ConfinedSession/MAX_FORKS)
+      (throw (ConfinedSession/tooManyAcquires)))
+    (set! (.-acquireCount this) (unchecked-inc-int (.-acquireCount this))))
+
+  (method ^:public ^{ForceInline true} release0 ^void [this]
+    (if (identical? (Thread/currentThread) (.-owner this))
+        (set! (.-acquireCount this) (unchecked-dec-int (.-acquireCount this)))
+        ^void (^[ConfinedSession int] VarHandle/.getAndAdd ASYNC_RELEASE_COUNT this 1)))
+
+  (method justClose ^void [this]
+    (.checkValidState this)
+    (let [asyncCount ^int (^[ConfinedSession] VarHandle/.getVolatile ASYNC_RELEASE_COUNT this)
+          acquire (unchecked-subtract-int (.-acquireCount this) asyncCount)]
+      (if (== acquire 0)
+          (set! (.-state this) ConfinedSession/CLOSED)
+          (throw (ConfinedSession/alreadyAcquired acquire)))))
+
+  (defclass ^:static ^:final ConfinedResourceList
+    :extends MemorySessionImpl$ResourceList
+
+    (field ^MemorySessionImpl$ResourceList$ResourceCleanup cache)
+
+    (method add ^void [this ^MemorySessionImpl$ResourceList$ResourceCleanup cleanup]
+      (if (not (identical? (.-fst this) MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST))
+          (if (nil? cache)
+              (set! cache cleanup)
+              (do (set! (.-next cleanup) (.-fst this)) (set! (.-fst this) cleanup)))
+          (throw (MemorySessionImpl/alreadyClosed))))
+
+    (method cleanup ^void [this]
+      (if (not (identical? (.-fst this) MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST))
+          (let [prev (.-fst this)]
+            (set! (.-fst this) MemorySessionImpl$ResourceList$ResourceCleanup/CLOSED_LIST)
+            (let [^:mutable ^RuntimeException pendingException nil]
+              (when (some? cache)
+                (set! pendingException (ConfinedResourceList/cleanupSingle cache pendingException)))
+              (ConfinedResourceList/cleanup prev pendingException)))
+          (throw (MemorySessionImpl/alreadyClosed))))))

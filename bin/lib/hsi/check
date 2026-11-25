@@ -10,7 +10,7 @@
 # made first by hsi image into HSI_IMAGE, default .tmp/hsi/image, none for the forms read every run) as record-ref ran
 # GHC's build: in a fresh copy of its directory, env -i, LANG=C.UTF-8, TZ=UTC, its stdin, its arguments (a sample's
 # NAME.args; a test's extra_run_opts through sh, its +RTS options left to the driver, which drops them as GHC's RTS
-# does) and its program name; HSI_TIMEOUT seconds of CPU, default 60, three times that of wall time (HSI_CPUPROFILE_DIR: each
+# does) and its program name; HSI_TIMEOUT seconds of CPU, default 60, its wall time a backstop (wall_cap) (HSI_CPUPROFILE_DIR: each
 # run's CPU profile into DIR/ID.prof, bin/hsi pgo's training; a run stopped at the limit keeps its profile). Judged against
 # test/haskell/ref-ghc914.edn (HES16 (a)): :pass when the status, stdout's SHA-256 and stderr's SHA-256 are the
 # reference's; else :fail with what differs (:status, :stdout, :stderr), :hsi when hsi itself stopped (an
@@ -234,8 +234,8 @@ export HSI_TIMEOUT=${HSI_TIMEOUT:-60}
 export HSI_MEM_CAPS=${HSI_MEM_CAPS:-}
 # HES97 (a) (the user, 2026-11-17; built by hs-speed, 2026-11-22): a program's own CPU limit, ID=SECONDS words (as HSI_MEM_CAPS), by
 # default test/haskell/cpu-caps.tsv's (ID, SECONDS, its measured CPU: about 1.5 times it), as GHC's testsuite gives its slow tests a
-# run_timeout_multiplier: a program whose run needs more than HSI_TIMEOUT on hsi runs to its cap, judged as any (its wall cap three
-# times the CPU's); a cap below HSI_TIMEOUT, or a profiled run (HSI_CPUPROFILE_DIR), keeps HSI_TIMEOUT
+# run_timeout_multiplier: a program whose run needs more than HSI_TIMEOUT on hsi runs to its cap, judged as any (its wall cap
+# wall_cap's); a cap below HSI_TIMEOUT, or a profiled run (HSI_CPUPROFILE_DIR), keeps HSI_TIMEOUT
 export HSI_CPU_CAPS=${HSI_CPU_CAPS-$(awk -F'\t' '!/^#/ && NF >= 2 {printf "%s=%s ", $1, $2}' "$root/test/haskell/cpu-caps.tsv")}
 
 # the plan: ID SRC MAIN FLAGS RUN-OPTS NAME STDIN KIND, separated by U+001F ("-" for none)
@@ -424,7 +424,7 @@ if [ "$front" = native ]; then
     [ "$libs_set" != own ] || { plibs=$own_libs; pimages=$own_images; }
     IFS=: read -r -a dirs <<< "$plibs"; for l in "${dirs[@]}"; do [ -d "$l" ] && la+=(--lib "$l"); done
     [ "$pimages" != none ] && la+=(--image "$pimages")
-    (cd "$g/src" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$g/src" timeout -s KILL $((HSI_TIMEOUT * 3)) \
+    (cd "$g/src" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$g/src" timeout -s KILL $(wall_cap "$HSI_TIMEOUT") \
        sh -c "ulimit -v $((mem * 1048576)); export GOMEMLIMIT=$((mem * 768))MiB; ulimit -t $HSI_TIMEOUT; exec $(printf '%q ' "$hsi" run "${la[@]}" --prog "$g/out/stg/${ob}_gen" --name "${gen%.*}" --)" \
        < /dev/null > "$g/gen.stdout" 2> "$g/gen.stderr") || { echo "pre-gen $gen: its run on hsi failed ($(head -c 80 "$g/gen.stderr" | tr '\n' ' '))"; return 1; }
     [ -f "$g/src/$main" ] || { echo "pre-gen $gen: wrote no $main"; return 1; }
@@ -522,6 +522,18 @@ prog_key() {  # (a program's own C is not in it: the helper's STG is the Haskell
   printf -- '-%s\n' "${helper_hash:0:16}"
 }
 export -f prog_key hsi_pre_gen boot_stdin_name boot_stdin_put
+
+# wall_cap CPU [LOAD NPROC]: the wall seconds a run with CPU seconds of CPU limit is given (smalls-1123, the VM's queue 541, finding 1):
+# a backstop for a run that stops using the CPU, never the judge of a run that uses it. Three times the CPU limit on a host whose
+# load is at most its cores, times the load per core (rounded up) on a loaded one, where a run gets a share of a core (the VM: load
+# 35-43 on 8 cores, hsi at 20-25 % of a core, secretary killed at 1,530 s of wall with 321 s of CPU under the old fixed 3 times);
+# LOAD and NPROC default to /proc/loadavg's first figure and nproc; HSI_WALL_FACTOR sets the factor
+wall_cap() {
+  local f=${HSI_WALL_FACTOR:-}
+  [ -n "$f" ] || f=$(awk -v l="${2:-$(cut -d' ' -f1 /proc/loadavg)}" -v n="${3:-$(nproc)}" 'BEGIN {x = l / n; k = int(x); if (k < x) k++; if (k < 1) k = 1; print 3 * k}')
+  echo $(($1 * f))
+}
+export -f wall_cap
 
 # cpu_limit ID: the program's CPU seconds, HSI_TIMEOUT or its cap (HSI_CPU_CAPS) when larger and the run is not profiled
 cpu_limit() {
@@ -812,7 +824,7 @@ one() {
     # (its run is hsi's: kept to compare the compiled run with, :vs-hsi, and its seconds, :hsi-run)
     local pt0 pt1; pt0=$(date +%s.%N); pst=0
     (cd "$pw" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$pw" HSI_AOT_MODULES="$prog/aot-closures.txt" \
-       timeout -s KILL $(($(cpu_limit "$id") * 3)) sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $(cpu_limit "$id"); $pcmd" \
+       timeout -s KILL $(wall_cap "$(cpu_limit "$id")") sh -c "ulimit -v $((${ARBACE_MEM_GIB:-16} * 1048576)); export GOMEMLIMIT=$((${ARBACE_MEM_GIB:-16} * 768))MiB; ulimit -t $(cpu_limit "$id"); $pcmd" \
        < "$pw/$stdin" > "$prog/aot-hsi.stdout" 2> "$prog/aot-hsi.stderr") || pst=$?
     pt1=$(date +%s.%N); hrun=$(printf '%.2f' "$(echo "$pt1 - $pt0" | bc)")
     rm -rf "${pw:?}"
@@ -834,7 +846,7 @@ one() {
   # a profiled run (HSI_CPUPROFILE_DIR) under the soft limit alone: SIGXCPU stops it with its profile written
   # (and ten times its wall time: a loaded host)
   local cl; cl=$(cpu_limit "$id")
-  local tl="ulimit -t $cl" wl=$((cl * 3))
+  local tl="ulimit -t $cl" wl; wl=$(wall_cap "$cl")
   [ -z "${HSI_CPUPROFILE_DIR:-}" ] || { tl="ulimit -S -t $HSI_TIMEOUT"; wl=$((HSI_TIMEOUT * 10)); }
   t0=$(date +%s.%N)
   (cd "$w" && env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ=UTC HOME="$w" \

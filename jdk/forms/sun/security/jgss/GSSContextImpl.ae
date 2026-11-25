@@ -1,0 +1,378 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/jgss/GSSContextImpl.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.jgss)
+
+(import '(java.io ByteArrayInputStream ByteArrayOutputStream IOException InputStream OutputStream)
+        '(java.lang.reflect Field Modifier)
+        '(org.ietf.jgss ChannelBinding
+                        GSSContext
+                        GSSCredential
+                        GSSException
+                        GSSName
+                        MessageProp
+                        Oid)
+        '(sun.security.jgss.spi GSSContextSpi GSSCredentialSpi)
+        '(sun.security.util ObjectIdentifier))
+
+(defclass ^:public GSSContextImpl
+  :implements [GSSContext]
+
+  (field ^:private ^GSSManagerImpl gssManager)
+
+  (field ^:private ^boolean initiator)
+
+  (field ^:private ^:static ^:final ^int PRE_INIT 1)
+
+  (field ^:private ^:static ^:final ^int IN_PROGRESS 2)
+
+  (field ^:private ^:static ^:final ^int READY 3)
+
+  (field ^:private ^:static ^:final ^int DELETED 4)
+
+  (field ^:private ^int currentState PRE_INIT)
+
+  (field ^:private ^GSSContextSpi mechCtxt nil)
+
+  (field ^:private ^Oid mechOid nil)
+
+  (field ^:private ^ObjectIdentifier objId nil)
+
+  (field ^:private ^GSSCredentialImpl myCred nil)
+
+  (field ^:private ^GSSNameImpl srcName nil)
+
+  (field ^:private ^GSSNameImpl targName nil)
+
+  (field ^:private ^int reqLifetime GSSContextImpl/INDEFINITE_LIFETIME)
+
+  (field ^:private ^ChannelBinding channelBindings nil)
+
+  (field ^:private ^boolean reqConfState true)
+
+  (field ^:private ^boolean reqIntegState true)
+
+  (field ^:private ^boolean reqMutualAuthState true)
+
+  (field ^:private ^boolean reqReplayDetState true)
+
+  (field ^:private ^boolean reqSequenceDetState true)
+
+  (field ^:private ^boolean reqCredDelegState false)
+
+  (field ^:private ^boolean reqAnonState false)
+
+  (field ^:private ^boolean reqDelegPolicyState false)
+
+  (constructor ^:public [this])
+
+  (constructor ^:protected [this ^GSSContextImpl src]
+    (for-each [^Field f (.getDeclaredFields GSSContextImpl)]
+      (when-not (Modifier/isStatic (.getModifiers f))
+        (try (.set f this (.get f src)) (catch Exception e (throw (RuntimeException. e)))))))
+
+  (constructor :throws [GSSException] ^:public [this ^GSSManagerImpl gssManager ^GSSName peer
+                                                ^:mutable ^Oid mech ^GSSCredential myCred
+                                                ^int lifetime]
+    (when-not (instance? GSSNameImpl peer) (throw (GSSException. GSSException/BAD_NAME)))
+    (when (nil? mech) (set! mech ProviderList/DEFAULT_MECH_OID))
+    (set! (.-gssManager this) gssManager)
+    (set! (.-myCred this) (cast GSSCredentialImpl myCred))
+    (set! reqLifetime lifetime)
+    (set! targName (cast GSSNameImpl peer))
+    (set! (.-mechOid this) mech)
+    (set! initiator true))
+
+  (constructor :throws [GSSException] ^:public [this ^GSSManagerImpl gssManager
+                                                ^GSSCredential myCred]
+    (set! (.-gssManager this) gssManager)
+    (set! (.-myCred this) (cast GSSCredentialImpl myCred))
+    (set! initiator false))
+
+  (constructor :throws [GSSException] ^:public [this ^GSSManagerImpl gssManager
+                                                ^byte/1 interProcessToken]
+    (set! (.-gssManager this) gssManager)
+    (set! mechCtxt (.getMechanismContext gssManager interProcessToken))
+    (set! initiator (.isInitiator mechCtxt))
+    (set! (.-mechOid this) (.getMech mechCtxt)))
+
+  (method ^:public initSecContext :throws [GSSException] ^byte/1 [this ^byte/1 inputBuf ^int offset
+                                                                  ^int len]
+    (let [bos (ByteArrayOutputStream. 600)
+          bin (ByteArrayInputStream. inputBuf offset len)
+          size (.initSecContext this bin bos)]
+      (when-not (== size 0) (.toByteArray bos))))
+
+  (method ^:public ^{Deprecated {:since "11"}} initSecContext :throws [GSSException] ^int [this
+                                                                                           ^InputStream inStream
+                                                                                           ^OutputStream outStream]
+    (when (and (some? mechCtxt) (not (== currentState IN_PROGRESS)))
+      (throw (GSSExceptionImpl. GSSException/FAILURE "Illegal call to initSecContext")))
+    (let [^:mutable ^GSSHeader gssHeader nil
+          ^:mutable ^int inTokenLen -1
+          ^:mutable ^GSSCredentialSpi credElement nil
+          ^:mutable firstToken false]
+      (try
+        (if (nil? mechCtxt)
+            (do
+              (when (some? myCred)
+                (try
+                  (set! credElement (.getElement myCred mechOid true))
+                  (catch GSSException ge
+                    (if (and (GSSUtil/isSpNegoMech mechOid)
+                             (== (.getMajor ge) GSSException/NO_CRED))
+                        (set! credElement (.getElement myCred (aget (.getMechs myCred) 0) true))
+                        (throw ge)))))
+              (let [nameElement (.getElement targName mechOid)]
+                (set! mechCtxt
+                      (.getMechanismContext gssManager nameElement credElement reqLifetime mechOid))
+                (.requestConf mechCtxt reqConfState)
+                (.requestInteg mechCtxt reqIntegState)
+                (.requestCredDeleg mechCtxt reqCredDelegState)
+                (.requestMutualAuth mechCtxt reqMutualAuthState)
+                (.requestReplayDet mechCtxt reqReplayDetState)
+                (.requestSequenceDet mechCtxt reqSequenceDetState)
+                (.requestAnonymity mechCtxt reqAnonState)
+                (.setChannelBinding mechCtxt channelBindings)
+                (.requestDelegPolicy mechCtxt reqDelegPolicyState)
+                (set! objId (ObjectIdentifier/of (.toString mechOid)))
+                (set! currentState IN_PROGRESS)
+                (set! firstToken true)))
+            (when-not (or (.equals (.getName (.getProvider mechCtxt)) "SunNativeGSS")
+                          (GSSUtil/isSpNegoMech mechOid))
+              (set! gssHeader (GSSHeader. inStream))
+              (when-not (.equals (.getOid gssHeader) objId)
+                (throw (GSSExceptionImpl. GSSException/DEFECTIVE_TOKEN
+                                          (java-str
+                                            "Mechanism not equal to "
+                                            (.toString mechOid)
+                                            " in initSecContext token"))))
+              (set! inTokenLen (.getMechTokenLength gssHeader))))
+        (let [obuf (.initSecContext mechCtxt inStream inTokenLen)
+              ^:mutable ^int retVal 0]
+          (when (some? obuf)
+            (set! retVal (alength obuf))
+            (when-not (or (.equals (.getName (.getProvider mechCtxt)) "SunNativeGSS")
+                          (and (not firstToken) (GSSUtil/isSpNegoMech mechOid)))
+              (set! gssHeader (GSSHeader. objId (alength obuf)))
+              (set! retVal (unchecked-add-int retVal (.encode gssHeader outStream))))
+            (.write outStream obuf))
+          (when (.isEstablished mechCtxt) (set! currentState READY))
+          retVal)
+        (catch IOException e
+          (throw (GSSExceptionImpl. GSSException/DEFECTIVE_TOKEN (.getMessage e)))))))
+
+  (method ^:public acceptSecContext :throws [GSSException] ^byte/1 [this ^byte/1 inTok ^int offset
+                                                                    ^int len]
+    (let [bos (ByteArrayOutputStream. 100)]
+      (.acceptSecContext this (ByteArrayInputStream. inTok offset len) bos)
+      (let [out (.toByteArray bos)] (when-not (== (alength out) 0) out))))
+
+  (method ^:public ^{Deprecated {:since "11"}} acceptSecContext :throws [GSSException] ^void [this
+                                                                                              ^InputStream inStream
+                                                                                              ^OutputStream outStream]
+    (when (and (some? mechCtxt) (not (== currentState IN_PROGRESS)))
+      (throw (GSSExceptionImpl. GSSException/FAILURE "Illegal call to acceptSecContext")))
+    (let [^:mutable ^GSSHeader gssHeader nil
+          ^:mutable ^int inTokenLen -1
+          ^:mutable ^GSSCredentialSpi credElement nil]
+      (try
+        (if (nil? mechCtxt)
+            (do
+              (set! gssHeader (GSSHeader. inStream))
+              (set! inTokenLen (.getMechTokenLength gssHeader))
+              (set! objId (.getOid gssHeader))
+              (set! mechOid (Oid. (.toString objId)))
+              (when (some? myCred) (set! credElement (.getElement myCred mechOid false)))
+              (set! mechCtxt (.getMechanismContext gssManager credElement mechOid))
+              (.setChannelBinding mechCtxt channelBindings)
+              (set! currentState IN_PROGRESS))
+            (when-not (or (.equals (.getName (.getProvider mechCtxt)) "SunNativeGSS")
+                          (GSSUtil/isSpNegoMech mechOid))
+              (set! gssHeader (GSSHeader. inStream))
+              (when-not (.equals (.getOid gssHeader) objId)
+                (throw (GSSExceptionImpl. GSSException/DEFECTIVE_TOKEN
+                                          (java-str
+                                            "Mechanism not equal to "
+                                            (.toString mechOid)
+                                            " in acceptSecContext token"))))
+              (set! inTokenLen (.getMechTokenLength gssHeader))))
+        (let [obuf (.acceptSecContext mechCtxt inStream inTokenLen)]
+          (when (some? obuf)
+            (when-not (or (.equals (.getName (.getProvider mechCtxt)) "SunNativeGSS")
+                          (GSSUtil/isSpNegoMech mechOid))
+              (set! gssHeader (GSSHeader. objId (alength obuf)))
+              (.encode gssHeader outStream))
+            (.write outStream obuf))
+          (when (.isEstablished mechCtxt) (set! currentState READY)))
+        (catch IOException e
+          (throw (GSSExceptionImpl. GSSException/DEFECTIVE_TOKEN (.getMessage e)))))))
+
+  (method ^:public isEstablished ^boolean [this]
+    (if (nil? mechCtxt) false (== currentState READY)))
+
+  (method ^:public getWrapSizeLimit :throws [GSSException] ^int [this ^int qop ^boolean confReq
+                                                                 ^int maxTokenSize]
+    (if (some? mechCtxt)
+        (.getWrapSizeLimit mechCtxt qop confReq maxTokenSize)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public wrap :throws [GSSException] ^byte/1 [this ^byte/1 inBuf ^int offset ^int len
+                                                        ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.wrap mechCtxt inBuf offset len msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public ^{Deprecated {:since "11"}} wrap :throws [GSSException] ^void [this
+                                                                                  ^InputStream inStream
+                                                                                  ^OutputStream outStream
+                                                                                  ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.wrap mechCtxt inStream outStream msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public unwrap :throws [GSSException] ^byte/1 [this ^byte/1 inBuf ^int offset ^int len
+                                                          ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.unwrap mechCtxt inBuf offset len msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public ^{Deprecated {:since "11"}} unwrap :throws [GSSException] ^void [this
+                                                                                    ^InputStream inStream
+                                                                                    ^OutputStream outStream
+                                                                                    ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.unwrap mechCtxt inStream outStream msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public getMIC :throws [GSSException] ^byte/1 [this ^byte/1 inMsg ^int offset ^int len
+                                                          ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.getMIC mechCtxt inMsg offset len msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public ^{Deprecated {:since "11"}} getMIC :throws [GSSException] ^void [this
+                                                                                    ^InputStream inStream
+                                                                                    ^OutputStream outStream
+                                                                                    ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.getMIC mechCtxt inStream outStream msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public verifyMIC :throws [GSSException] ^void [this ^byte/1 inTok ^int tokOffset
+                                                           ^int tokLen ^byte/1 inMsg ^int msgOffset
+                                                           ^int msgLen ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.verifyMIC mechCtxt inTok tokOffset tokLen inMsg msgOffset msgLen msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public ^{Deprecated {:since "11"}} verifyMIC :throws [GSSException] ^void [this
+                                                                                       ^InputStream tokStream
+                                                                                       ^InputStream msgStream
+                                                                                       ^MessageProp msgProp]
+    (if (some? mechCtxt)
+        (.verifyMIC mechCtxt tokStream msgStream msgProp)
+        (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!"))))
+
+  (method ^:public export :throws [GSSException] ^byte/1 [this]
+    (let [^:mutable ^byte/1 result nil]
+      (when (and (.isTransferable mechCtxt)
+                 (.equals (.getName (.getProvider mechCtxt)) "SunNativeGSS"))
+        (set! result (.export mechCtxt)))
+      result))
+
+  (method ^:public requestMutualAuth :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqMutualAuthState state)))
+
+  (method ^:public requestReplayDet :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqReplayDetState state)))
+
+  (method ^:public requestSequenceDet :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqSequenceDetState state)))
+
+  (method ^:public requestCredDeleg :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqCredDelegState state)))
+
+  (method ^:public requestAnonymity :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqAnonState state)))
+
+  (method ^:public requestConf :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqConfState state)))
+
+  (method ^:public requestInteg :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqIntegState state)))
+
+  (method ^:public requestLifetime :throws [GSSException] ^void [this ^int lifetime]
+    (when (and (nil? mechCtxt) initiator) (set! reqLifetime lifetime)))
+
+  (method ^:public setChannelBinding :throws [GSSException] ^void [this
+                                                                   ^ChannelBinding channelBindings]
+    (when (nil? mechCtxt) (set! (.-channelBindings this) channelBindings)))
+
+  (method ^:public getCredDelegState ^boolean [this]
+    (if (some? mechCtxt) (.getCredDelegState mechCtxt) reqCredDelegState))
+
+  (method ^:public getMutualAuthState ^boolean [this]
+    (if (some? mechCtxt) (.getMutualAuthState mechCtxt) reqMutualAuthState))
+
+  (method ^:public getReplayDetState ^boolean [this]
+    (if (some? mechCtxt) (.getReplayDetState mechCtxt) reqReplayDetState))
+
+  (method ^:public getSequenceDetState ^boolean [this]
+    (if (some? mechCtxt) (.getSequenceDetState mechCtxt) reqSequenceDetState))
+
+  (method ^:public getAnonymityState ^boolean [this]
+    (if (some? mechCtxt) (.getAnonymityState mechCtxt) reqAnonState))
+
+  (method ^:public isTransferable :throws [GSSException] ^boolean [this]
+    (if (some? mechCtxt) (.isTransferable mechCtxt) false))
+
+  (method ^:public isProtReady ^boolean [this]
+    (if (some? mechCtxt) (.isProtReady mechCtxt) false))
+
+  (method ^:public getConfState ^boolean [this]
+    (if (some? mechCtxt) (.getConfState mechCtxt) reqConfState))
+
+  (method ^:public getIntegState ^boolean [this]
+    (if (some? mechCtxt) (.getIntegState mechCtxt) reqIntegState))
+
+  (method ^:public getLifetime ^int [this]
+    (if (some? mechCtxt) (.getLifetime mechCtxt) reqLifetime))
+
+  (method ^:public getSrcName :throws [GSSException] ^GSSName [this]
+    (when (nil? srcName) (set! srcName (GSSNameImpl/wrapElement gssManager (.getSrcName mechCtxt))))
+    srcName)
+
+  (method ^:public getTargName :throws [GSSException] ^GSSName [this]
+    (when (nil? targName)
+      (set! targName (GSSNameImpl/wrapElement gssManager (.getTargName mechCtxt))))
+    targName)
+
+  (method ^:public getMech :throws [GSSException] ^Oid [this]
+    (if (some? mechCtxt) (.getMech mechCtxt) mechOid))
+
+  (method ^:public getDelegCred :throws [GSSException] ^GSSCredential [this]
+    (when (nil? mechCtxt)
+      (throw (GSSExceptionImpl. GSSException/NO_CONTEXT "No mechanism context yet!")))
+    (let [delCredElement (.getDelegCred mechCtxt)]
+      (when (some? delCredElement)
+        (GSSManagerImpl/wrap (GSSCredentialImpl. gssManager delCredElement)))))
+
+  (method ^:public isInitiator :throws [GSSException] ^boolean [this]
+    initiator)
+
+  (method ^:public dispose :throws [GSSException] ^void [this]
+    (set! currentState DELETED)
+    (when (some? mechCtxt) (.dispose mechCtxt) (set! mechCtxt nil))
+    (set! myCred nil)
+    (set! srcName nil)
+    (set! targName nil))
+
+  (method ^:public inquireSecContext :throws [GSSException] [this ^String type]
+    (when (nil? mechCtxt) (throw (GSSException. GSSException/NO_CONTEXT)))
+    (.inquireSecContext mechCtxt type))
+
+  (method ^:public requestDelegPolicy :throws [GSSException] ^void [this ^boolean state]
+    (when (and (nil? mechCtxt) initiator) (set! reqDelegPolicyState state)))
+
+  (method ^:public getDelegPolicyState ^boolean [this]
+    (if (some? mechCtxt) (.getDelegPolicyState mechCtxt) reqDelegPolicyState)))

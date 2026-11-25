@@ -27,6 +27,7 @@
 #include "caml/runtime_events_consumer.h"
 
 /* the natives (go/arbace/oicapi) */
+extern void __oi_caml_main(void);
 extern value __oi_alloc(mlsize_t wosize, tag_t tag);
 extern value __oi_alloc_static(mlsize_t wosize, tag_t tag);
 extern value __oi_predef(int index);
@@ -588,3 +589,10 @@ runtime_events_error caml_runtime_events_read_poll(struct caml_runtime_events_cu
   if (consumed != NULL) *consumed = n;
   return err;
 }
+
+/* a C program that embeds OCaml (queue 539, embedded/cmcaml: the stubs' own main): its first caml_main or caml_startup runs the
+   OCaml program's initialisation (go/arbace/oicapi's Embed; a nested call is counted, as startup.c's), caml_shutdown leaves the
+   program's at_exit to oi, which runs it once main returns */
+void caml_main(char **argv) { (void) argv; __oi_caml_main(); }
+void caml_startup(char **argv) { (void) argv; __oi_caml_main(); }
+void caml_shutdown(void) { }

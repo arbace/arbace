@@ -695,7 +695,22 @@
       (:get-field :set-field)
       (let [f (:field node)] (use-st st (or (:declarer f) (:owner f))) (use-desc! st (:desc f)))
       (:cast :instance?) (use-desc! st (:class node))
-      :class-lit (use-desc! st (:class node))
+      :class-lit (let [c (:class node)]
+                   (use-desc! st c)
+                   ;; a class literal may be initialized and instantiated by reflection (Class.forName's initialization,
+                   ;; newInstance, getConstructor(...).newInstance, a variant's rmiClass): a class's initializer, and a concrete
+                   ;; class's constructors, instantiated (java-design-1122, queue 517's finding 1: the literal had rooted the
+                   ;; class alone, "not translated: C.<clinit>", then ".<init>(...)", on its reflective instantiation)
+                   (when (t/class-desc? c)
+                     (let [n (t/desc->internal c)
+                           d (get (.-cs st) n)
+                           fl (or (:flags d) 0)]
+                       (when (and d (zero? (bit-and fl 0x0200)) (use-st st n))
+                         (init* st n)
+                         (when (zero? (bit-and fl 0x0400))
+                           (doseq [mm (:methods d) :when (= "<init>" (:name mm))]
+                             (reach* st [n "<init>" (:desc mm)]))
+                           (instantiate* st n))))))
       (:new-array :array-init) (use-desc! st (:type node))
       :try (doseq [c (:catches node) cls (:classes c)] (use-st st cls))
       :lambda (do (when (use-st st (:fi node)) (lambda-st st (:fi node))) (markers-st st (:markers node)))
@@ -1052,6 +1067,13 @@
       (when-let [why (:analysis-failed dst)] (note-unavailable! st (str "analysis failed: " why)))
       (when mm
         (doseq [cl (m/method-desc-classes desc)] (use-st st cl)))
+      ;; a program's own native method, which nothing implements: its body throws UnsatisfiedLinkError, as the JVM's
+      ;; unlinked native (decls/method-forms; java-design-1123)
+      (when (and mm (m/has? (:flags mm) Opcodes/ACC_NATIVE) (nm/own-class? c)
+                 (use-st st "java/lang/UnsatisfiedLinkError"))
+        (init* st "java/lang/UnsatisfiedLinkError")
+        (reach* st ["java/lang/UnsatisfiedLinkError" "<init>" "(Ljava/lang/String;)V"])
+        (instantiate* st "java/lang/UnsatisfiedLinkError"))
       (case name
         "<clinit>"
         (do (doseq [nd (:clinit dst)] (scan-code* st nd))

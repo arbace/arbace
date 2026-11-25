@@ -1,0 +1,187 @@
+;; Converted from jdk26u src/java.security.jgss/share/classes/sun/security/krb5/internal/PAData.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'sun.security.krb5.internal)
+
+(import '(java.io IOException)
+        '(java.nio.charset Charset StandardCharsets)
+        '(java.util ArrayList)
+        '(sun.security.krb5 Asn1Exception)
+        '(sun.security.krb5.internal.crypto EType)
+        '(sun.security.krb5.internal.util KerberosString)
+        '(sun.security.util DerInputStream DerOutputStream DerValue HexDumpEncoder))
+
+(defclass ^:public PAData
+  (field ^:private ^int pADataType)
+
+  (field ^:private ^byte/1 pADataValue nil)
+
+  (field ^:private ^:static ^:final ^byte TAG_PATYPE 1)
+
+  (field ^:private ^:static ^:final ^byte TAG_PAVALUE 2)
+
+  (constructor ^:private [this])
+
+  (constructor ^:public [this ^int new_pADataType ^byte/1 new_pADataValue]
+    (set! pADataType new_pADataType)
+    (when (some? new_pADataValue) (set! pADataValue (.clone new_pADataValue))))
+
+  (method ^:public clone [this]
+    (let [new_pAData (PAData.)]
+      (set! (.-pADataType new_pAData) pADataType)
+      (when (some? pADataValue)
+        (set! (.-pADataValue new_pAData) (new byte/1 (alength pADataValue)))
+        (System/arraycopy pADataValue 0 (.-pADataValue new_pAData) 0 (alength pADataValue)))
+      new_pAData))
+
+  (constructor :throws [Asn1Exception IOException] ^:public [this ^DerValue encoding]
+    (let [^:mutable ^DerValue der nil]
+      (when-not (== (.getTag encoding) DerValue/tag_Sequence)
+        (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (if (== (bit-and-int (.getTag der) 0x1F) 0x01)
+          (set! (.-pADataType this) (.intValue (.getBigInteger (.getData der))))
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+      (set! der (.getDerValue (.getData encoding)))
+      (when (== (bit-and-int (.getTag der) 0x1F) 0x02)
+        (set! (.-pADataValue this) (.getOctetString (.getData der))))
+      (when (> (.available (.getData encoding)) 0) (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))))
+
+  (method ^:public asn1Encode :throws [Asn1Exception IOException] ^byte/1 [this]
+    (let [bytes (DerOutputStream.)
+          ^:mutable temp (DerOutputStream.)]
+      (.putInteger temp pADataType)
+      (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true TAG_PATYPE) temp)
+      (set! temp (DerOutputStream.))
+      (.putOctetString temp pADataValue)
+      (.write bytes (DerValue/createTag DerValue/TAG_CONTEXT true TAG_PAVALUE) temp)
+      (set! temp (DerOutputStream.))
+      (.write temp DerValue/tag_Sequence bytes)
+      (.toByteArray temp)))
+
+  (method ^:public getType ^int [this] pADataType)
+
+  (method ^:public getValue ^byte/1 [this]
+    (when (some? pADataValue) (.clone pADataValue)))
+
+  (method ^:public ^:static parseSequence :throws [Asn1Exception IOException] ^PAData/1 [^DerInputStream data
+                                                                                         ^byte explicitTag
+                                                                                         ^boolean optional]
+    (when-not (and optional
+                   (not (== (bit-and-int (unchecked-byte (.peekByte data)) (unchecked-byte 0x1F))
+                            explicitTag)))
+      (let [subDer (.getDerValue data)
+            subsubDer (.getDerValue (.getData subDer))]
+        (when-not (== (.getTag subsubDer) DerValue/tag_SequenceOf)
+          (throw (Asn1Exception. Krb5/ASN1_BAD_ID)))
+        (let [^{:tag (ArrayList PAData)} v (ArrayList.)]
+          (while (> (.available (.getData subsubDer)) 0)
+            (.add v (PAData. (.getDerValue (.getData subsubDer)))))
+          (when (> (.size v) 0) (let [pas (cast PAData/1 (.toArray v (new PAData/1 0)))] pas))))))
+
+  (method ^:public ^:static getPreferredEType :throws [IOException Asn1Exception] ^int [^PAData/1 pas
+                                                                                        ^int defaultEType]
+    (if (nil? pas)
+        defaultEType
+        (let [^:mutable ^DerValue d nil
+              ^:mutable ^DerValue d2 nil]
+          (for-each [^PAData p pas]
+            (when (some? (.getValue p))
+              (switch (.getType p)
+                Krb5/PA_ETYPE_INFO (set! d (DerValue. (.getValue p)))
+                Krb5/PA_ETYPE_INFO2 (set! d2 (DerValue. (.getValue p))))))
+          (when (some? d2)
+            (while (> (.available (.-data d2)) 0)
+              (let [value (.getDerValue (.-data d2))
+                    tmp (ETypeInfo2. value)]
+                (when (or (EType/isNewer (.getEType tmp)) (nil? (.getParams tmp)))
+                  (return (.getEType tmp))))))
+          (when (some? d)
+            (while (> (.available (.-data d)) 0)
+              (let [value (.getDerValue (.-data d))
+                    tmp (ETypeInfo. value)]
+                (return (.getEType tmp)))))
+          defaultEType)))
+
+  (defclass ^:public ^:static SaltAndParams
+    (field ^:public ^:final ^String salt)
+
+    (field ^:public ^:final ^byte/1 params)
+
+    (constructor ^:public [this ^:mutable ^String s ^byte/1 p]
+      (when (and (some? s) (.isEmpty s)) (set! s nil))
+      (set! (.-salt this) s)
+      (set! (.-params this) p)))
+
+  (method ^:public ^:static getSaltAndParams :throws [Asn1Exception IOException] ^SaltAndParams [^int eType
+                                                                                                 ^PAData/1 pas]
+    (when (some? pas)
+      (let [^:mutable ^DerValue d nil
+            ^:mutable ^DerValue d2 nil
+            ^:mutable ^String paPwSalt nil]
+        (for-each [^PAData p pas]
+          (when (some? (.getValue p))
+            (switch (.getType p)
+              Krb5/PA_PW_SALT
+                (set! paPwSalt
+                      (String. (.getValue p)
+                               ^Charset (if KerberosString/MSNAME
+                                            StandardCharsets/UTF_8
+                                            StandardCharsets/ISO_8859_1)))
+              Krb5/PA_ETYPE_INFO (set! d (DerValue. (.getValue p)))
+              Krb5/PA_ETYPE_INFO2 (set! d2 (DerValue. (.getValue p))))))
+        (when (some? d2)
+          (while (> (.available (.-data d2)) 0)
+            (let [value (.getDerValue (.-data d2))
+                  tmp (ETypeInfo2. value)]
+              (when (and (== (.getEType tmp) eType)
+                         (or (EType/isNewer eType) (nil? (.getParams tmp))))
+                (return (SaltAndParams. (.getSalt tmp) (.getParams tmp)))))))
+        (when (some? d)
+          (while (> (.available (.-data d)) 0)
+            (let [value (.getDerValue (.-data d))
+                  tmp (ETypeInfo. value)]
+              (when (== (.getEType tmp) eType) (return (SaltAndParams. (.getSalt tmp) nil))))))
+        (when (some? paPwSalt) (SaltAndParams. paPwSalt nil)))))
+
+  (method ^:public toString ^String [this]
+    (let [sb (StringBuilder.)]
+      (.append (.append (.append sb ">>>Pre-Authentication Data:\n\t PA-DATA type = ") pADataType)
+               \newline)
+      (switch pADataType
+        Krb5/PA_ENC_TIMESTAMP (.append sb "\t PA-ENC-TIMESTAMP")
+        Krb5/PA_ETYPE_INFO
+          (when (some? pADataValue)
+            (try
+              (let [der (DerValue. pADataValue)]
+                (while (> (.available (.-data der)) 0)
+                  (let [value (.getDerValue (.-data der))
+                        info (ETypeInfo. value)]
+                    (.append (.append (.append (.append
+                                                 (.append sb "\t PA-ETYPE-INFO etype = ")
+                                                 (.getEType info))
+                                               ", salt = ")
+                                      (.getSalt info))
+                             \newline))))
+              (catch [IOException Asn1Exception] e (.append sb "\t <Unparseable PA-ETYPE-INFO>\n"))))
+        Krb5/PA_ETYPE_INFO2
+          (when (some? pADataValue)
+            (try
+              (let [der (DerValue. pADataValue)]
+                (while (> (.available (.-data der)) 0)
+                  (let [value (.getDerValue (.-data der))
+                        info2 (ETypeInfo2. value)]
+                    (.append (.append (.append (.append
+                                                 (.append sb "\t PA-ETYPE-INFO2 etype = ")
+                                                 (.getEType info2))
+                                               ", salt = ")
+                                      (.getSalt info2))
+                             ", s2kparams = ")
+                    (let [s2kparams (.getParams info2)]
+                      (cond
+                        (nil? s2kparams) (.append sb "null\n")
+                        (== (alength s2kparams) 0) (.append sb "empty\n")
+                        :else (.append sb (.encodeBuffer (HexDumpEncoder.) s2kparams)))))))
+              (catch [IOException Asn1Exception] e (.append sb "\t <Unparseable PA-ETYPE-INFO>\n"))))
+        Krb5/PA_FOR_USER (.append sb "\t PA-FOR-USER\n")
+        nil)
+      (.toString sb))))
