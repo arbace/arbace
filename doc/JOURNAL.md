@@ -22010,3 +22010,40 @@ The overlaps resolved (three branches built the same features independently):
 Next (.tmp/train-5.sh under one big-lock ticket, HEAVY_MEM_GIB 30): the read back, bin/j2g-edge update, one gate build, the smoke
 run; then .tmp/records-5.sh (its own ticket, 16): the eval check of the 101 modules the branches name or whose non-passes sit in
 the streams' classes (.tmp/train-5-modules.txt), and the AOT program set whole, recorded after review.
+
+## 2026-11-25: Python eval, py-odict lane: classes collected by the cycle collector, finalizer chains, an instance's __reduce__
+
+The burst's lane for the deferred eval classes `:ordered-dict-c` (31 names), `:zoneinfo-c` (11) and `:os-and-files-misc` (13),
+branch `py-odict-1125` from mac/train-5 (`b6be9b74b`). Studied: CPython 3.14.10 (the pinned tarball,
+`.tmp/repr-python/Python-3.14.10`): Python/gc.c, Objects/typeobject.c (`type_traverse`, `object___reduce_ex___impl`,
+`remove_subclass`), Objects/odictobject.c (`odict_traverse`), Lib/test/test_ordered_dict.py, test_zoneinfo/test_zoneinfo.py,
+Lib/zoneinfo/_zoneinfo.py; doc/python/PYTHON-SURVEY.md's "Design: 241" (its plan (2), classes as nodes, never built).
+
+- The before picture: train 5's executable (`.tmp/gate-exe/b85611b74343b609b2a4`), `bin/pyi check --only` of the 63 names the
+  three classes list (PYI_RUNTIME=compiled): 52 pass already (py-mods-1122's C OrderedDict, py-accel's `_zoneinfo` from
+  Modules/_zoneinfo.c in the C world, py-os-1124 and 521's `_datetime` for the os rows), 11 do not: five
+  test_highly_nested_subclass, four test_reference_loop, zoneinfo's pure ZoneInfoPickleTest test_from_file and
+  test_pickle_after_from_file.
+- finRounds (go/arbace/py/finalize.go): rounds while a round handles something, at most 256 (218's 8 ran 25 of a chain of 100
+  `__del__`: Go frees a chain of finalized objects a link a collection).
+- Classes as nodes of the cycle collector: heap classes not held by a module under a name, traversed as `type_traverse`; an
+  instance's class, a heap class's getsets and members, the C OrderedDict (`odict_traverse`) traversed too; `cyHideTypes` takes the
+  probed classes out of the registries and caches for the probe and puts every entry back after; `cyForgetType` drops a freed
+  class. Found on the way: removing a class from a base's subclasses by `append(list[:k:k], list[k+1:]...)` kept the class in the
+  old array past the shorter slice's end (the last class made was never collected): a new array (`cyWithout`).
+- object.__reduce_ex__: an instance's own `__reduce__` (its __dict__'s, before a class's non-data descriptor) is called, as
+  getattr(self, '__reduce__') in CPython; else the class's, bound to the instance as before (a first version through GetAttr bound
+  a built-in base's `__reduce__` to the unwrapped value: namedtuple's and functools.partial's pickling broke in the AOT run, fixed).
+- Measured by pyi's AOT (the worktree's runtime compiled, `bin/pyi check --aot --lib-test --fresh --only`, the children by the
+  compiled launcher; probes by `bin/pyi aot`), no gate build: 31 modules whole (test_ordered_dict, test_zoneinfo, the
+  `:os-and-files-misc` modules and those of the classes, the collector and pickling: 6,170 methods) and again 12 after the
+  `__reduce_ex__` fix (4,269): all 63 names of the three classes pass; against the eval record nothing the record passes fails
+  that does not fail the same on train 5's executable (test_functools' four test_recursive_pickle stack overflows, namedtuple's
+  and typing's NamedTuple pickling, test_descr's test_reduce_copying, test_pickle's C test_evil_pickler_mutating_collection; and
+  test_enum's import, "ReprEnum subclasses must be mixed with a data type": the C `_datetime`'s date has no `__new__` in its
+  `__dict__`: train 5's, the C world's, reported, not touched here). Rows of other classes that pass in the same run:
+  test_module's test_clear_dict_in_ref_cycle (`:finalization-collect`'s class cycle), test_weakref's test_classes and
+  test_functools' test_method_no_reference_loops (`:finalization-cycle`), test_descr's test_type_lookup_mro_reference, test_gc's
+  test_saveall, test_trash_weakref_clear, test_trashcan_threads and test_function_tp_clear_leaves_consistent_state
+  (`:gc-collector`), test_threading_local's test_local_refs: for the train's record to confirm. Nothing recorded here (the
+  train records from its build); no class of test/python/divergences.edn changed.

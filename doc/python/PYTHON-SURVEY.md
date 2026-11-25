@@ -8821,3 +8821,7 @@ the C OrderedDict's rows of py-mods-1122 (issue119004, gh-148660, the iterators'
 - **An instance's own `__reduce__`** (zoneinfo's pure `ZoneInfoPickleTest.test_from_file` and `test_pickle_after_from_file`):
   `object.__reduce_ex__` with a class `__reduce__` overriding object's calls `getattr(self, '__reduce__')`, so `from_file`'s
   instance attribute `obj.__reduce__ = obj._file_reduce` raises PicklingError (it called the class's).
+- **Proved** (pyi's AOT on the worktree, `bin/pyi check --aot --lib-test --fresh --only`, 31 modules whole, then 12 again after
+  the `__reduce_ex__` fix; the negative controls failing as they must): the 63 names of the three classes all pass; no row the
+  eval record passes fails but those that fail the same on train 5's executable (the C world's `_pickle` and `_datetime`
+  rows: the journal's entry lists them). Not recorded here: the train records from its build.
