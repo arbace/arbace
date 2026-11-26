@@ -2433,6 +2433,24 @@
         ;; (cpp-def3: the noexcept-specifier's surely failing operand, kept for cx-nx-needed!)
         nx-e (atom nil)
         nx-v (binding [*cx-nx-error* (when (checking?) nx-e)] (noexcept-of tscope qt))
+        ;; (cpp-def3, the checker: before C++17, a dynamic exception specification's type-ids resolved with the declaration
+        ;; ([except.spec] of C++14, /2: each an adjusted type, no incomplete one): one naming a member of a type that is no class --
+        ;; `throw(typename T::X)` for T = void -- is GCC's "'void' is not a class, struct, or union type", at the function:
+        ;; template/eh2.C's A<void>)
+        _ (when-let [[_ ts] (and (checking?) *on-refusal* (< (long *cxx-year*) 17) (not (header-node? n))
+                                 (re-find #"\bthrow\s*\(([^()]*)\)" (or qt "")))]
+            (doseq [t (map str/trim (str/split ts #","))
+                    :when (and (seq t) (not (str/includes? t "...")) (str/includes? t "::"))]
+              (try (resolve-type tscope t)
+                   (catch arbace.lang.ExceptionInfo e
+                     (when (or (re-find #"^codegen: a scope of a non-class" (str (ex-message e)))
+                               ;; (a template parameter bound to a type that is no class, its name no scope)
+                               (when-let [[_ q] (re-find #"^codegen: no scope ([A-Za-z_]\w*)$" (str (ex-message e)))]
+                                 (let [qt (try (resolve-type tscope q) (catch arbace.lang.ExceptionInfo _ nil))]
+                                   (and (map? qt) (not (abi/class? (abi/unq qt))) (not (abi/enum? (abi/unq qt)))))))
+                       (*on-refusal* (ex-info (str "codegen: a type that is not a class, struct, or union type named in a dynamic exception specification (" t ")")
+                                              {:codegen/refused :type :cx/node n})
+                                     n))))))
         f {:name nm :kind k :cls cid :ty ty
            ;; (cpp-sweep, the checker: C++11's [dcl.constexpr]/8, a constexpr non-static member function other than a constructor
            ;; is const, C++14 dropping it: ubsan/vptr-4.C's `t.foo()` of a constexpr object)
@@ -5611,6 +5629,9 @@
                    ;; (a defaulted or implicit copy or move assignment: the object's value, memberwise, [class.copy.assign]/12;
                    ;; the result the object)
                    (let [v (ce-init (first (:ps (:ty f))) (first (:args e)) env)]
+                     ;; (cpp-def3: the object's store judged as an assignment's: outside its lifetime, a const object,
+                     ;; cpp1y/constexpr-lifetime7.C's `x = T()` after `x.~T()`)
+                     (when (checking?) (ce-check-const! e this))
                      (ce-put! this (if (ce-loc? v) (ce-get v) v))
                      this)
                    (let [env2 (cond-> (assoc (ce-args-env f (:args e) env) ::ret rt ::fn (:id f)) this (assoc ::this this))

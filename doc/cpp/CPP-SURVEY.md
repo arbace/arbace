@@ -12118,3 +12118,80 @@ templates about 13 (template/non-dependent26.C, cpp0x/overload2.C, parse/templat
 diagnostic/pr79300.C, init/pr43064-2.C). Two held for the user: parse/explicit1.C (C++17's CWG727 allows the explicit
 specialization in class scope GCC 15 rejects) and template/typedef39.C (its expected error on a line of a template never
 instantiated, the test's own comment saying it belongs elsewhere).
+
+## As built: cpp-def3, the read cell's deferred rows: the constant evaluator, templates and single rules (2026-11-26; branch `cpp-def3-1126` from mac/next `0b3174413`)
+
+The read cell at the base: 6,155 pass / 0 by design / 128 deferred (own-diag 127, gcc-own-rules 1), the groups cpp-def2 left
+(parser recovery about 37, the constant evaluator 27, definition-time checks of templates 13, single rules 53). Each row read
+against its dg lines and the own errors, GCC 15.2's messages probed by hand where the test's words did not settle the place; the
+rules from the standard's text or GCC's documented messages, no GCC or clang code:
+
+- The constant evaluator (arbace/cpp/sema.ae): [class.copy.assign]/12 since C++14, an implicit or defaulted copy or move assignment
+  constexpr when its class is literal and its subobjects' assignments are (cx-implicit-assign-constexpr?), evaluated memberwise; an
+  element of a braced list that is itself an explicit conversion is no narrowing ([dcl.init.list]/7 judges the implicit one):
+  cpp1y/constexpr-89336-3.C. [class.static.data]/4, a non-inline const static data member of integral type whose declaration in its
+  class has an initializer: that initializer a constant expression (:cx-static-ice, cx-check-constant!), GCC's "overflow in constant
+  expression" at the operation and at the member; a class template's specialization's initializer instantiated where the member is
+  used, [temp.inst]/4 (cx-static-ice-use!, also a constexpr static member's of scalar type), its value kept for the reads
+  (:cx-ice-val: Fib<i>::value reads two others); an erroneous one leaves the member not usable: cpp0x/overflow1.C. C++11's
+  [expr.const]/2, an assignment, compound assignment, increment or decrement never constant, so a constexpr function whose return
+  statement has one fails the potential constant check ("expression '--x' is not a constant expression"): cpp0x/constexpr-function2.C,
+  constexpr-neg1.C; the check's return statement whose result a constructor surely not constexpr initializes (`return d;`, the copy
+  constructor), and the evaluation's place for such a call the return statement's (:cx-ret-at): cpp0x/constexpr-ex1.C.
+  [expr.const]/4, a const integral variable of the main file's namespace scope with no initializer before the read is not usable
+  (constexpr-function2.C's `extern const int side;`); [expr.const]/13, a constexpr pointer whose value points to a temporary of its
+  initializer (`addr(5)` returning its reference parameter's address): constexpr-neg1.C. DR2478, an explicit specialization of a
+  member of a class template's specialization has its own constexpr, consteval and constinit, a static member's
+  constant-initialization error at its definition: DRs/dr2478.C. [except.spec]/13, a noexcept-specifier instantiated when needed: the
+  operand's sure failure -- a substitution's error, a non-static data member read through `this` or a parameter's value outside the
+  function's body, a constant without an initializer -- kept on the function (*cx-nx-error*, :cx-nx-error) and reported when the
+  function is selected (fn-call, method-call, a constructor, an implicit copy constructor's subobjects'; not inside an implicit
+  member's own body): cpp0x/noexcept34.C, noexcept36.C, cpp0x/sfinae11.C. [class.mem] with [temp.inst], a class template
+  specialization's default member initializer that makes an object of that class by its implicit default constructor needs its own
+  instantiation again, "recursive instantiation of default member initializer" (nsdmi-guard): cpp0x/nsdmi-template14.C.
+- Templates (arbace/cpp/template.ae, arbace/repr/cpp/parse.ae): a template parameter whose type is a name no lookup finds and the
+  main file declares nowhere ("'T' has not been declared"), or `template<typedef>`, kept with an erroneous type so the declaration
+  goes on -- a literal operator template's list then invalid ([over.literal]/5), a redeclaration's parameter kinds differing, a
+  template-id's argument for it a mismatch: cpp0x/udlit-tmpl-arg-neg2.C, template/redecl5.C, template/typedef4.C; a type-id or a
+  function's name for a non-type parameter of integral type ([temp.arg.general]/2, [temp.arg.nontype]/1) a sure failure, "type/value
+  mismatch" or "could not convert" in a class template-id: template/typedef4.C, template/nontype13.C; a variable template's partial
+  specializations judged as a class template's ([temp.spec.partial]): its own parameters in order, a second definition of the same
+  arguments, two matching none more specialized ("ambiguous template instantiation"), one declared after a template-id of the main
+  file's text before it that it matches: cpp1y/var-templ19.C; [enum.udecl] with [namespace.udecl]/11, two using-enum-declarations of
+  one scope whose enumerations share an enumerator's name conflict: cpp2a/using-enum-5.C; an erroneous return-type-requirement
+  (`-> T`, no type-constraint) taken as the Concepts TS's implicit conversion, as GCC goes on after its error, a private base's
+  reference binding none from a namespace scope: cpp2a/concepts-requires5.C (concepts/pr71385.C still satisfied).
+- Single rules: an ambiguous member lookup's candidates as notes at their declarations, "candidates are: '...' [with T = int]"
+  (:cx/notes, diag.ae's sema-errors): parse/error17.C; GCC's explanation of a near match, an implicit copy or move assignment whose
+  reference parameter cannot bind a volatile operand of its class, its error at the class: overload/error8.C; a namespace-scope
+  function definition with no type, GCC's permerror "ISO C++ forbids declaration of 'x2' with no type", taken as returning int and
+  its body analyzed: parse/crash67.C; a generic lambda before C++14 (N3649), "use of 'auto' in lambda parameter declaration only
+  available with '-std=c++14'": cpp1y/lambda-generic-variadic2.C; a non-static data member's array bound naming a const static data
+  member whose in-class initializer is erroneous is no constant (cx-runtime-var?): template/crash2.C; before C++17 a dynamic exception
+  specification's type-ids resolved with a specialization's declaration, one naming a member of a type that is no class (`throw
+  (typename T::X)` for T = void) GCC's "'void' is not a class, struct, or union type": template/eh2.C.
+
+Each rule checked on the files it reaches (.tmp/bin/dm, the judge's `--only` lists): the rows, and as controls the recorded own
+passes the rule can touch (the files with two using-enum-declarations, every nsdmi, var-templ, noexcept, sfinae, constinit,
+consteval, template/spec and template/explicit pass, the return-type-requirement files; then 355 more: every constexpr pass, those
+with a const static member's in-class initializer, a generic lambda, a dynamic exception specification or a template parameter of a
+name the file declares nowhere). That run lost two, fixed: cpp1z/class-deduction52.C (a member template's undeclared parameter type
+now left declined, its class dropped as before) and cpp1y/constexpr-lifetime7.C (the implicit assignment's store judged as an
+assignment's, outside its lifetime at `x = T()`); concepts/pr71385.C before, by a first version that made an erroneous
+return-type-requirement false. Rows to own pass, 23 (.tmp/moved.txt
+in the worktree): cpp0x/constexpr-ex1.C, cpp0x/constexpr-function2.C, cpp0x/constexpr-neg1.C, cpp0x/noexcept34.C, cpp0x/noexcept36.C,
+cpp0x/nsdmi-template14.C, cpp0x/overflow1.C, cpp0x/sfinae11.C, cpp0x/udlit-tmpl-arg-neg2.C, cpp1y/constexpr-89336-3.C,
+cpp1y/lambda-generic-variadic2.C, cpp1y/var-templ19.C, cpp2a/concepts-requires5.C, cpp2a/using-enum-5.C, DRs/dr2478.C,
+overload/error8.C, parse/crash67.C, parse/error17.C, template/crash2.C, template/eh2.C, template/nontype13.C, template/redecl5.C,
+template/typedef4.C; cpp23/ext-floating12.C, the read's timeout row, passes alone too (the record's timeout under load). The regression over next's recorded own passes is the one shared with cpp-indep3 (the coordinator, 2026-11-26), which records both
+lanes' rows.
+
+Left, looked at: the constant evaluator's calls through function pointers and generic lambdas' conversions (cpp0x/constexpr-ice20.C,
+cpp1z/constexpr-lambda8.C, constexpr-lambda6.C), a non-aggregate's defaulted default constructor with `this` in a default member
+initializer and the copy elided (cpp1y/constexpr-nsdmi6b.C, 7b.C, pr94066-2.C), CWG2310's incomplete derived class (cpp0x/
+constexpr-base6.C, 6b.C: the static member's initializer is analyzed after its class completes), definition-time checks of
+uninstantiated templates (template/void14.C, cpp0x/vt-34052.C, template/non-dependent26.C, other/error35.C, ...), GCC's parser
+recovery (template/pr90138.C, inherit/error4.C, diagnostic/enum2.C, parse/pr68722.C, ...), default template arguments' errors at
+the template-id's place (lookup/using7.C, cpp2a/spaceship-err2.C), the alias templates' equivalence of partial specializations
+(cpp0x/variadic-alias6.C). One held for the user: template/friend58.C (a template friend naming a member of `freeList<T, baz>`,
+which [temp.friend]/5 allows and GCC 15 rejects).
