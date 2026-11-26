@@ -21419,6 +21419,7 @@ both. The records need no change.
   t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
   3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
 
+
 ## 2026-11-24: C++'s read independence: the own front end on the dg rows clang's dumps judged (branch `cpp-rind-1124`)
 
 The burst's C++ read-independence stream, from mac/next `7de5de3ec`. C++'s read stage (test/crops/independence.edn's `:read` fact,
@@ -21871,6 +21872,600 @@ Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ..
 old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
 --aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
 executables, and the host's C records rerun on its train.
+
+## 2026-11-24: py-core-1124, Python's core objects and builtins (the main host, the burst's py-core stream)
+
+The coordinator's scope (burst of 2026-11-23, .tmp/goal/burst-1123-brief.md): the eval level's "core objects and builtins" and
+"stdlib misc" groups of .tmp/goal/py-na-proposal.md (pure-Python semantics in pyi), with :coroutines from the Mac's 551 and five rows
+py-os handed over; branch py-core-1124 from mac/py-mac-1123 (5d93b6732, the consolidated Python of 535/537/545/551, so that its
+go/arbace/py edits meet train 3's). The record's non-passing rows (test/python/check-lib-test-linux-amd64.edn) classified by
+test/python/divergences.edn's first-class rule (.tmp/goal/pyna/classify.py over this tree): 163 rows in the scope's classes. Each
+cause read in CPython 3.14.10's sources (the pinned tarball) and ported; doc/python/PYTHON-SURVEY.md, "As built: py-core-1124", lists
+them: the built-ins' docstrings as a table Arbace makes (builtins_docs_table.go, tools/pyi/runtime_tables.ae's `docs`, from the same
+reading as textsig; its control), struct sequences as tuple subclasses, a non-dict `__builtins__` (Frame.BuiltinsMap), compile()'s
+optimize (the compiler's *optimize*), inlined comprehensions' temporary scopes, CO_FUTURE_ANNOTATIONS, match patterns at their own
+locations, and about thirty smaller ports (dict views' isdisjoint, deque, int's base, WITH_EXCEPT_START's traceback, complex
+products, % formatting, except* with a subclass's split, exceptions' members, OSError_init, function and type annotations, object's
+and the built-in types' dicts, type names' identity, dict.fromkeys' stored hashes, frozenset, set reprs, dir(), input()).
+
+The method: go/arbace/py printed (`bin/pyi runtime print`), edited as Go (gofmt, go vet clean), read back with `bin/repr-go read --full
+--tests ./py` (bin/pyi runtime read's step for py; the other packages unchanged, builtins_os_other kept); arbace/python edited in
+place. The checks by pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`: the checkout's runtime compiled; stage 0's goi
+would interpret it), first probes against python3 3.14.10, then the scope's rows, then 50 touched modules whole against the eval
+record: no row the record passes fails because of the branch (three differ, the same at the base; test_namespace_order, failing at the base, fixed too); after the last changes the same modules' heaviest whole again, and test_exceptions and test_getopt. The scope's rows: 163, of them 118 pass in the AOT run (and test_input, test_common_format, non_Python_modules, the enum classify row and the three asyncio rows py-os handed over after it); py-os's test_hashable passes, its test_trace (gc.get_referrers), test_socket_type (gc.is_tracked, the collector's) and test_recursion are not built. bin/pyi's AOT module now keeps
+the C libraries' cf2g translations across its rebuilds (bin/pyi-clib aot's key: the node program's and the translator's sources),
+which saved about 10 minutes a runtime change.
+
+Records: the eval record is the main host's on a build at the checkout's key (train), so none is written here; the branch is ready
+for its train (the coordinator: train 5) with the modules listed in the report. Disk: the AOT lib-test drivers (about 250 MB each)
+removed after each module ran.
+
+DECISION for the user (the report's): test_hash's three test_null_hash rows (:hash-algorithm) expect randomized hashes with
+PYTHONHASHSEED unset, CPython's default; pyi keeps the zero key for its deterministic runs (go/arbace/py/hash.go, queue 304).
+(a) randomize when unset, the check and the AOT runs setting PYTHONHASHSEED=0 as the references do; (b) keep, the rows n/a;
+(c) keep, by design. Recommended (a).
+
+## 2026-11-24: py-os-1124, Python's processes, command line and OS rows (the burst's host stream py-os)
+
+Base mac/py-mac-1123 (5d93b6732), so its go/arbace/py merges with train 3. Scope (the coordinator's): the eval rows of processes,
+the command line and the OS (the record's :pyi-command-line, :source-decoding, :os-and-files-misc, :signal-timing,
+:run-dir-zip-main, :compileall-pyc, :pyi-main-module, :interactive-mode, :socket-gaps, :hash-algorithm; test_sys and test_cmd_line
+whole, from the Mac's 551), and the library-gap skips outside the others' streams. Grouped by cause from
+test/python/check-lib-test-linux-amd64.edn with divergences.edn's first-class rule (.tmp/goal/pyna/classify.py pointed at the base).
+
+The baseline on the base (pyi's AOT path, `bin/pyi check --aot --lib-test --only` over the 127 scope ids and test_cmd_line,
+test_cmd_line_script, test_source_encoding, test_compileall and test_sys whole; .tmp/os/base.log): many rows of the record pass
+already (py-eval-1122's -X cpu_count and int_max_str_digits, py-mods-1122's __main__ loader, 545's _io, 551's standard streams):
+test_shutil's six zero-copy tests, test_gzip's three, test_json's two broken pipes, test_argparse's six FileType('rb') and two
+zip-directory runs, test_cmd_line_script's six, test_cmd_line's cpu_count, int_max_str_digits and non-interactive buffering,
+test_subprocess's communicate errors (once format keeps surrogates, below), test_os's two pseudo-terminal tests (537's).
+
+Built (go/arbace/py, printed, edited, read back; arbace/python, arbace/repr/python; bin/pyi; tools/pyi/python3):
+- the environment the caller gave: tools/pyi/python3 and the compiled launcher's wrapper keep it in PYI_ENTRY_ENV before bin/pyi
+  adds its own (their shell's PWD and SHLVL undone), posix.environ is it, the added names hidden from os.environ and
+  os.reload_environ until the program sets them (test_subprocess's test_empty_env);
+- sys.argv's bytes (PYI_ARGV) decoded with surrogateescape (test_cmd_line's test_invalid_utf8_arg); -c's command not UTF-8: "Unable
+  to decode the command from the command line:" and status 1 (test_undecodable_code); -c's coding spec ignored
+  (PyCF_IGNORE_COOKIE, native/*ignore-cookie*: test_coding); -mMOD and -cCMD joined (test_quopri's -mquopri);
+- PYTHONPATH (getpath's _Py_abspath, after sys.path[0]; test_large_PYTHONPATH, argparse's module runs, test_cmd_line_script's
+  zip packages, inspect's undecodable path, compileall's no-args run);
+- -O, -OO and PYTHONOPTIMIZE: the compiler's *optimize* (asserts out and __debug__ False from 1, docstrings out from 2), every
+  compile's mode +opt1/+opt2 (the IR cache keys it), compile()'s optimize argument, builtins.__debug__, sys.flags.optimize
+  (compileall's opt-1/opt-2 paths and hard-link dedup, test_support's optim args, test_sys_flags_set);
+- sys.flags from -v, -d, -B and PYTHONVERBOSE, PYTHONDEBUG, PYTHONDONTWRITEBYTECODE (_Py_get_env_flag), hash_randomization from
+  PYTHONHASHSEED and -R; hashes randomized when PYTHONHASHSEED is unset (CPython's default; bin/pyi's own verbs export
+  PYTHONHASHSEED=0 and PYTHONDONTWRITEBYTECODE=1 when unset, the references' environment): test_hash_randomization, test_hash's
+  three test_null_hash, test_sys_flags_set and _not_set;
+- -X importtime (import time lines, cached at 2, the start's error for another value), -X pycache_prefix and PYTHONPYCACHEPREFIX;
+- os.abort dies by SIGABRT (fhDie: SIG_DFL first; test_run_abort), restore_signals (SIGPIPE and SIGXFSZ Go's for the fork, so
+  the child starts with SIG_DFL; test_restore_signals), AF_UNIX getsockname/getpeername with the address's length (Linux
+  abstract names holding NULs: TestLinuxAbstractNamespace's three);
+- str.format keeps surrogates (buildString as code points: difflib's diff_bytes, test_email's five, test_subprocess's two
+  communicate errors); sys.displayhook's unencodable repr written with backslashreplace (test_displayhook_unencodable);
+- source decoding: get_normal_name for exec()'s bytes (test_long_coding_name), every coding spec of the first two lines made inert
+  in a decoded source (test_double_coding_line, _same_line), a script's CR LF and lone CR as LF (test_crlf, crcrlf, crcrcrlf);
+  a script whose path is not UTF-8 read by a prologue (test_cmd_line_script's test_non_ascii); a path inside a zip file is a
+  main importer (argparse's test_directory_in_zipfile);
+- the future features compile() and the REPL inherit (co_flags' CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL, +futA/+futB
+  modes, scope's *inherited-features*, the parser's barry flag): test_future_stmt's REPL, pyrepl's two future tests; ast.parse
+  of a tree too deep for encoding/json is the parser's MemoryError (pyrepl's test_runsource_compile_error);
+- atexit as atexitmodule.c: callbacks run from a copy, reported by sys.unraisablehook, unregister by the comparison's order
+  (test_atexit's test_general).
+- bin/pyi's AOT module keeps the libraries cf2g compiled (clib/LIB/aot, by their nodes' key) across a runtime change (15 minutes
+  saved each).
+
+- a script's coding spec whose bytes the host's charset decodes only by replacing goes to the runtime's own codec
+  (`native/source-text`'s strict CharsetDecoder check, :charset), and the runtime reports a script's decoding error as the file
+  tokenizer does (the codec's message as the SyntaxError, a codec that is no text encoding a SyntaxError): test_source_encoding's
+  test_coding_spec_decode_error and _non_text_encoding;
+- SIGINT's default_int_handler installed at the start (not over an inherited SIG_IGN): test_subprocess's test_send_signal;
+  compile(), exec() and eval() of a str holding a lone surrogate, and str.encode's and bytes.decode's arguments, the UTF-8
+  codec's UnicodeEncodeError (test_code_module's test_unicode_error, test_email's test_invalid_character_in_charset).
+
+Verified on pyi's AOT (the runtime compiled with the change; `bin/pyi check --aot --lib-test --fresh --only`, the controls failing
+as they must each time): the base's 39 modules 288 -> 332 pass, no row of the base's run lost (.tmp/os/v1-run on this host);
+then the modules the later changes touch, whole (test_cmd_line, test_code_module, test_subprocess, test_signal, test_pyrepl,
+test_email, test_source_encoding, test_atexit, test_codecs, test_str, test_future, test_threading, test_hash: 3,425 methods,
+3,212 pass, 210 classed, 3 in no class; .tmp/os/v2-run), against the eval record: 30 rows to pass, and five the record passes
+that this run does not: test_subprocess's test_close_fds and test_pass_fds (the compiled launcher's child keeps its compile
+server's pipes and pidfd at fds 6-13, which the parent's numbers meet; goi's child compiles in process, so the eval path has
+none), test_threading's test_can_interrupt_tight_loops, test_signal's test_stress_modifying_handlers and test_email's
+test_long_lines (CPU-bound under a load average of 70 on the host; rerun below). Direct probes on the compiled launcher (.tmp/os/t5.py: the empty environment, the flags, -O/-OO, three
+random hashes, PYTHONPATH, pycache_prefix, the undecodable command, argv's bytes, importtime, os.abort's -6, restore_signals'
+SigIgn, format, an abstract socket name, the REPL's barry; t6.py: KeyboardInterrupt at SIGINT; t8.py: compileall's opt-1/opt-2
+files and hard links, PYTHONPATH) and on goi's path (`bin/pyi python` interpreting the checkout's runtime: -c's coding spec, a CR
+CR CR LF script, a double coding spec, a non-UTF-8 script path, -O). gofmt, go vet and go test of the printed runtime clean
+(hash_test's PYTHONHASHSEED=0 cases take the zero key themselves now).
+
+Not built, and why: test_regrtest's test_add_python_opts (its worker asserts `_testcapi.config_get('buffered_stdio') == 0`:
+pyctypes' capi_config, py-accel's world, should read py's stdioUnbuffered, warnoptions, bytes_warning and use_environment);
+test_asyncio's three SelectorEventLoopSignalTests (an OSError subclass's class attribute `errno` must win over the instance's
+member field: the exception model, py-core's); test_socket's test_socket_type (gc.is_tracked of a type) and test_hash's
+test_hashable (object() and Hashable): py-core's; test_signal's wakeup-fd tests import _testcapi; test_sys's test_jit_is_active
+imports _testinternalcapi; test_signal's test__thread_interrupt_main and test_regrtest's test_unraisable_exc are the end's
+finalization (the Mac's); test_c_locale_coercion's two are the UTF-8 mode's stdio errors (the Mac's 553); test_compileall's
+test_workers needs ProcessPoolExecutor (535's); test_sendall_interrupted and test_wsgiref's test_interrupted_write need a
+signal to interrupt a blocking socket write (Go restarts the system call); test_cmd_line's test_python_malloc_stats prints
+pymalloc's statistics (CPython's allocator: proposed n/a); test_os's test_closerange and test_socket's test_aead_aes_gcm
+skip on this host (an fd hole; the kernel has no gcm(aes)). The library-gap skips: none outside the others' streams left
+buildable (the remaining :skipped-by-test rows are _elementtree, _tkinter, gdb, _zoneinfo, ctypes, _testbuffer, zstd's
+threads, the UTF-8 mode, Windows/BSD/Solaris/Apple, resources, and subtest ids CPython skips too).
+
+Then test_source_encoding and test_cmd_line_script whole and the two CPU-bound tests again (.tmp/os/v3): test_source_encoding
+all pass (its decoding errors too); test_cmd_line_script's two null-byte rows stay the compiled path's own (the AOT main
+decodes in Go: "source code string cannot contain null bytes"; the record passes them on goi's path); test_threading's
+test_can_interrupt_tight_loops and test_signal's test_stress_modifying_handlers fail again on the compiled path, which runs a
+tight loop as compiled Go with no switch to the other thread; on goi's path (bin/pyi check, the checkout's runtime
+interpreted; .tmp/os/v4.log) both pass, as does test_subprocess's test_send_signal; test_close_fds there outlived the
+runner's 300 s (three children each starting the interpreted runtime), which the compiled build's train run will settle.
+
+Records: none written here (the train's build records them). Ready for train 3: py-os-1124. Expected eval rows to move to pass
+(the record's non-passes that pass in these runs, 92, listed in .tmp/os/expected-pass.txt of the worktree: test_cmd_line 15,
+test_argparse 9, test_source_encoding 9, test_cmd_line_script 8, test_subprocess 8, test_email 6, test_shutil 6, test_pyrepl 4,
+test_socket 3, test_gzip 3, test_hash 3, and test_json, test_os, test_buffer, test_code_module, test_quopri 2 each, and
+test_future, test_inspect, test_atexit, test_difflib, test_regrtest, test_support, test_tempfile, test_tools 1 each; 40 of them
+passed on the base already), and on goi's path, which these compiled runs could not exercise (test_compileall imports
+_testmultiphase on the compiled path), test_compileall's eight -O, PYTHONPATH and hard-link rows (shown by .tmp/os/t8.py).
+
+## 2026-11-24: py-os-1124: the user's decisions on its two questions, and the interruptible socket send
+
+The user decided (2026-11-24, through the coordinator) py-os-1124's two questions:
+- 1 (a): test_cmd_line's test_python_malloc_stats is n/a, an allocator detail (PYTHONMALLOCSTATS prints the counters of
+  CPython's obmalloc arenas, pools and size classes, which Go's allocator has none of): test/python/divergences.edn's new
+  `:pymalloc-stats` (`:kind :na`), the test taken out of `:pyi-command-line`'s :tests.
+- 2 (a): build interruptible socket writes, non-blocking plus poll as 545 did for FileIO. Built: go/arbace/py's
+  builtins_socket `callWrite`, used by socket.send and sendall: on a blocking socket in the main thread the wait for room is
+  ppoll with the wake pipe (pollWithWake: a signal's handlers run when it arrives, one that raises ends the call with its
+  exception, one that returns lets it go on) and the send itself carries MSG_DONTWAIT, so it never blocks in the kernel, where
+  Go's SA_RESTART handlers would keep it; the descriptor's own flags stay as they are (545's writeInterruptible's rule); a
+  timeout's socket, other threads and families whose poll never reports room (AF_ALG's sock_no_poll: a first version hung
+  test_socket's LinuxKernelCryptoAPI test_hmac_sha1 and test_sha256) keep sock_call's path, the others being AF_UNIX,
+  AF_INET and AF_INET6. test/python/lib-test-skip.tsv no longer skips test_socket's
+  test_sendall_interrupted. For test_sendall_interrupted and test_wsgiref's test_interrupted_write (a server's send of
+  SOCK_MAX_SIZE bytes interrupted by SIGUSR1 from the client's thread, its handler returning).
+The branch rides train 5 (train 3 was already queued) with the Mac's 550, 552, 553 and 551b and py-core.
+Verified on pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`, the controls failing as they must): test_wsgiref and
+test_socket whole with the first version (835 methods, 635 pass, 0 in no class; to pass against the eval record:
+test_sendall_interrupted, test_interrupted_write, test_name_closed_socketio and the three abstract-namespace rows; the two
+LinuxKernelCryptoAPI hangs found there), then with the families restricted those two, test_sendall_interrupted,
+_with_timeout and test_interrupted_write: 5 of 5 pass; a direct probe (.tmp/os/t9.py): a raising SIGALRM handler ends a 16 MiB
+sendall with ZeroDivisionError, a returning one lets a 4 MiB sendall finish. `bin/pyi divergences` classes the record's
+test_python_malloc_stats row in `:pymalloc-stats`. Ready for train 5 (with the expected rows of the entry above, plus
+test_socket's test_sendall_interrupted and test_name_closed_socketio and test_wsgiref's test_interrupted_write; one row,
+test_python_malloc_stats, from deferred to n/a: bin/reap and bin/crops-score to record on the train's merge).
+
+## 2026-11-24: py-design-1124: Python eval's by-design classes tabled; 20 C-pickle skips reclassed; _functools.partial in Go (WIP)
+
+Branch `py-design-1124` from mac/next 903ef1ab2 with mac/train-3 bc5117f08 merged (the trains' runtime: py-accel, the Mac's 535,
+537, 545, 551). The eval cell's :kind :design classes (train-3's matrix, design 1,332): c-accelerators 1,092 (test_datetime 553,
+test_decimal 346 and test_types 129 rows recorded before 521: py-accel built _datetime and _decimal, they leave at train 3's
+record; left _pickle's C classes 56 and 8 others), extension-modules 66 (recorded before py-capi-1122, whose run passes 50 of
+them; the rest cpython_only skips and subinterpreters), finalization 65 (the Mac's 551b, n/a), skipped-by-test 42 (mostly
+utf-8 mode and _testbuffer, the Mac's 553; ctypes, _elementtree and _zoneinfo, py-accel's), ssl-go-tls 19 (552), coroutines
+18 (py-core), child-is-pyi 10 and subinterpreters 3 (553), pyio 7, pyio-size-type 5, pyio-buffered 2 and pickle-core 2 (545's
+native _io: the next record).
+- Reclassed (no run): the 20 test_pickle C-class methods that skip as CPython's own run does (numpy 3, frozendict 6, the cpu
+  resource 3) or as support.cpython_only (8) left :c-accelerators' :tests for :skipped-by-both and :cpython-only (the user's n/a
+  decisions take such skips whatever the pickler). bin/reap --record: Python eval design 1,332 -> 1,312, n/a 4,816 -> 4,836.
+- Built (not yet proved on Lib/test): _functools.partial, Placeholder and _PlaceholderType ported from CPython 3.14.10's
+  Modules/_functoolsmodule.c (partial_new's flattening and Placeholder merge, partial_call, partial_repr with Py_ReprEnter,
+  partial_reduce, partial_setstate's checks, READONLY func/args/keywords, __dict__ that cannot be deleted, __get__, __class_getitem__)
+  into go/arbace/py/builtins_functools. A probe of 25 behaviours (.tmp/p/partial.py) printed CPython 3.14.10's output but for a
+  subclass's repr; the fix (partial in reprOfInstance, __reduce__ and __setstate__ objectDescr) is in the printed Go, its read
+  back into the forms stopped at the coordinator's wrap-up (the worktree's .tmp/NEXT.md). Rows it should move: TestPartialC's and
+  TestPartialCSubclass's test_attributes_unwritable (c-accelerators 2), the C partial's rows of :partial-python and
+  :functools-core (deferred) to be judged.
+- The AOT module built without printing the C world again: its cf2g output copied from py-accel-w's module, whose nodes keys
+  are this tree's (.tmp/p/aotmod.sh).
+Proposal for the coordinator: _pickle.c (and _json.c, which already passes as a thin Go module) built into the C world as
+521's _datetime, by the C world's owner (py-accel): the remaining ~36 failing C-pickle rows.
+
+## 2026-11-24: py-design-1124: D1 and D2 decided; test_import's single-phase tests to :cpython-only
+
+The report's two decisions: D1, the user's (a): test_import's single-phase tests and test_descr's xxsubtype tests (skips by
+check_impl_detail()) are :cpython-only, n/a. test_descr's four already were (:cpython-only's xxsubtype match is before
+:extension-modules); test_import's eight SinglephaseInitTests rows still hold the pre-py-capi-1122 message ("test requires
+_testsinglephase module", which :extension-modules matched), so their ids go into :cpython-only's :tests until the re-record
+gives the cpython_only skip. D2, the coordinator's (a): CPicklingErrorTests.test_bad_state_setter ("only verified in the C
+implementation") stays in :c-accelerators, by design, until _pickle.c exists; _pickle.c into the C world goes to py-accel next
+cycle. bin/reap --record: Python eval design 1,312 -> 1,304, n/a 4,836 -> 4,844; crops-score recorded and judged, records-check
+0 problems. The functools subclass-repr fix stays in the worktree's .tmp/NEXT.md (not in the committed forms).
+
+## 2026-11-23: queue 550, dbm.sqlite3's rows: crt's F_GETLK and file mmap as Linux's, pysqlite3's statements as CPython's reference counts leave them (branch `550-py-sqlite-statements`)
+
+Brief: `.tmp/worktrees/q/tasks/550-py-sqlite-statements.md` (536's DECISION 536-1, the user's (a)), base next 320e74469. 536's analysis
+had the order of causes wrong; a probe settled it (`.tmp/q550/p/st1.py`: connect, PRAGMA journal_mode=wal, CREATE, REPLACE, close):
+with HEAD's crt every variant fails at the first write on "locking protocol" whether the PRAGMA cursor is exhausted, dropped or
+collected; with 536's shelved crt patch all write. So the coordinator approved carrying crt (Arbace's word: no host stream in crt
+now), then the pyi side.
+
+- **crt (go/arbace/crt)**, Linux's semantics: fcntl F_GETLK asks the host (`hostGetLk`, syscall.FcntlFlock on the description's host
+  file: another process's lock and its holder, else F_UNLCK; the program's own take none, as before) and writes struct flock back;
+  mmap of a file is the host's mapping of it (`hostMapFile`, syscall.Mmap MAP_SHARED or MAP_PRIVATE, PROT_WRITE as asked) placed at
+  the guest's address (`Mem.Place`, MAP_FIXED's) as a slab whose bytes are the host's (`Mem.MapFile`, `hostMem.file`: Zero leaves a
+  file's bytes), so a shared mapping's writes are the file's at once and two mappings agree; the host's errno otherwise (ENODEV,
+  EACCES); TamaGo (sys_other) copies the file's bytes in, a private copy. 536's patch (a copy written back at munmap) was replaced by
+  the host's mapping: Linux's coherence, which a copy cannot give. SQLite's unix VFS: the -shm's DMS probe answers F_UNLCK and its
+  regions map MAP_SHARED, so WAL works. crt moves gate_key: the records ride the host's train 2.
+- **pyi (go/arbace/pysqlite3, go/arbace/py)**: CPython frees a cursor and its statement when the last reference goes; pyi's go at a
+  collection. Two places make that observable, both measured: (1) close: sqlite3_close_v2 left a zombie until Go finalized the
+  statements, so a WAL database was never checkpointed (4096 bytes and the -wal and -shm left, where CPython's file is 12288 bytes
+  alone) and a reader with immutable=1 or whichdb saw an empty file; now close finalizes the connection's statements no
+  cursor is stepping (sqlite3_next_stmt's list, sqlite3_stmt_busy 0: the cache's and the finished or dead cursors'; a cursor drops its
+  statement once done), each handle recorded in the connection's `stmts_final` so a later reset and the statement's Go finalizer skip
+  it; a stepping statement stays, the database left open, as CPython leaves a live cursor's (test_connection_reinit reads the old
+  database through one after `__init__`: finalizing it too segfaulted there, the first version's mistake). (2) a
+  write: dbm.sqlite3 never closes its `PRAGMA journal_mode = wal` cursor, stepped once (a row), which CPython resets at once; under pyi
+  it stayed stepping and SQLite held every later autocommit write back (the -wal 0 bytes, a second connection seeing nothing, "database
+  is locked" for a reader of a fresh writer). Now before a statement that writes, and before COMMIT, when another statement of the
+  connection is still stepping, the runtime's finalizer rounds run (`py.ExtFinRounds`, finRounds), each dead cursor resetting its
+  statement (cursor_finalize, queue 241); a live cursor's stays, as CPython's holds the commit back too (`.tmp/q550/p/rw4/py5.py`:
+  python3 itself leaves the -wal at 0 bytes with a live PRAGMA cursor). Alternatives tried: Go weak pointers to keep a registry of a
+  connection's statements (goi does not interpret package weak: "generic over the runtime's weak pointers, out of scope"); a
+  collection at every close (finRounds under goi took seconds a close: test_corrupt_readwrite's 18 opens past 300 s);
+  finalizing every statement at close (test_connection_reinit's segmentation fault).
+- **Runs** (the VM, arm64, stage 0 nx's, goi interpreting py, pysqlite3 and crt from the checkout; the runner by python3): the probes
+  `.tmp/q550/p/test-pysqlite.sh` (st1, rw4 and py5 equal to python3's; the parent's pyi, addde6d33, fails all three: py5's live
+  cursor gave a -wal of 8272 bytes where python3's is 0, and an implementation resetting every stepping statement, a live cursor's
+  too, would commit there: py5 is the over-reset control) and `.tmp/q550/p/c/test-crt.sh` (gcc's builds: getlk-free, getlk-held, mmapfile pass; HEAD's crt fails all three);
+  C's `bin/ci check --only test/c/essential-check.txt`, `check --aot --only test/c/essential-aot.txt` and the four rows that mmap
+  (torture-execute{,-mirror} loop-2f and loop-2g, MAP_ANON) pass, the controls differing as they must; `bin/pyi check --only` of
+  test_dbm, test_dbm_sqlite3 and test_sqlite3 (check4: 31 ok, 25 ok and 502 ok; test_sqlite3's module reached its 3,600 s on its six
+  last WindowFunctionTests after MultiprocessTests' test_ctx_mgr_rollback_if_commit_failed crashed on the runner's 8 GiB cap; those
+  seven run again alone: the six pass, the seventh its recorded failure "1 != 0"), the three negative controls failing as they must.
+  Records: `bin/pyi check --judge DIR --record` over the three modules (the seven rows the second run's): 31 rows now pass (the 30
+  of `:dbm-sqlite3-locking`, gone from test/python/divergences.edn, and test_table_lock_cursor_non_readonly_select, out of
+  `:finalization-goi`); `:sqlite-process-locks` reworded (F_SETLK still takes no lock). Python eval 40,552 / 1,398 / 1,585 ->
+  40,583 / 1,398 / 1,554; completeness 0.9812 -> 0.9814. `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score
+  --judge --strict`, `bin/records-check`: 0 problems. crt moves gate_key: the records ride the host's train 2.
+
+## 2026-11-23: queue 551, the user's decisions 537-2 (a), 537-3 (a), 545-1 (b) and three n/a classes (the Mac VM)
+
+The user's decisions of 2026-11-23 (through the main session): 537-2 (a), 537-3 (a), 545-1 (b), and :builtin-modules,
+:runs-where-cpython-skips and :host-clock n/a (:subinterpreters left for queue 553). Branch 551-py-finalization-warnings from
+545-py-native-io 6b27c238a, with 537-py-design 63ecfd842 merged in (744f48926: conflicts in py.ae's :files and :init-order, the
+scores, the matrix, the journal and the survey; the merge's py.ae lacked builtins_hashopenssl in :files, which the runtime read of
+3e40893a5 makes again).
+
+- _warnings (537-3 (a)): Python/_warnings.c of CPython 3.14.10 ported to Go, go/arbace/py/builtins_warnings.ae (the stub of
+  builtins_imp.go, a warn calling warnings.warn, removed). warnings.py now imports its C names from it, as CPython's does, so a
+  warning reads sys.modules['warnings']'s filters, onceregistry, defaultaction, _showwarnmsg and WarningMessage at each call
+  (get_warnings_attr): test_warnings' BaseTest.setUp puts py_warnings there, which _py_warnings' own warn (its _wm) never saw.
+  Studied: cpython v3.14.10 Python/_warnings.c, Python/clinic/_warnings.c.h, Lib/warnings.py, Lib/_py_warnings.py,
+  Lib/test/test_warnings/__init__.py. The lock is an RLock of _thread (C's _PyRecursiveMutex); the context variable a ContextVar
+  named _warnings_context; get_source_line through _PyImport_BlessMyLoader's checks (gh-86298). The shutdown's own path once the
+  warnings module is gone (pylifecycle.go's finalWarn) is unchanged. Alternative: keep _py_warnings alone and make its warn read
+  sys.modules['warnings'] (a patch of the standard library: refused, pyi runs CPython's Lib unchanged).
+- The standard streams (545-1 (b)): at the start (init_sys_streams, an atStartHook first in the list, once the import system can
+  import the encodings package: a TextIOWrapper made while sys is created, before importlib stands, broke _bootstrap._setup's
+  _fix_up_module, seen in a probe), sys.stdin, sys.stdout and sys.stderr and their __std*__ become create_stdio's
+  TextIOWrapper(Buffered*(FileIO(fd, closefd=False))): raw named <stdin>/<stdout>/<stderr>, newline "\n", line buffering for a
+  terminal and for stderr, write_through and no buffer under -u, mode "w"/"r", encoding and errors stdioConfig's. input() flushes
+  the real stdout, the REPL's prompt flushes both (flush_io), readline's check takes the real streams, SystemExit's message goes
+  to sys.stderr's write (handle_system_exit). The runtime's textFile stays for an interpreter that writes elsewhere, a closed
+  descriptor, the REPL (Repl, which runs no start hooks) and tamago. Studied: cpython v3.14.10 Python/pylifecycle.c
+  (init_sys_streams, create_stdio, flush_std_files).
+- n/a (the user's): :finalization-cycle, :weakref-list, :builtin-modules, :runs-where-cpython-skips, :host-clock (divergences.edn
+  and divergences-315.edn), each :decided naming the decision and the reason given in queue 537's report.
+
+## 2026-11-24: queue 551b, 537-2's rest of :finalization n/a, :warnings-c down to one row, test_warnings and test_print recorded (the Mac VM)
+
+The main session's narrowed scope of 2026-11-24: :finalization's remaining rows n/a (537-2), :warnings-c, _warnings, and
+whole-module records of test_warnings and test_print; test_sys and test_cmd_line are the main host's py-os, :coroutines (with
+its two test_bpo_45813 rows) the main host's py-core, left alone. Branch 551b-py-finalization-warnings from py-mac-1123
+5d93b6732, which carries 551's work (78170d088) and 25c00615c's fix of _warnings' get_source_line.
+
+- 537-2 (a): :finalization (divergences.edn and divergences-315.edn) is n/a: owner "none (n/a: the user, 2026-11-23)", the
+  reason (reference counting's moment, which pyi's Go-collected objects do not have) appended to :decided. The class keeps its
+  :tests: 30 of its 80 are passes in the record (queue 222's DELETE_FAST collection; "rows it makes pass stay passes"), the
+  other 50 (545's eight test_error_through_destructor rows among them) n/a now. No finalization module was rerun: 551's run A
+  (the 65 non-pass ids, 2026-11-23) passed none of them but test_coroutines' test_fatal_coro_warning, a module py-core
+  records. test_os's test_fd_finalization is :child-is-pyi's, not this class's, and stays there.
+- :warnings-c: with Python/_warnings.c's port the class's 17 C rows pass (CWarnTests' gh-86298 checks and test_accelerated,
+  _WarningsTests' default action, filters, once registry and _showwarnmsg, the environment-variable tests); the class keeps
+  PyWarningsDisplayTests.test_tracemalloc alone (tracemalloc's object tracebacks), title and why rewritten.
+- The records: bin/pyi check over test_warnings and test_print whole (eval, PYI_RUNNER=python3). The first run at load 25
+  (seven other agents, CPUs 0-7) cut test_warnings off at its 3,600 s cap after BootstrapTest.test_issue_8766 passed its 300 s
+  test timeout: the test starts two pyi children, each 90-105 s under goi at that load (measured alone: `tools/pyi/python3 -c
+  pass` with the test's PYTHONPATH, 87 s), so the cap was load, not a hang. Run again alone with PYI_LIB_TEST_TEST_TIMEOUT=900
+  and PYI_LIB_TEST_TIMEOUT=10800: test_warnings 201 methods, 186 pass, 15 classed (cpython-only 6, skipped-by-test 6,
+  pyi-command-line 2, warnings-c 1), 0 failing, 3,632 s; test_print (the first run) 9 pass; the three negative controls failed
+  as they must. Recorded by `bin/pyi check --judge DIR --record` over a copy of the run's directory holding the whole modules
+  (its only.txt removed, test_print's files added): 0 regressions, 33 now pass (the 17 C rows and test_warnings'
+  DeprecatedTests, 15, which :coroutines' match had covered). bin/reap --record (0 problems), bin/crops-score --record, then
+  --judge --strict, and bin/records-check: 0 problems.
+
+## 2026-11-23: pyi's _ssl over a vendored crypto/tls: TLS 1.3 post-handshake authentication, PSKs, the exporter secret (queue 552, the Mac VM; the user's 537-4 (a))
+
+The user decided (537-4 (a)) to vendor Go's crypto/tls into pyi's ssl and add what OpenSSL has and Go lacks, for
+`:ssl-go-tls`'s 19 rows. Branch 552-py-tls13 from next 320e74469.
+- Source: https://github.com/usbarmory/tamago-go, tag go1.27.1 (TamaGo's go1.27.1; the GOROOT pinned by seed/goroot.sha256,
+  SHA-256 5745170fd3c83cb77ec88bc50aee8606f0436e718c222b48376b5943ac0cebe5): `src/crypto/tls` (every non-test file but
+  defaults_boring.go and generate_cert.go), `src/vendor/golang.org/x/crypto/{cryptobyte,chacha20poly1305,chacha20,
+  internal/poly1305,internal/alias}` (x/crypto v0.52.1-0.20260526024921-9beb694f9766 per vendor/modules.txt; generic code,
+  no assembly), `src/crypto/internal/fips140/{tls12,tls13}` (over the public crypto/hmac and crypto/hkdf),
+  `src/crypto/tls/internal/fips140tls`; new stubs for crypto/internal/boring, internal/godebug and internal/cpu. Copied into
+  go/arbace/pytls (import path arbace/pytls), converted to Go forms by `bin/repr-go read` (`bin/pyi runtime read-pytls`).
+  The edits are listed in doc/python/pytls-vendor.md and shown by doc/python/pytls-vendor.diff (2,727 lines, against the files
+  as copied); license: Go's BSD 3-Clause (LICENSE.md, coverage list extended).
+- Added to it: `Config.PostHandshakeAuth` (client), `Config.PostHandshakeClientAuth` (server, SSL_VERIFY_POST_HANDSHAKE),
+  `Conn.RequestClientCertificate`, TLS 1.3 external PSKs and TLS 1.2's plain PSK suites (`PSKClientCallback`,
+  `PSKServerCallback`, `PSKIdentityHint`), `EXPORTER_SECRET` in the key log, an `AlertError` from the verification callbacks
+  sent as that alert (and the client's unknown_ca and certificate_expired for its own verification). 17 Go tests, each
+  feature both ways; upstream's tests on a scratch copy: 686 pass, 3 fail by the intended changes, 22 skipped. The vendoring
+  and the features were written by a sub-agent from a brief of mine and reviewed here; the _ssl glue is mine.
+- _ssl (builtins_ssl*.ae): HAS_PHA and HAS_PSK true (3.15's HAS_PSK_TLS13 too); set_psk_client_callback and
+  set_psk_server_callback; the PSK suites in the cipher table; verify_client_post_handshake; a resumed server session's
+  chains as OpenSSL keeps them (the client's certificate alone, no verified chain).
+- The keys: pyi's runtime imports arbace/pytls, so goi's table lists it (arbace/go/table.ae) and j2g copies it into the
+  program (arbace/j2g/main.ae): gate_key moves, the table moves; arbace_runtime_key does not (bin/lib/version.bash's
+  arbace_runtime_not); the gate's :pyi host lists go/arbace/pytls; bin/pyi prints, builds and reads it back.
+- Proof and record (2026-11-24, after the night's pause): the whole test_ssl and test_httplib from the committed forms on AOT,
+  0 failing, the 19 rows pass; `bin/pyi check --judge DIR --record` (the record's 19 rows, its order kept), `:ssl-go-tls`
+  removed, `bin/reap --record`, `bin/crops-score --record`: Python eval pass 40,571, design 1,379.
+- Alternatives considered: (b) n/a and (c) by design (537-4's); moving _ssl into a lazy package beside the vendored code
+  (pyssl's way), which keeps it out of the program's copy but moves 4,500 lines of glue: not taken, the direct import is
+  the smaller change.
+
+## 2026-11-24: queue 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (the VM; branch `553-py-subinterp-testbuffer`)
+
+Brief: `.tmp/worktrees/q/tasks/553-py-subinterp-testbuffer.md` (the user's decisions of 2026-11-23 on 537's DECISIONs 537-5 and
+537-6: :subinterpreters' 3 rows, `_testbuffer`'s 3 and 3.14's UTF-8 mode rule from :skipped-by-test, :child-is-pyi's 10 case by
+case). Base next 9b60ce498; paused for the night at 739215eb7 (WIP) and resumed; origin/next 440cf0273 merged (its journal
+without the conflict markers 9b60ce498 had left; the survey's markers, which this branch had removed too, taken as next has it).
+
+- **Subinterpreters (`:subinterpreters`, 3 rows).** `concurrent.interpreters` is CPython's own Lib over pyi's `_interpreters`,
+  `_interpqueues` and `_interpchannels` (queue 230, each interpreter with its own module table, builtins, sys, importlib, codecs,
+  atexit, locale and the interpreter registers swapped by interpSwitch; one GIL, 230's DECISION). The three rows were `del interp`
+  in test_interpreters' module runs leaving the interpreter alive: pyi's moment at del (queue 222) collects at a deletion within a
+  budget of a tenth of the wall time, spent by then (a probe of _mixed alone passes). Now a deletion past the budget while a
+  subinterpreter is held by handles is owed (`xiDeathOwed`), settled by one finRound before the queues' get, get_count, is_full,
+  list_all and the channels' recv, get_count, get_info, list_all, list_interpreters (`xiSettleDeaths`). Alternatives: lifting the
+  budget for every deletion while subinterpreters exist (a collection per deleted tracked object in InterpreterPoolExecutor's
+  programs), recognizing the Interpreter class by name (a stdlib name in the runtime), reference counting (537-2 (b)).
+- **`_testbuffer` (3 rows) and its UTF-8 sibling.** `_testbuffer` has been ci's since queue 456 (473: memoryview over Py_buffer);
+  the rows, and test_buffer's 73 in `:testcapi`, are the 11-19 records night's. Task 554 runs and records test_buffer whole; the
+  test_capi and test_ctypes rows pass by id here. 3.14's UTF-8 mode rule (preconfig_init_utf8_mode) replaces pyi's constant 1:
+  `-X utf8`, `PYTHONUTF8` (-E/-I ignore it; invalid values refused for 3.14 too), else on only under the C or POSIX locale.
+- **`:child-is-pyi` (10), case by case (537-5):** test_posix's two test_close_file (Go's runtime.checkfds opens /dev/null on a
+  closed descriptor 0: `bin/pyi python` sees 0 closed and `PYI_STDIN_CLOSED` makes the runtime close it again before anything
+  runs, `sys.stdin` None), test_subprocess' test_preexec_at_exit (fork_exec's PythonFinalizationError and subinterpreter
+  RuntimeError before pyi's no-fork refusal) and test_encoding_warning (stale), test_marshal's test_unorderable_set_items_in_code
+  (the bytecode view's add_const keyed by repr merged two NaN complex constants: a NaN float or complex now matches only itself,
+  as `_PyCode_ConstantKey`), test_unicodedata's unload_reload (namereplace imports unicodedata once per interpreter, the
+  `_PyUnicode_GetNameCAPI` capsule) and failed_import_during_compiling (compile/exec/eval of a source with `\N{` asks the capsule;
+  on its failure a copy with each `\N{` opening an impossible name tells a decoded escape from raw text, and the error is the
+  parser's "(unicode error) \N escapes not supported (can't load unicodedata module)"; a first version asked at every IR load and
+  broke every module with an escape under `sys.modules['unicodedata'] = None`), test_os' test_urandom_failure (sysconfig's
+  HAVE_GETRANDOM, HAVE_GETRANDOM_SYSCALL, HAVE_GETENTROPY 1: os.urandom is getrandom; with it `:runs-where-cpython-skips`' two
+  URandomFDTests rows). Left for the user: test_pass_fds_redirected (Go's poller holds descriptors 3 and 4; DECISION 553-1, n/a
+  recommended) and BytesFwalkTests.test_fd_finalization (reference counting's moment: DECISION 553-2, to :finalization under 537-2).
+- **Runs** (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py; PYI_RUNNER=python3): check A by id and whole modules
+  (`.tmp/q553/checkA.log`, stopped for the night before test_buffer and test_utf8_mode ended), check B whole (test_unicodedata,
+  test_utf8_mode, test_builtin, test_posix; `.tmp/q553/checkB.log`, controls failed as they must), check C the VM-only rows alone
+  with a 16 GB cap (`.tmp/q553/checkC.log`); probes `.tmp/q553/p/subi2.py` (the budget spent, then `del interp`: qsize 4, PASS)
+  and fail.py (CPython's SyntaxError line).
+- **Records**: `bin/pyi check --judge DIR --record` over a copy of check B holding test_utf8_mode alone (test_env_var and
+  test_xoption pass). Not recorded, for the main host's whole record: test_builtin (its TestType.test_namespace_order fails on goi
+  only), test_posix (test_posix_spawnp past the 8 GB cap on goi), test_unicodedata (failed_import past the cap after the
+  module's heavy tests), and every row covered by id alone. Python eval 40,827 / 1,404 / 1,308 -> 40,829 / 1,404 / 1,306.
+  `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 553's two DECISIONs applied (the VM; branch `553-py-subinterp-testbuffer`)
+
+- **DECISION 553-1 (a), the user: n/a.** test_subprocess's test_pass_fds_redirected leaves `:child-is-pyi` for a new n/a class,
+  `:go-runtime-descriptors`: Go's runtime opens its network poller's two descriptors (epoll and eventfd, at 3 and 4) before any
+  Python runs, in every pyi process, so a child listing its open descriptors (fd_status.py) sees them beside the passed ones.
+  Not taken: (b) a patch to Go's runtime moving them above 255 in pyi's two builds, (c) keeping it by design.
+- **DECISION 553-2 (a), the main session, by the same rule as the user's 537-2: test_os' BytesFwalkTests.test_fd_finalization
+  goes to `:finalization`** (reference counting's moment: closing the wrapper generator unwinds its frame, and CPython closes the
+  inner os.fwalk generator, which closes its directory descriptors, when the frame's for-loop drops it; pyi when Go's collector
+  finds it). Not taken: (b) closing the generators a frame's for-loops hold as it unwinds (wrong when another reference holds one).
+- Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
+  -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
+  `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24 — Python's C API group: the records first, PyLong_FromString (queue 554, VM)
+
+The C API group (`:capi-port` 244, `:testcapi` 95, `:extension-modules` 66, `:testcapi-behaviour` 10 and the small ones, about
+438 rows) was mostly stale: the record predates PyConfig_Get (n-py-eval, 11-19), py-capi-1122's two rounds and `_testbuffer`
+(queue 456). Whole-module `bin/pyi check` runs on this base (83447c4c0 + this branch), the checkout's runtime interpreted by goi
+on the VM's stage 0, judged and recorded with `bin/pyi check --judge DIR --record`: test_compile, test_import, test_code,
+test_tracemalloc, test_buffer, test_call and the controls' test_bool and test_getopt (the three controls failing as they
+must). 216 rows move to pass: test_compile's 154 (its import no longer stops at PyConfig_Get), test_buffer's 61 (`_testbuffer`'s
+ndarray), test_import's and test_tracemalloc's. Python eval 40,886 / 1,332 / 1,292 -> 41,102 / 1,319 / 1,070.
+- Code: pyctypes' PyLong_FromString refuses a non-ASCII byte as long_from_string_base does (int() of a str takes Unicode
+  digits, the C function ASCII ones), with CPython's message and the base a base-0 prefix resolves (test_capi's
+  test_long_fromstring; probe against python3 3.14.10's own `_testlimitedcapi`).
+- Classes: test_compile's new non-passes: code equality, co_consts folding and dis of a tuple constant into `:bytecode` (n/a,
+  the user's 2026-11-23 decision covers them); gh-124285's test_compound (an operand's `__bool__` asked twice in a mixed
+  and/or chain) into the new deferred `:boolop-truth-calls` for py-core.
+- The record: the writer reorders the file; the changed rows were applied in the committed order. test_import's four
+  script-shadowing tests timed out at the VM's load (children of pyi on goi, 300 s): their passing rows are kept as recorded.
+  test_buffer's 17 rows past the 8 GiB cap under goi are recorded as the run gave them (classed).
+- Not recorded here: test_capi (its whole run on goi at this load needs many hours: 650-1150 s per driver start, the codec
+  handler tests past 8 GiB) and test_importlib (1,342 methods; its 52 `:extension-modules` rows): the host's record.
+Alternatives: PYI_RUNTIME=compiled on stage 0's runtime (fast, but not the checkout's: refused for a record).
+
+## 2026-11-24 — Python's C API group: DECISION 554-1 answered at the settle (queue 554, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287): 554-1 (a). test_compile's three code-format rows
+  (code equality, co_consts folding, dis of a tuple constant) stay in `:bytecode` (n/a), as committed in c1013fa1c: the
+  decision of 2026-11-23 names code equality and dis listings. Nothing changes in the record.
+Alternatives: (b) a deferred class of their own, the rows back to deferred until pyi's code view matches CPython's (not chosen).
+:journal
+
+## 2026-11-24: queue 557, Python's AOT deferred row and the eval classes nobody owned (the VM; branch `557-py-unowned` from mac/next a6da0aadf)
+
+- Classified first: every deferred and design class of `test/python/divergences.edn` by rows on the record (`bin/pyi divergences
+  --table`, `--methods`), each with its owner this round; the table went to the main session and is the report's. The main session
+  then gave `:compileall-pyc` and `:tools-misc` to 557b, every `:design` class to the host's py-design, and
+  `:pickle-builtin-reference` to py-core (train 5).
+- The AOT cell's one deferred row, synth/datamodel/del.py (`:as-pyi` in the amd64 record), is stale. On the VM, `bin/pyi check --aot
+  --no-pyi --only synth/datamodel/del.py` gives 1 pass: the compiled run and the loop print the golden text since py-small-1122. pyi on goi
+  still differs, which the judge tolerates (`:pyi-differs`). The row waits for the host's whole `--aot --record`, and
+  `:finalization-goi` goes after it.
+- e0c675f0b: `:ref-empty-skip` removed. Its one row, a test that skips itself on every platform, is now `:skipped-by-test`'s.
+- c2aa57923 `:source-decoding`: test_source_encoding's nine rows (new-lines of the main file; a strict decoding check that hands
+  the source to Python's codec; the file tokenizer's init error; get_normal_name; every cookie made inert).
+- 69fe0070a `:inlined-comprehensions`: the comprehension's own scopes outside class bodies too
+  (`_PyCompile_TweakInlinedComprehensionScopes`).
+- 51c5f1801 `:annotate-rest` (a function's `__annotate__` checks; type_set_annotations pops `__annotate__`) and `:compiler-errors`
+  (CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL in co_flags through the IR's flags).
+- Proofs: one script per change, failing on the parent and passing on the change (pyi runs of the cases against python3's output;
+  the report's appendix). Then whole-module checks with `PYI_RUNNER=python3`: test_listcomps (66 of 66 pass), test_type_annotations
+  (48 pass, test_no_cell skipped) and test_codeop (13 of 13), their rows written by `bin/pyi check --judge DIR --record` over run
+  directories holding those modules alone (3f7327b59: 5 methods now pass). test_source_encoding is left for the main host's record:
+  its child processes take 2-3 min each on goi, so the module ran past the default 3600 s (62 pass, the nine rows among them, then
+  the timeout); the second run, with `PYI_LIB_TEST_TIMEOUT=14400`, was stopped at the allowance's limit. `:source-decoding` keeps
+  its nine rows until that record.
+- Alternatives considered: for the main file's new-lines, translating inside `native/read-dump` (repr/python's corpus reader, whose
+  `:full` mode prints the original bytes back) was rejected in favour of pyi's run-dump alone. For a lenient charset, a decoding
+  error of pyi's own (the codec's message ported) was rejected for Python's codec, which already gives CPython's message.
+
+## 2026-11-24 — Python: compileall-pyc and tools-misc, -O in pyi and the rest (queue 557b, VM)
+
+- Rebased the WIP d92326f8a onto 557's final head 0be967103 (557-py-unowned) and split it in two: 61298096f, -O and -OO
+  (bin/pyi python counts each O into PYI_START_FLAGS; sys.flags.optimize, builtins.__debug__, compileSource's mode +O1/+O2,
+  compile()'s optimize; the compiler drops asserts and folds __debug__ at 1, docstrings at 2, after CPython's codegen), and
+  00cdf6a34, _interpreters' argument messages (PyArg_ParseTupleAndKeywords' "_interpreters.NAME() argument N", 3.14.10's
+  Modules/_interpretersmodule.c). The WIP's own journal entry was dropped in the rebase (its conflict) and replaced by this one.
+- Tested, then fixed what the runs showed:
+  - 4ae592b3c: bin/pyi run's main module is compiled by the host (arbace.python's start-run), not by compileSource, so it now
+    binds arbace.python.compile/*optimize* from PYI_START_FLAGS too (a probe's assert still ran under -O).
+  - fab5cbad8: callSpecial and the __call__ slot counted a level on Thread.depth, the Python frames' depth that
+    sys.setrecursionlimit's check reads; CPython 3.14 guards them on the machine's stack (_Py_EnterRecursiveCall), so they
+    now use enterRecursiveCall (cdepth). test_support's test_recursion: "cannot set the recursion limit to 18 at the
+    recursion depth 18" under unittest. test_descr's test_recursive_call and test_repr_as_str still raise (cStackLevels).
+  - a41346216: sys.pycache_prefix from -X pycache_prefix=PATH, else PYTHONPYCACHEPREFIX (config_init_pycache_prefix).
+  - 24a64a2dd: PYTHONPATH's entries on sys.path after sys.path[0], made absolute (Modules/getpath.py), not under -E or -I
+    (withPythonPath in RunModule). Both for compileall's test_no_args_compiles_path.
+- The runs: on goi alone test_compileall is out of reach (the first run hit 14,400 s with 60 of 145 tests, each child a
+  2-minute goi start on the loaded 4-core VM). So the drivers stayed on goi (PYI_RUNNER=python3) and their children ran
+  the checkout's runtime compiled: bin/pyi launcher (the AOT module rebuilt, about 25-30 min) and PYI_LAUNCHER,
+  PYI_LAUNCHER_PY and PYI_LAUNCHER_COMPILER exported, which bin/pyi python's launcher branch takes. The same runtime
+  sources either way. test_compileall then took 20 min. Alternative not taken: a gate build of the executable with the
+  runtime compiled (the record's own setting), two Go-hosted builds on the 4-core arm64 VM.
+- The final whole run at 24a64a2dd: 3 modules, 286 methods, 263 pass, 23 classed, 0 failing, 11 now pass. The rows were written
+  by `bin/pyi check --judge DIR --record` (c35fc031a). `:compileall-pyc` is empty and removed. Its last rows, compileall's
+  test_workers (-j 0: ProcessPoolExecutor on the forkserver, the read_signed EOF), went to `:multiprocessing` by name.
+  `:tools-misc` keeps its 11 rows not run here (trace's gc.get_referrers, pyclbr's _pickle, test_unittest's three,
+  test_buffer's two, reindent, test_interpreters' test_modified_arg); its :why was updated. Mirrored in divergences-315.edn.
+- bin/reap --record, bin/crops-score --record: Python eval 40,832 / 1,405 / 1,302 -> 40,843 / 1,405 / 1,291; bin/reap,
+  crops-score --judge --strict, records-check: 0 problems.
+
+## 2026-11-25 — the user's DECISIONs 557b-1 (a) and 557b-2 (queue 557b, VM)
+
+- 557b-1 (a): the VM's records of test_compileall, test_support and test__interpreters stand, recorded from a run whose children ran
+  on the compiled launcher with the drivers on goi (c35fc031a's rows). The host's next whole record confirms them. Alternative (b),
+  goi-alone runs with the rows waiting for the host, not taken.
+- 557b-2: keep. callSpecial and slot `__call__` keep the C level's guard: a deep loop of slot wrappers raises "Stack overflow
+  (used N kB)" at 10,000 levels, as CPython 3.14 does, not "maximum recursion depth exceeded" at the recursion limit.
+
+## 2026-11-24 — pyi: _pickle is CPython's own Modules/_pickle.c in the C world (queue 568, VM)
+
+Branch `568-py-pickle-c` from train-3 `2aeeffc77`, built the way queue 521 built `_datetime` (the user's decision of
+2026-11-22 reversing PY6g's DECISION 1; py-design-1124's D2). No hand port: CPython 3.14.10's `Modules/_pickle.c` (the
+tarball test/python/corpora.edn pins, `:cpython-3.14.10`) is compiled by ci into the world `ctypestest` and loaded as `_pickle`.
+
+- **The world.** `tools/pyi/clib/ctypestest/accel_pickle.c` includes `Modules/_pickle.c` (and its `clinic/_pickle.c.h`) with NDEBUG,
+  as the other accelerators' glue. `_pickle` is an extension module of CPython's (Py_BUILD_CORE_MODULE) that calls the internal
+  `_PyBytesWriter` (raw-unicode-escape): its functions are `Objects/bytesobject.c`'s own, lines 3528-3581 and 3618-3791 of the same
+  tarball, copied unchanged into the glue (the debug-only consistency check, 3582-3617, out under NDEBUG), with `Python/codecs.c`'s
+  `Py_hexdigits` (line 28). `pycapi.c` defines `_PyNone_Type`, `_PyNotImplemented_Type`, `PyEllipsis_Type` and
+  `PyPickleBuffer_Type`. The symbols the module needs were listed first by gcc (`nm -u` of the glue against the world's node
+  program and pyctypes' native table, dumped by a throwaway Go test): 19 functions and the five data symbols. The world built again
+  (`bin/pyi-clib build ctypestest`, Key f4b726d1..., 12.0 MB of node program, its cf2g aot forms; 1 h 03 min, 3.9 GB) by a copy of
+  bin/pyi-clib without `ARBACE_PATH_FIRST` (`.tmp/q568/pyi-clib-nopf`): on nx's stage 0 the checkout's builder still fails on
+  `Compiler$Dyn/hideMethod` (521's finding 7), so stage 0's embedded arbace/c built it, as 521's coordinator did; the host's
+  `bin/pyi-clib verify ctypestest` is the proof of the key.
+- **pyctypes** (`capi_pickle.go`, each after CPython's function of the same name): PyIter_Check, PyMemoryView_FromObject,
+  PyOS_double_to_string, PySys_Audit, _PyErr_FormatNote, _PyEval_GetBuiltin, _PyLong_NumBits, _PyLong_AsByteArray,
+  _PyLong_FromByteArray, _PyMem_Strdup, _PyObject_GenericGetAttrWithDict, _PySet_NextEntryRef, _PySet_Update,
+  _PySys_GetRequiredAttr, _PySys_GetSizeOf, _PyUnicode_Equal, _PyUnicode_EqualToASCIIString, _PyUnicode_InternMortal (sys.intern's
+  string, test_attribute_name_interning) and _Py_CheckRecursiveCall; `_pickle`'s 37 `_Py_ID` identifiers, their offsets gcc's
+  `offsetof` over `pycore_global_strings.h` (checked against 521's `isoformat`, 26848). The four types are bound (types.NoneType,
+  NotImplementedType, EllipsisType, pyi's PickleBuffer). The thread state is `sizeof(_PyThreadStateImpl)`, 936 bytes: the inline
+  `_Py_MakeRecCheck` of a Py_BUILD_CORE_MODULE module reads `c_stack_soft_limit` at 848, past the 256 bytes it had. A built-in's
+  handle is now a 64-byte PyCMethodObject (`writeCFunction`): `dump()` compares the bound `persistent_id` with its own C function
+  (`PyCFunction_GET_SELF`, `GET_FUNCTION`), which read past the 24-byte proxy head; the first probe faulted at 0x10. `m_ml` is the
+  world's own PyMethodDef (`cMethodDefs`, recorded by addCMethods and the module functions), else one synthesized per name.
+- **py.** `_pickle` is a lazy module of pyctypes; picklebuf.go's thin `_pickle` (queue 227) only under `PYI_C_ACCEL=0`
+  (DECISION 568-1 (a), the coordinator: kept as the fallback); `ExtPickleBufferType` exported.
+- **Forms.** py and pyctypes edited on their printed Go and read back (`.tmp/q568/readback.sh`, `readback-ctypes.sh`: bin/pyi
+  runtime read's steps for those two packages only, the printed tree's other packages being 554's).
+
+Alternatives considered: a hand port of `_pickle` in Go (refused by the task: no hand port); natives in Go for `_PyBytesWriter`
+(CPython's C is plain C over the bytes API the world already mirrors, so it is copied instead); a dict mirror for
+`PyDict_GET_SIZE` (not needed: queue 270's proxies already carry `ma_used`).
+
+Proofs (arm64 VM, AOT; eval needs the host's executable):
+- the probe `.tmp/q568/p/pk1.py` equals the host's CPython 3.14.10 line for line but for an address (protocols 0-5, C against
+  pure both ways, escapes, bytearray, PickleBuffer, file Pickler/Unpickler, the error messages, `__sizeof__`);
+- `bin/pyi check --aot --lib-test --fresh --only` test_pickle, test_copy, test_copyreg, test_shelve (whole modules; 28 min):
+  test_pickle 1,014 methods, 938 pass, 76 classed, 0 failing; test_copy 81/81 and test_copyreg 6/6 pass; the three controls fail as
+  they must. test_shelve: 187 pass, 79 failing, all "error locking protocol" (dbm.sqlite3, `:dbm-sqlite3-locking`'s cause on the
+  compiled level); its control with `PYI_C_ACCEL=0` (the pure pickler, `--fresh --only test_shelve`) fails the same 79 methods,
+  so they are not _pickle's: classed in `:dbm-sqlite3-locking`;
+- test_pickletools is not in the universe (CPython's recorded references hold no test_pickletools rows), so `bin/pyi check` drops it:
+  run on AOT by unittest with regrtest's default resources (`.tmp/q568/p/ptools.py`): 190 run, 0 failures, 0 errors, 14 skipped,
+  CPython 3.14.10's own numbers.
+
+`test/python/divergences.edn`: `:c-accelerators` loses 499 test_pickle rows (they pass on the C pickler, skip as CPython skips them,
+or are `:cpython-only`'s by its match) and keeps the 35 the eval record holds as an error, failure or skip until the host's eval run
+records test_pickle with the world; the three real gaps go to a new deferred class `:pickle-c-gaps` (a list cleared by Python code
+during batch_list, whose mirror's size C does not see; DumpPickle_CLoadPickle.test_optional_frames' fault at address 0, not
+reproduced by a probe; test_framed_write_sizes_with_delayed_writer past the 300 s limit); test_shelve's 79 join
+`:dbm-sqlite3-locking`. Judged again on the run (`--judge`): 6 modules, 1,408 methods, 1,253 pass, 155 classed, 0 failing (test_pickle
+938 pass, 76 classed: cpython-only 18, pickle-c-gaps 3, skipped-by-test 55), the controls failing as they must. No record written: there is no AOT lib-test record on arm64, and the eval record is
+the host's.
+
+## 2026-11-25 — the user's DECISION 568-1 (a) (queue 568, VM)
+
+568-1 (a): the thin Go `_pickle` stays, the fallback under `PYI_C_ACCEL=0`; `_pickle` is otherwise CPython's Modules/_pickle.c in the
+C world, as built on this branch. Alternative (b), removing the Go module, not taken.
+
+## 2026-11-25: train 5 (Python round 2) assembled: eleven branches on train-3, go/arbace/py merged at the Go level
+
+Branch train-5 from mac/train-3 (2aeeffc77), the burst's train 5 (.tmp/goal/train-3-plan.md's "Train 5" lines): merged in order
+mac/py-core-1124 e0847b7fc, mac/py-os-1124 144761c1c, mac/py-design-1124 cf9f89f08, the Mac's 550-py-sqlite-statements aab180875,
+551b-py-finalization-warnings a2e1214c8, 552-py-tls13 7d5ee9c01, 553-py-subinterp-testbuffer 585a1f7bc, 554-py-capi fce1feee9,
+557b-py-compileall-tools-r2 431dd5eb0 (which holds 557-py-unowned 0be967103) and 568-py-pickle-c c52666fc4.
+
+The method for go/arbace/py, whose forms carry Go positions (mode :full), so that a textual merge of two branches' edits to one
+file shifts the other's positions: each merge commit keeps go/arbace/py{,.ae} at its first parent; the package is printed to Go
+(bin/repr-go print) at every merge base and branch head, merged file by file in Go with git merge-file into one tree
+(.tmp/g/cur/py, the conflicts resolved there), and read back once at the end (bin/pyi runtime read's step, `bin/repr-go read
+--full --tests`) after gofmt, go vet and go test of the printed Go: one commit holds the read.
+
+The overlaps resolved (three branches built the same features independently):
+- -O: py-core (compile()'s optimize as a mode suffix +O1/+O2), py-os (config's optimization_level from -O and PYTHONOPTIMIZE,
+  every compile's +opt1/+opt2 mode, the IR cache keyed by it, compile()'s optimize -1 the interpreter's, the main module at the
+  level, sys.flags.optimize, builtins.__debug__) and 557b (startOptimize, optimizeMode's +ON, a second O in bin/pyi's start
+  flags). Kept: py-os's whole (the most complete: PYTHONOPTIMIZE and imports); 557b's startOptimize, optimizeMode and its O in
+  the start flags dropped (with both, -O counted twice); the compiler's *optimize* is one var, py-core's and 557b's uses being
+  the same as py-os's; 553's compileSourceNamed (compile()'s \N names) takes the level (compileSourceNamedOpt).
+- the future flags: py-os's :future-annotations and :future-barry (the IR names), 557's :future-barry-as-bdfl renamed to them
+  (CodeFutureBarry in Go, code.replace's co_flags kept from 557).
+- inlined comprehensions' scopes: py-core's :temp-syms kept, 557's :comp-syms tweak dropped (the same CPython rule).
+- source decoding: py-os's get_normal_name, cookie neutering and CR LF translation kept over 557's equivalents; 557's
+  fileInitError (a coding spec's codec that cannot read the file, a SyntaxError at line 0) added before py-os's -c branch.
+- function and type annotations, PYTHONPATH, sys.pycache_prefix: py-core's and py-os's kept over 557b's equivalents.
+- built-in docstrings: py-core's table (builtinDoc) after train 3's C extension docs (ExtBuiltinDoc) in __doc__ and
+  __text_signature__.
+- functools.partial: py-design's NEXT.md step 1, the subclass repr and objectDescr __reduce__/__setstate__, applied in the Go.
+- hash.go is py-os's (randomized when PYTHONHASHSEED is unset; bin/pyi's verbs export 0).
+- goi's table, j2g's program copy and arbace_runtime_not: train 3's clib and pyctypes beside 552's pytls.
+- classes: 551b's :finalization :kind :na kept with 553-2's test_fd_finalization; 557/557b's removals of :compiler-errors,
+  :inlined-comprehensions and :compileall-pyc kept; :forkserver-preload's rows kept out of :multiprocessing; :c-accelerators'
+  test_pickle rows those py-design and 568 both kept (39, 568's); bin/pyi divergences' six shadowed names resolved (test_compile's
+  four to queue 554's classes, test_type_check_in_subinterp :c-accelerator-gaps' alone, test_signaldict_repr :c-accelerators'):
+  0 shadowed. The merged namespaces load on stage 0 (arbace.go.table, arbace.j2g.main, arbace.python and its parts, repr/python's
+  native, astjson and peg).
+
+Next (.tmp/train-5.sh under one big-lock ticket, HEAVY_MEM_GIB 30): the read back, bin/j2g-edge update, one gate build, the smoke
+run; then .tmp/records-5.sh (its own ticket, 16): the eval check of the 101 modules the branches name or whose non-passes sit in
+the streams' classes (.tmp/train-5-modules.txt), and the AOT program set whole, recorded after review.
 
 ## 2026-11-24 — queue 542, round 8: the five eval cases rebuilt at the new layouts; threads.rs's livelock (VM)
 
@@ -23316,3 +23911,70 @@ textual scope does not reach a crate-root macro_export); leaving the gate gated 
   --record`): cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, cpp26/static_assert1.C, ext/vector41.C to own pass (ext/vector6.C already
   was). `bin/reap --record`: C++ read 6,108 / 0 / 177 -> 6,111 / 0 / 174; `bin/crops-score --record`: C++ completeness 0.9869 ->
   0.9870, read independence 0.892. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26: train 5's records: 84 modules recorded, 11 held for their regressions; mac/next merged; del.py's AOT row
+
+Built 2026-11-25 (`.tmp/train-5.sh`, one big-lock ticket): go/arbace/py read back from the Go-level merge (6775a693c), j2g's edge
+afresh (b6be9b74b), one gate build, KEY20 b85611b74343b609b2a4, smoke ok. The records (`.tmp/records-5.sh`, its own ticket at 16
+GiB): run 1 (20:54) took stage 0 as ARBACE_HOST_EXE by the script's mistake, so goi interpreted the runtime and no module imported
+(discarded, `.tmp/repr-python/pyi/check/run-bad-stage0`); run 2 (22:30-23:47, 1 h 17 min, peak 3.1 GB) on the train's own
+executable (PYI_RUNTIME_REQUIRE=compiled): the 95 modules of `.tmp/train-5-modules.txt` (the branches' modules and those whose
+non-passes sat in the streams' classes, less py-mp's, the Mac's 574 four and py-capi's test_capi and test_importlib, which train 6
+records), 15,861 methods, 13,189 pass, 1,092 regressions against train 5's record (1,087 against next's).
+
+The regressions, held (no row of these modules recorded: `bin/pyi check --judge DIR --record` writes a module's rows from the run
+and drops a method the run does not hold, so a single row cannot be kept; their modules were left out of the judged copy whole,
+their record lines as they were): test_enum (1,078: the module does not import, "ReprEnum subclasses must be mixed with a data
+type": the C _datetime's date has no __new__ in its __dict__, the Mac's report; the fix candidate py.ExtNewWrapper, the Mac's 587),
+test_functools (TestPartial{C,CSubclass,Py,PySubclass}.test_recursive_pickle: stack overflow), test_pickle
+(CPicklingErrorTests.test_evil_pickler_mutating_collection "list index out of range", test_wrong_newobj_ex_class skipped),
+test_descr (PicklingTests.test_reduce_copying: 'C2' object has no attribute 'a'), test_subprocess (test_pass_fds: fd 8 passed;
+two test_one_environment_variable: 1 != 0), test_os (test_execve_env_concurrent_mutation_with_fspath_posix), test_sys
+(test_ioencoding_nonascii skipped: "requires FS encoding to match locale"), test_builtin's test_open_default_encoding and test_io's
+CTextIOWrapperTest.test_default_encoding ('utf-8' != 'UTF-8', the UTF-8 mode rule), test_traceback
+(test_print_traceback_at_exit), test_sqlite3 (test_table_lock_cursor_non_readonly_select "database table is locked", back in
+:finalization-goi: it passes on the VM, 550's, not on amd64). Recorded: the other 84 modules, 0 regressions, 459 now pass, the
+writer's rows put back in the committed file's order (537 rows changed, 11 new; every other row byte for byte).
+
+The py-cli lane's --only directory (only-69e24fca3f8d, and only-7f8233b957e0) is refused by `--judge --record` ("--write-record of
+a selection (--only): refused"): nothing applied, they wait for train 6. The four py-cli classes' names the record now passes
+removed from their :tests (pyi-command-line 21, run-dir-zip-main 19, pyi-main-module 28, interactive-mode 22).
+
+mac/next b94fde1aa (train 3's records) merged first: the eval record next's, train 5's rows applied by the judge; :c-accelerators
+merged three ways against train-3 (568's title and :why, rec-t3's narrowed :match and :decided addition, the rows both sides kept:
+41); test_signaldict_repr back in :capi-refcounts (train 3's record: failure), the two test_large_pool names :host-memory takes
+first out of :multiprocessing-children. `bin/pyi divergences`: 0 shadowed, 0 in no class, no duplicate name.
+
+AOT: synth/datamodel/del.py on the train's executable passes compiled, on its loop and on pyi (`check --aot --only`, which the tool
+does not record): its row applied to check-aot-linux-amd64.edn, divergences-aot.edn's :finalization-goi removed (queue 557).
+
+Python eval (pass/design/deferred, n/a) next 42,743/278/1,004 (4,426) -> 43,203/148/568 (4,543); AOT 150/0/1 -> 151/0/0;
+completeness 0.9911 -> 0.9959. bin/reap --record 56 of 56, 0 problems; bin/crops-score --record, --judge --strict 0 problems;
+bin/records-check 9 pairs, 0 problems; bin/markers-check ok.
+## 2026-11-25: rust-rec-1125: Rust's eval and AOT records from the own path on amd64 (542's and 565's records for the host)
+
+Branch `rust-rec-1125` from mac/566-rust-c6-l1 (`6ffc51528`), next merged (`3a67d8dc2` with 565, 566, 561 before the runs; `5754ba518`
+after them). The Mac (arm64) writes no amd64 record; these are the ones 542 ("Records for the main host (held)") and 565 ("Left for
+the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/logs/.
+- Caches: rust-l1's (`.tmp/rust-front`, std's IR at the pin `test/rust/runtime/ir.sha256`, `.tmp/repr-rust`), paths rewritten.
+- `DEPS_IFACE_ROUNDS=3 bin/rust-front std-iface --deps`: libc 892 functions, 304 ADTs (round 10's three rounds; the facts rust-l1
+  installed 11-24, kept), hashbrown 665, unwind 14.
+- `CORE_NATIVE_IFACE=core/core-whole-iface.edn bin/rust-front std-iface-native`: core 27,199 of 27,498 facts equal to the helper's
+  (164 differ, 135 missing; the Mac's 542 pass 27,194), alloc 3,863 of 3,863.
+- std's names: np5's `std-names.edn` (rust-c4-1122's chain, kept in .tmp/kept/rust-c4; 15,120 of 15,162 equal; the names the Mac's
+  rsi18 used), not scanned again: the fresh `std-names-native` was killed by the 12:03 OOM reboot at core's scan 50 of 378 (about
+  75 min for core alone), and the coordinator approved np5's.
+- The exports at this head: `core-export --rsi` (21 min), `--rsi-outside` with 565's regex (43 min), `lib-export --rsi std`, the
+  two CTFE keys into std/native-std-ctfe.edn; after the OOM one at a time outside the lock at GOMEMLIMIT<=2500MiB.
+- `RF_FACT_TRACE=1 RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5 RF_EXTRA_IFACE=core pass:core native-iface:hashbrown:libc:unwind RF_DROP_GLUE=1
+  RF11_BATCH=1 bin/rust-front rsi-build --native-core` over the six, under the lock: **6 of 6 own**, 0 stub calls. fact-refused: 0 in
+  five; vectors 16 (8 callees, 8 fn-symbols), all `core_simd::swizzle::{impl#1}::resize::<N>` for Mask<i8,16> and Mask<i32,4>:
+  "attributes are not in core's sources (a macro-made item)" (the Mac's rsi20 had 0: its core-attrs cache likely covers swizzle.rs;
+  not investigated here).
+- runtime-ci (104 units lowered, 0 refused), then under the lock with RSI_FRONT_DIR the build's:
+  `bin/rsi check --record --front own --corpus samples` **6 of 6 pass**; `bin/rsi check --aot --record --front own --corpus samples`
+  **6 of 6 pass** (compiled against interpreted: 6 both).
+- Case inputs (eval and AOT): C1, C4, C5, C7 own on all six; C3 own on five (vectors' 16 the record's); C2 the pack's (std's instances'
+  bodies: 137 to 1,938 rustc's, the exports built for the five eval samples' keys, threads' larger); C6 std's IR. 0 of 6 cases own
+  in all seven: independence stays 80. bin/reap 56 of 56, matrix unchanged; crops-score unchanged (Rust 100 / 80), --judge --strict
+  0 problems; records-check 9 pairs 0; markers-check 0.

@@ -8398,3 +8398,393 @@ natives the new modules called (`PyType_GetModuleState`, `PyObject_SelfIter`, `_
 ctypes' 7 ids 5 / 2 / 0. Left in `:elementtree-c` (deferred, 6): XMLPullParser's flush and small-chunk events, a deep deepcopy's C
 stack, an Element's weak reference, a Go panic in TreeBuilder's late tail. The world's aot forms (11.5 MB of node program) now
 need more than 8 GiB to print.
+
+## As built: py-core-1124, the core objects' and builtins' rows of the eval level (2026-11-24, the main host, the burst's py-core stream)
+
+The burst's py-core stream (the coordinator's scope: py-na-proposal's "core objects and builtins" and "stdlib misc", with
+:coroutines from the Mac's 551), on mac/py-mac-1123 (5d93b6732). The record's rows of those classes grouped by cause; built, the
+largest causes first:
+
+- **The built-ins' docstrings** (`:builtin-docstrings`, `:docstrings`, functools' test_builtin_update, pydoc's generic-alias and
+  union-type rows). `tools/pyi/runtime_tables.ae`'s textsig reading (queue 357) also makes `builtins_docs_table.go`
+  (`builtinDocs`, gen-tables `docs`, made in the same run as textsig: `bin/pyi runtime gen-tables textsig docs`, the --full step
+  pyi-runtime-textsig): every built-in type's, method's and module function's `__doc__` as `_PyType_GetDocFromInternalDoc` gives it
+  (the internal doc less Argument Clinic's "name(sig)\n--\n\n"), keyed as textSigs (`type:`, `meth:`, `func:`), and the getset and
+  member descriptors' docs (`attr:`, PyGetSetDef's and PyMemberDef's doc, Py_tp_getset and Py_tp_members of the specs too); its
+  control: bin()'s doc one word changed. The runtime reads it: a built-in function's or method descriptor's or classmethod
+  descriptor's `__doc__` (builtinDoc, found as builtinTextSignature finds a signature; a method read from its type's `__dict__`
+  by the type whose dict holds it, builtinDictOwner), a static type's dict's `__doc__` (type_dict_set_doc: its doc, else None as
+  before), a getset or member descriptor's (getsetDoc). Doctest's finder over builtins now finds CPython's 14 objects with
+  examples.
+- **Struct sequences are tuples** (`:struct-sequences`, `:structseq-protocol`'s test_tuple, test_imaplib's Time2Internaldate):
+  a struct sequence type's base is tuple and its value's visible items are its tuple (BaseTuple), so `isinstance(t, tuple)`
+  holds and tuple's methods see them; the types CPython makes by PyStructSequence_NewType (the modules' own, not sys's static
+  ones) take attributes (test_reference_cycle).
+- **A non-dict `__builtins__`** (`:builtin-functions-core`): exec's, eval's and FunctionType's builtins from the globals'
+  `__builtins__` kept as _PyEval_BuiltinsFromGlobals keeps it (a mappingproxy, a dict subclass, any object: Frame.BuiltinsMap,
+  Function.BuiltinsMap), the builtins' loads through it (PyMapping_GetOptionalItem), IMPORT_NAME's `__import__` and
+  LOAD_BUILD_CLASS's lookup too ("__import__ not found"), and _PyEval_GetBuiltin (an iterator's `__reduce__`) the running frame's.
+- **compile()'s optimize** (test_builtin's test_compile): `MODE+O1`, `MODE+O2` to the host's compiler (arbace.python.run),
+  `arbace.python.compile/*optimize*`: no assert statements and `__debug__` False from 1, no docstrings from 2 (the statement
+  removed, as _PyAST_Preprocess does).
+- **Inlined comprehensions' scopes** (`:inlined-comprehensions`): a name whose scope inside the comprehension differs from the
+  unit's takes the inside one while the comprehension compiles (push_inlined_comprehension_state's temp_symbols; but a name free
+  inside, and a cell inside free outside), so a name a first comprehension bound in a function and a second reads free is the
+  global.
+- **CO_FUTURE_ANNOTATIONS** (`:compiler-errors`, test_codeop's test_future_imports): the IR's flag `:future-annotations` on every
+  code object of a unit under `from __future__ import annotations`, co_flags' 0x1000000.
+- Smaller causes, each CPython's function ported: dict views' `isdisjoint` (`:dict-views-set-methods`); deque's `in` and `index`
+  detecting a mutation (RuntimeError), `index`'s message, `n * deque` (`:deque-core`); int()'s base by `__index__` and the digits
+  limit for every base not a power of two (`:int-core`); WITH_EXCEPT_START passing the exception's traceback to `__exit__` (it was
+  None: `:with-exit-traceback`, contextlib's test_contextmanager_traceback); `_Py_c_prod`'s Annex G recovery of infinities
+  (`:complex-core`); bytes' `%f` of a non-float "float argument required", a `*` precision PyLong_AsInt's, `{:zs}`'s message
+  (`:format-messages`); except* calling a subclass's own `split` and checking its answer; a class body's LocalsMap not the
+  globals' map (test_type_aliases' exotic globals); `__contains__ = None` blocking the fallback (`:contains-none-blocks`);
+  BaseException.__setstate__ with a str subclass's key (`:setattr-str-subclass`); the exceptions' members (StopIteration.value
+  ...) as member descriptors; OSError_init a no-op unless oserror_use_init (`:data-model`'s test_new_overridden); the method
+  descriptors of a built-in type read from its `__dict__` (enum's shadowed attributes); object's slot wrappers in its `__dict__`
+  (collections.abc.Hashable of object); dict.fromkeys of a set, frozenset or dict with the stored hashes (`:set-core`);
+  frozenset's keyword refusal for a subclass without `__init__`; set.__repr__ of a subclass naming it (`:pprint-dispatch`); a
+  function's and a type's `__annotate__` and `__annotations__` as typeobject.c and funcobject.c set them, a function's cache
+  outside its `__dict__` (funcAnnotations: functools.update_wrapper's `__dict__` update put type's `__annotations__` descriptor
+  there) (`:annotate-rest`, functools' test_update_type_wrapper); `'%'` after flags an unsupported format character, not a literal
+  (unicode_format_arg); dir() of a dict subclass's locals by its keys(); input()'s flush of a stdout without one cleared; a match
+  statement's patterns at their own locations (codegen_pattern's LOC(p): `:code-positions`' six test_matchcase rows); a static
+  type's `__doc__` its tp_doc whatever its dict holds (property's); a class's `__name__` and `__qualname__` one str object while
+  the text stands (ht_name: inspect.classify_class_attrs finds them by identity, test_enum's test_inspect_classify_class_attrs);
+  type() of an OrderedDict namespace in its order (dict_merge's slow path: test_builtin's test_namespace_order, failing at the
+  base).
+- Tooling: bin/pyi's AOT module keeps the C libraries' cf2g translations across its rebuilds (bin/pyi-clib aot's key now the node
+  program's and the translator's sources): a runtime change no longer translates the five libraries again (about 10 minutes).
+
+- Also: OSError_init's use_init, a subclass's class attribute over an exception's field (OSError's errno: test_asyncio's three
+  SelectorEventLoopSignalTests, py-os's hand-over), input()'s "lost sys.stdin" and "lost sys.stdout", `'%*r'`'s width
+  PY_SSIZE_T_MIN "width too big", the owners of a built-in type's methods and class methods read from its `__dict__`
+  (`__objclass__`; doctest's finder walks them).
+- **Classes**: test_compile imports at this base (PyConfig_Get, 4c48d37c6), its rows run: the four compiler-shape rows named in
+  `:compiler-shapes` (it named none), the two null-byte script rows (the file's message, "source code cannot contain null
+  bytes", from a script run: pyi's command line) in `:source-decoding`. The classes whose rows pass now keep them until the
+  train's re-record (the record is the main host's).
+
+**Proofs** (the main host, pyi's AOT with the checkout's runtime, `bin/pyi check --aot --lib-test --fresh --only`; logs and probes in
+.tmp/core/ of the worktree): probes against python3 3.14.10 (.tmp/core/p/probe1-7: every line equal but the doctest finder's
+count, 758 of CPython's 783 in builtins, inside test_doctest's 750-800, the 14 examples' objects the same); the scope's 163 rows:
+118 pass (run3), the rest listed below; 50 touched modules whole (6,907 methods) against the eval record: 3 rows the record passes
+not passing, all three the same at the base (test_namespace_order, fixed since; test_recursion_error_cleanup, classed;
+test_closerange, the host's descriptors); after the last changes test_builtin, test_enum, test_inspect, test_pydoc, test_format, test_doctest, test_exceptions and test_set whole again (2,589 methods: two rows the exceptions' field rule broke, a slotted exception's and getopt's msg, fixed by narrowing it to a built-in field left None), then test_exceptions, test_getopt and the three asyncio rows (157 methods, 0 failing; the one row differing from the record the same at the base). The negative controls failed as they must in
+every run. `bin/pyi runtime gen-tables textsig docs`: textsig byte for byte, docs Arbace's, both controls differing.
+
+**Left in the scope** (not built here): the finalization and collector rows (WeakSet's five, test_slice's cycle, test_sort's
+mutating __del__, CodeWeakRefTest, test_no_exception_leak, test_structseq's gc tracking, test_coroutines' bpo_45813 pair, pdb's
+frame refleak, test_trace's gc.get_referrers); C accelerators (functools' four reentrant reprs of the C partial, pydoc's _pickle and
+_datetime signatures, plistlib's _datetime message); the subinterpreters' two (the Mac's 553); test_hash's three test_null_hash
+(PYTHONHASHSEED unset: CPython randomizes, pyi keeps the zero key: a DECISION); the command line's (test_support's -O flags,
+test_traceback's two relative file names, the two null-byte scripts); pydoc's help CLI, bad import and object addresses
+(pyi's identity numbers are short: pydoc's stripid wants six hex digits), the namedtuple field descriptor; test_monitoring's
+LoadSuperAttr call event; test_pyclbr's _testmultiphase.
+
+## As built: py-os-1124, the command line, the environment and the process as CPython's (2026-11-24, the main host, the burst's py-os stream)
+
+The eval rows of processes, the command line and the OS (`:pyi-command-line`, `:source-decoding`, `:os-and-files-misc`,
+`:signal-timing`, `:run-dir-zip-main`, `:compileall-pyc`, `:pyi-main-module`, `:interactive-mode`, `:socket-gaps`,
+`:hash-algorithm`; test_cmd_line and test_sys whole). The base's run (pyi's AOT, `bin/pyi check --aot --lib-test --only`, 39
+modules, 595 methods) passed 40 of the 127 rows already (the record predates py-eval-1122, py-mods-1122, 537, 545 and 551).
+
+- **The caller's environment** (`interp.go`'s entryEnviron): tools/pyi/python3 and the compiled launcher's wrapper keep the
+  environment they were given in `PYI_ENTRY_ENV` (NAME=VALUE records split by \036, a newline as \035) before bin/pyi adds its
+  own; the runtime reads it once, undoes its shell's PWD and SHLVL (busybox sh raises SHLVL, adds PWD when absent) and
+  `posix.environ` is it; the names bin/pyi added stay in the process (the runtime and env=None children read them) but out of
+  `os.environ` and `os.reload_environ()` until the program sets one. Without it (bin/pyi run, a compiled program): the process's.
+- **The command line**: sys.argv's bytes from `PYI_ARGV`, decoded with surrogateescape (Py_DecodeLocale); -c's command not UTF-8
+  is pymain_run_command's "Unable to decode the command from the command line:" and status 1; -c's coding spec ignored
+  (PyCF_IGNORE_COOKIE: `arbace.repr.python.native/*ignore-cookie*` on goi's path, a UTF-8 decode on the compiled path); `-mMOD`
+  and `-cCMD` joined; -O (each), -v, -d, -B and -R passed in `PYI_START_FLAGS`; a script whose path is not UTF-8 read by a
+  prologue (the host reads files by its strings); a path inside a zip file a main importer; a script's CR LF and lone CR read as
+  LF on goi's path (the reader's mode :full keeps a file's line ends for the round trip).
+- **Configuration**: PYTHONPATH after sys.path[0] (getpath's `_Py_abspath`: "" and "." the working directory, a relative entry
+  joined to it, undecodable bytes surrogate-escaped); sys.flags' optimize, verbose, debug and dont_write_bytecode from -O, -v,
+  -d, -B and PYTHONOPTIMIZE, PYTHONVERBOSE, PYTHONDEBUG, PYTHONDONTWRITEBYTECODE (`_Py_get_env_flag`), hash_randomization as
+  `use_hash_seed == 0 || hash_seed != 0`; sys.pycache_prefix from -X pycache_prefix and PYTHONPYCACHEPREFIX; -X importtime
+  (and PYTHONPROFILEIMPORTTIME): import_find_and_load's lines (self and cumulative microseconds, two spaces a level, "cached"
+  lines at 2, the name with backslashreplace, a failed import's line too), another value the start's error. pyi still writes no
+  bytecode cache at import (sys.dont_write_bytecode stays True; the IR cache is the host's).
+- **-O and -OO**: the compiler's `*optimize*` (`arbace.python.compile`): from 1 no assert statement (its "always true" warning
+  kept) and `__debug__` False, from 2 no docstrings (module, class, function); every compile the runtime asks takes the level as
+  the mode's `+opt1`/`+opt2` (the IR cache keys the whole mode), compile()'s `optimize` argument too (compileall's opt-1 and opt-2
+  files and their hard-link deduplication), builtins.`__debug__`, the main module (arbace.python's start asks the runtime's
+  `OptimizeLevel`).
+- **Hashes**: randomized when PYTHONHASHSEED is unset, empty or not a seed, or under -E, -I or -R (CPython's default; queue
+  304 kept them zero-keyed); bin/pyi's own verbs export `PYTHONHASHSEED=0` and `PYTHONDONTWRITEBYTECODE=1` when unset (the
+  references' environment), so their drivers and their children stay deterministic and only a child whose environment drops
+  the variable is randomized, as CPython's.
+- **The future features compile() and the REPL inherit**: co_flags' CO_FUTURE_ANNOTATIONS and CO_FUTURE_BARRY_AS_BDFL (the IR's
+  `:future-annotations`, `:future-barry` on every code of a module that imports them), compile()'s flags as the modes `+futA`
+  and `+futB` (scope's `*inherited-features*`, the parser's and tokenizer's barry flag, `peg/set-barry!`), the basic REPL's
+  accumulated features (PyCompilerFlags), ast.parse's CO_FUTURE_BARRY_AS_BDFL; a tree compiled from an AST object is made with
+  `!=` and so compiles without barry's parser.
+- **The process**: os.abort dies by SIGABRT (fhDie: SIG_DFL first); `restore_signals` makes SIGPIPE and SIGXFSZ Go's for the
+  fork (Go's child sets the signals it handles back to SIG_DFL) and ignored again after, so the child starts with them default
+  and a `restore_signals=False` child keeps them ignored; the start installs SIGINT's default_int_handler (not over an inherited
+  SIG_IGN), so a program that never imports signal ends a SIGINT with KeyboardInterrupt; atexit as atexitmodule.c (a copy run,
+  the list cleared after, an exception through sys.unraisablehook, unregister in the comparison's order).
+- **Text**: str.format keeps surrogates (buildString as code points); sys.displayhook writes an unencodable repr with
+  backslashreplace (sys_displayhook_unencodable); compile(), exec() and eval() of a str holding a lone surrogate raise the
+  UTF-8 codec's UnicodeEncodeError; str.encode's and bytes.decode's encoding and errors arguments likewise (getargs' "s");
+  exec()'s bytes take the tokenizer's get_normal_name and a decoded source's every coding spec of its first two lines is made
+  inert; ast.parse of a tree past encoding/json's depth is the parser's MemoryError.
+- **Sockets**: AF_UNIX getsockname and getpeername from the address and its length (Linux abstract names holding NULs);
+  send and sendall interruptible (the user's decision 2 (a) of 2026-11-24): on a blocking socket in the main thread the wait
+  for room is ppoll with the wake pipe and the send carries MSG_DONTWAIT, so a signal's handler runs while it waits (its
+  exception ends the call, its return lets it go on), as send(2) under CPython's handlers without SA_RESTART
+  (test_sendall_interrupted, no longer in lib-test-skip.tsv; test_wsgiref's test_interrupted_write).
+- **n/a**: test_cmd_line's test_python_malloc_stats (`:pymalloc-stats`, the user's decision 1 (a) of 2026-11-24: pymalloc's
+  statistics, an allocator detail).
+- **bin/pyi's AOT module** keeps the libraries cf2g compiled (clib/LIB/aot, by their nodes' key) across a runtime change: a
+  runtime rebuild is the print and copy, not 15 minutes of cf2g.
+- **Proved** (the main host, pyi's AOT, `bin/pyi check --aot --lib-test --fresh --only` over the same 39 modules; the three
+  negative controls failing as they must): 288 -> 332 pass, 0 failing, no row of the base's run lost; the launcher's direct
+  probes (.tmp/os/t5.py, t8.py) and goi's path (`bin/pyi python` interpreting the checkout's runtime: -c's coding, a CR CR CR LF
+  script, a double coding spec, a non-UTF-8 script path, -O); then 13 modules the later changes touch, whole (3,425 methods,
+  3,212 pass), and test_source_encoding whole again (every row passes). On the compiled path alone, and not on goi's:
+  test_subprocess's test_close_fds and test_pass_fds (the compiled launcher's compile server holds fds 6-13 in the child),
+  test_threading's test_can_interrupt_tight_loops and test_signal's test_stress_modifying_handlers (a compiled tight loop never
+  switches threads), test_cmd_line_script's two null-byte messages.
+- **Left, and whose**: test_regrtest's test_add_python_opts (`_testcapi.config_get('buffered_stdio')` in pyctypes'
+  capi_config, py-accel's world, should read the runtime's -u, -W, -b and -E); test_asyncio's three
+  SelectorEventLoopSignalTests (an OSError subclass's class attribute `errno` over the instance's field: py-core's exception
+  model); the wakeup-fd tests
+  (_testcapi), test_jit_is_active (_testinternalcapi), test_c_locale_coercion's two (the UTF-8 mode's stdio errors, 553's),
+  test_compileall's test_workers (ProcessPoolExecutor, 535's), the end's finalization rows (the Mac's).
+
+## As built: 550, dbm.sqlite3's rows: crt's F_GETLK and file mmap as Linux's, statements as CPython's reference counts leave them (2026-11-24, the Mac VM, queue 550)
+
+536's DECISION 536-1, the user's (a); the coordinator approved carrying crt on the branch. `:dbm-sqlite3-locking` (30 rows,
+deferred) is closed: test_dbm 31 ok, test_dbm_sqlite3 25 ok (5 skips), and test_sqlite3's test_table_lock_cursor_non_readonly_select
+passes too (it leaves `:finalization-goi`).
+
+- **The causes, in their order.** With crt as it was, SQLite's WAL could not start: `F_GETLK` answered 0 and left the struct, so the
+  -shm's DMS probe saw a conflict ("locking protocol" at the first write), and a file's mmap was ENODEV. Then two places where pyi's
+  objects outlive CPython's reference counts: close left the connection open until Go finalized its statements (no checkpoint: the
+  database 4096 bytes with -wal and -shm left, CPython's 12288 bytes alone), and dbm.sqlite3's never closed `PRAGMA journal_mode = wal`
+  cursor, stepped to its row, held every later autocommit write back (python3 does the same while such a cursor lives:
+  `.tmp/q550/p/rw4/py5.py`).
+- **crt** (`go/arbace/crt`): F_GETLK asks the host (`hostGetLk`: syscall.FcntlFlock on the description's host file; another process's
+  lock and its holder, else F_UNLCK; the program's own F_SETLK still takes none); mmap of a file is the host's mapping
+  (`hostMapFile`: MAP_SHARED or MAP_PRIVATE, PROT_WRITE as asked) at the guest's address (`Mem.Place`, MAP_FIXED's) as a slab whose
+  bytes are the host's (`Mem.MapFile`; `Mem.Zero` leaves a file's bytes); TamaGo copies the file's bytes in. crt moves gate_key.
+- **pysqlite3** (`go/arbace/pysqlite3`, `py.ExtFinRounds`): close finalizes the statements no cursor is stepping (sqlite3_next_stmt,
+  sqlite3_stmt_busy 0; the handles recorded in `stmts_final`, so a statement's later reset and Go finalizer skip them); a stepping
+  statement stays with the database open, as CPython keeps a live cursor's (test_connection_reinit reads the old database through one).
+  Before a statement that writes, and before COMMIT, when another statement of the connection is still stepping, the runtime's
+  finalizer rounds run, each dead cursor resetting its statement (cursor_finalize); a live cursor's stays.
+
+Proofs (the VM; `bin/pyi check --only` with `PYI_RUNNER=python3`, the three negative controls failing as they must): test_dbm,
+test_dbm_sqlite3 and test_sqlite3 whole (test_sqlite3's module reached its 3,600 s on the six last WindowFunctionTests and
+MultiprocessTests' memory-cap crash; those seven run again alone: six pass, test_ctx_mgr_rollback_if_commit_failed its recorded
+failure, `:sqlite-process-locks`), recorded by `--judge DIR --record`; the probes `.tmp/q550/p/test-pysqlite.sh` (st1, rw4 and py5 equal to
+python3's, all three failing on the parent's pyi; py5, a live cursor's write held back, the control against resetting too much) and `.tmp/q550/p/c/test-crt.sh` against gcc's builds (a lock another process holds, a shared
+mapping's coherence before munmap: the controls an always-F_UNLCK fcntl and a copying mmap fail); C's eval and AOT essential subsets
+and the four rows that mmap pass.
+
+## As built: 551, _warnings in Go, the standard streams as TextIOWrappers, 537-2's n/a (2026-11-23, the Mac VM, queue 551)
+
+The user's decisions of 2026-11-23: 537-2 (a), 537-3 (a), 545-1 (b); :builtin-modules, :runs-where-cpython-skips and
+:host-clock n/a (:subinterpreters is queue 553's).
+
+- **_warnings** (`go/arbace/py/builtins_warnings.ae`): Python/_warnings.c of CPython 3.14.10 in Go: warn (setup_context's
+  frames, importlib's bootstrap frames and skip_file_prefixes skipped past the first), warn_explicit (with module_globals'
+  source line through _PyImport_BlessMyLoader's checks), the registry's version, the once registry, the default action,
+  filters searched in the context's list when one is set, else the global list; _showwarnmsg and WarningMessage, or
+  show_warning's own line on sys.stderr when the warnings module is absent; the lock (an _thread.RLock), the
+  _filters_mutated_lock_held version. warnings.py takes them as CPython's does, so each warning reads sys.modules['warnings']
+  at the call (test_warnings' BaseTest.setUp swaps it). The shutdown's finalWarn, once the warnings module is gone, is
+  unchanged.
+- **The standard streams**: at the start (init_sys_streams, the first start hook: the encodings package is importable then;
+  made while sys is created, before importlib, a TextIOWrapper's codec lookup broke `_bootstrap._setup`), sys.stdin,
+  sys.stdout and sys.stderr and their `__std*__` become create_stdio's `TextIOWrapper(Buffered*(FileIO(fd, closefd=False)))`;
+  input() flushes the real stdout, the REPL's prompt flushes both (flush_io), SystemExit's message goes through sys.stderr.
+  The runtime's textFile stays for the REPL (`bin/pyi python` without a program), a closed descriptor and tamago.
+- **n/a**: :finalization-cycle, :weakref-list and the rest of :finalization (reference counting's moment; its 30 rows that
+  pass since queue 222 stay passes), :builtin-modules, :runs-where-cpython-skips, :host-clock (551b, 2026-11-24, for
+  :finalization; :coroutines and its test_bpo_45813 rows are the main host's py-core).
+- **Records** (551b): test_warnings whole, 186 pass, 15 classed, 0 failing; test_print 9 pass. :warnings-c keeps
+  PyWarningsDisplayTests.test_tracemalloc alone (tracemalloc's object tracebacks).
+
+## As built: 552, a vendored crypto/tls under _ssl: TLS 1.3 post-handshake authentication, PSKs, the exporter secret (2026-11-23, the Mac VM, queue 552; the user's 537-4 (a))
+
+pyi's `_ssl` (queue 209, PYS22 (a)) ran over Go's own crypto/tls, which has no post-handshake authentication, no PSKs and
+four key-log secrets where OpenSSL writes five (`:ssl-go-tls`, 19 rows). Since 552 it runs over a vendored copy with them.
+- **The copy**: go/arbace/pytls (import path `arbace/pytls`, package `tls`) and its internal packages: TamaGo's go1.27.1
+  `src/crypto/tls` (https://github.com/usbarmory/tamago-go, tag go1.27.1, the GOROOT `seed/goroot.sha256` pins) with what it
+  imports from inside GOROOT, which a package outside it cannot: `vendor/golang.org/x/crypto`'s cryptobyte (and asn1),
+  chacha20poly1305, chacha20, internal/poly1305, internal/alias (the generic code, no assembly), `crypto/internal/fips140/tls12`
+  and `tls13` rewritten over the public crypto/hmac and crypto/hkdf, `crypto/tls/internal/fips140tls` (never required), and
+  stubs of crypto/internal/boring (off), internal/godebug (Go 1.27's defaults; $GODEBUG not read) and internal/cpu. AES-GCM is
+  crypto/cipher's (the FIPS module's increasing-nonce check of TLS 1.2 is the one thing lost). Every change is listed in
+  doc/python/pytls-vendor.md and shown by doc/python/pytls-vendor.diff (against the files as copied); upstream lines edited
+  are marked `// arbace`, the features' code is in `arbace_keylog_alerts.go`, `arbace_pha.go`, `arbace_psk.go`, their Go tests
+  in `arbace_features_test.go` (17, each feature both ways). Upstream's own tests, run on a scratch copy: 686 pass, 3 fail by
+  the intended changes (the key log's fifth line, the new Config fields, the PSK suites' order rule), 22 skipped; the 162
+  recorded handshakes replay byte for byte.
+- **The features**: `Config.PostHandshakeAuth` (client: extension 49, the answer to a post-handshake CertificateRequest),
+  `Config.PostHandshakeClientAuth` (server: SSL_VERIFY_POST_HANDSHAKE, no request in a TLS 1.3 handshake whose client offered
+  PHA), `Conn.RequestClientCertificate` (SSL_verify_client_post_handshake: the request now, the client's answer verified in
+  the server's next Read; its errors OpenSSL's WRONG_SSL_VERSION, EXTENSION_NOT_RECEIVED, STILL_IN_INIT); TLS 1.3 external
+  PSKs (psk_dhe_ke, SHA-256, `DidResume`) and TLS 1.2's plain PSK suites (RFC 4279: PSK-AES256-GCM-SHA384,
+  PSK-CHACHA20-POLY1305, PSK-AES128-GCM-SHA256, PSK-AES256-CBC-SHA, PSK-AES128-CBC-SHA) through `PSKClientCallback`,
+  `PSKServerCallback` and `PSKIdentityHint`; `EXPORTER_SECRET` in the key log; an `AlertError` from the verification
+  callbacks sent as that alert (OpenSSL's unknown_ca and the others of ssl_x509err2alert, in TLS 1.3 too, where the
+  transport could not rewrite the encrypted alert).
+- **_ssl** (builtins_ssl*.ae): `HAS_PHA`, `HAS_PSK` (and 3.15's `HAS_PSK_TLS13`) true; `set_psk_client_callback` and
+  `set_psk_server_callback` as _ssl.c's (the callbacks called on the Python thread, their errors unraisable); the PSK suites
+  in the cipher table (kPSK, aPSK, PSK), offered only with this side's callback; `verify_client_post_handshake`; the peer's
+  certificates taken again after a read that completed a post-handshake authentication.
+- **Proved** on the VM (AOT, from the committed forms): `bin/pyi check --aot --lib-test --fresh test_ssl test_httplib`: test_ssl
+  184 pass, 22 classed, test_httplib 143 pass, 5 classed, 0 failing; the 19 rows pass, none the record passes fails; the
+  development run of test_asyncio.test_ssl and test_sslproto: no regression. Recorded by `bin/pyi check --judge DIR --record`
+  (the 19 rows alone changed in the record); `:ssl-go-tls` removed (both divergences files). Python eval: pass 40,552 ->
+  40,571, design 1,398 -> 1,379.
+- **The keys and the table**: pyi's runtime imports arbace/pytls, so it is listed in goi's table (arbace/go/table.ae's
+  `program-path?`) and copied into the program with go/arbace/py (arbace/j2g/main.ae); `gate_key` moves (those namespaces
+  and go/arbace/pytls), `arbace_runtime_key` does not (`arbace_runtime_not`); the gate's `:pyi` host lists it; bin/pyi prints
+  it beside the runtime, builds it into the AOT module and reads it back (`runtime read`, `runtime read-pytls`).
+
+## As built: 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (2026-11-24, the Mac VM, queue 553; the user's decisions of 2026-11-23 on 537-5 and 537-6)
+
+**Subinterpreters (PEP 734, `concurrent.interpreters`).** The public package is CPython 3.14.10's own
+`Lib/concurrent/interpreters` (pure Python) over pyi's `_interpreters`, `_interpqueues` and `_interpchannels`, ported in queue 230
+("Design: 230", "As built: 230") with each interpreter's own module table, builtins, sys, importlib bootstrap, codecs, atexit,
+locale and the interpreter registers (`_csv`'s, `_asyncio`'s, monitoring's, the at-fork hooks) swapped by `interpSwitch`: an
+`isolated` interpreter's module state is its own, as `Py_mod_multiple_interpreters` modules have it in CPython; what stays process
+wide is immutable or identity bookkeeping (interned strings, small ints, static types, code objects) and the one GIL (230's
+DECISION: an `own` GIL is reported as configuration, isolation without parallelism). This task closes what `:subinterpreters` kept:
+
+- **The moment of a handle's death.** A stdlib interpreter (`_interpreters.create(reqrefs=True)`) ends when the last
+  `Interpreter` handle's `__del__` drops its reference (`decref`), and its items in queues and channels are unbound then (UNBOUND,
+  UNBOUND_ERROR's `ItemInterpreterDestroyed`, UNBOUND_REMOVE). CPython does it at `del interp` by reference counting; pyi's moment at
+  del (queue 222) asks Go's collector at a deletion within a budget of a tenth of the wall time and 50 ms, and past the budget the
+  death waited for the next collection. The rows' failures fit that: in test_interpreters' module runs the budget is spent
+  by the time TestQueueOps and TestSendRecv run, and `del interp` left the interpreter alive, while a probe alone passes (the
+  budget fresh; read, not measured on the main host). Now a deletion past the
+  budget while a subinterpreter is held by handles is owed (`xiDeathOwed`), and the operations whose answer depends on an
+  interpreter's being alive settle it first with one collection round (`xiSettleDeaths`: the queues' get, get_count, is_full,
+  list_all, the channels' recv, get_count, get_info, list_all, list_interpreters). A program with no subinterpreter never owes one;
+  the cost is one collection per owed deletion, at the next such operation.
+- **`_testbuffer`** is ci's since queue 456 (Modules/_testbuffer.c in the C world, its memoryview over Py_buffer since 473):
+  the three `:skipped-by-test` rows ("needs _testbuffer", "No module named '_testbuffer'") and test_buffer's 73 "ndarray object
+  required" rows in `:testcapi` are the 11-19 records night's, before 473; test_capi's two test_number rows and test_ctypes'
+  test_fortran_contiguous pass by id on the VM (their record rows move at the host's whole record, as test_buffer's).
+- **3.14's UTF-8 mode rule** (Python/preconfig.c's preconfig_init_utf8_mode): `sys.flags.utf8_mode` is `-X utf8[=0|1]`, else
+  `PYTHONUTF8` (0 or 1; -E and -I ignore it; another value a fatal error at start, as 3.15's already was), else 1 only under the C
+  or POSIX locale (LC_ALL, LC_CTYPE, LANG; musl's default C.UTF-8). pyi kept 1 before; under the runner's `LC_ALL=C.UTF-8`
+  it is now 0, as CPython's reference runs had it, so open()'s and TextIOWrapper's default encoding is the locale's
+  (`locale.getencoding()`, "UTF-8") and the three tests that skip under UTF-8 mode run and pass. The standard streams' errors
+  are unchanged (stdioConfig: 551's area); test_utf8_mode's test_stdio still wants surrogateescape under `-X utf8`.
+- **The children that are pyi (`:child-is-pyi`, 537-5), case by case:**
+  - test_posix's two test_close_file (posix_spawn with POSIX_SPAWN_CLOSE 0): Go's runtime opens /dev/null on a closed 0, 1 or 2
+    at its start (runtime.checkfds), so the child's `os.fstat(0)` succeeded. `bin/pyi python` sees descriptor 0 closed before
+    Go's runtime starts and says so (`PYI_STDIN_CLOSED`); the runtime closes 0 again before anything runs and `sys.stdin` is
+    None (create_stdio's is_valid_fd).
+  - test_subprocess' test_preexec_at_exit: `_posixsubprocess.fork_exec` raises subprocess_fork_exec_impl's refusals first: a
+    `preexec_fn` at the interpreter's shutdown is PythonFinalizationError "preexec_fn not supported at interpreter shutdown",
+    within a subinterpreter RuntimeError (then pyi's own refusal: no fork).
+  - test_unicodedata's test_unicodedata_unload_reload: the namereplace handler imports unicodedata once per interpreter
+    (`_PyUnicode_GetNameCAPI`'s PyCapsule_Import) and keeps it, so `del sys.modules['unicodedata']` finds it there.
+    test_failed_import_during_compiling: compile(), exec() and eval() of a source holding `\N{` ask the same capsule
+    (compileSourceNamed), as CPython's tokenizer does when it decodes the escape, and when unicodedata does not import a copy
+    of the source whose every `\N{` opens a name no character has is compiled: a decoded escape fails there ("unknown Unicode
+    character name"), a raw string's, a bytes literal's or a comment's text does not, and the failure is the parser's SyntaxError
+    "(unicode error) \N escapes not supported (can't load unicodedata module)" at the escape's place (the compiler's host
+    decodes the names it knows itself, so the runtime sees no escape otherwise; the names it leaves, the IR's `{:named}` parts,
+    ask the capsule as the code loads under compile(), exec() and eval()). A module an import loads is compiled code, as a .pyc
+    is for CPython, and asks nothing (a first version asked at every load: with `sys.modules['unicodedata'] = None` every
+    module holding an escape then failed to load and the child grew past the runner's 8 GB cap). A source with `\N{` only in
+    a raw string or a comment imports unicodedata where CPython would not (sys.modules gains it; nothing else changes).
+  - test_marshal's test_unorderable_set_items_in_code: the bytecode view's add_const keyed constants by their repr, so the two
+    NaN complex numbers `{(nan)*1j, (nan)*2j, 1.5}` folds became one; `_PyCode_ConstantKey` keys a float or complex with a NaN
+    part by the object itself, so a NaN constant now matches only itself (`bcConstNaN`).
+  - test_os' URandomFDTests (test_urandom_failure here, fd_closed and fd_reopened of `:runs-where-cpython-skips`): sysconfig's
+    `HAVE_GETRANDOM`, `HAVE_GETRANDOM_SYSCALL` and `HAVE_GETENTROPY` are 1, as CPython's build on Alpine has them (os.urandom is
+    Go's crypto/rand, the getrandom system call), so they skip as CPython's do.
+  - test_subprocess' test_encoding_warning passes as it is (its row the records night's).
+  - Left: test_pass_fds_redirected (Go's poller holds two descriptors, 3 and 4, in every process: n/a, DECISION 553-1) and
+    test_os' BytesFwalkTests.test_fd_finalization (reference counting's moment, not a child: closing the wrapper generator
+    drops the inner os.fwalk generator, which CPython closes at once: to `:finalization`, under 537-2, DECISION 553-2).
+
+The eval cell: 40,827 / 1,404 / 1,308 before, 40,829 / 1,404 / 1,306 after (pass / design / deferred): only test_utf8_mode was
+recorded from the VM (`bin/pyi check --judge DIR --record` over check B's run of it: test_env_var and test_xoption pass, out of
+`:source-decoding`). The other rows above pass on the VM by id or in whole-module runs that a VM-only result keeps out of the
+record (test_builtin's TestType.test_namespace_order fails on goi alone; test_posix's test_posix_spawnp and test_unicodedata's
+failed_import pass with the runner's memory cap at 16 GB, check C, and crashed at 8 GB in the whole runs); they move at the main
+host's whole record, test_buffer with task 554's. Proofs (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py,
+`PYI_RUNNER=python3`): `bin/pyi check --only` A (ids and whole modules), B (test_unicodedata, test_utf8_mode, test_builtin and
+test_posix whole), C (the VM-only rows alone), the three negative controls failing as they must in B and C; probes of the owed
+death (`del interp` after the budget is spent: qsize 4) and of the `\N` SyntaxError against python3 3.14.10's line.
+
+## As built: 554, the C API group: the stale rows recorded, PyLong_FromString (2026-11-24, the Mac VM, queue 554)
+
+The group's classes (`:capi-port` 244, `:testcapi` 95, `:extension-modules` 66, `:testcapi-behaviour` 10, `:extension-subinterp-check`
+5, `:capi-refcounts` 3, `:capi-singletons` 2, `:capi-gc-tracked` 2) held mostly rows recorded before PyConfig_Get (test_compile's 160
+`:capi-port` rows stopped at its import), before py-capi-1122's natives and before `_testbuffer` was built (test_buffer's 73 `:testcapi`
+skips, "ndarray object required").
+
+- **Recorded** (whole-module `bin/pyi check` on the VM, the checkout's runtime on goi, `--judge DIR --record`, controls failing as
+  they must): test_compile (154 pass of 185), test_buffer (61 more pass), test_import, test_code, test_tracemalloc, test_call,
+  test_bool, test_getopt: 216 rows to pass. Python eval 40,886 / 1,332 / 1,292 -> 41,102 / 1,319 / 1,070.
+- **PyLong_FromString** (capi_more): ASCII digits only, a non-ASCII byte is "invalid literal for int() with base N" with the base
+  a base-0 prefix gives (test_capi's test_long_fromstring).
+- **Classes**: `:boolop-truth-calls` (new, deferred, py-core): test_compound's `__bool__` called twice in `a and b or c`;
+  test_compile_ast, test_consts_in_conditionals and test_folding_type_param into `:bytecode` (n/a).
+- **Left for the host's record**: test_capi whole (about 90 of the group's rows; the VM's goi run needs many hours) and
+  test_importlib (the 52 `:extension-modules` rows of `_testsinglephase`/`_testmultiphase`, built since py-capi-1122 round 2).
+- **Left for owners**: PyFunction_SetClosure of a tuple of non-cells (pyi's Function keeps []*Cell: py-core), type `__flags__`'
+  Py_TPFLAGS_HAVE_VECTORCALL inheritance and loss on `__call__` (test_call's TestPEP590: py-core), PyContext_Enter's prev of a
+  thread with no context yet (test_watchers' test_exit_base_context: py-core's contextvars), `sys._is_immortal` (test_bytes'
+  test_resize), `_testcapi.W_STOPCODE` (test_subprocess: py-os).
+
+## As built: 557, the AOT's deferred row and the eval classes nobody owned (2026-11-24, the Mac VM, queue 557)
+
+The classes of `test/python/divergences.edn` by rows on next a6da0aadf's record (`bin/pyi divergences --table`, `--methods`), each
+with its owner this round (the main host's py-core, py-os, py-design, py-accel and py-goi; the VM's 545, 550, 551b, 552, 553, 554
+and 557b): the table is the report's. What nobody owned and pyi could fix:
+
+- **The AOT's one deferred row, synth/datamodel/del.py, is stale.** The amd64 record has it `:as-pyi` (compiled, loop and pyi on
+  goi alike, none the golden text). Since py-small-1122 (222's moment at a frame's return) the compiled run and the loop print the
+  golden text (`bin/pyi check --aot --no-pyi --only synth/datamodel/del.py` on the VM: 1 pass), and the judge passes a program whose
+  compiled and loop runs are the reference even when pyi's differs (`:pyi-differs`). pyi on goi still prints `after del` before
+  `del 2` (`bin/pyi run`, the VM). The row is the main host's next whole `bin/pyi check --aot --record`; `:finalization-goi` of
+  divergences-aot.edn goes after it, as its :decided says.
+- **`:source-decoding`: test_source_encoding's nine rows.** Four causes. The main file of `bin/pyi run` was read as bytes with no
+  new-line translation (`arbace.python`'s run-dump), so a triple-quoted CR LF kept its CR and a lone CR broke the `:full` tokens'
+  positions; the bytes are now translated first (CR LF and CR to LF), as compile()'s source already was (astjson/read-forms). A
+  coding spec's charset that decodes leniently (Shift_JIS's illegal sequence) gave text: `native/source-text` now hands a source its
+  charset does not decode strictly to Python's codec (the `:charset` path), and the runtime turns that codec's LookupError,
+  ValueError or UnicodeDecodeError into the file tokenizer's SyntaxError (`fileInitError`, as `_PyTokenizer_raise_init_error`: the
+  error's str, the file, line 0, offset -1; the lookup's codecs.decode() hint dropped, as fp_setreadl's). exec() of bytes: the
+  cookie's name is normalized as get_normal_name (`iso-8859-1-xxx...` is iso-8859-1), and every cookie of the first two lines is
+  made inert once the text is decoded (a second line's cookie, or a second cookie on the first line, was read again by the host's
+  reader). The utf8_mode and c_locale rows are 553's; email's, quopri's and difflib's stay. The nine pass on the VM (a run of the
+  whole module that reached the default 3600 s after 62 passes, the nine among them); the module's record is the main host's
+  (its child processes take 2-3 min each on goi).
+- **`:inlined-comprehensions` (2): `_PyCompile_TweakInlinedComprehensionScopes` outside class bodies.** A name whose scope inside an
+  inlined comprehension differs from the enclosing block's (not FREE inside, not CELL inside and FREE outside) is now resolved the
+  comprehension's way in any block, not only in a class body; a function's second comprehension read a global through the local
+  slot its first comprehension had made (test_listcomps' test_multiple_comprehension_name_reuse, test_type_annotations'
+  test_complex_comprehension_inlining_exec).
+- **`:annotate-rest` (2).** A function's `__annotate__` and `__annotations__` went through funcattrs.go's fast path, which neither
+  checked the value (`function___annotate___set_impl`: not deleted, callable or None, a callable dropping the cached annotations)
+  nor the result (`__annotate__ returned non-dict`); a type's `__annotations__` set or deleted now pops `__annotate_func__` and the
+  class body's own `__annotate__` (type_set_annotations, gh-132285).
+- **`:compiler-errors` (1): co_flags' future bits.** The IR's code objects carry `:future-annotations` and `:future-barry-as-bdfl`
+  when the module imports them (compute_code_flags: CO_FUTURE_ANNOTATIONS, CO_FUTURE_BARRY_AS_BDFL in every code object), so
+  codeop's Compile learns a future import from co_flags (test_codeop's test_future_imports); code.replace(co_flags=...) keeps them.
+- Records: test_listcomps, test_type_annotations and test_codeop written whole (5 methods now pass); the eval cell 40,827 / 1,404 /
+  1,308 -> 40,832 / 1,405 / 1,302.
+- **`:ref-empty-skip` (1) removed.** test_selectors' SelectSelectorTestCase.test_modify_unregister skips itself (`skipTest("")`) on
+  every platform; judged by its own verdict (queue 234) the row is `:skipped-by-test`'s.
+- Not taken: `:pickle-builtin-reference` (py-core's, train 5; pyi already pickles the builtins, `str.maketrans`,
+  `bytearray.maketrans` and a class's `__new__` as CPython does, probed: those six rows look stale), `:compileall-pyc` and
+  `:tools-misc` (557b), `:traceback-objects` (`:with-exit-traceback`'s cause, py-core's: `__exit__` gets no traceback),
+  `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
+  docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
+  test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).
