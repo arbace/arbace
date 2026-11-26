@@ -24739,3 +24739,22 @@ Measured (pyi's AOT on the worktree, train 5's executable as host, `bin/pyi chec
 
 Not recorded: train 7 records test_json, test_pickle, test_annotationlib and test_functools on its own executable. The classes'
 rows go from that record.
+
+## 2026-11-26: py-json-1126's whole-module run: TestCEnum fixed in pyctypes, test_pickle's crash is the base's (the main host)
+
+The whole-module AOT run of test_json and test_pickle plus the classes' rows (`.tmp/w/measure.log`) finished with 1,282 methods:
+1,199 pass, 77 classed, 6 failing.
+
+- **test_json's TestCEnum (5: test_ints, test_floats, test_list, test_dict_keys, test_dict_values).** `_json.c` encodes an int or float
+  subclass by `PyLong_Type.tp_repr(obj)` and `PyFloat_Type.tp_repr(obj)`. pyctypes had given the static types' tp_repr the generic
+  `PyObject_Repr`, which calls the subclass's `__repr__`, so an IntEnum member encoded as `<BigNum.small: 1>`. Fixed in pyctypes'
+  slots, not in `_json.c`: `bindOwnReprs` points PyLong_Type's and PyFloat_Type's tp_repr at the natives `_Pyi_long_repr` and
+  `_Pyi_float_repr`, int's and float's own slot wrappers called on the object (`long_to_decimal_string` and `float_repr`
+  whatever the subclass). The probe `.tmp/w/p/j1.py` gained these cases, against CPython 3.14.10's output.
+- **test_pickle's InMemoryPickleTests.test_recursive_multi: a crash**, "a_crash at 0x0 in the C library ctypestest", musl's malloc
+  meta checks. It is not this branch's. Train 6's own eval run of test_pickle (train 6's world, no `_json`;
+  `.tmp/worktrees/train6/.tmp/repr-python/pyi/check/run/test_pickle.out`) crashes the same way three times, at
+  CPicklerTests.test_optional_frames, DumpPickle_CLoadPickle.test_recursive_dict and InMemoryPickleTests.test_optional_frames,
+  and passes test_recursive_multi there. The same heap corruption by `_pickle.c` on pyi's C API lands on whichever test comes
+  next: `:pickle-c-gaps`' DumpPickle_CLoadPickle.test_optional_frames fault (queue 568), not reproduced by a probe then. This run
+  also crashed at that row. Left to that class's owner and to train 6's record.
