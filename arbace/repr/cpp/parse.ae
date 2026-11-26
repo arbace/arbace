@@ -749,7 +749,8 @@
   ([^P p] (parse-template-args* p nil))
   ([^P p tmpl]
   (adv! p)
-  (with-gt p false
+  (let [bad-arg (volatile! false)
+        r (with-gt p false
     (if (gt-close! p)
       []
       (loop [out []]
@@ -813,6 +814,19 @@
               ;; (`template<void> class`, a pack not last) matches no argument: GCC's "type/value mismatch at argument N in
               ;; template parameter list", template/void14.C's `A<T>`; and a template-id of such a parameter is invalid, GCC's
               ;; "template argument N is invalid", cpp0x/vt-34052.C's `U<int>`)
+              ;; (queue 601: [temp.names]/3 with [temp.arg.template]/1, a template template argument `A<TP>::Template` whose
+              ;; nested-name-specifier is dependent names no template without `template` before its last name: GCC's
+              ;; "type/value mismatch at argument N ...", "expected a class template", at it; parse/crash11.C)
+              _ (when (and tmpl (= :tmpl (:k a)) (not (skim? p)) (main-tok? p b))
+                  (let [qn (:name a) ps (vec (:parts qn))]
+                    (when (and (> (count ps) 1) (:i (peek ps))
+                               (not (t= (tok-at p (dec (long (:i (peek ps))))) "template"))
+                               (some (fn [part] (and (:args part) (:ab part) (:ae part)
+                                                     (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (lookup (scope p) (.-s t))))))
+                                                           (range (long (:ab part)) (inc (long (:ae part)))))))
+                                     (pop ps)))
+                      (soft-diag! p b (str "type/value mismatch at argument " (inc (count out)) " in template parameter list for '" (:name tmpl) "'"))
+                      (vreset! bad-arg true))))
               _ (when (and tmpl (not (skim? p)) (main-tok? p b))
                   (let [tp (get (vec (:tps tmpl)) (count out))]
                     (cond (:bad-ttp tmpl)
@@ -824,7 +838,13 @@
               out (conj out a)]
           (cond (accept! p ",") (recur out)
                 (gt-close! p) out
-                :else (perr p "a template argument list"))))))))
+                :else (perr p "a template argument list"))))))]
+    ;; (queue 601: such an invalid template-id named as a nested-name-specifier, `A<A<TP>::Template>::template Template<T>`:
+    ;; its member template not found, GCC's "expected template-name before '<' token", the declaration failed there; parse/crash11.C)
+    (when (and @bad-arg (is? p "::") (is-at? p 1 "template") (identical? :id (tk (nxt p 2))) (is-at? p 3 "<"))
+      (seek! p (+ (long (ix p)) 3))
+      (perr p "expected template-name before '<' token"))
+    r)))
 
 ;; cpp-indep2: a unit's class-key counts by name (a class-key, the name, no < after it), made once a unit for the rule below
 (def ^:private class-key-counts (java.util.WeakHashMap.))
@@ -3766,6 +3786,18 @@
                                (if (:class q) (and (some? (:bases-order q)) (zero? (.size ^ArrayList (:bases-order q))) (not (:union q))) true)
                                (nil? (sc/find-in (:scope q) (:s l) true)) (nil? (sc/find-in (:scope q) (:s l) false)))
                       (soft-diag! p (long (:i l)) (str "'" (:s l) "' in '" (:s f) "' does not name a type"))))
+                  ;; (queue 601: the same of a class template's specialization named by its template-id, `B<C>::Template<void>::Type`,
+                  ;; the template defined in the main file without bases and never specialized there ([temp.inst]/? its
+                  ;; specialization's members its definition's): GCC's "'Type' in 'struct B<C>::Template<void>' does not name a type";
+                  ;; parse/crash11.C, whose member typedef failed)
+                  (let [ps (vec (:parts qn)) l (peek ps) q (:q qn) lq (when (> (count ps) 1) (peek (pop ps)))]
+                    (when (and *full-headers* (not (skim? p)) (> (count ps) 1) (not (:g qn)) (nil? (:ent qn)) (:s l) (nil? (:args l)) (:i l)
+                               (main-tok? p (long (:i l))) lq (:s lq) (:args lq)
+                               (map? q) (:tag q) (:class q) (:tmpl q) (not (:incomplete q)) (not (:tparam q)) (:scope q) (not (:union q))
+                               (= (:name q) (:s lq)) (declared-in-main? p (:s lq)) (not (class-specialized? p (:s lq)))
+                               (some? (:bases-order q)) (zero? (.size ^ArrayList (:bases-order q)))
+                               (nil? (sc/find-in (:scope q) (:s l) true)) (nil? (sc/find-in (:scope q) (:s l) false)))
+                      (soft-diag! p (long (:i l)) (str "'" (:s l) "' in '" (name-str p (assoc qn :parts (pop ps))) "' does not name a type"))))
                   (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words))
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
               (do ;; (cpp-read, 2026-11-22: an unqualified name no lookup finds where a declaration's type stands, a declarator's
