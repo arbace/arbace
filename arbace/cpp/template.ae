@@ -2043,7 +2043,13 @@
 (defn- forwarding-reference?
   "isForwardingReference: an rvalue reference to a cv-unqualified parameter of the template itself."
   [P tid]
-  (and (= :rref (:k P)) (= :tparam (:k (:to P))) (= tid (:tid (:to P))) (empty? (quals (:to P)))))
+  (and (= :rref (:k P)) (= :tparam (:k (:to P))) (= tid (:tid (:to P))) (empty? (quals (:to P)))
+       ;; (queue 601: [temp.deduct.call]/3, no forwarding reference a parameter that represents a template parameter of a
+       ;; class template during class template argument deduction: an implicit guide's of a constructor's T&&, the class's
+       ;; parameter; cpp2a/explicit11.C's A(T&&, ...) for an lvalue, so the explicit A(const T&, ...) is chosen)
+       (not (let [g (tmpl tid)]
+              (and (= :guide (:tk g)) (#{:ctor :ctor-tmpl :copy} (:kind g)) (:ctid g)
+                   (< (long (or (:i (:to P)) -1)) (count (:params (tmpl (:ctid g))))))))))
 
 (defn- simple-template-id? [t] (= :tspec (:k (abi/unq t))))
 
@@ -5690,12 +5696,23 @@
                            g))
             implicit (when pat
                        (let [cs (ctor-nodes pat)
+                             ;; (queue 601: [temp.deduct.type]/5.1, a constructor's guide deduces a class template parameter only
+                             ;; from a parameter type that names it, not through a member alias or typedef of the class, a
+                             ;; nested-name-specifier's non-deduced context in the guide: one with a parameter without a default
+                             ;; named in no written parameter type deduces nothing for it, GCC's "couldn't deduce template
+                             ;; parameter 'T'"; cpp2a/explicit11.C's B(U, TA<U>) of `template<typename U> using TA = T`)
+                             cps (vec (:params t))
+                             names-all? (fn [c] (let [qt (str (get-in c [:type :qualType]))
+                                                      ws (set (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (str/replace qt #"^[^(]*\(" "")))]
+                                                  (every? (fn [cp] (or (:default cp) (:pack cp) (nil? (:name cp)) (contains? ws (:name cp)))) cps)))
                              ctor (for [[c ft] cs]
                                     (let [qt (get-in c [:type :qualType])]
                                       {:kind (if ft :ctor-tmpl :ctor) :scope (:scope t) :pattern-of pat
                                        :params (into (vec (:params t)) (when ft (tparams ft)))
                                        :mk (fn [s] (sema/resolve-type s qt))
                                        :defaults (param-defaults c) :explicit (explicit-guide? c (:name t))
+                                       ;; (not for an alias template's deduction, whose guides fix such parameters, alias-guides)
+                                       :cx-undeducible (and (sema/checking?) (not (names-all? c)))
                                        :constraint (:requiresClause ft) :trailing (:trailingRequiresClause c)}))
                              self (self-text t)]
                          (concat ctor
@@ -6065,7 +6082,7 @@
         inits (cond list? (:items init) (vector? init) init :else [init])
         ;; (copy-initialization not from a list: the converting guides alone, [over.match.copy]/1, [over.match.ctor]/1)
         allow-explicit (not= :copy kind)
-        gs (if alias? (alias-guides t rhs (class-guides ctid)) (class-guides tid))
+        gs (if alias? (alias-guides t rhs (class-guides ctid)) (vec (remove :cx-undeducible (class-guides tid))))
         ;; (CP323 (a): C++23's guides from inherited constructors, a class template's own deduction alone)
         gs (if (and (not alias?) (>= (long sema/*cxx-year*) 23) (:pattern ct)) (into gs (inherited-guides ctid)) gs)
         has-user (some #(= :user (:kind %)) gs)
