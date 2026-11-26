@@ -5190,6 +5190,65 @@
 
 (swap! checks conj auto-list-undeclared)
 
+;; cpp-def: [dcl.align]/3, alignas(type-id) is alignas(alignof(type-id)), and [expr.alignof]/1 asks a complete object type: void,
+;; or a class of the unit with no definition before it, is GCC's "invalid application of '__alignof__' to incomplete type" at the
+;; alignment-specifier; a class template's alignas(T) the same for a specialization the main file names with such a T, at the
+;; template's alignas (cpp0x/alignas20.C).
+(defn alignas-incomplete
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        top (:nodes u)
+        all (java.util.ArrayList.)
+        _ (walk-nodes (fn [n _] (.add all n)) top nil)
+        defs (group-by :name (filter #(and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %) (string? (:name %))) all))
+        decls (set (keep #(when (= "CXXRecordDecl" (:kind %)) (:name %)) all))
+        others (set (keep #(when (#{"TypedefDecl" "TypeAliasDecl" "EnumDecl" "ClassTemplateDecl" "TemplateTypeParmDecl"} (:kind %)) (:name %)) all))
+        off (fn [n] (or (get-in n [:range :begin :offset]) (get-in n [:loc :offset])))
+        incomplete? (fn [^String t o]
+                      (let [t (str/trim (str/replace t #"^(const|volatile)\s+" ""))]
+                        (or (= "void" t)
+                            (and (re-matches #"[A-Za-z_]\w*" t) (decls t) (not (others t))
+                                 (not-any? (fn [d] (let [b (off d)] (or (nil? b) (nil? o) (< (long b) (long o)) (not= main (or (get-in d [:range :begin :file]) main)))))
+                                           (get defs t))))))
+        report! (fn [a t] (when-let [o (mine-at a main)]
+                            (let [[l c] (line-col starts o)]
+                              (.add out {:line l :col c :kind :error :rule :alignas
+                                         :msg (if (re-find #"void" t) "invalid application of '__alignof__' to a void type"
+                                                  (str "invalid application of '__alignof__' to incomplete type '" t "'"))}))))
+        ;; the class templates' alignas(T): name -> [[param-index attr] ...]
+        tmpls (into {} (for [n all :when (and (= "ClassTemplateDecl" (:kind n)) (string? (:name n)) (= main (or (get-in n [:range :begin :file]) main)))
+                             :let [ps (vec (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) %) (:inner n)))
+                                   r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n))
+                                   as (for [a (:inner r) :when (= "AlignedAttr" (:kind a))
+                                            :let [i (first (keep-indexed #(when (and (= "TemplateTypeParmDecl" (:kind %2)) (= (str/trim (str (:_arg a))) (:name %2))) %1) ps))]
+                                            :when i]
+                                        [i a])]
+                             :when (seq as)]
+                         [(:name n) (vec as)]))
+        targs (fn [^String s] (loop [i 0 d 0 b 0 acc []]
+                                (if (>= i (count s)) (conj acc (str/trim (subs s b)))
+                                    (let [c (.charAt s i)]
+                                      (cond (#{\< \( \[} c) (recur (inc i) (inc d) b acc)
+                                            (#{\> \) \]} c) (recur (inc i) (dec d) b acc)
+                                            (and (= c \,) (zero? d)) (recur (inc i) d (inc i) (conj acc (str/trim (subs s b i))))
+                                            :else (recur (inc i) d b acc))))))]
+    (doseq [n all :when (and (= "CXXRecordDecl" (:kind n)) (= main (or (get-in n [:range :begin :file]) main)))
+            a (:inner n) :when (and (map? a) (= "AlignedAttr" (:kind a)) (string? (:_arg a)))
+            :when (incomplete? (:_arg a) (off a))]
+      (report! a (str/trim (:_arg a))))
+    (when (seq tmpls)
+      (let [seen (java.util.HashSet.)]
+        (doseq [n all :when (and (#{"VarDecl" "FieldDecl"} (:kind n)) (= main (or (get-in n [:range :begin :file]) main)))
+                :let [[_ nm as] (re-matches #"(?:const\s+)?([A-Za-z_]\w*)\s*<(.*)>" (str/trim (str (get-in n [:type :qualType]))))]
+                :when (and nm (get tmpls nm))
+                [i a] (get tmpls nm)
+                :let [t (get (targs as) i)]
+                :when (and t (incomplete? t (off n)) (.add seen [nm i]))]
+          (report! a t))))
+    (vec out)))
+
+(swap! checks conj alignas-incomplete)
+
 ;; [class.union.general]/? : a union has no base classes and is no base class: GCC's "derived union 'U' invalid", at the union, and
 ;; "base type 'U' fails to be a struct or class type", at the derived class; a base named by a union's name the file defines once
 ;; (no class of that name beside it).
