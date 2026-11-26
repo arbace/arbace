@@ -26186,3 +26186,38 @@ j2g-chunks-1120 (`282cdf320`); mac/next merged again three times (`0b3174413`, `
   `bin/oi check --aot --only-list` of pr3612 alone under the cap: pass (287 s of wall, its row in check-aot-native.edn already
   the recorded pass, unchanged).
 - parallel/mctest's stall is the Mac's queue 603; the execv rows keep OC208 (b).
+## 2026-11-26 — C++ read independence, slice 4: the clang-only rows by cause (queue 602, VM)
+
+Branch `602-cpp-indep-slice4` from origin/next `e8e2c1ac3`. The 883 rows clang's recorded dumps pass and the own record fails (less
+dg-dialect-out and the :na classes) grouped by cause and the next groups after cpp-indep3's taken, each rule from the standard's text or
+GCC's documented messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: 602"): explicit conversion functions in direct- and
+copy-list-initialization, switch and operators; the conditional operator's [expr.cond]/4.3 and /6; aggregates before C++20 and their
+elements' destructors; hidden friend declarations; x87 asm outputs and read-only asm outputs; `C::C (...)`; [class.protected] for
+pointers to members and base access in reference binding; `this` in lambdas; bit-field and rvalue reference binding; xvalue operands;
+inconsistent `auto` return deduction; using-declaration conflicts; single rules (bound member function values, noexcept(noexcept(f())),
+a variable template without arguments, calls through function pointers, defaulted copy constructors' parameter, static_cast rules).
+Checks: a base run of the 883 rows (.tmp/q602/dgw-base), targeted run t1 (the candidates plus 1,115 recorded own passes the first rules
+reach, 1,998 files): 31 rows to own pass, 1 recorded pass lost (template/friend77.C: a template-id-qualified friend declared as a hidden
+friend; fixed, probed); t2 (the candidates plus 975 recorded passes the later rules reach, 1,858 files): 0 recorded own passes
+lost, 56 rows to own pass (the 48 probed and 8 side effects, named in the survey's section). No record
+yet: the coordinator runs one regression over this branch and 601's merged. Alternatives left: the static_assert traits and noexcept
+operands (the evaluator's unsure nodes), definition-time narrowing in templates' signatures, substitution order (DR 1227).
+
+## 2026-11-26 — C++ read: the deferred tail, round 1, and the shared regression with 602 (queue 601, VM)
+
+- Branch `601-cpp-deferred-tail` from origin/next `e8e2c1ac3`, worktree q573. The 95 deferred read rows probed at the base (one `--only`
+  run), g++ 15.2.0 by hand for GCC's messages; rows taken cheapest first, an hour each at most (the coordinator's direction). IFNDR:
+  test/cpp/ifndr/template-body.sh over the rows qualifies five, four already decided by the user (lambda-variadic11.C and defarg19.C out,
+  vt-34052.C and void14.C to be built), cpp1z/typename1.C kept deferred: no proposal.
+- Rules (doc/cpp/CPP-SURVEY.md, "As built: 601"): parse.ae's undeclared type in a block, member operators in class scope, erroneous
+  template template parameters, CTAD with no argument, crash11's three, the template keyword on a non-template, a block-scope function
+  of the injected-class-name; sema.ae and template.ae's dependent name yielding a type in a signature, pre-C++20 implicit constexpr default
+  constructors, CTAD's non-forwarding class parameters and undeducible guides; diag.ae's lambda pack captures. Each committed with its
+  targeted check (the rows and the recorded passes it reaches): 0 lost each.
+- Alternatives tried and withdrawn: P0466R5's builtins as known names (lost three passes that pass by their undeclared errors; round 2
+  with the builtins' own checks); void in a nested-name-specifier (lost template/eh2.C); several rows past the time-box (the survey).
+- The shared regression with 602 (the coordinator): origin/602-cpp-indep-slice4 `2f80e7a9e` merged without conflicts (`0ad4b146e`); 4,173
+  files in two parts: lost cpp0x/nsdmi-dr1397.C (602's aggregate rule), template/eh2.C and parse/error66.C (601's), fixed at `fc7d3ac73`,
+  rerun over the fixes' reach (552 files): 0 lost. Recorded from the three parts: 3,195 -> 3,266 own passes, 0 lost; 601's 13 deferred
+  rows and 602's 58 clang-only rows. `bin/reap --record`: C++ read 6,185 / 0 / 97 -> 6,198 / 0 / 84; `bin/crops-score --record`: read
+  independence 0.920 -> 0.926, completeness 0.9961 -> 0.9967; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
