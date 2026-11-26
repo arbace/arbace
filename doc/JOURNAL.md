@@ -24034,3 +24034,35 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
   erroneous type, its variables undeclared and calls silent; a GCC recovery no document states, left); GCC's recovery after declined
   declarations, the unit then unanalyzed (template/typedef4.C, crash99.C, redecl5.C: Sema runs on a unit without declines only, a
   wide change against the recorded passes, left).
+
+## 2026-11-26 — C++: read independence, more clang-only dg rows by the own front end (cpp-indep2, branch `cpp-indep2-1126`)
+
+- Goal (the burst's): C++ read independence 0.892, each dg row counting 0.5 while only clang's recorded dumps pass it. The rows
+  clang passes and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (test/cpp/divergences-dg.edn),
+  were 1,167 at mac/next `b94fde1aa`. Not cpp-def-1126's deferred rows (both failing; merged into next while this ran). Branch from
+  `b94fde1aa`, mac/next `ede33dbe5` and `9f06d5027` (cpp-def's record) merged before the regression run, parse.ae's template
+  arguments resolved by hand keeping both sides' rules.
+- Every rule from the standard's text and GCC's messages as the tests state them, no GCC or clang code (doc/cpp/CPP-SURVEY.md,
+  "As built: cpp-indep2"): the parser's template-head and declaration rules (template-parameter-lists, shadowing, explicit
+  specializations and instantiations, friends, qualified declarator-ids, elaborated enums, placeholders, template argument counts,
+  using-declarators), lambdas (this, void parameters, redundant and non-local captures), the later standards' pedwarns, recovery
+  (an anonymous union's missing `;`, a trailing return type's elaborated class, a static member's out-of-class initializer's
+  lookup, -Wno-error=pedantic, __extension__ over a declaration), partial specializations' pack expansions (template.ae), and the
+  checker's offsetof rules, uncaptured locals in lambdas, both operands of a binary operator reported, an erroneous void
+  parameter's calls left alone (sema.ae).
+- Tried and dropped: a function template's name as a class-head-name (template/crash74.C: the name's arguments parsed by another
+  path), the reverse class-key rule for a variable template (cpp1y/var-templ66.C), main's C-linkage friends (parse/friend5.C).
+  Each rule's targets and a control set of recorded own passes the rule can reach (grepped by construct) run by hand before its
+  commit: no control lost.
+- The regression run (logs kept in /root/arbace/.tmp/keep/cpp-indep2-1126/): every recorded own pass of next (2,969) with the
+  1,167 rows, 4,136 files at `886dc926f`, in the big lock's small slot (HEAVY_MEM_GIB=5, two parts in turn, 2 threads each, as
+  cpp-def-1126's): part 1 lost one recorded own pass, cpp2a/lambda-pack-init2.C,
+  whose init-capture pack's unnamed element the not-captured rule had reported (two extra lines); part 2 none. Fixed (`d30ab40cc`:
+  a named variable alone); the fix reaches only the files whose run gave that error, lambda-pack-init2.C and lambda-pack-init7.C
+  (grepped from both parts' reads), which were run again at `d30ab40cc` with the 96 moved rows and the lambda-capture controls (151
+  files, 0 lost). Recorded from the two parts and then that run (`--judge --record`, in that order): own passes 2,969 -> 3,067,
+  the 96 rows and cpp-def-1126's cpp1z/decomp26.C and inherit/error1.C, which it left for this record; lambda-pack-init7.C, a pass
+  at `886dc926f` only by that error, stays a failure. `bin/reap --record`: the matrix unchanged (the read cell counts clang's
+  passes, C++ read 6,139 / 0 / 146); `bin/crops-score --record`: C++ read independence 0.8940 -> 0.9020, independence 0.9788 ->
+  0.9804. `bin/reap`, `bin/crops-score --judge --strict`,
+  `bin/records-check`, `bin/markers-check`: 0 problems.

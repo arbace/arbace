@@ -11980,3 +11980,54 @@ pointers (cpp0x/constexpr-ice20.C, cpp1z/constexpr-lambda8.C), a local reference
 calls' paths never read the reference), a deleted member template's out-of-line redefinition (cpp0x/defaulted10.C), a
 placeholder's constraint whose argument fails to form (cpp2a/concepts-placeholder3.C), __type_pack_element's recursive
 instantiation (ext/type_pack_element4.C).
+
+## As built: cpp-indep2, more clang-only dg rows by the own front end (2026-11-26; branch `cpp-indep2-1126` from mac/next `b94fde1aa`; mac/next `ede33dbe5` and `9f06d5027`, cpp-def's record, merged)
+
+The read stage's independence counts a dg row 0.5 while only clang's recorded dumps pass it. The rows clang passes and the own
+record fails, less dg-dialect-out and the :na classes, were 1,167 at the base (870 accepted with an expected error, 197 missed lines,
+63 both, 42 extra, 3 timeouts, 2 crashes); cpp-def's deferred rows (both failing) are another set. Taken by the shortest tests
+first and grouped by the rule they need; every rule from the standard's text and GCC's messages as the tests state them, no GCC or
+clang code.
+
+- arbace/repr/cpp/parse.ae, template-heads and declarations: too many template-parameter-lists for an unqualified class, function or
+  friend ([temp.mem]/1); a class's own specialization in its member-specification ("must appear at namespace scope"); a template
+  parameter that shadows an enclosing one or names its templated declaration ([temp.local]/6, also diag.ae's tparam-shadows); a
+  template template parameter's own list's defaults ([temp.param]/14); a class-head naming a template template parameter's
+  specialization ("declaration does not declare anything", "shadows template template parameter"); an explicit specialization's
+  storage class ([dcl.stc]/1), of a non-template variable or member, with two template<> for a non-template member
+  ([temp.expl.spec]), in a friend declaration; a template-head before a member of a specialization whose arguments name none of its
+  parameters ("template definition of non-template"); an out-of-class member's template-head of another parameter count ("got 2
+  template parameters"); a typedef's template-id ([dcl.typedef]/1); a friend's defined specialization, a friend's deleted or
+  defaulted qualified definition ([class.friend]/6); `int ::i;` never declared ([dcl.meaning.general]/2); a class's qualified
+  definition in a scope not enclosing it ([class.pre]/3); an elaborated `enum E` never declared or finding a class ([dcl.type.elab]);
+  a static member declared twice in its class (diag.ae, [class.mem.general]/5); a class template placeholder as a function's return
+  or trailing return type ([dcl.type.class.deduct]/2); `decltype(auto)` with a declarator operator; trailing return types and
+  placeholders in alias declarations ([dcl.fct]/2); a non-type template parameter of a placeholder type before C++17, of array of
+  void; a type defined in a template parameter; string literals as template arguments ([temp.arg.nontype]); `auto` in a template
+  argument's function type; a class template's template-id with too few or too many arguments ([temp.arg.general]/1, a template
+  declared once); an explicit instantiation outside a namespace enclosing its template; a using-declarator naming no member of a
+  complete class without bases; a local class's friend whose prior local declaration has another parameter-type-list; GNU's bool
+  vectors; standard attributes before a class-key.
+- Lambdas: `this` in a namespace-scope lambda and in alignas; void parameters ([dcl.fct]/2); captures redundant with the capture
+  default ([expr.prim.lambda.capture]/2); a captured namespace-scope variable or type.
+- Pedwarns of later standards: fold-expressions and auto non-type parameters before C++17; the uses of main ([basic.start.main]/3,
+  diag.ae's main-uses); -Wno-error=pedantic after -pedantic-errors; `__extension__` over a whole declaration (in-extension?).
+- Recovery: an anonymous union whose `;` is missing stays the class's member; a trailing return type's elaborated class before
+  the function body (*trailing-type*); a static data member's out-of-class initializer looked up in its class; an attribute
+  pack of no pack.
+- arbace/cpp/template.ae: a class template partial specialization's pack expansions (cx-partial-pack-checks!): one against a
+  primary's non-pack parameter ("not more specialized"), one not last (dropped, as GCC drops it), one past the parameters.
+- arbace/cpp/sema.ae, the checker: a binary operator's two operands each reported when both are refused (cx-both-operands);
+  __builtin_offsetof's member an enumerator, a static member or a member function, an overloaded operator[], an incomplete class;
+  a local variable a lambda odr-uses without capturing it ("'i' is not captured", not const-qualified); a call whose candidate's
+  erroneous void parameter was its declaration's error, not reported again.
+
+Recorded from the regression run at `886dc926f` (next's 2,969 recorded own passes and the 1,167 rows, 4,136 files, two parts in
+the big lock's small slot; logs in .tmp/keep/cpp-indep2-1126/ in the main checkout), with the one fix it called for: the run lost
+cpp2a/lambda-pack-init2.C to the not-captured rule, which had reported an init-capture pack's unnamed element; the rule now takes a
+named variable alone (`d30ab40cc`), and the files that error had reached (lambda-pack-init2.C, lambda-pack-init7.C, the only two
+with it in the run) were run again at that head with the moved rows and the capture controls (151 files) and recorded after it.
+Own passes 2,969 -> 3,067: 96 rows of this branch's and cpp-def-1126's cpp1z/decomp26.C and inherit/error1.C, none lost
+(lambda-pack-init7.C, a pass only by the unnamed element's error, stays a failure). C++ read independence 0.8940 -> 0.9020,
+independence 0.9788 -> 0.9804. Left: definition-time checks of uninstantiated templates (the :ifndr class aside), instantiation's deeper diagnostics,
+lambdas' odr-use of const variables, units with a syntax error (the checker does not run), and the long tail of one-row rules.
