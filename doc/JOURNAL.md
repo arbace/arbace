@@ -26110,3 +26110,65 @@ stall after its depth: three workers of four done), statmemprof/bigarray (its de
 ephetest's test7, the suite's exception_comballoc and stop_start_in_callback (deallocations missing), lib-unix/common/test_unix_cmdline
 and cloexec (Unix.execv: OC208 (b) left it to the compiled level), unboxed-primitive-args/test (o2j's translation of its 600 KB of Lambda
 in bounded memory).
+
+## 2026-11-26 — Train 6 (Python): nine lanes merged, one gate build, Lib/test records of 67 modules
+
+Branch `train-6` from mac/next (`00494a2d4`). Members, in order: mac/py-regress-1126 (`d0eb94b03`, with py-enum-1125 and
+py-odict-1125), py-cli-1125 (`6f9661379`), py-limits-1125 (`7a1e8bed8`), py-capi-1125 (`f7f950ebb`), py-mp-1125 (`080525b2d`),
+574-py-unowned-rest (`86012eff2`), 579-goi-pyctypes-object (`e098204e7`), 585-py-accel-coroutines (`c2e66a8ac`) and
+j2g-chunks-1120 (`282cdf320`); mac/next merged again three times (`0b3174413`, `660b870c3`, and after the records).
+
+- The merges. go/arbace/py and go/arbace/pyctypes were merged at the Go level, as train 5 did: each revision printed by repr/go,
+  3-way merged file by file, and the merged Go read back by `bin/pyi runtime read` (`5e0d55109`; gofmt, go vet and go test clean).
+  The Go conflicts:
+  - py-regress and py-mp made the same eval-loop fix (the thread's reused pushFrame let go once the callee is taken); their two
+    comments are kept as one.
+  - 574 against next's own versions of its fixes: next's compile call (`compileSourceNamedOpt`) is kept, with 574's compile audit
+    event before it. str.encode's and bytes.decode's argument checks are 574's `clinicStrArg` (a lone surrogate, an embedded NUL),
+    and next's `utf8Arg` is removed as unused. In strformat.go and with.go next's code is kept (py-os-1124's runes,
+    py-core-1124's traceback, the same fixes).
+  - 585's side of its conflicts is an older copy of 553, which next has through train 5: next's code is kept.
+  - test/python/divergences.edn keeps both sides' rows. The record conflicts took next's side, so 574's whole-module records
+    (test_audit, test_tools, test_difflib, test_quopri, test_contextlib_async, test_with) were re-recorded here. The user's
+    by-design review (`aacc5c18d`) keeps its :kind and :decided of :coroutines, :c-accelerators and :pickle-core; queue 592's
+    :skipped-not-applicable and :zstd-multithread are kept too.
+- Before the build:
+  - `bin/pyi-clib verify ctypestest` (on train 5's executable: stage 0 predates the core_proxy fix) differs beyond the Key. The
+    two functions are musl's y0 and y1 (F 5308 and 5310), whose folded `return 0/0.0;` gives -NaN (0xFFF8000000000000) where the
+    committed world has gcc's +NaN. No source change explains it: the builder and musl are unchanged since 650dcb7b7. The NaN's
+    sign comes from the host (the builder interpreted against compiled). The coordinator took option (a): the verify's forms are
+    committed with Key 002c5389 (`9e1d7e8ff`). Left: the folder should canonicalise a folded NaN.
+  - `bin/j2g-edge update` (`025065fd1`), provenance-check.
+- The build: one `bin/arbace-go --gate-build` of `025065fd1`, KEY20 `d238b3a23ca9117d9cc8` (09:28-12:01 UTC), smoke ok.
+- The records. They ran on the train's own executable (`ARBACE_HOST_EXE=.tmp/gate-exe/d238b3a23ca9117d9cc8/amd64/arbace`,
+  `PYI_RUNTIME_REQUIRE=compiled`) over 84 modules, the lanes' claimed rows' modules (the coordinator's cut from 90). The list,
+  by origin:
+  - train 5's 11 held;
+  - py-cli's, py-odict's three classes' modules and its claimed rows' modules, test_enum;
+  - py-capi's rows' modules with test_ctypes and test_capi;
+  - py-limits' 8, py-mp's 16 multiprocessing modules, 574's, 585's five;
+  - the :pyio classes' and :child-is-pyi's modules.
+  - Run A, 68 modules at 2 jobs, ended 13:54.
+  - Run B, the multiprocessing modules at 1 job, finished test_as_completed, test_deadlock and test_init. It then hung for three
+    hours: its driver was stuck on a futex after a test_process_pool child crashed in the C _pickle's Pickler_dealloc (the heap
+    corruption py-pickle-heap is chasing). It was stopped with SIGTERM at 17:09 with the user's approval.
+  - Judged (`bin/pyi check --judge`), 71 modules: 6 regressions and 1 unclassed failure in four modules, held with their record
+    lines untouched:
+    - test_pickle: three a_crash in the C library world (CPicklerTests and InMemoryPickleTests test_optional_frames,
+      DumpPickle_CLoadPickle.test_recursive_dict), and test_wrong_newobj_ex_class skipped "only verified in the Python
+      implementation";
+    - test_sys: test_ioencoding_nonascii skipped "requires FS encoding to match locale". This skip and the test_pickle skip are
+      CPython's own outcomes after py-regress's UTF-8 mode, recorded passes now skipped: the user's call;
+    - test_as_completed: ProcessPoolForkserverAsCompletedTest.test_free_reference_yielded_future in no class, its tearDownModule
+      no result;
+    - test_deadlock: ProcessPoolSpawnExecutorDeadlockTest.test_error_at_task_pickle, a hang.
+  - test_process_pool and the 12 unreached multiprocessing modules: not run, left to train 7.
+  - The other 67 modules recorded (`--judge --record`): 0 regressions, 172 now pass. No other module's rows changed, though the
+    writer reordered the modules' blocks. 664 names the record now passes were dropped from the classes' :tests lists, and
+    `bin/pyi divergences` reports 0 stale, 0 unclassed.
+- Python eval 43,203 / 68 / 611 (n/a 4,580) -> 43,375 / 6 / 482 (n/a 4,599); AOT 151 / 0 / 0 unchanged (no AOT Lib/test record
+  exists; the coordinator: no run). Completeness 0.9961 -> 0.9972.
+- The last merge of mac/next: jdk/javac/provenance.edn takes next's files and the merged jdk/edge.edn's hash as :jdk-edge
+  (provenance-check clean).
+- Checks: `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` and `bin/markers-check`: 0
+  problems.

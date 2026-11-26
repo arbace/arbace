@@ -9062,3 +9062,11 @@ The classes of 557's table that 557b did not take, by size, each built or given 
 - Records: test_audit, test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with written whole
   from the run whose children ran on the compiled launcher (557b-1 (a)): 12 methods now pass, 0 regressions; the eval cell
   40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279.
+
+## As built: train 6, the lanes' records (2026-11-26, the main host)
+
+Train 6 merged py-regress (with py-enum and py-odict), py-cli, py-limits, py-capi, py-mp, 574, 579, 585 and j2g-chunks. It built
+one gate executable (KEY20 `d238b3a23ca9117d9cc8`) and recorded 67 Lib/test modules whole on it. Python eval went from
+43,203 / 68 / 611 to 43,375 / 6 / 482. Four modules are held with their record lines untouched: test_pickle (the C world's
+a_crash), test_sys, test.test_concurrent_futures.test_as_completed and test_deadlock. test_process_pool and 12 multiprocessing
+modules are not recorded: B's run hung on Pickler_dealloc's heap corruption. The details are in doc/JOURNAL.md, "Train 6".
