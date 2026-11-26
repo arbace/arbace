@@ -646,6 +646,11 @@
    [:sassert #"^codegen: non-constant condition for static assertion" "static assertion expression is not an integral constant expression"]
    [:constexpr #"^codegen: expression is not a constant expression" "expression is not a constant expression"]
    [:constexpr #"^codegen: constinit variable '.*' does not have a constant initializer" "variable does not have a constant initializer"]
+   ;; (cpp-def3: a noexcept-specifier's operand, arbace.cpp.sema/noexcept-of)
+   [:constexpr #"^codegen: use of ('this'|parameter) .*in a noexcept-specifier" "use of 'this' or a parameter in a constant expression"]
+   [:constexpr #"^codegen: the value of '.*' is not usable in a constant expression \(in a noexcept-specifier\)" "the value is not usable in a constant expression"]
+   ;; (cpp-def3: [class.static.data]/4, a const static data member's in-class initializer, arbace.cpp.sema/cx-sure-error!)
+   [:constexpr #"^codegen: the in-class initializer of static data member '.*' is not a constant expression" "in-class initializer for static data member is not a constant expression"]
    ;; (cpp-sweep: literal types, arbace.cpp.sema/cx-non-literal: C++11's enclosing class, a constexpr function's signature
    ;; before C++23, a constexpr variable's type)
    [:constexpr #"^codegen: enclosing class of 'constexpr' non-static member function '.*' is not a literal type" "enclosing class of constexpr non-static member function is not a literal type"]
@@ -681,6 +686,16 @@
    [:template #"^codegen: partial specialization of '.*': parameter pack argument must be at the end" "parameter pack argument must be at the end of the template argument list"]
    ;; (cpp-tpl2: [temp.arg.template]/3-4 in a class template's template-id, template.ae's cx-ttp-arg-mismatch?)
    [:template #"^codegen: a template template argument whose parameters do not match" "type/value mismatch in a template argument list"]
+   ;; (cpp-def3: a variable template's specialization two partial specializations match, neither more specialized,
+   ;; [temp.spec.partial.match]/1.3: GCC's "ambiguous template instantiation for 't3<int, int>'"; and a partial specialization's
+   ;; second definition)
+   [:template #"^codegen: ambiguous partial specializations of the variable template" "ambiguous template instantiation"]
+   [:redefinition #"^codegen: redefinition of the partial specialization of" "redefinition of a partial specialization"]
+   ;; (cpp-def3: arbace.cpp.sema/declare-fn!'s dynamic exception specification)
+   [:type #"^codegen: a type that is not a class, struct, or union type named in a dynamic exception specification" "is not a class, struct, or union type"]
+   ;; (cpp-def3: arbace.cpp.template/resolve-arg's: a type, or a function's name, for a non-type template parameter)
+   [:template #"^codegen: a type as the non-type template argument of" "type/value mismatch in a template argument list"]
+   [:template #"^codegen: could not convert a function's name to the non-type template argument of" "could not convert a template argument to the non-type parameter's type"]
    ;; (cpp-tpl2: a qualified name of a type a complete class does not declare, sema's resolve-type-form)
    [:type #"^codegen: unknown type .*: no type named '.*' in the complete class" "no type named in the class"]
    ;; (cpp-tpl2: [expr.prim.id.general]/4, sema's expression statements and requirements)
@@ -929,6 +944,13 @@
                         (.add out {:line l :col c :kind :error :rule :sema :msg (str "substitution failure (" (subs xm 9 (min 100 (count xm))) ")")}))))))
               ;; (cpp-singles: a refusal whose construct GCC also diagnoses inside a system header it instantiates, an error
               ;; outside the main file, :cx/header-error: <initializer_list>'s pointer to a reference type)
+              ;; (cpp-def3: a refusal's notes, :cx/notes, at their nodes: GCC's candidates of an ambiguous lookup)
+              (when (and rule (not nesting))
+                (doseq [{xm :msg xn :node} (:cx/notes (ex-data e))]
+                  (when-let [xo (get-in xn [:range :begin :offset])]
+                    (when-let [st (sema-starts main starts (get-in xn [:range :begin :file]))]
+                      (let [[l c] (line-col st (long xo))]
+                        (.add out {:line l :col c :kind :note :rule :sema :msg xm}))))))
               (when-let [hm (and rule (:cx/header-error (ex-data e)))]
                 (.add out {:line 0 :col 0 :kind :error :rule :sema :msg (str hm " (in a system header)")}))
               (if-let [st (when (and rule off) (sema-starts main starts (get-in n [:range :begin :file])))]
@@ -7666,6 +7688,29 @@
                           (when (and (= 2 (count parts)) (.contains enums q) (not (.containsKey classes q)) (not (.contains namespaces q)))
                             (at! n (str "'" q "' is not a namespace or unscoped enum")))))))
                   (:nodes u) nil))
+    ;; (cpp-def3: [enum.udecl]/2 with [namespace.udecl]/11 and [basic.scope.scope]/4: two using-enum-declarations of one block or
+    ;; namespace scope whose enumerations of the unit, found in the enclosing scopes, have an enumerator of one name introduce two
+    ;; entities that conflict: GCC's "'N6::color N6::color::orange' conflicts with a previous declaration" at the second;
+    ;; cpp2a/using-enum-5.C's `using enum fruit; using enum color;`)
+    (letfn [(enum-of [envs nm] (some (fn [kids] (some #(when (and (= "EnumDecl" (:kind %)) (= nm (:name %)) (seq (:inner %))) %) kids)) envs))
+            (scan [kids envs]
+              (let [kids (vec (mapcat #(if (and (map? %) (= "DeclStmt" (:kind %))) (:inner %) [%]) kids))
+                    envs (cons kids envs)
+                    seen (java.util.HashMap.)]
+                (doseq [k kids :when (map? k)]
+                  (when (= "UsingEnumDecl" (:kind k))
+                    (when-let [[_ nm] (some->> (let [b (get-in k [:range :begin :offset]) e (get-in k [:range :end :offset]) l (get-in k [:range :end :tokLen])]
+                                                 (when (and b e l (= main (get-in k [:range :begin :file])) (<= (long b) (long e)) (<= (+ (long e) (long l)) n-src))
+                                                   (subs src (long b) (+ (long e) (long l)))))
+                                               (re-find #"using\s+enum\s+([A-Za-z_]\w*)\s*;?\s*$"))]
+                      (when-let [e (enum-of envs nm)]
+                        (let [es (keep #(when (= "EnumConstantDecl" (:kind %)) (:name %)) (:inner e))]
+                          (when-let [c (first (filter #(let [o (.get seen %)] (and o (not (identical? o e)))) es))]
+                            (at! k (str "'" nm "::" c "' conflicts with a previous declaration")))
+                          (doseq [x es] (when-not (.containsKey seen x) (.put seen x e)))))))
+                  (when (#{"NamespaceDecl" "CompoundStmt" "FunctionDecl" "LinkageSpecDecl"} (:kind k))
+                    (scan (vec (:inner k)) envs)))))]
+      (scan (vec (:nodes u)) nil))
     (vec (distinct out))))
 
 (swap! checks conj using-and-consteval-overrides)
@@ -8818,7 +8863,9 @@
 
 (swap! checks conj odr-inline-vars)
 (alter-var-root #'sema-rules conj
-  [:nsdmi #"^codegen: default member initializer for '.*' required before the end of its enclosing class" "default member initializer required before the end of its enclosing class"])
+  [:nsdmi #"^codegen: default member initializer for '.*' required before the end of its enclosing class" "default member initializer required before the end of its enclosing class"]
+   ;; (cpp-def3: arbace.cpp.sema/nsdmi-guard's)
+   [:nsdmi #"^codegen: recursive instantiation of default member initializer for" "recursive instantiation of default member initializer"])
 (alter-var-root #'sema-rules conj
   [:varargs #"^codegen: binding a const reference to a volatile object passed through" "binding reference discards qualifiers"])
 (alter-var-root #'sema-rules conj

@@ -25344,3 +25344,40 @@ judge can only lose equals.
 - Tried and dropped: a fixed-point literal in decltype (cpp0x/decltype-38655.C: no node survives), a qualified bit-field's alignof
   outside its class (diagnostic/alignof3.C), `F foo;` of a cv-qualified function typedef (other/cv_func4.C), the deduced class type
   rule for every class template (narrowed).
+
+## 2026-11-26 — C++ read: the constant evaluator, templates and single rules (cpp-def3)
+
+- Branch `cpp-def3-1126` from mac/next `0b3174413` (a lane of the burst after cpp-def2; cpp-indep3 beside it on the rows only
+  clang's record passes, a disjoint set). The read cell at the base: 6,155 pass / 0 by design / 128 deferred (own-diag 127,
+  gcc-own-rules 1). Each row read against its dg lines and the own errors (cpp-def2's scripts, .tmp/bin/d1, dm, j.sh), GCC 15.2's
+  messages probed by hand (`g++ -fsyntax-only`) where the test's words did not settle the place; the rules from the standard's text
+  or GCC's documented messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-def3", each rule with its rows).
+- arbace/cpp/sema.ae (the checker's alone, (checking?)): implicit assignment operators in the constant evaluator ([class.copy.assign]/12);
+  an explicit conversion as a list element is no narrowing; [class.static.data]/4's in-class initializers, a specialization's when
+  used, the value kept for its reads; C++11's assignments in the potential constant check; a return statement's constructor surely not
+  constexpr, and its place; a const variable with no initializer not usable; a constexpr pointer to a temporary; DR2478's explicit
+  specializations (also template.ae); noexcept-specifiers instantiated when needed ([except.spec]/13: the operand's sure failure kept
+  and reported when the function is selected); a specialization's default member initializer needing its own default constructor; an
+  ambiguous lookup's candidates as notes (diag.ae's :cx/notes); a near match's binding error at an implicit assignment; a
+  const static member's erroneous initializer in an array bound; before C++17 a dynamic exception specification's type naming a
+  member of a non-class. arbace/cpp/template.ae: a type-id or a function's name for a
+  non-type parameter a sure failure; a variable template's partial specializations judged as a class template's. arbace/repr/cpp/
+  parse.ae: a template parameter of an undeclared type, and `template<typedef>`, kept with an erroneous type; a namespace-scope
+  function definition with no type taken as returning int (GCC's permerror); a generic lambda before C++14. diag.ae: two
+  using-enum-declarations whose enumerators share a name; sema-rules for the new messages.
+- Rows to own pass, 23 (the worktree's .tmp/moved.txt): template/eh2.C, cpp0x/constexpr-ex1.C, constexpr-function2.C, constexpr-neg1.C,
+  noexcept34.C, noexcept36.C, nsdmi-template14.C, overflow1.C, sfinae11.C, udlit-tmpl-arg-neg2.C, cpp1y/constexpr-89336-3.C,
+  lambda-generic-variadic2.C, var-templ19.C, cpp2a/concepts-requires5.C, using-enum-5.C, DRs/dr2478.C, overload/error8.C,
+  parse/crash67.C, parse/error17.C, template/crash2.C, nontype13.C, redecl5.C, typedef4.C. Checked on each rule's reach (its rows and
+  the recorded own passes it can touch: 355 more controls at the end, every constexpr pass and those with a const static member's
+  in-class initializer, a generic lambda, a dynamic exception specification or an undeclared template parameter type); losses met and
+  fixed: concepts/pr71385.C (a first version made an erroneous return-type-requirement false; now the TS's conversion),
+  cpp1z/class-deduction52.C (a member template's undeclared parameter type left declined as before), cpp1y/constexpr-lifetime7.C (the
+  implicit assignment's store judged for lifetime and constness). cpp23/ext-floating12.C, the timeout row, passes alone too. The regression over next's recorded own passes
+  is the single one the coordinator runs for both lanes (cpp-def3 and cpp-indep3, 2026-11-26), which records their rows.
+- Tried and dropped: CWG2310's incomplete derived class at a pointer conversion (cpp0x/constexpr-base6.C, 6b.C: the static member's
+  initializer is analyzed after its class completes; a rule on :defining reached nothing), and a scalar awaitable's final suspend
+  (coroutines/pr104051-0.C: the checker does not analyze coroutine bodies), both reverted.
+- For the user: template/friend58.C expects GCC's "member ... declared as friend before type ... defined" for `template<typename T>
+  friend void freeList<T, baz>::foo();`, which [temp.friend]/5 allows (a member of a dependent type named through a simple-template-id
+  whose parameters deduce): (a) the gxx-only-rules class (n/a), recommended, (b) GCC's rule.

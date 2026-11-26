@@ -273,6 +273,8 @@
 ;; of a parameter is depth 2) and the declaration's depth-1 `auto` tokens, judged once its declarator is read
 (def ^:dynamic *param-depth* 0)
 (def ^:dynamic *auto-params* nil)
+;; (cpp-def3: true while a lambda-declarator's parameter-declaration-clause is parsed)
+(def ^:dynamic *lambda-params* false)
 
 
 (defn- in-template?
@@ -4343,6 +4345,11 @@
                 ;; permitted in this context"; one of the outermost clause kept for its declaration, *auto-params*)
                 _ (when (and (= :auto (:t base)) (:auto-i ds) (not (skim? p)) (main-tok? p (long (:auto-i ds))))
                     (cond (>= (long *param-depth*) 2) (soft-diag! p (long (:auto-i ds)) "'auto' parameter not permitted in this context")
+                          ;; (cpp-def3: a generic lambda's placeholder parameter is C++14's (N3649, [expr.prim.lambda]/5): before it
+                          ;; GCC's error "use of 'auto' in lambda parameter declaration only available with '-std=c++14'",
+                          ;; cpp1y/lambda-generic-variadic2.C)
+                          (and *lambda-params* (< (.-year p) 2014))
+                          (soft-diag! p (long (:auto-i ds)) "use of 'auto' in lambda parameter declaration only available with '-std=c++14' or '-std=gnu++14'")
                           (some? *auto-params*) (.add ^ArrayList *auto-params* (long (:auto-i ds)))
                           :else nil))
                 d (parse-declarator p :either)
@@ -5496,6 +5503,13 @@
                        ;; rejects both)
                        (when (and (= ctx :top) qn (= 1 (count chain)) (= 1 (count (:parts qn))) (= "main" (:s lp)) fs)
                          (pedantic-diag! p (long (:i lp)) "ISO C++ forbids declaration of 'main' with no type")
+                         {:t :b :w ["int"]})
+                       ;; (cpp-def3: another function's definition with no type at namespace scope, GCC's permerror "ISO C++ forbids
+                       ;; declaration of 'x2' with no type", an error, the function then taken as returning int, as for main, its
+                       ;; body analyzed: parse/crash67.C's `template <x1> x2() { x0 x3 = x3.`, x3 of incomplete type)
+                       (when (and (= ctx :top) qn (= 1 (count chain)) (= 1 (count (:parts qn))) (:s lp) (not (:args lp)) fs (is? p "{")
+                                  (not (skim? p)) (main-tok? p (long (:i lp))) (empty? (:ptrs (first chain))))
+                         (soft-diag! p (long (:i lp)) (str "ISO C++ forbids declaration of '" (:s lp) "' with no type"))
                          {:t :b :w ["int"]})
                        (perr p "a declaration without a type"))
               ;; (queue 439: GNU's vector_size among the declaration specifiers' attributes makes the specifiers' type the vector
@@ -6842,7 +6856,26 @@
                     _ (when-let [bi (and (not (skim? p)) (main-tok? p (long (:b ds))) (:tag-node ds)
                                          (some #(when (t= (tok-at p %) "{") %) (range (long (:b ds)) (ix p))))]
                         (soft-diag! p (long bi) "definition of a type in a template parameter list"))
-                    base (or (ds-type ds) (perr p "a template parameter"))
+                    base (or (ds-type ds)
+                             ;; (cpp-def3: a parameter whose type is a name no lookup finds and the main file declares nowhere,
+                             ;; `template <T, T... U>`: GCC's "'T' has not been declared" at the name, the parameter kept with an
+                             ;; erroneous type -- its declaration goes on, so that a literal operator template's list is judged,
+                             ;; [over.literal]/5: cpp0x/udlit-tmpl-arg-neg2.C)
+                             (when (and (id? p) (not (skim? p)) (main-tok? p (ix p))
+                                        ;; (a member template's left declined as before: its class then dropped, the
+                                        ;; specialization's uses not judged, cpp1z/class-deduction52.C)
+                                        (not (loop [^Scope s (scope p)] (when s (if (= :class (sc/kind-of s)) true (recur (sc/parent-of s))))))
+                                        (let [^T n (tok-at p (inc (ix p)))] (or (identical? :id (.-k n)) (t= n "...") (t= n ",") (t= n ">")))
+                                        (nil? (lookup (scope p) (.-s (cur p)))) (not (declared-in-main? p (.-s (cur p)))))
+                               (soft-diag! p (ix p) (str "'" (.-s (cur p)) "' has not been declared"))
+                               (adv! p)
+                               {:t :b :w ["int"] :cx-erroneous true})
+                             ;; (cpp-def3: and `template<typedef>`, its typedef reported above and no type: GCC's "ISO C++ forbids
+                             ;; declaration of 'parameter' with no type", the parameter kept, so that the template's uses meet it --
+                             ;; foo<int>() "no matching function", template/typedef4.C)
+                             (when (and (:typedef ds) (not (skim? p)) (main-tok? p (long (:b ds))) (or (is? p ">") (is? p ",")))
+                               {:t :b :w ["int"] :cx-erroneous true})
+                             (perr p "a template parameter"))
                     ;; (cpp-indep2: a non-type template parameter declared with a placeholder type is C++17's ([temp.param]/? ,
                     ;; P0127R2): before it GCC's "'auto' parameter not permitted in this context", at the type; cpp1z/nontype-auto11.C)
                     _ (when (and (#{:auto :dta} (:t base)) (< (.-year p) 2017) (not (skim? p)) (main-tok? p (long (:b ds))))
@@ -8142,7 +8175,7 @@
             lam-unavail (when (and (is? p "[") (is-at? p 1 "["))
                           (let [a0 (ix p)] (attr-nodes p) (some #(contains? #{"unavailable" "__unavailable__"} (ts (tok-at p %))) (range a0 (ix p)))))
             pi0 (ix p)
-            pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil] (parse-param-list p)))
+            pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil *lambda-params* true] (parse-param-list p)))
             ;; (cpp-indep2: [dcl.fct]/2 for a lambda's parameters too: a parameter of type cv void other than a lone unnamed
             ;; `(void)`, GCC's "invalid use of type 'void' in parameter declaration" (cv-qualified: "invalid use of cv-qualified type
             ;; 'const void' in parameter declaration"), at it; cpp0x/lambda/lambda-ice5.C, lambda-ice21.C)
