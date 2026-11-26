@@ -1,7 +1,7 @@
 /* The C side of pyi's _zstd (queue 208; doc/python/PYTHON-SURVEY.md, "After the decisions"): built by ci's builder
    with zstd 1.5.7's library (lib/common, lib/compress, lib/decompress, lib/dictBuilder; no legacy formats, no
-   assembly, no intrinsics, no threads) into one node program, go/arbace/clib/zstd's Nodes. The Go glue
-   (go/arbace/pyzstd) calls zstd's functions directly, and these helpers: the layouts it checks at its start, and
+   assembly, no intrinsics; since queue 593 with threads, ZSTD_MULTITHREAD over musl's pthreads) into one node
+   program, go/arbace/clib/zstd's Nodes. The Go glue (go/arbace/pyzstd) calls zstd's functions directly, and these helpers: the layouts it checks at its start, and
    wrappers for the calls that take or return a structure by value (ZSTD_bounds, ZDICT_params_t). */
 
 #include <stddef.h>

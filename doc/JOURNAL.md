@@ -25063,3 +25063,37 @@ dropped :with-exit-traceback already). Check, on goi with the pytls swap (587-1 
 8 GiB cap (other tests than the previous run's: the goi driver's memory over the module, not a test's) and
 test_missing_exceptions_reset (an object goi keeps past gc.collect()); test_getopt's translations the swap's warning.
 bin/pyi divergences: test_audit's test_cantrace in no class, train 6's own (rc 1 on train 6 alone); bin/markers-check ok.
+## 2026-11-26 — C world: zstd with ZSTD_MULTITHREAD, its pool on musl's pthreads (queue 593, VM)
+
+On train 6 (6dc3129f5), branch 593-c-zstd-multithread. Goal: test_zstd's three multithreaded rows (592's report, F2:
+CompressorTestCase.test_zstd_multithread_compress, test_free_busy_multithread_compressor_with_dict,
+ZstdDictTestCase.test_collect_cycle_with_busy_compressor), which skip because nb_workers' bounds are (0, 0).
+
+- Sources: zstd 1.5.7, python/cpython-source-deps tag zstd-1.5.7 (the tarball tools/pyi/clib/zstd/lib.conf pins, SHA-256
+  f24b5247...499c8e): lib/common/threading.h (under ZSTD_MULTITHREAD and DEBUGLEVEL < 1 the ZSTD_pthread_* names are
+  pthread_mutex_*, pthread_cond_*, pthread_create and pthread_join themselves), lib/common/pool.c (POOL_create's workers,
+  the queue's mutex and its push and pop conditions, POOL_free's broadcast and joins), lib/compress/zstdmt_compress.h
+  (ZSTDMT_NBWORKERS_MAX 256 on 64 bits), lib/Makefile (lib-mt's -DZSTD_MULTITHREAD). musl 1.2.6 (test/c/corpora.edn's
+  :musl-1.2.6, SHA-256 d585fd3b...60512a): src/thread/pthread_create.c, pthread_join.c, pthread_mutex_*.c,
+  pthread_cond_*.c over __clone and the futex.
+- Found: nothing to port in the C world. Since CS11 (a) crt's scheduler runs musl's own pthreads, its __clone a ci.Thread on a
+  goroutine of its own (go/arbace/ci/thread.ae), the futex WAIT and WAKE as the baton's handoffs (go/arbace/crt/sched.ae),
+  and arbace/clib's world is such a program: its first pthread_create makes the scheduler with the caller's thread, the
+  library's p.Main, as its main task. py-capi-1125's own C threads (PyThread_start_new_thread on ci.Threads of pyctypes'
+  World) were needed there because ctypes' world is driven by several Python goroutines; a clib world is called only from the
+  GIL's holder, always on p.Main, so the main task holds the baton whenever no call runs: the workers run while a call waits
+  on a condition (cond_wait's futex) or yields at ci's preemption, and never between calls, which zstd's API allows (a
+  ZSTD_e_continue returns with jobs pending; the next call or ZSTD_freeCCtx's POOL_free joins them).
+- Built: tools/pyi/clib/zstd/lib.conf's cflags -DZSTD_MULTITHREAD (pool.c and threading.c were already in its sources),
+  bin/pyi-clib build zstd: go/arbace/clib/zstd/nodes.ae (key f3f19467...), its undefined-symbols check clean; the comments of
+  the C glue (pyzstd.c), of the Go glue (go/arbace/pyzstd/pyzstd.ae, the file comment's three lines edited in its forms in
+  place, printed again equal but for them) and of doc/python/PYTHON-SURVEY.md's "No threads" said so.
+- Checks (unit level, once): .tmp/q593/ct/pool.c, pool.c's pattern (4 workers, a queue of 3, 40 jobs, the two conditions,
+  the shutdown broadcast, joins with the threads' results) by bin/ci run against the host's cc: equal ("jobs 40 sum 233961").
+  A scratch Go test of arbace/clib with the new node program (not committed): nb_workers' bounds (0, 256); a 3 MB stream with
+  2 workers, a ZSTD_e_continue that returns with jobs pending, a call between, ZSTD_freeCCtx while a worker is busy, then a
+  whole stream decompressed equal; interpreted and with cf2g's translation (bin/pyi-clib aot zstd), both pass.
+- Alternatives: a pthread layer of natives over Go's sync for the clib worlds (as py-capi-1125 did for ctypes' Python threads):
+  not needed, and it would leave musl's semantics; releasing the GIL around the library's long calls so the workers run beside
+  Python: CPython does, but pyi's glue holds the GIL around every call (the objects' PyMutex locks are the GIL).
+- Measure: left for train 6's stage 0 (assets/587's seed archive, not yet posted): test_zstd by check --aot --lib-test. No record.
