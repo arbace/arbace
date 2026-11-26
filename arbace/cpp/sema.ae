@@ -2536,10 +2536,16 @@
                             ;; (queue 460: but a plain redeclaration of the same type after the deleted definition keeps it,
                             ;; [dcl.fct.def.delete]/4: the deleted definition is the first declaration, later ones redeclare it)
                             (and (checking?) (or (:deleted g) (:deleted f))
-                                 (not (and (:deleted-sure g) (not (:deleted f)) (not body) (= (:ty g) (:ty f))
-                                           (= (:cq g) (:cq f)) (= (:refq g) (:refq f)))))
+                                 (not (and (:deleted-sure g) (not (:deleted f)) (or (not body) (not (header-node? n)))
+                                           (= (:ty g) (:ty f)) (= (:cq g) (:cq f)) (= (:refq g) (:refq f)))))
                             (assoc :deleted-sure false)
-                            body (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
+                            ;; (cpp-def2, the checker: a definition of a function whose first declaration is its deleted
+                            ;; definition, [dcl.fct.def.delete]/4 with [basic.def.odr]/1, is a redefinition: GCC's error there, the
+                            ;; function staying deleted, its body not taken, so that a call of it is "use of deleted function";
+                            ;; cpp0x/defaulted10.C)
+                            (and body (not (and (checking?) (:deleted-sure g) (not (:deleted f)) (not (header-node? n)) (= (:ty g) (:ty f))
+                                                (= (:cq g) (:cq f)) (= (:refq g) (:refq f)))))
+                            (assoc :body body :node n :def-scope scope :inits (filter #(= "CXXCtorInitializer" (:kind %)) (kids n))
                                         :inline (or (:inline g) (boolean (:inline n))))
                             ;; a header's definition: analyzed when used (G4), as clang emits an inline function
                             (and body (lazy-header-node? n) (not (or (:used f) (:used g)))) (assoc :lazy true)))))
@@ -2950,7 +2956,11 @@
         eacc (when (and (checking?) (= :class (:kind scope)) (:cls scope))
                (or *member-access* (when nm (some #(when (= :type (:e %)) (:access %)) (.get ^java.util.HashMap (:names scope) nm)))))]
     (when-not nm (reset! *last-anon* t))
+    ;; (cpp-def2, the checker: an enumeration's definition seen, its enumerator list; an opaque-enum-declaration alone declares
+    ;; none, [dcl.enum]/3, name-expr's qualified lookup below)
+    (when (and (checking?) old-id (:_body n)) (swap! abi/*enums* assoc-in [old-id :body] true))
     (when-not old-id (swap! abi/*enums* assoc id (cond-> {:id id :name nm :path (:path scope) :under under :scope es :scoped scoped}
+                                                  (and (checking?) (:_body n)) (assoc :body true)
                                                   ;; (cpp-rind: a fixed underlying type, [conv.prom]/4's and DR 1601's)
                                                   (get-in n [:fixedUnderlyingType :qualType]) (assoc :fixed true))))
     (when (and nm (not old-id)) (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
@@ -5440,6 +5450,19 @@
                ;; (cpp-def, the checker: P2280R4, a virtual call on an object of unknown dynamic type, a reference parameter's
                ;; outside its call, surely no constant expression: cpp2a/constexpr-ref1.C's `swam.lochte()`)
                (when (and (checking?) (:virtual e) (:obj e))
+                 ;; (cpp-def2, the checker: [expr.const]/5.6 of C++20 (P1064R0), an invocation of a virtual function for an object
+                 ;; neither usable in constant expressions nor begun within the evaluation is no constant expression: the object
+                 ;; through a pointer formed from a variable outside the evaluation, `static_cast<VBase*>(&m)->foo()` with `Main m;`
+                 ;; a local, not constexpr; cpp2a/constexpr-virtual20.C. (A call on the variable itself, `m.foo()`, GCC
+                 ;; devirtualizes, its object's type known: left as it was.)
+                 (when-let [v (let [x (:obj e)]
+                                (when (= :deref (:op x))
+                                  (let [x (loop [x (:e x)] (if (and (map? x) (= :cast (:op x))) (recur (:e x)) x))]
+                                    (when (and (map? x) (= :addr (:op x)) (map? (:e x)) (= :var (:op (:e x))) (not (contains? env (:id (:e x)))))
+                                      (var* (:id (:e x)))))))]
+                   (when (and (:name v) (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v)))
+                              (not (or (:constexpr v) (:cx-constexpr v))) (#{:local :global :static-local} (:storage v)))
+                     (ub! e "virtual call on '" (:name v) "', an object not usable in constant expressions, is not a constant expression")))
                  (let [o (try (ce-lv (:obj e) env) (catch arbace.lang.ExceptionInfo _ nil))]
                    (when (and (ce-loc? o) (::uref o) (empty? (::path o)))
                      (ub! e "virtual call on '" (:name (var* (::uref o))) "', an object of unknown dynamic type, is not a constant expression"))))
@@ -6920,7 +6943,6 @@
         (abi/void? f) true
         (= (abi/unq f) (abi/unq t)) (not (cx-cv-ok? f t))
         (and (class-id f) (class-id t)) (or (not (abi/derived-from? (class-id f) (class-id t))) (not (cx-cv-ok? f t)))
-        (and (abi/ptr? f) (abi/ptr? t)) (or (not= (cx-shape f) (cx-shape t)) (boolean (cx-qual-bad? f t)))
         :else true))))
 
 (defn- cx-tyname ^String [t] (pr-str (select-keys (abi/unq t) [:k :n :id :to :cls])))
@@ -7849,8 +7871,24 @@
                   ;; [expr.const]/16-18 with P2564R3: an escalating caller escalates, another's error at the call; its positions the
                   ;; call's, GCC's place)
                   (let [own (and (cx-p2564?) (map? d) (not (header-node? d)) (or (nil? (:fn-id ctx)) (cx-main-fn? (fnd (:fn-id ctx)))))
-                        at (when own (or *cx-at-override* (some-> *at* deref :range)))]
-                    (init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* (if own *cx-no-imm* true) *cx-at-override* (if own at *cx-at-override*)]
+                        at (when own (or *cx-at-override* (some-> *at* deref :range)))
+                        call-at (some-> *at* deref)]
+                    ((fn [g] (if-not (and (checking?) *at* call-at *on-refusal* (map? d) (not (header-node? d)) (not (:tinst f))
+                                          (not (some-> (:cls f) abi/cls :targs seq)))
+                               (g)
+                               ;; (cpp-def2, the checker: a default argument of a function that is no template's whose conversion
+                               ;; to the parameter's type fails, [dcl.fct.default]/1 with [dcl.init]: GCC's error at the default
+                               ;; argument, the analysis's place for it, and again at the call that uses it, there: overload/defarg9.C's
+                               ;; `C c;` with `C(A& a = B())`)
+                               (try (g)
+                                    (catch arbace.lang.ExceptionInfo x
+                                      (if (and (:codegen/refused (ex-data x)) (nil? (:cx/node (ex-data x)))
+                                               (not= (get-in (some-> *at* deref) [:range :begin :offset]) (get-in call-at [:range :begin :offset])))
+                                        (do (*on-refusal* x (some-> *at* deref))
+                                            (reset! *at* call-at)
+                                            (throw x))
+                                        (throw x))))))
+                     #(init-for (nth ps i) (binding [*cutoff* Long/MAX_VALUE *cx-no-imm* (if own *cx-no-imm* true) *cx-at-override* (if own at *cx-at-override*)]
                                            ;; (cpp-def, the checker: an error of the default argument's own expression is GCC's at the
                                            ;; default argument, in the declaration, not at the call that uses it ([dcl.fct.default]/5:
                                            ;; its names bound and its semantic constraints checked where it appears); its conversion to
@@ -7862,7 +7900,7 @@
                                                              (get-in d [:range :begin :offset]))
                                                       (throw (ex-info (ex-message x) (assoc xd :cx/node d)))
                                                       (throw x))))))
-                              ctx :copy))))))))))
+                              ctx :copy)))))))))))
 
 (defn init-list-elem
   "E when the type `t` (cv-qualified, or a reference to it) is std::initializer_list<E>, else nil."
@@ -8893,6 +8931,8 @@
         fid (if (and fid (not= id (:cls (fnd fid)))) (inherit-through! id fid) fid)]
     (if (and (nil? fid) (checking?)
              (or (:cx-inst-refused (abi/cls id))
+                 ;; (cpp-def2: a specialization surely without a definition, its variable's error cx-sure-incomplete-refusal's)
+                 (and (:cx-sure-incomplete (abi/cls id)) (not (:complete (abi/cls id))))
                  ;; (queue 510, the checker: a base's default constructor its using-declaration inherits, as the code
                  ;; generator's branch above finds it ([namespace.udecl]/3, [over.match.funcs]/8 excludes only the copy and move
                  ;; constructors' shapes; g++ 15.2 accepts `struct D : B { using B::B; D(double); }; D d;` at C++11 to 20): not
@@ -9584,6 +9624,16 @@
           (fail :incomplete "incomplete type '" (:name c) "' used in nested name specifier")
           (and en (:name en) (pos? (.size ^java.util.HashMap (:names (:scope en)))))
           (fail :name "unknown name " nm ": no member of the complete class " (:name en))
+          ;; (cpp-def2: an enumeration only opaque-declared -- no enumerator list before the name, and none anywhere a qualified
+          ;; definition, `enum A<T>::E : T { ... }`, could give an instantiation -- has no enumerators, [dcl.enum]/3 with
+          ;; [basic.lookup.qual]/1: `C<int>::E::e1`, GCC's "'e1' is not a member of 'C<int>::E'"; cpp0x/pr82401.C)
+          (and en (:name en) (checking?) (not (:body en)) (zero? (.size ^java.util.HashMap (:names (:scope en))))
+               (not (re-find (re-pattern (str "\\benum\\s+(?:class\\s+|struct\\s+)?[^;{}]*"
+                                             (when-let [o (some-> (seq (butlast q)) last str (str/replace #"<.*$" "") str/trim not-empty)]
+                                               (str "\\b" (java.util.regex.Pattern/quote o) "\\s*(?:<[^;{}]*>)?\\s*"))
+                                             "::\\s*" (java.util.regex.Pattern/quote (str (:name en))) "\\b[^;]*\\{"))
+                             (str *src*))))
+          (fail :name "'" nm "' is not a member of '" (str/join "::" (conj (vec (butlast q)) (last q))) "'")
           ;; (queue 487: a namespace of the main file's that declares no such member, cx-ns-lacks?)
           (cx-ns-lacks? (:scope ctx) q g nm)
           (fail :name "'" nm "' is not a member of '" (last q) "'")
