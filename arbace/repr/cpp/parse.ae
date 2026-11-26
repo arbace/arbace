@@ -4397,6 +4397,10 @@
                     (soft-diag! p ni (str "declaration of '" (or nm "") "' as array of references")))
                 has-dflt (is? p "=")
                 db (ix p)
+                ;; (cpp-indep3: [dcl.fct.default]/3, "A default argument shall not be specified for a function parameter pack":
+                ;; GCC's "parameter pack 'args' cannot have a default argument", at the =; cpp0x/vt-34751.C)
+                _ (when (and has-dflt (:pack d) (not (skim? p)) (main-tok? p db))
+                    (soft-diag! p db (str "parameter pack " (if nm (str "'" nm "' ") "") "cannot have a default argument")))
                 dflt (when (accept! p "=")
                        ;; (a default argument is a complete-class context, [class.mem.general]/7: no use there changes a name's
                        ;; meaning, cpp-gnu)
@@ -5557,6 +5561,15 @@
                       ;; "keyword 'template' not allowed in declarator-id", at the name after it; template/template-keyword1.C)
                       (and (> (count (:parts qn)) 1) (#{:top :member} ctx) (some :tkw (rest (:parts qn))) (:i (first (filter :tkw (rest (:parts qn))))))
                       (soft-diag! p (long (:i (first (filter :tkw (rest (:parts qn)))))) "keyword 'template' not allowed in declarator-id")
+                      ;; (cpp-indep3: [dcl.fct]/11, "Functions shall not have a return type of type array or function": a function
+                      ;; declarator whose return type, its decl-specifiers' or its trailing return type, is a typedef-name of a
+                      ;; function or array type, `Fi f1();`, `auto a2() -> Ai;`, is GCC's "'f1' declared as function returning a
+                      ;; function" ("... an array"), at the declaration; cpp0x/trailing14.C)
+                      (and fs (= 1 (count chain)) (empty? (:ptrs d)) (= 1 (count (:sufs d))) (:b ds) (not (:typedef ds))
+                           (let [rt (or (:trailing fs) base0) tt (some-> rt :ent :ty)]
+                             (and (= :n (:t rt)) (map? tt) (#{:f :a} (:t tt)) (not (:tparam (:ent rt))))))
+                      (soft-diag! p (long (:b ds)) (str "'" (or nm "") "' declared as function returning "
+                                                        (if (= :a (:t (some-> (or (:trailing fs) base0) :ent :ty))) "an array" "a function")))
                       (and fs (:va fs) (or (and (:op lp) (not= "()" (:op lp))) (:conv lp)))
                       (soft-diag! p ni (str "'" (if (seq nm) nm (str "operator" (or (:op lp) " conversion"))) "' must not have variable number of arguments"))
                       ;; ([dcl.fct.default]/4 with [temp.mem]? : a member function template's definition out of its class, which
@@ -7261,7 +7274,14 @@
                       (if (id? p)
                         (let [x {:name (ts (cur p)) :i (ix p) :inline inl}]
                           (adv! p)
-                          (if (accept! p "::") (recur (conj out x)) (conj out x)))
+                          (if (accept! p "::")
+                            ;; (cpp-indep3: [namespace.def.general]/1, a nested-namespace-definition's enclosing-namespace-specifier
+                            ;; ends in an identifier, no `::` before the brace: `namespace F::G:: {}` is GCC's "namespace name
+                            ;; required", at the brace; cpp1z/nested-namespace-def1.C)
+                            (do (when (and (is? p "{") (not (skim? p)) (main-tok? p (ix p)))
+                                  (soft-diag! p (ix p) "namespace name required"))
+                                (recur (conj out x)))
+                            (conj out x)))
                         out)))
             ;; (cpp-read, 2026-11-22: [namespace.def.general]/1, a nested-namespace-definition `namespace A::B` takes `inline`
             ;; only before a name after the first (C++20's `A::inline B`): GCC's "a nested namespace definition cannot be inline"
@@ -7278,6 +7298,14 @@
                 (adv! p))
             a2i (ix p)
             a2 (attr-nodes p)
+            ;; (cpp-indep3: [namespace.def.general]/1, a nested-namespace-definition takes no attribute-specifier-seq: attributes
+            ;; before its names, or after the first and before `::` and the rest (whose names then end the definition), are GCC's
+            ;; "a nested namespace definition cannot have attributes", at the definition, the names after `::` taken;
+            ;; cpp1z/nested-namespace-def1.C)
+            more (when (and (seq parts) (seq a2) (is? p "::")) (loop [out []] (if (and (accept! p "::") (id? p)) (let [x {:name (ts (cur p)) :i (ix p)}] (adv! p) (recur (conj out x))) out)))
+            _ (when (and (not (skim? p)) (main-tok? p b) (or (seq more) (and (seq a1) (> (count parts) 1))))
+                (soft-diag! p b "a nested namespace definition cannot have attributes"))
+            parts (into (vec parts) more)
             ;; (cpp-rind: [namespace.def.general]/1, a namespace-definition's attribute-specifier-seq precedes its name: a standard one
             ;; after it is GCC's "standard attributes on namespaces must precede the namespace name", cpp1z/namespace-attribs2.C)
             _ (when (and (seq parts) (seq a2) (t= (tok-at p a2i) "[") (t= (tok-at p (inc a2i)) "[") (not (skim? p)) (main-tok? p a2i))
