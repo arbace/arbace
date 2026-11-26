@@ -25301,3 +25301,32 @@ test/python/divergences.edn (bin/pyi divergences --methods: `:ctypes-port` 18, `
   Key is the old flags'). test_csqrt is expected to pass after that rebuild (pyctypes' 'G' calls as ci's long double complex,
   not probed against the rebuilt world).
 - No module run (the classes need none); bin/pyi divergences on the committed record: no new problem.
+
+## 2026-11-26: train 7 (Python's 100% train), assembled
+
+Branch `train-7` (mac) from mac/train-6 `025065fd1`, the conductor's plan .tmp/goal/train-7-plan.md, train 6's method. Merged
+in order: mac/py-final-1126 `944281aaa`, py-frame-1126 `7b0196ade`, py-speed-1126 `2f00a53ac`, py-json-1126 `6b6d724c2`, the
+VM's 587-py-core-objects-final `e0e5fdc01`, 593-c-zstd-multithread `d7cfb4b21`, 597-py-testcapi-followups `b72d8bf72` (holds
+594-py-testcapi `f50c89732`), 595-py-core-tail `900ac1d2e` and 598-py-ctypes-capi-tail `7f6280697`. Not in it:
+py-pickle-heap-1126 and py-breaker-1126 (not pushed when the tree was assembled; they ride the next train unless pushed before
+the build's turn).
+
+- go/arbace/py and go/arbace/pyctypes merged at the Go level (train 5's method, "train 5" above): each merge commit keeps them at
+  its first parent; the packages printed by bin/repr-go print at train 6's head and at each member's head, merged file by file
+  by git merge-file into one tree, read back once (bin/pyi runtime read on train 6's executable `d238b3a23ca9`, after gofmt,
+  go vet and go test of the printed Go: `d9f26c59e`). The conflicts: pyctypes/capi.go's native tables (py-json's jsonTable,
+  598's q598Table, then 594's fatalTable last, over the natives it wraps, as its comment asks); py/thread_gil.go's threadInfo
+  (py-final's weakly held locals, 598's asyncExc added); py/builtins_weakref.go's ExtClearWeakRefsNoCallbacks, added by 594/597
+  and by 598 with the same body (go vet: redeclared), kept once. go/arbace/pyzstd's forms as the read gives them (593 edited
+  its file comment in the :full text only; comment only).
+- test/python/divergences.edn by both sides' rows: :finalization's :tests (py-final's five and 587's test_sort row);
+  :capi-refcounts (594's and 595's rows); :warnings-c emptied by 595 (its row to :finalization), 587's dropping of
+  :struct-sequences kept; :capi-refcounts beside 598's c_char_p row; 598's new :native-abi-addresses after :sys-getsizeof's
+  rows. bin/pyi divergences: no shadowed or duplicate row; its one problem is train 6's (test_audit's test_cantrace in no
+  class), which mac/next classes and train 7 takes when train 6 is merged into next.
+- go/arbace/clib/ctypestest at its first parent's side in 597's merge (the generated world; py-json and 597 each regenerated
+  it): rebuilt once from the merged sources by the train (bin/pyi-clib build ctypestest, its own big-lock ticket), then verify.
+- Checked light: bin/markers-check, bin/records-check 0 problems, the touched namespaces (arbace.go, arbace.go.table,
+  arbace.j2g.main, arbace.python and its aot, compile and run, arbace.repr.python.peg, pegen and parser, arbace.c.build) load on
+  stage 0; C's essential checks for 598's arbace/c/build.ae (bin/ci dg --essential, check --only essential-check, check --aot
+  --only essential-aot) on stage 0.
