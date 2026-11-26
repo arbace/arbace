@@ -8788,3 +8788,90 @@ and 557b): the table is the report's. What nobody owned and pyi could fix:
   `:code-objects` (a code object's weakref callback at its deletion: finalization timing), `:docstrings` (py-core's built-in
   docstrings), `:compiled-flaky` (timing, the cell's record decides), `:audit-hooks`' two (test_open is 545's native _io,
   test_cantrace the tracer's suspension), `:buffer-exports`' bytearray rows (PYI_BYTEARRAY_EXPORTS's cost, py-core's).
+
+## As built: py-odict-1125, classes in the cycle collector, chains of finalizers, an instance's own __reduce__ (2026-11-25, the main host, the burst's py-odict lane)
+
+The deferred eval classes `:ordered-dict-c` (31), `:zoneinfo-c` (11) and `:os-and-files-misc` (13). Train 5's executable
+(`b85611b74343b609b2a4`, `bin/pyi check --only` of the 63 names the three classes list, PYI_RUNTIME=compiled) already passed 52:
+the C OrderedDict's rows of py-mods-1122 (issue119004, gh-148660, the iterators' pickling, key changes during iteration,
+`__sizeof__`), the C `_zoneinfo` rows of py-accel's world (Modules/_zoneinfo.c built by ci, 2026-11-23), and every
+`:os-and-files-misc` row (the record predates py-os-1124, py-eval-1122 and 521's `_datetime`). The eleven left, read from CPython
+3.14.10 (Python/gc.c, Objects/typeobject.c's `type_traverse` and `object___reduce_ex___impl`, Objects/odictobject.c's
+`odict_traverse`):
+
+- **Chains of finalizers** (`test_highly_nested_subclass`, five: the builtin dict's, the C and pure OrderedDict's and their
+  subclasses'). A chain of 100 objects with `__del__`, each holding the next, is freed at once by CPython's reference counts and
+  by Go's collector a link a collection (Go keeps what a finalized object reaches for one more collection), so 218's rounds (at
+  most 8 a `gc.collect()`) ran 25 of the 100 `__del__` over test.support's three collections. `finRounds` now goes on while a
+  round handles something, up to `finMaxRounds` (256), and stops as before at the first round that handles nothing.
+- **A class in a cycle** (`test_reference_loop`, four: `class A: od = OrderedDict()`, `A.od[A] = None`, the class dead after
+  `gc.collect()`). Classes were no nodes of 241's cycle collector: the runtime's registries pinned every class. Design 241's
+  plan (2) is built: a class statement's class is a node (`cyIsNode`, unless a module holds it under a name: such a class is a
+  leaf, `cySetLeaves`), traversed as `type_traverse` (its namespace, `__base__`, `__bases__`, `__mro__` with itself first, the
+  metaclass), as are an instance's class, a heap class's `__dict__`/`__weakref__` getsets and `__slots__` members (their owner)
+  and the C OrderedDict (`odict_traverse`: the dict, each node's key, its instance dict). Before a probe `cyHideTypes` takes the
+  probed classes out of the registries where CPython keeps nothing or a weak reference (`classInfos`, a base's `subclasses`,
+  the class's own subclasses (by node), `keptBases`, `finished`, `readied`, `inheritsNew`, `reprOfInstance`, `structSeqHeap`),
+  drops their caches (`attrCache`, `initFn`) and the inline caches' entries that name a probed node, and takes a probed
+  OrderedDict's map of nodes out (a map's keys cannot be hidden); after the probe every entry is put back, the trash's too (its
+  finalizers may still use the class), and `cyForgetType` drops a class the collection freed (CPython's `remove_subclass` and the
+  type's caches). A base's subclasses lose the class through a new array (`cyWithout`): the old one, holding the class past the
+  shorter slice's end, kept it alive (the last class made was never collected until the next class statement).
+  `PYI_GC_DEBUG=2` lists every probed node and whether its probe ran.
+- **An instance's own `__reduce__`** (zoneinfo's pure `ZoneInfoPickleTest.test_from_file` and `test_pickle_after_from_file`):
+  `object.__reduce_ex__` with a class `__reduce__` overriding object's calls `getattr(self, '__reduce__')`, so `from_file`'s
+  instance attribute `obj.__reduce__ = obj._file_reduce` raises PicklingError (it called the class's).
+- **Proved** (pyi's AOT on the worktree, `bin/pyi check --aot --lib-test --fresh --only`, 31 modules whole, then 12 again after
+  the `__reduce_ex__` fix; the negative controls failing as they must): the 63 names of the three classes all pass; no row the
+  eval record passes fails but those that fail the same on train 5's executable (the C world's `_pickle` and `_datetime`
+  rows: the journal's entry lists them). Not recorded here: the train records from its build.
+
+## As built: py-enum-1125, a C type's own tp_new as __new__ in its dict (2026-11-25, the main host, the burst's py-odict lane)
+
+test_enum did not import on train 5 ("ReprEnum subclasses must be mixed with a data type": `class enum_type(date, ReprEnum)` at
+its class level): enum's `_find_data_type_` looks for `'__new__' in base.__dict__`, and the C `_datetime`'s date (521's, CPython's
+own C in the world ctypestest) had none. CPython's `type_ready_set_new` (Objects/typeobject.c) puts `add_tp_new_wrapper`'s
+`__new__` in the dict of a type with a tp_new of its own (not inherited, not Py_TPFLAGS_DISALLOW_INSTANTIATION) when the dict
+has none. arbace/pyctypes does it now for both ways a C type is made: `typeReady` (PyType_Ready and
+`_PyStaticType_InitForExtension`, the static types: its tp_new field before inheritance) and `typeFromSpec` (PyType_FromMetaclass:
+the spec's own Py_tp_new), before the methods as `type_ready_fill_dict` comes after; the wrapper is py's `ExtNewWrapper`, the
+built-in types' tp_new_wrapper (`makeSlotWrapper`'s staticmethod, one per type in `newWrappers`: its type checks, then the C
+tp_new). Taken from the Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects: `ExtNewWrapper` and the
+spec path), rewritten over this tree's staticmethod wrapper and extended to the static types, which `_datetime` uses.
+
+## As built: py-regress-1126, train 5's held regressions at their causes (2026-11-26, the main host, the burst's py-regress lane)
+
+Train 5's eval run held 11 modules for regressions against next's record (the journal's entry of 2026-11-26). Their causes, each
+fixed as CPython 3.14.10 behaves:
+
+- **slot_tp_new** (arbace/pyctypes, capi_mirror): a heap class whose `__new__` along its MRO is a class statement's (`classNew`)
+  has `_Pyi_slot_tp_new` in its tp_new slot, the subtype's `__new__` called with the subtype first; the built-in types keep
+  `_Pyi_tp_new` (the built-in base's `__new__`). The C unpickler's NEWOBJ (`cls->tp_new`) now runs a list or tuple subclass's
+  own `__new__` (test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling).
+- **The lists after Python code** (pyctypes's `sized` and `syncUsedLists`, py's `ExtRunCount`): when Python code ran inside a
+  native, the lists' mirrors the natives used since the outermost entry into the world whose length Python changed are written
+  to C, C's own writes taken first, so a size C reads in place (PyList_GET_SIZE) is the list's after a callback resized it
+  (test_pickle's C test_evil_pickler_mutating_collection: "list changed size during iteration"). Writing every mutable mirror
+  instead (a first version) crashed test_pickle's AOT driver.
+- **The C stack's soft limit** (pyctypes, capi_accel's `cStackLimit`): `_PyThreadState_GetCurrent` sets the main thread state's
+  `c_stack_soft_limit` (offset 848) just above the caller's frame when the C thread is 50,000 calls deep or within four
+  `_PyOS_STACK_MARGIN_BYTES` of its stack's end, else 0, so the inline `_Py_EnterRecursiveCall` of a core module (_pickle's
+  `save`) raises through `_Py_CheckRecursiveCall`, "Stack overflow (used N kB) while pickling an object", before Go's 1 GB
+  goroutine stack overflows (test_functools' test_recursive_pickle).
+- **The wake pipe** (py, builtins_signal_wait): made for a read that may wait (not a regular file's, a directory's, a block
+  device's or a non-blocking descriptor's) and for a write to a blocking FIFO only, so a child that never waits has no
+  descriptor CPython's has not (test_subprocess's test_pass_fds).
+- **3.14's UTF-8 mode for open() and TextIOWrapper** (py, `utf8ModeOn`): the running version's rule, as sys.flags since 553;
+  under C.UTF-8 their default encoding is the locale's "UTF-8" (test_builtin's test_open_default_encoding, test_io's
+  CTextIOWrapperTest.test_default_encoding).
+- **The eval loop's push signal** (py, eval's runFrames): the reused `Thread.push` lets go of the frame once the loop took it; it
+  held the last frame pushed (an `__init__`'s, its instance in `initSelf`) outside the collector's graph, so a cycle through it
+  was never garbage and its `__del__` never ran at exit (test_traceback's test_print_traceback_at_exit).
+- Not this lane's: test_subprocess's test_one_environment_variable and test_os's
+  test_execve_env_concurrent_mutation_with_fspath_posix (a child without ARBACE_HOST_EXE in its environment) are fixed by
+  py-cli-1125's adopt_host_env; test_sys's test_ioencoding_nonascii and test_pickle's C test_wrong_newobj_ex_class are skipped as
+  CPython skips them.
+- **Measured** (pyi's AOT on the worktree, `bin/pyi check --aot --lib-test --fresh --only`, two runs, 15 and 12 modules): every held
+  row passes; against the eval record nothing it passes fails but CPython's two skips and test_signal's
+  test_stress_modifying_handlers, a timeout in the AOT driver that passes alone, not shown to be these changes' (the journal's entry). Not recorded: train 6 records
+  the 11 modules whole.

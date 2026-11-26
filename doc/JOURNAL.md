@@ -24114,3 +24114,139 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
   rule; D2, template/typedef39.C expects its error on a line of a template never instantiated, its own comment saying it belongs on
   the other one: (a) an n/a class for expectations GCC's own test marks misplaced, recommended, (b) deferred as now. Both rows left
   as they are.
+
+## 2026-11-25: Python eval, py-odict lane: classes collected by the cycle collector, finalizer chains, an instance's __reduce__
+
+The burst's lane for the deferred eval classes `:ordered-dict-c` (31 names), `:zoneinfo-c` (11) and `:os-and-files-misc` (13),
+branch `py-odict-1125` from mac/train-5 (`b6be9b74b`). Studied: CPython 3.14.10 (the pinned tarball,
+`.tmp/repr-python/Python-3.14.10`): Python/gc.c, Objects/typeobject.c (`type_traverse`, `object___reduce_ex___impl`,
+`remove_subclass`), Objects/odictobject.c (`odict_traverse`), Lib/test/test_ordered_dict.py, test_zoneinfo/test_zoneinfo.py,
+Lib/zoneinfo/_zoneinfo.py; doc/python/PYTHON-SURVEY.md's "Design: 241" (its plan (2), classes as nodes, never built).
+
+- The before picture: train 5's executable (`.tmp/gate-exe/b85611b74343b609b2a4`), `bin/pyi check --only` of the 63 names the
+  three classes list (PYI_RUNTIME=compiled): 52 pass already (py-mods-1122's C OrderedDict, py-accel's `_zoneinfo` from
+  Modules/_zoneinfo.c in the C world, py-os-1124 and 521's `_datetime` for the os rows), 11 do not: five
+  test_highly_nested_subclass, four test_reference_loop, zoneinfo's pure ZoneInfoPickleTest test_from_file and
+  test_pickle_after_from_file.
+- finRounds (go/arbace/py/finalize.go): rounds while a round handles something, at most 256 (218's 8 ran 25 of a chain of 100
+  `__del__`: Go frees a chain of finalized objects a link a collection).
+- Classes as nodes of the cycle collector: heap classes not held by a module under a name, traversed as `type_traverse`; an
+  instance's class, a heap class's getsets and members, the C OrderedDict (`odict_traverse`) traversed too; `cyHideTypes` takes the
+  probed classes out of the registries and caches for the probe and puts every entry back after; `cyForgetType` drops a freed
+  class. Found on the way: removing a class from a base's subclasses by `append(list[:k:k], list[k+1:]...)` kept the class in the
+  old array past the shorter slice's end (the last class made was never collected): a new array (`cyWithout`).
+- object.__reduce_ex__: an instance's own `__reduce__` (its __dict__'s, before a class's non-data descriptor) is called, as
+  getattr(self, '__reduce__') in CPython; else the class's, bound to the instance as before (a first version through GetAttr bound
+  a built-in base's `__reduce__` to the unwrapped value: namedtuple's and functools.partial's pickling broke in the AOT run, fixed).
+- Measured by pyi's AOT (the worktree's runtime compiled, `bin/pyi check --aot --lib-test --fresh --only`, the children by the
+  compiled launcher; probes by `bin/pyi aot`), no gate build: 31 modules whole (test_ordered_dict, test_zoneinfo, the
+  `:os-and-files-misc` modules and those of the classes, the collector and pickling: 6,170 methods) and again 12 after the
+  `__reduce_ex__` fix (4,269): all 63 names of the three classes pass; against the eval record nothing the record passes fails
+  that does not fail the same on train 5's executable (test_functools' four test_recursive_pickle stack overflows, namedtuple's
+  and typing's NamedTuple pickling, test_descr's test_reduce_copying, test_pickle's C test_evil_pickler_mutating_collection; and
+  test_enum's import, "ReprEnum subclasses must be mixed with a data type": the C `_datetime`'s date has no `__new__` in its
+  `__dict__`: train 5's, the C world's, reported, not touched here). Rows of other classes that pass in the same run:
+  test_module's test_clear_dict_in_ref_cycle (`:finalization-collect`'s class cycle), test_weakref's test_classes and
+  test_functools' test_method_no_reference_loops (`:finalization-cycle`), test_descr's test_type_lookup_mro_reference, test_gc's
+  test_saveall, test_trash_weakref_clear, test_trashcan_threads and test_function_tp_clear_leaves_consistent_state
+  (`:gc-collector`), test_threading_local's test_local_refs: for the train's record to confirm. Nothing recorded here (the
+  train records from its build); no class of test/python/divergences.edn changed.
+
+## 2026-11-25: Python eval, py-enum lane: a C type's own tp_new as __new__ in its dict (test_enum imports again)
+
+The coordinator's urgent task: test_enum does not import on train 5's executable (`b85611b`): "ReprEnum subclasses must be
+mixed with a data type" (test_enum's `class enum_type(date, ReprEnum)`; enum's `_find_data_type_` asks `'__new__' in
+base.__dict__`, and 521's C `_datetime` date has none). Branch `py-enum-1125` from `py-odict-1125`.
+
+- Source: CPython 3.14.10's Objects/typeobject.c, `type_ready_set_new` and `add_tp_new_wrapper` (a type with its own tp_new, not
+  Py_TPFLAGS_DISALLOW_INSTANTIATION, gets tp_new_wrapper's `__new__` in its dict unless the dict has one; an inherited tp_new
+  none). The Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects, not run there): `py.ExtNewWrapper` and
+  its call in pyctypes' `typeFromSpec`. Not cherry-picked: that commit holds six other unrun changes of queue 587, its wrapper
+  is a bare builtin that needs its descr.go change (built-in `__new__` no longer a staticmethod), and it covers only the spec
+  path while `_datetime`'s types are static (`_PyStaticType_InitForExtension`, pyctypes' `typeReady`).
+- Built: `py.ExtNewWrapper` returns this tree's tp_new_wrapper (`makeSlotWrapper(m, "__new__")`, the staticmethod in
+  `newWrappers`); pyctypes' `addNewWrapper` puts it in the dict in `typeReady` (the C type object's tp_new field before
+  inheritance) and in `typeFromSpec` (the spec's own Py_tp_new), before the methods.
+- Proved by pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`, the worktree's runtime compiled, the children by the
+  compiled launcher; the three negative controls failing as they must): 18 modules whole, 8,294 methods (test_enum, test_datetime,
+  test_decimal, test_zoneinfo, test_pickle, test_xml_etree_c, test_ctypes, test_capi, test_sqlite3, test_bz2, test_lzma, test_zstd,
+  test_xxlimited, test_descr, test_typing, test_copy and the controls' two). test_enum imports: 1,073 of its 1,082 methods pass (the
+  record 1,074); its five failing methods the record passes (TestSpecial's test_subclasses_with_getnewargs, _ex,
+  test_subclasses_without_direct_pickle_support, test_tuple_subclass_with_auto_1 and _2) pickle an int or tuple subclass through
+  the C `_pickle`: all five pass with PYI_C_ACCEL=0 (the thin Go `_pickle`), as namedtuple's pickling fails on train 5 likewise:
+  568's, not touched here. Against the eval record nothing else fails that does not fail the same on train 5's executable (checked
+  there: test_ctypes' three long double rows, test_xml_etree_c's five, test_decimal's PyPythonAPItests.test_pickle and
+  PyContextAPItests.test_pickle (past 300 s there too), test_descr's test_reduce_copying, typing's NamedTuple pickling, test_pickle's
+  C test_evil_pickler_mutating_collection); test_datetime, test_pickle, test_zoneinfo, test_copy, test_typing and test_descr method
+  for method as py-odict-1125's run. Nothing recorded.
+
+## 2026-11-26: Python eval, py-regress lane: train 5's held regressions fixed at their causes (the C _pickle's world, the wake pipe, 3.14's UTF-8 mode, the eval loop's push signal)
+
+The burst's lane for the regressions train 5's eval run found in 11 modules it held (its entry above; the run kept at
+`.tmp/worktrees/train5/.tmp/repr-python/pyi/check/run`, built from `b6be9b74b`, executable `b85611b74343b609b2a4`). Branch
+`py-regress-1126` from mac/next (`c0521dc52`), mac/py-enum-1125 (`66134799d`, test_enum's import) merged first, the coordinator's
+request: its five test_enum methods and typing's NamedTuple pickling fail the same way as test_descr's row. Studied: CPython
+3.14.10 (the pinned tarball, `.tmp/repr-python/Python-3.14.10`): Modules/_pickle.c (`load_newobj`, `batch_list_exact`, `save`),
+Objects/typeobject.c (`slot_tp_new`, `type_new`'s tp_new), Include/internal/pycore_ceval.h (`_Py_MakeRecCheck`,
+`_Py_EnterRecursiveCall`), pycore_pythonrun.h (`_PyOS_STACK_MARGIN_BYTES`), pycore_tstate.h (`c_stack_soft_limit`'s offset),
+Python/ceval.c (`_Py_CheckRecursiveCall`), Python/preconfig.c and initconfig.c (the UTF-8 mode, `_Py_GetLocaleEncodingObject`),
+Lib/test/subprocessdata/fd_status.py.
+
+- **test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling: slot_tp_new.** The C unpickler's
+  NEWOBJ calls `cls->tp_new(cls, args, kwargs)`; every pyi type's tp_new slot was `_Pyi_tp_new`, the built-in base's `__new__`
+  (list's or tuple's), so a class's own `__new__` never ran (C2's `a` and `b` never set; a NamedTuple's `tuple.__new__` "expected
+  at most 1 argument"). A heap class whose `__new__` along its MRO is a class statement's (`classNew`) now gets
+  `_Pyi_slot_tp_new`, CPython's slot_tp_new: the subtype's `__new__` called with the subtype first. Built-in types keep
+  `_Pyi_tp_new`, so C calling `PyList_Type.tp_new(sub, ...)` still gets list's.
+- **test_pickle's CPicklingErrorTests.test_evil_pickler_mutating_collection: the lists after Python code.** A list's ob_size is
+  read in place (PyList_GET_SIZE); persistent_id, Python code a native ran, cleared the list, and its mirror was written to C only
+  when a native touching it returned, so batch_list_exact walked past the end ("list index out of range" from PyList_GetItemRef)
+  where CPython raises "list changed size during iteration". py counts the eval loop's entries from Go (`ExtRunCount`, in
+  `Thread.run`); `sized`, every native's wrapper, then calls `syncUsedLists`: the lists' mirrors the natives used (touch) since
+  the outermost entry into the world (`World.Call`) whose length Python changed are written to C, C's own writes taken first. A
+  first version wrote every mutable mirror (lists, sets, bytearrays) after any native in which Python code ran: in its AOT run
+  test_pickle's driver died three times on musl's `a_crash` (mallocng's free) in CPicklerTests.test_recursive_frozenset_subclass_and_inst
+  and InMemoryPickleTests.test_set_chunking, which pass alone, so state an earlier test left (not pinned down further); the
+  narrowed version's run has the module whole in one driver run, both passing.
+- **test_functools' four test_recursive_pickle: the C stack's soft limit.** _pickle's `save` guards by the inline
+  `_Py_EnterRecursiveCall`, which reads the thread state's `c_stack_soft_limit`; the world's was 0, so no check fired and the C
+  recursion ran until Go's 1 GB goroutine stack overflowed (fatal). `_PyThreadState_GetCurrent` now sets the main thread state's
+  limit for its caller: just above the C thread's stack pointer when the thread is 50,000 C calls deep (about 250 MB of Go's stack)
+  or within four margins of its C stack's end, else 0; `_Py_CheckRecursiveCall` raises "Stack overflow (used N kB) while pickling
+  an object" (pyi's nominal 100 bytes a level). A subinterpreter's 256-byte state is left alone.
+- **test_subprocess's test_pass_fds: the wake pipe.** The main thread's interruptible read (queue 231, py-mods-1122) made its wake
+  pipe on the first read of any descriptor, a source file's at start: a child pyi had two descriptors CPython's has not, which
+  fd_status listed (fd 8, one the parent's test expected closed). The pipe is made now only for a read that may wait (not a
+  regular file's, a directory's, a block device's, nor a non-blocking descriptor's) and for a write to a blocking FIFO, after their
+  checks.
+- **test_builtin's test_open_default_encoding, test_io's CTextIOWrapperTest.test_default_encoding: 3.14's UTF-8 mode.** 553 gave
+  sys.flags 3.14's rule (off under C.UTF-8), but open() and TextIOWrapper kept 3.15's (on), so their default encoding was "utf-8"
+  where locale.getencoding() says "UTF-8". They follow the running version's mode now (`utf8ModeOn`). test_sys's
+  test_ioencoding_nonascii, skipped now ("requires FS encoding to match locale"), and test_pickle's C test_wrong_newobj_ex_class
+  (skipped, "only verified in the Python implementation") are CPython's own outcomes (its record skips both): no fix, train 6's
+  record holds them as they are.
+- **test_traceback's test_print_traceback_at_exit: the push signal.** The eval loop's call signal (`Thread.push`, reused, 202b)
+  kept the last frame pushed: an `__init__`'s frame holding its instance (`initSelf`), outside the collector's graph, so the cycle
+  instance -> exception -> traceback -> frame -> instance was never garbage and its `__del__` never ran at exit (the last
+  instance made only: a later call replaced the frame). runFrames takes the frame and clears the signal.
+- **test_subprocess's two test_one_environment_variable, test_os's test_execve_env_concurrent_mutation_with_fspath_posix**: a child
+  started with an environment without ARBACE_HOST_EXE (env={'fruit': 'orange'}, env.clear()); py-cli-1125's adopt_host_env
+  (mac/py-cli-1125 `6f9661379`, bin/pyi) fixes both: measured on train 5's executable with its bin/pyi applied (the child prints
+  fruit=orange; the execve program prints its message); without it the child, with no host named, falls back to stage 0 and
+  the checkout's runtime interpreted by goi, too slow for the test. Not merged here: train 6 takes py-cli-1125.
+- **Measured** by pyi's AOT on the worktree (`bin/pyi check --aot --lib-test --fresh --only`, the runtime compiled with the
+  changes, the children by the compiled launcher; under bin/heavy-lock as a small job, HEAVY_MEM_GIB 8; peaks 5.0 and 2.7 GB):
+  run 1 (`1fac6ed8d`, 15 modules: test_functools, test_pickle, test_descr, test_traceback, test_builtin, test_io, test_enum,
+  test_collections, test_typing, test_subprocess, test_sys, test_os, test_signal and the controls' two; 5,561 methods, 59 min):
+  every held row passes (the four test_recursive_pickle, test_reduce_copying, test_evil_pickler_mutating_collection, test_pass_fds,
+  test_open_default_encoding, CTextIOWrapperTest.test_default_encoding, test_print_traceback_at_exit; test_enum's five TestSpecial
+  rows), the two crashes above failing. Run 2 (`a3738a57f`, 12 modules: test_pickle, test_functools, test_descr, test_enum,
+  test_typing, test_collections, test_signal, test_ctypes, test_copy, test_xml_etree_c and the controls'; 4,472 methods, 38 min):
+  0 failing, the negative controls failing as they must. Against next's eval record, of the rows it passes, the only ones not
+  passing in either run: the two CPython skips above and test_signal's StressTest.test_stress_modifying_handlers, a 300 s
+  timeout in the module's driver in both runs, which passes alone on the same AOT runtime (12 s; its class whole in 66 s) and on
+  train 5's executable (eval, 15 s): nothing these changes touch runs in it (no reads or writes, no C world); no record of the
+  AOT level holds it, so whether it times out there without them is not measured; train 6's eval run will show it. In AOT the
+  children are the compiled launcher, so test_subprocess's test_one_environment_variable and test_empty_env and test_os's execve
+  row pass there regardless; at the eval level they are py-cli-1125's.
+- Left to the user: none. test_enum's import is py-enum-1125's; test_sqlite3's table-lock row stays in :finalization-goi.
