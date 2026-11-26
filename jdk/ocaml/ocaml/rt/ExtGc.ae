@@ -83,11 +83,26 @@
     (ExtGc/memprofAsked majors)
     (set! canary (ExtGc/canaryRef)))
 
+  ;; (oc-tail) at the light level the process is stage 0's, its heap the interpreter's and the library's classes (about 800 MB) beside the
+  ;; program's: Gc.stat's heap is the growth of the heap in use since the program started (Main/run, heapStart), at least OCaml's first
+  ;; pool of the major heap's figure, 256 K words; its top the largest seen (regression/pr5233 fills a list of heap_words/3 conses)
+  (field ^:static ^long heapBase 0)
+  (field ^:static ^long heapTop 0)
+  (method ^:public ^:static heapStart ^void []
+    (when Rt/LIGHT
+      (let [rt (Runtime/getRuntime)]
+        (set! heapBase (unchecked-divide (unchecked-subtract (.totalMemory rt) (.freeMemory rt)) 8))
+        (set! heapTop 0))))
   (method ^:static gcStat []
     (let [rt (Runtime/getRuntime)
-          total (unchecked-divide (.totalMemory rt) 8)
-          used (unchecked-divide (unchecked-subtract (.totalMemory rt) (.freeMemory rt)) 8)
-          free (unchecked-divide (.freeMemory rt) 8)]
+          ^:mutable total (unchecked-divide (.totalMemory rt) 8)
+          ^:mutable used (unchecked-divide (unchecked-subtract (.totalMemory rt) (.freeMemory rt)) 8)
+          ^:mutable free (unchecked-divide (.freeMemory rt) 8)]
+      (when Rt/LIGHT
+        (set! used (Math/max (long 0) (unchecked-subtract used heapBase)))
+        (set! heapTop (Math/max heapTop (Math/max (long 262144) used)))
+        (set! total heapTop)
+        (set! free (unchecked-subtract total used)))
       (Block. 0 (new Object/1
                   [(Double/valueOf (double Rt/minorWords)) (Double/valueOf 0.0) (Double/valueOf (double Rt/majorWords))
                    (Long/valueOf (unchecked-add (ExtGc/gcCycles) minorAsked)) (Long/valueOf (unchecked-add (ExtGc/gcCycles) majorAsked))
@@ -254,6 +269,22 @@
                  (finally (set! finRunning false)))
             (recur))))))
 
+  ;; (oc-tail; oi's CAlloc, queue 523) a major cycle the C stubs' allocations ended in the C API's server (its 'M', oicapi's MajorCycle):
+  ;; the collection and the values it finds unreachable fired, their functions run at the first poll of OCaml's code after the stub
+  ;; returns, the next allocation (Rt/block, finAllocDue; c-api/alloc_async), not in the C
+  (field ^:public ^:static ^boolean finAllocDue false)
+  (method ^:public ^:static cMajorCycle ^void []
+    (when (> finCount 0)
+      (System/gc)
+      (ExtGc/finScan)
+      (when (> (.size finQueue) 0)
+        (set! finAllocDue true)
+        (set! ExtSignal/allocPoll true)
+        (set! memprofSampling true))))
+  (method ^:public ^:static finAllocRun ^void []
+    (set! finAllocDue false)
+    (ExtGc/finRun))
+
   ;; a forced collection (Gc.full_major, major, compact, minor) and the finalisers it fires
   (method ^:static finCollect ^void []
     (when (> finCount 0)
@@ -324,35 +355,116 @@
     (if (instance? WeakReference v)
       (let [y (.get (cast WeakReference v))] (if (nil? y) ephNone y))
       v))
-  ;; ephe_clean: it reports whether it dropped a data
+  ;; ephe_clean: it reports whether it dropped a data. (oc-tail, oi's since ocaml-eval: weak_array_par) a weak array, or an ephemeron
+  ;; without data, has nothing to drop: a collected key reads as unset through ephSlot, and each Weak.get scanned every key
   (method ^:static ephClean ^boolean [e]
     (let [f (.-f (cast Block e)) ^:mutable dead false]
-      (loop [^int i 2]
-        (when (< i (alength f))
-          (when (and (instance? WeakReference (aget f i)) (nil? (.get (cast WeakReference (aget f i)))))
-            (aset f i ephNone)
-            (set! dead true))
-          (recur (unchecked-inc-int i))))
-      (if (and dead (not (identical? (aget f 1) ephNone)))
-        (do (aset f 1 ephNone) true)
-        false)))
-  ;; again while a cleaning dropped a data (queue 438, oi's: a data that is another ephemeron's key dies in the same collection)
+      (if (identical? (aget f 1) ephNone)
+        false
+        (do (loop [^int i 2]
+              (when (< i (alength f))
+                (when (and (instance? WeakReference (aget f i)) (nil? (.get (cast WeakReference (aget f i)))))
+                  (aset f i ephNone)
+                  (set! dead true))
+                (recur (unchecked-inc-int i))))
+            (if dead
+              (do (aset f 1 ephNone) true)
+              false)))))
+  ;; again while a cleaning dropped a data (queue 438, oi's: a data that is another ephemeron's key dies in the same collection). (oc-tail)
+  ;; each round's scans in methods of their own: an interpreted frame's slot keeps what it last held, and the collection that follows a
+  ;; scan must not find its last ephemeron or data there
   (method ^:static weakCollect ^void []
     (when weakUsed
       (loop [^int round 0]
         (System/gc)
-        (let [live (ArrayList.) ^:mutable dropped false]
-          (loop [^int i 0]
-            (when (< i (.size ephRegistry))
-              (let [r (cast WeakReference (.get ephRegistry i)) e (.get r)]
-                (when (not (nil? e))
-                  (when (ExtGc/ephClean e) (set! dropped true))
-                  (.add live r)))
-              (recur (unchecked-inc-int i))))
-          (.clear ephRegistry)
-          (.addAll ephRegistry live)
+        (let [^:mutable dropped (ExtGc/weakScan)]
+          (when (ExtGc/ephKeyed) (set! dropped true))
           (when (and dropped (< round 31))
             (recur (unchecked-inc-int round)))))))
+  ;; the live weak arrays and ephemerons cleaned, the collected ones forgotten; whether a data was dropped
+  (method ^:static weakScan ^boolean []
+    (let [live (ArrayList.) ^:mutable dropped false]
+      (loop [^int i 0]
+        (when (< i (.size ephRegistry))
+          (let [r (cast WeakReference (.get ephRegistry i)) e (.get r)]
+            (when (not (nil? e))
+              (when (ExtGc/ephClean e) (set! dropped true))
+              (.add live r)))
+          (recur (unchecked-inc-int i))))
+      (.clear ephRegistry)
+      (.addAll ephRegistry live)
+      dropped))
+  ;; (oc-tail; oi's ephKeyed, ocaml-eval 2026-11-24) the asked collections' second phase: a collection with each live ephemeron's data
+  ;; held by its block keys alone (a box [data] in a list in a slot past the end of each key's fields, the ephemeron's data slot only
+  ;; a weak reference to the box), so that a key reachable only from its own ephemeron's data (weak-ephe-final/ephetest's test6) is
+  ;; unreachable; then the data back in the ephemerons that live, gone with a key that died, and each living key's fields its own
+  ;; array again (the same array when anything else still holds it: a finaliser's record). The first phase (the collection with the
+  ;; data in the ephemeron) collects an ephemeron reachable only from its own data (test7); together, OCaml's ephemerons: the data
+  ;; lives while the ephemeron and its keys do. No OCaml code runs between the two halves. An ephemeron with no block key (a
+  ;; string's, a closure's) keeps its data. It reports whether a data was dropped
+  (method ^:static ephKeyed ^boolean []
+    (let [moved (ArrayList.) keyed (ArrayList.)]
+      (ExtGc/ephKeyedMove moved keyed)
+      (if (== (.size moved) 0)
+        false
+        (do (System/gc)
+            (ExtGc/ephKeyedBack moved keyed)))))
+  ;; moved: [ephemeron box] weak references; keyed: [key array n] weak references and the key's fields' length
+  (method ^:static ephKeyedMove ^void [^ArrayList moved ^ArrayList keyed]
+    (let [lists (java.util.IdentityHashMap.)]
+      (loop [^int i 0]
+        (when (< i (.size ephRegistry))
+          (let [e (.get (cast WeakReference (.get ephRegistry i)))]
+            (when (some? e)
+              (let [f (.-f (cast Block e)) d (aget f 1) keys (ArrayList.)]
+                (when (not (identical? d ephNone))
+                  (loop [^int j 2]
+                    (when (< j (alength f))
+                      (let [s (aget f j)]
+                        (when (instance? WeakReference s)
+                          (let [k (.get (cast WeakReference s))]
+                            (when (and (instance? Block k) (> (alength (.-f (cast Block k))) 0)) (.add keys k)))))
+                      (recur (unchecked-inc-int j))))
+                  (when (> (.size keys) 0)
+                    (let [box (new Object/1 [d])]
+                      (loop [^int j 0]
+                        (when (< j (.size keys))
+                          (let [k (cast Block (.get keys j)) l (.get lists k)]
+                            (if (some? l)
+                              (.add (cast ArrayList l) box)
+                              (let [nl (ArrayList.) of (.-f k) n (alength of) nf (Arrays/copyOf of (unchecked-inc-int n))]
+                                (.add nl box)
+                                (aset nf n nl)
+                                (set! (.-f k) nf)
+                                (.put lists k nl)
+                                (.add keyed (new Object/1 [(WeakReference. k) (WeakReference. of) (Integer/valueOf n)])))))
+                          (recur (unchecked-inc-int j))))
+                      (aset f 1 (WeakReference. box))
+                      (.add moved (new Object/1 [(WeakReference. e) (WeakReference. box)]))))))))
+          (recur (unchecked-inc-int i))))
+      (.clear lists)))
+  (method ^:static ephKeyedBack ^boolean [^ArrayList moved ^ArrayList keyed]
+    (let [^:mutable dropped false]
+      (loop [^int i 0]
+        (when (< i (.size moved))
+          (let [m (cast Object/1 (.get moved i))
+                e (.get (cast WeakReference (aget m 0)))
+                b (.get (cast WeakReference (aget m 1)))]
+            (when (some? e)
+              (if (nil? b)
+                (do (aset (.-f (cast Block e)) 1 ephNone) (set! dropped true))
+                (aset (.-f (cast Block e)) 1 (aget (cast Object/1 b) 0)))))
+          (recur (unchecked-inc-int i))))
+      (loop [^int i 0]
+        (when (< i (.size keyed))
+          (let [m (cast Object/1 (.get keyed i))
+                k (.get (cast WeakReference (aget m 0)))]
+            (when (some? k)
+              (let [of (.get (cast WeakReference (aget m 1)))]
+                (set! (.-f (cast Block k))
+                      (if (some? of) (cast Object/1 of) (Arrays/copyOf (.-f (cast Block k)) (.intValue (cast Integer (aget m 2)))))))))
+          (recur (unchecked-inc-int i))))
+      dropped))
 
   (method ^:public ^:static caml_ephe_create [n]
     (let [e (ExtGc/ephCreate n)]
@@ -438,6 +550,9 @@
       (if (nil? x)
         (let [st (new Object/1 [(ArrayList.) Boolean/FALSE])] (.set memprofTL st) st)
         (cast Object/1 x))))
+  ;; (oc-tail) the thread's state, taken by the fresh thread of a deep call (Rt/hop), which runs as the same OCaml thread
+  (method ^:public ^:static mpThread [] (.get memprofTL))
+  (method ^:public ^:static mpAdopt ^void [st] (when (some? st) (.set memprofTL st)))
   (method ^:static mpInCb ^boolean [^Object/1 st] (.booleanValue (cast Boolean (aget st 1))))
   (method ^:static mpPush ^void [^Object/1 st ^long kind ^long n ^long size ^boolean major p r e]
     (ExtGc/mpPushSrc st kind n size major p r e 0))
