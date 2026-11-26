@@ -26906,3 +26906,53 @@ held its write end. A timeout's kill was `os.killpg(driver)` alone, which misses
 - Alternatives: the reader on a non-blocking pipe with a select timeout (the rows would end but the orphans would live on
   and keep their memory and their semaphores) and PR_SET_CHILD_SUBREAPER (pyi's os has no prctl; the orphans would still
   need finding) were left. The pipe-holder scan finds every case, even children that left the session.
+
+## 2026-11-26 — py-pickle-heap-1126: test_pickle's heap corruption in the C world, at its cause
+
+The bug: test_pickle's C classes aborted in musl's mallocng ("Fatal Python error: a_crash at 0x0 in the C library
+ctypestest"), at a test that moved from run to run (train 6's eval run: CPicklerTests.test_optional_frames,
+DumpPickle_CLoadPickle.test_recursive_dict, InMemoryPickleTests.test_optional_frames; py-json's: test_recursive_multi,
+test_set_chunking; 568's :pickle-c-gaps row DumpPickle_CLoadPickle.test_optional_frames).
+
+- Reproduced small (train 6's executable d238b3a23ca9117d9cc8, its compiled runtime): libtest_run.py on the 235 tests train 6's
+  first driver run had run before its crash (CChainDispatchTableTests through CPicklerTests.test_optional_frames, the delayed
+  writer's two left out), by bin/pyi run: three runs, two crashes (CPicklerTests.test_optional_frames, test_oob_buffers), each
+  about 3.5 minutes. Each test alone passes.
+- The crash is in a Lib.Call of Go's (malloc, free or realloc: "in the C library", the Lib's guard), not in C's frames. A
+  debugging heap check (PYI_CAPI_HEAPCHECK, local branch py-pickle-heap-dbg, not pushed: every Go malloc, free and realloc of
+  the world through a wrapper checking mallocng's in-band header, the natives' names on a stack, the malloc and free sites
+  paired) found no double free and no free of a freed block on train 6 or on 597's tree: the bad write was not to a block's
+  own header.
+- Two findings followed, both in pyctypes' mirrors (go/arbace/pyctypes/capi_mirror.ae):
+  1. **The cause: a memoryview's handle was a proxy's 24-byte head.** PyMemoryView_GET_BUFFER is a macro, and the C
+     unpickler's READONLY_BUFFER (load_readonly_buffer, Modules/_pickle.c of CPython 3.14.10) reads and writes
+     view.readonly in place, at offset 88 of the PyMemoryViewObject. With 24 bytes in a 32-byte stride, offset 88 is the
+     reserved-size mark of the slot two blocks on, which mallocng's free checks (get_nominal_size's `!*(end-reserved)`): the
+     abort came at whichever later free of that block met the mark. Every protocol-5 out-of-band read-only buffer did it
+     (test_oob_buffers and its kin), and the loaded view stayed writable. A probe (an out-of-band PickleBuffer of bytes loaded
+     with a bytearray as its buffer, 20,000 times, by pyi's AOT): on mac/train-7 the view is writable at the first load
+     (CPython: read-only); with the fix it is read-only every time. Fixed: mirrorKind gives a memoryview the kind 'v' and
+     PyMemoryViewObject's 152 bytes (Include/cpython/memoryobject.h, LP64; hash -1, the view's len, itemsize, ndim and readonly,
+     its buf when the memory is the world's), syncToC and syncFromC taking a readonly C wrote into Go's view, C's write first
+     (to read-only only).
+  2. **Queue 597's list merge leaked the items it took** (found on the way: 597's in-place PyList_SET_ITEM writes are the
+     C unpickler's LIST and Pdata_poplist lists too). Its three-way merge took C's slot into Go's list but left the slot's
+     snapshot stale, so the loop after it held a reference of the mirror's on the item, beside C's stolen one, which nothing
+     gave back. A probe (LIST of two objects, then a GLOBAL whose find_class enters the world again, 200 loads, gc.collect()):
+     on mac/train-7 all 400 objects alive, with the fix 0, CPython 0. Fixed: the slot taken is the slot's synchronized value
+     (no hold), its earlier item given back.
+- Attribution: 597's merge alone (train 6 + its syncToC change) passed the 235 tests once; mac/train-7 (597 and py-breaker
+  merged) with finding 2 crashed on test_pickle whole in each of three runs (1, 1 and 3 crashes: test_recursive_*,
+  test_set_chunking, test_recursive_multi). The memoryview's write was left.
+- The base: mac/train-7 (2dd9a6529: train 6 with 597, py-breaker-1126 and the other Python lanes), so the branch is a
+  fast-forward of train 7 and its measured tree is its head.
+- Alternatives: a smaller fix writing readonly through a native (_pickle.c is CPython's own, unchanged); the debugging heap
+  check as a committed facility (its wrapper touches 56 call sites of the lanes' files: kept local).
+- Measured (mac/train-7 with the two fixes, the branch's head; pyi's AOT, train 6's executable as host, `bin/pyi check --aot
+  --lib-test --fresh --only`, under the small slot, `.tmp/w/m2-run{1,2,3}` in the worktree py-pickle-heap): test_pickle whole
+  three times, no crash: 940, 940 and 939 ok, 73 skipped, 1 timeout each (CPicklerTests'
+  test_framed_write_sizes_with_delayed_writer, :pickle-c-gaps'); the third's one failure is
+  InMemoryPickleTests.test_unpickle_module_race (two threads' loads, one result where two are due; passed in the five other
+  whole runs; its pickle has no list or memoryview). test_copy 81 of 81, test_copyreg 6 of 6, 597's
+  test_xml_etree_c test_late_tail_mix_pi_comments passes. :pickle-c-gaps' test_evil_pickler_mutating_collection and
+  DumpPickle_CLoadPickle.test_optional_frames pass in all three. No record written: test_pickle's eval record is train 7's.
