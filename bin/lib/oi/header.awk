@@ -332,8 +332,11 @@ END {
   # level's one translation process, whose whole run the gate declares at 4 GiB; the light level keeps the class
   # Not in effect (burst 2026-11-23): at the compiled level too the one translation process (o2j cprogs) grew to 45 GB on it in 86
   # minutes under the big lock; the mode waits for o2j to translate a program of that size in bounded memory (gnon = 1 enables it)
+  # (queue 603) the cause: call-form wrote a call's arguments in both its branches, a call nested in an argument doubling at each level
+  # (the GADT values' 36 nested applications of Common.( ** )); with them bound first o2j translates main.ml in 2 s and 0.5 GB, so the
+  # light level runs the mode (aot 1); the compiled level's (aot 2, the host's chain) stays behind gnon until that chain measures it
   gnmode = 0
-  if (gnon && aot == 2 && !hasbuild && hasoptbuild) {
+  if ((aot == 1 || (gnon && aot == 2)) && !hasbuild && hasoptbuild) {
     gnmode = 1; gscript = ""; garg = ""; gout = ""; gens = ""; gro = ""; gall = ""
     for (j = 1; j <= m && gnmode; j++) {
       s = trim(st[j]); if (s == "") continue

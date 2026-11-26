@@ -25627,3 +25627,37 @@ stall after its depth: three workers of four done), statmemprof/bigarray (its de
 ephetest's test7, the suite's exception_comballoc and stop_start_in_callback (deallocations missing), lib-unix/common/test_unix_cmdline
 and cloexec (Unix.execv: OC208 (b) left it to the compiled level), unboxed-primitive-args/test (o2j's translation of its 600 KB of Lambda
 in bounded memory).
+
+## 2026-11-26 — OCaml AOT: the light level's tail after oc-tail (queue 603, VM)
+
+Queue task 603 (branch `603-ocaml-light-tail2` from next `e8e2c1ac3`, oc-tail-1126's merge): the light AOT level's rows oc-tail left
+that are not its speed, each probed alone on stage 0 (doc/ocaml/OCAML-SURVEY.md, "As built: queue 603"). Found and built:
+- The cause common to ephetest's test7, statmemprof/bigarray and the suite's exception_comballoc: stage 0's Java forms interpreter
+  (seed of 2026-11-17 04:15) predates n-java-serial's slot release (arbace/classes/interp.ae's `release!`, 2026-11-17 22:28), so every
+  let binding holds its slot for the frame's lifetime, and oc-tail's clears still carried each call's result past them in a local
+  (`r$`). arbace/o2j.ae's `value-then` passes the value through a two-element array at the light level (the compiled level keeps the
+  local). Alternatives: a runtime helper that returns its first argument (an interpreted call a use: queue 414's frames back);
+  re-seeding so stage 0 releases slots (a re-seed, not this lane's).
+- unboxed-primitive-args' 7.6 GB (45 GB at the compiled level): call-form wrote the arguments in both branches of its arity test,
+  and with-args leaves the leftmost impure argument in place, so a call nested in an argument doubled per level; the GADT values'
+  36 nested `( ** )` applications gave 2^36 forms (a 4.7 KB reduction took 14 GB). An argument that holds a call is bound first and,
+  at the light level, cleared as it is passed (`take-form`; clearing it after the call kept bigarray's bigstring alive through the
+  callee's full_major). main.ml translates in 2 s, 0.5 GB; header.awk's gen mode now runs at the light level (aot 1), the compiled
+  level's still behind `gnon` (the host's chain to measure). The row then fails on the C API (the C's writes into the server's copy of
+  a bigarray): aot-known.edn's c-api entry, the same `:c-api` class as before.
+- stop_start_in_callback: ocamlopt's combined allocation. A tree of makeblocks of simple fields is translated, while a Gc.Memprof
+  profile samples, between `ExtGc/combBegin` and `combEnd` (the outermost tree alone), its samples' callbacks run after the tree is
+  made, as memprof.c runs a combined allocation's. Alternative: the bytecode semantics (Sys.backend_type would be Bytecode: no).
+- parallel/mctest's stall: its last worker's `exit 0` ran in a fiber the second domain resumed; the Exit reached the domain's thread,
+  whose spawn made it the domain's Error result, and the main domain waited for work forever (a reduced mctest, 300 yields a worker,
+  printed its four `done` and never ended). Main/otherExit ends the program from a domain's or a system thread's Exit (System/exit;
+  the batch runner, Main/batch, takes the status as the row's and ends its process after it, status 4). With it and the slots, mctest
+  reaches DEPTH_LIMIT (200,000) in 39 s, or, when the domains share the yields evenly, runs past the CPU limit: every yield is five calls
+  deeper on its handler's thread, the light level making no tail call. It passes with O2J_DEPTH_LIMIT=1000000 in 206 s of CPU.
+  DECISION 603-1 (the user's; recommended (a)): (a) the light level's DEPTH_LIMIT clip raised to 1,000,000 with mctest's CPU cap 310 s,
+  the Stack_overflow rows measured at the next whole run; (b) mctest stays `:light-depth`; (c) tail calls at the light level.
+Records: `bin/oi check --aot --only-list` (31 rows: the lane's four main-corpus rows, oc-tail's moved rows, statmemprof's and
+weak-ephe-final's that finish within the limit) and `bin/oi suite check --aot --only-list` (statmemprof's five suite rows), each one
+whole run with `--record` (the first main run was not recorded from: mctest's timeout kind was not in its known entry yet); the suite
+run found discard_in_callback passing too (the combined allocations), its known entry removed, its `:na` class (the user's, 2026-11-24)
+left for the user. `bin/reap --record`: OCaml AOT 558 / 11 / 40 -> 563 / 11 / 36; `bin/crops-score --record`: 97.91% -> 98.07%.
