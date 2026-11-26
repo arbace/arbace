@@ -12378,4 +12378,9 @@ Operands"), no GCC or clang code. The groups, with the rows each moved to own pa
   std::nullptr_t to an arithmetic type, a cast notation to a pointer to member from an integer, reinterpret_cast of a pointer or
   nullptr_t to a smaller integer (tc1/dr137.C, cpp0x/nullptr04.C, other/conversion1.C).
 
-Bonus: overload/error3.C passes by the explicit rules.
+Bonus: overload/error3.C passes by the explicit rules. Checked by two targeted runs (.tmp/q602): t1, the candidates and 1,115 recorded
+own passes the first rules reach (1,998 files), lost template/friend77.C (a template-id-qualified friend taken as a hidden friend, fixed);
+t2, the candidates and 975 recorded own passes the later rules reach (1,858 files): 0 recorded own passes lost, 56 rows to own pass --
+the 48 above, overload/error3.C among them, and 8 as side effects of the rules: cpp0x/defaulted66.C, cpp0x/lambda/lambda-58566.C,
+lambda-ice15.C, func-args-1.C, lookup/using9.C, parse/error42.C, parse/missing-parens-fixit.C, warn/Waddress-7.C. The record is the
+shared regression's with 601.

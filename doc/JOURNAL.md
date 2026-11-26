@@ -25640,6 +25640,7 @@ inconsistent `auto` return deduction; using-declaration conflicts; single rules 
 a variable template without arguments, calls through function pointers, defaulted copy constructors' parameter, static_cast rules).
 Checks: a base run of the 883 rows (.tmp/q602/dgw-base), targeted run t1 (the candidates plus 1,115 recorded own passes the first rules
 reach, 1,998 files): 31 rows to own pass, 1 recorded pass lost (template/friend77.C: a template-id-qualified friend declared as a hidden
-friend; fixed, probed); t2 (the candidates plus 975 recorded passes the later rules reach, 1,858 files) for the later rules. No record
+friend; fixed, probed); t2 (the candidates plus 975 recorded passes the later rules reach, 1,858 files): 0 recorded own passes
+lost, 56 rows to own pass (the 48 probed and 8 side effects, named in the survey's section). No record
 yet: the coordinator runs one regression over this branch and 601's merged. Alternatives left: the static_assert traits and noexcept
 operands (the evaluator's unsure nodes), definition-time narrowing in templates' signatures, substitution order (DR 1227).
