@@ -25590,3 +25590,13 @@ its cap killed with the message while the job beside it finishes, no group left)
 Tickets queued before the deploy run the earlier copy (one slot for them) until they are requeued. GOMEMLIMIT per job was
 considered and left out: a job's several Go processes would each take the whole declaration. The watchdog stays as a backstop.
 After a reboot the mount is gone: the lock then runs without caps and the slot count must go back to 1 until it is mounted again.
+
+## 2026-11-26 — Rust C6: L2 over the whole closure, slice 1, core (queue 600, VM)
+
+596 showed every case needs its whole closure own (abort.rs's 8,935 defines, 8,299 rustc's, 8,190 never built). This grows L2 over
+it. build-run's lib-unit-run (shared front-end file, two commits) follows the items' callees transitively to the closure's defines
+in the crate's units (LIB_UNIT_L2_TARGETS), through the `#[inline(always)]` callees' calls too; bin/rust-front's build takes
+`test/rust/front/lib-unit-CRATE-targets.txt` by default (abort.rs's closure: the goal is one case all own first; the union of the 73
+cases, 1,482 core defines, was considered and left for later as it doubles the rounds). Rounds of build, inline-keys and export --add
+until no new key (scratch script, logs in .tmp/q600/logs). core: 157 -> 450 of abort's 687 equal; the own tree 688 -> 1,234; abort.rs
+8,299 -> 7,849 rustc's. Details in doc/rust/FRONTEND-SURVEY.md, "As built: C6's L2 over the whole closure, slice 1: core".
