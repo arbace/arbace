@@ -12175,6 +12175,23 @@ DECISION cpp-indep3-1 below; the list .tmp/keep/cpp-indep3-1126/ifndr-candidates
 hand); instantiation's deeper checks (bodies of specializations, aggregate initialization with bases, conversion functions'
 reference bindings, noexcept in function types); GCC's spelling suggestions ("did you mean", 6); the long tail of one-row rules.
 
+The shared regression (the coordinator's decision of 2026-11-26: one run for cpp-indep3 and cpp-def3, in this lane): branch
+`cpp-indep3-1126` with mac/cpp-def3-1126 `a89f09b10` and mac/next `1d92ac402` merged, DECISION cpp-indep3-1 (a) applied (the 104 rows
+into :ifndr-uninstantiated-template, test/cpp/ifndr/) and template/friend58.C into :gxx-only-rules (the user). The run at `9e648b3fd`,
+in the big lock's small slot (HEAVY_MEM_GIB=6, two parts of 2,140 files in turn, 2 threads each: 1,252 s and 1,212 s, peaks 3.0 and
+5.9 GB): next's 3,083 recorded own passes, every clang-only row (1,069), the 128 deferred rows, both lanes' lists and
+cpp23/ext-floating12.C, 4,280 files. Lost 3: other/abstract8.C (its `g(a)` had been answered by a stale "reference to 'a' is
+ambiguous", which this lane's one-namespace rule removed; the call's abstract parameter now checked at the call, [class.abstract]/3),
+diagnostic/static_assert4.C (cpp-def3's needed noexcept-specifier; not a constexpr function's), cpp2a/concepts-pr67774.C (a timeout
+under load). Rerun at `053a0d831` over what the two fixes reach (the files with a constexpr function's noexcept-specifier, a pure
+virtual function or "abstract", and concepts-pr67774.C on one thread; 65 files): every recorded own pass of them passes. Recorded
+from the three work directories in turn (`--judge --record`, the fixes' last), mac/next `eb408fb7f` merged first (no C++ change):
+3,083 -> 3,187 own passes, 0 recorded passes lost; 104 rows own: this lane's 64, cpp-def3's 23, and 17 more clang-only rows the
+record had kept failing from before the lanes' work (other/switch4.C, cpp0x/static_assert8.C, lookup/suggestions1.C, ...). `bin/reap
+--record`: C++ read 6,155 / 0 / 128 (248 n/a) -> 6,178 / 0 / 104 (249 n/a); `bin/crops-score --record`: C++ read independence 0.904
+-> 0.919 (3,187 of 4,175 dg rows own, 320 n/a), independence 98.1% -> 98.4%, completeness 99.5% -> 99.6%; `--judge --strict`,
+`bin/records-check`, `bin/markers-check`: 0 problems.
+
 ## As built: cpp-def3, the read cell's deferred rows: the constant evaluator, templates and single rules (2026-11-26; branch `cpp-def3-1126` from mac/next `0b3174413`)
 
 The read cell at the base: 6,155 pass / 0 by design / 128 deferred (own-diag 127, gcc-own-rules 1), the groups cpp-def2 left
@@ -12240,7 +12257,10 @@ cpp0x/nsdmi-template14.C, cpp0x/overflow1.C, cpp0x/sfinae11.C, cpp0x/udlit-tmpl-
 cpp1y/lambda-generic-variadic2.C, cpp1y/var-templ19.C, cpp2a/concepts-requires5.C, cpp2a/using-enum-5.C, DRs/dr2478.C,
 overload/error8.C, parse/crash67.C, parse/error17.C, template/crash2.C, template/eh2.C, template/nontype13.C, template/redecl5.C,
 template/typedef4.C; cpp23/ext-floating12.C, the read's timeout row, passes alone too (the record's timeout under load). The regression over next's recorded own passes is the one shared with cpp-indep3 (the coordinator, 2026-11-26), which records both
-lanes' rows.
+lanes' rows. Recorded there (cpp-indep3's section, "The shared regression"): the 23 rows own passes, 0 recorded passes lost
+(diagnostic/static_assert4.C, lost to the needed noexcept-specifier rule, fixed: not a constexpr function's, PR c++/92193);
+cpp23/ext-floating12.C timed out alone too on the loaded host (343 s, its 300 s cap), left as recorded; template/friend58.C n/a
+(:gxx-only-rules, the user's decision).
 
 Left, looked at: the constant evaluator's calls through function pointers and generic lambdas' conversions (cpp0x/constexpr-ice20.C,
 cpp1z/constexpr-lambda8.C, constexpr-lambda6.C), a non-aggregate's defaulted default constructor with `this` in a default member

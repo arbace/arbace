@@ -25493,3 +25493,26 @@ verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
     analyzer: 61 pass.
 - For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
   705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
+
+## 2026-11-26 — C++ read: the shared regression of cpp-indep3 and cpp-def3, recorded (branch `cpp-indep3-1126`)
+
+- The coordinator's decision of 2026-11-26: one regression for both lanes, run and recorded here. mac/cpp-def3-1126 `a89f09b10` and
+  mac/next `1d92ac402` merged (survey and journal kept both sides; template.ae's variable template partial specializations keep both
+  lanes' rules), DECISION cpp-indep3-1 (a) and template/friend58.C's :gxx-only-rules applied before the run (the entry above).
+- The run at `9e648b3fd` in the big lock's small slot (HEAVY_MEM_GIB=6; two parts of 2,140 files in turn, 2 threads each, 1,252 s
+  and 1,212 s, peaks 3.0 and 5.9 GB): next's 3,083 recorded own passes, the 1,069 clang-only rows, the 128 deferred rows, both lanes'
+  lists and cpp23/ext-floating12.C (4,280 files). Lost 3, fixed on the rules that lost them: other/abstract8.C (this lane's rule that
+  one namespace's declarations of a variable are no ambiguity removed the stale "reference to 'a' is ambiguous" its `g(a)` had
+  passed by; now [class.abstract]/3's check of an abstract parameter at the call, sema's call-args), diagnostic/static_assert4.C
+  (cpp-def3's needed noexcept-specifier, now not a constexpr function's, PR c++/92193), cpp2a/concepts-pr67774.C (a timeout under
+  load). Rerun at `053a0d831` over what the fixes reach (65 files: a constexpr function's noexcept-specifier, a pure virtual or
+  "abstract", concepts-pr67774.C on one thread): every recorded own pass of them passes. cpp23/ext-floating12.C alone on one thread:
+  343 s, past its 300 s cap on the loaded host, left as recorded (a timeout).
+- mac/next `eb408fb7f` merged (no C++ change), then recorded from p1, p2 and the fixes' run in turn (`bin/repr-cpp dg --front native
+  --judge --record`): own passes 3,083 -> 3,187, 0 recorded passes lost; 104 rows own: cpp-indep3's 64, cpp-def3's 23, and 17 more
+  clang-only rows the record had kept failing from before (other/switch4.C, cpp0x/static_assert8.C, cpp2a/explicit7.C,
+  lookup/suggestions1.C and suggestions2.C, spellcheck-pr77829.C, spellcheck-typenames.C, ...).
+- `bin/reap --record`: C++ read 6,155 pass / 0 design / 128 deferred (248 n/a) -> 6,178 / 0 / 104 (249 n/a), 56 of 56 cells, 0
+  problems. `bin/crops-score --record`: C++ read independence 0.904 -> 0.919 (3,187 of 4,175 dg rows own, 320 n/a), independence
+  98.1% -> 98.4%, completeness 99.5% -> 99.6%. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0
+  problems. Logs kept in /root/arbace/.tmp/keep/cpp-indep3-1126/reg/.
