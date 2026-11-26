@@ -9139,3 +9139,12 @@ PyUnicodeWriterTest.test_widechar, read past b'' by wcslen, fixed by keepBytes' 
   arbace/python/aot.ae), as bin/pyi python's --site.
 - **The world's Expat capsule**: accel_elementtree.c defines XML_COMBINED_VERSION, which its copy of pyexpat.c's table
   tests (undefined, every guarded field was NULL: XMLParser.flush did nothing).
+
+## As built: 597, 594's follow-ups (2026-11-26, the Mac VM, queue 597)
+
+- **The lists' mirrors merge C's in-place writes**: syncToC takes a slot C wrote (PyList_SET_ITEM) since the last
+  synchronization, where Go's item did not change, into Go's list before writing Go's items back, so a World.Call between
+  C's fill and the list's next use no longer zeroes C's slots (test_xml_etree_c's test_late_tail_mix_pi_comments: a
+  Python TreeBuilder subclass's comment factory between _elementtree's two data items).
+- **PyFunction_SetVectorcall**: py.Function.Vectorcall, every call path of a Python function through it when set; the
+  native sets the C vectorcallfunc (test_call's test_setvectorcall rows).

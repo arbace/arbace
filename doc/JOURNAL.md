@@ -24767,3 +24767,26 @@ The user's answers (via the coordinator): 594-1 (a), 594-2 (a), 594-3 (a); the n
   each now fails on the absent name (taken by the class's new patterns) or skips as before, test_buffer's
   test_memoryview_sizeof reaches sys.getsizeof (:sys-getsizeof), test_call's test_setvectorcall reaches the missing
   PyFunction_SetVectorcall native.
+
+## 2026-11-26 — 594's follow-ups: the late tail's Go panic, PyFunction_SetVectorcall (queue 597, VM)
+
+- **test_xml_etree_c's test_late_tail_mix_pi_comments' Go panic** (PYI_PANIC_STACK=1: PyUnicode_Join's str.join over a
+  list item nil, list_join < element_get_text). The cause is pyctypes' list mirror, not C: _elementtree's
+  treebuilder_handle_data makes its second data item's list by PyList_New(2) and fills it by PyList_SET_ITEM in place;
+  before any native used that list again, the comment factory of a Python TreeBuilder subclass ran a C type's call
+  (World.Call), whose syncAllToC wrote every mirror's Go items to C: the list's Go items were still PyList_New's nils, so
+  syncToC zeroed C's two slots (an instrumented run showed both slots zeroed, the stack World.Call's syncAllToC). Fixed in
+  syncToC (go/arbace/pyctypes/capi_mirror.ae): a list slot whose C value differs from the last synchronized one while Go's
+  item is still that one is C's write, taken into Go's list before Go writes it back (a three-way merge). The exact-builder
+  case passed because no Python code ran between the two writes. No world rebuild.
+- **PyFunction_SetVectorcall** (Objects/funcobject.c; _testcapi's function_setvectorcall, Modules/_testcapi/vectorcall.c,
+  CPython 3.14.10): a new field py.Function.Vectorcall, every call of the function through it: Thread.callFunction (the
+  type's call slot), callFunctionV and stackCall (compiled calls), callStack, the evaluator's and AotCallV's inline
+  paths and AotCallMethod's method call; the native sets it to the C vectorcallfunc (vectorcallC). test_call's three
+  test_setvectorcall rows (the plain call, __getattribute__'s skip and deopt): CPython's specialization has no pyi
+  counterpart, the overridden calls are what they check. _testinternalcapi gains SPECIALIZATION_THRESHOLD and
+  SPECIALIZATION_COOLDOWN (ADAPTIVE_WARMUP_VALUE + 1 and ADAPTIVE_COOLDOWN_VALUE + 1, Include/internal/pycore_code.h),
+  the loops' counts those rows run (their first whole run stopped on the absent name).
+- Alternatives: for the panic, refreshing Go's list on PyList_SET_ITEM (a macro: C writes the slot inline, no native
+  sees it); for the vectorcall, a synthetic code object for the function (frames and tracing would see it).
+- Measured (the AOT method, ARBACE_HOST_EXE train 6's arm64 stage 0): test_xml_etree_c and test_call whole; no record.
