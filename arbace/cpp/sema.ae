@@ -13572,6 +13572,33 @@
 
 (defn- full [e] {:s :expr :e e})
 
+(defn- cx-decomp-condition!
+  "cpp-def (the checker): C++26's structured binding declaration as a condition (P0963R3, [stmt.pre]/? with [dcl.struct.bind]),
+  an extension before (GCC's pedwarn): the decision variable is the whole object, contextually converted to bool (`:bool`, an if
+  or a while) or converted to an integral or enumeration type (`:switch`); an initializer of array type takes none, GCC's \"array
+  initializer for structured binding declaration in condition\"; a class of the unit with no conversion function, or (a switch)
+  none but explicit ones, GCC's \"could not convert '<structured bindings>' from 'S' to 'bool'\", \"switch quantity not an
+  integer\" (cpp26/decomp9.C). The DeclStmt `cvar`."
+  [ctx cvar what]
+  (when (checking?)
+    (when-let [d (first (filter #(= "DecompositionDecl" (:kind %)) (kids cvar)))]
+      (let [init (first (remove #(= "BindingDecl" (:kind %)) (kids d)))
+            a (when init (try (binding [*unevaluated* true] (analyze ctx init)) (catch arbace.lang.ExceptionInfo _ nil)))
+            t (when (and a (map? (:ty a))) (abi/unq (abi/non-ref (:ty a))))
+            err (fn [& m] (throw (ex-info (apply str "codegen: " m) {:codegen/refused :decomp :cx/node d})))]
+        (cond
+          (nil? t) nil
+          (abi/arr? t) (err "array initializer for structured binding declaration in condition")
+          (abi/class? t)
+          (let [c (abi/cls (:id t))
+                convs (keep #(let [f (fnd %)] (when (= :conv (:kind f)) f)) (:methods c))]
+            (when (and (:complete c) (not (:tmpl c)) (not (:targs c)) (not (:defining c)) (empty? (:bases c)) (not (:union c)))
+              (case what
+                :bool (when (empty? convs) (err "could not convert '<structured bindings>' from '" (:name c) "' to 'bool'"))
+                :switch (when (every? :explicit convs) (err "switch quantity not an integer"))
+                nil)))
+          :else nil)))))
+
 (defn- cond-of [ctx n]
   (to-bool (analyze ctx n)))
 
@@ -13784,6 +13811,7 @@
                    [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
                    [cvar ks] (if (:hasVar n) [(first ks) (subvec ks 1)] [nil ks])
                    init-s (when init (stmt c init))
+                   _ (when cvar (cx-decomp-condition! c cvar :bool))
                    cvar-s (when cvar (stmt c cvar))
                    cn (first ks)
                    cn (if (and cvar (nil? (get-in cn [:referencedDecl :name])))
@@ -13936,6 +13964,7 @@
                    {:s :asm :ins ins :clobbers cl}))
     "SwitchStmt" (let [c (block-ctx ctx) ks (vec (:inner n))
                        [init ks] (if (:hasInit n) [(first ks) (subvec ks 1)] [nil ks])
+                       _ (when (:hasVar n) (cx-decomp-condition! c (first ks) :switch))
                        _ (when (:hasVar n) (fail :stmt "a switch condition's declaration"))
                        e (rv (class->scalar c (analyze c (first ks))))
                        pt (promote-type (:ty e))]
