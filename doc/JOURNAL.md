@@ -24809,3 +24809,49 @@ The user's answers of 2026-11-26 (through the coordinator) to py-final-1126's re
   spawn's test_manager whole (the coordinator's row: WithManagerTestPool.test_release_task_refs, the ten CountedObjects alive
   after `del objs; gc.collect()`) wait for the big lock (`.tmp/w/run34.sh`, `.tmp/w/run5.sh`).
 - Ready for the train: `py-final-1126` HEAD.
+
+## 2026-11-26: Python, py-breaker lane: the eval breaker at a compiled backward jump; the C world's deallocations in gc.collect()
+
+The burst's lane for two compiled-level failures train 7 must pass, found by the Mac's queue 595 and 598 on train 6's runtime
+(mac/train-6 `025065fd1`): test_threading's InterruptMainTests.test_can_interrupt_tight_loops, and test.test_multiprocessing_spawn
+.test_processes' WithProcessesTestProcess.test_close and test_lose_target_ref. Branch `py-breaker-1126` from mac/py-final-1126
+(`944281aaa`, train 6 plus py-final's held-object fixes). Studied: CPython 3.14.10 (the pinned tarball): Python/ceval.c and
+Python/bytecodes.c (JUMP_BACKWARD's CHECK_EVAL_BREAKER, JUMP_BACKWARD_NO_INTERRUPT), Python/ceval_gil.c
+(_Py_HandlePending), Lib/test/test_threading.py, Lib/test/_test_multiprocessing.py, Lib/multiprocessing/{process,
+popen_spawn_posix,reduction}.py, Modules/_pickle.c (Pickler_dealloc, PyMemoTable_Del).
+
+- (1) Cause: the two leads were one. Compiled code (arbace.python.aot) checked only AotTracing at its block starts; a backward
+  jump was a bare goto, so a loop with no call never reached the eval breaker, the GIL was never dropped on another thread's
+  request (598's lead) and no pending signal was taken (595's): the worker's 100,000,000 iterations ran before the main thread
+  could set `cont[0] = False`. The loop (eval.go) checks the breaker at JUMP_BACKWARD, as CPython does. Built: arbace.python.aot's
+  `breaker`, emitted for a :jump to an instruction at or before its own (pyi's flow pass makes every backward edge a :jump,
+  fl-normalize, as CPython's codegen) in both generators, in the register generator after the block's locals are written back
+  (the target is a block start, the whole stack in the frame); `py.AotBreaking` (one atomic load, inlined) and `py.AotBreak`
+  (handleEvalBreaker, its error raised at the jump with Lasti the jump's) in go/arbace/py's aot.go. Alternatives: the check at
+  every block start beside AotTracing (also on forward edges, more loads than CPython's points); handing the frame to the loop
+  on a set breaker (AotToLoop's way: every GIL switch would leave compiled code for the rest of the frame).
+- Measured (`bin/pyi aot`, train 6's executable `d238b3a23ca9117d9cc8` as the tools' host, the worktree's runtime): a probe of
+  the test's loop and of signals into tight loops (a SIGALRM by setitimer into `while not got: n += 1` and `while not got2:
+  pass`): before, no output within 400 s (the spin never ends); after, `interrupted True 0.01s`, both signals taken. The tight
+  loop's cost, 20,000,000 iterations, best of 5 runs each, interleaved before/after binaries on the loaded host: `while i < n:
+  i += 1` 29.5 -> 30.5 ns, `for i in range(n): s += i` 46.5 -> 46.5 ns, `while i: i -= 1` 33.3 -> 34.4 ns (within the runs'
+  noise, 29.5-34.1 ns for the same binary).
+- (2) Cause: not the compiled code (the same on the compiled executable's loop, PYI_AOT_LOOP=1) but the C _pickle (queue 568,
+  CPython's Modules/_pickle.c in the C world). pickle.dumps(a) left `a` alive after `del a; gc.collect()` (the pure
+  pickle._Pickler did not, nor clear_memo()): the Pickler is C-born, Go collected it, and its tp_dealloc, which gives back the
+  references its memo holds, waited for the C world's next entry (pyctypes' reapDead in capiEnter). gc.collect() never entered
+  the world, so whatever was pickled stayed alive; spawn's Popen._launch pickles the Process and its target and arguments
+  (test_close's Process, test_lose_target_ref's DummyCallable). One more C call before gc.collect() freed them. Built: py's
+  `ExtReap` hook in finalize.go's rounds (finRounds: once before them and after each round's collection, a round that
+  deallocated something going on to the next, whose collection finds what it let go of), set by pyctypes to `reapAtCollect`
+  (world.go: the C-born objects Go collected deallocated in an entry of their own, capiEnter's reapDead and capiLeave's release
+  of the handles they held; nothing inside a C entry). Alternatives: reaping in the finalizer goroutine (C code off the GIL's
+  thread); a C call in gc.collect's Python (a wasted entry when nothing is dead). Not touched: the world's build (py-accel's).
+- Measured (the same host and runtime): pickle.dumps, Pickler(...).dump, a subclass, ForkingPickler and reduction.dump all
+  free the pickled object at gc.collect() (before: all held; the control, clear_memo, freed before and after); the spawn probes
+  (a Process started, joined, closed, deleted; the test's sequence with assertRaises; the target's DummyCallable): every one dead
+  after gc.collect(), compiled and on the loop (before: held).
+- The lane's whole-module run (`bin/pyi check --aot --lib-test --fresh --only`: test_threading and
+  test.test_multiprocessing_spawn.test_processes whole, the compiled launcher's children, under the big lock as a small job)
+  was queued behind the lock (nine tickets) at this entry; nothing recorded (train 7 records). Ready for the train:
+  `py-breaker-1126` HEAD.
