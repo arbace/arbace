@@ -323,6 +323,9 @@
 ;; error type, so that later uses of it say nothing; here the declaration is gone, and a later refusal whose message quotes such
 ;; a name, or whose node's text names it, is the dropped declaration's cascade: not reported (cx-poisoned?).
 (def ^:dynamic *cx-dropped* nil)
+;; cpp-def2: the names of the main file's declarations the native parser declined (arbace.repr.cpp.diag's sema-errors over a unit
+;; with syntax errors, as GCC goes on past them): dropped from the start, so that their uses' refusals are their cascade.
+(def ^:dynamic *cx-dropped-seed* nil)
 
 (defn cx-recoverable?
   "Queue 526: a refusal the checker recovers from at a declaration: the slice's or the program's (:codegen/refused, a constant
@@ -9597,7 +9600,14 @@
         lk #(if (or g (seq q))
               (lookup-qualified (:scope ctx) (conj q nm) g)
               (lookup (:scope ctx) nm))
-        es (lk)
+        ;; (cpp-def2, the checker: a qualifier naming a class template's specialization the templates found surely without a
+        ;; definition, the instantiation's :cx/sure-incomplete -- `A<int>::i` with A only declared -- [basic.lookup.qual]/1's
+        ;; complete class, GCC's "incomplete type 'A<int>' used in nested name specifier"; template/crash99.C)
+        es (try (lk)
+                (catch arbace.lang.ExceptionInfo x
+                  (if (and (checking?) (seq q) (:cx/sure-incomplete (ex-data x)) (not (cx-subst?)) (not (:cx/node (ex-data x))))
+                    (fail :incomplete "incomplete type '" (str/join "::" q) "' used in nested name specifier")
+                    (throw x))))
         es (if (and (empty? q) (implicit-alloc-fns nm) (not (.containsKey ^java.util.HashMap (:names *root*) (str " implicit " nm))))
              (do (implicit-alloc! nm) (lk)) es)
         ;; class members found through a class's scope keep their class
@@ -9625,6 +9635,10 @@
           ;; (queue 484: a qualifier naming a class not defined, [basic.lookup.qual]/1's complete-class requirement,
           ;; [expr.prim.id.qual]: `A::g()` with A only declared, expr/member-of-incomplete-type-1.C)
           (and c (cx-incomplete-cls qt))
+          (fail :incomplete "incomplete type '" (:name c) "' used in nested name specifier")
+          ;; (cpp-def2: a class template's specialization the templates found surely without a definition here, :cx-sure-incomplete,
+          ;; [temp.inst]/2 with [basic.lookup.qual]/1: `A<int>::i` with A only declared, template/crash99.C)
+          (and c (checking?) (:cx-sure-incomplete c) (not (:complete c)) (not (dt-dependent? (:targs c))))
           (fail :incomplete "incomplete type '" (:name c) "' used in nested name specifier")
           (and en (:name en) (pos? (.size ^java.util.HashMap (:names (:scope en)))))
           (fail :name "unknown name " nm ": no member of the complete class " (:name en))
@@ -15565,7 +15579,7 @@ protected:
   [nodes proot ^String src]
   (let [root (new-scope :ns nil :path [])
         ;; (queue 526: the checker's refusals that follow from a dropped declaration not reported, cx-poisoned?)
-        dropped (when (checking?) (atom #{}))
+        dropped (when (checking?) (atom (set *cx-dropped-seed*)))
         h0 *on-refusal*]
   (binding [*cx-dropped* dropped
             *on-refusal* (if dropped (fn [e n] (when-not (cx-poisoned? e n) (h0 e n))) h0)

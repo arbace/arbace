@@ -821,6 +821,8 @@
     (when-let [f ((resolve 'arbace.cpp.sema/local-include-file) file)]
       (line-starts (latin1 (.getPath ^java.io.File f))))))
 
+(declare declined-name)
+
 (defn sema-errors
   "The code generator's Sema's errors over the unit `u` (parsed with the headers in full) of the text `src`."
   [u starts ^String src ^String main]
@@ -914,7 +916,22 @@
     ;; then a failing :crash with its message (arbace.repr.cpp.dg/read-own), never an acceptance. CP329 (a): past the
     ;; deadline the analysis unwinds and the read is a :timeout.
     (try
-      (with-bindings {at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))
+      (with-bindings {(resolve 'arbace.cpp.sema/*cx-dropped-seed*)
+                      ;; (cpp-def2: a unit with declined declarations, analyzed as GCC goes on past its syntax errors: their names
+                      ;; dropped from the start, arbace.cpp.sema/*cx-dropped-seed*)
+                      (when (pos? (long (:declines u 0)))
+                        (let [acc (java.util.HashSet.) named (java.util.HashSet.)]
+                          (walk-nodes (fn [x _]
+                                        ;; (a name another declaration declares stands: not the declined one's alone)
+                                        (when (and (string? (:name x)) (string? (:kind x)) (str/ends-with? (:kind x) "Decl"))
+                                          (.add named (:name x)))
+                                        (when (= "NativeDecline" (:kind x))
+                                          (let [b (get-in x [:range :begin :offset]) e (get-in x [:range :end :offset])]
+                                            (when (and b e (= main (or (get-in x [:range :begin :file]) main)) (<= 0 (long b) (long e) (dec (.length src))))
+                                              (when-let [nm (declined-name (subs src (long b) (inc (long e))))] (.add acc nm))))))
+                                      (:nodes u) nil)
+                          (set (remove #(.contains named %) acc))))
+                      at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))
                       icw (boolean (some #{"-Winvalid-constexpr"} (concat (:args u) *driver-args*)))
                       ice (boolean (and (some #{"-pedantic-errors" "-Werror=invalid-constexpr" "-Werror"} (concat (:args u) *driver-args*))
                                         (not (some #{"-Wno-invalid-constexpr" "-Wno-error=invalid-constexpr"} (concat (:args u) *driver-args*))))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u)))
@@ -8384,8 +8401,12 @@
                       :when (re-find #"^[ \t]*#[ \t]*[0-9]" (subs src a z))]
                   {:line l :col 1 :kind :error :rule :pp :msg "style of line directive is a GCC extension"}))
           sema (concat lms (mapcat (fn [f] (f u starts src main)) @checks)
-                       ;; (a unit the parser declined a construct of is not analyzed: the code generator's refusal)
-                       (when (and sema? (or (zero? (long (:declines u 0))) (System/getenv "REPR_CPP_SEMA_DECLINED"))) (sema-errors u starts src main)))
+                       ;; (cpp-def2: a unit the parser declined a construct of is analyzed too, as GCC goes on past a syntax error
+                       ;; (the GCC manual's error recovery: the rest of the file checked, a declaration that failed to parse left
+                       ;; out), the declined declarations' names dropped from the start, sema-errors' *cx-dropped-seed*; before,
+                       ;; not analyzed: REPR_CPP_SEMA_DECLINED=0)
+                       (when (and sema? (or (zero? (long (:declines u 0))) (not= "0" (System/getenv "REPR_CPP_SEMA_DECLINED"))))
+                         (sema-errors u starts src main)))
           ds (->> (concat pps syn sema) (sort-by (juxt :line :col)) vec)
           ;; cpp-rind (2026-11-24): "used but never defined" is the symbol table's, built only from a unit without errors (an erroneous
           ;; call refers to nothing): :odr-internal dropped when the unit has another error (addr_builtin-1.C's func_arg)
