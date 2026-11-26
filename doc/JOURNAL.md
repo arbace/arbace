@@ -25600,3 +25600,10 @@ in the crate's units (LIB_UNIT_L2_TARGETS), through the `#[inline(always)]` call
 cases, 1,482 core defines, was considered and left for later as it doubles the rounds). Rounds of build, inline-keys and export --add
 until no new key (scratch script, logs in .tmp/q600/logs). core: 157 -> 450 of abort's 687 equal; the own tree 688 -> 1,234; abort.rs
 8,299 -> 7,849 rustc's. Details in doc/rust/FRONTEND-SURVEY.md, "As built: C6's L2 over the whole closure, slice 1: core".
+
+## 2026-11-26 — Rust C6: L2 over the closure, slice 2, alloc (queue 600, VM)
+
+alloc's slice: abort.rs's 296 alloc defines as targets, the rounds exporting core's wanted definitions beside alloc's; then the
+instances taken by reference (mono/unit-refs, shared mono.ae; build-run's L2 follows them, shared build_run.ae) for a second pass.
+alloc 210 of 296 equal; own tree 1,234 -> 1,447; abort.rs 7,849 -> 7,639 rustc's. The compare, the own tree's check and own-std
+run once, at the slice's end (the user's 2026-11-26 line: no checks within the rounds).
