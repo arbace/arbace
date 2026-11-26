@@ -809,6 +809,17 @@
                                            (get-in tp [:type :qualType]) "' because string literals can never be used in this context")))))
               _ (when (and tmpl (= :expr (:k a)) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b))
                   (nttp-arg-check! p a (get (vec (:tps tmpl)) (count out))))
+              ;; (queue 601: [temp.arg.template]/3, a template template parameter whose own template-parameter-list is erroneous
+              ;; (`template<void> class`, a pack not last) matches no argument: GCC's "type/value mismatch at argument N in
+              ;; template parameter list", template/void14.C's `A<T>`; and a template-id of such a parameter is invalid, GCC's
+              ;; "template argument N is invalid", cpp0x/vt-34052.C's `U<int>`)
+              _ (when (and tmpl (not (skim? p)) (main-tok? p b))
+                  (let [tp (get (vec (:tps tmpl)) (count out))]
+                    (cond (:bad-ttp tmpl)
+                          (soft-diag! p b (str "template argument " (inc (count out)) " is invalid"))
+                          (and (map? tp) (:_badttp tp))
+                          (soft-diag! p b (str "type/value mismatch at argument " (inc (count out)) " in template parameter list for '" (:name tmpl) "'"))
+                          :else nil)))
               a (if (accept! p "...") (assoc a :pack true) a)
               out (conj out a)]
           (cond (accept! p ",") (recur out)
@@ -6845,6 +6856,9 @@
                    (when nm (str nm (when pack "...")))]))
               (is? p "template")
               (let [_ (adv! p) _ (expect! p "<")
+                    ;; (queue 601: the errors its own parameter list had, counted: a template template parameter whose list is
+                    ;; erroneous, :_bad, matches no argument and names no valid template-id, template.ae's targs rule below)
+                    nd0 (when-let [^ArrayList d (stv p DIAGS)] (.size d))
                     ;; (queue 518: its own parameters kept, :_tparams, for the checker's match of a template template argument)
                     ;; (cpp-tpl2: and its own requires-clause, parsed in its parameters' scope, :_treq, a private key no tree
                     ;; check reads: the checker's match of a template template argument's constraints)
@@ -6885,11 +6899,16 @@
                                                 (when-let [c (angle-close p (inc di))] (let [^T n (tok-at p (inc (long c)))] (or (t= n ">") (t= n ",")))))))
                               (soft-diag! p di (str "invalid use of type '" (ts (cur p)) "' as a default value for a template template-parameter")))))
                         (skip-targ! p)))
-                    (when nm (sc/declare! (scope p) {:k :type :name nm :tmpl true :tparam true}))
+                    (let [bad (boolean (and nd0 (not (skim? p)) (main-tok? p b)
+                                            (when-let [^ArrayList d (stv p DIAGS)]
+                                              (some (fn [i] (let [[o why] (.get d (int i))] (and (not (str/starts-with? (str why) "pedantic")) (<= (.-o (tok-at p b)) (long o) (.-o (tok-at p (ix p)))))))
+                                                    (range (long nd0) (.size d))))))]
+                    (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tmpl true :tparam true} bad (assoc :bad-ttp true))))
                     ;; (round 54, fourth pass: a pack's fact and the name's place kept apart, :_pack and :_loc, for the
                     ;; template-heads' comparison alone)
-                    [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {:_tparams (vec tps)} nm (assoc :name nm :_loc (loc p ni)) pack (assoc :_pack true) treq (assoc :_treq treq)))
-                     (when nm (str nm (when pack "...")))]))
+                    [(node p "TemplateTemplateParmDecl" b (last-ix p) (cond-> {:_tparams (vec tps)} nm (assoc :name nm :_loc (loc p ni)) pack (assoc :_pack true) treq (assoc :_treq treq)
+                                                                                bad (assoc :_badttp true)))
+                     (when nm (str nm (when pack "...")))])))
               ;; a type-constraint: a concept's name (with arguments) before the parameter's
               ;; (n-cpp-concepts: not before auto or decltype(auto), a constrained placeholder's non-type parameter,
               ;; [temp.param]/1's parameter-declaration with [dcl.spec.auto.general]/1: `template<Type auto N>`)
