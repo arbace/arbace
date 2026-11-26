@@ -9062,3 +9062,67 @@ The classes of 557's table that 557b did not take, by size, each built or given 
 - Records: test_audit, test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with written whole
   from the run whose children ran on the compiled launcher (557b-1 (a)): 12 methods now pass, 0 regressions; the eval cell
   40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279.
+
+## As built: 594, _testcapi's rows and the C API's behaviour (2026-11-26, the Mac VM, queue 594)
+
+The classes `:testcapi` (24), `:testcapi-behaviour` (43), `:extension-subinterp-check` (5), `:c-accelerator-gaps` (1),
+`:pickle-c-gaps` (1) and `:elementtree-c` (6) at train 6 (025065fd1), read against train 3's record and CPython 3.14.10's
+sources; built in go/arbace/pyctypes (the new capi_fatal.go and the files named) and go/arbace/py, one field and one case
+of go/arbace/crt:
+
+- **Py_FatalError, _Py_FatalErrorFunc** (Python/pylifecycle.c's fatal_error): "Fatal Python error: PREFIX: MSG", the
+  runtime's state, the threads' tracebacks (faulthandler's dump), _Py_DumpExtensionModules' list (sys.modules' modules of a
+  PyModuleDef, the built-in ones too, less sys.stdlib_module_names) and its count, then abort() (py's ExtFatalError).
+- **Py_BEGIN_ALLOW_THREADS**: PyEval_SaveThread gives the C thread's state up until PyEval_RestoreThread (PyGILState_Ensure
+  takes it again, PyGILState_Release(UNLOCKED) gives it back); PyThreadState_Get and the error setters called without it are
+  PyThreadState_Get's fatal error (test_no_FatalError_infinite_loop).
+- **PYTHONMALLOC's debug hooks** (Objects/obmalloc.c, debug, malloc_debug, pymalloc_debug, mimalloc_debug): RAW's and MEM's
+  blocks laid out as CPython's (the size, the API id, the FORBIDDENBYTE pads, CLEANBYTE data, DEADBYTE once freed), checked at
+  free and realloc (_PyMem_DebugCheckAddress: the bad ID, the leading and the trailing pad, the block dumped as
+  _PyObject_DebugDumpAddress dumps it), MEM's and OBJ's calls without the thread state the fatal error of
+  _PyMem_DebugCheckGIL. OBJ's blocks keep the world's layout (pyi's C objects are made and freed through it).
+- **raise() of the C world**: a signal the world leaves at SIG_DFL is the process's: crt's Sys.HostSignal (new) hands it to
+  py's ExtRaiseSignal, which trips a signal with a Python handler as CPython's C handler does inside raise; a generator
+  sent into after a yield raises its RESUME's eval-breaker error in its own frame (runResumed), so
+  raise_SIGINT_then_send_None's KeyboardInterrupt is the innermost generator's (bpo-30039).
+- **Types**: PyType_GetFlags is tp_flags as C reads them (CPython's for the built-in types); a class over object alone has
+  INLINE_VALUES, MANAGED_DICT and MANAGED_WEAKREF; HAVE_VERSION_TAG is set on no type (3.14); a class inherits
+  HAVE_VECTORCALL from its C base unless it defines `__call__` (inherit_slots), and `__call__` set on a C type clears it
+  there and calls the new `__call__` (update_one_slot), the classes over it refilled (py's ExtTypeExtraFlags,
+  ExtTypeAttrSet).
+- **Objects**: PyFunction_SetClosure takes any tuple (`__closure__` gives it); PyNumber_InPlacePower's three-argument form
+  tries `__ipow__` without the modulo first; PyObject_ClearManagedDict empties a class instance's dict;
+  PyUnstable_Object_ClearWeakRefsNoCallbacks; object() refuses weak references; slot_tp_descr_get calls `__get__` unbound
+  with three arguments (bpo-25750); `_io._BytesIOBuffer` is _io's attribute and refuses the obsolete NULL view.
+- **The C world's memory**: a bytes argument's copy (keepBytes) is zeroed a wchar_t past its data (wcslen over b''), and
+  PYI_PANIC_STACK=1 prints a Go panic's stack (debugging).
+- **Weak references to C-born objects** (py's ExtFinTrackable): a C type's instance is tracked as pyi's own objects are,
+  so its weak references no longer hold it and their callbacks run once Go collects it (_elementtree's test_weakref).
+- **Strings**: PyUnicode_WriteChar is capi_unicode.go's again (py-accel's copy had shadowed its checks), PyUnicode_FromWideChar
+  refuses a size below -1, a str mirror's state.interned (immortal static for '' and the latin-1 characters, mortal for
+  sys.intern's), chr() and PyUnicodeWriter_Finish give the latin-1 characters' singletons.
+- **Subinterpreters**: `_imp._override_multi_interp_extensions_check` keeps its override per interpreter (the main one
+  refuses it); the C world's loader refuses a single-phase module, and a multi-phase one by its Py_mod_multiple_interpreters,
+  in a subinterpreter that checks ("module X does not support loading in subinterpreters"); a subinterpreter's binascii
+  has its own Error and Incomplete; tstate->context is the thread's current context, cleared when C clears it, and a
+  context entered by a thread with none returns it to none.
+- **_posixsubprocess.fork_exec** converts the executable list first, as _PySequence_BytesToCharpArray (its size, then each
+  item by PySequence_GetItem).
+
+Measured (judged, not recorded; the AOT method on train 6's runtime with this branch's, `bin/pyi check --aot --lib-test
+--only`, lib-dynload on PYTHONPATH as bin/pyi python puts it on sys.path; .tmp/q594/p/): the six classes' 80 rows, then the
+touched modules whole (test_capi, test_call, test_descr, test_generators, test_context, test_weakref, test_xml_etree_c,
+test_binascii, test_funcattrs, test_builtin, test_importlib, test_import, test_subprocess, test_datetime and test_pickle's row:
+5,449 methods, 4,629 pass): against train 3's record 123 rows it does not pass pass (this stream's 35 of the six classes, test_importlib's extension tests with lib-dynload, py-capi-1125's and other trains' fixes the record predates), 0 regressions of the change (the record's passes that do
+not pass: test_datetime's twelve zoneinfo rows, the VM has no tzdata; test_importlib's test_nonmodule_cases, whose `-I` child
+ignores PYTHONPATH and so lacks lib-dynload, as only this measure's method has it; test_capi's
+PyUnicodeWriterTest.test_widechar, read past b'' by wcslen, fixed by keepBytes' padding and passing since).
+
+| class | rows | pass | moved (n/a by the class's rule) | left |
+|---|---|---|---|---|
+| :testcapi | 24 | 1 | 3 to :skipped-by-both | 20, DECISION 594-1 |
+| :testcapi-behaviour | 43 | 29 | 6 to :capi-refcounts, 3 to :finalization | 5, DECISIONs 594-1, -2, -3 |
+| :extension-subinterp-check | 5 | 2 | | 3, DECISION 594-1 |
+| :c-accelerator-gaps | 1 | | | 1, DECISION 594-1 |
+| :pickle-c-gaps | 1 | 1 | | |
+| :elementtree-c | 6 | 2 | | 4 (XMLParser.flush, the late tail's panic) |

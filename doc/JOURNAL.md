@@ -24683,3 +24683,51 @@ where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No 
 differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
 reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
 compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
+
+## 2026-11-26 — pyi: _testcapi's rows and the C API's behaviour (queue 594, VM)
+
+Branch 594-py-testcapi on origin/train-6 (025065fd1), the user's brief via Arbace (Python to 100% in train 7). The classes
+:testcapi (24), :testcapi-behaviour (43), :extension-subinterp-check (5), :c-accelerator-gaps (1), :pickle-c-gaps (1) and
+:elementtree-c (6) of test/python/divergences.edn, read row by row against train 3's record
+(test/python/check-lib-test-linux-amd64.edn) and CPython 3.14.10's sources (the tarball REPR_PYTHON_SRC pins: Lib/test/test_capi/,
+test_call.py, test_descr.py, test_generators.py, test_tracemalloc.py, test_importlib/test_util.py, test_import/__init__.py;
+Modules/_testcapimodule.c, Modules/_testcapi/{mem,unicode,watchers,heaptype,vectorcall}.c, Modules/_testinternalcapi.c;
+Objects/obmalloc.c, typeobject.c, funcobject.c, unicodeobject.c, weakrefobject.c; Python/pylifecycle.c, import.c, errors.c;
+Modules/_posixsubprocess.c, _elementtree.c, Modules/expat/xmlparse.c). The runtime printed by bin/pyi runtime print, edited as
+Go, read back (go/arbace/py and go/arbace/pyctypes by bin/pyi runtime read's own steps for those two packages,
+.tmp/q594/read-fast.sh; go/arbace/crt's one field and one case edited as forms); measured by the AOT method
+(bin/pyi check --aot --lib-test --only, the drivers compiled with the checkout's runtime), no record (train 7 records).
+
+Part 1 (4c8e4e1b2), classification only: :testcapi's "need _testcapi" anchored, so the three skips CPython's release build makes
+too (test_object's decref_freed_object and negative_refcount, Py_REF_DEBUG's; test_subprocess's test_stopped, W_STOPCODE, which
+musl's sys/wait.h lacks) are :skipped-by-both's; six rows to :capi-refcounts and three to :finalization by those n/a classes'
+own rules (reference counts and their moment; tp_finalize at del, a weak reference dead right after its statement).
+
+Part 2, the runtime (doc/python/PYTHON-SURVEY.md, "As built: 594"): go/arbace/pyctypes' new capi_fatal.go (Py_FatalError
+and _Py_FatalErrorFunc as pylifecycle.c's fatal_error with _Py_DumpExtensionModules; the thread state Py_BEGIN_ALLOW_THREADS
+gives up and PyThreadState_Get's fatal error without it; PYTHONMALLOC's debug hooks as obmalloc.c lays and checks the blocks;
+tp_flags' HAVE_VECTORCALL across classes over C types and `__call__` set on a C type; tstate->context;
+PyUnstable_Object_ClearWeakRefsNoCallbacks), and in pyctypes PyType_GetFlags (CPython's flags; INLINE_VALUES and the
+managed flags of a plain class; no HAVE_VERSION_TAG), PyFunction_SetClosure's any tuple, PyNumber_InPlacePower's __ipow__
+first, PyObject_ClearManagedDict of a class instance, PyUnicode_WriteChar (capi_unicode.go's again: py-accel's copy in
+capi_accel.go had shadowed its checks), FromWideChar's negative size, state.interned, PyUnicodeWriter_Finish's
+singletons, the loader's subinterpreter check (single-phase; Py_mod_multiple_interpreters), _BytesIOBuffer's tp_alloc and
+NULL view, keepBytes' wchar_t padding, raise() of a SIG_DFL signal handed to py (crt's new Sys.HostSignal); in go/arbace/py
+ExtRaiseSignal, runResumed (a generator sent into after a yield raises its RESUME's eval-breaker error in its own frame, one
+suspended at a yield-from none: RESUME_AFTER_YIELD_FROM), ExtFatalError, slot_tp_descr_get's unbound three-argument
+__get__, object() not weakrefable, ExtClearWeakRefsNoCallbacks, ExtFinTrackable (a C-born object tracked for its weak
+references), chr()'s latin-1 singletons, ClosureTuple, fork_exec's executable list first (_PySequence_BytesToCharpArray),
+_imp._override_multi_interp_extensions_check per interpreter, a subinterpreter's own binascii.Error, a context entered by a
+thread with none returning it to none, _io._BytesIOBuffer in _io's namespace, PYI_PANIC_STACK. Measured by the AOT method
+(the 80 rows, then the touched modules whole; logs .tmp/q594/p/): 35 of the 80 pass, 12 moved to n/a classes by their rules,
+the rest DECISIONs 594-1 (_testinternalcapi, 25 rows), 594-2 (invalid strings, sys.getsizeof: 3), 594-3 (the args tuple: 1)
+and :elementtree-c's four (XMLParser.flush gives no events through the world's Expat, reproduced outside the test, cause not
+found; the late tail's Go panic). No regression of the change in the touched modules against the record (test_datetime's
+zoneinfo rows: no tzdata on the VM; test_importlib's test_nonmodule_cases: the measure's PYTHONPATH, which its -I child
+ignores; test_widechar fixed in the round).
+
+Alternatives considered: _testinternalcapi built now (the brief's "where a test needs it"): left to DECISION 594-1, since an
+importable module re-judges 258 n/a rows over about twenty modules (test.support's helpers among its users); the C world's
+raise() routed by a crt hook (HostSignal) rather than by installing pyi's Python handlers into the world's action table (the
+table is the C program's: its own sigaction must still win); tstate->context taken back at the outermost C exit, not after
+the next native (clear_context_stack reads it after PyThreadState_Get and before any other native).
