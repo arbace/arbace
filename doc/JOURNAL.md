@@ -24123,3 +24123,19 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
 - D2 (a): a new n/a class `:misplaced-expectation` for an expected error GCC's own test marks as misplaced: gxx-dg/template/typedef39.C (its
   comment: the error "should really be on this line", in the other template). (b), keeping it deferred, rejected: matching it would copy the
   misplacement.
+
+## 2026-11-26: the by-design review (the user)
+
+The user reviewed every by-design class still counted against completeness (bin/reap's cells of Java, Python, C++ and OCaml):
+- Java, n/a (out of both denominators): :classloading (no class loader: S4), :jvm-tools (the java launcher and the jar tool), :memory-limit
+  (no -Xmx heap limit), :j2g-reflection (caller-sensitive access checks; Arbace's reflection is lenient). Alternatives: keep by design,
+  or build class loading, a launcher, a heap limit and caller-sensitive checks.
+- Java, deferred, to build: :kerberos (pure Java in jdk26u) and :foreign (the FFM API). Alternative: n/a.
+- Java :flaky-timeout's AOT row: rerun alone and record (it passed when run again).
+- Python, deferred, to build: :c-accelerators (the C _json into the C world, as queue 568 did for _pickle; its _pickle rows clear at
+  train 6's record) and :pickle-core (_Framer's memoryview of a BytesIO buffer). Alternative: n/a.
+- Python :coroutines and C++ :oracle-text: n/a (reference-counting timing, as :finalization; the compiling clang's spelling of
+  __PRETTY_FUNCTION__ and similar).
+- Python :skipped-by-test (43): triaged by skip reason first, then decided.
+- Not decided because already decided: Python :extension-modules, :child-is-pyi and the :pyio classes clear at train 6's records; OCaml's
+  :ocamltest-tools and :unix-java are judged at the compiled level (583-1, 583-2), :opam-not-run built later (583-3).
