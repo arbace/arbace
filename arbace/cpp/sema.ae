@@ -9588,6 +9588,10 @@
         (when (and (seq es) (= :type (:e (first es))) (:ty (first es)) (not-any? #(#{:fn :var :tmpl} (:e %)) es)) (:ty (first es)))))))
 
 (defn- name-expr [ctx n]
+  ;; (cpp-def2: a name a failed block-scope using-declaration of a template's specialization left undeclared)
+  (when (and (checking?) (not (:explicitTemplateArgs n)) (empty? (second (ref-qualifier n))) (not (first (ref-qualifier n)))
+             (= :cx-bad-using (:e (first (lookup (:scope ctx) (get-in n [:referencedDecl :name]))))))
+    (throw (ex-info (str "codegen: use of undeclared identifier '" (get-in n [:referencedDecl :name]) "'") {:codegen/refused :undecl :cx/node n})))
   (let [nm (get-in n [:referencedDecl :name])
         [g q] (ref-qualifier n)
         lk #(if (or g (seq q))
@@ -13607,6 +13611,27 @@
            ;; (queue 570, the checker: a block scope's typedef or alias declaration may name a variably modified type, GNU's,
            ;; ext/vlm2.C's `typedef int X[n];`)
            (do (binding [*cx-vla* (when (and (checking?) (#{"TypedefDecl" "TypeAliasDecl"} (:kind d))) (:scope ctx))] (declare-node! (:scope ctx) d)) {:s :null})
+           ;; (cpp-def2, the checker: a block scope's using-declaration whose qualifier is dependent, in a function template's
+           ;; specialization: [namespace.udecl]/1 with [basic.lookup.qual]/1, its nested-name-specifier names a class, a namespace
+           ;; or an enumeration (C++20's P1099), another type -- UQ = int -- GCC's "'int' is not a class, namespace, or enumeration"
+           ;; at the declaration, the name then declared by nothing; cpp2a/using-enum-7.C. Else declared as a UsingDecl)
+           "UnresolvedUsingValueDecl"
+           (if-let [bad (when (and (checking?) (some-> (:fn-id ctx) fnd :tinst) (not (header-node? d)))
+                          (let [t (or (:_text d) (node-text d))
+                                [_ target] (re-find #"using\s+(?:typename\s+)?([^;]+);?\s*$" (or t ""))
+                                parts (when target (vec (map str/trim (remove str/blank? (split-scope (str/trim target))))))]
+                            (when (and (>= (count parts) 2) (not (str/includes? (str target) "...")))
+                              (let [q (try (resolve-type (:scope ctx) (str/join "::" (butlast parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                                    u (when (map? q) (abi/unq q))]
+                                (when (and u (= :b (:k u)) (cx-sure-scalar? u))
+                                  (gcc-type-str u))))))]
+             (do (*on-refusal* (ex-info (str "codegen: '" bad "' is not a class, namespace, or enumeration") {:codegen/refused :using :cx/node d}) d)
+                 ;; (its name declared by nothing in the block: a later unqualified use of it, no call's callee, GCC's "'kl' was not
+                 ;; declared in this scope", name-expr's :cx-bad-using)
+                 (when-let [nm (some->> (or (:_text d) (node-text d)) (re-find #"::\s*([A-Za-z_]\w*)\s*;?\s*$") second)]
+                   (enter! (:scope ctx) nm {:e :cx-bad-using}))
+                 {:s :null})
+             (do (declare-node! (:scope ctx) d) {:s :null}))
            ;; (a static_assert: no code; CX12, the checker: checked in a function no template's specialization)
            ;; (queue 497, the checker: in a function template's specialization for arguments with no dependent part too,
            ;; [temp.inst]/11 with [dcl.pre]/10, its failure alone judged -- a sure false value; any other refusal there the
