@@ -12475,3 +12475,9 @@ the rows cpp23/normalize7.C, cpp0x/overload2.C, cpp0x/error4.C, cpp2a/is-pointer
 diagnostic/pr79300.C, diagnostic/pr96045-3.C. `bin/reap --record`: C++ read 6,198 / 0 / 84 -> 6,205 / 0 / 77; `bin/crops-score --record`:
 completeness 0.9967 -> 0.9969 (read independence 0.926: the rows were clang's fails too); `--judge --strict`, `bin/records-check`,
 `bin/markers-check`: 0 problems.
+
+The user's answers (2026-11-26, all (a)), applied from the records, no new run: overload/builtin4.C (601-1), template/partial-specialization12.C
+and template/pr39425.C (601-3) into test/cpp/divergences-dg.edn's :gxx-only-rules (n/a, as parse/explicit1.C's), init/new38.C (601-2)
+into :ifndr-uninstantiated-template. `bin/reap --record`: C++ read 6,205 / 0 / 77 (249 n/a) -> 6,205 / 0 / 73 (253 n/a);
+`bin/crops-score --record`: completeness 0.9969 -> 0.9971; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+cpp2a/spaceship-eq15.C stays deferred, for a lane of its own.
