@@ -24114,3 +24114,12 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
   rule; D2, template/typedef39.C expects its error on a line of a template never instantiated, its own comment saying it belongs on
   the other one: (a) an n/a class for expectations GCC's own test marks misplaced, recommended, (b) deferred as now. Both rows left
   as they are.
+
+## 2026-11-26: C++ read, cpp-def2's D1 and D2 (the user)
+
+- D1 (a): gxx-dg/parse/explicit1.C joins `:gxx-only-rules` (n/a) in test/cpp/divergences-dg.edn. At C++17 it expects GCC's "explicit
+  specialization in non-namespace scope", which CWG727 removed from the standard; GCC 15 does not implement CWG727. (b), GCC's rule
+  implemented against the standard, rejected.
+- D2 (a): a new n/a class `:misplaced-expectation` for an expected error GCC's own test marks as misplaced: gxx-dg/template/typedef39.C (its
+  comment: the error "should really be on this line", in the other template). (b), keeping it deferred, rejected: matching it would copy the
+  misplacement.
