@@ -24016,3 +24016,55 @@ base.__dict__`, and 521's C `_datetime` date has none). Branch `py-enum-1125` fr
   PyContextAPItests.test_pickle (past 300 s there too), test_descr's test_reduce_copying, typing's NamedTuple pickling, test_pickle's
   C test_evil_pickler_mutating_collection); test_datetime, test_pickle, test_zoneinfo, test_copy, test_typing and test_descr method
   for method as py-odict-1125's run. Nothing recorded.
+
+## 2026-11-26: Python eval, py-regress lane: train 5's held regressions fixed at their causes (the C _pickle's world, the wake pipe, 3.14's UTF-8 mode, the eval loop's push signal)
+
+The burst's lane for the regressions train 5's eval run found in 11 modules it held (its entry above; the run kept at
+`.tmp/worktrees/train5/.tmp/repr-python/pyi/check/run`, built from `b6be9b74b`, executable `b85611b74343b609b2a4`). Branch
+`py-regress-1126` from mac/next (`c0521dc52`), mac/py-enum-1125 (`66134799d`, test_enum's import) merged first, the coordinator's
+request: its five test_enum methods and typing's NamedTuple pickling fail the same way as test_descr's row. Studied: CPython
+3.14.10 (the pinned tarball, `.tmp/repr-python/Python-3.14.10`): Modules/_pickle.c (`load_newobj`, `batch_list_exact`, `save`),
+Objects/typeobject.c (`slot_tp_new`, `type_new`'s tp_new), Include/internal/pycore_ceval.h (`_Py_MakeRecCheck`,
+`_Py_EnterRecursiveCall`), pycore_pythonrun.h (`_PyOS_STACK_MARGIN_BYTES`), pycore_tstate.h (`c_stack_soft_limit`'s offset),
+Python/ceval.c (`_Py_CheckRecursiveCall`), Python/preconfig.c and initconfig.c (the UTF-8 mode, `_Py_GetLocaleEncodingObject`),
+Lib/test/subprocessdata/fd_status.py.
+
+- **test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling: slot_tp_new.** The C unpickler's
+  NEWOBJ calls `cls->tp_new(cls, args, kwargs)`; every pyi type's tp_new slot was `_Pyi_tp_new`, the built-in base's `__new__`
+  (list's or tuple's), so a class's own `__new__` never ran (C2's `a` and `b` never set; a NamedTuple's `tuple.__new__` "expected
+  at most 1 argument"). A heap class whose `__new__` along its MRO is a class statement's (`classNew`) now gets
+  `_Pyi_slot_tp_new`, CPython's slot_tp_new: the subtype's `__new__` called with the subtype first. Built-in types keep
+  `_Pyi_tp_new`, so C calling `PyList_Type.tp_new(sub, ...)` still gets list's.
+- **test_pickle's CPicklingErrorTests.test_evil_pickler_mutating_collection: the mirrors after Python code.** A list's ob_size is
+  read in place (PyList_GET_SIZE); persistent_id, Python code a native ran, cleared the list, and its mirror was written to C only
+  when a native touching it returned, so batch_list_exact walked past the end ("list index out of range" from PyList_GetItemRef)
+  where CPython raises "list changed size during iteration". py counts the eval loop's entries from Go (`ExtRunCount`, in
+  `Thread.run`); `sized`, every native's wrapper, writes the mutable mirrors (lists, sets, bytearrays, `mutMirrors`, C's own writes
+  taken first) to C when Python code ran in the native.
+- **test_functools' four test_recursive_pickle: the C stack's soft limit.** _pickle's `save` guards by the inline
+  `_Py_EnterRecursiveCall`, which reads the thread state's `c_stack_soft_limit`; the world's was 0, so no check fired and the C
+  recursion ran until Go's 1 GB goroutine stack overflowed (fatal). `_PyThreadState_GetCurrent` now sets the main thread state's
+  limit for its caller: just above the C thread's stack pointer when the thread is 50,000 C calls deep (about 250 MB of Go's stack)
+  or within four margins of its C stack's end, else 0; `_Py_CheckRecursiveCall` raises "Stack overflow (used N kB) while pickling
+  an object" (pyi's nominal 100 bytes a level). A subinterpreter's 256-byte state is left alone.
+- **test_subprocess's test_pass_fds: the wake pipe.** The main thread's interruptible read (queue 231, py-mods-1122) made its wake
+  pipe on the first read of any descriptor, a source file's at start: a child pyi had two descriptors CPython's has not, which
+  fd_status listed (fd 8, one the parent's test expected closed). The pipe is made now only for a read that may wait (not a
+  regular file's, a directory's, a block device's, nor a non-blocking descriptor's) and for a write to a blocking FIFO, after their
+  checks.
+- **test_builtin's test_open_default_encoding, test_io's CTextIOWrapperTest.test_default_encoding: 3.14's UTF-8 mode.** 553 gave
+  sys.flags 3.14's rule (off under C.UTF-8), but open() and TextIOWrapper kept 3.15's (on), so their default encoding was "utf-8"
+  where locale.getencoding() says "UTF-8". They follow the running version's mode now (`utf8ModeOn`). test_sys's
+  test_ioencoding_nonascii, skipped now ("requires FS encoding to match locale"), and test_pickle's C test_wrong_newobj_ex_class
+  (skipped, "only verified in the Python implementation") are CPython's own outcomes (its record skips both): no fix, train 6's
+  record holds them as they are.
+- **test_traceback's test_print_traceback_at_exit: the push signal.** The eval loop's call signal (`Thread.push`, reused, 202b)
+  kept the last frame pushed: an `__init__`'s frame holding its instance (`initSelf`), outside the collector's graph, so the cycle
+  instance -> exception -> traceback -> frame -> instance was never garbage and its `__del__` never ran at exit (the last
+  instance made only: a later call replaced the frame). runFrames takes the frame and clears the signal.
+- **test_subprocess's two test_one_environment_variable, test_os's test_execve_env_concurrent_mutation_with_fspath_posix**: a child
+  started with an environment without ARBACE_HOST_EXE (env={'fruit': 'orange'}, env.clear()); py-cli-1125's adopt_host_env
+  (mac/py-cli-1125 `6f9661379`, bin/pyi) fixes both: measured on train 5's executable with its bin/pyi applied (the child prints
+  fruit=orange; the execve program prints its message), without it on the stage 0 the child falls back to. Not merged here: train
+  6 takes py-cli-1125.
+- Left to the user: none. test_enum's import is py-enum-1125's; test_sqlite3's table-lock row stays in :finalization-goi.

@@ -8838,3 +8838,35 @@ the spec's own Py_tp_new), before the methods as `type_ready_fill_dict` comes af
 built-in types' tp_new_wrapper (`makeSlotWrapper`'s staticmethod, one per type in `newWrappers`: its type checks, then the C
 tp_new). Taken from the Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects: `ExtNewWrapper` and the
 spec path), rewritten over this tree's staticmethod wrapper and extended to the static types, which `_datetime` uses.
+
+## As built: py-regress-1126, train 5's held regressions at their causes (2026-11-26, the main host, the burst's py-regress lane)
+
+Train 5's eval run held 11 modules for regressions against next's record (the journal's entry of 2026-11-26). Their causes, each
+fixed as CPython 3.14.10 behaves:
+
+- **slot_tp_new** (arbace/pyctypes, capi_mirror): a heap class whose `__new__` along its MRO is a class statement's (`classNew`)
+  has `_Pyi_slot_tp_new` in its tp_new slot, the subtype's `__new__` called with the subtype first; the built-in types keep
+  `_Pyi_tp_new` (the built-in base's `__new__`). The C unpickler's NEWOBJ (`cls->tp_new`) now runs a list or tuple subclass's
+  own `__new__` (test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling).
+- **The mutable mirrors after Python code** (pyctypes's `sized`, py's `ExtRunCount`): when Python code ran inside a native, the
+  lists', sets' and bytearrays' mirrors (`mutMirrors`) are written to C, C's own writes taken first, so a size C reads in place
+  (PyList_GET_SIZE) is the list's after a callback changed it (test_pickle's C test_evil_pickler_mutating_collection: "list
+  changed size during iteration").
+- **The C stack's soft limit** (pyctypes, capi_accel's `cStackLimit`): `_PyThreadState_GetCurrent` sets the main thread state's
+  `c_stack_soft_limit` (offset 848) just above the caller's frame when the C thread is 50,000 calls deep or within four
+  `_PyOS_STACK_MARGIN_BYTES` of its stack's end, else 0, so the inline `_Py_EnterRecursiveCall` of a core module (_pickle's
+  `save`) raises through `_Py_CheckRecursiveCall`, "Stack overflow (used N kB) while pickling an object", before Go's 1 GB
+  goroutine stack overflows (test_functools' test_recursive_pickle).
+- **The wake pipe** (py, builtins_signal_wait): made for a read that may wait (not a regular file's, a directory's, a block
+  device's or a non-blocking descriptor's) and for a write to a blocking FIFO only, so a child that never waits has no
+  descriptor CPython's has not (test_subprocess's test_pass_fds).
+- **3.14's UTF-8 mode for open() and TextIOWrapper** (py, `utf8ModeOn`): the running version's rule, as sys.flags since 553;
+  under C.UTF-8 their default encoding is the locale's "UTF-8" (test_builtin's test_open_default_encoding, test_io's
+  CTextIOWrapperTest.test_default_encoding).
+- **The eval loop's push signal** (py, eval's runFrames): the reused `Thread.push` lets go of the frame once the loop took it; it
+  held the last frame pushed (an `__init__`'s, its instance in `initSelf`) outside the collector's graph, so a cycle through it
+  was never garbage and its `__del__` never ran at exit (test_traceback's test_print_traceback_at_exit).
+- Not this lane's: test_subprocess's test_one_environment_variable and test_os's
+  test_execve_env_concurrent_mutation_with_fspath_posix (a child without ARBACE_HOST_EXE in its environment) are fixed by
+  py-cli-1125's adopt_host_env; test_sys's test_ioencoding_nonascii and test_pickle's C test_wrong_newobj_ex_class are skipped as
+  CPython skips them.
