@@ -24143,3 +24143,20 @@ blindness (statics by content), left for a decision.
 
 Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
 keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
+
+## 2026-11-26 — Rust C6: lib-unit's judge holds statics by name; an inherent method's static's symbol (queue 591, VM)
+
+On 590-1 (a). (1) lib-unit's judge normalized every global by content (RF3's global map), so a define naming the wrong static
+of one content, or a static of ours declared where rustc's unit defines it, compared by content alone. Now only anonymous
+constants (`private` constants, `anon-constant?`) are taken by content, every static (mutable or not) and every other global by
+name, in the judge and in L4.1's splice and check alike. (2) mono's std-static-symbol mangled a static inside an inherent method
+from MIR's printed path (`std::thread::id::ThreadId::new::COUNTER`, the self type's path) as if ThreadId were a module;
+inherent-def-path now takes the first prefix that is an ADT with an inherent impl defining the next segment as a function
+(std's interface: :inherent and :fns) and mangles under the impl (`{impl#0}::new::COUNTER`), rustc's
+`_RNvNvMNtNtCs.._3std6thread2idNtB4_8ThreadId3new7COUNTER`. No exported body changes (the symbol is the build's).
+One std build and compare with L2: items 224/35/66 -> 228/31/66, L2 413 of 487 unchanged, no equal lost; the four that became
+equal (thread_info's set_current_info and delete_current_info, thread_local's destructors::list::run and guard::key::enable)
+differed only by a static we declare and std's unit defines, its content compared before. One `lib-unit own`: 688 own (683 +
+ThreadId::new + the four), 0 left rustc's, both controls differ. rust-front essential once (mono changed). The backtrace
+crates not rerun: their equal defines name no static (their own files' globals are all anonymous constants), and the stricter
+judge can only lose equals.
