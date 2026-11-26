@@ -24035,12 +24035,16 @@ Lib/test/subprocessdata/fd_status.py.
   at most 1 argument"). A heap class whose `__new__` along its MRO is a class statement's (`classNew`) now gets
   `_Pyi_slot_tp_new`, CPython's slot_tp_new: the subtype's `__new__` called with the subtype first. Built-in types keep
   `_Pyi_tp_new`, so C calling `PyList_Type.tp_new(sub, ...)` still gets list's.
-- **test_pickle's CPicklingErrorTests.test_evil_pickler_mutating_collection: the mirrors after Python code.** A list's ob_size is
+- **test_pickle's CPicklingErrorTests.test_evil_pickler_mutating_collection: the lists after Python code.** A list's ob_size is
   read in place (PyList_GET_SIZE); persistent_id, Python code a native ran, cleared the list, and its mirror was written to C only
   when a native touching it returned, so batch_list_exact walked past the end ("list index out of range" from PyList_GetItemRef)
   where CPython raises "list changed size during iteration". py counts the eval loop's entries from Go (`ExtRunCount`, in
-  `Thread.run`); `sized`, every native's wrapper, writes the mutable mirrors (lists, sets, bytearrays, `mutMirrors`, C's own writes
-  taken first) to C when Python code ran in the native.
+  `Thread.run`); `sized`, every native's wrapper, then calls `syncUsedLists`: the lists' mirrors the natives used (touch) since
+  the outermost entry into the world (`World.Call`) whose length Python changed are written to C, C's own writes taken first. A
+  first version wrote every mutable mirror (lists, sets, bytearrays) after any native in which Python code ran: in its AOT run
+  test_pickle's driver died three times on musl's `a_crash` (mallocng's free) in CPicklerTests.test_recursive_frozenset_subclass_and_inst
+  and InMemoryPickleTests.test_set_chunking, which pass alone, so state an earlier test left (not pinned down further); the
+  narrowed version's run has the module whole in one driver run, both passing.
 - **test_functools' four test_recursive_pickle: the C stack's soft limit.** _pickle's `save` guards by the inline
   `_Py_EnterRecursiveCall`, which reads the thread state's `c_stack_soft_limit`; the world's was 0, so no check fired and the C
   recursion ran until Go's 1 GB goroutine stack overflowed (fatal). `_PyThreadState_GetCurrent` now sets the main thread state's
@@ -24065,6 +24069,21 @@ Lib/test/subprocessdata/fd_status.py.
 - **test_subprocess's two test_one_environment_variable, test_os's test_execve_env_concurrent_mutation_with_fspath_posix**: a child
   started with an environment without ARBACE_HOST_EXE (env={'fruit': 'orange'}, env.clear()); py-cli-1125's adopt_host_env
   (mac/py-cli-1125 `6f9661379`, bin/pyi) fixes both: measured on train 5's executable with its bin/pyi applied (the child prints
-  fruit=orange; the execve program prints its message), without it on the stage 0 the child falls back to. Not merged here: train
-  6 takes py-cli-1125.
+  fruit=orange; the execve program prints its message); without it the child, with no host named, falls back to stage 0 and
+  the checkout's runtime interpreted by goi, too slow for the test. Not merged here: train 6 takes py-cli-1125.
+- **Measured** by pyi's AOT on the worktree (`bin/pyi check --aot --lib-test --fresh --only`, the runtime compiled with the
+  changes, the children by the compiled launcher; under bin/heavy-lock as a small job, HEAVY_MEM_GIB 8; peaks 5.0 and 2.7 GB):
+  run 1 (`1fac6ed8d`, 15 modules: test_functools, test_pickle, test_descr, test_traceback, test_builtin, test_io, test_enum,
+  test_collections, test_typing, test_subprocess, test_sys, test_os, test_signal and the controls' two; 5,561 methods, 59 min):
+  every held row passes (the four test_recursive_pickle, test_reduce_copying, test_evil_pickler_mutating_collection, test_pass_fds,
+  test_open_default_encoding, CTextIOWrapperTest.test_default_encoding, test_print_traceback_at_exit; test_enum's five TestSpecial
+  rows), the two crashes above failing. Run 2 (`a3738a57f`, 12 modules: test_pickle, test_functools, test_descr, test_enum,
+  test_typing, test_collections, test_signal, test_ctypes, test_copy, test_xml_etree_c and the controls'; 4,472 methods, 38 min):
+  0 failing, the negative controls failing as they must. Against next's eval record, of the rows it passes, the only ones not
+  passing in either run: the two CPython skips above and test_signal's StressTest.test_stress_modifying_handlers, a 300 s
+  timeout in the module's driver in both runs, which passes alone on the same AOT runtime (12 s; its class whole in 66 s) and on
+  train 5's executable (eval, 15 s): nothing these changes touch runs in it (no reads or writes, no C world); no record of the
+  AOT level holds it, so whether it times out there without them is not measured; train 6's eval run will show it. In AOT the
+  children are the compiled launcher, so test_subprocess's test_one_environment_variable and test_empty_env and test_os's execve
+  row pass there regardless; at the eval level they are py-cli-1125's.
 - Left to the user: none. test_enum's import is py-enum-1125's; test_sqlite3's table-lock row stays in :finalization-goi.

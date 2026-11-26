@@ -8848,10 +8848,11 @@ fixed as CPython 3.14.10 behaves:
   has `_Pyi_slot_tp_new` in its tp_new slot, the subtype's `__new__` called with the subtype first; the built-in types keep
   `_Pyi_tp_new` (the built-in base's `__new__`). The C unpickler's NEWOBJ (`cls->tp_new`) now runs a list or tuple subclass's
   own `__new__` (test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling).
-- **The mutable mirrors after Python code** (pyctypes's `sized`, py's `ExtRunCount`): when Python code ran inside a native, the
-  lists', sets' and bytearrays' mirrors (`mutMirrors`) are written to C, C's own writes taken first, so a size C reads in place
-  (PyList_GET_SIZE) is the list's after a callback changed it (test_pickle's C test_evil_pickler_mutating_collection: "list
-  changed size during iteration").
+- **The lists after Python code** (pyctypes's `sized` and `syncUsedLists`, py's `ExtRunCount`): when Python code ran inside a
+  native, the lists' mirrors the natives used since the outermost entry into the world whose length Python changed are written
+  to C, C's own writes taken first, so a size C reads in place (PyList_GET_SIZE) is the list's after a callback resized it
+  (test_pickle's C test_evil_pickler_mutating_collection: "list changed size during iteration"). Writing every mutable mirror
+  instead (a first version) crashed test_pickle's AOT driver.
 - **The C stack's soft limit** (pyctypes, capi_accel's `cStackLimit`): `_PyThreadState_GetCurrent` sets the main thread state's
   `c_stack_soft_limit` (offset 848) just above the caller's frame when the C thread is 50,000 calls deep or within four
   `_PyOS_STACK_MARGIN_BYTES` of its stack's end, else 0, so the inline `_Py_EnterRecursiveCall` of a core module (_pickle's
@@ -8870,3 +8871,7 @@ fixed as CPython 3.14.10 behaves:
   test_execve_env_concurrent_mutation_with_fspath_posix (a child without ARBACE_HOST_EXE in its environment) are fixed by
   py-cli-1125's adopt_host_env; test_sys's test_ioencoding_nonascii and test_pickle's C test_wrong_newobj_ex_class are skipped as
   CPython skips them.
+- **Measured** (pyi's AOT on the worktree, `bin/pyi check --aot --lib-test --fresh --only`, two runs, 15 and 12 modules): every held
+  row passes; against the eval record nothing it passes fails but CPython's two skips and test_signal's
+  test_stress_modifying_handlers, a timeout in the AOT driver that passes alone, not shown to be these changes' (the journal's entry). Not recorded: train 6 records
+  the 11 modules whole.
