@@ -24274,3 +24274,54 @@ Measured: `bin/pyi check --only` of test_empty_env x2, test_one_environment_vari
 methods, 47 pass, 0 failing; the same call before the change failed both test_empty_env rows. The classes' :tests lists are not
 touched (the rows pass; the lists leave with the record, as the other classes' did): the train's record run of the 90 rows
 (a list of MODULE/TEST-ID lines, 14 modules) measures them.
+## 2026-11-25: py-limits-1125: Python eval's `:runner-limits` and `:host-memory` rows by cause; non-ASCII find, child GOGC
+
+Branch py-limits-1125 on mac/train-5 (c3efeae13), main host. The two classes match the runner's own words (timeouts, idle hangs,
+the 8192 MB cap); their 85 and 79 rows are mostly the 11-19 records night's. By cause: 65 and 54 are the process pools'
+(multiprocessing spawn's test_processes past its hour, 61; test_manager, test_misc, test_multiprocessing_main_handling,
+concurrent.futures' process_pool, shutdown, deadlock: py-mp's lane), 2 and 17 the C world's (test_buffer over ci's `_testbuffer.c`,
+test_capi: the C API lane), test_pdb's the Mac's 574's record. The other 18 + 8 were run alone (`bin/pyi python -m unittest`, the
+tree's RSS capped at 2.6 GiB, on gate build e0f40126, main's compiled runtime; one at a time outside the lock, at most one process
+over 1 GB): 15 pass now (test_fstring, test_longexp, test_modulefinder, the `'-' * 100_000` compile errors, test_cmd_line's
+relativedir, test_email's get_param, test_xml_etree(_c)'s deepcopy, test_uuid, test_urllib2, test_logging), test_email's
+test_long_lines passes in 674 s (CPython 1 s; main's _pyio StringIO), test_httpservers' RequestHandlerLoggingTestCase.test_get
+hangs on finalization (the response's makefile keeps the socket open until its deallocation; proposed for `:finalization`, the
+user's n/a class: a user decision, not moved), and 11 need train 5's runtime or more than 2.6 GiB (test_io's seven signal writes,
+test_wsgiref's interrupted write, test_compile's extended op arg, test_regrtest's test_module_test with `-j4`, test___all__): queued
+under the big lock (`.tmp/w/list2.txt`, results `.tmp/w/res2.tsv` in the worktree).
+
+Built (commit b8891a497): runeIndex (go/arbace/py/strmethods) searches a non-ASCII str in windows doubling from the near end, a
+one-code-point needle directly: `find(';', i)` in a loop encoded the whole range per call (40,000 calls: 25 s, CPython 0.01 s),
+checked against a naive search (200,000 random cases in Go) and CPython (3,000 cases, one digest); tools/pyi/python3 runs every
+child at GOGC 25 (`PYI_CHILD_GOGC`), after py-mp's finding that a spawn child is 1.2-1.5 GB: test._test_multiprocessing's import
+peaks at 1.45 GB instead of 2.0, the same wall, about 30% more CPU. Alternatives: GOGC 50 (1.75 GB), a GOMEMLIMIT per child (a
+soft limit that a busy child passes anyway), cutting the startup heap itself (about 330 MB live: Arbace's 177 MB and the host
+compiler's; larger work, not started). Doc: doc/python/PYTHON-SURVEY.md, "As built: py-limits-1125".
+
+## 2026-11-25: py-limits-1125: the user's decision on test_httpservers' test_get (n/a, `:finalization`)
+
+The user decided (2026-11-25, through the coordinator) py-limits-1125's first question, (a): test_httpservers'
+RequestHandlerLoggingTestCase.test_get is n/a, the timing of reference counting: http.client's will_close response keeps the
+socket open through its makefile until the response is deallocated, which CPython does at the discarded getresponse(), so the
+single-threaded HTTPServer's keep-alive readline sees the EOF there; under Go's collector it waits and tearDown's shutdown() never
+returns. Done: the id in test/python/divergences.edn's `:finalization` (`:kind :na`, before `:runner-limits` in the file, so it is
+that class's: `bin/pyi divergences` shows no shadowed name), its reason beside it and the decision in `:decided`. Also agreed:
+test_email's test_long_lines is fixed, not capped, if train 5's native StringIO leaves it slow; `.tmp/w/list2.txt` is rerun on train
+5's executable when it exists. bin/reap --record and bin/crops-score --record on the branch's tree (train 5's records, which its
+merges had not re-recorded: Python eval 40,886 / 1,304 / 1,292 -> 41,203 / 1,196 / 1,004, n/a 4,934); crops-score --judge --strict
+and records-check 0 problems. mac/next (train 3's merge, 76c4f46c9) is not merged here: it conflicts with train 5 in
+doc/JOURNAL.md, test/python/divergences.edn (`:c-accelerators`), the eval record, test/reap/matrix.edn and test/crops/scores.edn,
+the resolution train 5's conductor makes when train 5 takes next; this branch then merges train 5.
+
+## 2026-11-25: py-limits-1125: StringIO's appends linear (test_email's test_long_lines); the rows on train 5's executable
+
+The 13 rows queued as res2 had no verdict on the checkout's interpreted runtime: each died at `import ctypes` (pyctypes checked
+against main's compiled runtime). Run again alone on train 5's gate build b85611b74, compiled (`.tmp/w/res3.tsv`): test_io's seven
+signal writes, test_wsgiref's interrupted write, test_compile's extended op arg, test_logging's named pipe and test_urllib2's body
+pipe pass in 10-17 s at 1.1-1.9 GB; from res2's compiled half, test_regrtest's test_module_test (33 s, 2.4 GB, with the children at
+GOGC 25) and test___all__ (129 s, 2.66 GB, within its 900 s cap) pass. No cap is proposed. test_httpservers' test_get still hangs
+(`:finalization`, n/a). test_email's TestFeedParsers.test_long_lines was killed at 2.8 GB after 455 s: quadratic (each feed of N
+pieces 0.4, 1.3, 5.3 s at N 1,000, 2,000, 4,000). The cause: 545's native StringIO (builtins_io_stringio's writeStr) compared the
+write's end with the buffer's length, not its capacity, so every write past the end allocated and copied the whole buffer, its
+1/8 overallocation never used. Fixed: resliced within the capacity, reallocated with the same overallocation (resize_buffer's)
+past it. Measured on goi's interpreted runtime: N 2,000 2.1 s, 8,000 10.7 s (linear; it was x4 a doubling).

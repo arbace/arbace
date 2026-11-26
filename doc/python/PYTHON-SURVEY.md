@@ -8890,3 +8890,53 @@ PYI_RUNTIME, PYI_RUNTIME_NOTED, PYI_GOMEMLIMIT, PYI_THREADS): the way an install
 host that started the run. No ancestor with one: the default as before; os.environ stays what the caller gave. Measured: the two
 rows and four neighbours that strip the environment (test_one_environment_variable, test_env, test_communicate_errors x2) pass.
 Left to the record: the classes' lists keep the 90 names until the eval record runs these modules; every row measured passes.
+## As built: py-limits-1125, the eval's `:runner-limits` and `:host-memory` rows by cause (2026-11-25, the main host)
+
+The two classes are patterns over the record's rows (the runner's own words: a test past 300 s, idle past 90 s, a module past
+its hour; the test's processes past 8192 MB), most of them written by the 11-19 records night, before py-eval-1122, py-mods-1122,
+545's native _io and the compiler's speedups. Of the record's 85 `:runner-limits` rows and 79 `:host-memory` rows, 65 and 54
+are multiprocessing's and concurrent.futures' process pools (spawn's test_processes past its module timeout, 61; its test_manager,
+test_misc, test_multiprocessing_main_handling, test_concurrent_futures' process_pool, shutdown, deadlock: py-mp's lane), and 2 and
+17 run ci's C world (test_buffer over `_testbuffer.c`, test_capi's two: the C API lane). The rest, measured alone (one test, `bin/pyi
+python -m unittest`, the tree's resident set sampled every 2 s and capped at 2.6 GiB, on the gate build e0f40126 of main's runtime,
+compiled; `.tmp/w/batch.sh` and `res1.tsv` in the worktree):
+
+- **Pass alone now** (their rows move to a pass at the next record of their module): test_fstring's test_many_expressions (12-35 s,
+  1.4 GB), test_longexp (38 s, 1.8 GB), test_modulefinder's test_extended_opargs (102 s, 1.9 GB), the three compile errors of
+  `'-' * 100_000 + '1'` (test_code_module, test_pyrepl; test_pdb's moves with the Mac's 574): the parser's MAXSTACK MemoryError,
+  each about 5 s; test_cmd_line's test_relativedir_bug46421 (30 s, 2.5 GB), test_email's test_get_param_linear_complexity
+  (2 s: py-mods-1122's ASCII find), test_xml_etree(_c)'s test_deeply_nested_deepcopy (8 s, 3 s), test_uuid's
+  test_unix_getnode_from_libuuid (12 s), test_urllib2's test_http_body_pipe (9 s), test_logging's
+  test_should_not_rollover_named_pipe (0 s).
+- **Slow, passes past the limit**: test_email's TestFeedParsers.test_long_lines, 674 s (1,311 s of CPU, 2.6 GB) on main's runtime,
+  CPython 1.0 s: twenty thousand writes of 1,000 characters into feedparser's StringIO, then one 20 MB readlines; main's StringIO is
+  _pyio's, train 5's is 545's native one (measured there by `res2.tsv`, below).
+- **A hang, finalization's**: test_httpservers' RequestHandlerLoggingTestCase.test_get. The HTTP/1.1 response has no length, so
+  http.client marks it will_close and closes the connection, but the response's makefile keeps the socket open until the response
+  is deallocated: CPython's reference counting does that at the discarded getresponse(); under Go's collector the socket stays
+  open, the single-threaded HTTPServer waits in the keep-alive's next readline, and tearDown's shutdown() never returns (killed at
+  400 s, idle). test_err passes because send_error closes the connection. Proposed for `:finalization` (n/a, the user's 2026-11-23
+  decision on that class); not moved here.
+- **Need the train's runtime** (main's runtime is _pyio's and lacks py-os's interruptible send): test_io's seven
+  C/PySignalsTest interrupted and reentrant writes, test_wsgiref's test_interrupted_write (hangs on main's runtime: py-os-1124's
+  fix), test_compile's test_compiles_to_extended_op_arg (its import of _testcapi needs train 5's pyctypes), and the two that pass
+  2.6 GiB: test_regrtest's ProgramsTestCase.test_module_test (`-j4`: six pyi processes at once; its four siblings pass) and
+  test___all__'s test_all (900 s cap already in lib-test-limits.tsv; 2.95 GB at the kill). Queued under the big lock, 8 GiB, cap 7
+  GiB: `.tmp/w/list2.txt`, results `.tmp/w/res2.tsv`.
+
+Built:
+- **str.find, rfind, index and rindex on a non-ASCII str** (strmethods.go's runeIndex): the range was encoded whole at every call,
+  so `find(';', i)` in a loop was quadratic (40,000 calls on a 320 KB str: 25 s compiled, CPython 0.01 s). A one-code-point
+  needle is scanned directly; a longer one in windows doubling from the end the search starts at (256 code points first), so a
+  match costs its distance. Checked: 200,000 random cases against a naive search in Go, and 3,000 Python cases (find, rfind with
+  bounds, count) equal to CPython's digest; 10,000 and 40,000 calls on goi's interpreted runtime 0.5 s and 2.4 s (linear).
+- **A pyi child at GOGC 25** (tools/pyi/python3, `PYI_CHILD_GOGC`): every sys.executable child (multiprocessing's spawn, script_helper,
+  subprocess) was at the parent's GOGC 100. Measured: an idle child's heap 611 MB at 100, 465 at 50, 397 at 25 (the binary's 390 MB
+  of file pages beside it, shared between processes, half in each one's PSS when two run); importing test._test_multiprocessing
+  peaks at 2.0 GB at 100, 1.75 at 50, 1.42-1.50 at 25, wall 33-40 s against 34 s, CPU about 30% more. The child's os.environ is the
+  entry environment, captured before the assignment. The live heap after startup is about 330 MB: the rest of the footprint is
+  Arbace's (a bare executable 177 MB of heap) and the host compiler's, not reducible by GOGC.
+
+Caps proposed (the user's 2026-11-24 rule for OCaml, 1.5 x the CPU measured alone, as lib-test-limits.tsv's per-test rows): none yet
+for the tests that pass alone within 300 s; test_email's test_long_lines once `res2.tsv` measures it on the train's runtime (on main's,
+1.5 x 674 s wall would be 1,020 s; its row is better fixed than capped if 545's StringIO does not bring it near CPython).
