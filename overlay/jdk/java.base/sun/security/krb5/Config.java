@@ -1,7 +1,7 @@
 /*
  * Arbace (overlay/jdk, doc/classes/JAVA-CONFORMANCE-SURVEY.md, java-design-1123): jdk26u's sun.security.krb5.Config
  * (https://github.com/openjdk/jdk26u at baf63fb), derived by test/jrt/derive.ae (bin/jrt-convert derive):
- * macOS's SCDynamicStoreConfig branch dropped (the Go build runs on Linux).
+ * macOS's SCDynamicStoreConfig branch dropped, isWindows and isMacOS false (the Go build runs on Linux).
  * jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the
  * Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
@@ -48,7 +48,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import jdk.internal.util.OperatingSystem;
 import sun.net.dns.ResolverConfiguration;
 import sun.security.krb5.internal.crypto.EType;
 import sun.security.krb5.internal.Krb5;
@@ -173,7 +172,7 @@ public class Config {
 
     private static boolean isMacosLionOrBetter() {
         // split the "10.x.y" version number
-        if (!OperatingSystem.isMacOS()) {
+        if (!false) {
             return false;
         }
 
@@ -944,7 +943,7 @@ public class Config {
      */
     private String getNativeFileName() {
         String name = null;
-        if (OperatingSystem.isWindows()) {
+        if (false) {
             try {
                 Credentials.ensureLoaded();
             } catch (Exception e) {
@@ -977,7 +976,7 @@ public class Config {
             if (name == null) {
                 name = "c:\\winnt\\krb5.ini";
             }
-        } else if (OperatingSystem.isMacOS()) {
+        } else if (false) {
             name = findMacosConfigFile();
         } else {
             name =  "/etc/krb5.conf";
@@ -1247,7 +1246,7 @@ public class Config {
             }
         }
         if (realm == null) {
-            if (OperatingSystem.isWindows()) {
+            if (false) {
                 realm = System.getenv("USERDNSDOMAIN");
             }
         }
@@ -1286,7 +1285,7 @@ public class Config {
             }
         }
         if (kdcs == null) {
-            if (OperatingSystem.isWindows()) {
+            if (false) {
                 String logonServer = System.getenv("LOGONSERVER");
                 if (logonServer != null
                         && logonServer.startsWith("\\\\")) {
