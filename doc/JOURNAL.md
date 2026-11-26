@@ -24683,3 +24683,59 @@ where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No 
 differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
 reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
 compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
+
+## 2026-11-26: pyi's _json is CPython's Modules/_json.c in the C world (py-json-1126, the main host)
+
+Branch `py-json-1126` from mac/train-6 (5e0d55109), mac/next (0b3174413) and then mac/train-6 (025065fd1) merged in. The user's
+by-design review of 2026-11-26 made `:c-accelerators` and `:pickle-core` deferred, to be built. Built the way queue 568 built `_pickle`:
+no hand port. CPython 3.14.10's `Modules/_json.c` (the tarball test/python/corpora.edn pins, `:cpython-3.14.10`) is compiled by ci
+into the world `ctypestest` and loaded as `_json`.
+
+- **The world.** `tools/pyi/clib/ctypestest/accel_json.c` includes `Modules/_json.c` unchanged with NDEBUG (an extension module,
+  Py_BUILD_CORE_MODULE, as CPython builds it on Linux). lib.conf names the member and the glue. gcc's `nm -u` of the glue listed the
+  symbols it needs; all were the world's or pyctypes' but `PyCFunction_GetFunction`. Built by `bin/pyi-clib build ctypestest` with
+  train 5's executable (b85611b74343) as the tools' host, because stage 0 lacks `Compiler$Dyn/hideMethod` for the evaluated builder
+  (py-capi's verify failed on it). Key 236ebb59, 12.2 MB of node program, 36 min, 6.4 GB peak, under the big lock as a small job.
+  It is the world train 6's verify regenerated (9e1d7e8ff: the same host and builder, its -NaN in musl's y0 and y1) plus `_json`.
+  No input of the key moved between 5e0d55109 and train-6's head; the merged tree's `bin/pyi-clib key ctypestest` is 236ebb59.
+- **pyctypes** (`capi_json.go`, after CPython 3.14.10's Objects/methodobject.c):
+  - `PyCFunction_GetFunction`, the PyMethodDef's `ml_meth`. `encoder_new` compares it with its own `py_encode_basestring*` (the
+    fast path).
+  - `_json.c`'s `_Py_ID` identifiers and its literal, bound in `_PyRuntime` with rtIdentifiers, at gcc's offsetof over
+    `pycore_global_strings.h`: JSONDecodeError 1392, null 31696, true 39776, false 22184, and
+    `_Py_DECLARE_STR(json_decoder, "json.decoder")` 904. The literals come before the identifiers; isoformat 26848 and
+    __getinitargs__ 5016 agree with the committed offsets.
+  - `capi_unicode.go`: every PyUnicodeWriter write keeps the writer's `pos` (the characters written, `_PyUnicodeWriter`'s field at
+    offset 32) in its C block. `_json.c`'s `_PyUnicodeWriter_IsEmpty` reads it in place: always 0 before, so scanstring would
+    have returned the substring after the last escape alone.
+  - `module.go`: `_json` registered with the accelerators (`extModuleObj`).
+- **py.** `builtins_json.go`: `_json` is a lazy module of pyctypes. queue 459's thin Go `_json` stays only under `PYI_C_ACCEL=0`,
+  as DECISION 568-1 (a) kept the thin `_pickle`. Edited on the printed Go and read back by `bin/pyi runtime read`: only
+  builtins_json, pyctypes.ae, capi, capi_json, capi_unicode and module changed.
+- LICENSE.md: the world's entry names `Modules/_json.c`.
+
+Alternatives considered:
+- a port of `_json.c` in Go, refused: no hand port, as 568;
+- keeping the thin Go `_json` as the default: it is json's pure scanner and encoder behind `_json`'s names, which is what the
+  class names;
+- a native for `_PyUnicodeWriter_IsEmpty`, impossible: it is a static inline of `_json.c`, so the field itself has to be right.
+
+Measured (pyi's AOT on the worktree, train 5's executable as host, `bin/pyi check --aot --lib-test --fresh --only`):
+- **Before the C `_json`** (the world built, the old py forms): the 43 names of `:c-accelerators` and `:pickle-core` all pass,
+  and the three controls fail as they must.
+  - `_pickle`'s 35 rows pass with py-regress-1126's fixes (train 6).
+  - test_annotationlib's test_type_repr passes on queue 521's C `_datetime`, and test_functools' two partial rows on
+    py-design-1122's `_functools`.
+  - `:pickle-core`'s two rows pass: the pure pickler's frames handed out as memoryviews keep their bytes after the BytesIO
+    goes, and the unseekable BytesIO's readline no longer reaches `peek`. Most likely queue 545's native `_io`; a probe on the
+    checkout's runtime under goi agreed.
+- **With the C `_json`:** the probe `.tmp/w/p/j1.py` equals CPython 3.14.10's output line for line but one. The C decoder's
+  RecursionError says "Stack overflow (used 4882 kB) while decoding a JSON array from a unicode string" where CPython's says
+  992 kB: the C stack's measure. Covered: scanstring, the escapes, loads and dumps with indent, sort_keys and hooks, NaN and
+  Infinity, the errors' messages and positions, the keys' TypeError, circular references, make_encoder's fast path, and
+  `_json`'s identities with json's names.
+- The whole-module run (test_json and test_pickle whole, with the classes' other rows; `.tmp/w/measure.log` in the worktree) was
+  running at this entry.
+
+Not recorded: train 7 records test_json, test_pickle, test_annotationlib and test_functools on its own executable. The classes'
+rows go from that record.
