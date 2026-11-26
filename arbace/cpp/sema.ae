@@ -295,6 +295,11 @@
 ;; queue 492 (the checker): the names any declaration of the headers names (the native parser's nodes of the headers, in
 ;; full), so a name none of them names is not one the analysis could have missed in a part of a header it skipped.
 (def ^:dynamic *cx-copy-list* false)
+;; queue 602 (the checker): the class of a direct-initialization by one argument of another class type, [over.match.copy]/1.2
+;; and [over.match.ref]: the temporary bound to a constructor's first parameter of type reference to that class takes the
+;; argument's explicit conversion functions too (cx-direct-conv?)
+(def ^:dynamic *cx-direct-conv* nil)
+(defn- cx-direct-conv? [id] (boolean (and *cx-direct-conv* (= id *cx-direct-conv*))))
 (def ^:dynamic *cx-hdr-names* nil) ; a delay of a HashSet of names
 
 (declare header-node?)
@@ -2613,6 +2618,25 @@
         ;; (queue 445: a block-scope declaration made before it, kept under its hidden key)
         hidden (when-not old (find-block-redecl home f))
         old (or old hidden)
+        ;; (queue 602, the checker: [namespace.udecl]/11 (C++20 /12), a namespace's or a block's function declaration of the
+        ;; name and parameter-type-list of a function a using-declaration of that scope introduced from another namespace
+        ;; declares no such function: GCC's "'void Baz(int)' conflicts with a previous declaration" (lookup/using58.C's
+        ;; `extern void Baz (int);` after `using Y::Baz;`); the same function -- `using ::Foo; extern void Foo (int);` -- none)
+        _ (when (and (checking?) (not (:cls home)) (nil? cid) (not (header-node? n)) (nil? *instantiating*)
+                     (#{"FunctionDecl"} (:kind n)) (empty? q))
+            (let [us (filter #(and (= :fn (:e %)) (:cx-using %)) (.get ^java.util.HashMap (:names scope) (or nm "")))
+                  ;; (a block's function declaration declares its innermost enclosing namespace's, [dcl.meaning.general]/3.5)
+                  hns (loop [s home] (if (or (nil? s) (= :ns (:kind s))) s (recur (:parent s))))]
+              (when-let [u (some #(let [g (fnd (:id %))] (when (and g hns (same-sig? g f) (:scope g) (not (identical? (:names (:scope g)) (:names hns)))) g)) us)]
+                (throw (ex-info (str "codegen: '" nm "' conflicts with a previous declaration (a using-declaration's)")
+                                {:codegen/refused :redecl :cx/node n})))))
+        ;; (queue 602, the checker: a namespace's own declaration of a function a friend declaration alone declared makes it
+        ;; visible to ordinary lookup, [namespace.memdef]/3: one a friend definition declared too, or template.ae's friend!'s
+        ;; :cx-friend-decl)
+        _ (when (and (checking?) old (= :ns (:kind scope)) (= scope home) (:friend-cls (fnd old)))
+            (upd-fn! old dissoc :friend-cls :cx-friend-decl)
+            (let [^java.util.HashMap m (:names home) k (ucn-name nm)]
+              (when-let [es (.get m k)] (.put m k (mapv #(if (= old (:id %)) (dissoc % :friend-cls) %) es)))))
         _ (when (and old (or bns hidden))
             (enter! (if bns scope home) (if (= k :ctor) " ctor" (if (= k :dtor) " dtor" nm)) {:e :fn :id old :pos (:pos f)}))
         id (or old (next-id))
@@ -4004,7 +4028,24 @@
                                                              ;; (cpp-rt-own3, DECISION 510-1 (a): and the code generator's, for queue 510's
                                                              ;; implicit object parameter of a using-declared member)
                                                              (and (:cls scope) (= :fn (:e e)) (:cls (fnd (:id e))))
-                                                             (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))))))
+                                                             (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
+                                                             ;; (queue 602: a namespace's or a block's synonym marked, declare-fn!'s rule)
+                                                             (and (checking?) (not (:cls scope)) (= :fn (:e e)))
+                                                             (assoc :cx-using true))))
+                  ;; (queue 602, the checker: [namespace.udecl]/11 (C++20 /12), a function the using-declaration introduces with the
+                  ;; name and parameter-type-list of another function the scope declares itself -- not a using-declaration's, not the
+                  ;; same function -- is ill-formed: GCC's "'void a::f(int)' conflicts with a previous declaration", at the
+                  ;; using-declaration (overload/using3.C))
+                  (when (and (checking?) (not (:cls scope)) (#{:ns :block} (:kind scope)) (not (header-node? n)))
+                    (when (some (fn [e] (and (= :fn (:e e))
+                                             (let [g (fnd (:id e))]
+                                               (and g (not (:cls g))
+                                                    (some (fn [o] (and (= :fn (:e o)) (not (:cx-using o)) (not= (:id o) (:id e))
+                                                                       (let [h (fnd (:id o))] (and h (not (:cls h)) (not (:friend-cls h)) (same-sig? g h)))))
+                                                          (.get ^java.util.HashMap (:names scope) (last parts)))))))
+                                es)
+                      (swap! *order* conj [:cx-error (ex-info (str "codegen: '" (last parts) "' conflicts with a previous declaration (a using-declaration)")
+                                                              {:codegen/refused :redecl :cx/node n})]))))
     ;; (cpp-s12: `using enum E;`, [enum.udecl]/2: E's enumerators declared in the scope as by using-declarations, at
     ;; namespace, class or block scope; <bits/unicode.h>'s _Grapheme_cluster_iterator::_M_is_break, f8's)
     "UsingEnumDecl" (let [t (node-text n)
@@ -4274,7 +4315,19 @@
                                        (and (seq cs) (not-any? #(:c (:to (first (:ps (:ty (fnd %)))))) cs))))
                              (class-like-members id)))
           ctor-p (if (non-const? copy-ctor? :ctors) (abi/lref t) cref)
-          assign-p (if (non-const? copy-assign? :methods) (abi/lref t) cref)]
+          assign-p (if (non-const? copy-assign? :methods) (abi/lref t) cref)
+          ;; (queue 602, the checker: [dcl.fct.def.default]/2 before C++20, a copy constructor defaulted on its first declaration
+          ;; whose parameter is `const X&` where the implicit one's would be `X&` (above) is ill-formed -- deleted since C++20,
+          ;; P0641 --: GCC's "'W::W(const W&)' is implicitly deleted because its declared type does not match the type of an
+          ;; implicit copy constructor", at the declaration (cpp0x/defaulted59.C, defaulted52.C's W<M>))
+          _ (when (and (checking?) (< (long *cxx-year*) 20) (= ctor-p (abi/lref t)) *on-refusal*)
+              (doseq [x (:ctors (abi/cls id))]
+                (let [g (fnd x)]
+                  (when (and g (:defaulted g) (not (:ool-defaulted g)) (not (:out-of-line-default g)) (not (:implicit g)) (:node g)
+                             (copy-ctor? g id) (:c (:to (first (:ps (:ty g))))) (not (header-node? (:node g))))
+                    (*on-refusal* (ex-info (str "codegen: '" (:name g) "' is implicitly deleted because its declared type does not match the type of an implicit copy constructor")
+                                           {:codegen/refused :defaulted})
+                                  (:node g))))))]
     (when-not (has-ctor-of? id copy-ctor?)
       (let [fid (implicit-fn! id :ctor (:name c) {:k :fn :ret abi/void :ps [ctor-p] :va false} :trivial (trivial-copy? id))]
         (when del (upd-fn! fid merge del))
@@ -4364,7 +4417,21 @@
              ;; (cpp-rt-own3: a constructor template is a user-declared constructor too, [class.ctor.general]/1: `template<typename... U>
              ;; explicit constexpr CI(U&&... a)` over a union's member, `constinit CI<D> dr{};` value-initialized by it, its vptr
              ;; written, not zeroed as an aggregate's member)
-             (and (not (:user-ctor c)) (empty? (:ctor-tmpls c)) (not (abi/dynamic? id))
+             (and (if (and (checking?) (< (long *cxx-year*) 20))
+                    ;; (queue 602, the checker: before C++20, [dcl.init.aggr]/1 of C++11, C++14 and C++17: no user-provided
+                    ;; constructor -- one defaulted or deleted on its first declaration is none, [dcl.fct.def.default]/5 --
+                    ;; in C++17 no explicit or inherited one either; before C++17 no base class at all, in C++11 no default
+                    ;; member initializer: cpp2a/aggr1.C, cpp0x/deleted2.C's `A() = delete;` at C++11)
+                    (and (not-any? #(let [f (fnd %)]
+                                      (and (not (:implicit f))
+                                           (or (not (or (:deleted f) (and (:defaulted f) (not (:ool-defaulted f)) (not (:out-of-line-default f)))))
+                                               (and (>= (long *cxx-year*) 17) (:explicit f)))))
+                                   (:ctors c))
+                         (or (< (long *cxx-year*) 17) (empty? (:inherits-ctors c)))
+                         (or (>= (long *cxx-year*) 17) (empty? (:bases c)))
+                         (or (>= (long *cxx-year*) 14) (not-any? #(and (not (:static %)) (:init %)) (:fields c))))
+                    (not (:user-ctor c)))
+                  (empty? (:ctor-tmpls c)) (not (abi/dynamic? id))
                   (every? #(= :public (:access %)) (:fields c))
                   (every? #(= :public (:access %)) (:bases c)))))))
 
@@ -6886,6 +6953,12 @@
   [e]
   (let [t (:ty e)]
     (cond
+      ;; (queue 602, the checker: [expr.ref]/6.3.2 and [expr.prim.id]/2, a non-static member function named through an
+      ;; object -- `o.f`, `p->f`, or `f` alone in a member, implicitly this->f -- is only a call's operand: as a value GCC's
+      ;; "invalid use of non-static member function" (rtti/typeid8.C's typeid (foo), template/pr29633.C's `tc_a->testfn1`)
+      (and (checking?) (= :fnset (:op e)) (or (:obj e) (:implicit-this e)) (seq (:fns e)) (empty? (:tmpls e))
+           (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns e)))
+      (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns e)))) "'")
       (= :fnset (:op e)) (if-let [f (fn-matching e nil)] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} e)
       (= :mptr-fnset (:op e)) (if (= 1 (count (:fns e))) (mptr-fn-node (first (:fns e))) e)
       (abi/arr? t) {:op :decay :e e :ty (abi/ptr (:of t)) :cat :pr}
@@ -7084,6 +7157,23 @@
               :else nil)))
     (let [tu (abi/unq t) f0 (abi/unq (:ty e))
           f (if (and (= :mptr-fnset (:op e)) (seq (:fns e))) (abi/unq (:ty (mptr-fn-node (first (:fns e))))) f0)]
+      ;; (queue 602: [expr.static.cast]/13, a pointer to cv1 void to a pointer to cv2 T with cv2 no less than cv1 alone: GCC's
+      ;; "'static_cast' from type 'const void*' to type 'A*' casts away qualifiers", tc1/dr137.C)
+      (when (and (= kind "CXXStaticCastExpr") (abi/ptr? tu) (abi/ptr? f) (abi/void? (abi/unq (:to f))) (some? (:to tu))
+                 (not (abi/void? (abi/unq (:to tu)))) (not (abi/fn? (abi/unq (:to tu))))
+                 (or (and (:c (:to f)) (not (:c (:to tu)))) (and (:v (:to f)) (not (:v (:to tu))))))
+        (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) ": casts away qualifiers"))
+      ;; (queue 602: [expr.static.cast]/4 and [conv.bool]/1, std::nullptr_t converts to no arithmetic or enumeration type but bool,
+      ;; and no other static_cast applies: GCC's "invalid 'static_cast' from type 'std::nullptr_t' to type 'const int'",
+      ;; cpp0x/nullptr04.C)
+      (when (and (= kind "CXXStaticCastExpr") (not (abi/ref? t)) (= :nullptr (abi/bn f))
+                 (or (abi/arith? tu) (abi/enum? tu)) (not= :bool (abi/bn tu)))
+        (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) " (static_cast)"))
+      ;; (queue 602: [expr.cast]/4, a cast notation to a pointer to member from an arithmetic value or a pointer that is no null
+      ;; pointer constant is none of the casts it may perform ([expr.static.cast]/12, [expr.reinterpret.cast]/10 take pointers to
+      ;; members alone): GCC's "invalid cast from type 'long long int' to type 'void (QObject::*)()'", other/conversion1.C)
+      (when (and (= kind "CStyleCastExpr") (abi/mptr? tu) (or (abi/arith? f) (abi/ptr? f)) (not (null-constant? e)))
+        (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) " (a pointer to member)"))
       ;; (another member type, or the constness cast away, [expr.static.cast]/12)
       (when (and (= kind "CXXStaticCastExpr") (abi/mptr? tu) (abi/mptr? f) (some? (:to f)) (some? (:to tu)))
         (cond (not= (abi/unq (:to tu)) (abi/unq (:to f))) (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))
@@ -7120,7 +7210,10 @@
           (when (cond
                   (abi/class? tu) true
                   (abi/floating? tu) true
-                  (abi/integral? tu) (not (or (abi/ptr? f) (= tu f) (= :nullptr (abi/bn f))))
+                  ;; (queue 602: [expr.reinterpret.cast]/4, a pointer or std::nullptr_t to an integral type too small for it:
+                  ;; GCC's "cast from 'std::nullptr_t' to 'short int' loses precision", cpp0x/nullptr04.C)
+                  (abi/integral? tu) (or (not (or (abi/ptr? f) (= tu f) (= :nullptr (abi/bn f))))
+                                         (and (or (abi/ptr? f) (= :nullptr (abi/bn f))) (< (long (abi/size-of tu)) 8)))
                   (abi/enum? tu) (not= tu f)
                   (abi/ptr? tu) (or (not (or (abi/ptr? f) (abi/integral? f) (abi/enum? f)))
                                     (and (abi/ptr? f) (not (abi/fn? (abi/unq (:to f)))) (not (abi/fn? (abi/unq (:to tu))))
@@ -7684,6 +7777,10 @@
           (and (= :ref (:k p)) (not (:c pt))) nil
           ;; a const lvalue reference or an rvalue reference to a temporary
           (and (= :rref (:k p)) (= :lv (:cat e)) (or same derived)) nil
+          ;; (queue 602, the checker: or a similar pointer type, reference-related since CWG 2352, [dcl.init.ref]/5.4.4 with
+          ;; [over.ics.ref]/3: cpp0x/pr33930.C's foo (type&&) for an int* lvalue no candidate)
+          (and (checking?) (= :rref (:k p)) (= :lv (:cat e)) (abi/ptr? (abi/unq at)) (abi/ptr? (abi/unq pt))
+               (= (abi/unq (:to (abi/unq at))) (abi/unq (:to (abi/unq pt))))) nil
           :else (when-let [r (ics (if (lv? e) e e) pt)] (assoc r :sub (if (= :rref (:k p)) -1 (inc (long (or (:sub r) 0))))))))
               (assoc :refb true))
       (abi/class? pt)
@@ -7695,7 +7792,9 @@
         (and (class-id at) (abi/derived-from? (class-id at) (:id pt))) {:rank 2 :d2b [(class-id at) (:id pt)]}
         *no-user* nil
         ;; the source class's conversion function to the class ([over.ics.user]; G5: strong_ordering to partial_ordering)
-        (and (class-id at) (conv-for (class-id at) (abi/unq pt) false (:c at))) {:rank 3}
+        ;; (queue 602, the checker: explicit ones too for the temporary of a direct-initialization's constructor parameter,
+        ;; cx-direct-conv?)
+        (and (class-id at) (conv-for (class-id at) (abi/unq pt) (and (checking?) (cx-direct-conv? (:id pt))) (:c at))) {:rank 3}
         :else (let [converts? (fn [cid] (let [f (fnd cid)]
                                           (and (not (:explicit f)) (>= (count (:ps (:ty f))) 1)
                                                (not (let [p0 (first (:ps (:ty f)))] (and (abi/ref? p0) (= (class-id (:to p0)) (:id pt)))))
@@ -8813,7 +8912,13 @@
                           (empty? (:ctor-tmpls c)) (empty? (:inherits-ctors c)) (not (:header c)) (not (:cx-ctor-dropped c)))
                  (throw x))))))))
 
-(def ^:dynamic *copy-init-ctors* nil) ; cpp-tzdb: a copy-initialization from the class's own type, class-init's: no explicit template
+(def ^:dynamic *copy-init-ctors* nil)
+
+(defn- cx-other-class-arg?
+  "Queue 602: whether the argument `a` is an expression of a class type that is neither class `id` nor derived from it."
+  [id a]
+  (boolean (and (map? a) (not= :init-list (:op a))
+                (let [c (class-id (:ty a))] (and c (not= c id) (not (abi/derived-from? c id))))))) ; cpp-tzdb: a copy-initialization from the class's own type, class-init's: no explicit template
 
 (defn- class-init
   "The initialization of an object of class type `t` by the arguments `args` (typed expressions or an init-list)."
@@ -8854,15 +8959,18 @@
                       (when (= 1 (count viable)) (narrow-list-check! a l))
                       {:i :ctor :fn fid :args (call-args (fnd fid) [a] ctx)})))
                 ;; 1.2: all the constructors with the list's elements (each an argument, a list among them too)
-                (narrow-ctor-check! (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l)))))) (:items l)))))))
+                ;; (queue 602, the checker: a direct-list-initialization by one element of another class, cx-direct-conv?)
+                (narrow-ctor-check! (binding [*cx-direct-conv* (if (and (checking?) (not *cx-copy-list*) (= 1 (count (:items l))) (cx-other-class-arg? id (first (:items l)))) id *cx-direct-conv*)]
+                                      (ctor-init id (:items l) ctx (and (= 1 (count (:items l))) (= :init-list (:op (first (:items l)))))))
+                                    (:items l)))))))
       (and (empty? args)) (default-ctor-init id (= style :value))
       ;; from another class with a conversion function to this one: the conversion's prvalue ([dcl.init]/17.6.3,
       ;; [over.match.copy]; G5: strong_ordering to partial_ordering; else the copy constructor's reference would bind
       ;; through the same conversion, again and again)
       (and (= 1 (count args)) (not= :init-list (:op (first args))) (class-id (:ty (first args)))
            (not= (class-id (:ty (first args))) id) (not (abi/derived-from? (class-id (:ty (first args))) id))
-           (conv-for (class-id (:ty (first args))) (abi/unq t) false (:c (:ty (first args)))))
-      {:i :expr :e (user-conv ctx (first args) (abi/unq t) false)}
+           (conv-for (class-id (:ty (first args))) (abi/unq t) (and (checking?) (cx-direct-conv? id)) (:c (:ty (first args)))))
+      {:i :expr :e (let [x (and (checking?) (cx-direct-conv? id))] (binding [*cx-direct-conv* nil] (user-conv ctx (first args) (abi/unq t) x)))}
       ;; C++20's parenthesized initialization of an aggregate ([dcl.init.general]/16.6.2.2, P0960): no constructor viable
       ;; for the parenthesized arguments, the elements copy-initialized from them in order (CP280 (a); brace elision
       ;; and the narrowing check do not apply: the list's rules, which elide and check more, are not used for a
@@ -8908,6 +9016,11 @@
       (and (= style :copy) (= 1 (count args)) (not= :init-list (:op (first args)))
            (let [c (class-id (:ty (first args)))] (and c (or (= c id) (abi/derived-from? c id)))))
       (binding [*copy-init-ctors* true] (ctor-init id args ctx))
+      ;; (queue 602, the checker: a direct-initialization by one argument of another class, [over.match.copy]/1.2: the
+      ;; copy and move constructors' reference parameters take its explicit conversion functions too, cx-direct-conv?;
+      ;; cpp0x/explicit1.C's T t4(x) of `explicit operator T()`, cpp0x/explicit4.C's A(b) but not A(b,1))
+      (and (checking?) (= style :direct) (= 1 (count args)) (cx-other-class-arg? id (first args)))
+      (binding [*cx-direct-conv* id] (ctor-init id args ctx))
       :else (ctor-init id args ctx)))))
 
 (defn- inheriting-ctor!
@@ -9351,6 +9464,15 @@
              (> (long (:n (abi/unq (:ty e)))) (long (:n tu))))
     (fail :string-long "initializer-string for an array of " (:n tu) " elements is too long")))
 
+(defn- cx-bitfield-lv?
+  "Queue 602 (the checker): whether the lvalue `e` designates a bit-field: a bit-field member, or a conditional expression
+  either of whose operands does ([expr.cond]/4-5: the result a bit-field if either operand is)."
+  [e]
+  (boolean (case (:op e)
+             :field (and (integer? (:i e)) (:cls e) (some-> (abi/cls (:cls e)) :fields (nth (:i e) nil) :bits))
+             :cond (or (cx-bitfield-lv? (:then e)) (cx-bitfield-lv? (:else e)))
+             false)))
+
 (defn init-for
   "The initializer of an object of type `t` from `src`: nil (none), a typed expression, an init-list node
   {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
@@ -9397,7 +9519,19 @@
             (fail :init "no function of the set matches the reference"))
           (and (lv? e) (or same derived) (or (= :lv (:cat e)) (= :rref (:k t)) (:c pt))
                (or (not= :rref (:k t)) (not= :lv (:cat e))))
-          {:i :bind :e (if derived {:op :base-lv :e e :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c at)) :cat (:cat e)} e)}
+          (do ;; (queue 602, the checker: [dcl.init.ref]/5.1, a reference binds directly an lvalue that is no bit-field; a
+              ;; const non-volatile lvalue reference binds a temporary, any other a bit-field not at all, GCC's "cannot bind
+              ;; bit-field" -- also after overload resolution chose it, [over.ics.ref]/4: conversion/bitfield7.C's foo (s.bar)
+              ;; of foo (unsigned int &), tree-ssa/pr20280.C's g (b ? x.i : x.j) of g (long&))
+              (when (and (checking?) (= :ref (:k t)) (or (not (:c pt)) (:v pt)) (cx-bitfield-lv? e))
+                (fail :init "cannot bind bit-field to a non-const lvalue reference"))
+              ;; (queue 602, the checker: [conv.ptr]/3 with [dcl.init.ref]/5 and [class.access.base]/4-5, the derived-to-base
+              ;; conversion of the binding needs the base accessible where it is (an invented public member of the base
+              ;; accessible as a member of the derived class): GCC's "'P' is an inaccessible base of 'B'", conversion/access1.C's
+              ;; P(b))
+              (when (and (checking?) derived)
+                (cx-access! ctx (class-id pt) (:name (abi/cls (class-id pt))) :public (class-id at) nil))
+              {:i :bind :e (if derived {:op :base-lv :e e :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c at)) :cat (:cat e)} e)})
           (and (= :pr (:cat e)) (or same derived) (abi/class? (abi/unq at)))
           (do ;; (cpp-diag-b, 2026-11-22: [dcl.init.ref]/5.4, an lvalue reference binds an rvalue only when it is to a const
               ;; non-volatile type: GCC's "cannot bind non-const lvalue reference of type 'bar&' to an rvalue of type 'bar'")
@@ -9414,6 +9548,14 @@
                 rt (:ty c)
                 d (not= (class-id rt) (class-id pt))]
             {:i :bind :e (if (and d (class-id pt)) {:op :base-lv :e c :to (class-id pt) :ty (assoc (abi/unq pt) :c (:c rt)) :cat (:cat c)} c)})
+          ;; (queue 602, the checker: [dcl.init.ref]/5.4.4, an rvalue reference to a type reference-related to the initializer's
+          ;; -- the same, a base, or a similar pointer type (CWG 2352) -- binds no lvalue, the temporary not made: GCC's
+          ;; "cannot bind rvalue reference of type 'const int*&&' to an lvalue of type 'int*'", cpp0x/ref-bind2.C)
+          (and (checking?) (= :rref (:k t)) (= :lv (:cat e)) (not (vector? src)) (not (abi/fn? (abi/unq pt)))
+               (let [au (abi/unq at) pu (abi/unq pt)]
+                 (or same derived
+                     (and (abi/ptr? au) (abi/ptr? pu) (= (abi/unq (:to au)) (abi/unq (:to pu)))))))
+          (fail :init "cannot bind rvalue reference to an lvalue")
           (or (and (:c pt) (not (and (checking?) (:v pt)))) (= :rref (:k t)))
           {:i :bind-temp :init (if (and (checking?) (vector? src) (>= (long *cxx-year*) 20) (abi/class? (abi/unq pt)) (aggregate? (abi/unq pt))
                                         (not (class-id at)))
@@ -9501,6 +9643,11 @@
             (and (:union c) (empty? items) (not nsdmi-u)) {:i :zero}
             :else
             (do (when (> (count items) (count subs)) (fail :init "too many initializers"))
+                ;; (queue 602, the checker: [dcl.init.aggr]/8 (CWG2227), the destructor of each element of class type
+                ;; potentially invoked from the aggregate initialization's context, [class.dtor]/15: cpp1z/aggr-base11.C's
+                ;; protected base destructor)
+                (when (and (checking?) (not (:union c)))
+                  (doseq [s subs] (cx-dtor-access! ctx (:ty s))))
                 {:i :list :cls (:id tu)
                  ;; (queue 460: a union's list takes its first member, a designator not read: the member's implicit
                  ;; conversion not judged)
@@ -9543,7 +9690,10 @@
                       ;; braced list there is GCC's "braces around scalar initializer")
                       (when (and (checking?) (= :init-list (:op (first (:items src)))) (abi/scalar? tu))
                         (fail :scalar-braces "braces around scalar initializer"))
-                      (narrow-check! (init-for t (first (:items src)) ctx (if (= style :list) :direct :copy)) t (first (:items src))))
+                      ;; (queue 602, the checker: by copy-initialization for copy-list-initialization, *cx-copy-list*: an
+                      ;; element of class type converts by its non-explicit conversion functions alone, cpp0x/explicit15.C's
+                      ;; `int n2 = {t};` of `explicit operator int()`)
+                      (narrow-check! (init-for t (first (:items src)) ctx (if (and (= style :list) (not (and (checking?) *cx-copy-list* (class-id (:ty (first (:items src))))))) :direct :copy)) t (first (:items src))))
                 (fail :init "several values for a scalar")))
       (abi/class? tu) (class-init tu [src] ctx style)
       (abi/arr? tu)
@@ -10126,6 +10276,9 @@
   (cond
     (abi/class? (abi/unq (:ty l))) (operator-call ctx "=" [l r])
     :else (do (when-not (lv? l) (fail :assign "assignment to an rvalue"))
+              ;; (queue 602, the checker: [expr.assign]/1, a built-in assignment's left operand a modifiable lvalue: an xvalue
+              ;; of scalar type none, GCC's "using rvalue as lvalue", cpp0x/rv-lvalue-req.C's declval<int>() = ...)
+              (when (and (checking?) (= :xv (:cat l)) (not (abi/class? (abi/unq (:ty l))))) (fail :assign "assignment to an rvalue (an xvalue)"))
               ;; (queue 412, round 7, the checker: [expr.assign]/1 with [basic.lval]/7, an array is no modifiable lvalue; GCC's
               ;; "invalid array assignment", from a braced list its "assigning to an array from an initializer list")
               (when (and (checking?) (abi/arr? (abi/unq (:ty l))))
@@ -10171,6 +10324,10 @@
                 {:op :assign :l l :r r :ty (:ty l) :cat :lv})))))
 
 (defn- compound-node [o l r & [ctx]]
+  ;; (queue 602, the checker: [expr.assign]/1, a compound assignment's left operand a modifiable lvalue: a prvalue or an xvalue
+  ;; of scalar type none, GCC's "using rvalue as lvalue", cpp0x/rv-lvalue-req.C's `declval<int>() += 1`)
+  (when (and (checking?) (#{:xv :pr} (:cat l)) (some? (:ty l)) (not (abi/class? (abi/unq (:ty l)))))
+    (fail :assign "assignment to an rvalue (a compound assignment's)"))
   (cx-read-only! l nil ctx)
   (let [lt (abi/unq (:ty l)) r (rv r)]
     (if (abi/ptr? lt)
@@ -10206,7 +10363,12 @@
                      ;; not be moved, fs_path.cc's path::_List)
                      (and fc tc (abi/derived-from? fc tc)) (cond-> (to-base-lv e tc) (= :rref (:k t)) (assoc :cat :xv))
                      (and fc tc (abi/derived-from? tc fc)) {:op :derived-lv :e e :to tc :ty pt :cat (if (= :rref (:k t)) :xv :lv)}
-                     :else {:op :reinterpret-lv :e e :ty pt :cat (if (= :rref (:k t)) :xv :lv)}))
+                     ;; (queue 602, the checker: a cast of a bit-field lvalue to a reference type it does not bind to directly,
+                     ;; [dcl.init.ref]/5.1, is reinterpret_cast's, [expr.reinterpret.cast]/11, which takes the operand's address:
+                     ;; GCC's "attempt to take address of bit-field", tree-ssa/pr20280.C's `(long &)(b ? x.i : x.j)`)
+                     :else (do (when (and (checking?) (= :ref (:k t)) (or (not (:c pt)) (:v pt)) (lv? e) (cx-bitfield-lv? e))
+                                 (fail :init "cannot bind bit-field (attempt to take address of bit-field)"))
+                               {:op :reinterpret-lv :e e :ty pt :cat (if (= :rref (:k t)) :xv :lv)})))
     (abi/class? (abi/unq t)) {:op :temp-obj :init (init-for t [e] ctx :direct) :ty (abi/unq t) :cat :pr}
     :else (convert-scalar (rv e) t true)))
 
@@ -10492,7 +10654,7 @@
   (the qualifier's), so its access is checked there as any qualified name's ([class.access]/1-2, [class.access.base]/5):
   a non-static data member inaccessible as a member of C; a member function when every member function of that name
   the lookup `es` finds is inaccessible (overload resolution picks among them later, [over.over]); a protected member's
-  object rule ([class.protected]) not applied, so no false error. GCC's \"'void base::foo()' is private within this
+  object rule ([class.protected]/1) with the qualifier's class as the object's since queue 602. GCC's \"'void base::foo()' is private within this
   context\" (template/access34.C, in a class template's member, a member template's specialization and an out-of-line
   member alike)."
   [ctx es q g nm]
@@ -10501,11 +10663,14 @@
       (let [e (first es)]
         (case (:e e)
           :field (let [a (:access (nth (:fields (abi/cls (:cls e))) (:i e) nil))]
-                   (when (#{:private :protected} a) (cx-access! ctx (:cls e) nm a qc nil)))
+                   ;; (queue 602: [class.protected]/1, "If the access is to form a pointer to member, the nested-name-
+                   ;; specifier shall denote C or a class derived from C": the qualifier's class as the object's,
+                   ;; parse/access5.C's &A::a in B derived from A; likewise a member function's below, parse/access4.C)
+                   (when (#{:private :protected} a) (cx-access! ctx (:cls e) nm a qc qc)))
           :fn (let [fs (keep #(when (= :fn (:e %)) (fnd (:id %))) es)]
                 (when (and (seq fs) (every? #(and (:cls %) (not (:static %)) (#{:private :protected} (:access %))) fs))
                   (when-let [cx (cx-context ctx)]
-                    (when (every? #(false? (cx-access-ok? cx (:cls %) (:access %) (if (or (= qc (:cls %)) (abi/derived-from? qc (:cls %))) qc (:cls %)) nil)) fs)
+                    (when (every? #(false? (cx-access-ok? cx (:cls %) (:access %) (if (or (= qc (:cls %)) (abi/derived-from? qc (:cls %))) qc (:cls %)) qc)) fs)
                       (fail :access "'" nm "' is a " (name (:access (first fs))) " member of '" (:name (abi/cls (:cls (first fs)))) "'")))))
           nil)))))
 
@@ -10891,7 +11056,14 @@
     (let [nm (str "operator" o)
           cids (keep #(class-id (:ty %)) args)]
       (when (and (seq cids)
-                 (every? #(and (empty? (conv-fns %)) (empty? (conv-tmpls %))) cids)
+                 ;; (queue 602: or conversion functions all explicit, surely, which no built-in candidate's implicit
+                 ;; conversion takes, [over.match.oper]/7 with [class.conv.fct]/2 -- but the logical operators', whose
+                 ;; operands are contextually converted to bool, [expr.log.and]/1: cpp0x/explicit3.C's `a + true`)
+                 (every? #(and (empty? (conv-tmpls %))
+                               (if (#{"&&" "||" "!"} o)
+                                 (empty? (conv-fns %))
+                                 (every? (fn [f] (let [g (fnd f)] (and (:explicit g) (:explicit-sure g)))) (conv-fns %))))
+                         cids)
                  (not (some #(= :enum (:k (abi/unq (abi/non-ref (:ty %))))) args))
                  (empty? (class-lookup (first cids) nm))
                  (or (nil? (class-id (:ty (first args)))) (= (first cids) (class-id (:ty (first args)))))
@@ -11089,7 +11261,11 @@
                  ;; (cpp-rt-own4, the code generator: no argument-dependent lookup for a qualified name, [basic.lookup.argdep]/1:
                  ;; floating_from_chars.cc's `fast_float::from_chars(first, last, value, fmt)` had found std::from_chars through
                  ;; the std::chars_format argument, a better match than the template, from_chars(double&) calling itself)
-                 cands (concat (let [acls (adl-classes args)] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?))))) (adl-fns args (or (:name callee) (:name (first ms))))))
+                 ;; (queue 602, the checker: a qualified name finds no function a friend declaration alone declared,
+                 ;; [namespace.memdef]/3: lookup/friend19.C's ::foo (X()))
+                 cands (concat (let [acls (if (and (checking?) (:qualified callee)) #{} (adl-classes args))] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?)))))
+                                 (cond->> (adl-fns args (or (:name callee) (:name (first ms))))
+                                   (and (checking?) (:qualified callee)) (remove #(:friend-cls (fnd %))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
                  ;; (queue 588, the checker: a template argument-dependent lookup found, dropped by its deduction or constraints,
@@ -11161,6 +11337,12 @@
       (when (and (checking?) (not (abi/fn? ft)) (or (nil? ft) (#{:auto :dep :tdep :tparam} (:k ft))))
         (fail :type "a call of an undeduced callee type"))
       (when-not (abi/fn? ft) (fail :call "call of a non-function"))
+      ;; (queue 602, the checker: [expr.call]/7 with [dcl.fct.default]/3-4, a call through a pointer or reference to function has
+      ;; an argument for each parameter -- default arguments are no part of a function's type -- and, its type not variadic, no
+      ;; more: GCC's "too few arguments to function", expr/call5.C's `q ()` of `__typeof (Quux) *q`; not a pack's elements)
+      (when (and (checking?) (not (some #(= :pack-exp (:op %)) args)) (not-any? nil? (:ps ft))
+                 (or (< (count args) (count (:ps ft))) (and (not (:va ft)) (> (count args) (count (:ps ft))))))
+        (fail :call (if (< (count args) (count (:ps ft))) "missing argument" "too many arguments") " (a call through a pointer to function)"))
       {:op :icall :callee p :fty ft
        :args (vec (map-indexed (fn [i a] (if (< i (count (:ps ft))) (init-for (nth (:ps ft) i) a ctx :copy) {:i :expr :e (rv a)})) args))
        :ty (abi/non-ref (:ret ft)) :cat (case (:k (:ret ft)) :ref :lv :rref :xv :pr)})))
@@ -11761,7 +11943,14 @@
               (capture-field (assoc ctx :lambda (assoc lam :default :ref)) k))
         (cond
           (= :this k)
-          (let [te (this-expr encl)
+          (let [;; (queue 602, the checker: *this odr-used in a lambda that neither captures it nor has a capture-default is no
+                ;; entity odr-usable there, [expr.prim.lambda.capture]/8 with [basic.def.odr]/10: GCC's "'this' was not
+                ;; captured for this lambda function", at the use, the analysis going on as if captured (lambda-in-class-neg.C's
+                ;; `[] { this; }`, lambda-ice3.C's member `local`); an unevaluated operand's no odr-use)
+                _ (when (and (checking?) (nil? mode) (not *unevaluated*) *on-refusal*)
+                    (when-let [n (let [n (some-> *at* deref)] (when (get-in n [:range :begin :offset]) n))]
+                      (*on-refusal* (ex-info "codegen: 'this' is not captured (for this lambda function)" {:codegen/refused :lambda-capture}) n)))
+                te (this-expr encl)
                 i (count (:fields (abi/cls lid)))]
             (abi/update-cls! lid update :fields conj {:name nil :ty (:ty te) :access :private :i i :capture true})
             (swap! caps assoc k i)
@@ -11868,7 +12057,14 @@
         lctx {:scope fs :fn-id fid :this-type (abi/ptr (cond-> t (not mutable) (assoc :c true))) :statics (atom []) :lambda lam}
         explicit (into {} (for [it items :when (not (#{"=" "&"} it)) :when (not (str/includes? it "="))
                                 :let [byref (str/starts-with? it "&") nm (str/trim (str/replace it #"^&" ""))]]
-                            (cond (= nm "this") [:this :copy]
+                            (cond (= nm "this")
+                                  ;; (queue 602, the checker: [expr.prim.lambda.capture]/3, the simple-capture `this` needs a
+                                  ;; `this` in the enclosing context, [expr.prim.this]/2: none in a non-member function,
+                                  ;; lambda-in-class-neg.C's `[this] () -> void {} ();` in main)
+                                  (do (when (and (checking?) (nil? (:this-type ctx)) (nil? (:lambda ctx)) (nil? *constraint-this*)
+                                                 (some-> (:fn-id ctx) fnd) (not (some-> (:fn-id ctx) fnd :cls)))
+                                        (fail :this "invalid use of 'this' in non-member function"))
+                                      [:this :copy])
                                   (= nm "*this") (fail :lambda "a capture of *this")
                                   :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
                                           ;; (queue 492, the checker: a simple capture names an entity unqualified lookup
@@ -12028,7 +12224,14 @@
         lctx {:scope fs :fn-id nil :this-type (abi/ptr (cond-> t (not mutable) (assoc :c true))) :statics (atom []) :lambda lam}
         explicit (into {} (for [it items :when (not (#{"=" "&"} it)) :when (not (str/includes? it "="))
                                 :let [byref (str/starts-with? it "&") nm (str/trim (str/replace it #"^&" ""))]]
-                            (cond (= nm "this") [:this :copy]
+                            (cond (= nm "this")
+                                  ;; (queue 602, the checker: [expr.prim.lambda.capture]/3, the simple-capture `this` needs a
+                                  ;; `this` in the enclosing context, [expr.prim.this]/2: none in a non-member function,
+                                  ;; lambda-in-class-neg.C's `[this] () -> void {} ();` in main)
+                                  (do (when (and (checking?) (nil? (:this-type ctx)) (nil? (:lambda ctx)) (nil? *constraint-this*)
+                                                 (some-> (:fn-id ctx) fnd) (not (some-> (:fn-id ctx) fnd :cls)))
+                                        (fail :this "invalid use of 'this' in non-member function"))
+                                      [:this :copy])
                                   (= nm "*this") (fail :lambda "a capture of *this")
                                   :else (let [e (first (filter #(= :var (:e %)) (lookup (:scope ctx) nm)))]
                                           ;; (queue 492, the checker: a simple capture names an entity unqualified lookup
@@ -12104,16 +12307,51 @@
           [k o] (if swap? [b a] [a b])
           ot (abi/unq (:ty (rv o)))
           kt (abi/unq (:ty k))
-          [k o] (if (conv-for (class-id kt) ot false (:c (:ty k)))
+          ;; (queue 602, the checker: neither operand converts to the other's type implicitly -- the class's conversion
+          ;; functions yield nothing that converts to the other's type, and no converting constructor that is not explicit
+          ;; takes the other operand, [expr.cond]/4.3 -- so [expr.cond]/6, overload resolution among the built-in candidates
+          ;; of [over.built]/27: a null pointer constant or a pointer beside a class whose non-explicit conversion function
+          ;; yields a pointer, both converted to it (conversion/op8.C's `0 ? 0 : a`, A's `explicit A(int)` and `operator void*`);
+          ;; with no such candidate GCC's "operands to '?:' have different types")
+          pc (when (and (checking?) (not (conv-for (class-id kt) ot false (:c (:ty k)))) (not (ics o kt)))
+               (or (when (or (null-constant? (rv o)) (abi/ptr? ot))
+                     (some #(let [f (fnd %) rt (abi/unq (abi/non-ref (:ret (:ty f))))]
+                              (when (and (not (:explicit f)) (abi/ptr? rt) (or (not (:c (:ty k))) (:cq f) (:cq (:ty f)))
+                                         (or (null-constant? (rv o)) (= rt ot)))
+                                rt))
+                           (distinct (conv-fns (class-id kt)))))
+                   (fail :conversion "cannot convert " (cx-tyname (:ty (rv o))) " to '" (:name (abi/cls (class-id kt))) "' implicitly (operands to '?:' have different types)")))
+          ;; (queue 602, the checker: both sequences formed -- the class's conversion function to the other's type and a
+          ;; converting constructor from it -- ill-formed, [expr.cond]/4.3: expr/cond10.C's C(const char*) with operator
+          ;; const char*())
+          _ (when (and (checking?) (not pc) (conv-for (class-id kt) ot false (:c (:ty k))) (ics o kt))
+              (fail :conversion "cannot convert " (cx-tyname (:ty (rv o))) " to '" (:name (abi/cls (class-id kt))) "' implicitly (operands to '?:' have different types, each converting to the other)"))
+          [k o] (cond
+                  pc [(user-conv ctx k pc false) (convert-scalar (rv o) pc false)]
+                  (conv-for (class-id kt) ot false (:c (:ty k)))
                   [(user-conv ctx k ot false) o]
                   ;; (else the other operand converted to the class, a temporary by its converting constructor)
-                  [k {:op :temp-obj :init (init-for kt o ctx :copy) :ty kt :cat :pr}])]
+                  :else [k {:op :temp-obj :init (init-for kt o ctx :copy) :ty kt :cat :pr}])]
       (if swap? (cond-node ctx c o k) (cond-node ctx c k o)))
     ;; (cpp-tzdb, the code generator: [expr.cond]/4.3.3, operands of two unrelated class types: the one that converts
     ;; implicitly to the other's type after lvalue-to-rvalue conversion (its cv kept) converted so, exactly one of them, the
     ;; result a prvalue of that type: `false ? declval<const string_view&>() : declval<const string&>()` is a prvalue const
     ;; string_view, <type_traits>' __cond_res, so common_reference_t<const string_view&, const string&> and common_type_t,
     ;; tzdb.cc's ranges::equal_range(node->rules, ri.rules(), ranges::less{}, &Rule::name) over totally_ordered_with)
+    ;; (queue 602, the checker: [expr.cond]/4.3 then /6, operands of two unrelated class types neither of which converts to
+    ;; the other implicitly, each with one conversion function that is not explicit, to an arithmetic type: overload
+    ;; resolution among [over.built]/27's candidates for promoted arithmetic types, both operands converted by their
+    ;; conversion functions, the result the arithmetic one's: cpp0x/explicit3.C's `a ? c : d` of two `operator int()`)
+    (and (checking?) (class-id (:ty a)) (class-id (:ty b)) (not= (class-id (:ty a)) (class-id (:ty b)))
+         (not (abi/derived-from? (class-id (:ty a)) (class-id (:ty b)))) (not (abi/derived-from? (class-id (:ty b)) (class-id (:ty a))))
+         (not (ics a (abi/unq (:ty b)))) (not (ics b (abi/unq (:ty a))))
+         (every? (fn [o] (let [cid (class-id (:ty o)) fs (remove #(:explicit (fnd %)) (distinct (conv-fns cid)))]
+                           (and (empty? (conv-tmpls cid)) (= 1 (count fs))
+                                (abi/arith? (abi/unq (abi/non-ref (:ret (:ty (fnd (first fs))))))))))
+                 [a b]))
+    (let [cv (fn [o] (let [cid (class-id (:ty o)) f (first (remove #(:explicit (fnd %)) (distinct (conv-fns cid))))]
+                       (user-conv ctx o (abi/unq (abi/non-ref (:ret (:ty (fnd f))))) false)))]
+      (cond-node ctx c (cv a) (cv b)))
     (and (not (checking?)) (class-id (:ty a)) (class-id (:ty b)) (not= (class-id (:ty a)) (class-id (:ty b)))
          (not (abi/derived-from? (class-id (:ty a)) (class-id (:ty b)))) (not (abi/derived-from? (class-id (:ty b)) (class-id (:ty a)))))
     (let [target (fn [o] (cond-> (abi/unq (:ty o)) (:c (:ty o)) (assoc :c true) (:v (:ty o)) (assoc :v true)))
@@ -12796,10 +13034,16 @@
                                            (cond-> {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr}
                                              (and (empty? (:tmpls e)) (< 1 (count (distinct (:fns e))))) (assoc :set e)
                                              (and (checking?) (empty? (:tmpls e)) (= 1 (count (distinct (:fns e))))) (assoc :one true)))
+                      ;; (queue 602, the checker: [expr.unary.op]/3, the operand an lvalue: an xvalue none, GCC's "taking address
+                      ;; of rvalue", cpp0x/rv-lvalue-req.C's &declval<int>())
+                      (and (checking?) (= :xv (:cat e))) (fail :addr "& of an rvalue (an xvalue)")
                       (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
             ("++" "--") (do (when-not (lv? e) (fail :incdec "++ of an rvalue"))
+                            ;; (queue 602, the checker: [expr.pre.incr]/1, [expr.post.incr]/1, a modifiable lvalue: an xvalue none,
+                            ;; GCC's "using rvalue as lvalue")
+                            (when (and (checking?) (= :xv (:cat e))) (fail :incdec "++ of an rvalue (an xvalue)"))
                             (cx-read-only! e (if (= o "++") "increment" "decrement") ctx)
                             ;; (cpp-diag-b, 2026-11-22: [expr.pre.incr]/1, [expr.post.incr]/1: the operand of ++ is no bool since
                             ;; C++17 (deprecated before), of -- never: GCC's "use of an operand of type 'bool' in 'operator--' is
@@ -14285,8 +14529,24 @@
                                           :else (deduce-auto rt pre))]
                               ;; (n-cpp-concepts: a constrained placeholder's, [dcl.type.auto.deduct]/2)
                               (placeholder-check! (:scope ctx) rt t "return type" n)
-                              (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t) t)
-                            rt)]
+                              (upd-fn! (:fn-id ctx) assoc-in [:ty :ret] t)
+                              ;; (queue 602, the checker: the placeholder kept for the later return statements, below)
+                              (when (and (checking?) (= {:k :auto} rt)) (upd-fn! (:fn-id ctx) assoc :cx-ret-ph rt))
+                              t)
+                            rt)
+                       ;; (queue 602, the checker: [dcl.spec.auto.general]/9 (C++20 /11), each non-discarded return statement of a
+                       ;; function whose declared return type is `auto` deduces the type again, and a different one is ill-formed:
+                       ;; GCC's "inconsistent deduction for auto return type: 'int (*)(int)' and then 'std::nullptr_t'"
+                       ;; (cpp1y/pr82373.C, lambda-deduce-mult-neg.C; a lambda's "inconsistent types deduced for lambda return
+                       ;; type", lambda-deduce-ext-neg.C))
+                       _ (when (and (checking?) (nil? pre) e (:cx-ret-ph (fnd (:fn-id ctx)))
+                                    ;; (an operand with a lambda not analyzed twice: its closure type made once)
+                                    (not-any? #(and (map? %) (= "LambdaExpr" (:kind %))) (tree-seq coll? #(if (map? %) (vals (dissoc % :_t :_ent :range :loc)) (seq %)) e)))
+                           (let [t2 (try (deduce-auto {:k :auto} (analyze ctx e)) (catch arbace.lang.ExceptionInfo _ nil))
+                                 dep? (fn [t] (re-find #":k :(auto|dep|tparam|tdep|texpr|pack-exp|overload)" (pr-str t)))]
+                             (when (and (map? t2) (map? rt) (some? (:k t2)) (some? (:k rt)) (not (dep? t2)) (not (dep? rt))
+                                        (not (abi/same-type? t2 rt)))
+                               (fail :deduce "inconsistent deduction for auto return type"))))]
                    ;; (cpp-diag-b, 2026-11-22: [stmt.return]/2, a return statement without an operand in a function whose return type
                    ;; is no cv void: GCC's "return-statement with no value, in function returning 'int'"; one with an operand of a
                    ;; type other than void in a function returning void: "return-statement with a value", from a constructor
@@ -14503,6 +14763,12 @@
                        _ (when (:hasVar n) (cx-decomp-condition! c (first ks) :switch))
                        _ (when (:hasVar n) (fail :stmt "a switch condition's declaration"))
                        e (rv (class->scalar c (analyze c (first ks))))
+                       ;; (queue 602, the checker: [stmt.switch]/2, a condition of class type is contextually implicitly converted
+                       ;; to an integral or enumeration type: no explicit conversion function takes part, cpp0x/explicit3.C's
+                       ;; `switch (a);` of `explicit operator bool()`, GCC's "switch quantity not an integer")
+                       _ (when (and (checking?) (abi/class? (abi/unq (:ty e))) (empty? (conv-tmpls (class-id (:ty e))))
+                                    (every? #(let [g (fnd %)] (and (:explicit g) (:explicit-sure g))) (conv-fns (class-id (:ty e)))))
+                           (fail :decomp "switch quantity not an integer"))
                        pt (promote-type (:ty e))]
                    {:s :block :items (vec (concat (when init [(stmt c init)])
                                                   [{:s :switch :e (convert-scalar e pt false) :ty pt :body (stmt (block-ctx c) (second ks))}]))})

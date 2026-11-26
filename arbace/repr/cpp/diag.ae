@@ -1599,6 +1599,9 @@
 
 ;; (round 54, fifth pass) the standard's year exc-class reads, bound by exception-specs
 (def ^:dynamic *exc-year* nil)
+;; (queue 602) the unit's functions by name, each the class of its own exception specification when all of that name agree and
+;; take no parameter: a noexcept-specifier `noexcept(noexcept(f()))` of one is that class ([expr.unary.noexcept]/3, [except.spec]/5)
+(def ^:dynamic *exc-fns* nil)
 
 (defn- exc-class
   "An exception specification's class: :none (potentially-throwing), :nothrow, [:dep expr] (a dependent noexcept-specifier,
@@ -1608,6 +1611,9 @@
         (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
         (= "noexcept(false)" exc) :nfalse
         (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
+        ;; (queue 602: noexcept(noexcept(f())) of a function f of the unit, the class of f's own specification: cpp0x/noexcept47.C)
+        (and *exc-fns* (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc))
+        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc)))
         ;; (round 54, fifth pass: before C++17 a dynamic exception specification, its set of types)
         (and *exc-year* (< (long *exc-year*) 17) (re-matches #"throw\((.+)\)" exc))
         {:dyn (set (map str/trim (str/split (second (re-matches #"throw\((.+)\)" exc)) #",")))}
@@ -1638,7 +1644,20 @@
 (defn exception-specs
   "The exception specifications' checks of the unit `u` (see above)."
   [u starts ^String src ^String main]
-  (binding [*exc-year* (cxx-year (:std u))]
+  (binding [*exc-year* (cxx-year (:std u))
+            *exc-fns* (let [acc (java.util.HashMap.)]
+                        (walk-nodes (fn [n _]
+                                      (when (and (#{"FunctionDecl" "CXXMethodDecl"} (:kind n)) (string? (:name n)) (seq (:name n)))
+                                        (let [qt (str (get-in n [:type :qualType]))
+                                              [sig exc] (split-exc qt)
+                                              c (if (re-find #"\(\s*(void)?\s*\)" sig)
+                                                  (cond (nil? exc) :none
+                                                        (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
+                                                        :else ::unknown)
+                                                  ::unknown)]
+                                          (.put acc (:name n) (conj (or (.get acc (:name n)) #{}) c)))))
+                                    (:nodes u) nil)
+                        (into {} (for [[k cs] acc :when (and (= 1 (count cs)) (not= ::unknown (first cs)))] [k (first cs)])))]
   (let [out (java.util.ArrayList.)
         decls (java.util.HashMap.)
         heads (java.util.HashMap.)
@@ -3549,7 +3568,23 @@
                               :when (and c e (reg-only? (str c)))
                               :let [t (type-of e) r (when t (cls-of t))]
                               :when (and r (memory-class? r))]
-                        (report! x "impossible constraint in 'asm'"))))
+                        (report! x "impossible constraint in 'asm'"))
+                      ;; (queue 602: the GCC manual's "x86 Floating-Point asm Operands": an output operand names the x87 stack
+                      ;; register it is in after the asm, so `=f` or `+f`, a class of several registers, is GCC's "output
+                      ;; constraint N must specify a single register": ext/pr84683.C, pr84828.C, pr106877.C)
+                      (doseq [[i [_ c]] (map-indexed vector (:outputs a))
+                              :when (and c (str/includes? (str/replace (str c) #"[\"=+&%*#!?]" "") "f"))]
+                        (report! x (str "output constraint " i " must specify a single register")))
+                      ;; (queue 602: the manual's "Output Operands", an output operand is a modifiable lvalue: a variable or
+                      ;; parameter of a const-qualified type that is no pointer or reference is GCC's "read-only variable 'i' used
+                      ;; as 'asm' output", ext/asm7.C)
+                      (doseq [[_ e] (map vector (:outputs a) (:inner x))
+                              :let [e (when (map? e) (strip e))
+                                    nm (when (= "DeclRefExpr" (:kind e)) (get-in e [:referencedDecl :name]))
+                                    d (when nm (or (get vars nm) (get globals nm)))
+                                    t (some-> d (get-in [:type :qualType]) str str/trim)]
+                              :when (and t (or (re-find #"^const\b|\bconst$" t) (:_const d)) (not (re-find #"[*&\[]" t)))]
+                        (report! x (str "read-only " (if (= "ParmVarDecl" (:kind d)) "parameter" "variable") " '" nm "' used as 'asm' output")))))
                   (when (and (= "UnaryOperator" k) (= "&" (:opcode x)))
                     (let [e (strip (first (:inner x)))]
                       (when (= "DeclRefExpr" (:kind e))
@@ -6103,7 +6138,11 @@
                       (let [e (first (filter map? (:inner n)))]
                         (when (and (#{"BinaryOperator" "ParenExpr" "ConditionalOperator" "UnaryOperator"} (:kind e))
                                    (not (and (= "ParenExpr" (:kind e)) (= "IntegerLiteral" (:kind (first (:inner e))))))
-                                   (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true)))
+                                   (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true))
+                                   ;; (queue 602: a conditional both of whose arms are integral constants; one of class type
+                                   ;; makes the result its conversion's pointer, [expr.cond]/6, conversion/op8.C's `1 ? 0 : a`)
+                                   (or (not= "ConditionalOperator" (:kind e))
+                                       (every? #(try (some? (ce-eval %)) (catch arbace.lang.ExceptionInfo _ true)) (rest (filter map? (:inner e))))))
                           (add! n "invalid conversion from 'int' to a pointer type")))))
                   (:nodes u) nil))
     ;; (cpp-read, 2026-11-24: C++98's [expr.const]/1, an integral constant expression uses no function call and no comma operator,
@@ -8695,6 +8734,26 @@
        :diags (mapv #(format-diag main %) es)
        ;; (cpp-singles: the notes too, for the dg-errors' later branches, arbace.repr.cpp.dg/read-own's alt-hits)
        :notes (mapv #(format-diag main %) (filter #(= :note (:kind %)) (:diags r)))})))
+
+;; queue 602 (2026-11-26): a lambda's simple-capture `this` where no `this` is ([expr.prim.lambda.capture]/3, arbace.cpp.sema's
+;; lambda-expr): GCC's "invalid use of 'this' in non-member function"
+(alter-var-root #'sema-rules conj
+  [:this #"^codegen: invalid use of 'this' in non-member function" "invalid use of 'this' in non-member function"]
+  ;; ([dcl.init.ref]/5.1: a non-const lvalue reference binds no bit-field, arbace.cpp.sema's init-for)
+  [:init #"^codegen: cannot bind bit-field" "cannot bind bit-field"]
+  ;; ([dcl.init.ref]/5.4.4: an rvalue reference binds no lvalue of a reference-related type, arbace.cpp.sema's init-for)
+  [:init #"^codegen: cannot bind rvalue reference to an lvalue$" "cannot bind rvalue reference to an lvalue"]
+  ;; ([dcl.spec.auto.general]/9: an `auto` return type deduced differently by two return statements, arbace.cpp.sema's ReturnStmt)
+  [:deduce #"^codegen: inconsistent deduction for auto return type$" "inconsistent deduction for auto return type"]
+  ;; ([namespace.udecl]/11: a using-declaration's function and the scope's own of one parameter-type-list, arbace.cpp.sema's
+  ;; UsingDecl and declare-fn!)
+  [:redecl #"^codegen: '.*' conflicts with a previous declaration \(a using-declaration" "conflicts with a previous declaration"]
+  ;; (a variable template's name without its arguments, arbace.cpp.template's var-template)
+  [:template #"^codegen: missing template arguments after the variable template" "missing template arguments"]
+  ;; ([expr.call]/7: a call through a pointer to function of more arguments than parameters, arbace.cpp.sema's analyze-call)
+  [:call #"^codegen: too many arguments \(a call through a pointer to function\)" "too many arguments to function"]
+  ;; ([dcl.fct.def.default]/2 before C++20: a defaulted copy constructor of the wrong parameter type, arbace.cpp.sema's finish-class)
+  [:defaulted #"^codegen: '.*' is implicitly deleted because its declared type does not match" "is implicitly deleted because its declared type does not match"])
 
 ;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
 (alter-var-root #'sema-rules conj

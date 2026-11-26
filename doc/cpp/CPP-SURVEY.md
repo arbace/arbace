@@ -12323,3 +12323,64 @@ cpp1y/pr65340.C (GCC keeps `operator()(, )` as taking two ints), parse/defarg18.
 default arguments, a single rule), the -Wtemplate-body rows (template/void14.C, cpp0x/vt-34052.C: definition-time checks) and
 diagnostic/pr96045-3.C (a macro's spelling location); parse/error32.C and error33.C out, as the brief says. A missing comma between
 enumerators (`enum { p q }`) is still accepted (no row needs it).
+
+## As built: 602, clang-only dg rows by the own front end, fourth pass (2026-11-26; queue 602, VM; branch `602-cpp-indep-slice4` from origin/next `e8e2c1ac3`)
+
+The rows clang's recorded dumps pass and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (the 104 of
+:ifndr-uninstantiated-template among them): 883 at the base (785 missed, 611 of them accepted; 58 both, 37 extra, 2 timeouts, 1 crash).
+cpp-indep3 took the biggest groups by the shortest files; this pass took the next groups by cause, each read row by row against its
+dg lines, the rules from the standard's text and GCC's documented messages (the GCC manual's "Extended Asm" and "x86 Floating-Point asm
+Operands"), no GCC or clang code. The groups, with the rows each moved to own pass:
+
+- Explicit conversion functions (arbace/cpp/sema.ae), 5: [over.match.copy]/1.2 and [over.match.ref], a direct-initialization of C by
+  one argument of another class takes the argument's explicit conversion functions for the temporary bound to a constructor's
+  reference parameter of C (`*cx-direct-conv*`; direct-list-initialization too, not copy-list); a copy-list-initialization of a scalar
+  from one element of class type copy-initializes it ([dcl.init.list]/3.9); a switch condition of class type takes no explicit one
+  ([stmt.switch]/2, "switch quantity not an integer"); a binary operator's class operand whose conversion functions are all explicit
+  has no built-in candidate (no-operator!, the logical operators aside): cpp0x/explicit1.C, explicit3.C, explicit4.C, explicit15.C,
+  initlist64.C.
+- The conditional operator (sema.ae, diag.ae), 2: [expr.cond]/4.3 then /6 -- neither operand converting to the other, a null pointer
+  constant or pointer beside a class's non-explicit conversion to a pointer converted to it, two unrelated classes each with one
+  non-explicit arithmetic conversion converted by them, else "operands to '?:' have different types"; both sequences formed
+  ill-formed; diag.ae's int-to-pointer rule no longer fires for a conditional with a class arm: conversion/op8.C, expr/cond10.C.
+- Aggregates before C++20 (sema.ae's aggregate?, the checker's), 6: [dcl.init.aggr]/1 of C++11/14/17 -- no user-provided constructor
+  (defaulted or deleted on the first declaration is none), in C++17 no explicit or inherited one, before C++17 no base, in C++11 no
+  default member initializer -- and [dcl.init.aggr]/8 (CWG2227), each element's destructor potentially invoked (cx-dtor-access!):
+  cpp0x/aggr3.C, cpp0x/deleted2.C, cpp1z/aggr-base1a.C, aggr-base2a.C, aggr-base11.C, cpp2a/aggr1.C.
+- Friend declarations (template.ae's friend!, sema.ae), 1: an unqualified friend function declaration of a non-template class declares
+  the innermost enclosing namespace's function, visible to ADL alone until the namespace declares it ([namespace.memdef]/3); a qualified
+  call finds none of them: lookup/friend19.C.
+- GNU asm (diag.ae's gnu-asm), 4: the manual's "x86 Floating-Point asm Operands", an output operand's constraint names a single x87
+  register ("output constraint N must specify a single register"); an output operand of a const variable or parameter ("read-only
+  variable 'i' used as 'asm' output"): ext/pr84683.C, pr84828.C, pr106877.C, asm7.C.
+- Naming a constructor (parse.ae), 4: [class.qual]/2.1, `C::C (...)` in an expression names C's constructor, "cannot call constructor
+  'A::A' directly" (the parser's, so templates never instantiated too): template/pr68948.C, pr69961a.C, pr69961b.C, crash101.C.
+- Access (sema.ae), 3: [class.protected]/1, a pointer to a protected member formed through a qualifier that is not the accessing class
+  or derived from it (cx-mptr-access!); a reference binding's derived-to-base conversion needs the base accessible ([class.access.base]/4):
+  parse/access4.C, access5.C, conversion/access1.C.
+- Lambdas and `this` (sema.ae), 2: *this odr-used in a lambda with neither its capture nor a capture-default ([expr.prim.lambda.capture]/8,
+  "'this' was not captured for this lambda function"); a simple-capture `this` in a non-member function: cpp0x/lambda/lambda-in-class-neg.C,
+  lambda-ice3.C.
+- Reference binding (sema.ae), 5: a non-const lvalue reference binds no bit-field ([dcl.init.ref]/5.1, also a cast to one); an rvalue
+  reference binds no lvalue of a reference-related type, similar pointers among them (CWG 2352; in overload resolution too):
+  conversion/bitfield7.C, tree-ssa/pr20280.C, cpp0x/ref-bind2.C, conversion/ref11.C, cpp0x/pr33930.C.
+- Value categories (sema.ae), 1: the operand of &, ++, -- and a built-in (compound) assignment's left an lvalue, no xvalue:
+  cpp0x/rv-lvalue-req.C.
+- Deduced return types (sema.ae), 3: each return of a function declared `auto` deduces again, a different type "inconsistent deduction
+  for auto return type" ([dcl.spec.auto.general]/9): cpp1y/pr82373.C, lambda-deduce-mult-neg.C, cpp0x/lambda/lambda-deduce-ext-neg.C.
+- Using-declarations (sema.ae), 2: [namespace.udecl]/11, a function a using-declaration introduces and one the scope declares of the
+  same parameter-type-list, either order: overload/using3.C, lookup/using58.C.
+- Single rules: a bound non-static member function as a value ([expr.ref]/6.3.2, template/pr29633.C); noexcept(noexcept(f())) of the
+  unit's function in diag.ae's exception-specification rule (cpp0x/noexcept47.C); a variable template named without its arguments
+  (template.ae, cpp1y/var-templ61.C); a call through a pointer to function with too few or too many arguments ([expr.call]/7,
+  expr/call4.C); a copy constructor defaulted on its first declaration with `const X&` where the implicit one's is `X&`, before C++20
+  ([dcl.fct.def.default]/2, cpp0x/defaulted52.C, defaulted59.C); static_cast of `const void*` casting away qualifiers, of
+  std::nullptr_t to an arithmetic type, a cast notation to a pointer to member from an integer, reinterpret_cast of a pointer or
+  nullptr_t to a smaller integer (tc1/dr137.C, cpp0x/nullptr04.C, other/conversion1.C).
+
+Bonus: overload/error3.C passes by the explicit rules. Checked by two targeted runs (.tmp/q602): t1, the candidates and 1,115 recorded
+own passes the first rules reach (1,998 files), lost template/friend77.C (a template-id-qualified friend taken as a hidden friend, fixed);
+t2, the candidates and 975 recorded own passes the later rules reach (1,858 files): 0 recorded own passes lost, 56 rows to own pass --
+the 48 above, overload/error3.C among them, and 8 as side effects of the rules: cpp0x/defaulted66.C, cpp0x/lambda/lambda-58566.C,
+lambda-ice15.C, func-args-1.C, lookup/using9.C, parse/error42.C, parse/missing-parens-fixit.C, warn/Waddress-7.C. The record is the
+shared regression's with 601.
