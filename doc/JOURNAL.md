@@ -24630,3 +24630,45 @@ blindness (statics by content), left for a decision.
 
 Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
 keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
+
+## 2026-11-26 — Python: :skipped-by-test's 43 rows triaged, 35 n/a and 3 deferred (queue 592, VM)
+
+What: the 43 rows bin/reap put in :skipped-by-test (Python eval, the record test/python/check-lib-test-linux-amd64.edn). These
+are skips on pyi with no CPython reference row that is skipped, :excluded or :no-tests. I triaged each one by its skip
+condition in CPython 3.14.10's Lib/test (the pinned tarball, sha256 de414a57...b72032).
+The user decided DECISION 592-1 (a): the (ii) rows are n/a as listed.
+- (ii), 35 rows, a new n/a class `:skipped-not-applicable`, placed before :skipped-by-test:
+  - pymalloc's and mimalloc's debug-hook tests (test_capi/test_mem.py:169, 174; 18). pyi's memory is Go's, and
+    _testcapi.WITH_PYMALLOC and WITH_MIMALLOC are False.
+  - AF_ALG's aead gcm(aes) (test_socket.py:7065-7072). The kernel has none: CPython on the VM gets the same ENOENT.
+  - test_doctest's test_wrapped_c_func (test_doctest.py:2787, doctest_skip_if(check_impl_detail(cpython=False))).
+    test/python/cpython_marked.py resolves methods' decorators, not a module-level doctest function's, so the row is
+    named in the class instead of the tool being extended.
+  - 15 skips CPython takes too but its reference cannot show. regrtest's JUnit writer (libregrtest/testresult.py:55, 74-76)
+    drops a skip with an empty message (test_selectors.py:196) and every skip after the first of a method's subtests
+    (test_xml_etree.py:4863-4872). Skips in setUpClass and setUpModule have no id (test_ioctl.py:20, test_robotparser.py:812,
+    test_timeout.py:274, test_xml_etree.py:4629). Subtest ids with addresses are :excluded under other ids
+    (test_urlparse.py:986, 1002).
+  The class is keyed on each skip's message; the two generic messages (an empty one, doctest's "all examples were skipped")
+  are keyed by name.
+- (i), 3 rows, deferred class `:zstd-multithread` (owner queue 593): test_zstd's multithreaded tests (test_zstd.py:72-74,
+  327, 353, 1607). pyi's libzstd is built without ZSTD_MULTITHREAD (tools/pyi/clib/zstd/lib.conf), which needs pthreads in
+  the C world. CPython's reference build has no _zstd.
+- Left in place:
+  - the three UTF-8-mode rows (test_builtin.py:1704, test_io.py:3002) stay in :skipped-by-test: 553 and py-regress-1126
+    already fixed them, and train 6's record clears them;
+  - test_os's two test_closerange (test_os.py:218, 2587) stay as they are, and train 6's test_os record decides them.
+    These are (iii), a real divergence: standalone the fds are consecutive, so in the driver the next fd is held, likely by
+    files that CPython's reference counting would have closed (:finalization's kind).
+Alternatives considered: re-recording the references with refs.py taught what JUnit loses (the principled fix for the 15,
+the main host's job, left open); keeping all 35 by design (DECISION 592-1 (b), not taken).
+Probe: one script (bin/pyi's python on train-6's runtime interpreted by goi, q587's weak-free pytls cache.go swapped in for
+the run and restored), compared against python3 on the VM: utf8_mode, the fd allocation, AF_ALG and _testcapi's allocator
+flags.
+Checks:
+  - bin/pyi divergences: rc 0; skipped-not-applicable 39 there, because bin/pyi's judge reads no reference outcomes and
+    4 of the rows are :skipped-by-both's in reap.
+  - bin/reap: the matrix moved, Python eval design 106 to 68, deferred 608 to 611, n/a 4,545 to 4,580; :skipped-by-test
+    43 to 5. Recorded with `bin/reap --record`, then 0 problems.
+  - bin/records-check: 0 problems.
+  - test/crops/scores.edn recorded with `bin/crops-score --record`; `bin/crops-score --judge --strict`: 0 problems.
