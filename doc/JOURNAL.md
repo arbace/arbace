@@ -26296,3 +26296,10 @@ left for the user. `bin/reap --record`: OCaml AOT 558 / 11 / 40 -> 563 / 11 / 36
   (CWG 727) n/a as parse/explicit1.C. test/cpp/divergences-dg.edn's :gxx-only-rules and :ifndr-uninstantiated-template take them, the
   records judged again as they are (no run). `bin/reap --record`: C++ read 6,205 / 0 / 77 -> 6,205 / 0 / 73 (n/a 249 -> 253);
   `bin/crops-score --record`: completeness 0.9969 -> 0.9971; `--judge --strict`, records-check, markers-check: 0 problems.
+
+## 2026-11-26 — Rust C6: L2 over the closure, slice 2, alloc (queue 600, VM)
+
+alloc's slice: abort.rs's 296 alloc defines as targets, the rounds exporting core's wanted definitions beside alloc's; then the
+instances taken by reference (mono/unit-refs, shared mono.ae; build-run's L2 follows them, shared build_run.ae) for a second pass.
+alloc 210 of 296 equal; own tree 1,234 -> 1,447; abort.rs 7,849 -> 7,639 rustc's. The compare, the own tree's check and own-std
+run once, at the slice's end (the user's 2026-11-26 line: no checks within the rounds).
