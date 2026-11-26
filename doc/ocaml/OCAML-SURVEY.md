@@ -5014,3 +5014,196 @@ done: every unit is typed by Arbace's typer and run on oi, with no host ppx. T2 
 - **Checks at the end** (546b): typer-check 79 of 79 (types, raw and simplified Lambda; 79 runs on oi equal to the toplevel's); the
   native library 131 units built, 0 refused; typer-repros PASS; bin/reap, crops-score --judge --strict and records-check 0
   problems. No record changes: the ppx programs are not rows of the suite corpus.
+
+## As built: ocaml-aot (2026-11-24, branch `ocaml-aot-1124`, from mac/next `a6da0aadf` with mac/ocaml-1123): the AOT cell's n/a decisions, ports in progress
+
+- The user's decisions 539-1 (a), 539b-2, 539b-3 (a) and ephetest3's n/a hold at the AOT level too: test/ocaml/divergences-aot.edn's
+  `:na-native-dynlink`, `:na-gc-pacing`, `:na-boxed-identity` (539/14/63 -> 539/13/60, 64 n/a).
+- bin/oi's run corpus and selection in `bin/lib/oi/corpus.bash`: each writer's corpus a file of its own renamed into place, a program
+  selected once (concurrent checks doubled `.tmp/oi/corpus.tsv`).
+- Written, not yet run or recorded (doc/JOURNAL.md, 2026-11-24, ocaml-aot): the AOT runtime's ports of oi's thread exit, young set,
+  allocation buckets, OCAMLRUNPARAM s, the stub's signal at the next allocation and the embedding of OCaml in a C main.
+- Run and recorded 2026-11-25 (doc/JOURNAL.md, "ocaml-aot recorded"): those ports, the ring's buckets only for the instrumented runtime
+  (`O2J_RUNTIME_VARIANT=i` from header.awk's `-runtime-variant=i`), the custom blocks' memory sampled by Gc.Memprof (oi's queue 523:
+  `ExtGc/customMem`, `memprofCustom`, the source in info.source), a bigarray's zero filled by `Arrays/fill`, and the light level's
+  per-row CPU caps (`test/ocaml/aot-cpu-caps.tsv`, the user's caps of 2026-11-24 extended): seven rows pass, 539 / 13 / 57 -> 546 / 13 / 50.
+- `bin/lib/oi/suite.bash`'s corpus names by the PID taken once (`$BASHPID` in a pipeline is the subshell's: the corpus was empty since
+  8ce07bec1); also on its own branch for next, `oi-suite-bashpid-1125`.
+
+## As built: ppx_expect on oi (queue 547, 2026-11-24/25, the VM): T2 of DECISION 539b-1, re's lib_test/expect
+
+T2 of DECISION 539b-1 is done. re's expect tests are rewritten by ppx_expect's driver, built from the opam set and run on oi, and they
+run on oi. Each is judged by its own `[%expect]` blocks, as dune's runtest judges them. No host ppx is used, and every unit is typed by
+Arbace's typer.
+
+- **S1, base and stdio** (cycle 1): 273 units type (typer fixes c27-c32 and m6). `bin/oi ppx run base_load` loads them on oi with their
+  C stubs on ci, and prints "loaded".
+  - oi's C API gained caml/hash.h (the structural hash's mixes, as go/arbace/oi/hash.ae computes them), caml/backtrace.h (two words
+    oi never sets), caml/version.h, config.h's ARCH_INT*_TYPE, and Noreturn.
+  - CAMLweakdef is a weak definition, which ci links.
+  - The headers add the part of SSE2's emmintrin.h that ocaml_intrinsics_kernel uses.
+  - caml/mlvalues.h now includes what OCaml's does on the way: config.h first, then stdio.h, stdlib.h, stdarg.h and limits.h.
+    time_now's stubs need config.h to see ARCH_SIXTYFOUR.
+- **The ppx texts** (`bin/oi ppx pp [DRIVER...]`, test/ocaml/ppx-pp.tsv):
+  - A unit whose dune file has `(preprocess (pps ...))` gets the text its driver writes on oi. The driver runs as dune's ppx.driver
+    runs it: `--cookie library-name="LIB"`, `-corrected-suffix .ppx-corrected -diff-cmd -`, and `--impl` or `--intf`. Dune's
+    `-dump-ast` is left out, so the text is printed.
+  - The driver runs in a copy of the package, so a unit's locations stay its own.
+  - prep's build-unit takes the text from OI_PPX_PP/PKG/REL (.tmp/oi/ppx/pp).
+  - The metaquot driver rewrites ppx_compare's, ppx_enumerate's, ppx_hash's and ppx_globalize's expanders, ppx_sexp_conv's
+    expander, ppx_inline_test and ppx_expect (37 files).
+    - ppx_sexp_conv's dune also names ppxlib.traverse. None of its files derives traverse, so the metaquot driver alone gives the
+      same text.
+  - `time_now_driver` (D1) is ppx_base's rewriters plus ppx_optcomp and dune's ppx main. It rewrites time_now.
+    - time_now's `[%%import "config.h"]` is jst-config's config.h, made by `bin/oi ppx jst-config`.
+    - That verb ports discover.ml, held to its SHA-256. Each of discover's C programs is built for oi's own C target by cnodes.ae
+      (`--program`), and a program that builds sets its switch.
+    - The header is written in dune-configurator's gen_header_file format, which is recalled from memory: dune-configurator is not in
+      the pinned set.
+  - `expect_driver` (D2) is ppx_expect with ppx_inline_test, its libname, ppx_here's expander and the runtime libraries. It rewrites
+    re's 27 test files with `--cookie inline_tests="enabled"`.
+- **The programs' typing** (OI_DUMP_CACHE, set by the ppx verbs):
+  - Each unit's outputs are kept under a key chained from the earlier units', the native library's key, the flags and the libraries.
+  - Programs that share sexplib0, base, stdio and ppxlib therefore type only from where they differ. Base alone is about 50 minutes
+    on 8 cores.
+- **Typer fixes**, each with a repro in test/ocaml/typer-repros that ocamlc accepts and the parent typer refuses:
+  - c33: a record copied from (`with`) takes the expected record type first (ppxlib_jane).
+  - m7: opening a module opens its classes (ppx_compare_expander's `inherit type_is_recursive`).
+  - c34: a module bound to a submodule of a functor's parameter is no alias (Env.is_functor_arg).
+  - m8: a module's components give its classes' object types the module's path, so a value typed by a class keeps a path a later
+    process finds through a signature kept as data (`assert_no_attributes_in : Ast_traverse0.iter`).
+  - c35: a with-constraint on a submodule's type (Expect_test_config).
+  - c36: in pattern mode, two rows that do not unify are reified and recorded as an equation unless incompatible (a GADT indexed by an
+    existential's row, ppx_expect's Test_node).
+  - A unit A__b's exceptions are named A.B.E when A's module B aliases it (Out_type.rewrite_double_underscore_paths). This one was
+    probed against ocamlc and has no typer-repro.
+- **ppx_expect's runtime on oi's C path**:
+  - Its stubs redirect stdout and stderr into a file with dup and dup2 on io.h's `struct channel` fd, and read the position with
+    lseek.
+  - crt's HostFds (set by oi's C API over the process's own streams) makes close, lseek, dup, dup2 and dup3 act on the host's
+    descriptors for the standard streams and for any descriptor the program's table does not hold.
+  - A channel crosses to C as a custom block whose data points to a struct channel holding its fd and offset (oi.ChannelFd).
+  - oi's channels write the host's descriptors, so the redirection is real.
+  - caml_sys_error was added to the C runtime.
+- **oi**: `%string_unsafe_get` past a string's end reads OCaml's block padding (zeros, then the padding length). re's
+  Compile.Stream.feed reads the byte at the string's length before a bound check raises.
+- **S3** (`bin/oi ppx expect`):
+  - The program `expect_tests` is staged as dune builds the inline-test runner:
+    - re_private (re's lib copied), a main-less wrapped library whose alias module Re_private comes first and is opened by its
+      modules;
+    - re_tests, likewise;
+    - the runtimes, ppx_expect's evaluator, str, and the runner's main `let () = Ppx_inline_test_lib.exit ();;`.
+  - It runs as `inline-test-runner re_tests -source-tree-root ... -diff-cmd -`, in the library's directory of a copy of re (`@cwd=`).
+  - Judgment: status 0, and every `FILE.corrected` (ppx_expect under `-diff-cmd -` writes each test file's text with its actual
+    outputs) equal to `FILE`.
+  - Negative control: test_re.ml's first `[%expect]` is altered and the file is rewritten again by the driver on oi. Its
+    test_re.ml.corrected must differ.
+  - Result: pass, 27 of 27 files equal, and the control differs.
+- **Records** (DECISION 547-1 (b), the user's, 2026-11-25): re/expect has a record of its own. `bin/oi ppx expect --record` writes
+  `test/ocaml/check-ppx-oi.edn` (`[PROGRAM RESULT REASON]` as the suite records), only from a passing whole run: re/expect passes and
+  the control differs; any other run records nothing. The suite records' opam/re/expect row stays "class", since the ppx programs are
+  not rows of the suite corpus. reap's OCaml eval cell reads the new record over it (test/reap/cells.edn's `:override` on the suite
+  source, test/reap/main.ae's `override`): the record's row takes the place of the suite row of the same program, a pass counted as one,
+  a non-pass judged by the suite's classes as any other row. A record missing, or naming a program the suite record does not hold, is
+  a problem of reap's.
+
+## As built: ppx_jane on oi (queue 548, 2026-11-25, the VM): T3 of DECISION 539b-1, sexplib0's test library
+
+- **The drivers** (test/ocaml/ppx-programs.tsv), each a library's `(pps ...)` as dune links it, on oi; D1's (time_now_driver's) units
+  less ppx_optcomp come first, so the typed prefix (base, stdio, ppxlib, ppx_base) is shared by key (OI_DUMP_CACHE):
+  - traverse_driver: the metaquot driver with ppxlib.traverse (ppx_custom_printf's pps);
+  - base_mq_driver: ppx_base with metaquot (ppx_string), and the ppx_base libraries (capitalization, sexp_pretty, ppx_assert's,
+    ppx_hash's and ppx_module_timer's runtimes), a superset of ppx_base by metaquot, whose `[%expr]` they do not use;
+  - log_mq_driver: ppx_log's kernel and ppx_string_conv (ppx_compare ppx_enumerate ppx_expect ppx_fields_conv ppx_let ppx_sexp_conv
+    ppx_sexp_value ppx_string, metaquot);
+  - splittable_random_driver and base_quickcheck_driver: those libraries' pps. (jane_driver was tried first for them: its superset
+    adds ppx_module_timer's and ppx_expect's per-file code, Ppx_module_timer_runtime and Ppx_expect_runtime, which dune's build does not.)
+  - sexplib0_test_driver: sexplib0/test's pps (ppx_compare ppx_expect ppx_here ppx_sexp_conv ppx_sexp_value);
+  - jane_driver: ppx_jane's bin/main.ml (`Ppxlib.Driver.standalone ()`), ppx_jane_kernel's 22 rewriters, ppx_expect, ppx_log,
+    ppx_quickcheck and ppx_stable, with the runtimes their libraries link (ppx_compare's, ppx_enumerate's, ppx_string's): 655 units (word count of the row).
+  - The drivers' outer units carry ppx_base (D1's prefix) beyond a library's own pps: its derivers act on `[@@deriving]` alone.
+- **ppx-pp.tsv**: the metaquot driver's rows for the 20 libraries of ppx_jane's closure that use metaquot (ppxlib's traverse too),
+  then each other library's under its driver: 137 files beyond 547's 67, all rewritten on oi.
+- **ppx_custom_printf's format_lifter.ml** (its rule runs gen/gen.ml, which prints CamlinternalFormatBasics' types through the
+  toplevel): gen.ml ported in test/ocaml/ppx/format_lifter.ae (held to its SHA-256; `bin/oi ppx lifter`), the .mli's declarations
+  with the re-export equations the toplevel prints, as one group with `[@@deriving traverse_lift]`; compared with the host's
+  toplevel once: the same declarations but neutral_concat's two tags in the other order. The port lives outside arbace/repr/ocaml,
+  whose sources are in native_key (a change there retypes every cached unit). The traverse driver rewrites it; the staging takes the
+  driver's text for a rule-made unit (suite_stage's suite_ppx_made).
+- **The staging**: a wrapped library's ocamlyacc units (sexplib's parser.mly) generated by the native ocamlyacc, as its ocamllex
+  units were; sexplib's main-less alias module with the 12 modules the program needs.
+- **The program** sexplib0_tests: dune's inline-test runner of sexplib0_test (no `(inline_tests)` stanza in the opam release: run as
+  dune would run one), with expect_test_helpers_base, base_quickcheck, splittable_random, re, parsexp, sexplib, sexp_pretty and the
+  runtimes the rewritten texts name (ppx_sexp_conv's, ppx_compare's, ppx_assert's, ppx_bench's, fieldslib, ppx_module_timer's,
+  ppx_quickcheck's): 469 units (words of the row).
+- **Gaps**, each with its fix and a repro that fails on the parent:
+  - c37 (typecore): `C (p : t1 * t2)` of a constructor of two arguments (ppx_log's `Pconst_integer (_ : string * char option)`).
+  - m9 (typemod): a destructive type substitution over a signature scraped its module aliases into absent modules without an
+    address (base's `include (Shadow_stdlib : module type of struct include Shadow_stdlib end ... with type 'a ref := 'a ref)`),
+    so `Bigarray.Array1.create` under `open! Base` did not translate.
+  - c38 (typecore): an explicitly polymorphic annotation's `_` (parsexp's `let raise_error : type a b. ... -> _`) was made
+    generic, so an application's arguments lost their expected types.
+  - oi: `&&` and `||` compiled their second operand out of tail position; sexplib0's must_escape over a 5,000,000-byte atom
+    overflowed the stack (probe: 10,000,000 iterations).
+- **Result** (`bin/oi ppx expect sexplib0`): pass, sexplib0_test.ml's corrected text equal to the file (its 7 expect tests); the
+  control (its first `[%expect]` altered, rewritten again by sexplib0_test_driver on oi) differs.
+- **Records** (DECISION 547-1 (b)): `bin/oi ppx expect --record` writes a row for each library it ran, re/expect and
+  sexplib0/sexplib0_test, into test/ocaml/check-ppx-oi.edn, only when each passes and its control differs (see "As built: ppx_expect
+  on oi"); reap's OCaml eval cell reads both over the suite rows (opam/sexplib0/sexplib0_test's class there gives way to the pass).
+
+## As built: queue 576 (2026-11-25, the VM): ocamlmklib's libraries at oi's level, lib-dynlink-bytecode
+
+OC220 (a)'s last bytecode row. `lib-dynlink-bytecode/main` passes at oi by its own verdicts: `main.exe` loads `plug1.cma` and
+`plug2.cma` (their C stubs printing, stub2 calling stub1 in C), marshals the registry's closures of plugin code with `Closures` and
+calls them back (main.reference); `static.exe` (`-linkall registry.cmo plug1.cma plug2.cma`) and `custom.exe` (`-custom -linkall`,
+plug2 first) run and are each judged against their own reference (static.reference, custom.reference).
+
+- **header.awk's dynlink mode, at oi's level alone** (the AOT levels keep the class; the AOT cell is the host's, 547f-2 (a)):
+  - `compile_only = "true"; all_modules = "A.ml B.c ..."; ocamlc.byte`: each .ml a unit step (as `module =`), each .c an object;
+  - `program = NAME; modules = "O.${objext} ..."; ocamlmklib`: NAME's shared library of those objects' C files (`@dyndll=NAME:C+C`);
+  - `program = NAME; modules = "U.cmo ..."; ocamlmklib`: NAME.cma of those units, its dllib `-lNAME` as ocamlmklib records it
+    (`@dyncma=NAME:U+U`);
+  - after the main link and run, each further link (`.cmo` units and `.cma` libraries, a library only with `-linkall`; flags
+    `-linkall`, `-custom`, `-I .`; `use_runtime = "false"`; `output`) and run, with its `reference =` (`@dynruns=REF:ITEM+ITEM`);
+  - the libraries' C files the run's stubs (`@cstubs`), `ld_library_path += "${test_build_directory}"` the run's
+    `CAML_LD_LIBRARY_PATH=.` (the run's directory).
+  Over the testsuite's headers at the three levels only this row's line changes, at oi's level.
+- **bin/oi.** `oi_dynlink` writes `dllNAME.so` ("OI-DLL 1", its C files) and `NAME.cma` ("OI-CMA 1", `dllib -lNAME`, then each
+  unit's .cmo as `unit LENGTH` and its text: the library holds its units, as a bytecode .cma does). `oi_one` runs each further program
+  (the libraries' units, the units, in link order, with the program's libraries) and compares it with its reference; the first that
+  differs (status not 0, or output) is the row's, noted "the program REF (run N) differs from REF.reference".
+- **The platform** (test/ocaml/dynlink/dynlink.ml): `load` reads the file whole; "OI-CMO 1" is a unit as before, "OI-CMA 1" a
+  library: its shared libraries opened first (byte/dynlink.ml's `Dll.open_dlls`: `-lNAME` is `dllNAME.so`, looked up in
+  `CAML_LD_LIBRARY_PATH`'s directories; a missing one, or a file that is not "OI-DLL 1", is `Cannot_open_dynamic_library (Failure
+  "Cannot load shared library ...")`), then its units, each parsed and run in order by dynlink_common.
+- **What is not modelled**: a shared library's primitives are not bound when it is opened. The run's stubs are every library's C
+  files built into one node program on ci (OI_CSTUBS), each stub found by its name when first called, as oi finds any stub. A program
+  that called a plugin's primitive before loading its library would find it here, where ocamlrun fails. No test of the corpus does.
+  dynlink.ml is in native_key, so the native library was rebuilt once (the typing cache of the ppx programs rekeys with it).
+- **Controls**: `_control/dynlink-bytecode-vs-pr4229` (test/ocaml/controls.txt, judge check-oi.edn) differs. Once, in scratch, the
+  pinned tree's static.reference was given an extra line: the row failed with "the program static (run 2) differs from
+  static.reference", and the file was then restored (its SHA-256 checked).
+## As built: queue 583 (2026-11-25, the VM): the AOT cell's 13 by-design rows classified, two built
+
+The AOT cell's 13 design rows by cause (next 01ee9c426: 539 / 13 / 57):
+- **Built** (the light level):
+  - lib-runtime-events/test (`:c-runtime-internals`): the test's C consumer (runtime_events_consumer.h on ci) read the C API server's
+    own oi ring, which the program's collections never reach (minors 0, majors 0, 42 bytes against 44). Now oicapi's `RuntimeEvents`
+    hook (set by the wire's servers, wire.ae's wireLoad) sends __oi_re_control, _cursor and _next to the runtime as a request 'V'
+    (u32 op, str, u32 n, n i64), answered 'R' with a block of integers by ExtRtEvents/consumer over the runtime's own ring (start,
+    pause, resume, are_active; the cursor's E_SUCCESS / E_NO_CURRENT_RING / E_OPEN_FAILURE / E_MAP_FAILURE; the next message, its
+    lost words, padding skipped), as oi's RuntimeEventsControl, Cursor and Next answer on oi's. Handle keeps the worker on a 'V' as on
+    'K' and 'Q'. Passes, "same" against oi; the control `_control/re-test-vs-caml` differs. The class holds no program at this level.
+    The compiled level's main serves the same wire, so its row should pass too (not run: the host's lane).
+  - callback/callback_effects_domains_gc (`:c-primitive`): not a stub of the test's: `external caml_callback` names the C runtime's own
+    function, which ocamlopt links. ExtCore/caml_callback applies f to a on a stack of its own (CApi/apply's rule). The program runs and
+    passes by its own verdict given 900 s (148.7 s of user CPU for the whole check, its main beside a domain compacting without end on the
+    level's one Go thread), but not within the check's 120 s: recorded "slow", `:light-speed` (aot-slow.edn), deferred.
+- **ocamldoc's five** (tool-ocamldoc/t01-t05, `:ocamltest-tools`): 528-8 (a) puts them at the compiled level (the light level does not
+  fit, 480-1). There they stopped on `external caml_unix_gmtime`, which ExtUnix now has (the tm record by days_from_civil's inverse,
+  checked against date(1) on six instants including leap days and 2100). The compiled rerun is heavy (the host's lane).
+- **`:unix-java`'s four** (lib-threads/delayintr and signal; the suite's lib-unix/unix-socket/recvfrom_linux and recvfrom_unix): the
+  light level has no host for the OS's signals or AF_UNIX sockets; the compiled level has HostSys (OC216 (a)). DECISION 583-1.
+- **`:opam-not-run`'s two** (opam/re/expect, opam/sexplib0/sexplib0_test): 547f-2 (a) leaves them until the AOT level runs the ppx
+  programs. DECISION 583-3.
+After it: OCaml AOT 540 / 11 / 58 (67 n/a), completeness 0.9709 -> 0.9713.

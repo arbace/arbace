@@ -120,7 +120,7 @@
 #                                  of the runtime (go/arbace/py), each module on its loop with its GOCOVERDIR (run: the main
 #                                  host's night); blocks: tools/covsubset's block sets per module; subset: the modules of every
 #                                  covered block, one per class, the controls (bin/cover subset); --write: corpora.edn's :subset
-#   bin/pyi runtime print|read|vet|check|programs|tables|gen-tables
+#   bin/pyi runtime print|read|read-pytls|vet|check|programs|tables|gen-tables
 #                                  PY5b0, the runtime's sources (doc/python/PYI-SPEC.md §8): go/arbace/py's Go forms (mode :full,
 #                                  lossless) printed as a Go module into .tmp/repr-python/pyi/runtime (print), edited there,
 #                                  read back into go/arbace/py (read; go/arbace/libm, go/arbace/expat and go/arbace/pyexpat,
@@ -150,6 +150,8 @@
 #                                  Linux's and BlueZ's headers, tools/pyi/header-apks.sha256, and Go's syscall), gofmt'd, byte for
 #                                  byte the printed runtime's; a control per table (one source fact changed must differ); no
 #                                  python3 (tools/pyi/*_table.py of the five: the oracle tier's)
+#                                  read-pytls (queue 552): the vendored crypto/tls (go/arbace/pytls, TamaGo's go1.27.1 crypto/tls with its
+#                                  internal packages; doc/python/PYTHON-SURVEY.md, "As built: 552") read back alone (read reads it too)
 #   bin/pyi aot FILE.py [ARGS...]  PY8: FILE compiled by pyi's AOT (arbace.python.aot: the IR to Go forms over go/arbace/py, its
 #                                  module-level imports compiled ahead; printed by repr/go, built by TamaGo's go in
 #                                  .tmp/repr-python/pyi/aot/mod) and run; source compiled at run time by the host's compiler
@@ -229,6 +231,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 caller_pwd=$PWD
 cd "$root"
+# py-os-1124: pyi's hashes are CPython's, randomized when PYTHONHASHSEED is unset (go/arbace/py's hash.go); bin/pyi's own
+# verbs run with PYTHONHASHSEED=0 when it is unset (deterministic, as the references' runs), so their children inherit
+# it, and only sys.executable (bin/pyi python) started with an environment that drops it is randomized, as CPython is
+# likewise PYTHONDONTWRITEBYTECODE=1, the references' (sys.flags.dont_write_bytecode, which -B and the variable set since
+# py-os-1124; pyi writes no bytecode cache in any case)
+[ "${1:-}" = python ] || export PYTHONHASHSEED="${PYTHONHASHSEED-0}" PYTHONDONTWRITEBYTECODE="${PYTHONDONTWRITEBYTECODE-1}"
 
 WORK="$root/.tmp/repr-python/pyi"
 SYNTH="$root/test/python/synth"
@@ -470,7 +478,7 @@ launcher_py() {
   # platform.libc_ver(sys.executable) reads the next line as tools/pyi/python3's (test.support.linked_to_musl)
   printf '#!/bin/sh
 # bin/pyi'"'"'s compiled launcher (queue 284): pyi'"'"'s C library semantics are musl'"'"'s, ld-musl-%s.so.1
-PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
+PYI_ENTRY_ENV=$(env -u PYI_ENTRY_ENV -0 | tr '"'"'\\0\\n'"'"' '"'"'\\036\\035'"'"') PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
 ' \
     "$arch" "$exe" "$w" "$AOT/compiler.sh" "$root/bin/pyi" > "$w.$$"
   chmod +x "$w.$$"; mv "$w.$$" "$w"
@@ -904,6 +912,9 @@ cmd_python() {
     case $1 in
       -c) code=$2; have=c; shift 2; break ;;
       -m) mod=$2; have=m; shift 2; break ;;
+      # -mMOD and -cCMD joined (py-os-1124: test_quopri's "-mquopri")
+      -m?*) mod=${1#-m}; have=m; shift; break ;;
+      -c?*) code=${1#-c}; have=c; shift; break ;;
       # -X options to the runtime (sys._xoptions, -X faulthandler; queue 220), -W options too (sys.warnoptions; queue 328)
       -X) xopts+="$2"$'\n'; shift 2 ;;
       -X*) xopts+="${1#-X}"$'\n'; shift ;;
@@ -919,6 +930,9 @@ cmd_python() {
         # -E and -I: sys.flags.ignore_environment, -I sys.flags.isolated too (PYI_START_FLAGS, queue 296)
         case ${o%%[cm]*} in *E*) sflags+=E ;; esac
         case ${o%%[cm]*} in *I*) sflags+=I ;; esac  # and no site hook before the REPL (queue 298)
+        # -O (each), -v, -d, -B and -R (py-os-1124): sys.flags' optimize (the compiler's level), verbose, debug,
+        # dont_write_bytecode and hash randomization under PYTHONHASHSEED=0
+        local lv=${o%%[cm]*}; lv=${lv//[^OvdBR]/}; sflags+=$lv
         # -b, -bb: sys.flags.bytes_warning and the BytesWarning filter (PYI_BYTES_WARNING; queue 328)
         local bs=${o%%[cm]*}; bs=${bs//[^b]/}; bwarn=$((bwarn + ${#bs}))
         # -E and -I: the runtime's start ignores PYTHONFAULTHANDLER and PYTHONTRACEMALLOC (queue 220)
@@ -972,7 +986,16 @@ cmd_python() {
     # in the -m mode file (sys.path[0] the working directory, set to the path's by the prologue)
     f) case $file in /*) src=$file ;; *) src=$caller_pwd/$file ;; esac; argv0=$file
        local abs=$src
-       if [ -d "$src" ] || { [ -f "$src" ] && pyi_is_zip "$src"; }; then
+       # a path inside a zip file (py-os-1124, test_argparse's test_directory_in_zipfile: ARCHIVE.zip/package/subpackage)
+       # is a main importer too, zipimport's path hook taking it
+       local inzip="" zp=$src
+       if [ ! -e "$src" ]; then
+         while [ "$zp" != "${zp%/*}" ] && [ -n "${zp%/*}" ]; do
+           zp=${zp%/*}
+           if [ -e "$zp" ]; then { [ -f "$zp" ] && pyi_is_zip "$zp"; } && inzip=1; break; fi
+         done
+       fi
+       if [ -d "$src" ] || [ -n "$inzip" ] || { [ -f "$src" ] && pyi_is_zip "$src"; }; then
          src=$d/__pyi_m.py
          printf "(lambda s, p: (s.path.insert(0, p) if s.flags.safe_path else s.path.__setitem__(0, p), __import__('runpy')._run_module_as_main('__main__', False)))(__import__('sys'), %s)\n" "$(pyi_pystr "$abs")" > "$src"
        elif [ -f "$src" ] && pyi_is_pyc "$src"; then
@@ -1003,6 +1026,28 @@ def __pyi_pyc(file, dir):
 __pyi_pyc(*__pyi_pyc_args)
 PYI_PYC
          } > "$src"
+       elif [ -f "$src" ] && case $(pyi_pystr "$src") in *'\udc'*) true ;; *) false ;; esac; then
+         # a script whose path is not UTF-8 (py-os-1124, test_cmd_line_script's test_non_ascii): the host reads files by
+         # its strings, which lose such a byte, so a prologue reads and compiles it as run_file does, its path the
+         # surrogate-escaped str (__file__, the code's filename, sys.path[0]'s directory)
+         local real; real=$(realpath "$src")
+         src=$d/__pyi_m.py
+         { printf '__pyi_script_args = (%s, %s)\n' "$(pyi_pystr "$abs")" "$(pyi_pystr "${real%/*}")"
+           cat <<'PYI_SCRIPT'
+def __pyi_script(file, dir):
+    import sys, importlib.machinery
+    g = sys.modules["__main__"].__dict__
+    del g["__pyi_script"], g["__pyi_script_args"]
+    if not sys.flags.safe_path and sys.path:
+        sys.path[0] = dir
+    with open(file, "rb") as f:
+        code = compile(f.read(), file, "exec")
+    g["__file__"], g["__cached__"] = file, None
+    g["__loader__"] = importlib.machinery.SourceFileLoader("__main__", file)
+    exec(code, g)
+__pyi_script(*__pyi_script_args)
+PYI_SCRIPT
+         } > "$src"
        fi ;;
   esac
   # pymain_run_file's message: the program's name and the file made absolute (config's run_filename)
@@ -1025,12 +1070,17 @@ PYI_PYC
   local lib; lib=$(stdlib_lib)
   echo $$ > "$d/pid"
   cd "$caller_pwd"
+  # sys.argv's bytes (py-os-1124): the runtime decodes them with surrogateescape, as Py_DecodeLocale does
+  local av="$argv0" a1; for a1 in "$@"; do av+=$'\x1f'"$a1"; done; export PYI_ARGV="$av"
   if [ -n "$xopts" ]; then export PYI_XOPTIONS="$xopts"; else unset PYI_XOPTIONS; fi
   if [ -n "$wopts" ]; then export PYI_WARNOPTIONS="$wopts"; else unset PYI_WARNOPTIONS; fi
   if [ "$bwarn" -gt 0 ]; then export PYI_BYTES_WARNING=$bwarn; else unset PYI_BYTES_WARNING; fi
   if [ -n "$noenv" ]; then export PYI_IGNORE_ENV=1; else unset PYI_IGNORE_ENV; fi
   if [ -n "$unbuf" ]; then export PYI_UNBUFFERED=1; else unset PYI_UNBUFFERED; fi
   export PYI_SAFE_PATH=$safe
+  # descriptor 0 closed (queue 553: posix_spawn's POSIX_SPAWN_CLOSE 0, test_posix's test_close_file): Go's runtime opens
+  # /dev/null on it at its start (runtime.checkfds), so the runtime closes it again (PYI_STDIN_CLOSED) before the program
+  if { : 9<&0; } 2>/dev/null; then unset PYI_STDIN_CLOSED; else export PYI_STDIN_CLOSED=1; fi
   if [ -n "$sflags" ]; then export PYI_START_FLAGS=$sflags; else unset PYI_START_FLAGS; fi
   # -i (queue 289): the runtime's REPL after the main module (PYI_INSPECT=1), or as the run (repl, repl-quiet: -q); on a
   # terminal without -i the REPL as the run with sys.flags' inspect and interactive 0 (tty, tty-quiet; queue 313)
@@ -1159,7 +1209,7 @@ aot_module() {
   mkdir -p "$AOT/mod/pyaot"
   printf 'module arbace\n\ngo 1.27\n' > "$AOT/mod/go.mod"
   local key; key=$( (cd "$root" && find go/arbace/py.ae go/arbace/py go/arbace/libm.ae go/arbace/libm go/arbace/expat.ae go/arbace/expat go/arbace/pyexpat.ae go/arbace/pyexpat \
-                       go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt go/arbace/clib.ae go/arbace/clib go/arbace/pybz2.ae go/arbace/pybz2 go/arbace/pylzma.ae go/arbace/pylzma go/arbace/pyzstd.ae go/arbace/pyzstd go/arbace/pysqlite3.ae go/arbace/pysqlite3 go/arbace/pyctypes.ae go/arbace/pyctypes go/arbace/pyssl.ae go/arbace/pyssl x509roots/go bin/pyi-clib tools/pyi/clib/aot_text.ae -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
+                       go/arbace/ci.ae go/arbace/ci go/arbace/crt.ae go/arbace/crt go/arbace/clib.ae go/arbace/clib go/arbace/pybz2.ae go/arbace/pybz2 go/arbace/pylzma.ae go/arbace/pylzma go/arbace/pyzstd.ae go/arbace/pyzstd go/arbace/pysqlite3.ae go/arbace/pysqlite3 go/arbace/pyctypes.ae go/arbace/pyctypes go/arbace/pyssl.ae go/arbace/pyssl go/arbace/pytls.ae go/arbace/pytls x509roots/go bin/pyi-clib tools/pyi/clib/aot_text.ae -type f | LC_ALL=C sort | xargs sha256sum) | sha256sum | cut -c1-16)
   if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
     local lk; exec {lk}>"$AOT/mod.lock"; [ "${PYI_AOT_MODULE_LOCK:-1}" = 0 ] || flock "$lk"
     if [ "$(cat "$AOT/mod/runtime.key" 2>/dev/null)" != "$key" ]; then
@@ -1190,16 +1240,28 @@ aot_module_rebuild() {
     # queue 208: ci's back end, the C library host, bzip2's node program and _bz2's glue, and the library compiled by
     # cf2g (bin/pyi-clib aot: arbace/clib/bzip2/aot, its init registering the compiled functions); liblzma's and
     # _lzma's likewise, and zstd's and _zstd's, SQLite's and _sqlite3's (queue 215)
-    local p
+    local p keep="$AOT/clib-aot-keep"
+    # py-core-1124: the libraries' cf2g translations set aside and put back (bin/pyi-clib aot keeps one whose key, the node
+    # program's and the translator's digest, is current: a runtime change no longer translates the five libraries again)
+    rm -rf "$keep"; mkdir -p "$keep"
+    for p in bzip2 xz zstd sqlite ctypestest; do [ ! -d "$AOT/mod/clib/$p/aot" ] || mv "$AOT/mod/clib/$p/aot" "$keep/$p"; done
     # queue 244: ctypes's world (clib/ctypestest, compiled by cf2g too) and _ctypes's package (pyctypes)
     for p in ci crt clib clib/bzip2 clib/xz clib/zstd clib/sqlite clib/ctypestest pybz2 pylzma pyzstd pysqlite3 pyctypes; do
       rm -rf "$AOT/mod/$p"; mkdir -p "$AOT/mod/$p"
       for f in "$AOT/rt/$p"/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/$p/" ;; esac; done
     done
     for p in bzip2 xz zstd sqlite ctypestest; do
+      [ ! -d "$keep/$p" ] || { rm -rf "$AOT/mod/clib/$p/aot"; mv "$keep/$p" "$AOT/mod/clib/$p/aot"; }
       "$root/bin/pyi-clib" aot "$p" "$AOT/mod/clib/$p/aot" || die "bin/pyi-clib aot $p failed"
     done
+    rm -rf "$keep"
     for f in "$AOT/rt"/pyssl/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/pyssl/" ;; esac; done
+    # queue 552: the vendored crypto/tls's packages
+    rm -rf "$AOT/mod/pytls"
+    for p in $(pytls_pkgs); do
+      mkdir -p "$AOT/mod/$p"
+      for f in "$AOT/rt/$p"/*.go; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/$p/" ;; esac; done
+    done
     for f in "$AOT/rt"/x509roots/fallback/bundle/*; do case $f in *_test.go) ;; *) cp "$f" "$AOT/mod/x509roots/fallback/bundle/" ;; esac; done
     echo "$key" > "$AOT/mod/runtime.key"
   }
@@ -1887,6 +1949,19 @@ runtime_print() {
   ARBACE_PATH="$root:$root/x509roots" "$root/bin/repr-go" print "$root/x509roots/go/arbace/x509roots/fallback/bundle.ae" \
     "$out/x509roots/fallback/bundle" >/dev/null
   cp "$root/x509roots/go/arbace/x509roots/fallback/bundle/bundle.der" "$out/x509roots/fallback/bundle/"
+  # queue 552: the crypto/tls _ssl imports, vendored from TamaGo's go1.27.1 with its dependencies (go/arbace/pytls and
+  # its internal packages), printed beside it, not read back (bin/pyi tls-vendor makes their forms)
+  for p in $(pytls_pkgs); do
+    mkdir -p "$out/$p"
+    ARBACE_PATH="$root" "$root/bin/repr-go" print "$root/go/arbace/$p.ae" "$out/$p" >/dev/null
+  done
+}
+
+# pytls_pkgs: the vendored crypto/tls's packages under go/arbace (pytls, pytls/internal/...), as paths below go/arbace
+pytls_pkgs() {
+  [ -f "$root/go/arbace/pytls.ae" ] || return 0
+  echo pytls
+  (cd "$root/go/arbace" && find pytls -name '*.ae' | while read -r f; do [ -d "${f%.ae}" ] && echo "${f%.ae}"; done | LC_ALL=C sort)
 }
 
 # runtime_read_pkgs SRC: the C library host and _bz2's glue (queue 208) read back from SRC into go/arbace
@@ -1901,6 +1976,22 @@ runtime_read_pkgs() {
     for f in "$root/go/arbace/$p"/*.ae; do [ -d "${f%.ae}" ] || rm -f "$f"; done
     mkdir -p "$root/go/arbace/$p"
     cp "$out/go/arbace/$p.ae" "$root/go/arbace/"; cp "$out/go/arbace/$p"/*.ae "$root/go/arbace/$p/"
+  done
+}
+
+# runtime_read_pytls SRC (queue 552): the vendored crypto/tls's packages (SRC/pytls and its internal packages) read back into
+# go/arbace/pytls{.ae,/}, its _test files with them; the forms of a package no longer in SRC removed
+runtime_read_pytls() {
+  local src=$1 p out
+  [ -d "$src/pytls" ] || return 0
+  local pkgs; pkgs=$(cd "$src" && find pytls -name '*.go' -printf '%h\n' | LC_ALL=C sort -u)
+  rm -rf "$root/go/arbace/pytls" "$root/go/arbace/pytls.ae"
+  for p in $pkgs; do
+    out="$WORK/runtime-forms-$(echo "$p" | tr / -)"; rm -rf "$out"
+    (cd "$src" && "$root/bin/repr-go" read --full --tests --goos linux --goarch amd64 --out "$out" "./$p") > "$out.log" 2>&1 \
+      || { cat "$out.log" >&2; die "go/arbace/$p's Go does not read (log $out.log)"; }
+    mkdir -p "$root/go/arbace/$p"
+    cp "$out/go/arbace/$p.ae" "$root/go/arbace/$p.ae"; cp "$out/go/arbace/$p"/*.ae "$root/go/arbace/$p/"
   done
 }
 
@@ -1968,17 +2059,20 @@ cmd_runtime() {
   local verb=${1:-}
   case $verb in
     print) runtime_print "$RT"; echo "the runtime's Go in $RT/py: edit it there, then bin/pyi runtime read" ;;
+    read-pytls) [ -d "$RT/pytls" ] || die "no $RT/pytls: bin/pyi runtime print first"; runtime_read_pytls "$RT"
+      echo "go/arbace/pytls read from $RT/pytls" ;;
     read)
       [ -d "$RT/py" ] || die "no $RT/py: bin/pyi runtime print first"
       runtime_read "$RT" "$WORK/runtime-forms"
       rm -rf "$root/go/arbace/py" "$root/go/arbace/py.ae"
       cp -r "$WORK/runtime-forms/go/arbace/py" "$WORK/runtime-forms/go/arbace/py.ae" "$root/go/arbace/"
       runtime_read_pkgs "$RT"
+      runtime_read_pytls "$RT"
       echo "go/arbace/py read from $RT/py ($(ls "$root/go/arbace/py" | wc -l) files)" ;;
     vet)
       [ -d "$RT/py" ] || runtime_print "$RT"
       tamago_go gofmt -l py | sed 's/^/not gofmt: /' | grep . && die "gofmt the runtime's Go first"
-      tamago_go go vet ./py ./expat ./pyexpat ./clib ./pybz2 ./pylzma ./pyzstd ./pysqlite3 ./pyctypes
+      tamago_go go vet ./py ./pytls/... ./expat ./pyexpat ./clib ./pybz2 ./pylzma ./pyzstd ./pysqlite3 ./pyctypes
       tamago_go go test ./py ./expat ./pyexpat ./clib ./pybz2 ./pylzma ./pyzstd ./pysqlite3 ./pyctypes ;;
     check)
       local rc=0 t="$WORK/runtime-check" p
@@ -2070,7 +2164,7 @@ cmd_runtime() {
       done
       return $rc ;;
     gen-tables) shift; runtime_gen_tables "$@" ;;
-    *) die "usage: bin/pyi runtime print|read|vet|check|programs|tables|gen-tables" ;;
+    *) die "usage: bin/pyi runtime print|read|read-pytls|vet|check|programs|tables|gen-tables" ;;
   esac
 }
 
@@ -2152,7 +2246,8 @@ header_roots() {
 RT_GEN_TABLES="opcode errno fcntl socket posix slotdocs ast bytecode bytecode315 opcode315 stat cjk unicodedata unicodedata315"
 # queue 357: textsig (builtins_textsig_table.go from the tarball's C sources, every module's: about 2.5 minutes and 2 GB, its control as
 # long) apart: gen-tables textsig, the --full step pyi-runtime-textsig; gen-tables --all both
-RT_GEN_SLOW="textsig"
+# py-core-1124: docs (builtins_docs_table.go, the built-ins' __doc__) from the same reading, made with textsig in one run
+RT_GEN_SLOW="textsig docs"
 # rt_gen_file TABLE: the runtime's file a table is (queue 350: slotdocs is slotdocs.go)
 rt_gen_file() { case $1 in slotdocs) echo slotdocs.go ;; stat) echo builtins_stat_table.go ;; bytecode) echo bytecode_table.go ;; bytecode315) echo bytecode_table315.go ;;
   *315) echo "builtins_${1%315}_table315.go" ;; *) echo "builtins_$1_table.go" ;; esac; }
@@ -2194,7 +2289,7 @@ runtime_gen_tables() {
   musl=$(musl_src) || return 1
   # the header apks only for the tables that read them (queue 350: opcode, errno and slotdocs run without them)
   local hr="" roots=()
-  case " ${tables[*]} " in *" fcntl "*|*" socket "*|*" posix "*|*" textsig "*)
+  case " ${tables[*]} " in *" fcntl "*|*" socket "*|*" posix "*|*" textsig "*|*" docs "*)
     hr=$(header_roots) || return 1; roots=(--root-amd64 "$hr/root-x86_64" --root-arm64 "$hr/root-aarch64") ;; esac
   # queue 357: the 315 tables read 3.15.2's tree (extracted by REPR_PYTHON_VERSION=3.15 bin/repr-python pins --fetch); absent: said and
   # not judged, as ucd315_check
@@ -2229,6 +2324,10 @@ runtime_gen_tables() {
   case " ${tables[*]} " in *" textsig "*)
     cp -r "$top/Objects" "$top/Python" "$top/Modules" "$top/Include" "$c/"
     sed -i 's|^"_abc_init(\$module, self, /)\\n"|"_abc_init($module, self2, /)\\n"|' "$c/Modules/clinic/_abc.c.h" ;; esac
+  # docs (py-core-1124): bin()'s doc one word changed
+  case " ${tables[*]} " in *" docs "*)
+    [ -f "$c/Python/clinic/bltinmodule.c.h" ] || cp -r "$top/Objects" "$top/Python" "$top/Modules" "$top/Include" "$c/"
+    sed -i 's|^"Return the binary representation of an integer.\\n"|"Return the binary form of an integer.\\n"|' "$c/Python/clinic/bltinmodule.c.h" ;; esac
   sed -i 's/^\(    \[BINARY_OP\] = { true, INSTR_FMT_IBC0000, \)HAS_ARG_FLAG | /\1/' "$c/Include/internal/pycore_opcode_metadata.h"
   sed -i 's/^E(EPERM, *"Operation not permitted")/E(EPERM, "Operation not allowed")/' "$m/src/errno/__strerror.h"
   sed -i 's/^#define F_ADD_SEALS\t1033$/#define F_ADD_SEALS\t1039/' "$m/include/fcntl.h"

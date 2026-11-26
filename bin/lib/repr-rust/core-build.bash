@@ -326,7 +326,7 @@ alloc_iface() {
 # linux, musl), std's names and std's interface from the pack rust-front-std with every std fact taken out (core's and alloc's
 # facts read from it), its facts into .tmp/rust-front/std/std-iface.edn and compared with the helper's (std-iface.edn.report);
 # queue 400: std's vendored dependencies libc and hashbrown (library/vendor; their names and facts are none of the helper's) read
-# natively first, their module files, index and interface pass (DEPS_IFACE_ROUNDS, default 2; about 20 minutes, libc's 48 files
+# natively first, their module files, index and interface pass (DEPS_IFACE_ROUNDS, default 3; about 20 minutes, libc's 48 files
 # and hashbrown's 17) cached in .tmp/rust-front/std/deps/ (remove it after a change to the reader, the expansion or the
 # collection, as index.edn); STD_DEPS=0 leaves them out (std's names as before)
 #   bin/rust-front std-iface [FILE...]     the pass over std's module files (or FILEs, a module after the ones it names) and the
@@ -415,6 +415,14 @@ lib_rsi_keys() {
   done | sed 's/::/-/g' | LC_ALL=C sort -u
 }
 
+# queue 561 (C6 L3): the backtrace crates in their dependencies' order (core-check's backtrace-crates), up to and including $1,
+# comma-separated: DEPS_BACKTRACE's value for a step on that crate
+bt_upto() {
+  local o="" x
+  for x in adler2 memchr rustc_demangle miniz_oxide object gimli addr2line; do o=$o${o:+,}$x; [ "$x" = "$1" ] && break; done
+  echo "$o"
+}
+
 # C6 (doc/rust/FRONTEND-SURVEY.md, "As built: C6's first slice"): `lib-export --keys KEYS CRATE OUT` exports the bodies of KEYS (a
 # key a line, body-key's: bin/rust-front lib-unit keys) into OUT in place of the records' instances, the same build
 lib_export() {
@@ -428,7 +436,10 @@ lib_export() {
   case $c in
     alloc) m=$(alloc_modules) || return 1 ;;
     std) m=$(std_modules) || return 1 ;;
-    *) echo "lib-export: alloc or std, not '$c'" >&2; return 2 ;;
+    # queue 561 (C6 L3): a backtrace crate, over std's deps' caches (its module list there; the deps read up to it)
+    adler2|memchr|rustc_demangle|miniz_oxide|object|gimli|addr2line)
+      m=$work/std/deps/$c-modules.edn; export DEPS_BACKTRACE=${DEPS_BACKTRACE:-$(bt_upto "$c")} ;;
+    *) echo "lib-export: alloc, std or a backtrace crate, not '$c'" >&2; return 2 ;;
   esac
   fd=$(records_front) || return 1
   if [ -n "$kf" ]; then keys=$kf
@@ -442,7 +453,8 @@ lib_export() {
   LIB_CORE_DIR=$(core_lib) || return 1; core_modules > /dev/null || return 1
   [ -f "$work/core/index.edn" ] || { echo "lib-export: no core index ($work/core/index.edn: bin/rust-front core-attrs or core-check makes it)" >&2; return 1; }
   export LIB_CORE_DIR LIB_CORE_CACHE=$work/core LIB_CORE_CONSTS=${LIB_CORE_CONSTS:-mem/mod.rs}
-  cd "$root" && ALLOC_IFACE_ROUNDS=${LIB_IFACE_ROUNDS:-2} GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} arbace_tool -m arbace.rust.front.alloc-check --crate "$c" --export "$libsrc" "$fd" "$work/$c" "$m" "$out" "$keys" 2>&1 |
+  local cache=$work/$c; [ "$m" = "$work/std/deps/$c-modules.edn" ] && cache=$work/std
+  cd "$root" && ALLOC_IFACE_ROUNDS=${LIB_IFACE_ROUNDS:-2} GOMEMLIMIT=${GOMEMLIMIT:-2000MiB} arbace_tool -m arbace.rust.front.alloc-check --crate "$c" --export "$libsrc" "$fd" "$cache" "$m" "$out" "$keys" 2>&1 |
     grep --line-buffered -v -E "$filt"
   [ -s "$out" ] && echo "lib-export: $(grep -c '^(core/body' "$out") bodies of $c in $out"
 }

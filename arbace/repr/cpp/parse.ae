@@ -76,6 +76,10 @@
   (let [n (.length src)]
     (loop [i o] (if (and (< i n) (let [c (.charAt src (int i))] (or (Character/isLetterOrDigit c) (= c \_) (= c \$) (> (int c) 127)))) (recur (inc i)) (max 1 (- i o))))))
 
+(def ^:dynamic *spellings*
+  "queue 577: an atom tokens sets, when bound, to a long array of each token's spelling offset in the main file (-1: none)."
+  nil)
+
 (defn tokens
   "The parser's tokens (an array of T, an :eof last) of the preprocessor's stream `pp-toks` (arbace.repr.c.pp's
   :tokens), the main file's tokens being those of the file named `main-path`, written `main` in locations;
@@ -83,10 +87,18 @@
   [pp-toks ^String main-path ^String main ^String src kws]
   (let [out (ArrayList.)
         scr (volatile! nil)
-        add (fn [k ^String s o n f mac glue] (.add out (T. k s (long o) (long n) f mac glue @scr)))]
+        ;; (queue 577: with *spellings* bound, each token's spelling offset in the main file when a macro's expansion put it
+        ;; elsewhere, else -1, arbace.repr.c.lex/*spelling*'s)
+        spo (when *spellings* (ArrayList.))
+        sp (volatile! -1)
+        add (fn [k ^String s o n f mac glue] (.add out (T. k s (long o) (long n) f mac glue @scr)) (when spo (.add spo @sp)))]
     (doseq [^Tok t pp-toks]
       (let [ch (.-ch t)]
         (when-not (or (= ch \space) (= ch \newline))
+          (when spo
+            (vreset! sp (let [^Tok r (arbace.repr.c.lex/spelling t)
+                              ^CFile rf (when r (.-pf r))]
+                          (if (and rf (= (.-name rf) main-path) (not (and (identical? rf (.-pf t)) (= (.-po r) (.-po t))))) (.-po r) -1))))
           (let [^CFile cf (.-pf t)
                 fname (when cf (.-name cf))
                 main? (= fname main-path)
@@ -118,6 +130,7 @@
                   (add :punct s o n f mac nil))))))))
     (let [^T l (when (pos? (.size out)) (.get out (dec (.size out))))]
       (.add out (T. :eof "" (if l (+ (.-o l) (.-n l)) 0) 0 main nil nil nil)))
+    (when spo (.add spo -1) (reset! *spellings* (long-array spo)))
     (.toArray out)))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -231,6 +244,9 @@
 ;; queue 376: where a type-id stands, in GCC's words for "types may not be defined ..." ("in casts", "in 'sizeof' expressions",
 ;; ...), bound by the callers of parse-type-id; nil: "in a type-id"
 (def ^:dynamic *tdef-ctx* nil)
+;; cpp-indep2: a trailing return type's decl-specifiers are parsed (parse-type-id's :trailing): `-> struct A { ... }` with A a
+;; class declared before is the elaborated-type-specifier and the function's body, as GCC takes it (cpp0x/trailing5.C)
+(def ^:dynamic *trailing-type* false)
 
 ;; G4 (doc/cpp/CODEGEN.md): the headers' declarations parsed in full, bodies and all, their nodes given with the main
 ;; file's (the code generator's mode: arbace.cpp.codegen binds it); a header construct the parser cannot read is dropped
@@ -250,6 +266,14 @@
 ;; cpp-singles: a declaration in a class whose noexcept-specifier is no complete-class context ([class.mem.general]/7 names a
 ;; member function's alone): an alias-declaration's type, a friend function's declaration (fn-quals)
 (def ^:dynamic *ncc-noexcept* false)
+
+;; cpp-rind: [dcl.fct]/22 (C++20 [dcl.spec.auto.general]/2-3), a placeholder `auto` as a parameter's decl-specifier only in a
+;; lambda's parameter-declaration-clause or a function declaration's own one at namespace or class scope (an abbreviated function
+;; template, never in a local class): the depth of the parameter-declaration-clauses being read (a function type's own parameter
+;; of a parameter is depth 2) and the declaration's depth-1 `auto` tokens, judged once its declarator is read
+(def ^:dynamic *param-depth* 0)
+(def ^:dynamic *auto-params* nil)
+
 
 (defn- in-template?
   "Whether the cursor is in a template (a parameter list with parameters encloses it; an explicit specialization's has none)."
@@ -474,7 +498,7 @@
 ;; {:op "+"} {:conv type} {:dtor "S"} {:lit "_km"}, each with :i. An argument: {:k :type :t T} {:k :expr :x node}
 ;; {:k :tmpl :name name} with :b :e (its tokens) and :pack.
 
-(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively soft-diag! class-ctx)
+(declare parse-template-args parse-type-id parse-cond-expr parse-assign-expr parse-expr tentatively soft-diag! pedantic-diag! class-ctx)
 
 (defn- root-ent [^P p] {:k :ns :name "" :scope (stv p ROOT)})
 
@@ -534,6 +558,10 @@
                                  ;; "expected empty string after 'operator' keyword", the name taken)
                                  (when-not (re-find #"^(u8|u|U|L)?[\"][\"]" s)
                                    (soft-diag! p (ix p) "expected empty string after 'operator' keyword"))
+                                 ;; (cpp-indep: [over.literal]/1, that string-literal has no encoding-prefix: GCC's "invalid encoding
+                                 ;; prefix in literal operator", cpp1y/udlit-enc-prefix-neg.C)
+                                 (when (and (re-find #"^(u8|u|U|L)[\"][\"]" s) (not (skim? p)) (main-tok? p (ix p)))
+                                   (soft-diag! p (ix p) "invalid encoding prefix in literal operator"))
                                  (adv! p)
                                  (if (= s "\"\"")
                                    (let [nm (ts (cur p))]
@@ -656,10 +684,55 @@
     (when-let [lx (gt-lexeme-at p 0)]
       (soft-diag! p (ix p) (str "'" lx "' should be '" (if (= lx ">=") "> =" "> >=") "' to terminate a template argument list")))))
 
-(defn parse-template-args
+
+(defn- nttp-arg-check!
+  "cpp-def: a template argument `a` (an expression) for the non-type template parameter `tp` (its declaration's node):
+  [temp.param]/6, a non-type template-parameter of a non-reference scalar type is a prvalue, so no operand of the built-in
+  unary & (GCC's \"lvalue required as unary '&' operand\"); and C++98's rules for a value-dependent argument (ISO/IEC
+  14882:2003 [temp.arg.nontype]/1 with [expr.const]/1): an integral constant-expression names a non-type template-parameter of
+  integral or enumeration type only, sizeof's operand aside (GCC's \"... is not a valid template argument for type 'int' because
+  it is a non-constant expression\"), and the argument of a pointer parameter is the name of a non-type template-parameter or
+  `&` id-expression, so no other expression of a template-parameter (GCC's \"could not convert template argument\")."
+  [^P p a tp]
+  (when (and tp (= "NonTypeTemplateParmDecl" (:kind tp)) (not (:isParameterPack tp)))
+    (let [nttp (fn [x] (let [e (:_ent x)] (when (and (= "DeclRefExpr" (:kind x)) (:tparam e) (= :var (:k e))) e)))
+          ety (fn [e] (str (some-> (:ty e) qt)))
+          scalar? (fn [^String t] (and (not (str/includes? t "&")) (not (str/includes? t "("))
+                                       (or (str/includes? t "*")
+                                           (re-matches #"(const |volatile )*(unsigned |signed )?(bool|char|wchar_t|char8_t|char16_t|char32_t|short|int|long|long long|long int|short int|long long int|float|double|long double|unsigned|signed)( const| volatile)*" t))))
+          strip (fn strip [x] (if (= "ParenExpr" (:kind x)) (strip (first (:inner x))) x))
+          ;; the expressions of template-parameters in x, outside sizeof's and alignof's operands
+          refs (fn refs [x] (cond (not (map? x)) nil
+                                  (nttp x) [x]
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (mapcat refs (:inner x))))
+          addr (fn addr [x] (cond (not (map? x)) nil
+                                  (and (= "UnaryOperator" (:kind x)) (= "&" (:opcode x)) (not (:isPostfix x))
+                                       (some-> (nttp (strip (first (:inner x)))) ety scalar?))
+                                  x
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (some addr (:inner x))))
+          x (:x a)
+          pt (str (get-in tp [:type :qualType]))
+          ptr? (boolean (re-find #"\*\s*(const\s*|volatile\s*)*$" pt))
+          int? (and (not ptr?) (not (re-find #"[&\[(<:]" pt)))]
+      (if-let [u (addr x)]
+        (soft-diag! p (long (or (:_b u) (:b a))) "lvalue required as unary '&' operand")
+        (when (< (.-year p) 2011)
+          (let [rs (refs x)]
+            (cond
+              (and int? (some #(re-find #"[*\[]" (ety (nttp %))) rs))
+              (soft-diag! p (long (:b a)) (str "'" (tok-text p (:b a) (:e a)) "' is not a valid template argument for type '" pt "' because it is a non-constant expression"))
+              (and ptr? (seq rs)
+                   (let [s (strip x)]
+                     (not (or (nttp s)
+                              (and (= "UnaryOperator" (:kind s)) (= "&" (:opcode s)) (= "DeclRefExpr" (:kind (strip (first (:inner s))))))))))
+              (soft-diag! p (long (:b a)) (str "could not convert template argument '" (tok-text p (:b a) (:e a)) "' to '" pt "'")))))))))
+
+(defn- parse-template-args*
   "A template-argument-list at its <: the arguments ({:k :type :t T}, {:k :expr :x node}, {:k :tmpl :name name}, each with
   :b :e and :pack), the cursor after the > (one half of a split >>)."
-  ([^P p] (parse-template-args p nil))
+  ([^P p] (parse-template-args* p nil))
   ([^P p tmpl]
   (adv! p)
   (with-gt p false
@@ -684,7 +757,11 @@
               a (assoc a :b b :e (last-ix p))
               ;; (round 54, second pass: [dcl.spec.auto.general]/5, a placeholder is no template argument's type-id: GCC's
               ;; "invalid use of 'auto' in template argument")
-              _ (when (and (= :type (:k a)) (= b (long (:e a))) (t= (tok-at p b) "auto"))
+              ;; (cpp-indep2: and a type-id whose type-specifier is auto, `t<auto(&)(const int*) -> auto&>`; concepts/auto8.C)
+              _ (when (and (= :type (:k a)) (t= (tok-at p b) "auto")
+                           (or (= b (long (:e a)))
+                               (and (not (skim? p)) (main-tok? p b)
+                                    (or (not (t= (tok-at p (inc b)) "(")) (some #(t= (tok-at p %) "->") (range b (inc (long (:e a)))))))))
                   (soft-diag! p b "invalid use of 'auto' in template argument"))
               ;; cpp-read (2026-11-22): [temp.arg]/1, an argument's kind is its parameter's: a type-id for a non-type parameter, or
               ;; a literal or a variable for a type parameter, of a class or alias template: GCC's "type/value mismatch at argument
@@ -708,12 +785,60 @@
                                                                      (and (= :var (:k en)) (not (:tparam en)))))))
                               false)]
                     (when bad
-                      (soft-diag! p b (str "type/value mismatch at argument " (inc i) " in template parameter list for '" (:name tmpl) "'")))))
+                      (soft-diag! p b (str "type/value mismatch at argument " (inc i) " in template parameter list for '" (:name tmpl) "'")))
+                    ;; (cpp-indep2: [temp.arg.nontype]/? (C++17 /2.3, C++20 [temp.arg.nontype]/6.2): a string literal is no template
+                    ;; argument of a non-type parameter of a pointer or reference type: GCC's "'\"S\"' is not a valid template argument for
+                    ;; type 'const char*' because string literals can never be used in this context", at it; template/nontype7.C)
+                    (when (and (= "NonTypeTemplateParmDecl" (:kind tp)) (= :expr (:k a)) (= "StringLiteral" (:kind x))
+                               (re-find #"[*&]" (str (get-in tp [:type :qualType]))))
+                      (soft-diag! p b (str "'" (tok-text p b (long (:e a))) "' is not a valid template argument for type '"
+                                           (get-in tp [:type :qualType]) "' because string literals can never be used in this context")))))
+              _ (when (and tmpl (= :expr (:k a)) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b))
+                  (nttp-arg-check! p a (get (vec (:tps tmpl)) (count out))))
               a (if (accept! p "...") (assoc a :pack true) a)
               out (conj out a)]
           (cond (accept! p ",") (recur out)
                 (do (gt-close-check! p) (accept! p ">")) out
                 :else (perr p "a template argument list"))))))))
+
+;; cpp-indep2: a unit's class-key counts by name (a class-key, the name, no < after it), made once a unit for the rule below
+(def ^:private class-key-counts (java.util.WeakHashMap.))
+
+(defn parse-template-args
+  "parse-template-args* and, cpp-indep2, the argument count of a class or alias template's template-id ([temp.arg.general]/1,
+  [temp.names]/? : as many arguments as the template has parameters, the defaulted and the packs aside): GCC's \"wrong number of
+  template arguments (1, should be at least 2)\", at the template-id's <; no pack expansion among the arguments, the main
+  file's, not skimmed."
+  ([^P p] (parse-template-args p nil))
+  ([^P p tmpl]
+   (let [lt (ix p)
+         as (parse-template-args* p tmpl)]
+     (when (and tmpl (type-ent? tmpl) (:tmpl tmpl) (seq (:tps tmpl)) (not (:tparam tmpl)) (not (skim? p)) (main-tok? p lt)
+                (not-any? :pack as))
+       (let [tps (vec (:tps tmpl))
+             dflt? (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x)))
+             pk (some :isParameterPack tps)
+             nreq (count (remove #(or (dflt? %) (:isParameterPack %)) tps))
+             n (count as)]
+         ;; (a template declared once: a redeclaration may add default arguments, [temp.param]/12, which the entity's
+         ;; parameters, its first declaration's, may not hold; the tokens scanned only for a count that is wrong)
+         (when-let [msg (when (not-any? #(= "TemplateTemplateParmDecl" (:kind %)) tps)
+                          (cond
+                            (< n nreq) (str "wrong number of template arguments (" n ", should be " (if (or pk (some dflt? tps)) "at least " "") nreq ")")
+                            (and (not pk) (> n (count tps))) (str "wrong number of template arguments (" n ", should be " (count tps) ")")
+                            :else nil))]
+           (let [nm (:name tmpl)
+                 ^java.util.Map cs (locking class-key-counts
+                                     (or (.get ^java.util.Map class-key-counts p)
+                                         (let [m (java.util.HashMap.) cnt (.-cnt p)]
+                                           (dotimes [i (max 0 (- cnt 2))]
+                                             (when (and (#{"class" "struct" "union"} (ts (tok-at p i))) (not= "<" (ts (tok-at p (+ i 2)))))
+                                               (let [k (ts (tok-at p (inc i)))] (.put m k (inc (long (or (.get m k) 0)))))))
+                                           (.put ^java.util.Map class-key-counts p m)
+                                           m)))]
+             (when (and (string? nm) (>= 1 (long (or (.get cs nm) 0))))
+               (soft-diag! p lt msg))))))
+     as)))
 
 (defn- arg-str ^String [^P p a]
   (str (case (:k a)
@@ -1104,10 +1229,14 @@
             (t= t ")") (if (= d 1) j (recur (inc j) (dec d)))
             :else (recur (inc j) d)))))
 
+(def ^:dynamic *tentative*
+  "queue 578: true inside a tentative parse (tentatively), whose failure decides between readings: no syntax recovery there."
+  false)
+
 (defn- tentatively
   "Runs (f p) with the cursor put back after."
   [^P p f]
-  (let [b (ix p)] (try (f p) (catch arbace.lang.ExceptionInfo _ :error) (finally (seek! p b)))))
+  (let [b (ix p)] (try (binding [*tentative* true] (f p)) (catch arbace.lang.ExceptionInfo _ :error) (finally (seek! p b)))))
 
 (defn- is-simple-declaration?
   "isCXXSimpleDeclaration: a declaration statement (or a for-range declaration, `allow-for-range`)."
@@ -1398,7 +1527,24 @@
                                  v (when (and (identical? :num (.-k n)) (is-at? p 2 "]")) (try (Long/decode (.-s n)) (catch Exception _ nil)))]
                              (skip-balanced! p)
                              (if (or (is? p "=") (is? p ".") (is? p "["))
-                               (let [dz (conj dz [:i v s])] (if (is? p "=") dz (recur dz)))
+                               (let [dz (conj dz [:i v s])]
+                                 ;; (cpp-rind: GNU's C99 array designator `[i] =`, no C++ designator ([dcl.init.aggr]/3.1 names members
+                                 ;; alone): GCC's pedwarn "ISO C++ does not allow C99 designated initializers", an error under
+                                 ;; -pedantic-errors; an index of floating type "array index in initializer is not an integral constant-
+                                 ;; expression"; ext/desig9.C, desig8.C)
+                                 (when (and (not (skim? p)) (main-tok? p s))
+                                   (if (and (identical? :num (.-k n)) (t= (tok-at p (+ (long s) 2)) "]") (re-find #"[.eEpP]" (.-s n)) (not (re-find #"^0[xX][0-9a-fA-F]+$" (.-s n))))
+                                     (soft-diag! p s "array index in initializer is not an integral constant-expression")
+                                     ;; (a declaration under __extension__ spared, as GCC's pedwarns are: ext/desig2.C)
+                                     (when-not (loop [i (dec (long b)) k 0]
+                                                 (if (or (neg? i) (> k 64))
+                                                   false
+                                                   (let [^T t (tok-at p i)]
+                                                     (cond (or (t= t ";") (t= t "}")) false
+                                                           (t= t "__extension__") true
+                                                           :else (recur (dec i) (inc k))))))
+                                       (pedantic-diag! p s "ISO C++ does not allow C99 designated initializers"))))
+                                 (if (is? p "=") dz (recur dz)))
                                (do (seek! p s) dz)))
                            ;; (cpp-gnu, 2026-11-22: GNU's obsolete designator `member:` before an element, the manual's
                            ;; "Designated Initializers": `.member =` written `member:`, parse/pr43765.C)
@@ -1903,9 +2049,11 @@
       (t= t "__null") (do (adv! p) (node p "GNUNullExpr" b b {}))
       (t= t "this") (do ;; (cpp-read, 2026-11-22: [expr.prim.this]/2-3, `this` in a static member function or a non-member function's
                         ;; body: GCC's "'this' is unavailable for static member functions", "invalid use of 'this' in non-member function")
-                        (when (and (#{:static :nonmember} *this-ok*) (main-tok? p b) (not (skim? p)))
-                          (soft-diag! p b (if (= :static *this-ok*) "'this' is unavailable for static member functions"
-                                              "invalid use of 'this' in non-member function")))
+                        (when (and (#{:static :nonmember :top-lambda} *this-ok*) (main-tok? p b) (not (skim? p)))
+                          (soft-diag! p b (case *this-ok*
+                                            :static "'this' is unavailable for static member functions"
+                                            :top-lambda "invalid use of 'this' at top level"
+                                            "invalid use of 'this' in non-member function")))
                         (adv! p) (node p "CXXThisExpr" b b {}))
       (t= t "(")
       (cond
@@ -1947,6 +2095,10 @@
           ;; `(... op E)`): GCC's "expected ..." (cp_parser_fold_expression's errors), at the parenthesis
           (when (and full? (not (and f (= (second f) e0))) (main-tok? p b))
             (soft-diag! p b "expected a fold-expression"))
+          ;; (cpp-indep2: a fold-expression is C++17's (N4295): before it GCC's pedwarn "fold-expressions only available with
+          ;; '-std=c++17' or '-std=gnu++17'", an error under -pedantic-errors, at the `(`; cpp1z/fold5.C)
+          (when (and full? f (= (second f) e0) (< (.-year p) 2017) (main-tok? p b))
+            (pedantic-diag! p b "fold-expressions only available with '-std=c++17' or '-std=gnu++17'"))
           (skip-balanced! p)
           (cond-> (text-node p "CXXFoldExpr" b)
             ;; (the operands as data, the node the text it was: the tree compared with clang's unchanged)
@@ -2280,7 +2432,9 @@
         ;; (cpp-read, 2026-11-22: before C++20 an array's new-initializer is ( ) or a braced-init-list, P0960 allowing an
         ;; expression-list: GCC's build_new_1 "parenthesized initializer in array new", at the new-expression; the allocated type
         ;; an array by its bounds, a parenthesized type-id or a typedef-name; not in a template, checked at its instantiation)
+        ;; (cpp-indep: `( )` is no expression-list, a class type's empty ParenListExpr none either: expr/anew7.C's new S[1]())
         _ (when (and init (= "call" (second init)) (not= "ImplicitValueInitExpr" (:kind (first init))) (< (.-year p) 2020)
+                     (not (and (= "ParenListExpr" (:kind (first init))) (empty? (:inner (first init)))))
                      (not (skim? p)) (main-tok? p b) (not (in-template? p))
                      (or arr (loop [t ty n 0] (cond (= :a (:t t)) true
                                                     (and (= :n (:t t)) (:ty (:ent t)) (< n 8)) (recur (:ty (:ent t)) (inc n))
@@ -2458,6 +2612,24 @@
     (when (main-tok? p i)
       (let [^T t (tok-at p i)] (.add d [(.-o t) why (.-s t)])))))
 
+(defn- in-extension?
+  "cpp-indep2: whether token `i` is within a declaration GNU's `__extension__` introduces, its own or an enclosing one (a class's
+  member, a namespace's or a class's body): GCC's -pedantic spares the whole declaration (ext/anon-struct1.C's `__extension__
+  struct G { struct { char z; }; ... };`). Back from `i`: a sibling declaration (after a `;` or a `}` at the level) skipped to the
+  enclosing `{`, whose head is then searched in turn."
+  [^P p ^long i]
+  (loop [j (dec i) d 0 skip false k 0]
+    (if (or (neg? j) (> k 20000))
+      false
+      (let [^T t (tok-at p j)]
+        (cond (t= t "}") (recur (dec j) (inc d) (if (zero? d) true skip) (inc k))
+              (and (t= t "{") (pos? d)) (recur (dec j) (dec d) skip (inc k))
+              (pos? d) (recur (dec j) d skip (inc k))
+              (t= t "{") (recur (dec j) 0 false (inc k))
+              (t= t ";") (recur (dec j) 0 true (inc k))
+              (and (not skip) (t= t "__extension__")) true
+              :else (recur (dec j) 0 skip (inc k)))))))
+
 (defn- pedantic-diag!
   "CP338 (a): a main-file diagnostic GCC gives as a pedwarn (an error under -pedantic-errors alone), the construct taken:
   kept as a syntax error whose reason starts `pedantic: `, which arbace.repr.cpp.diag/diagnose drops without -pedantic-errors."
@@ -2516,7 +2688,16 @@
                    (adv! p) (recur (conj qs q)))
                  qs)))
         _ (expect! p "(")
-        lit (fn [] (if (identical? :str (tk (cur p))) (:value (parse-string-literal p)) (perr p "an asm string")))
+        ;; (cpp-vec, 2026-11-25: GCC 15's constexpr asm strings, the template, a constraint or a clobber written as a parenthesized
+        ;; constant expression, `asm ((S {}) :: (T {}) (x))`: parsed, its node kept among :cxstrs for the checker's rule)
+        cxs (atom [])
+        lit (fn [] (cond (identical? :str (tk (cur p))) (:value (parse-string-literal p))
+                         (is? p "(") (do (adv! p)
+                                         (let [x (with-gt p true (parse-expr p))]
+                                           (expect! p ")")
+                                           (swap! cxs conj x)
+                                           {:cx (dec (count @cxs))}))
+                         :else (perr p "an asm string")))
         ;; (h-cpp-read: the template is a string-literal, or C++26's parenthesized constant expression (GCC's constexpr asm):
         ;; GCC's "expected string-literal" else, before the statement is skipped)
         _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) "expected string-literal"))
@@ -2534,7 +2715,7 @@
                                   ;; string-literal: GCC's "expected identifier before numeric constant", "expected string-literal")
                                   (when-not (identical? :id (tk (cur p))) (soft-diag! p (ix p) (str "expected identifier before '" (ts (cur p)) "'")))
                                   (let [s (ts (cur p))] (adv! p) (expect! p "]") s))
-                             _ (when-not (identical? :str (tk (cur p))) (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'")))
+                             _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) (str "expected string-literal before '" (ts (cur p)) "'")))
                              c (lit)
                              _ (expect! p "(")
                              x (parse-expr p)]
@@ -2548,7 +2729,7 @@
     (expect! p ")")
     {:volatile (boolean (:volatile qs)) :inline (boolean (:inline qs)) :goto (boolean (:goto qs)) :template tmpl
      :outputs (mapv (fn [[n c _]] [n c]) outs) :inputs (mapv (fn [[n c _]] [n c]) ins) :clobbers clob :labels labels
-     :inner (vec (concat (map #(nth % 2) outs) (map #(nth % 2) ins)))}))
+     :inner (vec (concat (map #(nth % 2) outs) (map #(nth % 2) ins))) :cxstrs @cxs}))
 
 (defn- skip-rec!
   "Recovery (cpp-read, 2026-11-22): the cursor on an opener ( [ { after its closer, as GCC's recovery skips (the braces nest,
@@ -2653,7 +2834,12 @@
     (let [constexpr (accept! p "constexpr")
           neg (when (and (is? p "!") (is-at? p 1 "consteval")) (adv! p) true)]
       (if (accept! p "consteval")
-        (let [a (binding [*in-if* true] (parse-compound-stmt p))
+        (let [;; (cpp-own, 2026-11-25: [stmt.if]/4, a consteval if's first branch that is no compound statement: GCC's "'if
+              ;; consteval' requires compound statement" at it, the statement parsed as one, cpp23/consteval-if2.C)
+              a (binding [*in-if* true]
+                  (if (is? p "{")
+                    (parse-compound-stmt p)
+                    (do (soft-diag! p (ix p) "'if consteval' requires compound statement") (sub-statement p))))
               ;; (cpp-diag-a: [stmt.if]/4, `if consteval`'s else branch is a compound-statement too: GCC's "'if consteval' requires
               ;; compound statement", at the statement)
               e (when (accept! p "else")
@@ -2833,7 +3019,9 @@
       ;; what is parsed here, the statement's tokens skipped as before)
       (let [a (when-not (skim? p) (try (parse-asm-parts p) (catch arbace.lang.ExceptionInfo _ (seek! p b) nil)))]
         (when-not a (skip-until! p #{";"}))
-        (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e (if a {:_asm (dissoc a :inner) :inner (:inner a)} {}))))
+        (let [e (last-ix p)] (expect! p ";") (node p "GCCAsmStmt" b e (if a (cond-> {:_asm (dissoc a :inner :cxstrs) :inner (:inner a)}
+                                                                              (seq (:cxstrs a)) (assoc :_cxstrs (:cxstrs a)))
+                                                                      {}))))
       (or (and (t= t "[") (is-at? p 1 "[")) (t= t "__attribute__") (and (t= t "__attribute") (is-at? p 1 "(")))
       (let [as (attr-nodes p)
             ;; (cpp-read, 2026-11-22: a label's attributes, [stmt.label]/1: deprecated appertains to no label
@@ -2944,6 +3132,24 @@
             (and (t= t ";") (<= br 0)) (soft-diag! p j "expected primary-expression before ';' token")
             :else (recur (inc j) d br)))))
 
+(defn- gnu-attr-args!
+  "queue 578: a GNU attribute's arguments at its `(`, read as GCC reads them (the GCC manual's \"Attribute Syntax\": an identifier,
+  or an identifier and a comma-separated list of expressions, or such a list alone): parsed and put back, the clause still skipped
+  whole as before, so that a syntax error inside one -- a lambda's body among the arguments, cpp0x/pr84606.C's `common([] { struct
+  d })` -- is given (the statement's own recovery, or the error the parse stops at); in the main file outside a tentative parse and
+  a skimmed header, with the headers read in full (the dg check's own read)."
+  [^P p]
+  (when (and *full-headers* (not *tentative*) (not (skim? p)) (main-tok? p (ix p)))
+    (let [b (ix p)]
+      (try (adv! p)
+           (when (and (id? p) (or (is-at? p 1 ",") (is-at? p 1 ")"))) (adv! p) (accept! p ","))
+           (loop [] (when-not (is? p ")") (with-gt p true (parse-assign-expr p)) (when (accept! p ",") (recur))))
+           (catch arbace.lang.ExceptionInfo x
+             (let [at (:at (ex-data x))]
+               (when (and (:cpp/parse (ex-data x)) at (main-tok? p (long at)))
+                 (soft-diag! p (long at) (str (:why (ex-data x)))))))
+           (finally (seek! p b))))))
+
 (defn attr-nodes
   "The attribute-specifiers at the cursor: [[...]], __attribute__((...)), alignas(...): their nodes."
   [^P p]
@@ -2990,6 +3196,16 @@
                               ;; "attribute with no arguments contains no parameter packs")
                               (when (and (nil? nsname) (not args?) (contains? std-attrs (ts (tok-at p b))))
                                 (soft-diag! p b (str "attribute '" (ts (tok-at p b)) "' cannot be used as an attribute pack")))
+                              ;; (cpp-indep2: [temp.variadic]/5, an attribute pack's arguments name a pack: when each name in them is
+                              ;; a type that is no pack (a class, a template parameter that is no pack), GCC's "expansion pattern
+                              ;; contains no parameter packs", at the attribute; cpp0x/alignas11.C's `[[gnu::aligned (alignof(A))...]]`)
+                              (when (and args? *full-headers* (not (skim? p)) (main-tok? p b))
+                                (let [ids (keep (fn [i] (let [^T t (tok-at p i)] (when (identical? :id (.-k t)) (.-s t)))) (range (+ b (if nsname 3 1)) (ix p)))]
+                                  (when (and (seq ids)
+                                             (every? (fn [nm] (let [en (lookup (scope p) nm)]
+                                                                (and (map? en) (= :type (:k en)) (not (:pack en)))))
+                                                     ids))
+                                    (soft-diag! p b "expansion pattern contains no parameter packs"))))
                               (adv! p)))
                           (when (and (#{"gnu" "__gnu__"} nsname) (not (known-gnu-attr? (ts (tok-at p (+ b 2))))))
                             (unknown-gnu-attr! p b (+ b 2) (t= (tok-at p (+ b 3)) "(")))
@@ -3024,7 +3240,7 @@
                                      (contains? #{"noinline" "always_inline" "noreturn" "cold" "hot" "flatten" "leaf" "noclone" "returns_twice" "artificial" "noipa"}
                                                 (str/replace (ts (tok-at p b)) #"^__|__$" "")))
                             (soft-diag! p b (str "wrong number of arguments specified for '" (str/replace (ts (tok-at p b)) #"^__|__$" "") "' attribute")))
-                          (adv! p) (when (is? p "(") (attr-args-semicolon! p) (skip-balanced! p))
+                          (adv! p) (when (is? p "(") (when-not (attr-args-semicolon! p) (gnu-attr-args! p)) (skip-balanced! p))
                           (when-not (known-gnu-attr? (ts (tok-at p b))) (unknown-gnu-attr! p b b (t= (tok-at p (inc b)) "(")))
                           (recur (if (and (known-gnu-attr? (ts (tok-at p b))) (not gcc-kind))
                                    (conj out (node p "NativeAttr" b (last-ix p) (cond-> {:_gnu (ts (tok-at p b))}
@@ -3036,6 +3252,10 @@
       (let [b (ix p)]
         ;; (h-cpp-read: alignas takes a type-id or a constant-expression, [dcl.align]/1, none an error)
         (when (is-at? p 2 ")") (soft-diag! p (+ b 2) "expected type-id or expression before ')' token"))
+        ;; (cpp-indep2: [expr.prim.this]/3, `this` in an alignment-specifier outside a function body (a member's declarator, a
+        ;; namespace-scope declaration's): GCC's "invalid use of 'this' at top level", at it; cpp0x/gen-attrs-55.C)
+        (when (and (nil? *this-ok*) (not (skim? p)) (t= (tok-at p (+ b 2)) "this") (main-tok? p (+ b 2)))
+          (soft-diag! p (+ b 2) "invalid use of 'this' at top level"))
         (adv! p)
         ;; (cpp-read, 2026-11-22: the argument parsed, [dcl.align]/1: a `)` missing after it is GCC's "expected ')' before X", the
         ;; declaration going on at X; a pack expansion whose pattern names no pack, [temp.variadic]/5, "expansion pattern ...
@@ -3184,6 +3404,21 @@
                 (t= t "}") (recur (inc j) (dec d))
                 :else (recur (inc j) d)))))))
 
+(defn- declared-at-top-in-main?
+  "cpp-own (2026-11-25): whether the main file names `nm` outside every brace (at its top level, where a declaration of the
+  global namespace's member is): the guard of a `::X` no lookup finds, a failed declaration's cascade."
+  [^P p ^String nm]
+  (let [n (.-cnt p)]
+    (loop [i 0 d 0]
+      (if (>= i n)
+        false
+        (let [^T t (tok-at p i)]
+          (cond (not (main-tok? p i)) (recur (inc i) d)
+                (t= t "{") (recur (inc i) (inc d))
+                (t= t "}") (recur (inc i) (max 0 (dec d)))
+                (and (zero? d) (identical? :id (.-k t)) (.equals nm (.-s t))) true
+                :else (recur (inc i) d)))))))
+
 (defn- declared-in-main?
   "cpp-read (2026-11-22): whether the main file declares a type named `nm` somewhere (`using NM =`, a class-key or enum before
   it, `typedef ... NM;`, `concept NM`): a later use no lookup finds is then a declaration's failure's cascade (GCC declares the
@@ -3196,7 +3431,11 @@
                 (and (identical? :id (.-k t)) (.equals nm (.-s t)) (main-tok? p i)
                      (let [^T pv (tok-at p (dec i)) ^T nx (tok-at p (inc i))]
                        (or (and (t= pv "using") (t= nx "="))
-                           (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                           (and (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                                ;; (cpp-def: a type template-parameter, `template <class T, class S>`, declares its name in its
+                                ;; template alone, no failed declaration's: template/pr70466-1.C's `S::*` in another template)
+                                (not (and (#{"class" "typename"} (.-s pv)) (>= i 2) (#{"<" ","} (.-s (tok-at p (- i 2))))
+                                          (#{"," ">" "=" ">>"} (.-s nx)))))
                            (and (or (t= nx ";") (t= nx "[") (t= nx ",") (t= nx ")") (t= nx "("))
                                 (loop [j (dec i)] (cond (< j (max 0 (- i 64))) false
                                                         (or (t= (tok-at p j) ";") (t= (tok-at p j) "{") (t= (tok-at p j) "}")) false
@@ -3234,7 +3473,17 @@
             (= s "friend") (do (adv! p) (recur (assoc ds :friend true) words))
             (#{"inline" "__inline" "__inline__"} s) (do (adv! p) (recur (assoc ds :inline true :inline-i (last-ix p)) words))
             (= s "virtual") (do (adv! p) (recur (assoc ds :virtual true :virtual-i (last-ix p)) words))
-            (= s "explicit") (do (adv! p) (when (is? p "(") (skip-balanced! p)) (recur (assoc ds :explicit true) words))
+            ;; (queue 584: an explicit-specifier's constant-expression parsed tentatively and kept by its text, as a
+            ;; noexcept-specifier's: the checker evaluates it, [dcl.fct.spec]/3)
+            (= s "explicit") (let [i (ix p)] (adv! p)
+                                 (when (is? p "(")
+                                   (let [ob (ix p)
+                                         x (when (and *full-headers* (not (skim? p)))
+                                             (tentatively p (fn [p] (adv! p) (let [x (with-gt p true (parse-expr p))] (when (is? p ")") x)))))]
+                                     (skip-balanced! p)
+                                     (when (and (map? x) (> (- (long (ix p)) 2) (long ob)))
+                                       (.put ^HashMap (stv p DECLTYPES) (str "explicit:" (str/replace (tok-text p (inc (long ob)) (- (long (ix p)) 2)) #"\s+" "")) x))))
+                                 (recur (assoc ds :explicit true :explicit-i i) words))
             (= s "constexpr") (do (adv! p) (recur (assoc ds :constexpr true :constexpr-i (last-ix p)) words))
             (= s "consteval") (do (adv! p) (recur (assoc ds :consteval true) words))
             (#{"constinit" "__constinit"} s) (do (adv! p) (recur (assoc ds :constinit true) words))
@@ -3246,7 +3495,8 @@
             ;; "duplicate 'volatile'")
             (#{"const" "__const"} s) (do (when (:c ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :c true :cv-i (or (:cv-i ds) (last-ix p))) words))
             (#{"volatile" "__volatile" "__volatile__"} s) (do (when (:v ds) (soft-diag! p (ix p) (str "duplicate '" s "'"))) (adv! p) (recur (assoc ds :v true :cv-i (or (:cv-i ds) (last-ix p))) words))
-            (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur ds words))
+            ;; (cpp-indep: GNU's __restrict among the specifiers kept as :rs-spec alone, a constructor's qualifier, other/pr61753.C)
+            (#{"__restrict" "__restrict__"} s) (do (adv! p) (recur (assoc ds :rs-spec true) words))
             (and (contains? builtin-kws s) (nil? (:type ds)))
             (do ;; (cpp-gnu, 2026-11-22: GNU's __int128 is no type of ISO C++, [basic.fundamental]'s standard integer types:
                 ;; GCC's pedwarn "ISO C++ does not support '__int128' for ...", at the keyword, an error under -pedantic-errors
@@ -3260,7 +3510,11 @@
             (and (= s "__auto_type") (not has-type)) (do (adv! p) (recur (assoc ds :type {:t :auto}) words))
             (and (#{"decltype" "__decltype"} s) (not has-type) (is-at? p 1 "("))
             (if (and (is-at? p 2 "auto") (is-at? p 3 ")"))
-              (do (dotimes [_ 4] (adv! p)) (recur (assoc ds :type {:t :dta}) words))
+              (do ;; (cpp-rind: decltype(auto) is C++14's: before it GCC's "'decltype(auto)' type specifier only available with
+                  ;; '-std=c++14'", a pedwarn, an error under -pedantic-errors; cpp0x/decltype77.C)
+                  (when (and (< (.-year p) 2014) (not (skim? p)) (main-tok? p (ix p)))
+                    (pedantic-diag! p (ix p) "'decltype(auto)' type specifier only available with '-std=c++14'"))
+                  (dotimes [_ 4] (adv! p)) (recur (assoc ds :type {:t :dta}) words))
               (let [save (ix p)
                     qn (parse-name p :scan)]
                 (if (and qn (> (count (:parts qn)) 1))
@@ -3341,7 +3595,9 @@
           (let [i (ix p) as (attr-nodes p)]
             ;; (round 54, second pass: [dcl.spec.general]/1, a decl-specifier-seq's attribute-specifier-seq follows its last
             ;; decl-specifier alone: one before another decl-specifier is GCC's "standard attributes in middle of decl-specifiers")
-            (when (and (> i (long (:b ds))) (or (storage-kws (ts (cur p))) (cv-kws (ts (cur p))) (builtin-kws (ts (cur p)))))
+            ;; (cpp-indep2: before a class-key or enum too, `typedef [[gnu::aligned (16)]] struct {...} X;`; cpp0x/gen-attrs-39-1.C)
+            (when (and (> i (long (:b ds))) (or (storage-kws (ts (cur p))) (cv-kws (ts (cur p))) (builtin-kws (ts (cur p)))
+                                                (#{"struct" "class" "union" "enum"} (ts (cur p)))))
               (soft-diag! p i "standard attributes in middle of decl-specifiers"))
             (recur (update ds :attrs into as) words))
           (and (type-transform? p) (not has-type))
@@ -3426,6 +3682,34 @@
                         (when (and (:s s2) (:i s2) (not (and (= "align_val_t" (:s s2)) (>= (.-year p) 2017))))
                           (soft-diag! p (long (:i s2)) (str "'" (:s s2) "' is not a member of 'std'")))
                         (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared")))))
+                  ;; (cpp-own, 2026-11-25: [basic.lookup.qual]/1 with [namespace.qual]: `::X` names a member of the global namespace,
+                  ;; GCC's "'::X' has not been declared" when it declares none, at the name; the main file declaring X at its top
+                  ;; level nowhere (a failed declaration's cascade aside); tc1/dr176.C's `::Base* p3;` with Base N1's)
+                  (let [f (first (:parts qn))]
+                    (when (and *full-headers* (not (skim? p)) (:g qn) (= 1 (count (:parts qn))) (:s f) (not (:args f)) (:i f)
+                               (main-tok? p (long (:i f)))
+                               (nil? (sc/find-in (stv p ROOT) (:s f) true)) (nil? (sc/find-in (stv p ROOT) (:s f) false))
+                               (not (declared-at-top-in-main? p (:s f))))
+                      (soft-diag! p (long (:i f)) (str "'::" (:s f) "' has not been declared"))))
+                  ;; (cpp-rind: a name qualified by a namespace that declares no such member, its inline namespaces' and nominated
+                  ;; ones' aside: GCC's "'A::nonexistent' has not been declared", at the name; diagnostic/undeclared1.C)
+                  (let [l (peek (:parts qn)) q (:q qn)]
+                    (when (and *full-headers* (not (skim? p)) (= 2 (count (:parts qn))) (not (:g qn)) (nil? (:ent qn)) (:s l) (:i l)
+                               (not-any? :args (:parts qn)) (main-tok? p (long (:i l)))
+                               (map? q) (= :ns (:k q)) (:scope q) (not= "std" (:name q))
+                               (nil? (sc/find-in (:scope q) (:s l) true)) (nil? (sc/find-in (:scope q) (:s l) false)))
+                      (soft-diag! p (long (:i l)) (str "'" (name-str p qn) "' has not been declared"))))
+                  ;; (cpp-rind: [basic.lookup.qual]/1 with [dcl.type.simple]/1, a name qualified by a complete class without bases or
+                  ;; an enumeration, not a template's, that declares no such member: GCC's "'Type' in 'enum class ENUM' does not name
+                  ;; a type", at the name; cpp0x/enum16.C, parse/error52.C)
+                  (let [f (first (:parts qn)) l (peek (:parts qn)) q (:q qn)]
+                    (when (and *full-headers* (not (skim? p)) (= 2 (count (:parts qn))) (not (:g qn)) (nil? (:ent qn)) (:s f) (:s l)
+                               (not-any? :args (:parts qn)) (:i l) (main-tok? p (long (:i l)))
+                               (map? q) (:tag q) (not (:incomplete q)) (not (:dep q)) (not (:tmpl q)) (not (:tparam q)) (:scope q)
+                               (= (:name q) (:s f))
+                               (if (:class q) (and (some? (:bases-order q)) (zero? (.size ^ArrayList (:bases-order q))) (not (:union q))) true)
+                               (nil? (sc/find-in (:scope q) (:s l) true)) (nil? (sc/find-in (:scope q) (:s l) false)))
+                      (soft-diag! p (long (:i l)) (str "'" (:s l) "' in '" (:s f) "' does not name a type"))))
                   (recur (assoc ds :type {:t :n :s (name-str p qn) :qn qn}) words))
               (and decl-ctx (nil? e) (id? p) (not (#{"final" "override"} (ts (cur p)))))
               (do ;; (cpp-read, 2026-11-22: an unqualified name no lookup finds where a declaration's type stands, a declarator's
@@ -3614,6 +3898,12 @@
               ;; is GCC's "'A' is a namespace", at the name)
               (when (and (not (skim? p)) (main-tok? p save) (= :ns (:k (:ent qn))))
                 (soft-diag! p save (str "cannot create pointer to member of namespace '" (name-str p qn) "'")))
+              ;; (cpp-rind: its class's name one no lookup finds and the main file declares nowhere: GCC's "'A' has not been
+              ;; declared", other/ptrmem7.C)
+              (when (and *full-headers* (not (skim? p)) (main-tok? p save) (nil? (:ent qn)) (= 1 (count (:parts qn))) (not (:g qn))
+                         (:s (first (:parts qn))) (not (:args (first (:parts qn)))) (nil? (lookup (scope p) (:s (first (:parts qn)))))
+                         (not (declared-in-main? p (:s (first (:parts qn))))))
+                (soft-diag! p save (str "'" (:s (first (:parts qn))) "' has not been declared")))
               (adv! p) (adv! p)
               (let [[c v] (loop [c false v false] (cond (is? p "const") (do (adv! p) (recur true v)) (is? p "volatile") (do (adv! p) (recur c true))
                                                         ;; (cpp-read, 2026-11-22: the ptr-operator's attribute-specifier-seq, [dcl.decl.general]/4)
@@ -3877,7 +4167,25 @@
         t3 (if (:nested d) (build-type t2 (:nested d)) t2)]
     (if (and (:pack d) (not (:nested d))) {:t :pk :of t3} t3)))
 
+(defn- skimmed-bounds
+  "cpp-indep: the type `t` with each array bound a skim kept as text only (:sn) written as its bound (:n)."
+  [t]
+  (cond (map? t) (let [t (reduce-kv (fn [m k v] (if (or (map? v) (vector? v)) (assoc m k (skimmed-bounds v)) m)) t t)]
+                   (if (and (= :a (:t t)) (nil? (:n t)) (:sn t)) (assoc t :n (:sn t)) t))
+        (vector? t) (mapv skimmed-bounds t)
+        :else t))
+
 (defn- name-chain [d] (loop [d d out [d]] (if (:nested d) (recur (:nested d) (conj out (:nested d))) out)))
+
+(defn- arr-of-ref?
+  "cpp-rind: [dcl.array]/1, whether the type built by a declarator holds an array whose element type is a reference (`int &a[1]`,
+  `const int& (a)[1]`; a reference to an array, `int (&a)[1]`, is none), through its pointers, arrays and return types."
+  [t]
+  (loop [t t k 0]
+    (when (and (map? t) (< k 32))
+      (if (and (= :a (:t t)) (#{:lr :rr} (:t (:of t))))
+        true
+        (recur (if (= :f (:t t)) (:r t) (:of t)) (inc k))))))
 
 (defn- op-param!
   "Round 54, sixth pass: [dcl.fct]/? (C++23 [dcl.fct]/3) with [dcl.decl.general]/? : a parameter's and an exception-declaration's
@@ -3909,12 +4217,21 @@
   [^P p ctx]
   (let [outer *tid-def*
         ds (if (or outer (= ctx :trailing) (not (#{"class" "struct" "union" "enum"} (ts (cur p)))))
-             (parse-decl-specs p (if (= ctx :trailing) :alias :type-id))
+             (binding [*trailing-type* (= ctx :trailing)] (parse-decl-specs p (if (= ctx :trailing) :alias :type-id)))
              (binding [*tid-def* (count (stv p CLS))] (parse-decl-specs p :type-id)))
         base (or (ds-type ds) (perr p "a type"))
         ;; CP352: a class or enumeration defined in a trailing return type (`auto f() -> struct C {} {}`, ill-formed) has no place in the
         ;; function's forms (its declaration would stand beside it): a decline, the declaration's text
         _ (when (and (= ctx :trailing) (:tag-node ds) (not (skim? p))) (perr p "a type defined in a trailing return type"))
+        ;; (cpp-indep2: [dcl.type.class.deduct]/2, a placeholder for a deduced class type is no trailing return type: a class
+        ;; template's name alone, `auto foo() -> A;`, GCC's "invalid use of template-name 'A' without an argument list", at the
+        ;; type; its own injected name aside; cpp1z/class-deduction53.C)
+        _ (when (and (= ctx :trailing) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (let [tq (:qn (:type ds)) e (:ent (:type ds))]
+              (when (and (= :n (:t (:type ds))) (= 1 (count (:parts tq))) (nil? (:args (first (:parts tq)))) (not (:g tq))
+                         (map? e) (:tmpl e) (:class e) (not (:inj e)) (not (:tparam e))
+                         (not= (:s (first (:parts tq))) (some-> (stv p CLS) first :name)))
+                (soft-diag! p (long (:b ds)) (str "invalid use of template-name '" (:s (first (:parts tq))) "' without an argument list")))))
         ;; (round 54: [dcl.type.general]/3 (C++23 [dcl.type.general]/2), a type-specifier-seq defines no class or enumeration outside
         ;; a declaration's: a cast's, sizeof's, offsetof's or a template argument's type-id; GCC's "types may not be defined in ...")
         _ (when-let [tn (:tag-node ds)]
@@ -3935,9 +4252,22 @@
 
 (defn- declare! [^P p e] (sc/declare! (sc/decl-scope (scope p)) e))
 
+(defn- param-close
+  "queue 578: the index of the `)` that closes the parameter-declaration-clause the cursor is in (its groups nested), or nil when a
+  `;`, `{` or `}` outside them, or the end, comes first."
+  [^P p]
+  (loop [j (ix p) d 0]
+    (let [^T t (tok-at p j)]
+      (cond (identical? :eof (.-k t)) nil
+            (or (t= t "(") (t= t "[")) (recur (inc j) (inc d))
+            (or (t= t ")") (t= t "]")) (if (zero? d) (when (t= t ")") j) (recur (inc j) (dec d)))
+            (or (t= t ";") (t= t "{") (t= t "}")) nil
+            :else (recur (inc j) d)))))
+
 (defn parse-param-list
   "A parameter-declaration-clause, the ( consumed, its ) too: {:params [ParmVarDecl ...] :types [...] :names [...] :va}."
   [^P p]
+  (binding [*param-depth* (inc (long *param-depth*))]
   (with-gt p true
     (cond
       (is? p ")") (do (adv! p) {:params [] :types [] :names [] :va false})
@@ -3953,6 +4283,10 @@
                 ;; (cpp-diag-b, 2026-11-22: a register parameter in C++17, [diff.cpp14.dcl.dcl]: GCC's pedwarn, as for a variable)
                 _ (when (and (= "register" (:storage ds)) (>= (.-year p) 2017) (not (skim? p)) (main-tok? p (long (:b ds))))
                     (pedantic-diag! p (long (:b ds)) "ISO C++17 does not allow 'register' storage class specifier"))
+                ;; (cpp-indep: [dcl.typedef]/1 with [dcl.fct]/3, a parameter-declaration's decl-specifier-seq holds no typedef:
+                ;; GCC's "typedef declaration invalid in parameter declaration", other/typedef1.C's `void f4(typedef int x)`)
+                _ (when (and (:typedef ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+                    (soft-diag! p (long (:b ds)) "typedef declaration invalid in parameter declaration"))
                 ;; (queue 376: [dcl.fct]/17 (C++23 [dcl.fct]/16), a class or enumeration defined in a parameter's type: GCC's
                 ;; "types may not be defined in parameter types", at the definition's opening brace)
                 _ (when-let [tn (:tag-node ds)]
@@ -3960,6 +4294,12 @@
                       (let [bi (loop [i (long (:b ds))] (if (or (t= (tok-at p i) "{") (>= i (long (ix p)))) i (recur (inc i))))]
                         (soft-diag! p bi "types may not be defined in parameter types"))))
                 base (or (ds-type ds) (perr p "a parameter's type"))
+                ;; (cpp-rind: a placeholder parameter of a function type's own parameter, never permitted, GCC's "'auto' parameter not
+                ;; permitted in this context"; one of the outermost clause kept for its declaration, *auto-params*)
+                _ (when (and (= :auto (:t base)) (:auto-i ds) (not (skim? p)) (main-tok? p (long (:auto-i ds))))
+                    (cond (>= (long *param-depth*) 2) (soft-diag! p (long (:auto-i ds)) "'auto' parameter not permitted in this context")
+                          (some? *auto-params*) (.add ^ArrayList *auto-params* (long (:auto-i ds)))
+                          :else nil))
                 d (parse-declarator p :either)
                 ;; (cpp-decl2: [dcl.inline]/1, no inline parameter: GCC's "'var31' declared as an 'inline' parameter")
                 _ (when (and (:inline ds) (not (skim? p)) (main-tok? p (long (:b ds))))
@@ -3992,6 +4332,24 @@
                 qn (:name (last (name-chain d)))
                 nm (name-plain qn)
                 ni (if qn (long (:i (peek (:parts qn)))) (ix p))
+                ;; (cpp-rind: [dcl.fct]/? (C++23 [basic.scope.param] with [expr.prim.id]): an earlier parameter named in a
+                ;; parameter's array bound, outside the function body: GCC's "use of parameter 'i' outside function body", at the
+                ;; use; parse/parameter-declaration-2.C)
+                _ (when (and (not (skim? p)) (seq (remove nil? nms)))
+                    (let [pn (set (remove nil? nms))]
+                      (doseq [sf (mapcat :sufs (name-chain d)) :when (and (:a sf) (map? (:x sf)))]
+                        ((fn w [x]
+                           ;; (queue 567: a potentially-evaluated use only, as [dcl.fct.default]/9 says of default arguments: an
+                           ;; unevaluated operand -- sizeof, alignof, noexcept -- names it freely, diagnostic/parm1.C's
+                           ;; `int(*)[sizeof(t)]`)
+                           (when (and (map? x) (not (#{"UnaryExprOrTypeTraitExpr" "CXXNoexceptExpr"} (:kind x))))
+                             (if (and (= "DeclRefExpr" (:kind x)) (contains? pn (get-in x [:referencedDecl :name])) (:_b x) (main-tok? p (long (:_b x))))
+                               (soft-diag! p (long (:_b x)) (str "use of parameter '" (get-in x [:referencedDecl :name]) "' outside function body"))
+                               (doseq [y (:inner x)] (w y)))))
+                         (:x sf)))))
+                ;; (cpp-rind: a parameter declared as an array of references, as a variable, [dcl.array]/1; cpp0x/initlist57.C)
+                _ (when (and (not (skim? p)) (main-tok? p ni) (arr-of-ref? ty))
+                    (soft-diag! p ni (str "declaration of '" (or nm "") "' as array of references")))
                 has-dflt (is? p "=")
                 db (ix p)
                 dflt (when (accept! p "=")
@@ -4053,7 +4411,17 @@
               (accept! p ",") (recur ps tys nms)
               (and (is? p "...") (is-at? p 1 ")")) (do (adv! p) (adv! p) {:params ps :types tys :names nms :va true})
               (accept! p ")") {:params ps :types tys :names nms :va false}
-              :else (perr p "a parameter list"))))))))
+              ;; (queue 578: GCC's recovery in a parameter-declaration-clause ([dcl.fct]/3): a parameter followed by neither `,`
+              ;; `...` nor `)` is its error, "expected ',' or '...' before X", and the clause's tokens are skipped to its `)`, the
+              ;; declaration going on with the parameters before, so a function's body is still read (parse/error6.C's
+              ;; `int f(int not) { return 1-not; }`); a decline all the same (the unit's Sema not run), outside a tentative parse
+              ;; and a skimmed header only; no `)` before the declaration's `;`, `{` or `}`, no recovery)
+              (and (not *tentative*) (not (skim? p)) (main-tok? p (ix p)) (param-close p))
+              (let [at (ix p)]
+                (decline! p "declaration: a parameter list" at at)
+                (seek! p (long (param-close p))) (adv! p)
+                {:params ps :types tys :names nms :va false})
+              :else (perr p "a parameter list")))))))))
 
 (defn declare-params!
   ([^P p names] (declare-params! p names nil))
@@ -4096,7 +4464,14 @@
                  (when info (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
                                                                  :acc (or acc (if (= kw "class") "private" "public"))}))
                  ;; (i) a base class template's injected name, found in the derived class, is the base's type
-                 (when (and (:args lp) (:ent qn)) (sc/declare! cs {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}))
+                 ;; (cpp-own, 2026-11-25: marked when its arguments name a template parameter, a dependent base, whose scope
+                 ;; [temp.dep.general]/3 keeps out of the derived template's unqualified lookup: its injected name too)
+                 (when (and (:args lp) (:ent qn))
+                   (sc/declare! cs (cond-> {:k :type :name (:s lp) :scope (ent-scope (:ent qn)) :tmpl true :inj-full (name-str p qn)}
+                                     (and (= 1 (count (:parts qn))) (:ab lp) (:ae lp)
+                                          (some (fn [i] (let [^T t (tok-at p i)] (and (identical? :id (.-k t)) (:tparam (lookup (scope p) (.-s t))))))
+                                                (range (long (:ab lp)) (inc (long (:ae lp))))))
+                                     (assoc :dep-base true))))
                  (pack-indexed p {:t :n :s (name-str p qn)})))
           pack (accept! p "...")
           b (cond-> {:type {:qualType (qt ty)} :writtenAccess (or acc "none")} virt (assoc :isVirtual true) pack (assoc :isPackExpansion true))
@@ -4125,6 +4500,17 @@
     (adv! p)
     (let [attrs (attr-nodes p)
           qn (when (name-start? p) (parse-name p :parse))
+          ;; (cpp-indep2: [temp.local]/6 with [dcl.pre]/5: a class-head-name `A<0>` whose A is a template template parameter of
+          ;; the enclosing template-head names no class template to specialize: declared alone, GCC's "declaration does not declare
+          ;; anything"; defined, "declaration of ... shadows template template parameter"; at the name; template/ttp22.C,
+          ;; pr98297.C, spec32.C)
+          _ (when (and qn (= 1 (count (:parts qn))) (not (:g qn)) (:args (peek (:parts qn))) (:s (peek (:parts qn)))
+                       (not (skim? p)) (main-tok? p kb) (not (:friend ds)))
+              (let [e (lookup (scope p) (:s (peek (:parts qn))))]
+                (when (and (map? e) (:tparam e) (:tmpl e))
+                  (soft-diag! p (long (or (:i (peek (:parts qn))) kb)) (if (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":"))))
+                                     (str "declaration of '" (:s (peek (:parts qn))) "' shadows template template parameter")
+                                     "declaration does not declare anything")))))
           ;; (cpp-singles: a class-head-name `X<args>` whose X names no class template ([temp.expl.spec]/? with [class.pre]/1, a
           ;; simple-template-id names a class template's specialization): GCC's "'X' is not a class template", at the class-key,
           ;; the arguments dropped and the class taken by its name, so the rest of the unit is analyzed; cpp0x/override2.C's
@@ -4162,7 +4548,10 @@
                                      :else (recur (inc j) d))))]
                 (soft-diag! p k "expected template-name before '<' token")
                 (skip-until! p #{";"})))
-          defn? (or (is? p "{") (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))
+          defn? (or (and (is? p "{")
+                         (not (and *trailing-type* qn (not (:g qn)) (= 1 (count (:parts qn))) (nil? (:args (peek (:parts qn))))
+                                   (:class (or (:ent qn) (lookup (scope p) (:s (peek (:parts qn))) true))))))
+                    (and (is? p ":") (not (is-at? p 1 ":")) (or (nil? qn) (not (#{:member} ctx)) true)))
           ;; (cpp-diag-b, 2026-11-22: [class.pre]/3, a class-head-name's nested-name-specifier names a class or namespace that
           ;; declared the class, the name a class's: a template parameter's qualifier, or a typedef-name, GCC's "invalid class name
           ;; in declaration of 'A::C'", at the name)
@@ -4182,7 +4571,16 @@
                     (soft-diag! p (long (:b qn)) "extra qualification not allowed"))
                   (when (and q (= :ns (:k q)) (:scope q) cur (#{:top} ctx)
                              (not (loop [s (:scope q)] (cond (nil? s) false (identical? s cur) true :else (recur (sc/parent-of s))))))
-                    (soft-diag! p (long (:i (peek (:parts qn)))) (str "declaration of '" (name-str p qn) "' in a namespace which does not enclose it"))))))]
+                    (soft-diag! p (long (:i (peek (:parts qn)))) (str "declaration of '" (name-str p qn) "' in a namespace which does not enclose it")))
+                  ;; (cpp-indep2: the same rule for a qualifier that is a class, its definition in a namespace or a class that does
+                  ;; not enclose that class: GCC's "declaration of 'struct Foo::Bar' in namespace 'N' which does not enclose
+                  ;; 'struct Foo'", "... in 'struct Baz' ..."; other/error17.C)
+                  (let [c2 (sc/enclosing (scope p) #{:ns :class})]
+                    (when (and q (= :type (:k q)) (:class q) (not (:tparam q)) (:scope q) c2 (#{:top :member} ctx) (not (:g qn))
+                               (not (loop [s (:scope q)] (cond (nil? s) false (identical? s c2) true :else (recur (sc/parent-of s))))))
+                      (soft-diag! p (long (:i (peek (:parts qn)))) (str "declaration of '" (name-str p qn) "' in "
+                                                                        (if (= :ns (sc/kind-of c2)) "a namespace" "a class")
+                                                                        " which does not enclose '" (:s (first (:parts qn))) "'")))))))]
       (if-not defn?
         (let [nm (when qn (name-plain qn))
               e (or (:ent qn) (when nm (lookup (scope p) nm true)))
@@ -4198,6 +4596,27 @@
                      (reduce (fn [e part] (when (:scope e) (sc/find-in (:scope e) (:s part)))) (sc/lookup (scope p) (:s (first ps))) (rest ps)))
                    (when (and qn (= 1 (count (:parts qn))) (not (:g qn))) e))
               tn (:s lp)
+              ;; (cpp-own, 2026-11-25: [basic.lookup.qual]/1 with [dcl.type.elab]: `class C1::C2;` alone, its nested-name-specifier
+              ;; names a namespace or a complete class: a name no lookup finds is GCC's "'N1' has not been declared", a class only
+              ;; declared "incomplete type 'C1' used in nested name specifier", a member of it no class or namespace declares
+              ;; "'C1::C2' has not been declared", at the part; warn/forward-inner.C)
+              _ (when (and alone qual? (not (skim? p)) (main-tok? p (long (:i (first (:parts qn))))))
+                  (let [ps (vec (:parts qn))]
+                    ;; (a class declared again after its definition, `class C1;`, is the complete class: either lookup's entity
+                    ;; complete makes it so)
+                    (loop [i 0 e (let [a (sc/lookup (scope p) (:s (first ps))) b (sc/lookup (scope p) (:s (first ps)) true)]
+                                   (if (and a (not (:incomplete a))) a (or b a)))]
+                      (when (< i (dec (count ps)))
+                        (cond
+                          (nil? e) (soft-diag! p (long (:i (nth ps i)))
+                                               (str "'" (str/join "::" (map :s (subvec ps 0 (inc i)))) "' has not been declared"))
+                          (or (:tparam e) (:dep e) (:tmpl e) (:target e)) nil
+                          (and (:class e) (:incomplete e))
+                          (soft-diag! p (long (:i (nth ps i))) (str "incomplete type '" (str/join "::" (map :s (subvec ps 0 (inc i)))) "' used in nested name specifier"))
+                          (and (:scope e) (or (:class e) (= :ns (:k e))))
+                          (recur (inc i) (let [nm (:s (nth ps (inc i))) a (sc/find-in (:scope e) nm) b (sc/find-in (:scope e) nm true)]
+                                           (if (and a (not (:incomplete a))) a (or b a))))
+                          :else nil)))))
               _ (when (and te tn (nil? (:args lp)) (not (skim? p))
                            (= :type (:k te)) (not (:tag te)) (not (:class te)) (not (:tparam te)) (not (:tmpl te))
                            (not= tn (some-> (:target te) :name))
@@ -4208,6 +4627,21 @@
               _ (when (and lp (:args lp) e (= :type (:k e)) (:tmpl e) (not (:tag e)) (not (:class e)) (not (:tparam e)) (not (:inj e))
                            (not (skim? p)) (main-tok? p (long (:i lp))))
                   (soft-diag! p (long (:i lp)) (str "using alias template specialization '" tn "<...>' after '" kw "'")))
+              ;; (cpp-rind: `struct A;` alone, no template-head, declaring again a class template of its scope: GCC's "'struct A'
+              ;; redeclared as non-template", at the name; template/redecl4.C)
+              _ (when (and alone (nil? hdr) nm (nil? (:args lp)) (not qual?) (not (skim? p)) (main-tok? p (long (:i lp))))
+                  (when-let [te2 (get (sc/names-of (sc/decl-scope (scope p))) nm)]
+                    (when (and (:tmpl te2) (:class te2))
+                      (soft-diag! p (long (:i lp)) (str "'" kw " " nm "' redeclared as non-template")))))
+              ;; (cpp-indep: [dcl.type.elab]/4, the class-key of an elaborated-type-specifier naming a class agrees with its
+              ;; definition's or declaration's: union for a union, struct or class for the others: GCC's "'union' tag used in
+              ;; naming 'struct B'", at the class-key; other/classkey1.C, diagnostic/wrong-tag-1.C)
+              _ (let [e (if (and lp (:args lp) (not (contains? e :union)) (= 1 (count (:parts qn))) (not (:g qn)))
+                          (let [te (lookup (scope p) (:s lp) true)] (when (:tmpl te) te))
+                          e)]
+                  (when (and e (#{"struct" "class" "union"} kw) (:class e) (:tag e) (not (:tparam e)) (or (not (:dep e)) (:tmpl e)) (contains? e :union)
+                             (not= (boolean (:union e)) (= kw "union")) (not (skim? p)) (main-tok? p (long kb)))
+                    (soft-diag! p (long kb) (str "'" kw "' tag used in naming '" (if (:union e) "union" "struct") " " (:name e) "'"))))
               spec (and alone hdr (:args lp))
               new? (and nm (nil? (:args lp)) (or alone (nil? e)))
               n (when (and (or new? spec) (not (:friend ds)) (not (skim? p)))
@@ -4226,6 +4660,7 @@
                                                                           attrs)))))]
           (when (and new? (not (:friend ds)))
             (let [ent {:k :type :name nm :tag true :class true :scope (sc/new-scope :class (scope p) nil) :incomplete true :at (:i lp)
+                       :union (= kw "union")
                        :tps (:params hdr)
                        :tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args (peek (:parts qn))))))}]
               (if alone (declare! p ent) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) ent))))
@@ -4270,6 +4705,21 @@
               _ (when (and qent (= :ns (:k qent)) (:scope qent) (nil? (:args lp)) (not (skim? p)) (not (:friend ds))
                            (not-any? :args (:parts qn)) (nil? (sc/find-in (:scope qent) nm true)))
                   (soft-diag! p (long (:i lp)) (str "'" nm "' in namespace '" (str/join "::" (map :s (butlast (:parts qn)))) "' does not name a class")))
+              ;; (cpp-rind: [class.pre]/3, a class-head-name's nested-name-specifier is no `::` alone: GCC's "global qualification of
+              ;; class name is invalid before '{' token"; template/crash80.C)
+              _ (when (and qn (:g qn) (not (skim? p)) (main-tok? p (long (:i lp))))
+                  (soft-diag! p (long (:i lp)) "global qualification of class name is invalid"))
+              ;; (cpp-rind: a class template defined by a qualified name that names a class no template, `template<int I> struct
+              ;; N::A {};` for N's `struct A;`: GCC's "'N::A' redeclared as a template"... ; parse/crash21.C)
+              _ (when (and qent (= :ns (:k qent)) (:scope qent) hdr (pos? (long (:n hdr))) (nil? (:args lp)) (not (skim? p)) (main-tok? p (long (:i lp))))
+                  (when-let [te (get (sc/names-of (:scope qent)) nm)]
+                    (when (and (:class te) (not (:tmpl te)))
+                      (soft-diag! p (long (:i lp)) (str "'" (name-str p qn) "' redeclared as a different kind of entity (a template)")))))
+              ;; (cpp-rind: [class.pre]/3 with [class.mem.general]/? : a member class defined in its class by a name qualified by that
+              ;; class, `struct A::B { };` in A, GCC's "extra qualification not allowed", at the name; template/class2.C)
+              _ (when (and qent (= ctx :member) (= 2 (count (:parts qn))) (not (skim? p)) (not (:friend ds)) (main-tok? p (long (:i lp)))
+                           (= (:s (first (:parts qn))) (some-> (stv p CLS) first :name)))
+                  (soft-diag! p (long (:i (first (:parts qn)))) "extra qualification not allowed"))
               ;; (round 54, sixth pass: [temp.expl.spec]/1, an explicit specialization's class-head-name is a simple-template-id:
               ;; `template<> struct X { };` of a class template X is GCC's "template specifiers not specified in declaration
               ;; of 'X'", at the name)
@@ -4277,6 +4727,24 @@
                   (when-let [te (lookup (scope p) nm true)]
                     (when (and (:tmpl te) (:class te))
                       (soft-diag! p (long (:i lp)) (str "template specifiers not specified in declaration of '" nm "'")))))
+              ;; (cpp-rind: [temp.pre]/? with [basic.scope.scope]/4, a class template's name defined again as a class without a
+              ;; template-head in the same scope: GCC's "'struct X' redeclared as non-template", at the name; template/redecl1.C)
+              ;; (cpp-rind: and a class of its scope defined as a template, [temp.pre]/? : GCC's "'Foo' is not a template", at the
+              ;; name; template/crash34.C)
+              _ (when (and hdr (pos? (long (:n hdr))) simple (nil? (:args lp)) (not (skim? p)) (not (:friend ds)) (main-tok? p (long (:i lp))))
+                  (when-let [te (get (sc/names-of (sc/decl-scope (scope p))) nm)]
+                    (when (and (:class te) (not (:tmpl te)) (not (:tparam te)) (not (:udecl te)))
+                      (soft-diag! p (long (:i lp)) (str "'" nm "' is not a template")))))
+              _ (when (and (nil? hdr) simple (nil? (:args lp)) (not (skim? p)) (not (:friend ds)) (main-tok? p (long (:i lp))))
+                  (when-let [te (get (sc/names-of (sc/decl-scope (scope p))) nm)]
+                    (when (and (:tmpl te) (:class te))
+                      (soft-diag! p (long (:i lp)) (str "'" kw " " nm "' redeclared as non-template")))))
+              ;; (cpp-indep: an explicit specialization's definition's class-key agrees with its template's, [dcl.type.elab]/4
+              ;; with [temp.expl.spec]: other/classkey1.C's `template <> union A<float> {};`)
+              _ (when (and (:args lp) simple (#{"struct" "class" "union"} kw) (not (skim? p)) (main-tok? p (long kb)))
+                  (when-let [te (lookup (scope p) nm true)]
+                    (when (and (:tmpl te) (:class te) (contains? te :union) (not= (boolean (:union te)) (= kw "union")))
+                      (soft-diag! p (long kb) (str "'" kw "' tag used in naming '" (if (:union te) "union" "struct") " " nm "'")))))
               cs (sc/new-scope :class (if (:scope qent) (sc/new-scope :lookup (scope p) qent) (scope p)) nil)
               tmpl (boolean (and hdr (pos? (long (:n hdr))) (nil? (:args lp))))
               ent (cond-> {:k :type :name nm :tag true :class true :scope cs :fields (ArrayList.) :bases-order (ArrayList.)
@@ -4342,7 +4810,7 @@
               cm-uses (when late (HashMap.))
               members (in-scope p cs
                         (let [old (stv p CLS)]
-                          (st! p CLS (cons {:name nm :ent ent :late late} old))
+                          (st! p CLS (cons {:name nm :ent ent :late late :kw kw} old))
                           (try (binding [*this-ok* nil
                                          *cm-scopes* (if late
                                                        (let [m (if *cm-scopes* (java.util.IdentityHashMap. ^java.util.Map *cm-scopes*) (java.util.IdentityHashMap.))]
@@ -4381,30 +4849,64 @@
                   (when-let [bi (and (not (skim? p)) (def-brace p (ix p)))]
                     (soft-diag! p bi "types may not be defined in enum-base"))
                   (parse-type-specs p :type-id))
-          body? (is? p "{")
+          ;; (cpp-indep2: not a trailing return type's enumeration declared before, *trailing-type*)
+          body? (and (is? p "{")
+                     (not (and *trailing-type* qn (not (:g qn)) (= 1 (count (:parts qn)))
+                               (some-> (or (:ent qn) (lookup (scope p) nm true)) :scope sc/kind-of (= :enum)))))
           ;; (cpp-decl2: [dcl.type.elab]/1 and [dcl.enum]/2: an elaborated-type-specifier names an enumeration by `enum` alone,
           ;; and an enum-base belongs to an opaque-enum-declaration or a definition: GCC's "scoped enum must not use 'class'
           ;; keyword", "declaration of enumeration with fixed underlying type", at `enum`; cpp0x/forw_enum6.C)
-          _ (when (and qn (not body?) (not (is? p ";")) (not (skim? p)) (main-tok? p kb))
+          ;; (cpp-rind: an unnamed one's enum-base likewise, `enum : int a;`, [dcl.enum]/2's opaque-enum-declaration names its
+          ;; enumeration; cpp0x/enum40.C)
+          ;; (cpp-rind: [dcl.enum]/2, a scoped enumeration's enum-head has a name: GCC's "unnamed scoped enum is not allowed", at
+          ;; `enum`; cpp0x/enum26.C)
+          _ (when (and scoped (nil? qn) (not (skim? p)) (main-tok? p kb))
+              (soft-diag! p kb "unnamed scoped enum is not allowed"))
+          ;; (cpp-rind: [dcl.enum]/2 and [dcl.type.elab]/? : `enum E;` with no enum-base is no opaque-enum-declaration, an
+          ;; elaborated-type-specifier that declares nothing new: an enumeration no lookup finds is GCC's "use of enum 'E' without
+          ;; previous declaration", at the name; cpp0x/gen-attrs-24.C, ext/attrib24.C)
+          ;; (cpp-indep2: and an elaborated-type-specifier of a member's or a namespace-scope declaration, `enum tree_code code :
+          ;; 8;`, [dcl.type.elab]/3: an `enum` one refers to a previously declared enumeration; lookup/enum1.C)
+          _ (when (and qn (not body?) (not fixed) (not scoped) (or (is? p ";") (and (#{:member :top :block} ctx) (not (:friend ds))))
+                       (= 1 (count (:parts qn))) (not (:g qn)) (or (nil? (:ent qn)) (and (:elab-enum (:ent qn)) (not (is? p ";"))))
+                       (not (skim? p)) (main-tok? p kb) (let [e (lookup (scope p) nm true)] (or (nil? e) (and (:elab-enum e) (not (is? p ";"))))))
+              (soft-diag! p (long (:i (peek (:parts qn)))) (str "use of enum '" nm "' without previous declaration")))
+          _ (when (and (or qn fixed) (not body?) (not (is? p ";")) (not (skim? p)) (main-tok? p kb))
               (cond scoped (soft-diag! p kb "scoped enum must not use 'class' keyword")
                     fixed (soft-diag! p kb "declaration of enumeration with fixed underlying type")
                     :else nil))]
       (if (and (not body?) (not fixed) (not (and scoped (is? p ";"))))
-        (let [e (or (:ent qn) (when nm (lookup (scope p) nm true)))]
-          (when (and nm (nil? e)) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) {:k :type :name nm :tag true :scope (sc/new-scope :enum (scope p) nil)}))
+        (let [e (or (:ent qn) (when nm (lookup (scope p) nm true)))
+              ;; (cpp-indep2: [dcl.type.elab]/? (C++23 /5): an elaborated-type-specifier's `enum` refers to an enumeration: a
+              ;; class it finds is GCC's "'struct N::A' referred to as enum", at the name; parse/struct-as-enum1.C)
+              _ (when (and qn (map? e) (:class e) (:tag e) (not (:tparam e)) (not (:elab-enum e)) (not (skim? p)) (main-tok? p kb)
+                           (not (some-> (:scope e) sc/kind-of (= :enum))))
+                  (soft-diag! p (long (:i (peek (:parts qn)))) (str "'" (name-str p qn) "' referred to as enum")))]
+          (when (and nm (nil? e)) (sc/declare! (or (sc/enclosing (scope p) #{:ns :block}) (scope p)) {:k :type :name nm :tag true :elab-enum true :scope (sc/new-scope :enum (scope p) nil)}))
           {:type {:t :elab :kw "enum" :s (if qn (name-str p qn) "") :ent e} :node nil})
-        (let [_ (when (and qn (> (count (:parts qn)) 1) (nil? (:ent qn)) (not-any? :args (:parts qn))
+        (let [_ (when (and qn (> (count (:parts qn)) 1) (nil? (:ent qn))
+                           ;; (cpp-rind: the class being defined named with its template arguments, `enum D2<T>::A`, is that class
+                           ;; too: cpp0x/forw_enum13.C)
+                           (or (not-any? :args (:parts qn))
+                               (and (= 2 (count (:parts qn))) (not-any? :args (rest (:parts qn)))
+                                    (= (:s (first (:parts qn))) (some-> (stv p CLS) first :name))))
                            (when-let [q (lookup (scope p) (:s (first (:parts qn))))] (not (:tparam q))))
                   ;; (round 54, second pass: [dcl.enum]/4, a qualified enum-head-name names an enumeration declared before in the
                   ;; class or namespace its nested-name-specifier nominates: GCC's "'bar' in 'class foo' does not name an enumeration")
                   (soft-diag! p (long (:i (peek (:parts qn)))) (str "'" nm "' in '" (str/join "::" (map :s (butlast (:parts qn)))) "' does not name an enumeration")))
+              ;; (cpp-rind: [dcl.enum]/4, a qualified enum-head-name's nested-name-specifier names a class or namespace, never a
+              ;; template parameter: GCC's "nested name specifier 'T::' for declaration does not name a class or namespace"; parse/enum12.C)
+              _ (when (and qn body? (> (count (:parts qn)) 1) (not (skim? p)) (main-tok? p (long (:i (peek (:parts qn)))))
+                           (some-> (lookup (scope p) (:s (first (:parts qn)))) :tparam))
+                  (soft-diag! p (long (:i (first (:parts qn)))) (str "nested name specifier '" (:s (first (:parts qn))) "::' for declaration does not name a class or namespace")))
               ;; (cpp-read, 2026-11-22: [dcl.enum]/4 and [dcl.type.elab]/3, a qualified enum-head-name that finds a typedef-name:
               ;; GCC's "using typedef-name 'A' after 'enum'", at the name)
               _ (when (and qn (or (:g qn) (> (count (:parts qn)) 1)) (type-ent? (:ent qn)) (not (:tag (:ent qn))) (not (:tparam (:ent qn)))
                            (not (skim? p)) (main-tok? p (long (:i (peek (:parts qn))))))
                   (soft-diag! p (long (:i (peek (:parts qn)))) (str "using typedef-name '" nm "' after 'enum'")))
               es (sc/new-scope :enum (scope p) nil)
-              ent {:k :type :name nm :tag true :scope es}
+              ;; (cpp-indep: an opaque-enum-declaration's entity marked, `using enum`'s rule below)
+              ent (cond-> {:k :type :name nm :tag true :scope es} (not body?) (assoc :opaque true))
               ;; (cpp-decl2: [basic.scope.scope]/4, an enumeration defined in a class scope whose using-declarator named an
               ;; enumeration of that name: GCC's "multiple definition of 'enum D::E'", at the name; lookup/using53.C)
               _ (when-let [o (and nm body? (= 1 (count (:parts qn))) (not (skim? p)) (= ctx :member)
@@ -4518,7 +5020,10 @@
                  (some-> ^java.util.Map (:ftypes ce) (.get (name-plain qn)))
                  (when (type-ent? (:ent qn)) {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn})))
           x (if (is? p "{")
-              (let [l (parse-braced-init p)] (if mt (designate p mt l) l))
+              (do ;; (cpp-def: C++11's braced mem-initializer, N2672: before C++11 GCC's pedwarn "extended initializer lists only
+                  ;; available with '-std=c++11' or '-std=gnu++11'", an error under -pedantic-errors; parse/ctor3.C)
+                  (when (and (< (.-year p) 2011) (not (skim? p))) (pedantic-diag! p (ix p) "extended initializer lists only available with '-std=c++11' or '-std=gnu++11'"))
+                  (let [l (parse-braced-init p)] (if mt (designate p mt l) l)))
               (let [as (paren-args p)]
                 (cond (and (empty? as)) {:kind "ImplicitValueInitExpr"}
                       (and (= 1 (count as)) (not (is? p "..."))) (if mt (paren-init p mt (first as)) (first as))
@@ -4656,6 +5161,19 @@
                    (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (parse-braced-init p)) "list"]
                    (is? p "(") (let [ab (ix p) as (paren-args p)] [(if (= 1 (count as)) (first as) (node p "ParenListExpr" ab (last-ix p) {:inner as})) "call"])
                    :else [nil nil])
+        ;; (cpp-indep: [dcl.pre]/8 (C++23 [dcl.pre]/10), a structured binding's initializer is `= e`, `{ e }` or `( e )`, one
+        ;; assignment-expression: GCC's "invalid initializer for structured binding declaration"; `= { ... }` deduces no type
+        ;; it can decompose, "deducing from brace-enclosed initializer list requires #include <initializer_list>" without the
+        ;; header; cpp1z/decomp30.C)
+        _ (when (and x (not (skim? p)) (main-tok? p ib))
+            (cond
+              (and (= init "call") (= "ParenListExpr" (:kind x)) (not= 1 (count (:inner x))))
+              (soft-diag! p ib "invalid initializer for structured binding declaration")
+              (and (= init "list") (= "InitListExpr" (:kind x)) (not= 1 (count (:inner x))))
+              (soft-diag! p ib "invalid initializer for structured binding declaration")
+              (and (= init "c") (= "InitListExpr" (:kind x)))
+              (soft-diag! p ib "invalid initializer for structured binding declaration (a braced list after '=': deducing from brace-enclosed initializer list)")
+              :else nil))
         ;; (cpp-read, 2026-11-22: [dcl.struct.bind]/1 with [basic.scope.pdecl]: a binding is declared before its initializer, so a
         ;; use of its name there is of a binding whose type is not deduced yet, GCC's "use of 'x' before deduction of 'auto'")
         _ (when (and x (not (skim? p)) (main-tok? p ib))
@@ -4683,7 +5201,9 @@
         pre (:tag-node ds)
         base0 (ds-type ds)]
     (cond
-      (and (is? p ";") pre (= :unnamed (:t base0)) (:cs base0) (#{"union" "struct"} (:kw base0)) (not (:typedef ds)))
+      ;; (cpp-indep2: and one whose `;` is missing, GCC's "expected ';' after union definition" inserting it: the anonymous
+      ;; union's members are still the class's, cpp2a/spaceship-eq6.C's `union { int i; }` then `bool operator==...`)
+      (and (or (is? p ";") (:semi-missing ds)) pre (= :unnamed (:t base0)) (:cs base0) (#{"union" "struct"} (:kw base0)) (not (:typedef ds)))
       ;; an anonymous union or struct: an implicit object of its type (a member in a class), its members the scope's
       (let [e (:e ds)]
         ;; (round 54, sixth pass: [dcl.pre]/5, a declaration with no declarator declares a class's name, or is an anonymous
@@ -4707,19 +5227,34 @@
             (soft-diag! p (long (or (first (filter #(t= (tok-at p %) "{") (range (long (:b ds)) (ix p)))) (:b ds))) "anonymous struct not inside named type")
             ;; (and a member of a named class, GNU's extension: GCC's pedwarn "ISO C++ prohibits anonymous structs", -Wpedantic's,
             ;; at the brace)
+            ;; (cpp-indep2: not within a declaration GNU's __extension__ introduces, in-extension?; ext/anon-struct1.C)
+            (or (:ext ds) (in-extension? p (long (:gb ds)))) nil
             :else (soft-diag! p (long (or (first (filter #(t= (tok-at p %) "{") (range (long (:b ds)) (ix p)))) (:b ds))) "pedantic-w: ISO C++ prohibits anonymous structs")))
         ;; ([class.union.anon]/1: an anonymous union's member-specification defines non-static data members; none is GCC's
         ;; "anonymous union with no members", at the `;`)
         (when (and (= "union" (:kw base0)) (not (skim? p))
                    (not-any? #(#{"FieldDecl" "VarDecl" "IndirectFieldDecl"} (:kind %)) (:inner pre)))
           (soft-diag! p (ix p) "anonymous union with no members"))
-        (adv! p)
+        ;; (cpp-own, 2026-11-25: [class.union.anon]/1, no function is declared within an anonymous union, and GNU's anonymous
+        ;; structs take the same rule: GCC's "... invalid; an anonymous struct may only have public non-static data members",
+        ;; at the function's name; ext/anon-struct6.C)
+        (when-not (skim? p)
+          (doseq [m (:inner pre)
+                  :when (and (map? m) (#{"CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl" "FunctionTemplateDecl"} (:kind m))
+                             (not (:isImplicit m)) (:_b m))]
+            (let [o (get-in m [:loc :offset])
+                  i (or (when o (first (filter #(= (long o) (long (.-o ^T (tok-at p %)))) (range (long (:_b m)) (inc (long (:_e m)))))))
+                        (long (:_b m)))]
+              (soft-diag! p (long i) (str "'" (:name m) "' invalid; an anonymous " (:kw base0) " may only have public non-static data members")))))
+        (when-not (:semi-missing ds) (adv! p))
         (when (and (= ctx :member) (skim? p))
           (let [ce (:ent (class-ctx p)) nm (str "\u0001anon" (count (:fields ce)))]
             (when-let [^ArrayList fs (:fields ce)] (.add fs nm))
             (when-let [^java.util.HashMap ft (:ftypes ce)] (.put ft nm base0))))
         (doseq [[k v] (sc/names-of (:cs base0)) :when (#{:var :fn} (:k v))]
-          (declare! p (cond-> {:k :var :name k} (not= ctx :member) (assoc :anon true))))
+          (declare! p (cond-> {:k :var :name k} (not= ctx :member) (assoc :anon true)
+                        ;; (cpp-def: a function the anonymous class declared, invalid, for the bit-field width rule below)
+                        (= :fn (:k v)) (assoc :anon-fn true))))
         [pre (node p (if (= ctx :member) "FieldDecl" "VarDecl") (:b ds) e {:isImplicit true :type {:qualType (qt base0)}})])
       ;; C++26's friend-type-specifier-list: friend T, Us...;
       (and (:friend ds) base0 (nil? pre) (or (is? p ",") (and (is? p "...") (or (is-at? p 1 ";") (is-at? p 1 ",")))))
@@ -4806,7 +5341,14 @@
       (loop [out (if pre [pre] [])]
         (let [ctor (and (nil? base0) (ctor-name-here? p (if (= ctx :member) :member :top)))
               guide (and (nil? base0) (guide-here? p))
-              d (binding [*ncc-noexcept* (boolean (and (= ctx :member) (:friend ds)))] (parse-declarator p (if (= ctx :member) :either :named)))
+              aps (ArrayList.)
+              d (binding [*auto-params* aps *param-depth* 0 *ncc-noexcept* (boolean (and (= ctx :member) (:friend ds)))] (parse-declarator p (if (= ctx :member) :either :named)))
+              ;; (cpp-rind: the declaration's own placeholder parameters, permitted for a function declared at namespace scope or as a
+              ;; member of a class that is no local class; a pointer's, a block-scope function's, a local class's member's not)
+              _ (when (and (seq aps) (not (skim? p))
+                           (or (nil? (fn-suffix-of d)) (= ctx :block)
+                               (and (= ctx :member) (loop [^Scope s (scope p)] (when s (if (#{:block :fparams} (sc/kind-of s)) true (recur (sc/parent-of s))))))))
+                  (doseq [i aps] (soft-diag! p (long i) "'auto' parameter not permitted in this context")))
               chain (name-chain d)
               qn (:name (last chain))
               lp (peek (:parts qn))
@@ -4830,6 +5372,229 @@
               ty (build-type (cond-> base *vector-specs* (vectorized (:attrs ds))) d)
               ni (if qn (long (:i lp)) (ix p))
               nm (when qn (name-plain qn))
+              ;; (cpp-indep2: the GCC manual's vector_size attribute ("Specifying Attributes of Variables"; "Using Vector
+              ;; Instructions through Built-in Functions"): its base type an integral or floating scalar but bool, which C++'s
+              ;; vectors do not take: GCC's "invalid vector type for attribute 'vector_size'", at the name; ext/vector15.C)
+              _ (when (and (not (skim? p)) (main-tok? p ni) (= :b (:t base0)) (some #{"bool"} (:w base0))
+                           (some #(#{"vector_size" "__vector_size__"} (:_gnu %)) (:attrs ds)))
+                  (soft-diag! p ni "invalid vector type for attribute 'vector_size'"))
+              ;; (cpp-rind: [dcl.array]/1, no array of references: GCC's "declaration of 'a' as array of references", at the name)
+              _ (when (and (not (skim? p)) (not (:typedef ds)) (main-tok? p ni) (arr-of-ref? ty))
+                  (soft-diag! p ni (str "declaration of '" (or nm "") "' as array of references")))
+              ;; (cpp-rind: storage and declarators by context, each GCC's words at the name or the specifier:
+              ;; [dcl.stc]/9, a mutable member is no reference ("reference 'q' cannot be declared 'mutable'", other/pr33558.C);
+              ;; [class.local]/4 ([class.static.data]/? ), a local class has no static data member ("local class 'struct A' shall
+              ;; not have static data member", other/static2.C, static3.C); [dcl.stc]/4, no static function at block scope
+              ;; ("cannot declare static function inside another function", other/static4.C); [class.static.data]/? with
+              ;; [dcl.stc]/? , a static member's definition out of its class says no static ("'static' may not be used when
+              ;; defining (as opposed to declaring) a static data member", other/static5.C); [class.friend]/? , a class's own member
+              ;; function is no friend of it ("member functions are implicitly friends of their class", other/friend4.C))
+              _ (when (and (not (skim? p)) qn (main-tok? p ni) (not (:typedef ds)))
+                  (let [local? (fn [] (loop [^Scope s (scope p)] (when s (if (#{:block :fparams} (sc/kind-of s)) true (recur (sc/parent-of s))))))
+                        qualified (and (> (count (:parts qn)) 1) (not-any? :args (butlast (:parts qn))))]
+                    (cond
+                      (and (= ctx :member) (:mutable ds) (nil? fs) (#{:lr :rr} (:t (first (filter map? [(some-> d :ptrs first)])))))
+                      (soft-diag! p ni (str "reference '" nm "' cannot be declared 'mutable'"))
+                      (and (= ctx :member) (= "static" (:storage ds)) (nil? fs) (not (:friend ds)) (local?))
+                      (soft-diag! p ni (str "local class shall not have static data member '" nm "'"))
+                      (and (= ctx :block) (= "static" (:storage ds)) fs (nil? (some-> d :ptrs seq)) (= 1 (count chain)))
+                      (soft-diag! p (long (:b ds)) (str "cannot declare static function inside another function"))
+                      (and (= ctx :top) (= "static" (:storage ds)) qualified (nil? fs) (nil? tmpl)
+                           (let [q (:q qn)] (and (map? q) (:class q))))
+                      (soft-diag! p (long (:b ds)) "'static' may not be used when defining (as opposed to declaring) a static data member")
+                      ;; ([over.literal]/? : a literal operator has no C language linkage: GCC's "literal operator with C linkage",
+                      ;; at the name; cpp0x/udlit-extern-c.C)
+                      (and fs (= "C" *linkage*) (:lit lp))
+                      (soft-diag! p ni "literal operator with C linkage")
+                      ;; ([over.oper.general]/1: an operator-function-id names a function: a variable's declarator-id is GCC's
+                      ;; "declaration of 'operator+' as non-function", at the name; template/operator6.C)
+                      (and (nil? fs) (or (:op lp) (:conv lp) (:lit lp)) (#{:top :member :block} ctx))
+                      (soft-diag! p ni (str "declaration of 'operator" (or (:op lp) (some->> (:lit lp) (str "\"\"")) " conversion") "' as non-function"))
+                      ;; ([over.oper.general]/? (C++23 /9): an operator function but operator() has no ellipsis, a conversion
+                      ;; function none either ([class.conv.fct]/1, no parameters): GCC's "'A& A::operator=(A, ...)' must not have
+                      ;; variable number of arguments", at the name; other/ellipsis1.C)
+                      (and fs (:va fs) (or (and (:op lp) (not= "()" (:op lp))) (:conv lp)))
+                      (soft-diag! p ni (str "'" (if (seq nm) nm (str "operator" (or (:op lp) " conversion"))) "' must not have variable number of arguments"))
+                      ;; ([dcl.fct.default]/4 with [temp.mem]? : a member function template's definition out of its class, which
+                      ;; redeclares it, adds no default argument: GCC's "redeclaration of 'template<class> void A::fun(int)' may not
+                      ;; have default arguments", at the name; other/default9.C, default12.C)
+                      (and fs tmpl (pos? (long (or (:n tmpl) 0))) (> (count (:parts qn)) 1) (some #(= "c" (:init %)) (:params fs))
+                           (let [q (:q qn)] (and (map? q) (:class q))))
+                      (soft-diag! p ni (str "redeclaration of '" (or (:s lp) nm) "' may not have default arguments"))
+                      ;; ([temp.expl.spec]/? , a member of a class template's specialization defined out of its class names an
+                      ;; explicit specialization the file defined, else is itself one and takes `template<>`: GCC's "specializing
+                      ;; member 'foo<bool>::i' requires 'template<>' syntax", at the qualifier; parse/pr20118.C)
+                      (and (= ctx :top) (nil? tmpl) (= 2 (count (:parts qn))) (:args (first (:parts qn))) (not (:friend ds))
+                           (let [q (:q qn)] (and (map? q) (:tmpl q) (identical? q (spec-of-qualifier p qn q)))))
+                      (soft-diag! p (long (:i (first (:parts qn)))) (str "specializing member '" (name-str p qn) "' requires 'template<>' syntax"))
+                      ;; ([dcl.meaning.general]/1: a qualified declarator-id's nested-name-specifier names a class or namespace: a
+                      ;; template parameter's is GCC's "invalid use of template type parameter 'T'", an enumeration's "'enum A' is
+                      ;; not a class", a typedef of no class "'B' is not a class or namespace", at the qualifier; template/crash46.C,
+                      ;; crash47.C, crash49.C, cpp0x/enum20.C, cpp0x/parse1.C)
+                      (and (#{:top :member} ctx) (not (:friend ds)) (> (count (:parts qn)) 1) (not (:g qn))
+                           (let [q0 (lookup (scope p) (:s (first (:parts qn))))]
+                             (or (:tparam q0)
+                                 (and (nil? (:args (first (:parts qn)))) (= 2 (count (:parts qn))) (map? q0) (= :type (:k q0)) (not (:class q0)) (not (:tmpl q0)) (not (:dep q0))
+                                      (not (:incomplete q0)) (nil? (:target q0))
+                                      (or (and (:tag q0) (some-> (:scope q0) sc/kind-of (= :enum)))
+                                          (and (not (:tag q0)) (nil? (:scope q0)) (map? (:ty q0)) (= :b (:t (:ty q0)))))))))
+                      (soft-diag! p (long (:i (first (:parts qn)))) (str "'" (:s (first (:parts qn))) "' is not a class or namespace"))
+                      ;; ([class.mem.general]/? : a member's declarator-id is not qualified by `::` alone: GCC's "invalid use of '::'",
+                      ;; at the name; template/error22.C)
+                      (and (= ctx :member) (:g qn) (= 1 (count (:parts qn))) (not (:friend ds)))
+                      (soft-diag! p ni "invalid use of '::'")
+                      ;; (cpp-indep2: [dcl.meaning.general]/2, a qualified declarator-id refers to a previously declared member of
+                      ;; the namespace its qualifier names: `int ::i;`, `void ::f();` with no earlier declaration of the global
+                      ;; namespace's, GCC's "'::i' has not been declared", at the name; parse/qualified3.C)
+                      (and (= ctx :top) (:g qn) (= 1 (count (:parts qn))) (not (:friend ds)) (:s lp) (not (:args lp))
+                           (not (:op lp)) (not (:conv lp)) (not (:dtor lp)) (not (:lit lp)) *full-headers*
+                           (nil? (sc/find-in (stv p ROOT) (:s lp) true)) (nil? (sc/find-in (stv p ROOT) (:s lp) false)))
+                      (soft-diag! p ni (str "'::" (:s lp) "' has not been declared"))
+                      ;; ([class.mfct]/? with [dcl.meaning.general]/1: a qualified declarator-id redeclares a member its class
+                      ;; declared: a complete class without bases that declares no member of the name is GCC's "no declaration matches
+                      ;; 'void A::foo()'", at the name; template/error27.C, error28.C)
+                      (and (= ctx :top) (= 2 (count (:parts qn))) (not (:g qn)) (nil? (:args (first (:parts qn)))) (:s lp)
+                           (not (:op lp)) (not (:conv lp)) (not (:dtor lp)) (not (:lit lp)) (not ctor) (not= (:s lp) (:s (first (:parts qn))))
+                           (let [q0 (lookup (scope p) (:s (first (:parts qn))))]
+                             (and (map? q0) (:class q0) (not (:tmpl q0)) (not (:dep q0)) (not (:incomplete q0)) (:scope q0)
+                                  (some? (:bases-order q0)) (zero? (.size ^ArrayList (:bases-order q0)))
+                                  (nil? (sc/find-in (:scope q0) (:s lp) false)) (nil? (sc/find-in (:scope q0) (:s lp) true)))))
+                      (soft-diag! p ni (str "no declaration matches '" (name-str p qn) "'"))
+                      ;; ([class.static.mfct]/2, a static member function has no cv-qualifier: its definition out of the class,
+                      ;; `constexpr bool A::is_not() const {}`, GCC's "static member function 'bool A::is_not()' cannot have
+                      ;; cv-qualifier", at the name; cpp0x/constexpr-static7.C)
+                      (and (= ctx :top) fs (= 2 (count (:parts qn))) (re-find #"^\s*(const|volatile)" (str (:q fs)))
+                           (let [c (class-of-qualifier p qn) m (when (and (map? c) (:scope c)) (get (sc/names-of (:scope c)) (:s lp)))]
+                             (and (map? m) (= :fn (:k m)) (:static m) (= (:ptys m) (:types fs)))))
+                      (soft-diag! p ni (str "static member function '" (or (:s lp) nm) "' cannot have cv-qualifier"))
+                      ;; ([dcl.meaning.general]/1, [temp.names]/? : a qualified declarator-id's nested-name-specifier names a member
+                      ;; class template without its arguments, `int A::B::c;`, GCC's "invalid use of template-name 'A::B' without an
+                      ;; argument list", or a member a complete class without bases does not declare, "'A::C' has not been declared",
+                      ;; at the part; template/type1.C)
+                      (and (= ctx :top) (= 3 (count (:parts qn))) (not (:g qn)) (not-any? :args (butlast (:parts qn))) (nil? tmpl)
+                           (let [q0 (lookup (scope p) (:s (first (:parts qn))))]
+                             (and (map? q0) (:class q0) (not (:tmpl q0)) (not (:dep q0)) (not (:incomplete q0)) (:scope q0)
+                                  (some? (:bases-order q0)) (zero? (.size ^ArrayList (:bases-order q0)))
+                                  (let [m (sc/find-in (:scope q0) (:s (second (:parts qn))) true)]
+                                    (or (nil? m) (and (:tmpl m) (:class m)))))))
+                      (let [q0 (lookup (scope p) (:s (first (:parts qn)))) pt (second (:parts qn))
+                            m (sc/find-in (:scope q0) (:s pt) true)]
+                        (soft-diag! p (long (:i pt)) (if m
+                                                       (str "invalid use of template-name '" (:s (first (:parts qn))) "::" (:s pt) "' without an argument list")
+                                                       (str "'" (:s (first (:parts qn))) "::" (:s pt) "' has not been declared"))))
+                      ;; (queue 578: [temp.dep.type]/1 and /6 with [basic.lookup.qual]: a qualified declarator-id's nested-name-
+                      ;; specifier names a member of the current instantiation, `template<class T> A<T>::X::X() {}` (A<T>, its
+                      ;; arguments the template-head's parameters in order), that the class template's definition, complete and without
+                      ;; bases, does not declare -- a member whose declaration had a syntax error, which GCC drops, among them: GCC's
+                      ;; error at the part, "'A<T>::X' is not a type"; template/typedef6.C)
+                      (and (= ctx :top) tmpl (= 3 (count (:parts qn))) (not (:g qn)) (:args (first (:parts qn)))
+                           (not (:args (second (:parts qn)))) (not (:tkw (second (:parts qn)))) (:i (second (:parts qn)))
+                           (main-tok? p (long (:i (second (:parts qn)))))
+                           (let [f (first (:parts qn)) q0 (lookup (scope p) (:s f)) nms (:names tmpl)]
+                             (and (map? q0) (:class q0) (:tmpl q0) (not (:incomplete q0)) (:scope q0)
+                                  (some? (:bases-order q0)) (zero? (.size ^ArrayList (:bases-order q0)))
+                                  (seq nms) (= (count nms) (long (:n tmpl))) (:ab f) (:ae f)
+                                  (= (str/replace (tok-text p (inc (long (:ab f))) (dec (long (:ae f)))) #"\s+" "") (str/join "," nms))
+                                  (nil? (sc/find-in (:scope q0) (:s (second (:parts qn))) true))
+                                  (nil? (sc/find-in (:scope q0) (:s (second (:parts qn))) false)))))
+                      (let [f (first (:parts qn)) pt (second (:parts qn))]
+                        (soft-diag! p (long (:i pt)) (str "'" (:s f) "<" (str/join ", " (:names tmpl)) ">::" (:s pt) "' is not a type")))
+                      ;; ([dcl.fct]/? (C++23 [dcl.fct]/2): a function declared with a trailing return type has the placeholder
+                      ;; `auto` alone as its declared return type: GCC's "'f' function with trailing return type has
+                      ;; 'decltype(auto)' as its type rather than plain 'auto'", at the declaration; cpp1y/auto-fn52.C)
+                      (and fs (:trailing fs) (map? base0) (or (not= :auto (:t base0)) (:cn base0) (:c ds) (:v ds)
+                                                               ;; (cpp-indep: or a ptr-operator before the declarator-id, `auto *f4 () -> int`,
+                                                               ;; cpp0x/trailing2.C)
+                                                               (and (= 1 (count chain)) (seq (:ptrs d))))
+                           (not (:conv lp)) (not (:dtor lp)) (not ctor) (not guide))
+                      (soft-diag! p (long (:b ds)) (str "'" (or (:s lp) nm) "' function with trailing return type has '"
+                                                        (if (= :dta (:t base0)) "decltype(auto)" "another type") "' as its type rather than plain 'auto'"))
+                      ;; ([dcl.spec.auto.general]/? : a placeholder is no array's element type: GCC's "'foo' declared as array of
+                      ;; 'auto'" / "unable to deduce"; cpp0x/initlist75.C, initlist80.C)
+                      (and (nil? fs) (#{:auto :dta} (:t base0)) (some :a (mapcat :sufs chain)) (not (:typedef ds)))
+                      (soft-diag! p ni (str "'" (or nm "") "' declared as array of 'auto'"))
+                      ;; ([dcl.fct]/6: a function type with a cv-qualifier-seq or ref-qualifier, named by a typedef, is the type of no
+                      ;; non-member function: `FIC f;` at namespace scope or as a friend is GCC's "non-member function 'f' cannot have
+                      ;; cv-qualifier", at the name; other/cv_func.C, cv_func3.C)
+                      ;; (cpp-indep: nor of a pointer or reference to it, `fn* fp;` for `typedef void fn() const;`: GCC's "forming
+                      ;; pointer to qualified function type", at the name; a pointer to member's is the member function's; other/typedef2.C)
+                      (and (nil? fs) (not (:typedef ds)) (= 1 (count chain)) (seq (:ptrs d)) (#{:p :lr :rr} (:t (first (:ptrs d))))
+                           (let [tt (some-> base0 :ent :ty)] (and (map? tt) (= :f (:t tt)) (re-find #"const|volatile|&" (str (:q tt))))))
+                      (soft-diag! p ni (str "forming " (if (= :p (:t (first (:ptrs d)))) "pointer" "reference") " to qualified function type"))
+                      (and (nil? fs) (not (:typedef ds)) (or (#{:top :block} ctx) (and (= ctx :member) (:friend ds)))
+                           (empty? (mapcat :ptrs chain)) (empty? (mapcat :sufs chain))
+                           (let [tt (some-> base0 :ent :ty)] (and (map? tt) (= :f (:t tt)) (re-find #"const|volatile|&" (str (:q tt))))))
+                      (soft-diag! p ni (str "non-member function '" (or nm "") "' cannot have cv-qualifier"))
+                      ;; ([dcl.constexpr]/? : a constexpr destructor is C++20's: before it GCC's "'constexpr' destructors only
+                      ;; available with '-std=c++20'", at the specifier (an error under -pedantic-errors); cpp0x/locations1.C)
+                      (and fs (:dtor lp) (:constexpr ds) (< (.-year p) 2020) (:b ds))
+                      (pedantic-diag! p (long (:b ds)) "'constexpr' destructors only available with '-std=c++20'")
+                      ;; ([class.compare.default]/1 is C++20's: a comparison operator defaulted before it is GCC's pedwarn "defaulted
+                      ;; 'operator==' only available with '-std=c++20'", an error under -pedantic-errors; cpp0x/spaceship-eq1.C)
+                      (and fs (#{"==" "!=" "<" ">" "<=" ">=" "<=>"} (:op lp)) (is? p "=") (is-at? p 1 "default") (< (.-year p) 2020))
+                      (pedantic-diag! p ni (str "defaulted 'operator" (:op lp) "' only available with '-std=c++20'"))
+                      ;; ([dcl.fct.def.general]/2: a function-definition is at namespace or class scope only: one in a block is GCC's
+                      ;; "a function-definition is not allowed here before '{' token"; warn/Wshadow-5.C, cpp1y/pr59113.C)
+                      (and fs (= ctx :block) (is? p "{") (not (:typedef ds)))
+                      (soft-diag! p (ix p) "a function-definition is not allowed here before '{' token")
+                      ;; ([dcl.type.class.deduct]/1: a class template's name without arguments as a placeholder stands alone in a
+                      ;; declaration's type: under a pointer or reference declarator, `Tuple* u;`, GCC's "invalid use of template-name
+                      ;; 'Tuple' without an argument list", at the specifiers; the class's own injected name aside; cpp0x/variadic-ex1.C)
+                      ;; (cpp-own, 2026-11-25: and a dependent base's injected name, which unqualified lookup in the derived template
+                      ;; does not find, [temp.dep.general]/3: the enclosing namespace's template then, tc1/dr176.C's `Base* p;`)
+                      ;; (cpp-indep2: and a function's declared return type, [dcl.type.class.deduct]/2: a placeholder for a deduced
+                      ;; class type is no function's return type, `template<> A foo<A>();`; cpp1z/class-deduction47.C)
+                      (and (or (and (nil? fs) (seq (mapcat :ptrs chain))) (and fs (not guide) (not ctor) (not (:conv lp)) (not (:dtor lp))))
+                           (#{:top :block :member} ctx) (:b ds)
+                           (let [tq (:qn (:type ds)) e (:ent (:type ds))]
+                             (and (= :n (:t (:type ds))) (= 1 (count (:parts tq))) (nil? (:args (first (:parts tq))))
+                                  (map? e) (or (and (:tmpl e) (:class e) (not (:inj e))) (and (= ctx :member) (:dep-base e) (not (skim? p))))
+                                  (not (:tparam e))
+                                  (not= (:s (first (:parts tq))) (some-> (stv p CLS) first :name)))))
+                      (soft-diag! p (long (:b ds)) (str "invalid use of template-name '" (if (:dep-base (:ent (:type ds))) (:s (first (:parts (:qn (:type ds))))) (name-str p (:qn (:type ds)))) "' without an argument list"))
+                      ;; ([dcl.type.auto.deduct]/4: `auto x = {};` and `auto x{};` deduce from no element: GCC's "unable to deduce
+                      ;; 'std::initializer_list<auto>' from '{}'", at the name; cpp0x/auto54.C)
+                      (and (nil? fs) (= :auto (:t base0)) (nil? (:cn base0)) (not (:typedef ds)) (empty? (mapcat :ptrs chain)) (empty? (mapcat :sufs chain))
+                           (or (and (is? p "=") (is-at? p 1 "{") (is-at? p 2 "}")) (and (is? p "{") (is-at? p 1 "}"))))
+                      (soft-diag! p ni "unable to deduce 'std::initializer_list<auto>' from '{}'")
+                      ;; ([dcl.fct.def.default]/1: only a special member function or a comparison operator is defaulted, a namespace-
+                      ;; scope or block-scope function by its own name never: GCC's "'void foo()' cannot be defaulted", at the name;
+                      ;; cpp0x/defaulted7.C)
+                      (and fs (#{:top :block} ctx) (= 1 (count (:parts qn))) (not (:g qn)) (is? p "=") (is-at? p 1 "default")
+                           (not (#{"==" "!=" "<" ">" "<=" ">=" "<=>"} (:op lp))))
+                      (soft-diag! p ni (str "'" (or (:s lp) (some->> (:op lp) (str "operator")) nm) "' cannot be defaulted"))
+                      ;; ([dcl.fct.def.default]/1 with [dcl.fct]/? : a function with an ellipsis is no special member to default:
+                      ;; GCC's "'A::A(...)' cannot be defaulted", at the name; cpp0x/defaulted8.C)
+                      (and fs (:va fs) (is? p "=") (is-at? p 1 "default") (= ctx :member))
+                      (soft-diag! p ni (str "'" (or (:s lp) nm) "' cannot be defaulted"))
+                      ;; ([dcl.type.auto.deduct]/5 (C++23 [dcl.spec.auto.general]/? ): decltype(auto) is the declared type alone, no
+                      ;; cv-qualifier with it: GCC's "'decltype(auto)' cannot be cv-qualified", at the specifiers; cpp1y/auto-fn59.C)
+                      (and (= :dta (:t base0)) (or (:c ds) (:v ds)) (:b ds))
+                      (soft-diag! p (long (:b ds)) "'decltype(auto)' cannot be cv-qualified")
+                      ;; (cpp-indep2: nor a ptr-operator: a pointer to or reference to decltype(auto), a variable's or a function's
+                      ;; declared return type, `decltype(auto)* g2()`, [dcl.type.auto.deduct]/5; cpp1y/auto-fn21.C)
+                      (and (= :dta (:t base0)) (:b ds) (seq (:ptrs (first chain))) (not (:typedef ds)))
+                      (soft-diag! p (long (:b ds)) "'decltype(auto)' must be the declared type alone, not with a declarator operator")
+                      ;; ([dcl.typedef]/? with [dcl.spec.auto.general]/? : a typedef declares no placeholder type: GCC's "typedef
+                      ;; declared 'auto'", at the name; cpp1y/pr60384.C)
+                      (and (:typedef ds) (= :auto (:t base0)) (not (and fs (:trailing fs))))
+                      (soft-diag! p ni "typedef declared 'auto'")
+                      ;; ([class.qual]/2, `X::X` as a declaration's type names X's constructor, no type: GCC's "'X::X' names the
+                      ;; constructor, not the type", at the declaration; diagnostic/pr105483.C)
+                      (and (#{:block :top} ctx) (nil? fs) (not (:typedef ds))
+                           (let [tq (:qn (:type ds)) ps (:parts tq)]
+                             (and (= 2 (count ps)) (not-any? :args ps) (= (:s (first ps)) (:s (second ps)))
+                                  (let [q (:q tq)] (and (map? q) (:class q) (not (:tmpl q)))))))
+                      (soft-diag! p (long (:b ds)) (str "'" (name-str p (:qn (:type ds))) "' names the constructor, not the type"))
+                      ;; ([class.friend]/? : a friend declaration declares a function or names a class: a variable's is GCC's
+                      ;; "'foo' is neither function nor member function; cannot be declared friend", at the name; cpp0x/auto50.C)
+                      (and (= ctx :member) (:friend ds) (nil? fs) (seq nm) (= 1 (count (:parts qn)))
+                           (not= :f (:t (some-> base0 :ent :ty))))
+                      (soft-diag! p ni (str "'" nm "' is neither function nor member function; cannot be declared friend"))
+                      (and (= ctx :member) (:friend ds) fs (= 2 (count (:parts qn))) (nil? (:args (first (:parts qn))))
+                           (= (:s (first (:parts qn))) (some-> (stv p CLS) first :name)))
+                      (soft-diag! p (long (:b ds)) "member functions are implicitly friends of their class")
+                      :else nil)))
               nn (:s lp)
               e0 (long (:e d))
               ;; (cpp-singles: a qualified constructor name outside its class with no parameter-declaration-clause after it, the
@@ -4853,6 +5618,57 @@
               ;; for function", at the decl-specifiers)
               _ (when (and fs (not (:a fs)) (:tls ds) (not (skim? p)) (not (:typedef ds)))
                   (soft-diag! p (long (:b ds)) (str "storage class 'thread_local' invalid for function" (when nm (str " '" nm "'")))))
+              ;; (cpp-indep: the function specifiers a member function's kind forbids, at the specifier as GCC: [class.ctor.general]/1
+              ;; "constructors cannot be declared 'virtual'", [class.free]/1 an allocation or deallocation function a static member,
+              ;; "'operator delete' cannot be declared 'virtual'", [class.union.general]/2 "function 'f' declared 'virtual' inside a
+              ;; union"; [dcl.inline]/? a block-scope function declaration is not inline, "'inline' specifier invalid for function
+              ;; 'f' declared out of global scope"; [class.conv.fct]/1 a conversion function has no parameters, "'operator int&(int)'
+              ;; must have no arguments"; cpp0x/locations1.C, other/operator2.C)
+              _ (when (and fs (not (:a fs)) qn lp (not (skim? p)) (main-tok? p (long (:b ds))))
+                  (let [np (count (:parts qn))
+                        cc (class-ctx p)
+                        op (when (:op lp) (str/trim (str (:op lp))))]
+                    (when (and (:virtual ds) (= ctx :member) (not (:friend ds)))
+                      (cond
+                        (and (= 1 np) (:s lp) (not (:args lp)) (= (:s lp) (:name cc)))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) "constructors cannot be declared 'virtual'")
+                        (and op (re-matches #"(new|delete)(\s*\[\s*\])?" op))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) (str "'operator " op "' cannot be declared 'virtual'"))
+                        (= "union" (:kw cc))
+                        (soft-diag! p (long (or (:virtual-i ds) (:b ds))) (str "function '" (or (:s lp) nm) "' declared 'virtual' inside a union"))
+                        :else nil))
+                    (when (and (= ctx :block) (:inline ds) (= 1 np) (not (:g qn)))
+                      (soft-diag! p (long (or (:inline-i ds) (:b ds))) (str "'inline' specifier invalid for function '" (or (:s lp) nm) "' declared out of global scope")))
+                    ;; ([dcl.fct.spec]/3: explicit in the declaration of a constructor or conversion function in its class's
+                    ;; member-specification alone: GCC's "'explicit' outside class declaration", "'explicit' in friend declaration",
+                    ;; "only declarations of constructors and conversion operators can be 'explicit'"; a deduction guide's
+                    ;; is its own; cpp0x/explicit8.C, explicit9.C)
+                    (when (and (:explicit ds) (not guide))
+                      (let [at (long (or (:explicit-i ds) (:b ds)))]
+                        (cond
+                          (#{:top :block} ctx) (soft-diag! p at "'explicit' outside class declaration")
+                          (and (= ctx :member) (:friend ds)) (soft-diag! p at "'explicit' in friend declaration")
+                          (and (= ctx :member) (not ctor) (not (:conv lp)) (not (:dtor lp)) (= 1 np) (:s lp) (not= (:s lp) (:name cc)))
+                          (soft-diag! p at "only declarations of constructors and conversion operators can be 'explicit'")
+                          :else nil)))
+                    ;; ([temp.deduct.guide]/1, /3: a deduction-guide has no decl-specifier but explicit and no function body, and is
+                    ;; declared in its class template's scope: GCC's "decl-specifier in declaration of
+                    ;; deduction guide", "deduction guide ... must not have a function body", "deduction guide ... must be declared in
+                    ;; the same scope as"; cpp1z/class-deduction10.C, 11, 72)
+                    (when guide
+                      (when (or (:storage ds) (:inline ds) (:constexpr ds) (:consteval ds) (:virtual ds) (:friend ds) (:typedef ds) (:tls ds))
+                        (soft-diag! p (long (:b ds)) (str "decl-specifier in declaration of deduction guide")))
+                      (when (is? p "{")
+                        (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s lp) "' must not have a function body")))
+                      (when-let [te (and (= 1 np) (not (:g qn)) (lookup (scope p) (:s lp)))]
+                        (when (and (:tmpl te) (:class te) (:scope te) (#{:top :tmpl} ctx))
+                          (let [home (sc/enclosing (sc/parent-of (:scope te)) #{:ns :class})
+                                here (sc/enclosing (scope p) #{:ns :class})]
+                            (when (and home here (not (identical? home here)))
+                              (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s lp) "' must be declared in the same scope as '" (:s lp) "'")))))))
+                    (when (and (:conv lp) (= ctx :member) (seq (:types fs)) (not (:va fs))
+                               (not (and (= 1 (count (:types fs))) (= {:t :b :w ["void"]} (select-keys (first (:types fs)) [:t :w])))))
+                      (soft-diag! p (long (:b ds)) (str "'operator " (try (qt (:conv lp)) (catch Exception _ "")) "' must have no arguments")))))
               ;; (cpp-diag-b, 2026-11-22: [class.ctor.general]/1, [class.dtor]/1 and [class.conv.fct]/1: a constructor's, destructor's
               ;; or conversion function's declaration has no return type, so no type-specifier and no ptr-operator before the
               ;; declarator-id: GCC's "return type specification for constructor invalid", "return type specified for 'operator
@@ -4873,7 +5689,7 @@
                       (soft-diag! p (long (:b ds)) (if (= what "conv")
                                                      "return type specified for conversion operator"
                                                      (str "return type specification for " what " invalid")))
-                      (and fs (#{"constructor" "destructor"} what) (nil? base0) (or (:c ds) (:v ds)))
+                      (and fs (#{"constructor" "destructor"} what) (nil? base0) (or (:c ds) (:v ds) (:rs-spec ds)))
                       (soft-diag! p (long (:b ds)) (str "qualifiers are not allowed on declaration of '" (if (= what "destructor") (str "~" (:dtor lp)) (:s lp)) "'"))
                       ;; (a qualified destructor's name: its qualifier a namespace, "is not a class-name"; another class than the
                       ;; one its name names, both classes declared so (no typedef), "as member of")
@@ -4931,7 +5747,9 @@
                                                          (str "reference to '" (:s (first parts)) "::" nm "' is ambiguous")))))
                       (and (= ctx :member) (>= np 2) cls (= cls (:s (nth parts (- np 2)))) (not (:friend ds)) (= 2 np) (not (:g qn)))
                       (soft-diag! p (long (:i (nth parts (- np 2)))) (str "extra qualification '" cls "::' on member '" (or (:s lp) (some->> (:dtor lp) (str "~")) "") "'"))
-                      (and (= ctx :member) (:friend ds) (not fs) (:s lp) (not (:typedef ds)))
+                      (and (= ctx :member) (:friend ds) (not fs) (:s lp) (not (:typedef ds))
+                           ;; (cpp-rind: a function typedef's type declares a function, `friend F f;`)
+                           (not= :f (:t (some-> base0 :ent :ty))))
                       (soft-diag! p (long (:i lp)) (str "'" (:s lp) "' is neither function nor member function; cannot be declared friend"))
                       (and (= ctx :member) (not fs) (= "static" (:storage ds)) (not (:typedef ds)) (some #(nil? (:name %)) (stv p CLS)))
                       (soft-diag! p (long (:i lp)) (str "static data member '" (:s lp) "' in unnamed class"))
@@ -4963,7 +5781,9 @@
                       ;; ([class.friend]/6: a function is defined in a friend declaration only by an unqualified name, a
                       ;; non-member's: GCC's "cannot define member function 'A::foo' within 'B'", "friend function definition 'f'
                       ;; cannot have a name qualified with 'N::'")
-                      (and (= ctx :member) (:friend ds) fs (or (>= np 2) (:g qn)) (is? p "{"))
+                      ;; (cpp-indep2: a deleted or defaulted definition too, [dcl.fct.def.general]/1; cpp0x/deleted13.C)
+                      (and (= ctx :member) (:friend ds) fs (or (>= np 2) (:g qn))
+                           (or (is? p "{") (and (is? p "=") (or (is-at? p 1 "delete") (is-at? p 1 "default")))))
                       (soft-diag! p (long (:i lp)) (if (:class (:q qn))
                                                      (str "cannot define member function '" (name-str p qn) "' within '" cls "'")
                                                      (str "friend function definition '" (or (:s lp) "") "' cannot have a name qualified with '"
@@ -5048,7 +5868,11 @@
                                                              (#{:class :lookup :tparams :enum} (sc/kind-of s)) (recur (sc/parent-of s))
                                                              :else s))]
                              (and b (= :block (sc/kind-of b))
-                                  (not= :fn (:k (.get ^java.util.Map (sc/names-of b) (:s lp)))))))
+                                  ;; (cpp-indep2: a prior local declaration of another parameter-type-list declares another
+                                  ;; function, [over.dcl]/1: lookup/friend12.C's `extern void bar (int);` before `friend void bar();`)
+                                  (let [e (.get ^java.util.Map (sc/names-of b) (:s lp))]
+                                    (or (not= :fn (:k e))
+                                        (and (not (:ovl e)) (some? (:ptys e)) (some? (:types fs)) (not= (:ptys e) (:types fs))))))))
                       (soft-diag! p (long (:i lp)) (str "friend declaration '" (:s lp) "' in local class without prior local declaration"))
                       ;; ([temp.mem]/? : a destructor is no member template)
                       (and (:dtor lp) (string? (:dtor lp)) tmpl (pos? (long (or (:n tmpl) 0))) (= ctx :member))
@@ -5082,11 +5906,99 @@
                       (soft-diag! p (long (:i lp)) (cond (= ctx :member) (str "'constexpr' static data member '" (:s lp) "' must have an initializer")
                                                          (= "extern" (:storage ds)) (str "declaration of 'constexpr' variable '" (:s lp) "' is not a definition")
                                                          :else (str "uninitialized 'const " (:s lp) "'")))
+                      ;; (cpp-rind: [class.static.data]/4, only a const static data member of integral or enumeration type, or an
+                      ;; inline or constexpr one, has an initializer in its class: GCC's "ISO C++ forbids in-class initialization of
+                      ;; non-const static member 'k'"; cpp0x/auto7.C)
+                      (and (= ctx :member) (nil? fs) (= "static" (:storage ds)) (not (:constexpr ds)) (not (:inline ds)) (not (:c ds))
+                           (not (:typedef ds)) (not (:friend ds)) (nil? tmpl) (or (is? p "=") (is? p "{"))
+                           ;; (a pointer or array member too, `static int S::*m[] = {...};`, cpp0x/pr71248.C: no integral type)
+                           (not (some :c (mapcat :ptrs chain))))
+                      (soft-diag! p (long (:i lp)) (str "ISO C++ forbids in-class initialization of non-const static member '" (:s lp) "'"))
+                      ;; (cpp-rind: and a const one of an array type, no integral type: GCC's "'constexpr' needed for in-class
+                      ;; initialization of static data member 't' of non-integral type"; template/static1.C)
+                      (and (= ctx :member) (nil? fs) (= "static" (:storage ds)) (not (:constexpr ds)) (not (:inline ds)) (:c ds)
+                           (not (:typedef ds)) (not (:friend ds)) (nil? tmpl) (or (is? p "=") (is? p "{")) (empty? (mapcat :ptrs chain))
+                           (some :a (mapcat :sufs chain)) (>= (.-year p) 2011))
+                      (soft-diag! p (long (:i lp)) (str "'constexpr' needed for in-class initialization of static data member '" (:s lp) "' of non-integral type"))
+                      ;; (cpp-rind: [dcl.spec.auto.general]/? and [dcl.type.auto.deduct]: a variable declared with a placeholder type is
+                      ;; deduced from its initializer, so one with none is ill-formed, and a non-static data member's type is no
+                      ;; placeholder ([dcl.spec.auto.general]/6): GCC's "declaration of 'auto j' has no initializer", "non-static data
+                      ;; member declared with placeholder 'auto'"; cpp0x/auto7.C, cpp0x/constexpr-77482.C)
+                      (and (#{:auto :dta} (:t base0)) (nil? fs) (not (:typedef ds)) (#{:top :block :member} ctx) (or (is? p ";") (is? p ","))
+                           (not (:friend ds)) (nil? tmpl) (= 1 np) (not (:g qn)) (empty? (mapcat :sufs chain)) (>= (.-year p) 2011))
+                      (soft-diag! p (long (:i lp)) (if (and (= ctx :member) (not= "static" (:storage ds)))
+                                                     "non-static data member declared with placeholder 'auto'"
+                                                     (str "declaration of 'auto " (:s lp) "' has no initializer")))
                       ;; ([dcl.typedef]/1 with [dcl.meaning.general]/1: a typedef-name is declared unqualified, and an operator
                       ;; function's name is no typedef-name: GCC's "typedef name may not be a nested-name-specifier", "declaration
                       ;; of 'operator!' as non-function")
                       (and (:typedef ds) (or (>= np 2) (:g qn)))
                       (soft-diag! p (long (:i lp)) "typedef name may not be a nested-name-specifier")
+                      ;; (cpp-indep2: [dcl.typedef]/1, a typedef-name is an identifier: a template-id's declarator is GCC's "explicit
+                      ;; template argument list not allowed", at the name; template/crash91.C)
+                      ;; (cpp-indep2: [temp.mem.func]/1 with [temp.class.general]/3: a member function of a class template defined
+                      ;; out of its class, no member template, has the class template's template-head, as many parameters: `template<int
+                      ;; N, char> A<N>::A() {}` is GCC's "got 2 template parameters for 'A<N>::A()'" ("but 1 required"), at the name;
+                      ;; not judged with a pack or when the class has a specialization in the file; template/param1.C, crash116.C)
+                      (and tmpl (= 1 (long (or (:depth tmpl) 0))) fs (= ctx :top) (= 2 np) (not (:g qn)) (not (:friend ds))
+                           (let [q (first parts) qe (lookup (scope p) (:s q)) qargs (:args q) names (:names tmpl)]
+                             (and (map? qe) (:tmpl qe) (:class qe) (seq (:tps qe)) (seq qargs) (= (count qargs) (count (:tps qe)))
+                                  (not (some :isParameterPack (:params tmpl))) (not (some :isParameterPack (:tps qe)))
+                                  (every? #(some #{(tok-text p (long (:b %)) (long (:e %)))} names) qargs)
+                                  (not= (long (:n tmpl)) (count (:tps qe)))
+                                  (not (class-specialized? p (:s q)))
+                                  (let [mem (when (and (:scope qe) (:s lp)) (sc/find-in (:scope qe) (:s lp)))]
+                                    (or ctor (:dtor lp) (and (map? mem) (not (:tmpl mem))))))))
+                      (soft-diag! p (long (:i lp)) (str "got " (:n tmpl) " template parameters for '" (name-str p qn) "'"))
+                      ;; (cpp-indep2: [temp.expl.spec]/1, an explicit specialization's variable is a variable template's
+                      ;; specialization, a template-id, or a static data member of a class template's specialization: `template<> int
+                      ;; i;` and `template<> int A::i;` with A no template are GCC's "explicit specialization of non-template 'i'", at
+                      ;; the name; parse/error50.C)
+                      (and tmpl (zero? (long (or (:n tmpl) -1))) (= 1 (long (or (:depth tmpl) 0))) (nil? fs) (:s lp) (not (:args lp))
+                           (not-any? :args parts) (not (:typedef ds)) (#{:top} ctx) (not (:g qn))
+                           (or (= 1 np)
+                               (and (= 2 np) (let [q0 (lookup (scope p) (:s (first parts)))]
+                                               (and (map? q0) (:class q0) (:scope q0) (not (:tmpl q0)) (not (:dep q0)) (not (:tparam q0))
+                                                    (nil? (:target q0)) (not (:inj q0)))))))
+                      (soft-diag! p (long (:i lp)) (str "explicit specialization of non-template '" (name-str p qn) "'"))
+                      ;; (cpp-indep2: [temp.friend]/? with [temp.expl.spec]/? : no explicit specialization is declared by a friend
+                      ;; declaration, `template<> friend void foo<0>();`: GCC's error at the name; template/crash42.C)
+                      (and tmpl (zero? (long (or (:n tmpl) -1))) (:friend ds) fs (= ctx :member))
+                      (soft-diag! p (long (:i lp)) (str "explicit specialization of '" (name-str p qn) "' in a friend declaration"))
+                      ;; (cpp-indep2: [temp.mem]/1 with [temp.class.general]/3: a template-head before a member of a class template's
+                      ;; specialization whose arguments name none of its parameters, the member no template, `template<int> int
+                      ;; A<0,0>::i = 0;`: GCC's "template definition of non-template 'int A<0, 0>::i'", at the name; template/error49.C,
+                      ;; error33.C)
+                      (and tmpl (pos? (long (or (:n tmpl) 0))) (= 1 (long (or (:depth tmpl) 0))) (= 2 np) (:s lp) (not (:args lp))
+                           (#{:top} ctx) (not (:g qn)) (not (:friend ds)) (seq (:args (first parts)))
+                           (let [names (set (map #(str/replace (str %) #"\.\.\.$" "") (:names tmpl)))
+                                 q (first parts)
+                                 q0 (lookup (scope p) (:s q))
+                                 m (when (and (map? q0) (:tmpl q0) (:scope q0)) (sc/find-in (:scope q0) (:s lp)))]
+                             (and (map? m) (not (:tmpl m)) (#{:var :fn} (:k m))
+                                  (not-any? (fn [a] (some (fn [i] (contains? names (ts (tok-at p i)))) (range (long (:b a)) (inc (long (:e a))))))
+                                            (:args q)))))
+                      (soft-diag! p (long (:i lp)) (str "template definition of non-template '" (name-str p qn) "'"))
+                      ;; (cpp-indep2: [temp.expl.spec]/17, a member of a class template's explicit specialization takes one
+                      ;; template<> for the class alone: `template<> template<> int B<int>::i;`, i no template, is GCC's "too many
+                      ;; template-parameter-lists"; parse/error50.C)
+                      (and tmpl (zero? (long (or (:n tmpl) -1))) (= 2 (long (or (:depth tmpl) 0))) (= 2 np) (:s lp) (not (:args lp))
+                           (:args (first parts)) (#{:top} ctx) (not (:g qn))
+                           (let [q0 (lookup (scope p) (:s (first parts)))
+                                 m (when (and (map? q0) (:tmpl q0) (:scope q0)) (sc/find-in (:scope q0) (:s lp)))]
+                             (and (map? m) (not (:tmpl m)) (#{:var :fn} (:k m)))))
+                      (soft-diag! p (long (:i lp)) "too many template-parameter-lists")
+                      ;; (cpp-indep2: [dcl.stc]/1, no storage-class-specifier in an explicit specialization, `template<> static void
+                      ;; foo<0>() {}`: GCC's "explicit specialization cannot have a storage class", at the name; template/spec33.C)
+                      (and tmpl (zero? (long (or (:n tmpl) -1))) (#{"static" "extern"} (:storage ds)) (:args lp) (:s lp) fs)
+                      (soft-diag! p (long (:i lp)) "explicit specialization cannot have a storage class")
+                      (and (:typedef ds) (:args lp) (:s lp))
+                      (soft-diag! p (long (:i lp)) "explicit template argument list not allowed")
+                      ;; (cpp-indep2: [temp.friend]/? with [temp.expl.spec]: a friend declaration naming a specialization of a
+                      ;; function template by a template-id declares no definition: GCC's "defining explicit specialization 'foo<T>'
+                      ;; in friend declaration", at the name; template/friend64.C)
+                      (and fs (= ctx :member) (:friend ds) (:args lp) (:s lp) (is? p "{"))
+                      (soft-diag! p (long (:i lp)) (str "defining explicit specialization '" (:s lp) "<...>' in friend declaration"))
                       (and (:typedef ds) (or (:op lp) (:conv lp)))
                       (soft-diag! p (long (:i lp)) "declaration of an operator function as a typedef")
                       ;; ([dcl.stc]/5 (C++23 /5): a block-scope extern declaration has no initializer: GCC's "'i' has both 'extern'
@@ -5404,6 +6316,10 @@
                   ;; subscript: [dcl.attr.grammar]/7's "two consecutive '[' shall only introduce an attribute", GCC's error)
                   _ (when (and bits (is? p "[") (is-at? p 1 "[") (not (skim? p)) (main-tok? p (ix p)))
                       (soft-diag! p (ix p) "two consecutive '[' shall only introduce an attribute before '[' token"))
+                  ;; (cpp-def: [class.bit]/1, a bit-field's width is an integral constant expression: the name of a function or
+                  ;; function template alone is none, GCC's "width of bit-field ... has non-integral type"; lookup/pr84962.C)
+                  _ (when (and bits (= "DeclRefExpr" (:kind bits)) (or (= :fn (:k (:_ent bits))) (:anon-fn (:_ent bits))) (not (skim? p)) (:_b bits) (main-tok? p (long (:_b bits))))
+                      (soft-diag! p (long (:_b bits)) (str "width of bit-field '" (or nm "") "' has non-integral type")))
                   as1 (attr-nodes p)
                   ;; (cpp-gnu, 2026-11-22: GNU's asm label, the manual's "Asm Labels": the symbol of a variable or a function, so none
                   ;; on a non-static data member, GCC's error at it, ext/asmspecInvalid.C; on a register variable it names the
@@ -5422,7 +6338,14 @@
                   ;; block's declaration in a member function's body has it already below the function's parameters (fn-body),
                   ;; and first there it had hidden the block's own names: fast_float.h's bigint::shl_bits, `size_t shl = n;
                   ;; size_t shr = limb_bits - shl;` read as this->shl, the member function declared after it)
-                  late* (fn [f] (if (= ctx :block) (f) (with-late* p f)))
+                  ;; (cpp-indep2: and a qualified definition's initializer, a static data member's out of its class, `template<int N>
+                  ;; const int A<N>::j = i;`, in its class's scope, [basic.lookup.unqual]/? (C++23 /4): the names after a member's
+                  ;; declarator-id are looked up in its class; template/pr28284.C's `i` and `j` had been undeclared)
+                  qcls (when (and (= ctx :top) qn (> (count (:parts qn)) 1) (not (:friend ds)))
+                         (let [c (class-of-qualifier p qn)] (when (and (map? c) (:scope c) (:class c)) c)))
+                  late* (fn [f] (cond (= ctx :block) (f)
+                                      qcls (in-scope p (sc/new-scope :lookup (scope p) qcls) (f))
+                                      :else (with-late* p f)))
                   [x init] (cond
                              (accept! p "=") [(if (skim? p) (do (skip-init! p (boolean (and tmpl (pos? (long (:n tmpl)))))) nil) (late* #(parse-init-clause p))) "c"]
                              (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (late* #(parse-braced-init p))) "list"]
@@ -5576,9 +6499,20 @@
               (let [kw (ts (cur p))]
                 (adv! p)
                 (let [pack (accept! p "...")
+                      ;; (cpp-rind: a template parameter pack is C++11's: before it GCC's pedwarn "variadic templates only available
+                      ;; with '-std=c++11'", an error under -pedantic-errors; cpp0x/variadic62.C)
+                      _ (when (and pack (< (.-year p) 2011) (not (skim? p)) (main-tok? p (last-ix p)))
+                          (pedantic-diag! p (last-ix p) "variadic templates only available with '-std=c++11'"))
                       nm (when (id? p) (ts (cur p)))
                       ni (if nm (let [i (ix p)] (adv! p) i) (ix p))
                       dflt (when (and (accept! p "=") (vreset! hd true)) (if (skim? p) (do (skip-targ! p) nil) (with-gt p false (parse-type-id p :targ))))]
+                  ;; (cpp-indep2: [temp.local]/6, a template parameter's name is not declared again in its scope: a template
+                  ;; parameter of an inner template-parameter-list (a template template parameter's, a member template's) named
+                  ;; as an enclosing one is GCC's "declaration of template parameter 'A' shadows template parameter", at the
+                  ;; name; template/shadow2.C)
+                  (when (and nm (not (skim? p)) (main-tok? p ni) (= :tparams (sc/kind-of (scope p))))
+                    (when-let [o (lookup (sc/parent-of (scope p)) nm)]
+                      (when (:tparam o) (soft-diag! p ni (str "declaration of template parameter '" nm "' shadows template parameter")))))
                   (when nm (sc/declare! (scope p) (cond-> {:k :type :name nm :tparam true} pack (assoc :pack true))))
                   [(node p "TemplateTypeParmDecl" b (last-ix p)
                          (cond-> {:tagUsed kw :loc (loc p ni) :inner (if dflt [{:kind "TemplateArgument" :type {:qualType (qt dflt)}}] [])}
@@ -5591,6 +6525,15 @@
                     ;; check reads: the checker's match of a template template argument's constraints)
                     [tps treq] (with-scope p :tparams nil
                                  (let [[tps] (parse-template-params p)]
+                                   ;; (cpp-indep2: [temp.param]/14 in a template template parameter's own list too: a parameter after
+                                   ;; one with a default argument has one or is a pack, GCC's "no default argument for 'U'", at it;
+                                   ;; template/ttp26.C)
+                                   (when (and (not (skim? p)) (main-tok? p b))
+                                     (let [dflt? (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x)))
+                                           after (drop-while (complement dflt?) tps)]
+                                       (when (not-any? #(= "TemplateTemplateParmDecl" (:kind %)) after)
+                                         (when-let [x (first (filter #(not (or (dflt? %) (:isParameterPack %))) after))]
+                                           (when (:_b x) (soft-diag! p (long (:_b x)) (str "no default argument for '" (or (:name x) "") "'")))))))
                                    (expect! p ">")
                                    [tps (when (is? p "requires") (requires-clause! p))]))]
                   ;; (h-cpp-read: [temp.param]/1's type-parameter-key: GCC's "expected 'class' or 'typename' before" another
@@ -5644,8 +6587,26 @@
                  (when nm (str nm (when pack "...")))])
               :else
               (let [ds (parse-decl-specs p :tparam)
+                    ;; (cpp-indep: a template parameter's neither, [temp.param]/1 with [dcl.typedef]/1, template/typedef5.C)
+                    _ (when (and (:typedef ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+                        (soft-diag! p (long (:b ds)) "typedef declaration invalid in parameter declaration"))
+                    ;; (cpp-indep2: [temp.param]/? with [dcl.fct]/? : a template parameter's decl-specifiers define no class or
+                    ;; enumeration: GCC's "types may not be defined in template parameter types"... at the definition's brace;
+                    ;; template/error58.C's `template<struct N::A {}> void foo();`)
+                    _ (when-let [bi (and (not (skim? p)) (main-tok? p (long (:b ds))) (:tag-node ds)
+                                         (some #(when (t= (tok-at p %) "{") %) (range (long (:b ds)) (ix p))))]
+                        (soft-diag! p (long bi) "definition of a type in a template parameter list"))
                     base (or (ds-type ds) (perr p "a template parameter"))
+                    ;; (cpp-indep2: a non-type template parameter declared with a placeholder type is C++17's ([temp.param]/? ,
+                    ;; P0127R2): before it GCC's "'auto' parameter not permitted in this context", at the type; cpp1z/nontype-auto11.C)
+                    _ (when (and (#{:auto :dta} (:t base)) (< (.-year p) 2017) (not (skim? p)) (main-tok? p (long (:b ds))))
+                        (soft-diag! p (long (:b ds)) "'auto' parameter not permitted in this context"))
                     d (parse-declarator p :either)
+                    ;; (cpp-indep2: [dcl.array]/1, no array of void: a non-type template parameter `template<void[]>`, GCC's
+                    ;; "declaration of template parameter as array of void", at the type; template/void1.C)
+                    _ (when (and (= :b (:t base)) (= ["void"] (:w base)) (not (skim? p)) (main-tok? p (long (:b ds)))
+                                 (let [x (first (name-chain d))] (and (empty? (:ptrs x)) (:a (first (:sufs x))))))
+                        (soft-diag! p (long (:b ds)) "declaration of template parameter as array of void"))
                     de (ix p)
                     ty (build-type base d)
                     qn (:name (last (name-chain d)))
@@ -5701,6 +6662,10 @@
               ;; concept's type-constraint may leave out: std::three_way_comparable<T, Cat = partial_ordering>; D342-3 (a): the
               ;; parameter's own default (hd), not an `=` among its tokens: `template<class = int> class TT` has none)
               nreq (or nreq (when @hd (count ns)))
+              ;; (cpp-rind: [temp.param]/? with [basic.scope.temp]/? : a template-parameter-list declares each name once: GCC's
+              ;; "redefinition of 'int N'", at the second; template/crash67.C)
+              _ (when (and nm (some #{nm} names) (not (skim? p)) (main-tok? p b))
+                  (soft-diag! p b (str "redefinition of template parameter '" nm "'")))
               ns (conj ns n) names (conj names nm)]
           (if (accept! p ",") (recur ns names nreq)
               (do
@@ -5831,6 +6796,11 @@
   [^P p ctx ^long ob ^long depth]
   (let [hb (ix p)
         ext (accept! p "extern")]
+    ;; (cpp-read, 2026-11-24: [temp.mem]/2, a local class has no member template: GCC's "invalid declaration of member template in
+    ;; local class", at `template`, the declaration skipped to its end (template/crash63.C))
+    (when (and (= ctx :member) (= 1 depth) (not ext) (is? p "template") (is-at? p 1 "<") (not (skim? p)) (main-tok? p (ix p))
+               (loop [^Scope s (scope p)] (when s (if (#{:block :fparams} (sc/kind-of s)) true (recur (sc/parent-of s))))))
+      (perr p "invalid declaration of member template in local class"))
     (expect! p "template")
     (if-not (is? p "<")
       ;; an explicit instantiation: the converter reads it from its text
@@ -5841,9 +6811,11 @@
                         {:names (when fs (:names fs))
                          ;; (G5: a function's name and type, for the code generator)
                          :fname (when (and fs qn) (fn-name p (peek (:parts qn)) false false))
-                         :ftype (when (and fs (ds-type ds)) (try (qt (build-type (ds-type ds) d)) (catch Exception _ nil)))
+                         ;; (cpp-indep: the skimmed array bounds' texts kept, `template void f1 (char [][6]);` is of `char (*)[6]`,
+                         ;; not `char (*)[]`: template/unify2.C)
+                         :ftype (when (and fs (ds-type ds)) (try (qt (skimmed-bounds (build-type (ds-type ds) d))) (catch Exception _ nil)))
                          ;; (queue 367: a constructor's, no decl-specifiers: `template S::basic_string(C*, C*, const allocator<C>&);`)
-                         :fctype (when (and fs (nil? (ds-type ds))) (try (qt (build-type {:t :b :w ["void"]} d)) (catch Exception _ nil)))}))
+                         :fctype (when (and fs (nil? (ds-type ds))) (try (qt (skimmed-bounds (build-type {:t :b :w ["void"]} d))) (catch Exception _ nil)))}))
                     (catch arbace.lang.ExceptionInfo _ nil))
             names (:names fi)
             _ (seek! p b0)
@@ -5865,6 +6837,30 @@
                           (when (and (:incomplete e) (:class e) (not (:tmpl e)))
                             (soft-diag! p i (str "invalid use of incomplete type 'struct " (.-s t) "'"))))
                         (recur (inc i) (inc n)))))))
+            ;; (cpp-indep2: [temp.explicit]/? (C++11's, N3242 14.7.2/4), an explicit instantiation appears in a namespace enclosing
+            ;; its template's: the first name of the declarator's qualifier (a namespace, or a class template's name found by
+            ;; lookup) gives the template's namespace, which the current one encloses or is; GCC's "explicit instantiation of
+            ;; ... in namespace 'N::I' (which does not enclose namespace 'N')", at the declaration; template/explicit8.C)
+            _ (when (and *full-headers* (not (skim? p)) (main-tok? p b0) (>= (.-year p) 2011))
+                (let [cnt (.-cnt p)
+                      qi (loop [i b0 n 0]
+                           (let [^T t (tok-at p i)]
+                             (when (and (< n 64) (< i cnt) (not (t= t ";")) (not (t= t "(")) (not (identical? :eof (.-k t))))
+                               (if (and (identical? :id (.-k t)) (not (t= (tok-at p (dec i)) "::"))
+                                        (or (t= (tok-at p (inc i)) "::")
+                                            (and (t= (tok-at p (inc i)) "<")
+                                                 (when-let [c (angle-close p (inc i))] (t= (tok-at p (inc (long c))) "::")))))
+                                 i
+                                 (recur (inc i) (inc n))))))
+                      e (when qi (lookup (scope p) (.-s ^T (tok-at p (long qi)))))
+                      target (cond (and (map? e) (= :ns (:k e)) (:scope e)) (:scope e)
+                                   (and (map? e) (:tmpl e) (:class e) (:scope e) (not (:tparam e)))
+                                   (sc/enclosing (sc/parent-of (:scope e)) #{:ns})
+                                   :else nil)
+                      cur (sc/enclosing (scope p) #{:ns})]
+                  (when (and target cur
+                             (not (loop [s target] (cond (nil? s) false (identical? s cur) true :else (recur (sc/parent-of s))))))
+                    (soft-diag! p b0 "explicit instantiation in a namespace which does not enclose its template's namespace"))))
             ;; (cpp-sweep: [temp.explicit]/3, an explicit instantiation uses no inline, constexpr or consteval specifier: GCC's
             ;; permerror "explicit instantiation shall not use 'consteval' specifier", at the specifier; cpp2a/consteval3.C)
             _ (when (and (not (skim? p)) (main-tok? p b0))
@@ -5874,6 +6870,16 @@
                       (when (and (identical? :kw (.-k t)) (#{"inline" "constexpr" "consteval"} (.-s t)))
                         (soft-diag! p i (str "explicit instantiation shall not use '" (.-s t) "' specifier")))
                       (recur (inc i) (inc n))))))
+            ;; (cpp-rind: [temp.explicit]/? : an explicit instantiation of a class has no class-specifier, `template struct S<int>
+            ;; {};`, GCC's "explicit instantiation cannot have a definition"; and one of an operator-function-id without a function
+            ;; declarator is GCC's "declaration of 'operator+' as non-function"; template/explicit-instantiation9.C, operator6.C)
+            _ (when (and (not (skim? p)) (main-tok? p b0))
+                (let [ts (loop [i b0 out []] (let [^T t (tok-at p i)] (if (or (t= t ";") (identical? :eof (.-k t)) (> (count out) 64)) out (recur (inc i) (conj out [i (.-s t)])))))]
+                  (when-let [[bi] (and (#{"struct" "class" "union"} (second (first ts))) (first (filter #(= "{" (second %)) ts)))]
+                    (soft-diag! p (long bi) "explicit instantiation cannot have a definition"))
+                  (when-let [[oi] (first (filter #(= "operator" (second %)) ts))]
+                    (when (and (not-any? #(= "(" (second %)) (drop-while #(<= (long (first %)) (+ (long oi) 1)) ts)))
+                      (soft-diag! p (long oi) (str "declaration of 'operator" (second (second (drop-while #(< (long (first %)) (long oi)) ts))) "' as non-function"))))))
             _ (skip-until! p #{";"})
             e (last-ix p)]
         (expect! p ";")
@@ -5957,12 +6963,38 @@
                                      (or (re-find #"[*&]" q)
                                          (every? #{"char" "wchar_t" "char8_t" "char16_t" "char32_t" "bool" "short" "int" "long" "signed" "unsigned"
                                                    "float" "double" "const" "volatile" "decltype(nullptr)" "std::nullptr_t"} (str/split (str/trim q) #"\s+"))))))
-                      (soft-diag! p (long (:_b f)) (str "literal operator template '" (:name f) "' has invalid parameter list"))))
+                      ;; (cpp-indep2: at the name, as GCC, not at the declaration's first token: cpp1y/udlit-char-template-neg.C's
+                      ;; return type on the line before)
+                      (let [o (get-in f [:loc :offset])
+                            i (or (when o (first (filter #(= (long o) (long (.-o ^T (tok-at p %)))) (range (long (:_b f)) (min (.-cnt p) (+ (long (:_b f)) 64))))))
+                                  (long (:_b f)))]
+                        (soft-diag! p (long i) (str "literal operator template '" (:name f) "' has invalid parameter list")))))
                   ;; (round 54, second pass: [temp.expl.spec]/17 and [temp.mem]/1, a class's template headers one for itself and one
                   ;; for each enclosing class template its name's qualifier names: more is GCC's "too many template-parameter-lists")
                   (when-let [qn (some #(when (and (= "CXXRecordDecl" (:kind %)) (:_qn %)) (:_qn %)) ns)]
                     (when (> depth (count (:parts qn)))
                       (soft-diag! p (long (:i (peek (:parts qn)))) "too many template-parameter-lists")))
+                  ;; (cpp-indep2: [temp.spec.partial.general]/? with [temp.expl.spec]/? : a class's specialization is declared in a
+                  ;; scope where its template may be defined; in a class's member-specification the class's own name is the
+                  ;; class itself, a class at namespace scope: `template<typename T> struct A<T*>;` in A is GCC's "specialization of
+                  ;; 'template<class> struct A' must appear at namespace scope", at the declaration; template/spec37.C)
+                  (when (and (= ctx :member) (not (skim? p)))
+                    (when-let [d (some #(when (and (= "CXXRecordDecl" (:kind %)) (:_args %) (:name %) (:_b %)
+                                                (or (nil? (:_qn %)) (and (= 1 (count (:parts (:_qn %)))) (not (:g (:_qn %)))))) %) ns)]
+                      (when (= (:name d) (:name (class-ctx p)))
+                        (soft-diag! p (long (:_b d)) (str "specialization of '" (:name d) "' must appear at namespace scope")))))
+                  ;; (cpp-indep2: the same rule for a class template named by an unqualified name: one template header alone,
+                  ;; `template<int> template<int> struct A;`; template/class3.C)
+                  ;; (and a function's, a friend's too: template/crash65.C's `template<int> template<typename T> friend void foo(T)`)
+                  (when (and (> depth 1) (not (skim? p)))
+                    (when-let [d (some (fn [x]
+                                         (let [x (if (= "FriendDecl" (:kind x)) (assoc (first (:inner x)) :_b (:_b x)) x)]
+                                           (when (and (#{"CXXRecordDecl" "FunctionDecl" "CXXMethodDecl"} (:kind x)) (:name x) (:_b x)
+                                                      (get-in x [:loc :offset]))
+                                             x)))
+                                       ns)]
+                      (when-not (qualified-at? p (long (:_b d)) (long (get-in d [:loc :offset])))
+                        (soft-diag! p (long (:_b d)) "too many template-parameter-lists"))))
                   ws))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -5974,14 +7006,19 @@
   (let [s (sc/decl-scope (scope p))
         old (when nm (sc/find-in s nm))
         old (if (= :ns (:k old)) old nil)
-        e (or old {:k :ns :name nm :scope (sc/new-scope :ns s nil)})]
+        ;; (cpp-rind: whether a namespace's first definition was inline, for the rule in parse-namespace)
+        e (or old {:k :ns :name nm :scope (sc/new-scope :ns s nil) :inline-ns (boolean inline) :inline-ns-known true})]
     (when-not old (when nm (sc/declare! s e)))
     (when (or inline (nil? nm)) (sc/add-inline! s (:scope e)))
     e))
 
 (defn- parse-namespace [^P p]
   (let [b (ix p)
-        inline (accept! p "inline")]
+        inline (accept! p "inline")
+        ;; (cpp-rind: an inline namespace is C++11's: before it GCC's pedwarn "inline namespaces only available with
+        ;; '-std=c++11'", an error under -pedantic-errors; cpp0x/inline-ns5.C)
+        _ (when (and inline (< (.-year p) 2011) (not (skim? p)) (main-tok? p b))
+            (pedantic-diag! p b "inline namespaces only available with '-std=c++11'"))]
     (expect! p "namespace")
     (let [a1 (attr-nodes p)]
     (if (and (id? p) (is-at? p 1 "="))
@@ -5990,7 +7027,13 @@
         (let [qn (or (parse-name p :parse) (perr p "a namespace alias"))
               e (last-ix p)]
           (expect! p ";")
-          (when-let [t (:ent qn)] (when (= :ns (:k t)) (sc/declare! (sc/decl-scope (scope p)) (assoc t :name nm))))
+          ;; (cpp-rind: [namespace.alias]/? with [basic.scope.scope]/4, a namespace alias's name declares no other entity of its
+          ;; scope: a namespace of that name already (not an alias of the same namespace) is GCC's "namespace alias 'm' not allowed
+          ;; here, assuming 'm'" / "conflicts with a previous declaration", at the name; parse/namespace10.C)
+          (when-let [old (and (not (skim? p)) (main-tok? p ni) (get (sc/names-of (sc/decl-scope (scope p))) nm))]
+            (when (and (= :ns (:k old)) (or (not (:alias old)) (not (identical? (:scope old) (:scope (:ent qn))))))
+              (soft-diag! p ni (str "namespace alias '" nm "' conflicts with a previous declaration"))))
+          (when-let [t (:ent qn)] (when (= :ns (:k t)) (sc/declare! (sc/decl-scope (scope p)) (assoc t :name nm :alias true))))
           [(node p "NamespaceAliasDecl" b e {:name nm :loc (loc p ni)})]))
       (let [parts (loop [out []]
                     (let [inl (accept! p "inline")]
@@ -6005,10 +7048,19 @@
             _ (when (and (seq parts) (not (skim? p)) (main-tok? p b))
                 (cond (:inline (first parts)) (soft-diag! p (long (:i (first parts))) "expected identifier before 'inline'")
                       (and inline (> (count parts) 1)) (soft-diag! p b "a nested namespace definition cannot be inline")))
+            ;; (cpp-rind: a nested-namespace-definition is C++17's: before it GCC's pedwarn "nested namespace definitions only
+            ;; available with '-std=c++17'", an error under -pedantic-errors; cpp1z/nested-namespace-def2.C)
+            _ (when (and (> (count parts) 1) (< (.-year p) 2017) (not (skim? p)) (main-tok? p b))
+                (pedantic-diag! p (long (:i (first parts))) "nested namespace definitions only available with '-std=c++17'"))
             _ (when (and (is? p "inline") (seq parts) (not (skim? p)) (main-tok? p (ix p)))
                 (soft-diag! p (ix p) "expected '{' before 'inline'")
                 (adv! p))
+            a2i (ix p)
             a2 (attr-nodes p)
+            ;; (cpp-rind: [namespace.def.general]/1, a namespace-definition's attribute-specifier-seq precedes its name: a standard one
+            ;; after it is GCC's "standard attributes on namespaces must precede the namespace name", cpp1z/namespace-attribs2.C)
+            _ (when (and (seq parts) (seq a2) (t= (tok-at p a2i) "[") (t= (tok-at p (inc a2i)) "[") (not (skim? p)) (main-tok? p a2i))
+                (soft-diag! p a2i "standard attributes on namespaces must precede the namespace name"))
             ;; (cpp-rt-own2: GNU's abi_tag on a namespace kept as :_abi-tags, the tags it names, for the code generator's implicit
             ;; tags: <c++config.h>'s `inline namespace __cxx11 __attribute__((__abi_tag__ ("cxx11")))`; the nodes are no children)
             tags (not-empty (vec (sort (distinct (for [a (concat a1 a2) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
@@ -6017,6 +7069,18 @@
             parts (if (empty? parts) [{:name nil :i b :inline inline}] (update parts 0 assoc :inline inline))
             open (fn open [ps]
                    (let [{:keys [name i] inl :inline} (first ps)
+                         ;; (cpp-rind: [namespace.def.general]/? (C++23 /3): a namespace is inline at its first definition or never:
+                         ;; `inline namespace X {}` after `namespace X {}` is GCC's "inline namespace must be specified at initial
+                         ;; definition", at the name; cpp0x/pr79369.C)
+                         _ (when-let [old (and name inl (not (skim? p)) (main-tok? p (long i)) (get (sc/names-of (sc/decl-scope (scope p))) name))]
+                             (when (and (= :ns (:k old)) (not (:alias old)) (not (:inline-ns old)) (some? (:inline-ns-known old)))
+                               (soft-diag! p (long i) "inline namespace must be specified at initial definition")))
+                         ;; (cpp-rind: a namespace definition whose name is a namespace alias of its scope, [namespace.def]/2's
+                         ;; original namespace name: GCC's "namespace 'M' conflicts with a previous declaration", at the name;
+                         ;; parse/namespace-alias-1.C)
+                         _ (when-let [old (and name (not (skim? p)) (main-tok? p (long i)) (get (sc/names-of (sc/decl-scope (scope p))) name))]
+                             (when (and (= :ns (:k old)) (:alias old))
+                               (soft-diag! p (long i) (str "namespace '" name "' conflicts with a previous declaration"))))
                          e (ns-ent! p name inl)]
                      (in-scope p (:scope e)
                        (if (next ps)
@@ -6105,7 +7169,15 @@
             [(node p "UsingDirectiveDecl" b e {})]))
       (is? p "enum")
       (do (adv! p)
-          (let [qn (or (parse-name p :parse) (perr p "an enumeration's name")) e (last-ix p)]
+          (let [ni (ix p)
+                qn (or (parse-name p :parse) (perr p "an enumeration's name")) e (last-ix p)]
+            ;; (cpp-indep: [enum.udecl]/1, the using-enum-declarator names a non-dependent, complete enumeration: one declared by
+            ;; an opaque-enum-declaration alone is GCC's "'using enum' requires an enum-specifier" error, a dependent one its
+            ;; "'using enum' of dependent type"; cpp2a/using-enum-2.C)
+            (when (and qn (not (skim? p)) (main-tok? p ni))
+              (cond (:opaque (:ent qn)) (soft-diag! p ni "'using enum' of an enumeration declared by an opaque-enum-declaration alone: an enum-specifier is needed")
+                    (and (:q qn) (or (:tparam (:q qn)) (:dep (:q qn)))) (soft-diag! p ni "'using enum' of dependent type")
+                    :else nil))
             (expect! p ";")
             (when-let [s (ent-scope (:ent qn))] (sc/add-using! (sc/decl-scope (scope p)) s))
             [(node p "UsingEnumDecl" b e {})]))
@@ -6138,6 +7210,20 @@
           ;; "'auto' not allowed in alias declaration")
           (when (and (= :auto (:t (:type ds))) (nil? (:cn (:type ds))) (t= (tok-at p (long (:b ds))) "auto") (t= (tok-at p (inc (long (:b ds)))) ";"))
             (soft-diag! p (long (:b ds)) "'auto' not allowed in alias declaration"))
+          ;; (cpp-indep2: [dcl.fct]/2, a function type with a trailing return type has plain `auto` as its declared return type, in
+          ;; a type-id too: GCC's "invalid use of 'decltype(auto)'" for decltype(auto), "'type name' function with trailing return
+          ;; type not declared with 'auto' type specifier" for another type, at the decl-specifiers; cpp1y/auto-fn53.C, auto-fn54.C)
+          (when-let [fs (and (not (skim? p)) (main-tok? p (long (:b ds))) (fn-suffix-of ad))]
+            (let [b (ds-type ds)]
+              (cond
+                (and (:trailing fs) (map? b) (not= :auto (:t b)))
+                (soft-diag! p (long (:b ds)) (if (= :dta (:t b)) "invalid use of 'decltype(auto)'"
+                                                 "'type name' function with trailing return type not declared with 'auto' type specifier"))
+                ;; (and a function type's placeholder return type with no trailing return type, `using W = auto();`, [dcl.spec.auto.general]/?
+                ;; : GCC's "invalid use of 'auto'"; cpp0x/auto52.C)
+                (and (not (:trailing fs)) (map? b) (#{:auto :dta} (:t b)) (nil? (:cn b)))
+                (soft-diag! p (long (:b ds)) (str "invalid use of '" (if (= :dta (:t b)) "decltype(auto)" "auto") "'"))
+                :else nil)))
           (expect! p ";")
           (declare! p (cond-> {:k :type :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :target (:ent ty) :scope (ent-scope (:ent ty))}
                         (not (and tmpl (pos? (long (:n tmpl))))) (assoc :ty ty)
@@ -6156,6 +7242,55 @@
                     (when (and (< (.-year p) 2020) (= :block (sc/kind-of (scope p))) (> (count (:parts qn)) 1)
                                (let [q (:q qn)] (and (type-ent? q) (not (:tparam q)) (not (let [qs (:scope q)] (and (instance? Scope qs) (= :enum (sc/kind-of qs))))))))
                       (soft-diag! p (long (:b qn)) "using-declaration for member at non-class scope"))
+                    ;; (cpp-rind: [namespace.udecl]/1 with [basic.lookup.qual]/1, a using-declarator's nested-name-specifier whose
+                    ;; first name no lookup finds and the main file declares nowhere: GCC's "'N' has not been declared", at the name;
+                    ;; lookup/using12.C)
+                    ;; (cpp-indep: [namespace.udecl]/3, a using-declarator that names a constructor (`using A::A;`) names it of a
+                    ;; direct base class of the class being defined: GCC's "'A' is not a direct base of 'C'", at the name; a
+                    ;; dependent class's bases not judged; cpp1z/inh-ctor1.C, cpp0x/inh-ctor28.C)
+                    (let [ps (:parts qn) np (count ps) cc (class-ctx p) ce (:ent cc)]
+                      (when (and (>= np 2) ce (not (:dep ce)) (some? (:bases-order ce)) (= :class (sc/kind-of (sc/decl-scope (scope p))))
+                                 (:s (peek ps)) (= (:s (peek ps)) (:s (nth ps (- np 2)))) (nil? (:args (nth ps (- np 2))))
+                                 (not (skim? p)) (main-tok? p (long (:b qn))))
+                        (let [q (:q qn)]
+                          (when (and (type-ent? q) (:class q) (not (:tparam q)) (not (:dep q))
+                                     (not-any? (fn [[bn _]] (= bn (:s (peek ps)))) (:bases-order ce))
+                                     ;; (every base named by its class's own name: a typedef's or alias's not judged)
+                                     (when-let [^HashMap inf (sema/info ce)]
+                                       (every? (fn [b] (let [be (get-in b [:ty :ent])] (and (map? be) (:tag be) (:class be))))
+                                               (or (.get inf :bases) []))))
+                            (soft-diag! p (long (:b qn)) (str "'" (:s (peek ps)) "' is not a direct base of '" (:name cc) "'"))))))
+                    ;; (cpp-indep2: [namespace.udecl]/1 with [basic.lookup.qual]/1, a using-declarator names a member its class
+                    ;; declares: a complete class without bases, no template's, that declares no member of the name (an
+                    ;; operator-function-id's too) is GCC's "'operator()' has not been declared in 'struct A'", at the name;
+                    ;; template/using12.C)
+                    (let [ps (:parts qn) np (count ps) q (:q qn)]
+                      (when (and (= 2 np) (not (:g qn)) (nil? (:args (first ps))) (not (skim? p)) (main-tok? p (long (:b qn)))
+                                 (type-ent? q) (:class q) (:scope q) (not (:tparam q)) (not (:dep q)) (not (:tmpl q)) (not (:incomplete q))
+                                 (some? (:bases-order q)) (zero? (.size ^ArrayList (:bases-order q))))
+                        (let [nm (cond (:s lp) (:s lp) (:op lp) (str "operator" (str/trim (str (:op lp)))) :else nil)]
+                          (when (and nm (not (:conv lp)) (not= nm (:s (first ps))) (not (#{"=" "==" "<=>" "!="} (some-> (:op lp) str str/trim)))
+                                     (nil? (sc/find-in (:scope q) nm false)) (nil? (sc/find-in (:scope q) nm true))
+                                     (not (and (:op lp) (some #(str/starts-with? (str %) "operator") (keys (sc/names-of (:scope q)))))))
+                            (soft-diag! p (long (or (:i lp) (:b qn))) (str "'" nm "' has not been declared in '" (or (:name q) (:s (first ps))) "'"))))))
+                    (let [f (first (:parts qn))]
+                      ;; (cpp-rind: [namespace.udecl]/1, a using-declarator has a nested-name-specifier: `using i;` is GCC's
+                      ;; "expected nested-name-specifier before 'i'"; lookup/using15.C)
+                      (when (and (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s f) (:i f) (main-tok? p (long (:i f))))
+                        (soft-diag! p (long (:i f)) (str "expected nested-name-specifier before '" (:s f) "'")))
+                      ;; (cpp-rind: [namespace.udecl]/3, a using-declarator names no namespace: GCC's "'gnu::gcc' is a namespace",
+                      ;; at the name; lookup/using6.C)
+                      (when (and (not (skim? p)) (= :ns (:k (:ent qn))) (:i (peek (:parts qn))) (main-tok? p (long (:i (peek (:parts qn))))))
+                        (soft-diag! p (long (:i (peek (:parts qn)))) (str "using-declaration may not name namespace '" (name-str p qn) "'")))
+                      ;; (cpp-rind: `using ::B;` naming nothing the global namespace declares: GCC's "'::B' has not been declared";
+                      ;; parse/using1.C)
+                      (when (and *full-headers* (not (skim? p)) (= 1 (count (:parts qn))) (:g qn) (:s f) (:i f) (main-tok? p (long (:i f)))
+                                 (nil? (:ent qn)) (nil? (sc/find-in (stv p ROOT) (:s f))) (not (declared-in-main? p (:s f))))
+                        (soft-diag! p (long (:i f)) (str "'::" (:s f) "' has not been declared")))
+                      (when (and *full-headers* (not (skim? p)) (> (count (:parts qn)) 1) (not (:g qn)) (:s f) (not (:args f)) (:i f)
+                                 (main-tok? p (long (:i f))) (nil? (lookup (scope p) (:s f))) (not (declared-in-main? p (:s f)))
+                                 (not= "std" (:s f)))
+                        (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared"))))
                     (let [dep (or (nil? (:q qn)) (:tparam (:q qn))
                                   (some #(some (fn [a] (dependent-arg? p a)) (:args %)) (butlast (:parts qn))))
                           ;; (round 54, fifth pass: [basic.scope.scope]/4 with [namespace.udecl]/1, a using-declarator's
@@ -6226,7 +7361,11 @@
       (do (skip-balanced! p) (expect! p ";") [])
       (do (expect! p "(")
           (let [c (with-gt p true (parse-assign-expr p))
-                m (when (accept! p ",") (with-gt p true (parse-assign-expr p)))]
+                m (when (accept! p ",") (with-gt p true (parse-assign-expr p)))
+                ;; (cpp-rind: a static_assert-declaration without its message is C++17's: before it GCC's pedwarn "'static_assert'
+                ;; without a message only available with '-std=c++17'", an error under -pedantic-errors; cpp0x/static_assert8.C)
+                _ (when (and (nil? m) (is? p ")") (< (.-year p) 2017) (main-tok? p b))
+                    (pedantic-diag! p b "'static_assert' without a message only available with '-std=c++17'"))]
             (expect! p ")")
             (let [e (last-ix p)]
               (expect! p ";")
@@ -6347,7 +7486,22 @@
             (let [ms (decl-seq p :top)] (expect! p "}") [(node p "ExportDecl" b (last-ix p) {:inner ms})])
             (let [ns (parse-external-decl p :top)] [(node p "ExportDecl" b (if (seq ns) (ne (peek ns)) (last-ix p)) {:inner ns})])))
       (and (#{:top :member} ctx) (or (t= t "asm") (t= t "__asm__") (t= t "__asm")))
-      (do (adv! p) (skip-balanced! p) (let [e (last-ix p)] (expect! p ";") [(node p "FileScopeAsmDecl" b e {})]))
+      (do (adv! p)
+          ;; (cpp-rind: [dcl.asm]/1, an asm-declaration outside a function takes no asm-qualifier: GCC's "'const' is not an
+          ;; 'asm' qualifier", "'asm' qualifier outside of function body" (inline, goto), "expected '(' before 'restrict'",
+          ;; volatile a warning; the declaration read on; asm-qual-3.C had crashed in skip-balanced!)
+          (loop []
+            (let [q (ts (cur p))]
+              (when (#{"volatile" "__volatile__" "__volatile" "const" "inline" "__inline" "__inline__" "goto" "restrict" "__restrict"} q)
+                (when (and (not (skim? p)) (main-tok? p (ix p)))
+                  (case q
+                    ("volatile" "__volatile__" "__volatile") nil
+                    "const" (soft-diag! p (ix p) "'const' is not an 'asm' qualifier")
+                    ("restrict" "__restrict") (soft-diag! p (ix p) (str "expected '(' before '" q "'"))
+                    (soft-diag! p (ix p) "'asm' qualifier outside of function body")))
+                (adv! p) (recur))))
+          (if (is? p "(") (skip-balanced! p) (perr p "an asm declaration's ("))
+          (let [e (last-ix p)] (expect! p ";") [(node p "FileScopeAsmDecl" b e {})]))
       :else (parse-simple-decl p ctx))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -6377,10 +7531,19 @@
   DecompositionDecl, the names declared."
   [^P p]
   (let [ds (parse-decl-specs p :block)
+        ;; (cpp-rind: [stmt.pre]/? (C++23 /5): a condition's decl-specifier-seq has no storage class but constexpr: GCC's
+        ;; "'static' invalid in condition", at the specifier; cpp0x/constexpr-condition.C)
+        _ (when (and (:storage ds) (:b ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) (str "'" (:storage ds) "' invalid in condition")))
         base (or (ds-type ds) (perr p "a condition's type"))]
     (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
       ;; a structured binding declaration as a condition (C++26's P0963, an extension before)
-      (do ;; (cpp-read, 2026-11-22: GCC's pedwarn before C++26, "structured bindings in conditions only available with
+      (do ;; (cpp-def: [dcl.struct.bind]/1, a structured binding declaration's decl-specifiers are auto, cv-qualifiers, static and
+          ;; thread_local (C++26's constexpr ones, P2686R5, GCC 15 has not): GCC's "structured binding declaration cannot be
+          ;; 'constexpr'", cpp26/decomp9.C's condition)
+          (when (and (:constexpr ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) "structured binding declaration cannot be 'constexpr'"))
+          ;; (cpp-read, 2026-11-22: GCC's pedwarn before C++26, "structured bindings in conditions only available with
           ;; -std=c++2c or -std=gnu++2c", at the [)
           (when (and (< (.-year p) 2026) (not (skim? p)) (main-tok? p (ix p)))
             (pedantic-diag! p (ix p) "structured bindings in conditions only available with -std=c++2c or -std=gnu++2c"))
@@ -6393,6 +7556,10 @@
         _ (when-not qn (perr p "a condition's declarator"))
         nm (name-plain qn)
         ty (build-type base d)
+        ;; (cpp-indep: [stmt.pre]/? (C++23 /5), a condition's declarator specifies no function and no array: GCC's "condition
+        ;; declares a function", "condition declares an array", at the declarator; cpp0x/cond1.C)
+        _ (when (and qn (#{:f :a} (:t ty)) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (or (:i (peek (:parts qn))) (:b ds))) (if (= :f (:t ty)) "condition declares a function" "condition declares an array")))
         [x init] (cond (accept! p "=") [(parse-init-clause p) "c"]
                        (is? p "{") [(parse-braced-init p) "list"]
                        :else (perr p "a condition's initializer"))
@@ -6434,7 +7601,11 @@
         _ (op-param! p d)
         qn (:name (last (name-chain d)))
         nm (name-plain qn)
-        ty (build-type base d)]
+        ty (build-type base d)
+        ;; (cpp-indep: [except.handle]/1, an exception-declaration's type is no rvalue reference: GCC's "cannot declare catch
+        ;; parameter to be of rvalue reference type 'int&&'", at the declaration; cpp0x/catch1.C)
+        _ (when (and (= :rr (:t ty)) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) "cannot declare catch parameter to be of rvalue reference type"))]
     (when nm (declare! p {:k :var :name nm}))
     [ty nm (if qn (long (:i (peek (:parts qn)))) (ix p)) (:b ds)]))
 
@@ -6520,7 +7691,7 @@
   the code generator's mode, G4)."
   [^P p b]
   (with-scope p :block nil
-    (let [pl (when (is? p "(") (adv! p) (parse-param-list p))
+    (let [pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil] (parse-param-list p)))
           _ (when pl (declare-params! p (:names pl) (:types pl)))
           _ (expect! p "{")
           reqs (loop [out []]
@@ -6600,8 +7771,30 @@
                       (and (or (is? p "&") (is? p "=")) (or (is-at? p 1 "]") (is-at? p 1 ","))) (do (adv! p) (recur inits))
                       ;; the init-captures' initializers (the converter finds each by its offset; clang lists one for every
                       ;; capture, a simple one's the variable it names, which the forms do not need)
-                      (is? p "this") (do (adv! p) (recur inits))
-                      (and (is? p "*") (is-at? p 1 "this")) (do (adv! p) (adv! p) (recur inits))
+                      (is? p "this") (do ;; (cpp-rind: `this` captured explicitly beside a `=` capture-default is C++20's (P0409):
+                                         ;; before it GCC's pedwarn "explicit by-copy capture of 'this' with by-copy capture default only
+                                         ;; available with '-std=c++20'", an error under -pedantic-errors; cpp1z/lambda-this1.C)
+                                         (when (and (t= (tok-at p (inc b)) "=") (< (.-year p) 2020) (not (skim? p)) (main-tok? p (ix p)))
+                                           (pedantic-diag! p (ix p) "explicit by-copy capture of 'this' with by-copy capture default only available with '-std=c++20'"))
+                                         ;; (cpp-rind: [expr.prim.lambda.capture]/2, `this` captured once: GCC's "already captured 'this'
+                                         ;; in lambda expression")
+                                         (when (and (some #(and (t= (tok-at p %) "this") (or (t= (tok-at p (dec %)) ",") (t= (tok-at p (dec %)) "[")
+                                                                                               (and (t= (tok-at p (dec %)) "*") (or (t= (tok-at p (- % 2)) ",") (t= (tok-at p (- % 2)) "["))))
+                                                         (or (t= (tok-at p (inc %)) ",") (t= (tok-at p (inc %)) "]")))
+                                                   (range (inc b) (ix p))) (not (skim? p)) (main-tok? p (ix p)))
+                                           (soft-diag! p (ix p) "already captured 'this' in lambda expression"))
+                                         (adv! p) (recur inits))
+                      (and (is? p "*") (is-at? p 1 "this")) (do ;; (cpp-rind: a *this capture is C++17's: before it GCC's pedwarn
+                                                                    ;; "'*this' capture only available with '-std=c++17'", an error under
+                                                                    ;; -pedantic-errors; cpp1z/lambda-this1.C)
+                                                                    (when (and (< (.-year p) 2017) (not (skim? p)) (main-tok? p (ix p)))
+                                                                      (pedantic-diag! p (ix p) "'*this' capture only available with '-std=c++17'"))
+                                                                    (when (and (some #(and (t= (tok-at p %) "this") (or (t= (tok-at p (dec %)) ",") (t= (tok-at p (dec %)) "[")
+                                                                                               (and (t= (tok-at p (dec %)) "*") (or (t= (tok-at p (- % 2)) ",") (t= (tok-at p (- % 2)) "["))))
+                                                         (or (t= (tok-at p (inc %)) ",") (t= (tok-at p (inc %)) "]")))
+                                                   (range (inc b) (ix p))) (not (skim? p)) (main-tok? p (ix p)))
+                                                                      (soft-diag! p (ix p) "already captured 'this' in lambda expression"))
+                                                                    (adv! p) (adv! p) (recur inits))
                       :else
                       (let [amp (accept! p "&")]
                           (accept! p "...")
@@ -6609,13 +7802,47 @@
                             (let [nm (ts (cur p)) i (ix p)
                                   outer (lookup (scope p) nm)]
                               (adv! p) (accept! p "...")
+                              ;; (cpp-rind: [expr.prim.lambda.capture]/5, a simple-capture names a variable: a function's name (a member
+                              ;; function's) is GCC's "capture of non-variable 'S::b'", at the name; cpp0x/lambda/lambda-ice29.C)
+                              ;; (cpp-indep2: and a type's name, `[T]{}`; and a variable of namespace scope, whose storage duration is
+                              ;; static: GCC's "capture of variable 'i' with non-automatic storage duration", a pedwarn, at the name;
+                              ;; cpp0x/lambda/lambda-capture-neg.C)
+                              (when (and (#{:fn :type} (:k outer)) (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (not (skim? p)) (main-tok? p i))
+                                (soft-diag! p i (str "capture of non-variable '" nm "'")))
+                              (when (and (= :var (:k outer)) (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (not (skim? p)) (main-tok? p i)
+                                         (some-> (loop [s (scope p)] (when s (if (sc/find-in s nm) s (recur (sc/parent-of s))))) sc/kind-of (= :ns)))
+                                (pedantic-diag! p i (str "capture of variable '" nm "' with non-automatic storage duration")))
                               ;; a capture by copy copies its variable (its class's copy constructor)
                               (when (and (not amp) (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (:ty outer))
                                 (when-let [[c e] (sema/vclass {:kind "DeclRefExpr" :_ent outer} (.-year p))] (use-member! p e :copy)))
+                              ;; (cpp-indep: [expr.prim.lambda.capture]/5, an identifier captured once: GCC's "already captured 'x'
+                              ;; in lambda expression", at the second; cpp1y/lambda-init19.C)
+                              ;; (`_`, C++26's name-independent declaration, P2169, aside: cpp26/name-independent-decl2.C)
+                              (when (and (not= nm "_") (get (sc/names-of (scope p)) nm) (not (skim? p)) (main-tok? p i))
+                                (soft-diag! p i (str "already captured '" nm "' in lambda expression")))
+                              ;; (cpp-indep2: [expr.prim.lambda.capture]/2, beside a capture-default = a simple-capture is `& x`, and
+                              ;; beside & it is no `& x`: GCC's pedwarn "explicit by-copy capture of 'x' redundant with by-copy
+                              ;; capture default" ("by-reference"), at the name; cpp0x/lambda/lambda-108829.C)
+                              (when (and (not (is? p "=")) (not (is? p "{")) (not (is? p "(")) (not (skim? p)) (main-tok? p i)
+                                         (t= (tok-at p (+ b 2)) ",") (if amp (t= (tok-at p (inc b)) "&") (t= (tok-at p (inc b)) "=")))
+                                (pedantic-diag! p i (str "explicit by-" (if amp "reference" "copy") " capture of '" nm "' redundant with by-"
+                                                         (if amp "reference" "copy") " capture default")))
                               (sc/declare! (scope p) (cond-> {:k :var :name nm} (:ty outer) (assoc :ty (:ty outer))))
                               (cond (accept! p "=") (recur (conj inits (parse-init-clause p)))
-                                    (is? p "{") (recur (conj inits (parse-braced-init p)))
-                                    (is? p "(") (let [as (paren-args p)] (recur (into inits (take 1 as))))
+                                    (is? p "{") (let [bi (ix p) x (parse-braced-init p)
+                                                      ;; (cpp-rind: [expr.prim.lambda.capture]/6 with [dcl.type.auto.deduct]/4, an init-capture's
+                                                      ;; direct-list-initialization deduces from one element: GCC's "initializer for lambda
+                                                      ;; capture 'n' does not have one element"; cpp1y/lambda-ice1.C)
+                                                      els (when (map? x) (filter map? (:inner x)))]
+                                                  (when (and (map? x) (= "InitListExpr" (:kind x)) (not= 1 (count els)) (not (skim? p)) (main-tok? p bi))
+                                                    (soft-diag! p bi (str "initializer for lambda capture '" nm "' does not have one element")))
+                                                  (recur (conj inits x)))
+                                    (is? p "(") (let [pi (ix p) as (paren-args p)]
+                                                  ;; (cpp-rind: [expr.prim.lambda.capture]/6, an init-capture's initializer is no empty
+                                                  ;; parenthesized list: GCC's "empty initializer for lambda init-capture"; cpp1y/lambda-init7.C)
+                                                  (when (and (empty? as) (not (skim? p)) (main-tok? p pi))
+                                                    (soft-diag! p pi "empty initializer for lambda init-capture"))
+                                                  (recur (into inits (take 1 as))))
                                     :else (recur inits)))
                             (perr p "a capture")))))
             ;; (an explicit template-parameter-list's nodes: CP290 (a)'s generic lambda keeps them as data)
@@ -6633,7 +7860,30 @@
             lam-unavail (when (and (is? p "[") (is-at? p 1 "["))
                           (let [a0 (ix p)] (attr-nodes p) (some #(contains? #{"unavailable" "__unavailable__"} (ts (tok-at p %))) (range a0 (ix p)))))
             pi0 (ix p)
-            pl (when (is? p "(") (adv! p) (parse-param-list p))
+            pl (when (is? p "(") (adv! p) (binding [*param-depth* 0 *auto-params* nil] (parse-param-list p)))
+            ;; (cpp-indep2: [dcl.fct]/2 for a lambda's parameters too: a parameter of type cv void other than a lone unnamed
+            ;; `(void)`, GCC's "invalid use of type 'void' in parameter declaration" (cv-qualified: "invalid use of cv-qualified type
+            ;; 'const void' in parameter declaration"), at it; cpp0x/lambda/lambda-ice5.C, lambda-ice21.C)
+            _ (when (and pl (not (skim? p)))
+                (let [pns (vec (:params pl))
+                      q (fn [pn] (str/trim (str (get-in pn [:type :qualType]))))
+                      void? (fn [pn] (re-matches #"(?:(?:const|volatile)\s+)*void(?:\s+(?:const|volatile))*" (q pn)))
+                      cv? (fn [pn] (re-find #"\b(?:const|volatile)\b" (q pn)))]
+                  (when-let [pn (first (filter #(and (void? %) (:_b %) (main-tok? p (long (:_b %))) (or (> (count pns) 1) (:name %) (cv? %))) pns))]
+                    (soft-diag! p (long (:_b pn)) (if (cv? pn) (str "invalid use of cv-qualified type '" (q pn) "' in parameter declaration")
+                                                      "invalid use of type 'void' in parameter declaration")))
+                  ;; (a lone cv void, `(const void)`, which the list takes as `(void)`: its tokens)
+                  (when (and (or (empty? pns) (and (= 1 (count pns)) (void? (first pns)) (not (:name (first pns)))))
+                             (t= (tok-at p pi0) "(") (main-tok? p (inc pi0)))
+                    (let [ws (loop [j (inc pi0) out []] (let [^T t (tok-at p j)] (if (or (t= t ")") (identical? :eof (.-k t)) (> (count out) 4)) out (recur (inc j) (conj out (.-s t))))))]
+                      (when (and (some #{"void"} ws) (some #{"const" "volatile"} ws) (every? #{"void" "const" "volatile"} ws))
+                        (soft-diag! p (inc pi0) (str "invalid use of cv-qualified type '" (str/join " " ws) "' in parameter declaration")))))))
+            ;; (cpp-rind: [expr.prim.lambda.capture]/? (C++23 /5): a parameter of the lambda named as one of its captures: GCC's
+            ;; "lambda parameter 'x' previously declared as a capture", at the parameter; cpp0x/lambda/lambda-shadow3.C)
+            _ (when (and pl (not (skim? p)))
+                (doseq [[nm pn] (map vector (:names pl) (:params pl))
+                        :when (and nm (get (sc/names-of (scope p)) nm) (:_b pn) (main-tok? p (long (:_b pn))))]
+                  (soft-diag! p (long (:_b pn)) (str "lambda parameter '" nm "' previously declared as a capture"))))
             ;; (round 54, fourth pass: C++11's [expr.prim.lambda]/5, a lambda's parameter-declaration-clause has no default argument
             ;; (allowed from C++14, CWG 974): GCC's pedwarn "default argument specified for lambda parameter", at the '=')
             _ (when (and pl (= 2011 (.-year p)))
@@ -6697,7 +7947,11 @@
                 (soft-diag! p trq-at "constraints on a non-templated function"))
             body (let [old (stv p RET)]
                    (st! p RET nil)
-                   (try (with-scope p :fparams nil (declare-params! p (:names pl) (:types pl)) (binding [*in-if* false] (parse-compound-stmt p)))
+                   ;; (cpp-indep2: a lambda outside every function and class, a namespace-scope variable's initializer's, has no
+                   ;; `this` to capture, [expr.prim.this]/3: *this-ok* :top-lambda, GCC's "invalid use of 'this' at top level";
+                   ;; cpp0x/lambda/lambda-this20.C)
+                   (try (binding [*this-ok* (if (and (nil? *this-ok*) (nil? *fn-start*) (empty? (stv p CLS))) :top-lambda *this-ok*)]
+                          (with-scope p :fparams nil (declare-params! p (:names pl) (:types pl)) (binding [*in-if* false] (parse-compound-stmt p))))
                         (finally (st! p RET old))))
             op-type {:t :f :ps (:types pl) :va (:va pl) :r (or ret {:t :auto}) :tr (boolean ret)}
             rec (cond-> {:kind "CXXRecordDecl" :isImplicit true
@@ -6929,6 +8183,8 @@
       (and str? (= prefix "") *exec-latin1* (some (fn [[k v]] (and (not= k :unit) (> (long v) 0xFF))) cs))
       "converting to execution character set: Invalid or incomplete multibyte or wide character"
       str? nil
+      ;; (cpp-rind: [lex.ccon]/1, a character literal holds at least one c-char: cpplib's "empty character constant"; ext/utf16-4.C)
+      (empty? cs) "empty character constant"
       (and (> (count cs) 1) (or (and (#{"u" "U"} prefix) (>= year 2011)) (and (= prefix "u8") (>= year 2017)) (and (= prefix "L") (>= year 2023))))
       "multi-character literal cannot have an encoding prefix"
       (and (= 1 (count cs)) (not= :unit (ffirst cs))

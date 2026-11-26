@@ -62,6 +62,11 @@
                :when (and (:directive d) (= (:file d) path) (:off d))]
            (line-of starts (long (:off d)))))))
 
+(def ^:dynamic *spellings*
+  "queue 577: true keeps the tokens and their spellings in parse-file's result (:toks, :spell), for the front end's checks of
+  a diagnostic GCC gives at a macro's definition line."
+  false)
+
 (defn parse-file
   "The main file at `path`, named `main` as the oracle names it, read at the standard `std` with the compiler options
   `args` (-D, -U, -I, ...): {:nodes [clang's nodes of the main file's declarations] :executed #{line ...} :declines n
@@ -94,19 +99,31 @@
                     [(subs path 0 (- (count path) (count main) 1)) main]
                     ["." path])
         h (cond-> h *gnu-floats* (update-in [:predefined (:std fc)] #(str % (ext-float-lines (host-dir) (:std fc) (str %)))))
+        ;; (cpp-read, 2026-11-24: the own front end, GCC's dialect, answers __has_cpp_attribute as g++ 15 does, the target's g++
+        ;; column of has.tsv: carries_dependency 0 (g++ ignores it, P3475), no clang:: attribute; cpp0x/attr-carries_dependency1.C's
+        ;; #error under `#if __has_cpp_attribute(carries_dependency)`)
+        h (cond-> h *gnu-floats* (update :has merge (into {} (filter (fn [[[op _] _]] (= op "__has_cpp_attribute"))
+                                                                    (:has (host/load-host (host-dir) "gxx"))))))
         cfg (host/config h fc base)
         t0 (System/nanoTime)
-        r (pp/preprocess cfg nm)
+        ;; (queue 577: the tokens' spellings kept, *spellings*, arbace.repr.c.lex/*spelling*)
+        spl (when *spellings* (java.util.IdentityHashMap.))
+        r (binding [arbace.repr.c.lex/*spelling* spl] (pp/preprocess cfg nm))
         t1 (System/nanoTime)
         src (latin1 path)
         year (host/std-year (:std fc))
         gnu (str/starts-with? (:std fc) "gnu")
         ;; (h-cpp-read: -fno-gnu-keywords takes typeof out of the keywords, as GCC's D_EXT keywords; ext/no-gnu-keywords-1.C)
-        toks (binding [lit/*char8* char8]
+        spa (when spl (atom nil))
+        toks (binding [lit/*char8* char8 arbace.repr.c.lex/*spelling* spl ps/*spellings* spa]
                ;; queue 540: a failed #include is clang's fatal error: the token after its line, which the port's stream (cc's)
                ;; keeps, is not read (gxx-modules' target-aarch64-1_a.C, `#include <arm_sve.h>` then `export module M;`)
                (ps/tokens (cond-> (:tokens r) (:closed-token r) pop) nm main src (cond-> (ps/keywords year (and gnu (not (some #{"-fno-gnu-keywords"} args))) concepts)
                                                     char8 (conj "char8_t")
+                                                    ;; (cpp-rind: -fno-char8_t from C++20, the last of the two, takes char8_t out of the
+                                                    ;; keywords, GCC's D_CXX_CHAR8_T; cpp2a/char8_t2.C)
+                                                    (and (>= (long year) 2020) (= "-fno-char8_t" (last (filter #{"-fchar8_t" "-fno-char8_t"} args))))
+                                                    (disj "char8_t")
                                                     coroutines (into #{"co_await" "co_return" "co_yield"})
                                                     *gnu-floats* (into #{"_Float32" "_Float64" "_Float128" "_Float32x" "_Float64x"}))))
         _ (when (System/getenv "REPR_CPP_TIME") (binding [*out* *err*] (println (format "repr/cpp native: tokens %.2f s" (/ (- (System/nanoTime) t1) 1e9)))))
@@ -119,6 +136,8 @@
         (println (format "repr/cpp native: %s: %d tokens, preprocess %.2f s, parse %.2f s, skim cache %s" main (alength ^objects toks)
                          (/ (- t1 t0) 1e9) (/ (- t2 t1) 1e9) (or (:skim-cache u) "-")))))
     (assoc u :executed (executed-lines (:layer r) nm src) :pp-errors (:errors r)
+           ;; (queue 577: with *spellings*, the parser's tokens and their spelling offsets in the main file, -1 where none)
+           :toks (when spa toks) :spell (when spa @spa)
            ;; (cpp-gnu, 2026-11-22: the main file's #pragma directives, their offsets and texts, for the front end's pragma rules,
            ;; arbace.repr.cpp.diag/pragmas)
            :pragmas (vec (for [d (:layer r) :when (and (= "pragma" (:directive d)) (= (:file d) nm) (:off d))]

@@ -1,0 +1,311 @@
+;; Copyright 2018 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+;; This file provides the generic implementation of Sum and MAC. Other files
+;; might provide optimized assembly implementations of some of this code.
+
+(in-ns 'go.arbace.pytls.internal.poly1305) ^{:go/comments [[1 1 "// Copyright 2018 The Go Authors. All rights reserved."] [2 1 "// Use of this source code is governed by a BSD-style"] [3 1 "// license that can be found in the LICENSE file."] [5 1 "// This file provides the generic implementation of Sum and MAC. Other files"] [6 1 "// might provide optimized assembly implementations of some of this code."] [15 1 "// Poly1305 [RFC 7539] is a relatively simple algorithm: the authentication tag"] [16 1 "// for a 64 bytes message is approximately"] [17 1 "//"] [18 1 "//     s + m[0:16] * r⁴ + m[16:32] * r³ + m[32:48] * r² + m[48:64] * r  mod  2¹³⁰ - 5"] [19 1 "//"] [20 1 "// for some secret r and s. It can be computed sequentially like"] [21 1 "//"] [22 1 "//     for len(msg) > 0:"] [23 1 "//         h += read(msg, 16)"] [24 1 "//         h *= r"] [25 1 "//         h %= 2¹³⁰ - 5"] [26 1 "//     return h + s"] [27 1 "//"] [28 1 "// All the complexity is about doing performant constant-time math on numbers"] [29 1 "// larger than any available numeric type."] [43 1 "// macState holds numbers in saturated 64-bit little-endian limbs. That is,"] [44 1 "// the value of [x0, x1, x2] is x[0] + x[1] * 2⁶⁴ + x[2] * 2¹²⁸."] [46 2 "// h is the main accumulator. It is to be interpreted modulo 2¹³⁰ - 5, but"] [47 2 "// can grow larger during and after rounds. It must, however, remain below"] [48 2 "// 2 * (2¹³⁰ - 5)."] [50 2 "// r and s are the private key components."] [62 1 "// Write splits the incoming message into TagSize chunks, and passes them to"] [63 1 "// update. It buffers incomplete chunks."] [86 1 "// Sum flushes the last incomplete chunk from the buffer, if any, and generates"] [87 1 "// the MAC output. It does not modify its state, in order to allow for multiple"] [88 1 "// calls to Sum, even if no Write is allowed after Sum."] [97 1 "// [rMask0, rMask1] is the specified Poly1305 clamping mask in little-endian. It"] [98 1 "// clears some bits of the secret coefficient to make it possible to implement"] [99 1 "// multiplication more efficiently."] [105 1 "// initialize loads the 256-bit key into the two 128-bit secret values r and s."] [113 1 "// uint128 holds a 128-bit number as two 64-bit limbs, for use with the"] [114 1 "// bits.Mul64 and bits.Add64 intrinsics."] [139 1 "// updateGeneric absorbs msg into the state.h accumulator. For each chunk m of"] [140 1 "// 128 bits of message, it computes"] [141 1 "//"] [142 1 "//\th₊ = (h + m) * r  mod  2¹³⁰ - 5"] [143 1 "//"] [144 1 "// If the msg length is not a multiple of TagSize, it assumes the last"] [145 1 "// incomplete chunk is the final one."] [153 3 "// For the first step, h + m, we use a chain of bits.Add64 intrinsics."] [154 3 "// The resulting value of h might exceed 2¹³⁰ - 5, but will be partially"] [155 3 "// reduced at the end of the multiplication below."] [156 3 "//"] [157 3 "// The spec requires us to set a bit just above the message size, not to"] [158 3 "// hide leading zeroes. For full chunks, that's 1 << 128, so we can just"] [159 3 "// add 1 to the most significant (2¹²⁸) limb, h2."] [178 3 "// Multiplication of big number limbs is similar to elementary school"] [179 3 "// columnar multiplication. Instead of digits, there are 64-bit limbs."] [180 3 "//"] [181 3 "// We are multiplying a 3 limbs number, h, by a 2 limbs number, r."] [182 3 "//"] [183 3 "//                        h2    h1    h0  x"] [184 3 "//                              r1    r0  ="] [185 3 "//                       ----------------"] [186 3 "//                      h2r0  h1r0  h0r0     <-- individual 128-bit products"] [187 3 "//            +   h2r1  h1r1  h0r1"] [188 3 "//               ------------------------"] [189 3 "//                 m3    m2    m1    m0      <-- result in 128-bit overlapping limbs"] [190 3 "//               ------------------------"] [191 3 "//         m3.hi m2.hi m1.hi m0.hi           <-- carry propagation"] [192 3 "//     +         m3.lo m2.lo m1.lo m0.lo"] [193 3 "//        -------------------------------"] [194 3 "//           t4    t3    t2    t1    t0      <-- final result in 64-bit limbs"] [195 3 "//"] [196 3 "// The main difference from pen-and-paper multiplication is that we do"] [197 3 "// carry propagation in a separate step, as if we wrote two digit sums"] [198 3 "// at first (the 128-bit limbs), and then carried the tens all at once."] [207 3 "// Since h2 is known to be at most 7 (5 + 1 + 1), and r0 and r1 have their"] [208 3 "// top 4 bits cleared by rMask{0,1}, we know that their product is not going"] [209 3 "// to overflow 64 bits, so we can ignore the high part of the products."] [210 3 "//"] [211 3 "// This also means that the product doesn't have a fifth limb (t4)."] [220 28 "// These two additions don't overflow thanks again"] [221 28 "// to the 4 masked bits at the top of r0 and r1."] [229 3 "// Now we have the result as 4 64-bit limbs, and we need to reduce it"] [230 3 "// modulo 2¹³⁰ - 5. The special shape of this Crandall prime lets us do"] [231 3 "// a cheap partial reduction according to the reduction identity"] [232 3 "//"] [233 3 "//     c * 2¹³⁰ + n  =  c * 5 + n  mod  2¹³⁰ - 5"] [234 3 "//"] [235 3 "// because 2¹³⁰ = 5 mod 2¹³⁰ - 5. Partial reduction since the result is"] [236 3 "// likely to be larger than 2¹³⁰ - 5, but still small enough to fit the"] [237 3 "// assumptions we make about h in the rest of the code."] [238 3 "//"] [239 3 "// See also https://speakerdeck.com/gtank/engineering-prime-numbers?slide=23"] [241 3 "// We split the final result at the 2¹³⁰ mark into h and cc, the carry."] [242 3 "// Note that the carry bits are effectively shifted left by 2, in other"] [243 3 "// words, cc = c * 4 for the c in the reduction identity."] [247 3 "// To add c * 5 to h, we first add cc = c * 4, and then add (cc >> 2) = c."] [259 3 "// h2 is at most 3 + 1 + 1 = 5, making the whole of h at most"] [260 3 "//"] [261 3 "//     5 * 2¹²⁸ + (2¹²⁸ - 1) = 6 * 2¹²⁸ - 1"] [272 1 "// select64 returns x if v == 1 and y if v == 0, in constant time."] [275 1 "// [p0, p1, p2] is 2¹³⁰ - 5 in little endian order."] [282 1 "// finalize completes the modular reduction of h and computes"] [283 1 "//"] [284 1 "//\tout = h + s  mod  2¹²⁸"] [288 2 "// After the partial reduction in updateGeneric, h might be more than"] [289 2 "// 2¹³⁰ - 5, but will be less than 2 * (2¹³⁰ - 5). To complete the reduction"] [290 2 "// in constant time, we compute t = h - (2¹³⁰ - 5), and select h as the"] [291 2 "// result if the subtraction underflows, and t otherwise."] [297 2 "// h = h if h < p else h - p"] [301 2 "// Finally, we compute the last Poly1305 step"] [302 2 "//"] [303 2 "//     tag = h + s  mod  2¹²⁸"] [304 2 "//"] [305 2 "// by just doing a wide addition with the 128 low bits of h and discarding"] [306 2 "// the overflow."]] :go/pos {:name [8 9] :package [8 1]} :go/semis [[76 37]]} (go/file "sum_generic.go" :imports [
+
+
+    ^{:go/apos {1 [11 2]} :go/pos {:lparen [10 8] :rparen [13 1] :tok-pos [10 1]}} [binary "encoding/binary"]
+    ^{:go/apos {1 [12 2]}} [bits "math/bits"]])
+
+
+;; Poly1305 [RFC 7539] is a relatively simple algorithm: the authentication tag
+;; for a 64 bytes message is approximately
+;;
+;;     s + m[0:16] * r⁴ + m[16:32] * r³ + m[32:48] * r² + m[48:64] * r  mod  2¹³⁰ - 5
+;;
+;; for some secret r and s. It can be computed sequentially like
+;;
+;;     for len(msg) > 0:
+;;         h += read(msg, 16)
+;;         h *= r
+;;         h %= 2¹³⁰ - 5
+;;     return h + s
+;;
+;; All the complexity is about doing performant constant-time math on numbers
+;; larger than any available numeric type.
+
+^{:go/pos {:func [31 1] :lbrace [31 64] :rbrace [35 1]}} (go/func ^{:go/pos {:name-pos [31 6]}} sumGeneric ^{:go/pos {:closing [31 62] :opening [31 16]}} [^{:tag ^{:go/pos {:star [31 21]}} (* ^{:go/pos {:lbrack [31 22]}} (array ^{:go/pos {:name-pos [31 23]}} TagSize ^{:go/pos {:name-pos [31 31]}} byte)) :go/pos {:name-pos [31 17]}} out ^{:tag ^{:go/pos {:lbrack [31 41]}} (slice ^{:go/pos {:name-pos [31 43]}} byte) :go/pos {:name-pos [31 37]}} msg ^{:tag ^{:go/pos {:star [31 53]}} (* ^{:go/apos {1 [31 55]} :go/pos {:lbrack [31 54]}} (array 32 ^{:go/pos {:name-pos [31 58]}} byte)) :go/pos {:name-pos [31 49]}} key]
+  (let [^{:go/pos {:name-pos [32 2] :tok-pos [32 4]}} h ^{:go/pos {:lparen [32 20] :rparen [32 24]}} (^{:go/pos {:name-pos [32 7]}} newMACGeneric ^{:go/pos {:name-pos [32 21]}} key)]
+    ^{:go/pos {:dot [33 3] :lparen [33 9] :name-pos [33 4] :rparen [33 13]}} (.Write ^{:go/pos {:name-pos [33 2]}} h ^{:go/pos {:name-pos [33 10]}} msg)
+    ^{:go/pos {:dot [34 3] :lparen [34 7] :name-pos [34 4] :rparen [34 11]}} (.Sum ^{:go/pos {:name-pos [34 2]}} h ^{:go/pos {:name-pos [34 8]}} out)))
+
+
+^{:go/pos {:func [37 1] :lbrace [37 46] :rbrace [41 1] :return [40 2]}} (go/func ^{:go/pos {:name-pos [37 6]}} newMACGeneric ^{:tag ^{:go/pos {:name-pos [37 35]}} macGeneric :go/pos {:closing [37 33] :opening [37 19]}} [^{:tag ^{:go/pos {:star [37 24]}} (* ^{:go/apos {1 [37 26]} :go/pos {:lbrack [37 25]}} (array 32 ^{:go/pos {:name-pos [37 29]}} byte)) :go/pos {:name-pos [37 20]}} key]
+  (let [^{:go/pos {:name-pos [38 2] :tok-pos [38 4]}} m ^{:go/pos {:lbrace [38 17] :rbrace [38 18]}} (lit ^{:go/pos {:name-pos [38 7]}} macGeneric)]
+    ^{:go/pos {:lparen [39 12] :rparen [39 29]}} (^{:go/pos {:name-pos [39 2]}} initialize ^{:go/pos {:name-pos [39 13]}} key ^{:go/pos {:op-pos [39 18]}} (addr ^{:go/pos {:dot [39 20] :name-pos [39 21]}} (.-macState ^{:go/pos {:name-pos [39 19]}} m)))
+    ^{:go/pos {:name-pos [40 9]}} m))
+
+
+
+
+^{:go/pos {:doc [43 1] :tok-pos [45 1]}} (go/type ^{:go/pos {:name-pos [45 6]}} macState "macState holds numbers in saturated 64-bit little-endian limbs. That is,\nthe value of [x0, x1, x2] is x[0] + x[1] * 2⁶⁴ + x[2] * 2¹²⁸.\n" ^{:go/pos {:lbrace [45 22] :rbrace [53 1] :struct [45 15]}} (struct
+
+
+
+    ^{:tag ^{:go/apos {1 [49 5]} :go/pos {:lbrack [49 4]}} (array 3 ^{:go/pos {:name-pos [49 7]}} uint64) :doc "h is the main accumulator. It is to be interpreted modulo 2¹³⁰ - 5, but\ncan grow larger during and after rounds. It must, however, remain below\n2 * (2¹³⁰ - 5).\n" :go/pos {:name-pos [49 2]}} h
+
+    ^{:tag ^{:go/apos {1 [51 5]} :go/pos {:lbrack [51 4]}} (array 2 ^{:go/pos {:name-pos [51 7]}} uint64) :doc "r and s are the private key components.\n" :go/pos {:name-pos [51 2]}} r
+    ^{:tag ^{:go/apos {1 [52 5]} :go/pos {:lbrack [52 4]}} (array 2 ^{:go/pos {:name-pos [52 7]}} uint64) :go/pos {:name-pos [52 2]}} s))
+
+
+^{:go/pos {:tok-pos [55 1]}} (go/type ^{:go/pos {:name-pos [55 6]}} macGeneric ^{:go/pos {:lbrace [55 24] :rbrace [60 1] :struct [55 17]}} (struct
+    ^{:go/pos {:name-pos [56 2]}} macState
+
+    ^{:tag ^{:go/pos {:lbrack [58 9]}} (array ^{:go/pos {:name-pos [58 10]}} TagSize ^{:go/pos {:name-pos [58 18]}} byte) :go/pos {:name-pos [58 2]}} buffer
+    ^{:tag ^{:go/pos {:name-pos [59 9]}} int :go/pos {:name-pos [59 2]}} offset))
+
+
+
+
+^{:go/pos {:doc [62 1] :func [64 1] :lbrace [64 51] :rbrace [84 1]}} (go/method ^{:go/pos {:name-pos [64 22]}} Write "Write splits the incoming message into TagSize chunks, and passes them to\nupdate. It buffers incomplete chunks.\n" ^{:go/pos {:closing [64 36] :opening [64 27] :recv-closing [64 20] :recv-opening [64 6]}} [^{:tag ^{:go/pos {:star [64 9]}} (* ^{:go/pos {:name-pos [64 10]}} macGeneric) :go/pos {:name-pos [64 7]}} h ^{:tag ^{:go/pos {:lbrack [64 30]}} (slice ^{:go/pos {:name-pos [64 32]}} byte) :go/pos {:name-pos [64 28]}} p] :results ^{:go/pos {:closing [64 49] :opening [64 38]}} [^{:go/pos {:name-pos [64 39]}} int ^{:go/pos {:name-pos [64 44]}} error]
+  (let [^{:go/pos {:name-pos [65 2] :tok-pos [65 5]}} nn ^{:go/pos {:lparen [65 11] :rparen [65 13]}} (^{:go/pos {:name-pos [65 8]}} len ^{:go/pos {:name-pos [65 12]}} p)]
+    ^{:go/pos {:if [66 2] :lbrace [66 18] :rbrace [75 2]}} (when ^{:go/apos {2 [66 16]} :go/pos {:op-pos [66 14]}} (> ^{:go/pos {:dot [66 6] :name-pos [66 7]}} (.-offset ^{:go/pos {:name-pos [66 5]}} h) 0)
+      (let [^{:go/pos {:name-pos [67 3] :tok-pos [67 5]}} n ^{:go/pos {:lparen [67 12] :rparen [67 35]}} (^{:go/pos {:name-pos [67 8]}} copy ^{:go/pos {:lbrack [67 21] :rbrack [67 31]}} (subslice ^{:go/pos {:dot [67 14] :name-pos [67 15]}} (.-buffer ^{:go/pos {:name-pos [67 13]}} h) ^{:go/pos {:dot [67 23] :name-pos [67 24]}} (.-offset ^{:go/pos {:name-pos [67 22]}} h)) ^{:go/pos {:name-pos [67 34]}} p)]
+        ^{:go/pos {:if [68 3] :lbrace [68 27] :rbrace [71 3]}} (when ^{:go/pos {:op-pos [68 17]}} (< ^{:go/pos {:op-pos [68 14]}} (+ ^{:go/pos {:dot [68 7] :name-pos [68 8]}} (.-offset ^{:go/pos {:name-pos [68 6]}} h) ^{:go/pos {:name-pos [68 15]}} n) ^{:go/pos {:name-pos [68 19]}} TagSize)
+          ^{:go/pos {:tok-pos [69 13]}} (set! ^{:go/pos {:dot [69 5] :name-pos [69 6]}} (.-offset ^{:go/pos {:name-pos [69 4]}} h) + ^{:go/pos {:name-pos [69 16]}} n)
+          ^{:go/apos {2 [70 15]} :go/pos {:return [70 4]}} (return ^{:go/pos {:name-pos [70 11]}} nn nil))
+
+        ^{:go/pos {:tok-pos [72 5]}} (set! ^{:go/pos {:name-pos [72 3]}} p ^{:go/pos {:lbrack [72 8] :rbrack [72 11]}} (subslice ^{:go/pos {:name-pos [72 7]}} p ^{:go/pos {:name-pos [72 9]}} n))
+        ^{:go/apos {2 [73 14]} :go/pos {:tok-pos [73 12]}} (set! ^{:go/pos {:dot [73 4] :name-pos [73 5]}} (.-offset ^{:go/pos {:name-pos [73 3]}} h) 0)
+        ^{:go/pos {:lparen [74 16] :rparen [74 41]}} (^{:go/pos {:name-pos [74 3]}} updateGeneric ^{:go/pos {:op-pos [74 17]}} (addr ^{:go/pos {:dot [74 19] :name-pos [74 20]}} (.-macState ^{:go/pos {:name-pos [74 18]}} h)) ^{:go/pos {:lbrack [74 38] :rbrack [74 40]}} (subslice ^{:go/pos {:dot [74 31] :name-pos [74 32]}} (.-buffer ^{:go/pos {:name-pos [74 30]}} h)))))
+
+    ^{:go/pos {:if [76 2] :lbrace [76 45] :rbrace [79 2]}} (when [^{:go/pos {:name-pos [76 5] :tok-pos [76 7]}} n ^{:go/pos {:op-pos [76 17]}} (- ^{:go/pos {:lparen [76 13] :rparen [76 15]}} (^{:go/pos {:name-pos [76 10]}} len ^{:go/pos {:name-pos [76 14]}} p) ^{:go/parens [[[76 19] [76 36]]] :go/pos {:op-pos [76 27]}} (% ^{:go/pos {:lparen [76 23] :rparen [76 25]}} (^{:go/pos {:name-pos [76 20]}} len ^{:go/pos {:name-pos [76 24]}} p) ^{:go/pos {:name-pos [76 29]}} TagSize))] ^{:go/apos {2 [76 43]} :go/pos {:op-pos [76 41]}} (> ^{:go/pos {:name-pos [76 39]}} n 0)
+      ^{:go/pos {:lparen [77 16] :rparen [77 35]}} (^{:go/pos {:name-pos [77 3]}} updateGeneric ^{:go/pos {:op-pos [77 17]}} (addr ^{:go/pos {:dot [77 19] :name-pos [77 20]}} (.-macState ^{:go/pos {:name-pos [77 18]}} h)) ^{:go/pos {:lbrack [77 31] :rbrack [77 34]}} (subslice ^{:go/pos {:name-pos [77 30]}} p _ ^{:go/pos {:name-pos [77 33]}} n))
+      ^{:go/pos {:tok-pos [78 5]}} (set! ^{:go/pos {:name-pos [78 3]}} p ^{:go/pos {:lbrack [78 8] :rbrack [78 11]}} (subslice ^{:go/pos {:name-pos [78 7]}} p ^{:go/pos {:name-pos [78 9]}} n)))
+
+    ^{:go/pos {:if [80 2] :lbrace [80 16] :rbrace [82 2]}} (when ^{:go/apos {2 [80 14]} :go/pos {:op-pos [80 12]}} (> ^{:go/pos {:lparen [80 8] :rparen [80 10]}} (^{:go/pos {:name-pos [80 5]}} len ^{:go/pos {:name-pos [80 9]}} p) 0)
+      ^{:go/pos {:tok-pos [81 12]}} (set! ^{:go/pos {:dot [81 4] :name-pos [81 5]}} (.-offset ^{:go/pos {:name-pos [81 3]}} h) + ^{:go/pos {:lparen [81 19] :rparen [81 42]}} (^{:go/pos {:name-pos [81 15]}} copy ^{:go/pos {:lbrack [81 28] :rbrack [81 38]}} (subslice ^{:go/pos {:dot [81 21] :name-pos [81 22]}} (.-buffer ^{:go/pos {:name-pos [81 20]}} h) ^{:go/pos {:dot [81 30] :name-pos [81 31]}} (.-offset ^{:go/pos {:name-pos [81 29]}} h)) ^{:go/pos {:name-pos [81 41]}} p)))
+
+    ^{:go/apos {2 [83 13]} :go/pos {:return [83 2]}} (return ^{:go/pos {:name-pos [83 9]}} nn nil)))
+
+
+
+
+
+^{:go/pos {:doc [86 1] :func [89 1] :lbrace [89 46] :rbrace [95 1]}} (go/method ^{:go/pos {:name-pos [89 22]}} Sum "Sum flushes the last incomplete chunk from the buffer, if any, and generates\nthe MAC output. It does not modify its state, in order to allow for multiple\ncalls to Sum, even if no Write is allowed after Sum.\n" ^{:go/pos {:closing [89 44] :opening [89 25] :recv-closing [89 20] :recv-opening [89 6]}} [^{:tag ^{:go/pos {:star [89 9]}} (* ^{:go/pos {:name-pos [89 10]}} macGeneric) :go/pos {:name-pos [89 7]}} h ^{:tag ^{:go/pos {:star [89 30]}} (* ^{:go/pos {:lbrack [89 31]}} (array ^{:go/pos {:name-pos [89 32]}} TagSize ^{:go/pos {:name-pos [89 40]}} byte)) :go/pos {:name-pos [89 26]}} out]
+  (let [^{:go/pos {:name-pos [90 2] :tok-pos [90 8]}} state ^{:go/pos {:dot [90 12] :name-pos [90 13]}} (.-macState ^{:go/pos {:name-pos [90 11]}} h)]
+    ^{:go/pos {:if [91 2] :lbrace [91 18] :rbrace [93 2]}} (when ^{:go/apos {2 [91 16]} :go/pos {:op-pos [91 14]}} (> ^{:go/pos {:dot [91 6] :name-pos [91 7]}} (.-offset ^{:go/pos {:name-pos [91 5]}} h) 0)
+      ^{:go/pos {:lparen [92 16] :rparen [92 44]}} (^{:go/pos {:name-pos [92 3]}} updateGeneric ^{:go/pos {:op-pos [92 17]}} (addr ^{:go/pos {:name-pos [92 18]}} state) ^{:go/pos {:lbrack [92 33] :rbrack [92 43]}} (subslice ^{:go/pos {:dot [92 26] :name-pos [92 27]}} (.-buffer ^{:go/pos {:name-pos [92 25]}} h) _ ^{:go/pos {:dot [92 36] :name-pos [92 37]}} (.-offset ^{:go/pos {:name-pos [92 35]}} h))))
+
+    ^{:go/pos {:lparen [94 10] :rparen [94 34]}} (^{:go/pos {:name-pos [94 2]}} finalize ^{:go/pos {:name-pos [94 11]}} out ^{:go/pos {:op-pos [94 16]}} (addr ^{:go/pos {:dot [94 22] :name-pos [94 23]}} (.-h ^{:go/pos {:name-pos [94 17]}} state)) ^{:go/pos {:op-pos [94 26]}} (addr ^{:go/pos {:dot [94 32] :name-pos [94 33]}} (.-s ^{:go/pos {:name-pos [94 27]}} state)))))
+
+
+
+
+
+^{:go/pos {:doc [97 1] :lparen [100 7] :rparen [103 1] :tok-pos [100 1]}} (go/const "[rMask0, rMask1] is the specified Poly1305 clamping mask in little-endian. It\nclears some bits of the secret coefficient to make it possible to implement\nmultiplication more efficiently.\n"
+  ^{:go/apos {1 [101 11]} :go/atext {1 "0x0FFFFFFC0FFFFFFF"}} [^{:val 1152921487695413247 :go/pos {:name-pos [101 2]}} rMask0 0x0FFFFFFC0FFFFFFF]
+  ^{:go/apos {1 [102 11]} :go/atext {1 "0x0FFFFFFC0FFFFFFC"}} [^{:val 1152921487695413244 :go/pos {:name-pos [102 2]}} rMask1 0x0FFFFFFC0FFFFFFC])
+
+
+
+^{:go/pos {:doc [105 1] :func [106 1] :lbrace [106 45] :rbrace [111 1]}} (go/func ^{:go/pos {:name-pos [106 6]}} initialize "initialize loads the 256-bit key into the two 128-bit secret values r and s.\n" ^{:go/pos {:closing [106 43] :opening [106 16]}} [^{:tag ^{:go/pos {:star [106 21]}} (* ^{:go/apos {1 [106 23]} :go/pos {:lbrack [106 22]}} (array 32 ^{:go/pos {:name-pos [106 26]}} byte)) :go/pos {:name-pos [106 17]}} key ^{:tag ^{:go/pos {:star [106 34]}} (* ^{:go/pos {:name-pos [106 35]}} macState) :go/pos {:name-pos [106 32]}} m]
+  ^{:go/apos {2 [107 6]} :go/pos {:lbrack [107 5] :rbrack [107 7] :tok-pos [107 9]}} (aset ^{:go/pos {:dot [107 3] :name-pos [107 4]}} (.-r ^{:go/pos {:name-pos [107 2]}} m) 0 ^{:go/pos {:op-pos [107 48]}} (bit-and ^{:go/pos {:dot [107 30] :lparen [107 37] :name-pos [107 31] :rparen [107 46]}} (.Uint64 ^{:go/pos {:dot [107 17] :name-pos [107 18] :x-pos [107 11]}} binary/LittleEndian ^{:go/apos {2 [107 42] 3 [107 44]} :go/pos {:lbrack [107 41] :rbrack [107 45]}} (subslice ^{:go/pos {:name-pos [107 38]}} key 0 8)) ^{:go/pos {:name-pos [107 50]}} rMask0))
+  ^{:go/apos {2 [108 6]} :go/pos {:lbrack [108 5] :rbrack [108 7] :tok-pos [108 9]}} (aset ^{:go/pos {:dot [108 3] :name-pos [108 4]}} (.-r ^{:go/pos {:name-pos [108 2]}} m) 1 ^{:go/pos {:op-pos [108 49]}} (bit-and ^{:go/pos {:dot [108 30] :lparen [108 37] :name-pos [108 31] :rparen [108 47]}} (.Uint64 ^{:go/pos {:dot [108 17] :name-pos [108 18] :x-pos [108 11]}} binary/LittleEndian ^{:go/apos {2 [108 42] 3 [108 44]} :go/pos {:lbrack [108 41] :rbrack [108 46]}} (subslice ^{:go/pos {:name-pos [108 38]}} key 8 16)) ^{:go/pos {:name-pos [108 51]}} rMask1))
+  ^{:go/apos {2 [109 6]} :go/pos {:lbrack [109 5] :rbrack [109 7] :tok-pos [109 9]}} (aset ^{:go/pos {:dot [109 3] :name-pos [109 4]}} (.-s ^{:go/pos {:name-pos [109 2]}} m) 0 ^{:go/pos {:dot [109 30] :lparen [109 37] :name-pos [109 31] :rparen [109 48]}} (.Uint64 ^{:go/pos {:dot [109 17] :name-pos [109 18] :x-pos [109 11]}} binary/LittleEndian ^{:go/apos {2 [109 42] 3 [109 45]} :go/pos {:lbrack [109 41] :rbrack [109 47]}} (subslice ^{:go/pos {:name-pos [109 38]}} key 16 24)))
+  ^{:go/apos {2 [110 6]} :go/pos {:lbrack [110 5] :rbrack [110 7] :tok-pos [110 9]}} (aset ^{:go/pos {:dot [110 3] :name-pos [110 4]}} (.-s ^{:go/pos {:name-pos [110 2]}} m) 1 ^{:go/pos {:dot [110 30] :lparen [110 37] :name-pos [110 31] :rparen [110 48]}} (.Uint64 ^{:go/pos {:dot [110 17] :name-pos [110 18] :x-pos [110 11]}} binary/LittleEndian ^{:go/apos {2 [110 42] 3 [110 45]} :go/pos {:lbrack [110 41] :rbrack [110 47]}} (subslice ^{:go/pos {:name-pos [110 38]}} key 24 32))))
+
+
+
+
+^{:go/pos {:doc [113 1] :tok-pos [115 1]}} (go/type ^{:go/pos {:name-pos [115 6]}} uint128 "uint128 holds a 128-bit number as two 64-bit limbs, for use with the\nbits.Mul64 and bits.Add64 intrinsics.\n" ^{:go/pos {:lbrace [115 21] :rbrace [117 1] :struct [115 14]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [116 9]}} uint64 :go/pos {:name-pos [116 2]}} lo ^{:tag ^{:go/pos {:name-pos [116 9]}} uint64 :go/pos {:name-pos [116 6]}} hi))
+
+
+^{:go/pos {:func [119 1] :lbrace [119 33] :rbrace [122 1] :return [121 2]}} (go/func ^{:go/pos {:name-pos [119 6]}} mul64 ^{:tag ^{:go/pos {:name-pos [119 25]}} uint128 :go/pos {:closing [119 23] :opening [119 11]}} [^{:tag ^{:go/pos {:name-pos [119 17]}} uint64 :go/pos {:name-pos [119 12]}} a ^{:tag ^{:go/pos {:name-pos [119 17]}} uint64 :go/pos {:name-pos [119 15]}} b]
+  (let [^{:go/pos {:tok-pos [120 9]}} (values ^{:go/pos {:name-pos [120 2]}} hi ^{:go/pos {:name-pos [120 6]}} lo) ^{:go/pos {:lparen [120 22] :rparen [120 27]}} (^{:go/pos {:dot [120 16] :name-pos [120 17] :x-pos [120 12]}} bits/Mul64 ^{:go/pos {:name-pos [120 23]}} a ^{:go/pos {:name-pos [120 26]}} b)]
+    ^{:go/pos {:lbrace [121 16] :rbrace [121 23]}} (lit ^{:go/pos {:name-pos [121 9]}} uint128 ^{:go/pos {:name-pos [121 17]}} lo ^{:go/pos {:name-pos [121 21]}} hi)))
+
+
+^{:go/pos {:func [124 1] :lbrace [124 35] :rbrace [131 1] :return [130 2]}} (go/func ^{:go/pos {:name-pos [124 6]}} add128 ^{:tag ^{:go/pos {:name-pos [124 27]}} uint128 :go/pos {:closing [124 25] :opening [124 12]}} [^{:tag ^{:go/pos {:name-pos [124 18]}} uint128 :go/pos {:name-pos [124 13]}} a ^{:tag ^{:go/pos {:name-pos [124 18]}} uint128 :go/pos {:name-pos [124 16]}} b]
+  (let [^{:go/pos {:tok-pos [125 8]}} (values ^{:go/pos {:name-pos [125 2]}} lo ^{:go/pos {:name-pos [125 6]}} c) ^{:go/apos {3 [125 34]} :go/pos {:lparen [125 21] :rparen [125 35]}} (^{:go/pos {:dot [125 15] :name-pos [125 16] :x-pos [125 11]}} bits/Add64 ^{:go/pos {:dot [125 23] :name-pos [125 24]}} (.-lo ^{:go/pos {:name-pos [125 22]}} a) ^{:go/pos {:dot [125 29] :name-pos [125 30]}} (.-lo ^{:go/pos {:name-pos [125 28]}} b) 0)
+      ^{:go/pos {:tok-pos [126 8]}} (values ^{:go/pos {:name-pos [126 2]}} hi ^:assign ^{:go/pos {:name-pos [126 6]}} c) ^{:go/pos {:lparen [126 21] :rparen [126 35]}} (^{:go/pos {:dot [126 15] :name-pos [126 16] :x-pos [126 11]}} bits/Add64 ^{:go/pos {:dot [126 23] :name-pos [126 24]}} (.-hi ^{:go/pos {:name-pos [126 22]}} a) ^{:go/pos {:dot [126 29] :name-pos [126 30]}} (.-hi ^{:go/pos {:name-pos [126 28]}} b) ^{:go/pos {:name-pos [126 34]}} c)]
+    ^{:go/pos {:if [127 2] :lbrace [127 12] :rbrace [129 2]}} (when ^{:go/apos {2 [127 10]} :go/pos {:op-pos [127 7]}} (!= ^{:go/pos {:name-pos [127 5]}} c 0)
+      ^{:go/apos {1 [128 9]} :go/pos {:lparen [128 8] :rparen [128 40]}} (^{:go/pos {:name-pos [128 3]}} panic "poly1305: unexpected overflow"))
+
+    ^{:go/pos {:lbrace [130 16] :rbrace [130 23]}} (lit ^{:go/pos {:name-pos [130 9]}} uint128 ^{:go/pos {:name-pos [130 17]}} lo ^{:go/pos {:name-pos [130 21]}} hi)))
+
+
+^{:go/pos {:func [133 1] :lbrace [133 39] :rbrace [137 1] :return [136 2]}} (go/func ^{:go/pos {:name-pos [133 6]}} shiftRightBy2 ^{:tag ^{:go/pos {:name-pos [133 31]}} uint128 :go/pos {:closing [133 29] :opening [133 19]}} [^{:tag ^{:go/pos {:name-pos [133 22]}} uint128 :go/pos {:name-pos [133 20]}} a]
+  ^{:go/pos {:tok-pos [134 7]}} (set! ^{:go/pos {:dot [134 3] :name-pos [134 4]}} (.-lo ^{:go/pos {:name-pos [134 2]}} a) ^{:go/pos {:op-pos [134 17]}} (bit-or ^{:go/apos {2 [134 15]} :go/pos {:op-pos [134 13]}} (>> ^{:go/pos {:dot [134 10] :name-pos [134 11]}} (.-lo ^{:go/pos {:name-pos [134 9]}} a) 2) ^{:go/apos {2 [134 29]} :go/pos {:op-pos [134 27]}} (<< ^{:go/apos {2 [134 25]} :go/parens [[[134 19] [134 26]]] :go/pos {:op-pos [134 24]}} (bit-and ^{:go/pos {:dot [134 21] :name-pos [134 22]}} (.-hi ^{:go/pos {:name-pos [134 20]}} a) 3) 62)))
+  ^{:go/pos {:tok-pos [135 7]}} (set! ^{:go/pos {:dot [135 3] :name-pos [135 4]}} (.-hi ^{:go/pos {:name-pos [135 2]}} a) ^{:go/apos {2 [135 17]} :go/pos {:op-pos [135 14]}} (>> ^{:go/pos {:dot [135 10] :name-pos [135 11]}} (.-hi ^{:go/pos {:name-pos [135 9]}} a) 2))
+  ^{:go/pos {:name-pos [136 9]}} a)
+
+
+
+
+
+
+
+
+
+^{:go/pos {:doc [139 1] :func [146 1] :lbrace [146 49] :rbrace [265 1]}} (go/func ^{:go/pos {:name-pos [146 6]}} updateGeneric "updateGeneric absorbs msg into the state.h accumulator. For each chunk m of\n128 bits of message, it computes\n\n\th₊ = (h + m) * r  mod  2¹³⁰ - 5\n\nIf the msg length is not a multiple of TagSize, it assumes the last\nincomplete chunk is the final one.\n" ^{:go/pos {:closing [146 47] :opening [146 19]}} [^{:tag ^{:go/pos {:star [146 26]}} (* ^{:go/pos {:name-pos [146 27]}} macState) :go/pos {:name-pos [146 20]}} state ^{:tag ^{:go/pos {:lbrack [146 41]}} (slice ^{:go/pos {:name-pos [146 43]}} byte) :go/pos {:name-pos [146 37]}} msg]
+  (let [^{:go/pos {:tok-pos [147 13]}} (values ^{:go/pos {:name-pos [147 2]}} h0 ^{:go/pos {:name-pos [147 6]}} h1 ^{:go/pos {:name-pos [147 10]}} h2) (values ^{:go/apos {2 [147 24]} :go/pos {:lbrack [147 23] :rbrack [147 25]}} (aget ^{:go/pos {:dot [147 21] :name-pos [147 22]}} (.-h ^{:go/pos {:name-pos [147 16]}} state) 0) ^{:go/apos {2 [147 36]} :go/pos {:lbrack [147 35] :rbrack [147 37]}} (aget ^{:go/pos {:dot [147 33] :name-pos [147 34]}} (.-h ^{:go/pos {:name-pos [147 28]}} state) 1) ^{:go/apos {2 [147 48]} :go/pos {:lbrack [147 47] :rbrack [147 49]}} (aget ^{:go/pos {:dot [147 45] :name-pos [147 46]}} (.-h ^{:go/pos {:name-pos [147 40]}} state) 2))
+      ^{:go/pos {:tok-pos [148 9]}} (values ^{:go/pos {:name-pos [148 2]}} r0 ^{:go/pos {:name-pos [148 6]}} r1) (values ^{:go/apos {2 [148 20]} :go/pos {:lbrack [148 19] :rbrack [148 21]}} (aget ^{:go/pos {:dot [148 17] :name-pos [148 18]}} (.-r ^{:go/pos {:name-pos [148 12]}} state) 0) ^{:go/apos {2 [148 32]} :go/pos {:lbrack [148 31] :rbrack [148 33]}} (aget ^{:go/pos {:dot [148 29] :name-pos [148 30]}} (.-r ^{:go/pos {:name-pos [148 24]}} state) 1))]
+
+    ^{:go/pos {:for [150 2] :lbrace [150 19] :rbrace [262 2]}} (while ^{:go/apos {2 [150 17]} :go/pos {:op-pos [150 15]}} (> ^{:go/pos {:lparen [150 9] :rparen [150 13]}} (^{:go/pos {:name-pos [150 6]}} len ^{:go/pos {:name-pos [150 10]}} msg) 0)
+      (let [^{:tag ^{:go/pos {:name-pos [151 9]}} uint64 :go/pos {:name-pos [151 7] :tok-pos [151 3]}} c (zero ^{:go/pos {:name-pos [151 9]}} uint64)]
+
+        ;; For the first step, h + m, we use a chain of bits.Add64 intrinsics.
+        ;; The resulting value of h might exceed 2¹³⁰ - 5, but will be partially
+        ;; reduced at the end of the multiplication below.
+        ;;
+        ;; The spec requires us to set a bit just above the message size, not to
+        ;; hide leading zeroes. For full chunks, that's 1 << 128, so we can just
+        ;; add 1 to the most significant (2¹²⁸) limb, h2.
+        ^{:go/pos {:else-lbrace [166 10] :else-rbrace [176 3] :if [160 3] :lbrace [160 26] :rbrace [166 3]}} (if ^{:go/pos {:op-pos [160 15]}} (>= ^{:go/pos {:lparen [160 9] :rparen [160 13]}} (^{:go/pos {:name-pos [160 6]}} len ^{:go/pos {:name-pos [160 10]}} msg) ^{:go/pos {:name-pos [160 18]}} TagSize) ^{:go/pos {:lbrace [160 26] :rbrace [166 3]}} (do
+            ^{:go/pos {:tok-pos [161 10]}} (set! (values ^{:go/pos {:name-pos [161 4]}} h0 ^{:go/pos {:name-pos [161 8]}} c) ^{:go/apos {3 [161 65]} :go/pos {:lparen [161 22] :rparen [161 66]}} (^{:go/pos {:dot [161 16] :name-pos [161 17] :x-pos [161 12]}} bits/Add64 ^{:go/pos {:name-pos [161 23]}} h0 ^{:go/pos {:dot [161 46] :lparen [161 53] :name-pos [161 47] :rparen [161 62]}} (.Uint64 ^{:go/pos {:dot [161 33] :name-pos [161 34] :x-pos [161 27]}} binary/LittleEndian ^{:go/apos {2 [161 58] 3 [161 60]} :go/pos {:lbrack [161 57] :rbrack [161 61]}} (subslice ^{:go/pos {:name-pos [161 54]}} msg 0 8)) 0))
+            ^{:go/pos {:tok-pos [162 10]}} (set! (values ^{:go/pos {:name-pos [162 4]}} h1 ^{:go/pos {:name-pos [162 8]}} c) ^{:go/pos {:lparen [162 22] :rparen [162 67]}} (^{:go/pos {:dot [162 16] :name-pos [162 17] :x-pos [162 12]}} bits/Add64 ^{:go/pos {:name-pos [162 23]}} h1 ^{:go/pos {:dot [162 46] :lparen [162 53] :name-pos [162 47] :rparen [162 63]}} (.Uint64 ^{:go/pos {:dot [162 33] :name-pos [162 34] :x-pos [162 27]}} binary/LittleEndian ^{:go/apos {2 [162 58] 3 [162 60]} :go/pos {:lbrack [162 57] :rbrack [162 62]}} (subslice ^{:go/pos {:name-pos [162 54]}} msg 8 16)) ^{:go/pos {:name-pos [162 66]}} c))
+            ^{:go/pos {:tok-pos [163 7]}} (set! ^{:go/pos {:name-pos [163 4]}} h2 + ^{:go/apos {2 [163 14]} :go/pos {:op-pos [163 12]}} (+ ^{:go/pos {:name-pos [163 10]}} c 1))
+
+            ^{:go/pos {:tok-pos [165 8]}} (set! ^{:go/pos {:name-pos [165 4]}} msg ^{:go/pos {:lbrack [165 13] :rbrack [165 22]}} (subslice ^{:go/pos {:name-pos [165 10]}} msg ^{:go/pos {:name-pos [165 14]}} TagSize)))
+
+          (let [^{:tag ^{:go/pos {:lbrack [167 12]}} (array ^{:go/pos {:name-pos [167 13]}} TagSize ^{:go/pos {:name-pos [167 21]}} byte) :go/pos {:name-pos [167 8] :tok-pos [167 4]}} buf (zero ^{:go/pos {:lbrack [167 12]}} (array ^{:go/pos {:name-pos [167 13]}} TagSize ^{:go/pos {:name-pos [167 21]}} byte))]
+            ^{:go/pos {:lparen [168 8] :rparen [168 20]}} (^{:go/pos {:name-pos [168 4]}} copy ^{:go/pos {:lbrack [168 12] :rbrack [168 14]}} (subslice ^{:go/pos {:name-pos [168 9]}} buf) ^{:go/pos {:name-pos [168 17]}} msg)
+            ^{:go/apos {3 [169 20]} :go/pos {:lbrack [169 7] :rbrack [169 16] :tok-pos [169 18]}} (aset ^{:go/pos {:name-pos [169 4]}} buf ^{:go/pos {:lparen [169 11] :rparen [169 15]}} (^{:go/pos {:name-pos [169 8]}} len ^{:go/pos {:name-pos [169 12]}} msg) 1)
+
+            ^{:go/pos {:tok-pos [171 10]}} (set! (values ^{:go/pos {:name-pos [171 4]}} h0 ^{:go/pos {:name-pos [171 8]}} c) ^{:go/apos {3 [171 65]} :go/pos {:lparen [171 22] :rparen [171 66]}} (^{:go/pos {:dot [171 16] :name-pos [171 17] :x-pos [171 12]}} bits/Add64 ^{:go/pos {:name-pos [171 23]}} h0 ^{:go/pos {:dot [171 46] :lparen [171 53] :name-pos [171 47] :rparen [171 62]}} (.Uint64 ^{:go/pos {:dot [171 33] :name-pos [171 34] :x-pos [171 27]}} binary/LittleEndian ^{:go/apos {2 [171 58] 3 [171 60]} :go/pos {:lbrack [171 57] :rbrack [171 61]}} (subslice ^{:go/pos {:name-pos [171 54]}} buf 0 8)) 0))
+            ^{:go/pos {:tok-pos [172 10]}} (set! (values ^{:go/pos {:name-pos [172 4]}} h1 ^{:go/pos {:name-pos [172 8]}} c) ^{:go/pos {:lparen [172 22] :rparen [172 67]}} (^{:go/pos {:dot [172 16] :name-pos [172 17] :x-pos [172 12]}} bits/Add64 ^{:go/pos {:name-pos [172 23]}} h1 ^{:go/pos {:dot [172 46] :lparen [172 53] :name-pos [172 47] :rparen [172 63]}} (.Uint64 ^{:go/pos {:dot [172 33] :name-pos [172 34] :x-pos [172 27]}} binary/LittleEndian ^{:go/apos {2 [172 58] 3 [172 60]} :go/pos {:lbrack [172 57] :rbrack [172 62]}} (subslice ^{:go/pos {:name-pos [172 54]}} buf 8 16)) ^{:go/pos {:name-pos [172 66]}} c))
+            ^{:go/pos {:tok-pos [173 7]}} (set! ^{:go/pos {:name-pos [173 4]}} h2 + ^{:go/pos {:name-pos [173 10]}} c)
+
+            ^{:go/apos {2 [175 10]} :go/pos {:tok-pos [175 8]}} (set! ^{:go/pos {:name-pos [175 4]}} msg nil)))
+
+
+        ;; Multiplication of big number limbs is similar to elementary school
+        ;; columnar multiplication. Instead of digits, there are 64-bit limbs.
+        ;;
+        ;; We are multiplying a 3 limbs number, h, by a 2 limbs number, r.
+        ;;
+        ;;                        h2    h1    h0  x
+        ;;                              r1    r0  =
+        ;;                       ----------------
+        ;;                      h2r0  h1r0  h0r0     <-- individual 128-bit products
+        ;;            +   h2r1  h1r1  h0r1
+        ;;               ------------------------
+        ;;                 m3    m2    m1    m0      <-- result in 128-bit overlapping limbs
+        ;;               ------------------------
+        ;;         m3.hi m2.hi m1.hi m0.hi           <-- carry propagation
+        ;;     +         m3.lo m2.lo m1.lo m0.lo
+        ;;        -------------------------------
+        ;;           t4    t3    t2    t1    t0      <-- final result in 64-bit limbs
+        ;;
+        ;; The main difference from pen-and-paper multiplication is that we do
+        ;; carry propagation in a separate step, as if we wrote two digit sums
+        ;; at first (the 128-bit limbs), and then carried the tens all at once.
+
+        (let [^{:go/pos {:name-pos [200 3] :tok-pos [200 8]}} h0r0 ^{:go/pos {:lparen [200 16] :rparen [200 23]}} (^{:go/pos {:name-pos [200 11]}} mul64 ^{:go/pos {:name-pos [200 17]}} h0 ^{:go/pos {:name-pos [200 21]}} r0)
+            ^{:go/pos {:name-pos [201 3] :tok-pos [201 8]}} h1r0 ^{:go/pos {:lparen [201 16] :rparen [201 23]}} (^{:go/pos {:name-pos [201 11]}} mul64 ^{:go/pos {:name-pos [201 17]}} h1 ^{:go/pos {:name-pos [201 21]}} r0)
+            ^{:go/pos {:name-pos [202 3] :tok-pos [202 8]}} h2r0 ^{:go/pos {:lparen [202 16] :rparen [202 23]}} (^{:go/pos {:name-pos [202 11]}} mul64 ^{:go/pos {:name-pos [202 17]}} h2 ^{:go/pos {:name-pos [202 21]}} r0)
+            ^{:go/pos {:name-pos [203 3] :tok-pos [203 8]}} h0r1 ^{:go/pos {:lparen [203 16] :rparen [203 23]}} (^{:go/pos {:name-pos [203 11]}} mul64 ^{:go/pos {:name-pos [203 17]}} h0 ^{:go/pos {:name-pos [203 21]}} r1)
+            ^{:go/pos {:name-pos [204 3] :tok-pos [204 8]}} h1r1 ^{:go/pos {:lparen [204 16] :rparen [204 23]}} (^{:go/pos {:name-pos [204 11]}} mul64 ^{:go/pos {:name-pos [204 17]}} h1 ^{:go/pos {:name-pos [204 21]}} r1)
+            ^{:go/pos {:name-pos [205 3] :tok-pos [205 8]}} h2r1 ^{:go/pos {:lparen [205 16] :rparen [205 23]}} (^{:go/pos {:name-pos [205 11]}} mul64 ^{:go/pos {:name-pos [205 17]}} h2 ^{:go/pos {:name-pos [205 21]}} r1)]
+
+          ;; Since h2 is known to be at most 7 (5 + 1 + 1), and r0 and r1 have their
+          ;; top 4 bits cleared by rMask{0,1}, we know that their product is not going
+          ;; to overflow 64 bits, so we can ignore the high part of the products.
+          ;;
+          ;; This also means that the product doesn't have a fifth limb (t4).
+          ^{:go/pos {:if [212 3] :lbrace [212 19] :rbrace [214 3]}} (when ^{:go/apos {2 [212 17]} :go/pos {:op-pos [212 14]}} (!= ^{:go/pos {:dot [212 10] :name-pos [212 11]}} (.-hi ^{:go/pos {:name-pos [212 6]}} h2r0) 0)
+            ^{:go/apos {1 [213 10]} :go/pos {:lparen [213 9] :rparen [213 41]}} (^{:go/pos {:name-pos [213 4]}} panic "poly1305: unexpected overflow"))
+
+          ^{:go/pos {:if [215 3] :lbrace [215 19] :rbrace [217 3]}} (when ^{:go/apos {2 [215 17]} :go/pos {:op-pos [215 14]}} (!= ^{:go/pos {:dot [215 10] :name-pos [215 11]}} (.-hi ^{:go/pos {:name-pos [215 6]}} h2r1) 0)
+            ^{:go/apos {1 [216 10]} :go/pos {:lparen [216 9] :rparen [216 41]}} (^{:go/pos {:name-pos [216 4]}} panic "poly1305: unexpected overflow"))
+
+
+          (let [^{:go/pos {:name-pos [219 3] :tok-pos [219 6]}} m0 ^{:go/pos {:name-pos [219 9]}} h0r0
+              ^{:go/pos {:name-pos [220 3] :tok-pos [220 6]}} m1 ^{:go/pos {:lparen [220 15] :rparen [220 26]}} (^{:go/pos {:name-pos [220 9]}} add128 ^{:go/pos {:name-pos [220 16]}} h1r0 ^{:go/pos {:name-pos [220 22]}} h0r1) ; These two additions don't overflow thanks again
+              ^{:go/pos {:name-pos [221 3] :tok-pos [221 6]}} m2 ^{:go/pos {:lparen [221 15] :rparen [221 26]}} (^{:go/pos {:name-pos [221 9]}} add128 ^{:go/pos {:name-pos [221 16]}} h2r0 ^{:go/pos {:name-pos [221 22]}} h1r1) ; to the 4 masked bits at the top of r0 and r1.
+              ^{:go/pos {:name-pos [222 3] :tok-pos [222 6]}} m3 ^{:go/pos {:name-pos [222 9]}} h2r1
+
+              ^{:go/pos {:name-pos [224 3] :tok-pos [224 6]}} t0 ^{:go/pos {:dot [224 11] :name-pos [224 12]}} (.-lo ^{:go/pos {:name-pos [224 9]}} m0)
+              ^{:go/pos {:tok-pos [225 9]}} (values ^{:go/pos {:name-pos [225 3]}} t1 ^:assign ^{:go/pos {:name-pos [225 7]}} c) ^{:go/apos {3 [225 37]} :go/pos {:lparen [225 22] :rparen [225 38]}} (^{:go/pos {:dot [225 16] :name-pos [225 17] :x-pos [225 12]}} bits/Add64 ^{:go/pos {:dot [225 25] :name-pos [225 26]}} (.-lo ^{:go/pos {:name-pos [225 23]}} m1) ^{:go/pos {:dot [225 32] :name-pos [225 33]}} (.-hi ^{:go/pos {:name-pos [225 30]}} m0) 0)
+              ^{:go/pos {:tok-pos [226 9]}} (values ^{:go/pos {:name-pos [226 3]}} t2 ^:assign ^{:go/pos {:name-pos [226 7]}} c) ^{:go/pos {:lparen [226 22] :rparen [226 38]}} (^{:go/pos {:dot [226 16] :name-pos [226 17] :x-pos [226 12]}} bits/Add64 ^{:go/pos {:dot [226 25] :name-pos [226 26]}} (.-lo ^{:go/pos {:name-pos [226 23]}} m2) ^{:go/pos {:dot [226 32] :name-pos [226 33]}} (.-hi ^{:go/pos {:name-pos [226 30]}} m1) ^{:go/pos {:name-pos [226 37]}} c)
+              ^{:go/pos {:tok-pos [227 9]}} (values ^{:go/pos {:name-pos [227 3]}} t3 ^{:go/pos {:name-pos [227 7]}} _) ^{:go/pos {:lparen [227 22] :rparen [227 38]}} (^{:go/pos {:dot [227 16] :name-pos [227 17] :x-pos [227 12]}} bits/Add64 ^{:go/pos {:dot [227 25] :name-pos [227 26]}} (.-lo ^{:go/pos {:name-pos [227 23]}} m3) ^{:go/pos {:dot [227 32] :name-pos [227 33]}} (.-hi ^{:go/pos {:name-pos [227 30]}} m2) ^{:go/pos {:name-pos [227 37]}} c)]
+
+            ;; Now we have the result as 4 64-bit limbs, and we need to reduce it
+            ;; modulo 2¹³⁰ - 5. The special shape of this Crandall prime lets us do
+            ;; a cheap partial reduction according to the reduction identity
+            ;;
+            ;;     c * 2¹³⁰ + n  =  c * 5 + n  mod  2¹³⁰ - 5
+            ;;
+            ;; because 2¹³⁰ = 5 mod 2¹³⁰ - 5. Partial reduction since the result is
+            ;; likely to be larger than 2¹³⁰ - 5, but still small enough to fit the
+            ;; assumptions we make about h in the rest of the code.
+            ;;
+            ;; See also https://speakerdeck.com/gtank/engineering-prime-numbers?slide=23
+
+            ;; We split the final result at the 2¹³⁰ mark into h and cc, the carry.
+            ;; Note that the carry bits are effectively shifted left by 2, in other
+            ;; words, cc = c * 4 for the c in the reduction identity.
+            ^{:go/pos {:tok-pos [244 14]}} (set! (values ^{:go/pos {:name-pos [244 3]}} h0 ^{:go/pos {:name-pos [244 7]}} h1 ^{:go/pos {:name-pos [244 11]}} h2) (values ^{:go/pos {:name-pos [244 16]}} t0 ^{:go/pos {:name-pos [244 20]}} t1 ^{:go/pos {:op-pos [244 26]}} (bit-and ^{:go/pos {:name-pos [244 24]}} t2 ^{:go/pos {:name-pos [244 27]}} maskLow2Bits)))
+            (let [^{:go/pos {:name-pos [245 3] :tok-pos [245 6]}} cc ^{:go/pos {:lbrace [245 16] :rbrace [245 41]}} (lit ^{:go/pos {:name-pos [245 9]}} uint128 ^{:go/pos {:op-pos [245 20]}} (bit-and ^{:go/pos {:name-pos [245 17]}} t2 ^{:go/pos {:name-pos [245 22]}} maskNotLow2Bits) ^{:go/pos {:name-pos [245 39]}} t3)]
+
+              ;; To add c * 5 to h, we first add cc = c * 4, and then add (cc >> 2) = c.
+
+              ^{:go/pos {:tok-pos [249 9]}} (set! (values ^{:go/pos {:name-pos [249 3]}} h0 ^{:go/pos {:name-pos [249 7]}} c) ^{:go/apos {3 [249 33]} :go/pos {:lparen [249 21] :rparen [249 34]}} (^{:go/pos {:dot [249 15] :name-pos [249 16] :x-pos [249 11]}} bits/Add64 ^{:go/pos {:name-pos [249 22]}} h0 ^{:go/pos {:dot [249 28] :name-pos [249 29]}} (.-lo ^{:go/pos {:name-pos [249 26]}} cc) 0))
+              ^{:go/pos {:tok-pos [250 9]}} (set! (values ^{:go/pos {:name-pos [250 3]}} h1 ^{:go/pos {:name-pos [250 7]}} c) ^{:go/pos {:lparen [250 21] :rparen [250 34]}} (^{:go/pos {:dot [250 15] :name-pos [250 16] :x-pos [250 11]}} bits/Add64 ^{:go/pos {:name-pos [250 22]}} h1 ^{:go/pos {:dot [250 28] :name-pos [250 29]}} (.-hi ^{:go/pos {:name-pos [250 26]}} cc) ^{:go/pos {:name-pos [250 33]}} c))
+              ^{:go/pos {:tok-pos [251 6]}} (set! ^{:go/pos {:name-pos [251 3]}} h2 + ^{:go/pos {:name-pos [251 9]}} c)
+
+              ^{:go/pos {:tok-pos [253 6]}} (set! ^{:go/pos {:name-pos [253 3]}} cc ^{:go/pos {:lparen [253 21] :rparen [253 24]}} (^{:go/pos {:name-pos [253 8]}} shiftRightBy2 ^{:go/pos {:name-pos [253 22]}} cc))
+
+              ^{:go/pos {:tok-pos [255 9]}} (set! (values ^{:go/pos {:name-pos [255 3]}} h0 ^{:go/pos {:name-pos [255 7]}} c) ^{:go/apos {3 [255 33]} :go/pos {:lparen [255 21] :rparen [255 34]}} (^{:go/pos {:dot [255 15] :name-pos [255 16] :x-pos [255 11]}} bits/Add64 ^{:go/pos {:name-pos [255 22]}} h0 ^{:go/pos {:dot [255 28] :name-pos [255 29]}} (.-lo ^{:go/pos {:name-pos [255 26]}} cc) 0))
+              ^{:go/pos {:tok-pos [256 9]}} (set! (values ^{:go/pos {:name-pos [256 3]}} h1 ^{:go/pos {:name-pos [256 7]}} c) ^{:go/pos {:lparen [256 21] :rparen [256 34]}} (^{:go/pos {:dot [256 15] :name-pos [256 16] :x-pos [256 11]}} bits/Add64 ^{:go/pos {:name-pos [256 22]}} h1 ^{:go/pos {:dot [256 28] :name-pos [256 29]}} (.-hi ^{:go/pos {:name-pos [256 26]}} cc) ^{:go/pos {:name-pos [256 33]}} c))
+              ^{:go/pos {:tok-pos [257 6]}} (set! ^{:go/pos {:name-pos [257 3]}} h2 + ^{:go/pos {:name-pos [257 9]}} c))))))
+
+    ;; h2 is at most 3 + 1 + 1 = 5, making the whole of h at most
+    ;;
+    ;;     5 * 2¹²⁸ + (2¹²⁸ - 1) = 6 * 2¹²⁸ - 1
+
+
+    ^{:go/pos {:tok-pos [264 37]}} (set! (values ^{:go/apos {2 [264 10]} :go/pos {:lbrack [264 9] :rbrack [264 11]}} (aget ^{:go/pos {:dot [264 7] :name-pos [264 8]}} (.-h ^{:go/pos {:name-pos [264 2]}} state) 0) ^{:go/apos {2 [264 22]} :go/pos {:lbrack [264 21] :rbrack [264 23]}} (aget ^{:go/pos {:dot [264 19] :name-pos [264 20]}} (.-h ^{:go/pos {:name-pos [264 14]}} state) 1) ^{:go/apos {2 [264 34]} :go/pos {:lbrack [264 33] :rbrack [264 35]}} (aget ^{:go/pos {:dot [264 31] :name-pos [264 32]}} (.-h ^{:go/pos {:name-pos [264 26]}} state) 2)) (values ^{:go/pos {:name-pos [264 39]}} h0 ^{:go/pos {:name-pos [264 43]}} h1 ^{:go/pos {:name-pos [264 47]}} h2))))
+
+
+^{:go/pos {:lparen [267 7] :rparen [270 1] :tok-pos [267 1]}} (go/const
+  ^{:go/apos {1 [268 27]} :go/atext {1 "0x0000000000000003"}} [^{:tag ^{:go/pos {:name-pos [268 18]}} uint64 :val 3 :go/pos {:name-pos [268 2]}} maskLow2Bits 0x0000000000000003]
+  [^{:tag ^{:go/pos {:name-pos [269 18]}} uint64 :val 18446744073709551612N :go/pos {:name-pos [269 2]}} maskNotLow2Bits ^{:go/pos {:op-pos [269 27]}} (bit-not ^{:go/pos {:name-pos [269 28]}} maskLow2Bits)])
+
+
+
+^{:go/pos {:doc [272 1] :func [273 1] :lbrace [273 38] :rbrace [273 66] :return [273 40]}} (go/func ^{:go/pos {:name-pos [273 6]}} select64 "select64 returns x if v == 1 and y if v == 0, in constant time.\n" ^{:tag ^{:go/pos {:name-pos [273 31]}} uint64 :go/pos {:closing [273 29] :opening [273 14]}} [^{:tag ^{:go/pos {:name-pos [273 23]}} uint64 :go/pos {:name-pos [273 15]}} v ^{:tag ^{:go/pos {:name-pos [273 23]}} uint64 :go/pos {:name-pos [273 18]}} x ^{:tag ^{:go/pos {:name-pos [273 23]}} uint64 :go/pos {:name-pos [273 21]}} y] ^{:go/pos {:op-pos [273 56]}} (bit-or ^{:go/pos {:op-pos [273 53]}} (bit-and ^{:go/pos {:op-pos [273 47]}} (bit-not ^{:go/apos {2 [273 51]} :go/parens [[[273 48] [273 52]]] :go/pos {:op-pos [273 50]}} (- ^{:go/pos {:name-pos [273 49]}} v 1)) ^{:go/pos {:name-pos [273 54]}} x) ^{:go/pos {:op-pos [273 63]}} (bit-and ^{:go/apos {2 [273 61]} :go/parens [[[273 58] [273 62]]] :go/pos {:op-pos [273 60]}} (- ^{:go/pos {:name-pos [273 59]}} v 1) ^{:go/pos {:name-pos [273 64]}} y)))
+
+
+^{:go/pos {:doc [275 1] :lparen [276 7] :rparen [280 1] :tok-pos [276 1]}} (go/const "[p0, p1, p2] is 2¹³⁰ - 5 in little endian order.\n"
+  ^{:go/apos {1 [277 7]} :go/atext {1 "0xFFFFFFFFFFFFFFFB"}} [^{:val 18446744073709551611N :go/pos {:name-pos [277 2]}} p0 0xFFFFFFFFFFFFFFFB]
+  ^{:go/apos {1 [278 7]} :go/atext {1 "0xFFFFFFFFFFFFFFFF"}} [^{:val 18446744073709551615N :go/pos {:name-pos [278 2]}} p1 0xFFFFFFFFFFFFFFFF]
+  ^{:go/apos {1 [279 7]} :go/atext {1 "0x0000000000000003"}} [^{:val 3 :go/pos {:name-pos [279 2]}} p2 0x0000000000000003])
+
+
+
+
+
+^{:go/pos {:doc [282 1] :func [285 1] :lbrace [285 63] :rbrace [312 1]}} (go/func ^{:go/pos {:name-pos [285 6]}} finalize "finalize completes the modular reduction of h and computes\n\n\tout = h + s  mod  2¹²⁸\n" ^{:go/pos {:closing [285 61] :opening [285 14]}} [^{:tag ^{:go/pos {:star [285 19]}} (* ^{:go/pos {:lbrack [285 20]}} (array ^{:go/pos {:name-pos [285 21]}} TagSize ^{:go/pos {:name-pos [285 29]}} byte)) :go/pos {:name-pos [285 15]}} out ^{:tag ^{:go/pos {:star [285 37]}} (* ^{:go/apos {1 [285 39]} :go/pos {:lbrack [285 38]}} (array 3 ^{:go/pos {:name-pos [285 41]}} uint64)) :go/pos {:name-pos [285 35]}} h ^{:tag ^{:go/pos {:star [285 51]}} (* ^{:go/apos {1 [285 53]} :go/pos {:lbrack [285 52]}} (array 2 ^{:go/pos {:name-pos [285 55]}} uint64)) :go/pos {:name-pos [285 49]}} s]
+  (let [^{:go/pos {:tok-pos [286 13]}} (values ^{:go/pos {:name-pos [286 2]}} h0 ^{:go/pos {:name-pos [286 6]}} h1 ^{:go/pos {:name-pos [286 10]}} h2) (values ^{:go/apos {2 [286 18]} :go/pos {:lbrack [286 17] :rbrack [286 19]}} (aget ^{:go/pos {:name-pos [286 16]}} h 0) ^{:go/apos {2 [286 24]} :go/pos {:lbrack [286 23] :rbrack [286 25]}} (aget ^{:go/pos {:name-pos [286 22]}} h 1) ^{:go/apos {2 [286 30]} :go/pos {:lbrack [286 29] :rbrack [286 31]}} (aget ^{:go/pos {:name-pos [286 28]}} h 2))
+
+      ;; After the partial reduction in updateGeneric, h might be more than
+      ;; 2¹³⁰ - 5, but will be less than 2 * (2¹³⁰ - 5). To complete the reduction
+      ;; in constant time, we compute t = h - (2¹³⁰ - 5), and select h as the
+      ;; result if the subtraction underflows, and t otherwise.
+
+      ^{:go/pos {:tok-pos [293 14]}} (values ^{:go/pos {:name-pos [293 2]}} hMinusP0 ^{:go/pos {:name-pos [293 12]}} b) ^{:go/apos {3 [293 36]} :go/pos {:lparen [293 27] :rparen [293 37]}} (^{:go/pos {:dot [293 21] :name-pos [293 22] :x-pos [293 17]}} bits/Sub64 ^{:go/pos {:name-pos [293 28]}} h0 ^{:go/pos {:name-pos [293 32]}} p0 0)
+      ^{:go/pos {:tok-pos [294 14]}} (values ^{:go/pos {:name-pos [294 2]}} hMinusP1 ^:assign ^{:go/pos {:name-pos [294 12]}} b) ^{:go/pos {:lparen [294 27] :rparen [294 37]}} (^{:go/pos {:dot [294 21] :name-pos [294 22] :x-pos [294 17]}} bits/Sub64 ^{:go/pos {:name-pos [294 28]}} h1 ^{:go/pos {:name-pos [294 32]}} p1 ^{:go/pos {:name-pos [294 36]}} b)]
+    ^{:go/pos {:tok-pos [295 7]}} (set! (values ^{:go/pos {:name-pos [295 2]}} _ ^{:go/pos {:name-pos [295 5]}} b) ^{:go/pos {:lparen [295 19] :rparen [295 29]}} (^{:go/pos {:dot [295 13] :name-pos [295 14] :x-pos [295 9]}} bits/Sub64 ^{:go/pos {:name-pos [295 20]}} h2 ^{:go/pos {:name-pos [295 24]}} p2 ^{:go/pos {:name-pos [295 28]}} b))
+
+    ;; h = h if h < p else h - p
+    ^{:go/pos {:tok-pos [298 5]}} (set! ^{:go/pos {:name-pos [298 2]}} h0 ^{:go/pos {:lparen [298 15] :rparen [298 31]}} (^{:go/pos {:name-pos [298 7]}} select64 ^{:go/pos {:name-pos [298 16]}} b ^{:go/pos {:name-pos [298 19]}} h0 ^{:go/pos {:name-pos [298 23]}} hMinusP0))
+    ^{:go/pos {:tok-pos [299 5]}} (set! ^{:go/pos {:name-pos [299 2]}} h1 ^{:go/pos {:lparen [299 15] :rparen [299 31]}} (^{:go/pos {:name-pos [299 7]}} select64 ^{:go/pos {:name-pos [299 16]}} b ^{:go/pos {:name-pos [299 19]}} h1 ^{:go/pos {:name-pos [299 23]}} hMinusP1))
+
+    ;; Finally, we compute the last Poly1305 step
+    ;;
+    ;;     tag = h + s  mod  2¹²⁸
+    ;;
+    ;; by just doing a wide addition with the 128 low bits of h and discarding
+    ;; the overflow.
+    (let [^{:go/pos {:tok-pos [307 8]}} (values ^:assign ^{:go/pos {:name-pos [307 2]}} h0 ^{:go/pos {:name-pos [307 6]}} c) ^{:go/apos {3 [307 32]} :go/pos {:lparen [307 21] :rparen [307 33]}} (^{:go/pos {:dot [307 15] :name-pos [307 16] :x-pos [307 11]}} bits/Add64 ^{:go/pos {:name-pos [307 22]}} h0 ^{:go/apos {2 [307 28]} :go/pos {:lbrack [307 27] :rbrack [307 29]}} (aget ^{:go/pos {:name-pos [307 26]}} s 0) 0)]
+      ^{:go/pos {:tok-pos [308 8]}} (set! (values ^{:go/pos {:name-pos [308 2]}} h1 ^{:go/pos {:name-pos [308 6]}} _) ^{:go/pos {:lparen [308 20] :rparen [308 32]}} (^{:go/pos {:dot [308 14] :name-pos [308 15] :x-pos [308 10]}} bits/Add64 ^{:go/pos {:name-pos [308 21]}} h1 ^{:go/apos {2 [308 27]} :go/pos {:lbrack [308 26] :rbrack [308 28]}} (aget ^{:go/pos {:name-pos [308 25]}} s 1) ^{:go/pos {:name-pos [308 31]}} c))
+
+      ^{:go/pos {:dot [310 21] :lparen [310 31] :name-pos [310 22] :rparen [310 44]}} (.PutUint64 ^{:go/pos {:dot [310 8] :name-pos [310 9] :x-pos [310 2]}} binary/LittleEndian ^{:go/apos {2 [310 36] 3 [310 38]} :go/pos {:lbrack [310 35] :rbrack [310 39]}} (subslice ^{:go/pos {:name-pos [310 32]}} out 0 8) ^{:go/pos {:name-pos [310 42]}} h0)
+      ^{:go/pos {:dot [311 21] :lparen [311 31] :name-pos [311 22] :rparen [311 45]}} (.PutUint64 ^{:go/pos {:dot [311 8] :name-pos [311 9] :x-pos [311 2]}} binary/LittleEndian ^{:go/apos {2 [311 36] 3 [311 38]} :go/pos {:lbrack [311 35] :rbrack [311 40]}} (subslice ^{:go/pos {:name-pos [311 32]}} out 8 16) ^{:go/pos {:name-pos [311 43]}} h1))))

@@ -1,0 +1,1065 @@
+;; Copyright 2009 The Go Authors. All rights reserved.
+;; Use of this source code is governed by a BSD-style
+;; license that can be found in the LICENSE file.
+
+(in-ns 'go.arbace.pytls) ^{:go/comments [[1 1 "// Copyright 2009 The Go Authors. All rights reserved."] [2 1 "// Use of this source code is governed by a BSD-style"] [3 1 "// license that can be found in the LICENSE file."] [24 1 "// serverHandshakeState contains details of a server handshake in progress."] [25 1 "// It's discarded once the handshake has completed."] [42 1 "// serverHandshake performs a TLS handshake as a server."] [74 2 "// For an overview of TLS handshaking, see RFC 5246, Section 7.3."] [80 3 "// The client has included a session ticket and so we do an abbreviated handshake."] [101 3 "// The client didn't include a session ticket, or it wasn't"] [102 3 "// valid so we do a full handshake."] [106 46 "// arbace: or PSK"] [134 1 "// readClientHello reads a ClientHello message and selects the protocol version."] [136 2 "// clientHelloMsg is included in the transcript, but we haven't initialized"] [137 2 "// it yet. The respective handshake functions will record it themselves."] [148 2 "// ECH processing has to be done before we do any other negotiation based on"] [149 2 "// the contents of the client hello, since we may swap it out completely."] [181 3 "// RFC 8446 4.2.1 indicates when the supported_versions extension is not sent,"] [182 3 "// compatible servers MUST negotiate TLS 1.2 or earlier if supported, even"] [183 3 "// if the client legacy version is TLS 1.3 or later."] [184 3 "//"] [185 3 "// Since we reject empty extensionSupportedVersions in the client hello unmarshal"] [186 3 "// finding the supportedVersions empty indicates the extension was not present."] [200 2 "// This check reflects some odd specification implied behavior. Client-facing servers"] [201 2 "// are supposed to reject hellos with outer ECH and inner ECH that offers 1.2, but"] [202 2 "// backend servers are allowed to accept hellos with inner ECH that offer 1.2, since"] [203 2 "// they cannot expect client-facing servers to behave properly. Since we act as both"] [204 2 "// a client-facing and backend server, we only enforce 1.3 being negotiated if we"] [205 2 "// saw a hello with outer ECH first. The spec probably should've made this an error,"] [206 2 "// but it didn't, and this matches the boringssl behavior."] [222 2 "// We only support null compression, so check that the client offered it."] [237 2 "// Downgrade protection canaries. See RFC 8446, Section 4.1.3."] [275 3 "// arbace: a PSK server needs no certificate; only PSK suites can be chosen."] [298 3 "// Although omitting the ec_point_formats extension is permitted, some"] [299 3 "// old OpenSSL version will refuse to handshake if not present."] [300 3 "//"] [301 3 "// Per RFC 4492, section 5.1.2, implementations MUST support the"] [302 3 "// uncompressed point format. See golang.org/issue/31943."] [315 4 "// ML-DSA can only be used with TLS 1.3."] [337 1 "// negotiateALPN picks a shared ALPN protocol that both sides support in server"] [338 1 "// preference order. If ALPN is not configured or the peer doesn't support it,"] [339 1 "// it returns \"\" and no error."] [343 4 "// RFC 9001, Section 8.1"] [359 2 "// As a special case, let http/1.1 clients connect to h2 servers as if they"] [360 2 "// didn't support ALPN. We used not to enforce protocol overlap, so over"] [361 2 "// time a number of HTTP servers were configured with only \"h2\", but"] [362 2 "// expected to accept connections from \"http/1.1\" clients. See Issue 46310."] [369 1 "// supportsECDHE returns whether ECDHE key exchanges can be used with this"] [370 1 "// pre-TLS 1.3 client."] [389 2 "// Per RFC 8422, Section 5.1.2, if the Supported Point Formats extension is"] [390 2 "// missing, uncompressed points are supported. If supportedPoints is empty,"] [391 2 "// the extension must be missing, as an empty extension body is rejected by"] [392 2 "// the parser. See https://go.dev/issue/49126."] [417 4 "// The client is doing a fallback connection. See RFC 7507."] [430 29 "// arbace"] [453 1 "// checkForResumption reports whether we should perform resumption on this connection."] [483 2 "// TLS 1.2 tickets don't natively have a lifetime, but we want to avoid"] [484 2 "// re-wrapping the same master secret in different tickets over and over for"] [485 2 "// too long, weakening forward secrecy."] [491 2 "// Never resume a session for a different TLS version."] [497 2 "// Check that the client is still offering the ciphersuite in the session."] [508 2 "// Check that we also support the ciphersuite from the session."] [536 2 "// RFC 7627, Section 5.3"] [541 3 "// Aborting is somewhat harsh, but it's a MUST and it would indicate a"] [542 3 "// weird downgrade in client capabilities."] [547 4 "// FIPS 140-3 requires the use of Extended Master Secret."] [570 2 "// We echo the client's session ID in the ServerHello to let it know"] [571 2 "// that we're doing a resumption."] [573 2 "// We always send a new session ticket, even if it wraps the same master"] [574 2 "// secret and it's potentially encrypted with the same key, to help the"] [575 2 "// client avoid cross-connection tracking from a network observer."] [588 36 "// arbace"] [614 3 "// No need to keep a full record of the handshake if client"] [615 3 "// certificates won't be used."] [627 2 "// Set localCertificate here, rather than at certificate selection time, so"] [628 2 "// that it is only populated when a certificate is actually presented to the"] [629 2 "// peer, and not on resumed connections."] [661 3 "// Request a client certificate"] [672 3 "// An empty list of certificateAuthorities signals to"] [673 3 "// the client that it may send any certificate in response"] [674 3 "// to our request. When we know the CAs we trust, then"] [675 3 "// we can send them down, so that the client can choose"] [676 3 "// an appropriate certificate to give to us."] [694 27 "// public key for client auth, if any"] [701 2 "// If we requested a client certificate, then the client must send a"] [702 2 "// certificate message, even if it's empty."] [726 36 "// arbace"] [731 2 "// Get client key exchange"] [763 2 "// If we received a client cert in response to our certificate request message,"] [764 2 "// the client will send us a certificateVerifyMsg immediately after the"] [765 2 "// clientKeyExchangeMsg. This message is a digest of all preceding"] [766 2 "// handshake-layer messages that is signed using the private key corresponding"] [767 2 "// to the client's certificate. This allows us to verify that the client is in"] [768 2 "// possession of the private key of the certificate."] [770 3 "// certificateVerifyMsg is included in the transcript, but not until"] [771 3 "// after we verify the handshake signature, since the state before"] [772 3 "// this message was sent is used."] [795 21 "// ensure godebug is initialized"] [841 60 "/* for reading */"] [843 61 "/* not for reading */"] [863 2 "// finishedMsg is included in the transcript, but not until after we"] [864 2 "// check the client version, since the state before this message was"] [865 2 "// sent is used during verification."] [902 3 "// If this is re-wrapping an old key, then keep"] [903 3 "// the original time it was created."] [948 1 "// processCertsFromClient takes a chain of client certificates either from a"] [949 1 "// certificateMsg message or a certificateMsgTLS13 message and verifies them."] [951 72 "// arbace"] [954 1 "// processCertsFromClientAuth is processCertsFromClient under the clientAuth"] [955 1 "// policy (arbace: post-handshake authentication has its own)."] [1034 36 "// arbace"]] :go/pos {:name [5 9] :package [5 1]} :go/semis [[70 35] [76 35] [81 35] [84 31] [87 35] [90 49] [93 25] [97 33] [103 33] [106 31] [109 31] [112 49] [117 35] [120 33] [123 25] [170 61] [306 51] [324 54] [579 59] [582 68] [587 65] [618 59] [621 68] [631 67] [638 71] [650 59] [654 64] [680 68] [686 69] [690 24] [712 5] [725 65] [758 90] [802 107] [813 97] [821 56] [859 36] [883 59] [923 61] [933 39] [939 68] [961 53] [967 33] [997 62] [999 91] [1033 75]] :go/trails [[54 20] [62 27] [529 62] [665 27] [711 37] [988 65] [1065 25]]} (go/file "handshake_server.go" :imports [
+
+
+    ^{:go/apos {1 [8 2]} :go/pos {:lparen [7 8] :rparen [22 1] :tok-pos [7 1]}} [fips140tls "arbace/pytls/internal/fips140tls"]
+    ^{:go/apos {1 [9 2]}} [context "context"]
+    ^{:go/apos {1 [10 2]}} [crypto "crypto"]
+    ^{:go/apos {1 [11 2]}} [ecdsa "crypto/ecdsa"]
+    ^{:go/apos {1 [12 2]}} [ed25519 "crypto/ed25519"]
+    ^{:go/apos {1 [13 2]}} [mldsa "crypto/mldsa"]
+    ^{:go/apos {1 [14 2]}} [rsa "crypto/rsa"]
+    ^{:go/apos {1 [15 2]}} [subtle "crypto/subtle"]
+    ^{:go/apos {1 [16 2]}} [x509 "crypto/x509"]
+    ^{:go/apos {1 [17 2]}} [errors "errors"]
+    ^{:go/apos {1 [18 2]}} [fmt "fmt"]
+    ^{:go/apos {1 [19 2]}} [hash "hash"]
+    ^{:go/apos {1 [20 2]}} [io "io"]
+    ^{:go/apos {1 [21 2]}} [time "time"]])
+
+
+
+
+^{:go/pos {:doc [24 1] :tok-pos [26 1]}} (go/type ^{:go/pos {:name-pos [26 6]}} serverHandshakeState "serverHandshakeState contains details of a server handshake in progress.\nIt's discarded once the handshake has completed.\n" ^{:go/pos {:lbrace [26 34] :rbrace [40 1] :struct [26 27]}} (struct
+    ^{:tag ^{:go/pos {:star [27 15]}} (* ^{:go/pos {:name-pos [27 16]}} Conn) :go/pos {:name-pos [27 2]}} c
+    ^{:tag ^{:go/pos {:dot [28 22] :name-pos [28 23] :x-pos [28 15]}} context/Context :go/pos {:name-pos [28 2]}} ctx
+    ^{:tag ^{:go/pos {:star [29 15]}} (* ^{:go/pos {:name-pos [29 16]}} clientHelloMsg) :go/pos {:name-pos [29 2]}} clientHello
+    ^{:tag ^{:go/pos {:star [30 15]}} (* ^{:go/pos {:name-pos [30 16]}} serverHelloMsg) :go/pos {:name-pos [30 2]}} hello
+    ^{:tag ^{:go/pos {:star [31 15]}} (* ^{:go/pos {:name-pos [31 16]}} cipherSuite) :go/pos {:name-pos [31 2]}} suite
+    ^{:tag ^{:go/pos {:name-pos [32 15]}} bool :go/pos {:name-pos [32 2]}} ecdheOk
+    ^{:tag ^{:go/pos {:name-pos [33 15]}} bool :go/pos {:name-pos [33 2]}} ecSignOk
+    ^{:tag ^{:go/pos {:name-pos [34 15]}} bool :go/pos {:name-pos [34 2]}} rsaDecryptOk
+    ^{:tag ^{:go/pos {:name-pos [35 15]}} bool :go/pos {:name-pos [35 2]}} rsaSignOk
+    ^{:tag ^{:go/pos {:star [36 15]}} (* ^{:go/pos {:name-pos [36 16]}} SessionState) :go/pos {:name-pos [36 2]}} sessionState
+    ^{:tag ^{:go/pos {:name-pos [37 15]}} finishedHash :go/pos {:name-pos [37 2]}} finishedHash
+    ^{:tag ^{:go/pos {:lbrack [38 15]}} (slice ^{:go/pos {:name-pos [38 17]}} byte) :go/pos {:name-pos [38 2]}} masterSecret
+    ^{:tag ^{:go/pos {:star [39 15]}} (* ^{:go/pos {:name-pos [39 16]}} Certificate) :go/pos {:name-pos [39 2]}} cert))
+
+
+
+^{:go/pos {:doc [42 1] :func [43 1] :lbrace [43 59] :rbrace [65 1] :return [64 2]}} (go/method ^{:go/pos {:name-pos [43 16]}} serverHandshake "serverHandshake performs a TLS handshake as a server.\n" ^{:tag ^{:go/pos {:name-pos [43 53]}} error :go/pos {:closing [43 51] :opening [43 31] :recv-closing [43 14] :recv-opening [43 6]}} [^{:tag ^{:go/pos {:star [43 9]}} (* ^{:go/pos {:name-pos [43 10]}} Conn) :go/pos {:name-pos [43 7]}} c ^{:tag ^{:go/pos {:dot [43 43] :name-pos [43 44] :x-pos [43 36]}} context/Context :go/pos {:name-pos [43 32]}} ctx]
+  (let [^{:go/pos {:tok-pos [44 24]}} (values ^{:go/pos {:name-pos [44 2]}} clientHello ^{:go/pos {:name-pos [44 15]}} ech ^{:go/pos {:name-pos [44 20]}} err) ^{:go/pos {:dot [44 28] :lparen [44 44] :name-pos [44 29] :rparen [44 48]}} (.readClientHello ^{:go/pos {:name-pos [44 27]}} c ^{:go/pos {:name-pos [44 45]}} ctx)]
+    ^{:go/pos {:if [45 2] :lbrace [45 16] :rbrace [47 2]}} (when ^{:go/apos {2 [45 12]} :go/pos {:op-pos [45 9]}} (!= ^{:go/pos {:name-pos [45 5]}} err nil)
+      ^{:go/pos {:return [46 3]}} (return ^{:go/pos {:name-pos [46 10]}} err))
+
+
+    ^{:go/pos {:if [49 2] :lbrace [49 28] :rbrace [57 2]}} (when ^{:go/pos {:op-pos [49 12]}} (== ^{:go/pos {:dot [49 6] :name-pos [49 7]}} (.-vers ^{:go/pos {:name-pos [49 5]}} c) ^{:go/pos {:name-pos [49 15]}} VersionTLS13)
+      (let [^{:go/pos {:name-pos [50 3] :tok-pos [50 6]}} hs ^{:go/acolon {2 [51 5] 4 [52 7] 6 [53 15] 8 [54 14]} :go/apos {2 [51 4] 4 [52 4] 6 [53 4] 8 [54 4]} :go/pos {:lbrace [50 34] :rbrace [55 3]}} (lit ^{:go/pos {:name-pos [50 9]}} serverHandshakeStateTLS13
+            :c ^{:go/pos {:name-pos [51 17]}} c
+            :ctx ^{:go/pos {:name-pos [52 17]}} ctx
+            :clientHello ^{:go/pos {:name-pos [53 17]}} clientHello
+            :echContext ^{:go/pos {:name-pos [54 17]}} ech)]
+
+        ^{:go/pos {:return [56 3]}} (return ^{:go/pos {:dot [56 12] :lparen [56 22] :name-pos [56 13] :rparen [56 23]}} (.handshake ^{:go/pos {:name-pos [56 10]}} hs))))
+
+
+    (let [^{:go/pos {:name-pos [59 2] :tok-pos [59 5]}} hs ^{:go/acolon {2 [60 4] 4 [61 6] 6 [62 14]} :go/apos {2 [60 3] 4 [61 3] 6 [62 3]} :go/pos {:lbrace [59 28] :rbrace [63 2]}} (lit ^{:go/pos {:name-pos [59 8]}} serverHandshakeState
+          :c ^{:go/pos {:name-pos [60 16]}} c
+          :ctx ^{:go/pos {:name-pos [61 16]}} ctx
+          :clientHello ^{:go/pos {:name-pos [62 16]}} clientHello)]
+
+      ^{:go/pos {:dot [64 11] :lparen [64 21] :name-pos [64 12] :rparen [64 22]}} (.handshake ^{:go/pos {:name-pos [64 9]}} hs))))
+
+
+^{:go/pos {:func [67 1] :lbrace [67 51] :rbrace [132 1] :return [131 2]}} (go/method ^{:go/pos {:name-pos [67 33]}} handshake ^{:tag ^{:go/pos {:name-pos [67 45]}} error :go/pos {:closing [67 43] :opening [67 42] :recv-closing [67 31] :recv-opening [67 6]}} [^{:tag ^{:go/pos {:star [67 10]}} (* ^{:go/pos {:name-pos [67 11]}} serverHandshakeState) :go/pos {:name-pos [67 7]}} hs]
+  ^{:go/apos {8 [131 9]}} (let [^{:go/pos {:name-pos [68 2] :tok-pos [68 4]}} c ^{:go/pos {:dot [68 9] :name-pos [68 10]}} (.-c ^{:go/pos {:name-pos [68 7]}} hs)]
+
+    ^{:go/pos {:if [70 2] :lbrace [70 48] :rbrace [72 2]}} (when [^{:go/pos {:name-pos [70 5] :tok-pos [70 9]}} err ^{:go/pos {:dot [70 14] :lparen [70 33] :name-pos [70 15] :rparen [70 34]}} (.processClientHello ^{:go/pos {:name-pos [70 12]}} hs)] ^{:go/apos {2 [70 44]} :go/pos {:op-pos [70 41]}} (!= ^{:go/pos {:name-pos [70 37]}} err nil)
+      ^{:go/pos {:return [71 3]}} (return ^{:go/pos {:name-pos [71 10]}} err))
+
+
+    ;; For an overview of TLS handshaking, see RFC 5246, Section 7.3.
+    ^{:go/apos {2 [75 16]} :go/pos {:tok-pos [75 14]}} (set! ^{:go/pos {:dot [75 3] :name-pos [75 4]}} (.-buffering ^{:go/pos {:name-pos [75 2]}} c) true)
+    ^{:go/pos {:if [76 2] :lbrace [76 48] :rbrace [78 2]}} (when [^{:go/pos {:name-pos [76 5] :tok-pos [76 9]}} err ^{:go/pos {:dot [76 14] :lparen [76 33] :name-pos [76 15] :rparen [76 34]}} (.checkForResumption ^{:go/pos {:name-pos [76 12]}} hs)] ^{:go/apos {2 [76 44]} :go/pos {:op-pos [76 41]}} (!= ^{:go/pos {:name-pos [76 37]}} err nil)
+      ^{:go/pos {:return [77 3]}} (return ^{:go/pos {:name-pos [77 10]}} err))
+
+    ^{:go/pos {:else-lbrace [100 9] :else-rbrace [126 2] :if [79 2] :lbrace [79 28] :rbrace [100 2]}} (if ^{:go/apos {2 [79 24]} :go/pos {:op-pos [79 21]}} (!= ^{:go/pos {:dot [79 7] :name-pos [79 8]}} (.-sessionState ^{:go/pos {:name-pos [79 5]}} hs) nil) ^{:go/pos {:lbrace [79 28] :rbrace [100 2]}} (do
+        ;; The client has included a session ticket and so we do an abbreviated handshake.
+        ^{:go/pos {:if [81 3] :lbrace [81 48] :rbrace [83 3]}} (when [^{:go/pos {:name-pos [81 6] :tok-pos [81 10]}} err ^{:go/pos {:dot [81 15] :lparen [81 33] :name-pos [81 16] :rparen [81 34]}} (.doResumeHandshake ^{:go/pos {:name-pos [81 13]}} hs)] ^{:go/apos {2 [81 44]} :go/pos {:op-pos [81 41]}} (!= ^{:go/pos {:name-pos [81 37]}} err nil)
+          ^{:go/pos {:return [82 4]}} (return ^{:go/pos {:name-pos [82 11]}} err))
+
+        ^{:go/pos {:if [84 3] :lbrace [84 44] :rbrace [86 3]}} (when [^{:go/pos {:name-pos [84 6] :tok-pos [84 10]}} err ^{:go/pos {:dot [84 15] :lparen [84 29] :name-pos [84 16] :rparen [84 30]}} (.establishKeys ^{:go/pos {:name-pos [84 13]}} hs)] ^{:go/apos {2 [84 40]} :go/pos {:op-pos [84 37]}} (!= ^{:go/pos {:name-pos [84 33]}} err nil)
+          ^{:go/pos {:return [85 4]}} (return ^{:go/pos {:name-pos [85 11]}} err))
+
+        ^{:go/pos {:if [87 3] :lbrace [87 48] :rbrace [89 3]}} (when [^{:go/pos {:name-pos [87 6] :tok-pos [87 10]}} err ^{:go/pos {:dot [87 15] :lparen [87 33] :name-pos [87 16] :rparen [87 34]}} (.sendSessionTicket ^{:go/pos {:name-pos [87 13]}} hs)] ^{:go/apos {2 [87 44]} :go/pos {:op-pos [87 41]}} (!= ^{:go/pos {:name-pos [87 37]}} err nil)
+          ^{:go/pos {:return [88 4]}} (return ^{:go/pos {:name-pos [88 11]}} err))
+
+        ^{:go/pos {:if [90 3] :lbrace [90 62] :rbrace [92 3]}} (when [^{:go/pos {:name-pos [90 6] :tok-pos [90 10]}} err ^{:go/pos {:dot [90 15] :lparen [90 28] :name-pos [90 16] :rparen [90 48]}} (.sendFinished ^{:go/pos {:name-pos [90 13]}} hs ^{:go/pos {:lbrack [90 45] :rbrack [90 47]}} (subslice ^{:go/pos {:dot [90 30] :name-pos [90 31]}} (.-serverFinished ^{:go/pos {:name-pos [90 29]}} c)))] ^{:go/apos {2 [90 58]} :go/pos {:op-pos [90 55]}} (!= ^{:go/pos {:name-pos [90 51]}} err nil)
+          ^{:go/pos {:return [91 4]}} (return ^{:go/pos {:name-pos [91 11]}} err))
+
+        ^{:go/pos {:if [93 3] :lbrace [93 38] :rbrace [95 3]}} (when [^{:go/pos {:tok-pos [93 13]}} (values ^{:go/pos {:name-pos [93 6]}} _ ^{:go/pos {:name-pos [93 9]}} err) ^{:go/pos {:dot [93 17] :lparen [93 23] :name-pos [93 18] :rparen [93 24]}} (.flush ^{:go/pos {:name-pos [93 16]}} c)] ^{:go/apos {2 [93 34]} :go/pos {:op-pos [93 31]}} (!= ^{:go/pos {:name-pos [93 27]}} err nil)
+          ^{:go/pos {:return [94 4]}} (return ^{:go/pos {:name-pos [94 11]}} err))
+
+        ^{:go/apos {2 [96 29]} :go/pos {:tok-pos [96 27]}} (set! ^{:go/pos {:dot [96 4] :name-pos [96 5]}} (.-clientFinishedIsFirst ^{:go/pos {:name-pos [96 3]}} c) false)
+        ^{:go/pos {:if [97 3] :lbrace [97 46] :rbrace [99 3]}} (when [^{:go/pos {:name-pos [97 6] :tok-pos [97 10]}} err ^{:go/apos {2 [97 29]} :go/pos {:dot [97 15] :lparen [97 28] :name-pos [97 16] :rparen [97 32]}} (.readFinished ^{:go/pos {:name-pos [97 13]}} hs nil)] ^{:go/apos {2 [97 42]} :go/pos {:op-pos [97 39]}} (!= ^{:go/pos {:name-pos [97 35]}} err nil)
+          ^{:go/pos {:return [98 4]}} (return ^{:go/pos {:name-pos [98 11]}} err)))
+
+      ^{:go/pos {:lbrace [100 9] :rbrace [126 2]}} (do
+        ;; The client didn't include a session ticket, or it wasn't
+        ;; valid so we do a full handshake.
+        ^{:go/pos {:if [103 3] :lbrace [103 46] :rbrace [105 3]}} (when [^{:go/pos {:name-pos [103 6] :tok-pos [103 10]}} err ^{:go/pos {:dot [103 15] :lparen [103 31] :name-pos [103 16] :rparen [103 32]}} (.pickCipherSuite ^{:go/pos {:name-pos [103 13]}} hs)] ^{:go/apos {2 [103 42]} :go/pos {:op-pos [103 39]}} (!= ^{:go/pos {:name-pos [103 35]}} err nil)
+          ^{:go/pos {:return [104 4]}} (return ^{:go/pos {:name-pos [104 11]}} err))
+
+        ^{:go/pos {:if [106 3] :lbrace [106 44] :rbrace [108 3]}} (when [^{:go/pos {:name-pos [106 6] :tok-pos [106 10]}} err ^{:go/pos {:dot [106 15] :lparen [106 29] :name-pos [106 16] :rparen [106 30]}} (.fullHandshake ^{:go/pos {:name-pos [106 13]}} hs)] ^{:go/apos {2 [106 40]} :go/pos {:op-pos [106 37]}} (!= ^{:go/pos {:name-pos [106 33]}} err nil) ; arbace: or PSK
+          ^{:go/pos {:return [107 4]}} (return ^{:go/pos {:name-pos [107 11]}} err))
+
+        ^{:go/pos {:if [109 3] :lbrace [109 44] :rbrace [111 3]}} (when [^{:go/pos {:name-pos [109 6] :tok-pos [109 10]}} err ^{:go/pos {:dot [109 15] :lparen [109 29] :name-pos [109 16] :rparen [109 30]}} (.establishKeys ^{:go/pos {:name-pos [109 13]}} hs)] ^{:go/apos {2 [109 40]} :go/pos {:op-pos [109 37]}} (!= ^{:go/pos {:name-pos [109 33]}} err nil)
+          ^{:go/pos {:return [110 4]}} (return ^{:go/pos {:name-pos [110 11]}} err))
+
+        ^{:go/pos {:if [112 3] :lbrace [112 62] :rbrace [114 3]}} (when [^{:go/pos {:name-pos [112 6] :tok-pos [112 10]}} err ^{:go/pos {:dot [112 15] :lparen [112 28] :name-pos [112 16] :rparen [112 48]}} (.readFinished ^{:go/pos {:name-pos [112 13]}} hs ^{:go/pos {:lbrack [112 45] :rbrack [112 47]}} (subslice ^{:go/pos {:dot [112 30] :name-pos [112 31]}} (.-clientFinished ^{:go/pos {:name-pos [112 29]}} c)))] ^{:go/apos {2 [112 58]} :go/pos {:op-pos [112 55]}} (!= ^{:go/pos {:name-pos [112 51]}} err nil)
+          ^{:go/pos {:return [113 4]}} (return ^{:go/pos {:name-pos [113 11]}} err))
+
+        ^{:go/apos {2 [115 29]} :go/pos {:tok-pos [115 27]}} (set! ^{:go/pos {:dot [115 4] :name-pos [115 5]}} (.-clientFinishedIsFirst ^{:go/pos {:name-pos [115 3]}} c) true)
+        ^{:go/apos {2 [116 17]} :go/pos {:tok-pos [116 15]}} (set! ^{:go/pos {:dot [116 4] :name-pos [116 5]}} (.-buffering ^{:go/pos {:name-pos [116 3]}} c) true)
+        ^{:go/pos {:if [117 3] :lbrace [117 48] :rbrace [119 3]}} (when [^{:go/pos {:name-pos [117 6] :tok-pos [117 10]}} err ^{:go/pos {:dot [117 15] :lparen [117 33] :name-pos [117 16] :rparen [117 34]}} (.sendSessionTicket ^{:go/pos {:name-pos [117 13]}} hs)] ^{:go/apos {2 [117 44]} :go/pos {:op-pos [117 41]}} (!= ^{:go/pos {:name-pos [117 37]}} err nil)
+          ^{:go/pos {:return [118 4]}} (return ^{:go/pos {:name-pos [118 11]}} err))
+
+        ^{:go/pos {:if [120 3] :lbrace [120 46] :rbrace [122 3]}} (when [^{:go/pos {:name-pos [120 6] :tok-pos [120 10]}} err ^{:go/apos {2 [120 29]} :go/pos {:dot [120 15] :lparen [120 28] :name-pos [120 16] :rparen [120 32]}} (.sendFinished ^{:go/pos {:name-pos [120 13]}} hs nil)] ^{:go/apos {2 [120 42]} :go/pos {:op-pos [120 39]}} (!= ^{:go/pos {:name-pos [120 35]}} err nil)
+          ^{:go/pos {:return [121 4]}} (return ^{:go/pos {:name-pos [121 11]}} err))
+
+        ^{:go/pos {:if [123 3] :lbrace [123 38] :rbrace [125 3]}} (when [^{:go/pos {:tok-pos [123 13]}} (values ^{:go/pos {:name-pos [123 6]}} _ ^{:go/pos {:name-pos [123 9]}} err) ^{:go/pos {:dot [123 17] :lparen [123 23] :name-pos [123 18] :rparen [123 24]}} (.flush ^{:go/pos {:name-pos [123 16]}} c)] ^{:go/apos {2 [123 34]} :go/pos {:op-pos [123 31]}} (!= ^{:go/pos {:name-pos [123 27]}} err nil)
+          ^{:go/pos {:return [124 4]}} (return ^{:go/pos {:name-pos [124 11]}} err))))
+
+
+
+    ^{:go/pos {:tok-pos [128 8]}} (set! ^{:go/pos {:dot [128 3] :name-pos [128 4]}} (.-ekm ^{:go/pos {:name-pos [128 2]}} c) ^{:go/pos {:lparen [128 29] :rparen [128 103]}} (^{:go/pos {:name-pos [128 10]}} ekmFromMasterSecret ^{:go/pos {:dot [128 31] :name-pos [128 32]}} (.-vers ^{:go/pos {:name-pos [128 30]}} c) ^{:go/pos {:dot [128 40] :name-pos [128 41]}} (.-suite ^{:go/pos {:name-pos [128 38]}} hs) ^{:go/pos {:dot [128 50] :name-pos [128 51]}} (.-masterSecret ^{:go/pos {:name-pos [128 48]}} hs) ^{:go/pos {:dot [128 79] :name-pos [128 80]}} (.-random ^{:go/pos {:dot [128 67] :name-pos [128 68]}} (.-clientHello ^{:go/pos {:name-pos [128 65]}} hs)) ^{:go/pos {:dot [128 96] :name-pos [128 97]}} (.-random ^{:go/pos {:dot [128 90] :name-pos [128 91]}} (.-hello ^{:go/pos {:name-pos [128 88]}} hs))))
+    ^{:go/apos {2 [129 30]} :go/pos {:dot [129 23] :lparen [129 29] :name-pos [129 24] :rparen [129 34]}} (.Store ^{:go/pos {:dot [129 3] :name-pos [129 4]}} (.-isHandshakeComplete ^{:go/pos {:name-pos [129 2]}} c) true)
+
+    nil))
+
+
+
+^{:go/pos {:doc [134 1] :func [135 1] :lbrace [135 97] :rbrace [213 1]}} (go/method ^{:go/pos {:name-pos [135 16]}} readClientHello "readClientHello reads a ClientHello message and selects the protocol version.\n" ^{:go/pos {:closing [135 51] :opening [135 31] :recv-closing [135 14] :recv-opening [135 6]}} [^{:tag ^{:go/pos {:star [135 9]}} (* ^{:go/pos {:name-pos [135 10]}} Conn) :go/pos {:name-pos [135 7]}} c ^{:tag ^{:go/pos {:dot [135 43] :name-pos [135 44] :x-pos [135 36]}} context/Context :go/pos {:name-pos [135 32]}} ctx] :results ^{:go/pos {:closing [135 95] :opening [135 53]}} [^{:go/pos {:star [135 54]}} (* ^{:go/pos {:name-pos [135 55]}} clientHelloMsg) ^{:go/pos {:star [135 71]}} (* ^{:go/pos {:name-pos [135 72]}} echServerContext) ^{:go/pos {:name-pos [135 90]}} error]
+  ;; clientHelloMsg is included in the transcript, but we haven't initialized
+  ;; it yet. The respective handshake functions will record it themselves.
+  (let [^{:go/pos {:tok-pos [138 11]}} (values ^{:go/pos {:name-pos [138 2]}} msg ^{:go/pos {:name-pos [138 7]}} err) ^{:go/apos {2 [138 30]} :go/pos {:dot [138 15] :lparen [138 29] :name-pos [138 16] :rparen [138 33]}} (.readHandshake ^{:go/pos {:name-pos [138 14]}} c nil)]
+    ^{:go/pos {:if [139 2] :lbrace [139 16] :rbrace [141 2]}} (when ^{:go/apos {2 [139 12]} :go/pos {:op-pos [139 9]}} (!= ^{:go/pos {:name-pos [139 5]}} err nil)
+      ^{:go/apos {1 [140 10] 2 [140 15]} :go/pos {:return [140 3]}} (return nil nil ^{:go/pos {:name-pos [140 20]}} err))
+
+    (let [^{:go/pos {:tok-pos [142 18]}} (values ^{:go/pos {:name-pos [142 2]}} clientHello ^{:go/pos {:name-pos [142 15]}} ok) ^{:go/pos {:dot [142 24] :lparen [142 25] :rparen [142 41]}} (assert ^{:go/pos {:star [142 26]}} (* ^{:go/pos {:name-pos [142 27]}} clientHelloMsg) ^{:go/pos {:name-pos [142 21]}} msg)]
+      ^{:go/pos {:if [143 2] :lbrace [143 9] :rbrace [146 2]}} (when ^{:go/pos {:op-pos [143 5]}} (not ^{:go/pos {:name-pos [143 6]}} ok)
+        ^{:go/pos {:dot [144 4] :lparen [144 14] :name-pos [144 5] :rparen [144 37]}} (.sendAlert ^{:go/pos {:name-pos [144 3]}} c ^{:go/pos {:name-pos [144 15]}} alertUnexpectedMessage)
+        ^{:go/apos {1 [145 10] 2 [145 15]} :go/pos {:return [145 3]}} (return nil nil ^{:go/pos {:lparen [145 42] :rparen [145 59]}} (^{:go/pos {:name-pos [145 20]}} unexpectedMessageError ^{:go/pos {:name-pos [145 43]}} clientHello ^{:go/pos {:name-pos [145 56]}} msg)))
+
+
+      ;; ECH processing has to be done before we do any other negotiation based on
+      ;; the contents of the client hello, since we may swap it out completely.
+      (let [^{:tag ^{:go/pos {:star [150 10]}} (* ^{:go/pos {:name-pos [150 11]}} echServerContext) :go/pos {:doc [148 2] :name-pos [150 6] :tok-pos [150 2]}} ech (zero ^{:go/pos {:star [150 10]}} (* ^{:go/pos {:name-pos [150 11]}} echServerContext))]
+        ^{:go/pos {:if [151 2] :lbrace [151 48] :rbrace [164 2]}} (when ^{:go/apos {2 [151 46]} :go/pos {:op-pos [151 43]}} (!= ^{:go/pos {:lparen [151 8] :rparen [151 41]}} (^{:go/pos {:name-pos [151 5]}} len ^{:go/pos {:dot [151 20] :name-pos [151 21]}} (.-encryptedClientHello ^{:go/pos {:name-pos [151 9]}} clientHello)) 0)
+          (let [^{:go/pos {:name-pos [152 3] :tok-pos [152 11]}} echKeys ^{:go/pos {:dot [152 22] :name-pos [152 23]}} (.-EncryptedClientHelloKeys ^{:go/pos {:dot [152 15] :name-pos [152 16]}} (.-config ^{:go/pos {:name-pos [152 14]}} c))]
+            ^{:go/pos {:if [153 3] :lbrace [153 50] :rbrace [159 3]}} (when ^{:go/apos {2 [153 46]} :go/pos {:op-pos [153 43]}} (!= ^{:go/pos {:dot [153 14] :name-pos [153 15]}} (.-GetEncryptedClientHelloKeys ^{:go/pos {:dot [153 7] :name-pos [153 8]}} (.-config ^{:go/pos {:name-pos [153 6]}} c)) nil)
+              ^{:go/pos {:tok-pos [154 17]}} (set! (values ^{:go/pos {:name-pos [154 4]}} echKeys ^{:go/pos {:name-pos [154 13]}} err) ^{:go/pos {:lparen [154 55] :rparen [154 92]}} (^{:go/pos {:dot [154 27] :name-pos [154 28]}} (.-GetEncryptedClientHelloKeys ^{:go/pos {:dot [154 20] :name-pos [154 21]}} (.-config ^{:go/pos {:name-pos [154 19]}} c)) ^{:go/pos {:lparen [154 71] :rparen [154 91]}} (^{:go/pos {:name-pos [154 56]}} clientHelloInfo ^{:go/pos {:name-pos [154 72]}} ctx ^{:go/pos {:name-pos [154 77]}} c ^{:go/pos {:name-pos [154 80]}} clientHello)))
+              ^{:go/pos {:if [155 4] :lbrace [155 18] :rbrace [158 4]}} (when ^{:go/apos {2 [155 14]} :go/pos {:op-pos [155 11]}} (!= ^{:go/pos {:name-pos [155 7]}} err nil)
+                ^{:go/pos {:dot [156 6] :lparen [156 16] :name-pos [156 7] :rparen [156 35]}} (.sendAlert ^{:go/pos {:name-pos [156 5]}} c ^{:go/pos {:name-pos [156 17]}} alertInternalError)
+                ^{:go/apos {1 [157 12] 2 [157 17]} :go/pos {:return [157 5]}} (return nil nil ^{:go/pos {:name-pos [157 22]}} err)))
+
+
+            ^{:go/pos {:tok-pos [160 25]}} (set! (values ^{:go/pos {:name-pos [160 3]}} clientHello ^{:go/pos {:name-pos [160 16]}} ech ^{:go/pos {:name-pos [160 21]}} err) ^{:go/pos {:dot [160 28] :lparen [160 50] :name-pos [160 29] :rparen [160 71]}} (.processECHClientHello ^{:go/pos {:name-pos [160 27]}} c ^{:go/pos {:name-pos [160 51]}} clientHello ^{:go/pos {:name-pos [160 64]}} echKeys))
+            ^{:go/pos {:if [161 3] :lbrace [161 17] :rbrace [163 3]}} (when ^{:go/apos {2 [161 13]} :go/pos {:op-pos [161 10]}} (!= ^{:go/pos {:name-pos [161 6]}} err nil)
+              ^{:go/apos {1 [162 11] 2 [162 16]} :go/pos {:return [162 4]}} (return nil nil ^{:go/pos {:name-pos [162 21]}} err))))
+
+
+
+        (let [^{:tag ^{:go/pos {:star [166 22]}} (* ^{:go/pos {:name-pos [166 23]}} Config) :go/pos {:name-pos [166 6] :tok-pos [166 2]}} configForClient (zero ^{:go/pos {:star [166 22]}} (* ^{:go/pos {:name-pos [166 23]}} Config))
+            ^{:go/pos {:name-pos [167 2] :tok-pos [167 17]}} originalConfig ^{:go/pos {:dot [167 21] :name-pos [167 22]}} (.-config ^{:go/pos {:name-pos [167 20]}} c)]
+          ^{:go/pos {:if [168 2] :lbrace [168 40] :rbrace [176 2]}} (when ^{:go/apos {2 [168 36]} :go/pos {:op-pos [168 33]}} (!= ^{:go/pos {:dot [168 13] :name-pos [168 14]}} (.-GetConfigForClient ^{:go/pos {:dot [168 6] :name-pos [168 7]}} (.-config ^{:go/pos {:name-pos [168 5]}} c)) nil)
+            (let [^{:go/pos {:name-pos [169 3] :tok-pos [169 7]}} chi ^{:go/pos {:lparen [169 25] :rparen [169 45]}} (^{:go/pos {:name-pos [169 10]}} clientHelloInfo ^{:go/pos {:name-pos [169 26]}} ctx ^{:go/pos {:name-pos [169 31]}} c ^{:go/pos {:name-pos [169 34]}} clientHello)]
+              ^{:go/pos {:if [170 3] :lbrace [170 74] :rbrace [173 3]}} (if [^{:go/pos {:tok-pos [170 27]}} (set! (values ^{:go/pos {:name-pos [170 6]}} configForClient ^{:go/pos {:name-pos [170 23]}} err) ^{:go/pos {:lparen [170 56] :rparen [170 60]}} (^{:go/pos {:dot [170 37] :name-pos [170 38]}} (.-GetConfigForClient ^{:go/pos {:dot [170 30] :name-pos [170 31]}} (.-config ^{:go/pos {:name-pos [170 29]}} c)) ^{:go/pos {:name-pos [170 57]}} chi))] ^{:go/apos {2 [170 70]} :go/pos {:op-pos [170 67]}} (!= ^{:go/pos {:name-pos [170 63]}} err nil) ^{:go/pos {:lbrace [170 74] :rbrace [173 3]}} (do
+                  ^{:go/pos {:dot [171 5] :lparen [171 15] :name-pos [171 6] :rparen [171 34]}} (.sendAlert ^{:go/pos {:name-pos [171 4]}} c ^{:go/pos {:name-pos [171 16]}} alertInternalError)
+                  ^{:go/apos {1 [172 11] 2 [172 16]} :go/pos {:return [172 4]}} (return nil nil ^{:go/pos {:name-pos [172 21]}} err))
+                ^{:go/pos {:if [173 10] :lbrace [173 36] :rbrace [175 3]}} (when ^{:go/apos {2 [173 32]} :go/pos {:op-pos [173 29]}} (!= ^{:go/pos {:name-pos [173 13]}} configForClient nil)
+                  ^{:go/pos {:tok-pos [174 13]}} (set! ^{:go/pos {:dot [174 5] :name-pos [174 6]}} (.-config ^{:go/pos {:name-pos [174 4]}} c) ^{:go/pos {:name-pos [174 15]}} configForClient)))))
+
+
+          ^{:go/pos {:tok-pos [177 15]}} (set! ^{:go/pos {:dot [177 3] :name-pos [177 4]}} (.-ticketKeys ^{:go/pos {:name-pos [177 2]}} c) ^{:go/pos {:dot [177 31] :lparen [177 42] :name-pos [177 32] :rparen [177 58]}} (.ticketKeys ^{:go/pos {:name-pos [177 17]}} originalConfig ^{:go/pos {:name-pos [177 43]}} configForClient))
+
+          (let [^{:go/pos {:name-pos [179 2] :tok-pos [179 17]}} clientVersions ^{:go/pos {:dot [179 31] :name-pos [179 32]}} (.-supportedVersions ^{:go/pos {:name-pos [179 20]}} clientHello)]
+            ^{:go/cond [[[180 2] [180 66] [188 2]] [[188 9] [188 37] [190 2]]] :go/pos {:if [180 2]}} (cond ^{:go/pos {:op-pos [180 38]}} (and ^{:go/pos {:op-pos [180 22]}} (>= ^{:go/pos {:dot [180 16] :name-pos [180 17]}} (.-vers ^{:go/pos {:name-pos [180 5]}} clientHello) ^{:go/pos {:name-pos [180 25]}} VersionTLS13) ^{:go/apos {2 [180 64]} :go/pos {:op-pos [180 61]}} (== ^{:go/pos {:lparen [180 44] :rparen [180 59]}} (^{:go/pos {:name-pos [180 41]}} len ^{:go/pos {:name-pos [180 45]}} clientVersions) 0))
+              ;; RFC 8446 4.2.1 indicates when the supported_versions extension is not sent,
+              ;; compatible servers MUST negotiate TLS 1.2 or earlier if supported, even
+              ;; if the client legacy version is TLS 1.3 or later.
+              ;;
+              ;; Since we reject empty extensionSupportedVersions in the client hello unmarshal
+              ;; finding the supportedVersions empty indicates the extension was not present.
+              ^{:go/pos {:tok-pos [187 18]}} (set! ^{:go/pos {:name-pos [187 3]}} clientVersions ^{:go/pos {:lparen [187 44] :rparen [187 57]}} (^{:go/pos {:name-pos [187 20]}} supportedVersionsFromMax ^{:go/pos {:name-pos [187 45]}} VersionTLS12))
+              ^{:go/apos {2 [188 35]} :go/pos {:op-pos [188 32]}} (== ^{:go/pos {:lparen [188 15] :rparen [188 30]}} (^{:go/pos {:name-pos [188 12]}} len ^{:go/pos {:name-pos [188 16]}} clientVersions) 0)
+              ^{:go/pos {:tok-pos [189 18]}} (set! ^{:go/pos {:name-pos [189 3]}} clientVersions ^{:go/pos {:lparen [189 44] :rparen [189 61]}} (^{:go/pos {:name-pos [189 20]}} supportedVersionsFromMax ^{:go/pos {:dot [189 56] :name-pos [189 57]}} (.-vers ^{:go/pos {:name-pos [189 45]}} clientHello))))
+
+            ^{:go/pos {:tok-pos [191 13]}} (set! (values ^{:go/pos {:dot [191 3] :name-pos [191 4]}} (.-vers ^{:go/pos {:name-pos [191 2]}} c) ^{:go/pos {:name-pos [191 10]}} ok) ^{:go/pos {:dot [191 23] :lparen [191 37] :name-pos [191 24] :rparen [191 79]}} (.mutualVersion ^{:go/pos {:dot [191 16] :name-pos [191 17]}} (.-config ^{:go/pos {:name-pos [191 15]}} c) ^{:go/pos {:name-pos [191 38]}} roleServer ^{:go/apos {2 [191 60]} :go/pos {:op-pos [191 57]}} (!= ^{:go/pos {:dot [191 51] :name-pos [191 52]}} (.-quic ^{:go/pos {:name-pos [191 50]}} c) nil) ^{:go/pos {:name-pos [191 65]}} clientVersions))
+            ^{:go/pos {:if [192 2] :lbrace [192 9] :rbrace [195 2]}} (when ^{:go/pos {:op-pos [192 5]}} (not ^{:go/pos {:name-pos [192 6]}} ok)
+              ^{:go/pos {:dot [193 4] :lparen [193 14] :name-pos [193 5] :rparen [193 35]}} (.sendAlert ^{:go/pos {:name-pos [193 3]}} c ^{:go/pos {:name-pos [193 15]}} alertProtocolVersion)
+              ^{:go/apos {1 [194 10] 2 [194 15]} :go/pos {:return [194 3]}} (return nil nil ^{:go/apos {1 [194 31]} :go/pos {:lparen [194 30] :rparen [194 98]}} (^{:go/pos {:dot [194 23] :name-pos [194 24] :x-pos [194 20]}} fmt/Errorf "tls: client offered only unsupported versions: %x" ^{:go/pos {:name-pos [194 84]}} clientVersions)))
+
+            ^{:go/apos {2 [196 15]} :go/pos {:tok-pos [196 13]}} (set! ^{:go/pos {:dot [196 3] :name-pos [196 4]}} (.-haveVers ^{:go/pos {:name-pos [196 2]}} c) true)
+            ^{:go/pos {:tok-pos [197 15]}} (set! ^{:go/pos {:dot [197 6] :name-pos [197 7]}} (.-version ^{:go/pos {:dot [197 3] :name-pos [197 4]}} (.-in ^{:go/pos {:name-pos [197 2]}} c)) ^{:go/pos {:dot [197 18] :name-pos [197 19]}} (.-vers ^{:go/pos {:name-pos [197 17]}} c))
+            ^{:go/pos {:tok-pos [198 16]}} (set! ^{:go/pos {:dot [198 7] :name-pos [198 8]}} (.-version ^{:go/pos {:dot [198 3] :name-pos [198 4]}} (.-out ^{:go/pos {:name-pos [198 2]}} c)) ^{:go/pos {:dot [198 19] :name-pos [198 20]}} (.-vers ^{:go/pos {:name-pos [198 18]}} c))
+
+            ;; This check reflects some odd specification implied behavior. Client-facing servers
+            ;; are supposed to reject hellos with outer ECH and inner ECH that offers 1.2, but
+            ;; backend servers are allowed to accept hellos with inner ECH that offer 1.2, since
+            ;; they cannot expect client-facing servers to behave properly. Since we act as both
+            ;; a client-facing and backend server, we only enforce 1.3 being negotiated if we
+            ;; saw a hello with outer ECH first. The spec probably should've made this an error,
+            ;; but it didn't, and this matches the boringssl behavior.
+            ^{:go/pos {:if [207 2] :lbrace [207 58] :rbrace [210 2]}} (when ^{:go/pos {:op-pos [207 28]}} (and ^{:go/pos {:op-pos [207 12]}} (!= ^{:go/pos {:dot [207 6] :name-pos [207 7]}} (.-vers ^{:go/pos {:name-pos [207 5]}} c) ^{:go/pos {:name-pos [207 15]}} VersionTLS13) ^:go/paren ^{:go/parens [[[207 31] [207 56]]] :go/pos {:op-pos [207 43]}} (and ^{:go/apos {2 [207 39]} :go/pos {:op-pos [207 36]}} (!= ^{:go/pos {:name-pos [207 32]}} ech nil) ^{:go/pos {:op-pos [207 46]}} (not ^{:go/pos {:dot [207 50] :name-pos [207 51]}} (.-inner ^{:go/pos {:name-pos [207 47]}} ech))))
+              ^{:go/pos {:dot [208 4] :lparen [208 14] :name-pos [208 5] :rparen [208 36]}} (.sendAlert ^{:go/pos {:name-pos [208 3]}} c ^{:go/pos {:name-pos [208 15]}} alertIllegalParameter)
+              ^{:go/apos {1 [209 10] 2 [209 15]} :go/pos {:return [209 3]}} (return nil nil ^{:go/apos {1 [209 31]} :go/pos {:lparen [209 30] :rparen [209 87]}} (^{:go/pos {:dot [209 26] :name-pos [209 27] :x-pos [209 20]}} errors/New "tls: Encrypted Client Hello cannot be used pre-TLS 1.3")))
+
+
+            ^{:go/apos {3 [212 27]} :go/pos {:return [212 2]}} (return ^{:go/pos {:name-pos [212 9]}} clientHello ^{:go/pos {:name-pos [212 22]}} ech nil)))))))
+
+
+^{:go/pos {:func [215 1] :lbrace [215 60] :rbrace [335 1] :return [334 2]}} (go/method ^{:go/pos {:name-pos [215 33]}} processClientHello ^{:tag ^{:go/pos {:name-pos [215 54]}} error :go/pos {:closing [215 52] :opening [215 51] :recv-closing [215 31] :recv-opening [215 6]}} [^{:tag ^{:go/pos {:star [215 10]}} (* ^{:go/pos {:name-pos [215 11]}} serverHandshakeState) :go/pos {:name-pos [215 7]}} hs]
+  (let [^{:go/pos {:name-pos [216 2] :tok-pos [216 4]}} c ^{:go/pos {:dot [216 9] :name-pos [216 10]}} (.-c ^{:go/pos {:name-pos [216 7]}} hs)]
+
+    ^{:go/pos {:tok-pos [218 11]}} (set! ^{:go/pos {:dot [218 4] :name-pos [218 5]}} (.-hello ^{:go/pos {:name-pos [218 2]}} hs) ^{:go/pos {:lparen [218 16] :rparen [218 31]}} (^{:go/pos {:name-pos [218 13]}} new ^{:go/pos {:name-pos [218 17]}} serverHelloMsg))
+    ^{:go/pos {:tok-pos [219 16]}} (set! ^{:go/pos {:dot [219 10] :name-pos [219 11]}} (.-vers ^{:go/pos {:dot [219 4] :name-pos [219 5]}} (.-hello ^{:go/pos {:name-pos [219 2]}} hs)) ^{:go/pos {:dot [219 19] :name-pos [219 20]}} (.-vers ^{:go/pos {:name-pos [219 18]}} c))
+
+    (let ^{:go/apos {1 [221 22]}} [^{:go/pos {:name-pos [221 2] :tok-pos [221 19]}} foundCompression false]
+      ;; We only support null compression, so check that the client offered it.
+      ^{:go/pos {:for [223 2] :lbrace [223 64] :range [223 24] :rbrace [228 2] :tok-pos [223 21]}} (range [^{:go/pos {:name-pos [223 6]}} _ ^{:go/pos {:name-pos [223 9]}} compression ^{:go/pos {:dot [223 44] :name-pos [223 45]}} (.-compressionMethods ^{:go/pos {:dot [223 32] :name-pos [223 33]}} (.-clientHello ^{:go/pos {:name-pos [223 30]}} hs))]
+        ^{:go/pos {:if [224 3] :lbrace [224 37] :rbrace [227 3]}} (when ^{:go/pos {:op-pos [224 18]}} (== ^{:go/pos {:name-pos [224 6]}} compression ^{:go/pos {:name-pos [224 21]}} compressionNone)
+          ^{:go/apos {2 [225 23]} :go/pos {:tok-pos [225 21]}} (set! ^{:go/pos {:name-pos [225 4]}} foundCompression true)
+          ^{:go/pos {:tok-pos [226 4]}} (break)))
+
+
+
+      ^{:go/pos {:if [230 2] :lbrace [230 23] :rbrace [233 2]}} (when ^{:go/pos {:op-pos [230 5]}} (not ^{:go/pos {:name-pos [230 6]}} foundCompression)
+        ^{:go/pos {:dot [231 4] :lparen [231 14] :name-pos [231 5] :rparen [231 36]}} (.sendAlert ^{:go/pos {:name-pos [231 3]}} c ^{:go/pos {:name-pos [231 15]}} alertIllegalParameter)
+        ^{:go/pos {:return [232 3]}} (return ^{:go/apos {1 [232 21]} :go/pos {:lparen [232 20] :rparen [232 76]}} (^{:go/pos {:dot [232 16] :name-pos [232 17] :x-pos [232 10]}} errors/New "tls: client does not support uncompressed connections")))
+
+
+      ^{:go/pos {:tok-pos [235 18]}} (set! ^{:go/pos {:dot [235 10] :name-pos [235 11]}} (.-random ^{:go/pos {:dot [235 4] :name-pos [235 5]}} (.-hello ^{:go/pos {:name-pos [235 2]}} hs)) ^{:go/apos {2 [235 33]} :go/pos {:lparen [235 24] :rparen [235 35]}} (^{:go/pos {:name-pos [235 20]}} make ^{:go/pos {:lbrack [235 25]}} (slice ^{:go/pos {:name-pos [235 27]}} byte) 32))
+      (let [^{:go/pos {:name-pos [236 2] :tok-pos [236 15]}} serverRandom ^{:go/pos {:dot [236 26] :name-pos [236 27]}} (.-random ^{:go/pos {:dot [236 20] :name-pos [236 21]}} (.-hello ^{:go/pos {:name-pos [236 18]}} hs))
+          ;; Downgrade protection canaries. See RFC 8446, Section 4.1.3.
+          ^{:go/pos {:name-pos [238 2] :tok-pos [238 10]}} maxVers ^{:go/pos {:dot [238 21] :lparen [238 41] :name-pos [238 22] :rparen [238 67]}} (.maxSupportedVersion ^{:go/pos {:dot [238 14] :name-pos [238 15]}} (.-config ^{:go/pos {:name-pos [238 13]}} c) ^{:go/pos {:name-pos [238 42]}} roleServer ^{:go/apos {2 [238 64]} :go/pos {:op-pos [238 61]}} (!= ^{:go/pos {:dot [238 55] :name-pos [238 56]}} (.-quic ^{:go/pos {:name-pos [238 54]}} c) nil))]
+        ^{:go/pos {:if [239 2] :lbrace [239 84] :rbrace [246 2]}} (when ^{:go/pos {:op-pos [239 49]}} (or ^{:go/pos {:op-pos [239 29]}} (and ^{:go/pos {:op-pos [239 13]}} (>= ^{:go/pos {:name-pos [239 5]}} maxVers ^{:go/pos {:name-pos [239 16]}} VersionTLS12) ^{:go/pos {:op-pos [239 39]}} (< ^{:go/pos {:dot [239 33] :name-pos [239 34]}} (.-vers ^{:go/pos {:name-pos [239 32]}} c) ^{:go/pos {:name-pos [239 41]}} maxVers)) ^{:go/pos {:name-pos [239 52]}} testingOnlyForceDowngradeCanary)
+          ^{:go/pos {:else-lbrace [242 10] :else-rbrace [244 3] :if [240 3] :lbrace [240 29] :rbrace [242 3]}} (if ^{:go/pos {:op-pos [240 13]}} (== ^{:go/pos {:dot [240 7] :name-pos [240 8]}} (.-vers ^{:go/pos {:name-pos [240 6]}} c) ^{:go/pos {:name-pos [240 16]}} VersionTLS12)
+            ^{:go/pos {:lparen [241 8] :rparen [241 48]}} (^{:go/pos {:name-pos [241 4]}} copy ^{:go/apos {2 [241 22]} :go/pos {:lbrack [241 21] :rbrack [241 25]}} (subslice ^{:go/pos {:name-pos [241 9]}} serverRandom 24) ^{:go/pos {:name-pos [241 28]}} downgradeCanaryTLS12)
+
+            ^{:go/pos {:lparen [243 8] :rparen [243 48]}} (^{:go/pos {:name-pos [243 4]}} copy ^{:go/apos {2 [243 22]} :go/pos {:lbrack [243 21] :rbrack [243 25]}} (subslice ^{:go/pos {:name-pos [243 9]}} serverRandom 24) ^{:go/pos {:name-pos [243 28]}} downgradeCanaryTLS11))
+
+          ^{:go/pos {:tok-pos [245 16]}} (set! ^{:go/pos {:name-pos [245 3]}} serverRandom ^{:go/apos {3 [245 32]} :go/pos {:lbrack [245 30] :rbrack [245 34]}} (subslice ^{:go/pos {:name-pos [245 18]}} serverRandom _ 24)))
+
+        (let [^{:go/pos {:tok-pos [247 9]}} (values ^{:go/pos {:name-pos [247 2]}} _ ^{:go/pos {:name-pos [247 5]}} err) ^{:go/pos {:lparen [247 23] :rparen [247 53]}} (^{:go/pos {:dot [247 14] :name-pos [247 15] :x-pos [247 12]}} io/ReadFull ^{:go/pos {:dot [247 32] :lparen [247 37] :name-pos [247 33] :rparen [247 38]}} (.rand ^{:go/pos {:dot [247 25] :name-pos [247 26]}} (.-config ^{:go/pos {:name-pos [247 24]}} c)) ^{:go/pos {:name-pos [247 41]}} serverRandom)]
+          ^{:go/pos {:if [248 2] :lbrace [248 16] :rbrace [251 2]}} (when ^{:go/apos {2 [248 12]} :go/pos {:op-pos [248 9]}} (!= ^{:go/pos {:name-pos [248 5]}} err nil)
+            ^{:go/pos {:dot [249 4] :lparen [249 14] :name-pos [249 5] :rparen [249 33]}} (.sendAlert ^{:go/pos {:name-pos [249 3]}} c ^{:go/pos {:name-pos [249 15]}} alertInternalError)
+            ^{:go/pos {:return [250 3]}} (return ^{:go/pos {:name-pos [250 10]}} err))
+
+
+          ^{:go/pos {:if [253 2] :lbrace [253 50] :rbrace [256 2]}} (when ^{:go/apos {2 [253 48]} :go/pos {:op-pos [253 45]}} (!= ^{:go/pos {:lparen [253 8] :rparen [253 43]}} (^{:go/pos {:name-pos [253 5]}} len ^{:go/pos {:dot [253 23] :name-pos [253 24]}} (.-secureRenegotiation ^{:go/pos {:dot [253 11] :name-pos [253 12]}} (.-clientHello ^{:go/pos {:name-pos [253 9]}} hs))) 0)
+            ^{:go/pos {:dot [254 4] :lparen [254 14] :name-pos [254 5] :rparen [254 36]}} (.sendAlert ^{:go/pos {:name-pos [254 3]}} c ^{:go/pos {:name-pos [254 15]}} alertHandshakeFailure)
+            ^{:go/pos {:return [255 3]}} (return ^{:go/apos {1 [255 21]} :go/pos {:lparen [255 20] :rparen [255 83]}} (^{:go/pos {:dot [255 16] :name-pos [255 17] :x-pos [255 10]}} errors/New "tls: initial handshake had non-empty renegotiation extension")))
+
+
+          ^{:go/pos {:tok-pos [258 32]}} (set! ^{:go/pos {:dot [258 10] :name-pos [258 11]}} (.-extendedMasterSecret ^{:go/pos {:dot [258 4] :name-pos [258 5]}} (.-hello ^{:go/pos {:name-pos [258 2]}} hs)) ^{:go/pos {:dot [258 48] :name-pos [258 49]}} (.-extendedMasterSecret ^{:go/pos {:dot [258 36] :name-pos [258 37]}} (.-clientHello ^{:go/pos {:name-pos [258 34]}} hs)))
+          ^{:go/pos {:tok-pos [259 40]}} (set! ^{:go/pos {:dot [259 10] :name-pos [259 11]}} (.-secureRenegotiationSupported ^{:go/pos {:dot [259 4] :name-pos [259 5]}} (.-hello ^{:go/pos {:name-pos [259 2]}} hs)) ^{:go/pos {:dot [259 56] :name-pos [259 57]}} (.-secureRenegotiationSupported ^{:go/pos {:dot [259 44] :name-pos [259 45]}} (.-clientHello ^{:go/pos {:name-pos [259 42]}} hs)))
+          ^{:go/pos {:tok-pos [260 29]}} (set! ^{:go/pos {:dot [260 10] :name-pos [260 11]}} (.-compressionMethod ^{:go/pos {:dot [260 4] :name-pos [260 5]}} (.-hello ^{:go/pos {:name-pos [260 2]}} hs)) ^{:go/pos {:name-pos [260 31]}} compressionNone)
+          ^{:go/pos {:if [261 2] :lbrace [261 40] :rbrace [263 2]}} (when ^{:go/apos {2 [261 38]} :go/pos {:op-pos [261 36]}} (> ^{:go/pos {:lparen [261 8] :rparen [261 34]}} (^{:go/pos {:name-pos [261 5]}} len ^{:go/pos {:dot [261 23] :name-pos [261 24]}} (.-serverName ^{:go/pos {:dot [261 11] :name-pos [261 12]}} (.-clientHello ^{:go/pos {:name-pos [261 9]}} hs))) 0)
+            ^{:go/pos {:tok-pos [262 16]}} (set! ^{:go/pos {:dot [262 4] :name-pos [262 5]}} (.-serverName ^{:go/pos {:name-pos [262 3]}} c) ^{:go/pos {:dot [262 32] :name-pos [262 33]}} (.-serverName ^{:go/pos {:dot [262 20] :name-pos [262 21]}} (.-clientHello ^{:go/pos {:name-pos [262 18]}} hs))))
+
+
+          ^{:go/apos {14 [334 9]}} (let [^{:go/pos {:tok-pos [265 21]}} (values ^{:go/pos {:name-pos [265 2]}} selectedProto ^:assign ^{:go/pos {:name-pos [265 17]}} err) ^{:go/apos {3 [265 89]} :go/pos {:lparen [265 37] :rparen [265 94]}} (^{:go/pos {:name-pos [265 24]}} negotiateALPN ^{:go/pos {:dot [265 46] :name-pos [265 47]}} (.-NextProtos ^{:go/pos {:dot [265 39] :name-pos [265 40]}} (.-config ^{:go/pos {:name-pos [265 38]}} c)) ^{:go/pos {:dot [265 73] :name-pos [265 74]}} (.-alpnProtocols ^{:go/pos {:dot [265 61] :name-pos [265 62]}} (.-clientHello ^{:go/pos {:name-pos [265 59]}} hs)) false)]
+            ^{:go/pos {:if [266 2] :lbrace [266 16] :rbrace [269 2]}} (when ^{:go/apos {2 [266 12]} :go/pos {:op-pos [266 9]}} (!= ^{:go/pos {:name-pos [266 5]}} err nil)
+              ^{:go/pos {:dot [267 4] :lparen [267 14] :name-pos [267 5] :rparen [267 41]}} (.sendAlert ^{:go/pos {:name-pos [267 3]}} c ^{:go/pos {:name-pos [267 15]}} alertNoApplicationProtocol)
+              ^{:go/pos {:return [268 3]}} (return ^{:go/pos {:name-pos [268 10]}} err))
+
+            ^{:go/pos {:tok-pos [270 24]}} (set! ^{:go/pos {:dot [270 10] :name-pos [270 11]}} (.-alpnProtocol ^{:go/pos {:dot [270 4] :name-pos [270 5]}} (.-hello ^{:go/pos {:name-pos [270 2]}} hs)) ^{:go/pos {:name-pos [270 26]}} selectedProto)
+            ^{:go/pos {:tok-pos [271 19]}} (set! ^{:go/pos {:dot [271 3] :name-pos [271 4]}} (.-clientProtocol ^{:go/pos {:name-pos [271 2]}} c) ^{:go/pos {:name-pos [271 21]}} selectedProto)
+
+            ^{:go/pos {:tok-pos [273 15]}} (set! (values ^{:go/pos {:dot [273 4] :name-pos [273 5]}} (.-cert ^{:go/pos {:name-pos [273 2]}} hs) ^{:go/pos {:name-pos [273 11]}} err) ^{:go/pos {:dot [273 25] :lparen [273 40] :name-pos [273 26] :rparen [273 83]}} (.getCertificate ^{:go/pos {:dot [273 18] :name-pos [273 19]}} (.-config ^{:go/pos {:name-pos [273 17]}} c) ^{:go/pos {:lparen [273 56] :rparen [273 82]}} (^{:go/pos {:name-pos [273 41]}} clientHelloInfo ^{:go/pos {:dot [273 59] :name-pos [273 60]}} (.-ctx ^{:go/pos {:name-pos [273 57]}} hs) ^{:go/pos {:name-pos [273 65]}} c ^{:go/pos {:dot [273 70] :name-pos [273 71]}} (.-clientHello ^{:go/pos {:name-pos [273 68]}} hs))))
+            ^{:go/pos {:if [274 2] :lbrace [274 67] :rbrace [277 2]}} (when ^{:go/pos {:op-pos [274 30]}} (and ^{:go/pos {:op-pos [274 9]}} (== ^{:go/pos {:name-pos [274 5]}} err ^{:go/pos {:name-pos [274 12]}} errNoCertificates) ^{:go/apos {2 [274 63]} :go/pos {:op-pos [274 60]}} (!= ^{:go/pos {:dot [274 41] :name-pos [274 42]}} (.-PSKServerCallback ^{:go/pos {:dot [274 34] :name-pos [274 35]}} (.-config ^{:go/pos {:name-pos [274 33]}} c)) nil))
+              ;; arbace: a PSK server needs no certificate; only PSK suites can be chosen.
+              ^{:go/pos {:tok-pos [276 16]}} (set! (values ^{:go/pos {:dot [276 5] :name-pos [276 6]}} (.-cert ^{:go/pos {:name-pos [276 3]}} hs) ^{:go/pos {:name-pos [276 12]}} err) ^{:go/apos {2 [276 34]}} (values ^{:go/pos {:op-pos [276 18]}} (addr ^{:go/pos {:lbrace [276 30] :rbrace [276 31]}} (lit ^{:go/pos {:name-pos [276 19]}} Certificate)) nil)))
+
+            ^{:go/pos {:if [278 2] :lbrace [278 16] :rbrace [285 2]}} (when ^{:go/apos {2 [278 12]} :go/pos {:op-pos [278 9]}} (!= ^{:go/pos {:name-pos [278 5]}} err nil)
+              ^{:go/pos {:else-lbrace [281 10] :else-rbrace [283 3] :if [279 3] :lbrace [279 31] :rbrace [281 3]}} (if ^{:go/pos {:op-pos [279 10]}} (== ^{:go/pos {:name-pos [279 6]}} err ^{:go/pos {:name-pos [279 13]}} errNoCertificates)
+                ^{:go/pos {:dot [280 5] :lparen [280 15] :name-pos [280 6] :rparen [280 37]}} (.sendAlert ^{:go/pos {:name-pos [280 4]}} c ^{:go/pos {:name-pos [280 16]}} alertUnrecognizedName)
+
+                ^{:go/pos {:dot [282 5] :lparen [282 15] :name-pos [282 6] :rparen [282 34]}} (.sendAlert ^{:go/pos {:name-pos [282 4]}} c ^{:go/pos {:name-pos [282 16]}} alertInternalError))
+
+              ^{:go/pos {:return [284 3]}} (return ^{:go/pos {:name-pos [284 10]}} err))
+
+
+            ^{:go/pos {:if [287 2] :lbrace [287 25] :rbrace [289 2]}} (when ^{:go/pos {:dot [287 19] :name-pos [287 20]}} (.-scts ^{:go/pos {:dot [287 7] :name-pos [287 8]}} (.-clientHello ^{:go/pos {:name-pos [287 5]}} hs))
+              ^{:go/pos {:tok-pos [288 17]}} (set! ^{:go/pos {:dot [288 11] :name-pos [288 12]}} (.-scts ^{:go/pos {:dot [288 5] :name-pos [288 6]}} (.-hello ^{:go/pos {:name-pos [288 3]}} hs)) ^{:go/pos {:dot [288 26] :name-pos [288 27]}} (.-SignedCertificateTimestamps ^{:go/pos {:dot [288 21] :name-pos [288 22]}} (.-cert ^{:go/pos {:name-pos [288 19]}} hs))))
+
+
+            ^{:go/pos {:tok-pos [291 18]}} (set! (values ^{:go/pos {:dot [291 4] :name-pos [291 5]}} (.-ecdheOk ^{:go/pos {:name-pos [291 2]}} hs) ^{:go/pos {:name-pos [291 14]}} err) ^{:go/pos {:lparen [291 33] :rparen [291 114]}} (^{:go/pos {:name-pos [291 20]}} supportsECDHE ^{:go/pos {:dot [291 35] :name-pos [291 36]}} (.-config ^{:go/pos {:name-pos [291 34]}} c) ^{:go/pos {:dot [291 45] :name-pos [291 46]}} (.-vers ^{:go/pos {:name-pos [291 44]}} c) ^{:go/pos {:dot [291 66] :name-pos [291 67]}} (.-supportedCurves ^{:go/pos {:dot [291 54] :name-pos [291 55]}} (.-clientHello ^{:go/pos {:name-pos [291 52]}} hs)) ^{:go/pos {:dot [291 98] :name-pos [291 99]}} (.-supportedPoints ^{:go/pos {:dot [291 86] :name-pos [291 87]}} (.-clientHello ^{:go/pos {:name-pos [291 84]}} hs))))
+            ^{:go/pos {:if [292 2] :lbrace [292 16] :rbrace [295 2]}} (when ^{:go/apos {2 [292 12]} :go/pos {:op-pos [292 9]}} (!= ^{:go/pos {:name-pos [292 5]}} err nil)
+              ^{:go/pos {:dot [293 4] :lparen [293 14] :name-pos [293 5] :rparen [293 36]}} (.sendAlert ^{:go/pos {:name-pos [293 3]}} c ^{:go/pos {:name-pos [293 15]}} alertMissingExtension)
+              ^{:go/pos {:return [294 3]}} (return ^{:go/pos {:name-pos [294 10]}} err))
+
+
+            ^{:go/pos {:if [297 2] :lbrace [297 59] :rbrace [304 2]}} (when ^{:go/pos {:op-pos [297 16]}} (and ^{:go/pos {:dot [297 7] :name-pos [297 8]}} (.-ecdheOk ^{:go/pos {:name-pos [297 5]}} hs) ^{:go/apos {2 [297 57]} :go/pos {:op-pos [297 55]}} (> ^{:go/pos {:lparen [297 22] :rparen [297 53]}} (^{:go/pos {:name-pos [297 19]}} len ^{:go/pos {:dot [297 37] :name-pos [297 38]}} (.-supportedPoints ^{:go/pos {:dot [297 25] :name-pos [297 26]}} (.-clientHello ^{:go/pos {:name-pos [297 23]}} hs))) 0))
+              ;; Although omitting the ec_point_formats extension is permitted, some
+              ;; old OpenSSL version will refuse to handshake if not present.
+              ;;
+              ;; Per RFC 4492, section 5.1.2, implementations MUST support the
+              ;; uncompressed point format. See golang.org/issue/31943.
+              ^{:go/pos {:tok-pos [303 28]}} (set! ^{:go/pos {:dot [303 11] :name-pos [303 12]}} (.-supportedPoints ^{:go/pos {:dot [303 5] :name-pos [303 6]}} (.-hello ^{:go/pos {:name-pos [303 3]}} hs)) ^{:go/pos {:lbrace [303 37] :rbrace [303 61]}} (lit ^{:go/pos {:lbrack [303 30]}} (slice ^{:go/pos {:name-pos [303 32]}} uint8) ^{:go/pos {:name-pos [303 38]}} pointFormatUncompressed)))
+
+
+            ^{:go/pos {:if [306 2] :lbrace [306 56] :rbrace [323 2]}} (when [^{:go/pos {:tok-pos [306 14]}} (values ^{:go/pos {:name-pos [306 5]}} priv ^{:go/pos {:name-pos [306 11]}} ok) ^{:go/pos {:dot [306 35] :lparen [306 36] :rparen [306 50]}} (assert ^{:go/pos {:dot [306 43] :name-pos [306 44] :x-pos [306 37]}} crypto/Signer ^{:go/pos {:dot [306 24] :name-pos [306 25]}} (.-PrivateKey ^{:go/pos {:dot [306 19] :name-pos [306 20]}} (.-cert ^{:go/pos {:name-pos [306 17]}} hs)))] ^{:go/pos {:name-pos [306 53]}} ok
+              ^{:go/pos {:guard-dot [307 23] :guard-lparen [307 24] :guard-rparen [307 29] :lbrace [307 31] :rbrace [322 3] :switch [307 3]}} (type-switch ^{:go/pos {:dot [307 14] :lparen [307 21] :name-pos [307 15] :rparen [307 22]}} (.Public ^{:go/pos {:name-pos [307 10]}} priv)
+                ^{:go/pos {:case [308 3] :colon [308 24]}} (case [^{:go/pos {:star [308 8]}} (* ^{:go/pos {:dot [308 14] :name-pos [308 15] :x-pos [308 9]}} ecdsa/PublicKey)]
+                  ^{:go/apos {2 [309 18]} :go/pos {:tok-pos [309 16]}} (set! ^{:go/pos {:dot [309 6] :name-pos [309 7]}} (.-ecSignOk ^{:go/pos {:name-pos [309 4]}} hs) true))
+                ^{:go/pos {:case [310 3] :colon [310 25]}} (case [^{:go/pos {:dot [310 15] :name-pos [310 16] :x-pos [310 8]}} ed25519/PublicKey]
+                  ^{:go/apos {2 [311 18]} :go/pos {:tok-pos [311 16]}} (set! ^{:go/pos {:dot [311 6] :name-pos [311 7]}} (.-ecSignOk ^{:go/pos {:name-pos [311 4]}} hs) true))
+                ^{:go/pos {:case [312 3] :colon [312 22]}} (case [^{:go/pos {:star [312 8]}} (* ^{:go/pos {:dot [312 12] :name-pos [312 13] :x-pos [312 9]}} rsa/PublicKey)]
+                  ^{:go/apos {2 [313 19]} :go/pos {:tok-pos [313 17]}} (set! ^{:go/pos {:dot [313 6] :name-pos [313 7]}} (.-rsaSignOk ^{:go/pos {:name-pos [313 4]}} hs) true))
+                ^{:go/pos {:case [314 3] :colon [314 24]}} (case [^{:go/pos {:star [314 8]}} (* ^{:go/pos {:dot [314 14] :name-pos [314 15] :x-pos [314 9]}} mldsa/PublicKey)]
+                  ;; ML-DSA can only be used with TLS 1.3.
+                  ^{:go/pos {:dot [316 5] :lparen [316 15] :name-pos [316 6] :rparen [316 34]}} (.sendAlert ^{:go/pos {:name-pos [316 4]}} c ^{:go/pos {:name-pos [316 16]}} alertInternalError)
+                  ^{:go/pos {:return [317 4]}} (return ^{:go/apos {1 [317 22]} :go/pos {:lparen [317 21] :rparen [318 24]}} (^{:go/pos {:dot [317 14] :name-pos [317 15] :x-pos [317 11]}} fmt/Errorf "tls: ML-DSA certificates require TLS 1.3, but client negotiated %s"
+                      ^{:go/pos {:lparen [318 16] :rparen [318 23]}} (^{:go/pos {:name-pos [318 5]}} VersionName ^{:go/pos {:dot [318 18] :name-pos [318 19]}} (.-vers ^{:go/pos {:name-pos [318 17]}} c)))))
+                ^{:go/pos {:case [319 3] :colon [319 10]}} (default
+                  ^{:go/pos {:dot [320 5] :lparen [320 15] :name-pos [320 6] :rparen [320 34]}} (.sendAlert ^{:go/pos {:name-pos [320 4]}} c ^{:go/pos {:name-pos [320 16]}} alertInternalError)
+                  ^{:go/pos {:return [321 4]}} (return ^{:go/apos {1 [321 22]} :go/pos {:lparen [321 21] :rparen [321 77]}} (^{:go/pos {:dot [321 14] :name-pos [321 15] :x-pos [321 11]}} fmt/Errorf "tls: unsupported signing key type (%T)" ^{:go/pos {:dot [321 68] :lparen [321 75] :name-pos [321 69] :rparen [321 76]}} (.Public ^{:go/pos {:name-pos [321 64]}} priv))))))
+
+
+            ^{:go/pos {:if [324 2] :lbrace [324 59] :rbrace [332 2]}} (when [^{:go/pos {:tok-pos [324 14]}} (values ^{:go/pos {:name-pos [324 5]}} priv ^{:go/pos {:name-pos [324 11]}} ok) ^{:go/pos {:dot [324 35] :lparen [324 36] :rparen [324 53]}} (assert ^{:go/pos {:dot [324 43] :name-pos [324 44] :x-pos [324 37]}} crypto/Decrypter ^{:go/pos {:dot [324 24] :name-pos [324 25]}} (.-PrivateKey ^{:go/pos {:dot [324 19] :name-pos [324 20]}} (.-cert ^{:go/pos {:name-pos [324 17]}} hs)))] ^{:go/pos {:name-pos [324 56]}} ok
+              ^{:go/pos {:guard-dot [325 23] :guard-lparen [325 24] :guard-rparen [325 29] :lbrace [325 31] :rbrace [331 3] :switch [325 3]}} (type-switch ^{:go/pos {:dot [325 14] :lparen [325 21] :name-pos [325 15] :rparen [325 22]}} (.Public ^{:go/pos {:name-pos [325 10]}} priv)
+                ^{:go/pos {:case [326 3] :colon [326 22]}} (case [^{:go/pos {:star [326 8]}} (* ^{:go/pos {:dot [326 12] :name-pos [326 13] :x-pos [326 9]}} rsa/PublicKey)]
+                  ^{:go/apos {2 [327 22]} :go/pos {:tok-pos [327 20]}} (set! ^{:go/pos {:dot [327 6] :name-pos [327 7]}} (.-rsaDecryptOk ^{:go/pos {:name-pos [327 4]}} hs) true))
+                ^{:go/pos {:case [328 3] :colon [328 10]}} (default
+                  ^{:go/pos {:dot [329 5] :lparen [329 15] :name-pos [329 6] :rparen [329 34]}} (.sendAlert ^{:go/pos {:name-pos [329 4]}} c ^{:go/pos {:name-pos [329 16]}} alertInternalError)
+                  ^{:go/pos {:return [330 4]}} (return ^{:go/apos {1 [330 22]} :go/pos {:lparen [330 21] :rparen [330 80]}} (^{:go/pos {:dot [330 14] :name-pos [330 15] :x-pos [330 11]}} fmt/Errorf "tls: unsupported decryption key type (%T)" ^{:go/pos {:dot [330 71] :lparen [330 78] :name-pos [330 72] :rparen [330 79]}} (.Public ^{:go/pos {:name-pos [330 67]}} priv))))))
+
+
+
+            nil))))))
+
+
+
+
+
+^{:go/pos {:doc [337 1] :func [340 1] :lbrace [340 84] :rbrace [367 1]}} (go/func ^{:go/pos {:name-pos [340 6]}} negotiateALPN "negotiateALPN picks a shared ALPN protocol that both sides support in server\npreference order. If ALPN is not configured or the peer doesn't support it,\nit returns \"\" and no error.\n" ^{:go/pos {:closing [340 66] :opening [340 19]}} [^{:tag ^{:go/pos {:lbrack [340 47]}} (slice ^{:go/pos {:name-pos [340 49]}} string) :go/pos {:name-pos [340 20]}} serverProtos ^{:tag ^{:go/pos {:lbrack [340 47]}} (slice ^{:go/pos {:name-pos [340 49]}} string) :go/pos {:name-pos [340 34]}} clientProtos ^{:tag ^{:go/pos {:name-pos [340 62]}} bool :go/pos {:name-pos [340 57]}} quic] :results ^{:go/pos {:closing [340 82] :opening [340 68]}} [^{:go/pos {:name-pos [340 69]}} string ^{:go/pos {:name-pos [340 77]}} error]
+  ^{:go/pos {:if [341 2] :lbrace [341 54] :rbrace [347 2]}} (when ^{:go/pos {:op-pos [341 28]}} (or ^{:go/apos {2 [341 26]} :go/pos {:op-pos [341 23]}} (== ^{:go/pos {:lparen [341 8] :rparen [341 21]}} (^{:go/pos {:name-pos [341 5]}} len ^{:go/pos {:name-pos [341 9]}} serverProtos) 0) ^{:go/apos {2 [341 52]} :go/pos {:op-pos [341 49]}} (== ^{:go/pos {:lparen [341 34] :rparen [341 47]}} (^{:go/pos {:name-pos [341 31]}} len ^{:go/pos {:name-pos [341 35]}} clientProtos) 0))
+    ^{:go/pos {:if [342 3] :lbrace [342 37] :rbrace [345 3]}} (when ^{:go/pos {:op-pos [342 11]}} (and ^{:go/pos {:name-pos [342 6]}} quic ^{:go/apos {2 [342 35]} :go/pos {:op-pos [342 32]}} (!= ^{:go/pos {:lparen [342 17] :rparen [342 30]}} (^{:go/pos {:name-pos [342 14]}} len ^{:go/pos {:name-pos [342 18]}} serverProtos) 0))
+      ;; RFC 9001, Section 8.1
+      ^{:go/apos {1 [344 11]} :go/pos {:return [344 4]}} (return "" ^{:go/apos {1 [344 26]} :go/pos {:lparen [344 25] :rparen [344 79]}} (^{:go/pos {:dot [344 18] :name-pos [344 19] :x-pos [344 15]}} fmt/Errorf "tls: client did not request an application protocol")))
+
+    ^{:go/apos {1 [346 10] 2 [346 14]} :go/pos {:return [346 3]}} (return "" nil))
+
+  (let [^{:tag ^{:go/pos {:name-pos [348 21]}} bool :go/pos {:name-pos [348 6] :tok-pos [348 2]}} http11fallback (zero ^{:go/pos {:name-pos [348 21]}} bool)]
+    ^{:go/pos {:for [349 2] :lbrace [349 33] :range [349 14] :rbrace [358 2] :tok-pos [349 11]}} (range [^{:go/pos {:name-pos [349 6]}} _ ^{:go/pos {:name-pos [349 9]}} s ^{:go/pos {:name-pos [349 20]}} serverProtos]
+      ^{:go/pos {:for [350 3] :lbrace [350 34] :range [350 15] :rbrace [357 3] :tok-pos [350 12]}} (range [^{:go/pos {:name-pos [350 7]}} _ ^{:go/pos {:name-pos [350 10]}} c ^{:go/pos {:name-pos [350 21]}} clientProtos]
+        ^{:go/pos {:if [351 4] :lbrace [351 14] :rbrace [353 4]}} (when ^{:go/pos {:op-pos [351 9]}} (== ^{:go/pos {:name-pos [351 7]}} s ^{:go/pos {:name-pos [351 12]}} c)
+          ^{:go/apos {2 [352 15]} :go/pos {:return [352 5]}} (return ^{:go/pos {:name-pos [352 12]}} s nil))
+
+        ^{:go/pos {:if [354 4] :lbrace [354 36] :rbrace [356 4]}} (when ^{:go/pos {:op-pos [354 17]}} (and ^{:go/apos {2 [354 12]} :go/pos {:op-pos [354 9]}} (== ^{:go/pos {:name-pos [354 7]}} s "h2") ^{:go/apos {2 [354 25]} :go/pos {:op-pos [354 22]}} (== ^{:go/pos {:name-pos [354 20]}} c "http/1.1"))
+          ^{:go/apos {2 [355 22]} :go/pos {:tok-pos [355 20]}} (set! ^{:go/pos {:name-pos [355 5]}} http11fallback true))))
+
+
+
+    ;; As a special case, let http/1.1 clients connect to h2 servers as if they
+    ;; didn't support ALPN. We used not to enforce protocol overlap, so over
+    ;; time a number of HTTP servers were configured with only "h2", but
+    ;; expected to accept connections from "http/1.1" clients. See Issue 46310.
+    ^{:go/pos {:if [363 2] :lbrace [363 20] :rbrace [365 2]}} (when ^{:go/pos {:name-pos [363 5]}} http11fallback
+      ^{:go/apos {1 [364 10] 2 [364 14]} :go/pos {:return [364 3]}} (return "" nil))
+
+    ^{:go/apos {1 [366 9]} :go/pos {:return [366 2]}} (return "" ^{:go/apos {1 [366 24]} :go/pos {:lparen [366 23] :rparen [366 100]}} (^{:go/pos {:dot [366 16] :name-pos [366 17] :x-pos [366 13]}} fmt/Errorf "tls: client requested unsupported application protocols (%q)" ^{:go/pos {:name-pos [366 88]}} clientProtos))))
+
+
+
+
+^{:go/pos {:doc [369 1] :func [371 1] :lbrace [371 113] :rbrace [400 1]}} (go/func ^{:go/pos {:name-pos [371 6]}} supportsECDHE "supportsECDHE returns whether ECDHE key exchanges can be used with this\npre-TLS 1.3 client.\n" ^{:go/pos {:closing [371 97] :opening [371 19]}} [^{:tag ^{:go/pos {:star [371 22]}} (* ^{:go/pos {:name-pos [371 23]}} Config) :go/pos {:name-pos [371 20]}} c ^{:tag ^{:go/pos {:name-pos [371 39]}} uint16 :go/pos {:name-pos [371 31]}} version ^{:tag ^{:go/pos {:lbrack [371 63]}} (slice ^{:go/pos {:name-pos [371 65]}} CurveID) :go/pos {:name-pos [371 47]}} supportedCurves ^{:tag ^{:go/pos {:lbrack [371 90]}} (slice ^{:go/pos {:name-pos [371 92]}} uint8) :go/pos {:name-pos [371 74]}} supportedPoints] :results ^{:go/pos {:closing [371 111] :opening [371 99]}} [^{:go/pos {:name-pos [371 100]}} bool ^{:go/pos {:name-pos [371 106]}} error]
+  (let ^{:go/apos {1 [372 19]}} [^{:go/pos {:name-pos [372 2] :tok-pos [372 16]}} supportsCurve false]
+    ^{:go/pos {:for [373 2] :lbrace [373 40] :range [373 18] :rbrace [378 2] :tok-pos [373 15]}} (range [^{:go/pos {:name-pos [373 6]}} _ ^{:go/pos {:name-pos [373 9]}} curve ^{:go/pos {:name-pos [373 24]}} supportedCurves]
+      ^{:go/pos {:if [374 3] :lbrace [374 38] :rbrace [377 3]}} (when ^{:go/pos {:dot [374 7] :lparen [374 21] :name-pos [374 8] :rparen [374 36]}} (.supportsCurve ^{:go/pos {:name-pos [374 6]}} c ^{:go/pos {:name-pos [374 22]}} version ^{:go/pos {:name-pos [374 31]}} curve)
+        ^{:go/apos {2 [375 20]} :go/pos {:tok-pos [375 18]}} (set! ^{:go/pos {:name-pos [375 4]}} supportsCurve true)
+        ^{:go/pos {:tok-pos [376 4]}} (break)))
+
+
+
+    (let ^{:go/apos {1 [380 25] 3 [381 32]}} [^{:go/pos {:name-pos [380 2] :tok-pos [380 22]}} supportsPointFormat false
+        ^{:go/pos {:name-pos [381 2] :tok-pos [381 29]}} offeredNonCompressedFormat false]
+      ^{:go/pos {:for [382 2] :lbrace [382 46] :range [382 24] :rbrace [388 2] :tok-pos [382 21]}} (range [^{:go/pos {:name-pos [382 6]}} _ ^{:go/pos {:name-pos [382 9]}} pointFormat ^{:go/pos {:name-pos [382 30]}} supportedPoints]
+        ^{:go/pos {:else-lbrace [385 10] :else-rbrace [387 3] :if [383 3] :lbrace [383 45] :rbrace [385 3]}} (if ^{:go/pos {:op-pos [383 18]}} (== ^{:go/pos {:name-pos [383 6]}} pointFormat ^{:go/pos {:name-pos [383 21]}} pointFormatUncompressed)
+          ^{:go/apos {2 [384 26]} :go/pos {:tok-pos [384 24]}} (set! ^{:go/pos {:name-pos [384 4]}} supportsPointFormat true)
+
+          ^{:go/apos {2 [386 33]} :go/pos {:tok-pos [386 31]}} (set! ^{:go/pos {:name-pos [386 4]}} offeredNonCompressedFormat true)))
+
+
+      ;; Per RFC 8422, Section 5.1.2, if the Supported Point Formats extension is
+      ;; missing, uncompressed points are supported. If supportedPoints is empty,
+      ;; the extension must be missing, as an empty extension body is rejected by
+      ;; the parser. See https://go.dev/issue/49126.
+      ^{:go/cond [[[393 2] [393 31] [395 2]] [[395 9] [395 63] [397 2]]] :go/pos {:if [393 2]}} (cond ^{:go/apos {2 [393 29]} :go/pos {:op-pos [393 26]}} (== ^{:go/pos {:lparen [393 8] :rparen [393 24]}} (^{:go/pos {:name-pos [393 5]}} len ^{:go/pos {:name-pos [393 9]}} supportedPoints) 0)
+        ^{:go/apos {2 [394 25]} :go/pos {:tok-pos [394 23]}} (set! ^{:go/pos {:name-pos [394 3]}} supportsPointFormat true)
+        ^{:go/pos {:op-pos [395 39]}} (and ^{:go/pos {:name-pos [395 12]}} offeredNonCompressedFormat ^{:go/pos {:op-pos [395 42]}} (not ^{:go/pos {:name-pos [395 43]}} supportsPointFormat))
+        ^{:go/apos {1 [396 10]} :go/pos {:return [396 3]}} (return false ^{:go/apos {1 [396 28]} :go/pos {:lparen [396 27] :rparen [396 81]}} (^{:go/pos {:dot [396 23] :name-pos [396 24] :x-pos [396 17]}} errors/New "tls: client offered only incompatible point formats")))
+
+
+      ^{:go/apos {2 [399 47]} :go/pos {:return [399 2]}} (return ^{:go/pos {:op-pos [399 23]}} (and ^{:go/pos {:name-pos [399 9]}} supportsCurve ^{:go/pos {:name-pos [399 26]}} supportsPointFormat) nil))))
+
+
+^{:go/pos {:func [402 1] :lbrace [402 57] :rbrace [427 1] :return [426 2]}} (go/method ^{:go/pos {:name-pos [402 33]}} pickCipherSuite ^{:tag ^{:go/pos {:name-pos [402 51]}} error :go/pos {:closing [402 49] :opening [402 48] :recv-closing [402 31] :recv-opening [402 6]}} [^{:tag ^{:go/pos {:star [402 10]}} (* ^{:go/pos {:name-pos [402 11]}} serverHandshakeState) :go/pos {:name-pos [402 7]}} hs]
+  ^{:go/apos {6 [426 9]}} (let [^{:go/pos {:name-pos [403 2] :tok-pos [403 4]}} c ^{:go/pos {:dot [403 9] :name-pos [403 10]}} (.-c ^{:go/pos {:name-pos [403 7]}} hs)
+
+      ^{:go/pos {:name-pos [405 2] :tok-pos [405 17]}} preferenceList ^{:go/pos {:dot [405 28] :lparen [405 41] :name-pos [405 29] :rparen [405 88]}} (.cipherSuites ^{:go/pos {:dot [405 21] :name-pos [405 22]}} (.-config ^{:go/pos {:name-pos [405 20]}} c) ^{:go/pos {:lparen [405 59] :rparen [405 87]}} (^{:go/pos {:name-pos [405 42]}} isAESGCMPreferred ^{:go/pos {:dot [405 74] :name-pos [405 75]}} (.-cipherSuites ^{:go/pos {:dot [405 62] :name-pos [405 63]}} (.-clientHello ^{:go/pos {:name-pos [405 60]}} hs))))]
+
+    ^{:go/pos {:tok-pos [407 11]}} (set! ^{:go/pos {:dot [407 4] :name-pos [407 5]}} (.-suite ^{:go/pos {:name-pos [407 2]}} hs) ^{:go/pos {:lparen [407 30] :rparen [407 92]}} (^{:go/pos {:name-pos [407 13]}} selectCipherSuite ^{:go/pos {:name-pos [407 31]}} preferenceList ^{:go/pos {:dot [407 61] :name-pos [407 62]}} (.-cipherSuites ^{:go/pos {:dot [407 49] :name-pos [407 50]}} (.-clientHello ^{:go/pos {:name-pos [407 47]}} hs)) ^{:go/pos {:dot [407 78] :name-pos [407 79]}} (.-cipherSuiteOk ^{:go/pos {:name-pos [407 76]}} hs)))
+    ^{:go/pos {:if [408 2] :lbrace [408 21] :rbrace [412 2]}} (when ^{:go/apos {2 [408 17]} :go/pos {:op-pos [408 14]}} (== ^{:go/pos {:dot [408 7] :name-pos [408 8]}} (.-suite ^{:go/pos {:name-pos [408 5]}} hs) nil)
+      ^{:go/pos {:dot [409 4] :lparen [409 14] :name-pos [409 5] :rparen [409 36]}} (.sendAlert ^{:go/pos {:name-pos [409 3]}} c ^{:go/pos {:name-pos [409 15]}} alertHandshakeFailure)
+      ^{:go/pos {:return [410 3]}} (return ^{:go/apos {1 [410 21]} :go/pos {:lparen [410 20] :rparen [411 31]}} (^{:go/pos {:dot [410 13] :name-pos [410 14] :x-pos [410 10]}} fmt/Errorf "tls: no cipher suite supported by both client and server; client offered: %x"
+          ^{:go/pos {:dot [411 18] :name-pos [411 19]}} (.-cipherSuites ^{:go/pos {:dot [411 6] :name-pos [411 7]}} (.-clientHello ^{:go/pos {:name-pos [411 4]}} hs)))))
+
+    ^{:go/pos {:tok-pos [413 16]}} (set! ^{:go/pos {:dot [413 3] :name-pos [413 4]}} (.-cipherSuite ^{:go/pos {:name-pos [413 2]}} c) ^{:go/pos {:dot [413 26] :name-pos [413 27]}} (.-id ^{:go/pos {:dot [413 20] :name-pos [413 21]}} (.-suite ^{:go/pos {:name-pos [413 18]}} hs)))
+
+    ^{:go/pos {:for [415 2] :lbrace [415 49] :range [415 15] :rbrace [424 2] :tok-pos [415 12]}} (range [^{:go/pos {:name-pos [415 6]}} _ ^{:go/pos {:name-pos [415 9]}} id ^{:go/pos {:dot [415 35] :name-pos [415 36]}} (.-cipherSuites ^{:go/pos {:dot [415 23] :name-pos [415 24]}} (.-clientHello ^{:go/pos {:name-pos [415 21]}} hs))]
+      ^{:go/pos {:if [416 3] :lbrace [416 30] :rbrace [423 3]}} (when ^{:go/pos {:op-pos [416 9]}} (== ^{:go/pos {:name-pos [416 6]}} id ^{:go/pos {:name-pos [416 12]}} TLS_FALLBACK_SCSV)
+        ;; The client is doing a fallback connection. See RFC 7507.
+        ^{:go/pos {:if [418 4] :lbrace [418 85] :rbrace [421 4]}} (when ^{:go/pos {:op-pos [418 27]}} (< ^{:go/pos {:dot [418 21] :name-pos [418 22]}} (.-vers ^{:go/pos {:dot [418 9] :name-pos [418 10]}} (.-clientHello ^{:go/pos {:name-pos [418 7]}} hs)) ^{:go/pos {:dot [418 37] :lparen [418 57] :name-pos [418 38] :rparen [418 83]}} (.maxSupportedVersion ^{:go/pos {:dot [418 30] :name-pos [418 31]}} (.-config ^{:go/pos {:name-pos [418 29]}} c) ^{:go/pos {:name-pos [418 58]}} roleServer ^{:go/apos {2 [418 80]} :go/pos {:op-pos [418 77]}} (!= ^{:go/pos {:dot [418 71] :name-pos [418 72]}} (.-quic ^{:go/pos {:name-pos [418 70]}} c) nil)))
+          ^{:go/pos {:dot [419 6] :lparen [419 16] :name-pos [419 7] :rparen [419 43]}} (.sendAlert ^{:go/pos {:name-pos [419 5]}} c ^{:go/pos {:name-pos [419 17]}} alertInappropriateFallback)
+          ^{:go/pos {:return [420 5]}} (return ^{:go/apos {1 [420 23]} :go/pos {:lparen [420 22] :rparen [420 74]}} (^{:go/pos {:dot [420 18] :name-pos [420 19] :x-pos [420 12]}} errors/New "tls: client using inappropriate protocol fallback")))
+
+        ^{:go/pos {:tok-pos [422 4]}} (break)))
+
+
+
+    nil))
+
+
+^{:go/apos {6 [450 9]} :go/pos {:func [429 1] :lbrace [429 68] :rbrace [451 1] :return [450 2]}} (go/method ^{:go/pos {:name-pos [429 33]}} cipherSuiteOk ^{:tag ^{:go/pos {:name-pos [429 63]}} bool :go/pos {:closing [429 61] :opening [429 46] :recv-closing [429 31] :recv-opening [429 6]}} [^{:tag ^{:go/pos {:star [429 10]}} (* ^{:go/pos {:name-pos [429 11]}} serverHandshakeState) :go/pos {:name-pos [429 7]}} hs ^{:tag ^{:go/pos {:star [429 49]}} (* ^{:go/pos {:name-pos [429 50]}} cipherSuite) :go/pos {:name-pos [429 47]}} c]
+  ^{:go/pos {:if [430 2] :lbrace [430 27] :rbrace [432 2]}} (when ^{:go/apos {2 [430 25]} :go/pos {:op-pos [430 22]}} (!= ^{:go/pos {:op-pos [430 12]}} (bit-and ^{:go/pos {:dot [430 6] :name-pos [430 7]}} (.-flags ^{:go/pos {:name-pos [430 5]}} c) ^{:go/pos {:name-pos [430 13]}} suitePSK) 0) ; arbace
+    ^{:go/pos {:return [431 3]}} (return ^{:go/pos {:op-pos [431 47]}} (and ^{:go/apos {2 [431 43]} :go/pos {:op-pos [431 40]}} (!= ^{:go/pos {:dot [431 21] :name-pos [431 22]}} (.-PSKServerCallback ^{:go/pos {:dot [431 14] :name-pos [431 15]}} (.-config ^{:go/pos {:dot [431 12] :name-pos [431 13]}} (.-c ^{:go/pos {:name-pos [431 10]}} hs))) nil) ^:go/paren ^{:go/parens [[[431 50] [431 103]]] :go/pos {:op-pos [431 77]}} (or ^{:go/pos {:op-pos [431 61]}} (>= ^{:go/pos {:dot [431 55] :name-pos [431 56]}} (.-vers ^{:go/pos {:dot [431 53] :name-pos [431 54]}} (.-c ^{:go/pos {:name-pos [431 51]}} hs)) ^{:go/pos {:name-pos [431 64]}} VersionTLS12) ^{:go/apos {2 [431 102]} :go/pos {:op-pos [431 99]}} (== ^{:go/pos {:op-pos [431 87]}} (bit-and ^{:go/pos {:dot [431 81] :name-pos [431 82]}} (.-flags ^{:go/pos {:name-pos [431 80]}} c) ^{:go/pos {:name-pos [431 88]}} suiteTLS12) 0)))))
+
+  ^{:go/cond [[[433 2] [433 29] [444 2]] [[444 9] [444 29] [446 2]]] :go/pos {:if [433 2]}} (cond ^{:go/apos {2 [433 27]} :go/pos {:op-pos [433 24]}} (!= ^{:go/pos {:op-pos [433 12]}} (bit-and ^{:go/pos {:dot [433 6] :name-pos [433 7]}} (.-flags ^{:go/pos {:name-pos [433 5]}} c) ^{:go/pos {:name-pos [433 13]}} suiteECDHE) 0) ^{:go/pos {:lbrace [433 29] :rbrace [444 2]}} (do
+      ^{:go/pos {:if [434 3] :lbrace [434 18] :rbrace [436 3]}} (when ^{:go/pos {:op-pos [434 6]}} (not ^{:go/pos {:dot [434 9] :name-pos [434 10]}} (.-ecdheOk ^{:go/pos {:name-pos [434 7]}} hs))
+        ^{:go/apos {1 [435 11]} :go/pos {:return [435 4]}} (return false))
+
+      ^{:go/cond [[[437 3] [437 31] [441 3]] [[441 10] [441 27] [443 3]]] :go/pos {:if [437 3]}} (cond ^{:go/apos {2 [437 29]} :go/pos {:op-pos [437 26]}} (!= ^{:go/pos {:op-pos [437 13]}} (bit-and ^{:go/pos {:dot [437 7] :name-pos [437 8]}} (.-flags ^{:go/pos {:name-pos [437 6]}} c) ^{:go/pos {:name-pos [437 14]}} suiteECSign) 0)
+        ^{:go/pos {:if [438 4] :lbrace [438 20] :rbrace [440 4]}} (when ^{:go/pos {:op-pos [438 7]}} (not ^{:go/pos {:dot [438 10] :name-pos [438 11]}} (.-ecSignOk ^{:go/pos {:name-pos [438 8]}} hs))
+          ^{:go/apos {1 [439 12]} :go/pos {:return [439 5]}} (return false))
+
+        ^{:go/pos {:op-pos [441 13]}} (not ^{:go/pos {:dot [441 16] :name-pos [441 17]}} (.-rsaSignOk ^{:go/pos {:name-pos [441 14]}} hs))
+        ^{:go/apos {1 [442 11]} :go/pos {:return [442 4]}} (return false)))
+
+    ^{:go/pos {:op-pos [444 12]}} (not ^{:go/pos {:dot [444 15] :name-pos [444 16]}} (.-rsaDecryptOk ^{:go/pos {:name-pos [444 13]}} hs))
+    ^{:go/apos {1 [445 10]} :go/pos {:return [445 3]}} (return false))
+
+  ^{:go/pos {:if [447 2] :lbrace [447 57] :rbrace [449 2]}} (when ^{:go/pos {:op-pos [447 30]}} (and ^{:go/pos {:op-pos [447 15]}} (< ^{:go/pos {:dot [447 9] :name-pos [447 10]}} (.-vers ^{:go/pos {:dot [447 7] :name-pos [447 8]}} (.-c ^{:go/pos {:name-pos [447 5]}} hs)) ^{:go/pos {:name-pos [447 17]}} VersionTLS12) ^{:go/apos {2 [447 55]} :go/pos {:op-pos [447 52]}} (!= ^{:go/pos {:op-pos [447 40]}} (bit-and ^{:go/pos {:dot [447 34] :name-pos [447 35]}} (.-flags ^{:go/pos {:name-pos [447 33]}} c) ^{:go/pos {:name-pos [447 41]}} suiteTLS12) 0))
+    ^{:go/apos {1 [448 10]} :go/pos {:return [448 3]}} (return false))
+
+  true)
+
+
+
+^{:go/pos {:doc [453 1] :func [454 1] :lbrace [454 60] :rbrace [563 1] :return [562 2]}} (go/method ^{:go/pos {:name-pos [454 33]}} checkForResumption "checkForResumption reports whether we should perform resumption on this connection.\n" ^{:tag ^{:go/pos {:name-pos [454 54]}} error :go/pos {:closing [454 52] :opening [454 51] :recv-closing [454 31] :recv-opening [454 6]}} [^{:tag ^{:go/pos {:star [454 10]}} (* ^{:go/pos {:name-pos [454 11]}} serverHandshakeState) :go/pos {:name-pos [454 7]}} hs]
+  (let [^{:go/pos {:name-pos [455 2] :tok-pos [455 4]}} c ^{:go/pos {:dot [455 9] :name-pos [455 10]}} (.-c ^{:go/pos {:name-pos [455 7]}} hs)]
+
+    ^{:go/pos {:if [457 2] :lbrace [457 37] :rbrace [459 2]}} (when ^{:go/pos {:dot [457 13] :name-pos [457 14]}} (.-SessionTicketsDisabled ^{:go/pos {:dot [457 6] :name-pos [457 7]}} (.-config ^{:go/pos {:name-pos [457 5]}} c))
+      ^{:go/apos {1 [458 10]} :go/pos {:return [458 3]}} (return nil))
+
+
+    (let [^{:tag ^{:go/pos {:star [461 19]}} (* ^{:go/pos {:name-pos [461 20]}} SessionState) :go/pos {:name-pos [461 6] :tok-pos [461 2]}} sessionState (zero ^{:go/pos {:star [461 19]}} (* ^{:go/pos {:name-pos [461 20]}} SessionState))]
+      ^{:go/pos {:else-lbrace [471 9] :else-rbrace [481 2] :if [462 2] :lbrace [462 35] :rbrace [471 2]}} (if ^{:go/apos {2 [462 31]} :go/pos {:op-pos [462 28]}} (!= ^{:go/pos {:dot [462 13] :name-pos [462 14]}} (.-UnwrapSession ^{:go/pos {:dot [462 6] :name-pos [462 7]}} (.-config ^{:go/pos {:name-pos [462 5]}} c)) nil)
+        (let [^{:go/pos {:tok-pos [463 11]}} (values ^{:go/pos {:name-pos [463 3]}} ss ^{:go/pos {:name-pos [463 7]}} err) ^{:go/pos {:lparen [463 36] :rparen [463 92]}} (^{:go/pos {:dot [463 22] :name-pos [463 23]}} (.-UnwrapSession ^{:go/pos {:dot [463 15] :name-pos [463 16]}} (.-config ^{:go/pos {:name-pos [463 14]}} c)) ^{:go/pos {:dot [463 51] :name-pos [463 52]}} (.-sessionTicket ^{:go/pos {:dot [463 39] :name-pos [463 40]}} (.-clientHello ^{:go/pos {:name-pos [463 37]}} hs)) ^{:go/pos {:dot [463 68] :lparen [463 90] :name-pos [463 69] :rparen [463 91]}} (.connectionStateLocked ^{:go/pos {:name-pos [463 67]}} c))]
+          ^{:go/pos {:if [464 3] :lbrace [464 17] :rbrace [466 3]}} (when ^{:go/apos {2 [464 13]} :go/pos {:op-pos [464 10]}} (!= ^{:go/pos {:name-pos [464 6]}} err nil)
+            ^{:go/pos {:return [465 4]}} (return ^{:go/pos {:name-pos [465 11]}} err))
+
+          ^{:go/pos {:if [467 3] :lbrace [467 16] :rbrace [469 3]}} (when ^{:go/apos {2 [467 12]} :go/pos {:op-pos [467 9]}} (== ^{:go/pos {:name-pos [467 6]}} ss nil)
+            ^{:go/apos {1 [468 11]} :go/pos {:return [468 4]}} (return nil))
+
+          ^{:go/pos {:tok-pos [470 16]}} (set! ^{:go/pos {:name-pos [470 3]}} sessionState ^{:go/pos {:name-pos [470 18]}} ss))
+
+        (let [^{:go/pos {:name-pos [472 3] :tok-pos [472 13]}} plaintext ^{:go/pos {:dot [472 24] :lparen [472 38] :name-pos [472 25] :rparen [472 81]}} (.decryptTicket ^{:go/pos {:dot [472 17] :name-pos [472 18]}} (.-config ^{:go/pos {:name-pos [472 16]}} c) ^{:go/pos {:dot [472 53] :name-pos [472 54]}} (.-sessionTicket ^{:go/pos {:dot [472 41] :name-pos [472 42]}} (.-clientHello ^{:go/pos {:name-pos [472 39]}} hs)) ^{:go/pos {:dot [472 70] :name-pos [472 71]}} (.-ticketKeys ^{:go/pos {:name-pos [472 69]}} c))]
+          ^{:go/pos {:if [473 3] :lbrace [473 23] :rbrace [475 3]}} (when ^{:go/apos {2 [473 19]} :go/pos {:op-pos [473 16]}} (== ^{:go/pos {:name-pos [473 6]}} plaintext nil)
+            ^{:go/apos {1 [474 11]} :go/pos {:return [474 4]}} (return nil))
+
+          (let [^{:go/pos {:tok-pos [476 11]}} (values ^{:go/pos {:name-pos [476 3]}} ss ^{:go/pos {:name-pos [476 7]}} err) ^{:go/pos {:lparen [476 31] :rparen [476 41]}} (^{:go/pos {:name-pos [476 14]}} ParseSessionState ^{:go/pos {:name-pos [476 32]}} plaintext)]
+            ^{:go/pos {:if [477 3] :lbrace [477 17] :rbrace [479 3]}} (when ^{:go/apos {2 [477 13]} :go/pos {:op-pos [477 10]}} (!= ^{:go/pos {:name-pos [477 6]}} err nil)
+              ^{:go/apos {1 [478 11]} :go/pos {:return [478 4]}} (return nil))
+
+            ^{:go/pos {:tok-pos [480 16]}} (set! ^{:go/pos {:name-pos [480 3]}} sessionState ^{:go/pos {:name-pos [480 18]}} ss))))
+
+
+      ;; TLS 1.2 tickets don't natively have a lifetime, but we want to avoid
+      ;; re-wrapping the same master secret in different tickets over and over for
+      ;; too long, weakening forward secrecy.
+      (let [^{:go/pos {:name-pos [486 2] :tok-pos [486 12]}} createdAt ^{:go/apos {2 [486 56]} :go/pos {:lparen [486 24] :rparen [486 57]}} (^{:go/pos {:dot [486 19] :name-pos [486 20] :x-pos [486 15]}} time/Unix ^{:go/pos {:lparen [486 30] :rparen [486 53]}} (conv ^{:go/pos {:name-pos [486 25]}} int64 ^{:go/pos {:dot [486 43] :name-pos [486 44]}} (.-createdAt ^{:go/pos {:name-pos [486 31]}} sessionState)) 0)]
+        ^{:go/pos {:if [487 2] :lbrace [487 63] :rbrace [489 2]}} (when ^{:go/pos {:op-pos [487 36]}} (> ^{:go/pos {:dot [487 20] :lparen [487 24] :name-pos [487 21] :rparen [487 34]}} (.Sub ^{:go/pos {:dot [487 13] :lparen [487 18] :name-pos [487 14] :rparen [487 19]}} (.time ^{:go/pos {:dot [487 6] :name-pos [487 7]}} (.-config ^{:go/pos {:name-pos [487 5]}} c)) ^{:go/pos {:name-pos [487 25]}} createdAt) ^{:go/pos {:name-pos [487 38]}} maxSessionTicketLifetime)
+          ^{:go/apos {1 [488 10]} :go/pos {:return [488 3]}} (return nil))
+
+
+        ;; Never resume a session for a different TLS version.
+        ^{:go/pos {:if [492 2] :lbrace [492 36] :rbrace [494 2]}} (when ^{:go/pos {:op-pos [492 12]}} (!= ^{:go/pos {:dot [492 6] :name-pos [492 7]}} (.-vers ^{:go/pos {:name-pos [492 5]}} c) ^{:go/pos {:dot [492 27] :name-pos [492 28]}} (.-version ^{:go/pos {:name-pos [492 15]}} sessionState))
+          ^{:go/apos {1 [493 10]} :go/pos {:return [493 3]}} (return nil))
+
+
+        (let ^{:go/apos {1 [496 19]}} [^{:go/pos {:name-pos [496 2] :tok-pos [496 16]}} cipherSuiteOk false]
+          ;; Check that the client is still offering the ciphersuite in the session.
+          ^{:go/pos {:for [498 2] :lbrace [498 49] :range [498 15] :rbrace [503 2] :tok-pos [498 12]}} (range [^{:go/pos {:name-pos [498 6]}} _ ^{:go/pos {:name-pos [498 9]}} id ^{:go/pos {:dot [498 35] :name-pos [498 36]}} (.-cipherSuites ^{:go/pos {:dot [498 23] :name-pos [498 24]}} (.-clientHello ^{:go/pos {:name-pos [498 21]}} hs))]
+            ^{:go/pos {:if [499 3] :lbrace [499 37] :rbrace [502 3]}} (when ^{:go/pos {:op-pos [499 9]}} (== ^{:go/pos {:name-pos [499 6]}} id ^{:go/pos {:dot [499 24] :name-pos [499 25]}} (.-cipherSuite ^{:go/pos {:name-pos [499 12]}} sessionState))
+              ^{:go/apos {2 [500 20]} :go/pos {:tok-pos [500 18]}} (set! ^{:go/pos {:name-pos [500 4]}} cipherSuiteOk true)
+              ^{:go/pos {:tok-pos [501 4]}} (break)))
+
+
+          ^{:go/pos {:if [504 2] :lbrace [504 20] :rbrace [506 2]}} (when ^{:go/pos {:op-pos [504 5]}} (not ^{:go/pos {:name-pos [504 6]}} cipherSuiteOk)
+            ^{:go/apos {1 [505 10]} :go/pos {:return [505 3]}} (return nil))
+
+
+          ;; Check that we also support the ciphersuite from the session.
+          (let [^{:go/pos {:name-pos [509 2] :tok-pos [509 8]}} suite ^{:go/pos {:lparen [509 28] :rparen [510 53]}} (^{:go/pos {:name-pos [509 11]}} selectCipherSuite ^{:go/pos {:lbrace [509 37] :rbrace [509 62]}} (lit ^{:go/pos {:lbrack [509 29]}} (slice ^{:go/pos {:name-pos [509 31]}} uint16) ^{:go/pos {:dot [509 50] :name-pos [509 51]}} (.-cipherSuite ^{:go/pos {:name-pos [509 38]}} sessionState))
+                ^{:go/pos {:dot [510 11] :lparen [510 33] :name-pos [510 12] :rparen [510 34]}} (.supportedCipherSuites ^{:go/pos {:dot [510 4] :name-pos [510 5]}} (.-config ^{:go/pos {:name-pos [510 3]}} c)) ^{:go/pos {:dot [510 39] :name-pos [510 40]}} (.-cipherSuiteOk ^{:go/pos {:name-pos [510 37]}} hs))]
+            ^{:go/pos {:if [511 2] :lbrace [511 18] :rbrace [513 2]}} (when ^{:go/apos {2 [511 14]} :go/pos {:op-pos [511 11]}} (== ^{:go/pos {:name-pos [511 5]}} suite nil)
+              ^{:go/apos {1 [512 10]} :go/pos {:return [512 3]}} (return nil))
+
+
+            (let [^{:go/pos {:name-pos [515 2] :tok-pos [515 24]}} sessionHasClientCerts ^{:go/apos {2 [515 65]} :go/pos {:op-pos [515 62]}} (!= ^{:go/pos {:lparen [515 30] :rparen [515 60]}} (^{:go/pos {:name-pos [515 27]}} len ^{:go/pos {:dot [515 43] :name-pos [515 44]}} (.-peerCertificates ^{:go/pos {:name-pos [515 31]}} sessionState)) 0)
+                ^{:go/pos {:name-pos [516 2] :tok-pos [516 18]}} needClientCerts ^{:go/pos {:lparen [516 39] :rparen [516 59]}} (^{:go/pos {:name-pos [516 21]}} requiresClientCert ^{:go/pos {:dot [516 48] :name-pos [516 49]}} (.-ClientAuth ^{:go/pos {:dot [516 41] :name-pos [516 42]}} (.-config ^{:go/pos {:name-pos [516 40]}} c)))]
+              ^{:go/pos {:if [517 2] :lbrace [517 47] :rbrace [519 2]}} (when ^{:go/pos {:op-pos [517 21]}} (and ^{:go/pos {:name-pos [517 5]}} needClientCerts ^{:go/pos {:op-pos [517 24]}} (not ^{:go/pos {:name-pos [517 25]}} sessionHasClientCerts))
+                ^{:go/apos {1 [518 10]} :go/pos {:return [518 3]}} (return nil))
+
+              ^{:go/pos {:if [520 2] :lbrace [520 66] :rbrace [522 2]}} (when ^{:go/pos {:op-pos [520 27]}} (and ^{:go/pos {:name-pos [520 5]}} sessionHasClientCerts ^{:go/pos {:op-pos [520 50]}} (== ^{:go/pos {:dot [520 38] :name-pos [520 39]}} (.-ClientAuth ^{:go/pos {:dot [520 31] :name-pos [520 32]}} (.-config ^{:go/pos {:name-pos [520 30]}} c)) ^{:go/pos {:name-pos [520 53]}} NoClientCert))
+                ^{:go/apos {1 [521 10]} :go/pos {:return [521 3]}} (return nil))
+
+              ^{:go/pos {:if [523 2] :lbrace [523 95] :rbrace [525 2]}} (when ^{:go/pos {:op-pos [523 27]}} (and ^{:go/pos {:name-pos [523 5]}} sessionHasClientCerts ^{:go/pos {:dot [523 45] :lparen [523 51] :name-pos [523 46] :rparen [523 93]}} (.After ^{:go/pos {:dot [523 38] :lparen [523 43] :name-pos [523 39] :rparen [523 44]}} (.time ^{:go/pos {:dot [523 31] :name-pos [523 32]}} (.-config ^{:go/pos {:name-pos [523 30]}} c)) ^{:go/pos {:dot [523 84] :name-pos [523 85]}} (.-NotAfter ^{:go/apos {2 [523 82]} :go/pos {:lbrack [523 81] :rbrack [523 83]}} (aget ^{:go/pos {:dot [523 64] :name-pos [523 65]}} (.-peerCertificates ^{:go/pos {:name-pos [523 52]}} sessionState) 0))))
+                ^{:go/apos {1 [524 10]} :go/pos {:return [524 3]}} (return nil))
+
+              ^{:go/apos {15 [562 9]}} (let [^{:go/pos {:name-pos [526 2] :tok-pos [526 7]}} opts ^{:go/acolon {2 [527 14] 4 [528 8] 6 [529 12]} :go/apos {2 [527 3] 4 [528 3] 6 [529 3]} :go/pos {:lbrace [526 28] :rbrace [530 2]}} (lit ^{:go/pos {:dot [526 14] :name-pos [526 15] :x-pos [526 10]}} x509/VerifyOptions
+                    :CurrentTime ^{:go/pos {:dot [527 24] :lparen [527 29] :name-pos [527 25] :rparen [527 30]}} (.time ^{:go/pos {:dot [527 17] :name-pos [527 18]}} (.-config ^{:go/pos {:name-pos [527 16]}} c))
+                    :Roots ^{:go/pos {:dot [528 24] :name-pos [528 25]}} (.-ClientCAs ^{:go/pos {:dot [528 17] :name-pos [528 18]}} (.-config ^{:go/pos {:name-pos [528 16]}} c))
+                    :KeyUsages ^{:go/pos {:lbrace [529 34] :rbrace [529 61]}} (lit ^{:go/pos {:lbrack [529 16]}} (slice ^{:go/pos {:dot [529 22] :name-pos [529 23] :x-pos [529 18]}} x509/ExtKeyUsage) ^{:go/pos {:dot [529 39] :name-pos [529 40] :x-pos [529 35]}} x509/ExtKeyUsageClientAuth))]
+
+                ^{:go/pos {:if [531 2] :lbrace [532 61] :rbrace [534 2]}} (when ^{:go/ops [[531 27] [531 77]] :go/pos {:op-pos [531 77]}} (and ^{:go/pos {:name-pos [531 5]}} sessionHasClientCerts ^{:go/pos {:op-pos [531 50]}} (>= ^{:go/pos {:dot [531 38] :name-pos [531 39]}} (.-ClientAuth ^{:go/pos {:dot [531 31] :name-pos [531 32]}} (.-config ^{:go/pos {:name-pos [531 30]}} c)) ^{:go/pos {:name-pos [531 53]}} VerifyClientCertIfGiven)
+                    ^{:go/pos {:op-pos [532 3]}} (not ^{:go/pos {:lparen [532 25] :rparen [532 59]}} (^{:go/pos {:name-pos [532 4]}} anyValidVerifiedChain ^{:go/pos {:dot [532 38] :name-pos [532 39]}} (.-verifiedChains ^{:go/pos {:name-pos [532 26]}} sessionState) ^{:go/pos {:name-pos [532 55]}} opts)))
+                  ^{:go/apos {1 [533 10]} :go/pos {:return [533 3]}} (return nil))
+
+
+                ;; RFC 7627, Section 5.3
+                ^{:go/pos {:if [537 2] :lbrace [537 74] :rbrace [539 2]}} (when ^{:go/pos {:op-pos [537 35]}} (and ^{:go/pos {:op-pos [537 5]}} (not ^{:go/pos {:dot [537 18] :name-pos [537 19]}} (.-extMasterSecret ^{:go/pos {:name-pos [537 6]}} sessionState)) ^{:go/pos {:dot [537 52] :name-pos [537 53]}} (.-extendedMasterSecret ^{:go/pos {:dot [537 40] :name-pos [537 41]}} (.-clientHello ^{:go/pos {:name-pos [537 38]}} hs)))
+                  ^{:go/apos {1 [538 10]} :go/pos {:return [538 3]}} (return nil))
+
+                ^{:go/pos {:if [540 2] :lbrace [540 74] :rbrace [544 2]}} (when ^{:go/pos {:op-pos [540 34]}} (and ^{:go/pos {:dot [540 17] :name-pos [540 18]}} (.-extMasterSecret ^{:go/pos {:name-pos [540 5]}} sessionState) ^{:go/pos {:op-pos [540 37]}} (not ^{:go/pos {:dot [540 52] :name-pos [540 53]}} (.-extendedMasterSecret ^{:go/pos {:dot [540 40] :name-pos [540 41]}} (.-clientHello ^{:go/pos {:name-pos [540 38]}} hs))))
+                  ;; Aborting is somewhat harsh, but it's a MUST and it would indicate a
+                  ;; weird downgrade in client capabilities.
+                  ^{:go/pos {:return [543 3]}} (return ^{:go/apos {1 [543 21]} :go/pos {:lparen [543 20] :rparen [543 88]}} (^{:go/pos {:dot [543 16] :name-pos [543 17] :x-pos [543 10]}} errors/New "tls: session supported extended_master_secret but client does not")))
+
+                ^{:go/pos {:if [545 2] :lbrace [545 60] :rbrace [551 2]}} (when ^{:go/pos {:op-pos [545 35]}} (and ^{:go/pos {:op-pos [545 5]}} (not ^{:go/pos {:dot [545 18] :name-pos [545 19]}} (.-extMasterSecret ^{:go/pos {:name-pos [545 6]}} sessionState)) ^{:go/pos {:lparen [545 57] :rparen [545 58]}} (^{:go/pos {:dot [545 48] :name-pos [545 49] :x-pos [545 38]}} fips140tls/Required))
+                  ^{:go/pos {:if [546 3] :lbrace [546 32] :rbrace [549 3]}} (when ^{:go/apos {2 [546 28]} :go/pos {:op-pos [546 25]}} (!= ^{:go/pos {:dot [546 16] :lparen [546 22] :name-pos [546 17] :rparen [546 23]}} (.Value ^{:go/pos {:name-pos [546 6]}} fips140ems) "0")
+                    ;; FIPS 140-3 requires the use of Extended Master Secret.
+                    ^{:go/apos {1 [548 11]} :go/pos {:return [548 4]}} (return nil))
+
+                  ^{:go/pos {:dot [550 13] :lparen [550 27] :name-pos [550 14] :rparen [550 28]}} (.IncNonDefault ^{:go/pos {:name-pos [550 3]}} fips140ems))
+
+
+                ^{:go/pos {:tok-pos [553 21]}} (set! ^{:go/pos {:dot [553 3] :name-pos [553 4]}} (.-peerCertificates ^{:go/pos {:name-pos [553 2]}} c) ^{:go/pos {:dot [553 35] :name-pos [553 36]}} (.-peerCertificates ^{:go/pos {:name-pos [553 23]}} sessionState))
+                ^{:go/pos {:tok-pos [554 17]}} (set! ^{:go/pos {:dot [554 3] :name-pos [554 4]}} (.-ocspResponse ^{:go/pos {:name-pos [554 2]}} c) ^{:go/pos {:dot [554 31] :name-pos [554 32]}} (.-ocspResponse ^{:go/pos {:name-pos [554 19]}} sessionState))
+                ^{:go/pos {:tok-pos [555 9]}} (set! ^{:go/pos {:dot [555 3] :name-pos [555 4]}} (.-scts ^{:go/pos {:name-pos [555 2]}} c) ^{:go/pos {:dot [555 23] :name-pos [555 24]}} (.-scts ^{:go/pos {:name-pos [555 11]}} sessionState))
+                ^{:go/pos {:tok-pos [556 19]}} (set! ^{:go/pos {:dot [556 3] :name-pos [556 4]}} (.-verifiedChains ^{:go/pos {:name-pos [556 2]}} c) ^{:go/pos {:dot [556 33] :name-pos [556 34]}} (.-verifiedChains ^{:go/pos {:name-pos [556 21]}} sessionState))
+                ^{:go/pos {:tok-pos [557 20]}} (set! ^{:go/pos {:dot [557 3] :name-pos [557 4]}} (.-extMasterSecret ^{:go/pos {:name-pos [557 2]}} c) ^{:go/pos {:dot [557 34] :name-pos [557 35]}} (.-extMasterSecret ^{:go/pos {:name-pos [557 22]}} sessionState))
+                ^{:go/pos {:tok-pos [558 18]}} (set! ^{:go/pos {:dot [558 4] :name-pos [558 5]}} (.-sessionState ^{:go/pos {:name-pos [558 2]}} hs) ^{:go/pos {:name-pos [558 20]}} sessionState)
+                ^{:go/pos {:tok-pos [559 11]}} (set! ^{:go/pos {:dot [559 4] :name-pos [559 5]}} (.-suite ^{:go/pos {:name-pos [559 2]}} hs) ^{:go/pos {:name-pos [559 13]}} suite)
+                ^{:go/pos {:tok-pos [560 12]}} (set! ^{:go/pos {:dot [560 3] :name-pos [560 4]}} (.-curveID ^{:go/pos {:name-pos [560 2]}} c) ^{:go/pos {:dot [560 26] :name-pos [560 27]}} (.-curveID ^{:go/pos {:name-pos [560 14]}} sessionState))
+                ^{:go/apos {2 [561 16]} :go/pos {:tok-pos [561 14]}} (set! ^{:go/pos {:dot [561 3] :name-pos [561 4]}} (.-didResume ^{:go/pos {:name-pos [561 2]}} c) true)
+                nil))))))))
+
+
+^{:go/pos {:func [565 1] :lbrace [565 59] :rbrace [596 1] :return [595 2]}} (go/method ^{:go/pos {:name-pos [565 33]}} doResumeHandshake ^{:tag ^{:go/pos {:name-pos [565 53]}} error :go/pos {:closing [565 51] :opening [565 50] :recv-closing [565 31] :recv-opening [565 6]}} [^{:tag ^{:go/pos {:star [565 10]}} (* ^{:go/pos {:name-pos [565 11]}} serverHandshakeState) :go/pos {:name-pos [565 7]}} hs]
+  ^{:go/apos {12 [595 9]}} (let [^{:go/pos {:name-pos [566 2] :tok-pos [566 4]}} c ^{:go/pos {:dot [566 9] :name-pos [566 10]}} (.-c ^{:go/pos {:name-pos [566 7]}} hs)]
+
+    ^{:go/pos {:tok-pos [568 23]}} (set! ^{:go/pos {:dot [568 10] :name-pos [568 11]}} (.-cipherSuite ^{:go/pos {:dot [568 4] :name-pos [568 5]}} (.-hello ^{:go/pos {:name-pos [568 2]}} hs)) ^{:go/pos {:dot [568 33] :name-pos [568 34]}} (.-id ^{:go/pos {:dot [568 27] :name-pos [568 28]}} (.-suite ^{:go/pos {:name-pos [568 25]}} hs)))
+    ^{:go/pos {:tok-pos [569 16]}} (set! ^{:go/pos {:dot [569 3] :name-pos [569 4]}} (.-cipherSuite ^{:go/pos {:name-pos [569 2]}} c) ^{:go/pos {:dot [569 26] :name-pos [569 27]}} (.-id ^{:go/pos {:dot [569 20] :name-pos [569 21]}} (.-suite ^{:go/pos {:name-pos [569 18]}} hs)))
+    ;; We echo the client's session ID in the ServerHello to let it know
+    ;; that we're doing a resumption.
+    ^{:go/pos {:tok-pos [572 21]}} (set! ^{:go/pos {:dot [572 10] :name-pos [572 11]}} (.-sessionId ^{:go/pos {:dot [572 4] :name-pos [572 5]}} (.-hello ^{:go/pos {:name-pos [572 2]}} hs)) ^{:go/pos {:dot [572 37] :name-pos [572 38]}} (.-sessionId ^{:go/pos {:dot [572 25] :name-pos [572 26]}} (.-clientHello ^{:go/pos {:name-pos [572 23]}} hs)))
+    ;; We always send a new session ticket, even if it wraps the same master
+    ;; secret and it's potentially encrypted with the same key, to help the
+    ;; client avoid cross-connection tracking from a network observer.
+    ^{:go/apos {2 [576 29]} :go/pos {:tok-pos [576 27]}} (set! ^{:go/pos {:dot [576 10] :name-pos [576 11]}} (.-ticketSupported ^{:go/pos {:dot [576 4] :name-pos [576 5]}} (.-hello ^{:go/pos {:name-pos [576 2]}} hs)) true)
+    ^{:go/pos {:tok-pos [577 18]}} (set! ^{:go/pos {:dot [577 4] :name-pos [577 5]}} (.-finishedHash ^{:go/pos {:name-pos [577 2]}} hs) ^{:go/pos {:lparen [577 35] :rparen [577 52]}} (^{:go/pos {:name-pos [577 20]}} newFinishedHash ^{:go/pos {:dot [577 37] :name-pos [577 38]}} (.-vers ^{:go/pos {:name-pos [577 36]}} c) ^{:go/pos {:dot [577 46] :name-pos [577 47]}} (.-suite ^{:go/pos {:name-pos [577 44]}} hs)))
+    ^{:go/pos {:dot [578 17] :lparen [578 40] :name-pos [578 18] :rparen [578 41]}} (.discardHandshakeBuffer ^{:go/pos {:dot [578 4] :name-pos [578 5]}} (.-finishedHash ^{:go/pos {:name-pos [578 2]}} hs))
+    ^{:go/pos {:if [579 2] :lbrace [579 72] :rbrace [581 2]}} (when [^{:go/pos {:name-pos [579 5] :tok-pos [579 9]}} err ^{:go/pos {:lparen [579 25] :rparen [579 58]}} (^{:go/pos {:name-pos [579 12]}} transcriptMsg ^{:go/pos {:dot [579 28] :name-pos [579 29]}} (.-clientHello ^{:go/pos {:name-pos [579 26]}} hs) ^{:go/pos {:op-pos [579 42]}} (addr ^{:go/pos {:dot [579 45] :name-pos [579 46]}} (.-finishedHash ^{:go/pos {:name-pos [579 43]}} hs)))] ^{:go/apos {2 [579 68]} :go/pos {:op-pos [579 65]}} (!= ^{:go/pos {:name-pos [579 61]}} err nil)
+      ^{:go/pos {:return [580 3]}} (return ^{:go/pos {:name-pos [580 10]}} err))
+
+    ^{:go/pos {:if [582 2] :lbrace [582 81] :rbrace [584 2]}} (when [^{:go/pos {:tok-pos [582 12]}} (values ^{:go/pos {:name-pos [582 5]}} _ ^{:go/pos {:name-pos [582 8]}} err) ^{:go/pos {:dot [582 19] :lparen [582 40] :name-pos [582 20] :rparen [582 67]}} (.writeHandshakeRecord ^{:go/pos {:dot [582 17] :name-pos [582 18]}} (.-c ^{:go/pos {:name-pos [582 15]}} hs) ^{:go/pos {:dot [582 43] :name-pos [582 44]}} (.-hello ^{:go/pos {:name-pos [582 41]}} hs) ^{:go/pos {:op-pos [582 51]}} (addr ^{:go/pos {:dot [582 54] :name-pos [582 55]}} (.-finishedHash ^{:go/pos {:name-pos [582 52]}} hs)))] ^{:go/apos {2 [582 77]} :go/pos {:op-pos [582 74]}} (!= ^{:go/pos {:name-pos [582 70]}} err nil)
+      ^{:go/pos {:return [583 3]}} (return ^{:go/pos {:name-pos [583 10]}} err))
+
+
+    ^{:go/pos {:if [586 2] :lbrace [586 38] :rbrace [591 2]}} (when ^{:go/apos {2 [586 34]} :go/pos {:op-pos [586 31]}} (!= ^{:go/pos {:dot [586 13] :name-pos [586 14]}} (.-VerifyConnection ^{:go/pos {:dot [586 6] :name-pos [586 7]}} (.-config ^{:go/pos {:name-pos [586 5]}} c)) nil)
+      ^{:go/pos {:if [587 3] :lbrace [587 78] :rbrace [590 3]}} (when [^{:go/pos {:name-pos [587 6] :tok-pos [587 10]}} err ^{:go/pos {:lparen [587 38] :rparen [587 64]}} (^{:go/pos {:dot [587 21] :name-pos [587 22]}} (.-VerifyConnection ^{:go/pos {:dot [587 14] :name-pos [587 15]}} (.-config ^{:go/pos {:name-pos [587 13]}} c)) ^{:go/pos {:dot [587 40] :lparen [587 62] :name-pos [587 41] :rparen [587 63]}} (.connectionStateLocked ^{:go/pos {:name-pos [587 39]}} c))] ^{:go/apos {2 [587 74]} :go/pos {:op-pos [587 71]}} (!= ^{:go/pos {:name-pos [587 67]}} err nil)
+        ^{:go/pos {:dot [588 5] :lparen [588 15] :name-pos [588 6] :rparen [588 34]}} (.sendAlert ^{:go/pos {:name-pos [588 4]}} c ^{:go/pos {:lparen [588 29] :rparen [588 33]}} (^{:go/pos {:name-pos [588 16]}} callbackAlert ^{:go/pos {:name-pos [588 30]}} err)) ; arbace
+        ^{:go/pos {:return [589 4]}} (return ^{:go/pos {:name-pos [589 11]}} err)))
+
+
+
+    ^{:go/pos {:tok-pos [593 18]}} (set! ^{:go/pos {:dot [593 4] :name-pos [593 5]}} (.-masterSecret ^{:go/pos {:name-pos [593 2]}} hs) ^{:go/pos {:dot [593 35] :name-pos [593 36]}} (.-secret ^{:go/pos {:dot [593 22] :name-pos [593 23]}} (.-sessionState ^{:go/pos {:name-pos [593 20]}} hs)))
+
+    nil))
+
+
+^{:go/pos {:func [598 1] :lbrace [598 57] :rbrace [829 1] :return [828 2]}} (go/method ^{:go/pos {:name-pos [598 33]}} doFullHandshake ^{:tag ^{:go/pos {:name-pos [598 51]}} error :go/pos {:closing [598 49] :opening [598 48] :recv-closing [598 31] :recv-opening [598 6]}} [^{:tag ^{:go/pos {:star [598 10]}} (* ^{:go/pos {:name-pos [598 11]}} serverHandshakeState) :go/pos {:name-pos [598 7]}} hs]
+  (let [^{:go/pos {:name-pos [599 2] :tok-pos [599 4]}} c ^{:go/pos {:dot [599 9] :name-pos [599 10]}} (.-c ^{:go/pos {:name-pos [599 7]}} hs)]
+
+    ^{:go/pos {:if [601 2] :lbrace [601 64] :rbrace [603 2]}} (when ^{:go/pos {:op-pos [601 33]}} (and ^{:go/pos {:dot [601 19] :name-pos [601 20]}} (.-ocspStapling ^{:go/pos {:dot [601 7] :name-pos [601 8]}} (.-clientHello ^{:go/pos {:name-pos [601 5]}} hs)) ^{:go/apos {2 [601 62]} :go/pos {:op-pos [601 60]}} (> ^{:go/pos {:lparen [601 39] :rparen [601 58]}} (^{:go/pos {:name-pos [601 36]}} len ^{:go/pos {:dot [601 47] :name-pos [601 48]}} (.-OCSPStaple ^{:go/pos {:dot [601 42] :name-pos [601 43]}} (.-cert ^{:go/pos {:name-pos [601 40]}} hs))) 0))
+      ^{:go/apos {2 [602 27]} :go/pos {:tok-pos [602 25]}} (set! ^{:go/pos {:dot [602 11] :name-pos [602 12]}} (.-ocspStapling ^{:go/pos {:dot [602 5] :name-pos [602 6]}} (.-hello ^{:go/pos {:name-pos [602 3]}} hs)) true))
+
+
+    ^{:go/pos {:if [605 2] :lbrace [605 37] :rbrace [607 2]}} (when ^{:go/apos {2 [605 34]} :go/pos {:op-pos [605 31]}} (!= ^{:go/pos {:dot [605 19] :name-pos [605 20]}} (.-serverName ^{:go/pos {:dot [605 7] :name-pos [605 8]}} (.-clientHello ^{:go/pos {:name-pos [605 5]}} hs)) "")
+      ^{:go/apos {2 [606 28]} :go/pos {:tok-pos [606 26]}} (set! ^{:go/pos {:dot [606 11] :name-pos [606 12]}} (.-serverNameAck ^{:go/pos {:dot [606 5] :name-pos [606 6]}} (.-hello ^{:go/pos {:name-pos [606 3]}} hs)) true))
+
+
+    ^{:go/pos {:tok-pos [609 27]}} (set! ^{:go/pos {:dot [609 10] :name-pos [609 11]}} (.-ticketSupported ^{:go/pos {:dot [609 4] :name-pos [609 5]}} (.-hello ^{:go/pos {:name-pos [609 2]}} hs)) ^{:go/pos {:op-pos [609 60]}} (and ^{:go/pos {:dot [609 43] :name-pos [609 44]}} (.-ticketSupported ^{:go/pos {:dot [609 31] :name-pos [609 32]}} (.-clientHello ^{:go/pos {:name-pos [609 29]}} hs)) ^{:go/pos {:op-pos [609 63]}} (not ^{:go/pos {:dot [609 72] :name-pos [609 73]}} (.-SessionTicketsDisabled ^{:go/pos {:dot [609 65] :name-pos [609 66]}} (.-config ^{:go/pos {:name-pos [609 64]}} c)))))
+    ^{:go/pos {:tok-pos [610 23]}} (set! ^{:go/pos {:dot [610 10] :name-pos [610 11]}} (.-cipherSuite ^{:go/pos {:dot [610 4] :name-pos [610 5]}} (.-hello ^{:go/pos {:name-pos [610 2]}} hs)) ^{:go/pos {:dot [610 33] :name-pos [610 34]}} (.-id ^{:go/pos {:dot [610 27] :name-pos [610 28]}} (.-suite ^{:go/pos {:name-pos [610 25]}} hs)))
+
+    ^{:go/pos {:tok-pos [612 18]}} (set! ^{:go/pos {:dot [612 4] :name-pos [612 5]}} (.-finishedHash ^{:go/pos {:name-pos [612 2]}} hs) ^{:go/pos {:lparen [612 35] :rparen [612 55]}} (^{:go/pos {:name-pos [612 20]}} newFinishedHash ^{:go/pos {:dot [612 40] :name-pos [612 41]}} (.-vers ^{:go/pos {:dot [612 38] :name-pos [612 39]}} (.-c ^{:go/pos {:name-pos [612 36]}} hs)) ^{:go/pos {:dot [612 49] :name-pos [612 50]}} (.-suite ^{:go/pos {:name-pos [612 47]}} hs)))
+    ^{:go/pos {:if [613 2] :lbrace [613 41] :rbrace [617 2]}} (when ^{:go/pos {:op-pos [613 25]}} (== ^{:go/pos {:dot [613 13] :name-pos [613 14]}} (.-ClientAuth ^{:go/pos {:dot [613 6] :name-pos [613 7]}} (.-config ^{:go/pos {:name-pos [613 5]}} c)) ^{:go/pos {:name-pos [613 28]}} NoClientCert)
+      ;; No need to keep a full record of the handshake if client
+      ;; certificates won't be used.
+      ^{:go/pos {:dot [616 18] :lparen [616 41] :name-pos [616 19] :rparen [616 42]}} (.discardHandshakeBuffer ^{:go/pos {:dot [616 5] :name-pos [616 6]}} (.-finishedHash ^{:go/pos {:name-pos [616 3]}} hs)))
+
+    ^{:go/pos {:if [618 2] :lbrace [618 72] :rbrace [620 2]}} (when [^{:go/pos {:name-pos [618 5] :tok-pos [618 9]}} err ^{:go/pos {:lparen [618 25] :rparen [618 58]}} (^{:go/pos {:name-pos [618 12]}} transcriptMsg ^{:go/pos {:dot [618 28] :name-pos [618 29]}} (.-clientHello ^{:go/pos {:name-pos [618 26]}} hs) ^{:go/pos {:op-pos [618 42]}} (addr ^{:go/pos {:dot [618 45] :name-pos [618 46]}} (.-finishedHash ^{:go/pos {:name-pos [618 43]}} hs)))] ^{:go/apos {2 [618 68]} :go/pos {:op-pos [618 65]}} (!= ^{:go/pos {:name-pos [618 61]}} err nil)
+      ^{:go/pos {:return [619 3]}} (return ^{:go/pos {:name-pos [619 10]}} err))
+
+    ^{:go/pos {:if [621 2] :lbrace [621 81] :rbrace [623 2]}} (when [^{:go/pos {:tok-pos [621 12]}} (values ^{:go/pos {:name-pos [621 5]}} _ ^{:go/pos {:name-pos [621 8]}} err) ^{:go/pos {:dot [621 19] :lparen [621 40] :name-pos [621 20] :rparen [621 67]}} (.writeHandshakeRecord ^{:go/pos {:dot [621 17] :name-pos [621 18]}} (.-c ^{:go/pos {:name-pos [621 15]}} hs) ^{:go/pos {:dot [621 43] :name-pos [621 44]}} (.-hello ^{:go/pos {:name-pos [621 41]}} hs) ^{:go/pos {:op-pos [621 51]}} (addr ^{:go/pos {:dot [621 54] :name-pos [621 55]}} (.-finishedHash ^{:go/pos {:name-pos [621 52]}} hs)))] ^{:go/apos {2 [621 77]} :go/pos {:op-pos [621 74]}} (!= ^{:go/pos {:name-pos [621 70]}} err nil)
+      ^{:go/pos {:return [622 3]}} (return ^{:go/pos {:name-pos [622 10]}} err))
+
+
+    (let [^{:go/pos {:name-pos [625 2] :tok-pos [625 10]}} certMsg ^{:go/pos {:lparen [625 16] :rparen [625 31]}} (^{:go/pos {:name-pos [625 13]}} new ^{:go/pos {:name-pos [625 17]}} certificateMsg)]
+      ^{:go/pos {:tok-pos [626 23]}} (set! ^{:go/pos {:dot [626 9] :name-pos [626 10]}} (.-certificates ^{:go/pos {:name-pos [626 2]}} certMsg) ^{:go/pos {:dot [626 32] :name-pos [626 33]}} (.-Certificate ^{:go/pos {:dot [626 27] :name-pos [626 28]}} (.-cert ^{:go/pos {:name-pos [626 25]}} hs)))
+      ;; Set localCertificate here, rather than at certificate selection time, so
+      ;; that it is only populated when a certificate is actually presented to the
+      ;; peer, and not on resumed connections.
+      ^{:go/pos {:tok-pos [630 21]}} (set! ^{:go/pos {:dot [630 3] :name-pos [630 4]}} (.-localCertificate ^{:go/pos {:name-pos [630 2]}} c) ^{:go/pos {:dot [630 30] :name-pos [630 31]}} (.-Certificate ^{:go/pos {:dot [630 25] :name-pos [630 26]}} (.-cert ^{:go/pos {:name-pos [630 23]}} hs)))
+      ^{:go/pos {:if [631 2] :lbrace [631 80] :rbrace [633 2]}} (when [^{:go/pos {:tok-pos [631 12]}} (values ^{:go/pos {:name-pos [631 5]}} _ ^{:go/pos {:name-pos [631 8]}} err) ^{:go/pos {:dot [631 19] :lparen [631 40] :name-pos [631 20] :rparen [631 66]}} (.writeHandshakeRecord ^{:go/pos {:dot [631 17] :name-pos [631 18]}} (.-c ^{:go/pos {:name-pos [631 15]}} hs) ^{:go/pos {:name-pos [631 41]}} certMsg ^{:go/pos {:op-pos [631 50]}} (addr ^{:go/pos {:dot [631 53] :name-pos [631 54]}} (.-finishedHash ^{:go/pos {:name-pos [631 51]}} hs)))] ^{:go/apos {2 [631 76]} :go/pos {:op-pos [631 73]}} (!= ^{:go/pos {:name-pos [631 69]}} err nil)
+        ^{:go/pos {:return [632 3]}} (return ^{:go/pos {:name-pos [632 10]}} err))
+
+
+      ^{:go/pos {:if [635 2] :lbrace [635 27] :rbrace [641 2]}} (when ^{:go/pos {:dot [635 13] :name-pos [635 14]}} (.-ocspStapling ^{:go/pos {:dot [635 7] :name-pos [635 8]}} (.-hello ^{:go/pos {:name-pos [635 5]}} hs))
+        (let [^{:go/pos {:name-pos [636 3] :tok-pos [636 14]}} certStatus ^{:go/pos {:lparen [636 20] :rparen [636 41]}} (^{:go/pos {:name-pos [636 17]}} new ^{:go/pos {:name-pos [636 21]}} certificateStatusMsg)]
+          ^{:go/pos {:tok-pos [637 23]}} (set! ^{:go/pos {:dot [637 13] :name-pos [637 14]}} (.-response ^{:go/pos {:name-pos [637 3]}} certStatus) ^{:go/pos {:dot [637 32] :name-pos [637 33]}} (.-OCSPStaple ^{:go/pos {:dot [637 27] :name-pos [637 28]}} (.-cert ^{:go/pos {:name-pos [637 25]}} hs)))
+          ^{:go/pos {:if [638 3] :lbrace [638 84] :rbrace [640 3]}} (when [^{:go/pos {:tok-pos [638 13]}} (values ^{:go/pos {:name-pos [638 6]}} _ ^{:go/pos {:name-pos [638 9]}} err) ^{:go/pos {:dot [638 20] :lparen [638 41] :name-pos [638 21] :rparen [638 70]}} (.writeHandshakeRecord ^{:go/pos {:dot [638 18] :name-pos [638 19]}} (.-c ^{:go/pos {:name-pos [638 16]}} hs) ^{:go/pos {:name-pos [638 42]}} certStatus ^{:go/pos {:op-pos [638 54]}} (addr ^{:go/pos {:dot [638 57] :name-pos [638 58]}} (.-finishedHash ^{:go/pos {:name-pos [638 55]}} hs)))] ^{:go/apos {2 [638 80]} :go/pos {:op-pos [638 77]}} (!= ^{:go/pos {:name-pos [638 73]}} err nil)
+            ^{:go/pos {:return [639 4]}} (return ^{:go/pos {:name-pos [639 11]}} err))))
+
+
+
+      (let [^{:go/pos {:name-pos [643 2] :tok-pos [643 15]}} keyAgreement ^{:go/pos {:lparen [643 29] :rparen [643 36]}} (^{:go/pos {:dot [643 26] :name-pos [643 27]}} (.-ka ^{:go/pos {:dot [643 20] :name-pos [643 21]}} (.-suite ^{:go/pos {:name-pos [643 18]}} hs)) ^{:go/pos {:dot [643 31] :name-pos [643 32]}} (.-vers ^{:go/pos {:name-pos [643 30]}} c))
+          ^{:go/pos {:tok-pos [644 11]}} (values ^{:go/pos {:name-pos [644 2]}} skx ^{:go/pos {:name-pos [644 7]}} err) ^{:go/pos {:dot [644 26] :lparen [644 52] :name-pos [644 27] :rparen [644 96]}} (.generateServerKeyExchange ^{:go/pos {:name-pos [644 14]}} keyAgreement ^{:go/pos {:dot [644 54] :name-pos [644 55]}} (.-config ^{:go/pos {:name-pos [644 53]}} c) ^{:go/pos {:dot [644 65] :name-pos [644 66]}} (.-cert ^{:go/pos {:name-pos [644 63]}} hs) ^{:go/pos {:dot [644 74] :name-pos [644 75]}} (.-clientHello ^{:go/pos {:name-pos [644 72]}} hs) ^{:go/pos {:dot [644 90] :name-pos [644 91]}} (.-hello ^{:go/pos {:name-pos [644 88]}} hs))]
+        ^{:go/pos {:if [645 2] :lbrace [645 16] :rbrace [648 2]}} (when ^{:go/apos {2 [645 12]} :go/pos {:op-pos [645 9]}} (!= ^{:go/pos {:name-pos [645 5]}} err nil)
+          ^{:go/pos {:dot [646 4] :lparen [646 14] :name-pos [646 5] :rparen [646 36]}} (.sendAlert ^{:go/pos {:name-pos [646 3]}} c ^{:go/pos {:name-pos [646 15]}} alertHandshakeFailure)
+          ^{:go/pos {:return [647 3]}} (return ^{:go/pos {:name-pos [647 10]}} err))
+
+        ^{:go/pos {:if [649 2] :lbrace [649 16] :rbrace [657 2]}} (when ^{:go/apos {2 [649 12]} :go/pos {:op-pos [649 9]}} (!= ^{:go/pos {:name-pos [649 5]}} skx nil)
+          ^{:go/pos {:if [650 3] :lbrace [650 64] :rbrace [653 3]}} (when [^{:go/pos {:tok-pos [650 23]}} (values ^{:go/pos {:name-pos [650 6]}} keyAgreement ^{:go/pos {:name-pos [650 20]}} ok) ^{:go/pos {:dot [650 38] :lparen [650 39] :rparen [650 58]}} (assert ^{:go/pos {:star [650 40]}} (* ^{:go/pos {:name-pos [650 41]}} ecdheKeyAgreement) ^{:go/pos {:name-pos [650 26]}} keyAgreement)] ^{:go/pos {:name-pos [650 61]}} ok
+            ^{:go/pos {:tok-pos [651 14]}} (set! ^{:go/pos {:dot [651 5] :name-pos [651 6]}} (.-curveID ^{:go/pos {:name-pos [651 4]}} c) ^{:go/pos {:dot [651 28] :name-pos [651 29]}} (.-curveID ^{:go/pos {:name-pos [651 16]}} keyAgreement))
+            ^{:go/pos {:tok-pos [652 17]}} (set! ^{:go/pos {:dot [652 5] :name-pos [652 6]}} (.-peerSigAlg ^{:go/pos {:name-pos [652 4]}} c) ^{:go/pos {:dot [652 31] :name-pos [652 32]}} (.-signatureAlgorithm ^{:go/pos {:name-pos [652 19]}} keyAgreement)))
+
+          ^{:go/pos {:if [654 3] :lbrace [654 77] :rbrace [656 3]}} (when [^{:go/pos {:tok-pos [654 13]}} (values ^{:go/pos {:name-pos [654 6]}} _ ^{:go/pos {:name-pos [654 9]}} err) ^{:go/pos {:dot [654 20] :lparen [654 41] :name-pos [654 21] :rparen [654 63]}} (.writeHandshakeRecord ^{:go/pos {:dot [654 18] :name-pos [654 19]}} (.-c ^{:go/pos {:name-pos [654 16]}} hs) ^{:go/pos {:name-pos [654 42]}} skx ^{:go/pos {:op-pos [654 47]}} (addr ^{:go/pos {:dot [654 50] :name-pos [654 51]}} (.-finishedHash ^{:go/pos {:name-pos [654 48]}} hs)))] ^{:go/apos {2 [654 73]} :go/pos {:op-pos [654 70]}} (!= ^{:go/pos {:name-pos [654 66]}} err nil)
+            ^{:go/pos {:return [655 4]}} (return ^{:go/pos {:name-pos [655 11]}} err)))
+
+
+
+        (let [^{:tag ^{:go/pos {:star [659 14]}} (* ^{:go/pos {:name-pos [659 15]}} certificateRequestMsg) :go/pos {:name-pos [659 6] :tok-pos [659 2]}} certReq (zero ^{:go/pos {:star [659 14]}} (* ^{:go/pos {:name-pos [659 15]}} certificateRequestMsg))]
+          ^{:go/pos {:if [660 2] :lbrace [660 46] :rbrace [683 2]}} (when ^{:go/pos {:op-pos [660 25]}} (>= ^{:go/pos {:dot [660 13] :name-pos [660 14]}} (.-ClientAuth ^{:go/pos {:dot [660 6] :name-pos [660 7]}} (.-config ^{:go/pos {:name-pos [660 5]}} c)) ^{:go/pos {:name-pos [660 28]}} RequestClientCert)
+            ;; Request a client certificate
+            ^{:go/pos {:tok-pos [662 11]}} (set! ^{:go/pos {:name-pos [662 3]}} certReq ^{:go/pos {:lparen [662 16] :rparen [662 38]}} (^{:go/pos {:name-pos [662 13]}} new ^{:go/pos {:name-pos [662 17]}} certificateRequestMsg))
+            ^{:go/pos {:tok-pos [663 28]}} (set! ^{:go/pos {:dot [663 10] :name-pos [663 11]}} (.-certificateTypes ^{:go/pos {:name-pos [663 3]}} certReq) ^{:go/pos {:lbrace [663 36] :rbrace [666 3]}} (lit ^{:go/pos {:lbrack [663 30]}} (slice ^{:go/pos {:name-pos [663 32]}} byte)
+                ^{:go/pos {:lparen [664 8] :rparen [664 24]}} (conv ^{:go/pos {:name-pos [664 4]}} byte ^{:go/pos {:name-pos [664 9]}} certTypeRSASign)
+                ^{:go/pos {:lparen [665 8] :rparen [665 26]}} (conv ^{:go/pos {:name-pos [665 4]}} byte ^{:go/pos {:name-pos [665 9]}} certTypeECDSASign)))
+
+            ^{:go/pos {:if [667 3] :lbrace [667 29] :rbrace [670 3]}} (when ^{:go/pos {:op-pos [667 13]}} (>= ^{:go/pos {:dot [667 7] :name-pos [667 8]}} (.-vers ^{:go/pos {:name-pos [667 6]}} c) ^{:go/pos {:name-pos [667 16]}} VersionTLS12)
+              ^{:go/apos {2 [668 36]} :go/pos {:tok-pos [668 34]}} (set! ^{:go/pos {:dot [668 11] :name-pos [668 12]}} (.-hasSignatureAlgorithm ^{:go/pos {:name-pos [668 4]}} certReq) true)
+              ^{:go/pos {:tok-pos [669 41]}} (set! ^{:go/pos {:dot [669 11] :name-pos [669 12]}} (.-supportedSignatureAlgorithms ^{:go/pos {:name-pos [669 4]}} certReq) ^{:go/pos {:lparen [669 71] :rparen [669 86]}} (^{:go/pos {:name-pos [669 43]}} supportedSignatureAlgorithms ^{:go/pos {:dot [669 73] :name-pos [669 74]}} (.-vers ^{:go/pos {:name-pos [669 72]}} c) ^{:go/pos {:dot [669 81] :name-pos [669 82]}} (.-vers ^{:go/pos {:name-pos [669 80]}} c))))
+
+
+            ;; An empty list of certificateAuthorities signals to
+            ;; the client that it may send any certificate in response
+            ;; to our request. When we know the CAs we trust, then
+            ;; we can send them down, so that the client can choose
+            ;; an appropriate certificate to give to us.
+            ^{:go/pos {:if [677 3] :lbrace [677 32] :rbrace [679 3]}} (when ^{:go/apos {2 [677 28]} :go/pos {:op-pos [677 25]}} (!= ^{:go/pos {:dot [677 14] :name-pos [677 15]}} (.-ClientCAs ^{:go/pos {:dot [677 7] :name-pos [677 8]}} (.-config ^{:go/pos {:name-pos [677 6]}} c)) nil)
+              ^{:go/pos {:tok-pos [678 35]}} (set! ^{:go/pos {:dot [678 11] :name-pos [678 12]}} (.-certificateAuthorities ^{:go/pos {:name-pos [678 4]}} certReq) ^{:go/pos {:dot [678 55] :lparen [678 64] :name-pos [678 56] :rparen [678 65]}} (.Subjects ^{:go/pos {:dot [678 45] :name-pos [678 46]}} (.-ClientCAs ^{:go/pos {:dot [678 38] :name-pos [678 39]}} (.-config ^{:go/pos {:name-pos [678 37]}} c)))))
+
+            ^{:go/pos {:if [680 3] :lbrace [680 81] :rbrace [682 3]}} (when [^{:go/pos {:tok-pos [680 13]}} (values ^{:go/pos {:name-pos [680 6]}} _ ^{:go/pos {:name-pos [680 9]}} err) ^{:go/pos {:dot [680 20] :lparen [680 41] :name-pos [680 21] :rparen [680 67]}} (.writeHandshakeRecord ^{:go/pos {:dot [680 18] :name-pos [680 19]}} (.-c ^{:go/pos {:name-pos [680 16]}} hs) ^{:go/pos {:name-pos [680 42]}} certReq ^{:go/pos {:op-pos [680 51]}} (addr ^{:go/pos {:dot [680 54] :name-pos [680 55]}} (.-finishedHash ^{:go/pos {:name-pos [680 52]}} hs)))] ^{:go/apos {2 [680 77]} :go/pos {:op-pos [680 74]}} (!= ^{:go/pos {:name-pos [680 70]}} err nil)
+              ^{:go/pos {:return [681 4]}} (return ^{:go/pos {:name-pos [681 11]}} err)))
+
+
+
+          (let [^{:go/pos {:name-pos [685 2] :tok-pos [685 12]}} helloDone ^{:go/pos {:lparen [685 18] :rparen [685 37]}} (^{:go/pos {:name-pos [685 15]}} new ^{:go/pos {:name-pos [685 19]}} serverHelloDoneMsg)]
+            ^{:go/pos {:if [686 2] :lbrace [686 82] :rbrace [688 2]}} (when [^{:go/pos {:tok-pos [686 12]}} (values ^{:go/pos {:name-pos [686 5]}} _ ^{:go/pos {:name-pos [686 8]}} err) ^{:go/pos {:dot [686 19] :lparen [686 40] :name-pos [686 20] :rparen [686 68]}} (.writeHandshakeRecord ^{:go/pos {:dot [686 17] :name-pos [686 18]}} (.-c ^{:go/pos {:name-pos [686 15]}} hs) ^{:go/pos {:name-pos [686 41]}} helloDone ^{:go/pos {:op-pos [686 52]}} (addr ^{:go/pos {:dot [686 55] :name-pos [686 56]}} (.-finishedHash ^{:go/pos {:name-pos [686 53]}} hs)))] ^{:go/apos {2 [686 78]} :go/pos {:op-pos [686 75]}} (!= ^{:go/pos {:name-pos [686 71]}} err nil)
+              ^{:go/pos {:return [687 3]}} (return ^{:go/pos {:name-pos [687 10]}} err))
+
+
+            ^{:go/pos {:if [690 2] :lbrace [690 37] :rbrace [692 2]}} (when [^{:go/pos {:tok-pos [690 12]}} (values ^{:go/pos {:name-pos [690 5]}} _ ^{:go/pos {:name-pos [690 8]}} err) ^{:go/pos {:dot [690 16] :lparen [690 22] :name-pos [690 17] :rparen [690 23]}} (.flush ^{:go/pos {:name-pos [690 15]}} c)] ^{:go/apos {2 [690 33]} :go/pos {:op-pos [690 30]}} (!= ^{:go/pos {:name-pos [690 26]}} err nil)
+              ^{:go/pos {:return [691 3]}} (return ^{:go/pos {:name-pos [691 10]}} err))
+
+
+            (let [^{:tag ^{:go/pos {:dot [694 16] :name-pos [694 17] :x-pos [694 10]}} crypto/PublicKey :go/pos {:name-pos [694 6] :tok-pos [694 2]}} pub (zero ^{:go/pos {:dot [694 16] :name-pos [694 17] :x-pos [694 10]}} crypto/PublicKey) ; public key for client auth, if any
+
+                ^{:go/pos {:tok-pos [696 11]}} (values ^{:go/pos {:name-pos [696 2]}} msg ^:assign ^{:go/pos {:name-pos [696 7]}} err) ^{:go/pos {:dot [696 15] :lparen [696 29] :name-pos [696 16] :rparen [696 46]}} (.readHandshake ^{:go/pos {:name-pos [696 14]}} c ^{:go/pos {:op-pos [696 30]}} (addr ^{:go/pos {:dot [696 33] :name-pos [696 34]}} (.-finishedHash ^{:go/pos {:name-pos [696 31]}} hs)))]
+              ^{:go/pos {:if [697 2] :lbrace [697 16] :rbrace [699 2]}} (when ^{:go/apos {2 [697 12]} :go/pos {:op-pos [697 9]}} (!= ^{:go/pos {:name-pos [697 5]}} err nil)
+                ^{:go/pos {:return [698 3]}} (return ^{:go/pos {:name-pos [698 10]}} err))
+
+
+              ;; If we requested a client certificate, then the client must send a
+              ;; certificate message, even if it's empty.
+              ^{:go/pos {:if [703 2] :lbrace [703 46] :rbrace [723 2]}} (when ^{:go/pos {:op-pos [703 25]}} (>= ^{:go/pos {:dot [703 13] :name-pos [703 14]}} (.-ClientAuth ^{:go/pos {:dot [703 6] :name-pos [703 7]}} (.-config ^{:go/pos {:name-pos [703 5]}} c)) ^{:go/pos {:name-pos [703 28]}} RequestClientCert)
+                (let [^{:go/pos {:tok-pos [704 15]}} (values ^{:go/pos {:name-pos [704 3]}} certMsg ^{:go/pos {:name-pos [704 12]}} ok) ^{:go/pos {:dot [704 21] :lparen [704 22] :rparen [704 38]}} (assert ^{:go/pos {:star [704 23]}} (* ^{:go/pos {:name-pos [704 24]}} certificateMsg) ^{:go/pos {:name-pos [704 18]}} msg)]
+                  ^{:go/pos {:if [705 3] :lbrace [705 10] :rbrace [708 3]}} (when ^{:go/pos {:op-pos [705 6]}} (not ^{:go/pos {:name-pos [705 7]}} ok)
+                    ^{:go/pos {:dot [706 5] :lparen [706 15] :name-pos [706 6] :rparen [706 38]}} (.sendAlert ^{:go/pos {:name-pos [706 4]}} c ^{:go/pos {:name-pos [706 16]}} alertUnexpectedMessage)
+                    ^{:go/pos {:return [707 4]}} (return ^{:go/pos {:lparen [707 33] :rparen [707 46]}} (^{:go/pos {:name-pos [707 11]}} unexpectedMessageError ^{:go/pos {:name-pos [707 34]}} certMsg ^{:go/pos {:name-pos [707 43]}} msg)))
+
+
+                  ^{:go/pos {:if [710 3] :lbrace [712 18] :rbrace [714 3]}} (when [^{:go/pos {:name-pos [710 6] :tok-pos [710 10]}} err ^{:go/pos {:dot [710 14] :lparen [710 37] :name-pos [710 15] :rparen [712 4]}} (.processCertsFromClient ^{:go/pos {:name-pos [710 13]}} c ^{:go/acolon {2 [711 15]} :go/apos {2 [711 4]} :go/pos {:lbrace [710 49] :rbrace [712 3]}} (lit ^{:go/pos {:name-pos [710 38]}} Certificate
+                          :Certificate ^{:go/pos {:dot [711 24] :name-pos [711 25]}} (.-certificates ^{:go/pos {:name-pos [711 17]}} certMsg)))]
+                    ^{:go/apos {2 [712 14]} :go/pos {:op-pos [712 11]}} (!= ^{:go/pos {:name-pos [712 7]}} err nil)
+                    ^{:go/pos {:return [713 4]}} (return ^{:go/pos {:name-pos [713 11]}} err))
+
+                  ^{:go/pos {:if [715 3] :lbrace [715 37] :rbrace [717 3]}} (when ^{:go/apos {2 [715 35]} :go/pos {:op-pos [715 32]}} (!= ^{:go/pos {:lparen [715 9] :rparen [715 30]}} (^{:go/pos {:name-pos [715 6]}} len ^{:go/pos {:dot [715 17] :name-pos [715 18]}} (.-certificates ^{:go/pos {:name-pos [715 10]}} certMsg)) 0)
+                    ^{:go/pos {:tok-pos [716 8]}} (set! ^{:go/pos {:name-pos [716 4]}} pub ^{:go/pos {:dot [716 31] :name-pos [716 32]}} (.-PublicKey ^{:go/apos {2 [716 29]} :go/pos {:lbrack [716 28] :rbrack [716 30]}} (aget ^{:go/pos {:dot [716 11] :name-pos [716 12]}} (.-peerCertificates ^{:go/pos {:name-pos [716 10]}} c) 0))))
+
+
+                  ^{:go/pos {:tok-pos [719 12]}} (set! (values ^{:go/pos {:name-pos [719 3]}} msg ^{:go/pos {:name-pos [719 8]}} err) ^{:go/pos {:dot [719 15] :lparen [719 29] :name-pos [719 16] :rparen [719 46]}} (.readHandshake ^{:go/pos {:name-pos [719 14]}} c ^{:go/pos {:op-pos [719 30]}} (addr ^{:go/pos {:dot [719 33] :name-pos [719 34]}} (.-finishedHash ^{:go/pos {:name-pos [719 31]}} hs))))
+                  ^{:go/pos {:if [720 3] :lbrace [720 17] :rbrace [722 3]}} (when ^{:go/apos {2 [720 13]} :go/pos {:op-pos [720 10]}} (!= ^{:go/pos {:name-pos [720 6]}} err nil)
+                    ^{:go/pos {:return [721 4]}} (return ^{:go/pos {:name-pos [721 11]}} err))))
+
+
+              ^{:go/pos {:if [724 2] :lbrace [724 38] :rbrace [729 2]}} (when ^{:go/apos {2 [724 34]} :go/pos {:op-pos [724 31]}} (!= ^{:go/pos {:dot [724 13] :name-pos [724 14]}} (.-VerifyConnection ^{:go/pos {:dot [724 6] :name-pos [724 7]}} (.-config ^{:go/pos {:name-pos [724 5]}} c)) nil)
+                ^{:go/pos {:if [725 3] :lbrace [725 78] :rbrace [728 3]}} (when [^{:go/pos {:name-pos [725 6] :tok-pos [725 10]}} err ^{:go/pos {:lparen [725 38] :rparen [725 64]}} (^{:go/pos {:dot [725 21] :name-pos [725 22]}} (.-VerifyConnection ^{:go/pos {:dot [725 14] :name-pos [725 15]}} (.-config ^{:go/pos {:name-pos [725 13]}} c)) ^{:go/pos {:dot [725 40] :lparen [725 62] :name-pos [725 41] :rparen [725 63]}} (.connectionStateLocked ^{:go/pos {:name-pos [725 39]}} c))] ^{:go/apos {2 [725 74]} :go/pos {:op-pos [725 71]}} (!= ^{:go/pos {:name-pos [725 67]}} err nil)
+                  ^{:go/pos {:dot [726 5] :lparen [726 15] :name-pos [726 6] :rparen [726 34]}} (.sendAlert ^{:go/pos {:name-pos [726 4]}} c ^{:go/pos {:lparen [726 29] :rparen [726 33]}} (^{:go/pos {:name-pos [726 16]}} callbackAlert ^{:go/pos {:name-pos [726 30]}} err)) ; arbace
+                  ^{:go/pos {:return [727 4]}} (return ^{:go/pos {:name-pos [727 11]}} err)))
+
+
+
+              ;; Get client key exchange
+              (let [^{:go/pos {:tok-pos [732 10]}} (values ^{:go/pos {:name-pos [732 2]}} ckx ^{:go/pos {:name-pos [732 7]}} ok) ^{:go/pos {:dot [732 16] :lparen [732 17] :rparen [732 39]}} (assert ^{:go/pos {:star [732 18]}} (* ^{:go/pos {:name-pos [732 19]}} clientKeyExchangeMsg) ^{:go/pos {:name-pos [732 13]}} msg)]
+                ^{:go/pos {:if [733 2] :lbrace [733 9] :rbrace [736 2]}} (when ^{:go/pos {:op-pos [733 5]}} (not ^{:go/pos {:name-pos [733 6]}} ok)
+                  ^{:go/pos {:dot [734 4] :lparen [734 14] :name-pos [734 5] :rparen [734 37]}} (.sendAlert ^{:go/pos {:name-pos [734 3]}} c ^{:go/pos {:name-pos [734 15]}} alertUnexpectedMessage)
+                  ^{:go/pos {:return [735 3]}} (return ^{:go/pos {:lparen [735 32] :rparen [735 41]}} (^{:go/pos {:name-pos [735 10]}} unexpectedMessageError ^{:go/pos {:name-pos [735 33]}} ckx ^{:go/pos {:name-pos [735 38]}} msg)))
+
+
+                ^{:go/apos {7 [828 9]}} (let [^{:go/pos {:tok-pos [738 23]}} (values ^{:go/pos {:name-pos [738 2]}} preMasterSecret ^:assign ^{:go/pos {:name-pos [738 19]}} err) ^{:go/pos {:dot [738 38] :lparen [738 63] :name-pos [738 39] :rparen [738 94]}} (.processClientKeyExchange ^{:go/pos {:name-pos [738 26]}} keyAgreement ^{:go/pos {:dot [738 65] :name-pos [738 66]}} (.-config ^{:go/pos {:name-pos [738 64]}} c) ^{:go/pos {:dot [738 76] :name-pos [738 77]}} (.-cert ^{:go/pos {:name-pos [738 74]}} hs) ^{:go/pos {:name-pos [738 83]}} ckx ^{:go/pos {:dot [738 89] :name-pos [738 90]}} (.-vers ^{:go/pos {:name-pos [738 88]}} c))]
+                  ^{:go/pos {:if [739 2] :lbrace [739 16] :rbrace [742 2]}} (when ^{:go/apos {2 [739 12]} :go/pos {:op-pos [739 9]}} (!= ^{:go/pos {:name-pos [739 5]}} err nil)
+                    ^{:go/pos {:dot [740 4] :lparen [740 14] :name-pos [740 5] :rparen [740 36]}} (.sendAlert ^{:go/pos {:name-pos [740 3]}} c ^{:go/pos {:name-pos [740 15]}} alertIllegalParameter)
+                    ^{:go/pos {:return [741 3]}} (return ^{:go/pos {:name-pos [741 10]}} err))
+
+                  ^{:go/pos {:else-lbrace [747 9] :else-rbrace [757 2] :if [743 2] :lbrace [743 35] :rbrace [747 2]}} (if ^{:go/pos {:dot [743 13] :name-pos [743 14]}} (.-extendedMasterSecret ^{:go/pos {:dot [743 7] :name-pos [743 8]}} (.-hello ^{:go/pos {:name-pos [743 5]}} hs)) ^{:go/pos {:lbrace [743 35] :rbrace [747 2]}} (do
+                      ^{:go/apos {2 [744 23]} :go/pos {:tok-pos [744 21]}} (set! ^{:go/pos {:dot [744 4] :name-pos [744 5]}} (.-extMasterSecret ^{:go/pos {:name-pos [744 3]}} c) true)
+                      ^{:go/pos {:tok-pos [745 19]}} (set! ^{:go/pos {:dot [745 5] :name-pos [745 6]}} (.-masterSecret ^{:go/pos {:name-pos [745 3]}} hs) ^{:go/pos {:lparen [745 49] :rparen [746 25]}} (^{:go/pos {:name-pos [745 21]}} extMasterFromPreMasterSecret ^{:go/pos {:dot [745 51] :name-pos [745 52]}} (.-vers ^{:go/pos {:name-pos [745 50]}} c) ^{:go/pos {:dot [745 60] :name-pos [745 61]}} (.-suite ^{:go/pos {:name-pos [745 58]}} hs) ^{:go/pos {:name-pos [745 68]}} preMasterSecret
+                          ^{:go/pos {:dot [746 19] :lparen [746 23] :name-pos [746 20] :rparen [746 24]}} (.Sum ^{:go/pos {:dot [746 6] :name-pos [746 7]}} (.-finishedHash ^{:go/pos {:name-pos [746 4]}} hs)))))
+                    ^{:go/pos {:lbrace [747 9] :rbrace [757 2]}} (do
+                      ^{:go/pos {:if [748 3] :lbrace [748 28] :rbrace [754 3]}} (when ^{:go/pos {:lparen [748 25] :rparen [748 26]}} (^{:go/pos {:dot [748 16] :name-pos [748 17] :x-pos [748 6]}} fips140tls/Required)
+                        ^{:go/pos {:if [749 4] :lbrace [749 33] :rbrace [752 4]}} (when ^{:go/apos {2 [749 29]} :go/pos {:op-pos [749 26]}} (!= ^{:go/pos {:dot [749 17] :lparen [749 23] :name-pos [749 18] :rparen [749 24]}} (.Value ^{:go/pos {:name-pos [749 7]}} fips140ems) "0")
+                          ^{:go/pos {:dot [750 6] :lparen [750 16] :name-pos [750 7] :rparen [750 38]}} (.sendAlert ^{:go/pos {:name-pos [750 5]}} c ^{:go/pos {:name-pos [750 17]}} alertHandshakeFailure)
+                          ^{:go/pos {:return [751 5]}} (return ^{:go/apos {1 [751 23]} :go/pos {:lparen [751 22] :rparen [751 83]}} (^{:go/pos {:dot [751 18] :name-pos [751 19] :x-pos [751 12]}} errors/New "tls: FIPS 140-3 requires the use of Extended Master Secret")))
+
+                        ^{:go/pos {:dot [753 14] :lparen [753 28] :name-pos [753 15] :rparen [753 29]}} (.IncNonDefault ^{:go/pos {:name-pos [753 4]}} fips140ems))
+
+                      ^{:go/pos {:tok-pos [755 19]}} (set! ^{:go/pos {:dot [755 5] :name-pos [755 6]}} (.-masterSecret ^{:go/pos {:name-pos [755 3]}} hs) ^{:go/pos {:lparen [755 46] :rparen [756 42]}} (^{:go/pos {:name-pos [755 21]}} masterFromPreMasterSecret ^{:go/pos {:dot [755 48] :name-pos [755 49]}} (.-vers ^{:go/pos {:name-pos [755 47]}} c) ^{:go/pos {:dot [755 57] :name-pos [755 58]}} (.-suite ^{:go/pos {:name-pos [755 55]}} hs) ^{:go/pos {:name-pos [755 65]}} preMasterSecret
+                          ^{:go/pos {:dot [756 18] :name-pos [756 19]}} (.-random ^{:go/pos {:dot [756 6] :name-pos [756 7]}} (.-clientHello ^{:go/pos {:name-pos [756 4]}} hs)) ^{:go/pos {:dot [756 35] :name-pos [756 36]}} (.-random ^{:go/pos {:dot [756 29] :name-pos [756 30]}} (.-hello ^{:go/pos {:name-pos [756 27]}} hs))))))
+
+                  ^{:go/pos {:if [758 2] :lbrace [758 103] :rbrace [761 2]}} (when [^{:go/pos {:name-pos [758 5] :tok-pos [758 9]}} err ^{:go/pos {:dot [758 20] :lparen [758 32] :name-pos [758 21] :rparen [758 89]}} (.writeKeyLog ^{:go/pos {:dot [758 13] :name-pos [758 14]}} (.-config ^{:go/pos {:name-pos [758 12]}} c) ^{:go/pos {:name-pos [758 33]}} keyLogLabelTLS12 ^{:go/pos {:dot [758 65] :name-pos [758 66]}} (.-random ^{:go/pos {:dot [758 53] :name-pos [758 54]}} (.-clientHello ^{:go/pos {:name-pos [758 51]}} hs)) ^{:go/pos {:dot [758 76] :name-pos [758 77]}} (.-masterSecret ^{:go/pos {:name-pos [758 74]}} hs))] ^{:go/apos {2 [758 99]} :go/pos {:op-pos [758 96]}} (!= ^{:go/pos {:name-pos [758 92]}} err nil)
+                    ^{:go/pos {:dot [759 4] :lparen [759 14] :name-pos [759 5] :rparen [759 33]}} (.sendAlert ^{:go/pos {:name-pos [759 3]}} c ^{:go/pos {:name-pos [759 15]}} alertInternalError)
+                    ^{:go/pos {:return [760 3]}} (return ^{:go/pos {:name-pos [760 10]}} err))
+
+
+                  ;; If we received a client cert in response to our certificate request message,
+                  ;; the client will send us a certificateVerifyMsg immediately after the
+                  ;; clientKeyExchangeMsg. This message is a digest of all preceding
+                  ;; handshake-layer messages that is signed using the private key corresponding
+                  ;; to the client's certificate. This allows us to verify that the client is in
+                  ;; possession of the private key of the certificate.
+                  ^{:go/pos {:if [769 2] :lbrace [769 33] :rbrace [824 2]}} (when ^{:go/apos {2 [769 31]} :go/pos {:op-pos [769 29]}} (> ^{:go/pos {:lparen [769 8] :rparen [769 27]}} (^{:go/pos {:name-pos [769 5]}} len ^{:go/pos {:dot [769 10] :name-pos [769 11]}} (.-peerCertificates ^{:go/pos {:name-pos [769 9]}} c)) 0)
+                    ;; certificateVerifyMsg is included in the transcript, but not until
+                    ;; after we verify the handshake signature, since the state before
+                    ;; this message was sent is used.
+                    ^{:go/pos {:tok-pos [773 12]}} (set! (values ^{:go/pos {:name-pos [773 3]}} msg ^{:go/pos {:name-pos [773 8]}} err) ^{:go/apos {2 [773 30]} :go/pos {:dot [773 15] :lparen [773 29] :name-pos [773 16] :rparen [773 33]}} (.readHandshake ^{:go/pos {:name-pos [773 14]}} c nil))
+                    ^{:go/pos {:if [774 3] :lbrace [774 17] :rbrace [776 3]}} (when ^{:go/apos {2 [774 13]} :go/pos {:op-pos [774 10]}} (!= ^{:go/pos {:name-pos [774 6]}} err nil)
+                      ^{:go/pos {:return [775 4]}} (return ^{:go/pos {:name-pos [775 11]}} err))
+
+                    (let [^{:go/pos {:tok-pos [777 18]}} (values ^{:go/pos {:name-pos [777 3]}} certVerify ^{:go/pos {:name-pos [777 15]}} ok) ^{:go/pos {:dot [777 24] :lparen [777 25] :rparen [777 47]}} (assert ^{:go/pos {:star [777 26]}} (* ^{:go/pos {:name-pos [777 27]}} certificateVerifyMsg) ^{:go/pos {:name-pos [777 21]}} msg)]
+                      ^{:go/pos {:if [778 3] :lbrace [778 10] :rbrace [781 3]}} (when ^{:go/pos {:op-pos [778 6]}} (not ^{:go/pos {:name-pos [778 7]}} ok)
+                        ^{:go/pos {:dot [779 5] :lparen [779 15] :name-pos [779 6] :rparen [779 38]}} (.sendAlert ^{:go/pos {:name-pos [779 4]}} c ^{:go/pos {:name-pos [779 16]}} alertUnexpectedMessage)
+                        ^{:go/pos {:return [780 4]}} (return ^{:go/pos {:lparen [780 33] :rparen [780 49]}} (^{:go/pos {:name-pos [780 11]}} unexpectedMessageError ^{:go/pos {:name-pos [780 34]}} certVerify ^{:go/pos {:name-pos [780 46]}} msg)))
+
+
+                      (let [^{:tag ^{:go/pos {:name-pos [783 15]}} uint8 :go/pos {:name-pos [783 7] :tok-pos [783 3]}} sigType (zero ^{:go/pos {:name-pos [783 15]}} uint8)
+                          ^{:tag ^{:go/pos {:dot [784 21] :name-pos [784 22] :x-pos [784 15]}} crypto/Hash :go/pos {:name-pos [784 7] :tok-pos [784 3]}} sigHash (zero ^{:go/pos {:dot [784 21] :name-pos [784 22] :x-pos [784 15]}} crypto/Hash)]
+                        ^{:go/pos {:else-lbrace [806 10] :else-rbrace [817 3] :if [785 3] :lbrace [785 29] :rbrace [806 3]}} (if ^{:go/pos {:op-pos [785 13]}} (>= ^{:go/pos {:dot [785 7] :name-pos [785 8]}} (.-vers ^{:go/pos {:name-pos [785 6]}} c) ^{:go/pos {:name-pos [785 16]}} VersionTLS12) ^{:go/pos {:lbrace [785 29] :rbrace [806 3]}} (do
+                            ^{:go/pos {:if [786 4] :lbrace [786 107] :rbrace [789 4]}} (when ^{:go/pos {:op-pos [786 7]}} (not ^{:go/pos {:lparen [786 37] :rparen [786 105]}} (^{:go/pos {:name-pos [786 8]}} isSupportedSignatureAlgorithm ^{:go/pos {:dot [786 48] :name-pos [786 49]}} (.-signatureAlgorithm ^{:go/pos {:name-pos [786 38]}} certVerify) ^{:go/pos {:dot [786 76] :name-pos [786 77]}} (.-supportedSignatureAlgorithms ^{:go/pos {:name-pos [786 69]}} certReq)))
+                              ^{:go/pos {:dot [787 6] :lparen [787 16] :name-pos [787 7] :rparen [787 38]}} (.sendAlert ^{:go/pos {:name-pos [787 5]}} c ^{:go/pos {:name-pos [787 17]}} alertIllegalParameter)
+                              ^{:go/pos {:return [788 5]}} (return ^{:go/apos {1 [788 23]} :go/pos {:lparen [788 22] :rparen [788 86]}} (^{:go/pos {:dot [788 18] :name-pos [788 19] :x-pos [788 12]}} errors/New "tls: client certificate used with invalid signature algorithm")))
+
+                            ^{:go/pos {:tok-pos [790 26]}} (set! (values ^{:go/pos {:name-pos [790 4]}} sigType ^{:go/pos {:name-pos [790 13]}} sigHash ^{:go/pos {:name-pos [790 22]}} err) ^{:go/pos {:lparen [790 58] :rparen [790 88]}} (^{:go/pos {:name-pos [790 28]}} typeAndHashFromSignatureScheme ^{:go/pos {:dot [790 69] :name-pos [790 70]}} (.-signatureAlgorithm ^{:go/pos {:name-pos [790 59]}} certVerify)))
+                            ^{:go/pos {:if [791 4] :lbrace [791 18] :rbrace [793 4]}} (when ^{:go/apos {2 [791 14]} :go/pos {:op-pos [791 11]}} (!= ^{:go/pos {:name-pos [791 7]}} err nil)
+                              ^{:go/pos {:return [792 5]}} (return ^{:go/pos {:dot [792 13] :lparen [792 23] :name-pos [792 14] :rparen [792 42]}} (.sendAlert ^{:go/pos {:name-pos [792 12]}} c ^{:go/pos {:name-pos [792 24]}} alertInternalError)))
+
+                            ^{:go/pos {:if [794 4] :lbrace [794 30] :rbrace [797 4]}} (when ^{:go/pos {:op-pos [794 15]}} (== ^{:go/pos {:name-pos [794 7]}} sigHash ^{:go/pos {:dot [794 24] :name-pos [794 25] :x-pos [794 18]}} crypto/SHA1)
+                              ^{:go/pos {:dot [795 12] :lparen [795 18] :name-pos [795 13] :rparen [795 19]}} (.Value ^{:go/pos {:name-pos [795 5]}} tlssha1) ; ensure godebug is initialized
+                              ^{:go/pos {:dot [796 12] :lparen [796 26] :name-pos [796 13] :rparen [796 27]}} (.IncNonDefault ^{:go/pos {:name-pos [796 5]}} tlssha1))
+
+                            ^{:go/pos {:if [798 4] :lbrace [798 37] :rbrace [801 4]}} (when ^{:go/apos {2 [798 33]} :go/pos {:op-pos [798 30]}} (== ^{:go/pos {:dot [798 22] :name-pos [798 23]}} (.-buffer ^{:go/pos {:dot [798 9] :name-pos [798 10]}} (.-finishedHash ^{:go/pos {:name-pos [798 7]}} hs)) nil)
+                              ^{:go/pos {:dot [799 6] :lparen [799 16] :name-pos [799 7] :rparen [799 35]}} (.sendAlert ^{:go/pos {:name-pos [799 5]}} c ^{:go/pos {:name-pos [799 17]}} alertInternalError)
+                              ^{:go/pos {:return [800 5]}} (return ^{:go/apos {1 [800 23]} :go/pos {:lparen [800 22] :rparen [800 91]}} (^{:go/pos {:dot [800 18] :name-pos [800 19] :x-pos [800 12]}} errors/New "tls: internal error: did not keep handshake transcript for TLS 1.2")))
+
+                            ^{:go/pos {:if [802 4] :lbrace [802 120] :rbrace [805 4]}} (when [^{:go/pos {:name-pos [802 7] :tok-pos [802 11]}} err ^{:go/pos {:lparen [802 38] :rparen [802 106]}} (^{:go/pos {:name-pos [802 14]}} verifyHandshakeSignature ^{:go/pos {:name-pos [802 39]}} sigType ^{:go/pos {:name-pos [802 48]}} pub ^{:go/pos {:name-pos [802 53]}} sigHash ^{:go/pos {:dot [802 77] :name-pos [802 78]}} (.-buffer ^{:go/pos {:dot [802 64] :name-pos [802 65]}} (.-finishedHash ^{:go/pos {:name-pos [802 62]}} hs)) ^{:go/pos {:dot [802 96] :name-pos [802 97]}} (.-signature ^{:go/pos {:name-pos [802 86]}} certVerify))] ^{:go/apos {2 [802 116]} :go/pos {:op-pos [802 113]}} (!= ^{:go/pos {:name-pos [802 109]}} err nil)
+                              ^{:go/pos {:dot [803 6] :lparen [803 16] :name-pos [803 7] :rparen [803 34]}} (.sendAlert ^{:go/pos {:name-pos [803 5]}} c ^{:go/pos {:name-pos [803 17]}} alertDecryptError)
+                              ^{:go/pos {:return [804 5]}} (return ^{:go/pos {:lparen [804 22] :rparen [804 89]}} (^{:go/pos {:dot [804 18] :name-pos [804 19] :x-pos [804 12]}} errors/New ^{:go/apos {1 [804 23]} :go/pos {:op-pos [804 76]}} (+ "tls: invalid signature by the client certificate: " ^{:go/pos {:dot [804 81] :lparen [804 87] :name-pos [804 82] :rparen [804 88]}} (.Error ^{:go/pos {:name-pos [804 78]}} err))))))
+
+                          ^{:go/pos {:lbrace [806 10] :rbrace [817 3]}} (do
+                            ^{:go/pos {:tok-pos [807 26]}} (set! (values ^{:go/pos {:name-pos [807 4]}} sigType ^{:go/pos {:name-pos [807 13]}} sigHash ^{:go/pos {:name-pos [807 22]}} err) ^{:go/pos {:lparen [807 58] :rparen [807 62]}} (^{:go/pos {:name-pos [807 28]}} legacyTypeAndHashFromPublicKey ^{:go/pos {:name-pos [807 59]}} pub))
+                            ^{:go/pos {:if [808 4] :lbrace [808 18] :rbrace [811 4]}} (when ^{:go/apos {2 [808 14]} :go/pos {:op-pos [808 11]}} (!= ^{:go/pos {:name-pos [808 7]}} err nil)
+                              ^{:go/pos {:dot [809 6] :lparen [809 16] :name-pos [809 7] :rparen [809 38]}} (.sendAlert ^{:go/pos {:name-pos [809 5]}} c ^{:go/pos {:name-pos [809 17]}} alertIllegalParameter)
+                              ^{:go/pos {:return [810 5]}} (return ^{:go/pos {:name-pos [810 12]}} err))
+
+                            (let [^{:go/pos {:name-pos [812 4] :tok-pos [812 11]}} signed ^{:go/pos {:dot [812 29] :lparen [812 54] :name-pos [812 30] :rparen [812 62]}} (.hashForClientCertificate ^{:go/pos {:dot [812 16] :name-pos [812 17]}} (.-finishedHash ^{:go/pos {:name-pos [812 14]}} hs) ^{:go/pos {:name-pos [812 55]}} sigType)]
+                              ^{:go/pos {:if [813 4] :lbrace [813 110] :rbrace [816 4]}} (when [^{:go/pos {:name-pos [813 7] :tok-pos [813 11]}} err ^{:go/pos {:lparen [813 44] :rparen [813 96]}} (^{:go/pos {:name-pos [813 14]}} verifyLegacyHandshakeSignature ^{:go/pos {:name-pos [813 45]}} sigType ^{:go/pos {:name-pos [813 54]}} pub ^{:go/pos {:name-pos [813 59]}} sigHash ^{:go/pos {:name-pos [813 68]}} signed ^{:go/pos {:dot [813 86] :name-pos [813 87]}} (.-signature ^{:go/pos {:name-pos [813 76]}} certVerify))] ^{:go/apos {2 [813 106]} :go/pos {:op-pos [813 103]}} (!= ^{:go/pos {:name-pos [813 99]}} err nil)
+                                ^{:go/pos {:dot [814 6] :lparen [814 16] :name-pos [814 7] :rparen [814 34]}} (.sendAlert ^{:go/pos {:name-pos [814 5]}} c ^{:go/pos {:name-pos [814 17]}} alertDecryptError)
+                                ^{:go/pos {:return [815 5]}} (return ^{:go/pos {:lparen [815 22] :rparen [815 89]}} (^{:go/pos {:dot [815 18] :name-pos [815 19] :x-pos [815 12]}} errors/New ^{:go/apos {1 [815 23]} :go/pos {:op-pos [815 76]}} (+ "tls: invalid signature by the client certificate: " ^{:go/pos {:dot [815 81] :lparen [815 87] :name-pos [815 82] :rparen [815 88]}} (.Error ^{:go/pos {:name-pos [815 78]}} err))))))))
+
+
+
+                        ^{:go/pos {:tok-pos [819 16]}} (set! ^{:go/pos {:dot [819 4] :name-pos [819 5]}} (.-peerSigAlg ^{:go/pos {:name-pos [819 3]}} c) ^{:go/pos {:dot [819 28] :name-pos [819 29]}} (.-signatureAlgorithm ^{:go/pos {:name-pos [819 18]}} certVerify))
+
+                        ^{:go/pos {:if [821 3] :lbrace [821 69] :rbrace [823 3]}} (when [^{:go/pos {:name-pos [821 6] :tok-pos [821 10]}} err ^{:go/pos {:lparen [821 26] :rparen [821 55]}} (^{:go/pos {:name-pos [821 13]}} transcriptMsg ^{:go/pos {:name-pos [821 27]}} certVerify ^{:go/pos {:op-pos [821 39]}} (addr ^{:go/pos {:dot [821 42] :name-pos [821 43]}} (.-finishedHash ^{:go/pos {:name-pos [821 40]}} hs)))] ^{:go/apos {2 [821 65]} :go/pos {:op-pos [821 62]}} (!= ^{:go/pos {:name-pos [821 58]}} err nil)
+                          ^{:go/pos {:return [822 4]}} (return ^{:go/pos {:name-pos [822 11]}} err)))))
+
+
+
+                  ^{:go/pos {:dot [826 17] :lparen [826 40] :name-pos [826 18] :rparen [826 41]}} (.discardHandshakeBuffer ^{:go/pos {:dot [826 4] :name-pos [826 5]}} (.-finishedHash ^{:go/pos {:name-pos [826 2]}} hs))
+
+                  nil)))))))))
+
+
+^{:go/pos {:func [831 1] :lbrace [831 55] :rbrace [854 1] :return [853 2]}} (go/method ^{:go/pos {:name-pos [831 33]}} establishKeys ^{:tag ^{:go/pos {:name-pos [831 49]}} error :go/pos {:closing [831 47] :opening [831 46] :recv-closing [831 31] :recv-opening [831 6]}} [^{:tag ^{:go/pos {:star [831 10]}} (* ^{:go/pos {:name-pos [831 11]}} serverHandshakeState) :go/pos {:name-pos [831 7]}} hs]
+  ^{:go/apos {5 [853 9]}} (let [^{:go/pos {:name-pos [832 2] :tok-pos [832 4]}} c ^{:go/pos {:dot [832 9] :name-pos [832 10]}} (.-c ^{:go/pos {:name-pos [832 7]}} hs)
+
+      ^{:go/pos {:tok-pos [834 65]}} (values ^{:go/pos {:name-pos [834 2]}} clientMAC ^{:go/pos {:name-pos [834 13]}} serverMAC ^{:go/pos {:name-pos [834 24]}} clientKey ^{:go/pos {:name-pos [834 35]}} serverKey ^{:go/pos {:name-pos [834 46]}} clientIV ^{:go/pos {:name-pos [834 56]}} serverIV)
+      ^{:go/pos {:lparen [835 23] :rparen [835 147]}} (^{:go/pos {:name-pos [835 3]}} keysFromMasterSecret ^{:go/pos {:dot [835 25] :name-pos [835 26]}} (.-vers ^{:go/pos {:name-pos [835 24]}} c) ^{:go/pos {:dot [835 34] :name-pos [835 35]}} (.-suite ^{:go/pos {:name-pos [835 32]}} hs) ^{:go/pos {:dot [835 44] :name-pos [835 45]}} (.-masterSecret ^{:go/pos {:name-pos [835 42]}} hs) ^{:go/pos {:dot [835 73] :name-pos [835 74]}} (.-random ^{:go/pos {:dot [835 61] :name-pos [835 62]}} (.-clientHello ^{:go/pos {:name-pos [835 59]}} hs)) ^{:go/pos {:dot [835 90] :name-pos [835 91]}} (.-random ^{:go/pos {:dot [835 84] :name-pos [835 85]}} (.-hello ^{:go/pos {:name-pos [835 82]}} hs)) ^{:go/pos {:dot [835 107] :name-pos [835 108]}} (.-macLen ^{:go/pos {:dot [835 101] :name-pos [835 102]}} (.-suite ^{:go/pos {:name-pos [835 99]}} hs)) ^{:go/pos {:dot [835 124] :name-pos [835 125]}} (.-keyLen ^{:go/pos {:dot [835 118] :name-pos [835 119]}} (.-suite ^{:go/pos {:name-pos [835 116]}} hs)) ^{:go/pos {:dot [835 141] :name-pos [835 142]}} (.-ivLen ^{:go/pos {:dot [835 135] :name-pos [835 136]}} (.-suite ^{:go/pos {:name-pos [835 133]}} hs)))
+
+      ^{:go/pos {:tok-pos [837 2]}} (values ^{:tag ^{:go/pos {:name-pos [837 33]}} any :go/pos {:name-pos [837 6]}} clientCipher ^{:tag ^{:go/pos {:name-pos [837 33]}} any :go/pos {:name-pos [837 20]}} serverCipher) (zero ^{:go/pos {:name-pos [837 33]}} any)
+      ^{:go/pos {:tok-pos [838 2]}} (values ^{:tag ^{:go/pos {:dot [838 33] :name-pos [838 34] :x-pos [838 29]}} hash/Hash :go/pos {:name-pos [838 6]}} clientHash ^{:tag ^{:go/pos {:dot [838 33] :name-pos [838 34] :x-pos [838 29]}} hash/Hash :go/pos {:name-pos [838 18]}} serverHash) (zero ^{:go/pos {:dot [838 33] :name-pos [838 34] :x-pos [838 29]}} hash/Hash)]
+
+    ^{:go/pos {:else-lbrace [845 9] :else-rbrace [848 2] :if [840 2] :lbrace [840 26] :rbrace [845 2]}} (if ^{:go/apos {2 [840 22]} :go/pos {:op-pos [840 19]}} (== ^{:go/pos {:dot [840 13] :name-pos [840 14]}} (.-aead ^{:go/pos {:dot [840 7] :name-pos [840 8]}} (.-suite ^{:go/pos {:name-pos [840 5]}} hs)) nil) ^{:go/pos {:lbrace [840 26] :rbrace [845 2]}} (do
+        ^{:go/pos {:tok-pos [841 16]}} (set! ^{:go/pos {:name-pos [841 3]}} clientCipher ^{:go/apos {3 [841 55]} :go/pos {:lparen [841 33] :rparen [841 77]}} (^{:go/pos {:dot [841 26] :name-pos [841 27]}} (.-cipher ^{:go/pos {:dot [841 20] :name-pos [841 21]}} (.-suite ^{:go/pos {:name-pos [841 18]}} hs)) ^{:go/pos {:name-pos [841 34]}} clientKey ^{:go/pos {:name-pos [841 45]}} clientIV true)) ; /* for reading */
+        ^{:go/pos {:tok-pos [842 14]}} (set! ^{:go/pos {:name-pos [842 3]}} clientHash ^{:go/pos {:lparen [842 28] :rparen [842 38]}} (^{:go/pos {:dot [842 24] :name-pos [842 25]}} (.-mac ^{:go/pos {:dot [842 18] :name-pos [842 19]}} (.-suite ^{:go/pos {:name-pos [842 16]}} hs)) ^{:go/pos {:name-pos [842 29]}} clientMAC))
+        ^{:go/pos {:tok-pos [843 16]}} (set! ^{:go/pos {:name-pos [843 3]}} serverCipher ^{:go/apos {3 [843 55]} :go/pos {:lparen [843 33] :rparen [843 82]}} (^{:go/pos {:dot [843 26] :name-pos [843 27]}} (.-cipher ^{:go/pos {:dot [843 20] :name-pos [843 21]}} (.-suite ^{:go/pos {:name-pos [843 18]}} hs)) ^{:go/pos {:name-pos [843 34]}} serverKey ^{:go/pos {:name-pos [843 45]}} serverIV false)) ; /* not for reading */
+        ^{:go/pos {:tok-pos [844 14]}} (set! ^{:go/pos {:name-pos [844 3]}} serverHash ^{:go/pos {:lparen [844 28] :rparen [844 38]}} (^{:go/pos {:dot [844 24] :name-pos [844 25]}} (.-mac ^{:go/pos {:dot [844 18] :name-pos [844 19]}} (.-suite ^{:go/pos {:name-pos [844 16]}} hs)) ^{:go/pos {:name-pos [844 29]}} serverMAC)))
+      ^{:go/pos {:lbrace [845 9] :rbrace [848 2]}} (do
+        ^{:go/pos {:tok-pos [846 16]}} (set! ^{:go/pos {:name-pos [846 3]}} clientCipher ^{:go/pos {:lparen [846 31] :rparen [846 51]}} (^{:go/pos {:dot [846 26] :name-pos [846 27]}} (.-aead ^{:go/pos {:dot [846 20] :name-pos [846 21]}} (.-suite ^{:go/pos {:name-pos [846 18]}} hs)) ^{:go/pos {:name-pos [846 32]}} clientKey ^{:go/pos {:name-pos [846 43]}} clientIV))
+        ^{:go/pos {:tok-pos [847 16]}} (set! ^{:go/pos {:name-pos [847 3]}} serverCipher ^{:go/pos {:lparen [847 31] :rparen [847 51]}} (^{:go/pos {:dot [847 26] :name-pos [847 27]}} (.-aead ^{:go/pos {:dot [847 20] :name-pos [847 21]}} (.-suite ^{:go/pos {:name-pos [847 18]}} hs)) ^{:go/pos {:name-pos [847 32]}} serverKey ^{:go/pos {:name-pos [847 43]}} serverIV))))
+
+
+    ^{:go/pos {:dot [850 6] :lparen [850 24] :name-pos [850 7] :rparen [850 57]}} (.prepareCipherSpec ^{:go/pos {:dot [850 3] :name-pos [850 4]}} (.-in ^{:go/pos {:name-pos [850 2]}} c) ^{:go/pos {:dot [850 26] :name-pos [850 27]}} (.-vers ^{:go/pos {:name-pos [850 25]}} c) ^{:go/pos {:name-pos [850 33]}} clientCipher ^{:go/pos {:name-pos [850 47]}} clientHash)
+    ^{:go/pos {:dot [851 7] :lparen [851 25] :name-pos [851 8] :rparen [851 58]}} (.prepareCipherSpec ^{:go/pos {:dot [851 3] :name-pos [851 4]}} (.-out ^{:go/pos {:name-pos [851 2]}} c) ^{:go/pos {:dot [851 27] :name-pos [851 28]}} (.-vers ^{:go/pos {:name-pos [851 26]}} c) ^{:go/pos {:name-pos [851 34]}} serverCipher ^{:go/pos {:name-pos [851 48]}} serverHash)
+
+    nil))
+
+
+^{:go/pos {:func [856 1] :lbrace [856 64] :rbrace [889 1] :return [888 2]}} (go/method ^{:go/pos {:name-pos [856 33]}} readFinished ^{:tag ^{:go/pos {:name-pos [856 58]}} error :go/pos {:closing [856 56] :opening [856 45] :recv-closing [856 31] :recv-opening [856 6]}} [^{:tag ^{:go/pos {:star [856 10]}} (* ^{:go/pos {:name-pos [856 11]}} serverHandshakeState) :go/pos {:name-pos [856 7]}} hs ^{:tag ^{:go/pos {:lbrack [856 50]}} (slice ^{:go/pos {:name-pos [856 52]}} byte) :go/pos {:name-pos [856 46]}} out]
+  (let [^{:go/pos {:name-pos [857 2] :tok-pos [857 4]}} c ^{:go/pos {:dot [857 9] :name-pos [857 10]}} (.-c ^{:go/pos {:name-pos [857 7]}} hs)]
+
+    ^{:go/pos {:if [859 2] :lbrace [859 49] :rbrace [861 2]}} (when [^{:go/pos {:name-pos [859 5] :tok-pos [859 9]}} err ^{:go/pos {:dot [859 13] :lparen [859 34] :name-pos [859 14] :rparen [859 35]}} (.readChangeCipherSpec ^{:go/pos {:name-pos [859 12]}} c)] ^{:go/apos {2 [859 45]} :go/pos {:op-pos [859 42]}} (!= ^{:go/pos {:name-pos [859 38]}} err nil)
+      ^{:go/pos {:return [860 3]}} (return ^{:go/pos {:name-pos [860 10]}} err))
+
+
+    ;; finishedMsg is included in the transcript, but not until after we
+    ;; check the client version, since the state before this message was
+    ;; sent is used during verification.
+    (let [^{:go/pos {:tok-pos [866 11]}} (values ^{:go/pos {:name-pos [866 2]}} msg ^{:go/pos {:name-pos [866 7]}} err) ^{:go/apos {2 [866 30]} :go/pos {:dot [866 15] :lparen [866 29] :name-pos [866 16] :rparen [866 33]}} (.readHandshake ^{:go/pos {:name-pos [866 14]}} c nil)]
+      ^{:go/pos {:if [867 2] :lbrace [867 16] :rbrace [869 2]}} (when ^{:go/apos {2 [867 12]} :go/pos {:op-pos [867 9]}} (!= ^{:go/pos {:name-pos [867 5]}} err nil)
+        ^{:go/pos {:return [868 3]}} (return ^{:go/pos {:name-pos [868 10]}} err))
+
+      (let [^{:go/pos {:tok-pos [870 21]}} (values ^{:go/pos {:name-pos [870 2]}} clientFinished ^{:go/pos {:name-pos [870 18]}} ok) ^{:go/pos {:dot [870 27] :lparen [870 28] :rparen [870 41]}} (assert ^{:go/pos {:star [870 29]}} (* ^{:go/pos {:name-pos [870 30]}} finishedMsg) ^{:go/pos {:name-pos [870 24]}} msg)]
+        ^{:go/pos {:if [871 2] :lbrace [871 9] :rbrace [874 2]}} (when ^{:go/pos {:op-pos [871 5]}} (not ^{:go/pos {:name-pos [871 6]}} ok)
+          ^{:go/pos {:dot [872 4] :lparen [872 14] :name-pos [872 5] :rparen [872 37]}} (.sendAlert ^{:go/pos {:name-pos [872 3]}} c ^{:go/pos {:name-pos [872 15]}} alertUnexpectedMessage)
+          ^{:go/pos {:return [873 3]}} (return ^{:go/pos {:lparen [873 32] :rparen [873 52]}} (^{:go/pos {:name-pos [873 10]}} unexpectedMessageError ^{:go/pos {:name-pos [873 33]}} clientFinished ^{:go/pos {:name-pos [873 49]}} msg)))
+
+
+        ^{:go/apos {5 [888 9]}} (let [^{:go/pos {:name-pos [876 2] :tok-pos [876 9]}} verify ^{:go/pos {:dot [876 27] :lparen [876 37] :name-pos [876 28] :rparen [876 53]}} (.clientSum ^{:go/pos {:dot [876 14] :name-pos [876 15]}} (.-finishedHash ^{:go/pos {:name-pos [876 12]}} hs) ^{:go/pos {:dot [876 40] :name-pos [876 41]}} (.-masterSecret ^{:go/pos {:name-pos [876 38]}} hs))]
+          ^{:go/pos {:if [877 2] :lbrace [878 70] :rbrace [881 2]}} (when ^{:go/pos {:op-pos [877 51]}} (or ^{:go/pos {:op-pos [877 17]}} (!= ^{:go/pos {:lparen [877 8] :rparen [877 15]}} (^{:go/pos {:name-pos [877 5]}} len ^{:go/pos {:name-pos [877 9]}} verify) ^{:go/pos {:lparen [877 23] :rparen [877 49]}} (^{:go/pos {:name-pos [877 20]}} len ^{:go/pos {:dot [877 38] :name-pos [877 39]}} (.-verifyData ^{:go/pos {:name-pos [877 24]}} clientFinished)))
+              ^{:go/apos {2 [878 68]} :go/pos {:op-pos [878 65]}} (!= ^{:go/pos {:lparen [878 29] :rparen [878 63]}} (^{:go/pos {:dot [878 9] :name-pos [878 10] :x-pos [878 3]}} subtle/ConstantTimeCompare ^{:go/pos {:name-pos [878 30]}} verify ^{:go/pos {:dot [878 52] :name-pos [878 53]}} (.-verifyData ^{:go/pos {:name-pos [878 38]}} clientFinished)) 1))
+            ^{:go/pos {:dot [879 4] :lparen [879 14] :name-pos [879 5] :rparen [879 36]}} (.sendAlert ^{:go/pos {:name-pos [879 3]}} c ^{:go/pos {:name-pos [879 15]}} alertHandshakeFailure)
+            ^{:go/pos {:return [880 3]}} (return ^{:go/apos {1 [880 21]} :go/pos {:lparen [880 20] :rparen [880 66]}} (^{:go/pos {:dot [880 16] :name-pos [880 17] :x-pos [880 10]}} errors/New "tls: client's Finished message is incorrect")))
+
+
+          ^{:go/pos {:if [883 2] :lbrace [883 72] :rbrace [885 2]}} (when [^{:go/pos {:name-pos [883 5] :tok-pos [883 9]}} err ^{:go/pos {:lparen [883 25] :rparen [883 58]}} (^{:go/pos {:name-pos [883 12]}} transcriptMsg ^{:go/pos {:name-pos [883 26]}} clientFinished ^{:go/pos {:op-pos [883 42]}} (addr ^{:go/pos {:dot [883 45] :name-pos [883 46]}} (.-finishedHash ^{:go/pos {:name-pos [883 43]}} hs)))] ^{:go/apos {2 [883 68]} :go/pos {:op-pos [883 65]}} (!= ^{:go/pos {:name-pos [883 61]}} err nil)
+            ^{:go/pos {:return [884 3]}} (return ^{:go/pos {:name-pos [884 10]}} err))
+
+
+          ^{:go/pos {:lparen [887 6] :rparen [887 18]}} (^{:go/pos {:name-pos [887 2]}} copy ^{:go/pos {:name-pos [887 7]}} out ^{:go/pos {:name-pos [887 12]}} verify)
+          nil)))))
+
+
+^{:go/pos {:func [891 1] :lbrace [891 59] :rbrace [928 1] :return [927 2]}} (go/method ^{:go/pos {:name-pos [891 33]}} sendSessionTicket ^{:tag ^{:go/pos {:name-pos [891 53]}} error :go/pos {:closing [891 51] :opening [891 50] :recv-closing [891 31] :recv-opening [891 6]}} [^{:tag ^{:go/pos {:star [891 10]}} (* ^{:go/pos {:name-pos [891 11]}} serverHandshakeState) :go/pos {:name-pos [891 7]}} hs]
+  ^{:go/pos {:if [892 2] :lbrace [892 31] :rbrace [894 2]}} (when ^{:go/pos {:op-pos [892 5]}} (not ^{:go/pos {:dot [892 14] :name-pos [892 15]}} (.-ticketSupported ^{:go/pos {:dot [892 8] :name-pos [892 9]}} (.-hello ^{:go/pos {:name-pos [892 6]}} hs)))
+    ^{:go/apos {1 [893 10]} :go/pos {:return [893 3]}} (return nil))
+
+
+  ^{:go/apos {6 [927 9]}} (let [^{:go/pos {:name-pos [896 2] :tok-pos [896 4]}} c ^{:go/pos {:dot [896 9] :name-pos [896 10]}} (.-c ^{:go/pos {:name-pos [896 7]}} hs)
+      ^{:go/pos {:name-pos [897 2] :tok-pos [897 4]}} m ^{:go/pos {:lparen [897 10] :rparen [897 30]}} (^{:go/pos {:name-pos [897 7]}} new ^{:go/pos {:name-pos [897 11]}} newSessionTicketMsg)
+
+      ^{:go/pos {:name-pos [899 2] :tok-pos [899 8]}} state ^{:go/pos {:dot [899 12] :lparen [899 25] :name-pos [899 13] :rparen [899 26]}} (.sessionState ^{:go/pos {:name-pos [899 11]}} c)]
+    ^{:go/pos {:tok-pos [900 15]}} (set! ^{:go/pos {:dot [900 7] :name-pos [900 8]}} (.-secret ^{:go/pos {:name-pos [900 2]}} state) ^{:go/pos {:dot [900 19] :name-pos [900 20]}} (.-masterSecret ^{:go/pos {:name-pos [900 17]}} hs))
+    ^{:go/pos {:if [901 2] :lbrace [901 28] :rbrace [905 2]}} (when ^{:go/apos {2 [901 24]} :go/pos {:op-pos [901 21]}} (!= ^{:go/pos {:dot [901 7] :name-pos [901 8]}} (.-sessionState ^{:go/pos {:name-pos [901 5]}} hs) nil)
+      ;; If this is re-wrapping an old key, then keep
+      ;; the original time it was created.
+      ^{:go/pos {:tok-pos [904 19]}} (set! ^{:go/pos {:dot [904 8] :name-pos [904 9]}} (.-createdAt ^{:go/pos {:name-pos [904 3]}} state) ^{:go/pos {:dot [904 36] :name-pos [904 37]}} (.-createdAt ^{:go/pos {:dot [904 23] :name-pos [904 24]}} (.-sessionState ^{:go/pos {:name-pos [904 21]}} hs))))
+
+    ^{:go/pos {:else-lbrace [912 9] :else-rbrace [921 2] :if [906 2] :lbrace [906 33] :rbrace [912 2]}} (if ^{:go/apos {2 [906 29]} :go/pos {:op-pos [906 26]}} (!= ^{:go/pos {:dot [906 13] :name-pos [906 14]}} (.-WrapSession ^{:go/pos {:dot [906 6] :name-pos [906 7]}} (.-config ^{:go/pos {:name-pos [906 5]}} c)) nil)
+      (let [^{:tag ^{:go/pos {:name-pos [907 11]}} error :go/pos {:name-pos [907 7] :tok-pos [907 3]}} err (zero ^{:go/pos {:name-pos [907 11]}} error)]
+        ^{:go/pos {:tok-pos [908 17]}} (set! (values ^{:go/pos {:dot [908 4] :name-pos [908 5]}} (.-ticket ^{:go/pos {:name-pos [908 3]}} m) ^{:go/pos {:name-pos [908 13]}} err) ^{:go/pos {:lparen [908 39] :rparen [908 72]}} (^{:go/pos {:dot [908 27] :name-pos [908 28]}} (.-WrapSession ^{:go/pos {:dot [908 20] :name-pos [908 21]}} (.-config ^{:go/pos {:name-pos [908 19]}} c)) ^{:go/pos {:dot [908 41] :lparen [908 63] :name-pos [908 42] :rparen [908 64]}} (.connectionStateLocked ^{:go/pos {:name-pos [908 40]}} c) ^{:go/pos {:name-pos [908 67]}} state))
+        ^{:go/pos {:if [909 3] :lbrace [909 17] :rbrace [911 3]}} (when ^{:go/apos {2 [909 13]} :go/pos {:op-pos [909 10]}} (!= ^{:go/pos {:name-pos [909 6]}} err nil)
+          ^{:go/pos {:return [910 4]}} (return ^{:go/pos {:name-pos [910 11]}} err)))
+
+
+      (let [^{:go/pos {:tok-pos [913 19]}} (values ^{:go/pos {:name-pos [913 3]}} stateBytes ^{:go/pos {:name-pos [913 15]}} err) ^{:go/pos {:dot [913 27] :lparen [913 33] :name-pos [913 28] :rparen [913 34]}} (.Bytes ^{:go/pos {:name-pos [913 22]}} state)]
+        ^{:go/pos {:if [914 3] :lbrace [914 17] :rbrace [916 3]}} (when ^{:go/apos {2 [914 13]} :go/pos {:op-pos [914 10]}} (!= ^{:go/pos {:name-pos [914 6]}} err nil)
+          ^{:go/pos {:return [915 4]}} (return ^{:go/pos {:name-pos [915 11]}} err))
+
+        ^{:go/pos {:tok-pos [917 17]}} (set! (values ^{:go/pos {:dot [917 4] :name-pos [917 5]}} (.-ticket ^{:go/pos {:name-pos [917 3]}} m) ^{:go/pos {:name-pos [917 13]}} err) ^{:go/pos {:dot [917 27] :lparen [917 41] :name-pos [917 28] :rparen [917 66]}} (.encryptTicket ^{:go/pos {:dot [917 20] :name-pos [917 21]}} (.-config ^{:go/pos {:name-pos [917 19]}} c) ^{:go/pos {:name-pos [917 42]}} stateBytes ^{:go/pos {:dot [917 55] :name-pos [917 56]}} (.-ticketKeys ^{:go/pos {:name-pos [917 54]}} c)))
+        ^{:go/pos {:if [918 3] :lbrace [918 17] :rbrace [920 3]}} (when ^{:go/apos {2 [918 13]} :go/pos {:op-pos [918 10]}} (!= ^{:go/pos {:name-pos [918 6]}} err nil)
+          ^{:go/pos {:return [919 4]}} (return ^{:go/pos {:name-pos [919 11]}} err))))
+
+
+
+    ^{:go/pos {:if [923 2] :lbrace [923 74] :rbrace [925 2]}} (when [^{:go/pos {:tok-pos [923 12]}} (values ^{:go/pos {:name-pos [923 5]}} _ ^{:go/pos {:name-pos [923 8]}} err) ^{:go/pos {:dot [923 19] :lparen [923 40] :name-pos [923 20] :rparen [923 60]}} (.writeHandshakeRecord ^{:go/pos {:dot [923 17] :name-pos [923 18]}} (.-c ^{:go/pos {:name-pos [923 15]}} hs) ^{:go/pos {:name-pos [923 41]}} m ^{:go/pos {:op-pos [923 44]}} (addr ^{:go/pos {:dot [923 47] :name-pos [923 48]}} (.-finishedHash ^{:go/pos {:name-pos [923 45]}} hs)))] ^{:go/apos {2 [923 70]} :go/pos {:op-pos [923 67]}} (!= ^{:go/pos {:name-pos [923 63]}} err nil)
+      ^{:go/pos {:return [924 3]}} (return ^{:go/pos {:name-pos [924 10]}} err))
+
+
+    nil))
+
+
+^{:go/pos {:func [930 1] :lbrace [930 64] :rbrace [946 1] :return [945 2]}} (go/method ^{:go/pos {:name-pos [930 33]}} sendFinished ^{:tag ^{:go/pos {:name-pos [930 58]}} error :go/pos {:closing [930 56] :opening [930 45] :recv-closing [930 31] :recv-opening [930 6]}} [^{:tag ^{:go/pos {:star [930 10]}} (* ^{:go/pos {:name-pos [930 11]}} serverHandshakeState) :go/pos {:name-pos [930 7]}} hs ^{:tag ^{:go/pos {:lbrack [930 50]}} (slice ^{:go/pos {:name-pos [930 52]}} byte) :go/pos {:name-pos [930 46]}} out]
+  (let [^{:go/pos {:name-pos [931 2] :tok-pos [931 4]}} c ^{:go/pos {:dot [931 9] :name-pos [931 10]}} (.-c ^{:go/pos {:name-pos [931 7]}} hs)]
+
+    ^{:go/pos {:if [933 2] :lbrace [933 52] :rbrace [935 2]}} (when [^{:go/pos {:name-pos [933 5] :tok-pos [933 9]}} err ^{:go/pos {:dot [933 13] :lparen [933 37] :name-pos [933 14] :rparen [933 38]}} (.writeChangeCipherRecord ^{:go/pos {:name-pos [933 12]}} c)] ^{:go/apos {2 [933 48]} :go/pos {:op-pos [933 45]}} (!= ^{:go/pos {:name-pos [933 41]}} err nil)
+      ^{:go/pos {:return [934 3]}} (return ^{:go/pos {:name-pos [934 10]}} err))
+
+
+    ^{:go/apos {5 [945 9]}} (let [^{:go/pos {:name-pos [937 2] :tok-pos [937 11]}} finished ^{:go/pos {:lparen [937 17] :rparen [937 29]}} (^{:go/pos {:name-pos [937 14]}} new ^{:go/pos {:name-pos [937 18]}} finishedMsg)]
+      ^{:go/pos {:tok-pos [938 22]}} (set! ^{:go/pos {:dot [938 10] :name-pos [938 11]}} (.-verifyData ^{:go/pos {:name-pos [938 2]}} finished) ^{:go/pos {:dot [938 39] :lparen [938 49] :name-pos [938 40] :rparen [938 65]}} (.serverSum ^{:go/pos {:dot [938 26] :name-pos [938 27]}} (.-finishedHash ^{:go/pos {:name-pos [938 24]}} hs) ^{:go/pos {:dot [938 52] :name-pos [938 53]}} (.-masterSecret ^{:go/pos {:name-pos [938 50]}} hs)))
+      ^{:go/pos {:if [939 2] :lbrace [939 81] :rbrace [941 2]}} (when [^{:go/pos {:tok-pos [939 12]}} (values ^{:go/pos {:name-pos [939 5]}} _ ^{:go/pos {:name-pos [939 8]}} err) ^{:go/pos {:dot [939 19] :lparen [939 40] :name-pos [939 20] :rparen [939 67]}} (.writeHandshakeRecord ^{:go/pos {:dot [939 17] :name-pos [939 18]}} (.-c ^{:go/pos {:name-pos [939 15]}} hs) ^{:go/pos {:name-pos [939 41]}} finished ^{:go/pos {:op-pos [939 51]}} (addr ^{:go/pos {:dot [939 54] :name-pos [939 55]}} (.-finishedHash ^{:go/pos {:name-pos [939 52]}} hs)))] ^{:go/apos {2 [939 77]} :go/pos {:op-pos [939 74]}} (!= ^{:go/pos {:name-pos [939 70]}} err nil)
+        ^{:go/pos {:return [940 3]}} (return ^{:go/pos {:name-pos [940 10]}} err))
+
+
+      ^{:go/pos {:lparen [943 6] :rparen [943 31]}} (^{:go/pos {:name-pos [943 2]}} copy ^{:go/pos {:name-pos [943 7]}} out ^{:go/pos {:dot [943 20] :name-pos [943 21]}} (.-verifyData ^{:go/pos {:name-pos [943 12]}} finished))
+
+      nil)))
+
+
+
+
+^{:go/pos {:doc [948 1] :func [950 1] :lbrace [950 70] :rbrace [952 1] :return [951 2]}} (go/method ^{:go/pos {:name-pos [950 16]}} processCertsFromClient "processCertsFromClient takes a chain of client certificates either from a\ncertificateMsg message or a certificateMsgTLS13 message and verifies them.\n" ^{:tag ^{:go/pos {:name-pos [950 64]}} error :go/pos {:closing [950 62] :opening [950 38] :recv-closing [950 14] :recv-opening [950 6]}} [^{:tag ^{:go/pos {:star [950 9]}} (* ^{:go/pos {:name-pos [950 10]}} Conn) :go/pos {:name-pos [950 7]}} c ^{:tag ^{:go/pos {:name-pos [950 51]}} Certificate :go/pos {:name-pos [950 39]}} certificate]
+  ^{:go/pos {:dot [951 10] :lparen [951 37] :name-pos [951 11] :rparen [951 70]}} (.processCertsFromClientAuth ^{:go/pos {:name-pos [951 9]}} c ^{:go/pos {:name-pos [951 38]}} certificate ^{:go/pos {:dot [951 59] :name-pos [951 60]}} (.-ClientAuth ^{:go/pos {:dot [951 52] :name-pos [951 53]}} (.-config ^{:go/pos {:name-pos [951 51]}} c)))) ; arbace
+
+
+
+
+^{:go/pos {:doc [954 1] :func [956 1] :lbrace [956 101] :rbrace [1040 1] :return [1039 2]}} (go/method ^{:go/pos {:name-pos [956 16]}} processCertsFromClientAuth "processCertsFromClientAuth is processCertsFromClient under the clientAuth\npolicy (arbace: post-handshake authentication has its own).\n" ^{:tag ^{:go/pos {:name-pos [956 95]}} error :go/pos {:closing [956 93] :opening [956 42] :recv-closing [956 14] :recv-opening [956 6]}} [^{:tag ^{:go/pos {:star [956 9]}} (* ^{:go/pos {:name-pos [956 10]}} Conn) :go/pos {:name-pos [956 7]}} c ^{:tag ^{:go/pos {:name-pos [956 55]}} Certificate :go/pos {:name-pos [956 43]}} certificate ^{:tag ^{:go/pos {:name-pos [956 79]}} ClientAuthType :go/pos {:name-pos [956 68]}} clientAuth]
+  ^{:go/apos {10 [1039 9]}} (let [^{:go/pos {:name-pos [957 2] :tok-pos [957 15]}} certificates ^{:go/pos {:dot [957 29] :name-pos [957 30]}} (.-Certificate ^{:go/pos {:name-pos [957 18]}} certificate)
+      ^{:go/pos {:name-pos [958 2] :tok-pos [958 8]}} certs ^{:go/pos {:lparen [958 15] :rparen [958 54]}} (^{:go/pos {:name-pos [958 11]}} make ^{:go/pos {:lbrack [958 16]}} (slice ^{:go/pos {:star [958 18]}} (* ^{:go/pos {:dot [958 23] :name-pos [958 24] :x-pos [958 19]}} x509/Certificate)) ^{:go/pos {:lparen [958 40] :rparen [958 53]}} (^{:go/pos {:name-pos [958 37]}} len ^{:go/pos {:name-pos [958 41]}} certificates))
+      ^{:tag ^{:go/pos {:name-pos [959 10]}} error :go/pos {:name-pos [959 6] :tok-pos [959 2]}} err (zero ^{:go/pos {:name-pos [959 10]}} error)]
+    ^{:go/pos {:for [960 2] :lbrace [960 40] :range [960 21] :rbrace [972 2] :tok-pos [960 18]}} (range [^{:go/pos {:name-pos [960 6]}} i ^{:go/pos {:name-pos [960 9]}} asn1Data ^{:go/pos {:name-pos [960 27]}} certificates]
+      ^{:go/pos {:if [961 3] :lbrace [961 66] :rbrace [964 3]}} (when [^{:go/pos {:tok-pos [961 20]}} (set! (values ^{:go/pos {:lbrack [961 11] :rbrack [961 13]}} (aget ^{:go/pos {:name-pos [961 6]}} certs ^{:go/pos {:name-pos [961 12]}} i) ^{:go/pos {:name-pos [961 16]}} err) ^{:go/pos {:lparen [961 43] :rparen [961 52]}} (^{:go/pos {:dot [961 26] :name-pos [961 27] :x-pos [961 22]}} x509/ParseCertificate ^{:go/pos {:name-pos [961 44]}} asn1Data))] ^{:go/apos {2 [961 62]} :go/pos {:op-pos [961 59]}} (!= ^{:go/pos {:name-pos [961 55]}} err nil)
+        ^{:go/pos {:dot [962 5] :lparen [962 15] :name-pos [962 6] :rparen [962 32]}} (.sendAlert ^{:go/pos {:name-pos [962 4]}} c ^{:go/pos {:name-pos [962 16]}} alertDecodeError)
+        ^{:go/pos {:return [963 4]}} (return ^{:go/pos {:lparen [963 21] :rparen [963 79]}} (^{:go/pos {:dot [963 17] :name-pos [963 18] :x-pos [963 11]}} errors/New ^{:go/apos {1 [963 22]} :go/pos {:op-pos [963 66]}} (+ "tls: failed to parse client certificate: " ^{:go/pos {:dot [963 71] :lparen [963 77] :name-pos [963 72] :rparen [963 78]}} (.Error ^{:go/pos {:name-pos [963 68]}} err)))))
+
+      ^{:go/pos {:if [965 3] :lbrace [965 46] :rbrace [971 3]}} (when ^{:go/pos {:op-pos [965 34]}} (== ^{:go/pos {:dot [965 14] :name-pos [965 15]}} (.-PublicKeyAlgorithm ^{:go/pos {:lbrack [965 11] :rbrack [965 13]}} (aget ^{:go/pos {:name-pos [965 6]}} certs ^{:go/pos {:name-pos [965 12]}} i)) ^{:go/pos {:dot [965 41] :name-pos [965 42] :x-pos [965 37]}} x509/RSA)
+        (let [^{:go/pos {:name-pos [966 4] :tok-pos [966 6]}} n ^{:go/pos {:dot [966 46] :lparen [966 53] :name-pos [966 47] :rparen [966 54]}} (.BitLen ^{:go/pos {:dot [966 44] :name-pos [966 45]}} (.-N ^{:go/pos {:dot [966 27] :lparen [966 28] :rparen [966 43]}} (assert ^{:go/pos {:star [966 29]}} (* ^{:go/pos {:dot [966 33] :name-pos [966 34] :x-pos [966 30]}} rsa/PublicKey) ^{:go/pos {:dot [966 17] :name-pos [966 18]}} (.-PublicKey ^{:go/pos {:lbrack [966 14] :rbrack [966 16]}} (aget ^{:go/pos {:name-pos [966 9]}} certs ^{:go/pos {:name-pos [966 15]}} i)))))]
+          ^{:go/pos {:if [967 4] :lbrace [967 39] :rbrace [970 4]}} (when [^{:go/pos {:tok-pos [967 15]}} (values ^{:go/pos {:name-pos [967 7]}} max ^{:go/pos {:name-pos [967 12]}} ok) ^{:go/pos {:lparen [967 30] :rparen [967 32]}} (^{:go/pos {:name-pos [967 18]}} checkKeySize ^{:go/pos {:name-pos [967 31]}} n)] ^{:go/pos {:op-pos [967 35]}} (not ^{:go/pos {:name-pos [967 36]}} ok)
+            ^{:go/pos {:dot [968 6] :lparen [968 16] :name-pos [968 7] :rparen [968 36]}} (.sendAlert ^{:go/pos {:name-pos [968 5]}} c ^{:go/pos {:name-pos [968 17]}} alertBadCertificate)
+            ^{:go/pos {:return [969 5]}} (return ^{:go/apos {1 [969 23]} :go/pos {:lparen [969 22] :rparen [969 97]}} (^{:go/pos {:dot [969 15] :name-pos [969 16] :x-pos [969 12]}} fmt/Errorf "tls: client sent certificate containing RSA key larger than %d bits" ^{:go/pos {:name-pos [969 94]}} max))))))
+
+
+
+
+    ^{:go/pos {:if [974 2] :lbrace [974 55] :rbrace [981 2]}} (when ^{:go/pos {:op-pos [974 21]}} (and ^{:go/apos {2 [974 19]} :go/pos {:op-pos [974 16]}} (== ^{:go/pos {:lparen [974 8] :rparen [974 14]}} (^{:go/pos {:name-pos [974 5]}} len ^{:go/pos {:name-pos [974 9]}} certs) 0) ^{:go/pos {:lparen [974 42] :rparen [974 53]}} (^{:go/pos {:name-pos [974 24]}} requiresClientCert ^{:go/pos {:name-pos [974 43]}} clientAuth))
+      ^{:go/pos {:else-lbrace [977 10] :else-rbrace [979 3] :if [975 3] :lbrace [975 29] :rbrace [977 3]}} (if ^{:go/pos {:op-pos [975 13]}} (== ^{:go/pos {:dot [975 7] :name-pos [975 8]}} (.-vers ^{:go/pos {:name-pos [975 6]}} c) ^{:go/pos {:name-pos [975 16]}} VersionTLS13)
+        ^{:go/pos {:dot [976 5] :lparen [976 15] :name-pos [976 6] :rparen [976 40]}} (.sendAlert ^{:go/pos {:name-pos [976 4]}} c ^{:go/pos {:name-pos [976 16]}} alertCertificateRequired)
+
+        ^{:go/pos {:dot [978 5] :lparen [978 15] :name-pos [978 6] :rparen [978 37]}} (.sendAlert ^{:go/pos {:name-pos [978 4]}} c ^{:go/pos {:name-pos [978 16]}} alertHandshakeFailure))
+
+      ^{:go/pos {:return [980 3]}} (return ^{:go/apos {1 [980 21]} :go/pos {:lparen [980 20] :rparen [980 63]}} (^{:go/pos {:dot [980 16] :name-pos [980 17] :x-pos [980 10]}} errors/New "tls: client didn't provide a certificate")))
+
+
+    ^{:go/pos {:if [983 2] :lbrace [983 61] :rbrace [1012 2]}} (when ^{:go/pos {:op-pos [983 43]}} (and ^{:go/pos {:op-pos [983 16]}} (>= ^{:go/pos {:name-pos [983 5]}} clientAuth ^{:go/pos {:name-pos [983 19]}} VerifyClientCertIfGiven) ^{:go/apos {2 [983 59]} :go/pos {:op-pos [983 57]}} (> ^{:go/pos {:lparen [983 49] :rparen [983 55]}} (^{:go/pos {:name-pos [983 46]}} len ^{:go/pos {:name-pos [983 50]}} certs) 0))
+      (let [^{:go/pos {:name-pos [984 3] :tok-pos [984 8]}} opts ^{:go/acolon {2 [985 9] 4 [986 15] 6 [987 17] 8 [988 13]} :go/apos {2 [985 4] 4 [986 4] 6 [987 4] 8 [988 4]} :go/pos {:lbrace [984 29] :rbrace [989 3]}} (lit ^{:go/pos {:dot [984 15] :name-pos [984 16] :x-pos [984 11]}} x509/VerifyOptions
+            :Roots ^{:go/pos {:dot [985 27] :name-pos [985 28]}} (.-ClientCAs ^{:go/pos {:dot [985 20] :name-pos [985 21]}} (.-config ^{:go/pos {:name-pos [985 19]}} c))
+            :CurrentTime ^{:go/pos {:dot [986 27] :lparen [986 32] :name-pos [986 28] :rparen [986 33]}} (.time ^{:go/pos {:dot [986 20] :name-pos [986 21]}} (.-config ^{:go/pos {:name-pos [986 19]}} c))
+            :Intermediates ^{:go/pos {:lparen [987 35] :rparen [987 36]}} (^{:go/pos {:dot [987 23] :name-pos [987 24] :x-pos [987 19]}} x509/NewCertPool)
+            :KeyUsages ^{:go/pos {:lbrace [988 37] :rbrace [988 64]}} (lit ^{:go/pos {:lbrack [988 19]}} (slice ^{:go/pos {:dot [988 25] :name-pos [988 26] :x-pos [988 21]}} x509/ExtKeyUsage) ^{:go/pos {:dot [988 42] :name-pos [988 43] :x-pos [988 38]}} x509/ExtKeyUsageClientAuth))]
+
+
+        ^{:go/pos {:for [991 3] :lbrace [991 34] :range [991 18] :rbrace [993 3] :tok-pos [991 15]}} (range [^{:go/pos {:name-pos [991 7]}} _ ^{:go/pos {:name-pos [991 10]}} cert ^{:go/apos {2 [991 30]} :go/pos {:lbrack [991 29] :rbrack [991 32]}} (subslice ^{:go/pos {:name-pos [991 24]}} certs 1)]
+          ^{:go/pos {:dot [992 22] :lparen [992 30] :name-pos [992 23] :rparen [992 35]}} (.AddCert ^{:go/pos {:dot [992 8] :name-pos [992 9]}} (.-Intermediates ^{:go/pos {:name-pos [992 4]}} opts) ^{:go/pos {:name-pos [992 31]}} cert))
+
+
+        (let [^{:go/pos {:tok-pos [995 15]}} (values ^{:go/pos {:name-pos [995 3]}} chains ^{:go/pos {:name-pos [995 11]}} err) ^{:go/pos {:dot [995 26] :lparen [995 33] :name-pos [995 27] :rparen [995 38]}} (.Verify ^{:go/apos {2 [995 24]} :go/pos {:lbrack [995 23] :rbrack [995 25]}} (aget ^{:go/pos {:name-pos [995 18]}} certs 0) ^{:go/pos {:name-pos [995 34]}} opts)]
+          ^{:go/pos {:if [996 3] :lbrace [996 17] :rbrace [1005 3]}} (when ^{:go/apos {2 [996 13]} :go/pos {:op-pos [996 10]}} (!= ^{:go/pos {:name-pos [996 6]}} err nil)
+            ^{:go/pos {:if [997 4] :lbrace [997 67] :rbrace [999 4]}} (if [^{:go/pos {:tok-pos [997 13]}} (values ^{:go/pos {:name-pos [997 7]}} _ ^{:go/pos {:name-pos [997 10]}} ok) ^{:go/pos {:lparen [997 57] :rparen [997 61]}} (^{:go/pos {:lbrack [997 29] :rbrack [997 56]}} (inst ^{:go/pos {:dot [997 22] :name-pos [997 23] :x-pos [997 16]}} errors/AsType ^{:go/pos {:dot [997 34] :name-pos [997 35] :x-pos [997 30]}} x509/UnknownAuthorityError) ^{:go/pos {:name-pos [997 58]}} err)] ^{:go/pos {:name-pos [997 64]}} ok
+              ^{:go/pos {:dot [998 6] :lparen [998 16] :name-pos [998 7] :rparen [998 31]}} (.sendAlert ^{:go/pos {:name-pos [998 5]}} c ^{:go/pos {:name-pos [998 17]}} alertUnknownCA)
+              ^{:go/pos {:else-lbrace [1001 11] :else-rbrace [1003 4] :if [999 11] :lbrace [999 144] :rbrace [1001 4]}} (if [^{:go/pos {:tok-pos [999 40]}} (values ^{:go/pos {:name-pos [999 14]}} errCertificateInvalid ^{:go/pos {:name-pos [999 37]}} ok) ^{:go/pos {:lparen [999 86] :rparen [999 90]}} (^{:go/pos {:lbrack [999 56] :rbrack [999 85]}} (inst ^{:go/pos {:dot [999 49] :name-pos [999 50] :x-pos [999 43]}} errors/AsType ^{:go/pos {:dot [999 61] :name-pos [999 62] :x-pos [999 57]}} x509/CertificateInvalidError) ^{:go/pos {:name-pos [999 87]}} err)] ^{:go/pos {:op-pos [999 96]}} (and ^{:go/pos {:name-pos [999 93]}} ok ^{:go/pos {:op-pos [999 128]}} (== ^{:go/pos {:dot [999 120] :name-pos [999 121]}} (.-Reason ^{:go/pos {:name-pos [999 99]}} errCertificateInvalid) ^{:go/pos {:dot [999 135] :name-pos [999 136] :x-pos [999 131]}} x509/Expired))
+                ^{:go/pos {:dot [1000 6] :lparen [1000 16] :name-pos [1000 7] :rparen [1000 40]}} (.sendAlert ^{:go/pos {:name-pos [1000 5]}} c ^{:go/pos {:name-pos [1000 17]}} alertCertificateExpired)
+
+                ^{:go/pos {:dot [1002 6] :lparen [1002 16] :name-pos [1002 7] :rparen [1002 36]}} (.sendAlert ^{:go/pos {:name-pos [1002 5]}} c ^{:go/pos {:name-pos [1002 17]}} alertBadCertificate)))
+
+            ^{:go/pos {:return [1004 4]}} (return ^{:go/pos {:op-pos [1004 11]}} (addr ^{:go/acolon {2 [1004 63] 4 [1004 75]} :go/apos {2 [1004 41] 4 [1004 72]} :go/pos {:lbrace [1004 40] :rbrace [1004 80]}} (lit ^{:go/pos {:name-pos [1004 12]}} CertificateVerificationError :UnverifiedCertificates ^{:go/pos {:name-pos [1004 65]}} certs :Err ^{:go/pos {:name-pos [1004 77]}} err))))
+
+
+          ^{:go/pos {:tok-pos [1007 25]}} (set! (values ^{:go/pos {:dot [1007 4] :name-pos [1007 5]}} (.-verifiedChains ^{:go/pos {:name-pos [1007 3]}} c) ^{:go/pos {:name-pos [1007 21]}} err) ^{:go/pos {:lparen [1007 44] :rparen [1007 51]}} (^{:go/pos {:name-pos [1007 27]}} fipsAllowedChains ^{:go/pos {:name-pos [1007 45]}} chains))
+          ^{:go/pos {:if [1008 3] :lbrace [1008 17] :rbrace [1011 3]}} (when ^{:go/apos {2 [1008 13]} :go/pos {:op-pos [1008 10]}} (!= ^{:go/pos {:name-pos [1008 6]}} err nil)
+            ^{:go/pos {:dot [1009 5] :lparen [1009 15] :name-pos [1009 6] :rparen [1009 35]}} (.sendAlert ^{:go/pos {:name-pos [1009 4]}} c ^{:go/pos {:name-pos [1009 16]}} alertBadCertificate)
+            ^{:go/pos {:return [1010 4]}} (return ^{:go/pos {:op-pos [1010 11]}} (addr ^{:go/acolon {2 [1010 63] 4 [1010 75]} :go/apos {2 [1010 41] 4 [1010 72]} :go/pos {:lbrace [1010 40] :rbrace [1010 80]}} (lit ^{:go/pos {:name-pos [1010 12]}} CertificateVerificationError :UnverifiedCertificates ^{:go/pos {:name-pos [1010 65]}} certs :Err ^{:go/pos {:name-pos [1010 77]}} err)))))))
+
+
+
+    ^{:go/pos {:tok-pos [1014 21]}} (set! ^{:go/pos {:dot [1014 3] :name-pos [1014 4]}} (.-peerCertificates ^{:go/pos {:name-pos [1014 2]}} c) ^{:go/pos {:name-pos [1014 23]}} certs)
+    ^{:go/pos {:tok-pos [1015 17]}} (set! ^{:go/pos {:dot [1015 3] :name-pos [1015 4]}} (.-ocspResponse ^{:go/pos {:name-pos [1015 2]}} c) ^{:go/pos {:dot [1015 30] :name-pos [1015 31]}} (.-OCSPStaple ^{:go/pos {:name-pos [1015 19]}} certificate))
+    ^{:go/pos {:tok-pos [1016 9]}} (set! ^{:go/pos {:dot [1016 3] :name-pos [1016 4]}} (.-scts ^{:go/pos {:name-pos [1016 2]}} c) ^{:go/pos {:dot [1016 22] :name-pos [1016 23]}} (.-SignedCertificateTimestamps ^{:go/pos {:name-pos [1016 11]}} certificate))
+
+    ^{:go/pos {:if [1018 2] :lbrace [1018 20] :rbrace [1030 2]}} (when ^{:go/apos {2 [1018 18]} :go/pos {:op-pos [1018 16]}} (> ^{:go/pos {:lparen [1018 8] :rparen [1018 14]}} (^{:go/pos {:name-pos [1018 5]}} len ^{:go/pos {:name-pos [1018 9]}} certs) 0)
+      ^{:go/pos {:guard-dot [1019 28] :guard-lparen [1019 29] :guard-rparen [1019 34] :lbrace [1019 36] :rbrace [1029 3] :switch [1019 3]}} (type-switch ^{:go/pos {:dot [1019 18] :name-pos [1019 19]}} (.-PublicKey ^{:go/apos {2 [1019 16]} :go/pos {:lbrack [1019 15] :rbrack [1019 17]}} (aget ^{:go/pos {:name-pos [1019 10]}} certs 0))
+        ^{:go/pos {:case [1020 3] :colon [1020 59]}} (case [^{:go/pos {:star [1020 8]}} (* ^{:go/pos {:dot [1020 14] :name-pos [1020 15] :x-pos [1020 9]}} ecdsa/PublicKey) ^{:go/pos {:star [1020 26]}} (* ^{:go/pos {:dot [1020 30] :name-pos [1020 31] :x-pos [1020 27]}} rsa/PublicKey) ^{:go/pos {:dot [1020 49] :name-pos [1020 50] :x-pos [1020 42]}} ed25519/PublicKey])
+        ^{:go/pos {:case [1021 3] :colon [1021 24]}} (case [^{:go/pos {:star [1021 8]}} (* ^{:go/pos {:dot [1021 14] :name-pos [1021 15] :x-pos [1021 9]}} mldsa/PublicKey)]
+          ^{:go/pos {:if [1022 4] :lbrace [1022 29] :rbrace [1025 4]}} (when ^{:go/pos {:op-pos [1022 14]}} (< ^{:go/pos {:dot [1022 8] :name-pos [1022 9]}} (.-vers ^{:go/pos {:name-pos [1022 7]}} c) ^{:go/pos {:name-pos [1022 16]}} VersionTLS13)
+            ^{:go/pos {:dot [1023 6] :lparen [1023 16] :name-pos [1023 7] :rparen [1023 38]}} (.sendAlert ^{:go/pos {:name-pos [1023 5]}} c ^{:go/pos {:name-pos [1023 17]}} alertIllegalParameter)
+            ^{:go/pos {:return [1024 5]}} (return ^{:go/apos {1 [1024 23]} :go/pos {:lparen [1024 22] :rparen [1024 84]}} (^{:go/pos {:dot [1024 18] :name-pos [1024 19] :x-pos [1024 12]}} errors/New "tls: client certificate uses ML-DSA, which requires TLS 1.3"))))
+
+        ^{:go/pos {:case [1026 3] :colon [1026 10]}} (default
+          ^{:go/pos {:dot [1027 5] :lparen [1027 15] :name-pos [1027 6] :rparen [1027 43]}} (.sendAlert ^{:go/pos {:name-pos [1027 4]}} c ^{:go/pos {:name-pos [1027 16]}} alertUnsupportedCertificate)
+          ^{:go/pos {:return [1028 4]}} (return ^{:go/apos {1 [1028 22]} :go/pos {:lparen [1028 21] :rparen [1028 113]}} (^{:go/pos {:dot [1028 14] :name-pos [1028 15] :x-pos [1028 11]}} fmt/Errorf "tls: client certificate contains an unsupported public key of type %T" ^{:go/pos {:dot [1028 103] :name-pos [1028 104]}} (.-PublicKey ^{:go/apos {2 [1028 101]} :go/pos {:lbrack [1028 100] :rbrack [1028 102]}} (aget ^{:go/pos {:name-pos [1028 95]}} certs 0)))))))
+
+
+
+    ^{:go/pos {:if [1032 2] :lbrace [1032 43] :rbrace [1037 2]}} (when ^{:go/apos {2 [1032 39]} :go/pos {:op-pos [1032 36]}} (!= ^{:go/pos {:dot [1032 13] :name-pos [1032 14]}} (.-VerifyPeerCertificate ^{:go/pos {:dot [1032 6] :name-pos [1032 7]}} (.-config ^{:go/pos {:name-pos [1032 5]}} c)) nil)
+      ^{:go/pos {:if [1033 3] :lbrace [1033 88] :rbrace [1036 3]}} (when [^{:go/pos {:name-pos [1033 6] :tok-pos [1033 10]}} err ^{:go/pos {:lparen [1033 43] :rparen [1033 74]}} (^{:go/pos {:dot [1033 21] :name-pos [1033 22]}} (.-VerifyPeerCertificate ^{:go/pos {:dot [1033 14] :name-pos [1033 15]}} (.-config ^{:go/pos {:name-pos [1033 13]}} c)) ^{:go/pos {:name-pos [1033 44]}} certificates ^{:go/pos {:dot [1033 59] :name-pos [1033 60]}} (.-verifiedChains ^{:go/pos {:name-pos [1033 58]}} c))] ^{:go/apos {2 [1033 84]} :go/pos {:op-pos [1033 81]}} (!= ^{:go/pos {:name-pos [1033 77]}} err nil)
+        ^{:go/pos {:dot [1034 5] :lparen [1034 15] :name-pos [1034 6] :rparen [1034 34]}} (.sendAlert ^{:go/pos {:name-pos [1034 4]}} c ^{:go/pos {:lparen [1034 29] :rparen [1034 33]}} (^{:go/pos {:name-pos [1034 16]}} callbackAlert ^{:go/pos {:name-pos [1034 30]}} err)) ; arbace
+        ^{:go/pos {:return [1035 4]}} (return ^{:go/pos {:name-pos [1035 11]}} err)))
+
+
+
+    nil))
+
+
+^{:go/pos {:func [1042 1] :lbrace [1042 98] :rbrace [1067 1] :return [1052 2]}} (go/func ^{:go/pos {:name-pos [1042 6]}} clientHelloInfo ^{:tag ^{:go/pos {:star [1042 81]}} (* ^{:go/pos {:name-pos [1042 82]}} ClientHelloInfo) :go/pos {:closing [1042 79] :opening [1042 21]}} [^{:tag ^{:go/pos {:dot [1042 33] :name-pos [1042 34] :x-pos [1042 26]}} context/Context :go/pos {:name-pos [1042 22]}} ctx ^{:tag ^{:go/pos {:star [1042 45]}} (* ^{:go/pos {:name-pos [1042 46]}} Conn) :go/pos {:name-pos [1042 43]}} c ^{:tag ^{:go/pos {:star [1042 64]}} (* ^{:go/pos {:name-pos [1042 65]}} clientHelloMsg) :go/pos {:name-pos [1042 52]}} clientHello]
+  (let [^{:go/pos {:name-pos [1043 2] :tok-pos [1043 20]}} supportedVersions ^{:go/pos {:dot [1043 34] :name-pos [1043 35]}} (.-supportedVersions ^{:go/pos {:name-pos [1043 23]}} clientHello)]
+    ^{:go/pos {:if [1044 2] :lbrace [1044 45] :rbrace [1046 2]}} (when ^{:go/apos {2 [1044 43]} :go/pos {:op-pos [1044 40]}} (== ^{:go/pos {:lparen [1044 8] :rparen [1044 38]}} (^{:go/pos {:name-pos [1044 5]}} len ^{:go/pos {:dot [1044 20] :name-pos [1044 21]}} (.-supportedVersions ^{:go/pos {:name-pos [1044 9]}} clientHello)) 0)
+      ^{:go/pos {:tok-pos [1045 21]}} (set! ^{:go/pos {:name-pos [1045 3]}} supportedVersions ^{:go/pos {:lparen [1045 47] :rparen [1045 64]}} (^{:go/pos {:name-pos [1045 23]}} supportedVersionsFromMax ^{:go/pos {:dot [1045 59] :name-pos [1045 60]}} (.-vers ^{:go/pos {:name-pos [1045 48]}} clientHello))))
+
+
+    (let [^{:go/pos {:name-pos [1048 2] :tok-pos [1048 7]}} conn ^{:go/pos {:dot [1048 11] :name-pos [1048 12]}} (.-conn ^{:go/pos {:name-pos [1048 10]}} c)]
+      ^{:go/pos {:if [1049 2] :lbrace [1049 19] :rbrace [1051 2]}} (when ^{:go/apos {2 [1049 15]} :go/pos {:op-pos [1049 12]}} (!= ^{:go/pos {:dot [1049 6] :name-pos [1049 7]}} (.-quic ^{:go/pos {:name-pos [1049 5]}} c) nil)
+        ^{:go/pos {:tok-pos [1050 8]}} (set! ^{:go/pos {:name-pos [1050 3]}} conn ^{:go/pos {:dot [1050 16] :name-pos [1050 17]}} (.-clientHelloInfoConn ^{:go/pos {:dot [1050 11] :name-pos [1050 12]}} (.-quic ^{:go/pos {:name-pos [1050 10]}} c))))
+
+      ^{:go/pos {:op-pos [1052 9]}} (addr ^{:go/acolon {2 [1053 15] 4 [1054 13] 6 [1055 18] 8 [1056 18] 10 [1057 19] 12 [1058 18] 14 [1059 20] 16 [1060 13] 18 [1061 7] 20 [1062 20] 22 [1063 9] 24 [1064 9] 26 [1065 6]} :go/apos {2 [1053 3] 4 [1054 3] 6 [1055 3] 8 [1056 3] 10 [1057 3] 12 [1058 3] 14 [1059 3] 16 [1060 3] 18 [1061 3] 20 [1062 3] 22 [1063 3] 24 [1064 3] 26 [1065 3]} :go/pos {:lbrace [1052 25] :rbrace [1066 2]}} (lit ^{:go/pos {:name-pos [1052 10]}} ClientHelloInfo
+          :CipherSuites ^{:go/pos {:dot [1053 33] :name-pos [1053 34]}} (.-cipherSuites ^{:go/pos {:name-pos [1053 22]}} clientHello)
+          :ServerName ^{:go/pos {:dot [1054 33] :name-pos [1054 34]}} (.-serverName ^{:go/pos {:name-pos [1054 22]}} clientHello)
+          :SupportedCurves ^{:go/pos {:dot [1055 33] :name-pos [1055 34]}} (.-supportedCurves ^{:go/pos {:name-pos [1055 22]}} clientHello)
+          :SupportedPoints ^{:go/pos {:dot [1056 33] :name-pos [1056 34]}} (.-supportedPoints ^{:go/pos {:name-pos [1056 22]}} clientHello)
+          :SignatureSchemes ^{:go/pos {:dot [1057 33] :name-pos [1057 34]}} (.-supportedSignatureAlgorithms ^{:go/pos {:name-pos [1057 22]}} clientHello)
+          :SupportedProtos ^{:go/pos {:dot [1058 33] :name-pos [1058 34]}} (.-alpnProtocols ^{:go/pos {:name-pos [1058 22]}} clientHello)
+          :SupportedVersions ^{:go/pos {:name-pos [1059 22]}} supportedVersions
+          :Extensions ^{:go/pos {:dot [1060 33] :name-pos [1060 34]}} (.-extensions ^{:go/pos {:name-pos [1060 22]}} clientHello)
+          :Conn ^{:go/pos {:name-pos [1061 22]}} conn
+          :HelloRetryRequest ^{:go/pos {:dot [1062 23] :name-pos [1062 24]}} (.-didHRR ^{:go/pos {:name-pos [1062 22]}} c)
+          :config ^{:go/pos {:dot [1063 23] :name-pos [1063 24]}} (.-config ^{:go/pos {:name-pos [1063 22]}} c)
+          :isQUIC ^{:go/apos {2 [1064 32]} :go/pos {:op-pos [1064 29]}} (!= ^{:go/pos {:dot [1064 23] :name-pos [1064 24]}} (.-quic ^{:go/pos {:name-pos [1064 22]}} c) nil)
+          :ctx ^{:go/pos {:name-pos [1065 22]}} ctx)))))

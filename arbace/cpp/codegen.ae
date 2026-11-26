@@ -1878,6 +1878,10 @@
                     (store! et (load! et p) (offset! res (* i es)))))
                 (load! vt res))
     :clear-padding (emit-clear-padding! e)
+    ;; (cpp-tzdb: __builtin_ia32_pause, clang's CGBuiltin: llvm.x86.sse2.pause)
+    :pause (do (declare! "llvm.x86.sse2.pause" 'void [])
+               (emit! (list 'call 'void (gsym "llvm.x86.sse2.pause") []))
+               nil)
     :atomic (emit-atomic! e)
     :bitop (emit-bitop! e)
     :fmath (emit-fmath! e)
@@ -2226,7 +2230,9 @@
   called (written before). True when it initialized the object."
   [vid addr t init]
   (let [u (abi/unq t) v (sema/var* vid)]
-    (when (and (abi/class? u) (#{:expr :list} (:i init))
+    ;; (cpp-rt-own4: a constructor's direct-initialization too, `year_month_day d{y, m, d}`, as clang's isConstantInitializer
+    ;; evaluates a CXXConstructExpr)
+    (when (and (abi/class? u) (#{:expr :list :ctor} (:i init))
                (let [cid (:id u) c (abi/cls cid)]
                  (and (not (:union c)) (not (abi/dynamic? cid)) (not (vb-class? cid)) (not-any? :bits (:fields c))
                       (sema/trivial-copy? cid) (sema/trivial-dtor? cid) (pod-default? cid))))
@@ -3497,7 +3503,9 @@
     (cond
       (or (abi/integral? u) (abi/enum? u)) (when (number? v) [[off (abi/llvm-type u) (if (= :bool (abi/bn u)) (if (zero? (long v)) 0 1) (long (sema/ce-wrap u v)))]])
       (abi/floating? u) (when (number? v) [[off (abi/llvm-type u) (fp-const u (double v))]])
-      (abi/ptr? u) (when-let [[id o] (sema/ce-global-addr v)] (when-let [c (global-addr-const id (long o))] [[off 'ptr c]]))
+      (abi/ptr? u) (if (sema/ce-null? v)
+                     [[off 'ptr 'null]]
+                     (when-let [[id o] (sema/ce-global-addr v)] (when-let [c (global-addr-const id (long o))] [[off 'ptr c]])))
       (and (abi/class? u) (:union (abi/cls (:id u))))
       (when (and (map? v) (not (abi/dynamic? (:id u))))
         (if-let [k (sema/ce-union-member v)]
@@ -3574,7 +3582,14 @@
                     ls (map-indexed (fn [i it] (const-leaves et it (+ off (* i sz)))) (:items init))
                     fill (:fill init)]
                 ;; (cpp-s14: every element written, no fill: `static int u[3] = {1, 2, 3};`)
-                (when (and (every? some? ls) (or (nil? fill) (#{:none :zero} (:i fill)))) (vec (apply concat ls))))
+                ;; (cpp-tzdb: and the rest each the fill's constant, a constexpr default constructor's object: <bits/atomic_wait.h>'s
+                ;; `static __waiter_pool_base __w[16];`, constant-initialized as clang does, no guard)
+                (let [n (long (or (:n tu) 0)) k (count (:items init))
+                      fl (when (and fill (not (#{:none :zero} (:i fill))) (> n k) (<= n 4096))
+                           (let [l0 (const-leaves et fill 0)]
+                             (when l0 (for [i (range k n)] (mapv (fn [[o lt v]] [(+ off (* i sz) (long o)) lt v]) l0)))))]
+                  (when (and (every? some? ls) (or (nil? fill) (#{:none :zero} (:i fill)) fl))
+                    (vec (concat (apply concat ls) (apply concat fl))))))
               (let [cid (:id tu) l (abi/layout cid) c (abi/cls cid)
                     subs (concat (map-indexed (fn [i b] [(nth (:bases l) i) {:k :class :id (:cls b)}]) (:bases c))
                                  (map (fn [i] [(nth (:fields l) i) (:ty (nth (:fields c) i))]) (or (:fields-used init) (range (count (:fields c))))))

@@ -73,7 +73,7 @@
 (defn- alloc-bytes
   "Our allocation ID's bytes, read back from its text (write_allocation's hex columns), else nil"
   [ours id]
-  (when-let [t (get (:alloc-texts ours) id)]
+  (when-let [t (let [t (get (:alloc-texts ours) id)] (when-not (str/includes? (str t) ", deferred)") t))]   ; queue 542: a deferred static
     (vec (for [l (rest (str/split-lines (str/trim t)))
                :when (str/includes? l "│")
                :let [l (str/trim l) l (if (str/starts-with? l "0x") (subs l (+ 2 (str/index-of l "│"))) l)
@@ -174,18 +174,25 @@
   [l vidx fields]
   (let [vs (:variants l) size (long (:size l))
         buf (long-array size)
+        ;; rust-l1 (C6): the bytes written (the fields' own initialized bytes, the tag's); the rest, padding, uninitialized as in
+        ;; CTFE's allocation (a static's `[9 x i8] zeroinitializer, [3 x i8] undef`)
+        ini (long-array size)
         relocs (atom [])
-        put! (fn [off bs] (doseq [[i b] (map-indexed vector bs)] (aset buf (int (+ (long off) i)) (long b))))
+        put! (fn [off bs] (doseq [[i b] (map-indexed vector bs)] (aset buf (int (+ (long off) i)) (long b)) (aset ini (int (+ (long off) i)) 1)))
         place! (fn [offs]
                  (when (not= (count offs) (count fields)) (throw (ex-info "a variant's fields and its layout's differ" {})))
                  (doseq [[o f] (map vector offs fields)]
                    (put! o (:bytes f))
+                   (when-let [fi (:init f)] (doseq [[i b] (map-indexed vector fi)] (when (zero? (long b)) (aset ini (int (+ (long o) i)) 0))))
                    (doseq [[ro a] (:relocs f)] (swap! relocs conj [(+ (long o) (long ro)) a]))))]
     (case (str (first vs))
       "single" (do (when-not (= vidx (second vs)) (throw (ex-info "another variant" {})))
                    (place! (if (vector? (:fields l)) (:fields l) [])))
       "multiple"
-      (let [m (second vs) [_ bits _] (:tag m) off (long (first (:fields l)))
+      (let [m (second vs) tg (:tag m)
+            ;; queue 542: a pointer niche's tag (`(ptr RANGE)`: a Box's or a reference's null as None) is 64 bits
+            bits (if (= "ptr" (str (first tg))) 64 (second tg))
+            off (long (first (:fields l)))
             e (:encoding m)
             tv (case (str (first e))
                  "direct" (nth (:discrs l) vidx vidx)
@@ -197,13 +204,13 @@
           (let [v (mod (bigint tv) (reduce * 1N (repeat bits 2N)))]
             (put! off (for [i (range (quot (long bits) 8))] (.intValue (.and (.shiftRight (biginteger v) (int (* 8 i))) (biginteger 255))))))))
       (throw (ex-info (str "a layout's variants " (pr-str vs)) {})))
-    {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs))}))
+    {:bytes (vec (map int buf)) :align (:align l) :relocs (vec (sort-by first @relocs)) :init (vec (map int ini))}))
 
 (defn- alloc-bytes+relocs
   "RF17: our allocation ID's bytes and its pointers (write_allocation's `╾allocN<imm>╼`, a pointer's 8 bytes): {:bytes [B...]
   :relocs [[OFFSET N]]}, else nil"
   [ours id]
-  (when-let [t (get (:alloc-texts ours) id)]
+  (when-let [t (let [t (get (:alloc-texts ours) id)] (when-not (str/includes? (str t) ", deferred)") t))]   ; queue 542: a deferred static
     (let [toks (for [l (rest (str/split-lines (str/trim t)))
                      :when (str/includes? l "│")
                      :let [l (str/trim l) l (if (str/starts-with? l "0x") (subs l (+ 2 (str/index-of l "│"))) l)
@@ -218,12 +225,36 @@
                 :else (throw (ex-info (str "allocation " id ": " b) {})))
           {:bytes bytes :relocs relocs})))))
 
+(defn- init-text
+  "queue 566 (C6 L1): an evaluated value's init mask as an allocation's :init text (its padding uninitialized: variant-bytes'
+  :init, const_alloc_to_llvm's undef runs), all initialized when the value carries none of its length"
+  [{:keys [bytes init]}]
+  (if (and (sequential? init) (= (count init) (count bytes)))
+    (apply str (map #(if (zero? (long %)) "0" "1") init))
+    (apply str (repeat (count bytes) "1"))))
+
+(declare iface-const-value eval-local-const)
 (def ^:dynamic *const-call*
   "queue 464 (462-4 (a)): within eval-local-const, a call of a const fn evaluated as CTFE does: (fn [DEF TYPE-ARGS ARG-VALUES])
   its value ({:bytes ..}), else nil (the call refused, as before)"
   nil)
 (def ^:dynamic *arg-values*
   "queue 464: the argument values a callee's body is evaluated with (_1, _2, ..), within *const-call*"
+  nil)
+
+(def ^:dynamic *fn-alloc*
+  "queue 542: within a promoted's evaluation, (fn [SYMBOL] ALLOC): a function's allocation (GlobalAlloc::Function) named in the
+  body's data, for a closure reified to a function pointer by CTFE (thread_local!'s LocalKey: its inline const's closure)"
+  nil)
+(def ^:dynamic *data-alloc*
+  "rust-l1 (C6): within a body's constant evaluation (a promoted's, or runtime-body's fix-uneval of a named or inline constant),
+  (fn [{:keys [bytes align relocs]}] ALLOC): a nested allocation of the body's data (CTFE's interned memory), its name, for a
+  library constant whose value holds pointers (a &str, a &[&str], LocalKey's function pointer, io::const_error!'s
+  &SimpleMessage)"
+  nil)
+(def ^:dynamic *closure-fnptr*
+  "queue 542: (fn [CLOSURE-TYPE-FORM] SYMBOL), a closure's ClosureOnceShim's symbol (mono's closure-once-symbol), for CTFE's
+  ClosureFnPointer cast"
   nil)
 
 (defn eval-promoted
@@ -251,10 +282,21 @@
                                                     (when-let [d (anon-discr vp)]
                                                       (when-let [[k bits] (scalar-kind tyf)]
                                                         (list 'scalar (mod (bigint d) (reduce * 1N (repeat bits 2N))) (quot bits 8))))))
-                                v (if (and (seq? v) (= 'unevaluated (first v))) (or (std-const-value text) (discr-v) (when local-const (local-const text tyf v)) (no "an unevaluated constant" o)) v)]
+                                v (if (and (seq? v) (= 'unevaluated (first v)))
+                                    (or (std-const-value text) (discr-v) (when local-const (local-const text tyf v))
+                                        ;; queue 542: a dependency's integer constant by its interface fact (libc's EBADF)
+                                        (let [[d args] (:nc (meta v))] (when (and (string? d) (empty? args)) (or (iface-const-value d) (eval-local-const d #{}))))
+                                        (no "an unevaluated constant" o))
+                                    v)]
                             (cond
                               (and (seq? v) (= 'scalar (first v)))
                               (let [[_ bits size] v] {:bytes (le-bytes bits size) :align (scalar-align size) :ty tyf})
+                              ;; queue 542: a local constant's whole value (thread_local!'s LocalKey: a function pointer), as
+                              ;; local-const evaluated it
+                              (map? v) (assoc v :ty tyf)
+                              ;; queue 542: a zero-sized constant (a function item's, `&stat` promoted as a ZST): no bytes
+                              (and (seq? v) (= 'zst (first v)))
+                              {:bytes [] :align 1 :ty tyf}
                               ;; RF15: `&"two"` (a &str: its bytes' allocation and length) and `&b"ab"` (a pointer)
                               (and (seq? v) (#{'raw-str 'raw-bytes} (first v)) raw-alloc)
                               (let [[a n] (raw-alloc (first v) (second v))]
@@ -318,9 +360,26 @@
                  ;; RF16: a thin pointer to a trait object (`&Dog as &dyn Animal`): the pointer, then its vtable's allocation (mono's,
                  ;; as the runtime body's casts take theirs)
                  (let [[_ _ a tyf] rv va (operand a)
-                       vt (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv))]
+                       ;; (queue 566 (C6 L1): an array's pointer to a slice's, `&[u8; N] as &[u8]`: the pointer, then N, as CTFE's
+                       ;; unsize_into writes the metadata: sys::path's `str::from_utf8(&[b'/'])`)
+                       n (let [st (:tc (meta (:ty va))) tt (:tc (meta tyf))]
+                           (when (and (vector? st) (#{:ref :ptr} (first st)) (vector? tt) (vector? (last tt)) (= :slice (first (last tt))))
+                             (let [pt (last st)] (when (and (vector? pt) (= :array (first pt)) (vector? (nth pt 2 nil)) (= :cval (first (nth pt 2))))
+                                                   (parse-long (str (second (nth pt 2))))))))
+                       vt (when-not n (or (when vt-alloc (vt-alloc (second tyf) (second (:ty va)))) (no "an unsizing cast without its vtable" rv)))]
                    (when-not (= 8 (count (:bytes va))) (no "an unsizing cast of a fat pointer" rv))
-                   {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])})
+                   (if n
+                     {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (le-bytes n 8))) :relocs (vec (:relocs va))}
+                     {:ty tyf :align 8 :bytes (vec (concat (:bytes va) (repeat 8 0))) :relocs (conj (vec (:relocs va)) [8 vt])}))
+               (if (str/starts-with? (str (second rv)) "PointerCoercion(ClosureFnPointer")
+                 ;; queue 542: a closure reified to a function pointer (thread_local!'s inline const `|init| ..` coerced to
+                 ;; LocalKey's `unsafe fn`): the pointer to its ClosureOnceShim's function allocation (Instance::resolve_closure
+                 ;; at FnOnce, as CTFE's ptr_to_fn reifies it)
+                 (let [[_ _ a tyf] rv
+                       src (when (and (seq? a) (#{'copy 'move} (first a))) (local-ty (loc-of (second a))))
+                       sym (or (when (and src *closure-fnptr*) (*closure-fnptr* src)) (no "a closure's reified pointer without its shim" rv))
+                       fa (or (when *fn-alloc* (*fn-alloc* sym)) (no "a function's allocation outside a promoted" rv))]
+                   {:ty tyf :align 8 :bytes (vec (repeat 8 0)) :relocs [[0 fa]]})
                (if (= "Transmute" (str (second rv)))
                  ;; queue 464: a transmute (the niche types' new_unchecked): the same bytes at the target type, sizes equal
                  (let [[_ _ a tyf] rv va (operand a)
@@ -334,7 +393,7 @@
                            "IntToFloat" (val-bytes kd (if (= 32 (second kd)) (float (.doubleValue (biginteger x))) (.doubleValue (biginteger x))))
                            "FloatToFloat" (val-bytes kd (if (= 32 (second kd)) (float x) (double x)))
                            "FloatToInt" (val-bytes kd (f->int kd x))
-                           (no (str "a cast " kind) rv))}))))]
+                           (no (str "a cast " kind) rv))})))))]
     (loop [bi 0 seen #{}]
       (when (seen bi) (no "a loop" bi))
       (let [blk (nth (:blocks pb) bi)]
@@ -373,6 +432,9 @@
                                               (and (contains? #{nil 0} (nth kind 5 nil)) (#{"struct" "fn" "const"} (str (nth kind 2 nil)))
                                                    (not (re-find #"(^|::)[A-Z][A-Za-z0-9_]*::[A-Z][A-Za-z0-9_]*$" (str (nth kind 4 nil)))))))
                                      (swap! env assoc l (if (seq ops) (operand (first ops)) {:bytes [] :align 1}))
+                                     ;; queue 542: a closure capturing nothing (`|| ..` promoted as a value): zero-sized
+                                     (and (seq? kind) (= 'closure (first kind)) (empty? ops))
+                                     (swap! env assoc l {:bytes [] :align 1})
                                      :else (no (str "an aggregate " (when (seq? kind) (first kind))) kind)))
                        ;; RF13: [x; N] of a scalar constant (`&[0u8; 100]`)
                        repeat (let [[_ o n] rv v (operand o) n (Long/parseLong (str n)) w (count (:bytes v))]
@@ -381,6 +443,15 @@
                        ref (let [tp (nth rv 2)
                                  deref? (and (seq? tp) (= 3 (count tp)) (= '(deref) (nth tp 2)))]
                              (cond
+                               ;; rust-l1 (C6): a constant's own body borrowing into _0 (`const { &SimpleMessage::new(..) }`): the
+                               ;; borrowed value a nested allocation, _0 its pointer
+                               (and (= l 0) value? nest-alloc (not deref?))
+                               (let [v (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv))]
+                                 (swap! env assoc 0 {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (nest-alloc v)]] :ty (local-ty 0)}))
+                               ;; queue 566 (C6 L1): a constant's own body reborrowing into _0 (`_0 = &(*_1)`, io::const_error!'s
+                               ;; inline const after its promoted): _0 the same pointer
+                               (and (= l 0) value? deref?)
+                               (swap! env assoc 0 (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty 0)))
                                (= l 0) (reset! result (or (get @env (loc-of tp)) (no "a borrow of a local not assigned" rv)))
                                ;; RF15: `&*p` of a pointer local: the same pointer (a reborrow)
                                deref? (swap! env assoc l (assoc (or (get @env (second tp)) (no "a reborrow of a local not assigned" rv)) :ty (local-ty l)))
@@ -395,6 +466,10 @@
           (case (first t)
             return (if value? (or (get @env 0) (no "no value in _0" pb)) (or @result (no "no borrow in _0" pb)))
             (goto false-edge false-unwind) (recur (second t) (conj seen bi))
+            ;; queue 542: a switch on a scalar (an inline const's `if needs_drop::<T>()`): the target of its value, else otherwise
+            switch (let [[_ d vals other] t v (operand d)
+                         x (scalar-val (or (scalar-kind (:ty v)) [:uint (* 8 (count (:bytes v)))]) (:bytes v))]
+                     (recur (or (some (fn [[cv b]] (when (== (bigint cv) (bigint x)) b)) vals) other) (conj seen bi)))
             ;; RF16: an assertion (a checked operator's overflow flag): its target when the condition is the expected value,
             ;; else the CTFE's error (the promoted fails to evaluate)
             assert (let [[_ c expected _ target] t v (operand c)]
@@ -409,6 +484,12 @@
                    (if (and target (re-matches #"(std|core)::ptr::null(_mut)?::<[^\[]*>" txt) (not (re-find #"dyn |\[|\bstr\b" txt)))
                      (do (swap! env assoc (loc-of dest) {:bytes (vec (repeat 8 0)) :align 8 :ty (local-ty (loc-of dest))})
                          (recur target (conj seen bi)))
+                     ;; queue 542: `mem::needs_drop::<T>()` (the intrinsic's CTFE: Ty::needs_drop), a bool
+                     (if-let [nd (when (and target (re-matches #"(std|core)::mem::needs_drop::<.+>" txt))
+                                   (let [ft (when (seq? f) (:tc (meta (nth f 2 nil)))) ta (when (and (vector? ft) (= :fndef (first ft))) (first (nth ft 2 nil)))]
+                                     (when (vector? ta) (try [(mono/needs-drop-ty ta)] (catch Throwable _ nil)))))]
+                       (do (swap! env assoc (loc-of dest) {:bytes [(if (first nd) 1 0)] :align 1 :ty (local-ty (loc-of dest))})
+                           (recur target (conj seen bi)))
                      ;; `mem::size_of::<T>()` and `mem::align_of::<T>()` (intrinsics::size_of and align_of, as CTFE evaluates them:
                      ;; T's layout, mono's), a usize
                      (if (and target layout-of (re-matches #"(std|core)::mem::(size_of|align_of)::<.+>" txt))
@@ -423,7 +504,7 @@
                          (if cv
                            (do (swap! env assoc (loc-of dest) (assoc cv :ty (local-ty (loc-of dest))))
                                (recur target (conj seen bi)))
-                           (no "a call" t))))))
+                           (no "a call" t)))))))
             (no "a terminator" t))))))))
 
 (defn- slice-len-fn? [d]
@@ -488,21 +569,38 @@
                        :else
                      (if (and (seq? x) (= 'static-ptr (first x)))
                        (let [id (second x) nm (static-name ours id)
-                             st (or (get (:statics facts) nm) (throw (ex-info (str "no static " nm " in the record") {})))
+                             st (let [o (get (:statics facts) nm)]
+                                  (if (map? o) o (throw (ex-info (str "no static " nm (if o (str ": " (pr-str o)) " in the record")) {}))))
                              a (str "allocS" id)]
+                         (if (:extern-linkage st)
+                           (let [w (str "allocW" id)]
+                             (swap! static-data conj [w {:kind :static :symbol (:symbol st) :def (:def st) :linkage (:extern-linkage st)}])
+                             ;; (rustc 1.99's name: the local crate's StableCrateId in hex before the symbol)
+                             (swap! static-data conj [a {:kind :static :def (:def st)
+                                                         :symbol (str "_rust_extern_with_linkage_"
+                                                                      (when-let [h (:extern-crate-id st)] (str h "_")) (:symbol st))
+                                                         :bytes "0000000000000000" :init "11111111" :relocs [[0 w]] :mutable true
+                                                         :align nil}]))   ; (no alignment set: LLVM's default for the global)
                          (swap! static-data conj [a (merge {:kind :static :symbol (:symbol st) :def (:def st)}
                                                            ;; its initializer from our own allocation (the static's evaluated bytes)
                                                            ;; (RF17: with its pointers, each to its own allocation's bytes: `&str`'s)
-                                                           (when-let [{bs :bytes rs :relocs} (alloc-bytes+relocs ours id)]
+                                                           (when-let [{bs :bytes rs :relocs} (or (alloc-bytes+relocs ours id)
+                                                                                                  ;; queue 542: a deferred static's value by CTFE
+                                                                                                  (when-let [sv (:static-value facts)] (sv nm)))]
                                                              {:bytes (apply str (map #(format "%02x" %) bs))
-                                                              :align (parse-long (or (second (re-find #"align: (\d+)\)" (get (:alloc-texts ours) id))) "1"))
+                                                              ;; rust-l1 (C6): a CTFE value's uninitialized bytes (padding), undef in the global
+                                                              :init (when-let [sv (:static-value facts)]
+                                                                      (when-not (alloc-bytes+relocs ours id)
+                                                                        (when-let [ini (:init (sv nm))] (when (= (count ini) (count bs)) (apply str ini)))))
+                                                              :align (or (when-let [sv (:static-value facts)] (when-not (alloc-bytes+relocs ours id) (:align (sv nm))))
+                                                                         (parse-long (or (second (re-find #"align: (\d+)\)" (get (:alloc-texts ours) id))) "1")))
                                                               :relocs (vec (for [[off tid] rs]
                                                                              (let [tb (or (alloc-bytes ours tid) (throw (ex-info (str "no bytes for allocation " tid) {})))
                                                                                    ta (str "allocB" tid)]
                                                                                (swap! static-data conj [ta {:kind :memory :align 1 :mutable false :bytes (apply str (map #(format "%02x" %) tb))
                                                                                                             :init (apply str (repeat (count tb) "1")) :relocs []}])
                                                                                [off ta])))
-                                                              :mutable true}))])   ; the record does not say `mut`; writable either way at -O0
+                                                              :mutable true}))]))   ; the record does not say `mut`; writable either way at -O0
                          (list 'ptr (symbol a) 0 8))
                        (if (and (seq? x) (#{'raw-str 'raw-bytes} (first x)))
                          ;; a string's or byte string's bytes (allocate_bytes_dedup): rustc's (slice allocN LEN) for &str, a
@@ -523,20 +621,26 @@
                                                                            :init (apply str (repeat (count bs) "1")) :relocs []}])
                                                [a (count bs)]))
                                  nest-n (atom 0)
-                                 nest-alloc (fn [{:keys [bytes align relocs]}]
+                                 nest-alloc (fn [{:keys [bytes align relocs] :as v}]
                                               (let [a (str "allocP" idx "n" (swap! nest-n inc))]
                                                 (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
-                                                                            :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                                            :init (init-text v) :relocs (vec (or relocs []))}])
                                                 a))
-                                 {:keys [bytes align relocs]} (try (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
-                                                                                  (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false)
+                                 ;; queue 542: a function's allocation (a closure's ClosureOnceShim reified by the constant)
+                                 fn-alloc (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
+                                                      (when-not (some #(= a (first %)) @static-data)
+                                                        (swap! static-data conj [a {:kind :fn :symbol sym}]))
+                                                      a))
+                                 {:keys [bytes align relocs] :as pv} (try (binding [*fn-alloc* fn-alloc *closure-fnptr* (:closure-fnptr facts) *data-alloc* nest-alloc]
+                                                                     (eval-promoted pb raw-alloc nest-alloc (:unit-variant facts) (:anon-discr facts)
+                                                                                    (fn [tgt src] (@vt-fn tgt src)) (:layout-of facts) (:local-const facts) false))
                                                                    (catch Throwable e (when-let [f (:const! facts)] (f false #(str "promoted " idx " of " (:name ours) ": " (.getMessage e))))
                                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                                      (throw e)))
                                  a (str "allocP" idx)]
                              (when-let [f (:const! facts)] (f true))
                              (swap! static-data conj [a {:kind :memory :align align :mutable false :bytes (apply str (map #(format "%02x" %) bytes))
-                                                         :init (apply str (repeat (count bytes) "1")) :relocs (vec (or relocs []))}])
+                                                         :init (init-text pv) :relocs (vec (or relocs []))}])
                              (apply list (concat (take 3 x) [(list 'ptr (symbol a) 0 8)] (drop 4 x))))
                            x)))))
         ;; RFP44 (a): an unsizing cast to a trait object carries its vtable's allocation (codegen's pair's second half): mono's
@@ -621,7 +725,28 @@
                                             ;; queue 524 (C3): a library constant's integer literal from its module's source
                                             (when (:local-const facts) (mono/src-const-value (second x))))]
                                (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [v] (drop 4 x))))
-                               (do (when-let [f (:const! facts)] (f false #(str "unevaluated " (second x) " in " (:name ours)))) x))
+                               ;; rust-l1 (C6): a library constant's whole value (pointers too: a &str, a tuple, an inline
+                               ;; const's `&SimpleMessage`), each allocation it makes the body's data, the constant itself an
+                               ;; allocation read in place (`(indirect ALLOC 0)`: codegen's alloc-const! reads a scalar or a
+                               ;; pair from its bytes, a memory value by reference), as rustc's codegen takes a constant's
+                               ;; interned allocation
+                               (if-let [w (when-let [cw (:const-whole facts)]
+                                            (let [n (atom 0)
+                                                  da (fn [{:keys [bytes align relocs] :as v}]
+                                                       (let [a (str "allocK" (Math/abs (long (hash (second x)))) "n" (swap! n inc))]
+                                                         (swap! static-data conj [a {:kind :memory :align (or align 1) :mutable false
+                                                                                     :bytes (apply str (map #(format "%02x" %) bytes))
+                                                                                     :init (init-text v) :relocs (vec (or relocs []))}])
+                                                         a))
+                                                  fa (fn [sym] (let [a (str "allocF" (Math/abs (long (hash sym))))]
+                                                                 (when-not (some #(= a (first %)) @static-data)
+                                                                   (swap! static-data conj [a {:kind :fn :symbol sym}]))
+                                                                 a))]
+                                              (when-let [r (binding [*data-alloc* da *fn-alloc* fa *closure-fnptr* (:closure-fnptr facts)]
+                                                             (cw (second x) (nth x 2) (nth x 3)))]
+                                                (da r))))]
+                                 (do (when-let [f (:const! facts)] (f true)) (apply list (concat (take 3 x) [(list 'indirect (symbol w) 0)] (drop 4 x))))
+                                 (do (when-let [f (:const! facts)] (f false #(str "unevaluated " (second x) " in " (:name ours)))) x)))
                              x))
         ;; RF17 (RFP50 (a)'s first part): a closure reified as a function pointer (ClosureFnPointer) carries its ClosureOnceShim's
         ;; symbol (mono's), whose body is the record's (a shim of core's FnOnce::call_once)
@@ -653,8 +778,19 @@
                           (list 'assert c e m target (unwind u) (if-let [al (:assert-loc facts)] (al t) loc) 0))
                  ;; C6-4 (a): the drop's glue, drop_glue::<T> of the dropped local's type when it needs drop (facts' :drop-glue,
                  ;; mono's drop-glue-symbol); none (nil) codegen reads as no drop at all: a plain branch
-                 drop (let [[_ p target u r d] t
-                            ty (when (and (:drop-glue facts) (seq? p) (= 2 (count p))) (:tc (meta (:ty (nth (:locals ours) (second p) nil)))))
+                 drop (let [[_ p target u r d pd] t
+                            lp (when (seq? p) (last p))
+                            ty (when (and (:drop-glue facts) (seq? p))
+                                 (cond (= 2 (count p)) (:tc (meta (:ty (nth (:locals ours) (second p) nil))))
+                                       ;; queue 566 (C6 L1): a field's place (`(_8 as Some).0` in an unwind path's drop of a moved-from
+                                       ;; Option's payload, get_backtrace_style's OsString): the field's type, its projection's
+                                       (and (seq? lp) (= 'field (first lp))) (:tc (meta (nth lp 2 nil)))
+                                       ;; queue 572 (C6 L3): a drop of a reference's pointee (`*path = p.to_string()`'s replace, addr2line's
+                                       ;; path_push: ElaborateDrops leaves an untracked place's drop unconditional): the reference's pointee
+                                       ;; type (gated on the backtrace crates by 572, ungated by queue 581, 572-1 (a))
+                                       (and (= 3 (count p)) (= '(deref) lp))
+                                       (let [lt (:tc (meta (:ty (nth (:locals ours) (second p) nil))))]
+                                         (case (first lt) :ref (nth lt 3 nil) nil))))
                             g (when ty (try (if (= "1" (System/getenv "RF_DROP_GLUE_TRACE"))
                                               ;; C1: what the glue's needs_drop assumed without knowing, printed
                                               (binding [build/*needs-drop-unknown* (atom [])]
@@ -663,8 +799,9 @@
                                                     (println "rf-drop-glue:" (pr-str ty) "assumed:" (pr-str (distinct @build/*needs-drop-unknown*))))
                                                   r))
                                               ((:drop-glue facts) ty))
-                                            (catch Throwable _ nil)))]
-                        (list 'drop p target (unwind u) r d (when g (list 'glue {:symbol g}))))
+                                            (catch Throwable e (when (System/getenv "RF_DROP_GLUE_TRACE") (println "rf-drop-glue: no glue for" (pr-str ty) (.getMessage e))) nil)))]
+                        ;; (queue 581: core-instance's :param-drop mark kept, after the glue)
+                        (apply list (cond-> ['drop p target (unwind u) r d (when g (list 'glue {:symbol g}))] (= :param-drop pd) (conj :param-drop))))
                  t))
         keep-stmt? (fn [s] (not (or (#{'fake-read 'place-mention} (first s))
                                     (and (= 'raw (first s)) (str/starts-with? (str (second s)) "AscribeUserType")))))]
@@ -774,7 +911,13 @@
     (or (get @native-core-cache f)
         ;; queue 443: several files, `:`-separated (core's, then alloc's and std's from bin/rust-front lib-export)
         (let [m (into {} (for [^String f1 (str/split f #":") :when (.exists (File. f1))
-                               x (read-forms (slurp f1)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)]
+                               x (read-forms (slurp f1)) :when (and (seq? x) (= 'core/body (first x))) :let [e (second x)] :when (:body e)
+                               ;; rust-l1 (C6): an inline const's body (its key `ITEM-{constant#N}`, the export's :def its parent's)
+                               ;; by its own def path, `ITEM::{constant#N}`, not in its parent's place
+                               :let [sfx (second (re-find #"((?:-\{constant#\d+\})+)$" (str (:key e))))
+                                     e (if (and sfx (not (str/ends-with? (str (:def e)) "}")))
+                                         (assoc e :def (str (:def e) (str/replace sfx "-{" "::{")))
+                                         e)]]
                            [(:def e) e]))]
           (swap! native-core-cache assoc f m)
           m))
@@ -824,12 +967,24 @@
                             (let [x (if (str/starts-with? (str/trim (subs (slurp f) 0 (min 64 (.length (File. f))))) "{")
                                       (read-string (slurp f))
                                       (c/load-std-iface f))]
-                              (-> acc (update :fns #(merge (:fns x) %)) (update :adts #(merge (:adts x) %))
+                              (-> acc (update :fns #(merge (:fns x) %)) (update :adts #(merge (:adts x) %)) (update :consts #(merge (:consts x) %))
                                   (update :impls #(merge (:impls x) %)) (update :traits #(merge (:traits x) %))))))
-                        {:fns {} :adts {} :impls {} :traits {}} (str/split v #":"))]
+                        {:fns {} :adts {} :impls {} :traits {} :consts {}} (str/split v #":"))]
           (swap! extra-iface-cache assoc v m)
           m))
-    {:fns {} :adts {} :impls {} :traits {}}))
+    {:fns {} :adts {} :impls {} :traits {} :consts {}}))
+
+(def ^:private prim-bits {"u8" 8 "i8" 8 "u16" 16 "i16" 16 "u32" 32 "i32" 32 "u64" 64 "i64" 64 "usize" 64 "isize" 64 "u128" 128 "i128" 128 "bool" 8})
+
+(defn- iface-const-value
+  "queue 542 (C6): a dependency's integer constant (libc's S_IFMT, _SC_PAGESIZE, UIO_MAXIOV: its pass's fact, :value the
+  definition's literal expression as collect evaluates it) as CTFE's scalar `(scalar BITS SIZE)`, the value wrapped to its type;
+  nil for another constant"
+  [d]
+  (when-let [{:keys [ty value]} (get (:consts (extra-iface-files)) d)]
+    (when (and (integer? value) (seq? ty) (= 'prim (first ty)))
+      (when-let [b (get prim-bits (second ty))]
+        (list 'scalar (mod (bigint value) (reduce * 1N (repeat b 2N))) (quot b 8))))))
 
 (defn with-extra-iface
   "SI (the run's interface) and STD (its names) with the exported bodies' crate-private facts: functions (443), impls and
@@ -946,11 +1101,37 @@
 
 (defn- has-proj? [t] (boolean (some #(and (vector? %) (= :proj (first %))) (tree-seq coll? seq t))))
 
+(def ^:private opaques-cache (atom {}))
+(defn- export-opaques
+  "rust-l1 (C6): the library's opaque types' hidden types the exports carry (each entry's :opaques), {PATH TYPE}"
+  []
+  (let [m (native-core-map) k (System/identityHashCode m)]
+    (or (get @opaques-cache k)
+        (let [os (into {} (for [e (vals m) [p t] (:opaques e)] [p t]))]
+          (swap! opaques-cache assoc k os)
+          os))))
+
+(defn- reveal-opaques
+  "rust-l1 (C6): T with each library opaque type of a non-generic definer (`[:ext-opaque PATH []]`) its hidden type, as
+  Reveal::All's normalization gives a mono item's types (std's panic_output's `impl io::Write`: Stderr)"
+  [t]
+  (if (and (coll? t) (some #(and (vector? %) (= :ext-opaque (first %))) (tree-seq coll? seq t)))
+    (let [os (export-opaques)]
+      (letfn [(w [x] (cond (and (vector? x) (= :ext-opaque (first x)) (every? #(and (vector? %) (#{:re-erased :re-static} (first %))) (nth x 2 [])))
+                           (if-let [h (get os (second x))] (w h) x)
+                           (vector? x) (mapv w x)
+                           (map? x) (into {} (for [[a b] x] [a (w b)]))
+                           (seq? x) (apply list (map w x))
+                           :else x))]
+        (w t)))
+    t))
+
 (defn- instance-normalize
   "An instance's type: the builtin projections (builtin-normalize), then the rest normalized by the run's solver
-  (*normalize-ty*) when one is left (an associated type of a library impl: `<Chars<'_> as Iterator>::Item`)"
+  (*normalize-ty*) when one is left (an associated type of a library impl: `<Chars<'_> as Iterator>::Item`); rust-l1: the
+  library's opaque types revealed first (reveal-opaques)"
   [t]
-  (let [t (builtin-normalize t)]
+  (let [t (builtin-normalize (reveal-opaques t))]
     (if (and *normalize-ty* (has-proj? t))
       (builtin-normalize (try (*normalize-ty* t) (catch Throwable _ t)))
       t)))
@@ -992,7 +1173,7 @@
                       (and (re-matches #"core::any::\{impl#\d+\}::of" (str *instance-def*)) (= "::{constant#0}" sfx)
                            (= 1 (count args)) (vector? (first args)) (not (some #(and (vector? %) (#{:param :proj :infer} (first %))) (tree-seq coll? seq (first args)))))
                       (when-let [hx (mono/type-id-hash (first args))] (list 'indirect-type-id hx)))]
-        [text val]))))
+        [text val sfx]))))
 
 (defn- promoted-text
   "queue 512: a promoted constant of the reprinted body (PromoteTemps' `(unevaluated NAME [] IDX)`, NAME the generic body's MIR
@@ -1021,7 +1202,7 @@
         (and (= 'unevaluated (first y)) (:nc m)) (with-meta y (update m :nc (fn [[d as]] [d (mapv #(c/subst % args) as)])))
         (= 'const (first y))
         (let [tyf (nth y 2 nil) t (:tc (meta tyf)) v (nth y 3 nil) nc (:nc (meta v))
-              [itext ival] (when (and nc (nil? (first nc))) (inline-const tyf v args))
+              [itext ival isfx] (when (and nc (nil? (first nc))) (inline-const tyf v args))
               ptext (promoted-text v args)
               text (cond (and t (= :fndef (first t))) (build/fn-const-text t)
                          itext itext
@@ -1029,7 +1210,15 @@
                          (and nc (nil? (first nc))) (throw (ex-info (str "an inline const outside the reprinted body (" (pr-str (second v)) ")") {}))
                          nc (str "const " (binding [c/*in-value* true c/*erased-regions* true] (c/print-def-path (first nc) (second nc))))
                          :else (second y))]
-          (with-meta (apply list 'const text (concat (take 1 (drop 2 y)) (if ival [ival] (drop 3 y)))) m))
+          (with-meta (apply list 'const text (concat (take 1 (drop 2 y))
+                                                     (cond ival [ival]
+                                                           ;; rust-l1 (C6): an inline const of a non-generic item, its export's
+                                                           ;; key beside it (`ITEM::{constant#N}`, the def path of its body in the
+                                                           ;; export), which eval-const-whole evaluates
+                                                           (and isfx (empty? args) (seq? (nth y 3 nil)))
+                                                           (cons (vary-meta (nth y 3) assoc :inline-def (str *instance-def* isfx)) (drop 4 y))
+                                                           :else (drop 3 y))))
+                     m))
         :else (if m (with-meta y m) y)))
     (vector? x) (let [y (mapv #(reprint % args) x)] (if (meta x) (with-meta y (meta x)) y))
     (map? x) (into {} (for [[k v] x] [k (if (= k :local-tys) (mapv #(instance-normalize (c/subst % args)) v) (reprint v args))]))
@@ -1076,7 +1265,11 @@
   []
   (let [m (native-core-map)]
     (or (get @const-bodies-cache (System/identityHashCode m))
-        (let [cs (reduce (fn [acc e] (merge acc (:consts e))) {} (vals m))]
+        ;; (queue 566 (C6 L1): and the export's own entries of constants, keyed like a body (another module's constant a body
+        ;; names by its path: FULL_BACKTRACE_DEFAULT, READ_LIMIT), under the bodies' :consts)
+        (let [cs (reduce (fn [acc e] (merge acc (:consts e)))
+                         (into {} (for [[d e] m :when (and (string? d) (#{:const :static :static-mut} (:kind (:body e))))] [d (:body e)]))
+                         (vals m))]
           (swap! const-bodies-cache assoc (System/identityHashCode m) cs)
           cs))))
 
@@ -1089,7 +1282,7 @@
   [d seen]
   (when-let [cb (and (string? d) (not (seen d)) (get (const-bodies) d))]
     (try
-      (let [b (reprint cb [])
+      (let [b (binding [*instance-def* d] (reprint cb []))   ; rust-l1: its inline consts named under it (thread_local!'s closure)
             lc (fn [_ _ v] (let [[d2 as] (:nc (meta v))] (when (empty? as) (eval-local-const d2 (conj seen d)))))
             lay (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
             ;; queue 464 (462-4 (a)): a call of a const fn (alloc's ZERO_CAP = Cap::new_unchecked(0)): its exported body at
@@ -1111,6 +1304,109 @@
       (catch Throwable e
         (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-local-const:" d (.getMessage e))))
         nil))))
+
+(def ^:dynamic *ctfe-wanted*
+  "queue 542 (C6): an atom of the const fns a static's evaluation called that no export holds (their keys for the next export,
+  logged as `lib-unit inline wanted DEF` so that lib-unit inline-keys takes them)"
+  nil)
+
+(def ^:dynamic *const-wanted*
+  "queue 566 (566-1 (a), the user's): an atom of what a library constant's whole evaluation (eval-const-whole) wanted that no
+  export holds: [DEF ARGS] of the const fns it called and [DEF []] of the constants it named, logged as `lib-unit const wanted
+  DEF` (their keys for the next export, which lib-unit inline-keys takes as it takes L2's)"
+  nil)
+
+(def ^:private const-whole-depth (atom 0))
+(declare eval-const-whole)
+(defn- const-whole-body
+  "rust-l1 (C6): a library constant's exported body by its def path D: a named constant's (export-consts', const-bodies) or an
+  inline const's (the export's `ITEM::{constant#N}` body, its parent's identity: a non-generic item's), reprinted in the
+  program's crate; nil when the export has none"
+  [d]
+  (if-let [cb (get (const-bodies) d)]
+    ;; (queue 566 (C6 L1): a constant the export has an entry of, the entry's instance, its promoteds with it: sys::path's
+    ;; SEPARATORS_STR's `&[b'/']`)
+    (if-let [e (let [e (get (native-core-map) d)] (when (and e (= :const (:kind (:body e))) (not (pos? (long (or (:generics e) 0))))) e))]
+      (binding [*instance-def* d] (:body (core-instance e [])))
+      (binding [*instance-def* d] (reprint cb [])))
+    (when-let [e (when (re-find #"::\{constant#\d+\}$" (str d)) (get (native-core-map) d))]
+      (when-not (pos? (long (or (:generics e) 0)))
+        (binding [*instance-def* (str/replace (str d) #"(::\{constant#\d+\})+$" "")]
+          (:body (core-instance e [])))))))
+
+(defn- eval-const-whole
+  "rust-l1 (C6): a library constant's whole value as CTFE interns it, pointers too (MAIN_SEPARATOR_STR's &str, UNWIND_DATA_REG's
+  tuple, LocalKey's function pointer, io::const_error!'s inline const `&SimpleMessage`): its exported body (const-whole-body)
+  evaluated by eval-promoted with its aggregates laid out by UNIT-VARIANT and LAY, its strings and borrowed temporaries each a
+  nested allocation of the body's data (*data-alloc*), the constants it names in turn and the const fns it calls by their
+  exported bodies (eight calls deep at most): {:bytes :align :relocs}, else nil. Only within *data-alloc*"
+  [d unit-variant lay]
+  (when (and *data-alloc* (string? d) (< @const-whole-depth 6))
+    (when-let [b (or (const-whole-body d)
+                     ;; queue 566 (566-1 (a)): a constant the export lacks, wanted
+                     (when *const-wanted* (swap! *const-wanted* conj [d []]) nil))]
+      (swap! const-whole-depth inc)
+      (try
+        (let [raw-alloc (fn [kind id]
+                          (let [bs (or (alloc-bytes b id) (throw (ex-info (str "no bytes for allocation " id " of " d) {})))]
+                            [(*data-alloc* {:bytes bs :align 1 :relocs []}) (count bs)]))
+              lc (fn lc [_ tyf v]
+                   (let [idx (when (seq? v) (nth v 3 nil)) pt (:tc (meta tyf))]
+                     (if (integer? idx)
+                       ;; queue 566 (C6 L1): a promoted of the constant's own body (io::const_error!'s `&SimpleMessage` in
+                       ;; Timespec::new's inline const): evaluated into a nested allocation, the constant a thin pointer to it
+                       (when-let [pb (get (:promoted-bodies b) idx)]
+                         (when (and (vector? pt) (#{:ref :ptr} (first pt)) (vector? (last pt)) (not (#{:slice :str :dyn} (first (last pt)))))
+                           (let [r (eval-promoted pb raw-alloc *data-alloc* unit-variant nil nil lay lc false)]
+                             {:bytes (vec (repeat 8 0)) :align 8 :relocs [[0 (*data-alloc* (select-keys r [:bytes :align :relocs :init]))]]})))
+                       (let [[d2 as] (:nc (meta v)) d2 (if (string? d2) d2 (:inline-def (meta v)))]
+                         (when (and (string? d2) (empty? as))
+                           (or (iface-const-value d2) (eval-local-const d2 #{})
+                               ;; a constant of another module whose value is a literal in its source (std's HAS_PREFIXES)
+                               (mono/src-const-value (str "const " d2))
+                               (eval-const-whole d2 unit-variant lay)))))))
+              depth (atom 0)
+              call (fn call [cd targs vals]
+                     (let [e (get (native-core-map) cd)]
+                       (when (and (nil? e) *ctfe-wanted*) (swap! *ctfe-wanted* conj [cd (vec targs)]))
+                       (when (and (nil? e) *const-wanted*) (swap! *const-wanted* conj [cd (vec targs)]))
+                       (when (and e (< @depth 8))
+                         (swap! depth inc)
+                         (try (binding [*arg-values* vals]
+                                (eval-promoted (:body (core-instance e (vec targs))) raw-alloc *data-alloc* unit-variant nil nil lay lc true))
+                              (catch Throwable x
+                                (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-const-whole: the call of" cd (.getMessage x))))
+                                nil)
+                              (finally (swap! depth dec))))))
+              r (binding [*const-call* call *arg-values* nil]
+                  (eval-promoted b raw-alloc *data-alloc* unit-variant nil nil lay lc true))]
+          (when (vector? (:bytes r)) (select-keys r [:bytes :align :relocs :init])))
+        (catch Throwable e
+          (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-const-whole:" d (.getMessage e))))
+          nil)
+        (finally (swap! const-whole-depth dec))))))
+
+(defn- eval-static-body
+  "queue 542 (C6): a static's initializer body CB (the export's, construct_const's) evaluated as CTFE evaluates it into the
+  static's allocation: eval-promoted on its own body (_0's value) with UNIT-VARIANT laying out its aggregates and LAY the types'
+  layouts, the constants it names (eval-local-const) and the const fns it calls by their exported bodies at the call's arguments
+  (core's Atomic::new, std's OnceLock::new, ...; eight calls deep at most): {:bytes :align :relocs}, else an ex-info"
+  [cb unit-variant lay]
+  (let [b (reprint cb [])
+        lc (fn [_ _ v] (let [[d2 as] (:nc (meta v))] (when (and (string? d2) (empty? as)) (or (iface-const-value d2) (eval-local-const d2 #{})))))
+        depth (atom 0)
+        call (fn call [cd targs vals]
+               (let [e (get (native-core-map) cd)]
+                 (when (and (nil? e) *ctfe-wanted*) (swap! *ctfe-wanted* conj [cd (vec targs)]))
+                 (when (and e (< @depth 8))
+                   (swap! depth inc)
+                   (try (binding [*arg-values* vals]
+                          (eval-promoted (:body (core-instance e (vec targs))) nil nil unit-variant nil nil lay lc true))
+                        (catch Throwable x
+                          (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "eval-static-body: the call of" cd (.getMessage x))))
+                          nil)
+                        (finally (swap! depth dec))))))]
+    (binding [*const-call* call *arg-values* nil] (eval-promoted b nil nil unit-variant nil nil lay lc true))))
 
 (defn- sized-const-eval
   "queue 448: core::mem::SizedTypeProperties' constants at a native instance (`<String as SizedTypeProperties>::MAX_SLICE_LEN`,
@@ -1158,7 +1454,9 @@
                                                        "core::ptr::swap_nonoverlapping_bytes::CHUNK_SIZE" '(scalar 8 8)}
                                                       d)))
                  ;; queue 462: another constant of the library's own, by its exported body
-                 val (or val (when (and (nil? nm) (empty? args)) (eval-local-const d #{})))]
+                 val (or val (when (and (nil? nm) (empty? args)) (eval-local-const d #{})))
+                 ;; queue 542: a dependency's integer constant by its interface fact's value
+                 val (or val (when (and (nil? nm) (empty? args) (string? d)) (iface-const-value d)))]
              (if val (with-meta (apply list (concat (take 3 x) [val])) (meta x)) x)))))
      body)))
 
@@ -1220,11 +1518,31 @@
                       x))]
     (update b :blocks (fn [bs] (mapv (fn [blk] (update blk :stmts (fn [ss] (mapv fix ss)))) bs)))))
 
+(defn- mark-param-drops
+  "queue 581 (C6 L2's unwind-edge slice): a generic body's drops of a place whose type names a parameter (the local's, or a field
+  projection's) marked `:param-drop` (the term's 7th element): rustc's MIR of the instance is the generic body's, where such a drop
+  stays (needs_drop unknown) and its landing pad with it; codegen's nop_landing_pads takes the pad as a nop at the instance (a
+  plain call), but MergingSucc still counts the edge (codegen_terminator's mergeable_succ: the terminator's successors)"
+  [body]
+  (let [lt (:local-tys body)
+        param? (fn [t] (boolean (some #(and (vector? %) (= :param (first %))) (tree-seq coll? seq t))))]
+    (update body :blocks
+            (fn [bs]
+              (mapv (fn [blk]
+                      (let [t (:term blk) p (when (seq? t) (second t)) lp (when (seq? p) (last p))]
+                        (if (and (seq? t) (= 'drop (first t)) (= 6 (count t)) (seq? p)
+                                 (param? (cond (= 2 (count p)) (nth lt (second p) nil)
+                                               (and (seq? lp) (= 'field (first lp))) (:tc (meta (nth lp 2 nil)))
+                                               :else nil)))
+                          (assoc blk :term (with-meta (apply list (concat t [:param-drop])) (meta t)))
+                          blk)))
+                    bs)))))
+
 (defn- core-instance
   "A native core body at the instance's ARGS, printed in the program's crate: {:def :args :body :promoted} or nil"
   [entry args]
   (binding [*export-crate* (first (str/split (str (:def entry)) #"::")) *instance-def* (:def entry)]
-  (let [b (sized-const-eval (reprint (:body entry) args))
+  (let [b (sized-const-eval (reprint (cond-> (:body entry) (seq args) mark-param-drops) args))
         ;; queue 479: the locals RemoveZsts takes as zero-sized: rustc's optimized_mir is the generic body's, so a local whose
         ;; type is concrete there (no parameter) and zero-sized by mono's layout (remove_zsts.rs' maybe_zst kinds but fn items
         ;; and `!`, whose constants print otherwise); the instance's arguments make no others ZST
@@ -1232,7 +1550,9 @@
         zst (when *type-layout*
               (set (for [i (range (count gt))
                          :let [g (nth gt i) t (nth it i nil)]
-                         :when (and t (vector? g) (#{:adt :array :closure :tuple} (first g))
+                         ;; (queue 566 (C6 L1): or an opaque type its export carries, revealed at the instance as optimized_mir
+                         ;; reveals it: panic_output's `impl Write`, Stderr, whose `(_1 as Some).0` move RemoveZsts drops)
+                         :when (and t (vector? g) (#{:adt :array :closure :tuple :ext-opaque} (first g))
                                     ;; queue 493: a parameter's type whose layout needs no parameter's (PhantomData<T>, layout_of
                                     ;; generic: RawVec::new_in's and Unique::cast's `_marker`, the record's `const <zst>`)
                                     (or (not-any? #(and (vector? %) (= :param (first %))) (tree-seq coll? seq g))
@@ -1259,7 +1579,9 @@
   (let [rt [:ref [:re-erased] true t]
         unit (build/ty-form [:tuple []])
         f [:fndef drop-fn []]
-        callee (with-meta (list 'const (str "<" (binding [c/*in-value* false] (c/print-ty t)) " as core::ops::Drop>::drop") (build/ty-form f) '(zst)) {})]
+        ;; queue 558 (C3): the call's caller location the shim's span, drop_glue's def_span (rustc's shim body's source info)
+        callee (with-meta (list 'const (str "<" (binding [c/*in-value* false] (c/print-ty t)) " as core::ops::Drop>::drop") (build/ty-form f) '(zst))
+                 (if-let [l (mono/lib-fn-loc "core::ptr::drop_glue")] {:call-loc l} {}))]
     {:args 1 :ret unit
      :locals [{:mut true :scope 0 :ty unit} {:mut false :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty (build/ty-form rt)} {:mut true :scope 0 :ty unit}]
      :scopes [[nil nil nil nil false]] :debug []
@@ -1551,6 +1873,12 @@
   its local's type form and whether the place derefs it ([TY-FORM DEREF?]); nil where not known"
   nil)
 
+(def ^:dynamic *switch-place-variants*
+  "queue 561 (C6 L3): within lib-unit's build of a backtrace crate, the discriminants of the inhabited variants of a field place's
+  enum (fn of the field's type form, its :tc), for a switch on `discriminant((*_1).0)` (UnreachableEnumBranching takes any
+  place: rustc-demangle's `if let Ok(ref mut parser) = self.parser`); nil: a local or its deref alone, as before"
+  nil)
+
 (defn- o0-unreachable-enum-branching
   "UnreachableEnumBranching (unreachable_enum_branching.rs, -O0's run_optimization_passes after RemoveZsts): a switch on
   `_d = discriminant(P)` (the block's last statement, P a local or its deref) whose enum's inhabited variants are known: each
@@ -1558,7 +1886,7 @@
   empty unreachable block) made the last variant's explicit target, then unreachable (one new block `unreachable`, the
   patch's, appended); [body changed?]"
   [body]
-  (if-not *switch-variants*
+  (if-not (or *switch-variants* *switch-place-variants*)
     [body false]
     (let [blocks (:blocks body) lt (fn [l] (:ty (nth (:locals body) l nil)))
           unr (count blocks) used (atom false)
@@ -1570,8 +1898,11 @@
                           (let [rv (nth st 2 nil) pl (when (and (seq? rv) (= 'discriminant (first rv))) (second rv))
                                 l (when (and (seq? pl) (= 'place (first pl)) (number? (second pl))) (second pl))
                                 proj (when l (drop 2 pl))
-                                allowed (when (and l (or (empty? proj) (= ['(deref)] (vec proj))))
-                                          (try (*switch-variants* [(lt l) (boolean (seq proj))]) (catch Throwable _ nil)))]
+                                allowed (cond (and l *switch-variants* (or (empty? proj) (= ['(deref)] (vec proj))))
+                                              (try (*switch-variants* [(lt l) (boolean (seq proj))]) (catch Throwable _ nil))
+                                              (and l *switch-place-variants* (seq proj)
+                                                   (let [e (last proj)] (and (seq? e) (= 'field (first e)))))
+                                              (try (*switch-place-variants* (nth (last proj) 2 nil)) (catch Throwable _ nil)))]
                             (when (set? allowed)
                               (let [[_ op targets otherwise] t
                                     left (reduce (fn [a [v _]] (disj a (bigint v))) (set (map bigint allowed)) targets)
@@ -1653,9 +1984,26 @@
                            single (let [i (second vs)] #{(nth ds i i)})
                            empty #{}
                            multiple (set (keep-indexed (fn [i v] (when-not (:uninhabited v) (nth ds i))) (:variants (second vs))))
-                           nil)])))]
+                           nil)])))
+        field-tcs (delay (into {} (for [x (tree-seq coll? seq (:blocks ib))
+                                        :when (and (seq? x) (= 'field (first x)) (:tc (meta (nth x 2 nil))))]
+                                    [(knorm (nth x 2)) (:tc (meta (nth x 2)))])))]
     (binding [*freeze-ty?* (fn [t] (boolean (get fz (knorm t))))
-              *switch-variants* (when (seq sv) (fn [[t d]] (get sv [(knorm t) d])))]
+              *switch-variants* (when (seq sv) (fn [[t d]] (get sv [(knorm t) d])))
+              ;; queue 561: switches on a field place's discriminant too (gated on the backtrace crates by 561, ungated by queue 586,
+              ;; 581-3 (a))
+              *switch-place-variants* (when *type-layout*
+                                        (fn [tyf]
+                                          ;; the runtime body keeps no metadata: the field's type by the instance body's own field
+                                          ;; projections' types (their :tc)
+                                          (let [t (or (:tc (meta tyf)) (get @field-tcs (knorm tyf)))
+                                                lf (when (vector? t) (*type-layout* t)) ds (:discrs lf) vs (:variants lf)]
+                                            (when (and (seq ds) (seq? vs))
+                                              (case (first vs)
+                                                single (let [i (second vs)] #{(nth ds i i)})
+                                                empty #{}
+                                                multiple (set (keep-indexed (fn [i v] (when-not (:uninhabited v) (nth ds i))) (:variants (second vs))))
+                                                nil)))))]
       (first (o0-normalize rb true (:zst-locals ib))))))
 
 (defn- first-diff
@@ -1969,7 +2317,9 @@
                                      ;; an intrinsic is codegen's; a function core's export has is built; one that is MIR-available
                                      ;; without a native body stops the root; any other is an external symbol (core's own object)
                                      ;; (queue 483: drop glue is a shim, no body of its def's: *drop-glue-ok?*'s above)
+                                     ;; queue 558 (C3): a virtual call (a trait method on a trait object) reaches no body
                                      :when (and (string? cd) (not (mono/intrinsic? cd)) (not= cd "core::ptr::drop_glue")
+                                                (not (and (= cd cd0) (mono/virtual-call? cd cargs)))
                                                 (or (get nc cd) (mono/mir-available? cd)))]
                                  [cd (vec cargs)])]
                       ;; a callee without an equal native body that the record has a body of: the record's (the pack's fallback)
@@ -2111,9 +2461,20 @@
                                         (dissoc b :alloc-data)))
                                 (vec acc))
                     ;; RF15: the function allocations of those bodies (their vtables' entries), by symbol
-                    std-fn-syms (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))
-                                           [_ a] (:alloc-data b) :when (= :fn (:kind a))]
-                                       (:symbol a)))
+                    std-fn-syms (into (set (for [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))
+                                                 [_ a] (:alloc-data b) :when (= :fn (:kind a))]
+                                             (:symbol a)))
+                                      ;; queue 542: and the functions those bodies call or name by symbol (a thread_local!'s
+                                      ;; closure, called by std's LazyStorage through FnMut::call_mut: the record's
+                                      ;; :fn-symbol and callee symbol), which mono matches to the program's local instances
+                                      (let [acc (java.util.HashSet.)]
+                                        (doseq [b rec-bodies :when (not (str/starts-with? (str (:def-id b)) "DefId(0:"))
+                                                blk (:blocks b) :let [t (:term blk)]
+                                                :when (and (seq? t) (= 'call (first t)))]
+                                          (let [f (second t) ci (nth t 6 nil)]
+                                            (when (seq? f) (doseq [[k v] (partition 2 1 f)] (when (and (= :fn-symbol k) (string? v)) (.add acc v))))
+                                            (when (and (seq? ci) (map? (second ci)) (string? (:symbol (second ci)))) (.add acc (:symbol (second ci))))))
+                                        (set acc)))
                     ;; queue 448, 433-1 (a): each call of the record's library bodies whose callee is a library body of the
                     ;; record's (an Item instance): its function constant's [PATH ARG-FORMS], that body's def (its DefId's path
                     ;; less the crate's hash: `core::fmt::{impl#4}::new`) and symbol, for mono to collect (RFP49's roots through
@@ -2185,7 +2546,8 @@
                                                            rec-bodies))
                                              dfn (when rec (try (mono/drop-shim-plan n t) (catch Throwable _ nil)))]
                                        :when dfn]
-                                   {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true}))
+                                   {:rec rec :def "core::ptr::drop_glue" :args [t] :body (drop-shim-body t dfn) :shim true
+                                    :sym (when (string? (:symbol x)) (:symbol x))}))
                     core-f (when (or (seq core-insts) (seq glue-shims))
                              (binding [mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))
                                        mono/*closure-kinds* (atom (merge (some-> mono/*closure-kinds* deref) (:closure-kinds facts)))
@@ -2207,7 +2569,12 @@
                     ;; RF17: the program's own constants (a `const` item's body, construct_const's, by its text `const NAME`), each
                     ;; evaluated once as CTFE evaluates it (eval-promoted over its built body, _0's value): a scalar's (scalar BITS
                     ;; SIZE), else nil (left unevaluated: codegen refuses it)
-                    const-bodies (into {} (for [[nm b _] bodies :when (and b (= :const (:kind b)))] [(str "const " nm) b]))
+                    ;; (queue 542: a const item's inline consts too, `const NOISY::{constant#0}`: thread_local!'s closure as a
+                    ;; function pointer)
+                    const-bodies (into {} (for [[nm b _] bodies :when (and b (or (= :const (:kind b))
+                                                                                 (and (= :anon-const (:kind b)) (map? (:def b))
+                                                                                      (str/starts-with? (str (:kind (:def b))) "Const"))))]
+                                            [(str "const " nm) b]))
                     const-by-def (into {} (for [[_ b _] bodies :when (and b (= :const (:kind b)) (number? (:id (:def b))))] [(:id (:def b)) b]))
                     const-vals (atom {})
                     local-const (fn local-const [text tyf v]
@@ -2227,13 +2594,31 @@
                                                          (when (empty? (remove c/region? args')) (get const-by-def d'))))))]
                                     (if (contains? @const-vals text)
                                       (get @const-vals text)
-                                      (let [v (try (let [{:keys [bytes relocs ty]} (eval-promoted b nil nil nil nil nil nil local-const true)]
-                                                     (when (and (empty? relocs) (scalar-kind (or ty (:ret b))) (seq bytes))
-                                                       (list 'scalar (bytes->int bytes) (count bytes))))
+                                      (let [;; queue 542: a const fn it calls (std's LocalKey::new) by its exported body at the
+                                            ;; call's arguments, as eval-local-const's
+                                            depth (atom 0)
+                                            call (fn [cd targs vals]
+                                                   (when (and (string? cd) (nil? (get (native-core-map) cd)))
+                                                     (swap! lines conj (str "ctfe wanted " cd)))
+                                                   (when-let [e (and (< @depth 4) (get (native-core-map) cd))]
+                                                     (swap! depth inc)
+                                                     (try (binding [*arg-values* vals]
+                                                            (eval-promoted (:body (core-instance e (vec targs))) nil nil nil nil nil nil local-const true))
+                                                          (catch Throwable x
+                                                            (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "local-const: the call of" cd (.getMessage x))))
+                                                            nil)
+                                                          (finally (swap! depth dec)))))
+                                            v (try (let [{:keys [bytes relocs ty] :as r} (binding [*const-call* call *arg-values* nil]
+                                                                                          (eval-promoted b nil nil nil nil nil nil local-const true))]
+                                                     (cond (and (empty? relocs) (scalar-kind (or ty (:ret b))) (seq bytes))
+                                                           (list 'scalar (bytes->int bytes) (count bytes))
+                                                           ;; queue 542: a value with pointers (a function's allocation, named in the
+                                                           ;; evaluating body's data: not kept across bodies)
+                                                           (and (vector? bytes) *fn-alloc*) (select-keys r [:bytes :align :relocs])))
                                                    (catch Throwable e
                                                      (when (System/getenv "RF_PROMOTED_TRACE") (.printStackTrace e))
                                                      nil))]
-                                        (swap! const-vals assoc text v)
+                                        (when-not (map? v) (swap! const-vals assoc text v))
                                         v)))))
                     ;; RF11: with BUILD_PASS (the batch's SimplifyCfg-pre-optimizations), each body after the ported passes to
                     ;; runtime MIR (arbace.rust.front.passes: PromoteTemps, ElaborateDrops, ElaborateBoxDerefs, ...), as codegen
@@ -2288,7 +2673,7 @@
                     statics (into {} (for [[nm m] rec-statics]
                                        [nm (let [o (get (:statics facts) nm)] (if (map? o) (do (fact! :statics true) o) (do (fact! :statics false #(str nm ": " (pr-str o))) m)))]))
                     header (fn [rec]
-                             (let [o (or (get (:items facts) (:name rec)) (get (:items core-f) (:name rec)))]
+                             (let [o (or (:native-header rec) (get (:items facts) (:name rec)) (get (:items core-f) (:name rec)))]
                                (if (and (map? o) (not (mono/error? o)))
                                  (do (fact! :symbols true) (assoc (dissoc o :name) :phase "optimized" :name (:name rec)))
                                  (do (fact! :symbols false #(str (:name rec) ": " (pr-str o))) (select-keys rec [:def :def-id :phase :instance :symbol :name :kind :track-caller :spread-arg])))))
@@ -2303,7 +2688,14 @@
                         ;; C6-4 (a): RF_DROP_GLUE=1, a drop's glue symbol (runtime-body's :drop-glue); off by default: without
                         ;; it the program's and the native library bodies' drops are plain branches (nothing dropped), and
                         ;; with it unwind.rs's native-std run (rsi-native) faults at its second catch_unwind: the ci leg judges
-                        :drop-glue (when (= "1" (System/getenv "RF_DROP_GLUE")) (fn [t] (mono/drop-glue-symbol n t)))
+                        ;; queue 542 (round 10): with the program's closures' upvars bound, as the facts were made: codegen runs
+                        ;; outside build-program's bindings, where a local closure's upvars were unknown, so needs_drop of a
+                        ;; by-value closure (an FnOnce body's self, `move || { tx.send(..) }`) was false and its drop left out
+                        ;; (the Sender never dropped, the channel's receiver parked for ever: threads.rs's livelock)
+                        :drop-glue (when (= "1" (System/getenv "RF_DROP_GLUE"))
+                                     (fn [t] (binding [build/*closure-tys* (merge build/*closure-tys* (:closure-upvars facts))
+                                                       mono/*closure-upvars* (merge mono/*closure-upvars* (:closure-upvars facts))]
+                                               (mono/drop-glue-symbol n t))))
                         :vtables (:vtables facts) :vtable! (fn [native?] (fact! :vtables native?))
                         :const! (fn ([native?] (fact! :consts native?)) ([native? d] (fact! :consts native? d)))
                         ;; RF15: a promoted ADT value's bytes (an enum's variant: `&Color::Blue`, `&Some(1.5)`) from mono's layout
@@ -2351,7 +2743,16 @@
                                              core-es (doall (for [[h i] core-items] (assoc (entry h (:body i) "a native body failed at run time") :core true)))
                                              ;; queue 448b: a shim that fails at run time keeps the record's (std's types' glue now
                                              ;; among them), as a core body does
-                                             glue-es (doall (for [g glue-shims] (entry (:rec g) (:body g) "drop glue's shim failed at run time")))
+                                             ;; queue 558 (C3): the shim's header its own (mono's symbol, the instance written as the
+                                             ;; record's `Shim(DropGlue(.., Some(T)))`), not the record's by its name (every shim's
+                                             ;; is `std::ptr::drop_glue`: no item fact of that name)
+                                             glue-es (doall (for [g glue-shims]
+                                                              (entry (assoc (:rec g) :native-header
+                                                                            {:def "std::ptr::drop_glue" :def-id "native core core::ptr::drop_glue"
+                                                                             :instance (str "Shim(DropGlue(core::ptr::drop_glue, Some("
+                                                                                            (binding [c/*in-value* false] (c/print-ty (first (:args g)))) ")))")
+                                                                             :symbol (or (:sym g) (:symbol (:rec g))) :name "std::ptr::drop_glue" :kind :fn})
+                                                                     (:body g) "drop glue's shim failed at run time")))
                                              {:keys [kept] fl :lines} (native-fallback (concat core-es glue-es))]
                                          (doseq [l fl] (swap! lines conj l))
                                          (doall (for [e kept]
@@ -2459,19 +2860,54 @@
                                                                              bs))))]
                   ;; RF16: a thread-local static a body names (`(tlsref MUT PATH)`, a nested static of the body's own item, std's
                   ;; RandomState::new's KEYS) given its symbol, mono's v0 of the static's def path (the body's DefId's, then its name)
-                  (let [tls (fn [b]
+                  ;; queue 542: a program's own thread-local static's initializer (thread_local!'s `LazyStorage::new()`) evaluated
+                  ;; as CTFE evaluates it (its built body, the const fns it calls by their exported bodies, the aggregates laid
+                  ;; out by mono): {:bytes :align}, defined by codegen as the unit's thread-local (rustc's codegen_static); else nil
+                  (let [tls-init (memoize
+                                  (fn [p]
+                                    (try
+                                      (if-let [sb (some (fn [[nm b _]] (when (and b (= nm p)) b)) bodies)]
+                                        (let [uv (:unit-variant nf) lay (:layout-of nf) depth (atom 0)
+                                              call (fn [cd targs vals]
+                                                     (when (and (string? cd) (nil? (get (native-core-map) cd)))
+                                                       (swap! lines conj (str "ctfe wanted " cd)))
+                                                     (when-let [e (and (< @depth 8) (get (native-core-map) cd))]
+                                                       (swap! depth inc)
+                                                       (try (binding [*arg-values* vals]
+                                                              (eval-promoted (:body (core-instance e (vec targs))) nil nil uv nil nil lay nil true))
+                                                            (catch Throwable x
+                                                              (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (println "tls-init: the call of" cd (.getMessage x))))
+                                                              nil)
+                                                            (finally (swap! depth dec)))))
+                                              r (binding [*const-call* call *arg-values* nil] (eval-promoted sb nil nil uv nil nil lay nil true))]
+                                          (if (and (vector? (:bytes r)) (empty? (:relocs r)))
+                                            {:bytes (:bytes r) :align (:align r)}
+                                            {:why (str "a value with pointers " (pr-str (:relocs r)))}))
+                                        {:why "no built body"})
+                                      (catch Throwable e {:why (str (.getMessage e))}))))
+                        tls (fn [b]
                               (let [did (when-let [[_ k p] (re-find #"^DefId\((\d+):\d+ ~ (.*)\)$" (str (:def-id b)))]
                                           (when (not= "0" k) (str/replace p #"\[[0-9a-f]+\]" "")))]
                                 (update b :blocks
                                         (fn [bs]
                                           (walk (fn [x]
-                                                  (if (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)) did
-                                                           (str/starts-with? (str (nth x 2)) (str (:def b) "::")))
+                                                  (cond
+                                                    (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)) did
+                                                         (str/starts-with? (str (nth x 2)) (str (:def b) "::")))
                                                     (let [p (str did (subs (str (nth x 2)) (count (str (:def b)))))
                                                           sym (try (mono/std-static-symbol n p) (catch Throwable _ nil))]
                                                       (fact! :tlsrefs (some? sym))
                                                       (if sym (concat x [sym]) x))
-                                                    x))
+                                                    ;; queue 542: a thread-local static of the program's own (thread_local!'s
+                                                    ;; `NOISY::{constant#0}::{closure#0}::__RUST_STD_INTERNAL_VAL`), its local def's symbol
+                                                    (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)) (nil? did))
+                                                    (let [sym (try (mono/local-static-symbol n (str (nth x 2))) (catch Throwable _ nil))
+                                                          ti (when sym (tls-init (str (nth x 2))))
+                                                          init (when (:bytes ti) ti)]
+                                                      (fact! :tlsrefs (some? sym))
+                                                      (fact! :tls-inits (some? init) #(str "the initializer of " (nth x 2) ": " (:why ti)))
+                                                      (if sym (concat x [sym] (when init [init])) x))
+                                                    :else x))
                                                 bs)))))]
                     (doall (for [f new-forms] (cond (= 'mir/layouts (first f)) (list 'mir/layouts (vec table))
                                                     (= 'mir/body (first f)) (list 'mir/body (tls (fix (second f))))
@@ -2656,7 +3092,23 @@
               ;; C6-4 (the always-inliner): the `#[inline(always)]` callees of the items, and theirs, each at its arguments (an
               ;; instance of a generic one), built beside them for the inliner (std's IR holds none of them: LLVM's -O0 pipeline
               ;; inlined and removed them); one the export lacks is wanted (its key named, for the next export)
-              inl (loop [todo (in-lib #(mono/inline-always-callees n (keep (fn [[_ i]] (:body i)) insts))) seen #{} acc []]
+              ;; queue 566 (C6 L2's first slice): with LIB_UNIT_L2, the items' other callees (unit-callees: one level, the instances
+              ;; the items call), each the export's body instantiated (core-instance) where the export has its definition
+              l2-name (fn [d args] (str "lib-l2 " d (when (seq args) (pr-str args))))
+              l2 (when (System/getenv "LIB_UNIT_L2")
+                   (let []
+                     (vec (for [[d args sym] (in-lib #(mono/unit-callees n (keep (fn [[_ i]] (:body i)) insts)))
+                                ;; (the copies std's units define: a generic instance, a cross-crate-inlinable definition, or
+                                ;; std's own; an upstream crate's plain item is that crate's)
+                                :when (and (not (and (empty? args) (some #{d} defs))) (not (in-lib #(mono/foreign-link-name d)))
+                                           ;; (an argument other than a region: lifetimes alone make no copy)
+                                           (or (some #(not (and (vector? %) (#{:re-erased :re-static :re-early :re-bound} (first %)))) args)
+                                               (and (string? d) (str/starts-with? d (str crate "::")))
+                                               (in-lib #(mono/cross-crate-inlinable? d))))
+                                :let [e (when (string? d) (get nc d))
+                                      i (when e (try (in-lib #(core-instance e args)) (catch Throwable _ nil)))]]
+                            [d args sym i (cond i nil e "the instance refused" :else "not exported")]))))
+              inl (loop [todo (in-lib #(mono/inline-always-callees n (concat (keep (fn [[_ i]] (:body i)) insts) (keep (fn [x] (:body (nth x 3))) l2)))) seen #{} acc []]
                     (if-let [[d args sym :as c] (first todo)]
                       (if (or (seen [d args]) (some #{d} defs))
                         (recur (rest todo) seen acc)
@@ -2667,11 +3119,18 @@
                                  (conj acc [d args sym i (cond i nil e "the instance refused" :else "not exported")]))))
                       acc))
               inl-name (fn [d args] (str "lib-inline " d (when (seq args) (pr-str args))))
+              ctfe-wanted (atom #{})   ; queue 542: the const fns a static's evaluation wanted
+              const-wanted (atom #{})  ; queue 566 (566-1 (a)): what a constant's whole evaluation wanted (eval-const-whole)
+              ;; rust-l1 (C6): a constant's aggregates laid out by mono, its types' layouts (eval-const-whole)
+              unit-variant* (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
+              lay* (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t)))
               cf (in-lib #(mono/core-facts n (concat (for [[d i] insts :when i] {:def d :args [] :name (str "lib " d) :body (:body i)})
-                                                     (for [[d args _ i] inl :when i] {:def d :args args :name (inl-name d args) :body (:body i)}))))
+                                                     (for [[d args _ i] inl :when i] {:def d :args args :name (inl-name d args) :body (:body i)})
+                                                     (for [[d args _ i] l2 :when i] {:def d :args args :name (l2-name d args) :body (:body i)}))))
               ;; the function constants' symbols, operands' too (a function reified as a pointer), beside the calls'
               cf (update cf :fsyms #(merge (in-lib (fn [] (mono/const-fsyms n (concat (keep (fn [x] (:body (second x))) insts)
-                                                                                   (keep (fn [x] (:body (nth x 3))) inl))))) %))
+                                                                                   (keep (fn [x] (:body (nth x 3))) inl)
+                                                                                   (keep (fn [x] (:body (nth x 3))) l2))))) %))
               ;; a caller location's file as the library build writes it: Cargo's trimmed path, relative to library/ (std.edn's
               ;; TRIM_PATHS; the export's :call-loc carries the remap's /rustc/COMMIT/library/ prefix), LIB_UNIT_SRC_PREFIX before
               ;; it (RFP47 (a)'s remap once std.edn takes it: /rustc/COMMIT/library/)
@@ -2679,8 +3138,10 @@
                                          (str (or (System/getenv "LIB_UNIT_SRC_PREFIX") "") (if (neg? i) f (subs f (+ i 9))))))
               ;; rust-c6c: each body's unsizing casts to a trait object with their vtables (mono's vtable-alloc, as program-facts
               ;; gives a program's), by the runtime body's name, which runtime-body's casts take in turn
+              ;; (queue 571: L2's callees too, by their names)
               vts (into {} (for [[nm b] (concat (for [[d i] insts :when i] [(str "lib " d) (:body i)])
-                                                (for [[d args _ i] inl :when i] [(inl-name d args) (:body i)]))
+                                                (for [[d args _ i] inl :when i] [(inl-name d args) (:body i)])
+                                                (for [[d args _ i] l2 :when i] [(l2-name d args) (:body i)]))
                                  :let [cs (try (mono/dyn-casts b) (catch Throwable _ nil))] :when (seq cs)]
                              [nm (vec (for [[st tt c tr targs] cs]
                                         [tt (try (in-lib #(mono/vtable-alloc-in n c tr targs))
@@ -2699,7 +3160,45 @@
                                      (throw (ex-info (str "no callee for " (second f) (when (mono/error? c) (str ": " (second c)))) {})))
                                    [(list 'callee c) (if cl (list 'loc (loc-file (first cl)) (second cl) (nth cl 2)) (list 'loc "?" 0 0))]))))
                   :fsym (into {} (for [[t s] (:fsyms cf) :when (not (mono/error? s))] [t s]))
-                  :statics {}
+                  ;; queue 542 (C6): the statics the bodies point at with their value deferred (the export's `static: PATH,
+                  ;; deferred` allocations): each by its path, its symbol v0's of the library's static (std-static-symbol), no bytes:
+                  ;; declared in the unit, as rustc's codegen of a body that names a static of its crate's other units
+                  ;; (queue 571: and L2's callees')
+                  :statics (into {} (for [b (concat (for [[_ i] insts :when i] (:body i)) (for [[_ _ _ i] inl :when i] (:body i))
+                                                    (for [[_ _ _ i] l2 :when i] (:body i)))
+                                          [_ t] (:alloc-texts b)
+                                          :let [p (second (re-find #"^\s*alloc\d+ \(static: ([^,]+), deferred\)" (str t)))]
+                                          :when p
+                                          ;; the export prints the local crate's paths without it (`panicking::HOOK`): CRATE's own
+                                          :let [fp (if (contains? (:crates mono/*crates*) (first (str/split p #"::"))) p (str crate "::" p))]]
+                                      [p (if-let [fs (:foreign-static (get (const-bodies) fp))]
+                                           ;; queue 566 (C6 L1): a foreign static with a linkage (weak!'s extern_weak `getrandom`): the
+                                           ;; symbol its link name, read through `_rust_extern_with_linkage_NAME`, an internal global
+                                           ;; holding its address (check_and_apply_linkage)
+                                           {:symbol (:name fs) :def (str "DefId(?:? ~ " fp ")") :extern-linkage (:linkage fs)
+                                            :extern-crate-id (get-in mono/*crates* [:crates crate :stable-crate-id])}
+                                           (try {:symbol (in-lib #(mono/std-static-symbol n fp)) :def (str "DefId(?:? ~ " fp ")")}
+                                                (catch Throwable x [:error (.getMessage x)])))]))
+                  ;; queue 542 (C6): a deferred static's value, its exported initializer evaluated (eval-static-body); nil when the
+                  ;; export has no body for it or the evaluation refuses (the static then declared, as before)
+                  :static-value (let [memo (atom {})]
+                                  (fn [p]
+                                    (if (contains? @memo p)
+                                      (get @memo p)
+                                      (let [fp (if (contains? (:crates mono/*crates*) (first (str/split p #"::"))) p (str crate "::" p))
+                                            cb (or (get (const-bodies) fp) (get (const-bodies) p))
+                                            v (when (and cb (not (:foreign-static cb)))
+                                                (try (binding [*ctfe-wanted* ctfe-wanted]
+                                                       (in-lib #(eval-static-body cb (fn [tyf vidx fields] (variant-bytes (in-lib (fn [] (mono/type-layout-form n tyf))) vidx fields))
+                                                                                  (fn [tyf] (when-let [t (:tc (meta tyf))] (*type-layout* t))))))
+                                                     (catch Throwable x
+                                                       (println (str "lib-unit static refused " fp ": " (.getMessage x)))
+                                                       (when (System/getenv "RF_CONST_TRACE") (binding [*out* *err*] (.printStackTrace x)))
+                                                       nil)))
+                                            v (when (and v (vector? (:bytes v)) (empty? (:relocs v))) v)]
+                                        (when-not cb (println (str "lib-unit static without its initializer's body " fp)))
+                                        (swap! memo assoc p v)
+                                        v))))
                   :header (fn [rec] (let [o (get (:items cf) (:name rec))]
                                       (if (and (map? o) (not (mono/error? o)))
                                         (assoc (dissoc o :name) :phase "arbace-lib-unit" :name (:name rec))
@@ -2710,7 +3209,32 @@
                   :layout-of (fn [tyf] (in-lib #(mono/type-layout-form n tyf)))
                   :closure-fnptr (fn [tyf] (try (in-lib #(mono/closure-once-symbol n tyf)) (catch Throwable _ nil)))
                   :unit-variant (fn [tyf vidx fields] (variant-bytes (in-lib #(mono/type-layout-form n tyf)) vidx fields))
-                  :drop-glue (fn [t] (in-lib #(mono/drop-glue-symbol n t)))}
+                  :drop-glue (fn [t] (in-lib #(mono/drop-glue-symbol n t)))
+                  ;; queue 542 (round 10, C6): a library constant the bodies name unevaluated (std's READ_LIMIT, NSEC_PER_SEC, ...)
+                  ;; as CTFE evaluates it: a dependency's integer constant by its interface fact, else its exported body
+                  ;; (eval-local-const); with it fix-uneval also reads an integer literal from the constant's module source
+                  :local-const (fn [_ _ v] (let [[d as] (:nc (meta v))]
+                                             (when (and (string? d) (empty? as))
+                                               (in-lib #(or (iface-const-value d) (eval-local-const d #{})
+                                                            ;; rust-l1 (C6): within a promoted's evaluation, a whole value
+                                                            ;; (LocalKey's function pointer: &LOCAL_PANIC_COUNT)
+                                                            (when *data-alloc* (binding [*const-wanted* const-wanted] (eval-const-whole d unit-variant* lay*))))))))
+                  ;; rust-l1 (C6): a named or inline constant's whole value (eval-const-whole), for fix-uneval
+                  :const-whole (fn [_ _ v] (let [[d as] (:nc (meta v)) d (if (string? d) d (:inline-def (meta v)))]
+                                             (when (and (string? d) (empty? as))
+                                               (binding [*const-wanted* const-wanted] (in-lib #(eval-const-whole d unit-variant* lay*))))))}
+              ;; queue 566 (C6 L1): a thread-local static the body names (`(tlsref MUT PATH)`, the crate's: list::DTORS), its symbol
+              ;; v0's of the library's static, as the program's run writes the program's own
+              tls-sym (fn [b] (walk (fn [x] (if (and (seq? x) (= 'tlsref (first x)) (= 3 (count x)))
+                                              (let [p (str (nth x 2))
+                                                    fp (if (contains? (:crates mono/*crates*) (first (str/split p #"::"))) p (str crate "::" p))
+                                                    sym (try (in-lib #(mono/std-static-symbol n fp)) (catch Throwable _ nil))
+                                                    ;; its initializer's value by CTFE (the export's body of it), the unit's own
+                                                    ;; thread-local defined with it, as codegen_static
+                                                    init (when sym (when-let [sv (:static-value nf)] (sv p)))]
+                                                (if sym (concat x [sym] (when init [(select-keys init [:bytes :align])])) x))
+                                              x))
+                                    b))
               out (vec (for [[d i why] insts]
                          (if-not i
                            [d nil why]
@@ -2718,7 +3242,7 @@
                            ;; (SimplifyCfg-final, CopyProp, RemoveZsts, ...): o0-normalize, pack-compare's port of them, over the
                            ;; runtime body (its calls' callees and locations already written: it keeps no metadata); LIB_UNIT_O0=0: not
                            (try [d (in-lib #(let [rb (runtime-body (assoc (:body i) :name (str "lib " d)) {:name (str "lib " d)} nf false)]
-                                              (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i))))) nil]
+                                              (tls-sym (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i)))))) nil]
                                 (catch Throwable x [d nil (str "the runtime body: " (.getMessage x))])))))
               inl-out (vec (for [[d args sym i why] inl]
                              (if-not i
@@ -2727,17 +3251,28 @@
                                                                rb (runtime-body (assoc (:body i) :name nm) {:name nm} nf false)]
                                                            (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i))))) nil]
                                     (catch Throwable x [d args sym nil (str "the runtime body: " (.getMessage x))])))))
+              l2-out (vec (for [[d args sym i why] l2]
+                            (if-not i
+                              [d args sym nil why]
+                              (try [d args sym (in-lib #(let [nm (l2-name d args)
+                                                              rb (runtime-body (assoc (:body i) :name nm) {:name nm} nf false)]
+                                                          (tls-sym (if (= "0" (System/getenv "LIB_UNIT_O0")) rb (o0-instance-normalize rb (:body i)))))) nil]
+                                   (catch Throwable x [d args sym nil (str "the runtime body: " (.getMessage x))])))))
               ;; the layouts from the instances' forms, which carry their types (:tc; runtime-body's walk drops it, and form->ty
               ;; reads a type from the record's DefId texts alone), then from the runtime bodies' for what they add
               ;; C6-4: each layout with its LLVM type without names (std's IR's -Z fewer-names: mono/*llty*)
+              ;; (queue 572's pair structs nested, mono's *pair-struct-llty*, ungated by queue 581: its default)
               lt (binding [mono/*llty* true]
-                   ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl)))
-                                                (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out))))))]
+                   ((:layouts-of facts) (concat (mono/ty-forms (concat (for [[_ i] insts :when i] (:body i)) (keep #(nth % 3) inl) (keep #(nth % 3) l2)))
+                                                (mono/ty-forms (concat (keep second out) (keep #(nth % 3) inl-out) (keep #(nth % 3) l2-out))))))]
           {:bodies out
            :inline-bodies (vec (for [[d args sym b why] inl-out] [d args sym b why]))
+           :l2-bodies (vec (for [[d args sym b why] l2-out] [d args sym (when b (assoc b :symbol sym)) why]))
            :layouts (vec (for [[t l] lt :when (not (mono/error? l))] [t l]))
            :layout-refusals (vec (for [[t l] lt :when (mono/error? l)] [t (second l)]))
-           :langsyms (into {} (for [[k v] (:langsyms facts) :when (not (mono/error? v))] [k v]))})))))
+           :langsyms (into {} (for [[k v] (:langsyms facts) :when (not (mono/error? v))] [k v]))
+           :ctfe-wanted (vec (sort-by str @ctfe-wanted))
+           :const-wanted (vec (sort-by str @const-wanted))})))))
 
 (defn lib-unit-main
   "lib-unit CRATES FRONT-DIR N CRATE DEFS-FILE OUT: lib-unit-run over DEFS-FILE's definitions (a def path a line) into OUT"
@@ -2750,6 +3285,16 @@
     (doseq [[d args sym b why] (:inline-bodies r)]
       (println (if b (str "lib-unit inline built " d (when (seq args) (str " " (pr-str args))) " " sym)
                    (str "lib-unit inline " (if (= why "not exported") "wanted " "refused ") d (when (seq args) (str " " (pr-str args))) " (" why ")"))))
+    ;; queue 542: the const fns a static's evaluation called that no export holds, wanted as the inliner's are (lib-unit inline-keys)
+    (doseq [[d args] (:ctfe-wanted r)]
+      (println (str "lib-unit inline wanted " d (when (seq args) (str " " (pr-str args))) " (not exported; a static's evaluation)")))
+    ;; queue 566 (566-1 (a)): the const fns and constants a constant's whole evaluation wanted, as L2's are logged
+    (doseq [[d args] (:const-wanted r)]
+      (println (str "lib-unit const wanted " d (when (seq args) (str " " (pr-str args))) " (not exported; a constant's evaluation)")))
+    ;; queue 566 (L2's first slice): the items' callees built (LIB_UNIT_L2), or wanted (their keys for the next export)
+    (doseq [[d args sym b why] (:l2-bodies r)]
+      (println (if b (str "lib-unit l2 built " d (when (seq args) (str " " (pr-str args))) " " sym)
+                   (str "lib-unit l2 " (if (= why "not exported") "wanted " "refused ") d (when (seq args) (str " " (pr-str args))) " (" why ")"))))
     (println (str "lib-unit: " (count (:layouts r)) " layouts, " (count (:layout-refusals r)) " refused"))
     (doseq [[t why] (take 12 (:layout-refusals r))] (println (str "lib-unit layout refused " t ": " (subs (str why) 0 (min 200 (count (str why)))))))
     (println (str "lib-unit: " crate ": " (count (filter second (:bodies r))) " of " (count defs) " items made runtime bodies, into " out))

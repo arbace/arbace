@@ -160,7 +160,10 @@
   ;; first statement, so the rest may be incomplete or broken), the parser's other errors after it
   ;; MODE+await: PyCF_ALLOW_TOP_LEVEL_AWAIT
   ;; MODE+incomplete, MODE+dedent: the parser's flags, its error first (codeop's _maybe_compile asks them)
+  ;; MODE+O1, MODE+O2: compile()'s optimize (py-core-1124), the last suffix
   (cond
+    (re-find #"\+O[12]$" mode)
+    (binding [pc/*optimize* (- (int (last mode)) (int \0))] (compile-uncached (subs mode 0 (- (count mode) 3)) source))
     (str/ends-with? mode "+await")
     (binding [sc/*top-level-await* true] (compile-uncached (subs mode 0 (- (count mode) 6)) source))
     (or (str/includes? mode "+incomplete") (str/includes? mode "+dedent"))
@@ -287,6 +290,12 @@
   ;; (the runtime's own lookup of this cache, go/arbace/py's aot.go, keys the text it has; libpatch.ae is in the digest);
   ;; the patches' control (PYI_LIB_PATCHES=0) of a patched source is not kept
   (let [key (sha256 (str mode "\u0000" @compiler-digest "\u0000" source))
+        ;; py-os-1124: the runtime's optimization level (-O, -OO, PYTHONOPTIMIZE, compile()'s optimize) as the mode's +opt1
+        ;; or +opt2, the compiler's *optimize* (the key above keeps the whole mode)
+        opt (if-let [[_ n] (re-find #"\+opt([12])" mode)] (Long/parseLong n) 0)
+        ;; the inherited future features (+futA annotations, +futB barry_as_FLUFL; py-os-1124)
+        fut (cond-> #{} (str/includes? mode "+futA") (conj "annotations") (str/includes? mode "+futB") (conj "barry_as_FLUFL"))
+        mode (str/replace mode #"\+opt[12]|\+fut[AB]" "")
         unpatched? ((requiring-resolve 'arbace.python.libpatch/withheld?) mode file source)
         source ((requiring-resolve 'arbace.python.libpatch/patch) mode file source)
         cf (File. (str work "/ir-cache/" (subs key 0 2) "/" key))]
@@ -296,7 +305,10 @@
                      (or (str/starts-with? mode "ast:") (str/starts-with? mode "tokenize:") (= mode "source-error"))
                      (native-answer mode file source)
                      (str/starts-with? mode "symtable:") (symtable-answer (subs mode 9) source)
-                     :else (compile-uncached mode source))
+                     :else (with-bindings {#'pc/*optimize* opt
+                                           (requiring-resolve 'arbace.python.scope/*inherited-features*) fut
+                                           (requiring-resolve 'arbace.repr.python.native/*barry*) (contains? fut "barry_as_FLUFL")}
+                             (compile-uncached mode source)))
                    (catch StackOverflowError _ too-deep-to-parse))]
         (when (and (not unpatched?)
                    (or (str/starts-with? r "{") (str/starts-with? r "AST:") (str/starts-with? r "TOK:") (= r "incomplete")
