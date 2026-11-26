@@ -3106,15 +3106,30 @@
                            (set (remove str/blank? (map str/trim (str/split-lines (slurp f))))))
               l2 (cond
                    l2-targets
-                   (loop [todo (in-lib #(mono/unit-callees n (keep (fn [[_ i]] (:body i)) insts))) seen #{} acc []]
+                   ;; (the callees of the `#[inline(always)]` callees' bodies too: LLVM's inliner leaves their calls in the
+                   ;; caller, so the instances they call are the unit's; each such body instantiated once, iseen)
+                   (let [iseen (volatile! #{})
+                         with-inl (fn [bodies]
+                                    (loop [bs (vec bodies) todo (vec bodies) acc (vec bodies)]
+                                      (if (empty? todo)
+                                        acc
+                                        (let [ics (remove #(contains? @iseen [(first %) (second %)])
+                                                          (try (in-lib (fn [] (mono/inline-always-callees n todo))) (catch Throwable _ nil)))
+                                              _ (vswap! iseen into (map (fn [[d args]] [d args]) ics))
+                                              nb (vec (keep (fn [[d args]] (when-let [e (when (string? d) (get nc d))]
+                                                                             (:body (try (in-lib #(core-instance e args)) (catch Throwable _ nil)))))
+                                                            ics))]
+                                          (recur bs nb (into acc nb))))))
+                         callees (fn [bodies] (in-lib #(mono/unit-callees n (with-inl bodies))))]
+                   (loop [todo (callees (keep (fn [[_ i]] (:body i)) insts)) seen #{} acc []]
                      (let [new (vec (distinct (remove (fn [[d args sym]] (or (contains? seen sym) (not (contains? l2-targets sym))
                                                                              (and (empty? args) (some #{d} defs))))
                                                       todo)))]
                        (if (empty? new)
                          acc
                          (let [built (mapv l2-one new)]
-                           (recur (in-lib #(mono/unit-callees n (keep (fn [x] (:body (nth x 3))) built)))
-                                  (into seen (map #(nth % 2) new)) (into acc built))))))
+                           (recur (callees (keep (fn [x] (:body (nth x 3))) built))
+                                  (into seen (map #(nth % 2) new)) (into acc built)))))))
                    (System/getenv "LIB_UNIT_L2")
                    (let []
                      (vec (for [[d args sym] (in-lib #(mono/unit-callees n (keep (fn [[_ i]] (:body i)) insts)))
