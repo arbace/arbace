@@ -11980,3 +11980,62 @@ pointers (cpp0x/constexpr-ice20.C, cpp1z/constexpr-lambda8.C), a local reference
 calls' paths never read the reference), a deleted member template's out-of-line redefinition (cpp0x/defaulted10.C), a
 placeholder's constraint whose argument fails to form (cpp2a/concepts-placeholder3.C), __type_pack_element's recursive
 instantiation (ext/type_pack_element4.C).
+
+## As built: cpp-def2, the read cell's deferred rows: GCC's recovery and single rules (2026-11-26; branch `cpp-def2-1126` from mac/next `9f06d5027`)
+
+The read cell at the base: 6,139 pass / 0 by design / 146 deferred (own-diag 145, gcc-own-rules 1). A run of the 146 at the base
+(`.tmp/dg-base`, one thread): own pass 0; 40 of them have a syntax error of the native parser (a declined construct), the group
+cpp-def left first: such a unit had its Sema not run at all. The rules, each from the standard's text or GCC's documented messages
+and manual as the tests state them, no GCC or clang code:
+
+- GCC's error recovery: a unit whose parser declined a construct is analyzed by the checker too (arbace/repr/cpp/diag.ae's
+  diagnose; `REPR_CPP_SEMA_DECLINED=0` the old way), the declined declarations' names -- declined-name's, but a name another
+  declaration of the unit declares -- dropped from the start (arbace.cpp.sema/*cx-dropped-seed*, queue 526's cx-poisoned?), as GCC
+  goes on past a syntax error with the failed declaration left out. Checked first on a fifth of the recorded own passes with a syntax
+  error (208 of 1,042, every fifth): all still pass. template/crash99.C, cpp2a/concepts-requires1.C.
+- [temp.inst]/2 with [temp.expl.spec]/7 (arbace/cpp/template.ae): a class template's specialization whose template is not defined
+  yet (no partial or explicit specialization for the arguments), or an explicit specialization declared and not defined, is surely
+  incomplete there (:cx-sure-incomplete): a variable of it is GCC's "aggregate ... has incomplete type" (no default constructor's
+  cascade), and [basic.lookup.qual]/1 a qualifier naming it "incomplete type 'A<int>' used in nested name specifier" (sema.ae's
+  name-expr). template/crash99.C.
+- [dcl.enum]/3 with [basic.lookup.qual]/1: an enumeration only opaque-declared -- no enumerator list before the name, and none a
+  qualified definition `enum A<T>::E : T {...}` could give an instantiation -- has no members: "'e1' is not a member of 'C<int>::E'".
+  cpp0x/pr82401.C.
+- [expr.const]/5.6 of C++20 (P1064R0): a virtual call on an object through a pointer formed from a variable outside the evaluation,
+  neither constexpr nor begun in it, is no constant expression (`static_cast<VBase*>(&m)->foo()`; a call on the variable itself,
+  which GCC devirtualizes, left as it was). cpp2a/constexpr-virtual20.C.
+- [dcl.fct.default]/1 with [dcl.init]: a default argument of a function that is no template's specialization whose conversion to the
+  parameter's type fails is reported at the default argument and again at the call that uses it (sema.ae's call-args).
+  overload/defarg9.C.
+- [dcl.fct.def.delete]/4 with [basic.def.odr]/1: a definition after a function's (or a member function template's) deleted
+  definition is a redefinition, the function staying deleted, its body not taken (sema.ae's declare-fn!, template.ae's
+  declare-template): "use of deleted function". cpp0x/defaulted10.C.
+- [expr.type.conv]/2 as DR2351 states it: no braced list but one empty after its packs' expansion initializes void, "compound literal
+  of non-object type 'void'": a list with an element that is no pack expansion in any definition, a template's too (diag.ae's
+  void-lists), one of pack expansions at the specialization (sema.ae). cpp0x/dr2351.C.
+- [expr.sub]/2: the built-in subscript's operands neither a pointer after their conversions, "subscripted value is neither array nor
+  pointer" at the subscript; a default template argument's own error located in the main file reported there and, outside a
+  substitution, the argument the specialization's: "template argument 2 is invalid" at the template-id (template.ae's complete-args).
+  template/crash89.C.
+- [namespace.udecl]/1 with [basic.lookup.qual]/1: a block scope's dependent using-declaration in a function template's specialization
+  whose qualifier is a scalar type, "'int' is not a class, namespace, or enumeration", its name then declared by nothing (a later
+  unqualified use "not declared"). cpp2a/using-enum-7.C.
+- [temp.constr.atomic]/3: a constrained placeholder's type-constraint whose arguments surely fail to form (`same_as<decltype(x.missing)>
+  auto` for an int x) is not satisfied, "placeholder constraints not satisfied" (sema.ae's *cx-tc-args*, template.ae's
+  :type-constraint hook). cpp2a/concepts-placeholder3.C.
+- [dcl.constexpr]/3 (C++11-C++23 /4): a constexpr constructor or destructor of a class with a virtual base is no constexpr function
+  (sema.ae's ce-not-constexpr?, ce-construct): its call "call to non-'constexpr' function"; the error at the definition's body's end,
+  where GCC judges it (diag.ae's constexpr-virtual-bases). cpp0x/constexpr-ice21.C.
+- [expr.prim.lambda.capture]/7-11: an enclosing function's local named in a lambda's body is its closure's member there; its address
+  in a constant evaluation (`*&n`, an odr-use) is no constant expression. cpp1z/constexpr-lambda10.C.
+- [temp.param]/6-7 (C++20) with [over.literal]/5: a non-type template parameter of a class type surely no literal type is not
+  structural, GCC's "... is not a valid type for a template non-type parameter because it is not structural", and a literal operator
+  template of that one parameter has an invalid parameter list (template.ae's cx-structural-params!). cpp2a/udlit-class-nttp-neg2.C.
+- [temp.explicit]/3 with [dcl.fct]/22: an explicit instantiation's function declarator with a placeholder parameter (an abbreviated
+  function template) is no specialization's, "'auto' parameter not permitted in this context" (diag.ae's explicit-inst-auto-params).
+  cpp1y/pr60627.C.
+- [over.ics.rank]/3.1 (DR1467): of two list-initialization sequences, one to std::initializer_list<X> is better than one that is not,
+  whatever the other rules say; and [dcl.init.list]/7.5 (P1957R2, which GCC applies to every standard, as the test's C++11 target
+  shows): a pointer or a pointer to member to bool narrows. cpp0x/initlist92.C.
+
+Results to come: the regression run and the record.
