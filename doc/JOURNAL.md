@@ -24721,3 +24721,20 @@ test/python/divergences.edn (bin/pyi divergences --methods: `:ctypes-port` 18, `
   _Py_FFI_SUPPORT_C_COMPLEX; ci's csqrtl gives -0 0, a C crop request), test_audit's test_ctypes_call_function (string_at of
   id(...) + 40: id is no address in pyi). Not this lane's: test_call's method descriptor flag (594), test_getargs' two str
   subclass keywords (py-core).
+## 2026-11-26 — queue 598's DECISIONs answered (the user: 598-1 (a), 598-2 (a), 598-3 (a)) (queue 598, VM)
+
+- 598-1 (a) and 598-3 (a): test_issue18060_a/b/c (an ABI coincidence: a Structure of two doubles passed where atan2 takes two
+  doubles) and test_audit's test_ctypes_call_function (string_at(id(...) + 40): id() is no CPython address) are n/a, in the new
+  class `:native-abi-addresses` of test/python/divergences.edn (before `:ctypes-port`, which keeps test_csqrt alone of the four's
+  neighbours).
+- 598-2 (a): csqrtl. Probed with bin/ci run (.tmp/q598/cx/): musl's csqrtl is `return csqrt(z);`, and ci's builder returned the
+  double complex value at the long double complex result's size without converting it (argument and initializer conversions were
+  right; the return statement's :m case took the node as it was), so csqrtl gave 0 0 / -0 0. The cause is fixed in the builder
+  (arbace/c/build.ae, `return`'s aggregate case converts a complex result to the function's complex type, C11 6.8.6.4p3), not in
+  musl's sources: the world's musl comes from the pinned tarball with no overlay, and every complex function returning another
+  complex type had the same fault. After it the probe gives csqrtl(-1 - 0.01i) = 0.0049999375027342139 - 1.0000124996093955i, as
+  csqrt. tools/pyi/clib/ctypestest/lib.conf's cflags add -D_Py_FFI_SUPPORT_C_COMPLEX=1, so _ctypes_test.c builds my_csqrt,
+  my_csqrtf and my_csqrtl; the world is not rebuilt here (train 7 rebuilds it from all lanes; until then the committed nodes'
+  Key is the old flags'). test_csqrt is expected to pass after that rebuild (pyctypes' 'G' calls as ci's long double complex,
+  not probed against the rebuilt world).
+- No module run (the classes need none); bin/pyi divergences on the committed record: no new problem.
