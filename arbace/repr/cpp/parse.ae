@@ -684,10 +684,10 @@
     (when-let [lx (gt-lexeme-at p 0)]
       (soft-diag! p (ix p) (str "'" lx "' should be '" (if (= lx ">=") "> =" "> >=") "' to terminate a template argument list")))))
 
-(defn parse-template-args
+(defn- parse-template-args*
   "A template-argument-list at its <: the arguments ({:k :type :t T}, {:k :expr :x node}, {:k :tmpl :name name}, each with
   :b :e and :pack), the cursor after the > (one half of a split >>)."
-  ([^P p] (parse-template-args p nil))
+  ([^P p] (parse-template-args* p nil))
   ([^P p tmpl]
   (adv! p)
   (with-gt p false
@@ -753,6 +753,45 @@
           (cond (accept! p ",") (recur out)
                 (do (gt-close-check! p) (accept! p ">")) out
                 :else (perr p "a template argument list"))))))))
+
+;; cpp-indep2: a unit's class-key counts by name (a class-key, the name, no < after it), made once a unit for the rule below
+(def ^:private class-key-counts (java.util.WeakHashMap.))
+
+(defn parse-template-args
+  "parse-template-args* and, cpp-indep2, the argument count of a class or alias template's template-id ([temp.arg.general]/1,
+  [temp.names]/? : as many arguments as the template has parameters, the defaulted and the packs aside): GCC's \"wrong number of
+  template arguments (1, should be at least 2)\", at the template-id's <; no pack expansion among the arguments, the main
+  file's, not skimmed."
+  ([^P p] (parse-template-args p nil))
+  ([^P p tmpl]
+   (let [lt (ix p)
+         as (parse-template-args* p tmpl)]
+     (when (and tmpl (type-ent? tmpl) (:tmpl tmpl) (seq (:tps tmpl)) (not (:tparam tmpl)) (not (skim? p)) (main-tok? p lt)
+                (not-any? :pack as))
+       (let [tps (vec (:tps tmpl))
+             dflt? (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x)))
+             pk (some :isParameterPack tps)
+             nreq (count (remove #(or (dflt? %) (:isParameterPack %)) tps))
+             n (count as)]
+         ;; (a template declared once: a redeclaration may add default arguments, [temp.param]/12, which the entity's
+         ;; parameters, its first declaration's, may not hold; the tokens scanned only for a count that is wrong)
+         (when-let [msg (when (not-any? #(= "TemplateTemplateParmDecl" (:kind %)) tps)
+                          (cond
+                            (< n nreq) (str "wrong number of template arguments (" n ", should be " (if (or pk (some dflt? tps)) "at least " "") nreq ")")
+                            (and (not pk) (> n (count tps))) (str "wrong number of template arguments (" n ", should be " (count tps) ")")
+                            :else nil))]
+           (let [nm (:name tmpl)
+                 ^java.util.Map cs (locking class-key-counts
+                                     (or (.get ^java.util.Map class-key-counts p)
+                                         (let [m (java.util.HashMap.) cnt (.-cnt p)]
+                                           (dotimes [i (max 0 (- cnt 2))]
+                                             (when (and (#{"class" "struct" "union"} (ts (tok-at p i))) (not= "<" (ts (tok-at p (+ i 2)))))
+                                               (let [k (ts (tok-at p (inc i)))] (.put m k (inc (long (or (.get m k) 0)))))))
+                                           (.put ^java.util.Map class-key-counts p m)
+                                           m)))]
+             (when (and (string? nm) (>= 1 (long (or (.get cs nm) 0))))
+               (soft-diag! p lt msg))))))
+     as)))
 
 (defn- arg-str ^String [^P p a]
   (str (case (:k a)
