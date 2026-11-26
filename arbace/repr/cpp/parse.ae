@@ -2287,6 +2287,12 @@
                 (when (and (:s s2) (:i s2) (not (and (= "align_val_t" (:s s2)) (>= (.-year p) 2017))))
                   (soft-diag! p (long (:i s2)) (str "'" (:s s2) "' is not a member of 'std'")))
                 (soft-diag! p (long (:i f)) (str "'" (:s f) "' has not been declared")))))
+          ;; (cpp-indep3: [basic.lookup.qual.general]/? with [namespace.qual], `::n` names a member of the global namespace: one it
+          ;; does not declare, the main file declaring the name nowhere, is GCC's "'::n' has not been declared", at the name;
+          ;; cpp0x/constexpr-ice15.C)
+          (when (and *full-headers* (not (skim? p)) (nil? en) (:g qn) (= 1 (count (:parts qn))) (:s lp) (not (:args lp)) (:i lp)
+                     (main-tok? p (long (:i lp))) (nil? (sc/find-in (stv p ROOT) (:s lp))) (not (declared-in-main? p (:s lp))))
+            (soft-diag! p (long (:i lp)) (str "'::" (:s lp) "' has not been declared")))
           (node p "DeclRefExpr" b (:e qn) (merge (written-name p qn)
                                           {:_ent en
                                            :_this (boolean (and (= 1 (count (:parts qn))) (not (:g qn)) (:s lp)
@@ -5470,6 +5476,11 @@
                       (and fs tmpl (pos? (long (or (:n tmpl) 0))) (> (count (:parts qn)) 1) (some #(= "c" (:init %)) (:params fs))
                            (let [q (:q qn)] (and (map? q) (:class q))))
                       (soft-diag! p ni (str "redeclaration of '" (or (:s lp) nm) "' may not have default arguments"))
+                      ;; (cpp-indep3: [dcl.fct.default]/4 (C++23 [temp.expl.spec]/? ), "Default function arguments shall not be
+                      ;; specified in ... the explicit specialization of a function template": GCC's "default argument specified in
+                      ;; explicit specialization", at the name; template/spec30.C)
+                      (and fs tmpl (zero? (long (or (:n tmpl) -1))) (not (:friend ds)) (some #(= "c" (:init %)) (:params fs)))
+                      (soft-diag! p ni "default argument specified in explicit specialization")
                       ;; ([temp.expl.spec]/? , a member of a class template's specialization defined out of its class names an
                       ;; explicit specialization the file defined, else is itself one and takes `template<>`: GCC's "specializing
                       ;; member 'foo<bool>::i' requires 'template<>' syntax", at the qualifier; parse/pr20118.C)
@@ -5664,6 +5675,19 @@
               ;; is no simple-template-id; GCC's pedwarn, -Wtemplate-id-cdtor)
               _ (when (and fs (>= (.-year p) 2020) (:args lp) (or (and ctor (= ctx :member) (not (and (:friend ds) (> (count (:parts qn)) 1)))) (:dtor lp)))
                   (pedantic-diag! p (long (:i lp)) (str "template-id not allowed for " (if (:dtor lp) "destructor" "constructor") " in C++20")))
+              ;; (cpp-indep3: [class.dtor]/1 (C++17), a destructor's declarator-id in its class is ~ and the class's name: in a
+              ;; class template's member-specification a template-id of other arguments than its own parameters names another
+              ;; specialization, GCC's "declaration of '~A<0>' as member of 'A'", at the name; template/dtor4.C)
+              _ (when (and fs (= ctx :member) (:dtor lp) (seq (:args lp)) (= 1 (count (:parts qn))) (not (:friend ds))
+                           (not-any? :pack (:args lp)) (:i lp) (not (skim? p)) (main-tok? p (long (:i lp))))
+                  (let [e (sc/find-in (scope p) (str (:dtor lp)) false)
+                        own (:inj e)]
+                    ;; (a template with an unnamed parameter, whose own arguments no template-id spells: :inj-full)
+                    (when (and (= (:dtor lp) (some-> (stv p CLS) first :name))
+                               (or (= (:inj-full e) (:dtor lp))
+                                   (and (vector? own) (every? string? own) (= (count own) (count (:args lp)))
+                                        (not= own (mapv #(arg-str p %) (:args lp))))))
+                      (soft-diag! p (long (:i lp)) (str "declaration of '~" (:dtor lp) "<" (str/join ", " (mapv #(arg-str p %) (:args lp))) ">' as member of '" (:dtor lp) "'")))))
               ;; (queue 365: round 54's [temp.variadic]/5 check of a declaration's type naming a pack removed: a lambda's local
               ;; `T y` in a fold over the lambda is valid)
               ;; (round 54: [dcl.stc]/2 (C++14), the register specifier applies to variables alone; GCC's error at every standard)
@@ -6407,6 +6431,7 @@
                   late* (fn [f] (cond (= ctx :block) (f)
                                       qcls (in-scope p (sc/new-scope :lookup (scope p) qcls) (f))
                                       :else (with-late* p f)))
+                  ib (ix p)
                   [x init] (cond
                              (accept! p "=") [(if (skim? p) (do (skip-init! p (boolean (and tmpl (pos? (long (:n tmpl)))))) nil) (late* #(parse-init-clause p))) "c"]
                              (is? p "{") [(if (skim? p) (do (skip-balanced! p) nil) (late* #(parse-braced-init p))) "list"]
@@ -6415,6 +6440,26 @@
                              :else [nil nil])
                   _ (when (and field nm init (skim? p))
                       (when-let [^HashMap i (sema/info (:ent (class-ctx p)))] (.put i :dmi true) (.add ^HashSet (.get i :finit) nm)))
+                  ;; (cpp-indep3: [basic.def.odr]/10 (C++23 /? ) with [class.local]/1, a local class's default member initializer names no
+                  ;; local entity of the enclosing function -- a variable or parameter that is no static, constexpr or reference
+                  ;; constant -- outside an unevaluated operand: GCC's "local variable 'q' may not appear in this context", at the
+                  ;; name; cpp0x/nsdmi-local.C)
+                  _ (when (and field init (= ctx :member) (not (skim? p)) (main-tok? p ib)
+                               (not-any? #(#{"sizeof" "decltype" "alignof" "noexcept" "typeid" "__typeof__" "__decltype" "[" "requires"} (ts (tok-at p %))) (range ib (ix p))))
+                      (when-let [i (first (filter (fn [i]
+                                                    (let [^T t (tok-at p i) ^T pv (tok-at p (dec i))]
+                                                      (and (identical? :id (.-k t)) (not (or (t= pv ".") (t= pv "->") (t= pv "::"))) (not (t= (tok-at p (inc i)) "::"))
+                                                           (let [en (loop [^Scope s (scope p) seen-class false]
+                                                                      (when s
+                                                                        (if-let [e (.get ^java.util.HashMap (sc/names-of s) (.-s t))]
+                                                                          [e (sc/kind-of s) seen-class]
+                                                                          (recur (sc/parent-of s) (or seen-class (= :class (sc/kind-of s)))))))]
+                                                             (and en (nth en 2) (#{:block :fparams} (second en)) (= :var (:k (first en)))
+                                                                  (not (:enumerator (first en))) (not (:static (first en))) (not (:constexpr (first en)))
+                                                                  (not (:tparam (first en))) (map? (:ty (first en))) (not (:c (:ty (first en))))
+                                                                  (not (#{:lr :rr} (:t (:ty (first en))))))))))
+                                                  (range ib (ix p))))]
+                        (soft-diag! p (long i) (str "local variable '" (ts (tok-at p (long i))) "' may not appear in this context"))))
                   ;; (round 54, sixth pass: [dcl.init.general]/16.9 (C++23), a scalar initialized by a parenthesized
                   ;; expression-list has a single expression: GCC's "expression list treated as compound expression in
                   ;; initializer", at the parenthesis; an arithmetic type or a pointer as written)

@@ -2821,7 +2821,16 @@
           names (set (mapcat (fn [i f]
                                (if (and (nt? i) (not (symbol? f)) (not (and (seq? f) (= 'pack-expand (first f)) (symbol? (second f)))))
                                  []
-                                 (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (pr-str f))))
+                                 ;; (cpp-indep3: [temp.deduct.type]/5.1, a name's nested-name-specifier is a non-deduced
+                                 ;; context: a parameter written only before `::` (a qualified symbol's `/` in the forms), `typename
+                                 ;; T::foo`, `c::d`, deduces nothing;
+                                 ;; template/partial5.C, cpp1z/pr81016.C, cpp0x/vt-33964.C)
+                                 (let [s (pr-str f)
+                                       m (re-matcher #"[A-Za-z_][A-Za-z_0-9]*" s)]
+                                   (loop [out []]
+                                     (if (.find m)
+                                       (recur (let [r (subs s (.end m))] (if (or (str/starts-with? r "::") (str/starts-with? r "/")) out (conj out (.group m)))))
+                                       out)))))
                              (range) (:forms pt)))
           bad (filter #(or (str/blank? (str (:name %))) (not (contains? names (str (:name %))))) (:params pt))]
       (when (seq bad)
@@ -2872,6 +2881,35 @@
         (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))
               txt (if (and (seq? bad) (= 'cpp/text (first bad))) (str/replace (str (second bad)) #"\s+" "") (pr-str bad))]
           (h (ex-info (str "codegen: template argument '" txt "' involves template parameter(s)") {:codegen/refused :template :cx/node at}) n)
+          true)))))
+
+;; cpp-indep3 (the checker): [temp.spec.partial.general]/9.1, "The type of a template parameter corresponding to a specialized
+;; non-type argument shall not be dependent on a parameter of the partial specialization": the primary's non-type parameter
+;; whose type names another of its parameters, specialized by an argument that is no identifier alone, where that other
+;; parameter's argument names a parameter of the partial specialization: GCC's "type 'T' of template argument '(T)0' depends on
+;; a template parameter", at the declaration `n`; template/partial5.C's `template<typename T> struct Z<T, (T)0>` of `template<typename
+;; T, T V> struct Z`. True when reported.
+(defn- cx-partial-nontype-type-dependent!
+  [t forms params n]
+  (when-let [h (when (and (sema/checking?) (not (sema/header-node? n))) sema/*on-refusal*)]
+    (let [tps (vec (:params t)) forms (vec forms)
+          pn (set (keep #(not-empty (str (:name %))) params))
+          ids (fn [f] (set (re-seq #"[A-Za-z_][A-Za-z_0-9]*" (if (and (seq? f) (= 'cpp/text (first f))) (str (second f)) (pr-str f)))))
+          bad (when (and (= (count tps) (count forms)) (not-any? :pack tps))
+                (first (keep-indexed
+                        (fn [i f]
+                          (let [q (tps i)
+                                tw (ids (str (:qt q)))]
+                            (when (and (= :value (:kind q)) (not (symbol? f))
+                                       (some (fn [[j r]] (and (not= i j) (contains? tw (str (:name r))) (some pn (ids (forms j)))))
+                                             (map-indexed vector tps)))
+                              [q f])))
+                        forms)))]
+      (when-let [[q f] bad]
+        (let [at (let [l (:loc n) l (if (:expansionLoc l) (:expansionLoc l) l)] (if (:offset l) {:range {:begin l}} n))
+              txt (if (and (seq? f) (= 'cpp/text (first f))) (str/replace (str (second f)) #"\s+" "") (pr-str f))]
+          (h (ex-info (str "codegen: type '" (str/trim (str (:qt q))) "' of template argument '" txt "' depends on a template parameter")
+                      {:codegen/refused :template :cx/node at}) n)
           true)))))
 
 (defn- more-constrained-partial?
@@ -5131,6 +5169,9 @@
           params (tparams n)
           ss (bind-scope (:scope t) params nil pid)
           forms (var-text-args n)
+          ;; (cpp-indep3: a variable template's partial specialization whose arguments name a parameter nowhere is as a class
+          ;; template's, [temp.spec.partial.match]/3: cpp1y/var-templ32.C's `template<typename T> bool V1<int>`, var-templ35.C)
+          _ (when (sema/checking?) (cx-partial-undeducible! t {:params params :forms forms} n))
           args (resolve-args ss t forms true)]
       (upd-tmpl! tid update :partials (fnil conj [])
                  {:id pid :params params :args args :node n :constraint (:requiresClause n) :scope (:scope t) :forms forms :tmpl t})
@@ -5177,6 +5218,7 @@
         ;; it: cpp0x/pr32128.C's `A<int>` then of the primary, incomplete)
         (let [bad (and (not same) (cx-partial-pack-checks! t (:forms pt) n))]
         (when-not (or same bad) (identity-partial-check! t pt n) (cx-partial-nontype-involves! t (:forms pt) params n)
+                       (cx-partial-nontype-type-dependent! t (:forms pt) params n)
                        (cx-partial-after-instantiation! t pt n))
         (let [pt (if (and (not same) (not bad) (cx-partial-undeducible! t pt n)) (assoc pt :node (dissoc n :completeDefinition) :cx-undeducible true) pt)]
         (cond
