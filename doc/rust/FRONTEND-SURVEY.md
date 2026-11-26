@@ -6174,3 +6174,43 @@ pointers; fn pointer to integer casts; `extern "C"` pair returns as `{ i64, i64 
 source; export opaque types with their hidden types (`:opaques`, untested). std 180 / 39 / 106 -> 180 / 44 / 101 at the first half
 (b1), then env_read_lock and Path::components equal in targeted runs; no full run at the head. Left of L1: the doc/JOURNAL.md entry of
 2026-11-24 and the worktree's `.tmp/NEXT.md`.
+
+## As built: C6's L4.4 measured, L5's tooling (2026-11-26, queue 596, VM)
+
+On next `3725c6dc8` (590's and 591's own tree: 688 own of 31,684 defines in 23 of 120 units; the host's L4 rerun on `227dce44c`,
+73 of 73, its baseline, not measured again).
+
+**L4.4, the closure analysis.** Each case's closure through the own tree (its x.ll's and shim.ll's undefined symbols, as `census`
+takes them; `lib-unit own-std`, checked against an independent scanner: the same counts for all 73 cases, and the 5 samples' union
+9,718 defines as `census` gives it on the tree today; the 8,834 above were the packs and std of 2026-11-20):
+
+| | defines in the closure | rustc's |
+|---|---|---|
+| the smallest, `synthetic/abort.rs` (18 more synthetic cases equal: exit-code, the panics, trap, overflow-rem-zero-u64) | 8,935 | **8,299** |
+| the largest, `eval/std.rs` | 9,651 | 8,975 |
+| shared by all 73 cases | | **8,299** (abort's whole rustc set) |
+
+abort's 8,299 by crate: std 5,697, core 687, rustc_demangle 556, gimli 473, alloc 296, miniz_oxide 270, addr2line 233, adler2 44,
+object 40, panic_abort 2, libc 1. Of them lib-unit has judged 109 (std 67 differ and 35 refused, rustc_demangle 5 and gimli 2
+differ); **8,190 have never been built** (L1's items and L2's callees of the samples cover 865 defines: 688 equal, 82 differ, 92
+refused, 3 without a symbol). So no case gets to C6 own before all of them almost do: the 8,299 are the runtime every case
+links (lang_start, the panic and backtrace machinery, std's I/O and thread setup), and the first cases to get there are abort's
+19, at 8,935 own defines. Working through the 109 differing and refused defines moves no case; the next work is L2 grown to
+the whole closure (each reached instance and copy built by lib-unit, not only the items' direct callees), crate by crate, core
+and alloc first (983 of abort's, none built), then std's 5,697, then the backtrace crates (C6-1 (a)).
+
+**L5's tooling.**
+- `arbace.rust.front.lib-unit/own-std STD LIST OUT`: a case's C6 (own when no define of its closure is rustc's; STD/own.tsv's own
+  rows, none for std's pinned IR); a control with every define marked own gives every case own.
+- `bin/rsi check --std own` (RSI_STD, default pinned): RSI_STD_DIR the own tree (RSI_STD_OWN_DIR, else the checkout's or the
+  main checkout's `.tmp/rust-front/lib-unit/own`, checked at the pin), RSI_RUNTIME_DIR `.tmp/rsi/runtime-own`, WORK
+  `.tmp/rsi-check-own-std`; each corpus's `std.tsv` (ID, own|rustc, why) and `front.tsv`'s fourth column, the own-std column.
+  Refused with `--record` until DECISION 596-1, and with RSI_IR=rustc or `--make-pack`.
+- `arbace.rust.check/write-case-inputs`: C6 from the run's `std.tsv` (`:own`, else the closure's count), the fixed text without it.
+
+**DECISION 596-1 (how a run on another std is recorded).** (a) **A record of its own, `test/rust/check-own-std-linux-amd64.edn`
+with its inputs `eval-inputs-own-std-linux-amd64.edn` (and `-aot-` beside), which crops-score reads for C6 (a case's C6 own
+from that record's inputs, the other inputs from the main record's), the main record staying the pinned std's**; (b) the one
+record, each row naming its std (`:std :own`), the inputs' C6 from it. *Recommended: (a)*: the two runs are different
+configurations of the same cases, a regression of one never hides behind the other, and the pinned record (the gate's, the
+matrix's) is untouched by an L4 night.

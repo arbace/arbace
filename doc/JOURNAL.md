@@ -25516,3 +25516,23 @@ verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
   problems. `bin/crops-score --record`: C++ read independence 0.904 -> 0.919 (3,187 of 4,175 dg rows own, 320 n/a), independence
   98.1% -> 98.4%, completeness 99.5% -> 99.6%. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0
   problems. Logs kept in /root/arbace/.tmp/keep/cpp-indep3-1126/reg/.
+
+## 2026-11-26 — Rust C6: L4.4 measured, L5's tooling (queue 596, VM)
+
+On next `3725c6dc8` (590 and 591: the own tree with 688 own defines). The host's L4 rerun on `227dce44c` (73 of 73) is the baseline,
+not measured again.
+
+- L4.4: the closure analysis over the own tree (`.tmp/rust-front/lib-unit/own`), each of the 73 cases (the samples' and synthetic
+  packs' x.ll and shim.ll), by `lib-unit own-std` and by an independent scanner (a scratch script, the same counts for every case).
+  No case's closure is near own: the smallest, `synthetic/abort.rs` and 18 others, takes 8,935 defines, 636 own and 8,299 rustc's,
+  and those 8,299 are shared by all 73. Of them 109 have been built and differ or are refused; 8,190 were never built. So the first
+  case to get there is abort.rs (with its 18 equals) at 8,935 own defines, after L2 is grown to the whole closure; fixing the 109
+  moves no case, so no crate's defines were worked through here (alternative considered: grinding the 109; rejected as it changes
+  no case's C6). Numbers and the order (core and alloc, then std, then the backtrace crates) in doc/rust/FRONTEND-SURVEY.md, "As
+  built: C6's L4.4 measured, L5's tooling".
+- L5's tooling: `lib-unit own-std` (6da839dea), `bin/rsi check --std own` with each corpus's `std.tsv` and front.tsv's own-std
+  column (98eb6099b), C6 in `write-case-inputs` from the run (4680e865b). Checked: own-std on the 73 cases and on an all-own control;
+  the check's std block on two synthetic cases in isolation; write-case-inputs on a make-fake run recorded into a scratch directory;
+  `bin/rsi judge-test` passes. No whole check run (the host's night, by key).
+- DECISION 596-1 for the user: a run on another std recorded (a) in a record of its own that crops-score reads for C6, recommended,
+  or (b) in the one record, each row naming its std. Until then `--std own --record` is refused.
