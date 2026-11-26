@@ -813,7 +813,8 @@
   ([^P p tmpl]
    (let [lt (ix p)
          as (parse-template-args* p tmpl)]
-     (when (and tmpl (type-ent? tmpl) (:tmpl tmpl) (seq (:tps tmpl)) (not (:tparam tmpl)) (not (skim? p)) (main-tok? p lt)
+     ;; (cpp-indep3: a variable template's template-id too, whose arguments no deduction supplies; cpp1y/var-templ15.C)
+     (when (and tmpl (or (type-ent? tmpl) (= :var (:k tmpl))) (:tmpl tmpl) (seq (:tps tmpl)) (not (:tparam tmpl)) (not (skim? p)) (main-tok? p lt)
                 (not-any? :pack as))
        (let [tps (vec (:tps tmpl))
              dflt? (fn [x] (some #(= "TemplateArgument" (:kind %)) (:inner x)))
@@ -4361,6 +4362,12 @@
                 _ (when has-dflt
                     (when-let [i (first (filter #(#{"co_await" "co_yield"} (ts (tok-at p %))) (range (inc db) (ix p))))]
                       (soft-diag! p (long i) (str "'" (ts (tok-at p (long i))) "' cannot be used in default arguments"))))
+                ;; (cpp-indep3: [dcl.fct.default]/8, "The keyword this shall not appear in a default argument of a member
+                ;; function": GCC's "'this' may not be used in this context", at it; a lambda's body aside; DRs/dr2082.C)
+                _ (when (and has-dflt (not (skim? p)) (main-tok? p db)
+                             (not-any? #(t= (tok-at p %) "[") (range (inc db) (ix p))))
+                    (when-let [i (first (filter #(t= (tok-at p %) "this") (range (inc db) (ix p))))]
+                      (soft-diag! p (long i) "'this' may not be used in this context")))
                 ;; (cpp-read, 2026-11-22: [dcl.fct.default]/7-9, an enclosing function's local variable or parameter in a default
                 ;; argument (a lambda's or a local declaration's): GCC's "local variable 'x' may not appear in this context", at the
                 ;; name; an unevaluated operand's aside)
@@ -4445,6 +4452,8 @@
           _ (when (is? p "typename")
               (soft-diag! p (ix p) "keyword 'typename' not allowed in this context (the base class is implicitly a type)")
               (adv! p))
+          drop (volatile! false)
+          sb (ix p)
           ty (if (is? p "decltype")
                (let [ds (parse-decl-specs p :type-id)] (ds-type ds))
                (let [qn (or (parse-name p :parse) (perr p "a base class"))
@@ -4453,7 +4462,16 @@
                      ;; GCC's "expected class-name"; the injected-class-name, a class, is not one)
                      en (:ent qn)
                      _ (when (and en (:tmpl en) (not (:tparam en)) (nil? (:args lp)) (not (:inj en)) (not (:inj-full en)) (= :type (:k en)))
-                         (soft-diag! p (ix p) (str "expected class-name before '" (ts (cur p)) "' token")))]
+                         (soft-diag! p (ix p) (str "expected class-name before '" (ts (cur p)) "' token")))
+                     ;; (cpp-indep3: [class.derived.general]/2, a class-or-decltype denotes a class: a namespace's name is GCC's
+                     ;; "expected class-name", at the name; inherit/namespace-as-base.C)
+                     _ (when (and en (= :ns (:k en)) (:i lp) (not (skim? p)) (main-tok? p (long (:i lp))))
+                         (soft-diag! p (long (:i lp)) (str "expected class-name before '" (ts (cur p)) "' token")))
+                     ;; (cpp-indep3: the same for an enumeration's name, the base dropped; parse/enum7.C)
+                     en-base (and en (= :type (:k en)) (not (:tparam en)) (some-> (:scope en) sc/kind-of (= :enum)))
+                     _ (when (and en-base (:i lp) (not (skim? p)) (main-tok? p (long (:i lp))))
+                         (soft-diag! p (long (:i lp)) (str "expected class-name before '" (ts (cur p)) "' token")))
+                     _ (when en-base (vreset! drop true))]
                  ;; (cpp-diag-b, 2026-11-22: [class.mi]/3, a class is a direct base at most once: GCC's "duplicate base type 'a'
                  ;; invalid", at the name)
                  (when (and (:s lp) (not (skim? p)) (main-tok? p (long (:i lp))) (nil? (:args lp)) (= 1 (count (:parts qn)))
@@ -4461,7 +4479,7 @@
                    (soft-diag! p (long (:i lp)) (str "duplicate base type '" (:s lp) "' invalid")))
                  (sc/add-base! cs (ent-scope (:ent qn)))
                  (.add order [(:s lp) virt])
-                 (when info (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
+                 (when (and info (not en-base)) (.add ^ArrayList (.get info :bases) {:ty {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn} :virt virt
                                                                  :acc (or acc (if (= kw "class") "private" "public"))}))
                  ;; (i) a base class template's injected name, found in the derived class, is the base's type
                  ;; (cpp-own, 2026-11-25: marked when its arguments name a template parameter, a dependent base, whose scope
@@ -4473,9 +4491,19 @@
                                                 (range (long (:ab lp)) (inc (long (:ae lp))))))
                                      (assoc :dep-base true))))
                  (pack-indexed p {:t :n :s (name-str p qn)})))
+          pk-i (ix p)
           pack (accept! p "...")
+          ;; (cpp-indep3: [temp.variadic]/5, a base-specifier's pack expansion names a pack: a pattern none of whose names is
+          ;; one (each a type that is no pack, or none at all, `decltype (auto) ...`) is GCC's "expansion pattern contains no
+          ;; parameter packs", at the ellipsis; template/pr95672.C)
+          _ (when (and pack (not (skim? p)) (main-tok? p pk-i)
+                       (every? (fn [i] (let [^T t (tok-at p i)]
+                                         (or (not (identical? :id (.-k t)))
+                                             (let [en (lookup (scope p) (.-s t))] (and (map? en) (= :type (:k en)) (not (:pack en)) (not (:tparam en)))))))
+                               (range sb pk-i)))
+              (soft-diag! p pk-i "expansion pattern contains no parameter packs"))
           b (cond-> {:type {:qualType (qt ty)} :writtenAccess (or acc "none")} virt (assoc :isVirtual true) pack (assoc :isPackExpansion true))
-          out (conj out b)]
+          out (if @drop out (conj out b))]
       (if (accept! p ",") (recur out) out))))
 
 (defn- unnamed-type [^P p ^String kw ^long i]
@@ -4904,6 +4932,13 @@
               _ (when (and qn (or (:g qn) (> (count (:parts qn)) 1)) (type-ent? (:ent qn)) (not (:tag (:ent qn))) (not (:tparam (:ent qn)))
                            (not (skim? p)) (main-tok? p (long (:i (peek (:parts qn))))))
                   (soft-diag! p (long (:i (peek (:parts qn)))) (str "using typedef-name '" nm "' after 'enum'")))
+              ;; (cpp-indep3: [dcl.enum]/4 with [basic.scope.scope]/4, a qualified enum-head-name that finds a class its nested-name-
+              ;; specifier's namespace declared: the enumeration's declaration and the class's conflict, GCC's "conflicting
+              ;; declaration", at the name; parse/enum6.C)
+              _ (when (and qn body? (> (count (:parts qn)) 1) (map? (:ent qn)) (:class (:ent qn)) (:tag (:ent qn)) (not (:tparam (:ent qn)))
+                           (not (some-> (:scope (:ent qn)) sc/kind-of (= :enum)))
+                           (not (skim? p)) (main-tok? p (long (:i (peek (:parts qn))))))
+                  (soft-diag! p (long (:i (peek (:parts qn)))) (str "conflicting declaration 'enum " (name-str p qn) "'")))
               es (sc/new-scope :enum (scope p) nil)
               ;; (cpp-indep: an opaque-enum-declaration's entity marked, `using enum`'s rule below)
               ent (cond-> {:k :type :name nm :tag true :scope es} (not body?) (assoc :opaque true))
@@ -5198,6 +5233,10 @@
         b0 (ix p)
         ds (parse-decl-specs p ctx)
         _ (st! p THDR nil)
+        ;; (cpp-indep3: [temp.pre]/2, a template-declaration's declaration declares no typedef-name (an alias-declaration
+        ;; does): GCC's "template declaration of 'typedef'", at the typedef; template/typedef2.C)
+        _ (when (and tmpl (pos? (long (or (:n tmpl) 0))) (:typedef ds) (not (skim? p)) (main-tok? p b0))
+            (soft-diag! p (long (or (first (filter #(t= (tok-at p %) "typedef") (range b0 (ix p)))) b0)) "template declaration of 'typedef'"))
         pre (:tag-node ds)
         base0 (ds-type ds)]
     (cond
@@ -5378,6 +5417,16 @@
               _ (when (and (not (skim? p)) (main-tok? p ni) (= :b (:t base0)) (some #{"bool"} (:w base0))
                            (some #(#{"vector_size" "__vector_size__"} (:_gnu %)) (:attrs ds)))
                   (soft-diag! p ni "invalid vector type for attribute 'vector_size'"))
+              ;; (cpp-indep3: [temp.deduct.guide]/1, a deduction-guide is a class template's name, its parameter-declaration-
+              ;; clause, -> and a simple-template-id: a template's `A(T);` at namespace scope, no declarator-id, no trailing return
+              ;; type, is GCC's "deduction guide for 'A<T>' must have trailing return type", at the name; cpp1z/class-deduction7.C)
+              _ (when (and (nil? qn) fs (not (:trailing fs)) tmpl (pos? (long (or (:n tmpl) 0))) (= ctx :top) (:b ds)
+                           (not (skim? p)) (main-tok? p (long (:b ds))) (not (:typedef ds)) (not (:friend ds))
+                           (let [tq (:qn base0) e (:ent base0)]
+                             (and (= :n (:t base0)) (= 1 (count (:parts tq))) (not (:g tq)) (nil? (:args (first (:parts tq))))
+                                  (map? e) (:tmpl e) (:class e) (not (:inj e)) (not (:tparam e))
+                                  (= (:b ds) (:i (first (:parts tq)))))))
+                  (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s (first (:parts (:qn base0)))) "' must have trailing return type")))
               ;; (cpp-rind: [dcl.array]/1, no array of references: GCC's "declaration of 'a' as array of references", at the name)
               _ (when (and (not (skim? p)) (not (:typedef ds)) (main-tok? p ni) (arr-of-ref? ty))
                   (soft-diag! p ni (str "declaration of '" (or nm "") "' as array of references")))
@@ -5567,6 +5616,12 @@
                       ;; GCC's "'A::A(...)' cannot be defaulted", at the name; cpp0x/defaulted8.C)
                       (and fs (:va fs) (is? p "=") (is-at? p 1 "default") (= ctx :member))
                       (soft-diag! p ni (str "'" (or (:s lp) nm) "' cannot be defaulted"))
+                      ;; (cpp-indep3: [dcl.fct.def.default]/1 with [special]/1 and [class.copy.ctor]/1, a function template is no
+                      ;; special member function (a template constructor is never a copy or move constructor): a member template
+                      ;; defaulted is GCC's "a template cannot be defaulted", at the name; cpp0x/defaulted24.C)
+                      (and fs (is? p "=") (is-at? p 1 "default") (= ctx :member) (pos? (long (or (:n tmpl) 0)))
+                           (not (#{"==" "!=" "<" ">" "<=" ">=" "<=>"} (:op lp))))
+                      (soft-diag! p ni "a template cannot be defaulted")
                       ;; ([dcl.type.auto.deduct]/5 (C++23 [dcl.spec.auto.general]/? ): decltype(auto) is the declared type alone, no
                       ;; cv-qualifier with it: GCC's "'decltype(auto)' cannot be cv-qualified", at the specifiers; cpp1y/auto-fn59.C)
                       (and (= :dta (:t base0)) (or (:c ds) (:v ds)) (:b ds))
@@ -5660,6 +5715,12 @@
                         (soft-diag! p (long (:b ds)) (str "decl-specifier in declaration of deduction guide")))
                       (when (is? p "{")
                         (soft-diag! p (long (:b ds)) (str "deduction guide for '" (:s lp) "' must not have a function body")))
+                      ;; (cpp-indep3: [temp.deduct.guide]/3, a deduction-guide's template-name names a class template, never a
+                      ;; template template parameter: GCC's "template template parameter 'TT' in declaration of deduction guide",
+                      ;; at the declaration; cpp1z/class-deduction48.C)
+                      (when-let [te (and (= 1 np) (not (:g qn)) (lookup (scope p) (:s lp)))]
+                        (when (and (:tparam te) (:tmpl te) (not (skim? p)) (main-tok? p (long (or (:b ds) (:i lp)))))
+                          (soft-diag! p (long (or (:b ds) (:i lp))) (str "template template parameter '" (:s lp) "' in declaration of deduction guide"))))
                       (when-let [te (and (= 1 np) (not (:g qn)) (lookup (scope p) (:s lp)))]
                         (when (and (:tmpl te) (:class te) (:scope te) (#{:top :tmpl} ctx))
                           (let [home (sc/enclosing (sc/parent-of (:scope te)) #{:ns :class})
@@ -6443,6 +6504,8 @@
                               (assoc :_qual (tok-text p (long (:i (first (:parts qn)))) (dec (long ni))))
                               (seq ga) (assoc :_gattrs ga))))]
               (when (and nm (nil? (:args lp)) (not (and (:undeclared-type ds) (= ctx :block)))) (declare! p (cond-> {:k :var :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :ty ty :vat ni}
+                                                             ;; (cpp-indep3: a variable template's parameters, for parse-template-args' count)
+                                                             (and tmpl (pos? (long (:n tmpl))) (seq (:params tmpl))) (assoc :tps (:params tmpl))
                                                              (and (= :auto (:t ty)) (= "LambdaExpr" (:kind x))) (assoc :closure true)
                                                              (= "static" (:storage ds)) (assoc :static true)
                                                              (= "C" *linkage*) (assoc :clink true))))
@@ -7278,6 +7341,10 @@
                       ;; "expected nested-name-specifier before 'i'"; lookup/using15.C)
                       (when (and (not (skim? p)) (= 1 (count (:parts qn))) (not (:g qn)) (:s f) (:i f) (main-tok? p (long (:i f))))
                         (soft-diag! p (long (:i f)) (str "expected nested-name-specifier before '" (:s f) "'")))
+                      ;; (cpp-indep3: [namespace.udecl]/? (C++23 /5), "A using-declarator shall not name a template-id": GCC's
+                      ;; "a template-id may not appear in a using-declaration", at the name; parse/using2.C)
+                      (when (and (not (skim? p)) (> (count (:parts qn)) 1) (some? (:args lp)) (:i lp) (main-tok? p (long (:i lp))))
+                        (soft-diag! p (long (:i lp)) "a template-id may not appear in a using-declaration"))
                       ;; (cpp-rind: [namespace.udecl]/3, a using-declarator names no namespace: GCC's "'gnu::gcc' is a namespace",
                       ;; at the name; lookup/using6.C)
                       (when (and (not (skim? p)) (= :ns (:k (:ent qn))) (:i (peek (:parts qn))) (main-tok? p (long (:i (peek (:parts qn))))))

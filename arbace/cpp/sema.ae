@@ -1061,6 +1061,18 @@
                             (and b (:const-bound @hooks) *cx-vla* (identical? scope *cx-vla*) (checking?))
                             (try ((:const-bound @hooks) scope b)
                                  (catch arbace.lang.ExceptionInfo x (if (cx-runtime-bound? scope b) ::vla (throw x))))
+                            ;; (cpp-indep3, the checker: [dcl.array]/1, a bound is a converted constant expression, and a division
+                            ;; by zero is none ([expr.const]/5.8, [expr.mul]/4): outside a substitution GCC's "size of array is not
+                            ;; an integral constant-expression", the array taken with one element; other/array2.C's `int x[1/0];`)
+                            (and b (:const-bound @hooks) (checking?) (not (cx-subst?)))
+                            (try ((:const-bound @hooks) scope b)
+                                 (catch arbace.lang.ExceptionInfo x
+                                   ;; (a declaration analyzed outside any expression, no node analyzed yet: the refusal its entry's,
+                                   ;; reported at the declaration)
+                                   (if (and (re-find #"^codegen: division by zero in a constant expression" (str (ex-message x)))
+                                            (nil? (some-> *at* deref)))
+                                     (throw (ex-info "codegen: size of array is not an integral constant-expression" {:codegen/refused :array-bound}))
+                                     (throw x))))
                             (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil)]
                 ;; (cpp-tpl2, the checker: [temp.deduct.general]/11's "attempting to create an array with ... a size that
                 ;; is zero or negative", [dcl.array]/1; GCC's words)
@@ -2987,6 +2999,27 @@
                 ;; (cpp-read: an initializer past 64 bits, an __int128's, is no standard integer type's value: [dcl.enum]/7 below
                 ;; under D342-4 (a), the enumerator 0 then)
                 wide (atom false)
+                ;; (cpp-indep3, the checker: [dcl.enum]/2 and /5, an enumerator's initializer is an integral constant expression,
+                ;; or a converted constant expression of the fixed underlying type: a function's name (an overload set) is GCC's
+                ;; "enumerator value for 'n' is not an integer constant", cpp0x/pr70448.C, pr71665-1.C; an enumerator of another
+                ;; scoped enumeration, which converts to no integral type implicitly ([conv.integral]/1, [conv.prom]/4), "could
+                ;; not convert 'A::X' from 'A' to 'int'", cpp0x/pr66243.C; at the enumerator, its value 0 then)
+                xt (when (and x (checking?))
+                     (try (some-> (binding [*unevaluated* true] (analyze {:scope bs} x)) :ty abi/non-ref abi/unq)
+                          (catch arbace.lang.ExceptionInfo _ nil)))
+                bad (when xt
+                      (cond (or (abi/fn? xt) (= :overload (:k xt)))
+                            (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
+                            ;; (no fixed underlying type: an integral constant expression's, "enumerator value for 'a' must have
+                            ;; integral or unscoped enumeration type", cpp0x/pr71665-2.C)
+                            (and (abi/enum? xt) (:scoped (abi/enm (:id xt))) (not= (:id xt) id) (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])))
+                            (str "codegen: enumerator value for '" (:name c) "' must have integral or unscoped enumeration type")
+                            (and (abi/enum? xt) (:scoped (abi/enm (:id xt))) (not= (:id xt) id))
+                            (str "codegen: could not convert '" (:name c) "' from '" (:name (abi/enm (:id xt))) "' to '"
+                                 (str/trim (str (or (get-in n [:fixedUnderlyingType :qualType]) "int"))) "'")
+                            :else nil))
+                _ (when bad (*on-refusal* (ex-info bad {:codegen/refused :enum}) c))
+                x (if bad nil x)
                 v (if x
                     (if (checking?)
                       (try (const-int bs x)
@@ -13012,7 +13045,16 @@
           ;; (cpp-def, the checker: [expr.alignof]/1, alignof of void, an incomplete type, is GCC's "invalid application of
           ;; '__alignof__' to a void type" (GNU's __alignof and sizeof of void are its pedwarns, not errors); cpp0x/alignas20.C)
           _ (when (and (checking?) (= "alignof" (:name n)) at (= abi/void (abi/unq t)))
-              (fail :incomplete "invalid application of alignof to incomplete type 'void'"))]
+              (fail :incomplete "invalid application of alignof to incomplete type 'void'"))
+          ;; (cpp-indep3, the checker: [expr.sizeof]/1 and [expr.alignof]/1, the operand is no bit-field: GCC's "invalid application
+          ;; of '__alignof' to a bit-field", diagnostic/alignof3.C; nor an expression of function type, whose sizeof and __alignof
+          ;; GNU gives 1 (the GCC manual's "Pointer Arith"), GCC's pedwarn "ISO C++ forbids applying 'sizeof' to an expression of
+          ;; function type", an error under -pedantic-errors, at the operand; expr/sizeof1.C, diagnostic/alignof1.C, alignof2.C)
+          _ (when (and (checking?) x (= :field (:op x)) (integer? (:i x)) (:cls x)
+                       (some-> (abi/cls (:cls x)) :fields (nth (:i x) nil) :bits))
+              (fail :sizeof-operand "invalid application of '" (:name n) "' to a bit-field"))
+          _ (when (and (checking?) x *pedantic-errors* (some-> (:ty x) abi/unq ((fn [t] (or (abi/fn? t) (= :overload (:k t)))))))
+              (fail :sizeof-operand "ISO C++ forbids applying '" (:name n) "' to an expression of function type"))]
       (case (:name n)
         "sizeof" (if-let [vid (and (checking?) (:vla (abi/unq t)) (= :var (:op x)) (:vla-n (var* (:id x))) (:id x))]
                    ;; (queue 569, the checker: sizeof of a GNU variable-length array, evaluated where it is, the GCC manual's
