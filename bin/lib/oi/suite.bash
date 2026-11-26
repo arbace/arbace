@@ -27,20 +27,22 @@ suite_actions() { # -> "ID<TAB>run|class<TAB>..." for every .ml of tests/ (ID wi
 
 cmd_suite_corpus() {
   mkdir -p "$S"; need_source; cmd_corpus > "$OI_DIR/corpus.log"
-  local out=$S/corpus.tsv
+  # (the process's own names taken once: BASHPID in a pipeline's command is its subshell's, so the cat and the opam awk below named
+  # other files and the corpus came out empty, 2026-11-25)
+  local out=$S/corpus.tsv me=$BASHPID
   # the testsuite's run programs the run corpus of O5 does not hold
-  suite_actions > "$S/actions.tsv"
-  awk -F'\t' 'NR == FNR { if ($2 == "run") o5[$1] = 1; next }
+  suite_actions > "$S/actions.tsv.$me"; mv -f "$S/actions.tsv.$me" "$S/actions.tsv"
+  awk -F'\t' 'FILENAME == ARGV[1] { if ($2 == "run") o5[$1] = 1; next }
     $2 == "run" && !($1 in o5) {
       dir = $1; sub(/[^\/]*$/, "", dir); name = $1; sub(/.*\//, "", name)
       units = ""; n = split($7, m, " "); for (i = 1; i <= n; i++) units = units (units == "" ? "" : " ") dir m[i]
       units = units (units == "" ? "" : " ") $1 ".ml"
       printf "%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $3, $4, $5, $6, "'"$TESTS"'", units
-    }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts"
+    }' "$OI_DIR/corpus.tsv" "$S/actions.tsv" > "$out.ts.$me"
   # the packages' programs (test/ocaml/opam-programs.tsv: PKG ID FLAGS ARGS UNITS [ENV [INCS]]; ENV since 2026-11-20, judge-rest: the
   # environment a reviewed golden file's output depends on, test/ocaml/opam/golden.edn's :env; INCS since queue 531: the libraries of
   # OCaml's distribution the program links, unix, as a testsuite row's), a package whose sources are not fetched out
-  : > "$out.opam"
+  : > "$out.opam.$me"
   # every package of the set extracted, else the 33 opam rows would leave the corpus unseen (review 008's finding 4)
   local pkg
   for pkg in $(grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | cut -f1 | LC_ALL=C sort -u); do
@@ -49,9 +51,10 @@ cmd_suite_corpus() {
   if [ -d "$OPAM" ]; then
     # (a seventh column INCS, queue 528 and queue 531 alike: the libraries the program links, as header.awk's include names them: unix)
     grep -v '^#' "$root/test/ocaml/opam-programs.tsv" | awk -F'\t' 'NF >= 5 && $2 != "class" { printf "opam/%s/%s\trun\t%s\t%s\t%s\t%s\t%s\t%s\n", $1, $2, $3, $7, $4, $6, "'"$OPAM"'/" $1, $5 }
-      NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam"
+      NF >= 3 && $2 == "class" { printf "opam/%s/%s\tclass\t%s\n", $1, $3, $4 }' >> "$out.opam.$me"
   fi
-  cat "$out.ts" "$out.opam" | LC_ALL=C sort > "$out"; rm -f "$out.ts" "$out.opam"
+  # (each writer its own files, renamed into place: two bin/oi processes at once must not append to one corpus, bin/lib/oi/corpus.bash)
+  cat "$out.ts.$me" "$out.opam.$me" | LC_ALL=C sort > "$out.$me"; rm -f "$out.ts.$me" "$out.opam.$me"; mv -f "$out.$me" "$out"
   echo "oi: suite corpus: $(awk -F'\t' '$2 == "run"' "$out" | wc -l) programs ($(grep -c '^opam/' "$out") of the opam set), $(awk -F'\t' '$2 == "class"' "$out" | wc -l) classed ($out)"
 }
 
@@ -75,10 +78,15 @@ suite_stage() {
     case $u in
       =*) cp "$root/test/ocaml/opam/${u#=}" "$d/" ;;
       @*=) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
-      @*) if suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
+      @*+) suite_alias "${u:1:${#u}-2}" "$units" > "$d/$(suite_unit_file "$u")" ;;
+      # (queue 548) a wrapped library's unit a rule of its directory makes and its `(preprocess (pps ...))` rewrites (ppx_custom_printf's
+      # src/format_lifter.ml, gen.ml's): the text its ppx driver wrote on oi from the rule's output (bin/oi ppx pp, OI_PPX_PP/PKG/REL)
+      @*) if suite_ppx_made "$base" "$(suite_wrap_path "$u")"; then suite_wrap_one "$base" "$u" "$d" "$SUITE_PPX_MADE"
+          elif suite_needs_build "$id" "$base" "$(suite_wrap_path "$u")"; then wbuild+=("$u")
           # (queue 546) a wrapped library's unit its directory's ocamllex stanza makes (ppxlib's src/skip_hash_bang.ml): generated beside
-          # DIR by the native ocamllex, then staged as the library's module
-          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && [ -f "$base/$(suite_wrap_path "$u" | sed 's/\.ml$//').mll" ]; then
+          # DIR by the native ocamllex, then staged as the library's module; (queue 548) or its ocamlyacc stanza, the .ml and the .mli
+          # (sexplib's src/parser.ml), by the native ocamlyacc
+          elif [ ! -f "$base/$(suite_wrap_path "$u")" ] && { [ -f "$base/$(suite_wrap_path "$u" | sed -E 's/\.mli?$//').mll" ] || [ -f "$base/$(suite_wrap_path "$u" | sed -E 's/\.mli?$//').mly" ]; }; then
             local wg=$d.wgen; mkdir -p "$wg"; suite_gen "$base/$(suite_wrap_path "$u")" "$wg"
             [ -f "$wg/$(basename "$(suite_wrap_path "$u")")" ] && suite_wrap_one "$base" "$u" "$d" "$wg/$(basename "$(suite_wrap_path "$u")")"
           else suite_wrap_one "$base" "$u" "$d"; fi ;;
@@ -93,7 +101,7 @@ suite_stage() {
     # (the two queues composed: a wrapped library's unit that dune preprocesses is built first, by library into a directory beside DIR so
     # that two libraries' modules of one name stay apart, then staged as Lib__M with its open from the build's text)
     if [ ${#wbuild[@]} -gt 0 ]; then
-      local lib libs="" files w
+      local lib libs="" files w f
       for u in "${wbuild[@]}"; do lib=${u#@}; lib=${lib%%[/!]*}; case " $libs " in *" $lib "*) ;; *) libs="$libs $lib" ;; esac; done
       for lib in $libs; do
         w=$d.wbuild/$lib; mkdir -p "$w"; files=()
@@ -108,12 +116,26 @@ suite_stage() {
   rm -rf "$d.wgen"
 }
 
+# suite_ppx_made BASE PATH (queue 548): PATH (relative to BASE, an opam package's directory) is no file of the package, a rule of its
+# directory's dune file names it among its targets, the stanza preprocesses by `(pps ...)`, and OI_PPX_PP/PKG/REL holds the driver's
+# text (PKG/REL its path under the opam set); SUITE_PPX_MADE that text's file
+suite_ppx_made() {
+  local f=$1/$2 r dn
+  [ -n "${OI_PPX_PP:-}" ] && [ ! -f "$f" ] || return 1
+  dn=$(dirname "$f")/dune; [ -f "$dn" ] || return 1
+  r=$(realpath -m "$f"); r=${r#"$(realpath -m "$OPAM")"/}
+  [ -f "$OI_PPX_PP/$r" ] || return 1
+  tr '\n' ' ' < "$dn" | grep -q "(preprocess *(pps" && tr '\n' ' ' < "$dn" | grep -q "(targets *$(basename "$f"))" || return 1
+  SUITE_PPX_MADE=$OI_PPX_PP/$r
+}
+
 # suite_needs_build ID BASE PATH (queue 534): an opam unit its directory's dune file preprocesses (`%{input-file}` in an action) or, absent,
 # makes by a rule (no .mly or .mll of its stem), whose text dune's build compiles prep's build-into gives
 suite_needs_build() {
   local id=$1 base=$2 u=$3
   case $id in opam/*) ;; *) return 1 ;; esac
-  if [ -f "$base/$u" ]; then grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune"
+  # (queue 547) or by ppx rewriters, `(preprocess (pps ...))`: the text their driver wrote on oi (bin/oi ppx pp, OI_PPX_PP)
+  if [ -f "$base/$u" ]; then grep -qsF '%{input-file}' "$(dirname "$base/$u")/dune" || { tr '\n' ' ' < "$(dirname "$base/$u")/dune" | grep -q '(preprocess *(pps'; } 2> /dev/null
   else local s=$base/${u%.*}; [ ! -f "$s.mly" ] && [ ! -f "$s.mll" ] && [ -f "$(dirname "$base/$u")/dune" ]; fi
 }
 
@@ -126,12 +148,15 @@ suite_needs_build() {
 #   @LIB/PATH>NAME    the same, the module named NAME (dune's copy rules, alcotest's test_iarray.54.ml as test_iarray.ml)
 #   @LIB!PATH         LIB's main module
 #   @LIB=             the alias module Lib__, before LIB's modules
+#   @LIB+             (queue 547) a library without a main module of its own (ocaml_intrinsics_kernel, re_private): dune's alias
+#                     module, which is then the library's main module Lib (lib.ml-gen), before LIB's modules, each of which opens it
 suite_cap() { echo "$(echo "${1:0:1}" | tr a-z A-Z)${1:1}"; }
 suite_unit_file() { # UNIT -> the staged file's name
   local u=$1 p n ext
   case $u in
     =*) basename "${u#=}" ;;
     @*=) echo "${u:1:${#u}-2}__.ml" ;;
+    @*+) echo "${u:1:${#u}-2}.ml" ;;
     @*) [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || { echo "$u"; return; }
         p=${BASH_REMATCH[3]}
         if [ "${BASH_REMATCH[2]}" = '!' ]; then basename "$p"; return; fi
@@ -147,9 +172,13 @@ suite_wrap_one() { # BASE UNIT DIR [SRC]: a wrapped unit staged with its open (S
   local base=$1 u=$2 d=$3 lib src
   [[ $u =~ ^@([a-z0-9_]+)([/!])(.*)$ ]] || return 1
   lib=${BASH_REMATCH[1]}; src=${4:-$base/$(suite_wrap_path "$u")}
+  # the alias module the unit opens: Lib__, or (queue 547) a library without a main module's Lib (@LIB+ among the caller's units:
+  # dune's lib.ml-gen, compiled first and opened by every module, so Out_type.rewrite_double_underscore_paths names an exception
+  # of Lib__M as Lib.M.E)
+  local al; al="$(suite_cap "$lib")__"; case " ${units:-} " in *" @$lib+ "*) al=$(suite_cap "$lib") ;; esac
   # the open on the first line, unless that line is a line directive (a build's `# 1 "FILE"`), which then renumbers what follows it
-  if [ "$(head -c1 "$src")" = '#' ]; then { printf 'open! %s__\n' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"
-  else { printf 'open! %s__ ' "$(suite_cap "$lib")"; cat "$src"; } > "$d/$(suite_unit_file "$u")"; fi
+  if [ "$(head -c1 "$src")" = '#' ]; then { printf 'open! %s\n' "$al"; cat "$src"; } > "$d/$(suite_unit_file "$u")"
+  else { printf 'open! %s ' "$al"; cat "$src"; } > "$d/$(suite_unit_file "$u")"; fi
 }
 suite_alias() { # LIB UNITS: the alias module's text
   local lib=$1 u f seen=" "
@@ -256,9 +285,24 @@ suite_dump_native() {
   done
   # the program's libraries (unix, threads, str, compiler-libs, testing) after its own directory, by their sources' interfaces
   inc=$d; [ -n "$incs" ] && inc="$d:$(inc_dirs "$incs")"
+  # (queue 547) OI_DUMP_CACHE=DIR (bin/oi ppx's programs, which share sexplib0, ppxlib and base's hundreds of units): each unit's
+  # outputs kept under a key chained from the earlier units' (the native library's key, the flags and libraries, the unit's file and
+  # its .mli), so a program whose units begin as another's types only from where they differ; unset, every unit is typed
+  local ck="" kf
+  if [ -n "${OI_DUMP_CACHE:-}" ]; then
+    [ -s "$LIB/key" ] || { echo "typer: OI_DUMP_CACHE without the native library's key ($LIB/key)" > "$d/error"; return; }
+    mkdir -p "$OI_DUMP_CACHE"; ck=$( { cat "$LIB/key"; echo "$nf|$incs"; } | sha256sum | cut -c1-40)
+  fi
   for u in $units; do
     n=$(suite_unit_file "$u"); b=${n%.*}; U=$(echo "${b:0:1}" | tr a-z A-Z)${b:1}
     case $n in *.mli) continue ;; esac
+    if [ -n "$ck" ]; then
+      ck=$( { echo "$ck $n"; sha256sum < "$d/$n"; if [ -f "$d/$b.mli" ]; then sha256sum < "$d/$b.mli"; fi; } | sha256sum | cut -c1-40); kf=$OI_DUMP_CACHE/$ck
+      if [ -s "$kf/$U.ae" ]; then
+        cp "$kf/$U.ae" "$d/"; if [ -f "$kf/$b.cmi.ae" ]; then cp "$kf/$b.cmi.ae" "$d/"; fi; : > "$d/$n.typer.err"
+        echo "$d/$U.ae" >> "$d/units.list"; continue
+      fi
+    fi
     local extra=""
     # OC184 (a): a unit without an .mli of its own leaves its typed signature as data, a native .cmi (NAME.cmi.ae, read back by the
     # typer's find-unit as OCaml reads a .cmi), not Printtyp's text as an .mli (OI_SUITE_SIG_TEXT=1: the printed interface, as before)
@@ -267,6 +311,10 @@ suite_dump_native() {
     else extra="--cmi-out $d/$b.cmi.ae"; fi
     if ! (cd "$d" && typer_ns lambda --simplify --stdlib "$(native_dir)" --include "$inc" $nf $extra --file "$n" "$n" > "$U.ae" 2> "$n.typer.err"); then
       echo "typer $n: $(typer_err_text "$d/$n.typer.err")" > "$d/error"; return
+    fi
+    if [ -n "$ck" ]; then
+      rm -rf "$kf.new"; mkdir -p "$kf.new"; cp "$d/$U.ae" "$kf.new/"; if [ -f "$d/$b.cmi.ae" ]; then cp "$d/$b.cmi.ae" "$kf.new/"; fi
+      rm -rf "$kf"; mv "$kf.new" "$kf"
     fi
     echo "$d/$U.ae" >> "$d/units.list"
   done
@@ -297,7 +345,11 @@ suite_oi_one() {
   fi
   local st=0 t0 t1 note=""
   t0=$(date +%s.%N); times > "$d/cpu0"
-  (cd "$d" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
+  # (queue 547) @cwd=DIR in ENV: the program run in DIR (dune's inline-test runner runs in the library's directory, where ppx_expect
+  # reads each test's source and writes its .corrected file)
+  local rd=$d
+  for kv in $env; do case $kv in @cwd=*) rd=${kv#@cwd=} ;; esac; done
+  (cd "$rd" && run_redirected "$env" "$d/oi.out" limited_cpu "$TIMEOUT" "$(oi_wall)" "$EXE" run "$LIB" $tl $(cat "$d/units.list") -- $args) || st=$?
   t1=$(date +%s.%N); times > "$d/cpu1"
   note=$(grep -a -m1 -o 'oi: .*' "$d/oi.out" | head -c 300 | tr '\t' ' ' || true)
   local cpu; cpu=$(oi_cpu_secs "$d/cpu0" "$d/cpu1")

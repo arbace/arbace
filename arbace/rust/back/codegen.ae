@@ -209,8 +209,11 @@
 (defn nop-landing-pads
   "find_noop_landing_pads (rustc_mir_transform/remove_noop_landing_pads.rs): the cleanup blocks that do nothing but resume: their
   statements trivial (or writes of a local, a drop flag), their terminator a goto, resume, switch or false edge whose
-  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call."
-  [blocks]
+  successors are all such blocks, or a drop that needs no glue likewise. A call that unwinds to one is a plain call. With MIR?
+  (queue 581) the pads rustc's MIR no longer has: a drop marked `:param-drop` (core-instance: a generic body's drop of a
+  parameter's type, which the instance's MIR keeps) is no nop, so its edge stays one for MergingSucc"
+  ([blocks] (nop-landing-pads blocks false))
+  ([blocks mir?]
   (let [trivial #{"nop" "storage-dead" "storage-live" "fake-read" "place-mention" "const-eval-counter" "bidh" "raw"}
         ok-stmt (fn [st] (let [st (if (= "dbg-stmt" (name (first st))) (second st) st) k (name (first st))]
                            (or (trivial k)
@@ -224,10 +227,10 @@
                                          (let [t (:term blk) all-nop (fn [] (every? nops (successors t)))]
                                            (case (name (first t))
                                              ("resume" "goto" "switch" "false-edge" "false-unwind") (all-nop)
-                                             "drop" (and (nil? (nth t 6)) (all-nop))
+                                             "drop" (and (nil? (nth t 6)) (not (and mir? (= :param-drop (nth t 7 nil)))) (all-nop))
                                              false)))]
                           b))]
-        (if (= nops' nops) nops (recur nops'))))))
+        (if (= nops' nops) nops (recur nops')))))))
 
 (defn const-switch-bits
   "Body::try_const_mono_switchint: the value a block's switchInt is decided by when its discriminant is a constant, a runtime
@@ -602,7 +605,8 @@
                     (let [s (read-string txt) n (count (.getBytes ^String s "UTF-8"))]
                       {:pair [{:ty "ptr" :v (ag [:str s])} {:ty "i64" :v n}]})
                     (unsupported (str "const tyconst " txt))))
-      (unsupported (str "const " (first v))))))
+      ;; queue 542 (round 10): an unevaluated constant names itself (lib-unit's refusals by cause)
+      (unsupported (str "const " (first v) (when (= "unevaluated" (name (first v))) (str " " (second c))))))))
 
 (defn fn-callee [f]
   (let [s (ty-struct (nth f 2))]
@@ -719,6 +723,10 @@
           live (filter #(not (zst? (layout lt (nth (ty-struct t) (inc %))))) order)
           ft (when-let [f (nth live i nil)] (nth (ty-struct t) (inc f)))]
       (when ft (ref-align lt ft)))
+  (if (and (= i 1) (= "ptr" (ty-kind t)) (= "dyn" (ty-kind (pointee-type t))))
+    ;; queue 566 (C6 L1): a raw `*mut dyn Trait`'s vtable half too (pointee_info_at: a vtable is always valid; its data half
+    ;; none), catch_unwind::cleanup's `Box::from_raw(*mut dyn Any)` argument `ptr align 8`
+    8
   (when (or (= "ref" (ty-kind t)) (and (= "adt" (ty-kind t)) (= "std::boxed::Box" (second (ty-struct t)))))
     (let [pt (if (= "ref" (ty-kind t)) (pointee-type t) (first (nth (ty-struct t) 3))) pk (ty-kind pt)]
       (cond
@@ -727,7 +735,7 @@
         ;; a struct with an unsized tail behind a fat pointer: the struct's own alignment, when the table has its layout
         (and (= i 0) (= pk "adt") (get lt (second pt)))
         (let [pl (layout lt pt)] (when (and (not (zst? pl)) (> (:align pl) 1)) (:align pl)))
-        :else nil)))))))
+        :else nil))))))))
 
 (defn ret-attrs-of
   "The attributes of a returned value: zeroext for bool, align for a reference."
@@ -809,6 +817,24 @@
   [gl name ret params]
   (vswap! gl assoc-in [:decls name] (list 'llvm/declare name ret params)))
 
+(def ^:dynamic *const-index-align*
+  "queue 572 (C6 L3): place.rs' project_index: an index that is a constant restricts the place's alignment for its offset
+  (index times the element's size: `r.table_sizes[0]` keeps the struct's align 8), else for the element's size; gated on the
+  backtrace crates by 572, ungated by queue 581 (572-1 (a): every crate, every program; false: the element's size alone)"
+  true)
+
+(def ^:dynamic *consume-fat-pair*
+  "queue 572 (C6 L3), its own var since queue 581 (572-2 (a)): a deref of a memory local's fat pointer loads both halves
+  (operand.rs' codegen_consume, load_operand: the metadata's load unused); gated on the backtrace crates by 572, ungated by queue
+  581 (572-1 (a): every crate, every program; false: the data pointer's half alone)"
+  true)
+
+(def ^:dynamic *repeat-ptr-loop*
+  "queue 572 (C6 L3), its own var since queue 581 (572-2 (a)): `[x; N]`'s loop as rustc 1.99's write_operand_repeatedly writes
+  it, a pointer loop from the place's element 0 to its element N; gated on the backtrace crates by 572, ungated by queue 581
+  (572-1 (a): every crate, every program; false: the index loop of before)"
+  true)
+
 (def ^:dynamic *call-seq*
   "rust-c6c: lib-unit's compare binds it true: every call and invoke carries `:cseq N`, its creation's place in the body (the
   inliner's use-list order; arbace.rust.back.inline strips it)"
@@ -830,7 +856,10 @@
         ;; C6-4: an edge into a landing pad that does nothing is no edge (RemoveNoopLandingPads made it `unwind continue` in
         ;; rustc's MIR before codegen): a call whose cleanup is one has its return target alone, which MergingSucc merges
         ;; (CustomOwner::into_raw's `forget` then `return`, one LLVM block)
-        real-succs (fn [t] (vec (remove nops (successors t))))
+        ;; queue 581: but an edge rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is
+        ;; one: codegen_terminator's mergeable_succ counts it (Ord::min::<usize>'s, cvt::<i32>'s `br` after the call)
+        mir-nops (nop-landing-pads blocks true)
+        real-succs (fn [t] (vec (remove mir-nops (successors t))))
         preds (reduce (fn [m b] (reduce (fn [m s] (update m s (fnil conj []) b)) m (real-succs (:term (nth blocks b))))) {} (range (count blocks)))
         mergeable (fn [t] (let [ss (real-succs t)] (when (and (= 1 (count ss)) (= 1 (count (get preds (first ss))))) (first ss))))
         allocs (into {} (:alloc-data body))
@@ -852,13 +881,26 @@
                                    (when-let [bs (:bytes a)]
                                      (let [n (quot (count bs) 2)
                                            byte-str (fn [from to] (apply str (map #(char (Integer/parseInt (subs bs (* 2 %) (+ 2 (* 2 %))) 16)) (range from to))))
-                                           run (fn [from to] (let [ty (list 'array (- to from) 'i8)]
-                                                               [ty (if (every? #{\0} (subs bs (* 2 from) (* 2 to))) 'zeroinitializer (list 'c-string (byte-str from to)))]))
+                                           sinit (:init a)
+                                           run1 (fn [from to] (let [ty (list 'array (- to from) 'i8)]
+                                                                [ty (cond (and sinit (every? #(= \0 (nth sinit %)) (range from to))) 'undef
+                                                                          (every? #{\0} (subs bs (* 2 from) (* 2 to))) 'zeroinitializer
+                                                                          :else (list 'c-string (byte-str from to)))]))
+                                           ;; rust-l1 (C6): a static's uninitialized bytes (its :init, a CTFE value's padding) a run of
+                                           ;; their own, undef, as const_alloc_to_llvm splits the allocation at its init mask's changes
+                                           runs (fn [from to]
+                                                  (if (or (nil? sinit) (= from to))
+                                                    [(run1 from to)]
+                                                    (loop [i from start from out []]
+                                                      (cond (= i to) (conj out (run1 start to))
+                                                            (and (> i start) (not= (nth sinit i) (nth sinit (dec i)))) (recur (inc i) i (conj out (run1 start i)))
+                                                            :else (recur (inc i) start out)))))
+                                           run (fn [from to] (let [rs (runs from to)] (if (= 1 (count rs)) (first rs) (into [:runs] rs))))
                                            relocs (sort-by first (:relocs a))]
                                        (when-not (get-in @gl [:statics sy])
                                          ;; (a placeholder first: a static whose pointers lead back to it)
                                          (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array n 'i8) 'zeroinitializer :linkage :internal :align (:align a)))
-                                         (if (empty? relocs)
+                                         (if (and (empty? relocs) (not= :runs (first (run 0 n))))
                                            (vswap! gl assoc-in [:statics sy]
                                                    (list 'llvm/global sy (list 'array n 'i8) (second (run 0 n)) :linkage :internal :constant (not (:mutable a)) :align (:align a)))
                                            ;; RF17: a static holding pointers (`static GREETING: &str = "hi"`): codegen_static's
@@ -867,19 +909,28 @@
                                            (let [segs (loop [pos 0 rs relocs out []]
                                                         (cond
                                                           (and (empty? rs) (= pos n)) out
-                                                          (empty? rs) (conj out (run pos n))
+                                                          (empty? rs) (into out (runs pos n))
                                                           :else (let [[off tid] (first rs)]
                                                                   (recur (+ off 8) (rest rs)
-                                                                         (cond-> out (> off pos) (conj (run pos off)) true (conj [:ptr tid]))))))
+                                                                         (cond-> out (> off pos) (into (runs pos off)) true (conj [:ptr tid]))))))
                                                  tys (mapv (fn [x] (if (= :ptr (first x)) 'ptr (first x))) segs)
                                                  vals (mapv (fn [x] (if (= :ptr (first x)) ['ptr (alloc-sym! (second x))] [(first x) (second x)])) segs)]
                                              (vswap! gl assoc-in [:statics sy]
-                                                     (list 'llvm/global sy (apply list 'packed tys) (apply list 'packed vals)
-                                                           :linkage :internal :constant (not (:mutable a)) :align (:align a))))))))
+                                                     ;; (queue 566: one pointer alone is that value, const_alloc_to_llvm's single chunk:
+                                                     ;; `_rust_extern_with_linkage_getrandom = internal global ptr @getrandom`)
+                                                     (if (and (= 1 (count segs)) (= :ptr (first (first segs))))
+                                                       (list 'llvm/global sy 'ptr (second (first vals))
+                                                             :linkage :internal :constant (not (:mutable a)) :align (:align a))
+                                                       (list 'llvm/global sy (apply list 'packed tys) (apply list 'packed vals)
+                                                             :linkage :internal :constant (not (:mutable a)) :align (:align a)))))))))
                                    ;; RF13: another crate's static (std's WHITESPACE_MAP) declared external, as rustc's codegen unit
-                                   ;; declares it
+                                   ;; declares it; (queue 566: a foreign static with a linkage, `@getrandom = extern_weak global i8`,
+                                   ;; as check_and_apply_linkage declares it)
                                    (when-not (or (:bytes a) (get-in @gl [:statics sy]))
-                                     (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :align 1)))
+                                     (vswap! gl assoc-in [:statics sy]
+                                             (if (= "extern_weak" (:linkage a))
+                                               (list 'llvm/global sy 'i8 :linkage :extern_weak)
+                                               (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :align 1))))
                                    sy)
                          :memory
                          (if (and (string? (:bytes a)) (zero? (count (:bytes a))) (not (:mutable a)))
@@ -932,7 +983,11 @@
                                                           :int-ptr ['ptr (int-ptr (second x))]
                                                           [(first x) (second x)]))
                                                 segs)]
-                                 (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a)))))))
+                                 ;; queue 566 (C6 L1): one pointer alone is that value, not a struct (const_alloc_to_llvm's `if let
+                                 ;; &[data] = &*llvals { data }`): LocalKey's `ptr @<{closure} as FnOnce>::call_once`
+                                 (if (and (= 1 (count segs)) (#{:ptr :int-ptr} (first (first segs))))
+                                   (intern-const! gl 'ptr (second (first vals)) (:align a))
+                                   (intern-const! gl (apply list 'packed tys) (apply list 'packed vals) (:align a))))))))
                          (unsupported "allocation of this kind")))))
         ;; a constant held in an allocation: scalars and pairs read from its bytes, aggregates by reference to its global
         alloc-const! (fn [id off l]
@@ -1073,6 +1128,10 @@
                     (let [l (place-local p) projs (place-projs p)
                           base (if (and (seq projs) (= "deref" (proj-kind (first projs))))
                                  (let [ptr (cond
+                                             ;; queue 572: a memory local's fat pointer consumed whole (codegen_consume's
+                                             ;; load_operand: both halves loaded, the metadata's load unused) for a backtrace crate
+                                             (and *consume-fat-pair* (contains? mem l) (= :pair (:kind (nth lay l))))
+                                             (:v (first (:pair (load-place! bb {:ptr (get-in @st [:allocas l]) :align (:align (nth lay l)) :ly (nth lay l)}))))
                                              (and (contains? mem l) (= :pair (:kind (nth lay l))))
                                              (:v (load-scalar! bb (first (:pair (nth lay l))) (get-in @st [:allocas l]) (:align (nth lay l))))
                                              (contains? mem l)
@@ -1101,7 +1160,8 @@
                                                 r (fresh!)]
                                             (when-not (:array (:ly pl)) (unsupported "index of a non-array"))
                                             (emit! bb (list '= r (list 'getelementptr :inbounds :nuw (backend-type lt gl (second (ty-struct (:ty pl)))) ['ptr (:ptr pl)] ['i64 idx])))
-                                            {:ptr r :align (restrict-align (:align pl) (:size el)) :ly el :ty (second (ty-struct (:ty pl)))})
+                                            {:ptr r :align (restrict-align (:align pl) (if (and *const-index-align* (integer? idx)) (* (long idx) (long (:size el))) (:size el)))
+                                             :ly el :ty (second (ty-struct (:ty pl)))})
                                   "cindex" (let [[_ off _ from-end] e
                                                  _ (when-not (:array (:ly pl)) (unsupported "constant index of a slice"))
                                                  el (layout lt (second (ty-struct (:ty pl))))
@@ -1579,8 +1639,16 @@
                     ;; module's (build-run's, from mono)
                     "tlsref" (let [sym (or (nth r 3 nil) (unsupported "a thread-local static without its symbol"))
                                    sy (symbol "g" sym) nm (symbol "g" "llvm.threadlocal.address.p0") res (fresh!)]
-                               (when-not (get-in @gl [:statics sy])
-                                 (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :thread-local true :align 1)))
+                               (if-let [{bs :bytes al :align} (nth r 4 nil)]
+                                 ;; queue 542: the program's own thread-local (thread_local!'s `__RUST_STD_INTERNAL_VAL`), its
+                                 ;; initializer evaluated by build-run: defined in the unit, internal, as rustc's codegen_static
+                                 (let [n (count bs)]
+                                   (vswap! gl assoc-in [:statics sy]
+                                           (list 'llvm/global sy (list 'array n 'i8)
+                                                 (if (every? zero? bs) 'zeroinitializer (list 'c-string (apply str (map #(char (bit-and (long %) 255)) bs))))
+                                                 :linkage :internal :thread-local true :align (or al 1))))
+                                 (when-not (get-in @gl [:statics sy])
+                                   (vswap! gl assoc-in [:statics sy] (list 'llvm/global sy (list 'array 0 'i8) :linkage :external :thread-local true :align 1))))
                                (declare! gl nm 'ptr [['ptr]])
                                (emit! bb (list '= res (list 'call 'ptr nm [['ptr sy]])))
                                {:ty "ptr" :v res})
@@ -1658,6 +1726,24 @@
                                                   cur (get (:redir @st) bb bb)
                                                   hdr (new-block! "repeat_loop_header") bdy (new-block! "repeat_loop_body") nxt (new-block! "repeat_loop_next")
                                                   i (fresh!) k (fresh!) off (fresh!) ep (fresh!) nx (fresh!)]
+                                              (if *repeat-ptr-loop*
+                                                ;; queue 572 (a backtrace crate's lib-unit compare): write_operand_repeatedly as rustc
+                                                ;; 1.99's builder writes it, a pointer loop: start and end as the place's elements 0
+                                                ;; and N, the current element's pointer the header's phi, `!=` the end, the next one
+                                                ;; element on
+                                                (let [ety (backend-type lt gl (second (ty-struct (place-type body p))))
+                                                      s0 (fresh!) e0 (fresh!)]
+                                                  (emit! bb (list '= s0 (list 'getelementptr :inbounds :nuw ety ['ptr (:ptr pl)] ['i64 0])))
+                                                  (emit! bb (list '= e0 (list 'getelementptr :inbounds :nuw ety ['ptr (:ptr pl)] ['i64 n])))
+                                                  (emit! bb (list 'br (symbol (str "%" hdr))))
+                                                  (emit! hdr (list '= i (list 'phi 'ptr [s0 (symbol (str "%" cur))] [nx (symbol (str "%" bdy))])))
+                                                  (emit! hdr (list '= k (list 'icmp :ne 'ptr i e0)))
+                                                  (emit! hdr (list 'br 'i1 k (symbol (str "%" bdy)) (symbol (str "%" nxt))))
+                                                  (store-val! bdy {:ptr i :align (restrict-align (:align pl) (:size el)) :ly el} v)
+                                                  (emit! bdy (list '= nx (list 'getelementptr :inbounds ety ['ptr i] ['i64 1])))
+                                                  (emit! bdy (list 'br (symbol (str "%" hdr))))
+                                                  (vswap! st assoc-in [:redir bb] nxt))
+                                              (do
                                               (emit! bb (list 'br (symbol (str "%" hdr))))
                                               (emit! hdr (list '= i (list 'phi 'i64 [0 (symbol (str "%" cur))] [nx (symbol (str "%" bdy))])))
                                               (emit! hdr (list '= k (list 'icmp :ult 'i64 i n)))
@@ -1667,7 +1753,7 @@
                                               (store-val! bdy {:ptr ep :align (restrict-align (:align pl) (:size el)) :ly el} v)
                                               (emit! bdy (list '= nx (list 'add :nuw 'i64 i 1)))
                                               (emit! bdy (list 'br (symbol (str "%" hdr))))
-                                              (vswap! st assoc-in [:redir bb] nxt))))))
+                                              (vswap! st assoc-in [:redir bb] nxt))))))))
                                     ssa-dest (when-let [v (rvalue! bb r dly)] (assign! bb p v))
                                     ;; rustc codegens the destination place before the rvalue
                                     :else (let [pl (if (zst? dly) nil (place-of! bb p))
@@ -1930,6 +2016,22 @@
                                            cases (mapv (fn [[v target]] [(symbol (:ty dv)) (key v) (llbb! target)]) vals)]
                                        (emit! bb (list 'switch (symbol (:ty dv)) (:v dv) ld cases)))))
                         "call" (let [[_ f args dest target unwind callee-info0 fn-loc scope] t
+                                     ;; queue 542 (round 10): a call of an `extern "rust-call"` function (a closure's call, call_mut,
+                                     ;; call_once, a ClosureOnceShim's) untuples its last argument, one argument a field, as rustc's
+                                     ;; codegen_call_terminator does for Abi::RustCall; before, the tuple went as one value, right
+                                     ;; only when its layout passed as its fields do (a scalar, a pair of scalars, a ZST): a
+                                     ;; memory tuple ((usize, JoinHandle<bool>) in IntoIter::fold's call of map_fold's closure)
+                                     ;; went by its address (threads.rs's Barrier section: a segmentation fault in memcpy)
+                                     args (let [tt (when (and (seq? f) (= "const" (name (first f)))) (nth f 2 nil))
+                                                lst (last args)
+                                                lt0 (when (seq args) (ty-of lst))
+                                                fields (when (and (seq? lt0) (seq? (nth lt0 2 nil)) (= "tuple" (name (first (nth lt0 2))))) (rest (nth lt0 2)))]
+                                            (if (and (seq? tt) (string? (second tt)) (re-find #"extern \"rust-call\"" (second tt))
+                                                     fields (#{"copy" "move"} (name (first lst))))
+                                              (let [p (second lst)]
+                                                (vec (concat (butlast args)
+                                                             (map-indexed (fn [i ft] (list (first lst) (apply list (concat p [(list 'field i ft)])))) fields))))
+                                              args))
                                      ci0 (when (and (seq? callee-info0) (map? (second callee-info0))) (second callee-info0))
                                      ;; the intrinsics rustc's LLVM backend leaves to their fallback bodies are calls of that instance
                                      fb (when (and (= "intrinsic" (:kind ci0)) (#{"rotate_left" "rotate_right" "type_id_eq"} (:intrinsic ci0)))
@@ -2439,28 +2541,49 @@
                                              argfs)
                                      dl (nth lay (place-local dest))
                                      dl (if (seq (place-projs dest)) (layout lt (place-type body dest)) dl)
-                                     ret (llvm-type dl)
+                                     ;; rust-l1 (C6): an `extern "C"` callee returning a pair of integers or pointers (std's
+                                     ;; `__rust_panic_cleanup`'s `*mut dyn Any`): the x86-64 SysV ABI's PassMode::Cast, the value an
+                                     ;; integer register a eightbyte (`{ i64, i64 }`), stored through a scratch and copied into a
+                                     ;; place of the layout, then read back (rustc_codegen_ssa's store_return: DirectOperand under a
+                                     ;; cast, store_arg's store_cast, load_operand)
+                                     c-cast (let [tt (when (and (seq? f) (= "const" (name (first f)))) (nth f 2 nil))]
+                                              (when (and (seq? tt) (string? (second tt)) (re-find #"extern \"C(-unwind)?\"" (second tt))
+                                                         (= :pair (:kind dl)) (not (indirect? dl)) (= 16 (:size dl))
+                                                         (every? #(#{:int :ptr} (:prim %)) (take 2 (:pair dl)))
+                                                         (empty? (place-projs dest)) (not (contains? mem (place-local dest))))
+                                                '(struct i64 i64)))
+                                     ret (or c-cast (llvm-type dl))
                                      ret-attrs (when-let [ra (ret-attrs-of lt (place-type body dest) dl)] [:ret-attrs ra])
                                      unw (when can-unwind (unwind-block! b unwind))
                                      rbb (if unw (if target (if (zero? target) "start" (str "bb" target)) nil) bb)
                                      ;; an invoke continues in its normal destination: the result is handled there
+                                     ;; queue 542 (C6): a C-variadic callee is called at its function type (`i64 (i64, ...)`), its fixed
+                                     ;; parameters the first arguments' types
+                                     nfix (when (and (seq? callee-info) (map? (second callee-info))) (:variadic (second callee-info)))
+                                     cty (if nfix (list 'fn ret (conj (mapv first (take nfix argfs)) '&)) ret)
                                      callf (if unw
-                                             (concat (list 'invoke ret callee argfs :to (if target (llbb-wc! b target) (unreachable-block!)) :unwind unw) ret-attrs)
-                                             (concat (list 'call ret callee argfs) ret-attrs))
+                                             (concat (list 'invoke cty callee argfs :to (if target (llbb-wc! b target) (unreachable-block!)) :unwind unw) ret-attrs)
+                                             (concat (list 'call cty callee argfs) ret-attrs))
                                      handle (fn [instr-form]
                                               (case (:kind dl)
                                                 :zst (emit! bb instr-form)
                                                 :scalar (let [r (fresh!)]
                                                           (emit! bb (list '= r instr-form))
                                                           (assign-in! rbb dest {:ty (:imm (:scalar dl)) :v r}))
-                                                :pair (if (indirect? dl)
+                                                :pair (if c-cast
+                                                        (let [tmp (scratch! (:size dl) (:align dl)) r (fresh!) sc (scratch! 16 8)]
+                                                          (emit! bb (list '= r instr-form))
+                                                          (emit! rbb (list 'store [c-cast r] ['ptr sc] :align 8))
+                                                          (memcpy! rbb {:ptr tmp :align (:align dl)} {:ptr sc :align 8} 16)
+                                                          (assign-in! rbb dest (load-place! rbb {:ptr tmp :align (:align dl) :ly dl})))
+                                                      (if (indirect? dl)
                                                         (do (emit! bb instr-form)
                                                             (when sret-tmp (assign-in! rbb dest (load-place! rbb sret-tmp))))
                                                         (let [r (fresh!) a (fresh!) c (fresh!) [sa sb] (:pair dl)]
                                                         (emit! bb (list '= r instr-form))
                                                         (emit! rbb (list '= a (list 'extractvalue [ret r] 0)))
                                                         (emit! rbb (list '= c (list 'extractvalue [ret r] 1)))
-                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]})))
+                                                        (assign-in! rbb dest {:pair [{:ty (:imm sa) :v a} {:ty (:imm sb) :v c}]}))))
                                                 :memory (if (indirect? dl)
                                                           (emit! bb instr-form)
                                                           (let [r (fresh!) ci (cast-int dl) pl (place-of! bb dest)]
@@ -2468,7 +2591,7 @@
                                                             (store-cast! rbb ci r pl (:size dl))))
                                                 (unsupported "aggregate returned")))]
                                  (when (and ci (symbol? callee) (= "g" (namespace callee)))
-                                   (declare! gl callee ret (mapv #(vec (butlast %)) argfs)))
+                                   (declare! gl callee ret (if nfix (conj (mapv #(vec (butlast %)) (take nfix argfs)) '&) (mapv #(vec (butlast %)) argfs))))
                                  (handle (apply list callf))
                                  (cond
                                    unw nil
@@ -2552,9 +2675,16 @@
                   (recur m)))))))
       ;; the blocks no traversal reached (and no merge took) are codegen'd as `unreachable`, in index order; a no-op landing pad
       ;; is no block (RemoveNoopLandingPads, -O0's o1 pass before rustc's codegen, made it dead and SimplifyCfg removed it: since
-      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run)
-      (doseq [b (range (count blocks))]
-        (when-not (or (some #{b} order) (contains? (:skip @st) b) (contains? nops b))
+      ;; 512-1 our runtime bodies keep it until o0-normalize, which the programs' codegen does not run); queue 581: but a pad
+      ;; rustc's MIR of a generic body's instance keeps (nop-landing-pads' MIR?: a parameter's drop) is one, unreached
+      ;; (and a no-op pad such a kept pad jumps to, the resume block, is kept with it: RemoveNoopLandingPads redirects only unwind
+      ;; edges into no-op pads, a jump into one goes to the resume block)
+      (doseq [b (range (count blocks))
+              :let [kept-nop? (fn [b] (some (fn [i] (let [t (:term (nth blocks i))]
+                                                      (and (not (contains? mir-nops i)) (:cleanup (nth blocks i))
+                                                           (some #{b} (remove #{(unwind-cleanup t)} (successors t))))))
+                                            (range (count blocks))))]]
+        (when-not (or (some #{b} order) (contains? (:skip @st) b) (and (contains? mir-nops b) (not (kept-nop? b))))
           (let [nm (if (zero? b) "start" (str "bb" b))]
             (llbb! b)
             (emit! nm '(unreachable)))))
@@ -2566,6 +2696,13 @@
             rl (first lay)]
         (apply list 'llvm/define (body-symbol body) (llvm-type rl) params
                (concat (when-let [ra (ret-attrs-of lt (:ret body) rl)] [:ret-attrs ra])
-                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks))))
+                       ;; (queue 581: or a kept pad, a parameter's drop, whose unwind terminates: codegen_mir's personality for a
+                       ;; mono-reachable block's UnwindAction::Terminate)
+                       (when (or (:personality s) (some (fn [i] (and (:cleanup (nth blocks i)) (not (contains? nops i)))) (range (count blocks)))
+                                 (some (fn [i] (and (contains? nops i) (not (contains? mir-nops i))
+                                                    (let [t (:term (nth blocks i))
+                                                          u (case (name (first t)) ("call" "assert") (nth t 5 nil) "drop" (nth t 3 nil) "false-unwind" (nth t 2 nil) nil)]
+                                                      (and (seq? u) (= "terminate" (name (first u)))))))
+                                       (range (count blocks))))
                          [:personality ['ptr (symbol "g" "rust_eh_personality")]])
                        [:body (vec bbs)]))))))

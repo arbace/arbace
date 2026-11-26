@@ -103,6 +103,7 @@
 
     ^{:line 90 :tag uint64 :doc "FS is the value arch_prctl(ARCH_SET_FS) stored (the thread pointer).\n"} FS
 
+    ^{:tag bool :doc "HostFds (queue 547, oi's C API) makes close, lseek, dup, dup2 and dup3 act on the host process's descriptors for the\nstandard streams and any descriptor the program's table does not hold (hostDispatch).\n"} HostFds
     ^{:line 92 :tag (map int (* sysFd))} fds
     ^{:line 93 :tag string} cwd
     ^{:line 94 :tag (array 65 (array 4 uint64))} actions
@@ -299,7 +300,48 @@
   (.dispatch s n a1 a2 a3 a4 a5 a6))
 
 
+(go/method hostFd "hostFd is whether fd names a descriptor of the host process under HostFds: a standard stream's, or one the program's
+own table does not hold (an OCaml channel's, which oi's C API gives a stub as its struct channel's fd).\n" ^bool [^{:tag (* Sys)} s ^int fd]
+  (and (.-HostFds s) (>= fd 0) (or (<= fd 2) (== (aget (.-fds s) fd) nil))))
+
+(go/func hostErr "hostErr is a host call's result as the kernel's: r, or -errno.\n" ^int64 [^int r ^error err]
+  (when (!= err nil)
+    (when [(values e ok) (assert syscall/Errno err)] ok
+      (return (- (conv int64 e))))
+    (return (- eINVAL)))
+  (conv int64 r))
+
+(go/method hostDispatch "hostDispatch is close, lseek, dup, dup2 and dup3 on the host's descriptors (HostFds, queue 547: ppx_expect's stubs
+redirect the process's stdout and stderr into a file with dup2, which oi's channels, writing the host's descriptors, then write into),
+with ok false for any other call or descriptor.\n" [^{:tag (* Sys)} s ^int64 n ^uint64 a1 ^uint64 a2 ^uint64 a3] :results [^int64 r ^bool ok]
+  (let [fd (fdArg a1)]
+    (when (not (.hostFd s fd))
+      (return 0 false))
+    (switch n
+      (case [3] ; close
+        (return (hostErr 0 (syscall/Close fd)) true))
+      (case [8] ; lseek
+        (let [(values o err) (syscall/Seek fd (conv int64 a2) (conv int (conv int32 a3)))]
+          (return (hostErr (conv int o) err) true)))
+      (case [32] ; dup
+        (let [(values nfd err) (syscall/Dup fd)]
+          (return (hostErr nfd err) true)))
+      (case [33 292] ; dup2, dup3
+        (let [nfd (fdArg a2)]
+          (when (and (== nfd fd) (== n 33))
+            (return (conv int64 nfd) true))
+          (when (not (.hostFd s nfd))
+            (return (- eBADF) true))
+          (let [flags 0]
+            (when (== n 292)
+              (set! flags (conv int a3)))
+            (return (hostErr nfd (syscall/Dup3 fd nfd flags)) true)))))
+    (return 0 false)))
+
 ^{:go/end 622} (go/method dispatch ^int64 [^{:tag (* Sys)} s ^int64 n ^uint64 a1 ^uint64 a2 ^uint64 a3 ^uint64 a4 ^uint64 a5 ^uint64 a6]
+  (when (.-HostFds s)
+    (when [(values r ok) (.hostDispatch s n a1 a2 a3)] ok
+      (return r)))
   (let [m (.-M s)]
     (switch n
       (case [0] ; read
@@ -348,7 +390,7 @@
       (case [8] ; lseek
         (return (.lseek s (fdArg a1) (conv int64 a2) (conv int (conv int32 a3)))))
       (case [9]
-        (return (.mmap s a1 a2 a4 (fdArg a5))))
+        (return (.mmap s a1 a2 a3 a4 (fdArg a5) a6)))
       (case [10] ; mprotect
         (return 0))
       (case [11] ; munmap
@@ -937,9 +979,27 @@
         (let [^:const ^{:val 27648} settable (bit-or oAppend oNonblock 020000 040000)]
           (set! (.-flags (.-of e)) (bit-or (bit-and-not (.-flags (.-of e)) settable) (bit-and (conv int arg) settable)))
           (return 0)))
-      (case [5 6 7] ; record locks: nothing contends
+      (case [5 6 7] ; record locks: the program's own take none (nothing of it contends)
         (when (.-opath (.-of e)) ; queue 309: O_PATH's
           (return (- eBADF)))
+
+        (when (== cmd 5) ; F_GETLK (queue 550): Linux's answer, the host's (another process's lock), else F_UNLCK (2)
+          (let [m (.-M s)
+                lk (lit (array 5 int64))]
+            (aset lk 0 (conv int64 (conv int16 (.Load16 m arg))))
+            (aset lk 1 (conv int64 (conv int16 (.Load16 m (+ arg 2)))))
+            (aset lk 2 (conv int64 (.Load64 m (+ arg 8))))
+            (aset lk 3 (conv int64 (.Load64 m (+ arg 16))))
+            (if [f (.-f (.-of e))] (!= f nil)
+              (when [err (hostGetLk f (addr lk))] (!= err nil)
+                (return (eno err)))
+              (aset lk 0 2))
+            (.Store16 m arg (conv uint16 (aget lk 0)))
+            (when (!= (aget lk 0) 2)
+              (.Store16 m (+ arg 2) (conv uint16 (aget lk 1)))
+              (.Store64 m (+ arg 8) (conv uint64 (aget lk 2)))
+              (.Store64 m (+ arg 16) (conv uint64 (aget lk 3)))
+              (.Store32 m (+ arg 24) (conv uint32 (aget lk 4))))))
 
         (return 0)))
 
@@ -1061,12 +1121,12 @@
       (* 128 p))))
 
 
-^{:go/end 876} (go/method mmap ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint64 length ^uint64 flags ^int fd]
+^{:go/end 876} (go/method mmap ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint64 length ^uint64 prot ^uint64 flags ^int fd ^uint64 off]
   (when (== length 0)
     (return (- eINVAL)))
 
-  (when (== (bit-and flags 0x20) 0) ; not MAP_ANONYMOUS
-    (return (- eNODEV)))
+  (when (== (bit-and flags 0x20) 0) ; not MAP_ANONYMOUS: a file's mapping (queue 550)
+    (return (.mmapFile s addr length prot flags fd off)))
 
   (let [size (pageUp length)]
     (when (!= (bit-and flags 0x10) 0) ; MAP_FIXED
@@ -1078,6 +1138,56 @@
       (return (conv int64 addr)))
 
     (conv int64 (.Mmap (.-M s) addr size))))
+
+
+(go/method mmapFile "mmapFile is mmap of the file open as fd (queue 550: SQLite's WAL index, its -shm file mapped MAP_SHARED), as Linux
+maps it: an offset not page-aligned EINVAL, a closed descriptor EBADF, no mapping type EINVAL, then the host's mapping of the file
+(hostMapFile: the file's own pages, a shared mapping's writes the file's, a private one copy-on-write; the host's errno, ENODEV for no
+regular file, EACCES for the descriptor's mode) at the guest's address (MAP_FIXED's, else Mem.Place's), read-only without PROT_WRITE.
+Where the host has no file mapping (TamaGo) the file's bytes from off are copied in, to its end (the rest zero): a private copy.
+" ^int64 [^{:tag (* Sys)} s ^uint64 addr ^uint64 length ^uint64 prot ^uint64 flags ^int fd ^uint64 off]
+  (when (!= (% off PageSize) 0)
+    (return (- eINVAL)))
+
+  (let [of (.getIO s fd)]
+    (when (== of nil)
+      (return (- eBADF)))
+
+    (let [kind (bit-and flags 3)
+          write (!= (bit-and prot 2) 0)
+          fixed (!= (bit-and flags 0x10) 0)
+          size (pageUp length)]
+      (when (== kind 0)
+        (return (- eINVAL)))
+
+      (when (or (== (.-f of) nil) (.-dir of))
+        (return (- eNODEV)))
+
+      (when (and fixed (!= (% addr PageSize) 0))
+        (return (- eINVAL)))
+
+      (let [(values b err) (hostMapFile (.-f of) (conv int64 off) size write (!= kind 2))]
+        (when (== err nil)
+          (let [a addr]
+            (if fixed
+              (.Unmap (.-M s) a size)
+              (set! a (.Place (.-M s) addr size)))
+            (.MapFile (.-M s) a b (not write) "mmap")
+            (return (conv int64 a))))
+
+        (when (!= err syscall/ENOSYS)
+          (return (eno err))))
+
+      ;; no host mapping: a copy of the file's bytes
+      (let [a (.mmap s addr length prot (bit-or (bit-and flags 0x10) 0x22) -1 0)]
+        (when (< a 0)
+          (return a))
+
+        (when [(values _ err) (.ReadAt (.-f of) (.W (.-M s) (conv uint64 a) length) (conv int64 off))] (and (!= err nil) (!= err io/EOF))
+          (.Unmap (.-M s) (conv uint64 a) size)
+          (return (eno err)))
+
+        a))))
 
 
 ^{:go/end 897} (go/method mremap ^int64 [^{:tag (* Sys)} s ^uint64 old ^uint64 oldsz ^uint64 newsz ^int flags]

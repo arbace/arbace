@@ -312,7 +312,9 @@
             u (if (some :bits (:fields c)) 8 1)
             [offb align foffs bitoffs]
             (reduce (fn [[offb align foffs bitoffs] f]
-                      (let [[s a] (size-align (:ty f))
+                      (let [;; (queue 570-1 (a): a member of GNU's VLA type the checker kept after its error, :cx-vla, laid
+                            ;; out with no bytes, so that the class and its uses go on)
+                            [s a] (if (:cx-vla f) [0 (align-of (:ty f))] (size-align (:ty f)))
                             s (long s) a (long a) offb (long offb)
                             start (if uni 0 offb)]
                         (if-let [w (:bits f)]
@@ -681,6 +683,9 @@
   ^String [x]
   (cond
     (number? x) (str "Li" (if (neg? (long x)) (str "n" (- (long x))) x) "E")
+    ;; (cpp-tzdb: an enumerator of a dependent conditional, template.ae's :elit, L <its enumeration> <value> E, clang's
+    ;; mangleIntegerLiteral of an enumeral type)
+    (= :elit (:k x)) (str "L" (mangle-type* (:ty x)) (if (neg? (long (:v x))) (str "n" (- (long (:v x)))) (:v x)) "E")
     (= :tparam-v (:k x)) (template-param (:i x))
     (= :texpr (:k x))
     (case (:o x)
@@ -853,7 +858,9 @@
                   :arr (sub-or [:t sk] #(str "A" (let [n (:n bare)] (if (map? n) (template-param (:i n)) n)) "_" (mangle-type* (:of bare))))
                   :mptr (sub-or [:t sk] #(str "M" (mangle-type* (if (map? (:cls bare)) (:cls bare) {:k :class :id (:cls bare)}))
                                                 (if (= :fn (:k (:to bare))) (str (when (:cq (:to bare)) "K") (mangle-type* (dissoc (:to bare) :cq))) (mangle-type* (:to bare)))))
-                  :fn (sub-or [:t sk] #(str "F" (mangle-type* (:ret bare))
+                  ;; (cpp-rt-own4: a non-throwing function type's Do, <exception-spec> of Itanium 5.1.5.3: sema's mptr-fn-node of a
+                  ;; noexcept member function since C++17, tzdb.cc's &ZoneInfo::until as ranges' projection, MS1_KDoFSD_vE)
+                  :fn (sub-or [:t sk] #(str (when (:nx bare) "Do") "F" (mangle-type* (:ret bare))
                                               (if (and (empty? (:ps bare)) (not (:va bare))) "v" (apply str (map mangle-type* (:ps bare))))
                                               (when (:va bare) "z") "E"))
                   ;; a template's own parameter and a dependent template-id, in a function template's signature (§G3)
@@ -877,11 +884,18 @@
                                                    seen (first (filter (fn [k] (and (string? (nth names (dec (long k))))
                                                                                     (not (neg? (.indexOf ^java.util.List @*subs* (pkey k))))))
                                                                        (range (dec n) 0 -1)))
-                                                   nm (fn [x] (if (map? x) (str (source-name (:name x)) (template-args (:args x))) (source-name x)))]
+                                                   ;; (cpp-tzdb: a template-id's name, its <template-prefix> a candidate before its arguments, as
+                                                   ;; clang's manglePrefix: std::__conditional_t's `typename __conditional<_Cond>::template type<_If,
+                                                   ;; _Else>`, ranges::equal_range's NSt13__conditionalIX..EE4typeI..EE, the subrange_kind after it SY_)
+                                                   nm (fn [k x] (if (map? x)
+                                                                  (let [s (source-name (:name x))]
+                                                                    (swap! *subs* conj [:tprefix (pkey k) (:name x)])
+                                                                    (str s (template-args (:args x))))
+                                                                  (source-name x)))]
                                                (str "N" (if seen
                                                           (seq-id (.indexOf ^java.util.List @*subs* (pkey seen)))
                                                           (if (= :tspec (:k base)) (sub-or [:t base] (fn [] (tspec-unwrapped base))) (mangle-type* base)))
-                                                    (apply str (map (fn [k] (let [x (nth names k) s (nm x)]
+                                                    (apply str (map (fn [k] (let [x (nth names k) s (nm k x)]
                                                                               (when (and (< (inc (long k)) n) (string? x)) (swap! *subs* conj (pkey (inc (long k)))))
                                                                               s))
                                                                     (range (or seen 0) n)))
@@ -1044,6 +1058,14 @@
             (case (:kind r)
               ;; (clang's mangleRequirement: X <expression>, no end marker)
               "SimpleRequirement" (str "X" (ex (first (:inner r))))
+              ;; (cpp-tzdb: X <expression> [N] [R <type-constraint>], a concept named alone: <compare>'s _Synth3way)
+              "CompoundRequirement" (str "X" (ex (first (:inner r))) (when (:_noexcept r) "N")
+                                         (when-let [rt (:_ret r)]
+                                           (let [c (or (get (:concepts q) (str/trim rt)) (fail :mangle "a return-type-requirement " rt))
+                                                 path (:path c)]
+                                             (str "R" (cond (empty? path) (source-name (:name c))
+                                                            (= [[:ns "std"]] path) (str "St" (source-name (:name c)))
+                                                            :else (str "N" (mangle-prefix path) (source-name (:name c)) "E"))))))
               "NestedRequirement" (str "Q" (ex (first (:inner r))))
               "TypeRequirement" (str "T" (ty (get-in r [:type :qualType])))
               (fail :mangle "a requirement " (:kind r))))
@@ -1062,6 +1084,13 @@
                                   (if init (str "pi" (apply str (map ex (if (= "ParenListExpr" (:kind init)) (:inner init) [init]))) "E") "E")))
               "CStyleCastExpr" (str "cv" (ty (get-in n [:type :qualType])) (ex (first (:inner n))))
               "PackExpansionExpr" (str "sp" (ex (first (:inner n))))
+              ;; (cpp-tzdb: a unary fold, clang's fl/fr <operator> <pattern>: tuple's `requires (is_default_constructible_v<_Elements>
+              ;; && ...)`, Qfraa26is_default_constructible_vIT_E)
+              "CXXFoldExpr" (let [{:keys [op l r]} (:_fold n)
+                                  oc (or (expr-op-codes op) (fail :mangle "a fold's operator " op))]
+                              (cond (and l (nil? r)) (str "fr" oc (ex l))
+                                    (and r (nil? l)) (str "fl" oc (ex r))
+                                    :else (fail :mangle "a binary fold in a constraint")))
               "BinaryOperator" (str (or (expr-op-codes (:opcode n)) (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))) (ex (second (:inner n))))
               "UnaryOperator" (str (case (:opcode n) "!" "nt" "-" "ng" "~" "co" (fail :mangle "operator " (:opcode n))) (ex (first (:inner n))))
               "CallExpr" (str "cl" (apply str (map ex (:inner n))) "E")
@@ -1090,7 +1119,14 @@
                                                                  (:qualifier n)))
                                             "E" (source-name nm) targs)
                   (and (get pnames nm) (nil? targs)) (let [[d i] (get pnames nm)] (q-param d i))
+                  ;; (cpp-tzdb: a function parameter, fp_ for the first, fp <n-2> _ for the nth: clang's mangleFunctionParam)
+                  (and (nil? targs) (contains? (:fparams q) nm))
+                  (let [i (long (get (:fparams q) nm))] (if (zero? i) "fp_" (str "fp" (dec i) "_")))
                   (get pidx nm) (q-param depth (get pidx nm))
+                  ;; (cpp-tzdb: a static data member of the enclosing class template, template.ae's constraint-q :members:
+                  ;; L _Z <its name in the pattern> E, clang's mangleDeclRefExpr of a resolved declaration)
+                  (and (nil? targs) (get (:members q) nm))
+                  (let [m (get (:members q) nm)] (str "L_ZN" (mangle-prefix (:path m)) (source-name (:cls m)) (source-name nm) "EE"))
                   :else (str (source-name nm) targs)))
               (fail :mangle "a constraint's " (:kind n))))]
     (ex n))))

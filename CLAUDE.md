@@ -567,7 +567,8 @@ Prior art:
   front of the flock that plain `flock big.lock` users still exclude; GTS32 (a), `make gate-queue`; since 2026-11-23 (the
   user) two slots, `big.lock` and `big.lock.2`, a job beside another admitted only when its `HEAVY_MEM_GIB` (default 24; the
   gate's steps their admission, `--concurrent`'s run `all`) fits MemAvailable less 2 GiB less what the other holder declared
-  and has not reached, the head that does not fit waiting, no later ticket passing it) and the
+  and has not reached, the head that does not fit waiting, a later ticket that fits passing it only to run beside a holder: backfill, 2026-11-24; since 2026-11-25 (the user, after an OOM) one slot by the file `big.lock.slots` (`HEAVY_LOCK_SLOTS` over it), the second
+  slot taking only a job declared at most `HEAVY_LOCK_SMALL_GIB`, 8) and the
   gate itself does not (a caller that holds the lock sets `GATE_HEAVY_CMD=env`, else the gate waits for it),
   the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
   GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
