@@ -58,6 +58,13 @@ struct pyi_type _PyWeakref_CallableProxyType = { 1, 0 };
    placed by ci's link at address 0 ((at N 0), queue 475's finding 1): bin/pyi-clib build refuses a world with one,
    but for the linker's own (bin/pyi-clib undefined) */
 struct pyi_type PyCMethod_Type = { 1, 0 };
+/* queue 568: the type objects Modules/_pickle.c compares with (save's dispatch: Py_TYPE(obj) == &_PyNone_Type, ...) and
+   adds to its module (PyPickleBuffer_Type, Objects/picklebufobject.c's), bound by pyctypes to type(None),
+   type(NotImplemented), type(Ellipsis) and pyi's PickleBuffer */
+struct pyi_type _PyNone_Type = { 1, 0 };
+struct pyi_type _PyNotImplemented_Type = { 1, 0 };
+struct pyi_type PyEllipsis_Type = { 1, 0 };
+struct pyi_type PyPickleBuffer_Type = { 1, 0 };
 
 /* Py_Version (Include/pylifecycle.h; queue 269: _testcapi reads it): Py_PACK_FULL_VERSION of 3.14.10 final */
 const unsigned long Py_Version = 0x030E0AF0;
