@@ -5562,3 +5562,40 @@ int32 from AnnotationInvocationHandler.invoke), lambda deserialization (t06256).
   types), from the files the world holds: 1,739 lines, 705 new (XSLTC's instructions, functions and error classes, Xalan's
   XPath and DTM, Xerces' schema and DOM, BCEL, the XML security library, StAX's writers and events). The forms are the
   train's `bin/javac-vendor convert`.
+
+## As built: java-krb-1126, Kerberos and sun.misc.Unsafe (2026-11-26; branch `java-krb-1126`, from `train-4` `82b1dfff1` with next `0b3174413` merged)
+
+The user's by-design review of 2026-11-26 (doc/JOURNAL.md, "the by-design review") made `:kerberos` (5 interpreted + 5
+compiled rows) and `:foreign` (t03656 and t08053 interpreted) deferred, to build. Kerberos and GSS-API were already in the
+world since java-design-1122's round 2 (`test/jrt/jrt_sources.ae`'s `kerberos-sources`); train 4's report
+(`.tmp/gate-exe/9564e7a0c725952e4bb8/amd64/j2g/report.edn`, `:unavailable`) and the rows' traces named what stopped them:
+- **Every KerberosPrincipal** (t05298 t08051 t08052 t08053 t08199 t08201, the six rows): `sun.security.krb5.PrincipalName`'s
+  static initializer took `nameStrings`' offset by `Unsafe.objectFieldOffset(getDeclaredField("nameStrings"))`; jrt's member
+  tables list a class's public fields and jrt's Unsafe answers the offset by name (the JDK's `objectFieldOffset(Class,
+  String)`), so j2g stubbed the call ("jrt lacks ... objectFieldOffset(Ljava/lang/reflect/Field;)J") and the class never
+  initialized. Built: a derived overlay (`test/jrt/derive.ae`'s `jk1126-derivations`) asking the offset by name, as
+  `java.util.Random`'s variant does.
+- **Every Config.getInstance** (the keys from a password, t08199; the key tab's encryption types, t08201): the derived Config
+  still asked `jdk.internal.util.OperatingSystem` (not in the world), so j2g left `getNativeFileName`, `getDefaultRealm` and
+  `getKDCList` out. Built: the Config derivation's isWindows and isMacOS are `false` (the Go build runs on Linux), the import
+  dropped. Left out as before: `getRealmFromDNS` (sun.net.dns.ResolverConfiguration, reached only with `dns_lookup_realm`),
+  `Credentials.ensureLoaded` (the native ccache library, Windows' and macOS's), `DflCache`'s initializer (the acceptor's
+  replay cache, VM.geteuid).
+- **sun.misc.Unsafe** (t03656, FillArrayWithUnsafe: `ClassNotFoundException` interpreted, refused compiled): jdk.unsupported's
+  class as a derived overlay over jrt's jdk.internal.misc.Unsafe: without `jdk.internal.reflect.Reflection` (not in the world:
+  the filter of getUnsafe dropped, getUnsafe's caller check the JDK's answer to a caller outside the JDK, SecurityException),
+  the memory-access methods' warned flag a plain static under the class's lock (jrt's Unsafe has no static field bases), the
+  warning printed to System.err (jrt's VM has no initialErr) naming the caller without a code source (jrt's classes have no
+  protection domain); the members whose jdk.internal.misc.Unsafe methods jrt lacks stay j2g's stubs. `theUnsafe` is a
+  reflection root (`arbace.j2g.model/reflection-roots`, the user's short list of 2026-11-24), so `getDeclaredField("theUnsafe")`
+  finds it. The derived class's warning path was run interpreted (a copy in a scratch package with the test, on train 4's
+  executable): status 0, the JDK's four warning lines but the location.
+
+Proven by day: `bin/jrt-convert derive --check` 109 overlays, 0 not as derived; `bin/jrt-convert predict --list` of the seven
+rows on the three changed files (15 min under the big lock's small slot, HEAVY_MEM_GIB=6): the three read with their context,
+their forms committed (jdk/forms' `sun/misc.ae`, `sun/misc/Unsafe.ae`, krb5's `Config.ae` and `PrincipalName.ae`, the source
+list's two lines; the provenance's counts by hand, 3,861 sources and 4,105 forms), vet of the world 0 refused, j2g's analysis
+of the whole world 0 failures, the changed classes' stubs only sun.misc.Unsafe's 37 (the jdk.internal.misc.Unsafe members jrt
+lacks: none on t03656's path), and all seven rows analyzed at the compiled level (t03656 refused before). Waiting for the
+train's build: every row, interpreted and compiled (the classes are the world's, translated), after `bin/jrt-convert update`
+(the provenance) and `bin/j2g-edge update` (sun.misc.Unsafe's edge).

@@ -2170,9 +2170,15 @@ import java.lang.module.ModuleDescriptor;
    {:path "sun/security/krb5/Config.java"
     :from "src/java.security.jgss/share/classes/sun/security/krb5/Config.java"
     :header (jd1123-header "sun.security.krb5.Config"
-                           "macOS's SCDynamicStoreConfig branch dropped (the Go build runs on Linux).")
+                           "macOS's SCDynamicStoreConfig branch dropped, isWindows and isMacOS false (the Go build runs on Linux).")
     :ops [["                if (isMacosLionOrBetter()) {\n                    try {\n                        stanzaTable = SCDynamicStoreConfig.getConfig();\n                        if (DEBUG != null) {\n                            DEBUG.println(\"Loaded from SCDynamicStoreConfig\");\n                        }\n                        found = true;\n                    } catch (IOException ioe) {\n                        // OK. Will go on with file\n                    }\n                }\n"
-           "" 1]]}
+           "" 1]
+          ;; java-krb-1126: Config's native file name and default realm and KDCs asked jdk.internal.util.OperatingSystem,
+          ;; which is not in the world (j2g left getNativeFileName, getDefaultRealm and getKDCList out: every Config.getInstance
+          ;; failed); the Go build runs on Linux, so isWindows and isMacOS are false, as the JDK's OperatingSystem answers there
+          ["import jdk.internal.util.OperatingSystem;\n" "" 1]
+          ["OperatingSystem.isWindows()" "false" 3]
+          ["OperatingSystem.isMacOS()" "false" 2]]}
    ;; jdk.xml.internal.SecuritySupport: readConfig's JdkXmlConfig (with the JDK's built-in catalog, the XML security managers
    ;; and features: javac's tool world's) replaced by its configuration's own reading, JdkXmlConfig.loadConfig's: java.home's
    ;; conf/jaxp.properties (else, for StAX, conf/stax.properties), then java.xml.config.file's on top, read once
@@ -2182,6 +2188,56 @@ import java.lang.module.ModuleDescriptor;
                            "readConfig reads the JAXP configuration files itself, as JdkXmlConfig.loadConfig does.")
     :ops [["        return JdkXmlConfig.getInstance(stax).getJaxpConfig().getProperty(propName);\n    }\n"
            "        return JaxpConfigHolder.get(stax).getProperty(propName);\n    }\n\n    // Arbace: JdkXmlConfig.loadConfig's reading, once (the first caller's stax, as JdkXmlConfig's single instance)\n    private static final class JaxpConfigHolder {\n        private static volatile Properties config;\n\n        static Properties get(boolean stax) {\n            Properties p = config;\n            if (p == null) {\n                synchronized (JaxpConfigHolder.class) {\n                    p = config;\n                    if (p == null) {\n                        p = new Properties();\n                        String home = System.getProperty(\"java.home\");\n                        boolean found = load(p, new File(new File(home, \"conf\"), \"jaxp.properties\"));\n                        if (stax && !found) {\n                            load(p, new File(new File(home, \"conf\"), \"stax.properties\"));\n                        }\n                        String configFile = System.getProperty(\"java.xml.config.file\");\n                        if (configFile != null) {\n                            load(p, new File(configFile));\n                        }\n                        config = p;\n                    }\n                }\n            }\n            return p;\n        }\n\n        private static boolean load(Properties p, File f) {\n            if (doesFileExist(f)) {\n                try (final InputStream in = getFileInputStream(f)) {\n                    p.load(in);\n                    return true;\n                } catch (IOException e) {\n                    // as JdkXmlConfig.loadProperties\n                }\n            }\n            return false;\n        }\n    }\n" 1]]}])
+
+;; ---------------------------------------------------------------------------------------
+;; java-krb-1126 (the user's decision of 2026-11-26, the by-design review: :kerberos and :foreign deferred, to build): what
+;; the Kerberos tests and sun.misc.Unsafe's reach that jrt has not. Derived mechanically, each replacement asserted.
+
+(defn- jk1126-header [rel src what]
+  (header [(str "Arbace (overlay/jdk, doc/classes/JAVA-CONFORMANCE-SURVEY.md, java-krb-1126): jdk26u's " rel)
+           (str "(" src " at https://github.com/openjdk/jdk26u baf63fb), derived by test/jrt/derive.ae")
+           (str "(bin/jrt-convert derive): " what)
+           "jdk26u's text Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2 with the"
+           "Classpath Exception (LICENSE.md); the derivation Copyright (c) the Arbace authors; Eclipse Public License 1.0."]))
+
+(def ^:private jk1126-derivations
+  [;; sun.security.krb5.PrincipalName: its static initializer took nameStrings' offset by
+   ;; Unsafe.objectFieldOffset(getDeclaredField("nameStrings")); jrt's member tables list a class's public fields
+   ;; (getDeclaredField of a private one is NoSuchFieldException) and jrt's Unsafe has the offset by name,
+   ;; objectFieldOffset(Class, String), as java.util.Random's variant asks it: every KerberosPrincipal failed in
+   ;; PrincipalName's initializer (t05298 t08051-t08053 t08199 t08201)
+   (let [rel "sun/security/krb5/PrincipalName.java" src (str "src/java.security.jgss/share/classes/" rel)]
+     {:path rel :from src
+      :header (jk1126-header "sun.security.krb5.PrincipalName" src
+                             "nameStrings' offset taken by name, objectFieldOffset(Class, String).")
+      :ops [["            NAME_STRINGS_OFFSET = unsafe.objectFieldOffset(\n                    PrincipalName.class.getDeclaredField(\"nameStrings\"));\n"
+             "            NAME_STRINGS_OFFSET = unsafe.objectFieldOffset(PrincipalName.class, \"nameStrings\");\n" 1]
+            ;; nothing in the block throws a ReflectiveOperationException now: javac refuses its catch
+            ["        } catch (ReflectiveOperationException e) {\n            throw new Error(e);\n        }\n"
+             "        } catch (RuntimeException e) {\n            throw new Error(e);\n        }\n" 1]]})
+   ;; sun.misc.Unsafe (jdk.unsupported), the classic Unsafe applications reach by reflection (getDeclaredField("theUnsafe"),
+   ;; m/reflection-roots), over jrt's jdk.internal.misc.Unsafe (t03656, FillArrayWithUnsafe): jdk.internal.reflect's
+   ;; Reflection is not in the world (its filter of getUnsafe dropped; getUnsafe's caller check is the JDK's answer to every
+   ;; caller outside the JDK, which the world's classes do not call: SecurityException), the warned flag of the
+   ;; memory-access methods a plain static under the class's lock (jrt's Unsafe has no static field bases), the warning
+   ;; printed to System.err (jrt's VM has no initialErr) naming the caller without a code source location (jrt's classes
+   ;; have no protection domain)
+   (let [rel "sun/misc/Unsafe.java" src (str "src/jdk.unsupported/share/classes/" rel)]
+     {:path rel :from src
+      :header (jk1126-header "sun.misc.Unsafe" src
+                             "no Reflection (getUnsafe's caller check refuses), the warned flag a plain static, the warning to System.err.")
+      :ops [["import jdk.internal.reflect.CallerSensitive;\nimport jdk.internal.reflect.Reflection;\n" "" 1]
+            ["    static {\n        Reflection.registerMethodsToFilter(Unsafe.class, Set.of(\"getUnsafe\"));\n    }\n\n" "" 1]
+            ["    @CallerSensitive\n    public static Unsafe getUnsafe() {\n        Class<?> caller = Reflection.getCallerClass();\n        if (!VM.isSystemDomainLoader(caller.getClassLoader()))\n            throw new SecurityException(\"Unsafe\");\n        return theUnsafe;\n    }\n"
+             "    public static Unsafe getUnsafe() {\n        // Arbace: the JDK's answer to a caller outside the JDK's own loaders; no class of the world calls it\n        throw new SecurityException(\"Unsafe\");\n    }\n" 1]
+            ["    private static final Object MEMORY_ACCESS_WARNED_BASE;\n    private static final long MEMORY_ACCESS_WARNED_OFFSET;\n    static {\n        try {\n            Field field = Unsafe.class.getDeclaredField(\"memoryAccessWarned\");\n            MEMORY_ACCESS_WARNED_BASE = theInternalUnsafe.staticFieldBase(field);\n            MEMORY_ACCESS_WARNED_OFFSET = theInternalUnsafe.staticFieldOffset(field);\n        } catch (Exception e) {\n            throw new ExceptionInInitializerError(e);\n        }\n    }\n" "" 1]
+            ["        return theInternalUnsafe.getBooleanVolatile(MEMORY_ACCESS_WARNED_BASE, MEMORY_ACCESS_WARNED_OFFSET);\n"
+             "        synchronized (Unsafe.class) {\n            return memoryAccessWarned;\n        }\n" 1]
+            ["        return theInternalUnsafe.compareAndSetBoolean(MEMORY_ACCESS_WARNED_BASE, MEMORY_ACCESS_WARNED_OFFSET, false, true);\n"
+             "        synchronized (Unsafe.class) {\n            if (memoryAccessWarned) {\n                return false;\n            }\n            memoryAccessWarned = true;\n            return true;\n        }\n" 1]
+            ["        CodeSource cs = callerClass.getProtectionDomain().getCodeSource();\n        String who = callerClass.getName();\n        if (cs != null && cs.getLocation() != null) {\n            who += \" (\" + cs.getLocation() + \")\";\n        }\n        return who;\n"
+             "        // Arbace: jrt's classes have no protection domain, so no code source's location\n        return callerClass.getName();\n" 1]
+            ["        VM.initialErr().println(message);\n" "        System.err.println(message);\n" 1]]})])
 
 ;; java-design-1122 (the burst's Java by-design stream, 2026-11-22): jdk.internal.foreign.Utils for the foreign memory API's
 ;; segments (test/jrt/jrt_sources.ae, ffm-sources): its static initializer looked up three method handles of the
@@ -2447,7 +2503,8 @@ import java.lang.module.ModuleDescriptor;
   async-derivations
   swing-derivations
   [ffm-utils-derivation ffm-amsi-derivation ffm-layoutpath-derivation ffm-abstractlayout-derivation]
-  jd1123-derivations))
+  jd1123-derivations
+  jk1126-derivations))
 
 ;; ---------------------------------------------------------------------------------------
 

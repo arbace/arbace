@@ -1070,6 +1070,14 @@ covers what.
   General Public License version 2 with the Classpath Exception (text below); the rest of `test/jrt/derive.ae`, the
   bodies and helpers it writes and `test/jrt/vet.ae` are Arbace's own. The overlays it makes are covered above with
   their features (F7, F9, F10a, F10b, JCS164, F24).
+- Kerberos's and sun.misc's derived overlays (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-design-1122/1123" and
+  "As built: java-krb-1126"; recorded by the rule of B7): `overlay/jdk/java.base/sun/security/krb5/{Config,PrincipalName}.java`,
+  `sun/security/jgss/ProviderList.java` and `sun/misc/Unsafe.java` are jdk26u's files of the same paths
+  (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.security.jgss/share/classes/` and
+  `src/jdk.unsupported/share/classes/`) with the exact replacements `test/jrt/derive.ae` makes (`jd1123-derivations`,
+  `jk1126-derivations`, whose tables hold their replaced text; each file's header says so): Copyright (c) Oracle and/or its
+  affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the derivations
+  Arbace's own (Eclipse Public License 1.0).
 - JMX's core, AccessFlag and type annotations (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1 (write-ahead)", "As built:
   JCS273 (write-ahead)", "As built: JCS271 (b) (write-ahead)"; recorded by the rule of B7): the derived overlays
   `overlay/jdk/java.base/{com/sun/jmx,javax/management}/...` (21 files), `java/lang/management/ThreadInfo.java`,

@@ -25414,3 +25414,36 @@ verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
     analyzer: 61 pass.
 - For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
   705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
+
+## 2026-11-26: java-krb-1126, Kerberos's and sun.misc.Unsafe's gaps (:kerberos, :foreign to build; branch `java-krb-1126`)
+
+The user's by-design review of this morning made `:kerberos` (t05298 t08051 t08052 t08199 t08201, interpreted and compiled)
+and `:foreign` (t03656 and t08053 interpreted) deferred, to build. Branch `java-krb-1126` from `mac/train-4` (82b1dfff1) with
+`mac/next` (0b3174413) merged (the conflicts: the journal a union; test/java/divergences.edn, check-diagnostics.edn and
+jdk/javac/provenance.edn train 4's, the newer in those places; test/reap/matrix.edn and test/crops/scores.edn derived again
+by `bin/reap --record` and `bin/crops-score --record`).
+
+What stopped the rows (their traces on train 4's executable, `.tmp/gate-exe/9564e7a0c725952e4bb8`, and its j2g report's
+`:unavailable`): every row but t03656 died in sun.security.krb5.PrincipalName's static initializer, whose
+`Unsafe.objectFieldOffset(PrincipalName.class.getDeclaredField("nameStrings"))` j2g stubbed (jrt's Unsafe has the offset by
+name only; jrt's member tables list public fields), and every Config.getInstance would then fail: the derived Config still
+asked jdk.internal.util.OperatingSystem, outside the world, so j2g left getNativeFileName, getDefaultRealm and getKDCList out.
+t03656 (FillArrayWithUnsafe) needs sun.misc.Unsafe (jdk.unsupported), not in the world.
+
+Built (test/jrt/derive.ae, origins https://github.com/openjdk/jdk26u at baf63fb, src/java.security.jgss/share/classes/ and
+src/jdk.unsupported/share/classes/; LICENSE.md's new item): PrincipalName derived (the offset by name,
+objectFieldOffset(Class, String), as java.util.Random's variant asks it); Config's derivation's isWindows and isMacOS
+`false` (the Go build runs on Linux); sun.misc.Unsafe derived (no jdk.internal.reflect.Reflection: getUnsafe's caller check
+the JDK's SecurityException for every caller outside the JDK, the method filter dropped; the memory-access warned flag a
+plain static under the class's lock, jrt's Unsafe having no static field bases; the warning to System.err, naming the caller
+without a code source); `sun/misc/Unsafe` `theUnsafe` added to arbace.j2g.model's reflection roots (the user's short list of
+2026-11-24) for getDeclaredField("theUnsafe"). The derived Unsafe's warning path ran interpreted in a scratch copy on train 4's
+executable: status 0, the JDK's four warning lines but the location. `bin/jrt-convert predict --list` of the seven rows: the
+forms read (committed with their two source lines), vet 0 refused, j2g's analysis 0 failures, the changed classes' stubs
+sun.misc.Unsafe's 37 jrt-lacking members (none on t03656's path), the seven rows analyzed compiled.
+
+Alternatives considered: jrt's Unsafe.objectFieldOffset(Field) with PrincipalName.nameStrings a reflection root (the general
+form, but the list is the user's short one, and jrt's manifest and tables would be regenerated); jdk.internal.util.OperatingSystem
+in the world (its generated PlatformProps; the derivations so far keep it out, ExtendedSocketOptions' too); sun.misc.Unsafe
+hand-written (the derivation keeps jdk26u's text). Every row waits for the next Java train's build: `bin/jrt-convert update`
+(provenance), `bin/j2g-edge update` (the new class), then the interp and compiled records of the seven rows.
