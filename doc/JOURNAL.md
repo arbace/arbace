@@ -24845,3 +24845,74 @@ test_concurrent_futures' ProcessPoolSpawnExecutorDeadlockTest.test_shutdown_dead
   the cut. This is not probed.
 - Alternatives: a per-frame "on a thread's stack" flag set and cleared by runFrames (an extra store on every call and
   return, for a check that only frame.clear() makes) was left. A walk of the threads costs nothing on the hot path.
+## 2026-11-26: py-speed-1126, the eval's `:runner-limits` and `:host-memory` rows by cause: shutil's three lazy modules compiled, the parser's MAXSTACK
+
+Branch `py-speed-1126` (mac), from mac/train-6 025065fd1, for train 7 (the user's direction of 2026-11-26: Python to 100%
+completeness in train 7; this lane's classes the speed and memory ones). doc/python/PYTHON-SURVEY.md, "As built: py-speed-1126".
+Measured on train 5's executable (b85611b74343, PYI_RUNTIME=compiled), CPU and heap profiles by ARBACE_CPUPROFILE and
+ARBACE_MEMPROFILE, single tests and small modules outside the big lock under a 2.6 GiB tree cap; nothing recorded.
+
+- Built: the glue of `_bz2`, `_lzma` and `_zstd` (go/arbace/pybz2, pylzma, pyzstd) listed in goi's table and compiled into the
+  executable with the node programs they import (go/arbace/gotable.edn, arbace.go.table/program-path?, arbace/j2g/main.ae's
+  program copy, bin/lib/version.bash's keys: out of arbace_crop_paths, into arbace_runtime_not; test/gate/audit.ae,
+  test/gate/gate-key-crops-test.bash; bin/pyi's runtime_clib_from_source, runtime_state and table-check). Why: shutil imports
+  bz2, lzma and compression.zstd at its import, so every pyi process importing shutil or tempfile (every multiprocessing child
+  of the test modules) had goi read, check and build the three from their forms: 5.5 s, 11 s of CPU and 140 MB a process
+  (`import _bz2, _lzma, _zstd` 6.9 s / 13.4 s CPU / 918 MB against `pass` 1.35 s / 778 MB; of a child's 7.7 s import of
+  test._test_multiprocessing, 4.1 s). This measures W-P6 (a)'s "measured later" and follows 521-2 (b) (pyctypes); pysqlite3,
+  pyssl and pyexpat stay lazy. Alternatives: a cache of goi's checked packages (more general, not built: a new mechanism of
+  goi's for three packages); keeping them lazy (every child keeps the cost). Its effect reaches the eval with train 7's build.
+- Built: pegen's MAXSTACK in pyi's parser (arbace.repr.python.peg's enter/leave, p->level in the state's slot 9;
+  arbace.repr.python.pegen wraps every generated rule; parser.ae regenerated, parser315.ae given the identical textual change,
+  checked exact on parser.ae, as the 3.15.2 tarball is not fetched on this host; arbace.python.run answers the reader's
+  MemoryError as the MemoryError). Why: `'-' * 100_000 + '1'` (test_code_module's test_compile_error, test_pyrepl's
+  test_compile_error_single_line, test_pdb's test_compile_error_message) recursed 100,000 rules deep through Go's stack, then
+  converted and compiled: one compile 529 s wall, 1,184 s CPU; CPython raises MemoryError at the 6001st nested rule. Now the
+  threshold is CPython's exactly (ast.parse of '-' * 5968 passes, 5969 raises, on both), 100,000 fails in 0.1-0.3 s;
+  test_code_module 18 tests in 2.3 s, the pyrepl and pdb rows 0.6 s and 0.5 s. Checked: `bin/repr-python pegen --check`;
+  parse-check --no-mutants against the recorded trees (errors, lex-errors, samples, synthetic, stdlib: 1,008 files equal,
+  controls failing as they must).
+- Measured, no change: spawn's test_manager whole (in a tree at train 6's commit, train 5's runtime compiled): 82 tests in
+  693 s, peak 6,979 MB of proportional set: 28 of its 29 `:host-memory` rows pass (the 11-19 night's kills at 8192 MB of
+  resident pages predate py-mods-1122's count and cap and GOGC 25 for children); the 29th, test_release_task_refs, fails
+  "-10 != 0" because the world's C _pickle's NEWOBJ does not reach a Python class's __new__ on train 5 (pickle-core's, to judge
+  on train 6's executable, which carries py-enum's and py-regress's tp_new work). test_longexp whole 13.5 s, test_modulefinder whole 21 s, test_datetime's test_easy alone 12 s: their
+  rows' limits were the 11-19 night's. A child's memory: 576 MB of its own after importing test._test_multiprocessing (live heap
+  about 336 MB: ctypes' world 67 MB, Arbace's base about 140 MB), so the Barrier and Pool classes fit py-mods-1122's 16384 MB cap.
+- DECISION py-speed-1 for the user (a row past 8 GiB): the two test_large_pool rows, Pool(200) of pyi children, about 70 GB.
+  (a) recommended: a deferred class of pyi's per-process footprint, owner PY8; (b) n/a by the user; (c) a cap, impossible here.
+- Not finished here: `bin/pyi table-check` passed this lane's memory (linux configurations 10 GB, tamago 7.5 GB; arbace/py and crt
+  already fail tamago/amd64 on the base), so the listing's whole check is train 7's `bin/goi table`; goi's checker takes the
+  three in linux/amd64 at every interpreted import today. Alternative not taken: a table-check under the big lock (hours behind
+  the trains' builds and records).
+
+## 2026-11-26: py-speed-1126, round 2: a pyi child's footprint (DECISION py-speed-1 (a), the user)
+
+The user decided py-speed-1 (a): the two test_large_pool rows go into a deferred class for pyi's per-process footprint, owner PY8,
+and are then to pass (Pool(200) fitting the host). Profiled first (doc/python/PYTHON-SURVEY.md, "py-speed-1126, round 2"): a bare
+child holds 297 MB of its own (Go's heap: about 140 MB live beside jrt's untouched 64 MiB ballast, the rest freed heap Go's
+scavenger kept), the executable's 431 MB of file pages shared; a Pool(2) worker about 540 MB, half of it the lazy modules round 1
+compiles; without them 285 MB, of which goi's digest 27 MB and the start's and the imports' freed heap about 50 MB.
+- Built: arbace.python's idle releaser (a daemon thread: FreeOSMemory when the process idled 3 s and its heap grew 16 MiB past the
+  last release; PYI_IDLE_FREE, PYI_IDLE_FREE_TRACE), arbace.go's release-digest! after the start (resolved by name: stage 0 and the
+  executables before train 7 do nothing), a child's start at GOGC 50 (tools/pyi/python3, PYI_START_GOGC).
+- Measured on train 6's executable: a worker-like child 285 -> 251 MB of its own, a Pool(2)'s workers 545/549 -> 483/487 MB with
+  the lazy modules still interpreted there, the start's peak 60 MB lower and no slower; expected on train 7 about 233 MB a worker,
+  Pool(200) about 47 GB.
+- Alternatives measured and not taken: no ballast for children (0.3 s more CPU a start, the releaser making it moot); GOGC 10 for
+  children (16 MB less, 25% more CPU); a FreeOSMemory at the start's end (nothing for a worker, a collection for every short child);
+  a GOMEMLIMIT for children (a child that imports test._test_multiprocessing would collect without end).
+- Proposals for their owners, not built (C's crop at 100%): crt's 64 MiB read-only reservation per world, the ctypestest world's
+  67 MB text table on import ctypes, goi's 9 MB of inflated digest bytes; and for the user: test_large_pool's rows need a per-test
+  memory cap of about 50 GB and a run alone under the big lock (its modules' cap is 16384 MB), not applied.
+- Checked after the push (the same day): the idle releaser leaves the collector-sensitive modules as they were: test_gc (59 tests:
+  25 failures, 1 error, 12 skipped: the record's counts), test_weakref (139: 9 failures) and test_finalization (18: ok) give the
+  same failing sets with PYI_IDLE_FREE on and off (train 5's runtime compiled, a tree at train 6's commit).
+
+## 2026-11-26: py-speed-1126: the user's decision on test_large_pool's rows
+
+The user decided (2026-11-26): the two test_large_pool rows (spawn's and forkserver's test_misc) stay deferred in
+`:process-footprint` (PY8), with no per-test memory cap of about 50 GB (option (b) of round 2's DECISION, not its recommended
+(a)); they wait until a pyi child is much smaller. lib-test-limits.tsv is unchanged. The proposals for that (crt's 64 MiB
+read-only reservation per C world, the ctypestest world's 67 MB text table on `import ctypes`, goi's 9 MB of inflated digest
+bytes) stay open for their owners.

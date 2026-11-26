@@ -61,9 +61,9 @@ arbace_crop_paths=(
   go/arbace/wai.ae 'go/arbace/wai/*'
   # pyi's lazy modules (queue 208, 209, 215: _bz2's, _lzma's, _zstd's, _ssl's and _sqlite3's glue; W-P6 (a)). Queue 521
   # (DECISION 521-2 (b)): the C library host go/arbace/clib (its worlds and their compiled packages) and _ctypes's package
-  # go/arbace/pyctypes are listed in goi's table, so they leave the list (out of the runtime key by arbace_runtime_not)
-  go/arbace/pybz2.ae 'go/arbace/pybz2/*' go/arbace/pylzma.ae 'go/arbace/pylzma/*'
-  go/arbace/pyzstd.ae 'go/arbace/pyzstd/*' go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'
+  # go/arbace/pyctypes are listed in goi's table, so they leave the list (out of the runtime key by arbace_runtime_not);
+  # py-speed-1126: so do _bz2's, _lzma's and _zstd's glue, go/arbace/{pybz2,pylzma,pyzstd} (shutil imports them in every process)
+  go/arbace/pyssl.ae 'go/arbace/pyssl/*' go/arbace/pysqlite3.ae 'go/arbace/pysqlite3/*'
   # OCaml's AOT runtime forms (o2j's Java, no executable's)
   'jdk/ocaml/*'
   # the crops' scripts' libraries
@@ -76,7 +76,9 @@ arbace_crop_paths=(
 arbace_runtime_not=(! -path go/arbace/oi.ae ! -path 'go/arbace/oi/*' ! -path go/arbace/scm.ae ! -path 'go/arbace/scm/*'
                     ! -path go/arbace/scminterp.ae ! -path 'go/arbace/scminterp/*' ! -path go/arbace/py.ae ! -path 'go/arbace/py/*'
                     ! -path go/arbace/libm.ae ! -path 'go/arbace/libm/*' ! -path go/arbace/clib.ae ! -path 'go/arbace/clib/*'
-                    ! -path go/arbace/pyctypes.ae ! -path 'go/arbace/pyctypes/*' ! -path go/arbace/pytls.ae ! -path 'go/arbace/pytls/*')
+                    ! -path go/arbace/pyctypes.ae ! -path 'go/arbace/pyctypes/*'
+                    ! -path go/arbace/pybz2.ae ! -path 'go/arbace/pybz2/*' ! -path go/arbace/pylzma.ae ! -path 'go/arbace/pylzma/*'
+                    ! -path go/arbace/pyzstd.ae ! -path 'go/arbace/pyzstd/*' ! -path go/arbace/pytls.ae ! -path 'go/arbace/pytls/*')
 arbace_not_crops=()
 for _p in "${arbace_crop_paths[@]}"; do arbace_not_crops+=(! -path "$_p"); done
 unset _p

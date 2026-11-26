@@ -27,8 +27,9 @@
 
 (deftype Parser [lx ^java.util.ArrayList toks ^longs st ^java.util.HashMap memo ^java.util.Map keywords
                  ^java.util.Set soft ^java.util.ArrayList type-ignores ^objects types])
-;; st: [mark fill call-invalid barry feature-version last-stmt-lineno last-stmt-col-offset single parsing-started]
-;; (single: 0, or Py_single_input 1, with PyPARSE_DONT_IMPLY_DEDENT 2); types: [an int array of the tokens' types]
+;; st: [mark fill call-invalid barry feature-version last-stmt-lineno last-stmt-col-offset single parsing-started level]
+;; (single: 0, or Py_single_input 1, with PyPARSE_DONT_IMPLY_DEDENT 2; level: p->level, the rules' nesting, py-speed-1126);
+;; types: [an int array of the tokens' types]
 
 (defn parser
   "A parser over `text` (the string tokenizer's input: new-lines translated, ending in one), with type comments
@@ -36,7 +37,7 @@
   (^Parser [^String text keywords soft type-comments] (parser text keywords soft type-comments false))
   ;; no-fake: the text may end without a new-line, read so (lex/lexer's no-fake; compile()'s mode single, queue 203)
   (^Parser [^String text keywords soft type-comments no-fake]
-  (let [p (Parser. (lex/lexer text false type-comments true no-fake) (java.util.ArrayList.) (long-array 9) (java.util.HashMap.)
+  (let [p (Parser. (lex/lexer text false type-comments true no-fake) (java.util.ArrayList.) (long-array 10) (java.util.HashMap.)
                    keywords (set soft) (java.util.ArrayList.) (object-array [(int-array 1024)]))]
     (aset ^longs (.-st p) 4 (long lex/*minor*))
     p)))
@@ -54,6 +55,38 @@
   [^Parser p dont-imply-dedent]
   (aset ^longs (.-st p) 7 (long (if dont-imply-dedent 2 1)))
   p)
+
+;; ---- the parser's stack limit (py-speed-1126; Parser/parser.c's MAXSTACK, pegen_errors.c's _Pypegen_stack_overflow): every
+;; rule function of the generated parser counts its nesting, p->level, on entry (enter) and on its return (leave); the
+;; 6001st nested rule call raises MemoryError, as CPython's generated rules do (`if (p->level++ == MAXSTACK ...)`), so a
+;; source nested past it (compile('-' * 100_000 + '1'), test_code_module's test_compile_error) fails at once instead of
+;; recursing through Go's growing stack. An error thrown out of a rule leaves the count to run-parser, which starts each
+;; pass at 0 (CPython's pass ends with p->level 0 either way: an error returns NULL through every frame).
+;; (_Py_ReachedRecursionLimitWithMargin, the C stack's check beside it, has no counterpart: Go's stack grows.)
+
+(def ^:const MAXSTACK 6000)
+
+(defn stack-overflow
+  "_Pypegen_stack_overflow: the parser's MemoryError"
+  []
+  (throw (ex-info "MemoryError: Parser stack overflowed - Python source too complex to parse"
+                  {:python-error ["MemoryError" "Parser stack overflowed - Python source too complex to parse" nil nil nil nil nil]})))
+
+(defmacro enter
+  "A rule's entry: p->level counted, MemoryError past MAXSTACK (a macro: two array operations in every rule)"
+  [p]
+  (let [st (with-meta (gensym "st") {:tag 'longs}) l (gensym "l")]
+    `(let [~st (.-st ~(vary-meta p assoc :tag 'arbace.repr.python.peg.Parser)) ~l (aget ~st 9)]
+       (aset ~st 9 (unchecked-inc ~l))
+       (when (== ~l MAXSTACK) (stack-overflow)))))
+
+(defmacro leave
+  "A rule's return: p->level counted down; `r` returned"
+  [p r]
+  (let [st (with-meta (gensym "st") {:tag 'longs}) v (gensym "r")]
+    `(let [~v ~r ~st (.-st ~(vary-meta p assoc :tag 'arbace.repr.python.peg.Parser))]
+       (aset ~st 9 (unchecked-dec (aget ~st 9)))
+       ~v)))
 
 (defn mark ^long [^Parser p] (aget ^longs (.-st p) 0))
 (defn reset [^Parser p ^long m] (aset ^longs (.-st p) 0 m))
@@ -1075,6 +1108,7 @@
   Options: :incomplete (PyPARSE_ALLOW_INCOMPLETE_INPUT: a failure at the end of the source is \"incomplete input\"),
   :single (Py_single_input: one statement)"
   [^Parser p rule & [opts]]
+  (aset ^longs (.-st p) 9 0)
   (let [res (try (rule p) (catch arbace.lang.ExceptionInfo e (if (error-of-ex e) e (throw e))))]
     (if (and (some? res) (not (instance? arbace.lang.ExceptionInfo res)))
       (if (and (:single opts) (bad-single-statement? p))
@@ -1091,6 +1125,7 @@
               e2 (or e1
                      (do (.clear ^java.util.HashMap (.-memo p))
                          (reset p 0)
+                         (aset ^longs (.-st p) 9 0)
                          (set-call-invalid p true)
                          (caught #(rule p))))]
           (throw (with-metadata p (set-syntax-error p last-token e2))))))))
