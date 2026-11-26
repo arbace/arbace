@@ -11961,7 +11961,15 @@ tests state them, no GCC or clang code:
   cpp26/name-independent-decl10.C.
 - A redefinition's note at the first definition, for a dg-error's later branch (diag.ae's qualified definitions).
 
-RESULTS-PLACEHOLDER
+Rows to own pass, 28: cpp0x/alignas20.C, cpp0x/constexpr-arith-overflow2.C, cpp0x/initlist31.C, cpp0x/pr78890-2.C, cpp0x/using-enum-3.C,
+cpp0x/vt-34399.C, cpp1y/constexpr-89074-3.C, cpp1z/decomp55.C, cpp23/attr-assume8.C, cpp23/subscript2.C, cpp26/decomp9.C,
+cpp26/name-independent-decl10.C, cpp2a/constexpr-ref1.C, lookup/pr84962.C, other/error29.C, parse/crash40.C, parse/ctor3.C,
+template/crash14.C, template/friend50.C, template/friend72a.C, template/memfriend6.C, template/nontype3.C, template/pr70466-1.C,
+template/virtual3.C, ubsan/pr63956.C, and the base's other/abstract1.C, template/crash125.C, tc1/dr176.C (cpp23/ext-floating12.C timed out again under the load, as recorded). Regression run at
+`e9b0a69f7` (next's 2,941 recorded own passes and the 174, 3,115 files, two parts of 2 threads under the big lock's small slot):
+0 lost; recorded from it with `--judge --record`. C++ read 6,111 / 0 / 174 -> 6,139 / 0 / 146; completeness 0.9870 -> 0.9881,
+independence 0.9784 -> 0.9788 (read 0.894). Also own passes now, not recorded (not this lane's rows: clang's record passes them,
+cpp-indep2's set): cpp1z/decomp26.C, inherit/error1.C.
 
 Left, looked at: GCC's recovery after syntax errors (a declined declaration leaves its unit unanalyzed: template/typedef4.C, crash99.C,
 redecl5.C, pr90138.C, crash59.C; parse/error32.C and error33.C's typedef of a qualified name), definition-time checks of
