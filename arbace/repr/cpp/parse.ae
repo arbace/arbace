@@ -377,10 +377,26 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Locations and nodes, as tools/cxxdump writes clang's
 
+(def ^:dynamic *spell*
+  "queue 601 (group 5): the tokens' spelling offsets in the main file (a long array by token index, -1 none), when the native front end
+  kept them (arbace.repr.c.lex/*spelling*): a macro's token spelled in the main file's #define, or a macro argument's at the use."
+  nil)
+
+(defn- spell-off
+  "queue 601: the main-file offset token `i`, a macro expansion's, is spelled at, or nil -- GCC's diagnostic location under its
+  default -ftrack-macro-expansion=2 (the GCC manual: a token of a macro's definition reported at its spelling, with the expansion's
+  \"in expansion of macro\" notes)."
+  [^P p ^long i]
+  (when-let [^longs a *spell*]
+    (let [^T t (tok-at p i)]
+      (when (and (.-mac t) (< -1 i (alength a)))
+        (let [o (aget a i)] (when (>= o 0) o))))))
+
 (defn- loc [^P p ^long i]
   (let [^T t (tok-at p i)]
     (if-let [m (or (.-mac t) (when (and (.-glue t) (identical? :punct (.-k t)) (= ">" (.-s t))) (.-n t)))]
-      {:spellingLoc {:offset (.-o t) :file (if (or (.-scr t) (.-glue t)) "<scratch space>" "<macro>") :tokLen (.-n t)}
+      {:spellingLoc (cond-> {:offset (.-o t) :file (if (or (.-scr t) (.-glue t)) "<scratch space>" "<macro>") :tokLen (.-n t)}
+                      (spell-off p i) (assoc :_main (spell-off p i)))
        :expansionLoc {:offset (.-o t) :file (.-f t) :tokLen (long m)}}
       {:offset (.-o t) :file (.-f t) :tokLen (.-n t)})))
 
@@ -2408,7 +2424,7 @@
                                                                ;; a nested class's member aside: its enclosing class's later members,
                                                                ;; which [class.mem.general]/7 shows it, are not in the parser's scopes)
                                                                (or (not (dep-this? p)) (and (not (dep-bases? p)) (<= (count (stv p CLS)) 1))))
-                                                      [(.-o (tok-at p b)) (:s lp) (boolean (in-template? p))])
+                                                      [(or (spell-off p b) (.-o (tok-at p b))) (:s lp) (boolean (in-template? p))])
                                            :referencedDecl {:name (or (:s lp) (when (:op lp) (if (re-find #"^[a-z]" (:op lp)) (str "operator " (:op lp)) (str "operator" (:op lp))))
                                                                 ;; (queue 492: a literal operator's id, [over.literal]/1, as clang
                                                                 ;; names it)
@@ -2678,7 +2694,13 @@
                                           (and (= "GCC" (.group m 1)) (#{"system_header" "poison" "dependency" "warning" "error"} (.group m 2))))
                                     last (+ (.-o t) (.end m))))
                            last))))
-                   (.-o t)))]
+                   (.-o t)))
+           ;; (queue 601 (group 5): at a macro's token, its spelling in the main file, spell-off: the previous token's for an
+           ;; "expected" placed after it and for the end of input -- diagnostic/pr96045-3.C's `#define BORKED <int>`)
+           ;; (only there: an error at a macro's token GCC may give at the next token, or at the argument's, as its own diagnostic's
+           ;; location decides -- cpp1y/digit-sep-paste.C, parse/parser-pr14875-2.C keep the expansion's line)
+           o (let [sp (when (and (identical? :eof (.-k t)) (pos? i)) (spell-off p (dec i)))]
+               (or sp o))]
        (.add d [o why (.-s t)])))))
 
 ;; (round 54, third pass) Whether the file declares an explicit or partial specialization of the class template `nm`: a
