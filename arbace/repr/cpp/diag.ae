@@ -5249,6 +5249,53 @@
 
 (swap! checks conj alignas-incomplete)
 
+;; cpp-def: a direct base whose destructor is private, its class befriending none: [class.dtor]/7, the derived class's implicit
+;; destructor is deleted (the base's inaccessible from it), so with the base's destructor virtual it is a deleted function
+;; overriding a non-deleted one, [class.virtual]/18 ("deleted function 'virtual B::~B()' overriding non-deleted function", at the
+;; class); and [class.base.init]/13, a user-provided non-delegating constructor potentially invokes the base's destructor, private
+;; within it ("'A<0>::~A()' is private within this context", at the constructor). The unit's classes by name, class templates' by
+;; their pattern (template/virtual3.C).
+(defn inaccessible-base-dtors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (= main (or (get-in x [:range :begin :file]) (get-in x [:loc :file]) main)))
+        recs (java.util.HashMap.)
+        _ (doseq [n (:nodes u) :when (mine? n)]
+            (case (:kind n)
+              "CXXRecordDecl" (when (and (string? (:name n)) (:completeDefinition n)) (.put recs (:name n) (if (.containsKey recs (:name n)) :many n)))
+              "ClassTemplateDecl" (when-let [r (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) (:inner n))]
+                                    (.put recs (:name n) (if (.containsKey recs (:name n)) :many r)))
+              nil))
+        private-dtor (fn [r]
+                       (when (and (map? r) (not-any? #(= "FriendDecl" (:kind %)) (:inner r)))
+                         (loop [ms (:inner r) acc (if (= "class" (:tagUsed r)) "private" "public")]
+                           (when-let [m (first ms)]
+                             (cond (= "AccessSpecDecl" (:kind m)) (recur (rest ms) (:access m))
+                                   (= "CXXDestructorDecl" (:kind m)) (when (= "private" acc) m)
+                                   :else (recur (rest ms) acc))))))
+        at! (fn [x msg] (when-let [o (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :dtor-access :msg msg}))))]
+    (doseq [c (:nodes u)
+            :when (and (= "CXXRecordDecl" (:kind c)) (mine? c) (:completeDefinition c) (string? (:name c)) (seq (:bases c))
+                       (not-any? #(= "CXXDestructorDecl" (:kind %)) (:inner c)))
+            :let [bad (keep (fn [b] (let [bt (-> (str (get-in b [:type :qualType])) (str/replace #"^(?:struct|class)\s+" "") str/trim)
+                                          bn (str/replace bt #"\s*<.*$" "")
+                                          d (private-dtor (.get recs bn))]
+                                      (when (and d (re-matches #"[A-Za-z_]\w*(?:\s*<[^<>]*>)?" bt)) [bt d])))
+                            (:bases c))]
+            :when (seq bad)]
+      (when (some (fn [[_ d]] (:virtual d)) bad)
+        (at! c (str "deleted function 'virtual " (:name c) "::~" (:name c) "()' overriding non-deleted function")))
+      (doseq [k (:inner c)
+              :when (and (= "CXXConstructorDecl" (:kind k)) (some #(= "CompoundStmt" (:kind %)) (:inner k))
+                         (not-any? #(and (= "CXXCtorInitializer" (:kind %)) (:delegatingInit %)) (:inner k)))]
+        (let [[bt d] (first bad)]
+          (at! k (str "'" bt "::" (:name d) "()' is private within this context")))))
+    (vec out)))
+
+(swap! checks conj inaccessible-base-dtors)
+
 ;; cpp-def: the union rule of `unions` at a function template's specialization the main file names by its explicit template arguments
 ;; (`baz<int, int &> ()`): a union member of the body whose type is the template's type parameter, its argument a reference type,
 ;; at the member (cpp0x/pr78890-2.C's U b).
