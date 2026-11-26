@@ -24587,3 +24587,46 @@ and 568 (C `_pickle`). Done here, without redoing those:
   - Redoing 537's and 551's fixes on this base: not taken. That would duplicate work that is already on its way to next.
   - Recording test_subprocess with its three launcher failures moved into `:go-runtime-descriptors`: not taken. The
     host's records, with children on goi, pass them.
+## 2026-11-26: C++ read, cpp-def2's D1 and D2 (the user)
+
+- D1 (a): gxx-dg/parse/explicit1.C joins `:gxx-only-rules` (n/a) in test/cpp/divergences-dg.edn. At C++17 it expects GCC's "explicit
+  specialization in non-namespace scope", which CWG727 removed from the standard; GCC 15 does not implement CWG727. (b), GCC's rule
+  implemented against the standard, rejected.
+- D2 (a): a new n/a class `:misplaced-expectation` for an expected error GCC's own test marks as misplaced: gxx-dg/template/typedef39.C (its
+  comment: the error "should really be on this line", in the other template). (b), keeping it deferred, rejected: matching it would copy the
+  misplacement.
+
+## 2026-11-26: the by-design review (the user)
+
+The user reviewed every by-design class still counted against completeness (bin/reap's cells of Java, Python, C++ and OCaml):
+- Java, n/a (out of both denominators): :classloading (no class loader: S4), :jvm-tools (the java launcher and the jar tool), :memory-limit
+  (no -Xmx heap limit), :j2g-reflection (caller-sensitive access checks; Arbace's reflection is lenient). Alternatives: keep by design,
+  or build class loading, a launcher, a heap limit and caller-sensitive checks.
+- Java, deferred, to build: :kerberos (pure Java in jdk26u) and :foreign (the FFM API). Alternative: n/a.
+- Java :flaky-timeout's AOT row: rerun alone and record (it passed when run again).
+- Python, deferred, to build: :c-accelerators (the C _json into the C world, as queue 568 did for _pickle; its _pickle rows clear at
+  train 6's record) and :pickle-core (_Framer's memoryview of a BytesIO buffer). Alternative: n/a.
+- Python :coroutines and C++ :oracle-text: n/a (reference-counting timing, as :finalization; the compiling clang's spelling of
+  __PRETTY_FUNCTION__ and similar).
+- Python :skipped-by-test (43): triaged by skip reason first, then decided.
+- Not decided because already decided: Python :extension-modules, :child-is-pyi and the :pyio classes clear at train 6's records; OCaml's
+  :ocamltest-tools and :unix-java are judged at the compiled level (583-1, 583-2), :opam-not-run built later (583-3).
+## 2026-11-26 — Rust C6 L4.1: the splice's statics (queue 590, VM)
+
+The host's L4.3 run (35 failures, samples 4 of 6, synthetic 33 of 67) traced to 10 of L4.1's 684 own defines reading the
+wrong static (thread::current::id::{get,set} alloc::HOOK for ID; panic_count, args::really_init and argc_argv
+thread::current::CURRENT for GLOBAL_PANIC_COUNT, ARGC, ARGV; stack_overflow's PAGE_SIZE as spawn_unchecked::MIN; current_exe and
+len_before_body a static for an anon constant). The cause was 586's own splice: rename-globals mapped every global of our module
+through RF3's global map, content -> name, so a static (no constant) became the unit's first global of the same content, a
+zero-filled `[8 x i8]` being many statics; and the check normalized every global by content, so it passed them. Now the splice
+keeps a global's name when the unit names it and it is no constant (a static's symbol is rustc's), renames only constants, among
+the unit's constants (`:constant true`); the check's normal form takes constants by content and every other global by name; a
+statics control swaps one own define's static for another of its unit and must differ. The own tree rebuilt once (the compares'
+CRATE-own.edn as 586 left them): 683 own, every define equal, both controls differ, and every copied unit's defines name the
+same globals as rustc's (the host's gl.awk, 0 of 31,684 differ). One define fell back to rustc's, ThreadId::new: our symbol of
+its `static COUNTER` (`..3std6thread2id8ThreadId3new7COUNTER`, the impl as a module) is not rustc's
+(`_RNvNvMNtNtCs.._3std6thread2idNtB4_8ThreadId3new7COUNTER`), which content renaming had hidden too. lib-unit's judge has the same
+blindness (statics by content), left for a decision.
+
+Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
+keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
