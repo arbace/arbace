@@ -2851,6 +2851,14 @@
             :let [a (analyze r)]
             :when (:bad a)]
       (report! (:first a) (str "flexible array member '" (:name (:first a)) "' not at end of '" (:tagUsed r) " " (or (:name r) "<unnamed>") "'")))
+    ;; (cpp-indep3: a flexible array member is GNU's extension, the manual's "Arrays of Length Zero": under -pedantic-errors
+    ;; GCC's pedwarn "ISO C++ forbids flexible array member 'a'" an error, at the member's name; ext/flexary11.C, flexary14.C,
+    ;; flexary27.C)
+    (let [as (vec (concat (:args u) *driver-args*))]
+      (when (and (some #{"-pedantic-errors"} as) (not (some #{"-Wno-pedantic" "-Wno-error=pedantic" "-w"} as)))
+        (doseq [r (.values by-off) m (members r)
+                :when (and (fam-type? (str (get-in m [:type :qualType]))) (string? (:name m)) (seq (:name m)))]
+          (report! m (str "ISO C++ forbids flexible array member '" (:name m) "'")))))
     ;; initializers
     (doseq [r (.values by-off) :when (not (.containsKey in-tmpl r))
             :let [fams (set (keep #(when (fam-type? (str (get-in % [:type :qualType]))) (:name %)) (members r)))
@@ -3681,7 +3689,8 @@
         (let [tds (into {} (for [m (:inner r) :when (#{"TypedefDecl" "TypeAliasDecl"} (:kind m))] [(:name m) (str/trim (str (get-in m [:type :qualType])))]))
               ty (fn [f] (let [t (str/trim (str (get-in f [:type :qualType])))] (get tds t t)))
               fs (filter #(= "FieldDecl" (:kind %)) (:inner r))
-              ok (and e (= 2 (count fs))
+              ;; (cpp-indep3: [support.initlist]/1, a class template, no union: cpp0x/initlist128.C's `union initializer_list`)
+              ok (and e (= 2 (count fs)) (not= "union" (:tagUsed r))
                       (re-matches (re-pattern (str "const " (java.util.regex.Pattern/quote e) " \\*")) (ty (first fs)))
                       (or (#{"size_t" "std::size_t" "unsigned long" "__SIZE_TYPE__" "::size_t"} (ty (second fs)))
                           ;; (cpp-indep3: decltype(sizeof 0) is std::size_t, [expr.sizeof]/6 with [support.types.layout]/3:
@@ -9607,3 +9616,37 @@
     (vec out)))
 
 (swap! checks conj member-type-access)
+
+;; cpp-indep3 (2026-11-26): [dcl.attr.deprecated]/? (C++23 /4), a use of a name declared deprecated -- the standard attribute or GNU's
+;; (the GCC manual's "Common Function Attributes": "The deprecated attribute results in a warning if the function is used anywhere in
+;; the source file") -- is diagnosed: GCC's warning "'void doNothing()' is deprecated" [-Wdeprecated-declarations], an error under
+;; -Werror (neither -Wno-deprecated-declarations nor -Wno-error=deprecated-declarations), at the use. A function of the main file
+;; declared once by its name, its uses outside its own declaration; diagnostic/pr67960.C, pr67960-2.C.
+(defn deprecated-uses
+  "The deprecated functions' uses under -Werror of the unit `u` (see above)."
+  [u starts ^String src ^String main]
+  (let [as (vec (concat (:args u) *driver-args*))
+        out (java.util.ArrayList.)]
+    (when (and (some #{"-Werror"} as)
+               (not (some #{"-Wno-deprecated-declarations" "-Wno-error=deprecated-declarations" "-Wno-deprecated" "-w"} as)))
+      (let [dep? (fn [a] (and (= "NativeAttr" (:kind a))
+                              (or (#{"deprecated" "__deprecated__"} (str (:_gnu a)))
+                                  (let [o (get-in a [:range :begin :offset]) l (get-in a [:range :begin :tokLen])]
+                                    (and o l (<= (+ (long o) (long l)) (.length src))
+                                         (#{"deprecated" "__deprecated__"} (subs src (long o) (+ (long o) (long l)))))))))
+            fns (java.util.HashMap.)]
+        (walk-nodes (fn [n _]
+                      (when (and (= "FunctionDecl" (:kind n)) (string? (:name n)) (mine-at n main))
+                        (.put fns (:name n) (conj (or (.get fns (:name n)) []) (boolean (some dep? (:inner n)))))))
+                    (:nodes u) nil)
+        (let [deps (set (for [[k v] fns :when (and (= 1 (count v)) (first v))] k))]
+          (when (seq deps)
+            (walk-nodes (fn [n _]
+                          (when (and (= "DeclRefExpr" (:kind n)) (contains? deps (get-in n [:referencedDecl :name])) (mine-at n main))
+                            (let [[l c] (line-col starts (mine-at n main))]
+                              (.add out {:line l :col c :kind :error :rule :deprecated
+                                         :msg (str "'" (get-in n [:referencedDecl :name]) "' is deprecated [-Werror=deprecated-declarations]")}))))
+                        (:nodes u) nil)))))
+    (vec out)))
+
+(swap! checks conj deprecated-uses)
