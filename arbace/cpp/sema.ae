@@ -1717,9 +1717,12 @@
                               (or (cx-subst?) (and (not (abi/void? (:ty e))) (not= :fn (:k (:ty e)))))
                               (not (re-find #":k :(auto|dep|tparam|tdep)" (pr-str (:ty e)))))
                      ;; (cpp-tpl2: in a function template's signature substituted, a substitution failure, cx-subst-fail!)
-                     (if (cx-subst?)
-                       (cx-subst-fail! "'" p "' is not a class, struct, or union type")
-                       (fail :name "'" p "' is not a class, struct, or union type")))
+                     ;; (cpp-indep3: the type named as GCC spells it, the template argument's `int` for `T`, cpp0x/lambda/
+                     ;; lambda-template11.C)
+                     (let [p (or (try (some-> (resolve 'arbace.cpp.sema/gcc-type-str) (apply [(:ty e)])) (catch Exception _ nil)) p)]
+                       (if (cx-subst?)
+                         (cx-subst-fail! "'" p "' is not a class, struct, or union type")
+                         (fail :name "'" p "' is not a class, struct, or union type"))))
                    (fail :lookup "no scope " p))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1823,7 +1826,18 @@
     (try (f)
          (catch arbace.lang.ExceptionInfo e
            (if (cx-recoverable? e) (cx-dropped! cs k) (throw e))))
-    (f)))
+    ;; (cpp-indep3: a main-file class template's specialization's member whose declaration the substitution makes ill-formed --
+    ;; `typename T::F f;` of T = B, no type F in B -- is reported at that member's declaration in the template, as GCC reports it
+    ;; (the specialization's use its "required from here" note, no error): the refusal's node the member's, the class failing as
+    ;; before; template/defarg13.C, cpp0x/alias-decl-4.C)
+    (if (and (checking?) (not (header-node? k)) (get-in k [:range :begin :offset]) (:targs (abi/cls id)) (not (:lambda (abi/cls id))))
+      (try (f)
+           (catch arbace.lang.ExceptionInfo e
+             (let [d (ex-data e)]
+               (throw (if (and (:codegen/refused d) (nil? (:cx/node d)) (not (:cx/reported d)))
+                        (ex-info (ex-message e) (assoc d :cx/node k) e)
+                        e)))))
+      (f))))
 
 (defn cx-unexpanded-packs
   "Queue 573 (the checker): the names of `packs` (a set) the type text `s` names outside a pack expansion, [temp.variadic]/5
