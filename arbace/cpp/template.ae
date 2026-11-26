@@ -4811,9 +4811,34 @@
         (try (bind-scope scope (tparams n) nil -1) false
              (catch arbace.lang.ExceptionInfo e (sema/cx-recoverable? e))))))
 
+(defn- cx-structural-params!
+  "cpp-def2 (the checker): [temp.param]/6-7 (C++20), a non-type template parameter's type is structural: a class type that is no
+  literal type (sema's cx-non-literal, sure) is not, GCC's \"'X' is not a valid type for a template non-type parameter because it
+  is not structural\" at the parameter; a literal operator template whose one parameter that is ([over.literal]/5) then has an
+  invalid parameter list too, GCC's second error at its name (cpp2a/udlit-class-nttp-neg2.C)."
+  [scope n]
+  (when-let [h (when (and (sema/checking?) (>= (long sema/*cxx-year*) 20) (not (sema/header-node? n))) sema/*on-refusal*)]
+    (doseq [k (kids n) :when (= "NonTypeTemplateParmDecl" (:kind k))
+            :let [qt (str/trim (str/replace (str (get-in k [:type :qualType])) #"\s*\.\.\.$" ""))]
+            :when (re-matches #"[A-Za-z_][A-Za-z_0-9]*(::[A-Za-z_][A-Za-z_0-9]*)*" qt)
+            :let [t (try (sema/resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
+                  u (when (map? t) (abi/unq t))]
+            :when (and u (abi/class? u) (not (dependent? [u])))
+            :let [why (try (sema/cx-non-literal u) (catch arbace.lang.ExceptionInfo _ nil))]
+            :when why]
+      (h (ex-info (str "codegen: '" (:name (abi/cls (:id u))) "' is not a valid type for a template non-type parameter because it is not structural")
+                  {:codegen/refused :template :cx/node k})
+         k)
+      (when-let [f (some #(when (and (= "FunctionDecl" (:kind %)) (str/starts-with? (str (:name %)) "operator\"\"")) %) (kids n))]
+        (when (= 1 (count (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (kids n))))
+          (let [at (if-let [o (get-in f [:loc :offset])] {:range {:begin (:loc f)}} f)]
+            (h (ex-info (str "codegen: literal operator template '" (:name f) "' has invalid parameter list") {:codegen/refused :template :cx/node at}) f)))))))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
+  (when (#{"FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind n))
+    (cx-structural-params! scope n))
   (case (:kind n)
     "ClassTemplateDecl"
     (if-let [[cn qt nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
