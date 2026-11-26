@@ -25246,3 +25246,58 @@ last fixes (probed --only).
 Left: test_jit_is_active (594's _testinternalcapi), test_synopsis_sourceless (DECISION 595-1), CodeWeakRefTest.test_basic (a
 holder of code objects not found), and the moved rows. Alternatives considered: a refcount for C consumers (test_memoryview_release;
 not taken, :finalization's decision), gc.is_tracked answers by type (not taken: :gc-collector is n/a by decision).
+## 2026-11-26 — pyi: `:ctypes-port` and `:capi-port`'s remaining ports (queue 598, VM)
+
+Branch 598-py-ctypes-capi-tail on origin/train-6 (025065fd1), for train 7 (Python 100%). The two classes' 43 rows of
+test/python/divergences.edn (bin/pyi divergences --methods: `:ctypes-port` 18, `:capi-port` 25).
+
+- Measure (step 1, train 6's runtime, `bin/pyi check --aot --lib-test --only` of the 43 rows, arm64): 12 pass already (the
+  three c_longdouble rows of py-capi-1125; of `:capi-port` the nine py-capi-1125 built), 31 fail.
+- Ported (go/arbace/pyctypes, go/arbace/py; printed by bin/pyi runtime print, edited after CPython 3.14.10's sources, read back):
+  - Modules/_ctypes' audit events, none of which pyctypes raised: ctypes.call_function (_ctypes_callproc), cdata (PyCData_AtAddress),
+    cdata/buffer (from_buffer, from_buffer_copy), dlsym (in_dll, a function from a library), dlsym/handle, dlopen, addressof,
+    PyObj_FromPtr, get_errno, set_errno, string_at, wstring_at, memoryview_at; `_ctypes.call_function` and `call_cdeclfunction`,
+    which raised NotImplementedError (callAddress: ConvParam's arguments, an int result).
+  - The stable ABI's 905 symbols (Misc/stable_abi.toml without ifdef, plus HAVE_FORK's four and PyThread_get_thread_native_id,
+    as test_stable_abi_ctypes' SYMBOL_NAMES): a function with no native a missingNative (as bindMissing does for the world's own
+    references), the type objects and singletons their handles, PyExc_* a cell with the type, the other data as CPython defines them
+    (Py_Version 0x030E0AF0, _Py_SwappedOp, the file system encoding's strings, Py_UTF8Mode, PyOS_InputHook NULL,
+    PyStructSequence_UnnamedField), PyModuleDef_Type a "moduledef" type when the world has none (PyModuleDef_Init uses it too).
+  - PyBytes_FromFormat (PyBytes_FromFormatV), PyUnicodeWriter_Format, PyCapsule's Get/SetContext, Get/SetDestructor, SetName,
+    SetPointer (the capsule's destructor now looked up at collection), PyThreadState_EnterTracing/LeaveTracing (py's
+    monTracing), GetFrame, GetID, PyUnstable_Object_ClearWeakRefsNoCallbacks (py: the references cleared, no callback),
+    PyUnstable_Object_GC_NewWithExtraData (genericAllocExtra), PyUnicode_Resize, PyUnstable_GC_VisitObjects (over the handles:
+    every object C can name has one), PyRefTracer_Set/GetTracer, IsUniquelyReferenced (C's count), IsUniqueReferencedTemporary
+    (0), Enable/TryIncRef.
+  - PyThreadState_SetAsyncExc: py's threadInfo keeps the exception, the eval breaker's breakAsyncExc (unused until now) raises it
+    at the thread's next check; compiled frames go to the loop while one is pending (AotTracing), as for a trace function.
+    Considered: a check in the compiled code's blocks of its own (the AOT compiler's change, every block's cost).
+  - array.buffer_info()'s address: once _ctypes is imported, the array's bytes mapped into the C world as from_buffer maps them
+    (py.ExtBufferAddress), so from_address of it reads and writes the items in place (test_numbers' three from_address tests;
+    before, the fixed 0x10000 faulted). Considered: leaving them by design (queue 261's (2)); the mapping is the same one
+    from_buffer already shares.
+- Classes: Packed1's subtest id to `:subtest-ids` (built only under MSVC or x86 gcc, skipped by the reference's compiler, run and
+  passed inside test_generated_data on ci's x86_64 world); test_c_char_p (sys.getrefcount) to `:capi-refcounts`; seven test_capi
+  rows that now fail by reference counts or immortality held in `:capi-port`'s :tests until train 7's record (the record's
+  older messages match `:capi-port` first), then `:capi-refcounts`.
+- DECISIONs in the report (.tmp/q598/598-report.md): test_issue18060_a/b/c (an ABI coincidence), test_csqrt (the world without
+  _Py_FFI_SUPPORT_C_COMPLEX; ci's csqrtl gives -0 0, a C crop request), test_audit's test_ctypes_call_function (string_at of
+  id(...) + 40: id is no address in pyi). Not this lane's: test_call's method descriptor flag (594), test_getargs' two str
+  subclass keywords (py-core).
+## 2026-11-26 — queue 598's DECISIONs answered (the user: 598-1 (a), 598-2 (a), 598-3 (a)) (queue 598, VM)
+
+- 598-1 (a) and 598-3 (a): test_issue18060_a/b/c (an ABI coincidence: a Structure of two doubles passed where atan2 takes two
+  doubles) and test_audit's test_ctypes_call_function (string_at(id(...) + 40): id() is no CPython address) are n/a, in the new
+  class `:native-abi-addresses` of test/python/divergences.edn (before `:ctypes-port`, which keeps test_csqrt alone of the four's
+  neighbours).
+- 598-2 (a): csqrtl. Probed with bin/ci run (.tmp/q598/cx/): musl's csqrtl is `return csqrt(z);`, and ci's builder returned the
+  double complex value at the long double complex result's size without converting it (argument and initializer conversions were
+  right; the return statement's :m case took the node as it was), so csqrtl gave 0 0 / -0 0. The cause is fixed in the builder
+  (arbace/c/build.ae, `return`'s aggregate case converts a complex result to the function's complex type, C11 6.8.6.4p3), not in
+  musl's sources: the world's musl comes from the pinned tarball with no overlay, and every complex function returning another
+  complex type had the same fault. After it the probe gives csqrtl(-1 - 0.01i) = 0.0049999375027342139 - 1.0000124996093955i, as
+  csqrt. tools/pyi/clib/ctypestest/lib.conf's cflags add -D_Py_FFI_SUPPORT_C_COMPLEX=1, so _ctypes_test.c builds my_csqrt,
+  my_csqrtf and my_csqrtl; the world is not rebuilt here (train 7 rebuilds it from all lanes; until then the committed nodes'
+  Key is the old flags'). test_csqrt is expected to pass after that rebuild (pyctypes' 'G' calls as ci's long double complex,
+  not probed against the rebuilt world).
+- No module run (the classes need none); bin/pyi divergences on the committed record: no new problem.

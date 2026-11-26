@@ -9399,3 +9399,28 @@ PyUnicodeWriterTest.test_widechar, read past b'' by wcslen, fixed by keepBytes' 
   Python TreeBuilder subclass's comment factory between _elementtree's two data items).
 - **PyFunction_SetVectorcall**: py.Function.Vectorcall, every call path of a Python function through it when set; the
   native sets the C vectorcallfunc (test_call's test_setvectorcall rows).
+## As built: 598, `:ctypes-port` and `:capi-port`'s remaining ports (2026-11-26, the Mac VM, queue 598)
+
+The two classes' 43 rows at train 6 (025065fd1): measured by `bin/pyi check --aot --lib-test --only` on train 6's runtime, 12
+pass already (py-capi-1125's), 31 fail. Built after CPython 3.14.10's Modules/_ctypes, Objects/ and Python/
+(`go/arbace/pyctypes/capi_q598.go`, `capi_stable.go`; callproc, ctypes, module, world; `go/arbace/py`'s audit, array, weakref and
+thread files):
+
+- **_ctypes' audit events** (none were raised): `ctypes.call_function`, `cdata`, `cdata/buffer`, `dlsym`, `dlsym/handle`, `dlopen`,
+  `addressof`, `PyObj_FromPtr`, `get_errno`, `set_errno`, `string_at`, `wstring_at`, `memoryview_at`; `_ctypes.call_function` and
+  `call_cdeclfunction` given.
+- **The stable ABI's symbols** for pythonapi (test_stable_abi_ctypes): Misc/stable_abi.toml's functions and data (the ifdefs
+  pyi's configuration defines included); a function with no native is a missingNative, as a world's undefined reference is.
+- **Natives**: PyBytes_FromFormat, PyUnicodeWriter_Format, the capsule's setters and getters, PyThreadState_EnterTracing,
+  LeaveTracing, GetFrame, GetID, ClearWeakRefsNoCallbacks, GC_NewWithExtraData, PyUnicode_Resize, PyUnstable_GC_VisitObjects
+  (over the handles: an object C can name has one), PyRefTracer's setter and getter, IsUniquelyReferenced,
+  IsUniqueReferencedTemporary, TryIncRef.
+- **PyThreadState_SetAsyncExc**: raised at the thread's next eval breaker check (`breakAsyncExc`); compiled frames go to the loop
+  while one is pending.
+- **array.buffer_info()** gives the address of the array's bytes mapped into the C world once _ctypes is imported, so
+  `from_address` of it shares the items (test_numbers' from_address tests).
+
+Left: test_issue18060's three (an ABI coincidence), test_csqrt (the world without `_Py_FFI_SUPPORT_C_COMPLEX`; ci's `csqrtl`
+wrong), test_audit's `string_at(id(...) + 40)` (id is no address): the report's DECISIONs; test_call's method descriptor flag
+(queue 594's), test_getargs' str subclass keywords (py-core's); seven test_capi rows of reference counts and immortality, n/a by
+`:capi-refcounts`' rule, moved there with train 7's record.
