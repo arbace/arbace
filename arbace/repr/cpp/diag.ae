@@ -5249,6 +5249,45 @@
 
 (swap! checks conj alignas-incomplete)
 
+;; cpp-def: the union rule of `unions` at a function template's specialization the main file names by its explicit template arguments
+;; (`baz<int, int &> ()`): a union member of the body whose type is the template's type parameter, its argument a reference type,
+;; at the member (cpp0x/pr78890-2.C's U b).
+(defn union-ref-specializations
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
+        unions (fn us [x] (cond (map? x) (concat (when (and (= "CXXRecordDecl" (:kind x)) (= "union" (:tagUsed x)) (:completeDefinition x)) [x])
+                                                 (mapcat us (:inner x)))
+                                (sequential? x) (mapcat us x) :else nil))
+        ;; template name -> [[param-index field] ...]
+        tm (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (when (and (= "FunctionTemplateDecl" (:kind n)) (string? (:name n)) (mine? n))
+                          (let [ps (vec (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:inner n)))
+                                f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n))
+                                fs (for [un (unions (:inner f)) m (:inner un)
+                                         :when (and (map? m) (= "FieldDecl" (:kind m)) (not (:isImplicit m)) (mine? m))
+                                         :let [i (first (keep-indexed #(when (and (= "TemplateTypeParmDecl" (:kind %2)) (= (:name %2) (str/trim (str (get-in m [:type :qualType]))))) %1) ps))]
+                                         :when i]
+                                     [i m])]
+                            (when (seq fs) (.put tm (:name n) (vec fs))))))
+                      (:nodes u) nil)
+        seen (java.util.HashSet.)]
+    (when-not (.isEmpty tm)
+      (walk-nodes (fn [n _]
+                    (when (and (= "DeclRefExpr" (:kind n)) (seq (:explicitTemplateArgs n)))
+                      (when-let [fs (.get tm (get-in n [:referencedDecl :name]))]
+                        (doseq [[i m] fs :let [a (str/trim (str (get (vec (:explicitTemplateArgs n)) i)))]
+                                :when (and (re-find #"&$" a) (.add seen m))]
+                          (when-let [o (or (get-in m [:loc :offset]) (get-in m [:range :begin :offset]))]
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :union
+                                         :msg (str "non-static data member '" (:name m) "' in a union may not have reference type '" (str/replace a #"\s+(&&?)$" "$1") "'")})))))))
+                  (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj union-ref-specializations)
+
 ;; [class.union.general]/? : a union has no base classes and is no base class: GCC's "derived union 'U' invalid", at the union, and
 ;; "base type 'U' fails to be a struct or class type", at the derived class; a base named by a union's name the file defines once
 ;; (no class of that name beside it).
