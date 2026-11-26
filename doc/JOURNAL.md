@@ -25444,3 +25444,16 @@ DECISIONs proposed (none applied; recommended option first):
   queue 491's (098ceb730, class.ae: the classes RunMain initializes before main, a slice) and b04c83d39's (defineclass.ae:
   the boot loader's classes defined from bytes, a map), the two met in train 4's merge of next (891d550c1) after its build.
   defineclass.ae's is `bootDefined` now (its three uses); 491's keeps its name (thread.ae, object_test.ae).
+
+## 2026-11-26: C++ read, DECISION cpp-indep3-1 and cpp-def3's friend58.C (the user)
+
+- DECISION cpp-indep3-1 (a) (the user, 2026-11-26), applied: the 104 clang-only rows whose every missed line is an error g++ 15.2.0
+  tags [-Wtemplate-body] and drops under -Wno-template-body (a construct of a template never instantiated: ill-formed, no diagnostic
+  required, [temp.res.general]/6) join test/cpp/divergences-dg.edn's :ifndr-uninstantiated-template (n/a), the criterion of proposal D
+  (the user, 2026-11-23) for the deferred rows. The measure is kept in-tree: test/cpp/ifndr/template-body.sh (by hand, the oracle: g++
+  with each file's recorded -std and options, then -Wno-template-body; never a gate step), its output over the 1,069 clang-only rows of
+  mac/next `0b3174413` test/cpp/ifndr/template-body.tsv, the 104 files test/cpp/ifndr/clang-only.txt; the class's :why names them.
+  Alternative not taken: (b) building GCC's definition-time checks of non-dependent constructs.
+- template/friend58.C (cpp-def3's question; the user, 2026-11-26) joins :gxx-only-rules (n/a), as parse/explicit1.C did: its
+  `template<typename T> friend void freeList<T, baz>::foo();` is the form [temp.friend]/5 allows (a member of a dependent type
+  declared a friend), which GCC 15 rejects; the expected error is GCC's own rule.
