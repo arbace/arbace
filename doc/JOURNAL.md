@@ -25566,3 +25566,12 @@ runs only (doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-26, the user): DECISIO
   template/error-recovery1.C; and template/crash34.C). `bin/reap --record`: C++ read 6,178 / 0 / 104 -> 6,185 / 0 / 97;
   `bin/crops-score --record`: read independence 0.919 -> 0.920; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0
   problems. Left: pr90138.C, pr81247-a.C, pr113788.C, concepts-pr67178.C, pr65340.C, defarg18/19.C (reasons in the survey).
+
+## 2026-11-26: the big lock's small slot takes jobs up to 16 GiB (the user)
+
+The host sat underused: a record run declared at 16 GiB (using about 2 GB) held the one big slot while train 8's build and an OCaml
+shard waited, with 54 GB available and a load of 1.5. The user chose to keep one big slot and raise the side slot's limit from 8 to
+16 GiB (alternatives: two slots under the memory rule; no change). `bin/heavy-lock` reads the limit from `HEAVY_LOCK_SMALL_GIB`, else
+the file `LOCK.small_gib` (the main checkout's `.tmp/big.lock.small_gib`, now 16), else 8, on every look, so a waiter already in the
+queue sees a change once it runs this copy. The memory rule still admits a side job only when its declaration fits MemAvailable less
+2 GiB less the holder's unreached declaration; the watchdog stays. test/gate/heavy-lock-test.bash case 7 covers the file; all pass.
