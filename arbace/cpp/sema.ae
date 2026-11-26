@@ -835,6 +835,20 @@
                      (throw (ex-info (str "codegen: " (subs (str (ex-message e)) 9)) (assoc (ex-data e) :codegen/refused :subst :cx/sure-drop true :cx/subst true))))
                    (when (and (cx-subst?) (:cx/subst (ex-data e))) (throw e))
                    (when (and *cx-tc-args* (checking?) (sure-failure? e)) (throw e))
+                   ;; (queue 601 (group 2), the checker: in a class template's specialization of concrete arguments, a member's
+                   ;; decltype whose operand surely fails is the member's error, [temp.inst]/3 (its declaration instantiated with the
+                   ;; class), no substitution failure: reported at the operand, its candidates' explanations with it, the member's
+                   ;; type then erroneous (dependent, so its uses say nothing more); cpp0x/error4.C's `typedef
+                   ;; decltype(get<T>(declval<T>())) type;` for S<X>)
+                   (when (and (checking?) (not (cx-subst?)) (sure-failure? e) *on-refusal* (not (:cx/reported (ex-data e)))
+                              (loop [s scope]
+                                (cond (nil? s) false
+                                      (:fn-type s) false
+                                      (:cls s) (let [c (abi/cls (:cls s))]
+                                                 (boolean (and (seq (:targs c)) (not (:header c))
+                                                               (not (re-find #":k :(tparam|tdep|dep|auto)" (pr-str (:targs c)))))))
+                                      :else (recur (:parent s)))))
+                     (*on-refusal* e (or (:cx/node (ex-data e)) n)))
                    (if (:codegen/refused (ex-data e))
                      (do (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") dependent:" (.getMessage e))))
                          ;; (only an unknown name, a lookup that found nothing after argument-dependent lookup, is
@@ -5869,6 +5883,9 @@
        :dyncast (if (checking?) (ce-dyncast e env) (not-constant "the expression :dyncast"))
        ;; (cpp-ce2: __builtin_bit_cast, the checker's: ce-bit-cast)
        :bit-cast (ce-bit-cast e env)
+       ;; (queue 601: P0466R5's builtins: a null pointer to member's false, else no constant folded here)
+       :ptm-builtin (let [vs (mapv ev (:args e))]
+                      (if (every? #(and (number? %) (zero? (long %))) vs) false (not-constant "a P0466R5 builtin's value")))
        :ptrdiff (let [a (ev (:l e)) b (ev (:r e))]
                   (if (and (ce-ptr? a) (ce-ptr? b) (ce-same-base? a b)) (- (long (::i a)) (long (::i b))) (not-constant "a pointer difference")))
        ;; (cpp-rt-own: the bit counts and byte swaps folded as clang's ExprConstant does them, BI__builtin_popcount, clz, ctz and
@@ -11159,6 +11176,9 @@
 (def ^:private value-builtins
   {"__builtin_expect" :expect "__builtin_expect_with_probability" :expect "__builtin_constant_p" :constant-p
    "__builtin_is_constant_evaluated" :is-constant-evaluated
+   ;; (queue 601: P0466R5's, which libstdc++ 15.2's <type_traits> calls under __has_builtin for
+   ;; std::is_pointer_interconvertible_with_class and std::is_corresponding_member, the checker's)
+   "__builtin_is_pointer_interconvertible_with_class" :ptm-interconv "__builtin_is_corresponding_member" :ptm-corresponding
    "__builtin_addressof" :addressof
    ;; (queue 393, W4: <coroutine>'s coroutine_handle over the frame, clang's CGCoroutine's llvm.coro.done, .resume, .destroy
    ;; and .promise, which CoroCleanup lowers as the switch ABI lays the frame out: the resume and destroy functions' pointers
@@ -11686,7 +11706,12 @@
             (when (> total max-new-size)
               (*on-refusal* (ex-info (str "codegen: size '" total "' of array exceeds maximum object size '9223372036854775807'")
                                      {:codegen/refused :array})
-                            n)))))
+                            ;; (queue 601 (group 3): outside a template's specialization GCC's place is the new-type-id's end, its last
+                            ;; bound's `]`, the expression having no initializer; a specialization's error at the `new`: init/new38.C)
+                            (if (and (not (some-> (:fn-id ctx) fnd :tinst)) (not (:tinst ctx)) (get-in n [:range :end :offset])
+                                     (not-any? #(and (map? %) (#{"InitListExpr" "ParenListExpr" "CXXConstructExpr"} (:kind %))) (:inner n)))
+                              (assoc n :range {:begin (get-in n [:range :end]) :end (get-in n [:range :end])})
+                              n))))))
       (catch arbace.lang.ExceptionInfo x (when (System/getenv "CX_NEW_TRACE") (binding [*out* *err*] (println "new-size refused" (ex-message x)))) nil))))
 
 (defn- cx-const-default-constructible?
@@ -13179,6 +13204,25 @@
                       (cond (ce-try x) {:op :int :v 1 :ty abi/int* :cat :pr}
                             (and (or (abi/integral? t) (abi/enum? t) (abi/floating? t)) (pure? x)) {:op :int :v 0 :ty abi/int* :cat :pr :no-fold true}
                             :else {:op :int :v 0 :ty abi/int* :cat :pr}))
+        ;; (queue 601, the checker: P0466R5's builtins, [meta.member]: one argument, or two, each a pointer to a data member of a
+        ;; complete class -- GCC's "'X' needs a single argument" ("needs two arguments"), "'X' argument is not pointer to member",
+        ;; "invalid use of incomplete type 'struct B'", each a sure error at the call; its value a null argument's false, else no
+        ;; constant the slice folds; cpp2a/is-corresponding-member3.C, is-pointer-interconvertible-with-class3.C, 6.C)
+        (:ptm-interconv :ptm-corresponding)
+        (let [nm (get-in (first (kids n)) [:referencedDecl :name])
+              args (vec (rest (kids n)))
+              want (if (= b :ptm-interconv) 1 2)]
+          (when-not (checking?) (fail :name "unknown name " nm))
+          (when-not (= want (count args))
+            (fail :call "'" nm "' needs " (if (= 1 want) "a single argument" "two arguments")))
+          (let [xs (mapv #(rv (analyze ctx %)) args)]
+            (doseq [x xs :let [t (abi/unq (:ty x))]]
+              (when-not (and (= :mptr (:k t)) (not (abi/fn? (abi/unq (:to t)))))
+                (fail :call "'" nm "' argument is not pointer to member"))
+              (when (and (number? (:cls t)) (cx-incomplete-cls {:k :class :id (:cls t)}))
+                (throw (ex-info (str "codegen: invalid use of incomplete type '" (gcc-type-str {:k :class :id (:cls t)}) "'")
+                                {:codegen/refused :incomplete :cx/node (nth args (.indexOf ^java.util.List xs x))}))))
+            {:op :ptm-builtin :args xs :ty abi/bool* :cat :pr}))
         ;; (CP378 (a): 0 in code that runs, marked :ice: the evaluator's 1 when manifestly constant-evaluated)
         :is-constant-evaluated {:op :int :v 0 :ice true :ty abi/bool* :cat :pr}
         :pause {:op :pause :ty abi/void :cat :pr}
