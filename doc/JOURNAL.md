@@ -25544,3 +25544,25 @@ The user chose 596-1 (a): a run on the own copy of std's IR gets records of its 
 refusing; crops-score reads C6 from those inputs (`:case-inputs`' `:from-other`, test/crops/independence.edn), the main inputs' C6
 when they are absent. Alternative (b), one record with each row naming its std, not taken (the user's choice). Tested on scratch
 runs only (doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-26, the user): DECISION 596-1 (a)"); no whole check.
+## 2026-11-26 — C++ read: GCC's parser recovery after syntax errors in templates and class heads (queue 599, VM)
+
+- Branch `599-cpp-parser-recovery` from origin/next `3725c6dc8` (cpp-def3, cpp-indep3), worktree q573. The 104 deferred read rows
+  listed from the records (check-dg-linux-amd64.edn and the own record both failing, not named by an earlier class: 103 :own-diag, 1
+  timeout), the 58 not `accepted` probed on the own front end at the base (one targeted run, `--only`), 32 with an own syntax error;
+  g++ 15.2.0 (the host's, by hand) gave GCC's messages where the test's words left the place or the recovery open. Rules only from the
+  standard and GCC's messages; no GCC or clang code.
+- arbace/repr/cpp/parse.ae, seven recovery rules (doc/cpp/CPP-SURVEY.md, "As built: 599"): a failed template declaration's
+  elaborated class no template, a non-template class defined as a template kept; a base-clause followed by an identifier declares it
+  a variable; an enumerator-list's error ends the enum and the recovery resumes at the error (a decline's `:resume`); a `>=` closing an
+  argument list takes its `=`; too many template-parameter-lists in a class; a failed class head's body skipped (X no class template:
+  a class of the scope, or arguments naming an undeclared template); a member with no type declined at its name.
+- Alternatives: resuming every decline at its error token (GCC's general way) rather than the enum's alone, not taken: the recorded
+  passes rely on the declaration-start skip; GCC's own "'A' is not a template" message at `A<0>` uses, not needed (the lines carry).
+- Targeted check, 501 files (the rows and the recorded passes each rule can reach): 0 lost; memfriend7.C's new extra (a friend member's
+  two template-heads) fixed before the run. The one regression at `2458343f9`: next's 3,187 own passes and the rows, 3,246 files in two
+  parts: cpp0x/pr71251.C lost (the two-heads diagnostic's place), fixed at `7027d84a1`, the 22 files with two adjacent template-heads
+  rerun: all pass. Recorded from the three runs (`--judge --record`): 3,187 -> 3,195 own passes, 0 lost; 8 rows own (7 deferred:
+  diagnostic/enum2.C, inherit/error4.C, parse/crash28.C, parse/pr68722.C, parse/template28.C, template/crash59.C,
+  template/error-recovery1.C; and template/crash34.C). `bin/reap --record`: C++ read 6,178 / 0 / 104 -> 6,185 / 0 / 97;
+  `bin/crops-score --record`: read independence 0.919 -> 0.920; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0
+  problems. Left: pr90138.C, pr81247-a.C, pr113788.C, concepts-pr67178.C, pr65340.C, defarg18/19.C (reasons in the survey).
