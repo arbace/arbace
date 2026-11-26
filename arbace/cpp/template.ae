@@ -3525,7 +3525,11 @@
       :var (let [vid (some #(when (= (:name (sema/var* %)) (:name n)) %) (:statics c))]
              (when-not vid (fail :template "no static member " (:name n) " of " (:name t) " to define"))
              ;; a definition without an initializer keeps the one the class gave (static const int x = 3; ... X<T>::x;)
-             (upd-var! vid #(cond-> % (first (kids n)) (assoc :init (first (kids n)) :init-style (:init n) :def-scope s)))
+             (upd-var! vid #(cond-> % (first (kids n)) (assoc :init (first (kids n)) :init-style (:init n) :def-scope s)
+                                    ;; (cpp-def3, the checker: a constinit or constexpr member's error at its definition, where GCC
+                                    ;; reports it, not at its class's declaration: DRs/dr2478.C's `T S<T>::x = S<T> ().foo ();`)
+                                    (and (sema/checking?) (first (kids n)) (or (:cx-constinit %) (:cx-constexpr %)) (:range n) (not (sema/header-node? n)))
+                                    (assoc :cx-range (if (:offset (:loc n)) {:begin (:loc n) :end (:loc n)} (:range n)) :cx-init-range (:range (first (kids n))))))
              ;; (queue 351: the definition's bound for a member declared with none, `static size_type _S_empty_rep_storage[];`
              ;; defined `_S_empty_rep_storage[(sizeof(_Rep_base) + ...) / sizeof(size_type)]`: it had been a zero-size object)
              (let [v (sema/var* vid)]
@@ -4500,7 +4504,14 @@
           (do (upd-var! vid #(-> % (assoc :init (first (kids n)) :init-style (:init n) :def-scope scope :defined true :linkonce false
                                           ;; (cpp-rt-own: no longer the header's declaration without an initializer, extern)
                                           :extern false :internal false :internal-l false)
-                                 (dissoc :pending-def)))
+                                 (dissoc :pending-def)
+                                 ;; (cpp-def3, the checker: DR2478, the explicit specialization's own constinit -- `template <>
+                                 ;; constinit long S<long>::y = ...;` though S<T>::y is not -- its errors at it, DRs/dr2478.C)
+                                 (cond-> (and (sema/checking?) (not (sema/header-node? n)) (:range n))
+                                   (assoc :cx-range (if (:offset (:loc n)) {:begin (:loc n) :end (:loc n)} (:range n)) :cx-init-range (:range (first (kids n)))))
+                                 (cond-> (and (sema/checking?) (not (sema/header-node? n))
+                                              (or (:_constinit n) (some (fn [a] (= "ConstInitAttr" (:kind a))) (:inner n))))
+                                   (assoc :cx-constinit true :constinit true))))
               ;; (cpp-rt-own: and defined in this unit, among the definitions emit-globals writes: locale_facets.cc's
               ;; `template<> const char* __timepunct_cache<char>::_S_timezones[14] = {...};`, never written before)
               (when-not (some #{[:var vid]} @sema/*order*) (swap! sema/*order* conj [:var vid])))
@@ -4527,6 +4538,11 @@
                                    :inits (filter (fn [k] (= "CXXCtorInitializer" (:kind k))) (kids n)) :param-names (mapv :name pn)
                                    :inline (boolean (:inline n)) :spec-member true)
                           (dissoc :lazy :keep-def-scope :analyzed)
+                          ;; (cpp-def3, the checker: DR2478 ([temp.expl.spec]/?): the explicit specialization's own constexpr and
+                          ;; consteval, not the member's of the template -- S<int>::foo constexpr though S<T>::foo is not, S<int>::bar
+                          ;; not though S<T>::bar is: DRs/dr2478.C's constinit variables)
+                          (cond-> (and (sema/checking?) (not (sema/header-node? n)))
+                            (assoc :constexpr (boolean (or (:constexpr n) (:_consteval n))) :consteval (boolean (:_consteval n)) :cx-explicit-spec true))
                           ;; a header's: analyzed when used (G4)
                           (cond-> (sema/header-node? n) (assoc :lazy true))))))
     :template))
