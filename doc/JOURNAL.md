@@ -24066,3 +24066,51 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
   passes, C++ read 6,139 / 0 / 146); `bin/crops-score --record`: C++ read independence 0.8940 -> 0.9020, independence 0.9788 ->
   0.9804. `bin/reap`, `bin/crops-score --judge --strict`,
   `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26 — C++ read: GCC's recovery after syntax errors and single rules (cpp-def2)
+
+- Branch `cpp-def2-1126` from mac/next `9f06d5027` (a lane of the burst after cpp-def; cpp-indep2 beside it on the rows only clang's
+  record passes, a disjoint set, merged at `3e694b11a`). The read cell at the base: 6,139 pass / 0 by design / 146 deferred (own-diag
+  145, gcc-own-rules 1). A run of the 146 at the base (`.tmp/dg-base`, one thread): own pass 0; 40 with a syntax error of the native
+  parser (a declined construct, whose unit the checker did not analyze), 27 of the constant evaluator, about 13 of definition-time
+  checks of templates, the rest single rules. Each row read against its dg lines and the own errors; the rules from the standard's
+  text or GCC's documented messages and manual as the tests state them, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built:
+  cpp-def2", each rule with its rows).
+- GCC's recovery: arbace/repr/cpp/diag.ae's diagnose runs the checker on a unit with declined constructs too (`REPR_CPP_SEMA_DECLINED=0`
+  the old way), the declined declarations' names and a declined member's class dropped from the start (arbace.cpp.sema's
+  *cx-dropped-seed*, queue 526's cascade rule), a name another declaration declares excepted. Tried first on every fifth recorded own
+  pass with a syntax error (208 of 1,042, `.tmp/dg-x2`): all passed still, then the default.
+- The single rules: arbace/cpp/template.ae (sure-incomplete specializations of templates not defined and explicit specializations
+  declared alone; a default template argument's own error and "template argument N is invalid"; a deleted member template's
+  redefinition; a placeholder's type-constraint whose arguments fail; structural non-type parameters), arbace/cpp/sema.ae (opaque
+  enumerations' members; qualifiers naming sure-incomplete specializations; virtual calls through a pointer to a variable outside the
+  evaluation; default arguments' conversions at the call too; deleted definitions redefined; void{...}; the built-in subscript's
+  operands; a block scope's dependent using-declaration of a non-class; constexpr constructors of classes with virtual bases; an
+  enclosing local odr-used in a lambda; [over.ics.rank]/3.1; P1957R2's pointer to bool; a statement expression's labeled last
+  statement; a conversion function template's specialization named), arbace/repr/cpp/diag.ae (void lists in templates; explicit
+  instantiations with placeholder parameters; the virtual-base constexpr error at the body's end). Every sema change is the checker's
+  alone ((checking?)): the code generator's paths unchanged.
+- Checked: each rule on its rows (.tmp/bin/d1), the 40 syntax rows with the recovery on (`.tmp/dg-x1`, `.tmp/dg-x3`), then two
+  regressions over next's recorded own passes (2,969) and the 146 (3,115 files, two parts of 2 threads, the big lock's small slot,
+  HEAVY_MEM_GIB=5, a frozen run tree): at `1ddac633e` 4 lost (cpp1z/class-deduction52.C, cpp2a/range-for7.C, parse/casting-operator2.C,
+  units the recovery now analyzed, and cpp2a/concepts-pr67774.C's timeout), fixed; at `07d95aaf2` 4 lost (cpp0x/auto11.C, auto43.C,
+  template/conv11.C, by the conversion-name refusal, and the timeout again), fixed. mac/next `3e694b11a` (cpp-indep2's record, +98
+  own passes) merged (the survey's two sections kept), then a targeted rerun at the merged head `639f613d8`: cpp-indep2's 98 new
+  passes, every recorded own pass with a syntax error, the rows and the files with a named conversion function call (1,201 files):
+  0 lost, 16 gained; concepts-pr67774.C alone on one thread: passes (281 s at cpp-def's run, a load-dependent timeout). mac/next had
+  not moved when recorded. Recorded from the four parts in turn (`--judge --record`, the merged head's two last): 16 rows to own
+  pass (cpp0x/constexpr-ice21.C, cpp0x/defaulted10.C, cpp0x/dr2351.C, cpp0x/initlist92.C, cpp0x/pr82401.C, cpp1y/pr60627.C,
+  cpp1z/constexpr-lambda10.C, cpp2a/concepts-placeholder3.C, cpp2a/concepts-requires1.C, cpp2a/constexpr-virtual20.C,
+  cpp2a/udlit-class-nttp-neg2.C, cpp2a/using-enum-7.C, other/crash-11.C, overload/defarg9.C, template/crash89.C, template/crash99.C),
+  0 recorded passes lost. `bin/reap --record`: C++ read 6,139 / 0 / 146 -> 6,155 / 0 / 130; `bin/crops-score --record`: C++
+  completeness 0.9881 -> 0.9887, independence 0.9804 -> 0.9808. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
+  `bin/markers-check`: 0 problems.
+- Tried and dropped: CWG2310's incomplete derived class in a pointer conversion (cpp0x/constexpr-base6.C, 6b.C: the static data
+  member's initializer is analyzed after its class completes, no point to judge it at); a pointer to member's conversion inside its
+  class (cpp0x/ptrmem-cst1.C, likewise); the variable templates' partial specializations' four errors (cpp1y/var-templ19.C: the
+  ambiguity is the slice's unsure partial ordering); a class-head's failure skipping its body (parse/crash28.C: a parser change).
+- Held for the user (the coordinator, 2026-11-26): D1, parse/explicit1.C at C++17 expects GCC's "explicit specialization in
+  non-namespace scope", which CWG727 allows and GCC 15 does not implement: (a) the gxx-only-rules class (n/a), recommended, (b) GCC's
+  rule; D2, template/typedef39.C expects its error on a line of a template never instantiated, its own comment saying it belongs on
+  the other one: (a) an n/a class for expectations GCC's own test marks misplaced, recommended, (b) deferred as now. Both rows left
+  as they are.

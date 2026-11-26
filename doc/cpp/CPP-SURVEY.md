@@ -12089,4 +12089,32 @@ and manual as the tests state them, no GCC or clang code:
   whatever the other rules say; and [dcl.init.list]/7.5 (P1957R2, which GCC applies to every standard, as the test's C++11 target
   shows): a pointer or a pointer to member to bool narrows. cpp0x/initlist92.C.
 
-Results to come: the regression run and the record.
+Also from the regressions: a declined member's class dropped from the start too (as cx-dropped!'s; cpp1z/class-deduction52.C's
+B, whose constructor template declined); a statement expression's labeled last statement its value (the GCC manual's "Statements and
+Declarations in Expressions": `({ a: 3; })`, cpp2a/range-for7.C); a conversion function named by its conversion-type-id, `a.operator
+int()`, of a class whose conversion function template deduces a specialization of exactly that type, a refusal with no rule (the
+slice names no such specialization: parse/casting-operator2.C), `operator auto` and a type no specialization has keeping "no member"
+(cpp0x/auto11.C, auto43.C, template/conv11.C); the code generator's block-scope dependent using-declaration refused as before.
+
+Rows to own pass, 16: cpp0x/constexpr-ice21.C, cpp0x/defaulted10.C, cpp0x/dr2351.C, cpp0x/initlist92.C, cpp0x/pr82401.C,
+cpp1y/pr60627.C, cpp1z/constexpr-lambda10.C, cpp2a/concepts-placeholder3.C, cpp2a/concepts-requires1.C, cpp2a/constexpr-virtual20.C,
+cpp2a/udlit-class-nttp-neg2.C, cpp2a/using-enum-7.C, other/crash-11.C, overload/defarg9.C, template/crash89.C, template/crash99.C.
+Regressions over next's recorded own passes (2,969) and the 146, 3,115 files, two parts of 2 threads under the big lock's small slot
+in a frozen run tree (.tmp/worktrees/cpp-def2-run): at `1ddac633e` 4 lost (class-deduction52.C, range-for7.C, casting-operator2.C,
+units the recovery now analyzed; concepts-pr67774.C's timeout), fixed; at `07d95aaf2` 4 lost (auto11.C, auto43.C, conv11.C, by the
+conversion-name refusal; concepts-pr67774.C's timeout again, 281 s already at cpp-def's run), fixed. mac/next `3e694b11a`
+(cpp-indep2's record, +98 own passes; parse.ae, template.ae, sema.ae, diag.ae) merged, then a targeted rerun at the merged head
+`639f613d8`: cpp-indep2's 98 new passes, every recorded own pass with a syntax error (1,082), the rows and the files with a named
+conversion function call, 1,201 files: 0 lost; concepts-pr67774.C alone on one thread: passes. Recorded from the four parts in turn
+(`--judge --record`, the merged head's last): 16 rows to own pass, 0 recorded passes lost. C++ read 6,139 / 0 / 146 -> 6,155 / 0 /
+130; completeness 0.9881 -> 0.9887, independence 0.9804 -> 0.9808.
+
+Left (130), measured: GCC's parser recovery 37 (of the 38 units with a syntax error: a template kept with an erroneous parameter,
+a class-head's failure skipping its body, template/typedef4.C, redecl5.C, pr90138.C, crash59.C, crash67.C, crash28.C, ...;
+parse/error32.C and error33.C left, as cpp-def), the constant evaluator 27 (implicit assignment operators, calls through function
+pointers, implicit default constructors before C++20, noexcept-specifiers instantiated when needed), definition-time checks of
+templates about 13 (template/non-dependent26.C, cpp0x/overload2.C, parse/template18.C, template/nested3.C, ...), single rules about
+53 (among them two errors GCC places in a macro's definition, whose spelling locations the native parser does not keep:
+diagnostic/pr79300.C, init/pr43064-2.C). Two held for the user: parse/explicit1.C (C++17's CWG727 allows the explicit
+specialization in class scope GCC 15 rejects) and template/typedef39.C (its expected error on a line of a template never
+instantiated, the test's own comment saying it belongs elsewhere).
