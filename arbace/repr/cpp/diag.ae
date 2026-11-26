@@ -418,8 +418,13 @@
                   (when (and def (#{:fn :tag :var :fn-tmpl} c) (or (not (#{:fn :fn-tmpl} c)) sig) (mine? n))
                     (let [k [path (if (#{:fn :fn-tmpl} c) [c sig] c)]]
                       (if (.containsKey qdefs k)
-                        (report! n (str "redefinition of '" (:name n) "'"))
-                        (.put qdefs k true))))))
+                        (do (report! n (str "redefinition of '" (:name n) "'"))
+                            ;; (cpp-def: GCC's note at the first definition, which a dg-error's later branch may take,
+                            ;; arbace.repr.cpp.dg/alt-hits: cpp0x/defaulted10.C's `previously|declared`)
+                            (when-let [po (let [o (.get qdefs k)] (and (map? o) (mine? o) (loff o)))]
+                              (let [[l c] (line-col starts (long po))]
+                                (.add out {:line l :col c :kind :note :rule :redefinition :msg (str "'" (:name n) "' previously declared here")}))))
+                        (.put qdefs k n))))))
         ;; (cpp-decl2: the namespace region of the class being walked, for its friends' definitions; and the namespace
         ;; functions declared so far by region, name and signature, for a deleted friend's earlier declaration)
         cur-ns (atom nil)
@@ -584,6 +589,8 @@
    ;; [dcl.struct.bind]/4)
    [:access #"^codegen: '.*' is a member of '.*', an inaccessible base of" "cannot cast to its private base class"]
    [:decomp #"^codegen: cannot decompose" "cannot decompose"]
+   ;; (cpp-def: a structured binding declaration as a condition, sema's cx-decomp-condition!)
+   [:decomp #"^codegen: (array initializer for structured binding declaration in condition|could not convert '<structured bindings>'|switch quantity not an integer)" "a structured binding declaration as a condition"]
    [:decomp #"^codegen: .*decomposes into \d+ elements" "type decomposes into N elements, but M names were provided"]
    [:conversion #"^codegen: incompatible member function pointer types" "assigning to X from incompatible type X"]
    [:conversion #"^codegen: ambiguous conversion from derived class '.*' to base class" "ambiguous conversion from derived class X to base class X"]
@@ -763,6 +770,7 @@
    [:assign #"^codegen: (assignment|increment|decrement) of read-only (variable|location)" "cannot assign to variable with const-qualified type"]
    ;; (queue 412, round 7: [expr.assign]/1, an array as the left operand)
    [:assign #"^codegen: (invalid array assignment|assigning to an array from an initializer list)" "array type is not assignable"]
+   [:member #"^codegen: '.*' is not a base of '" "is not a base of"]
    [:member #"^codegen: no member " "no member named in the class"]
    [:member #"^codegen: member of a non-class" "member reference base type is not a structure or union"]
    [:call #"^codegen: missing argument" "too few arguments to function call"]
@@ -870,6 +878,14 @@
                   rule (when-not (and permissive (re-find #"^codegen: cannot convert .* implicitly" m)) rule)
                   ;; (a refusal that names its own node: the constant evaluation's operation)
                   n (or (:cx/node (ex-data e)) n)
+                  ;; (cpp-def: a node a macro of the main file expands, GCC's error at the expansion: cpp0x/constexpr-arith-overflow2.C's
+                  ;; `Assert (...)`, a static_assert by a macro; for the constant evaluation's errors alone, the evaluator's sure
+                  ;; judgments, the checker's other rules over macro-made code left as they were: cpp0x/decltype3.C)
+                  n (if (and (nil? (get-in n [:range :begin :offset])) (get-in n [:range :begin :expansionLoc :offset])
+                             (or (= :constexpr cls) (and (= :sassert cls) (str/starts-with? m "codegen: non-constant condition")))
+                             (= main (get-in n [:range :begin :expansionLoc :file])))
+                      (assoc-in n [:range :begin] (get-in n [:range :begin :expansionLoc]))
+                      n)
                   off (get-in n [:range :begin :offset])]
               (when *sema-log* (swap! *sema-log* conj [cls (subs m 0 (min 120 (count m))) (boolean rule)]))
               ;; (cpp-tpl2: a call with no viable function reported with its candidates' substitution failures, each an error at its
@@ -3911,11 +3927,23 @@
                                 (and (fl? ct) (some (fn [[t l]] (and (not l) (not (fl? t)) (>= (long (int-type-size t)) (long (float-type-size ct))))) [[tb lb] [tc lc]]))
                                 (report! x (str "conversion of scalar to vector of '" ct "' involves truncation"))
                                 :else nil))))))
-                    "ArraySubscriptExpr" (let [[a b] (:inner x) ka (kd a) kb (kd b)]
+                    "ArraySubscriptExpr" (let [[a b] (:inner x) ka (kd a) kb (kd b)
+                                               ;; (cpp-def: C++23's subscript of an expression-list, P2128R6, [expr.sub]/2: the built-in
+                                               ;; one takes a single expression, so none is GCC's "built-in subscript operator without
+                                               ;; expression list"; several GCC's comma expression, its last the index: a floating
+                                               ;; literal there "invalid types ... for array subscript"; cpp23/subscript2.C)
+                                               ms (when (:_multi x) (filter map? (:inner x)))]
+                                           (cond
+                                             (and ms (= 1 (count ms)) ka (#{:array :ptr} (:k ka)))
+                                             (report! x "built-in subscript operator without expression list")
+                                             (and ms (> (count ms) 2) ka (#{:array :ptr} (:k ka))
+                                                  (= "FloatingLiteral" (:kind (some-> (last ms) strip))))
+                                             (report! x "invalid types for array subscript")
+                                             :else
                                            (when (and ka kb
                                                       (if (#{:array :ptr} (:k ka)) (bad-index? kb)
                                                           (if (#{:array :ptr} (:k kb)) (bad-index? ka) (not (and (= :vector (:k ka)) (= :int (:k kb)))))))
-                                             (report! x "invalid types for array subscript")))
+                                             (report! x "invalid types for array subscript"))))
                     "CXXNewExpr" (when-let [sz (and (:isArray x) (some #(when (= "DeclRefExpr" (:kind (some-> % strip))) %) (:inner x)))]
                                    (when (bad-index? (kd sz)) (report! sz "expression in new-declarator must have integral or enumeration type")))
                     "SwitchStmt" (when (bad-index? (kd (first (:inner x)))) (report! (first (:inner x)) "switch quantity not an integer"))
@@ -5038,6 +5066,298 @@
     (vec out)))
 
 (swap! checks conj unsized-arrays)
+
+;; (cpp-def: the nested-name-specifier that ends `head`, a declaration's text before its declarator-id: `::`, `A<U>::`, `N::X<1>::Y::`,
+;; scanned backwards over names and balanced template argument lists; nil when the name is unqualified)
+(defn- qual-suffix [^String head]
+  (let [kw #{"int" "void" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "auto" "const" "volatile" "friend"
+             "inline" "static" "constexpr" "consteval" "typename" "class" "struct" "union" "enum" "virtual" "explicit" "template" "extern"}
+        ws (fn [^long i] (loop [i i] (if (and (pos? i) (Character/isWhitespace (.charAt head (dec i)))) (recur (dec i)) i)))
+        idb (fn [^long i] (loop [j i] (if (and (pos? j) (let [c (.charAt head (dec j))] (or (Character/isLetterOrDigit c) (= c \_)))) (recur (dec j)) j)))]
+    (loop [i (ws (count head)) start nil]
+      (if (and (>= i 2) (= "::" (subs head (- i 2) i)))
+        (let [j (ws (- i 2))
+              ;; a template argument list before the ::
+              k (if (and (pos? j) (= \> (.charAt head (dec j))))
+                  (loop [k (dec j) d 0]
+                    (cond (neg? k) -1
+                          (= \> (.charAt head k)) (recur (dec k) (inc d))
+                          (= \< (.charAt head k)) (if (= 1 d) (ws k) (recur (dec k) (dec d)))
+                          (#{\; \{ \}} (.charAt head k)) -1
+                          :else (recur (dec k) d)))
+                  j)
+              m (if (neg? (long k)) k (idb k))]
+          (cond (neg? (long k)) (when start (subs head start))
+                (and (< (long m) (long k)) (not (kw (subs head m k))) (not (Character/isDigit (.charAt head m)))) (recur (ws m) m)
+                ;; a leading :: alone
+                (= m k) (subs head (- i 2))
+                :else (subs head (- i 2))))
+        (when start (subs head start))))))
+
+;; cpp-def: qualified friend declarations. [dcl.meaning.general]/1 with [temp.friend]/1: a friend function declared by a
+;; qualified-id refers to a function the qualifier's class or namespace declared before, a non-template one or a specialization of a
+;; function template (GCC's "no declaration matches", "... should have been declared inside"); a member of a class template's
+;; specialization A<U> matches a member of A by its kind (a member template or not: the friend's template-heads beyond those its
+;; qualifier's template-ids take) and type; [temp.friend]/5: a template friend naming a member of a dependent type does so through
+;; a nested-name-specifier ending with a simple-template-id, so not through the template's injected-class-name after it
+;; (`X<N>::X::foo`, GCC's "... declared as friend"). Judged only where every candidate is the main file's and their kinds and
+;; parameter counts (or types of builtin words alone) decide it: a class template without bases, no using-declaration of the name.
+(defn friend-qualified
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        top (:nodes u)
+        in-main? (fn [n] (= main (or (get-in n [:range :begin :file]) main)))
+        ctd (into {} (for [n top :when (and (= "ClassTemplateDecl" (:kind n)) (in-main? n))
+                           :let [r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n))]
+                           :when (and r (:completeDefinition r))]
+                       [(:name n) [n r]]))
+        fdecl (fn [n] (if (= "FunctionTemplateDecl" (:kind n)) (some #(when (#{"FunctionDecl" "CXXMethodDecl"} (:kind %)) %) (:inner n)) n))
+        params (fn [f] (filter #(= "ParmVarDecl" (:kind %)) (:inner f)))
+        nparams (fn [f] (let [ps (params f) t (str (get-in f [:type :qualType]))]
+                          (when-not (or (str/includes? t "...") (some #(seq (remove (fn [x] (not (map? x))) (:inner %))) ps)) (count ps))))
+        builtin? (fn [^String t] (every? #{"void" "int" "char" "bool" "long" "short" "unsigned" "signed" "float" "double" "const" "volatile"}
+                                         (re-seq #"[A-Za-z_]\w*" t)))
+        report! (fn [o msg] (let [[l c] (line-col starts (long o))] (.add out {:line l :col c :kind :error :rule :friend-qual :msg msg})))]
+    (walk-nodes
+      (fn [n _]
+        (when (and (= "FriendDecl" (:kind n)) (in-main? n))
+          (let [d (first (filter map? (:inner n)))
+                f (when d (fdecl d))
+                nm (:name f)
+                o (get-in f [:loc :offset])
+                b (get-in n [:range :begin :offset])]
+            (when (and f (string? nm) o b (#{"FunctionDecl" "CXXMethodDecl"} (:kind f)) (re-matches #"[A-Za-z_]\w*" nm) (< (long b) (long o)))
+              (let [head (subs src (long b) (long o))
+                    qual (qual-suffix head)
+                    heads (count (re-seq #"\btemplate\s*<" (subs head 0 (- (count head) (count (or qual ""))))))
+                    templated (or (= "FunctionTemplateDecl" (:kind d)) (pos? (long (or (:_qtmpl f) 0))))]
+                (when qual
+                  (cond
+                    ;; [temp.friend]/5: X<N>::X::foo
+                    (and templated (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*([A-Za-z_]\w*)\s*::\s*$" qual)
+                         (let [[_ a b2] (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*([A-Za-z_]\w*)\s*::\s*$" qual)] (= a b2)))
+                    (report! o (str "member '" (str/replace qual #"\s+" "") nm "' declared as friend through the injected-class-name, no template-id"))
+                    ;; ::f, a namespace-scope function of the main file
+                    (and (re-matches #"::\s*" qual) (not= "FunctionTemplateDecl" (:kind d)) (zero? heads))
+                    (let [cands (for [x top :when (#{"FunctionDecl" "FunctionTemplateDecl"} (:kind x)) :when (= nm (:name x))
+                                      :when (< (long (or (get-in x [:range :begin :offset]) 0)) (long b))] x)
+                          k (nparams f)]
+                      (when (and k (seq cands) (every? in-main? cands)
+                                 (every? (fn [x] (let [kx (nparams (fdecl x))] (and kx (not= kx k)))) cands))
+                        (report! o (str "no declaration matches '" (get-in f [:type :qualType]) "' named '::" nm "'"))))
+                    ;; A<...>::f, a member of a class template's specialization
+                    :else
+                    (when-let [[_ cn] (re-find #"(?:^|::\s*)([A-Za-z_]\w*)\s*<[^;{}()]*>\s*::\s*$" qual)]
+                      (when-let [[_ r] (get ctd cn)]
+                        (let [ms (filter #(= nm (:name %)) (:inner r))
+                              own (max 0 (- heads (long (or (:_qtmpl f) 0))))
+                              ft (str (get-in f [:type :qualType]))]
+                          (when (and (seq ms) (empty? (:bases r))
+                                     (every? #(#{"CXXMethodDecl" "FunctionTemplateDecl"} (:kind %)) ms)
+                                     (every? (fn [m]
+                                               (let [mt (if (= "FunctionTemplateDecl" (:kind m)) 1 0)
+                                                     mf (fdecl m)
+                                                     t (str (get-in mf [:type :qualType]))]
+                                                 (or (not= mt own)
+                                                     (and (= 0 mt) (builtin? t) (builtin? ft) (not= (str/replace t #"\s+" "") (str/replace ft #"\s+" "")))
+                                                     (let [k1 (nparams mf) k2 (nparams f)] (and k1 k2 (not= k1 k2))))))
+                                             ms))
+                            (report! o (str "no declaration matches '" ft "' named '" (str/replace qual #"\s+" "") nm "'")))))))))))))
+      top nil)
+    (vec out)))
+
+(swap! checks conj friend-qualified)
+
+;; cpp-def: [expr.call]/1, the postfix-expression of a call has function type, pointer to function type or a class type: an
+;; explicit conversion to an arithmetic type -- GNU's complex types among them, the GCC manual's "Complex Numbers" -- called is
+;; GCC's "expression cannot be used as a function" (other/error29.C).
+(defn arithmetic-calls
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        strip (fn strip [x] (if (= "ParenExpr" (:kind x)) (strip (first (filter map? (:inner x)))) x))]
+    (walk-nodes (fn [n _]
+                  (when (= "CallExpr" (:kind n))
+                    (let [c (strip (first (filter map? (:inner n))))]
+                      (when (and (#{"CStyleCastExpr" "CXXFunctionalCastExpr" "CXXStaticCastExpr"} (:kind c))
+                                 (= :b (get-in c [:_t :t])) (seq (get-in c [:_t :w]))
+                                 (not-any? #{"void" "auto" "decltype" "__typeof__" "typeof" "__typeof"} (get-in c [:_t :w])))
+                        (when-let [o (mine-at n main)]
+                          (let [[l cl] (line-col starts o)]
+                            (.add out {:line l :col cl :kind :error :rule :call-arith
+                                       :msg (str "'(" (get-in c [:type :qualType]) ")' cannot be used as a function")})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj arithmetic-calls)
+
+;; cpp-def: [dcl.type.auto.deduct]/4, `auto v = { ... };` deduces std::initializer_list<U> from the list's elements: an element
+;; naming an undeclared identifier (GCC's error_mark_node) deduces nothing, GCC's "unable to deduce 'std::initializer_list<auto>'
+;; from '{<expression error>}'" at the list's end, beside the name's own error (cpp0x/initlist31.C).
+(defn auto-list-undeclared
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        undecl? (fn f [x] (cond (map? x) (or (and (= "DeclRefExpr" (:kind x)) (:_undecl x))
+                                             (some f (:inner x)))
+                                (sequential? x) (some f x)
+                                :else false))]
+    (walk-nodes (fn [n _]
+                  (when (and (= "VarDecl" (:kind n)) (= "auto" (str/trim (str (get-in n [:type :qualType])))) (= "c" (:init n)))
+                    (when-let [l (first (filter map? (:inner n)))]
+                      (when (and (= "InitListExpr" (:kind l)) (undecl? (:inner l)))
+                        (when-let [o (get-in l [:range :end :offset])]
+                          (when (= main (or (get-in l [:range :end :file]) main))
+                            (let [[ln c] (line-col starts (long o))]
+                              (.add out {:line ln :col c :kind :error :rule :deduce
+                                         :msg "unable to deduce 'std::initializer_list<auto>' from '{<expression error>}'"}))))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj auto-list-undeclared)
+
+;; cpp-def: [dcl.align]/3, alignas(type-id) is alignas(alignof(type-id)), and [expr.alignof]/1 asks a complete object type: void,
+;; or a class of the unit with no definition before it, is GCC's "invalid application of '__alignof__' to incomplete type" at the
+;; alignment-specifier; a class template's alignas(T) the same for a specialization the main file names with such a T, at the
+;; template's alignas (cpp0x/alignas20.C).
+(defn alignas-incomplete
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        top (:nodes u)
+        all (java.util.ArrayList.)
+        _ (walk-nodes (fn [n _] (.add all n)) top nil)
+        defs (group-by :name (filter #(and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %) (string? (:name %))) all))
+        decls (set (keep #(when (= "CXXRecordDecl" (:kind %)) (:name %)) all))
+        others (set (keep #(when (#{"TypedefDecl" "TypeAliasDecl" "EnumDecl" "ClassTemplateDecl" "TemplateTypeParmDecl"} (:kind %)) (:name %)) all))
+        off (fn [n] (or (get-in n [:range :begin :offset]) (get-in n [:loc :offset])))
+        incomplete? (fn [^String t o]
+                      (let [t (str/trim (str/replace t #"^(const|volatile)\s+" ""))]
+                        (or (= "void" t)
+                            (and (re-matches #"[A-Za-z_]\w*" t) (decls t) (not (others t))
+                                 (not-any? (fn [d] (let [b (off d)] (or (nil? b) (nil? o) (< (long b) (long o)) (not= main (or (get-in d [:range :begin :file]) main)))))
+                                           (get defs t))))))
+        report! (fn [a t] (when-let [o (mine-at a main)]
+                            (let [[l c] (line-col starts o)]
+                              (.add out {:line l :col c :kind :error :rule :alignas
+                                         :msg (if (re-find #"void" t) "invalid application of '__alignof__' to a void type"
+                                                  (str "invalid application of '__alignof__' to incomplete type '" t "'"))}))))
+        ;; the class templates' alignas(T): name -> [[param-index attr] ...]
+        tmpls (into {} (for [n all :when (and (= "ClassTemplateDecl" (:kind n)) (string? (:name n)) (= main (or (get-in n [:range :begin :file]) main)))
+                             :let [ps (vec (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) %) (:inner n)))
+                                   r (some #(when (= "CXXRecordDecl" (:kind %)) %) (:inner n))
+                                   as (for [a (:inner r) :when (= "AlignedAttr" (:kind a))
+                                            :let [i (first (keep-indexed #(when (and (= "TemplateTypeParmDecl" (:kind %2)) (= (str/trim (str (:_arg a))) (:name %2))) %1) ps))]
+                                            :when i]
+                                        [i a])]
+                             :when (seq as)]
+                         [(:name n) (vec as)]))
+        targs (fn [^String s] (loop [i 0 d 0 b 0 acc []]
+                                (if (>= i (count s)) (conj acc (str/trim (subs s b)))
+                                    (let [c (.charAt s i)]
+                                      (cond (#{\< \( \[} c) (recur (inc i) (inc d) b acc)
+                                            (#{\> \) \]} c) (recur (inc i) (dec d) b acc)
+                                            (and (= c \,) (zero? d)) (recur (inc i) d (inc i) (conj acc (str/trim (subs s b i))))
+                                            :else (recur (inc i) d b acc))))))]
+    (doseq [n all :when (and (= "CXXRecordDecl" (:kind n)) (= main (or (get-in n [:range :begin :file]) main)))
+            a (:inner n) :when (and (map? a) (= "AlignedAttr" (:kind a)) (string? (:_arg a)))
+            :when (incomplete? (:_arg a) (off a))]
+      (report! a (str/trim (:_arg a))))
+    (when (seq tmpls)
+      (let [seen (java.util.HashSet.)]
+        (doseq [n all :when (and (#{"VarDecl" "FieldDecl"} (:kind n)) (= main (or (get-in n [:range :begin :file]) main)))
+                :let [[_ nm as] (re-matches #"(?:const\s+)?([A-Za-z_]\w*)\s*<(.*)>" (str/trim (str (get-in n [:type :qualType]))))]
+                :when (and nm (get tmpls nm))
+                [i a] (get tmpls nm)
+                :let [t (get (targs as) i)]
+                :when (and t (incomplete? t (off n)) (.add seen [nm i]))]
+          (report! a t))))
+    (vec out)))
+
+(swap! checks conj alignas-incomplete)
+
+;; cpp-def: a direct base whose destructor is private, its class befriending none: [class.dtor]/7, the derived class's implicit
+;; destructor is deleted (the base's inaccessible from it), so with the base's destructor virtual it is a deleted function
+;; overriding a non-deleted one, [class.virtual]/18 ("deleted function 'virtual B::~B()' overriding non-deleted function", at the
+;; class); and [class.base.init]/13, a user-provided non-delegating constructor potentially invokes the base's destructor, private
+;; within it ("'A<0>::~A()' is private within this context", at the constructor). The unit's classes by name, class templates' by
+;; their pattern (template/virtual3.C).
+(defn inaccessible-base-dtors
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (= main (or (get-in x [:range :begin :file]) (get-in x [:loc :file]) main)))
+        recs (java.util.HashMap.)
+        _ (doseq [n (:nodes u) :when (mine? n)]
+            (case (:kind n)
+              "CXXRecordDecl" (when (and (string? (:name n)) (:completeDefinition n)) (.put recs (:name n) (if (.containsKey recs (:name n)) :many n)))
+              "ClassTemplateDecl" (when-let [r (some #(when (and (= "CXXRecordDecl" (:kind %)) (:completeDefinition %)) %) (:inner n))]
+                                    (.put recs (:name n) (if (.containsKey recs (:name n)) :many r)))
+              nil))
+        private-dtor (fn [r]
+                       (when (and (map? r) (not-any? #(= "FriendDecl" (:kind %)) (:inner r)))
+                         (loop [ms (:inner r) acc (if (= "class" (:tagUsed r)) "private" "public")]
+                           (when-let [m (first ms)]
+                             (cond (= "AccessSpecDecl" (:kind m)) (recur (rest ms) (:access m))
+                                   (= "CXXDestructorDecl" (:kind m)) (when (= "private" acc) m)
+                                   :else (recur (rest ms) acc))))))
+        at! (fn [x msg] (when-let [o (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset]))]
+                          (let [[l c] (line-col starts (long o))]
+                            (.add out {:line l :col c :kind :error :rule :dtor-access :msg msg}))))]
+    (doseq [c (:nodes u)
+            :when (and (= "CXXRecordDecl" (:kind c)) (mine? c) (:completeDefinition c) (string? (:name c)) (seq (:bases c))
+                       (not-any? #(= "CXXDestructorDecl" (:kind %)) (:inner c)))
+            :let [bad (keep (fn [b] (let [bt (-> (str (get-in b [:type :qualType])) (str/replace #"^(?:struct|class)\s+" "") str/trim)
+                                          bn (str/replace bt #"\s*<.*$" "")
+                                          d (private-dtor (.get recs bn))]
+                                      (when (and d (re-matches #"[A-Za-z_]\w*(?:\s*<[^<>]*>)?" bt)) [bt d])))
+                            (:bases c))]
+            :when (seq bad)]
+      (when (some (fn [[_ d]] (:virtual d)) bad)
+        (at! c (str "deleted function 'virtual " (:name c) "::~" (:name c) "()' overriding non-deleted function")))
+      (doseq [k (:inner c)
+              :when (and (= "CXXConstructorDecl" (:kind k)) (some #(= "CompoundStmt" (:kind %)) (:inner k))
+                         (not-any? #(and (= "CXXCtorInitializer" (:kind %)) (:delegatingInit %)) (:inner k)))]
+        (let [[bt d] (first bad)]
+          (at! k (str "'" bt "::" (:name d) "()' is private within this context")))))
+    (vec out)))
+
+(swap! checks conj inaccessible-base-dtors)
+
+;; cpp-def: the union rule of `unions` at a function template's specialization the main file names by its explicit template arguments
+;; (`baz<int, int &> ()`): a union member of the body whose type is the template's type parameter, its argument a reference type,
+;; at the member (cpp0x/pr78890-2.C's U b).
+(defn union-ref-specializations
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
+        unions (fn us [x] (cond (map? x) (concat (when (and (= "CXXRecordDecl" (:kind x)) (= "union" (:tagUsed x)) (:completeDefinition x)) [x])
+                                                 (mapcat us (:inner x)))
+                                (sequential? x) (mapcat us x) :else nil))
+        ;; template name -> [[param-index field] ...]
+        tm (java.util.HashMap.)
+        _ (walk-nodes (fn [n _]
+                        (when (and (= "FunctionTemplateDecl" (:kind n)) (string? (:name n)) (mine? n))
+                          (let [ps (vec (filter #(#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:inner n)))
+                                f (some #(when (= "FunctionDecl" (:kind %)) %) (:inner n))
+                                fs (for [un (unions (:inner f)) m (:inner un)
+                                         :when (and (map? m) (= "FieldDecl" (:kind m)) (not (:isImplicit m)) (mine? m))
+                                         :let [i (first (keep-indexed #(when (and (= "TemplateTypeParmDecl" (:kind %2)) (= (:name %2) (str/trim (str (get-in m [:type :qualType]))))) %1) ps))]
+                                         :when i]
+                                     [i m])]
+                            (when (seq fs) (.put tm (:name n) (vec fs))))))
+                      (:nodes u) nil)
+        seen (java.util.HashSet.)]
+    (when-not (.isEmpty tm)
+      (walk-nodes (fn [n _]
+                    (when (and (= "DeclRefExpr" (:kind n)) (seq (:explicitTemplateArgs n)))
+                      (when-let [fs (.get tm (get-in n [:referencedDecl :name]))]
+                        (doseq [[i m] fs :let [a (str/trim (str (get (vec (:explicitTemplateArgs n)) i)))]
+                                :when (and (re-find #"&$" a) (.add seen m))]
+                          (when-let [o (or (get-in m [:loc :offset]) (get-in m [:range :begin :offset]))]
+                            (let [[l c] (line-col starts (long o))]
+                              (.add out {:line l :col c :kind :error :rule :union
+                                         :msg (str "non-static data member '" (:name m) "' in a union may not have reference type '" (str/replace a #"\s+(&&?)$" "$1") "'")})))))))
+                  (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj union-ref-specializations)
 
 ;; [class.union.general]/? : a union has no base classes and is no base class: GCC's "derived union 'U' invalid", at the union, and
 ;; "base type 'U' fails to be a struct or class type", at the derived class; a base named by a union's name the file defines once
@@ -7208,6 +7528,19 @@
                                         (at! n (str "'" nm "' is not an enumerated type")))))
                   nil)))]
       (walk (:nodes u) nil false))
+    ;; (cpp-def: before C++20's P1099R5, which lets a using-declarator name an enumerator through its enumeration, a
+    ;; using-declaration outside a class names a namespace's member: one whose nested-name-specifier is an enumeration of the unit
+    ;; (no class or namespace of its name) is GCC's "'e' is not a namespace or unscoped enum", cpp0x/using-enum-3.C's block scope)
+    (when (< (long (cxx-year (:std u))) 20)
+      (walk-nodes (fn [n parent]
+                    (when (and (= "UsingDecl" (:kind n)) (not (#{"CXXRecordDecl" "ClassTemplateSpecializationDecl" "ClassTemplatePartialSpecializationDecl"} (:kind parent))))
+                      (when-let [t (or (:_text n) (text n))]
+                        (let [t (str/replace (str/replace t #"^\s*using\s+" "") #"^typename\s+" "")
+                              parts (map str/trim (str/split (str/replace t #";\s*$" "") #"::"))
+                              q (first parts)]
+                          (when (and (= 2 (count parts)) (.contains enums q) (not (.containsKey classes q)) (not (.contains namespaces q)))
+                            (at! n (str "'" q "' is not a namespace or unscoped enum")))))))
+                  (:nodes u) nil))
     (vec (distinct out))))
 
 (swap! checks conj using-and-consteval-overrides)
@@ -8641,8 +8974,20 @@
                   (w b)
                   (doseq [g gotos :when (not (.contains seen (:label g)))]
                     (when-let [o (mine-at g main)]
-                      (let [[l c] (line-col starts o)]
-                        (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")}))))))))
+                      ;; (cpp-def: a label the tree does not keep, in a GNU statement expression of the same body -- an
+                      ;; assumption's, whose expression the native parser drops -- is the goto's jump into the statement
+                      ;; expression, which the GCC manual's "Statements and Declarations in Expressions" forbids: GCC's "jump to
+                      ;; label 'l1'" at the label; cpp23/attr-assume8.C)
+                      (let [bb (get-in b [:range :begin :offset]) be (get-in b [:range :end :offset])
+                            m (when (and bb be (< (long bb) (long be) (count src)))
+                                (let [mt (re-matcher (re-pattern (str "\\(\\s*\\{[^{}]*?(?<![\\w:])(" (java.util.regex.Pattern/quote (:label g)) ")\\s*:(?!:)"))
+                                                     (subs src (long bb) (long be)))]
+                                  (when (.find mt) (+ (long bb) (.start mt 1)))))]
+                        (if m
+                          (let [[l c] (line-col starts (long m))]
+                            (.add out {:line l :col c :kind :error :rule :label :msg (str "jump to label '" (:label g) "'")}))
+                          (let [[l c] (line-col starts o)]
+                            (.add out {:line l :col c :kind :error :rule :label :msg (str "label '" (:label g) "' used but not defined")}))))))))))
             (top! [nodes]
               (doseq [n nodes :when (and (map? n) (reach? n))]
                 (cond (fn-kinds (:kind n)) (doseq [b (:inner n) :when (and (map? b) (#{"CompoundStmt" "CXXTryStmt"} (:kind b)))] (body! b))

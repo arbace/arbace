@@ -684,6 +684,51 @@
     (when-let [lx (gt-lexeme-at p 0)]
       (soft-diag! p (ix p) (str "'" lx "' should be '" (if (= lx ">=") "> =" "> >=") "' to terminate a template argument list")))))
 
+
+(defn- nttp-arg-check!
+  "cpp-def: a template argument `a` (an expression) for the non-type template parameter `tp` (its declaration's node):
+  [temp.param]/6, a non-type template-parameter of a non-reference scalar type is a prvalue, so no operand of the built-in
+  unary & (GCC's \"lvalue required as unary '&' operand\"); and C++98's rules for a value-dependent argument (ISO/IEC
+  14882:2003 [temp.arg.nontype]/1 with [expr.const]/1): an integral constant-expression names a non-type template-parameter of
+  integral or enumeration type only, sizeof's operand aside (GCC's \"... is not a valid template argument for type 'int' because
+  it is a non-constant expression\"), and the argument of a pointer parameter is the name of a non-type template-parameter or
+  `&` id-expression, so no other expression of a template-parameter (GCC's \"could not convert template argument\")."
+  [^P p a tp]
+  (when (and tp (= "NonTypeTemplateParmDecl" (:kind tp)) (not (:isParameterPack tp)))
+    (let [nttp (fn [x] (let [e (:_ent x)] (when (and (= "DeclRefExpr" (:kind x)) (:tparam e) (= :var (:k e))) e)))
+          ety (fn [e] (str (some-> (:ty e) qt)))
+          scalar? (fn [^String t] (and (not (str/includes? t "&")) (not (str/includes? t "("))
+                                       (or (str/includes? t "*")
+                                           (re-matches #"(const |volatile )*(unsigned |signed )?(bool|char|wchar_t|char8_t|char16_t|char32_t|short|int|long|long long|long int|short int|long long int|float|double|long double|unsigned|signed)( const| volatile)*" t))))
+          strip (fn strip [x] (if (= "ParenExpr" (:kind x)) (strip (first (:inner x))) x))
+          ;; the expressions of template-parameters in x, outside sizeof's and alignof's operands
+          refs (fn refs [x] (cond (not (map? x)) nil
+                                  (nttp x) [x]
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (mapcat refs (:inner x))))
+          addr (fn addr [x] (cond (not (map? x)) nil
+                                  (and (= "UnaryOperator" (:kind x)) (= "&" (:opcode x)) (not (:isPostfix x))
+                                       (some-> (nttp (strip (first (:inner x)))) ety scalar?))
+                                  x
+                                  (= "UnaryExprOrTypeTraitExpr" (:kind x)) nil
+                                  :else (some addr (:inner x))))
+          x (:x a)
+          pt (str (get-in tp [:type :qualType]))
+          ptr? (boolean (re-find #"\*\s*(const\s*|volatile\s*)*$" pt))
+          int? (and (not ptr?) (not (re-find #"[&\[(<:]" pt)))]
+      (if-let [u (addr x)]
+        (soft-diag! p (long (or (:_b u) (:b a))) "lvalue required as unary '&' operand")
+        (when (< (.-year p) 2011)
+          (let [rs (refs x)]
+            (cond
+              (and int? (some #(re-find #"[*\[]" (ety (nttp %))) rs))
+              (soft-diag! p (long (:b a)) (str "'" (tok-text p (:b a) (:e a)) "' is not a valid template argument for type '" pt "' because it is a non-constant expression"))
+              (and ptr? (seq rs)
+                   (let [s (strip x)]
+                     (not (or (nttp s)
+                              (and (= "UnaryOperator" (:kind s)) (= "&" (:opcode s)) (= "DeclRefExpr" (:kind (strip (first (:inner s))))))))))
+              (soft-diag! p (long (:b a)) (str "could not convert template argument '" (tok-text p (:b a) (:e a)) "' to '" pt "'")))))))))
+
 (defn- parse-template-args*
   "A template-argument-list at its <: the arguments ({:k :type :t T}, {:k :expr :x node}, {:k :tmpl :name name}, each with
   :b :e and :pack), the cursor after the > (one half of a split >>)."
@@ -748,6 +793,8 @@
                                (re-find #"[*&]" (str (get-in tp [:type :qualType]))))
                       (soft-diag! p b (str "'" (tok-text p b (long (:e a))) "' is not a valid template argument for type '"
                                            (get-in tp [:type :qualType]) "' because string literals can never be used in this context")))))
+              _ (when (and tmpl (= :expr (:k a)) (seq (:tps tmpl)) (not (skim? p)) (main-tok? p b))
+                  (nttp-arg-check! p a (get (vec (:tps tmpl)) (count out))))
               a (if (accept! p "...") (assoc a :pack true) a)
               out (conj out a)]
           (cond (accept! p ",") (recur out)
@@ -3384,7 +3431,11 @@
                 (and (identical? :id (.-k t)) (.equals nm (.-s t)) (main-tok? p i)
                      (let [^T pv (tok-at p (dec i)) ^T nx (tok-at p (inc i))]
                        (or (and (t= pv "using") (t= nx "="))
-                           (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                           (and (#{"class" "struct" "union" "enum" "concept" "typename"} (.-s pv))
+                                ;; (cpp-def: a type template-parameter, `template <class T, class S>`, declares its name in its
+                                ;; template alone, no failed declaration's: template/pr70466-1.C's `S::*` in another template)
+                                (not (and (#{"class" "typename"} (.-s pv)) (>= i 2) (#{"<" ","} (.-s (tok-at p (- i 2))))
+                                          (#{"," ">" "=" ">>"} (.-s nx)))))
                            (and (or (t= nx ";") (t= nx "[") (t= nx ",") (t= nx ")") (t= nx "("))
                                 (loop [j (dec i)] (cond (< j (max 0 (- i 64))) false
                                                         (or (t= (tok-at p j) ";") (t= (tok-at p j) "{") (t= (tok-at p j) "}")) false
@@ -4969,7 +5020,10 @@
                  (some-> ^java.util.Map (:ftypes ce) (.get (name-plain qn)))
                  (when (type-ent? (:ent qn)) {:t :n :s (name-str p qn) :ent (:ent qn) :qn qn})))
           x (if (is? p "{")
-              (let [l (parse-braced-init p)] (if mt (designate p mt l) l))
+              (do ;; (cpp-def: C++11's braced mem-initializer, N2672: before C++11 GCC's pedwarn "extended initializer lists only
+                  ;; available with '-std=c++11' or '-std=gnu++11'", an error under -pedantic-errors; parse/ctor3.C)
+                  (when (and (< (.-year p) 2011) (not (skim? p))) (pedantic-diag! p (ix p) "extended initializer lists only available with '-std=c++11' or '-std=gnu++11'"))
+                  (let [l (parse-braced-init p)] (if mt (designate p mt l) l)))
               (let [as (paren-args p)]
                 (cond (and (empty? as)) {:kind "ImplicitValueInitExpr"}
                       (and (= 1 (count as)) (not (is? p "..."))) (if mt (paren-init p mt (first as)) (first as))
@@ -5198,7 +5252,9 @@
             (when-let [^ArrayList fs (:fields ce)] (.add fs nm))
             (when-let [^java.util.HashMap ft (:ftypes ce)] (.put ft nm base0))))
         (doseq [[k v] (sc/names-of (:cs base0)) :when (#{:var :fn} (:k v))]
-          (declare! p (cond-> {:k :var :name k} (not= ctx :member) (assoc :anon true))))
+          (declare! p (cond-> {:k :var :name k} (not= ctx :member) (assoc :anon true)
+                        ;; (cpp-def: a function the anonymous class declared, invalid, for the bit-field width rule below)
+                        (= :fn (:k v)) (assoc :anon-fn true))))
         [pre (node p (if (= ctx :member) "FieldDecl" "VarDecl") (:b ds) e {:isImplicit true :type {:qualType (qt base0)}})])
       ;; C++26's friend-type-specifier-list: friend T, Us...;
       (and (:friend ds) base0 (nil? pre) (or (is? p ",") (and (is? p "...") (or (is-at? p 1 ";") (is-at? p 1 ",")))))
@@ -6260,6 +6316,10 @@
                   ;; subscript: [dcl.attr.grammar]/7's "two consecutive '[' shall only introduce an attribute", GCC's error)
                   _ (when (and bits (is? p "[") (is-at? p 1 "[") (not (skim? p)) (main-tok? p (ix p)))
                       (soft-diag! p (ix p) "two consecutive '[' shall only introduce an attribute before '[' token"))
+                  ;; (cpp-def: [class.bit]/1, a bit-field's width is an integral constant expression: the name of a function or
+                  ;; function template alone is none, GCC's "width of bit-field ... has non-integral type"; lookup/pr84962.C)
+                  _ (when (and bits (= "DeclRefExpr" (:kind bits)) (or (= :fn (:k (:_ent bits))) (:anon-fn (:_ent bits))) (not (skim? p)) (:_b bits) (main-tok? p (long (:_b bits))))
+                      (soft-diag! p (long (:_b bits)) (str "width of bit-field '" (or nm "") "' has non-integral type")))
                   as1 (attr-nodes p)
                   ;; (cpp-gnu, 2026-11-22: GNU's asm label, the manual's "Asm Labels": the symbol of a variable or a function, so none
                   ;; on a non-static data member, GCC's error at it, ext/asmspecInvalid.C; on a register variable it names the
@@ -7478,7 +7538,12 @@
         base (or (ds-type ds) (perr p "a condition's type"))]
     (if (or (is? p "[") (and (or (is? p "&") (is? p "&&")) (is-at? p 1 "[")))
       ;; a structured binding declaration as a condition (C++26's P0963, an extension before)
-      (do ;; (cpp-read, 2026-11-22: GCC's pedwarn before C++26, "structured bindings in conditions only available with
+      (do ;; (cpp-def: [dcl.struct.bind]/1, a structured binding declaration's decl-specifiers are auto, cv-qualifiers, static and
+          ;; thread_local (C++26's constexpr ones, P2686R5, GCC 15 has not): GCC's "structured binding declaration cannot be
+          ;; 'constexpr'", cpp26/decomp9.C's condition)
+          (when (and (:constexpr ds) (not (skim? p)) (main-tok? p (long (:b ds))))
+            (soft-diag! p (long (:b ds)) "structured binding declaration cannot be 'constexpr'"))
+          ;; (cpp-read, 2026-11-22: GCC's pedwarn before C++26, "structured bindings in conditions only available with
           ;; -std=c++2c or -std=gnu++2c", at the [)
           (when (and (< (.-year p) 2026) (not (skim? p)) (main-tok? p (ix p)))
             (pedantic-diag! p (ix p) "structured bindings in conditions only available with -std=c++2c or -std=gnu++2c"))

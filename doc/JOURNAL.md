@@ -23978,3 +23978,59 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
   bodies: 137 to 1,938 rustc's, the exports built for the five eval samples' keys, threads' larger); C6 std's IR. 0 of 6 cases own
   in all seven: independence stays 80. bin/reap 56 of 56, matrix unchanged; crops-score unchanged (Rust 100 / 80), --judge --strict
   0 problems; records-check 9 pairs 0; markers-check 0.
+
+## 2026-11-26 — C++ read: the read cell's deferred rows by cause (cpp-def)
+
+- Branch `cpp-def-1126` from mac/next `b94fde1aa` (a lane of the burst; cpp-indep2 beside it on the rows only clang's record
+  passes, a disjoint set). The read cell at the base: 6,111 pass / 0 by design / 174 deferred, the 174 the dg rows neither judge
+  passes (own-diag 173, gcc-own-rules 1: ext/type_pack_element4.C). A run of the 174 at the base (`.tmp/dg-base`) passed four
+  already (other/abstract1.C, template/crash125.C, tc1/dr176.C; cpp23/ext-floating12.C, a timeout of the record's): next's changes
+  since their rows were recorded. Each other row read against its dg lines, the own errors and g++ 15.2's recorded lines, and grouped
+  by cause; the rules built from the standard's text or GCC's documented messages and manual as the tests state them, no GCC or
+  clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-def", lists each rule with its rows).
+- arbace/repr/cpp/parse.ae: C++98's non-type template arguments and [temp.param]/6's prvalue parameters (nttp-arg-check!);
+  declared-in-main?'s type template-parameters; [class.bit]/1 widths naming functions; C++98's braced mem-initializers (GCC's
+  pedwarn); a structured binding condition's constexpr. arbace/repr/cpp/diag.ae: qualified friend declarations
+  ([dcl.meaning.general]/1, [temp.friend]/1 and /5); [expr.call]/1 for arithmetic casts called; P1099R5's using-declarations of
+  enumerators before C++20; the constant evaluation's errors at a main-file macro's expansion; a goto into a statement expression;
+  C++23's subscripts of expression-lists; an auto braced list with an undeclared element; alignas and alignof of void or an
+  incomplete class; union reference members at a function template's named specialization; bases' private destructors
+  ([class.dtor]/7, [class.virtual]/18, [class.base.init]/13); a redefinition's note. arbace/cpp/sema.ae (the checker): the constant
+  evaluator's floating division by zero, [conv.fpint]/1, abort, static arrays decayed (constexpr ones' elements, others' addresses
+  alone), pointer comparisons across objects, string literals that may overlap, two functions' addresses; P2280R4's unknown
+  reference parameters (reads, virtual calls) and typeid through a reference; [class.access.base]/6's naming class; a default
+  argument's own errors at it; [dcl.struct.bind]/4's void tuple_element, at namespace scope too; structured binding declarations as
+  conditions (P0963R3); alignof(void); C++23's operator[] of an expression-list; a range-based for whose body is a declaration.
+- Checked: each rule on its rows (.tmp/bin/d1, one file), then reach runs outside the lock (2 threads, GOMEMLIMIT=2500MiB, 2.6-2.9
+  GB): `.tmp/reach1.list` (398 files: the 174, C++98 files, qualified friends, casts called, using-declarations, constexpr comparisons,
+  macros) lost one recorded pass, cpp0x/decltype3.C, whose static assertions in a macro the relocation of errors to the macro's
+  expansion exposed (a checker's misjudged decltype it had hidden): the relocation kept to the constant evaluation's errors;
+  `.tmp/reach2.list` (421: qualified member access, structured bindings, gotos, default arguments, constexpr files), reach3 (53:
+  alignas, auto lists, C++23 subscripts), reach4 (103: destructors, unions in templates, C++98), reach5 (4: structured binding
+  conditions): none lost. Then one regression run over next's recorded own passes (2,941) and the 174, 3,115 files, at `e9b0a69f7`
+  in a frozen run tree (.tmp/worktrees/cpp-def-run), two parts one after the other with 2 threads each under the big lock's small slot
+  (HEAVY_MEM_GIB=5: the reach runs' peak), 00:29-00:56 UTC: 1,475 and 1,494 own passes, 0 recorded passes lost. mac/next moved
+  meanwhile to `ede33dbe5` (train 5's Python records, rust-rec-1125), merged (no C++ path, test/cpp or seed changed, so the run stands
+  for the merged tree), and had not moved again when recorded. Recorded from the two parts (`--judge --record`): 28 rows to own
+  pass (cpp0x/alignas20.C, cpp0x/constexpr-arith-overflow2.C, cpp0x/initlist31.C, cpp0x/pr78890-2.C, cpp0x/using-enum-3.C,
+  cpp0x/vt-34399.C, cpp1y/constexpr-89074-3.C, cpp1z/decomp55.C, cpp23/attr-assume8.C, cpp23/subscript2.C, cpp26/decomp9.C,
+  cpp26/name-independent-decl10.C, cpp2a/constexpr-ref1.C, lookup/pr84962.C, other/error29.C, parse/crash40.C, parse/ctor3.C,
+  template/crash14.C, template/friend50.C, template/friend72a.C, template/memfriend6.C, template/nontype3.C, template/pr70466-1.C,
+  template/virtual3.C, ubsan/pr63956.C, and the base's other/abstract1.C, template/crash125.C, tc1/dr176.C);
+  cpp23/ext-floating12.C timed out again (load-dependent, as recorded); three
+  other rows' reasons narrowed (cpp0x/defaulted10.C, cpp0x/pr83993.C, spellcheck-stdlib.C). `bin/reap --record`: C++ read 6,111 / 0 /
+  174 -> 6,139 / 0 / 146; `bin/crops-score --record`: C++ completeness 0.9870 -> 0.9881, independence 0.9784 -> 0.9788 (read
+  0.894). `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems. Two rows of the clang-only
+  set pass by these rules too (cpp1z/decomp26.C, inherit/error1.C): cpp-indep2's, not recorded here.
+- Tried and dropped: every Sema error at a macro's expansion (cpp0x/decltype3.C, above); a function address as an evaluator value
+  of its own (every arithmetic path would meet it: the comparison of two function names kept to :cmp); a block-scope reference's
+  id-expression as no constant (cpp0x/constexpr-ref12.C's g(ar2), h(ar2), h(arp) never read the reference, so the row stayed failing);
+  keeping a deleted member template deleted after its out-of-line redefinition (cpp0x/defaulted10.C: the member template goes another
+  way than a plain member function); pre-C++20 implicit default constructors evaluated by their members' initializers
+  (cpp1y/pr94066-2.C passed, cpp0x/nsdmi3.C's refused initializer then read as an uninitialized member: lost in reach6, reverted
+  before the regression); an explicit template argument naming a declaration flagged incomplete un-silenced (template/incomplete2.C:
+  the checker gives no error there).
+- Alternatives considered: the typedef-of-a-qualified-name recovery (parse/error32.C, error33.C: GCC declares the name with an
+  erroneous type, its variables undeclared and calls silent; a GCC recovery no document states, left); GCC's recovery after declined
+  declarations, the unit then unanalyzed (template/typedef4.C, crash99.C, redecl5.C: Sema runs on a unit without declines only, a
+  wide change against the recorded passes, left).
