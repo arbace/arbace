@@ -24768,3 +24768,44 @@ Modules/_threadmodule.c (`localobject`, `local_traverse`, `create_sentinel_wr`),
 - Nothing recorded (the train records from its build). Train 7's whole-module records for these rows: the 26 modules above,
   test.test_multiprocessing_fork.test_misc and test.test_multiprocessing_spawn.test_processes. Ready for the train:
   `py-final-1126`.
+
+## 2026-11-26: Python eval, py-final lane (2): the user's 537-2 (a) for five rows; id() without a Go finalizer; the pending runs
+
+The user's answers of 2026-11-26 (through the coordinator) to py-final-1126's report:
+
+- (1) n/a under 537-2 (a): test_frame's TestIncompleteFrameAreInvisible.test_entry_frames_are_invisible_during_teardown (from
+  `:entry-frame-teardown`, now with no test), test_ssl's TestSSL.test_create_connection_memory_leak and
+  test_handshake_timeout_handler_leak and test_sslproto's SelectorStartTLSTests.test_create_connection_ssl_failed_certificate_no_cycles
+  and test_start_tls_failed_certificate_no_cycles (from `:ssl-finalization`, which keeps its four rows that now pass): moved to
+  `:finalization` (n/a), each source class's `:decided` and `:finalization`'s naming the decision and the reason. bin/pyi
+  divergences against train 6's tree's: the five move, nothing else changes (its one problem, test_audit's test_cantrace in no
+  class, is train 6's tree's and mac/next classes it). bin/reap --record refused on that same row and crops-score's judgment on
+  the matrix train 6's tree carries, so the matrix and scores are the train's to record; records-check 0 problems.
+- (2) built: a list's and a dictionary's id() in a field of their own (`List.ident`, `Dict.ident`, as an instance's), no longer a
+  record of `tracked` with a Go finalizer (queue 418's). Go keeps everything an object with a finalizer reaches for one more
+  collection, so a chain of such records freed a link a collection: after test_xml_etree's test_deeply_nested_deepcopy
+  (copy.deepcopy's memo had taken id() of about 10,000 dicts and lists before its RecursionError, the probe's histogram of
+  `tracked`: 6,665 dicts and 3,333 lists, all identity only) every gc.collect() ran its 256 rounds, 63 s, and the graph's seeds
+  passed cyMaxNodes. After: the same probe (p13) collects in 0.06 s, `tracked` 20 records. Such a list or dictionary was a
+  seed of the cycle collector only by its record: test_gc's test_saveall (`L.append(L); id(L); del L` in gc.garbage under
+  DEBUG_SAVEALL) failed in the first measure below; a del (DELETE_FAST, and DELETE_NAME through finPeek) of one whose number
+  was taken now holds it until the next collection, whose graph takes it as a seed probed as cySuspects are (`cyHeld`, at most
+  256, emptied by each collection, kept through the owed round's graph by cySeedKeepHeld): the probe passes at a module's
+  level and in a function, and test_gc's test_saveall passes in an aot run of test_gc (the children it spawns on the tools' host
+  killed, at 3 GB each, so its script_helper rows were not judged there). Tuples and sets keep the record (a set's
+  struct is assigned whole in place by its operations; a tuple's header would grow a size class). Alternatives: runtime.AddCleanup
+  (no resurrection, no extra collection; goi cannot interpret its generic body, builtins_tracemalloc's note); an address-keyed map
+  without a finalizer (a dead object's record would be read as the type of the next object at its address).
+- (3) `:spawn-children-timing` stays deferred (b). The pending run (`bin/pyi check --aot --lib-test --fresh --only`, the compiled
+  launcher's children): spawn's eight WithProcessesTestBarrier rows all pass, and test.test_multiprocessing_fork.test_misc whole
+  passes `:finalization-collect`'s three TestResourceTracker rows (sigint, sigkill, sigterm), 138 methods, 0 failing, no method
+  the eval record passes failing, the negative controls failing as they must.
+- Measured on train 6's executable (`d238b3a23ca9117d9cc8` as the tools' host, the worktree's runtime compiled by pyi's AOT):
+  `bin/pyi check --aot --lib-test --fresh --only` over test_xml_etree and test_gc whole (before cyHeld): 336 methods, 294 pass, 42
+  classed, 0 failing, the controls failing as they must; test_xml_etree in 30 s (1,144 s and two driver runs before), its
+  BasicElementTest.test_cyclic_gc and test_deeply_nested_deepcopy now passing and IterparseTest.test_resource_warnings_exhausted
+  passing again (no timeout); test_gc's test_class, test_newstyleclass and test_trashcan_threads now passing; against the eval
+  record one method it passes failing, test_saveall (0 != 1), which cyHeld serves. The same two modules again with cyHeld and
+  spawn's test_manager whole (the coordinator's row: WithManagerTestPool.test_release_task_refs, the ten CountedObjects alive
+  after `del objs; gc.collect()`) wait for the big lock (`.tmp/w/run34.sh`, `.tmp/w/run5.sh`).
+- Ready for the train: `py-final-1126` HEAD.

@@ -9129,3 +9129,17 @@ Left, by cause:
 - `:spawn-children-timing` and `:finalization-collect`'s three test_multiprocessing_fork rows: their run (test_misc whole, spawn's eight
   barrier rows) waits for the big lock; the spawn rows are the barrier's 30 s against a spawned child's start (queue 418), a
   DECISION for the user (the journal's entry).
+
+### py-final-1126, second round: id() without a Go finalizer (2026-11-26, the user's answers)
+
+- A list's and a dictionary's identity is a field of their own (`List.ident`, `Dict.ident`), as an instance's: queue 418's record
+  in `tracked` carried a Go finalizer, and Go frees a chain of objects with finalizers a link a collection, so after
+  test_xml_etree's test_deeply_nested_deepcopy (copy.deepcopy's memo: 6,665 dicts and 3,333 lists taken by id() before its
+  RecursionError) every gc.collect() ran its 256 rounds (63 s) and the cycle graph's seeds passed cyMaxNodes. Now 0.06 s;
+  test_xml_etree whole in 30 s (1,144 s before), its test_cyclic_gc passing in its module. Tuples and sets keep the record.
+- What the record also did, a list or dictionary as a seed of the cycle collector, is kept for the case a test sees: a del of
+  one whose number id() took holds it until the next collection, a seed probed as a deleted class is (`cyHeld`, at most 256;
+  test_gc's test_saveall).
+- The user's 537-2 (a), 2026-11-26: test_frame's teardown callback, test_ssl's two leak checks and test_sslproto's two
+  `*_no_cycles` are `:finalization`'s (n/a); `:spawn-children-timing` stays deferred (its eight rows pass with the compiled
+  launcher's children).
