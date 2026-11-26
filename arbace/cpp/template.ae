@@ -4382,6 +4382,11 @@
   specialization declared once; defined (linkonce_odr) only when odr-used."
   [ctx e n]
   (let [t (tmpl (:id e))
+        ;; (queue 602, the checker: a variable template is named in an expression by a simple-template-id ([temp.names]/1,
+        ;; [expr.prim.id]), its name alone none, when its parameters have no defaults: GCC's "missing template arguments after 'A<int>::u'",
+        ;; cpp1y/var-templ59.C, var-templ61.C; judged when no argument list is written after the name)
+        _ (when (and (sema/checking?) (nil? (sema/written-targs n (:name t))) (nil? (complete-args t [])))
+            (fail :template "missing template arguments after the variable template '" (:name t) "'"))
         args (or (complete-args t (or (explicit-args t (sema/written-targs n (:name t)) (:scope ctx)) [])) (fail :template "missing template arguments for " (:name t)))]
     (var-template-inst t args)))
 
@@ -4470,8 +4475,26 @@
         ;; argument-dependent lookup asks, sema's befriended?: [basic.lookup.argdep]/4.3, a namespace-scope friend declared in an
         ;; associated class is visible though another class defines it; <chrono>'s month declares `friend year_month
         ;; operator/(const year&, const month&)`, year_month defines it, and tzdb.cc's `year::min()/January` found none)
+        (do
         (when (and (not (sema/checking?)) (:cls scope) (string? (:name k)) (seq (:name k)))
           (abi/update-cls! (:cls scope) update-in [:friend-decls (:name k)] (fnil conj []) {:fs fs :k k}))
+        ;; (queue 602, the checker: an unqualified friend function declaration of a class no template's, whose name the
+        ;; innermost enclosing namespace does not declare with that signature, declares that namespace's function, visible to
+        ;; argument-dependent lookup alone until the namespace declares it ([namespace.memdef]/3 of C++17, [dcl.meaning.general]/2.3
+        ;; and [basic.lookup.argdep]/4.3 since C++20): lookup/friend19.C's `friend int foo (X);` found by foo (X()) beside the
+        ;; namespace's foo (int), and not by ::foo (X()); a local class's or a template's not judged)
+        (when (and (sema/checking?) (nil? *instance*) (:cls scope) (string? (:name k)) (seq (:name k)) (= "FunctionDecl" (:kind k))
+                   (not (:tmpl (abi/cls (:cls scope)))) (not (:targs (abi/cls (:cls scope))))
+                   (loop [s scope] (cond (nil? s) false (= :ns (:kind s)) true (:cls s) (recur (:parent s)) :else false))
+                   (not (#'sema/header-node? k))
+                   (empty? (#'sema/qualifier-before k)) (not (pos? (long (or (:_qtmpl k) 0))))
+                   (not-any? #(= "TemplateArgument" (:kind %)) (:inner k)))
+          (when-let [fid (try (#'sema/declare-fn! fs k) (catch arbace.lang.ExceptionInfo _ nil))]
+            (let [f (sema/fnd fid)
+                  old (some (fn [e] (when (and (= :fn (:e e)) (#'sema/same-sig? (sema/fnd (:id e)) f)) (:id e))) (.get ^java.util.HashMap (:names ns) (:name k)))]
+              (when-not old
+                (enter! ns (:name k) {:e :fn :id fid :pos (long (or (:_b k) 0)) :friend-cls (:cls scope)})
+                (upd-fn! fid assoc :friend-cls (:cls scope) :cx-friend-decl true))))))
 
         ;; declared in the class's names (its type may name the class's parameters), entered in the namespace, or
         ;; defining the namespace's earlier declaration of it

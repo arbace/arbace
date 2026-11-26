@@ -25627,3 +25627,19 @@ stall after its depth: three workers of four done), statmemprof/bigarray (its de
 ephetest's test7, the suite's exception_comballoc and stop_start_in_callback (deallocations missing), lib-unix/common/test_unix_cmdline
 and cloexec (Unix.execv: OC208 (b) left it to the compiled level), unboxed-primitive-args/test (o2j's translation of its 600 KB of Lambda
 in bounded memory).
+
+## 2026-11-26 — C++ read independence, slice 4: the clang-only rows by cause (queue 602, VM)
+
+Branch `602-cpp-indep-slice4` from origin/next `e8e2c1ac3`. The 883 rows clang's recorded dumps pass and the own record fails (less
+dg-dialect-out and the :na classes) grouped by cause and the next groups after cpp-indep3's taken, each rule from the standard's text or
+GCC's documented messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: 602"): explicit conversion functions in direct- and
+copy-list-initialization, switch and operators; the conditional operator's [expr.cond]/4.3 and /6; aggregates before C++20 and their
+elements' destructors; hidden friend declarations; x87 asm outputs and read-only asm outputs; `C::C (...)`; [class.protected] for
+pointers to members and base access in reference binding; `this` in lambdas; bit-field and rvalue reference binding; xvalue operands;
+inconsistent `auto` return deduction; using-declaration conflicts; single rules (bound member function values, noexcept(noexcept(f())),
+a variable template without arguments, calls through function pointers, defaulted copy constructors' parameter, static_cast rules).
+Checks: a base run of the 883 rows (.tmp/q602/dgw-base), targeted run t1 (the candidates plus 1,115 recorded own passes the first rules
+reach, 1,998 files): 31 rows to own pass, 1 recorded pass lost (template/friend77.C: a template-id-qualified friend declared as a hidden
+friend; fixed, probed); t2 (the candidates plus 975 recorded passes the later rules reach, 1,858 files) for the later rules. No record
+yet: the coordinator runs one regression over this branch and 601's merged. Alternatives left: the static_assert traits and noexcept
+operands (the evaluator's unsure nodes), definition-time narrowing in templates' signatures, substitution order (DR 1227).
