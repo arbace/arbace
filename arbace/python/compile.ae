@@ -994,13 +994,33 @@
           (at-node! u x #(do (emit! u :to-bool nil)
                              (swap! nxt conj (jump! u (if want :jump-if-true :jump-if-false)))))))))
 
+(defn- bool-jump!
+  "A boolean operation's operand x (queue 595, :boolop-truth-calls): its value pushed, then a jump (the value kept) conj'd
+  on the atom yes when its truth is t, else a fall through with the value on the stack. An operand that is itself a
+  boolean operation is tested as flowgraph.c's jump threading of JUMP_IF_FALSE and JUMP_IF_TRUE leaves CPython's codegen_boolop
+  (gh-124285): an inner operand's jump goes straight to the outer end when the two operations are one kind, past the
+  outer test (to the POP_TOP) when they differ, and the inner's last value is tested once, by the outer, so no operand's
+  __bool__ is called twice"
+  [u x t yes]
+  (let [[h p _ _] (when (seq? x) (node x))]
+    (if (= h 'bool-op)
+      (let [[op vs] p
+            t2 (= op 'or)
+            no (atom [])]
+        (doseq [v (butlast vs)]
+          (bool-jump! u v t2 (if (= t2 t) yes no))
+          (emit! u :pop nil))
+        (bool-jump! u (last vs) t yes)
+        (doseq [j @no] (label! u j)))
+      (do (expr! u x)
+          (emit! u :copy 1) (emit! u :to-bool nil)
+          (swap! yes conj (jump! u (if t :jump-if-true :jump-if-false)))))))
+
 (defn- bool-op! [u x]
   (let [[_ [op vs] _ _] (node x)
         ends (atom [])]
     (doseq [v (butlast vs)]
-      (expr! u v)
-      (emit! u :copy 1) (emit! u :to-bool nil)
-      (swap! ends conj (jump! u (if (= op 'and) :jump-if-false :jump-if-true)))
+      (bool-jump! u v (= op 'or) ends)
       (emit! u :pop nil))
     (expr! u (last vs))
     (doseq [e @ends] (label! u e))))
