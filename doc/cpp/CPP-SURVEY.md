@@ -11881,3 +11881,240 @@ false, "no matching function") and concepts-var-templ1a.C to own pass; sat2, sat
 
 Rows to own pass: cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, cpp26/static_assert1.C, ext/vector41.C (regression run at `75369eedd`,
 2,991 files: 0 lost); C++ read 6,108 / 0 / 177 -> 6,111 / 0 / 174.
+
+## As built: cpp-def, the read cell's deferred rows by cause (2026-11-26; branch `cpp-def-1126` from mac/next `b94fde1aa`)
+
+The read cell at the base: 6,111 pass / 0 by design / 174 deferred, the 174 the dg rows neither judge passes (own-diag 173,
+gcc-own-rules 1: ext/type_pack_element4.C), each its own cause but for the groups below. A run of the 174 at the base (`.tmp/dg-base`)
+passed four already (other/abstract1.C, template/crash125.C, tc1/dr176.C, cpp23/ext-floating12.C, a timeout of the record's): next's
+changes since their rows were recorded. The rules, each from the standard's text or GCC's documented messages and manual as the
+tests state them, no GCC or clang code:
+
+- Non-type template arguments (arbace/repr/cpp/parse.ae, nttp-arg-check!): [temp.param]/6, a non-type template-parameter of a
+  scalar non-reference type is a prvalue, no operand of the built-in & ("lvalue required as unary '&' operand"); C++98's
+  [temp.arg.nontype]/1 with [expr.const]/1 (ISO/IEC 14882:2003) for a value-dependent argument: an integral constant-expression names
+  a non-type template-parameter of integral or enumeration type only, sizeof's operand aside, and a pointer parameter's argument is a
+  template-parameter's name or `&` id-expression ("... is not a valid template argument ...", "could not convert template argument").
+  template/nontype3.C, template/crash14.C.
+- Qualified friend declarations (arbace/repr/cpp/diag.ae, friend-qualified): [dcl.meaning.general]/1 with [temp.friend]/1, a friend
+  function named by a qualified-id matches a declaration the qualifier's scope made before (by kind, template or not, and by
+  parameter count or types of builtin words), else GCC's "no declaration matches"; [temp.friend]/5, a template friend naming a
+  member of a dependent type through a nested-name-specifier that ends with the injected-class-name, no simple-template-id
+  (`X<N>::X::foo`, "... declared as friend"). template/memfriend6.C, template/friend72a.C, template/friend50.C, cpp0x/vt-34399.C.
+- [expr.call]/1: an explicit conversion to an arithmetic type (GNU's complex types among them) called ("... cannot be used as a
+  function"; diag.ae, arithmetic-calls). other/error29.C.
+- Before C++20's P1099R5, a using-declaration outside a class whose nested-name-specifier is an enumeration ("'e' is not a namespace
+  or unscoped enum"; diag.ae's using rules). cpp0x/using-enum-3.C.
+- declared-in-main? (parse.ae): a type template-parameter's name declares no failed declaration's name, so `S::*` in another
+  template, S no type there, is "'S' has not been declared". template/pr70466-1.C.
+- [class.bit]/1: a bit-field's width naming a function or a function template (an anonymous struct's member, invalid) is no
+  integral constant expression (parse.ae). lookup/pr84962.C.
+- The checker's constant evaluator (arbace/cpp/sema.ae): [expr.mul]/4's division by zero for floating operands; [conv.fpint]/1, a
+  floating value the integer type cannot represent ("overflow in constant expression"); [expr.const]/5.2, abort reached
+  (__builtin_unreachable's stand-in); a constexpr array of static storage duration decayed, its elements its initializer's; an
+  array not usable in constant expressions decayed to a pointer into its unknown object, its bound kept (addresses compared, none
+  read); [expr.eq]/3.1, a past-the-end pointer of one object against the first element of another, a local array's against a string
+  literal's or a static array's; [lex.string]/9 with [intro.object]/9, pointers into two string literals whose suffixes are the same
+  characters (they may overlap); [expr.eq]/3, two functions' addresses compared. ubsan/pr63956.C, cpp1y/constexpr-89074-3.C.
+- P2280R4 (which GCC applies from C++11, as cpp0x/constexpr-ref12.C's arp states it): a reference parameter outside its call's
+  evaluation refers to an unknown object: its object read, a virtual call on it, surely no constant; typeid of a polymorphic glvalue
+  through a namespace-scope reference with no initializer the evaluation knows. cpp2a/constexpr-ref1.C.
+- Errors of the constant evaluation (and a static_assert's "non-constant condition") at a main-file macro's expansion, the node's
+  expansion location (diag.ae's sema-errors; the checker's other rules over macro-made code left as they were: cpp0x/decltype3.C's
+  static assertions, a checker's misjudgement of decltype that the relocation had exposed, lost in the first reach run and kept out).
+  cpp0x/constexpr-arith-overflow2.C.
+- [class.access.base]/6: a non-static member named `o.C::m` through a naming class C that is neither o's class nor its base ("'C' is
+  not a base of 'B'"); [dcl.fct.default]/5, a default argument's own expression's error at the default argument, its conversion's
+  still the call's (sema.ae). parse/crash40.C.
+- [dcl.struct.bind]/4: a tuple-like E whose std::tuple_element<i, E>::type is void ("... is 'void'"), at block scope and, through
+  cx-decomposition!, at namespace scope, whose declaration the slice drops. cpp1z/decomp55.C.
+- The GCC manual's "Statements and Declarations in Expressions": a goto into a statement expression -- an assumption's, whose
+  expression the native parser drops -- is "jump to label 'l1'" at the label, not "used but not defined" (diag.ae's labels).
+  cpp23/attr-assume8.C.
+- C++23's subscript of an expression-list (P2128R6, [expr.sub]/2): the built-in one takes a single expression, so none is "built-in
+  subscript operator without expression list"; several GCC's comma expression, its last the index (a floating literal there "invalid
+  types ... for array subscript"), and for a class whose operator[] takes neither the list nor the comma's one, no conversion of its
+  making the built-in one apply, "no match for call to 'V::operator[] (int, int, int)'" (sema.ae, diag.ae's operand-types).
+  cpp23/subscript2.C.
+- [dcl.type.auto.deduct]/4: `auto v = { ... };` with an element naming an undeclared identifier deduces nothing, "unable to deduce
+  'std::initializer_list<auto>' from '{<expression error>}'" at the list's end (diag.ae, auto-list-undeclared). cpp0x/initlist31.C.
+- [dcl.align]/3 with [expr.alignof]/1: alignas(type-id) is alignas(alignof(type-id)), whose type is a complete object type: void,
+  or a class with no definition before the specifier, "invalid application of '__alignof__' to ..." at the specifier, and a class
+  template's alignas(T) the same at the template for a specialization the main file names with such a T (diag.ae,
+  alignas-incomplete); alignof(void) in the checker (GNU's __alignof of void a pedwarn). cpp0x/alignas20.C.
+- C++11's braced mem-initializers (N2672) before C++11: GCC's pedwarn "extended initializer lists only available with
+  '-std=c++11' or '-std=gnu++11'", an error under -pedantic-errors (parse.ae's ctor-inits). parse/ctor3.C.
+- [class.union.general]: a union member whose type is a function template's type parameter, at a specialization the main file names
+  by explicit template arguments with a reference type there (diag.ae, union-ref-specializations). cpp0x/pr78890-2.C.
+- A direct base whose destructor is private, its class befriending none: [class.dtor]/7, the derived class's implicit destructor is
+  deleted, so with the base's destructor virtual a deleted function overriding a non-deleted one ([class.virtual]/18), and
+  [class.base.init]/13, a user-provided non-delegating constructor potentially invokes the base's destructor, private there (diag.ae,
+  inaccessible-base-dtors). template/virtual3.C.
+- C++26's structured binding declaration as a condition (P0963R3; GCC's pedwarn before): the decision variable the whole object,
+  contextually converted to bool or (a switch) to an integral or enumeration type: an array initializer is "array initializer for
+  structured binding declaration in condition", a class with no conversion function "could not convert '<structured bindings>' from
+  'S' to 'bool'", with only explicit ones in a switch "switch quantity not an integer" (sema.ae, cx-decomp-condition!); and
+  [dcl.struct.bind]/1's decl-specifiers, no constexpr (GCC 15 has not P2686R5: "structured binding declaration cannot be
+  'constexpr'"; parse.ae). cpp26/decomp9.C.
+- [stmt.ranged]/1: a range-based for's loop variable is its for-range-declaration, not a body that is a declaration statement
+  (`for (auto _ : s) int _ = 5;`, which the checker had taken for the loop variable: "no viable conversion from 'S'"; sema.ae).
+  cpp26/name-independent-decl10.C.
+- A redefinition's note at the first definition, for a dg-error's later branch (diag.ae's qualified definitions).
+
+Rows to own pass, 28: cpp0x/alignas20.C, cpp0x/constexpr-arith-overflow2.C, cpp0x/initlist31.C, cpp0x/pr78890-2.C, cpp0x/using-enum-3.C,
+cpp0x/vt-34399.C, cpp1y/constexpr-89074-3.C, cpp1z/decomp55.C, cpp23/attr-assume8.C, cpp23/subscript2.C, cpp26/decomp9.C,
+cpp26/name-independent-decl10.C, cpp2a/constexpr-ref1.C, lookup/pr84962.C, other/error29.C, parse/crash40.C, parse/ctor3.C,
+template/crash14.C, template/friend50.C, template/friend72a.C, template/memfriend6.C, template/nontype3.C, template/pr70466-1.C,
+template/virtual3.C, ubsan/pr63956.C, and the base's other/abstract1.C, template/crash125.C, tc1/dr176.C (cpp23/ext-floating12.C timed out again under the load, as recorded). Regression run at
+`e9b0a69f7` (next's 2,941 recorded own passes and the 174, 3,115 files, two parts of 2 threads under the big lock's small slot):
+0 lost; recorded from it with `--judge --record`. C++ read 6,111 / 0 / 174 -> 6,139 / 0 / 146; completeness 0.9870 -> 0.9881,
+independence 0.9784 -> 0.9788 (read 0.894). Also own passes now, not recorded (not this lane's rows: clang's record passes them,
+cpp-indep2's set): cpp1z/decomp26.C, inherit/error1.C.
+
+Left, looked at: GCC's recovery after syntax errors (a declined declaration leaves its unit unanalyzed: template/typedef4.C, crash99.C,
+redecl5.C, pr90138.C, crash59.C; parse/error32.C and error33.C's typedef of a qualified name), definition-time checks of
+uninstantiated templates (template/non-dependent26.C, cpp0x/overload2.C), the evaluator's implicit assignment operators
+(cpp1y/constexpr-89336-3.C), implicit default constructors before C++20 (cpp1y/pr94066-2.C, cpp0x/constexpr-nsdmi1.C: evaluated
+by their members' initializers, cpp0x/nsdmi3.C's refused initializer then read as uninitialized; dropped), calls through function
+pointers (cpp0x/constexpr-ice20.C, cpp1z/constexpr-lambda8.C), a local reference's id-expression (cpp0x/constexpr-ref12.C: its
+calls' paths never read the reference), a deleted member template's out-of-line redefinition (cpp0x/defaulted10.C), a
+placeholder's constraint whose argument fails to form (cpp2a/concepts-placeholder3.C), __type_pack_element's recursive
+instantiation (ext/type_pack_element4.C).
+
+## As built: cpp-indep2, more clang-only dg rows by the own front end (2026-11-26; branch `cpp-indep2-1126` from mac/next `b94fde1aa`; mac/next `ede33dbe5` and `9f06d5027`, cpp-def's record, merged)
+
+The read stage's independence counts a dg row 0.5 while only clang's recorded dumps pass it. The rows clang passes and the own
+record fails, less dg-dialect-out and the :na classes, were 1,167 at the base (870 accepted with an expected error, 197 missed lines,
+63 both, 42 extra, 3 timeouts, 2 crashes); cpp-def's deferred rows (both failing) are another set. Taken by the shortest tests
+first and grouped by the rule they need; every rule from the standard's text and GCC's messages as the tests state them, no GCC or
+clang code.
+
+- arbace/repr/cpp/parse.ae, template-heads and declarations: too many template-parameter-lists for an unqualified class, function or
+  friend ([temp.mem]/1); a class's own specialization in its member-specification ("must appear at namespace scope"); a template
+  parameter that shadows an enclosing one or names its templated declaration ([temp.local]/6, also diag.ae's tparam-shadows); a
+  template template parameter's own list's defaults ([temp.param]/14); a class-head naming a template template parameter's
+  specialization ("declaration does not declare anything", "shadows template template parameter"); an explicit specialization's
+  storage class ([dcl.stc]/1), of a non-template variable or member, with two template<> for a non-template member
+  ([temp.expl.spec]), in a friend declaration; a template-head before a member of a specialization whose arguments name none of its
+  parameters ("template definition of non-template"); an out-of-class member's template-head of another parameter count ("got 2
+  template parameters"); a typedef's template-id ([dcl.typedef]/1); a friend's defined specialization, a friend's deleted or
+  defaulted qualified definition ([class.friend]/6); `int ::i;` never declared ([dcl.meaning.general]/2); a class's qualified
+  definition in a scope not enclosing it ([class.pre]/3); an elaborated `enum E` never declared or finding a class ([dcl.type.elab]);
+  a static member declared twice in its class (diag.ae, [class.mem.general]/5); a class template placeholder as a function's return
+  or trailing return type ([dcl.type.class.deduct]/2); `decltype(auto)` with a declarator operator; trailing return types and
+  placeholders in alias declarations ([dcl.fct]/2); a non-type template parameter of a placeholder type before C++17, of array of
+  void; a type defined in a template parameter; string literals as template arguments ([temp.arg.nontype]); `auto` in a template
+  argument's function type; a class template's template-id with too few or too many arguments ([temp.arg.general]/1, a template
+  declared once); an explicit instantiation outside a namespace enclosing its template; a using-declarator naming no member of a
+  complete class without bases; a local class's friend whose prior local declaration has another parameter-type-list; GNU's bool
+  vectors; standard attributes before a class-key.
+- Lambdas: `this` in a namespace-scope lambda and in alignas; void parameters ([dcl.fct]/2); captures redundant with the capture
+  default ([expr.prim.lambda.capture]/2); a captured namespace-scope variable or type.
+- Pedwarns of later standards: fold-expressions and auto non-type parameters before C++17; the uses of main ([basic.start.main]/3,
+  diag.ae's main-uses); -Wno-error=pedantic after -pedantic-errors; `__extension__` over a whole declaration (in-extension?).
+- Recovery: an anonymous union whose `;` is missing stays the class's member; a trailing return type's elaborated class before
+  the function body (*trailing-type*); a static data member's out-of-class initializer looked up in its class; an attribute
+  pack of no pack.
+- arbace/cpp/template.ae: a class template partial specialization's pack expansions (cx-partial-pack-checks!): one against a
+  primary's non-pack parameter ("not more specialized"), one not last (dropped, as GCC drops it), one past the parameters.
+- arbace/cpp/sema.ae, the checker: a binary operator's two operands each reported when both are refused (cx-both-operands);
+  __builtin_offsetof's member an enumerator, a static member or a member function, an overloaded operator[], an incomplete class;
+  a local variable a lambda odr-uses without capturing it ("'i' is not captured", not const-qualified); a call whose candidate's
+  erroneous void parameter was its declaration's error, not reported again.
+
+Recorded from the regression run at `886dc926f` (next's 2,969 recorded own passes and the 1,167 rows, 4,136 files, two parts in
+the big lock's small slot; logs in .tmp/keep/cpp-indep2-1126/ in the main checkout), with the one fix it called for: the run lost
+cpp2a/lambda-pack-init2.C to the not-captured rule, which had reported an init-capture pack's unnamed element; the rule now takes a
+named variable alone (`d30ab40cc`), and the files that error had reached (lambda-pack-init2.C, lambda-pack-init7.C, the only two
+with it in the run) were run again at that head with the moved rows and the capture controls (151 files) and recorded after it.
+Own passes 2,969 -> 3,067: 96 rows of this branch's and cpp-def-1126's cpp1z/decomp26.C and inherit/error1.C, none lost
+(lambda-pack-init7.C, a pass only by the unnamed element's error, stays a failure). C++ read independence 0.8940 -> 0.9020,
+independence 0.9788 -> 0.9804. Left: definition-time checks of uninstantiated templates (the :ifndr class aside), instantiation's deeper diagnostics,
+lambdas' odr-use of const variables, units with a syntax error (the checker does not run), and the long tail of one-row rules.
+
+## As built: cpp-def2, the read cell's deferred rows: GCC's recovery and single rules (2026-11-26; branch `cpp-def2-1126` from mac/next `9f06d5027`)
+
+The read cell at the base: 6,139 pass / 0 by design / 146 deferred (own-diag 145, gcc-own-rules 1). A run of the 146 at the base
+(`.tmp/dg-base`, one thread): own pass 0; 40 of them have a syntax error of the native parser (a declined construct), the group
+cpp-def left first: such a unit had its Sema not run at all. The rules, each from the standard's text or GCC's documented messages
+and manual as the tests state them, no GCC or clang code:
+
+- GCC's error recovery: a unit whose parser declined a construct is analyzed by the checker too (arbace/repr/cpp/diag.ae's
+  diagnose; `REPR_CPP_SEMA_DECLINED=0` the old way), the declined declarations' names -- declined-name's, but a name another
+  declaration of the unit declares -- dropped from the start (arbace.cpp.sema/*cx-dropped-seed*, queue 526's cx-poisoned?), as GCC
+  goes on past a syntax error with the failed declaration left out. Checked first on a fifth of the recorded own passes with a syntax
+  error (208 of 1,042, every fifth): all still pass. template/crash99.C, cpp2a/concepts-requires1.C.
+- [temp.inst]/2 with [temp.expl.spec]/7 (arbace/cpp/template.ae): a class template's specialization whose template is not defined
+  yet (no partial or explicit specialization for the arguments), or an explicit specialization declared and not defined, is surely
+  incomplete there (:cx-sure-incomplete): a variable of it is GCC's "aggregate ... has incomplete type" (no default constructor's
+  cascade), and [basic.lookup.qual]/1 a qualifier naming it "incomplete type 'A<int>' used in nested name specifier" (sema.ae's
+  name-expr). template/crash99.C.
+- [dcl.enum]/3 with [basic.lookup.qual]/1: an enumeration only opaque-declared -- no enumerator list before the name, and none a
+  qualified definition `enum A<T>::E : T {...}` could give an instantiation -- has no members: "'e1' is not a member of 'C<int>::E'".
+  cpp0x/pr82401.C.
+- [expr.const]/5.6 of C++20 (P1064R0): a virtual call on an object through a pointer formed from a variable outside the evaluation,
+  neither constexpr nor begun in it, is no constant expression (`static_cast<VBase*>(&m)->foo()`; a call on the variable itself,
+  which GCC devirtualizes, left as it was). cpp2a/constexpr-virtual20.C.
+- [dcl.fct.default]/1 with [dcl.init]: a default argument of a function that is no template's specialization whose conversion to the
+  parameter's type fails is reported at the default argument and again at the call that uses it (sema.ae's call-args).
+  overload/defarg9.C.
+- [dcl.fct.def.delete]/4 with [basic.def.odr]/1: a definition after a function's (or a member function template's) deleted
+  definition is a redefinition, the function staying deleted, its body not taken (sema.ae's declare-fn!, template.ae's
+  declare-template): "use of deleted function". cpp0x/defaulted10.C.
+- [expr.type.conv]/2 as DR2351 states it: no braced list but one empty after its packs' expansion initializes void, "compound literal
+  of non-object type 'void'": a list with an element that is no pack expansion in any definition, a template's too (diag.ae's
+  void-lists), one of pack expansions at the specialization (sema.ae). cpp0x/dr2351.C.
+- [expr.sub]/2: the built-in subscript's operands neither a pointer after their conversions, "subscripted value is neither array nor
+  pointer" at the subscript; a default template argument's own error located in the main file reported there and, outside a
+  substitution, the argument the specialization's: "template argument 2 is invalid" at the template-id (template.ae's complete-args).
+  template/crash89.C.
+- [namespace.udecl]/1 with [basic.lookup.qual]/1: a block scope's dependent using-declaration in a function template's specialization
+  whose qualifier is a scalar type, "'int' is not a class, namespace, or enumeration", its name then declared by nothing (a later
+  unqualified use "not declared"). cpp2a/using-enum-7.C.
+- [temp.constr.atomic]/3: a constrained placeholder's type-constraint whose arguments surely fail to form (`same_as<decltype(x.missing)>
+  auto` for an int x) is not satisfied, "placeholder constraints not satisfied" (sema.ae's *cx-tc-args*, template.ae's
+  :type-constraint hook). cpp2a/concepts-placeholder3.C.
+- [dcl.constexpr]/3 (C++11-C++23 /4): a constexpr constructor or destructor of a class with a virtual base is no constexpr function
+  (sema.ae's ce-not-constexpr?, ce-construct): its call "call to non-'constexpr' function"; the error at the definition's body's end,
+  where GCC judges it (diag.ae's constexpr-virtual-bases). cpp0x/constexpr-ice21.C.
+- [expr.prim.lambda.capture]/7-11: an enclosing function's local named in a lambda's body is its closure's member there; its address
+  in a constant evaluation (`*&n`, an odr-use) is no constant expression. cpp1z/constexpr-lambda10.C.
+- [temp.param]/6-7 (C++20) with [over.literal]/5: a non-type template parameter of a class type surely no literal type is not
+  structural, GCC's "... is not a valid type for a template non-type parameter because it is not structural", and a literal operator
+  template of that one parameter has an invalid parameter list (template.ae's cx-structural-params!). cpp2a/udlit-class-nttp-neg2.C.
+- [temp.explicit]/3 with [dcl.fct]/22: an explicit instantiation's function declarator with a placeholder parameter (an abbreviated
+  function template) is no specialization's, "'auto' parameter not permitted in this context" (diag.ae's explicit-inst-auto-params).
+  cpp1y/pr60627.C.
+- [over.ics.rank]/3.1 (DR1467): of two list-initialization sequences, one to std::initializer_list<X> is better than one that is not,
+  whatever the other rules say; and [dcl.init.list]/7.5 (P1957R2, which GCC applies to every standard, as the test's C++11 target
+  shows): a pointer or a pointer to member to bool narrows. cpp0x/initlist92.C.
+
+Also from the regressions: a declined member's class dropped from the start too (as cx-dropped!'s; cpp1z/class-deduction52.C's
+B, whose constructor template declined); a statement expression's labeled last statement its value (the GCC manual's "Statements and
+Declarations in Expressions": `({ a: 3; })`, cpp2a/range-for7.C); a conversion function named by its conversion-type-id, `a.operator
+int()`, of a class whose conversion function template deduces a specialization of exactly that type, a refusal with no rule (the
+slice names no such specialization: parse/casting-operator2.C), `operator auto` and a type no specialization has keeping "no member"
+(cpp0x/auto11.C, auto43.C, template/conv11.C); the code generator's block-scope dependent using-declaration refused as before.
+
+Rows to own pass, 16: cpp0x/constexpr-ice21.C, cpp0x/defaulted10.C, cpp0x/dr2351.C, cpp0x/initlist92.C, cpp0x/pr82401.C,
+cpp1y/pr60627.C, cpp1z/constexpr-lambda10.C, cpp2a/concepts-placeholder3.C, cpp2a/concepts-requires1.C, cpp2a/constexpr-virtual20.C,
+cpp2a/udlit-class-nttp-neg2.C, cpp2a/using-enum-7.C, other/crash-11.C, overload/defarg9.C, template/crash89.C, template/crash99.C.
+Regressions over next's recorded own passes (2,969) and the 146, 3,115 files, two parts of 2 threads under the big lock's small slot
+in a frozen run tree (.tmp/worktrees/cpp-def2-run): at `1ddac633e` 4 lost (class-deduction52.C, range-for7.C, casting-operator2.C,
+units the recovery now analyzed; concepts-pr67774.C's timeout), fixed; at `07d95aaf2` 4 lost (auto11.C, auto43.C, conv11.C, by the
+conversion-name refusal; concepts-pr67774.C's timeout again, 281 s already at cpp-def's run), fixed. mac/next `3e694b11a`
+(cpp-indep2's record, +98 own passes; parse.ae, template.ae, sema.ae, diag.ae) merged, then a targeted rerun at the merged head
+`639f613d8`: cpp-indep2's 98 new passes, every recorded own pass with a syntax error (1,082), the rows and the files with a named
+conversion function call, 1,201 files: 0 lost; concepts-pr67774.C alone on one thread: passes. Recorded from the four parts in turn
+(`--judge --record`, the merged head's last): 16 rows to own pass, 0 recorded passes lost. C++ read 6,139 / 0 / 146 -> 6,155 / 0 /
+130; completeness 0.9881 -> 0.9887, independence 0.9804 -> 0.9808.
+
+Left (130), measured: GCC's parser recovery 37 (of the 38 units with a syntax error: a template kept with an erroneous parameter,
+a class-head's failure skipping its body, template/typedef4.C, redecl5.C, pr90138.C, crash59.C, crash67.C, crash28.C, ...;
+parse/error32.C and error33.C left, as cpp-def), the constant evaluator 27 (implicit assignment operators, calls through function
+pointers, implicit default constructors before C++20, noexcept-specifiers instantiated when needed), definition-time checks of
+templates about 13 (template/non-dependent26.C, cpp0x/overload2.C, parse/template18.C, template/nested3.C, ...), single rules about
+53 (among them two errors GCC places in a macro's definition, whose spelling locations the native parser does not keep:
+diagnostic/pr79300.C, init/pr43064-2.C). Two held for the user: parse/explicit1.C (C++17's CWG727 allows the explicit
+specialization in class scope GCC 15 rejects) and template/typedef39.C (its expected error on a line of a template never
+instantiated, the test's own comment saying it belongs elsewhere).

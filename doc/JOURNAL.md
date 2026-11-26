@@ -23951,6 +23951,738 @@ does not record): its row applied to check-aot-linux-amd64.edn, divergences-aot.
 Python eval (pass/design/deferred, n/a) next 42,743/278/1,004 (4,426) -> 43,203/148/568 (4,543); AOT 150/0/1 -> 151/0/0;
 completeness 0.9911 -> 0.9959. bin/reap --record 56 of 56, 0 problems; bin/crops-score --record, --judge --strict 0 problems;
 bin/records-check 9 pairs, 0 problems; bin/markers-check ok.
+## 2026-11-25: rust-rec-1125: Rust's eval and AOT records from the own path on amd64 (542's and 565's records for the host)
+
+Branch `rust-rec-1125` from mac/566-rust-c6-l1 (`6ffc51528`), next merged (`3a67d8dc2` with 565, 566, 561 before the runs; `5754ba518`
+after them). The Mac (arm64) writes no amd64 record; these are the ones 542 ("Records for the main host (held)") and 565 ("Left for
+the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/logs/.
+- Caches: rust-l1's (`.tmp/rust-front`, std's IR at the pin `test/rust/runtime/ir.sha256`, `.tmp/repr-rust`), paths rewritten.
+- `DEPS_IFACE_ROUNDS=3 bin/rust-front std-iface --deps`: libc 892 functions, 304 ADTs (round 10's three rounds; the facts rust-l1
+  installed 11-24, kept), hashbrown 665, unwind 14.
+- `CORE_NATIVE_IFACE=core/core-whole-iface.edn bin/rust-front std-iface-native`: core 27,199 of 27,498 facts equal to the helper's
+  (164 differ, 135 missing; the Mac's 542 pass 27,194), alloc 3,863 of 3,863.
+- std's names: np5's `std-names.edn` (rust-c4-1122's chain, kept in .tmp/kept/rust-c4; 15,120 of 15,162 equal; the names the Mac's
+  rsi18 used), not scanned again: the fresh `std-names-native` was killed by the 12:03 OOM reboot at core's scan 50 of 378 (about
+  75 min for core alone), and the coordinator approved np5's.
+- The exports at this head: `core-export --rsi` (21 min), `--rsi-outside` with 565's regex (43 min), `lib-export --rsi std`, the
+  two CTFE keys into std/native-std-ctfe.edn; after the OOM one at a time outside the lock at GOMEMLIMIT<=2500MiB.
+- `RF_FACT_TRACE=1 RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5 RF_EXTRA_IFACE=core pass:core native-iface:hashbrown:libc:unwind RF_DROP_GLUE=1
+  RF11_BATCH=1 bin/rust-front rsi-build --native-core` over the six, under the lock: **6 of 6 own**, 0 stub calls. fact-refused: 0 in
+  five; vectors 16 (8 callees, 8 fn-symbols), all `core_simd::swizzle::{impl#1}::resize::<N>` for Mask<i8,16> and Mask<i32,4>:
+  "attributes are not in core's sources (a macro-made item)" (the Mac's rsi20 had 0: its core-attrs cache likely covers swizzle.rs;
+  not investigated here).
+- runtime-ci (104 units lowered, 0 refused), then under the lock with RSI_FRONT_DIR the build's:
+  `bin/rsi check --record --front own --corpus samples` **6 of 6 pass**; `bin/rsi check --aot --record --front own --corpus samples`
+  **6 of 6 pass** (compiled against interpreted: 6 both).
+- Case inputs (eval and AOT): C1, C4, C5, C7 own on all six; C3 own on five (vectors' 16 the record's); C2 the pack's (std's instances'
+  bodies: 137 to 1,938 rustc's, the exports built for the five eval samples' keys, threads' larger); C6 std's IR. 0 of 6 cases own
+  in all seven: independence stays 80. bin/reap 56 of 56, matrix unchanged; crops-score unchanged (Rust 100 / 80), --judge --strict
+  0 problems; records-check 9 pairs 0; markers-check 0.
+
+## 2026-11-26 — C++ read: the read cell's deferred rows by cause (cpp-def)
+
+- Branch `cpp-def-1126` from mac/next `b94fde1aa` (a lane of the burst; cpp-indep2 beside it on the rows only clang's record
+  passes, a disjoint set). The read cell at the base: 6,111 pass / 0 by design / 174 deferred, the 174 the dg rows neither judge
+  passes (own-diag 173, gcc-own-rules 1: ext/type_pack_element4.C). A run of the 174 at the base (`.tmp/dg-base`) passed four
+  already (other/abstract1.C, template/crash125.C, tc1/dr176.C; cpp23/ext-floating12.C, a timeout of the record's): next's changes
+  since their rows were recorded. Each other row read against its dg lines, the own errors and g++ 15.2's recorded lines, and grouped
+  by cause; the rules built from the standard's text or GCC's documented messages and manual as the tests state them, no GCC or
+  clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-def", lists each rule with its rows).
+- arbace/repr/cpp/parse.ae: C++98's non-type template arguments and [temp.param]/6's prvalue parameters (nttp-arg-check!);
+  declared-in-main?'s type template-parameters; [class.bit]/1 widths naming functions; C++98's braced mem-initializers (GCC's
+  pedwarn); a structured binding condition's constexpr. arbace/repr/cpp/diag.ae: qualified friend declarations
+  ([dcl.meaning.general]/1, [temp.friend]/1 and /5); [expr.call]/1 for arithmetic casts called; P1099R5's using-declarations of
+  enumerators before C++20; the constant evaluation's errors at a main-file macro's expansion; a goto into a statement expression;
+  C++23's subscripts of expression-lists; an auto braced list with an undeclared element; alignas and alignof of void or an
+  incomplete class; union reference members at a function template's named specialization; bases' private destructors
+  ([class.dtor]/7, [class.virtual]/18, [class.base.init]/13); a redefinition's note. arbace/cpp/sema.ae (the checker): the constant
+  evaluator's floating division by zero, [conv.fpint]/1, abort, static arrays decayed (constexpr ones' elements, others' addresses
+  alone), pointer comparisons across objects, string literals that may overlap, two functions' addresses; P2280R4's unknown
+  reference parameters (reads, virtual calls) and typeid through a reference; [class.access.base]/6's naming class; a default
+  argument's own errors at it; [dcl.struct.bind]/4's void tuple_element, at namespace scope too; structured binding declarations as
+  conditions (P0963R3); alignof(void); C++23's operator[] of an expression-list; a range-based for whose body is a declaration.
+- Checked: each rule on its rows (.tmp/bin/d1, one file), then reach runs outside the lock (2 threads, GOMEMLIMIT=2500MiB, 2.6-2.9
+  GB): `.tmp/reach1.list` (398 files: the 174, C++98 files, qualified friends, casts called, using-declarations, constexpr comparisons,
+  macros) lost one recorded pass, cpp0x/decltype3.C, whose static assertions in a macro the relocation of errors to the macro's
+  expansion exposed (a checker's misjudged decltype it had hidden): the relocation kept to the constant evaluation's errors;
+  `.tmp/reach2.list` (421: qualified member access, structured bindings, gotos, default arguments, constexpr files), reach3 (53:
+  alignas, auto lists, C++23 subscripts), reach4 (103: destructors, unions in templates, C++98), reach5 (4: structured binding
+  conditions): none lost. Then one regression run over next's recorded own passes (2,941) and the 174, 3,115 files, at `e9b0a69f7`
+  in a frozen run tree (.tmp/worktrees/cpp-def-run), two parts one after the other with 2 threads each under the big lock's small slot
+  (HEAVY_MEM_GIB=5: the reach runs' peak), 00:29-00:56 UTC: 1,475 and 1,494 own passes, 0 recorded passes lost. mac/next moved
+  meanwhile to `ede33dbe5` (train 5's Python records, rust-rec-1125), merged (no C++ path, test/cpp or seed changed, so the run stands
+  for the merged tree), and had not moved again when recorded. Recorded from the two parts (`--judge --record`): 28 rows to own
+  pass (cpp0x/alignas20.C, cpp0x/constexpr-arith-overflow2.C, cpp0x/initlist31.C, cpp0x/pr78890-2.C, cpp0x/using-enum-3.C,
+  cpp0x/vt-34399.C, cpp1y/constexpr-89074-3.C, cpp1z/decomp55.C, cpp23/attr-assume8.C, cpp23/subscript2.C, cpp26/decomp9.C,
+  cpp26/name-independent-decl10.C, cpp2a/constexpr-ref1.C, lookup/pr84962.C, other/error29.C, parse/crash40.C, parse/ctor3.C,
+  template/crash14.C, template/friend50.C, template/friend72a.C, template/memfriend6.C, template/nontype3.C, template/pr70466-1.C,
+  template/virtual3.C, ubsan/pr63956.C, and the base's other/abstract1.C, template/crash125.C, tc1/dr176.C);
+  cpp23/ext-floating12.C timed out again (load-dependent, as recorded); three
+  other rows' reasons narrowed (cpp0x/defaulted10.C, cpp0x/pr83993.C, spellcheck-stdlib.C). `bin/reap --record`: C++ read 6,111 / 0 /
+  174 -> 6,139 / 0 / 146; `bin/crops-score --record`: C++ completeness 0.9870 -> 0.9881, independence 0.9784 -> 0.9788 (read
+  0.894). `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems. Two rows of the clang-only
+  set pass by these rules too (cpp1z/decomp26.C, inherit/error1.C): cpp-indep2's, not recorded here.
+- Tried and dropped: every Sema error at a macro's expansion (cpp0x/decltype3.C, above); a function address as an evaluator value
+  of its own (every arithmetic path would meet it: the comparison of two function names kept to :cmp); a block-scope reference's
+  id-expression as no constant (cpp0x/constexpr-ref12.C's g(ar2), h(ar2), h(arp) never read the reference, so the row stayed failing);
+  keeping a deleted member template deleted after its out-of-line redefinition (cpp0x/defaulted10.C: the member template goes another
+  way than a plain member function); pre-C++20 implicit default constructors evaluated by their members' initializers
+  (cpp1y/pr94066-2.C passed, cpp0x/nsdmi3.C's refused initializer then read as an uninitialized member: lost in reach6, reverted
+  before the regression); an explicit template argument naming a declaration flagged incomplete un-silenced (template/incomplete2.C:
+  the checker gives no error there).
+- Alternatives considered: the typedef-of-a-qualified-name recovery (parse/error32.C, error33.C: GCC declares the name with an
+  erroneous type, its variables undeclared and calls silent; a GCC recovery no document states, left); GCC's recovery after declined
+  declarations, the unit then unanalyzed (template/typedef4.C, crash99.C, redecl5.C: Sema runs on a unit without declines only, a
+  wide change against the recorded passes, left).
+
+## 2026-11-26 — C++: read independence, more clang-only dg rows by the own front end (cpp-indep2, branch `cpp-indep2-1126`)
+
+- Goal (the burst's): C++ read independence 0.892, each dg row counting 0.5 while only clang's recorded dumps pass it. The rows
+  clang passes and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (test/cpp/divergences-dg.edn),
+  were 1,167 at mac/next `b94fde1aa`. Not cpp-def-1126's deferred rows (both failing; merged into next while this ran). Branch from
+  `b94fde1aa`, mac/next `ede33dbe5` and `9f06d5027` (cpp-def's record) merged before the regression run, parse.ae's template
+  arguments resolved by hand keeping both sides' rules.
+- Every rule from the standard's text and GCC's messages as the tests state them, no GCC or clang code (doc/cpp/CPP-SURVEY.md,
+  "As built: cpp-indep2"): the parser's template-head and declaration rules (template-parameter-lists, shadowing, explicit
+  specializations and instantiations, friends, qualified declarator-ids, elaborated enums, placeholders, template argument counts,
+  using-declarators), lambdas (this, void parameters, redundant and non-local captures), the later standards' pedwarns, recovery
+  (an anonymous union's missing `;`, a trailing return type's elaborated class, a static member's out-of-class initializer's
+  lookup, -Wno-error=pedantic, __extension__ over a declaration), partial specializations' pack expansions (template.ae), and the
+  checker's offsetof rules, uncaptured locals in lambdas, both operands of a binary operator reported, an erroneous void
+  parameter's calls left alone (sema.ae).
+- Tried and dropped: a function template's name as a class-head-name (template/crash74.C: the name's arguments parsed by another
+  path), the reverse class-key rule for a variable template (cpp1y/var-templ66.C), main's C-linkage friends (parse/friend5.C).
+  Each rule's targets and a control set of recorded own passes the rule can reach (grepped by construct) run by hand before its
+  commit: no control lost.
+- The regression run (logs kept in /root/arbace/.tmp/keep/cpp-indep2-1126/): every recorded own pass of next (2,969) with the
+  1,167 rows, 4,136 files at `886dc926f`, in the big lock's small slot (HEAVY_MEM_GIB=5, two parts in turn, 2 threads each, as
+  cpp-def-1126's): part 1 lost one recorded own pass, cpp2a/lambda-pack-init2.C,
+  whose init-capture pack's unnamed element the not-captured rule had reported (two extra lines); part 2 none. Fixed (`d30ab40cc`:
+  a named variable alone); the fix reaches only the files whose run gave that error, lambda-pack-init2.C and lambda-pack-init7.C
+  (grepped from both parts' reads), which were run again at `d30ab40cc` with the 96 moved rows and the lambda-capture controls (151
+  files, 0 lost). Recorded from the two parts and then that run (`--judge --record`, in that order): own passes 2,969 -> 3,067,
+  the 96 rows and cpp-def-1126's cpp1z/decomp26.C and inherit/error1.C, which it left for this record; lambda-pack-init7.C, a pass
+  at `886dc926f` only by that error, stays a failure. `bin/reap --record`: the matrix unchanged (the read cell counts clang's
+  passes, C++ read 6,139 / 0 / 146); `bin/crops-score --record`: C++ read independence 0.8940 -> 0.9020, independence 0.9788 ->
+  0.9804. `bin/reap`, `bin/crops-score --judge --strict`,
+  `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26 — C++ read: GCC's recovery after syntax errors and single rules (cpp-def2)
+
+- Branch `cpp-def2-1126` from mac/next `9f06d5027` (a lane of the burst after cpp-def; cpp-indep2 beside it on the rows only clang's
+  record passes, a disjoint set, merged at `3e694b11a`). The read cell at the base: 6,139 pass / 0 by design / 146 deferred (own-diag
+  145, gcc-own-rules 1). A run of the 146 at the base (`.tmp/dg-base`, one thread): own pass 0; 40 with a syntax error of the native
+  parser (a declined construct, whose unit the checker did not analyze), 27 of the constant evaluator, about 13 of definition-time
+  checks of templates, the rest single rules. Each row read against its dg lines and the own errors; the rules from the standard's
+  text or GCC's documented messages and manual as the tests state them, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built:
+  cpp-def2", each rule with its rows).
+- GCC's recovery: arbace/repr/cpp/diag.ae's diagnose runs the checker on a unit with declined constructs too (`REPR_CPP_SEMA_DECLINED=0`
+  the old way), the declined declarations' names and a declined member's class dropped from the start (arbace.cpp.sema's
+  *cx-dropped-seed*, queue 526's cascade rule), a name another declaration declares excepted. Tried first on every fifth recorded own
+  pass with a syntax error (208 of 1,042, `.tmp/dg-x2`): all passed still, then the default.
+- The single rules: arbace/cpp/template.ae (sure-incomplete specializations of templates not defined and explicit specializations
+  declared alone; a default template argument's own error and "template argument N is invalid"; a deleted member template's
+  redefinition; a placeholder's type-constraint whose arguments fail; structural non-type parameters), arbace/cpp/sema.ae (opaque
+  enumerations' members; qualifiers naming sure-incomplete specializations; virtual calls through a pointer to a variable outside the
+  evaluation; default arguments' conversions at the call too; deleted definitions redefined; void{...}; the built-in subscript's
+  operands; a block scope's dependent using-declaration of a non-class; constexpr constructors of classes with virtual bases; an
+  enclosing local odr-used in a lambda; [over.ics.rank]/3.1; P1957R2's pointer to bool; a statement expression's labeled last
+  statement; a conversion function template's specialization named), arbace/repr/cpp/diag.ae (void lists in templates; explicit
+  instantiations with placeholder parameters; the virtual-base constexpr error at the body's end). Every sema change is the checker's
+  alone ((checking?)): the code generator's paths unchanged.
+- Checked: each rule on its rows (.tmp/bin/d1), the 40 syntax rows with the recovery on (`.tmp/dg-x1`, `.tmp/dg-x3`), then two
+  regressions over next's recorded own passes (2,969) and the 146 (3,115 files, two parts of 2 threads, the big lock's small slot,
+  HEAVY_MEM_GIB=5, a frozen run tree): at `1ddac633e` 4 lost (cpp1z/class-deduction52.C, cpp2a/range-for7.C, parse/casting-operator2.C,
+  units the recovery now analyzed, and cpp2a/concepts-pr67774.C's timeout), fixed; at `07d95aaf2` 4 lost (cpp0x/auto11.C, auto43.C,
+  template/conv11.C, by the conversion-name refusal, and the timeout again), fixed. mac/next `3e694b11a` (cpp-indep2's record, +98
+  own passes) merged (the survey's two sections kept), then a targeted rerun at the merged head `639f613d8`: cpp-indep2's 98 new
+  passes, every recorded own pass with a syntax error, the rows and the files with a named conversion function call (1,201 files):
+  0 lost, 16 gained; concepts-pr67774.C alone on one thread: passes (281 s at cpp-def's run, a load-dependent timeout). mac/next had
+  not moved when recorded. Recorded from the four parts in turn (`--judge --record`, the merged head's two last): 16 rows to own
+  pass (cpp0x/constexpr-ice21.C, cpp0x/defaulted10.C, cpp0x/dr2351.C, cpp0x/initlist92.C, cpp0x/pr82401.C, cpp1y/pr60627.C,
+  cpp1z/constexpr-lambda10.C, cpp2a/concepts-placeholder3.C, cpp2a/concepts-requires1.C, cpp2a/constexpr-virtual20.C,
+  cpp2a/udlit-class-nttp-neg2.C, cpp2a/using-enum-7.C, other/crash-11.C, overload/defarg9.C, template/crash89.C, template/crash99.C),
+  0 recorded passes lost. `bin/reap --record`: C++ read 6,139 / 0 / 146 -> 6,155 / 0 / 130; `bin/crops-score --record`: C++
+  completeness 0.9881 -> 0.9887, independence 0.9804 -> 0.9808. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`,
+  `bin/markers-check`: 0 problems.
+- Tried and dropped: CWG2310's incomplete derived class in a pointer conversion (cpp0x/constexpr-base6.C, 6b.C: the static data
+  member's initializer is analyzed after its class completes, no point to judge it at); a pointer to member's conversion inside its
+  class (cpp0x/ptrmem-cst1.C, likewise); the variable templates' partial specializations' four errors (cpp1y/var-templ19.C: the
+  ambiguity is the slice's unsure partial ordering); a class-head's failure skipping its body (parse/crash28.C: a parser change).
+- Held for the user (the coordinator, 2026-11-26): D1, parse/explicit1.C at C++17 expects GCC's "explicit specialization in
+  non-namespace scope", which CWG727 allows and GCC 15 does not implement: (a) the gxx-only-rules class (n/a), recommended, (b) GCC's
+  rule; D2, template/typedef39.C expects its error on a line of a template never instantiated, its own comment saying it belongs on
+  the other one: (a) an n/a class for expectations GCC's own test marks misplaced, recommended, (b) deferred as now. Both rows left
+  as they are.
+
+## 2026-11-25: Python eval, py-odict lane: classes collected by the cycle collector, finalizer chains, an instance's __reduce__
+
+The burst's lane for the deferred eval classes `:ordered-dict-c` (31 names), `:zoneinfo-c` (11) and `:os-and-files-misc` (13),
+branch `py-odict-1125` from mac/train-5 (`b6be9b74b`). Studied: CPython 3.14.10 (the pinned tarball,
+`.tmp/repr-python/Python-3.14.10`): Python/gc.c, Objects/typeobject.c (`type_traverse`, `object___reduce_ex___impl`,
+`remove_subclass`), Objects/odictobject.c (`odict_traverse`), Lib/test/test_ordered_dict.py, test_zoneinfo/test_zoneinfo.py,
+Lib/zoneinfo/_zoneinfo.py; doc/python/PYTHON-SURVEY.md's "Design: 241" (its plan (2), classes as nodes, never built).
+
+- The before picture: train 5's executable (`.tmp/gate-exe/b85611b74343b609b2a4`), `bin/pyi check --only` of the 63 names the
+  three classes list (PYI_RUNTIME=compiled): 52 pass already (py-mods-1122's C OrderedDict, py-accel's `_zoneinfo` from
+  Modules/_zoneinfo.c in the C world, py-os-1124 and 521's `_datetime` for the os rows), 11 do not: five
+  test_highly_nested_subclass, four test_reference_loop, zoneinfo's pure ZoneInfoPickleTest test_from_file and
+  test_pickle_after_from_file.
+- finRounds (go/arbace/py/finalize.go): rounds while a round handles something, at most 256 (218's 8 ran 25 of a chain of 100
+  `__del__`: Go frees a chain of finalized objects a link a collection).
+- Classes as nodes of the cycle collector: heap classes not held by a module under a name, traversed as `type_traverse`; an
+  instance's class, a heap class's getsets and members, the C OrderedDict (`odict_traverse`) traversed too; `cyHideTypes` takes the
+  probed classes out of the registries and caches for the probe and puts every entry back after; `cyForgetType` drops a freed
+  class. Found on the way: removing a class from a base's subclasses by `append(list[:k:k], list[k+1:]...)` kept the class in the
+  old array past the shorter slice's end (the last class made was never collected): a new array (`cyWithout`).
+- object.__reduce_ex__: an instance's own `__reduce__` (its __dict__'s, before a class's non-data descriptor) is called, as
+  getattr(self, '__reduce__') in CPython; else the class's, bound to the instance as before (a first version through GetAttr bound
+  a built-in base's `__reduce__` to the unwrapped value: namedtuple's and functools.partial's pickling broke in the AOT run, fixed).
+- Measured by pyi's AOT (the worktree's runtime compiled, `bin/pyi check --aot --lib-test --fresh --only`, the children by the
+  compiled launcher; probes by `bin/pyi aot`), no gate build: 31 modules whole (test_ordered_dict, test_zoneinfo, the
+  `:os-and-files-misc` modules and those of the classes, the collector and pickling: 6,170 methods) and again 12 after the
+  `__reduce_ex__` fix (4,269): all 63 names of the three classes pass; against the eval record nothing the record passes fails
+  that does not fail the same on train 5's executable (test_functools' four test_recursive_pickle stack overflows, namedtuple's
+  and typing's NamedTuple pickling, test_descr's test_reduce_copying, test_pickle's C test_evil_pickler_mutating_collection; and
+  test_enum's import, "ReprEnum subclasses must be mixed with a data type": the C `_datetime`'s date has no `__new__` in its
+  `__dict__`: train 5's, the C world's, reported, not touched here). Rows of other classes that pass in the same run:
+  test_module's test_clear_dict_in_ref_cycle (`:finalization-collect`'s class cycle), test_weakref's test_classes and
+  test_functools' test_method_no_reference_loops (`:finalization-cycle`), test_descr's test_type_lookup_mro_reference, test_gc's
+  test_saveall, test_trash_weakref_clear, test_trashcan_threads and test_function_tp_clear_leaves_consistent_state
+  (`:gc-collector`), test_threading_local's test_local_refs: for the train's record to confirm. Nothing recorded here (the
+  train records from its build); no class of test/python/divergences.edn changed.
+
+## 2026-11-25: Python eval, py-enum lane: a C type's own tp_new as __new__ in its dict (test_enum imports again)
+
+The coordinator's urgent task: test_enum does not import on train 5's executable (`b85611b`): "ReprEnum subclasses must be
+mixed with a data type" (test_enum's `class enum_type(date, ReprEnum)`; enum's `_find_data_type_` asks `'__new__' in
+base.__dict__`, and 521's C `_datetime` date has none). Branch `py-enum-1125` from `py-odict-1125`.
+
+- Source: CPython 3.14.10's Objects/typeobject.c, `type_ready_set_new` and `add_tp_new_wrapper` (a type with its own tp_new, not
+  Py_TPFLAGS_DISALLOW_INSTANTIATION, gets tp_new_wrapper's `__new__` in its dict unless the dict has one; an inherited tp_new
+  none). The Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects, not run there): `py.ExtNewWrapper` and
+  its call in pyctypes' `typeFromSpec`. Not cherry-picked: that commit holds six other unrun changes of queue 587, its wrapper
+  is a bare builtin that needs its descr.go change (built-in `__new__` no longer a staticmethod), and it covers only the spec
+  path while `_datetime`'s types are static (`_PyStaticType_InitForExtension`, pyctypes' `typeReady`).
+- Built: `py.ExtNewWrapper` returns this tree's tp_new_wrapper (`makeSlotWrapper(m, "__new__")`, the staticmethod in
+  `newWrappers`); pyctypes' `addNewWrapper` puts it in the dict in `typeReady` (the C type object's tp_new field before
+  inheritance) and in `typeFromSpec` (the spec's own Py_tp_new), before the methods.
+- Proved by pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`, the worktree's runtime compiled, the children by the
+  compiled launcher; the three negative controls failing as they must): 18 modules whole, 8,294 methods (test_enum, test_datetime,
+  test_decimal, test_zoneinfo, test_pickle, test_xml_etree_c, test_ctypes, test_capi, test_sqlite3, test_bz2, test_lzma, test_zstd,
+  test_xxlimited, test_descr, test_typing, test_copy and the controls' two). test_enum imports: 1,073 of its 1,082 methods pass (the
+  record 1,074); its five failing methods the record passes (TestSpecial's test_subclasses_with_getnewargs, _ex,
+  test_subclasses_without_direct_pickle_support, test_tuple_subclass_with_auto_1 and _2) pickle an int or tuple subclass through
+  the C `_pickle`: all five pass with PYI_C_ACCEL=0 (the thin Go `_pickle`), as namedtuple's pickling fails on train 5 likewise:
+  568's, not touched here. Against the eval record nothing else fails that does not fail the same on train 5's executable (checked
+  there: test_ctypes' three long double rows, test_xml_etree_c's five, test_decimal's PyPythonAPItests.test_pickle and
+  PyContextAPItests.test_pickle (past 300 s there too), test_descr's test_reduce_copying, typing's NamedTuple pickling, test_pickle's
+  C test_evil_pickler_mutating_collection); test_datetime, test_pickle, test_zoneinfo, test_copy, test_typing and test_descr method
+  for method as py-odict-1125's run. Nothing recorded.
+
+## 2026-11-26: Python eval, py-regress lane: train 5's held regressions fixed at their causes (the C _pickle's world, the wake pipe, 3.14's UTF-8 mode, the eval loop's push signal)
+
+The burst's lane for the regressions train 5's eval run found in 11 modules it held (its entry above; the run kept at
+`.tmp/worktrees/train5/.tmp/repr-python/pyi/check/run`, built from `b6be9b74b`, executable `b85611b74343b609b2a4`). Branch
+`py-regress-1126` from mac/next (`c0521dc52`), mac/py-enum-1125 (`66134799d`, test_enum's import) merged first, the coordinator's
+request: its five test_enum methods and typing's NamedTuple pickling fail the same way as test_descr's row. Studied: CPython
+3.14.10 (the pinned tarball, `.tmp/repr-python/Python-3.14.10`): Modules/_pickle.c (`load_newobj`, `batch_list_exact`, `save`),
+Objects/typeobject.c (`slot_tp_new`, `type_new`'s tp_new), Include/internal/pycore_ceval.h (`_Py_MakeRecCheck`,
+`_Py_EnterRecursiveCall`), pycore_pythonrun.h (`_PyOS_STACK_MARGIN_BYTES`), pycore_tstate.h (`c_stack_soft_limit`'s offset),
+Python/ceval.c (`_Py_CheckRecursiveCall`), Python/preconfig.c and initconfig.c (the UTF-8 mode, `_Py_GetLocaleEncodingObject`),
+Lib/test/subprocessdata/fd_status.py.
+
+- **test_descr's test_reduce_copying, test_enum's tuple subclasses, NamedTuple's pickling: slot_tp_new.** The C unpickler's
+  NEWOBJ calls `cls->tp_new(cls, args, kwargs)`; every pyi type's tp_new slot was `_Pyi_tp_new`, the built-in base's `__new__`
+  (list's or tuple's), so a class's own `__new__` never ran (C2's `a` and `b` never set; a NamedTuple's `tuple.__new__` "expected
+  at most 1 argument"). A heap class whose `__new__` along its MRO is a class statement's (`classNew`) now gets
+  `_Pyi_slot_tp_new`, CPython's slot_tp_new: the subtype's `__new__` called with the subtype first. Built-in types keep
+  `_Pyi_tp_new`, so C calling `PyList_Type.tp_new(sub, ...)` still gets list's.
+- **test_pickle's CPicklingErrorTests.test_evil_pickler_mutating_collection: the lists after Python code.** A list's ob_size is
+  read in place (PyList_GET_SIZE); persistent_id, Python code a native ran, cleared the list, and its mirror was written to C only
+  when a native touching it returned, so batch_list_exact walked past the end ("list index out of range" from PyList_GetItemRef)
+  where CPython raises "list changed size during iteration". py counts the eval loop's entries from Go (`ExtRunCount`, in
+  `Thread.run`); `sized`, every native's wrapper, then calls `syncUsedLists`: the lists' mirrors the natives used (touch) since
+  the outermost entry into the world (`World.Call`) whose length Python changed are written to C, C's own writes taken first. A
+  first version wrote every mutable mirror (lists, sets, bytearrays) after any native in which Python code ran: in its AOT run
+  test_pickle's driver died three times on musl's `a_crash` (mallocng's free) in CPicklerTests.test_recursive_frozenset_subclass_and_inst
+  and InMemoryPickleTests.test_set_chunking, which pass alone, so state an earlier test left (not pinned down further); the
+  narrowed version's run has the module whole in one driver run, both passing.
+- **test_functools' four test_recursive_pickle: the C stack's soft limit.** _pickle's `save` guards by the inline
+  `_Py_EnterRecursiveCall`, which reads the thread state's `c_stack_soft_limit`; the world's was 0, so no check fired and the C
+  recursion ran until Go's 1 GB goroutine stack overflowed (fatal). `_PyThreadState_GetCurrent` now sets the main thread state's
+  limit for its caller: just above the C thread's stack pointer when the thread is 50,000 C calls deep (about 250 MB of Go's stack)
+  or within four margins of its C stack's end, else 0; `_Py_CheckRecursiveCall` raises "Stack overflow (used N kB) while pickling
+  an object" (pyi's nominal 100 bytes a level). A subinterpreter's 256-byte state is left alone.
+- **test_subprocess's test_pass_fds: the wake pipe.** The main thread's interruptible read (queue 231, py-mods-1122) made its wake
+  pipe on the first read of any descriptor, a source file's at start: a child pyi had two descriptors CPython's has not, which
+  fd_status listed (fd 8, one the parent's test expected closed). The pipe is made now only for a read that may wait (not a
+  regular file's, a directory's, a block device's, nor a non-blocking descriptor's) and for a write to a blocking FIFO, after their
+  checks.
+- **test_builtin's test_open_default_encoding, test_io's CTextIOWrapperTest.test_default_encoding: 3.14's UTF-8 mode.** 553 gave
+  sys.flags 3.14's rule (off under C.UTF-8), but open() and TextIOWrapper kept 3.15's (on), so their default encoding was "utf-8"
+  where locale.getencoding() says "UTF-8". They follow the running version's mode now (`utf8ModeOn`). test_sys's
+  test_ioencoding_nonascii, skipped now ("requires FS encoding to match locale"), and test_pickle's C test_wrong_newobj_ex_class
+  (skipped, "only verified in the Python implementation") are CPython's own outcomes (its record skips both): no fix, train 6's
+  record holds them as they are.
+- **test_traceback's test_print_traceback_at_exit: the push signal.** The eval loop's call signal (`Thread.push`, reused, 202b)
+  kept the last frame pushed: an `__init__`'s frame holding its instance (`initSelf`), outside the collector's graph, so the cycle
+  instance -> exception -> traceback -> frame -> instance was never garbage and its `__del__` never ran at exit (the last
+  instance made only: a later call replaced the frame). runFrames takes the frame and clears the signal.
+- **test_subprocess's two test_one_environment_variable, test_os's test_execve_env_concurrent_mutation_with_fspath_posix**: a child
+  started with an environment without ARBACE_HOST_EXE (env={'fruit': 'orange'}, env.clear()); py-cli-1125's adopt_host_env
+  (mac/py-cli-1125 `6f9661379`, bin/pyi) fixes both: measured on train 5's executable with its bin/pyi applied (the child prints
+  fruit=orange; the execve program prints its message); without it the child, with no host named, falls back to stage 0 and
+  the checkout's runtime interpreted by goi, too slow for the test. Not merged here: train 6 takes py-cli-1125.
+- **Measured** by pyi's AOT on the worktree (`bin/pyi check --aot --lib-test --fresh --only`, the runtime compiled with the
+  changes, the children by the compiled launcher; under bin/heavy-lock as a small job, HEAVY_MEM_GIB 8; peaks 5.0 and 2.7 GB):
+  run 1 (`1fac6ed8d`, 15 modules: test_functools, test_pickle, test_descr, test_traceback, test_builtin, test_io, test_enum,
+  test_collections, test_typing, test_subprocess, test_sys, test_os, test_signal and the controls' two; 5,561 methods, 59 min):
+  every held row passes (the four test_recursive_pickle, test_reduce_copying, test_evil_pickler_mutating_collection, test_pass_fds,
+  test_open_default_encoding, CTextIOWrapperTest.test_default_encoding, test_print_traceback_at_exit; test_enum's five TestSpecial
+  rows), the two crashes above failing. Run 2 (`a3738a57f`, 12 modules: test_pickle, test_functools, test_descr, test_enum,
+  test_typing, test_collections, test_signal, test_ctypes, test_copy, test_xml_etree_c and the controls'; 4,472 methods, 38 min):
+  0 failing, the negative controls failing as they must. Against next's eval record, of the rows it passes, the only ones not
+  passing in either run: the two CPython skips above and test_signal's StressTest.test_stress_modifying_handlers, a 300 s
+  timeout in the module's driver in both runs, which passes alone on the same AOT runtime (12 s; its class whole in 66 s) and on
+  train 5's executable (eval, 15 s): nothing these changes touch runs in it (no reads or writes, no C world); no record of the
+  AOT level holds it, so whether it times out there without them is not measured; train 6's eval run will show it. In AOT the
+  children are the compiled launcher, so test_subprocess's test_one_environment_variable and test_empty_env and test_os's execve
+  row pass there regardless; at the eval level they are py-cli-1125's.
+- Left to the user: none. test_enum's import is py-enum-1125's; test_sqlite3's table-lock row stays in :finalization-goi.
+## 2026-11-25 — Python: the command-line classes measured on train 5's executable; env-stripped children find their host (py-cli-1125)
+
+The four classes of bin/pyi python's command line (`:pyi-command-line` 20 non-pass rows in the eval record, `:run-dir-zip-main` 9,
+`:pyi-main-module` 8, `:interactive-mode` 4: 41 of the 90 rows the classes list; the rest recorded passes) measured at train 5's
+head (b6be9b74b, the gate executable b85611b74343b609b2a4, `bin/pyi check --only` of the 90 rows, 14 modules, 131 methods, the
+runtime compiled): 129 pass, 2 classed, 0 failing, 39 of the 41 now pass. They were py-os-1124's (the command line, the
+environment and the process as CPython's) and its neighbours' work, merged in train 5; the record they are judged against
+predates it. What was left, test_subprocess's test_empty_env (two rows, ProcessTestCase and NoPoll): the child that the test starts
+with `env={}` is `tools/pyi/python3`, and with no ARBACE_HOST_EXE it takes the checkout's or the main checkout's stage 0, whose
+compiled runtime is another commit's, so bin/pyi runs the checkout's go/arbace/py interpreted by goi, which cannot import `weak`
+(go/arbace/pytls): the child printed a Go check error and nothing else (`eval` of an empty stdout: "invalid syntax (<string>, line
+0)"). The same fault would have taken every test that starts a child with a stripped environment (test_one_environment_variable,
+test_env, ...) at the next record on any host whose stage 0 is not the gate's build.
+
+Decision: `adopt_host_env` in bin/pyi (the `python` verb only, before runtime_from_source): when ARBACE_HOST_EXE is absent, the
+nearest ancestor process whose /proc/PID/environ holds one gives it, with ARBACE_GOI_FROM_SOURCE, PYI_RUNTIME, PYI_RUNTIME_NOTED,
+PYI_GOMEMLIMIT and PYI_THREADS, as the child would have inherited them; no such ancestor: the default as before. os.environ stays
+what the caller gave (PYI_ENTRY_ENV). Alternatives: a per-run wrapper as sys.executable embedding the host's paths (the compiled
+launcher's way, queue 284): changes sys.executable for every module of the universe, rejected for the risk against 529 modules;
+a state file in .tmp/repr-python/pyi naming the running host: global state read by any later bare call, rejected for staleness.
+Measured: `bin/pyi check --only` of test_empty_env x2, test_one_environment_variable, test_env, test_communicate_errors x2: 47
+methods, 47 pass, 0 failing; the same call before the change failed both test_empty_env rows. The classes' :tests lists are not
+touched (the rows pass; the lists leave with the record, as the other classes' did): the train's record run of the 90 rows
+(a list of MODULE/TEST-ID lines, 14 modules) measures them.
+## 2026-11-25: py-limits-1125: Python eval's `:runner-limits` and `:host-memory` rows by cause; non-ASCII find, child GOGC
+
+Branch py-limits-1125 on mac/train-5 (c3efeae13), main host. The two classes match the runner's own words (timeouts, idle hangs,
+the 8192 MB cap); their 85 and 79 rows are mostly the 11-19 records night's. By cause: 65 and 54 are the process pools'
+(multiprocessing spawn's test_processes past its hour, 61; test_manager, test_misc, test_multiprocessing_main_handling,
+concurrent.futures' process_pool, shutdown, deadlock: py-mp's lane), 2 and 17 the C world's (test_buffer over ci's `_testbuffer.c`,
+test_capi: the C API lane), test_pdb's the Mac's 574's record. The other 18 + 8 were run alone (`bin/pyi python -m unittest`, the
+tree's RSS capped at 2.6 GiB, on gate build e0f40126, main's compiled runtime; one at a time outside the lock, at most one process
+over 1 GB): 15 pass now (test_fstring, test_longexp, test_modulefinder, the `'-' * 100_000` compile errors, test_cmd_line's
+relativedir, test_email's get_param, test_xml_etree(_c)'s deepcopy, test_uuid, test_urllib2, test_logging), test_email's
+test_long_lines passes in 674 s (CPython 1 s; main's _pyio StringIO), test_httpservers' RequestHandlerLoggingTestCase.test_get
+hangs on finalization (the response's makefile keeps the socket open until its deallocation; proposed for `:finalization`, the
+user's n/a class: a user decision, not moved), and 11 need train 5's runtime or more than 2.6 GiB (test_io's seven signal writes,
+test_wsgiref's interrupted write, test_compile's extended op arg, test_regrtest's test_module_test with `-j4`, test___all__): queued
+under the big lock (`.tmp/w/list2.txt`, results `.tmp/w/res2.tsv` in the worktree).
+
+Built (commit b8891a497): runeIndex (go/arbace/py/strmethods) searches a non-ASCII str in windows doubling from the near end, a
+one-code-point needle directly: `find(';', i)` in a loop encoded the whole range per call (40,000 calls: 25 s, CPython 0.01 s),
+checked against a naive search (200,000 random cases in Go) and CPython (3,000 cases, one digest); tools/pyi/python3 runs every
+child at GOGC 25 (`PYI_CHILD_GOGC`), after py-mp's finding that a spawn child is 1.2-1.5 GB: test._test_multiprocessing's import
+peaks at 1.45 GB instead of 2.0, the same wall, about 30% more CPU. Alternatives: GOGC 50 (1.75 GB), a GOMEMLIMIT per child (a
+soft limit that a busy child passes anyway), cutting the startup heap itself (about 330 MB live: Arbace's 177 MB and the host
+compiler's; larger work, not started). Doc: doc/python/PYTHON-SURVEY.md, "As built: py-limits-1125".
+
+## 2026-11-25: py-limits-1125: the user's decision on test_httpservers' test_get (n/a, `:finalization`)
+
+The user decided (2026-11-25, through the coordinator) py-limits-1125's first question, (a): test_httpservers'
+RequestHandlerLoggingTestCase.test_get is n/a, the timing of reference counting: http.client's will_close response keeps the
+socket open through its makefile until the response is deallocated, which CPython does at the discarded getresponse(), so the
+single-threaded HTTPServer's keep-alive readline sees the EOF there; under Go's collector it waits and tearDown's shutdown() never
+returns. Done: the id in test/python/divergences.edn's `:finalization` (`:kind :na`, before `:runner-limits` in the file, so it is
+that class's: `bin/pyi divergences` shows no shadowed name), its reason beside it and the decision in `:decided`. Also agreed:
+test_email's test_long_lines is fixed, not capped, if train 5's native StringIO leaves it slow; `.tmp/w/list2.txt` is rerun on train
+5's executable when it exists. bin/reap --record and bin/crops-score --record on the branch's tree (train 5's records, which its
+merges had not re-recorded: Python eval 40,886 / 1,304 / 1,292 -> 41,203 / 1,196 / 1,004, n/a 4,934); crops-score --judge --strict
+and records-check 0 problems. mac/next (train 3's merge, 76c4f46c9) is not merged here: it conflicts with train 5 in
+doc/JOURNAL.md, test/python/divergences.edn (`:c-accelerators`), the eval record, test/reap/matrix.edn and test/crops/scores.edn,
+the resolution train 5's conductor makes when train 5 takes next; this branch then merges train 5.
+
+## 2026-11-25: py-limits-1125: StringIO's appends linear (test_email's test_long_lines); the rows on train 5's executable
+
+The 13 rows queued as res2 had no verdict on the checkout's interpreted runtime: each died at `import ctypes` (pyctypes checked
+against main's compiled runtime). Run again alone on train 5's gate build b85611b74, compiled (`.tmp/w/res3.tsv`): test_io's seven
+signal writes, test_wsgiref's interrupted write, test_compile's extended op arg, test_logging's named pipe and test_urllib2's body
+pipe pass in 10-17 s at 1.1-1.9 GB; from res2's compiled half, test_regrtest's test_module_test (33 s, 2.4 GB, with the children at
+GOGC 25) and test___all__ (129 s, 2.66 GB, within its 900 s cap) pass. No cap is proposed. test_httpservers' test_get still hangs
+(`:finalization`, n/a). test_email's TestFeedParsers.test_long_lines was killed at 2.8 GB after 455 s: quadratic (each feed of N
+pieces 0.4, 1.3, 5.3 s at N 1,000, 2,000, 4,000). The cause: 545's native StringIO (builtins_io_stringio's writeStr) compared the
+write's end with the buffer's length, not its capacity, so every write past the end allocated and copied the whole buffer, its
+1/8 overallocation never used. Fixed: resliced within the capacity, reallocated with the same overallocation (resize_buffer's)
+past it. Measured on goi's interpreted runtime: N 2,000 2.1 s, 8,000 10.7 s (linear; it was x4 a doubling).
+## 2026-11-25: py-capi-1125, the C API's last natives of `:capi-port`, C threads, and c_longdouble as ci's x87 long double
+
+On train 5 (c3efeae13, then its b6be9b74b), branch py-capi-1125. The classes `:capi-port` (84 rows) and `:extension-modules` (53)
+hold mostly rows recorded before py-capi-1122 (76 test_capi, 52 test_importlib's "Requires dynamic loading support"); train 5's
+records run (.tmp/records-5.sh in train5's worktree) runs test_capi and test_importlib whole, so this stream did not run them
+again: it built what py-capi-1122's own runs (.tmp/kept/py-capi) still left failing, after CPython 3.14.10's sources
+(go/arbace/pyctypes/capi_rest.go; doc/python/PYTHON-SURVEY.md, "As built: py-capi-1125"):
+
+- PyErr_Display and PyErr_DisplayException (Python/pythonrun.c's _PyErr_Display: traceback._print_exception_bltin),
+  PyErr_Print and PyErr_PrintEx (_PyErr_PrintEx: SystemExit, sys.last_*, the audit event, the hook's own failure).
+- PyCode_Addr2Line over co_lines(); Py_UniversalNewlineFgets over the world's fread (musl's ungetc in place: no getc linked).
+- PyThread_allocate_lock and the lock natives as pyi's _thread.lock; PyThread_start_new_thread a _thread thread running the C
+  function on a C thread of its own (ci.Thread on a 1 MiB stack mapped in the world). World.Call, push and guard take the running
+  Python thread's C thread (World.thread), so the GIL's holder runs C on its own stack. Considered: ci's own threads (crt's
+  scheduler, the baton): the world's main thread is driven by Python's goroutines, which never take the baton, so a cloned thread
+  would wait for a turn no one passes; running the thread inline: a body that waits for a lock the caller releases later
+  (spawn_pthread_waiter) would deadlock.
+- PySlice_Unpack with an index that runs __index__: the mirrors synchronized around it (the macro PySlice_GetIndicesEx's Py_SIZE
+  after it, gh-72054).
+- The coordinator's report of train 3's records (three test_ctypes regressions, c_longdouble results 0.0): not py-accel's D/F/G
+  types but queue 522's builder (CR3 (a)), which made ci's long double x87's extended in 16 bytes; the world rebuilt with it
+  passed wide values where pyctypes passed doubles. TLongDouble is 16 bytes aligned to 16, ci's 'w', the 'g' and 'G' fields
+  through crt's x87 conversions; ctypes no longer aliases c_longdouble to c_double (the sizes differ), as on CPython's x86-64.
+- ctypestest's Key (the coordinator: verify equal but for the build's key, d65251e1 committed): on this tree (568's world,
+  f4b726d1 committed) `bin/pyi-clib key ctypestest` gives c4e412ea; bin/pyi-clib verify runs under the lock
+  (.tmp/verify-clib.sh), committing the build's nodes.ae when the Key is the only difference.
+- Not merged: mac/next (76c4f46c9) into the branch: next and train 5 conflict in the Python record and divergences.edn (train 3's
+  records against 568's :c-accelerators), the train's merge of train 5 into next; the branch's own commits touch only
+  go/arbace/pyctypes (out of every key) and, by the verify, ctypestest's Key.
+- Left (not this stream's): test_call's Py_TPFLAGS_METHOD_DESCRIPTOR and test_getargs' str subclass keywords (py-core), test_pickle's
+  memo MemoryError (queue 568's _testcapi.set_nomemory).
+
+- Found by the measure: PyThread_allocate_lock's cell was a cbuf (freed by Go's collector too), so PyThread_free_lock freed it
+  twice and musl's heap broke (test_thread_gilstate_in_clear, then test_pyweakref_getref, faulting); now the world's malloc'd
+  memory. Added the world's lock while a C thread lives (one Python thread inside C at a time, given up in
+  PyThread_acquire_lock's wait; errIndicator and touched kept across it).
+
+Measure (judged, not recorded): before, on train 5's executable (its own compiled pyctypes), 124 of the 137 rows pass, 4 skip
+as CPython on Linux, 9 fail (six this stream's, three py-core's); after, through check --aot --lib-test with the checkout's
+pyctypes (the gate's executable compiles its own copy: the eval rows move at the next train's build), the six pass,
+TestThreadState's four pass, test_ctypes loses no recorded pass and its long double methods pass. Expected at the next record:
+:capi-port 84 -> 3, :extension-modules 53 -> 0. Not recorded here: train 5's records run (test_capi, test_importlib whole) is the
+train's, and this stream's rows need a build with its pyctypes.
+## 2026-11-25 — py-mp-1125: multiprocessing's deferred classes by cause; a frame held by the call signal, a child's signal mask
+
+Branch py-mp-1125 from mac/train-5 (c3efeae13). `:multiprocessing` (199 rows) and `:multiprocessing-children` (83) of
+test/python/divergences.edn, read row by row against the record (test/python/check-lib-test-linux-amd64.edn) and the tests'
+sources (CPython 3.14.10's Lib/test/_test_multiprocessing.py, test_multiprocessing_main_handling.py, mp_fork_bomb.py,
+mp_preload.py; Lib/multiprocessing/resource_tracker.py, util.py), probed with bin/pyi run on train 3's executable
+(df179e3b1e10, its compiled runtime) and on goi (the checkout's runtime interpreted).
+
+- Causes. 195 rows of `:multiprocessing` and the forkserver's not-run pool rows are forkserver.py's "unexpected EOF" of the
+  records night before queue 535 (the server's os.fork), which train 3 carries: they move at the next eval record of the modules,
+  nothing built. test_multiprocessing_main_handling's ForkCmdLineTest (13) sets the start method fork (probed: popen_fork's
+  os.fork, "module 'os' has no attribute 'fork'"): moved to `:fork` (n/a, the user 2026-11-04). Spawn's test_heap and
+  TestManagerExceptions' two (an exception at the end of its handler under gc.disable(), probed alive with the collector on and
+  off: the handler's `e = None` comes before the `del e` the moment at del checks): moved to `:finalization` (n/a, 537-2 (a)).
+  `:multiprocessing-children` 83 -> 67.
+- Built (go/arbace/py, printed, edited, go vet and gofmt clean, read back by bin/repr-go read --full, only the edited files'
+  forms taken; printed again equal to the edited Go): (1) eval.go's loop clears the thread's reused pushFrame when it takes the
+  callee: it held the last pushed frame until the next call, so an escaped frame (sys._getframe, a warning's f_back walk) kept
+  its locals past its return and gc.collect() (test_resource_tracker_sigkill's semaphore). Probe: a method calling
+  sys._getframe(0), its instance dead after del and gc.collect (alive with the old eval.ae, the control). An __init__'s frame
+  still survives on goi, whose registers keep returned values (queue 218): the compiled build decides. (2) fork_exec,
+  posix_spawn without setsigmask and spawnv give the child pthread_sigmask's mask (spawnSignals around ForkExec). Go's runtime
+  unblocks SIGINT and SIGTERM at its start, so bin/pyi python passes its shell's SigBlk and pending sets (/proc/PID/status:
+  PYI_START_SIGBLK, PYI_START_SIGPND) and ignores a blocked SIGINT or SIGTERM until the exec, and the runtime's init
+  (builtins_signal_wait.go) blocks those for the program, notified and held. Probes on goi: a child of a parent that blocked
+  SIGINT and SIGTERM sees both blocked; a SIGINT 0.5 s after the spawn no longer kills it (status 0, before killed); a SIGTERM
+  pending at the exec is pending in the child and kills it at its unblock (status 15), as CPython's child; resource_tracker's
+  SIGINT case: the tracker survives, no warning, the semaphore dead after gc.collect (before: "process died unexpectedly").
+- Alternatives: the exception rows by a compiler change (a handler's cleanup as one checked deletion) left: the bytecode view
+  and every handler's cost; overlay/go exposing Go's initial signal mask instead of /proc: a runtime patch and a re-seed for
+  what the shell already knows.
+- Found, not mine: a spawn child of the compiled runtime is about 1.2 GB resident before it imports anything (maxrss of a
+  trivial target), 1.5 GB after test._test_multiprocessing; Pool(200) (test_large_pool) and the main-handling scripts' Pool(5)
+  pass the runner's caps: the host-memory lane's.
+- Records: the classes moved by name only (bin/pyi divergences 0 problems), bin/reap --record, bin/crops-score --record and
+  --judge --strict, bin/records-check: 0 problems. The runtime changes need the train's build; then the modules' eval record.
+## 2026-11-25 — pyi: 557's unowned deferred classes beyond 557b (queue 574, VM)
+
+- Scope: 557's table of unowned deferred classes, the ones 557b did not take, by size: :pickle-builtin-reference (9),
+  :tools-misc (9 left), :source-decoding's unowned rest (email 5, quopri 2, difflib 1), :compiled-flaky (4), :audit-hooks (2),
+  :doctests (test_pdb 2), :code-objects, :traceback-objects, :docstrings (1 each). Base 557b-r2 431dd5eb0.
+- Causes found (probes against CPython 3.14.10, .tmp/q574/p/) and fixed in go/arbace/py (printed by bin/pyi runtime print,
+  edited, read back):
+  - format.go, strformat.go, str.go: str.format built its result through Go's []rune and string(), so a lone surrogate
+    (WTF-8's three bytes) became three U+FFFD, and a format spec's width counted the three bytes
+    (utf8.RuneCountInString). Now wtf8String and wtf8Len. difflib.diff_bytes's header line, email's surrogateescaped
+    header values (test_headerregistry's four rows).
+  - strmethods.go: str.encode's and bytes.decode's encoding and errors pass clinic's str converter's checks
+    (clinicStrArg: a lone surrogate a UnicodeEncodeError, a NUL a ValueError); email's _encoded_words then reports a
+    CharsetError for 'utf-8\udce2\udc80\udc9d' instead of decoding as utf-8.
+  - with.go: WITH_EXCEPT_START gave __exit__ None for the traceback; now the exception's (PyException_GetTraceback).
+    contextlib's _GeneratorContextManager.__exit__ puts that traceback back on the exception gen.throw() re-raised, so
+    the re-raised error had no frame (test_contextlib's and test_contextlib_async's test_contextmanager_traceback,
+    mock.patch's test_tracebacks).
+  - audit.go: tracing off while the hooks run, on again for a hook whose __cantrace__ is true (sys_audit_tstate);
+    builtins_exec.go: eval, exec and compile raise the compile and exec events (test_cantrace counts the traced hook calls
+    on them).
+  - sys.go: the standard streams' TextIOWrapper gains IOBase's writelines (reindent.py without arguments).
+  - tbobj.go: f_lineno is None at a function's instruction with the IR's line 0 (NO_LOCATION); a module's line 0 stays 0, as
+    CPython's module RESUME. pdb's GH-127321 rule steps past it (test_pdb_issue_gh_127321).
+  - bin/pyi python: -mMOD and -cCODE as one argument (test_quopri runs [sys.executable, "-mquopri"]); the first c or m of a
+    cluster ends it.
+- Alternatives considered: a narrower with fix in contextlib (no: the runtime's op is where CPython reads the traceback);
+  f_lineno None for every line 0 (no: CPython reports a module's RESUME as 0).
+- The run (.tmp/q574/run/check1.log): 12 modules (test_email, test_unittest, test_pdb, test_audit, test_tools, test_difflib,
+  test_quopri, test_contextlib, test_contextlib_async, and test_bdb, test_sys_settrace, test_with against the f_lineno and with
+  changes), the drivers on goi with the checkout's runtime (PYI_RUNNER=python3), the children on the compiled launcher (557b-1 (a)):
+  3,920 methods, 3,768 pass, 146 classed, 6 failing, 22 now pass. The six, none from this round's changes: test_email's
+  test_variable_tzname (the VM has no tzdata: it skips), test_unittest's two test_garbage_collect_test_after_run and test_contextlib's
+  test_nokeepref (a weakref goi keeps alive: they fail the same with with.ae put back to the base, probed; the TestSuite one is
+  already :compiled-flaky's), test_unittest's test_seal_with_autospec (past the runner's 8 GiB cap under the VM's load), test_bdb's
+  test_bp_after_last_statement (passes alone, probed). So only the seven modules that passed whole were recorded: test_audit,
+  test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with (`bin/pyi check --judge DIR --record`
+  over a copy of the run with those modules, .tmp/q574/run/check1-pass): 12 methods now pass, 0 regressions. test_pdb passed whole
+  too but is left to the host: its record would move a :host-memory row, a class the host's own lanes own (the coordinator).
+- Classes: :with-exit-traceback emptied and removed; :audit-hooks 2 -> 1; :source-decoding's difflib and quopri rows and four names
+  the record already passes pruned; :tools-misc's reindent row and its stale test_warnings name pruned; core-objects-287's
+  test_contextlib_async row pruned; :docstrings' stale test_generators name pruned. Mirrored in divergences-315.edn. The survey's
+  "As built: 574".
+- bin/reap --record, bin/crops-score --record: Python eval 40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279; bin/reap,
+  crops-score --judge --strict, records-check: 0 problems.
+- For the main host: whole records of test_email, test_unittest, test_contextlib, test_pdb and test_pickle (pickle-builtin-reference's
+  nine pass on the VM). DECISION 574-1 (the user's): trace's two and test_pdb_frame_refleak need gc.get_referrers, empty by 241-3 (a).
+
+## 2026-11-25 — the user's DECISIONs 574-1 (a) and 574-2 (queue 574, VM)
+
+- 574-1 (a), the user's: trace's TestCallers.test_loop_caller_importing and TestFuncs.test_inst_method_calling (out of
+  `:tools-misc`) and test_pdb's test_pdb_frame_refleak (out of `:doctests`, whose match took it) are a `:design` class,
+  `:gc-referrers-empty`: gc.get_referrers answers empty by 241-3 (a) (no registry of containers). The class stands before
+  `:doctests` so that it takes the doctest row first. Mirrored in divergences-315.edn. Alternative (b), revisiting 241-3 with a
+  registry, not taken.
+- 574-2, the user's: keep. f_lineno is None at a function's instruction with the IR's line 0 and stays 0 at module level
+  (7949c2058).
+- Judged again from the records, with no new run: bin/reap --record, bin/crops-score --record. Python eval 40,855 / 1,405 / 1,279 ->
+  40,855 / 1,408 / 1,276. bin/reap, crops-score --judge --strict and records-check: 0 problems.
+## 2026-11-25 — goi's digest keeps a listed package's dot imports: pyctypes' `Object` (queue 579, VM)
+
+- The finding (Arbace, the main session): with arbace/pyctypes listed in goi's table (queue 521, 6db3dd0cb, on its branches),
+  goi's std check (test/goi/std.ae, the full gate's `goi` step) fails `:compiled arbace/pyctypes` with "not supported by goi yet:
+  a value of type invalid type" for every exported func whose signature names `Object` (Str_, DelItemOf, ...); NUM_BITS passes.
+- Why: pyctypes' files import arbace/py as a dot import (`. "arbace/py"`), so `Object` is py.Object written unqualified.
+  arbace.go.table/digest-forms keeps a file's import only when a kept declaration uses its name as a qualifier (used-quals); a
+  dot import's name `.` is never one, so every digest file of pyctypes lost its import of arbace/py, and the checker of goi's REPL
+  (the digest session) resolved `Object` in pyctypes' own scope: no such declaration, an invalid type, which goi's builder
+  refuses (arbace/go/build.ae's desc1). interpret-forms (the interpretable packages' digests) already keeps `_` and `.` imports.
+- Fix (arbace/go/table.ae, digest-forms): a dot import is kept when the file's kept declarations name, unqualified, an exported
+  member of the dot-imported package (its index's types, funcs, vars or consts; any exported name the package does not declare
+  when that package is not in the environment). No package listed on next has a dot import, so next's table is unchanged;
+  the fix acts when 521's listing of pyctypes arrives.
+- Alternative not taken: leaving pyctypes out of the compiled std check (or unlisting it). The package is meant to be compiled
+  (521's DECISION 521-2 (b): the C world at compiled speed); its members' types were wrong in the digest, so every caller of them
+  at the REPL, not only the std check, would have hit the invalid type. The digest was the bug.
+- Proof (.tmp/q579/digest-proof.ae on stage 0, tamago/arm64 over tamago/goroot, pyctypes taken as a program path as 521 does):
+  the digest's pyctypes files keep 6 dot imports of arbace/py; checked as goi's digest session checks it, Str_ is
+  func(py.Object) string and DelItemOf func(py.Object, py.Object) error; the same digest less its dot imports (the old one) gives
+  func(invalid type) string and func(invalid type, invalid type) error (the negative control); NUM_BITS func(uint64) uint64 in both.
+  The step's own command (bin/goi test --gc's std.ae) needs an executable whose table lists pyctypes: the main host's, after
+  this merges with 521's listing.
+
+## 2026-11-24: queue 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (the VM; branch `553-py-subinterp-testbuffer`)
+
+Brief: `.tmp/worktrees/q/tasks/553-py-subinterp-testbuffer.md` (the user's decisions of 2026-11-23 on 537's DECISIONs 537-5 and
+537-6: :subinterpreters' 3 rows, `_testbuffer`'s 3 and 3.14's UTF-8 mode rule from :skipped-by-test, :child-is-pyi's 10 case by
+case). Base next 9b60ce498; paused for the night at 739215eb7 (WIP) and resumed; origin/next 440cf0273 merged (its journal
+without the conflict markers 9b60ce498 had left; the survey's markers, which this branch had removed too, taken as next has it).
+
+- **Subinterpreters (`:subinterpreters`, 3 rows).** `concurrent.interpreters` is CPython's own Lib over pyi's `_interpreters`,
+  `_interpqueues` and `_interpchannels` (queue 230, each interpreter with its own module table, builtins, sys, importlib, codecs,
+  atexit, locale and the interpreter registers swapped by interpSwitch; one GIL, 230's DECISION). The three rows were `del interp`
+  in test_interpreters' module runs leaving the interpreter alive: pyi's moment at del (queue 222) collects at a deletion within a
+  budget of a tenth of the wall time, spent by then (a probe of _mixed alone passes). Now a deletion past the budget while a
+  subinterpreter is held by handles is owed (`xiDeathOwed`), settled by one finRound before the queues' get, get_count, is_full,
+  list_all and the channels' recv, get_count, get_info, list_all, list_interpreters (`xiSettleDeaths`). Alternatives: lifting the
+  budget for every deletion while subinterpreters exist (a collection per deleted tracked object in InterpreterPoolExecutor's
+  programs), recognizing the Interpreter class by name (a stdlib name in the runtime), reference counting (537-2 (b)).
+- **`_testbuffer` (3 rows) and its UTF-8 sibling.** `_testbuffer` has been ci's since queue 456 (473: memoryview over Py_buffer);
+  the rows, and test_buffer's 73 in `:testcapi`, are the 11-19 records night's. Task 554 runs and records test_buffer whole; the
+  test_capi and test_ctypes rows pass by id here. 3.14's UTF-8 mode rule (preconfig_init_utf8_mode) replaces pyi's constant 1:
+  `-X utf8`, `PYTHONUTF8` (-E/-I ignore it; invalid values refused for 3.14 too), else on only under the C or POSIX locale.
+- **`:child-is-pyi` (10), case by case (537-5):** test_posix's two test_close_file (Go's runtime.checkfds opens /dev/null on a
+  closed descriptor 0: `bin/pyi python` sees 0 closed and `PYI_STDIN_CLOSED` makes the runtime close it again before anything
+  runs, `sys.stdin` None), test_subprocess' test_preexec_at_exit (fork_exec's PythonFinalizationError and subinterpreter
+  RuntimeError before pyi's no-fork refusal) and test_encoding_warning (stale), test_marshal's test_unorderable_set_items_in_code
+  (the bytecode view's add_const keyed by repr merged two NaN complex constants: a NaN float or complex now matches only itself,
+  as `_PyCode_ConstantKey`), test_unicodedata's unload_reload (namereplace imports unicodedata once per interpreter, the
+  `_PyUnicode_GetNameCAPI` capsule) and failed_import_during_compiling (compile/exec/eval of a source with `\N{` asks the capsule;
+  on its failure a copy with each `\N{` opening an impossible name tells a decoded escape from raw text, and the error is the
+  parser's "(unicode error) \N escapes not supported (can't load unicodedata module)"; a first version asked at every IR load and
+  broke every module with an escape under `sys.modules['unicodedata'] = None`), test_os' test_urandom_failure (sysconfig's
+  HAVE_GETRANDOM, HAVE_GETRANDOM_SYSCALL, HAVE_GETENTROPY 1: os.urandom is getrandom; with it `:runs-where-cpython-skips`' two
+  URandomFDTests rows). Left for the user: test_pass_fds_redirected (Go's poller holds descriptors 3 and 4; DECISION 553-1, n/a
+  recommended) and BytesFwalkTests.test_fd_finalization (reference counting's moment: DECISION 553-2, to :finalization under 537-2).
+- **Runs** (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py; PYI_RUNNER=python3): check A by id and whole modules
+  (`.tmp/q553/checkA.log`, stopped for the night before test_buffer and test_utf8_mode ended), check B whole (test_unicodedata,
+  test_utf8_mode, test_builtin, test_posix; `.tmp/q553/checkB.log`, controls failed as they must), check C the VM-only rows alone
+  with a 16 GB cap (`.tmp/q553/checkC.log`); probes `.tmp/q553/p/subi2.py` (the budget spent, then `del interp`: qsize 4, PASS)
+  and fail.py (CPython's SyntaxError line).
+- **Records**: `bin/pyi check --judge DIR --record` over a copy of check B holding test_utf8_mode alone (test_env_var and
+  test_xoption pass). Not recorded, for the main host's whole record: test_builtin (its TestType.test_namespace_order fails on goi
+  only), test_posix (test_posix_spawnp past the 8 GB cap on goi), test_unicodedata (failed_import past the cap after the
+  module's heavy tests), and every row covered by id alone. Python eval 40,827 / 1,404 / 1,308 -> 40,829 / 1,404 / 1,306.
+  `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 553's two DECISIONs applied (the VM; branch `553-py-subinterp-testbuffer`)
+
+- **DECISION 553-1 (a), the user: n/a.** test_subprocess's test_pass_fds_redirected leaves `:child-is-pyi` for a new n/a class,
+  `:go-runtime-descriptors`: Go's runtime opens its network poller's two descriptors (epoll and eventfd, at 3 and 4) before any
+  Python runs, in every pyi process, so a child listing its open descriptors (fd_status.py) sees them beside the passed ones.
+  Not taken: (b) a patch to Go's runtime moving them above 255 in pyi's two builds, (c) keeping it by design.
+- **DECISION 553-2 (a), the main session, by the same rule as the user's 537-2: test_os' BytesFwalkTests.test_fd_finalization
+  goes to `:finalization`** (reference counting's moment: closing the wrapper generator unwinds its frame, and CPython closes the
+  inner os.fwalk generator, which closes its directory descriptors, when the frame's for-loop drops it; pyi when Go's collector
+  finds it). Not taken: (b) closing the generators a frame's for-loops hold as it unwinds (wrong when another reference holds one).
+- Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
+  -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
+  `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-25 — Python: :coroutines' two refcount rows, :child-is-pyi's records, :c-accelerators' remainder (queue 585, VM)
+
+Brief: `.tmp/worktrees/q/tasks/585-py-accel-coroutines.md` (branch `585-py-accel-coroutines` from next 01ee9c426).
+Not in that base: 537 (the strict-subclass DeprecationWarning: test_int, test_complex, test_capi's test_D), 551/551b
+(`_warnings` in Go: test_warnings' 15 DeprecatedTests, which `:coroutines`' match holds here), 553 (:child-is-pyi's fixes)
+and 568 (C `_pickle`). Done here, without redoing those:
+- Merged origin/553-py-subinterp-testbuffer (585a1f7bc): 553's eight :child-is-pyi rows passed in its probes but no whole
+  record held them. The journal's conflict is a union; nothing else conflicted.
+- `:coroutines`: test_bpo_45813_1 and _2 moved to `:finalization`, as 537-2 (a) names them (the user, 2026-11-23: the moment
+  of reference counting; 551b makes `:finalization` n/a). The class keeps its match line for the rows the merges of 537 and
+  551b will clear. No run: the rows' outcome is unchanged.
+- Whole run: `bin/pyi check --fresh` of test_marshal, test_unicodedata, test_posix, test_subprocess and test_os, with the
+  drivers on goi and the children on the compiled launcher (557b-1 (a); the launcher rebuilt at runtime key 0739f727c096e87e).
+  The run had 1,058 methods: 856 pass, 196 classed and 6 failing. All 8 of 553's rows pass, and test_urandom_failure skips
+  as CPython's does.
+  - test_marshal (64 pass, 15 classed) and test_posix (136 pass, 44 classed) passed whole. They were recorded with
+    `bin/pyi check --judge DIR --record` over those two modules alone: 0 regressions, 3 now pass. Their 3 names left
+    `:child-is-pyi`.
+  - Three modules had failures, so they were not recorded: test_unicodedata (one memory-cap crash), test_subprocess (3)
+    and test_os (2). Probed alone (`--only`):
+    - test_function_checksum and test_fd_leak pass. Both are load effects.
+    - test_timerfd_TFD_TIMER_ABSTIME fails both times: 0.98 s against 1 within 2 places. This is timing on the VM's goi.
+    - test_close_fds, test_pass_fds and test_leak_fast_process_del_killed fail with launcher children. With children on goi
+      (no launcher) they pass, and so do test_bool and test_getopt, the controls' subjects. So they are an artifact of the
+      launcher child, whose Go runtime descriptors land at 5 and 6 after the passed ones. They are not this code.
+  - The host's whole records of these three modules would clear the remaining 5 rows.
+- Python eval 40,829 / 1,403 / 1,306 -> 40,832 / 1,400 / 1,306. `bin/reap --record` and `bin/crops-score --record` were
+  run. `bin/reap`, `crops-score --judge --strict` and `records-check` each give 0 problems.
+- `:c-accelerators`' remainder after 568 (no change):
+  - test_inspect's test_signature_on_builtin_class and test_pickle's test_clear_unpickler_memo_reentrant are 568's C
+    `_pickle`.
+  - These stay by design under the user's decisions (2026-11-04, 465-3):
+    - test_annotationlib's test_type_repr and test_inspect's test_excluding_predicates are `_datetime`'s;
+    - test_types' module and test_int's monster are `_datetime` and `_decimal`;
+    - test_functools' test_c_classes needs `_decimal`.
+  - test_functools' two test_attributes_unwritable need a C partial with READONLY members, against 459-1 (a) (`_functools`
+    stays thin). That is the user's call: DECISION 585-2 in the report.
+
+  Alternatives considered:
+  - Redoing 537's and 551's fixes on this base: not taken. That would duplicate work that is already on its way to next.
+  - Recording test_subprocess with its three launcher failures moved into `:go-runtime-descriptors`: not taken. The
+    host's records, with children on goi, pass them.
+## 2026-11-26: C++ read, cpp-def2's D1 and D2 (the user)
+
+- D1 (a): gxx-dg/parse/explicit1.C joins `:gxx-only-rules` (n/a) in test/cpp/divergences-dg.edn. At C++17 it expects GCC's "explicit
+  specialization in non-namespace scope", which CWG727 removed from the standard; GCC 15 does not implement CWG727. (b), GCC's rule
+  implemented against the standard, rejected.
+- D2 (a): a new n/a class `:misplaced-expectation` for an expected error GCC's own test marks as misplaced: gxx-dg/template/typedef39.C (its
+  comment: the error "should really be on this line", in the other template). (b), keeping it deferred, rejected: matching it would copy the
+  misplacement.
+
+## 2026-11-26: the by-design review (the user)
+
+The user reviewed every by-design class still counted against completeness (bin/reap's cells of Java, Python, C++ and OCaml):
+- Java, n/a (out of both denominators): :classloading (no class loader: S4), :jvm-tools (the java launcher and the jar tool), :memory-limit
+  (no -Xmx heap limit), :j2g-reflection (caller-sensitive access checks; Arbace's reflection is lenient). Alternatives: keep by design,
+  or build class loading, a launcher, a heap limit and caller-sensitive checks.
+- Java, deferred, to build: :kerberos (pure Java in jdk26u) and :foreign (the FFM API). Alternative: n/a.
+- Java :flaky-timeout's AOT row: rerun alone and record (it passed when run again).
+- Python, deferred, to build: :c-accelerators (the C _json into the C world, as queue 568 did for _pickle; its _pickle rows clear at
+  train 6's record) and :pickle-core (_Framer's memoryview of a BytesIO buffer). Alternative: n/a.
+- Python :coroutines and C++ :oracle-text: n/a (reference-counting timing, as :finalization; the compiling clang's spelling of
+  __PRETTY_FUNCTION__ and similar).
+- Python :skipped-by-test (43): triaged by skip reason first, then decided.
+- Not decided because already decided: Python :extension-modules, :child-is-pyi and the :pyio classes clear at train 6's records; OCaml's
+  :ocamltest-tools and :unix-java are judged at the compiled level (583-1, 583-2), :opam-not-run built later (583-3).
+## 2026-11-26 — Rust C6 L4.1: the splice's statics (queue 590, VM)
+
+The host's L4.3 run (35 failures, samples 4 of 6, synthetic 33 of 67) traced to 10 of L4.1's 684 own defines reading the
+wrong static (thread::current::id::{get,set} alloc::HOOK for ID; panic_count, args::really_init and argc_argv
+thread::current::CURRENT for GLOBAL_PANIC_COUNT, ARGC, ARGV; stack_overflow's PAGE_SIZE as spawn_unchecked::MIN; current_exe and
+len_before_body a static for an anon constant). The cause was 586's own splice: rename-globals mapped every global of our module
+through RF3's global map, content -> name, so a static (no constant) became the unit's first global of the same content, a
+zero-filled `[8 x i8]` being many statics; and the check normalized every global by content, so it passed them. Now the splice
+keeps a global's name when the unit names it and it is no constant (a static's symbol is rustc's), renames only constants, among
+the unit's constants (`:constant true`); the check's normal form takes constants by content and every other global by name; a
+statics control swaps one own define's static for another of its unit and must differ. The own tree rebuilt once (the compares'
+CRATE-own.edn as 586 left them): 683 own, every define equal, both controls differ, and every copied unit's defines name the
+same globals as rustc's (the host's gl.awk, 0 of 31,684 differ). One define fell back to rustc's, ThreadId::new: our symbol of
+its `static COUNTER` (`..3std6thread2id8ThreadId3new7COUNTER`, the impl as a module) is not rustc's
+(`_RNvNvMNtNtCs.._3std6thread2idNtB4_8ThreadId3new7COUNTER`), which content renaming had hidden too. lib-unit's judge has the same
+blindness (statics by content), left for a decision.
+
+Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
+keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
+
+## 2026-11-26 — Python: :skipped-by-test's 43 rows triaged, 35 n/a and 3 deferred (queue 592, VM)
+
+What: the 43 rows bin/reap put in :skipped-by-test (Python eval, the record test/python/check-lib-test-linux-amd64.edn). These
+are skips on pyi with no CPython reference row that is skipped, :excluded or :no-tests. I triaged each one by its skip
+condition in CPython 3.14.10's Lib/test (the pinned tarball, sha256 de414a57...b72032).
+The user decided DECISION 592-1 (a): the (ii) rows are n/a as listed.
+- (ii), 35 rows, a new n/a class `:skipped-not-applicable`, placed before :skipped-by-test:
+  - pymalloc's and mimalloc's debug-hook tests (test_capi/test_mem.py:169, 174; 18). pyi's memory is Go's, and
+    _testcapi.WITH_PYMALLOC and WITH_MIMALLOC are False.
+  - AF_ALG's aead gcm(aes) (test_socket.py:7065-7072). The kernel has none: CPython on the VM gets the same ENOENT.
+  - test_doctest's test_wrapped_c_func (test_doctest.py:2787, doctest_skip_if(check_impl_detail(cpython=False))).
+    test/python/cpython_marked.py resolves methods' decorators, not a module-level doctest function's, so the row is
+    named in the class instead of the tool being extended.
+  - 15 skips CPython takes too but its reference cannot show. regrtest's JUnit writer (libregrtest/testresult.py:55, 74-76)
+    drops a skip with an empty message (test_selectors.py:196) and every skip after the first of a method's subtests
+    (test_xml_etree.py:4863-4872). Skips in setUpClass and setUpModule have no id (test_ioctl.py:20, test_robotparser.py:812,
+    test_timeout.py:274, test_xml_etree.py:4629). Subtest ids with addresses are :excluded under other ids
+    (test_urlparse.py:986, 1002).
+  The class is keyed on each skip's message; the two generic messages (an empty one, doctest's "all examples were skipped")
+  are keyed by name.
+- (i), 3 rows, deferred class `:zstd-multithread` (owner queue 593): test_zstd's multithreaded tests (test_zstd.py:72-74,
+  327, 353, 1607). pyi's libzstd is built without ZSTD_MULTITHREAD (tools/pyi/clib/zstd/lib.conf), which needs pthreads in
+  the C world. CPython's reference build has no _zstd.
+- Left in place:
+  - the three UTF-8-mode rows (test_builtin.py:1704, test_io.py:3002) stay in :skipped-by-test: 553 and py-regress-1126
+    already fixed them, and train 6's record clears them;
+  - test_os's two test_closerange (test_os.py:218, 2587) stay as they are, and train 6's test_os record decides them.
+    These are (iii), a real divergence: standalone the fds are consecutive, so in the driver the next fd is held, likely by
+    files that CPython's reference counting would have closed (:finalization's kind).
+Alternatives considered: re-recording the references with refs.py taught what JUnit loses (the principled fix for the 15,
+the main host's job, left open); keeping all 35 by design (DECISION 592-1 (b), not taken).
+Probe: one script (bin/pyi's python on train-6's runtime interpreted by goi, q587's weak-free pytls cache.go swapped in for
+the run and restored), compared against python3 on the VM: utf8_mode, the fd allocation, AF_ALG and _testcapi's allocator
+flags.
+Checks:
+  - bin/pyi divergences: rc 0; skipped-not-applicable 39 there, because bin/pyi's judge reads no reference outcomes and
+    4 of the rows are :skipped-by-both's in reap.
+  - bin/reap: the matrix moved, Python eval design 106 to 68, deferred 608 to 611, n/a 4,545 to 4,580; :skipped-by-test
+    43 to 5. Recorded with `bin/reap --record`, then 0 problems.
+  - bin/records-check: 0 problems.
+  - test/crops/scores.edn recorded with `bin/crops-score --record`; `bin/crops-score --judge --strict`: 0 problems.
+
+## 2026-11-26: train 6, the ctypestest world regenerated (the main session's call)
+
+Train 6's `bin/pyi-clib verify ctypestest` (on train 5's executable as the tools' host) differed from the committed forms beyond the
+Key (f4b726d1 -> 002c5389, which 577's lexer and preprocessor changes and bin/pyi-clib move): in musl's y0 and y1 (src/math/j0.c,
+j1.c; F 5308 and 5310) the constant folded for `return 0/0.0;` is 0xFFF8000000000000 (the x86 default NaN of a division at run time)
+where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No source changed (the builder and musl are as at
+650dcb7b7): the committed world was built with the builder evaluated (stage 0), the verify's with it compiled, and the host's 0.0/0.0
+differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
+reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
+compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
 
 ## 2026-11-26 — Python: the core objects' deferred classes, test_enum's import, tp_new (queue 587, VM)
 
