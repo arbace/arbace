@@ -336,6 +336,9 @@
       (:poison o) nil
       ;; a variable defined twice; at block scope every declaration but an extern one defines
       (and (= :var oc c)) (cond (and (:def o) def (not (and (= rk :class)))) (str "redefinition of '" nm "'")
+                                ;; (cpp-indep2: [class.mem.general]/5, a static data member is not declared twice in its class's
+                                ;; member-specification: GCC's "redeclaration of 'int A<R>::_test'"; template/static4.C)
+                                (and (= rk :class) (= "VarDecl" (:kind n)) (= "VarDecl" (:kind (:node o)))) (str "redeclaration of '" nm "'")
                                 ;; (round 54, fourth pass: [basic.scope.scope]/4, [basic.link]/8: at block scope an extern declaration
                                 ;; after a local variable (or parameter, or a condition's variable in a substatement's outermost
                                 ;; block, [stmt.pre]/5) of its name declares another entity in the same scope: GCC's "'int x' conflicts
@@ -657,6 +660,14 @@
    [:constraint #"^codegen: satisfaction of atomic constraint depends on itself" "satisfaction of atomic constraint depends on itself"]
    ;; (n-cpp-concepts: [temp.spec.partial.general]/9.2)
    [:template #"^codegen: partial specialization of '.*' does not specialize any template arguments" "partial specialization does not specialize any template arguments"]
+   ;; (cpp-indep2: [temp.deduct.type]/9, template.ae's identity-partial-check!)
+   [:template #"^codegen: partial specialization of '.*' is not more specialized than primary template" "partial specialization is not more specialized than primary template"]
+   ;; (cpp-indep2: [expr.prim.lambda.capture]/7-8, sema's capture-field)
+   [:lambda-capture #"^codegen: '.*' is not captured" "variable is not captured"]
+   ;; (cpp-indep2: [support.types.layout]/1, sema's __builtin_offsetof)
+   [:offsetof #"^codegen: (cannot apply 'offsetof'|invalid use of incomplete type .* in offsetof)" "invalid offsetof"]
+   [:template #"^codegen: partial specialization of '.*' has the wrong number of template arguments" "wrong number of template arguments"]
+   [:template #"^codegen: partial specialization of '.*': parameter pack argument must be at the end" "parameter pack argument must be at the end of the template argument list"]
    ;; (cpp-tpl2: [temp.arg.template]/3-4 in a class template's template-id, template.ae's cx-ttp-arg-mismatch?)
    [:template #"^codegen: a template template argument whose parameters do not match" "type/value mismatch in a template argument list"]
    ;; (cpp-tpl2: a qualified name of a type a complete class does not declare, sema's resolve-type-form)
@@ -1892,6 +1903,17 @@
                        "FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"}]
     (walk-nodes
      (fn [n _]
+       ;; (cpp-indep2: [temp.local]/6, the templated declaration itself named as one of its own template parameters,
+       ;; `template<template<int> class A> class A {};`, `template <class Z> using Z = Z;`: GCC's "declaration of ... shadows
+       ;; template parameter", at its name; template/shadow1.C, shadow3.C)
+       (when (#{"ClassTemplateDecl" "TypeAliasTemplateDecl" "VarTemplateDecl" "FunctionTemplateDecl"} (:kind n))
+         (let [ps (filter #(tparam-kinds (:kind %)) (:inner n))
+               d (last (:inner n))]
+           (when (and d (not (tparam-kinds (:kind d))) (:name d) (some #(= (:name d) (:name %)) ps)
+                      (= main (get-in d [:loc :file])) (get-in d [:loc :offset]))
+             (let [[l c] (line-col starts (long (get-in d [:loc :offset])))]
+               (.add out {:line l :col c :kind :error :rule :tparam-shadow
+                          :msg (str "declaration of '" (:name d) "' shadows template parameter")})))))
        (when (= "ClassTemplateDecl" (:kind n))
          (let [ps (filter #(tparam-kinds (:kind %)) (:inner n))
                names (set (keep :name ps))
@@ -7138,6 +7160,38 @@
 
 (swap! checks conj constexpr-pre23-bodies)
 
+;; (cpp-indep2) [basic.start.main]/3, the function main is not used within the program: a use of the global main, GCC's pedwarns
+;; (errors under -pedantic-errors) "ISO C++ forbids calling '::main' from within program" for a call and "ISO C++ forbids taking
+;; address of function '::main'" for any other use, at the name; diagnostic/main2.C. The global main: a namespace-scope function
+;; of the unit named main, the name unqualified (or ::main) and no member's.
+
+(defn main-uses
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        args (:args u)
+        pe? (and (some #{"-pedantic-errors"} args) (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
+        has-main (some #(and (= "FunctionDecl" (:kind %)) (= "main" (:name %))) (:nodes u))
+        calls (java.util.IdentityHashMap.)]
+    (when (and pe? has-main (str/includes? src "main"))
+      (walk-nodes (fn [n _]
+                    (when (and (= "CallExpr" (:kind n)) (map? (first (:inner n))))
+                      (.put calls (first (:inner n)) true)))
+                  (:nodes u) nil)
+      (walk-nodes (fn [n _]
+                    (when (and (= "DeclRefExpr" (:kind n)) (= "main" (get-in n [:referencedDecl :name]))
+                               (= :fn (get-in n [:_ent :k])) (not (:_this n)) (not (:_mfn n))
+                               (or (empty? (:qualifier n)) (:globalQualifier n)) (not (seq (:qualifier n)))
+                               (= main (get-in n [:range :begin :file])))
+                      (when-let [o (get-in n [:range :begin :offset])]
+                        (let [[l c] (line-col starts (long o))]
+                          (.add out {:line l :col c :kind :error :rule :pedantic
+                                     :msg (if (.containsKey calls n) "ISO C++ forbids calling '::main' from within program"
+                                              "ISO C++ forbids taking address of function '::main'")})))))
+                  (:nodes u) nil))
+    (vec out)))
+
+(swap! checks conj main-uses)
+
 ;; Later standards' constructs in an earlier standard's unit, GCC's pedwarns ("only available with '-std=c++NN'"), errors under
 ;; -pedantic-errors: a label at the end of a compound statement (C++23, P2324: "label at end of compound statement only available
 ;; with '-std=c++23'", at the closing brace), an alias-declaration as an init-statement (C++23, P2360: "alias-declaration in
@@ -8413,7 +8467,10 @@
           pps (keep #(pp-diag main (str %)) (:pp-errors u))
           other (count (remove #(pp-diag main (str %)) (filter #(re-find #"^.*?:\d+:" (str %)) (:pp-errors u))))
           ;; (CP338 (a): the parser's pedantic diagnostics, GCC's pedwarns, errors under -pedantic-errors alone)
-          pe? (boolean (some #{"-pedantic-errors"} args))
+          ;; (cpp-indep2: -Wno-error=pedantic after -pedantic-errors makes them warnings again, ext/flexary19.C's
+          ;; dg-additional-options "-Wpedantic -Wno-error=pedantic")
+          pe? (and (boolean (some #{"-pedantic-errors"} args))
+                   (not (some #{"-Wno-error=pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
           ;; (round 54, sixth pass: a pedwarn of -Wpedantic's own, `pedantic-w: `, which -Wno-pedantic after it turns off)
           pw? (and pe? (not (some #{"-Wno-pedantic"} (drop-while #(not= "-pedantic-errors" %) args))))
           syn (for [[off why tok] (distinct (:syntax u))

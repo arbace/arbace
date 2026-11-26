@@ -7762,6 +7762,10 @@
                                                       args))
                                  cs))
           (fail :overload "no viable function (a generic lambda's conversion not modeled) among " (count (distinct cands)) " for " n0 " arguments")
+          ;; (cpp-indep2, the checker: a candidate whose parameter of type void was its declaration's error ([dcl.fct]/2, reported
+          ;; there) leaves the call undiagnosed, as GCC's erroneous parameter does: conversion/void1.C's `foo(0)` of `void foo(void i)`)
+          (and (checking?) (some (fn [[f]] (try (some #(abi/void? (abi/unq %)) (:ps (:ty (fnd f)))) (catch Exception _ nil))) cs))
+          (fail :overload "no viable function (a candidate's erroneous void parameter) among " (count (distinct cands)) " for " n0 " arguments")
           ;; (cpp-tpl2, the checker: the candidates' substitution failures, call-candidates' :explain, reported with the call's
           ;; error, each at its construct, as GCC's explanations; arbace.repr.cpp.diag's handler)
           (seq explain)
@@ -11359,6 +11363,28 @@
                          [(analyze ctx a)]))
                ns)))
 
+(defn- cx-both-operands
+  "cpp-indep2, the checker: a binary operator's two operands analyzed as [l r]; when the left one's analysis is refused, the right
+  one is analyzed too, and when it is refused as well each refusal is reported where it was found and the first thrown as
+  reported (GCC goes on past the erroneous operand and reports both: cpp0x/nullptr46.C's `foo () > nullptr || foo () < nullptr`,
+  an error on each line). Else as before: the left one's refusal thrown."
+  [ctx ln rn]
+  (if-not (and *on-refusal* (checking?))
+    [(analyze ctx ln) (analyze ctx rn)]
+    (let [ok? (fn [e] (let [d (ex-data e)] (and (:codegen/refused d) (not (:cpp/timeout d)) (not (:cx/reported d)))))
+          [l el at-l] (try [(analyze ctx ln) nil nil]
+                           (catch arbace.lang.ExceptionInfo e
+                             (if (ok? e) [nil e (some-> *at* deref)] (throw e))))]
+      (if-not el
+        [l (analyze ctx rn)]
+        (let [er (try (analyze ctx rn) nil
+                      (catch arbace.lang.ExceptionInfo e (if (ok? e) [e (some-> *at* deref)] (throw e))))]
+          (if-not er
+            (throw el)
+            (do (*on-refusal* el (or (:cx/node (ex-data el)) at-l))
+                (*on-refusal* (first er) (or (:cx/node (ex-data (first er))) (second er)))
+                (throw (ex-info (.getMessage ^Throwable el) (assoc (ex-data el) :cx/reported true))))))))))
+
 (defn- cx-list-items
   "cpp-decl2, the checker: a braced list's elements as analyze-args gives them; when an element's analysis is refused, each
   other element is analyzed too and every refusal reported at its element (GCC reports each: other/offsetof8.C's two), the
@@ -11442,7 +11468,14 @@
           (let [t (:ty v)]
             (if-let [c (when (and (:c t) (abi/integral? t) (:init-node v)) (try (const-int (:scope encl) (:init-node v)) (catch arbace.lang.ExceptionInfo _ nil)))]
               {:op :int :v c :ty (abi/unq t) :cat :pr}
-              (fail :lambda "a variable the lambda does not capture: " (:name v))))
+              ;; (cpp-indep2, the checker: [expr.prim.lambda.capture]/7-8, a local entity odr-used in a lambda with no
+              ;; capture-default and no capture of it, not const-qualified (whose lvalue-to-rvalue conversion may be no odr-use):
+              ;; GCC's "'i' is not captured"; cpp0x/lambda/lambda-copy-neg.C, lambda-ice28.C)
+              ;; (a named variable alone: a pack's element, an init-capture pack's `[...xs=xs]`, has no name of its own and is
+              ;; left to the slice, cpp2a/lambda-pack-init2.C)
+              (if (and (checking?) (not (:c (abi/non-ref t))) (not (:c t)) (string? (:name v)) (seq (:name v)))
+                (fail :lambda-capture "'" (:name v) "' is not captured")
+                (fail :lambda "a variable the lambda does not capture: " (:name v)))))
           :else
           (let [;; (queue 570, the checker: a VLA captured by copy, its closure member an array copied element by element,
                 ;; [expr.prim.lambda.capture]/10, /15, which a bound known only at run time cannot size: GCC's "array of runtime
@@ -12206,18 +12239,33 @@
                         {:op :int :v off :ty abi/ulong* :cat :pr}
                         (if-let [nm (:f c)]
                           (let [cid (or (class-id t) (fail :expr "offsetof in a non-class " (pr-str t)))
+                                ;; (cpp-indep2, the checker: [support.types.layout]/1, offsetof's type a complete class: GCC's "invalid
+                                ;; use of incomplete type", in the class's own member-specification; ext/builtin-offsetof4.C,
+                                ;; template/offsetof2.C)
+                                _ (when (and (checking?) (let [c (abi/cls cid)] (and c (not (:complete c)) (not (:tmpl c)))))
+                                    (fail :offsetof "invalid use of incomplete type '" (:name (abi/cls cid)) "' in offsetof"))
                                 [owner e] (first (class-lookup cid nm))
                                 bo (when owner (let [[_ o vb] (abi/base-path cid owner)] (when vb (if (checking?)
                                                                                                   ;; (cpp-decl2: GCC's error, [support.types.layout]/1's conditionally-
                                                                                                   ;; supported non-standard-layout class: other/offsetof8.C)
                                                                                                   (fail :null-object "invalid access to non-static data member '" nm "' of NULL object (through a virtual base)")
                                                                                                   (fail :expr "offsetof through a virtual base"))) o))
-                                chain (case (:e e) :field [[(:cls e) (:i e)]] :indirect (:chain e) (fail :expr "offsetof of a non-field " nm))
+                                ;; (cpp-indep2, the checker: offsetof's member a non-static data member: GCC's "cannot apply 'offsetof'
+                                ;; to an enumerator 'E'", "... to static data member", "... to member function"; ext/builtin-offsetof2.C,
+                                ;; builtin-offsetof1.C)
+                                chain (case (:e e) :field [[(:cls e) (:i e)]] :indirect (:chain e)
+                                        (if (and (checking?) (#{:enumerator :var :fn} (:e e)))
+                                          (fail :offsetof "cannot apply 'offsetof' to " (case (:e e) :enumerator "an enumerator" :var "static data member" "member function") " '" nm "'")
+                                          (fail :expr "offsetof of a non-field " nm)))
                                 fo (reduce (fn [a [k i]] (+ (long a) (long (get (:fields (abi/layout k)) i)))) 0 chain)
                                 [k i] (peek chain)]
                             (when (:bits (nth (:fields (abi/cls k)) i)) (fail :expr "offsetof of a bit-field"))
                             (recur (:ty (nth (:fields (abi/cls k)) i)) (+ off (long bo) (long fo)) cs))
                           (let [at (abi/unq t)
+                                ;; (cpp-indep2, the checker: a class with its own operator[], GCC's "cannot apply 'offsetof' when
+                                ;; 'operator[]' is overloaded"; parse/offsetof6.C, offsetof7.C, offsetof8.C)
+                                _ (when (and (checking?) (abi/class? at))
+                                    (fail :offsetof "cannot apply 'offsetof' when 'operator[]' is overloaded"))
                                 _ (when-not (abi/arr? at) (fail :expr "offsetof's [] of a non-array"))
                                 i (or (:v (ce-try (rv (analyze ctx (:i c))))) (fail :expr "offsetof's index not a constant"))]
                             (recur (:of at) (+ off (* (long i) (long (abi/size-of (:of at))))) cs)))))
@@ -12463,7 +12511,7 @@
                             {:op :unop :o o :e (convert-scalar r pt false) :ty pt :cat :pr})
             (fail :operator "unary " o)))))
     "BinaryOperator"
-    (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)
+    (let [o (:opcode n) [ln rn] (kids n) [l r] (cx-both-operands ctx ln rn)
           ;; (cpp-rind, the checker: a member function named as an assignment's left operand, `foo = 0;` with foo a member
           ;; function, [expr.ref]/6.3.2: GCC's "invalid use of member function 'void A::foo(int)'"; parse/error45.C)
           _ (when (and (checking?) (= "=" o) (= :fnset (:op l)) (seq (:fns l))
