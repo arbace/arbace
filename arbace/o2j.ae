@@ -275,18 +275,22 @@
                (or (str/starts-with? n "global ")
                    (and (str/starts-with? n "field_imm ") (simple? (first args)))))))))
 
+(declare scoped)
+
 (defn- with-args
   "Evaluates arg nodes right to left (as ocamlc's code does) and calls (k forms): every argument
-  that is not simple but the leftmost such one is bound to a temporary first, from the right."
-  [ctx nodes k]
+  that is not simple but the leftmost such one is bound to a temporary first, from the right. With
+  clear? (oc-tail: a call that is no tail call) the temporaries are cleared once k's form is evaluated
+  (scoped)."
+  [ctx nodes k & [clear?]]
   (let [impure (keep-indexed (fn [i x] (when-not (simple? x) i)) nodes)
         bind (set (rest impure))
-        temps (into {} (for [i bind] [i (fresh "t$")]))
+        temps (into {} (for [i bind] [i (if clear? (with-meta (fresh "t$") {:mutable true :tag 'Object}) (fresh "t$"))]))
         forms (vec (map-indexed (fn [i x] (or (temps i) (expr ctx x false))) nodes))
         bindings (vec (mapcat (fn [i] [(temps i) (expr ctx (nth nodes i) false)])
                               (reverse (sort bind))))
         body (k forms)]
-    (if (seq bindings) (list 'let bindings body) body)))
+    (if (seq bindings) (list 'let bindings (if clear? (scoped body (vals temps)) body)) body)))
 
 (defn- call-form
   "The application of function form f to argument forms (already evaluated, simple). A closure is cast in place, Rt/fn called
@@ -332,6 +336,18 @@
     (if (seq bindings) (list 'let bindings body) body)))
 
 (defn- clear "The forms that clear temporaries ts." [ts] (map (fn [t] (list 'set! t nil)) ts))
+
+(defn- scoped
+  "Form b, then the locals ts cleared, b's value the result (oc-tail, 2026-11-26): at the light level an interpreted frame's slot
+  keeps what it last held until the frame returns, so a value bound by a let or a temporary whose scope ended before the rest of
+  the function (lib-sys/opaque's inlined go, regression/pr5233's Some argument) stayed reachable through the collections the rest
+  asks for, where ocamlopt's frame no longer holds it; only for a b that is no tail form (a tail call's continue or TailCall, or
+  the function's own result, which ends the frame)."
+  [b ts]
+  (if (seq ts)
+    (let [r (fresh "r$")]
+      (concat (list 'let [r b]) (clear ts) [r]))
+    b))
 
 (def ^:private bt-pop
   "Bt/pop in place (queue 414)."
@@ -422,10 +438,10 @@
         (do (reset! (:tails ctx) true)
             (with-args ctx (into [f] args)
                        (fn [as] (list 'new 'ocaml.rt.TailCall (first as) (list 'new 'Object/1 (vec (rest as)))))))
-      ;; arguments right to left, then the function
+      ;; arguments right to left, then the function (a call that is no tail call clears its temporaries after it, scoped)
       (if (simple? f)
-        (with-args ctx args (fn [as] (call-form (expr ctx f false) as)))
-        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as)))))))))
+        (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))))))
 
 ;; ---- functions
 
@@ -522,14 +538,17 @@
   (loop [x x ctx ctx bindings []]
     (case (hd x)
       let (let [[_ _ id def body] (node-body x)
-                s (munge-id id)
+                ;; (oc-tail) a let that is no tail form clears its variables at its end (scoped)
+                s (if tail? (munge-id id) (with-meta (munge-id id) {:mutable true :tag 'Object}))
                 k (const-arg ctx def)
                 ctx2 (cond-> (assoc-in ctx [:env id] s) k (assoc-in [:kconst id] k) (nil? k) (update :kconst dissoc id))]
             (recur body ctx2 (conj bindings s (expr ctx def false))))
       mutlet (let [[_ id def body] (node-body x)
                    s (with-meta (munge-id id) {:mutable true :tag 'Object})]
                (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
-      (list 'let bindings (expr ctx x tail?)))))
+      (list 'let bindings (if tail?
+                            (expr ctx x tail?)
+                            (scoped (expr ctx x tail?) (take-nth 2 bindings)))))))
 
 ;; ---- primitives
 
