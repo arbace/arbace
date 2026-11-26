@@ -3765,7 +3765,12 @@
                                  ;; (cpp-indep3: a class only a friend declaration declared, hidden from lookup, friend-class-of)
                                  (or (not (declared-in-main? p (:s lp)))
                                      (some? (when-let [ns (sc/enclosing (scope p) #{:ns})] (friend-class-of p ns (:s lp)))))
-                                 (not (and *fn-start* (some (fn [x] (>= (long (first x)) (long *fn-start*))) (stv p DIAGS)))))]
+                                 ;; (once a function, the cascade of an earlier error there kept out; queue 601: but after
+                                 ;; errors of this rule alone each undeclared name its own, as GCC reports each statement's,
+                                 ;; spellcheck-stdlib.C's `clock_t c; time_t t; tm t2;`)
+                                 (not (and *fn-start* (some (fn [x] (and (>= (long (first x)) (long *fn-start*))
+                                                                         (not (str/ends-with? (str (second x)) "' does not name a type"))))
+                                                            (stv p DIAGS)))))]
                     (when bad (soft-diag! p save (str "'" (:s lp) "' does not name a type")))
                     ;; (:undeclared-type: in a block GCC reads the statement as an expression, its declarator declaring nothing,
                     ;; so a later use of the name is undeclared too: ext/builtin11.C)
@@ -6588,6 +6593,13 @@
                               noreturn (assoc :noreturn true)
                               (or stdnr (:stdnr fe)) (assoc :stdnr true)))
                 (when (and tmpl (= ctx :member)) (.add ^HashSet (stv p MTMPL) nm)))
+              ;; (queue 601: a member operator function declared in its class's scope by its operator-function-id, so a
+              ;; using-declarator naming it finds it, [namespace.udecl]/1: `using B0::operator();` of a B0 that declares one,
+              ;; cpp23/explicit-obj-lambda12.C; the parser's other lookups are by identifier)
+              (when (and (:op lp) (= ctx :member) (nil? (:args lp)) (not (:friend ds)) (= 1 (count (:parts qn))))
+                (let [on (fn-name p lp false false)]
+                  (when-not (sc/find-in (sc/decl-scope (scope p)) on false)
+                    (declare! p {:k :fn :name on :op true}))))
               (cond
                 body? (conj out n)
                 (decl-comma! p) (recur (conj out n))
@@ -6731,6 +6743,7 @@
                             (cond-> {:name nn :loc (loc p ni) :type {:qualType (qt ty)}
                                      :inner (vec (concat (:attrs ds) (:attrs d) as1 (when x [x])))
                                      :_qtmpl (count (filter :args (butlast (:parts qn))))}
+                              (and (:undeclared-type ds) (= ctx :block)) (assoc :_undecltype true)
                               (#{"static" "extern"} (:storage ds)) (assoc :storageClass (:storage ds))
                               (:inline ds) (assoc :inline true)
                               (:constexpr ds) (assoc :constexpr true)
