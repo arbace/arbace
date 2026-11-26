@@ -12683,6 +12683,12 @@
              :cat (if (= :pr (:cat a)) :xv :lv)})
           (let [i (class->scalar ctx i)]
           (let [[p ix] (if (abi/ptr? (:ty (rv a))) [(rv a) (rv i)] [(rv i) (rv a)])]
+            ;; (cpp-def2, the checker: [expr.sub]/2, of the built-in subscript's operands one is a glvalue of array type or a prvalue
+            ;; of pointer type, the other of unscoped enumeration or integral type: neither a pointer after their conversions is GCC's
+            ;; "subscripted value is neither array nor pointer", template/crash89.C's `T()[0]` for T = int)
+            (when (and (checking?) (not (abi/ptr? (:ty p))) (cx-sure-scalar? (:ty (rv a))) (cx-sure-scalar? (:ty (rv i)))
+                       (not (abi/ptr? (abi/unq (:ty (rv a))))) (not (abi/ptr? (abi/unq (:ty (rv i))))))
+              (throw (ex-info "codegen: subscripted value is neither array nor pointer" {:codegen/refused :subscript :cx/node n})))
             (cx-subscript-incomplete! p)
             {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
@@ -12721,7 +12727,14 @@
         ;; (cpp-s8: T{} and T{e} of a scalar type, [expr.type.conv]/2 with [dcl.init.list]/3.9-3.11: value-initialized, or
         ;; the one element converted; <concepts>' default_initializable<char*>, `requires { _Tp{}; ... }`, had been false)
         (and (= "CXXFunctionalCastExpr" (:kind n)) (= "InitListExpr" (:kind k)) (not (abi/ref? t)))
-        (scalar-list-cast ctx t (analyze-args ctx (kids k)))
+        (let [args (analyze-args ctx (kids k))]
+          ;; (cpp-def2, the checker: [expr.type.conv]/2 as DR2351 states it, void{} -- a braced list empty after its packs'
+          ;; expansion -- is a prvalue of type void, and no other list initializes void: GCC's "compound literal of non-object
+          ;; type 'void'", cpp0x/dr2351.C's `void{t...}` with a pack of two)
+          ;; (a list with an element of its own is the front end's, arbace.repr.cpp.diag's void-lists, a template's too)
+          (when (and (checking?) (seq args) (abi/void? (abi/unq t)) (every? #(= "PackExpansionExpr" (:kind %)) (kids k)))
+            (fail :expr "compound literal of non-object type 'void'"))
+          (scalar-list-cast ctx t args))
         :else (let [a (analyze ctx k)
                     _ (cx-named-cast! (:kind n) t a)
                     ;; (cpp-sweep, the checker: a reinterpret_cast between pointer to member types, [expr.reinterpret.cast]/10,
@@ -12782,7 +12795,11 @@
         {:op :temp-obj :init (if brace? (init-for t (first args) ctx :direct) (init-for t args ctx (if (empty? args) :value :direct))) :ty (abi/unq t) :cat :pr}
         (cond (empty? args) {:op :zero-val :ty t :cat :pr}
               ;; (cpp-s8: T{...} of a scalar type in a template, its one argument the braced list)
-              (and (= 1 (count args)) (= :init-list (:op (first args))) (not (abi/ref? t))) (scalar-list-cast ctx t (:items (first args)))
+              (and (= 1 (count args)) (= :init-list (:op (first args))) (not (abi/ref? t)))
+              (do (when (and (checking?) brace? (seq (:items (first args))) (abi/void? (abi/unq t))
+                             (every? #(= "PackExpansionExpr" (:kind %)) (kids (first ks))))
+                    (fail :expr "compound literal of non-object type 'void'"))
+                  (scalar-list-cast ctx t (:items (first args))))
               :else (cast-expr ctx t (first args) true)))))
     "CXXScalarValueInitExpr" (let [qt (get-in n [:type :qualType])
                                    t (resolve-type (:scope ctx) qt)]

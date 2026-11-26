@@ -663,6 +663,12 @@
    [:type #"^codegen: unknown type .*: no type named '.*' in the complete class" "no type named in the class"]
    ;; (cpp-tpl2: [expr.prim.id.general]/4, sema's expression statements and requirements)
    [:expr #"^codegen: invalid use of non-static member function" "reference to non-static member function must be called"]
+   ;; (cpp-def2: [expr.type.conv]/2 with DR2351, sema's functional casts)
+   [:expr #"^codegen: compound literal of non-object type 'void'" "compound literal of non-object type 'void'"]
+   ;; (cpp-def2: [expr.sub]/2, sema's built-in subscript)
+   [:subscript #"^codegen: subscripted value is neither array nor pointer" "subscripted value is neither array nor pointer"]
+   ;; (cpp-def2: a default template argument's error, template.ae's complete-args)
+   [:template #"^codegen: template argument \d+ is invalid" "template argument is invalid"]
    ;; (cpp-tpl2: [class.copy.ctor]/5, sema's declare-fn!)
    [:decl #"^codegen: invalid constructor: " "copy constructor must pass its first argument by reference"]
    ;; (cpp-tpl2: template.ae's template-id, a member class named as a template)
@@ -5167,6 +5173,29 @@
     (vec out)))
 
 (swap! checks conj arithmetic-calls)
+
+;; cpp-def2: [expr.type.conv]/2 as DR2351 states it, void{} -- a braced list empty after its packs' expansion -- is a prvalue of type
+;; void, and no other list initializes void: a list with an element that is no pack expansion is ill-formed whatever the packs,
+;; in a template's definition too (GCC's "compound literal of non-object type 'void'", at the type; cpp0x/dr2351.C's `void{t..., 1}`
+;; in a function template never instantiated); a list of pack expansions alone is the instantiation's, sema's.
+(defn void-lists
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (and (#{"CXXFunctionalCastExpr" "CXXUnresolvedConstructExpr"} (:kind n))
+                             (= "void" (str/trim (str (get-in n [:type :qualType])))))
+                    (let [ks (filter map? (:inner n))
+                          l (first ks)]
+                      (when (and (= 1 (count ks)) (= "InitListExpr" (:kind l))
+                                 (some #(not= "PackExpansionExpr" (:kind %)) (filter map? (:inner l))))
+                        (when-let [o (mine-at n main)]
+                          (let [[ln cl] (line-col starts o)]
+                            (.add out {:line ln :col cl :kind :error :rule :void-list
+                                       :msg "compound literal of non-object type 'void'"})))))))
+                (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj void-lists)
 
 ;; cpp-def: [dcl.type.auto.deduct]/4, `auto v = { ... };` deduces std::initializer_list<U> from the list's elements: an element
 ;; naming an undeclared identifier (GCC's error_mark_node) deduces nothing, GCC's "unable to deduce 'std::initializer_list<auto>'
