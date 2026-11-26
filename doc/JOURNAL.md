@@ -25283,3 +25283,35 @@ differed only by a static we declare and std's unit defines, its content compare
 ThreadId::new + the four), 0 left rustc's, both controls differ. rust-front essential once (mono changed). The backtrace
 crates not rerun: their equal defines name no static (their own files' globals are all anonymous constants), and the stricter
 judge can only lose equals.
+
+## 2026-11-26: train 4 built and its Java records (read, interp, compiled)
+
+- Built at 82b1dfff1 (the provenance batch e8120f1d7 on train 3's tool, REPR_JAVA_STALE_OK=1): executables
+  `9564e7a0c725952e4bb8`, javac's tool `javac-e585cbd9ee084dd57abd`. On the way, four fixes (each its commit):
+  - 551dfeab4: 562's `$`-named overlay (java/lang/System$Logger.java) off the joint javac compile's patch tree (a hard-linked
+    copy without it) and off the other chunks' patch path in the chunked read (repr.java.chunks: a chunk of its own, last):
+    the conversion had failed on Stream's ambiguous Logger, SystemLoggers' inherited defaults, ObjectInputStream's and
+    LogManager's javac fallback ("No descriptor for type ResourceBundle");
+  - 5a6da0c62: the runtime's declarations (bin/repr-java declarations, the suite's fixtures' class path), broken since
+    java-bytecode-1122 (the first fixtures update since): a file's several classes each printed to a file of its own name
+    (they overwrote each other), BytecodeAnnotations' constant pool an Object in its signatures (jdk.internal.reflect is
+    not exported);
+  - 1803d91bb: java-design-1123's XML closure in javac's tool world, first built here: AttrNSImpl in the closure, and a
+    tool-build variant of TemplatesImpl.createModule (the translets in their loader's unnamed module: no module layers).
+  - `bin/javac-vendor verify` after the tool: the forms byte for byte (1,786 files); its diff names only jdk/javac's
+    platform pins a fresh conversion does not make, and the provenance's host.
+- The records: `bin/java-check --levels read,interp,compiled --list` of 160 tests (the touched ids of every merged branch
+  and the rows not passing but n/a and the 600 s speed rows; .tmp/t4/rec2.list), on train 4's build, judged after next's merge
+  (227dce44c: the user's by-design review kept) with `--judge --partial --record`: compiled 64 now passing, interp 40,
+  no regression recorded; read 160 pass.
+  - Held out of the record: t05766 (TestInferCaller) interp, passing before, now "Bad class name" (java.lang.reflect.Method
+    where the JDK hides the reflection frame): java-stack-1124's StackWalker changes (the interpreter's reflection frames);
+    its row stays a pass until fixed (the brief: a passing row stays a pass).
+  - Classed: t08083 t08091 t08093 t08094 t08095 t08096 interp under :xml (javac's tool world's XML closure gaps: XSLTC's
+    ErrorMsg, XSAnnotation), t04725 interp under :serialization (annotation proxies), t04680 interp under :stack (a
+    System.Logger default method's caller frame); :diag-processors' tests none (575's and rec-t3's rows pass).
+  - t05172 (the :flaky-timeout compiled row) flaky again in the shard; the user's decision: run alone (queued).
+- Java (bin/reap): read 7,819 / 0 / 25 -> 7,843 / 0 / 1; eval 3,148 / 0 / 117 (60 n/a) -> 3,205 / 0 / 54 (66 n/a); AOT
+  3,157 / 1 / 120 (47 n/a) -> 3,225 / 1 / 50 (49 n/a); print 3,318 / 0 / 7 -> 3,324 / 0 / 1 (print and diagnostics re-run on
+  the train's tool by the second agent). bin/reap 0 problems, crops-score --record and --judge --strict 0 problems,
+  records-check 0, markers-check 0.
