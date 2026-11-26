@@ -25378,3 +25378,19 @@ DECISIONs proposed (none applied; recommended option first):
   queue 491's (098ceb730, class.ae: the classes RunMain initializes before main, a slice) and b04c83d39's (defineclass.ae:
   the boot loader's classes defined from bytes, a map), the two met in train 4's merge of next (891d550c1) after its build.
   defineclass.ae's is `bootDefined` now (its three uses); 491's keeps its name (thread.ae, object_test.ae).
+
+## 2026-11-26: java-tail3-1126, the user's decisions on java-tail2-1126 (branch `java-tail3-1126` from mac/next `1d92ac402`)
+
+The user answered java-tail2-1126's seven decisions (2026-11-26, through the burst's coordinator); applied here as classes and
+verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
+1. JT2-1 (a): t03295 (TestClassConstantPatching) n/a in :class-files-na beside t03296 (out of :classloading's :tests, where
+   :interp-protected's match had taken it first).
+2. JT2-2 (a): t05050 (GetURLsTest) and t04444 (SubclassGC) in :classloading (n/a since the by-design review), both levels
+   (out of :design-also, :design-also-compiled and :serialization).
+3. JT2-3 (a): t04989 (PortUnreachableException/Concurrent) judged by jtreg's status (java.check's status-by-decision,
+   verdicts.edn `:status`), out of test/java/golden/out.edn and left.tsv (the Java judge's out-of-cases 24 -> 22);
+   measured interpreted on train 4's executable: passes (its record row waits for the train).
+5. JT2-5 (a): t04809 (MyOwnSynchronizer) in :mxbeans (deferred), out of :design-also and :design-also-compiled.
+- `bin/java-check verdicts --verify`: as recorded (own verdicts interp and compiled 3,309 of 3,325). bin/reap --record:
+  Java eval 3,205 / 0 / 54 (66 n/a) -> 3,205 / 0 / 51 (69 n/a), AOT 3,225 / 1 / 50 (49 n/a) -> 3,225 / 1 / 49 (50 n/a);
+  crops-score --record (Java completeness 0.9919 -> 0.9922) and --judge --strict 0 problems; records-check 0 problems.
