@@ -1923,6 +1923,14 @@
 
 (declare analyze rv ce-try cx-cce-type!)
 
+(declare sure-failure? cx-nx-needed!)
+
+(def ^:dynamic *cx-nx-error*
+  "cpp-def3 (the checker): an atom declare-fn! binds around noexcept-of, which puts there [error node] when a noexcept-specifier's
+  operand surely fails -- a substitution's error, a parameter's or `this`'s object read --, reported when the function is
+  needed, cx-nx-needed!."
+  nil)
+
 (defn- noexcept-of
   "Whether a function type's spelling says noexcept: `noexcept`, `noexcept(true)`, or noexcept(e) of a constant e
   true ([except.spec]/2; G4: the headers' noexcept(__and_<...>::value), evaluated in `scope`, not noexcept when it
@@ -1946,9 +1954,39 @@
                   ;; the operand the native parser kept (G5): analyzed with the parameters in scope, a constant
                   (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
                   (let [x (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
-                        a (when (checking?) (try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))) (catch arbace.lang.ExceptionInfo _ nil)))
+                        nx! (fn [ex] (when (and *cx-nx-error* (nil? @*cx-nx-error*) (map? x) (:range x) (not (header-node? x)))
+                                       (reset! *cx-nx-error* [ex x])))
+                        a (when (checking?) (try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x)))
+                                                 (catch arbace.lang.ExceptionInfo ex
+                                                   ;; (cpp-def3: [except.spec]/13, a specialization's noexcept-specifier instantiated
+                                                   ;; when needed, its operand's error then the program's: a substitution's
+                                                   ;; (sfinae11.C's `noexcept(declval<T&>().foo())` for Z), or a non-static data
+                                                   ;; member read through `this` outside a member function's body, [expr.const]/5.1
+                                                   ;; (noexcept34.C's `noexcept (b)`)
+                                                   (cond (sure-failure? ex) (nx! ex)
+                                                         (and (re-find #"this outside a method" (str (ex-message ex)))
+                                                              (re-find #"\bthis\s*->\s*[A-Za-z_]\w*\s*(?:[^\s(]|$)" (str e)))
+                                                         (nx! (ex-info "codegen: use of 'this' in a constant expression (a non-static data member in a noexcept-specifier)"
+                                                                       {:codegen/refused :constexpr :cx/node x}))
+                                                         :else nil)
+                                                   nil)))
+                        ;; (cpp-def3: a parameter's value read, [expr.const]/5.9 with [basic.scope.param]: GCC's "use of parameter from
+                        ;; containing function", noexcept34.C's `g4 (int i) noexcept (i)`)
+                        _ (when (and a (checking?)
+                                     (some #(and (map? %) (= :load (:op %)) (= :var (:op (:e %))) (= :param (:storage (var* (:id (:e %)))))
+                                                 (not (abi/ref? (:ty (var* (:id (:e %)))))))
+                                           (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) a)))
+                            (nx! (ex-info "codegen: use of parameter outside function body in a noexcept-specifier" {:codegen/refused :constexpr :cx/node x})))
                         v (try (ce-try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))))
-                               (catch arbace.lang.ExceptionInfo _ nil))]
+                               (catch arbace.lang.ExceptionInfo _ nil))
+                        ;; (cpp-def3: the operand a const or constexpr static data member's or variable's value with no initializer,
+                        ;; not usable in constant expressions, [expr.const]/4: noexcept36.C's `noexcept (T::qq)`)
+                        _ (when (and a (nil? v) (= :load (:op a)) (= :var (:op (:e a))))
+                            (let [w (var* (:id (:e a)))]
+                              (when (and (#{:member-static :global} (:storage w)) (nil? (or (:init w) (:init-node w))) (:name w)
+                                         (or (:c (:ty w)) (:constexpr w) (:cx-constexpr w)))
+                                (nx! (ex-info (str "codegen: the value of '" (:name w) "' is not usable in a constant expression (in a noexcept-specifier)")
+                                              {:codegen/refused :constexpr :cx/node x})))))]
                     ;; (queue 584, the checker: the operand a contextually converted constant expression of type bool,
                     ;; [except.spec]/1 with [expr.const]/12 (P1401R5): an integer constant other than 0 and 1 narrows, GCC's
                     ;; "narrowing conversion of '2' from 'long unsigned int' to 'bool'"; cpp23/narrowing-bool1.C)
@@ -2392,6 +2430,9 @@
         ;; declaration reported and dropped, declare-node!)
         _ (when (and (checking?) (= k :ctor) cid (= 1 (count (:ps ty))) (= {:k :class :id cid} (abi/unq (first (:ps ty)))))
             (throw (ex-info "codegen: invalid constructor: its only parameter of its own class type" {:codegen/refused :decl :cx/node n})))
+        ;; (cpp-def3: the noexcept-specifier's surely failing operand, kept for cx-nx-needed!)
+        nx-e (atom nil)
+        nx-v (binding [*cx-nx-error* (when (checking?) nx-e)] (noexcept-of tscope qt))
         f {:name nm :kind k :cls cid :ty ty
            ;; (cpp-sweep, the checker: C++11's [dcl.constexpr]/8, a constexpr non-static member function other than a constructor
            ;; is const, C++14 dropping it: ubsan/vptr-4.C's `t.foo()` of a constexpr object)
@@ -2425,7 +2466,7 @@
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
            ;; (the C library's functions that do not return, nothrow builtins for clang, G5c: musl's abort; not free, which
            ;; clang invokes in del_op.cc's noexcept operator delete)
-           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
+           :noexcept (or nx-v (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
                                                                                        (contains? clang-nothrow-libc nm))))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
@@ -2449,7 +2490,7 @@
         tags (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
                                                            [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
                                                        t)))))
-        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags))
+        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags) @nx-e (assoc :cx-nx-error @nx-e))
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)
@@ -8965,6 +9006,14 @@
         ;; (queue 510, the checker: a base constructor inherited from two base class subobjects, cx-inh-ambiguous!)
         (when (and (checking?) (seq (:inherits-ctors (abi/cls id))) (or (= ::inherited fid) (some #{fid} inh)))
           (cx-inh-ambiguous! id args cands))
+        ;; (cpp-def3, the checker: [except.spec]/13, the constructor selected needs its noexcept-specifier, and an implicit copy
+        ;; or move constructor's exception specification ([except.spec]/7) the subobjects' copy constructors': cx-nx-needed!,
+        ;; cpp0x/noexcept36.C's `decltype (lk (sc<lk> ()))` through kf<z8>'s `kf (const kf &) noexcept (T::qq)`)
+        (when (and (checking?) f)
+          (cx-nx-needed! f)
+          (when (and (:implicit f) (= 1 (count (:ps (:ty f)))))
+            (doseq [m (class-like-members id) g (:ctors (abi/cls m))]
+              (let [g (fnd g)] (when (and g (or (copy-ctor? g m) (move-ctor? g m))) (cx-nx-needed! g))))))
         (cond
           (= ::inherited fid) {:i :none}
           (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) (cx-inherited-deleted! id fid) {:i :none})
@@ -9580,7 +9629,7 @@
   read."
   false)
 
-(declare check-access! cx-static-ice-use!)
+(declare check-access! cx-static-ice-use! cx-nx-needed!)
 
 (defn- entity-expr [ctx es n]
   (let [;; (cpp-rt-own: a class name and a function or variable of the same name found together -- a using-declaration names
@@ -10500,6 +10549,7 @@
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
   [ctx fid obj args virtual-ok]
   (let [f (fnd (deduced! fid))
+        _ (cx-nx-needed! f)
         _ (cx-immediate-call! ctx f)
         _ (cx-closure-conv! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
@@ -10537,8 +10587,18 @@
         call)
     call))
 
+(defn- cx-nx-needed!
+  "cpp-def3 (the checker): [except.spec]/13, the function `f` selected by overload resolution needs its noexcept-specifier, whose
+  operand's error noexcept-of kept (:cx-nx-error) is then reported, once, at the operand."
+  [f]
+  (when (and (checking?) *on-refusal* (:cx-nx-error f) (not (:cx-nx-reported f)) (:id f) (not *cx-in-implicit*))
+    (let [[e x] (:cx-nx-error f)]
+      (upd-fn! (:id f) assoc :cx-nx-reported true)
+      (*on-refusal* e x))))
+
 (defn- fn-call [ctx fid args]
   (let [f (fnd (deduced! fid))
+        _ (cx-nx-needed! f)
         _ (cx-immediate-call! ctx f)]
     (imm-fold ctx
               (cx-immediate-eval! ctx f
