@@ -23951,3 +23951,30 @@ does not record): its row applied to check-aot-linux-amd64.edn, divergences-aot.
 Python eval (pass/design/deferred, n/a) next 42,743/278/1,004 (4,426) -> 43,203/148/568 (4,543); AOT 150/0/1 -> 151/0/0;
 completeness 0.9911 -> 0.9959. bin/reap --record 56 of 56, 0 problems; bin/crops-score --record, --judge --strict 0 problems;
 bin/records-check 9 pairs, 0 problems; bin/markers-check ok.
+## 2026-11-25: rust-rec-1125: Rust's eval and AOT records from the own path on amd64 (542's and 565's records for the host)
+
+Branch `rust-rec-1125` from mac/566-rust-c6-l1 (`6ffc51528`), next merged (`3a67d8dc2` with 565, 566, 561 before the runs; `5754ba518`
+after them). The Mac (arm64) writes no amd64 record; these are the ones 542 ("Records for the main host (held)") and 565 ("Left for
+the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/logs/.
+- Caches: rust-l1's (`.tmp/rust-front`, std's IR at the pin `test/rust/runtime/ir.sha256`, `.tmp/repr-rust`), paths rewritten.
+- `DEPS_IFACE_ROUNDS=3 bin/rust-front std-iface --deps`: libc 892 functions, 304 ADTs (round 10's three rounds; the facts rust-l1
+  installed 11-24, kept), hashbrown 665, unwind 14.
+- `CORE_NATIVE_IFACE=core/core-whole-iface.edn bin/rust-front std-iface-native`: core 27,199 of 27,498 facts equal to the helper's
+  (164 differ, 135 missing; the Mac's 542 pass 27,194), alloc 3,863 of 3,863.
+- std's names: np5's `std-names.edn` (rust-c4-1122's chain, kept in .tmp/kept/rust-c4; 15,120 of 15,162 equal; the names the Mac's
+  rsi18 used), not scanned again: the fresh `std-names-native` was killed by the 12:03 OOM reboot at core's scan 50 of 378 (about
+  75 min for core alone), and the coordinator approved np5's.
+- The exports at this head: `core-export --rsi` (21 min), `--rsi-outside` with 565's regex (43 min), `lib-export --rsi std`, the
+  two CTFE keys into std/native-std-ctfe.edn; after the OOM one at a time outside the lock at GOMEMLIMIT<=2500MiB.
+- `RF_FACT_TRACE=1 RF_NATIVE_IFACE=1 RF_NATIVE_NAMES=np5 RF_EXTRA_IFACE=core pass:core native-iface:hashbrown:libc:unwind RF_DROP_GLUE=1
+  RF11_BATCH=1 bin/rust-front rsi-build --native-core` over the six, under the lock: **6 of 6 own**, 0 stub calls. fact-refused: 0 in
+  five; vectors 16 (8 callees, 8 fn-symbols), all `core_simd::swizzle::{impl#1}::resize::<N>` for Mask<i8,16> and Mask<i32,4>:
+  "attributes are not in core's sources (a macro-made item)" (the Mac's rsi20 had 0: its core-attrs cache likely covers swizzle.rs;
+  not investigated here).
+- runtime-ci (104 units lowered, 0 refused), then under the lock with RSI_FRONT_DIR the build's:
+  `bin/rsi check --record --front own --corpus samples` **6 of 6 pass**; `bin/rsi check --aot --record --front own --corpus samples`
+  **6 of 6 pass** (compiled against interpreted: 6 both).
+- Case inputs (eval and AOT): C1, C4, C5, C7 own on all six; C3 own on five (vectors' 16 the record's); C2 the pack's (std's instances'
+  bodies: 137 to 1,938 rustc's, the exports built for the five eval samples' keys, threads' larger); C6 std's IR. 0 of 6 cases own
+  in all seven: independence stays 80. bin/reap 56 of 56, matrix unchanged; crops-score unchanged (Rust 100 / 80), --judge --strict
+  0 problems; records-check 9 pairs 0; markers-check 0.
