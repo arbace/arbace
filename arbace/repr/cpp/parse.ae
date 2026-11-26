@@ -593,6 +593,26 @@
               (.put uses nm (.-o ^T (tok-at p i)))))
           (recur (sc/parent-of s)))))))
 
+(defn- tkw-not-template!
+  "queue 601: [temp.names]/5 (C++20 /6), a name prefixed by the keyword `template` names a template: a member function or class
+  the lookup finds that is no template, `A::template a1()`, is GCC's \"'A::a1()' is not a template\", at the name. Under a
+  dependent qualifier (or object) only in a function template the main file instantiates explicitly, where GCC's instantiation
+  reports it (parse/template18.C's f2<0>; f1's lines are never instantiated)."
+  [^P p e ^long i dep]
+  (when (and (map? e) (#{:fn :type} (:k e)) (not (tmpl-ent? e)) (not (:tparam e)) (not (skim? p)) (main-tok? p i)
+             (or (not dep)
+                 (some (fn [nm] (re-find (re-pattern (str "\\btemplate\\s+[^<\\s][^;{}]*\\b" (java.util.regex.Pattern/quote (str nm)) "\\s*<"))
+                                         (str (.-src p))))
+                       *fn-names*)))
+    (soft-diag! p i (str "'" (.-s ^T (tok-at p i)) "' is not a template"))))
+
+(defn- dep-part?
+  "queue 601: whether the name part `part` has template arguments that name a template parameter."
+  [^P p part]
+  (boolean (and (:args part) (:ab part) (:ae part)
+                (some (fn [j] (let [^T t (tok-at p j)] (and (identical? :id (.-k t)) (:tparam (lookup (scope p) (.-s t))))))
+                      (range (long (:ab part)) (inc (long (:ae part))))))))
+
 (defn parse-name
   "A possibly qualified name at the cursor: the name map with the cursor after it, or nil (the cursor unmoved) when
   none starts there. `mode` :parse parses template arguments, :scan skips them; `member` (a name after . or ->): its
@@ -621,6 +641,8 @@
              ;; template argument): GCC's "expected template-id"
              (when (and tkw (= mode :parse) (not (is? p "<")) (not (is? p "::")) (or (id? p) (is? p ";")) (not (tmpl-ent? e)) (main-tok? p i))
                (soft-diag! p i "expected template-id"))
+             (when (and tkw (= mode :parse) (not member) (seq parts) qe *full-headers*)
+               (tkw-not-template! p e i (or (some #(dep-part? p %) parts) (some-> (lookup (scope p) (str (:s (first parts)))) :tparam))))
              (let [lt (when (is? p "<") (angle-close p (ix p)))
                    tmpl? (and lt (or tkw (tmpl-ent? e)
                                      (and first? (not member) (assumed-template? p e))
@@ -2377,6 +2399,10 @@
   (adv! p)
   (let [qn (or (parse-name p :parse true) (perr p "a member name"))
         lp (peek (:parts qn))
+        ;; (queue 601: `p->template a1()`, tkw-not-template! on the object's class's member)
+        _ (when (and (:tkw lp) (:s lp) (= 1 (count (:parts qn))) *full-headers*)
+            (when-let [[ce d] (object-class p base arrow)]
+              (when (:scope ce) (tkw-not-template! p (sc/find-in (:scope ce) (:s lp)) (long (:i lp)) d))))
         nm (cond (:s lp) (:s lp) (:dtor lp) (str "~" (:dtor lp)) (:op lp) (str "operator" (:op lp)) :else "")
         ;; the member function it names, for an unresolved call (unresolved-call)
         [mfn dep] (when (and (:s lp) (or (in-template? p) (dep-this? p)) (= 1 (count (:parts qn))))
