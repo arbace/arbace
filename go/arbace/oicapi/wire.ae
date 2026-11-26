@@ -23,7 +23,7 @@
 ;; 'E' value (it raised), 'X' i32 (the C called exit), 'F' str (a fatal error), 'N' (no stub of that name, or no stubs: OI_CSTUBS
 ;; unset), 'T' (the call unwound for the runtime's throwable), 'K' value, u32 n, n values (a callback: apply the closure), 'Q' str
 ;; (caml_named_value); (queue 583) 'V' u32 op, str s, u32 n, n i64 (the C consumer of runtime events on the runtime's ring: RuntimeEvents),
-;; answered 'R' a block of integers; 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
+;; answered 'R' a block of integers; (oc-tail) 'M' (a major cycle the stubs' allocations ended: MajorCycle), answered 'R' unit; 'G' u32 n, n u64 (queue 523: the C's custom blocks an asked collection found unreachable, at no call's depth),
 ;; answered 'N' once their finalize ran; (queue 527, Marshal of the C's custom blocks: extern_custom and intern's CODE_CUSTOM_LEN, as
 ;; ocamlopt's runtime calls the operations') 'S' u64 the address (its operations' serialize: 'R', no updates, u32 n, n bytes, u64 the
 ;; 32-bit size, u64 the 64-bit size), 'D' str the identifier, str the data from the identifier's sizes to the message's end, u64 the
@@ -66,7 +66,8 @@
         (return false))
       (set! Apply wireApply)
       (set! Named wireNamed)
-      (set! RuntimeEvents wireRuntimeEvents)))
+      (set! RuntimeEvents wireRuntimeEvents)
+      (set! MajorCycle wireMajorCycle)))
   (== loadErr ""))
 
 ;; ---- the wire form
@@ -169,7 +170,10 @@
       (when [(values kind layout dims data ok) (oi/BigarrayParts v)] ok
         (.add s v)
         (.u8 w \B)
-        (.u32 w kind)
+        ;; (oc-tail) 0x200 in the kind: the C allocated it with memory the collector manages (Managed), sampled by the runtime's Memprof
+        (if (Managed v)
+          (.u32 w (bit-or kind 0x200))
+          (.u32 w kind))
         (.u32 w layout)
         (.u32 w (len dims))
         (range [_ d dims]
@@ -365,6 +369,16 @@
         (return out)))
     (panic (addr (lit unwind)))))
 
+(go/func wireMajorCycle "wireMajorCycle is MajorCycle: 'M', answered 'R' once the runtime fired its finalisers (oc-tail); only inside a call (a\nworker to ask with): a custom block's serialize or deserialize ('S', 'D') runs in a session of its own, with none.\n" []
+  (when (or (== sess nil) (== (len (.-workers sess)) 0))
+    (return))
+  (let [ss sess
+        r (ask \M (fn [^{:tag (* wbuf)} w]))]
+    (when (== (.u8 r) \R)
+      (.get ss r)
+      (return))
+    (panic (addr (lit unwind)))))
+
 (go/func wireRun "wireRun is a worker's call: the stub name with the arguments read from r; its end the worker's last message.\n"
   [^{:tag (* worker)} wk ^string name ^string reprs ^{:tag (slice oi/Value)} args]
   (let [s sess
@@ -468,7 +482,7 @@
           (return (.-b w)))))
     (let [out (<! (.-out wk))]
       (switch (aget out 0)
-        (case [\K \Q \V])
+        (case [\K \Q \V \M])
         (default
           (set! (.-workers sess) (subslice (.-workers sess) 0 (- (len (.-workers sess)) 1)))
           (when (== (len (.-workers sess)) 0)

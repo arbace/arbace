@@ -5207,3 +5207,64 @@ The AOT cell's 13 design rows by cause (next 01ee9c426: 539 / 13 / 57):
 - **`:opam-not-run`'s two** (opam/re/expect, opam/sexplib0/sexplib0_test): 547f-2 (a) leaves them until the AOT level runs the ppx
   programs. DECISION 583-3.
 After it: OCaml AOT 540 / 11 / 58 (67 n/a), completeness 0.9709 -> 0.9713.
+
+## As built: oc-tail (2026-11-26, branch `oc-tail-1126`, from mac/next `0b3174413`): the light AOT level's deferred rows that are not its speed
+
+The lane's rows (test/ocaml/divergences-aot.edn, divergences-suite-aot.edn): `:light-depth` 7, `:gc-and-memory` 5, `:light-unfinished` 2,
+`:c-api` 2, `:c-runtime-decided` 2, `:dynlink-decided` 1, `:unix-unported` 1. All at the light level, on stage 0 (no gate executable).
+
+- **Deep calls on worker threads** (jdk/ocaml's `Rt/hop`, arbace/o2j.ae's `entered`). The Java forms' interpreter throws
+  StackOverflowError past 10,000 nested interpreted calls a thread (`Compiler$CF$Rt/MAX_DEPTH`; stage 0's interpreter has no way to read a
+  frame's depth from interpreted code, so the runtime counts OCaml's own, `Rt/depth`). A function's entry (o2j's in-place prologue) takes the
+  slow path once in 128 turns; `Rt/enterHop` then says whether the call is more than HOP (1,000) OCaml calls deeper than its thread's base
+  (`hopBase`), and if so the method makes the same call again on a worker (`Rt/hop`: an idle worker thread of the pool `hopIdle`, at the
+  interpreter's depth 0 on a Go stack of its own; the caller waits on a SynchronousQueue, the worker runs as the same OCaml thread: its
+  TState and Memprof state, the runtime's lock still held; its result or exception handed back). Past HOP every slow path is taken until
+  the next entry (`tickSlow`, and after a worker's call returns): the first test may meet a leaf (filter's predicate) while the recursion
+  goes on on the caller's thread, which otherwise in step with the 128 turns never moved. `Gil`'s saved state keeps `hopBase` with the depth.
+  `Rt/depth` goes on across the threads, so Stack_overflow still comes at DEPTH_LIMIT (OCAMLRUNPARAM's l). HOP is 0 at the compiled level
+  (the light level's runner, test/ocaml/o2j/run.ae, sets the property `ocaml.rt.light`; `O2J_HOP_DEPTH` overrides). A Java-forms probe
+  (200,000 nested calls a hop per 1,000) costs about 60 MB of RSS and a second. callback/test3, effect-syntax/coroutines,
+  lib-threads/prodcons2, misc/sieve and runtime-errors/stackoverflow pass. Left: parallel/test_issue_11094 (100,000 nested handlers, each
+  with a suspended fiber, a Java thread; about 5 OCaml calls a level, as the light level has no tail calls, so it meets DEPTH_LIMIT's
+  200,000; let further, it passed 6 GB at 200 s and was stopped) and parallel/mctest (past its depth now: three of its four workers print
+  `done` in about 7 minutes, the fourth is not resumed within 900 s, 291 s of CPU: a stall, not diagnosed).
+- **Values kept by interpreted frames** (o2j's `scoped`, `tail-clears`). An interpreted frame's slot keeps what it last held until the
+  frame returns, where ocamlopt's frame no longer holds a dead value. o2j now clears a let's variables at the end of a let that is no tail
+  form, a non-tail call's and a non-tail primitive's argument temporaries after them, and, before a tail call, the function's parameters
+  the call does not name (as ocamlopt's tail call leaves the caller's frame; not in a function whose body is a self tail call's loop, a
+  letrec group's or one of more than six parameters; the parameters are then mutable locals). lib-sys/opaque (Simplif inlines `go`, its `r`
+  a let of `lifetimes`' frame) and regression/pr5233 (the `Some` argument of `Weak.set` in a temporary) pass with it.
+- **Gc.stat's heap at the light level** (`ExtGc/heapStart`, `gcStat`): the growth of the heap in use since the program started (Main/run),
+  at least 256 K words, its top the largest seen; stage 0's own heap (the interpreter, the library's classes) is left out. pr5233's fill of
+  heap_words/3 conses no longer grows past 3 GB.
+- **Ephemerons' second phase** (`ExtGc/ephKeyed`, oi's of ocaml-eval): a collection with each live ephemeron's data held by its block keys
+  alone (a box in a list in a slot past the end of each key's fields; the ephemeron's data slot a weak reference to the box), then the data
+  back, gone with a key that died, and each living key's fields its own array again (the same array while anything else holds it). It runs
+  once the first phase drops nothing (a chain of keys that are other ephemerons' data dies a link a round without it). Each round's scans
+  are methods of their own (a frame's slot must not hold the last ephemeron through the collection that follows). A weak array's get no
+  longer scans its keys (`ephClean` returns at once without data, oi's since ocaml-eval). `Gc.finalise_last`'s record keeps no fields
+  (only `Gc.finalise`'s needs them; they kept test6's key alive through its data's finaliser). weak-ephe-final/ephetest: tests 1-6 pass,
+  test7 (an ephemeron reachable only from its own data) still FAIL; ephetest2 passes in 181 s of CPU alone and weaktest in 719 s (it did
+  not finish in 900 s), each under a cap of the user's 1.5x rule (test/ocaml/aot-cpu-caps.tsv: 280 and 1080).
+- **A stub's major cycle** (oicapi's `MajorCycle`, the wire's 'M'; CApi's 77, `ExtGc/cMajorCycle`): a major cycle the C stubs' allocations
+  end in the light level's server (oi's CAlloc, the simulated major heap) is told to the runtime, whose collection fires its own
+  finalisers; their functions run at the next allocation (`Rt/block` under `ExtSignal/allocPoll`, `ExtGc/finAllocDue`), not in the C:
+  c-api/alloc_async passes. A bigarray the C allocated with memory the collector manages is sent with 0x200 in its kind (oicapi's
+  `Managed`, `managedNew`), and the runtime samples that memory from the source Custom (`ExtGc/customMem`); statmemprof/bigarray's sections
+  then count, but its dealloc callbacks come a collection late and it ends on its assertion (status 2, still `:c-runtime-decided`).
+- **ocamlmklib's libraries at the light level** (header.awk's dynlink mode at aot <= 1; bin/oi's `o2j_dump` passes the libraries to
+  `oi_dynlink`, writes `D/dynruns.txt`, translates each further program beside the main one, `D/dynrun/REF/out`; `o2j_env_runs` runs them
+  after it, the first that differs from REF.reference the row's): lib-dynlink-bytecode/main passes (main.exe loads plug1.cma and plug2.cma
+  with their C stubs, marshals the plugins' closures; static.exe and custom.exe against their references).
+- **Not moved**: lib-unix/common/test_unix_cmdline and lib-unix/common/cloexec call `Unix.execv`, which OC208 (b) (the user, 2026-11-09)
+  left to the compiled level (the light level keeps `:unix-unported`); unboxed-primitive-args/test's generated program needs o2j to
+  translate 600 KB of Lambda in bounded memory (7.6 GB at the light level); the suite's statmemprof/exception_comballoc and
+  stop_start_in_callback still miss deallocations at line 111 and 118.
+- **Records**: one `bin/oi check --aot --only-list --record` run of the lane's rows and 158 recorded passes of the same modules (gc,
+  effects, threads, domains, the C API, Dynlink, the CPU-heavy misc programs; their controls), and `suite check --aot` over the suite's
+  two and 8 recorded passes: 11 rows pass (callback/test3, effect-syntax/coroutines, lib-threads/prodcons2, misc/sieve,
+  runtime-errors/stackoverflow, lib-sys/opaque, regression/pr5233, weak-ephe-final/ephetest2 and weaktest, c-api/alloc_async,
+  lib-dynlink-bytecode/main), their entries out of aot-known.edn and the classes' `:programs`. regression/pr3612 timed out (its million
+  deserializations through the server): 203 s of CPU alone with mac/next's runtime and translator as with these (an A/B), so its row is
+  left as recorded. OCaml AOT 547 / 11 / 51 -> 558 / 11 / 40 (67 n/a).

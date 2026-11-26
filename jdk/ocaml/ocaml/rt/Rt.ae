@@ -79,6 +79,66 @@
       (set! depth (unchecked-dec-int depth))
       (throw (Exn. Stack_overflow))))
   (method ^:public ^:static leave ^void [] (set! depth (unchecked-dec-int depth)))
+  ;; ---- the light level's interpreted depth (oc-tail, 2026-11-26): the Java forms' interpreter throws StackOverflowError past
+  ;; 10,000 nested interpreted calls on one thread (arbace.lang.Compiler's CF$Rt/MAX_DEPTH, J2G-SPEC §10.5: Go's stack overflow is
+  ;; fatal), far below DEPTH_LIMIT. A call entered more than HOP OCaml calls deeper than its thread's base (hopBase) goes on on
+  ;; another Java thread, a worker idle at the interpreter's depth 0 on a Go stack of its own: the caller waits for it, the worker
+  ;; runs the call as the same OCaml thread (its TState, its Memprof state; the runtime's lock stays held, as the caller holds it
+  ;; while it waits) and hands its result or exception back to the caller, then waits for another call (hopIdle, under the lock).
+  ;; One OCaml call is one interpreted frame (the closure's method, o2j's in-place entry), a few through Rt/ap or a C callback: HOP
+  ;; 1,000 keeps a thread's frames well below 10,000. Rt/depth goes on across the threads, so Stack_overflow comes at DEPTH_LIMIT
+  ;; as before. The test is the entry's slow path's, once in 128 turns; past HOP every slow path is taken (tickSlow), so the next
+  ;; entry moves (the call the first test met may be a leaf, filter's predicate, while the recursion goes on on the caller's
+  ;; thread). HOP 0 is off: the compiled level, whose depth is Go's stack. LIGHT: the light level's runner (test/ocaml/o2j/run.ae)
+  ;; sets the property ocaml.rt.light; O2J_HOP_DEPTH overrides HOP
+  (field ^:public ^:static ^:final ^boolean LIGHT (some? (System/getProperty "ocaml.rt.light")))
+  (field ^:public ^:static ^int hopBase 0)
+  (field ^:public ^:static ^:final ^int HOP (Rt/hopDepth))
+  (field ^:static ^:final ^java.util.ArrayDeque hopIdle (java.util.ArrayDeque.))
+  (method ^:static hopDepth ^int []
+    (let [e (System/getenv "O2J_HOP_DEPTH")]
+      (cond (some? e) (Integer/parseInt e)
+            LIGHT (int 1000)
+            :else (int 0))))
+  ;; whether a call entered now goes on on another thread
+  (method ^:static hopDue ^boolean [] (if (> HOP 0) (> (unchecked-subtract-int depth hopBase) HOP) false))
+  ;; an entry's slow path (enterSlow), then whether the call goes on on another thread
+  (method ^:public ^:static enterHop ^boolean []
+    (Rt/enterSlow)
+    (Rt/hopDue))
+  ;; an idle worker's queue, or a new worker's: each call it takes [c args TState Memprof-state reply] is run, its outcome
+  ;; [result exception] put on reply
+  (method ^:static hopWorker ^java.util.concurrent.SynchronousQueue []
+    (let [w (.pollLast hopIdle)]
+      (if (some? w)
+        (cast java.util.concurrent.SynchronousQueue w)
+        (let [q (java.util.concurrent.SynchronousQueue.)
+              t (Thread. (lambda Runnable []
+                           (loop []
+                             (let [m (cast Object/1 (.take q)) out (new Object/1 2)]
+                               (.set Effects/CUR (aget m 2))
+                               (ExtGc/mpAdopt (aget m 3))
+                               (try (aset out 0 (.exact (cast Closure (aget m 0)) (cast Object/1 (aget m 1))))
+                                    (catch Throwable e (aset out 1 e)))
+                               (.put (cast java.util.concurrent.SynchronousQueue (aget m 4)) out)
+                               (recur)))))]
+          (.setDaemon t true)
+          (.start t)
+          q))))
+  ;; closure c's call with args again on a worker (its entry's depth given back: the call counts itself there)
+  (method ^:public ^:static hop [^Closure c ^Object/1 args]
+    (set! depth (unchecked-dec-int depth))
+    (let [base hopBase w (Rt/hopWorker) reply (java.util.concurrent.SynchronousQueue.)]
+      (set! hopBase depth)
+      (let [out (try (.put w (new Object/1 [c args (Effects/st) (ExtGc/mpThread) reply]))
+                     (cast Object/1 (.take reply))
+                     ;; the caller still past HOP: its next entry tested too (the worker's last slow path cleared the turns)
+                     (finally (set! hopBase base)
+                              (.addLast hopIdle w)
+                              (when (Rt/hopDue) (set! ticks 129))))
+            e (aget out 1)]
+        (when (some? e) (throw (cast Throwable e)))
+        (aget out 0))))
   ;; a call's or a loop's turn (oi's tick): while other domains run, every 128 turns the thread lets them run (Gil/yield), as
   ;; OCaml's domains run in parallel (a domain spinning on a reference another one sets, parallel/pingpong)
   (field ^:public ^:static ^int ticks 0)
@@ -96,9 +156,11 @@
     (when (not (== ExtGc/memprofPending 0)) (ExtGc/memprofRun))
     (when (or (> Effects/domainsRunning 0) ExtSignal/watching) (Gil/yield))
     ;; every turn the slow one again while an action is still pending (a masked signal, a callback kept) or the depth is near its
-    ;; limit (an entry's 128 unchecked turns)
+    ;; limit (an entry's 128 unchecked turns), or (oc-tail) a call is due to go on on a fresh thread: a loop's turn that took the
+    ;; slow path leaves it to the next entry (enterHop), which a recursion whose turns fall in step with the 128 would never reach
     (set! ticks (if (or (not (== ExtSignal/pending 0)) (not (== ExtGc/memprofPending 0))
-                        (> depth (unchecked-subtract-int DEPTH_LIMIT 256)))
+                        (> depth (unchecked-subtract-int DEPTH_LIMIT 256))
+                        (Rt/hopDue))
                   129 0)))
   ;; the result of a letrec group function's body (TailCall, OC84 (c)): the tail calls it returns made in turn, in this frame
   (method ^:public ^:static bounce [r]
@@ -283,8 +345,11 @@
   ;; ---- blocks
 
   (method ^:public ^:static block [^int tag ^Object/1 fields]
-    ;; an allocation is a poll point once a stub's signal waits for one (ExtSignal/allocPoll, CApi's call3)
-    (when (and ExtSignal/allocPoll (not (== ExtSignal/pending 0))) (ExtSignal/process))
+    ;; an allocation is a poll point once a stub's signal waits for one (ExtSignal/allocPoll, CApi's call3), or (oc-tail) the finalisers
+    ;; a stub's major cycle fired (ExtGc/cMajorCycle)
+    (when ExtSignal/allocPoll
+      (when (not (== ExtSignal/pending 0)) (ExtSignal/process))
+      (when ExtGc/finAllocDue (ExtGc/finAllocRun)))
     ;; Rt/wordsV in place (queue 414), counted once the value exists (queue 438: memprof tracks it)
     (let [w (alength fields)
           v (if (== tag 254)
