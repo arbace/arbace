@@ -532,7 +532,13 @@
   its modifiers before its type: parameters, the receiver, locals, for-each, lambdas' and
   patterns' bindings."
   [dm t]
-  (if (and (seq? t) (= '.. (first t)))
+  (cond
+    ;; an array of such a type (@A Outer.@B Inner @C [] foo(): t04723's TestClassNested): its element, the array's own
+    ;; annotations kept
+    (and (seq? t) (= 'array (first t)) (= 2 (count t)))
+    (let [e (second t) e' (strip-decl-annotations dm e)]
+      (if (identical? e e') t (with-meta (list 'array e') (meta t))))
+    (and (seq? t) (= '.. (first t)))
     (let [[_ outer inner] t
           outer' (strip-decl-annotations dm outer)
           items (annotation-items (meta outer'))
@@ -540,7 +546,7 @@
       (if (and (seq items) (every? own items) (instance? arbace.lang.IObj outer'))
         (list '.. (with-meta outer' (reduce dissoc (meta outer') (map first items))) inner)
         (if (identical? outer outer') t (list '.. outer' inner))))
-    t))
+    :else t))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; Types (SPEC §4.3)
@@ -995,9 +1001,10 @@
   (assoc-in env [:locals (name s)] (merge {:tag (tag-of s)} info)))
 
 (defn- forms-of
-  "The statements of a body form: a do's forms spliced."
+  "The statements of a body form: a do's forms spliced (but a do with a Java line: a static call through an impure
+  qualifier, (do q (C/m ...)), one statement; see st)."
   [x]
-  (if (is? x 'do) (mapcat forms-of (rest x)) [x]))
+  (if (and (is? x 'do) (not (:java/line (meta x)))) (mapcat forms-of (rest x)) [x]))
 
 ;;; ------------------------------------------------------------------------------------------
 ;;; The types of expressions (erased, as Arbace types them; nil when the printer cannot tell)
@@ -1259,7 +1266,12 @@
                                                            (assignable-jtype? (nth ats j) p))))
                                                (range (count ats))))
                                cands))]
-     (and (seq ps) long-phase? (some long-accepting ps)))))
+     (and (seq ps)
+          (or (and long-phase? (some long-accepting ps))
+              ;; a reference parameter (Object, a type variable's erasure, Number, Long): a bare literal there is a
+              ;; long boxed to Long whatever the phase (the converter boxes an int literal for one explicitly,
+              ;; Integer/valueOf): ra.lazySet(0, 6L) of an AtomicReferenceArray<Long>, t05715
+              (every? #(and (long-accepting %) (not (prim-names %))) ps))))))
 
 (defn- conditional-form? [x]
   (and (seq? x) (#{"if" "if-not" "when" "when-not" "cond" "if-instance" "when-instance" "switch"} (str (head x)))))
@@ -1436,6 +1448,13 @@
                                                     a)]
                                             (cond
                                               (and (integer? a) (long-literal-arg? cands i ats)) (int-literal a true)
+                                              ;; a pinned call's integer literal for its pin's long parameter: 1L, the
+                                              ;; overload the pin records (sb.insert(0, 1L) pinned ^[int long]; written 1,
+                                              ;; javac takes insert(int, int): t04669, t04675); a long parameter's widened
+                                              ;; int constant is the same constant to javac
+                                              (and (integer? a) (:pinned (first cands)) (= 1 (count cands))
+                                                   (= "long" (param-at (first cands) i)))
+                                              (int-literal a true)
                                               ;; a pinned call's reference argument of another type than its
                                               ;; parameter (v((Object) "s") pinned ^[Object]): the source's
                                               ;; widening cast, which chose the overload and the converter
@@ -2048,6 +2067,12 @@
              (and (symbol? f) (nil? (namespace f)) (not (str/includes? (str f) "."))
                   (nil? (class-binary (:scope env) f)))))))
 
+(def ^:dynamic *postfix-place*
+  "True while a postfix increment's place is printed (P++ as a value): a qualified super's field is not written out
+  there, as compound's written-out f = f + x would be (Java has no written-out x++ as a value: QualBoxedPostOp's
+  Outer.super.i++, t06036, t06038)."
+  false)
+
 (defn compound
   "For (set! P V) or (aset A I V): [place-text op rhs-form] when V is P op rhs (Java's compound
   assignment, its narrowing written out by the converter), [place-text \"++\"/\"--\" nil] for an
@@ -2066,7 +2091,7 @@
                      (let [r (second place)]
                        (and (symbol? r) (= "super" (name r)) (or (namespace r) (:qualified (meta r))))))]
     (cond
-      qsuper? nil
+      (and qsuper? (not *postfix-place*)) nil
       (and (seq? inner) (incs h) (= 2 (count inner)) (read-of? env (second inner) place)
            (or (not narrow?) (#{"unchecked-inc-int" "unchecked-dec-int"} h)))
       [(incs h) nil]
@@ -2123,11 +2148,20 @@
   "True while a statement (set! P (inc P)) marked ^:prefix is printed: ++P, as the source wrote it (queue 556c)."
   false)
 
+(def ^:dynamic *uncompounded*
+  "True while a (set! P V) or (aset A I V) without the converter's ^:compound is printed: on a boxed place it is the
+  source's written-out P = P op rhs, which the converter marks ^:compound when the source wrote P op= rhs (queue 556c);
+  printed as P op= rhs it would read back marked (the print level's forms, train 4)."
+  false)
+
 (defn- assign-text
   "Java's assignment of `v` to place text `pt` for place form `place` (a value)."
   [env place pt v value?]
   (if-let [[op rhs opn] (let [c (when-not (and (impure-index-place? place) (not *temps-expanded*))
-                                  (compound env place v))]
+                                  (compound env place v))
+                              c (when-not (and c *uncompounded* (not (#{"++" "--"} (first c)))
+                                               (box-prims (type-of env place)))
+                                  c)]
                           ;; a narrowed compound assignment on a box (Byte b; b += i) is not
                           ;; Java's ((Byte) (int) cannot be cast): b = (byte) (b + i)
                           (when-not (and c (not (#{"++" "--"} (first c))) (box-prims (type-of env place))
@@ -2238,7 +2272,7 @@
 
 (defn- postfix-text [env place setf]
   (let [v (if (is? setf 'set!) (nth setf 2) (nth setf 3))
-        [op _] (compound env place v)]
+        [op _] (binding [*postfix-place* true] (compound env place v))]
     (if (#{"++" "--"} op)
       ;; the assignment's place: the old value's read may be cast (a field of a type variable
       ;; read as its instantiation, (cast Integer (.-i Outer/super)): QualBoxedPostOp2), which
@@ -2580,9 +2614,9 @@
                 idx (butlast more)
                 v (last more)
                 place (apply list 'aget a idx)]
-            (assign-text env place (place-text env place) v true))
+            (binding [*uncompounded* (not (:compound (meta x)))] (assign-text env place (place-text env place) v true)))
           (= hn "set!")
-          (let [[p v] args] (assign-text env p (place-text env p) v true))
+          (let [[p v] args] (binding [*uncompounded* (not (:compound (meta x)))] (assign-text env p (place-text env p) v true)))
           (= hn "new")
           (let [[t & more] args
                 t (str-array-sym t)]
@@ -3494,7 +3528,14 @@
     (let [h (head x)
           hn (when (and h (nil? (namespace h))) (name h))]
       (case hn
-        "do" (body-lines env (rest x) ctx)
+        "do" (if (and (:java/line (meta x)) (expr-form? env x))
+               ;; (do q (C/m ...)) with a Java line (repr/java read --line-numbers): a static call through an impure
+               ;; qualifier, q.m(), which the converter's simplification leaves unspliced for its line (a block's
+               ;; statements are spliced, a branch's do has no line); printed as q.m() it reads back to itself, as two
+               ;; statements it read back spliced (the print level's forms, train 4: t04473's
+               ;; Thread.currentThread().yield())
+               (value-stmt env x ctx)
+               (body-lines env (rest x) ctx))
         "let" (let-lines env x ctx)
         "letclass" (letclass-lines env x ctx)
         "if" (let [[_ c a b] x]
@@ -4056,11 +4097,12 @@
     (let [[op rhs] (marked-compound env (second x) (nth x 2))]
       (str (place-text env (second x)) " " op "= " (ex-text env rhs P-ASSIGN)))
     ;; ^:prefix: the source's ++x as a statement on a boxed place, whose code javac makes without x++'s old value (queue 556c)
-    (is? x 'set!) (second (binding [*prefix-stmt* (boolean (:prefix (meta x)))]
+    (is? x 'set!) (second (binding [*prefix-stmt* (boolean (:prefix (meta x))) *uncompounded* (not (:compound (meta x)))]
                             (assign-text env (second x) (place-text env (second x)) (nth x 2) false)))
     (is? x 'aset) (let [[_ a & more] x
                         place (apply list 'aget a (butlast more))]
-                    (second (assign-text env place (place-text env place) (last more) false)))
+                    (second (binding [*uncompounded* (not (:compound (meta x)))]
+                              (assign-text env place (place-text env place) (last more) false))))
     (and (is? x 'let) (= :assign (first (expand-temps env x))))
     (binding [*temps-expanded* true] (stmt-expr-text env (second (expand-temps env x))))
     :else (ex-text env (strip-tag x) P-ASSIGN)))
