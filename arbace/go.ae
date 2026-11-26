@@ -53,19 +53,33 @@
   [^String p]
   (symbol (arbace.core/str "go." (apply arbace.core/str (interpose "." (map #(.replaceAll ^String % "[.-]" "_") (.split p "/")))))))
 
+;; The digest's index ({package [start end]}) is kept once read; its text (the whole digest as a string, about 18 MB, with
+;; goi's inflated 9 MB beside it) only until release-digest! (py-speed-1126: pyi's start releases it, so a process keeps none
+;; of it; a namespace of the table made later reads the text again for its own part, and lets it go)
 (def ^:private digest-index
   (delay
     (when-let [^String s (GoInterp/digest)]
       (let [nl (.indexOf s "\n")]
-        {:index (read-string (subs s 0 nl)) :text s :start (inc nl)}))))
+        {:index (read-string (subs s 0 nl)) :start (inc nl) :text (volatile! s)}))))
+
+(def ^:private digest-kept (volatile! true))
+
+(defn release-digest!
+  "Lets the digest's text go (py-speed-1126): later reads take it from goi again and do not keep it."
+  []
+  (vreset! digest-kept false)
+  (when (realized? digest-index)
+    (some-> @digest-index :text (vreset! nil)))
+  nil)
 
 (defn digest-forms
   "The forms of the digest of listed package path p (§6.5): its go/package, go/file and
   declaration forms, or nil."
   [p]
-  (when-let [{:keys [index ^String text start]} @digest-index]
+  (when-let [{:keys [index text start]} @digest-index]
     (when-let [[a b] (get index p)]
-      (let [r (PushbackReader. (StringReader. (subs text (+ start a) (+ start b))))]
+      (let [^String t (or @text (let [t (GoInterp/digest)] (when @digest-kept (vreset! text t)) t))
+            r (PushbackReader. (StringReader. (subs t (+ start a) (+ start b))))]
         (binding [*read-eval* false]
           (loop [acc []]
             (let [f (read {:eof ::eof} r)]

@@ -216,6 +216,52 @@
         ((requiring-resolve 'arbace.repr.python.native/read-dump)
          (universal-newlines (java.nio.file.Files/readAllBytes (.toPath f))) (.getName f) true true)))))
 
+(defn- idle-free!
+  "py-speed-1126: a daemon thread that gives the heap's freed pages back to the system once the process idles (a pool's
+  waiting workers, a manager): every 3 s Go's heap statistics; when less than 1 MiB was allocated since the last look and the
+  heap's resident pages (HeapSys less HeapReleased) grew 16 MiB past what the last release left, runtime/debug.FreeOSMemory
+  (a collection, then the free pages returned). Go's scavenger alone keeps them up to the collector's goal, which jrt's and the
+  C worlds' untouched reservations inflate: an idle child held about 100 MB of freed heap. A busy process never idles 3 s, a
+  short one ends first; PYI_IDLE_FREE=0 none"
+  []
+  (when-not (= "0" (System/getenv "PYI_IDLE_FREE"))
+    (require 'go.runtime 'go.runtime.debug 'arbace.go)
+    (let [trace (System/getenv "PYI_IDLE_FREE_TRACE")
+          read (resolve 'go.runtime/ReadMemStats) mst (resolve 'go.runtime/MemStats) gnew (resolve 'arbace.go/new)
+          free (resolve 'go.runtime.debug/FreeOSMemory)]
+      (when (and read mst gnew free)
+        (let [m (gnew @mst)
+              resident #(- (long (.-HeapSys m)) (long (.-HeapReleased m)))
+              mib (* 1024 1024)]
+          (doto (Thread.
+                  ^Runnable
+                  (fn []
+                    (try
+                      (loop [prev -1 floor 0]
+                        (Thread/sleep 3000)
+                        (read m)
+                        (let [alloc (long (.-TotalAlloc m))]
+                          (if (and (>= prev 0) (< (- alloc prev) mib) (> (resident) (+ floor (* 16 mib))))
+                            (let [r0 (resident)]
+                              (free) (read m)
+                              (when trace (.println System/err (arbace.core/str "pyi: idle, the heap's resident pages "
+                                                                              (quot r0 mib) " MiB -> " (quot (resident) mib) " MiB")))
+                              (recur (long (.-TotalAlloc m)) (resident)))
+                            (recur alloc floor))))
+                      (catch Throwable _ nil)))
+                  "pyi-idle-free")
+            (.setDaemon true)
+            (.start)))))))
+
+(defn- after-start!
+  "After the start (py-speed-1126): goi's digest let go (arbace.go/release-digest!, about 18 MB a process: its text as a
+  string; a later table namespace reads it again for its part) and the idle releaser started (idle-free!); PYI_START_FREE=0
+  neither"
+  []
+  (when-not (= "0" (System/getenv "PYI_START_FREE"))
+    (when-let [r (resolve 'arbace.go/release-digest!)] (r))
+    (idle-free!)))
+
 (defn- with-start-gc
   "F's value, called with Go's collector at GOGC 200 at least, the environment's setting restored after (queue 298): the
   start (the main module's compile, goi's load of go.arbace.py) allocates its live data once, and under the runs'
@@ -223,10 +269,14 @@
   [f]
   (require 'go.runtime.debug)
   (let [gc% (resolve 'go.runtime.debug/SetGCPercent)
-        prev (gc% 200)]
-    (if (or (neg? prev) (>= prev 200))
-      (do (gc% prev) (f))
-      (try (f) (finally (gc% prev))))))
+        ;; py-speed-1126: PYI_START_GOGC another start setting (a child's, tools/pyi/python3: its start's peak)
+        start (or (some-> (System/getenv "PYI_START_GOGC") parse-long) 200)
+        prev (gc% start)
+        r (if (or (neg? prev) (>= prev start))
+            (do (gc% prev) (f))
+            (try (f) (finally (gc% prev))))]
+    (after-start!)
+    r))
 
 (defn- start-run
   "The run's start (bin/pyi run): the main module's IR text, the runtime loaded and configured (install!)"

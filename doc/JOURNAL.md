@@ -24724,3 +24724,23 @@ ARBACE_MEMPROFILE, single tests and small modules outside the big lock under a 2
   already fail tamago/amd64 on the base), so the listing's whole check is train 7's `bin/goi table`; goi's checker takes the
   three in linux/amd64 at every interpreted import today. Alternative not taken: a table-check under the big lock (hours behind
   the trains' builds and records).
+
+## 2026-11-26: py-speed-1126, round 2: a pyi child's footprint (DECISION py-speed-1 (a), the user)
+
+The user decided py-speed-1 (a): the two test_large_pool rows go into a deferred class for pyi's per-process footprint, owner PY8,
+and are then to pass (Pool(200) fitting the host). Profiled first (doc/python/PYTHON-SURVEY.md, "py-speed-1126, round 2"): a bare
+child holds 297 MB of its own (Go's heap: about 140 MB live beside jrt's untouched 64 MiB ballast, the rest freed heap Go's
+scavenger kept), the executable's 431 MB of file pages shared; a Pool(2) worker about 540 MB, half of it the lazy modules round 1
+compiles; without them 285 MB, of which goi's digest 27 MB and the start's and the imports' freed heap about 50 MB.
+- Built: arbace.python's idle releaser (a daemon thread: FreeOSMemory when the process idled 3 s and its heap grew 16 MiB past the
+  last release; PYI_IDLE_FREE, PYI_IDLE_FREE_TRACE), arbace.go's release-digest! after the start (resolved by name: stage 0 and the
+  executables before train 7 do nothing), a child's start at GOGC 50 (tools/pyi/python3, PYI_START_GOGC).
+- Measured on train 6's executable: a worker-like child 285 -> 251 MB of its own, a Pool(2)'s workers 545/549 -> 483/487 MB with
+  the lazy modules still interpreted there, the start's peak 60 MB lower and no slower; expected on train 7 about 233 MB a worker,
+  Pool(200) about 47 GB.
+- Alternatives measured and not taken: no ballast for children (0.3 s more CPU a start, the releaser making it moot); GOGC 10 for
+  children (16 MB less, 25% more CPU); a FreeOSMemory at the start's end (nothing for a worker, a collection for every short child);
+  a GOMEMLIMIT for children (a child that imports test._test_multiprocessing would collect without end).
+- Proposals for their owners, not built (C's crop at 100%): crt's 64 MiB read-only reservation per world, the ctypestest world's
+  67 MB text table on import ctypes, goi's 9 MB of inflated digest bytes; and for the user: test_large_pool's rows need a per-test
+  memory cap of about 50 GB and a run alone under the big lock (its modules' cap is 16384 MB), not applied.

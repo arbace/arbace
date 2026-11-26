@@ -9143,3 +9143,56 @@ set sampled, killed past 2.6 GiB outside the big lock), CPU profiles by `ARBACE_
   footprint of tens of MB a process is the runtime's long term, not a lane's), owner PY8; (b) an n/a class "a pool of 200 whole
   pyi processes past the host's memory", by the user's decision; (c) raise the module's cap, not possible on this host.
   Not applied: a row whose peak passes 8 GiB is the user's.
+
+### py-speed-1126, round 2: a pyi child's footprint (the user's decision py-speed-1 (a), 2026-11-26)
+
+The two test_large_pool rows go into a deferred class for pyi's per-process footprint (owner PY8), and then are to pass:
+`multiprocessing.Pool(200)` must fit the host. Profiled first (ARBACE_MEMPROFILE, /proc/PID/smaps, GODEBUG=gctrace=1; train 5's
+and train 6's executables, a tree at train 6's commit; `.tmp/w/bare.sh`, `pool.sh`, `ab.sh` in that tree):
+- **A bare child** (`-c pass`, GOGC 25): 731 MB resident, 297 MB of it its own (anonymous, all of it Go's heap arena), 431 MB the
+  executable's file pages (208 MB of code, 209 MB of read-only data: tables and embedded forms), shared, so about 2 MB each of
+  200. Go's heap: about 140 MB live (Arbace's runtime init 37-40 MB, jrt's strings and class tables about 55 MB, goi's digest
+  27 MB) beside jrt's 64 MiB ballast, which is never touched.
+- **A Pool(2) worker**: about 540 MB of its own (the forkserver and the resource tracker about 270 MB each, the parent 705 MB).
+  Half of it is shutil's three lazy modules (round 1): with `_bz2`, `_lzma` and `_zstd` kept out, a worker-like child
+  (multiprocessing.pool, forkserver, queues, pickle, shutil) holds 275-290 MB. Its heap in use 254 MB: one C world's 64 MiB
+  read-only reservation (`crt.(*Mem).Rodata`, `make(0, 64<<20)`: the world `_pickle` lives in), never touched; jrt's strings
+  52 MB, 18 MB of them goi's digest as a string (with its 9 MB of inflated bytes, held by arbace.go's digest index for the whole
+  run); jrt's tables 16 MB; the world's data 10 MB; Python's code objects 8 MB. The rest of its resident pages is heap the
+  collector freed and Go's scavenger kept: it keeps up to the collector's goal, which the untouched reservations raise; under a
+  tight GOMEMLIMIT the same child holds about 233 MB, its live data.
+
+Built:
+- **The idle releaser** (arbace.python's idle-free!, started after the start): a daemon thread reads Go's heap statistics every 3 s,
+  and when less than 1 MiB was allocated since the last look and the heap's resident pages grew 16 MiB past the last release,
+  runtime/debug.FreeOSMemory gives the freed pages back. A busy process never idles 3 s and a short one ends first, so only a
+  waiting process pays one collection. PYI_IDLE_FREE=0 turns it off, PYI_IDLE_FREE_TRACE=1 prints each release. This takes the
+  place of a FreeOSMemory at the end of the start, which saved 40 MB on a bare child but nothing on a worker, whose imports come
+  after the start, and which every short child would have paid.
+- **goi's digest let go after the start** (arbace.go's release-digest!: the index kept, the text dropped; a table namespace made
+  later reads the text again for its own part and does not keep it). Checked by evaluating arbace/go.ae on train 5's executable:
+  the forms of fmt (35) and strings (97) are the same after the release, a later go.unicode.utf8 has its docs. On the
+  executables before train 7 arbace.go is compiled and has no release-digest!, which arbace.python resolves by name (nil: nothing
+  done), so stage 0 and older executables run as before.
+- **A child's start at GOGC 50, not 200** (tools/pyi/python3: PYI_START_GOGC, with-start-gc; PYI_CHILD_START_GOGC another): the
+  start's peak is about 60 MB lower (train 6: 584-591 MB against 521-523 MB maximum resident) and the start is no slower (1.38-1.66 s
+  and 2.40-2.58 s of CPU at 200; 1.33-1.41 s and 2.43-2.48 s at 50). Matters when 200 workers start at once.
+- **Not done: no ballast for children.** Without jrt's ballast (ARBACE_MIN_HEAP_MB=0) a child's start took 0.3 s more CPU and
+  0.1-0.2 s more wall (four more collections), and the releaser returns the freed pages whatever the goal, so the ballast stays.
+
+Measured on train 6's executable (d238b3a23ca9), its runtime the tree's (compiled): a worker-like child 285 MB of its own without
+the releaser, 251 MB with it; a real Pool(2)'s workers (the lazy modules still interpreted there) 545 and 549 MB before, 483 and 487
+MB after; the Pool(2)'s five processes' proportional sets 2,479 MB before, 2,217 MB after. Expected for train 7 (the three modules
+compiled, the digest released, both measurable there only): a worker about 233 MB of its own, so Pool(200) about 47 GB with its
+parent, fork server and tracker (about 1.1 GB).
+
+Proposals, not built (C's crop and its records are at 100%; py-accel's and ci's code):
+- crt's read-only data reserved 64 MiB at its first use (`crt.(*Mem).Rodata`: `make([]byte, 0, 64<<20)`), per world opened: never
+  touched past what the world uses, but counted in the collector's goal (16 MB of slack at GOGC 25) and in GOMEMLIMIT's
+  accounting; growing it as the world asks would take that off every process that imports pickle.
+- the ctypestest world's text table on `import ctypes` (`clib/ctypestest/aot.setup` -> `ci.(*Loader).TopText`): 67 MB a process
+  (test._test_multiprocessing imports ctypes, so every child of the multiprocessing tests holds it).
+- goi's inflated digest bytes (go/arbace/goi's `digestText`, 9 MB, kept by a sync.Once for the process's life).
+- The runner's cap: test_large_pool's 200 workers need about 48 GB where its modules' cap is 16384 MB (lib-test-limits.tsv) and the
+  night runs two modules at once; to pass, its two rows need a per-test memory cap of about 50 GB and a run alone under the big
+  lock: the user's to decide, not applied.
