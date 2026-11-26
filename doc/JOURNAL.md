@@ -26872,3 +26872,37 @@ j2g-chunks-1120 (`282cdf320`); mac/next merged again three times (`0b3174413`, `
   (provenance-check clean).
 - Checks: `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` and `bin/markers-check`: 0
   problems.
+
+## 2026-11-26 — py-frame-1126 (2): the lib-test runner never waits on a dead driver's orphans
+
+The coordinator's request, after py-frame's AOT measurement (the entry above). That run waited 2.5 h in
+test_concurrent_futures.test_deadlock: the compiled driver segfaulted in the C _pickle at
+ProcessPoolForkserverExecutorDeadlockTest.test_crash_big_data, and train 6's record run hung for 3 h the same way after a
+test_process_pool child crashed in the C _pickle. The C crashes are the C world's (py-accel's). The runner's part is in
+tools/pyi/libtest_all.py's run_module: its watch thread ran `while p.poll() is None`, so it stopped as soon as the driver
+exited, and no timeout fired after that. The reader's `for l in p.stdout` then waited for the pipe's end, which never came
+while an orphan (reparented to init, in another process group or session: a spawn worker, a resource tracker, a forkserver)
+held its write end. A timeout's kill was `os.killpg(driver)` alone, which misses such children too.
+
+- Built: `kill_driver` kills the driver's process group, its session, their descendants (from /proc's stat) and every
+  process holding the output pipe (its inode in /proc/PID/fd). Once the driver is reaped, the group, session and
+  descendants are taken only among processes started before its death (start time against /proc/uptime), so a new session
+  leader that got the recycled pid is spared. Pipe holders are matched by inode alone. Every kill of the watch (test, idle,
+  memory, module) uses it. The watch now lasts until the output ends: once the driver is gone, the holders left are killed
+  `PYI_LIB_TEST_ORPHAN_GRACE` seconds (default 5) after its exit. After a driver run that ended without DONE, what is left of
+  its run is killed. The killed pids are named in DIR/MODULE.err, after the driver's own stderr, so first_cause still reads
+  the driver's cause. The verdicts are as before: the test that was running gets its crash (the driver's first cause) or
+  timeout row, the driver starts again on the module's other tests, and then the next module runs.
+- Repro (`.tmp/orph/fake.py` in the worktree, a fake driver through PYI_LIB_TEST_DRIVER_EXE). Three modules: `crash` (a
+  setsid'd child sleeps 600 s holding stdout, then the driver dies by SIGSEGV), `hang` (the same child, and the driver
+  sleeps past the 8 s test timeout) and `linger` (DONE, then a child of the driver's session holds stdout). Results on
+  CPython and on the runner compiled by pyi's AOT (bin/pyi runner run, this worktree's runtime, train 6's executable as
+  host; 156 s with the runner's compile, peak 4.1 GB, under the small slot):
+  - crash.t1 crash "the driver died, status 139", then crash.t2 ok;
+  - hang.t1 timeout "the test past 8 s", then hang.t2 ok;
+  - linger.t1 and t2 ok;
+  - 26 s for the three, an orphan killed in crash and in linger, no process left. The control (HEAD's runner, the crash
+    module, module timeout 30 s) was still waiting at 60 s, killed by timeout(1), its orphan alive.
+- Alternatives: the reader on a non-blocking pipe with a select timeout (the rows would end but the orphans would live on
+  and keep their memory and their semaphores) and PR_SET_CHILD_SUBREAPER (pyi's os has no prctl; the orphans would still
+  need finding) were left. The pipe-holder scan finds every case, even children that left the session.

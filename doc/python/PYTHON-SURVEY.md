@@ -8857,6 +8857,12 @@ The program `test/python/pyi/q-frame-clear-thread.py` (its oracle outcome record
 a traceback and through sys._current_frames(), then a finished thread's frame. On train 6's executable it prints "cleared"
 twice and dies with the UnboundLocalError, which makes it its own negative control.
 
+The lib-test runner (tools/pyi/libtest_all.py's run_module, the same branch) no longer waits on a dead driver's orphans: a
+kill takes the driver's process group, session, descendants and every holder of its output pipe (`kill_driver`), and once the
+driver is gone the holders are killed after `PYI_LIB_TEST_ORPHAN_GRACE` seconds (default 5) and the rest of its run once its
+output ends. The verdicts are unchanged: the running test's crash or timeout row, then the module's other tests, then the next
+module. Before, a driver dead in the C _pickle held train 6's record run for 3 h and this lane's AOT run for 2.5 h.
+
 ## As built: py-regress-1126, train 5's held regressions at their causes (2026-11-26, the main host, the burst's py-regress lane)
 
 Train 5's eval run held 11 modules for regressions against next's record (the journal's entry of 2026-11-26). Their causes, each

@@ -27,7 +27,11 @@ usage: python3 -I -S -B libtest_all.py VERB ...
       test/python/lib-test-limits.tsv, bin/pyi's) raises a listed module's memory cap and module timeout; each test's
       wall and CPU seconds in DIR/MODULE.times (ID, outcome, wall, CPU; "#start N" lines: a driver start's import); a driver that dies in a test (a Go
       panic, a fatal error) is written "CASE ID crash FIRST-CAUSE"; either way the driver starts again on the module's
-      other tests (its SKIPFILE the tests already reported), until DONE. A run that makes no progress, or the module's
+      other tests (its SKIPFILE the tests already reported), until DONE. Every kill takes the driver's whole run (py-frame-1126:
+      its process group, its session, their descendants and any process holding its output pipe), and a driver gone
+      (dead, or killed) leaves none of them: those still holding its output are killed PYI_LIB_TEST_ORPHAN_GRACE seconds
+      (default 5) after its exit, the rest once its output ends, named in DIR/MODULE.err; the runner never waits on an
+      orphan (a spawn worker, a resource tracker, a forkserver, a setsid'd child). A run that makes no progress, or the module's
       wall past its cap (default 3600), stops: no DONE, the judge's "crash" lines, status 124 for the cap. Modules
       already run in DIR (a .status) are kept: the run resumes. Each run's TMPDIR a short directory under D (default
       DIR/_tmp), removed after its module, each driver run's working directory beside it (TMPDIR + "c"), made afresh
@@ -380,6 +384,111 @@ def tree_rss_mb(pid):
     return kb // 1024
 
 
+# py-frame-1126: the processes of a driver's run, and those that keep its output open. A driver that dies (a crash, or the
+# runner's kill) leaves its children: a spawn worker, a resource tracker, a forkserver, a manager. Orphaned (reparented to
+# init), they may sit in another process group or session and still hold the write end of the driver's stdout, and the
+# runner, reading the pipe to its end, waited on them for hours (train 6's record run, 3 h; py-frame's AOT run, 2.5 h, a
+# Forkserver test's driver dead in the C _pickle). ORPHAN_GRACE: the seconds after the driver's exit before they are killed.
+ORPHAN_GRACE = float(os.environ.get("PYI_LIB_TEST_ORPHAN_GRACE", "5"))
+
+
+def proc_table():
+    """{pid: (ppid, pgid, session, start)} of every process /proc lists, start in clock ticks since boot"""
+    procs = {}
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return procs
+    for n in names:
+        if not n.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % n) as f:
+                s = f.read()
+        except OSError:
+            continue
+        r = s[s.rfind(")") + 2:].split()
+        try:
+            procs[int(n)] = (int(r[1]), int(r[2]), int(r[3]), int(r[19]))
+        except (IndexError, ValueError):
+            continue
+    return procs
+
+
+def uptime_ticks():
+    """now, in the clock ticks since boot /proc/PID/stat's start times count; None where /proc/uptime cannot be read"""
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0]) * CLK_TCK
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def pipe_holders(ino):
+    """the processes, this one aside, with a descriptor on the pipe of inode ino (/proc/PID/fd's "pipe:[INO]")"""
+    out, tag, me = set(), "pipe:[%d]" % ino, os.getpid()
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return out
+    for n in names:
+        if not n.isdigit() or int(n) == me:
+            continue
+        try:
+            fds = os.listdir("/proc/%s/fd" % n)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink("/proc/%s/fd/%s" % (n, fd)) == tag:
+                    out.add(int(n))
+                    break
+            except OSError:
+                continue
+    return out
+
+
+def kill_driver(pid, ino, before=None):
+    """kills a driver's run whole: its process group, its session and every process descended from them (start_new_session
+    made the driver both leaders), and any process still holding its output pipe (ino), a child that left the driver's
+    session or was orphaned among them; returns the pids killed beside the driver. before (clock ticks since boot): the
+    driver is dead and reaped, its pid free again, so only processes started before its death are its run's (a new
+    session leader may have its pid)"""
+    procs = proc_table()
+    if before is None:
+        try:
+            os.killpg(pid, 9)
+        except OSError:
+            pass
+    else:
+        procs = {q: v for q, v in procs.items() if v[3] <= before}
+    mine, grew = {q for q, v in procs.items() if (q == pid and before is None) or v[1] == pid or v[2] == pid}, True
+    while grew:
+        grew = False
+        for q, v in procs.items():
+            if q not in mine and v[0] in mine:
+                mine.add(q)
+                grew = True
+    if ino is not None:
+        mine |= pipe_holders(ino)
+    mine.discard(os.getpid())
+    for q in mine:
+        try:
+            os.kill(q, 9)
+        except OSError:
+            pass
+    return sorted(q for q in mine if q != pid)
+
+
+def driver_lines(stream, state):
+    """the driver's output lines to the pipe's end, then state["eof"] set (the watch's end)"""
+    try:
+        for l in stream:
+            yield l
+    finally:
+        state["eof"] = True
+
+
 def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeout=0.0, mem_max=0, test_timeouts=None):
     skipfile = os.path.join(d, m + ".skip")
     out_lines, err_parts, reported = [], [], set()
@@ -424,14 +533,33 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
             p = subprocess.Popen(cmd, cwd=cwd, env=e, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=ef,
                                  text=True, encoding="utf-8", errors="replace", start_new_session=True)
             state = {"current": None, "deadline": None, "killed": None, "t0": None, "cpu0": None, "samples": [],
-                     "t_start": time.monotonic()}
+                     "t_start": time.monotonic(), "eof": False, "orphans": [], "exit_ticks": None}
             lock = threading.Lock()
+            try:
+                ino = os.fstat(p.stdout.fileno()).st_ino
+            except (OSError, AttributeError, ValueError):
+                ino = None
 
             def watch():
-                tick = 0
-                while p.poll() is None:
+                # py-frame-1126: the watch lasts until the driver's output ends, not until the driver exits: once it is
+                # gone, the processes left holding its output are killed after ORPHAN_GRACE seconds (kill_driver), so the
+                # reading below ends; and every kill takes the driver's whole run, not its process group alone
+                tick, t_exit = 0, None
+                while not state["eof"]:
                     time.sleep(1)
                     tick += 1
+                    if p.poll() is not None:
+                        now = time.monotonic()
+                        if t_exit is None:
+                            t_exit = now
+                            state["exit_ticks"] = uptime_ticks()
+                        elif now - t_exit >= ORPHAN_GRACE:
+                            left = kill_driver(p.pid, ino, state["exit_ticks"] if state["exit_ticks"] is not None else 0)
+                            if left:
+                                with lock:
+                                    state["orphans"] = sorted(set(state["orphans"]) | set(left))
+                            t_exit = now
+                        continue
                     # queue 275: every 5 s the driver's CPU; a test whose processes used less than 5% of one core over
                     # the last idle_timeout seconds waits on something that does not come (a hang): killed then, not
                     # at test_timeout
@@ -458,15 +586,12 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
                             why = "test"
                         if why and not state["killed"]:
                             state["killed"] = why
-                            try:
-                                os.killpg(p.pid, 9)
-                            except OSError:
-                                pass
+                            kill_driver(p.pid, ino)
 
             w = threading.Thread(target=watch, daemon=True)
             w.start()
             progress = False
-            for l in p.stdout:
+            for l in driver_lines(p.stdout, state):
                 l = l.rstrip("\n")
                 row = l.split("\t")
                 with lock:
@@ -494,8 +619,19 @@ def run_module(m, root, d, oracle, test_timeout, module_timeout, tmp, idle_timeo
                 out_lines.append(l)
             rc = p.wait()
             w.join()
+            if not done:
+                # py-frame-1126: a driver that died (a crash, or the runner's kill) leaves no process of its run behind,
+                # holding its output or not
+                t = state["exit_ticks"] if state["exit_ticks"] is not None else uptime_ticks()
+                left = kill_driver(p.pid, None, t if t is not None else 0)
+                if left:
+                    state["orphans"] = sorted(set(state["orphans"]) | set(left))
         err = open(errpath, encoding="utf-8", errors="replace").read()
         err_parts.append(err)
+        if state["orphans"]:
+            # py-frame-1126: said in the module's .err, after the driver's own (first_cause reads the driver's)
+            err_parts.append("lib-test-all: %d processes left holding the driver's output after its exit, killed: %s\n"
+                             % (len(state["orphans"]), " ".join(str(q) for q in state["orphans"])))
         os.unlink(errpath)
         status = str(rc if rc >= 0 else 128 - rc)
         if done or imported_fail:
