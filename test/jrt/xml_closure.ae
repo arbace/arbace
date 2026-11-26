@@ -1,0 +1,127 @@
+(ns jrt.xml-closure
+  "javac's tool world's XML closure (the user's decision JT2-7 (a), 2026-11-26; java-tail3-1126): overlay/jdk/javac/closure.txt's
+  java.xml and java.xml.crypto lines made statically from the JDK build's class files, in place of the classes HotSpot loaded
+  in the XML tests' passing runs (java-design-1123's measured closure, which missed what only an error path or an untaken
+  branch loads: XSLTC's ErrorMsg, Xerces' XSAnnotation).
+
+  The closure is over the classes each class file names (jrt.classfile: its superclass and interfaces, its fields' and
+  methods' descriptors, its code's owners, classes and constants, its handlers' catch types), from the files the world
+  holds already (closure.txt's lines, jdk/sources.txt's and jdk/javac/sources.txt's), within the two modules' classes of
+  the build's exploded image (build/CONF/jdk/modules/java.xml, java.xml.crypto); a class's file is its top-level class's
+  (a nested class names its file). A file the shipped program's or javac's world has is not listed again.
+
+    EXE test/jrt/xml_closure.ae write|check JDK CLOSURE SOURCES JAVAC-SOURCES
+
+  write rewrites CLOSURE's lines of the two modules with the closure (the other lines and the header kept, sorted as
+  closure.txt is); check prints the lines that differ and exits 1 when any does."
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [jrt.classfile :as cf])
+  (:import (java.io File)))
+
+(def modules ["java.xml" "java.xml.crypto"])
+
+(defn- top [^String n] (first (str/split n #"\$")))
+
+(defn- class-files
+  "{internal name File} of the build's exploded module mod's class files."
+  [jdk mod]
+  (let [root (io/file jdk "build/linux-x86_64-server-release/jdk/modules" mod)
+        rp (.toPath root)]
+    (into {} (for [^File f (file-seq root)
+                   :let [n (.getName f)]
+                   :when (and (str/ends-with? n ".class") (not= n "module-info.class"))]
+               [(str/replace (str (.relativize rp (.toPath f))) #"\.class$" "") f]))))
+
+(defn- desc-classes [s]
+  (map second (re-seq #"L([\w/$]+);" (str s))))
+
+(defn- const-classes [c]
+  (case (:tag c)
+    :class [(str/replace (str (:name c)) #"^\[+L|;$" "")]
+    :method-handle (cons (:owner c) (desc-classes (:desc c)))
+    :method-type (desc-classes (:desc c))
+    :dynamic (desc-classes (:desc c))
+    nil))
+
+(defn refs
+  "The classes class file data c names."
+  [c]
+  (distinct
+    (concat [(:super c)] (:interfaces c)
+            (mapcat (comp desc-classes :desc) (:fields c))
+            (for [m (:methods c)
+                  x (concat (desc-classes (:desc m))
+                            (for [a (:annotations m)] (str/replace a #"^L|;$" ""))
+                            (for [e (:elements (:code m))
+                                  y (case (:op e)
+                                      :catch [(:class e)]
+                                      (:new :checkcast :instanceof :anewarray :multianewarray)
+                                      [(str/replace (str (:class e)) #"^\[+L|;$" "")]
+                                      :ldc (const-classes (:const e))
+                                      :invokedynamic (desc-classes (:desc e))
+                                      (when (:owner e) (cons (:owner e) (desc-classes (:desc e)))))]
+                              y))]
+              x))))
+
+(defn- lines [f] (str/split-lines (slurp f :encoding "UTF-8")))
+
+(defn- present
+  "The top-level classes (internal names) of the files the world lists already: closure.txt's (MODULE PATH) and the sources
+  lists' (MODULE KIND PATH)."
+  [closure sources javac-sources]
+  (set (for [f [closure sources javac-sources]
+             l (lines f)
+             :when (and (not (str/blank? l)) (not (str/starts-with? l "#")))
+             :let [p (last (str/split l #"\s+"))]
+             :when (str/ends-with? p ".java")]
+         (str/replace p #"\.java$" ""))))
+
+(defn closure-lines
+  "The two modules' closure.txt lines, MODULE PATH, sorted: the closure's files the shipped and javac's worlds do not list,
+  and closure.txt's own lines of the two modules."
+  [jdk closure sources javac-sources]
+  (let [files (into {} (for [m modules [n f] (class-files jdk m)] [n [m f]]))
+        have (present closure sources javac-sources)
+        own (set (for [l (lines closure)
+                       :let [[m p] (str/split l #"\s+")]
+                       :when (and p (some #{m} modules))]
+                   (str/replace p #"\.java$" "")))
+        by-top (group-by top (keys files))
+        start (filter #(contains? have (top %)) (keys files))
+        seen (java.util.HashSet. ^java.util.Collection (vec start))
+        work (java.util.ArrayDeque. ^java.util.Collection (vec start))]
+    (while (not (.isEmpty work))
+      (let [n (.pop work)]
+        (doseq [r (refs (cf/read-file (second (get files n))))
+                :when (and r (contains? files r))
+                c (get by-top (top r))
+                :when (not (.contains seen c))]
+          (.add seen c)
+          (.push work c))))
+    (sort
+             (distinct (for [n seen
+                             :let [t (top n)]
+                             :when (or (contains? own t) (not (contains? have t)))]
+                         (str (first (get files t)) " " t ".java"))))))
+
+(defn -main [verb jdk closure sources javac-sources]
+  (let [xml (closure-lines jdk closure sources javac-sources)
+        ls (lines closure)
+        header (take-while #(str/starts-with? % "#") ls)
+        body (drop (count header) ls)
+        others (remove #(some (fn [m] (str/starts-with? % (str m " "))) modules) body)
+        new-body (sort (concat others xml))
+        old-xml (set (filter #(some (fn [m] (str/starts-with? % (str m " "))) modules) body))]
+    (case verb
+      "write" (do (spit closure (str (str/join "\n" (concat header new-body)) "\n") :encoding "UTF-8")
+                  (println (str "xml-closure: " (count xml) " lines of " (str/join " and " modules) " ("
+                                (count (remove old-xml xml)) " new, " (count (remove (set xml) old-xml)) " gone), "
+                                closure)))
+      "check" (let [added (remove old-xml xml) gone (remove (set xml) old-xml)]
+                (doseq [l added] (println (str "+ " l)))
+                (doseq [l gone] (println (str "- " l)))
+                (println (str "xml-closure: " (count xml) " lines, " (count added) " to add, " (count gone) " to remove"))
+                (shutdown-agents)
+                (System/exit (if (or (seq added) (seq gone)) 1 0))))
+    (shutdown-agents)))

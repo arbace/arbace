@@ -5534,3 +5534,31 @@ foreign lane's), the run-time VarHandle (FxVarHandles' twelve cases), jdk.dynali
 BufferPoolMXBean (t04784), the compiled :stack rows (a try body's closure in an inlined Go function, suspected), the
 deserialized annotation proxies' primitive results (t04725: `Compiler$ProxyFn.doInvoke` receives a raw Go bool and
 int32 from AnnotationInvocationHandler.invoke), lambda deserialization (t06256).
+
+## As built: java-tail3-1126, the user's answers to java-tail2-1126 built (2026-11-26; branch `java-tail3-1126`)
+
+- **A package's auxiliary classes** (JT2-4 (a); arbace/classes/analyze.ae): the source lookup of a class not found as p/C.ae,
+  p/C_class.ae or in the file being loaded now reads the package's other files, as its namespace file p.ae loads them
+  (`package-files`), for a non-public top-level class a file names before the file that declares it is loaded
+  (SuppressStackTraces.java's Impl1, named by Impl1_Skel.java: t05254). With it, `enter-file!` reads a `defclasses` form's
+  classes as `declares-top?` does (it had found the file and entered none of them). Interpreted on train 4's executable
+  with the checkout's analyzer on the path: t05254 passes.
+- **Run-time VarHandles for the interpreter's classes** (JT2-6 (a)): jrt's own jdk.internal.jrt.VarHandles
+  (overlay/jdk/java.base): a handle over a field (java.lang.reflect.Field: the interpreter's slots or a compiled class's) or
+  an array class's elements, every access mode (get and set in their four orders, compareAndSet and its weak forms,
+  compareAndExchange, getAndSet, getAndAdd, the bitwise modes) under one lock, references compared by identity and float and
+  double by their raw bits, arguments converted as asType converts the call site's, the array handles' exceptions as the
+  JVM's (ArrayIndexOutOfBoundsException's message, NullPointerException, ArrayStoreException); the fences take the lock. The
+  analyzer (`*runtime-varhandles*`, true but in j2g, which binds it false: compiled code keeps J2G-SPEC §8.5) writes
+  Lookup.findVarHandle, findStaticVarHandle, unreflectVarHandle and MethodHandles.arrayElementVarHandle as VarHandles'
+  makers (their nodes keep VarHandle's type, a value that is never cast to it), a VarHandle's access modes as
+  `VarHandles.accessR(vh, mode, R.class, Class[] site, Object[] args)` (Invokers' scheme for MethodHandle), its other
+  methods as `VarHandles.call`, and VarHandle's static fences as VarHandles'. Measured interpreted on train 4's executable,
+  VarHandles defined from its own forms at the REPL beside the diffcheck fixture FxVarHandles: all 12 cases give the JVM's
+  recorded values (test/j2g/fixtures.edn), tContended's 8 threads included.
+- **javac's tool world's XML closure, static** (JT2-7 (a)): `bin/javac-vendor xml-closure [--check]` (test/jrt/xml_closure.ae
+  over jrt.classfile) makes closure.txt's java.xml and java.xml.crypto lines as the closure of the classes each class file of
+  the JDK build's exploded modules names (superclass, interfaces, descriptors, code's owners, classes and constants, catch
+  types), from the files the world holds: 1,739 lines, 705 new (XSLTC's instructions, functions and error classes, Xalan's
+  XPath and DTM, Xerces' schema and DOM, BCEL, the XML security library, StAX's writers and events). The forms are the
+  train's `bin/javac-vendor convert`.

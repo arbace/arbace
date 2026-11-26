@@ -25457,3 +25457,39 @@ DECISIONs proposed (none applied; recommended option first):
 - template/friend58.C (cpp-def3's question; the user, 2026-11-26) joins :gxx-only-rules (n/a), as parse/explicit1.C did: its
   `template<typename T> friend void freeList<T, baz>::foo();` is the form [temp.friend]/5 allows (a member of a dependent type
   declared a friend), which GCC 15 rejects; the expected error is GCC's own rule.
+
+## 2026-11-26: java-tail3-1126, the user's decisions on java-tail2-1126 (branch `java-tail3-1126` from mac/next `1d92ac402`)
+
+The user answered java-tail2-1126's seven decisions (2026-11-26, through the burst's coordinator); applied here as classes and
+verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
+1. JT2-1 (a): t03295 (TestClassConstantPatching) n/a in :class-files-na beside t03296 (out of :classloading's :tests, where
+   :interp-protected's match had taken it first).
+2. JT2-2 (a): t05050 (GetURLsTest) and t04444 (SubclassGC) in :classloading (n/a since the by-design review), both levels
+   (out of :design-also, :design-also-compiled and :serialization).
+3. JT2-3 (a): t04989 (PortUnreachableException/Concurrent) judged by jtreg's status (java.check's status-by-decision,
+   verdicts.edn `:status`), out of test/java/golden/out.edn and left.tsv (the Java judge's out-of-cases 24 -> 22);
+   measured interpreted on train 4's executable: passes (its record row waits for the train).
+5. JT2-5 (a): t04809 (MyOwnSynchronizer) in :mxbeans (deferred), out of :design-also and :design-also-compiled.
+- `bin/java-check verdicts --verify`: as recorded (own verdicts interp and compiled 3,309 of 3,325). bin/reap --record:
+  Java eval 3,205 / 0 / 54 (66 n/a) -> 3,205 / 0 / 51 (69 n/a), AOT 3,225 / 1 / 50 (49 n/a) -> 3,225 / 1 / 49 (50 n/a);
+  crops-score --record (Java completeness 0.9919 -> 0.9922) and --judge --strict 0 problems; records-check 0 problems.
+- Built, the user's 4, 6 and 7 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-tail3-1126"):
+  - 4 (JT2-4 (a)): the analyzer's source lookup reads a package's other files (its namespace file's loads) for a class no
+    file is named after; enter-file! reads a `defclasses` form's classes (it had entered none). t05254 passes interpreted on
+    train 4's executable with the checkout's analyzer on the path. Alternative considered: an index of every package's
+    classes made by the converter (a new file per package; the lookup reads the files the REPL loads anyway).
+  - 6 (JT2-6 (a)): jdk.internal.jrt.VarHandles (overlay/jdk/java.base) and the analyzer's `*runtime-varhandles*` (bound
+    false by j2g's main: compiled code keeps J2G-SPEC §8.5): the makers, the access modes by the call site's descriptor
+    (Invokers' scheme), the other methods and the fences as VarHandles' static calls, one lock for every access.
+    Alternatives considered: Unsafe's field slots (compiled classes' Go structs only: the interpreter's objects keep
+    their fields elsewhere), a VarHandle class in the world (j2g's constant handles assume java.lang.invoke's VarHandle
+    outside it). Measured: FxVarHandles' 12 cases interpreted on train 4's executable, VarHandles defined from its forms
+    at the REPL, all equal to the JVM's recorded values.
+  - 7 (JT2-7 (a)): `bin/javac-vendor xml-closure [--check]` (test/jrt/xml_closure.ae over jrt.classfile): closure.txt's
+    java.xml and java.xml.crypto lines are the static closure over the JDK build's class files, 1,739 lines (705 new, none
+    gone). A first count by a script over each class file's descriptor strings gave 785 (strings of generic signatures
+    and literals counted too).
+  - A sample of 61 interp rows (60 passing ones at random and t05254) on train 4's executable with the checkout's
+    analyzer: 61 pass.
+- For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
+  705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
