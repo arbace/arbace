@@ -8839,6 +8839,22 @@ built-in types' tp_new_wrapper (`makeSlotWrapper`'s staticmethod, one per type i
 tp_new). Taken from the Mac's paused candidate (queue 587, `e9a6de175` on mac/587-py-core-objects: `ExtNewWrapper` and the
 spec path), rewritten over this tree's staticmethod wrapper and extended to the static types, which `_datetime` uses.
 
+## As built: py-frame-1126, frame.clear() of a frame running on another thread (2026-11-26, the main host, the burst's py-frame lane)
+
+frame.clear() (tbobj.go's `frameClear`, queue 219) refused an executing frame only when it was on the current thread's chain
+of frames. CPython's frame_clear refuses any frame its thread owns (`FRAME_OWNED_BY_THREAD`). So traceback.clear_frames(tb),
+which unittest's assertRaises calls on the exception it caught, cleared the locals of a frame that was still running on
+another thread. Here that frame was multiprocessing's queue feeder `_feed`, blocked in its `nwait()`, reached through a
+PicklingError raised in the feeder and re-raised by `future.result()` in the main thread. The feeder woke up to
+"cannot access local variable 'nrelease'", then to the same error for 'ignore_epipe' in its handler, and died without
+failing the future: test_concurrent_futures' ProcessPoolSpawnExecutorDeadlockTest.test_shutdown_deadlock_pickle hung (the
+eval record's `:timeout`). `frameExecuting` now walks every thread's chain (`threadsNewestFirst`, the threads
+sys._current_frames lists), and a running generator's frame as before. Not a regression of train 6: the same program fails
+the same way on train 5's executable, and the eval loop's push-signal change of py-mp-1125 and py-regress-1126 plays no part.
+The program `test/python/pyi/q-frame-clear-thread.py` (its oracle outcome recorded) clears a waiting thread's frame through
+a traceback and through sys._current_frames(), then a finished thread's frame. On train 6's executable it prints "cleared"
+twice and dies with the UnboundLocalError, which makes it its own negative control.
+
 ## As built: py-regress-1126, train 5's held regressions at their causes (2026-11-26, the main host, the burst's py-regress lane)
 
 Train 5's eval run held 11 modules for regressions against next's record (the journal's entry of 2026-11-26). Their causes, each
