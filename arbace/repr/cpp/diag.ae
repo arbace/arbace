@@ -3683,7 +3683,10 @@
               fs (filter #(= "FieldDecl" (:kind %)) (:inner r))
               ok (and e (= 2 (count fs))
                       (re-matches (re-pattern (str "const " (java.util.regex.Pattern/quote e) " \\*")) (ty (first fs)))
-                      (#{"size_t" "std::size_t" "unsigned long" "__SIZE_TYPE__" "::size_t"} (ty (second fs))))]
+                      (or (#{"size_t" "std::size_t" "unsigned long" "__SIZE_TYPE__" "::size_t"} (ty (second fs)))
+                          ;; (cpp-indep3: decltype(sizeof 0) is std::size_t, [expr.sizeof]/6 with [support.types.layout]/3:
+                          ;; cpp0x/auto54.C's own initializer_list)
+                          (re-matches #"decltype\s*\(\s*sizeof\b.*\)" (ty (second fs)))))]
           (when-not ok (report! t "definition of 'std::initializer_list' does not match '#include <initializer_list>'"))))
       ;; (cpp-sweep: [support.initlist]/1, std::initializer_list is a class template: a class of that name declared in std that is
       ;; no template is GCC's "declaration of 'std::initializer_list' does not match '#include <initializer_list>', isn't a
@@ -5849,7 +5852,19 @@
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
         report! (fn [n msg] (when-let [o (mine-at n main)] (let [[l c] (line-col starts o)] (.add out {:line l :col c :kind :error :rule :member-conflict :msg msg}))))
-        split (fn [^String qt] (let [i (.indexOf qt "(")] (when (pos? i) [(str/replace (subs qt 0 i) #"\s+" "") (str/replace (subs qt i) #"\s+" "")])))]
+        ;; (cpp-indep3: the parameter list's parenthesis the first outside the return type's template arguments and parentheses,
+        ;; `B<sizeof...(T)> ()`; diagnostic/variadic1.C)
+        split (fn [^String qt] (let [n (.length qt)
+                                     i (loop [j 0 a 0 d 0]
+                                         (if (>= j n) -1
+                                             (let [c (.charAt qt j)]
+                                               (cond (and (= c \() (zero? a) (zero? d) (pos? j)) j
+                                                     (= c \<) (recur (inc j) (inc a) d)
+                                                     (= c \>) (recur (inc j) (max 0 (dec a)) d)
+                                                     (= c \() (recur (inc j) a (inc d))
+                                                     (= c \)) (recur (inc j) a (max 0 (dec d)))
+                                                     :else (recur (inc j) a d)))))]
+                                 (when (pos? i) [(str/replace (subs qt 0 i) #"\s+" "") (str/replace (subs qt i) #"\s+" "")])))]
     (walk-nodes (fn [n _]
                   (when (and (= "CXXRecordDecl" (:kind n)) (:completeDefinition n))
                     (let [ms (:inner n)
