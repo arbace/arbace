@@ -417,11 +417,29 @@
   again there with its arguments (Rt/hop), else b, the depth given back on the way out (an exception's way out is the
   handler's, trywith-node)."
   [b params]
-  (let [r (fresh "r$")]
-    (concat (list 'do) enter-forms
-            [(list 'if '(if (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterHop) false)
-                   (list 'ocaml.rt.Rt/hop 'this (list 'new 'Object/1 (vec params)))
-                   (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))])))
+  (let [r (fresh "r$")
+        e (concat (list 'do) enter-forms
+                  [(list 'if '(if (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterHop) false)
+                         (list 'ocaml.rt.Rt/hop 'this (list 'new 'Object/1 (vec params)))
+                         (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))])]
+    ;; (queue 604) the light level's tail calls: whether this call was a tail call (Rt/tok, taken and cleared: tail-form)
+    (if *in-ns* e (list 'let '[ok$ ocaml.rt.Rt/tok] '(set! ocaml.rt.Rt/tok false) e))))
+
+(defn- tail-form
+  "(queue 604) A tail call at the light level of function form f to argument forms as (simple or temporaries ts, evaluated): from a
+  function entered from a tail call (ok$), its Tail (Rt's TAIL_DEPTH: the thread's frames deep) returned to the frame that makes
+  it, else the call made in place as a tail call (Rt/tok, its own deep tail call returned through this one's result); from a
+  function entered from no tail call, the call made as a tail call and a Tail it returns made here (Rt/bounce), the chain's frames
+  each returned before the next is made. The temporaries are read and cleared as they are passed (take-form)."
+  [f as ts]
+  (let [tset (set ts)
+        pass (mapv (fn [a] (if (tset a) (take-form a) a)) as)
+        tail (list 'new 'ocaml.rt.Tail f (list 'new 'Object/1 (vec as)))
+        call (list 'do '(set! ocaml.rt.Rt/tok true) (call-form f pass))
+        r (with-meta (fresh "r$") {:mutable true :tag 'Object})]
+    (list 'if 'ok$
+          (list 'if '(> (unchecked-subtract-int ocaml.rt.Rt/depth ocaml.rt.Rt/hopBase) ocaml.rt.Rt/TAIL_DEPTH) tail call)
+          (list 'let [r call] (list 'if (list 'instance? 'ocaml.rt.Tail r) (list 'ocaml.rt.Rt/bounce (take-form r)) r)))))
 
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
   (list 'do (list 'ocaml.rt.Bt/push ev) (value-then f (concat (clear ts) [bt-pop]))))
@@ -489,8 +507,14 @@
       (let [clears (when (and tail? (seq (:params ctx)))
                      (let [refs (into #{} (mapcat #(second (bound-and-refs %)) (cons f args)))]
                        (seq (for [[id sym] (:params ctx) :when (not (refs id))] (list 'set! sym nil)))))
-            call (if (simple? f)
+            call (cond
+                   ;; (queue 604) a tail call at the light level: every argument and the function evaluated first (nothing runs
+                   ;; between Rt/tok's setting and the callee's entry), then tail-form
+                   (and tail? (not *in-ns*))
+                   (with-all-args ctx (into [f] args) (fn [as ts] (tail-form (first as) (rest as) ts)))
+                   (simple? f)
                    (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+                   :else
                    (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))]
         (if clears (list 'do (apply list 'o2j$clears clears) call) call))))))
 
@@ -537,7 +561,8 @@
         a (symbol "args$")
         tb (when @tails
              (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
-                   (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) b)))
+                   ;; (queue 604) a group function's body returns to its entry's bounce: its tail calls may return Tails (ok$)
+                   (list 'let (vec (concat (when-not *in-ns* '[ok$ true]) (mapcat (fn [i p] [p (list 'aget a i)]) (range) params))) b)))
         b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (entered)
         b (entered b params)]
@@ -837,6 +862,10 @@
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
             :else (symbol (class-of g) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
+    ;; (queue 604) an effect primitive in the tail of a function at the light level: its handler's function called as from a tail call
+    ;; when the function was (Effects/runstackT, resumeT, reperformT with ok$)
+    (and tail? (not *in-ns*) (#{"runstack" "resume" "reperform"} n))
+    (with-args ctx args (fn [as] (apply list (symbol "ocaml.rt.Effects" (str (name (effect-prims n)) "T")) 'ok$ as)))
     ;; (oc-tail) a primitive that is no tail form clears its temporaries after it (scoped: weak-ephe-final/ephetest's Ephe !eph)
     ;; (queue 603) a tree of blocks (ocamlopt's Comballoc: one combined allocation) at the light level while a Gc.Memprof profile
     ;; samples: the callbacks of its blocks' samples run once the whole tree is made (ExtGc/combBegin, combEnd), as memprof.c runs a
