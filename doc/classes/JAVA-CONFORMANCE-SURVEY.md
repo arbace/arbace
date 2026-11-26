@@ -5408,3 +5408,83 @@ after the gate's executables `36aab1207a6fe6f3a858`; its build 75 min, peak 26.5
   Raw diagnostics' short file names (t06452, t07536) need PathFileObject file objects. `-XDexpectKeys` (t06660) and the error count
   after a plug-in error (t07527) come with `Main.compile` itself. It changes every javac command line on Arbace, so its proof is
   whole runs of the classes, diagnostics and print levels.
+
+## As built: java-design-1122/1123, the by-design rows built (2026-11-22 to 2026-11-24; branch `java-design-1123`)
+
+The user's decisions of 2026-11-22 (JD1-JD9) and 2026-11-23 (JMX, JDI, desktop and smartcardio n/a; serialization at the
+compiled level, XML in javac's tool world, the class-file API, zip and javac's synthetic lambdas built; JCS51's processors
+through JD3's loader). doc/JOURNAL.md's entries of those days are the record; in short:
+- **Built and recorded (train 1, d9217f672):** round 1 (the JVM's array limit, StackTraceElement's module constructor,
+  ClassLoader's getPackage(s) and findLoadedClass, URLClassLoader.addURL, java.base's XML parser: Properties' XML form),
+  round 2 (Kerberos and GSS-API, javax.xml.datatype), round 3 (the foreign memory API's segments, layouts and arenas),
+  System.setProperties for translated code, JD4 (the tests naming javac's API at the compiled level in shards with javac's
+  world: 40 of 57 pass). Java eval 3,109 / 116 / 100 -> 3,131 / 33 / 120, AOT 3,079 / 155 / 91 -> 3,141 / 33 / 122
+  (pass / by design / deferred; the n/a rows out of the denominators).
+- **Built, waiting for train 3's build:** JD7 (javac's synthetic lambda methods in reflection, `arbace.classes.analyze/
+  synthetic-lambdas`; protected method references of another package made lambdas), Dyn's clone through an interface, an own
+  native method's UnsatisfiedLinkError, Reference subclasses' super.clone(), annotation elements of primitive types written
+  as conversions, annotation objects' serial form, classes defined from bytes collected with their loader (SubclassGC), the
+  Kerberos and datatype slices javac-clean (derived overlays of ProviderList, krb5's Config and SecuritySupport;
+  NegotiateCallbackHandler, WrongThreadException and UnsatisfiedLinkError in the world; SunJGSS among the providers), XML's
+  closure in javac's tool world (803 files of java.xml and java.xml.crypto, the classes loaded by name rooted, the XML tests
+  routed to the tool; j2g's names checked unique by `bin/javac-vendor names` before any run).
+- **Left:** the 11 interpreted speed rows (a faster interpreter), the XMLDSig provider in the tool's service registry and
+  XSLTC's translets on JD3's loader (after train 3's conversion), the rows `:jd1123-next-train` holds until train 3's runs.
+
+## As built: java-stack-1124, stack traces' lines, StackWalker's frames, reflection's access checks (2026-11-24; branch `java-stack-1124`, from next `903ef1ab2`)
+
+The `:stack` class (interp 7 rows, compiled 10) and the reflection rows that need the caller class (t07688, t04829).
+Written ahead of the train's records: the rows each change should move are named, the records are the train's.
+
+- **Where a frame's line comes from.** The JDK's from the class file's LineNumberTable (javac marks each statement and
+  each method invocation after its arguments, `Gen.visitApply`). The Java forms kept no Java line (SPEC §14, 3); the
+  interpreter gave -1 ("Line number: ...a(ChainedExceptions.java)"), j2g's code the forms file's name and line
+  ("File name: ...a(J_t04701_ChainedExceptions.ae:36)"). Now: `bin/repr-java read --line-numbers` (SPEC §14, 7) records
+  `^{:java/line N}` on the forms of invocations (javac's `pos`, the `(`), creations and method references, and
+  `^{:java/source "F.java"}` on each top-level class; `bin/java-check`'s `read_opts` passes it (every read of the
+  check: read, nread, print's reads, `--forms`; the read cache re-keys, test/java/forms/ is regenerated). The analyzer
+  (`body-actx`'s `:java-lines`) takes such a class's node lines from `:java/line` alone (`:line` and `:java-line`).
+  - interp: `Compiler$CF$Node.line` and `Frame.line`; a call node (CallI, CallV, CallR, NewI, NewR, CtorCall,
+    SuperCtor, SuperCall, MakeLambda) stores its line into its frame before the receiver's null check and again after
+    its arguments (`Node.at`); `arbace.classes.interp/node` gives each call node the innermost Java line around it,
+    through `Rt/setLine` looked up by name (the tools' host evaluates interp.ae on the seed's runtime: the TRAP of train
+    3; nil on a runtime without it); `Rt/snapshot` keeps each frame's line with its Meth, `describe` gives six slots,
+    jrt's `interpFrames` reads the sixth.
+  - compiled: j2g's ClassInfo `:Source` from the outermost class's `:java/source` (`java-source`); jrt's `frameOf`
+    names a registered frame's file by its class's Source when that is a `.java` name (`javaSource`); a nested call
+    or creation on a later Java line than its statement's gets `:j2g/line` on its Go form (`expr`), gc's line table
+    then giving it its own line (T7024096).
+- **StackWalker's frames** (jrt's `stackFrames`): the interpreter's frames pop the reflective call under them once per
+  group (each of them popped again, so a program's `m.invoke(...)` frame went with the interpreter's own: HiddenFrames'
+  "No reflection frame", t04613 interp); in a walk jrt's method-handle invokers (`jdk.internal.jrt.Invokers`) and a
+  lambda's class (`$$Lambda`) are hidden (GetCallerClassTest's `invokeExact`, t04612 both levels; HiddenFrames' "Hidden
+  frames are shown", t04613 compiled); a compiled `main` the evaluator called (run.ae's launch at the compiled level)
+  has no frame below it, as an interpreted main entered from outside (WalkFunction's `arbace.core$apply` frame, t04618
+  compiled). j2g's frame table lists a method whose name does not start with a lower case letter (the demangler lowers
+  it: GenerifyStackTraces' `A()` shown as `a`, t04684 compiled).
+- **Reflection's access checks** (jrt's reflect.ae, `checkMemberAccess`): Method.invoke, Constructor.newInstance and
+  Field's accessors without setAccessible check jdk26u's `Reflection.verifyMemberAccess` (the nest by the top-level
+  class's name, protected through a subclass and JLS 6.6.2's target rule, package access by package name, a class
+  file's public flag), the message `newIllegalAccessException`'s; the caller (`reflectCaller`) is the program's class
+  whose code made the call: the first Go frame outside jrt (a compiled class's), or for the interpreter the first Java
+  frame of `stackFrames` past the reflection frames. The run time's and the JDK's callers (Clojure's evaluator and
+  Reflector, the translated JDK) are not checked, nor an unknown one: a lenient default where the JVM would refuse.
+- Rows each change should move (the train's records): t04701, t06142, t06143 at both levels and t06329 interp (lines);
+  t04612 both, t04613 both, t04618 and t04684 compiled (walks); t07688 and t04829 both (access). Not addressed:
+  t04614 compiled (MultiThreadStackWalk's Marker frame, not reproduced without a compiled run), t08164 (a charset
+  encoder's failure that prints `Thread.dumpStack`'s "Stack trace": :stack by its match only), t04611 (the 7-argument
+  StackTraceElement constructor, in jrt since java-design-1122: its records predate it), t06329 compiled (refused: the
+  ClassFile API).
+## As built: java-speed (1), the interpreter's hot paths (2026-11-24, branch `java-speed-1124`, from next `440cf0273`)
+
+The user's decision of 2026-11-24: the interp level's slowness timeouts outside `:jit-loops` to pass within their limits (600 s of
+CPU at most, GTS208 (a)). Measured and profiled on train 1's build (doc/JOURNAL.md, 2026-11-24, "java-speed-1124"). Built in
+arbace/lang/Compiler.ae's CF: node arrays walked as chains of `CF$Cell` (Do, Let, Recur, the calls' arguments: no generic interface
+assertion per element on Go), Recur's one- and two-value turns without arrays, `Host.invoke` (the Go host's reflective calls by
+`Evaluator.invokeDirect`: no InvocationTargetException, no recover frame), shared empty argument and slot arrays, `Rt/toJ`'s and
+`Rt/toD`'s exact wrapper tests first; in arbace/j2g/dyn.ae, Dyn implements the marker interfaces declared from reflection
+(RandomAccess: BigBinarySearch, t05477, walked 2^30 elements because an interpreted RandomAccess list was none in the world's
+code). The rows' expected standing: t05477 by the RandomAccess fix; t05714, t05716, t05718 (771/125/755 s) within reach (they
+need 1.3-1.8 times); t04494, t04620, t04656 need three times or more (a later round: the reflective calls' boxing, frames, j2g's
+assertions); t06419 (2^32 calls) and t05498 (about 10^10 calls) exhaustive loops, proposed n/a beside `:jit-loops`; t05126 a hang
+(jrt's FileChannel interrupt), t07728 `:oom`, neither slowness. Records on the train's build.

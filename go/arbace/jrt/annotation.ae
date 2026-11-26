@@ -109,7 +109,8 @@ the explicit members not among them, in the class file's order), each in the inv
 handler's form (primitives boxed, arrays as arrays). self is the Java object (the type's own Go
 type embedding it, or the AnnotationObj).\n"
   (struct Object ^{:tag (* Class)} typ ^{:tag (slice string)} names ^{:tag (slice any)} vals ^any self
-          ^{:tag (atomic/Pointer annotationHandler) :doc "its invocation handler, made by Proxy.getInvocationHandler's first call (JCS210)\n"} handler))
+          ^{:tag (atomic/Pointer annotationHandler) :doc "its invocation handler, made by Proxy.getInvocationHandler's first call (JCS210)\n"} handler
+          ^{:tag (slice any) :doc "Proxy's field h as serialization reads it (DynFields: the handler, java-design-1123)\n"} hf))
 
 (go/type annotationBased
   "annotationBased is an annotation object: AnnotationObj, or a Go type embedding it.\n"
@@ -120,6 +121,14 @@ type embedding it, or the AnnotationObj).\n"
 (go/method AnnotationType__Class ^{:tag (* Class)} [^{:tag (* AnnotationObj)} a] (.-typ a))
 (go/method Ref ^any [^{:tag (* AnnotationObj)} a] (when (== a nil) (return nil)) (.-self a))
 (go/method Clone__O ^any [^{:tag (* AnnotationObj)} a] (panic (CloneNotSupported a)))
+;; java-design-1123 (annotation UnitTest, t04725: "NotSerializableException: t04725.$Proxy1"): an annotation object is a
+;; Proxy, which is Serializable, its field h the handler (proxyHandlerField reads it through DynFields), the handler's
+;; serial form below (AnnotationInvocationHandler's type and memberValues)
+(go/method Is_Serializable [^{:tag (* AnnotationObj)} a])
+(go/method DynFields ^{:tag (* (slice any))} [^{:tag (* AnnotationObj)} a]
+  (when (== (len (.-hf a)) 0)
+    (set! (.-hf a) (lit (slice any) (annotationHandlerOf (.-self a)))))
+  (addr (.-hf a)))
 (go/method GetClass__Class "GetClass__Class: the type's proxy-like class (annotationClass).\n"
   ^{:tag (* Class)} [^{:tag (* AnnotationObj)} a] (annotationClass (.-typ a)))
 
@@ -598,7 +607,6 @@ C desc, F name), its parameters' by key (P name desc) and index.\n"
           ^{:tag (func [string] [any]) :doc "a class defined from bytes: its annotations by key, parsed on demand (SetAnnotationSource)\n"} src
           ^{:tag sync/Map :doc "src's answers by key\n"} srcCache))
 
-(go/var ^{:tag sync/Map :doc "annotationSources: *ClassInfo -> func(string) any (SetAnnotationSource).\n"} annotationSources)
 
 (go/func SetAnnotationSource
   "SetAnnotationSource gives class c, defined from bytes (java-bytecode-1122), its annotations by key: \"T\" the
@@ -606,8 +614,8 @@ class's, \"M NAME DESC\", \"C DESC\", \"F NAME\" a member's (an Annotation[]), \
 parameters' (Annotation[][]), \"D NAME DESC\" an element's default (arbace.lang.BytecodeAnnotations: jdk26u's
 AnnotationParser over the class file's own constant pool).\n"
   [^{:tag (* Class)} c ^{:tag (func [string] [any])} src]
-  (.Store annotationSources (.-info c) src)
-  (.Delete annotationDataCache (.-info c)))
+  (.Store (classCaches (.-info c)) "annSrc" src)
+  (.Delete (classCaches (.-info c)) "annData"))
 
 (go/func refSlice "refSlice: the elements of an Object[] (nil: none).\n" ^{:tag (slice any)} [^any x]
   (let [(values a ok) (assert (* RefArray) x)]
@@ -642,8 +650,6 @@ AnnotationParser over the class file's own constant pool).\n"
         (return out)))
     (aget (.-params d) key)))
 
-(go/var ^{:tag sync/Map :doc "annotationData: *ClassInfo -> *annData, decoded once.\n"} annotationDataCache)
-(go/var ^{:tag sync/Map :doc "annotationDefaultsCache: *ClassInfo -> *annDefaults.\n"} annotationDefaultsCache)
 
 (go/func SetAnnotations
   "SetAnnotations sets class c's annotation data (the interpreter's host, for the classes it
@@ -652,14 +658,14 @@ makes: arbace.classes.interp), forgetting what was decoded from its earlier data
   (let [s ""]
     (when (!= data nil) (set! s (.String data)))
     (set! (.-Annots (.-info c)) s)
-    (.Delete annotationDataCache (.-info c))
-    (.Delete annotationDefaultsCache (.-info c))
+    (.Delete (classCaches (.-info c)) "annData")
+    (.Delete (classCaches (.-info c)) "annDefaults")
     ;; F25: the attributes recorded beside the annotations (classdata.ae)
     (forgetClassAttrs (.-info c))))
 
 (go/func annotationDefaults ^{:tag (* annDefaults)} [^{:tag (* Class)} typ]
   (let [info (.-info typ)
-        (values v ok) (.Load annotationDefaultsCache info)]
+        (values v ok) (.Load (classCaches info) "annDefaults")]
     (when ok (return (assert (* annDefaults) v)))
     (let [d (addr (lit annDefaults :vals (make (map string any))))]
       (range [_ line (strings/Split (.-Annots info) "\n")]
@@ -670,12 +676,12 @@ makes: arbace.classes.interp), forgetting what was decoded from its earlier data
             (when ok
               (set! (.-names d) (append (.-names d) name))
               (aset (.-vals d) name val)))))
-      (let [(values w _) (.LoadOrStore annotationDefaultsCache info d)]
+      (let [(values w _) (.LoadOrStore (classCaches info) "annDefaults" d)]
         (assert (* annDefaults) w)))))
 
 (go/func annotations "annotations: c's decoded annotation data.\n" ^{:tag (* annData)} [^{:tag (* Class)} c]
   (let [info (.-info c)
-        (values v ok) (.Load annotationDataCache info)]
+        (values v ok) (.Load (classCaches info) "annData")]
     (when ok (return (assert (* annData) v)))
     (let [d (addr (lit annData :members (make (map string (slice any))) :params (make (map string (slice (slice any))))))]
       (when (!= (.-Annots info) "")
@@ -712,11 +718,11 @@ makes: arbace.classes.interp), forgetting what was decoded from its earlier data
                         (aset ps i (append (aget ps i) a))
                         (aset (.-params d) k ps))))))))))
       ;; a class defined from bytes: its annotations from its source (SetAnnotationSource)
-      (let [(values sv ok) (.Load annotationSources info)]
+      (let [(values sv ok) (.Load (classCaches info) "annSrc")]
         (when ok
           (set! (.-src d) (assert (func [string] [any]) sv))
           (set! (.-class d) (append (.-class d) (spread (refSlice ((.-src d) "T")))))))
-      (let [(values w _) (.LoadOrStore annotationDataCache info d)]
+      (let [(values w _) (.LoadOrStore (classCaches info) "annData" d)]
         (assert (* annData) w)))))
 
 (go/type annParser "annParser reads one record of the data from position i.\n"
@@ -1065,7 +1071,7 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
   (when (or (!= (len (.-params m)) 0) (not (.IsAnnotation__Z (.-clazz m))))
     (return nil))
   ;; a class defined from bytes: its AnnotationDefault parsed by AnnotationParser (SetAnnotationSource)
-  (let [(values sv ok) (.Load annotationSources (.-info (.-clazz m)))]
+  (let [(values sv ok) (.Load (classCaches (.-info (.-clazz m))) "annSrc")]
     (when ok
       (return ((assert (func [string] [any]) sv) (+ "D " (methodKey (.-Name (.-info m)) (.-params m) (.-Return (.-info m))))))))
   (let [(values v ok) (aget (.-vals (annotationDefaults (.-clazz m))) (.-Name (.-info m)))]
@@ -1081,14 +1087,43 @@ declared ones, else for an @Inherited type the nearest superclass's.\n"
 ;; hashCode and toString are Object's.
 
 (go/type annotationHandler
-  "annotationHandler is an annotation's AnnotationInvocationHandler.\n"
-  (struct Object ^{:tag (* AnnotationObj)} a))
+  "annotationHandler is an annotation's AnnotationInvocationHandler (stype and smap: its serial fields as a stream
+reads them, until both are read).\n"
+  (struct Object ^{:tag (* AnnotationObj)} a ^{:tag (* Class)} stype ^any smap))
 
 (go/var annotationHandler_class
   (Define (addr (lit ClassInfo :Name "sun.reflect.annotation.AnnotationInvocationHandler" :Kind KindClass
                      :Modifiers AccFinal :Super Object_class
                      :Interfaces (lit (slice (* Class)) InvocationHandler_class Serializable_class)
                      :Go "arbace/jrt.annotationHandler"))))
+
+;; the handler's serial form (JCS291's left part, java-design-1123): AnnotationInvocationHandler's serialVersionUID and
+;; fields, type and memberValues (a LinkedHashMap of the members in the annotation's order), read back into a new handler
+;; and annotation object as its constructor makes them (the map kept until the type comes: the stream sets the fields by
+;; name, memberValues first); its readObject's checks of the members' types against the type's not made
+(go/func annotationHandlerMemberValues ^any [^{:tag (* AnnotationObj)} a]
+  (let [m (serialNewObject "java.util.LinkedHashMap" nil nil)]
+    (range [i n (.-names a)]
+      (serialCall m "java.util.Map" "put" (lit (slice (* Class)) Object_class Object_class)
+                  (lit (slice any) (Str n) (aget (.-vals a) i))))
+    m))
+
+(go/method serialComplete [^{:tag (* annotationHandler)} h]
+  (when (and (!= (.-stype h) nil) (!= (.-smap h) nil) (== (.-a h) nil))
+    (set! (.-a h) (.-a (annotationHandler_New_Class_Map (.-stype h) (.-smap h))))))
+
+(go/func init []
+  (serialClass annotationHandler_class
+    (serialTable "G26 serialVersionUID J\nF18 memberValues Ljava.util.Map;\nF18 type Ljava.lang.Class;\n" nil
+      (lit (slice (func [any] [any]))
+        (fn ^any [^any o] (return (conv int64 6182022883658399397)))
+        (fn ^any [^any o] (return (annotationHandlerMemberValues (.-a (assert (* annotationHandler) o)))))
+        (fn ^any [^any o] (return (.-typ (.-a (assert (* annotationHandler) o))))))
+      (lit (slice (func [any any]))
+        nil
+        (fn [^any o ^any v] (let [h (assert (* annotationHandler) o)] (set! (.-smap h) v) (.serialComplete h)))
+        (fn [^any o ^any v] (let [h (assert (* annotationHandler) o)] (set! (.-stype h) (assert (* Class) v)) (.serialComplete h)))))
+    (fn ^any [] (return (addr (lit annotationHandler))))))
 
 (go/method Is_InvocationHandler [^{:tag (* annotationHandler)} h])
 (go/method Is_Serializable [^{:tag (* annotationHandler)} h])

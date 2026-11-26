@@ -480,6 +480,18 @@ generate() {
       cp "$cso/${rel#sun/nio/cs/}" "$out/$rel"
     fi
   done < "$work/sources.txt"
+  # the jdk.charsets charsets jdk26u's tests name (java-rows-1124, the user's decision of 2026-11-24: not the whole module;
+  # KIND gensrc:jdk.charsets), as make/modules/jdk.charsets/Gensrc.gmk's extcs step makes them, into a directory of their
+  # own from which the closure's files are taken (its ExtendedCharsets is not: jrt's own, overlay/jdk/java.base)
+  local cse=$tools/charsetmapping-ext-out ext=$jdk/src/jdk.charsets/share/classes/sun/nio/cs/ext
+  mkdir -p "$cse"
+  "${java[@]}" build.tools.charsetmapping.Main "$jdk/make/data/charsetmapping" "$cse" extcs charsets stdcs-linux \
+    "$ext/ExtendedCharsets.java.template" "$ext" "$t/build/tools/charsetmapping" > "$tools/charsetmapping-ext.log" || return 1
+  while read -r _ kind rel; do
+    if [ "$kind" = gensrc:jdk.charsets ]; then
+      mkdir -p "$out/$(dirname "$rel")"; cp "$cse/${rel##*/}" "$out/$rel" || return 1
+    fi
+  done < "$work/sources.txt"
   # jdk.localedata's CLDR data (JRT-NOTES.md, "Text and locales"), as
   # make/modules/jdk.localedata/Gensrc.gmk makes it (TOOL_CLDRCONVERTER without -basemodule):
   # every locale's bundles, of which the selection (sources.txt's KIND locales line,
@@ -893,14 +905,34 @@ fi
 if has javac; then
   echo "== javac (twice)"
   t0=$(date +%s)
-  (cd "$work/src/java.base" && find . -name '*.java' | sed 's|^\./||' | sort) > "$work/javac.list"
+  # queue 562 (JMS4): a top-level overlay named by a nested class's binary name (java/lang/System$Logger.java) is
+  # compiled apart: in the joint --patch-module compile it would hide the platform's member System.Logger from the
+  # other files (543's finding); alone, against the platform, it is the class its binary name says
+  (cd "$work/src/java.base" && find . -name '*.java' | sed 's|^\./||' | sort) > "$work/javac.all"
+  grep -v '\$' "$work/javac.all" > "$work/javac.list" || true
+  grep '\$' "$work/javac.all" > "$work/javac.apart" || true
+  # and the joint compile's patch tree without them (train 4: on the patch path, java/lang/System$Logger.java made
+  # System.Logger ambiguous in jdk.internal.net.http's Stream and SystemLoggers' adapter), hard links of the tree
+  joint=$work/src/java.base
+  if [ -s "$work/javac.apart" ]; then
+    joint=$work/joint
+    rm -rf "$joint"; cp -al "$work/src/java.base" "$joint" || status=1
+    while read -r f; do rm -f "$joint/$f"; done < "$work/javac.apart"
+  fi
   for n in 1 2; do
     rm -rf "$work/ref$n"
     mkdir -p "$work/ref$n"
     # java.base's options of the JDK build that change class files (test/repr/java/jdk.bash)
-    (cd "$work/src/java.base" && "$root/bin/repr-java" javac -XDstringConcat=inline --patch-module "java.base=$work/src/java.base" \
+    (cd "$joint" && "$root/bin/repr-java" javac -XDstringConcat=inline --patch-module "java.base=$joint" \
        -implicit:none --enable-preview -source 26 -nowarn -XDsuppressNotes -d "$work/ref$n" \
        "@$work/javac.list") > "$work/log/javac$n.log" 2>&1 || { echo "javac failed: $work/log/javac$n.log"; status=1; }
+    if [ -s "$work/javac.apart" ]; then
+      rm -rf "$work/apart"
+      while read -r f; do mkdir -p "$work/apart/$(dirname "$f")"; cp "$work/src/java.base/$f" "$work/apart/$f"; done < "$work/javac.apart"
+      (cd "$work/apart" && "$root/bin/repr-java" javac -XDstringConcat=inline --patch-module "java.base=$work/apart" \
+         -implicit:none --enable-preview -source 26 -nowarn -XDsuppressNotes -d "$work/ref$n" \
+         "@$work/javac.apart") >> "$work/log/javac$n.log" 2>&1 || { echo "javac (apart) failed: $work/log/javac$n.log"; status=1; }
+    fi
   done
   echo "$(find "$work/ref1" -name '*.class' | wc -l) classes ($(( $(date +%s) - t0 )) s)"
 fi

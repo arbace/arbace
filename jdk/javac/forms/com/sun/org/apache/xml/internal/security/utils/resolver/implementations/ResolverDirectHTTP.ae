@@ -1,0 +1,167 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/com/sun/org/apache/xml/internal/security/utils/resolver/implementations/ResolverDirectHTTP.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xml.internal.security.utils.resolver.implementations)
+
+(import '(com.sun.org.apache.xml.internal.security.signature XMLSignatureInput)
+        '(com.sun.org.apache.xml.internal.security.utils XMLUtils)
+        '(com.sun.org.apache.xml.internal.security.utils.resolver
+           ResourceResolverContext
+           ResourceResolverException
+           ResourceResolverSpi)
+        '(com.sun.org.slf4j.internal Logger LoggerFactory)
+        '(java.io ByteArrayOutputStream IOException)
+        '(java.net InetSocketAddress Proxy Proxy$Type URI URISyntaxException URL URLConnection)
+        '(java.nio.charset StandardCharsets)
+        '(java.util Collections Map))
+
+(defclass ^:public ResolverDirectHTTP
+  :extends ResourceResolverSpi
+
+  (field ^:private ^:static ^:final ^Logger LOG (LoggerFactory/getLogger ResolverDirectHTTP))
+
+  (field ^:private ^:static ^:final ^String/1 properties
+    (new String/1
+         ["http.proxy.host" "http.proxy.port" "http.proxy.username" "http.proxy.password"
+          "http.basic.username" "http.basic.password"]))
+
+  (field ^:private ^:static ^:final ^int HttpProxyHost 0)
+
+  (field ^:private ^:static ^:final ^int HttpProxyPort 1)
+
+  (field ^:private ^:static ^:final ^int HttpProxyUser 2)
+
+  (field ^:private ^:static ^:final ^int HttpProxyPass 3)
+
+  (field ^:private ^:static ^:final ^int HttpBasicUser 4)
+
+  (field ^:private ^:static ^:final ^int HttpBasicPass 5)
+
+  (field ^:private ^:final ^{:tag (Map String String)} resolverProperties)
+
+  (constructor ^:public [this]
+    (set! resolverProperties (Collections/emptyMap)))
+
+  (constructor ^:public [this ^{:tag (Map String String)} resolverProperties]
+    (set! (.-resolverProperties this)
+          (Collections/unmodifiableMap
+            ^Map (if (some? resolverProperties) resolverProperties (Collections/emptyMap)))))
+
+  (method ^:public engineResolveURI :throws [ResourceResolverException] ^XMLSignatureInput [this
+                                                                                            ^ResourceResolverContext context]
+    (try
+      (let [uriNew (ResolverDirectHTTP/getNewURI (.-uriToResolve context) (.-baseUri context))
+            url (.toURL uriNew)
+            ^:mutable urlConnection (.openConnection this url context)
+            auth (.getHeaderField urlConnection "WWW-Authenticate")]
+        (when (and (some? auth) (.startsWith auth "Basic"))
+          (let [user (.getProperty this
+                                   context
+                                   (aget ResolverDirectHTTP/properties
+                                         ResolverDirectHTTP/HttpBasicUser))
+                pass (.getProperty this
+                                   context
+                                   (aget ResolverDirectHTTP/properties
+                                         ResolverDirectHTTP/HttpBasicPass))]
+            (when (and (some? user) (some? pass))
+              (set! urlConnection (.openConnection this url context))
+              (let [password (java-str user ":" pass)
+                    encodedPassword (XMLUtils/encodeToString
+                                      (.getBytes password StandardCharsets/ISO_8859_1))]
+                (.setRequestProperty urlConnection
+                                     "Authorization"
+                                     (java-str "Basic " encodedPassword))))))
+        (let [mimeType (.getHeaderField urlConnection "Content-Type")]
+          (with-resources [^:final baos (ByteArrayOutputStream.)
+                           ^:final inputStream (.getInputStream urlConnection)]
+            (let [buf (new byte/1 4096)
+                  ^:mutable ^int read 0
+                  ^:mutable ^int summarized 0]
+              (while (>= (set! read (.read inputStream buf)) 0)
+                (.write baos buf 0 read)
+                (set! summarized (unchecked-add-int summarized read)))
+              (.debug LOG
+                      "Fetched {} bytes from URI {}"
+                      (new Object/1 [summarized (.toString uriNew)]))
+              (let [result (XMLSignatureInput. (.toByteArray baos))]
+                (.setSecureValidation result (.-secureValidation context))
+                (.setSourceURI result (.toString uriNew))
+                (.setMIMEType result mimeType)
+                result)))))
+      (catch [URISyntaxException IOException IllegalArgumentException] ex
+        (throw (ResourceResolverException. ex
+                                           (.-uriToResolve context)
+                                           (.-baseUri context)
+                                           "generic.EmptyMessage")))))
+
+  (method ^:private openConnection :throws [IOException] ^URLConnection [this ^URL url
+                                                                         ^ResourceResolverContext context]
+    (let [proxyHostProp (.getProperty this
+                                      context
+                                      (aget ResolverDirectHTTP/properties
+                                            ResolverDirectHTTP/HttpProxyHost))
+          proxyPortProp (.getProperty this
+                                      context
+                                      (aget ResolverDirectHTTP/properties
+                                            ResolverDirectHTTP/HttpProxyPort))
+          proxyUser (.getProperty this
+                                  context
+                                  (aget ResolverDirectHTTP/properties
+                                        ResolverDirectHTTP/HttpProxyUser))
+          proxyPass (.getProperty this
+                                  context
+                                  (aget ResolverDirectHTTP/properties
+                                        ResolverDirectHTTP/HttpProxyPass))
+          ^:mutable ^Proxy proxy nil]
+      (when (and (some? proxyHostProp) (some? proxyPortProp))
+        (let [port (Integer/parseInt proxyPortProp)]
+          (set! proxy (Proxy. Proxy$Type/HTTP (InetSocketAddress. proxyHostProp port)))))
+      (let [^:mutable ^URLConnection urlConnection nil]
+        (if (some? proxy)
+            (do
+              (set! urlConnection (.openConnection url proxy))
+              (when (and (some? proxyUser) (some? proxyPass))
+                (let [password (java-str proxyUser ":" proxyPass)
+                      authString (java-str "Basic "
+                                           (XMLUtils/encodeToString
+                                             (.getBytes password StandardCharsets/ISO_8859_1)))]
+                  (.setRequestProperty urlConnection "Proxy-Authorization" authString))))
+            (set! urlConnection (.openConnection url)))
+        urlConnection)))
+
+  (method ^:public engineCanResolveURI ^boolean [this ^ResourceResolverContext context]
+    (.debug LOG "I was asked whether I can resolve {}" (new Object/1 [(.-uriToResolve context)]))
+    (cond
+      (nil? (.-uriToResolve context)) (do (.debug LOG "quick fail, uri == null") false)
+      (or (.isEmpty (.-uriToResolve context)) (== (.charAt (.-uriToResolve context) 0) \#))
+        (do (.debug LOG "quick fail for empty URIs and local ones") false)
+      :else
+        (let [uriToResolveScheme (ResolverDirectHTTP/scheme (.-uriToResolve context))]
+          (if (nil? uriToResolveScheme)
+              (let [baseUriScheme (ResolverDirectHTTP/scheme (.-baseUri context))]
+                (when (or (.equals "http" baseUriScheme) (.equals "https" baseUriScheme))
+                  (.debug LOG
+                          "I state that I can resolve {}"
+                          (new Object/1 [(.-uriToResolve context)]))
+                  (return true)))
+              (when (or (.equals uriToResolveScheme "http") (.equals uriToResolveScheme "https"))
+                (.debug LOG
+                        "I state that I can resolve {}"
+                        (new Object/1 [(.-uriToResolve context)]))
+                (return true)))
+          (.debug LOG "I state that I can't resolve {}" (new Object/1 [(.-uriToResolve context)]))
+          false)))
+
+  (method ^:private ^:static getNewURI :throws [URISyntaxException] ^URI [^String uri
+                                                                          ^String baseURI]
+    (let [^:mutable ^URI newUri nil]
+      (if (or (nil? baseURI) (== (.length baseURI) 0))
+          (set! newUri (URI. uri))
+          (set! newUri (.resolve (URI. baseURI) uri)))
+      (if (some? (.getFragment newUri))
+          (URI. (.getScheme newUri) (.getSchemeSpecificPart newUri) nil)
+          newUri)))
+
+  (method ^:private getProperty ^String [this ^ResourceResolverContext context ^String propertyName]
+    (if (.containsKey resolverProperties propertyName)
+        (cast String (.get resolverProperties propertyName))
+        (cast String (.get (.getProperties context) propertyName)))))

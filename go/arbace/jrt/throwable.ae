@@ -506,7 +506,10 @@ runtime and testing frames and jrt's helpers are elided.\n"
           (set! (values info ok) (lookupFrame (subslice (.-Function fr) _ i))))))
     (if ok
       (set! f (lit jframe :goName (.-Function fr) :cls (.-Class info) :method (.-Method info)
-                   :elide (!= (bit-and (.-Flags info) FrameElide) 0)))
+                   :elide (!= (bit-and (.-Flags info) FrameElide) 0)
+                   ;; a class read with its Java lines (its forms' lines the Java source's): its
+                   ;; source file, javac's SourceFile (ClassInfo.Source, j2g's from :java/source)
+                   :src (javaSource (.-Class info))))
       (set! f (demangle (.-Function fr))))
     (set! (.-file f) (.-File fr))
     (when (>= (strings/LastIndexByte (.-file f) \/) 0)
@@ -516,6 +519,17 @@ runtime and testing frames and jrt's helpers are elided.\n"
       (set! (.-file f) (.-src f)))
     (set! (.-line f) (.-Line fr))
     f))
+
+(go/func javaSource
+  "javaSource: the source file of the class named name when it is a Java source's (a .java name:
+a class read with its Java lines), else \"\".\n"
+  ^string [^string name]
+  (.RLock registryMu)
+  (let [c (aget registry name)]
+    (.RUnlock registryMu)
+    (when (or (== c nil) (not (strings/HasSuffix (.-Source (.-info c)) ".java")))
+      (return ""))
+    (.-Source (.-info c))))
 
 (go/func isLiteralOf
   "isLiteralOf: whether callee is a function literal of fn: fn.funcN, or fn.N when fn is itself
@@ -534,6 +548,25 @@ a dispatch method that forwards (§5.4).\n"
   (let [i (strings/LastIndexByte fn \.)
         j (strings/LastIndexByte callee \.)]
     (and (>= i 0) (>= j 0) (== (subslice callee (+ j 1)) (+ "Impl_" (subslice fn (+ i 1)))))))
+
+(go/func isDefaultForwarder
+  "isDefaultForwarder: whether fn (pkg.(*T).M) called callee as the default method it inherits
+(pkg2.J_M, interface J's package function, which T implements): the forwarder of an inherited
+default method (J2G-SPEC §5.4), which HotSpot has no frame for (MultiThreadStackWalk's Call.walk,
+t04614 compiled; queue 582).\n"
+  ^bool [^string fn ^string callee]
+  (let [i (strings/LastIndexByte fn \.)
+        j (strings/LastIndexByte callee \.)]
+    (when (or (< i 1) (< j 1) (!= (aget fn (- i 1)) \)) (== (aget callee (- j 1)) \)))
+      (return false))
+    (let [m (subslice fn (+ i 1))
+          c (subslice callee (+ j 1))
+          o (strings/Index fn ".(*")]
+      (when (or (< o 0) (<= (len c) (+ (len m) 1)) (not (strings/HasSuffix c (+ "_" m))))
+        (return false))
+      (let [k (classOfGo (+ (subslice callee _ j) "." (subslice c _ (- (len c) (len m) 1))))
+            t (classOfGo (+ (subslice fn _ o) "." (subslice fn (+ o 3) (- i 1))))]
+        (and (!= k nil) (!= t nil) (.IsInterface__Z k) (.assignableFrom k t))))))
 
 (go/var ^{:tag Supplier
           :doc "EvalTrace, set by the evaluator (Compiler$Evaluator's static initializer), gives
@@ -571,9 +604,10 @@ Compiler$CF$Rt.describe), nil when it runs none (queue 416).\n"}
 
 (go/type iframe
   "iframe is an interpreted Java frame (Compiler$CF$Rt.describe): its class (nil when unknown), the
-class's and the method's names, the source file, and the flags: 1 entered from outside the interpreter,
-2 hidden (a lambda's class), 4 a static main(String[]).\n"
-  (struct ^{:tag (* Class)} k ^string cls ^string method ^string file ^int32 flags))
+class's and the method's names, the source file, the flags: 1 entered from outside the interpreter,
+2 hidden (a lambda's class), 4 a static main(String[]); and the line (-1 when unknown: a class read
+without its Java lines).\n"
+  (struct ^{:tag (* Class)} k ^string cls ^string method ^string file ^int32 flags ^int line))
 
 (go/func strOf ^string [^any x]
   (let [(values s ok) (assert (* String) x)]
@@ -593,13 +627,17 @@ class's and the method's names, the source file, and the flags: 1 entered from o
           ^{:tag (slice iframe)} fs nil]
       (when (or (not ok2) (== a nil))
         (return nil))
-      (for [i 0] (< (+ i 4) (len (.-A a))) (set! i (+ i 5))
+      (for [i 0] (< (+ i 5) (len (.-A a))) (set! i (+ i 6))
         (let [x (.-A a)
               (values k _) (assert (* Class) (aget x i))
               (values fl _) (Unbox Prim_int (aget x (+ i 4)))
-              (values f _) (assert int32 fl)]
+              (values f _) (assert int32 fl)
+              (values ln _) (Unbox Prim_int (aget x (+ i 5)))
+              (values l ok3) (assert int32 ln)]
+          (when (not ok3)
+            (set! l -1))
           (set! fs (append fs (lit iframe :k k :cls (strOf (aget x (+ i 1))) :method (strOf (aget x (+ i 2)))
-                                   :file (strOf (aget x (+ i 3))) :flags f)))))
+                                   :file (strOf (aget x (+ i 3))) :flags f :line (conv int l))))))
       fs)))
 
 (go/func isInterpEntry
@@ -731,7 +769,11 @@ marked, the top's exception frames kept).\n"
   (let [^{:tag (slice any)} ev nil
         ^{:tag (slice jframe)} fs nil
         top (not walk)
-        stop false]
+        stop false
+        ;; the interpreter's frames since the last frame shown popped their reflective call once
+        ;; (java-stack-1124: each of its frames popped again, a reflective call the program made,
+        ;; m.invoke(...), went with the interpreter's own: HiddenFrames, t04613)
+        popped false]
     (when (!= evals nil)
       (set! ev (.-A evals)))
     (range [i fr raw]
@@ -751,7 +793,8 @@ marked, the top's exception frames kept).\n"
                 :else
                 (do
                   (set! top false)
-                  (set! fs (append fs (lit jframe :cls (.-cls x) :method (.-method x) :file (.-file x) :line -1
+                  (set! popped false)
+                  (set! fs (append fs (lit jframe :cls (.-cls x) :method (.-method x) :file (.-file x) :line (.-line x)
                                            :k (.-k x) :hidden (!= (bit-and (.-flags x) 2) 0))))))
               (when (!= (bit-and (.-flags x) 1) 0)
                 (when (!= (bit-and (.-flags x) 4) 0)
@@ -759,13 +802,15 @@ marked, the top's exception frames kept).\n"
                 (break))))
           ;; the interpreter's own frames; a reflective call it made (a method of compiled code) not shown
           (isInterpInternal (.-Function fr))
-          (let [popped false]
-            (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
-              (when (.-rcall (aget fs (- (len fs) 1)))
-                (when popped
-                  (break))
-                (set! popped true))
-              (set! fs (subslice fs _ (- (len fs) 1)))))
+          (when (not popped)
+            (set! popped true)
+            (let [rc false]
+              (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
+                (when (.-rcall (aget fs (- (len fs) 1)))
+                  (when rc
+                    (break))
+                  (set! rc true))
+                (set! fs (subslice fs _ (- (len fs) 1))))))
           ;; an evaluated fn's or method's call (the evaluator's try body): its Clojure frame,
           ;; the evaluator's own frames elided (J2G-SPEC §10.7)
           (isEvalCall (.-Function fr))
@@ -774,6 +819,7 @@ marked, the top's exception frames kept).\n"
                   file ""]
               (set! ev (subslice ev 1))
               (set! top false)
+              (set! popped false)
               (when (!= (.-fileName e) nil)
                 (set! file (.String (.-fileName e))))
               (set! fs (append fs (lit jframe :cls (.String (.-declaringClass e)) :method (.String (.-methodName e))
@@ -781,8 +827,14 @@ marked, the top's exception frames kept).\n"
           ;; the evaluator's interop: compiled code calls the method directly, so the
           ;; reflective call's frames (Reflector, Method.invoke) above it are not shown
           (isEvalInterop (.-Function fr))
-          (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
-            (set! fs (subslice fs _ (- (len fs) 1))))
+          (do
+            (while (and (> (len fs) 0) (.-refl (aget fs (- (len fs) 1))))
+              (set! fs (subslice fs _ (- (len fs) 1))))
+            ;; a compiled main the evaluator called (a launch: java-check's run.ae, the compiled
+            ;; level): no frame below it, as below an interpreted main entered from outside the
+            ;; interpreter and the JVM's launcher's (WalkFunction, t04618)
+            (when (and (> (len fs) 0) (== (.-method (aget fs (- (len fs) 1))) "main"))
+              (set! stop true)))
           ;; an interpreted Go function's run (goi's call body): its Go frame, goi's other
           ;; frames (its nodes) and the table's (invokers, adapters) elided (GOI-SPEC.md §10.6)
           (== (.-Function fr) "arbace/goi.run")
@@ -790,6 +842,7 @@ marked, the top's exception frames kept).\n"
             (let [g (aget goi 0)]
               (set! goi (subslice goi 1))
               (set! top false)
+              (set! popped false)
               (set! fs (append fs (lit jframe :cls (.-NS g) :method (.-Name g) :file (.-File g) :line (.-Line g))))))
           (or (strings/HasPrefix (.-Function fr) "arbace/goi.") (strings/HasPrefix (.-Function fr) "arbace/goi/")
               (strings/HasPrefix (.-Function fr) "arbace/gotable."))
@@ -798,6 +851,9 @@ marked, the top's exception frames kept).\n"
           (.-elide f) (do)
           ;; a forwarder: its callee is the implementation Impl_M of its method M
           (and (> i 0) (isForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))
+          (do)
+          ;; an inherited default method's forwarder: its callee is the interface's J_M
+          (and (> i 0) (isDefaultForwarder (.-Function fr) (.-Function (aget raw (- i 1)))))
           (do)
           ;; the guarded entry of a static method of a class initialized at start: its callee
           ;; is the method's guard-free entry C_m_NoInit (Futamura F4, arbace/j2g/start.ae)
@@ -815,11 +871,17 @@ marked, the top's exception frames kept).\n"
           :else
           (do
             (set! top false)
+            (set! popped false)
             (set! (.-refl f) (isReflection (.-Function fr)))
             (set! (.-rcall f) (isReflectCall (.-Function fr)))
             (when walk
               (set! (.-k f) (ForName (.-cls f)))
-              (set! (.-hidden f) (strings/HasPrefix (.-cls f) "java.lang.invoke.")))
+              ;; java.lang.invoke's internals, jrt's own invokers of method handles
+              ;; (jdk.internal.jrt.Invokers: GetCallerClassTest's invokeExact, t04612) and a
+              ;; lambda's class (HiddenFrames, t04613): hidden, as the JVM's hidden classes
+              (set! (.-hidden f) (or (strings/HasPrefix (.-cls f) "java.lang.invoke.")
+                                     (strings/HasPrefix (.-cls f) "jdk.internal.jrt.Invokers")
+                                     (strings/Contains (.-cls f) "$$Lambda"))))
             (set! fs (append fs f))))))
     ;; interpreted frames whose entry's Go frame is not among the captured ones (a trace's 1024 Go
     ;; frames end in the interpreter): the frames below the last captured, in order
@@ -827,7 +889,7 @@ marked, the top's exception frames kept).\n"
       (let [x (aget it 0)]
         (set! it (subslice it 1))
         (when (or walk (== (bit-and (.-flags x) 2) 0))
-          (set! fs (append fs (lit jframe :cls (.-cls x) :method (.-method x) :file (.-file x) :line -1
+          (set! fs (append fs (lit jframe :cls (.-cls x) :method (.-method x) :file (.-file x) :line (.-line x)
                                    :k (.-k x) :hidden (!= (bit-and (.-flags x) 2) 0)))))
         (when (== (bit-and (.-flags x) 5) 5)
           (set! stop true))))

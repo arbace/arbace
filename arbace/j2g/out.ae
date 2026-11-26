@@ -47,6 +47,12 @@
 
 (declare write-form)
 
+(defn- java-source
+  "The source file of class n read with its Java lines (repr/java read --line-numbers): the
+  :java/source of its outermost declared class, or nil."
+  [n]
+  (some #(:java/source (:meta (a/decl %))) (take-while some? (iterate #(some-> % a/decl :outer) n))))
+
 ;; The layout of the forms text (J2G-SPEC §4.3, §7.9.6): a form carrying :j2g/line (the class
 ;; forms line of the statement or member it comes from) is written on that line of the file
 ;; when the text has not passed it yet, so that the reader's position is that line; else it
@@ -496,6 +502,25 @@ java-bytecode-1122 MalformedParametersException's (a class defined from bytes' M
    ["jdk/internal/jrt/AccessFlagSupport" "executableAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]
    ["jdk/internal/jrt/AccessFlagSupport" "fieldAccessFlags" "(ILjava/lang/Class;)Ljava/util/Set;"]])
 
+(def protection-domain-classes
+  "What Class.getProtectionDomain (out/support-forms; java-tail-1125) makes: jdk26u's allPermDomain's classes."
+  ["java/security/ProtectionDomain" "java/security/Permissions" "java/security/AllPermission"])
+
+(def protection-domain-ctor "(Ljava/security/CodeSource;Ljava/security/PermissionCollection;)V")
+
+(def protection-domain-roots
+  "What Class.getProtectionDomain (out/support-forms; java-tail-1125) calls, roots of the program."
+  [["java/security/ProtectionDomain" "<init>" protection-domain-ctor]
+   ["java/security/Permissions" "<init>" "()V"]
+   ["java/security/Permissions" "add" "(Ljava/security/Permission;)V"]
+   ["java/security/AllPermission" "<init>" "()V"]])
+
+(defn protection-domain?
+  "Whether j2g writes Class.getProtectionDomain (java-tail-1125): jrt's Class hand-written, the domain's classes
+  translated."
+  []
+  (and (m/hand-written? "java/lang/Class") (every? m/translated? protection-domain-classes)))
+
 (defn type-annotations?
   "Whether j2g writes Class, Method, Constructor and Field's getAnnotated* (JCS271 (b)): TypeAnnotationParser and
   jrt's TypeAnnotationSupport translated."
@@ -694,6 +719,20 @@ java-bytecode-1122 MalformedParametersException's (a class defined from bytes' M
            "DescribeConstable__Optional is Class.describeConstable: Optional.of the ClassDesc of its descriptor.\n"
            ^{:tag (* Optional)} [^{:tag (* Class)} c]
            (Optional_Of_O__Optional (ClassDesc_OfDescriptor_String__ClassDesc (.DescriptorString__String c))))])
+     ;; Class.getProtectionDomain (java-tail-1125, jdk26u's Proxy/Basic1): the closed world has no code sources nor
+     ;; class loaders that define classes, so every class's domain is jdk26u's allPermDomain, the bootstrap
+     ;; classes' (Class.getProtectionDomain of a class without one: no code source, AllPermission); a new one a call
+     ;; (main.ae's scan names the method, its roots the calls)
+     (when (protection-domain?)
+       [(list 'go/method 'GetProtectionDomain__ProtectionDomain
+              "GetProtectionDomain__ProtectionDomain is Class.getProtectionDomain: jdk26u's allPermDomain (no code source, AllPermission).\n"
+              (with-meta [(tag 'c '(* Class))] {:tag (m/go-type :jrt "Ljava/security/ProtectionDomain;")})
+              (list 'let ['perms (list (m/class-sym :jrt "java/security/Permissions" "_New"))]
+                    (list (symbol (str "." (nm/method-base "add" "(Ljava/security/Permission;)V"))) 'perms
+                          (list (m/class-sym :jrt "java/security/AllPermission" "_New")))
+                    (list 'return (list (m/class-sym :jrt "java/security/ProtectionDomain"
+                                                     (str "_" (subs (nm/new-name "X" protection-domain-ctor) 2)))
+                                        nil 'perms))))])
      ;; Runtime.Version's parts of translated types (JCS304 (b) with JCS293, doc/classes/JAVA-DEFERRED-TRIAGE.md,
      ;; "As built: JCS304 (b), JCS293"): pre, build and optional as Optionals, version as List.of the numbers; jrt's
      ;; Runtime$Version (system.go) holds the parts (main.ae's world-scan names these methods, its roots their calls)
@@ -841,15 +880,27 @@ module is this one, and the packages of module_table.ae for a named module, as a
                 "AccessFlags__Set is Field.accessFlags: AccessFlagSupport.fieldAccessFlags of the modifiers.\n"
                 (with-meta [(tag 'f '(* Field))] {:tag set-t})
                 '(AccessFlagSupport_FieldAccessFlags_I_Class__Set (.GetModifiers__I f) (.GetDeclaringClass__Class f)))]))
+     ;; Executable.accessFlags for translated calls on an Executable (m/support-call-helpers; java-tail-1125, t04832):
+     ;; the receiver null-checked, then its own Method's or Constructor's accessFlags above
+     (when (access-flags?)
+       [(list 'go/func 'J2g_ExecutableAccessFlags
+              "J2g_ExecutableAccessFlags is Executable.accessFlags: the Method's or the Constructor's (jdk26u's Executable.accessFlags).\n"
+              (with-meta [(tag 'e (m/go-type :jrt "Ljava/lang/reflect/Executable;"))] {:tag (m/go-type :jrt "Ljava/util/Set;")})
+              '(when (== e nil) (panic (NPE)))
+              '(let [(values m ok) (assert (* Method) e)]
+                 (when ok (return (.AccessFlags__Set m))))
+              '(return (.AccessFlags__Set (assert (* Constructor) e))))])
      ;; Method and Constructor's getParameters (JCS280 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS280
-     ;; (a)"): jdk26u's Executable.synthesizeAllParams, the Go build recording no MethodParameters: arg0, arg1, ...,
-     ;; modifiers 0, a new array of new Parameters each call (jdk26u's copies its cached array)
+     ;; (a)"; queue 563, JCS280 (a) reversed by the user): jdk26u's Executable.getParameters, a new array of new Parameters
+     ;; each call (jdk26u's copies its cached array): the recorded MethodParameters attribute (jrt's executableParameters
+     ;; over the W records: arbace.classes.annot's for the forms, a name or none, javac's index 0, and the flags;
+     ;; arbace.lang.Bytecode's for a class defined from bytes), else synthesizeAllParams' arg0, arg1, ..., modifiers 0
      (when (parameters?)
        (for [t ['Method 'Constructor]]
          (list 'go/method 'GetParameters__Parameter1
-               (str "GetParameters__Parameter1 is " t ".getParameters (Executable's): the synthesized parameters, arg0 ... with
-modifiers 0 (jdk26u's synthesizeAllParams: no MethodParameters records in the Go build); a class defined from bytes'
-MethodParameters (java-bytecode-1122: classdata.ae's W records) by jdk26u's privateGetParameters and verifyParameters.\n")
+               (str "GetParameters__Parameter1 is " t ".getParameters (Executable's): the recorded MethodParameters
+(classdata.ae's W records: arbace.classes.annot's, queue 563; a class defined from bytes', java-bytecode-1122) by jdk26u's
+privateGetParameters and verifyParameters, else the synthesized parameters, arg0 ... with modifiers 0 (synthesizeAllParams).\n")
                (with-meta [(tag 'e (list '* t))] {:tag '(* RefArray)})
                '(let [n (.GetParameterCount__I e)
                       a (NewRefArray Parameter_class n)
@@ -874,6 +925,20 @@ MethodParameters (java-bytecode-1122: classdata.ae's W records) by jdk26u's priv
      ;; built: JCS271 (b) (write-ahead)"): jdk26u's bodies in jrt's own Java jdk.internal.jrt.TypeAnnotationSupport
      (when (type-annotations?)
        (ta-support-forms))
+     ;; Executable's getAnnotated* for translated calls on an Executable (m/support-call-helpers; queue 564): the
+     ;; receiver null-checked, then TypeAnnotationSupport's method, which takes a Method or a Constructor
+     (when (type-annotations?)
+       (for [[jm arr] m/executable-type-annotation-methods
+             :let [f (str "J2g_Executable" (str/upper-case (subs jm 0 1)) (subs jm 1))
+                   sm (str/lower-case (subs jm 3 4)) sm (str sm (subs jm 4))
+                   ret (if arr '(* RefArray) (m/go-type :jrt "Ljava/lang/reflect/AnnotatedType;"))
+                   target (symbol (str "TypeAnnotationSupport_" (str/upper-case (subs sm 0 1)) (subs sm 1)
+                                       "_Executable__AnnotatedType" (when arr "1")))]]
+         (list 'go/func (symbol f)
+               (str f " is Executable." jm ": TypeAnnotationSupport." sm " (jdk26u's).\n")
+               (with-meta [(tag 'e (m/go-type :jrt "Ljava/lang/reflect/Executable;"))] {:tag ret})
+               '(when (== e nil) (panic (NPE)))
+               (list 'return (list target 'e)))))
      ;; java.util.Date's default zone (JRT-NOTES.md, "Time"): jrt's Date computes its local
      ;; fields, toString's zone name and its local constructors through jrt's DateZone hooks,
      ;; which jrt's own Java jdk.internal.jrt.DefaultZone answers over the translated TimeZone
@@ -1055,6 +1120,14 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
 (m/j2g-static?).\n"
              (with-meta [] {:tag (m/go-type :jrt "Ljava/util/Properties;")})
              '(J2g_SystemGetProperties)))
+     ;; System.getLogger(name) (queue 562, the user's JMS4; m/j2g-static?): jrt's SystemLoggers' logger as the
+     ;; translated overlay java.lang.System$Logger
+     (when (and (m/translated? "java/lang/System$Logger") (m/translated? "jdk/internal/jrt/SystemLoggers"))
+       (let [d "(Ljava/lang/String;)Ljava/lang/System$Logger;"]
+         (list 'go/func (symbol (str "System_" (nm/method-base "getLogger" d)))
+               "System.getLogger(name) as translated code calls it (m/j2g-static?): SystemLoggers.getSystemLogger.\n"
+               (with-meta [(tag 'name (m/go-type :jrt "Ljava/lang/String;"))] {:tag (m/go-type :jrt "Ljava/lang/System$Logger;")})
+               (list (symbol (str (m/go-name "jdk/internal/jrt/SystemLoggers") "_" (nm/method-base "getSystemLogger" d))) 'name))))
      ;; Thread.getAllStackTraces() (JCS320 (a), doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JCS320 (a)";
      ;; m/j2g-static?): jdk26u's map of the live threads (HostManagement's threads0) to their stacks (its stackTrace0:
      ;; the current thread's, a waiting thread's as it began to wait, else none, F13's records)
@@ -1311,8 +1384,20 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
           ;; reflection gives them (getParameterTypes), which the interpreter's env drops (inner-member?); a
           ;; local or anonymous class's captures and a super-outer stay out
           dd (a/decl n)
-          inner-ctor? (fn [ps rps] (and (:outer-instance? dd) (= :member (:nesting dd)) (nil? (:super-outer dd))
-                                        (= (count rps) (inc (count ps)))))
+          inner-ctor? (fn [ps rps] (or (and (:outer-instance? dd) (= :member (:nesting dd)) (nil? (:super-outer dd))
+                                            (= (count rps) (inc (count ps))))
+                                       ;; an enum's constructors (queue 564, jdk26u's EnumConstructorAnnotation): the
+                                       ;; name and the ordinal first, as the JVM's reflection gives them (javac's
+                                       ;; descriptor; jrt's Constructor.newInstance refuses an enum's, as the JDK's)
+                                       (and (= :enum (:kind dd)) (not (:outer-instance? dd)) (nil? (:super-outer dd))
+                                            (= (count rps) (+ 2 (count ps))))
+                                       ;; a local or anonymous class's (queue 564, jdk26u's GetAnnotatedReceiverType):
+                                       ;; its outer instance first, as javac's descriptor; since java-tail-1125 (CaptureTest)
+                                       ;; also one that captures, its captured locals last, as javac's Lower appends them
+                                       ;; (a/ctor-real-desc's order: the analyzer's first use, javac's freevars' too)
+                                       (and (#{:local :anon} (:nesting dd)) (nil? (:super-outer dd))
+                                            (= (count rps) (+ (if (:outer-instance? dd) 1 0) (count ps)
+                                                              (count (:captures @(:state dd))))))))
           ctors (for [mm (d/class-methods n)
                       :when (and (public? mm) (= "<init>" (:name mm)) (not abstract) (not iface))
                       :let [real (a/ctor-real-desc n mm)
@@ -1323,8 +1408,10 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                       {:line (str "C" (bit-and (:flags mm) 0x1fff) " " (dotted-desc real))
                        :body [(list 'return (apply list (symbol (nm/new-name g real))
                                                    (map-indexed (fn [i p] (arg-conv pkg p (list 'aget 'args i))) rps)))]}))
-          fields (for [f (d/class-fields n)
-                       :when (or (public? f) (and serial (m/serial-field? f)))
+          ;; a --program's own class's synthetic fields too (this$N, val$x), as the interpreter's (java-tail-1125)
+          fields (for [f (concat (when (and own (not iface)) (d/synthetic-fields n)) (d/class-fields n))
+                       ;; the reflection roots' fields (m/reflection-roots: the user's short list of 2026-11-24)
+                       :when (or (public? f) (and serial (m/serial-field? f)) (m/reflection-root-field? n f))
                        :let [static (m/static? f)
                              place (if static (symbol (nm/static-field-name g (:name f)))
                                        (list (symbol (str ".-" (nm/field-name (:name f))))
@@ -1419,8 +1506,10 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                                   (when-not (= :top (:nesting dd))
                                     [:Simple (or (:simple dd) "")])
                                   [:Go (str (nm/pkg-path pkg) "." g)]
-                                  ;; a compiled namespace's class: its source file (standalone S6)
-                                  (when-let [src (:c2j/source (:meta dd))] [:Source src])
+                                  ;; a compiled namespace's class: its source file (standalone S6); a class
+                                  ;; read with its Java lines (repr/java read --line-numbers): its source
+                                  ;; file, its top-level class's :java/source (javac's SourceFile)
+                                  (when-let [src (or (:c2j/source (:meta dd)) (java-source n))] [:Source src])
                                   (when annots [:Annots annots]))))))
        (list 'go/func 'init []
              (list* 'let ['i (list '.Info cls-sym)]
@@ -1454,24 +1543,39 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
   registered by name only, so that Class.forName finds them and nothing is their instance
   (\"cut\" classes, J2G-SPEC §4.1)."
   [pkg classes]
-  (for [n (sort classes)]
+  (for [n (sort classes)
+        ;; its superinterfaces in the world, one outside standing for its own (as a class's ifaces
+        ;; above): an annotation type's java.lang.annotation.Annotation, so that
+        ;; Class.forName("java.lang.SuppressWarnings").asSubclass(Annotation.class) holds (JCS51's
+        ;; TestElementsAnnotatedWith; queue 575)
+        :let [is (distinct (mapcat (fn up [i] (if (m/in-world? i) [i] (mapcat up (:interfaces (env/info i)))))
+                                   (:interfaces (env/info n))))
+              ;; an annotation type is one (Class.isAnnotation: RoundEnvironment.getElementsAnnotatedWith's check)
+              ann (some-> (:flags (env/info n)) (bit-and 0x2000) pos?)]]
     (list 'go/var (symbol (str (m/go-name n) "_class"))
           (list (m/jrt-sym pkg "Define")
-                (list 'addr (list 'lit (m/jrt-sym pkg "ClassInfo")
-                                  :Name (java-name n)
-                                  :Modifiers 1 :Kind (if (env/interface? n) (m/jrt-sym pkg "KindInterface") (m/jrt-sym pkg "KindClass"))
-                                  ;; its first superclass in the world (SecurityException's
-                                  ;; RuntimeException: a multi-catch's lub, JC5), else Object
-                                  :Super (when-not (env/interface? n)
-                                           (let [sup (loop [s (:super (env/info n))]
-                                                       (cond (nil? s) nil
-                                                             (= s "java/lang/Object") nil
-                                                             (m/in-world? s) s
-                                                             :else (recur (:super (env/info s)))))]
-                                             (if sup
-                                               (c/class-val (str "L" sup ";"))
-                                               (m/jrt-sym pkg "Object_class"))))
-                                  :Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")))))))
+                (list 'addr (apply list 'lit (m/jrt-sym pkg "ClassInfo")
+                                  (concat
+                                   [:Name (java-name n)
+                                    :Modifiers (if ann (bit-and (:flags (env/info n)) 0x761f) 1)
+                                    :Kind (cond ann (m/jrt-sym pkg "KindAnnotation")
+                                                (env/interface? n) (m/jrt-sym pkg "KindInterface")
+                                                :else (m/jrt-sym pkg "KindClass"))
+                                    ;; its first superclass in the world (SecurityException's
+                                    ;; RuntimeException: a multi-catch's lub, JC5), else Object
+                                    :Super (when-not (env/interface? n)
+                                             (let [sup (loop [s (:super (env/info n))]
+                                                         (cond (nil? s) nil
+                                                               (= s "java/lang/Object") nil
+                                                               (m/in-world? s) s
+                                                               :else (recur (:super (env/info s)))))]
+                                               (if sup
+                                                 (c/class-val (str "L" sup ";"))
+                                                 (m/jrt-sym pkg "Object_class"))))]
+                                   (when (seq is)
+                                     [:Interfaces (apply list 'lit (list 'slice (list '* (m/jrt-sym pkg "Class")))
+                                                         (map #(c/class-val (str "L" % ";")) is))])
+                                   [:Go (str (nm/pkg-path pkg) "." (m/go-name n) " (cut)")])))))))
 
 (defn support-table-forms
   "The member table entries of jrt's statics and methods that j2g writes (J2G-NOTES.md, phase
@@ -1523,6 +1627,7 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
         pst-s? (m/translated? "java/io/PrintStream")
         getenv? (and (m/translated? "java/util/HashMap") (m/translated? "java/util/Collections"))
         props? (m/translated? "java/util/Properties")
+        logger? (and (m/translated? "java/lang/System$Logger") (m/translated? "jdk/internal/jrt/SystemLoggers"))
         ;; Runtime.exec over the translated ProcessBuilder, through jrt's own Java RuntimeExec
         ;; (JRT-NOTES.md, "Processes")
         exec? (m/translated? "jdk/internal/jrt/RuntimeExec")
@@ -1559,8 +1664,13 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                    ;; "No accessible method describeConstable in java.lang.Class")
                    (when (and (m/hand-written? "java/lang/Class") (m/translated? "java/lang/constant/Constable")
                               (m/translated? "java/util/Optional") (m/translated? "java/lang/constant/ClassDesc"))
-                     [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* Class)) this)))]))]
-    (when (or (seq str-ms) (seq cls-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks?
+                     [(sig "describeConstable" [] 'Optional_class 0x1 '(.DescribeConstable__Optional ((inst As (* Class)) this)))])
+                   ;; Class.getProtectionDomain (support-forms; java-tail-1125), for the interpreter ("No accessible
+                   ;; method getProtectionDomain in java.lang.Class")
+                   (when (protection-domain?)
+                     [(sig "getProtectionDomain" [] 'ProtectionDomain_class 0x1
+                           '(.GetProtectionDomain__ProtectionDomain ((inst As (* Class)) this)))]))]
+    (when (or (seq str-ms) (seq cls-ms) streams? loaders? ci? pst-w? pst-s? getenv? instant? props? exec? flags? tann? inherited? ver-opt? ver-list? stacks? logger?
               (parameters?) string-transform? object-finalize?)
       [(apply list 'go/func 'init []
               (concat
@@ -1675,6 +1785,15 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                           (append (.-Methods (.Info System_class))
                                   (lit MethodInfo :Name "getProperties" :Return Properties_class :Modifiers 0x9
                                        :Invoke (fn ^any [^any this ^{:tag (slice any)} args] (J2g_SystemGetProperties)))))])
+                (when logger?
+                  (let [d "(Ljava/lang/String;)Ljava/lang/System$Logger;"]
+                    [(list 'set! '(.-Methods (.Info System_class))
+                           (list 'append '(.-Methods (.Info System_class))
+                                 (list 'lit 'MethodInfo :Name "getLogger" :Params '(lit (slice (* Class)) String_class)
+                                       :Return (symbol (str (m/go-name "java/lang/System$Logger") "_class")) :Modifiers 0x9
+                                       :Invoke (list 'fn (with-meta [(tag 'this 'any) (tag 'args '(slice any))] {:tag 'any})
+                                                     (list (symbol (str "System_" (nm/method-base "getLogger" d)))
+                                                           '((inst As (* String)) (aget args 0)))))))]))
                 (when (and props? (m/translated? "java/util/Iterator"))
                   ['(set! (.-Methods (.Info System_class))
                           (append (.-Methods (.Info System_class))
@@ -1891,7 +2010,8 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
 
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
-  cannot read back (names with _ or $)."
+  cannot read back (names with _ or $, or not starting with a lower case letter: the demangler
+  lowers the Go name's first letter, GenerifyStackTraces' A(), t04684)."
   [pkg classes]
   (let [entries (for [n classes
                       :when (a/decl n)
@@ -1899,7 +2019,9 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                       mm (d/class-methods n)
                       ;; and a package-private family's, renamed (JCS122)
                       :let [gm (m/go-mname n (:name mm) (:desc mm))]
-                      :when (and (not= "<init>" (:name mm)) (or (re-find #"[_$]" (:name mm)) (not= gm (:name mm))))
+                      :when (and (not= "<init>" (:name mm))
+                                 (or (re-find #"[_$]" (:name mm)) (not= gm (:name mm))
+                                     (not (Character/isLowerCase (.charAt ^String (:name mm) 0)))))
                       :let [base (nm/method-base gm (:desc mm))
                             static (m/static? mm)
                             iface (m/interface? n)

@@ -869,7 +869,7 @@ covers what.
   classes' files of `src/java.base/share/classes`) as repr/java converts them, with the changes they
   name: Copyright (c) Oracle and/or its affiliates, under the GNU General Public License version 2
   with the Classpath Exception (text below); the rest of those files, the variants `Subject.ae`,
-  `PortConfig.ae`, `RegisteredDomain.ae` and `OCSP.ae`, and
+  `PortConfig.ae` and `RegisteredDomain.ae`, and
   `overlay/jdk/java.base/jdk/internal/event/EventHelper.java` (with jdk26u's names and signatures),
   `jdk/internal/jrt/PkiAccess.java` and `sun/security/provider/PkiServices.java` (its service class
   names are jdk26u's providers') are Arbace's own. Their jdk26u sources join `jdk/forms/` (the
@@ -906,7 +906,7 @@ covers what.
   the GNU General Public License version 2 with the Classpath Exception (text below); the rest of those files,
   `overlay/jdk/java.base/jdk/internal/jrt/FieldUpdaters.java`, `java/sql/DriverManager.java` (with jdk26u's
   names and signatures), the variant `Scanner.ae` (F16), `sun/nio/cs/JrtCharsets.java` (its class names are
-  jdk26u's charsets'), `jdk/internal/jrt/CharsetStrings.java` (F8), `jdk/internal/jrt/HostFileChannels.java`
+  jdk26u's charsets'), `sun/nio/cs/ext/ExtendedCharsets.java` (java-rows-1124; its names and aliases jdk26u's), `jdk/internal/jrt/CharsetStrings.java` (F8), `jdk/internal/jrt/HostFileChannels.java`
   (F7), `java/net/HostDatagramSocketImpl.java`, `jdk/internal/jrt/HostDatagram.java` and the variants
   `NetworkInterface.ae`, `InterfaceAddress.ae` (F11) are Arbace's own. Their jdk26u sources join `jdk/forms/`
   once `bin/jrt-convert update` has run: 27 files of small-members-sources (19 of `src/java.base/share/classes`,

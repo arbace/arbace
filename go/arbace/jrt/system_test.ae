@@ -289,3 +289,33 @@ reference enqueues by hand; System.runFinalization keeps the interrupt status.\n
         (.Error t "runFinalization cleared the interrupt status")))
     (when (not (PhantomReference_InstanceOf pk))
       (.Error t "instanceof PhantomReference"))))
+
+;; finalization (the user's JMS1 (a), 2026-11-24; finalize.ae): a finalizable object no longer reachable has its
+;; finalize() run once, on the thread "Finalizer" or by runFinalization's "Secondary finalizer", never the caller's
+
+(go/type finTest
+  "finTest is a Java object whose class declares finalize(): it sends the running thread's name; padded past Go's
+tiny allocator by the channel.\n"
+  (struct objectInstance ^{:tag (chan string)} ch))
+
+(go/method Finalize__V [^{:tag (* finTest)} f]
+  (>! (.-ch f) (.String (.GetName__String (CurrentThread)))))
+
+(go/func finDrop "finDrop makes a finalizable finTest and drops it.\n" [^{:tag (chan string)} ch]
+  (RegisterFinalizer (addr (lit finTest :ch ch))))
+
+(go/func TestFinalization [^{:tag (* testing/T)} t]
+  (let [ch (make (chan string) 4)
+        ^string name ""]
+    (finDrop ch)
+    (for [i 0] (and (< i 50) (== name "")) (inc! i)
+      (System_RunFinalization__V)
+      (select
+        (case [n (<! ch)] (set! name n))
+        (case (<! (time/After (* 20 time/Millisecond))))))
+    (when (and (!= name "Finalizer") (!= name "Secondary finalizer"))
+      (.Errorf t "finalize() not run on a finalizer thread: %q" name))
+    (System_RunFinalization__V)
+    (select
+      (case [n (<! ch)] (.Errorf t "finalize() run twice (%q)" n))
+      (default))))

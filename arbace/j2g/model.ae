@@ -125,10 +125,14 @@
   System.getProperties(), a Properties (out.ae; JRT-NOTES.md, \"Text and locales\":
   StaticProperty reads it); System.setProperties(Properties) (java-design-1123: GetSystemProperties,
   t04794); SharedSecrets' serialization accessors (JCS167: serial-accessors), when their interfaces are
-  translated; Thread.getAllStackTraces(), a HashMap (JCS320 (a))."
+  translated; Thread.getAllStackTraces(), a HashMap (JCS320 (a)); System.getLogger(String), a System$Logger (queue 562)."
   [cls base]
   (or (and (= cls "java/lang/System") (= base "GetProperties__Properties")
            (translated? "java/util/Properties"))
+      ;; System.getLogger(String) (queue 562, the user's JMS4): over jrt's SystemLoggers, when the overlay
+      ;; System$Logger is translated
+      (and (= cls "java/lang/System") (= base (nm/method-base "getLogger" "(Ljava/lang/String;)Ljava/lang/System$Logger;"))
+           (translated? "java/lang/System$Logger") (translated? "jdk/internal/jrt/SystemLoggers"))
       (and (= cls "java/lang/System") (= base "SetProperties_Properties__V")
            (translated? "java/util/Properties") (translated? "java/util/Iterator"))
       (and (= cls "java/lang/Thread") (= base "GetAllStackTraces__Map")
@@ -329,6 +333,14 @@
    ;; (jdk.internal.jrt.javac.FileManager's DirLoader, arbace.lang.Bytecode), extend AbstractProcessor; javac's tool
    ;; world alone, as F6's
    "javax/annotation/processing/AbstractProcessor"
+   ;; queue 575: the language model's visitors, which the test library's JavacTestingAbstractProcessor's visitors extend
+   ;; (their Preview versions) and a processor's anonymous visitors extend in turn (TestMissingElement); javac's tool
+   ;; world alone
+   "javax/lang/model/util/AbstractAnnotationValueVisitorPreview" "javax/lang/model/util/AbstractElementVisitorPreview"
+   "javax/lang/model/util/AbstractTypeVisitorPreview" "javax/lang/model/util/ElementKindVisitorPreview"
+   "javax/lang/model/util/ElementScannerPreview" "javax/lang/model/util/SimpleAnnotationValueVisitorPreview"
+   "javax/lang/model/util/SimpleElementVisitorPreview" "javax/lang/model/util/SimpleTypeVisitorPreview"
+   "javax/lang/model/util/TypeKindVisitorPreview"
    ;; F12 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: F12 (write-ahead)"): the java.net classes the URL and
    ;; HTTP tests extend (their own authenticators, proxy selectors, sockets, server sockets, URL connections,
    ;; cached responses) and the reader one of them does
@@ -402,7 +414,7 @@
    ;; n-java-defer, round 54 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: n-java-defer (round 54)"): the translated
    ;; classes the interp cell's "cannot extend" rows extend (21 rows on e8e0d017243dca8a9f9f): JAAS's text callback
    ;; handler (7), the barrier, the map, the file stream (2 each), and one test each for the rest; CountDownLatch is
-   ;; jrt's hand-written (no class interface: JC4c's way, not a line here)
+   ;; jrt's hand-written (its class interface since java-rows-1124, below)
    "com/sun/security/auth/callback/TextCallbackHandler" "java/util/concurrent/CyclicBarrier"
    "java/util/concurrent/ConcurrentHashMap" "java/io/FileOutputStream" "java/io/IOException" "java/math/BigDecimal"
    "java/util/Hashtable" "java/net/SocketAddress" "java/net/ResponseCache" "java/util/ResourceBundle"
@@ -431,7 +443,10 @@
    "java/net/URLClassLoader" "javax/management/StandardMBean"
    ;; queue 517's leftover (java-design-1122): java.nio.channels.FileLock, whose protected constructors FileLockConstructor
    ;; (t05150) calls from its own subclass ("No accessible constructor of java.nio.channels.FileLock")
-   "java/nio/channels/FileLock"])
+   "java/nio/channels/FileLock"
+   ;; java-rows-1124: jrt's hand-written CountDownLatch and Semaphore, made non-leaf with class interfaces (JC4c's way), which
+   ;; Timer/Args's latches (t05653) and PermitOverflow's Sem with its protected reducePermits (t05707) extend
+   "java/util/concurrent/CountDownLatch" "java/util/concurrent/Semaphore"])
 
 (def ^:private proxy-super? (set (concat proxy-supers class-supers)))
 
@@ -704,6 +719,20 @@
   serialPersistentFields (getDeclaredSUID, getDeclaredSerialFields)?"
   [f]
   (or (not (static? f)) (#{"serialVersionUID" "serialPersistentFields"} (:name f))))
+
+(def reflection-roots
+  "Members of the world's classes listed in their member tables although not public (the user's decision of 2026-11-24,
+  java-rows-1124's decision 2: a short list, as GraalVM's reflection metadata names what a closed world keeps for reflection):
+  class -> the names of its fields. jdk26u's tests read them with getDeclaredField and check their modifiers:
+  JceSecurity.isRestricted (javax/crypto/JceSecurity/FinalRestricted, t07910: private static final) and AbstractSaslImpl.logger
+  (com/sun/security/sasl/util/CheckAccess, t07882: final)."
+  {"javax/crypto/JceSecurity" #{"isRestricted"}
+   "com/sun/security/sasl/util/AbstractSaslImpl" #{"logger"}})
+
+(defn reflection-root-field?
+  "Is field f of class n in reflection-roots?"
+  [n f]
+  (contains? (get reflection-roots n) (:name f)))
 
 (defn- java-pkg [n] (let [i (.lastIndexOf ^String n "/")] (if (neg? i) "" (subs n 0 i))))
 
@@ -1166,6 +1195,12 @@
   (let [[n d] (class-loader-resource-target nme desc)]
     (boolean (some #(and (= n (:name %)) (= d (:desc %))) (:methods (a/decl "jdk/internal/jrt/ClassPathResources"))))))
 
+(def executable-type-annotation-methods
+  "Executable's getAnnotated* that TypeAnnotationSupport answers, [name, returns an array?] (queue 564; out's
+  type-annotation-calls of Method and Constructor)."
+  [["getAnnotatedReturnType" false] ["getAnnotatedReceiverType" false]
+   ["getAnnotatedParameterTypes" true] ["getAnnotatedExceptionTypes" true]])
+
 (def support-call-helpers
   "The instance methods of jrt's hand-written classes that jrt cannot write itself, as they name
   translated classes, by [owner name desc]: [support function, the translated class it needs].
@@ -1190,7 +1225,17 @@
           (for [[nme desc f] class-loader-resource-helpers]
             [["java/lang/ClassLoader" nme desc] [f "jdk/internal/jrt/ClassPathResources"]])
           (for [d runtime-exec-descs]
-            [["java/lang/Runtime" "exec" d] [(str "J2g_Runtime" (nm/method-base "exec" d)) "jdk/internal/jrt/RuntimeExec"]]))))
+            [["java/lang/Runtime" "exec" d] [(str "J2g_Runtime" (nm/method-base "exec" d)) "jdk/internal/jrt/RuntimeExec"]])
+          ;; Executable's getAnnotated* (queue 564, 543-2 (a)): j2g writes them on Method and Constructor alone
+          ;; (out/type-annotation-calls), so a call on an Executable (jrt's Executable_I lacks them) is j2g's support
+          ;; function, TypeAnnotationSupport's, which takes either (jdk26u's GetAnnotatedReceiverType)
+          (for [[jm arr] executable-type-annotation-methods]
+            [["java/lang/reflect/Executable" jm (str "()" (when arr "[") "Ljava/lang/reflect/AnnotatedType;")]
+             [(str "J2g_Executable" (str/upper-case (subs jm 0 1)) (subs jm 1)) "jdk/internal/jrt/TypeAnnotationSupport"]])
+          ;; Executable.accessFlags (java-tail-1125, t04832): j2g writes accessFlags on Method and Constructor alone
+          ;; (out/support-forms, JCS273), so a call on an Executable is j2g's support function, the receiver's own
+          [[["java/lang/reflect/Executable" "accessFlags" "()Ljava/util/Set;"]
+            ["J2g_ExecutableAccessFlags" "jdk/internal/jrt/AccessFlagSupport"]]])))
 
 (defn throwable-print-helper
   "The support function of a call of a member of support-call-helpers declared by its owner

@@ -1,0 +1,247 @@
+;; jrt: ForkJoinPool's scheduling (java-rows-1124; jdk26u's ForkJoinPool is a ScheduledExecutorService since JDK 25, its
+;; DelayScheduler and DelayScheduler.ScheduledForkJoinTask): schedule(Runnable|Callable, delay, unit),
+;; scheduleAtFixedRate, scheduleWithFixedDelay, cancelDelayedTasksOnShutdown and getDelayedTaskCount. A scheduled task waits
+;; on a Go timer, not in a scheduler thread; when it fires the task runs in a worker of the pool. The policies are
+;; jdk26u's (ScheduledThreadPoolExecutor's defaults):
+;; - a delayed one-shot task still runs after shutdown, unless cancelDelayedTasksOnShutdown was called;
+;; - a periodic task is cancelled on shutdown;
+;; - the pool terminates once no worker runs and no delayed task waits.
+;; A periodic task's exec returns false (not completed) after a run that threw nothing, so runForked runs it again at its
+;; next time, as jdk26u's ScheduledForkJoinTask resets itself; one that throws completes abnormally, its later runs
+;; suppressed.
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+(in-ns 'go.arbace.jrt)
+
+(go/file "fjschedule.go"
+  :imports [[time "time"]])
+
+(go/type DelayScheduler_ScheduledForkJoinTask
+  "DelayScheduler_ScheduledForkJoinTask is java.util.concurrent.DelayScheduler$ScheduledForkJoinTask: its pool, its action
+(a Runnable or a Callable) and result, when it runs next (at), its period (nextDelay: 0 once, > 0 at a fixed rate, < 0 with a
+fixed delay, in nanoseconds), its timer while it waits (pending).\n"
+  (struct ForkJoinTask
+          ^{:tag (* ForkJoinPool)} pool
+          ^Runnable runnable
+          ^Callable callable
+          ^any result
+          ^{:tag time/Time} at
+          ^int64 nextDelay
+          ^{:tag (* time/Timer)} timer
+          ^bool pending))
+
+(go/var DelayScheduler_ScheduledForkJoinTask_class
+  (Define (addr (lit ClassInfo :Name "java.util.concurrent.DelayScheduler$ScheduledForkJoinTask" :Kind KindClass
+                     :Modifiers (bit-or AccStatic AccFinal) :Super ForkJoinTask_class
+                     :Interfaces (lit (slice (* Class)) ScheduledFuture_class)
+                     :Go "arbace/jrt.DelayScheduler_ScheduledForkJoinTask"))))
+
+;; ---- the pool's side (mu held where named)
+
+(go/method pend
+  "pend arms t's timer for its time (mu held): the pool counts it among its delayed tasks.\n"
+  [^{:tag (* ForkJoinPool)} p ^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t]
+  (set! (.-pending t) true)
+  (when (== (.-delayedTasks p) nil)
+    (set! (.-delayedTasks p) (make (map (* DelayScheduler_ScheduledForkJoinTask) bool))))
+  (aset (.-delayedTasks p) t true)
+  (set! (.-timer t) (time/AfterFunc (time/Until (.-at t)) (fn [] (.fire p t)))))
+
+(go/method unpend
+  "unpend takes t from the delayed tasks (mu held): false when it was not waiting (fired or cancelled already).\n"
+  ^bool [^{:tag (* ForkJoinPool)} p ^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t]
+  (when (not (.-pending t))
+    (return false))
+  (set! (.-pending t) false)
+  (when (!= (.-timer t) nil)
+    (.Stop (.-timer t)))
+  (delete (.-delayedTasks p) t)
+  true)
+
+(go/method fire
+  "fire runs t in a worker of the pool when its time comes, unless it was cancelled meanwhile; the worker is counted before
+the delayed task is not, so that the pool does not terminate between the two.\n"
+  [^{:tag (* ForkJoinPool)} p ^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t]
+  (.Lock (.-mu p))
+  (when (not (.unpend p t))
+    (.Unlock (.-mu p))
+    (return))
+  (.Unlock (.-mu p))
+  (.startWorker p t (fn []))
+  (.Lock (.-mu p))
+  (.checkTerminated p)
+  (.Unlock (.-mu p)))
+
+(go/method scheduleTask
+  "scheduleTask pends a new task: RejectedExecutionException when the pool is shut down.\n"
+  ^{:tag (* DelayScheduler_ScheduledForkJoinTask)}
+  [^{:tag (* ForkJoinPool)} p ^Runnable r ^Callable c ^int64 delay ^int64 nextDelay ^{:tag (* TimeUnit)} unit]
+  (when (== unit nil) (panic (NPE)))
+  (let [nanos (.ToNanos_J__J unit delay)
+        t (addr (lit DelayScheduler_ScheduledForkJoinTask :pool p :runnable r :callable c :nextDelay nextDelay))]
+    (when (< nanos 0) (set! nanos 0))
+    (set! (.-at t) (.Add (time/Now) (conv time/Duration nanos)))
+    (.Lock (.-mu p))
+    (defer (.Unlock (.-mu p)))
+    (when (.Load (.-shutdown p))
+      (panic (RejectedExecutionException_New)))
+    (.pend p t)
+    t))
+
+(go/method Schedule_Runnable_J_TimeUnit__ScheduledFuture
+  "Schedule_Runnable_J_TimeUnit__ScheduledFuture is schedule(Runnable, long, TimeUnit).\n"
+  ^ScheduledFuture [^{:tag (* ForkJoinPool)} p ^Runnable r ^int64 delay ^{:tag (* TimeUnit)} unit]
+  (when (== r nil) (panic (NPE)))
+  (.scheduleTask p r nil delay 0 unit))
+
+(go/method Schedule_Callable_J_TimeUnit__ScheduledFuture
+  "Schedule_Callable_J_TimeUnit__ScheduledFuture is schedule(Callable, long, TimeUnit).\n"
+  ^ScheduledFuture [^{:tag (* ForkJoinPool)} p ^Callable c ^int64 delay ^{:tag (* TimeUnit)} unit]
+  (when (== c nil) (panic (NPE)))
+  (.scheduleTask p nil c delay 0 unit))
+
+(go/method ScheduleAtFixedRate_Runnable_J_J_TimeUnit__ScheduledFuture
+  "ScheduleAtFixedRate_Runnable_J_J_TimeUnit__ScheduledFuture is scheduleAtFixedRate: IllegalArgumentException for a period
+of zero or less.\n"
+  ^ScheduledFuture [^{:tag (* ForkJoinPool)} p ^Runnable r ^int64 initialDelay ^int64 period ^{:tag (* TimeUnit)} unit]
+  (when (or (== r nil) (== unit nil)) (panic (NPE)))
+  (when (<= period 0) (panic (IllegalArgumentException_New)))
+  (.scheduleTask p r nil initialDelay (.ToNanos_J__J unit period) unit))
+
+(go/method ScheduleWithFixedDelay_Runnable_J_J_TimeUnit__ScheduledFuture
+  "ScheduleWithFixedDelay_Runnable_J_J_TimeUnit__ScheduledFuture is scheduleWithFixedDelay: IllegalArgumentException for a
+delay of zero or less.\n"
+  ^ScheduledFuture [^{:tag (* ForkJoinPool)} p ^Runnable r ^int64 initialDelay ^int64 delay ^{:tag (* TimeUnit)} unit]
+  (when (or (== r nil) (== unit nil)) (panic (NPE)))
+  (when (<= delay 0) (panic (IllegalArgumentException_New)))
+  (.scheduleTask p r nil initialDelay (- (.ToNanos_J__J unit delay)) unit))
+
+(go/method Is_ScheduledExecutorService [^{:tag (* ForkJoinPool)} p])
+
+(go/method CancelDelayedTasksOnShutdown__V
+  "CancelDelayedTasksOnShutdown__V is cancelDelayedTasksOnShutdown: the delayed tasks are cancelled on shutdown (at once
+when the pool is shut down already).\n"
+  [^{:tag (* ForkJoinPool)} p]
+  (when (== p commonPool) (return))
+  (.Lock (.-mu p))
+  (set! (.-cancelDelayedOnShutdown p) true)
+  (.Unlock (.-mu p))
+  (when (.Load (.-shutdown p))
+    (.cancelDelayed p false)))
+
+(go/method GetDelayedTaskCount__J
+  "GetDelayedTaskCount__J is getDelayedTaskCount: the tasks waiting for their time.\n"
+  ^int64 [^{:tag (* ForkJoinPool)} p]
+  (.Lock (.-mu p))
+  (defer (.Unlock (.-mu p)))
+  (conv int64 (len (.-delayedTasks p))))
+
+(go/method cancelDelayed
+  "cancelDelayed cancels the delayed tasks on shutdown: the periodic ones only, or all (cancelDelayedTasksOnShutdown).\n"
+  [^{:tag (* ForkJoinPool)} p ^bool periodicOnly]
+  (let [ts (make (slice (* DelayScheduler_ScheduledForkJoinTask)) 0)]
+    (.Lock (.-mu p))
+    (range [t _ (.-delayedTasks p)]
+      (when (or (not periodicOnly) (!= (.-nextDelay t) 0))
+        (set! ts (append ts t))))
+    (.Unlock (.-mu p))
+    (range [_ t ts]
+      (.Cancel_Z__Z t false))))
+
+;; ---- the task's side
+
+(go/method Exec__Z
+  "Exec__Z runs the action: a one-shot task completes; a periodic one is pended again for its next time (none once the pool
+is shut down or the task cancelled) and does not complete.\n"
+  ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t]
+  (if (!= (.-callable t) nil)
+    (let [exc (runCatching (fn [] (set! (.-result t) (.Call__O (.-callable t)))))]
+      (when (!= exc nil)
+        (when (or (RuntimeException_InstanceOf exc) (Error_InstanceOf exc))
+          (panic exc))
+        (panic (RuntimeException_New_Throwable exc))))
+    (.Run__V (.-runnable t)))
+  (when (== (.-nextDelay t) 0)
+    (return true))
+  (let [p (.-pool t)]
+    (.Lock (.-mu p))
+    (defer (.Unlock (.-mu p)))
+    (when (or (.Load (.-shutdown p)) (.-cancelled (addr (.-ForkJoinTask t))))
+      (return true))
+    (if (> (.-nextDelay t) 0)
+      (set! (.-at t) (.Add (.-at t) (conv time/Duration (.-nextDelay t))))
+      (set! (.-at t) (.Add (time/Now) (conv time/Duration (- (.-nextDelay t))))))
+    (.pend p t)
+    false))
+
+(go/method Cancel_Z__Z
+  "Cancel_Z__Z is cancel: a waiting task leaves the pool's delayed tasks and completes cancelled (a periodic one between its
+runs too); a running one is not cancelled.\n"
+  ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^bool may]
+  (let [p (.-pool t)
+        f (addr (.-ForkJoinTask t))]
+    (.Lock (.-mu p))
+    (let [was (.unpend p t)]
+      (.checkTerminated p)
+      (.Unlock (.-mu p))
+      (when (and was (== (.Load (.-state f)) fjRunning))
+        ;; a periodic task between its runs
+        (set! (.-cancelled f) true)
+        (.finish f (CancellationException_New))
+        (return true)))
+    (.Impl_Cancel_Z__Z f t may)))
+
+(go/method GetDelay_TimeUnit__J
+  "GetDelay_TimeUnit__J is getDelay: the time until the next run in unit, truncated as TimeUnit.convert truncates.\n"
+  ^int64 [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^{:tag (* TimeUnit)} unit]
+  (when (== unit nil) (panic (NPE)))
+  (let [p (.-pool t)]
+    (.Lock (.-mu p))
+    (let [d (conv int64 (time/Until (.-at t)))]
+      (.Unlock (.-mu p))
+      (/ d (.ToNanos_J__J unit 1)))))
+
+(go/method CompareTo_O__I
+  "CompareTo_O__I is compareTo(Delayed): by the delays in nanoseconds.\n"
+  ^int32 [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^any o]
+  (when (== o t) (return 0))
+  (let [a (.GetDelay_TimeUnit__J t TimeUnit_NANOSECONDS)
+        b (.GetDelay_TimeUnit__J (assert Delayed (nnIface o)) TimeUnit_NANOSECONDS)]
+    (when (< a b) (return -1))
+    (when (> a b) (return 1))
+    0))
+
+(go/method Is_Delayed [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t])
+(go/method Is_ScheduledFuture [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t])
+(go/method Is_Comparable [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t])
+(go/method GetRawResult__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.-result t))
+(go/method SetRawResult_O__V [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^any v] (set! (.-result t) v))
+
+;; the dispatch methods (J2G-SPEC §5.4: forwarders to ForkJoinTask's Impl_), as the adapters'
+(go/method Fork__ForkJoinTask ^ForkJoinTask_I [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_Fork__ForkJoinTask (addr (.-ForkJoinTask t)) t))
+(go/method Join__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_Join__O (addr (.-ForkJoinTask t)) t))
+(go/method Invoke__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_Invoke__O (addr (.-ForkJoinTask t)) t))
+(go/method QuietlyJoin__V [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_QuietlyJoin__V (addr (.-ForkJoinTask t)) t))
+(go/method QuietlyInvoke__V [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_QuietlyInvoke__V (addr (.-ForkJoinTask t)) t))
+(go/method Get__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_Get__O (addr (.-ForkJoinTask t)) t))
+(go/method Get_J_TimeUnit__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^int64 timeout ^{:tag (* TimeUnit)} unit] (.Impl_Get_J_TimeUnit__O (addr (.-ForkJoinTask t)) t timeout unit))
+(go/method IsCancelled__Z ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_IsCancelled__Z (addr (.-ForkJoinTask t)) t))
+(go/method IsDone__Z ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_IsDone__Z (addr (.-ForkJoinTask t)) t))
+(go/method IsCompletedNormally__Z ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_IsCompletedNormally__Z (addr (.-ForkJoinTask t)) t))
+(go/method IsCompletedAbnormally__Z ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_IsCompletedAbnormally__Z (addr (.-ForkJoinTask t)) t))
+(go/method GetException__Throwable ^Throwable_I [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_GetException__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method Complete_O__V [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^any v] (.Impl_Complete_O__V (addr (.-ForkJoinTask t)) t v))
+(go/method CompleteExceptionally_Throwable__V [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t ^Throwable_I ex] (.Impl_CompleteExceptionally_Throwable__V (addr (.-ForkJoinTask t)) t ex))
+(go/method TryUnfork__Z ^bool [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_TryUnfork__Z (addr (.-ForkJoinTask t)) t))
+(go/method ResultNow__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_ResultNow__O (addr (.-ForkJoinTask t)) t))
+(go/method ExceptionNow__Throwable ^Throwable_I [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_ExceptionNow__Throwable (addr (.-ForkJoinTask t)) t))
+(go/method State__Future_State ^{:tag (* Future_State)} [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (.Impl_State__Future_State (addr (.-ForkJoinTask t)) t))
+(go/method Ref ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (when (== t nil) (return nil)) t)
+(go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] DelayScheduler_ScheduledForkJoinTask_class)
+(go/method ToString__String ^{:tag (* String)} [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (Object_toString t))
+(go/method Clone__O ^any [^{:tag (* DelayScheduler_ScheduledForkJoinTask)} t] (panic (CloneNotSupported t)))
+
+(go/func DelayScheduler_ScheduledForkJoinTask_InstanceOf ^bool [^any x]
+  (let [(values _ ok) (assert (* DelayScheduler_ScheduledForkJoinTask) x)] ok))
+
+(go/func init []
+  (set! (.-IsInstance (.Info DelayScheduler_ScheduledForkJoinTask_class)) DelayScheduler_ScheduledForkJoinTask_InstanceOf))
