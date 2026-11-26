@@ -23951,3 +23951,64 @@ does not record): its row applied to check-aot-linux-amd64.edn, divergences-aot.
 Python eval (pass/design/deferred, n/a) next 42,743/278/1,004 (4,426) -> 43,203/148/568 (4,543); AOT 150/0/1 -> 151/0/0;
 completeness 0.9911 -> 0.9959. bin/reap --record 56 of 56, 0 problems; bin/crops-score --record, --judge --strict 0 problems;
 bin/records-check 9 pairs, 0 problems; bin/markers-check ok.
+
+## 2026-11-26 — Python: the core objects' deferred classes, test_enum's import, tp_new (queue 587, VM)
+
+Base origin/train-5 b6be9b74b, then c0521dc52 (train 5's records) merged; CPython 3.14.10's Objects/typeobject.c
+(type_ready_set_new, add_tp_new_wrapper, slot_tp_new), Modules/_collectionsmodule.c (tuplegetter), Objects/sliceobject.c
+(slice_traverse), Lib/_sitebuiltins.py and Lib/pydoc.py (_re_stripid) from the pinned tarball under REPR_PYTHON_SRC.
+
+The VM's stage 0 (nx's, 2026-11-17) does not list arbace/pytls (queue 552), whose cache.go imports weak, which goi refuses:
+no bin/pyi run starts. The runs here swap in a weak-free cache.ae (ParseCertificate, no cache) for their duration, never
+committed (587-1 (a), the user 2026-11-25: the host gives the VM a stage 0 that lists pytls); its child processes print a goi
+stub warning on stderr, so test_getopt's test_translations fails under it (an artifact of the swap).
+
+Baseline: one --only run over the 17 classes' 108 rows on goi (eval, the checkout's runtime interpreted; 29 modules, 149
+methods: 131 pass, 16 classed, 2 failing, 85 now pass against the record). Most rows were served by the work merged since the
+classes were written (the docstrings and clinic tables, py-design's Go partial, the set, deque, format, complex, with, dict-view
+and struct sequence fixes): of them the 50 the record passes leave their classes, the rest (the record's rows failing still,
+modules not recorded yet) stay for the host's record run to clear.
+
+Fixed (go/arbace/py, go/arbace/pyctypes; edited in the printed runtime, read back by bin/pyi runtime read and repr-go read of
+pyctypes):
+- test_enum did not import on train-5 (train 5's records held its 1,078 rows): `class enum_type(date, ReprEnum)` needs
+  '__new__' in _datetime.date.__dict__ (enum's _find_data_type_), and a C type's dict had none since 521's C _datetime.
+  py.ExtNewWrapper is add_tp_new_wrapper's builtin for a C type (one per type, in newWrappers), put into the dict of a type with
+  its own tp_new by both PyType_Ready paths of pyctypes (the static types' mirror, capi_mirror.go, and PyType_FromSpec's,
+  capi_types.go), as type_ready_set_new does.
+- _Pyi_tp_new (a pyi type's tp_new as C sees it) called the built-in base's __new__, skipping a class's own: _pickle's NEWOBJ
+  (cls->tp_new(cls, args)) of a namedtuple or any tuple subclass with __new__ raised "tuple expected at most 1 argument, got 2"
+  (on train-5 too, probed in a scratch worktree at b6be9b74b). It is slot_tp_new now: __new__ looked up on the class.
+- a built-in type's __dict__ holds tp_new_wrapper's builtin itself, no staticmethod (vars(object)['__new__'] is object.__new__:
+  test_pydoc's test_allmethods);
+- _collections._tuplegetter (namedtuple's fields; pydoc shows the doc alone: test_namedtuple_field_descriptor);
+- identity numbers (id(), the default reprs) start at 0x7f0000000000, so that reprs look like addresses and pydoc's _re_stripid
+  (6 to 16 hex digits) strips them (test_custom_non_data_descriptor); the base is a multiple of 2^40, so a set's or dict's
+  index of an identity hash is unchanged;
+- site's help (_sitebuiltins._Helper: calls pydoc.help) in builtins (test_fail_help_cli: python -c "help()");
+- a slice is a node of the cycle collector (slice_traverse). On goi the probe's instance still survives gc.collect (the
+  collector probes it and finds no root held: goi's frame slots, :finalization-goi's kind); compiled is the host's to see.
+
+Classes (test/python/divergences.edn and divergences-315.edn): the 50 names the record passes removed; :set-core, :deque-core,
+:with-exit-traceback, :struct-sequences, :structseq-protocol, :format-messages, :complex-core, :dict-views-set-methods,
+:contains-none-blocks and :setattr-str-subclass emptied and dropped; test_sort's test_key_with_mutating_del to :finalization
+(n/a, reference counting's moment, 537-2 (a)); test_structseq's test_replace_gc_tracked to :gc-collector (n/a, gc.is_tracked);
+WeakSet's five stay in :core-objects-287 with their cause (587-2 (a), the user 2026-11-25): list.pop() and del l[-1] leave the
+removed item in Go's backing array (append(l.Items[:i:i], ...) keeps slot i set), so Go's collector sees it alive; pop(0)
+reallocates and frees it. bin/pyi divergences: rc 0, the stale names 576 -> 526.
+
+Alternatives: is_tracked and the WeakSet slot clearing were weighed and left (n/a by the user's decisions, and an audit of
+shared list arrays: NewList(xs...), AotBuildList, range loops over l.Items across Python calls); importing site at start-up
+for help was rejected (sys.path and start-up time for every run): help is one more site builtin beside exit and quit.
+
+The check (one combined --only run on goi, drivers and children on goi, the pytls swap; `.tmp/q587/run/final2.log`,
+`.tmp/repr-python/pyi/check/only-de04981f3f73`): test_pydoc, test_enum, test_collections, test_reprlib, test_inspect,
+test_copyreg and test_datetime whole, test_slice's row (test_descr whole in a first combined run, stopped once test_pickle's C
+tests on goi showed the memory cap's restarts: 148 pass, its three non-passes the record's, test_descrdoc now passing). 2,871
+methods: 2,716 pass, 104 classed, 51 against the record, all of the VM's or goi's: test_enum imports, 1,069 pass, its three rows
+of :core-objects-287 pass, 7 of its date-mixed tests and test_datetime's 23 Fast tests killed at the runner's 8 GiB cap (the C
+world interpreted by goi, the driver's memory grown over a long module; importing test_datetime alone holds 4 GB on goi; S(datetime)
+construction, fromisoformat, ordinals and C pickling of a subclass probed alone pass), 12 zoneinfo tests skipped (the VM has no tz
+database), 6 a child's stderr holding the swap's goi warning, test_pydoc's test_not_ascii (driver and child on goi past the cap)
+and test_enum's test_missing_exceptions_reset (an object kept past gc.collect() on goi). The four test_pydoc rows pass;
+test_collections 112/112. test_pickle is left to the host's compiled record run (on goi its C tests hold 20 GB: test_bytes).
