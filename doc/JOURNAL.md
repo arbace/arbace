@@ -25374,3 +25374,7 @@ DECISIONs proposed (none applied; recommended option first):
   krb lane's; t08077 t08078 (XML DSig's providers) and t08083-t08096 (XML) to be built; t05847 (the class-file API) and
   t04725 (serialization of annotation proxies) deferred, to build; t04833 (ModuleDescriptor's builder) and t06334
   (javac's ServiceLoader in a compiled program) world gaps, deferred, none by design.
+- (later) mac/next's jrt did not compile (found by this branch's `bin/jrt test --package jrt`): `bootClasses` declared twice,
+  queue 491's (098ceb730, class.ae: the classes RunMain initializes before main, a slice) and b04c83d39's (defineclass.ae:
+  the boot loader's classes defined from bytes, a map), the two met in train 4's merge of next (891d550c1) after its build.
+  defineclass.ae's is `bootDefined` now (its three uses); 491's keeps its name (thread.ae, object_test.ae).
