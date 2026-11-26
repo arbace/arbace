@@ -9424,3 +9424,14 @@ Left: test_issue18060's three (an ABI coincidence), test_csqrt (the world withou
 wrong), test_audit's `string_at(id(...) + 40)` (id is no address): the report's DECISIONs; test_call's method descriptor flag
 (queue 594's), test_getargs' str subclass keywords (py-core's); seven test_capi rows of reference counts and immortality, n/a by
 `:capi-refcounts`' rule, moved there with train 7's record.
+
+## As built: py-breaker-1126, the compiled breaker and the C world's deallocations at gc.collect() (2026-11-26, the main host)
+
+- Compiled code checks the eval breaker where CPython does, at a backward jump (arbace.python.aot's `breaker`: one inline load,
+  `py.AotBreaking`; set, `py.AotBreak`, handleEvalBreaker, its error raised at the jump): a loop with no call yields the GIL on
+  a drop request and takes a pending signal (test_threading's test_can_interrupt_tight_loops). Its cost on a tight loop is
+  within the host's noise (29.5 -> 30.5, 46.5 -> 46.5, 33.3 -> 34.4 ns an iteration).
+- gc.collect()'s rounds (finRounds) give the C world its turn (py's `ExtReap`, pyctypes' `reapAtCollect`): the C-born objects
+  Go collected are deallocated then, not at the world's next entry, so what their memory held dies in the same collection, as
+  CPython's last Py_DECREF frees it (the C _pickle's Pickler and its memo: spawn's pickled Process and target,
+  test_multiprocessing_spawn's test_close and test_lose_target_ref).
