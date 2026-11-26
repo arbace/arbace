@@ -14,7 +14,7 @@
 # check-aot-linux-amd64.edn). Each program's seconds (IR, lowering, ci's build [+ translation], run) in WORK/CORPUS/times.tsv and,
 # with --record, test/rust/check{,-aot}-times-linux-amd64.edn (GT8's subsets, GTS205).
 #
-# Usage: bin/rsi check [--aot] [--front own] [--corpus samples,ui] [--set SET] [--only LIST] [--sample N [--offset K]] [--record] [--judge]
+# Usage: bin/rsi check [--aot] [--front own] [--std own] [--corpus samples,ui] [--set SET] [--only LIST] [--sample N [--offset K]] [--record] [--judge]
 #   --corpus   samples (test/rust/eval/), synthetic (test/rust/synthetic/, RE5), ui (the UI suite's run programs, bin/rsi list); default samples,synthetic,ui
 #   --set      the UI programs' set (bin/rsi list --set: all, run, threads, process, net; default all)
 #   --only     a file of ids (# comments) to check alone (GT8's lists)
@@ -24,6 +24,14 @@
 #              programs the front end builds (bin/rust-front rsi-build: every body of the program's own from Arbace's MIR, the
 #              module through codegen and the lowering) take Arbace's codegen unit in place of the pack's x.ll (the allocator
 #              shim and std's lowered library as before); the rest the pack's; WORK/CORPUS/front.tsv says which and why
+#   --std own  queue 596 (C6 L5; doc/rust/FRONTEND-SURVEY.md, "The plan (C6-L1 to C6-L5)"): the programs linked with Arbace's
+#              own copy of std's IR (`bin/rust-front lib-unit own`'s tree: RSI_STD_OWN_DIR, else the checkout's, else the main
+#              checkout's .tmp/rust-front/lib-unit/own, at the committed pin) lowered into RSI_RUNTIME_DIR (default
+#              .tmp/rsi/runtime-own); each case's closure through it in WORK/CORPUS/std.tsv (ID, own|rustc, why; own: no define
+#              of it rustc's), front.tsv's fourth column, and the case inputs' C6; WORK .tmp/rsi-check-own-std (-aot-own-std);
+#              --record (DECISION 596-1 (a), the user 2026-11-26): its own records, test/rust/check[-aot]-own-std-linux-ARCH.edn,
+#              its times and its inputs {eval,aot}-inputs-own-std-linux-ARCH.edn (crops-score's C6), the pinned std's records
+#              untouched; RSI_STD the default (pinned)
 #   --record   the record and the times rewritten for the corpora run (not with --only or --sample); RIND5 (a): also with --front
 #              own, and a passing record writes the cell's case inputs C1-C7 (test/rust/{eval,aot}-inputs-linux-amd64.edn)
 #   RSI_FRONT  the default of --front (own with --record, else pack); RSI_SHIM=pack: the packs' allocator shims (RIND2 (a): Arbace's own by default)
@@ -40,12 +48,13 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/bin/lib/tmpdir.bash"
 . "$root/bin/lib/tools.bash"
 cd "$root"
-corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot= make_pack= front=${RSI_FRONT:-}
+corpora=samples,synthetic,ui set=all only= sample=1 offset=0 record= judge= aot= make_pack= front=${RSI_FRONT:-} std=${RSI_STD:-pinned}
 while [ $# -gt 0 ]; do
   case $1 in
     --make-pack) make_pack=1; shift ;;
     --aot) aot=1; shift ;;
     --front) front=$2; shift 2; case $front in own|pack) ;; *) echo "bin/rsi check: --front own or pack, not $front" >&2; exit 2 ;; esac ;;
+    --std) std=$2; shift 2; case $std in own|pinned) ;; *) echo "bin/rsi check: --std own or pinned, not $std" >&2; exit 2 ;; esac ;;
     --corpus) corpora=$2; shift 2 ;;
     --set) set=$2; shift 2 ;;
     --only) only=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); shift 2 ;;
@@ -54,7 +63,7 @@ while [ $# -gt 0 ]; do
     --record) record=1; shift ;;
     --judge) judge=1; shift ;;
     --essential) only=$root/test/rust/essential.txt; corpora=samples,synthetic; shift ;;
-    *) sed -n '17,36p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
+    *) sed -n '17,44p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
   esac
 done
 level=eval; [ -n "$aot" ] && level=aot
@@ -76,7 +85,20 @@ if [ -n "$only" ] || [ "$sample" != 1 ] || [ "$set" != all ]; then
   [ -n "$record" ] && { echo "bin/rsi check: --record records whole corpora, not --only's, --sample's or --set's subset" >&2; exit 2; }
   export CI_SUBSET=1
 fi
-work=${RSI_CHECK_WORK:-$root/.tmp/rsi-$([ -n "$aot" ] && echo aot || echo check)}
+# queue 596 (C6 L5): --std own, the own copy of std's IR and its lowered runtime (bin/rsi runtime-ci reads RSI_STD_DIR, RSI_RUNTIME_DIR)
+if [ "$std" = own ]; then
+  export RSI_RECORD_STD=own   # DECISION 596-1 (a): arbace.rust.check's records and inputs of their own (own-std- in their names)
+  [ "$irmode" = pack ] || { echo "bin/rsi check: --std own reads the packs' IR (no RSI_IR=rustc, no --make-pack: the own tree has no sysroot)" >&2; exit 2; }
+  od=${RSI_STD_OWN_DIR:-}
+  if [ -z "$od" ]; then for od in "$root/.tmp/rust-front/lib-unit/own" "${main:-$root}/.tmp/rust-front/lib-unit/own"; do [ -f "$od/own.tsv" ] && break; done; fi
+  { [ -f "$od/own.tsv" ] && [ -f "$od/base.sha256" ] && cmp -s "$od/base.sha256" "$root/test/rust/runtime/ir.sha256" && (cd "$od/ir" && sha256sum -c --quiet ../ir.sha256 > /dev/null 2>&1); } \
+    || { echo "bin/rsi check: --std own: no own copy of std's IR at the checkout's pin in $od (bin/rust-front lib-unit own)" >&2; exit 1; }
+  export RSI_STD_DIR=$(cd "$od" && pwd) RSI_RUNTIME_DIR=${RSI_RUNTIME_DIR:-$root/.tmp/rsi/runtime-own}
+  echo "rsi check: --std own: $RSI_STD_DIR ($(awk -F'\t' '$4 == "own"' "$RSI_STD_DIR/own.tsv" | wc -l) own defines), its runtime $RSI_RUNTIME_DIR" >&2
+else
+  unset RSI_RECORD_STD   # the pinned std's records
+fi
+work=${RSI_CHECK_WORK:-$root/.tmp/rsi-$([ -n "$aot" ] && echo aot || echo check)$([ "$std" = own ] && echo -own-std)}
 jobs=${RSI_JOBS:-4}; threads=${RSI_THREADS:-3}; shard=${RSI_SHARD:-4}; gop=${RSI_GO_P:-2}
 go=${ARBACE_GOROOT:-/root/tamago-go}/bin/go
 srcroot=$root/.tmp/repr-rust/src/rustc-1.99.1-src
@@ -258,6 +280,18 @@ if [ -z "$judge" ]; then
       done < "$work/shims/$id/shims.tsv"
       cp "$work/shims/$id/shims.tsv" "$d/shims.tsv"
       echo "rsi check: shim: $id: $(awk -F'\t' '$2 == "own"' "$d/shims.tsv" | wc -l) of $n programs' allocator shims Arbace's own ($d/shims.tsv)" >&2
+    fi
+    # queue 596 (C6 L5): with --std own each case's closure through the own tree (arbace.rust.front.lib-unit/own-std), its C6
+    # (own: no define of the closure rustc's), WORK/CORPUS/std.tsv and front.tsv's fourth column
+    if [ "$std" = own ]; then
+      awk -v w="$work" '{ k = $0; gsub(/[\/#]/, "%", k); print $0 "\t" w "/files/" k }' "$d/ids.txt" > "$d/std.list"
+      (cd "$root" && GOMEMLIMIT=${RSI_STD_MEMLIMIT:-1500MiB} arbace_tool -m arbace.rust.front.lib-unit own-std "$RSI_STD_DIR" "$d/std.list" "$d/std.tsv") > "$d/std.log" 2>&1 \
+        || { grep -v -E 'Reflection|recur arg|Auto-boxing' "$d/std.log" | tail -5 >&2; exit 1; }
+      echo "rsi check: std own: $id: $(awk -F'\t' '$2 == "own"' "$d/std.tsv" | wc -l) of $n programs' closures take no define of std's IR rustc's ($d/std.tsv)" >&2
+      if [ -f "$d/front.tsv" ]; then
+        awk -F'\t' 'BEGIN { OFS = "\t"; while ((getline l < ARGV[2]) > 0) { split(l, f, "\t"); s[f[1]] = (f[2] == "own" ? "own" : "rustc " f[3]) }; ARGV[2] = "" }
+                    { $4 = ($1 in s) ? s[$1] : "-"; print }' "$d/front.tsv" "$d/std.tsv" > "$d/front.tsv.new" && mv "$d/front.tsv.new" "$d/front.tsv"
+      fi
     fi
     # the build list: ID DIR (DIR - when the IR is missing), and for AOT the package
     awk -v w="$work" '{ k = $0; gsub(/[\/#]/, "%", k); s = ""; f = w "/files/" k "/ir.status"

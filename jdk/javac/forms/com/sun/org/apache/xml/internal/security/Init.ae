@@ -1,0 +1,283 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/com/sun/org/apache/xml/internal/security/Init.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xml.internal.security)
+
+(import '(com.sun.org.apache.xml.internal.security.algorithms
+           JCEMapper
+           JCEMapper$Algorithm
+           SignatureAlgorithm)
+        '(com.sun.org.apache.xml.internal.security.c14n Canonicalizer)
+        '(com.sun.org.apache.xml.internal.security.exceptions XMLSecurityException)
+        '(com.sun.org.apache.xml.internal.security.keys.keyresolver KeyResolver)
+        '(com.sun.org.apache.xml.internal.security.transforms Transform)
+        '(com.sun.org.apache.xml.internal.security.utils ElementProxy I18n XMLUtils)
+        '(com.sun.org.apache.xml.internal.security.utils.resolver ResourceResolver)
+        '(com.sun.org.slf4j.internal Logger LoggerFactory)
+        '(java.io IOException InputStream)
+        '(java.net URL)
+        '(java.security AccessController
+                        PrivilegedAction
+                        PrivilegedActionException
+                        PrivilegedExceptionAction)
+        '(java.util ArrayList Enumeration List)
+        '(org.w3c.dom Element Node))
+
+(defclass ^:public Init
+  (field ^:public ^:static ^:final ^String CONF_NS "http://www.xmlsecurity.org/NS/#configuration")
+
+  (field ^:private ^:static ^:final ^Logger LOG (LoggerFactory/getLogger Init))
+
+  (field ^:private ^:static ^boolean alreadyInitialized false)
+
+  (method ^:public ^:static ^:final ^:synchronized isInitialized ^boolean []
+    Init/alreadyInitialized)
+
+  (method ^:public ^:static ^:synchronized init ^void []
+    (when-not alreadyInitialized
+      (let [^{:tag (PrivilegedAction InputStream)} action (lambda PrivilegedAction ^InputStream []
+                                                            (let [cfile (System/getProperty
+                                                                          "com.sun.org.apache.xml.internal.security.resource.config")]
+                                                              (when (some? cfile)
+                                                                (Init/getResourceAsStream
+                                                                  cfile
+                                                                  Init))))]
+        (try
+          (with-resources [^:final is (cast InputStream (AccessController/doPrivileged action))]
+            (if (nil? is) (Init/dynamicInit) (Init/fileInit is)))
+          (catch IOException ex (.warn LOG (.getMessage ex) ex)))
+        (set! alreadyInitialized true))))
+
+  (method ^:private ^:static dynamicInit ^void []
+    (I18n/init "en" "US")
+    (.debug LOG "Registering default algorithms")
+    (try
+      (AccessController/doPrivileged
+        (anon (PrivilegedExceptionAction Void) []
+          (method ^:public run :throws [XMLSecurityException] ^Void [this]
+            (ElementProxy/registerDefaultPrefixes)
+            (Transform/registerDefaultAlgorithms)
+            (SignatureAlgorithm/registerDefaultAlgorithms)
+            (JCEMapper/registerDefaultAlgorithms)
+            (Canonicalizer/registerDefaultAlgorithms)
+            (ResourceResolver/registerDefaultResolvers)
+            (KeyResolver/registerDefaultResolvers)
+            nil)))
+      (catch PrivilegedActionException ex
+        (let [xse (cast XMLSecurityException (.getException ex))]
+          (.error LOG (.getMessage xse) xse)
+          (.printStackTrace xse)))))
+
+  (method ^:private ^:static fileInit ^void [^InputStream is]
+    (try
+      (let [doc (XMLUtils/read is true)
+            ^:mutable config (.getFirstChild doc)]
+        (while (some? config)
+          (when (.equals "Configuration" (.getLocalName config)) (break))
+          (set! config (.getNextSibling config)))
+        (if (nil? config)
+            (.error LOG "Error in reading configuration file - Configuration element not found")
+            (loop [el (.getFirstChild config)]
+              (if (some? el)
+                  (if (not (== Node/ELEMENT_NODE (.getNodeType el)))
+                      (recur (.getNextSibling el))
+                      (let [tag (.getLocalName el)]
+                        (when (.equals "ResourceBundles" tag)
+                          (let [resource (cast Element el)
+                                langAttr (.getAttributeNodeNS resource nil "defaultLanguageCode")
+                                countryAttr (.getAttributeNodeNS resource nil "defaultCountryCode")
+                                ^String languageCode (when (some? langAttr)
+                                                       (.getNodeValue langAttr))
+                                ^String countryCode (when (some? countryAttr)
+                                                      (.getNodeValue countryAttr))]
+                            (I18n/init languageCode countryCode)))
+                        (when (.equals "CanonicalizationMethods" tag)
+                          (let [list (XMLUtils/selectNodes
+                                       (.getFirstChild el)
+                                       CONF_NS
+                                       "CanonicalizationMethod")]
+                            (for-each [^Element element list]
+                              (let [uri (.getAttributeNS element nil "URI")
+                                    javaClass (.getAttributeNS element nil "JAVACLASS")]
+                                (try
+                                  (Canonicalizer/register uri javaClass)
+                                  (.debug LOG
+                                          "Canonicalizer.register({}, {})"
+                                          (new Object/1 [uri javaClass]))
+                                  (catch ClassNotFoundException e
+                                    (let [exArgs (new Object/1 [uri javaClass])]
+                                      (.error LOG
+                                              (I18n/translate "algorithm.classDoesNotExist" exArgs)))))))))
+                        (when (.equals "TransformAlgorithms" tag)
+                          (let [tranElem (XMLUtils/selectNodes
+                                           (.getFirstChild el)
+                                           CONF_NS
+                                           "TransformAlgorithm")]
+                            (for-each [^Element element tranElem]
+                              (let [uri (.getAttributeNS element nil "URI")
+                                    javaClass (.getAttributeNS element nil "JAVACLASS")]
+                                (try
+                                  (Transform/register uri javaClass)
+                                  (.debug LOG
+                                          "Transform.register({}, {})"
+                                          (new Object/1 [uri javaClass]))
+                                  (catch ClassNotFoundException e
+                                    (let [exArgs (new Object/1 [uri javaClass])]
+                                      (.error LOG
+                                              (I18n/translate "algorithm.classDoesNotExist" exArgs))))
+                                  (catch NoClassDefFoundError ex
+                                    (.warn
+                                      LOG
+                                      "Not able to found dependencies for algorithm, I'll keep working.")))))))
+                        (when (.equals "JCEAlgorithmMappings" tag)
+                          (let [algorithmsNode (.item
+                                                 (.getElementsByTagName
+                                                   (cast Element el)
+                                                   "Algorithms")
+                                                 0)]
+                            (when (some? algorithmsNode)
+                              (let [algorithms (XMLUtils/selectNodes
+                                                 (.getFirstChild algorithmsNode)
+                                                 CONF_NS
+                                                 "Algorithm")]
+                                (for-each [^Element element algorithms]
+                                  (let [id (.getAttributeNS element nil "URI")]
+                                    (JCEMapper/register id (JCEMapper$Algorithm. element))))))))
+                        (when (.equals "SignatureAlgorithms" tag)
+                          (let [sigElems (XMLUtils/selectNodes
+                                           (.getFirstChild el)
+                                           CONF_NS
+                                           "SignatureAlgorithm")]
+                            (for-each [^Element sigElem sigElems]
+                              (let [uri (.getAttributeNS sigElem nil "URI")
+                                    javaClass (.getAttributeNS sigElem nil "JAVACLASS")]
+                                (try
+                                  (SignatureAlgorithm/register uri javaClass)
+                                  (.debug LOG
+                                          "SignatureAlgorithm.register({}, {})"
+                                          (new Object/1 [uri javaClass]))
+                                  (catch ClassNotFoundException e
+                                    (let [exArgs (new Object/1 [uri javaClass])]
+                                      (.error LOG
+                                              (I18n/translate "algorithm.classDoesNotExist" exArgs)))))))))
+                        (when (.equals "ResourceResolvers" tag)
+                          (let [resolverElem (XMLUtils/selectNodes
+                                               (.getFirstChild el)
+                                               CONF_NS
+                                               "Resolver")
+                                ^{:tag (List String)} classNames (ArrayList. (alength resolverElem))]
+                            (for-each [^Element element resolverElem]
+                              (let [javaClass (.getAttributeNS element nil "JAVACLASS")
+                                    description (.getAttributeNS element nil "DESCRIPTION")]
+                                (if (and (some? description) (> (.length description) 0))
+                                    (.debug LOG
+                                            "Register Resolver: {}: {}"
+                                            (new Object/1 [javaClass description]))
+                                    (.debug LOG
+                                            "Register Resolver: {}: For unknown purposes"
+                                            (new Object/1 [javaClass])))
+                                (.add classNames javaClass)))
+                            (ResourceResolver/registerClassNames classNames)))
+                        (when (.equals "KeyResolver" tag)
+                          (let [resolverElem (XMLUtils/selectNodes
+                                               (.getFirstChild el)
+                                               CONF_NS
+                                               "Resolver")
+                                ^{:tag (List String)} classNames (ArrayList. (alength resolverElem))]
+                            (for-each [^Element element resolverElem]
+                              (let [javaClass (.getAttributeNS element nil "JAVACLASS")
+                                    description (.getAttributeNS element nil "DESCRIPTION")]
+                                (if (and (some? description) (> (.length description) 0))
+                                    (.debug LOG
+                                            "Register Resolver: {}: {}"
+                                            (new Object/1 [javaClass description]))
+                                    (.debug LOG
+                                            "Register Resolver: {}: For unknown purposes"
+                                            (new Object/1 [javaClass])))
+                                (.add classNames javaClass)))
+                            (KeyResolver/registerClassNames classNames)))
+                        (if (.equals "PrefixMappings" tag)
+                            (do
+                              (.debug LOG "Now I try to bind prefixes:")
+                              (let [nl (XMLUtils/selectNodes
+                                         (.getFirstChild el)
+                                         CONF_NS
+                                         "PrefixMapping")]
+                                (for-each [^Element element nl]
+                                  (let [namespace (.getAttributeNS element nil "namespace")
+                                        prefix (.getAttributeNS element nil "prefix")]
+                                    (.debug LOG
+                                            "Now I try to bind {} to {}"
+                                            (new Object/1 [prefix namespace]))
+                                    (ElementProxy/setDefaultPrefix namespace prefix)))
+                                (recur (.getNextSibling el))))
+                            (recur (.getNextSibling el)))))
+                  nil))))
+      (catch Exception e (.error LOG "Bad: " e))))
+
+  (method ^:public ^:static getResource ^URL [^String resourceName ^{:tag (Class ?)} callingClass]
+    (when (nil? resourceName) (throw (NullPointerException.)))
+    (let [^:mutable url (.getResource (.getContextClassLoader (Thread/currentThread)) resourceName)]
+      (when (and (nil? url) (== (.charAt resourceName 0) \/))
+        (set! url
+              (.getResource (.getContextClassLoader (Thread/currentThread))
+                            (.substring resourceName 1))))
+      (let [^:mutable cluClassloader (.getClassLoader Init)]
+        (when (nil? cluClassloader) (set! cluClassloader (ClassLoader/getSystemClassLoader)))
+        (when (nil? url) (set! url (.getResource cluClassloader resourceName)))
+        (when (and (nil? url) (== (.charAt resourceName 0) \/))
+          (set! url (.getResource cluClassloader (.substring resourceName 1))))
+        (when (nil? url)
+          (let [cl (.getClassLoader callingClass)]
+            (when (some? cl) (set! url (.getResource cl resourceName)))))
+        (when (nil? url) (set! url (.getResource callingClass resourceName)))
+        (if (and (nil? url) (not (== (.charAt resourceName 0) \/)))
+            (Init/getResource (java-str \/ resourceName) callingClass)
+            url))))
+
+  (method ^:private ^:static getResources ^{:tag (List URL)} [^String resourceName
+                                                              ^{:tag (Class ?)} callingClass]
+    (when (nil? resourceName) (throw (NullPointerException.)))
+    (let [^{:tag (List URL)} ret (ArrayList.)
+          ^:mutable ^{:tag (Enumeration URL)} urls (anon (Enumeration URL) []
+                                                     (method ^:public hasMoreElements ^boolean [this]
+                                                       false)
+
+                                                     (method ^:public nextElement ^URL [this] nil))]
+      (try
+        (set! urls (.getResources (.getContextClassLoader (Thread/currentThread)) resourceName))
+        (catch IOException e (.debug LOG (.getMessage e) e)))
+      (when (and (not (.hasMoreElements urls)) (== (.charAt resourceName 0) \/))
+        (try
+          (set! urls
+                (.getResources (.getContextClassLoader (Thread/currentThread))
+                               (.substring resourceName 1)))
+          (catch IOException e (.debug LOG (.getMessage e) e))))
+      (let [^:mutable cluClassloader (.getClassLoader Init)]
+        (when (nil? cluClassloader) (set! cluClassloader (ClassLoader/getSystemClassLoader)))
+        (when-not (.hasMoreElements urls)
+          (try
+            (set! urls (.getResources cluClassloader resourceName))
+            (catch IOException e (.debug LOG (.getMessage e) e))))
+        (when (and (not (.hasMoreElements urls)) (== (.charAt resourceName 0) \/))
+          (try
+            (set! urls (.getResources cluClassloader (.substring resourceName 1)))
+            (catch IOException e (.debug LOG (.getMessage e) e))))
+        (when-not (.hasMoreElements urls)
+          (let [cl (.getClassLoader callingClass)]
+            (when (some? cl)
+              (try
+                (set! urls (.getResources cl resourceName))
+                (catch IOException e (.debug LOG (.getMessage e) e))))))
+        (when-not (.hasMoreElements urls)
+          (let [url (.getResource callingClass resourceName)] (when (some? url) (.add ret url))))
+        (while (.hasMoreElements urls) (.add ret (cast URL (.nextElement urls))))
+        (if (and (.isEmpty ret) (not (== (.charAt resourceName 0) \/)))
+            (Init/getResources (java-str \/ resourceName) callingClass)
+            ret))))
+
+  (method ^:private ^:static getResourceAsStream ^InputStream [^String resourceName
+                                                               ^{:tag (Class ?)} callingClass]
+    (let [url (Init/getResource resourceName callingClass)]
+      (try
+        (when (some? url) (.openStream url))
+        (catch IOException e (.debug LOG (.getMessage e) e) nil)))))

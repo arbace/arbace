@@ -1,12 +1,14 @@
 ;; Go-build variant of java.util.logging.LogRecord (J2G-SPEC §4.6; doc/classes/JAVA-DEFERRED-TRIAGE.md,
 ;; "As built: F5 (write-ahead)"): read by j2g only.
-;; - inferCaller walks the stack trace of a new Throwable (jrt's frames, J2G-SPEC §7.9.6, §10.7)
-;;   instead of StackWalker (not in the Go build, F20), with CallerFinder's test: past the first
-;;   frame of java.util.logging.Logger (or sun.util.logging.PlatformLogger), the first frame that
-;;   SimpleConsoleLogger.Formatting.isFilteredFrame does not filter, by its class name (the
-;;   System.Logger implementations' test needs the frame's class, which a StackTraceElement has
-;;   not; there are no System.Logger implementations in the Go build, JCS136). No such frame: the
-;;   source stays unset, as the JDK's when the walk finds none.
+;; - inferCaller is jdk26u's again (java-tail2-1126): CallerFinder walks the stack with StackWalker,
+;;   in the Go build since queue 416, whose default walk hides the reflection frames as the JDK's
+;;   does (Method.invoke: TestInferCaller's m2.invoke(m, ...), t05766); until then it walked the
+;;   stack trace of a new Throwable, which shows them (F20). CallerFinder's test keeps jdk26u's
+;;   rule, past the first frame of java.util.logging.Logger (or sun.util.logging.PlatformLogger)
+;;   the first frame SimpleConsoleLogger.Formatting.isFilteredFrame does not filter: a System.Logger
+;;   implementation's frame by its class, the rest by its class name (isFilteredFrameName below:
+;;   jdk.internal.logger, SurrogateLogger's, is not in the Go build). No such frame: the source
+;;   stays unset, as the JDK's when the walk finds none.
 ;; (serialPersistentFields, cut until serialization came into the world, is jdk26u's since its slice
 ;; 4: doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: serialization slice 4".)
 ;; The replacing members keep jdk26u's code where they keep it (baf63fb,
@@ -17,20 +19,6 @@
 (in-ns 'java.util.logging)
 
 (j2g/variant LogRecord
-  (method ^:private inferCaller ^void [this]
-    (set! needToInferCaller false)
-    (let [^StackTraceElement/1 stack (.getStackTrace (Throwable.))
-          ^:mutable lookingForLogger true]
-      (for-each [^StackTraceElement f stack]
-        (let [cname (.getClassName f)]
-          (if lookingForLogger
-              (set! lookingForLogger (not (or (.equals cname "java.util.logging.Logger")
-                                              (.startsWith cname "sun.util.logging.PlatformLogger"))))
-              (when-not (LogRecord/isFilteredFrameName cname)
-                (.setSourceClassName this cname)
-                (.setSourceMethodName this (.getMethodName f))
-                (return)))))))
-
   (j2g/add
     (method ^:private ^:static isFilteredFrameName ^boolean [^String cname]
       (let [c (if (< (.length cname) 12) \u0000 (.charAt cname 0))]
@@ -51,3 +39,11 @@
           (for-each [^String skip (.split additionalPkgs ",")]
             (when (and (not (.isEmpty skip)) (.startsWith cname skip)) (return true)))))
       false)))
+
+(j2g/variant LogRecord$CallerFinder
+  (method ^:public test ^boolean [this ^StackWalker$StackFrame t]
+    (let [^:final cname (.getClassName t)]
+      (if lookingForLogger
+          (do (set! lookingForLogger (not (.isLoggerImplFrame this cname))) false)
+          (not (or (.isAssignableFrom java.lang.System$Logger (.getDeclaringClass t))
+                   (LogRecord/isFilteredFrameName cname)))))))

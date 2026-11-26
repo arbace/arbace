@@ -29,13 +29,18 @@
     (SetClassAssertionStatus_String_Z__V [^{:tag (* String)} className ^bool enabled])
     (SetPackageAssertionStatus_String_Z__V [^{:tag (* String)} packageName ^bool enabled])
     (SetDefaultAssertionStatus_Z__V [^bool enabled])
-    (ClearAssertionStatus__V [])))
+    (ClearAssertionStatus__V [])
+    ;; queue 575: the loader's unnamed module (module.ae)
+    (GetUnnamedModule__Module ^{:tag (* Module)} [])))
 
 (go/type ClassLoader
   "ClassLoader is java.lang.ClassLoader (abstract): a parent, a name, whether it is parallel capable (its class
 registered when it was made: jdk26u's parallelLockMap), and the loader object it is the part of (self: its subclass's,
 whose overrides loadClass calls; java-bytecode-1122, defineclass.ae).\n"
-  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name ^bool parallel ^ClassLoader_I self))
+  (struct Object ^ClassLoader_I parent ^{:tag (* String)} name ^bool parallel ^ClassLoader_I self
+          ^{:tag (map string (* Class)) :doc "the classes it defined from bytes, by binary name (under loaderMu; java-design-1123)\n"} classes
+          ^{:tag (map string (* Package)) :doc "the packages its definePackage defined, by name (under packagesMu; definedPackages before java-design-1123)\n"} packages
+          ^{:tag (* Module) :doc "its unnamed module, made when first asked (under unnamedMu; queue 575, module.ae)\n"} unnamed))
 
 (go/var ClassLoader_class
   (Define (addr (lit ClassInfo :Name "java.lang.ClassLoader" :Kind KindClass
@@ -171,7 +176,7 @@ application loader.\n"
 ;; implementation's title, version and vendor, the seal base. The closed world has no class loading,
 ;; so a class's package is made on demand (Class.getPackage, Package.getPackage, of the loader the
 ;; class reports: bootstrap or the application's) and a loader's own definePackage calls are kept
-;; by loader; no package-info class: a package has no annotations. Its superclass NamedPackage
+;; by loader; its annotations are its package-info class's (queue 563). Its superclass NamedPackage
 ;; (package-private) is not here: Package's is Object.
 
 (go/type Package
@@ -190,8 +195,6 @@ application loader.\n"
 
 (go/var
   [^{:tag sync/Mutex} packagesMu]
-  [^{:tag (map (* ClassLoader) (map string (* Package))) :doc "definedPackages: the packages a loader's definePackage defined, by loader and name.\n"}
-   definedPackages (make (map (* ClassLoader) (map string (* Package))))]
   [^{:tag (map string (* Package)) :doc "classPackages: the packages made for the registry's classes, by name.\n"}
    classPackages (make (map string (* Package)))])
 
@@ -219,7 +222,7 @@ one made once.\n"
   (defer (.Unlock packagesMu))
   (let [k (loaderKey l)]
     (when (!= k nil)
-      (let [p (aget (aget definedPackages k) pkg)]
+      (let [p (aget (.-packages k) pkg)]
         (when (!= p nil) (return p)))))
   (let [p (aget classPackages pkg)]
     (when (== p nil)
@@ -241,7 +244,7 @@ of that name (a definePackage's, else one of the registry's classes), else null.
   ^{:tag (* Package)} [^{:tag (* String)} name]
   (let [n (.String (NN name))]
     (.Lock packagesMu)
-    (let [p (aget (aget definedPackages (loaderKey appLoader)) n)]
+    (let [p (aget (.-packages (loaderKey appLoader)) n)]
       (.Unlock packagesMu)
       (when (!= p nil) (return p)))
     (when (not (registeredPackage n))
@@ -260,7 +263,7 @@ application loader defined, by name.\n"
           (if (< i 0) (aset names "" true) (aset names (subslice n _ i) true)))))
     (.RUnlock registryMu)
     (.Lock packagesMu)
-    (range [n _ (aget definedPackages (loaderKey appLoader))]
+    (range [n _ (.-packages (loaderKey appLoader))]
       (aset names n true))
     (.Unlock packagesMu)
     (let [ks (make (slice string) 0 (len names))]
@@ -283,10 +286,10 @@ The seal base, a java.net.URL (translated), is held as a value.\n"
                      :implTitle implTitle :implVersion implVersion :implVendor implVendor :sealBase sealBase))]
     (.Lock packagesMu)
     (defer (.Unlock packagesMu))
-    (let [m (aget definedPackages t)]
+    (let [m (.-packages t)]
       (when (== m nil)
         (set! m (make (map string (* Package))))
-        (aset definedPackages t m))
+        (set! (.-packages t) m))
       (when (!= (aget m n) nil)
         (panic (IllegalArgumentException_New_String name)))
       (aset m n p))
@@ -300,14 +303,14 @@ that name, else null; NullPointerException(\"name cannot be null\").\n"
     (panic (NullPointerException_New_String (Str "name cannot be null"))))
   (.Lock packagesMu)
   (defer (.Unlock packagesMu))
-  (aget (aget definedPackages t) (.String name)))
+  (aget (.-packages t) (.String name)))
 
 (go/method GetDefinedPackages__Package1
   "GetDefinedPackages__Package1 is ClassLoader.getDefinedPackages: the packages this loader defined, by name.\n"
   ^{:tag (* RefArray)} [^{:tag (* ClassLoader)} t]
   (.Lock packagesMu)
   (defer (.Unlock packagesMu))
-  (let [m (aget definedPackages t)
+  (let [m (.-packages t)
         ks (make (slice string) 0 (len m))]
     (range [n _ m] (set! ks (append ks n)))
     (sort/Strings ks)
@@ -429,23 +432,43 @@ specification when not empty.\n"
       (set! s (+ s ", version " (.String (.-specVersion p)))))
     (Str s)))
 
-;; AnnotatedElement: no package-info class, no annotations
+;; AnnotatedElement (queue 563): jdk26u's Package.getPackageInfo, the package's package-info class (an interface the
+;; interpreter defines from a package-info.java's defpackage, its annotations the package's), else none: each method
+;; that class's (jdk26u's PackageInfoProxy, a class without annotations, when there is none)
+(go/method packageInfo
+  "packageInfo is Package.getPackageInfo: the class NAME.package-info of the registry, else nil.\n"
+  ^{:tag (* Class)} [^{:tag (* Package)} p]
+  (let [n (.String (.-name p))]
+    (when (== n "") (return (ForName "package-info")))
+    (ForName (+ n ".package-info"))))
 (go/method Is_AnnotatedElement [^{:tag (* Package)} p])
 (go/method GetAnnotation_Class__Annotation ^Annotation [^{:tag (* Package)} p ^{:tag (* Class)} a]
   (NN a)
-  nil)
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return nil))
+    (.GetAnnotation_Class__Annotation c a)))
 (go/method IsAnnotationPresent_Class__Z ^bool [^{:tag (* Package)} p ^{:tag (* Class)} a]
   (AnnotatedElement_IsAnnotationPresent_Class__Z p a))
 (go/method GetAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p]
-  (annotationArray Annotation_class nil))
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return (annotationArray Annotation_class nil)))
+    (.GetAnnotations__Annotation1 c)))
 (go/method GetDeclaredAnnotations__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p]
-  (annotationArray Annotation_class nil))
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return (annotationArray Annotation_class nil)))
+    (.GetDeclaredAnnotations__Annotation1 c)))
 (go/method GetAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p ^{:tag (* Class)} a]
-  (AnnotatedElement_GetAnnotationsByType_Class__Annotation1 p a))
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return (AnnotatedElement_GetAnnotationsByType_Class__Annotation1 p a)))
+    (.GetAnnotationsByType_Class__Annotation1 c a)))
 (go/method GetDeclaredAnnotation_Class__Annotation ^Annotation [^{:tag (* Package)} p ^{:tag (* Class)} a]
-  (AnnotatedElement_GetDeclaredAnnotation_Class__Annotation p a))
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return (AnnotatedElement_GetDeclaredAnnotation_Class__Annotation p a)))
+    (.GetDeclaredAnnotation_Class__Annotation c a)))
 (go/method GetDeclaredAnnotationsByType_Class__Annotation1 ^{:tag (* RefArray)} [^{:tag (* Package)} p ^{:tag (* Class)} a]
-  (AnnotatedElement_GetDeclaredAnnotationsByType_Class__Annotation1 p a))
+  (let [c (.packageInfo p)]
+    (when (== c nil) (return (AnnotatedElement_GetDeclaredAnnotationsByType_Class__Annotation1 p a)))
+    (.GetDeclaredAnnotationsByType_Class__Annotation1 c a)))
 
 (go/method Ref ^any [^{:tag (* Package)} t] (when (== t nil) (return nil)) t)
 (go/method GetClass__Class ^{:tag (* Class)} [^{:tag (* Package)} t] Package_class)
