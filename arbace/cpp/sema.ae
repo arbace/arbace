@@ -7418,9 +7418,12 @@
         (when-not (and (= :ref (:k p)) (not (:c pt)))
           (assoc r :sub (if (= :rref (:k p)) -1 1))))
       (= :init-list (:op e))
+      ;; (cpp-def2, the checker: a list-initialization sequence marked :list, and one to std::initializer_list<X> :il, for
+      ;; [over.ics.rank]/3.1, better-ics?)
+      ((fn [r] (if (and r (checking?)) (assoc r :list true) r))
       (cond (init-list-elem pt) (let [el (init-list-elem pt) rs (map #(ics % el) (:items e))]
                                   ;; [over.ics.list]/5: the worst conversion of an element
-                                  (when (every? some? rs) {:rank (reduce max 0 (map #(long (:rank %)) rs))}))
+                                  (when (every? some? rs) (cond-> {:rank (reduce max 0 (map #(long (:rank %)) rs))} (checking?) (assoc :il true))))
             (and (abi/class? pt) (aggregate? pt)) {:rank 3}
             ;; (cpp-s11: a non-aggregate class, [over.ics.list]/7: a user-defined conversion when [over.match.list] finds
             ;; a viable constructor for the list, none when it finds none; <format>'s _Utf32_view<subrange<iterator>>
@@ -7430,7 +7433,7 @@
             ;; (a non-const lvalue reference binds no list's temporary, [over.ics.list]/9 with [dcl.init.ref]/5)
             (and (= :ref (:k p)) (not (:c pt)) (not (and (= 1 (count (:items e))) (lv? (first (:items e)))))) nil
             (and (abi/scalar? pt) (<= (count (:items e)) 1)) {:rank (if (seq (:items e)) (or (std-rank (rv (first (:items e))) (:ty (rv (first (:items e)))) pt) 9) 0)}
-            :else nil)
+            :else nil))
       (abi/ref? p)
       ;; (cpp-rt-own: marked a reference binding, :refb, whose :sub better-ics? weighs against another reference binding's alone,
       ;; [over.ics.rank]/3.2.3 and /3.2.6: `const I&` and a by-value `F` for an lvalue are both identities, the call then decided
@@ -7550,6 +7553,11 @@
                   (or (not (abi/floating? t3)) (not= 0 (abi/fp-rank-cmp fp1 t3)) (> (abi/fp-subrank fp2) (abi/fp-subrank t3)))))))
 
 (defn- better-ics? [a b]
+  ;; (cpp-def2, the checker: [over.ics.rank]/3.1 (DR1467), of two list-initialization sequences one to std::initializer_list<X>
+  ;; is better than one that is not, whatever the other rules say: cpp0x/initlist92.C's Test2({123}), (int) beside
+  ;; (std::initializer_list<int>), had been ambiguous)
+  (if (and (:list a) (:list b) (not= (boolean (:il a)) (boolean (:il b))))
+    (boolean (:il a))
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
            (cond
@@ -7578,7 +7586,7 @@
              ;; function declared without a ref-qualifier against an rvalue reference's: B::g(this S&&) and S::g() for S{}.g()
              ;; neither better, cpp2a/concepts-memfun4.C)
              (and (or (:noref a) (:noref b)) (or (neg? (long (or (:sub a) 0))) (neg? (long (or (:sub b) 0))))) false
-             :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0)))))))
+             :else (< (long (or (:sub a) 0)) (long (or (:sub b) 0))))))))
 
 (declare resolve-overload*)
 
@@ -7983,6 +7991,9 @@
     (= ft tt) nil
     (not (abi/arith? tt)) nil
     (and (abi/enum? ft) (:scoped (abi/enm (:id ft)))) nil
+    ;; (cpp-def2, the checker: [dcl.init.list]/7.5 (P1957R2, which GCC applies to every standard as a defect report), a pointer or
+    ;; a pointer to member to bool narrows: cpp0x/initlist92.C's Test1({"false"}) of Test1(bool))
+    (and (checking?) (= :bool (abi/bn tt)) (or (abi/ptr? ft) (abi/mptr? ft))) :always
     ;; (cpp-extfloat: [dcl.init.list]/7.2 since P1467R9, a floating type to one whose conversion rank is neither greater than nor
     ;; equal to its, an extended type's too: :fp-ext, a constant whose value is finite and in the target's range excepted)
     (and (abi/floating? ft) (abi/floating? tt) (not (and (narrow-fp-rank (abi/bn ft)) (narrow-fp-rank (abi/bn tt)))))
