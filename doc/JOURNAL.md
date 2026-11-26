@@ -24683,3 +24683,40 @@ where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No 
 differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
 reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
 compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
+
+## 2026-11-26 — py-frame-1126: frame.clear() refuses a frame running on any thread (the feeder's lost locals in train 6's run)
+
+Asked by the coordinator: train 6's eval run (mac/train-6 `025065fd1`, gate executable `d238b3a23ca9117d9cc8`) hung in
+test_concurrent_futures' ProcessPoolSpawnExecutorDeadlockTest.test_shutdown_deadlock_pickle (killed at 900 s; log
+`.tmp/keep/py-speed-m/w/runs/deadlock_pickle/out.ts`), after multiprocessing/queues.py's `_feed` raised UnboundLocalError for
+'nrelease' and then 'ignore_epipe', two locals that are always bound. The suspect was the eval loop's push-signal change
+(py-mp-1125 `080525b2d`, and py-regress-1126 made the same change). Branch py-frame-1126 from mac/train-6.
+
+- Cause, not the suspect: tbobj.go's `frameExecuting` (from `0a345fadb`, 2026-11-05, queue 219, frame.clear()) looked only
+  at the current thread's chain of frames. CPython 3.14.10's frame_clear (Objects/frameobject.c) refuses any frame its
+  thread owns (FRAME_OWNED_BY_THREAD, "cannot clear an executing frame"). The test's `with self.assertRaises(PicklingError):
+  f.result()` ends in unittest/case.py's `traceback.clear_frames(tb)`. The traceback runs from the main thread's frames into
+  the feeder's `_feed`, where the PicklingError was raised, and the feeder is by then blocked in `nwait()`. pyi cleared that
+  frame's locals, so the feeder died at its `finally: nrelease()`, and the executor's manager waited forever. Studied:
+  Lib/multiprocessing/queues.py (`_feed`), Lib/concurrent/futures/process.py (`_SafeQueue._on_queue_feeder_error`),
+  Lib/unittest/case.py (`_AssertRaisesContext.__exit__`), Lib/traceback.py (`clear_frames`), all of the pinned 3.14.10 tarball.
+- Repro (20 lines: a thread waits on an Event after storing its own traceback, and the main thread calls tb_frame.clear()
+  and traceback.clear_frames): CPython raises RuntimeError twice and the thread prints its locals. pyi prints "cleared" twice
+  and the thread dies with "cannot access local variable 'nrelease'", on train 6's executable and also on train 5's
+  (`b85611b74343b609b2a4`, before the push-signal change). So it is no regression of train 6, and the eval record already
+  holds the row as `:timeout`. The coordinator was told at once (train 6's records hold no module for it).
+- Fix (go/arbace/py/tbobj.ae, printed by bin/repr-go print, edited, gofmt and go vet clean, read back by bin/repr-go read
+  --full; only tbobj.ae's forms taken, the other 217 files read back equal; printed again equal to the edited Go):
+  `frameExecuting` walks every thread's chain, `threadsNewestFirst` (the registry sys._current_frames reads) after the
+  current thread's. A running generator's frame counts as before. The eval loop is unchanged, so py-regress-1126's
+  test_print_traceback_at_exit fix stays as it was.
+- Regression program test/python/pyi/q-frame-clear-thread.py: its oracle outcome is recorded
+  (`REPR_PYTHON_ORACLE=record PYI_SMOKE_ONLY=... bin/pyi runtime programs`, the date-only rewrites of the controls' outcomes
+  reverted). On train 6's executable it fails, which makes it its own negative control.
+- Also checked, as asked: py-final-1126's listCut/listScrub and its _thread._local change (not in train 6). Neither touches
+  a frame's locals, which are a Go slice of the frame (`Fast`), not a list. One risk is noted for that lane: listScrub clears
+  the slots past a noted list's current length at a collection's start. A Go loop that holds the old items slice while a
+  Python callback runs gc.collect() after cutting the list would see nil again, the crash class listCut's delay avoids at
+  the cut. This is not probed.
+- Alternatives: a per-frame "on a thread's stack" flag set and cleared by runFrames (an extra store on every call and
+  return, for a check that only frame.clear() makes) was left. A walk of the threads costs nothing on the hot path.
