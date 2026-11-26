@@ -25376,3 +25376,10 @@ popen_spawn_posix,reduction}.py, Modules/_pickle.c (Pickler_dealloc, PyMemoTable
   test.test_multiprocessing_spawn.test_processes whole, the compiled launcher's children, under the big lock as a small job)
   was queued behind the lock (nine tickets) at this entry; nothing recorded (train 7 records). Ready for the train:
   `py-breaker-1126` HEAD.
+- Later the same evening: mac/py-breaker-1126 merged at the Go level, first `32b0ab9ef` (pyi's AOT: the eval breaker at a
+  compiled backward jump), then its rest at `214467aa7` (`647ab4251`: gc.collect()'s rounds deallocate the C-born objects Go
+  collected, py's ExtReap and pyctypes' reapAtCollect; its journal and survey); py/aot.go, finalize.go and pyctypes/world.go
+  merged without conflict, read back once (`c674ba6f5`); arbace.python.aot loads on stage 0.
+- C's essential checks on stage 0 after 598's arbace/c/build.ae: dg --essential, check --only essential-check (with
+  CI_LINK_CHECK) and check --aot --only essential-aot all pass against their records, the controls failing as they must:
+  no C row moves.
