@@ -8992,3 +8992,36 @@ test_ctypes whole):
   pass, test_ctypes 555+ pass with no row of the record's passes lost (37 of its non-passes pass), its four long double
   methods pass; left the three py-core rows. Expected on the record at the next train: `:capi-port` 84 -> 3 (test_call's and
   test_getargs' two), `:extension-modules` 53 -> 0 (48 pass, 4 to the skip classes, test_ctypes' fortran_contiguous passes).
+## As built: py-mp-1125, multiprocessing's two deferred classes by cause (2026-11-25, the main host, the burst's py-mp stream)
+
+The classes at train 5 (c3efeae13): `:multiprocessing` 199 rows, `:multiprocessing-children` 83, by cause:
+
+- **The forkserver's EOF, before 535 (195 of `:multiprocessing`, 25 not-run pool rows and the `-c` scripts of
+  `:multiprocessing-children`).** "unexpected EOF" is forkserver.py's read_signed after the server died at its `os.fork()`;
+  the record's rows are the records night's of 2026-11-19, before queue 535 started the server's children as fresh pyi
+  processes (libpatch.ae; on next since train 3). Nothing to build: they leave at the next eval record of the modules
+  (`test.test_multiprocessing_forkserver.*`, `test.test_concurrent_futures.*`, `test.test_multiprocessing_spawn.test_misc`,
+  `test_compileall`, `test_logging`, `test_asyncio.test_events`, `test_re`, `test_cprofile`).
+- **The start method fork (13): test_multiprocessing_main_handling's ForkCmdLineTest**, whose scripts set the start
+  method their argv names: `:fork`'s (n/a, the user's decision of 2026-11-04), moved there.
+- **Reference counting's moment (spawn's test_heap): `:finalization`'s** (n/a, 537-2 (a)), beside its fork and forkserver
+  siblings: BufferWrapper's blocks freed by `del` alone.
+- **Built: a frame the thread's reused call signal kept.** `Thread.push` (eval.go's pushFrame, reused since 202b) held the
+  last Python frame pushed until the next call, so a frame that escaped (sys._getframe, a warning's caller walk through
+  f_back, a traceback) kept its locals past its return and past gc.collect(): resource_tracker's "process died" warning,
+  raised inside SemLock.__init__'s call chain, kept the semaphore alive (TestResourceTracker's test_resource_tracker_sigkill:
+  "<Semaphore(value=1)> is not None"). The loop now takes the frame and clears the signal. Probed (goi, the checkout's
+  runtime): a method that calls sys._getframe(0), its instance collected after del and gc.collect() (alive before; the
+  control, the old eval.ae, alive). An `__init__`'s frame of a class call still survives under goi, whose registers keep a
+  returned call's values (queue 218's REQUEST): the compiled runtime decides it.
+- **Built: a child's signal mask.** pthread_sigmask's mask is the module's (queue 231), and `_posixsubprocess.fork_exec`,
+  `posix_spawn` without `setsigmask` and `spawnv` now give it to the child (the forking thread's mask around ForkExec,
+  spawnSignals), as a C child inherits its thread's. Go's runtime unblocks SIGINT, SIGTERM and the rest of its kill signals at
+  its start, so a child that is pyi lost the mask and died of a SIGINT or SIGTERM sent while it started: bin/pyi python reads
+  its shell's SigBlk and pending sets from /proc and passes them (PYI_START_SIGBLK, PYI_START_SIGPND), ignores a blocked SIGINT
+  or SIGTERM until the exec (a pending one discarded, counted), and the runtime's init blocks those signals for the program,
+  notified, a pending one held (sigpending), so the program's SIG_IGN and unblock decide it as CPython's child does.
+  resource_tracker's parent blocks SIGINT and SIGTERM around the tracker's spawn and the tests send them at once
+  (test_resource_tracker_sigint, test_resource_tracker_sigterm). Probed (goi): the child of a parent that blocked SIGINT
+  and SIGTERM reports both blocked; a SIGINT sent 0.5 s after the spawn, before the child's main ignores it, no longer kills
+  it (exit status 0; before, killed by SIGINT).

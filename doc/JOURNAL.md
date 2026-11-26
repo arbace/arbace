@@ -24368,3 +24368,39 @@ pyctypes (the gate's executable compiles its own copy: the eval rows move at the
 TestThreadState's four pass, test_ctypes loses no recorded pass and its long double methods pass. Expected at the next record:
 :capi-port 84 -> 3, :extension-modules 53 -> 0. Not recorded here: train 5's records run (test_capi, test_importlib whole) is the
 train's, and this stream's rows need a build with its pyctypes.
+## 2026-11-25 — py-mp-1125: multiprocessing's deferred classes by cause; a frame held by the call signal, a child's signal mask
+
+Branch py-mp-1125 from mac/train-5 (c3efeae13). `:multiprocessing` (199 rows) and `:multiprocessing-children` (83) of
+test/python/divergences.edn, read row by row against the record (test/python/check-lib-test-linux-amd64.edn) and the tests'
+sources (CPython 3.14.10's Lib/test/_test_multiprocessing.py, test_multiprocessing_main_handling.py, mp_fork_bomb.py,
+mp_preload.py; Lib/multiprocessing/resource_tracker.py, util.py), probed with bin/pyi run on train 3's executable
+(df179e3b1e10, its compiled runtime) and on goi (the checkout's runtime interpreted).
+
+- Causes. 195 rows of `:multiprocessing` and the forkserver's not-run pool rows are forkserver.py's "unexpected EOF" of the
+  records night before queue 535 (the server's os.fork), which train 3 carries: they move at the next eval record of the modules,
+  nothing built. test_multiprocessing_main_handling's ForkCmdLineTest (13) sets the start method fork (probed: popen_fork's
+  os.fork, "module 'os' has no attribute 'fork'"): moved to `:fork` (n/a, the user 2026-11-04). Spawn's test_heap and
+  TestManagerExceptions' two (an exception at the end of its handler under gc.disable(), probed alive with the collector on and
+  off: the handler's `e = None` comes before the `del e` the moment at del checks): moved to `:finalization` (n/a, 537-2 (a)).
+  `:multiprocessing-children` 83 -> 67.
+- Built (go/arbace/py, printed, edited, go vet and gofmt clean, read back by bin/repr-go read --full, only the edited files'
+  forms taken; printed again equal to the edited Go): (1) eval.go's loop clears the thread's reused pushFrame when it takes the
+  callee: it held the last pushed frame until the next call, so an escaped frame (sys._getframe, a warning's f_back walk) kept
+  its locals past its return and gc.collect() (test_resource_tracker_sigkill's semaphore). Probe: a method calling
+  sys._getframe(0), its instance dead after del and gc.collect (alive with the old eval.ae, the control). An __init__'s frame
+  still survives on goi, whose registers keep returned values (queue 218): the compiled build decides. (2) fork_exec,
+  posix_spawn without setsigmask and spawnv give the child pthread_sigmask's mask (spawnSignals around ForkExec). Go's runtime
+  unblocks SIGINT and SIGTERM at its start, so bin/pyi python passes its shell's SigBlk and pending sets (/proc/PID/status:
+  PYI_START_SIGBLK, PYI_START_SIGPND) and ignores a blocked SIGINT or SIGTERM until the exec, and the runtime's init
+  (builtins_signal_wait.go) blocks those for the program, notified and held. Probes on goi: a child of a parent that blocked
+  SIGINT and SIGTERM sees both blocked; a SIGINT 0.5 s after the spawn no longer kills it (status 0, before killed); a SIGTERM
+  pending at the exec is pending in the child and kills it at its unblock (status 15), as CPython's child; resource_tracker's
+  SIGINT case: the tracker survives, no warning, the semaphore dead after gc.collect (before: "process died unexpectedly").
+- Alternatives: the exception rows by a compiler change (a handler's cleanup as one checked deletion) left: the bytecode view
+  and every handler's cost; overlay/go exposing Go's initial signal mask instead of /proc: a runtime patch and a re-seed for
+  what the shell already knows.
+- Found, not mine: a spawn child of the compiled runtime is about 1.2 GB resident before it imports anything (maxrss of a
+  trivial target), 1.5 GB after test._test_multiprocessing; Pool(200) (test_large_pool) and the main-handling scripts' Pool(5)
+  pass the runner's caps: the host-memory lane's.
+- Records: the classes moved by name only (bin/pyi divergences 0 problems), bin/reap --record, bin/crops-score --record and
+  --judge --strict, bin/records-check: 0 problems. The runtime changes need the train's build; then the modules' eval record.
