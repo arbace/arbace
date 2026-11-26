@@ -25203,3 +25203,46 @@ The user's answers (via the coordinator): 594-1 (a), 594-2 (a), 594-3 (a); the n
 - Alternatives: for the panic, refreshing Go's list on PyList_SET_ITEM (a macro: C writes the slot inline, no native
   sees it); for the vectorcall, a synthetic code object for the function (frames and tracing would see it).
 - Measured (the AOT method, ARBACE_HOST_EXE train 6's arm64 stage 0): test_xml_etree_c and test_call whole; no record.
+## 2026-11-26 — Python: the small core tail, 17 classes' 47 rows at their causes (queue 595, VM)
+
+Brief: `.tmp/worktrees/q/tasks/595-py-core-tail.md` (branch `595-py-core-tail` from train-6 025065fd1). The rows: the record's
+non-passes in :buffer-exports, :source-decoding, :signal-timing, :signal-wakeup-errors, :tools-misc, :doctests, :warnings-c,
+:traceback-objects, :sys-module, :socket-gaps, :data-model, :code-objects, :boolop-truth-calls, :goi-liveness-fallthrough,
+:compiled-flaky, :slow-on-goi and :sqlite-process-locks (`bin/pyi divergences --methods`: 47 at train 6's record). Sources:
+CPython 3.14.10's tarball (REPR_PYTHON_SRC): Python/flowgraph.c (jump threading), Python/bytecodes.c (LOAD_SUPER_ATTR,
+_CHECK_PERIODIC), Modules/signalmodule.c (_PySignal_Fini, trip_signal, report_wakeup_write_error,
+_PyErr_CheckSignalsTstate), Python/pylifecycle.c (Py_FinalizeEx's order, _TARGET_LOCALES), Python/initconfig.c
+(config_init_stdio_encoding, config_get_stdio_errors), Objects/unicodeobject.c (config_get_codec_name),
+Objects/bytearrayobject.c (ob_exports around hex, join, split, the search methods, contains, %), Modules/_sre (the
+scanner's buffer), Objects/floatobject.c (float_hash).
+Done (each a commit):
+- the compiler: an and/or operand that is itself a boolean operation is tested as flowgraph.c's threading of
+  JUMP_IF_FALSE/JUMP_IF_TRUE leaves it (arbace/python/compile.ae's bool-jump!; gh-124285): no __bool__ twice.
+- monitoring: a super object's built-in method or method-wrapper is bound with no self for a monitored CALL (the
+  instrumented LOAD_SUPER_ATTR takes PyObject_GetAttr of the super object).
+- signals: _PySignal_Fini before the modules' clearing, so interrupt_main in a __del__ at exit gets the race message;
+  interrupt_main trips unless the handler is SIG_IGN or SIG_DFL; _CHECK_PERIODIC after every call of a callable that is not
+  a Python function (eval loop and the compiled code's calls), so a KeyboardInterrupt from interrupt_main lands at
+  waiter.acquire()'s return, not at Condition._acquire_restore's start ("release unlocked lock"); a failed write to the
+  wakeup fd reported as report_wakeup_write_error does (warn_on_full_buffer kept); an unraisable's header written to
+  sys.stderr with its traceback; os.write on a read-only descriptor answers EBADF without polling (it waited forever);
+  test_print_exception_gh_102056 off the runner's skip list.
+- buffer exports: a bytearray counts memoryview's exports by default (PYI_BYTEARRAY_EXPORTS=0 not: since 545 _io is Go,
+  only _pyio asks the collector); its methods that run Python code pin it (BufferExports.pins: refused at once, budget or
+  not); memoryview.release() asks the collector for a dropped re-exporter; re's scanner holds its subject's export.
+- stdio: the streams' errors as config_get_stdio_errors (UTF-8 mode, C/POSIX, a coercion target such as musl's default
+  C.UTF-8); PYTHONIOENCODING's encoding named by its codec; sys.argv decoded force-ASCII in the C locale outside UTF-8 mode.
+- builtins: extension modules' types (_queue.SimpleQueue, _random.Random) and memory_iterator left out; the runtime's exit
+  and quit pickle as _sitebuiltins.Quitter (a subinterpreter's exec() globals shared back).
+- float: a NaN float subclass instance hashes by the instance's identity.
+- crt: fcntl's F_SETLK and F_SETLKW on the host's description (SQLite's locks between processes).
+- divergences.edn: notes per class; moved test_memoryview_release and test_tracemalloc to :finalization (reference
+  counting's moment), test_socket_type to :gc-collector (gc.is_tracked), test_no_exception_leak to :finalization-collect.
+Measured: the 26 modules whole by `bin/pyi check --aot --lib-test` on train 6's stage 0 (7,376 methods: 6,569 pass, 804
+classed, 3 failing, none of them these rows: test_threading's test_can_interrupt_tight_loops, which passes on the eval loop,
+is the compiled code's backward jumps that never check the eval breaker; spawn's test_close and test_lose_target_ref hold a
+process object after gc_collect compiled); every --only list on goi before. 37 of the 47 rows pass compiled, 2 more after the
+last fixes (probed --only).
+Left: test_jit_is_active (594's _testinternalcapi), test_synopsis_sourceless (DECISION 595-1), CodeWeakRefTest.test_basic (a
+holder of code objects not found), and the moved rows. Alternatives considered: a refcount for C consumers (test_memoryview_release;
+not taken, :finalization's decision), gc.is_tracked answers by type (not taken: :gc-collector is n/a by decision).
