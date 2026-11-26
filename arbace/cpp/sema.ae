@@ -434,6 +434,8 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Classes: members by name, through the bases
 
+(declare gcc-type-str header-node?)
+
 (defn class-lookup
   "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases ([class.member.lookup]: the
   bases' sets merged, a set found in a base of another found one's class dropped -- dominance through virtual bases;
@@ -456,7 +458,19 @@
          (when (and (checking?) (>= (count (distinct (map ffirst kept))) 2)
                     (every? (fn [r] (every? #(#{:fn :field} (:e (second %))) r)) kept)
                     (not-any? #(:header (abi/cls (ffirst %))) kept) (not (:header c)))
-           (fail :ambiguous "reference to '" nm "' is ambiguous (found in several base classes)"))
+           ;; (cpp-def3: GCC's notes at the candidates, "candidates are: '...' [with T = int]", a class template's specialization's
+           ;; arguments named by its parameters: parse/error17.C's B<int>::Bar and B<char>::Bar)
+           (let [with (fn [cid] (let [c (abi/cls cid)
+                                      t (when (:tmpl c) (some-> (requiring-resolve 'arbace.cpp.template/tmpl) (apply [(:tmpl c)])))
+                                      ps (:params t)]
+                                  (when (and (seq ps) (= (count ps) (count (:targs c))))
+                                    (str/join ", " (map (fn [p a] (str (:name p) " = " (if (map? a) (gcc-type-str a) (str a)))) ps (:targs c))))))
+                 notes (vec (for [[cid e] (map first kept)
+                                  :let [f (when (= :fn (:e e)) (fnd (:id e))) n (:node f)]
+                                  :when (and n (:range n) (not (header-node? n)))]
+                              {:msg (str "candidates are: '" (:name f) "'" (when-let [w (with cid)] (str " [with " w "]"))) :node n}))]
+             (throw (ex-info (str "codegen: reference to '" nm "' is ambiguous (found in several base classes)")
+                             (cond-> {:codegen/refused :ambiguous} (seq notes) (assoc :cx/notes notes))))))
          (first kept))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -11056,7 +11070,21 @@
                                                                           ;; copy assignment's memberwise body, constexpr-tracking-const3.C)
                                                                           (not (some-> (:fn-id ctx) fnd ((some-fn :implicit :defaulted))))
                                                                           (re-find #"^codegen: no viable function among [1-9]" (.getMessage x)))
-                                                                 (fail :nomatch "no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")))
+                                                                 ;; (cpp-def3: GCC's explanation of a near match, an implicit copy or move
+                                                                 ;; assignment whose reference parameter cannot bind a volatile operand of
+                                                                 ;; the class -- [dcl.init.ref]/5's cv-qualification, an rvalue reference to
+                                                                 ;; an lvalue -- its error at the candidate, the class: overload/error8.C)
+                                                                 (let [rt (:ty (last args)) ru (abi/unq (abi/non-ref rt))
+                                                                       cn (:cx-node (abi/cls lc))
+                                                                       ex (when (and (abi/class? ru) (= (:id ru) lc) (:v (abi/non-ref rt)) cn (not (header-node? cn)))
+                                                                            (vec (for [m (distinct members) :let [g (fnd m)]
+                                                                                       :when (and (:implicit g) (= "operator=" (:name g)) (= 1 (count (:ps (:ty g)))))]
+                                                                                   {:msg (if (= :rref (:k (first (:ps (:ty g)))))
+                                                                                           "codegen: cannot bind rvalue reference to an lvalue of a volatile type"
+                                                                                           "codegen: binding reference of a const type to a volatile object discards qualifiers")
+                                                                                    :node cn})))]
+                                                                   (throw (ex-info (str "codegen: no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")
+                                                                                   (cond-> {:codegen/refused :nomatch} (seq ex) (assoc :cx/explain ex)))))))
                                                            (throw x))))]
         (cond
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
