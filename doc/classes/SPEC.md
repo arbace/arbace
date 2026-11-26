@@ -179,6 +179,7 @@ the code it must reproduce:
   | `:permits` | `permits` | a vector of types |
   | `:type-params` | `<T, U extends B>` | a vector of type parameters (§4.3) |
   | `:package` | `package` | `""` for the unnamed package (dotted names give all others) |
+  | `:parameters` | `javac -parameters` | `true`: the class's and its nested classes' `MethodParameters` record the parameters' names (a top-level class's; repr/java writes it when the read's javac options have `-parameters`; queue 563) |
 
 - **Value.** The form defines the class (and everything nested in it), imports it into the
   namespace under its simple name, and returns the `Class`.
@@ -617,7 +618,10 @@ permitted subclasses are those declared in the same top-level Java form or sourc
 `defmodule` writes `module-info.class` (`ACC_MODULE`, the `Module` attribute; `java.base` is
 required implicitly and marked `MANDATED`, and the versions of required system modules are
 recorded as javac does). `defpackage` writes `package-info.class` for package annotations, a
-synthetic interface as javac makes it. Both only make sense when compiling to files.
+synthetic interface as javac makes it. `defmodule` only makes sense when compiling to files;
+`defpackage` with annotations defines that interface, `package-info` of the namespace's package
+(`ACC_INTERFACE`, `ACC_ABSTRACT`, `ACC_SYNTHETIC`), whose annotations `Package`'s are (jdk26u's
+`Package.getPackageInfo`; amendment, queue 563, 2026-11-24).
 
 ### 4.15 Member macros
 
@@ -1398,7 +1402,11 @@ from
    class of a later form of the same file is known, as javac compiles a file's classes together
    (JC4, doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: JC4"; on Go since then, the path being
    ARBACE_PATH and the embedded sources). A class entered this way that is needed before its form
-   is defined (a superclass) is still an error: §9.2's rule for a top-level `do`.
+   is defined (a superclass) is still an error: §9.2's rule for a top-level `do`. An `(import ...)`
+   of such a class is lazy (2026-11-24, java-misc-1124): when the class cannot be loaded yet but a
+   source on the path declares it, the import maps its simple name for the Java forms
+   (`env/source-imports`) instead of throwing, so packages that import each other load in either
+   order; a class no source declares is Clojure's ClassNotFoundException.
 
 Bytecode refers to classes by name and the JVM resolves names lazily, so a class can be defined
 before the classes it refers to exist, as long as it is not used before. With 3, loading
@@ -2193,3 +2201,15 @@ repr/java's `print` (`arbace.repr.java.print`, `bin/repr-java print`, since 2026
    prints a declaration that is the one recorded (its hash the recorded one) as its text, a class
    through its own text with its members in their spans, and one that is not anew: an unedited
    file is the original byte for byte, and javac compiles it to the original's class files.
+
+7. **Java lines** (`bin/repr-java read --line-numbers`, since 2026-11-24, java-stack-1124; the Java
+   check's reads). The forms of the expressions that call carry their Java line as `^{:java/line N}`:
+   a method invocation the line of its `(` (javac's `pos`, where `Gen.visitApply` marks the line,
+   after the arguments), a class instance or array creation and a method reference (its bound
+   receiver's null check) the line of theirs; each top-level `defclass`'s name carries its file as
+   `^{:java/source "F.java"}` (javac's `SourceFile`). They are a record, as `:java/at`: the round
+   trip's and the print level's comparisons leave them out, and the printer ignores them. The
+   analyzer takes a class whose top-level class has `:java/source` as read with its lines: its
+   nodes' `:line` is the forms' `:java/line` alone (never the forms file's line), which j2g's line
+   tables and the interpreter's frames (`Compiler$CF$Frame.line`) give stack traces. Without the
+   option (jdk/'s forms, the corpora) nothing changes.

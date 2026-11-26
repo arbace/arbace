@@ -1,0 +1,909 @@
+;; Converted from jdk26u src/java.xml/share/classes/com/sun/org/apache/xalan/internal/xsltc/compiler/Parser.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xalan.internal.xsltc.compiler)
+
+(import '(com.sun.org.apache.xalan.internal.utils ObjectFactory)
+        '(com.sun.org.apache.xalan.internal.xsltc.compiler.util
+           ErrorMsg
+           MethodType
+           Type
+           TypeCheckError)
+        '(java.io File IOException StringReader)
+        '(java.util ArrayList HashMap Iterator List Map Properties Stack StringTokenizer)
+        '(javax.xml XMLConstants)
+        '(javax.xml.catalog CatalogFeatures)
+        '(jdk.xml.internal ErrorHandlerProxy
+                           JdkConstants
+                           JdkXmlFeatures
+                           JdkXmlFeatures$XmlFeature
+                           JdkXmlUtils
+                           SecuritySupport
+                           XMLSecurityManager)
+        '(org.xml.sax Attributes ContentHandler InputSource Locator SAXException XMLReader)
+        '(org.xml.sax.helpers AttributesImpl))
+
+(defclass ^:public Parser
+  :implements [Constants ContentHandler]
+
+  (field ^:private ^:static ^:final ^String XSL "xsl")
+
+  (field ^:private ^:static ^:final ^String TRANSLET "translet")
+
+  (field ^:private ^Locator _locator nil)
+
+  (field ^:private ^XSLTC _xsltc)
+
+  (field ^:private ^XPathParser _xpathParser)
+
+  (field ^:private ^{:tag (ArrayList ErrorMsg)} _errors)
+
+  (field ^:private ^{:tag (ArrayList ErrorMsg)} _warnings)
+
+  (field ^:private ^{:tag (Map String String)} _instructionClasses)
+
+  (field ^:private ^{:tag (Map String String/1)} _instructionAttrs)
+
+  (field ^:private ^{:tag (Map String QName)} _qNames)
+
+  (field ^:private ^{:tag (Map String (Map String QName))} _namespaces)
+
+  (field ^:private ^QName _useAttributeSets)
+
+  (field ^:private ^QName _excludeResultPrefixes)
+
+  (field ^:private ^QName _extensionElementPrefixes)
+
+  (field ^:private ^{:tag (Map String Object)} _variableScope)
+
+  (field ^:private ^Stylesheet _currentStylesheet)
+
+  (field ^:private ^SymbolTable _symbolTable)
+
+  (field ^:private ^Output _output)
+
+  (field ^:private ^Template _template)
+
+  (field ^:private ^boolean _rootNamespaceDef)
+
+  (field ^:private ^SyntaxTreeNode _root)
+
+  (field ^:private ^String _target)
+
+  (field ^:private ^int _currentImportPrecedence)
+
+  (field ^:private ^boolean _overrideDefaultParser)
+
+  (field ^:private ^boolean _hasUserErrListener)
+
+  (constructor ^:public [this ^XSLTC xsltc ^boolean useOverrideDefaultParser
+                         ^boolean hasUserErrListener]
+    (set! _xsltc xsltc)
+    (set! _overrideDefaultParser useOverrideDefaultParser)
+    (set! _hasUserErrListener hasUserErrListener))
+
+  (method ^:public init ^void [this]
+    (set! _qNames (HashMap. 512))
+    (set! _namespaces (HashMap.))
+    (set! _instructionClasses (HashMap.))
+    (set! _instructionAttrs (HashMap.))
+    (set! _variableScope (HashMap.))
+    (set! _template nil)
+    (set! _errors (ArrayList.))
+    (set! _warnings (ArrayList.))
+    (set! _symbolTable (SymbolTable.))
+    (set! _xpathParser (XPathParser. this))
+    (set! _currentStylesheet nil)
+    (set! _output nil)
+    (set! _root nil)
+    (set! _rootNamespaceDef false)
+    (set! _currentImportPrecedence 1)
+    (.initStdClasses this)
+    (.initInstructionAttrs this)
+    (.initExtClasses this)
+    (.initSymbolTable this)
+    (set! _useAttributeSets (.getQName this Parser/XSLT_URI XSL "use-attribute-sets"))
+    (set! _excludeResultPrefixes (.getQName this Parser/XSLT_URI XSL "exclude-result-prefixes"))
+    (set! _extensionElementPrefixes
+          (.getQName this Parser/XSLT_URI XSL "extension-element-prefixes")))
+
+  (method ^:public setOutput ^void [this ^Output output]
+    (if (some? _output)
+        (if (<= (.getImportPrecedence _output) (.getImportPrecedence output))
+            (do (.mergeOutput output _output) (.disable _output) (set! _output output))
+            (.disable output))
+        (set! _output output)))
+
+  (method ^:public getOutput ^Output [this] _output)
+
+  (method ^:public getOutputProperties ^Properties [this]
+    (.getOutputProperties (.getTopLevelStylesheet this)))
+
+  (method ^:public addVariable ^void [this ^Variable var]
+    (.addVariableOrParam this var))
+
+  (method ^:public addParameter ^void [this ^Param param]
+    (.addVariableOrParam this param))
+
+  (method ^:private addVariableOrParam ^void [this ^VariableBase var]
+    (let [existing (.get _variableScope (.getStringRep (.getName var)))]
+      (if (some? existing)
+          (cond
+            (instance? Stack existing)
+              (let [^{:tag (Stack VariableBase)} stack (cast Stack existing)] (.push stack var))
+            (instance? VariableBase existing)
+              (let [^{:tag (Stack VariableBase)} stack (Stack.)]
+                (.push stack (cast VariableBase existing))
+                (.push stack var)
+                (.put _variableScope (.getStringRep (.getName var)) stack)))
+          (.put _variableScope (.getStringRep (.getName var)) var))))
+
+  (method ^:public removeVariable ^void [this ^QName name]
+    (let [existing (.get _variableScope (.getStringRep name))]
+      (when (instance? Stack existing)
+        (let [^{:tag (Stack VariableBase)} stack (cast Stack existing)]
+          (when-not (.isEmpty stack) (.pop stack))
+          (when-not (.isEmpty stack) (return))))
+      (.remove _variableScope (.getStringRep name))))
+
+  (method ^:public lookupVariable ^VariableBase [this ^QName name]
+    (let [existing (.get _variableScope (.getStringRep name))]
+      (cond
+        (instance? VariableBase existing) (cast VariableBase existing)
+        (instance? Stack existing)
+          (let [^{:tag (Stack VariableBase)} stack (cast Stack existing)]
+            (cast VariableBase (.peek stack))))))
+
+  (method ^:public setXSLTC ^void [this ^XSLTC xsltc] (set! _xsltc xsltc))
+
+  (method ^:public getXSLTC ^XSLTC [this] _xsltc)
+
+  (method ^:public getCurrentImportPrecedence ^int [this]
+    _currentImportPrecedence)
+
+  (method ^:public getNextImportPrecedence ^int [this]
+    (set! _currentImportPrecedence (unchecked-inc-int _currentImportPrecedence)))
+
+  (method ^:public setCurrentStylesheet ^void [this ^Stylesheet stylesheet]
+    (set! _currentStylesheet stylesheet))
+
+  (method ^:public getCurrentStylesheet ^Stylesheet [this]
+    _currentStylesheet)
+
+  (method ^:public getTopLevelStylesheet ^Stylesheet [this]
+    (.getStylesheet _xsltc))
+
+  (method ^:public getQNameSafe ^QName [this ^:final ^String stringRep]
+    (let [^:final colon (.lastIndexOf stringRep \:)]
+      (if (not (== colon -1))
+          (let [^:final prefix (.substring stringRep 0 colon)
+                ^:final localname (.substring stringRep (unchecked-add-int colon 1))
+                ^:mutable ^String namespace nil]
+            (when (= (.equals prefix Parser/XMLNS_PREFIX) false)
+              (set! namespace (.lookupNamespace _symbolTable prefix))
+              (when (nil? namespace) (set! namespace Parser/EMPTYSTRING)))
+            (.getQName this namespace prefix localname))
+          (let [^:final ^String uri (when-not (.equals stringRep Parser/XMLNS_PREFIX)
+                                      (.lookupNamespace _symbolTable Parser/EMPTYSTRING))]
+            (.getQName this uri nil stringRep)))))
+
+  (method ^:public getQName ^QName [this ^:final ^String stringRep]
+    (.getQName this stringRep true false))
+
+  (method ^:public getQNameIgnoreDefaultNs ^QName [this ^:final ^String stringRep]
+    (.getQName this stringRep true true))
+
+  (method ^:public getQName ^QName [this ^:final ^String stringRep ^boolean reportError]
+    (.getQName this stringRep reportError false))
+
+  (method ^:private getQName ^QName [this ^:final ^String stringRep ^boolean reportError
+                                     ^:mutable ^boolean ignoreDefaultNs]
+    (let [^:final colon (.lastIndexOf stringRep \:)]
+      (if (not (== colon -1))
+          (let [^:final prefix (.substring stringRep 0 colon)
+                ^:final localname (.substring stringRep (unchecked-add-int colon 1))
+                ^:mutable ^String namespace nil]
+            (when (= (.equals prefix Parser/XMLNS_PREFIX) false)
+              (set! namespace (.lookupNamespace _symbolTable prefix))
+              (when (and (nil? namespace) reportError)
+                (let [^:final line (.getLineNumber this)
+                      err (ErrorMsg. ErrorMsg/NAMESPACE_UNDEF_ERR line prefix)]
+                  (.reportError this Parser/ERROR err))))
+            (.getQName this namespace prefix localname))
+          (do
+            (when (.equals stringRep Parser/XMLNS_PREFIX) (set! ignoreDefaultNs true))
+            (let [^:final ^String defURI (when-not ignoreDefaultNs
+                                           (.lookupNamespace _symbolTable Parser/EMPTYSTRING))]
+              (.getQName this defURI nil stringRep))))))
+
+  (method ^:public getQName ^QName [this ^String namespace ^String prefix ^String localname]
+    (if (or (nil? namespace) (.equals namespace Parser/EMPTYSTRING))
+        (let [^:mutable name (cast QName (.get _qNames localname))]
+          (when (nil? name) (set! name (QName. nil prefix localname)) (.put _qNames localname name))
+          name)
+        (let [^:mutable ^{:tag (Map String QName)} space (cast Map (.get _namespaces namespace))
+              ^String lexicalQName (if (or (nil? prefix) (== (.length prefix) 0))
+                                       localname
+                                       (java-str prefix \: localname))]
+          (if (nil? space)
+              (let [^:final name (QName. namespace prefix localname)]
+                (.put _namespaces namespace (set! space (HashMap.)))
+                (.put space lexicalQName name)
+                name)
+              (let [^:mutable name (cast QName (.get space lexicalQName))]
+                (when (nil? name)
+                  (set! name (QName. namespace prefix localname))
+                  (.put space lexicalQName name))
+                name)))))
+
+  (method ^:public getQName ^QName [this ^String scope ^String name]
+    (.getQName this (java-str scope name)))
+
+  (method ^:public getQName ^QName [this ^QName scope ^QName name]
+    (.getQName this (java-str (.toString scope) (.toString name))))
+
+  (method ^:public getUseAttributeSets ^QName [this] _useAttributeSets)
+
+  (method ^:public getExtensionElementPrefixes ^QName [this]
+    _extensionElementPrefixes)
+
+  (method ^:public getExcludeResultPrefixes ^QName [this]
+    _excludeResultPrefixes)
+
+  (method ^:public makeStylesheet :throws [CompilerException] ^Stylesheet [this
+                                                                           ^SyntaxTreeNode element]
+    (try
+      (let [^:mutable ^Stylesheet stylesheet nil]
+        (if (instance? Stylesheet element)
+            (set! stylesheet (cast Stylesheet element))
+            (do
+              (set! stylesheet (Stylesheet.))
+              (.setSimplified stylesheet)
+              (.addElement stylesheet element)
+              (.setAttributes stylesheet (cast AttributesImpl (.getAttributes element)))
+              (when (nil? (.lookupNamespace element Parser/EMPTYSTRING))
+                (.addPrefixMapping element Parser/EMPTYSTRING Parser/EMPTYSTRING))))
+        (.setParser stylesheet this)
+        stylesheet)
+      (catch ClassCastException e
+        (let [err (ErrorMsg. ErrorMsg/NOT_STYLESHEET_ERR element)]
+          (throw (CompilerException. (.toString err)))))))
+
+  (method ^:public createAST ^void [this ^Stylesheet stylesheet]
+    (try
+      (when (some? stylesheet)
+        (.parseContents stylesheet this)
+        (let [^:final ^{:tag (Iterator SyntaxTreeNode)} elements (.elements stylesheet)]
+          (while (.hasNext elements)
+            (let [child (cast SyntaxTreeNode (.next elements))]
+              (when (instance? Text child)
+                (let [^:final l (.getLineNumber this)
+                      err (ErrorMsg. ErrorMsg/ILLEGAL_TEXT_NODE_ERR l nil)]
+                  (.reportError this Parser/ERROR err)))))
+          (when-not (.errorsFound this) (.typeCheck stylesheet _symbolTable))))
+      (catch TypeCheckError e
+        (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/JAXP_COMPILE_ERR e)))))
+
+  (method ^:public parse ^SyntaxTreeNode [this ^XMLReader reader ^InputSource input]
+    (try
+      (.setContentHandler reader this)
+      (when _hasUserErrListener (.setErrorHandler reader (ErrorHandlerProxy.)))
+      (.parse reader input)
+      (return (.getStylesheet this _root))
+      (catch IOException e
+        (when (.debug _xsltc) (.printStackTrace e))
+        (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/JAXP_COMPILE_ERR e)))
+      (catch SAXException e
+        (let [^Throwable ex (.getException e)]
+          (when (.debug _xsltc) (.printStackTrace e) (when (some? ex) (.printStackTrace ex)))
+          (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/JAXP_COMPILE_ERR e))))
+      (catch CompilerException e
+        (when (.debug _xsltc) (.printStackTrace e))
+        (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/JAXP_COMPILE_ERR e)))
+      (catch Exception e
+        (when (.debug _xsltc) (.printStackTrace e))
+        (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/JAXP_COMPILE_ERR e))))
+    nil)
+
+  (method ^:public parse ^SyntaxTreeNode [this ^InputSource input]
+    (let [^:final reader (JdkXmlUtils/getXMLReader
+                           (cast XMLSecurityManager
+                                 (.getProperty _xsltc JdkConstants/SECURITY_MANAGER))
+                           _overrideDefaultParser
+                           (.isSecureProcessing _xsltc)
+                           (.getFeature _xsltc JdkXmlFeatures$XmlFeature/USE_CATALOG)
+                           (cast CatalogFeatures
+                                 (.getProperty _xsltc JdkXmlFeatures/CATALOG_FEATURES)))]
+      (JdkXmlUtils/setXMLReaderPropertyIfSupport
+        reader
+        XMLConstants/ACCESS_EXTERNAL_DTD
+        (.getProperty _xsltc XMLConstants/ACCESS_EXTERNAL_DTD)
+        true)
+      (JdkXmlUtils/setXMLReaderPropertyIfSupport
+        reader
+        JdkConstants/CDATA_CHUNK_SIZE
+        (.getProperty _xsltc JdkConstants/CDATA_CHUNK_SIZE)
+        false)
+      (.parse this reader input)))
+
+  (method ^:public getDocumentRoot ^SyntaxTreeNode [this] _root)
+
+  (field ^:private ^String _PImedia nil)
+
+  (field ^:private ^String _PItitle nil)
+
+  (field ^:private ^String _PIcharset nil)
+
+  (method ^:protected setPIParameters ^void [this ^String media ^String title ^String charset]
+    (set! _PImedia media)
+    (set! _PItitle title)
+    (set! _PIcharset charset))
+
+  (method ^:private getStylesheet :throws [CompilerException] ^SyntaxTreeNode [this
+                                                                               ^SyntaxTreeNode root]
+    (cond
+      (nil? _target)
+        (do
+          (when-not _rootNamespaceDef
+            (let [msg (ErrorMsg. ErrorMsg/MISSING_XSLT_URI_ERR)]
+              (throw (CompilerException. (.toString msg)))))
+          root)
+      (== (.charAt _target 0) \#)
+        (let [element (.findStylesheet this root (.substring _target 1))]
+          (when (nil? element)
+            (let [msg (ErrorMsg. ErrorMsg/MISSING_XSLT_TARGET_ERR _target root)]
+              (throw (CompilerException. (.toString msg)))))
+          element)
+      :else
+        (do
+          (try
+            (let [^:mutable path _target]
+              (when (== (.indexOf path ":") -1) (set! path (java-str "file:" path)))
+              (set!
+                path
+                (com.sun.org.apache.xml.internal.serializer.utils.SystemIDResolver/getAbsoluteURI
+                  path))
+              (let [accessError (SecuritySupport/checkAccess
+                                  path
+                                  (cast String
+                                        (.getProperty
+                                          _xsltc
+                                          XMLConstants/ACCESS_EXTERNAL_STYLESHEET))
+                                  JdkConstants/ACCESS_EXTERNAL_ALL)]
+                (when (some? accessError)
+                  (let [msg (ErrorMsg. ErrorMsg/ACCESSING_XSLT_TARGET_ERR
+                                       (SecuritySupport/sanitizePath _target)
+                                       accessError
+                                       root)]
+                    (throw (CompilerException. (.toString msg)))))))
+            (catch IOException ex (throw (CompilerException. ex))))
+          (.loadExternalStylesheet this _target))))
+
+  (method ^:private findStylesheet ^SyntaxTreeNode [this ^SyntaxTreeNode root ^String href]
+    (when (some? root)
+      (when (instance? Stylesheet root)
+        (let [id (.getAttribute root "id")] (when (.equals id href) (return root))))
+      (let [^{:tag (List SyntaxTreeNode)} children (.getContents root)]
+        (when (some? children)
+          (let [^:final count (.size children)]
+            (loop [^int i 0]
+              (when (< i count)
+                (let [child (cast SyntaxTreeNode (.get children i))
+                      node (.findStylesheet this child href)]
+                  (if (some? node) (return node) (recur (unchecked-inc-int i))))))))
+        nil)))
+
+  (method ^:private loadExternalStylesheet :throws [CompilerException] ^SyntaxTreeNode [this
+                                                                                        ^String location]
+    (let [^InputSource source (if (.exists (File. location))
+                                  (InputSource. (java-str "file:" location))
+                                  (InputSource. location))]
+      (let [external (.parse this source)] external)))
+
+  (method ^:private initAttrTable ^void [this ^String elementName ^String/1 attrs]
+    (.put _instructionAttrs (.getStringRep (.getQName this Parser/XSLT_URI XSL elementName)) attrs))
+
+  (method ^:private initInstructionAttrs ^void [this]
+    (.initAttrTable this "template" (new String/1 ["match" "name" "priority" "mode"]))
+    (.initAttrTable this
+                    "stylesheet"
+                    (new String/1
+                         ["id" "version" "extension-element-prefixes" "exclude-result-prefixes"]))
+    (.initAttrTable this
+                    "transform"
+                    (new String/1
+                         ["id" "version" "extension-element-prefixes" "exclude-result-prefixes"]))
+    (.initAttrTable this "text" (new String/1 ["disable-output-escaping"]))
+    (.initAttrTable this "if" (new String/1 ["test"]))
+    (.initAttrTable this "choose" (new String/1 []))
+    (.initAttrTable this "when" (new String/1 ["test"]))
+    (.initAttrTable this "otherwise" (new String/1 []))
+    (.initAttrTable this "for-each" (new String/1 ["select"]))
+    (.initAttrTable this "message" (new String/1 ["terminate"]))
+    (.initAttrTable this
+                    "number"
+                    (new String/1
+                         ["level" "count" "from" "value" "format" "lang" "letter-value"
+                          "grouping-separator" "grouping-size"]))
+    (.initAttrTable this "comment" (new String/1 []))
+    (.initAttrTable this "copy" (new String/1 ["use-attribute-sets"]))
+    (.initAttrTable this "copy-of" (new String/1 ["select"]))
+    (.initAttrTable this "param" (new String/1 ["name" "select"]))
+    (.initAttrTable this "with-param" (new String/1 ["name" "select"]))
+    (.initAttrTable this "variable" (new String/1 ["name" "select"]))
+    (.initAttrTable this
+                    "output"
+                    (new String/1
+                         ["method" "version" "encoding" "omit-xml-declaration" "standalone"
+                          "doctype-public" "doctype-system" "cdata-section-elements" "indent"
+                          "media-type"]))
+    (.initAttrTable this "sort" (new String/1 ["select" "order" "case-order" "lang" "data-type"]))
+    (.initAttrTable this "key" (new String/1 ["name" "match" "use"]))
+    (.initAttrTable this "fallback" (new String/1 []))
+    (.initAttrTable this "attribute" (new String/1 ["name" "namespace"]))
+    (.initAttrTable this "attribute-set" (new String/1 ["name" "use-attribute-sets"]))
+    (.initAttrTable this "value-of" (new String/1 ["select" "disable-output-escaping"]))
+    (.initAttrTable this "element" (new String/1 ["name" "namespace" "use-attribute-sets"]))
+    (.initAttrTable this "call-template" (new String/1 ["name"]))
+    (.initAttrTable this "apply-templates" (new String/1 ["select" "mode"]))
+    (.initAttrTable this "apply-imports" (new String/1 []))
+    (.initAttrTable this
+                    "decimal-format"
+                    (new String/1
+                         ["name" "decimal-separator" "grouping-separator" "infinity" "minus-sign"
+                          "NaN" "percent" "per-mille" "zero-digit" "digit" "pattern-separator"]))
+    (.initAttrTable this "import" (new String/1 ["href"]))
+    (.initAttrTable this "include" (new String/1 ["href"]))
+    (.initAttrTable this "strip-space" (new String/1 ["elements"]))
+    (.initAttrTable this "preserve-space" (new String/1 ["elements"]))
+    (.initAttrTable this "processing-instruction" (new String/1 ["name"]))
+    (.initAttrTable this "namespace-alias" (new String/1 ["stylesheet-prefix" "result-prefix"])))
+
+  (method ^:private initStdClasses ^void [this]
+    (.initStdClass this "template" "Template")
+    (.initStdClass this "stylesheet" "Stylesheet")
+    (.initStdClass this "transform" "Stylesheet")
+    (.initStdClass this "text" "Text")
+    (.initStdClass this "if" "If")
+    (.initStdClass this "choose" "Choose")
+    (.initStdClass this "when" "When")
+    (.initStdClass this "otherwise" "Otherwise")
+    (.initStdClass this "for-each" "ForEach")
+    (.initStdClass this "message" "Message")
+    (.initStdClass this "number" "Number")
+    (.initStdClass this "comment" "Comment")
+    (.initStdClass this "copy" "Copy")
+    (.initStdClass this "copy-of" "CopyOf")
+    (.initStdClass this "param" "Param")
+    (.initStdClass this "with-param" "WithParam")
+    (.initStdClass this "variable" "Variable")
+    (.initStdClass this "output" "Output")
+    (.initStdClass this "sort" "Sort")
+    (.initStdClass this "key" "Key")
+    (.initStdClass this "fallback" "Fallback")
+    (.initStdClass this "attribute" "XslAttribute")
+    (.initStdClass this "attribute-set" "AttributeSet")
+    (.initStdClass this "value-of" "ValueOf")
+    (.initStdClass this "element" "XslElement")
+    (.initStdClass this "call-template" "CallTemplate")
+    (.initStdClass this "apply-templates" "ApplyTemplates")
+    (.initStdClass this "apply-imports" "ApplyImports")
+    (.initStdClass this "decimal-format" "DecimalFormatting")
+    (.initStdClass this "import" "Import")
+    (.initStdClass this "include" "Include")
+    (.initStdClass this "strip-space" "Whitespace")
+    (.initStdClass this "preserve-space" "Whitespace")
+    (.initStdClass this "processing-instruction" "ProcessingInstruction")
+    (.initStdClass this "namespace-alias" "NamespaceAlias"))
+
+  (method ^:private initStdClass ^void [this ^String elementName ^String className]
+    (.put _instructionClasses
+          (.getStringRep (.getQName this Parser/XSLT_URI XSL elementName))
+          (java-str (java-str Parser/COMPILER_PACKAGE \.) className)))
+
+  (method ^:public elementSupported ^boolean [this ^String namespace ^String localName]
+    (some? (.get _instructionClasses (.getStringRep (.getQName this namespace XSL localName)))))
+
+  (method ^:public functionSupported ^boolean [this ^String fname]
+    (some? (.lookupPrimop _symbolTable fname)))
+
+  (method ^:private initExtClasses ^void [this]
+    (.initExtClass this "output" "TransletOutput")
+    (.initExtClass this Parser/REDIRECT_URI "write" "TransletOutput"))
+
+  (method ^:private initExtClass ^void [this ^String elementName ^String className]
+    (.put _instructionClasses
+          (.getStringRep (.getQName this Parser/TRANSLET_URI TRANSLET elementName))
+          (java-str (java-str Parser/COMPILER_PACKAGE \.) className)))
+
+  (method ^:private initExtClass ^void [this ^String namespace ^String elementName ^String className]
+    (.put _instructionClasses
+          (.getStringRep (.getQName this namespace TRANSLET elementName))
+          (java-str (java-str Parser/COMPILER_PACKAGE \.) className)))
+
+  (method ^:private initSymbolTable ^void [this]
+    (let [I_V (MethodType. Type/Int Type/Void)
+          I_R (MethodType. Type/Int Type/Real)
+          I_S (MethodType. Type/Int Type/String)
+          I_D (MethodType. Type/Int Type/NodeSet)
+          R_I (MethodType. Type/Real Type/Int)
+          R_V (MethodType. Type/Real Type/Void)
+          R_R (MethodType. Type/Real Type/Real)
+          R_D (MethodType. Type/Real Type/NodeSet)
+          R_O (MethodType. Type/Real Type/Reference)
+          I_I (MethodType. Type/Int Type/Int)
+          D_O (MethodType. Type/NodeSet Type/Reference)
+          D_V (MethodType. Type/NodeSet Type/Void)
+          D_S (MethodType. Type/NodeSet Type/String)
+          D_D (MethodType. Type/NodeSet Type/NodeSet)
+          A_V (MethodType. Type/Node Type/Void)
+          S_V (MethodType. Type/String Type/Void)
+          S_S (MethodType. Type/String Type/String)
+          S_A (MethodType. Type/String Type/Node)
+          S_D (MethodType. Type/String Type/NodeSet)
+          S_O (MethodType. Type/String Type/Reference)
+          B_O (MethodType. Type/Boolean Type/Reference)
+          B_V (MethodType. Type/Boolean Type/Void)
+          B_B (MethodType. Type/Boolean Type/Boolean)
+          B_S (MethodType. Type/Boolean Type/String)
+          D_X (MethodType. Type/NodeSet Type/Object)
+          R_RR (MethodType. Type/Real Type/Real Type/Real)
+          I_II (MethodType. Type/Int Type/Int Type/Int)
+          B_RR (MethodType. Type/Boolean Type/Real Type/Real)
+          B_II (MethodType. Type/Boolean Type/Int Type/Int)
+          S_SS (MethodType. Type/String Type/String Type/String)
+          S_DS (MethodType. Type/String Type/Real Type/String)
+          S_SR (MethodType. Type/String Type/String Type/Real)
+          O_SO (MethodType. Type/Reference Type/String Type/Reference)
+          D_SS (MethodType. Type/NodeSet Type/String Type/String)
+          D_SD (MethodType. Type/NodeSet Type/String Type/NodeSet)
+          B_BB (MethodType. Type/Boolean Type/Boolean Type/Boolean)
+          B_SS (MethodType. Type/Boolean Type/String Type/String)
+          S_SD (MethodType. Type/String Type/String Type/NodeSet)
+          S_DSS (MethodType. Type/String Type/Real Type/String Type/String)
+          S_SRR (MethodType. Type/String Type/String Type/Real Type/Real)
+          S_SSS (MethodType. Type/String Type/String Type/String Type/String)]
+      (.addPrimop _symbolTable "current" A_V)
+      (.addPrimop _symbolTable "last" I_V)
+      (.addPrimop _symbolTable "position" I_V)
+      (.addPrimop _symbolTable "true" B_V)
+      (.addPrimop _symbolTable "false" B_V)
+      (.addPrimop _symbolTable "not" B_B)
+      (.addPrimop _symbolTable "name" S_V)
+      (.addPrimop _symbolTable "name" S_A)
+      (.addPrimop _symbolTable "generate-id" S_V)
+      (.addPrimop _symbolTable "generate-id" S_A)
+      (.addPrimop _symbolTable "ceiling" R_R)
+      (.addPrimop _symbolTable "floor" R_R)
+      (.addPrimop _symbolTable "round" R_R)
+      (.addPrimop _symbolTable "contains" B_SS)
+      (.addPrimop _symbolTable "number" R_O)
+      (.addPrimop _symbolTable "number" R_V)
+      (.addPrimop _symbolTable "boolean" B_O)
+      (.addPrimop _symbolTable "string" S_O)
+      (.addPrimop _symbolTable "string" S_V)
+      (.addPrimop _symbolTable "translate" S_SSS)
+      (.addPrimop _symbolTable "string-length" I_V)
+      (.addPrimop _symbolTable "string-length" I_S)
+      (.addPrimop _symbolTable "starts-with" B_SS)
+      (.addPrimop _symbolTable "format-number" S_DS)
+      (.addPrimop _symbolTable "format-number" S_DSS)
+      (.addPrimop _symbolTable "unparsed-entity-uri" S_S)
+      (.addPrimop _symbolTable "key" D_SS)
+      (.addPrimop _symbolTable "key" D_SD)
+      (.addPrimop _symbolTable "id" D_S)
+      (.addPrimop _symbolTable "id" D_D)
+      (.addPrimop _symbolTable "namespace-uri" S_V)
+      (.addPrimop _symbolTable "function-available" B_S)
+      (.addPrimop _symbolTable "element-available" B_S)
+      (.addPrimop _symbolTable "document" D_S)
+      (.addPrimop _symbolTable "document" D_V)
+      (.addPrimop _symbolTable "count" I_D)
+      (.addPrimop _symbolTable "sum" R_D)
+      (.addPrimop _symbolTable "local-name" S_V)
+      (.addPrimop _symbolTable "local-name" S_D)
+      (.addPrimop _symbolTable "namespace-uri" S_V)
+      (.addPrimop _symbolTable "namespace-uri" S_D)
+      (.addPrimop _symbolTable "substring" S_SR)
+      (.addPrimop _symbolTable "substring" S_SRR)
+      (.addPrimop _symbolTable "substring-after" S_SS)
+      (.addPrimop _symbolTable "substring-before" S_SS)
+      (.addPrimop _symbolTable "normalize-space" S_V)
+      (.addPrimop _symbolTable "normalize-space" S_S)
+      (.addPrimop _symbolTable "system-property" S_S)
+      (.addPrimop _symbolTable "nodeset" D_O)
+      (.addPrimop _symbolTable "objectType" S_O)
+      (.addPrimop _symbolTable "cast" O_SO)
+      (.addPrimop _symbolTable "+" R_RR)
+      (.addPrimop _symbolTable "-" R_RR)
+      (.addPrimop _symbolTable "*" R_RR)
+      (.addPrimop _symbolTable "/" R_RR)
+      (.addPrimop _symbolTable "%" R_RR)
+      (.addPrimop _symbolTable "+" I_II)
+      (.addPrimop _symbolTable "-" I_II)
+      (.addPrimop _symbolTable "*" I_II)
+      (.addPrimop _symbolTable "<" B_RR)
+      (.addPrimop _symbolTable "<=" B_RR)
+      (.addPrimop _symbolTable ">" B_RR)
+      (.addPrimop _symbolTable ">=" B_RR)
+      (.addPrimop _symbolTable "<" B_II)
+      (.addPrimop _symbolTable "<=" B_II)
+      (.addPrimop _symbolTable ">" B_II)
+      (.addPrimop _symbolTable ">=" B_II)
+      (.addPrimop _symbolTable "<" B_BB)
+      (.addPrimop _symbolTable "<=" B_BB)
+      (.addPrimop _symbolTable ">" B_BB)
+      (.addPrimop _symbolTable ">=" B_BB)
+      (.addPrimop _symbolTable "or" B_BB)
+      (.addPrimop _symbolTable "and" B_BB)
+      (.addPrimop _symbolTable "u-" R_R)
+      (.addPrimop _symbolTable "u-" I_I)))
+
+  (method ^:public getSymbolTable ^SymbolTable [this] _symbolTable)
+
+  (method ^:public getTemplate ^Template [this] _template)
+
+  (method ^:public setTemplate ^void [this ^Template template]
+    (set! _template template))
+
+  (field ^:private ^int _templateIndex 0)
+
+  (method ^:public getTemplateIndex ^int [this]
+    (let [_templateIndex-1 _templateIndex]
+      (set! _templateIndex (unchecked-inc-int _templateIndex))
+      _templateIndex-1))
+
+  (field ^:private ^boolean versionIsOne true)
+
+  (method ^:public makeInstance ^SyntaxTreeNode [this ^String uri ^String prefix ^String local
+                                                 ^Attributes attributes]
+    (let [^:mutable ^SyntaxTreeNode node nil
+          qname (.getQName this uri prefix local)
+          className (cast String (.get _instructionClasses (.getStringRep qname)))]
+      (if (some? className)
+          (try
+            (let [^:final ^{:tag (Class ?)} clazz (ObjectFactory/findProviderClass className true)]
+              (set! node (cast SyntaxTreeNode (.newInstance (.getDeclaredConstructor clazz))))
+              (.setQName node qname)
+              (.setParser node this)
+              (when (some? _locator) (.setLineNumber node (.getLineNumber this)))
+              (when (instance? Stylesheet node) (.setStylesheet _xsltc (cast Stylesheet node)))
+              (.checkForSuperfluousAttributes this node attributes))
+            (catch ClassNotFoundException e
+              (let [err (ErrorMsg. ErrorMsg/CLASS_NOT_FOUND_ERR node)]
+                (.reportError this Parser/ERROR err)))
+            (catch Exception e
+              (let [err (ErrorMsg. ErrorMsg/INTERNAL_ERR (.getMessage e) node)]
+                (.reportError this Parser/FATAL err))))
+          (do
+            (when (some? uri)
+              (cond
+                (.equals uri Parser/XSLT_URI)
+                  (do
+                    (set! node (UnsupportedElement. uri prefix local false))
+                    (let [element (cast UnsupportedElement node)
+                          msg (ErrorMsg. ErrorMsg/UNSUPPORTED_XSL_ERR (.getLineNumber this) local)]
+                      (.setErrorMessage element msg)
+                      (when versionIsOne (.reportError this Parser/UNSUPPORTED msg))))
+                (.equals uri Parser/TRANSLET_URI)
+                  (do
+                    (set! node (UnsupportedElement. uri prefix local true))
+                    (let [element (cast UnsupportedElement node)
+                          msg (ErrorMsg. ErrorMsg/UNSUPPORTED_EXT_ERR (.getLineNumber this) local)]
+                      (.setErrorMessage element msg)))
+                :else
+                  (let [sheet (.getStylesheet _xsltc)]
+                    (when (and (some? sheet) (.isExtension sheet uri))
+                      (when-not (identical? sheet (.peek _parentStack))
+                        (set! node (UnsupportedElement. uri prefix local true))
+                        (let [elem (cast UnsupportedElement node)
+                              msg (ErrorMsg. ErrorMsg/UNSUPPORTED_EXT_ERR
+                                             (.getLineNumber this)
+                                             (java-str prefix ":" local))]
+                          (.setErrorMessage elem msg)))))))
+            (when (nil? node)
+              (set! node (LiteralElement.))
+              (.setLineNumber node (.getLineNumber this)))))
+      (when (and (some? node) (instance? LiteralElement node))
+        (.setQName (cast LiteralElement node) qname))
+      node))
+
+  (method ^:private checkForSuperfluousAttributes ^void [this ^SyntaxTreeNode node ^Attributes attrs]
+    (let [qname (.getQName node)
+          isStylesheet (instance? Stylesheet node)
+          legal (cast String/1 (.get _instructionAttrs (.getStringRep qname)))]
+      (when (and versionIsOne (some? legal))
+        (let [^:mutable ^int j 0
+              ^:final n (.getLength attrs)]
+          (loop [^int i 0]
+            (when (< i n)
+              (let [^:final attrQName (.getQName attrs i)]
+                (when (and isStylesheet (.equals attrQName "version"))
+                  (set! versionIsOne (.equals (.getValue attrs i) "1.0")))
+                (if (or (.startsWith attrQName "xml") (> (.indexOf attrQName \:) 0))
+                    (recur (unchecked-inc-int i))
+                    (do
+                      (set! j 0)
+                      (while (< j (alength legal))
+                        (when (.equalsIgnoreCase attrQName (aget legal j)) (break))
+                        (set! j (unchecked-inc-int j)))
+                      (if (== j (alength legal))
+                          (let [^:final err (ErrorMsg.
+                                              ErrorMsg/ILLEGAL_ATTRIBUTE_ERR
+                                              attrQName
+                                              node)]
+                            (.setWarningError err true)
+                            (.reportError this Parser/WARNING err)
+                            (recur (unchecked-inc-int i)))
+                          (recur (unchecked-inc-int i))))))))))))
+
+  (method ^:public parseExpression ^Expression [this ^SyntaxTreeNode parent ^String exp]
+    (cast Expression (.parseTopLevel this parent (java-str "<EXPRESSION>" exp) nil)))
+
+  (method ^:public parseExpression ^Expression [this ^SyntaxTreeNode parent ^String attr ^String def]
+    (let [^:mutable exp (.getAttribute parent attr)]
+      (when (and (== (.length exp) 0) (some? def)) (set! exp def))
+      (cast Expression (.parseTopLevel this parent (java-str "<EXPRESSION>" exp) exp))))
+
+  (method ^:public parsePattern ^Pattern [this ^SyntaxTreeNode parent ^String pattern]
+    (cast Pattern (.parseTopLevel this parent (java-str "<PATTERN>" pattern) pattern)))
+
+  (method ^:public parsePattern ^Pattern [this ^SyntaxTreeNode parent ^String attr ^String def]
+    (let [^:mutable pattern (.getAttribute parent attr)]
+      (when (and (== (.length pattern) 0) (some? def)) (set! pattern def))
+      (cast Pattern (.parseTopLevel this parent (java-str "<PATTERN>" pattern) pattern))))
+
+  (method ^:private parseTopLevel ^SyntaxTreeNode [this ^SyntaxTreeNode parent ^String text
+                                                   ^String expression]
+    (let [line (.getLineNumber this)]
+      (try
+        (.setScanner _xpathParser (XPathLexer. (StringReader. text)))
+        (let [result (.parse _xpathParser expression line)]
+          (when (some? result)
+            (let [^:final node (cast SyntaxTreeNode (.-value result))]
+              (when (some? node)
+                (.setParser node this)
+                (.setParent node parent)
+                (.setLineNumber node line)
+                (return node))))
+          (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/XPATH_PARSER_ERR expression parent)))
+        (catch Exception e
+          (when (.equals ErrorMsg/XPATH_LIMIT (.getMessage e))
+            (throw (RuntimeException. ErrorMsg/XPATH_LIMIT)))
+          (when (.debug _xsltc) (.printStackTrace e))
+          (.reportError this Parser/ERROR (ErrorMsg. ErrorMsg/XPATH_PARSER_ERR expression parent))))
+      (.setParser SyntaxTreeNode/Dummy this)
+      SyntaxTreeNode/Dummy))
+
+  (method ^:public errorsFound ^boolean [this] (> (.size _errors) 0))
+
+  (method ^:public printErrors ^void [this]
+    (let [^:final size (.size _errors)]
+      (when (> size 0)
+        (.println System/err (ErrorMsg. ErrorMsg/COMPILER_ERROR_KEY))
+        (loop [^int i 0]
+          (when (< i size)
+            (.println System/err (java-str "  " (.get _errors i)))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:public printWarnings ^void [this]
+    (let [^:final size (.size _warnings)]
+      (when (> size 0)
+        (.println System/err (ErrorMsg. ErrorMsg/COMPILER_WARNING_KEY))
+        (loop [^int i 0]
+          (when (< i size)
+            (.println System/err (java-str "  " (.get _warnings i)))
+            (recur (unchecked-inc-int i)))))))
+
+  (method ^:public reportError ^void [this ^:final ^int category ^:final ^ErrorMsg error]
+    (switch category
+      Constants/INTERNAL (.add _errors error)
+      Constants/UNSUPPORTED (.add _errors error)
+      Constants/FATAL (.add _errors error)
+      Constants/ERROR (.add _errors error)
+      Constants/WARNING (.add _warnings error)))
+
+  (method ^:public getErrors ^{:tag (ArrayList ErrorMsg)} [this] _errors)
+
+  (method ^:public getWarnings ^{:tag (ArrayList ErrorMsg)} [this]
+    _warnings)
+
+  (field ^:private ^{:tag (Stack SyntaxTreeNode)} _parentStack nil)
+
+  (field ^:private ^{:tag (Map String String)} _prefixMapping nil)
+
+  (method ^:public startDocument ^void [this]
+    (set! _root nil)
+    (set! _target nil)
+    (set! _prefixMapping nil)
+    (set! _parentStack (Stack.)))
+
+  (method ^:public endDocument ^void [this])
+
+  (method ^:public startPrefixMapping ^void [this ^String prefix ^String uri]
+    (when (nil? _prefixMapping) (set! _prefixMapping (HashMap.)))
+    (.put _prefixMapping prefix uri))
+
+  (method ^:public endPrefixMapping ^void [this ^String prefix])
+
+  (method ^:public startElement :throws [SAXException] ^void [this ^String uri ^String localname
+                                                              ^String qname ^Attributes attributes]
+    (let [^:final col (.lastIndexOf qname \:)
+          ^:final ^String prefix (when-not (== col -1) (.substring qname 0 col))
+          element (.makeInstance this uri prefix localname attributes)]
+      (when (nil? element)
+        (let [err (ErrorMsg. ErrorMsg/ELEMENT_PARSE_ERR (java-str prefix \: localname))]
+          (throw (SAXException. (.toString err)))))
+      (if (nil? _root)
+          (do
+            (if (or (nil? _prefixMapping)
+                    (= (.containsValue _prefixMapping Constants/XSLT_URI) false))
+                (set! _rootNamespaceDef false)
+                (set! _rootNamespaceDef true))
+            (set! _root element))
+          (let [parent (cast SyntaxTreeNode (.peek _parentStack))]
+            (when (and (.isAssignableFrom (.getClass element) Import) (.notTypeOf parent Import))
+              (let [err (ErrorMsg. ErrorMsg/IMPORT_PRECEDE_OTHERS_ERR
+                                   (java-str prefix \: localname))]
+                (throw (SAXException. (.toString err)))))
+            (.addElement parent element)
+            (.setParent element parent)))
+      (.setAttributes element (AttributesImpl. attributes))
+      (.setPrefixMapping element _prefixMapping)
+      (when (instance? Stylesheet element)
+        (.setCurrentNode (.getSymbolTable this) element)
+        (.declareExtensionPrefixes (cast Stylesheet element) this))
+      (set! _prefixMapping nil)
+      (.push _parentStack element)))
+
+  (method ^:public endElement ^void [this ^String uri ^String localname ^String qname]
+    (.pop _parentStack))
+
+  (method ^:public characters ^void [this ^char/1 ch ^int start ^int length]
+    (let [string (String. ch start length)
+          parent (cast SyntaxTreeNode (.peek _parentStack))]
+      (when-not (== (.length string) 0)
+        (if (instance? Text parent)
+            (.setText (cast Text parent) string)
+            (when-not (instance? Stylesheet parent)
+              (let [bro (.lastChild parent)]
+                (when (and (some? bro) (instance? Text bro))
+                  (let [text (cast Text bro)]
+                    (when-not (.isTextElement text)
+                      (when (or (> length 1) (< (int (aget ch 0)) 0x100))
+                        (.setText text string)
+                        (return)))))
+                (.addElement parent (Text. string))))))))
+
+  (method ^:private getTokenValue ^String [this ^String token]
+    (let [^:final start (.indexOf token \")
+          ^:final stop (.lastIndexOf token \")]
+      (.substring token (unchecked-add-int start 1) stop)))
+
+  (method ^:public processingInstruction ^void [this ^String name ^String value]
+    (when (and (nil? _target) (.equals name "xml-stylesheet"))
+      (let [^:mutable ^String href nil
+            ^:mutable ^String media nil
+            ^:mutable ^String title nil
+            ^:mutable ^String charset nil
+            tokens (StringTokenizer. value)]
+        (while (.hasMoreElements tokens)
+          (let [token (cast String (.nextElement tokens))]
+            (cond
+              (.startsWith token "href") (set! href (.getTokenValue this token))
+              (.startsWith token "media") (set! media (.getTokenValue this token))
+              (.startsWith token "title") (set! title (.getTokenValue this token))
+              (.startsWith token "charset") (set! charset (.getTokenValue this token)))))
+        (when (and (and (or (nil? _PImedia) (.equals _PImedia media))
+                        (or (nil? _PItitle) (.equals _PImedia title)))
+                   (or (nil? _PIcharset) (.equals _PImedia charset)))
+          (set! _target href)))))
+
+  (method ^:public ignorableWhitespace ^void [this ^char/1 ch ^int start ^int length])
+
+  (method ^:public skippedEntity ^void [this ^String name])
+
+  (method ^:public setDocumentLocator ^void [this ^Locator locator]
+    (set! _locator locator))
+
+  (method ^:private getLineNumber ^int [this]
+    (let [^:mutable ^int line 0] (when (some? _locator) (set! line (.getLineNumber _locator))) line)))

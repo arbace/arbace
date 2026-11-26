@@ -9435,3 +9435,10 @@ wrong), test_audit's `string_at(id(...) + 40)` (id is no address): the report's 
   Go collected are deallocated then, not at the world's next entry, so what their memory held dies in the same collection, as
   CPython's last Py_DECREF frees it (the C _pickle's Pickler and its memo: spawn's pickled Process and target,
   test_multiprocessing_spawn's test_close and test_lose_target_ref).
+## As built: train 6, the lanes' records (2026-11-26, the main host)
+
+Train 6 merged py-regress (with py-enum and py-odict), py-cli, py-limits, py-capi, py-mp, 574, 579, 585 and j2g-chunks. It built
+one gate executable (KEY20 `d238b3a23ca9117d9cc8`) and recorded 67 Lib/test modules whole on it. Python eval went from
+43,203 / 68 / 611 to 43,375 / 6 / 482. Four modules are held with their record lines untouched: test_pickle (the C world's
+a_crash), test_sys, test.test_concurrent_futures.test_as_completed and test_deadlock. test_process_pool and 12 multiprocessing
+modules are not recorded: B's run hung on Pickler_dealloc's heap corruption. The details are in doc/JOURNAL.md, "Train 6".

@@ -36,6 +36,20 @@
 ;; numbering the positioned forms of the unit being converted, else nil; and its end positions.
 (def ^:dynamic *full* nil)
 
+(def ^:dynamic *parameters*
+  "Whether the read's javac options have -parameters (queue 563): each top-level class form then takes the option
+  :parameters true, its compilation's MethodParameters names (arbace.classes.annot's W records)."
+  false)
+
+(defn- with-parameters-option
+  "Defclass form `f` with :parameters true after its name and record components (*parameters*)."
+  [f]
+  (if (and *parameters* (seq? f) (= 'defclass (first f)))
+    (let [[h nm & more] f
+          [comps more] (if (vector? (first more)) [[(first more)] (rest more)] [nil more])]
+      (with-meta (apply list h nm (concat comps [:parameters true] more)) (meta f)))
+    f))
+
 (defn at-span
   "Form `x` with its span [s e] recorded in mode :full (:java/at, numbered for its hash)."
   [x s e]
@@ -45,6 +59,53 @@
   "Form `x` with the span of tree `t` recorded in mode :full."
   [x t]
   (if *full* (at-span x (tr/start t) (tr/end t)) x))
+
+;; repr/java read --line-numbers (the Java check's reads; doc/classes/SPEC.md §14, 7): the Java line of
+;; the forms that call (a method invocation at javac's pos, its '(', as Gen.visitApply marks it; a
+;; class instance or array creation; a method reference, its bound receiver's null check) recorded
+;; as :java/line, and each top-level class's source file as :java/source (javac's SourceFile), for
+;; the stack traces of the interpreter and of j2g's code. Off (false) for every other read: jdk/'s
+;; forms and the corpora's are unchanged. One read per process: the command line sets it.
+(def line-numbers (atom false))
+
+(def ^:dynamic *line-starts*
+  "The offsets of the lines' starts in the unit's text when line numbers are recorded, else nil."
+  nil)
+
+(defn- line-starts
+  "The offsets at which text's lines start (after \\n, \\r\\n or a lone \\r, as javac's line map)."
+  ^longs [^String text]
+  (let [n (count text)
+        acc (java.util.ArrayList.)]
+    (.add acc (Long/valueOf 0))
+    (loop [i 0]
+      (when (< i n)
+        (let [c (.charAt text i)]
+          (cond
+            (and (= c \return) (< (inc i) n) (= (.charAt text (inc i)) \newline))
+            (do (.add acc (Long/valueOf (+ i 2))) (recur (+ i 2)))
+            (or (= c \newline) (= c \return))
+            (do (.add acc (Long/valueOf (inc i))) (recur (inc i)))
+            :else (recur (inc i))))))
+    (long-array (map long acc))))
+
+(defn line-of
+  "The 1-based line of offset p in the unit's text."
+  ^long [^long p]
+  (let [^longs a *line-starts*
+        i (java.util.Arrays/binarySearch a p)]
+    (if (neg? i) (- (- i) 1) (inc i))))
+
+(defn lined
+  "Result x (a {:f :t}) with its form's Java line, the line of tree t's pos, when line numbers are
+  recorded and the form is a list without one."
+  [x t]
+  (let [form (:f x)]
+    (if (and *line-starts* (seq? form) (instance? arbace.lang.IObj form)
+             (not (some #(and (vector? %) (= [:java :line] (subvec % 0 2))) (f/items form))))
+      (let [p (tr/pos t)]
+        (if (neg? p) x (assoc x :f (m+ form [:java :line (line-of p)]))))
+      x)))
 
 (defn- gensym! [env base]
   (let [n (swap! (:counter env) inc)]
@@ -104,10 +165,30 @@
 (defn- annotate [form items]
   (if (seq items) (apply m+ form items) form))
 
+(defn- dotted-inner?
+  "Is class type `t` written as (.. OUTER INNER): an inner (non-static, non-local) member class's type
+  whose enclosing type has type arguments (unless its simple name is in scope and the enclosing type
+  is its own, unannotated), or whose own type annotations sit deeper than its enclosing type's
+  (Outer.@A Inner: the INNER_TYPE step of the annotation's path, JVMS 4.7.20.2; queue 563, t04723)."
+  [env t]
+  (let [outer (m/enclosing-type t)
+        c (m/tsym t)]
+    (boolean
+     (and (m/class-type? outer) (not (m/static? c)) (not (m/local-class? c))
+          (or (seq (type-ann-items env t false))
+              (and (m/allparams? outer)
+                   (not (and (identical? (get (:scope env) (m/simple-name c)) c)
+                             (m/own-type? outer)
+                             ;; an annotated outer is written (round 52, n-java-conv)
+                             (not (type-annotated? outer))))))))))
+
 (defn- type-form*
   [env t elem?]
   (let [tg (tag-name t)
-        anns (type-ann-items env t (and elem? (not (m/array? t))))]
+        dotted (and (m/class-type? t) (dotted-inner? env t))
+        ;; a declaration's TYPE_USE annotations go on the outermost type of (.. OUTER INNER) (javac's
+        ;; TypeAnnotations), not on the inner one: its own are all written
+        anns (type-ann-items env t (and elem? (not (m/array? t)) (not dotted)))]
     (annotate
      (cond
        (#{"BOOLEAN" "BYTE" "SHORT" "INT" "LONG" "CHAR" "FLOAT" "DOUBLE" "VOID"} tg) (m/prim-sym t)
@@ -144,12 +225,7 @@
              outer (m/enclosing-type t)
              base (class-ref env c)
              self (if args (apply list base (map #(type-form* env % false) args)) base)]
-         (if (and (m/class-type? outer) (m/allparams? outer)
-                  (not (m/static? c)) (not (m/local-class? c))
-                  (not (and (identical? (get (:scope env) (m/simple-name c)) c)
-                            (m/own-type? outer)
-                            ;; an annotated outer is written (round 52, n-java-conv)
-                            (not (type-annotated? outer)))))
+         (if dotted
            (list '.. (type-form* env outer false)
                  (annotate (if args
                              (apply list (symbol (m/simple-name c)) (map #(type-form* env % false) args))
@@ -157,13 +233,8 @@
                            anns))
            self))
        :else (do (note! :warn/odd-type) (class-ref env (.tsym (object-type)))))
-     ;; the annotations of an inner type of a generic outer go on its element of (.. ...)
-     (when-not (and (m/class-type? t) (m/class-type? (m/enclosing-type t))
-                    (m/allparams? (m/enclosing-type t))
-                    (not (m/static? (m/tsym t))) (not (m/local-class? (m/tsym t)))
-                    (not (and (identical? (get (:scope env) (m/simple-name (m/tsym t))) (m/tsym t))
-                              (m/own-type? (m/enclosing-type t))
-                              (not (type-annotated? (m/enclosing-type t))))))
+     ;; the annotations of an inner type written as (.. ...) go on its element
+     (when-not dotted
        anns))))
 
 (defn type-form
@@ -735,8 +806,10 @@
     (cond
       (= nm "class") (r (class-literal env (qtype)) (erasure (attr/type-of t :types/class-literal)))
       (= nm "this") (r (this-of env (m/tsym (qtype))) (erasure (attr/type-of t :types/this)))
+      ;; X.super in X itself: ^:qualified super, the source's qualifier, through which javac reaches the member by an
+      ;; access$N accessor (queue 556c, t06072); the same super otherwise
       (= nm "super") (r (if (identical? (m/tsym (qtype)) (current-class env))
-                          'super
+                          (m+ 'super :qualified)
                           (member (class-ref env (m/tsym (qtype))) "super"))
                         (erasure (attr/type-of t :types/this)))
       (#{"TYP" "PCK"} (m/kind sym)) (r (if (= "TYP" (m/kind sym)) (class-ref env sym) (symbol (m/sstr sym))) :type)
@@ -976,7 +1049,7 @@
              (let [head (cond-> (member (class-ref env head-class) nm)
                           pin? (m+ (param-tags env m)))
                    call (apply list head afs)]
-               (if (and recv (not (identical? recv 'super))) (list 'do recv call) call))
+               (if (and recv (not (= recv 'super))) (list 'do recv call) call))
              poly?
              ;; the call site descriptor: param-tags from javac's call site types, the
              ;; result type as a tag on the call
@@ -1145,7 +1218,10 @@
       (coerce env x p))))
 
 (defn- logic-form
-  "Java's non-short-circuit boolean & | ^ over results `a` and `b`."
+  "Java's non-short-circuit boolean & | ^ over results `a` and `b`. The user's 538-3 (a) (2026-11-24, queue 556b):
+  where the operands are evaluated in place (both pure, or ^ always) the form is marked ^:eager, the source's
+  non-short-circuit operator, which javac compiles to iand/ior/ixor where && || != branch (t03567); its meaning is
+  the unmarked form's, the operands being pure (& |) or both evaluated (^)."
   [env tg a b]
   (let [both-pure (and (pure? (:f a)) (pure? (:f b)))
         build (fn [x y] (case tg
@@ -1154,7 +1230,7 @@
                           "BITXOR" (list (h env 'not) (list '= x y))))]
     (note! :form/boolean-logic)
     (if (or both-pure (= tg "BITXOR"))
-      (build (:f a) (:f b))
+      (m+ (build (:f a) (:f b)) :eager)
       (let [ta (gensym! env "a") tb (gensym! env "b")]
         (list 'let [ta (:f a) tb (:f b)] (build ta tb))))))
 
@@ -1508,7 +1584,11 @@
               (list (h env 'java-str) (:get p) (concat-operand env (tr/f t :rhs) rhs))
               (narrow-to env (binary-op env base [pa pb] (erasure result) cur rhs) (erasure result) lt))]
     (note! (keyword "op" tg))
-    (r (with-binds (:binds p) ((:set p) val)) (or (:set-t p) lt))))
+    ;; a compound assignment on a boxed place: ^:compound, javac's code for it keeps the place's receiver in a
+    ;; temporary where the written-out assignment reads it twice (queue 556c, t06039)
+    (r (with-binds (:binds p) (let [sf ((:set p) val)]
+                                (if (and (not (prim? lt)) (m/unboxed lt) (seq? sf)) (m+ sf :compound) sf)))
+       (or (:set-t p) lt))))
 
 (defn- inc-dec [env t value?]
   (let [tg (tr/tag-name t)
@@ -1536,7 +1616,11 @@
          (if (and value? post?)
          (let [old (gensym! env "old")]
            (list 'let (into (vec (:binds p)) [old g]) setf old))
-         (with-binds (:binds p) setf)))
+         ;; ++x as a statement on a boxed place: ^:prefix, javac's code for it keeps no old value as x++'s
+         ;; does (queue 556c, t06039)
+         (with-binds (:binds p) (if (and (not value?) (not post?) (not (prim? lt)) (seq? setf))
+                                  (m+ setf :prefix)
+                                  setf))))
        (if (and value? (not post?) (:set-t p)) (:set-t p) lt))))
 
 ;;; ------------------------------------------------------------------------------------------
@@ -1758,7 +1842,15 @@
         branch (fn [x]
                  (if (and (prim? target) (= :lit-int (:t x)) (#{"INT"} (tag-name target)))
                    (:f x)
-                   (let [f (coerce env x target true)]
+                   (let [f (coerce env x target true)
+                         ;; a primitive branch widened to the ?:'s type by its binary numeric promotion: ^:promoted,
+                         ;; Java's implicit widening, printed without the cast (javac writes an i2s for an explicit
+                         ;; (short) of a byte, none for the promotion; queue 556d)
+                         f (if (and (prim? target) (m/type? (:t x)) (prim? (:t x)) (not (same? (:t x) target))
+                                    (seq? f) (= 2 (count f)) (identical? (second f) (:f x))
+                                    (#{"short" "int" "long" "float" "double"} (str (first f))))
+                             (m+ f :promoted)
+                             f)]
                      ;; reference branches of other types than the whole: hint to it
                      (if (and (not (prim? target)) (identical? f (:f x)) (m/type? (:t x))
                               (not (same? (:t x) target)))
@@ -1766,7 +1858,15 @@
                        f))))]
     (note! :form/if)
     (cond-> (r (if c
-                 (list 'if c (branch a) (branch b))
+                 (let [;; a primitive ?: branch that is a parenthesized ?:: ^:parens, kept apart by the prettifier and
+                       ;; printed in parentheses (javac types (c ? x : y) by its own branches, an unparenthesized nested
+                       ;; ?: by the outer one's: t03453's i2f after the branches against a float constant; queue 556d)
+                       pb (fn [part f]
+                            (let [pt (tr/f t part)]
+                              (if (and (prim? target) (tr/is? pt :PARENS) (tr/is? (tr/skip-parens pt) :CONDEXPR) (seq? f))
+                                (if (some #{:promoted} (f/items f)) f (m+ f :parens))
+                                f)))]
+                   (list 'if c (pb :truepart (branch a)) (pb :falsepart (branch b))))
                  (cond-form env (tr/f t :cond) (fn [e] (branch (ex e (tr/f t :truepart)))) (fn [e] (branch (ex e (tr/f t :falsepart))))))
                (if (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) :lit-int target))
       (and a b (= :lit-int (:t a)) (= :lit-int (:t b))) (assoc :vals (concat (:vals a) (:vals b))))))
@@ -1791,9 +1891,9 @@
     :LITERAL (literal env t)
     :IDENT (ident env t)
     :SELECT (select env t)
-    :APPLY (invocation env t)
-    :NEWCLASS (new-class env t)
-    :NEWARRAY (new-array env t)
+    :APPLY (lined (invocation env t) t)
+    :NEWCLASS (lined (new-class env t) t)
+    :NEWARRAY (lined (new-array env t) t)
     :INDEXED (let [aa t
                    idx (fn idx [e acc]
                          (let [e (tr/skip-parens e)]
@@ -1813,7 +1913,7 @@
     :TYPETEST (instance-of env t)
     :CONDEXPR (conditional env t)
     :LAMBDA (let [x (lambda-form env t)] (assoc x :f (capture-values env t (:f x))))
-    :REFERENCE (method-ref-form env t)
+    :REFERENCE (lined (method-ref-form env t) t)
     :SWITCH_EXPRESSION (switch-form env t nil)
     (cond
       (tr/assignop? t) (assign-op env t)
@@ -2107,7 +2207,10 @@
                  (if (prim? decl) (m/prim-sym decl) (type-form env (erasure decl)))))
         sf (apply m+ s (concat (when (and mut? (not const?)) [:mutable])
                                (when const? [:const])
-                               (when (m/has-flag? sym d/FINAL) (when-not const? nil))
+                               ;; a declared final local not constant: ^:final (javac's Lower reads a final local
+                               ;; again where it keeps another receiver of a compound assignment in a temporary:
+                               ;; t03457's var_122.var_92 &= ...; queue 556d)
+                               (when (and (m/has-flag? sym d/FINAL) (not const?) (not mut?)) [:final])
                                (annotation-items env (tr/f (tr/f d :mods) :annotations))
                                (when tg [[:tag tg]])))]
     (note! (if mut? :form/mutable-local :form/local))
@@ -2997,7 +3100,13 @@
                    (some #(type-annotated? (attr/type-of % :names/type-tree)) (tr/f t :typeargs))
                    (m+ [:type-args (mapv #(type-form env (attr/type-of % :names/type-tree)) (tr/f t :typeargs))]))
             recv (case kind
-                   "BOUND" [(coerce env (ex env (tr/f t :expr)) qt)]
+                   ;; queue 538 (t06244): a parenthesized new as the receiver, ((new E<Short>())::xI), is
+                   ;; null-checked by javac (Attr.makeNullCheck skips a bare NEWCLASS alone): ^:null-check
+                   "BOUND" [(let [q (tr/f t :expr)
+                                  f (coerce env (ex env q) qt)]
+                              (if (and (tr/is? q :PARENS) (tr/is? (tr/skip-parens q) :NEWCLASS) (seq? f))
+                                (m+ f :null-check)
+                                f))]
                    "SUPER" [(:f (ex env (tr/f t :expr)))]
                    nil)]
         (r (apply list (h env 'method-ref) fi (concat (when sig [sig]) recv [msym])) (erasure target))))))
@@ -3435,6 +3544,7 @@
     ;; without javac (cu nil, a read without javac, JFS111 (b)): the native tree, its text and source
     (binding [*text* (if cu (:text ju) (:text opts))
               *full* (when (:full opts) (atom 0))
+              *line-starts* (when @line-numbers (line-starts (if cu (:text ju) (:text opts))))
               tr/*end-positions* (when cu (:end-positions ju))
               attr/*twins* (:twins idx)
               attr/*natives* (:natives idx)
@@ -3454,13 +3564,21 @@
               forms (vec (for [d (type-decls u)
                                :when (not (tr/is? d :SKIP))]
                            (case (tr/tag d)
-                             :CLASSDEF (class-form env d true)
+                             :CLASSDEF (with-parameters-option (class-form env d true))
                              :MODULEDEF (at (module-form env d) d))))
               forms (if-let [md (module-decl u)]
                       (into [(at (module-form env md) md)] forms)
                       forms)
               split (when attr/*measure* (attr/split-of forms))
               forms (mapv simplify forms)
+              ;; --line-numbers: each top-level class's source file (javac's SourceFile)
+              forms (if *line-starts*
+                      (mapv (fn [x] (if (and (seq? x) (= 'defclass (first x)))
+                                      (with-meta (apply list 'defclass (m+ (second x) [:java :source file]) (nnext x))
+                                        (meta x))
+                                      x))
+                            forms)
+                      forms)
               pd (package-decl u)
               pkg-anns (when pd (seq (annotation-items env (tr/f pd :annotations))))
               forms (if (and (= file "package-info.java") pkg-anns)
@@ -3554,6 +3672,8 @@
             (if (and (seq? c) (= 'nil? (first c)) (= 2 (count c)))
               (keep-meta y (apply list (sh 'when) (list (sh 'some?) (second c)) (splice b)))
               (keep-meta y (apply list (sh 'when-not) c (splice b))))
+            (and (some #{:parens} (f/items b)))
+            y
             (or (and (if-head? b 'if) (= 4 (count b))) (if-head? b 'cond)
                 (and (if-head? b 'when) (= 3 (count b))))
             (let [tail (cond

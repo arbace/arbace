@@ -232,6 +232,36 @@
 (def ^:private kind-qual "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)")
 (def ^:private kind-compound "a compound assignment written out or not (s = s + x against s += x)")
 (def ^:private kind-owner "a static member's owner (named through the class that inherits it or the class that declares it)")
+;; the user's 538-2 (a) (2026-11-24, queue 556b): a switch's case-group locals, one scope (a colon switch's block) or
+;; each arm's (the printed arrows'), numbered from other slots
+(def ^:private kind-slot "a local's slot (a switch's case-group locals in one scope or in each arm's)")
+
+(defn- slots-only?
+  "538-2 (a): whether the code lines a and b differ by their locals' slots alone, in methods with a switch: the
+  same number of lines, each pair equal but for the slot of a load, store or iinc (aload_1 read as aload 1) and
+  the branches' and the switches' targets, at least one slot differing, and each method's slots mapped as a
+  function from a's to b's (one original slot one printed slot; the arms' locals may share one printed slot)."
+  [a b]
+  (let [slot-re #"^(.*: )((?:wide )?(?:[ailfd](?:load|store)|iinc))[ _](\d+)(.*)$"
+        untarget (fn [l] (str/replace l #"L\d+" "L"))
+        parts (fn [l] (when-let [[_ m op n more] (re-matches slot-re l)] [m op (parse-long n) more]))
+        method (fn [l] (second (re-find #"^(.*?): " l)))]
+    (and (= (count a) (count b))
+         (let [pairs (map vector a b)
+               diffs (remove (fn [[x y]] (= (untarget x) (untarget y))) pairs)
+               ps (map (fn [[x y]] [(parts x) (parts y)]) diffs)]
+           (and (seq diffs)
+                (every? (fn [[px py]] (and px py (= (px 0) (py 0)) (= (str/replace (px 1) #"_" " ") (str/replace (py 1) #"_" " "))
+                                             (= (px 3) (py 3)) (not= (px 2) (py 2))))
+                        ps)
+                ;; each method's slot map a function, over all its slot lines (the unchanged too)
+                (every? (fn [[_ ls]] (every? (fn [[_ ys]] (= 1 (count (distinct (map (comp second second) ys)))))
+                                             (group-by (comp first second) ls)))
+                        (group-by (fn [[m _]] m)
+                                  (for [[x y] pairs :let [px (parts x) py (parts y)] :when (and px py)]
+                                    [(px 0) [(px 2) (py 2)]])))
+                (let [ms (set (map (comp method first) diffs))]
+                  (every? (fn [m] (some #(and (= m (method %)) (re-find #": (tableswitch|lookupswitch) " %)) a)) ms)))))))
 
 (defn- counted-kinds
   "h-java-readprint (2026-11-17): the kinds of the differences of the method code lines a and b counted, each
@@ -261,14 +291,16 @@
         has (fn [re] (some #(re-find re %) ds))
         ;; RP1 (a): the original evaluates a pure qualifier and pops it (more pops on the original's side)
         qual? (pos? (get more "pop" 0))
-        compound? (and (some #{"dup"} ds) (every? #(re-find #"^(dup|aload(_\d| \d+))$" %) ds))
+        ;; the receiver read again or dup'ed: a local (aload), or an inner class's outer instance (aload, getfield
+        ;; this$N; 538-4 (a), queue 556c)
+        compound? (and (some #{"dup"} ds) (every? #(re-find #"^(dup|aload(_\d| \d+)|getfield \S+\.this\$\d+:\S+)$" %) ds))
         branch? (fn [i] (re-find #"^if[a-z_]*$" i))
         inc? (has #"^(wide )?iinc ")
         init? (has #"^([ailfd]const_0|aconst_null)$")
         other-ok? (fn [i] (or (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
                         (and init? (re-find #"^([ailfd]const_0|aconst_null|[ailfd]store(_\d| \d+))$" i))
                         (and qual? (re-find #"^(pop|[ailfd]load(_\d| \d+)|ldc.*|ldc_w .*|ldc2_w .*|getstatic .*|[il]const_\d|bipush .*|sipush .*)$" i))
-                        (and compound? (re-find #"^(dup|aload(_\d| \d+))$" i))))
+                        (and compound? (re-find #"^(dup|aload(_\d| \d+)|getfield \S+\.this\$\d+:\S+)$" i))))
         ;; a goto or a return differing, or conditional branches alone beside the other kinds' instructions
         flow? (or (has #"^(goto|goto_w|[ailfd]?return)$")
                   (and (some branch? ds) (every? #(or (branch? %) (other-ok? %)) ds)))
@@ -277,7 +309,30 @@
       (and (empty? ds) owner?) [kind-owner]
       (empty? ds) ["the order of the code (the same instructions)"]
       (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)
-                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner)))))
+                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner))
+      ;; the user's 538-4 (a) (2026-11-24, queue 556b): RP2 (a)'s compound assignment through an inner class's accessor,
+      ;; the accessors' access$N numbered alike: the written-out side reads the outer instance (aload, getfield
+      ;; this$N) and calls the getter and adds or subtracts beside the setter, the compound side's one accessor
+      ;; does the arithmetic (the outer instance dup'ed), or the accessors only renumbered
+      (let [acc (fn [l] (str/replace l #"access\$\d+" (fn [_] "access$N")))
+            ;; the accessors' own bodies follow their callers (a getter and a setter, or one accessor doing the
+            ;; arithmetic, queue 556c): their lines are left out, the callers judged
+            body? #(re-find #"^access\$\d+ \(" %)
+            fq (fn [ls] (frequencies (map (comp acc norm) (remove body? ls))))
+            fa (fq a) fb (fq b)
+            da (vec (for [k (distinct (concat (keys fa) (keys fb)))
+                          :let [na (get fa k 0) nb (get fb k 0)]
+                          :when (not= na nb)]
+                      [(str/trim (second (re-find #": (.*)$" k))) (- na nb)]))
+            as (mapv first da)
+            accessor? #(re-find #"^invokestatic \S+\.access\$N:\S+$" %)]
+        (and (not= (count da) (count d1))
+             (every? #(re-find #"^(dup|aload(_\d| \d+)|getfield \S+\.this\$\d+:\S+|invokestatic \S+\.access\$N:\S+|[il](add|sub))$" %) as)
+             (or (empty? as) (some accessor? as)
+                 ;; or the accessors themselves differ (renumbered, or their bodies)
+                 (some #(re-find #"access\$\d+" %) (concat (remove (set b) a) (remove (set a) b))))))
+      [kind-compound]
+      (slots-only? a b) [kind-slot])))
 
 (defn class-differences
   "Short reasons for the differences of class file c in the trees c1 and c2, named as
@@ -289,15 +344,23 @@
       ["the constant pool's order or an attribute (the same code)"]
       (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
             has (fn [re] (some #(re-find re %) ds))]
-        (cond-> []
-          (has #": (goto|goto_w|[ailfd]?return) ") (conj kind-flow)
+        (vec (distinct (cond-> []
+          ;; 556b-1 (a) (the main session, 2026-11-24): a differing goto or return line names the control flow only by
+          ;; counting (counted-kinds: every differing instruction a flow instruction or another named kind's), unless a
+          ;; switch's arms differ (fall-through repeated: any instruction); else the code difference is unnamed
+          (and (has #": (goto|goto_w|[ailfd]?return) ") (not (has #": (lookupswitch|tableswitch) ")))
+          (into (or (counted-kinds a b)
+                    ;; the unnamed difference shown by a line of no flow instruction where there is one
+                    (let [nf (remove #(re-find #": (if[a-z_]*|goto|goto_w|[ailfd]?return) ?" %) (sort ds))]
+                      [(str "code: " (str/trim (first (or (seq nf) (sort ds)))))])))
+          (and (has #": (goto|goto_w|[ailfd]?return) ") (has #": (lookupswitch|tableswitch) ")) (conj kind-flow)
           (has #": iinc ") (conj kind-inc)
           (has #": ([ail]const_0|aconst_null|lconst_0|fconst_0|dconst_0) ") (conj kind-init)
           (has #": (lookupswitch|tableswitch) ") (conj "a switch's arms (fall-through repeated)")
           true (#(if (empty? %)
                    (or (when (seq ds) (counted-kinds a b))
                        [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")])
-                   %)))))))
+                   %)))))))))
 
 (def class-kinds
   "The class-file differences class-differences names (the forms do not record what they differ by: JCV11 (b))."
@@ -309,7 +372,8 @@
     "the order of the code (the same instructions)"
     "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)"
     "a compound assignment written out or not (s = s + x against s += x)"
-    "a static member's owner (named through the class that inherits it or the class that declares it)"})
+    "a static member's owner (named through the class that inherits it or the class that declares it)"
+    "a local's slot (a switch's case-group locals in one scope or in each arm's)"})
 
 (defn classes-note?
   "JCV11 (b) (the user, 2026-11-08; RPS9 (a) reopened): whether the classes step's reason WHY is a sub-level note,

@@ -98,7 +98,7 @@
   [mm]
   (or (#{:method :ctor} (:kind mm)) (= :record-accessor (:derived mm))))
 
-(declare throws-lines signature-lines)
+(declare throws-lines signature-lines parameters-lines)
 
 (defn attribute-lines
   "F25 (doc/classes/JAVA-DEFERRED-TRIAGE.md, \"As built: F25 (write-ahead)\"): the class file
@@ -130,7 +130,88 @@
     (when members
       (concat
         (signature-lines n d)
-        (throws-lines n d)))))
+        (throws-lines n d)
+        (parameters-lines n d)))))
+
+;; ---------------------------------------------------------------------------------------------
+;; MethodParameters (queue 563, JCS280 (a) reversed by the user: -parameters' names and the implicit parameters'
+;; flags recorded): javac's ClassWriter.writeMethodParametersAttr over Lower's and TypeEnter's parameters, for
+;; jdk26u's Executable.getParameters (go/arbace/jrt/classdata.ae's W records)
+
+(def ^:private ACC_FINAL 0x0010)
+(def ^:private ACC_SYNTHETIC 0x1000)
+(def ^:private ACC_MANDATED 0x8000)
+
+(defn compiled-with-parameters?
+  "Whether class n's compilation passed javac -parameters: its top-level class's option :parameters (repr/java writes it
+  when the read's javac options have -parameters; local, anonymous and member classes take their top-level class's)."
+  [n]
+  (loop [n n i 0]
+    (let [d (when n (a/decl n))]
+      (cond
+        (or (nil? d) (> i 64)) false
+        (get-in d [:opts :parameters]) true
+        :else (recur (:outer d) (inc i))))))
+
+(defn- param-name [p i]
+  (if-let [s (:sym p)] (name s) (str "arg" i)))
+
+(defn method-parameters
+  "Constructor or method mm of class n (analyzed: d) as javac's MethodParameters attribute has it: [names? [[name flags]
+  ...]] (name nil without -parameters: javac writes index 0), in the order of the class file's descriptor (the enclosing
+  instance, an anonymous class's qualified creation's instance, an enum's name and ordinal, the declared parameters,
+  the captured locals), or nil where javac writes none (no parameters; no name asked by -parameters or a record's
+  canonical constructor and no implicit parameter SYNTHETIC or MANDATED: requiresParamNames, requiresParamFlags)."
+  [n d mm]
+  (let [ctor (= :ctor (:kind mm))
+        anon (= :anon (:nesting d))
+        sc (when (and ctor anon) (:anon-super-ctor d))
+        ;; the outer instance (Lower.outerThisDef): mandated for an anonymous class's constructor and a non-private
+        ;; inner class's, else synthetic
+        outer (when (and ctor (:outer-instance? d))
+                [[(a/this0-name n)
+                  (bit-or ACC_FINAL (if (or anon (zero? (bit-and (or (:inner-flags d) 0) 0x0002))) ACC_MANDATED ACC_SYNTHETIC))]])
+        ;; an anonymous class created as o.new Inner() {} (TypeEnter's AnonClassConstructorHelper: x0, PARAMETER)
+        sout (when (and ctor (:super-outer d)) [["x0" 0]])
+        enum (when (and ctor (or (= :enum (:kind d)) (:enum-body d)))
+               [["$enum$name" ACC_SYNTHETIC] ["$enum$ordinal" ACC_SYNTHETIC]])
+        msyn (bit-and (or (:flags mm) 0) ACC_SYNTHETIC)
+        declared (cond
+                   (:mparams mm) (vec (:mparams mm))
+                   ;; an anonymous constructor's parameters are its superclass constructor's (names and flags)
+                   (and ctor anon)
+                   (let [ps (:params sc)
+                         n0 (count (first (t/parse-method-desc (or (:anon-ctor-desc d) "()V"))))]
+                     (vec (for [i (range n0) :let [p (get ps i)]]
+                            [(param-name p i) (bit-and (or (:flags p) 0) (bit-or ACC_FINAL ACC_SYNTHETIC ACC_MANDATED))])))
+                   ;; a compact canonical constructor's parameters are mandated (JavacParser)
+                   (:compact mm) (vec (for [[i p] (map-indexed vector (:params mm))] [(param-name p i) ACC_MANDATED]))
+                   :else (vec (for [[i p] (map-indexed vector (:params mm))]
+                                [(param-name p i) (bit-and (or (:flags p) 0) (bit-or ACC_FINAL ACC_SYNTHETIC ACC_MANDATED))])))
+        caps (when (and ctor (#{:local :anon} (:nesting d)))
+               (for [b (:captures @(:state d))]
+                 [(a/capture-field-name n b) (bit-or ACC_FINAL ACC_SYNTHETIC)]))
+        extra (concat outer enum)
+        all (vec (for [[nm f] (concat outer sout enum declared caps)] [nm (bit-or f msyn)]))
+        names? (or (compiled-with-parameters? n) (and ctor (:canonical mm)))
+        flags? (if (seq extra)
+                 (some #(pos? (bit-and (second %) (bit-or ACC_SYNTHETIC ACC_MANDATED))) extra)
+                 (some #(pos? (bit-and (second %) (bit-or ACC_SYNTHETIC ACC_MANDATED))) (concat sout declared)))]
+    (when (and (seq all) (or names? flags?))
+      [names? all])))
+
+(defn parameters-lines
+  "The W records of class n (analyzed: d): its methods' and constructors' MethodParameters (method-parameters), the
+  descriptor's parameter count checked."
+  [n d]
+  (for [mm (:methods d)
+        :when (or (#{:method :ctor} (:kind mm)) (:mparams mm))
+        :let [ctor (= :ctor (:kind mm))
+              desc (if ctor (safe-ctor-desc n mm) (:desc mm))
+              [names? ps] (try (method-parameters n d mm) (catch Exception _ nil))]
+        :when (and ps (= (count ps) (count (first (t/parse-method-desc desc)))))]
+    (apply str "W " (if ctor (str "C " (bin desc)) (str "M " (:name mm) " " (bin desc))) " " (count ps)
+           (for [[nm f] ps] (str " " (if (and names? nm) (enc-string nm) "-") " " f)))))
 
 (defn signature-lines
   "The G records of class n (analyzed: d): its methods', constructors' and fields' Signatures. Written with the

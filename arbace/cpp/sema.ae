@@ -256,7 +256,11 @@
       (let [seen (java.util.IdentityHashMap.) us (java.util.ArrayList.)]
         (.put seen (:names root) true)
         (doseq [s chain] (cx-nominees! s seen us))
-        (let [es (into (cx-own root nm) (mapcat #(cx-own % nm) us))]
+        ;; (cpp-indep3: one namespace's variables of the name are declarations of one variable, [basic.link]/? (C++23 /11),
+        ;; however its later declaration's error left them -- init/array32.C's `extern int x[];` then `int x[] = 0;` --: no
+        ;; ambiguity among them, only across the nominated namespaces)
+        (let [own1 (fn [s] (let [es (cx-own s nm)] (if (and (> (count es) 1) (every? #(= :var (:e %)) es)) [(first es)] es)))
+              es (into (own1 root) (mapcat own1 us))]
           (when (cx-ambiguous-set? es true)
             (fail :ambiguous "reference to '" nm "' is ambiguous")))))))
 
@@ -434,6 +438,8 @@
 ;; ---------------------------------------------------------------------------------------------
 ;; Classes: members by name, through the bases
 
+(declare gcc-type-str header-node?)
+
 (defn class-lookup
   "[[class-id entity] ...]: the members named `nm` in class `id` or, if none, in its bases ([class.member.lookup]: the
   bases' sets merged, a set found in a base of another found one's class dropped -- dominance through virtual bases;
@@ -456,7 +462,19 @@
          (when (and (checking?) (>= (count (distinct (map ffirst kept))) 2)
                     (every? (fn [r] (every? #(#{:fn :field} (:e (second %))) r)) kept)
                     (not-any? #(:header (abi/cls (ffirst %))) kept) (not (:header c)))
-           (fail :ambiguous "reference to '" nm "' is ambiguous (found in several base classes)"))
+           ;; (cpp-def3: GCC's notes at the candidates, "candidates are: '...' [with T = int]", a class template's specialization's
+           ;; arguments named by its parameters: parse/error17.C's B<int>::Bar and B<char>::Bar)
+           (let [with (fn [cid] (let [c (abi/cls cid)
+                                      t (when (:tmpl c) (some-> (requiring-resolve 'arbace.cpp.template/tmpl) (apply [(:tmpl c)])))
+                                      ps (:params t)]
+                                  (when (and (seq ps) (= (count ps) (count (:targs c))))
+                                    (str/join ", " (map (fn [p a] (str (:name p) " = " (if (map? a) (gcc-type-str a) (str a)))) ps (:targs c))))))
+                 notes (vec (for [[cid e] (map first kept)
+                                  :let [f (when (= :fn (:e e)) (fnd (:id e))) n (:node f)]
+                                  :when (and n (:range n) (not (header-node? n)))]
+                              {:msg (str "candidates are: '" (:name f) "'" (when-let [w (with cid)] (str " [with " w "]"))) :node n}))]
+             (throw (ex-info (str "codegen: reference to '" nm "' is ambiguous (found in several base classes)")
+                             (cond-> {:codegen/refused :ambiguous} (seq notes) (assoc :cx/notes notes))))))
          (first kept))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -911,7 +929,7 @@
 ;; ([dcl.constexpr]/6: a constant expression's object has a size known at translation); a closure's copy of an array is its
 ;; element-wise copy ([expr.prim.lambda.capture]/15), which a bound known only at run time cannot size.
 
-(declare strip-type-attrs header-node? cx-runtime-bound? cx-vm?)
+(declare strip-type-attrs header-node? cx-runtime-bound? cx-vm? cx-static-ice-use!)
 
 (def ^:dynamic *cx-vla*
   "queue 570, the checker: the block scope (the object itself) whose written type may be variably modified -- a local typedef
@@ -972,9 +990,15 @@
         e (first es)]
     (when (and (= :var (:e e)) (every? #(= :var (:e %)) es))
       (let [v (var* (:id e)) t (:ty v)]
-        (boolean (and (map? t) (not (abi/ref? t))
-                      (or (= :param (:storage v))
-                          (not (:c (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))))))))))
+        (boolean (or (and (map? t) (not (abi/ref? t))
+                          (or (= :param (:storage v))
+                              (not (:c (loop [t t] (if (abi/arr? t) (recur (:of t)) t))))))
+                     ;; (cpp-def3: a const static data member whose in-class initializer is erroneous or surely no constant,
+                     ;; [class.static.data]/4, cx-static-ice-use!'s :cx-bad: template/crash2.C's `static const EnumType size = max;`,
+                     ;; max declared nowhere its template's definition sees, then `int table[size];`)
+                     (and (checking?) (:cx-static-ice v) *on-refusal*
+                          (do (when-not (:cx-sinit v) (cx-static-ice-use! (:id e)))
+                              (:cx-bad (var* (:id e)))))))))))
 
 (defn cx-runtime-bound?
   "queue 570: the array bound's form `b` (a name, a qualified name, or (cpp/text s), as the type parser keeps it) surely is no
@@ -1061,6 +1085,18 @@
                             (and b (:const-bound @hooks) *cx-vla* (identical? scope *cx-vla*) (checking?))
                             (try ((:const-bound @hooks) scope b)
                                  (catch arbace.lang.ExceptionInfo x (if (cx-runtime-bound? scope b) ::vla (throw x))))
+                            ;; (cpp-indep3, the checker: [dcl.array]/1, a bound is a converted constant expression, and a division
+                            ;; by zero is none ([expr.const]/5.8, [expr.mul]/4): outside a substitution GCC's "size of array is not
+                            ;; an integral constant-expression", the array taken with one element; other/array2.C's `int x[1/0];`)
+                            (and b (:const-bound @hooks) (checking?) (not (cx-subst?)))
+                            (try ((:const-bound @hooks) scope b)
+                                 (catch arbace.lang.ExceptionInfo x
+                                   ;; (a declaration analyzed outside any expression, no node analyzed yet: the refusal its entry's,
+                                   ;; reported at the declaration)
+                                   (if (and (re-find #"^codegen: division by zero in a constant expression" (str (ex-message x)))
+                                            (nil? (some-> *at* deref)))
+                                     (throw (ex-info "codegen: size of array is not an integral constant-expression" {:codegen/refused :array-bound}))
+                                     (throw x))))
                             (and b (:const-bound @hooks)) ((:const-bound @hooks) scope b) :else nil)]
                 ;; (cpp-tpl2, the checker: [temp.deduct.general]/11's "attempting to create an array with ... a size that
                 ;; is zero or negative", [dcl.array]/1; GCC's words)
@@ -1701,9 +1737,12 @@
                               (or (cx-subst?) (and (not (abi/void? (:ty e))) (not= :fn (:k (:ty e)))))
                               (not (re-find #":k :(auto|dep|tparam|tdep)" (pr-str (:ty e)))))
                      ;; (cpp-tpl2: in a function template's signature substituted, a substitution failure, cx-subst-fail!)
-                     (if (cx-subst?)
-                       (cx-subst-fail! "'" p "' is not a class, struct, or union type")
-                       (fail :name "'" p "' is not a class, struct, or union type")))
+                     ;; (cpp-indep3: the type named as GCC spells it, the template argument's `int` for `T`, cpp0x/lambda/
+                     ;; lambda-template11.C)
+                     (let [p (or (try (some-> (resolve 'arbace.cpp.sema/gcc-type-str) (apply [(:ty e)])) (catch Exception _ nil)) p)]
+                       (if (cx-subst?)
+                         (cx-subst-fail! "'" p "' is not a class, struct, or union type")
+                         (fail :name "'" p "' is not a class, struct, or union type"))))
                    (fail :lookup "no scope " p))))))))))
 
 ;; ---------------------------------------------------------------------------------------------
@@ -1807,7 +1846,18 @@
     (try (f)
          (catch arbace.lang.ExceptionInfo e
            (if (cx-recoverable? e) (cx-dropped! cs k) (throw e))))
-    (f)))
+    ;; (cpp-indep3: a main-file class template's specialization's member whose declaration the substitution makes ill-formed --
+    ;; `typename T::F f;` of T = B, no type F in B -- is reported at that member's declaration in the template, as GCC reports it
+    ;; (the specialization's use its "required from here" note, no error): the refusal's node the member's, the class failing as
+    ;; before; template/defarg13.C, cpp0x/alias-decl-4.C)
+    (if (and (checking?) (not (header-node? k)) (get-in k [:range :begin :offset]) (:targs (abi/cls id)) (not (:lambda (abi/cls id))))
+      (try (f)
+           (catch arbace.lang.ExceptionInfo e
+             (let [d (ex-data e)]
+               (throw (if (and (:codegen/refused d) (nil? (:cx/node d)) (not (:cx/reported d)))
+                        (ex-info (ex-message e) (assoc d :cx/node k) e)
+                        e)))))
+      (f))))
 
 (defn cx-unexpanded-packs
   "Queue 573 (the checker): the names of `packs` (a set) the type text `s` names outside a pack expansion, [temp.variadic]/5
@@ -1903,6 +1953,14 @@
 
 (declare analyze rv ce-try cx-cce-type!)
 
+(declare sure-failure? cx-nx-needed!)
+
+(def ^:dynamic *cx-nx-error*
+  "cpp-def3 (the checker): an atom declare-fn! binds around noexcept-of, which puts there [error node] when a noexcept-specifier's
+  operand surely fails -- a substitution's error, a parameter's or `this`'s object read --, reported when the function is
+  needed, cx-nx-needed!."
+  nil)
+
 (defn- noexcept-of
   "Whether a function type's spelling says noexcept: `noexcept`, `noexcept(true)`, or noexcept(e) of a constant e
   true ([except.spec]/2; G4: the headers' noexcept(__and_<...>::value), evaluated in `scope`, not noexcept when it
@@ -1926,9 +1984,39 @@
                   ;; the operand the native parser kept (G5): analyzed with the parameters in scope, a constant
                   (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
                   (let [x (get *decltypes* (str "noexcept:" (str/replace e #"\s+" "")))
-                        a (when (checking?) (try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))) (catch arbace.lang.ExceptionInfo _ nil)))
+                        nx! (fn [ex] (when (and *cx-nx-error* (nil? @*cx-nx-error*) (map? x) (:range x) (not (header-node? x)))
+                                       (reset! *cx-nx-error* [ex x])))
+                        a (when (checking?) (try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x)))
+                                                 (catch arbace.lang.ExceptionInfo ex
+                                                   ;; (cpp-def3: [except.spec]/13, a specialization's noexcept-specifier instantiated
+                                                   ;; when needed, its operand's error then the program's: a substitution's
+                                                   ;; (sfinae11.C's `noexcept(declval<T&>().foo())` for Z), or a non-static data
+                                                   ;; member read through `this` outside a member function's body, [expr.const]/5.1
+                                                   ;; (noexcept34.C's `noexcept (b)`)
+                                                   (cond (sure-failure? ex) (nx! ex)
+                                                         (and (re-find #"this outside a method" (str (ex-message ex)))
+                                                              (re-find #"\bthis\s*->\s*[A-Za-z_]\w*\s*(?:[^\s(]|$)" (str e)))
+                                                         (nx! (ex-info "codegen: use of 'this' in a constant expression (a non-static data member in a noexcept-specifier)"
+                                                                       {:codegen/refused :constexpr :cx/node x}))
+                                                         :else nil)
+                                                   nil)))
+                        ;; (cpp-def3: a parameter's value read, [expr.const]/5.9 with [basic.scope.param]: GCC's "use of parameter from
+                        ;; containing function", noexcept34.C's `g4 (int i) noexcept (i)`)
+                        _ (when (and a (checking?)
+                                     (some #(and (map? %) (= :load (:op %)) (= :var (:op (:e %))) (= :param (:storage (var* (:id (:e %)))))
+                                                 (not (abi/ref? (:ty (var* (:id (:e %)))))))
+                                           (tree-seq coll? (fn [c] (if (map? c) (vals c) (seq c))) a)))
+                            (nx! (ex-info "codegen: use of parameter outside function body in a noexcept-specifier" {:codegen/refused :constexpr :cx/node x})))
                         v (try (ce-try (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope scope} x))))
-                               (catch arbace.lang.ExceptionInfo _ nil))]
+                               (catch arbace.lang.ExceptionInfo _ nil))
+                        ;; (cpp-def3: the operand a const or constexpr static data member's or variable's value with no initializer,
+                        ;; not usable in constant expressions, [expr.const]/4: noexcept36.C's `noexcept (T::qq)`)
+                        _ (when (and a (nil? v) (= :load (:op a)) (= :var (:op (:e a))))
+                            (let [w (var* (:id (:e a)))]
+                              (when (and (#{:member-static :global} (:storage w)) (nil? (or (:init w) (:init-node w))) (:name w)
+                                         (or (:c (:ty w)) (:constexpr w) (:cx-constexpr w)))
+                                (nx! (ex-info (str "codegen: the value of '" (:name w) "' is not usable in a constant expression (in a noexcept-specifier)")
+                                              {:codegen/refused :constexpr :cx/node x})))))]
                     ;; (queue 584, the checker: the operand a contextually converted constant expression of type bool,
                     ;; [except.spec]/1 with [expr.const]/12 (P1401R5): an integer constant other than 0 and 1 narrows, GCC's
                     ;; "narrowing conversion of '2' from 'long unsigned int' to 'bool'"; cpp23/narrowing-bool1.C)
@@ -2372,6 +2460,27 @@
         ;; declaration reported and dropped, declare-node!)
         _ (when (and (checking?) (= k :ctor) cid (= 1 (count (:ps ty))) (= {:k :class :id cid} (abi/unq (first (:ps ty)))))
             (throw (ex-info "codegen: invalid constructor: its only parameter of its own class type" {:codegen/refused :decl :cx/node n})))
+        ;; (cpp-def3: the noexcept-specifier's surely failing operand, kept for cx-nx-needed!)
+        nx-e (atom nil)
+        nx-v (binding [*cx-nx-error* (when (checking?) nx-e)] (noexcept-of tscope qt))
+        ;; (cpp-def3, the checker: before C++17, a dynamic exception specification's type-ids resolved with the declaration
+        ;; ([except.spec] of C++14, /2: each an adjusted type, no incomplete one): one naming a member of a type that is no class --
+        ;; `throw(typename T::X)` for T = void -- is GCC's "'void' is not a class, struct, or union type", at the function:
+        ;; template/eh2.C's A<void>)
+        _ (when-let [[_ ts] (and (checking?) *on-refusal* (< (long *cxx-year*) 17) (not (header-node? n))
+                                 (re-find #"\bthrow\s*\(([^()]*)\)" (or qt "")))]
+            (doseq [t (map str/trim (str/split ts #","))
+                    :when (and (seq t) (not (str/includes? t "...")) (str/includes? t "::"))]
+              (try (resolve-type tscope t)
+                   (catch arbace.lang.ExceptionInfo e
+                     (when (or (re-find #"^codegen: a scope of a non-class" (str (ex-message e)))
+                               ;; (a template parameter bound to a type that is no class, its name no scope)
+                               (when-let [[_ q] (re-find #"^codegen: no scope ([A-Za-z_]\w*)$" (str (ex-message e)))]
+                                 (let [qt (try (resolve-type tscope q) (catch arbace.lang.ExceptionInfo _ nil))]
+                                   (and (map? qt) (not (abi/class? (abi/unq qt))) (not (abi/enum? (abi/unq qt)))))))
+                       (*on-refusal* (ex-info (str "codegen: a type that is not a class, struct, or union type named in a dynamic exception specification (" t ")")
+                                              {:codegen/refused :type :cx/node n})
+                                     n))))))
         f {:name nm :kind k :cls cid :ty ty
            ;; (cpp-sweep, the checker: C++11's [dcl.constexpr]/8, a constexpr non-static member function other than a constructor
            ;; is const, C++14 dropping it: ubsan/vptr-4.C's `t.foo()` of a constexpr object)
@@ -2405,7 +2514,7 @@
            :ctor-attr (when-let [x (gnu-attr-arg n "constructor")] (if (number? x) x 65535))
            ;; (the C library's functions that do not return, nothrow builtins for clang, G5c: musl's abort; not free, which
            ;; clang invokes in del_op.cc's noexcept operator delete)
-           :noexcept (or (noexcept-of tscope qt) (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
+           :noexcept (or nx-v (and (linkage-c? home) (not cid) (or (contains? #{"abort" "exit" "_Exit" "quick_exit"} nm)
                                                                                        (contains? clang-nothrow-libc nm))))
            :noexcept-false (boolean (re-find #"\bnoexcept\s*\(\s*false" (or qt "")))
            ;; queue 351: `throw()`, clang's EST_DynamicNone: before C++17 an exception filter, not noexcept's terminate scope
@@ -2429,7 +2538,7 @@
         tags (not-empty (vec (sort (distinct (for [a (:inner n) :when (and (= "NativeAttr" (:kind a)) (#{"abi_tag" "__abi_tag__"} (:_gnu a)))
                                                            [_ t] (re-seq #"\"([^\"]*)\"" (str (:_arg a)))]
                                                        t)))))
-        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags))
+        f (cond-> f xobj (assoc :xobj xobj) tags (assoc :abi-tags tags) @nx-e (assoc :cx-nx-error @nx-e))
         ;; (CX12, the checker: a deletion the program wrote, a call of which it diagnoses; a volatile member function)
         f (cond-> f (checking?) (assoc :deleted-sure (boolean (:explicitlyDeleted n)) :vq (method-volatile? (or qt ""))
                                        :access (when cid *member-access*)
@@ -2504,7 +2613,9 @@
                        :defaults (mapv (fn [p] (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))) pn)}
                 ;; (cpp-rt-own4, the code generator: each parameter's top-level const, which the function's type leaves out,
                 ;; [dcl.fct]/5, and its variable keeps: analyze-fn!)
-                (not (checking?)) (assoc :param-const (mapv #(boolean (:_const %)) pn)))
+                ;; (cpp-indep3: the checker's too, [dcl.fct]/5's "the type of the parameter" in its body keeping its const: an
+                ;; assignment to it is GCC's "assignment of read-only parameter", template/param3.C's `t = 1` of `const T t`)
+                true (assoc :param-const (mapv #(boolean (:_const %)) pn)))
         ;; (cpp-1123, the checker: a function definition's parameter or return type an abstract class, [class.abstract]/3)
         _ (when (and (checking?) body (not (header-node? n)) (not (:explicitlyDeleted n)))
             (doseq [[pt pnode] (map vector (:ps ty) pn) :when (map? pt)]
@@ -2877,6 +2988,17 @@
             v (cond-> v (and (checking?) (not (:constexpr n)) (:constinit v)) (assoc :cx-constinit true :cx-range (:range n)
                                                                                      ;; (cpp-singles: its initializer's place, cx-sure-error!)
                                                                                      :cx-init-range (:range (init-kid n))))
+            ;; (cpp-def3, the checker: [class.static.data]/4, a non-inline const static data member of integral or enumeration
+            ;; type whose declaration in its class has an initializer: that initializer a constant expression, cx-check-constant!;
+            ;; GCC's "overflow in constant expression" at the operation and at the member, cpp0x/overflow1.C's Fib<93>::value)
+            v (cond-> v (and (checking?) (:cls home) (empty? q) init (not (:constexpr n)) (not (:inline n)) (:c ty) (not (:v ty))
+                             (abi/integral? (abi/unq ty)) (not (header-node? n)))
+                (assoc :cx-static-ice true :cx-range (:range n)))
+            ;; (cpp-def3: and a constexpr static data member's of a scalar type, its in-class initializer analyzed where it is used,
+            ;; cx-static-ice-use!: `static constexpr int u = 2147483647 + N;` of a class template)
+            v (cond-> v (and (checking?) (:cls home) (empty? q) init (or (:cx-static-ice v) (and (:constexpr n) (abi/scalar? (abi/unq ty))))
+                             (not (header-node? n)))
+                (assoc :cx-static-use true))
             ;; (queue 463, the checker: a static data member's access, [class.access]/1, judged where it is named)
             v (cond-> v (and (checking?) (:cls home)) (assoc :cx-cls (:cls home))
                     (and (checking?) (:cls home) (#{:private :protected} *member-access*)) (assoc :cx-access *member-access*))
@@ -2987,6 +3109,29 @@
                 ;; (cpp-read: an initializer past 64 bits, an __int128's, is no standard integer type's value: [dcl.enum]/7 below
                 ;; under D342-4 (a), the enumerator 0 then)
                 wide (atom false)
+                ;; (cpp-indep3, the checker: [dcl.enum]/2 and /5, an enumerator's initializer is an integral constant expression,
+                ;; or a converted constant expression of the fixed underlying type: a function's name (an overload set) is GCC's
+                ;; "enumerator value for 'n' is not an integer constant", cpp0x/pr70448.C, pr71665-1.C; an enumerator of another
+                ;; scoped enumeration, which converts to no integral type implicitly ([conv.integral]/1, [conv.prom]/4), "could
+                ;; not convert 'A::X' from 'A' to 'int'", cpp0x/pr66243.C; at the enumerator, its value 0 then)
+                xt (when (and x (checking?))
+                     (try (some-> (binding [*unevaluated* true] (analyze {:scope bs} x)) :ty abi/non-ref abi/unq)
+                          (catch arbace.lang.ExceptionInfo _ nil)))
+                bad (when xt
+                      (cond (or (abi/fn? xt) (= :overload (:k xt)))
+                            (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
+                            ;; (no fixed underlying type: an integral constant expression's, "enumerator value for 'a' must have
+                            ;; integral or unscoped enumeration type", cpp0x/pr71665-2.C)
+                            (or (and (abi/enum? xt) (:scoped (abi/enm (:id xt))) (not= (:id xt) id) (not scoped) (not (get-in n [:fixedUnderlyingType :qualType])))
+                                ;; (a floating initializer, parse/constant5.C's `a = 24.2`)
+                                (and (abi/floating? xt) (not scoped) (not (get-in n [:fixedUnderlyingType :qualType]))))
+                            (str "codegen: enumerator value for '" (:name c) "' must have integral or unscoped enumeration type")
+                            (and (abi/enum? xt) (:scoped (abi/enm (:id xt))) (not= (:id xt) id))
+                            (str "codegen: could not convert '" (:name c) "' from '" (:name (abi/enm (:id xt))) "' to '"
+                                 (str/trim (str (or (get-in n [:fixedUnderlyingType :qualType]) "int"))) "'")
+                            :else nil))
+                _ (when bad (*on-refusal* (ex-info bad {:codegen/refused :enum}) c))
+                x (if bad nil x)
                 v (if x
                     (if (checking?)
                       (try (const-int bs x)
@@ -4244,6 +4389,24 @@
 
 (declare analyze-implicit!)
 
+(defn- cx-implicit-assign-constexpr?
+  "cpp-def3 (the checker): whether the implicit or defaulted (no body) copy or move assignment operator `f` is constexpr by
+  [class.copy.assign]/12 of C++14 and later: its class literal and the assignment of each base and class-type member a
+  constexpr function -- every one implicit or defaulted, or declared constexpr, recursively; a class of the headers unsure."
+  ([f] (cx-implicit-assign-constexpr? f #{}))
+  ([f seen]
+   (boolean
+    (and (>= (long *cxx-year*) 14) (= "operator=" (:name f)) (or (:implicit f) (:defaulted f)) (not (:body f)) (not (:deleted f)) (:cls f)
+         (let [id (:cls f) c (abi/cls id)]
+           (and c (not (seen id)) (not (:header c)) (not (cx-non-literal {:k :class :id id}))
+                (every? (fn [m] (let [mc (abi/cls m)]
+                                  (and mc (not (:header mc))
+                                       (every? (fn [g] (let [g (fnd g)]
+                                                         (or (not (or (copy-assign? g m) (move-assign? g m))) (:constexpr g)
+                                                             (cx-implicit-assign-constexpr? g (conj seen id)))))
+                                               (:methods mc)))))
+                        (class-like-members id))))))))
+
 (defn- cx-cmp-defaulted? [f]
   (boolean (and (checking?) (:defaulted f) (not (:constexpr f)) (not (:deleted f)) (not (:implicit f))
                 (#{"==" "<=>" "!=" "<" ">" "<=" ">="} (:op f)) (:node f) (not (header-node? (:node f))))))
@@ -5348,6 +5511,14 @@
                            (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression"))
                          (when (and v (not (:constexpr v)) (:c (:ty v)) (abi/floating? (:ty v)) (= :global (:storage v)) (:name v))
                            (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression"))
+                         ;; (cpp-def3, the checker: [expr.const]/4, a const integral variable of the main file's namespace scope with no
+                         ;; initializer before the read -- `extern const int side;` -- is not usable in constant expressions: GCC's
+                         ;; "the value of 'side' is not usable in a constant expression", cpp0x/constexpr-function2.C's squarei(side))
+                         (when (and (checking?) v (:c (:ty v)) (nil? init) (abi/integral? (:ty v)) (= :global (:storage v)) (:name v) (:cx-decl v)
+                                    (not (abi/ref? (:ty v))))
+                           (if *ce-in-call*
+                             (ub! x "the value of '" (:name v) "' is not usable in a constant expression")
+                             (ce-top-sure! "the value of '" (:name v) "' is not usable in a constant expression")))
                          (not-constant "a load"))))))
        ;; (CP378 (a): the place a local's, or an object's subobject through ce-lv: `this->_M_len -= __n`)
        ;; (cpp-own, 2026-11-25, the checker: C++11's [expr.const]/2, an assignment or a compound assignment is no core constant
@@ -5477,7 +5648,11 @@
                    (when (and (ce-loc? o) (::uref o) (empty? (::path o)))
                      (ub! e "virtual call on '" (:name (var* (::uref o))) "', an object of unknown dynamic type, is not a constant expression"))))
                (when (or (not (or (:constexpr f) (and (:cls f) (:lambda (abi/cls (:cls f))))
-                                  (cx-cmp-constexpr? (:id f))))
+                                  (cx-cmp-constexpr? (:id f))
+                                  ;; (cpp-def3, the checker: [class.copy.assign]/12 since C++14, an implicit or defaulted
+                                  ;; assignment constexpr by its class's and subobjects': evaluated memberwise below,
+                                  ;; cpp1y/constexpr-89336-3.C's `w.a = { 5, 0 }` of a union's struct member)
+                                  (and (checking?) (cx-implicit-assign-constexpr? f))))
                          (:virtual e))
                  (not-constant "a call of " (:name f)))
                ;; (h-cpp-read: a call from within the function's own definition, before its body is analyzed -- f3's
@@ -5509,6 +5684,9 @@
                    ;; (a defaulted or implicit copy or move assignment: the object's value, memberwise, [class.copy.assign]/12;
                    ;; the result the object)
                    (let [v (ce-init (first (:ps (:ty f))) (first (:args e)) env)]
+                     ;; (cpp-def3: the object's store judged as an assignment's: outside its lifetime, a const object,
+                     ;; cpp1y/constexpr-lifetime7.C's `x = T()` after `x.~T()`)
+                     (when (checking?) (ce-check-const! e this))
                      (ce-put! this (if (ce-loc? v) (ce-get v) v))
                      this)
                    (let [env2 (cond-> (assoc (ce-args-env f (:args e) env) ::ret rt ::fn (:id f)) this (assoc ::this this))
@@ -5769,7 +5947,12 @@
              ;; (h-cpp-consteval: the block's locals end their lifetimes)
              (when *ce-dead* (ce-kill! (for [[k c] @env :when (and (not (contains? env0 k)) (not (keyword? k)))] c)))
              r)
-    :return (cond (:void-e s) [:ret 0] (:init s) [:ret (ce-full-expr (ce-init (::ret env) (:init s) env))] :else [:ret 0])
+    :return (cond (:void-e s) [:ret 0]
+                  ;; (cpp-def3, the checker: the return statement's place, where an operation of the result's initialization with
+                  ;; no place of its own -- a copy constructor's call -- is reported: cpp0x/constexpr-ex1.C's `return d;`)
+                  (:init s) [:ret (do (when-let [p (and (checking?) (= :ctor (:i (:init s))) (:cx-ret-at s))] (when *ce-pos* (reset! *ce-pos* p)))
+                                      (ce-full-expr (ce-init (::ret env) (:init s) env)))]
+                  :else [:ret 0])
     :expr (do (ce-full-expr (ce-eval (:e s) env)) [:normal])
     :if (if (zero? (ce-num (ce-eval (:cond s) env))) (if (:else s) (ce-exec (:else s) env) [:normal]) (ce-exec (:then s) env))
     ;; (cpp-ce3, the checker: a loop's iterations bounded by GCC's -fconstexpr-loop-limit, [implimits]: past it GCC's error at the loop)
@@ -6096,8 +6279,11 @@
                (if-let [c (some-> *ce-unknown* deref (get [:global (:id e)]))]
                  {::cell c ::path []}
                  (let [init (or (:init v) (:init-node v))
-                       x (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init)))
-                       c (atom (ce-wrap (:ty v) (binding [*ce-manifest* true *ce-in-call* true] (ce-eval x {}))))]
+                       ;; (cpp-def3: a const static data member's value its in-class initializer's check found, cx-check-constant!:
+                       ;; read, not evaluated again -- cpp0x/overflow1.C's Fib<i>::value, each reading two others)
+                       memo? (contains? v :cx-ice-val)
+                       x (when-not memo? (rv (binding [*cutoff* Long/MAX_VALUE] (analyze {:scope (or (:def-scope v) *root*)} init))))
+                       c (atom (if memo? (:cx-ice-val v) (ce-wrap (:ty v) (binding [*ce-manifest* true *ce-in-call* true] (ce-eval x {})))))]
                    (when *ce-const* (swap! *ce-const* conj c))
                    (when *ce-unknown* (swap! *ce-unknown* assoc [:global (:id e)] c))
                    {::cell c ::path []}))
@@ -6353,7 +6539,7 @@
             (and (checking?) f (#{:ctor :dtor} (:kind f)) (:constexpr f) (:cls f) (:node f) (not (header-node? (:node f)))
                  (not (:implicit f)) (not (:defaulted f)) (not (:tinst f)) (some :virtual (:bases (abi/cls (:cls f)))))
            (and (checking?) f
-                (not (:constexpr f)) (not (:consteval f)) (not (:implicit f)) (not (:defaulted f)) (not (:tinst f))
+                (not (:constexpr f)) (not (:consteval f)) (not (:implicit f)) (not (:defaulted f)) (or (not (:tinst f)) (:cx-explicit-spec f))
                 (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda)))
                 (:node f)
                 (or (and (not (header-node? (:node f))) (not (str/starts-with? (str (:name f)) "__")))
@@ -7855,6 +8041,11 @@
           (map-indexed (fn [i a] (if (< i (count ps))
                                    ;; (queue 492, the checker: a braced argument copy-list-initializes its parameter, cx-explicit-list!)
                                    (do (desig-order! a (nth ps i))
+                                       ;; (cpp-indep3, the checker: [class.abstract]/3 (P0929R2), a parameter of an abstract class type is
+                                       ;; checked at the call too, the object its argument initializes: GCC's "cannot declare parameter to be
+                                       ;; of abstract type 'A'", at the call; other/abstract8.C's `g(a)`, which an ambiguity of `a` had
+                                       ;; answered before)
+                                       (when (checking?) (when-let [at (some-> *at* deref)] (cx-abstract! (nth ps i) at "parameter")))
                                        (binding [*cx-copy-list* (or *cx-copy-list* (and (checking?) (= :init-list (:op a))))] (init-for (nth ps i) a ctx :copy)))
                                    (let [a (rv a)]
                                                                                            ;; [expr.call]/12: a class argument through the ellipsis is
@@ -8059,7 +8250,9 @@
     (case (:i init)
       :bind-temp (narrow-check! (:init init) (:ty init) src)
       :expr (let [x (:e init) tt (abi/unq (abi/non-ref t))]
-              (when (and (= :cast (:op x)) (:e x) (abi/arith? tt))
+              ;; (cpp-def3: an element that is itself an explicit conversion, `{ (int) (w.w = 17LL), 2 }` --
+              ;; cpp1y/constexpr-89336-3.C --, is no narrowing: [dcl.init.list]/7 judges the implicit conversion alone)
+              (when (and (= :cast (:op x)) (:e x) (abi/arith? tt) (not (identical? x src)))
                 (let [e (:e x) ft (abi/unq (:ty e))]
                   (when-let [k (narrowing-kind ft tt)]
                     (let [v (narrow-value e)]
@@ -8894,6 +9087,14 @@
         ;; (queue 510, the checker: a base constructor inherited from two base class subobjects, cx-inh-ambiguous!)
         (when (and (checking?) (seq (:inherits-ctors (abi/cls id))) (or (= ::inherited fid) (some #{fid} inh)))
           (cx-inh-ambiguous! id args cands))
+        ;; (cpp-def3, the checker: [except.spec]/13, the constructor selected needs its noexcept-specifier, and an implicit copy
+        ;; or move constructor's exception specification ([except.spec]/7) the subobjects' copy constructors': cx-nx-needed!,
+        ;; cpp0x/noexcept36.C's `decltype (lk (sc<lk> ()))` through kf<z8>'s `kf (const kf &) noexcept (T::qq)`)
+        (when (and (checking?) f)
+          (cx-nx-needed! f)
+          (when (and (:implicit f) (= 1 (count (:ps (:ty f)))))
+            (doseq [m (class-like-members id) g (:ctors (abi/cls m))]
+              (let [g (fnd g)] (when (and g (or (copy-ctor? g m) (move-ctor? g m))) (cx-nx-needed! g))))))
         (cond
           (= ::inherited fid) {:i :none}
           (and (checking?) (some #{fid} inh)) (do (cx-ctor-access! ctx {:i :ctor :fn fid}) (cx-inherited-deleted! id fid) {:i :none})
@@ -9096,7 +9297,20 @@
         ;; (reported here, once, the refusal unwinding the analyses that asked it)
         (when (and (checking?) *on-refusal* (:node fl)) (*on-refusal* e (:node fl)))
         (throw (ex-info (.getMessage e) (assoc (ex-data e) :cx/reported true))))
-      (binding [*nsdmi-active* (conj *nsdmi-active* k)] (f)))))
+      (let [d (binding [*nsdmi-active* (conj *nsdmi-active* k)] (f))]
+        ;; (cpp-def3, the checker: a class template's specialization whose default member initializer makes an object of that
+        ;; class by its implicit or defaulted default constructor -- `int i = (A<0>(), 0);`, `B* p = new B<N>;` -- needs its own
+        ;; instantiation again, [temp.inst]/? with [class.base.init]/9: GCC's "recursive instantiation of default member
+        ;; initializer for 'A<0>::i'", at the member, cpp0x/nsdmi-template14.C)
+        (when (and (checking?) *on-refusal* (:node fl) (not (header-node? (:node fl))) (:tmpl (abi/cls cid)))
+          (when (some (fn [x] (and (map? x) (:fn x) (#{:call :ctor} (or (:op x) (:i x)))
+                                   (let [g (fnd (:fn x))]
+                                     (and (= :ctor (:kind g)) (= cid (:cls g)) (or (:implicit g) (:defaulted g)) (empty? (:ps (:ty g)))))))
+                      (tree-seq coll? #(if (map? %) (vals %) (seq %)) d))
+            (*on-refusal* (ex-info (str "codegen: recursive instantiation of default member initializer for '" (:name (abi/cls cid)) "::" (:name fl) "'")
+                                   {:codegen/refused :nsdmi :cx/node (:node fl)})
+                          (:node fl))))
+        d))))
 
 (defn- cx-string-fits!
   "cpp-diag-b (2026-11-22): [dcl.init.string]/2, no more initializers than the array has elements, the string literal's
@@ -9496,7 +9710,7 @@
   read."
   false)
 
-(declare check-access!)
+(declare check-access! cx-static-ice-use! cx-nx-needed!)
 
 (defn- entity-expr [ctx es n]
   (let [;; (cpp-rt-own: a class name and a function or variable of the same name found together -- a using-declaration names
@@ -9510,6 +9724,11 @@
              ;; the qualifier's, else the function's class it is looked up from, [class.access.base]/5)
              (when (and (checking?) (:cx-access v))
                (cx-static-access! ctx (:cx-cls v) (:name v) (:cx-access v) (or (cx-naming-class ctx n) (some-> (:fn-id ctx) fnd :cls))))
+             ;; (cpp-def3, the checker: a const static data member of integral type of a class template's specialization, its
+             ;; in-class initializer instantiated where it is used, [temp.inst]/4, and then a constant expression,
+             ;; [class.static.data]/4: cx-static-ice-use!)
+             (when (and (checking?) (:cx-static-use v) (not (:cx-sinit v)) (not *unevaluated*) *on-refusal*)
+               (cx-static-ice-use! (:id e)))
              (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
@@ -9851,7 +10070,7 @@
   (when (and (checking?) (= :var (:op l)) (:c (:ty l)) (not (abi/ref? (:ty l))) (abi/scalar? (abi/unq (:ty l))))
     (when-let [v (var* (:id l))]
       (when (and (:name v) (:c (:ty v)) (not (abi/ref? (:ty v))))
-        (fail :assign (or what "assignment") " of read-only variable '" (:name v) "'"))))
+        (fail :assign (or what "assignment") " of read-only " (if (= :param (:storage v)) "parameter" "variable") " '" (:name v) "'"))))
   ;; (cpp-indep: any other lvalue of a const-qualified scalar type is no modifiable lvalue either, [basic.lval]/? with
   ;; [expr.assign]/1, [expr.pre.incr]/1: a comma's, a call's returning a reference to const, a dereferenced pointer to const,
   ;; a member of a const object but a mutable one -- GCC's "assignment of read-only location", other/const5.C's `(0, i) = 1`,
@@ -10411,6 +10630,7 @@
   "A call of the method `fid` on the object glvalue `obj` with the typed arguments."
   [ctx fid obj args virtual-ok]
   (let [f (fnd (deduced! fid))
+        _ (cx-nx-needed! f)
         _ (cx-immediate-call! ctx f)
         _ (cx-closure-conv! ctx f)
         o (when-not (:static f) (to-base-lv obj (:cls f)))]
@@ -10448,8 +10668,21 @@
         call)
     call))
 
+(defn- cx-nx-needed!
+  "cpp-def3 (the checker): [except.spec]/13, the function `f` selected by overload resolution needs its noexcept-specifier, whose
+  operand's error noexcept-of kept (:cx-nx-error) is then reported, once, at the operand."
+  [f]
+  ;; (the shared regression of cpp-indep3 and cpp-def3: not a constexpr function's, whose noexcept-specifier GCC instantiates
+  ;; with its definition's constant evaluation alone, PR c++/92193: diagnostic/static_assert4.C's constexpr foo(T)
+  ;; noexcept(noexcept(t.foo())) called for an X without foo, no error there)
+  (when (and (checking?) *on-refusal* (:cx-nx-error f) (not (:cx-nx-reported f)) (:id f) (not *cx-in-implicit*) (not (:constexpr f)))
+    (let [[e x] (:cx-nx-error f)]
+      (upd-fn! (:id f) assoc :cx-nx-reported true)
+      (*on-refusal* e x))))
+
 (defn- fn-call [ctx fid args]
   (let [f (fnd (deduced! fid))
+        _ (cx-nx-needed! f)
         _ (cx-immediate-call! ctx f)]
     (imm-fold ctx
               (cx-immediate-eval! ctx f
@@ -11000,7 +11233,21 @@
                                                                           ;; copy assignment's memberwise body, constexpr-tracking-const3.C)
                                                                           (not (some-> (:fn-id ctx) fnd ((some-fn :implicit :defaulted))))
                                                                           (re-find #"^codegen: no viable function among [1-9]" (.getMessage x)))
-                                                                 (fail :nomatch "no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")))
+                                                                 ;; (cpp-def3: GCC's explanation of a near match, an implicit copy or move
+                                                                 ;; assignment whose reference parameter cannot bind a volatile operand of
+                                                                 ;; the class -- [dcl.init.ref]/5's cv-qualification, an rvalue reference to
+                                                                 ;; an lvalue -- its error at the candidate, the class: overload/error8.C)
+                                                                 (let [rt (:ty (last args)) ru (abi/unq (abi/non-ref rt))
+                                                                       cn (:cx-node (abi/cls lc))
+                                                                       ex (when (and (abi/class? ru) (= (:id ru) lc) (:v (abi/non-ref rt)) cn (not (header-node? cn)))
+                                                                            (vec (for [m (distinct members) :let [g (fnd m)]
+                                                                                       :when (and (:implicit g) (= "operator=" (:name g)) (= 1 (count (:ps (:ty g)))))]
+                                                                                   {:msg (if (= :rref (:k (first (:ps (:ty g)))))
+                                                                                           "codegen: cannot bind rvalue reference to an lvalue of a volatile type"
+                                                                                           "codegen: binding reference of a const type to a volatile object discards qualifiers")
+                                                                                    :node cn})))]
+                                                                   (throw (ex-info (str "codegen: no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")
+                                                                                   (cond-> {:codegen/refused :nomatch} (seq ex) (assoc :cx/explain ex)))))))
                                                            (throw x))))]
         (cond
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
@@ -11466,6 +11713,14 @@
                 (fail :lambda "a capture of a generic lambda its definition did not name: " (if (= :this k) "this" (:name (var* k)))))
             mode (or (get (:explicit lam) k) (:default lam))
             v (when (not= :this k) (var* k))]
+        ;; (cpp-indep3, the checker: a variable that is not captured is reported where it is named, at the node analyzed, and
+        ;; the analysis goes on as if it were captured by reference, so the lambda's type stays what GCC deduces -- its
+        ;; return type the variable's, cpp0x/lambda/lambda-err2.C's `[]() { return a(); }` still returning bool)
+        (if-let [at (when (and (nil? mode) (checking?) v (not (:c (abi/non-ref (:ty v)))) (not (:c (:ty v)))
+                               (string? (:name v)) (seq (:name v)))
+                      (let [n (some-> *at* deref)] (when (get-in n [:range :begin :offset]) n)))]
+          (do (*on-refusal* (ex-info (str "codegen: '" (:name v) "' is not captured") {:codegen/refused :lambda-capture}) at)
+              (capture-field (assoc ctx :lambda (assoc lam :default :ref)) k))
         (cond
           (= :this k)
           (let [te (this-expr encl)
@@ -11498,7 +11753,7 @@
             (abi/update-cls! lid update :fields conj (cond-> {:name nil :ty ft :access :private :i i :capture true} (checking?) (assoc :cx-capname (:name v))))
             (swap! caps assoc k i)
             (swap! (:inits lam) conj [i (if (= :ref mode) {:i :bind :e src} (init-for ft src encl :copy))])
-            (field-node obj lid i)))))))
+            (field-node obj lid i))))))))
 
 (defn- init-capture!
   "An init-capture ([expr.prim.lambda.capture]/6): a field of the deduced type initialized by the expression analyzed in
@@ -12383,7 +12638,25 @@
                                             ;; not check: in the checker a doubt, for the code generator true as before)
                                             ;; (n-cpp-concepts: one the parser found no type-constraint, its error given there:
                                             ;; judged by nothing)
-                                            (:_ret_bad r) (do (doubt!) true)
+                                            ;; (cpp-def3: since then the expression's implicit conversion to the type, the Concepts TS's
+                                            ;; meaning of `-> T` that GCC goes on with after its error: concepts/pr71385.C's `{x + x} -> T`
+                                            ;; satisfied by int, cpp2a/concepts-requires5.C's `{t} -> U&` not by a private base,
+                                            ;; static_assert(ConvertibleTo<D, B>) failing; a conversion not judged surely a doubt)
+                                            (:_ret_bad r)
+                                            (if-not (checking?)
+                                              true
+                                              (try (let [t (resolve-type (:scope c) (str/trim (:_ret r)))
+                                                         ;; ([conv.ptr]/3, [dcl.init.ref]/5: a derived class's glvalue binds a reference to
+                                                         ;; its base only when the base is accessible -- a requirement's context a
+                                                         ;; namespace scope's, a non-public base inaccessible there)
+                                                         bc (class-id (abi/non-ref t)) dc (class-id (abi/non-ref (:ty x)))]
+                                                     (if (and (abi/ref? t) bc dc (not= bc dc) (abi/derived-from? dc bc) (nil? (:fn-id c))
+                                                              (not (:has-friends (abi/cls dc)))
+                                                              (some (fn [[k i]] (not= :public (:access (nth (:bases (abi/cls k)) i)))) (first (abi/base-path dc bc))))
+                                                       false
+                                                       (do (init-for t x c :copy) true)))
+                                                   (catch arbace.lang.ExceptionInfo e
+                                                     (if (sure-failure? e) false (do (doubt!) true)))))
                                             (and (:_ret r) (:type-constraint @hooks))
                                             (let [t (abi/non-ref (:ty x))
                                                   dt (case (:cat x) :lv (abi/lref t) :xv (abi/rref t) t)
@@ -13012,7 +13285,16 @@
           ;; (cpp-def, the checker: [expr.alignof]/1, alignof of void, an incomplete type, is GCC's "invalid application of
           ;; '__alignof__' to a void type" (GNU's __alignof and sizeof of void are its pedwarns, not errors); cpp0x/alignas20.C)
           _ (when (and (checking?) (= "alignof" (:name n)) at (= abi/void (abi/unq t)))
-              (fail :incomplete "invalid application of alignof to incomplete type 'void'"))]
+              (fail :incomplete "invalid application of alignof to incomplete type 'void'"))
+          ;; (cpp-indep3, the checker: [expr.sizeof]/1 and [expr.alignof]/1, the operand is no bit-field: GCC's "invalid application
+          ;; of '__alignof' to a bit-field", diagnostic/alignof3.C; nor an expression of function type, whose sizeof and __alignof
+          ;; GNU gives 1 (the GCC manual's "Pointer Arith"), GCC's pedwarn "ISO C++ forbids applying 'sizeof' to an expression of
+          ;; function type", an error under -pedantic-errors, at the operand; expr/sizeof1.C, diagnostic/alignof1.C, alignof2.C)
+          _ (when (and (checking?) x (= :field (:op x)) (integer? (:i x)) (:cls x)
+                       (some-> (abi/cls (:cls x)) :fields (nth (:i x) nil) :bits))
+              (fail :sizeof-operand "invalid application of '" (:name n) "' to a bit-field"))
+          _ (when (and (checking?) x *pedantic-errors* (some-> (:ty x) abi/unq ((fn [t] (or (abi/fn? t) (= :overload (:k t)))))))
+              (fail :sizeof-operand "ISO C++ forbids applying '" (:name n) "' to an expression of function type"))]
       (case (:name n)
         "sizeof" (if-let [vid (and (checking?) (:vla (abi/unq t)) (= :var (:op x)) (:vla-n (var* (:id x))) (:id x))]
                    ;; (queue 569, the checker: sizeof of a GNU variable-length array, evaluated where it is, the GCC manual's
@@ -13890,6 +14172,8 @@
     (cond
       (not (and (checking?) (map? r) (:range n))) r
       (#{:asm :goto} (:s r)) (assoc r :cx-at (:range n))
+      ;; (cpp-def3: a return statement's, the potential constant check's place of its result's initialization)
+      (= :return (:s r)) (assoc r :cx-ret-at (:range n))
       ;; (cpp-ce3: a loop's, where its iteration count's limit is reported)
       (#{:while :do :for} (:s r)) (assoc r :cx-at (:range n))
       ;; (cpp-ce2: a compound statement's closing brace, where its objects are destroyed)
@@ -14550,7 +14834,7 @@
                                        ;; `const optional<int> precision`, whose value() is the const& one, and `const int precision`
                                        ;; given to optional<int>(_Up&&) as const int&)
                                        t (if (and (= (count (:param-const f)) (count (:ps (:ty f)))) (nth (:param-const f) i false)
-                                                  (not (abi/ref? t)) (not (checking?)))
+                                                  (not (abi/ref? t)))
                                            (assoc t :c true) t)]
                                    (swap! *vars* assoc id {:id id :name nm :ty t :storage :param :fn fid})
                                    (when nm (enter! fs nm {:e :var :id id}))
@@ -14989,7 +15273,18 @@
     (when (:cx/sure d)
       (when (:id v) (upd-var! (:id v) assoc :cx-bad true))
       (let [m (subs (str (.getMessage ^Throwable x)) (count "not a constant: "))]
-        (if (:cx-constinit v)
+        (cond
+          ;; (cpp-def3: a const static data member's in-class initializer, [class.static.data]/4: the operation's error, and the
+          ;; member's own when the operation has a place of its own, as GCC's two "overflow in constant expression" errors)
+          (:cx-static-ice v)
+          (if-let [p (or (:cx/at d) (:cx/top d))]
+            (do (when-let [h *on-refusal*]
+                  (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range p}}) nil))
+                (throw (ex-info (str "codegen: the in-class initializer of static data member '" (:name v) "' is not a constant expression (" m ")")
+                                {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))
+            (throw (ex-info (str "codegen: the in-class initializer of static data member '" (:name v) "' is not a constant expression (" m ")")
+                            {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))
+          (:cx-constinit v)
           ;; (cpp-singles: a call of a function not constexpr that the initializer makes implicitly -- a converting constructor
           ;; of the temporary a reference binds, `constinit const nonliteral &r5 = 42;` --, which has no place of its own: at the
           ;; initializer, as GCC: cpp2a/constinit11.C)
@@ -14998,7 +15293,7 @@
                   (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range p}}) nil)))
               (throw (ex-info (str "codegen: constinit variable '" (:name v) "' does not have a constant initializer (" m ")")
                               {:codegen/refused :constexpr :cx/node {:range (:cx-range v)}})))
-          (do
+          :else (do
             ;; (the variable's own line too, GCC's "in 'constexpr' expansion of" there, an error where the evaluation's
             ;; failure is the variable's: cpp23/constexpr-nonlit6.C)
             (when (and (:cx/at d) (:cx/pce d) (:cx-range v))
@@ -15069,9 +15364,23 @@
            (ce-init (:ty v) i {}))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
   ;; (cpp-vec: and a GNU vector's, cpp1y/pr68180.C's `constexpr float32x4_t v = fill(1.f);`)
-  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :expr (:i i)) (or (abi/scalar? (abi/unq (:ty v))) (= :vec (:k (abi/unq (:ty v))))))
-    (try (binding [*ce-manifest* true *ce-point* (:cx-range v)] (ce-eval (:e i)))
+  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v) (:cx-static-ice v)) (= :expr (:i i)) (or (abi/scalar? (abi/unq (:ty v))) (= :vec (:k (abi/unq (:ty v))))))
+    (try (let [r (binding [*ce-manifest* true *ce-point* (:cx-range v)] (ce-eval (:e i)))]
+           ;; (cpp-def3: a const static data member's value kept, ce-lv's read of it)
+           (when (and (:cx-static-ice v) (:id v) (number? r)) (upd-var! (:id v) assoc :cx-ice-val (ce-wrap (:ty v) r))))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
+  ;; (cpp-def3: [expr.const]/13, a pointer to a temporary of the initializer, which dies at its full-expression's end, is no
+  ;; permitted result -- `constexpr const int* tp = addr(5);` with addr returning its reference parameter's address: GCC's
+  ;; "'&<anonymous>' is not a constant expression", cpp0x/constexpr-neg1.C; the result's location from an evaluation of its own)
+  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :expr (:i i)) (abi/ptr? (abi/unq (:ty v))))
+    (let [temps (atom [])
+          r (try (binding [*ce-steps* (atom 0) *ce-heap* (atom {}) *ce-moved* (atom {}) *ce-const* (atom #{}) *ce-pos* (atom nil)
+                           *ce-dead* (atom #{}) *ce-temps* temps *ce-unknown* (atom {}) *ce-wide* true *ce-heap-top* true
+                           *ce-manifest* true *ce-point* (:cx-range v)]
+                   (ce-eval (:e i) {}))
+                 (catch arbace.lang.ExceptionInfo _ nil))]
+      (when (and (ce-loc? r) (some #(identical? % (::cell (ce-res r))) @temps))
+        (cx-sure-error! v (ex-info "not a constant: '&<anonymous>' is not a constant expression (a pointer to a temporary)" {:codegen/not-constant true :cx/sure true})))))
   ;; (h-cpp-consteval: a class object's initializer too, its constructor's evaluation: [dcl.constexpr]/10's full-expression)
   (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (#{:ctor :zero-then :list :copy :expr} (:i i))
              (not (abi/ref? (:ty v))) (abi/class? (abi/unq (:ty v))))
@@ -15459,6 +15768,22 @@
            (or (nil? (:tmpl c)) (:explicit-inst-def c))
            (some? (cx-enclosing-classes cid))))))
 
+(declare global-init)
+
+(defn cx-static-ice-use!
+  "cpp-def3 (the checker): the in-class initializer of the const static data member `id` of integral type (:cx-static-ice), at
+  a use of the member outside an unevaluated operand: analyzed once, as entry! does for a class's own ([temp.inst]/4: an
+  implicit instantiation's initializer is instantiated when used), so that cx-check-constant! judges it ([class.static.data]/4);
+  its refusals reported, the analysis' place restored after."
+  [id]
+  (upd-var! id assoc :cx-sinit true)
+  (let [at0 (some-> *at* deref)]
+    (try (global-init id)
+         (catch arbace.lang.ExceptionInfo e
+           ;; (an erroneous initializer leaves the member not usable in constant expressions, as GCC's error_mark_node)
+           (if (:codegen/refused (ex-data e)) (do (upd-var! id assoc :cx-bad true) (*on-refusal* e (some-> *at* deref))) (throw e)))
+         (finally (when *at* (reset! *at* at0))))))
+
 (defn global-init
   "A namespace-scope variable's initializer."
   [vid]
@@ -15582,6 +15907,14 @@ protected:
                   (let [a (pce-expr (:then e)) b (pce-expr (:else e))] (when (and a b) a))))
       (:land :lor) (pce-expr (:l e))
       :comma (or (pce-expr (:l e)) (pce-expr (:r e)))
+      ;; (cpp-def3: C++11's [expr.const]/2, an assignment or a compound assignment -- an increment or decrement among them,
+      ;; [expr.pre.incr]/1 -- is never part of a core constant expression, so a constexpr function whose return statement has
+      ;; one is never constant: GCC's "expression '--x' is not a constant expression" at the definition; C++14's N3652 allows
+      ;; them: cpp0x/constexpr-function2.C, constexpr-neg1.C's prev)
+      (:assign :cassign :incdec)
+      (or (when (and (= 11 (long *cxx-year*)) (:cx-at e))
+            [(str "expression '" (case (:op e) :incdec (str (:o e) "x") "x = y") "' is not a constant expression") (:cx-at e)])
+          (some pce-expr (for [k [:e :l :r] :let [x (get e k)] :when (map? x)] x)))
       ;; (an operator's operands, in no particular order: the first finding)
       (some pce-expr (for [k [:e :l :r :obj :p :n] :let [x (get e k)] :when (map? x)] x)))))
 
@@ -15591,7 +15924,14 @@ protected:
     (case (:s s)
       :block (some pce-stmt (mapcat #(if (:flat %) (:items %) [%]) (:items s)))
       :expr (pce-expr (:e s))
-      :return (when (= :expr (get-in s [:init :i])) (pce-expr (get-in s [:init :e])))
+      :return (if (= :expr (get-in s [:init :i]))
+                (pce-expr (get-in s [:init :e]))
+                ;; (cpp-def3: the result's initialization by a constructor surely not constexpr -- `return d;` copying a parameter
+                ;; of a class whose copy constructor is not constexpr --, at the return statement: cpp0x/constexpr-ex1.C's f)
+                (let [i (:init s) g (when (= :ctor (:i i)) (some-> (:fn i) fnd))]
+                  (or (when (and g (ce-not-constexpr? g) (:cx-ret-at s))
+                        [(str "call to non-'constexpr' function '" (:name g) "'") (:cx-ret-at s)])
+                      (when (= :ctor (:i i)) (some #(when (= :expr (:i %)) (pce-expr (:e %))) (filter map? (:args i)))))))
       :decl (when (= :expr (get-in s [:init :i])) (pce-expr (get-in s [:init :e])))
       :if (or (pce-expr (:cond s))
               (case (pce-fold (:cond s))

@@ -1531,7 +1531,21 @@ o2j_env_runs() {
   local bl=$1 res=$2
   awk -F'\t' '$NF != "" { a = ""; for (i = 5; i < NF; i++) a = a (a == "" ? "" : " ") $i; print $1 "\037" $2 "\037" $3 "\037" $4 "\037" a "\037" $NF }' "$bl" |
   while IFS=$'\037' read -r id out files argv0 args env; do
-    ( for kv in $(env_vars "$env"); do export "$kv"; done; OI_REDIR=$env; o2j_alone "$id" "$out" "$files" "$argv0" $args ) >> "$res"
+    local row; row=$( for kv in $(env_vars "$env"); do export "$kv"; done; OI_REDIR=$env; o2j_alone "$id" "$out" "$files" "$argv0" $args )
+    # (oc-tail, header.awk's dynlink mode at the light level) a dynlink test's further programs (D/dynruns.txt), each run once after the
+    # main one and judged against its own reference REF.reference; the first that differs (status not 0, or its output) is the row's
+    local d drf drfiles drow
+    d=$(dirname "$out")
+    if [ -s "$d/dynruns.txt" ] && [ "$(echo "$row" | cut -f2)" = 0 ]; then
+      while IFS=$'\t' read -r drf drfiles; do
+        [ -f "$d/dynrun/$drf/out/files.txt" ] || { echo "dynlink: the program $drf was not translated" >> "$out"; row=$(printf '%s\t125\t0' "$id"); break; }
+        drow=$( for kv in $(env_vars "$env"); do export "$kv"; done; o2j_alone "$id" "$d/o2j.out.$drf" "$d/dynrun/$drf/out/files.txt" "$argv0" < /dev/null )
+        if [ "$(echo "$drow" | cut -f2)" != 0 ] || ! cmp -s "$d/o2j.out.$drf" "$(dirname "$TESTS/$id")/$drf.reference"; then
+          mv "$out" "$out.main"; cp "$d/o2j.out.$drf" "$out"; row=$drow; break
+        fi
+      done < "$d/dynruns.txt"
+    fi
+    echo "$row" >> "$res"
     # (header.awk's ocamldoc mode, queue 480: the row's output TEST.result, ocamldoc's own output judged beside it)
     [ -z "$(ocamldoc_of "$env")" ] || ocamldoc_output "$id" "$(dirname "$out")" "$out"
     # (header.awk's objinfo mode at this level, queue 528: the compiler's output judged beside the tool's)
@@ -1589,13 +1603,30 @@ o2j_dump() {
   local u; u=$(echo "${base:0:1}" | tr a-z A-Z)${base:1}
   cp "$src" "$d/"
   local why; why=$(mll_gen "$d" "$base") || { printf '(ocaml/error "%s")\n' "${why#dump: }" > "$d/$u.ae"; return 0; }
-  local dyn="" dynmain="" dyncopy="" kv
-  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;; esac; done
+  local dyn="" dynmain="" dyncopy="" dyndll="" dyncma="" dynruns="" kv
+  for kv in $env; do case $kv in @dyn=*) dyn=${kv#@dyn=} ;; @dynmain=*) dynmain=${kv#@dynmain=} ;; @dyncopy=*) dyncopy=${kv#@dyncopy=} ;;
+    @dyndll=*) dyndll=${kv#@dyndll=} ;; @dyncma=*) dyncma=${kv#@dyncma=} ;; @dynruns=*) dynruns=${kv#@dynruns=} ;; esac; done
   if [ -n "$dyn" ]; then
-    if ! why=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy"); then
+    if ! why=$(oi_dynlink "$id" "$d" "$flags" "$incs" "$dyn" "$dynmain" "$dyncopy" "$dyndll" "$dyncma"); then
       printf '(ocaml/error "%s")\n' "$(echo "${why#dump: }" | tr '\n"\\' '   ' | head -c 200)" > "$d/$u.ae"; return 0
     fi
     printf '%s\n' "$why" | sed '/^$/d' > "$d/dynmains.txt"
+    # (oc-tail, header.awk's dynlink mode with ocamlmklib's libraries at the light level, lib-dynlink-bytecode) the further programs
+    # (@dynruns=REF:ITEM+ITEM,...: a unit, or NAME.cma its units, linked whole): REF and their units' Lambda files a line, translated
+    # with the program and run after it (o2j_env_runs), each judged against REF.reference as oi_one judges them
+    : > "$d/dynruns.txt"
+    local dr ditem dfiles ce cu
+    for dr in $(echo "$dynruns" | tr ',' ' '); do
+      dfiles=""
+      for ditem in $(echo "${dr#*:}" | tr '+' ' '); do
+        case $ditem in
+          *.cma) for ce in $(echo "$dyncma" | tr ',' ' '); do [ "${ce%%:*}" = "${ditem%.cma}" ] || continue
+                   for cu in $(echo "${ce#*:}" | tr '+' ' '); do dfiles="$dfiles $d/$(echo "${cu:0:1}" | tr a-z A-Z)${cu:1}.ae"; done; done ;;
+          *) dfiles="$dfiles $d/$(echo "${ditem:0:1}" | tr a-z A-Z)${ditem:1}.ae" ;;
+        esac
+      done
+      printf '%s\t%s\n' "${dr%%:*}" "${dfiles# }" >> "$d/dynruns.txt"
+    done
     # each plugin a .cmxs too, the native alternative's file (this level's Sys.backend_type is Native: pr4229 loads client.cmxs), the same
     # Lambda the runtime's loader reads
     local f; for f in $(find "$d" -name '*.cmo'); do cp "$f" "${f%.cmo}.cmxs"; done
@@ -1808,6 +1839,14 @@ cmd_check_aot() {
     # (header.awk's ocamldoc mode, queue 480: ocamldoc's arguments and its program's interface digests)
     if [ -n "$(ocamldoc_of "$env")" ]; then args=$(cat "$d/ocamldoc.args"); env="$env OI_DYNLINK_IMPORTS=$ODOC/main.imports"; fi
     printf '%s\t%s%s%s\n' "$d/out" "$(inc_units "$incs" "$d/$u.ae" | sed 's/$/\t/' | tr -d '\n')" "$dm" "$d/$u.ae" >> "$tl"
+    # (oc-tail) the further programs of a dynlink test (D/dynruns.txt): each its units over the program's included ones, D/dynrun/REF/out
+    local drf drfiles
+    if [ -s "$d/dynruns.txt" ]; then
+      while IFS=$'\t' read -r drf drfiles; do
+        mkdir -p "$d/dynrun/$drf"
+        printf '%s\t%s%s\n' "$d/dynrun/$drf/out" "$(inc_units "$incs" "$d/$u.ae" | sed 's/$/\t/' | tr -d '\n')" "$(echo "$drfiles" | tr ' ' '\t')" >> "$tl"
+      done < "$d/dynruns.txt"
+    fi
     local hn hm hu
     if [ -s "$d/helpers.txt" ]; then
       while read -r hn hm; do

@@ -405,9 +405,10 @@ END {
       # after the main program's link and run, each further link (`all_modules = "U.cmo NAME.cma ..."`, flags -linkall, -custom, -I .,
       # use_runtime = "false") and run a program of those units with every library's units linked (-linkall), judged against its own
       # reference (`reference = "${test_source_directory}/REF.reference"`; @dynruns=REF:ITEM+ITEM,...); the libraries' C files the run's
-      # stubs (@cstubs), ld_library_path += test_build_directory the run's CAML_LD_LIBRARY_PATH (the run's directory). The AOT levels keep
-      # the class
-      if (aot == 0) {
+      # stubs (@cstubs), ld_library_path += test_build_directory the run's CAML_LD_LIBRARY_PATH (the run's directory). The light AOT level
+      # too (oc-tail, 2026-11-26: bin/oi's o2j_dump writes the libraries, the further programs translated beside the main one and run
+      # after it, D/dynruns.txt); the compiled level keeps the class
+      if (aot <= 1) {
         if (s ~ /^ld_library_path *\+= *"\$VAR"$/) { dldpath = 1; continue }
         if (s ~ /^compile_only *= *"(true|false)"$/) { dco = (s ~ /"true"/); continue }
         if (s ~ /^modules *= *"/) { v = s; sub(/^[^"]*"/, "", v); sub(/"[^"]*$/, "", v); dmkmods = trim(v); continue }

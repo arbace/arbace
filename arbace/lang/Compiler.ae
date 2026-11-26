@@ -853,9 +853,35 @@
     (constructor ^:public [this ^String c] (set! (.-c this) c))
 
     (method ^:public eval [this]
-      (let [ns (cast Namespace (.deref RT/CURRENT_NS))]
+      (ImportExpr/importIn (cast Namespace (.deref RT/CURRENT_NS)) c)
+      nil)
+
+    ;; the import of class c into ns: the class, or nil for a lazy import (the REPL's model, JCS8 (b);
+    ;; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: the lazy import"): a class not loadable yet whose
+    ;; source on the path declares it (p/C.ae or p/C_class.ae, SPEC §9.2, 3), as a package that imports one
+    ;; importing it back, the Java forms' name for it then (arbace.classes.native's defer-import); else
+    ;; Clojure's ClassNotFoundException. The front end is loaded only when such a file exists
+    (method ^:public ^:static importIn ^Class [^Namespace ns ^String c]
+      (try
         (.importClass ns (RT/classForNameNonLoading c))
-        nil))
+        (catch Exception e
+          (when-not (instance? ClassNotFoundException e) (throw (Util/sneakyThrow e)))
+          (let [d (.indexOf c "$")
+                top (.replace (if (>= d 0) (.substring c 0 d) c) \. \/)
+                found (and (> (.indexOf top "/") 0)
+                           (or (ImportExpr/sourceExists (java-str top "_class.ae"))
+                               (ImportExpr/sourceExists (java-str top ".ae"))))]
+            (if (and found
+                     (RT/booleanCast (.invoke (arbace.lang.Compiler/classForms "defer-import") ns c)))
+              nil
+              (throw (Util/sneakyThrow e)))))))
+
+    (method ^:static sourceExists ^boolean [^String name]
+      (let [in (RT/resourceAsStream (RT/baseLoader) name)]
+        (if (nil? in)
+          false
+          (do (try (.close in) (catch java.io.IOException x nil))
+              true))))
 
     (method ^:public hasJavaClass ^boolean [this] false)
 
@@ -870,7 +896,7 @@
 
     ;; the class, as the compiled import* leaves it (ImportExpr.emit; its eval gives nil)
     (method ^:public evalIn [this ^Compiler$Frame f]
-      (.importClass (cast Namespace (.deref RT/CURRENT_NS)) (RT/classForNameNonLoading c))))
+      (ImportExpr/importIn (cast Namespace (.deref RT/CURRENT_NS)) c)))
 
   (defclass ^:public ^:abstract ^:static LiteralExpr
     :implements [Expr]
@@ -6386,8 +6412,13 @@
         (if (== t \F) (Float/valueOf (unchecked-float v)) (Double/valueOf v)))
 
       ;; an object (a wrapper) as a long slot's value
+      ;; java-speed-1124: the wrappers the interpreter boxes most (Integer, Long; Double for toD)
+      ;; tested first, by their final classes: an exact type check where Number's is an interface
+      ;; assertion and a virtual call (an int field or argument read each iteration of a loop)
       (method ^:public ^:static toJ ^long [o]
         (cond
+          (instance? Integer o) (unchecked-long (.intValue (cast Integer o)))
+          (instance? Long o) (.longValue (cast Long o))
           (instance? Number o) (.longValue (cast Number o))
           (instance? Character o) (unchecked-long (.charValue (cast Character o)))
           (instance? Boolean o) (if (.booleanValue (cast Boolean o)) 1 0)
@@ -6397,6 +6428,7 @@
 
       (method ^:public ^:static toD ^double [o]
         (cond
+          (instance? Double o) (.doubleValue (cast Double o))
           (instance? Number o) (.doubleValue (cast Number o))
           (instance? Character o) (unchecked-double (.charValue (cast Character o)))
           (nil? o) (throw (NullPointerException.))
@@ -6455,9 +6487,15 @@
                 (loop [f (.-top t)]
                   (when (some? f)
                     (.add l (.-meth f))
+                    (.add l (Integer/valueOf (.-line f)))
                     (when (.-entry f) (.add l ENTRY))
                     (recur (.-caller f))))
                 (Snap. (.toArray l))))))
+
+      ;; a call node's Java line (Node.line): arbace.classes.interp's, by name (the tools' host runs
+      ;; interp.ae on the seed's runtime until a re-seed carries Node.line)
+      (method ^:public ^:static setLine ^void [^Node n ^int line]
+        (set! (.-line n) line))
 
       ;; a frame's source file as javac names it by default: the top-level class's simple name
       (method ^:public ^:static sourceFile ^String [^String cname]
@@ -6466,30 +6504,35 @@
               i (.indexOf s "$")]
           (java-str (if (< i 0) s (.substring s 0 i)) ".java")))
 
-      ;; a snapshot's frames as jrt reads them, five slots a frame, innermost first: the Class
+      ;; a snapshot's frames as jrt reads them, six slots a frame, innermost first: the Class
       ;; (nil on the JVM's test host), the class's name, the method's, the source file (nil
-      ;; for a lambda's class) and the flags (an Integer): 1 the frame was entered from
+      ;; for a lambda's class), the flags (an Integer): 1 the frame was entered from
       ;; outside the interpreter, 2 hidden (a lambda's class, as the JVM's hidden classes), 4 a
-      ;; static main(String[]) (a launch: jrt shows no frame below one entered from outside).
-      ;; A lambda's method is two frames, as on the JVM: the lambda's body (its class's
-      ;; lambda$m$N) under its hidden class's method; a method reference's is the hidden one
+      ;; static main(String[]) (a launch: jrt shows no frame below one entered from outside),
+      ;; and the line (an Integer, -1 when unknown; the snapshot keeps each frame's Meth and its
+      ;; line then). A lambda's method is two frames, as on the JVM: the lambda's body (its class's
+      ;; lambda$m$N, the line) under its hidden class's method; a method reference's is the hidden one
       (method ^:public ^:static describe ^Object/1 [^Object/1 snap]
         (let [l (java.util.ArrayList.)]
           (loop [^int i 0]
             (when (< i (alength snap))
               (let [x (aget snap i)]
                 (if (identical? x ENTRY)
-                    (let [j (unchecked-subtract-int (.size l) 1)]
-                      (.set l j (Integer/valueOf (bit-or-int (.intValue (cast Integer (.get l j))) 1))))
+                    (let [j (unchecked-subtract-int (.size l) 2)]
+                      (.set l j (Integer/valueOf (bit-or-int (.intValue (cast Integer (.get l j))) 1)))
+                      (recur (unchecked-inc-int i)))
                     (let [m (cast Meth x)
                           k (.-k m)
-                          h (.-lambdaHost k)]
+                          h (.-lambdaHost k)
+                          ln (.intValue (cast Integer (aget snap (unchecked-inc-int i))))
+                          line (Integer/valueOf (if (> ln 0) ln -1))]
                       (when (and (some? h) (some? (.-lambdaName k)))
                         (.add l (.-cls h))
                         (.add l (.-name h))
                         (.add l (.-lambdaName k))
                         (.add l (Rt/sourceFile (.-name h)))
-                        (.add l (Integer/valueOf 0)))
+                        (.add l (Integer/valueOf 0))
+                        (.add l line))
                       (.add l (.-cls k))
                       (.add l (.-name k))
                       (.add l (.-name m))
@@ -6498,8 +6541,9 @@
                                 (cond (some? h) 2
                                       (and (.-isStatic m) (.equals (.-name m) "main")
                                            (.equals (.-desc m) "([Ljava/lang/String;)V")) 4
-                                      :else 0))))))
-              (recur (unchecked-inc-int i))))
+                                      :else 0)))
+                      (.add l (if (some? h) (Integer/valueOf -1) line))
+                      (recur (unchecked-add-int i 2)))))))
           (.toArray l)))
 
       ;; an exception thrown by a reflective call, as the call itself would have thrown it
@@ -6637,8 +6681,40 @@
                   (if (== (.-jump f) 0) (recur (unchecked-inc-int i)) false))
                 true))))
 
+      ;; Rt/boxed over the arguments' cells (n of them)
+      (method ^:public ^:static boxedC ^Object/1 [^Cell c0 ^int n ^char/1 ts ^Frame f]
+        (when (== n 0) (return NOARGS))
+        (let [vs (new Object/1 n)]
+          (loop [^int i 0 ^Cell c c0]
+            (if (some? c)
+                (let [a (.-n c)
+                      ty (aget ts i)]
+                  (aset vs i (switch (Rt/kind ty)
+                               \J (Rt/box ty (.evalJ a f))
+                               \D (Rt/boxD ty (.evalD a f))
+                               (.eval a f)))
+                  (if (== (.-jump f) 0) (recur (unchecked-inc-int i) (.-next c)) nil))
+                vs))))
+
+      ;; Rt/args over the arguments' cells (Cell/of of the call's args)
+      (method ^:public ^:static argsC ^boolean [^Meth m ^Cell c0 ^Frame f ^Frame g]
+        (let [ps (.-pslots m) ts (.-ptypes m)]
+          (loop [^int i 0 ^Cell c c0]
+            (if (some? c)
+                (let [a (.-n c)]
+                  (switch (Rt/kind (aget ts i))
+                    \J (let [v (.evalJ a f)] (aset (.-p g) (aget ps i) v))
+                    \D (let [v (.evalD a f)] (.setD g (aget ps i) v))
+                    (let [v (.eval a f)] (aset (.-r g) (aget ps i) v)))
+                  (if (== (.-jump f) 0) (recur (unchecked-inc-int i) (.-next c)) false))
+                true))))
+
       ;; the arguments as objects (a reflective call), by the parameters' types
+      ;; no arguments: one empty array, never written (a reflective call only reads its arguments)
+      (field ^:static ^:final ^Object/1 NOARGS (new Object/1 0))
+
       (method ^:public ^:static boxed ^Object/1 [^Node/1 args ^char/1 ts ^Frame f]
+        (when (== (alength args) 0) (return NOARGS))
         (let [vs (new Object/1 (alength args))]
           (loop [^int i 0]
             (if (< i (alength args))
@@ -6685,6 +6761,13 @@
       (method ^:public ^:abstract adaptFn [this ^Class c o])
       ;; Object's own toString, hashCode and equals of an object (super calls)
       (method ^:public ^:abstract objectMethod [this ^String name o arg])
+      ;; a reflective call of method m of the world on o (nil: static) with the boxed arguments,
+      ;; an exception it throws propagating as it is (Method.invoke's InvocationTargetException
+      ;; unwrapped); the result boxed. java-speed-1124: the Go host calls m's invoker directly
+      (method ^:public invoke [this ^java.lang.reflect.Method m o ^Object/1 args]
+        (try
+          (.invoke m o args)
+          (catch Throwable e (throw (Rt/unwrap e)))))
       ;; whether an interpreted class may extend class c of the world
       (method ^:public canExtend ^boolean [this ^Class c]
         (or (identical? c Object) (identical? c Record)))
@@ -6807,11 +6890,16 @@
       (field ^:public ^:final ^Frame caller)
       (field ^:public ^:final ^Thr thr)
       (field ^:public ^:final ^boolean entry)
+      ;; the Java line of the frame's latest call (Node.at), 0 when unknown: a stack trace's line
+      (field ^:public ^int line)
+      (field ^:static ^:final ^Object/1 NOREFS (new Object/1 0))
+      (field ^:static ^:final ^long/1 NOPRIMS (new long/1 0))
 
       (constructor ^:public [this ^int nr ^int np ^Meth meth ^Frame caller ^Thr thr ^int depth
                              ^boolean entry]
-        (set! (.-r this) (new Object/1 nr))
-        (set! (.-p this) (new long/1 np))
+        ;; java-speed-1124: a method without slots of a kind shares one empty array of it
+        (set! (.-r this) (if (== nr 0) Frame/NOREFS (new Object/1 nr)))
+        (set! (.-p this) (if (== np 0) Frame/NOPRIMS (new long/1 np)))
         (set! (.-meth this) meth)
         (set! (.-caller this) caller)
         (set! (.-thr this) thr)
@@ -6828,6 +6916,15 @@
     (defclass ^:public ^:abstract ^:static Node
       ;; the type (Rt/typeOf)
       (field ^:public ^char t)
+      ;; a call's Java line (a class read with its Java lines, repr/java read --line-numbers;
+      ;; arbace.classes.interp sets it by Rt/setLine), else 0
+      (field ^:public ^int line)
+
+      ;; the call's line as frame f's current line (Frame.line), when it has one: before the
+      ;; receiver's null check and again after the arguments, right before the call, as javac
+      ;; marks a method invocation's line after its arguments (Gen.visitApply)
+      (method ^:public at ^void [this ^Frame f]
+        (when (not (== line 0)) (set! (.-line f) line)))
 
       ;; the value as an object. A node overrides the method of its kind: evalJ for long
       ;; slots, evalD for double slots, eval for the others (or for nodes whose value comes
@@ -6861,6 +6958,24 @@
           (\F \D) (do (.evalD this f) true)
           (\N \X) (do (.exec this f) false)
           (Rt/truth (.eval this f)))))
+
+    ;; java-speed-1124: a node array as a chain of cells, walked without an array's element
+    ;; loads (on Go an element of a Node[] is asserted to Node's interface at each load, a
+    ;; generic assertion that searches the itab table: an eighth of the interpreter's time)
+    (defclass ^:public ^:static Cell
+      (field ^:public ^:final ^Node n)
+      (field ^:public ^:final ^Cell next)
+      (constructor ^:public [this ^Node n ^Cell next]
+        (set! (.-n this) n)
+        (set! (.-next this) next))
+      ;; the cells of ns in order, nil for none
+      (method ^:public ^:static of ^Cell [^Node/1 ns]
+        (let [^:mutable ^Cell c nil]
+          (loop [^int i (unchecked-dec-int (alength ns))]
+            (when (>= i 0)
+              (set! c (Cell. (aget ns i) c))
+              (recur (unchecked-dec-int i))))
+          c)))
 
     ;; a constant
     (defclass ^:public ^:static Const
@@ -7277,15 +7392,17 @@
       :extends Node
       (field ^:public ^:final ^Node/1 ss)
       (field ^:public ^:final ^Node ret)
+      (field ^:final ^Cell cs)
       (constructor ^:public [this ^char t ^Node/1 ss ^Node ret]
         (set! (.-t this) t)
         (set! (.-ss this) ss)
-        (set! (.-ret this) ret))
+        (set! (.-ret this) ret)
+        (set! (.-cs this) (Cell/of ss)))
       (method ^:public stmts ^boolean [this ^Frame f]
-        (loop [^int i 0]
-          (if (< i (alength ss))
-              (do (.exec (aget ss i) f)
-                  (if (== (.-jump f) 0) (recur (unchecked-inc-int i)) false))
+        (loop [^Cell c cs]
+          (if (some? c)
+              (do (.exec (.-n c) f)
+                  (if (== (.-jump f) 0) (recur (.-next c)) false))
               true)))
       (method ^:public eval [this ^Frame f] (if (.stmts this f) (.eval ret f) nil))
       (method ^:public evalJ ^long [this ^Frame f] (if (.stmts this f) (.evalJ ret f) 0))
@@ -7304,6 +7421,7 @@
       ;; a loop's codes, 0 for let
       (field ^:public ^:final ^int brk)
       (field ^:public ^:final ^int rec)
+      (field ^:final ^Cell cs)
       (constructor ^:public [this ^char t ^int/1 slots ^char/1 kinds ^Node/1 inits ^Node body
                              ^int brk ^int rec]
         (set! (.-t this) t)
@@ -7312,17 +7430,18 @@
         (set! (.-inits this) inits)
         (set! (.-body this) body)
         (set! (.-brk this) brk)
-        (set! (.-rec this) rec))
+        (set! (.-rec this) rec)
+        (set! (.-cs this) (Cell/of inits)))
       (method ^:public init ^boolean [this ^Frame f]
-        (loop [^int i 0]
-          (if (< i (alength inits))
-              (let [n (aget inits i) s (aget slots i)]
+        (loop [^int i 0 ^Cell c cs]
+          (if (some? c)
+              (let [n (.-n c) s (aget slots i)]
                 (switch (aget kinds i)
                   \J (let [v (.evalJ n f)] (aset (.-p f) s v))
                   \D (let [v (.evalD n f)] (.setD f s v))
                   \X (.exec n f)
                   (let [v (.eval n f)] (aset (.-r f) s v)))
-                (if (== (.-jump f) 0) (recur (unchecked-inc-int i)) false))
+                (if (== (.-jump f) 0) (recur (unchecked-inc-int i) (.-next c)) false))
               true)))
       ;; after the body: whether the loop goes on (a recur of this loop)
       (method ^:public again ^boolean [this ^Frame f]
@@ -7433,13 +7552,55 @@
       (field ^:public ^:final ^int/1 slots)
       (field ^:public ^:final ^char/1 kinds)
       (field ^:public ^:final ^Node/1 args)
+      (field ^:final ^Cell cs)
       (constructor ^:public [this ^int code ^int/1 slots ^char/1 kinds ^Node/1 args]
         (set! (.-t this) \X)
         (set! (.-code this) code)
         (set! (.-slots this) slots)
         (set! (.-kinds this) kinds)
-        (set! (.-args this) args))
+        (set! (.-args this) args)
+        (set! (.-cs this) (Cell/of args)))
+      ;; one value: stored as evaluated (no other value of the recur reads the slot)
+      (method ^:public eval1 [this ^Frame f]
+        (let [a (.-n cs) s (aget slots 0)]
+          (switch (aget kinds 0)
+            \J (let [v (.evalJ a f)] (when (== (.-jump f) 0) (aset (.-p f) s v)))
+            \D (let [v (.evalD a f)] (when (== (.-jump f) 0) (aset (.-p f) s (Double/doubleToRawLongBits v))))
+            (let [v (.eval a f)] (when (== (.-jump f) 0) (aset (.-r f) s v))))
+          (when (== (.-jump f) 0) (set! (.-jump f) code))
+          nil))
+      ;; two values: both evaluated before either is stored, in locals
+      (method ^:public eval2 [this ^Frame f]
+        (let [a0 (.-n cs) a1 (.-n (.-next cs))
+              k0 (aget kinds 0) k1 (aget kinds 1)
+              ^:mutable ^long l0 0 ^:mutable ^long l1 0
+              ^:mutable r0 nil ^:mutable r1 nil]
+          (switch k0
+            \J (set! l0 (.evalJ a0 f))
+            \D (set! l0 (Double/doubleToRawLongBits (.evalD a0 f)))
+            (set! r0 (.eval a0 f)))
+          (when (not (== (.-jump f) 0)) (return nil))
+          (switch k1
+            \J (set! l1 (.evalJ a1 f))
+            \D (set! l1 (Double/doubleToRawLongBits (.evalD a1 f)))
+            (set! r1 (.eval a1 f)))
+          (when (not (== (.-jump f) 0)) (return nil))
+          (switch k0
+            (\J \D) (aset (.-p f) (aget slots 0) l0)
+            (aset (.-r f) (aget slots 0) r0))
+          (switch k1
+            (\J \D) (aset (.-p f) (aget slots 1) l1)
+            (aset (.-r f) (aget slots 1) r1))
+          (set! (.-jump f) code)
+          nil))
+      ;; java-speed-1124: one or two values (most loops) without the two arrays a turn
       (method ^:public eval [this ^Frame f]
+        (switch (alength args)
+          0 (do (set! (.-jump f) code) nil)
+          1 (.eval1 this f)
+          2 (.eval2 this f)
+          (.evalN this f)))
+      (method ^:public evalN [this ^Frame f]
         (let [n (alength args)
               ls (new long/1 n)
               rs (new Object/1 n)]
@@ -7744,6 +7905,16 @@
 
       ;; whether the class's initialization completed (an assert's enabling: AssertOn)
       (method ^:public initDone ^boolean [this] (== state 2))
+
+      ;; finalization (the user's JMS1 (a), 2026-11-24): whether its objects are finalizable, a finalize() among its
+      ;; virtual methods (its own or an interpreted superclass's), decided once (0 not yet, 1 yes, 2 no)
+      (field ^int fin)
+
+      (method ^:public finalizable ^boolean [this]
+        (when (== fin 0)
+          (set! fin (if (some? (.get vtable "finalize()V")) 1 2)))
+        (== fin 1))
+
       ;; class initialization (JLS 12.4.2, simplified): the superclass first, then the static
       ;; initializer, once; a failed one fails every later use
       (method ^:public init ^void [this]
@@ -8027,19 +8198,22 @@
       (field ^:public ^:final ^Meth m)
       (field ^:public ^:final ^Node target)
       (field ^:public ^:final ^Node/1 args)
+      (field ^:final ^Cell argc)
       (constructor ^:public [this ^char t ^Meth m ^Node target ^Node/1 args]
         (set! (.-t this) t)
         (set! (.-m this) m)
         (set! (.-target this) target)
-        (set! (.-args this) args))
+        (set! (.-args this) args)
+        (set! (.-argc this) (Cell/of args)))
       (method ^:public call ^Frame [this ^Frame f]
         (let [o (if (some? target) (.eval target f) nil)]
           (when (not (== (.-jump f) 0)) (return nil))
+          (.at this f)
           (when (and (some? target) (nil? o)) (throw (NullPointerException.)))
           (when (.-isStatic m) (.init (.-k m)))
           (let [g (.frame m f)]
             (when (>= (.-self m) 0) (aset (.-r g) (.-self m) o))
-            (if (Rt/args m args f g) g nil))))
+            (if (Rt/argsC m argc f g) (do (.at this f) g) nil))))
       (method ^:public eval [this ^Frame f]
         (let [g (.call this f)] (if (some? g) (.run m g) nil)))
       (method ^:public evalJ ^long [this ^Frame f]
@@ -8074,6 +8248,7 @@
       (field ^:public ^:final ^char/1 ptypes)
       ;; the last receiver class and its method (one object: threads read it whole)
       (field ^VCache cache)
+      (field ^:final ^Cell argc)
       (constructor ^:public [this ^char t ^String key ^java.lang.reflect.Method rm ^Node target
                              ^Node/1 args ^char/1 ptypes]
         (set! (.-t this) t)
@@ -8081,7 +8256,8 @@
         (set! (.-rm this) rm)
         (set! (.-target this) target)
         (set! (.-args this) args)
-        (set! (.-ptypes this) ptypes))
+        (set! (.-ptypes this) ptypes)
+        (set! (.-argc this) (Cell/of args)))
       ;; the interpreted method for receiver o, or nil
       (method ^:public lookup ^Meth [this o]
         (let [k (.klassOf Rt/HOST o)
@@ -8102,8 +8278,9 @@
           g))
       ;; a reflective call (the receiver and the method's arguments evaluated)
       (method ^:public reflect [this o ^Frame f]
-        (let [vs (Rt/boxed args ptypes f)]
+        (let [vs (Rt/boxedC argc (alength args) ptypes f)]
           (when (nil? vs) (return nil))
+          (.at this f)
           (when (nil? rm)
             ;; a protected method of the nearest superclass of the world of an interpreted
             ;; object (its DynSub_C's implementation), which reflection does not list (JC4b)
@@ -8134,42 +8311,43 @@
           (when (and (identical? (.getDeclaringClass rm) Object) (.equals (.getName rm) "clone"))
             (let [c (Rt/cloneOf o)]
               (when (some? c) (return c))))
-          (try
-            (.invoke rm o vs)
-            (catch Throwable e (throw (Rt/unwrap e))))))
+          (.invoke Rt/HOST rm o vs)))
       (method ^:public eval [this ^Frame f]
         (let [o (.eval target f)]
           (when (not (== (.-jump f) 0)) (return nil))
+          (.at this f)
           (when (nil? o) (throw (NullPointerException.)))
           (let [m (.lookup this o)]
             (if (some? m)
                 (let [g (.enter this m o f)]
-                  (if (Rt/args m args f g) (.run m g) nil))
+                  (if (Rt/argsC m argc f g) (do (.at this f) (.run m g)) nil))
                 (.reflect this o f)))))
       (method ^:public evalJ ^long [this ^Frame f]
         (let [o (.eval target f)]
           (when (not (== (.-jump f) 0)) (return 0))
+          (.at this f)
           (when (nil? o) (throw (NullPointerException.)))
           (let [m (.lookup this o)]
             (if (and (some? m) (== (Rt/kind (.-ret m)) \J))
                 (let [g (.enter this m o f)]
-                  (if (Rt/args m args f g) (.runJ m g) 0))
+                  (if (Rt/argsC m argc f g) (do (.at this f) (.runJ m g)) 0))
                 (let [v (if (some? m)
                             (let [g (.enter this m o f)]
-                              (if (Rt/args m args f g) (.run m g) nil))
+                              (if (Rt/argsC m argc f g) (do (.at this f) (.run m g)) nil))
                             (.reflect this o f))]
                   (if (== (.-jump f) 0) (Rt/toJ v) 0))))))
       (method ^:public evalD ^double [this ^Frame f]
         (let [o (.eval target f)]
           (when (not (== (.-jump f) 0)) (return 0.0))
+          (.at this f)
           (when (nil? o) (throw (NullPointerException.)))
           (let [m (.lookup this o)]
             (if (and (some? m) (== (Rt/kind (.-ret m)) \D))
                 (let [g (.enter this m o f)]
-                  (if (Rt/args m args f g) (.runD m g) 0.0))
+                  (if (Rt/argsC m argc f g) (do (.at this f) (.runD m g)) 0.0))
                 (let [v (if (some? m)
                             (let [g (.enter this m o f)]
-                              (if (Rt/args m args f g) (.run m g) nil))
+                              (if (Rt/argsC m argc f g) (do (.at this f) (.run m g)) nil))
                             (.reflect this o f))]
                   (if (== (.-jump f) 0) (Rt/toD v) 0.0)))))))
 
@@ -8181,23 +8359,25 @@
       (field ^:public ^:final ^Node target)
       (field ^:public ^:final ^Node/1 args)
       (field ^:public ^:final ^char/1 ptypes)
+      (field ^:final ^Cell argc)
       (constructor ^:public [this ^char t ^java.lang.reflect.Method rm ^Node target
                              ^Node/1 args ^char/1 ptypes]
         (set! (.-t this) t)
         (set! (.-rm this) rm)
         (set! (.-target this) target)
         (set! (.-args this) args)
-        (set! (.-ptypes this) ptypes))
+        (set! (.-ptypes this) ptypes)
+        (set! (.-argc this) (Cell/of args)))
       (method ^:public eval [this ^Frame f]
         (let [o (if (some? target) (.eval target f) nil)]
           (when (not (== (.-jump f) 0)) (return nil))
+          (.at this f)
           (when (and (some? target) (nil? o)) (throw (NullPointerException.)))
-          (let [vs (Rt/boxed args ptypes f)]
+          (let [vs (Rt/boxedC argc (alength args) ptypes f)]
             (if (nil? vs)
                 nil
-                (try
-                  (.invoke rm o vs)
-                  (catch Throwable e (throw (Rt/unwrap e)))))))))
+                (do (.at this f)
+                    (.invoke Rt/HOST rm o vs)))))))
 
     ;; a super call of Object's toString, hashCode, equals or clone
     (defclass ^:public ^:static ObjectCall
@@ -8304,6 +8484,7 @@
           (let [g (.frame ctor f)]
             (aset (.-r g) (.-self ctor) o)
             (when (not (Rt/args ctor args f g)) (return nil))
+            (.at this f)
             (.runV ctor g)
             o))))
 
@@ -8335,6 +8516,7 @@
           (let [g (.frame ctor f)]
             (aset (.-r g) (.-self ctor) o)
             (when (Rt/args ctor args f g)
+              (.at this f)
               (.runV ctor g))
             nil))))
 
@@ -8354,6 +8536,7 @@
           (if (nil? vs)
               nil
               (try
+                (.at this f)
                 (.newInstance c vs)
                 (catch Throwable e (throw (Rt/unwrap e))))))))
 
@@ -8939,6 +9122,7 @@
         (set! (.-k this) k)
         (set! (.-caps this) caps))
       (method ^:public eval [this ^Frame f]
+        (.at this f)
         (let [o (.alloc Rt/HOST k)]
           (loop [^int i 0]
             (when (< i (alength caps))
@@ -8968,6 +9152,7 @@
       (method ^:public eval [this ^Frame f]
         (let [vs (Rt/boxed args ptypes f)]
           (when (some? vs)
+            (.at this f)
             (.superCtor Rt/HOST (aget (.-r f) self) c desc vs))
           nil)))
 
@@ -8990,7 +9175,7 @@
         (let [o (.eval target f)]
           (when (not (== (.-jump f) 0)) (return nil))
           (let [vs (Rt/boxed args ptypes f)]
-            (if (nil? vs) nil (.superCall Rt/HOST o c key vs))))))
+            (if (nil? vs) nil (do (.at this f) (.superCall Rt/HOST o c key vs)))))))
 
     ;; a protected instance field of a superclass of the world, on an object of an interpreted
     ;; subclass (Host.superField: its DynSub_C's field), read, or written when v (JC4b)
@@ -9117,10 +9302,13 @@
                             (int (cond (.-iface k) 1 (.-fnClass k) 2 (.-record k) 3 :else 0))
                             k)))
 
+      ;; an object of a class with a finalize() registered for finalization (jrt's finalize.ae; JMS1 (a))
       (method ^:public alloc [this ^CF$Klass k]
         (if (.-fnClass k)
             (CF$FnObj. k (.clone (.-defaults k)))
-            (CFGo/alloc (.-cls k) (.clone (.-defaults k)))))
+            (let [o (CFGo/alloc (.-cls k) (.clone (.-defaults k)))]
+              (when (.finalizable k) (CFGo/registerFinalizer o))
+              o)))
 
       (method ^:public klassOf ^CF$Klass [this o]
         (if (instance? CF$FnObj o)
@@ -9138,6 +9326,12 @@
             (Dyn/setField o i v)))
 
       (method ^:public checkCast [this ^Class c o] (Evaluator/checkCast c o))
+
+      ;; java-speed-1124: the invoker called directly (Evaluator.invokeDirect, compiled code's
+      ;; call), no InvocationTargetException made and unwrapped, no recover frame. The receiver
+      ;; is an instance of m's class (the analyzer's static type), as Method.invoke checks
+      (method ^:public invoke [this ^java.lang.reflect.Method m o ^Object/1 args]
+        (Evaluator/invokeDirect m o args))
 
       (method ^:public adaptFn [this ^Class c o] (Reflector/boxArg c o))
 
@@ -9223,6 +9417,8 @@
                                                            ^int flags ^int kind klass])
     ;; a new object of class c (kind 0): its fields the values
     (method ^:public ^:static ^:native alloc [^Class c ^Object/1 values])
+    ;; o finalizable: its finalize() run once Go finds it unreachable (jrt.RegisterFinalizer; JMS1 (a))
+    (method ^:public ^:static ^:native registerFinalizer ^void [o])
     ;; the CF$Klass of o's class when o is an object of an interpreted class, else nil
     (method ^:public ^:static ^:native klassOf [o])
     ;; a method: static (a static entry of the member table) or virtual (Dyn's slot of its name

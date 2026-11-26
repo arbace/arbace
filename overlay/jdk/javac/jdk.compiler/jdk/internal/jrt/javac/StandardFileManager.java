@@ -9,6 +9,7 @@
  */
 package jdk.internal.jrt.javac;
 
+import com.sun.tools.javac.api.ClientCodeWrapper;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -18,6 +19,7 @@ import javax.tools.StandardJavaFileManager;
 import javax.tools.StandardLocation;
 
 /** FileManager as a StandardJavaFileManager: no source path, the current directory as class path, no output. */
+@ClientCodeWrapper.Trusted
 public final class StandardFileManager extends FileManager implements StandardJavaFileManager {
 
     public StandardFileManager() {
@@ -29,10 +31,10 @@ public final class StandardFileManager extends FileManager implements StandardJa
         String n = f.getName();
         for (JavaFileObject.Kind k : List.of(JavaFileObject.Kind.SOURCE, JavaFileObject.Kind.CLASS, JavaFileObject.Kind.HTML)) {
             if (n.endsWith(k.extension)) {
-                return new Obj(f, k, null);
+                return new Obj(this, f, k, null);
             }
         }
-        return new Obj(f, JavaFileObject.Kind.OTHER, null);
+        return new Obj(this, f, JavaFileObject.Kind.OTHER, null);
     }
 
     @Override
@@ -91,8 +93,9 @@ public final class StandardFileManager extends FileManager implements StandardJa
      * The file manager's options javac's API hands it (F6, doc/classes/JAVA-DEFERRED-TRIAGE.md, "As
      * built: F6"; javac's Arguments.doProcessArgs, an option of no javac group given to the file
      * manager): those javac on Arbace's command line (Main) serves, -d, the class path's and the
-     * source path's spellings, -encoding UTF-8 and --system none; the others are not handled (javac
-     * then reports an invalid flag, as for an option no file manager knows).
+     * source path's spellings, -encoding (since queue 549 any, BaseFileManager's decoding: FileManager's)
+     * and --system none; the others are not handled (javac then reports an invalid flag, as for an option
+     * no file manager knows).
      */
     @Override
     public int isSupportedOption(String option) {
@@ -107,6 +110,9 @@ public final class StandardFileManager extends FileManager implements StandardJa
         if (isSupportedOption(current) != 1) {
             return false;
         }
+        if (current.equals("-encoding")) {
+            return super.handleOption(current, remaining);
+        }
         if (!remaining.hasNext()) {
             throw new IllegalArgumentException("error: " + current + " requires an argument");
         }
@@ -115,11 +121,6 @@ public final class StandardFileManager extends FileManager implements StandardJa
             case "-d" -> setLocation(StandardLocation.CLASS_OUTPUT, List.of(new File(v)));
             case "-cp", "-classpath", "--class-path" -> setLocation(StandardLocation.CLASS_PATH, Main.path(v));
             case "-sourcepath", "--source-path" -> setLocation(StandardLocation.SOURCE_PATH, Main.path(v));
-            case "-encoding" -> {
-                if (!v.equalsIgnoreCase("utf-8") && !v.equalsIgnoreCase("utf8")) {
-                    throw new IllegalArgumentException("error: unsupported on Arbace: -encoding " + v);
-                }
-            }
             default -> {
                 if (!v.equals("none")) {
                     throw new IllegalArgumentException("error: unsupported on Arbace: --system " + v);
