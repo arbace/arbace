@@ -9448,3 +9448,28 @@ one gate executable (KEY20 `d238b3a23ca9117d9cc8`) and recorded 67 Lib/test modu
 43,203 / 68 / 611 to 43,375 / 6 / 482. Four modules are held with their record lines untouched: test_pickle (the C world's
 a_crash), test_sys, test.test_concurrent_futures.test_as_completed and test_deadlock. test_process_pool and 12 multiprocessing
 modules are not recorded: B's run hung on Pickler_dealloc's heap corruption. The details are in doc/JOURNAL.md, "Train 6".
+## As built: py-pickle-heap-1126, test_pickle's heap corruption (2026-11-26, the main host)
+
+test_pickle's C classes aborted in the C world's allocator ("a_crash at 0x0 in the C library ctypestest"), at a test that
+moved from run to run. The cause was pyctypes' handle of a memoryview: a proxy's 24-byte head, while
+PyMemoryView_GET_BUFFER is a macro and the C unpickler's READONLY_BUFFER (load_readonly_buffer) writes view.readonly in
+place at offset 88, into the reserved-size mark of the block two slots on, which mallocng's free checks. Every protocol-5
+out-of-band read-only buffer wrote it, and the loaded view stayed writable.
+
+- **A memoryview's mirror** (capi_mirror's kind 'v'): PyMemoryViewObject's 152 bytes (Include/cpython/memoryobject.h,
+  LP64), hash -1, its view's len, itemsize, ndim and readonly, its buf when the memory is the world's (0 for Go's). A
+  readonly C wrote is taken into Go's view by syncToC (C's write first) and syncFromC, to read-only only.
+- **597's list merge without its leak**: a list slot syncToC takes from C (PyList_SET_ITEM in place) is the slot's
+  synchronized value, C's own reference. 597 held another of the mirror's on it, which nothing gave back: the C unpickler's
+  in-place lists (LIST, Pdata_poplist) followed by a find_class kept all their items alive.
+- **Measured** (pyi's AOT on mac/train-7 with this branch, train 6's executable as host, `bin/pyi check --aot --lib-test
+  --fresh --only`, under the small slot): test_pickle whole three times, no crash (mac/train-7 without the memoryview fix: 1,
+  1 and 3 crashes): 940, 940 and 939 ok, 73 skipped and 1 timeout each (CPicklerTests' test_framed_write_sizes_with_delayed_writer
+  past 300 s, :pickle-c-gaps'), and in the third InMemoryPickleTests.test_unpickle_module_race failed once (two threads'
+  loads of a class whose module import waits on a barrier, one result where two are due; it passed in the five other whole
+  runs, M's and M'''s, and its pickle has no list or memoryview: a thread race of its own, not this change's); test_copy 81 and test_copyreg 6 pass, and 597's test_late_tail_mix_pi_comments too. :pickle-c-gaps'
+  test_evil_pickler_mutating_collection and test_optional_frames pass in all three: the class keeps the delayed writer alone
+  once test_pickle's record runs. Two probes by pyi's AOT, the out-of-band read-only view and the in-place list's items:
+  read-only and none alive, as CPython.
+- Left: train 6's B run of test_process_pool and 12 multiprocessing modules hung on Pickler_dealloc (the journal's "Train
+  6"), not measured here; their pickles take no out-of-band buffers, so it may be another cause.
