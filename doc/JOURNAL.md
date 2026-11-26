@@ -25536,3 +25536,11 @@ not measured again.
   `bin/rsi judge-test` passes. No whole check run (the host's night, by key).
 - DECISION 596-1 for the user: a run on another std recorded (a) in a record of its own that crops-score reads for C6, recommended,
   or (b) in the one record, each row naming its std. Until then `--std own --record` is refused.
+
+## 2026-11-26 — Rust C6: DECISION 596-1 (a) applied, the own-std records (queue 596, VM)
+
+The user chose 596-1 (a): a run on the own copy of std's IR gets records of its own. `bin/rsi check --std own --record` now records
+(RSI_RECORD_STD=own: `check[-aot]-own-std-linux-ARCH.edn`, its times, `{eval,aot}-inputs-own-std-linux-ARCH.edn`) in place of
+refusing; crops-score reads C6 from those inputs (`:case-inputs`' `:from-other`, test/crops/independence.edn), the main inputs' C6
+when they are absent. Alternative (b), one record with each row naming its std, not taken (the user's choice). Tested on scratch
+runs only (doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-26, the user): DECISION 596-1 (a)"); no whole check.

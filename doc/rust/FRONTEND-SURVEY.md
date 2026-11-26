@@ -6214,3 +6214,14 @@ from that record's inputs, the other inputs from the main record's), the main re
 record, each row naming its std (`:std :own`), the inputs' C6 from it. *Recommended: (a)*: the two runs are different
 configurations of the same cases, a regression of one never hides behind the other, and the pinned record (the gate's, the
 matrix's) is untouched by an L4 night.
+
+**Decided (2026-11-26, the user): DECISION 596-1 (a).** `bin/rsi check --std own --record` writes records of their own
+(RSI_RECORD_STD=own, arbace.rust.check's `std-part`): `test/rust/check[-aot]-own-std-linux-ARCH.edn`, its times
+`check[-aot]-own-std-times-linux-ARCH.edn` and its inputs `{eval,aot}-inputs-own-std-linux-ARCH.edn`, judged against the own-std
+record (absent: no regression to find), the pinned std's records untouched. crops-score's `:case-inputs` takes
+`:from-other {:file F :inputs [:c6]}` (test/crops/independence.edn's Rust eval and AOT facts): a case's C6 from the own-std
+inputs where they hold it, else the main record's, as before when the file is absent. Checked: a make-fake run recorded into a
+scratch directory under RSI_RECORD_STD=own (the three own-std files written); crops-score with a scratch own-std inputs file
+(one case's C6 own over a row with the other six own: 0 -> 1 of 6, the stage 0.583; without the file 0 of 6), and
+`--judge --strict` unchanged without it; `bin/rsi judge-test` passes. No records-check or markers-check entry is needed
+(neither lists Rust's records; crops-score's gate inputs already cover `test/rust/*.edn`).
