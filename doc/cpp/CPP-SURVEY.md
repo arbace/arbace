@@ -12271,3 +12271,55 @@ recovery (template/pr90138.C, inherit/error4.C, diagnostic/enum2.C, parse/pr6872
 the template-id's place (lookup/using7.C, cpp2a/spaceship-err2.C), the alias templates' equivalence of partial specializations
 (cpp0x/variadic-alias6.C). One held for the user: template/friend58.C (a template friend naming a member of `freeList<T, baz>`,
 which [temp.friend]/5 allows and GCC 15 rejects).
+
+## As built: 599, the read cell's deferred rows: GCC's parser recovery in templates and class heads (2026-11-26; queue 599, VM; branch `599-cpp-parser-recovery` from origin/next `3725c6dc8`)
+
+The base's 104 deferred rows read again for the ones whose own errors stop at a syntax error (58 not `accepted`, 32 with a syntax
+error of the own parser), each against its dg lines and g++ 15.2's messages probed by hand (`g++ -fsyntax-only`, the host's
+Alpine g++ 15.2.0); the rules from the standard and GCC's messages as the tests and g++ state them, no GCC or clang code. All in
+arbace/repr/cpp/parse.ae:
+
+- An elaborated-type-specifier `class-key identifier` of a template-head followed by a token no declaration goes on with
+  (`template<int> struct A !`): GCC's "expected unqualified-id before '!' token", A declared a class that is no template (the test's
+  "forward declaration of 'struct A'"); a class template defined later of a class of the scope that is no template, "'A' is not a
+  template" ([temp.pre], [basic.scope.scope]/4), now keeps the class as the name's entity (GCC's "invalid use of incomplete type"
+  after it): template/crash59.C, template/crash34.C.
+- A base-clause followed by an identifier, `struct B : A A {};`: GCC's "expected '{' before 'A'", the identifier then the
+  declaration's init-declarator, a variable of the scope that hides the class A ("'A' does not name a type" at a later `A foo(...)`),
+  B left incomplete: inherit/error4.C.
+- An enumerator-definition followed by neither `,` nor `}` ([dcl.enum]/1's grammar): GCC's "expected '}' before '.' token" with its
+  "to match this '{'", the enumerator-list ended there and the declaration's recovery going on from that token with the enumeration's
+  brace closed (the parser's decline carries `:resume`, skip-statement!/skip-declaration! start there): its skip stops at the
+  enclosing `}`, which closes the function; a `;` right after a stray namespace-scope `}` goes with it: diagnostic/enum2.C.
+- A `>=` whose `>` closes a template argument list ([temp.names]/4 splits no such token): after GCC's "'>=' should be '> ='" the `=`
+  goes with the `>` (gt-close!), GCC taking the token as the list's end: `foo(A<T>=A<T>())`'s parameter is `A<T> A<T>()`, so the call
+  of foo fails (parse/template28.C); parse/template30.C's "expected ';' before numeric constant" as before.
+- [temp.mem]/1: a member-declaration of a class with two template-heads, not a friend declaration of a class template's member:
+  GCC's "too many template-parameter-lists" at the declaration after the second list (where the completed declaration's rule places
+  it, cpp0x/pr71251.C): template/error-recovery1.C, whose class never completes (the file ends in it).
+- A class-head-name `X<args>` whose X is no class template: when X is a class of the scope that is no template, GCC's "'X' is not a
+  template" and the head fails, its body skipped; when the arguments name a template no lookup finds (`X<Y<> >`), GCC's "'Y' was not
+  declared" and "expected unqualified-id before '>'", X declared a class that is no template, incomplete, its body skipped (a later
+  `struct A {};` no redefinition): parse/crash28.C.
+- A member-declaration of a variable with no decl-specifiers (`&__loc` before the class's `}`): GCC's permerror "ISO C++ forbids
+  declaration of '__loc' with no type" at the name, the member declined there: parse/pr68722.C.
+
+Each rule checked on the rows and, as controls, the recorded own passes it can reach (every pass with an `expected` or template
+dg-error and a class or template, every pass with an enum and a dg-error, the `>=` and "not a template" files; 501 files): 0 lost,
+memfriend7.C's new extra (a friend member's two heads) fixed. The one regression, next's 3,187 recorded own passes and the 58 rows
+with crash34.C (3,246 files, two parts in turn, 2 threads, the big lock's small slot), at `2458343f9`: one lost, cpp0x/pr71251.C (the
+two-heads rule's place), fixed at `7027d84a1` and rerun over what the fix reaches (the 22 files with two adjacent template-heads, the
+rows among them): every recorded own pass passes. Recorded from the three parts in turn (`--judge --record`, the fix's last): own
+passes 3,187 -> 3,195, 0 recorded passes lost; 8 rows to own pass: diagnostic/enum2.C, inherit/error4.C, parse/crash28.C,
+parse/pr68722.C, parse/template28.C, template/crash59.C, template/error-recovery1.C (7 deferred rows) and template/crash34.C (a
+clang-only row). `bin/reap --record`: C++ read 6,178 / 0 / 104 (249 n/a) -> 6,185 / 0 / 97; `bin/crops-score --record`: C++ read
+independence 0.919 -> 0.920, completeness 0.9959 -> 0.9961.
+
+Left of the group, looked at: template/pr90138.C (GCC's "no default argument for 'T'" after erroneous parameters: which parameter
+counts as defaulted is no rule the standard or GCC's messages state), parse/pr81247-a.C (a namespace-definition without its `{`: the
+friend's "redeclared as different kind of entity" is placed at A's `{`, the instantiation's), parse/pr113788.C (the for-range
+header's recovery after `this`), cpp2a/concepts-pr67178.C (a requirement parameter's placeholder and an erroneous concept's uses),
+cpp1y/pr65340.C (GCC keeps `operator()(, )` as taking two ints), parse/defarg18.C and defarg19.C ([dcl.fct.default]/4's friend
+default arguments, a single rule), the -Wtemplate-body rows (template/void14.C, cpp0x/vt-34052.C: definition-time checks) and
+diagnostic/pr96045-3.C (a macro's spelling location); parse/error32.C and error33.C out, as the brief says. A missing comma between
+enumerators (`enum { p q }`) is still accepted (no row needs it).
