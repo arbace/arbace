@@ -24744,3 +24744,16 @@ construction, fromisoformat, ordinals and C pickling of a subclass probed alone 
 database), 6 a child's stderr holding the swap's goi warning, test_pydoc's test_not_ascii (driver and child on goi past the cap)
 and test_enum's test_missing_exceptions_reset (an object kept past gc.collect() on goi). The four test_pydoc rows pass;
 test_collections 112/112. test_pickle is left to the host's compiled record run (on goi its C tests hold 20 GB: test_bytes).
+
+## 2026-11-26 — Python: queue 587 on train 6 (queue 587, VM)
+
+Correction to queue 587's entry above: its ExtNewWrapper (pyctypes' two type-creation paths) and its slot_tp_new for _Pyi_tp_new
+are superseded by train 6's py-enum-1125 (addNewWrapper on typeReady and typeFromSpec, type_ready_set_new) and py-regress-1126
+(slot_tp_new for every class statement defining __new__, the C unpickler's list sync, the C stack limit): origin/train-6
+025065fd1 merged into 587-py-core-objects-final, those files taken from train 6, finalize.ae train 6's with 587's slice traversal
+applied again (printed, edited, read back), the divergences files train 6's with 587's script run over them again (train 6 had
+dropped :with-exit-traceback already). Check, on goi with the pytls swap (587-1 (a)): test_enum whole and the four pydoc rows
+(`.tmp/q587/run/t6.log`): test_pydoc 4/4; test_enum 1,069 of 1,082 pass, its three class rows among them, 7 killed at the runner's
+8 GiB cap (other tests than the previous run's: the goi driver's memory over the module, not a test's) and
+test_missing_exceptions_reset (an object goi keeps past gc.collect()); test_getopt's translations the swap's warning.
+bin/pyi divergences: test_audit's test_cantrace in no class, train 6's own (rc 1 on train 6 alone); bin/markers-check ok.
