@@ -90,6 +90,12 @@
   since JC4, doc/classes/JAVA-CONFORMANCE-SURVEY.md, JCS8 (b)); j2g binds it false."
   true)
 
+(def ^:dynamic *runtime-varhandles*
+  "Whether VarHandles are made and accessed at run time through jdk.internal.jrt.VarHandles (the interpreter's classes:
+  the user's JT2-6 (a), java-tail3-1126), when the world has it: findVarHandle and its kin, the access modes and the
+  fences written as its static calls. j2g binds it false: compiled code keeps J2G-SPEC §8.5's constant handles."
+  true)
+
 (defn- class-exists? [n]
   (boolean (or (decl n) (env/known? n)
                (and *source-lookup* *unit* (enter-from-source! n)))))
@@ -2532,6 +2538,65 @@
                  (invokers-method "lookup" "(Ljava/lang/Class;)Ljava/lang/invoke/MethodHandles$Lookup;")
                  nil [(class-lit actx (t/internal->desc (:class actx)))] false)))
 
+;; run-time VarHandles (jdk.internal.jrt.VarHandles' header; *runtime-varhandles*): in the interpreter's code, the makers
+;; of a VarHandle, its access modes (signature polymorphic, by the call site's descriptor as Invokers' calls), its other
+;; methods and VarHandle's static fences are VarHandles' static calls; a made handle's node keeps VarHandle's type, so that
+;; it is stored and called as one (its value a VarHandles$Handle: no cast to VarHandle, a class outside the world)
+
+(def ^:private var-handles "jdk/internal/jrt/VarHandles")
+
+(def ^:private vh-desc "Ljava/lang/invoke/VarHandle;")
+
+(defn- runtime-vh? [] (and *runtime-varhandles* (some? (env/info var-handles))))
+
+(defn- vh-static-call
+  "A call of VarHandles' static method mname whose arguments are arg-nodes, converted to its parameters: the first of that
+  name and arity (VarHandles declares one), or nil when it has none."
+  [actx mname arg-nodes]
+  (when-let [m (first (filter #(= (count arg-nodes) (count (first (t/parse-method-desc (:desc %)))))
+                              (env/member-methods var-handles mname)))]
+    (let [[ps _] (t/parse-method-desc (:desc m))]
+      (invoke-node actx nil (t/internal->desc var-handles) m nil (mapv #(convert-node %1 %2) arg-nodes ps) false))))
+
+(defn- vh-maker
+  "Lookup.findVarHandle, findStaticVarHandle and unreflectVarHandle as VarHandles' (the lookup first), of VarHandle's type."
+  [actx cn mname target arg-nodes]
+  (when (and (= cn "java/lang/invoke/MethodHandles$Lookup")
+             (#{"findVarHandle" "findStaticVarHandle" "unreflectVarHandle"} mname) (runtime-vh?))
+    (some-> (vh-static-call actx mname (into [target] arg-nodes)) (assoc :type vh-desc))))
+
+(defn- vh-access
+  "(R) vh.mode(a...) as VarHandles.accessR(vh, \"mode\", R.class, new Class[] {A...}, new Object[] {a...}), R the return
+  type's kind (L: Object, cast to R), as invokers-call writes MethodHandle's."
+  [actx mname target ps ret args]
+  (let [k (if (or (t/prim? ret) (= ret "V")) ret "L")
+        m (or (first (filter #(= (str "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/Class;[Ljava/lang/Class;[Ljava/lang/Object;)"
+                                      (if (= k "L") t/object-desc ret))
+                                 (:desc %))
+                             (env/member-methods var-handles (str "access" k))))
+              (fail (str "No method access" k " in jdk.internal.jrt.VarHandles")))
+        classes {:op :array-init :type "[Ljava/lang/Class;" :elems (mapv #(class-lit actx %) ps)}
+        objects {:op :array-init :type "[Ljava/lang/Object;" :elems (mapv #(convert-node % t/object-desc) args)}
+        node (invoke-node actx nil (t/internal->desc var-handles) m nil
+                          [(convert-node target t/object-desc) (const-node t/string-desc mname) (class-lit actx ret) classes objects]
+                          false)]
+    (if (and (= k "L") (not= ret t/object-desc))
+      {:op :cast :class ret :expr node :type ret}
+      node)))
+
+(defn- vh-method
+  "A VarHandle method that is not an access mode (varType, coordinateTypes, toString, ...) as VarHandles.call(vh, name,
+  args), its result cast to the method's return type (unboxed for a primitive)."
+  [actx m target arg-nodes]
+  (let [[_ ret] (t/parse-method-desc (:desc m))
+        node (vh-static-call actx "call" [target (const-node t/string-desc (:name m))
+                                          {:op :array-init :type "[Ljava/lang/Object;"
+                                           :elems (mapv #(convert-node % t/object-desc) arg-nodes)}])]
+    (cond
+      (= ret "V") node
+      (= ret t/object-desc) node
+      :else (convert-node node ret))))
+
 (defn analyze-method-call
   "(.name target args) where target is a node of static type `tt`."
   [actx target mname args & {:keys [special param-tags owner-override ret-tag type-args] :as opts}]
@@ -2557,11 +2622,22 @@
     (if (and (t/array? tt) (= mname "clone") (empty? args))
       {:op :invoke :kind :virtual :owner tt :itf false :name "clone" :desc "()Ljava/lang/Object;"
        :target target :args [] :type tt :array-clone true}
+      (or
+      (vh-maker actx cn mname target arg-nodes)
       (let [cands (instance-candidates (:class actx) cn mname)
             _ (when (empty? cands)
                 (fail (str "No accessible method " mname " in " (str/replace cn "/" "."))))
             poly (when (and (= 1 (count cands)) (signature-polymorphic? (first cands))) (first cands))]
-        (if poly
+        (cond
+          (and poly (= "java/lang/invoke/VarHandle" (:owner poly)) (runtime-vh?))
+          (let [ps (if param-tags (mapv #(actx-desc actx %) param-tags)
+                       (mapv #(value-type (:type %)) arg-nodes))
+                ret (if ret-tag (actx-desc actx ret-tag) t/object-desc)]
+            (vh-access actx mname target ps ret (mapv #(convert-node %1 %2) arg-nodes ps)))
+          (and (not poly) (= cn "java/lang/invoke/VarHandle") (runtime-vh?))
+          (let [[m va] (select-method actx cands arg-nodes (str "method " mname) param-tags)]
+            (vh-method actx m target arg-nodes))
+          poly
           ;; the call site's descriptor: the param-tags (or the arguments' types), the tag of the
           ;; call form (or Object) as return type
           (let [ps (if param-tags (mapv #(actx-desc actx %) param-tags)
@@ -2572,10 +2648,11 @@
             (or (invokers-call actx (:owner poly) mname target ps ret args)
                 {:op :invoke :kind :virtual :owner (:owner poly) :itf false :name mname :desc desc
                  :target target :args args :type ret}))
+          :else
           (let [[m va] (if (and (:clojure actx) (not special) (nil? param-tags))
                          (clj-select cands arg-nodes :instance mname cn)
                          (select-method actx cands arg-nodes (str "method " mname) param-tags))]
-            (invoke-node actx (when special :special) (or owner-override tt) m target arg-nodes va)))))))
+            (invoke-node actx (when special :special) (or owner-override tt) m target arg-nodes va))))))))
 
 (declare clj-convert type-arg-anns)
 
@@ -2583,6 +2660,13 @@
   (let [arg-nodes (mapv #(analyze actx %) args)]
     (or
     (invokers-lookup actx cn mname args)
+    ;; run-time VarHandles: VarHandle's fences, MethodHandles.arrayElementVarHandle (*runtime-varhandles*)
+    (when (and (or (and (= cn "java/lang/invoke/VarHandle")
+                        (#{"fullFence" "acquireFence" "releaseFence" "loadLoadFence" "storeStoreFence"} mname))
+                   (and (= cn "java/lang/invoke/MethodHandles") (= mname "arrayElementVarHandle")))
+               (runtime-vh?))
+      (some-> (vh-static-call actx mname arg-nodes)
+              (cond-> (= mname "arrayElementVarHandle") (assoc :type vh-desc))))
     (or-reflect
       actx
       #(let [cands (static-candidates (:class actx) cn mname)
@@ -4710,6 +4794,9 @@
              *ns*))
         class-forms (for [f forms
                           f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                          ;; a defclasses' classes, as declares-top? reads them (a file's top-level classes, JCS30 (b):
+                          ;; SuppressStackTraces.java's, java-tail3-1126)
+                          f (if (and (seq? f) (symbol? (first f)) (= "defclasses" (name (first f)))) (rest f) [f])
                           :when (and (seq? f) (symbol? (first f)) (= "defclass" (name (first f))))]
                       (rest f))
         from (count @(:order *unit*))
@@ -4752,6 +4839,22 @@
             (swap! env/source-imports assoc-in [(ns-name ns) simple] n)
             true))))))
 
+(defn- package-files
+  "The source files of the package of top-level class top (an internal name p/C) that its namespace file p.ae loads,
+  (load \"p/F\") forms, as the converter writes them, in its order; none for the default package or without one."
+  [top]
+  (let [i (.lastIndexOf ^String top "/")]
+    (when (pos? i)
+      (let [pkg (subs top 0 i)]
+        (when-let [in (arbace.lang.RT/resourceAsStream (arbace.lang.RT/baseLoader) (str pkg ".ae"))]
+          (for [f (try (read-source-forms in) (catch Exception _ nil))
+                f (if (and (seq? f) (= 'do (first f))) (rest f) [f])
+                :when (and (seq? f) (symbol? (first f)) (= "load" (name (first f))) (string? (second f))
+                           (str/starts-with? (second f) (str pkg "/")))
+                :let [nm (str (second f) ".ae")]
+                :when (not (#{(str top ".ae") (str top "_class.ae") (str *file*)} nm))]
+            nm))))))
+
 (defn enter-from-source!
   "Looks up the top-level class of internal name n as a source p/C.ae on the class path, else in
   the file being loaded (*file*: a later form of it, as javac compiles a file's classes together;
@@ -4770,8 +4873,13 @@
                                         (str/starts-with? nm "/") (try (java.io.FileInputStream. ^String nm) (catch Exception _ nil))
                                         :else (arbace.lang.RT/resourceAsStream (arbace.lang.RT/baseLoader) nm))]
                       (enter-file! top in)))
-                  [(str top "_class.ae") (str top ".ae")
-                   (let [f (str *file*)] (when (str/ends-with? f ".ae") f))])
+                  (concat [(str top "_class.ae") (str top ".ae")
+                           (let [f (str *file*)] (when (str/ends-with? f ".ae") f))]
+                          ;; a package's class of another file, not named by it (a non-public top-level class, javac's
+                          ;; "auxiliary class": SuppressStackTraces.java's Impl1, which Impl1_Skel.java names and the REPL
+                          ;; loads first: t05254; the user's JT2-4 (a), java-tail2-1126): the package's other files, as
+                          ;; its namespace file loads them
+                          (lazy-seq (package-files top))))
         (when (decl n) n)))))
 
 ;; ---------------------------------------------------------------------------------------------

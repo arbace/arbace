@@ -25394,3 +25394,23 @@ verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
 - `bin/java-check verdicts --verify`: as recorded (own verdicts interp and compiled 3,309 of 3,325). bin/reap --record:
   Java eval 3,205 / 0 / 54 (66 n/a) -> 3,205 / 0 / 51 (69 n/a), AOT 3,225 / 1 / 50 (49 n/a) -> 3,225 / 1 / 49 (50 n/a);
   crops-score --record (Java completeness 0.9919 -> 0.9922) and --judge --strict 0 problems; records-check 0 problems.
+- Built, the user's 4, 6 and 7 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-tail3-1126"):
+  - 4 (JT2-4 (a)): the analyzer's source lookup reads a package's other files (its namespace file's loads) for a class no
+    file is named after; enter-file! reads a `defclasses` form's classes (it had entered none). t05254 passes interpreted on
+    train 4's executable with the checkout's analyzer on the path. Alternative considered: an index of every package's
+    classes made by the converter (a new file per package; the lookup reads the files the REPL loads anyway).
+  - 6 (JT2-6 (a)): jdk.internal.jrt.VarHandles (overlay/jdk/java.base) and the analyzer's `*runtime-varhandles*` (bound
+    false by j2g's main: compiled code keeps J2G-SPEC §8.5): the makers, the access modes by the call site's descriptor
+    (Invokers' scheme), the other methods and the fences as VarHandles' static calls, one lock for every access.
+    Alternatives considered: Unsafe's field slots (compiled classes' Go structs only: the interpreter's objects keep
+    their fields elsewhere), a VarHandle class in the world (j2g's constant handles assume java.lang.invoke's VarHandle
+    outside it). Measured: FxVarHandles' 12 cases interpreted on train 4's executable, VarHandles defined from its forms
+    at the REPL, all equal to the JVM's recorded values.
+  - 7 (JT2-7 (a)): `bin/javac-vendor xml-closure [--check]` (test/jrt/xml_closure.ae over jrt.classfile): closure.txt's
+    java.xml and java.xml.crypto lines are the static closure over the JDK build's class files, 1,739 lines (705 new, none
+    gone). A first count by a script over each class file's descriptor strings gave 785 (strings of generic signatures
+    and literals counted too).
+  - A sample of 61 interp rows (60 passing ones at random and t05254) on train 4's executable with the checkout's
+    analyzer: 61 pass.
+- For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
+  705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
