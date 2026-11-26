@@ -25315,3 +25315,32 @@ judge can only lose equals.
   3,157 / 1 / 120 (47 n/a) -> 3,225 / 1 / 50 (49 n/a); print 3,318 / 0 / 7 -> 3,324 / 0 / 1 (print and diagnostics re-run on
   the train's tool by the second agent). bin/reap 0 problems, crops-score --record and --judge --strict 0 problems,
   records-check 0, markers-check 0.
+
+## 2026-11-26 — C++ read: more clang-only dg rows by the own front end (cpp-indep3, branch `cpp-indep3-1126`)
+
+- Goal (the burst's): C++ read independence (0.904 at the base, the dg rows only clang's recorded dumps pass counted 0.5). The rows
+  clang passes and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (test/cpp/divergences-dg.edn), were
+  1,069 at mac/next `0b3174413`; cpp-def3's deferred rows (both failing) are the other lane's. mac/next `5b7180185` merged (no C++
+  change).
+- Every rule from the standard's text, GCC's manual and GCC's messages as the tests state them, no GCC or clang code
+  (doc/cpp/CPP-SURVEY.md, "As built: cpp-indep3"): the parser's declaration rules (hidden friend classes, deduction guides,
+  using-declarators, bases, defaulted templates, default arguments, nested namespaces, asm qualifiers, dynamic exception
+  specifications, conversion functions, partial specializations' variable templates, ...), diag.ae's flexible array members under
+  -pedantic-errors, deprecated uses under -Werror and case labels outside a switch, host.ae's no-feature options' macros, the
+  checker's sizeof and alignof operands, enumerator initializers, read-only parameters, not-captured variables, member errors of
+  class template specializations at the member, and template.ae's partial specializations' deducibility and dependent non-type
+  argument types.
+- 64 rows pass on the own front end at the branch's head (the worktree's .tmp/moved.txt), each rule checked on the files it reaches
+  and a control set of recorded own passes of its construct (17 targeted runs, 1,000-odd files with repeats, 0 lost); one control
+  lost on the way (cpp1z/class-deduction108.C, by the CTAD rule, narrowed to a template declared only) and fixed. Not recorded here:
+  the coordinator's decision of 2026-11-26 runs one regression over next's recorded own passes, cpp-def3's rows and these, in one
+  lane, which records both (`--judge --record`, reap, crops-score). Expected: read independence 0.904 -> about 0.909.
+- Measured for a decision (g++ 15.2 run by hand, the oracle, over the 1,069 rows, the record's -std and options, then with
+  -Wno-template-body): 104 rows whose every missed line is an error g++ tags [-Wtemplate-body] that -Wno-template-body drops, a
+  construct in a template never instantiated: ill-formed, no diagnostic required ([temp.res.general]/6), the class
+  :ifndr-uninstantiated-template's criterion (proposal D, the user 2026-11-23, verified deferred rows only). DECISION cpp-indep3-1:
+  (a) extend the class's :tests by those 104 clang-only rows (recommended: the same verified criterion, the list and its tool kept);
+  (b) build GCC's definition-time checks of non-dependent constructs. Not applied.
+- Tried and dropped: a fixed-point literal in decltype (cpp0x/decltype-38655.C: no node survives), a qualified bit-field's alignof
+  outside its class (diagnostic/alignof3.C), `F foo;` of a cv-qualified function typedef (other/cv_func4.C), the deduced class type
+  rule for every class template (narrowed).

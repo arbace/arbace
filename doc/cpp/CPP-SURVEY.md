@@ -12118,3 +12118,59 @@ templates about 13 (template/non-dependent26.C, cpp0x/overload2.C, parse/templat
 diagnostic/pr79300.C, init/pr43064-2.C). Two held for the user: parse/explicit1.C (C++17's CWG727 allows the explicit
 specialization in class scope GCC 15 rejects) and template/typedef39.C (its expected error on a line of a template never
 instantiated, the test's own comment saying it belongs elsewhere).
+
+## As built: cpp-indep3, clang-only dg rows by the own front end, third pass (2026-11-26; branch `cpp-indep3-1126` from mac/next `0b3174413`, `5b7180185` merged)
+
+The rows clang's recorded dumps pass and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (cpp-def2's
+D1 and D2 among them), were 1,069 at the base (769 accepted with an expected error, 198 missed lines, 60 both, 38 extra, 2 timeouts, 2
+crashes); cpp-def3's deferred rows are another set. Taken by the shortest files first, grouped by the rule they need; every rule from
+the standard's text, GCC's manual and GCC's messages as the tests state them, no GCC or clang code. 64 rows pass on the own front end at
+the branch's head (.tmp/moved.txt in the worktree; checked on their reach and with a control set of recorded own passes of each rule's
+construct, all kept), recorded by the regression run the two lanes share (cpp-def3's and this one's, one run).
+
+- arbace/repr/cpp/parse.ae: a using-declarator's template-id ([namespace.udecl]); a namespace's or an enumeration's name as a base
+  ([class.derived.general]/2; the enumeration's base dropped, which had crashed Sema, parse/enum7.C); a member template defaulted
+  ([dcl.fct.def.default]/1, a template is no special member); a variable template's argument count (parse-template-args' rule for
+  class templates, its :tps); a qualified enum-head-name finding a class; a base-specifier's pack expansion naming no pack
+  ([temp.variadic]/5); a deduction guide of a template template parameter, and a template's `A(T);` without its trailing return type
+  ([temp.deduct.guide]); `this` in a default argument ([dcl.fct.default]/8) and in a class's alias-declaration ([expr.prim.this]/3);
+  a template-declaration of a typedef ([temp.pre]/2); default arguments in an explicit specialization; `::n` undeclared; a local
+  class's default member initializer naming a local of the enclosing function; a class template's destructor named by a template-id
+  of other arguments ([class.dtor]/1); the classes a friend declaration alone declares (hidden from lookup, [namespace.memdef]/3):
+  a friend template's name without arguments, a class redeclared as a friend template, a using-declaration of one, a definition
+  after a friend template ("redeclared as non-template", the template kept), a use of one; a deduced class type without an
+  initializer of a template declared only; `template` after a declarative nested-name-specifier; a capture's identifier; asm
+  qualifiers other than volatile, inline and goto (the GCC manual's "Extended Asm"); an alias-declaration's template-parameter-lists;
+  a conversion function's trailing return type ([class.conv.fct]/1); C++17's dynamic exception specifications; a member class template
+  defined without its template-head ([temp.mem]/1); a delegating mem-initializer beside another ([class.base.init]/6); static and
+  mutable anonymous union members ([class.union.anon]); a function parameter pack's default argument ([dcl.fct.default]/3); a nested
+  namespace definition's trailing `::` and its attributes; a function returning a function or array typedef ([dcl.fct]/11); a template
+  template parameter's default of a class or a template-id.
+- arbace/repr/cpp/diag.ae: GCC's pedantic flexible array members (the manual's "Arrays of Length Zero", -pedantic-errors); a union
+  initializer_list and decltype(sizeof 0) as size_t in gnu-interface's rule; deprecated functions' uses under -Werror
+  (deprecated-uses; [dcl.attr.deprecated], the manual's deprecated attribute); a member function overloaded only by its return type
+  when the return type's template arguments hold parentheses; case and default labels outside a switch of their own function
+  ([stmt.label]/2).
+- arbace/repr/cpp/host.ae: -fno-rtti, -fno-exceptions, -fno-threadsafe-statics and -fno-sized-deallocation take their feature-test
+  macros away where no recorded delta holds the option list (as cpp/target's model and the recorded deltas give them).
+- arbace/cpp/sema.ae: sizeof and alignof of an expression of function type (GNU's pedwarn under -pedantic-errors) or of a bit-field;
+  an enumerator's initializer that is a function's name, a floating value or another scoped enumeration's enumerator ([dcl.enum]/2,
+  /5); an array bound a division by zero makes no constant ([dcl.array]/1); a variable a lambda does not capture reported where it
+  is named, the analysis going on as if captured by reference (the lambda's return type GCC's); one namespace's declarations of a
+  variable are no ambiguity; a class template specialization's member made ill-formed by the substitution reported at the member's
+  declaration (GCC's place; the use its "required from here" note); a nested-name-specifier's non-class type spelled as GCC does; a
+  parameter's top-level const kept by the checker too ("assignment of read-only parameter").
+- arbace/cpp/template.ae: a variable template's partial specialization whose arguments name a parameter nowhere
+  ([temp.spec.partial.match]/3); a parameter written only in a nested-name-specifier deduces nothing ([temp.deduct.type]/5.1); a
+  partial specialization's non-type argument whose type depends on a parameter of the specialization
+  ([temp.spec.partial.general]/9.1); __underlying_type of a type that is no enumeration.
+
+Tried and dropped: a fixed-point literal in an unevaluated operand (no node of it survives the parse), the alignof of a qualified
+bit-field outside its class (Sema's implicit this), `F foo;` of a cv-qualified function typedef (the parser's VarDecl), the CTAD
+rule for every class template (a defined one's guides may deduce: cpp1z/class-deduction108.C).
+
+Left, measured on the base's 1,069: definition-time checks of templates never instantiated, 104 rows whose every missed line is an
+error g++ 15.2 tags [-Wtemplate-body] and drops under -Wno-template-body (ill-formed, no diagnostic required, [temp.res.general]/6:
+DECISION cpp-indep3-1 below; the list .tmp/keep/cpp-indep3-1126/ifndr-candidates.txt, the tool tbody.sh beside it, g++ run by
+hand); instantiation's deeper checks (bodies of specializations, aggregate initialization with bases, conversion functions'
+reference bindings, noexcept in function types); GCC's spelling suggestions ("did you mean", 6); the long tail of one-row rules.
