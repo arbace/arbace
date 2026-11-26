@@ -24672,3 +24672,14 @@ Checks:
     43 to 5. Recorded with `bin/reap --record`, then 0 problems.
   - bin/records-check: 0 problems.
   - test/crops/scores.edn recorded with `bin/crops-score --record`; `bin/crops-score --judge --strict`: 0 problems.
+
+## 2026-11-26: train 6, the ctypestest world regenerated (the main session's call)
+
+Train 6's `bin/pyi-clib verify ctypestest` (on train 5's executable as the tools' host) differed from the committed forms beyond the
+Key (f4b726d1 -> 002c5389, which 577's lexer and preprocessor changes and bin/pyi-clib move): in musl's y0 and y1 (src/math/j0.c,
+j1.c; F 5308 and 5310) the constant folded for `return 0/0.0;` is 0xFFF8000000000000 (the x86 default NaN of a division at run time)
+where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No source changed (the builder and musl are as at
+650dcb7b7): the committed world was built with the builder evaluated (stage 0), the verify's with it compiled, and the host's 0.0/0.0
+differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
+reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
+compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
