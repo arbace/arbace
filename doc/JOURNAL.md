@@ -23911,3 +23911,43 @@ textual scope does not reach a crate-root macro_export); leaving the gate gated 
   --record`): cpp1y/pr68180.C, cpp1z/constexpr-asm-5.C, cpp26/static_assert1.C, ext/vector41.C to own pass (ext/vector6.C already
   was). `bin/reap --record`: C++ read 6,108 / 0 / 177 -> 6,111 / 0 / 174; `bin/crops-score --record`: C++ completeness 0.9869 ->
   0.9870, read independence 0.892. `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26: train 5's records: 84 modules recorded, 11 held for their regressions; mac/next merged; del.py's AOT row
+
+Built 2026-11-25 (`.tmp/train-5.sh`, one big-lock ticket): go/arbace/py read back from the Go-level merge (6775a693c), j2g's edge
+afresh (b6be9b74b), one gate build, KEY20 b85611b74343b609b2a4, smoke ok. The records (`.tmp/records-5.sh`, its own ticket at 16
+GiB): run 1 (20:54) took stage 0 as ARBACE_HOST_EXE by the script's mistake, so goi interpreted the runtime and no module imported
+(discarded, `.tmp/repr-python/pyi/check/run-bad-stage0`); run 2 (22:30-23:47, 1 h 17 min, peak 3.1 GB) on the train's own
+executable (PYI_RUNTIME_REQUIRE=compiled): the 95 modules of `.tmp/train-5-modules.txt` (the branches' modules and those whose
+non-passes sat in the streams' classes, less py-mp's, the Mac's 574 four and py-capi's test_capi and test_importlib, which train 6
+records), 15,861 methods, 13,189 pass, 1,092 regressions against train 5's record (1,087 against next's).
+
+The regressions, held (no row of these modules recorded: `bin/pyi check --judge DIR --record` writes a module's rows from the run
+and drops a method the run does not hold, so a single row cannot be kept; their modules were left out of the judged copy whole,
+their record lines as they were): test_enum (1,078: the module does not import, "ReprEnum subclasses must be mixed with a data
+type": the C _datetime's date has no __new__ in its __dict__, the Mac's report; the fix candidate py.ExtNewWrapper, the Mac's 587),
+test_functools (TestPartial{C,CSubclass,Py,PySubclass}.test_recursive_pickle: stack overflow), test_pickle
+(CPicklingErrorTests.test_evil_pickler_mutating_collection "list index out of range", test_wrong_newobj_ex_class skipped),
+test_descr (PicklingTests.test_reduce_copying: 'C2' object has no attribute 'a'), test_subprocess (test_pass_fds: fd 8 passed;
+two test_one_environment_variable: 1 != 0), test_os (test_execve_env_concurrent_mutation_with_fspath_posix), test_sys
+(test_ioencoding_nonascii skipped: "requires FS encoding to match locale"), test_builtin's test_open_default_encoding and test_io's
+CTextIOWrapperTest.test_default_encoding ('utf-8' != 'UTF-8', the UTF-8 mode rule), test_traceback
+(test_print_traceback_at_exit), test_sqlite3 (test_table_lock_cursor_non_readonly_select "database table is locked", back in
+:finalization-goi: it passes on the VM, 550's, not on amd64). Recorded: the other 84 modules, 0 regressions, 459 now pass, the
+writer's rows put back in the committed file's order (537 rows changed, 11 new; every other row byte for byte).
+
+The py-cli lane's --only directory (only-69e24fca3f8d, and only-7f8233b957e0) is refused by `--judge --record` ("--write-record of
+a selection (--only): refused"): nothing applied, they wait for train 6. The four py-cli classes' names the record now passes
+removed from their :tests (pyi-command-line 21, run-dir-zip-main 19, pyi-main-module 28, interactive-mode 22).
+
+mac/next b94fde1aa (train 3's records) merged first: the eval record next's, train 5's rows applied by the judge; :c-accelerators
+merged three ways against train-3 (568's title and :why, rec-t3's narrowed :match and :decided addition, the rows both sides kept:
+41); test_signaldict_repr back in :capi-refcounts (train 3's record: failure), the two test_large_pool names :host-memory takes
+first out of :multiprocessing-children. `bin/pyi divergences`: 0 shadowed, 0 in no class, no duplicate name.
+
+AOT: synth/datamodel/del.py on the train's executable passes compiled, on its loop and on pyi (`check --aot --only`, which the tool
+does not record): its row applied to check-aot-linux-amd64.edn, divergences-aot.edn's :finalization-goi removed (queue 557).
+
+Python eval (pass/design/deferred, n/a) next 42,743/278/1,004 (4,426) -> 43,203/148/568 (4,543); AOT 150/0/1 -> 151/0/0;
+completeness 0.9911 -> 0.9959. bin/reap --record 56 of 56, 0 problems; bin/crops-score --record, --judge --strict 0 problems;
+bin/records-check 9 pairs, 0 problems; bin/markers-check ok.
