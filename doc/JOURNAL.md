@@ -24683,3 +24683,129 @@ where the committed forms had 0x7FF8000000000000 (gcc's positive quiet NaN). No 
 differs in the NaN's sign bit, which C leaves unspecified. Decided (a): the regenerated forms are committed, so the world is
 reproducible on the gate's executables. Alternative (b), only the new Key with the +NaN text, rejected (the verify would stay red on
 compiled hosts). Follow-up: the folder canonicalises a folded NaN to gcc's +NaN, so every host gives the same forms.
+
+## 2026-11-26: Python eval, py-final lane: what still held the dead after gc.collect(); the finalization rows by cause
+
+The burst's lane for the user's direction of 2026-11-26 (Python to 100% completeness in train 7): the deferred rows of
+`:finalization-collect` (20 non-passes in the eval record), `:ssl-finalization` (8), `:finalization-goi` (1),
+`:entry-frame-teardown` (1) and `:spawn-children-timing` (8), each decided as a real gap (built) or reference counting's moment
+(an n/a candidate for the user, 537-2 (a)'s rule; no row reclassified here). Branch `py-final-1126` from mac/train-6
+(`025065fd1`). Studied: CPython 3.14.10 (the pinned tarball): Lib/test's tests named below, Lib/concurrent/futures/_base.py
+(`_yield_finished_futures`, `Executor.map`'s `result_iterator`), Lib/asyncio/{futures,tasks,sslproto}.py, Lib/ssl.py,
+Modules/_threadmodule.c (`localobject`, `local_traverse`, `create_sentinel_wr`), Objects/listobject.c, Python/gc.c.
+
+- Probes (pyi's AOT on the worktree's runtime, `bin/pyi aot`, train 5's executable `b85611b74343b609b2a4` as the tools' host;
+  each compiled and again on the loop, PYI_AOT_LOOP=1; the Go edited in the AOT module's printed runtime between probes):
+  at the base `list.pop()`'s last item outlived `del` and gc.collect() (as_completed's and Executor.map's yielded futures), a
+  generator with a weak reference never died (test_islice), `_thread._local`'s cycle, a dict subclass that is its own
+  `__dict__`, a deleted subclass in its base's `__subclasses__()`, the pure-Python Task's "destroyed but pending" (debug mode
+  or not), and an SSL context behind a wrapped SSL object or a cancelled TLS handshake all stayed alive.
+- Built (go/arbace/py, printed, edited, gofmt, go vet and go test clean, read back by bin/repr-go read --full, only the edited
+  files' forms taken; py.ae's index edited by hand for its two names, its tamago file kept):
+  (1) list.go's `listCut` (pop, remove, `del l[i]`, `del l[a:b]`, `l[a:b] = []`): a cut to the end keeps the array, its
+  cut slots noted (`listStale`, a ring of 64) and cleared at the next collection's start (`listScrub`, gc.collect() and the
+  moment at del) while the array is still the list's; a cut that empties the list takes an empty slice of no array (not nil:
+  SortList's mark). A first version cleared them at the cut: test_list's and test_userlist's test_index crashed (a Go panic:
+  seqIndexOf's loop over the items it took, EvilCmp's __eq__ emptying the list), measured and replaced;
+  (2) finalize.go's `trackLocked`: a generator a weak reference tracks has its frame's pointer back at it made an address, as
+  `track` does (with its own Go finalizer it reached itself and Go never finalized it);
+  (3) gen.go: the thread's saved exception state (`t.outer`) cleared at its pop (the slot past the length held a handled
+  exception, its traceback's frames and their locals: asyncio's TLS objects);
+  (4) builtins_ssl_conn.go: the engine's goroutine, a root while it waits, reaches its SSL object only through `sslSockRef`
+  (the address, hidden), every callback Go's TLS keeps in the config going through it; the object's death (TrackFinalizer,
+  `sslSocketFinalize`) clears it and stops the engine (a `dead` channel every wait of the goroutine selects on); the last
+  callback's closure no longer kept; a stopped engine's step gives net.ErrClosed;
+  (5) builtins_thread.go: `_thread._local`'s state is the instance's last slot (as `_asyncio`'s futObj), its per-thread dicts
+  a list, a thread holds its locals by weak references and drops its dicts at its end (the global map `localStates` held every
+  local forever);
+  (6) the cycle collector: a local's state traversed (`local_traverse`), a dict's `self` (the dict subclass's instance it is
+  the `__dict__` of), the SSL object's context value and the context's PSK callbacks; a class a `del` lets go of seeds the
+  next collection and its cycle is probed as a tracked node's (`cySuspects`); an untracked suspended generator is a node, its
+  frame's pointer back at it a hidden slot; a suspended generator's escaped frame is a node with its edge back;
+  `PYI_GC_DEBUG=2` names each node's class or code.
+- Alternatives: a `List` flag for arrays shared with a tuple (memory on every list; no live list shares its array: item
+  assignment would already show it); Go's `weak` package for the SSL and local references (not used in the runtime, and goi's
+  table would need it); seeding every heap class at each collection (a probe of every class at every gc.collect(): the cost
+  measured by 222 and 241 forbids it); stopping the SSL engine at close() only (an SSL object dropped unclosed, the tests'
+  case, would still leak).
+- Measured: the rows' tests one by one compiled and on the loop (unittest over the named methods, `bin/pyi aot`): every row of
+  the list below served passes both ways. Then `bin/pyi check --aot --lib-test --fresh --only` (under the big lock as a small
+  job, HEAVY_MEM_GIB=8; the worktree's runtime compiled by pyi's AOT, the children by the compiled launcher) over 26 modules
+  whole (the rows' modules and those of the code changed: test_list, test_userlist, test_gc, test_weakref, test_finalization,
+  test_generators, test_coroutines, test_ssl, test_threading, test_contextlib, test_sys_settrace, test_ctypes, test_sqlite3):
+  5,148 methods, 4,727 pass, 420 classed, 1 failing, the three negative controls failing as they must. Of the classes' non-passes
+  run, 19 of 27 pass: `:finalization-collect` 14 of 17 (as_completed's thread, process-spawn and interpreter pools,
+  test_thread_pool's test_free_reference, test_islice, test_cycle_through_dict, test_remove_subclass, test_module's
+  test_clear_dict_in_ref_cycle, test_inspect's cache test, test_threading_local's C test_cycle_collection, the pure Task and
+  Future's four), `:ssl-finalization` 4 of 8 (sslproto's test_create_connection_memory_leak, test_handshake_timeout,
+  test_start_tls_client_reg_proto_1, test_ssl's test_shutdown_timeout_handler_leak), `:finalization-goi` 1 of 1 (test_sqlite3's
+  test_table_lock_cursor_non_readonly_select). Against the eval record: 48 methods it does not pass pass (the pattern-classed
+  "Task was destroyed" and "never retrieved" rows of the C Task variants, test_threading_local's clear_race, forkserver's
+  as_completed among them), 2 it passes do not: test_threading's test_can_interrupt_tight_loops (passes alone: the run's load
+  against its worker's 100,000,000 iterations) and test_xml_etree's IterparseTest.test_resource_warnings_exhausted (a 300 s
+  timeout: the identity chain below, as long at the base). The first list.go (clearing at the cut) failed test_list's and
+  test_userlist's test_index (a Go panic) in an aot run of test_list, test_userlist, test_sort, test_threading_local, test_weakref,
+  test_finalization and test_gc; the version committed passes them (test_sort's test_key_with_mutating_del fails as recorded).
+- n/a candidates (DECISION for the user, 537-2 (a)'s rule; nothing reclassified): (1) `:entry-frame-teardown`'s
+  test_frame test_entry_frames_are_invisible_during_teardown: the weak reference's callback (exec) expected as f returns, when
+  its local `ref` dies, with no collection between (observed: the callback's TypeError is reported at the next test's
+  gc.collect()); (2) `:ssl-finalization`'s test_ssl TestSSL.test_create_connection_memory_leak and
+  test_handshake_timeout_handler_leak: `ctx = weakref.ref(ctx)` then `assertIsNone(ctx())` with no gc.collect() ("SSLProtocol
+  should be DECREF to 0"); (3) its test_sslproto SelectorStartTLSTests.test_create_connection_ssl_failed_certificate_no_cycles
+  and test_start_tls_failed_certificate_no_cycles: under support.disable_gc() the transport must be freed by reference counts
+  alone (gh-159049: "no cycles"); recommended (a) n/a for all five, the class's kind. (4) `:spawn-children-timing`'s 8 (spawn's
+  WithProcessesTestBarrier): not reference counting but the barrier's 30 s against a spawned child's start (queue 418: a pyi start
+  plus test._test_multiprocessing's import, 30-40 s on the eval's children); options (a) n/a as host timing, (b) deferred to pyi's
+  start (PY8); recommended (b) until the measure below shows the compiled launcher's children within the barrier.
+- Left: the C world's (py-accel's, not touched): test_xml_etree_c's test_cyclic_gc (the C `_elementtree`'s elements) and
+  test_ctypes' test_pointer_types_factory (`_ctypes.PyCStructType` classes held by the C world); the identity chain: after
+  test_xml_etree's test_deeply_nested_deepcopy (deepcopy's memo takes id() of 500,000 nested elements, each identity a record
+  with a Go finalizer) Go frees the chain a link a collection, so every gc.collect() runs its 256 rounds (about 62 s; probe
+  p13: 63 s on this branch, as at the base) and the seeds pass cyMaxNodes: test_xml_etree's pure test_cyclic_gc fails within its
+  module (it passes alone); a fix is an identity record without a finalizer (218's design), not built here. Waiting for the
+  big lock (launched detached, `.tmp/w/after1.sh`): test.test_multiprocessing_fork.test_misc whole (`:finalization-collect`'s
+  three resource-tracker rows) and spawn's eight barrier rows.
+- Nothing recorded (the train records from its build). Train 7's whole-module records for these rows: the 26 modules above,
+  test.test_multiprocessing_fork.test_misc and test.test_multiprocessing_spawn.test_processes. Ready for the train:
+  `py-final-1126`.
+
+## 2026-11-26: Python eval, py-final lane (2): the user's 537-2 (a) for five rows; id() without a Go finalizer; the pending runs
+
+The user's answers of 2026-11-26 (through the coordinator) to py-final-1126's report:
+
+- (1) n/a under 537-2 (a): test_frame's TestIncompleteFrameAreInvisible.test_entry_frames_are_invisible_during_teardown (from
+  `:entry-frame-teardown`, now with no test), test_ssl's TestSSL.test_create_connection_memory_leak and
+  test_handshake_timeout_handler_leak and test_sslproto's SelectorStartTLSTests.test_create_connection_ssl_failed_certificate_no_cycles
+  and test_start_tls_failed_certificate_no_cycles (from `:ssl-finalization`, which keeps its four rows that now pass): moved to
+  `:finalization` (n/a), each source class's `:decided` and `:finalization`'s naming the decision and the reason. bin/pyi
+  divergences against train 6's tree's: the five move, nothing else changes (its one problem, test_audit's test_cantrace in no
+  class, is train 6's tree's and mac/next classes it). bin/reap --record refused on that same row and crops-score's judgment on
+  the matrix train 6's tree carries, so the matrix and scores are the train's to record; records-check 0 problems.
+- (2) built: a list's and a dictionary's id() in a field of their own (`List.ident`, `Dict.ident`, as an instance's), no longer a
+  record of `tracked` with a Go finalizer (queue 418's). Go keeps everything an object with a finalizer reaches for one more
+  collection, so a chain of such records freed a link a collection: after test_xml_etree's test_deeply_nested_deepcopy
+  (copy.deepcopy's memo had taken id() of about 10,000 dicts and lists before its RecursionError, the probe's histogram of
+  `tracked`: 6,665 dicts and 3,333 lists, all identity only) every gc.collect() ran its 256 rounds, 63 s, and the graph's seeds
+  passed cyMaxNodes. After: the same probe (p13) collects in 0.06 s, `tracked` 20 records. Such a list or dictionary was a
+  seed of the cycle collector only by its record: test_gc's test_saveall (`L.append(L); id(L); del L` in gc.garbage under
+  DEBUG_SAVEALL) failed in the first measure below; a del (DELETE_FAST, and DELETE_NAME through finPeek) of one whose number
+  was taken now holds it until the next collection, whose graph takes it as a seed probed as cySuspects are (`cyHeld`, at most
+  256, emptied by each collection, kept through the owed round's graph by cySeedKeepHeld): the probe passes at a module's
+  level and in a function, and test_gc's test_saveall passes in an aot run of test_gc (the children it spawns on the tools' host
+  killed, at 3 GB each, so its script_helper rows were not judged there). Tuples and sets keep the record (a set's
+  struct is assigned whole in place by its operations; a tuple's header would grow a size class). Alternatives: runtime.AddCleanup
+  (no resurrection, no extra collection; goi cannot interpret its generic body, builtins_tracemalloc's note); an address-keyed map
+  without a finalizer (a dead object's record would be read as the type of the next object at its address).
+- (3) `:spawn-children-timing` stays deferred (b). The pending run (`bin/pyi check --aot --lib-test --fresh --only`, the compiled
+  launcher's children): spawn's eight WithProcessesTestBarrier rows all pass, and test.test_multiprocessing_fork.test_misc whole
+  passes `:finalization-collect`'s three TestResourceTracker rows (sigint, sigkill, sigterm), 138 methods, 0 failing, no method
+  the eval record passes failing, the negative controls failing as they must.
+- Measured on train 6's executable (`d238b3a23ca9117d9cc8` as the tools' host, the worktree's runtime compiled by pyi's AOT):
+  `bin/pyi check --aot --lib-test --fresh --only` over test_xml_etree and test_gc whole (before cyHeld): 336 methods, 294 pass, 42
+  classed, 0 failing, the controls failing as they must; test_xml_etree in 30 s (1,144 s and two driver runs before), its
+  BasicElementTest.test_cyclic_gc and test_deeply_nested_deepcopy now passing and IterparseTest.test_resource_warnings_exhausted
+  passing again (no timeout); test_gc's test_class, test_newstyleclass and test_trashcan_threads now passing; against the eval
+  record one method it passes failing, test_saveall (0 != 1), which cyHeld serves. The same two modules again with cyHeld and
+  spawn's test_manager whole (the coordinator's row: WithManagerTestPool.test_release_task_refs, the ten CountedObjects alive
+  after `del objs; gc.collect()`) wait for the big lock (`.tmp/w/run34.sh`, `.tmp/w/run5.sh`).
+- Ready for the train: `py-final-1126` HEAD.

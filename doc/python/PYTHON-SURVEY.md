@@ -9062,3 +9062,84 @@ The classes of 557's table that 557b did not take, by size, each built or given 
 - Records: test_audit, test_tools, test_difflib, test_quopri, test_contextlib_async, test_sys_settrace and test_with written whole
   from the run whose children ran on the compiled launcher (557b-1 (a)): 12 methods now pass, 0 regressions; the eval cell
   40,843 / 1,405 / 1,291 -> 40,855 / 1,405 / 1,279.
+
+## As built: py-final-1126, what still held the dead after gc.collect() (2026-11-26, the main host, the burst's py-final lane)
+
+The deferred finalization classes `:finalization-collect` (20 non-passes in the eval record), `:ssl-finalization` (8),
+`:finalization-goi` (1), `:entry-frame-teardown` (1) and `:spawn-children-timing` (8), read row by row against the tests'
+sources (CPython 3.14.10's Lib/test) and probed with pyi's AOT on the worktree (train 6's tree, train 5's executable as the
+tools' host; each probe compiled and again on the loop, PYI_AOT_LOOP=1). Each holder found was a reference Go's collector saw
+and CPython does not have; nothing of the collector's design changed.
+
+- **A popped list item** (`list.pop()`, `remove`, `del l[i]`, `del l[a:]`, `l[a:] = []`): the shorter list kept its array
+  (`append(l.Items[:i:i])` with nothing after it), whose slots past the length Go still scans, so the last item cut outlived
+  its last reference. Clearing them at the cut crashed list.index's evil comparison (test_list's test_index: a Go loop over
+  the items, a callback that empties the list): `listCut` notes the list and its array (a ring of 64, under the GIL) and the
+  slots past its length are cleared at the next collection's start (`listScrub`: gc.collect() and the moment at del), when the
+  array is still the list's; a cut that empties the list takes an empty slice of no array. Served: as_completed's and
+  Executor.map's yielded futures (`yield fs.pop()`; the thread, process-spawn and interpreter pools'
+  test_free_reference_yielded_future, test_thread_pool's test_free_reference).
+- **A weakly referenced generator** reached itself through its frame (`frame.gen`), so with the Go finalizer its weak
+  reference gave it Go never finalized it: `trackLocked` turns the frame's pointer into the address as `track` does
+  (test_itertools' test_islice; any generator dropped with a weak reference to it).
+- **The thread's saved exception states** (`t.outer`, a generator's resumption): the pop left the exception in the slice's
+  array, a root holding its traceback's frames and their locals (asyncio's TLS tests: the SSL protocol, the SSL object and the
+  context behind a cancelled handshake's exception).
+- **The SSL engine's goroutine**: waiting for input or for its next operation it is a root, and the callbacks Go's TLS keeps in
+  the connection's config (verification, the session cache, PSK, the server's per-hello config) held the SSL object and its
+  context. They hold it now by a hidden address (`sslSockRef`), the object's death (TrackFinalizer, `sslSocketFinalize`)
+  clears it and stops the engine (its `dead` channel; every wait of the goroutine selects on it), and the engine no longer
+  keeps the last callback's closure. The cycle collector traverses the SSL object's context value and the context's PSK
+  callbacks too.
+- **`_thread._local`**: a global map of the locals' states held every local and its dicts. The state is the instance's last
+  slot (as `_asyncio`'s futObj), its per-thread dicts a list the collector traverses (`local_traverse`), and a thread holds its
+  locals by weak references (CPython's sentinel callbacks hold a weak reference to the local), dropping its dicts at its end.
+- **Classes**: a class a `del` lets go of is a seed of the next collection's graph and its cycle (the MRO) is probed as a
+  tracked node's (`cySuspects`; test_descr's test_remove_subclass: py-odict-1125's class nodes were reached only from a
+  tracked object). A dict subclass's instance that is its own `__dict__` (`Dict.self`) is an edge (test_cycle_through_dict).
+- **Generators in the graph**: an untracked suspended generator is a node, its frame's pointer back at it a slot hidden with
+  the rest (a Future's `__await__` held its future visibly from a task's cycle); a suspended generator's frame handed out
+  (asyncio's debug mode takes a coroutine's frame for a future's source traceback) is a node of its own. The pure-Python
+  Task and Future's test_log_destroyed_pending_task and test_shield_cancel_outer_exception_never_retrieved.
+- `PYI_GC_DEBUG=2` names an instance's class, a function's, generator's and frame's qualified name beside each node.
+
+Measured (`bin/pyi check --aot --lib-test --fresh --only`, 26 modules whole: the rows' modules and those of the code changed,
+test_list, test_userlist, test_gc, test_weakref, test_finalization, test_generators, test_coroutines, test_ssl, test_threading,
+test_contextlib, test_sys_settrace, test_ctypes, test_sqlite3; 5,148 methods, the negative controls failing as they must): of
+the 27 non-passes of the four finalization classes run, 19 pass (`:finalization-collect` 14 of 17 run, `:ssl-finalization` 4
+of 8, `:finalization-goi` 1 of 1, `:entry-frame-teardown` 0 of 1); 48 methods the eval record does not pass pass, and 2 it passes do not: test_threading's
+test_can_interrupt_tight_loops (passes alone: the run's load against the 100,000,000 iterations of its worker) and
+test_xml_etree's test_resource_warnings_exhausted (a 300 s timeout: the base's runtime takes as long, below).
+
+Left, by cause:
+- A chain of objects whose identity id() took (finalize.go's identity records, each with its Go finalizer): Go frees such a
+  chain a link a collection, so after test_xml_etree's test_deeply_nested_deepcopy (copy.deepcopy's memo over 500,000 nested
+  elements) every gc.collect() runs its 256 rounds, about 62 s, and the graph's seeds pass cyMaxNodes, so no cycle is probed:
+  test_xml_etree's test_cyclic_gc fails within its module (it passes alone), and the module's later collections take 200 s
+  (measured at the base and on this branch alike: test_treebuilder_end 197.5 s and 193 s after the deep copy). Not built
+  here: an identity without a finalizer that holds the object (a cleanup instead of a finalizer) changes 218's records.
+- The C world's objects (py-accel's): test_xml_etree_c's test_cyclic_gc (the C `_elementtree`'s elements, CPython's own C over
+  pyi's C API: their tp_traverse is not the collector's) and test_ctypes' test_pointer_types_factory (classes of
+  `_ctypes.PyCStructType`, held by the C world's records): a real gap of the C world's collector, not built here.
+- Reference counting's moment (n/a candidates under 537-2 (a), the user's to decide): test_frame's
+  test_entry_frames_are_invisible_during_teardown (the weak reference's callback at f's return, no collection: it runs at the
+  next one); test_ssl's test_create_connection_memory_leak and test_handshake_timeout_handler_leak (the context's weak
+  reference read right after the last reference goes, no gc.collect()); test_sslproto's two *_no_cycles (under
+  support.disable_gc(), the transport freed by reference counts alone).
+- `:spawn-children-timing` and `:finalization-collect`'s three test_multiprocessing_fork rows: their run (test_misc whole, spawn's eight
+  barrier rows) waits for the big lock; the spawn rows are the barrier's 30 s against a spawned child's start (queue 418), a
+  DECISION for the user (the journal's entry).
+
+### py-final-1126, second round: id() without a Go finalizer (2026-11-26, the user's answers)
+
+- A list's and a dictionary's identity is a field of their own (`List.ident`, `Dict.ident`), as an instance's: queue 418's record
+  in `tracked` carried a Go finalizer, and Go frees a chain of objects with finalizers a link a collection, so after
+  test_xml_etree's test_deeply_nested_deepcopy (copy.deepcopy's memo: 6,665 dicts and 3,333 lists taken by id() before its
+  RecursionError) every gc.collect() ran its 256 rounds (63 s) and the cycle graph's seeds passed cyMaxNodes. Now 0.06 s;
+  test_xml_etree whole in 30 s (1,144 s before), its test_cyclic_gc passing in its module. Tuples and sets keep the record.
+- What the record also did, a list or dictionary as a seed of the cycle collector, is kept for the case a test sees: a del of
+  one whose number id() took holds it until the next collection, a seed probed as a deleted class is (`cyHeld`, at most 256;
+  test_gc's test_saveall).
+- The user's 537-2 (a), 2026-11-26: test_frame's teardown callback, test_ssl's two leak checks and test_sslproto's two
+  `*_no_cycles` are `:finalization`'s (n/a); `:spawn-children-timing` stays deferred (its eight rows pass with the compiled
+  launcher's children).
