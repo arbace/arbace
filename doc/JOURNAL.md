@@ -24123,3 +24123,23 @@ the host") list. Scratch: .tmp/worktrees/rust-rec/.tmp/chain.sh, logs in .tmp/lo
 - D2 (a): a new n/a class `:misplaced-expectation` for an expected error GCC's own test marks as misplaced: gxx-dg/template/typedef39.C (its
   comment: the error "should really be on this line", in the other template). (b), keeping it deferred, rejected: matching it would copy the
   misplacement.
+
+## 2026-11-26 — Rust C6 L4.1: the splice's statics (queue 590, VM)
+
+The host's L4.3 run (35 failures, samples 4 of 6, synthetic 33 of 67) traced to 10 of L4.1's 684 own defines reading the
+wrong static (thread::current::id::{get,set} alloc::HOOK for ID; panic_count, args::really_init and argc_argv
+thread::current::CURRENT for GLOBAL_PANIC_COUNT, ARGC, ARGV; stack_overflow's PAGE_SIZE as spawn_unchecked::MIN; current_exe and
+len_before_body a static for an anon constant). The cause was 586's own splice: rename-globals mapped every global of our module
+through RF3's global map, content -> name, so a static (no constant) became the unit's first global of the same content, a
+zero-filled `[8 x i8]` being many statics; and the check normalized every global by content, so it passed them. Now the splice
+keeps a global's name when the unit names it and it is no constant (a static's symbol is rustc's), renames only constants, among
+the unit's constants (`:constant true`); the check's normal form takes constants by content and every other global by name; a
+statics control swaps one own define's static for another of its unit and must differ. The own tree rebuilt once (the compares'
+CRATE-own.edn as 586 left them): 683 own, every define equal, both controls differ, and every copied unit's defines name the
+same globals as rustc's (the host's gl.awk, 0 of 31,684 differ). One define fell back to rustc's, ThreadId::new: our symbol of
+its `static COUNTER` (`..3std6thread2id8ThreadId3new7COUNTER`, the impl as a module) is not rustc's
+(`_RNvNvMNtNtCs.._3std6thread2idNtB4_8ThreadId3new7COUNTER`), which content renaming had hidden too. lib-unit's judge has the same
+blindness (statics by content), left for a decision.
+
+Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
+keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
