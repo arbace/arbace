@@ -9294,3 +9294,21 @@ Proposals, not built (C's crop and its records are at 100%; py-accel's and ci's 
 - The runner's cap: test_large_pool's 200 workers need about 48 GB where its modules' cap is 16384 MB (lib-test-limits.tsv) and the
   night runs two modules at once; to pass, its two rows need a per-test memory cap of about 50 GB and a run alone under the big
   lock: the user's to decide, not applied.
+## As built: py-json-1126, _json as CPython's Modules/_json.c in the C world (2026-11-26, the main host, the burst's py-json lane)
+
+The user's by-design review (2026-11-26) made `:c-accelerators` (38 eval rows) and `:pickle-core` (2) deferred, to be built.
+
+- **_json** is CPython 3.14.10's `Modules/_json.c`, built by ci into the world `ctypestest` through
+  `tools/pyi/clib/ctypestest/accel_json.c`, as 568 built `_pickle`. The world's Key is 236ebb59: the world train 6's verify
+  regenerated plus `_json`. It is a lazy module of pyctypes. The thin Go `_json` (queue 459) is the fallback under
+  `PYI_C_ACCEL=0`.
+- **pyctypes:**
+  - `capi_json.go`: `PyCFunction_GetFunction`, and the `_Py_ID` identifiers and the `"json.decoder"` literal `_json.c` names in
+    `_PyRuntime`.
+  - `capi_unicode.go`: the PyUnicodeWriter's `pos` kept in its C block, which `_json.c`'s `_PyUnicodeWriter_IsEmpty` reads in
+    place.
+- **The classes' rows** pass at the AOT level on the worktree: all 43 names of the two classes, `_pickle`'s 35 among them (with
+  py-regress-1126's fixes) and `:pickle-core`'s two (the pure pickler's frames over the native `_io`). They leave the classes
+  with train 7's record of test_json, test_pickle, test_annotationlib and test_functools.
+- **The probe** (json's C paths, errors and identities) equals CPython's output but for the C stack's size in the decoder's
+  RecursionError message.

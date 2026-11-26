@@ -24916,3 +24916,77 @@ The user decided (2026-11-26): the two test_large_pool rows (spawn's and forkser
 (a)); they wait until a pyi child is much smaller. lib-test-limits.tsv is unchanged. The proposals for that (crt's 64 MiB
 read-only reservation per C world, the ctypestest world's 67 MB text table on `import ctypes`, goi's 9 MB of inflated digest
 bytes) stay open for their owners.
+## 2026-11-26: pyi's _json is CPython's Modules/_json.c in the C world (py-json-1126, the main host)
+
+Branch `py-json-1126` from mac/train-6 (5e0d55109), mac/next (0b3174413) and then mac/train-6 (025065fd1) merged in. The user's
+by-design review of 2026-11-26 made `:c-accelerators` and `:pickle-core` deferred, to be built. Built the way queue 568 built `_pickle`:
+no hand port. CPython 3.14.10's `Modules/_json.c` (the tarball test/python/corpora.edn pins, `:cpython-3.14.10`) is compiled by ci
+into the world `ctypestest` and loaded as `_json`.
+
+- **The world.** `tools/pyi/clib/ctypestest/accel_json.c` includes `Modules/_json.c` unchanged with NDEBUG (an extension module,
+  Py_BUILD_CORE_MODULE, as CPython builds it on Linux). lib.conf names the member and the glue. gcc's `nm -u` of the glue listed the
+  symbols it needs; all were the world's or pyctypes' but `PyCFunction_GetFunction`. Built by `bin/pyi-clib build ctypestest` with
+  train 5's executable (b85611b74343) as the tools' host, because stage 0 lacks `Compiler$Dyn/hideMethod` for the evaluated builder
+  (py-capi's verify failed on it). Key 236ebb59, 12.2 MB of node program, 36 min, 6.4 GB peak, under the big lock as a small job.
+  It is the world train 6's verify regenerated (9e1d7e8ff: the same host and builder, its -NaN in musl's y0 and y1) plus `_json`.
+  No input of the key moved between 5e0d55109 and train-6's head; the merged tree's `bin/pyi-clib key ctypestest` is 236ebb59.
+- **pyctypes** (`capi_json.go`, after CPython 3.14.10's Objects/methodobject.c):
+  - `PyCFunction_GetFunction`, the PyMethodDef's `ml_meth`. `encoder_new` compares it with its own `py_encode_basestring*` (the
+    fast path).
+  - `_json.c`'s `_Py_ID` identifiers and its literal, bound in `_PyRuntime` with rtIdentifiers, at gcc's offsetof over
+    `pycore_global_strings.h`: JSONDecodeError 1392, null 31696, true 39776, false 22184, and
+    `_Py_DECLARE_STR(json_decoder, "json.decoder")` 904. The literals come before the identifiers; isoformat 26848 and
+    __getinitargs__ 5016 agree with the committed offsets.
+  - `capi_unicode.go`: every PyUnicodeWriter write keeps the writer's `pos` (the characters written, `_PyUnicodeWriter`'s field at
+    offset 32) in its C block. `_json.c`'s `_PyUnicodeWriter_IsEmpty` reads it in place: always 0 before, so scanstring would
+    have returned the substring after the last escape alone.
+  - `module.go`: `_json` registered with the accelerators (`extModuleObj`).
+- **py.** `builtins_json.go`: `_json` is a lazy module of pyctypes. queue 459's thin Go `_json` stays only under `PYI_C_ACCEL=0`,
+  as DECISION 568-1 (a) kept the thin `_pickle`. Edited on the printed Go and read back by `bin/pyi runtime read`: only
+  builtins_json, pyctypes.ae, capi, capi_json, capi_unicode and module changed.
+- LICENSE.md: the world's entry names `Modules/_json.c`.
+
+Alternatives considered:
+- a port of `_json.c` in Go, refused: no hand port, as 568;
+- keeping the thin Go `_json` as the default: it is json's pure scanner and encoder behind `_json`'s names, which is what the
+  class names;
+- a native for `_PyUnicodeWriter_IsEmpty`, impossible: it is a static inline of `_json.c`, so the field itself has to be right.
+
+Measured (pyi's AOT on the worktree, train 5's executable as host, `bin/pyi check --aot --lib-test --fresh --only`):
+- **Before the C `_json`** (the world built, the old py forms): the 43 names of `:c-accelerators` and `:pickle-core` all pass,
+  and the three controls fail as they must.
+  - `_pickle`'s 35 rows pass with py-regress-1126's fixes (train 6).
+  - test_annotationlib's test_type_repr passes on queue 521's C `_datetime`, and test_functools' two partial rows on
+    py-design-1122's `_functools`.
+  - `:pickle-core`'s two rows pass: the pure pickler's frames handed out as memoryviews keep their bytes after the BytesIO
+    goes, and the unseekable BytesIO's readline no longer reaches `peek`. Most likely queue 545's native `_io`; a probe on the
+    checkout's runtime under goi agreed.
+- **With the C `_json`:** the probe `.tmp/w/p/j1.py` equals CPython 3.14.10's output line for line but one. The C decoder's
+  RecursionError says "Stack overflow (used 4882 kB) while decoding a JSON array from a unicode string" where CPython's says
+  992 kB: the C stack's measure. Covered: scanstring, the escapes, loads and dumps with indent, sort_keys and hooks, NaN and
+  Infinity, the errors' messages and positions, the keys' TypeError, circular references, make_encoder's fast path, and
+  `_json`'s identities with json's names.
+- The whole-module run (test_json and test_pickle whole, with the classes' other rows; `.tmp/w/measure.log` in the worktree) was
+  running at this entry.
+
+Not recorded: train 7 records test_json, test_pickle, test_annotationlib and test_functools on its own executable. The classes'
+rows go from that record.
+
+## 2026-11-26: py-json-1126's whole-module run: TestCEnum fixed in pyctypes, test_pickle's crash is the base's (the main host)
+
+The whole-module AOT run of test_json and test_pickle plus the classes' rows (`.tmp/w/measure.log`) finished with 1,282 methods:
+1,199 pass, 77 classed, 6 failing.
+
+- **test_json's TestCEnum (5: test_ints, test_floats, test_list, test_dict_keys, test_dict_values).** `_json.c` encodes an int or float
+  subclass by `PyLong_Type.tp_repr(obj)` and `PyFloat_Type.tp_repr(obj)`. pyctypes had given the static types' tp_repr the generic
+  `PyObject_Repr`, which calls the subclass's `__repr__`, so an IntEnum member encoded as `<BigNum.small: 1>`. Fixed in pyctypes'
+  slots, not in `_json.c`: `bindOwnReprs` points PyLong_Type's and PyFloat_Type's tp_repr at the natives `_Pyi_long_repr` and
+  `_Pyi_float_repr`, int's and float's own slot wrappers called on the object (`long_to_decimal_string` and `float_repr`
+  whatever the subclass). The probe `.tmp/w/p/j1.py` gained these cases, against CPython 3.14.10's output.
+- **test_pickle's InMemoryPickleTests.test_recursive_multi: a crash**, "a_crash at 0x0 in the C library ctypestest", musl's malloc
+  meta checks. It is not this branch's. Train 6's own eval run of test_pickle (train 6's world, no `_json`;
+  `.tmp/worktrees/train6/.tmp/repr-python/pyi/check/run/test_pickle.out`) crashes the same way three times, at
+  CPicklerTests.test_optional_frames, DumpPickle_CLoadPickle.test_recursive_dict and InMemoryPickleTests.test_optional_frames,
+  and passes test_recursive_multi there. The same heap corruption by `_pickle.c` on pyi's C API lands on whichever test comes
+  next: `:pickle-c-gaps`' DumpPickle_CLoadPickle.test_optional_frames fault (queue 568), not reproduced by a probe then. This run
+  also crashed at that row. Left to that class's owner and to train 6's record.
