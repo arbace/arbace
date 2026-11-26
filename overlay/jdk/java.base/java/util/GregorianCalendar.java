@@ -42,8 +42,9 @@ public class GregorianCalendar extends Calendar {
         2 * ONE_HOUR
     };
 
-    private static final int[] MONTH_LENGTH = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    private static final int[] LEAP_MONTH_LENGTH = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    // package-private, as jdk26u's (queue 543: JapaneseImperialCalendar's)
+    static final int[] MONTH_LENGTH = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    static final int[] LEAP_MONTH_LENGTH = { 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 
     /** The default cutover, 1582-10-15T00:00:00Z. */
     static final long DEFAULT_GREGORIAN_CUTOVER = -12219292800000L;

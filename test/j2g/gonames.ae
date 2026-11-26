@@ -1,0 +1,89 @@
+(ns j2g.gonames
+  "j2g's Go names of the JDK's classes checked unique per Go package, before any j2g run (java-design-1123: train 2's
+  javac-world edge stopped on com.sun.org.slf4j.internal.Logger beside java.util.logging.Logger and
+  com.sun.java_cup.internal.runtime.Scanner beside java.util.Scanner, both Go names Logger and Scanner in package jrt).
+  The classes of each world: the shipped one's jdk/forms (every defclass, nested ones by their binary names) and jrt's
+  hand-written classes (go/arbace/jrt/manifest.edn); javac's tool world's adds jdk/javac/forms and, not converted yet,
+  the top-level classes of overlay/jdk/javac/closure.txt's files and jdk/javac/sources.txt's. Each class's Go package
+  and name as j2g gives them (arbace.j2g.names/pkg-of, go-class-name); two classes of one world with the same package
+  and name fail the check (status 1), with a negative control (a pair made to collide must be reported).
+
+  Usage: arbace -m j2g.gonames ROOT"
+  (:require [arbace.string :as str]
+            [arbace.java.io :as io]
+            [arbace.j2g.names :as nm])
+  (:import (java.io File PushbackReader)))
+
+(defn- read-all [^File f]
+  (with-open [r (PushbackReader. (io/reader f))]
+    (binding [*read-eval* false]
+      (loop [acc []]
+        (let [x (try (read {:eof ::eof} r) (catch Exception _ ::eof))]
+          (if (= ::eof x) acc (recur (conj acc x))))))))
+
+(defn- class-names
+  "The binary names (internal) of the defclass forms of form x, in package pkg (a/b), outer the enclosing class's."
+  [pkg outer x]
+  (when (seq? x)
+    (if (and (= 'defclass (first x)) (symbol? (second x)))
+      (let [n (if outer (str outer "$" (name (second x))) (str (when (seq pkg) (str pkg "/")) (name (second x))))]
+        (cons n (mapcat #(class-names pkg n %) (nnext x))))
+      (mapcat #(class-names pkg outer %) x))))
+
+(defn- forms-classes [dir]
+  (vec (for [^File f (file-seq (io/file dir))
+             :when (and (.isFile f) (str/ends-with? (.getName f) ".ae"))
+             :let [xs (read-all f)
+                   ns (some #(when (and (seq? %) (= 'in-ns (first %))) (str (second (second %)))) xs)]
+             :when ns
+             n (mapcat #(class-names (str/replace ns "." "/") nil %) xs)]
+         n)))
+
+(defn- path-classes
+  "Top-level classes of source lines: the last field of each line, a path P/C.java (comments out)."
+  [f]
+  (for [l (str/split-lines (slurp f))
+        :when (and (seq l) (not (str/starts-with? l "#")))
+        :let [p (last (str/split (str/trim l) #"\s+"))]
+        :when (str/ends-with? p ".java")
+        :let [c (subs p 0 (- (count p) 5))]
+        :when (not (str/ends-with? c "module-info"))
+        :when (not (str/ends-with? c "package-info"))]
+    c))
+
+(defn- manifest-classes [root]
+  (let [f (io/file root "go/arbace/jrt/manifest.edn")]
+    (when (.isFile f)
+      (for [k (keys (first (read-all f)))] (str/replace (str k) "." "/")))))
+
+(defn collisions
+  "{[pkg go-name] #{internal ...}} of the classes ns whose Go names meet."
+  [ns]
+  (into (sorted-map)
+        (filter #(> (count (val %)) 1)
+                (reduce (fn [m n]
+                          (let [p (nm/pkg-of n)]
+                            (update m [(name p) (nm/go-class-name n)] (fnil conj (sorted-set)) n)))
+                        {} (distinct ns)))))
+
+(defn -main [root]
+  (let [shipped (concat (forms-classes (str root "/jdk/forms")) (manifest-classes root))
+        tool (concat shipped (forms-classes (str root "/jdk/javac/forms"))
+                     (path-classes (str root "/overlay/jdk/javac/closure.txt"))
+                     (path-classes (str root "/jdk/javac/sources.txt")))
+        ;; the negative control: java.util.logging.Logger beside a made class of another package named Logger, which
+        ;; no prefix rule names apart
+        ctl (collisions ["java/util/logging/Logger" "sun/gonames/control/Logger"])
+        bad (atom 0)]
+    (when (empty? ctl)
+      (println "gonames: CONTROL FAILED: two classes named Logger in package jrt were not reported")
+      (System/exit 1))
+    (doseq [[w ns] [["the shipped world" shipped] ["javac's tool world" tool]]]
+      (let [cs (collisions ns)]
+        (println (str "gonames: " w ": " (count (distinct ns)) " classes, " (count cs) " Go names declared twice"))
+        (doseq [[[p g] xs] cs]
+          (swap! bad inc)
+          (println (str "   package " p ": " g ": " (str/join ", " (map #(str/replace % "/" ".") xs)))))))
+    (println "gonames: control ok (java.util.logging.Logger and a made sun.gonames.control.Logger collide)")
+    (shutdown-agents)
+    (System/exit (if (pos? @bad) 1 0))))

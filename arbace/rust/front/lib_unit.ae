@@ -20,7 +20,9 @@
     compare STD-IR CRATE UNIT-FORMS             the native LLVM defines of UNIT-FORMS (build-run's lib-unit: each exported
                                                item at its identity, codegen's) against CRATE's defines in std's IR of the
                                                same symbol, after RF3's normalizer (arbace.rust.back.check), item by item;
-                                               a crossed control (one item's forms against another's IR) must differ"
+                                               a crossed control (one item's forms against another's IR) must differ
+    own-std STD LIST OUT                        queue 596 (C6 L5): each case's closure through the std tree STD (STD/ir, and
+                                               STD/own.tsv for an own copy); OUT: ID, own|rustc, why (own: no define rustc's)"
   (:require [arbace.repr.llvm :as llvm]
             [arbace.rust.back.check :as chk]
             [arbace.rust.back.codegen :as cg]
@@ -294,6 +296,15 @@
                                (str/join "\n" (subvec lines a (inc b)))))
              "\n")))))
 
+(defn- anon-constant?
+  "queue 590, 591 (590-1 (a)): a global the normalizer takes by its content: an anonymous constant (`private unnamed_addr
+  constant`, codegen's interned allocations); a static, mutable or not, and every other global by its name (two statics of
+  one content are two places: thread::current::id::ID is not alloc::HOOK)"
+  [f]
+  (and (= 'llvm/global (first f))
+       (some #(= [:constant true] %) (partition 2 1 f))
+       (some #(= [:linkage :private] %) (partition 2 1 f))))
+
 (defn- ir-forms
   "CRATE's defines in STD-DIR of the symbols WANTED, read by repr/llvm from each unit's fragment (unit-fragment): {symbol
   [define-form unit-global-map]}"
@@ -302,7 +313,7 @@
     (try
       (into {} (for [^File f (sort-by #(.getName ^File %) (.listFiles (File. (str std-dir "/" crate)))) :when (str/ends-with? (.getName f) ".ll")
                      :let [t (unit-fragment (.getPath f) ws)] :when t
-                     :let [_ (spit tmp t) forms (llvm/read-ll (.getPath tmp)) gm (chk/global-map forms)]
+                     :let [_ (spit tmp t) forms (llvm/read-ll (.getPath tmp)) gm (chk/global-map (filter anon-constant? forms))]
                      x forms :when (= 'llvm/define (first x))]
                  [(name (second x)) [x gm]]))
       (finally (.delete tmp)))))
@@ -399,9 +410,6 @@
         b (first (keep-indexed (fn [i ^String l] (when (and a (> (long i) (long a)) (str/starts-with? l "}")) i)) ls))]
     (when (and a b) (subvec (vec ls) a (inc b)))))
 
-(defn- constant-global? [f]
-  (and (= 'llvm/global (first f)) (some #(= [:constant true] %) (partition 2 1 f))))
-
 (defn- rename-globals
   "FORM's constant globals (OGM's, ours) by the unit's names of the same content (INV: content -> name, the unit's constants
   alone); a global the unit names too (a static: its symbol is rustc's) keeps its name (queue 590: a static is no constant, two
@@ -435,7 +443,7 @@
   "Each define's normal form, a constant by its content and every other global (a static, a function) by its name (queue 590:
   the check holds a define's statics to rustc's by identity)"
   [forms]
-  (let [gm (chk/global-map (remove #(and (= 'llvm/global (first %)) (not (constant-global? %))) forms))]
+  (let [gm (chk/global-map (filter anon-constant? forms))]
     (into {} (for [f forms :when (= 'llvm/define (first f))] [(name (second f)) (canon-fp (chk/normalize (entry-unlabeled f) gm))]))))
 
 (defn own-tree
@@ -443,7 +451,7 @@
   (crate, unit, symbol, own|rustc, why), OUT/check.tsv (each copied unit: defines, own, the read back's verdict)"
   [std-dir out own-files]
   (let [owns (for [f own-files] (read-string (slurp f)))
-        by-sym (into {} (for [o owns :let [gm (chk/global-map (:globals o))] [sy f] (:defines o) :when f]
+        by-sym (into {} (for [o owns :let [gm (chk/global-map (filter anon-constant? (:globals o)))] [sy f] (:defines o) :when f]
                           [sy {:form f :gm gm :crate (:crate o)}]))
         tsv (StringBuilder.) chk (StringBuilder.)
         stats (atom {:units 0 :spliced-units 0 :defines 0 :own 0 :fallback 0 :check-bad 0})]
@@ -470,9 +478,9 @@
           (do (llvm/spit-latin1 dst text)
               (doseq [[nm] spans] (.append tsv (str crate "\t" unit "\t" nm "\trustc\t\n"))))
           (let [forms (llvm/read-ll (.getPath f))
-                ugm (chk/global-map (filter constant-global? forms))
+                ugm (chk/global-map (filter anon-constant? forms))
                 inv (reduce (fn [m [k c]] (if (contains? m c) m (assoc m c k))) {} (sort-by (comp str key) ugm))
-                unit-names (set (for [x forms :when (= 'llvm/global (first x)) :when (not (constant-global? x))] (second x)))
+                unit-names (set (for [x forms :when (= 'llvm/global (first x)) :when (not (anon-constant? x))] (second x)))
                 statics (vec (sort-by str unit-names))
                 theirs (into {} (for [x forms :when (= 'llvm/define (first x))] [(name (second x)) x]))
                 repl (into {} (for [[nm a b] hits
@@ -540,9 +548,43 @@
         (println "lib-unit own statics control: no own define names a static"))
       (System/exit (if (and (zero? (:check-bad s)) (= :differs (nth (:control s) 2 nil)) (= :differs (nth (:static-control s) 3 nil))) 0 1)))))
 
+(defn own-std
+  "queue 596 (C6 L5): each case's C6, its closure through the std tree STD (bin/rsi check's std: an own copy, `own`'s tree, STD/ir
+  and STD/own.tsv; std's pinned IR, STD/ir without own.tsv, every define rustc's). LIST: ID<TAB>DIR a line, DIR's x.ll and shim.ll
+  the case's IR (their undefined symbols the roots, as census takes them). OUT: ID<TAB>own|rustc<TAB>why a line; own when the
+  closure takes no define of std's IR (doc/rust/FRONTEND-SURVEY.md, \"The plan (C6-L1 to C6-L5)\": L4's rule)."
+  [std list out]
+  (let [t0 (System/nanoTime)
+        units (std-units (str std "/ir"))
+        gidx (global-index units)
+        ownf (File. (str std "/own.tsv"))
+        owned (if (.exists ownf)
+                (with-open [r (BufferedReader. (FileReader. ownf))]
+                  (persistent! (reduce (fn [s ^String l] (let [[c u nm k] (str/split l #"\t" -1)] (if (= "own" k) (conj! s [[c u] nm]) s)))
+                                       (transient #{}) (line-seq r))))
+                #{})
+        tree (if (.exists ownf) "the own tree's" "std's pinned IR's")
+        rows (for [^String l (str/split-lines (slurp list)) :when (seq l)
+                   :let [[id dir] (str/split l #"\t" 2)
+                         fs (filter #(.exists (File. ^String %)) [(str dir "/x.ll") (str dir "/shim.ll")])]]
+               (if-not (.exists (File. (str dir "/x.ll")))
+                 [id "rustc" "no IR (the case's closure not taken)"]
+                 (let [{:keys [reached]} (closure units gidx (program-roots fs))
+                       fns (filter (fn [[u nm]] (:fn? (get-in units [u nm]))) reached)
+                       rust (remove owned fns)
+                       by (sort-by (comp - val) (frequencies (map ffirst rust)))]
+                   (if (empty? rust)
+                     [id "own" (str (count fns) " defines of " tree " closure, none rustc's")]
+                     [id "rustc" (str (count rust) " of " (count fns) " defines rustc's (" tree "; "
+                                      (str/join ", " (for [[c n] (take 6 by)] (str c " " n))) (when (> (count by) 6) ", ...") ")")]))))]
+    (spit out (str/join "" (for [r rows] (str (str/join "\t" r) "\n"))))
+    (println (format "lib-unit own-std: %d cases, %d with C6 own (no define of std's IR rustc's), %s (%d s)" (count rows)
+                     (count (filter #(= "own" (second %)) rows)) tree (quot (- (System/nanoTime) t0) 1000000000)))))
+
 (defn -main [cmd & args]
   (case cmd
     "census" (let [[std & specs] args] (census std specs))
+    "own-std" (let [[std list out] args] (own-std std list out))
     "own" (let [[std out & owns] args] (own-tree std out owns))
     "keys" (let [[std crate out & specs] args
                  rows (census std specs)
@@ -610,7 +652,8 @@
                                                                :else [d sym (get by (second f) f) why]))))]
                              ;; (queue 566: the L2 callees through the same module, kept as the result's metadata)
                              (with-meta (through ours) {:l2-inlined (through l2-ours)})))
-                    our-gm (chk/global-map (cg/module-extras gl))
+                    ;; queue 591 (590-1 (a)): the statics by name, the anonymous constants by content (anon-constant?)
+                    our-gm (chk/global-map (filter anon-constant? (cg/module-extras gl)))
                     l2-rows (judge (or (:l2-inlined (meta ours)) l2-ours) our-gm theirs)
                     rows (judge ours our-gm theirs)
                     ctl (control ours our-gm theirs)]

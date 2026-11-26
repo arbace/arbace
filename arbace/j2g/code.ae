@@ -774,8 +774,24 @@
         (use-sym! s)
         (v s d)))))
 
+(declare expr*)
+
 (defn expr
-  "Translates node in expression context: {:x go-form :t java-desc :nn bool}."
+  "Translates node in expression context: {:x go-form :t java-desc :nn bool}. A call or creation of a
+  class read with its Java lines (the analyzer's :java-line) on a later line than the statement's
+  is written on its line (:j2g/line on its Go form): gc's line table then gives a nested call on a
+  later line its own line, as javac's (T7024096, t06142)."
+  [node]
+  (let [jl (:java-line node)]
+    (if (and jl *line* (> (long jl) (long *line*)) (#{:invoke :new} (:op node)))
+      (binding [*line* jl]
+        (let [r (expr* node)]
+          (if (and (seq? (:x r)) (instance? arbace.lang.IObj (:x r)))
+            (assoc r :x (vary-meta (:x r) assoc :j2g/line jl))
+            r)))
+      (expr* node))))
+
+(defn- expr*
   [node]
   (let [node (acc/unaccess node)]
     (if-let [why (missing-reason node)]
@@ -1717,22 +1733,29 @@
         :if-instance (translate-if-instance node ctx)
         :for-each (translate-for-each node ctx)
         (:break :recur) (translate-ctx node {:k :jump})
-        :assert (let [c (cond-expr (:test node))
-                      msg (when (:msg node) (expr-as (:msg node) (:msg-desc node)))
-                      ex (if msg
-                           (list (jsym (str "AssertionError_New_" (nm/desc-code (:msg-desc node)))) msg)
-                           (list (jsym "AssertionError_New")))]
-                  ;; JLS 14.10 with javac's $assertionsDisabled (t06029, the user's decision of 2026-11-23): an
-                  ;; assert runs when assertions are enabled, or while its class's initialization has not completed
-                  ;; (the flag still its default false before <clinit> sets it), as on the JVM; an interface's
-                  ;; holder class is not translated, so its asserts follow the global flag alone
-                  (let [cls (:class node)
-                        on (if (and (not (:holder-top node)) (m/translated? cls) (not (m/trivial-init? cls)))
-                             (list 'or (list 'not (jsym "J2g_AssertionsDisabled"))
-                                   (list 'not (list '.Done (csym cls "_init"))))
-                             (list 'not (jsym "J2g_AssertionsDisabled")))]
-                    (emit! (list 'when (list 'and on (list 'not c))
-                                 (list 'panic (list (jsym "Thrown") ex))))))
+        ;; JLS 14.10 with javac's $assertionsDisabled (t06029, the user's decision of 2026-11-23): an assert runs
+        ;; when assertions are enabled, or while its class's initialization has not completed (the flag still its
+        ;; default false before <clinit> sets it), as on the JVM; an interface's holder class is not translated, so
+        ;; its asserts follow the global flag alone. The condition is evaluated only when the assert runs and the
+        ;; message only when the condition is false (java-tail-1125: cond-expr hoists an assignment's store, so the
+        ;; condition outside the when ran Attach's `assert enabled = true` with assertions off)
+        :assert (let [cls (:class node)
+                      on (if (and (not (:holder-top node)) (m/translated? cls) (not (m/trivial-init? cls)))
+                           (list 'or (list 'not (jsym "J2g_AssertionsDisabled"))
+                                 (list 'not (list '.Done (csym cls "_init"))))
+                           (list 'not (jsym "J2g_AssertionsDisabled")))
+                      run (with-block
+                            (fn []
+                              (let [c (cond-expr (:test node))
+                                    fail (with-block
+                                           (fn []
+                                             (let [msg (when (:msg node) (expr-as (:msg node) (:msg-desc node)))
+                                                   ex (if msg
+                                                        (list (jsym (str "AssertionError_New_" (nm/desc-code (:msg-desc node)))) msg)
+                                                        (list (jsym "AssertionError_New")))]
+                                               (emit! (list 'panic (list (jsym "Thrown") ex))))))]
+                                (emit! (apply list 'when (list 'not c) fail)))))]
+                  (emit! (apply list 'when on run)))
         (:and :or) (translate-and-or node ctx)
         (stmt! node))
 

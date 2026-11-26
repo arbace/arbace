@@ -429,12 +429,14 @@ termination: done is closed when the pool is shut down with none running).\n"
           ^int64 running
           ^{:tag (chan (struct))} done
           ^bool terminated
-          ^{:tag atomic/Int64 :doc "steals: the forked tasks a new worker ran, not their forking thread (getStealCount; round 54)\n"} steals))
+          ^{:tag atomic/Int64 :doc "steals: the forked tasks a new worker ran, not their forking thread (getStealCount; round 54)\n"} steals
+          ^{:tag (map (* DelayScheduler_ScheduledForkJoinTask) bool) :doc "delayedTasks: the scheduled tasks waiting for their time (fjschedule.ae; mu)\n"} delayedTasks
+          ^{:tag bool :doc "cancelDelayedOnShutdown: cancelDelayedTasksOnShutdown was called (mu)\n"} cancelDelayedOnShutdown))
 
 (go/var ForkJoinPool_class
   (Define (addr (lit ClassInfo :Name "java.util.concurrent.ForkJoinPool" :Kind KindClass
                      :Modifiers AccPublic :Super Object_class
-                     :Interfaces (lit (slice (* Class)) ExecutorService_class)
+                     :Interfaces (lit (slice (* Class)) ScheduledExecutorService_class)
                      :Go "arbace/jrt.ForkJoinPool"))))
 
 ;; ---------------------------------------------------------------------------------------
@@ -593,6 +595,11 @@ the forked tasks a new worker ran (the JDK counts its workers' steals from each 
   [^{:tag (* ForkJoinPool)} p]
   (when (!= p commonPool)
     (.Store (.-shutdown p) true)
+    ;; the delayed tasks' policy (fjschedule.ae): the periodic ones cancelled, all with cancelDelayedTasksOnShutdown
+    (.Lock (.-mu p))
+    (let [all (.-cancelDelayedOnShutdown p)]
+      (.Unlock (.-mu p))
+      (.cancelDelayed p (not all)))
     (.Lock (.-mu p))
     (.checkTerminated p)
     (.Unlock (.-mu p))))
@@ -607,9 +614,9 @@ the forked tasks a new worker ran (the JDK counts its workers' steals from each 
   (.Unlock (.-mu p)))
 
 (go/method checkTerminated
-  "checkTerminated ends the pool when it is shut down with no worker running (mu held).\n"
+  "checkTerminated ends the pool when it is shut down with no worker running and no delayed task waiting (mu held).\n"
   [^{:tag (* ForkJoinPool)} p]
-  (when (and (.Load (.-shutdown p)) (== (.-running p) 0) (not (.-terminated p)))
+  (when (and (.Load (.-shutdown p)) (== (.-running p) 0) (== (len (.-delayedTasks p)) 0) (not (.-terminated p)))
     (set! (.-terminated p) true)
     (when (!= (.-done p) nil)
       (close (.-done p)))))

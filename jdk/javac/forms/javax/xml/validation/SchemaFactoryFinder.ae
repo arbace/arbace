@@ -1,0 +1,150 @@
+;; Converted from jdk26u src/java.xml/share/classes/javax/xml/validation/SchemaFactoryFinder.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'javax.xml.validation)
+
+(import '(com.sun.org.apache.xerces.internal.jaxp.validation XMLSchemaFactory)
+        '(java.lang.reflect InvocationTargetException)
+        '(java.util ServiceConfigurationError ServiceLoader)
+        '(java.util.function Supplier)
+        '(jdk.xml.internal SecuritySupport))
+
+(defclass SchemaFactoryFinder
+  (field ^:private ^:static ^boolean debug false)
+
+  (field ^:private ^:static ^:final ^String DEFAULT_PACKAGE "com.sun.org.apache.xerces.internal")
+
+  (static-initializer (set! debug (some? (System/getProperty "jaxp.debug"))))
+
+  (method ^:private ^:static debugPrintln ^void [^{:tag (Supplier String)} msgGen]
+    (when debug (.println System/err (java-str "JAXP: " (cast String (.get msgGen))))))
+
+  (field ^:private ^:final ^ClassLoader classLoader)
+
+  (constructor ^:public [this ^ClassLoader loader]
+    (set! (.-classLoader this) loader)
+    (when debug (.debugDisplayClassLoader this)))
+
+  (method ^:private debugDisplayClassLoader ^void [this]
+    (try
+      (when (identical? classLoader (SecuritySupport/getContextClassLoader))
+        (SchemaFactoryFinder/debugPrintln
+          (lambda Supplier ^String []
+            (java-str "using thread context class loader (" classLoader ") for search")))
+        (return))
+      (catch Throwable unused))
+    (if (identical? classLoader (ClassLoader/getSystemClassLoader))
+        (SchemaFactoryFinder/debugPrintln
+          (lambda Supplier ^String []
+            (java-str "using system class loader (" classLoader ") for search")))
+        (SchemaFactoryFinder/debugPrintln
+          (lambda Supplier ^String [] (java-str "using class loader (" classLoader ") for search")))))
+
+  (method ^:public newFactory ^SchemaFactory [this ^String schemaLanguage]
+    (when (nil? schemaLanguage) (throw (NullPointerException.)))
+    (let [f (._newFactory this schemaLanguage)]
+      (if (some? f)
+          (SchemaFactoryFinder/debugPrintln
+            (lambda Supplier ^String []
+              (java-str "factory '" (.getName (.getClass f)) "' was found for " schemaLanguage)))
+          (SchemaFactoryFinder/debugPrintln
+            (lambda Supplier ^String [] (java-str "unable to find a factory for " schemaLanguage))))
+      f))
+
+  (method ^:private _newFactory ^SchemaFactory [this ^String schemaLanguage]
+    (let [^:mutable ^SchemaFactory sf nil
+          propertyName (java-str (.getName SERVICE_CLASS) ":" schemaLanguage)]
+      (try
+        (SchemaFactoryFinder/debugPrintln
+          (lambda Supplier ^String [] (java-str "Looking up system property '" propertyName "'")))
+        (let [r (System/getProperty propertyName)]
+          (if (some? r)
+              (do
+                (SchemaFactoryFinder/debugPrintln
+                  (lambda Supplier ^String [] (java-str "The value is '" r "'")))
+                (set! sf (.createInstance this r))
+                (when (some? sf) (return sf)))
+              (SchemaFactoryFinder/debugPrintln
+                (lambda Supplier ^String [] "The property is undefined."))))
+        (catch Throwable t
+          (when debug
+            (SchemaFactoryFinder/debugPrintln
+              (lambda Supplier ^String []
+                (java-str "failed to look up system property '" propertyName "'")))
+            (.printStackTrace t))))
+      (let [factoryClassName (SecuritySupport/readConfig propertyName)]
+        (when (some? factoryClassName)
+          (set! sf (.createInstance this factoryClassName))
+          (when (some? sf) (return sf)))
+        (let [^:final factoryImpl (.findServiceProvider this schemaLanguage)]
+          (cond
+            (some? factoryImpl) factoryImpl
+            (.equals schemaLanguage "http://www.w3.org/2001/XMLSchema")
+              (do
+                (SchemaFactoryFinder/debugPrintln
+                  (lambda Supplier ^String []
+                    "attempting to use the platform default XML Schema validator"))
+                (XMLSchemaFactory.))
+            :else
+              (do
+                (SchemaFactoryFinder/debugPrintln
+                  (lambda Supplier ^String []
+                    "all things were tried, but none was found. bailing out."))
+                nil))))))
+
+  (method ^:private createClass ^{:tag (Class ?)} [this ^String className]
+    (let [^:mutable ^{:tag (Class ?)} clazz nil]
+      (try
+        (if (some? classLoader)
+            (set! clazz (Class/forName className false classLoader))
+            (set! clazz (Class/forName className)))
+        (catch Throwable t (when debug (.printStackTrace t)) (return nil)))
+      clazz))
+
+  (method createInstance ^SchemaFactory [this ^String className]
+    (let [^:mutable ^SchemaFactory schemaFactory nil]
+      (SchemaFactoryFinder/debugPrintln
+        (lambda Supplier ^String [] (java-str "createInstance(" className ")")))
+      (let [^{:tag (Class ?)} clazz (.createClass this className)]
+        (if (nil? clazz)
+            (do
+              (SchemaFactoryFinder/debugPrintln
+                (lambda Supplier ^String [] (java-str "failed to getClass(" className ")")))
+              nil)
+            (do
+              (SchemaFactoryFinder/debugPrintln
+                (lambda Supplier ^String []
+                  (java-str "loaded " className " from " (SchemaFactoryFinder/which clazz))))
+              (try
+                (when-not (.isAssignableFrom SchemaFactory clazz)
+                  (throw (ClassCastException.
+                           (java-str (.getName clazz) " cannot be cast to " SchemaFactory))))
+                (set! schemaFactory (cast SchemaFactory (.newInstance (.getConstructor clazz))))
+                (catch [ClassCastException
+                        IllegalAccessException
+                        IllegalArgumentException
+                        InstantiationException
+                        InvocationTargetException
+                        NoSuchMethodException] ex
+                  (SchemaFactoryFinder/debugPrintln
+                    (lambda Supplier ^String []
+                      (java-str "could not instantiate " (.getName clazz))))
+                  (when debug (.printStackTrace ex))
+                  (return nil)))
+              schemaFactory)))))
+
+  (method ^:private findServiceProvider ^SchemaFactory [this ^:final ^String schemaLanguage]
+    (java-assert (some? schemaLanguage))
+    (try
+      (let [^:final ^{:tag (ServiceLoader SchemaFactory)} loader (ServiceLoader/load SERVICE_CLASS)]
+        (for-each [^SchemaFactory factory loader]
+          (when (.isSchemaLanguageSupported factory schemaLanguage) (return factory)))
+        nil)
+      (catch ServiceConfigurationError error
+        (throw (SchemaFactoryConfigurationError.
+                 (java-str "Provider for " SERVICE_CLASS " cannot be created")
+                 error)))))
+
+  (field ^:private ^:static ^:final ^{:tag (Class SchemaFactory)} SERVICE_CLASS SchemaFactory)
+
+  (method ^:private ^:static which ^String [^{:tag (Class ?)} clazz]
+    (SecuritySupport/getClassSource clazz)))

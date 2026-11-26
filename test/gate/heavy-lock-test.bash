@@ -123,6 +123,9 @@ before S start A end && [ "$(slot S)" = 2 ] && ok "7: a small ticket (4 GiB) ran
 case_dir one-slot-env; echo 2 > "$D/big.lock.slots"
 HEAVY_LOCK_SLOTS=1 run A 1.5 20; sleep 0.3; HEAVY_LOCK_SLOTS=1 HEAVY_LOCK_SMALL_GIB=2 run S 0.3 4; wait
 before A end S start && ok "7: HEAVY_LOCK_SLOTS=1 over the file, and HEAVY_LOCK_SMALL_GIB=2 keeps a 4 GiB ticket out of slot 2" || bad "7: env: $(cat "$LOG")"
+case_dir small-file; export HEAVY_LOCK_MEMAVAIL_KIB=$((100 * G)); echo 1 > "$D/big.lock.slots"; echo 16 > "$D/big.lock.small_gib"
+run A 1.5 20; sleep 0.3; run S 0.3 12; wait
+before S start A end && [ "$(slot S)" = 2 ] && ok "7: LOCK.small_gib 16 lets a 12 GiB ticket run in slot 2" || bad "7: small_gib file: $(cat "$LOG")"
 unset HEAVY_LOCK_MEMAVAIL_KIB
 
 [ "$fail" = 0 ] && echo "heavy-lock-test: passed" || echo "heavy-lock-test: FAILED"

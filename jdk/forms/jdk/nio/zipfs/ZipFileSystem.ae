@@ -1,0 +1,2654 @@
+;; Converted from jdk26u src/jdk.zipfs/share/classes/jdk/nio/zipfs/ZipFileSystem.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'jdk.nio.zipfs)
+
+(import '(java.io BufferedOutputStream
+                  ByteArrayInputStream
+                  ByteArrayOutputStream
+                  EOFException
+                  FilterOutputStream
+                  IOException
+                  InputStream
+                  OutputStream)
+        '(java.nio ByteBuffer MappedByteBuffer)
+        '(java.nio.channels FileChannel
+                            FileChannel$MapMode
+                            FileLock
+                            ReadableByteChannel
+                            SeekableByteChannel
+                            WritableByteChannel)
+        '(java.nio.file AccessMode
+                        ClosedFileSystemException
+                        CopyOption
+                        DirectoryNotEmptyException
+                        DirectoryStream$Filter
+                        FileAlreadyExistsException
+                        FileStore
+                        FileSystem
+                        FileSystemException
+                        Files
+                        NoSuchFileException
+                        NotDirectoryException
+                        OpenOption
+                        Path
+                        PathMatcher
+                        ReadOnlyFileSystemException
+                        StandardCopyOption
+                        StandardOpenOption
+                        WatchService)
+        '(java.nio.file.attribute FileAttribute
+                                  FileTime
+                                  GroupPrincipal
+                                  PosixFileAttributeView
+                                  PosixFileAttributes
+                                  PosixFilePermission
+                                  PosixFilePermissions
+                                  UserPrincipal
+                                  UserPrincipalLookupService)
+        '(java.nio.file.spi FileSystemProvider)
+        '(java.util ArrayList
+                    Arrays
+                    Collections
+                    Formatter
+                    HashMap
+                    HashSet
+                    Iterator
+                    LinkedHashMap
+                    List
+                    Map
+                    Objects
+                    Optional
+                    Set
+                    TreeMap)
+        '(java.util.concurrent.locks ReadWriteLock ReentrantReadWriteLock)
+        '(java.util.function Consumer Function)
+        '(java.util.jar Attributes$Name Manifest)
+        '(java.util.regex Pattern)
+        '(java.util.zip CRC32
+                        Deflater
+                        DeflaterOutputStream
+                        Inflater
+                        InflaterInputStream
+                        ZipException))
+
+(defclass ZipFileSystem
+  :extends FileSystem
+
+  (field ^:private ^:static ^:final ^boolean isWindows
+    (.startsWith (System/getProperty "os.name") "Windows"))
+
+  (field ^:private ^:static ^:final ^byte/1 ROOTPATH (new byte/1 [(unchecked-byte \/)]))
+
+  (field ^:private ^:static ^:final ^String PROPERTY_ACCESS_MODE "accessMode")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_POSIX "enablePosixFileAttributes")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_DEFAULT_OWNER "defaultOwner")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_DEFAULT_GROUP "defaultGroup")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_DEFAULT_PERMISSIONS "defaultPermissions")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_RELEASE_VERSION "releaseVersion")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_MULTI_RELEASE "multi-release")
+
+  (field ^:private ^:static ^:final ^String PROPERTY_COMPRESSION_METHOD "compressionMethod")
+
+  (field ^:private ^:static ^:final ^String COMPRESSION_METHOD_DEFLATED "DEFLATED")
+
+  (field ^:private ^:static ^:final ^String COMPRESSION_METHOD_STORED "STORED")
+
+  (field ^:private ^:final ^ZipFileSystemProvider provider)
+
+  (field ^:private ^:final ^Path zfpath)
+
+  (field ^:final ^ZipCoder zc)
+
+  (field ^:private ^:final ^ZipPath rootdir)
+
+  (field ^:private ^boolean readOnly true)
+
+  (field ^:private ^:final ^long zfsDefaultTimeStamp (System/currentTimeMillis))
+
+  (field ^:private ^:final ^boolean noExtt)
+
+  (field ^:private ^:final ^boolean useTempFile)
+
+  (field ^:private ^:final ^int tempFileCreationThreshold
+    (unchecked-multiply-int (unchecked-multiply-int 10 1024) 1024))
+
+  (field ^:private ^:final ^boolean forceEnd64)
+
+  (field ^:private ^:final ^int defaultCompressionMethod)
+
+  (field ^:private ^{:tag (Function byte/1 byte/1)} entryLookup (Function/identity))
+
+  (field ^:final ^boolean supportPosix)
+
+  (field ^:private ^:final ^UserPrincipal defaultOwner)
+
+  (field ^:private ^:final ^GroupPrincipal defaultGroup)
+
+  (field ^:private ^:final ^{:tag (Set PosixFilePermission)} defaultPermissions)
+
+  (field ^:private ^:final ^{:tag (Set String)} supportedFileAttributeViews)
+
+  (defclass ^:private ^:enum ZipAccessMode
+    (constants (READ_WRITE ["readWrite"]) (READ_ONLY ["readOnly"]))
+
+    (field ^:private ^:final ^String label)
+
+    (constructor [this ^String label] (set! (.-label this) label))
+
+    (method ^:static from ^ZipAccessMode [value]
+      (when (some? value)
+        (cond
+          (.equals (.-label READ_WRITE) value) ZipAccessMode/READ_WRITE
+          (.equals (.-label READ_ONLY) value) ZipAccessMode/READ_ONLY
+          :else
+            (throw (IllegalArgumentException. (java-str "Unknown file system access mode: " value)))))))
+
+  (constructor :throws [IOException] [this ^ZipFileSystemProvider provider ^Path zfpath
+                                      ^{:tag (Map String ?)} env]
+    (let [^String nameEncoding (if (.containsKey env "encoding")
+                                   (cast String (.get env "encoding"))
+                                   "UTF-8")]
+      (set! (.-noExtt this) (.equals "false" (.get env "zipinfo-time")))
+      (set! (.-useTempFile this) (ZipFileSystem/isTrue env "useTempFile"))
+      (set! (.-forceEnd64 this) (ZipFileSystem/isTrue env "forceZIP64End"))
+      (set! (.-defaultCompressionMethod this) (.getDefaultCompressionMethod this env))
+      (let [accessMode (ZipAccessMode/from (.get env PROPERTY_ACCESS_MODE))
+            forceReadOnly (identical? accessMode ZipAccessMode/READ_ONLY)]
+        (set! (.-supportPosix this) (ZipFileSystem/isTrue env PROPERTY_POSIX))
+        (set! (.-defaultOwner this) (when supportPosix (.initOwner this zfpath env)))
+        (set! (.-defaultGroup this) (when supportPosix (.initGroup this zfpath env)))
+        (set! (.-defaultPermissions this)
+              (when supportPosix (Collections/unmodifiableSet (.initPermissions this env))))
+        (set! (.-supportedFileAttributeViews this)
+              (if supportPosix (Set/of "basic" "posix" "zip") (Set/of "basic" "zip")))
+        (let [shouldCreate (ZipFileSystem/isTrue env "create")]
+          (when (and shouldCreate forceReadOnly)
+            (throw (IllegalArgumentException.
+                     "Specifying 'accessMode=readOnly' is incompatible with 'create=true'")))
+          (when (Files/notExists zfpath)
+            (if shouldCreate
+                (with-resources [^:final os (Files/newOutputStream
+                                              zfpath
+                                              StandardOpenOption/CREATE_NEW
+                                              StandardOpenOption/WRITE)]
+                  (.write (END.) os 0 forceEnd64))
+                (throw (NoSuchFileException. (.toString zfpath)))))
+          (.checkAccess (.provider (.getFileSystem zfpath)) zfpath AccessMode/READ)
+          (set! (.-zc this) (ZipCoder/get nameEncoding))
+          (set! (.-ch this)
+                (Files/newByteChannel zfpath (new OpenOption/1 [StandardOpenOption/READ])))
+          (try
+            (set! (.-cen this) (.initCEN this))
+            (catch IOException x
+              (try (.close (.-ch this)) (catch IOException xx (.addSuppressed x xx)))
+              (throw x)))
+          (set! (.-provider this) provider)
+          (set! (.-zfpath this) zfpath)
+          (set! (.-rootdir this) (ZipPath. this (new byte/1 [(unchecked-byte \/)])))
+          (let [^{:tag (Optional Integer)} multiReleaseVersion (.determineReleaseVersion this env)]
+            (set! (.-entryLookup this)
+                  (cast Function
+                        (.orElse (.map multiReleaseVersion
+                                       (method-ref
+                                         Function
+                                         ^Function [Integer]
+                                         this
+                                         ZipFileSystem/.createVersionedLinks))
+                                 (Function/identity))))
+            (set! (.-readOnly this)
+                  (or (or forceReadOnly (.isPresent multiReleaseVersion))
+                      (not (Files/isWritable zfpath))))
+            (when (and readOnly (identical? accessMode ZipAccessMode/READ_WRITE))
+              (let [^String reason (if (.isPresent multiReleaseVersion)
+                                       "the multi-release JAR file is not writable"
+                                       "the ZIP file is not writable")]
+                (throw (IOException. reason)))))))))
+
+  (method ^:private getDefaultCompressionMethod ^int [this ^{:tag (Map String ?)} env]
+    (let [^:mutable ^int result (if (ZipFileSystem/isTrue env "noCompression")
+                                    ZipConstants/METHOD_STORED
+                                    ZipConstants/METHOD_DEFLATED)]
+      (when (.containsKey env PROPERTY_COMPRESSION_METHOD)
+        (let [compressionMethod (.get env PROPERTY_COMPRESSION_METHOD)]
+          (if (some? compressionMethod)
+              (if (instance? String compressionMethod)
+                  (switch (.toUpperCase (cast String compressionMethod))
+                    COMPRESSION_METHOD_STORED (set! result ZipConstants/METHOD_STORED)
+                    COMPRESSION_METHOD_DEFLATED (set! result ZipConstants/METHOD_DEFLATED)
+                    (throw (IllegalArgumentException.
+                             (String/format "The value for the %s property must be %s or %s"
+                                            (new
+                                              Object/1
+                                              [PROPERTY_COMPRESSION_METHOD COMPRESSION_METHOD_STORED
+                                               COMPRESSION_METHOD_DEFLATED])))))
+                  (throw (IllegalArgumentException.
+                           (String/format "The Object type for the %s property must be a String"
+                                          (new Object/1 [PROPERTY_COMPRESSION_METHOD])))))
+              (throw (IllegalArgumentException.
+                       (String/format "The value for the %s property must be %s or %s"
+                                      (new Object/1
+                                           [PROPERTY_COMPRESSION_METHOD COMPRESSION_METHOD_STORED
+                                            COMPRESSION_METHOD_DEFLATED])))))))
+      result))
+
+  (method ^:private ^:static isTrue ^boolean [^{:tag (Map String ?)} env ^String name]
+    (or (.equals "true" (.get env name)) (.equals Boolean/TRUE (.get env name))))
+
+  (method ^:private initOwner :throws [IOException] ^UserPrincipal [this ^Path zfpath
+                                                                    ^{:tag (Map String ?)} env]
+    (let [o (.get env PROPERTY_DEFAULT_OWNER)]
+      (when (nil? o)
+        (try
+          (return (Files/getOwner zfpath))
+          (catch [UnsupportedOperationException NoSuchFileException] e
+            (let [userName (System/getProperty "user.name")]
+              (return (lambda UserPrincipal ^String [] userName))))))
+      (cond
+        (instance? String o)
+          (do
+            (when (.isEmpty (cast String o))
+              (throw (IllegalArgumentException.
+                       (java-str (java-str "Value for property " PROPERTY_DEFAULT_OWNER)
+                                 " must not be empty."))))
+            (lambda UserPrincipal ^String [] (cast String o)))
+        (instance? UserPrincipal o) (cast UserPrincipal o)
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str (java-str (java-str "Value for property " PROPERTY_DEFAULT_OWNER)
+                                       " must be of type ")
+                             String
+                             " or "
+                             UserPrincipal))))))
+
+  (method ^:private initGroup :throws [IOException] ^GroupPrincipal [this ^Path zfpath
+                                                                     ^{:tag (Map String ?)} env]
+    (let [o (.get env PROPERTY_DEFAULT_GROUP)]
+      (when (nil? o)
+        (try
+          (let [zfpv (cast PosixFileAttributeView
+                           (Files/getFileAttributeView zfpath PosixFileAttributeView))]
+            (when (nil? zfpv)
+              (return (method-ref GroupPrincipal defaultOwner UserPrincipal/.getName)))
+            (return (.group (.readAttributes zfpv))))
+          (catch [UnsupportedOperationException NoSuchFileException] e
+            (return (method-ref GroupPrincipal defaultOwner UserPrincipal/.getName)))))
+      (cond
+        (instance? String o)
+          (do
+            (when (.isEmpty (cast String o))
+              (throw (IllegalArgumentException.
+                       (java-str (java-str "Value for property " PROPERTY_DEFAULT_GROUP)
+                                 " must not be empty."))))
+            (lambda GroupPrincipal ^String [] (cast String o)))
+        (instance? GroupPrincipal o) (cast GroupPrincipal o)
+        :else
+          (throw (IllegalArgumentException.
+                   (java-str (java-str (java-str "Value for property " PROPERTY_DEFAULT_GROUP)
+                                       " must be of type ")
+                             String
+                             " or "
+                             GroupPrincipal))))))
+
+  (method ^:private initPermissions ^{:tag (Set PosixFilePermission)} [this
+                                                                       ^{:tag (Map String ?)} env]
+    (let [o (.get env PROPERTY_DEFAULT_PERMISSIONS)]
+      (cond
+        (nil? o) (PosixFilePermissions/fromString "rwxrwxrwx")
+        (instance? String o) (PosixFilePermissions/fromString (cast String o))
+        :else
+          (do
+            (when-not (instance? Set o)
+              (throw (IllegalArgumentException.
+                       (java-str (java-str (java-str
+                                             "Value for property "
+                                             PROPERTY_DEFAULT_PERMISSIONS)
+                                           " must be of type ")
+                                 String
+                                 " or "
+                                 Set))))
+            (let [^{:tag (Set PosixFilePermission)} perms (HashSet.)]
+              (for-each [o2 (cast Set o)]
+                (if (instance? PosixFilePermission o2)
+                    (.add perms (cast PosixFilePermission o2))
+                    (throw (IllegalArgumentException.
+                             (java-str (java-str
+                                         PROPERTY_DEFAULT_PERMISSIONS
+                                         " must only contain objects of type ")
+                                       PosixFilePermission)))))
+              perms)))))
+
+  (method ^:public provider ^FileSystemProvider [this] provider)
+
+  (method ^:public getSeparator ^String [this] "/")
+
+  (method ^:public isOpen ^boolean [this] isOpen)
+
+  (method ^:public isReadOnly ^boolean [this] readOnly)
+
+  (method ^:private checkWritable ^void [this]
+    (when readOnly (throw (ReadOnlyFileSystemException.))))
+
+  (method ^:public getRootDirectories ^{:tag (Iterable Path)} [this]
+    (List/of rootdir))
+
+  (method getRootDir ^ZipPath [this] rootdir)
+
+  (method ^:public getPath ^ZipPath [this ^String first & ^String/1 more]
+    (if (== (alength more) 0)
+        (ZipPath. this first)
+        (let [sb (StringBuilder.)]
+          (.append sb first)
+          (for-each [^String path more]
+            (when (> (.length path) 0) (when (> (.length sb) 0) (.append sb \/)) (.append sb path)))
+          (ZipPath. this (.toString sb)))))
+
+  (method ^:public getUserPrincipalLookupService ^UserPrincipalLookupService [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method ^:public newWatchService ^WatchService [this]
+    (throw (UnsupportedOperationException.)))
+
+  (method getFileStore ^FileStore [this ^ZipPath path]
+    (ZipFileStore. path))
+
+  (method ^:public getFileStores ^{:tag (Iterable FileStore)} [this]
+    (List/of (ZipFileStore. rootdir)))
+
+  (method ^:public supportedFileAttributeViews ^{:tag (Set String)} [this]
+    supportedFileAttributeViews)
+
+  (method ^:public toString ^String [this] (.toString zfpath))
+
+  (method getZipFile ^Path [this] zfpath)
+
+  (field ^:private ^:static ^:final ^String GLOB_SYNTAX "glob")
+
+  (field ^:private ^:static ^:final ^String REGEX_SYNTAX "regex")
+
+  (method ^:public getPathMatcher ^PathMatcher [this ^String syntaxAndInput]
+    (let [pos (.indexOf syntaxAndInput \:)]
+      (when (<= pos 0) (throw (IllegalArgumentException.)))
+      (let [syntax (.substring syntaxAndInput 0 pos)
+            input (.substring syntaxAndInput (unchecked-add-int pos 1))
+            ^:mutable ^String expr nil]
+        (cond
+          (.equalsIgnoreCase syntax GLOB_SYNTAX) (set! expr (ZipUtils/toRegexPattern input))
+          (.equalsIgnoreCase syntax REGEX_SYNTAX) (set! expr input)
+          :else
+            (throw (UnsupportedOperationException. (java-str "Syntax '" syntax "' not recognized"))))
+        (let [^:final pattern (Pattern/compile expr)]
+          (lambda PathMatcher ^boolean [^Path path] (.matches (.matcher pattern (.toString path))))))))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (.beginWrite this)
+    (try (when-not isOpen (return)) (set! isOpen false) (finally (.endWrite this)))
+    (when-not (.isEmpty streams)
+      (let [^{:tag (Set InputStream)} copy (HashSet. streams)]
+        (for-each [^InputStream is copy] (.close is))))
+    (.beginWrite this)
+    (try (.sync this) (.close ch) (finally (.endWrite this)))
+    (locking inflaters (for-each [^Inflater inf inflaters] (.end inf)))
+    (locking deflaters (for-each [^Deflater def deflaters] (.end def)))
+    (.beginWrite this)
+    (try (set! inodes nil) (finally (.endWrite this)))
+    (let [^:mutable ^IOException ioe nil]
+      (locking tmppaths
+        (for-each [^Path p tmppaths]
+          (try
+            (Files/deleteIfExists p)
+            (catch IOException x (if (nil? ioe) (set! ioe x) (.addSuppressed ioe x))))))
+      (.removeFileSystem provider zfpath this)
+      (when (some? ioe) (throw ioe))))
+
+  (method getFileAttributes :throws [IOException] ^ZipFileAttributes [this ^byte/1 path]
+    (.beginRead this)
+    (try
+      (.ensureOpen this)
+      (let [inode (.getInode this path)]
+        (when (some? inode)
+          (cond
+            (instance? Entry inode) (cast Entry inode)
+            (== (.-pos inode) -1)
+              (let [^Entry e (if supportPosix
+                                 ^Entry (PosixEntry.
+                                          (.-name inode)
+                                          (.-isdir inode)
+                                          ZipConstants/METHOD_STORED)
+                                 (Entry. (.-name inode) (.-isdir inode) ZipConstants/METHOD_STORED))]
+                (set! (.-mtime e) (set! (.-atime e) (set! (.-ctime e) zfsDefaultTimeStamp)))
+                e)
+            supportPosix ^ZipFileAttributes (PosixEntry. this inode)
+            :else ^ZipFileAttributes (Entry. this inode))))
+      (finally (.endRead this))))
+
+  (method checkAccess :throws [IOException] ^void [this ^byte/1 path]
+    (.beginRead this)
+    (try
+      (.ensureOpen this)
+      (when (nil? (.getInode this path)) (throw (NoSuchFileException. (.toString this))))
+      (finally (.endRead this))))
+
+  (method setTimes :throws [IOException] ^void [this ^byte/1 path ^FileTime mtime ^FileTime atime
+                                                ^FileTime ctime]
+    (.checkWritable this)
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (let [e (.getEntry this path)]
+        (when (nil? e) (throw (NoSuchFileException. (.getString this path))))
+        (when (== (.-type e) Entry/CEN) (set! (.-type e) Entry/COPY))
+        (when (some? mtime) (set! (.-mtime e) (.toMillis mtime)))
+        (when (some? atime) (set! (.-atime e) (.toMillis atime)))
+        (when (some? ctime) (set! (.-ctime e) (.toMillis ctime)))
+        (.update this e))
+      (finally (.endWrite this))))
+
+  (method setOwner :throws [IOException] ^void [this ^byte/1 path ^UserPrincipal owner]
+    (.checkWritable this)
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (let [e (.getEntry this path)]
+        (when (nil? e) (throw (NoSuchFileException. (.getString this path))))
+        (when (instance? PosixEntry e) (set! (.-owner (cast PosixEntry e)) owner) (.update this e)))
+      (finally (.endWrite this))))
+
+  (method setGroup :throws [IOException] ^void [this ^byte/1 path ^GroupPrincipal group]
+    (.checkWritable this)
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (let [e (.getEntry this path)]
+        (when (nil? e) (throw (NoSuchFileException. (.getString this path))))
+        (when (instance? PosixEntry e) (set! (.-group (cast PosixEntry e)) group) (.update this e)))
+      (finally (.endWrite this))))
+
+  (method setPermissions :throws [IOException] ^void [this ^byte/1 path
+                                                      ^{:tag (Set PosixFilePermission)} perms]
+    (.checkWritable this)
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (let [e (.getEntry this path)]
+        (when (nil? e) (throw (NoSuchFileException. (.getString this path))))
+        (when (== (.-type e) Entry/CEN) (set! (.-type e) Entry/COPY))
+        (cond
+          (nil? perms) (set! (.-externalFileAttributes e) -1)
+          (== (.-externalFileAttributes e) -1)
+            (set! (.-externalFileAttributes e) (ZipUtils/permsToFlags perms))
+          :else
+            (set! (.-externalFileAttributes e)
+                  (bit-or-int (ZipUtils/permsToFlags perms)
+                              (bit-and-int (.-externalFileAttributes e) 0xFE00))))
+        (.update this e))
+      (finally (.endWrite this))))
+
+  (method exists ^boolean [this ^byte/1 path]
+    (.beginRead this)
+    (try (.ensureOpen this) (some? (.getInode this path)) (finally (.endRead this))))
+
+  (method isDirectory ^boolean [this ^byte/1 path]
+    (.beginRead this)
+    (try (let [n (.getInode this path)] (and (some? n) (.isDir n))) (finally (.endRead this))))
+
+  (method iteratorOf :throws [IOException] ^{:tag (Iterator Path)} [this ^ZipPath dir
+                                                                    ^{:tag (DirectoryStream$Filter (? super Path))} filter]
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (let [path (.getResolvedPath dir)
+            inode (.getInode this path)]
+        (when (nil? inode) (throw (NotDirectoryException. (.getString this path))))
+        (let [^{:tag (List Path)} list (ArrayList.)
+              ^:mutable child (.-child inode)]
+          (while (some? child)
+            (let [childPath (ZipPath. this (.-name child) true)
+                  childFileName (.getFileName childPath)
+                  zpath (.resolve dir childFileName)]
+              (when (or (nil? filter) (.accept filter zpath)) (.add list zpath))
+              (set! child (.-sibling child))))
+          (.iterator list)))
+      (finally (.endWrite this))))
+
+  (method createDirectory :throws [IOException] ^void [this ^byte/1 dir &
+                                                       ^{:tag (array (FileAttribute ?))} attrs]
+    (.checkWritable this)
+    (.beginWrite this)
+    (try
+      (.ensureOpen this)
+      (when (or (== (alength dir) 0) (.exists this dir))
+        (throw (FileAlreadyExistsException. (.getString this dir))))
+      (.checkParents this dir)
+      (let [^Entry e (if supportPosix
+                         ^Entry (PosixEntry. dir Entry/NEW true ZipConstants/METHOD_STORED attrs)
+                         (Entry. dir Entry/NEW true ZipConstants/METHOD_STORED attrs))]
+        (.update this e))
+      (finally (.endWrite this))))
+
+  (method copyFile :throws [IOException] ^void [this ^boolean deletesrc ^byte/1 src ^byte/1 dst &
+                                                ^CopyOption/1 options]
+    (.checkWritable this)
+    (when-not (Arrays/equals src dst)
+      (.beginWrite this)
+      (try
+        (.ensureOpen this)
+        (let [eSrc (.getEntry this src)]
+          (when (nil? eSrc) (throw (NoSuchFileException. (.getString this src))))
+          (if (.isDir eSrc)
+              (.createDirectory this dst)
+              (let [^:mutable hasReplace false
+                    ^:mutable hasCopyAttrs false]
+                (for-each [^CopyOption opt options]
+                  (cond
+                    (identical? opt StandardCopyOption/REPLACE_EXISTING) (set! hasReplace true)
+                    (identical? opt StandardCopyOption/COPY_ATTRIBUTES) (set! hasCopyAttrs true)))
+                (let [eDst (.getEntry this dst)]
+                  (if (some? eDst)
+                      (when-not hasReplace
+                        (throw (FileAlreadyExistsException. (.getString this dst))))
+                      (.checkParents this dst))
+                  (let [^:mutable ^Entry u (if supportPosix
+                                               ^Entry (PosixEntry.
+                                                        (cast PosixEntry eSrc)
+                                                        Entry/COPY)
+                                               (Entry. eSrc Entry/COPY))]
+                    (.name u dst)
+                    (if (or (== (.-type eSrc) Entry/NEW) (== (.-type eSrc) Entry/FILECH))
+                        (do
+                          (set! (.-type u) (.-type eSrc))
+                          (cond
+                            deletesrc
+                              (do (set! (.-bytes u) (.-bytes eSrc)) (set! (.-file u) (.-file eSrc)))
+                            (some? (.-bytes eSrc))
+                              (set! (.-bytes u)
+                                    (Arrays/copyOf (.-bytes eSrc) (alength (.-bytes eSrc))))
+                            :else
+                              (when (some? (.-file eSrc))
+                                (set! (.-file u) (.getTempPathForEntry this nil))
+                                (Files/copy
+                                  (.-file eSrc)
+                                  (.-file u)
+                                  (new CopyOption/1 [StandardCopyOption/REPLACE_EXISTING])))))
+                        (when (and (== (.-type eSrc) Entry/CEN)
+                                   (not (== (.-method eSrc) defaultCompressionMethod)))
+                          (with-resources [^:final in (.newInputStream this src)
+                                           ^:final out (.newOutputStream
+                                                         this
+                                                         dst
+                                                         StandardOpenOption/CREATE
+                                                         StandardOpenOption/TRUNCATE_EXISTING
+                                                         StandardOpenOption/WRITE)]
+                            (.transferTo in out))
+                          (set! u (.getEntry this dst))))
+                    (when-not hasCopyAttrs
+                      (set! (.-mtime u)
+                            (set! (.-atime u) (set! (.-ctime u) (System/currentTimeMillis)))))
+                    (.update this u)
+                    (when deletesrc (.updateDelete this eSrc)))))))
+        (finally (.endWrite this)))))
+
+  (method newOutputStream :throws [IOException] ^OutputStream [this ^byte/1 path &
+                                                               ^OpenOption/1 options]
+    (.checkWritable this)
+    (let [^:mutable hasCreateNew false
+          ^:mutable hasCreate false
+          ^:mutable hasAppend false
+          ^:mutable hasTruncate false]
+      (for-each [^OpenOption opt options]
+        (when (identical? opt StandardOpenOption/READ)
+          (throw (IllegalArgumentException. "READ not allowed")))
+        (when (identical? opt StandardOpenOption/CREATE_NEW) (set! hasCreateNew true))
+        (when (identical? opt StandardOpenOption/CREATE) (set! hasCreate true))
+        (when (identical? opt StandardOpenOption/APPEND) (set! hasAppend true))
+        (when (identical? opt StandardOpenOption/TRUNCATE_EXISTING) (set! hasTruncate true)))
+      (when (and hasAppend hasTruncate)
+        (throw (IllegalArgumentException. "APPEND + TRUNCATE_EXISTING not allowed")))
+      (.beginRead this)
+      (try
+        (.ensureOpen this)
+        (let [e (.getEntry this path)]
+          (if (some? e)
+              (do
+                (when (or (.isDir e) hasCreateNew)
+                  (throw (FileAlreadyExistsException. (.getString this path))))
+                (if hasAppend
+                    (let [os (.getOutputStream this (Entry. e Entry/NEW))]
+                      (with-resources [^:final is (.getInputStream this e)] (.transferTo is os))
+                      os)
+                    (.getOutputStream this
+                                      ^Entry (if supportPosix
+                                                 ^Entry (PosixEntry.
+                                                          (cast PosixEntry e)
+                                                          Entry/NEW
+                                                          defaultCompressionMethod)
+                                                 (Entry. e Entry/NEW defaultCompressionMethod)))))
+              (do
+                (when (and (not hasCreate) (not hasCreateNew))
+                  (throw (NoSuchFileException. (.getString this path))))
+                (.checkParents this path)
+                (.getOutputStream this
+                                  ^Entry (if supportPosix
+                                             ^Entry (PosixEntry.
+                                                      path
+                                                      Entry/NEW
+                                                      false
+                                                      defaultCompressionMethod
+                                                      (new FileAttribute/1 []))
+                                             (Entry.
+                                               path
+                                               Entry/NEW
+                                               false
+                                               defaultCompressionMethod
+                                               (new FileAttribute/1 [])))))))
+        (finally (.endRead this)))))
+
+  (method newInputStream :throws [IOException] ^InputStream [this ^byte/1 path]
+    (.beginRead this)
+    (try
+      (.ensureOpen this)
+      (let [e (.getEntry this path)]
+        (when (nil? e) (throw (NoSuchFileException. (.getString this path))))
+        (when (.isDir e) (throw (FileSystemException. (.getString this path) nil "is a directory")))
+        (.getInputStream this e))
+      (finally (.endRead this))))
+
+  (method ^:private checkOptions ^void [this ^{:tag (Set (? extends OpenOption))} options]
+    (for-each [^OpenOption option options]
+      (when (nil? option) (throw (NullPointerException.)))
+      (when-not (instance? StandardOpenOption option) (throw (IllegalArgumentException.))))
+    (when (and (.contains options StandardOpenOption/APPEND)
+               (.contains options StandardOpenOption/TRUNCATE_EXISTING))
+      (throw (IllegalArgumentException. "APPEND + TRUNCATE_EXISTING not allowed"))))
+
+  (defclass ^:private EntryOutputChannel
+    :extends ByteArrayChannel
+
+    (field ^:final ^Entry e)
+
+    (constructor [this ^Entry e]
+      (super. (if (> (.-size e) 0) (unchecked-int (.-size e)) 8192) false)
+      (set! (.-e this) e)
+      (when (== (.-mtime e) -1) (set! (.-mtime e) (System/currentTimeMillis)))
+      (when (== (.-method e) -1) (set! (.-method e) defaultCompressionMethod))
+      (set! (.-flag e) ZipConstants/FLAG_DATADESCR)
+      (when (.isUTF8 zc) (set! (.-flag e) (bit-or-int (.-flag e) ZipConstants/FLAG_USE_UTF8))))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (.beginWrite super)
+      (try
+        (when-not (not (.isOpen this))
+          (with-resources [^:final os (.getOutputStream ZipFileSystem/this e)]
+            (.write os (.toByteArray this)))
+          (.close super))
+        (finally (.endWrite super)))))
+
+  (method newByteChannel :throws [IOException] ^SeekableByteChannel [this ^byte/1 path
+                                                                     ^{:tag (Set (? extends OpenOption))} options
+                                                                     &
+                                                                     ^{:tag (array (FileAttribute ?))} attrs]
+    (.checkOptions this options)
+    (if (or (.contains options StandardOpenOption/WRITE)
+            (.contains options StandardOpenOption/APPEND))
+        (do
+          (.checkWritable this)
+          (.beginRead this)
+          (.ensureOpen this)
+          (try
+            (let [e (.getEntry this path)]
+              (if (some? e)
+                  (do
+                    (when (or (.isDir e) (.contains options StandardOpenOption/CREATE_NEW))
+                      (throw (FileAlreadyExistsException. (.getString this path))))
+                    (let [^SeekableByteChannel sbc (EntryOutputChannel.
+                                                     ^Entry (if supportPosix
+                                                                ^Entry (PosixEntry.
+                                                                         (cast PosixEntry e)
+                                                                         Entry/NEW)
+                                                                (Entry. e Entry/NEW)))]
+                      (when (.contains options StandardOpenOption/APPEND)
+                        (with-resources [^:final is (.getInputStream this e)]
+                          (let [buf (new byte/1 8192)
+                                bb (ByteBuffer/wrap buf)
+                                ^:mutable ^int n 0]
+                            (while (not (== (set! n (.read is buf)) -1))
+                              (.position bb 0)
+                              (.limit bb n)
+                              (.write sbc bb)))))
+                      sbc))
+                  (do
+                    (when (and (not (.contains options StandardOpenOption/CREATE))
+                               (not (.contains options StandardOpenOption/CREATE_NEW)))
+                      (throw (NoSuchFileException. (.getString this path))))
+                    (.checkParents this path)
+                    (EntryOutputChannel.
+                      ^Entry (if supportPosix
+                                 ^Entry (PosixEntry.
+                                          path
+                                          Entry/NEW
+                                          false
+                                          defaultCompressionMethod
+                                          attrs)
+                                 (Entry. path Entry/NEW false defaultCompressionMethod attrs))))))
+            (finally (.endRead this))))
+        (do
+          (.beginRead this)
+          (try
+            (.ensureOpen this)
+            (let [e (.getEntry this path)]
+              (when (or (nil? e) (.isDir e)) (throw (NoSuchFileException. (.getString this path))))
+              (with-resources [^:final is (.getInputStream this e)]
+                (ByteArrayChannel. (.readAllBytes is) true)))
+            (finally (.endRead this))))))
+
+  (method newFileChannel :throws [IOException] ^FileChannel [this ^byte/1 path
+                                                             ^:mutable ^{:tag (Set (? extends OpenOption))} options
+                                                             &
+                                                             ^{:tag (array (FileAttribute ?))} attrs]
+    (.checkOptions this options)
+    (let [^:final forWrite (or (.contains options StandardOpenOption/WRITE)
+                               (.contains options StandardOpenOption/APPEND))]
+      (.beginRead this)
+      (try
+        (.ensureOpen this)
+        (let [e (.getEntry this path)]
+          (cond
+            forWrite
+              (do
+                (.checkWritable this)
+                (if (nil? e)
+                    (when (and (not (.contains options StandardOpenOption/CREATE))
+                               (not (.contains options StandardOpenOption/CREATE_NEW)))
+                      (throw (NoSuchFileException. (.getString this path))))
+                    (do
+                      (when (.contains options StandardOpenOption/CREATE_NEW)
+                        (throw (FileAlreadyExistsException. (.getString this path))))
+                      (when (.isDir e)
+                        (throw (FileAlreadyExistsException.
+                                 (java-str "directory <" (.getString this path) "> exists"))))))
+                (set! options (HashSet. options))
+                (.remove options StandardOpenOption/CREATE_NEW))
+            (or (nil? e) (.isDir e)) (throw (NoSuchFileException. (.getString this path))))
+          (let [^:final isFCH (and (some? e) (== (.-type e) Entry/FILECH))
+                ^:final ^Path tmpfile (if isFCH (.-file e) (.getTempPathForEntry this path))
+                ^:final fch (.newFileChannel (.provider (.getFileSystem tmpfile))
+                                             tmpfile
+                                             options
+                                             attrs)
+                ^:final ^Entry u (cond
+                                   isFCH e
+                                   supportPosix ^Entry (PosixEntry. path tmpfile Entry/FILECH attrs)
+                                   :else (Entry. path tmpfile Entry/FILECH attrs))]
+            (when forWrite
+              (set! (.-flag u) ZipConstants/FLAG_DATADESCR)
+              (set! (.-method u) defaultCompressionMethod))
+            (anon FileChannel []
+              (method ^:public write :throws [IOException] ^int [this ^ByteBuffer src]
+                (.write fch src))
+
+              (method ^:public write :throws [IOException] ^long [this ^ByteBuffer/1 srcs
+                                                                  ^int offset ^int length]
+                (.write fch srcs offset length))
+
+              (method ^:public position :throws [IOException] ^long [this]
+                (.position fch))
+
+              (method ^:public position :throws [IOException] ^FileChannel [this ^long newPosition]
+                (.position fch newPosition)
+                this)
+
+              (method ^:public size :throws [IOException] ^long [this] (.size fch))
+
+              (method ^:public truncate :throws [IOException] ^FileChannel [this ^long size]
+                (.truncate fch size)
+                this)
+
+              (method ^:public force :throws [IOException] ^void [this ^boolean metaData]
+                (.force fch metaData))
+
+              (method ^:public transferTo :throws [IOException] ^long [this ^long position
+                                                                       ^long count
+                                                                       ^WritableByteChannel target]
+                (.transferTo fch position count target))
+
+              (method ^:public transferFrom :throws [IOException] ^long [this
+                                                                         ^ReadableByteChannel src
+                                                                         ^long position ^long count]
+                (.transferFrom fch src position count))
+
+              (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst]
+                (.read fch dst))
+
+              (method ^:public read :throws [IOException] ^int [this ^ByteBuffer dst ^long position]
+                (.read fch dst position))
+
+              (method ^:public read :throws [IOException] ^long [this ^ByteBuffer/1 dsts ^int offset
+                                                                 ^int length]
+                (.read fch dsts offset length))
+
+              (method ^:public write :throws [IOException] ^int [this ^ByteBuffer src ^long position]
+                (.write fch src position))
+
+              (method ^:public map ^MappedByteBuffer [this ^FileChannel$MapMode mode ^long position
+                                                      ^long size]
+                (throw (UnsupportedOperationException.)))
+
+              (method ^:public lock :throws [IOException] ^FileLock [this ^long position ^long size
+                                                                     ^boolean shared]
+                (.lock fch position size shared))
+
+              (method ^:public tryLock :throws [IOException] ^FileLock [this ^long position
+                                                                        ^long size ^boolean shared]
+                (.tryLock fch position size shared))
+
+              (method ^:protected implCloseChannel :throws [IOException] ^void [this]
+                (.close fch)
+                (if forWrite
+                    (do
+                      (set! (.-mtime u) (System/currentTimeMillis))
+                      (set! (.-size u) (Files/size (.-file u)))
+                      (.update ZipFileSystem/this u))
+                    (when-not isFCH (.removeTempPathForEntry ZipFileSystem/this tmpfile)))))))
+        (finally (.endRead this)))))
+
+  (field ^:private ^{:tag (Set InputStream)} streams (Collections/synchronizedSet (HashSet.)))
+
+  (field ^:private ^:final ^{:tag (Set Path)} tmppaths (Collections/synchronizedSet (HashSet.)))
+
+  (method ^:private getTempPathForEntry :throws [IOException] ^Path [this ^byte/1 path]
+    (let [tmpPath (.createTempFileInSameDirectoryAs this zfpath)]
+      (when (some? path)
+        (let [e (.getEntry this path)]
+          (when (some? e)
+            (with-resources [^:final is (.newInputStream this path)]
+              (Files/copy is tmpPath (new CopyOption/1 [StandardCopyOption/REPLACE_EXISTING]))))))
+      tmpPath))
+
+  (method ^:private removeTempPathForEntry :throws [IOException] ^void [this ^Path path]
+    (Files/delete path)
+    (.remove tmppaths path))
+
+  (method ^:private checkParents :throws [IOException] ^void [this ^:mutable ^byte/1 path]
+    (.beginRead this)
+    (try
+      (while (and (some? (set! path (ZipFileSystem/getParent path)))
+                  (not (identical? path ROOTPATH)))
+        (when-not (.containsKey inodes (IndexNode/keyOf path))
+          (throw (NoSuchFileException. (.getString this path)))))
+      (finally (.endRead this))))
+
+  (method ^:private ^:static getParent ^byte/1 [^byte/1 path]
+    (let [off (ZipFileSystem/getParentOff path)] (if (<= off 1) ROOTPATH (Arrays/copyOf path off))))
+
+  (method ^:private ^:static getParentOff ^int [^byte/1 path]
+    (let [^:mutable off (unchecked-subtract-int (alength path) 1)]
+      (when (and (> off 0) (== (aget path off) \/)) (set! off (unchecked-dec-int off)))
+      (while (and (> off 0) (not (== (aget path off) \/))) (set! off (unchecked-dec-int off)))
+      off))
+
+  (method ^:private beginWrite ^void [this] (.lock (.writeLock rwlock)))
+
+  (method ^:private endWrite ^void [this] (.unlock (.writeLock rwlock)))
+
+  (method ^:private beginRead ^void [this] (.lock (.readLock rwlock)))
+
+  (method ^:private endRead ^void [this] (.unlock (.readLock rwlock)))
+
+  (field ^:private ^:volatile ^boolean isOpen true)
+
+  (field ^:private ^:final ^SeekableByteChannel ch)
+
+  (field ^:final ^byte/1 cen)
+
+  (field ^:private ^END end)
+
+  (field ^:private ^long locpos)
+
+  (field ^:private ^:final ^ReadWriteLock rwlock (ReentrantReadWriteLock.))
+
+  (field ^:private ^{:tag (LinkedHashMap IndexNode IndexNode)} inodes)
+
+  (method ^:final getBytes ^byte/1 [this ^String name]
+    (.getBytes zc name))
+
+  (method ^:final getString ^String [this ^byte/1 name]
+    (.toString zc name))
+
+  (method ^:protected finalize :throws [IOException] ^void [this]
+    (.close this))
+
+  (method ^:final readNBytesAt :throws [IOException] ^long [this ^byte/1 buf ^int off ^long len
+                                                            ^:mutable ^long pos]
+    (let [bb (ByteBuffer/wrap buf)]
+      (.position bb off)
+      (.limit bb (unchecked-int (unchecked-add off len)))
+      (let [^:mutable totalRead 0]
+        (while (< totalRead len)
+          (let [n (.readAt this bb pos)]
+            (when (< n 0) (break))
+            (set! pos (unchecked-add pos n))
+            (set! totalRead (unchecked-add totalRead n))))
+        totalRead)))
+
+  (method ^:private readAt :throws [IOException] ^int [this ^ByteBuffer bb ^long pos]
+    (if-instance [^FileChannel fc ch] (.read fc bb pos) (locking ch (.read (.position ch pos) bb))))
+
+  (method ^:private findEND :throws [IOException] ^END [this]
+    (let [^:mutable buf (new byte/1 ZipConstants/READBLOCKSZ)
+          ziplen (.size ch)
+          minHDR (if (> (unchecked-subtract ziplen ZipConstants/END_MAXLEN) 0)
+                     (unchecked-subtract ziplen ZipConstants/END_MAXLEN)
+                     0)
+          minPos (unchecked-subtract minHDR
+                                     (unchecked-subtract-int (alength buf) ZipConstants/ENDHDR))]
+      (loop [pos (unchecked-subtract ziplen (alength buf))]
+        (when (>= pos minPos)
+          (let [^:mutable ^int off 0]
+            (when (< pos 0)
+              (set! off (unchecked-int (unchecked-negate pos)))
+              (Arrays/fill buf 0 off (unchecked-byte 0)))
+            (let [len (unchecked-subtract-int (alength buf) off)]
+              (when-not (== (.readNBytesAt this buf off len (unchecked-add pos off)) len)
+                (throw (ZipException. "zip END header not found")))
+              (loop [^int i (unchecked-subtract-int (alength buf) ZipConstants/ENDHDR)]
+                (if (>= i 0)
+                    (if (and (and (and (and (== (aget buf i) (unchecked-byte \P))
+                                            (== (aget buf (unchecked-add-int i 1))
+                                                (unchecked-byte \K)))
+                                       (== (aget buf (unchecked-add-int i 2))
+                                           (unchecked-byte \u0005)))
+                                  (== (aget buf (unchecked-add-int i 3)) (unchecked-byte \u0006)))
+                             (== (unchecked-add
+                                   (unchecked-add (unchecked-add pos i) ZipConstants/ENDHDR)
+                                   (ZipConstants/ENDCOM buf i))
+                                 ziplen))
+                        (do
+                          (set!
+                            buf
+                            (Arrays/copyOfRange buf i (unchecked-add-int i ZipConstants/ENDHDR)))
+                          (let [end (END.)]
+                            (set! (.-centot end) (ZipConstants/ENDTOT buf))
+                            (set! (.-cenlen end) (ZipConstants/ENDSIZ buf))
+                            (set! (.-cenoff end) (ZipConstants/ENDOFF buf))
+                            (set! (.-endpos end) (unchecked-add pos i))
+                            (let [loc64 (new byte/1 ZipConstants/ZIP64_LOCHDR)]
+                              (when (or (or (< (.-endpos end) ZipConstants/ZIP64_LOCHDR)
+                                            (not
+                                              (==
+                                                (.readNBytesAt
+                                                  this
+                                                  loc64
+                                                  0
+                                                  (alength loc64)
+                                                  (unchecked-subtract
+                                                    (.-endpos end)
+                                                    ZipConstants/ZIP64_LOCHDR))
+                                                (alength loc64))))
+                                        (not (ZipConstants/locator64SigAt loc64 0)))
+                                (return end))
+                              (let [end64pos (ZipConstants/ZIP64_LOCOFF loc64)
+                                    end64buf (new byte/1 ZipConstants/ZIP64_ENDHDR)]
+                                (when (or (not (==
+                                                 (.readNBytesAt
+                                                   this
+                                                   end64buf
+                                                   0
+                                                   (alength end64buf)
+                                                   end64pos)
+                                                 (alength end64buf)))
+                                          (not (ZipConstants/end64SigAt end64buf 0)))
+                                  (return end))
+                                (let [cenlen64 (ZipConstants/ZIP64_ENDSIZ end64buf)
+                                      cenoff64 (ZipConstants/ZIP64_ENDOFF end64buf)
+                                      centot64 (ZipConstants/ZIP64_ENDTOT end64buf)]
+                                  (when (or
+                                          (or
+                                            (and
+                                              (not (== cenlen64 (.-cenlen end)))
+                                              (not (== (.-cenlen end) ZipConstants/ZIP64_MINVAL)))
+                                            (and
+                                              (not (== cenoff64 (.-cenoff end)))
+                                              (not (== (.-cenoff end) ZipConstants/ZIP64_MINVAL))))
+                                          (and
+                                            (not (== centot64 (.-centot end)))
+                                            (not (== (.-centot end) ZipConstants/ZIP64_MINVAL32))))
+                                    (return end))
+                                  (set! (.-cenlen end) cenlen64)
+                                  (set! (.-cenoff end) cenoff64)
+                                  (set! (.-centot end) (unchecked-int centot64))
+                                  (set! (.-endpos end) end64pos)
+                                  (return end))))))
+                        (recur (unchecked-dec-int i)))
+                    nil))
+              (recur
+                (unchecked-subtract pos (unchecked-subtract-int (alength buf) ZipConstants/ENDHDR)))))))
+      (throw (ZipException. "zip END header not found"))))
+
+  (method ^:private makeParentDirs ^void [this ^:mutable ^IndexNode node ^IndexNode root]
+    (let [^:mutable ^IndexNode parent nil
+          ^:mutable lookup (ParentLookup.)]
+      (while true
+        (let [off (ZipFileSystem/getParentOff (.-name node))]
+          (when (<= off 1)
+            (set! (.-sibling node) (.-child root))
+            (set! (.-child root) node)
+            (break))
+          (set! lookup (.as lookup (.-name node) off))
+          (set! parent (cast IndexNode (.get inodes lookup)))
+          (when (some? parent)
+            (set! (.-sibling node) (.-child parent))
+            (set! (.-child parent) node)
+            (break))
+          (set! parent (IndexNode. (Arrays/copyOf (.-name node) off) true))
+          (.put inodes parent parent)
+          (set! (.-sibling node) (.-child parent))
+          (set! (.-child parent) node)
+          (set! node parent)))))
+
+  (method ^:private buildNodeTree ^void [this]
+    (.beginWrite this)
+    (try
+      (let [^:mutable root (cast IndexNode (.remove inodes (.as LOOKUPKEY ROOTPATH)))]
+        (when (nil? root) (set! root (IndexNode. ROOTPATH true)))
+        (let [nodes (cast IndexNode/1 (.toArray (.values inodes) (new IndexNode/1 0)))]
+          (.put inodes root root)
+          (for-each [^IndexNode node nodes] (.makeParentDirs this node root))))
+      (finally (.endWrite this))))
+
+  (method ^:private removeFromTree ^void [this ^IndexNode inode]
+    (let [parent (cast IndexNode
+                       (.get inodes (.as LOOKUPKEY (ZipFileSystem/getParent (.-name inode)))))
+          ^:mutable child (.-child parent)]
+      (if (.equals child inode)
+          (set! (.-child parent) (.-sibling child))
+          (let [^:mutable last child]
+            (while (some? (set! child (.-sibling child)))
+              (if (.equals child inode)
+                  (do (set! (.-sibling last) (.-sibling child)) (break))
+                  (set! last child)))))))
+
+  (method ^:private determineReleaseVersion :throws [IOException] ^{:tag (Optional Integer)} [this
+                                                                                              ^{:tag (Map String ?)} env]
+    (let [o (if (.containsKey env PROPERTY_RELEASE_VERSION)
+                (.get env PROPERTY_RELEASE_VERSION)
+                (.get env PROPERTY_MULTI_RELEASE))]
+      (if (or (nil? o) (not (.isMultiReleaseJar this)))
+          (Optional/empty)
+          (let [^int version (switch o
+                               [^String s :when (.equals s "runtime")] (.feature (Runtime/version))
+                               [^String s :when (.matches s "^[1-9][0-9]*$")]
+                                 (.feature (Runtime$Version/parse s))
+                               [^Integer i] (.feature (Runtime$Version/parse (.toString i)))
+                               [^Runtime$Version v] (.feature v)
+                               [^String s]
+                                 (throw (IllegalArgumentException.
+                                          (java-str "Invalid runtime version: " s)))
+                               (throw (IllegalArgumentException.
+                                        "env parameter must be String, Integer, or Version")))]
+            (Optional/of (^[int int] Math/max version 0))))))
+
+  (method ^:private isMultiReleaseJar :throws [IOException] ^boolean [this]
+    (try
+      (with-resources [^:final is (.newInputStream this (.getBytes this "/META-INF/MANIFEST.MF"))]
+        (let [multiRelease (.getValue (.getMainAttributes (Manifest. is))
+                                      Attributes$Name/MULTI_RELEASE)]
+          (.equalsIgnoreCase "true" multiRelease)))
+      (catch NoSuchFileException x false)))
+
+  (method ^:private createVersionedLinks ^{:tag (Function byte/1 byte/1)} [this ^int version]
+    (let [verdir (.getInode this (.getBytes this "/META-INF/versions"))]
+      (if (nil? verdir)
+          (Function/identity)
+          (let [^{:tag (HashMap IndexNode byte/1)} aliasMap (HashMap.)]
+            (.forEach (.values (.getVersionMap this version verdir))
+                      (lambda Consumer ^void [^IndexNode versionNode]
+                        (.walk this
+                               (.-child versionNode)
+                               (lambda Consumer ^void [^IndexNode entryNode]
+                                 (.put aliasMap
+                                       (.getOrCreateInode
+                                         this
+                                         (.getRootName this entryNode versionNode)
+                                         (.-isdir entryNode))
+                                       (.-name entryNode))))))
+            (lambda Function ^byte/1 [^byte/1 path]
+              (cast byte/1 (.getOrDefault aliasMap (IndexNode/keyOf path) path)))))))
+
+  (method lookupPath ^byte/1 [this ^byte/1 resolvedPath]
+    (cast byte/1 (.apply entryLookup resolvedPath)))
+
+  (method ^:private getVersionMap ^{:tag (TreeMap Integer IndexNode)} [this ^int version
+                                                                       ^IndexNode metaInfVersions]
+    (let [^{:tag (TreeMap Integer IndexNode)} map (TreeMap.)
+          ^:mutable child (.-child metaInfVersions)]
+      (while (some? child)
+        (let [key (.getVersion this child metaInfVersions)]
+          (when (and (some? key) (<= key version)) (.put map key child))
+          (set! child (.-sibling child))))
+      map))
+
+  (method ^:private getVersion ^Integer [this ^IndexNode inode ^IndexNode metaInfVersions]
+    (try
+      (let [fullName (.-name inode)]
+        (Integer/parseInt
+          (.getString this
+                      (Arrays/copyOfRange fullName
+                                          (unchecked-add-int (alength (.-name metaInfVersions)) 1)
+                                          (alength fullName)))))
+      (catch NumberFormatException x nil)))
+
+  (method ^:private walk ^void [this ^IndexNode inode ^{:tag (Consumer IndexNode)} consumer]
+    (when (some? inode)
+      (if (.isDir inode) (.walk this (.-child inode) consumer) (.accept consumer inode))
+      (.walk this (.-sibling inode) consumer)))
+
+  (method ^:private getRootName ^byte/1 [this ^IndexNode inode ^IndexNode prefix]
+    (let [fullName (.-name inode)]
+      (Arrays/copyOfRange fullName (alength (.-name prefix)) (alength fullName))))
+
+  (method ^:private initCEN :throws [IOException] ^byte/1 [this]
+    (set! end (.findEND this))
+    (if (== (.-endpos end) 0)
+        (do (set! inodes (LinkedHashMap. 10)) (set! locpos 0) (.buildNodeTree this) nil)
+        (do
+          (when (> (.-cenlen end) (.-endpos end))
+            (throw (ZipException. "invalid END header (bad central directory size)")))
+          (let [cenpos (unchecked-subtract (.-endpos end) (.-cenlen end))]
+            (set! locpos (unchecked-subtract cenpos (.-cenoff end)))
+            (when (< locpos 0)
+              (throw (ZipException. "invalid END header (bad central directory offset)")))
+            (let [cen (new byte/1
+                           (unchecked-int (unchecked-add (.-cenlen end) ZipConstants/ENDHDR)))]
+              (when-not (== (.readNBytesAt this cen 0 (alength cen) cenpos)
+                            (unchecked-add (.-cenlen end) ZipConstants/ENDHDR))
+                (throw (ZipException. "read CEN tables failed")))
+              (set! inodes (LinkedHashMap/newLinkedHashMap (unchecked-add-int (.-centot end) 1)))
+              (let [^:mutable ^int pos 0
+                    limit (unchecked-subtract-int (alength cen) ZipConstants/ENDHDR)]
+                (while (< pos limit)
+                  (when-not (ZipConstants/cenSigAt cen pos)
+                    (throw (ZipException. "invalid CEN header (bad signature)")))
+                  (let [method (ZipConstants/CENHOW cen pos)
+                        nlen (ZipConstants/CENNAM cen pos)
+                        elen (ZipConstants/CENEXT cen pos)
+                        clen (ZipConstants/CENCOM cen pos)
+                        flag (ZipConstants/CENFLG cen pos)
+                        csize (ZipConstants/CENSIZ cen pos)
+                        size (ZipConstants/CENLEN cen pos)
+                        locoff (ZipConstants/CENOFF cen pos)
+                        diskNo (ZipConstants/CENDSK cen pos)]
+                    (when-not (== (bit-and-int flag 1) 0)
+                      (throw (ZipException. "invalid CEN header (encrypted entry)")))
+                    (when (and (not (== method ZipConstants/METHOD_STORED))
+                               (not (== method ZipConstants/METHOD_DEFLATED)))
+                      (throw (ZipException.
+                               (java-str "invalid CEN header (unsupported compression method: "
+                                         method
+                                         ")"))))
+                    (let [headerSize (unchecked-add
+                                       (unchecked-add
+                                         (unchecked-add (long ZipConstants/CENHDR) nlen)
+                                         clen)
+                                       elen)]
+                      (when (or (> headerSize 0xFFFF) (> (unchecked-add pos headerSize) limit))
+                        (ZipFileSystem/zerror "invalid CEN header (bad header size)"))
+                      (cond
+                        (> elen 0)
+                          (.checkExtraFields this
+                                             cen
+                                             pos
+                                             size
+                                             csize
+                                             locoff
+                                             diskNo
+                                             (unchecked-add-int
+                                               (unchecked-add-int pos ZipConstants/CENHDR)
+                                               nlen)
+                                             elen)
+                        (and (== elen 0)
+                             (or (or (or (== size ZipConstants/ZIP64_MINVAL)
+                                         (== csize ZipConstants/ZIP64_MINVAL))
+                                     (== locoff ZipConstants/ZIP64_MINVAL))
+                                 (== diskNo ZipConstants/ZIP64_MINVAL32)))
+                          (throw
+                            (ZipException. "Invalid CEN header (invalid zip64 extra len size)")))
+                      (let [inode (IndexNode. cen pos nlen)]
+                        (when (.pathHasDotOrDotDot inode)
+                          (throw (ZipException.
+                                   (java-str
+                                     "ZIP file can't be opened as a file system because entry \""
+                                     (.nameAsString inode)
+                                     "\" has a '.' or '..' element in its name"))))
+                        (.put inodes inode inode)
+                        (if (or (.isUTF8 zc)
+                                (not (== (bit-and-int flag ZipConstants/FLAG_USE_UTF8) 0)))
+                            (.checkUTF8 this (.-name inode))
+                            (.checkEncoding this (.-name inode)))
+                        (set! pos
+                              (unchecked-add-int
+                                pos
+                                (unchecked-add-int
+                                  (unchecked-add-int
+                                    (unchecked-add-int ZipConstants/CENHDR nlen)
+                                    elen)
+                                  clen)))))))
+                (when-not (== (unchecked-add-int pos ZipConstants/ENDHDR) (alength cen))
+                  (throw (ZipException. "invalid CEN header (bad header size)")))
+                (.buildNodeTree this)
+                cen))))))
+
+  (method ^:private checkExtraFields :throws [ZipException] ^void [this ^byte/1 cen ^int cenPos
+                                                                   ^long size ^long csize
+                                                                   ^long locoff ^int diskNo
+                                                                   ^int startingOffset
+                                                                   ^int extraFieldLen]
+    (when (> extraFieldLen 0xFFFF) (ZipFileSystem/zerror "invalid extra field length"))
+    (let [extraEndOffset (unchecked-add-int startingOffset extraFieldLen)]
+      (when (> extraEndOffset (unchecked-subtract-int (alength cen) ZipConstants/ENDHDR))
+        (ZipFileSystem/zerror "Invalid CEN header (extra data field size too long)"))
+      (let [^:mutable currentOffset startingOffset]
+        (while (<= (unchecked-add-int currentOffset Integer/BYTES) extraEndOffset)
+          (let [tag (ZipConstants/SH cen currentOffset)]
+            (set! currentOffset (unchecked-add-int currentOffset Short/BYTES))
+            (let [tagBlockSize (ZipConstants/SH cen currentOffset)]
+              (set! currentOffset (unchecked-add-int currentOffset Short/BYTES))
+              (let [tagBlockEndingOffset (unchecked-add (long currentOffset) tagBlockSize)]
+                (when (> tagBlockEndingOffset extraEndOffset)
+                  (ZipFileSystem/zerror
+                    (String/format
+                      "Invalid CEN header (invalid extra data field size for tag: 0x%04x at %d)"
+                      (new Object/1 [tag cenPos]))))
+                (when (== tag ZipConstants/EXTID_ZIP64)
+                  (.checkZip64ExtraFieldValues this
+                                               cen
+                                               currentOffset
+                                               tagBlockSize
+                                               csize
+                                               size
+                                               locoff
+                                               diskNo))
+                (set! currentOffset (unchecked-add-int currentOffset tagBlockSize)))))))))
+
+  (method ^:private checkZip64ExtraFieldValues :throws [ZipException] ^void [this ^byte/1 cen
+                                                                             ^:mutable ^int off
+                                                                             ^:mutable ^int blockSize
+                                                                             ^long csize ^long size
+                                                                             ^long locoff
+                                                                             ^int diskNo]
+    (if (== blockSize 0)
+        (when (or (or (or (== csize ZipConstants/ZIP64_MINVAL) (== size ZipConstants/ZIP64_MINVAL))
+                      (== locoff ZipConstants/ZIP64_MINVAL))
+                  (== diskNo ZipConstants/ZIP64_MINVAL32))
+          (ZipFileSystem/zerror "Invalid CEN header (invalid zip64 extra data field size)"))
+        (do
+          (when-not (ZipFileSystem/isZip64ExtBlockSizeValid blockSize csize size locoff diskNo)
+            (ZipFileSystem/zerror "Invalid CEN header (invalid zip64 extra data field size)"))
+          (when (== size ZipConstants/ZIP64_MINVAL)
+            (if (>= blockSize Long/BYTES)
+                (do
+                  (when (< (ZipConstants/LL cen off) 0)
+                    (ZipFileSystem/zerror "Invalid zip64 extra block size value"))
+                  (set! off (unchecked-add-int off Long/BYTES))
+                  (set! blockSize (unchecked-subtract-int blockSize Long/BYTES)))
+                (ZipFileSystem/zerror "Invalid Zip64 extra block, missing size")))
+          (when (== csize ZipConstants/ZIP64_MINVAL)
+            (if (>= blockSize Long/BYTES)
+                (do
+                  (when (< (ZipConstants/LL cen off) 0)
+                    (ZipFileSystem/zerror "Invalid zip64 extra block compressed size value"))
+                  (set! off (unchecked-add-int off Long/BYTES))
+                  (set! blockSize (unchecked-subtract-int blockSize Long/BYTES)))
+                (ZipFileSystem/zerror "Invalid Zip64 extra block, missing compressed size")))
+          (when (== locoff ZipConstants/ZIP64_MINVAL)
+            (if (>= blockSize Long/BYTES)
+                (when (< (ZipConstants/LL cen off) 0)
+                  (ZipFileSystem/zerror "Invalid zip64 extra block LOC OFFSET value"))
+                (ZipFileSystem/zerror "Invalid Zip64 extra block, missing LOC offset value"))))))
+
+  (method ^:private ^:static isZip64ExtBlockSizeValid ^boolean [^int blockSize ^long csize
+                                                                ^long size ^long locoff ^int diskNo]
+    (let [expectedBlockSize (unchecked-add-int
+                              (unchecked-add-int
+                                (unchecked-add-int
+                                  (if (== csize ZipConstants/ZIP64_MINVAL) Long/BYTES 0)
+                                  (if (== size ZipConstants/ZIP64_MINVAL) Long/BYTES 0))
+                                (if (== locoff ZipConstants/ZIP64_MINVAL) Long/BYTES 0))
+                              (if (== diskNo ZipConstants/ZIP64_MINVAL32) Integer/BYTES 0))]
+      (== expectedBlockSize blockSize)))
+
+  (method ^:private ^:final checkUTF8 :throws [ZipException] ^void [this ^byte/1 a]
+    (try
+      (let [end (alength a)
+            ^:mutable ^int pos 0]
+        (while (< pos end)
+          (when (< (aget a pos) 0) (.toString zc (Arrays/copyOfRange a pos (alength a))) (break))
+          (set! pos (unchecked-inc-int pos))))
+      (catch Exception e (throw (ZipException. "invalid CEN header (bad entry name)")))))
+
+  (method ^:private ^:static zerror :throws [ZipException] ^void [^String msg]
+    (throw (ZipException. msg)))
+
+  (method ^:private ^:final checkEncoding :throws [ZipException] ^void [this ^byte/1 a]
+    (try
+      (.toString zc a)
+      (catch Exception e (throw (ZipException. "invalid CEN header (bad entry name)")))))
+
+  (method ^:private ensureOpen ^void [this]
+    (when-not isOpen (throw (ClosedFileSystemException.))))
+
+  (method ^:private createTempFileInSameDirectoryAs :throws [IOException] ^Path [this ^Path path]
+    (let [parent (.getParent (.toAbsolutePath path))
+          ^Path dir (if (nil? parent) (.getPath (.getFileSystem path) ".") parent)
+          tmpPath (Files/createTempFile dir "zipfstmp" nil (new FileAttribute/1 []))]
+      (.add tmppaths tmpPath)
+      tmpPath))
+
+  (field ^:private ^boolean hasUpdate false)
+
+  (field ^:private ^:final ^IndexNode LOOKUPKEY (IndexNode. nil -1))
+
+  (method ^:private updateDelete ^void [this ^IndexNode inode]
+    (.beginWrite this)
+    (try
+      (.removeFromTree this inode)
+      (.remove inodes inode)
+      (set! hasUpdate true)
+      (finally (.endWrite this))))
+
+  (method ^:private update ^void [this ^Entry e]
+    (.beginWrite this)
+    (try
+      (let [old (cast IndexNode (.put inodes e e))]
+        (when (some? old) (.removeFromTree this old))
+        (when (or (or (== (.-type e) Entry/NEW) (== (.-type e) Entry/FILECH))
+                  (== (.-type e) Entry/COPY))
+          (let [parent (cast IndexNode
+                             (.get inodes (.as LOOKUPKEY (ZipFileSystem/getParent (.-name e)))))]
+            (set! (.-sibling e) (.-child parent))
+            (set! (.-child parent) e)))
+        (set! hasUpdate true))
+      (finally (.endWrite this))))
+
+  (method ^:private copyLOCEntry :throws [IOException] ^long [this ^Entry e ^boolean updateHeader
+                                                              ^OutputStream os
+                                                              ^:mutable ^long written ^byte/1 buf]
+    (let [^:mutable locoff (.-locoff e)]
+      (set! (.-locoff e) written)
+      (let [^:mutable size 0]
+        (when-not (== (bit-and-int (.-flag e) ZipConstants/FLAG_DATADESCR) 0)
+          (if (or (>= (.-size e) ZipConstants/ZIP64_MINVAL)
+                  (>= (.-csize e) ZipConstants/ZIP64_MINVAL))
+              (set! size 24)
+              (set! size 16)))
+        (when-not (== (.readNBytesAt this buf 0 (unchecked-add-int ZipConstants/LOCHDR 1) locoff)
+                      (unchecked-add-int ZipConstants/LOCHDR 1))
+          (throw (ZipException. "loc: reading failed")))
+        (if (or updateHeader
+                (and (> (ZipConstants/LOCNAM buf) 0) (== (aget buf ZipConstants/LOCHDR) \/)))
+            (do
+              (set! locoff
+                    (unchecked-add locoff
+                                   (unchecked-add-int
+                                     (unchecked-add-int
+                                       ZipConstants/LOCHDR
+                                       (ZipConstants/LOCNAM buf))
+                                     (ZipConstants/LOCEXT buf))))
+              (set! size (unchecked-add size (.-csize e)))
+              (set! written (unchecked-add (.writeLOC e os) size)))
+            (do
+              (.write os buf 0 ZipConstants/LOCHDR)
+              (set! locoff (unchecked-add locoff ZipConstants/LOCHDR))
+              (set! size
+                    (unchecked-add size
+                                   (unchecked-add
+                                     (unchecked-add-int
+                                       (ZipConstants/LOCNAM buf)
+                                       (ZipConstants/LOCEXT buf))
+                                     (.-csize e))))
+              (set! written (unchecked-add ZipConstants/LOCHDR size))))
+        (let [^:mutable ^int n 0]
+          (while (and (> size 0)
+                      (not (== (set!
+                                 n
+                                 (unchecked-int (.readNBytesAt this buf 0 (alength buf) locoff)))
+                               -1)))
+            (when (< size n) (set! n (unchecked-int size)))
+            (.write os buf 0 n)
+            (set! size (unchecked-subtract size n))
+            (set! locoff (unchecked-add locoff n)))
+          written))))
+
+  (method ^:private writeEntry :throws [IOException] ^long [this ^Entry e ^OutputStream os]
+    (if (and (nil? (.-bytes e)) (nil? (.-file e)))
+        0
+        (let [^:mutable written 0]
+          (if (and (and (not (== (.-method e) ZipConstants/METHOD_STORED)) (> (.-csize e) 0))
+                   (or (not (== (.-crc e) 0)) (== (.-size e) 0)))
+              (.writeTo this e os)
+              (with-resources [^:final ^OutputStream os2 (if (==
+                                                               (.-method e)
+                                                               ZipConstants/METHOD_STORED)
+                                                             ^OutputStream (EntryOutputStreamCRC32.
+                                                                             e
+                                                                             os)
+                                                             ^OutputStream (EntryOutputStreamDef.
+                                                                             e
+                                                                             os))]
+                (.writeTo this e os2)))
+          (set! written (unchecked-add written (.-csize e)))
+          (when-not (== (bit-and-int (.-flag e) ZipConstants/FLAG_DATADESCR) 0)
+            (set! written (unchecked-add written (.writeEXT e os))))
+          written)))
+
+  (method ^:private writeTo :throws [IOException] ^void [this ^Entry e ^OutputStream os]
+    (if (some? (.-bytes e))
+        (.write os (.-bytes e) 0 (alength (.-bytes e)))
+        (when (some? (.-file e))
+          (when (or (== (.-type e) Entry/NEW) (== (.-type e) Entry/FILECH))
+            (with-resources [^:final is (Files/newInputStream (.-file e))] (.transferTo is os)))
+          (Files/delete (.-file e))
+          (.remove tmppaths (.-file e)))))
+
+  (method ^:private sync :throws [IOException] ^void [this]
+    (when-not (not hasUpdate)
+      (let [attrs (.getPosixAttributes this zfpath)
+            tmpFile (.createTempFileInSameDirectoryAs this zfpath)]
+        (with-resources [^:final ^OutputStream os (BufferedOutputStream.
+                                                    (Files/newOutputStream
+                                                      tmpFile
+                                                      StandardOpenOption/WRITE))]
+          (let [^{:tag (ArrayList Entry)} elist (ArrayList. (.size inodes))
+                ^:mutable written 0
+                ^:mutable ^byte/1 buf nil
+                ^:mutable ^Entry e nil
+                ^:final manifestInode (cast IndexNode
+                                            (.get
+                                              inodes
+                                              (IndexNode/keyOf
+                                                (.getBytes this "/META-INF/MANIFEST.MF"))))
+                ^:final ^{:tag (Iterator IndexNode)} inodeIterator (.iterator (.values inodes))
+                ^:mutable manifestProcessed false]
+            (while (.hasNext inodeIterator)
+              (let [^:mutable ^IndexNode inode nil]
+                (cond
+                  (nil? manifestInode) (set! inode (cast IndexNode (.next inodeIterator)))
+                  manifestProcessed
+                    (do
+                      (set! inode (cast IndexNode (.next inodeIterator)))
+                      (when (identical? inode manifestInode) (continue)))
+                  :else (do (set! inode manifestInode) (set! manifestProcessed true)))
+                (if (instance? Entry inode)
+                    (do
+                      (set! e (cast Entry inode))
+                      (try
+                        (if (== (.-type e) Entry/COPY)
+                            (do
+                              (when (nil? buf) (set! buf (new byte/1 8192)))
+                              (set! written
+                                    (unchecked-add
+                                      written
+                                      (.copyLOCEntry this e true os written buf))))
+                            (do
+                              (set! (.-locoff e) written)
+                              (set! written (unchecked-add written (.writeLOC e os)))
+                              (set! written (unchecked-add written (.writeEntry this e os)))))
+                        (.add elist e)
+                        (catch IOException x (.printStackTrace x))))
+                    (when-not (== (.-pos inode) -1)
+                      (when-not (and (== (alength (.-name inode)) 1)
+                                     (== (aget (.-name inode) 0) \/))
+                        (set! e
+                              (if supportPosix ^Entry (PosixEntry. this inode) (Entry. this inode)))
+                        (try
+                          (when (nil? buf) (set! buf (new byte/1 8192)))
+                          (set! written
+                                (unchecked-add written (.copyLOCEntry this e false os written buf)))
+                          (.add elist e)
+                          (catch IOException x (.printStackTrace x))))))))
+            (set! (.-cenoff end) written)
+            (for-each [^Entry entry elist]
+              (set! written (unchecked-add written (.writeCEN entry os))))
+            (set! (.-centot end) (.size elist))
+            (set! (.-cenlen end) (unchecked-subtract written (.-cenoff end)))
+            (.write end os written forceEnd64)))
+        (.close ch)
+        (Files/delete zfpath)
+        (when (some? attrs) (Files/setPosixFilePermissions tmpFile (.permissions attrs)))
+        (Files/move tmpFile zfpath StandardCopyOption/REPLACE_EXISTING)
+        (set! hasUpdate false))))
+
+  (method ^:private getPosixAttributes :throws [IOException] ^PosixFileAttributes [this ^Path path]
+    (try
+      (let [view (cast PosixFileAttributeView
+                       (Files/getFileAttributeView path PosixFileAttributeView))]
+        (when (some? view) (.readAttributes view)))
+      (catch UnsupportedOperationException e nil)))
+
+  (method ^:private getInode ^IndexNode [this ^byte/1 path]
+    (cast IndexNode
+          (.get inodes
+                (IndexNode/keyOf
+                  (cast byte/1
+                        (Objects/requireNonNull (cast byte/1 (.apply entryLookup path)) "path"))))))
+
+  (method ^:private getOrCreateInode ^IndexNode [this ^byte/1 path ^boolean isdir]
+    (let [^:mutable node (.getInode this path)]
+      (if (some? node)
+          node
+          (do
+            (set! node (IndexNode. path isdir))
+            (.beginWrite this)
+            (try
+              (.makeParentDirs this
+                               node
+                               (cast IndexNode
+                                     (Objects/requireNonNull
+                                       (cast IndexNode (.get inodes (IndexNode/keyOf ROOTPATH)))
+                                       "no root node found")))
+              node
+              (finally (.endWrite this)))))))
+
+  (method ^:private getEntry :throws [IOException] ^Entry [this ^byte/1 path]
+    (let [inode (.getInode this path)]
+      (if (instance? Entry inode)
+          (cast Entry inode)
+          (when-not (or (nil? inode) (== (.-pos inode) -1))
+            (if supportPosix ^Entry (PosixEntry. this inode) (Entry. this inode))))))
+
+  (method ^:public deleteFile :throws [IOException] ^void [this ^byte/1 path
+                                                           ^boolean failIfNotExists]
+    (.checkWritable this)
+    (let [inode (.getInode this path)]
+      (if (nil? inode)
+          (do
+            (when (and (some? path) (== (alength path) 0))
+              (throw (ZipException. "root directory </> cannot be deleted")))
+            (when failIfNotExists (throw (NoSuchFileException. (.getString this path)))))
+          (do
+            (when (and (.isDir inode) (some? (.-child inode)))
+              (throw (DirectoryNotEmptyException. (.getString this path))))
+            (.updateDelete this inode)))))
+
+  (method ^:private getOutputStream :throws [IOException] ^OutputStream [this ^Entry e]
+    (when (== (.-mtime e) -1) (set! (.-mtime e) (System/currentTimeMillis)))
+    (when (== (.-method e) -1) (set! (.-method e) defaultCompressionMethod))
+    (set! (.-flag e) ZipConstants/FLAG_DATADESCR)
+    (when (.isUTF8 zc) (set! (.-flag e) (bit-or-int (.-flag e) ZipConstants/FLAG_USE_UTF8)))
+    (let [^:mutable ^OutputStream os nil]
+      (if (or useTempFile (>= (.-size e) tempFileCreationThreshold))
+          (do
+            (set! (.-file e) (.getTempPathForEntry this nil))
+            (set! os (Files/newOutputStream (.-file e) StandardOpenOption/WRITE)))
+          (set! os (FileRolloverOutputStream. e)))
+      (if (== (.-method e) ZipConstants/METHOD_DEFLATED)
+          (DeflatingEntryOutputStream. e os)
+          (EntryOutputStream. e os))))
+
+  (defclass ^:private EntryOutputStream
+    :extends FilterOutputStream
+
+    (field ^:private ^:final ^Entry e)
+
+    (field ^:private ^long written)
+
+    (field ^:private ^boolean isClosed)
+
+    (constructor [this ^Entry e ^OutputStream os]
+      (super. os)
+      (set! (.-e this) (cast Entry (Objects/requireNonNull e "Zip entry is null"))))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^int b]
+      (.write (.-out this) b)
+      (set! written (unchecked-add written 1)))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                       ^int len]
+      (.write (.-out this) b off len)
+      (set! written (unchecked-add written len)))
+
+    (method ^:public ^:synchronized close :throws [IOException] ^void [this]
+      (when-not isClosed
+        (set! isClosed true)
+        (set! (.-size e) written)
+        (when-instance [^FileRolloverOutputStream fros (.-out this)]
+          (when (nil? (.-tmpFileOS fros)) (set! (.-bytes e) (.toByteArray fros))))
+        (.close super)
+        (.update ZipFileSystem/this e))))
+
+  (defclass ^:private DeflatingEntryOutputStream
+    :extends DeflaterOutputStream
+
+    (field ^:private ^:final ^CRC32 crc)
+
+    (field ^:private ^:final ^Entry e)
+
+    (field ^:private ^boolean isClosed)
+
+    (constructor [this ^Entry e ^OutputStream os]
+      (super. os (.getDeflater ZipFileSystem/this))
+      (set! (.-e this) (cast Entry (Objects/requireNonNull e "Zip entry is null")))
+      (set! (.-crc this) (CRC32.)))
+
+    (method ^:public ^:synchronized write :throws [IOException] ^void [this ^byte/1 b ^int off
+                                                                       ^int len]
+      (.write super b off len)
+      (.update crc b off len))
+
+    (method ^:public ^:synchronized close :throws [IOException] ^void [this]
+      (when-not isClosed
+        (set! isClosed true)
+        (.finish this)
+        (set! (.-size e) (.getBytesRead (.-def this)))
+        (set! (.-csize e) (.getBytesWritten (.-def this)))
+        (set! (.-crc e) (.getValue crc))
+        (when-instance [^FileRolloverOutputStream fros (.-out this)]
+          (when (nil? (.-tmpFileOS fros)) (set! (.-bytes e) (.toByteArray fros))))
+        (.close super)
+        (.update ZipFileSystem/this e)
+        (.releaseDeflater ZipFileSystem/this (.-def this)))))
+
+  (defclass ^:private EntryOutputStreamCRC32
+    :extends FilterOutputStream
+
+    (field ^:private ^:final ^CRC32 crc)
+
+    (field ^:private ^:final ^Entry e)
+
+    (field ^:private ^long written)
+
+    (field ^:private ^boolean isClosed)
+
+    (constructor [this ^Entry e ^OutputStream os]
+      (super. os)
+      (set! (.-e this) (cast Entry (Objects/requireNonNull e "Zip entry is null")))
+      (set! (.-crc this) (CRC32.)))
+
+    (method ^:public write :throws [IOException] ^void [this ^int b]
+      (.write (.-out this) b)
+      (.update crc b)
+      (set! written (unchecked-add written 1)))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (.write (.-out this) b off len)
+      (.update crc b off len)
+      (set! written (unchecked-add written len)))
+
+    (method ^:public close ^void [this]
+      (when-not isClosed
+        (set! isClosed true)
+        (set! (.-size e) (set! (.-csize e) written))
+        (set! (.-crc e) (.getValue crc)))))
+
+  (defclass ^:private EntryOutputStreamDef
+    :extends DeflaterOutputStream
+
+    (field ^:private ^:final ^CRC32 crc)
+
+    (field ^:private ^:final ^Entry e)
+
+    (field ^:private ^boolean isClosed)
+
+    (constructor [this ^Entry e ^OutputStream os]
+      (super. os (.getDeflater ZipFileSystem/this))
+      (set! (.-e this) (cast Entry (Objects/requireNonNull e "Zip entry is null")))
+      (set! (.-crc this) (CRC32.)))
+
+    (method ^:public write :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (.write super b off len)
+      (.update crc b off len))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (when-not isClosed
+        (set! isClosed true)
+        (.finish this)
+        (set! (.-size e) (.getBytesRead (.-def this)))
+        (set! (.-csize e) (.getBytesWritten (.-def this)))
+        (set! (.-crc e) (.getValue crc))
+        (.releaseDeflater ZipFileSystem/this (.-def this)))))
+
+  (defclass ^:private FileRolloverOutputStream
+    :extends OutputStream
+
+    (field ^:private ^ByteArrayOutputStream baos (ByteArrayOutputStream. 8192))
+
+    (field ^:private ^:final ^Entry entry)
+
+    (field ^:private ^OutputStream tmpFileOS)
+
+    (field ^:private ^long totalWritten 0)
+
+    (constructor ^:private [this ^:final ^Entry e] (set! (.-entry this) e))
+
+    (method ^:public write :throws [IOException] ^void [this ^:final ^int b]
+      (cond
+        (some? tmpFileOS) (.writeToFile this b)
+        (< (unchecked-add totalWritten 1) tempFileCreationThreshold)
+          (do (.write baos b) (set! totalWritten (unchecked-inc totalWritten)))
+        :else (do (.transferToFile this) (.writeToFile this b))))
+
+    (method ^:public write :throws [IOException] ^void [this ^:final ^byte/1 b]
+      (.write this b 0 (alength b)))
+
+    (method ^:public write :throws [IOException] ^void [this ^:final ^byte/1 b ^:final ^int off
+                                                        ^:final ^int len]
+      (cond
+        (some? tmpFileOS) (.writeToFile this b off len)
+        (< (unchecked-add totalWritten len) tempFileCreationThreshold)
+          (do (.write baos b off len) (set! totalWritten (unchecked-add totalWritten len)))
+        :else (do (.transferToFile this) (.writeToFile this b off len))))
+
+    (method ^:public flush :throws [IOException] ^void [this]
+      (when (some? tmpFileOS) (.flush tmpFileOS)))
+
+    (method ^:public close :throws [IOException] ^void [this]
+      (set! baos nil)
+      (when (some? tmpFileOS) (.close tmpFileOS)))
+
+    (method ^:private writeToFile :throws [IOException] ^void [this ^int b]
+      (.write tmpFileOS b)
+      (set! totalWritten (unchecked-inc totalWritten)))
+
+    (method ^:private writeToFile :throws [IOException] ^void [this ^byte/1 b ^int off ^int len]
+      (.write tmpFileOS b off len)
+      (set! totalWritten (unchecked-add totalWritten len)))
+
+    (method ^:private transferToFile :throws [IOException] ^void [this]
+      (set! (.-file entry) (.getTempPathForEntry ZipFileSystem/this nil))
+      (set! tmpFileOS (BufferedOutputStream. (Files/newOutputStream (.-file entry))))
+      (.writeTo baos tmpFileOS)
+      (set! baos nil))
+
+    (method ^:private toByteArray ^byte/1 [this]
+      (when (some? baos) (.toByteArray baos))))
+
+  (method ^:private getInputStream :throws [IOException] ^InputStream [this ^Entry e]
+    (let [^:mutable ^InputStream eis nil]
+      (cond
+        (== (.-type e) Entry/NEW)
+          (cond
+            (some? (.-bytes e)) (set! eis (ByteArrayInputStream. (.-bytes e)))
+            (some? (.-file e)) (set! eis (Files/newInputStream (.-file e)))
+            :else (throw (ZipException. "update entry data is missing")))
+        (== (.-type e) Entry/FILECH) (do (set! eis (Files/newInputStream (.-file e))) (return eis))
+        :else (set! eis (EntryInputStream. e)))
+      (if (== (.-method e) ZipConstants/METHOD_DEFLATED)
+          (let [^:mutable bufSize (unchecked-add (.-size e) 2)]
+            (when (> bufSize 65536) (set! bufSize 8192))
+            (let [^:final size (.-size e)]
+              (set! eis
+                    (anon InflaterInputStream [eis (.getInflater this) (unchecked-int bufSize)]
+                      (field ^:private ^boolean isClosed false)
+
+                      (method ^:public close :throws [IOException] ^void [this]
+                        (when-not isClosed
+                          (.releaseInflater ZipFileSystem/this (.-inf this))
+                          (.close (.-in this))
+                          (set! isClosed true)
+                          (.remove streams this)))
+
+                      (method ^:protected fill :throws [IOException] ^void [this]
+                        (when eof (throw (EOFException. "Unexpected end of ZLIB input stream")))
+                        (set! (.-len this)
+                              (.read (.-in this) (.-buf this) 0 (alength (.-buf this))))
+                        (when (== (.-len this) -1)
+                          (aset (.-buf this) 0 0)
+                          (set! (.-len this) 1)
+                          (set! eof true))
+                        (.setInput (.-inf this) (.-buf this) 0 (.-len this)))
+
+                      (field ^:private ^boolean eof)
+
+                      (method ^:public available ^int [this]
+                        (if isClosed
+                            0
+                            (let [avail (unchecked-subtract size (.getBytesWritten (.-inf this)))]
+                              (if (> avail (long Integer/MAX_VALUE))
+                                  Integer/MAX_VALUE
+                                  (unchecked-int avail)))))))))
+          (when-not (== (.-method e) ZipConstants/METHOD_STORED)
+            (throw (ZipException. "invalid compression method"))))
+      (.add streams eis)
+      eis))
+
+  (defclass ^:private EntryInputStream
+    :extends InputStream
+
+    (field ^:private ^long pos)
+
+    (field ^:private ^long rem)
+
+    (constructor :throws [IOException] [this ^Entry e]
+      (set! rem (.-csize e))
+      (set! pos (.-locoff e))
+      (when (== pos -1)
+        (let [e2 (.getEntry ZipFileSystem/this (.-name e))]
+          (when (nil? e2)
+            (throw (ZipException.
+                     (java-str "invalid loc for entry <"
+                               (.getString ZipFileSystem/this (.-name e))
+                               ">"))))
+          (set! pos (.-locoff e2))))
+      (set! pos (unchecked-negate pos)))
+
+    (method ^:public read :throws [IOException] ^int [this ^byte/1 b ^int off ^:mutable ^int len]
+      (.ensureOpen ZipFileSystem/this)
+      (.initDataPos this)
+      (cond
+        (== rem 0) -1
+        (<= len 0) 0
+        :else
+          (do
+            (when (> len rem) (set! len (unchecked-int rem)))
+            (let [bb (ByteBuffer/wrap b)]
+              (.position bb off)
+              (.limit bb (unchecked-add-int off len))
+              (let [^long n (.readAt ZipFileSystem/this bb pos)]
+                (when (> n 0)
+                  (set! pos (unchecked-add pos n))
+                  (set! rem (unchecked-subtract rem n)))
+                (when (== rem 0) (.close this))
+                (unchecked-int n))))))
+
+    (method ^:public read :throws [IOException] ^int [this]
+      (let [b (new byte/1 1)] (if (== (.read this b 0 1) 1) (bit-and-int (aget b 0) 0xff) -1)))
+
+    (method ^:public skip ^long [this ^:mutable ^long n]
+      (.ensureOpen ZipFileSystem/this)
+      (when (> n rem) (set! n rem))
+      (set! pos (unchecked-add pos n))
+      (set! rem (unchecked-subtract rem n))
+      (when (== rem 0) (.close this))
+      n)
+
+    (method ^:public available ^int [this]
+      (if (> rem Integer/MAX_VALUE) Integer/MAX_VALUE (unchecked-int rem)))
+
+    (method ^:public close ^void [this] (set! rem 0) (.remove streams this))
+
+    (method ^:private initDataPos :throws [IOException] ^void [this]
+      (when (<= pos 0)
+        (set! pos (unchecked-add (unchecked-negate pos) locpos))
+        (let [buf (new byte/1 ZipConstants/LOCHDR)]
+          (when-not (== (.readNBytesAt ZipFileSystem/this buf 0 (alength buf) pos)
+                        ZipConstants/LOCHDR)
+            (throw (ZipException. (java-str "invalid LOC " pos " for entry reading"))))
+          (when-not (== (ZipConstants/LOCSIG buf) ZipConstants/LOCSIG)
+            (throw (ZipException. "invalid LOC header (bad signature)")))
+          (set! pos
+                (unchecked-add pos
+                               (unchecked-add-int
+                                 (unchecked-add-int ZipConstants/LOCHDR (ZipConstants/LOCNAM buf))
+                                 (ZipConstants/LOCEXT buf))))))))
+
+  (field ^:private ^:final ^int MAX_FLATER 20)
+
+  (field ^:private ^:final ^{:tag (List Inflater)} inflaters (ArrayList.))
+
+  (method ^:private getInflater ^Inflater [this]
+    (locking inflaters
+      (let [size (.size inflaters)]
+        (if (> size 0)
+            (cast Inflater (.remove inflaters (unchecked-subtract-int size 1)))
+            (Inflater. true)))))
+
+  (method ^:private releaseInflater ^void [this ^Inflater inf]
+    (locking inflaters
+      (if (< (.size inflaters) MAX_FLATER) (do (.reset inf) (.add inflaters inf)) (.end inf))))
+
+  (field ^:private ^:final ^{:tag (List Deflater)} deflaters (ArrayList.))
+
+  (method ^:private getDeflater ^Deflater [this]
+    (locking deflaters
+      (let [size (.size deflaters)]
+        (if (> size 0)
+            (cast Deflater (.remove deflaters (unchecked-subtract-int size 1)))
+            (Deflater. Deflater/DEFAULT_COMPRESSION true)))))
+
+  (method ^:private releaseDeflater ^void [this ^Deflater def]
+    (locking deflaters
+      (if (< (.size deflaters) MAX_FLATER) (do (.reset def) (.add deflaters def)) (.end def))))
+
+  (defclass ^:static END
+    (field ^int centot)
+
+    (field ^long cenlen)
+
+    (field ^long cenoff)
+
+    (field ^long endpos)
+
+    (method write :throws [IOException] ^void [this ^OutputStream os ^long offset
+                                               ^boolean forceEnd64]
+      (let [^:mutable hasZip64 forceEnd64
+            ^:mutable xlen cenlen
+            ^:mutable xoff cenoff]
+        (when (>= xlen ZipConstants/ZIP64_MINVAL)
+          (set! xlen ZipConstants/ZIP64_MINVAL)
+          (set! hasZip64 true))
+        (when (>= xoff ZipConstants/ZIP64_MINVAL)
+          (set! xoff ZipConstants/ZIP64_MINVAL)
+          (set! hasZip64 true))
+        (let [^:mutable count centot]
+          (when (>= count ZipConstants/ZIP64_MINVAL32)
+            (set! count ZipConstants/ZIP64_MINVAL32)
+            (set! hasZip64 true))
+          (when hasZip64
+            (ZipUtils/writeInt os ZipConstants/ZIP64_ENDSIG)
+            (ZipUtils/writeLong os (unchecked-subtract-int ZipConstants/ZIP64_ENDHDR 12))
+            (ZipUtils/writeShort os 45)
+            (ZipUtils/writeShort os 45)
+            (ZipUtils/writeInt os 0)
+            (ZipUtils/writeInt os 0)
+            (ZipUtils/writeLong os centot)
+            (ZipUtils/writeLong os centot)
+            (ZipUtils/writeLong os cenlen)
+            (ZipUtils/writeLong os cenoff)
+            (ZipUtils/writeInt os ZipConstants/ZIP64_LOCSIG)
+            (ZipUtils/writeInt os 0)
+            (ZipUtils/writeLong os offset)
+            (ZipUtils/writeInt os 1))
+          (ZipUtils/writeInt os ZipConstants/ENDSIG)
+          (ZipUtils/writeShort os 0)
+          (ZipUtils/writeShort os 0)
+          (ZipUtils/writeShort os count)
+          (ZipUtils/writeShort os count)
+          (ZipUtils/writeInt os xlen)
+          (ZipUtils/writeInt os xoff)
+          (ZipUtils/writeShort os 0)))))
+
+  (defclass ^:static IndexNode
+    (field ^byte/1 name)
+
+    (field ^int hashcode)
+
+    (field ^boolean isdir)
+
+    (field ^int pos -1)
+
+    (field ^IndexNode child)
+
+    (field ^IndexNode sibling)
+
+    (constructor [this])
+
+    (constructor [this ^byte/1 name ^boolean isdir]
+      (.name this name)
+      (set! (.-isdir this) isdir)
+      (set! (.-pos this) -1))
+
+    (constructor [this ^byte/1 name ^int pos]
+      (.name this name)
+      (set! (.-pos this) pos))
+
+    (constructor [this ^byte/1 cen ^int pos ^:mutable ^int nlen]
+      (let [noff (unchecked-add-int pos ZipConstants/CENHDR)]
+        (when (== (aget cen (unchecked-subtract-int (unchecked-add-int noff nlen) 1)) \/)
+          (set! isdir true)
+          (set! nlen (unchecked-dec-int nlen)))
+        (if (and (> nlen 0) (== (aget cen noff) \/))
+            (set! name (Arrays/copyOfRange cen noff (unchecked-add-int noff nlen)))
+            (do
+              (set! name (new byte/1 (unchecked-add-int nlen 1)))
+              (System/arraycopy cen noff name 1 nlen)
+              (aset name 0 (unchecked-byte \/))))
+        (.name this (.normalize this name))
+        (set! (.-pos this) pos)))
+
+    (method ^:private normalize ^byte/1 [this ^byte/1 path]
+      (let [len (alength path)]
+        (if (== len 0)
+            path
+            (let [^:mutable ^byte prevC 0]
+              (loop [^int pathPos 0]
+                (when (< pathPos len)
+                  (let [c (aget path pathPos)]
+                    (when (and (== c \/) (== prevC \/))
+                      (return (.normalize this path (unchecked-subtract-int pathPos 1))))
+                    (set! prevC c)
+                    (recur (unchecked-inc-int pathPos)))))
+              (if (and (> len 1) (== prevC \/))
+                  (Arrays/copyOf path (unchecked-subtract-int len 1))
+                  path)))))
+
+    (method ^:private normalize ^byte/1 [this ^byte/1 path ^int off]
+      (let [to (new byte/1 (unchecked-subtract-int (alength path) 1))
+            ^:mutable ^int pathPos 0]
+        (while (< pathPos off)
+          (aset to pathPos (aget path pathPos))
+          (set! pathPos (unchecked-inc-int pathPos)))
+        (let [^:mutable toPos pathPos
+              ^:mutable ^byte prevC 0]
+          (while (< pathPos (alength path))
+            (let [c (aget path
+                          (let [old-1 pathPos] (set! pathPos (unchecked-inc-int pathPos)) old-1))]
+              (when-not (and (== c \/) (== prevC \/))
+                (aset to toPos c)
+                (set! toPos (unchecked-inc-int toPos))
+                (set! prevC c))))
+          (when (and (> toPos 1) (== (aget to (unchecked-subtract-int toPos 1)) \/))
+            (set! toPos (unchecked-dec-int toPos)))
+          (if (== toPos (alength to)) to (Arrays/copyOf to toPos)))))
+
+    (field ^:private ^:static ^:final ^{:tag (ThreadLocal IndexNode)} cachedKey (ThreadLocal.))
+
+    (method ^:static ^:final keyOf ^IndexNode [^byte/1 name]
+      (let [^:mutable key (cast IndexNode (.get cachedKey))]
+        (when (nil? key) (set! key (IndexNode. name -1)) (.set cachedKey key))
+        (.as key name)))
+
+    (method ^:final name ^void [this ^byte/1 name]
+      (set! (.-name this) name)
+      (set! (.-hashcode this) (Arrays/hashCode name)))
+
+    (method ^:final as ^IndexNode [this ^byte/1 name]
+      (.name this name)
+      this)
+
+    (method isDir ^boolean [this] isdir)
+
+    (method ^:private pathHasDotOrDotDot ^boolean [this]
+      (java-assert (== (aget name 0) \/))
+      (if (== (alength name) 1)
+          false
+          (let [^:mutable ^int index 1]
+            (while (< index (alength name))
+              (let [start index]
+                (while (and (< index (alength name)) (not (== (aget name index) \/)))
+                  (set! index (unchecked-inc-int index)))
+                (when (== (aget name start) \.)
+                  (let [len (unchecked-subtract-int index start)]
+                    (when (or (== len 1)
+                              (and (== (aget name (unchecked-add-int start 1)) \.) (== len 2)))
+                      (return true))))
+                (set! index (unchecked-inc-int index))))
+            false)))
+
+    (method ^:protected nameAsString ^String [this] (String. name))
+
+    (method ^:public equals ^boolean [this other]
+      (cond
+        (not (instance? IndexNode other)) false
+        (instance? ParentLookup other) (.equals (cast ParentLookup other) this)
+        :else (Arrays/equals name (.-name (cast IndexNode other)))))
+
+    (method ^:public hashCode ^int [this] hashcode)
+
+    (method ^:public toString ^String [this]
+      (java-str (.nameAsString this) (if isdir " (dir)" " ") ", index: " pos)))
+
+  (defclass ^:static Entry
+    :extends IndexNode
+    :implements [ZipFileAttributes]
+
+    (field ^:static ^:final ^int CEN 1)
+
+    (field ^:static ^:final ^int NEW 2)
+
+    (field ^:static ^:final ^int FILECH 3)
+
+    (field ^:static ^:final ^int COPY 4)
+
+    (field ^byte/1 bytes)
+
+    (field ^Path file)
+
+    (field ^int type CEN)
+
+    (field ^int version)
+
+    (field ^int flag)
+
+    (field ^int externalFileAttributes -1)
+
+    (field ^int method -1)
+
+    (field ^long mtime -1)
+
+    (field ^long atime -1)
+
+    (field ^long ctime -1)
+
+    (field ^long crc -1)
+
+    (field ^long csize -1)
+
+    (field ^long size -1)
+
+    (field ^byte/1 extra)
+
+    (field ^long locoff)
+
+    (field ^byte/1 comment)
+
+    (constructor [this ^byte/1 name ^boolean isdir ^int method]
+      (.name this name)
+      (set! (.-isdir this) isdir)
+      (set! (.-mtime this) (set! (.-ctime this) (set! (.-atime this) (System/currentTimeMillis))))
+      (set! (.-crc this) 0)
+      (set! (.-size this) 0)
+      (set! (.-csize this) 0)
+      (set! (.-method this) method))
+
+    (constructor [this ^byte/1 name ^int type ^boolean isdir ^int method &
+                  ^{:tag (array (FileAttribute ?))} attrs]
+      (this. name isdir method)
+      (set! (.-type this) type)
+      (for-each [^{:tag (FileAttribute ?)} attr attrs]
+        (let [attrName (.name attr)]
+          (when (.equals attrName "posix:permissions")
+            (set! externalFileAttributes (ZipUtils/permsToFlags (cast Set (.value attr))))))))
+
+    (constructor [this ^byte/1 name ^Path file ^int type & ^{:tag (array (FileAttribute ?))} attrs]
+      (this. name type false ZipConstants/METHOD_STORED attrs)
+      (set! (.-file this) file))
+
+    (constructor [this ^Entry e ^int type ^int compressionMethod]
+      (this. e type)
+      (set! (.-method this) compressionMethod))
+
+    (constructor [this ^Entry e ^int type]
+      (.name this (.-name e))
+      (set! (.-isdir this) (.-isdir e))
+      (set! (.-version this) (.-version e))
+      (set! (.-ctime this) (.-ctime e))
+      (set! (.-atime this) (.-atime e))
+      (set! (.-mtime this) (.-mtime e))
+      (set! (.-crc this) (.-crc e))
+      (set! (.-size this) (.-size e))
+      (set! (.-csize this) (.-csize e))
+      (set! (.-method this) (.-method e))
+      (set! (.-extra this) (.-extra e))
+      (set! (.-locoff this) (.-locoff e))
+      (set! (.-comment this) (.-comment e))
+      (set! (.-externalFileAttributes this) (.-externalFileAttributes e))
+      (set! (.-type this) type))
+
+    (constructor :throws [IOException] [this ^ZipFileSystem zipfs ^IndexNode inode]
+      (.readCEN this zipfs inode))
+
+    (method ^:private version :throws [ZipException] ^int [this ^boolean zip64]
+      (cond
+        zip64 45
+        (== method ZipConstants/METHOD_DEFLATED) 20
+        (== method ZipConstants/METHOD_STORED) 10
+        :else (throw (ZipException. "unsupported compression method"))))
+
+    (method ^:private versionMadeBy ^int [this ^int version]
+      (if (< externalFileAttributes 0)
+          version
+          (bit-or-int ZipConstants/VERSION_MADE_BY_BASE_UNIX (bit-and-int version 0xff))))
+
+    (method ^:private readCEN :throws [IOException] ^void [this ^ZipFileSystem zipfs
+                                                           ^IndexNode inode]
+      (let [cen (.-cen zipfs)
+            ^:mutable pos (.-pos inode)]
+        (when-not (ZipConstants/cenSigAt cen pos)
+          (throw (ZipException. "invalid CEN header (bad signature)")))
+        (set! version (ZipConstants/CENVER cen pos))
+        (set! flag (ZipConstants/CENFLG cen pos))
+        (set! method (ZipConstants/CENHOW cen pos))
+        (set! mtime (ZipUtils/dosToJavaTime (ZipConstants/CENTIM cen pos)))
+        (set! crc (ZipConstants/CENCRC cen pos))
+        (set! csize (ZipConstants/CENSIZ cen pos))
+        (set! size (ZipConstants/CENLEN cen pos))
+        (let [nlen (ZipConstants/CENNAM cen pos)
+              elen (ZipConstants/CENEXT cen pos)
+              clen (ZipConstants/CENCOM cen pos)
+              diskNo (ZipConstants/CENDSK cen pos)]
+          (when (== (ZipConstants/CENVEM_FA cen pos) ZipConstants/FILE_ATTRIBUTES_UNIX)
+            (set! externalFileAttributes (bit-and-int (ZipConstants/CENATX_PERMS cen pos) 0xFFFF)))
+          (set! locoff (ZipConstants/CENOFF cen pos))
+          (set! pos (unchecked-add-int pos ZipConstants/CENHDR))
+          (set! (.-name this) (.-name inode))
+          (set! (.-isdir this) (.-isdir inode))
+          (set! (.-hashcode this) (.-hashcode inode))
+          (set! pos (unchecked-add-int pos nlen))
+          (cond
+            (> elen 0)
+              (do
+                (set! extra (Arrays/copyOfRange cen pos (unchecked-add-int pos elen)))
+                (set! pos (unchecked-add-int pos elen))
+                (.readExtra this zipfs))
+            (and (== elen 0)
+                 (or (or (or (== size ZipConstants/ZIP64_MINVAL)
+                             (== csize ZipConstants/ZIP64_MINVAL))
+                         (== locoff ZipConstants/ZIP64_MINVAL))
+                     (== diskNo ZipConstants/ZIP64_MINVAL32)))
+              (throw (ZipException. "Invalid CEN header (invalid zip64 extra len size)")))
+          (when (> clen 0) (set! comment (Arrays/copyOfRange cen pos (unchecked-add-int pos clen)))))))
+
+    (method ^:private writeCEN :throws [IOException] ^int [this ^OutputStream os]
+      (let [^:mutable csize0 csize
+            ^:mutable size0 size
+            ^:mutable locoff0 locoff
+            ^:mutable ^int elen64 0
+            ^:mutable ^int elenNTFS 0
+            ^:mutable ^int elenEXTT 0
+            ^:mutable foundExtraTime false
+            ^byte/1 zname (if (.-isdir this) (ZipUtils/toDirectoryPath (.-name this)) (.-name this))
+            ^int nlen (if (some? zname) (unchecked-subtract-int (alength zname) 1) 0)
+            ^int elen (if (some? extra) (alength extra) 0)
+            ^:mutable ^int eoff 0
+            ^int clen (if (some? comment) (alength comment) 0)]
+        (when (>= csize ZipConstants/ZIP64_MINVAL)
+          (set! csize0 ZipConstants/ZIP64_MINVAL)
+          (set! elen64 (unchecked-add-int elen64 8)))
+        (when (>= size ZipConstants/ZIP64_MINVAL)
+          (set! size0 ZipConstants/ZIP64_MINVAL)
+          (set! elen64 (unchecked-add-int elen64 8)))
+        (when (>= locoff ZipConstants/ZIP64_MINVAL)
+          (set! locoff0 ZipConstants/ZIP64_MINVAL)
+          (set! elen64 (unchecked-add-int elen64 8)))
+        (when-not (== elen64 0) (set! elen64 (unchecked-add-int elen64 4)))
+        (let [zip64 (not (== elen64 0))
+              version0 (.version this zip64)]
+          (while (< (unchecked-add-int eoff 4) elen)
+            (let [tag (ZipConstants/SH extra eoff)
+                  sz (ZipConstants/SH extra (unchecked-add-int eoff 2))]
+              (when (or (== tag ZipConstants/EXTID_EXTT) (== tag ZipConstants/EXTID_NTFS))
+                (set! foundExtraTime true))
+              (set! eoff (unchecked-add-int eoff (unchecked-add-int 4 sz)))))
+          (when-not foundExtraTime (if isWindows (set! elenNTFS 36) (set! elenEXTT 9)))
+          (ZipUtils/writeInt os ZipConstants/CENSIG)
+          (ZipUtils/writeShort os (.versionMadeBy this version0))
+          (ZipUtils/writeShort os version0)
+          (ZipUtils/writeShort os flag)
+          (ZipUtils/writeShort os method)
+          (ZipUtils/writeInt os (unchecked-int (ZipUtils/javaToDosTime mtime)))
+          (ZipUtils/writeInt os crc)
+          (ZipUtils/writeInt os csize0)
+          (ZipUtils/writeInt os size0)
+          (ZipUtils/writeShort os nlen)
+          (ZipUtils/writeShort os
+                               (unchecked-add-int
+                                 (unchecked-add-int (unchecked-add-int elen elen64) elenNTFS)
+                                 elenEXTT))
+          (if (some? comment)
+              (ZipUtils/writeShort os (^[int int] Math/min clen 0xffff))
+              (ZipUtils/writeShort os 0))
+          (ZipUtils/writeShort os 0)
+          (ZipUtils/writeShort os 0)
+          (ZipUtils/writeInt os
+                             (if (> externalFileAttributes 0)
+                                 (bit-shift-left-int externalFileAttributes 16)
+                                 0))
+          (ZipUtils/writeInt os locoff0)
+          (ZipUtils/writeBytes os zname 1 nlen)
+          (when zip64
+            (ZipUtils/writeShort os ZipConstants/EXTID_ZIP64)
+            (ZipUtils/writeShort os (unchecked-subtract-int elen64 4))
+            (when (== size0 ZipConstants/ZIP64_MINVAL) (ZipUtils/writeLong os size))
+            (when (== csize0 ZipConstants/ZIP64_MINVAL) (ZipUtils/writeLong os csize))
+            (when (== locoff0 ZipConstants/ZIP64_MINVAL) (ZipUtils/writeLong os locoff)))
+          (when-not (== elenNTFS 0)
+            (ZipUtils/writeShort os ZipConstants/EXTID_NTFS)
+            (ZipUtils/writeShort os (unchecked-subtract-int elenNTFS 4))
+            (ZipUtils/writeInt os 0)
+            (ZipUtils/writeShort os 0x0001)
+            (ZipUtils/writeShort os 24)
+            (ZipUtils/writeLong os (ZipUtils/javaToWinTime mtime))
+            (ZipUtils/writeLong os (ZipUtils/javaToWinTime atime))
+            (ZipUtils/writeLong os (ZipUtils/javaToWinTime ctime)))
+          (when-not (== elenEXTT 0)
+            (ZipUtils/writeShort os ZipConstants/EXTID_EXTT)
+            (ZipUtils/writeShort os (unchecked-subtract-int elenEXTT 4))
+            (if (== ctime -1) (.write os 0x3) (.write os 0x7))
+            (ZipUtils/writeInt os (ZipUtils/javaToUnixTime mtime)))
+          (when (some? extra) (ZipUtils/writeBytes os extra))
+          (when (some? comment) (ZipUtils/writeBytes os comment))
+          (unchecked-add-int
+            (unchecked-add-int
+              (unchecked-add-int
+                (unchecked-add-int
+                  (unchecked-add-int (unchecked-add-int ZipConstants/CENHDR nlen) elen)
+                  clen)
+                elen64)
+              elenNTFS)
+            elenEXTT))))
+
+    (method ^:private writeLOC :throws [IOException] ^int [this ^OutputStream os]
+      (let [^byte/1 zname (if (.-isdir this) (ZipUtils/toDirectoryPath (.-name this)) (.-name this))
+            ^int nlen (if (some? zname) (unchecked-subtract-int (alength zname) 1) 0)
+            ^int elen (if (some? extra) (alength extra) 0)
+            ^:mutable foundExtraTime false
+            ^:mutable ^int eoff 0
+            ^:mutable ^int elen64 0
+            ^:mutable zip64 false
+            ^:mutable ^int elenEXTT 0
+            ^:mutable ^int elenNTFS 0]
+        (ZipUtils/writeInt os ZipConstants/LOCSIG)
+        (if (not (== (bit-and-int flag ZipConstants/FLAG_DATADESCR) 0))
+            (do
+              (ZipUtils/writeShort os (.version this false))
+              (ZipUtils/writeShort os flag)
+              (ZipUtils/writeShort os method)
+              (ZipUtils/writeInt os (unchecked-int (ZipUtils/javaToDosTime mtime)))
+              (ZipUtils/writeInt os 0)
+              (ZipUtils/writeInt os 0)
+              (ZipUtils/writeInt os 0))
+            (do
+              (when (or (>= csize ZipConstants/ZIP64_MINVAL) (>= size ZipConstants/ZIP64_MINVAL))
+                (set! elen64 20)
+                (set! zip64 true))
+              (ZipUtils/writeShort os (.version this zip64))
+              (ZipUtils/writeShort os flag)
+              (ZipUtils/writeShort os method)
+              (ZipUtils/writeInt os (unchecked-int (ZipUtils/javaToDosTime mtime)))
+              (ZipUtils/writeInt os crc)
+              (if zip64
+                  (do
+                    (ZipUtils/writeInt os ZipConstants/ZIP64_MINVAL)
+                    (ZipUtils/writeInt os ZipConstants/ZIP64_MINVAL))
+                  (do (ZipUtils/writeInt os csize) (ZipUtils/writeInt os size)))))
+        (while (< (unchecked-add-int eoff 4) elen)
+          (let [tag (ZipConstants/SH extra eoff)
+                sz (ZipConstants/SH extra (unchecked-add-int eoff 2))]
+            (when (or (== tag ZipConstants/EXTID_EXTT) (== tag ZipConstants/EXTID_NTFS))
+              (set! foundExtraTime true))
+            (set! eoff (unchecked-add-int eoff (unchecked-add-int 4 sz)))))
+        (when-not foundExtraTime
+          (if isWindows
+              (set! elenNTFS 36)
+              (do
+                (set! elenEXTT 9)
+                (when-not (== atime -1) (set! elenEXTT (unchecked-add-int elenEXTT 4)))
+                (when-not (== ctime -1) (set! elenEXTT (unchecked-add-int elenEXTT 4))))))
+        (ZipUtils/writeShort os nlen)
+        (ZipUtils/writeShort os
+                             (unchecked-add-int
+                               (unchecked-add-int (unchecked-add-int elen elen64) elenNTFS)
+                               elenEXTT))
+        (ZipUtils/writeBytes os zname 1 nlen)
+        (when zip64
+          (ZipUtils/writeShort os ZipConstants/EXTID_ZIP64)
+          (ZipUtils/writeShort os 16)
+          (ZipUtils/writeLong os size)
+          (ZipUtils/writeLong os csize))
+        (when-not (== elenNTFS 0)
+          (ZipUtils/writeShort os ZipConstants/EXTID_NTFS)
+          (ZipUtils/writeShort os (unchecked-subtract-int elenNTFS 4))
+          (ZipUtils/writeInt os 0)
+          (ZipUtils/writeShort os 0x0001)
+          (ZipUtils/writeShort os 24)
+          (ZipUtils/writeLong os (ZipUtils/javaToWinTime mtime))
+          (ZipUtils/writeLong os (ZipUtils/javaToWinTime atime))
+          (ZipUtils/writeLong os (ZipUtils/javaToWinTime ctime)))
+        (when-not (== elenEXTT 0)
+          (ZipUtils/writeShort os ZipConstants/EXTID_EXTT)
+          (ZipUtils/writeShort os (unchecked-subtract-int elenEXTT 4))
+          (let [^:mutable ^int fbyte 0x1]
+            (when-not (== atime -1) (set! fbyte (bit-or-int fbyte 0x2)))
+            (when-not (== ctime -1) (set! fbyte (bit-or-int fbyte 0x4)))
+            (.write os fbyte)
+            (ZipUtils/writeInt os (ZipUtils/javaToUnixTime mtime))
+            (when-not (== atime -1) (ZipUtils/writeInt os (ZipUtils/javaToUnixTime atime)))
+            (when-not (== ctime -1) (ZipUtils/writeInt os (ZipUtils/javaToUnixTime ctime)))))
+        (when (some? extra) (ZipUtils/writeBytes os extra))
+        (unchecked-add-int
+          (unchecked-add-int
+            (unchecked-add-int (unchecked-add-int (unchecked-add-int ZipConstants/LOCHDR nlen) elen)
+                               elen64)
+            elenNTFS)
+          elenEXTT)))
+
+    (method ^:private writeEXT :throws [IOException] ^int [this ^OutputStream os]
+      (ZipUtils/writeInt os ZipConstants/EXTSIG)
+      (ZipUtils/writeInt os crc)
+      (if (or (>= csize ZipConstants/ZIP64_MINVAL) (>= size ZipConstants/ZIP64_MINVAL))
+          (do (ZipUtils/writeLong os csize) (ZipUtils/writeLong os size) 24)
+          (do (ZipUtils/writeInt os csize) (ZipUtils/writeInt os size) 16)))
+
+    (method ^:private readExtra :throws [IOException] ^void [this ^ZipFileSystem zipfs]
+      (when (some? extra)
+        (let [elen (alength extra)]
+          (when (> elen 0xFFFF) (throw (ZipException. "invalid extra field length")))
+          (let [^:mutable ^int off 0
+                ^:mutable ^int newOff 0
+                ^:mutable hasZip64LocOffset false]
+            (while (<= (unchecked-add-int off 4) elen)
+              (let [^:mutable pos off
+                    tag (ZipConstants/SH extra pos)
+                    sz (ZipConstants/SH extra (unchecked-add-int pos 2))]
+                (set! pos (unchecked-add-int pos 4))
+                (when (> (unchecked-add-int pos sz) elen)
+                  (throw
+                    (ZipException.
+                      (String/format
+                        "Invalid CEN header (invalid extra data field size for tag: 0x%04x size: %d)"
+                        (new Object/1 [tag sz])))))
+                (label :switch
+                  (switch tag
+                    ZipConstants/EXTID_ZIP64
+                      (do
+                        (when (== size ZipConstants/ZIP64_MINVAL)
+                          (when (> (unchecked-add-int pos 8) elen) (break :switch))
+                          (set! size (ZipConstants/LL extra pos))
+                          (when (< size 0)
+                            (throw (ZipException. "Invalid zip64 extra block size value")))
+                          (set! pos (unchecked-add-int pos 8)))
+                        (when (== csize ZipConstants/ZIP64_MINVAL)
+                          (when (> (unchecked-add-int pos 8) elen) (break :switch))
+                          (set! csize (ZipConstants/LL extra pos))
+                          (when (< csize 0)
+                            (throw
+                              (ZipException. "Invalid zip64 extra block compressed size value")))
+                          (set! pos (unchecked-add-int pos 8)))
+                        (when (== locoff ZipConstants/ZIP64_MINVAL)
+                          (when (> (unchecked-add-int pos 8) elen) (break :switch))
+                          (set! locoff (ZipConstants/LL extra pos))
+                          (when (< locoff 0)
+                            (throw (ZipException. "Invalid zip64 extra block LOC offset value")))))
+                    ZipConstants/EXTID_NTFS
+                      (when-not (< sz 32)
+                        (set! pos (unchecked-add-int pos 4))
+                        (when-not (not (== (ZipConstants/SH extra pos) 0x0001))
+                          (when-not (not (== (ZipConstants/SH extra (unchecked-add-int pos 2)) 24))
+                            (set! mtime
+                                  (ZipUtils/winToJavaTime
+                                    (ZipConstants/LL extra (unchecked-add-int pos 4))))
+                            (set! atime
+                                  (ZipUtils/winToJavaTime
+                                    (ZipConstants/LL extra (unchecked-add-int pos 12))))
+                            (set! ctime
+                                  (ZipUtils/winToJavaTime
+                                    (ZipConstants/LL extra (unchecked-add-int pos 20)))))))
+                    ZipConstants/EXTID_EXTT
+                      (cond
+                        (.-noExtt zipfs)
+                          (when (== sz 5)
+                            (set! mtime
+                                  (ZipUtils/unixToJavaTime
+                                    (ZipConstants/LG extra (unchecked-add-int pos 1)))))
+                        (not (== locoff ZipConstants/ZIP64_MINVAL)) (.readLocEXTT this zipfs)
+                        :else (set! hasZip64LocOffset true))
+                    (do
+                      (System/arraycopy extra off extra newOff (unchecked-add-int sz 4))
+                      (set! newOff (unchecked-add-int newOff (unchecked-add-int sz 4))))))
+                (set! off (unchecked-add-int off (unchecked-add-int sz 4)))))
+            (when hasZip64LocOffset (.readLocEXTT this zipfs))
+            (if (and (not (== newOff 0)) (not (== newOff (alength extra))))
+                (set! extra (Arrays/copyOf extra newOff))
+                (set! extra nil))))))
+
+    (method ^:private readLocEXTT :throws [IOException] ^void [this ^ZipFileSystem zipfs]
+      (let [^:mutable buf (new byte/1 ZipConstants/LOCHDR)]
+        (when-not (== (.readNBytesAt zipfs buf 0 (alength buf) locoff) (alength buf))
+          (throw (ZipException. "loc: reading failed")))
+        (when-not (ZipConstants/locSigAt buf 0)
+          (throw (ZipException. (java-str "R" (Long/toString (ZipConstants/getSig buf 0) 16)))))
+        (let [locElen (ZipConstants/LOCEXT buf)]
+          (when-not (< locElen 9)
+            (let [locNlen (ZipConstants/LOCNAM buf)]
+              (set! buf (new byte/1 locElen))
+              (when-not (== (.readNBytesAt zipfs
+                                           buf
+                                           0
+                                           (alength buf)
+                                           (unchecked-add
+                                             (unchecked-add locoff ZipConstants/LOCHDR)
+                                             locNlen))
+                            (alength buf))
+                (throw (ZipException. "loc extra: reading failed")))
+              (let [^:mutable ^int locPos 0]
+                (while (< (unchecked-add-int locPos 4) (alength buf))
+                  (let [locTag (ZipConstants/SH buf locPos)
+                        locSZ (ZipConstants/SH buf (unchecked-add-int locPos 2))]
+                    (set! locPos (unchecked-add-int locPos 4))
+                    (if (not (== locTag ZipConstants/EXTID_EXTT))
+                        (set! locPos (unchecked-add-int locPos locSZ))
+                        (let [end (unchecked-subtract-int (unchecked-add-int locPos locSZ) 4)
+                              flag (ZipConstants/CH
+                                     buf
+                                     (let [old-2 locPos]
+                                       (set! locPos (unchecked-inc-int locPos))
+                                       old-2))]
+                          (when (and (not (== (bit-and-int flag 0x1) 0)) (<= locPos end))
+                            (set! mtime (ZipUtils/unixToJavaTime (ZipConstants/LG buf locPos)))
+                            (set! locPos (unchecked-add-int locPos 4)))
+                          (when (and (not (== (bit-and-int flag 0x2) 0)) (<= locPos end))
+                            (set! atime (ZipUtils/unixToJavaTime (ZipConstants/LG buf locPos)))
+                            (set! locPos (unchecked-add-int locPos 4)))
+                          (when (and (not (== (bit-and-int flag 0x4) 0)) (<= locPos end))
+                            (set! ctime (ZipUtils/unixToJavaTime (ZipConstants/LG buf locPos))))
+                          (break)))))))))))
+
+    (method ^:public toString ^String [this]
+      (let [sb (StringBuilder. 1024)
+            fm (Formatter. sb)]
+        (.format fm "    name            : %s%n" (new Object/1 [(.nameAsString this)]))
+        (.format fm "    creationTime    : %tc%n" (new Object/1 [(.toMillis (.creationTime this))]))
+        (.format fm
+                 "    lastAccessTime  : %tc%n"
+                 (new Object/1 [(.toMillis (.lastAccessTime this))]))
+        (.format fm
+                 "    lastModifiedTime: %tc%n"
+                 (new Object/1 [(.toMillis (.lastModifiedTime this))]))
+        (.format fm "    isRegularFile   : %b%n" (new Object/1 [(.isRegularFile this)]))
+        (.format fm "    isDirectory     : %b%n" (new Object/1 [(.isDirectory this)]))
+        (.format fm "    isSymbolicLink  : %b%n" (new Object/1 [(.isSymbolicLink this)]))
+        (.format fm "    isOther         : %b%n" (new Object/1 [(.isOther this)]))
+        (.format fm "    fileKey         : %s%n" (new Object/1 [(.fileKey this)]))
+        (.format fm "    size            : %d%n" (new Object/1 [(.size this)]))
+        (.format fm "    compressedSize  : %d%n" (new Object/1 [(.compressedSize this)]))
+        (.format fm "    crc             : %x%n" (new Object/1 [(.crc this)]))
+        (.format fm "    method          : %d%n" (new Object/1 [(.method this)]))
+        (let [^{:tag (Set PosixFilePermission)} permissions (cast
+                                                              Set
+                                                              (.orElse
+                                                                (.storedPermissions this)
+                                                                nil))]
+          (when (some? permissions)
+            (.format fm "    permissions     : %s%n" (new Object/1 [permissions])))
+          (.close fm)
+          (.toString sb))))
+
+    (method ^:public creationTime ^FileTime [this]
+      (FileTime/fromMillis (if (== ctime -1) mtime ctime)))
+
+    (method ^:public isDirectory ^boolean [this] (.isDir this))
+
+    (method ^:public isOther ^boolean [this] false)
+
+    (method ^:public isRegularFile ^boolean [this] (not (.isDir this)))
+
+    (method ^:public lastAccessTime ^FileTime [this]
+      (FileTime/fromMillis (if (== atime -1) mtime atime)))
+
+    (method ^:public lastModifiedTime ^FileTime [this]
+      (FileTime/fromMillis mtime))
+
+    (method ^:public size ^long [this] size)
+
+    (method ^:public isSymbolicLink ^boolean [this] false)
+
+    (method ^:public fileKey [this] nil)
+
+    (method ^:public compressedSize ^long [this] csize)
+
+    (method ^:public crc ^long [this] crc)
+
+    (method ^:public method ^int [this] method)
+
+    (method ^:public extra ^byte/1 [this]
+      (when (some? extra) (Arrays/copyOf extra (alength extra))))
+
+    (method ^:public comment ^byte/1 [this]
+      (when (some? comment) (Arrays/copyOf comment (alength comment))))
+
+    (method ^:public storedPermissions ^{:tag (Optional (Set PosixFilePermission))} [this]
+      (let [^:mutable ^{:tag (Set PosixFilePermission)} perms nil]
+        (when-not (== externalFileAttributes -1)
+          (set! perms (HashSet/newHashSet (alength (PosixFilePermission/values))))
+          (for-each [^PosixFilePermission perm (PosixFilePermission/values)]
+            (when-not (== (bit-and-int externalFileAttributes (ZipUtils/permToFlag perm)) 0)
+              (.add perms perm))))
+        (Optional/ofNullable perms))))
+
+  (defclass ^:final PosixEntry
+    :extends Entry
+    :implements [PosixFileAttributes]
+
+    (field ^:private ^UserPrincipal owner defaultOwner)
+
+    (field ^:private ^GroupPrincipal group defaultGroup)
+
+    (constructor [this ^byte/1 name ^boolean isdir ^int method]
+      (super. name isdir method))
+
+    (constructor [this ^byte/1 name ^int type ^boolean isdir ^int method &
+                  ^{:tag (array (FileAttribute ?))} attrs]
+      (super. name type isdir method attrs))
+
+    (constructor [this ^byte/1 name ^Path file ^int type & ^{:tag (array (FileAttribute ?))} attrs]
+      (super. name file type attrs))
+
+    (constructor [this ^PosixEntry e ^int type ^int compressionMethod]
+      (super. e type)
+      (set! (.-method this) compressionMethod))
+
+    (constructor [this ^PosixEntry e ^int type]
+      (super. e type)
+      (set! (.-owner this) (.-owner e))
+      (set! (.-group this) (.-group e)))
+
+    (constructor :throws [IOException] [this ^ZipFileSystem zipfs ^IndexNode inode]
+      (super. zipfs inode))
+
+    (method ^:public owner ^UserPrincipal [this] owner)
+
+    (method ^:public group ^GroupPrincipal [this] group)
+
+    (method ^:public permissions ^{:tag (Set PosixFilePermission)} [this]
+      (cast Set (.orElse (.storedPermissions this) defaultPermissions))))
+
+  (defclass ^:static ParentLookup
+    :extends IndexNode
+
+    (field ^int len)
+
+    (constructor [this])
+
+    (method ^:final as ^ParentLookup [this ^byte/1 name ^int len]
+      (.name this name len)
+      this)
+
+    (method name ^void [this ^byte/1 name ^int len]
+      (set! (.-name this) name)
+      (set! (.-len this) len)
+      (let [^:mutable ^int result 1]
+        (loop [^int i 0]
+          (when (< i len)
+            (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (aget name i)))
+            (recur (unchecked-inc-int i))))
+        (set! (.-hashcode this) result)))
+
+    (method ^:public equals ^boolean [this other]
+      (if (not (instance? IndexNode other))
+          false
+          (let [oname (.-name (cast IndexNode other))]
+            (Arrays/equals (.-name this) 0 len oname 0 (alength oname)))))))

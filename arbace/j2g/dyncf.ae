@@ -280,28 +280,19 @@ or CF$FnObj, whose getClass is their class).\n"
               (let [c (jrt/DefineDynamic info)]
                 (set! (.-Cls dc) c)
                 (set! (.-IsInstance info) (fn ^bool [^any x] (cfIsInstance c x)))
-                (.Lock dynMu)
-                (aset dynClasses c dc)
-                (when (!= nw nil) (aset cfNews c nw))
-                (.Unlock dynMu)
+                (set! (.-CfNew dc) nw)
+                (set! (.-Dyn (.Info c)) dc)
                 c))))))
-   '(go/var ^{:tag (map (* jrt/Class) (func [(* DynClass) (slice any)] [any]))
-              :doc "cfNews: the allocation of the interpreted classes whose objects are DynSub_C (under dynMu).\n"}
-      cfNews (make (map (* jrt/Class) (func [(* DynClass) (slice any)] [any]))))
    '(go/func cfInterpreted "cfInterpreted: whether c is an interpreted class (made by Compiler$CFGo).\n"
       ^bool [^{:tag (* jrt/Class)} c]
-      (.Lock dynMu)
-      (let [(values dc ok) (aget dynClasses c)]
-        (.Unlock dynMu)
+      (let [(values dc ok) (assert (* DynClass) (.-Dyn (.Info c)))]
         (and ok (!= (.-CF dc) nil))))
    (list 'go/func (native-name "alloc" "(Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;")
          (with-meta [(tag 'c '(* jrt/Class)) (tag 'values '(* jrt/RefArray))] {:tag 'any})
-         '(let [dc (dynClassOf c)]
-            (.Lock dynMu)
-            (let [nw (aget cfNews c)]
-              (.Unlock dynMu)
-              (when (!= nw nil) (return (nw dc (.-A values))))
-              (newDyn dc (.-A values)))))
+         '(let [dc (dynClassOf c)
+                nw (.-CfNew dc)]
+            (when (!= nw nil) (return (nw dc (.-A values))))
+            (newDyn dc (.-A values))))
    (list 'go/func (native-name "canExtend" "(Ljava/lang/Class;)Z")
          (with-meta [(tag 'c '(* jrt/Class))] {:tag 'bool})
          '(let [(values nw _ _) (cfSubFor c)]
@@ -325,6 +316,10 @@ or CF$FnObj, whose getClass is their class).\n"
               (let [(values _ sub) (assert jrt/J2gCloner o)
                     (values x ok) (assert jrt/Object_I o)]
                 (when (and sub ok) (return (.Clone__O x)))))
+            ;; Iface.super.m() of an interface's default method (dyn's dynIfaceDefaults; queue 575)
+            (when (and (== f nil) (.IsInterface__Z c))
+              (let [d (aget dynIfaceDefaults (+ (.-Name (.Info c)) " " (.String (jrt/NN key))))]
+                (when (!= d nil) (return (d o (.-A args))))))
             (when (== f nil)
               (panic (jrt/Thrown (jrt/UnsupportedOperationException_New_String
                                    (jrt/Str (+ "super call of " (.-Name (.Info c)) "." (.String key) " is not in the Go build"))))))
@@ -392,6 +387,10 @@ or CF$FnObj, whose getClass is their class).\n"
          '(let [info (.Info c)]
             (set! (.-Kind info) jrt/KindEnum)
             (set! (.-Enum info) (fn ^{:tag (* jrt/RefArray)} [] (assert (* jrt/RefArray) (.Invoke__O values))))))
+   ;; finalization (the user's JMS1 (a), 2026-11-24): an interpreted class's object with a finalize()
+   (list 'go/func (native-name "registerFinalizer" "(Ljava/lang/Object;)V")
+         [(tag 'o 'any)]
+         '(jrt/RegisterFinalizer o))
    (list 'go/func (native-name "klassOf" "(Ljava/lang/Object;)Ljava/lang/Object;")
          (with-meta [(tag 'o 'any)] {:tag 'any})
          '(let [(values d ok) (assert dynObject o)]
@@ -416,9 +415,7 @@ or CF$FnObj, whose getClass is their class).\n"
               ;; method neither (JCS350 (a), JVMS 5.4.6: it overrides nothing and nothing overrides it,
               ;; so it is no slot and no method of the class by key, which a subclass's private method
               ;; of the same key would otherwise take)
-              (.Lock dynMu)
-              (let [(values dc ok) (aget dynClasses c)]
-                (.Unlock dynMu)
+              (let [(values dc ok) (assert (* DynClass) (.-Dyn (.Info c)))]
                 (when (and ok (!= impl nil) (== (bit-and flags jrt/AccPrivate) 0))
                   (let [(values i ok) (aget (.-SlotMap dc) key)]
                     (when ok (aset (.-Slots dc) i impl)))

@@ -302,7 +302,7 @@ Prior art:
     `bin/lib/version.bash`'s `arbace_crop_paths` (the namespaces no executable embeds: repr/haskell, repr/rust, repr/ocaml, rsi's
     `arbace/rust`, llvmi's `arbace/llvm`, repr/asm, `arbace/asm/`, repr/wasm, `arbace/wasm/`, and C++'s oracle check tools
     `arbace/repr/cpp/{ncheck,tcheck}.ae` and `arbace/repr/llvm/{mutate,expect}.ae`, W-P4 (a); the Go forms `go/arbace/{oicapi,expat,
-    pyexpat,hs,x86i,emu,a64i,wai,cix86}`, pyi's lazy modules `go/arbace/{clib,pybz2,pylzma,pyzstd,pyssl,pysqlite3,pyctypes}`, OCaml's
+    pyexpat,hs,x86i,emu,a64i,wai,cix86}`, pyi's lazy modules `go/arbace/{pybz2,pylzma,pyzstd,pyssl,pysqlite3}`, OCaml's
     `jdk/ocaml/`, the crops' script libraries `bin/lib/{oi,repr-cpp,cppi,rsi,hsi,si,pyi,repr-haskell,repr-rust,repr-ocaml,repr-scheme,repr-python,repr-llvm,crops,repr-wasm,wai}`), is left out by `gate_key`,
     `gate_rest_key`, `arbace_runtime_key`, `arbace_embedded_sources`, `arbace_javac_key` and `arbace_javac_rest_key`, and the audit's
     hosts take it (`test/gate/audit.ae`'s `crop-rules`; `test/gate/gate-key-crops-test.bash`): a crop's commit under it moves none of
@@ -568,7 +568,8 @@ Prior art:
   user) two slots, `big.lock` and `big.lock.2`, a job beside another admitted only when its `HEAVY_MEM_GIB` (default 24; the
   gate's steps their admission, `--concurrent`'s run `all`) fits MemAvailable less 2 GiB less what the other holder declared
   and has not reached, the head that does not fit waiting, a later ticket that fits passing it only to run beside a holder: backfill, 2026-11-24; since 2026-11-25 (the user, after an OOM) one slot by the file `big.lock.slots` (`HEAVY_LOCK_SLOTS` over it), the second
-  slot taking only a job declared at most `HEAVY_LOCK_SMALL_GIB`, 8) and the
+  slot taking only a job declared at most `HEAVY_LOCK_SMALL_GIB`, else the file `big.lock.small_gib`, else 8; 16 since
+  2026-11-26, the user) and the
   gate itself does not (a caller that holds the lock sets `GATE_HEAVY_CMD=env`, else the gate waits for it),
   the `:heavy :inner` ones not: their tools take the lock around their heavy process alone (since GT5,
   GTS31 (b), `bin/lib/heavy.bash`: `bin/j2g`, repr/go's native reader and converter, repr/java's corpus
@@ -704,7 +705,7 @@ Prior art:
   seven nights, the subset every night), on the
   night that starts on Saturday `bin/gate --weekly` (since GD3 `--full` with the `:phase :weekly` steps and parts: the jdk corpora
   of repr/java's front and nojavac checks, cpp-roundtrip's libstdcxx-testsuite-every-40, rsi-aot's samples, javac-platform-rebuild, javac-ctsym-rebuild,
-  rsi-check, si-ecraven-aot, haskell-target-probe, llvmi-aot, the fixpoint and programs-full, these two also
+  rsi-check, si-ecraven-aot, haskell-target-probe, llvmi-aot, ocaml-ppx-expect, the fixpoint and programs-full, these two also
   on a night whose changes touch their `:also-changed` files; the parked `:clean-only` parts the clean run's alone); since GD3
   every key holds the epoch `test/gate/epoch` in place of the runner's and planner's text, and an audited step's arbace/ files are
   its load closure, `test/gate/loads.edn` (`bin/gate --loads-update`); `gate-tests`

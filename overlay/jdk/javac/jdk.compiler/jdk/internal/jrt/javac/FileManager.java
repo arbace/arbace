@@ -10,12 +10,20 @@
  * them. Since JFS52 (b) StandardFileManager extends it, the standard file manager of javac's
  * JavaCompiler on Arbace (SystemCompiler). Since F6 (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built:
  * F6") a class file without -d goes where javac's own file manager puts it. Since JCS50 (b) its platforms
- * are --release's too (ReleasePlatforms, CtSymFileManager). Since JCS51 a location's class loader defines its class files
- * from their bytes (DirLoader: annotation processors). Written for javac's documented javax.tools API (https://github.com/openjdk/jdk26u at
- * baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+ * are --release's too (ReleasePlatforms, CtSymFileManager). Since queue 549 (JCS53 (a), the file manager's part) it is a
+ * BaseFileManager, trusted by javac (ClientCodeWrapper.Trusted: not wrapped, so javac sees it and its file objects as
+ * its own): Arguments' warnings of a default platform (source.no.system.modules.path, source.no.bootclasspath), -encoding
+ * by BaseFileManager's decoding, its file objects PathFileObjects (ArbaceFileObject: raw diagnostics' short names, one
+ * object a file), and -source 8's platform class path the system modules' classes. Since JCS51 a location's class loader
+ * defines its class files from their bytes (DirLoader: annotation processors). Written for javac's documented javax.tools
+ * API (https://github.com/openjdk/jdk26u at baf63fb): Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt.javac;
 
+import com.sun.tools.javac.api.ClientCodeWrapper;
+import com.sun.tools.javac.file.ArbaceFileObject;
+import com.sun.tools.javac.file.BaseFileManager;
+import com.sun.tools.javac.main.Option;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -23,6 +31,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -35,28 +46,64 @@ import java.util.Set;
 import javax.tools.FileObject;
 import javax.tools.JavaFileManager;
 import javax.tools.JavaFileObject;
-import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardLocation;
 
-/** javac's locations as directories (JFS5 (b)): no jrt:/, no zip, no java.nio.file. */
-public class FileManager implements JavaFileManager {
+/** javac's locations as directories (JFS5 (b)): no jrt:/, no zip; files through java.io.File. */
+@ClientCodeWrapper.Trusted
+public class FileManager extends BaseFileManager {
 
-    /** A file of a directory, with the binary name it was found under (null for output and resources). */
-    public static final class Obj extends SimpleJavaFileObject {
+    /**
+     * A file of a directory, with the binary name it was found under (null for output and resources):
+     * a PathFileObject (queue 549) of the file's absolute, normalized path, read and written through
+     * java.io.File as before.
+     */
+    @ClientCodeWrapper.Trusted
+    public static final class Obj extends ArbaceFileObject {
         final File file;
         final String path;
         final String binaryName;
+        final Kind kind;
 
-        Obj(File file, Kind kind, String binaryName) {
-            super(file.getAbsoluteFile().toURI(), kind);
+        Obj(BaseFileManager fm, File file, Kind kind, String binaryName) {
+            super(fm, file.getAbsoluteFile().toPath().normalize());
             this.file = file;
             this.path = file.getAbsolutePath();
             this.binaryName = binaryName;
+            this.kind = kind;
+        }
+
+        @Override
+        protected String binaryName() {
+            return binaryName;
+        }
+
+        @Override
+        protected byte[] content() throws IOException {
+            return bytes(file);
+        }
+
+        /** A source's characters: javac's compilation began reading (FileManager.sourceRead). */
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) throws IOException {
+            if (kind == Kind.SOURCE && fileManager instanceof FileManager fm) {
+                fm.sourceRead = true;
+            }
+            return super.getCharContent(ignoreEncodingErrors);
         }
 
         @Override
         public String getName() {
             return file.getPath();
+        }
+
+        @Override
+        public Kind getKind() {
+            return kind;
+        }
+
+        @Override
+        public URI toUri() {
+            return file.getAbsoluteFile().toURI();
         }
 
         @Override
@@ -66,6 +113,7 @@ public class FileManager implements JavaFileManager {
 
         @Override
         public OutputStream openOutputStream() throws IOException {
+            fileManager.flushCache(this);
             File dir = file.getParentFile();
             if (dir != null && !dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) {
                 throw new IOException("cannot create the directory " + dir);
@@ -74,13 +122,18 @@ public class FileManager implements JavaFileManager {
         }
 
         @Override
-        public CharSequence getCharContent(boolean ignoreEncodingErrors) throws IOException {
-            return new String(bytes(file), "UTF-8");
+        public Writer openWriter() throws IOException {
+            return new OutputStreamWriter(openOutputStream());
         }
 
         @Override
         public long getLastModified() {
             return file.lastModified();
+        }
+
+        @Override
+        public boolean delete() {
+            return file.delete();
         }
 
         @Override
@@ -146,6 +199,11 @@ public class FileManager implements JavaFileManager {
     final Map<String, ModuleLoc> sourceModules = new LinkedHashMap<>();
     final Map<String, ModuleLoc> outputModules = new LinkedHashMap<>();
     boolean multiModule;
+    /**
+     * Whether a source file's characters were read (queue 549): javac's JavaCompiler.compile parsed,
+     * which javac's API task skips when its preparation already reported an error (Main uses it).
+     */
+    volatile boolean sourceRead;
 
     /**
      * sourcePath: the source roots, null when javac is given none (it then looks for sources on
@@ -153,6 +211,7 @@ public class FileManager implements JavaFileManager {
      * classOutput: -d, or null.
      */
     public FileManager(List<File> sourcePath, List<File> classPath, File classOutput) {
+        super(null);
         this.sourcePath = sourcePath;
         this.classPath = classPath;
         this.classOutput = classOutput;
@@ -237,7 +296,7 @@ public class FileManager implements JavaFileManager {
     }
 
     public Obj source(File f) {
-        return new Obj(f, JavaFileObject.Kind.SOURCE, null);
+        return new Obj(this, f, JavaFileObject.Kind.SOURCE, null);
     }
 
     List<File> dirs(Location location) {
@@ -253,10 +312,20 @@ public class FileManager implements JavaFileManager {
         if (location == StandardLocation.CLASS_OUTPUT) {
             return classOutput == null || multiModule ? List.of() : List.of(classOutput);
         }
+        if (location == StandardLocation.PLATFORM_CLASS_PATH) {
+            // queue 549: the platform's classes, as javac's default boot class path of a modular
+            // image (Locations.BootClassPathLocationHandler: every system module's), which javac
+            // reads below -source 9 (java.lang for -source 8)
+            List<File> ds = new ArrayList<>();
+            for (ModuleLoc m : system.values()) {
+                ds.addAll(m.dirs);
+            }
+            return ds;
+        }
         return List.of();
     }
 
-    static void listDir(File root, String pkg, Set<JavaFileObject.Kind> kinds, boolean recurse, List<JavaFileObject> out) {
+    void listDir(File root, String pkg, Set<JavaFileObject.Kind> kinds, boolean recurse, List<JavaFileObject> out) {
         File dir = pkg.isEmpty() ? root : new File(root, pkg.replace('.', '/'));
         File[] fs = dir.listFiles();
         if (fs == null) {
@@ -274,7 +343,7 @@ public class FileManager implements JavaFileManager {
             for (JavaFileObject.Kind k : kinds) {
                 if (k != JavaFileObject.Kind.OTHER && n.endsWith(k.extension)) {
                     String simple = n.substring(0, n.length() - k.extension.length());
-                    out.add(new Obj(f, k, pkg.isEmpty() ? simple : pkg + "." + simple));
+                    out.add(new Obj(this, f, k, pkg.isEmpty() ? simple : pkg + "." + simple));
                     break;
                 }
             }
@@ -341,9 +410,20 @@ public class FileManager implements JavaFileManager {
         return a == b;
     }
 
+    /**
+     * -encoding (queue 549): BaseFileManager's, its charset the decoding of every file object (javac's
+     * API hands it to the file manager); the file manager's other options are javac on Arbace's
+     * command line's (Main) and the standard file manager's.
+     */
     @Override
     public boolean handleOption(String current, Iterator<String> remaining) {
-        return false;
+        if (!current.equals("-encoding")) {
+            return false;
+        }
+        if (!remaining.hasNext()) {
+            throw new IllegalArgumentException("error: " + current + " requires an argument");
+        }
+        return handleOption(Option.ENCODING, remaining.next());
     }
 
     @Override
@@ -369,6 +449,9 @@ public class FileManager implements JavaFileManager {
         if (location == StandardLocation.MODULE_SOURCE_PATH) {
             return multiModule;
         }
+        if (location == StandardLocation.PLATFORM_CLASS_PATH) {
+            return !system.isEmpty();
+        }
         return false;
     }
 
@@ -385,7 +468,7 @@ public class FileManager implements JavaFileManager {
     @Override
     public JavaFileObject getJavaFileForInput(Location location, String className, JavaFileObject.Kind kind) {
         File f = find(location, className.replace('.', '/') + kind.extension);
-        return f == null ? null : new Obj(f, kind, className);
+        return f == null ? null : new Obj(this, f, kind, className);
     }
 
     /**
@@ -408,12 +491,12 @@ public class FileManager implements JavaFileManager {
             dir = new File(".");
         }
         if (dir == null && location == StandardLocation.CLASS_OUTPUT && !multiModule) {
-            return new Obj(besideSibling(className, kind, sibling), kind, null);
+            return new Obj(this, besideSibling(className, kind, sibling), kind, null);
         }
         if (dir == null) {
             throw new IOException("no output location " + location + " for " + className);
         }
-        return new Obj(new File(dir, className.replace('.', '/') + kind.extension), kind, null);
+        return new Obj(this, new File(dir, className.replace('.', '/') + kind.extension), kind, null);
     }
 
     /**
@@ -432,7 +515,7 @@ public class FileManager implements JavaFileManager {
     @Override
     public FileObject getFileForInput(Location location, String packageName, String relativeName) {
         File f = find(location, relative(packageName, relativeName));
-        return f == null ? null : new Obj(f, JavaFileObject.Kind.OTHER, null);
+        return f == null ? null : new Obj(this, f, JavaFileObject.Kind.OTHER, null);
     }
 
     @Override
@@ -445,7 +528,7 @@ public class FileManager implements JavaFileManager {
         if (dir == null) {
             throw new IOException("no output location " + location + " for " + relativeName);
         }
-        return new Obj(new File(dir, relative(packageName, relativeName)), JavaFileObject.Kind.OTHER, null);
+        return new Obj(this, new File(dir, relative(packageName, relativeName)), JavaFileObject.Kind.OTHER, null);
     }
 
     @Override
@@ -458,7 +541,7 @@ public class FileManager implements JavaFileManager {
 
     @Override
     public int isSupportedOption(String option) {
-        return -1;
+        return option.equals("-encoding") ? 1 : -1;
     }
 
     @Override

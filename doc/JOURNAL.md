@@ -20834,6 +20834,279 @@ the global flag as before (javac's holder class is not translated). No class run
 essential checks. Branch java-bytecode-assert-1123 (from java-bytecode-1122 731924212).
 ## 2026-11-23: JCS51 on train 1's tool, 18 of 25; the Filer's generated sources (java-bytecode-assert-1123, train 3)
 
+JCS51's 25 processing tests at the diagnostics level on train 1's javac tool (javac-f170fb32cd7e, d9217f672): 18 pass, recorded
+on java-bytecode-1122 (660ab0f75), :diag-processors narrowed to the 7 left. Three of the seven stop on the Filer's generated
+sources: javac on Arbace's file manager had no SOURCE_OUTPUT (getJavaFileForOutput's IOException, BrokenEnumConstructor's
+output, and the generated classes missing in GenerateAndError and WErrorGen). Built for train 3: SOURCE_OUTPUT (no -s on
+Arbace) goes to CLASS_OUTPUT's directory, else the current directory, as jdk26u's JavacFileManager.getFileForOutput puts a
+generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java at baf63fb, read for the
+behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
+committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
+method) is left for after train 3's run.
+## 2026-11-23: an interpreted interface's method on a proxy (JCS51's TestElementsAnnotatedWith; train 3)
+
+t07544 (TestElementsAnnotatedWith) on train 1's tool stopped on AbstractMethodError jdk.proxy1.$Proxy0.names(): javac's
+AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the test's processor defined from its class file
+(annot/AnnotatedElementInfo), and the processor's invokeinterface of names() on it reached CallV's reflective path, where the
+proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
+with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
+as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
+
+## 2026-11-24 — ci: a goto loop's back edge resumes in the same frame (queue 542, round 8; VM)
+
+ci's statement lists (go/arbace/ci/stmt.ae) resumed a jump to a label of their own list by `Seq.from` calling `Seq.Enter`, which
+called `Seq.from` again: every turn of a goto loop cost two Go frames, and a long loop overflowed the 1 GB Go stack (threads.rs's own
+build, whose loops lower to goto back edges: 8.4M frames of Seq.from/Seq.Enter on one list; the C sample below too). `from` now finds
+the label's statement and enters it in the same frame, continuing after it (Enter's own loop as before); the semantics unchanged.
+Proof: /root/arbace-mac/.tmp/q542/r8/gotoloop.c (ten million turns of `again: ... goto again;`) by `bin/ci run` overflows with the
+old cirun and prints `10000000 35000000` with the new; `bin/ci check --only test/c/essential-check.txt` (CI_LINK_CHECK=1) and `check
+--aot --only test/c/essential-aot.txt` pass, their controls differing. go/arbace/ci is in gate_key: the merge rebuilds the
+executables, and the host's C records rerun on its train.
+## 2026-11-23: queue 540's torture-compile rows recorded on train 1's compiled host (smalls2-1123)
+
+The second try under the big-job lock (.tmp/c/rt540b.sh: REPR_C_THREADS=2, ulimit 22 GiB, GOMEMLIMIT 18 GiB; train 1's gate executable
+the tools' host, 540's REPR_C_MAX_NEST at 20,000): `bin/repr-c roundtrip --corpus torture-compile --record` (16 min, 18.7 GB peak):
+1,790 of 1,791 pass: limits-declparen.c, limits-exprparen.c, limits-pointer.c and limits-structnest.c (levels 1-2 equal),
+limits-externdecl.c and pr46534.c (read whole, no read budget compiled) left the known file; left: limits-caselabels.c (100,000
+nested case labels past the 20,000 bound, stack overflow: the VM's 540-1, iterative label chains). `bin/repr-c parse-check --corpus
+torture-compile --no-mutants --record` (10 min, 10.1 GB): 1,790 of 1,791 equal, the same four limits files' trees equal to cc's
+(66,002, 36,002, 26,002 and 165,998 nodes), left limits-caselabels.c (:eval-depth). Cells: C read 5,470 / 0 / 5 -> 5,474 / 0 / 1, print
+4,847 / 0 / 8 -> 4,853 / 0 / 2 (left: limits-caselabels.c, the VM's; sqlite3.c, a print fault at an offsetof inside a macro, filed
+:eval-limits by the record's kept class, the VM's 540 too); C completeness 0.9994 -> 0.9999. bin/reap --record, bin/crops-score
+--record, --judge --strict, bin/records-check: 0 problems.
+## 2026-11-23: the user's decisions on Java's remaining by-design classes; their rows classed
+
+Relayed by the coordinator (the user, 2026-11-23): JDI (JD9) and AWT/Swing (desktop) are n/a; JMX is n/a; serialization (its
+compiled level), XML (JD8, reversing 2026-11-22's "stays"), javac's synthetic lambdas (JD7, reversing DECISION 517-1 (a)), the
+class-file API and the jrt: image (:zip) are to be built; annotation processors from class files (JCS51) go through JD3's
+class-file loader (java-bytecode's stream), not JCS51 (a)'s interpreted sources. Alternatives not taken: keeping them by design.
+
+Applied in test/java/divergences.edn (java-design-1123):
+- `:jmx`, `:jdi`, `:desktop`: kind `:na`.
+- `:xml`, `:classfile`, `:zip`, `:synthetic-lambdas`: kind `:world` (deferred: to be built).
+- `:design-also` and `:design-also-compiled` (JCS129 (a)'s by-design-beside-its-cause lists): their tests' sources (test/java/
+  ref-jdk26.edn's `:files` in jdk26u at the platform's pin) scanned for the features' packages; a test naming javax.management,
+  com.sun.jdi or java.awt/javax.swing moved to new n/a classes `:design-also-na` (32 interpreted) and `:design-also-compiled-na`
+  (39 compiled); the two naming javax.smartcardio (t08070, t08073; no decision changed JCS97 (a)) to `:design-also-smartcardio`
+  (`:design`); the rest stay, kind `:world` (they wait for serialization, XML, the class-file API, class loading).
+- `bin/reap --record`: Java eval 3,109 / 116 / 100 -> 3,109 / 51 / 119 (46 n/a), AOT 3,079 / 155 / 91 -> 3,079 / 54 / 161
+  (31 n/a; the branch's JD1, JD2, JD5, JD6 n/a classes included); `bin/crops-score --record`: Java completeness 96.9 (97.6 without
+  by design); `--judge --strict` and `bin/records-check` pass. By design left: class loading and defineClass (JD3's), FFM and
+  Kerberos (being built on this branch), the harness's (jvm-tools, memory-limit, flaky-timeout), j2g-reflection, smartcardio,
+  diffcheck's corpus-own exclusions.
+
+## 2026-11-23: java-design-1123: JD7 built (javac's synthetic lambda methods in reflection); Dyn's clone; train 1's session
+
+- JD7 (the user's BUILD of 2026-11-23): `arbace.classes.analyze/synthetic-lambdas` lists a class's lambdas as javac's
+  LambdaToMethod makes their methods: the name analyze-lambda already gave (lambda$M$N, javac's per-prefix index, used until
+  now for SerializedLambda), the captured locals first in the order the body first names them then the instantiated
+  descriptor's parameters (erased), private and synthetic, static unless the body uses this. The interpreter publishes them
+  as member table entries (`Compiler$CFGo.setMethod`, an entry that throws when invoked: the lambda runs as its own class's
+  method), j2g lists them in a program's own classes' member tables as `m` lines (jrt's throwing entry). Method references
+  to a protected method declared in another package are made lambdas as javac's TransTypes makes them
+  (`needsConversionToLambda`'s `isProtectedInSuperClassOfEnclosingClassInOtherPackage`; analyze-method-ref's bound, unbound and
+  static references through `ref-as-lambda`), which numbers ProtectedInaccessibleMethodRefTest2's three as javac does.
+  Alternatives considered: invocable synthetic methods (a second entry point to every lambda body; no test calls them);
+  names computed apart from the analysis (the analyzer already numbers them for serialization).
+- Proved by day without a build: `.tmp/jd/dev/arbace-dev`, the executable 2399c5e5's with the checkout's
+  `arbace/classes/analyze.ae` and `interp.ae` evaluated over its own before test/java/run.ae (the interp level's harness for a
+  change to the Java forms' front end alone): t06144 PrivateLambdas, t06157 CaptureVarOrder, t06306
+  ProtectedInaccessibleMethodRefTest2 pass, the control t03208 passes, the negative controls c00001 and c00004 differ. The
+  compiled level waits for a train's build.
+- j2g: Dyn's `Clone__O` calls the interpreted class's own `clone()` by its key (`DynClass.ByKey`), else Object's refusal:
+  compiled code cloning an interpreted object through an interface that declares `clone()` public (BuildOddSel t05330:
+  PKIXParameters clones its CertSelector). Waits for a train.
+- The class-file API's compiled rows (t06042 and its kin: "Unable to resolve symbol: ClassFile/of") are stale: the API is in
+  the world since F26, and `bin/java-check --analyze-only` of t06042 on the checkout refuses none of its classes; their rows run
+  with train 1's.
+- Train 1 (the coordinator's: next + java-design-1123 at 0ad52db70 + clj-1123, one edge update and one gate build) builds this
+  branch's FFM, Kerberos, XML parser, setProperties and JD4; `.tmp/jd/session-train1.sh` waits for its build, runs the compiled
+  and interp rows on its executables in java-design-b1 (the compiled ones under one heavy-lock ticket), then
+  `.tmp/jd/post-1123.sh` merges train 1 and records them.
+
+## 2026-11-23: the user's decisions on XML's place and smartcardio; java-design-1123's scope; the unlinked native, Reference's clone
+
+- The user (relayed by the coordinator, 2026-11-23): XML is built in javac's tool world (java-design's option (b): the tests
+  naming java.xml run on javac's tool at interp, as F6's javac-API tests do, and in javac-world shards at compiled, as JD4's;
+  the shipped program does not grow); javax.smartcardio is n/a. The Mac (queue 543) takes jrt's open causes (CountDownLatch and
+  Semaphore extendable, ForkJoinPool.schedule, System.Logger, the jdk.charsets charsets, the Buddhist calendar, stack traces'
+  line numbers, type annotations' reflection, the ConditionObject name, the jrt: and zipfs providers); java-design keeps XML in
+  the tool world, serialization at compiled, t04823, JD7 and Dyn's clone, and train 1's records. Alternatives not taken for XML:
+  the shipped world (a third to a half more of jdk/forms in every build), a world and executable of its own.
+- `:smartcardio` and `:design-also-smartcardio`: kind `:na`. `bin/reap --record`: the cells unchanged (no row of the two fails
+  today); `crops-score --judge --strict` and `records-check` pass.
+- An own native method that nothing implements (SubclassTest's AbstractObjectInputStream.allocateNewObject, t04443;
+  MethodAccessFlagTest's m4, t04832; both compiled, "Go does not compile: undefined: ..._native"): j2g's body throws
+  UnsatisfiedLinkError, named as HotSpot names an unlinked native ('R C.m(P, ...)'), as the JVM does when it is called
+  (decls/method-forms); reach.ae roots UnsatisfiedLinkError's constructor for it. java.lang.UnsatisfiedLinkError entered the
+  world (test/jrt/jrt_sources.ae's jd1123-sources, jdk/sources.txt, jdk/forms/java/lang/UnsatisfiedLinkError.ae read by
+  `bin/repr-java read-jdk --no-javac` on javac's tool: the same forms as the vendoring read but the header's path, checked on
+  ThreadDeath; the provenance's counts 3,828 and 4,068). Waits for a train.
+- t04823 ReferenceClone: a SoftReference, WeakReference or PhantomReference subclass's super.clone() was Object's shallow copy
+  (dyn/clone-call: jrt's manifest lists no clone for the references, so impl-of found Object's); now jrt's reference's own
+  Clone__O (CloneNotSupportedException, Reference.clone's), for a DynSub of a Reference subclass whose jrt struct has one.
+  Waits for a train.
+- Found, not built: t04725 (annotation UnitTest) fails first on annotation elements of type byte, short and float (their values
+  null, their defaults "missing element"), before its proxies' serialization; t04444 SubclassGC needs a class loader's classes
+  unloaded (JD3's loader). Both stay deferred.
+
+## 2026-11-23: java-design-1123: XML in javac's tool world, the measured closure (plan, nothing built yet)
+
+- The user's (b) of today: java.xml's parsers, DOM, transform, XPath, validation and StAX, and java.xml.crypto's XML signature,
+  in javac's tool world (overlay/jdk/javac/closure.txt, read by `bin/javac-vendor convert` into jdk/javac/forms), the XML tests
+  routed there as F6 and JD4 route javac's API tests (bin/java-check's tool_re: their sources naming javax.xml's parsers,
+  transform, xpath, validation, stream, catalog and crypto, org.w3c.dom, org.xml.sax; at interp on javac's tool, at compiled
+  in javac-world shards).
+- The closure measured as JN7.2 measured the SAX parser's: the 15 XML tests (t08077-t08081, t08083, t08088-t08096) compiled
+  by the jdk26u build's javac and run by its java with `-Xshare:off -Xlog:class+load` (`.tmp/jd/xmlload/run.py`, each test's
+  renamed sources as test/java/ref-jdk26.edn's :files give them): 1,007 java.xml and 162 java.xml.crypto classes loaded, 803
+  top-level source files beyond the shipped world's (jdk/sources.txt), javac's (jdk/javac/sources.txt) and the closure's
+  (684 java.xml, 119 java.xml.crypto; about 247,000 lines; BCEL's generic 173, XSLTC's compiler 57, XPath's functions 42,
+  Xerces' schema datatypes 35, ...); `.tmp/jd/xmlload/need.txt`. Still to add: the classes their members' descriptors name and
+  their supertypes (j2g translates a call only when its descriptor's classes are in the world), found by
+  `bin/javac-vendor check`'s refusals, and the factories found by name (FactoryFinder's defaults, the XML signature's
+  providers) rooted for reflection, as round 2 rooted the default DatatypeFactory.
+- XSLTC (the XSLT tests t08091, t08093, t08096's transform) compiles a stylesheet to class files with BCEL and defines them:
+  JD3's class-file loader and interpreter in the tool's world as well.
+- Cost: javac's world grows from 915 forms by about 800 files; javac's tool build (75 minutes, 26.5 GB at JCS52 (a)) grows
+  with it. The conversion and the check are heavy runs (the read under the big lock, the check's j2g of javac's world 28-40
+  GB): to be scheduled by the coordinator, as the trains are.
+
+## 2026-11-23: java-design-1123: XML's closure on the branch, ready for a train (convert, modules, edge, builds)
+
+- overlay/jdk/javac/closure.txt: the 803 files measured today (684 java.xml, 119 java.xml.crypto; the two whose classes live in
+  another file's, XSAttributeChecker's traversers' containers and XPathParser's parser_actions, by their files), 1,025 lines.
+- bin/javac-vendor: java.xml.crypto a module of javac's world (`modules`; its closure lines converted by read-jdk as java.xml's).
+- j2g: org.jcp (java.xml.crypto's provider and its DOM implementation) a JDK package (`pkg-of`) and named by its binary name in
+  the tool's world (`tool-module-prefixes`, as java.xml's packages); the classes java.xml and java.xml.crypto instantiate or
+  load by name rooted (main.ae, beside round 2's: FactoryFinder's defaults, Xerces' DV factories and loaders, the XML security
+  library's algorithms, transforms and resolvers, the XMLDSig provider and its services, XSLTC's runtime classes, 71: the
+  string-named classes of the two modules' sources that the 15 tests load on the JDK).
+- bin/java-check's tool_re: a test naming javax.xml's parsers, transform, xpath, validation, stream, crypto or catalog, or
+  org.w3c.dom or org.xml.sax (not jdk.internal.org.xml.sax, not javax.xml.datatype), runs on javac's tool at interp and in a
+  javac-world shard at compiled; checked on t08088 and t08077 (the tool) against t08084 (datatype) and t05590 (Properties' XML),
+  which stay on the executable.
+- Not run (heavy, a train's): `bin/javac-vendor convert` (REPR_JAVA_STALE_OK=1 on train 1's tool: the closure changes javac's key
+  before any tool holds it), then `bin/jrt modules` (go/arbace/jrt/module_table.ae: java.xml.crypto's packages, read from
+  jdk/javac/sources.txt), `bin/j2g-edge update`, the gate build and javac's tool. Known left for after the convert: the XMLDSig
+  provider in the tool's service registry (bin/jrt provides lists the shipped world's providers alone), XSLTC's translets on
+  JD3's loader (AbstractTranslet a class bytecode classes extend), and whatever `bin/javac-vendor check` refuses.
+
+## 2026-11-24: java-design-1123: train 1's rows recorded; the XML edge proved; jrt-convert's refusals fixed
+
+- Train 1 (d9217f672: next + java-design-1123 at 0ad52db70 + clj-1123 + java-bytecode-1122 + smalls2-1123; executables
+  fb29d2672f0d7bf945b6, javac's tool javac-f170fb32cd7e14aa55f8) built on its fourth attempt (19:50 on 2026-11-23); my
+  session-train1.sh had stopped at its first failure (10:16) and ran again at 22:03, in java-design-b1 at train 1's commit (the
+  key checked): compiled rows of rounds 1-3 and the class-file API's (compiled1-t1, 81 rows), JD4's javac-API tests
+  (compiled-javac-t1, 57), the heavy interp row (t05445) and the interp rows (interp1-t1, 49). Judged and recorded partially
+  (bin/java-check --judge --partial --record): compiled 62 now passing, interp 22, no regression; JD4: 40 of the 57 pass compiled.
+- Rows whose cause the branch built after train 1's commit, classed `:jd1123-next-train` (deferred) until the next train's
+  runs: the FFM rows (WrongThreadException not in the world), the datatype rows (JdkXmlConfig), Kerberos' three (SunJGSS not
+  among the providers); `:assert-default` (deferred): t06029, assertions on where the JDK's run (no -ea) had them off.
+- Java: eval 3,109 / 51 / 119 -> 3,131 / 33 / 120 (41 n/a), AOT 3,079 / 54 / 161 -> 3,141 / 33 / 122 (29 n/a); completeness
+  96.9 -> 97.5 (97.9 without by design); crops-score --judge --strict and records-check pass.
+- The XML edge proved (the coordinator's ask after train 2): train 2's conversion of javac's world with XML (1,627 sources,
+  java.xml 904, java.xml.crypto 119, 0 failed) laid into jdk/javac, its provenance written by javac-vendor's own function,
+  `bin/javac-vendor edge` under one lock ticket: the names check (9,919 classes, none twice), then j2g's --record-edge on the
+  frozen JVM: 731 classes beyond jdk/edge.edn, status 0 (.tmp/jd/xml-edge-proof.log). jdk/javac put back as committed after it:
+  train 3 converts afresh.
+- Train 2's `bin/jrt-convert update` refused the Kerberos and datatype slices (17 javac errors) and found four FFM package
+  files other than a fresh convert's: ProviderList and krb5's Config now derived overlays (the native GSS wrapper's and
+  macOS's SCDynamicStore branches dropped: the classes those name are natives of other platforms or libraries),
+  SecuritySupport.readConfig reading the JAXP configuration files itself (JdkXmlConfig, with its catalog and security
+  managers, is javac's tool world's), sun.net.www.protocol.http.spnego.NegotiateCallbackHandler in the world (GSSUtil.login
+  names it), java.lang.WrongThreadException in the world, SunJGSS in ProviderConfig's variant (398a8833f). The forms come from
+  `bin/jrt-convert update` itself (queued under the lock: `.tmp/jd/jrt-update.sh`).
+
+## 2026-11-24: java-design-1123: t04725's annotation elements and its proxies' serial form; SubclassGC's unloading (not built)
+
+- Annotation UnitTest (t04725) failed first on its byte, short and float elements and defaults: the Java forms write javac's
+  (byte) 1 as (unchecked-byte 1), and arbace.classes.analyze's ann-value took any list headed by a symbol for a nested
+  annotation ("Unknown annotation: unchecked-byte", the value left out, the default missing). Now a nested annotation only where
+  the element's type is not primitive (4ada4b190). Interpreted on the day harness (train 1's executable fb29d2672f0d with the
+  checkout's analyzer and interpreter): every annotation check of the test passes; it then stops at serialization.
+- Its serialization: jrt's annotation objects (AnnotationObj, a proxy-like class per type, JCS210) were no Serializable and had
+  no Proxy field h to serialization ("NotSerializableException: t04725.$Proxy1"); now an annotation object is Serializable (as
+  a Proxy is), DynFields gives proxyHandlerField its handler, and the handler has AnnotationInvocationHandler's serial form
+  (serialVersionUID 6182022883658399397, type and memberValues as a LinkedHashMap in the annotation's order), read back through
+  annotationHandler_New_Class_Map once both fields are read; its readObject's checks of the members against the type are not
+  made (JCS291's left part). `bin/jrt build`: jrt compiles. Proved by the next train's run (t04725 in .tmp/jd/interp-t2.list
+  and compiled-t2.list).
+- SubclassGC (t04444) passes up to its check that a class a URLClassLoader defined (the bytecode loader's, JD3) is collected
+  once its loader and objects are unreachable: jrt and the dynamic classes keep every class reachable (j2g_dyn's dynClasses map,
+  the loader's table, ClassInfo registries). Unloading needs those to hold a loader-defined class weakly (Go's weak.Pointer and
+  runtime.AddCleanup) and WeakReference to a Class cleared when it goes: a change to java-bytecode's loader and jrt's registries,
+  left for a decision with that stream. Not built. t04308 passes already.
+- The interp speed rows (11: exhaustive loops interpreted past 600 s of CPU) need a faster interpreter; not started.
+## 2026-11-23: ClassLoader.resources(String) for translated code (java-bytecode-1122, after train 1)
+
+The last member of the user's decision (a): jdk.internal.jrt.ClassPathResources.resources(ClassLoader, String)
+(overlay/jdk/java.base), jdk26u's lazy stream over the loader's getResources (the name checked first; getResources called
+when the stream is consumed, its IOException an UncheckedIOException then), and j2g's class-loader-resource-helpers'
+resources(String) (arbace/j2g/model.ae: a translated loader's own override first, else ClassPathResources'; main.ae roots
+it). jdk/forms' ClassPathResources.ae as bin/jrt-convert predict reads it (only the new method and its imports differ from
+the committed forms; vet: 0 refused; j2g's analysis of the predicted world: 0 failures; the night's update regenerates
+it). The interp level is not covered: an interpreted loader's getResources override is not seen by jrt (getResources is
+a support helper, not a ClassLoader_I method a DynSub dispatches), so ResourcesStreamTest (t04543) can pass compiled only.
+Rides train 2.
+## 2026-11-23: an assert runs while its class's initialization is in progress (t06029; the user's decision, train 3)
+
+The user confirmed (2026-11-23, relayed by the coordinator) building :assert-before-init: assertion status per class as
+the JVM has it. javac compiles assert to a test of the class's static $assertionsDisabled, which <clinit> sets from
+desiredAssertionStatus(); before <clinit> completes the field is still false, so an assert in a class whose initialization
+is in progress runs (Attach.java: U, initialized as V's superclass, calls V.assertsEnabled(); JLS 12.4.2, 14.10). Built,
+write-ahead of train 3's build: the interpreter's :assert (arbace/classes/interp.ae) is (if (and (AssertOn k) (not test))
+(throw (new AssertionError msg))) with Compiler$CF$AssertOn, on while the Klass's state is not done (CF$Klass.initDone,
+new); j2g's :assert (arbace/j2g/code.ae) tests (or (not J2g_AssertionsDisabled) (not (.Done C_init))) for a translated
+class with non-trivial initialization (a class with an assert always has it: :uses-assert); an interface's asserts follow
+the global flag as before (javac's holder class is not translated). No class runs with assertions enabled
+(Class.desiredAssertionStatus stays false). Proof due on train 3's build: t06029 at interp and compiled, and the Java
+essential checks. Branch java-bytecode-assert-1123 (from java-bytecode-1122 731924212).
+## 2026-11-23: JCS51 on train 1's tool, 18 of 25; the Filer's generated sources (java-bytecode-assert-1123, train 3)
+
+JCS51's 25 processing tests at the diagnostics level on train 1's javac tool (javac-f170fb32cd7e, d9217f672): 18 pass, recorded
+on java-bytecode-1122 (660ab0f75), :diag-processors narrowed to the 7 left. Three of the seven stop on the Filer's generated
+sources: javac on Arbace's file manager had no SOURCE_OUTPUT (getJavaFileForOutput's IOException, BrokenEnumConstructor's
+output, and the generated classes missing in GenerateAndError and WErrorGen). Built for train 3: SOURCE_OUTPUT (no -s on
+Arbace) goes to CLASS_OUTPUT's directory, else the current directory, as jdk26u's JavacFileManager.getFileForOutput puts a
+generated source (src/jdk.compiler/share/classes/com/sun/tools/javac/file/JavacFileManager.java at baf63fb, read for the
+behaviour); FileManager.ae read again by read-jdk --no-javac on train 1's tool (the other five files byte for byte the
+committed forms). The rest (-Werror's status after the last round, -XprintProcessorInfo, a model call reaching an abstract
+method) is left for after train 3's run.
+## 2026-11-23: an interpreted interface's method on a proxy (JCS51's TestElementsAnnotatedWith; train 3)
+
+t07544 (TestElementsAnnotatedWith) on train 1's tool stopped on AbstractMethodError jdk.proxy1.$Proxy0.names(): javac's
+AnnotationProxyMaker makes a java.lang.reflect.Proxy for an annotation type the test's processor defined from its class file
+(annot/AnnotatedElementInfo), and the processor's invokeinterface of names() on it reached CallV's reflective path, where the
+proxy's class has no public method of that key. Built (Compiler.ae, train 3): CallV.reflect asks a proxy's invocation handler
+with the interface's Method (Rt/proxyMethod over the proxy class's interfaces, Rt/classMethod shared with receiverMethod),
+as the JVM's proxy class dispatches it. Proof due on train 3's tool (t07544's diagnostics).
+
+## 2026-11-24: java-design-1123: a class defined from bytes goes with its loader (SubclassGC, t04444; built, rides train 3)
+
+The coordinator handed java-bytecode's loader and jrt's registries to this stream (java-bytecode finished; its last branch,
+java-bytecode-assert-1123 at 25fa51e29, merged into java-design-1123: assert-before-init, the Filer's SOURCE_OUTPUT, proxies'
+interface calls; :assert-default left for its :assert-before-init). SubclassGC (jdk/java/io/Serializable/subclassGC, bug
+6232010) defines an ObjectOutputStream subclass through a URLClassLoader from test.classes, drops the loader, the class and
+the stream, and expects System.gc() to enqueue a WeakReference to the class within a second (JLS 12.7: a class is unloaded
+when its defining loader is collected). Every table that named the class kept it:
+- jrt: definingLoaders (class -> loader) and loaderClasses (loader -> classes) are now fields, the class's loader and the
+  loader's classes (ClassLoader.classes; the boot loader's in bootClasses); definedPackages, which kept every loader that
+  defined a package (URLClassLoader does at each class), is the loader's own (ClassLoader.packages); a class of a loader other
+  than the built-in ones (null, application, platform) leaves the registry for weakRegistry (weak.Pointer: ForName and
+  Class.getDeclaredClasses find it while it lives); the decoded annotations, attributes and generic repositories, five sync.Map
+  tables keyed by every ClassInfo, are in the ClassInfo (classCaches).
+- j2g_dyn (arbace.j2g.dyn, dyncf): dynClasses (class -> DynClass) and cfNews are gone: a class keeps its DynClass in
+  ClassInfo.Dyn, the allocation in DynClass.CfNew.
+- arbace.lang.Bytecode: CLASSES and BY_LOADER are WeakHashMaps whose values hold the BytecodeClass and the classes weakly
+  (WeakReference); KLASSES is gone (a Klass's BytecodeClass is its info).
+The class and its loader keep each other, nothing else keeps them; the built-in loaders' classes stay strong. jrt's
+WeakReference was already over Go's weak pointers and runtime.AddCleanup (F17). `bin/jrt build`: jrt compiles on amd64 and
+arm64. Not provable by the day harness (jrt, j2g_dyn and Bytecode are compiled into the executable): t04444 is in the next
+train's lists (.tmp/jd/interp-t2.list, compiled-t2.list), with t04308 as a control of the defining path. Alternatives not
+taken: clearing the tables when a loader is collected (a cleanup on the loader: the tables themselves kept it); a weak table
+keyed by class beside the strong ones (its values named the class).
+
 ## 2026-11-24: cpp-decl2 (3), overload resolution by constraints, member lookup ambiguity, and the left list (branch `cpp-decl2-1123` after next `97a71ba55`)
 
 The coordinator handed over three rows from cpp-tpl2 (concepts-return-req1, concepts-memfun4, crash126's line 12; the satisfaction of
@@ -21369,6 +21642,400 @@ The user's decisions (2026-11-24, through the coordinator, after next took ocaml
 - Next: T2 (ppx_expect with base, stdio and time_now, for re/expect) and T3 (ppx_jane, for sexplib0_test), as tasks of their own.
   Their ppx rows then move from deferred.
 
+## 2026-11-24: java-rows-1124: Math.pow's huge exponents and the empty synchronized method; Java's deferred rows classed (the burst)
+
+The burst's Java eval/AOT stream (branch `java-rows-1124` from mac/next a6da0aadf). Eval 3,147 / 23 / 114 and AOT 3,152 / 22 / 122
+deferred rows classed by test/java/divergences.edn (a classifier over the records, the reap rule), the scopes other branches own
+subtracted (java-design-1123's FFM/Kerberos/XML/serialization/class-file API/zip and :jd1123-next-train, java-speed-1124's speed
+rows, java-bytecode-assert's t06029, train 2's synthetic lambdas, the Mac's read rows). Two causes built:
+
+- `go/arbace/jrt/math.ae`: Math.pow is jdk26u's `FdLibm.Pow.compute(x, y, false)` (Math.java:755), StrictMath.pow
+  `compute(x, y)`, FDLIBM 5.3's compat. jrt used the compat constants for both; in the huge-|y| branch (|y| > ~2^31, x near 1)
+  the non-compat split of 1/ln2 is 21 bits (0x1.71547p0) and its tail 0x1.94ae0bf85ddf4p-22 (JDK-8301202's fix). jdk26u's
+  PowLargeExpTests (t04583, :jrt-math, both levels) probes exactly these. `TestPowLargeExp` (math_test.ae): its two cases within
+  2 ulps; the control (Math.pow with compat) fails it, 0x1.ffffe0bc9e614p+915 against 0x1.ffffe0bc9e399p+915.
+  `bin/jrt test --package jrt` (TestDoubles, TestFloats, TestMath*, TestNoFusion, TestPowLargeExp) passes; its test data made
+  from the frozen jar (`bin/jrt testdata`, FROZEN_JAR the main checkout's).
+- `arbace/classes/interp.ae`: a void method without body forms took no monitor when synchronized; it now does, as a method with
+  a body (JLS 8.4.3.6). jdk26u's StringBuffer/TestSynchronization (t04668, :jrt-strings, interp; compiled passed) self-tests on
+  its own `public synchronized void sync_shouldnt_be_tested() {}`: a thread calling it while main holds the receiver must be
+  BLOCKED. Checked on train 3's executable (40a4745332aacf54acab) with the checkout's analyzer on ARBACE_PATH (RT.toolSource):
+  t04668 status 0; without the change status 1 (the control). A probe (an empty and a non-empty synchronized method, direct and
+  by reflection) BLOCKED in every case after, TERMINATED for the empty one before.
+
+Expected rows (the train's records): eval +2 (t04583, t04668), AOT +1 (t04583). Not recorded here: both need a gate build.
+
+Classed but not built (the table in the report): :reflection 10/12, :stack 7/10, :security 7/7, charsets 5/5, :jrt-dates 4/4,
+:threads 4/3, :logging 3/4 (JCS155 (a)), :references 3/2, the extends rows 4/2, :repl-sibling 2/0 (cyclic packages: the eager
+ImportExpr), :net 2/2, the rest single rows. Decisions put to the user: jdk.charsets into the world (F8's second step), reflection
+of world classes' private members for the tests that read them (t07882, t07910), host-dependent stdout (t04983's network
+interfaces, t07657's java.home, t03503's identity hashes), the jrt: file system (t08098, t08102, t08103).
+
+## 2026-11-24: java-rows-1124: the user's four decisions built (charsets, reflection roots, own verdicts, the jrt: file system)
+
+The user's decisions of 2026-11-24 on java-rows-1124's report:
+
+1. **The charsets the tests name, not the whole of jdk.charsets.**
+   - The closure (test/jrt/jrt_sources.ae) gains:
+     - `ext-charset-sources`: ISO2022_JP, ISO2022_JP_2, MS50220, MS50221 and MSISO2022JP, KIND share:jdk.charsets;
+     - `ext-charset-gensrc`: EUC_JP_Open, MS950, PCK and the five internal JIS tables they decode through
+       (JIS_X_0208_Solaris, JIS_X_0212_Solaris, JIS_X_0208_MS5022X, JIS_X_0212_MS5022X, JIS_X_0208_MS932), KIND gensrc:jdk.charsets.
+   - bin/jrt-convert's generate step makes them with make/modules/jdk.charsets/Gensrc.gmk's extcs step (build.tools.charsetmapping.Main
+     ... extcs charsets stdcs-linux). All eight are byte for byte the JDK build's gensrc (generated.edn :same).
+   - The provider is jrt's own sun.nio.cs.ext.ExtendedCharsets (overlay, Arbace's own; LICENSE.md).
+     - It replaces jdk26u's generated provider, which loads all of jdk.charsets by class name.
+     - It holds the eight charsets' names and aliases (jdk26u's charsets file), aliasesFor (which the charsets' constructors call),
+       charsetForName (case ignored) and charsets().
+     - It constructs the charsets directly, as JrtCharsets does.
+   - The Charset variant's extendedProviders0 gives that provider.
+   - javac on Arbace compiles the 14 files against the platform (`bin/repr-java javac --patch-module java.base=.tmp/jrt/src/java.base`:
+     35 classes, no error).
+   - Expected rows: t08152 (pck), t08176 (ISO-2022-JP and its variants), t08178 (x-eucJP-Open), t08179 (MS950), at eval and AOT.
+   - jdk/: `bin/jrt-convert update` queued under the big lock (.tmp/jrt-update.sh); .tmp/jrt-after.sh then runs `bin/jrt modules`
+     and `bin/jrt provides`, commits jdk/ and pushes.
+   - java-design-1123 (02d35ac1b) was merged in first, so one conversion holds both branches' jdk/.
+2. **Reflection roots.** arbace.j2g.model/reflection-roots is a short list of non-public fields that the member tables list
+   (out.ae's fields), as GraalVM's reflection metadata names what a closed world keeps for reflection:
+   - JceSecurity.isRestricted (FinalRestricted, t07910);
+   - AbstractSaslImpl.logger (CheckAccess, t07882).
+3. **t03503, t04983 and t07657 are judged by jtreg's status.**
+   - java.check's status-by-decision; verdicts.edn regenerated: 3,125 :status, 18 :stdout.
+   - They leave test/java/golden/out.edn (26 cases out) and left.tsv.
+   - The Java judge fact's :out-of-cases is 26 and its :shares 3,304.
+   - Their rows move when the train's records run them.
+4. **:jrt-filesystem is n/a.** It is a new class, before :nio and :design-also-compiled: t08098, t08102 and t08103 at interp and
+   compiled (the jrt: file system's modules and class files, which the Go build has not). Java eval 3,147 / 23 / 111 (44 n/a),
+   AOT 3,152 / 22 / 119 (32 n/a).
+
+Also:
+- The train-3 fix 2aeeffc77 (AssertOn constructed by name) is cherry-picked onto this branch.
+- This branch's own interp.ae change constructs only CF classes the seed has (Monitor, Local).
+- Checked on train 3's executable: t04878 (Proxy nonJavaNames) and t08307 (TimeZone names) already pass. Their rows move with the
+  train's records.
+
+Not built, with estimates:
+- :jrt-dates (t05398, t05461, t05462): jdk26u's JapaneseImperialCalendar, BuddhistCalendar and LocalGregorianCalendar beside jrt's
+  own Calendar and GregorianCalendar (overlays), and Calendar.createCalendar by the locale. About a day.
+- :threads: ScopedValue (t04607), ForkJoinPool.schedule and its ScheduledForkJoinTask in jrt's hand-written pool (t05691),
+  extending Semaphore and CountDownLatch (t05707, t05653). A day or more.
+- :reflection:
+  - MethodParameters under -parameters (t04832, t05910; repr/java, the interpreter, jrt and j2g). About a day.
+  - Package annotations: defpackage is a no-op (t04730).
+  - Reflective access checks need the caller class (t07688, t04829; the :stack work).
+
+## 2026-11-24: java-rows-1124: CountDownLatch and Semaphore extendable; the rest of threads and -parameters planned
+
+**Built (478a6c1b2).** jrt's hand-written CountDownLatch and Semaphore are now non-leaf, as JC4c made AtomicReference and
+ThreadLocal:
+- class interfaces `CountDownLatch_I` and `Semaphore_I`;
+- the constructors as subclasses call them (`Ctor_I`, `Ctor_I_Z`);
+- `Impl_ToString`;
+- Semaphore's protected `reducePermits`, with jdk26u's "Permit count underflow" Error and IllegalArgumentException for a negative
+  reduction;
+- InstanceOf through the interfaces, and serial_locks through `Semaphore_I`;
+- both classes in `arbace.j2g.model/class-supers`, so they get a DynSub type. The interpreter's `canExtend` and `superCall`, and
+  generics.edn's `:protected`, come from that and from the regenerated manifest (`bin/jrt manifest`: `reducePermits (I)V
+  protected`).
+
+Checks: `bin/jrt test --package jrt` with TestSubclassedSemaphoreAndLatch (an embedding struct built by the Ctors, the underflow
+and the negative reduction) passes, and so do TestCountDownLatch and TestSemaphore. Expected rows, once train 4 builds it:
+- t05653 (Timer/Args's latches): interp's `:interp-extends`, compiled's `:j2g-go`;
+- t05707 (PermitOverflow's Sem): interp's `:threads`, compiled's `:j2g-go`.
+
+**Not built, the designs found:**
+- **ForkJoinPool.schedule (t05691).** jdk26u's ForkJoinPool is a ScheduledExecutorService. jrt's pool is hand-written, and it
+  names ScheduledFuture, Delayed and ScheduledExecutorService only through stand-ins: new stand-ins (standin_executor.ae's way), a
+  ScheduledForkJoinTask over a timer that submits the task unless it is cancelled, and the delayed tasks counted in the pool's
+  termination (jdk26u's close lets them run after shutdown). Only a j2g run can try the stand-ins' method sets. Half a day.
+- **ScopedValue (t04607).** It needs the bindings on jrt's hand-written Thread (jdk26u's scopedValueBindings). About a day.
+- **-parameters (t04832, t05910).**
+  - The reader records nothing of javac's `-parameters`. The tests' `:javac ["-parameters"]` reach the read, but no form says so.
+  - A class mark from repr/java (both fronts, javac's and the native one) and W records written by
+    `arbace.classes.annot/attribute-lines` give both levels the MethodParameters: classdata.ae's executableParameters and j2g's
+    GetParameters already read W records.
+  - The W records follow javac's ClassWriter: names only under `-parameters` (or for a record's canonical constructor), flags
+    whenever an extra parameter is SYNTHETIC or MANDATED. Lower.outerThisDef makes the outer instance MANDATED for an anonymous
+    class's constructor and a non-private inner member class's, else SYNTHETIC; captured locals are FINAL|SYNTHETIC; enum
+    constructors' name and ordinal are SYNTHETIC, valueOf's name MANDATED.
+  - It touches repr/java, so it waits until the queued `jdk/` conversion has written its provenance. About half a day.
+- **Package annotations (t04730).** `defpackage` is a no-op (core_classes.ae), and jrt's Package has no annotations. Needed:
+  - a registration at load for the interpreter (a runtime change);
+  - j2g translating `defpackage` for the compiled level;
+  - Package's getAnnotation* over the registered data.
+- **Reflective access checks (t07688, t04829).** They need the caller class, which is the :stack work.
+
+## 2026-11-24: java-rows-1124: ForkJoinPool's scheduling and ScopedValue in jrt (t05691, t04607)
+
+Both are in jrt's hand-written Go, outside what the queued conversion reads.
+
+**ForkJoinPool's scheduling (63a1c7578).** jdk26u's ForkJoinPool is a ScheduledExecutorService (since JDK 25). AscendingOrderAfterReplace (t05691) schedules
+eleven delayed tasks on a pool of one, cancels one, and closes the pool.
+- jrt's pool, in go/arbace/jrt/fjschedule.ae, now has: schedule(Runnable) and schedule(Callable), scheduleAtFixedRate,
+  scheduleWithFixedDelay, cancelDelayedTasksOnShutdown and getDelayedTaskCount.
+- Each scheduled task is a DelayScheduler$ScheduledForkJoinTask, a ForkJoinTask and ScheduledFuture (getDelay, compareTo by delay).
+  It waits on a Go timer and runs in a worker of the pool when the timer fires.
+- The policies are jdk26u's:
+  - a delayed one-shot task runs after shutdown unless cancelDelayedTasksOnShutdown was called;
+  - periodic tasks are cancelled on shutdown;
+  - termination waits for the delayed tasks;
+  - a periodic task's exec returns false between runs, so runForked runs it again;
+  - cancel takes a waiting task out of the pool's set.
+- jrt's own build gets stand-ins for Delayed, ScheduledFuture and ScheduledExecutorService (standin_scheduled.ae), which the
+  translated interfaces replace in the program.
+- ForkJoinPool's class info and the manifest's class list now give ScheduledExecutorService as its interface.
+- TestForkJoinPoolSchedule, in the order of the delays, passes. It covers: a cancelled task, close waiting, a rejected schedule
+  after shutdown, a periodic task, and a Callable's result.
+
+**ScopedValue (271f11782).** jdk26u's java.lang.ScopedValue (final since JDK 25, JEP 506) is now in go/arbace/jrt/scopedvalue.ae,
+in jrt's hand-written Go:
+- newInstance, where, get, isBound, orElse, orElseThrow; Carrier's where, get, run and call; CallableOp;
+- the bindings are a stack of snapshots on jrt's Thread, removed however run or call ends; a new thread starts with none;
+- hashCode is jdk26u's xor-shift key;
+- the class's generic Signature is in classdata.ae's handSignatures;
+- NoSuchElementException is a stand-in now (test/jrt/standins.ae, `bin/jrt standins`), so that an unbound get throws "ScopedValue
+  not bound", which UnboundValueAfterOOME (t04607) expects after its OutOfMemoryError. jrt's array limit already throws that error.
+
+The manifest's class list (test/jrt/manifest.ae) gains ScopedValue, its Carrier and CallableOp. CountDownLatch and Semaphore stay
+"false" there, their methods promoted as AtomicReference's. TestScopedValue passes, and so does the whole `bin/jrt test --package jrt`.
+
+For the train: jdk/edge.edn may need `bin/j2g-edge update` for the new hand-written classes (as train 3 recorded it afresh).
+## 2026-11-23: queue 549, javac on Arbace's doclint, file manager and command line (538-5; branch `549-java-doclint-fm`, the VM)
+
+The read cell's 49 deferred rows were all at the diagnostics level, in javac on Arbace's own Java (JCS52 (a), JCS53 (a)). The 25
+processor rows are left to the host's JD3 bytecode loader (the user's JCS51 decision of 2026-11-23).
+- **doclint** (`overlay/jdk/javac/variants/ServiceLoader.ae`). The tool's ServiceLoader is the program's. Its `stream()` read the
+  registry, so `DocLint.newDocLint` found no provider ("As built: JCS52 (a)"). The variant now replaces `stream()`: each of
+  `providers()` becomes a `Provider` whose `get()` makes a new instance (`fresh`, its own `j2g/add`: one member to each).
+- **The file manager** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/{FileManager,StandardFileManager,Main}.java`, new
+  `com/sun/tools/javac/file/ArbaceFileObject.java`):
+  - `FileManager` is a `BaseFileManager` that javac trusts (`@ClientCodeWrapper.Trusted`), so javac no longer wraps it. `Arguments`
+    therefore gives its warnings for a default platform (source.no.system.modules.path, source.no.bootclasspath).
+  - Its file objects are `PathFileObject`s, through `ArbaceFileObject`. That class sits in javac's package because
+    `inferBinaryName` and `getSibling` are package-private there. A raw diagnostic then names a file by its short name, and two
+    objects for one path are equal.
+  - Once it has javac's context its characters are decoded by `BaseFileManager.decode`, which handles `-encoding`.
+  - `-source 8`'s platform class path is now the system modules' classes.
+- **The command line** (`Main.run`):
+  - The file manager gets the task's context before `call`, as `Main.compile`'s "reinit with options" does.
+  - `-XDexpectKeys` is judged as `Main.compile` judges it.
+  - After an error in the task's preparation the counts are printed. `JavacTaskImpl.doCall` returns before `JavaCompiler.compile`,
+    whose end prints them; `Main.compile` goes on into it. "Before" is detected as no source read.
+  - `-encoding` is passed to javac's API and handled by the file manager.
+- **javac's forms.** The seven overlay files were read by `bin/repr-java read-jdk --check --no-javac` on the 538 tool (7 of 7
+  converted). The unchanged CtSymFileManager and ReleasePlatforms came out byte for byte the committed forms. SystemCompiler's
+  `javax.tools.JavaCompiler` is now qualified, because Main's new import of javac's `JavaCompiler` shares the package's namespace.
+  The package file `com/sun/tools/javac/file.ae` loads ArbaceFileObject after PathFileObject, as names.ae's topo-order does.
+  `sources.txt` and the provenance's counts were updated. The host's `bin/javac-vendor convert`/`verify` makes them afresh.
+- **The tool.** One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java`: 5 h 43 min wall, about 1 h 40 min of it
+  waiting for the lock, 27.5 GB peak. The compiled namespaces (aot-javac) were reused.
+  - The first-stage tool, tried at once, showed the refused ServiceLoader: `j2g/add` takes one member, and `fresh` had shared the
+    first one. The fix (a32b29bcf) went in 14 s before the final j2g read the variants ("3 replaced, 0 cut, 2 added"; 49,347
+    classes analyzed, no failures).
+  - The build recorded its start's key, 6e6db5f5. The key now written beside the tool is the checkout's, a3e3fd09.
+  - `bin/javac-vendor check --from`: no failures. Shared at `.tmp/shared/javac-arm64/`, replacing 538's.
+- **Exploratory probes, not evidence.** Before the build I ran the overlay's Java on Alpine's openjdk25 as a stand-in. The user
+  restricts that JDK to bootstrapping a JDK 26 build (2026-11-02), so those runs prove nothing. They were deleted, and none of
+  their numbers is used.
+- **Proofs** on the new tool, with `bin/java-check --levels diagnostics --only` over the 24 rows of the four classes and the
+  control pair t06443/t06444 (`.tmp/q549/after/`):
+  - 21 now pass: doclint 8; file manager 8 (t06452 t06697 t07420 t07442 t07462 t07478 t07536 t07622); command line 3 (t06660
+    t07527 t07621); closed world t07440, which already passed on 538's tool.
+  - t07463 is still refused (a jar on `--module-path`, JCS53 (a)). The processing tests t07545, t07546 and t07552 still crash on
+    `getUnnamedModule`.
+  - The control c00002 differs, as it must.
+  - Before: the same 26 on 538's tool (`.tmp/q549/base/`), the rows as recorded.
+- **A regression sample** on the new tool, 202 tests (every 10th diagnostics test, every 40th classes test), read, classes,
+  diagnostics and print:
+  - Read, classes and print: every test as recorded.
+  - Diagnostics: 110 as recorded and 3 of this task's rows now passing.
+  - 6 `--release N` tests fail. They fail the same way on 538's tool: this VM has no own platform cache, so no ct.sym. That is the
+    environment, not a regression; they were not recorded.
+- **Cells:** read 7,795 / 0 / 49 -> 7,815 / 0 / 29. Java completeness 0.9634 -> 0.9640. `bin/reap --record`, `bin/crops-score
+  --record`, `--judge --strict`, `bin/records-check`: 0 problems. `bin/provenance-check` reports the same as at 538: reader b45f7ace,
+  the host's regeneration.
+
+## 2026-11-24: queue 549b (and 555), javac on Arbace's --module-path; the user's decisions 549-1 to 549-3 (branch `549b-java-module-path`, the VM)
+
+- **The user's decisions of 2026-11-24 on report 549:**
+  - 549-1 (a): the tool key rewritten to the checkout's (a3e3fd09) is accepted.
+  - 549-2 (a): Main's counts after an early error stay an emulation until JCS53 (a)'s full form, where the file manager is a
+    JavacFileManager under javac's Main.compile.
+  - 549-3 (b): --module-path goes through BaseFileManager's Locations, so a missing element warns as javac's does.
+- **549-3 (b) as built** (`overlay/jdk/javac/jdk.compiler/jdk/internal/jrt/javac/Main.java`):
+  - A --module-path whose elements all do not exist is accepted. Once the file manager has javac's context, it is handed to
+    `BaseFileManager.handleOption(Option.MODULE_PATH, ...)`, as Main.compile hands a file manager its deferred options.
+  - Locations' ModulePathLocationHandler then warns `path.element.not.found` for each element (lint `path`), as javac does
+    (t07463: -Xlint:path -Werror --module-path missing.jar).
+  - A module path naming an existing file or directory stays refused (status 2): there is no jar file system and the file manager
+    serves no module path.
+  - Main.ae was read by `read-jdk --check --no-javac` on 549's tool. The other six overlay files came out byte for byte the committed
+    forms.
+- **Queue 555, folded in and stopped, not built.** The three closed-world rows (t07545 t07546 t07552) each run `-processor X` over a
+  processor class built by `@build`. With `ClassLoader.getUnnamedModule` added to jrt, they would only reach `:diag-processors`
+  (proc.processor.cant.instantiate). Their golden outputs need the processor to run, which is JCS51's work (the host's JD3 loader).
+  The jrt change would also be a runtime change, outside javac's tool build. So no row moves without processors, and the rows stay
+  in `:diag-closed-world`.
+- **549b's tool and proofs (2026-11-24).**
+  - One `ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java` (f83f974bc): 4 h 25 min wall including the lock's
+    queue, 27.6 GB peak. Key 97f949b1, which the build recorded and which is the checkout's. `bin/javac-vendor check --from`: no
+    failures. Shared at `.tmp/shared/javac-arm64/`, replacing 549's.
+  - `bin/java-check --levels diagnostics --only` over the 24 rows of 549's four classes and the control pair: t07463 now passes,
+    the 20 of 549 still pass, t07545, t07546 and t07552 are as recorded, and c00002 differs as a control must. Recorded with
+    `--judge --partial --record`: 1 now passing, 0 regressions.
+  - A regression sample of 102 tests (every 20th diagnostics test, every 80th classes test) at read, classes, diagnostics and print:
+    every test as recorded except t07512 (`--release 15`, no ct.sym on the VM). t07512 fails the same way on 549's tool.
+  - Cells: read 7,815 / 0 / 29 -> 7,816 / 0 / 28. `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`,
+    `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 555's rows routed (DECISION 555-1 (a), the main session's)
+
+t07545, t07546 and t07552 (javac on Arbace's closed-world processing tests) go to the processor work, JCS51's annotation processors loaded
+through JD3's bytecode loader (the main host's): their golden output needs the processor to run, which getUnnamedModule alone would not
+give. Routing, not n/a: the rows stay deferred in their class until that work lands. Alternative considered: adding
+ClassLoader.getUnnamedModule to jrt here (reaches only proc.processor.cant.instantiate).
+
+## 2026-11-24: queue 556b, the user's 538-1 to 538-4 (Java print)
+
+The user answered report 538's four print DECISIONs (2026-11-24, via the main session; brief
+`tasks/556b-java-print-decisions.md`). Built on 549b-java-module-path 8bc7e8303 (538's print fixes, 549, 549b; train 4).
+- **538-1 (b): t05503 stays deferred** in `:print-type-arguments` until JFS75 (b)'s model carries type arguments. Nothing built. The
+  alternative was recording a raw `new C()` as `^:raw` (this moves the reader hash and many jdk/ forms).
+- **538-3 (a), c91403791: `& | ^` kept on pure boolean operands.**
+  - `arbace/repr/java/convert.ae`'s `logic-form` marks `^:eager`:
+    - the `(and a b)` / `(or a b)` of two pure operands;
+    - every `^`, `(not (= a b))`, whose operands are both evaluated anyway.
+  - `arbace/repr/java/print.ae` prints the marked forms as `&`, `|` and `^`, which javac compiles to iand/ior/ixor, where `&&`, `||`
+    and `!=` branch. The meaning is the unmarked form's.
+  - It moves repr/java's reader hash, so jdk/, jdk/javac, test/java/forms and the fixtures' forms need the host's regeneration
+    batch, as for 538-0.
+  - No tool build was needed: javac's tool loads the changed converter from the checkout (RT.toolSource; the shared arm64 tool,
+    key 97f949b1, run with REPR_JAVA_STALE_OK=1).
+  - The alternative was naming the difference a by-design kind (538-3 (b)).
+- **538-2 (a), 0b19a54fa: a local's slot named.** `test/java/print.ae` gains the kind "a local's slot (a switch's case-group locals
+  in one scope or in each arm's)", in `class-kinds` and in `:print-classes`' pattern.
+  - `counted-kinds`' `slots-only?` names it when two class files' code lines are equal but for their locals' slots (branch and
+    switch targets aside), in methods with a switch.
+  - Each method's slots must map as a function from the original's to the printed Java's.
+  - The alternative was printing the colon form back (538-2 (b)), a larger change on both sides.
+- **538-4 (a), 9bc4c1ffc: RP2 (a)'s compound assignment extended to an inner class's accessor.**
+  - `counted-kinds` compares the lines with the accessors' `access$N` numbered alike.
+  - The written-out side's outer instance (aload, getfield this$N), getter call and iadd/isub, against the compound side's one
+    accessor (the outer instance dup'ed), are the compound kind. So is a renumbering alone.
+  - The alternative was keeping it deferred (538-4 (b)).
+- **Proofs (run, VM):**
+  - `bin/java-check --levels read,print --only` over t03567, t05125, t06072, t05503, t03208 and t03209: t03567, t05125 and t06072
+    pass at print; t05503 fails as recorded; c00001 differs, as a control must.
+  - The kinds' controls are a probe ns over the real class files and their mutations (`.tmp/q556/tools/ctl556.ae`): a slot mapped
+    two ways, no switch, an opcode changed, imul for iadd, a field read for this$0. All are unnamed, and both real cases are named.
+    On 8bc7e8303's print.ae the two real cases are unnamed.
+  - A print regression sample of 122 tests (every 40th print test, plus 40 whose sources use boolean `& | ^`): read 122/122 as
+    recorded; print 121 pass, 1 regression.
+- **The regression, t03457 (cr6712835):** it leaves the named kinds.
+  - Its equals() now compiles to the original's ixor, so no goto differs in Tester_Class_7 any more.
+  - That class's `<init>` difference was already there at 8bc7e8303 (run on its sources): a char field's `&=` of a `|=`, an extra
+    local and dup_x1/pop. Only the set-level control-flow rule, which names a class by any differing goto or return line, had
+    covered it.
+  - Recorded as it is now, in `:print-classes-unnamed`, to triage.
+- **Records:** `--judge --partial --record` of both runs, which re-records the sample's rows; several fuzz tests now have fewer
+  differing class files. Java print, the cell, 3321/0/4 -> 3323/0/2. `bin/reap --record`, `bin/crops-score --record` and
+  `--judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 556b, DECISION 556b-1 (a) (the main session's): the print judge's flow rule narrowed
+
+`test/java/print.ae`'s `class-differences` named a whole class "a value's control flow" when any goto or return line differed,
+covering every other difference in it (t03457's `<init>`, report 556b's finding 1). The decision makes it count instead:
+- A differing goto or return names flow only through `counted-kinds`, when every differing instruction is a flow instruction or
+  another named kind's. Otherwise the difference is unnamed, shown by a line of no flow instruction.
+- A switch whose arms differ keeps the set-level naming: fall-through repeats arbitrary instructions.
+- The alternative was keeping the rule and t03457 alone deferred (556b-1 (b)).
+
+**Proved (run):** `.tmp/q556/flowctl.sh` calls class-differences on two real class files:
+- t06072's NonDirectSuper.class, where only flow differs, is named. It is named before and after.
+- t03457's Tester_Class_7 at 8bc7e8303, where flow differs alongside `<init>`'s extra local, is unnamed. It was named before the
+  change (the script fails on the parent and passes on the change).
+
+**The 128-test sample** (556b's 122 plus the six rows) at print against the record: 6 more leave the named kinds, all in
+`:print-classes-unnamed`, to triage:
+- t03453, t03454, t03455, t03567, and more of t03457's classes: hotspot's fuzz tests, where ?: against if moves the arms' loads,
+  stores, constants and conversions, which the counted flow kind does not admit.
+- t06039: a boxed compound assignment on a generic field, printed through a temporary.
+- t06072: its accessor hosts. `X.super.f` and `X.super.m()` in X go through access$N in the original and are direct in the printed
+  `super.f`.
+
+Recorded with `--judge --partial --record`. The whole print level's re-judge is the host's, on train 4's build: it will move more
+rows.
+
+## 2026-11-24: queue 556c, the print rows 556b-1 (a) exposed, as printer fixes (from the main session)
+
+Built on 556b-java-print-decisions 326cd1f02. Both fixes move repr/java's reader hash (the host's regeneration batch, as for
+538-0).
+- **t06072, ca0cee3fa.**
+  - `convert.ae` keeps `X.super` named in X itself as `^:qualified super`. It was plain `super`, but javac reaches `X.super`'s
+    members through access$N accessors and `super`'s directly.
+  - `print.ae` writes it `X.super` (`super-text`) and does not fold a qualified super's field into a compound assignment: the
+    source's getter and setter, against `+=`'s one accessor.
+  - `test/java/print.ae`, 538-4's accessor shape: the access$N methods' own lines are left out, since they follow their callers.
+    RP2's compound kind now covers an inner class's outer instance (aload, getfield this$N) read again against dup'ed.
+  - Controls C4 and C5 (`.tmp/q556/tools/ctl556.ae`): CurPackagePrivateTest$1 is named; the same with a field read for this$0 is
+    not. C4 fails on the parent. Plain `super.f` in X still prints as `super.f`.
+- **t06039, d615f40ca.**
+  - `convert.ae` marks two forms on a boxed place: a prefix increment used as a statement, `^:prefix` (javac's x++ keeps the old
+    value); and a compound assignment, `^:compound` (the written-out form reads the receiver twice where `P OP= rhs` keeps it in a
+    temporary).
+  - `print.ae` prints `++P` and `P OP= rhs` (`marked-compound`).
+  - The class file is now byte for byte the original's. The test's written-out boolean assignments stay written out, which is the
+    negative control.
+- **Left, the ?: family** (t03453, t03454, t03455, t03457, t03567). The pure ?:/if cases are named by the counted flow kind. What
+  stays unnamed are the numeric promotions of a ?:'s arms, which the converter writes as explicit conversions: `(short) (byte) x`
+  gives an i2s, and also l2d, f2d and l2f beside the arms' branches. Each shape is a fix of its own. Written up, not built (the
+  week's allowance).
+- **The 128-test sample** at read and print: print has 2 now passing (t06039, t06072), 4 reasons changed (fuzz rows) and 0
+  regressions; read is as recorded. Recorded with `--judge --partial --record`.
+
+## 2026-11-24: queue 556d, the ?: arms' promotion (from the main session)
+
+Built on 556c's 1e042215a.
+
+**Census** of the 128-test sample's unnamed `code:` reasons (`.tmp/q556/tools/census.ae`, `census.txt`), by class file:
+- A widening cast in a ?: arm: i2s 5, l2f/i2l 1, l2d/i2l 1, f2d/i2f 1 (7 classes, 5 tests).
+- A literal arm loaded as another constant: 3 classes (t03453 ldc float, t03457 and t03567 ldc2_w double).
+- t03457's char `&=` temporary: 1 class.
+
+**f19b5580a, the promotion shape.**
+- `convert.ae`'s `conditional` marks `^:promoted` a primitive branch that the coercion widened to the ?:'s type.
+- `print.ae` prints the branch without the cast (`promoted-branches`, in `cond-text` and `target-text`). javac writes an i2s for an
+  explicit `(short)` of a byte, and none for the promotion.
+- A returned or yielded `if` with such a branch is printed as the source's ?:, not as if statements, so its forms round-trip.
+- Explicit casts stay: t03567's `(short) (byte) 'S'` arm is printed as written. That is the negative control.
+- The change moves repr/java's reader hash, and `^:promoted` marks every mixed-type numeric ?: in jdk/ (the host's regeneration
+  batch).
+
+**The sample** at read and print: t03454 and t03455 now pass, 3 reasons changed, 0 regressions; read is as recorded. Recorded with
+`--judge --partial --record`.
+
+**Left** (written up; the week's allowance): the literal arms (t03453, t03457, t03567) and t03457's char `&=` temporary.
+
+## 2026-11-24: queue 556d, the two shapes left (from the main session)
+
+Built on 556d's ec1fc1bd8. All three commits move repr/java's reader hash (the host's regeneration batch).
+- **2a3f35d59 and 6dd9a362d, the literal arms** (t03453, t03567).
+  - The cause: the "promoted constant" was a parenthesized nested ?: that the converter's prettifier folded into a flat `cond`.
+    javac types `(c ? x : y)` by its own branches and widens it once, but types an unparenthesized nested ?: by the outer one's
+    type. So the constant branch was loaded as the outer type's constant: ldc2_w -1.0 for iconst_m1, ldc -7168.0f for sipush plus
+    a later i2f.
+  - The fix: `convert.ae`'s `conditional` marks a primitive branch that is a parenthesized ?: `^:parens`, and the prettifier keeps
+    it apart. `print.ae` parenthesizes it, as it does a `^:promoted` branch that is a ?:. A returned or yielded `if` with such a
+    branch is printed as one ?:.
+  - Proof: t03453 and t03567 pass at print. The forms round-trip (the forms step), which is the negative control: an
+    unparenthesized nested ?: stays unparenthesized, or F2 would differ.
+- **adbc2a924, the char `&=` temporary** (t03457).
+  - The cause: `convert.ae`'s local binding dropped `final` from a non-constant local. javac's Lower reads a final local again as a
+    compound assignment's receiver, and keeps any other receiver in a temporary (astore, dup_x1/pop).
+  - The fix: such a local is `^:final`, and `print.ae` writes `final` for it.
+  - Proof: t03457 passes. Its source's 29 final local declarations print as 29, and no other local is marked.
+- **The 128-test sample** at read and print: t03453, t03457 and t03567 now pass, 0 regressions, read as recorded; c00001 differs.
+  An intermediate run caught a regression in t03454 (its forms: a returned ?: printed as if statements lost the parentheses),
+  fixed by 6dd9a362d. Recorded with `--judge --partial --record`.
 ## 2026-11-24: queue 559, a conflict-marker check and pyi divergences' shadowed names to 0 (the VM)
 
 - Base mac/next a6da0aadf, branch 559-tooling-markers-shadows. Why: doc and journal merges left git's conflict markers twice
@@ -21418,6 +22085,42 @@ both. The records need no change.
   test/java/divergences.edn: :synthetic-lambdas keeps t06157 alone (it passes at interp), t06306 out of the reflection metadata class,
   t04308 out of :design-also-compiled and the serialization class, t04443 out of :design-also-compiled. Java AOT 3,152 / 22 / 122 ->
   3,157 / 21 / 118; Java completeness 0.9768 -> 0.9775. reap, crops-score --record and --judge --strict, records-check: 0 problems.
+## 2026-11-24: java-stack-1124, Java's stack traces' lines, StackWalker's frames and reflection's access checks
+
+Branch `java-stack-1124` from mac/next `903ef1ab2`; doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-stack-1124", and
+doc/classes/SPEC.md §14, 7. Goal: Java's `:stack` class (interp 7, compiled 10 rows) and the access-check rows t07688, t04829.
+- Lines. The Java forms keep no Java positions (SPEC §14, 3), so neither level could give a frame's line. Chosen: an opt-in
+  read option, `bin/repr-java read --line-numbers`, recording `^{:java/line N}` on the forms that call (javac's invocation
+  pos, the `(`; creations; method references) and `^{:java/source F}` on each top-level class, passed by `bin/java-check`'s
+  reads only. Alternatives: a lines layout of the `.ae` text as repr/go's mode `:lines` (the forms file on the Java lines;
+  much more of the writer, the pretty layout lost); the line on every form (noise, and jdk/'s forms would all change); a
+  side table of .ae lines to Java lines (a second artifact to keep in step). jdk/ and the corpora stay unchanged, so JDK
+  frames keep the forms file's lines; making them Java's is a later choice (a user decision below).
+- The interpreter's frames carry the line of their latest call (javac's rule: after the arguments); interp.ae reaches the new
+  `Rt/setLine` by name (the tools' host evaluates interp.ae on the seed's runtime). j2g names a class's source file from
+  `:java/source`, and a nested call on a later line gets its own Go line.
+- StackWalker: the interpreter's reflective-call popping once per group (it popped a program's `m.invoke` frame), jrt's MH
+  invokers and lambda classes hidden in a walk, no frame below a compiled `main` the evaluator launched, j2g's frame table
+  for methods named with an upper-case first letter.
+- Access checks: jdk26u's Reflection.verifyMemberAccess in jrt's Method.invoke, Constructor.newInstance and Field's
+  accessors, for the program's own callers (the run time's and the JDK's not checked: the JVM's Clojure would reflect
+  through public members, and jrt's variants were never checked).
+- Checks (light): the read of ChainedExceptions with `--line-numbers` (lines as javac's), printed back by repr/java's printer;
+  arbace.classes.analyze/interp and arbace.j2g.* load on stage 0; `bin/jrt build --package jrt` (go build, vet) and the jrt
+  tests of the frames and the access rule; a probe at interp on the gate's executable `40a4745332aacf54acab` (no runtime
+  change: frames as before) showing the MH and reflection walks the fixes address. No gate build: ready for the train.
+- (later) The j2g analysis of the whole world with these sources (`bin/j2g --analyze-only`, 8,524 classes, Compiler.ae's CF
+  classes among them): 0 analysis failures. test/java/forms/ read again with `--line-numbers` (`bin/java-check --forms update`,
+  428 tests: their layout and the :java/ items move, nothing else). The reader's hash moved (convert.ae, java.ae), so
+  `bin/provenance-check` asks the regeneration of jdk/, jdk/javac/ and the fixtures (provenance only expected, the option being
+  off for them): queued under the big lock as `.tmp/regen.sh` in the worktree (`bin/jrt-convert update`, `bin/javac-vendor
+  convert`, `bin/clojure-tests --java-fixtures update` on javac's tool f170fb32 with the checkout's namespaces).
+- (later) Decisions, the coordinator's (2026-11-24; neither an n/a): (a) JDK frames keep the forms file's lines (jdk/ is read
+  without `--line-numbers`; only the tests' own frames get Java lines); (a) reflection's access checks stay lenient for the run
+  time's and the JDK's callers (only the program's own classes checked). The queued regeneration (`.tmp/regen.sh`) was cancelled
+  by the coordinator: train 4 regenerates the provenance once for every reader-hash change it merges (538, 549, 549b, 556d's
+  ^:final and this branch) on a fresh javac tool; until then `bin/provenance-check` fails on this branch alone.
+
 
 
 ## 2026-11-24: C++'s read independence: the own front end on the dg rows clang's dumps judged (branch `cpp-rind-1124`)
@@ -21525,6 +22228,370 @@ test/java/divergences.edn: the class `:jms-na` (:kind :na, both levels, before t
 t07867 with their reasons (the stdout unspecified, the stdout the host's); t03385 left `:references`' tests; `:security`
 notes t05346's decision. `bin/reap --record`: Java eval 3,147 / 23 / 111 (44 n/a), AOT 3,157 / 21 / 115 (32 n/a);
 `bin/crops-score --record`, `--judge --strict` 0 problems, `bin/records-check` 0 problems.
+
+## 2026-11-24: finalization built (JMS1 (a), java-misc-1124)
+
+As the user decided: jrt's `finalize.ae` (RegisterFinalizer, the queue, the daemon thread "Finalizer", runFinalization's
+"Secondary finalizer" after `runtime.blockUntilEmptyFinalizerQueue`), j2g's `finalizable?` registering in the New functions
+of a class whose nearest finalize() is not Object's and not empty, and the interpreter's allocation registering through
+the native `Compiler$CFGo/registerFinalizer` (dyncf). Alternatives considered: registering in the Java constructors of
+every class (a cost for every object; HotSpot registers only finalizable classes' objects), running finalize() on Go's
+finalizer goroutine (a blocking finalize() would stop every Go finalizer of the process: FinThreads blocks one forever),
+and runtime.AddCleanup (its function cannot reach the object, which finalize() needs). Should move FinThreads (t04683)
+and ref/Basic (t04816) at interp and compiled; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124,
+finalization".
+
+## 2026-11-23: Java's jrt open causes (queue 543, the VM; branch `543-java-jrt-causes`)
+
+The brief's causes, on next fa635f636. Built here (commit 170761555):
+- CountDownLatch and Semaphore are jdk26u's (over the translated AbstractQueuedSynchronizer, in the closure since JC5),
+  jrt's hand-written ones removed with their reflection tables, manifest rows, Semaphore's serial twins and jrt's
+  tests of them; both in j2g's class-supers (a test's own latch or semaphore; Semaphore's protected reducePermits).
+  Alternative considered: JC4c's class interfaces on jrt's Go types (Ctor_ methods, manifest rows by hand); not
+  taken: the JDK's own classes give the protected members and the serial form with no Go.
+- ForkJoinPool's delayed tasks (JDK 25): schedule (Runnable, Callable), scheduleAtFixedRate, scheduleWithFixedDelay,
+  cancelDelayedTasksOnShutdown in jrt's own Java ForkJoinPools (a waiter task per delayed task, executed in the pool
+  at once, so the pool does not terminate while one waits, as the JDK's), j2g's fjp-support methods (a void one
+  now written without a return) and their reflection entries for the interpreter.
+- jdk.charsets whole: its 17 sources (share:jdk.charsets) and the 107 files its build generates (gensrc:jdk.charsets:
+  build.tools.charsetmapping's extcs and hkscs, bin/jrt-convert's generate step), ExtendedCharsets the extended
+  provider (Charset's variant), each charset made by jrt's JrtExtCharsets (AbstractCharsetProvider's variant), as
+  F8 did for the standard ones. Not sjis0213.dat (x-SJIS_0213, x-MS932_0213 found, their coding failing).
+- The Buddhist and Japanese calendars: jdk26u's BuddhistCalendar, JapaneseImperialCalendar, LocalGregorianCalendar;
+  jrt's Calendar makes them as jdk26u's createCalendar and Calendar.Builder do, with jdk26u's field masks, getZone
+  and isFullyNormalized; GregorianCalendar's month lengths package-private; JIC's computeTime a variant (a zone that
+  is no ZoneInfo without TimeZone.getOffsets, which TimeZone's variant cuts).
+- jdk.zipfs (12 files): its provider installed through the closed-world ServiceLoader (FileSystemProvider jdk26u's
+  again, its overlay and derivation removed; jdk/provides.txt, bin/jrt provides now reading a module whose first
+  directive is a provides: jdk.zipfs's and jdk.charsets' lines were missed).
+- jrt's ReentrantLock condition is named ReentrantLock$ConditionObject, so AbstractQueuedSynchronizer$ConditionObject
+  is jdk26u's, translated (MyOwnSynchronizer's new ConditionObject()).
+Not built: System.Logger (JCS250 (a), decided: jrt's hand-written types, 1.5 days; an overlay class named
+System$Logger was tried and withdrawn: javac on the converter's tree then resolves System.Logger nowhere else);
+stack-trace line numbers, type-annotation reflection and MethodParameters, the jrt: file system: DECISIONs 543-1 to
+543-3 in the report.
+Follow-ups (2026-11-24): build 4 (07122002d) fixed the first run's findings: ForkJoinPool's delayed tasks now run in trigger
+order (one driver per pool), Calendar.getCalendarType is jdk26u's, and jdk/data carries sjis0213.dat (the tests that enumerate
+the charsets had hit SJIS_0213's missing table). Interp on 37 tests: 11 now passing (t05222, t05398, t05461, t05462, t05653,
+t05691, t05707, t08152, t08176, t08178, t08179), 0 regressions, controls differ; t04789 and t04809 load and stop at JMX
+(:design-also). The compiled run built no program (its build-go under the heavy lock left no output) and was not repeated:
+the allowance's consolidation stopped the task. Interp's rows recorded; the REAP matrix, scores and compiled rows left.
+
+## 2026-11-24 — Java's jrt causes: DECISIONs 543-1 to 543-3 answered at the settle (queue 543, VM)
+
+- The user, at the settle (tasks/ANSWERS.md on the queue, 729fd3287):
+  - 543-1 (Java line numbers in stack traces) dropped from 543: built on the main host as java-stack-1124.
+  - 543-2 (a): type-annotation reflection, MethodParameters and receiver types split by cause into small tasks: queue 563
+    (repr/java and jrt at interp: Outer.@A Inner's inner annotation, t04723; package-info's annotations on jrt's Package,
+    t04730; -parameters' MethodParameters, t04832 and t05910, JCS280 (a) reversed) and queue 564 (the compiled level:
+    Executable.getAnnotatedReceiverType through Executable_I, t04733; an enum constructor's parameter annotations, t04717;
+    Class.describeConstable, t04712-t04715). Each cause is its own commit.
+  - 543-3 superseded: the jrt: file system rows are n/a by the user's decision on the main host (java-rows-1124,
+    `:jrt-filesystem`).
+Alternatives: 543-2 (b), leaving the rows in `:reflection` (not chosen).
+:journal
+## 2026-11-24 — Java: type annotations, package-info and MethodParameters at interp (queue 563, VM)
+
+DECISION 543-2 (a)'s first part, one commit per cause on `563-java-annotations-interp` (base 543's ae548f267), built
+once (`ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build`, 1 h 20 min, 23.2 GB peak) and run at interp on
+the four targets and 91 samples (every recorded annotations, reflection, MethodParameters and typeAnnotations test,
+T6232928, annotations/pos):
+- Outer.@A Inner (t04723, 4fdf60501): repr/java skipped the inner type's annotations as the declaration's when of the
+  same class (`*skip-anns*`) and wrote a non-generic outer's inner type as Outer$Inner, the annotation at the
+  outermost type's path; the analyzer's `(.. ...)` dropped an inner element's annotations. Now an inner member type
+  with annotations of its own is written `(.. Outer ^{A ..} Inner)` (convert's `dotted-inner?`) and types.ae keeps
+  them (path INNER_TYPE, as AnnotatedTypeFactory's nestingForType reads it). Alternative: the analyzer deriving the
+  INNER_TYPE steps of a plain Outer$Inner symbol from its nesting (not chosen: the forms would still lose the
+  same-class annotation, and every compiled program's paths would change at once).
+- package-info (t04730, d849cc046): `defpackage` was a no-op; now it defines the synthetic interface package-info
+  (annotations of context PACKAGE) and jrt's Package delegates its AnnotatedElement methods to that class
+  (jdk26u's getPackageInfo). T6232928 (t05958) passes too. Alternative: a package annotation table in jrt filled
+  by the interpreter's host (not chosen: the class is javac's own model and reflection's Class.forName finds it).
+- MethodParameters (t04832, t05910): JCS280 (a) (synthesized parameters only) reversed by the user for its (b):
+  repr/java writes `:parameters true` on a top-level class when the read's javac options have -parameters
+  (bin/java-check passes the test's -parameters to the read); arbace.classes.annot writes W records per method and
+  constructor by javac's ClassWriter/Lower/TypeEnter rules (this$N MANDATED or SYNTHETIC, $enum$name/$enum$ordinal,
+  declared FINAL, anonymous constructors' super parameters, compact canonical MANDATED, val$x captured locals;
+  names only with -parameters or a record's canonical constructor); jrt decodes them (RecordedParameters) and j2g's
+  getParameters gives them when the count matches. Written in doc/classes/JAVA-DEFERRED-TRIAGE.md, "JCS280 (a)
+  reversed", and SPEC §4.1's option table.
+Rows (interp, `bin/java-check --judge --partial --record`): t04723, t04730, t05958, t04832, t05910 now passing; 0
+regressions (t04876 and t05915 fail on this VM with 543's executable too: the Proxy loader and javac's --release 8
+ct.sym, the environment's). Compiled (6 tests, 6 h on 4 cores): t04723's reason now Executable.getAnnotatedExceptionTypes
+through Executable_I (564's kind), the rest unchanged. The own platform cache was built on the VM by
+`bin/javac-vendor platform-own --gensrc` from the committed pack plus an empty gensrc/jdk.hotspot.agent (the pin lists
+that module's empty listing; the pack has no empty directory, so `platform-cache` fails its own check on a miss), then
+`platform-cache --seed`.
+## 2026-11-24 — Java's compiled-level reflection: Executable's getAnnotated*, an enum's constructors, Class.describeConstable (queue 564, VM)
+
+543-2 (a)'s compiled part (the user, at the settle), each cause its own commit with its rows:
+- Executable.getAnnotatedReceiverType (t04733): j2g writes the getAnnotated* methods on jrt's Method and Constructor
+  alone (out/type-annotation-calls), and jrt's Executable_I declares none, so a translated call on an Executable was
+  "jrt lacks". Now Executable's four getAnnotated* (return, receiver, parameter and exception types) are
+  m/support-call-helpers: the call is j2g's support function J2g_ExecutableGetAnnotated..., the receiver null-checked,
+  then TypeAnnotationSupport's method, which already takes either (jdk26u's bodies). Alternative: the methods in
+  Executable_I (jrt's hand-written interface), refused: j2g writes them only when TypeAnnotationParser is translated,
+  so jrt's own build and the worlds without it would not compile. The test then stopped at a local class's
+  getConstructors()[0] and an anonymous class's getDeclaredConstructors()[0] (instance context): the member tables
+  now list a local or anonymous class's constructors when it captures nothing (outer instance first, javac's
+  descriptor); one that captures stays out (javac's order of captured parameters not checked here).
+- An enum constructor's parameter annotations (t04717): a --program's member tables listed a constructor only when its
+  javac descriptor had as many parameters as the source one, or one more (an inner member class's outer instance), so
+  an enum's (name and ordinal first) was left out and getDeclaredConstructors() was empty. j2g now lists an enum's
+  constructors with the JVM's parameters; the parameter annotations were already keyed past the leading implicit
+  parameters (JCS351 (a)). jrt's Constructor.newInstance now refuses an enum's, as jdk26u's newInstanceWithCaller
+  ("Cannot reflectively create enum objects"), since the table's entry could otherwise make one.
+- Class.describeConstable (t04712-t04715): out/support-forms writes it on jrt's Class (F26), the REPL's entry found it,
+  but main.ae's world scan did not name it, so a translated call was "jrt lacks". The scan names it now (the support
+  form no longer asks the scan whether jrt has it: the scan is that answer's source), and ClassDesc.ofDescriptor is a
+  root. The four tests then stop at defineClass (AbstractMethodError), as interpreted: :define-bytes, by design.
+Checked: bin/java-check --levels read,compiled over t04712-t04717, t04724, t04733, t04738 (one shard: j2g --program
+with q543's compiled namespaces, JAVA_CHECK_AOT_STALE_OK=1, on q543's arbace-head2, bin/build-go, under the heavy lock;
+two rounds, the second after the local-class fix). t04717 and t04733 compiled pass, t04712-t04715 stop at defineClass,
+t04716, t04724, t04738 still pass. Recorded per cause with bin/java-check --judge --partial --record --levels compiled.
+The read used the main checkout's build-tree platform under the own pin's .pin (no own platform of the pin existed on
+the VM: 563's build of it came out "not the pin's" with the stale shared javac tool), forms only, scratch. Interp
+unchanged (the REPL's entries were there already); jrt's enum guard reaches interp at the next build.
+## 2026-11-24: java-speed-1124: the interpreter's hot paths, and RandomAccess for interpreted classes (branch `java-speed-1124`, from next `440cf0273`)
+
+The user's decision of 2026-11-24 (relayed by the coordinator): a faster interpreter, so that the interp level's timeouts that
+are slowness alone (`:speed-hang`'s interp rows outside JD6's `:jit-loops`, n/a) pass within their limits. The rows timing out at
+interp in test/java/check-interp.edn outside `:jit-loops`: t04494 (Character/Supplementary), t04620 (StrictMath/ExhaustingTests),
+t04656 (StringBuffer/ECoreIndexOf#id0), t05126 (FileChannel/InterruptDeadlock: a hang, a jrt bug, not slowness), t05477
+(Collections/BigBinarySearch), t05498 (Collections/RotateHuge), t05714 (DoubleAdderDemo), t05716 (LongAdderDemo), t05718
+(forkjoin/Integrate), t06419 (switchnull/SwitchNull) and t07728 (ReflectOutOfMemoryError, `:oom`, not slowness).
+
+Measured on train 1's executable (`.tmp/gate-exe/fb29d2672f0d7bf945b6`), each test run alone to its end by
+`.tmp/js/stamp.sh` (the main checkout's cached forms, run.ae as bin/java-check runs it, stdout lines time-stamped), and profiled
+by `ARBACE_CPUPROFILE` (a harness `.tmp/js/dev/run-prof.ae` that ends the run by System.exit after N seconds, so that jrt writes
+the profile): CPU seconds, the limit's ceiling being 600 s of CPU (GTS208 (a)):
+- t05714 1,084 s, t05716 871 s (32 threads, 63 x 10^7 interpreted increments on this 64-processor host: NCPU decides the work);
+- t05718's three actions: dynamic 771 s, serial 125 s, fork 755 s (ForkJoinPool of 64 workers);
+- t04656 about 2,200 s (eight exhaustive phases of about 230 s of wall each), t04620 about 1,500 s by its first phases (sqrt's
+  2^22 inputs 70 s of wall; 16 unary and 3 binary cases, the binary ones 2^24 inputs each);
+- t05477: the cause is not speed: Collections.binarySearch took iteratorBinarySearch (a ListIterator over 2^30 elements) because
+  an interpreted class implementing RandomAccess was no RandomAccess in the world's code: Dyn's interfaces left out the
+  interfaces declared from reflection (arbace/j2g/dyn.ae, since c2g's phase 2B), and RandomAccess is the one (a marker);
+- t06419 is 2^32 interpreted calls (testSwitchIntegerBoxExhaustive) and t05498 about 10^10 interpreted calls of MockList.set from
+  Collections.rotate1 (sizes 2^30 and 2^31): exhaustive loops no tree-walking interpreter finishes within 600 s of CPU.
+
+The profiles (t04494, t04620, t04656, t05477, t05498, t05716, t06419): allocation and the collector 20-40% (a Recur's two temporary
+arrays each turn of a loop, a frame's three objects, the reflective calls' boxed arguments), a generic interface assertion
+(jrt.As[Compiler$CF$Node] on each element of a Node[]: assertE2I2, getitab and the itab table's search) 10-14%, reflective calls
+of the world's methods 25-50% where the test calls the JDK (Method.invoke's callWrapping, its defer and recover,
+InvocationTargetException made and unwrapped, the receiver's instance check), Rt/toJ's Number interface assertion and virtual
+call 10% where a loop reads an int field.
+
+Built (arbace/lang/Compiler.ae's CF, arbace/j2g/dyn.ae; no change of the interpreter's semantics):
+- `CF$Cell`: a Node[] kept also as a chain of cells, walked with typed field loads, for Do's statements, Let's initial values,
+  Recur's values and the arguments of CallI, CallV and CallR (`Rt/argsC`, `Rt/boxedC`); the arrays stay (the builder's API);
+- Recur with one or two values stores them without arrays (two through locals, both evaluated before either is stored, as the
+  arrays did), three or more as before;
+- `Host.invoke`: a reflective call of the world's method; the Go host's calls the invoker directly
+  (`Compiler$Evaluator/invokeDirect`, compiled interop's call): no InvocationTargetException, no recover frame (a Go run-time
+  error now reaches the interpreter's catch unmapped, which jrt.Catch maps as callWrapping's did); CallR's and CallV's final
+  reflective call take it, their `Rt/unwrap` catch gone (a callee's own InvocationTargetException, Method.invoke called
+  reflectively, now propagates as it is, where unwrapping it was wrong); CallV's other reflective paths unchanged;
+- `Rt/boxed` without arguments, and a frame without reference or primitive slots, share empty arrays;
+- `Rt/toJ` tests Integer and Long, `Rt/toD` Double, by their final classes before Number;
+- Dyn implements the JDK's interfaces declared from reflection that have no methods (RandomAccess), with the nominal check
+  as for the others.
+Checked: Compiler.ae read and analyzed by j2g (`bin/j2g --lang --jdk jdk/forms --slice '^arbace/lang/Compiler$' --root
+CF's classes`, 0 analysis failures) and the CF methods' Go forms read (the cell walks with no assertion); `bin/j2g-unit`: 223 pass,
+the 7 failures the stage 0 host's older analysis gives (type annotations, invokers), none Dyn's. Not testable before a build (the
+interpreter's nodes are compiled into the executable): ready for the train; the rows' runs and the records on its build.
+Alternatives considered: GOGC=800 for the interp level (ExhaustingTests 191 -> 159 s of CPU in 150 s, 3.8 GB resident: the
+memory, rejected); j2g's `:aget` of an interface element as a non-generic assertion for the whole program (Go caches a static
+assertion site; all of j2g's output changes: left for a later round); a typed reflective call (the arguments unboxed into Go
+values by a native: the arrays it needs cost what the boxing does); frames reused per thread by depth (a call from the world
+back into the interpreter restarts the depth: unsafe without more state).
+## 2026-11-24: queue 540c, sqlite3.c's offsetof inside a macro (the VM; branch `540c-c-print-offsetof` from next 3d9bcb313)
+
+On the main host's compiled build, sqlite3.c reads whole. Its level 1 differed at `offsetof(BtCursor, BTCURSOR_FIRST_UNINIT)` and gcc
+rejected the print. The cause: `#define BTCURSOR_FIRST_UNINIT pBt` stands inside struct BtCursor's member list, where the print keeps no
+directive (place-directives! places them only between statement-list items, initializer and enumerator elements). The recovered
+invocation then names a macro the print does not define.
+- repr/c (convert.ae): compute-groups! is given the main file's struct and union member lists (struct-bodies). An invocation one of
+  whose identifiers has its last #define before it inside one of them is printed expanded (dropped-define?): `(offsetof BtCursor
+  :pBt)`, printed `__builtin_offsetof(BtCursor, pBt)`.
+- The reproducer off3.c has a struct with `#define FIRST pBt` among its members, `offsetof(S, FIRST)` and `p->FIRST`:
+  - on 540b's code the print `offsetof(S, FIRST)` is rejected by gcc ("'S' has no member named 'FIRST'");
+  - now the print is `__builtin_offsetof(S, pBt)` and `p->pBt`, gcc accepts it, and the forms read back equal;
+  - an invocation whose macro is defined at file scope (`offsetof(S, LATER)`) is still printed as itself.
+- sqlite3.c moves from :eval-limits to :macro-context (CS82's class: a recovered invocation means another thing where the print
+  stands). Its whole read is the main host's (the compiled build; on the VM the evaluated read is past the budget): `bin/repr-c
+  roundtrip --corpus sqlite --record` with ARBACE_HOST_EXE set to the gate's executable.
+
+## 2026-11-25: java-tail-1125, compiled reflection's tail (branch `java-tail-1125` from mac/train-4 `5a4f7cddb`)
+
+Goal: Java eval/AOT rows nobody owned after train 4 (the coordinator's list: -parameters, package annotations, the :stack,
+:threads, :security, :reflection leftovers). Classified first against train-4's divergences.edn (bin/reap --entries): the
+interp halves of -parameters (t04832, t05910) and package-info (t04730) are queue 563's, in train 4; security's t05304,
+t05333, t08235 java-misc's and t07882, t07910 java-rows', in train 4 (t05346 deferred by JCS234 (a)); threads' t04607,
+t05691, t05653, t05707 java-rows', in train 4; :stack's java-stack's. What was left, built in j2g only (doc/classes/
+JAVA-DEFERRED-TRIAGE.md, "As built: java-tail-1125"):
+- Executable.accessFlags as a support call (t04832 compiled), as queue 564's getAnnotated*.
+- Capturing local and anonymous classes' constructors in the member tables (t05910 compiled), javac's parameter order
+  (outer, declared, captured: Lower's appendList of freevarDefs, first-use order). Alternative: leave them out (564's
+  choice); the order is the analyzer's first use, javac's too for the corpora's single captures.
+- An own class's synthetic fields this$N, val$x in getDeclaredFields (t06345 compiled), javac's order (Lower prepends).
+- defpackage expanded by j2g's world itself (t04730 compiled): not by macroexpand, since the tools' host's arbace.core may
+  hold the seed's no-op defpackage (the stage-0 trap of 11-24).
+- Class.getProtectionDomain (t04873 both levels): the allPermDomain for every class. Alternative: a code source for the
+  program's classes (none exists in the closed world; TestConcurrentPatching, t03296, would then fail at URLClassLoader's
+  load of class files, by design). t03296 named in :classloading.
+Checks (light, stage 0): the j2g namespaces load; world's class-forms expands a defpackage with annotations and none
+without; the names the support forms call (Permissions_New, Add_Permission__V, ProtectionDomain_New_CodeSource_
+PermissionCollection) as nm computes them; bin/reap: Java's cells unchanged. Not run: no j2g of a program (heavy, the
+train's). Left, as decisions or not started: t04849 (getDeclaredMethods' order is HotSpot's, unspecified), t05602
+(StoreDeadlock's stdout is the host's properties), t08164 compiled and t04614 compiled (need a run's output first),
+t04878 (Class.forName through a loader defining "Test+Interface" from bytes: needs a run).
+
+## 2026-11-25: java-tail-1125, the user's three decisions (t04849, t05602, t03296) applied
+
+The user's decisions of 2026-11-25 on java-tail-1125's report:
+1. t04849 (SignatureTest) n/a: it prints getDeclaredMethods in HotSpot's order (main first; the javadoc: "not sorted and not
+   in any particular order") and a Type[]'s identity hash. Into :jms-na's :tests beside t05778 (LogManager's methods in
+   HotSpot's order).
+2. t05602 (StoreDeadlock) judged by its own verdict, its status within its timeout. Why our run printed 0 bytes:
+   test/java/run.ae calls System.exit as soon as main returns, and StoreDeadlock's main only starts its two threads
+   (Properties.store(System.out) of the system properties, TimeZone.getTimeZone): they were ended before they printed, at
+   both levels (status 0, stdout empty). The JDK's record ran the launcher, which waits for the non-daemon threads
+   (DestroyJavaVM) before it exits; jtreg's MainWrapper exits after main, as run.ae. Built: run.ae joins the main group's
+   non-daemon threads after main for the tests of its `join-tests` (t05602 alone: a general wait would change every
+   test's end, unmeasured), so a deadlock is a timeout; java.check's status-by-decision names it (verdicts.edn :status,
+   `bin/java-check verdicts`), its out.edn and left.tsv entries removed (test/crops/independence.edn's out-of-cases 26 -> 24).
+   Checked on stage 0: join-threads! waits for a sleeping non-daemon thread and not for a daemon one. Its row moves when
+   recorded (still :threads, :differ, until then).
+3. t03296 (TestConcurrentPatching) n/a, not by design: it reloads its own class from its class files through a URLClassLoader
+   over its CodeSource's directory, and a Go build has no class files of the program, as the jrt: file system's rows have
+   no run-time image. Out of :classloading into a new n/a class :class-files-na.
+Also: train 4's merge of divergences.edn had left t04789 (ThreadMXBeanProxy) and t04809 (MyOwnSynchronizer) in no interp
+class (bin/reap refused to record): t04789 into :design-also-na (its source names javax.management: the 11-23 n/a),
+t04809 into :design-also, as queue 543 had them and as their compiled rows are. bin/reap --record (Java eval 3,163 / 22 /
+90, 50 n/a; AOT 3,159 / 21 / 108, 37 n/a), bin/crops-score --record and --judge --strict (0 problems), bin/records-check (0).
+
+## 2026-11-25: java-tail-1125, j2g's assert evaluated only when it runs (t06029 compiled)
+
+t06029 (langtools assert/Attach.java) passes interpreted since train 3 (13b2ec250, assert-before-init) and failed compiled
+with "failed 4478095.1": main's V.assertsEnabled() returned true with assertions off. 13b2ec250's j2g half (the assert on
+while the class's C_init is not Done) was right; the cause was older: j2g's :assert translated the condition with cond-expr
+before the `when` that tests the flag, and cond-expr hoists an assignment's store as a statement, so Attach's
+`assert enabled = true` set `enabled` whether the assert ran or not (the message was evaluated early too). Now the
+condition is translated inside the `when` of the flag, and the message inside the `when` of the failed condition (JLS
+14.10: the message only when the condition is false). Checked: arbace.j2g.* load on stage 0; no j2g of a program (the
+train's). Row expected: t06029 compiled passes (:assert-before-init then empty at both levels).
+
+## 2026-11-25: train 4 (Java) assembled: the merges, the shared causes once, the user's n/a for the exhaustive loops
+
+Branch `train-4` from `mac/train-3` (2aeeffc77): first the revert of 83447c4c0 (java-design's XML and the Mac's 538 back), then
+java-rows-1124 (978914d3d, with java-design-1123), 556d (458e0a229: 538, 549, 549b, 556b-556d), java-stack-1124 (b0a2b4838),
+java-misc-1124 (02da870be), 563 (61a394458) and 564 (9fb41b11c), both on 543's ae548f267 (543-1 dropped by the answers), 562
+(0d3a778be), java-speed-1124 (ffedb8ab3), 540c (4fff52656, sqlite3.c's print), then java-tail-1125 (fd5f7b47f, a fast-forward).
+- 543 and java-rows-1124 built three causes twice. Kept java-rows' (the coordinator agreed, 2026-11-25): the jdk.charsets charsets
+  the tests name with jrt's own ExtendedCharsets (the user's decision of 2026-11-24: not the whole module; 543's whole jdk.charsets,
+  JrtExtCharsets, CsExtAbstractCharsetProvider and sjis0213.dat left out), jrt's hand-written CountDownLatch and Semaphore made
+  non-leaf (not jdk26u's over the translated AbstractQueuedSynchronizer), ForkJoinPool's scheduling in fjschedule.ae (not
+  ForkJoinPools' waiter tasks and j2g's fjp-support methods). Kept 543's other causes: the Buddhist and Japanese calendars,
+  jdk.zipfs (FileSystemProvider jdk26u's again), ReentrantLock$ConditionObject's name, `bin/jrt provides`' module header fix and
+  j2g's Zipfs renames. Alternative: 543's versions (jdk26u's classes over AQS, the whole charsets module), not taken: the user's
+  charsets decision and java-rows' jrt tests.
+- 563's MethodParameters records take java-bytecode-1122's W format and reader (names quoted by annot's enc-string, jrt's
+  executableParameters with jdk26u's verifyParameters): one record, one getParameters; 563's ParamRecord and RecordedParameters
+  dropped. 564's Class.describeConstable root and support form duplicated java-bytecode-1122's: train 3's kept.
+- Hand merges: FileManager.java's header (549's BaseFileManager and JCS51's DirLoader), Compiler.ae (Klass's initDone and
+  finalizable; Frame's line and java-speed's NOREFS/NOPRIMS; the calls with java-speed's argsC, boxedC and Rt/HOST's invoke and
+  java-stack's Node.at), reflect.ae (java-stack's access check, then 564's enum guard), check-diagnostics.edn ours (JCS51's
+  processor rows, to be run again on the train's tool).
+- The user's decision of 2026-11-24 on java-speed-1124's report (the train plan's train 4 line): t06419 (SwitchNull) and t05498
+  (RotateHuge) n/a at interp, the class `:exhaustive-loops` before `:speed-hang`, which no longer names them.
+- Checks before the build: every changed tool namespace (arbace.classes.*, arbace.j2g.*, arbace.repr.java.*, arbace.repr.c.convert)
+  loads on stage 0 (the stage-0 trap of 11-24); `bin/jrt test --package jrt` passes on amd64 (arm64 under qemu-aarch64 fails
+  TestChannelMulticast, TestOperatingSystemFacts and the negative-index messages of TestExceptionCases and TestRuntimeErrorMessages:
+  the emulator's, no gate step, none of the train's changes near them).
+- Then, under one big-lock ticket (.tmp/t4/train-4.sh): one provenance batch over every reader-hash mover on train 3's javac tool,
+  one gate build, the smoke run, javac's tool at the new key, `bin/javac-vendor verify`; the records after.
+## 2026-11-25 — JCS51's last processor rows: t07544 and 555's t07545, t07546, t07552 (queue 575, VM)
+
+Branch `575-java-processor-rows`, rebased by the coordinator's word onto mac/train-4 5a4f7cddb (it holds 549b; the first merge of
+549b into next cad9434f5 was dropped). The six other :diag-processors rows (t07541, t07548, t07550, t07553, t07555, t07558) pass
+on train 3's tool and are the host's to record; this entry is the four left.
+- The tool: train-4's javac tool build stops in j2g on "Undeclared functional of class java.lang.System$Logger: not in the
+  declared edge" (queue 562's JMS4 System.Logger entered the world; jdk/edge.edn is the host's to record on the frozen JVM). So
+  the rows were proved on tools built from mac/train-3 2aeeffc77 with this branch's commits applied (scratch worktree
+  .tmp/q575/t3, `ARBACE_AOT=0 ARBACE_GO_ARCHES=arm64 bin/heavy-lock bin/arbace-go --build-java`: no compiled reader, which
+  javac's diagnostics do not use; six rounds, 12-36 min each), each round's failure the next fix:
+  1. jrt: ClassLoader.getUnnamedModule (the application loader's the unnamed module Class.getModule answers, another loader's
+     its own) and Module.addExports (the module itself: nothing is encapsulated in the closed world), for
+     JavacProcessingEnvironment.initProcessorLoader's ModuleHelper.addExports under -XDaccessInternalAPI (t07545, t07546,
+     t07552). This is the shipped runtime's change 555-1's option (b) named; the user's (a) gave the rows to the processor
+     work, which needs it. TestClassLoaders checks both (`bin/jrt test --arch arm64 -run ...`, then the test alone).
+  2. The bytecode interpreter (arbace/lang/BytecodeCode.ae): a virtual call of an interpreted interface's method on an
+     object of the world asks the receiver class's method, then a proxy's handler (as CallV does since 25fa51e29, which the
+     bytecode path lacked: t07544's AbstractMethodError $Proxy0.names()), and a proxy's method by name and parameters when
+     the key's return type does not name it (t07545's enum E defined from bytes); Class.forName(String) by the caller's
+     defining loader (caller-sensitive: InheritedAnnotation on the processor's class path).
+  3. j2g: javac's AnnotationProxyMaker's three ExceptionProxies' generateException rooted (t07545, t07546, as 3860d35e1
+     rooted sun.reflect.annotation's); a cut class's superinterfaces in its ClassInfo and an annotation type's kind
+     KindAnnotation (Class.forName("java.lang.SuppressWarnings").asSubclass(Annotation.class), RoundEnvironment's
+     isAnnotation check: t07544); the language model's nine Preview visitors on class-supers in javac's tool world
+     (TestMissingElement's visitors extend them: t07552); Iface.super.m() of a world interface's default method from an
+     interpreted class through dyn's new dynIfaceDefaults table (Host.superCall: RoundEnvironment.super.
+     getElementsAnnotatedWithAny, t07544).
+  4. javac on Arbace's Main: a name that is not a .java file but a type's a class for annotation processing, as javac's
+     Option.SOURCEFILE takes it (@compile/process -proc:only Foo, t07544's last action); Main.ae read by `bin/repr-java
+     read-jdk --check --no-javac` of the overlay's seven files on the round-4 tool (the others as committed, but two
+     with-resources' ^:final from train-4's reader in FileManager.ae and CtSymFileManager.ae, left to the host's convert).
+- The rows: `bin/java-check --levels diagnostics --only 't07544|t07545|t07546|t07552'` on the last tool (key 1f506e46): 4 of 4
+  pass; the other 18 processing tests of the corpus pass on it too (no regression). Recorded with `--judge --partial --record`
+  in this tree; :diag-processors' tests the six, :diag-closed-world's why amended. `bin/reap --record` did not write (two
+  interp problems already on train-4, t04789 and t04809); crops-score not recorded for that reason; records-check 0 problems.
+- Alternatives: adding RoundEnvironment alone to a DynSub list (an interface has no DynSub); a variant of
+  initProcessorLoader skipping addExports (javac's code changed instead of the runtime's missing members); waiting for the
+  host's train-4 edge before any build (no proof until then).
+
+## 2026-11-25 — the user's DECISIONs 575-1 (a), 575-2 (a), 575-3 (a) (queue 575, VM)
+
+- 575-1 (a): ClassLoader.getUnnamedModule (one unnamed module per loader) and the no-op Module.addExports stay in jrt, the shipped
+  runtime; the alternative, a javac tool-world variant skipping addExports, not taken.
+- 575-2 (a): j2g's dynIfaceDefaults table stays general (Iface.super.m() on any world interface's default method), at its code size
+  in every program; a list of interfaces not taken.
+- 575-3 (a): the four rows' record (t07544, t07545, t07546, t07552), made on a tool of train-3 with this branch, is accepted now;
+  train 4's tool reruns their diagnostics after its edge is recorded again (System$Logger), as the confirmation.
+
+## 2026-11-25 — Java run leftovers t08164, t04614, t04878 (queue 582, VM)
+
+Branch `582-java-run-leftovers` from mac/train-4 268287e6e. Proved by one --only run on an arm64 build of train-4 plus this
+branch: `bin/java-check --levels read,interp,compiled --only 't08164|t04614|t04878'`.
+
+The scratch build. Train-4 does not build as it stands: j2g stops at "Undeclared functional of class java.lang.System$Logger",
+because jdk/edge.edn has not been recorded since 562 brought System$Logger into the world. For this build only, the edge was given
+`:functional false` for System$Logger by hand (Logger is not @FunctionalInterface), then restored. That change is not committed:
+recording the edge is the host's `bin/j2g-edge update`.
+
+The read level ran on 575's javac tool (train-3 plus 575; `REPR_JAVA_STALE_OK=1`), since train-4 has no tool on the VM.
+
+- **t04614 (MultiThreadStackWalk), compiled: fixed.** The failure was "Expected Marker at 991, found Test".
+  - The cause: Test inherits Call's default walk. j2g gives it a forwarder `(*T).m` that calls the interface's package function
+    `J_m` (J2G-SPEC §5.4). jrt's stackFrames dropped only the forwarders that call Impl_, so this one showed as a frame of class
+    Test above Call.walk, one frame before the Marker.
+  - The fix, in go/arbace/jrt/throwable.ae: isDefaultForwarder drops the frame of `pkg.(*T).M` when its callee is `J_M` of an
+    interface J that T implements. HotSpot has no such frame.
+  - Throwable traces lose the same frame.
+  - Alternative considered: have j2g register the forwarders as FrameElide in its frame table. That means one entry per
+    forwarder in every program, where jrt can tell them apart by their names.
+  - It passes at all three levels. It is out of :stack's :tests.
+- **t04878 (Proxy nonJavaNames): passes at interp and compiled.** No change was needed: train-4's
+  `Class.forName(name, init, loader)` calls the loader's loadClass.
+- **t08164 (FindOneCharEncoderBugs), interp and compiled: classed.**
+  - The test asserts `ByteBuffer.allocateDirect(..).asCharBuffer().isDirect()`. That is false by JCS152 (a): a direct buffer is
+    a heap buffer. One check fails per charset (170 failed, 340 passed in 543's interp output), and no encoding differs.
+  - Classed under :nio by :tests. :stack's match "Exception: Stack trace" (JC1's, matching only this row) is dropped, so that the
+    row is classed by its cause.
+  - Making the views answer isDirect true is the user's choice (DECISION 582-1).
+
+Recorded: `bin/java-check --judge --partial --record --levels interp,compiled` (interp: 1 now passing; compiled: 2 now passing;
+levels-known: t04614 resolved). Then `bin/reap --record` (56 of 56 cells, 0 problems) and `bin/records-check` (0 problems).
 ## 2026-11-24: ocaml-1123: b4's compiled rows on the host fix; the queued tool and ocamldoc runs
 
 - b4 (the build worktree at 8bcdee584, the compiled main's hosts embedding jrt's OSHost): opam/base64/test and opam/fmt/test_fmt pass at
@@ -24159,6 +25226,355 @@ blindness (statics by content), left for a decision.
 Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
 keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
 
+## 2026-11-26 — Python: :skipped-by-test's 43 rows triaged, 35 n/a and 3 deferred (queue 592, VM)
+
+What: the 43 rows bin/reap put in :skipped-by-test (Python eval, the record test/python/check-lib-test-linux-amd64.edn). These
+are skips on pyi with no CPython reference row that is skipped, :excluded or :no-tests. I triaged each one by its skip
+condition in CPython 3.14.10's Lib/test (the pinned tarball, sha256 de414a57...b72032).
+The user decided DECISION 592-1 (a): the (ii) rows are n/a as listed.
+- (ii), 35 rows, a new n/a class `:skipped-not-applicable`, placed before :skipped-by-test:
+  - pymalloc's and mimalloc's debug-hook tests (test_capi/test_mem.py:169, 174; 18). pyi's memory is Go's, and
+    _testcapi.WITH_PYMALLOC and WITH_MIMALLOC are False.
+  - AF_ALG's aead gcm(aes) (test_socket.py:7065-7072). The kernel has none: CPython on the VM gets the same ENOENT.
+  - test_doctest's test_wrapped_c_func (test_doctest.py:2787, doctest_skip_if(check_impl_detail(cpython=False))).
+    test/python/cpython_marked.py resolves methods' decorators, not a module-level doctest function's, so the row is
+    named in the class instead of the tool being extended.
+  - 15 skips CPython takes too but its reference cannot show. regrtest's JUnit writer (libregrtest/testresult.py:55, 74-76)
+    drops a skip with an empty message (test_selectors.py:196) and every skip after the first of a method's subtests
+    (test_xml_etree.py:4863-4872). Skips in setUpClass and setUpModule have no id (test_ioctl.py:20, test_robotparser.py:812,
+    test_timeout.py:274, test_xml_etree.py:4629). Subtest ids with addresses are :excluded under other ids
+    (test_urlparse.py:986, 1002).
+  The class is keyed on each skip's message; the two generic messages (an empty one, doctest's "all examples were skipped")
+  are keyed by name.
+- (i), 3 rows, deferred class `:zstd-multithread` (owner queue 593): test_zstd's multithreaded tests (test_zstd.py:72-74,
+  327, 353, 1607). pyi's libzstd is built without ZSTD_MULTITHREAD (tools/pyi/clib/zstd/lib.conf), which needs pthreads in
+  the C world. CPython's reference build has no _zstd.
+- Left in place:
+  - the three UTF-8-mode rows (test_builtin.py:1704, test_io.py:3002) stay in :skipped-by-test: 553 and py-regress-1126
+    already fixed them, and train 6's record clears them;
+  - test_os's two test_closerange (test_os.py:218, 2587) stay as they are, and train 6's test_os record decides them.
+    These are (iii), a real divergence: standalone the fds are consecutive, so in the driver the next fd is held, likely by
+    files that CPython's reference counting would have closed (:finalization's kind).
+Alternatives considered: re-recording the references with refs.py taught what JUnit loses (the principled fix for the 15,
+the main host's job, left open); keeping all 35 by design (DECISION 592-1 (b), not taken).
+Probe: one script (bin/pyi's python on train-6's runtime interpreted by goi, q587's weak-free pytls cache.go swapped in for
+the run and restored), compared against python3 on the VM: utf8_mode, the fd allocation, AF_ALG and _testcapi's allocator
+flags.
+Checks:
+  - bin/pyi divergences: rc 0; skipped-not-applicable 39 there, because bin/pyi's judge reads no reference outcomes and
+    4 of the rows are :skipped-by-both's in reap.
+  - bin/reap: the matrix moved, Python eval design 106 to 68, deferred 608 to 611, n/a 4,545 to 4,580; :skipped-by-test
+    43 to 5. Recorded with `bin/reap --record`, then 0 problems.
+  - bin/records-check: 0 problems.
+  - test/crops/scores.edn recorded with `bin/crops-score --record`; `bin/crops-score --judge --strict`: 0 problems.
+## 2026-11-26 — Rust C6: lib-unit's judge holds statics by name; an inherent method's static's symbol (queue 591, VM)
+
+On 590-1 (a). (1) lib-unit's judge normalized every global by content (RF3's global map), so a define naming the wrong static
+of one content, or a static of ours declared where rustc's unit defines it, compared by content alone. Now only anonymous
+constants (`private` constants, `anon-constant?`) are taken by content, every static (mutable or not) and every other global by
+name, in the judge and in L4.1's splice and check alike. (2) mono's std-static-symbol mangled a static inside an inherent method
+from MIR's printed path (`std::thread::id::ThreadId::new::COUNTER`, the self type's path) as if ThreadId were a module;
+inherent-def-path now takes the first prefix that is an ADT with an inherent impl defining the next segment as a function
+(std's interface: :inherent and :fns) and mangles under the impl (`{impl#0}::new::COUNTER`), rustc's
+`_RNvNvMNtNtCs.._3std6thread2idNtB4_8ThreadId3new7COUNTER`. No exported body changes (the symbol is the build's).
+One std build and compare with L2: items 224/35/66 -> 228/31/66, L2 413 of 487 unchanged, no equal lost; the four that became
+equal (thread_info's set_current_info and delete_current_info, thread_local's destructors::list::run and guard::key::enable)
+differed only by a static we declare and std's unit defines, its content compared before. One `lib-unit own`: 688 own (683 +
+ThreadId::new + the four), 0 left rustc's, both controls differ. rust-front essential once (mono changed). The backtrace
+crates not rerun: their equal defines name no static (their own files' globals are all anonymous constants), and the stricter
+judge can only lose equals.
+
+## 2026-11-26: train 4 built and its Java records (read, interp, compiled)
+
+- Built at 82b1dfff1 (the provenance batch e8120f1d7 on train 3's tool, REPR_JAVA_STALE_OK=1): executables
+  `9564e7a0c725952e4bb8`, javac's tool `javac-e585cbd9ee084dd57abd`. On the way, four fixes (each its commit):
+  - 551dfeab4: 562's `$`-named overlay (java/lang/System$Logger.java) off the joint javac compile's patch tree (a hard-linked
+    copy without it) and off the other chunks' patch path in the chunked read (repr.java.chunks: a chunk of its own, last):
+    the conversion had failed on Stream's ambiguous Logger, SystemLoggers' inherited defaults, ObjectInputStream's and
+    LogManager's javac fallback ("No descriptor for type ResourceBundle");
+  - 5a6da0c62: the runtime's declarations (bin/repr-java declarations, the suite's fixtures' class path), broken since
+    java-bytecode-1122 (the first fixtures update since): a file's several classes each printed to a file of its own name
+    (they overwrote each other), BytecodeAnnotations' constant pool an Object in its signatures (jdk.internal.reflect is
+    not exported);
+  - 1803d91bb: java-design-1123's XML closure in javac's tool world, first built here: AttrNSImpl in the closure, and a
+    tool-build variant of TemplatesImpl.createModule (the translets in their loader's unnamed module: no module layers).
+  - `bin/javac-vendor verify` after the tool: the forms byte for byte (1,786 files); its diff names only jdk/javac's
+    platform pins a fresh conversion does not make, and the provenance's host.
+- The records: `bin/java-check --levels read,interp,compiled --list` of 160 tests (the touched ids of every merged branch
+  and the rows not passing but n/a and the 600 s speed rows; .tmp/t4/rec2.list), on train 4's build, judged after next's merge
+  (227dce44c: the user's by-design review kept) with `--judge --partial --record`: compiled 64 now passing, interp 40,
+  no regression recorded; read 160 pass.
+  - Held out of the record: t05766 (TestInferCaller) interp, passing before, now "Bad class name" (java.lang.reflect.Method
+    where the JDK hides the reflection frame): java-stack-1124's StackWalker changes (the interpreter's reflection frames);
+    its row stays a pass until fixed (the brief: a passing row stays a pass).
+  - Classed: t08083 t08091 t08093 t08094 t08095 t08096 interp under :xml (javac's tool world's XML closure gaps: XSLTC's
+    ErrorMsg, XSAnnotation), t04725 interp under :serialization (annotation proxies), t04680 interp under :stack (a
+    System.Logger default method's caller frame); :diag-processors' tests none (575's and rec-t3's rows pass).
+  - t05172 (the :flaky-timeout compiled row) flaky again in the shard; the user's decision: run alone (queued).
+- Java (bin/reap): read 7,819 / 0 / 25 -> 7,843 / 0 / 1; eval 3,148 / 0 / 117 (60 n/a) -> 3,205 / 0 / 54 (66 n/a); AOT
+  3,157 / 1 / 120 (47 n/a) -> 3,225 / 1 / 50 (49 n/a); print 3,318 / 0 / 7 -> 3,324 / 0 / 1 (print and diagnostics re-run on
+  the train's tool by the second agent). bin/reap 0 problems, crops-score --record and --judge --strict 0 problems,
+  records-check 0, markers-check 0.
+
+## 2026-11-26 — C++ read: more clang-only dg rows by the own front end (cpp-indep3, branch `cpp-indep3-1126`)
+
+- Goal (the burst's): C++ read independence (0.904 at the base, the dg rows only clang's recorded dumps pass counted 0.5). The rows
+  clang passes and the own record fails, less test/cpp/dg-dialect-out.edn's and the :na classes' (test/cpp/divergences-dg.edn), were
+  1,069 at mac/next `0b3174413`; cpp-def3's deferred rows (both failing) are the other lane's. mac/next `5b7180185` merged (no C++
+  change).
+- Every rule from the standard's text, GCC's manual and GCC's messages as the tests state them, no GCC or clang code
+  (doc/cpp/CPP-SURVEY.md, "As built: cpp-indep3"): the parser's declaration rules (hidden friend classes, deduction guides,
+  using-declarators, bases, defaulted templates, default arguments, nested namespaces, asm qualifiers, dynamic exception
+  specifications, conversion functions, partial specializations' variable templates, ...), diag.ae's flexible array members under
+  -pedantic-errors, deprecated uses under -Werror and case labels outside a switch, host.ae's no-feature options' macros, the
+  checker's sizeof and alignof operands, enumerator initializers, read-only parameters, not-captured variables, member errors of
+  class template specializations at the member, and template.ae's partial specializations' deducibility and dependent non-type
+  argument types.
+- 64 rows pass on the own front end at the branch's head (the worktree's .tmp/moved.txt), each rule checked on the files it reaches
+  and a control set of recorded own passes of its construct (17 targeted runs, 1,000-odd files with repeats, 0 lost); one control
+  lost on the way (cpp1z/class-deduction108.C, by the CTAD rule, narrowed to a template declared only) and fixed. Not recorded here:
+  the coordinator's decision of 2026-11-26 runs one regression over next's recorded own passes, cpp-def3's rows and these, in one
+  lane, which records both (`--judge --record`, reap, crops-score). Expected: read independence 0.904 -> about 0.909.
+- Measured for a decision (g++ 15.2 run by hand, the oracle, over the 1,069 rows, the record's -std and options, then with
+  -Wno-template-body): 104 rows whose every missed line is an error g++ tags [-Wtemplate-body] that -Wno-template-body drops, a
+  construct in a template never instantiated: ill-formed, no diagnostic required ([temp.res.general]/6), the class
+  :ifndr-uninstantiated-template's criterion (proposal D, the user 2026-11-23, verified deferred rows only). DECISION cpp-indep3-1:
+  (a) extend the class's :tests by those 104 clang-only rows (recommended: the same verified criterion, the list and its tool kept);
+  (b) build GCC's definition-time checks of non-dependent constructs. Not applied.
+- Tried and dropped: a fixed-point literal in decltype (cpp0x/decltype-38655.C: no node survives), a qualified bit-field's alignof
+  outside its class (diagnostic/alignof3.C), `F foo;` of a cv-qualified function typedef (other/cv_func4.C), the deduced class type
+  rule for every class template (narrowed).
+
+## 2026-11-26 — C++ read: the constant evaluator, templates and single rules (cpp-def3)
+
+- Branch `cpp-def3-1126` from mac/next `0b3174413` (a lane of the burst after cpp-def2; cpp-indep3 beside it on the rows only
+  clang's record passes, a disjoint set). The read cell at the base: 6,155 pass / 0 by design / 128 deferred (own-diag 127,
+  gcc-own-rules 1). Each row read against its dg lines and the own errors (cpp-def2's scripts, .tmp/bin/d1, dm, j.sh), GCC 15.2's
+  messages probed by hand (`g++ -fsyntax-only`) where the test's words did not settle the place; the rules from the standard's text
+  or GCC's documented messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: cpp-def3", each rule with its rows).
+- arbace/cpp/sema.ae (the checker's alone, (checking?)): implicit assignment operators in the constant evaluator ([class.copy.assign]/12);
+  an explicit conversion as a list element is no narrowing; [class.static.data]/4's in-class initializers, a specialization's when
+  used, the value kept for its reads; C++11's assignments in the potential constant check; a return statement's constructor surely not
+  constexpr, and its place; a const variable with no initializer not usable; a constexpr pointer to a temporary; DR2478's explicit
+  specializations (also template.ae); noexcept-specifiers instantiated when needed ([except.spec]/13: the operand's sure failure kept
+  and reported when the function is selected); a specialization's default member initializer needing its own default constructor; an
+  ambiguous lookup's candidates as notes (diag.ae's :cx/notes); a near match's binding error at an implicit assignment; a
+  const static member's erroneous initializer in an array bound; before C++17 a dynamic exception specification's type naming a
+  member of a non-class. arbace/cpp/template.ae: a type-id or a function's name for a
+  non-type parameter a sure failure; a variable template's partial specializations judged as a class template's. arbace/repr/cpp/
+  parse.ae: a template parameter of an undeclared type, and `template<typedef>`, kept with an erroneous type; a namespace-scope
+  function definition with no type taken as returning int (GCC's permerror); a generic lambda before C++14. diag.ae: two
+  using-enum-declarations whose enumerators share a name; sema-rules for the new messages.
+- Rows to own pass, 23 (the worktree's .tmp/moved.txt): template/eh2.C, cpp0x/constexpr-ex1.C, constexpr-function2.C, constexpr-neg1.C,
+  noexcept34.C, noexcept36.C, nsdmi-template14.C, overflow1.C, sfinae11.C, udlit-tmpl-arg-neg2.C, cpp1y/constexpr-89336-3.C,
+  lambda-generic-variadic2.C, var-templ19.C, cpp2a/concepts-requires5.C, using-enum-5.C, DRs/dr2478.C, overload/error8.C,
+  parse/crash67.C, parse/error17.C, template/crash2.C, nontype13.C, redecl5.C, typedef4.C. Checked on each rule's reach (its rows and
+  the recorded own passes it can touch: 355 more controls at the end, every constexpr pass and those with a const static member's
+  in-class initializer, a generic lambda, a dynamic exception specification or an undeclared template parameter type); losses met and
+  fixed: concepts/pr71385.C (a first version made an erroneous return-type-requirement false; now the TS's conversion),
+  cpp1z/class-deduction52.C (a member template's undeclared parameter type left declined as before), cpp1y/constexpr-lifetime7.C (the
+  implicit assignment's store judged for lifetime and constness). cpp23/ext-floating12.C, the timeout row, passes alone too. The regression over next's recorded own passes
+  is the single one the coordinator runs for both lanes (cpp-def3 and cpp-indep3, 2026-11-26), which records their rows.
+- Tried and dropped: CWG2310's incomplete derived class at a pointer conversion (cpp0x/constexpr-base6.C, 6b.C: the static member's
+  initializer is analyzed after its class completes; a rule on :defining reached nothing), and a scalar awaitable's final suspend
+  (coroutines/pr104051-0.C: the checker does not analyze coroutine bodies), both reverted.
+- For the user: template/friend58.C expects GCC's "member ... declared as friend before type ... defined" for `template<typename T>
+  friend void freeList<T, baz>::foo();`, which [temp.friend]/5 allows (a member of a dependent type named through a simple-template-id
+  whose parameters deduce): (a) the gxx-only-rules class (n/a), recommended, (b) GCC's rule.
+
+## 2026-11-26: java-tail2-1126, Java's tail after train 4 (branch `java-tail2-1126` from mac/next `5b7180185`)
+
+The burst's Java lane for completeness (Java at 99.2% after train 4): train 4's held regression, :jd1123-next-train, :xml,
+:interp-world-limits and the small classes, then the :design-also rows against the user's by-design review of the day.
+Measured interpreted on train 4's build (`9564e7a0c725952e4bb8`, javac's tool `javac-e585cbd9ee084dd57abd`); doc/classes/
+JAVA-CONFORMANCE-SURVEY.md, "As built: java-tail2-1126". Nothing recorded (the train records).
+- t05766 (TestInferCaller, held by train 4): two causes. java-speed-1124's direct invoke (`Evaluator.invokeDirect`, no
+  Method.invoke of the interpreter's own) met java-stack-1124's pop of the interpreter's reflective call, which then popped
+  the program's `m2.invoke` frame and left `m.invoke`'s; and LogRecord's variant inferred the caller from a Throwable's
+  trace, which shows reflection frames (the JDK's StackWalker hides them). Built: jrt's stackFrames pops nothing below a
+  direct-invoke frame; LogRecord's inferCaller is jdk26u's again (CallerFinder over StackWalker, its test a variant with
+  jdk26u's rule but SurrogateLogger's name filter in LogRecord). Alternative considered: filter java.lang.reflect frames
+  in the variant's Throwable walk (a rule of our own where the JDK has StackWalker's).
+- The same direct invoke made jrt's reflectCaller answer nil (no access check) for every interpreted reflective call:
+  it skips the direct-invoke frames now (t07688, t04829). The run-time classes' dispatch core `(*dynCore).` is elided as
+  `(*Dyn).` (t04680). jrt tests for both frame rules in throwable_test.ae.
+- :jd1123-next-train: none of the 9 passes interpreted on train 4; their causes moved past java-design's: 8 are FFM's
+  (JavaNioAccess not in the world: t05828 t05829 t05830 t07775, MemorySegment's buffers; VM.isDirectMemoryPageAligned
+  that jrt lacks, from SegmentFactories: t03584 t03640 t05096 t05812), the foreign lane's (java-krb-1126); t08195 is
+  krb5's PrincipalName offset (Unsafe.objectFieldOffset(Field)), which java-krb-1126's derived overlay already takes by
+  name. Not built here (no duplicate work); a jrt `VM_IsDirectMemoryPageAligned__Z` returning false (no saved
+  properties) is the one-line half for that lane.
+- :xml: XSLTC's Parser makes its instruction classes with getDeclaredConstructor, and their constructors are
+  package-private (the member tables list public members): j2g's reflection-roots for constructors
+  (`reflection-root-ctors`, XSLTC's 31 instruction classes, rooted with the XML roots); the closure gains XSLTC's error
+  classes, XSAnnotation and javax.xml.xpath's missing API classes (ten files; probed: XSLTC's real exception under
+  `TransformerFactory`'s debug attribute is that NoSuchMethodException).
+- :interp-world-limits: java.io.StringReader in class-supers (FxCode); FxVarHandles' twelve cases need a run-time
+  VarHandle (DECISION below).
+- The single rows: t05019 (jrt: URL) gets jrt's own handler (the syntax, no image); t08235 (StrongSeedReader) passes
+  interpreted with the harness's `arbace.spec.skip-macros` (run.ae's ns forms loaded arbace.core.specs, whose
+  UUID.randomUUID loaded the providers before main); a sample of 80 passing interp rows still passes.
+- Ready for the train: jrt (throwable.ae, reflect.ae), j2g (model.ae, out.ae, main.ae), overlay (LogRecord and URL
+  variants, the jrt: handler: `bin/jrt-convert update`), javac's closure (`bin/javac-vendor convert`, its edge if asked).
+DECISIONs proposed (none applied; recommended option first):
+- JT2-1, t03295 (TestClassConstantPatching, :interp-protected): it reads its own class file through
+  getSystemResourceAsStream and defines it again: (a) n/a in :class-files-na, as t03296 (the user, 2026-11-25);
+  (b) build ClassLoader.getSystemResourceAsStream, then fail on the missing class file.
+- JT2-2, t05050 (GetURLsTest, :design-also) and t04444 (SubclassGC, interp :serialization, compiled :design-also-compiled):
+  a class loaded from class files by a URLClassLoader (and unloaded by GC): (a) :classloading, n/a since the by-design
+  review; (b) keep them deferred.
+- JT2-3, t04989 (PortUnreachableException/Concurrent, :net): stdout is the two threads' interleaving and the test has no
+  check of its own: (a) judged by its status (verdicts.edn :status by decision, as t05602); (b) n/a.
+- JT2-4, t05254 (SuppressStackTraces, interp :design-also): no by-design feature: Impl1, a non-public class of
+  SuppressStackTraces.java, is named by Impl1_Skel.java, loaded first (the file-by-file model): (a) build the source
+  lookup of a package's non-public classes (scan its files' defclass names); (b) :repl-sibling.
+- JT2-5, t04809 (MyOwnSynchronizer, :design-also both levels): java.lang.management alone (ThreadMXBean's locked ownable
+  synchronizers), no by-design feature: (a) into :mxbeans (deferred, world); (b) keep.
+- JT2-6, FxVarHandles' twelve diffcheck cases: (a) a run-time VarHandle for the interpreter's classes
+  (Lookup.findVarHandle, findStaticVarHandle, unreflectVarHandle over jrt's Field slots, CAS under the field's lock),
+  J2G-SPEC §8.5 unchanged for compiled code; (b) by design: VarHandles are compiled statically.
+- JT2-7, javac's tool world's XML closure: (a) the static closure over the JDK build's class files (785 java.xml and
+  java.xml.crypto files more: XSLTC, Xalan's XPath and DTM, Xerces' schema, BCEL, the XML security library), made once by
+  a script and kept as closure.txt's lines; (b) a train at a time, by the gaps the runs name (this branch's ten files).
+- The :design-also rows' other features, re-checked: t03656 (sun.misc.Unsafe) is java-krb-1126's; t08053 (Kerberos) the
+  krb lane's; t08077 t08078 (XML DSig's providers) and t08083-t08096 (XML) to be built; t05847 (the class-file API) and
+  t04725 (serialization of annotation proxies) deferred, to build; t04833 (ModuleDescriptor's builder) and t06334
+  (javac's ServiceLoader in a compiled program) world gaps, deferred, none by design.
+- (later) mac/next's jrt did not compile (found by this branch's `bin/jrt test --package jrt`): `bootClasses` declared twice,
+  queue 491's (098ceb730, class.ae: the classes RunMain initializes before main, a slice) and b04c83d39's (defineclass.ae:
+  the boot loader's classes defined from bytes, a map), the two met in train 4's merge of next (891d550c1) after its build.
+  defineclass.ae's is `bootDefined` now (its three uses); 491's keeps its name (thread.ae, object_test.ae).
+
+## 2026-11-26: C++ read, DECISION cpp-indep3-1 and cpp-def3's friend58.C (the user)
+
+- DECISION cpp-indep3-1 (a) (the user, 2026-11-26), applied: the 104 clang-only rows whose every missed line is an error g++ 15.2.0
+  tags [-Wtemplate-body] and drops under -Wno-template-body (a construct of a template never instantiated: ill-formed, no diagnostic
+  required, [temp.res.general]/6) join test/cpp/divergences-dg.edn's :ifndr-uninstantiated-template (n/a), the criterion of proposal D
+  (the user, 2026-11-23) for the deferred rows. The measure is kept in-tree: test/cpp/ifndr/template-body.sh (by hand, the oracle: g++
+  with each file's recorded -std and options, then -Wno-template-body; never a gate step), its output over the 1,069 clang-only rows of
+  mac/next `0b3174413` test/cpp/ifndr/template-body.tsv, the 104 files test/cpp/ifndr/clang-only.txt; the class's :why names them.
+  Alternative not taken: (b) building GCC's definition-time checks of non-dependent constructs.
+- template/friend58.C (cpp-def3's question; the user, 2026-11-26) joins :gxx-only-rules (n/a), as parse/explicit1.C did: its
+  `template<typename T> friend void freeList<T, baz>::foo();` is the form [temp.friend]/5 allows (a member of a dependent type
+  declared a friend), which GCC 15 rejects; the expected error is GCC's own rule.
+
+## 2026-11-26: java-tail3-1126, the user's decisions on java-tail2-1126 (branch `java-tail3-1126` from mac/next `1d92ac402`)
+
+The user answered java-tail2-1126's seven decisions (2026-11-26, through the burst's coordinator); applied here as classes and
+verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
+1. JT2-1 (a): t03295 (TestClassConstantPatching) n/a in :class-files-na beside t03296 (out of :classloading's :tests, where
+   :interp-protected's match had taken it first).
+2. JT2-2 (a): t05050 (GetURLsTest) and t04444 (SubclassGC) in :classloading (n/a since the by-design review), both levels
+   (out of :design-also, :design-also-compiled and :serialization).
+3. JT2-3 (a): t04989 (PortUnreachableException/Concurrent) judged by jtreg's status (java.check's status-by-decision,
+   verdicts.edn `:status`), out of test/java/golden/out.edn and left.tsv (the Java judge's out-of-cases 24 -> 22);
+   measured interpreted on train 4's executable: passes (its record row waits for the train).
+5. JT2-5 (a): t04809 (MyOwnSynchronizer) in :mxbeans (deferred), out of :design-also and :design-also-compiled.
+- `bin/java-check verdicts --verify`: as recorded (own verdicts interp and compiled 3,309 of 3,325). bin/reap --record:
+  Java eval 3,205 / 0 / 54 (66 n/a) -> 3,205 / 0 / 51 (69 n/a), AOT 3,225 / 1 / 50 (49 n/a) -> 3,225 / 1 / 49 (50 n/a);
+  crops-score --record (Java completeness 0.9919 -> 0.9922) and --judge --strict 0 problems; records-check 0 problems.
+- Built, the user's 4, 6 and 7 (doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-tail3-1126"):
+  - 4 (JT2-4 (a)): the analyzer's source lookup reads a package's other files (its namespace file's loads) for a class no
+    file is named after; enter-file! reads a `defclasses` form's classes (it had entered none). t05254 passes interpreted on
+    train 4's executable with the checkout's analyzer on the path. Alternative considered: an index of every package's
+    classes made by the converter (a new file per package; the lookup reads the files the REPL loads anyway).
+  - 6 (JT2-6 (a)): jdk.internal.jrt.VarHandles (overlay/jdk/java.base) and the analyzer's `*runtime-varhandles*` (bound
+    false by j2g's main: compiled code keeps J2G-SPEC §8.5): the makers, the access modes by the call site's descriptor
+    (Invokers' scheme), the other methods and the fences as VarHandles' static calls, one lock for every access.
+    Alternatives considered: Unsafe's field slots (compiled classes' Go structs only: the interpreter's objects keep
+    their fields elsewhere), a VarHandle class in the world (j2g's constant handles assume java.lang.invoke's VarHandle
+    outside it). Measured: FxVarHandles' 12 cases interpreted on train 4's executable, VarHandles defined from its forms
+    at the REPL, all equal to the JVM's recorded values.
+  - 7 (JT2-7 (a)): `bin/javac-vendor xml-closure [--check]` (test/jrt/xml_closure.ae over jrt.classfile): closure.txt's
+    java.xml and java.xml.crypto lines are the static closure over the JDK build's class files, 1,739 lines (705 new, none
+    gone). A first count by a script over each class file's descriptor strings gave 785 (strings of generic signatures
+    and literals counted too).
+  - A sample of 61 interp rows (60 passing ones at random and t05254) on train 4's executable with the checkout's
+    analyzer: 61 pass.
+- For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
+  705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
+
+## 2026-11-26 — C++ read: the shared regression of cpp-indep3 and cpp-def3, recorded (branch `cpp-indep3-1126`)
+
+- The coordinator's decision of 2026-11-26: one regression for both lanes, run and recorded here. mac/cpp-def3-1126 `a89f09b10` and
+  mac/next `1d92ac402` merged (survey and journal kept both sides; template.ae's variable template partial specializations keep both
+  lanes' rules), DECISION cpp-indep3-1 (a) and template/friend58.C's :gxx-only-rules applied before the run (the entry above).
+- The run at `9e648b3fd` in the big lock's small slot (HEAVY_MEM_GIB=6; two parts of 2,140 files in turn, 2 threads each, 1,252 s
+  and 1,212 s, peaks 3.0 and 5.9 GB): next's 3,083 recorded own passes, the 1,069 clang-only rows, the 128 deferred rows, both lanes'
+  lists and cpp23/ext-floating12.C (4,280 files). Lost 3, fixed on the rules that lost them: other/abstract8.C (this lane's rule that
+  one namespace's declarations of a variable are no ambiguity removed the stale "reference to 'a' is ambiguous" its `g(a)` had
+  passed by; now [class.abstract]/3's check of an abstract parameter at the call, sema's call-args), diagnostic/static_assert4.C
+  (cpp-def3's needed noexcept-specifier, now not a constexpr function's, PR c++/92193), cpp2a/concepts-pr67774.C (a timeout under
+  load). Rerun at `053a0d831` over what the fixes reach (65 files: a constexpr function's noexcept-specifier, a pure virtual or
+  "abstract", concepts-pr67774.C on one thread): every recorded own pass of them passes. cpp23/ext-floating12.C alone on one thread:
+  343 s, past its 300 s cap on the loaded host, left as recorded (a timeout).
+- mac/next `eb408fb7f` merged (no C++ change), then recorded from p1, p2 and the fixes' run in turn (`bin/repr-cpp dg --front native
+  --judge --record`): own passes 3,083 -> 3,187, 0 recorded passes lost; 104 rows own: cpp-indep3's 64, cpp-def3's 23, and 17 more
+  clang-only rows the record had kept failing from before (other/switch4.C, cpp0x/static_assert8.C, cpp2a/explicit7.C,
+  lookup/suggestions1.C and suggestions2.C, spellcheck-pr77829.C, spellcheck-typenames.C, ...).
+- `bin/reap --record`: C++ read 6,155 pass / 0 design / 128 deferred (248 n/a) -> 6,178 / 0 / 104 (249 n/a), 56 of 56 cells, 0
+  problems. `bin/crops-score --record`: C++ read independence 0.904 -> 0.919 (3,187 of 4,175 dg rows own, 320 n/a), independence
+  98.1% -> 98.4%, completeness 99.5% -> 99.6%. `bin/crops-score --judge --strict`, `bin/records-check`, `bin/markers-check`: 0
+  problems. Logs kept in /root/arbace/.tmp/keep/cpp-indep3-1126/reg/.
+
+## 2026-11-26 — Rust C6: L4.4 measured, L5's tooling (queue 596, VM)
+
+On next `3725c6dc8` (590 and 591: the own tree with 688 own defines). The host's L4 rerun on `227dce44c` (73 of 73) is the baseline,
+not measured again.
+
+- L4.4: the closure analysis over the own tree (`.tmp/rust-front/lib-unit/own`), each of the 73 cases (the samples' and synthetic
+  packs' x.ll and shim.ll), by `lib-unit own-std` and by an independent scanner (a scratch script, the same counts for every case).
+  No case's closure is near own: the smallest, `synthetic/abort.rs` and 18 others, takes 8,935 defines, 636 own and 8,299 rustc's,
+  and those 8,299 are shared by all 73. Of them 109 have been built and differ or are refused; 8,190 were never built. So the first
+  case to get there is abort.rs (with its 18 equals) at 8,935 own defines, after L2 is grown to the whole closure; fixing the 109
+  moves no case, so no crate's defines were worked through here (alternative considered: grinding the 109; rejected as it changes
+  no case's C6). Numbers and the order (core and alloc, then std, then the backtrace crates) in doc/rust/FRONTEND-SURVEY.md, "As
+  built: C6's L4.4 measured, L5's tooling".
+- L5's tooling: `lib-unit own-std` (6da839dea), `bin/rsi check --std own` with each corpus's `std.tsv` and front.tsv's own-std
+  column (98eb6099b), C6 in `write-case-inputs` from the run (4680e865b). Checked: own-std on the 73 cases and on an all-own control;
+  the check's std block on two synthetic cases in isolation; write-case-inputs on a make-fake run recorded into a scratch directory;
+  `bin/rsi judge-test` passes. No whole check run (the host's night, by key).
+- DECISION 596-1 for the user: a run on another std recorded (a) in a record of its own that crops-score reads for C6, recommended,
+  or (b) in the one record, each row naming its std. Until then `--std own --record` is refused.
+
+## 2026-11-26 — Rust C6: DECISION 596-1 (a) applied, the own-std records (queue 596, VM)
+
+The user chose 596-1 (a): a run on the own copy of std's IR gets records of its own. `bin/rsi check --std own --record` now records
+(RSI_RECORD_STD=own: `check[-aot]-own-std-linux-ARCH.edn`, its times, `{eval,aot}-inputs-own-std-linux-ARCH.edn`) in place of
+refusing; crops-score reads C6 from those inputs (`:case-inputs`' `:from-other`, test/crops/independence.edn), the main inputs' C6
+when they are absent. Alternative (b), one record with each row naming its std, not taken (the user's choice). Tested on scratch
+runs only (doc/rust/FRONTEND-SURVEY.md, "Decided (2026-11-26, the user): DECISION 596-1 (a)"); no whole check.
+## 2026-11-26 — C++ read: GCC's parser recovery after syntax errors in templates and class heads (queue 599, VM)
+
+- Branch `599-cpp-parser-recovery` from origin/next `3725c6dc8` (cpp-def3, cpp-indep3), worktree q573. The 104 deferred read rows
+  listed from the records (check-dg-linux-amd64.edn and the own record both failing, not named by an earlier class: 103 :own-diag, 1
+  timeout), the 58 not `accepted` probed on the own front end at the base (one targeted run, `--only`), 32 with an own syntax error;
+  g++ 15.2.0 (the host's, by hand) gave GCC's messages where the test's words left the place or the recovery open. Rules only from the
+  standard and GCC's messages; no GCC or clang code.
+- arbace/repr/cpp/parse.ae, seven recovery rules (doc/cpp/CPP-SURVEY.md, "As built: 599"): a failed template declaration's
+  elaborated class no template, a non-template class defined as a template kept; a base-clause followed by an identifier declares it
+  a variable; an enumerator-list's error ends the enum and the recovery resumes at the error (a decline's `:resume`); a `>=` closing an
+  argument list takes its `=`; too many template-parameter-lists in a class; a failed class head's body skipped (X no class template:
+  a class of the scope, or arguments naming an undeclared template); a member with no type declined at its name.
+- Alternatives: resuming every decline at its error token (GCC's general way) rather than the enum's alone, not taken: the recorded
+  passes rely on the declaration-start skip; GCC's own "'A' is not a template" message at `A<0>` uses, not needed (the lines carry).
+- Targeted check, 501 files (the rows and the recorded passes each rule can reach): 0 lost; memfriend7.C's new extra (a friend member's
+  two template-heads) fixed before the run. The one regression at `2458343f9`: next's 3,187 own passes and the rows, 3,246 files in two
+  parts: cpp0x/pr71251.C lost (the two-heads diagnostic's place), fixed at `7027d84a1`, the 22 files with two adjacent template-heads
+  rerun: all pass. Recorded from the three runs (`--judge --record`): 3,187 -> 3,195 own passes, 0 lost; 8 rows own (7 deferred:
+  diagnostic/enum2.C, inherit/error4.C, parse/crash28.C, parse/pr68722.C, parse/template28.C, template/crash59.C,
+  template/error-recovery1.C; and template/crash34.C). `bin/reap --record`: C++ read 6,178 / 0 / 104 -> 6,185 / 0 / 97;
+  `bin/crops-score --record`: read independence 0.919 -> 0.920; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0
+  problems. Left: pr90138.C, pr81247-a.C, pr113788.C, concepts-pr67178.C, pr65340.C, defarg18/19.C (reasons in the survey).
+
+## 2026-11-26: the big lock's small slot takes jobs up to 16 GiB (the user)
+
+The host sat underused: a record run declared at 16 GiB (using about 2 GB) held the one big slot while train 8's build and an OCaml
+shard waited, with 54 GB available and a load of 1.5. The user chose to keep one big slot and raise the side slot's limit from 8 to
+16 GiB (alternatives: two slots under the memory rule; no change). `bin/heavy-lock` reads the limit from `HEAVY_LOCK_SMALL_GIB`, else
+the file `LOCK.small_gib` (the main checkout's `.tmp/big.lock.small_gib`, now 16), else 8, on every look, so a waiter already in the
+queue sees a change once it runs this copy. The memory rule still admits a side job only when its declaration fits MemAvailable less
+2 GiB less the holder's unreached declaration; the watchdog stays. test/gate/heavy-lock-test.bash case 7 covers the file; all pass.
 ## 2026-11-26 — OCaml AOT: the light level's deferred rows that are not its speed (oc-tail, branch `oc-tail-1126`)
 
 The burst's lane for OCaml's AOT cell beside the compiled level's chain: `:light-depth` (7), `:gc-and-memory` (5), `:light-unfinished`

@@ -5,7 +5,7 @@
 (in-ns 'go.arbace.jrt)
 
 (go/file "reflect.go"
-  :imports [[strconv "strconv"] [strings "strings"] [sync "sync"]])
+  :imports [[runtime "runtime"] [strconv "strconv"] [strings "strings"] [sync "sync"]])
 
 ;; ---------------------------------------------------------------------------------------
 ;; The value convention of the member tables (JRT-NOTES.md, "The member tables")
@@ -404,6 +404,12 @@ virtually; an exception it throws wrapped in InvocationTargetException; a primit
 boxed, void giving null.\n"
   ^any [^{:tag (* Method)} m ^any obj ^{:tag (* RefArray)} args]
   (let [info (.-info m)]
+    ;; the access check (java-stack-1124), before the receiver's
+    (when (not (.-override m))
+      (if (!= (bit-and (.-mods m) AccStatic) 0)
+        (checkMemberAccess (.-clazz m) nil (.GetModifiers__I m))
+        (when (!= obj nil)
+          (checkMemberAccess (.-clazz m) (GetClass obj) (.GetModifiers__I m)))))
     (when (== (bit-and (.-mods m) AccStatic) 0)
       (when (== obj nil)
         (panic (NPE)))
@@ -424,6 +430,144 @@ boxed, void giving null.\n"
   (let [(values v ok) (assert (* Method) x)]
     (when (not ok) (panic (ClassCast x Method_class)))
     v))
+
+;; ---------------------------------------------------------------------------------------
+;; Reflection's access checks (java-stack-1124): AccessibleObject.checkAccess's rule,
+;; jdk26u's Reflection.verifyMemberAccess, for the program's own classes calling Method.invoke,
+;; Constructor.newInstance and Field's accessors without setAccessible (TestReflectionHierarchy,
+;; t07688; AccessControlTest, t04829). The caller class is found on the stack (Reflection.getCallerClass):
+;; the program's code that made the reflective call; the run time's and the JDK's code (Clojure's
+;; evaluator and Reflector, jrt, the translated JDK) are not checked.
+
+(go/func programClassName
+  "programClassName: whether a class of that binary name is the program's (not the JDK's, not the
+run time's).\n"
+  ^bool [^string n]
+  (not (or (strings/HasPrefix n "java.") (strings/HasPrefix n "javax.") (strings/HasPrefix n "jdk.")
+           (strings/HasPrefix n "sun.") (strings/HasPrefix n "com.sun.") (strings/HasPrefix n "arbace.")
+           (strings/HasPrefix n "clojure."))))
+
+(go/func reflectCaller
+  "reflectCaller: the class of the program's code that made the reflective call the calling jrt
+method implements, or nil (the run time's or the JDK's code, an evaluated fn, unknown). The first Go
+frame outside jrt says: the interpreter's (an interpreted class's call, through a reflective call of
+the interpreter's own when the program reflects on reflection) asks the Java frames (stackFrames, the
+interpreted ones among them), a compiled class's is its class.\n"
+  ^{:tag (* Class)} []
+  (let [pcs (make (slice uintptr) 32)
+        n (runtime/Callers 2 pcs)
+        frames (runtime/CallersFrames (subslice pcs _ n))
+        walk false
+        ^{:tag (* Class)} c nil]
+    (while true
+      (let [(values fr more) (.Next frames)
+            fn (.-Function fr)]
+        (cond
+          (strings/HasPrefix fn "arbace/jrt.") (do)
+          ;; the evaluator's direct call of the method (Evaluator.invokeDirect, java-speed-1124: the
+          ;; interpreter's hinted calls of compiled code, Method.invoke's among them): its caller's
+          ;; frames say (java-tail2-1126; it had answered nil, no check: TestReflectionHierarchy, t07688)
+          (isDirectInvoke fn) (do)
+          (or (isInterpInternal fn) (isInterpEntry fn)) (do (set! walk true) (break))
+          :else
+          (let [f (frameOf fr)]
+            (when (and (not (.-elide f)) (!= (.-cls f) "") (programClassName (.-cls f)))
+              (set! c (ForName (.-cls f))))
+            (break)))
+        (when (not more)
+          (break))))
+    (when (not walk)
+      (return c))
+    (range [_ f (stackFrames (rawFrames (callersAll 1)) (evalTrace) (goiTrace) (interpFrames (interpTrace)) true)]
+      (cond
+        (or (.-refl f) (.-hidden f)) (do)
+        (or (== (.-k f) nil) (not (programClassName (.-cls f)))) (return nil)
+        :else (return (.-k f))))
+    nil))
+
+(go/func classFilePublic
+  "classFilePublic: whether class c is public in its class file's access flags (Reflection's
+getClassAccessFlags: a nested class's protected is public there, its private package-private).\n"
+  ^bool [^{:tag (* Class)} c]
+  (!= (bit-and (.GetModifiers__I c) (bit-or AccPublic AccProtected)) 0))
+
+(go/func packageOf ^string [^{:tag (* Class)} c]
+  (while (.IsArray__Z c)
+    (set! c (.-comp c)))
+  (let [n (.-Name (.-info c))
+        i (strings/LastIndexByte n \.)]
+    (when (< i 0)
+      (return ""))
+    (subslice n _ i)))
+
+(go/func nestName
+  "nestName: the binary name of c's nest host as javac makes nests, its top-level class's (the name
+before the first $; an interpreted class's Class answers no declaring class).\n"
+  ^string [^{:tag (* Class)} c]
+  (while (.IsArray__Z c)
+    (set! c (.-comp c)))
+  (nestOf (.-Name (.-info c))))
+
+(go/func nestOf "nestOf: the nest host's binary name of the class named n (nestName).\n" ^string [^string n]
+  (let [d (strings/LastIndexByte n \.)
+        i (strings/IndexByte (subslice n (+ d 1)) \$)]
+    (when (< i 0)
+      (return n))
+    (subslice n _ (+ d 1 i))))
+
+(go/func isSubclassOf
+  "isSubclassOf is Reflection.isSubclassOf: c or one of its superclasses is of.\n"
+  ^bool [^{:tag (* Class)} c ^{:tag (* Class)} of]
+  (while (!= c nil)
+    (when (== c of)
+      (return true))
+    (set! c (.GetSuperclass__Class c)))
+  false)
+
+(go/func verifyMemberAccess
+  "verifyMemberAccess is jdk26u's Reflection.verifyMemberAccess (no modules: every class is the
+unnamed module's of one loader): whether code of class current may access a member of class member
+with modifiers mods on an object of class target (nil for a static member).\n"
+  ^bool [^{:tag (* Class)} current ^{:tag (* Class)} member ^{:tag (* Class)} target ^int32 mods]
+  (when (== current member)
+    (return true))
+  (let [same (== (packageOf current) (packageOf member))]
+    (when (and (not (classFilePublic member)) (not same))
+      (return false))
+    (when (!= (bit-and mods AccPublic) 0)
+      (return true))
+    (when (and (!= (bit-and mods AccPrivate) 0) (== (nestName current) (nestName member)))
+      (return true))
+    (let [ok false]
+      (when (and (!= (bit-and mods AccProtected) 0) (isSubclassOf current member))
+        (set! ok true))
+      (when (and (not ok) (== (bit-and mods AccPrivate) 0) same)
+        (set! ok true))
+      (when (not ok)
+        (return false))
+      ;; JLS 6.6.2: a protected instance member or constructor of another package's class, through
+      ;; an object of current's class or a subclass
+      (when (and (!= target nil) (!= (bit-and mods AccProtected) 0) (!= target current) (not same)
+                 (not (isSubclassOf target current)))
+        (return false))
+      true)))
+
+(go/func checkMemberAccess
+  "checkMemberAccess is AccessibleObject.checkAccess for a member of class member with modifiers mods
+(target the object's class, nil for a static member): a public member of a public class passes at
+once; else the caller (reflectCaller), when it is the program's, must have access, or
+IllegalAccessException with Reflection.newIllegalAccessException's message.\n"
+  [^{:tag (* Class)} member ^{:tag (* Class)} target ^int32 mods]
+  (when (and (classFilePublic member) (!= (bit-and mods AccPublic) 0))
+    (return))
+  (let [c (reflectCaller)]
+    (when (or (== c nil) (verifyMemberAccess c member target mods))
+      (return))
+    (let [ms (modifierString mods)
+          msg (+ (.String (.ToString__String c)) " cannot access a member of " (.String (.ToString__String member)))]
+      (when (!= ms "")
+        (set! msg (+ msg " with modifiers \"" ms "\"")))
+      (panic (IllegalAccessException_New_String (Str msg))))))
 
 ;; ---------------------------------------------------------------------------------------
 ;; java.lang.reflect.Constructor
@@ -460,6 +604,13 @@ or an interface, the arguments checked and converted, the constructor's exceptio
 InvocationTargetException.\n"
   ^any [^{:tag (* Constructor)} k ^{:tag (* RefArray)} args]
   (let [c (.-clazz k)]
+    ;; the access check (java-stack-1124): the constructed class the target, as the JDK's
+    (when (not (.-override k))
+      (checkMemberAccess c c (.GetModifiers__I k)))
+    ;; jdk26u's Constructor.newInstanceWithCaller: an enum's constructor is listed (j2g's tables, queue 564), not
+    ;; called
+    (when (!= (bit-and (.GetModifiers__I c) AccEnum) 0)
+      (panic (IllegalArgumentException_New_String (Str "Cannot reflectively create enum objects"))))
     (when (or (!= (bit-and (.GetModifiers__I c) (bit-or AccAbstract AccInterface)) 0) (== (.-New (.-info k)) nil))
       (panic (InstantiationException_New)))
     (let [cargs (convertArgs (.-params k) args)]
@@ -547,6 +698,12 @@ InvocationTargetException.\n"
 IllegalArgumentException for an object of another class (the JVM's set message, also for
 get).\n"
   ^any [^{:tag (* Field)} f ^any obj]
+  ;; the access check (java-stack-1124), before the receiver's
+  (when (not (.-override f))
+    (if (!= (bit-and (.-Modifiers (.-info f)) AccStatic) 0)
+      (checkMemberAccess (.-clazz f) nil (.GetModifiers__I f))
+      (when (!= obj nil)
+        (checkMemberAccess (.-clazz f) (GetClass obj) (.GetModifiers__I f)))))
   (when (!= (bit-and (.-Modifiers (.-info f)) AccStatic) 0)
     (when (!= (.-Init (.-info (.-clazz f))) nil)
       ((.-Init (.-info (.-clazz f)))))

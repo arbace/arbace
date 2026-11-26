@@ -1,0 +1,123 @@
+;; jrt: finalization (the user's JMS1 (a), 2026-11-24; doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: java-misc-1124,
+;; finalization"), as jdk26u's java.lang.ref.Finalizer does it over the VM's FinalReferences: an object of a class that
+;; declares finalize() (j2g's constructors, the interpreter's allocations: RegisterFinalizer) has a Go finalizer on its
+;; header, which only queues it (Go's single finalizer goroutine, which the runtime's own files share, never runs Java
+;; code); the daemon thread "Finalizer" of the system thread group runs the queued objects' finalize() one by one, an
+;; exception ignored, as Finalizer.runFinalizer; System.runFinalization collects, waits for Go's finalizer queue to be
+;; empty and runs what is queued on a thread "Secondary finalizer" (never on the caller's: FinThreads), as
+;; Finalizer.runFinalization's forkSecondaryFinalizer. Go clears an object's weak pointers when it queues its finalizer
+;; and runs AddCleanup's cleanups only once it is freed, after: Java's orders for weak and phantom references. A cycle
+;; through such an object is never collected by Go (runtime.SetFinalizer), where the JVM finalizes it.
+(in-ns 'go.arbace.jrt)
+
+(go/file "finalize.go"
+  :imports [[runtime "runtime"] [sync "sync"] [unsafe "unsafe"]])
+
+(go/func ^:extern ^{:go/linkname "blockUntilEmptyFinalizerQueue runtime.blockUntilEmptyFinalizerQueue"}
+  blockUntilEmptyFinalizerQueue
+  "blockUntilEmptyFinalizerQueue (Go's runtime, mfinal.go; a linkname target of runtime/linkname.go) waits, at most
+timeout nanoseconds, until Go's finalizer queue is empty and its goroutine idle; it says whether it was.\n"
+  ^bool [^int64 timeout])
+
+(go/type finalizable "finalizable is a translated object's finalize() (j2g's Go method of it).\n"
+  (interface (Finalize__V [])))
+
+(go/var ^{:tag sync/Mutex} finalMu)
+(go/var ^{:doc "finalQueue: the objects whose finalizer is due, not yet run (finalMu): the JVM's Finalizer queue\n"
+          :tag (slice any)} finalQueue)
+(go/var ^{:tag (chan (struct))} finalSignal (make (chan (struct)) 1))
+(go/var ^{:tag sync/Once} finalizerOnce)
+
+(go/func RegisterFinalizer
+  "RegisterFinalizer makes x, a new Java object of a class that declares finalize() (not Object's), finalizable: when
+Go finds it unreachable, it is queued for the thread \"Finalizer\" (the JVM's Finalizer.register at Object.<init>).\n"
+  [^any x]
+  (when (== x nil)
+    (return))
+  (let [h (.Self_Object (asObject x))
+        typ (typeWordOf x)]
+    (startFinalizer)
+    (runtime/SetFinalizer h (fn [^{:tag (* Object)} o] (queueFinal (makeAny typ (conv unsafe/Pointer o)))))))
+
+(go/func queueFinal "queueFinal queues x for finalization (on Go's finalizer goroutine: it does not block).\n" [^any x]
+  (.Lock finalMu)
+  (set! finalQueue (append finalQueue x))
+  (.Unlock finalMu)
+  (select
+    (case (>! finalSignal (lit (struct))))
+    (default)))
+
+(go/func pollFinal "pollFinal takes the oldest queued object, or nil.\n" ^any []
+  (.Lock finalMu)
+  (defer (.Unlock finalMu))
+  (when (== (len finalQueue) 0)
+    (return nil))
+  (let [x (aget finalQueue 0)]
+    (aset finalQueue 0 nil)
+    (set! finalQueue (subslice finalQueue 1))
+    x))
+
+(go/func startFinalizer
+  "startFinalizer starts, once, the daemon thread \"Finalizer\" of the system thread group (priority 8, as jdk26u's
+Finalizer.startFinalizerThread), with the first finalizable object.\n"
+  []
+  (.Do finalizerOnce
+       (fn []
+         (let [t (Thread_New_Runnable_String (RunnableOf finalizerLoop) (Str "Finalizer"))]
+           (set! (.-group t) systemThreadGroup)
+           (.Store (.-priority t) 8)
+           (.Store (.-daemon t) true)
+           (.Start__V t)))))
+
+(go/func finalizerLoop "finalizerLoop is the thread \"Finalizer\"'s run.\n" []
+  (while true
+    (let [x (pollFinal)]
+      (if (== x nil)
+        (<! finalSignal)
+        (runFinalizer x)))))
+
+(go/func runFinalizer
+  "runFinalizer runs x's finalize(), a Throwable it throws ignored (Finalizer.runFinalizer): a translated class's Go
+method, else the method of its class's member table (an interpreted class's, whose objects are Dyn), up its
+superclasses.\n"
+  [^any x]
+  (defer ((fn [] (recover))))
+  (let [(values f ok) (assert finalizable x)]
+    (when ok
+      (.Finalize__V f)
+      (return)))
+  (let [c (GetClass x)]
+    (while (and (!= c nil) (!= c Object_class))
+      (let [m (.declaredMethodInfo c "finalize" nil false)]
+        (when (and (!= m nil) (!= (.-Invoke m) nil))
+          ((.-Invoke m) x nil)
+          (return)))
+      (set! c (.-Super (.-info c))))))
+
+(go/func runFinalization
+  "runFinalization is System.runFinalization's (and Runtime's): a collection, Go's finalizer queue waited for (at most
+a second), then the queued objects' finalizers run on a thread \"Secondary finalizer\" of the system group, the caller
+waiting for it without touching its interrupt status (FinInterrupt).\n"
+  []
+  (runtime/GC)
+  (blockUntilEmptyFinalizerQueue 1000000000)
+  (.Lock finalMu)
+  (let [n (len finalQueue)]
+    (.Unlock finalMu)
+    (when (== n 0)
+      (runtime/Gosched)
+      (return)))
+  (let [done (make (chan (struct)))
+        t (Thread_New_Runnable_String
+            (RunnableOf (fn []
+                          (defer (close done))
+                          (while true
+                            (let [x (pollFinal)]
+                              (when (== x nil)
+                                (return))
+                              (runFinalizer x)))))
+            (Str "Secondary finalizer"))]
+    (set! (.-group t) systemThreadGroup)
+    (.Store (.-daemon t) true)
+    (.Start__V t)
+    (<! done)))

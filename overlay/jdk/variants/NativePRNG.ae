@@ -8,21 +8,37 @@
 ;; is initialized) and no file: the box (B1b) has no /dev. So the three kinds are always
 ;; available, and setSeed only mixes the seed into the SHA1PRNG (the JDK also writes it to
 ;; /dev/random, which only adds to the kernel's pool; here the seed file is null and the write
-;; is skipped as when the file cannot be opened). The rest is jdk26u's (RandomIO's buffering
-;; and mixing unchanged). The replacing members keep jdk26u's code where they keep it (baf63fb;
+;; is skipped as when the file cannot be opened). A seed source naming another readable file
+;; (java.security.egd or securerandom.source) is the mixed kind's seed file as in the JDK's initIO,
+;; its seeds read from it and setSeed's written to it (java-misc-1124, StrongSeedReader). The
+;; rest is jdk26u's (RandomIO's buffering and mixing unchanged). The replacing members keep jdk26u's code where they keep it (baf63fb;
 ;; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md);
 ;; the rest Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'sun.security.provider)
 
 (j2g/variant NativePRNG
   (method ^:private ^:static initIO ^RandomIO [^:final ^Variant v]
-    (when (some? debug)
-      (.println debug (java-str "NativePRNG." v " seedFile: host nextFile: host")))
-    (RandomIO. nil nil)))
+    (let [^:mutable ^File seedFile nil]
+      (when (identical? v Variant/MIXED)
+        (let [^:mutable ^URL egdUrl nil
+              ^:mutable ^File egdFile nil]
+          (when (some? (set! egdUrl (NativePRNG/getEgdUrl)))
+            (try (set! egdFile (SunEntries/getDeviceFile egdUrl)) (catch IOException e)))
+          (when (and (some? egdFile) (.canRead egdFile)
+                     (not (.equals (.getPath egdFile) NAME_RANDOM))
+                     (not (.equals (.getPath egdFile) NAME_URANDOM)))
+            (set! seedFile egdFile))))
+      (when (some? debug)
+        (.println debug (java-str "NativePRNG." v " seedFile: " (if (some? seedFile) (.getPath seedFile) "host")
+                                  " nextFile: host")))
+      (try (RandomIO. seedFile nil) (catch Exception e nil)))))
 
 (j2g/variant NativePRNG$RandomIO
   (constructor :throws [IOException] ^:private [this ^File seedFile ^File nextFile]
     (set! (.-seedFile this) seedFile)
-    (set! (.-seedIn this) jdk.internal.jrt.HostRandom/INSTANCE)
+    (set! (.-seedIn this)
+          (if (some? seedFile)
+              (cast InputStream (java.io.FileInputStream. seedFile))
+              (cast InputStream jdk.internal.jrt.HostRandom/INSTANCE)))
     (set! (.-nextIn this) jdk.internal.jrt.HostRandom/INSTANCE)
     (set! (.-nextBuffer this) (new byte/1 bufferSize))))
