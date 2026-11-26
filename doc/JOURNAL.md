@@ -24158,3 +24158,41 @@ blindness (statics by content), left for a decision.
 
 Alternatives considered: comparing each define's referenced global names beside the normal form (the same check, two places);
 keeping the content renaming for statics found under one name only (still wrong when the unit has two of one content).
+
+## 2026-11-26 — OCaml AOT: the light level's deferred rows that are not its speed (oc-tail, branch `oc-tail-1126`)
+
+The burst's lane for OCaml's AOT cell beside the compiled level's chain: `:light-depth` (7), `:gc-and-memory` (5), `:light-unfinished`
+(2), `:c-api` (2), `:c-runtime-decided` (2), `:dynlink-decided` (1), `:unix-unported` (1), at the light level on stage 0. Built (doc/ocaml/
+OCAML-SURVEY.md, "As built: oc-tail"):
+- Deep calls on worker threads: jdk/ocaml's `Rt/hop` with o2j's prologue (`entered`): a call more than 1,000 OCaml calls deeper than its
+  thread's base is made again on a pooled worker thread (the interpreter's depth 0, a Go stack of its own), the caller waiting, the worker
+  the same OCaml thread (TState, Memprof state, the lock held). Alternatives: raising the interpreter's MAX_DEPTH (arbace/lang's Compiler:
+  stage 0's, a re-seed, and Go's stack overflow is fatal); reading the interpreter's frame depth (stage 0's interpreter has no shadow stack:
+  `Rt/enter` returns an int array there, a NEW member by name would not help either); a fresh thread a hop (it worked, the pool is cheaper
+  for a loop of leaf calls past the limit); a forced test limited to three in a row (it left lib-threads/prodcons2's descent on the
+  caller's thread).
+- o2j clears the slots an interpreted frame would keep: a non-tail let's variables at its end, a non-tail call's and primitive's
+  temporaries after it, the parameters a tail call does not name before it (as ocamlopt's tail call leaves the frame). Alternative: liveness
+  per variable (its last use), more code for the same rows.
+- Gc.stat's heap at the light level the program's own (growth since Main/run). Alternative: the simulated major heap's words (OC218's
+  model has no live size).
+- Ephemerons' second phase (oi's ephKeyed, the data in a slot past the end of each block key's fields during one collection), run once
+  the first drops nothing; scans in their own methods; a weak array's get without the key scan; Gc.finalise_last's record without fields.
+- A stub's major cycle told to the runtime ('M', oicapi's MajorCycle), the fired finalisers run at the next allocation; a C bigarray's
+  managed memory sampled by the runtime's Memprof (the wire's 0x200).
+- header.awk's ocamlmklib mode at the light level, the further programs translated beside the main one (`D/dynruns.txt`).
+- Caps by the user's 1.5x rule (test/ocaml/aot-cpu-caps.tsv): weak-ephe-final/ephetest2 280 s (181 s alone), weaktest 1080 s (719 s).
+Recorded from one run of the lane's rows and 158 + 8 of the modules' recorded passes (gc, effects, threads, domains, C API, Dynlink, the
+CPU-heavy misc programs), `bin/oi check --aot --only-list ... --record` and `suite check --aot`: 11 rows pass (callback/test3, effect-syntax/coroutines,
+lib-threads/prodcons2, misc/sieve, runtime-errors/stackoverflow, lib-sys/opaque, regression/pr5233, weak-ephe-final/ephetest2 and
+weaktest, c-api/alloc_async, lib-dynlink-bytecode/main), every control and recorded pass of the lists still passes but
+regression/pr3612, which timed out (120 s of CPU): it takes 203 s of CPU alone with mac/next's runtime and translator too (an A/B on
+this host, the same program, the same C API server), so its row is left as recorded and the user is told. The OCaml AOT cell 547 / 11 /
+51 -> 558 / 11 / 40. After the record the server's major-cycle trigger counts the stubs' words itself (GcCount read Go's memory
+statistics on every allocation) and asks only inside a call (a custom block's 'D' has no worker); c-api/alloc_async and the C API rows
+were run again on it.
+Left, and why: parallel/test_issue_11094 (200,000 suspended fibers' threads: past 6 GB when let past DEPTH_LIMIT), parallel/mctest (a
+stall after its depth: three workers of four done), statmemprof/bigarray (its dealloc callbacks a collection late), weak-ephe-final/
+ephetest's test7, the suite's exception_comballoc and stop_start_in_callback (deallocations missing), lib-unix/common/test_unix_cmdline
+and cloexec (Unix.execv: OC208 (b) left it to the compiled level), unboxed-primitive-args/test (o2j's translation of its 600 KB of Lambda
+in bounded memory).

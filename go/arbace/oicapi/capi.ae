@@ -119,13 +119,43 @@ light level's server marks it so in the wire form, and the runtime samples its m
     (return true))
   false)
 
-(go/func cAlloc "cAlloc is oi's CAlloc of a stub's block of wosize words, then MajorCycle when it ended a major cycle (oi's caml_stat_major_collections\nadvanced).\n" [^int wosize]
-  (if (== MajorCycle nil)
-    (oi/CAlloc wosize)
-    (let [c0 (oi/GcCount 0)]
-      (oi/CAlloc wosize)
-      (when (> (oi/GcCount 0) c0)
-        (MajorCycle)))))
+(go/var ^{:tag int :doc "cWords is the words the stubs allocated since the simulated major heap's last cycle end, as oi's CAlloc counts them\n(cMajorUsed; oc-tail: counted here, not read back through GcCount, whose figures read Go's memory statistics).\n"} cWords)
+(go/var ^{:tag int :doc "cCycle is the words of a cycle, oi's minor heap's (OCAMLRUNPARAM's s as minorHeapInit normalizes it, else 256 Ki), read once.\n"} cCycle)
+
+(go/func cycleWords "cycleWords is cCycle, read once from OCAMLRUNPARAM (or CAMLRUNPARAM) as oi's minorHeapInit reads it.\n" ^int []
+  (when (== cCycle 0)
+    (let [(values opt ok) (os/LookupEnv "OCAMLRUNPARAM")
+          n 262144]
+      (when (not ok)
+        (set! opt (os/Getenv "CAMLRUNPARAM")))
+      (range [_ o (strings/Split opt ",")]
+        (when (strings/HasPrefix o "s=")
+          (let [v (subslice o 2)
+                m 1]
+            (when (strings/HasSuffix v "k")
+              (set! m 1024)
+              (set! v (strings/TrimSuffix v "k")))
+            (when (strings/HasSuffix v "M")
+              (set! m 1048576)
+              (set! v (strings/TrimSuffix v "M")))
+            (when (strings/HasSuffix v "G")
+              (set! m 1073741824)
+              (set! v (strings/TrimSuffix v "G")))
+            (when [(values x err) (strconv/Atoi v)] (== err nil)
+              (set! n (* x m))
+              (when (< n 257)
+                (set! n 257))
+              (set! n (* (/ (+ n 511) 512) 512))))))
+      (set! cCycle n)))
+  cCycle)
+
+(go/func cAlloc "cAlloc is oi's CAlloc of a stub's block of wosize words, then MajorCycle when it ended a major cycle of the simulated heap\n(the stubs' words since the last reaching a minor heap's, as CAlloc's cMajorUsed).\n" [^int wosize]
+  (oi/CAlloc wosize)
+  (when (!= MajorCycle nil)
+    (set! cWords (+ cWords (+ wosize 1)))
+    (when (>= cWords (cycleWords))
+      (set! cWords 0)
+      (MajorCycle))))
 
 (go/func reNext "reNext is the C consumer's read at pos: RuntimeEvents' (op 2), else oi's RuntimeEventsNext.\n" [^int pos]
   :results [^int status ^int next ^int kind ^int dom ^int64 ts ^int id ^int64 data]
