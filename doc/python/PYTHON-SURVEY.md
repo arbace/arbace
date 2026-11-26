@@ -9166,7 +9166,8 @@ Built:
 - **The idle releaser** (arbace.python's idle-free!, started after the start): a daemon thread reads Go's heap statistics every 3 s,
   and when less than 1 MiB was allocated since the last look and the heap's resident pages grew 16 MiB past the last release,
   runtime/debug.FreeOSMemory gives the freed pages back. A busy process never idles 3 s and a short one ends first, so only a
-  waiting process pays one collection. PYI_IDLE_FREE=0 turns it off, PYI_IDLE_FREE_TRACE=1 prints each release. This takes the
+  waiting process pays one collection. PYI_IDLE_FREE=0 turns it off, PYI_IDLE_FREE_TRACE=1 prints each release. test_gc,
+  test_weakref and test_finalization give the same failing sets with it on and off (25 + 1, 9, none). This takes the
   place of a FreeOSMemory at the end of the start, which saved 40 MB on a bare child but nothing on a worker, whose imports come
   after the start, and which every short child would have paid.
 - **goi's digest let go after the start** (arbace.go's release-digest!: the index kept, the text dropped; a table namespace made

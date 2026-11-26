@@ -24744,3 +24744,6 @@ compiles; without them 285 MB, of which goi's digest 27 MB and the start's and t
 - Proposals for their owners, not built (C's crop at 100%): crt's 64 MiB read-only reservation per world, the ctypestest world's
   67 MB text table on import ctypes, goi's 9 MB of inflated digest bytes; and for the user: test_large_pool's rows need a per-test
   memory cap of about 50 GB and a run alone under the big lock (its modules' cap is 16384 MB), not applied.
+- Checked after the push (the same day): the idle releaser leaves the collector-sensitive modules as they were: test_gc (59 tests:
+  25 failures, 1 error, 12 skipped: the record's counts), test_weakref (139: 9 failures) and test_finalization (18: ok) give the
+  same failing sets with PYI_IDLE_FREE on and off (train 5's runtime compiled, a tree at train 6's commit).
