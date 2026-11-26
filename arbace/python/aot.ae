@@ -57,6 +57,14 @@
   [n]
   (list 'when '(py/AotTracing) (list 'set! '(.-PC f) n) '(return nil py/AotToLoop)))
 
+(defn- breaker
+  "The eval breaker at a backward jump at n (CPython's JUMP_BACKWARD, CHECK_EVAL_BREAKER; eval.go's OpJump): one load of
+  the breaker inline, and when it is set its work (the GIL yielded on a drop request, the pending signals' handlers run on
+  the main thread), its error raised at the jump. The whole stack is in the frame here (a block start's state)."
+  [n]
+  (list 'when '(py/AotBreaking) (list 'set! '(.-Lasti f) n)
+        (list 'when ['err '(py/AotBreak t)] '(!= err nil) '(return nil err))))
+
 (defn- lookup [table k what]
   (or (get table k) (throw (ex-info (str "aot: no " what " " (pr-str k)) {}))))
 
@@ -114,7 +122,7 @@
     :call (let [[k kw] arg] [(set-pc n) (chk (list 'py/AotCall 't 'f k (if (integer? kw) kw -1)))])
     :make-function (let [[k parts] arg]
                      [(list 'py/AotMakeFunction 'f k (reduce + 0 (map #(lookup part-bits % "part") parts)))])
-    :jump [(list 'goto (lbl arg))]
+    :jump (if (<= arg n) [(breaker n) (list 'goto (lbl arg))] [(list 'goto (lbl arg))])
     (:jump-if-false :jump-if-true)
     [(list 'if '[(values b err) (py/AotTruthy f)] '(!= err nil)
            '(return nil err)
@@ -522,7 +530,10 @@
                                            (emit! (list 'set! (push!) (list 'py/AotMakeFunctionV 'f k
                                                                             (get at :defaults) (get at :kwdefaults)
                                                                             (get at :annotate) (get at :closure))))))
-                        :jump (do (doseq [s (goto-stmts arg)] (emit! s)) (vreset! live false))
+                        :jump (do (if (<= arg n)
+                                    (do (doseq [s (spill-stmts @m @d)] (emit! s)) (emit! (breaker n)) (emit! (list 'goto (lbl arg))))
+                                    (doseq [s (goto-stmts arg)] (emit! s)))
+                                  (vreset! live false))
                         (:jump-if-false :jump-if-true) (truth! n (= op :jump-if-false) arg)
                         (:jump-if-none :jump-if-not-none)
                         (do (take! (dec @d)) (vswap! d dec)
