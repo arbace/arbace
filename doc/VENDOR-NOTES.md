@@ -1191,6 +1191,16 @@ step 4 (2026-10-07); the others came with later work, as each says:
     among class-supers): a fn the Java forms compiler compiles is an `IFn$LL` whose `invokePrim` runs (the oracle's
     `native.ae:233`, `:234`, `:237`, which are such fns).
 
+36. **A transient vector's empty root not kept** (2026-11-20, `j2g-chunks-1120`). `PersistentVector$TransientVector`'s
+    `persistent` gives a vector of at most 32 elements (all in its tail, `shift` 5) `PersistentVector/EMPTY_NODE` as
+    its root, as `create` and `adopt` do, in place of the transient's editable copy of the root: a copy of
+    `EMPTY_NODE`'s 32 empty slots, which upstream keeps (on the JVM 144 bytes with compressed references; on Go 512
+    bytes of interface words and the node and its `AtomicReference`). Every vector `mapv`, `vec`, `into` or `persistent!`
+    makes through a transient kept one: a heap profile of j2g's world (doc/go/J2G-SPEC.md §4.1, "The run in bounded
+    memory") found these copies a fifth of its in-use memory. The root of such a vector is never read (`tailoff` is 0
+    up to 32 elements) and `cons`, `asTransient` and `pop` treat `EMPTY_NODE` as they treat the copy; no behaviour
+    changes.
+
 ## Dialect divergences
 
 Where Arbace behaves differently from upstream Clojure on purpose, beyond the renaming
