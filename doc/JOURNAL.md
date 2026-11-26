@@ -26221,3 +26221,13 @@ operands (the evaluator's unsure nodes), definition-time narrowing in templates'
   rerun over the fixes' reach (552 files): 0 lost. Recorded from the three parts: 3,195 -> 3,266 own passes, 0 lost; 601's 13 deferred
   rows and 602's 58 clang-only rows. `bin/reap --record`: C++ read 6,185 / 0 / 97 -> 6,198 / 0 / 84; `bin/crops-score --record`: read
   independence 0.920 -> 0.926, completeness 0.9961 -> 0.9967; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26 — Rust C6: L2 over the whole closure, slice 1, core (queue 600, VM)
+
+596 showed every case needs its whole closure own (abort.rs's 8,935 defines, 8,299 rustc's, 8,190 never built). This grows L2 over
+it. build-run's lib-unit-run (shared front-end file, two commits) follows the items' callees transitively to the closure's defines
+in the crate's units (LIB_UNIT_L2_TARGETS), through the `#[inline(always)]` callees' calls too; bin/rust-front's build takes
+`test/rust/front/lib-unit-CRATE-targets.txt` by default (abort.rs's closure: the goal is one case all own first; the union of the 73
+cases, 1,482 core defines, was considered and left for later as it doubles the rounds). Rounds of build, inline-keys and export --add
+until no new key (scratch script, logs in .tmp/q600/logs). core: 157 -> 450 of abort's 687 equal; the own tree 688 -> 1,234; abort.rs
+8,299 -> 7,849 rustc's. Details in doc/rust/FRONTEND-SURVEY.md, "As built: C6's L2 over the whole closure, slice 1: core".
