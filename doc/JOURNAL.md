@@ -25575,3 +25575,18 @@ shard waited, with 54 GB available and a load of 1.5. The user chose to keep one
 the file `LOCK.small_gib` (the main checkout's `.tmp/big.lock.small_gib`, now 16), else 8, on every look, so a waiter already in the
 queue sees a change once it runs this copy. The memory rule still admits a side job only when its declaration fits MemAvailable less
 2 GiB less the holder's unreached declaration; the watchdog stays. test/gate/heavy-lock-test.bash case 7 covers the file; all pass.
+
+## 2026-11-26: two big slots again, each job under a hard memory cap (the user)
+
+The user had kept one big slot since the 11-25 OOM, for fear of a repeat, and asked for it to be revisited if a second slot could
+be made safe. What made 11-25 catastrophic: no swap, a job past its declaration (j2g 21 GB against 16), and the host thrashing until
+it stopped answering; the watchdog (3 s polls) and the declarations are promises, not limits. Done, with the user's approval (for
+this boot only, no fstab entry): cgroup v2 mounted at /sys/fs/cgroup with the memory controller delegated; `bin/heavy-lock` runs
+each job in a group of its own, arbace-lock/TICKET, memory.max 125% of HEAVY_MEM_GIB (`HEAVY_LOCK_CAP_PCT`) and memory.oom.group 1,
+so the kernel kills a job past its cap whole and alone; the memory rule counts every holder and the job asking at its cap (cap less
+the holder's tree's RSS); the lock prints when a job was killed by its cap; `HEAVY_LOCK_CGROUP=0` runs without. Proved on scratch
+jobs first (a 500 MB allocation in a 200 MB group killed, the host untouched) and by test/gate/heavy-lock-test.bash case 8 (a job past
+its cap killed with the message while the job beside it finishes, no group left); every case passes. Then `.tmp/big.lock.slots` 2.
+Tickets queued before the deploy run the earlier copy (one slot for them) until they are requeued. GOMEMLIMIT per job was
+considered and left out: a job's several Go processes would each take the whole declaration. The watchdog stays as a backstop.
+After a reboot the mount is gone: the lock then runs without caps and the slot count must go back to 1 until it is mounted again.

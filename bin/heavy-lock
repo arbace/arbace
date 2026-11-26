@@ -125,6 +125,14 @@ small_gib() { echo "${HEAVY_LOCK_SMALL_GIB:-$(cat "$lock.small_gib" 2>/dev/null 
 slot2_ok() { [ "$slots" != 1 ] || [ "${1:-$need}" -le "$(( $(small_gib) * 1048576 ))" ]; }
 
 # the KiB the other holders (state 1 or 2) declared and have not reached yet: their need less their process tree's RSS
+# a hard memory cap per job (the user, 2026-11-26): when cgroup v2's memory controller is delegated at /sys/fs/cgroup (mounted by
+# hand: `mount -t cgroup2 cgroup2 /sys/fs/cgroup; echo +memory > /sys/fs/cgroup/cgroup.subtree_control`), each job runs in a group
+# of its own, arbace-lock/TICKET, with memory.max at HEAVY_LOCK_CAP_PCT (125) percent of HEAVY_MEM_GIB and memory.oom.group 1: a job
+# past its cap is killed whole by the kernel, the host and the other slot untouched; the memory rule then counts each holder, and
+# the job asking, at its cap. HEAVY_LOCK_CGROUP=0 runs without (as before); HEAVY_MEM_GIB=all runs without a cap.
+cg_root=/sys/fs/cgroup
+cg_on() { [ "${HEAVY_LOCK_CGROUP:-1}" != 0 ] && grep -qw memory "$cg_root/cgroup.subtree_control" 2>/dev/null; }
+cap_pct() { if cg_on; then echo "${HEAVY_LOCK_CAP_PCT:-125}"; else echo 100; fi; }
 unreached_kib() {
   local t s hs=() pg
   for t in "$@"; do
@@ -134,12 +142,12 @@ unreached_kib() {
   done
   [ ${#hs[@]} -gt 0 ] || { echo 0; return; }
   pg=$(( $(getconf PAGESIZE) / 1024 ))
-  cat /proc/[0-9]*/stat 2>"$q/.err" | awk -v pg="$pg" -v hs="${hs[*]}" '
+  cat /proc/[0-9]*/stat 2>"$q/.err" | awk -v pg="$pg" -v hs="${hs[*]}" -v cp="$(cap_pct)" '
     { pid = $1; l = $0; sub(/^.*\) /, "", l); split(l, f, " "); pp[pid] = f[2]; rss[pid] = f[22] * pg }
     END { n = split(hs, h, " "); tot = 0
       for (i = 1; i <= n; i++) { split(h[i], x, ":"); r = 0
         for (p in pp) { c = p; d = 0; while (c != "" && c != 0 && d < 64) { if (c == x[1]) { r += rss[p]; break }; c = pp[c]; d++ } }
-        if (x[2] > r) tot += x[2] - r }
+        c2 = int(x[2] * cp / 100); if (c2 > r) tot += c2 - r }
       printf "%d\n", tot }'
 }
 # the memory rule for a job beside another
@@ -148,7 +156,7 @@ fits() {
   avail=${HEAVY_LOCK_MEMAVAIL_KIB:-$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)}
   un=$(unreached_kib "$@")
   memmsg="MemAvailable $(( avail / 1048576 )) GiB less 2 GiB less $(( un / 1048576 )) GiB the other holders have not reached, against $(( need / 1048576 )) GiB (HEAVY_MEM_GIB)"
-  [ $(( avail - 2097152 - un )) -gt "$need" ]
+  [ $(( avail - 2097152 - un )) -gt $(( need * $(cap_pct) / 100 )) ]
 }
 
 announced= memsaid= slot= backfill= bf_seen=0 memmsg=
@@ -209,8 +217,25 @@ put_state "$slot" || exit 1
 # the slot held: the seconds waited appended to HEAVY_LOCK_WAITS when set (bin/gate's step's .waits: the summary's "its
 # tools waited ... for the lock"), then CMD, which inherits the held slot's descriptor (as flock(1)'s child did), not the other's
 [ -z "${HEAVY_LOCK_WAITS:-}" ] || echo $(( $(date +%s) - t0 )) >> "$HEAVY_LOCK_WAITS"
-if [ "$slot" = 1 ]; then
-  ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=1 "$@" {f2}>&-
-else
-  ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=2 "$@" {f1}>&-
+cg=
+if cg_on && [ "${HEAVY_MEM_GIB:-24}" != all ]; then
+  mkdir -p "$cg_root/arbace-lock" 2>/dev/null
+  grep -qw memory "$cg_root/arbace-lock/cgroup.subtree_control" 2>/dev/null || echo +memory > "$cg_root/arbace-lock/cgroup.subtree_control" 2>/dev/null
+  cg=$cg_root/arbace-lock/$me
+  if mkdir "$cg" 2>/dev/null && echo $(( need * 1024 * $(cap_pct) / 100 )) > "$cg/memory.max" 2>/dev/null \
+     && echo 1 > "$cg/memory.oom.group" 2>/dev/null; then :; else rmdir "$cg" 2>/dev/null; cg=; fi
 fi
+if [ "$slot" = 1 ]; then
+  ( [ -z "$cg" ] || echo "$BASHPID" > "$cg/cgroup.procs" || exit 125
+    export ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=1; exec "$@" {f2}>&- )
+else
+  ( [ -z "$cg" ] || echo "$BASHPID" > "$cg/cgroup.procs" || exit 125
+    export ARBACE_HEAVY_HELD=1 ARBACE_HEAVY_LOCK="$lock" ARBACE_HEAVY_SLOT=2; exec "$@" {f1}>&- )
+fi
+st=$?
+if [ -n "$cg" ]; then
+  grep -q '^oom_kill [1-9]' "$cg/memory.events" 2>/dev/null \
+    && echo "heavy-lock: the job passed its memory cap ($(( need * $(cap_pct) / 100 / 1048576 )) GiB, $(cap_pct)% of HEAVY_MEM_GIB=${HEAVY_MEM_GIB:-24}) and was killed: declare more" >&2
+  for _ in 1 2 3 4 5; do rmdir "$cg" 2>/dev/null && break; sleep 1; done
+fi
+exit "$st"
