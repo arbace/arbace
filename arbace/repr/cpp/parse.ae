@@ -3865,6 +3865,12 @@
           :else nil))
       (when (and (= ctx :member) sto (#{"extern" "register"} (second sto)))
         (soft-diag! p (long (first sto)) "storage class specified for a member"))
+      ;; (cpp-indep3: [class.union.anon]/2, "A storage class is not allowed in a declaration of an anonymous union in a class
+      ;; scope": static or mutable before an anonymous union member, `static union { int c; };`, is GCC's "storage class
+      ;; specified for anonymous union" (as extern's and register's above), at the specifier; other/anon-union3.C)
+      (when (and (= ctx :member) (or (and sto (= "static" (second sto))) mut) (is? p ";")
+                 (let [t (:type ds)] (and (= :unnamed (:t t)) (= "union" (:kw t)))))
+        (soft-diag! p (long (first (or (when (and sto (= "static" (second sto))) sto) mut))) "storage class specified for a member"))
       (when (and (= ctx :param) (or tls (and sto (not= "register" (second sto)))))
         (soft-diag! p (long (first (or tls sto))) "storage class specified for parameter"))
       (when (and frnd (#{:top :block} ctx) (not virt)) (soft-diag! p (long (first frnd)) "'friend' used outside of class"))
@@ -5147,8 +5153,18 @@
                 {:delegatingInit {:qualType (name-str p qn)}}
                 :else {:baseInit {:qualType (if qn (name-str p qn) "decltype")}})
           ;; (cpp-ce3: its range, the checker's place of its constructor call's errors; a private key, no tree check reads it)
-          out (conj out (merge {:kind "CXXCtorInitializer" :inner [x] :_range (rng p mb (last-ix p))} who))]
-      (if (accept! p ",") (recur out) out))))
+          out (conj out (merge {:kind "CXXCtorInitializer" :inner [x] :_range (rng p mb (last-ix p))} (assoc who :_mb mb)))]
+      (if (accept! p ",")
+        (recur out)
+        ;; (cpp-indep3: [class.base.init]/6, "If a mem-initializer-id designates the constructor's class, it shall be the only
+        ;; mem-initializer": a delegating one beside another is GCC's "mem-initializer for 'A::j' follows constructor delegation"
+        ;; (or "constructor delegation follows mem-initializer for"), at the later; cpp0x/dc2.C)
+        (do (when (and (> (count out) 1) (some :delegatingInit out) (not (skim? p)) (main-tok? p (long (:_mb (first out)))))
+              (let [d (first (keep-indexed (fn [i x] (when (:delegatingInit x) i)) out))
+                    at (if (zero? (long d)) (second out) (nth out d))]
+                (soft-diag! p (long (:_mb at)) (if (zero? (long d)) "mem-initializer follows constructor delegation"
+                                                    "constructor delegation follows mem-initializer"))))
+            (mapv #(dissoc % :_mb) out))))))
 
 (defn- spec-of-qualifier
   "queue 380 (W3d): the entity of the explicit specialization a qualified declarator-id's qualifier names, X<char> of
@@ -7429,6 +7445,12 @@
                 (and (not (:trailing fs)) (map? b) (#{:auto :dta} (:t b)) (nil? (:cn b)))
                 (soft-diag! p (long (:b ds)) (str "invalid use of '" (if (= :dta (:t b)) "decltype(auto)" "auto") "'"))
                 :else nil)))
+          ;; (cpp-indep3: [expr.prim.this]/3, `this` only in a member function's declarator after its cv-qualifiers, its body,
+          ;; or a default member initializer: an alias-declaration's type-id of a class's member-specification, `using type =
+          ;; decltype(this);`, is GCC's "invalid use of 'this' at top level", at it; lookup/this2.C)
+          (when (and (nil? *this-ok*) (= :class (sc/kind-of (sc/decl-scope (scope p)))) (not (skim? p)))
+            (when-let [i (first (filter #(t= (tok-at p %) "this") (range (long (or (:b ds) ni)) (inc (long e)))))]
+              (when (main-tok? p (long i)) (soft-diag! p (long i) "invalid use of 'this' at top level"))))
           (expect! p ";")
           (declare! p (cond-> {:k :type :name nm :tmpl (boolean (and tmpl (pos? (long (:n tmpl))))) :target (:ent ty) :scope (ent-scope (:ent ty))}
                         (not (and tmpl (pos? (long (:n tmpl))))) (assoc :ty ty)
