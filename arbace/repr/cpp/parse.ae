@@ -17,7 +17,8 @@
             [arbace.repr.cpp.scope :as sc]
             [arbace.repr.cpp.sema :as sema]
             [arbace.repr.cpp.skim :as skim]
-            [arbace.string :as str])
+            [arbace.string :as str]
+            [arbace.cpp.nfc :as nfc])
   (:import [arbace.repr.c.lex Tok CFile]
            [arbace.repr.cpp.scope Scope]
            [java.util ArrayList HashMap HashSet]))
@@ -80,6 +81,19 @@
   "queue 577: an atom tokens sets, when bound, to a long array of each token's spelling offset in the main file (-1: none)."
   nil)
 
+(defn- ucn-latin1
+  "queue 601 (group 4): an identifier's spelling with its universal-character-names ([lex.charset]/? \\uXXXX, \\UXXXXXXXX)
+  replaced by their characters' UTF-8 bytes, one char a byte as the main file's text is read: an identifier written with a UCN and
+  the same one written in UTF-8 are one name ([lex.name]/1, P1949R7; clang's IdentifierInfo, GCC's), cpp23/normalize7.C's
+  `\\u00c0` and `À`."
+  ^String [^String s]
+  (str/replace s #"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})"
+               (fn [[_ a b]]
+                 (let [cp (Long/parseLong ^String (or a b) 16)]
+                   (if (or (> cp 0x10FFFF) (<= 0xD800 cp 0xDFFF))
+                     (or a b)
+                     (String. (.getBytes (String. (Character/toChars (int cp))) "UTF-8") "ISO-8859-1"))))))
+
 (defn tokens
   "The parser's tokens (an array of T, an :eof last) of the preprocessor's stream `pp-toks` (arbace.repr.c.pp's
   :tokens), the main file's tokens being those of the file named `main-path`, written `main` in locations;
@@ -114,7 +128,7 @@
               :IDENTIFIER (cond
                             (contains? alt-ops s) (add :punct (alt-ops s) o n f mac nil)
                             (contains? kws s) (add :kw s o n f mac nil)
-                            :else (add :id s o n f mac nil))
+                            :else (add :id (if (str/includes? s "\\") (ucn-latin1 s) s) o n f mac nil))
               :PPNUMBER (add :num s o n f mac nil)
               (:STRINGLITERAL :LONGSTRINGLITERAL) (add :str s o n f mac nil)
               (:CHARCONST :LONGCHARCONST) (add :chr s o n f mac nil)
@@ -8783,7 +8797,17 @@
                                   ;; ([lex.fcon]: hexadecimal floating literals are C++17's; before, GCC's pedwarn)
                                   (when (and (< (.-year p) 2017) (re-matches #"0[xX][0-9a-fA-F'.]*[pP][-+]?[0-9']+[fFlL]?" (.-s t)))
                                     "pedantic: use of C++17 hexadecimal floating constant"))
-                         :id (when (str/includes? (.-s t) "\\") (ucn-error (.-s t) (.-year p)))
+                         ;; (the identifier's written spelling, its UCNs, from the main file's text: tokens' spelling has
+                         ;; them as their characters, ucn-latin1; queue 601: P1949R7's [lex.name]/1, an identifier's characters in
+                         ;; Normalization Form C, GCC's "'A\\U00000300' is not in NFC" under -pedantic-errors, arbace.cpp.nfc)
+                         :id (let [^String w (let [^String src (.-src p)] (if (and src (<= (+ (.-o t) (.-n t)) (.length src))) (subs src (.-o t) (+ (.-o t) (.-n t))) (.-s t)))]
+                               (or (when (str/includes? w "\\") (ucn-error w (.-year p)))
+                                   (let [^String s (.-s t)]
+                                     (when (some #(> (int %) 127) s)
+                                       (let [u (String. (.getBytes s "ISO-8859-1") "UTF-8")
+                                             cps (vec (.toArray (.codePoints u)))]
+                                         (when-not (nfc/nfc? cps)
+                                           (str "pedantic: '" (apply str (map (fn [c] (if (< (long c) 128) (str (char c)) (format "\\U%08X" (long c)))) cps)) "' is not in NFC")))))))
                          ;; (round 54, fifth pass: [lex.ccon]'s encodable literals)
                          :chr (or (escape-error (.-s t) (.-year p)) (char-literal-error (.-s t) (.-year p) false))
                          :str (or (escape-error (.-s t) (.-year p)) (when (or (str/starts-with? (.-s t) "u\"") (and *exec-latin1* (str/starts-with? (.-s t) "\"")))
