@@ -26172,3 +26172,17 @@ j2g-chunks-1120 (`282cdf320`); mac/next merged again three times (`0b3174413`, `
   (provenance-check clean).
 - Checks: `bin/reap --record`, `bin/crops-score --record`, `--judge --strict`, `bin/records-check` and `bin/markers-check`: 0
   problems.
+## 2026-11-26 — OCaml AOT: oc-tail's leftovers (oc-tail2, branch `oc-tail2-1126`)
+
+- The user's decision (2026-11-26): parallel/test_issue_11094 is judged at the compiled level only, as callback_effects_domains_gc was
+  (2026-11-25). Its light row stays where it is, `:light-depth` (deferred, the light level's), with the decision in the class's
+  `:decided`; no light cap. At the light level it now ends at Rt's DEPTH_LIMIT (200,000 OCaml calls, about 5 a nested handler; its
+  100,000 suspended fibers are Java threads, past 6 GB when let further), its aot-known.edn entry's text kept (the record's row). It is
+  in test/ocaml/light-compiled.txt (the compiled level's by-list run) and joins the compiled level's follow-up after its chain (583's
+  list, callback_effects_domains_gc's).
+- regression/pr3612 gets a light cap by the user's 1.5x rule (oc-tail's option (a)): measured alone on this host, 210.05 s user + 34.87 s
+  system (203.07 + 35.28 with mac/next 0b3174413's runtime and translator, the same program and C API server), so 1.5 x 244.9 s, 370 s
+  in test/ocaml/aot-cpu-caps.tsv (the coordinator's 310 s counted the user CPU alone; the cap and the limit count both). Confirmed by
+  `bin/oi check --aot --only-list` of pr3612 alone under the cap: pass (287 s of wall, its row in check-aot-native.edn already
+  the recorded pass, unchanged).
+- parallel/mctest's stall is the Mac's queue 603; the execv rows keep OC208 (b).
