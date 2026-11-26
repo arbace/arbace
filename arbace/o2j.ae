@@ -59,6 +59,15 @@
 
 (defn- hd [x] (when (seq? x) (first x)))
 
+(defn- tail-clears
+  "x with its tail calls' parameter clears (apply-node's o2j$clears, oc-tail) made forms (keep? true: a (do) of them) or dropped
+  (nil: a function whose body is a loop, whose parameters are the loop's)."
+  [x keep?]
+  (cond (and (seq? x) (= 'o2j$clears (first x))) (when keep? (with-meta (apply list 'do (rest x)) (meta x)))
+        (seq? x) (with-meta (apply list (map #(tail-clears % keep?) x)) (meta x))
+        (vector? x) (with-meta (mapv #(tail-clears % keep?) x) (meta x))
+        :else x))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; names
 
@@ -438,16 +447,24 @@
         (do (reset! (:tails ctx) true)
             (with-args ctx (into [f] args)
                        (fn [as] (list 'new 'ocaml.rt.TailCall (first as) (list 'new 'Object/1 (vec (rest as)))))))
-      ;; arguments right to left, then the function (a call that is no tail call clears its temporaries after it, scoped)
-      (if (simple? f)
-        (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
-        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))))))
+      ;; arguments right to left, then the function (a call that is no tail call clears its temporaries after it, scoped; oc-tail: a
+      ;; tail call first clears the function's parameters it does not name, as ocamlopt's tail call leaves the caller's frame: at the
+      ;; light level the frame stays until the call returns, statmemprof/bigarray's test_tail)
+      (let [clears (when (and tail? (seq (:params ctx)))
+                     (let [refs (into #{} (mapcat #(second (bound-and-refs %)) (cons f args)))]
+                       (seq (for [[id sym] (:params ctx) :when (not (refs id))] (list 'set! sym nil)))))
+            call (if (simple? f)
+                   (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))]
+        (if clears (list 'do (apply list 'o2j$clears clears) call) call))))))
 
 ;; ---- functions
 
-(defn- method-for [arity params body]
+(defn- method-for [arity params body & [mutable?]]
   (if (<= arity 6)
-    (list 'method (with-meta (symbol (str "a" arity)) {:public true}) (into ['this] params) body)
+    ;; (oc-tail) mutable? the parameters a tail call clears (tail-clears)
+    (list 'method (with-meta (symbol (str "a" arity)) {:public true})
+          (into ['this] (if mutable? (map #(with-meta % {:mutable true}) params) params)) body)
     (let [a (symbol "args$")]
       (list 'method (with-meta 'an {:public true}) ['this (with-meta a {:tag 'Object/1})]
             (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) body)))))
@@ -469,8 +486,12 @@
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
         tails (atom false)
         ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})
-              :group (not-empty (dissoc group self-id)) :tails tails}
+              :group (not-empty (dissoc group self-id)) :tails tails
+              ;; (oc-tail) the method's own parameters (arity 6 at most), which a tail call clears when it does not name them
+              :params (when (<= arity 6) (mapv (fn [[p] s] [p s]) ps params))}
         b (realize (expr ictx body true))
+        clears? (and (not @used) (not @tails) (not (:group ictx)) (<= arity 6))
+        b (tail-clears b clears?)
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
         b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
@@ -492,7 +513,7 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b)
+             (method-for arity params b clears?)
              ;; Marshal's Closures flag (OC216 (a); ocaml.rt.Marshal's closureFields, fixClosures): the free variables, a closure
              ;; of the class with none set, and their setting
              (list 'method (with-meta 'envOf {:public true}) (with-meta ['this] {:tag 'Object/1})
