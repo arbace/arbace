@@ -24486,3 +24486,104 @@ mp_preload.py; Lib/multiprocessing/resource_tracker.py, util.py), probed with bi
   func(invalid type) string and func(invalid type, invalid type) error (the negative control); NUM_BITS func(uint64) uint64 in both.
   The step's own command (bin/goi test --gc's std.ae) needs an executable whose table lists pyctypes: the main host's, after
   this merges with 521's listing.
+
+## 2026-11-24: queue 553, subinterpreters' handles, `_testbuffer`, 3.14's UTF-8 mode and the children that are pyi (the VM; branch `553-py-subinterp-testbuffer`)
+
+Brief: `.tmp/worktrees/q/tasks/553-py-subinterp-testbuffer.md` (the user's decisions of 2026-11-23 on 537's DECISIONs 537-5 and
+537-6: :subinterpreters' 3 rows, `_testbuffer`'s 3 and 3.14's UTF-8 mode rule from :skipped-by-test, :child-is-pyi's 10 case by
+case). Base next 9b60ce498; paused for the night at 739215eb7 (WIP) and resumed; origin/next 440cf0273 merged (its journal
+without the conflict markers 9b60ce498 had left; the survey's markers, which this branch had removed too, taken as next has it).
+
+- **Subinterpreters (`:subinterpreters`, 3 rows).** `concurrent.interpreters` is CPython's own Lib over pyi's `_interpreters`,
+  `_interpqueues` and `_interpchannels` (queue 230, each interpreter with its own module table, builtins, sys, importlib, codecs,
+  atexit, locale and the interpreter registers swapped by interpSwitch; one GIL, 230's DECISION). The three rows were `del interp`
+  in test_interpreters' module runs leaving the interpreter alive: pyi's moment at del (queue 222) collects at a deletion within a
+  budget of a tenth of the wall time, spent by then (a probe of _mixed alone passes). Now a deletion past the budget while a
+  subinterpreter is held by handles is owed (`xiDeathOwed`), settled by one finRound before the queues' get, get_count, is_full,
+  list_all and the channels' recv, get_count, get_info, list_all, list_interpreters (`xiSettleDeaths`). Alternatives: lifting the
+  budget for every deletion while subinterpreters exist (a collection per deleted tracked object in InterpreterPoolExecutor's
+  programs), recognizing the Interpreter class by name (a stdlib name in the runtime), reference counting (537-2 (b)).
+- **`_testbuffer` (3 rows) and its UTF-8 sibling.** `_testbuffer` has been ci's since queue 456 (473: memoryview over Py_buffer);
+  the rows, and test_buffer's 73 in `:testcapi`, are the 11-19 records night's. Task 554 runs and records test_buffer whole; the
+  test_capi and test_ctypes rows pass by id here. 3.14's UTF-8 mode rule (preconfig_init_utf8_mode) replaces pyi's constant 1:
+  `-X utf8`, `PYTHONUTF8` (-E/-I ignore it; invalid values refused for 3.14 too), else on only under the C or POSIX locale.
+- **`:child-is-pyi` (10), case by case (537-5):** test_posix's two test_close_file (Go's runtime.checkfds opens /dev/null on a
+  closed descriptor 0: `bin/pyi python` sees 0 closed and `PYI_STDIN_CLOSED` makes the runtime close it again before anything
+  runs, `sys.stdin` None), test_subprocess' test_preexec_at_exit (fork_exec's PythonFinalizationError and subinterpreter
+  RuntimeError before pyi's no-fork refusal) and test_encoding_warning (stale), test_marshal's test_unorderable_set_items_in_code
+  (the bytecode view's add_const keyed by repr merged two NaN complex constants: a NaN float or complex now matches only itself,
+  as `_PyCode_ConstantKey`), test_unicodedata's unload_reload (namereplace imports unicodedata once per interpreter, the
+  `_PyUnicode_GetNameCAPI` capsule) and failed_import_during_compiling (compile/exec/eval of a source with `\N{` asks the capsule;
+  on its failure a copy with each `\N{` opening an impossible name tells a decoded escape from raw text, and the error is the
+  parser's "(unicode error) \N escapes not supported (can't load unicodedata module)"; a first version asked at every IR load and
+  broke every module with an escape under `sys.modules['unicodedata'] = None`), test_os' test_urandom_failure (sysconfig's
+  HAVE_GETRANDOM, HAVE_GETRANDOM_SYSCALL, HAVE_GETENTROPY 1: os.urandom is getrandom; with it `:runs-where-cpython-skips`' two
+  URandomFDTests rows). Left for the user: test_pass_fds_redirected (Go's poller holds descriptors 3 and 4; DECISION 553-1, n/a
+  recommended) and BytesFwalkTests.test_fd_finalization (reference counting's moment: DECISION 553-2, to :finalization under 537-2).
+- **Runs** (the VM, arm64; stage 0 nx's, goi interpreting the checkout's py; PYI_RUNNER=python3): check A by id and whole modules
+  (`.tmp/q553/checkA.log`, stopped for the night before test_buffer and test_utf8_mode ended), check B whole (test_unicodedata,
+  test_utf8_mode, test_builtin, test_posix; `.tmp/q553/checkB.log`, controls failed as they must), check C the VM-only rows alone
+  with a 16 GB cap (`.tmp/q553/checkC.log`); probes `.tmp/q553/p/subi2.py` (the budget spent, then `del interp`: qsize 4, PASS)
+  and fail.py (CPython's SyntaxError line).
+- **Records**: `bin/pyi check --judge DIR --record` over a copy of check B holding test_utf8_mode alone (test_env_var and
+  test_xoption pass). Not recorded, for the main host's whole record: test_builtin (its TestType.test_namespace_order fails on goi
+  only), test_posix (test_posix_spawnp past the 8 GB cap on goi), test_unicodedata (failed_import past the cap after the
+  module's heavy tests), and every row covered by id alone. Python eval 40,827 / 1,404 / 1,308 -> 40,829 / 1,404 / 1,306.
+  `bin/reap --record`, `bin/crops-score --record`; `bin/reap`, `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-24: queue 553's two DECISIONs applied (the VM; branch `553-py-subinterp-testbuffer`)
+
+- **DECISION 553-1 (a), the user: n/a.** test_subprocess's test_pass_fds_redirected leaves `:child-is-pyi` for a new n/a class,
+  `:go-runtime-descriptors`: Go's runtime opens its network poller's two descriptors (epoll and eventfd, at 3 and 4) before any
+  Python runs, in every pyi process, so a child listing its open descriptors (fd_status.py) sees them beside the passed ones.
+  Not taken: (b) a patch to Go's runtime moving them above 255 in pyi's two builds, (c) keeping it by design.
+- **DECISION 553-2 (a), the main session, by the same rule as the user's 537-2: test_os' BytesFwalkTests.test_fd_finalization
+  goes to `:finalization`** (reference counting's moment: closing the wrapper generator unwinds its frame, and CPython closes the
+  inner os.fwalk generator, which closes its directory descriptors, when the frame's for-loop drops it; pyi when Go's collector
+  finds it). Not taken: (b) closing the generators a frame's for-loops hold as it unwinds (wrong when another reference holds one).
+- Both in test/python/divergences.edn and divergences-315.edn; no run (the record unchanged). Python eval 40,829 / 1,404 / 1,306
+  -> 40,829 / 1,403 / 1,306 (4,789 -> 4,790 n/a). `bin/reap --record`, `bin/crops-score --record`; `bin/reap`,
+  `bin/crops-score --judge --strict`, `bin/records-check`: 0 problems.
+
+## 2026-11-25 — Python: :coroutines' two refcount rows, :child-is-pyi's records, :c-accelerators' remainder (queue 585, VM)
+
+Brief: `.tmp/worktrees/q/tasks/585-py-accel-coroutines.md` (branch `585-py-accel-coroutines` from next 01ee9c426).
+Not in that base: 537 (the strict-subclass DeprecationWarning: test_int, test_complex, test_capi's test_D), 551/551b
+(`_warnings` in Go: test_warnings' 15 DeprecatedTests, which `:coroutines`' match holds here), 553 (:child-is-pyi's fixes)
+and 568 (C `_pickle`). Done here, without redoing those:
+- Merged origin/553-py-subinterp-testbuffer (585a1f7bc): 553's eight :child-is-pyi rows passed in its probes but no whole
+  record held them. The journal's conflict is a union; nothing else conflicted.
+- `:coroutines`: test_bpo_45813_1 and _2 moved to `:finalization`, as 537-2 (a) names them (the user, 2026-11-23: the moment
+  of reference counting; 551b makes `:finalization` n/a). The class keeps its match line for the rows the merges of 537 and
+  551b will clear. No run: the rows' outcome is unchanged.
+- Whole run: `bin/pyi check --fresh` of test_marshal, test_unicodedata, test_posix, test_subprocess and test_os, with the
+  drivers on goi and the children on the compiled launcher (557b-1 (a); the launcher rebuilt at runtime key 0739f727c096e87e).
+  The run had 1,058 methods: 856 pass, 196 classed and 6 failing. All 8 of 553's rows pass, and test_urandom_failure skips
+  as CPython's does.
+  - test_marshal (64 pass, 15 classed) and test_posix (136 pass, 44 classed) passed whole. They were recorded with
+    `bin/pyi check --judge DIR --record` over those two modules alone: 0 regressions, 3 now pass. Their 3 names left
+    `:child-is-pyi`.
+  - Three modules had failures, so they were not recorded: test_unicodedata (one memory-cap crash), test_subprocess (3)
+    and test_os (2). Probed alone (`--only`):
+    - test_function_checksum and test_fd_leak pass. Both are load effects.
+    - test_timerfd_TFD_TIMER_ABSTIME fails both times: 0.98 s against 1 within 2 places. This is timing on the VM's goi.
+    - test_close_fds, test_pass_fds and test_leak_fast_process_del_killed fail with launcher children. With children on goi
+      (no launcher) they pass, and so do test_bool and test_getopt, the controls' subjects. So they are an artifact of the
+      launcher child, whose Go runtime descriptors land at 5 and 6 after the passed ones. They are not this code.
+  - The host's whole records of these three modules would clear the remaining 5 rows.
+- Python eval 40,829 / 1,403 / 1,306 -> 40,832 / 1,400 / 1,306. `bin/reap --record` and `bin/crops-score --record` were
+  run. `bin/reap`, `crops-score --judge --strict` and `records-check` each give 0 problems.
+- `:c-accelerators`' remainder after 568 (no change):
+  - test_inspect's test_signature_on_builtin_class and test_pickle's test_clear_unpickler_memo_reentrant are 568's C
+    `_pickle`.
+  - These stay by design under the user's decisions (2026-11-04, 465-3):
+    - test_annotationlib's test_type_repr and test_inspect's test_excluding_predicates are `_datetime`'s;
+    - test_types' module and test_int's monster are `_datetime` and `_decimal`;
+    - test_functools' test_c_classes needs `_decimal`.
+  - test_functools' two test_attributes_unwritable need a C partial with READONLY members, against 459-1 (a) (`_functools`
+    stays thin). That is the user's call: DECISION 585-2 in the report.
+
+  Alternatives considered:
+  - Redoing 537's and 551's fixes on this base: not taken. That would duplicate work that is already on its way to next.
+  - Recording test_subprocess with its three launcher failures moved into `:go-runtime-descriptors`: not taken. The
+    host's records, with children on goi, pass them.
