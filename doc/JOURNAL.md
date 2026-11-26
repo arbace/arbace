@@ -22063,3 +22063,15 @@ base.__dict__`, and 521's C `_datetime` date has none). Branch `py-enum-1125` fr
 - Built: `py.ExtNewWrapper` returns this tree's tp_new_wrapper (`makeSlotWrapper(m, "__new__")`, the staticmethod in
   `newWrappers`); pyctypes' `addNewWrapper` puts it in the dict in `typeReady` (the C type object's tp_new field before
   inheritance) and in `typeFromSpec` (the spec's own Py_tp_new), before the methods.
+- Proved by pyi's AOT (`bin/pyi check --aot --lib-test --fresh --only`, the worktree's runtime compiled, the children by the
+  compiled launcher; the three negative controls failing as they must): 18 modules whole, 8,294 methods (test_enum, test_datetime,
+  test_decimal, test_zoneinfo, test_pickle, test_xml_etree_c, test_ctypes, test_capi, test_sqlite3, test_bz2, test_lzma, test_zstd,
+  test_xxlimited, test_descr, test_typing, test_copy and the controls' two). test_enum imports: 1,073 of its 1,082 methods pass (the
+  record 1,074); its five failing methods the record passes (TestSpecial's test_subclasses_with_getnewargs, _ex,
+  test_subclasses_without_direct_pickle_support, test_tuple_subclass_with_auto_1 and _2) pickle an int or tuple subclass through
+  the C `_pickle`: all five pass with PYI_C_ACCEL=0 (the thin Go `_pickle`), as namedtuple's pickling fails on train 5 likewise:
+  568's, not touched here. Against the eval record nothing else fails that does not fail the same on train 5's executable (checked
+  there: test_ctypes' three long double rows, test_xml_etree_c's five, test_decimal's PyPythonAPItests.test_pickle and
+  PyContextAPItests.test_pickle (past 300 s there too), test_descr's test_reduce_copying, typing's NamedTuple pickling, test_pickle's
+  C test_evil_pickler_mutating_collection); test_datetime, test_pickle, test_zoneinfo, test_copy, test_typing and test_descr method
+  for method as py-odict-1125's run. Nothing recorded.
