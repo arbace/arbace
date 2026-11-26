@@ -25674,3 +25674,17 @@ operands (the evaluator's unsure nodes), definition-time narrowing in templates'
   (K, the compatibility decompositions, left out). arbace/cpp/nfc.ae is UAX #15's NFC over it, Arbace's own; test/cpp/nfc-test.ae runs
   it against the pinned NormalizationTest.txt: 19,965 lines, 0 failing. LICENSE.md's Unicode entry names the file now (Unicode License
   V3 for the data). Alternative not taken: java.text.Normalizer, which jrt does not have and the coordinator ruled out.
+
+## 2026-11-26 — C++ read: the deferred tail by mechanism, round 3 recorded (queue 601, VM)
+
+- The coordinator's groups after the record of 718e19c8c: P0466R5's builtins with their own checks (52687fdad), NFC identifiers
+  (432a245e6, cbf6f2661: the UCD 16.0.0 already on the VM, pinned by test/scheme/ucd.edn), macro spelling locations (ba70caecd),
+  two-phase lookup in signatures and instance members' decltype (08e9d9164). Details and the rules' sources in doc/cpp/CPP-SURVEY.md,
+  "As built: 601, round 3".
+- Not built, for the user: overload/builtin4.C (GCC's built-in candidate set, against [over.built]/16 with [conv.ptr]/1), the CWG rows
+  partial-specialization12.C (CWG 455) and pr39425.C (CWG 727), and init/new38.C as an :ifndr-uninstantiated-template candidate (its one
+  missed line [-Wtemplate-body] in a template never instantiated). Tried and reverted: non-dependent26.C's decltype qualifier check,
+  constexpr-ref12.C's local references.
+- Checks per rule on the rows and the recorded passes each reaches; one regression at 08e9d9164 (3,348 files): 0 lost, 7 rows own;
+  recorded: own passes 3,266 -> 3,273; `bin/reap --record`: C++ read 6,198 / 0 / 84 -> 6,205 / 0 / 77; completeness 0.9967 -> 0.9969;
+  `--judge --strict`, records-check, markers-check: 0 problems (the user's "avoid redundancy": no rerun of a passing run).
