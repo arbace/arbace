@@ -9126,3 +9126,16 @@ PyUnicodeWriterTest.test_widechar, read past b'' by wcslen, fixed by keepBytes' 
 | :c-accelerator-gaps | 1 | | | 1, DECISION 594-1 |
 | :pickle-c-gaps | 1 | 1 | | |
 | :elementtree-c | 6 | 2 | | 4 (XMLParser.flush, the late tail's panic) |
+
+### 594, part 3: pyi's _testinternalcapi (the user's 594-1 (a)), 594-2 (a), 594-3 (a)
+
+- **`_testinternalcapi`**, pyi's own and partial (go/arbace/py/builtins_testinternalcapi.go): create_interpreter,
+  destroy_interpreter, exec_interpreter, next_interpreter_id, run_in_subinterp_with_config, get_interp_settings,
+  get_code_var_counts, _PyTraceMalloc_GetTraceback; with tracemalloc's C traces (PyTraceMalloc_Track and _Untrack, by
+  domain and address: _get_traces, the traced memory, the traceback by key). Importable everywhere: a test that reaches a
+  name it lacks fails on the absent name where it skipped, which :testinternalcapi-absent's patterns take (n/a, the same
+  absence); the runner's stand-ins carry the real names.
+- **lib-dynload** on the compiled Lib/test drivers' and the compiled launcher's sys.path after the stdlib (PYI_AOT_SITE,
+  arbace/python/aot.ae), as bin/pyi python's --site.
+- **The world's Expat capsule**: accel_elementtree.c defines XML_COMBINED_VERSION, which its copy of pyexpat.c's table
+  tests (undefined, every guarded field was NULL: XMLParser.flush did nothing).

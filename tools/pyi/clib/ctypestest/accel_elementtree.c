@@ -7,7 +7,15 @@
    (lines 1459-1520 and 2422-2496 of the same tarball), copied unchanged but for the capsule's attribute set on the module
    pyi already has. */
 #define NDEBUG 1
+/* Modules/expat/expat_config.h's XML_GE (the world's Expat is built with it): expat.h declares the amplification limits'
+   setters the capsule's table names only then (queue 594) */
+#define XML_GE 1
 #include "Modules/_elementtree.c"
+
+/* pyexpat.c's own (line 25), which the capsule's table below tests: undefined here, every field it guards was NULL, so
+   XMLParser.flush did nothing (SetReparseDeferralEnabled) and Expat's hash salt and amplification limits were not set
+   (queue 594: test_xml_etree_c's XMLPullParser flush rows) */
+#define XML_COMBINED_VERSION (10000*XML_MAJOR_VERSION+100*XML_MINOR_VERSION+XML_MICRO_VERSION)
 
 static const unsigned char template_buffer[256] =
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,

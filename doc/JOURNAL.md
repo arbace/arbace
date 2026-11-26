@@ -24731,3 +24731,39 @@ importable module re-judges 258 n/a rows over about twenty modules (test.support
 raise() routed by a crt hook (HostSignal) rather than by installing pyi's Python handlers into the world's action table (the
 table is the C program's: its own sigaction must still win); tstate->context taken back at the outermost C exit, not after
 the next native (clear_context_stack reads it after PyThreadState_Get and before any other native).
+
+## 2026-11-26 — pyi: queue 594, part 3: _testinternalcapi of pyi's own, the user's 594-1/-2/-3 (a) (queue 594, VM)
+
+The user's answers (via the coordinator): 594-1 (a), 594-2 (a), 594-3 (a); the nine n/a moves of part 1 confirmed.
+- **_testinternalcapi** (go/arbace/py/builtins_testinternalcapi.go, new; after CPython 3.14.10's Modules/_testinternalcapi.c):
+  create_interpreter, destroy_interpreter, exec_interpreter (a thread state of the interpreter, `main` its running __main__),
+  next_interpreter_id, run_in_subinterp_with_config (Py_NewInterpreterFromConfig's whence, the code run as PyRun_SimpleString,
+  not as __main__'s running), get_interp_settings (feature_flags, own_gil), get_code_var_counts (_PyCode_GetVarCounts and
+  _PyCode_SetUnboundVarCounts over pyi's IR: the locals by kind, co_names by LOAD_ATTR and LOAD_GLOBAL), and
+  _PyTraceMalloc_GetTraceback over tracemalloc's new C traces (PyTraceMalloc_Track and _Untrack, pyctypes' natives, by
+  domain and address, in _get_traces with their domain, in the traced memory). Any other name is absent: the runner's
+  stand-ins (test/python/libtest_run.py, libtest.py) carry the real module's names; :testinternalcapi-absent's patterns take
+  an absent name's AttributeError and from-import's ImportError, the same absence the user's 2026-11-22 n/a names.
+- **test.support's helpers over the module**: get_recursion_depth (the frames' count, the helper's fallback),
+  get_static_builtin_types (the fallback's naive set), identify_type_slot_wrappers raising NotImplementedError (the
+  fallback's signal): with the module importable an absent one broke whole modules at their import (test_xml_etree_c:
+  infinite_recursion's get_recursion_depth). check_sizeof now reaches sys.getsizeof: the new deferred class :sys-getsizeof.
+- **lib-dynload on the AOT drivers' and the launcher's sys.path** (arbace/python/aot.ae: PYI_AOT_SITE's directories after
+  the stdlib in the baked path; bin/pyi sets it for the Lib/test drivers and the launcher, its key naming it), as bin/pyi
+  python's --site has it: test_import's and test_importlib's extension modules, and their `-I` children's.
+- **594-2 (a), 594-3 (a)**: test_fromkindanddata, test_ucs4 and test_vectorcall_override to :object-layout;
+  test_heaptype_relative_special_members_errors stays deferred with test_ordered_dict's test_sizeof rows.
+- **test_datetime's test_type_check_in_subinterp** to :builtin-modules (n/a): it runs now and loads _testcapi_datetime by
+  ExtensionFileLoader over find_spec('_testcapi').origin ("built-in": ImportError).
+- **:elementtree-c's flush** found: accel_elementtree.c tested pyexpat.c's XML_COMBINED_VERSION without defining it, so the
+  capsule's guarded fields (SetReparseDeferralEnabled, the hash salts, the amplification limits) were NULL and
+  XMLParser.flush did nothing; defined in the glue, the world rebuilt (bin/pyi-clib build ctypestest).
+- Measured (the AOT method, ARBACE_HOST_EXE train 6's arm64 stage 0 for the final runs; .tmp/q594/p/ r6, final3, whole4):
+  the 25 rows of 594-1: 23 pass, test_datetime's to :builtin-modules, test_interpreters' ListAllTests.test_created_with_capi
+  (newly running) to :finalization; test_xml_etree_c's three pull-parser rows pass (the capsule fixed); test_interpreters,
+  test_tracemalloc, test_import and test_xml_etree_c whole: against the record no regression of the change but
+  test_tracemalloc's test_new_reference (a list the compiled path makes untraced at a reused address: the trace of the
+  list collected before it; the eval record's path traces it). The sample of :testinternalcapi-absent's rows (12 modules):
+  each now fails on the absent name (taken by the class's new patterns) or skips as before, test_buffer's
+  test_memoryview_sizeof reaches sys.getsizeof (:sys-getsizeof), test_call's test_setvectorcall reaches the missing
+  PyFunction_SetVectorcall native.

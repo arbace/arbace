@@ -56,17 +56,23 @@ def inline_values_stand_in(name):
     its other tests run. The module stays absent for the rest of Lib/test, whose tests skip without it."""
     if name.endswith("test_class") and sys.implementation.name != "cpython":
         import types
-        m = types.ModuleType("_testinternalcapi")
         def has_inline_values(obj):
             raise NotImplementedError("pyi's objects have no inline values")
-        m.has_inline_values = has_inline_values
+        try:
+            import _testinternalcapi as m  # queue 594: pyi's own, with the names some tests need
+        except ImportError:
+            m = types.ModuleType("_testinternalcapi")
+        if not hasattr(m, "has_inline_values"):
+            m.has_inline_values = has_inline_values
         sys.modules.setdefault("_testinternalcapi", m)
 
 
 def testinternalcapi_stand_in(name):
     """_testinternalcapi is by design (244-4 (a): CPython's internals, subinterpreters, its compiler's and optimizer's
-    state). test_capi's modules and test_crossinterp import it at module level, so none of their methods ran (queue
-    465): a stand-in for their imports alone, for those modules alone, so that their other tests run. It answers
+    state); since queue 594 pyi has a partial one of its own (594-1 (a): the names test_interpreters, test_tracemalloc,
+    test_import and test_capi's subinterpreter tests reach), which the stand-in carries. test_capi's modules and
+    test_crossinterp import it at module level, so none of their methods ran (queue 465): a stand-in for their imports
+    alone, for those modules alone, so that their other tests run. It answers
     nothing: an attribute it lacks raises AbsentInternal, an AttributeError (hasattr and getattr's default still see it
     absent) that is also unittest's SkipTest (a test, or a helper of test.support, that needs it skips, with the reason
     "pyi has no _testinternalcapi (by design, 244-4 (a)): NAME"); the names a module takes at its import (test_opt's
@@ -102,6 +108,16 @@ def testinternalcapi_stand_in(name):
         __lt__ = __le__ = __gt__ = __ge__ = __neg__ = _absent
 
     m = types.ModuleType("_testinternalcapi")
+    # queue 594: pyi's own _testinternalcapi gives the names some tests need (subinterpreters, tracemalloc's): the
+    # stand-in carries them, the absent ones as before
+    try:
+        import _testinternalcapi as real
+    except ImportError:
+        real = None
+    if real is not None:
+        for k, v in vars(real).items():
+            if not (k.startswith("__") and k.endswith("__")):
+                setattr(m, k, v)
 
     def __getattr__(attr):
         if attr.startswith("__") and attr.endswith("__"):
@@ -110,8 +126,9 @@ def testinternalcapi_stand_in(name):
 
     m.__getattr__ = __getattr__
     for n in taken[base]:
-        setattr(m, n, Placeholder(n))
-    sys.modules.setdefault("_testinternalcapi", m)
+        if not hasattr(real, n):
+            setattr(m, n, Placeholder(n))
+    sys.modules["_testinternalcapi"] = m
 
 
 def main():
