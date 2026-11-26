@@ -22049,3 +22049,16 @@ merges had not re-recorded: Python eval 40,886 / 1,304 / 1,292 -> 41,203 / 1,196
 and records-check 0 problems. mac/next (train 3's merge, 76c4f46c9) is not merged here: it conflicts with train 5 in
 doc/JOURNAL.md, test/python/divergences.edn (`:c-accelerators`), the eval record, test/reap/matrix.edn and test/crops/scores.edn,
 the resolution train 5's conductor makes when train 5 takes next; this branch then merges train 5.
+
+## 2026-11-25: py-limits-1125: StringIO's appends linear (test_email's test_long_lines); the rows on train 5's executable
+
+The 13 rows queued as res2 had no verdict on the checkout's interpreted runtime: each died at `import ctypes` (pyctypes checked
+against main's compiled runtime). Run again alone on train 5's gate build b85611b74, compiled (`.tmp/w/res3.tsv`): test_io's seven
+signal writes, test_wsgiref's interrupted write, test_compile's extended op arg, test_logging's named pipe and test_urllib2's body
+pipe pass in 10-17 s at 1.1-1.9 GB; from res2's compiled half, test_regrtest's test_module_test (33 s, 2.4 GB, with the children at
+GOGC 25) and test___all__ (129 s, 2.66 GB, within its 900 s cap) pass. No cap is proposed. test_httpservers' test_get still hangs
+(`:finalization`, n/a). test_email's TestFeedParsers.test_long_lines was killed at 2.8 GB after 455 s: quadratic (each feed of N
+pieces 0.4, 1.3, 5.3 s at N 1,000, 2,000, 4,000). The cause: 545's native StringIO (builtins_io_stringio's writeStr) compared the
+write's end with the buffer's length, not its capacity, so every write past the end allocated and copied the whole buffer, its
+1/8 overallocation never used. Fixed: resliced within the capacity, reallocated with the same overallocation (resize_buffer's)
+past it. Measured on goi's interpreted runtime: N 2,000 2.1 s, 8,000 10.7 s (linear; it was x4 a doubling).
