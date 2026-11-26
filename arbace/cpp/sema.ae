@@ -5032,7 +5032,9 @@
        :null (cond (checking?) 0 *ce-gaddr* {::gaddr ::null ::off 0} :else (not-constant "a null pointer"))
        ;; (CP378 (a): class objects: `this`, an address, a prvalue object, a value-initialized scalar)
        :this (ce-res (or (::this env) (not-constant "this outside a member's evaluation")))
-       :addr (or (when *ce-gaddr* (ce-static-addr (:e e) env)) (ce-lv (:e e) env))
+       :addr (do (when (and (checking?) (:cx-outer (:e e)) (not (and (= :var (:op (:e e))) (contains? env (:id (:e e))))))
+                   (ub! e "'" (:cx-outer (:e e)) "' is odr-used in a lambda: its closure's member is no constant expression"))
+                 (or (when *ce-gaddr* (ce-static-addr (:e e) env)) (ce-lv (:e e) env)))
        ;; (cpp-sweep, the checker: a temporary of a type surely not literal, GCC's "temporary of non-literal type 'T' in a
        ;; constant expression" in every standard (g++ 15.2 by hand), at the evaluation's position: cpp0x/constexpr-friend.C)
        :temp-obj (do (when (and (checking?) (abi/class? (abi/unq (:ty e))) (cx-non-literal (:ty e)))
@@ -9668,7 +9670,16 @@
           (cx-ns-lacks? (:scope ctx) q g nm)
           (fail :name "'" nm "' is not a member of '" (last q) "'")
           :else (fail :name "unknown name " nm))))
-    (let [e (entity-expr ctx es n)]
+    (let [e (entity-expr ctx es n)
+          ;; (cpp-def2, the checker: a local variable of an enclosing function named in a lambda's body, [expr.prim.lambda.capture]/
+          ;; 7-11: odr-used, it is the closure's member it is captured by -- marked, so that the constant evaluation of its address,
+          ;; `*&n`, is no constant expression; cpp1z/constexpr-lambda10.C)
+          e (if-let [v (and (checking?) (map? e) (#{:var :field} (:op e)) (= :var (:e (first es))) (var* (:id (first es))))]
+              (if (and (#{:local :param} (:storage v)) (:fn v) (:fn-id ctx) (not= (:fn v) (:fn-id ctx))
+                       (some-> (fnd (:fn-id ctx)) :cls abi/cls :lambda))
+                (assoc e :cx-outer (:name v))
+                e)
+              e)]
       ;; (an unqualified name that finds nothing, with explicit template arguments: argument-dependent lookup's templates
       ;; take them, [temp.names]/3's P0846; get<i>(e) of a structured binding, [dcl.struct.bind]/4)
       ;; (queue 514, the checker: a name finding functions that are no templates, written with template arguments (the tree's
