@@ -24747,3 +24747,11 @@ compiles; without them 285 MB, of which goi's digest 27 MB and the start's and t
 - Checked after the push (the same day): the idle releaser leaves the collector-sensitive modules as they were: test_gc (59 tests:
   25 failures, 1 error, 12 skipped: the record's counts), test_weakref (139: 9 failures) and test_finalization (18: ok) give the
   same failing sets with PYI_IDLE_FREE on and off (train 5's runtime compiled, a tree at train 6's commit).
+
+## 2026-11-26: py-speed-1126: the user's decision on test_large_pool's rows
+
+The user decided (2026-11-26): the two test_large_pool rows (spawn's and forkserver's test_misc) stay deferred in
+`:process-footprint` (PY8), with no per-test memory cap of about 50 GB (option (b) of round 2's DECISION, not its recommended
+(a)); they wait until a pyi child is much smaller. lib-test-limits.tsv is unchanged. The proposals for that (crt's 64 MiB
+read-only reservation per C world, the ctypestest world's 67 MB text table on `import ctypes`, goi's 9 MB of inflated digest
+bytes) stay open for their owners.
