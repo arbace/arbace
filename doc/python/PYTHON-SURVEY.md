@@ -2538,7 +2538,9 @@ show the first line. And pyi's `frame.f_locals` is a snapshot, not PEP 667's wri
   (`bin/pyi-clib aot zstd`: 8.8 MB of Go, 60 s, 1.8 GB). `compression.zstd` is the tarball's Python over it.
 - **No threads.** zstd is built without `ZSTD_MULTITHREAD`: `nb_workers`' bounds are (0, 0), test_zstd's three
   multithreaded tests skip as on CPython over such a libzstd. The GIL is held around every library call; the objects'
-  PyMutex locks are the GIL.
+  PyMutex locks are the GIL. Since queue 593 built with `ZSTD_MULTITHREAD` (bounds (0, 256)): pool.c's workers are
+  musl's pthreads on ci's threads (crt's scheduler, the library's program's own), run while a call into the library
+  waits on a condition or yields at ci's preemption, never between calls.
 - **The reference.** Alpine's python3 3.14.10 has no `_zstd`, so `ref-cpython314-lib-test-all.edn` records test_zstd as a
   skipped module (no methods). `tools/pyi/clib/refmod.bash zstd OUT` builds CPython's own `Modules/_zstd` by the host's cc
   as an extension of the oracle's python3 (its pyconfig.h, the tarball's Include/) over the same pinned zstd with
