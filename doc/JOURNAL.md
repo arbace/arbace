@@ -25381,3 +25381,66 @@ judge can only lose equals.
 - For the user: template/friend58.C expects GCC's "member ... declared as friend before type ... defined" for `template<typename T>
   friend void freeList<T, baz>::foo();`, which [temp.friend]/5 allows (a member of a dependent type named through a simple-template-id
   whose parameters deduce): (a) the gxx-only-rules class (n/a), recommended, (b) GCC's rule.
+
+## 2026-11-26: java-tail2-1126, Java's tail after train 4 (branch `java-tail2-1126` from mac/next `5b7180185`)
+
+The burst's Java lane for completeness (Java at 99.2% after train 4): train 4's held regression, :jd1123-next-train, :xml,
+:interp-world-limits and the small classes, then the :design-also rows against the user's by-design review of the day.
+Measured interpreted on train 4's build (`9564e7a0c725952e4bb8`, javac's tool `javac-e585cbd9ee084dd57abd`); doc/classes/
+JAVA-CONFORMANCE-SURVEY.md, "As built: java-tail2-1126". Nothing recorded (the train records).
+- t05766 (TestInferCaller, held by train 4): two causes. java-speed-1124's direct invoke (`Evaluator.invokeDirect`, no
+  Method.invoke of the interpreter's own) met java-stack-1124's pop of the interpreter's reflective call, which then popped
+  the program's `m2.invoke` frame and left `m.invoke`'s; and LogRecord's variant inferred the caller from a Throwable's
+  trace, which shows reflection frames (the JDK's StackWalker hides them). Built: jrt's stackFrames pops nothing below a
+  direct-invoke frame; LogRecord's inferCaller is jdk26u's again (CallerFinder over StackWalker, its test a variant with
+  jdk26u's rule but SurrogateLogger's name filter in LogRecord). Alternative considered: filter java.lang.reflect frames
+  in the variant's Throwable walk (a rule of our own where the JDK has StackWalker's).
+- The same direct invoke made jrt's reflectCaller answer nil (no access check) for every interpreted reflective call:
+  it skips the direct-invoke frames now (t07688, t04829). The run-time classes' dispatch core `(*dynCore).` is elided as
+  `(*Dyn).` (t04680). jrt tests for both frame rules in throwable_test.ae.
+- :jd1123-next-train: none of the 9 passes interpreted on train 4; their causes moved past java-design's: 8 are FFM's
+  (JavaNioAccess not in the world: t05828 t05829 t05830 t07775, MemorySegment's buffers; VM.isDirectMemoryPageAligned
+  that jrt lacks, from SegmentFactories: t03584 t03640 t05096 t05812), the foreign lane's (java-krb-1126); t08195 is
+  krb5's PrincipalName offset (Unsafe.objectFieldOffset(Field)), which java-krb-1126's derived overlay already takes by
+  name. Not built here (no duplicate work); a jrt `VM_IsDirectMemoryPageAligned__Z` returning false (no saved
+  properties) is the one-line half for that lane.
+- :xml: XSLTC's Parser makes its instruction classes with getDeclaredConstructor, and their constructors are
+  package-private (the member tables list public members): j2g's reflection-roots for constructors
+  (`reflection-root-ctors`, XSLTC's 31 instruction classes, rooted with the XML roots); the closure gains XSLTC's error
+  classes, XSAnnotation and javax.xml.xpath's missing API classes (ten files; probed: XSLTC's real exception under
+  `TransformerFactory`'s debug attribute is that NoSuchMethodException).
+- :interp-world-limits: java.io.StringReader in class-supers (FxCode); FxVarHandles' twelve cases need a run-time
+  VarHandle (DECISION below).
+- The single rows: t05019 (jrt: URL) gets jrt's own handler (the syntax, no image); t08235 (StrongSeedReader) passes
+  interpreted with the harness's `arbace.spec.skip-macros` (run.ae's ns forms loaded arbace.core.specs, whose
+  UUID.randomUUID loaded the providers before main); a sample of 80 passing interp rows still passes.
+- Ready for the train: jrt (throwable.ae, reflect.ae), j2g (model.ae, out.ae, main.ae), overlay (LogRecord and URL
+  variants, the jrt: handler: `bin/jrt-convert update`), javac's closure (`bin/javac-vendor convert`, its edge if asked).
+DECISIONs proposed (none applied; recommended option first):
+- JT2-1, t03295 (TestClassConstantPatching, :interp-protected): it reads its own class file through
+  getSystemResourceAsStream and defines it again: (a) n/a in :class-files-na, as t03296 (the user, 2026-11-25);
+  (b) build ClassLoader.getSystemResourceAsStream, then fail on the missing class file.
+- JT2-2, t05050 (GetURLsTest, :design-also) and t04444 (SubclassGC, interp :serialization, compiled :design-also-compiled):
+  a class loaded from class files by a URLClassLoader (and unloaded by GC): (a) :classloading, n/a since the by-design
+  review; (b) keep them deferred.
+- JT2-3, t04989 (PortUnreachableException/Concurrent, :net): stdout is the two threads' interleaving and the test has no
+  check of its own: (a) judged by its status (verdicts.edn :status by decision, as t05602); (b) n/a.
+- JT2-4, t05254 (SuppressStackTraces, interp :design-also): no by-design feature: Impl1, a non-public class of
+  SuppressStackTraces.java, is named by Impl1_Skel.java, loaded first (the file-by-file model): (a) build the source
+  lookup of a package's non-public classes (scan its files' defclass names); (b) :repl-sibling.
+- JT2-5, t04809 (MyOwnSynchronizer, :design-also both levels): java.lang.management alone (ThreadMXBean's locked ownable
+  synchronizers), no by-design feature: (a) into :mxbeans (deferred, world); (b) keep.
+- JT2-6, FxVarHandles' twelve diffcheck cases: (a) a run-time VarHandle for the interpreter's classes
+  (Lookup.findVarHandle, findStaticVarHandle, unreflectVarHandle over jrt's Field slots, CAS under the field's lock),
+  J2G-SPEC §8.5 unchanged for compiled code; (b) by design: VarHandles are compiled statically.
+- JT2-7, javac's tool world's XML closure: (a) the static closure over the JDK build's class files (785 java.xml and
+  java.xml.crypto files more: XSLTC, Xalan's XPath and DTM, Xerces' schema, BCEL, the XML security library), made once by
+  a script and kept as closure.txt's lines; (b) a train at a time, by the gaps the runs name (this branch's ten files).
+- The :design-also rows' other features, re-checked: t03656 (sun.misc.Unsafe) is java-krb-1126's; t08053 (Kerberos) the
+  krb lane's; t08077 t08078 (XML DSig's providers) and t08083-t08096 (XML) to be built; t05847 (the class-file API) and
+  t04725 (serialization of annotation proxies) deferred, to build; t04833 (ModuleDescriptor's builder) and t06334
+  (javac's ServiceLoader in a compiled program) world gaps, deferred, none by design.
+- (later) mac/next's jrt did not compile (found by this branch's `bin/jrt test --package jrt`): `bootClasses` declared twice,
+  queue 491's (098ceb730, class.ae: the classes RunMain initializes before main, a slice) and b04c83d39's (defineclass.ae:
+  the boot loader's classes defined from bytes, a map), the two met in train 4's merge of next (891d550c1) after its build.
+  defineclass.ae's is `bootDefined` now (its three uses); 491's keeps its name (thread.ae, object_test.ae).

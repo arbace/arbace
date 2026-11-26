@@ -5488,3 +5488,49 @@ code). The rows' expected standing: t05477 by the RandomAccess fix; t05714, t057
 need 1.3-1.8 times); t04494, t04620, t04656 need three times or more (a later round: the reflective calls' boxing, frames, j2g's
 assertions); t06419 (2^32 calls) and t05498 (about 10^10 calls) exhaustive loops, proposed n/a beside `:jit-loops`; t05126 a hang
 (jrt's FileChannel interrupt), t07728 `:oom`, neither slowness. Records on the train's build.
+
+## As built: java-tail2-1126, Java's tail after train 4 (2026-11-26; branch `java-tail2-1126`, from mac/next `5b7180185`)
+
+Measured interpreted on train 4's executable `9564e7a0c725952e4bb8` and javac's tool `javac-e585cbd9ee084dd57abd`
+(`bin/java-check --levels interp --list`), with probes of Java read by `bin/repr-java read --line-numbers` and run by
+`test/java/run.ae` (Go stacks by SIGQUIT where a frame's Go name was needed). Built (the train's build for all but the
+harness):
+- **The direct invoke's frames** (jrt, throwable.ae, reflect.ae). Since java-speed-1124 the interpreter calls compiled
+  code through `Compiler$Evaluator.invokeDirect` (the method's invoker, no Method.invoke of its own), so java-stack-1124's
+  pop of "the interpreter's own reflective call" removed the program's: a walk under `m.invoke` lost its
+  `Method.invoke` frame (HiddenFrames' SHOW_REFLECT_FRAMES, t04613), and the first group's pop left
+  `m2.invoke(m, ...)`'s inner frame (TestInferCaller). `stackFrames` now pops nothing below an `isDirectInvoke` frame, and
+  `reflectCaller` skips those frames to the interpreter's (it had answered nil, the run time's code, so no access check
+  ran: TestReflectionHierarchy t07688, AccessControlTest t04829). jrt test: TestInterpFrames' direct-call case.
+- **The run-time classes' dispatch core** (`arbace/lang.(*dynCore).`) elided in traces as `(*Dyn).` is: a System.Logger
+  default method's call of an interpreted logger's `log` showed `arbace.lang.dynCore.Log_..._V` frames
+  (LoggerInterfaceTest, t04680). jrt test: TestInterpFrames' dynCore case.
+- **LogRecord's caller inference by StackWalker** (overlay/jdk/variants/LogRecord.ae): the variant's walk of a new
+  Throwable's trace (F5, before StackWalker was in the Go build) shows the reflection frames, which the JDK's default
+  StackWalker hides; jdk26u's inferCaller and CallerFinder are back, CallerFinder's test a variant: jdk26u's rule with
+  the System.Logger check by class and the name filter (jdk.internal.logger is not in the world). TestInferCaller
+  (t05766), interp and compiled. Probed interpreted: the same finder written in a test passes the four reflective cases.
+- **XSLTC's instruction classes' constructors** (arbace/j2g/model.ae `reflection-root-ctors`, out.ae, main.ae): Parser
+  makes them by name with `getDeclaredConstructor().newInstance()`, and all but three are package-private final classes
+  with package-private constructors, which the member tables left out (public members only): a NoSuchMethodException
+  reported through ErrorMsg, outside the world. The list is reflection-roots' (the user's 2026-11-24 decision) for
+  constructors; the classes are rooted with the XML roots.
+- **javac's tool world's XML closure** (overlay/jdk/javac/closure.txt, ten files): XSLTC's ErrorMsg, ErrorMessages,
+  TypeCheckError and CompilerException, XML Schema's XSAnnotation, javax.xml.xpath's XPathEvaluationResult,
+  XPathExpression, XPathFunctionException, XPathNodes and XPathVariableResolver. The measured closure (classes HotSpot
+  loaded in passing runs) misses what only an error path or an untaken branch loads; javac's tool build's report names
+  517 such java.xml classes reached, and the static closure over the build's class files' constant pools is 785 files
+  more (a DECISION in the journal).
+- **java.io.StringReader** among j2g's class-supers (FxCode's run-time subclass, diffcheck's :interp-world-limits).
+- **The jrt: URL's handler** (overlay/jdk/java.base/sun/net/www/protocol/jrt/Handler.java, URL's variant): the syntax,
+  no run-time image (its connection fails on connect): URItoURLTest (t05019).
+- **The harness** (bin/java-check, no build): the runs get `arbace.spec.skip-macros=true` through JAVA_TOOL_OPTIONS, so
+  run.ae's and the test's ns forms load no arbace.core.specs, whose arbace.spec.alpha calls UUID.randomUUID (a
+  SecureRandom: the providers loaded, NativePRNG's seed file fixed) before main, as no JVM of the JDK's runs does.
+  StrongSeedReader (t08235) passes interpreted on train 4; a sample of 80 passing interp rows (40 of them security's)
+  all pass with it.
+Not built, each with its cause: the FFM rows of :jd1123-next-train (JavaNioAccess, VM.isDirectMemoryPageAligned: the
+foreign lane's), the run-time VarHandle (FxVarHandles' twelve cases), jdk.dynalink (t08097), JNDI's LDAP (t07869),
+BufferPoolMXBean (t04784), the compiled :stack rows (a try body's closure in an inlined Go function, suspected), the
+deserialized annotation proxies' primitive results (t04725: `Compiler$ProxyFn.doInvoke` receives a raw Go bool and
+int32 from AnnotationInvocationHandler.invoke), lambda deserialization (t06256).
