@@ -9167,7 +9167,20 @@
         ;; (reported here, once, the refusal unwinding the analyses that asked it)
         (when (and (checking?) *on-refusal* (:node fl)) (*on-refusal* e (:node fl)))
         (throw (ex-info (.getMessage e) (assoc (ex-data e) :cx/reported true))))
-      (binding [*nsdmi-active* (conj *nsdmi-active* k)] (f)))))
+      (let [d (binding [*nsdmi-active* (conj *nsdmi-active* k)] (f))]
+        ;; (cpp-def3, the checker: a class template's specialization whose default member initializer makes an object of that
+        ;; class by its implicit or defaulted default constructor -- `int i = (A<0>(), 0);`, `B* p = new B<N>;` -- needs its own
+        ;; instantiation again, [temp.inst]/? with [class.base.init]/9: GCC's "recursive instantiation of default member
+        ;; initializer for 'A<0>::i'", at the member, cpp0x/nsdmi-template14.C)
+        (when (and (checking?) *on-refusal* (:node fl) (not (header-node? (:node fl))) (:tmpl (abi/cls cid)))
+          (when (some (fn [x] (and (map? x) (:fn x) (#{:call :ctor} (or (:op x) (:i x)))
+                                   (let [g (fnd (:fn x))]
+                                     (and (= :ctor (:kind g)) (= cid (:cls g)) (or (:implicit g) (:defaulted g)) (empty? (:ps (:ty g)))))))
+                      (tree-seq coll? #(if (map? %) (vals %) (seq %)) d))
+            (*on-refusal* (ex-info (str "codegen: recursive instantiation of default member initializer for '" (:name (abi/cls cid)) "::" (:name fl) "'")
+                                   {:codegen/refused :nsdmi :cx/node (:node fl)})
+                          (:node fl))))
+        d))))
 
 (defn- cx-string-fits!
   "cpp-diag-b (2026-11-22): [dcl.init.string]/2, no more initializers than the array has elements, the string literal's
