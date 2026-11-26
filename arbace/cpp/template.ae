@@ -140,7 +140,7 @@
 
 (defn- param-type [scope p] (abi/unq (sema/resolve-type scope (:qt p))))
 
-(declare extern-member! arg-entity)
+(declare extern-member! arg-entity cx-first-decl-node)
 (declare ^:dynamic *unstable*)
 
 (defn- bind-scope
@@ -3970,7 +3970,15 @@
                            (when (:cx/sure-drop (ex-data e)) (when-not (:cx/subst (ex-data e)) (throw e)))
                            (when (:cx/subst (ex-data e))
                              (throw (if-let [k (:node (meta p))] (ex-info (ex-message e) (assoc (ex-data e) :cx/node k)) e))))))))
-            fid (binding [sema/*cutoff* Long/MAX_VALUE sema/*constraint-doubt* d sema/*instantiating* {:tid tid :args args}
+            ;; (queue 601 (group 2): [temp.res.general]/1 with [temp.dep.candidate]/1 and CWG 1321 -- the checker's: a main file's
+            ;; function template's signature substituted with its names looked up at the template's first declaration, the later
+            ;; declarations found by argument-dependent lookup at the instantiation alone (588's concept cutoff, *cx-concept-cutoff*):
+            ;; cpp0x/overload2.C's decltype(g2(T())) with g2 declared after, decltype(g3(T())) with g3(int) after)
+            sub-cut (when (and (sema/checking?) (not (dependent? args)) (:pos t) (pos? (long (:pos t)))
+                               (map? (:pattern t)) (not (sema/header-node? (:pattern t))))
+                      (long (:pos t)))
+            fid (binding [sema/*cutoff* (or sub-cut Long/MAX_VALUE) sema/*cx-concept-cutoff* (or sub-cut sema/*cx-concept-cutoff*)
+                          sema/*constraint-doubt* d sema/*instantiating* {:tid tid :args args}
                           sema/*cx-subst* (and (sema/checking?) (not (dependent? args)) (str (:name t)))]
                   (#'sema/declare-fn! ps (:pattern t)))
             _ (when-not fid (unsat "constraints"))
@@ -4261,7 +4269,7 @@
                                            (catch arbace.lang.ExceptionInfo e
                                              (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "template" (:name t) "drops out:" (.getMessage e))))
                                              (when (:cx/subst (ex-data e))
-                                               (swap! explain conj {:msg (ex-message e) :node (or (:cx/node (ex-data e)) (cx-explain-node t (some-> at deref)))}))
+                                               (swap! explain conj {:msg (ex-message e) :node (cx-first-decl-node t (or (:cx/node (ex-data e)) (cx-explain-node t (some-> at deref))))}))
                                              ;; (cpp-tpl2: a constraint not satisfied, its atoms' errors)
                                              (when (:cx/constraint-false (ex-data e))
                                                (swap! explain into (:cx/explain (ex-data e))))
@@ -4301,6 +4309,23 @@
         sp (ph? (get-in n [:type :qualType]))]
     (boolean (and (seq ts) (string? (get-in n [:type :qualType]))
                   (every? (fn [t] (let [q (get-in (:pattern t) [:type :qualType])] (and (string? q) (not= sp (ph? q))))) ts)))))
+
+(defn- cx-first-decl-node
+  "queue 601 (group 2), the checker: a node of the function template `t`'s definition's signature as the same place of its first
+  declaration's, where an earlier declaration redeclares it (CWG 1321: the signature is the first declaration's, GCC's explanation
+  there, cpp0x/overload2.C); the node unchanged otherwise."
+  [t n]
+  (let [d (first (:decls t)) pt (:pattern t)
+        db (get-in d [:range :begin :offset]) de (get-in d [:range :end :offset])
+        pb (get-in pt [:range :begin :offset]) no (get-in n [:range :begin :offset])]
+    ;; (only where the two declarations write the same signature: a definition whose signature is another's, alias-decl-80.C's
+    ;; `void_t<typename T::type>*` for `void*`, is its own place, GCC's error at the definition)
+    (if (and (sema/checking?) (map? n) db de pb no (< (long db) (long pb)) (<= (long pb) (long no))
+             (= (get-in d [:type :qualType]) (get-in pt [:type :qualType]))
+             (<= (- (long no) (long pb)) (- (long de) (long db)))
+             (= (get-in d [:range :begin :file]) (get-in pt [:range :begin :file]) (or (get-in n [:range :begin :file]) (get-in pt [:range :begin :file]))))
+      (assoc-in n [:range :begin :offset] (+ (long db) (- (long no) (long pb))))
+      n)))
 
 (defn- explicit-fn-spec!
   "An explicit specialization of a function template (template <> R f<args>(...) {...}): its template found by name

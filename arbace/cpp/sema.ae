@@ -835,6 +835,20 @@
                      (throw (ex-info (str "codegen: " (subs (str (ex-message e)) 9)) (assoc (ex-data e) :codegen/refused :subst :cx/sure-drop true :cx/subst true))))
                    (when (and (cx-subst?) (:cx/subst (ex-data e))) (throw e))
                    (when (and *cx-tc-args* (checking?) (sure-failure? e)) (throw e))
+                   ;; (queue 601 (group 2), the checker: in a class template's specialization of concrete arguments, a member's
+                   ;; decltype whose operand surely fails is the member's error, [temp.inst]/3 (its declaration instantiated with the
+                   ;; class), no substitution failure: reported at the operand, its candidates' explanations with it, the member's
+                   ;; type then erroneous (dependent, so its uses say nothing more); cpp0x/error4.C's `typedef
+                   ;; decltype(get<T>(declval<T>())) type;` for S<X>)
+                   (when (and (checking?) (not (cx-subst?)) (sure-failure? e) *on-refusal* (not (:cx/reported (ex-data e)))
+                              (loop [s scope]
+                                (cond (nil? s) false
+                                      (:fn-type s) false
+                                      (:cls s) (let [c (abi/cls (:cls s))]
+                                                 (boolean (and (seq (:targs c)) (not (:header c))
+                                                               (not (re-find #":k :(tparam|tdep|dep|auto)" (pr-str (:targs c)))))))
+                                      :else (recur (:parent s)))))
+                     (*on-refusal* e (or (:cx/node (ex-data e)) n)))
                    (if (:codegen/refused (ex-data e))
                      (do (when (System/getenv "CPP_TMPL_TRACE") (binding [*out* *err*] (println "decltype(" t ") dependent:" (.getMessage e))))
                          ;; (only an unknown name, a lookup that found nothing after argument-dependent lookup, is
@@ -11692,7 +11706,12 @@
             (when (> total max-new-size)
               (*on-refusal* (ex-info (str "codegen: size '" total "' of array exceeds maximum object size '9223372036854775807'")
                                      {:codegen/refused :array})
-                            n)))))
+                            ;; (queue 601 (group 3): outside a template's specialization GCC's place is the new-type-id's end, its last
+                            ;; bound's `]`, the expression having no initializer; a specialization's error at the `new`: init/new38.C)
+                            (if (and (not (some-> (:fn-id ctx) fnd :tinst)) (not (:tinst ctx)) (get-in n [:range :end :offset])
+                                     (not-any? #(and (map? %) (#{"InitListExpr" "ParenListExpr" "CXXConstructExpr"} (:kind %))) (:inner n)))
+                              (assoc n :range {:begin (get-in n [:range :end]) :end (get-in n [:range :end])})
+                              n))))))
       (catch arbace.lang.ExceptionInfo x (when (System/getenv "CX_NEW_TRACE") (binding [*out* *err*] (println "new-size refused" (ex-message x)))) nil))))
 
 (defn- cx-const-default-constructible?
