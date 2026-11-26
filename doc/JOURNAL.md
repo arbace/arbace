@@ -24325,3 +24325,46 @@ pieces 0.4, 1.3, 5.3 s at N 1,000, 2,000, 4,000). The cause: 545's native String
 write's end with the buffer's length, not its capacity, so every write past the end allocated and copied the whole buffer, its
 1/8 overallocation never used. Fixed: resliced within the capacity, reallocated with the same overallocation (resize_buffer's)
 past it. Measured on goi's interpreted runtime: N 2,000 2.1 s, 8,000 10.7 s (linear; it was x4 a doubling).
+## 2026-11-25: py-capi-1125, the C API's last natives of `:capi-port`, C threads, and c_longdouble as ci's x87 long double
+
+On train 5 (c3efeae13, then its b6be9b74b), branch py-capi-1125. The classes `:capi-port` (84 rows) and `:extension-modules` (53)
+hold mostly rows recorded before py-capi-1122 (76 test_capi, 52 test_importlib's "Requires dynamic loading support"); train 5's
+records run (.tmp/records-5.sh in train5's worktree) runs test_capi and test_importlib whole, so this stream did not run them
+again: it built what py-capi-1122's own runs (.tmp/kept/py-capi) still left failing, after CPython 3.14.10's sources
+(go/arbace/pyctypes/capi_rest.go; doc/python/PYTHON-SURVEY.md, "As built: py-capi-1125"):
+
+- PyErr_Display and PyErr_DisplayException (Python/pythonrun.c's _PyErr_Display: traceback._print_exception_bltin),
+  PyErr_Print and PyErr_PrintEx (_PyErr_PrintEx: SystemExit, sys.last_*, the audit event, the hook's own failure).
+- PyCode_Addr2Line over co_lines(); Py_UniversalNewlineFgets over the world's fread (musl's ungetc in place: no getc linked).
+- PyThread_allocate_lock and the lock natives as pyi's _thread.lock; PyThread_start_new_thread a _thread thread running the C
+  function on a C thread of its own (ci.Thread on a 1 MiB stack mapped in the world). World.Call, push and guard take the running
+  Python thread's C thread (World.thread), so the GIL's holder runs C on its own stack. Considered: ci's own threads (crt's
+  scheduler, the baton): the world's main thread is driven by Python's goroutines, which never take the baton, so a cloned thread
+  would wait for a turn no one passes; running the thread inline: a body that waits for a lock the caller releases later
+  (spawn_pthread_waiter) would deadlock.
+- PySlice_Unpack with an index that runs __index__: the mirrors synchronized around it (the macro PySlice_GetIndicesEx's Py_SIZE
+  after it, gh-72054).
+- The coordinator's report of train 3's records (three test_ctypes regressions, c_longdouble results 0.0): not py-accel's D/F/G
+  types but queue 522's builder (CR3 (a)), which made ci's long double x87's extended in 16 bytes; the world rebuilt with it
+  passed wide values where pyctypes passed doubles. TLongDouble is 16 bytes aligned to 16, ci's 'w', the 'g' and 'G' fields
+  through crt's x87 conversions; ctypes no longer aliases c_longdouble to c_double (the sizes differ), as on CPython's x86-64.
+- ctypestest's Key (the coordinator: verify equal but for the build's key, d65251e1 committed): on this tree (568's world,
+  f4b726d1 committed) `bin/pyi-clib key ctypestest` gives c4e412ea; bin/pyi-clib verify runs under the lock
+  (.tmp/verify-clib.sh), committing the build's nodes.ae when the Key is the only difference.
+- Not merged: mac/next (76c4f46c9) into the branch: next and train 5 conflict in the Python record and divergences.edn (train 3's
+  records against 568's :c-accelerators), the train's merge of train 5 into next; the branch's own commits touch only
+  go/arbace/pyctypes (out of every key) and, by the verify, ctypestest's Key.
+- Left (not this stream's): test_call's Py_TPFLAGS_METHOD_DESCRIPTOR and test_getargs' str subclass keywords (py-core), test_pickle's
+  memo MemoryError (queue 568's _testcapi.set_nomemory).
+
+- Found by the measure: PyThread_allocate_lock's cell was a cbuf (freed by Go's collector too), so PyThread_free_lock freed it
+  twice and musl's heap broke (test_thread_gilstate_in_clear, then test_pyweakref_getref, faulting); now the world's malloc'd
+  memory. Added the world's lock while a C thread lives (one Python thread inside C at a time, given up in
+  PyThread_acquire_lock's wait; errIndicator and touched kept across it).
+
+Measure (judged, not recorded): before, on train 5's executable (its own compiled pyctypes), 124 of the 137 rows pass, 4 skip
+as CPython on Linux, 9 fail (six this stream's, three py-core's); after, through check --aot --lib-test with the checkout's
+pyctypes (the gate's executable compiles its own copy: the eval rows move at the next train's build), the six pass,
+TestThreadState's four pass, test_ctypes loses no recorded pass and its long double methods pass. Expected at the next record:
+:capi-port 84 -> 3, :extension-modules 53 -> 0. Not recorded here: train 5's records run (test_capi, test_importlib whole) is the
+train's, and this stream's rows need a build with its pyctypes.
