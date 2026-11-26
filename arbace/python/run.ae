@@ -96,6 +96,17 @@
         (apply str (map #(str "\u0000" (if (nil? %) "" %)) (take 4 (concat loc (repeat nil)))))
         "\u0000" kind (when (and (not= kind "c") (some? text)) (str "\u0000" text)))))
 
+(declare reader-loc reader-kind reader-text)
+
+(defn- reader-error
+  "The compiler's answer for the reader's error form: the parser's MemoryError past MAXSTACK (py-speed-1126,
+  arbace.repr.python.peg/enter: \"MemoryError: Parser stack overflowed - Python source too complex to parse\", as
+  _Pypegen_stack_overflow raises it), else its SyntaxError"
+  [form]
+  (if (= "MemoryError" (str (second form)))
+    (str "MemoryError: " (nth form 2))
+    (syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))))
+
 (defn- reader-text
   "A reader error's :text, the helper's SyntaxError text, or nil"
   [form]
@@ -136,6 +147,8 @@
   else the compiler's SyntaxError (an ex-info), as compile-uncached answers compile(); a file's decoding error names the
   file as the tokenizer's does when it reads one (helpers.c's \" in file \")"
   [form ex file]
+  (if (and form (= "MemoryError" (str (second form))))
+    (reader-error form)
   (if form
     (let [msg (str (nth form 2))
           msg (if-let [[_ a b] (and file (re-matches #"(?s)(Non-UTF-8 code starting with '\\x[0-9a-f]{2}')( on line .*)" msg))]
@@ -144,7 +157,7 @@
       (syntax-error (str (second form)) msg (reader-loc form) (reader-kind form) (reader-text form)))
     (let [d (ex-data ex)]
       (keep-compile-warnings! ex)
-      (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)])))))
+      (syntax-error (:msg d) (when (:lineno d) [(:lineno d) (:offset d) (:end-lineno d) (:end-offset d)]))))))
 
 (def ^:private too-deep-to-compile "RecursionError: maximum recursion depth exceeded during compilation")
 
@@ -195,7 +208,7 @@
       (and single-err (str/starts-with? single-err "SyntaxError: multiple statements found")) single-err
       (and incomplete-rule? (incomplete? source form)) "incomplete"
       single-err single-err
-      (cv/error-form? form)(syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))
+      (cv/error-form? form) (reader-error form)
       :else
       (try ((resolve 'arbace.python/ir-text) (pc/compile-source form (keyword mode)))
            ;; nested too deep for the compiler's recursion (queue 289): CPython's compiler raises RecursionError
@@ -265,7 +278,7 @@
                        nil)]
        (cond
          start-err start-err
-         (cv/error-form? form) (syntax-error (str (second form)) (nth form 2) (reader-loc form) (reader-kind form) (reader-text form))
+         (cv/error-form? form) (reader-error form)
          :else
          (try (let [sb (StringBuilder. "SYMTABLE:")]
                 (block-json sb (:top (sc/analyze form)))
