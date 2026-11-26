@@ -25688,3 +25688,11 @@ operands (the evaluator's unsure nodes), definition-time narrowing in templates'
 - Checks per rule on the rows and the recorded passes each reaches; one regression at 08e9d9164 (3,348 files): 0 lost, 7 rows own;
   recorded: own passes 3,266 -> 3,273; `bin/reap --record`: C++ read 6,198 / 0 / 84 -> 6,205 / 0 / 77; completeness 0.9967 -> 0.9969;
   `--judge --strict`, records-check, markers-check: 0 problems (the user's "avoid redundancy": no rerun of a passing run).
+
+## 2026-11-26 — C++ read: the user's answers to 601's DECISIONs applied (queue 601, VM)
+
+- The user, 2026-11-26: 601-1 (a) overload/builtin4.C n/a (GCC's built-in candidate set against [over.built]/16), 601-2 (a)
+  init/new38.C to :ifndr-uninstantiated-template, 601-3 (a) template/partial-specialization12.C (CWG 455) and template/pr39425.C
+  (CWG 727) n/a as parse/explicit1.C. test/cpp/divergences-dg.edn's :gxx-only-rules and :ifndr-uninstantiated-template take them, the
+  records judged again as they are (no run). `bin/reap --record`: C++ read 6,205 / 0 / 77 -> 6,205 / 0 / 73 (n/a 249 -> 253);
+  `bin/crops-score --record`: completeness 0.9969 -> 0.9971; `--judge --strict`, records-check, markers-check: 0 problems.
