@@ -9492,7 +9492,11 @@ the checkout's runtime by goi, or compiled with `check --aot --lib-test --only` 
 - **The code object's cycle** (finalize.go, code.go): `Code.obj` (`__code__`'s identity) and `CodeObject.Code` hold each
   other, a cycle Go never frees once the code object has a Go finalizer (a weak reference to it); the code object and its
   Code are nodes of the cycle collection now (a function's Code slot, the code's free frames' Code slots listed too), so
-  gc.collect() finds them dead with the function that held them (test_code's CodeWeakRefTest.test_basic, :code-objects).
+  gc.collect() finds them dead with the function that held them; and a nested code no longer holds its parent (queue 229's
+  `parent`, read by the bytecode view's isImportOriginated and irSuperOK): the parent's constants held the nested code's
+  own code object, a chain on which Go runs one finalizer a collection, so the probe of the code object never fired. The
+  outermost code's kind, instructions, names and imports are a `codeTop` the nested codes reach by `up` (code.go's
+  linkTops, at ReadIR) (test_code's CodeWeakRefTest.test_basic, :code-objects).
 - **Audit events of readline and ssl** (builtins_readline.go, builtins_ssl.go): read_init_file's, read_history_file's,
   write_history_file's and append_history_file's `open` events as readline.c raises them (the filename, else
   `<readline_init_file>` or `~/.history`, the mode's letter, 0), SSLContext.load_dh_params' Py_fopen event (test_audit's
@@ -9516,3 +9520,17 @@ the checkout's runtime by goi, or compiled with `check --aot --lib-test --only` 
   (test_interpreters' test_modified_arg: the exec() globals' `__builtins__` shared back, :tools-misc).
 - **A raise() of a signal the process ignores** (builtins_signal.go's ExtRaiseSignal): discarded, as the kernel discards it,
   not the C world's default action, which ended the driver.
+
+**Measured** (each row once): on goi with the checkout's runtime (`bin/pyi check --only`, train 7's executable): test_audit's
+test_open and test_unittest's test_no_exception_leak pass; compiled, `bin/pyi check --aot --lib-test --only` (the C world needs
+the compiled runtime): test_buffer's test_memoryview_sizeof, test_capi's test_heaptype_relative_special_members_errors,
+test_weird_str_subclass and test_weird_str_subclass2, test_call's test_method_descriptor_flag, test_sys's test_jit_is_active,
+test_ctypes' test_libc test_csqrt, test_regrtest's test_add_python_opts, test_interpreters' test_modified_arg and test_code's
+CodeWeakRefTest.test_basic pass, with test_dis's test_disassemble_instance_method and test__find_imports and test_monitoring's
+TestLoadSuperAttr test_attr and test_method_call (the bytecode view's import and super checks over codeTop) passing as before.
+Left: test_weakset's test_weak_destroy_while_iterating (the item dies when the generator's `item` is rebound, at a refcount's
+moment pyi has none), test_regrtest's test_unraisable_exc (`obj = None` drops the last reference of a weakly referenced
+object inside the test: no moment at a rebinding), test_pickle's delayed writer (past the 300 s limit compiled), test_ctypes'
+test_pointer_types_factory and test_xml_etree_c's test_cyclic_gc (cycles through the C world's objects), test_sqlite3's
+test_table_lock_cursor_non_readonly_select (passes alone and in test_sqlite3.test_regression whole, compiled, fails in the
+package's run: an earlier test's state).
