@@ -235,6 +235,59 @@
 ;; the user's 538-2 (a) (2026-11-24, queue 556b): a switch's case-group locals, one scope (a colon switch's block) or
 ;; each arm's (the printed arrows'), numbered from other slots
 (def ^:private kind-slot "a local's slot (a switch's case-group locals in one scope or in each arm's)")
+;; queue 610 (2026-11-27; JCV11 (b): the forms do not record them): an early exit out of a try with a finally or resources
+;; (if (c) { s; return; } rest), which the converter folds into the if's arms ((if c (do s) (do rest)), the same forms as the
+;; if/else's), javac inlining the finally's code at the exit; and javac's lambda deduplication, of bodies the source spelled
+;; apart where the forms do not (this, C.this or implicit; a class named with or without its package; a void lambda's return;)
+(def ^:private kind-exit "an early exit's finally code (a return or a jump out of a try with a finally or resources, the finally inlined at it, or the if's arms)")
+(def ^:private kind-dedup "a lambda deduplicated (javac's equal lambda bodies, the source's spellings apart: this, C.this or implicit, a qualifier)")
+
+(def ^:private code-norm
+  "A code line's instruction as counted: a branch without its target, ldc_w as ldc (the constant's index, the constant
+  pool's order)."
+  (fn [l] (-> l (str/replace #": (if[a-z_]*|goto|goto_w) L\d+$" ": $1") (str/replace #": ldc_w " ": ldc "))))
+
+(defn- line-method [l] (second (re-find #"^(.*?): " l)))
+
+(defn- exit-copies
+  "queue 610: the code lines a and b with the copies of a finally block at an early exit taken out of the side that has
+  them: in a method, a run of a's (or b's) lines just before a return or a goto, each of its instructions one the side has
+  more of (counted as code-norm counts them), at least two, the run's instructions (code-norm's, in order) also met as a run
+  in the other side's same method (the finally's copy on its normal path). [a' b' found?]."
+  [a b]
+  (let [strip (fn [side other]
+                (let [ms (group-by line-method side) mo (group-by line-method other)]
+                  (reduce
+                   (fn [[out found?] m]
+                     (let [ls (vec (get ms m)) lo (mapv code-norm (get mo m))
+                           extra (volatile! (merge-with + (frequencies (map code-norm ls))
+                                                         (update-vals (frequencies lo) -)))
+                           ;; twice: the finally's copies on the normal path and in the handler of every exception
+                           occurs? (fn [r] (let [n (count r)]
+                                             (<= 2 (count (filter #(= r (subvec lo % (+ % n))) (range 0 (inc (- (count lo) n))))))))
+                           drop-idx (volatile! #{})]
+                       (doseq [r (range (count ls))
+                               :when (re-find #": ([ailfd]?return|goto|goto_w) ?$" (code-norm (ls r)))]
+                         ;; the longest run back from r whose lines are all extra
+                         (let [s0 (loop [s r e @extra]
+                                    (let [k (when (pos? s) (code-norm (ls (dec s))))]
+                                      (if (and k (pos? (get e k 0)) (not (@drop-idx (dec s))))
+                                        (recur (dec s) (update e k dec))
+                                        s)))
+                               hit (some (fn [s] (let [run (mapv code-norm (subvec ls s r))]
+                                                   (when (occurs? run) s)))
+                                         (range s0 (dec r)))]
+                           (when hit
+                             (doseq [i (range hit r)]
+                               (vswap! extra update (code-norm (ls i)) dec)
+                               (vswap! drop-idx conj i)))))
+                       [(into out (keep-indexed (fn [i l] (when-not (@drop-idx i) l)) ls))
+                        (or found? (boolean (seq @drop-idx)))]))
+                   [[] false]
+                   (distinct (map line-method side)))))
+        [a' fa] (strip a b)
+        [b' fb] (strip b a)]
+    [a' b' (or fa fb)]))
 
 (defn- slots-only?
   "538-2 (a): whether the code lines a and b differ by their locals' slots alone, in methods with a switch: the
@@ -275,7 +328,12 @@
   constants and static reads it pops; RP2 (a), a compound assignment, aload against dup alone, and a static member's owner, an
   invokestatic, getstatic or putstatic of the same member through another class. None differing: the order of the code."
   [a b]
-  (let [norm (fn [l] (str/replace l #": (if[a-z_]*|goto|goto_w) L\d+$" ": $1"))
+  (let [[a b exit?] (exit-copies a b)
+        norm code-norm
+        ;; queue 610: ldc against ldc_w alone is the constant pool's order
+        cp? (let [n0 (fn [l] (str/replace l #": (if[a-z_]*|goto|goto_w) L\d+$" ": $1"))
+                  c (fn [f] (count (filter (fn [[_ n]] (not= 0 n)) (merge-with + (frequencies (map f a)) (update-vals (frequencies (map f b)) -)))))]
+              (not= (c n0) (c norm)))
         unowned (fn [l] (str/replace l #": (invokestatic|getstatic|putstatic) [^ .]+\.([^.: ]+:[^ ]+)$" ": $1 $2"))
         diff (fn [f] (let [fa (frequencies (map f a)) fb (frequencies (map f b))]
                        (vec (for [k (distinct (concat (keys fa) (keys fb)))
@@ -297,19 +355,35 @@
         branch? (fn [i] (re-find #"^if[a-z_]*$" i))
         inc? (has #"^(wide )?iinc ")
         init? (has #"^([ailfd]const_0|aconst_null)$")
-        other-ok? (fn [i] (or (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
+        ;; queue 610: a local assigned in each arm of an if against once from a ?: (the converter folds the if's
+        ;; assignments into the local's initializer, SPEC §5.3: the forms are the same), its stores alone differing,
+        ;; all on one side
+        store-re #"^[ailfd]store(_\d| \d+)$"
+        stores (filter #(re-find store-re %) ds)
+        ;; (not a local's initializer's store, which its constant names)
+        arm-store? (and (not init?) (seq stores) (or (every? #(pos? (more %)) stores) (every? #(neg? (more %)) stores)))
+        ;; RP2 (a)'s compound assignment on an array's element: dup2 against the array and the index read again
+        acompound? (some #{"dup2"} ds)
+        other-ok? (fn [i] (or (and arm-store? (re-find store-re i))
+                        (and acompound? (re-find #"^(dup2|aload(_\d| \d+)|getstatic \S+:\[\S*|getfield \S+:\[\S*|iload(_\d| \d+)|iconst_m?\d|bipush .*|sipush .*)$" i)) (and inc? (re-find #"^((wide )?iinc .*|iload(_\d| \d+)|istore(_\d| \d+)|iadd|isub|iconst_m?\d|bipush .*|sipush .*)$" i))
                         (and init? (re-find #"^([ailfd]const_0|aconst_null|[ailfd]store(_\d| \d+))$" i))
                         (and qual? (re-find #"^(pop|[ailfd]load(_\d| \d+)|ldc.*|ldc_w .*|ldc2_w .*|getstatic .*|[il]const_\d|bipush .*|sipush .*)$" i))
                         (and compound? (re-find #"^(dup|aload(_\d| \d+)|getfield \S+\.this\$\d+:\S+)$" i))))
         ;; a goto or a return differing, or conditional branches alone beside the other kinds' instructions
         flow? (or (has #"^(goto|goto_w|[ailfd]?return)$")
-                  (and (some branch? ds) (every? #(or (branch? %) (other-ok? %)) ds)))
-        ok? (fn [i] (or (and flow? (re-find #"^(if[a-z_]*|goto|goto_w|[ailfd]?return)$" i)) (other-ok? i)))]
+                  (and (some branch? ds) (every? #(or (branch? %) (other-ok? %)) ds))
+                  arm-store?)
+        ;; queue 610: with the control flow, a value boxed once after a ?: or in each arm of an if
+        ok? (fn [i] (or (and flow? (re-find #"^(if[a-z_]*|goto|goto_w|[ailfd]?return|invokestatic java/lang/(Integer|Long|Short|Byte|Character|Boolean|Float|Double)\.valueOf:\S+)$" i))
+                        (other-ok? i)))
+        more-kinds (fn [ks] (cond-> ks exit? (conj kind-exit) cp? (conj "the constant pool's order or an attribute (the same code)")))]
     (cond
-      (and (empty? ds) owner?) [kind-owner]
+      (and (empty? ds) owner?) (more-kinds [kind-owner])
+      (and (empty? ds) (or exit? cp?)) (more-kinds [])
       (empty? ds) ["the order of the code (the same instructions)"]
-      (every? ok? ds) (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)
-                        qual? (conj kind-qual) compound? (conj kind-compound) owner? (conj kind-owner))
+      (every? ok? ds) (more-kinds
+                        (cond-> [] flow? (conj kind-flow) inc? (conj kind-inc) init? (conj kind-init)
+                          qual? (conj kind-qual) (or compound? acompound?) (conj kind-compound) owner? (conj kind-owner)))
       ;; the user's 538-4 (a) (2026-11-24, queue 556b): RP2 (a)'s compound assignment through an inner class's accessor,
       ;; the accessors' access$N numbered alike: the written-out side reads the outer instance (aload, getfield
       ;; this$N) and calls the getter and adds or subtracts beside the setter, the compound side's one accessor
@@ -334,14 +408,39 @@
       [kind-compound]
       (slots-only? a b) [kind-slot])))
 
+(defn- lambda-dedup
+  "queue 610: the code lines a and b with javac's deduplicated lambdas taken out: a lambda method (lambda$...) of one side
+  only whose code is that of another lambda method of the same descriptor which both sides have, the call sites'
+  bootstrap indices (invokedynamic N) then not compared. [a' b' found?]."
+  [a b]
+  (let [ma (group-by line-method a) mb (group-by line-method b)
+        body (fn [ls] (mapv #(subs % (count (line-method %))) ls))
+        desc (fn [m] (second (re-find #" (\S+)$" m)))
+        gone (fn [ms mo]
+               (set (for [[m ls] ms
+                          :when (and (str/starts-with? m "lambda$") (not (contains? mo m)))
+                          :when (some (fn [[m2 ls2]] (and (not= m m2) (str/starts-with? m2 "lambda$") (contains? mo m2)
+                                                          (= (desc m) (desc m2)) (= (body ls) (body ls2))))
+                                      ms)]
+                      m)))
+        ga (gone ma mb) gb (gone mb ma)]
+    (if (and (empty? ga) (empty? gb))
+      [a b false]
+      (let [idx (fn [l] (str/replace l #": invokedynamic \d+ " ": invokedynamic N "))
+            keep (fn [ls g] (mapv idx (remove #(g (line-method %)) ls)))]
+        [(keep a ga) (keep b gb) true]))))
+
 (defn class-differences
   "Short reasons for the differences of class file c in the trees c1 and c2, named as
   arbace.repr.java.roundtrip/class-differences names javap's; where the lines' sets name none, the lines
   counted (counted-kinds) name them when they explain every instruction that differs."
   [c1 c2 c]
-  (let [a (code-lines (io/file c1 c)) b (code-lines (io/file c2 c))]
-    (if (= a b)
-      ["the constant pool's order or an attribute (the same code)"]
+  (let [a (code-lines (io/file c1 c)) b (code-lines (io/file c2 c))
+        [a b dedup?] (lambda-dedup a b)]
+    (cond
+      (and dedup? (= a b)) [kind-dedup]
+      (= a b) ["the constant pool's order or an attribute (the same code)"]
+      :else
       (let [ds (set (remove str/blank? (concat (remove (set b) a) (remove (set a) b))))
             has (fn [re] (some #(re-find re %) ds))]
         (vec (distinct (cond-> []
@@ -360,7 +459,8 @@
           true (#(if (empty? %)
                    (or (when (seq ds) (counted-kinds a b))
                        [(if (seq ds) (str "code: " (str/trim (first (sort ds)))) "the order of the code (the same instructions)")])
-                   %)))))))))
+                   %))
+          dedup? (conj kind-dedup))))))))
 
 (def class-kinds
   "The class-file differences class-differences names (the forms do not record what they differ by: JCV11 (b))."
@@ -373,7 +473,8 @@
     "a static member's pure qualifier (a local, this or a literal, evaluated and dropped, or not written)"
     "a compound assignment written out or not (s = s + x against s += x)"
     "a static member's owner (named through the class that inherits it or the class that declares it)"
-    "a local's slot (a switch's case-group locals in one scope or in each arm's)"})
+    "a local's slot (a switch's case-group locals in one scope or in each arm's)"
+    kind-exit kind-dedup})
 
 (defn classes-note?
   "JCV11 (b) (the user, 2026-11-08; RPS9 (a) reopened): whether the classes step's reason WHY is a sub-level note,
