@@ -220,7 +220,9 @@
         declared (delay (let [hs (java.util.HashSet.)]
                           (walk-nodes (fn [n _] (when-let [nm (:name n)] (when (string? nm) (.add hs nm)))) (:nodes u) nil)
                           hs))
-        reach? (reaches-fn #{"DeclRefExpr"})]
+        reach? (reaches-fn #{"DeclRefExpr"})
+        cls-stack (java.util.ArrayDeque.)
+        in-parm (atom 0)]
     ;; (round 54, third pass: GCC's suppression of a repeated error, its unqualified_name_lookup_error's declaration of the
     ;; name in the innermost block scope: an undeclared name is reported once in a block and the blocks it encloses, a later
     ;; use there found; a compound statement, a selection or iteration statement's own scope, a handler and a function each a
@@ -232,12 +234,20 @@
                 (not (reach? x)) nil
                 ;; (queue 567: as walk-nodes, *params* rebound only where a parameter is, the entries reduced)
                 (map? x) (let [levels (if (contains? block-kinds (:kind x)) (cons (java.util.HashSet.) levels) levels)
+                               ;; (cpp-read-indep: [class.mem.general]/7, a member function's default argument is a complete-class
+                               ;; context: a member the class declares after the function is found there, so no undeclared name;
+                               ;; cpp0x/constexpr-inhctor1.C's `A(int, int = i)` before `static const int i;`)
+                               _ (when (and (= "CXXRecordDecl" (:kind x)) (vector? (:inner x)))
+                                   (.push ^java.util.ArrayDeque cls-stack (set (keep #(when (string? (:name %)) (:name %)) (:inner x)))))
+                               _ (when (= "ParmVarDecl" (:kind x)) (swap! in-parm inc))
                                _ (when (:kind x) (f x parent levels))
                                p (if (:kind x) x parent)
                                inner (:inner x)
                                ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
                                go (fn [] (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (w v p levels)) nil) nil x))]
-                           (if ps (binding [*params* (into *params* ps)] (go)) (go)))
+                           (if ps (binding [*params* (into *params* ps)] (go)) (go))
+                           (when (= "ParmVarDecl" (:kind x)) (swap! in-parm dec))
+                           (when (and (= "CXXRecordDecl" (:kind x)) (vector? (:inner x))) (.pop ^java.util.ArrayDeque cls-stack)))
                 (vector? x) (reduce (fn [_ y] (w y parent levels) nil) nil x)
                 (seq? x) (doseq [y x] (w y parent levels))
                 :else nil))
@@ -249,6 +259,7 @@
                     (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
                       (when (and (or (not callee?) (adl-free? parent) (not (.contains ^java.util.HashSet @declared nm)))
                                  (not (contains? *params* nm)) (dunder-ok? nm)
+                                 (not (and (pos? (long @in-parm)) (some #(contains? % nm) cls-stack)))
                                  ;; (a braced list's element still: its auto deduction fails on the error, GCC's "unable to
                                  ;; deduce", on that line)
                                  (or (and parent (= "InitListExpr" (:kind parent))) (not-any? #(.contains ^java.util.HashSet % nm) levels)))
@@ -631,7 +642,7 @@
    [:addr #"^codegen: & of an rvalue" "lvalue required as unary '&' operand"]
    [:incdec #"^codegen: \+\+ of an rvalue" "lvalue required as increment operand"]
    ;; (cpp-rind: [dcl.type.auto.deduct]/4, arbace.cpp.sema's return statements)
-   [:deduce #"^codegen: (unable to deduce 'auto\*'|no return statements in function returning)" "unable to deduce / no return statements"]
+   [:deduce #"^codegen: (unable to deduce 'auto\*'|no return statements in function returning|unable to deduce 'auto' from the overloaded function)" "unable to deduce / no return statements"]
    ;; (cpp-rind: [expr.new]/1, arbace.cpp.sema/new-expr)
    [:new-array #"^codegen: invalid use of array with unspecified bounds" "invalid use of array with unspecified bounds"]
    ;; (cpp-rind: [over.ref]/1, arbace.cpp.sema/member-expr)
@@ -888,6 +899,7 @@
         ice (resolve 'arbace.cpp.sema/*invalid-constexpr-error*)
         icw (resolve 'arbace.cpp.sema/*invalid-constexpr-warned*)
         pd (resolve 'arbace.cpp.sema/*pedantic*)
+        nrt (resolve 'arbace.cpp.sema/*no-rtti*)
         nw (resolve 'arbace.cpp.sema/*narrowing*)
         fre (resolve 'arbace.cpp.sema/*fp-rank-error*)
         ntm (resolve 'arbace.cpp.sema/*new-ttp-matching*)
@@ -1005,7 +1017,7 @@
                       at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))
                       icw (boolean (some #{"-Winvalid-constexpr"} (concat (:args u) *driver-args*)))
                       ice (boolean (and (some #{"-pedantic-errors" "-Werror=invalid-constexpr" "-Werror"} (concat (:args u) *driver-args*))
-                                        (not (some #{"-Wno-invalid-constexpr" "-Wno-error=invalid-constexpr"} (concat (:args u) *driver-args*))))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u)))
+                                        (not (some #{"-Wno-invalid-constexpr" "-Wno-error=invalid-constexpr"} (concat (:args u) *driver-args*))))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u))) nrt (boolean (some #{"-fno-rtti"} (concat (:args u) *driver-args*)))
                       ;; (queue 412: [dcl.init.list]/7, GCC's permerror; nothing or a warning under these)
                       nw (not (some #{"-Wno-narrowing" "-fpermissive" "-Wno-error=narrowing"} (:args u)))
                       ;; (cpp-extfloat: GCC's pedwarn on a floating conversion to a lesser conversion rank, -Wnarrowing's, an error)
@@ -1624,8 +1636,9 @@
         (= "noexcept(false)" exc) :nfalse
         (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
         ;; (queue 602: noexcept(noexcept(f())) of a function f of the unit, the class of f's own specification: cpp0x/noexcept47.C)
-        (and *exc-fns* (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc))
-        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc)))
+        ;; (cpp-read-indep: the native parser's spelling of a member's, `noexcept(noexcept ( this -> fn ( ) ))`, cpp0x/noexcept53.C)
+        (and *exc-fns* (re-matches #"noexcept\(noexcept\s*\(\s*(?:this\s*->\s*)?([A-Za-z_][A-Za-z_0-9]*)\s*\(\s*\)\s*\)\)" exc))
+        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\s*\(\s*(?:this\s*->\s*)?([A-Za-z_][A-Za-z_0-9]*)\s*\(\s*\)\s*\)\)" exc)))
         ;; (round 54, fifth pass: before C++17 a dynamic exception specification, its set of types)
         (and *exc-year* (< (long *exc-year*) 17) (re-matches #"throw\((.+)\)" exc))
         {:dyn (set (map str/trim (str/split (second (re-matches #"throw\((.+)\)" exc)) #",")))}
@@ -5648,8 +5661,19 @@
             :when sig
             :let [bm (overridden cn (:name m) sig 0)]
             :when bm
-            :let [[brt _] (split (str (get-in bm [:type :qualType])))]
-            :when (and brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
+            :let [[brt _] (split (str (get-in bm [:type :qualType])))
+                  ;; (cpp-read-indep: [dcl.spec.auto.general]/? (C++23 /10), a function whose return type has a placeholder is
+                  ;; not virtual, and an overrider is virtual ([class.virtual]/2): GCC's "virtual function cannot have deduced
+                  ;; return type", at the overrider, cpp1y/auto-fn18.C's `auto f()` over `virtual int f()`)
+                  ;; (not over a function itself declared with a deduced return type, whose virtual is the error GCC gives,
+                  ;; the overrider then said nothing of: cpp1y/auto-fn25.C)
+                  ded (when (and (re-matches #"(?:decltype\s*\(\s*auto\s*\)|auto)" (str/trim (str rt))) (not (re-find #"->" (str (get-in m [:type :qualType]))))
+                                 (not (re-matches #"(?:decltype\s*\(\s*auto\s*\)|auto)" (str/trim (str brt)))))
+                        (mine-at m main))
+                  _ (when ded (let [[l c] (line-col starts ded)]
+                                (.add out {:line l :col c :kind :error :rule :covariant
+                                           :msg (str "virtual function cannot have deduced return type ('" (:name m) "' overrides a virtual function)")})))]
+            :when (and (not ded) brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
             :let [a (rtype rt) b (rtype brt) o (mine-at m main)]
             :when (and a b o)]
       (let [cls-ptr? (and (:cls a) (:cls b) (:k a) (= (:k a) (:k b)))
@@ -6243,6 +6267,21 @@
    [:delete-arg #"^codegen: (type of the argument given to 'delete'|cannot delete a function|ambiguous default type conversion)" "invalid argument to delete"]
    [:cond-void #"^codegen: an operand of the conditional operator is of type 'void'" "void operand of the conditional operator"]
    [:ptr-cmp #"^codegen: comparison between distinct pointer types" "comparison between distinct pointer types lacks a cast"]
+   [:nullptr-operands #"^codegen: invalid operands of types" "invalid operands to binary expression"]
+   [:pseudo-dtor #"^codegen: the (object of a pseudo-destructor|type being destroyed|pseudo-destructor's qualifier)" "invalid pseudo-destructor name"]
+   [:default-arg #"^codegen: invalid use of non-static data member in a default argument" "invalid use of non-static data member"]
+   [:enum #"^codegen: invalid conversion to incomplete type '.*' in the initializer of its enumerator" "invalid conversion to incomplete type"]
+   [:var-fn-type #"^codegen: variable '.*' has function type" "variable has function type"]
+   [:call-object #"^codegen: no match for call to an object of class" "no matching function for call to object"]
+   [:overload-addr #"^codegen: statement cannot resolve address of overloaded function" "reference to overloaded function could not be resolved"]
+   [:udl #"^codegen: unable to find (numeric|character) literal operator" "no matching literal operator"]
+   [:no-rtti #"^codegen: '(dynamic_cast|typeid)' not permitted with -fno-rtti" "not permitted with -fno-rtti"]
+   [:local-use #"^codegen: use of (parameter|local variable with automatic storage) from containing function" "reference to local variable declared in enclosing function"]
+   [:nonstatic-use #"^codegen: invalid use of non-static data member \(no object" "invalid use of non-static data member"]
+   [:type #"^codegen: arithmetic on two vectors of different types" "invalid operands to binary expression (vectors of different types)"]
+   [:new-array #"^codegen: size of array is negative \(a new-expression's" "size of array is negative"]
+   [:redecl #"^codegen: redeclaration of '.*' may not have default arguments" "redeclaration may not have default arguments"]
+   [:ptr-int-cmp #"^codegen: ISO C\+\+ forbids comparison between pointer and integer" "comparison between pointer and integer"]
    [:mptr-base #"^codegen: (pointer to member conversion via virtual base|'.*' is an (ambiguous|inaccessible) base of)" "invalid pointer to member conversion"]
    [:init #"^codegen: a reference from arguments" "invalid value-initialization of reference type"]])
 
@@ -9797,3 +9836,56 @@
     (vec out)))
 
 (swap! checks conj deprecated-uses)
+
+;; cpp-read-indep: [except.spec]/2 and [basic.scope.class]: a member function's noexcept-specifier is a complete-class context,
+;; its names looked up there and in the enclosing scopes. `noexcept(noexcept(f()))` or `noexcept(noexcept(x))` whose name no
+;; declaration of the unit declares (the native parser writes a member it finds as `this -> f`) is GCC's "'nosuchfn' was not
+;; declared in this scope", at the declaration (cpp0x/noexcept53.C's S2).
+(defn noexcept-undeclared
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        names (java.util.HashSet.)
+        fns (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (map? n)
+                    (when (string? (:name n)) (.add names (:name n)))
+                    (when (#{"CXXMethodDecl" "FunctionDecl"} (:kind n)) (.add fns n))))
+                (:nodes u) nil)
+    (doseq [n fns
+            :let [qt (str (get-in n [:type :qualType]))
+                  [_ nm] (re-find #"noexcept\(noexcept\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?:\(\s*\))?\s*\)\)\s*$" qt)]
+            :when (and nm (not (.contains names nm)) (not (str/starts-with? nm "__")) (not (#{"this" "true" "false" "nullptr"} nm)))
+            :let [o (mine-at n main)]
+            :when o]
+      (let [[l c] (line-col starts o)]
+        (.add out {:line l :col c :kind :error :rule :undeclared :msg (str "'" nm "' was not declared in this scope (a noexcept-specifier's operand)")})))
+    (vec out)))
+
+(swap! checks conj noexcept-undeclared)
+
+;; cpp-read-indep: [dcl.align]/2, an alignment-specifier alignas(constant-expression) takes an integral constant expression: the
+;; name of a function or of a function template's specialization, not called, has a function type, GCC's "'alignas' argument has
+;; non-integral type 'int()'" (cpp0x/alignas8.C's `alignas (f)`, cpp0x/alignas12.C's `alignas (f < int >)`); a name the unit
+;; declares as anything else (a variable, a type, an enumerator, a parameter) is not judged.
+(defn alignas-functions
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        fns (java.util.HashSet.)
+        others (java.util.HashSet.)
+        attrs (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (map? n)
+                    (when (string? (:name n))
+                      (if (#{"FunctionDecl" "FunctionTemplateDecl" "CXXMethodDecl"} (:kind n)) (.add fns (:name n)) (.add others (:name n))))
+                    (when (and (= "AlignedAttr" (:kind n)) (string? (:_arg n))) (.add attrs n))))
+                (:nodes u) nil)
+    (doseq [a attrs
+            :let [[_ nm] (re-matches #"\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?:<[^<>()]*>)?\s*" (:_arg a))]
+            :when (and nm (.contains fns nm) (not (.contains others nm)))
+            :let [o (mine-at a main)]
+            :when o]
+      (let [[l c] (line-col starts o)]
+        (.add out {:line l :col c :kind :error :rule :alignas :msg (str "'alignas' argument has non-integral type (the function '" nm "')")})))
+    (vec out)))
+
+(swap! checks conj alignas-functions)

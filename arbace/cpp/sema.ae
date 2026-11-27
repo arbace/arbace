@@ -47,6 +47,9 @@
 ;; queue 365: -pedantic, -Wpedantic or -pedantic-errors given (the checker): GCC's diagnostics of the GNU extensions it otherwise
 ;; accepts silently (a zero-size array)
 (def ^:dynamic *pedantic* false)
+;; cpp-read-indep (the checker): -fno-rtti given, GCC's "'dynamic_cast' not permitted with -fno-rtti" for a cast that needs the
+;; run-time type information (arbace.repr.cpp.diag binds it)
+(def ^:dynamic *no-rtti* false)
 ;; queue 412 (round 7): [dcl.init.list]/7's narrowing conversions judged (the checker): false under -Wno-narrowing, -fpermissive
 ;; or -Wno-error=narrowing (GCC's permerror then a warning or nothing), and for the code generator
 (def ^:dynamic *narrowing* false)
@@ -1186,6 +1189,14 @@
       typeof-text (let [t (str/trim (str (second f)))]
                     (cond (= t "nullptr") abi/nullptr-t
                           (re-find #"^(sizeof|alignof|__alignof__)\b" t) abi/ulong*
+                          ;; (cpp-read-indep, the checker: the GCC manual's "Referring to a Type with typeof", typeof of a function's
+                          ;; name is its function type -- default arguments no part of it, [dcl.fct.default]/3: expr/call5.C's
+                          ;; `__typeof (Quux) *q = Baz; q ();`, too few arguments)
+                          (and (checking?) (re-matches #"[A-Za-z_]\w*" t)
+                               (let [es (try (lookup scope t) (catch arbace.lang.ExceptionInfo _ nil))]
+                                 (and (= 1 (count es)) (= :fn (:e (first es))) (some-> (fnd (:id (first es))) :ty abi/fn?)
+                                      (not (:cls (fnd (:id (first es))))))))
+                          (:ty (fnd (:id (first (lookup scope t)))))
                           :else (fail :type "type form " (pr-str f))))
       <> (if-let [h (:template-id @hooks)] (h scope f) (fail :template "template-id " (pr-str f)))
       cpp/scope (loop [t (resolve-type-form scope (second f))
@@ -1208,7 +1219,14 @@
                     ;; "attempting to use a type that is not a class or enumeration type in a qualified name"; GCC's words)
                     (not (abi/class? t)) (if (and (cx-subst?) (not (abi/enum? (abi/unq t))) (not (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t))))
                                            (cx-subst-fail! "'" (pr-str (abi/unq t)) "' is not a class, struct, or union type")
-                                           (fail :type "a scope of a non-class " (pr-str f)))
+                                           ;; (cpp-read-indep, the checker: the same at a class template's instantiation,
+                                           ;; [temp.res.general]/3 with [basic.lookup.qual.general]/1: `typename T::X` for T =
+                                           ;; int, GCC's "'int' is not a class, struct, or union type", template/crash73.C,
+                                           ;; cpp0x/pr57543-1.C)
+                                           (if (and (checking?) (#{:b :ptr :ref :rref :arr :mptr} (:k (abi/unq t))) (not (abi/void? (abi/unq t)))
+                                                    (not (abi/enum? (abi/unq t))) (not (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t))))
+                                             (fail :name "'" (or (try (gcc-type-str (abi/unq t)) (catch Exception _ nil)) (pr-str (abi/unq t))) "' is not a class, struct, or union type")
+                                             (fail :type "a scope of a non-class " (pr-str f))))
                     ;; a member template's specialization (Outer<int>::Inner<double>): its name found in the class, its
                     ;; arguments resolved here
                     (and (seq? p) (= '<> (first p)))
@@ -1410,7 +1428,14 @@
   declared with a dependent placeholder type, the error raised at its initialization), else nil."
   [scope n qt]
   (when (checking?)
-    (when-not (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
+    ;; (cpp-read-indep: a refusal of a class template's specialization's member, located at it by cx-member-recover! (:cx/node),
+    ;; is the instantiation's error, rethrown: swallowed here, the instance stayed cached unfinished and the variable's own
+    ;; resolution found it without a word -- template/crash73.C's A<int> over `typedef typename T::X Y`)
+    (when-not (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo e (if (and (:cx/node (ex-data e)) (:codegen/refused (ex-data e))
+                                                                                 ;; (a qualified name's non-class scope alone: init/member1.C's
+                                                                                 ;; cascade of an incomplete scope stays the instance's own)
+                                                                                 (re-find #"is not a class, struct, or union type" (str (ex-message e))))
+                                                                          (throw e) nil)))
       (try (ctad-compound! scope qt) nil
            (catch arbace.lang.ExceptionInfo e
              (when (= :ctad (:codegen/refused (ex-data e)))
@@ -2359,6 +2384,40 @@
 
 (declare cx-abstract!)
 
+;; (cpp-read-indep, the checker: [dcl.fct.default]/5, a default argument's names are bound and its semantic constraints
+;; checked where it appears, not only at the calls that use it: a function of namespace or block scope that is no template's,
+;; each default argument converted to its parameter's type there -- GCC's access errors of an uncalled function's default
+;; argument (overload/defarg6.C's `void f (A = 1)` of a private A(int)); and [dcl.fct.default]/8-9, `this`, so a non-static
+;; member named implicitly through it, appears in no default argument (overload/defarg5.C's local `void foo(int=i);` in a
+;; constructor). A member function's default arguments, in its class's complete-class context, are left to their calls.)
+(declare init-for analyze)
+(defn- cx-default-args!
+  [scope n]
+  (when (and (checking?) *on-refusal* (nil? *instantiating*) (= "FunctionDecl" (:kind n)) (not (:friend n))
+             (not (header-node? n)) (not (:cls scope)) (not (str/includes? (str (:name n)) "::")))
+    ;; (the parameters in scope, [basic.scope.param]: a later default argument may name an earlier parameter in an unevaluated
+    ;; operand, [dcl.fct.default]/9, DRs/dr2082.C's `int b = sizeof(a)`)
+    (let [ps (new-scope :block scope)]
+    (doseq [pn (param-nodes n) :when (:name pn)]
+      (when-let [t (try (resolve-type scope (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+        (let [id (next-id)]
+          (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
+          (enter! ps (:name pn) {:e :var :id id}))))
+    (doseq [p (param-nodes n)
+            :let [d (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))]
+            :when (and (map? d) (get-in d [:range :begin :offset]))]
+      (when-let [t (try (resolve-type scope (get-in p [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (and (map? t) (not (some #(= % (:k t)) [:dep :tparam :auto])))
+          (try (init-for t (analyze {:scope ps} d) {:scope ps} :copy)
+               (catch arbace.lang.ExceptionInfo x
+                 (let [xd (ex-data x)]
+                   (cond (:cpp/timeout xd) (throw x)
+                         (and (:codegen/refused xd) (not (:cx/reported xd)))
+                         (*on-refusal* (if (= :this (:codegen/refused xd))
+                                         (ex-info "codegen: invalid use of non-static data member in a default argument" {:codegen/refused :default-arg})
+                                         x)
+                                       (or (:cx/node xd) (some-> *at* deref) d))))))))))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -3156,8 +3215,19 @@
                 xt (when (and x (checking?))
                      (try (some-> (binding [*unevaluated* true] (analyze {:scope bs} x)) :ty abi/non-ref abi/unq)
                           (catch arbace.lang.ExceptionInfo _ nil)))
-                bad (when xt
-                      (cond (or (abi/fn? xt) (= :overload (:k xt)))
+                ;; (cpp-read-indep, the checker: [dcl.enum]/5, an enumeration without a fixed underlying type is incomplete until
+                ;; the closing brace of its enumerator list: a cast to it in an enumerator's initializer converts to an incomplete
+                ;; type, GCC's "invalid conversion to incomplete type 'E'" (diagnostic/pr59838.C's `b = (E) a`))
+                to-self (when (and x (checking?) (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped) (string? nm) (seq nm)
+                                   (not (header-node? n)))
+                          ((fn walk [m] (and (map? m)
+                                             (or (and (#{"CStyleCastExpr" "CXXStaticCastExpr" "CXXFunctionalCastExpr"} (:kind m))
+                                                      (= nm (str/trim (str (get-in m [:type :qualType])))))
+                                                 (some walk (kids m)))))
+                           x))
+                bad (when (or xt to-self)
+                      (cond to-self (str "codegen: invalid conversion to incomplete type '" nm "' in the initializer of its enumerator '" (:name c) "'")
+                            (or (abi/fn? xt) (= :overload (:k xt)))
                             (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
                             ;; (no fixed underlying type: an integral constant expression's, "enumerator value for 'a' must have
                             ;; integral or unscoped enumeration type", cpp0x/pr71665-2.C)
@@ -3871,7 +3941,7 @@
                         (let [^java.util.ArrayList us (:usings scope)] (when-not (some #(identical? % s) us) (.add us s))))
                       (doseq [k (kids n)] (declare-node! s k)))
     "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
-    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (declare-fn! scope n)
+    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (let [r (declare-fn! scope n)] (cx-default-args! scope n) r)
     "VarDecl" (declare-var! scope n :global)
     "CXXRecordDecl" (declare-class! scope n)
     "EnumDecl" (declare-enum! scope n)
@@ -7385,6 +7455,14 @@
 (defn convert-scalar
   "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
   [e t explicit?]
+  ;; (cpp-read-indep, the checker: [over.over]/1, an overload set's name of several functions (or a template's) has a type only
+  ;; from a target of pointer to function, reference to function or pointer to member function type: to an arithmetic,
+  ;; enumeration or bool target GCC's "cannot resolve overloaded function 'foo' based on conversion to type 'double'",
+  ;; lookup/pr83287-2.C's `new T (foo)` for T double)
+  (when (and (checking?) (= :fnset (:op e)) (or (> (count (:fns e)) 1) (seq (:tmpls e)))
+             (let [u (abi/unq t)] (and (map? u) (or (abi/arith? u) (abi/enum? u)))))
+    (fail :overload-addr "statement cannot resolve address of overloaded function: cannot resolve overloaded function '"
+          (or (some-> (first (:fns e)) fnd :name) "") "' based on conversion to an arithmetic type"))
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
@@ -7445,6 +7523,21 @@
       ;; as the program's: void, std::nullptr_t to an integer, a pointer to an integer, unrelated pointers to members)
       (and (checking?) (not explicit?) (not *cx-union-init*) (cx-sure-scalar? from) (cx-sure-scalar? to) (not= :nullptr (abi/bn to)))
       (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly")
+      ;; (cpp-read-indep, the checker: [conv.ptr]/1, only a null pointer constant converts to std::nullptr_t -- an arithmetic value
+      ;; of another value does not, GCC's "cannot convert 'int' to 'std::nullptr_t' in assignment", cpp0x/nullptr10.C)
+      ;; (cpp-read-indep, the checker: [expr.unary.op]/4, `&f` of a member function named unqualified is no pointer to member
+      ;; (only `&C::f` forms one), and [conv.mem] converts no pointer to function to a pointer to member: GCC's "ISO C++ forbids
+      ;; taking the address of an unbound member function to form a pointer to member function.  Say '&a::f'", warn/pmf1.C)
+      ;; (cpp-read-indep, the checker: [conv.ptr]/1, an integer converts to a pointer only as a null pointer constant, whatever the
+      ;; pointee -- a class template's specialization not complete among them, which cx-sure-scalar? leaves: GCC's "invalid
+      ;; conversion from 'int' to 'A<void() const>*'", template/pr34938-2.C)
+      (and (checking?) (not explicit?) (not *cx-union-init*) (abi/ptr? (abi/unq to)) (abi/integral? (abi/unq from)) (not (abi/enum? (abi/unq from)))
+           (not (null-constant? e)) (not (some-> *at* deref header-node?)))
+      (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (an integer to a pointer)")
+      (and (checking?) (not explicit?) (abi/mptr? (abi/unq to)) (abi/ptr? (abi/unq from)) (abi/fn? (abi/unq (:to (abi/unq from)))))
+      (fail :conversion "cannot convert a pointer to function to a pointer to member implicitly (say '&C::f')")
+      (and (checking?) (not explicit?) (not *cx-union-init*) (= :nullptr (abi/bn to)) (abi/arith? (abi/unq from)))
+      (fail :conversion "cannot convert " (cx-tyname from) " to std::nullptr_t implicitly")
       :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
 
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
@@ -9272,7 +9365,17 @@
           (and (:trivial f) (= 1 (count args)) (not= :init-list (:op (first args)))
                (let [c (class-id (:ty (first args)))] (and c (not= c id) (not (abi/derived-from? c id)) (conv-for c {:k :class :id id} false (:c (:ty (first args)))))))
           {:i :expr :e (user-conv ctx (first args) {:k :class :id id} false)}
-          (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
+          (and (:trivial f) (= 1 (count args)))
+          (do ;; (cpp-read-indep, the checker: the trivial copy's reference parameter binds the argument's base subobject, a
+              ;; derived-to-base conversion that needs the base accessible ([dcl.init.ref]/5, [class.access.base]/4), as the
+              ;; reference binding's: GCC's "'A' is an inaccessible base of 'B'", parse/crash51.C's `(A)b` of `class B : A`)
+              (when (checking?)
+                (let [c (class-id (:ty (first args)))]
+                  (when (and c (not= c id) (abi/derived-from? c id))
+                    (cx-access! ctx id (:name (abi/cls id)) :public c nil))))
+              ;; (cpp-read-indep: the trivial copy's constructor named for class-init's access check, cx-ctor-access!'s :cx-ctor:
+              ;; a private defaulted copy constructor, cpp0x/defaulted28.C's `f(a)` through the ellipsis)
+              (cond-> {:i :copy :e (first args) :cls id} (and (checking?) (not @#'*unevaluated*)) (assoc :cx-ctor fid)))
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
           (and (:consteval f) (abi/empty-class? id) (not (and (cx-p2564?) (cx-main-fn? f)))) {:i :none}
@@ -9491,6 +9594,11 @@
   {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
   :list :value :default."
   [t src ctx style]
+  ;; (cpp-read-indep, the checker: [expr.mptr.oper]/6, the result of .* or ->* with a pointer to member function is only a
+  ;; call's operand, so no initializer nor argument: GCC's "invalid use of non-static member function", expr/bound-mem-fun.C's
+  ;; `A a = B().*(&B::foo);` of a constructor template)
+  (when (and (checking?) (or (= :mbound (:op src)) (and (vector? src) (some #(= :mbound (:op %)) src))))
+    (fail :expr "invalid use of non-static member function (the result of a pointer-to-member operator not called)"))
   (let [tu (abi/unq t)]
     (cond
       ;; a semantic list's value-initialized element (the native parser's ImplicitValueInitExpr fill, [dcl.init.aggr]/5.2)
@@ -9706,7 +9814,9 @@
                       ;; (queue 602, the checker: by copy-initialization for copy-list-initialization, *cx-copy-list*: an
                       ;; element of class type converts by its non-explicit conversion functions alone, cpp0x/explicit15.C's
                       ;; `int n2 = {t};` of `explicit operator int()`)
-                      (narrow-check! (init-for t (first (:items src)) ctx (if (and (= style :list) (not (and (checking?) *cx-copy-list* (class-id (:ty (first (:items src))))))) :direct :copy)) t (first (:items src))))
+                      (narrow-check! (init-for t (first (:items src)) ctx (if (and (= style :list) (not (and (checking?) *cx-copy-list* (or (class-id (:ty (first (:items src))))
+                                                                                                                                        ;; (cpp-read-indep: and std::nullptr_t to bool, DR 1423, DRs/dr1423.C's `bool b4 = { nullptr };`)
+                                                                                                                                        (and (= :bool (abi/bn tu)) (= :nullptr (abi/bn (abi/unq (or (:ty (first (:items src))) {}))))))))) :direct :copy)) t (first (:items src))))
                 (fail :init "several values for a scalar")))
       (abi/class? tu) (class-init tu [src] ctx style)
       (abi/arr? tu)
@@ -9923,6 +10033,13 @@
              ;; [class.static.data]/4: cx-static-ice-use!)
              (when (and (checking?) (:cx-static-use v) (not (:cx-sinit v)) (not *unevaluated*) *on-refusal*)
                (cx-static-ice-use! (:id e)))
+             ;; (cpp-read-indep, the checker: [basic.def.odr]/10 with [class.local]/1, a local entity of an enclosing function is not
+             ;; odr-usable in a local class's member function or default member initializer (a lambda's capture aside): GCC's "use
+             ;; of parameter from containing function", "use of local variable with automatic storage from containing function";
+             ;; cpp0x/error1.C, cpp0x/pr85015.C; a const variable's value no odr-use, left as the lambda's rule leaves it)
+             (when (and (checking?) (not (:lambda ctx)) (#{:local :param} (:storage v)) (:fn v) (:fn-id ctx) (not= (:fn v) (:fn-id ctx))
+                        (not *unevaluated*) (not (:c (abi/non-ref (:ty v)))) (not (:c (:ty v))) (string? (:name v)) (seq (:name v)))
+               (fail :local-use "use of " (if (= :param (:storage v)) "parameter" "local variable with automatic storage") " from containing function ('" (:name v) "')"))
              (if (and (:lambda ctx) (#{:local :param} (:storage v)) (not= (:fn v) (:fn-id ctx)) (not *unevaluated*))
                (capture-field ctx (:id e))
                (var-node (:id e))))
@@ -10135,11 +10252,20 @@
       (let [vt (if (= :vec (:k lv)) lv rv')]
         (when (and (= :vec (:k lv)) (= :vec (:k rv')) (not= (dissoc lv :c :v) (dissoc rv' :c :v)))
           (fail :type "arithmetic on two vectors of different types"))
+        ;; (cpp-read-indep: the bitwise operators and % of vectors take integer elements alone, as of scalars, [expr.mul]/2,
+        ;; [expr.bit.and]: GCC's "invalid operands to binary |" of float vectors, ext/vector8.C)
+        (when (and (#{"&" "|" "^" "%" "<<" ">>"} o) (some #(and (= :vec (:k %)) (abi/floating? (abi/unq (:of %)))) [lv rv']))
+          (fail :type "arithmetic on two vectors of different types: invalid operands to binary " o " (floating elements)"))
         {:op :vec-binop :o o :l l :r r :ty (dissoc vt :c :v) :cat :pr})
       (let [ct (arith-common (:ty l) (:ty r))]
         {:op :binop :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ty ct :cat :pr}))))
 
 (defn- to-bool [e]
+  ;; (cpp-read-indep, the checker: the GCC manual's "Using Vector Instructions", a vector converts to no scalar, so to no bool: a
+  ;; vector comparison's or a vector `!`'s result as a condition or a bool's initializer, GCC's "could not convert '(* a < * b)'
+  ;; from '__vector(4) int' to 'bool'", ext/pr80363.C, other/error23.C)
+  (when (and (checking?) (= :vec (:k (abi/unq (:ty e)))))
+    (fail :conversion "cannot convert a vector to 'bool' implicitly"))
   ;; (cpp-1123, the checker: a scoped enumeration has no implicit conversion to bool, so no contextual one, [conv.bool],
   ;; [dcl.enum]/10 with [conv]/4: GCC's "could not convert 'y' from 'Col' to 'bool'"; cpp0x/scoped_enum_examples.C)
   (when (and (checking?) (abi/enum? (abi/unq (:ty e))) (:scoped (abi/enm (:id (abi/unq (:ty e))))))
@@ -10199,6 +10325,29 @@
 
 (defn- builtin-binop [o l r]
   (let [lt (:ty (rv l)) rt (:ty (rv r))]
+    ;; (cpp-read-indep, the checker: [expr.eq]/2-4 and [expr.arith.conv]: std::nullptr_t takes part in no arithmetic, and is
+    ;; compared for equality only with a pointer, a pointer to member, another std::nullptr_t or a null pointer constant: GCC's
+    ;; "invalid operands of types 'int' and 'std::nullptr_t' to binary 'operator=='", cpp0x/nullptr07.C, nullptr10.C)
+    (when (checking?)
+      (let [ln (= :nullptr (abi/bn (abi/unq lt))) rn (= :nullptr (abi/bn (abi/unq rt)))
+            other (if ln rt lt) oe (if ln r l)]
+        (when (and (or ln rn)
+                   (or (#{"+" "-" "*" "/" "%" "&" "|" "^" "<<" ">>"} o)
+                       (and (#{"==" "!="} o) (not (and ln rn))
+                            (not (or (abi/ptr? other) (abi/mptr? other)))
+                            (abi/scalar? (abi/unq other))
+                            (not (null-constant? (rv oe))))))
+          (fail :nullptr-operands "invalid operands of types '" (if ln "std::nullptr_t" (cx-tyname lt)) "' and '"
+                (if rn "std::nullptr_t" (cx-tyname rt)) "' to binary 'operator" o "'"))
+        ;; ([expr.mul]/2, [expr.bit.and], [expr.xor], [expr.or], [expr.shift]/1: arithmetic or integral operands, no pointer or
+        ;; pointer to member; [expr.add]/1-2: no two pointers added, no pointer subtracted from an integer: GCC's "invalid operands of
+        ;; types 'char*' and 'unsigned char:1' to binary 'operator|'", diagnostic/bitfld1.C)
+        (let [p? (fn [t] (let [u (abi/unq t)] (or (abi/ptr? u) (abi/mptr? u))))]
+          (when (or (and (#{"*" "/" "%" "&" "|" "^" "<<" ">>"} o) (or (p? lt) (p? rt)))
+                    (and (= "+" o) (p? lt) (p? rt))
+                    (and (= "-" o) (abi/arith? (abi/unq lt)) (p? rt))
+                    (and (#{"+" "-"} o) (or (abi/mptr? (abi/unq lt)) (abi/mptr? (abi/unq rt)))))
+            (fail :nullptr-operands "invalid operands of types '" (cx-tyname lt) "' and '" (cx-tyname rt) "' to binary 'operator" o "'")))))
     (case o
       "<=>" (three-way l r)
       ("+" "-")
@@ -10215,6 +10364,11 @@
       ("<<" ">>") (let [l (rv l) pl (promote-type (:ty l))]
                     {:op :binop :o o :l (convert-scalar l pl false) :r (convert-scalar (rv r) pl false) :ty pl :cat :pr})
       ("<" ">" "<=" ">=" "==" "!=")
+      (if (and (checking?) (or (= :vec (:k (abi/unq lt))) (= :vec (:k (abi/unq rt)))))
+        ;; (cpp-read-indep, the checker: a vector comparison is lane by lane, a vector of the lanes' results, the GCC manual's
+        ;; "Using Vector Instructions")
+        (let [vt (dissoc (abi/unq (if (= :vec (:k (abi/unq lt))) lt rt)) :c :v)]
+          {:op :vec-binop :o o :l (rv l) :r (rv r) :ty vt :cat :pr})
       (let [l (rv l) r (rv r)]
         ;; (cpp-diag-b, 2026-11-22: [expr.rel]/? since C++11 (CWG 1512), a relational operator's operands are no pointer and null
         ;; pointer constant, nor two null pointer constants one a std::nullptr_t: GCC's "ordered comparison of pointer with integer
@@ -10223,6 +10377,12 @@
                    (or (and (abi/ptr? lt) (null-constant? r)) (and (abi/ptr? rt) (null-constant? l))
                        (and (null-constant? l) (null-constant? r) (or (= :nullptr (abi/bn lt)) (= :nullptr (abi/bn rt))))))
           (fail :ordered-cmp "ordered comparison of pointer with integer zero"))
+        ;; (cpp-read-indep: [expr.eq]/3 and [expr.rel]/2, a pointer is compared with a pointer, std::nullptr_t or a null pointer
+        ;; constant -- an integer that is none of them (since C++11 no character literal, CWG 903) has no composite pointer type:
+        ;; GCC's "ISO C++ forbids comparison between pointer and integer", cpp0x/nullptr37.C)
+        (when (and (checking?) (>= (long *cxx-year*) 11) (or (and (abi/ptr? lt) (abi/integral? (abi/unq rt)) (not (abi/enum? (abi/unq rt))) (not (null-constant? r)))
+                                   (and (abi/ptr? rt) (abi/integral? (abi/unq lt)) (not (abi/enum? (abi/unq lt))) (not (null-constant? l)))))
+          (fail :ptr-int-cmp "ISO C++ forbids comparison between pointer and integer"))
         ;; (cpp-diag-b, round 2: [expr.eq]/3 and [expr.rel]/3, two pointers compared through their composite pointer type
         ;; ([expr.type]/4): pointees the same up to cv-qualifiers, a class and its base, or one of them void (an object's); else
         ;; GCC's "comparison between distinct pointer types 'int*' and 'double*' lacks a cast")
@@ -10243,7 +10403,7 @@
           (let [pt (if (abi/ptr? lt) lt rt)]
             {:op :cmp :o o :l (convert-scalar l pt false) :r (convert-scalar r pt false) :ct pt :ty abi/bool* :cat :pr})
           :else (let [ct (arith-common lt rt)]
-                  {:op :cmp :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ct ct :ty abi/bool* :cat :pr})))
+                  {:op :cmp :o o :l (convert-scalar l ct false) :r (convert-scalar r ct false) :ct ct :ty abi/bool* :cat :pr}))))
       "&&" {:op :land :l (fold-mark (to-bool l)) :r (to-bool r) :ty abi/bool* :cat :pr}
       "||" {:op :lor :l (fold-mark (to-bool l)) :r (to-bool r) :ty abi/bool* :cat :pr}
       "," {:op :comma :l l :r r :ty (:ty r) :cat (:cat r)}
@@ -11756,7 +11916,9 @@
         ;; int[]) has no size: GCC's "invalid use of array with unspecified bounds"; init/new20.C)
         _ (when (and (checking?) (nil? nexpr) (map? et) (abi/arr? (abi/unq et)) (nil? (:n (abi/unq et))) (nil? initn))
             (fail :new-array "invalid use of array with unspecified bounds"))
-        _ (when (and (checking?) (nil? initn) (nil? nexpr) (:c et) (not (abi/ref? et))
+        ;; (cpp-read-indep: an array new's elements alike, [expr.new]/22 with [dcl.init.general]/7.2: init/pr20039.C's `new const
+        ;; X[2]`)
+        _ (when (and (checking?) (nil? initn) (:c et) (not (abi/ref? et))
                      (or (abi/scalar? (abi/unq et))
                          (and (abi/class? (abi/unq et)) (not (cx-const-default-constructible? (:id (abi/unq et)))))))
             ;; (cpp-decl2, the checker: [expr.new]/22 with [dcl.init.general]/7, a new-expression without an initializer
@@ -11795,10 +11957,42 @@
         (when (and (= :int (:op nv)) (integer? (:v nv)) (> (long (:v nv)) (count (kids initn))))
           (binding [*cx-copy-list* initn]
             (init-for et {:op :init-list :items []} ctx :list)))))
+    ;; (cpp-read-indep, the checker: C++20's parenthesized array new-initializer, [dcl.init.general]/16.5 (P0960R3): its
+    ;; expressions initialize the elements as a braced list's would, so no more of them than a constant bound holds, and a string
+    ;; literal for a character array no longer than it: GCC's "too many initializers for 'int [2]'", "initializer-string for
+    ;; 'char [3]' is too long", cpp2a/paren-init36.C)
+    (when (and nexpr (checking?) initn (= "ParenListExpr" (:kind initn)) (seq (kids initn)) (>= (long *cxx-year*) 20))
+      (let [nv (try (analyze ctx nexpr) (catch arbace.lang.ExceptionInfo _ nil))
+            ks (kids initn)]
+        (when (and (= :int (:op nv)) (integer? (:v nv)))
+          (if (and (= 1 (count ks)) (= "StringLiteral" (:kind (first ks))))
+            (let [sx (try (analyze ctx (first ks)) (catch arbace.lang.ExceptionInfo _ nil))]
+              (when (= :str (:op sx)) (cx-string-fits! sx (abi/arr (:v nv) et))))
+            (when (and (< (long (:v nv)) (count ks)) (not-any? #(= "PackExpansionExpr" (:kind %)) ks))
+              (fail :init "too many initializers for an array new of " (:v nv) " elements"))))))
+    ;; (cpp-read-indep, the checker: [expr.new]/9, a new-expression's bound that is a constant expression of a negative value is
+    ;; ill-formed (the run-time check is for the others): GCC's "size of array is negative", cpp0x/new6.C's `new int[-1]`)
+    (when (and nexpr (checking?))
+      (let [nv (try (analyze ctx nexpr) (catch arbace.lang.ExceptionInfo _ nil))
+            nv (when (map? nv) (try (ce-try nv true) (catch Exception _ nil)))]
+        (when (and (map? nv) (= :int (:op nv)) (integer? (:v nv)) (neg? (long (:v nv))) (abi/integral? (abi/unq (:ty nv)))
+                   (not (contains? abi/unsigned-ns (abi/bn (abi/unq (:ty nv))))))
+          (fail :new-array "size of array is negative (a new-expression's constant bound " (:v nv) ")"))))
     ;; (cpp-indep, the checker: the same of a braced new-initializer with fewer elements than the bound, [dcl.init.aggr]/5.2:
     ;; an element with no initializer copy-initialized from {}, expr/anew7.C's new S[1]{} of `explicit S()`)
     (when (and nexpr (checking?) initn (= "InitListExpr" (:kind initn)) (not= "call" (:initStyle n)))
       (let [nv (try (analyze ctx nexpr) (catch arbace.lang.ExceptionInfo _ nil))]
+        ;; (cpp-read-indep: [expr.new]/7 with [dcl.init.string]/2, a constant bound's array initialized by a braced string
+        ;; literal holds it and its terminating null: GCC's "initializer-string for 'char [3]' is too long", cpp0x/initlist-new4.C)
+        ;; (and more elements than a constant bound holds, [dcl.init.aggr]/9: GCC's "too many initializers for 'const float
+        ;; [1]'", cpp0x/initlist21.C's `new const float[1] { 1.5, 2.5 }`)
+        (when (and (= :int (:op nv)) (integer? (:v nv)) (< (long (:v nv)) (count (kids initn)))
+                   (not-any? #(#{"PackExpansionExpr" "DesignatedInitExpr"} (:kind %)) (kids initn))
+                   (not (and (= 1 (count (kids initn))) (= "StringLiteral" (:kind (first (kids initn)))))))
+          (fail :init "too many initializers for an array new of " (:v nv) " elements"))
+        (when (and (= :int (:op nv)) (integer? (:v nv)) (= 1 (count (kids initn))) (= "StringLiteral" (:kind (first (kids initn)))))
+          (let [sx (try (analyze ctx (first (kids initn))) (catch arbace.lang.ExceptionInfo _ nil))]
+            (when (= :str (:op sx)) (cx-string-fits! sx (abi/arr (:v nv) et)))))
         (when (and (= :int (:op nv)) (integer? (:v nv)) (> (long (:v nv)) (count (kids initn))))
           (binding [*cx-copy-list* initn]
             ;; (an array element's own elements alike: the innermost element type's, new S[1][1]{})
@@ -11858,7 +12052,14 @@
   [ctx ns]
   (vec (mapcat (fn [a] (if (= "PackExpansionExpr" (:kind a))
                          (if-let [h (:expand-pack @hooks)] (h ctx a) (fail :pack "a pack expansion"))
-                         [(analyze ctx a)]))
+                         (let [x (analyze ctx a)]
+                           ;; (cpp-read-indep, the checker: [expr.prim.id.general]/4 with [expr.ref]/6.3.2, a non-static member
+                           ;; function named without a call -- and without &, which forms a pointer to member -- is no argument:
+                           ;; GCC's "invalid use of non-static member function", template/ptrmem4.C's `queryAliases(inputs)`)
+                           (when (and (checking?) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x)) (#{"DeclRefExpr" "MemberExpr"} (:kind a))
+                                      (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x)))
+                             (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+                           [x])))
                ns)))
 
 (defn- cx-both-operands
@@ -12751,7 +12952,14 @@
                     (coro-await ctx (coro-promise-call ctx "yield_value" [(analyze ctx (second (kids (first (kids n)))))]) :yield)
                     (fail :expr "expression " (:kind n)))
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
-    "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
+    ;; (cpp-read-indep, the checker: a wide or UTF character literal of its own type, [lex.ccon]/3-6 -- wchar_t, char8_t, char16_t
+    ;; or char32_t -- so L'\0' is no integer literal and no null pointer constant since C++11, cpp0x/nullptr37.C; the code
+    ;; generator's int kept)
+    "CharacterLiteral" {:op :int :v (long (:value n))
+                        :ty (let [qt (get-in n [:type :qualType] "char")]
+                              (or (when (checking?) ({"wchar_t" (abi/b :wchar) "char8_t" (abi/b :char8) "char16_t" (abi/b :char16) "char32_t" (abi/b :char32)} qt))
+                                  (int-type-of qt)))
+                        :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
     ;; a user-defined literal ([lex.ext]/3-8): the literal operator's call, operator""X(...) with the literal's value
     "UserDefinedLiteral"
@@ -12774,7 +12982,21 @@
                           (and (:text u) (one-param #(and (abi/ptr? %) (= :char (abi/bn (abi/unq (:to %)))))))
                           {:raw true}
                           (and (:text u) (some #(= :tmpl (:e %)) es))
-                          {:tmpl (mapv #(if (= \' %) "'\\''" (str "'" % "'")) (:text u))})))
+                          {:tmpl (mapv #(if (= \' %) "'\\''" (str "'" % "'")) (:text u))}
+                          ;; (cpp-read-indep, the checker: [lex.ext]/3-4, a numeric literal finds a literal operator of parameter
+                          ;; unsigned long long (long double for a floating one), else a raw literal operator or a numeric literal
+                          ;; operator template; no implicit conversion picks another: GCC's "unable to find numeric literal operator
+                          ;; 'operator""_bar'", cpp0x/udlit-implicit-conv-neg.C's 12_bar of operator""_bar(long double))
+                          (and (checking?) (seq es) (every? #(= :fn (:e %)) es))
+                          (fail :udl "unable to find numeric literal operator '" opname "' with a " (if (= :int (:k u)) "'unsigned long long int'" "'long double'") " argument"))))
+            ;; (cpp-read-indep, the checker: [lex.ext]/6, a character literal's operator has one parameter of the literal's own type:
+            ;; GCC's "unable to find character literal operator 'operator""_char' with 'wchar_t' argument", the same test's L'c'_char)
+            _ (when (and (checking?) (= :chr (:k u)))
+                (let [es (try (lookup (:scope ctx) opname) (catch arbace.lang.ExceptionInfo _ nil))
+                      want ({"char" :char "wchar_t" :wchar "char8_t" :char8 "char16_t" :char16 "char32_t" :char32} (str (:ty u)))]
+                  (when (and want (seq es) (every? #(= :fn (:e %)) es)
+                             (not-any? #(let [ps (:ps (:ty (fnd (:id %))))] (and (= 1 (count ps)) (= want (abi/bn (abi/unq (first ps)))))) es))
+                    (fail :udl "unable to find character literal operator '" opname "' with '" (:ty u) "' argument"))))
             args (case (:k u)
                    :str [{:kind "StringLiteral" :value (:value u) :type {:qualType (str "const " (:ty u) "[" (:n u) "]")} :valueCategory "lvalue" :range (:range n)}
                          {:kind "IntegerLiteral" :value (str (dec (long (:n u)))) :type {:qualType "unsigned long"} :valueCategory "prvalue"}]
@@ -13017,7 +13239,13 @@
                       (when (:unavailable (var* (:id v)))
                         (fail :unavailable "'" (:name (var* (:id v))) "' is unavailable")))
                     x)
-    "CXXThisExpr" (this-expr ctx)
+    ;; (cpp-read-indep, the checker: [expr.prim.id.general]/3 (C++23 /4), a non-static member named in a function that is no
+    ;; non-static member function -- a friend function defined in its class, a static member function -- has no implicit object
+    ;; (the parser's implicit this): GCC's "invalid use of non-static data member 'A<0>::i'", template/error42.C)
+    "CXXThisExpr" (if (and (checking?) (:implicit n) (not (:lambda ctx)) (nil? (:this-type ctx)) (nil? *constraint-this*)
+                           (not @#'*unevaluated*) (:fn-id ctx) (fnd (:fn-id ctx)) (not (:header (fnd (:fn-id ctx)))) (not (header-node? n)))
+                    (fail :nonstatic-use "invalid use of non-static data member (no object in a function that is no non-static member)")
+                    (this-expr ctx))
     "UnaryOperator"
     (or
      ;; &C::m: a pointer to member ([expr.unary.op]/4)
@@ -13107,6 +13335,10 @@
       ;; or of an arithmetic, relational or bitwise operator (the comma's aside): GCC's "void value not ignored as it ought to be")
       (when (and (checking?) (not= o ",") (not (class-operand? l)) (or (abi/void? (abi/unq (:ty r))) (and (not= o "=") (abi/void? (abi/unq (:ty l))))))
         (fail :void-value "void value not ignored as it ought to be"))
+      ;; (cpp-read-indep, the checker: [expr.mptr.oper]/6, a .* or ->* of a pointer to member function is only a call's operand,
+      ;; no other operator's: GCC's "invalid use of non-static member function", template/crash72.C's `(a.*m) < x`)
+      (when (and (checking?) (not= o ",") (or (= :mbound (:op l)) (= :mbound (:op r))))
+        (fail :expr "invalid use of non-static member function (the result of a pointer-to-member operator not called)"))
       (cond
         (= o "=") (assign-node ctx l r)
         (#{".*" "->*"} o) (or (when (and (checking?) (= o "->*") (or (class-operand? l) (class-operand? r)))
@@ -13135,15 +13367,37 @@
     ;; function-to-pointer conversion: libcpp's macro.cc `(kind == CPP_time_kind::FIXED ? gmtime : localtime) (&tt)`, "call
     ;; of a non-function" before)
     (let [[c a b] (kids n)
-          fa (fn [x] (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
+          fa (fn [x]
+               ;; (cpp-read-indep, the checker: [expr.prim.id.general]/4 and [expr.cond]/1, a non-static member function named
+               ;; without a call is no operand of the conditional operator: GCC's "invalid use of member function", conversion/
+               ;; memfn2.C's `i ? foo : foo`)
+               (when (and (checking?) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
+                          (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x)))
+                 (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+               (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
       ;; (cpp-ce3: an immediate invocation in a branch is not evaluated where the branch is analyzed, cx-immediate-eval!)
-      (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx a))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx b)))))
+      ;; (cpp-read-indep: a vector condition is GCC's vector conditional, its lanes chosen, no conversion to bool -- the
+      ;; slice's refusal as before, unreported: ext/vector23.C)
+      (cond-node ctx (fold-mark (to-bool (let [cv (analyze ctx c)]
+                                           (when (and (checking?) (= :vec (:k (abi/unq (:ty cv))))) (fail :vec-cond "a vector conditional"))
+                                           cv)))
+                 (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx a))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx b)))))
     ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
     ;; bound as an opaque value (a glvalue's address, a class prvalue materialized, else its value), the condition and the
     ;; true operand both that value (clang's OpaqueValueExpr, CodeGenFunction::OpaqueValueMapping)
     "BinaryConditionalOperator"
     (let [[x y] (kids n)
           x (analyze ctx x)
+          ;; (cpp-read-indep, the checker: the condition `x` of `x ?: y` is contextually converted to bool, [expr.cond]/1 with the
+          ;; GCC manual's "Conditionals with Omitted Operands": a non-static member function's or an overload set's name
+          ;; converts to nothing, GCC's "cannot convert 'z<t>::zz' from type 'bool (z<t>::)()' to type 'bool'", ext/pr77496.C,
+          ;; "cannot resolve overloaded function 'f' based on conversion to type 'bool'", other/pr77548.C)
+          _ (when (and (checking?) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x)))
+              (cond (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x))
+                    (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'")
+                    (> (count (:fns x)) 1)
+                    (fail :overload-addr "statement cannot resolve address of overloaded function: cannot resolve overloaded function '"
+                          (:name (fnd (first (:fns x)))) "' based on conversion to type 'bool'")))
           x (if (and (= :pr (:cat x)) (abi/class? (abi/unq (:ty x)))) (materialize x) x)
           k (swap! opaque-ids inc)
           ov {:op :opaque :id k :ty (:ty x) :cat (:cat x)}
@@ -13341,6 +13595,51 @@
           cn (if (= "CXXDependentScopeMemberExpr" (:kind cn)) (-> cn (assoc :kind "MemberExpr" :name (:member cn)) (dissoc :member)) cn)
           pseudo (when (and (= "MemberExpr" (:kind cn)) (str/starts-with? (str (:name cn)) "~") (empty? an))
                    (let [o (analyze ctx (first (kids cn))) o (if (:isArrow cn) (deref-node o) o)]
+                     ;; (cpp-read-indep, the checker: [expr.prim.id.dtor]/2 and [expr.ref]/3, a pseudo-destructor's object is
+                     ;; of scalar type, and in `T1::~T2` the type-names T1 and T2 denote its type, cv-unqualified: GCC's
+                     ;; "the type being destroyed is 'C', but the destructor refers to 'D'", expr/dtor4.C's `o.D::~C ()`;
+                     ;; template/error32.C's `p->A::~A()` of a pointer to function)
+                     (when (and (checking?) (not (class-id (:ty o))))
+                       (let [ot (abi/unq (abi/non-ref (:ty o)))
+                             rt (fn [nm] (when (and (string? nm) (re-matches #"[A-Za-z_]\w*" nm))
+                                           (try (abi/unq (resolve-type (:scope ctx) nm)) (catch arbace.lang.ExceptionInfo _ nil))))
+                             dt (rt (subs (str (:name cn)) 1))
+                             qt (when (= 1 (count (:qualifier cn))) (rt (first (:qualifier cn))))]
+                         (cond (and (map? ot) (abi/fn? ot))
+                               (fail :pseudo-dtor "the object of a pseudo-destructor call is a function, not of scalar type")
+                               ;; (a name after ~ that no declaration declares: GCC's "'e_u' has not been declared",
+                               ;; cpp0x/enum18.C's `ev.e::~e_u()`)
+                               (let [nm (subs (str (:name cn)) 1)]
+                                 (and (re-matches #"[A-Za-z_]\w*" nm) (cx-sure-scalar? ot)
+                                      (empty? (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))))
+                               (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" (subs (str (:name cn)) 1) "' has not been declared")
+                               (and dt (cx-sure-scalar? ot) (cx-sure-scalar? dt) (not= (dissoc ot :c :v) (dissoc dt :c :v)))
+                               (fail :pseudo-dtor "the type being destroyed is not the one the destructor names")
+                               (and dt qt (cx-sure-scalar? qt) (cx-sure-scalar? dt) (not= (dissoc qt :c :v) (dissoc dt :c :v)))
+                               (fail :pseudo-dtor "the pseudo-destructor's qualifier names another type than its destructor"))))
+                     ;; (cpp-read-indep, the checker: [expr.prim.id.dtor]/2 and [class.dtor]/?, `o.~T()` of a class object names
+                     ;; its class's destructor: a T that denotes a scalar type is no destructor of it, GCC's "the type being
+                     ;; destroyed is 'Z', but the destructor refers to 'int'"/"is not of type", template/pseudodtor2.C's
+                     ;; `foo ().~T()` of T int)
+                     (when (and (checking?) (class-id (:ty o)) (empty? (:qualifier cn)))
+                       (let [nm (subs (str (:name cn)) 1)
+                             dt (when (re-matches #"[A-Za-z_]\w*" nm)
+                                  (try (abi/unq (resolve-type (:scope ctx) nm)) (catch arbace.lang.ExceptionInfo _ nil)))]
+                         (when (and (map? dt) (cx-sure-scalar? dt) (not (abi/class? dt)))
+                           (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' is not of the object's class type"))
+                         ;; (a name no declaration declares, nor the object's class's: template/dtor5.C's `ap->~B()`)
+                         (let [c (abi/cls (class-id (:ty o)))]
+                           (when (and (nil? dt) (re-matches #"[A-Za-z_]\w*" nm) c (:complete c) (not= nm (:name c))
+                                      (empty? (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))
+                                      (empty? (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ [:unknown]))))
+                             (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' has not been declared"))
+                           ;; (a name whose every declaration found is another class's: GCC's "'~A' does not match destructor
+                           ;; name" for an object of class B, template/dtor7.C)
+                           (let [es (when (and c (:complete c) (re-matches #"[A-Za-z_]\w*" nm) (not= nm (:name c)))
+                                      (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ nil)))]
+                             (when (and (seq es) (empty? (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))
+                                        (every? #(and (= :type (:e %)) (abi/class? (abi/unq (:ty %))) (not= (:id (abi/unq (:ty %))) (:id c))) es))
+                               (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '~" nm "' does not match destructor name"))))))
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (let [c (cast-expr ctx abi/void pseudo true)] (if (and (checking?) (= :cast (:op c)) (= :void (:ck c))) (assoc c :cx-pseudo-dtor true) c))
@@ -13356,7 +13655,22 @@
     (let [callee (analyze ctx cn)
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
-        (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
+        (or (operator-call ctx "()" (into [callee] args))
+            ;; (cpp-read-indep, the checker: [over.call.object]/1-2, a call of a class object whose class and bases declare no
+            ;; operator() and no non-template conversion function (a conversion function template gives no surrogate call
+            ;; function): GCC's "no match for call to '(A) ()'", template/crash93.C's `A()()` of `template<int> operator F();`)
+            (when (checking?)
+              (let [cid (class-id (:ty callee))
+                    all ((fn walk [id] (cons id (mapcat #(walk (:cls %)) (:bases (abi/cls id))))) cid)
+                    c0 (abi/cls cid)]
+                ;; (an object of an incomplete class, which declares no member: parse/crash32.C's `v (*this)` of `struct Visitor;`)
+                (when (and c0 (not (:complete c0)) (not (:header c0)) (not (:tmpl c0)) (empty? (:targs c0)) (not (:lambda c0)) (seq (:name c0)))
+                  (fail :call-object "no match for call to an object of class '" (:name c0) "' (an incomplete class)"))
+                (when (and (every? #(let [c (abi/cls %)] (and c (:complete c) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:dep-bases c)) (not (:lambda c))))
+                                   all)
+                           (not-any? (fn [id] (some #(= :conv (:kind (fnd %))) (:methods (abi/cls id)))) all))
+                  (fail :call-object "no match for call to an object of class '" (:name (abi/cls cid)) "' (no operator() and no conversion function)"))))
+            (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args))))))
 )
 ))
@@ -13401,7 +13715,11 @@
                        (not (abi/ptr? (abi/unq (:ty (rv a))))) (not (abi/ptr? (abi/unq (:ty (rv i))))))
               (throw (ex-info "codegen: subscripted value is neither array nor pointer" {:codegen/refused :subscript :cx/node n})))
             (cx-subscript-incomplete! p)
-            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))))
+            ;; (cpp-read-indep, the checker: [expr.sub]/2 since C++17 (CWG 1213), the subscript of an array operand that is an
+            ;; xvalue -- a prvalue's member array, materialized -- is an xvalue, no lvalue: so `&(a.getB().x[0])` takes the address
+            ;; of an rvalue, GCC's "taking address of rvalue", pr60517.C)
+            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p))
+             :cat (if (and (checking?) (>= (long *cxx-year*) 17) (abi/arr? (abi/unq (abi/non-ref (:ty a)))) (#{:xv :pr} (:cat a))) :xv :lv)})))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
     (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
@@ -13710,6 +14028,11 @@
                   (= "lvalue" (:valueCategory n)) (abi/lref t)
                   :else t)
           e (analyze ctx (first (kids n)))
+          ;; (cpp-read-indep, the checker: [expr.ref]/6.3.2, a non-static member function named through an object is no operand
+          ;; of dynamic_cast: GCC's "cannot 'dynamic_cast' ... (invalid use of member function)", conversion/dynamic1.C)
+          _ (when (and (checking?) (= :fnset (:op e)) (:obj e) (seq (:fns e)) (empty? (:tmpls e))
+                       (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns e)))
+              (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns e)))) "'"))
           ref (abi/ref? t)
           src (if ref e (rv e))
           sc (if ref (class-id (:ty src)) (class-id (:to (abi/unq (:ty src)))))
@@ -13717,6 +14040,9 @@
           dc (class-id dt)]
       (cond
         (and dc sc (or (= dc sc) (abi/derived-from? sc dc))) (cast-expr ctx t e false)
+        ;; (cpp-read-indep: a downcast or a cast to void* reads the object's dynamic type, which -fno-rtti leaves out: GCC's
+        ;; "'dynamic_cast' not permitted with -fno-rtti", rtti/no-rtti.C)
+        (and (checking?) *no-rtti*) (fail :no-rtti "'dynamic_cast' not permitted with -fno-rtti")
         (and (not ref) (abi/void? dt)) {:op :dyncast :e src :void true :ty t :cat :pr}
         :else {:op :dyncast :e src :ref ref :from sc :to dc :ty (if ref dt t) :cat (if ref (if (= :rref (:k t)) :xv :lv) :pr)
                :hint (if-let [[_ off vb] (abi/base-path dc sc)] (if vb -1 off) -2)}))
@@ -14012,6 +14338,12 @@
   (the checker) a constrained placeholder's constraint checked too (placeholder-check!)."
   ([t e scope what node] (let [d (deduce-auto t e)] (placeholder-check! scope t d what node) d))
   ([t e]
+  ;; (cpp-read-indep, the checker: [dcl.type.auto.deduct]/4 with [temp.deduct.call]/6, a placeholder deduced from an overload set
+  ;; of several functions, none a template, deduces nothing: GCC's "unable to deduce 'auto' from 'f'", cpp0x/lambda/lambda-deduce2.C's
+  ;; `[]{ return f; }` of f(), f(int))
+  (when (and (checking?) (= :fnset (:op e)) (> (count (:fns e)) 1) (empty? (:tmpls e)) (not (:obj e))
+             (every? #(let [f (fnd %)] (and f (not (:cls f)))) (:fns e)))
+    (fail :deduce "unable to deduce 'auto' from the overloaded function '" (:name (fnd (first (:fns e)))) "'"))
   (case (:k t)
     :auto (let [;; (cpp-tzdb: a template-id naming a function template's one specialization, its arguments written and
                 ;; defaulted, is an lvalue of that function, [temp.arg.explicit]/4 with [over.over]: <format>'s
@@ -14058,6 +14390,15 @@
                        (not (#{"InitListExpr" "DesignatedInitExpr" "PackExpansionExpr"} (:kind (first (kids init))))))
                   (analyze ctx (first (kids init)))
                   :else nil)
+        ;; (cpp-read-indep, the checker: [dcl.type.auto.deduct]/5 with [dcl.type.decltype]/1.3, `decltype(auto) j = i;` of an
+        ;; unparenthesized name of a variable declared T&& deduces T&&, which binds no lvalue, the name i an lvalue ([dcl.init.ref]/5.4.4):
+        ;; GCC's "cannot bind rvalue reference of type 'int&&' to lvalue of type 'int'", cpp1y/decltype-auto1.C)
+        _ (when (and (checking?) pre (= :auto (:k t)) (:decltype t) (= "DeclRefExpr" (:kind init)))
+            (let [vid (or (when (= :var (:op pre)) (:id pre))
+                          (when (and (= :deref (:op pre)) (= :load (get-in pre [:e :op])) (= :var (get-in pre [:e :e :op]))) (get-in pre [:e :e :id])))
+                  vt (some-> vid var* :ty)]
+              (when (and (map? vt) (= :rref (:k vt)))
+                (fail :init "cannot bind rvalue reference to an lvalue"))))
         ;; (cpp-rind, the checker: [dcl.type.auto.deduct]/4, `auto x = {a, b};` deduces std::initializer_list<E>, E the elements'
         ;; one type, as a braced range-for range does; it had deduced the first element's type and refused the list as "excess
         ;; elements in scalar initializer", a false error: asan/pr117845.C; elements of different types or no <initializer_list>
@@ -14280,7 +14621,13 @@
                                  (when (and f (not (:cls f)) (not (:this-type ctx)))
                                    (check-type-access! (:scope ctx) (get-in d [:type :qualType]) d))))
                            id (local-var! ctx d :local)
-                           v (var* id)]
+                           v (var* id)
+                           ;; (cpp-read-indep, the checker: [temp.spec.general]/? (C++23 [temp.spec.general]/8) with [dcl.fct]/?: a
+                           ;; declaration that acquires a function type through a template parameter is no function's, so a
+                           ;; variable of function type, ill-formed: GCC's "variable 't' has function type", template/crash61.C's
+                           ;; `T t = 0;` for T int())
+                           _ (when (and (checking?) (map? (:ty v)) (abi/fn? (abi/unq (:ty v))) (init-kid d))
+                               (fail :var-fn-type "variable '" (:name d) "' has function type"))]
                        (if (= :static-local (:storage v))
                          (do (swap! (:statics ctx) conj id)
                              (let [c (count (filter #(= (:name (var* %)) (:name v)) @(:statics ctx)))]
@@ -14328,7 +14675,7 @@
                            (cond-> {:s :decl :var id :init init} (and (checking?) (:range d)) (assoc :cx-at (:range d))))))
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
            ;; a block-scope function declaration (queue 445: the code generator's at its enclosing namespace, *block-fn*)
-           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) {:s :null})
+           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) (cx-default-args! (:scope ctx) d) {:s :null})
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl")
            ;; (queue 570, the checker: a block scope's typedef or alias declaration may name a variably modified type, GNU's,
@@ -14505,6 +14852,22 @@
       (and (= "IfStmt" (:kind n)) (= :block (:s r)) (= :if (:s (peek (:items r)))))
       (update r :items #(conj (pop %) (assoc (peek %) :cx-at (:range n))))
       :else r)))
+
+;; (cpp-read-indep, the checker: a discarded-value expression -- an expression statement's, a for statement's iteration
+;; expression -- that is a function named without a call: [expr.mptr.oper]/6, the result of .* or ->* with a pointer to member
+;; function (expr/ptrmem5.C's `A().*ftype();`); [expr.ref]/6.3.2, a non-static member function (expr/for1.C's `for (;;s.f);`);
+;; [over.over]/1, an overload set of several functions with no target type (expr/for1.C's `for (;;g);` of g(int), g(double)):
+;; GCC's "invalid use of non-static member function", "statement cannot resolve address of overloaded function")
+(defn- cx-discarded! [x n]
+  (when (checking?)
+    (cond (= :mbound (:op x))
+          (fail :expr "invalid use of non-static member function (the result of a pointer-to-member operator not called)")
+          (and (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x)) (:obj x)
+               (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x)))
+          (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'")
+          (and (= :fnset (:op x)) (> (count (:fns x)) 1) (empty? (:tmpls x)) (not (:obj x)) (#{"DeclRefExpr"} (:kind n))
+               (every? #(let [f (fnd %)] (and f (not (:cls f)))) (:fns x)))
+          (fail :overload-addr "statement cannot resolve address of overloaded function '" (:name (fnd (first (:fns x)))) "'"))))
 
 (defn- stmt*
   "The typed statement of a tree node (stmt's)."
@@ -14688,7 +15051,7 @@
                     init (when (:kind init) (stmt c init))]
                 (when (:kind cvar) (fail :stmt "a for condition's declaration"))
                 {:s :block :items [(or init {:s :null})
-                                   {:s :for :cond (when (:kind cn) (cond-of c cn)) :inc (when (:kind inc) (analyze c inc))
+                                   {:s :for :cond (when (:kind cn) (cond-of c cn)) :inc (when (:kind inc) (let [x (analyze c inc)] (cx-discarded! x inc) x))
                                     :body (stmt (block-ctx c) body)}]})
     "CXXForRangeStmt"
     (let [c (block-ctx ctx)
@@ -14857,6 +15220,10 @@
         (when (and (checking?) (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
                    (every? #(let [f (fnd %)] (and (:cls f) (not (:static f)))) (:fns x)))
           (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+        ;; (cpp-read-indep, the checker: [expr.mptr.oper]/6, the result of .* or ->* with a pointer to member function is only a
+        ;; call's operand: an expression statement of it is GCC's "invalid use of non-static member function", expr/ptrmem5.C's
+        ;; `A().*ftype();`)
+        (cx-discarded! x n)
         (full x))
       (fail :stmt "statement " (:kind n)))))
 

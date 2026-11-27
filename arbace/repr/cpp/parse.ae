@@ -1943,6 +1943,11 @@
     (if (some #(re-find #"[\"][A-Za-z_][A-Za-z0-9_]*$" %) ss)
       ;; (G5: the literal and its ud-suffix for the code generator's literal operator call, [lex.ext]/5)
       (let [sfx (some #(second (re-find #"[\"]([A-Za-z_][A-Za-z0-9_]*)$" %)) ss)
+            ;; (cpp-read-indep: [lex.ext]/8, the concatenated literals' ud-suffixes are one: two different ones are GCC's
+            ;; "inconsistent user-defined literal suffixes '_xxx' and '_yyy' in string literal", cpp0x/udlit-concat-neg.C)
+            _ (let [sfxs (distinct (keep #(second (re-find #"[\"]([A-Za-z_][A-Za-z0-9_]*)$" %)) ss))]
+                (when (and (> (count sfxs) 1) (not (skim? p)) (main-tok? p b))
+                  (soft-diag! p b (str "inconsistent user-defined literal suffixes '" (first sfxs) "' and '" (second sfxs) "' in string literal"))))
             plain (mapv #(str/replace % #"([\"])[A-Za-z_][A-Za-z0-9_]*$" "$1") ss)
             [v ty n] (try (lit/string-literal plain (.-year p)) (catch Exception _ nil))]
         (node p "UserDefinedLiteral" b e (if v {:_udl {:k :str :suffix sfx :value v :ty ty :n n}} {})))
@@ -2827,6 +2832,7 @@
         ;; (h-cpp-read: the template is a string-literal, or C++26's parenthesized constant expression (GCC's constexpr asm):
         ;; GCC's "expected string-literal" else, before the statement is skipped)
         _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) "expected string-literal"))
+        ti (ix p)
         tmpl (lit)
         ;; the sections' separators: `:` each, `::` two
         colons (atom 0)
@@ -2850,7 +2856,25 @@
         outs (if (sep!) (section operand) [])
         ins (if (sep!) (section operand) [])
         clob (if (sep!) (section lit) [])
-        labels (if (sep!) (section (fn [] (let [s (ts (cur p))] (adv! p) s))) [])]
+        labels (if (sep!) (section (fn [] (let [s (ts (cur p))] (adv! p) s))) [])
+        ;; (cpp-read-indep: the GCC manual's "Extended Asm", "Input Operands": an extended asm's template refers to its operands as
+        ;; %N, N below the operands' count (the goto labels' after them); a greater N is GCC's "operand number out of range",
+        ;; opt/pr69213.C's `__asm__ ("# %0" : : : "memory")`; a basic asm, without colons, substitutes nothing)
+        _ (when (and (string? tmpl) (pos? (+ (count outs) (count ins) (count clob) (count labels) (long @colons)))
+                     (not (skim? p)) (main-tok? p ti))
+            (let [n (+ (count outs) (count ins) (count labels))
+                  t (str tmpl)]
+              (loop [i 0]
+                (let [j (.indexOf t "%" (int i))]
+                  (when (and (>= j 0) (< (inc j) (count t)))
+                    (let [c (.charAt t (inc j))]
+                      (if (#{\% \= \{ \| \}} c)
+                        (recur (+ j 2))
+                        (let [k (if (Character/isLetter c) (+ j 2) (inc j))
+                              m (loop [e k] (if (and (< e (count t)) (Character/isDigit (.charAt t e))) (recur (inc e)) e))]
+                          (if (and (> m k) (>= (Long/parseLong (subs t k m)) n))
+                            (soft-diag! p ti "operand number out of range")
+                            (recur (max (inc j) m)))))))))))]
     (when (pos? (long @colons)) (perr p "an asm section"))
     (expect! p ")")
     {:volatile (boolean (:volatile qs)) :inline (boolean (:inline qs)) :goto (boolean (:goto qs)) :template tmpl
@@ -5328,7 +5352,11 @@
                 (cond (and (empty? as)) {:kind "ImplicitValueInitExpr"}
                       (and (= 1 (count as)) (not (is? p "..."))) (if mt (paren-init p mt (first as)) (first as))
                       :else (node p "ParenListExpr" ib (last-ix p) {:inner as}))))
-          _ (accept! p "...")
+          ;; (cpp-read-indep: [temp.variadic]/5, a pack expansion's pattern names a pack; outside every template a mem-initializer
+          ;; names none: GCC's "cannot expand initializer for member", other/error21.C's `B() : A()... {}`)
+          ei (ix p)
+          _ (when (and (accept! p "...") (not (in-template? p)) (not (skim? p)) (main-tok? p ei))
+              (soft-diag! p ei "cannot expand initializer: its pattern contains no parameter packs"))
           ;; a member's name, else a base's or the class's own (a delegating constructor's): clang prints the latter as a type
           who (cond
                 (and qn (name-plain qn) (nil? (:args (peek (:parts qn)))) (not (type-ent? (:ent qn))))
@@ -6360,7 +6388,11 @@
                       ;; deduced from its initializer, so one with none is ill-formed, and a non-static data member's type is no
                       ;; placeholder ([dcl.spec.auto.general]/6): GCC's "declaration of 'auto j' has no initializer", "non-static data
                       ;; member declared with placeholder 'auto'"; cpp0x/auto7.C, cpp0x/constexpr-77482.C)
-                      (and (#{:auto :dta} (:t base0)) (nil? fs) (not (:typedef ds)) (#{:top :block :member} ctx) (or (is? p ";") (is? p ","))
+                      ;; (cpp-read-indep: a non-static data member's too when it has a default member initializer, `auto i = 0;`,
+                      ;; [dcl.spec.auto.general]/6: cpp0x/auto29.C)
+                      (and (#{:auto :dta} (:t base0)) (nil? fs) (not (:typedef ds)) (#{:top :block :member} ctx)
+                           (or (is? p ";") (is? p ",")
+                               (and (= ctx :member) (not= "static" (:storage ds)) (not (:constexpr ds)) (not (:inline ds)) (or (is? p "=") (is? p "{"))))
                            (not (:friend ds)) (nil? tmpl) (= 1 np) (not (:g qn)) (empty? (mapcat :sufs chain)) (>= (.-year p) 2011))
                       (soft-diag! p (long (:i lp)) (if (and (= ctx :member) (not= "static" (:storage ds)))
                                                      "non-static data member declared with placeholder 'auto'"
