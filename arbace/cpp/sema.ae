@@ -2383,12 +2383,20 @@
   [scope n]
   (when (and (checking?) *on-refusal* (nil? *instantiating*) (= "FunctionDecl" (:kind n)) (not (:friend n))
              (not (header-node? n)) (not (:cls scope)) (not (str/includes? (str (:name n)) "::")))
+    ;; (the parameters in scope, [basic.scope.param]: a later default argument may name an earlier parameter in an unevaluated
+    ;; operand, [dcl.fct.default]/9, DRs/dr2082.C's `int b = sizeof(a)`)
+    (let [ps (new-scope :block scope)]
+    (doseq [pn (param-nodes n) :when (:name pn)]
+      (when-let [t (try (resolve-type scope (get-in pn [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+        (let [id (next-id)]
+          (swap! *vars* assoc id {:id id :name (:name pn) :ty t :storage :param})
+          (enter! ps (:name pn) {:e :var :id id}))))
     (doseq [p (param-nodes n)
             :let [d (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))]
             :when (and (map? d) (get-in d [:range :begin :offset]))]
       (when-let [t (try (resolve-type scope (get-in p [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
         (when (and (map? t) (not (some #(= % (:k t)) [:dep :tparam :auto])))
-          (try (init-for t (analyze {:scope scope} d) {:scope scope} :copy)
+          (try (init-for t (analyze {:scope ps} d) {:scope ps} :copy)
                (catch arbace.lang.ExceptionInfo x
                  (let [xd (ex-data x)]
                    (cond (:cpp/timeout xd) (throw x)
@@ -2396,7 +2404,7 @@
                          (*on-refusal* (if (= :this (:codegen/refused xd))
                                          (ex-info "codegen: invalid use of non-static data member in a default argument" {:codegen/refused :default-arg})
                                          x)
-                                       (or (:cx/node xd) (some-> *at* deref) d)))))))))))
+                                       (or (:cx/node xd) (some-> *at* deref) d))))))))))))
 
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
@@ -13288,6 +13296,16 @@
     "BinaryConditionalOperator"
     (let [[x y] (kids n)
           x (analyze ctx x)
+          ;; (cpp-read-indep, the checker: the condition `x` of `x ?: y` is contextually converted to bool, [expr.cond]/1 with the
+          ;; GCC manual's "Conditionals with Omitted Operands": a non-static member function's or an overload set's name
+          ;; converts to nothing, GCC's "cannot convert 'z<t>::zz' from type 'bool (z<t>::)()' to type 'bool'", ext/pr77496.C,
+          ;; "cannot resolve overloaded function 'f' based on conversion to type 'bool'", other/pr77548.C)
+          _ (when (and (checking?) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x)))
+              (cond (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x))
+                    (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'")
+                    (> (count (:fns x)) 1)
+                    (fail :overload-addr "statement cannot resolve address of overloaded function: cannot resolve overloaded function '"
+                          (:name (fnd (first (:fns x)))) "' based on conversion to type 'bool'")))
           x (if (and (= :pr (:cat x)) (abi/class? (abi/unq (:ty x)))) (materialize x) x)
           k (swap! opaque-ids inc)
           ov {:op :opaque :id k :ty (:ty x) :cat (:cat x)}
@@ -13516,7 +13534,13 @@
                              dt (when (re-matches #"[A-Za-z_]\w*" nm)
                                   (try (abi/unq (resolve-type (:scope ctx) nm)) (catch arbace.lang.ExceptionInfo _ nil)))]
                          (when (and (map? dt) (cx-sure-scalar? dt) (not (abi/class? dt)))
-                           (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' is not of the object's class type"))))
+                           (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' is not of the object's class type"))
+                         ;; (a name no declaration declares, nor the object's class's: template/dtor5.C's `ap->~B()`)
+                         (let [c (abi/cls (class-id (:ty o)))]
+                           (when (and (nil? dt) (re-matches #"[A-Za-z_]\w*" nm) c (:complete c) (not= nm (:name c))
+                                      (empty? (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))
+                                      (empty? (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ [:unknown]))))
+                             (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' has not been declared")))))
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (let [c (cast-expr ctx abi/void pseudo true)] (if (and (checking?) (= :cast (:op c)) (= :void (:ck c))) (assoc c :cx-pseudo-dtor true) c))
