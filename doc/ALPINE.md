@@ -22,9 +22,13 @@ apk add alex alpine-base alpine-sdk alsa-lib-dev atop autoconf automake bat bubb
   doas dosfstools e2fsprogs-extra fastfetch findutils fontconfig-dev gcc-cross-embedded gdb \
   github-cli go grep grub-efi happy hdparm htop hyperfine joker linux-virt maven mosh mount \
   newlib nvme-cli ocaml5-compiler-libs openjdk25-src openssh openssh-server-pam perf pigz procps proot py3-pip \
-  qemu-aarch64 qemu-guest-agent qemu-system-aarch64 reptyr rsync sed strace tmux tree ugrep vim \
+  qemu-aarch64 qemu-guest-agent qemu-system-aarch64 reptyr rsync sed strace tmux tree ugrep util-linux-misc vim \
   wget zellij zip
 ```
+
+`util-linux-misc` (taskset) was installed on 2026-11-27 for `bin/java-check`'s interp level (the Mac's queue 612, the user's
+612-1 (b): its runs capped at `JAVA_CHECK_INTERP_CPUS` processors by their CPU affinity; the level refuses to run uncapped
+without taskset), so the line above holds 68.
 
 None of the 67 is implied by the others, so no shorter list of world's names gives the same
 installation. The line's dependency closure is 485 packages, and the other 75 come by
@@ -70,6 +74,7 @@ scripts and has not yet been tried on a fresh host.
 | Need | Packages |
 |---|---|
 | The scripts | `bash coreutils findutils grep sed diffutils tar xz unzip` (flock, setsid, awk, bc, timeout and `time -v` from busybox; `unzip -Z1` needs Info-ZIP's `unzip`, the package) |
+| Java's interp level's CPU cap (`bin/java-check`, `JAVA_CHECK_INTERP_CPUS`, 612-1 (b); Alpine's busybox has no taskset applet) | `util-linux-misc` (taskset) |
 | The gate's audit (`bin/gate --audit`, and `--clean`, whose every step runs under it; GT4, GT7: `strace -f --seccomp-bpf`, `bin/lib/gate-run.bash`) | `strace` |
 | Helpers in some scripts (`alpine-env`, `arbace-go`'s REPL check, `box-arm64-vm`, `box-smoke`, `box-suite`, `goi`, `net-check`, `tamago-vendor`, `toolchain-vendor`, `gate-tests`' `test/java/timeouts-test.bash`) | `python3` |
 | Sources, Clojure's suite's jars from Maven Central, the arm64 VM's netboot | `git curl ca-certificates` |
@@ -104,7 +109,7 @@ As one line:
 ```sh
 apk add bash coreutils findutils grep sed diffutils tar xz unzip python3 git curl \
   ca-certificates strace rlwrap qemu-aarch64 qemu-system-aarch64 openssh-client openjdk25-jdk \
-  alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev go
+  alpine-sdk autoconf zip alsa-lib-dev cups-dev fontconfig-dev go util-linux-misc
 ```
 
 The crops' checks, until their branches merge, add:
