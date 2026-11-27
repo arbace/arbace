@@ -2850,6 +2850,9 @@
 (defn flexible-arrays
   [u starts ^String src ^String main]
   (let [out (java.util.ArrayList.)
+        fam-used-fn (atom (constantly false))
+        fam-spec-var? (atom (constantly false))
+        fam-used? (fn [r d] (@fam-used-fn r d))
         mine? (fn [x] (let [f (or (get-in x [:loc :file]) (get-in x [:range :begin :file]))] (or (nil? f) (= main f))))
         report! (fn [x msg] (when-let [o (or (get-in x [:loc :offset]) (get-in x [:range :begin :offset]))]
                               (when (mine? x)
@@ -2940,6 +2943,25 @@
             :let [a (analyze r)]
             :when (:bad a)]
       (report! (:first a) (str "flexible array member '" (:name (:first a)) "' not at end of '" (:tagUsed r) " " (or (:name r) "<unnamed>") "'")))
+    ;; (cpp-sema-types: whether a constructor or an object of the record `r` uses its default member initializers: a constructor
+    ;; not deleted, a variable of its type anywhere in the unit, or a member of its type in a record so used)
+    (let [var-types (let [acc (java.util.HashSet.)]
+                      (walk-nodes (fn [v _] (when (= "VarDecl" (:kind v)) (.add acc (base-name (str (get-in v [:type :qualType])))))) (:nodes u) nil)
+                      acc)
+          named? (fn [r t] (let [nm (:name r) tag (when-let [o (get-in r [:range :begin :offset])] (str " at " main ":" o ")"))]
+                             (or (and nm (= t nm)) (and tag (str/includes? t tag))
+                                 (and nm (.containsKey in-tmpl r) (str/starts-with? t (str nm "<"))))))]
+      (reset! fam-spec-var? (fn [nm] (boolean (some #(str/starts-with? % (str nm "<")) var-types))))
+      (reset! fam-used-fn
+              (fn used? [r depth]
+                (boolean
+                  (and (< (long depth) 6)
+                       (or (some #(and (= "CXXConstructorDecl" (:kind %)) (not (:explicitlyDeleted %))) (:inner r))
+                           (some #(named? r %) var-types)
+                           (some (fn [p] (and (not (identical? p r))
+                                              (some #(named? r (base-name (str (get-in % [:type :qualType])))) (members p))
+                                              (used? p (inc (long depth)))))
+                                 (.values by-off))))))))
     ;; (cpp-indep3: a flexible array member is GNU's extension, the manual's "Arrays of Length Zero": under -pedantic-errors
     ;; GCC's pedwarn "ISO C++ forbids flexible array member 'a'" an error, at the member's name; ext/flexary11.C, flexary14.C,
     ;; flexary27.C)
@@ -2949,7 +2971,11 @@
                 :when (and (fam-type? (str (get-in m [:type :qualType]))) (string? (:name m)) (seq (:name m)))]
           (report! m (str "ISO C++ forbids flexible array member '" (:name m) "'")))))
     ;; initializers
-    (doseq [r (.values by-off) :when (not (.containsKey in-tmpl r))
+    ;; (cpp-sema-types: a class template's pattern too when a variable of one of its specializations is defined, `struct X<char>
+    ;; x;`: its member's type an array of unknown bound in every specialization; ext/flexary20.C)
+    (doseq [r (.values by-off) :when (or (not (.containsKey in-tmpl r))
+                                         (and (string? (:name r)) (seq (:name r)) (nil? (.get parent-of r))
+                                              (@fam-spec-var? (:name r))))
             :let [fams (set (keep #(when (fam-type? (str (get-in % [:type :qualType]))) (:name %)) (members r)))
                   ctors (filter #(= "CXXConstructorDecl" (:kind %)) (:inner r))]]
       (when (seq fams)
@@ -2958,15 +2984,11 @@
                 :when (some #(and (= "CXXCtorInitializer" (:kind %)) (contains? fams (get-in % [:anyInit :name]))) (:inner c))]
           (report! c "initializer for flexible array member"))
         ;; a default member initializer of one, when a constructor or an object of the class uses it
+        ;; (cpp-sema-types: an object anywhere in the unit, a block-scope variable among them, or a member of a class whose
+        ;; constructor or object uses the member's in turn, [class.base.init]/9: ext/flexary20.C's `struct T t;` in main and
+        ;; V's member `w` of the nested W)
         (doseq [m (members r)
-                :when (and (contains? fams (:name m)) (:hasInClassInitializer m)
-                           (or (some #(not (:explicitlyDeleted %)) ctors)
-                               (let [nm (:name r)
-                                     tag (when-let [o (get-in r [:range :begin :offset])] (str " at " main ":" o ")"))]
-                                 (some (fn [v] (and (= "VarDecl" (:kind v))
-                                                    (let [t (base-name (str (get-in v [:type :qualType])))]
-                                                      (or (and nm (= t nm)) (and tag (str/includes? t tag))))))
-                                       (let [p (.get parent-of r)] (if p (:inner p) (:nodes u)))))))]
+                :when (and (contains? fams (:name m)) (:hasInClassInitializer m) (fam-used? r 0))]
           (report! m "initializer for flexible array member")))
       ;; a default member initializer of a class type whose list reaches the flexible array member
       (doseq [m (members r)
