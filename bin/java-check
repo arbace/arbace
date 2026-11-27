@@ -257,7 +257,8 @@
 # shared by the worktrees, keyed by the sources, the options, the reader's sources and the tool's key),
 # JAVA_CHECK_FORMS_ONLY=1 (GTS41 (c), bin/gate --clean: the levels that consume the read's output, run
 # without the read level, take their forms from that cache alone; a miss fails the run, never reads),
-# REPR_JAVA_EXE (javac's tool executable, bin/repr-java's), ARBACE_HOST_EXE (the tools' host).
+# REPR_JAVA_EXE (javac's tool executable, bin/repr-java's), ARBACE_HOST_EXE (the tools' host),
+# JAVA_CHECK_INTERP_CPUS (the interp level's processors, default 8, 0 no cap: interp_cpus, the user's 612-1 (b)).
 set -euo pipefail
 export CGO_ENABLED=0
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -957,6 +958,26 @@ plan_bad() {
   return 1
 }
 
+# interp_cpus ID: the CPUs an interpreted run of test ID may use (queue 612, the user's 612-1 (b), 2026-11-27), as a
+# comma list for taskset, or nothing for no cap. Tests whose work the processor count decides (DoubleAdderDemo's and
+# LongAdderDemo's NCPU/2 threads, ForkJoinPool's default parallelism) do 9 times the work on a 64-processor host
+# as on 8: the interp level caps Runtime.availableProcessors at JAVA_CHECK_INTERP_CPUS (default 8; 0 no cap) by
+# the run's CPU affinity, which jrt's availableProcessors reads (Go's runtime.NumCPU: sched_getaffinity at start),
+# so the executable needs no change. The window of CPUs is taken from the allowed ones, moved along by the test's
+# number so that concurrent jobs spread over the host. No cap when the host allows no more (a missing taskset: the run refuses, above)
+interp_cpus() {
+  local k=${JAVA_CHECK_INTERP_CPUS:-8} n i off out="" c
+  local -a all=()
+  [ "$k" -gt 0 ] 2>/dev/null && command -v taskset > /dev/null || return 0
+  mapfile -t all < <(awk '/^Cpus_allowed_list:/ { n = split($2, r, ","); for (i = 1; i <= n; i++) { m = split(r[i], ab, "-");
+    lo = ab[1]; hi = (m > 1) ? ab[2] : ab[1]; for (c = lo; c <= hi; c++) print c } }' /proc/self/status)
+  n=${#all[@]}
+  [ "$n" -gt "$k" ] || return 0
+  off=$(( (10#${1#t} * k) % n ))
+  for ((i = 0; i < k; i++)); do c=${all[$(( (off + i) % n ))]}; out=${out:+$out,}$c; done
+  echo "$out"
+}
+
 # run_actions LEVEL EXE LOAD FORMS: each main action of the test (id, p, dir: check_one's) run by
 # EXE's test/java/run.ae, its classes defined from FORMS as LOAD says (do, files: the interpreter;
 # none: the program's own, compiled), in the run's directories (run_dirs, JCS19 (b)), judged;
@@ -991,6 +1012,9 @@ run_actions() {
   # a wall-clock limit (test_wall): the attempts' limits as wall seconds, no CPU limit
   local lcmd=(limited)
   test_wall "$(awk -F'\t' '$1 == "test" { print $2; exit }' "$p/plan.tsv")" && lcmd=(limited_cpu unlimited)
+  # 612-1 (b): the interpreted runs' processors capped (interp_cpus), taskset between the limit and the executable
+  local pin=() cpus
+  if [ "$level" = interp ] && declare -F interp_cpus > /dev/null; then cpus=$(interp_cpus "$id"); [ -z "$cpus" ] || pin=(taskset -c "$cpus"); fi
   # JCS341 (a): jtreg's standard properties (jtreg_props), test.jdk WORK/no-jdk: no JDK on Arbace's side
   local tprops=() tbase=$jdktest
   [ "$(awk -F'\t' '$1=="root"{print $2}' "$p/plan.tsv")" != checkout ] || tbase=$root
@@ -1016,7 +1040,7 @@ run_actions() {
       st=0; (cd "$w" && export TMPDIR="$tmp" JAVA_TOOL_OPTIONS="-Darbace.spec.skip-macros=true${JAVA_TOOL_OPTIONS:+ $JAVA_TOOL_OPTIONS}" \
                && { [ -z "$fdir" ] || export ARBACE_PATH=$fdir; } \
                && { [ ! -f "$p/classes.dir" ] || export ARBACE_PATH=${ARBACE_PATH:+$ARBACE_PATH:}$(cat "$p/classes.dir"); } \
-               && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env "java-$level" "$id"); } && "${lcmd[@]}" "$lim" "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
+               && { [ -z "${ARBACE_COVER_DIR:-}" ] || export $(cover_env "java-$level" "$id"); } && "${lcmd[@]}" "$lim" ${pin[@]+"${pin[@]}"} "$exe" "$root/test/java/run.ae" --load "$mode" "${fdir:--}" "${x[8]}" \
                -Dtest.src="$dir" -Dtest.classes="$work/classes/$id" "${tprops[@]}" -Djava.io.tmpdir="$tmp" ${props[@]+"${props[@]}"} -- "${x[@]:9}" \
                < "$work/empty" > "$p/out$i" 2> "$p/err$i") || st=$?
       ojr=""
@@ -1707,10 +1731,18 @@ check() {
       reader_key="$(repr_java_reader_hash) $(repr_java_host)" || return 1 ;;
     esac
   fi
+  # 612-1 (b): the interp level's processor cap is part of the run's terms: refuse rather than run uncapped when
+  # taskset is missing (JAVA_CHECK_INTERP_CPUS=0 is the explicit off), so an uncapped run is never recorded by mistake
+  case ",$levels," in *,interp,*)
+    if [ "${JAVA_CHECK_INTERP_CPUS:-8}" != 0 ] && ! command -v taskset > /dev/null; then
+      echo "java-check: the interp level caps its runs' processors at JAVA_CHECK_INTERP_CPUS=${JAVA_CHECK_INTERP_CPUS:-8} by taskset (util-linux-misc), which is missing; install it, or set JAVA_CHECK_INTERP_CPUS=0 to run uncapped" >&2
+      return 1
+    fi ;;
+  esac
   jc plan "$ref" "$work" ${pargs[@]+"${pargs[@]}"} >&2
   jc plan-diag "$ref" "$work" "$levels" >&2
   echo "== java-check: $(wc -l < "$work/run.list") tests at the levels $levels, $jobs at a time (the executable $rexe${texe:+; the tests naming the javac API on $texe})" >&2
-  export -f src_of cache_slot cache_take tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions jtreg_props run_dirs mask_hashes mask_dirs test_dir plan_bad check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden
+  export -f src_of cache_slot cache_take tool_test classes_test test_classes cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall check_one nread_one read_opts read_finished first_line root_cause classes_sha classes_verdict judge run_actions jtreg_props run_dirs mask_hashes mask_dirs test_dir plan_bad check_diag diag_actions diag_root diag_norm diag_first_diff diag_golden diag_judge judge_own judge_golden interp_cpus
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work formsc forms_only save jdktest levels timeout from_committed load rexe texe tplatform tool_re cf_re reader_key="${reader_key:-}" classes_opts_s="${classes_opts[*]}"
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'classes_opts=($classes_opts_s); check_one "$1"' _ {} 8>&- | LC_ALL=C sort > "$work/results.tsv"
@@ -2052,7 +2084,7 @@ essential_compiled() {
     echo "$key" > "$s/key"
   fi
   echo "== java-check --essential-compiled: the runs of $(wc -l < "$work/run.list") tests, $jobs at a time ($(since_t0))" >&2
-  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall compiled_one run_actions tool_test src_of plan_bad jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
+  export -f cover_env cover_settle limited limited_cpu attempt_limits timeout_kind note_attempt program_tmo test_limit test_wall compiled_one run_actions interp_cpus tool_test src_of plan_bad jtreg_props judge judge_own judge_golden diag_first_diff first_line root_cause mask_hashes mask_dirs run_dirs test_dir
   reset_timeout_log "$work/timeout-attempts.tsv"
   export root work jdktest timeout
   xargs -a "$work/run.list" -P "$jobs" -I{} bash -c 'compiled_one "$1" "$2"' _ {} "$s/arbace-ec" | LC_ALL=C sort > "$work/results.tsv"

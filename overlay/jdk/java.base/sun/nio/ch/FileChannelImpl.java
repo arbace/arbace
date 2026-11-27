@@ -56,6 +56,14 @@ public class FileChannelImpl
     // Used to make native read and write calls
     private final FileDescriptor fd;
 
+    // Arbace: jdk26u's positionLock, the lock of the position-sensitive operations. They held fd's
+    // monitor across begin and end before, and an interrupt that closes the channel (begin or end:
+    // postInterrupt, close under closeLock) then waited for closeLock while holding fd's monitor, which
+    // a close holding closeLock waits for (implCloseChannel's HostFiles.setHandle, FileDescriptor.set):
+    // a deadlock (InterruptDeadlock). fd's monitor, which positional reads and writes and the streams
+    // take (HostFileChannels), is held only around the host's operations, never across begin and end
+    private final Object positionLock = new Object();
+
     // File access mode (immutable)
     private final boolean writable;
     private final boolean readable;
@@ -244,8 +252,14 @@ public class FileChannelImpl
             off = 0;
             rem = b.length;
         }
-        int n = (pos < 0) ? HostFiles.read(handle(), b, off, rem)
-                          : HostFileChannels.pread(fd, pos, b, off, rem);
+        int n;
+        if (pos < 0) {
+            synchronized (fd) {
+                n = HostFiles.read(handle(), b, off, rem);
+            }
+        } else {
+            n = HostFileChannels.pread(fd, pos, b, off, rem);
+        }
         if (n > 0) {
             if (direct)
                 dst.position(dst.position() + n);
@@ -270,9 +284,11 @@ public class FileChannelImpl
             off = 0;
             src.duplicate().get(b);
         }
-        if (pos < 0)
-            HostFiles.write(handle(), b, off, rem);
-        else
+        if (pos < 0) {
+            synchronized (fd) {
+                HostFiles.write(handle(), b, off, rem);
+            }
+        } else
             HostFileChannels.pwrite(fd, pos, b, off, rem);
         src.position(src.position() + rem);
         return rem;
@@ -284,7 +300,7 @@ public class FileChannelImpl
         ensureOpen();
         if (!readable)
             throw new NonReadableChannelException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             int n = 0;
             try {
                 beginBlocking();
@@ -304,7 +320,7 @@ public class FileChannelImpl
         ensureOpen();
         if (!readable)
             throw new NonReadableChannelException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             long total = 0;
             try {
                 beginBlocking();
@@ -335,7 +351,7 @@ public class FileChannelImpl
         ensureOpen();
         if (!writable)
             throw new NonWritableChannelException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             int n = 0;
             try {
                 beginBlocking();
@@ -355,7 +371,7 @@ public class FileChannelImpl
         ensureOpen();
         if (!writable)
             throw new NonWritableChannelException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             long total = 0;
             try {
                 beginBlocking();
@@ -375,14 +391,16 @@ public class FileChannelImpl
     @Override
     public long position() throws IOException {
         ensureOpen();
-        synchronized (fd) {
+        synchronized (positionLock) {
             long p = -1;
             try {
                 beginBlocking();
                 if (!isOpen())
                     return 0;
                 // in append-mode then position is advanced to end before writing
-                p = append ? HostFiles.length(handle()) : HostFiles.position(handle());
+                synchronized (fd) {
+                    p = append ? HostFiles.length(handle()) : HostFiles.position(handle());
+                }
                 return p;
             } finally {
                 endBlocking(p > -1);
@@ -395,13 +413,15 @@ public class FileChannelImpl
         ensureOpen();
         if (newPosition < 0)
             throw new IllegalArgumentException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             boolean done = false;
             try {
                 beginBlocking();
                 if (!isOpen())
                     return null;
-                HostFiles.seek(handle(), newPosition);
+                synchronized (fd) {
+                    HostFiles.seek(handle(), newPosition);
+                }
                 done = true;
                 return this;
             } finally {
@@ -413,13 +433,15 @@ public class FileChannelImpl
     @Override
     public long size() throws IOException {
         ensureOpen();
-        synchronized (fd) {
+        synchronized (positionLock) {
             long s = -1;
             try {
                 beginBlocking();
                 if (!isOpen())
                     return -1;
-                s = HostFiles.length(handle());
+                synchronized (fd) {
+                    s = HostFiles.length(handle());
+                }
                 return s;
             } finally {
                 endBlocking(s > -1);
@@ -454,22 +476,24 @@ public class FileChannelImpl
             throw new IllegalArgumentException("Negative size");
         if (!writable)
             throw new NonWritableChannelException();
-        synchronized (fd) {
+        synchronized (positionLock) {
             boolean done = false;
             try {
                 beginBlocking();
                 if (!isOpen())
                     return null;
-                int h = handle();
-                long size = HostFiles.length(h);
-                long p = HostFiles.position(h);
-                // truncate file if given size is less than the current size
-                if (newSize < size)
-                    HostFiles.setLength(h, newSize);
-                // if position is beyond new size then adjust it
-                if (p > newSize)
-                    p = newSize;
-                HostFiles.seek(h, p);
+                synchronized (fd) {
+                    int h = handle();
+                    long size = HostFiles.length(h);
+                    long p = HostFiles.position(h);
+                    // truncate file if given size is less than the current size
+                    if (newSize < size)
+                        HostFiles.setLength(h, newSize);
+                    // if position is beyond new size then adjust it
+                    if (p > newSize)
+                        p = newSize;
+                    HostFiles.seek(h, p);
+                }
                 done = true;
                 return this;
             } finally {
