@@ -220,7 +220,9 @@
         declared (delay (let [hs (java.util.HashSet.)]
                           (walk-nodes (fn [n _] (when-let [nm (:name n)] (when (string? nm) (.add hs nm)))) (:nodes u) nil)
                           hs))
-        reach? (reaches-fn #{"DeclRefExpr"})]
+        reach? (reaches-fn #{"DeclRefExpr"})
+        cls-stack (java.util.ArrayDeque.)
+        in-parm (atom 0)]
     ;; (round 54, third pass: GCC's suppression of a repeated error, its unqualified_name_lookup_error's declaration of the
     ;; name in the innermost block scope: an undeclared name is reported once in a block and the blocks it encloses, a later
     ;; use there found; a compound statement, a selection or iteration statement's own scope, a handler and a function each a
@@ -232,12 +234,20 @@
                 (not (reach? x)) nil
                 ;; (queue 567: as walk-nodes, *params* rebound only where a parameter is, the entries reduced)
                 (map? x) (let [levels (if (contains? block-kinds (:kind x)) (cons (java.util.HashSet.) levels) levels)
+                               ;; (cpp-read-indep: [class.mem.general]/7, a member function's default argument is a complete-class
+                               ;; context: a member the class declares after the function is found there, so no undeclared name;
+                               ;; cpp0x/constexpr-inhctor1.C's `A(int, int = i)` before `static const int i;`)
+                               _ (when (and (= "CXXRecordDecl" (:kind x)) (vector? (:inner x)))
+                                   (.push ^java.util.ArrayDeque cls-stack (set (keep #(when (string? (:name %)) (:name %)) (:inner x)))))
+                               _ (when (= "ParmVarDecl" (:kind x)) (swap! in-parm inc))
                                _ (when (:kind x) (f x parent levels))
                                p (if (:kind x) x parent)
                                inner (:inner x)
                                ps (when (vector? inner) (seq (keep #(when (and (= "ParmVarDecl" (:kind %)) (not (:_badtypes %))) (:name %)) inner)))
                                go (fn [] (reduce-kv (fn [_ k v] (when (and (not (identical? k :_ent)) (or (map? v) (vector? v) (seq? v))) (w v p levels)) nil) nil x))]
-                           (if ps (binding [*params* (into *params* ps)] (go)) (go)))
+                           (if ps (binding [*params* (into *params* ps)] (go)) (go))
+                           (when (= "ParmVarDecl" (:kind x)) (swap! in-parm dec))
+                           (when (and (= "CXXRecordDecl" (:kind x)) (vector? (:inner x))) (.pop ^java.util.ArrayDeque cls-stack)))
                 (vector? x) (reduce (fn [_ y] (w y parent levels) nil) nil x)
                 (seq? x) (doseq [y x] (w y parent levels))
                 :else nil))
@@ -249,6 +259,7 @@
                     (let [callee? (and parent (= "CallExpr" (:kind parent)) (identical? n (first (:inner parent))))]
                       (when (and (or (not callee?) (adl-free? parent) (not (.contains ^java.util.HashSet @declared nm)))
                                  (not (contains? *params* nm)) (dunder-ok? nm)
+                                 (not (and (pos? (long @in-parm)) (some #(contains? % nm) cls-stack)))
                                  ;; (a braced list's element still: its auto deduction fails on the error, GCC's "unable to
                                  ;; deduce", on that line)
                                  (or (and parent (= "InitListExpr" (:kind parent))) (not-any? #(.contains ^java.util.HashSet % nm) levels)))
@@ -888,6 +899,7 @@
         ice (resolve 'arbace.cpp.sema/*invalid-constexpr-error*)
         icw (resolve 'arbace.cpp.sema/*invalid-constexpr-warned*)
         pd (resolve 'arbace.cpp.sema/*pedantic*)
+        nrt (resolve 'arbace.cpp.sema/*no-rtti*)
         nw (resolve 'arbace.cpp.sema/*narrowing*)
         fre (resolve 'arbace.cpp.sema/*fp-rank-error*)
         ntm (resolve 'arbace.cpp.sema/*new-ttp-matching*)
@@ -1005,7 +1017,7 @@
                       at-var (atom nil) on-var h dts (:decltypes u) mn main md (:dir u) yr (cxx-year (:std u)) pe (boolean (some #{"-pedantic-errors"} (:args u)))
                       icw (boolean (some #{"-Winvalid-constexpr"} (concat (:args u) *driver-args*)))
                       ice (boolean (and (some #{"-pedantic-errors" "-Werror=invalid-constexpr" "-Werror"} (concat (:args u) *driver-args*))
-                                        (not (some #{"-Wno-invalid-constexpr" "-Wno-error=invalid-constexpr"} (concat (:args u) *driver-args*))))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u)))
+                                        (not (some #{"-Wno-invalid-constexpr" "-Wno-error=invalid-constexpr"} (concat (:args u) *driver-args*))))) pd (boolean (some #{"-pedantic" "-Wpedantic" "-pedantic-errors"} (:args u))) nrt (boolean (some #{"-fno-rtti"} (concat (:args u) *driver-args*)))
                       ;; (queue 412: [dcl.init.list]/7, GCC's permerror; nothing or a warning under these)
                       nw (not (some #{"-Wno-narrowing" "-fpermissive" "-Wno-error=narrowing"} (:args u)))
                       ;; (cpp-extfloat: GCC's pedwarn on a floating conversion to a lesser conversion rank, -Wnarrowing's, an error)
@@ -6260,6 +6272,7 @@
    [:call-object #"^codegen: no match for call to an object of class" "no matching function for call to object"]
    [:overload-addr #"^codegen: statement cannot resolve address of overloaded function" "reference to overloaded function could not be resolved"]
    [:udl #"^codegen: unable to find (numeric|character) literal operator" "no matching literal operator"]
+   [:no-rtti #"^codegen: '(dynamic_cast|typeid)' not permitted with -fno-rtti" "not permitted with -fno-rtti"]
    [:ptr-int-cmp #"^codegen: ISO C\+\+ forbids comparison between pointer and integer" "comparison between pointer and integer"]
    [:mptr-base #"^codegen: (pointer to member conversion via virtual base|'.*' is an (ambiguous|inaccessible) base of)" "invalid pointer to member conversion"]
    [:init #"^codegen: a reference from arguments" "invalid value-initialization of reference type"]])

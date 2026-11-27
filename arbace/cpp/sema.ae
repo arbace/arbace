@@ -47,6 +47,9 @@
 ;; queue 365: -pedantic, -Wpedantic or -pedantic-errors given (the checker): GCC's diagnostics of the GNU extensions it otherwise
 ;; accepts silently (a zero-size array)
 (def ^:dynamic *pedantic* false)
+;; cpp-read-indep (the checker): -fno-rtti given, GCC's "'dynamic_cast' not permitted with -fno-rtti" for a cast that needs the
+;; run-time type information (arbace.repr.cpp.diag binds it)
+(def ^:dynamic *no-rtti* false)
 ;; queue 412 (round 7): [dcl.init.list]/7's narrowing conversions judged (the checker): false under -Wno-narrowing, -fpermissive
 ;; or -Wno-error=narrowing (GCC's permerror then a warning or nothing), and for the code generator
 (def ^:dynamic *narrowing* false)
@@ -7432,6 +7435,14 @@
 (defn convert-scalar
   "The standard conversion of the prvalue `e` to the scalar type `t` (implicit or, with `explicit?`, a cast's)."
   [e t explicit?]
+  ;; (cpp-read-indep, the checker: [over.over]/1, an overload set's name of several functions (or a template's) has a type only
+  ;; from a target of pointer to function, reference to function or pointer to member function type: to an arithmetic,
+  ;; enumeration or bool target GCC's "cannot resolve overloaded function 'foo' based on conversion to type 'double'",
+  ;; lookup/pr83287-2.C's `new T (foo)` for T double)
+  (when (and (checking?) (= :fnset (:op e)) (or (> (count (:fns e)) 1) (seq (:tmpls e)))
+             (let [u (abi/unq t)] (and (map? u) (or (abi/arith? u) (abi/enum? u)))))
+    (fail :overload-addr "statement cannot resolve address of overloaded function: cannot resolve overloaded function '"
+          (or (some-> (first (:fns e)) fnd :name) "") "' based on conversion to an arithmetic type"))
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
@@ -10276,7 +10287,16 @@
                             (abi/scalar? (abi/unq other))
                             (not (null-constant? (rv oe))))))
           (fail :nullptr-operands "invalid operands of types '" (if ln "std::nullptr_t" (cx-tyname lt)) "' and '"
-                (if rn "std::nullptr_t" (cx-tyname rt)) "' to binary 'operator" o "'"))))
+                (if rn "std::nullptr_t" (cx-tyname rt)) "' to binary 'operator" o "'"))
+        ;; ([expr.mul]/2, [expr.bit.and], [expr.xor], [expr.or], [expr.shift]/1: arithmetic or integral operands, no pointer or
+        ;; pointer to member; [expr.add]/1-2: no two pointers added, no pointer subtracted from an integer: GCC's "invalid operands of
+        ;; types 'char*' and 'unsigned char:1' to binary 'operator|'", diagnostic/bitfld1.C)
+        (let [p? (fn [t] (let [u (abi/unq t)] (or (abi/ptr? u) (abi/mptr? u))))]
+          (when (or (and (#{"*" "/" "%" "&" "|" "^" "<<" ">>"} o) (or (p? lt) (p? rt)))
+                    (and (= "+" o) (p? lt) (p? rt))
+                    (and (= "-" o) (abi/arith? (abi/unq lt)) (p? rt))
+                    (and (#{"+" "-"} o) (or (abi/mptr? (abi/unq lt)) (abi/mptr? (abi/unq rt)))))
+            (fail :nullptr-operands "invalid operands of types '" (cx-tyname lt) "' and '" (cx-tyname rt) "' to binary 'operator" o "'")))))
     (case o
       "<=>" (three-way l r)
       ("+" "-")
@@ -11845,7 +11865,9 @@
         ;; int[]) has no size: GCC's "invalid use of array with unspecified bounds"; init/new20.C)
         _ (when (and (checking?) (nil? nexpr) (map? et) (abi/arr? (abi/unq et)) (nil? (:n (abi/unq et))) (nil? initn))
             (fail :new-array "invalid use of array with unspecified bounds"))
-        _ (when (and (checking?) (nil? initn) (nil? nexpr) (:c et) (not (abi/ref? et))
+        ;; (cpp-read-indep: an array new's elements alike, [expr.new]/22 with [dcl.init.general]/7.2: init/pr20039.C's `new const
+        ;; X[2]`)
+        _ (when (and (checking?) (nil? initn) (:c et) (not (abi/ref? et))
                      (or (abi/scalar? (abi/unq et))
                          (and (abi/class? (abi/unq et)) (not (cx-const-default-constructible? (:id (abi/unq et)))))))
             ;; (cpp-decl2, the checker: [expr.new]/22 with [dcl.init.general]/7, a new-expression without an initializer
@@ -13485,6 +13507,16 @@
                                (fail :pseudo-dtor "the type being destroyed is not the one the destructor names")
                                (and dt qt (cx-sure-scalar? qt) (cx-sure-scalar? dt) (not= (dissoc qt :c :v) (dissoc dt :c :v)))
                                (fail :pseudo-dtor "the pseudo-destructor's qualifier names another type than its destructor"))))
+                     ;; (cpp-read-indep, the checker: [expr.prim.id.dtor]/2 and [class.dtor]/?, `o.~T()` of a class object names
+                     ;; its class's destructor: a T that denotes a scalar type is no destructor of it, GCC's "the type being
+                     ;; destroyed is 'Z', but the destructor refers to 'int'"/"is not of type", template/pseudodtor2.C's
+                     ;; `foo ().~T()` of T int)
+                     (when (and (checking?) (class-id (:ty o)) (empty? (:qualifier cn)))
+                       (let [nm (subs (str (:name cn)) 1)
+                             dt (when (re-matches #"[A-Za-z_]\w*" nm)
+                                  (try (abi/unq (resolve-type (:scope ctx) nm)) (catch arbace.lang.ExceptionInfo _ nil)))]
+                         (when (and (map? dt) (cx-sure-scalar? dt) (not (abi/class? dt)))
+                           (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' is not of the object's class type"))))
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (let [c (cast-expr ctx abi/void pseudo true)] (if (and (checking?) (= :cast (:op c)) (= :void (:ck c))) (assoc c :cx-pseudo-dtor true) c))
@@ -13881,6 +13913,9 @@
           dc (class-id dt)]
       (cond
         (and dc sc (or (= dc sc) (abi/derived-from? sc dc))) (cast-expr ctx t e false)
+        ;; (cpp-read-indep: a downcast or a cast to void* reads the object's dynamic type, which -fno-rtti leaves out: GCC's
+        ;; "'dynamic_cast' not permitted with -fno-rtti", rtti/no-rtti.C)
+        (and (checking?) *no-rtti*) (fail :no-rtti "'dynamic_cast' not permitted with -fno-rtti")
         (and (not ref) (abi/void? dt)) {:op :dyncast :e src :void true :ty t :cat :pr}
         :else {:op :dyncast :e src :ref ref :from sc :to dc :ty (if ref dt t) :cat (if ref (if (= :rref (:k t)) :xv :lv) :pr)
                :hint (if-let [[_ off vb] (abi/base-path dc sc)] (if vb -1 off) -2)}))

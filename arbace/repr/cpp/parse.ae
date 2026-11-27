@@ -2827,6 +2827,7 @@
         ;; (h-cpp-read: the template is a string-literal, or C++26's parenthesized constant expression (GCC's constexpr asm):
         ;; GCC's "expected string-literal" else, before the statement is skipped)
         _ (when-not (or (identical? :str (tk (cur p))) (is? p "(")) (soft-diag! p (ix p) "expected string-literal"))
+        ti (ix p)
         tmpl (lit)
         ;; the sections' separators: `:` each, `::` two
         colons (atom 0)
@@ -2850,7 +2851,25 @@
         outs (if (sep!) (section operand) [])
         ins (if (sep!) (section operand) [])
         clob (if (sep!) (section lit) [])
-        labels (if (sep!) (section (fn [] (let [s (ts (cur p))] (adv! p) s))) [])]
+        labels (if (sep!) (section (fn [] (let [s (ts (cur p))] (adv! p) s))) [])
+        ;; (cpp-read-indep: the GCC manual's "Extended Asm", "Input Operands": an extended asm's template refers to its operands as
+        ;; %N, N below the operands' count (the goto labels' after them); a greater N is GCC's "operand number out of range",
+        ;; opt/pr69213.C's `__asm__ ("# %0" : : : "memory")`; a basic asm, without colons, substitutes nothing)
+        _ (when (and (string? tmpl) (pos? (+ (count outs) (count ins) (count clob) (count labels) (long @colons)))
+                     (not (skim? p)) (main-tok? p ti))
+            (let [n (+ (count outs) (count ins) (count labels))
+                  t (str tmpl)]
+              (loop [i 0]
+                (let [j (.indexOf t "%" (int i))]
+                  (when (and (>= j 0) (< (inc j) (count t)))
+                    (let [c (.charAt t (inc j))]
+                      (if (#{\% \= \{ \| \}} c)
+                        (recur (+ j 2))
+                        (let [k (if (Character/isLetter c) (+ j 2) (inc j))
+                              m (loop [e k] (if (and (< e (count t)) (Character/isDigit (.charAt t e))) (recur (inc e)) e))]
+                          (if (and (> m k) (>= (Long/parseLong (subs t k m)) n))
+                            (soft-diag! p ti "operand number out of range")
+                            (recur (max (inc j) m)))))))))))]
     (when (pos? (long @colons)) (perr p "an asm section"))
     (expect! p ")")
     {:volatile (boolean (:volatile qs)) :inline (boolean (:inline qs)) :goto (boolean (:goto qs)) :template tmpl
