@@ -631,7 +631,7 @@
    [:addr #"^codegen: & of an rvalue" "lvalue required as unary '&' operand"]
    [:incdec #"^codegen: \+\+ of an rvalue" "lvalue required as increment operand"]
    ;; (cpp-rind: [dcl.type.auto.deduct]/4, arbace.cpp.sema's return statements)
-   [:deduce #"^codegen: (unable to deduce 'auto\*'|no return statements in function returning)" "unable to deduce / no return statements"]
+   [:deduce #"^codegen: (unable to deduce 'auto\*'|no return statements in function returning|unable to deduce 'auto' from the overloaded function)" "unable to deduce / no return statements"]
    ;; (cpp-rind: [expr.new]/1, arbace.cpp.sema/new-expr)
    [:new-array #"^codegen: invalid use of array with unspecified bounds" "invalid use of array with unspecified bounds"]
    ;; (cpp-rind: [over.ref]/1, arbace.cpp.sema/member-expr)
@@ -1624,8 +1624,9 @@
         (= "noexcept(false)" exc) :nfalse
         (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
         ;; (queue 602: noexcept(noexcept(f())) of a function f of the unit, the class of f's own specification: cpp0x/noexcept47.C)
-        (and *exc-fns* (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc))
-        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc)))
+        ;; (cpp-read-indep: the native parser's spelling of a member's, `noexcept(noexcept ( this -> fn ( ) ))`, cpp0x/noexcept53.C)
+        (and *exc-fns* (re-matches #"noexcept\(noexcept\s*\(\s*(?:this\s*->\s*)?([A-Za-z_][A-Za-z_0-9]*)\s*\(\s*\)\s*\)\)" exc))
+        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\s*\(\s*(?:this\s*->\s*)?([A-Za-z_][A-Za-z_0-9]*)\s*\(\s*\)\s*\)\)" exc)))
         ;; (round 54, fifth pass: before C++17 a dynamic exception specification, its set of types)
         (and *exc-year* (< (long *exc-year*) 17) (re-matches #"throw\((.+)\)" exc))
         {:dyn (set (map str/trim (str/split (second (re-matches #"throw\((.+)\)" exc)) #",")))}
@@ -5648,8 +5649,16 @@
             :when sig
             :let [bm (overridden cn (:name m) sig 0)]
             :when bm
-            :let [[brt _] (split (str (get-in bm [:type :qualType])))]
-            :when (and brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
+            :let [[brt _] (split (str (get-in bm [:type :qualType])))
+                  ;; (cpp-read-indep: [dcl.spec.auto.general]/? (C++23 /10), a function whose return type has a placeholder is
+                  ;; not virtual, and an overrider is virtual ([class.virtual]/2): GCC's "virtual function cannot have deduced
+                  ;; return type", at the overrider, cpp1y/auto-fn18.C's `auto f()` over `virtual int f()`)
+                  ded (when (and (re-matches #"(?:decltype\s*\(\s*auto\s*\)|auto)" (str/trim (str rt))) (not (re-find #"->" (str (get-in m [:type :qualType])))))
+                        (mine-at m main))
+                  _ (when ded (let [[l c] (line-col starts ded)]
+                                (.add out {:line l :col c :kind :error :rule :covariant
+                                           :msg (str "virtual function cannot have deduced return type ('" (:name m) "' overrides a virtual function)")})))]
+            :when (and (not ded) brt (not= (str/replace rt #"\s+" "") (str/replace brt #"\s+" "")))
             :let [a (rtype rt) b (rtype brt) o (mine-at m main)]
             :when (and a b o)]
       (let [cls-ptr? (and (:cls a) (:cls b) (:k a) (= (:k a) (:k b)))
@@ -6249,6 +6258,8 @@
    [:enum #"^codegen: invalid conversion to incomplete type '.*' in the initializer of its enumerator" "invalid conversion to incomplete type"]
    [:var-fn-type #"^codegen: variable '.*' has function type" "variable has function type"]
    [:call-object #"^codegen: no match for call to an object of class" "no matching function for call to object"]
+   [:overload-addr #"^codegen: statement cannot resolve address of overloaded function" "reference to overloaded function could not be resolved"]
+   [:udl #"^codegen: unable to find (numeric|character) literal operator" "no matching literal operator"]
    [:ptr-int-cmp #"^codegen: ISO C\+\+ forbids comparison between pointer and integer" "comparison between pointer and integer"]
    [:mptr-base #"^codegen: (pointer to member conversion via virtual base|'.*' is an (ambiguous|inaccessible) base of)" "invalid pointer to member conversion"]
    [:init #"^codegen: a reference from arguments" "invalid value-initialization of reference type"]])
@@ -9804,3 +9815,29 @@
     (vec out)))
 
 (swap! checks conj deprecated-uses)
+
+;; cpp-read-indep: [except.spec]/2 and [basic.scope.class]: a member function's noexcept-specifier is a complete-class context,
+;; its names looked up there and in the enclosing scopes. `noexcept(noexcept(f()))` or `noexcept(noexcept(x))` whose name no
+;; declaration of the unit declares (the native parser writes a member it finds as `this -> f`) is GCC's "'nosuchfn' was not
+;; declared in this scope", at the declaration (cpp0x/noexcept53.C's S2).
+(defn noexcept-undeclared
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        names (java.util.HashSet.)
+        fns (java.util.ArrayList.)]
+    (walk-nodes (fn [n _]
+                  (when (map? n)
+                    (when (string? (:name n)) (.add names (:name n)))
+                    (when (#{"CXXMethodDecl" "FunctionDecl"} (:kind n)) (.add fns n))))
+                (:nodes u) nil)
+    (doseq [n fns
+            :let [qt (str (get-in n [:type :qualType]))
+                  [_ nm] (re-find #"noexcept\(noexcept\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)\s*(?:\(\s*\))?\s*\)\)\s*$" qt)]
+            :when (and nm (not (.contains names nm)) (not (str/starts-with? nm "__")) (not (#{"this" "true" "false" "nullptr"} nm)))
+            :let [o (mine-at n main)]
+            :when o]
+      (let [[l c] (line-col starts o)]
+        (.add out {:line l :col c :kind :error :rule :undeclared :msg (str "'" nm "' was not declared in this scope (a noexcept-specifier's operand)")})))
+    (vec out)))
+
+(swap! checks conj noexcept-undeclared)
