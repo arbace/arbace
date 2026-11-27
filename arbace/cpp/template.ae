@@ -198,7 +198,13 @@
       :nttp (cond-> {:k :tparam-v :i (:i e) :tid (:tid e)} (:pack e) (assoc :pack true))
       :texpr (:x e)
       :var (let [v (sema/var* (:id e))]
-             (cond (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v)))
+             (cond ;; (cpp-sema-const, the checker: [expr.const]/5.9, an lvalue-to-rvalue conversion of a volatile glvalue is no
+                   ;; constant expression, constexpr or not: GCC's "lvalue-to-rvalue conversion of a volatile lvalue",
+                   ;; cpp0x/constexpr-volatile2.C's X<decltype(a), a>)
+                   (and (sema/checking?) (:v (:ty v)) (:name v) (not (abi/ref? (:ty v))) (not (abi/arr? (:ty v))))
+                   (throw (ex-info (str "codegen: not a constant: " (str/join "::" parts) " (a volatile variable's value)")
+                                   {:codegen/refused :template :cx/sure-drop true}))
+                   (and (:c (:ty v)) (:init v)) (var-value v (sema/const-int (or (:def-scope v) scope) (:init v)))
                    ;; (queue 514, the checker: a function parameter is never a constant expression, [expr.const]/10: a template
                    ;; argument naming one, a sure failure of the template's deduction, other/ptrmem10.C's `foo<C,m>`)
                    (and (sema/checking?) (= :param (:storage v)))
@@ -2593,7 +2599,8 @@
       ;; members)
       (let [drops0 (.get ^java.util.concurrent.atomic.AtomicLong sema/drop-count)]
       (try
-        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid) sema/*in-signature* false]
+        (binding [sema/*cutoff* Long/MAX_VALUE *instance* (when-not explicit? cid) sema/*in-signature* false
+                  sema/*cx-class-inst* (when (and (sema/checking?) (not explicit?) (not (sema/header-node? node))) cid)]
           (sema/declare-node! ps (assoc (strip-tparam-kids node) :kind "CXXRecordDecl")))
         ;; (queue 487, the checker: an instance whose definition refused stays cached unfinished, its implicit members never
         ;; declared; marked, so that a later default-initialization of it -- the use whose instantiation refused, its type
@@ -5032,6 +5039,25 @@
   is not structural\" at the parameter; a literal operator template whose one parameter that is ([over.literal]/5) then has an
   invalid parameter list too, GCC's second error at its name (cpp2a/udlit-class-nttp-neg2.C)."
   [scope n]
+  ;; (cpp-sema-const, the checker: [temp.param]/4 of C++17 and /6 of C++20, a parameter whose type a class template's instance
+  ;; substitutes -- `template<T> int foo();` in A<double> before C++20, `template<T&>` in A<void>, void itself -- is no valid
+  ;; non-type parameter: GCC's "'double' is not a valid type for a template non-type parameter", "forming reference to void", at
+  ;; the parameter; template/nontype12.C, template/instantiate7.C. The primary's own parameters, dependent, not judged.)
+  (when-let [h (when (and (sema/checking?) (not (sema/header-node? n)) *instance*) sema/*on-refusal*)]
+    (doseq [k (kids n) :when (= "NonTypeTemplateParmDecl" (:kind k))
+            :let [qt (str/trim (str (get-in k [:type :qualType])))
+                  [_ base ref] (re-matches #"([A-Za-z_][A-Za-z_0-9]*)\s*(&{0,2})" qt)]
+            :when base
+            :let [t (try (sema/resolve-type scope base) (catch arbace.lang.ExceptionInfo _ nil))
+                  u (when (map? t) (abi/unq t))]
+            :when (and u (not (dependent? [u])))
+            :let [why (cond (and (abi/void? u) (seq ref)) "forming reference to void"
+                            (abi/void? u) "'void' is not a valid type for a template non-type parameter"
+                            (and (empty? ref) (abi/floating? u) (< (long sema/*cxx-year*) 20))
+                            (str "'" (name (or (abi/bn u) :double)) "' is not a valid type for a template non-type parameter")
+                            :else nil)]
+            :when why]
+      (h (ex-info (str "codegen: " why " (an instance's template parameter)") {:codegen/refused :template :cx/node k}) k)))
   (when-let [h (when (and (sema/checking?) (>= (long sema/*cxx-year*) 20) (not (sema/header-node? n))) sema/*on-refusal*)]
     (doseq [k (kids n) :when (= "NonTypeTemplateParmDecl" (:kind k))
             :let [qt (str/trim (str/replace (str (get-in k [:type :qualType])) #"\s*\.\.\.$" ""))]
