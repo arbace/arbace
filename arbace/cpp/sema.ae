@@ -899,7 +899,23 @@
 ;; failure ([temp.deduct.general]/11's list: "attempting to create an array with an element type that is void, a function type,
 ;; or a reference type", "a pointer to member ... of reference type", "a function type whose return type is a function or an
 ;; array"), cx-subst-fail!; GCC's words as its explanation)
-(declare ^:dynamic *constraint-depth*)
+(declare ^:dynamic *constraint-depth* ^:dynamic *on-refusal* ^:dynamic *pedantic* header-node? checking?)
+(defn- cx-array-size!
+  "cpp-sema-const (the checker): [dcl.array]/1, an array bound is greater than zero: a variable's or a member's declared array
+  type `t` (its node `n`, of the main file) of a negative constant bound is GCC's \"size of array is negative\", of a zero one
+  under -pedantic \"ISO C++ forbids zero-size array\" (GNU's zero-length arrays otherwise); a class template's instance's member
+  too, at the member: template/dependent-name3.C's `int y[A<N>::minus_one];`."
+  [t n]
+  (when-let [h (and (checking?) (map? n) (not (header-node? n)) *on-refusal*)]
+    (loop [t t]
+      (when (and (map? t) (abi/arr? t))
+        (let [b (:n t)]
+          (cond (and (integer? b) (neg? (long b)))
+                (h (ex-info (str "codegen: size of array is negative (" b ")") {:codegen/refused :array :cx/node n}) n)
+                (and (integer? b) (zero? (long b)) *pedantic*)
+                (h (ex-info "codegen: zero-size array" {:codegen/refused :array :cx/node n}) n)
+                :else (recur (:of t))))))))
+
 (def ^:dynamic *cx-class-inst*
   "cpp-sema-const (the checker): the class template specialization whose member declarations are being instantiated, or nil
   (arbace.cpp.template's instantiate-class*)."
@@ -3008,6 +3024,7 @@
                                                   (not (loop [s (:parent scope)] (cond (nil? s) false (identical? (:names s) (:names home)) true :else (recur (:parent s))))))
                                            home scope)
                                          qt))
+        _ (cx-array-size! ty n)
         ;; (cpp-s11: an array of unknown bound of scalars completed by its braced initializer's count at its declaration,
         ;; [dcl.array]/7, as a local's is at its initialization: <bits/unicode-data.h>'s `inline constexpr char32_t
         ;; __width_edges[] = {...}` given to std::end(T (&)[N]), whose N had been nil)
@@ -3581,7 +3598,8 @@
                                                        (throw x))))]
                                        (if (instance? arbace.lang.ExceptionInfo t0)
                                          t0
-                                       (let [et (loop [t t0] (if (abi/arr? t) (recur (:of t)) t))]
+                                       (let [_ (cx-array-size! t0 k)
+                                             et (loop [t t0] (if (abi/arr? t) (recur (:of t)) t))]
                                        ;; (CP368 (a): a member of a class still being defined, its own or an enclosing one's,
                                        ;; or a class template's instance being instantiated: an incomplete type,
                                        ;; [class.mem.general]/7, clang's err_field_incomplete_or_sizeless; pr67405.C's `S f;` in
