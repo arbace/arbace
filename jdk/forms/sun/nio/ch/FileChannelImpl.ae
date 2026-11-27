@@ -32,6 +32,8 @@
 
   (field ^:private ^:final ^FileDescriptor fd)
 
+  (field ^:private ^:final positionLock (Object.))
+
   (field ^:private ^:final ^boolean writable)
 
   (field ^:private ^:final ^boolean readable)
@@ -161,9 +163,10 @@
                   (set! b (new byte/1 (Math/min rem TRANSFER_SIZE)))
                   (set! off 0)
                   (set! rem (alength b))))
-            (let [^int n (if (< pos 0)
-                             (HostFiles/read (.handle this) b off rem)
-                             (HostFileChannels/pread fd pos b off rem))]
+            (let [^:mutable ^int n 0]
+              (if (< pos 0)
+                  (locking fd (set! n (HostFiles/read (.handle this) b off rem)))
+                  (set! n (HostFileChannels/pread fd pos b off rem)))
               (when (> n 0)
                 (if direct (.position dst (unchecked-add-int (.position dst) n)) (.put dst b 0 n)))
               n)))))
@@ -180,7 +183,7 @@
                   (set! off (unchecked-add-int (.arrayOffset src) (.position src))))
                 (do (set! b (new byte/1 rem)) (set! off 0) (.get (.duplicate src) b)))
             (if (< pos 0)
-                (HostFiles/write (.handle this) b off rem)
+                (locking fd (HostFiles/write (.handle this) b off rem))
                 (HostFileChannels/pwrite fd pos b off rem))
             (.position src (unchecked-add-int (.position src) rem))
             rem))))
@@ -189,7 +192,7 @@
     (Objects/requireNonNull dst)
     (.ensureOpen this)
     (when-not readable (throw (NonReadableChannelException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable ^int n 0]
         (try
           (.beginBlocking this)
@@ -200,7 +203,7 @@
     (Objects/checkFromIndexSize offset length (alength dsts))
     (.ensureOpen this)
     (when-not readable (throw (NonReadableChannelException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable total 0]
         (try
           (.beginBlocking this)
@@ -224,7 +227,7 @@
     (Objects/requireNonNull src)
     (.ensureOpen this)
     (when-not writable (throw (NonWritableChannelException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable ^int n 0]
         (try
           (.beginBlocking this)
@@ -236,7 +239,7 @@
     (Objects/checkFromIndexSize offset length (alength srcs))
     (.ensureOpen this)
     (when-not writable (throw (NonWritableChannelException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable total 0]
         (try
           (.beginBlocking this)
@@ -252,40 +255,43 @@
 
   (method ^:public position :throws [IOException] ^long [this]
     (.ensureOpen this)
-    (locking fd
+    (locking positionLock
       (let [^:mutable p -1]
         (try
           (.beginBlocking this)
           (if (not (.isOpen this))
               0
               (do
-                (set! p
-                      (if append
-                          (HostFiles/length (.handle this))
-                          (HostFiles/position (.handle this))))
+                (locking fd
+                  (set! p
+                        (if append
+                            (HostFiles/length (.handle this))
+                            (HostFiles/position (.handle this)))))
                 p))
           (finally (.endBlocking this (> p -1)))))))
 
   (method ^:public position :throws [IOException] ^FileChannel [this ^long newPosition]
     (.ensureOpen this)
     (when (< newPosition 0) (throw (IllegalArgumentException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable done false]
         (try
           (.beginBlocking this)
           (when-not (not (.isOpen this))
-            (HostFiles/seek (.handle this) newPosition)
+            (locking fd (HostFiles/seek (.handle this) newPosition))
             (set! done true)
             this)
           (finally (.endBlocking this done))))))
 
   (method ^:public size :throws [IOException] ^long [this]
     (.ensureOpen this)
-    (locking fd
+    (locking positionLock
       (let [^:mutable s -1]
         (try
           (.beginBlocking this)
-          (if (not (.isOpen this)) -1 (do (set! s (HostFiles/length (.handle this))) s))
+          (if (not (.isOpen this))
+              -1
+              (do (locking fd (set! s (HostFiles/length (.handle this)))) s))
           (finally (.endBlocking this (> s -1)))))))
 
   (method available :throws [IOException] ^int [this]
@@ -300,19 +306,20 @@
     (.ensureOpen this)
     (when (< newSize 0) (throw (IllegalArgumentException. "Negative size")))
     (when-not writable (throw (NonWritableChannelException.)))
-    (locking fd
+    (locking positionLock
       (let [^:mutable done false]
         (try
           (.beginBlocking this)
           (when-not (not (.isOpen this))
-            (let [h (.handle this)
-                  size (HostFiles/length h)
-                  ^:mutable p (HostFiles/position h)]
-              (when (< newSize size) (HostFiles/setLength h newSize))
-              (when (> p newSize) (set! p newSize))
-              (HostFiles/seek h p)
-              (set! done true)
-              this))
+            (locking fd
+              (let [h (.handle this)
+                    size (HostFiles/length h)
+                    ^:mutable p (HostFiles/position h)]
+                (when (< newSize size) (HostFiles/setLength h newSize))
+                (when (> p newSize) (set! p newSize))
+                (HostFiles/seek h p)))
+            (set! done true)
+            this)
           (finally (.endBlocking this done))))))
 
   (method ^:public force :throws [IOException] ^void [this ^boolean metaData]
