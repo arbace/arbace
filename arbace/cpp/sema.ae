@@ -885,6 +885,12 @@
         ;; ([dcl.type.decltype]/1.3, [over.over]/1's set of one: `decltype(f)`, <refwrap.h>'s users); several, ill-formed)
         (and (= :fnset (:op x)) (not (:obj x)) (empty? (:tmpls x)) (= 1 (count (distinct (:fns x)))))
         (:ty (fnd (first (:fns x))))
+        ;; (cpp-sema-ovl, the checker: decltype of an overload set's name of two or more functions, no target type choosing one,
+        ;; [dcl.type.decltype]/1 with [over.over]/1: GCC's "decltype cannot resolve address of overloaded function",
+        ;; cpp0x/decltype2.C's `decltype(bar) z;`; not in a substitution, whose failure it would be)
+        (and (checking?) (not (cx-subst?)) (not *cx-tc-args*) (= :fnset (:op x)) (not (:obj x)) (empty? (:tmpls x))
+             (> (count (distinct (:fns x))) 1) (= "DeclRefExpr" (:kind n)))
+        (fail :overload-addr "statement cannot resolve address of overloaded function: decltype cannot resolve address of overloaded function")
         (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (:ty x)
         (= :lv (:cat x)) (abi/lref (:ty x))
         (= :xv (:cat x)) (abi/rref (:ty x))
@@ -1058,6 +1064,8 @@
                              (and (seq es) (every? #(= :type (:e %)) es)))))
                      (map vector (cons nil toks) toks)))))))
 
+(declare conv-fns conv-tmpls std-rank)
+
 (defn resolve-type-form [scope f]
   (cond
     (symbol? f)
@@ -1101,6 +1109,25 @@
       array (if (= 2 (count f))
               (abi/arr nil (doto (resolve-type-form scope (second f)) (->> (cx-formed! :arr))))
               (let [b (second f)
+                    ;; (cpp-sema-ovl, the checker: [dcl.array]/1, a bound a converted constant expression of type std::size_t,
+                    ;; [expr.const]/12: a variable of class type converts by a non-explicit conversion function to an integral or
+                    ;; unscoped enumeration type ([class.conv.fct]); none, or two whose conversions to std::size_t no rank tells
+                    ;; apart ([over.match.conv]), is GCC's "could not convert": cpp0x/constexpr-47969.C, constexpr-ex2.C's
+                    ;; operator int and operator long)
+                    _ (when (and (checking?) (not (cx-subst?)) (symbol? b) (nil? (namespace b)))
+                        (when-let [e (first (try (lookup scope (name b)) (catch arbace.lang.ExceptionInfo _ nil)))]
+                          (when (= :var (:e e))
+                            (let [t (abi/unq (abi/non-ref (:ty (var* (:id e)))))
+                                  c (when (abi/class? t) (abi/cls (:id t)))]
+                              (when (and c (:complete c) (not (:tmpl c)) (empty? (:dep-bases c)) (not (:lambda c)) (empty? (conv-tmpls (:id t))))
+                                (let [cands (for [fid (distinct (conv-fns (:id t))) :let [g (fnd fid) r (abi/unq (abi/non-ref (:ret (:ty g))))]
+                                                  :when (and (not (:explicit g)) (map? r) (or (abi/integral? r) (and (abi/enum? r) (not (:scoped (abi/enm (:id r)))))))]
+                                              [(std-rank {:op :call :ty r} r abi/ulong*) (boolean (or (:cq g) (:cq (:ty g))))])
+                                      cands (filter first cands)
+                                      best (when (seq cands) (reduce min (map first cands)))
+                                      tied (filter #(= best (first %)) cands)]
+                                  (when (or (empty? cands) (and (>= (count tied) 2) (= 1 (count (distinct (map second tied))))))
+                                    (fail :conversion "could not convert an expression of type " (:name c) " to an integral type in a converted constant expression (an array bound)"))))))))
                     n (cond (number? b) b
                             ;; (queue 570, the checker: in *cx-vla*'s block scope a bound surely no constant expression is
                             ;; GNU's VLA's)
@@ -1134,14 +1161,20 @@
                va (some #{'&} ps)
                ps (remove #{'&} ps)
                ps (if (= ['void] (vec ps)) [] ps)]
-           {:k :fn :ret (doto (resolve-type-form scope r) (->> (cx-formed! :ret)))
+           (cond-> {:k :fn :ret (doto (resolve-type-form scope r) (->> (cx-formed! :ret)))
             ;; a parameter of array or function type is a pointer ([dcl.fct]/5), a substituted one too
             :ps (mapv (fn [t] (cond (abi/arr? t) (abi/ptr (:of t)) (abi/fn? t) (abi/ptr t) :else t))
                       (mapcat #(if (and (seq? %) (= 'pack-expand (first %)))
                                  (if-let [h (:pack-expand @hooks)] (h scope (second %)) (fail :pack "a pack expansion"))
                                  [(resolve-type-form scope %)])
                               ps))
-            :va (boolean va)}))
+            :va (boolean va)}
+             ;; (cpp-sema-ovl, the checker: since C++17 a function type's noexcept is part of it, [except.spec]/1 with [dcl.fct]/1
+             ;; (P0012R1): `noexcept`, `noexcept(true)` and `throw()` ([except.spec]/2 of C++17), :nx as the code generator's
+             ;; member function pointers have it; cpp1z/noexcept-type3.C's two f overloads)
+             (and (checking?) (>= (long *cxx-year*) 17)
+                  (let [m (meta f)] (or (true? (:noexcept m)) (and (nil? (:noexcept m)) (= "" (some-> (:cpp/throw m) str str/trim))))))
+             (assoc :nx true))))
       ;; (cpp-rt-own: an elaborated-type-specifier's name is looked up ignoring the names that are no types, [basic.lookup.elab]/1:
       ;; libcpp's traditional.cc, `struct block *block;` then `block = (struct block *) (exp + macro->count);`, the variable had
       ;; hidden the class, "unknown type block")
@@ -2418,6 +2451,15 @@
                                          x)
                                        (or (:cx/node xd) (some-> *at* deref) d))))))))))))
 
+(def ^:private gcc-builtin-sigs
+  "cpp-sema-ovl: GCC's built-in functions by name as the GCC 15.2 manual declares them, [return-type parameter-types] (nil
+  parameters: a generic built-in, its parameters any type's): \"Other Built-in Functions\" and \"Built-in Functions for Memory
+  Model Aware Atomic Operations\"."
+  {"__builtin_trap" [abi/void []] "__builtin_unreachable" [abi/void []]
+   "__atomic_compare_exchange" [abi/bool* nil] "__atomic_compare_exchange_n" [abi/bool* nil]
+   "__atomic_test_and_set" [abi/bool* nil] "__atomic_clear" [abi/void nil] "__atomic_store" [abi/void nil] "__atomic_load" [abi/void nil]
+   "__atomic_exchange" [abi/void nil] "__atomic_thread_fence" [abi/void nil] "__atomic_signal_fence" [abi/void nil]})
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -2697,6 +2739,18 @@
               (when-let [u (some #(let [g (fnd (:id %))] (when (and g hns (same-sig? g f) (:scope g) (not (identical? (:names (:scope g)) (:names hns)))) g)) us)]
                 (throw (ex-info (str "codegen: '" nm "' conflicts with a previous declaration (a using-declaration's)")
                                 {:codegen/refused :redecl :cx/node n})))))
+        ;; (cpp-sema-ovl, the checker: a namespace-scope declaration of one of GCC's built-in functions, implicitly declared with
+        ;; the type the GCC 15.2 manual gives it ("Other Built-in Functions": void __builtin_trap (void); "Built-in Functions for
+        ;; Memory Model Aware Atomic Operations": bool __atomic_compare_exchange (type *, type *, type *, bool, int, int), ...), whose
+        ;; return type is another: GCC's "new declaration ... ambiguates built-in declaration", an error, a warning under
+        ;; -fpermissive when its parameters are the built-in's (arbace.repr.cpp.diag's rule): ext/pr84724-3.C, pr84843-1.C, -2.C)
+        _ (when (and (checking?) (= :fn k) (nil? cid) (= :ns (:kind home)) (not (header-node? n)) (nil? *instantiating*) (empty? q))
+            (when-let [[r ps] (gcc-builtin-sigs nm)]
+              (when-let [rk (cx-type-key (:ret ty))]
+                (when (not= rk (cx-type-key r))
+                  (throw (ex-info (str "codegen: new declaration of '" nm "' ambiguates built-in declaration"
+                                       (if (and ps (= (mapv cx-type-key (:ps ty)) (mapv cx-type-key ps))) " (its parameters the built-in's)" ""))
+                                  {:codegen/refused :redecl :cx/node (if (get-in n [:loc :offset]) {:range {:begin (:loc n)}} n)}))))))
         ;; (queue 602, the checker: a namespace's own declaration of a function a friend declaration alone declared makes it
         ;; visible to ordinary lookup, [namespace.memdef]/3: one a friend definition declared too, or template.ae's friend!'s
         ;; :cx-friend-decl)
@@ -2733,7 +2787,32 @@
       ;; `sometype::sometype() = delete;`, cpp0x/deleted10.C's explicit specializations)
       (when (and (checking?) (:explicitlyDeleted n) (not (header-node? n)) (not (:deleted (fnd id))))
         (*on-refusal* (ex-info (str "codegen: deleted definition of '" (:name n) "' is not its first declaration") {:codegen/refused :redecl}) n))
+      ;; (cpp-sema-ovl, the checker: [over.load]/2.1 with [basic.link]/11, two declarations of a non-template function of one name and
+      ;; parameter-type-list in one scope declare one function, whose type they give alike: a return type another than the earlier
+      ;; declaration's is GCC's "ambiguating new declaration of", clang's "functions that differ only in their return type cannot be
+      ;; overloaded"; both return types known whole (cx-type-key), neither a template's specialization: cpp0x/inline-ns10.C,
+      ;; pr87155.C's anonymous namespaces, template/friend44.C's friend)
+      (when (and (checking?) (= :fn k) (nil? cid) (not (header-node? n)) (nil? *instantiating*) (not (:tinst (fnd id))) (not (:tinst f)))
+        (let [ok (cx-type-key (:ret (:ty (fnd id)))) nk (cx-type-key (:ret ty))
+              ;; ([dcl.spec.auto.general]/13: a redeclaration of a function whose declared return type uses a placeholder uses
+              ;; that placeholder, not a deduced type, and back: cpp1y/auto-fn8.C's `int f();` after `auto f() { return 42; }`)
+              ph (fn [q] (when (string? q)
+                           (let [q (str/trim q)]
+                             (cond (str/includes? q "->") :trailing
+                                   (re-find #"^decltype\(auto\)" q) :decltype-auto
+                                   (re-find #"^auto\b" q) :auto
+                                   :else nil))))
+              op (ph (get-in (:node (fnd id)) [:type :qualType])) np (ph (get-in n [:type :qualType]))]
+          (when (or (and ok nk (not= ok nk))
+                    (and (not= :trailing op) (not= :trailing np) (not= op np)
+                         (string? (get-in (:node (fnd id)) [:type :qualType])) (string? (get-in n [:type :qualType]))))
+            (*on-refusal* (ex-info (str "codegen: ambiguating new declaration of '" (:name n) "'") {:codegen/refused :redecl}) n))))
       (upd-fn! id (fn [g] (cond-> (merge g (select-keys pinfo (if body [:param-names :param-const] [])))
+                            ;; (cpp-sema-ovl, the checker: declarations of one function whose types differ in noexcept alone --
+                            ;; GCC's "declaration of ... has a different exception specifier", or its discarding a system header's
+                            ;; throw(), cpp1z/noexcept-type19.C's malloc -- leave its type without noexcept, the conversions'
+                            ;; lenient side)
+                            (and (checking?) (not= (boolean (:nx (:ty g))) (boolean (:nx ty)))) (update :ty dissoc :nx)
                             (some some? (:defaults pinfo)) (assoc :defaults (:defaults pinfo))
                             (:always-inline f) (assoc :always-inline true)
                             (:used f) (assoc :used true)
@@ -6981,7 +7060,10 @@
   [e ft]
   (let [fs (:fns e)
         same? #(let [g (fnd %)] (and (not (and (:cls g) (not (:static g))))
-                                     (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))))]
+                                     (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))
+                                     ;; (cpp-sema-ovl, the checker: [over.over]/1 of C++17, the function's type the target's or one a
+                                     ;; function pointer conversion takes to it: a target noexcept, the function noexcept, :nx)
+                                     (or (not (:nx ft)) (:nx (:ty g)))))]
     (if ft
       (or (first (filter same? fs))
           ;; the templates' specializations deduced from the target type ([over.over]/2: a non-template preferred)
@@ -7258,8 +7340,15 @@
       (when (and (= kind "CStyleCastExpr") (abi/mptr? tu) (or (abi/arith? f) (abi/ptr? f)) (not (null-constant? e)))
         (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) " (a pointer to member)"))
       ;; (another member type, or the constness cast away, [expr.static.cast]/12)
+      ;; (cpp-sema-ovl: [expr.static.cast]/7 casts by the inverse of no function pointer conversion ([conv.fctptr]): a pointer to
+      ;; function or to member function to the noexcept type of one that is not, cpp1z/noexcept-type7.C; one taking noexcept
+      ;; away is an implicit conversion, /4: noexcept-type20.C)
+      (when (and (= kind "CXXStaticCastExpr") (or (and (abi/ptr? tu) (abi/ptr? f)) (and (abi/mptr? tu) (abi/mptr? f)))
+                 (abi/fn? (abi/unq (:to tu))) (abi/fn? (abi/unq (:to f))) (:nx (:to tu)) (not (:nx (:to f))))
+        (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) " (static_cast adds no noexcept)"))
       (when (and (= kind "CXXStaticCastExpr") (abi/mptr? tu) (abi/mptr? f) (some? (:to f)) (some? (:to tu)))
-        (cond (not= (abi/unq (:to tu)) (abi/unq (:to f))) (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))
+        (cond (not= (abi/unq (:to tu)) (let [x (abi/unq (:to f))] (if (and (abi/fn? x) (:nx x) (not (:nx (:to tu)))) (dissoc x :nx) x)))
+              (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu))
               (or (and (:c (:to f)) (not (:c (:to tu)))) (and (:v (:to f)) (not (:v (:to tu)))))
               (fail :named-cast "invalid cast from type " (cx-tyname f) " to type " (cx-tyname tu) ": casts away qualifiers")
               :else nil))
@@ -7414,6 +7503,27 @@
              (let [a (abi/unq (:to from)) b (abi/unq (:to to))]
                (or (and (abi/fn? a) (abi/void? b)) (and (abi/void? a) (abi/fn? b)))))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a function pointer and void*)")
+        ;; (cpp-sema-ovl: nor a pointer to an object type to a pointer to function or back, [conv.ptr]/1-3 and [conv.fctptr]:
+        ;; reinterpret_cast alone, [expr.reinterpret.cast]/6; diagnostic/aka5a.C's `ue_fn_ptr1 = &s1;` of a struct s)
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
+             (let [a (abi/unq (:to from)) b (abi/unq (:to to))]
+               (and (not= (boolean (abi/fn? a)) (boolean (abi/fn? b)))
+                    (not (abi/void? a)) (not (abi/void? b))
+                    (let [o (if (abi/fn? a) b a)] (or (abi/class? o) (cx-sure-scalar? o) (abi/ptr? o) (abi/arr? o))))))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (an object pointer and a function pointer)")
+        ;; (and a pointer to a GNU vector type from a pointer to another type but void, or back: no pointer conversion between
+        ;; them, [conv.ptr]/2-3 (the GCC manual's "Using Vector Instructions through Built-in Functions": a vector is its own
+        ;; type), diagnostic/aka4.C's `myvec *ptr = &x;` of a float, aka5a.C's of a struct)
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
+             (let [a (abi/unq (:to from)) b (abi/unq (:to to))]
+               (and (not= (= :vec (:k a)) (= :vec (:k b)))
+                    (not (abi/void? a)) (not (abi/void? b)) (not (abi/fn? a)) (not (abi/fn? b))
+                    (let [o (if (= :vec (:k a)) b a)] (or (abi/class? o) (cx-sure-scalar? o))))))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a pointer to a vector type)")
+        ;; (and a scalar to a vector: no standard conversion makes a GNU vector, GCC's "cannot convert 'float' to 'myvec'",
+        ;; diagnostic/aka4.C's `myvec y = x;`)
+        (and (= :vec (:k to)) (or (abi/arith? from) (abi/enum? from) (abi/ptr? from)))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a scalar to a vector type)")
         ;; (cpp-decl2: a pointer to function converts to no pointer to another function type, [conv.fctptr]/1 taking only
         ;; noexcept away (C++17); judged when every parameter and result type is one the checker judges: GCC's "cannot convert
         ;; 'void (*)(int)' to 'void (*)()' in initialization", conversion/err-recover1.C)
@@ -7425,6 +7535,20 @@
                     (or (not= (abi/unq (:ret a)) (abi/unq (:ret b))) (not= (mapv abi/unq (:ps a)) (mapv abi/unq (:ps b)))
                         (not= (boolean (:va a)) (boolean (:va b)))))))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (another function type)")
+        ;; (cpp-sema-ovl: [conv.fctptr]/1 takes noexcept away and nothing adds it, C++17's function types (:nx): a pointer to
+        ;; function to a pointer to the noexcept function type, cpp1z/noexcept-type1.C, a pointer to member function likewise,
+        ;; noexcept-type23.C's `F2 f12 = F1();`)
+        (and (or (and (abi/ptr? to) (abi/ptr? from)) (and (abi/mptr? to) (abi/mptr? from))) (not (null-constant? e))
+             (abi/fn? (abi/unq (:to from))) (abi/fn? (abi/unq (:to to))) (:nx (:to to)) (not (:nx (:to from))))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (a function pointer conversion adds no noexcept)")
+        ;; (and a pointer to such a pointer: below the first level the types are similar only when the function types are the
+        ;; same, [conv.qual]/1-3, no function pointer conversion there: noexcept-type1.C's `void (**pp)() noexcept = &p;`)
+        (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e))
+             (loop [a (abi/unq (:to from)) b (abi/unq (:to to)) d 1]
+               (cond (and (abi/ptr? a) (abi/ptr? b)) (recur (abi/unq (:to a)) (abi/unq (:to b)) (inc d))
+                     (and (> d 1) (abi/fn? a) (abi/fn? b)) (and (not= (boolean (:nx a)) (boolean (:nx b))) (= (dissoc a :nx) (dissoc b :nx)))
+                     :else false)))
+        (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (pointers to function types of another noexcept)")
         ;; (cpp-diag-b, round 2: pointers to arrays, [conv.qual]/3 with DR 330)
         (and (abi/ptr? to) (abi/ptr? from) (not (null-constant? e)) (not (abi/void? (abi/unq (:to to)))) (cx-array-qual-bad? from to))
         (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly (no qualification conversion of arrays)")
@@ -7463,6 +7587,21 @@
              (let [u (abi/unq t)] (and (map? u) (or (abi/arith? u) (abi/enum? u)))))
     (fail :overload-addr "statement cannot resolve address of overloaded function: cannot resolve overloaded function '"
           (or (some-> (first (:fns e)) fnd :name) "") "' based on conversion to an arithmetic type"))
+  ;; (cpp-sema-ovl, the checker: [over.over]/3-5, no non-template function of the set of the target's type, and specializations of
+  ;; two or more of its templates deduced for it of which partial ordering ([temp.func.order]) makes none the most specialized:
+  ;; GCC's "converting overloaded function 'f' to type ... is ambiguous", template/overload10.C)
+  (when (and (checking?) (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))) (>= (count (:tmpls e)) 2))
+    (let [ft (:to (abi/unq t))
+          same? #(let [g (fnd %)] (and (not (and (:cls g) (not (:static g))))
+                                       (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps ft))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret ft)))))]
+      (when (and (not-any? same? (:fns e)) (:fnaddr-specs @hooks) (:tiebreak @hooks))
+        (let [sp (distinct (filter same? (try ((:fnaddr-specs @hooks) e ft) (catch arbace.lang.ExceptionInfo _ nil))))
+              sp (vals (into {} (map (fn [f] [(:tid (:tinst (fnd f))) f]) sp)))
+              tb (:tiebreak @hooks)
+              n (count (:ps ft))]
+          (when (and (>= (count sp) 2) (every? #(:tid (:tinst (fnd %))) sp)
+                     (not-any? (fn [a] (every? #(or (= a %) (tb a % n)) sp)) sp))
+            (fail :overload "ambiguous call (converting the overloaded function to a pointer to function: " (count sp) " templates' specializations, none more specialized)"))))))
   (let [e (if (and (= :fnset (:op e)) (abi/ptr? (abi/unq t)) (abi/fn? (:to (abi/unq t))))
             (if-let [f (fn-matching e (:to (abi/unq t)))] {:op :fnaddr :fn f :ty (abi/ptr (:ty (fnd f))) :cat :pr} (fail :conversion "no function of the set matches"))
             e)
@@ -7493,7 +7632,8 @@
       ;; (cpp-tzdb, the code generator: [conv.fctptr]/1, a pointer to a noexcept member function to one to the same function
       ;; type without it, the same value -- eh_ptr.cc's `return _M_exception_object ? &exception_ptr::_M_safe_bool_dummy :
       ;; nullptr;` to __safe_bool, since cpp-rt-own4 keeps noexcept on the member function pointer's type, :nx)
-      (and (not (checking?)) (abi/mptr? to) (abi/mptr? from) (= (:cls to) (:cls from)) (abi/fn? (:to from)) (abi/fn? (:to to))
+      ;; (cpp-sema-ovl: the checker's too, its function types noexcept since C++17 as well)
+      (and (abi/mptr? to) (abi/mptr? from) (= (:cls to) (:cls from)) (abi/fn? (:to from)) (abi/fn? (:to to))
            (:nx (:to from)) (= (dissoc (:to from) :nx) (dissoc (:to to) :nx)))
       (assoc e :ty to)
       (and (abi/mptr? to) (abi/mptr? from) (abi/derived-from? (:cls to) (:cls from)))
@@ -7576,11 +7716,18 @@
       (let [ft (:to from) tt (:to to)]
         (cond
           (and (= (abi/unq ft) (abi/unq tt)) (or (:c tt) (not (:c ft)))) (if (= ft tt) 0 0)
+          ;; (cpp-sema-ovl, the checker: [conv.fctptr]/1, a pointer to noexcept function to a pointer to the function type without
+          ;; noexcept, an Exact Match, [over.ics.scs]/3; ics marks it :fnptr)
+          (and (checking?) (abi/fn? ft) (:nx ft) (= (dissoc ft :nx) (dissoc tt :nx))) 0
           (and (abi/void? tt) (or (:c tt) (not (:c ft)))) 2
           (and (class-id ft) (class-id tt) (abi/derived-from? (class-id ft) (class-id tt)) (or (:c tt) (not (:c ft)))) 2
           :else nil))
       (and (abi/mptr? to) (null-constant? e)) 2
       (and (abi/mptr? to) (abi/mptr? from) (= (:to from) (:to to)) (abi/derived-from? (:cls to) (:cls from))) 2
+      ;; (cpp-sema-ovl, the checker: [conv.fctptr]/1, a pointer to noexcept member function to one without noexcept)
+      (and (checking?) (abi/mptr? to) (abi/mptr? from) (abi/fn? (:to from)) (:nx (:to from)) (= (dissoc (:to from) :nx) (dissoc (:to to) :nx))
+           (or (= (:cls to) (:cls from)) (abi/derived-from? (:cls to) (:cls from))))
+      (if (= (:cls to) (:cls from)) 0 2)
       (and (= :bool (abi/bn to)) (abi/mptr? from)) 2
       :else nil)))
 
@@ -7652,9 +7799,16 @@
                   (abi/update-cls! cid #(-> % (update :methods (fnil conj []) cvid) (assoc-in [:glam-convs F] cvid)))
                   cvid))))))))
 
+(declare conv-cands)
+
 (defn- conv-for
   "The conversion function of class `id` that converts best to the non-class type `t` (explicit ones when
   `explicit?`), or nil."
+  [id t explicit? & [obj-c]]
+  (second (first (sort-by first (conv-cands id t explicit? obj-c)))))
+
+(defn- conv-cands
+  "conv-for's candidates, [rank fid] each."
   [id t explicit? & [obj-c]]
   ;; (CP301 (a): a captureless generic lambda's conversion to a pointer to function made for the target's function type)
   (when (and (:glam-conv (abi/cls id)) (abi/ptr? (abi/unq t)) (abi/fn? (abi/unq (:to (abi/unq t)))))
@@ -7675,7 +7829,7 @@
                           rt (cond (abi/arr? rt) (abi/ptr (:of rt)) (abi/fn? rt) (abi/ptr rt) :else rt)
                           r (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t))] :when r]
                 [r fid])]
-    (second (first (sort-by first cands)))))
+    cands))
 
 (defn- cx-conv-ambiguous?
   "Queue 518 (the checker): whether class `id`'s conversion to the non-class type `t` (conv-for's) is ambiguous ([over.match.conv],
@@ -7689,8 +7843,12 @@
                       :when (or (not obj-c) (:cq f) (:cq (:ty f)))
                       :when (or (not explicit?) (not (:explicit f)) (= (abi/unq (abi/non-ref (:ret (:ty f)))) (abi/unq t)))
                       :let [rt (abi/non-ref (:ret (:ty f)))
-                            r (when (and (abi/arith? (abi/unq rt)) (abi/arith? (abi/unq t)))
-                                (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t)))]
+                            r (cond (and (abi/arith? (abi/unq rt)) (abi/arith? (abi/unq t)))
+                                    (if (= (abi/unq rt) (abi/unq t)) 0 (std-rank {:op :call :ty rt} rt t))
+                                    ;; (cpp-sema-ovl: or any scalar result of the target's type exactly, an identity: two
+                                    ;; bases' `operator bool*` a using-declaration of each brings in, cpp1z/using-variadic1c.C)
+                                    (and (map? rt) (abi/scalar? (abi/unq rt)) (= (abi/unq rt) (abi/unq t))) 0
+                                    :else nil)]
                       :when r]
                   [r fid (boolean (or (:cq f) (:cq (:ty f))))])
           best (when (seq cands) (reduce min (map first cands)))
@@ -7815,7 +7973,11 @@
       ;; (queue 514, the checker: a name that is functions, no template, binds an lvalue reference to a function type one of
       ;; them has exactly, [over.ics.ref]/1 with [over.over]/1: template/unify7.C's Foo(f) for Foo<int &()>(int &(&)()))
       (and (checking?) (= :fnset (:op e)) (empty? (:tmpls e)) (= :ref (:k p)) (abi/fn? (abi/unq pt))
-           (some #(= (unspelled-fn (abi/unq pt)) (unspelled-fn (:ty (fnd %)))) (:fns e)))
+           (some #(let [t (unspelled-fn (abi/unq pt)) g (unspelled-fn (:ty (fnd %)))]
+                    ;; (cpp-sema-ovl: [dcl.init.ref]/4's reference-compatible function types, a noexcept function's for the type
+                    ;; without it, [conv.fctptr])
+                    (or (= t g) (and (:nx g) (not (:nx t)) (= t (dissoc g :nx)))))
+                 (:fns e)))
       {:rank 0}
       ;; (cpp-decl2: a designated list converts to an aggregate its designators name members of, [over.ics.list]/2)
       (and (= :init-list (:op e)) (:desigs e) (not (desig-convertible? e pt))) nil
@@ -7854,7 +8016,13 @@
       ;; (cpp-rt-own: marked a reference binding, :refb, whose :sub better-ics? weighs against another reference binding's alone,
       ;; [over.ics.rank]/3.2.3 and /3.2.6: `const I&` and a by-value `F` for an lvalue are both identities, the call then decided
       ;; by the templates' partial ordering, <bits/stl_iterator.h>'s __niter_wrap(const _Iterator&, _Iterator))
-      (some-> (let [same (= (arr-unq at) (arr-unq pt))
+      (some-> (let [same (or (= (arr-unq at) (arr-unq pt))
+                             ;; (cpp-sema-ovl, the checker: C++20's P0388R4, an array of known bound reference-compatible with an
+                             ;; array of unknown bound of its element type, [dcl.init.ref]/4 with [conv.qual]/3: an identity as
+                             ;; the array-to-pointer conversion is an Exact Match, cpp2a/array-conv4.C's f(int(&)[]) and f(int*)
+                             ;; for an int[1] ambiguous)
+                             (and (checking?) (>= (long *cxx-year*) 20) (abi/arr? pt) (nil? (:n pt)) (abi/arr? at) (some? (:n at))
+                                  (= (arr-unq (:of at)) (arr-unq (:of pt)))))
             derived (and (class-id at) (class-id pt) (abi/derived-from? (class-id at) (class-id pt)))
             cv-ok (and (or (:c (arr-cv pt)) (not (:c (arr-cv at))))
                        ;; CX12 (the checker): volatile too ([dcl.init.ref]/4-5, reference-compatible: cv1 >= cv2)
@@ -7864,6 +8032,9 @@
         (cond
           (and (= :ref (:k p)) (lv? e) (= :lv (:cat e)) (or same derived) cv-ok)
           (cond-> {:rank (if derived 2 0) :sub (if (and (:c pt) (not (:c at))) 1 0)}
+            ;; (cpp-sema-ovl: to an array of unknown bound, behind the same bound's, [over.ics.rank]/3.2.5's qualification
+            ;; conversion, better-ics?: cpp2a/array-conv3.C's f(int(&)[1]) over f(int(&)[]))
+            (and (checking?) (abi/arr? pt) (nil? (:n pt)) (abi/arr? at) (some? (:n at))) (assoc :unb true)
             derived (assoc :d2b [(class-id at) (class-id pt)])
             ;; (CX12, the checker: [over.ics.rank]/3.2.6 orders two such bindings by their cv-qualifiers' inclusion)
             (checking?) (assoc :cvq (cond-> #{} (:c (arr-cv pt)) (conj :c) (:v (arr-cv pt)) (conj :v))))
@@ -7887,7 +8058,11 @@
           ;; [over.ics.ref]/3: cpp0x/pr33930.C's foo (type&&) for an int* lvalue no candidate)
           (and (checking?) (= :rref (:k p)) (= :lv (:cat e)) (abi/ptr? (abi/unq at)) (abi/ptr? (abi/unq pt))
                (= (abi/unq (:to (abi/unq at))) (abi/unq (:to (abi/unq pt))))) nil
-          :else (when-let [r (ics (if (lv? e) e e) pt)] (assoc r :sub (if (= :rref (:k p)) -1 (inc (long (or (:sub r) 0))))))))
+          :else (when-let [r (ics (if (lv? e) e e) pt)]
+                  (cond-> (assoc r :sub (if (= :rref (:k p)) -1 (inc (long (or (:sub r) 0)))))
+                    ;; (cpp-sema-ovl: a temporary's binding after a qualification conversion, better-ics?'s [over.ics.rank]/3.2.1)
+                    (and (checking?) (= 0 (long (:rank r))) (pos? (long (or (:sub r) 0)))) (assoc :qual true)
+                    (and (checking?) (= 0 (long (:rank r))) (zero? (long (or (:sub r) 0))) (not (:fnptr r))) (assoc :temp-id true)))))
               (assoc :refb true))
       (abi/class? pt)
       (cond
@@ -7936,7 +8111,9 @@
       (abi/class? at) (when (and (not *no-user*) (conv-for (class-id at) pt false (:c at)))
                         ;; (queue 518, the checker: an ambiguous conversion sequence, [over.best.ics]/10, resolve-overload*'s :amb)
                         (if (cx-conv-ambiguous? (class-id at) pt false (:c at)) {:rank 3 :amb true} {:rank 3}))
-      (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching e (:to (abi/unq pt)))) {:rank 0})
+      (= :fnset (:op e)) (when (and (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))))
+                           (when-let [g (fn-matching e (:to (abi/unq pt)))]
+                             (cond-> {:rank 0} (and (checking?) (:nx (:ty (fnd g))) (not (:nx (:to (abi/unq pt))))) (assoc :fnptr true))))
       ;; (queue 380: &f of an overload set, its set's function the parameter's type matches, an exact match, [over.ics.scs]/3)
       (and (= :fnaddr (:op e)) (:set e) (abi/ptr? (abi/unq pt)) (abi/fn? (:to (abi/unq pt))) (fn-matching (:set e) (:to (abi/unq pt))))
       {:rank 0}
@@ -7952,6 +8129,10 @@
                         ;; (cpp-rt-own: what [over.ics.rank]/4 orders among conversions of one rank, better-ics?'s: a pointer's to bool,
                         ;; to cv void*, to a base class's pointer)
                         (and (or (abi/ptr? ft) (abi/mptr? ft)) (= :bool (abi/bn tt))) (assoc :ptr-bool true)
+                        ;; (cpp-sema-ovl: a function pointer conversion, better-ics?'s [over.ics.rank]/3.2.1)
+                        (and (checking?) (or (and (abi/ptr? ft) (abi/ptr? tt)) (and (abi/mptr? ft) (abi/mptr? tt)))
+                             (:nx (:to ft)) (abi/fn? (:to tt)) (not (:nx (:to tt))))
+                        (assoc :fnptr true)
                         ;; (cpp-rind, the checker: [over.ics.rank]/4.2 (DR 1601), the promotion of an enumeration with a fixed
                         ;; underlying type to that type before its promotion to the promoted type)
                         (and (checking?) (= 1 r) (abi/enum? ft) (:fixed (abi/enm (:id ft))) (= (abi/unq (abi/underlying ft)) tt))
@@ -7983,6 +8164,23 @@
   (or (< (long (:rank a)) (long (:rank b)))
       (and (= (:rank a) (:rank b))
            (cond
+             ;; (cpp-sema-ovl, the checker: [over.ics.rank]/3.2.1, the identity a proper subsequence of a function pointer
+             ;; conversion's sequence, [conv.fctptr]: cpp1z/noexcept-type3.C's f(h) of a noexcept h, f(void (*)() noexcept) before
+             ;; f(void (*)()))
+             (and (:fnptr b) (not (:fnptr a))) true
+             (and (:fnptr a) (not (:fnptr b))) false
+             ;; (cpp-sema-ovl, the checker: [over.ics.rank]/3.2.1 (CWG 2352) between a reference binding and a conversion by
+             ;; value: the identity -- a direct binding, or a by-value parameter's exact type -- a proper subsequence of a sequence
+             ;; whose only conversion is a qualification conversion: cpp0x/ref-bind4.C's f1(int *) over f1(const int *const &),
+             ;; f3(int *const &) over f3(const int *) for an int*)
+             (and (checking?) (not= (boolean (:refb a)) (boolean (:refb b)))
+                  (let [id? (fn [x] (and (= 0 (long (:rank x))) (not (:fnptr x)) (not (:d2b x)) (not (:qual x))
+                                         (if (:refb x) (not (:temp-id x)) (zero? (long (or (:sub x) 0))))))
+                        q? (fn [x] (and (= 0 (long (:rank x))) (not (:fnptr x)) (if (:refb x) (:qual x) (pos? (long (or (:sub x) 0))))))]
+                    (or (and (id? a) (q? b)) (and (id? b) (q? a)))))
+             (let [id? (fn [x] (and (= 0 (long (:rank x))) (not (:fnptr x)) (not (:d2b x)) (not (:qual x))
+                                    (if (:refb x) (not (:temp-id x)) (zero? (long (or (:sub x) 0))))))]
+               (id? a))
              (and (:arith a) (:arith b) (fp-better? (:arith a) (:arith b))) true
              (and (:arith a) (:arith b) (fp-better? (:arith b) (:arith a))) false
              ;; (cpp-rt-own: [over.ics.rank]/4.1, a conversion that does not convert a pointer to bool before one that does;
@@ -7999,6 +8197,9 @@
              (boolean (abi/derived-from? (second (:ptr-d2b a)) (second (:ptr-d2b b))))
              (and (:d2b a) (:d2b b) (= (first (:d2b a)) (first (:d2b b))) (not= (second (:d2b a)) (second (:d2b b))))
              (boolean (abi/derived-from? (second (:d2b a)) (second (:d2b b))))
+             ;; (cpp-sema-ovl: a binding to an array of unknown bound behind one to the bound's, [over.ics.rank]/3.2.5)
+             (and (:unb b) (not (:unb a)) (= (:cvq a) (:cvq b))) true
+             (and (:unb a) (not (:unb b)) (= (:cvq a) (:cvq b))) false
              (and (:cvq a) (:cvq b))
              (let [x (:cvq a) y (:cvq b)] (and (not= x y) (every? y x)))
              ;; (cpp-rt-own: a reference binding's :sub against another's alone; a pointer's qualification adjustment's against
@@ -8244,8 +8445,30 @@
                                (every? #(let [f (fnd %)] (and (:explicit f) (:explicit-sure f))) specs))
                       (when-let [a *at*] (reset! a at0))
                       (fail :noconv "no viable conversion from '" (:name (abi/cls cid)) "' to " (pr-str (select-keys t [:k :n])) " (explicit conversion function templates)"))))
+                ;; (cpp-sema-ovl, the checker: no conversion function templates, and a conversion function whose result converts to
+                ;; the pointer to function type `t` but for its noexcept, which no conversion adds ([conv.fctptr]/1): none converts,
+                ;; GCC's "cannot convert", cpp1z/noexcept-type1.C's S(), noexcept-type6.C's closure of no noexcept call operator)
+                (let [u (abi/unq t)
+                      fnp? (and (or (abi/ptr? u) (abi/mptr? u)) (abi/fn? (abi/unq (:to u))) (:nx (:to u)))]
+                  (when (and (checking?) fnp? (empty? (conv-tmpls cid)) (not (:glam-conv (abi/cls cid)))
+                             (conv-for cid (update u :to dissoc :nx) explicit? (:c (:ty e))))
+                    (fail :noconv "no viable conversion from '" (:name (abi/cls cid)) "' to " (pr-str (select-keys t [:k :n])) " (a function pointer conversion adds no noexcept)")))
                 (fail :conversion "no conversion function of " (:name (abi/cls cid)) " to " (pr-str t)))
         obj (if (= :pr (:cat e)) (materialize e) e)]
+    ;; (cpp-sema-ovl, the checker: [dcl.fct.def.delete]/2 with [over.match.conv], the conversion function chosen deleted -- a
+    ;; deleted conversion function template's specialization an exact match beside a non-template's promotion, template/conv12.C
+    ;; -- when its standard conversion's rank is better than every other candidate's)
+    ;; (and GNU's unavailable attribute on it, GCC's "'Foo::operator int()' is unavailable", ext/attr-unavailable-3.C)
+    (when (and (checking?) (or (and (:deleted (fnd fid)) (:deleted-sure (fnd fid))) (:unavailable (fnd fid)))
+               ;; (to a non-class type alone: a class's initialization takes its constructors, the conversion function only
+               ;; through a copy constructor's parameter, which another constructor may beat, overload/conv-op2.C)
+               (not (abi/class? (abi/unq (abi/non-ref t)))))
+      (let [cs (conv-cands cid t explicit? (:c (:ty e)))
+            r (some (fn [[r f]] (when (= f fid) r)) cs)]
+        (when (and r (every? (fn [[r2 f]] (or (= f fid) (< (long r) (long r2)))) cs))
+          (if (:unavailable (fnd fid))
+            (fail :unavailable "'" (:name (fnd fid)) "' is unavailable")
+            (fail :overload "call to a deleted function " (:name (fnd fid)))))))
     (rv (method-call ctx fid obj [] true))))
 
 (defn ctor-candidates
@@ -9095,7 +9318,15 @@
                    (doseq [[st a] (map vector subs args)]
                      (when (and (abi/arr? (abi/unq st)) (map? a) (not= :str (:op a)) (some? (:ty a))
                                 (not (abi/arr? (abi/unq (abi/non-ref (:ty a))))))
-                       (fail :array-init "array must be initialized with a brace-enclosed initializer"))))
+                       (fail :array-init "array must be initialized with a brace-enclosed initializer"))
+                     ;; (cpp-sema-ovl: and an element of an aggregate class type copy-initialized from a scalar, which no
+                     ;; constructor or conversion function converts ([dcl.init.general]/16.6.3; no brace elision): GCC's
+                     ;; "could not convert '42' from 'int' to 'A'", cpp2a/paren-init32.C, paren-init13.C's comma expression)
+                     ;; (outside a substitution, whose failure the list's own error makes: cpp2a/paren-init26.C)
+                     (when (and (not (cx-subst?)) (abi/class? (abi/unq st)) (aggregate? (abi/unq st)) (map? a) (some? (:ty a))
+                                (let [at (abi/unq (abi/non-ref (:ty a)))] (or (abi/arith? at) (abi/enum? at) (abi/ptr? at)))
+                                (every? #(:implicit (fnd %)) (ctor-candidates (:id (abi/unq st)))))
+                       (fail :conversion "could not convert an expression of a scalar type to the aggregate '" (:name (abi/cls (:id (abi/unq st)))) "' in a parenthesized aggregate initialization"))))
                  (init-for t {:op :init-list :items (vec args) :paren true} ctx :list))
                (throw x))))
       ;; (queue 508, the checker: a copy-initialization from another type, by a converting constructor, before C++17
@@ -9772,7 +10003,15 @@
                 {:i :list :cls (:id tu)
                  ;; (queue 460: a union's list takes its first member, a designator not read: the member's implicit
                  ;; conversion not judged)
-                 :items (binding [*cx-union-init* (or *cx-union-init* (boolean (:union c)))] (vec (map-indexed (fn [i s]
+                 :items (binding [*cx-union-init* (or *cx-union-init*
+                                                       (boolean (and (:union c)
+                                                                     ;; (cpp-sema-ovl: but a list of one item, no designator, for a
+                                                                     ;; union of no default member initializer, which initializes its
+                                                                     ;; first member surely, [dcl.init.aggr]/5: cpp2a/desig5.C's
+                                                                     ;; `u e = { "asdf" };` of `union u { int a; const char* b; }`)
+                                                                     (not (and (checking?) (nil? (:field src)) (not (:desigs src)) (not nsdmi-u)
+                                                                               (= 1 (count items)) (map? (first items))
+                                                                               (not= :init-list (:op (first items))))))))] (vec (map-indexed (fn [i s]
                                             ;; (the native parser's semantic list holds a default member initializer's
                                             ;; place as CXXDefaultInitExpr, :default-init: the member's own initializer)
                                             (if (and (< i (count items)) (not= :default-init (:op (nth items i))))
@@ -10389,7 +10628,9 @@
         (when (and (checking?) (abi/ptr? lt) (abi/ptr? rt) (not (null-constant? l)) (not (null-constant? r)))
           (let [a (abi/unq (:to lt)) b (abi/unq (:to rt))
                 bad (cond (or (abi/void? a) (abi/void? b)) (and (or (abi/fn? a) (abi/fn? b)) false)
-                          (or (abi/fn? a) (abi/fn? b)) (not= a b)
+                          ;; (cpp-sema-ovl: a pointer to noexcept function's composite with one to the type without it the
+                          ;; latter, [expr.type]/4.4's function pointer conversion)
+                          (or (abi/fn? a) (abi/fn? b)) (not= (dissoc a :nx) (dissoc b :nx))
                           (and (class-id a) (class-id b)) (not (or (= a b) (abi/derived-from? (class-id a) (class-id b)) (abi/derived-from? (class-id b) (class-id a))))
                           (or (class-id a) (class-id b)) (and (or (abi/class? a) (abi/class? b)) (not= (abi/class? a) (abi/class? b)) (cx-sure-scalar? (if (abi/class? a) b a)))
                           (and (cx-sure-scalar? lt) (cx-sure-scalar? rt)) (not= (cx-shape lt) (cx-shape rt))
@@ -11233,9 +11474,22 @@
                  ;; conversion takes, [over.match.oper]/7 with [class.conv.fct]/2 -- but the logical operators', whose
                  ;; operands are contextually converted to bool, [expr.log.and]/1: cpp0x/explicit3.C's `a + true`)
                  (every? #(and (empty? (conv-tmpls %))
-                               (if (#{"&&" "||" "!"} o)
-                                 (empty? (conv-fns %))
-                                 (every? (fn [f] (let [g (fnd f)] (and (:explicit g) (:explicit-sure g)))) (conv-fns %))))
+                               (cond
+                                 (#{"&&" "||" "!"} o) (empty? (conv-fns %))
+                                 ;; (cpp-sema-ovl: ++ and --, whose built-in candidates take a non-const lvalue of an arithmetic
+                                 ;; type -- not bool for --, nor for ++ since C++17 -- or of a pointer type, [over.built]/3-6: a
+                                 ;; conversion function yielding no such lvalue binds none, overload/builtin5.C's operator bool&)
+                                 (and (#{"++" "--"} o) (= 1 (count args)))
+                                 (every? (fn [f] (let [g (fnd f) r (:ret (:ty g)) t (when (= :ref (:k r)) (:to r))]
+                                                   (or (and (:explicit g) (:explicit-sure g))
+                                                       (and (map? r) (not (#{:auto :dep :tdep :tparam} (:k (abi/non-ref r))))
+                                                            (not (and t (not (:c t))
+                                                                      (or (abi/ptr? (abi/unq t))
+                                                                          (and (abi/arith? (abi/unq t))
+                                                                               (not (and (= :bool (abi/bn (abi/unq t)))
+                                                                                         (or (= o "--") (>= (long *cxx-year*) 17))))))))))))
+                                         (conv-fns %))
+                                 :else (every? (fn [f] (let [g (fnd f)] (and (:explicit g) (:explicit-sure g)))) (conv-fns %))))
                          cids)
                  (not (some #(= :enum (:k (abi/unq (abi/non-ref (:ty %))))) args))
                  (empty? (class-lookup (first cids) nm))
@@ -11243,6 +11497,27 @@
                  (empty? (filter #(#{:fn :tmpl} (:e %)) (lookup (:scope ctx) nm)))
                  (when-let [nss (sure-assoc-nss args)] (not (declared-in? nss nm))))
         (fail :nomatch "no match for '" nm "' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")))))
+
+(defn- cx-builtin-amb!
+  "cpp-sema-ovl (the checker): x == y or x != y of two objects of one class, no operator function viable, whose class converts by
+  two or more non-explicit conversion functions (no template) to distinct pointer or pointer-to-member types: each a built-in
+  candidate operator==(T, T) ([over.built]/16) viable by user-defined conversions of both operands, none better
+  ([over.ics.rank]/3.3: different conversion functions), the call ambiguous: overload/operator5.C's two `operator
+  UnspecifiedBoolType()`."
+  [^String o args]
+  (when (and (checking?) (#{"==" "!="} o) (= 2 (count args)))
+    (let [cids (map #(class-id (:ty %)) args)]
+      (when (and (every? some? cids) (apply = cids))
+        (let [cid (first cids)
+              c (abi/cls cid)]
+          (when (and c (:complete c) (empty? (conv-tmpls cid)) (empty? (:dep-bases c)))
+            (let [cst (some #(:c (abi/non-ref (:ty %))) args)
+                  ts (distinct (for [f (distinct (conv-fns cid)) :let [g (fnd f) r (abi/unq (abi/non-ref (:ret (:ty g))))]
+                                     :when (and (not (:explicit g)) (or (not cst) (:cq g) (:cq (:ty g)))
+                                                (map? r) (or (abi/ptr? r) (abi/mptr? r)))]
+                                 r))]
+              (when (>= (count ts) 2)
+                (fail :overload "ambiguous call (built-in operator" o " candidates of " (count ts) " pointer types by conversion functions)")))))))))
 
 (defn- adl-not-found!
   "CX12 (the checker): an unqualified call in a function template's specialization that nothing names: not unqualified
@@ -11439,8 +11714,20 @@
                  ;; the std::chars_format argument, a better match than the template, from_chars(double&) calling itself)
                  ;; (queue 602, the checker: a qualified name finds no function a friend declaration alone declared,
                  ;; [namespace.memdef]/3: lookup/friend19.C's ::foo (X()))
-                 cands (concat (let [acls (if (and (checking?) (:qualified callee)) #{} (adl-classes args))] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?)))))
-                                 (cond->> (adl-fns args (or (:name callee) (:name (first ms))))
+                 ;; (cpp-sema-ovl, the checker: [basic.lookup.argdep]/3.2, unqualified lookup finding a block-scope declaration of a
+                 ;; function that is no using-declaration -- the innermost scope declaring the name a block's -- performs no
+                 ;; argument-dependent lookup: lookup/koenig15.C's `extern void f(char); using M::f; f (s);`)
+                 no-adl (and (checking?) (not (:qualified callee)) (:name callee)
+                             (let [nm (:name callee)]
+                               (loop [sc (:scope ctx)]
+                                 (when sc
+                                   (let [es (some-> ^java.util.HashMap (:names sc) (.get nm))]
+                                     (if (seq es)
+                                       (and (#{:block :fn} (:kind sc))
+                                            (some #(and (= :fn (:e %)) (not (:cx-using %)) (not (:ucls %))) es))
+                                       (recur (:parent sc))))))))
+                 cands (concat (let [acls (if (and (checking?) (or no-adl (:qualified callee))) #{} (adl-classes args))] (filter #(friend-visible? acls (fnd %)) own-fns)) tcands (when (and (not (:obj callee)) (not any-method) (not (and (:qualified callee) (not (checking?)))))
+                                 (cond->> (if no-adl [] (adl-fns args (or (:name callee) (:name (first ms)))))
                                    (and (checking?) (:qualified callee)) (remove #(:friend-cls (fnd %))))))
                  _ (when (and (empty? cands) (System/getenv "CPP_TMPL_TRACE"))
                      (binding [*out* *err*] (println "call of" (:name callee) "no candidates:" (count (:fns callee)) "fns" (count (:tmpls callee)) "templates" (pr-str (map :ty args)))))
@@ -11578,6 +11865,19 @@
                  (try (h ctx {:op :fnset :fns [] :name nm :tmpls (mapv :id (filter #(and (= :tmpl (:e %)) (= :fn (:tk %))) found))} args)
                       (catch arbace.lang.ExceptionInfo _ nil)))
         frees (concat (filter #(not (:cls (fnd %))) (map :id (filter #(= :fn (:e %)) found))) (adl-fns args nm) tspecs)
+        ;; (cpp-sema-ovl, the checker: [over.match.oper]/3.2, no operand of class type: a non-member function is a candidate only
+        ;; when an operand of enumeration type T has a parameter of type T or reference to cv T at its position, so that no
+        ;; operator function takes an enumeration through a converting constructor: overload/operator6.C's `e == ""` and `*e`
+        ;; beside operator==(const A&, const A&), the built-in operators' then)
+        frees (if (and (checking?) (not-any? #(class-id (:ty %)) args) (<= (count args) 2))
+                (filter (fn [fid]
+                          (let [ps (:ps (:ty (fnd fid)))]
+                            (some (fn [[a p]]
+                                    (let [t (abi/unq (abi/non-ref (:ty a)))]
+                                      (and (abi/enum? t) p (= t (abi/unq (abi/non-ref p))))))
+                                  (map vector args ps))))
+                        frees)
+                frees)
         cands (concat (map (fn [m] [:m m]) members) (map (fn [f] [:f f]) (distinct frees)))]
     (when (and (empty? cands) (System/getenv "CPP_OP_TRACE")) (binding [*out* *err*] (println "operator" o "no candidates for" (pr-str (map :ty args)) (pr-str (map #(some-> (class-id (:ty %)) abi/cls ((juxt :name :lambda :targs))) args)))))
     (if (empty? cands)
@@ -11620,6 +11920,22 @@
                       (catch arbace.lang.ExceptionInfo x (if (= :overload (:codegen/refused (ex-data x)))
                                                            (do (when (System/getenv "CPP_OP_TRACE") (binding [*out* *err*] (println "operator" o (.getMessage x) (count members) (count frees))))
                                                                (when (re-find #"ambiguous|deleted function" (.getMessage x)) (throw x))
+                                                               ;; (cpp-sema-ovl, the checker: [over.match.oper]/3 with [over.built]: an operator
+                                                               ;; whose candidates are surely none viable, with class operands of no conversion
+                                                               ;; function or template -- so no built-in candidate is viable -- and no operand of
+                                                               ;; enumeration type: GCC's "no match for 'operator@'" (its single candidate's
+                                                               ;; "invalid conversion"), cpp0x/pr51313.C's `cout << isdigit(0)`; not the operators
+                                                               ;; with rewritten or reversed candidates, nor = , -> () [])
+                                                               (when (and (checking?) (not *cx-in-implicit*)
+                                                                          (not (#{"=" "," "->" "()" "[]" "==" "!=" "<" ">" "<=" ">=" "<=>"} o))
+                                                                          (not (and (= o "&") (= 1 (count args))))
+                                                                          (re-find #"^codegen: no viable function among [1-9]" (.getMessage x))
+                                                                          (not (some #(abi/enum? (abi/unq (abi/non-ref (:ty %)))) args))
+                                                                          (let [cids (keep #(class-id (:ty %)) args)]
+                                                                            (and (seq cids) (every? #(and (empty? (conv-fns %)) (empty? (conv-tmpls %)) (not (:glam-conv (abi/cls %)))) cids))))
+                                                                 (throw (ex-info (str "codegen: no match for '" nm "' (no viable operator function, operand types "
+                                                                                      (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")
+                                                                                 {:codegen/refused :nomatch})))
                                                                ;; (queue 497, the checker: an assignment to a class, which has no
                                                                ;; built-in candidate ([over.built] has none for a class), whose
                                                                ;; operator= candidates are surely none viable: GCC's "no match for
@@ -11644,7 +11960,78 @@
                                                                                     :node cn})))]
                                                                    (throw (ex-info (str "codegen: no match for 'operator=' (operand types " (pr-str (mapv #(select-keys (abi/unq (abi/non-ref (:ty %))) [:k :n :id]) args)) ")")
                                                                                    (cond-> {:codegen/refused :nomatch} (seq ex) (assoc :cx/explain ex)))))))
-                                                           (throw x))))]
+                                                           (throw x))))
+        ;; (cpp-sema-ovl, the checker: [over.match.oper]/3.3 with [over.built]/12-14 and [over.ics.rank]/3.3: x @ y of class operands
+        ;; each converting by a conversion function to an integral or unscoped enumeration type, so that a built-in candidate
+        ;; (L, R) of promoted arithmetic types is viable by user-defined conversions alone, and the best operator function a
+        ;; non-member taking each operand by a user-defined conversion to a class type, another conversion function or
+        ;; constructor than the built-in candidate's: no conversion better, the call ambiguous, overload/builtin1.C's `a + a`
+        ;; for operator+(B, B) beside A::operator int)
+        _ (when (and (checking?) best (= 2 (count args)) (#{"+" "-" "*" "/" "%" "<" ">" "<=" ">=" "==" "!=" "&" "|" "^"} o)
+                     (not (contains? ms best)) (not (:tinst (fnd best)))
+                     (every? #(class-id (:ty %)) args)
+                     (let [ps (:ps (:ty (fnd best)))]
+                       (and (= 2 (count ps))
+                            (every? (fn [[a p]] (let [pt (abi/unq (abi/non-ref p))]
+                                                  (and (abi/class? pt) (not= (:id pt) (class-id (:ty a)))
+                                                       (not (abi/derived-from? (class-id (:ty a)) (:id pt)))
+                                                       (= 3 (long (or (:rank (ics a p)) 0))))))
+                                    (map vector args ps))))
+                     (every? (fn [a] (let [cid (class-id (:ty a))]
+                                       (and (empty? (conv-tmpls cid))
+                                            (some #(let [g (fnd %) r (abi/unq (abi/non-ref (:ret (:ty g))))]
+                                                     (and (not (:explicit g)) (or (not (:c (:ty a))) (:cq g))
+                                                          (or (abi/integral? r) (and (abi/enum? r) (not (:scoped (abi/enm (:id r))))))))
+                                                  (conv-fns cid)))))
+                             args))
+            (fail :overload "ambiguous call (operator" o " and a built-in candidate, each by user-defined conversions)"))
+        ;; (cpp-sema-ovl, the checker: C++20's reversed candidates of x == y, [over.match.oper]/3.4.4 with [over.match.best]/2.8: a
+        ;; non-member operator==(P0, P1), no template's and no operator!= corresponding to it ([over.match.oper]/4, P2468R2), taking
+        ;; y as its first operand and x as its second, against the best non-member candidate taken in order: one better for one
+        ;; operand and worse for another, neither better, the call ambiguous; cpp2a/spaceship-rewrite3.C's `x == y` for
+        ;; operator==(X, int) and operator==(Y, int))
+        _ (when (and (checking?) best (= o "==") (= 2 (count args)) (>= (long *cxx-year*) 20)
+                     (= (if (contains? ms best) 1 2) (count (:ps (:ty (fnd best))))))
+            (let [[l r] args
+                  ;; (a member's implicit object parameter, [over.match.funcs]/4: an lvalue reference to its class, const for a
+                  ;; const member function)
+                  objics (fn [o g] (when (not (:refq g)) (ics o {:k :ref :to (cond-> {:k :class :id (:cls g)} (:cq g) (assoc :c true))})))
+                  bg (fnd best)
+                  bps (:ps (:ty bg))
+                  bc (if (contains? ms best) [(objics l bg) (ics r (first bps))] [(ics l (first bps)) (ics r (second bps))])
+                  ne (fn [g] (let [ps (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty g)))]
+                               (some #(let [h (fnd (:id %))] (and (= :fn (:e %)) h (not (:cls h)) (= ps (mapv (fn [t] (abi/unq (abi/non-ref t))) (:ps (:ty h))))))
+                                     (try (lookup (:scope ctx) "operator!=") (catch arbace.lang.ExceptionInfo _ nil)))))
+                  rcid (class-id (:ty r))
+                  ;; (the reversed member candidates, y.operator==(x): the members of y's class, its operator templates'
+                  ;; specializations deduced from x, as for x's)
+                  rms (when (and rcid (not (seq (conv-tmpls rcid))))
+                        (let [rtm (vec (keep (fn [[_ x]] (when (and (= :tmpl (:e x)) (= :fn (:tk x))) (:id x))) (class-lookup rcid nm)))
+                              rsp (when (and (seq rtm) (:call-candidates @hooks))
+                                    (try ((:call-candidates @hooks) ctx {:op :fnset :fns [] :name nm :tmpls rtm :obj r} [l])
+                                         (catch arbace.lang.ExceptionInfo _ nil)))]
+                          (when-not (pos? (long (or (:unsure-drops (meta rsp)) 0)))
+                            (concat (second (method-set-of rcid nm)) rsp))))
+                  same? (fn [f] (or (= f best) (let [a (:tinst (fnd f)) b (:tinst bg)] (and a b (= (:tid a) (:tid b))))))
+                  judge! (fn [f rc]
+                           ;; (the same function reversed, or another specialization of its template: GCC's pedwarn "C++20 says
+                           ;; that these are ambiguous, even though the second is reversed", an error under -pedantic-errors)
+                           (when (and (every? some? rc) (some true? (map better-ics? rc bc)) (some true? (map better-ics? bc rc))
+                                      (or (not (same? f)) *pedantic-errors*))
+                             (fail :overload "ambiguous call (operator== and a reversed candidate)")))]
+              (when (every? some? bc)
+                (doseq [f (distinct frees) :let [g (fnd f) ps (:ps (:ty g))]
+                        :when (and (not (:tinst g)) (not (:cls g)) (= 2 (count ps)) (not (:va (:ty g))) (not (ne g)))]
+                  ;; (by operand: x's conversion to the second parameter, y's to the first)
+                  (judge! f [(ics l (second ps)) (ics r (first ps))]))
+                (doseq [f (distinct rms) :let [g (fnd f) ps (:ps (:ty g))]
+                        :when (and g (:cls g) (not (:static g)) (= 1 (count ps)) (not (:va (:ty g))) (not (:explicit-obj g))
+                                   ;; (no operator!= member corresponding to it, [over.match.oper]/4)
+                                   (not-any? #(let [h (fnd %)] (and h (= (mapv (fn [t] (abi/unq (abi/non-ref t))) (:ps (:ty h)))
+                                                                         (mapv (fn [t] (abi/unq (abi/non-ref t))) ps))
+                                                                    (= (boolean (:cq h)) (boolean (:cq g)))))
+                                             (second (method-set-of (:cls g) "operator!="))))]
+                  (judge! f [(ics l (first ps)) (objics r g)])))))]
         (cond
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
                             ;; (CP338 (a): none viable, a != b's rewritten candidate !(a == b), [over.match.oper]/3.4: a
@@ -11670,7 +12057,15 @@
           ;; operator<(strong_ordering, __unspec))
           (rewritten-better? ctx o args best ms)
           (operator-call ctx o [(operator-call ctx "<=>" args) {:op :int :v 0 :ty abi/int* :cat :pr}])
-          (contains? ms best) (method-call ctx best l more true)
+          (contains? ms best) (do ;; (cpp-sema-ovl, the checker: [class.access]/4 after [over.match.oper], the member operator
+                                  ;; function chosen named through the first operand's class, accessible there: GCC's "'...' is
+                                  ;; private within this context", diagnostic/inhibit-warn-2.C's `opt = 0` of a private
+                                  ;; operator= template)
+                                  (when (checking?)
+                                    (let [f (fnd best)]
+                                      (when (and (#{:private :protected} (:access f)) (:cls f) (not (:implicit f)))
+                                        (check-access! ctx (:cls f) (:name f) (:access f) lc l))))
+                                  (method-call ctx best l more true))
           :else (fn-call ctx best args))))))
 
 (defn- rewritten-relational
@@ -12257,7 +12652,13 @@
                                           ul? (assoc :ul [ps k])))
         fid (next-id)
         base-f {:cls id :inline inline? :internal (not inline?) :path (conj path [:cls id]) :scope cs :def-scope cs :linkage :cpp :defaults [] :pos -1}
-        _ (swap! *fns* assoc fid (merge base-f {:id fid :name "operator()" :kind :method :op "()" :ty {:k :fn :ret ret :ps ps :va false}
+        ;; (cpp-sema-ovl, the checker: a noexcept call operator's type noexcept since C++17, [except.spec]/1; its conversion's too)
+        _ (swap! *fns* assoc fid (merge base-f {:id fid :name "operator()" :kind :method :op "()"
+                                                :ty (cond-> {:k :fn :ret ret :ps ps :va false}
+                                                      ;; (the lambda-declarator's `noexcept` or `noexcept(true)`, its text before the body)
+                                                      (and (checking?) (>= (long *cxx-year*) 17)
+                                                           (re-find #"\)[^(){}\[\]]*\bnoexcept\b(?!\s*\()|\)[^(){}\[\]]*\bnoexcept\s*\(\s*true\s*\)" (str/replace head #"/\*.*?\*/|//[^\n]*" "")))
+                                                      (assoc :nx true))
                                                 :cq (not mutable) :param-names (mapv :name pn)}
                                                ;; (cpp-p2564, the checker: the call operator's default arguments, as a function's,
                                                ;; [expr.prim.lambda.closure]/3: consteval-prop1.C's `[] (int u = undef ()) {...}()`)
@@ -12318,7 +12719,9 @@
         _ (when (and (checking?) (seq inits)) (abi/update-cls! id assoc :cx-capturing true))]
     (when (empty? inits)
       ;; the conversion to a pointer to function and the static __invoke it returns
-      (let [ivid (next-id) cvid (next-id) ft {:k :fn :ret ret :ps ps :va false}
+      ;; (cpp-sema-ovl, the checker: the function type of a noexcept call operator's conversion noexcept too,
+      ;; [expr.prim.lambda.closure]/9 with [except.spec]/1: cpp1z/noexcept-type6.C)
+      (let [ivid (next-id) cvid (next-id) ft (cond-> {:k :fn :ret ret :ps ps :va false} (and (checking?) (>= (long *cxx-year*) 17) (or (:nx (:ty (fnd fid))) (:noexcept (fnd fid)))) (assoc :nx true))
             ipids (vec (for [pt ps] (let [pid (next-id)] (swap! *vars* assoc pid {:id pid :name nil :ty pt :storage :param :fn ivid}) pid)))
             lv (next-id)
             _ (swap! *vars* assoc lv {:id lv :name nil :ty t :storage :local :fn ivid})
@@ -12606,6 +13009,11 @@
                         (and (abi/arith? (:ty a)) (abi/arith? (:ty b))) (arith-common (:ty a) (:ty b))
                         (and (checking?) ca cb (not= ca cb) (abi/derived-from? ca cb)) (cvp (:ty b) (:ty a))
                         (and (checking?) ca cb (not= ca cb) (abi/derived-from? cb ca)) (cvp (:ty a) (:ty b))
+                        ;; (cpp-sema-ovl, the checker: [expr.type]/4.4, a pointer to noexcept function and one to the function
+                        ;; type without it: the latter, the composite pointer type)
+                        (and (checking?) (abi/ptr? (:ty a)) (abi/ptr? (:ty b)) (abi/fn? (:to (abi/unq (:ty a)))) (abi/fn? (:to (abi/unq (:ty b))))
+                             (= (dissoc (:to (abi/unq (:ty a))) :nx) (dissoc (:to (abi/unq (:ty b))) :nx)))
+                        (abi/ptr (dissoc (:to (abi/unq (:ty a))) :nx))
                         (abi/ptr? (:ty a)) (:ty a) (abi/ptr? (:ty b)) (:ty b)
                         (abi/void? (:ty a)) abi/void
                         :else (abi/unq (:ty a)))]
@@ -13347,6 +13755,7 @@
         :else
         (or (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (operator-call ctx o [l r]))
             (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (no-operator! ctx o [l r]))
+            (when (and (or (class-operand? l) (class-operand? r)) (not= o ",")) (cx-builtin-amb! o [l r]))
             (builtin-binop o (class->scalar ctx l) (class->scalar ctx r)))))
     "CompoundAssignOperator"
     (let [o (:opcode n) [ln rn] (kids n) l (analyze ctx ln) r (analyze ctx rn)]
@@ -13669,7 +14078,44 @@
                 (when (and (every? #(let [c (abi/cls %)] (and c (:complete c) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:dep-bases c)) (not (:lambda c))))
                                    all)
                            (not-any? (fn [id] (some #(= :conv (:kind (fnd %))) (:methods (abi/cls id)))) all))
-                  (fail :call-object "no match for call to an object of class '" (:name (abi/cls cid)) "' (no operator() and no conversion function)"))))
+                  (fail :call-object "no match for call to an object of class '" (:name (abi/cls cid)) "' (no operator() and no conversion function)"))
+                ;; (cpp-sema-ovl, the checker: [over.call.object]/2-3, no operator() in the class or its bases: the candidates are
+                ;; the surrogate call functions of its non-explicit conversion functions to a pointer or reference to function
+                ;; (none a template), each taking the arguments by the function type's parameters, the object by its conversion
+                ;; function: two viable that no argument's conversion tells apart are ambiguous, GCC's "call of '(C) (int)' is
+                ;; ambiguous", conversion/ambig3.C's two bases' `operator T *`; none viable, every conversion function one, "no
+                ;; match for call")
+                (when (and (every? #(let [c (abi/cls %)] (and c (:complete c) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:dep-bases c)) (not (:lambda c))))
+                                   all)
+                           (empty? (conv-tmpls cid))
+                           (not-any? #(seq (class-lookup % "operator()")) all)
+                           (not (some #(= :pack-exp (:op %)) args)) (not-any? #(= :init-list (:op %)) args))
+                  (let [fty (fn [g] (let [r (:ret (:ty g)) r1 (abi/non-ref r) u (abi/unq r1)]
+                                      (cond (and (abi/ref? r) (abi/fn? u)) u
+                                            (and (abi/ptr? u) (abi/fn? (abi/unq (:to u)))) (abi/unq (:to u))
+                                            :else nil)))
+                        cfs (distinct (conv-fns cid))
+                        sur (for [f cfs :let [g (fnd f)]
+                                  :when (not (:explicit g))
+                                  :when (or (not (:c (:ty callee))) (:cq g))]
+                              [f (fty g)])
+                        sure? (fn [F] (every? #(let [t (abi/non-ref %)] (or (abi/void? (abi/unq t)) (cx-sure-scalar? t) (abi/class? (abi/unq t)))) (cons (:ret F) (:ps F))))
+                        viable (for [[f F] sur :when F
+                                     :let [ps (:ps F)]
+                                     :when (and (>= (count args) (count ps)) (or (<= (count args) (count ps)) (:va F)))
+                                     :let [cs (map-indexed (fn [i a] (if (< i (count ps)) (ics a (nth ps i)) {:rank 4})) args)]
+                                     :when (every? some? cs)]
+                                 [f cs])
+                        best (filter (fn [[_ a]] (every? (fn [[_ b]] (or (identical? a b)
+                                                                        (and (every? true? (map #(not (better-ics? %2 %1)) a b)) (some true? (map better-ics? a b)))))
+                                                         viable))
+                                     viable)]
+                    (when (and (seq sur) (every? (fn [[_ F]] (and F (sure? F))) sur))
+                      (cond (and (>= (count viable) 2) (not= 1 (count best)))
+                            (fail :overload "ambiguous call (" (count viable) " viable surrogate call functions of '" (:name (abi/cls cid)) "')")
+                            (empty? viable)
+                            (fail :call-object "no match for call to an object of class '" (:name (abi/cls cid)) "' (no viable surrogate call function)")
+                            :else nil))))))
             (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args))))))
 )
@@ -15224,6 +15670,12 @@
         ;; call's operand: an expression statement of it is GCC's "invalid use of non-static member function", expr/ptrmem5.C's
         ;; `A().*ftype();`)
         (cx-discarded! x n)
+        ;; (cpp-sema-ovl, the checker: [class.dtor]/15, an expression statement of a class or array prvalue, `A{};`, materializes a
+        ;; temporary ([expr.context]/2, [class.temporary]/2) whose destructor is potentially invoked: a deleted or inaccessible one
+        ;; GCC's "use of deleted function 'A::~A()'", cpp0x/initlist47.C's `cA{};`)
+        (when (and (checking?) (= :pr (:cat x)) (map? (:ty x)) (not (abi/void? (abi/unq (:ty x)))) (#{"CXXFunctionalCastExpr" "CXXTemporaryObjectExpr"} (:kind n)))
+          (let [u (loop [u (abi/unq (:ty x)) k 0] (if (and (abi/arr? u) (< k 8)) (recur (abi/unq (:of u)) (inc k)) u))]
+            (when (abi/class? u) (cx-dtor-access! ctx (:ty x)))))
         (full x))
       (fail :stmt "statement " (:kind n)))))
 
