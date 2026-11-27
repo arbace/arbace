@@ -12555,3 +12555,66 @@ checker's types -- the checker leaves :nx out, cpp1z/noexcept-type3.C's false de
 complete-class contexts, GCC's parenthesized array new in C++20 (cpp2a/paren-init36.C, 37.C's false errors) and the rest), and 73 that
 clang fails as well (the cell's deferred rows). At this pass's rate (59 rows a day's pass) the stage reaches 1 only by CX12's tail
 done row by row; no input of it is the oracle tier's by design.
+
+## As built: cpp-sema-ovl, the own front end's overload resolution (2026-11-27; branch `cpp-sema-ovl-1127` from mac/next `2e2cd3ef1`)
+
+One of three agents splitting the fifth pass's tail by area (overload resolution here; incomplete types and class rules,
+cpp-sema-types-1127; constant evaluation and templates, cpp-sema-const-1127). The rows it moves to own are listed in
+test/cpp/sema-pass-ovl.txt (CORPUS/FILE a line), recorded with the other two branches' at their merge. The rules, each from the
+standard's text (and the GCC 15.2 manual for GCC's built-ins and vector types), in arbace/cpp/sema.ae, arbace/cpp/template.ae and
+arbace/repr/cpp/diag.ae's sema-rules, the checker's alone (`checking?`), the code generator's paths untouched:
+
+- noexcept in C++17's function types ([except.spec]/1 with [dcl.fct]/1, P0012R1): the checker's function types carry :nx as the
+  code generator's member function pointers did (`noexcept`, `noexcept(true)`, `throw()`; a lambda's call operator and its
+  conversion's function type too); the function pointer conversion ([conv.fctptr]) is an Exact Match ranked behind the identity
+  ([over.ics.rank]/3.2.1, :fnptr), in [over.over]'s matching, reference binding, the composite pointer type ([expr.type]/4.4),
+  static_cast ([expr.static.cast]/4, /7), template argument deduction ([temp.deduct.call]/4) and non-type template arguments;
+  nothing adds noexcept (a pointer, pointer to member, a pointer to pointer below the first level, a conversion function's
+  result): cpp1z/noexcept-type1.C, 3.C (the false deleted call), 4.C, 6.C, 7.C, 23.C. Declarations of one function whose types
+  differ in noexcept leave it without (GCC's discarding of a system header's throw(), noexcept-type19.C).
+- Declarations: [over.load]/2.1 with [basic.link]/11, a redeclaration with another return type, and
+  [dcl.spec.auto.general]/13's placeholder kept, GCC's "ambiguating new declaration" (cpp0x/inline-ns10.C, pr87155.C,
+  cpp1y/auto-fn8.C); GCC's built-in functions redeclared with another return type, "ambiguates built-in declaration"
+  (ext/pr84724-3.C, pr84843-1.C, -2.C; a warning under -fpermissive when the parameters are the built-in's);
+  [dcl.fct.def.delete]/4 for an explicit specialization (cpp0x/deleted10.C).
+- Operator candidates: [over.match.oper]/3.2, no class operand: a non-member candidate only for an enumeration operand's exact
+  parameter (overload/operator6.C); a built-in candidate of promoted arithmetic types viable by user-defined conversions beside a
+  non-member operator taking each operand by another one, ambiguous (overload/builtin1.C); == of one class converting to two
+  pointer types, ambiguous (overload/operator5.C); every candidate surely not viable and no built-in candidate (class operands of
+  no conversion function), "no match" (cpp0x/pr51313.C, diagnostic/param-type-mismatch-2.C; not under -fpermissive for a
+  postfix ++ whose prefix operator exists, parse/pr16696-permissive.C); C++20's reversed == candidates, non-member and member,
+  [over.match.oper]/3.4.4 and /4 (P2468R2) with [over.match.best]/2.8 (the same function reversed only under
+  -pedantic-errors): cpp2a/spaceship-rewrite1.C, rewrite3.C; [class.access]/4 for the member operator chosen
+  (diagnostic/inhibit-warn-2.C); ++ and -- whose class converts to no modifiable arithmetic or pointer lvalue ([over.built]/3-6).
+- Calls and conversions: [over.call.object]/2-3's surrogate call functions, ambiguous or none viable (conversion/ambig3.C);
+  [over.over]/3-5, two templates' specializations for a pointer to function and none more specialized (template/overload10.C);
+  [temp.deduct.decl]/2 for an explicit instantiation (template/crash92.C); [basic.lookup.argdep]/3.2, no ADL after a block-scope
+  function declaration (lookup/koenig15.C); [over.ics.rank]/3.2.1 between a reference binding and a by-value conversion
+  (CWG 2352: cpp0x/ref-bind4.C's false ambiguities gone, its f8 diagnosed) and /3.2.5 with P0388R4's arrays of unknown bound
+  (cpp2a/array-conv4.C; array-conv3.C's and 6.C's false ambiguities gone); [over.match.conv]: two conversion functions to the
+  target's scalar type (cpp1z/using-variadic1c.C), the one chosen deleted or GNU-unavailable (template/conv12.C's first,
+  ext/attr-unavailable-3.C); decltype of an overload set (cpp0x/decltype2.C); no pointer conversion between object and function
+  pointers or to a GNU vector, nor a scalar to a vector (diagnostic/aka4.C, aka5a.C, aka5b.C); C++20's parenthesized aggregate
+  initialization, an aggregate element from a scalar (cpp2a/paren-init13.C, 30.C, 32.C); an array bound of class type with no
+  or two conversion functions ([dcl.array]/1, cpp0x/constexpr-47969.C, constexpr-ex2.C); a pointer to data member as a
+  non-type template argument of another type (cpp2a/nontype-class10.C), a member function's of a class no base of the parameter's
+  ([conv.mem]/2, template/ptrmem20.C); a union's braced list of one undesignated item, its first member's conversion judged
+  ([dcl.init.aggr]/5, cpp2a/desig5.C); [class.dtor]/15, an expression statement's temporary of
+  deleted destructor (cpp0x/initlist47.C).
+
+Checks: .tmp/bin/dm and .tmp/bin/cmp of the fifth pass, probes beside each rule (the valid forms: f(g) of a non-noexcept g,
+`p1 == p2` of the two pointer types, a single surrogate, `x == x`, a == b of a const member ==), and full regressions over the
+3,332 recorded own passes and the 949 clang-pass candidates (4,281 files), r1 at the first pass `14bffede3`, r2 at the second
+`a38a38bed`, r3 at the third `41b1782f9`: r1 lost parse/pr16696-permissive.C (the no-viable-operator rule under -fpermissive,
+fixed in the second pass); r2 and r3 lost no recorded pass but to the read's 300 s cap under the host's load (four agents' runs at
+once): cpp2a/concepts-pr67774.C (255 s alone at the third pass's code, 261 s at the base `2e2cd3ef1` under the same load) and in
+r3 cpp1z/constexpr-asm-3.C, constexpr-asm-3.C a pass when rerun beside one other file, concepts-pr67774.C a pass rerun alone (255 s; it timed out again
+beside a second thread, as at the fifth pass: the load's, not the rules'). The dg negative control (dr2082-vs-dr1423) failed as it
+must in each run. r3: own passes 3,332 -> 3,379 of the files run, 49 rows moved to own (test/cpp/sema-pass-ovl.txt, all clang's
+passes): the 42 named above with the rules' own reach besides, gomp/pr92504.C, parse/error44.C, parse/pr16696.C,
+template/crash41.C, overload9.C, ttp5.C (the no-viable-operator rule) and overload/conv-op1.C (the surrogate call functions).
+
+Left in the area (each one or a few files a rule): the overload sets deduced as arguments ([temp.deduct.call]/6, cpp0x/pr69056.C),
+templates before instantiation (template/new14.C, cast3.C, cpp1y/var-templ76.C; area C's), OpenMP clauses (gomp/), built-in
+candidates for conversion function templates (template/operator12.C), copy-initialization's second step before C++17
+(template/copy1.C), GCC's own built-ins' argument rules (ext/builtin_alloca.C), lambdas in templates (lambda-template17.C).
