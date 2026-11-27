@@ -5506,6 +5506,44 @@
 
 (swap! checks conj alignas-incomplete)
 
+;; cpp-sema-types: [temp.deduct.guide]/3, a deduction-guide declared in a class is declared with the same access as the member
+;; class template it is for: GCC's "'template<class T> Y::B(T)-> Y::B<T>' has different access from 'template<class T> struct
+;; Y::B'", at the guide; cpp1z/class-deduction94.C. A class's members walked in order with their access-specifiers (the
+;; class-key's default first), the member templates' access by name; a guide whose template is not declared in the class not
+;; judged.
+
+(defn deduction-guide-access
+  [u starts ^String src ^String main]
+  (let [out (java.util.ArrayList.)
+        mine? (fn [n] (= main (get-in n [:range :begin :file])))]
+    (walk-nodes
+      (fn [r _]
+        (when (and (= "CXXRecordDecl" (:kind r)) (:completeDefinition r) (vector? (:inner r)) (mine? r))
+          (let [acc0 (if (= "class" (:tagUsed r)) "private" "public")
+                tm (java.util.HashMap.)]
+            (loop [ms (:inner r) a acc0 guides []]
+              (if-let [m (first ms)]
+                (case (:kind m)
+                  "AccessSpecDecl" (recur (rest ms) (str (:access m)) guides)
+                  "ClassTemplateDecl" (do (when (and (string? (:name m)) (not (.containsKey tm (:name m)))) (.put tm (:name m) a))
+                                          (recur (rest ms) a guides))
+                  ("FunctionTemplateDecl" "CXXDeductionGuideDecl")
+                  (let [g (if (= "CXXDeductionGuideDecl" (:kind m)) m (some #(when (= "CXXDeductionGuideDecl" (:kind %)) %) (:inner m)))]
+                    (recur (rest ms) a (if g (conj guides [m g a]) guides)))
+                  (recur (rest ms) a guides))
+                (doseq [[m g a] guides
+                        :let [nm (some-> (re-find #"^<deduction guide for (.+)>$" (str (:name g))) second)
+                              ta (when nm (.get tm nm))]
+                        :when (and ta (not= ta a) (mine? m))]
+                  (when-let [o (get-in m [:range :begin :offset])]
+                    (let [[l c] (line-col starts (long o))]
+                      (.add out {:line l :col c :kind :error :rule :access
+                                 :msg (str "deduction guide for '" nm "' has different access from its class template")})))))))))
+      (:nodes u) nil)
+    (vec out)))
+
+(swap! checks conj deduction-guide-access)
+
 ;; cpp-def: a direct base whose destructor is private, its class befriending none: [class.dtor]/7, the derived class's implicit
 ;; destructor is deleted (the base's inaccessible from it), so with the base's destructor virtual it is a deleted function
 ;; overriding a non-deleted one, [class.virtual]/18 ("deleted function 'virtual B::~B()' overriding non-deleted function", at the
