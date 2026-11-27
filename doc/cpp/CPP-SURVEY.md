@@ -12555,3 +12555,56 @@ checker's types -- the checker leaves :nx out, cpp1z/noexcept-type3.C's false de
 complete-class contexts, GCC's parenthesized array new in C++20 (cpp2a/paren-init36.C, 37.C's false errors) and the rest), and 73 that
 clang fails as well (the cell's deferred rows). At this pass's rate (59 rows a day's pass) the stage reaches 1 only by CX12's tail
 done row by row; no input of it is the oracle tier's by design.
+
+## As built: cpp-sema-const, the own front end's constant evaluation and templates (2026-11-27; branch `cpp-sema-const-1127` from mac/next `2e2cd3ef1`)
+
+One of three agents over the 766 dg rows clang passes that the own front end did not (the fifth pass's "Left"), split by
+semantic area; this one constant evaluation and templates (constexpr and consteval, core constant expressions, static_assert,
+constinit; templates before instantiation; deduction, packs; concepts), the other two overload resolution with noexcept in
+function types, and incomplete types, complete-class contexts, access, class rules and parenthesized init. The method the fifth
+pass's: each candidate read against its dg lines (the worktree's .tmp/bin/dm, a file's diagnostics with the checker's refusals),
+each rule from the standard's text, its valid forms probed beside the invalid ones (.tmp/p/ok*.C give no diagnostic). The rules
+(arbace/cpp/sema.ae, arbace/cpp/template.ae, arbace/repr/cpp/diag.ae's sema-rules):
+
+- Constant evaluation: a pointer to function converted to a pointer to an object type (void among them), or back, a
+  reinterpret_cast ([expr.reinterpret.cast]/6, /8; cpp0x/constexpr-89599.C), and a reinterpret_cast's glvalue read
+  (constexpr-union.C); a constexpr array's braced initializer evaluated, its class elements no indeterminate subobject
+  ([dcl.init.aggr]/4, [expr.const]/13-14; constexpr-init3.C); a global array from a string literal read element by element
+  ([dcl.init.string]/3; constexpr-array13.C's `*(p-1)`); a reference of static storage duration bound to a temporary of a type
+  not const, its referent no object usable in constant expressions, and a const variable of pointer or floating type none either
+  ([expr.const]/4-5; constexpr-ref10.C, constexpr-59686.C, constexpr-object2.C); a member function used before its outermost
+  enclosing class is complete, outside the class's own member functions ([class.mem.general]/7, [expr.const]/5.3;
+  constexpr-54002.C); a GNU vector operation's operands evaluated (pr59641.C); flowing off the end of a user-written function
+  that returns a value ([stmt.return]/4; cpp1y/constexpr-return2.C), not judged for a body with a statement left out, an error
+  reported or a VLA; -INT_MIN of a type narrower than long ([expr.pre]/4); an array member of scalars, or of class elements,
+  with an element holding no value ([expr.const]/13-14; cpp2a/constexpr-init21.C, whose arrays are maps of their set elements);
+  a pointer or a reference to an object of automatic storage duration as no permitted result ([expr.const]/13;
+  diagnostic/constexpr3.C, cpp0x/constexpr-ref2.C); an ellipsis's arguments evaluated ([expr.call]/12;
+  constexpr-ellipsis2.C); a closure type no literal type before C++17 ([expr.prim.lambda]/3 of C++14); a constexpr
+  constructor's mem-initializer calling a constructor not constexpr ([dcl.constexpr]/3-6 of C++11-C++20; constexpr-ctor2.C,
+  constexpr-ice5.C) and, before C++20, a member of class type default-initialized by a trivial constructor while its class has
+  members (constexpr-diag4.C); the consteval branch of `if consteval` analyzed as an immediate function context
+  ([stmt.if]/4, [expr.const]/16; cpp23/consteval-if12.C); __is_same judged in a static_assert; C++03's floating operations in an
+  enumerator's integral constant expression ([expr.const]/1 of C++03; parse/constant5.C).
+- Templates: a non-type template argument naming a function parameter, a variable neither const nor constexpr, a volatile one or
+  a const floating one ([expr.const]/4-5, /5.9; template/crash131.C's cascade aside, parse/error2.C, constexpr-volatile2.C);
+  structural class types for non-type parameters, a base or member not public, mutable, an rvalue reference
+  ([temp.param]/7; cpp2a/nontype-class25.C); a placeholder parameter deduced from a floating literal before C++20, and an
+  instance's non-type parameter whose substituted type is void, a reference to void or (before C++20) floating
+  ([temp.param]/4 of C++17; cpp1z/nontype-auto3.C, template/nontype12.C, template/instantiate7.C); a class template's
+  instance forming a reference to void or a pointer to member of void, reported at the member, and in a constraint's
+  substitution the same a sure failure ([temp.inst]/3, [temp.constr.atomic]/3; template/ptrmem15.C,
+  cpp2a/concepts-requires18.C); an array bound greater than zero for a variable or a member, an instance's too ([dcl.array]/1;
+  template/dependent-name3.C); a variable template's non-dependent constrained placeholder and initialization checked at its
+  definition ([temp.res.general]/6; cpp2a/concepts-placeholder4.C, warn/Waddress-of-packed-member2.C).
+- Deduction and packs: a placeholder parameter's type from another placeholder's argument, a character literal or a literal
+  default ([dcl.type.auto.deduct]); a trailing pack's explicit arguments extended by deduction ([temp.arg.explicit]/9;
+  cpp0x/variadic35.C's `get_ith<1, float>(1, 2.0, 'x')`, a false error before); packs of different lengths in one expansion
+  an error ([temp.variadic]/7; cpp0x/variadic78.C).
+- Concepts: an atomic constraint's type other than bool for a literal, a cast or an arithmetic result ([temp.constr.atomic]/3;
+  concepts/pr94252.C, cpp2a/concepts-nonbool3.C); a call through a pointer to function of too many arguments, an implicit
+  conversion no standard conversion makes and too many initializers sure substitution failures (concepts/diagnostic17.C,
+  cpp2a/concepts-class2.C); a nested requirement's own sure evaluation error reported (cpp2a/concepts-pr67697.C); a class
+  template's placeholder parameters' type-constraints (cpp2a/concepts-template-parm2.C, -parm6.C); an alias template's
+  constraints not satisfied a template constraint failure at its use or at the alias naming it (cpp2a/concepts-alias.C); a
+  variable template's explicit specialization satisfying its constraints (cpp2a/concepts-var-templ1.C).
