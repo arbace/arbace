@@ -22,7 +22,12 @@
                                     forkserver's protocol: the child's pid written to the client, its exit status from
                                     the server's SIGCHLD and waitpid, the child the server's own. What a fork alone
                                     gives is not given: the preloaded modules' import runs again in each child (their
-                                    side effects repeat), and the server's memory is not the child's."
+                                    side effects repeat), and the server's memory is not the child's. So that
+                                    the repeated preload leaks nothing (py-mp-1127): the child takes the request's
+                                    resource tracker before it, runs the finalizers it registered at its exit
+                                    (process._bootstrap clears the registry, as for a forked child's inherited
+                                    ones), and collects after spawn's prepare when a finalizer of an object waits
+                                    (an object the preparation made and dropped dies at once in CPython)."
   (:require [arbace.string :as str])
   (:import [java.security MessageDigest]))
 
@@ -60,18 +65,45 @@ def _pyi_spawn_one(child_r, fds, handlers, preload, *args, sys_argv=None, **kws)
         argv += sys_argv
     return util.spawnv_passfds(exe, argv, [child_r] + list(fds))
 
+def _pyi_prepare(data, _prepare=spawn.prepare):
+    '''spawn.prepare in the child, then a collection when a finalizer of an object waits (py-mp-1127): process._bootstrap
+    next clears util's finalizer registry (a forked child drops its parent's), and an object the preparation made and
+    dropped (mp_preload.py's Lock() as __mp_main__) is dead by then under reference counting, its finalizer run (the
+    semaphore unlinked and unregistered, else reported leaked)'''
+    _prepare(data)
+    if any(f._weakref is not None for f in list(util._finalizer_registry.values())):
+        import gc
+        gc.collect()
+
+def _pyi_finalize_preload(preloaded):
+    '''The preload's own finalizers at the child's exit (py-mp-1127): process._bootstrap clears the registry, as a forked
+    child drops its parent's, but these are the child's own (its preload ran again here: a preloaded module's semaphore,
+    unlinked and unregistered from the resource tracker, else reported leaked)'''
+    for f in preloaded:
+        if f._key is not None:  # not run or cancelled since
+            util._finalizer_registry[f._key] = f
+    util._run_finalizers()
+
 def _pyi_serve_one(child_r, fds, handler_names, preload, args, *, sys_argv=None, **kws):
     '''The child of a request: the forked child's work in main() after os.fork'''
     code = 1
     try:
+        # the request's alive fd and resource tracker before the preload (py-mp-1127): a forked child inherits the
+        # server's; here a preloaded module's semaphore (test.mp_preload's Lock) otherwise launched a tracker of the
+        # child's own, which reported it leaked at the child's exit
+        _forkserver._forkserver_alive_fd, resource_tracker._resource_tracker._fd = fds[0], fds[1]
+        before = set(util._finalizer_registry)
         _pyi_preload(preload, *args, sys_argv=sys_argv, **kws)
+        preloaded = [f for k, f in util._finalizer_registry.items() if k not in before]
         util._close_stdin()
         atexit._clear()
         atexit.register(util._exit_function)
+        atexit.register(_pyi_finalize_preload, preloaded)
         handlers = {}
         for sig, name in handler_names.items():
             handlers[sig] = {'dfl': signal.SIG_DFL, 'ign': signal.SIG_IGN,
                              'int': signal.default_int_handler}[name]
+        spawn.prepare = _pyi_prepare
         code = _serve_one(child_r, fds, [], handlers)
     except Exception:
         sys.excepthook(*sys.exc_info())

@@ -9473,3 +9473,37 @@ out-of-band read-only buffer wrote it, and the loaded view stayed writable.
   read-only and none alive, as CPython.
 - Left: train 6's B run of test_process_pool and 12 multiprocessing modules hung on Pickler_dealloc (the journal's "Train
   6"), not measured here; their pickles take no out-of-band buffers, so it may be another cause.
+
+## As built: py-mp-1127, `:multiprocessing` and `:multiprocessing-children` at train 7 (2026-11-27, the main host)
+
+The classes' 64 rows at train 7's record (mac/train-7, f3da80d1c), each probed alone (`bin/pyi check --only`, one method a
+line, on train 7's executable c04e326d97bedc4262f7) or read from train 7's own runs:
+
+- **Already passing on train 7's executable (58).** `:multiprocessing`'s ProcessPoolForkserverProcessPoolExecutorTest rows
+  ("unexpected EOF", before queue 535's forkserver) but test_ressources_gced_in_workers (below), 40, pass in train 7's run
+  judge-2a (in its earlier run some crashed with the C `_pickle`'s segmentation fault, py-regress-1127's); TestStdinBadfiledescriptor's
+  two and forkserver's test_rapid_restart pass. Of `:multiprocessing-children`: spawn's and forkserver's TestResourceTracker
+  sigint/sigkill/sigterm (py-mp-1125's frame and signal mask), both test_poll_eintr, forkserver's
+  test_shared_memory_SharedMemoryServer_ignores_sigint (its KeyboardInterrupt needs SIGINT not ignored by the run's shell: train
+  7's wd-run.sh), fork's and spawn's test_worker_finalization_via_atexit_handler_of_multiprocessing, fork's
+  SharedMemoryManager_reuses_resource_tracker, spawn's test_finalize and test_release_task_refs; spawn's test_preload_resources
+  skips ('forkserver' only; its reference `:excluded`).
+- **Built: the forkserver child's preload leaks nothing** (libpatch.ae's `_pyi_serve_one`): forkserver's test_preload_resources
+  ("failed spawning forkserver or grandchild": two "leaked semaphore objects" warnings on stderr). mp_preload.py's
+  `multiprocessing.Lock()` runs again in pyi's child (the preload and then spawn's prepare of `__mp_main__`), where a forked child
+  only inherits the server's. The child now takes the request's alive fd and resource tracker before the preload (the preload's
+  Lock launched a tracker of the child's own), runs the finalizers the preload registered at its exit (process._bootstrap clears
+  util's registry, as a forked child drops its parent's), and collects after spawn's prepare when a finalizer of an object waits
+  (the Lock() made and dropped by `__mp_main__` dies at once in CPython, its finalizer run before the clear). Passes (`--only`).
+- **Built: the moment at del looks past an untracked value** (finalize.go's `finHeld`): test_ressources_gced_in_workers (spawn's
+  and forkserver's): concurrent.futures' worker lets go of a call's arguments by `del call_item`, a _CallItem whose args tuple holds
+  the EventfulGCObj whose `__del__` the test waits 1 s for; 222's DELETE_FAST check saw only the untracked _CallItem. DELETE_FAST
+  of an instance, tuple, list or dict now checks the tracked objects with work or weak references due that it holds, two levels
+  deep and at most 32 items, each as a deleted value's (one collection within the moment's budget; values never held, addresses
+  only). Probed natively (a `go test` of the printed runtime over the IR of probes; goi keeps a returned call's values in its
+  registers, so it cannot show a death): a tuple's and an instance's args tuple's `__del__` object die at their del, with the
+  old finalize.go at a later collection.
+- **Left: forkserver's TestManagerExceptions test_dispatch and test_queue_get** ("Empty() != None"): spawn's two, the same tests,
+  are `:finalization`'s (n/a, 537-2 (a), py-mp-1125): the handler's `e = None; del e` deletes None, the exception dies at the
+  handler's end only under reference counting. **test_large_pool** (fork's test_misc, its script's Pool(200) past the memory cap)
+  is the user's decision of 2026-11-27 (libtest_run.py's Pool(20)), recorded by train 7.
