@@ -12585,7 +12585,9 @@ each rule from the standard's text, its valid forms probed beside the invalid on
   constexpr-ice5.C) and, before C++20, a member of class type default-initialized by a trivial constructor while its class has
   members (constexpr-diag4.C); the consteval branch of `if consteval` analyzed as an immediate function context
   ([stmt.if]/4, [expr.const]/16; cpp23/consteval-if12.C); __is_same judged in a static_assert; C++03's floating operations in an
-  enumerator's integral constant expression ([expr.const]/1 of C++03; parse/constant5.C).
+  enumerator's integral constant expression ([expr.const]/1 of C++03; parse/constant5.C); a constexpr constructor's
+  mem-initializer argument reading a variable not usable in constant expressions (constexpr-non-const-arg.C); GCC's
+  -fconstexpr-ops-limit=N when the file gives it (cpp1y/constexpr-87481.C).
 - Templates: a non-type template argument naming a function parameter, a variable neither const nor constexpr, a volatile one or
   a const floating one ([expr.const]/4-5, /5.9; template/crash131.C's cascade aside, parse/error2.C, constexpr-volatile2.C);
   structural class types for non-type parameters, a base or member not public, mutable, an rvalue reference
@@ -12596,7 +12598,9 @@ each rule from the standard's text, its valid forms probed beside the invalid on
   substitution the same a sure failure ([temp.inst]/3, [temp.constr.atomic]/3; template/ptrmem15.C,
   cpp2a/concepts-requires18.C); an array bound greater than zero for a variable or a member, an instance's too ([dcl.array]/1;
   template/dependent-name3.C); a variable template's non-dependent constrained placeholder and initialization checked at its
-  definition ([temp.res.general]/6; cpp2a/concepts-placeholder4.C, warn/Waddress-of-packed-member2.C).
+  definition ([temp.res.general]/6; cpp2a/concepts-placeholder4.C, warn/Waddress-of-packed-member2.C); before C++20 no
+  placeholder for a deduced class type as a non-type parameter's type (cpp1z/class-deduction64.C); an address cast to an
+  integer type in a template argument ([expr.const]/5.15; template/pr79650.C).
 - Deduction and packs: a placeholder parameter's type from another placeholder's argument, a character literal or a literal
   default ([dcl.type.auto.deduct]); a trailing pack's explicit arguments extended by deduction ([temp.arg.explicit]/9;
   cpp0x/variadic35.C's `get_ith<1, float>(1, 2.0, 'x')`, a false error before); packs of different lengths in one expansion
@@ -12607,4 +12611,7 @@ each rule from the standard's text, its valid forms probed beside the invalid on
   cpp2a/concepts-class2.C); a nested requirement's own sure evaluation error reported (cpp2a/concepts-pr67697.C); a class
   template's placeholder parameters' type-constraints (cpp2a/concepts-template-parm2.C, -parm6.C); an alias template's
   constraints not satisfied a template constraint failure at its use or at the alias naming it (cpp2a/concepts-alias.C); a
-  variable template's explicit specialization satisfying its constraints (cpp2a/concepts-var-templ1.C).
+  variable template's explicit specialization satisfying its constraints (cpp2a/concepts-var-templ1.C); a variadic concept
+  constraining a pack, C<Ts...> whole ([temp.param]/4; cpp2a/concepts-fn3.C); no type named in a complete class a sure
+  substitution failure (cpp2a/concepts-pr65854.C); a compound requirement surely false by its type-constraint whatever its
+  noexcept, which the checker leaves unjudged (concepts/diagnostic7.C).
