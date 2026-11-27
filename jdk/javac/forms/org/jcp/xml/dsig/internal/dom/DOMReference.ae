@@ -1,0 +1,468 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/org/jcp/xml/dsig/internal/dom/DOMReference.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'org.jcp.xml.dsig.internal.dom)
+
+(import '(com.sun.org.apache.xml.internal.security.c14n CanonicalizationException)
+        '(com.sun.org.apache.xml.internal.security.signature XMLSignatureInput)
+        '(com.sun.org.apache.xml.internal.security.utils UnsyncBufferedOutputStream XMLUtils)
+        '(com.sun.org.slf4j.internal Logger LoggerFactory)
+        '(java.io IOException InputStream OutputStream)
+        '(java.net URI URISyntaxException)
+        '(java.security AccessController
+                        MessageDigest
+                        NoSuchAlgorithmException
+                        PrivilegedAction
+                        Provider)
+        '(java.util ArrayList Arrays Collections Iterator List Set)
+        '(javax.xml.crypto Data
+                           MarshalException
+                           NodeSetData
+                           OctetStreamData
+                           URIReferenceException
+                           XMLCryptoContext)
+        '(javax.xml.crypto.dom DOMCryptoContext DOMURIReference)
+        '(javax.xml.crypto.dsig CanonicalizationMethod
+                                DigestMethod
+                                Reference
+                                Transform
+                                TransformException
+                                TransformService
+                                XMLSignContext
+                                XMLSignature
+                                XMLSignatureException
+                                XMLValidateContext)
+        '(org.jcp.xml.dsig.internal DigesterOutputStream)
+        '(org.w3c.dom Attr Element Node))
+
+(defclass ^:public ^:final DOMReference
+  :extends DOMStructure
+  :implements [Reference DOMURIReference]
+
+  (field ^:public ^:static ^:final ^int MAXIMUM_TRANSFORM_COUNT 5)
+
+  (field ^:private ^:static ^boolean useC14N11
+    (.booleanValue
+      (cast Boolean
+            (AccessController/doPrivileged
+              (lambda PrivilegedAction ^Boolean []
+                (Boolean/getBoolean "com.sun.org.apache.xml.internal.security.useC14N11"))))))
+
+  (field ^:private ^:static ^:final ^Logger LOG (LoggerFactory/getLogger DOMReference))
+
+  (field ^:private ^:final ^DigestMethod digestMethod)
+
+  (field ^:private ^:final ^String id)
+
+  (field ^:private ^:final ^{:tag (List Transform)} transforms)
+
+  (field ^:private ^{:tag (List Transform)} allTransforms)
+
+  (field ^:private ^:final ^Data appliedTransformData)
+
+  (field ^:private ^Attr here)
+
+  (field ^:private ^:final ^String uri)
+
+  (field ^:private ^:final ^String type)
+
+  (field ^:private ^byte/1 digestValue)
+
+  (field ^:private ^byte/1 calcDigestValue)
+
+  (field ^:private ^Element refElem)
+
+  (field ^:private ^boolean digested false)
+
+  (field ^:private ^boolean validated false)
+
+  (field ^:private ^boolean validationStatus)
+
+  (field ^:private ^Data derefData)
+
+  (field ^:private ^InputStream dis)
+
+  (field ^:private ^MessageDigest md)
+
+  (field ^:private ^Provider provider)
+
+  (constructor ^:public [this ^String uri ^String type ^DigestMethod dm
+                         ^{:tag (List (? extends Transform))} transforms ^String id
+                         ^Provider provider]
+    (this. uri type dm nil nil transforms id nil provider))
+
+  (constructor ^:public [this ^String uri ^String type ^DigestMethod dm
+                         ^{:tag (List (? extends Transform))} appliedTransforms ^Data result
+                         ^{:tag (List (? extends Transform))} transforms ^String id
+                         ^Provider provider]
+    (this. uri type dm appliedTransforms result transforms id nil provider))
+
+  (constructor ^:public [this ^String uri ^String type ^DigestMethod dm
+                         ^{:tag (List (? extends Transform))} appliedTransforms ^Data result
+                         ^{:tag (List (? extends Transform))} transforms ^String id
+                         ^byte/1 digestValue ^Provider provider]
+    (when (nil? dm) (throw (NullPointerException. "DigestMethod must be non-null")))
+    (if (nil? appliedTransforms)
+        (set! (.-allTransforms this) (ArrayList.))
+        (do
+          (set! (.-allTransforms this) (ArrayList. appliedTransforms))
+          (loop [^int i 0
+                 ^int size (.size (.-allTransforms this))]
+            (if (< i size)
+                (if (not (instance? Transform (.get (.-allTransforms this) i)))
+                    (throw (ClassCastException.
+                             (java-str "appliedTransforms[" i "] is not a valid type")))
+                    (recur (unchecked-inc-int i) size))
+                nil))))
+    (if (nil? transforms)
+        (set! (.-transforms this) (Collections/emptyList))
+        (do
+          (set! (.-transforms this) (ArrayList. transforms))
+          (loop [^int i 0
+                 ^int size (.size (.-transforms this))]
+            (if (< i size)
+                (if (not (instance? Transform (.get (.-transforms this) i)))
+                    (throw (ClassCastException. (java-str "transforms[" i "] is not a valid type")))
+                    (recur (unchecked-inc-int i) size))
+                nil))
+          (.addAll (.-allTransforms this) (.-transforms this))))
+    (set! (.-digestMethod this) dm)
+    (set! (.-uri this) uri)
+    (when (and (some? uri) (not (.isEmpty uri)))
+      (try
+        (URI. uri)
+        (catch URISyntaxException e (throw (IllegalArgumentException. (.getMessage e))))))
+    (set! (.-type this) type)
+    (set! (.-id this) id)
+    (when (some? digestValue)
+      (set! (.-digestValue this) (.clone digestValue))
+      (set! (.-digested this) true))
+    (set! (.-appliedTransformData this) result)
+    (set! (.-provider this) provider))
+
+  (constructor :throws [MarshalException] ^:public [this ^Element refElem ^XMLCryptoContext context
+                                                    ^Provider provider]
+    (let [secVal (Utils/secureValidation context)
+          ^:mutable nextSibling (DOMUtils/getFirstChildElement refElem)
+          ^{:tag (List Transform)} newTransforms (ArrayList. MAXIMUM_TRANSFORM_COUNT)]
+      (when (and (.equals "Transforms" (.getLocalName nextSibling))
+                 (.equals XMLSignature/XMLNS (.getNamespaceURI nextSibling)))
+        (let [^:mutable transformElem (DOMUtils/getFirstChildElement
+                                        nextSibling
+                                        "Transform"
+                                        XMLSignature/XMLNS)]
+          (.add newTransforms (DOMTransform. transformElem context provider))
+          (set! transformElem (DOMUtils/getNextSiblingElement transformElem))
+          (while (some? transformElem)
+            (let [localName (.getLocalName transformElem)
+                  namespace (.getNamespaceURI transformElem)]
+              (when (or (not (.equals "Transform" localName))
+                        (not (.equals XMLSignature/XMLNS namespace)))
+                (throw (MarshalException.
+                         (java-str "Invalid element name: " localName ", expected Transform"))))
+              (.add newTransforms (DOMTransform. transformElem context provider))
+              (when (and secVal (Policy/restrictNumTransforms (.size newTransforms)))
+                (let [error (java-str
+                              "A maximum of "
+                              (Policy/maxTransforms)
+                              " transforms per Reference are allowed when secure validation is enabled")]
+                  (throw (MarshalException. error))))
+              (set! transformElem (DOMUtils/getNextSiblingElement transformElem))))
+          (set! nextSibling (DOMUtils/getNextSiblingElement nextSibling))))
+      (when (and (not (.equals "DigestMethod" (.getLocalName nextSibling)))
+                 (.equals XMLSignature/XMLNS (.getNamespaceURI nextSibling)))
+        (throw (MarshalException.
+                 (java-str "Invalid element name: "
+                           (.getLocalName nextSibling)
+                           ", expected DigestMethod"))))
+      (let [dmElem nextSibling]
+        (set! (.-digestMethod this) (DOMDigestMethod/unmarshal dmElem))
+        (let [digestMethodAlgorithm (.getAlgorithm (.-digestMethod this))]
+          (when (and secVal (Policy/restrictAlg digestMethodAlgorithm))
+            (throw (MarshalException.
+                     (java-str "It is forbidden to use algorithm "
+                               digestMethodAlgorithm
+                               " when secure validation is enabled"))))
+          (let [dvElem (DOMUtils/getNextSiblingElement dmElem "DigestValue" XMLSignature/XMLNS)
+                content (XMLUtils/getFullTextChildrenFromNode dvElem)]
+            (set! (.-digestValue this) (XMLUtils/decode content))
+            (when (some? (DOMUtils/getNextSiblingElement dvElem))
+              (throw (MarshalException. "Unexpected element after DigestValue element")))
+            (set! (.-uri this) (DOMUtils/getAttributeValue refElem "URI"))
+            (let [attr (.getAttributeNodeNS refElem nil "Id")]
+              (if (some? attr)
+                  (do (set! (.-id this) (.getValue attr)) (.setIdAttributeNode refElem attr true))
+                  (set! (.-id this) nil))
+              (set! (.-type this) (DOMUtils/getAttributeValue refElem "Type"))
+              (set! (.-here this) (.getAttributeNodeNS refElem nil "URI"))
+              (set! (.-refElem this) refElem)
+              (set! (.-transforms this) newTransforms)
+              (set! (.-allTransforms this) transforms)
+              (set! (.-appliedTransformData this) nil)
+              (set! (.-provider this) provider)))))))
+
+  (method ^:public getDigestMethod ^DigestMethod [this] digestMethod)
+
+  (method ^:public getId ^String [this] id)
+
+  (method ^:public getURI ^String [this] uri)
+
+  (method ^:public getType ^String [this] type)
+
+  (method ^:public getTransforms ^{:tag (List Transform)} [this]
+    (Collections/unmodifiableList allTransforms))
+
+  (method ^:public getDigestValue ^byte/1 [this]
+    (when (some? digestValue) (.clone digestValue)))
+
+  (method ^:public getCalculatedDigestValue ^byte/1 [this]
+    (when (some? calcDigestValue) (.clone calcDigestValue)))
+
+  (method ^:public marshal :throws [MarshalException] ^void [this ^Node parent ^String dsPrefix
+                                                             ^DOMCryptoContext context]
+    (.debug LOG "Marshalling Reference")
+    (let [ownerDoc (DOMUtils/getOwnerDocument parent)]
+      (set! refElem (DOMUtils/createElement ownerDoc "Reference" XMLSignature/XMLNS dsPrefix))
+      (DOMUtils/setAttributeID refElem "Id" id)
+      (DOMUtils/setAttribute refElem "URI" uri)
+      (DOMUtils/setAttribute refElem "Type" type)
+      (when-not (.isEmpty allTransforms)
+        (let [transformsElem (DOMUtils/createElement
+                               ownerDoc
+                               "Transforms"
+                               XMLSignature/XMLNS
+                               dsPrefix)]
+          (.appendChild refElem transformsElem)
+          (for-each [^Transform transform allTransforms]
+            (.marshal (cast DOMStructure transform) transformsElem dsPrefix context))))
+      (.marshal (cast DOMDigestMethod digestMethod) refElem dsPrefix context)
+      (.debug LOG "Adding digestValueElem")
+      (let [digestValueElem (DOMUtils/createElement
+                              ownerDoc
+                              "DigestValue"
+                              XMLSignature/XMLNS
+                              dsPrefix)]
+        (when (some? digestValue)
+          (.appendChild digestValueElem
+                        (.createTextNode ownerDoc (XMLUtils/encodeToString digestValue))))
+        (.appendChild refElem digestValueElem)
+        (.appendChild parent refElem)
+        (set! here (.getAttributeNodeNS refElem nil "URI")))))
+
+  (method ^:public digest :throws [XMLSignatureException] ^void [this ^XMLSignContext signContext]
+    (let [^:mutable ^Data data nil]
+      (if (nil? appliedTransformData)
+          (set! data (.dereference this signContext))
+          (set! data appliedTransformData))
+      (set! digestValue (.transform this data signContext))
+      (let [encodedDV (XMLUtils/encodeToString digestValue)]
+        (.debug LOG "Reference object uri = {}" (new Object/1 [uri]))
+        (let [digestElem (DOMUtils/getLastChildElement refElem)]
+          (when (nil? digestElem) (throw (XMLSignatureException. "DigestValue element expected")))
+          (DOMUtils/removeAllChildren digestElem)
+          (.appendChild digestElem (.createTextNode (.getOwnerDocument refElem) encodedDV))
+          (set! digested true)
+          (.debug LOG "Reference digesting completed")))))
+
+  (method ^:public validate :throws [XMLSignatureException] ^boolean [this
+                                                                      ^XMLValidateContext validateContext]
+    (when (nil? validateContext) (throw (NullPointerException. "validateContext cannot be null")))
+    (if validated
+        validationStatus
+        (let [data (.dereference this validateContext)]
+          (set! calcDigestValue (.transform this data validateContext))
+          (when (.isDebugEnabled LOG)
+            (.debug LOG (java-str "Expected digest: " (XMLUtils/encodeToString digestValue)))
+            (.debug LOG (java-str "Actual digest: " (XMLUtils/encodeToString calcDigestValue))))
+          (set! validationStatus (Arrays/equals digestValue calcDigestValue))
+          (set! validated true)
+          validationStatus)))
+
+  (method ^:public getDereferencedData ^Data [this] derefData)
+
+  (method ^:public getDigestInputStream ^InputStream [this] dis)
+
+  (method ^:private dereference :throws [XMLSignatureException] ^Data [this
+                                                                       ^XMLCryptoContext context]
+    (let [^:mutable ^Data data nil
+          ^:mutable deref (.getURIDereferencer context)]
+      (when (nil? deref) (set! deref DOMURIDereferencer/INSTANCE))
+      (try
+        (set! data (.dereference deref this context))
+        (.debug LOG "URIDereferencer class name: {}" (new Object/1 [(.getName (.getClass deref))]))
+        (.debug LOG "Data class name: {}" (new Object/1 [(.getName (.getClass data))]))
+        (catch URIReferenceException ure (throw (XMLSignatureException. ure))))
+      data))
+
+  (method ^:private transform :throws [XMLSignatureException] ^byte/1 [this ^Data dereferencedData
+                                                                       ^XMLCryptoContext context]
+    (when (nil? md)
+      (try
+        (set! md
+              (MessageDigest/getInstance
+                (.getMessageDigestAlgorithm (cast DOMDigestMethod digestMethod))))
+        (catch NoSuchAlgorithmException nsae (throw (XMLSignatureException. nsae)))))
+    (.reset md)
+    (let [^:mutable ^DigesterOutputStream dos nil
+          cache (cast Boolean (.getProperty context "javax.xml.crypto.dsig.cacheReference"))]
+      (if (and (some? cache) (.booleanValue cache))
+          (do
+            (set! (.-derefData this) (DOMReference/copyDerefData dereferencedData))
+            (set! dos (DigesterOutputStream. md true)))
+          (set! dos (DigesterOutputStream. md)))
+      (let [^:mutable data dereferencedData
+            ^:mutable ^XMLSignatureInput xi nil]
+        (try
+          (with-resources [^:final ^OutputStream os (UnsyncBufferedOutputStream. dos)]
+            (loop [^int i 0
+                   ^int size (.size transforms)]
+              (when (< i size)
+                (let [transform (cast DOMTransform (.get transforms i))]
+                  (if (< i (unchecked-subtract-int size 1))
+                      (do
+                        (set! data (.transform transform data context))
+                        (recur (unchecked-inc-int i) size))
+                      (do
+                        (set! data (.transform transform data context os))
+                        (recur (unchecked-inc-int i) size))))))
+            (if (some? data)
+                (let [^:mutable c14n11 useC14N11
+                      ^:mutable c14nalg CanonicalizationMethod/INCLUSIVE]
+                  (when (instance? XMLSignContext context)
+                    (if (not c14n11)
+                        (let [prop (cast Boolean
+                                         (.getProperty
+                                           context
+                                           "com.sun.org.apache.xml.internal.security.useC14N11"))]
+                          (set! c14n11 (and (some? prop) (.booleanValue prop)))
+                          (when c14n11 (set! c14nalg "http://www.w3.org/2006/12/xml-c14n11")))
+                        (set! c14nalg "http://www.w3.org/2006/12/xml-c14n11")))
+                  (cond
+                    (instance? ApacheData data)
+                      (set! xi (.getXMLSignatureInput (cast ApacheData data)))
+                    (instance? OctetStreamData data)
+                      (set! xi (XMLSignatureInput. (.getOctetStream (cast OctetStreamData data))))
+                    (instance? NodeSetData data)
+                      (let [^:mutable ^TransformService spi nil]
+                        (if (nil? provider)
+                            (set! spi (TransformService/getInstance c14nalg "DOM"))
+                            (try
+                              (set! spi (TransformService/getInstance c14nalg "DOM" provider))
+                              (catch NoSuchAlgorithmException nsae
+                                (set! spi (TransformService/getInstance c14nalg "DOM")))))
+                        (set! data (.transform spi data context))
+                        (set! xi (XMLSignatureInput. (.getOctetStream (cast OctetStreamData data)))))
+                    :else (throw (XMLSignatureException. "unrecognized Data type")))
+                  (let [secVal (Utils/secureValidation context)]
+                    (try
+                      (.setSecureValidation xi secVal)
+                      (if (and (and (and (instance? XMLSignContext context) c14n11)
+                                    (not (.isOctetStream xi)))
+                               (not (.isOutputStreamSet xi)))
+                          (let [^:mutable ^TransformService spi nil]
+                            (if (nil? provider)
+                                (set! spi (TransformService/getInstance c14nalg "DOM"))
+                                (try
+                                  (set! spi (TransformService/getInstance c14nalg "DOM" provider))
+                                  (catch NoSuchAlgorithmException nsae
+                                    (set! spi (TransformService/getInstance c14nalg "DOM")))))
+                            (let [t (DOMTransform. spi)
+                                  ^:mutable ^Element transformsElem nil
+                                  dsPrefix (DOMUtils/getSignaturePrefix context)]
+                              (if (.isEmpty allTransforms)
+                                  (do
+                                    (set! transformsElem
+                                          (DOMUtils/createElement
+                                            (.getOwnerDocument refElem)
+                                            "Transforms"
+                                            XMLSignature/XMLNS
+                                            dsPrefix))
+                                    (.insertBefore
+                                      refElem
+                                      transformsElem
+                                      (DOMUtils/getFirstChildElement refElem)))
+                                  (set! transformsElem (DOMUtils/getFirstChildElement refElem)))
+                              (.marshal t transformsElem dsPrefix (cast DOMCryptoContext context))
+                              (.add allTransforms t)
+                              (.updateOutputStream xi os true)))
+                          (.updateOutputStream xi os))
+                      (finally
+                        (when (some? (.getOctetStreamReal xi)) (.close (.getOctetStreamReal xi)))))))
+                (.warn
+                  LOG
+                  "The input bytes to the digest operation are null. This may be due to a problem with the Reference URI or its Transforms."))
+            (.flush os)
+            (when (and (some? cache) (.booleanValue cache))
+              (set! (.-dis this) (.getInputStream dos)))
+            (.getDigestValue dos))
+          (catch [NoSuchAlgorithmException
+                  TransformException
+                  MarshalException
+                  IOException
+                  CanonicalizationException] e
+            (throw (XMLSignatureException. e)))
+          (finally
+            (when (and (some? xi) (some? (.getOctetStreamReal xi)))
+              (try
+                (.close (.getOctetStreamReal xi))
+                (catch IOException e (throw (XMLSignatureException. e)))))
+            (when (some? dos)
+              (try (.close dos) (catch IOException e (throw (XMLSignatureException. e))))))))))
+
+  (method ^:public getHere ^Node [this] here)
+
+  (method ^:public equals ^boolean [this o]
+    (cond
+      (identical? this o) true
+      (not (instance? Reference o)) false
+      :else
+        (let [oref (cast Reference o)
+              idsEqual (if (nil? id) (nil? (.getId oref)) (.equals id (.getId oref)))
+              urisEqual (if (nil? uri) (nil? (.getURI oref)) (.equals uri (.getURI oref)))
+              typesEqual (if (nil? type) (nil? (.getType oref)) (.equals type (.getType oref)))
+              digestValuesEqual (Arrays/equals digestValue (.getDigestValue oref))]
+          (and (and (and (and (and (.equals digestMethod (.getDigestMethod oref)) idsEqual)
+                              urisEqual)
+                         typesEqual)
+                    (.equals allTransforms (.getTransforms oref)))
+               digestValuesEqual))))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable ^int result 17]
+      (when (some? id)
+        (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode id))))
+      (when (some? uri)
+        (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode uri))))
+      (when (some? type)
+        (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode type))))
+      (when (some? digestValue)
+        (set! result
+              (unchecked-add-int (unchecked-multiply-int 31 result) (Arrays/hashCode digestValue))))
+      (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode digestMethod)))
+      (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode allTransforms)))
+      result))
+
+  (method isDigested ^boolean [this] digested)
+
+  (method ^:private ^:static copyDerefData ^Data [^Data dereferencedData]
+    (when (instance? ApacheData dereferencedData)
+      (let [ad (cast ApacheData dereferencedData)
+            xsi (.getXMLSignatureInput ad)]
+        (cond
+          (.isNodeSet xsi)
+            (try
+              (let [^:final ^{:tag (Set Node)} s (.getNodeSet xsi)]
+                (return (anon (NodeSetData Node) []
+                          (method ^:public iterator ^{:tag (Iterator Node)} [this] (.iterator s)))))
+              (catch Exception e
+                (.warn LOG (java-str "cannot cache dereferenced data: " e))
+                (return nil)))
+          (.isElement xsi) (return (DOMSubTreeData. (.getSubNode xsi) (.isExcludeComments xsi)))
+          (or (.isOctetStream xsi) (.isByteArray xsi))
+            (try
+              (return (OctetStreamData. (.getOctetStream xsi)
+                                        (.getSourceURI xsi)
+                                        (.getMIMEType xsi)))
+              (catch IOException ioe
+                (.warn LOG (java-str "cannot cache dereferenced data: " ioe))
+                (return nil))))))
+    dereferencedData))

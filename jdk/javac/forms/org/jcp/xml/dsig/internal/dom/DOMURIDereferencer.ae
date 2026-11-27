@@ -1,0 +1,82 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/org/jcp/xml/dsig/internal/dom/DOMURIDereferencer.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'org.jcp.xml.dsig.internal.dom)
+
+(import '(com.sun.org.apache.xml.internal.security Init)
+        '(com.sun.org.apache.xml.internal.security.signature XMLSignatureInput)
+        '(com.sun.org.apache.xml.internal.security.utils XMLUtils)
+        '(com.sun.org.apache.xml.internal.security.utils.resolver
+           ResourceResolver
+           ResourceResolverContext)
+        '(java.net URI)
+        '(javax.xml.crypto Data URIDereferencer URIReference URIReferenceException XMLCryptoContext)
+        '(javax.xml.crypto.dom DOMCryptoContext DOMURIReference)
+        '(org.w3c.dom Attr Element Node))
+
+(defclass ^:public ^:final DOMURIDereferencer
+  :implements [URIDereferencer]
+
+  (field ^:static ^:final ^URIDereferencer INSTANCE (DOMURIDereferencer.))
+
+  (constructor ^:private [this] (Init/init))
+
+  (method ^:public dereference :throws [URIReferenceException] ^Data [this ^URIReference uriRef
+                                                                      ^XMLCryptoContext context]
+    (when (nil? uriRef) (throw (NullPointerException. "uriRef cannot be null")))
+    (when (nil? context) (throw (NullPointerException. "context cannot be null")))
+    (let [domRef (cast DOMURIReference uriRef)
+          uriAttr (cast Attr (.getHere domRef))
+          uri (.getURI uriRef)
+          dcc (cast DOMCryptoContext context)
+          baseURI (.getBaseURI context)
+          secVal (Utils/secureValidation context)]
+      (when secVal
+        (try
+          (when (Policy/restrictReferenceUriScheme uri)
+            (throw (URIReferenceException.
+                     (java-str "URI " uri " is forbidden when secure validation is enabled"))))
+          (when (and (and (and (some? uri) (not (.isEmpty uri))) (not (== (.charAt uri 0) \#)))
+                     (nil? (.getScheme (URI/create uri))))
+            (try
+              (when (Policy/restrictReferenceUriScheme baseURI)
+                (throw (URIReferenceException.
+                         (java-str "Base URI "
+                                   baseURI
+                                   " is forbidden when secure validation is enabled"))))
+              (catch IllegalArgumentException e
+                (throw (URIReferenceException. (java-str "Invalid base URI " baseURI))))))
+          (catch IllegalArgumentException e
+            (throw (URIReferenceException. (java-str "Invalid URI " uri))))))
+      (when (and (and (some? uri) (not (== (.length uri) 0))) (== (.charAt uri 0) \#))
+        (let [^:mutable id (.substring uri 1)]
+          (when (.startsWith id "xpointer(id(")
+            (let [i1 (.indexOf id \')
+                  i2 (.indexOf id \' (unchecked-add-int i1 1))]
+              (when (and (>= i1 0) (>= i2 0)) (set! id (.substring id (unchecked-add-int i1 1) i2)))))
+          (let [^:mutable ^Node referencedElem (.getElementById (.getOwnerDocument uriAttr) id)]
+            (when (nil? referencedElem) (set! referencedElem (.getElementById dcc id)))
+            (when (some? referencedElem)
+              (when (and secVal (Policy/restrictDuplicateIds))
+                (let [start (.getDocumentElement (.getOwnerDocument referencedElem))]
+                  (when-not (XMLUtils/protectAgainstWrappingAttack
+                              start
+                              (cast Element referencedElem)
+                              id)
+                    (let [error (java-str "Multiple Elements with the same ID "
+                                          id
+                                          " detected when secure validation is enabled")]
+                      (throw (URIReferenceException. error))))))
+              (let [result (XMLSignatureInput. referencedElem)]
+                (.setSecureValidation result secVal)
+                (when-not (.startsWith (.substring uri 1) "xpointer(id(")
+                  (.setExcludeComments result true))
+                (.setMIMEType result "text/xml")
+                (if (and (some? baseURI) (> (.length baseURI) 0))
+                    (.setSourceURI result (.concat baseURI (.getNodeValue uriAttr)))
+                    (.setSourceURI result (.getNodeValue uriAttr)))
+                (return (ApacheNodeSetData. result)))))))
+      (try
+        (let [resContext (ResourceResolverContext. uriAttr baseURI secVal)
+              in (ResourceResolver/resolve resContext)]
+          (if (.isOctetStream in) (ApacheOctetStreamData. in) (ApacheNodeSetData. in)))
+        (catch Exception e (throw (URIReferenceException. e)))))))

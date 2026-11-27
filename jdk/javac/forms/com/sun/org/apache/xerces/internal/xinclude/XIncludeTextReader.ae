@@ -1,0 +1,282 @@
+;; Converted from jdk26u src/java.xml/share/classes/com/sun/org/apache/xerces/internal/xinclude/XIncludeTextReader.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xerces.internal.xinclude)
+
+(import '(com.sun.org.apache.xerces.internal.impl XMLEntityManager XMLErrorReporter)
+        '(com.sun.org.apache.xerces.internal.impl.io
+           ASCIIReader
+           Latin1Reader
+           UTF16Reader
+           UTF8Reader)
+        '(com.sun.org.apache.xerces.internal.impl.msg XMLMessageFormatter)
+        '(com.sun.org.apache.xerces.internal.util EncodingMap HTTPInputSource XMLChar)
+        '(com.sun.org.apache.xerces.internal.xni XMLString)
+        '(com.sun.org.apache.xerces.internal.xni.parser XMLInputSource)
+        '(java.io BufferedInputStream IOException InputStream InputStreamReader Reader)
+        '(java.net HttpURLConnection URL)
+        '(java.util Iterator Locale Map$Entry))
+
+(defclass ^:public XIncludeTextReader
+  (field ^:private ^Reader fReader)
+
+  (field ^:private ^:final ^XIncludeHandler fHandler)
+
+  (field ^:private ^XMLInputSource fSource)
+
+  (field ^:private ^XMLErrorReporter fErrorReporter)
+
+  (field ^:private ^XMLString fTempString (XMLString.))
+
+  (constructor :throws [IOException] ^:public [this ^XMLInputSource source ^XIncludeHandler handler
+                                               ^int bufferSize]
+    (set! fHandler handler)
+    (set! fSource source)
+    (set! fTempString (XMLString. (new char/1 (unchecked-add-int bufferSize 1)) 0 0)))
+
+  (method ^:public setErrorReporter ^void [this ^XMLErrorReporter errorReporter]
+    (set! fErrorReporter errorReporter))
+
+  (method ^:protected getReader :throws [IOException] ^Reader [this ^XMLInputSource source]
+    (if (some? (.getCharacterStream source))
+        (.getCharacterStream source)
+        (let [^:mutable ^InputStream stream nil
+              ^:mutable encoding (.getEncoding source)]
+          (when (nil? encoding) (set! encoding "UTF-8"))
+          (if (some? (.getByteStream source))
+              (do
+                (set! stream (.getByteStream source))
+                (when-not (instance? BufferedInputStream stream)
+                  (set! stream (BufferedInputStream. stream (alength (.-ch fTempString))))))
+              (let [expandedSystemId (XMLEntityManager/expandSystemId
+                                       (.getSystemId source)
+                                       (.getBaseSystemId source)
+                                       false)
+                    url (URL. expandedSystemId)
+                    urlCon (.openConnection url)]
+                (when (and (instance? HttpURLConnection urlCon) (instance? HTTPInputSource source))
+                  (let [^:final urlConnection (cast HttpURLConnection urlCon)
+                        ^:final httpInputSource (cast HTTPInputSource source)
+                        ^{:tag (Iterator (Map$Entry String String))} propIter
+                          (.getHTTPRequestProperties httpInputSource)]
+                    (while (.hasNext propIter)
+                      (let [^{:tag (Map$Entry String String)} entry (cast
+                                                                      Map$Entry
+                                                                      (.next propIter))]
+                        (.setRequestProperty urlConnection
+                                             (cast String (.getKey entry))
+                                             (cast String (.getValue entry)))))
+                    (let [followRedirects (.getFollowHTTPRedirects httpInputSource)]
+                      (when-not followRedirects
+                        (.setInstanceFollowRedirects urlConnection followRedirects)))))
+                (set! stream (BufferedInputStream. (.getInputStream urlCon)))
+                (let [^:final rawContentType (.getContentType urlCon)
+                      ^:final ^int index (if (some? rawContentType) (.indexOf rawContentType \;) -1)
+                      ^:mutable ^String contentType nil
+                      ^:mutable ^String charset nil]
+                  (if (not (== index -1))
+                      (do
+                        (set! contentType (.trim (.substring rawContentType 0 index)))
+                        (set! charset
+                              (.trim (.substring rawContentType (unchecked-add-int index 1))))
+                        (if (.startsWith charset "charset=")
+                            (do
+                              (set! charset (.trim (.substring charset 8)))
+                              (when (or (and (== (.charAt charset 0) \")
+                                             (==
+                                               (.charAt
+                                                 charset
+                                                 (unchecked-subtract-int (.length charset) 1))
+                                               \"))
+                                        (and (== (.charAt charset 0) \')
+                                             (==
+                                               (.charAt
+                                                 charset
+                                                 (unchecked-subtract-int (.length charset) 1))
+                                               \')))
+                                (set! charset
+                                      (.substring
+                                        charset
+                                        1
+                                        (unchecked-subtract-int (.length charset) 1)))))
+                            (set! charset nil)))
+                      (set! contentType (if (some? rawContentType) (.trim rawContentType) "")))
+                  (let [^:mutable ^String detectedEncoding nil]
+                    (cond
+                      (.equals contentType "text/xml")
+                        (if (some? charset)
+                            (set! detectedEncoding charset)
+                            (set! detectedEncoding "US-ASCII"))
+                      (.equals contentType "application/xml")
+                        (if (some? charset)
+                            (set! detectedEncoding charset)
+                            (set! detectedEncoding (.getEncodingName this stream)))
+                      (.endsWith contentType "+xml")
+                        (set! detectedEncoding (.getEncodingName this stream)))
+                    (when (some? detectedEncoding) (set! encoding detectedEncoding))))))
+          (set! encoding (.toUpperCase encoding Locale/ENGLISH))
+          (set! encoding (.consumeBOM this stream encoding))
+          (cond
+            (.equals encoding "UTF-8") (.createUTF8Reader this stream)
+            (.equals encoding "UTF-16BE") (.createUTF16Reader this stream true)
+            (.equals encoding "UTF-16LE") (.createUTF16Reader this stream false)
+            :else
+              (let [javaEncoding (EncodingMap/getIANA2JavaMapping encoding)]
+                (cond
+                  (nil? javaEncoding)
+                    (let [aFormatter (.getMessageFormatter
+                                       fErrorReporter
+                                       XMLMessageFormatter/XML_DOMAIN)
+                          aLocale (.getLocale fErrorReporter)]
+                      (throw (IOException. (.formatMessage
+                                             aFormatter
+                                             aLocale
+                                             "EncodingDeclInvalid"
+                                             (new Object/1 [encoding])))))
+                  (.equals javaEncoding "ASCII") (return (.createASCIIReader this stream))
+                  (.equals javaEncoding "ISO8859_1") (return (.createLatin1Reader this stream)))
+                (InputStreamReader. stream javaEncoding))))))
+
+  (method ^:private createUTF8Reader ^Reader [this ^InputStream stream]
+    (UTF8Reader. stream
+                 (alength (.-ch fTempString))
+                 (.getMessageFormatter fErrorReporter XMLMessageFormatter/XML_DOMAIN)
+                 (.getLocale fErrorReporter)))
+
+  (method ^:private createUTF16Reader ^Reader [this ^InputStream stream ^boolean isBigEndian]
+    (UTF16Reader. stream
+                  (bit-shift-left-int (alength (.-ch fTempString)) 1)
+                  isBigEndian
+                  (.getMessageFormatter fErrorReporter XMLMessageFormatter/XML_DOMAIN)
+                  (.getLocale fErrorReporter)))
+
+  (method ^:private createASCIIReader ^Reader [this ^InputStream stream]
+    (ASCIIReader. stream
+                  (alength (.-ch fTempString))
+                  (.getMessageFormatter fErrorReporter XMLMessageFormatter/XML_DOMAIN)
+                  (.getLocale fErrorReporter)))
+
+  (method ^:private createLatin1Reader ^Reader [this ^InputStream stream]
+    (Latin1Reader. stream (alength (.-ch fTempString))))
+
+  (method ^:protected getEncodingName :throws [IOException] ^String [this ^InputStream stream]
+    (let [^:final b4 (new byte/1 4)
+          ^:mutable ^String encoding nil]
+      (.mark stream 4)
+      (let [count (.read stream b4 0 4)]
+        (.reset stream)
+        (when (== count 4) (set! encoding (.getEncodingName this b4)))
+        encoding)))
+
+  (method ^:protected consumeBOM :throws [IOException] ^String [this ^InputStream stream
+                                                                ^String encoding]
+    (let [b (new byte/1 3)
+          ^:mutable ^int count 0]
+      (.mark stream 3)
+      (if (.equals encoding "UTF-8")
+          (do
+            (set! count (.read stream b 0 3))
+            (if (== count 3)
+                (let [^:final b0 (bit-and-int (aget b 0) 0xFF)
+                      ^:final b1 (bit-and-int (aget b 1) 0xFF)
+                      ^:final b2 (bit-and-int (aget b 2) 0xFF)]
+                  (when (or (or (not (== b0 0xEF)) (not (== b1 0xBB))) (not (== b2 0xBF)))
+                    (.reset stream)))
+                (.reset stream)))
+          (when (.startsWith encoding "UTF-16")
+            (set! count (.read stream b 0 2))
+            (when (== count 2)
+              (let [^:final b0 (bit-and-int (aget b 0) 0xFF)
+                    ^:final b1 (bit-and-int (aget b 1) 0xFF)]
+                (cond
+                  (and (== b0 0xFE) (== b1 0xFF)) (return "UTF-16BE")
+                  (and (== b0 0xFF) (== b1 0xFE)) (return "UTF-16LE"))))
+            (.reset stream)))
+      encoding))
+
+  (method ^:protected getEncodingName ^String [this ^byte/1 b4]
+    (let [b0 (bit-and-int (aget b4 0) 0xFF)
+          b1 (bit-and-int (aget b4 1) 0xFF)]
+      (cond
+        (and (== b0 0xFE) (== b1 0xFF)) "UTF-16BE"
+        (and (== b0 0xFF) (== b1 0xFE)) "UTF-16LE"
+        :else
+          (let [b2 (bit-and-int (aget b4 2) 0xFF)]
+            (if (and (and (== b0 0xEF) (== b1 0xBB)) (== b2 0xBF))
+                "UTF-8"
+                (let [b3 (bit-and-int (aget b4 3) 0xFF)]
+                  (cond
+                    (and (and (and (== b0 0x00) (== b1 0x00)) (== b2 0x00)) (== b3 0x3C))
+                      "ISO-10646-UCS-4"
+                    (and (and (and (== b0 0x3C) (== b1 0x00)) (== b2 0x00)) (== b3 0x00))
+                      "ISO-10646-UCS-4"
+                    (and (and (and (== b0 0x00) (== b1 0x00)) (== b2 0x3C)) (== b3 0x00))
+                      "ISO-10646-UCS-4"
+                    (and (and (and (== b0 0x00) (== b1 0x3C)) (== b2 0x00)) (== b3 0x00))
+                      "ISO-10646-UCS-4"
+                    (and (and (and (== b0 0x00) (== b1 0x3C)) (== b2 0x00)) (== b3 0x3F)) "UTF-16BE"
+                    (and (and (and (== b0 0x3C) (== b1 0x00)) (== b2 0x3F)) (== b3 0x00)) "UTF-16LE"
+                    (and (and (and (== b0 0x4C) (== b1 0x6F)) (== b2 0xA7)) (== b3 0x94)) "CP037")))))))
+
+  (method ^:public parse :throws [IOException] ^void [this]
+    (set! fReader (.getReader this fSource))
+    (set! fSource nil)
+    (let [^:mutable readSize (.read fReader
+                                    (.-ch fTempString)
+                                    0
+                                    (unchecked-subtract-int (alength (.-ch fTempString)) 1))]
+      (set! (.-fHasIncludeReportedContent fHandler) true)
+      (while (not (== readSize -1))
+        (let [^:mutable ^int i 0]
+          (while (< i readSize)
+            (let [ch (aget (.-ch fTempString) i)]
+              (when-not (.isValid this ch)
+                (if (XMLChar/isHighSurrogate ch)
+                    (let [^:mutable ^int ch2 0]
+                      (if (< (set! i (unchecked-inc-int i)) readSize)
+                          (set! ch2 (aget (.-ch fTempString) i))
+                          (do
+                            (set! ch2 (.read fReader))
+                            (when-not (== ch2 -1)
+                              (aset (.-ch fTempString) readSize (unchecked-char ch2))
+                              (set! readSize (unchecked-inc-int readSize)))))
+                      (if (XMLChar/isLowSurrogate ch2)
+                          (let [sup (XMLChar/supplemental ch (unchecked-char ch2))]
+                            (when-not (.isValid this sup)
+                              (.reportError fErrorReporter
+                                            XMLMessageFormatter/XML_DOMAIN
+                                            "InvalidCharInContent"
+                                            (new Object/1 [(Integer/toString sup 16)])
+                                            XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+                          (.reportError fErrorReporter
+                                        XMLMessageFormatter/XML_DOMAIN
+                                        "InvalidCharInContent"
+                                        (new Object/1 [(Integer/toString ch2 16)])
+                                        XMLErrorReporter/SEVERITY_FATAL_ERROR)))
+                    (.reportError fErrorReporter
+                                  XMLMessageFormatter/XML_DOMAIN
+                                  "InvalidCharInContent"
+                                  (new Object/1 [(Integer/toString ch 16)])
+                                  XMLErrorReporter/SEVERITY_FATAL_ERROR))))
+            (set! i (unchecked-inc-int i))))
+        (when (and (some? fHandler) (> readSize 0))
+          (set! (.-offset fTempString) 0)
+          (set! (.-length fTempString) readSize)
+          (.characters fHandler fTempString (.modifyAugmentations fHandler nil true)))
+        (set! readSize
+              (.read fReader
+                     (.-ch fTempString)
+                     0
+                     (unchecked-subtract-int (alength (.-ch fTempString)) 1))))))
+
+  (method ^:public setInputSource ^void [this ^XMLInputSource source]
+    (set! fSource source))
+
+  (method ^:public close :throws [IOException] ^void [this]
+    (when (some? fReader) (.close fReader) (set! fReader nil)))
+
+  (method ^:protected isValid ^boolean [this ^int ch]
+    (XMLChar/isValid ch))
+
+  (method ^:protected setBufferSize ^void [this ^:mutable ^int bufferSize]
+    (when-not (== (alength (.-ch fTempString)) (set! bufferSize (unchecked-inc-int bufferSize)))
+      (set! (.-ch fTempString) (new char/1 bufferSize)))))
