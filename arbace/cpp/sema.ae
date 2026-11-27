@@ -3618,7 +3618,13 @@
                                        ;; diagnostic of its own here; parse/bitfield1.C)
                                        (when (and (checking?) (:isBitfield k) (map? et) (not (header-node? k))
                                                   (let [u (abi/unq et)] (and (#{:b :ptr :class :mptr} (:k u)) (not (abi/integral? u)))))
-                                         (ex-info "codegen: a bit-field of a type neither integral nor an enumeration" {:codegen/refused :bitfield-type :cx/node k}))
+                                         ;; (cpp-sema-types: in a class template's specialization the parser saw the pattern's
+                                         ;; dependent type alone, so the instance's member is the error here: GCC's "bit-field
+                                         ;; 'double D<double>::t' with non-integral type 'double'"; parse/bitfield2.C)
+                                         (ex-info (if (seq (:targs (abi/cls id)))
+                                                    (str "codegen: bit-field '" (:name k) "' with non-integral type (a specialization's member)")
+                                                    "codegen: a bit-field of a type neither integral nor an enumeration")
+                                                  {:codegen/refused :bitfield-type :cx/node k}))
                                        ;; (cpp-1123: a member of an abstract class type or an array of it, [class.abstract]/3)
                                        (when-let [an (and (checking?) (not (header-node? k)) (cx-abstract-type et))]
                                          (ex-info (str "codegen: cannot declare field '" (:name k) "' to be of abstract type '" an "'")
@@ -3642,6 +3648,14 @@
                               i (count (:fields (abi/cls id)))
                               _ (when (:isBitfield k) (cx-cce-type! cs (first (kids k)) "a bit-field's width"))
                               bits (when (:isBitfield k) (const-int cs (first (kids k))))
+                              ;; (cpp-sema-types, the checker: [class.bit]/1, a bit-field's width is not negative, and zero only for
+                              ;; an unnamed bit-field: GCC's "negative width in bit-field 'x'", "zero width for bit-field 'x'", at
+                              ;; the member; a specialization's too, its width from the template's arguments, template/bitfield2.C)
+                              _ (when (and (checking?) *on-refusal* (integer? bits) (not (header-node? k))
+                                           (or (neg? (long bits)) (and (zero? (long bits)) (:name k))))
+                                  (*on-refusal* (ex-info (str "codegen: " (if (neg? (long bits)) "negative width in" "zero width for") " bit-field '" (:name k) "'")
+                                                         {:codegen/refused :bitfield-width :cx/node k})
+                                                k))
                               init (when (:hasInClassInitializer k) (if bits (second (kids k)) (first (kids k))))]
                           (abi/update-cls! id update :fields conj (cond-> {:name (:name k) :ty ft :init init :access @access :i i :bits bits
                                                                             :anon (boolean (and (nil? (:name k)) (not bits)))
@@ -13440,6 +13454,10 @@
                       ;; (queue 602, the checker: [expr.unary.op]/3, the operand an lvalue: an xvalue none, GCC's "taking address
                       ;; of rvalue", cpp0x/rv-lvalue-req.C's &declval<int>())
                       (and (checking?) (= :xv (:cat e))) (fail :addr "& of an rvalue (an xvalue)")
+                      ;; (cpp-sema-types, the checker: [class.bit]/3, the address-of operator is not applied to a bit-field, a
+                      ;; structured binding's to one too ([dcl.struct.bind]/5): GCC's "attempt to take address of bit-field";
+                      ;; cpp1z/decomp-bitfield1.C)
+                      (and (checking?) (lv? e) (cx-bitfield-lv? e)) (fail :addr "attempt to take address of bit-field")
                       (lv? e) {:op :addr :e e :ty (abi/ptr (:ty e)) :cat :pr}
                       :else (fail :addr "& of an rvalue"))
             "*" (deref-node e)
