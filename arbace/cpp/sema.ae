@@ -2359,6 +2359,32 @@
 
 (declare cx-abstract!)
 
+;; (cpp-read-indep, the checker: [dcl.fct.default]/5, a default argument's names are bound and its semantic constraints
+;; checked where it appears, not only at the calls that use it: a function of namespace or block scope that is no template's,
+;; each default argument converted to its parameter's type there -- GCC's access errors of an uncalled function's default
+;; argument (overload/defarg6.C's `void f (A = 1)` of a private A(int)); and [dcl.fct.default]/8-9, `this`, so a non-static
+;; member named implicitly through it, appears in no default argument (overload/defarg5.C's local `void foo(int=i);` in a
+;; constructor). A member function's default arguments, in its class's complete-class context, are left to their calls.)
+(declare init-for analyze)
+(defn- cx-default-args!
+  [scope n]
+  (when (and (checking?) *on-refusal* (nil? *instantiating*) (= "FunctionDecl" (:kind n)) (not (:friend n))
+             (not (header-node? n)) (not (:cls scope)) (not (str/includes? (str (:name n)) "::")))
+    (doseq [p (param-nodes n)
+            :let [d (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))]
+            :when (and (map? d) (get-in d [:range :begin :offset]))]
+      (when-let [t (try (resolve-type scope (get-in p [:type :qualType])) (catch arbace.lang.ExceptionInfo _ nil))]
+        (when (and (map? t) (not (some #(= % (:k t)) [:dep :tparam :auto])))
+          (try (init-for t (analyze {:scope scope} d) {:scope scope} :copy)
+               (catch arbace.lang.ExceptionInfo x
+                 (let [xd (ex-data x)]
+                   (cond (:cpp/timeout xd) (throw x)
+                         (and (:codegen/refused xd) (not (:cx/reported xd)))
+                         (*on-refusal* (if (= :this (:codegen/refused xd))
+                                         (ex-info "codegen: invalid use of non-static data member in a default argument" {:codegen/refused :default-arg})
+                                         x)
+                                       (or (:cx/node xd) (some-> *at* deref) d)))))))))))
+
 (defn- declare-fn!
   "A function, method, constructor or destructor declaration (or definition) in `scope`; out-of-line definitions join
   their declaration. One whose trailing requires-clause is not satisfied is not declared (nil; P14 (b), G4)."
@@ -3156,8 +3182,19 @@
                 xt (when (and x (checking?))
                      (try (some-> (binding [*unevaluated* true] (analyze {:scope bs} x)) :ty abi/non-ref abi/unq)
                           (catch arbace.lang.ExceptionInfo _ nil)))
-                bad (when xt
-                      (cond (or (abi/fn? xt) (= :overload (:k xt)))
+                ;; (cpp-read-indep, the checker: [dcl.enum]/5, an enumeration without a fixed underlying type is incomplete until
+                ;; the closing brace of its enumerator list: a cast to it in an enumerator's initializer converts to an incomplete
+                ;; type, GCC's "invalid conversion to incomplete type 'E'" (diagnostic/pr59838.C's `b = (E) a`))
+                to-self (when (and x (checking?) (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped) (string? nm) (seq nm)
+                                   (not (header-node? n)))
+                          ((fn walk [m] (and (map? m)
+                                             (or (and (#{"CStyleCastExpr" "CXXStaticCastExpr" "CXXFunctionalCastExpr"} (:kind m))
+                                                      (= nm (str/trim (str (get-in m [:type :qualType])))))
+                                                 (some walk (kids m)))))
+                           x))
+                bad (when (or xt to-self)
+                      (cond to-self (str "codegen: invalid conversion to incomplete type '" nm "' in the initializer of its enumerator '" (:name c) "'")
+                            (or (abi/fn? xt) (= :overload (:k xt)))
                             (str "codegen: enumerator value for '" (:name c) "' is not an integer constant")
                             ;; (no fixed underlying type: an integral constant expression's, "enumerator value for 'a' must have
                             ;; integral or unscoped enumeration type", cpp0x/pr71665-2.C)
@@ -3871,7 +3908,7 @@
                         (let [^java.util.ArrayList us (:usings scope)] (when-not (some #(identical? % s) us) (.add us s))))
                       (doseq [k (kids n)] (declare-node! s k)))
     "LinkageSpecDecl" (let [s (assoc scope :extern-c (= "C" (:language n)))] (doseq [k (kids n)] (declare-node! s k)))
-    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (declare-fn! scope n)
+    ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl") (let [r (declare-fn! scope n)] (cx-default-args! scope n) r)
     "VarDecl" (declare-var! scope n :global)
     "CXXRecordDecl" (declare-class! scope n)
     "EnumDecl" (declare-enum! scope n)
@@ -7445,6 +7482,10 @@
       ;; as the program's: void, std::nullptr_t to an integer, a pointer to an integer, unrelated pointers to members)
       (and (checking?) (not explicit?) (not *cx-union-init*) (cx-sure-scalar? from) (cx-sure-scalar? to) (not= :nullptr (abi/bn to)))
       (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly")
+      ;; (cpp-read-indep, the checker: [conv.ptr]/1, only a null pointer constant converts to std::nullptr_t -- an arithmetic value
+      ;; of another value does not, GCC's "cannot convert 'int' to 'std::nullptr_t' in assignment", cpp0x/nullptr10.C)
+      (and (checking?) (not explicit?) (not *cx-union-init*) (= :nullptr (abi/bn to)) (abi/arith? (abi/unq from)))
+      (fail :conversion "cannot convert " (cx-tyname from) " to std::nullptr_t implicitly")
       :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
 
 ;; Implicit conversion sequences: {:rank 0 exact, 1 promotion, 2 conversion, 3 user-defined, 4 ellipsis, :sub n}
@@ -9272,7 +9313,15 @@
           (and (:trivial f) (= 1 (count args)) (not= :init-list (:op (first args)))
                (let [c (class-id (:ty (first args)))] (and c (not= c id) (not (abi/derived-from? c id)) (conv-for c {:k :class :id id} false (:c (:ty (first args)))))))
           {:i :expr :e (user-conv ctx (first args) {:k :class :id id} false)}
-          (and (:trivial f) (= 1 (count args))) {:i :copy :e (first args) :cls id}
+          (and (:trivial f) (= 1 (count args)))
+          (do ;; (cpp-read-indep, the checker: the trivial copy's reference parameter binds the argument's base subobject, a
+              ;; derived-to-base conversion that needs the base accessible ([dcl.init.ref]/5, [class.access.base]/4), as the
+              ;; reference binding's: GCC's "'A' is an inaccessible base of 'B'", parse/crash51.C's `(A)b` of `class B : A`)
+              (when (checking?)
+                (let [c (class-id (:ty (first args)))]
+                  (when (and c (not= c id) (abi/derived-from? c id))
+                    (cx-access! ctx id (:name (abi/cls id)) :public c nil))))
+              {:i :copy :e (first args) :cls id})
           ;; an immediate function's constructor of an empty class: evaluated, nothing at run time ([expr.const]/16;
           ;; G5: <compare>'s __cmp_cat::__unspec)
           (and (:consteval f) (abi/empty-class? id) (not (and (cx-p2564?) (cx-main-fn? f)))) {:i :none}
@@ -10199,6 +10248,20 @@
 
 (defn- builtin-binop [o l r]
   (let [lt (:ty (rv l)) rt (:ty (rv r))]
+    ;; (cpp-read-indep, the checker: [expr.eq]/2-4 and [expr.arith.conv]: std::nullptr_t takes part in no arithmetic, and is
+    ;; compared for equality only with a pointer, a pointer to member, another std::nullptr_t or a null pointer constant: GCC's
+    ;; "invalid operands of types 'int' and 'std::nullptr_t' to binary 'operator=='", cpp0x/nullptr07.C, nullptr10.C)
+    (when (checking?)
+      (let [ln (= :nullptr (abi/bn (abi/unq lt))) rn (= :nullptr (abi/bn (abi/unq rt)))
+            other (if ln rt lt) oe (if ln r l)]
+        (when (and (or ln rn)
+                   (or (#{"+" "-" "*" "/" "%" "&" "|" "^" "<<" ">>"} o)
+                       (and (#{"==" "!="} o) (not (and ln rn))
+                            (not (or (abi/ptr? other) (abi/mptr? other)))
+                            (abi/scalar? (abi/unq other))
+                            (not (null-constant? (rv oe))))))
+          (fail :nullptr-operands "invalid operands of types '" (if ln "std::nullptr_t" (cx-tyname lt)) "' and '"
+                (if rn "std::nullptr_t" (cx-tyname rt)) "' to binary 'operator" o "'"))))
     (case o
       "<=>" (three-way l r)
       ("+" "-")
@@ -10223,6 +10286,12 @@
                    (or (and (abi/ptr? lt) (null-constant? r)) (and (abi/ptr? rt) (null-constant? l))
                        (and (null-constant? l) (null-constant? r) (or (= :nullptr (abi/bn lt)) (= :nullptr (abi/bn rt))))))
           (fail :ordered-cmp "ordered comparison of pointer with integer zero"))
+        ;; (cpp-read-indep: [expr.eq]/3 and [expr.rel]/2, a pointer is compared with a pointer, std::nullptr_t or a null pointer
+        ;; constant -- an integer that is none of them (since C++11 no character literal, CWG 903) has no composite pointer type:
+        ;; GCC's "ISO C++ forbids comparison between pointer and integer", cpp0x/nullptr37.C)
+        (when (and (checking?) (>= (long *cxx-year*) 11) (or (and (abi/ptr? lt) (abi/integral? (abi/unq rt)) (not (abi/enum? (abi/unq rt))) (not (null-constant? r)))
+                                   (and (abi/ptr? rt) (abi/integral? (abi/unq lt)) (not (abi/enum? (abi/unq lt))) (not (null-constant? l)))))
+          (fail :ptr-int-cmp "ISO C++ forbids comparison between pointer and integer"))
         ;; (cpp-diag-b, round 2: [expr.eq]/3 and [expr.rel]/3, two pointers compared through their composite pointer type
         ;; ([expr.type]/4): pointees the same up to cv-qualifiers, a class and its base, or one of them void (an object's); else
         ;; GCC's "comparison between distinct pointer types 'int*' and 'double*' lacks a cast")
@@ -12751,7 +12820,14 @@
                     (coro-await ctx (coro-promise-call ctx "yield_value" [(analyze ctx (second (kids (first (kids n)))))]) :yield)
                     (fail :expr "expression " (:kind n)))
     "IntegerLiteral" (let [t (int-type-of (get-in n [:type :qualType]))] {:op :int :v (let [v (bigint (:value n))] (if (> v Long/MAX_VALUE) (long (- v 18446744073709551616N)) (long v))) :ty t :cat :pr})
-    "CharacterLiteral" {:op :int :v (long (:value n)) :ty (int-type-of (get-in n [:type :qualType] "char")) :cat :pr}
+    ;; (cpp-read-indep, the checker: a wide or UTF character literal of its own type, [lex.ccon]/3-6 -- wchar_t, char8_t, char16_t
+    ;; or char32_t -- so L'\0' is no integer literal and no null pointer constant since C++11, cpp0x/nullptr37.C; the code
+    ;; generator's int kept)
+    "CharacterLiteral" {:op :int :v (long (:value n))
+                        :ty (let [qt (get-in n [:type :qualType] "char")]
+                              (or (when (checking?) ({"wchar_t" (abi/b :wchar) "char8_t" (abi/b :char8) "char16_t" (abi/b :char16) "char32_t" (abi/b :char32)} qt))
+                                  (int-type-of qt)))
+                        :cat :pr}
     ;; a type trait's value (G4: the headers' __is_constructible(T, Args...)), its text evaluated by the templates' hook
     ;; a user-defined literal ([lex.ext]/3-8): the literal operator's call, operator""X(...) with the literal's value
     "UserDefinedLiteral"
@@ -13135,7 +13211,14 @@
     ;; function-to-pointer conversion: libcpp's macro.cc `(kind == CPP_time_kind::FIXED ? gmtime : localtime) (&tt)`, "call
     ;; of a non-function" before)
     (let [[c a b] (kids n)
-          fa (fn [x] (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
+          fa (fn [x]
+               ;; (cpp-read-indep, the checker: [expr.prim.id.general]/4 and [expr.cond]/1, a non-static member function named
+               ;; without a call is no operand of the conditional operator: GCC's "invalid use of member function", conversion/
+               ;; memfn2.C's `i ? foo : foo`)
+               (when (and (checking?) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
+                          (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x)))
+                 (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+               (if (and (= :fnset (:op x)) (= 1 (count (:fns x))) (empty? (:tmpls x)) (not (:obj x))) (rv x) x))]
       ;; (cpp-ce3: an immediate invocation in a branch is not evaluated where the branch is analyzed, cx-immediate-eval!)
       (cond-node ctx (fold-mark (to-bool (analyze ctx c))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx a))) (binding [*cx-no-imm* (not *cx-arms-evaluated*)] (fa (analyze ctx b)))))
     ;; GNU's `x ?: y` ([GCC manual, Conditionals with Omitted Operands]; clang's BinaryConditionalOperator): x evaluated once,
@@ -13341,6 +13424,22 @@
           cn (if (= "CXXDependentScopeMemberExpr" (:kind cn)) (-> cn (assoc :kind "MemberExpr" :name (:member cn)) (dissoc :member)) cn)
           pseudo (when (and (= "MemberExpr" (:kind cn)) (str/starts-with? (str (:name cn)) "~") (empty? an))
                    (let [o (analyze ctx (first (kids cn))) o (if (:isArrow cn) (deref-node o) o)]
+                     ;; (cpp-read-indep, the checker: [expr.prim.id.dtor]/2 and [expr.ref]/3, a pseudo-destructor's object is
+                     ;; of scalar type, and in `T1::~T2` the type-names T1 and T2 denote its type, cv-unqualified: GCC's
+                     ;; "the type being destroyed is 'C', but the destructor refers to 'D'", expr/dtor4.C's `o.D::~C ()`;
+                     ;; template/error32.C's `p->A::~A()` of a pointer to function)
+                     (when (and (checking?) (not (class-id (:ty o))))
+                       (let [ot (abi/unq (abi/non-ref (:ty o)))
+                             rt (fn [nm] (when (and (string? nm) (re-matches #"[A-Za-z_]\w*" nm))
+                                           (try (abi/unq (resolve-type (:scope ctx) nm)) (catch arbace.lang.ExceptionInfo _ nil))))
+                             dt (rt (subs (str (:name cn)) 1))
+                             qt (when (= 1 (count (:qualifier cn))) (rt (first (:qualifier cn))))]
+                         (cond (and (map? ot) (abi/fn? ot))
+                               (fail :pseudo-dtor "the object of a pseudo-destructor call is a function, not of scalar type")
+                               (and dt (cx-sure-scalar? ot) (cx-sure-scalar? dt) (not= (dissoc ot :c :v) (dissoc dt :c :v)))
+                               (fail :pseudo-dtor "the type being destroyed is not the one the destructor names")
+                               (and dt qt (cx-sure-scalar? qt) (cx-sure-scalar? dt) (not= (dissoc qt :c :v) (dissoc dt :c :v)))
+                               (fail :pseudo-dtor "the pseudo-destructor's qualifier names another type than its destructor"))))
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (let [c (cast-expr ctx abi/void pseudo true)] (if (and (checking?) (= :cast (:op c)) (= :void (:ck c))) (assoc c :cx-pseudo-dtor true) c))
@@ -13356,7 +13455,18 @@
     (let [callee (analyze ctx cn)
           args (analyze-args ctx an)]
       (if (and (abi/class? (abi/unq (:ty callee))) (not= :fnset (:op callee)))
-        (or (operator-call ctx "()" (into [callee] args)) (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
+        (or (operator-call ctx "()" (into [callee] args))
+            ;; (cpp-read-indep, the checker: [over.call.object]/1-2, a call of a class object whose class and bases declare no
+            ;; operator() and no non-template conversion function (a conversion function template gives no surrogate call
+            ;; function): GCC's "no match for call to '(A) ()'", template/crash93.C's `A()()` of `template<int> operator F();`)
+            (when (checking?)
+              (let [cid (class-id (:ty callee))
+                    all ((fn walk [id] (cons id (mapcat #(walk (:cls %)) (:bases (abi/cls id))))) cid)]
+                (when (and (every? #(let [c (abi/cls %)] (and c (:complete c) (not (:header c)) (not (:cx-inst-refused c)) (empty? (:dep-bases c))))
+                                   all)
+                           (not-any? (fn [id] (some #(= :conv (:kind (fnd %))) (:methods (abi/cls id)))) all))
+                  (fail :call-object "no match for call to an object of class '" (:name (abi/cls cid)) "' (no operator() and no conversion function)"))))
+            (fail :call "no operator()" (when (System/getenv "CPP_HDR_TRACE") (str " of " (pr-str (:op callee)) " " (pr-str (:ty callee)) " " (some-> (class-id (:ty callee)) abi/cls :name)))))
         (analyze-call ctx (if (and (= :fnset (:op callee)) (if (:_wn cn) (boolean (or (:globalQualifier cn) (seq (:qualifier cn)))) (str/includes? (or (node-text cn) "") "::"))) (assoc callee :qualified true) callee) args))))))
 )
 ))
@@ -14280,7 +14390,13 @@
                                  (when (and f (not (:cls f)) (not (:this-type ctx)))
                                    (check-type-access! (:scope ctx) (get-in d [:type :qualType]) d))))
                            id (local-var! ctx d :local)
-                           v (var* id)]
+                           v (var* id)
+                           ;; (cpp-read-indep, the checker: [temp.spec.general]/? (C++23 [temp.spec.general]/8) with [dcl.fct]/?: a
+                           ;; declaration that acquires a function type through a template parameter is no function's, so a
+                           ;; variable of function type, ill-formed: GCC's "variable 't' has function type", template/crash61.C's
+                           ;; `T t = 0;` for T int())
+                           _ (when (and (checking?) (map? (:ty v)) (abi/fn? (abi/unq (:ty v))) (init-kid d))
+                               (fail :var-fn-type "variable '" (:name d) "' has function type"))]
                        (if (= :static-local (:storage v))
                          (do (swap! (:statics ctx) conj id)
                              (let [c (count (filter #(= (:name (var* %)) (:name v)) @(:statics ctx)))]
@@ -14328,7 +14444,7 @@
                            (cond-> {:s :decl :var id :init init} (and (checking?) (:range d)) (assoc :cx-at (:range d))))))
            "CXXRecordDecl" (do (declare-class! (:scope ctx) d) {:s :null})
            ;; a block-scope function declaration (queue 445: the code generator's at its enclosing namespace, *block-fn*)
-           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) {:s :null})
+           "FunctionDecl" (do (binding [*block-fn* (not (checking?))] (declare-fn! (:scope ctx) d)) (cx-default-args! (:scope ctx) d) {:s :null})
            "EnumDecl" (do (declare-enum! (:scope ctx) d) {:s :null})
            ("TypedefDecl" "TypeAliasDecl" "UsingDecl" "UsingDirectiveDecl" "UsingEnumDecl" "NamespaceAliasDecl")
            ;; (queue 570, the checker: a block scope's typedef or alias declaration may name a variably modified type, GNU's,
@@ -14857,6 +14973,11 @@
         (when (and (checking?) (#{"DeclRefExpr" "MemberExpr"} (:kind n)) (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
                    (every? #(let [f (fnd %)] (and (:cls f) (not (:static f)))) (:fns x)))
           (fail :expr "invalid use of non-static member function '" (:name (fnd (first (:fns x)))) "'"))
+        ;; (cpp-read-indep, the checker: [expr.mptr.oper]/6, the result of .* or ->* with a pointer to member function is only a
+        ;; call's operand: an expression statement of it is GCC's "invalid use of non-static member function", expr/ptrmem5.C's
+        ;; `A().*ftype();`)
+        (when (and (checking?) (= :mbound (:op x)))
+          (fail :expr "invalid use of non-static member function (the result of a pointer-to-member operator not called)"))
         (full x))
       (fail :stmt "statement " (:kind n)))))
 
