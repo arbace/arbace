@@ -216,7 +216,7 @@
 ;; namespace; and two of them differ. A namespace-scope directive at or after *cutoff* is not in force yet.
 (def ^:dynamic *cx-udir-pos* nil) ; IdentityHashMap: a scope's :usings list -> IdentityHashMap {nominee's :names -> the directive's position}
 
-(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend? cx-qual-type-access! cx-qual-type-names cx-sub-classes cx-access-ok?)
+(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend? cx-qual-type-access! cx-qual-type-names cx-sub-classes cx-access-ok? cx-const-default-constructible?)
 
 (defn- cx-udir-visible? [s u]
   (or (not= :ns (:kind s))
@@ -3150,6 +3150,15 @@
             ;; (CX12, the checker: the type's member names' access, an unqualified declarator at namespace scope)
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl (cond-> {:range (:range n)} (:loc n) (assoc :loc (:loc n)))))]
+        ;; (cpp-sema-types, the checker: a namespace-scope const object default-initialized, of a class type that is not
+        ;; const-default-constructible, [dcl.init.general]/7-8 as local-var!'s: a union none of whose variant members has a
+        ;; default member initializer, a member of such a union type; cpp2a/constexpr-init7.C's `constexpr U2 u2;`)
+        (when (and (checking?) *on-refusal* (= st :global) (empty? q) (nil? (init-kid n)) (not= "extern" (:storageClass n)) (not (:extern n))
+                   (map? ty) (not (abi/ref? ty)) (not (header-node? n)) (nil? cv))
+          (let [et (loop [t ty] (if (abi/arr? (abi/unq t)) (recur (:of (abi/unq t))) t))
+                u (abi/unq et)]
+            (when (and (or (:c ty) (:c et)) (abi/class? u) (not (cx-const-default-constructible? (:id u))))
+              (*on-refusal* (ex-info (str "codegen: uninitialized 'const " (:name n) "'") {:codegen/refused :uninit :cx/node n}) n))))
         ;; (cpp-sema-types: a static data member's initializer in its class, no complete-class context)
         (when (and (checking?) (:cls home) (empty? q) (not (header-node? n))) (cx-defining-in-init! scope (init-kid n)))
         ;; (cpp-sema-types, the checker: [class.static.data]/3 with [basic.def]/2, [basic.def]/5: an inline (a constexpr's
@@ -12084,7 +12093,9 @@
   (let [c (abi/cls id)]
     ;; (cpp-sema-types: a class template's specialization of concrete arguments, its members known, is judged as a class)
     (or (nil? c) (not (:complete c)) (and (:tmpl c) (or (empty? (:targs c)) (dt-dependent? (:targs c)))) (:header c)
-        (some #(let [f (fnd %)] (and (empty? (:ps (:ty f))) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f)))) (:ctors c))
+        ;; (cpp-sema-types: a constructor callable with no argument, its parameters all defaulted, is a default constructor too,
+        ;; [class.default.ctor]/1)
+        (some #(let [f (fnd %)] (and (<= (count (:ps (:ty f))) (count (filter some? (:defaults f)))) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f)))) (:ctors c))
         (seq (:ctor-tmpls c)) (seq (:inherits-ctors c))
         (if (:union c)
           (boolean (some :init (:fields c)))
@@ -14545,7 +14556,8 @@
                      (let [et (loop [t ty] (if (abi/arr? (abi/unq t)) (recur (:of (abi/unq t))) t))
                            u (abi/unq et)]
                        (and (or (:c ty) (:c et))
-                            (or (some-> (:fn-id ctx) fnd :tinst) (and (abi/class? u) (seq (:targs (abi/cls (:id u))))))
+                            ;; (a scalar's outside a template's specialization is diag.ae's uninit-consts', as before)
+                            (or (abi/class? u) (some-> (:fn-id ctx) fnd :tinst))
                             (or (and (abi/scalar? u) (not (:vla (abi/unq ty))))
                                 (and (abi/class? u) (not (cx-const-default-constructible? (:id u))))))))
             (*on-refusal* (ex-info (str "codegen: uninitialized 'const " (:name n) "'") {:codegen/refused :uninit :cx/node n}) n))
