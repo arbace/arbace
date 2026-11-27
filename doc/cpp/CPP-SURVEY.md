@@ -12534,3 +12534,24 @@ messages, no GCC or clang code. The rules (arbace/cpp/sema.ae, arbace/cpp/templa
   inconsistent string literal ud-suffixes (udlit-concat-neg.C); noexcept(noexcept(this -> f ())) in the exception-specification check,
   undeclared names in a member's noexcept operand (cpp0x/noexcept53.C); a mem-initializer pack expansion outside every template
   (other/error21.C); an extended asm's operand numbers (opt/pr69213.C); -fno-rtti's dynamic_cast (rtti/no-rtti.C).
+
+Checks (the worktree's .tmp/own/, its scripts .tmp/bin/dm, a file's diagnostics and the checker's refusals, and .tmp/bin/cmp, lost and
+gained against the record): per rule, the rows it aims at and hand-made probes (each rule's valid forms beside the invalid ones: `0 ==
+nullptr`, `q - q`, `b3{nullptr}`, a static member's `s.h;`, `sizeof(f(a))`). Three regressions over the 3,273 recorded own passes and
+the 825 candidates (4,098 files): r1 at the first group (lost DRs/dr2082.C: the default-argument check without the earlier parameters in
+scope; fixed), r2 at the third (lost dr2082.C again, cpp1y/auto-fn25.C, ext/vector23.C's vector conditional and init/member1.C's
+instance cascade, each fixed: the parameters entered, a vector condition left as before, the instance's rethrow kept to a non-class
+scope's error, an overrider of a deduced virtual not judged), r4 at the last rule, `d4564360f`: 0 recorded passes lost but
+cpp2a/concepts-pr67774.C's timeout (300.3 s under 6 threads and the host's load, 298 s at r1; 199 s alone at `d4564360f`, 209 s alone at the base `120b1b912`: the load's, not the rules'; a pass: rerun as r5 and
+recorded from it), 59 rows to own pass: 56 named above and three the rules reach besides (diagnostic/bad-binary-ops.C, cpp0x/lambda/lambda-nsdmi7.C,
+expr/pmf-1.C).
+Recorded from r4, then r5 (`--judge --record`): own passes 3,273 -> 3,332; `bin/reap --record` unchanged (the rows were clang's passes,
+the cell 6,205 / 0 / 73); `bin/crops-score --record`: C++ read independence 0.926 -> 0.931 ((1934 + 3332 + 0.5 x 839) / 6105), the crop's
+0.9852 -> 0.9862; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+Left: 839 counted rows, 766 of them clang's passes (each one or a few files a rule: overload resolution's no match and ambiguity,
+incomplete types, constant evaluation, template definitions checked before instantiation, deduction of packs, noexcept in the
+checker's types -- the checker leaves :nx out, cpp1z/noexcept-type3.C's false deleted call --, access through private bases,
+complete-class contexts, GCC's parenthesized array new in C++20 (cpp2a/paren-init36.C, 37.C's false errors) and the rest), and 73 that
+clang fails as well (the cell's deferred rows). At this pass's rate (59 rows a day's pass) the stage reaches 1 only by CX12's tail
+done row by row; no input of it is the oracle tier's by design.
