@@ -899,6 +899,7 @@
 ;; failure ([temp.deduct.general]/11's list: "attempting to create an array with an element type that is void, a function type,
 ;; or a reference type", "a pointer to member ... of reference type", "a function type whose return type is a function or an
 ;; array"), cx-subst-fail!; GCC's words as its explanation)
+(declare ^:dynamic *constraint-depth*)
 (def ^:dynamic *cx-class-inst*
   "cpp-sema-const (the checker): the class template specialization whose member declarations are being instantiated, or nil
   (arbace.cpp.template's instantiate-class*)."
@@ -909,10 +910,14 @@
   ;; (cpp-sema-const, the checker: in a class template's instance a member declaration's type is formed outside any deduction,
   ;; [temp.inst]/3: the same compound types ill-formed, the program's errors -- GCC's "forming reference to void", "creating
   ;; pointer to member of type void" at the member, template/ptrmem15.C's `T A::* p;` of A<void>)
-  (when (and (checking?) *cx-class-inst* (not (cx-subst?)))
+  ;; (and in a constraint's satisfaction, [temp.constr.atomic]/3: the substitution's failure, the constraint not satisfied with no
+  ;; doubt -- cpp2a/concepts-requires18.C's subst<T&> of T = void in c1<void>)
+  (when (and (checking?) (or *cx-class-inst* (pos? (long *constraint-depth*))) (not (cx-subst?)))
     (let [u (abi/unq t)
           tv (fn [t] (re-find #":k :(auto|dep|tparam|tdep|tspec)" (pr-str t)))
-          bad (fn [m] (throw (ex-info (str "codegen: " m " (a class template's instance)") {:codegen/refused :type})))]
+          bad (fn [m] (if (pos? (long *constraint-depth*))
+                        (throw (ex-info (str "codegen: " m " (a constraint's substitution)") {:codegen/refused :subst :cx/sure-drop true}))
+                        (throw (ex-info (str "codegen: " m " (a class template's instance)") {:codegen/refused :type}))))]
       (when-not (tv t)
         (case k
           :ptr (when (abi/ref? t) (bad "forming pointer to reference type"))
@@ -2144,7 +2149,7 @@
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero|wrong type argument to unary|'[^']*' is not a class, struct, or union type|too many arguments \(a call through a pointer to function\)|cannot convert \{.*\} to \{.*\} implicitly)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero|wrong type argument to unary|'[^']*' is not a class, struct, or union type|too many arguments \(a call through a pointer to function\)|cannot convert \{.*\} to \{.*\} implicitly|(forming|creating) .* \(a constraint's substitution\))" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -16299,7 +16304,11 @@
              (not (and (:cx-constexpr v) (>= (long *cxx-year*) 20)
                        (let [et (abi/unq (:of (abi/unq (:ty v))))] (and (abi/class? et) (not (trivial-dtor? (:id et))))))))
     (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
-           (ce-init (:ty v) i {}))
+           (let [o (ce-init (:ty v) i {})]
+             ;; (its class elements no indeterminate subobject either, [expr.const]/13-14: cpp2a/constexpr-init3.C's
+             ;; `constexpr B b[] = { {} };` whose A() leaves A::i uninitialized)
+             (when-let [m (and (vector? o) (some #(when (and (map? %) (::cls %)) (cx-indeterminate-member %)) o))]
+               (throw (ex-info (str "not a constant: the member '" m "' is not initialized") {:codegen/not-constant true :cx/sure true})))))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x)))))
 
 ;; cpp-p2564 (the checker): P2564R3's immediate escalation ([expr.const]/16-18), *cx-consteval-unit* above.

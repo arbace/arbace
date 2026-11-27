@@ -1464,9 +1464,12 @@
           ;; (cpp-tpl2, the checker: a placeholder parameter's type deduced from a literal argument, [temp.arg.nontype]/1 with
           ;; [dcl.type.auto.deduct]: bool for true and false, int for an int literal; instantiate-fn checks its type-constraint)
           lit (cond (boolean? f) :bool ('#{true false} f) :bool (and (integer? f) (<= Integer/MIN_VALUE f Integer/MAX_VALUE)) :int
-                    (and (symbol? f) (re-matches #"\d+" (str f))) :int :else nil)
+                    (and (symbol? f) (re-matches #"\d+" (str f))) :int
+                    ;; (cpp-sema-const: a plain character literal, char: cpp2a/concepts-template-parm6.C's S4<0, 1, 2, 'a'>)
+                    (and (seq? f) (= 'cpp/text (first f)) (string? (second f)) (re-matches #"\s*'(?:\\.|[^'\\])'\s*" (second f))) :char
+                    :else nil)
           pt (if (and (sema/checking?) (map? pt) (= :auto (:k pt)) lit)
-               (if (= :bool lit) abi/bool* abi/int*)
+               (case lit :bool abi/bool* :char abi/char* abi/int*)
                pt)
           ;; (cpp-sema-const, the checker: and from a name of a value of known type -- another placeholder parameter's
           ;; argument, an enumerator --, its type's, [dcl.type.auto.deduct]/2: concept C<V> in f<0>'s constraint,
@@ -1552,7 +1555,16 @@
                                         (let [v (when (some dependent? args)
                                                   (try (eval-text s (#'sema/node-text d)) (catch arbace.lang.ExceptionInfo _ nil)))]
                                           (if (map? v) v (throw e))))))
-                               (:name p) (param-type s p)))
+                               (:name p)
+                               ;; (cpp-sema-const, the checker: a placeholder parameter's type deduced from a literal default,
+                               ;; [temp.arg.nontype]/1 with [dcl.type.auto.deduct]: bool, int or char, as template-arg-of's for a
+                               ;; written literal; cpp2a/concepts-template-parm2.C's `Int auto X = false`)
+                               (let [pt (param-type s p)]
+                                 (if (and (sema/checking?) (map? pt) (= :auto (:k pt)) (map? d))
+                                   (case (:kind d) "CXXBoolLiteralExpr" abi/bool* "CharacterLiteral" (if (re-find #"^'" (str (#'sema/node-text d))) abi/char* pt)
+                                         "IntegerLiteral" (if (re-matches #"\s*[0-9]+\s*" (str (#'sema/node-text d))) abi/int* pt)
+                                         pt)
+                                   pt))))
                    ;; (cpp-tpl2: a default's substitution failure at its parameter, call-candidates' explanation)
                    (catch arbace.lang.ExceptionInfo e
                      (let [e (if (and (sema/cx-subst?) (not (:cx/subst (ex-data e))) (sema/sure-failure? e))
@@ -3072,6 +3084,19 @@
   [temp.constr.decl]/3); not satisfied with no doubt, GCC's \"template constraint failure\" (a substitution failure where a
   deduction names it: a sure drop)."
   [t args]
+  ;; (cpp-sema-const, the checker: a constrained placeholder parameter's type-constraint, `Int auto X`, [temp.param]/4 with
+  ;; [dcl.type.auto.deduct]/2: each argument's type (a pack's, each element's) satisfies it, else GCC's "placeholder constraints
+  ;; not satisfied" -- a sure drop where a deduction names it; cpp2a/concepts-template-parm2.C's S2<>, -parm6.C's S4)
+  (when (and (sema/checking?) (not (dependent? args)) (:type-constraint @sema/hooks))
+    (let [ps (delay (bind-scope (:scope t) (:params t) args nil))]
+      (doseq [[p a] (map vector (:params t) args) :when (not (#{:type :template} (:kind p)))
+              :let [pt (try (param-type @ps p) (catch arbace.lang.ExceptionInfo _ nil))]
+              :when (and (map? pt) (= :auto (:k pt)) (:tc pt))
+              x (if (and (map? a) (vector? (:pack a))) (:pack a) [a])
+              :when (and (map? x) (map? (:ty x)) (not= :auto (:k (:ty x))) (not (dependent? [(:ty x)])))]
+        (when (false? (try ((:type-constraint @sema/hooks) @ps (str/trim (str (:tc pt))) (abi/unq (:ty x))) (catch arbace.lang.ExceptionInfo _ nil)))
+          (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "' (placeholder constraints not satisfied)")
+                          {:codegen/refused :template :cx/sure-drop true}))))))
   (when (and (sema/checking?) (or (:class-constraint t) (and (= :var (:tk t)) (:constraint t)) (some :tc (:params t))) (not (dependent? args)))
     (let [d (atom false)
           ex (atom [])
