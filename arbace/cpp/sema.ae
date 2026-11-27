@@ -216,7 +216,7 @@
 ;; namespace; and two of them differ. A namespace-scope directive at or after *cutoff* is not in force yet.
 (def ^:dynamic *cx-udir-pos* nil) ; IdentityHashMap: a scope's :usings list -> IdentityHashMap {nominee's :names -> the directive's position}
 
-(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend?)
+(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend? cx-qual-type-access! cx-qual-type-names)
 
 (defn- cx-udir-visible? [s u]
   (or (not= :ns (:kind s))
@@ -2932,6 +2932,33 @@
                       n)
         true))))
 
+(defn- cx-defining-in-init!
+  "cpp-sema-types (the checker): [class.mem]/8 with [basic.types.general]/5, a class is incomplete within its own
+  member-specification outside its complete-class contexts, and a static data member's initializer in the class is none
+  of them (a default member initializer is): `__builtin_offsetof(B, a)` ([support.types.layout]/1), sizeof(B) or
+  alignof(B) ([expr.sizeof]/1, [expr.alignof]/1) naming the class being defined, or an array of it, in the initializer
+  `init` of a member declared in `scope` -- GCC's \"invalid use of incomplete type\", \"invalid application of 'sizeof' to
+  incomplete type\"; ext/builtin-offsetof4.C. A lambda's body is not walked; each error reported at its expression, the
+  declaration going on."
+  [scope init]
+  (when (and (checking?) *on-refusal* (map? init) (= :class (:kind scope)))
+    (let [inc-cls (fn [qt] (let [t (try (resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
+                                 t (when (map? t) (loop [t (abi/non-ref t)] (if (abi/arr? (abi/unq t)) (recur (:of (abi/unq t))) t)))
+                                 u (when (map? t) (abi/unq t))
+                                 c (when (abi/class? u) (abi/cls (:id u)))]
+                             (when (and c (:defining c) (not (:tmpl c)) (not (:targs c)) (not (:lambda c)) (not (:header c))) c)))]
+      ((fn walk [x]
+         (when (and (map? x) (not= "LambdaExpr" (:kind x)))
+           (cond
+             (and (= "BuiltinExpr" (:kind x)) (string? (:type (:_offsetof x))))
+             (when-let [c (inc-cls (:type (:_offsetof x)))]
+               (*on-refusal* (ex-info (str "codegen: invalid use of incomplete type '" (:name c) "' in offsetof") {:codegen/refused :offsetof :cx/node x}) x))
+             (and (= "UnaryExprOrTypeTraitExpr" (:kind x)) (#{"sizeof" "alignof" "__alignof" "__alignof__"} (:name x)) (get-in x [:argType :qualType]))
+             (when-let [c (inc-cls (get-in x [:argType :qualType]))]
+               (*on-refusal* (ex-info (str "codegen: invalid application of " (:name x) " to incomplete type '" (:name c) "'") {:codegen/refused :incomplete :cx/node x}) x)))
+           (doseq [k (:inner x)] (walk k))))
+       init))))
+
 (defn- declare-var!
   [scope n storage]
   (let [qt (get-in n [:type :qualType])
@@ -3103,6 +3130,8 @@
             ;; (CX12, the checker: the type's member names' access, an unqualified declarator at namespace scope)
             v (cond-> v (and (checking?) (empty? q) (= :ns (:kind home)) (not (header-node? n)))
                 (assoc :cx-type-text (get-in n [:type :qualType]) :cx-decl (cond-> {:range (:range n)} (:loc n) (assoc :loc (:loc n)))))]
+        ;; (cpp-sema-types: a static data member's initializer in its class, no complete-class context)
+        (when (and (checking?) (:cls home) (empty? q) (not (header-node? n))) (cx-defining-in-init! scope (init-kid n)))
         ;; a header's definition: defined when odr-used (G4: clang emits an unused inline variable not at all)
         (swap! *vars* assoc id (cond
                                  ;; (cpp-rt-own3: and an inline variable anywhere, [dcl.inline]/6, defined when odr-used, linkonce_odr)
@@ -3194,6 +3223,10 @@
     (when (and nm (not old-id)) (enter! scope nm (cond-> {:e :type :ty t :pos (long (or (:_b n) 0))}
                                 ;; (queue 492, the checker: a member enumeration's access, check-type-access!)
                                 (and (checking?) (= :class (:kind scope)) *member-access*) (assoc :access *member-access*))))
+    ;; (cpp-sema-types, the checker: [dcl.enum]/6, an enumeration whose underlying type is not fixed is an incomplete type
+    ;; until after its enum-specifier's closing brace: marked :defining over its enumerators, __underlying_type's check)
+    (when (and (checking?) (:_body n) (not (get-in n [:fixedUnderlyingType :qualType])) (not scoped))
+      (swap! abi/*enums* assoc-in [id :defining] true))
     ;; (cpp-s4: an enumerator's initializer sees the earlier enumerators, of the underlying type before the closing brace,
     ;; [dcl.enum]/5 and [basic.scope.enum]: a scoped enumeration's too, <charconv>'s `general = fixed | scientific`)
     (let [neg (atom false)
@@ -3317,6 +3350,7 @@
                                            {:codegen/refused :enum})
                                   c2)))))
             (recur more (unchecked-inc (long v)) bs))))
+      (when (checking?) (swap! abi/*enums* update id #(when % (dissoc % :defining))))
       ;; (cpp-s13: an enumeration without a fixed underlying type and no negative enumerator has clang's unsigned int as its
       ;; integer type ([dcl.enum]/7; Sema's ActOnEnumBody), which a bit-field of it reads zero-extended: <format>'s _Spec's
       ;; `_Align _M_align : 2` held _Align_right, 2, read back as -2, and "{:>6}" padded on the left's other side)
@@ -10606,6 +10640,18 @@
             :when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))]
       (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name (abi/cls cid)) "'")
                       {:codegen/refused :access :cx/node node}))))
+  ;; (cpp-sema-types: a template-id's type arguments, T2<B::X>, name B's member type X in the declaration's context too,
+  ;; [class.access]/1-2 with [temp.arg.type]; reported at the declaration, cx-qual-type-access!)
+  ;; (not when the member's class may grant it by a friend, cx-type-friend?, as the other steps here)
+  (when (and (checking?) text (str/includes? text "<") (str/includes? text "::"))
+    (doseq [[parts nm] (cx-qual-type-names text)
+            :let [ce (try (first (filter #(= :type (:e %)) (lookup-qualified scope parts))) (catch arbace.lang.ExceptionInfo _ nil))
+                  cid (when ce (class-id (:ty ce)))
+                  c (when cid (abi/cls cid))
+                  acc (when (:scope c) (some #(when (= :type (:e %)) (:access %)) (.get ^java.util.HashMap (:names (:scope c)) nm)))]
+            :when (and (#{:private :protected} acc) (not (cx-type-friend? cid acc)))]
+      (throw (ex-info (str "codegen: '" nm "' is a " (name acc) " member of '" (:name c) "'")
+                      {:codegen/refused :access :cx/node node}))))
   (when (and (checking?) text (str/includes? text "::") (not (str/includes? text "<")))
     (doseq [[_ q0 nm0] (re-seq #"((?:[A-Za-z_][A-Za-z_0-9]*::)+)([A-Za-z_][A-Za-z_0-9]*)" text)
             ;; (queue 492: each step of the qualifier too, Bar::type2::type1's type2 in Bar)
@@ -11892,13 +11938,53 @@
                                       (and (abi/class? t) (cx-const-default-constructible? (:id t))))))
                        (:fields c)))))))
 
+(defn- new-size-node
+  "cpp-sema-types, the checker: an array new's bound as an IntegerLiteral node, for a bound the new-expression does not write."
+  [v] {:kind "IntegerLiteral" :value (str v) :type {:qualType "unsigned long"} :valueCategory "prvalue"})
+
+(defn- new-deduced-bound
+  "cpp-sema-types, the checker: [expr.new]/7 (P1009R2), an array new whose first bound is omitted takes it from its
+  new-initializer as an array declaration's from its initializer, [dcl.init.aggr]/4: a braced list's or a C++20 parenthesized
+  expression-list's elements, or the length of a lone string literal with its terminating null for a character array; nil
+  when the count is not known here (a pack expansion, a designated list)."
+  [ctx initn et]
+  (let [ks (if (#{"ParenListExpr" "InitListExpr"} (:kind initn)) (vec (kids initn)) [initn])
+        s (when (and (= 1 (count ks)) (= "StringLiteral" (:kind (first ks))) (abi/integral? (abi/unq et)))
+            (try (analyze ctx (first ks)) (catch arbace.lang.ExceptionInfo _ nil)))]
+    (cond (some #(#{"PackExpansionExpr" "DesignatedInitExpr"} (:kind %)) ks) nil
+          s (some-> s :ty abi/unq :n)
+          :else (count ks))))
+
 (defn- new-expr [ctx n]
   (let [t (resolve-type (:scope ctx) (get-in n [:type :qualType]))
         et (:to t)
         ks (kids n)
+        ;; (cpp-sema-types, the checker: [expr.new]/5, when the allocated object is an array -- the type-id or new-type-id denotes
+        ;; an array type, a parenthesized `new (int[2])` or a typedef's `new A` -- the new-expression yields a pointer to the array's
+        ;; initial element, its bound the array's: an array new of its element type; cpp2a/paren-init37.C)
+        aty (when (and (checking?) (not (:isArray n)) (map? et) (abi/arr? (abi/unq et)) (not (:vla (abi/unq et)))
+                       (or (some? (:n (abi/unq et))) (and (:initStyle n) (seq ks))) (not (cx-vm? (:of (abi/unq et)))))
+              (abi/unq et))
+        ;; (a type-id of unknown bound, `new (char[])("foo")`, its bound deduced from the initializer, [expr.new]/7)
+        asz (when aty (or (:n aty) (new-deduced-bound ctx (first ks) (:of aty))))
+        [t et n ks] (if asz
+                      (let [e (cond-> (:of aty) (:c et) (assoc :c true) (:v et) (assoc :v true))]
+                        [(abi/ptr e) e (assoc n :isArray true) (cons (new-size-node asz) ks)])
+                      [t et n ks])
+        ;; (cpp-sema-types, the checker: a noptr-new-declarator whose first bound is omitted, `new char[]("foo")`, writes no
+        ;; bound: the parser's node holds the initializer alone, the bound deduced from it, [expr.new]/7)
+        ks (if (and (checking?) (:isArray n) (:sizeOmitted n) (:initStyle n) (seq ks))
+             (if-let [b (new-deduced-bound ctx (first ks) et)] (cons (new-size-node b) ks) ks)
+             ks)
         [nexpr ks] (if (:isArray n) [(first ks) (rest ks)] [nil ks])
         ;; the initializer when written, then the placement arguments (the native parser's order; G4)
         initn (when (or (:initStyle n) (not (:isPlacement n))) (first ks))
+        ;; (cpp-sema-types, the checker: an array's parenthesized new-initializer of one expression is an expression-list all
+        ;; the same, [expr.new]/1's new-initializer `( expression-list )`, C++20's elements initialized from it, [dcl.init.general]/16.5;
+        ;; the parser keeps one expression bare, as clang's tree does: cpp2a/paren-init36.C's `new int[1](1)`)
+        initn (if (and (checking?) nexpr initn (= "call" (:initStyle n)) (not (#{"ParenListExpr" "ImplicitValueInitExpr" "InitListExpr"} (:kind initn))))
+                {:kind "ParenListExpr" :inner [initn] :_b (:_b initn) :_e (:_e initn)}
+                initn)
         place (vec (if initn (rest ks) ks))
         pargs (when (:isPlacement n) (vec (analyze-args ctx place)))
         fa (find-allocation ctx (if nexpr et et) (boolean nexpr) (boolean (:isGlobal n)) (vec pargs))
@@ -13234,6 +13320,13 @@
     "GNUNullExpr" {:op :int :v 0 :ty abi/long* :cat :pr}
     "ParenExpr" (analyze ctx (first (kids n)))
     "DeclRefExpr" (let [x (name-expr ctx n)]
+                    ;; (cpp-sema-types, the checker: [class.access]/1-2 with [temp.arg.type], a template-id's type argument in a
+                    ;; qualified name's nested-name-specifier names its member types where it appears: `A<B::X>::i` with B's X
+                    ;; private, GCC's "'typedef int B::X' is private within this context" in a function no member or friend of
+                    ;; B; template/access26.C)
+                    (when (and (checking?) *on-refusal* (some #(and (string? %) (str/includes? % "<")) (:qualifier n)) (not (header-node? n)))
+                      (when-let [cx (cx-context ctx)]
+                        (cx-qual-type-access! (:scope ctx) (str/join "::" (:qualifier n)) n cx (constantly true))))
                     ;; (queue 497, the checker: a variable declared with GNU's unavailable attribute, named)
                     (when-let [v (when (checking?) (some #(when (and (map? %) (= :var (:op %)) (:id %)) %) [x (:e x) (:e (:e x))]))]
                       (when (:unavailable (var* (:id v)))
