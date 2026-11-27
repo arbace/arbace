@@ -9567,3 +9567,46 @@ object inside the test: no moment at a rebinding), test_pickle's delayed writer 
 test_pointer_types_factory and test_xml_etree_c's test_cyclic_gc (cycles through the C world's objects), test_sqlite3's
 test_table_lock_cursor_non_readonly_select (passes alone and in test_sqlite3.test_regression whole, compiled, fails in the
 package's run: an earlier test's state).
+## As built: py-cthreads-1127, the C world's threads at their serialized cost (2026-11-27, the main host; write-ahead: needs a build)
+
+py-regress-1127 (678975e2a) gave every Python thread a C stack of its own and fixed train 7's `_pickle` segfault. On train 9's
+executable (KEY20 `e89947b7637c5ceb2de8`) its thr.py (4 threads, C `_pickle` over objects whose `__reduce__` sleeps) took
+349 s and thr1.py (the same work in 1 thread) 13.3 s. CPython 3.14.10 runs both in about 1.1 s.
+
+- **Measured** (`ARBACE_CPUPROFILE`, jrt's, on `bin/pyi run`; probes `.tmp/p/thrn.py N ROUNDS SWITCH SLEEP` and the same with a
+  lock around each round). The work's timer, without startup:
+  - With no sleep, 1 thread for 5, 10, 20 and 40 rounds: 0.52, 1.56, 5.2 and 13.2 s. The cost grows with the work done, even
+    in 1 thread.
+  - 4 threads for 5 and 10 rounds: 5.5 and 23.4 s. 4 threads for 10 rounds with the rounds serialized by a lock: 12.7 s, the
+    1-thread cost of 40 rounds.
+  - Profile: 65% of both the 1-thread and the 4-thread runs is `refreshSizes`, after every native. It wrote ob_size for every
+    dict and bytearray proxy alive (`varSize`'s IsInstance and crt's `Store64`, `Mem.find`'s `sort.Search`). `reapDead`'s
+    deallocations took 15 to 20%, and the mirrors' `syncToC`/`syncFromC` took 6 to 20%. `cThreadSwitch` (ExtThreadSwitch)
+    does not show in the profile.
+- **The cause.** The proxies of count 0, the strings handed to C (keepAlive) and the C-born objects Go collected (the C
+  Pickler and Unpickler, whose memo holds every object pickled) were released or deallocated only with every thread out of C
+  at once (cDepth 0, and `reapDead` at cDepth 1). In thr.py some thread's C is always suspended in a reducer, so that never
+  happens: the proxies and mirrors grew with all the work, and each native and each entry walked all of them. In 1 thread
+  they grow until Go collects the Picklers. So the 4-thread run is quadratic in its total work, and the 1-thread run grows
+  between collections.
+- **The fix** (go/arbace/pyctypes, the printed Go read back by `bin/repr-go read --full`, printed again equal; go vet, go test):
+  - **Entries by thread.** Each thread's outermost C entry has a number (`entryOf`, `entrySeq`). A handle given to C before its
+    thread enters (a call's arguments) gets the number of that thread's next entry, which is dropped at a hand-off while the
+    thread is out of C. Every handle given to C (`handle`) records the range of entry numbers it went to (`recv`).
+  - **Release at a thread's own outermost return** (`releaseUnowned(true)`). It releases a proxy of count 0 when no other live
+    entry falls in the proxy's range (`heldElsewhere`). So a borrowed reference of a suspended entry stays valid, as before.
+    It also drops the strings of the entries that ended (`keep`, `dropKept`).
+  - **Deallocation at a thread's own outermost entry.** `reapDead` runs there (and `reapAtCollect` when this thread is out of
+    C), not only at the world's. `cTraverse` guards both (`traversing`).
+  - **cDepth 0.** The full release, the leaked subinterpreters and the pending calls stay there. That release also holds what a
+    thread out of C was given for its next entry.
+  - **C threads unchanged.** PyThread_start_new_thread's threads record nothing and keep their strings until cDepth 0.
+  - **refreshSizes** walks a slice (`varList`), reads a dict's size from its `*Dict`, and writes ob_size only when it changed.
+  - **Stacks pooled.** An ended thread's 1 MiB C stack goes to a pool of 8 (`newStack`, `freeStack`), not unmapped.
+  - The one case a suspended entry is not covered is a pointer its C read from memory (a list's item, PyList_GET_ITEM), not
+    through a native, whose owner Python code then dropped while the object lives on in Python. CPython's own C increfs such
+    an item around a call that can run Python code (`_pickle`'s batch_list_exact does).
+- **What the build must show** (`PYI_RUNTIME_REQUIRE=compiled`, `ARBACE_HOST_EXE` the new executable, `bin/pyi run`, from
+  py-regress-1127's scratch): thr.py prints `errors [] 0` in 3 of 3 runs, in well under its 349 s (the serialized cost: about 4
+  times thr1.py's work, so under 60 s); thr1.py prints `errors [] 0` and is not slower than its 13.3 s; `thrn.py 1 40 0.005 0`
+  is not slower than 13.2 s, and `thrn.py 4 10 0.005 0` is near it, not 23.4 s.
