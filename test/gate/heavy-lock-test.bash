@@ -123,7 +123,26 @@ before S start A end && [ "$(slot S)" = 2 ] && ok "7: a small ticket (4 GiB) ran
 case_dir one-slot-env; echo 2 > "$D/big.lock.slots"
 HEAVY_LOCK_SLOTS=1 run A 1.5 20; sleep 0.3; HEAVY_LOCK_SLOTS=1 HEAVY_LOCK_SMALL_GIB=2 run S 0.3 4; wait
 before A end S start && ok "7: HEAVY_LOCK_SLOTS=1 over the file, and HEAVY_LOCK_SMALL_GIB=2 keeps a 4 GiB ticket out of slot 2" || bad "7: env: $(cat "$LOG")"
+case_dir small-file; export HEAVY_LOCK_MEMAVAIL_KIB=$((100 * G)); echo 1 > "$D/big.lock.slots"; echo 16 > "$D/big.lock.small_gib"
+run A 1.5 20; sleep 0.3; run S 0.3 12; wait
+before S start A end && [ "$(slot S)" = 2 ] && ok "7: LOCK.small_gib 16 lets a 12 GiB ticket run in slot 2" || bad "7: small_gib file: $(cat "$LOG")"
 unset HEAVY_LOCK_MEMAVAIL_KIB
+
+# 8. the per-job memory cap (cgroup v2's memory controller delegated at /sys/fs/cgroup; skipped without): a job past 125% of its
+#    declaration is killed alone, with the lock's message, while a job beside it in the other slot finishes
+if grep -qw memory /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null && command -v python3 > /dev/null; then
+  case_dir cgroup; export HEAVY_LOCK_MEMAVAIL_KIB=$((100 * G)); echo 2 > "$D/big.lock.slots"
+  run A 3 1
+  sleep 0.3
+  HEAVY_MEM_GIB=1 "$HL" python3 -c "b = bytearray(2 << 30)" 2>> "$D/stderr" & X=$!
+  wait $X; xs=$?; wait
+  [ "$xs" != 0 ] && grep -q 'passed its memory cap' "$D/stderr" && ok "8: a job past its cap (2 GiB against 1.25) was killed, with the message" || bad "8: cap: status $xs, $(cat "$D/stderr")"
+  [ -n "$(at A end)" ] && ok "8: the job beside it finished" || bad "8: A: $(cat "$LOG")"
+  ls /sys/fs/cgroup/arbace-lock 2>/dev/null | grep -q -- "-" && bad "8: a job group left: $(ls /sys/fs/cgroup/arbace-lock)" || ok "8: no job group left"
+  unset HEAVY_LOCK_MEMAVAIL_KIB
+else
+  echo "skip 8: no cgroup v2 memory controller at /sys/fs/cgroup"
+fi
 
 [ "$fail" = 0 ] && echo "heavy-lock-test: passed" || echo "heavy-lock-test: FAILED"
 exit "$fail"

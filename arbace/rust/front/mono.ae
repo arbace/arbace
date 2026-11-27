@@ -2781,6 +2781,41 @@
                                  (let [i (vtable-instance c tr targs m)]
                                    [:fn (if (= :vtable (:shim i)) (vtable-shim-mangle (:def i) (:args i)) (instance-symbol i))])))))}))
 
+(defn unit-refs
+  "queue 600 (C6 L2 over the closure): within build-program's bindings, the instances BODIES take by reference rather than by a
+  call: each function constant reified as an operand (a function pointer: `fmt::rt::Argument::new_display`'s formatter), and
+  each method of the vtables their unsizing casts make (vtable-instance; a shim's entry left out): [[def args symbol]], each once"
+  [n bodies]
+  (binding [*local* (local-crate n) *layouts* (atom {}) *def-order* (atom nil)]
+    (tc/with-solver (solver-def) (fn []
+      (let [fnconsts (fn [b]
+                       (let [acc (volatile! [])]
+                         (letfn [(walk [x]
+                                   (when (and (seq? x) (= 'const (first x)) (string? (second x)))
+                                     (let [t (:tc (meta (nth x 2 nil)))]
+                                       (when (and (vector? t) (= :fndef (first t)) (not (intrinsic? (second t))))
+                                         (vswap! acc conj [(second t) (nth t 2)]))))
+                                   (cond (seq? x) (doseq [y x] (walk y)) (vector? x) (doseq [y x] (walk y)) (map? x) (doseq [y (vals x)] (walk y))))]
+                           (walk (:blocks b))
+                           (doseq [pb (vals (:promoted-bodies b))] (walk (:blocks pb))))
+                         @acc))
+            inst (fn [{:keys [def args shim]}]
+                   (when (and def (nil? shim) (not (intrinsic? def)) (not ((:names (attrs-of def)) "inline(always)")))
+                     (when-let [sym (try (instance-symbol {:def def :args (erase-regions args)}) (catch Throwable _ nil))]
+                       [def (erase-regions args) sym])))]
+        (vec (distinct (concat
+                        (for [b bodies [d0 args0] (distinct (fnconsts b))
+                              :let [r (try (resolve-instance d0 (erase-regions args0)) (catch Throwable _ nil))]
+                              :when r
+                              :let [[d args shim] r x (inst {:def d :args args :shim shim})]
+                              :when x]
+                          x)
+                        (for [b bodies [_ _ c tr targs] (try (dyn-casts b) (catch Throwable _ nil))
+                              [k m] (try (vtable-entries tr) (catch Throwable _ nil)) :when (= :method k)
+                              :let [i (try (vtable-instance c tr targs m) (catch Throwable _ nil)) x (when i (inst i))]
+                              :when x]
+                          x)))))))))
+
 (defn vtable-alloc-in
   "rust-c6c: within build-program's bindings (program N's crate, a layout cache, the solver), vtable-alloc of C as a TR object at
   TARGS: lib-unit's casts' vtables"

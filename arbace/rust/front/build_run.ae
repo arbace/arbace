@@ -3095,7 +3095,46 @@
               ;; queue 566 (C6 L2's first slice): with LIB_UNIT_L2, the items' other callees (unit-callees: one level, the instances
               ;; the items call), each the export's body instantiated (core-instance) where the export has its definition
               l2-name (fn [d args] (str "lib-l2 " d (when (seq args) (pr-str args))))
-              l2 (when (System/getenv "LIB_UNIT_L2")
+              l2-one (fn [[d args sym]]
+                       (let [e (when (string? d) (get nc d))
+                             i (when e (try (in-lib #(core-instance e args)) (catch Throwable _ nil)))]
+                         [d args sym i (cond i nil e "the instance refused" :else "not exported")]))
+              ;; queue 600 (C6 L2 grown to the whole closure): LIB_UNIT_L2_TARGETS=FILE, the symbols of the closure's defines in
+              ;; CRATE's units (a symbol a line): the callees followed transitively from the items, through each built instance's
+              ;; own callees, every one whose symbol FILE names built (the one-level filter below not applied)
+              l2-targets (when-let [f (System/getenv "LIB_UNIT_L2_TARGETS")]
+                           (set (remove str/blank? (map str/trim (str/split-lines (slurp f))))))
+              l2 (cond
+                   l2-targets
+                   ;; (the callees of the `#[inline(always)]` callees' bodies too: LLVM's inliner leaves their calls in the
+                   ;; caller, so the instances they call are the unit's; each such body instantiated once, iseen)
+                   (let [iseen (volatile! #{})
+                         with-inl (fn [bodies]
+                                    (loop [bs (vec bodies) todo (vec bodies) acc (vec bodies)]
+                                      (if (empty? todo)
+                                        acc
+                                        (let [ics (remove #(contains? @iseen [(first %) (second %)])
+                                                          (try (in-lib (fn [] (mono/inline-always-callees n todo))) (catch Throwable _ nil)))
+                                              _ (vswap! iseen into (map (fn [[d args]] [d args]) ics))
+                                              nb (vec (keep (fn [[d args]] (when-let [e (when (string? d) (get nc d))]
+                                                                             (:body (try (in-lib #(core-instance e args)) (catch Throwable _ nil)))))
+                                                            ics))]
+                                          (recur bs nb (into acc nb))))))
+                         ;; (and the instances they take by reference: function pointers and their vtables' methods,
+                         ;; mono/unit-refs; LIB_UNIT_L2_REFS=0: calls alone)
+                         callees (fn [bodies] (let [bs (with-inl bodies)]
+                                                (in-lib #(cond-> (mono/unit-callees n bs)
+                                                           (not= "0" (System/getenv "LIB_UNIT_L2_REFS")) (into (mono/unit-refs n bs))))))]
+                   (loop [todo (callees (keep (fn [[_ i]] (:body i)) insts)) seen #{} acc []]
+                     (let [new (vec (distinct (remove (fn [[d args sym]] (or (contains? seen sym) (not (contains? l2-targets sym))
+                                                                             (and (empty? args) (some #{d} defs))))
+                                                      todo)))]
+                       (if (empty? new)
+                         acc
+                         (let [built (mapv l2-one new)]
+                           (recur (callees (keep (fn [x] (:body (nth x 3))) built))
+                                  (into seen (map #(nth % 2) new)) (into acc built)))))))
+                   (System/getenv "LIB_UNIT_L2")
                    (let []
                      (vec (for [[d args sym] (in-lib #(mono/unit-callees n (keep (fn [[_ i]] (:body i)) insts)))
                                 ;; (the copies std's units define: a generic instance, a cross-crate-inlinable definition, or

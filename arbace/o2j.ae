@@ -59,6 +59,15 @@
 
 (defn- hd [x] (when (seq? x) (first x)))
 
+(defn- tail-clears
+  "x with its tail calls' parameter clears (apply-node's o2j$clears, oc-tail) made forms (keep? true: a (do) of them) or dropped
+  (nil: a function whose body is a loop, whose parameters are the loop's)."
+  [x keep?]
+  (cond (and (seq? x) (= 'o2j$clears (first x))) (when keep? (with-meta (apply list 'do (rest x)) (meta x)))
+        (seq? x) (with-meta (apply list (map #(tail-clears % keep?) x)) (meta x))
+        (vector? x) (with-meta (mapv #(tail-clears % keep?) x) (meta x))
+        :else x))
+
 ;; ---------------------------------------------------------------------------------------------
 ;; names
 
@@ -275,32 +284,61 @@
                (or (str/starts-with? n "global ")
                    (and (str/starts-with? n "field_imm ") (simple? (first args)))))))))
 
+(declare scoped holds-call? take-form)
+
 (defn- with-args
   "Evaluates arg nodes right to left (as ocamlc's code does) and calls (k forms): every argument
-  that is not simple but the leftmost such one is bound to a temporary first, from the right."
-  [ctx nodes k]
+  that is not simple but the leftmost such one is bound to a temporary first, from the right. With
+  clear? (oc-tail: a call that is no tail call) the temporaries are cleared once k's form is evaluated
+  (scoped)."
+  [ctx nodes k & [clear?]]
   (let [impure (keep-indexed (fn [i x] (when-not (simple? x) i)) nodes)
         bind (set (rest impure))
-        temps (into {} (for [i bind] [i (fresh "t$")]))
+        temps (into {} (for [i bind] [i (if clear? (with-meta (fresh "t$") {:mutable true :tag 'Object}) (fresh "t$"))]))
         forms (vec (map-indexed (fn [i x] (or (temps i) (expr ctx x false))) nodes))
         bindings (vec (mapcat (fn [i] [(temps i) (expr ctx (nth nodes i) false)])
                               (reverse (sort bind))))
         body (k forms)]
-    (if (seq bindings) (list 'let bindings body) body)))
+    (if (seq bindings) (list 'let bindings (if clear? (scoped body (vals temps)) body)) body)))
 
 (defn- call-form
   "The application of function form f to argument forms (already evaluated, simple). A closure is cast in place, Rt/fn called
   only for another value (queue 414: at the light level each interpreted call is a frame)."
-  [f args]
-  (let [n (count args)]
+  [f args0]
+  (let [n (count args0) args args0]
     (if (<= 1 n 6)
-      (let [c (fresh "c$") v (fresh "f$")]
-        (list 'let [v f
-                    c (list 'if (list 'instance? 'ocaml.rt.Closure v) (list 'cast 'ocaml.rt.Closure v) (list 'ocaml.rt.Rt/fn v))]
-              (list 'if (list '== (list '.-arity c) n)
-                    (apply list (symbol (str ".a" n)) c args)
-                    (list 'ocaml.rt.Rt/ap c (list 'new 'Object/1 (vec args))))))
+      ;; (queue 603) the arguments are written in both branches: one that holds a call (with-args' leftmost argument that is not
+      ;; simple, evaluated in place: a call of a call ...) is bound first, else the nested calls' forms doubled at each level
+      ;; (unboxed-primitive-args' GADT values, Float ** Int32 ** ... thirty-six calls deep, 2^36 forms: o2j past 14 GB on 4.7 KB of
+      ;; Lambda); the function form is simple then (with-args), so it is evaluated after it as before. At the light level the local
+      ;; is read and cleared as the argument is passed (take-form: the frame's slot would keep the value through the call, where the
+      ;; callee's parameter is the only holder: statmemprof/bigarray's test_tail)
+      (let [c (fresh "c$") v (fresh "f$")
+            big (into {} (keep-indexed (fn [i a] (when (holds-call? a) [i (with-meta (fresh "a$") {:mutable true :tag 'Object})])) args))
+            args (vec (map-indexed (fn [i a] (if-let [t (big i)] (if *in-ns* t (take-form t)) a)) args))
+            call (list 'let [v f
+                             c (list 'if (list 'instance? 'ocaml.rt.Closure v) (list 'cast 'ocaml.rt.Closure v) (list 'ocaml.rt.Rt/fn v))]
+                       (list 'if (list '== (list '.-arity c) n)
+                             (apply list (symbol (str ".a" n)) c args)
+                             (list 'ocaml.rt.Rt/ap c (list 'new 'Object/1 (vec args)))))]
+        (if (seq big)
+          (list 'let (vec (mapcat (fn [i] [(big i) (nth args0 i)]) (sort (keys big)))) call)
+          call))
       (list 'ocaml.rt.Rt/ap f (list 'new 'Object/1 (vec args))))))
+
+(defn- take-form
+  "Local t's value, t cleared as it is read (queue 603: the value is no slot's once passed)."
+  [t]
+  (list 'aget (list 'new 'Object/1 [t (list 'set! t nil)]) 0))
+
+(defn- holds-call?
+  "Whether form x holds a call (call-form's .aN or Rt/ap): written twice, its forms double."
+  [x]
+  (cond (seq? x) (or (= 'ocaml.rt.Rt/ap (first x))
+                     (and (symbol? (first x)) (boolean (re-matches #"\.a[1-6]" (name (first x)))))
+                     (boolean (some holds-call? x)))
+        (vector? x) (boolean (some holds-call? x))
+        :else false))
 
 ;; ---- backtraces (OC217 (a)'s fifth stage, queue 370; oi's compile.go event, applyEvNode, primEv, raiseNode): a -g unit's
 ;; after-events, `(event L [KIND DEF FILE L1 C1 EOFF L2 C2])`, are the slots of Bt's shadow stack
@@ -333,6 +371,31 @@
 
 (defn- clear "The forms that clear temporaries ts." [ts] (map (fn [t] (list 'set! t nil)) ts))
 
+(defn- value-then
+  "Form f's value, with forms after run once it is evaluated (clears, Bt's pop). (queue 603) At the light level f's value is not
+  bound to a local: stage 0's Java forms interpreter gives every let binding a slot of its own for the frame's lifetime (a let's
+  slots are released after its body since n-java-serial, 2026-11-17, a later interpreter than stage 0's), so the local that
+  carried the value past the clears kept it reachable through every collection the rest of the frame asked for (weak-ephe-final/
+  ephetest's test7: the ephemeron K1.make returned, held by its call's result slot after the program dropped it); the value goes
+  through a two-element array instead, its first element read, the array no slot's. The compiled level keeps the local (Go's
+  liveness drops it)."
+  [f after]
+  (if *in-ns*
+    (let [r (fresh "r$")]
+      (concat (list 'let [r f]) after [r]))
+    (list 'aget (list 'new 'Object/1 [f (concat (list 'do) after [nil])]) 0)))
+
+(defn- scoped
+  "Form b, then the locals ts cleared, b's value the result (oc-tail, 2026-11-26): at the light level an interpreted frame's slot
+  keeps what it last held until the frame returns, so a value bound by a let or a temporary whose scope ended before the rest of
+  the function (lib-sys/opaque's inlined go, regression/pr5233's Some argument) stayed reachable through the collections the rest
+  asks for, where ocamlopt's frame no longer holds it; only for a b that is no tail form (a tail call's continue or TailCall, or
+  the function's own result, which ends the frame)."
+  [b ts]
+  (if (seq ts)
+    (value-then b (clear ts))
+    b))
+
 (def ^:private bt-pop
   "Bt/pop in place (queue 414)."
   '(set! ocaml.rt.Bt/sp (unchecked-dec-int ocaml.rt.Bt/sp)))
@@ -343,25 +406,34 @@
     (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/tickSlow))])
 
 (def ^:private enter-forms
-  "Rt/enter in place (queue 453: a call's entry without a frame): the depth and the turn counted, the slow path (the turn's work,
-  the depth's limit) past 128 turns."
+  "Rt/enter in place (queue 453: a call's entry without a frame): the depth and the turn counted (the slow path's test is
+  entered's)."
   '[(set! ocaml.rt.Rt/depth (unchecked-inc-int ocaml.rt.Rt/depth))
-    (set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))
-    (when (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterSlow))])
+    (set! ocaml.rt.Rt/ticks (unchecked-inc-int ocaml.rt.Rt/ticks))])
+
+(defn- entered
+  "A function's body b after its entry (enter-forms): past 128 turns the slow path (the turn's work, the depth's limit), which
+  says whether the call goes on on a fresh thread (Rt/enterHop, oc-tail: the light level's interpreted depth); then the call made
+  again there with its arguments (Rt/hop), else b, the depth given back on the way out (an exception's way out is the
+  handler's, trywith-node)."
+  [b params]
+  (let [r (fresh "r$")]
+    (concat (list 'do) enter-forms
+            [(list 'if '(if (> ocaml.rt.Rt/ticks 128) (ocaml.rt.Rt/enterHop) false)
+                   (list 'ocaml.rt.Rt/hop 'this (list 'new 'Object/1 (vec params)))
+                   (list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r))])))
 
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
-  (let [r (fresh "r$")]
-    (list 'do (list 'ocaml.rt.Bt/push ev) (concat (list 'let [r f]) (clear ts) [bt-pop r]))))
+  (list 'do (list 'ocaml.rt.Bt/push ev) (value-then f (concat (clear ts) [bt-pop]))))
 
 (defn- apply-ev-node
   "A non-tail application with an after-event: its slot entered once the arguments and the function are evaluated (bytegen's
   APPLY1-3), before the arguments for four or more (PUSH_RETADDR)."
   [ctx [f args] ev]
   (if (>= (count args) 4)
-    (let [r (fresh "r$")]
-      (list 'do (list 'ocaml.rt.Bt/push ev)
-            (with-all-args ctx (into [f] args)
-                           (fn [as ts] (concat (list 'let [r (call-form (first as) (rest as))]) (clear ts) [bt-pop r])))))
+    (list 'do (list 'ocaml.rt.Bt/push ev)
+          (with-all-args ctx (into [f] args)
+                         (fn [as ts] (value-then (call-form (first as) (rest as)) (concat (clear ts) [bt-pop])))))
     (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
 
 (declare prim-value const-arg)
@@ -411,16 +483,24 @@
         (do (reset! (:tails ctx) true)
             (with-args ctx (into [f] args)
                        (fn [as] (list 'new 'ocaml.rt.TailCall (first as) (list 'new 'Object/1 (vec (rest as)))))))
-      ;; arguments right to left, then the function
-      (if (simple? f)
-        (with-args ctx args (fn [as] (call-form (expr ctx f false) as)))
-        (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as)))))))))
+      ;; arguments right to left, then the function (a call that is no tail call clears its temporaries after it, scoped; oc-tail: a
+      ;; tail call first clears the function's parameters it does not name, as ocamlopt's tail call leaves the caller's frame: at the
+      ;; light level the frame stays until the call returns, statmemprof/bigarray's test_tail)
+      (let [clears (when (and tail? (seq (:params ctx)))
+                     (let [refs (into #{} (mapcat #(second (bound-and-refs %)) (cons f args)))]
+                       (seq (for [[id sym] (:params ctx) :when (not (refs id))] (list 'set! sym nil)))))
+            call (if (simple? f)
+                   (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))]
+        (if clears (list 'do (apply list 'o2j$clears clears) call) call))))))
 
 ;; ---- functions
 
-(defn- method-for [arity params body]
+(defn- method-for [arity params body & [mutable?]]
   (if (<= arity 6)
-    (list 'method (with-meta (symbol (str "a" arity)) {:public true}) (into ['this] params) body)
+    ;; (oc-tail) mutable? the parameters a tail call clears (tail-clears)
+    (list 'method (with-meta (symbol (str "a" arity)) {:public true})
+          (into ['this] (if mutable? (map #(with-meta % {:mutable true}) params) params)) body)
     (let [a (symbol "args$")]
       (list 'method (with-meta 'an {:public true}) ['this (with-meta a {:tag 'Object/1})]
             (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) body)))))
@@ -442,8 +522,12 @@
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
         tails (atom false)
         ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})
-              :group (not-empty (dissoc group self-id)) :tails tails}
+              :group (not-empty (dissoc group self-id)) :tails tails
+              ;; (oc-tail) the method's own parameters (arity 6 at most), which a tail call clears when it does not name them
+              :params (when (<= arity 6) (mapv (fn [[p] s] [p s]) ps params))}
         b (realize (expr ictx body true))
+        clears? (and (not @used) (not @tails) (not (:group ictx)) (<= arity 6))
+        b (tail-clears b clears?)
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
         b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
@@ -455,10 +539,8 @@
              (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
                    (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) b)))
         b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
-        ;; the call depth (OC92 (a)): counted on entry, given back on the way out (an exception's way out is the handler's,
-        ;; trywith-node)
-        r (fresh "r$")
-        b (concat (list 'do) enter-forms [(list 'let [r b] '(set! ocaml.rt.Rt/depth (unchecked-dec-int ocaml.rt.Rt/depth)) r)])]
+        ;; the call depth (OC92 (a)): counted on entry, given back on the way out (entered)
+        b (entered b params)]
     (when (= kind :tupled) (throw (ex-info "tupled function" {})))
     (swap! (:classes *unit*) conj
            (concat
@@ -467,7 +549,7 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b)
+             (method-for arity params b clears?)
              ;; Marshal's Closures flag (OC216 (a); ocaml.rt.Marshal's closureFields, fixClosures): the free variables, a closure
              ;; of the class with none set, and their setting
              (list 'method (with-meta 'envOf {:public true}) (with-meta ['this] {:tag 'Object/1})
@@ -513,14 +595,17 @@
   (loop [x x ctx ctx bindings []]
     (case (hd x)
       let (let [[_ _ id def body] (node-body x)
-                s (munge-id id)
+                ;; (oc-tail) a let that is no tail form clears its variables at its end (scoped)
+                s (if tail? (munge-id id) (with-meta (munge-id id) {:mutable true :tag 'Object}))
                 k (const-arg ctx def)
                 ctx2 (cond-> (assoc-in ctx [:env id] s) k (assoc-in [:kconst id] k) (nil? k) (update :kconst dissoc id))]
             (recur body ctx2 (conj bindings s (expr ctx def false))))
       mutlet (let [[_ id def body] (node-body x)
                    s (with-meta (munge-id id) {:mutable true :tag 'Object})]
                (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
-      (list 'let bindings (expr ctx x tail?)))))
+      (list 'let bindings (if tail?
+                            (expr ctx x tail?)
+                            (scoped (expr ctx x tail?) (take-nth 2 bindings)))))))
 
 ;; ---- primitives
 
@@ -727,6 +812,19 @@
                (when (every? some? ks) (list 'block (num-arg n) (vec ks))))))
     nil))
 
+(def ^:private ^:dynamic *in-comb* "Whether a combined allocation's tree is being translated (prim-node, queue 603)." false)
+
+(defn- comb-tree?
+  "Whether node x allocates a block of simple fields or of such trees, and nothing else (queue 603: ocamlopt's combined
+  allocation)."
+  [x]
+  (and (= 'prim (hd x))
+       (let [[^String n args] (node-body x)]
+         (and (#{"makeblock" "makemutable"} (first (str/split n #"[ \[]")))
+              (not= 254 (num-arg n))
+              (seq args)
+              (every? #(or (simple? %) (comb-tree? %)) args)))))
+
 (defn- prim-node [ctx [^String n args] tail?]
   (cond
     (and (str/starts-with? n "makeblock") (seq args) (const-arg ctx (list 'prim n args)))
@@ -739,7 +837,19 @@
       (cond (predefs g) (symbol "ocaml.rt.Rt" g)
             :else (symbol (class-of g) "G")))
     (#{"&&" "||" "sequand" "sequor"} n) (rt 'b (test-form ctx (list 'prim n args)))
-    :else (binding [*simple-args* (every? simple? args)] (with-args ctx args (fn [as] (prim-value n as))))))
+    ;; (oc-tail) a primitive that is no tail form clears its temporaries after it (scoped: weak-ephe-final/ephetest's Ephe !eph)
+    ;; (queue 603) a tree of blocks (ocamlopt's Comballoc: one combined allocation) at the light level while a Gc.Memprof profile
+    ;; samples: the callbacks of its blocks' samples run once the whole tree is made (ExtGc/combBegin, combEnd), as memprof.c runs a
+    ;; combined allocation's, so a callback that stops or replaces the profile leaves the rest of the tree's samples without theirs
+    ;; (statmemprof/stop_start_in_callback). The outermost tree alone (*in-comb*): its form written twice, the trees inside it once
+    :else (let [comb? (and (not *in-ns*) (not *in-comb*) (comb-tree? (list 'prim n args)) (some #(comb-tree? %) args))
+                form (binding [*simple-args* (every? simple? args) *in-comb* (or *in-comb* comb?)]
+                       (with-args ctx args (fn [as] (prim-value n as)) (not tail?)))]
+            (if comb?
+              (list 'if 'ocaml.rt.ExtGc/memprofSampling
+                    (list 'ocaml.rt.ExtGc/combEnd '(ocaml.rt.ExtGc/combBegin) form)
+                    form)
+              form))))
 
 ;; ---- tests
 

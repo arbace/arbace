@@ -23,6 +23,10 @@
   (:require [arbace.string :as str])
   (:import (java.io File FileOutputStream PrintStream BufferedOutputStream)))
 
+;; (oc-tail) the runtime told that it runs at the light level (jdk/ocaml's Rt/LIGHT): a deep call goes on on a fresh thread (Rt/hop: the
+;; interpreter's 10,000 frames a thread), Gc.stat's heap is the program's (ExtGc/gcStat: stage 0's own heap left out)
+(System/setProperty "ocaml.rt.light" "1")
+
 (defn- cause [^Throwable e]
   (let [^Throwable c (last (take 16 (take-while some? (iterate #(.getCause ^Throwable %) e))))
         m (.getMessage c)]
@@ -122,7 +126,9 @@
   (let [loaded (atom #{})
         out0 System/out err0 System/err
         ms (* 1000 (Long/parseLong timeout))
-        io-reset (try (eval '(fn [] (ocaml.rt.ExtIo/reset))) (catch Throwable _ (fn [] nil)))]
+        io-reset (try (eval '(fn [] (ocaml.rt.ExtIo/reset))) (catch Throwable _ (fn [] nil)))
+        exit-code (eval '(fn [] ocaml.rt.Main/exitCode))]
+    (eval '(set! ocaml.rt.Main/batch true))
     (with-open [res (java.io.FileWriter. ^String results true)]
       (doseq [line (str/split-lines (slurp list-file))
               :when (seq line)
@@ -150,8 +156,14 @@
                 t (Thread. ^Runnable (fn [] (reset! status (try (run argv) (catch Throwable e (.println System/err (str "o2j: " e)) 125)))))]
             (.setDaemon t true)
             (.start t)
-            (.join t ms)
-            (when (.isAlive t)
+            ;; (queue 603) the program's exit in another of its threads (Main/otherExit, batch true): its status the program's
+            (loop [left ms]
+              (when (and (.isAlive t) (pos? left) (neg? (long (exit-code))))
+                (.join t (min left 50))
+                (recur (- left 50))))
+            (when (and (.isAlive t) (not (neg? (long (exit-code)))))
+              (reset! status (exit-code)))
+            (when (and (.isAlive t) (neg? (long (exit-code))))
               (.flush ps)
               (System/setOut out0) (System/setErr err0)
               (.write res (str id "\ttimeout\t" timeout "\n"))
@@ -168,7 +180,7 @@
         (.flush res)
         ;; a program that ended with domains still running (parallel/backup_thread's): they would write into the next
         ;; program's output, so the process ends here (status 4) and the driver runs the rest in a new one (OT9's work)
-        (when (pos? (long (eval 'ocaml.rt.Effects/domainsRunning)))
+        (when (or (pos? (long (eval 'ocaml.rt.Effects/domainsRunning))) (not (neg? (long (exit-code)))))
           (System/exit 4))))
     (System/exit 0)))
 

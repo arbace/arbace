@@ -922,8 +922,9 @@ cmd_python() {
       -W*) wopts+="${1#-W}"$'\n'; shift ;;
       -) have=s; shift; break ;;
       --) shift; [ $# -gt 0 ] && { file=$1; have=f; shift; }; break ;;
-      -[IEsSBubqOPRdvi]*)
-        local o=${1#-} rest
+      # -mMOD and -cCODE alone too (queue 574: test_quopri's [sys.executable, "-mquopri"])
+      -[IEsSBubqOPRdvicm]*)
+        local o=${1#-} rest pre
         # -i: interactive after the code, or the REPL on stdin when there is none (queue 289); -q: no banner then
         case ${o%%[cm]*} in *i*) inspect=1 ;; esac
         case ${o%%[cm]*} in *q*) quiet=1; sflags+=q ;; esac
@@ -941,9 +942,11 @@ cmd_python() {
         case ${o%%[cm]*} in *[PI]*) safe=1 ;; esac
         # -u: the standard streams written through, write_through (PYI_UNBUFFERED; py-mods-1122)
         case ${o%%[cm]*} in *u*) unbuf=1 ;; esac
-        case $o in
-          *c*) rest=${o#*c}; if [ -n "$rest" ]; then code=$rest; shift; else code=$2; shift 2; fi; have=c; break ;;
-          *m*) rest=${o#*m}; if [ -n "$rest" ]; then mod=$rest; shift; else mod=$2; shift 2; fi; have=m; break ;;
+        # the first c or m ends the flags, the rest its argument (-Imcalendar: -m calendar)
+        pre=${o%%[cm]*}
+        case ${o:${#pre}:1} in
+          c) rest=${o#"$pre"c}; if [ -n "$rest" ]; then code=$rest; shift; else code=$2; shift 2; fi; have=c; break ;;
+          m) rest=${o#"$pre"m}; if [ -n "$rest" ]; then mod=$rest; shift; else mod=$2; shift 2; fi; have=m; break ;;
         esac
         shift ;;
       -*) echo "pyi python: unknown option $1" >&2; exit 2 ;;
@@ -1082,6 +1085,26 @@ PYI_SCRIPT
   # /dev/null on it at its start (runtime.checkfds), so the runtime closes it again (PYI_STDIN_CLOSED) before the program
   if { : 9<&0; } 2>/dev/null; then unset PYI_STDIN_CLOSED; else export PYI_STDIN_CLOSED=1; fi
   if [ -n "$sflags" ]; then export PYI_START_FLAGS=$sflags; else unset PYI_START_FLAGS; fi
+  # the signal mask this shell was started with (py-mp-1125): Go's runtime unblocks SIGINT, SIGTERM and its other
+  # signals on its threads before any of the program runs, and a SIGINT or SIGTERM pending then is the process's death by
+  # Go's default action. So the runtime takes the mask from here (PYI_START_SIGBLK, builtins_signal_wait.go's init: those
+  # signals blocked for the program and notified, one that arrives held, sigpending), with the ones already pending
+  # (PYI_START_SIGPND: ShdPnd and SigPnd); a blocked SIGINT or SIGTERM is ignored from here to the exec, which discards
+  # one pending (counted above) and keeps a later one from killing the runtime's start (the runtime reads an inherited
+  # SIG_IGN of SIGHUP alone; its notify replaces this one). resource_tracker's parent blocks SIGINT and SIGTERM around its
+  # spawn, and the test's SIGINT or SIGTERM, sent while this child starts, must be held until its main ignores it.
+  unset PYI_START_SIGBLK PYI_START_SIGPND
+  local sigblk="" sigpnd=0 l v
+  while read -r l v; do
+    case $l in SigBlk:) sigblk=$v ;; ShdPnd:|SigPnd:) case $v in *[!0-9a-fA-F]*|"") ;; *) sigpnd=$(( sigpnd | 16#$v )) ;; esac ;; esac
+  done < "/proc/$$/status" 2>/dev/null || true
+  case $sigblk in ""|*[!0-9a-fA-F]*|0000000000000000) ;; *)
+    export PYI_START_SIGBLK=$sigblk
+    sigpnd=$(( sigpnd & 16#$sigblk ))
+    [ "$sigpnd" = 0 ] || export PYI_START_SIGPND=$(printf '%x' "$sigpnd")
+    if (( 16#$sigblk & 0x2 )); then trap '' INT; fi
+    if (( 16#$sigblk & 0x4000 )); then trap '' TERM; fi ;;
+  esac
   # -i (queue 289): the runtime's REPL after the main module (PYI_INSPECT=1), or as the run (repl, repl-quiet: -q); on a
   # terminal without -i the REPL as the run with sys.flags' inspect and interactive 0 (tty, tty-quiet; queue 313)
   if [ -n "$stdinrepl" ] && [ -n "$inspect" ]; then export PYI_INSPECT=repl${quiet:+-quiet}
@@ -3059,6 +3082,32 @@ records_overlay() {
   sed -i "s|:py-ref \"test/python/ref-cpython$RECV.edn\"|:py-ref \"test/python/ref-cpython$RECV-slice.edn\"|" "$o/test/reap/cells.edn"
   echo "$o"
 }
+
+# adopt_host_env (py-cli-1125, test_subprocess's test_empty_env): a child that a test starts with env={} (or an environment
+# without ARBACE_HOST_EXE) is bin/pyi python on no host of its own: it would take the checkout's or the main checkout's stage 0,
+# whose compiled runtime is another commit's (the checkout's go/arbace/py then interpreted by goi, which cannot, for the
+# runtime's packages that import weak), where CPython's python3 is an installed program that works in any environment. The
+# host's choice is read from the process tree instead: the nearest ancestor whose environment (/proc/PID/environ, what it was
+# started with) holds ARBACE_HOST_EXE gives it, with the runtime's decision and tuning it was started with. No ancestor that
+# has one (a process reparented to init, a bare shell), the default as before. os.environ stays what the caller gave
+# (PYI_ENTRY_ENV, tools/pyi/python3).
+adopt_host_env() {
+  local p=$PPID n=0 e v name
+  [ -z "${ARBACE_HOST_EXE:-}" ] || return 0
+  while [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 64 ]; do
+    if e=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null) && grep -q '^ARBACE_HOST_EXE=.' <<< "$e"; then
+      for name in ARBACE_HOST_EXE ARBACE_GOI_FROM_SOURCE PYI_RUNTIME PYI_RUNTIME_NOTED PYI_GOMEMLIMIT PYI_THREADS; do
+        if grep -q "^$name=" <<< "$e"; then v=$(sed -n "s/^$name=//p" <<< "$e" | head -n 1); export "$name=$v"; fi
+      done
+      return 0
+    fi
+    p=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f2) || return 0
+    [ -n "$p" ] || return 0
+    n=$((n + 1))
+  done
+  return 0
+}
+[ "${1:-}" != python ] || adopt_host_env
 
 # the verbs that run pyi on goi decide its runtime first (runtime_from_source), for their children too
 case "${1:-}" in

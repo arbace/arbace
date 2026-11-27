@@ -1,0 +1,602 @@
+(in-ns 'go.arbace.pyctypes) ^{:go/comments [[3 1 "// The C API's natives the class :capi-port still named after py-capi-1122 (the burst of 2026-11-25, py-capi-1125;"] [4 1 "// doc/python/PYTHON-SURVEY.md, \"As built: py-capi-1125\"), each written after CPython 3.14.10's function of the same"] [5 1 "// name: PyErr_Display, PyErr_DisplayException, PyErr_Print and PyErr_PrintEx (Python/pythonrun.c), PyCode_Addr2Line"] [6 1 "// (Objects/codeobject.c) and Py_UniversalNewlineFgets (Objects/fileobject.c). The PSF's license (LICENSE.md)."] [17 1 "// cThreads are the C threads PyThread_start_new_thread made, by their Python thread's ident (each a Python thread"] [18 1 "// of _thread's, so the GIL serializes them with the others)."] [21 1 "// cLocks are PyThread_allocate_lock's locks (Python/thread_pthread.h): each a _thread.lock of pyi's (blocking with"] [22 1 "// the GIL released, as PyThread_acquire_lock runs under Py_BEGIN_ALLOW_THREADS in CPython), by the address of the"] [23 1 "// 8 bytes of the world that is the PyThread_type_lock C holds."] [26 1 "// cThreadStack is a C thread's stack (as musl's default for pthread_create: 128 KiB is musl's, the world's C code is"] [27 1 "// CPython's test modules', so 1 MiB)."] [30 1 "// The world's lock (py-capi-1125): while a C thread lives, one Python thread at a time is inside the C world, from its"] [31 1 "// entry (World.Call, a C thread's start) to its return, nested Python code included; the owner gives it up only while it"] [32 1 "// waits in PyThread_acquire_lock (CPython's callers hold no GIL there: Py_BEGIN_ALLOW_THREADS). Without it a thread's C"] [33 1 "// would run while another's is suspended in Python code a native called, and the error indicator and the mirrors'"] [34 1 "// bookkeeping (errIndicator, touched), which are the world's and not a thread's, would be mixed. A waiter blocks on a"] [35 1 "// _thread.lock of its own, so the GIL is released while it waits; the bookkeeping is the GIL holder's. Off while no C"] [36 1 "// thread lives: the depth of each Python thread inside C (cEntryDepth) is kept so that the starter, inside C, owns it at"] [37 1 "// once."] [54 1 "// wlTake makes the running thread (id) the owner with n levels, waiting its turn when another owns it."] [75 54 "// released by the handoff (wlGive)"] [79 1 "// wlGive gives up all of the owner's levels: the first waiter owns it next (its lock released), else no one."] [91 1 "// enterC and exitC bracket an entry into the C world (World.Call; a C thread's start)."] [113 1 "// wlOn turns the lock on at a C thread's start: the starter (inside C) owns it with its depth."] [125 1 "// wlOff turns it off once no C thread lives and no one waits."] [132 1 "// blockingWait runs f (a wait that releases the GIL) with the world's lock given up, the error indicator and the mirrors'"] [133 1 "// bookkeeping of the running native kept across it, then takes the lock back with the levels it had."] [149 1 "// startCThread is PyThread_start_new_thread(func, arg): a Python thread of _thread's whose body runs the C function"] [150 1 "// func(arg) on a C thread of its own (a stack mapped in the world, the main thread's thread-local objects), the"] [151 1 "// mirrors synchronized around it as around a call into C; a fault in it ends the process (World.guard). Its ident,"] [152 1 "// or -1 when the thread cannot start."] [193 1 "// lockOf is the _thread.lock of a PyThread_type_lock (a fault for one PyThread_allocate_lock did not give, as a freed"] [194 1 "// pthread lock's use is undefined)."] [203 1 "// thread is the C thread of the running Python thread: the one PyThread_start_new_thread made for it (capi_rest.go,"] [204 1 "// py-capi-1125), else the world's main thread (the library's). The GIL's holder is the only goroutine that runs C,"] [205 1 "// so each Python thread's C frames stay on a stack of its own."] [215 1 "// displayException is _PyErr_Display(file, NULL, value, tb): a traceback given beside an exception that has none"] [216 1 "// put on it (issue #18776), then traceback._print_exception_bltin(value), which writes sys.stderr (colorized when"] [217 1 "// _colorize says so); when that cannot run, sys.__excepthook__'s own printing."] [232 2 "// the fallback: the built-in hook's printing of the same exception"] [245 1 "// writeStderr is PySys_WriteStderr of a text: sys.stderr.write(s), its errors ignored."] [252 1 "// handleSystemExit is _Py_HandleSystemExit and Py_Exit for an exception that is a SystemExit: its code (None 0, an int"] [253 1 "// its value, anything else printed to sys.stderr and 1), the exit functions run (atexit's, Py_FinalizeEx's first step)"] [254 1 "// and the standard streams flushed, then the process exits. false (nothing done) for any other exception."] [293 1 "// printEx is _PyErr_PrintEx: the raised exception (none: nothing) handed to sys.excepthook(type, value, traceback),"] [294 1 "// sys.last_exc, last_type, last_value and last_traceback set first when setSysLastVars, the audit event"] [295 1 "// \"sys.excepthook\" raised before the call; a hook that fails has its error and the original displayed, a missing hook"] [296 1 "// \"sys.excepthook is missing\" and the exception displayed. A SystemExit exits the process (handle_system_exit)."] [359 1 "// lineOfOffset is PyCode_Addr2Line's _PyCode_CheckLineNumber over code.co_lines(): the line of the range holding the"] [360 1 "// byte offset addr (-1 for a range of no line, or an offset no range holds)."] [390 1 "// fgetsByte is the stream's next byte as getc gives it (-1 at the end or on an error), read by the world's fread into"] [391 1 "// one byte of the world's memory."] [404 1 "// ungetByte is musl's ungetc of a byte just read by fread: the read position stepped back over the buffer's byte"] [405 1 "// (rpos at offset 8 of musl's FILE, never below its buffer after a read of it) and the end-of-file flag (F_EOF, 16)"] [406 1 "// cleared. EOF is not pushed back."] [424 2 "// PyErr_Display(unused, value, tb) and PyErr_DisplayException(exc) (Python/pythonrun.c): the exception printed to"] [425 2 "// sys.stderr as the interpreter prints an uncaught one (traceback's _print_exception_bltin)"] [438 2 "// PyErr_Print() is PyErr_PrintEx(1); the error indicator cleared"] [447 2 "// PyCode_Addr2Line(code, addrq) (Objects/codeobject.c): co_firstlineno for a negative offset, else the line of the"] [448 2 "// address range that holds it (code.co_lines(), the location table's view)"] [472 2 "// Py_UniversalNewlineFgets(buf, n, stream, fobj) (Objects/fileobject.c, _Py_UniversalNewlineFgetsWithSize): at most"] [473 2 "// n-1 bytes of the line, \\r and \\r\\n read as \\n, NUL-terminated; NULL when nothing was read; fobj must be NULL"] [474 2 "// (errno ENXIO otherwise)"] [480 21 "// ENXIO"] [509 2 "// the thread module's natives (Python/thread.c, thread_pthread.h)"] [520 3 "// the world's malloc'd 8 bytes, freed by PyThread_free_lock (not a cbuf, which the collector frees)"] [536 2 "// PyThread_acquire_lock(lock, waitflag): 1 (PY_LOCK_ACQUIRED) or 0; PyThread_acquire_lock_timed(lock, microseconds,"] [537 2 "// intr_flag): microseconds < 0 waits as long as it takes, 0 does not wait"] [573 3 "// a lock not held stays released (thread_pthread.h's semaphore lock posts; the error is no one's to see)"] [577 2 "// PySlice_Unpack (queue 262's, capi_limited.go) when an index of the slice is no int or None: its __index__ is Python"] [578 2 "// code that may change any object C sees (gh-72054: test_slice's PopIndex pops from the list whose Py_SIZE the"] [579 2 "// macro PySlice_GetIndicesEx reads after the call), so the mirrors are synchronized around it as around a call"] [580 2 "// into C: C's writes taken first, then Go's state written back to C"] [596 1 "// plainIndex is a slice index whose evaluation runs no Python code: None or an exact int."]] :go/pos {:name [1 9] :package [1 1]} :go/semis [[102 22] [106 16] [120 25] [208 37] [222 31] [223 57] [227 63] [228 44] [233 52] [235 57] [240 43] [247 43] [268 23] [269 25] [273 29] [274 26] [281 52] [285 40] [311 55] [325 45] [330 85] [331 23] [338 56] [343 46] [380 34] [427 23] [433 23] [479 23] [485 13] [485 23] [530 37] [553 23] [581 44]]} (go/file "capi_rest.go" :imports [
+
+    ;; The C API's natives the class :capi-port still named after py-capi-1122 (the burst of 2026-11-25, py-capi-1125;
+    ;; doc/python/PYTHON-SURVEY.md, "As built: py-capi-1125"), each written after CPython 3.14.10's function of the same
+    ;; name: PyErr_Display, PyErr_DisplayException, PyErr_Print and PyErr_PrintEx (Python/pythonrun.c), PyCode_Addr2Line
+    ;; (Objects/codeobject.c) and Py_UniversalNewlineFgets (Objects/fileobject.c). The PSF's license (LICENSE.md).
+
+
+    ^{:go/apos {1 [9 2]} :go/pos {:lparen [8 8] :rparen [15 1] :tok-pos [8 1]}} [fmt "fmt"]
+    ^{:go/apos {1 [10 2]}} [os "os"]
+
+    ^{:go/apos {1 [12 2]}} [ci "arbace/ci"]
+    ^{:go/apos {1 [13 2]}} [crt "arbace/crt"]
+    ^{:go/apos {1 [14 4]}} [^{:go/pos {:name-pos [14 2]}} . "arbace/py"]])
+
+
+
+
+^{:go/pos {:doc [17 1] :tok-pos [19 1]}} (go/var ^{:doc "cThreads are the C threads PyThread_start_new_thread made, by their Python thread's ident (each a Python thread\nof _thread's, so the GIL serializes them with the others).\n" :go/pos {:name-pos [19 5]}} cThreads ^{:go/pos {:lbrace [19 36] :rbrace [19 37]}} (lit ^{:go/pos {:map [19 16]}} (map ^{:go/pos {:name-pos [19 20]}} int64 ^{:go/pos {:star [19 26]}} (* ^{:go/pos {:dot [19 29] :name-pos [19 30] :x-pos [19 27]}} ci/Thread))))
+
+
+
+
+^{:go/pos {:doc [21 1] :tok-pos [24 1]}} (go/var ^{:doc "cLocks are PyThread_allocate_lock's locks (Python/thread_pthread.h): each a _thread.lock of pyi's (blocking with\nthe GIL released, as PyThread_acquire_lock runs under Py_BEGIN_ALLOW_THREADS in CPython), by the address of the\n8 bytes of the world that is the PyThread_type_lock C holds.\n" :go/pos {:name-pos [24 5]}} cLocks ^{:go/pos {:lbrace [24 31] :rbrace [24 32]}} (lit ^{:go/pos {:map [24 14]}} (map ^{:go/pos {:name-pos [24 18]}} uint64 ^{:go/pos {:name-pos [24 25]}} Object)))
+
+
+
+^{:go/pos {:doc [26 1] :tok-pos [28 1]}} (go/const ^{:val 1048576 :doc "cThreadStack is a C thread's stack (as musl's default for pthread_create: 128 KiB is musl's, the world's C code is\nCPython's test modules', so 1 MiB).\n" :go/pos {:name-pos [28 7]}} cThreadStack ^{:go/apos {1 [28 22] 2 [28 27]} :go/pos {:op-pos [28 24]}} (<< 1 20))
+
+
+
+
+
+
+
+
+
+^{:go/pos {:doc [30 1] :tok-pos [38 1]}} (go/type ^{:go/pos {:name-pos [38 6]}} wlWaiter "The world's lock (py-capi-1125): while a C thread lives, one Python thread at a time is inside the C world, from its\nentry (World.Call, a C thread's start) to its return, nested Python code included; the owner gives it up only while it\nwaits in PyThread_acquire_lock (CPython's callers hold no GIL there: Py_BEGIN_ALLOW_THREADS). Without it a thread's C\nwould run while another's is suspended in Python code a native called, and the error indicator and the mirrors'\nbookkeeping (errIndicator, touched), which are the world's and not a thread's, would be mixed. A waiter blocks on a\n_thread.lock of its own, so the GIL is released while it waits; the bookkeeping is the GIL holder's. Off while no C\nthread lives: the depth of each Python thread inside C (cEntryDepth) is kept so that the starter, inside C, owns it at\nonce.\n" ^{:go/pos {:lbrace [38 22] :rbrace [42 1] :struct [38 15]}} (struct
+    ^{:tag ^{:go/pos {:name-pos [39 5]}} int64 :go/pos {:name-pos [39 2]}} id
+    ^{:tag ^{:go/pos {:name-pos [40 5]}} int :go/pos {:name-pos [40 2]}} n
+    ^{:tag ^{:go/pos {:name-pos [41 5]}} Object :go/pos {:name-pos [41 2]}} lk))
+
+
+^{:go/pos {:lparen [44 5] :rparen [52 1] :tok-pos [44 1]}} (go/var
+  [^{:go/pos {:name-pos [45 2]}} cEntryDepth ^{:go/pos {:lbrace [45 29] :rbrace [45 30]}} (lit ^{:go/pos {:map [45 16]}} (map ^{:go/pos {:name-pos [45 20]}} int64 ^{:go/pos {:name-pos [45 26]}} int))]
+  [^{:tag ^{:go/pos {:lbrace [46 21] :rbrace [51 2] :struct [46 14]}} (struct ^{:tag ^{:go/pos {:name-pos [47 11]}} bool :go/pos {:name-pos [47 3]}} on ^{:tag ^{:go/pos {:name-pos [48 11]}} int64 :go/pos {:name-pos [48 3]}} owner ^{:tag ^{:go/pos {:name-pos [49 11]}} int :go/pos {:name-pos [49 3]}} count ^{:tag ^{:go/pos {:lbrack [50 11]}} (slice ^{:go/pos {:star [50 13]}} (* ^{:go/pos {:name-pos [50 14]}} wlWaiter)) :go/pos {:name-pos [50 3]}} waiters) :go/pos {:name-pos [46 2]}} wl])
+
+
+
+
+
+
+
+
+^{:go/pos {:doc [54 1] :func [55 1] :lbrace [55 30] :rbrace [77 1]}} (go/func ^{:go/pos {:name-pos [55 6]}} wlTake "wlTake makes the running thread (id) the owner with n levels, waiting its turn when another owns it.\n" ^{:go/pos {:closing [55 28] :opening [55 12]}} [^{:tag ^{:go/pos {:name-pos [55 16]}} int64 :go/pos {:name-pos [55 13]}} id ^{:tag ^{:go/pos {:name-pos [55 25]}} int :go/pos {:name-pos [55 23]}} n]
+  ^{:go/pos {:if [56 2] :lbrace [56 20] :rbrace [59 2]}} (when ^{:go/pos {:op-pos [56 14]}} (== ^{:go/pos {:dot [56 7] :name-pos [56 8]}} (.-owner ^{:go/pos {:name-pos [56 5]}} wl) ^{:go/pos {:name-pos [56 17]}} id)
+    ^{:go/pos {:tok-pos [57 12]}} (set! ^{:go/pos {:dot [57 5] :name-pos [57 6]}} (.-count ^{:go/pos {:name-pos [57 3]}} wl) + ^{:go/pos {:name-pos [57 15]}} n)
+    ^{:go/pos {:return [58 3]}} (return))
+
+  ^{:go/pos {:if [60 2] :lbrace [60 19] :rbrace [63 2]}} (when ^{:go/apos {2 [60 17]} :go/pos {:op-pos [60 14]}} (== ^{:go/pos {:dot [60 7] :name-pos [60 8]}} (.-owner ^{:go/pos {:name-pos [60 5]}} wl) 0)
+    ^{:go/pos {:tok-pos [61 22]}} (set! (values ^{:go/pos {:dot [61 5] :name-pos [61 6]}} (.-owner ^{:go/pos {:name-pos [61 3]}} wl) ^{:go/pos {:dot [61 15] :name-pos [61 16]}} (.-count ^{:go/pos {:name-pos [61 13]}} wl)) (values ^{:go/pos {:name-pos [61 24]}} id ^{:go/pos {:name-pos [61 28]}} n))
+    ^{:go/pos {:return [62 3]}} (return))
+
+  (let [^{:go/pos {:tok-pos [64 9]}} (values ^{:go/pos {:name-pos [64 2]}} f ^{:go/pos {:name-pos [64 5]}} err) ^{:go/apos {1 [64 22] 2 [64 33]} :go/pos {:lparen [64 21] :rparen [64 48]}} (^{:go/pos {:name-pos [64 12]}} pyModAttr "_thread" "allocate_lock")]
+    ^{:go/pos {:if [65 2] :lbrace [65 16] :rbrace [67 2]}} (when ^{:go/apos {2 [65 12]} :go/pos {:op-pos [65 9]}} (!= ^{:go/pos {:name-pos [65 5]}} err nil)
+      ^{:go/pos {:lparen [66 8] :rparen [66 59]}} (^{:go/pos {:name-pos [66 3]}} panic ^{:go/apos {1 [66 21]} :go/pos {:lparen [66 20] :rparen [66 58]}} (^{:go/pos {:dot [66 12] :name-pos [66 13] :x-pos [66 9]}} fmt/Sprintf "pyctypes: the world's lock: %v" ^{:go/pos {:name-pos [66 55]}} err)))
+
+    (let [^{:go/pos {:tok-pos [68 10]}} (values ^{:go/pos {:name-pos [68 2]}} lk ^:assign ^{:go/pos {:name-pos [68 6]}} err) ^{:go/apos {2 [68 21] 3 [68 26]} :go/pos {:lparen [68 17] :rparen [68 29]}} (^{:go/pos {:name-pos [68 13]}} Call ^{:go/pos {:name-pos [68 18]}} f nil nil)]
+      ^{:go/pos {:if [69 2] :lbrace [69 16] :rbrace [71 2]}} (when ^{:go/apos {2 [69 12]} :go/pos {:op-pos [69 9]}} (!= ^{:go/pos {:name-pos [69 5]}} err nil)
+        ^{:go/pos {:lparen [70 8] :rparen [70 59]}} (^{:go/pos {:name-pos [70 3]}} panic ^{:go/apos {1 [70 21]} :go/pos {:lparen [70 20] :rparen [70 58]}} (^{:go/pos {:dot [70 12] :name-pos [70 13] :x-pos [70 9]}} fmt/Sprintf "pyctypes: the world's lock: %v" ^{:go/pos {:name-pos [70 55]}} err)))
+
+      ^{:go/pos {:tok-pos [72 7]}} (set! (values ^{:go/pos {:name-pos [72 2]}} _ ^{:go/pos {:name-pos [72 5]}} _) ^{:go/apos {2 [72 22]} :go/pos {:lparen [72 17] :rparen [72 31]}} (^{:go/pos {:name-pos [72 9]}} callMeth ^{:go/pos {:name-pos [72 18]}} lk "acquire"))
+      ^{:go/pos {:tok-pos [73 13]}} (set! ^{:go/pos {:dot [73 4] :name-pos [73 5]}} (.-waiters ^{:go/pos {:name-pos [73 2]}} wl) ^{:go/pos {:lparen [73 21] :rparen [73 65]}} (^{:go/pos {:name-pos [73 15]}} append ^{:go/pos {:dot [73 24] :name-pos [73 25]}} (.-waiters ^{:go/pos {:name-pos [73 22]}} wl) ^{:go/pos {:op-pos [73 34]}} (addr ^{:go/acolon {2 [73 46] 4 [73 53] 6 [73 60]} :go/apos {2 [73 44] 4 [73 52] 6 [73 58]} :go/pos {:lbrace [73 43] :rbrace [73 64]}} (lit ^{:go/pos {:name-pos [73 35]}} wlWaiter :id ^{:go/pos {:name-pos [73 48]}} id :n ^{:go/pos {:name-pos [73 55]}} n :lk ^{:go/pos {:name-pos [73 62]}} lk))))
+      ^{:go/pos {:for [74 2] :lbrace [74 21] :rbrace [76 2]}} (while ^{:go/pos {:op-pos [74 15]}} (!= ^{:go/pos {:dot [74 8] :name-pos [74 9]}} (.-owner ^{:go/pos {:name-pos [74 6]}} wl) ^{:go/pos {:name-pos [74 18]}} id)
+        ^{:go/pos {:tok-pos [75 8]}} (set! (values ^{:go/pos {:name-pos [75 3]}} _ ^{:go/pos {:name-pos [75 6]}} _) ^{:go/apos {2 [75 23]} :go/pos {:lparen [75 18] :rparen [75 52]}} (^{:go/pos {:name-pos [75 10]}} callMeth ^{:go/pos {:name-pos [75 19]}} lk "acquire" ^{:go/pos {:name-pos [75 34]}} True ^{:go/apos {1 [75 49]} :go/pos {:lparen [75 48] :rparen [75 51]}} (^{:go/pos {:name-pos [75 40]}} NewFloat -1))))))) ; released by the handoff (wlGive)
+
+
+
+
+^{:go/pos {:doc [79 1] :func [80 1] :lbrace [80 15] :rbrace [89 1]}} (go/func ^{:go/pos {:name-pos [80 6]}} wlGive "wlGive gives up all of the owner's levels: the first waiter owns it next (its lock released), else no one.\n" ^{:go/pos {:closing [80 13] :opening [80 12]}} []
+  ^{:go/pos {:if [81 2] :lbrace [81 25] :rbrace [87 2]}} (when ^{:go/apos {2 [81 23]} :go/pos {:op-pos [81 21]}} (> ^{:go/pos {:lparen [81 8] :rparen [81 19]}} (^{:go/pos {:name-pos [81 5]}} len ^{:go/pos {:dot [81 11] :name-pos [81 12]}} (.-waiters ^{:go/pos {:name-pos [81 9]}} wl)) 0)
+    (let [^{:go/pos {:name-pos [82 3] :tok-pos [82 5]}} w ^{:go/apos {2 [82 19]} :go/pos {:lbrack [82 18] :rbrack [82 20]}} (aget ^{:go/pos {:dot [82 10] :name-pos [82 11]}} (.-waiters ^{:go/pos {:name-pos [82 8]}} wl) 0)]
+      ^{:go/pos {:tok-pos [83 14]}} (set! ^{:go/pos {:dot [83 5] :name-pos [83 6]}} (.-waiters ^{:go/pos {:name-pos [83 3]}} wl) ^{:go/apos {2 [83 27]} :go/pos {:lbrack [83 26] :rbrack [83 29]}} (subslice ^{:go/pos {:dot [83 18] :name-pos [83 19]}} (.-waiters ^{:go/pos {:name-pos [83 16]}} wl) 1))
+      ^{:go/pos {:tok-pos [84 22]}} (set! (values ^{:go/pos {:dot [84 5] :name-pos [84 6]}} (.-owner ^{:go/pos {:name-pos [84 3]}} wl) ^{:go/pos {:dot [84 15] :name-pos [84 16]}} (.-count ^{:go/pos {:name-pos [84 13]}} wl)) (values ^{:go/pos {:dot [84 25] :name-pos [84 26]}} (.-id ^{:go/pos {:name-pos [84 24]}} w) ^{:go/pos {:dot [84 31] :name-pos [84 32]}} (.-n ^{:go/pos {:name-pos [84 30]}} w)))
+      ^{:go/pos {:tok-pos [85 8]}} (set! (values ^{:go/pos {:name-pos [85 3]}} _ ^{:go/pos {:name-pos [85 6]}} _) ^{:go/apos {2 [85 25]} :go/pos {:lparen [85 18] :rparen [85 34]}} (^{:go/pos {:name-pos [85 10]}} callMeth ^{:go/pos {:dot [85 20] :name-pos [85 21]}} (.-lk ^{:go/pos {:name-pos [85 19]}} w) "release"))
+      ^{:go/pos {:return [86 3]}} (return)))
+
+  ^{:go/pos {:tok-pos [88 21]}} (set! (values ^{:go/pos {:dot [88 4] :name-pos [88 5]}} (.-owner ^{:go/pos {:name-pos [88 2]}} wl) ^{:go/pos {:dot [88 14] :name-pos [88 15]}} (.-count ^{:go/pos {:name-pos [88 12]}} wl)) ^{:go/apos {1 [88 23] 2 [88 26]}} (values 0 0)))
+
+
+
+^{:go/pos {:doc [91 1] :func [92 1] :lbrace [92 15] :rbrace [98 1]}} (go/func ^{:go/pos {:name-pos [92 6]}} enterC "enterC and exitC bracket an entry into the C world (World.Call; a C thread's start).\n" ^{:go/pos {:closing [92 13] :opening [92 12]}} []
+  (let [^{:go/pos {:name-pos [93 2] :tok-pos [93 5]}} id ^{:go/pos {:lparen [93 22] :rparen [93 23]}} (^{:go/pos {:name-pos [93 8]}} ExtThreadIdent)]
+    ^{:go/pos {:if [94 2] :lbrace [94 11] :rbrace [96 2]}} (when ^{:go/pos {:dot [94 7] :name-pos [94 8]}} (.-on ^{:go/pos {:name-pos [94 5]}} wl)
+      ^{:go/apos {2 [95 14]} :go/pos {:lparen [95 9] :rparen [95 15]}} (^{:go/pos {:name-pos [95 3]}} wlTake ^{:go/pos {:name-pos [95 10]}} id 1))
+
+    ^{:go/pos {:tok-pos [97 17]}} (inc! ^{:go/pos {:lbrack [97 13] :rbrack [97 16]}} (aget ^{:go/pos {:name-pos [97 2]}} cEntryDepth ^{:go/pos {:name-pos [97 14]}} id))))
+
+
+^{:go/pos {:func [100 1] :lbrace [100 14] :rbrace [111 1]}} (go/func ^{:go/pos {:name-pos [100 6]}} exitC ^{:go/pos {:closing [100 12] :opening [100 11]}} []
+  (let [^{:go/pos {:name-pos [101 2] :tok-pos [101 5]}} id ^{:go/pos {:lparen [101 22] :rparen [101 23]}} (^{:go/pos {:name-pos [101 8]}} ExtThreadIdent)]
+    ^{:go/pos {:if [102 2] :lbrace [102 45] :rbrace [104 2]}} (when [^{:go/pos {:tok-pos [102 20]}} (dec! ^{:go/pos {:lbrack [102 16] :rbrack [102 19]}} (aget ^{:go/pos {:name-pos [102 5]}} cEntryDepth ^{:go/pos {:name-pos [102 17]}} id))] ^{:go/apos {2 [102 43]} :go/pos {:op-pos [102 40]}} (<= ^{:go/pos {:lbrack [102 35] :rbrack [102 38]}} (aget ^{:go/pos {:name-pos [102 24]}} cEntryDepth ^{:go/pos {:name-pos [102 36]}} id) 0)
+      ^{:go/pos {:lparen [103 9] :rparen [103 25]}} (^{:go/pos {:name-pos [103 3]}} delete ^{:go/pos {:name-pos [103 10]}} cEntryDepth ^{:go/pos {:name-pos [103 23]}} id))
+
+    ^{:go/pos {:if [105 2] :lbrace [105 29] :rbrace [109 2]}} (when ^{:go/pos {:op-pos [105 11]}} (and ^{:go/pos {:dot [105 7] :name-pos [105 8]}} (.-on ^{:go/pos {:name-pos [105 5]}} wl) ^{:go/pos {:op-pos [105 23]}} (== ^{:go/pos {:dot [105 16] :name-pos [105 17]}} (.-owner ^{:go/pos {:name-pos [105 14]}} wl) ^{:go/pos {:name-pos [105 26]}} id))
+      ^{:go/pos {:if [106 3] :lbrace [106 32] :rbrace [108 3]}} (when [^{:go/pos {:tok-pos [106 14]}} (dec! ^{:go/pos {:dot [106 8] :name-pos [106 9]}} (.-count ^{:go/pos {:name-pos [106 6]}} wl))] ^{:go/apos {2 [106 30]} :go/pos {:op-pos [106 27]}} (<= ^{:go/pos {:dot [106 20] :name-pos [106 21]}} (.-count ^{:go/pos {:name-pos [106 18]}} wl) 0)
+        ^{:go/pos {:lparen [107 10] :rparen [107 11]}} (^{:go/pos {:name-pos [107 4]}} wlGive)))
+
+
+    ^{:go/pos {:lparen [110 7] :rparen [110 8]}} (^{:go/pos {:name-pos [110 2]}} wlOff)))
+
+
+
+^{:go/pos {:doc [113 1] :func [114 1] :lbrace [114 13] :rbrace [123 1]}} (go/func ^{:go/pos {:name-pos [114 6]}} wlOn "wlOn turns the lock on at a C thread's start: the starter (inside C) owns it with its depth.\n" ^{:go/pos {:closing [114 11] :opening [114 10]}} []
+  ^{:go/pos {:if [115 2] :lbrace [115 11] :rbrace [117 2]}} (when ^{:go/pos {:dot [115 7] :name-pos [115 8]}} (.-on ^{:go/pos {:name-pos [115 5]}} wl)
+    ^{:go/pos {:return [116 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [118 2] :tok-pos [118 5]}} id ^{:go/pos {:lparen [118 22] :rparen [118 23]}} (^{:go/pos {:name-pos [118 8]}} ExtThreadIdent)]
+    ^{:go/apos {2 [119 10]} :go/pos {:tok-pos [119 8]}} (set! ^{:go/pos {:dot [119 4] :name-pos [119 5]}} (.-on ^{:go/pos {:name-pos [119 2]}} wl) true)
+    ^{:go/pos {:if [120 2] :lbrace [120 33] :rbrace [122 2]}} (when [^{:go/pos {:name-pos [120 5] :tok-pos [120 7]}} n ^{:go/pos {:lbrack [120 21] :rbrack [120 24]}} (aget ^{:go/pos {:name-pos [120 10]}} cEntryDepth ^{:go/pos {:name-pos [120 22]}} id)] ^{:go/apos {2 [120 31]} :go/pos {:op-pos [120 29]}} (> ^{:go/pos {:name-pos [120 27]}} n 0)
+      ^{:go/pos {:tok-pos [121 22]}} (set! (values ^{:go/pos {:dot [121 5] :name-pos [121 6]}} (.-owner ^{:go/pos {:name-pos [121 3]}} wl) ^{:go/pos {:dot [121 15] :name-pos [121 16]}} (.-count ^{:go/pos {:name-pos [121 13]}} wl)) (values ^{:go/pos {:name-pos [121 24]}} id ^{:go/pos {:name-pos [121 28]}} n)))))
+
+
+
+
+^{:go/pos {:doc [125 1] :func [126 1] :lbrace [126 14] :rbrace [130 1]}} (go/func ^{:go/pos {:name-pos [126 6]}} wlOff "wlOff turns it off once no C thread lives and no one waits.\n" ^{:go/pos {:closing [126 12] :opening [126 11]}} []
+  ^{:go/pos {:if [127 2] :lbrace [127 57] :rbrace [129 2]}} (when ^{:go/ops [[127 11] [127 33]] :go/pos {:op-pos [127 33]}} (and ^{:go/pos {:dot [127 7] :name-pos [127 8]}} (.-on ^{:go/pos {:name-pos [127 5]}} wl) ^{:go/apos {2 [127 31]} :go/pos {:op-pos [127 28]}} (== ^{:go/pos {:lparen [127 17] :rparen [127 26]}} (^{:go/pos {:name-pos [127 14]}} len ^{:go/pos {:name-pos [127 18]}} cThreads) 0) ^{:go/apos {2 [127 55]} :go/pos {:op-pos [127 52]}} (== ^{:go/pos {:lparen [127 39] :rparen [127 50]}} (^{:go/pos {:name-pos [127 36]}} len ^{:go/pos {:dot [127 42] :name-pos [127 43]}} (.-waiters ^{:go/pos {:name-pos [127 40]}} wl)) 0))
+    ^{:go/pos {:tok-pos [128 29]}} (set! (values ^{:go/pos {:dot [128 5] :name-pos [128 6]}} (.-on ^{:go/pos {:name-pos [128 3]}} wl) ^{:go/pos {:dot [128 12] :name-pos [128 13]}} (.-owner ^{:go/pos {:name-pos [128 10]}} wl) ^{:go/pos {:dot [128 22] :name-pos [128 23]}} (.-count ^{:go/pos {:name-pos [128 20]}} wl)) ^{:go/apos {1 [128 31] 2 [128 38] 3 [128 41]}} (values false 0 0))))
+
+
+
+
+
+^{:go/pos {:doc [132 1] :func [134 1] :lbrace [134 29] :rbrace [147 1]}} (go/func ^{:go/pos {:name-pos [134 6]}} blockingWait "blockingWait runs f (a wait that releases the GIL) with the world's lock given up, the error indicator and the mirrors'\nbookkeeping of the running native kept across it, then takes the lock back with the levels it had.\n" ^{:go/pos {:closing [134 27] :opening [134 18]}} [^{:tag ^{:go/pos {:func [134 21]}} (func ^{:go/pos {:closing [134 26] :opening [134 25]}} []) :go/pos {:name-pos [134 19]}} f]
+  (let ^{:go/apos {5 [137 7]}} [^{:go/pos {:name-pos [135 2] :tok-pos [135 5]}} id ^{:go/pos {:lparen [135 22] :rparen [135 23]}} (^{:go/pos {:name-pos [135 8]}} ExtThreadIdent)
+      ^{:go/pos {:tok-pos [136 25]}} (values ^{:go/pos {:name-pos [136 2]}} savedErr ^{:go/pos {:name-pos [136 12]}} savedTouched) (values ^{:go/pos {:name-pos [136 28]}} errIndicator ^{:go/pos {:name-pos [136 42]}} touched)
+      ^{:go/pos {:name-pos [137 2] :tok-pos [137 4]}} n 0]
+    ^{:go/pos {:if [138 2] :lbrace [138 29] :rbrace [141 2]}} (when ^{:go/pos {:op-pos [138 11]}} (and ^{:go/pos {:dot [138 7] :name-pos [138 8]}} (.-on ^{:go/pos {:name-pos [138 5]}} wl) ^{:go/pos {:op-pos [138 23]}} (== ^{:go/pos {:dot [138 16] :name-pos [138 17]}} (.-owner ^{:go/pos {:name-pos [138 14]}} wl) ^{:go/pos {:name-pos [138 26]}} id))
+      ^{:go/pos {:tok-pos [139 5]}} (set! ^{:go/pos {:name-pos [139 3]}} n ^{:go/pos {:dot [139 9] :name-pos [139 10]}} (.-count ^{:go/pos {:name-pos [139 7]}} wl))
+      ^{:go/pos {:lparen [140 9] :rparen [140 10]}} (^{:go/pos {:name-pos [140 3]}} wlGive))
+
+    ^{:go/pos {:lparen [142 3] :rparen [142 4]}} (^{:go/pos {:name-pos [142 2]}} f)
+    ^{:go/pos {:if [143 2] :lbrace [143 20] :rbrace [145 2]}} (when ^{:go/pos {:op-pos [143 11]}} (and ^{:go/apos {2 [143 9]} :go/pos {:op-pos [143 7]}} (> ^{:go/pos {:name-pos [143 5]}} n 0) ^{:go/pos {:dot [143 16] :name-pos [143 17]}} (.-on ^{:go/pos {:name-pos [143 14]}} wl))
+      ^{:go/pos {:lparen [144 9] :rparen [144 15]}} (^{:go/pos {:name-pos [144 3]}} wlTake ^{:go/pos {:name-pos [144 10]}} id ^{:go/pos {:name-pos [144 14]}} n))
+
+    ^{:go/pos {:tok-pos [146 24]}} (set! (values ^{:go/pos {:name-pos [146 2]}} errIndicator ^{:go/pos {:name-pos [146 16]}} touched) (values ^{:go/pos {:name-pos [146 26]}} savedErr ^{:go/pos {:name-pos [146 36]}} savedTouched))))
+
+
+
+
+
+
+^{:go/pos {:doc [149 1] :func [153 1] :lbrace [153 47] :rbrace [191 1] :return [190 2]}} (go/func ^{:go/pos {:name-pos [153 6]}} startCThread "startCThread is PyThread_start_new_thread(func, arg): a Python thread of _thread's whose body runs the C function\nfunc(arg) on a C thread of its own (a stack mapped in the world, the main thread's thread-local objects), the\nmirrors synchronized around it as around a call into C; a fault in it ends the process (World.guard). Its ident,\nor -1 when the thread cannot start.\n" ^{:tag ^{:go/pos {:name-pos [153 41]}} int64 :go/pos {:closing [153 39] :opening [153 18]}} [^{:tag ^{:go/pos {:name-pos [153 22]}} uint64 :go/pos {:name-pos [153 19]}} fn ^{:tag ^{:go/pos {:name-pos [153 34]}} int64 :go/pos {:name-pos [153 30]}} arg]
+  (let [^{:go/pos {:name-pos [154 2] :tok-pos [154 4]}} w ^{:go/pos {:lparen [154 9] :rparen [154 10]}} (^{:go/pos {:name-pos [154 7]}} cw)
+      ^{:go/pos {:tok-pos [155 7]}} (values ^{:go/pos {:name-pos [155 2]}} p ^{:go/pos {:name-pos [155 5]}} m) (values ^{:go/pos {:dot [155 13] :name-pos [155 14]}} (.-P ^{:go/pos {:dot [155 11] :name-pos [155 12]}} (.-L ^{:go/pos {:name-pos [155 10]}} w)) ^{:go/pos {:dot [155 20] :name-pos [155 21]}} (.-M ^{:go/pos {:dot [155 18] :name-pos [155 19]}} (.-L ^{:go/pos {:name-pos [155 17]}} w)))
+      ^{:go/pos {:name-pos [156 2] :tok-pos [156 7]}} base ^{:go/apos {2 [156 17]} :go/pos {:dot [156 11] :lparen [156 16] :name-pos [156 12] :rparen [156 32]}} (.Mmap ^{:go/pos {:name-pos [156 10]}} m 0 ^{:go/pos {:name-pos [156 20]}} cThreadStack)]
+    ^{:go/pos {:if [157 2] :lbrace [157 15] :rbrace [159 2]}} (when ^{:go/apos {2 [157 13]} :go/pos {:op-pos [157 10]}} (== ^{:go/pos {:name-pos [157 5]}} base 0)
+      ^{:go/apos {1 [158 10]} :go/pos {:return [158 3]}} (return -1))
+
+    (let [^{:go/pos {:name-pos [160 2] :tok-pos [160 5]}} nt ^{:go/pos {:op-pos [160 8]}} (addr ^{:go/acolon {2 [160 20] 4 [160 26] 6 [160 33] 8 [160 66]} :go/apos {2 [160 19] 4 [160 25] 6 [160 31] 8 [160 64]} :go/pos {:lbrace [160 18] :rbrace [160 72]}} (lit ^{:go/pos {:dot [160 11] :name-pos [160 12] :x-pos [160 9]}} ci/Thread :P ^{:go/pos {:name-pos [160 22]}} p :M ^{:go/pos {:name-pos [160 28]}} m :SP ^{:go/apos {2 [160 60]} :go/pos {:op-pos [160 57]}} (bit-and-not ^{:go/parens [[[160 35] [160 55]]] :go/pos {:op-pos [160 41]}} (+ ^{:go/pos {:name-pos [160 36]}} base ^{:go/pos {:name-pos [160 43]}} cThreadStack) 15) :Lo ^{:go/pos {:name-pos [160 68]}} base))
+        ^{:go/pos {:name-pos [161 2] :tok-pos [161 7]}} body ^{:go/pos {:op-pos [161 10]}} (addr ^{:go/acolon {2 [161 23] 4 [161 40]} :go/apos {2 [161 19] 3 [161 25] 4 [161 38]} :go/pos {:lbrace [161 18] :rbrace [176 3]}} (lit ^{:go/pos {:name-pos [161 11]}} Builtin :Name "_c_thread" :Fn ^{:go/pos {:func [161 42] :lbrace [161 89] :rbrace [176 2]}} (fn ^{:go/pos {:closing [161 71] :opening [161 46]}} [^{:tag ^{:go/pos {:lbrack [161 52]}} (slice ^{:go/pos {:name-pos [161 54]}} Object) :go/pos {:name-pos [161 47]}} args ^{:tag ^{:go/pos {:lbrack [161 65]}} (slice ^{:go/pos {:star [161 67]}} (* ^{:go/pos {:name-pos [161 68]}} Str)) :go/pos {:name-pos [161 62]}} kw] :results ^{:go/pos {:closing [161 87] :opening [161 73]}} [^{:go/pos {:name-pos [161 74]}} Object ^{:go/pos {:name-pos [161 82]}} error]
+              (let [^{:go/pos {:name-pos [162 3] :tok-pos [162 6]}} id ^{:go/pos {:lparen [162 23] :rparen [162 24]}} (^{:go/pos {:name-pos [162 9]}} ExtThreadIdent)]
+                ^{:go/pos {:lbrack [163 11] :rbrack [163 14] :tok-pos [163 16]}} (aset ^{:go/pos {:name-pos [163 3]}} cThreads ^{:go/pos {:name-pos [163 12]}} id ^{:go/pos {:name-pos [163 18]}} nt)
+                ^{:go/pos {:lparen [164 9] :rparen [164 10]}} (^{:go/pos {:name-pos [164 3]}} enterC)
+                ^{:go/pos {:defer [165 3]}} (defer ^{:go/pos {:lparen [169 4] :rparen [169 5]}} (^{:go/pos {:func [165 9] :lbrace [165 16] :rbrace [169 3]}} (fn ^{:go/pos {:closing [165 14] :opening [165 13]}} []
+                      ^{:go/pos {:lparen [166 10] :rparen [166 23]}} (^{:go/pos {:name-pos [166 4]}} delete ^{:go/pos {:name-pos [166 11]}} cThreads ^{:go/pos {:name-pos [166 21]}} id)
+                      ^{:go/pos {:lparen [167 9] :rparen [167 10]}} (^{:go/pos {:name-pos [167 4]}} exitC)
+                      ^{:go/pos {:dot [168 5] :lparen [168 11] :name-pos [168 6] :rparen [168 30]}} (.Unmap ^{:go/pos {:name-pos [168 4]}} m ^{:go/pos {:name-pos [168 12]}} base ^{:go/pos {:name-pos [168 18]}} cThreadStack))))
+
+                ^{:go/pos {:dot [170 4] :lparen [170 10] :name-pos [170 5] :rparen [174 4]}} (.guard ^{:go/pos {:name-pos [170 3]}} w ^{:go/pos {:func [170 11] :lbrace [170 18] :rbrace [174 3]}} (fn ^{:go/pos {:closing [170 16] :opening [170 15]}} []
+                    ^{:go/pos {:lparen [171 14] :rparen [171 15]}} (^{:go/pos {:name-pos [171 4]}} syncAllToC)
+                    ^{:go/pos {:dot [172 5] :lparen [172 14] :name-pos [172 6] :rparen [172 49]}} (.CallAddr ^{:go/pos {:name-pos [172 4]}} p ^{:go/pos {:name-pos [172 15]}} nt ^{:go/pos {:name-pos [172 19]}} fn ^{:go/pos {:lbrace [172 31] :rbrace [172 48]}} (lit ^{:go/pos {:lbrack [172 23]}} (slice ^{:go/pos {:dot [172 27] :name-pos [172 28] :x-pos [172 25]}} ci/Arg) ^{:go/acolon {2 [172 34] 4 [172 42]} :go/apos {2 [172 33] 3 [172 36] 4 [172 41]} :go/pos {:lbrace [172 32] :rbrace [172 47]}} (lit _ :K \i :I ^{:go/pos {:name-pos [172 44]}} arg)))
+                    ^{:go/pos {:lparen [173 16] :rparen [173 17]}} (^{:go/pos {:name-pos [173 4]}} syncAllFromC)))
+
+                ^{:go/apos {2 [175 16]} :go/pos {:return [175 3]}} (return ^{:go/pos {:name-pos [175 10]}} None nil)))))]
+
+      ^{:go/pos {:lparen [177 6] :rparen [177 7]}} (^{:go/pos {:name-pos [177 2]}} wlOn)
+      (let [^{:go/pos {:tok-pos [178 13]}} (values ^{:go/pos {:name-pos [178 2]}} start ^{:go/pos {:name-pos [178 9]}} err) ^{:go/apos {1 [178 26] 2 [178 37]} :go/pos {:lparen [178 25] :rparen [178 55]}} (^{:go/pos {:name-pos [178 16]}} pyModAttr "_thread" "start_new_thread")]
+        ^{:go/pos {:if [179 2] :lbrace [179 16] :rbrace [182 2]}} (when ^{:go/apos {2 [179 12]} :go/pos {:op-pos [179 9]}} (!= ^{:go/pos {:name-pos [179 5]}} err nil)
+          ^{:go/pos {:dot [180 4] :lparen [180 10] :name-pos [180 5] :rparen [180 29]}} (.Unmap ^{:go/pos {:name-pos [180 3]}} m ^{:go/pos {:name-pos [180 11]}} base ^{:go/pos {:name-pos [180 17]}} cThreadStack)
+          ^{:go/apos {1 [181 10]} :go/pos {:return [181 3]}} (return -1))
+
+        (let [^{:go/pos {:tok-pos [183 9]}} (values ^{:go/pos {:name-pos [183 2]}} r ^:assign ^{:go/pos {:name-pos [183 5]}} err) ^{:go/apos {3 [183 52]} :go/pos {:lparen [183 16] :rparen [183 55]}} (^{:go/pos {:name-pos [183 12]}} Call ^{:go/pos {:name-pos [183 17]}} start ^{:go/pos {:lbrace [183 32] :rbrace [183 49]}} (lit ^{:go/pos {:lbrack [183 24]}} (slice ^{:go/pos {:name-pos [183 26]}} Object) ^{:go/pos {:name-pos [183 33]}} body ^{:go/pos {:lparen [183 47] :rparen [183 48]}} (^{:go/pos {:name-pos [183 39]}} NewTuple)) nil)]
+          ^{:go/pos {:if [184 2] :lbrace [184 16] :rbrace [187 2]}} (when ^{:go/apos {2 [184 12]} :go/pos {:op-pos [184 9]}} (!= ^{:go/pos {:name-pos [184 5]}} err nil)
+            ^{:go/pos {:dot [185 4] :lparen [185 10] :name-pos [185 5] :rparen [185 29]}} (.Unmap ^{:go/pos {:name-pos [185 3]}} m ^{:go/pos {:name-pos [185 11]}} base ^{:go/pos {:name-pos [185 17]}} cThreadStack)
+            ^{:go/apos {1 [186 10]} :go/pos {:return [186 3]}} (return -1))
+
+          (let [^{:go/pos {:tok-pos [188 7]}} (values ^{:go/pos {:name-pos [188 2]}} i ^{:go/pos {:name-pos [188 5]}} _) ^{:go/pos {:lparen [188 15] :rparen [188 17]}} (^{:go/pos {:name-pos [188 10]}} AsInt ^{:go/pos {:name-pos [188 16]}} r)
+              ^{:go/pos {:tok-pos [189 7]}} (values ^{:go/pos {:name-pos [189 2]}} v ^{:go/pos {:name-pos [189 5]}} _) ^{:go/pos {:dot [189 11] :lparen [189 17] :name-pos [189 12] :rparen [189 18]}} (.Int64 ^{:go/pos {:name-pos [189 10]}} i)]
+            ^{:go/pos {:name-pos [190 9]}} v))))))
+
+
+
+
+^{:go/pos {:doc [193 1] :func [195 1] :lbrace [195 30] :rbrace [201 1] :return [200 2]}} (go/func ^{:go/pos {:name-pos [195 6]}} lockOf "lockOf is the _thread.lock of a PyThread_type_lock (a fault for one PyThread_allocate_lock did not give, as a freed\npthread lock's use is undefined).\n" ^{:tag ^{:go/pos {:name-pos [195 23]}} Object :go/pos {:closing [195 21] :opening [195 12]}} [^{:tag ^{:go/pos {:dot [195 17] :name-pos [195 18] :x-pos [195 15]}} ci/Arg :go/pos {:name-pos [195 13]}} a]
+  (let [^{:go/pos {:name-pos [196 2] :tok-pos [196 5]}} lk ^{:go/pos {:lbrack [196 14] :rbrack [196 26]}} (aget ^{:go/pos {:name-pos [196 8]}} cLocks ^{:go/pos {:lparen [196 21] :rparen [196 25]}} (conv ^{:go/pos {:name-pos [196 15]}} uint64 ^{:go/pos {:dot [196 23] :name-pos [196 24]}} (.-I ^{:go/pos {:name-pos [196 22]}} a)))]
+    ^{:go/pos {:if [197 2] :lbrace [197 15] :rbrace [199 2]}} (when ^{:go/apos {2 [197 11]} :go/pos {:op-pos [197 8]}} (== ^{:go/pos {:name-pos [197 5]}} lk nil)
+      ^{:go/pos {:lparen [198 8] :rparen [198 117]}} (^{:go/pos {:name-pos [198 3]}} panic ^{:go/pos {:op-pos [198 9]}} (addr ^{:go/acolon {2 [198 23] 4 [198 42] 6 [198 60]} :go/apos {2 [198 20] 4 [198 38] 6 [198 57]} :go/pos {:lbrace [198 19] :rbrace [198 116]}} (lit ^{:go/pos {:dot [198 13] :name-pos [198 14] :x-pos [198 10]}} crt/Fault :Sig ^{:go/pos {:dot [198 28] :name-pos [198 29] :x-pos [198 25]}} crt/SIGSEGV :Addr ^{:go/pos {:lparen [198 50] :rparen [198 54]}} (conv ^{:go/pos {:name-pos [198 44]}} uint64 ^{:go/pos {:dot [198 52] :name-pos [198 53]}} (.-I ^{:go/pos {:name-pos [198 51]}} a)) :Msg ^{:go/apos {1 [198 74]} :go/pos {:lparen [198 73] :rparen [198 115]}} (^{:go/pos {:dot [198 65] :name-pos [198 66] :x-pos [198 62]}} fmt/Sprintf "PyThread lock %#x is not allocated" ^{:go/pos {:dot [198 113] :name-pos [198 114]}} (.-I ^{:go/pos {:name-pos [198 112]}} a))))))
+
+    ^{:go/pos {:name-pos [200 9]}} lk))
+
+
+
+
+
+^{:go/pos {:doc [203 1] :func [206 1] :lbrace [206 37] :rbrace [213 1] :return [212 2]}} (go/method ^{:go/pos {:name-pos [206 17]}} thread "thread is the C thread of the running Python thread: the one PyThread_start_new_thread made for it (capi_rest.go,\npy-capi-1125), else the world's main thread (the library's). The GIL's holder is the only goroutine that runs C,\nso each Python thread's C frames stay on a stack of its own.\n" ^{:tag ^{:go/pos {:star [206 26]}} (* ^{:go/pos {:dot [206 29] :name-pos [206 30] :x-pos [206 27]}} ci/Thread) :go/pos {:closing [206 24] :opening [206 23] :recv-closing [206 15] :recv-opening [206 6]}} [^{:tag ^{:go/pos {:star [206 9]}} (* ^{:go/pos {:name-pos [206 10]}} World) :go/pos {:name-pos [206 7]}} w]
+  ^{:go/pos {:if [207 2] :lbrace [207 23] :rbrace [211 2]}} (when ^{:go/apos {2 [207 21]} :go/pos {:op-pos [207 19]}} (> ^{:go/pos {:lparen [207 8] :rparen [207 17]}} (^{:go/pos {:name-pos [207 5]}} len ^{:go/pos {:name-pos [207 9]}} cThreads) 0)
+    ^{:go/pos {:if [208 3] :lbrace [208 48] :rbrace [210 3]}} (when [^{:go/pos {:name-pos [208 6] :tok-pos [208 8]}} t ^{:go/pos {:lbrack [208 19] :rbrack [208 36]}} (aget ^{:go/pos {:name-pos [208 11]}} cThreads ^{:go/pos {:lparen [208 34] :rparen [208 35]}} (^{:go/pos {:name-pos [208 20]}} ExtThreadIdent))] ^{:go/apos {2 [208 44]} :go/pos {:op-pos [208 41]}} (!= ^{:go/pos {:name-pos [208 39]}} t nil)
+      ^{:go/pos {:return [209 4]}} (return ^{:go/pos {:name-pos [209 11]}} t)))
+
+
+  ^{:go/pos {:dot [212 12] :name-pos [212 13]}} (.-T ^{:go/pos {:dot [212 10] :name-pos [212 11]}} (.-L ^{:go/pos {:name-pos [212 9]}} w)))
+
+
+
+
+
+^{:go/pos {:doc [215 1] :func [218 1] :lbrace [218 41] :rbrace [243 1]}} (go/func ^{:go/pos {:name-pos [218 6]}} displayException "displayException is _PyErr_Display(file, NULL, value, tb): a traceback given beside an exception that has none\nput on it (issue #18776), then traceback._print_exception_bltin(value), which writes sys.stderr (colorized when\n_colorize says so); when that cannot run, sys.__excepthook__'s own printing.\n" ^{:go/pos {:closing [218 39] :opening [218 22]}} [^{:tag ^{:go/pos {:name-pos [218 33]}} Object :go/pos {:name-pos [218 23]}} value ^{:tag ^{:go/pos {:name-pos [218 33]}} Object :go/pos {:name-pos [218 30]}} tb]
+  ^{:go/pos {:if [219 2] :lbrace [219 18] :rbrace [221 2]}} (when ^{:go/apos {2 [219 14]} :go/pos {:op-pos [219 11]}} (== ^{:go/pos {:name-pos [219 5]}} value nil)
+    ^{:go/pos {:return [220 3]}} (return))
+
+  ^{:go/pos {:if [222 2] :lbrace [222 88] :rbrace [226 2]}} (when [^{:go/pos {:name-pos [222 5] :tok-pos [222 7]}} e ^{:go/pos {:lparen [222 24] :rparen [222 30]}} (^{:go/pos {:name-pos [222 10]}} ExtAsException ^{:go/pos {:name-pos [222 25]}} value)] ^{:go/ops [[222 42] [222 55]] :go/pos {:op-pos [222 55]}} (and ^{:go/apos {2 [222 38]} :go/pos {:op-pos [222 35]}} (!= ^{:go/pos {:name-pos [222 33]}} e nil) ^{:go/apos {2 [222 51]} :go/pos {:op-pos [222 48]}} (!= ^{:go/pos {:name-pos [222 45]}} tb nil) ^{:go/pos {:lparen [222 68] :rparen [222 86]}} (^{:go/pos {:name-pos [222 58]}} IsInstance ^{:go/pos {:name-pos [222 69]}} tb ^{:go/pos {:name-pos [222 73]}} TracebackType))
+    ^{:go/pos {:if [223 3] :lbrace [223 85] :rbrace [225 3]}} (when [^{:go/pos {:tok-pos [223 15]}} (values ^{:go/pos {:name-pos [223 6]}} cur ^{:go/pos {:name-pos [223 11]}} err) ^{:go/pos {:lparen [223 25] :rparen [223 56]}} (^{:go/pos {:name-pos [223 18]}} GetAttr ^{:go/pos {:name-pos [223 26]}} value ^{:go/apos {1 [223 40]} :go/pos {:lparen [223 39] :rparen [223 55]}} (^{:go/pos {:name-pos [223 33]}} NewStr "__traceback__"))] ^{:go/pos {:op-pos [223 70]}} (and ^{:go/apos {2 [223 66]} :go/pos {:op-pos [223 63]}} (== ^{:go/pos {:name-pos [223 59]}} err nil) ^{:go/pos {:op-pos [223 77]}} (== ^{:go/pos {:name-pos [223 73]}} cur ^{:go/pos {:name-pos [223 80]}} None))
+      ^{:go/pos {:tok-pos [224 6]}} (set! ^{:go/pos {:name-pos [224 4]}} _ ^{:go/pos {:lparen [224 15] :rparen [224 50]}} (^{:go/pos {:name-pos [224 8]}} SetAttr ^{:go/pos {:name-pos [224 16]}} value ^{:go/apos {1 [224 30]} :go/pos {:lparen [224 29] :rparen [224 45]}} (^{:go/pos {:name-pos [224 23]}} NewStr "__traceback__") ^{:go/pos {:name-pos [224 48]}} tb))))
+
+
+  ^{:go/pos {:if [227 2] :lbrace [227 76] :rbrace [231 2]}} (when [^{:go/pos {:tok-pos [227 12]}} (values ^{:go/pos {:name-pos [227 5]}} f ^{:go/pos {:name-pos [227 8]}} err) ^{:go/apos {1 [227 25] 2 [227 38]} :go/pos {:lparen [227 24] :rparen [227 62]}} (^{:go/pos {:name-pos [227 15]}} pyModAttr "traceback" "_print_exception_bltin")] ^{:go/apos {2 [227 72]} :go/pos {:op-pos [227 69]}} (== ^{:go/pos {:name-pos [227 65]}} err nil)
+    ^{:go/pos {:if [228 3] :lbrace [228 57] :rbrace [230 3]}} (when [^{:go/pos {:tok-pos [228 13]}} (set! (values ^{:go/pos {:name-pos [228 6]}} _ ^{:go/pos {:name-pos [228 9]}} err) ^{:go/apos {3 [228 40]} :go/pos {:lparen [228 19] :rparen [228 43]}} (^{:go/pos {:name-pos [228 15]}} Call ^{:go/pos {:name-pos [228 20]}} f ^{:go/pos {:lbrace [228 31] :rbrace [228 37]}} (lit ^{:go/pos {:lbrack [228 23]}} (slice ^{:go/pos {:name-pos [228 25]}} Object) ^{:go/pos {:name-pos [228 32]}} value) nil))] ^{:go/apos {2 [228 53]} :go/pos {:op-pos [228 50]}} (== ^{:go/pos {:name-pos [228 46]}} err nil)
+      ^{:go/pos {:return [229 4]}} (return)))
+
+
+  ;; the fallback: the built-in hook's printing of the same exception
+  ^{:go/pos {:if [233 2] :lbrace [233 65] :rbrace [239 2]}} (when [^{:go/pos {:tok-pos [233 15]}} (values ^{:go/pos {:name-pos [233 5]}} hook ^{:go/pos {:name-pos [233 11]}} err) ^{:go/apos {1 [233 28] 2 [233 35]} :go/pos {:lparen [233 27] :rparen [233 51]}} (^{:go/pos {:name-pos [233 18]}} pyModAttr "sys" "__excepthook__")] ^{:go/apos {2 [233 61]} :go/pos {:op-pos [233 58]}} (== ^{:go/pos {:name-pos [233 54]}} err nil)
+    (let [^{:tag ^{:go/pos {:name-pos [234 9]}} Object :go/pos {:name-pos [234 7] :tok-pos [234 3]}} t ^{:go/pos {:name-pos [234 18]}} None]
+      ^{:go/pos {:if [235 3] :lbrace [235 70] :rbrace [237 3]}} (when [^{:go/pos {:tok-pos [235 15]}} (values ^{:go/pos {:name-pos [235 6]}} cur ^{:go/pos {:name-pos [235 11]}} err) ^{:go/pos {:lparen [235 25] :rparen [235 56]}} (^{:go/pos {:name-pos [235 18]}} GetAttr ^{:go/pos {:name-pos [235 26]}} value ^{:go/apos {1 [235 40]} :go/pos {:lparen [235 39] :rparen [235 55]}} (^{:go/pos {:name-pos [235 33]}} NewStr "__traceback__"))] ^{:go/apos {2 [235 66]} :go/pos {:op-pos [235 63]}} (== ^{:go/pos {:name-pos [235 59]}} err nil)
+        ^{:go/pos {:tok-pos [236 6]}} (set! ^{:go/pos {:name-pos [236 4]}} t ^{:go/pos {:name-pos [236 8]}} cur))
+
+      ^{:go/pos {:tok-pos [238 8]}} (set! (values ^{:go/pos {:name-pos [238 3]}} _ ^{:go/pos {:name-pos [238 6]}} _) ^{:go/apos {3 [238 55]} :go/pos {:lparen [238 14] :rparen [238 58]}} (^{:go/pos {:name-pos [238 10]}} Call ^{:go/pos {:name-pos [238 15]}} hook ^{:go/pos {:lbrace [238 29] :rbrace [238 52]}} (lit ^{:go/pos {:lbrack [238 21]}} (slice ^{:go/pos {:name-pos [238 23]}} Object) ^{:go/pos {:dot [238 35] :lparen [238 40] :name-pos [238 36] :rparen [238 41]}} (.Type ^{:go/pos {:name-pos [238 30]}} value) ^{:go/pos {:name-pos [238 44]}} value ^{:go/pos {:name-pos [238 51]}} t) nil))))
+
+  ^{:go/pos {:if [240 2] :lbrace [240 71] :rbrace [242 2]}} (when [^{:go/pos {:tok-pos [240 14]}} (values ^{:go/pos {:name-pos [240 5]}} out ^{:go/pos {:name-pos [240 10]}} err) ^{:go/apos {1 [240 27] 2 [240 34]} :go/pos {:lparen [240 26] :rparen [240 42]}} (^{:go/pos {:name-pos [240 17]}} pyModAttr "sys" "stderr")] ^{:go/pos {:op-pos [240 56]}} (and ^{:go/apos {2 [240 52]} :go/pos {:op-pos [240 49]}} (== ^{:go/pos {:name-pos [240 45]}} err nil) ^{:go/pos {:op-pos [240 63]}} (!= ^{:go/pos {:name-pos [240 59]}} out ^{:go/pos {:name-pos [240 66]}} None))
+    ^{:go/pos {:tok-pos [241 8]}} (set! (values ^{:go/pos {:name-pos [241 3]}} _ ^{:go/pos {:name-pos [241 6]}} _) ^{:go/apos {2 [241 24]} :go/pos {:lparen [241 18] :rparen [241 31]}} (^{:go/pos {:name-pos [241 10]}} callMeth ^{:go/pos {:name-pos [241 19]}} out "flush"))))
+
+
+
+
+^{:go/pos {:doc [245 1] :func [246 1] :lbrace [246 28] :rbrace [250 1]}} (go/func ^{:go/pos {:name-pos [246 6]}} writeStderr "writeStderr is PySys_WriteStderr of a text: sys.stderr.write(s), its errors ignored.\n" ^{:go/pos {:closing [246 26] :opening [246 17]}} [^{:tag ^{:go/pos {:name-pos [246 20]}} string :go/pos {:name-pos [246 18]}} s]
+  ^{:go/pos {:if [247 2] :lbrace [247 71] :rbrace [249 2]}} (when [^{:go/pos {:tok-pos [247 14]}} (values ^{:go/pos {:name-pos [247 5]}} out ^{:go/pos {:name-pos [247 10]}} err) ^{:go/apos {1 [247 27] 2 [247 34]} :go/pos {:lparen [247 26] :rparen [247 42]}} (^{:go/pos {:name-pos [247 17]}} pyModAttr "sys" "stderr")] ^{:go/pos {:op-pos [247 56]}} (and ^{:go/apos {2 [247 52]} :go/pos {:op-pos [247 49]}} (== ^{:go/pos {:name-pos [247 45]}} err nil) ^{:go/pos {:op-pos [247 63]}} (!= ^{:go/pos {:name-pos [247 59]}} out ^{:go/pos {:name-pos [247 66]}} None))
+    ^{:go/pos {:tok-pos [248 8]}} (set! (values ^{:go/pos {:name-pos [248 3]}} _ ^{:go/pos {:name-pos [248 6]}} _) ^{:go/apos {2 [248 24]} :go/pos {:lparen [248 18] :rparen [248 42]}} (^{:go/pos {:name-pos [248 10]}} callMeth ^{:go/pos {:name-pos [248 19]}} out "write" ^{:go/pos {:lparen [248 39] :rparen [248 41]}} (^{:go/pos {:name-pos [248 33]}} NewStr ^{:go/pos {:name-pos [248 40]}} s)))))
+
+
+
+
+
+
+^{:go/pos {:doc [252 1] :func [255 1] :lbrace [255 40] :rbrace [291 1] :return [290 2]}} (go/func ^{:go/pos {:name-pos [255 6]}} handleSystemExit "handleSystemExit is _Py_HandleSystemExit and Py_Exit for an exception that is a SystemExit: its code (None 0, an int\nits value, anything else printed to sys.stderr and 1), the exit functions run (atexit's, Py_FinalizeEx's first step)\nand the standard streams flushed, then the process exits. false (nothing done) for any other exception.\n" ^{:tag ^{:go/pos {:name-pos [255 35]}} bool :go/pos {:closing [255 33] :opening [255 22]}} [^{:tag ^{:go/pos {:name-pos [255 27]}} Object :go/pos {:name-pos [255 23]}} exc]
+  ^{:go/pos {:if [256 2] :lbrace [256 52] :rbrace [258 2]}} (when ^{:go/pos {:op-pos [256 16]}} (or ^{:go/apos {2 [256 12]} :go/pos {:op-pos [256 9]}} (== ^{:go/pos {:name-pos [256 5]}} exc nil) ^{:go/pos {:op-pos [256 19]}} (not ^{:go/pos {:lparen [256 30] :rparen [256 50]}} (^{:go/pos {:name-pos [256 20]}} IsInstance ^{:go/pos {:name-pos [256 31]}} exc ^{:go/pos {:name-pos [256 36]}} SystemExitType)))
+    ^{:go/apos {1 [257 10]} :go/pos {:return [257 3]}} (return false))
+
+  ^{:go/apos {6 [290 9]}} (let ^{:go/apos {1 [259 10]}} [^{:go/pos {:name-pos [259 2] :tok-pos [259 7]}} code 1
+      ^{:go/pos {:tok-pos [260 9]}} (values ^{:go/pos {:name-pos [260 2]}} v ^{:go/pos {:name-pos [260 5]}} err) ^{:go/pos {:lparen [260 19] :rparen [260 39]}} (^{:go/pos {:name-pos [260 12]}} GetAttr ^{:go/pos {:name-pos [260 20]}} exc ^{:go/apos {1 [260 32]} :go/pos {:lparen [260 31] :rparen [260 38]}} (^{:go/pos {:name-pos [260 25]}} NewStr "code"))]
+    ^{:go/pos {:lbrace [261 9] :rbrace [280 2] :switch [261 2]}} (switch
+      ^{:go/pos {:case [262 2] :colon [262 30]}} (case [^{:go/pos {:op-pos [262 18]}} (or ^{:go/apos {2 [262 14]} :go/pos {:op-pos [262 11]}} (!= ^{:go/pos {:name-pos [262 7]}} err nil) ^{:go/pos {:op-pos [262 23]}} (== ^{:go/pos {:name-pos [262 21]}} v ^{:go/pos {:name-pos [262 26]}} None))]
+        ^{:go/apos {2 [263 10]} :go/pos {:tok-pos [263 8]}} (set! ^{:go/pos {:name-pos [263 3]}} code 0)
+        ^{:go/pos {:if [264 3] :lbrace [264 17] :rbrace [266 3]}} (when ^{:go/apos {2 [264 13]} :go/pos {:op-pos [264 10]}} (!= ^{:go/pos {:name-pos [264 6]}} err nil)
+          ^{:go/apos {2 [265 11]} :go/pos {:tok-pos [265 9]}} (set! ^{:go/pos {:name-pos [265 4]}} code 1)))
+
+      ^{:go/pos {:case [267 2] :colon [267 9]}} (default
+        ^{:go/pos {:else-lbrace [272 10] :else-rbrace [279 3] :if [268 3] :lbrace [268 54] :rbrace [272 3]}} (if [^{:go/pos {:tok-pos [268 12]}} (values ^{:go/pos {:name-pos [268 6]}} i ^{:go/pos {:name-pos [268 9]}} ok) ^{:go/pos {:lparen [268 20] :rparen [268 22]}} (^{:go/pos {:name-pos [268 15]}} AsInt ^{:go/pos {:name-pos [268 21]}} v)] ^{:go/pos {:op-pos [268 28]}} (and ^{:go/pos {:name-pos [268 25]}} ok ^{:go/pos {:lparen [268 41] :rparen [268 52]}} (^{:go/pos {:name-pos [268 31]}} IsInstance ^{:go/pos {:name-pos [268 42]}} v ^{:go/pos {:name-pos [268 45]}} IntType))
+          ^{:go/pos {:if [269 4] :lbrace [269 30] :rbrace [271 4]}} (when [^{:go/pos {:tok-pos [269 13]}} (values ^{:go/pos {:name-pos [269 7]}} x ^{:go/pos {:name-pos [269 10]}} ok) ^{:go/pos {:dot [269 17] :lparen [269 23] :name-pos [269 18] :rparen [269 24]}} (.Int64 ^{:go/pos {:name-pos [269 16]}} i)] ^{:go/pos {:name-pos [269 27]}} ok
+            ^{:go/pos {:tok-pos [270 10]}} (set! ^{:go/pos {:name-pos [270 5]}} code ^{:go/pos {:lparen [270 15] :rparen [270 24]}} (conv ^{:go/pos {:name-pos [270 12]}} int ^{:go/pos {:lparen [270 21] :rparen [270 23]}} (conv ^{:go/pos {:name-pos [270 16]}} int32 ^{:go/pos {:name-pos [270 22]}} x))))
+
+          ^{:go/pos {:lbrace [272 10] :rbrace [279 3]}} (do
+            ^{:go/pos {:if [273 4] :lbrace [273 42] :rbrace [277 4]}} (when [^{:go/pos {:tok-pos [273 14]}} (values ^{:go/pos {:name-pos [273 7]}} s ^{:go/pos {:name-pos [273 10]}} err) ^{:go/pos {:lparen [273 26] :rparen [273 28]}} (^{:go/pos {:name-pos [273 17]}} StrObject ^{:go/pos {:name-pos [273 27]}} v)] ^{:go/apos {2 [273 38]} :go/pos {:op-pos [273 35]}} (== ^{:go/pos {:name-pos [273 31]}} err nil)
+              ^{:go/pos {:if [274 5] :lbrace [274 31] :rbrace [276 5]}} (when [^{:go/pos {:tok-pos [274 15]}} (values ^{:go/pos {:name-pos [274 8]}} ss ^{:go/pos {:name-pos [274 12]}} ok) ^{:go/pos {:lparen [274 23] :rparen [274 25]}} (^{:go/pos {:name-pos [274 18]}} AsStr ^{:go/pos {:name-pos [274 24]}} s)] ^{:go/pos {:name-pos [274 28]}} ok
+                ^{:go/pos {:lparen [275 17] :rparen [275 36]}} (^{:go/pos {:name-pos [275 6]}} writeStderr ^{:go/apos {2 [275 32]} :go/pos {:op-pos [275 30]}} (+ ^{:go/pos {:dot [275 20] :lparen [275 27] :name-pos [275 21] :rparen [275 28]}} (.String ^{:go/pos {:name-pos [275 18]}} ss) "\n"))))
+
+
+            ^{:go/apos {2 [278 11]} :go/pos {:tok-pos [278 9]}} (set! ^{:go/pos {:name-pos [278 4]}} code 1)))))
+
+
+    ^{:go/pos {:if [281 2] :lbrace [281 65] :rbrace [283 2]}} (when [^{:go/pos {:tok-pos [281 12]}} (values ^{:go/pos {:name-pos [281 5]}} f ^{:go/pos {:name-pos [281 8]}} err) ^{:go/apos {1 [281 25] 2 [281 35]} :go/pos {:lparen [281 24] :rparen [281 51]}} (^{:go/pos {:name-pos [281 15]}} pyModAttr "atexit" "_run_exitfuncs")] ^{:go/apos {2 [281 61]} :go/pos {:op-pos [281 58]}} (== ^{:go/pos {:name-pos [281 54]}} err nil)
+      ^{:go/pos {:tok-pos [282 8]}} (set! (values ^{:go/pos {:name-pos [282 3]}} _ ^{:go/pos {:name-pos [282 6]}} _) ^{:go/apos {2 [282 18] 3 [282 23]} :go/pos {:lparen [282 14] :rparen [282 26]}} (^{:go/pos {:name-pos [282 10]}} Call ^{:go/pos {:name-pos [282 15]}} f nil nil)))
+
+    ^{:go/pos {:for [284 2] :lbrace [284 52] :range [284 17] :rbrace [288 2] :tok-pos [284 14]}} (range [^{:go/pos {:name-pos [284 6]}} _ ^{:go/pos {:name-pos [284 9]}} name ^{:go/apos {2 [284 32] 3 [284 42]} :go/pos {:lbrace [284 31] :rbrace [284 50]}} (lit ^{:go/pos {:lbrack [284 23]}} (slice ^{:go/pos {:name-pos [284 25]}} string) "stdout" "stderr")]
+      ^{:go/pos {:if [285 3] :lbrace [285 68] :rbrace [287 3]}} (when [^{:go/pos {:tok-pos [285 15]}} (values ^{:go/pos {:name-pos [285 6]}} out ^{:go/pos {:name-pos [285 11]}} err) ^{:go/apos {1 [285 28]} :go/pos {:lparen [285 27] :rparen [285 39]}} (^{:go/pos {:name-pos [285 18]}} pyModAttr "sys" ^{:go/pos {:name-pos [285 35]}} name)] ^{:go/pos {:op-pos [285 53]}} (and ^{:go/apos {2 [285 49]} :go/pos {:op-pos [285 46]}} (== ^{:go/pos {:name-pos [285 42]}} err nil) ^{:go/pos {:op-pos [285 60]}} (!= ^{:go/pos {:name-pos [285 56]}} out ^{:go/pos {:name-pos [285 63]}} None))
+        ^{:go/pos {:tok-pos [286 9]}} (set! (values ^{:go/pos {:name-pos [286 4]}} _ ^{:go/pos {:name-pos [286 7]}} _) ^{:go/apos {2 [286 25]} :go/pos {:lparen [286 19] :rparen [286 32]}} (^{:go/pos {:name-pos [286 11]}} callMeth ^{:go/pos {:name-pos [286 20]}} out "flush"))))
+
+
+    ^{:go/pos {:lparen [289 9] :rparen [289 14]}} (^{:go/pos {:dot [289 4] :name-pos [289 5] :x-pos [289 2]}} os/Exit ^{:go/pos {:name-pos [289 10]}} code)
+    true))
+
+
+
+
+
+
+^{:go/pos {:doc [293 1] :func [297 1] :lbrace [297 35] :rbrace [357 1]}} (go/func ^{:go/pos {:name-pos [297 6]}} printEx "printEx is _PyErr_PrintEx: the raised exception (none: nothing) handed to sys.excepthook(type, value, traceback),\nsys.last_exc, last_type, last_value and last_traceback set first when setSysLastVars, the audit event\n\"sys.excepthook\" raised before the call; a hook that fails has its error and the original displayed, a missing hook\n\"sys.excepthook is missing\" and the exception displayed. A SystemExit exits the process (handle_system_exit).\n" ^{:go/pos {:closing [297 33] :opening [297 13]}} [^{:tag ^{:go/pos {:name-pos [297 29]}} bool :go/pos {:name-pos [297 14]}} setSysLastVars]
+  (let [^{:go/pos {:name-pos [298 2] :tok-pos [298 6]}} err ^{:go/pos {:name-pos [298 9]}} errIndicator]
+    ^{:go/apos {2 [299 17]} :go/pos {:tok-pos [299 15]}} (set! ^{:go/pos {:name-pos [299 2]}} errIndicator nil)
+    ^{:go/pos {:if [300 2] :lbrace [300 16] :rbrace [302 2]}} (when ^{:go/apos {2 [300 12]} :go/pos {:op-pos [300 9]}} (== ^{:go/pos {:name-pos [300 5]}} err nil)
+      ^{:go/pos {:return [301 3]}} (return))
+
+    (let [^{:go/pos {:name-pos [303 2] :tok-pos [303 4]}} e ^{:go/pos {:lparen [303 12] :rparen [303 16]}} (^{:go/pos {:name-pos [303 7]}} excOf ^{:go/pos {:name-pos [303 13]}} err)]
+      ^{:go/pos {:if [304 2] :lbrace [304 14] :rbrace [306 2]}} (when ^{:go/apos {2 [304 10]} :go/pos {:op-pos [304 7]}} (== ^{:go/pos {:name-pos [304 5]}} e nil)
+        ^{:go/pos {:return [305 3]}} (return))
+
+      (let [^{:tag ^{:go/pos {:name-pos [307 10]}} Object :go/pos {:name-pos [307 6] :tok-pos [307 2]}} exc ^{:go/pos {:name-pos [307 19]}} e]
+        ^{:go/pos {:lparen [308 18] :rparen [308 22]}} (^{:go/pos {:name-pos [308 2]}} handleSystemExit ^{:go/pos {:name-pos [308 19]}} exc)
+        (let [^{:go/pos {:name-pos [309 2] :tok-pos [309 6]}} typ ^{:go/pos {:lparen [309 15] :rparen [309 26]}} (conv ^{:go/pos {:name-pos [309 9]}} Object ^{:go/pos {:dot [309 19] :lparen [309 24] :name-pos [309 20] :rparen [309 25]}} (.Type ^{:go/pos {:name-pos [309 16]}} exc))
+            ^{:tag ^{:go/pos {:name-pos [310 9]}} Object :go/pos {:name-pos [310 6] :tok-pos [310 2]}} tb ^{:go/pos {:name-pos [310 18]}} None]
+          ^{:go/pos {:if [311 2] :lbrace [311 83] :rbrace [313 2]}} (when [^{:go/pos {:tok-pos [311 15]}} (values ^{:go/pos {:name-pos [311 5]}} cur ^{:go/pos {:name-pos [311 10]}} gerr) ^{:go/pos {:lparen [311 25] :rparen [311 54]}} (^{:go/pos {:name-pos [311 18]}} GetAttr ^{:go/pos {:name-pos [311 26]}} exc ^{:go/apos {1 [311 38]} :go/pos {:lparen [311 37] :rparen [311 53]}} (^{:go/pos {:name-pos [311 31]}} NewStr "__traceback__"))] ^{:go/pos {:op-pos [311 69]}} (and ^{:go/apos {2 [311 65]} :go/pos {:op-pos [311 62]}} (== ^{:go/pos {:name-pos [311 57]}} gerr nil) ^{:go/apos {2 [311 79]} :go/pos {:op-pos [311 76]}} (!= ^{:go/pos {:name-pos [311 72]}} cur nil))
+            ^{:go/pos {:tok-pos [312 6]}} (set! ^{:go/pos {:name-pos [312 3]}} tb ^{:go/pos {:name-pos [312 8]}} cur))
+
+          (let [^{:go/pos {:tok-pos [314 12]}} (values ^{:go/pos {:name-pos [314 2]}} sys ^{:go/pos {:name-pos [314 7]}} serr) ^{:go/apos {1 [314 31]} :go/pos {:lparen [314 30] :rparen [314 36]}} (^{:go/pos {:name-pos [314 15]}} ExtImportModule "sys")]
+            ^{:go/pos {:if [315 2] :lbrace [315 35] :rbrace [320 2]}} (when ^{:go/pos {:op-pos [315 20]}} (and ^{:go/pos {:name-pos [315 5]}} setSysLastVars ^{:go/apos {2 [315 31]} :go/pos {:op-pos [315 28]}} (== ^{:go/pos {:name-pos [315 23]}} serr nil))
+              ^{:go/pos {:tok-pos [316 5]}} (set! ^{:go/pos {:name-pos [316 3]}} _ ^{:go/pos {:lparen [316 14] :rparen [316 43]}} (^{:go/pos {:name-pos [316 7]}} SetAttr ^{:go/pos {:name-pos [316 15]}} sys ^{:go/apos {1 [316 27]} :go/pos {:lparen [316 26] :rparen [316 37]}} (^{:go/pos {:name-pos [316 20]}} NewStr "last_exc") ^{:go/pos {:name-pos [316 40]}} exc))
+              ^{:go/pos {:tok-pos [317 5]}} (set! ^{:go/pos {:name-pos [317 3]}} _ ^{:go/pos {:lparen [317 14] :rparen [317 44]}} (^{:go/pos {:name-pos [317 7]}} SetAttr ^{:go/pos {:name-pos [317 15]}} sys ^{:go/apos {1 [317 27]} :go/pos {:lparen [317 26] :rparen [317 38]}} (^{:go/pos {:name-pos [317 20]}} NewStr "last_type") ^{:go/pos {:name-pos [317 41]}} typ))
+              ^{:go/pos {:tok-pos [318 5]}} (set! ^{:go/pos {:name-pos [318 3]}} _ ^{:go/pos {:lparen [318 14] :rparen [318 45]}} (^{:go/pos {:name-pos [318 7]}} SetAttr ^{:go/pos {:name-pos [318 15]}} sys ^{:go/apos {1 [318 27]} :go/pos {:lparen [318 26] :rparen [318 39]}} (^{:go/pos {:name-pos [318 20]}} NewStr "last_value") ^{:go/pos {:name-pos [318 42]}} exc))
+              ^{:go/pos {:tok-pos [319 5]}} (set! ^{:go/pos {:name-pos [319 3]}} _ ^{:go/pos {:lparen [319 14] :rparen [319 48]}} (^{:go/pos {:name-pos [319 7]}} SetAttr ^{:go/pos {:name-pos [319 15]}} sys ^{:go/apos {1 [319 27]} :go/pos {:lparen [319 26] :rparen [319 43]}} (^{:go/pos {:name-pos [319 20]}} NewStr "last_traceback") ^{:go/pos {:name-pos [319 46]}} tb)))
+
+            (let [^{:tag ^{:go/pos {:name-pos [321 11]}} Object :go/pos {:name-pos [321 6] :tok-pos [321 2]}} hook (zero ^{:go/pos {:name-pos [321 11]}} Object)]
+              ^{:go/pos {:if [322 2] :lbrace [322 17] :rbrace [324 2]}} (when ^{:go/apos {2 [322 13]} :go/pos {:op-pos [322 10]}} (== ^{:go/pos {:name-pos [322 5]}} serr nil)
+                ^{:go/pos {:tok-pos [323 11]}} (set! (values ^{:go/pos {:name-pos [323 3]}} hook ^{:go/pos {:name-pos [323 9]}} _) ^{:go/apos {2 [323 34]} :go/pos {:lparen [323 28] :rparen [323 46]}} (^{:go/pos {:name-pos [323 13]}} GetAttrOptional ^{:go/pos {:name-pos [323 29]}} sys "excepthook")))
+
+              ^{:go/pos {:if [325 2] :lbrace [325 59] :rbrace [336 2]}} (when [^{:go/pos {:tok-pos [325 17]}} (values ^{:go/pos {:name-pos [325 5]}} audit ^{:go/pos {:name-pos [325 12]}} aerr) ^{:go/apos {1 [325 30] 2 [325 37]} :go/pos {:lparen [325 29] :rparen [325 44]}} (^{:go/pos {:name-pos [325 20]}} pyModAttr "sys" "audit")] ^{:go/apos {2 [325 55]} :go/pos {:op-pos [325 52]}} (== ^{:go/pos {:name-pos [325 47]}} aerr nil)
+                (let [^{:go/pos {:name-pos [326 3] :tok-pos [326 5]}} h ^{:go/pos {:name-pos [326 8]}} hook]
+                  ^{:go/pos {:if [327 3] :lbrace [327 15] :rbrace [329 3]}} (when ^{:go/apos {2 [327 11]} :go/pos {:op-pos [327 8]}} (== ^{:go/pos {:name-pos [327 6]}} h nil)
+                    ^{:go/pos {:tok-pos [328 6]}} (set! ^{:go/pos {:name-pos [328 4]}} h ^{:go/pos {:name-pos [328 8]}} None))
+
+                  ^{:go/pos {:if [330 3] :lbrace [330 99] :rbrace [335 3]}} (when [^{:go/pos {:tok-pos [330 14]}} (set! (values ^{:go/pos {:name-pos [330 6]}} _ ^{:go/pos {:name-pos [330 9]}} aerr) ^{:go/apos {3 [330 81]} :go/pos {:lparen [330 20] :rparen [330 84]}} (^{:go/pos {:name-pos [330 16]}} Call ^{:go/pos {:name-pos [330 21]}} audit ^{:go/pos {:lbrace [330 36] :rbrace [330 78]}} (lit ^{:go/pos {:lbrack [330 28]}} (slice ^{:go/pos {:name-pos [330 30]}} Object) ^{:go/apos {1 [330 44]} :go/pos {:lparen [330 43] :rparen [330 60]}} (^{:go/pos {:name-pos [330 37]}} NewStr "sys.excepthook") ^{:go/pos {:name-pos [330 63]}} h ^{:go/pos {:name-pos [330 66]}} typ ^{:go/pos {:name-pos [330 71]}} exc ^{:go/pos {:name-pos [330 76]}} tb) nil))] ^{:go/apos {2 [330 95]} :go/pos {:op-pos [330 92]}} (!= ^{:go/pos {:name-pos [330 87]}} aerr nil)
+                    ^{:go/pos {:if [331 4] :lbrace [331 69] :rbrace [333 4]}} (when [^{:go/pos {:name-pos [331 7] :tok-pos [331 9]}} x ^{:go/pos {:lparen [331 17] :rparen [331 22]}} (^{:go/pos {:name-pos [331 12]}} excOf ^{:go/pos {:name-pos [331 18]}} aerr)] ^{:go/pos {:op-pos [331 34]}} (and ^{:go/apos {2 [331 30]} :go/pos {:op-pos [331 27]}} (!= ^{:go/pos {:name-pos [331 25]}} x nil) ^{:go/pos {:lparen [331 47] :rparen [331 67]}} (^{:go/pos {:name-pos [331 37]}} IsInstance ^{:go/pos {:name-pos [331 48]}} x ^{:go/pos {:name-pos [331 51]}} RuntimeErrorType))
+                      ^{:go/pos {:return [332 5]}} (return))
+
+                    ^{:go/apos {3 [334 70]} :go/pos {:lparen [334 20] :rparen [334 73]}} (^{:go/pos {:name-pos [334 4]}} writeUnraisableC ^{:go/pos {:name-pos [334 21]}} aerr ^{:go/apos {1 [334 34]} :go/pos {:lparen [334 33] :rparen [334 67]}} (^{:go/pos {:name-pos [334 27]}} NewStr "Exception ignored in audit hook") nil))))
+
+
+              ^{:go/pos {:if [337 2] :lbrace [337 33] :rbrace [354 2]}} (when ^{:go/pos {:op-pos [337 17]}} (and ^{:go/apos {2 [337 13]} :go/pos {:op-pos [337 10]}} (!= ^{:go/pos {:name-pos [337 5]}} hook nil) ^{:go/pos {:op-pos [337 25]}} (!= ^{:go/pos {:name-pos [337 20]}} hook ^{:go/pos {:name-pos [337 28]}} None))
+                ^{:go/pos {:if [338 3] :lbrace [338 70] :rbrace [352 3]}} (when [^{:go/pos {:tok-pos [338 14]}} (values ^{:go/pos {:name-pos [338 6]}} _ ^{:go/pos {:name-pos [338 9]}} herr) ^{:go/apos {3 [338 52]} :go/pos {:lparen [338 21] :rparen [338 55]}} (^{:go/pos {:name-pos [338 17]}} Call ^{:go/pos {:name-pos [338 22]}} hook ^{:go/pos {:lbrace [338 36] :rbrace [338 49]}} (lit ^{:go/pos {:lbrack [338 28]}} (slice ^{:go/pos {:name-pos [338 30]}} Object) ^{:go/pos {:name-pos [338 37]}} typ ^{:go/pos {:name-pos [338 42]}} exc ^{:go/pos {:name-pos [338 47]}} tb) nil)] ^{:go/apos {2 [338 66]} :go/pos {:op-pos [338 63]}} (!= ^{:go/pos {:name-pos [338 58]}} herr nil)
+                  (let [^{:go/pos {:name-pos [339 4] :tok-pos [339 6]}} x ^{:go/pos {:lparen [339 14] :rparen [339 19]}} (^{:go/pos {:name-pos [339 9]}} excOf ^{:go/pos {:name-pos [339 15]}} herr)]
+                    ^{:go/pos {:if [340 4] :lbrace [340 16] :rbrace [342 4]}} (when ^{:go/apos {2 [340 12]} :go/pos {:op-pos [340 9]}} (!= ^{:go/pos {:name-pos [340 7]}} x nil)
+                      ^{:go/pos {:lparen [341 21] :rparen [341 23]}} (^{:go/pos {:name-pos [341 5]}} handleSystemExit ^{:go/pos {:name-pos [341 22]}} x))
+
+                    ^{:go/pos {:if [343 4] :lbrace [343 75] :rbrace [345 4]}} (when [^{:go/pos {:tok-pos [343 17]}} (values ^{:go/pos {:name-pos [343 7]}} out ^{:go/pos {:name-pos [343 12]}} oerr) ^{:go/apos {1 [343 30] 2 [343 37]} :go/pos {:lparen [343 29] :rparen [343 45]}} (^{:go/pos {:name-pos [343 20]}} pyModAttr "sys" "stdout")] ^{:go/pos {:op-pos [343 60]}} (and ^{:go/apos {2 [343 56]} :go/pos {:op-pos [343 53]}} (== ^{:go/pos {:name-pos [343 48]}} oerr nil) ^{:go/pos {:op-pos [343 67]}} (!= ^{:go/pos {:name-pos [343 63]}} out ^{:go/pos {:name-pos [343 70]}} None))
+                      ^{:go/pos {:tok-pos [344 10]}} (set! (values ^{:go/pos {:name-pos [344 5]}} _ ^{:go/pos {:name-pos [344 8]}} _) ^{:go/apos {2 [344 26]} :go/pos {:lparen [344 20] :rparen [344 33]}} (^{:go/pos {:name-pos [344 12]}} callMeth ^{:go/pos {:name-pos [344 21]}} out "flush")))
+
+                    ^{:go/apos {1 [346 16]} :go/pos {:lparen [346 15] :rparen [346 44]}} (^{:go/pos {:name-pos [346 4]}} writeStderr "Error in sys.excepthook:\n")
+                    ^{:go/pos {:if [347 4] :lbrace [347 16] :rbrace [349 4]}} (when ^{:go/apos {2 [347 12]} :go/pos {:op-pos [347 9]}} (!= ^{:go/pos {:name-pos [347 7]}} x nil)
+                      ^{:go/apos {2 [348 25]} :go/pos {:lparen [348 21] :rparen [348 28]}} (^{:go/pos {:name-pos [348 5]}} displayException ^{:go/pos {:name-pos [348 22]}} x nil))
+
+                    ^{:go/apos {1 [350 16]} :go/pos {:lparen [350 15] :rparen [350 45]}} (^{:go/pos {:name-pos [350 4]}} writeStderr "\nOriginal exception was:\n")
+                    ^{:go/apos {2 [351 26]} :go/pos {:lparen [351 20] :rparen [351 29]}} (^{:go/pos {:name-pos [351 4]}} displayException ^{:go/pos {:name-pos [351 21]}} exc nil)))
+
+                ^{:go/pos {:return [353 3]}} (return))
+
+              ^{:go/apos {1 [355 14]} :go/pos {:lparen [355 13] :rparen [355 43]}} (^{:go/pos {:name-pos [355 2]}} writeStderr "sys.excepthook is missing\n")
+              ^{:go/apos {2 [356 24]} :go/pos {:lparen [356 18] :rparen [356 27]}} (^{:go/pos {:name-pos [356 2]}} displayException ^{:go/pos {:name-pos [356 19]}} exc nil))))))))
+
+
+
+
+^{:go/pos {:doc [359 1] :func [361 1] :lbrace [361 57] :rbrace [388 1]}} (go/func ^{:go/pos {:name-pos [361 6]}} lineOfOffset "lineOfOffset is PyCode_Addr2Line's _PyCode_CheckLineNumber over code.co_lines(): the line of the range holding the\nbyte offset addr (-1 for a range of no line, or an offset no range holds).\n" ^{:go/pos {:closing [361 40] :opening [361 18]}} [^{:tag ^{:go/pos {:name-pos [361 22]}} Object :go/pos {:name-pos [361 19]}} co ^{:tag ^{:go/pos {:name-pos [361 35]}} int64 :go/pos {:name-pos [361 30]}} addr] :results ^{:go/pos {:closing [361 55] :opening [361 42]}} [^{:go/pos {:name-pos [361 43]}} int64 ^{:go/pos {:name-pos [361 50]}} error]
+  (let [^{:go/pos {:tok-pos [362 13]}} (values ^{:go/pos {:name-pos [362 2]}} lines ^{:go/pos {:name-pos [362 9]}} err) ^{:go/apos {2 [362 29]} :go/pos {:lparen [362 24] :rparen [362 39]}} (^{:go/pos {:name-pos [362 16]}} callMeth ^{:go/pos {:name-pos [362 25]}} co "co_lines")]
+    ^{:go/pos {:if [363 2] :lbrace [363 16] :rbrace [365 2]}} (when ^{:go/apos {2 [363 12]} :go/pos {:op-pos [363 9]}} (!= ^{:go/pos {:name-pos [363 5]}} err nil)
+      ^{:go/apos {1 [364 10]} :go/pos {:return [364 3]}} (return -1 ^{:go/pos {:name-pos [364 14]}} err))
+
+    (let [^{:go/pos {:name-pos [366 2] :tok-pos [366 7]}} line ^{:go/apos {2 [366 16]} :go/pos {:lparen [366 15] :rparen [366 18]}} (conv ^{:go/pos {:name-pos [366 10]}} int64 -1)]
+      ^{:go/pos {:tok-pos [367 6]}} (set! ^{:go/pos {:name-pos [367 2]}} err ^{:go/pos {:lparen [367 15] :rparen [386 3]}} (^{:go/pos {:name-pos [367 8]}} Iterate ^{:go/pos {:name-pos [367 16]}} lines ^{:go/pos {:func [367 23] :lbrace [367 52] :rbrace [386 2]}} (fn ^{:go/pos {:closing [367 36] :opening [367 27]}} [^{:tag ^{:go/pos {:name-pos [367 30]}} Object :go/pos {:name-pos [367 28]}} x] :results ^{:go/pos {:closing [367 50] :opening [367 38]}} [^{:go/pos {:name-pos [367 39]}} bool ^{:go/pos {:name-pos [367 45]}} error]
+            (let [^{:go/pos {:tok-pos [368 10]}} (values ^{:go/pos {:name-pos [368 3]}} tp ^{:go/pos {:name-pos [368 7]}} ok) ^{:go/pos {:lparen [368 20] :rparen [368 22]}} (^{:go/pos {:name-pos [368 13]}} AsTuple ^{:go/pos {:name-pos [368 21]}} x)]
+              ^{:go/pos {:if [369 3] :lbrace [369 32] :rbrace [371 3]}} (when ^{:go/pos {:op-pos [369 10]}} (or ^{:go/pos {:op-pos [369 6]}} (not ^{:go/pos {:name-pos [369 7]}} ok) ^{:go/apos {2 [369 30]} :go/pos {:op-pos [369 27]}} (!= ^{:go/pos {:lparen [369 16] :rparen [369 25]}} (^{:go/pos {:name-pos [369 13]}} len ^{:go/pos {:dot [369 19] :name-pos [369 20]}} (.-Items ^{:go/pos {:name-pos [369 17]}} tp)) 3))
+                ^{:go/apos {1 [370 11] 2 [370 18]} :go/pos {:return [370 4]}} (return false nil))
+
+              (let [^{:go/pos {:tok-pos [372 10]}} (values ^{:go/pos {:name-pos [372 3]}} s ^{:go/pos {:name-pos [372 6]}} ok1) ^{:go/pos {:lparen [372 18] :rparen [372 30]}} (^{:go/pos {:name-pos [372 13]}} AsInt ^{:go/apos {2 [372 28]} :go/pos {:lbrack [372 27] :rbrack [372 29]}} (aget ^{:go/pos {:dot [372 21] :name-pos [372 22]}} (.-Items ^{:go/pos {:name-pos [372 19]}} tp) 0))
+                  ^{:go/pos {:tok-pos [373 11]}} (values ^{:go/pos {:name-pos [373 3]}} en ^{:go/pos {:name-pos [373 7]}} ok2) ^{:go/pos {:lparen [373 19] :rparen [373 31]}} (^{:go/pos {:name-pos [373 14]}} AsInt ^{:go/apos {2 [373 29]} :go/pos {:lbrack [373 28] :rbrack [373 30]}} (aget ^{:go/pos {:dot [373 22] :name-pos [373 23]}} (.-Items ^{:go/pos {:name-pos [373 20]}} tp) 1))]
+                ^{:go/pos {:if [374 3] :lbrace [374 19] :rbrace [376 3]}} (when ^{:go/pos {:op-pos [374 11]}} (or ^{:go/pos {:op-pos [374 6]}} (not ^{:go/pos {:name-pos [374 7]}} ok1) ^{:go/pos {:op-pos [374 14]}} (not ^{:go/pos {:name-pos [374 15]}} ok2))
+                  ^{:go/apos {1 [375 11] 2 [375 18]} :go/pos {:return [375 4]}} (return false nil))
+
+                (let [^{:go/pos {:tok-pos [377 9]}} (values ^{:go/pos {:name-pos [377 3]}} sv ^{:go/pos {:name-pos [377 7]}} _) ^{:go/pos {:dot [377 13] :lparen [377 19] :name-pos [377 14] :rparen [377 20]}} (.Int64 ^{:go/pos {:name-pos [377 12]}} s)
+                    ^{:go/pos {:tok-pos [378 9]}} (values ^{:go/pos {:name-pos [378 3]}} ev ^{:go/pos {:name-pos [378 7]}} _) ^{:go/pos {:dot [378 14] :lparen [378 20] :name-pos [378 15] :rparen [378 21]}} (.Int64 ^{:go/pos {:name-pos [378 12]}} en)]
+                  ^{:go/pos {:if [379 3] :lbrace [379 30] :rbrace [384 3]}} (when ^{:go/pos {:op-pos [379 17]}} (and ^{:go/pos {:op-pos [379 9]}} (<= ^{:go/pos {:name-pos [379 6]}} sv ^{:go/pos {:name-pos [379 12]}} addr) ^{:go/pos {:op-pos [379 25]}} (< ^{:go/pos {:name-pos [379 20]}} addr ^{:go/pos {:name-pos [379 27]}} ev))
+                    ^{:go/pos {:if [380 4] :lbrace [380 39] :rbrace [382 4]}} (when [^{:go/pos {:tok-pos [380 13]}} (values ^{:go/pos {:name-pos [380 7]}} l ^{:go/pos {:name-pos [380 10]}} ok) ^{:go/pos {:lparen [380 21] :rparen [380 33]}} (^{:go/pos {:name-pos [380 16]}} AsInt ^{:go/apos {2 [380 31]} :go/pos {:lbrack [380 30] :rbrack [380 32]}} (aget ^{:go/pos {:dot [380 24] :name-pos [380 25]}} (.-Items ^{:go/pos {:name-pos [380 22]}} tp) 2))] ^{:go/pos {:name-pos [380 36]}} ok
+                      ^{:go/pos {:tok-pos [381 13]}} (set! (values ^{:go/pos {:name-pos [381 5]}} line ^{:go/pos {:name-pos [381 11]}} _) ^{:go/pos {:dot [381 16] :lparen [381 22] :name-pos [381 17] :rparen [381 23]}} (.Int64 ^{:go/pos {:name-pos [381 15]}} l)))
+
+                    ^{:go/apos {1 [383 11] 2 [383 18]} :go/pos {:return [383 4]}} (return false nil))
+
+                  ^{:go/apos {1 [385 10] 2 [385 16]} :go/pos {:return [385 3]}} (return true nil)))))))
+
+      ^{:go/pos {:return [387 2]}} (return ^{:go/pos {:name-pos [387 9]}} line ^{:go/pos {:name-pos [387 15]}} err))))
+
+
+
+
+^{:go/pos {:doc [390 1] :tok-pos [392 1]}} (go/var ^{:tag ^{:go/pos {:star [392 15]}} (* ^{:go/pos {:name-pos [392 16]}} cbuf) :doc "fgetsByte is the stream's next byte as getc gives it (-1 at the end or on an error), read by the world's fread into\none byte of the world's memory.\n" :go/pos {:name-pos [392 5]}} fgetsCell)
+
+^{:go/pos {:func [394 1] :lbrace [394 31] :rbrace [402 1] :return [401 2]}} (go/func ^{:go/pos {:name-pos [394 6]}} fgetsByte ^{:tag ^{:go/pos {:name-pos [394 27]}} int :go/pos {:closing [394 25] :opening [394 15]}} [^{:tag ^{:go/pos {:name-pos [394 19]}} uint64 :go/pos {:name-pos [394 16]}} fp]
+  ^{:go/pos {:if [395 2] :lbrace [395 22] :rbrace [397 2]}} (when ^{:go/apos {2 [395 18]} :go/pos {:op-pos [395 15]}} (== ^{:go/pos {:name-pos [395 5]}} fgetsCell nil)
+    ^{:go/pos {:tok-pos [396 13]}} (set! ^{:go/pos {:name-pos [396 3]}} fgetsCell ^{:go/apos {1 [396 24]} :go/pos {:lparen [396 23] :rparen [396 25]}} (^{:go/pos {:name-pos [396 15]}} allocBuf 1)))
+
+  ^{:go/pos {:if [398 2] :lbrace [398 68] :rbrace [400 2]}} (when ^{:go/apos {2 [398 66]} :go/pos {:op-pos [398 63]}} (!= ^{:go/apos {2 [398 17] 4 [398 46] 5 [398 49]} :go/pos {:dot [398 11] :lparen [398 16] :name-pos [398 12] :rparen [398 61]}} (.Call ^{:go/pos {:dot [398 9] :name-pos [398 10]}} (.-L ^{:go/pos {:lparen [398 7] :rparen [398 8]}} (^{:go/pos {:name-pos [398 5]}} cw)) "fread" ^{:go/pos {:lparen [398 31] :rparen [398 43]}} (conv ^{:go/pos {:name-pos [398 26]}} int64 ^{:go/pos {:dot [398 41] :name-pos [398 42]}} (.-p ^{:go/pos {:name-pos [398 32]}} fgetsCell)) 1 1 ^{:go/pos {:lparen [398 57] :rparen [398 60]}} (conv ^{:go/pos {:name-pos [398 52]}} int64 ^{:go/pos {:name-pos [398 58]}} fp)) 1)
+    ^{:go/apos {1 [399 10]} :go/pos {:return [399 3]}} (return -1))
+
+  ^{:go/pos {:lparen [401 12] :rparen [401 37]}} (conv ^{:go/pos {:name-pos [401 9]}} int ^{:go/pos {:dot [401 18] :lparen [401 24] :name-pos [401 19] :rparen [401 36]}} (.Load8 ^{:go/pos {:lparen [401 16] :rparen [401 17]}} (^{:go/pos {:name-pos [401 13]}} mem) ^{:go/pos {:dot [401 34] :name-pos [401 35]}} (.-p ^{:go/pos {:name-pos [401 25]}} fgetsCell))))
+
+
+
+
+
+^{:go/pos {:doc [404 1] :func [407 1] :lbrace [407 34] :rbrace [420 1]}} (go/func ^{:go/pos {:name-pos [407 6]}} ungetByte "ungetByte is musl's ungetc of a byte just read by fread: the read position stepped back over the buffer's byte\n(rpos at offset 8 of musl's FILE, never below its buffer after a read of it) and the end-of-file flag (F_EOF, 16)\ncleared. EOF is not pushed back.\n" ^{:go/pos {:closing [407 32] :opening [407 15]}} [^{:tag ^{:go/pos {:name-pos [407 19]}} uint64 :go/pos {:name-pos [407 16]}} fp ^{:tag ^{:go/pos {:name-pos [407 29]}} int :go/pos {:name-pos [407 27]}} c]
+  ^{:go/pos {:if [408 2] :lbrace [408 11] :rbrace [410 2]}} (when ^{:go/apos {2 [408 9]} :go/pos {:op-pos [408 7]}} (< ^{:go/pos {:name-pos [408 5]}} c 0)
+    ^{:go/pos {:return [409 3]}} (return))
+
+  (let [^{:go/pos {:name-pos [411 2] :tok-pos [411 4]}} m ^{:go/pos {:lparen [411 10] :rparen [411 11]}} (^{:go/pos {:name-pos [411 7]}} mem)
+      ^{:go/pos {:name-pos [412 2] :tok-pos [412 7]}} rpos ^{:go/pos {:dot [412 11] :lparen [412 18] :name-pos [412 12] :rparen [412 25]}} (.Load64 ^{:go/pos {:name-pos [412 10]}} m ^{:go/apos {2 [412 24]} :go/pos {:op-pos [412 22]}} (+ ^{:go/pos {:name-pos [412 19]}} fp 8))]
+    ^{:go/pos {:if [413 2] :lbrace [413 15] :rbrace [415 2]}} (when ^{:go/apos {2 [413 13]} :go/pos {:op-pos [413 10]}} (== ^{:go/pos {:name-pos [413 5]}} rpos 0)
+      ^{:go/pos {:return [414 3]}} (return))
+
+    ^{:go/pos {:tok-pos [416 6]}} (dec! ^{:go/pos {:name-pos [416 2]}} rpos)
+    ^{:go/pos {:dot [417 3] :lparen [417 10] :name-pos [417 4] :rparen [417 25]}} (.Store8 ^{:go/pos {:name-pos [417 2]}} m ^{:go/pos {:name-pos [417 11]}} rpos ^{:go/pos {:lparen [417 22] :rparen [417 24]}} (conv ^{:go/pos {:name-pos [417 17]}} uint8 ^{:go/pos {:name-pos [417 23]}} c))
+    ^{:go/pos {:dot [418 3] :lparen [418 11] :name-pos [418 4] :rparen [418 22]}} (.Store64 ^{:go/pos {:name-pos [418 2]}} m ^{:go/apos {2 [418 15]} :go/pos {:op-pos [418 14]}} (+ ^{:go/pos {:name-pos [418 12]}} fp 8) ^{:go/pos {:name-pos [418 18]}} rpos)
+    ^{:go/pos {:dot [419 3] :lparen [419 11] :name-pos [419 4] :rparen [419 32]}} (.Store32 ^{:go/pos {:name-pos [419 2]}} m ^{:go/pos {:name-pos [419 12]}} fp ^{:go/apos {2 [419 30]} :go/pos {:op-pos [419 28]}} (bit-and-not ^{:go/pos {:dot [419 17] :lparen [419 24] :name-pos [419 18] :rparen [419 27]}} (.Load32 ^{:go/pos {:name-pos [419 16]}} m ^{:go/pos {:name-pos [419 25]}} fp) 16))))
+
+
+^{:go/pos {:func [422 1] :lbrace [422 67] :rbrace [594 1] :return [593 2]}} (go/func ^{:go/pos {:name-pos [422 6]}} restTable ^{:tag ^{:go/pos {:map [422 18]}} (map ^{:go/pos {:name-pos [422 22]}} string ^{:go/pos {:func [422 29]}} (func ^{:go/pos {:closing [422 58] :opening [422 33]}} [^{:tag ^{:go/pos {:star [422 36]}} (* ^{:go/pos {:dot [422 39] :name-pos [422 40] :x-pos [422 37]}} ci/Thread) :go/pos {:name-pos [422 34]}} t ^{:tag ^{:go/pos {:lbrack [422 50]}} (slice ^{:go/pos {:dot [422 54] :name-pos [422 55] :x-pos [422 52]}} ci/Arg) :go/pos {:name-pos [422 48]}} a] [^{:go/pos {:dot [422 62] :name-pos [422 63] :x-pos [422 60]}} ci/Arg])) :go/pos {:closing [422 16] :opening [422 15]}} []
+  (let [^{:go/pos {:name-pos [423 2] :tok-pos [423 4]}} n ^{:go/pos {:lbrace [423 55] :rbrace [423 56]}} (lit ^{:go/pos {:map [423 7]}} (map ^{:go/pos {:name-pos [423 11]}} string ^{:go/pos {:func [423 18]}} (func ^{:go/pos {:closing [423 47] :opening [423 22]}} [^{:tag ^{:go/pos {:star [423 25]}} (* ^{:go/pos {:dot [423 28] :name-pos [423 29] :x-pos [423 26]}} ci/Thread) :go/pos {:name-pos [423 23]}} t ^{:tag ^{:go/pos {:lbrack [423 39]}} (slice ^{:go/pos {:dot [423 43] :name-pos [423 44] :x-pos [423 41]}} ci/Arg) :go/pos {:name-pos [423 37]}} a] [^{:go/pos {:dot [423 51] :name-pos [423 52] :x-pos [423 49]}} ci/Arg])))]
+    ;; PyErr_Display(unused, value, tb) and PyErr_DisplayException(exc) (Python/pythonrun.c): the exception printed to
+    ;; sys.stderr as the interpreter prints an uncaught one (traceback's _print_exception_bltin)
+    ^{:go/apos {2 [426 4]} :go/pos {:lbrack [426 3] :rbrack [426 19] :tok-pos [426 21]}} (aset ^{:go/pos {:name-pos [426 2]}} n "PyErr_Display" ^{:go/pos {:func [426 23] :lbrace [426 61] :rbrace [431 2] :return [430 3]}} (fn ^{:tag ^{:go/pos {:dot [426 56] :name-pos [426 57] :x-pos [426 54]}} ci/Arg :go/pos {:closing [426 52] :opening [426 27]}} [^{:tag ^{:go/pos {:star [426 30]}} (* ^{:go/pos {:dot [426 33] :name-pos [426 34] :x-pos [426 31]}} ci/Thread) :go/pos {:name-pos [426 28]}} t ^{:tag ^{:go/pos {:lbrack [426 44]}} (slice ^{:go/pos {:dot [426 48] :name-pos [426 49] :x-pos [426 46]}} ci/Arg) :go/pos {:name-pos [426 42]}} a]
+        ^{:go/pos {:if [427 3] :lbrace [427 34] :rbrace [429 3]}} (when [^{:go/pos {:name-pos [427 6] :tok-pos [427 8]}} v ^{:go/pos {:lparen [427 17] :rparen [427 22]}} (^{:go/pos {:name-pos [427 11]}} argObj ^{:go/apos {2 [427 20]} :go/pos {:lbrack [427 19] :rbrack [427 21]}} (aget ^{:go/pos {:name-pos [427 18]}} a 1))] ^{:go/apos {2 [427 30]} :go/pos {:op-pos [427 27]}} (!= ^{:go/pos {:name-pos [427 25]}} v nil)
+          ^{:go/pos {:lparen [428 20] :rparen [428 36]}} (^{:go/pos {:name-pos [428 4]}} displayException ^{:go/pos {:name-pos [428 21]}} v ^{:go/pos {:lparen [428 30] :rparen [428 35]}} (^{:go/pos {:name-pos [428 24]}} argObj ^{:go/apos {2 [428 33]} :go/pos {:lbrack [428 32] :rbrack [428 34]}} (aget ^{:go/pos {:name-pos [428 31]}} a 2))))
+
+        ^{:go/apos {1 [430 13]} :go/pos {:lparen [430 12] :rparen [430 14]}} (^{:go/pos {:name-pos [430 10]}} ai 0)))
+
+    ^{:go/apos {2 [432 4]} :go/pos {:lbrack [432 3] :rbrack [432 28] :tok-pos [432 30]}} (aset ^{:go/pos {:name-pos [432 2]}} n "PyErr_DisplayException" ^{:go/pos {:func [432 32] :lbrace [432 70] :rbrace [437 2] :return [436 3]}} (fn ^{:tag ^{:go/pos {:dot [432 65] :name-pos [432 66] :x-pos [432 63]}} ci/Arg :go/pos {:closing [432 61] :opening [432 36]}} [^{:tag ^{:go/pos {:star [432 39]}} (* ^{:go/pos {:dot [432 42] :name-pos [432 43] :x-pos [432 40]}} ci/Thread) :go/pos {:name-pos [432 37]}} t ^{:tag ^{:go/pos {:lbrack [432 53]}} (slice ^{:go/pos {:dot [432 57] :name-pos [432 58] :x-pos [432 55]}} ci/Arg) :go/pos {:name-pos [432 51]}} a]
+        ^{:go/pos {:if [433 3] :lbrace [433 34] :rbrace [435 3]}} (when [^{:go/pos {:name-pos [433 6] :tok-pos [433 8]}} v ^{:go/pos {:lparen [433 17] :rparen [433 22]}} (^{:go/pos {:name-pos [433 11]}} argObj ^{:go/apos {2 [433 20]} :go/pos {:lbrack [433 19] :rbrack [433 21]}} (aget ^{:go/pos {:name-pos [433 18]}} a 0))] ^{:go/apos {2 [433 30]} :go/pos {:op-pos [433 27]}} (!= ^{:go/pos {:name-pos [433 25]}} v nil)
+          ^{:go/apos {2 [434 24]} :go/pos {:lparen [434 20] :rparen [434 27]}} (^{:go/pos {:name-pos [434 4]}} displayException ^{:go/pos {:name-pos [434 21]}} v nil))
+
+        ^{:go/apos {1 [436 13]} :go/pos {:lparen [436 12] :rparen [436 14]}} (^{:go/pos {:name-pos [436 10]}} ai 0)))
+
+    ;; PyErr_Print() is PyErr_PrintEx(1); the error indicator cleared
+    ^{:go/apos {2 [439 4]} :go/pos {:lbrack [439 3] :rbrack [439 19] :tok-pos [439 21]}} (aset ^{:go/pos {:name-pos [439 2]}} n "PyErr_PrintEx" ^{:go/pos {:func [439 23] :lbrace [439 61] :rbrace [442 2] :return [441 3]}} (fn ^{:tag ^{:go/pos {:dot [439 56] :name-pos [439 57] :x-pos [439 54]}} ci/Arg :go/pos {:closing [439 52] :opening [439 27]}} [^{:tag ^{:go/pos {:star [439 30]}} (* ^{:go/pos {:dot [439 33] :name-pos [439 34] :x-pos [439 31]}} ci/Thread) :go/pos {:name-pos [439 28]}} t ^{:tag ^{:go/pos {:lbrack [439 44]}} (slice ^{:go/pos {:dot [439 48] :name-pos [439 49] :x-pos [439 46]}} ci/Arg) :go/pos {:name-pos [439 42]}} a]
+        ^{:go/pos {:lparen [440 10] :rparen [440 29]}} (^{:go/pos {:name-pos [440 3]}} printEx ^{:go/apos {2 [440 28]} :go/pos {:op-pos [440 25]}} (!= ^{:go/pos {:lparen [440 16] :rparen [440 23]}} (conv ^{:go/pos {:name-pos [440 11]}} int32 ^{:go/pos {:dot [440 21] :name-pos [440 22]}} (.-I ^{:go/apos {2 [440 19]} :go/pos {:lbrack [440 18] :rbrack [440 20]}} (aget ^{:go/pos {:name-pos [440 17]}} a 0))) 0))
+        ^{:go/apos {1 [441 13]} :go/pos {:lparen [441 12] :rparen [441 14]}} (^{:go/pos {:name-pos [441 10]}} ai 0)))
+
+    ^{:go/apos {2 [443 4]} :go/pos {:lbrack [443 3] :rbrack [443 17] :tok-pos [443 19]}} (aset ^{:go/pos {:name-pos [443 2]}} n "PyErr_Print" ^{:go/pos {:func [443 21] :lbrace [443 59] :rbrace [446 2] :return [445 3]}} (fn ^{:tag ^{:go/pos {:dot [443 54] :name-pos [443 55] :x-pos [443 52]}} ci/Arg :go/pos {:closing [443 50] :opening [443 25]}} [^{:tag ^{:go/pos {:star [443 28]}} (* ^{:go/pos {:dot [443 31] :name-pos [443 32] :x-pos [443 29]}} ci/Thread) :go/pos {:name-pos [443 26]}} t ^{:tag ^{:go/pos {:lbrack [443 42]}} (slice ^{:go/pos {:dot [443 46] :name-pos [443 47] :x-pos [443 44]}} ci/Arg) :go/pos {:name-pos [443 40]}} a]
+        ^{:go/apos {1 [444 11]} :go/pos {:lparen [444 10] :rparen [444 15]}} (^{:go/pos {:name-pos [444 3]}} printEx true)
+        ^{:go/apos {1 [445 13]} :go/pos {:lparen [445 12] :rparen [445 14]}} (^{:go/pos {:name-pos [445 10]}} ai 0)))
+
+    ;; PyCode_Addr2Line(code, addrq) (Objects/codeobject.c): co_firstlineno for a negative offset, else the line of the
+    ;; address range that holds it (code.co_lines(), the location table's view)
+    ^{:go/apos {2 [449 4]} :go/pos {:lbrack [449 3] :rbrack [449 22] :tok-pos [449 24]}} (aset ^{:go/pos {:name-pos [449 2]}} n "PyCode_Addr2Line" ^{:go/pos {:func [449 26] :lbrace [449 64] :rbrace [471 2] :return [470 3]}} (fn ^{:tag ^{:go/pos {:dot [449 59] :name-pos [449 60] :x-pos [449 57]}} ci/Arg :go/pos {:closing [449 55] :opening [449 30]}} [^{:tag ^{:go/pos {:star [449 33]}} (* ^{:go/pos {:dot [449 36] :name-pos [449 37] :x-pos [449 34]}} ci/Thread) :go/pos {:name-pos [449 31]}} t ^{:tag ^{:go/pos {:lbrack [449 47]}} (slice ^{:go/pos {:dot [449 51] :name-pos [449 52] :x-pos [449 49]}} ci/Arg) :go/pos {:name-pos [449 45]}} a]
+        (let [^{:go/pos {:name-pos [450 3] :tok-pos [450 6]}} co ^{:go/pos {:lparen [450 15] :rparen [450 20]}} (^{:go/pos {:name-pos [450 9]}} argObj ^{:go/apos {2 [450 18]} :go/pos {:lbrack [450 17] :rbrack [450 19]}} (aget ^{:go/pos {:name-pos [450 16]}} a 0))]
+          ^{:go/pos {:if [451 3] :lbrace [451 16] :rbrace [453 3]}} (when ^{:go/apos {2 [451 12]} :go/pos {:op-pos [451 9]}} (== ^{:go/pos {:name-pos [451 6]}} co nil)
+            ^{:go/pos {:return [452 4]}} (return ^{:go/apos {1 [452 14]} :go/pos {:lparen [452 13] :rparen [452 16]}} (^{:go/pos {:name-pos [452 11]}} ai -1)))
+
+          (let [^{:go/pos {:name-pos [454 3] :tok-pos [454 8]}} addr ^{:go/pos {:lparen [454 16] :rparen [454 30]}} (conv ^{:go/pos {:name-pos [454 11]}} int64 ^{:go/pos {:lparen [454 22] :rparen [454 29]}} (conv ^{:go/pos {:name-pos [454 17]}} int32 ^{:go/pos {:dot [454 27] :name-pos [454 28]}} (.-I ^{:go/apos {2 [454 25]} :go/pos {:lbrack [454 24] :rbrack [454 26]}} (aget ^{:go/pos {:name-pos [454 23]}} a 1))))]
+            ^{:go/pos {:if [455 3] :lbrace [455 15] :rbrace [464 3]}} (when ^{:go/apos {2 [455 13]} :go/pos {:op-pos [455 11]}} (< ^{:go/pos {:name-pos [455 6]}} addr 0)
+              (let [^{:go/pos {:tok-pos [456 11]}} (values ^{:go/pos {:name-pos [456 4]}} v ^{:go/pos {:name-pos [456 7]}} err) ^{:go/pos {:lparen [456 21] :rparen [456 50]}} (^{:go/pos {:name-pos [456 14]}} GetAttr ^{:go/pos {:name-pos [456 22]}} co ^{:go/apos {1 [456 33]} :go/pos {:lparen [456 32] :rparen [456 49]}} (^{:go/pos {:name-pos [456 26]}} NewStr "co_firstlineno"))]
+                ^{:go/pos {:if [457 4] :lbrace [457 18] :rbrace [460 4]}} (when ^{:go/apos {2 [457 14]} :go/pos {:op-pos [457 11]}} (!= ^{:go/pos {:name-pos [457 7]}} err nil)
+                  ^{:go/pos {:tok-pos [458 18]}} (set! ^{:go/pos {:name-pos [458 5]}} errIndicator ^{:go/pos {:name-pos [458 20]}} err)
+                  ^{:go/pos {:return [459 5]}} (return ^{:go/apos {1 [459 15]} :go/pos {:lparen [459 14] :rparen [459 17]}} (^{:go/pos {:name-pos [459 12]}} ai -1)))
+
+                (let [^{:go/pos {:tok-pos [461 9]}} (values ^{:go/pos {:name-pos [461 4]}} i ^{:go/pos {:name-pos [461 7]}} _) ^{:go/pos {:lparen [461 17] :rparen [461 19]}} (^{:go/pos {:name-pos [461 12]}} AsInt ^{:go/pos {:name-pos [461 18]}} v)
+                    ^{:go/pos {:tok-pos [462 9]}} (values ^{:go/pos {:name-pos [462 4]}} x ^{:go/pos {:name-pos [462 7]}} _) ^{:go/pos {:dot [462 13] :lparen [462 19] :name-pos [462 14] :rparen [462 20]}} (.Int64 ^{:go/pos {:name-pos [462 12]}} i)]
+                  ^{:go/pos {:return [463 4]}} (return ^{:go/pos {:lparen [463 13] :rparen [463 15]}} (^{:go/pos {:name-pos [463 11]}} ai ^{:go/pos {:name-pos [463 14]}} x)))))
+
+            (let [^{:go/pos {:tok-pos [465 13]}} (values ^{:go/pos {:name-pos [465 3]}} line ^{:go/pos {:name-pos [465 9]}} err) ^{:go/pos {:lparen [465 28] :rparen [465 37]}} (^{:go/pos {:name-pos [465 16]}} lineOfOffset ^{:go/pos {:name-pos [465 29]}} co ^{:go/pos {:name-pos [465 33]}} addr)]
+              ^{:go/pos {:if [466 3] :lbrace [466 17] :rbrace [469 3]}} (when ^{:go/apos {2 [466 13]} :go/pos {:op-pos [466 10]}} (!= ^{:go/pos {:name-pos [466 6]}} err nil)
+                ^{:go/pos {:tok-pos [467 17]}} (set! ^{:go/pos {:name-pos [467 4]}} errIndicator ^{:go/pos {:name-pos [467 19]}} err)
+                ^{:go/pos {:return [468 4]}} (return ^{:go/apos {1 [468 14]} :go/pos {:lparen [468 13] :rparen [468 16]}} (^{:go/pos {:name-pos [468 11]}} ai -1)))
+
+              ^{:go/pos {:lparen [470 12] :rparen [470 17]}} (^{:go/pos {:name-pos [470 10]}} ai ^{:go/pos {:name-pos [470 13]}} line))))))
+
+    ;; Py_UniversalNewlineFgets(buf, n, stream, fobj) (Objects/fileobject.c, _Py_UniversalNewlineFgetsWithSize): at most
+    ;; n-1 bytes of the line, \r and \r\n read as \n, NUL-terminated; NULL when nothing was read; fobj must be NULL
+    ;; (errno ENXIO otherwise)
+    ^{:go/apos {2 [475 4]} :go/pos {:lbrack [475 3] :rbrack [475 30] :tok-pos [475 32]}} (aset ^{:go/pos {:name-pos [475 2]}} n "Py_UniversalNewlineFgets" ^{:go/pos {:func [475 34] :lbrace [475 72] :rbrace [508 2] :return [507 3]}} (fn ^{:tag ^{:go/pos {:dot [475 67] :name-pos [475 68] :x-pos [475 65]}} ci/Arg :go/pos {:closing [475 63] :opening [475 38]}} [^{:tag ^{:go/pos {:star [475 41]}} (* ^{:go/pos {:dot [475 44] :name-pos [475 45] :x-pos [475 42]}} ci/Thread) :go/pos {:name-pos [475 39]}} t ^{:tag ^{:go/pos {:lbrack [475 55]}} (slice ^{:go/pos {:dot [475 59] :name-pos [475 60] :x-pos [475 57]}} ci/Arg) :go/pos {:name-pos [475 53]}} a]
+        (let [^{:go/pos {:tok-pos [476 17]}} (values ^{:go/pos {:name-pos [476 3]}} buf ^{:go/pos {:name-pos [476 8]}} size ^{:go/pos {:name-pos [476 14]}} fp) (values ^{:go/pos {:lparen [476 26] :rparen [476 33]}} (conv ^{:go/pos {:name-pos [476 20]}} uint64 ^{:go/pos {:dot [476 31] :name-pos [476 32]}} (.-I ^{:go/apos {2 [476 29]} :go/pos {:lbrack [476 28] :rbrack [476 30]}} (aget ^{:go/pos {:name-pos [476 27]}} a 0))) ^{:go/pos {:lparen [476 41] :rparen [476 55]}} (conv ^{:go/pos {:name-pos [476 36]}} int64 ^{:go/pos {:lparen [476 47] :rparen [476 54]}} (conv ^{:go/pos {:name-pos [476 42]}} int32 ^{:go/pos {:dot [476 52] :name-pos [476 53]}} (.-I ^{:go/apos {2 [476 50]} :go/pos {:lbrack [476 49] :rbrack [476 51]}} (aget ^{:go/pos {:name-pos [476 48]}} a 1)))) ^{:go/pos {:lparen [476 64] :rparen [476 71]}} (conv ^{:go/pos {:name-pos [476 58]}} uint64 ^{:go/pos {:dot [476 69] :name-pos [476 70]}} (.-I ^{:go/apos {2 [476 67]} :go/pos {:lbrack [476 66] :rbrack [476 68]}} (aget ^{:go/pos {:name-pos [476 65]}} a 2))))
+            ^{:go/pos {:name-pos [477 3] :tok-pos [477 5]}} m ^{:go/pos {:lparen [477 11] :rparen [477 12]}} (^{:go/pos {:name-pos [477 8]}} mem)]
+          ^{:go/pos {:if [478 3] :lbrace [478 18] :rbrace [483 3]}} (when ^{:go/apos {2 [478 16]} :go/pos {:op-pos [478 13]}} (!= ^{:go/pos {:dot [478 10] :name-pos [478 11]}} (.-I ^{:go/apos {2 [478 8]} :go/pos {:lbrack [478 7] :rbrack [478 9]}} (aget ^{:go/pos {:name-pos [478 6]}} a 3)) 0)
+            ^{:go/pos {:if [479 4] :lbrace [479 32] :rbrace [481 4]}} (when [^{:go/pos {:name-pos [479 7] :tok-pos [479 9]}} p ^{:go/pos {:lparen [479 21] :rparen [479 22]}} (^{:go/pos {:name-pos [479 12]}} errnoAddr)] ^{:go/apos {2 [479 30]} :go/pos {:op-pos [479 27]}} (!= ^{:go/pos {:name-pos [479 25]}} p 0)
+              ^{:go/apos {3 [480 18]} :go/pos {:dot [480 6] :lparen [480 14] :name-pos [480 7] :rparen [480 19]}} (.Store32 ^{:go/pos {:name-pos [480 5]}} m ^{:go/pos {:name-pos [480 15]}} p 6)) ; ENXIO
+
+            ^{:go/pos {:return [482 4]}} (return ^{:go/apos {1 [482 14]} :go/pos {:lparen [482 13] :rparen [482 15]}} (^{:go/pos {:name-pos [482 11]}} ai 0)))
+
+          (let [^{:go/pos {:name-pos [484 3] :tok-pos [484 5]}} p ^{:go/pos {:name-pos [484 8]}} buf]
+            ^{:go/pos {:for [485 3] :lbrace [485 32] :rbrace [502 3]}} (for [^{:go/pos {:tok-pos [485 11]}} (dec! ^{:go/pos {:name-pos [485 7]}} size)] ^{:go/apos {2 [485 22]} :go/pos {:op-pos [485 20]}} (> ^{:go/pos {:name-pos [485 15]}} size 0) ^{:go/pos {:tok-pos [485 29]}} (dec! ^{:go/pos {:name-pos [485 25]}} size)
+              (let [^{:go/pos {:name-pos [486 4] :tok-pos [486 6]}} c ^{:go/pos {:lparen [486 18] :rparen [486 21]}} (^{:go/pos {:name-pos [486 9]}} fgetsByte ^{:go/pos {:name-pos [486 19]}} fp)]
+                ^{:go/pos {:if [487 4] :lbrace [487 13] :rbrace [489 4]}} (when ^{:go/apos {2 [487 11]} :go/pos {:op-pos [487 9]}} (< ^{:go/pos {:name-pos [487 7]}} c 0)
+                  ^{:go/pos {:tok-pos [488 5]}} (break))
+
+                ^{:go/pos {:if [490 4] :lbrace [490 17] :rbrace [496 4]}} (when ^{:go/apos {2 [490 12]} :go/pos {:op-pos [490 9]}} (== ^{:go/pos {:name-pos [490 7]}} c \return)
+                  ^{:go/pos {:tok-pos [491 7]}} (set! ^{:go/pos {:name-pos [491 5]}} c ^{:go/pos {:lparen [491 18] :rparen [491 21]}} (^{:go/pos {:name-pos [491 9]}} fgetsByte ^{:go/pos {:name-pos [491 19]}} fp))
+                  ^{:go/pos {:if [492 5] :lbrace [492 18] :rbrace [495 5]}} (when ^{:go/apos {2 [492 13]} :go/pos {:op-pos [492 10]}} (!= ^{:go/pos {:name-pos [492 8]}} c \newline)
+                    ^{:go/pos {:lparen [493 15] :rparen [493 21]}} (^{:go/pos {:name-pos [493 6]}} ungetByte ^{:go/pos {:name-pos [493 16]}} fp ^{:go/pos {:name-pos [493 20]}} c)
+                    ^{:go/apos {2 [494 10]} :go/pos {:tok-pos [494 8]}} (set! ^{:go/pos {:name-pos [494 6]}} c \newline)))
+
+
+                ^{:go/pos {:dot [497 5] :lparen [497 12] :name-pos [497 6] :rparen [497 24]}} (.Store8 ^{:go/pos {:name-pos [497 4]}} m ^{:go/pos {:name-pos [497 13]}} p ^{:go/pos {:lparen [497 21] :rparen [497 23]}} (conv ^{:go/pos {:name-pos [497 16]}} uint8 ^{:go/pos {:name-pos [497 22]}} c))
+                ^{:go/pos {:tok-pos [498 5]}} (inc! ^{:go/pos {:name-pos [498 4]}} p)
+                ^{:go/pos {:if [499 4] :lbrace [499 17] :rbrace [501 4]}} (when ^{:go/apos {2 [499 12]} :go/pos {:op-pos [499 9]}} (== ^{:go/pos {:name-pos [499 7]}} c \newline)
+                  ^{:go/pos {:tok-pos [500 5]}} (break))))
+
+
+            ^{:go/apos {3 [503 15]} :go/pos {:dot [503 4] :lparen [503 11] :name-pos [503 5] :rparen [503 16]}} (.Store8 ^{:go/pos {:name-pos [503 3]}} m ^{:go/pos {:name-pos [503 12]}} p 0)
+            ^{:go/pos {:if [504 3] :lbrace [504 15] :rbrace [506 3]}} (when ^{:go/pos {:op-pos [504 8]}} (== ^{:go/pos {:name-pos [504 6]}} p ^{:go/pos {:name-pos [504 11]}} buf)
+              ^{:go/pos {:return [505 4]}} (return ^{:go/apos {1 [505 14]} :go/pos {:lparen [505 13] :rparen [505 15]}} (^{:go/pos {:name-pos [505 11]}} ai 0)))
+
+            ^{:go/pos {:lparen [507 12] :rparen [507 23]}} (^{:go/pos {:name-pos [507 10]}} ai ^{:go/pos {:lparen [507 18] :rparen [507 22]}} (conv ^{:go/pos {:name-pos [507 13]}} int64 ^{:go/pos {:name-pos [507 19]}} buf))))))
+
+    ;; the thread module's natives (Python/thread.c, thread_pthread.h)
+    ^{:go/apos {2 [510 4]} :go/pos {:lbrack [510 3] :rbrack [510 31] :tok-pos [510 33]}} (aset ^{:go/pos {:name-pos [510 2]}} n "PyThread_start_new_thread" ^{:go/pos {:func [510 35] :lbrace [510 73] :rbrace [510 123] :return [510 75]}} (fn ^{:tag ^{:go/pos {:dot [510 68] :name-pos [510 69] :x-pos [510 66]}} ci/Arg :go/pos {:closing [510 64] :opening [510 39]}} [^{:tag ^{:go/pos {:star [510 42]}} (* ^{:go/pos {:dot [510 45] :name-pos [510 46] :x-pos [510 43]}} ci/Thread) :go/pos {:name-pos [510 40]}} t ^{:tag ^{:go/pos {:lbrack [510 56]}} (slice ^{:go/pos {:dot [510 60] :name-pos [510 61] :x-pos [510 58]}} ci/Arg) :go/pos {:name-pos [510 54]}} a] ^{:go/pos {:lparen [510 84] :rparen [510 121]}} (^{:go/pos {:name-pos [510 82]}} ai ^{:go/pos {:lparen [510 97] :rparen [510 120]}} (^{:go/pos {:name-pos [510 85]}} startCThread ^{:go/pos {:lparen [510 104] :rparen [510 111]}} (conv ^{:go/pos {:name-pos [510 98]}} uint64 ^{:go/pos {:dot [510 109] :name-pos [510 110]}} (.-I ^{:go/apos {2 [510 107]} :go/pos {:lbrack [510 106] :rbrack [510 108]}} (aget ^{:go/pos {:name-pos [510 105]}} a 0))) ^{:go/pos {:dot [510 118] :name-pos [510 119]}} (.-I ^{:go/apos {2 [510 116]} :go/pos {:lbrack [510 115] :rbrack [510 117]}} (aget ^{:go/pos {:name-pos [510 114]}} a 1))))))
+    ^{:go/apos {2 [511 4]} :go/pos {:lbrack [511 3] :rbrack [511 28] :tok-pos [511 30]}} (aset ^{:go/pos {:name-pos [511 2]}} n "PyThread_allocate_lock" ^{:go/pos {:func [511 32] :lbrace [511 70] :rbrace [528 2] :return [527 3]}} (fn ^{:tag ^{:go/pos {:dot [511 65] :name-pos [511 66] :x-pos [511 63]}} ci/Arg :go/pos {:closing [511 61] :opening [511 36]}} [^{:tag ^{:go/pos {:star [511 39]}} (* ^{:go/pos {:dot [511 42] :name-pos [511 43] :x-pos [511 40]}} ci/Thread) :go/pos {:name-pos [511 37]}} t ^{:tag ^{:go/pos {:lbrack [511 53]}} (slice ^{:go/pos {:dot [511 57] :name-pos [511 58] :x-pos [511 55]}} ci/Arg) :go/pos {:name-pos [511 51]}} a]
+        (let [^{:go/pos {:tok-pos [512 10]}} (values ^{:go/pos {:name-pos [512 3]}} f ^{:go/pos {:name-pos [512 6]}} err) ^{:go/apos {1 [512 23] 2 [512 34]} :go/pos {:lparen [512 22] :rparen [512 49]}} (^{:go/pos {:name-pos [512 13]}} pyModAttr "_thread" "allocate_lock")]
+          ^{:go/pos {:if [513 3] :lbrace [513 17] :rbrace [515 3]}} (when ^{:go/apos {2 [513 13]} :go/pos {:op-pos [513 10]}} (!= ^{:go/pos {:name-pos [513 6]}} err nil)
+            ^{:go/pos {:return [514 4]}} (return ^{:go/apos {1 [514 14]} :go/pos {:lparen [514 13] :rparen [514 15]}} (^{:go/pos {:name-pos [514 11]}} ai 0)))
+
+          (let [^{:go/pos {:tok-pos [516 11]}} (values ^{:go/pos {:name-pos [516 3]}} lk ^:assign ^{:go/pos {:name-pos [516 7]}} err) ^{:go/apos {2 [516 22] 3 [516 27]} :go/pos {:lparen [516 18] :rparen [516 30]}} (^{:go/pos {:name-pos [516 14]}} Call ^{:go/pos {:name-pos [516 19]}} f nil nil)]
+            ^{:go/pos {:if [517 3] :lbrace [517 17] :rbrace [519 3]}} (when ^{:go/apos {2 [517 13]} :go/pos {:op-pos [517 10]}} (!= ^{:go/pos {:name-pos [517 6]}} err nil)
+              ^{:go/pos {:return [518 4]}} (return ^{:go/apos {1 [518 14]} :go/pos {:lparen [518 13] :rparen [518 15]}} (^{:go/pos {:name-pos [518 11]}} ai 0)))
+
+            ;; the world's malloc'd 8 bytes, freed by PyThread_free_lock (not a cbuf, which the collector frees)
+            (let [^{:go/pos {:name-pos [521 3] :tok-pos [521 8]}} cell ^{:go/apos {2 [521 25]} :go/pos {:dot [521 17] :lparen [521 24] :name-pos [521 18] :rparen [521 26]}} (.Malloc ^{:go/pos {:dot [521 15] :name-pos [521 16]}} (.-L ^{:go/pos {:lparen [521 13] :rparen [521 14]}} (^{:go/pos {:name-pos [521 11]}} cw)) 8)]
+              ^{:go/pos {:if [522 3] :lbrace [522 16] :rbrace [524 3]}} (when ^{:go/apos {2 [522 14]} :go/pos {:op-pos [522 11]}} (== ^{:go/pos {:name-pos [522 6]}} cell 0)
+                ^{:go/pos {:return [523 4]}} (return ^{:go/apos {1 [523 14]} :go/pos {:lparen [523 13] :rparen [523 15]}} (^{:go/pos {:name-pos [523 11]}} ai 0)))
+
+              ^{:go/apos {3 [525 20] 4 [525 23]} :go/pos {:dot [525 8] :lparen [525 13] :name-pos [525 9] :rparen [525 24]}} (.Fill ^{:go/pos {:lparen [525 6] :rparen [525 7]}} (^{:go/pos {:name-pos [525 3]}} mem) ^{:go/pos {:name-pos [525 14]}} cell 0 8)
+              ^{:go/pos {:lbrack [526 9] :rbrack [526 14] :tok-pos [526 16]}} (aset ^{:go/pos {:name-pos [526 3]}} cLocks ^{:go/pos {:name-pos [526 10]}} cell ^{:go/pos {:name-pos [526 18]}} lk)
+              ^{:go/pos {:lparen [527 12] :rparen [527 24]}} (^{:go/pos {:name-pos [527 10]}} ai ^{:go/pos {:lparen [527 18] :rparen [527 23]}} (conv ^{:go/pos {:name-pos [527 13]}} int64 ^{:go/pos {:name-pos [527 19]}} cell)))))))
+
+    ^{:go/apos {2 [529 4]} :go/pos {:lbrack [529 3] :rbrack [529 24] :tok-pos [529 26]}} (aset ^{:go/pos {:name-pos [529 2]}} n "PyThread_free_lock" ^{:go/pos {:func [529 28] :lbrace [529 66] :rbrace [535 2] :return [534 3]}} (fn ^{:tag ^{:go/pos {:dot [529 61] :name-pos [529 62] :x-pos [529 59]}} ci/Arg :go/pos {:closing [529 57] :opening [529 32]}} [^{:tag ^{:go/pos {:star [529 35]}} (* ^{:go/pos {:dot [529 38] :name-pos [529 39] :x-pos [529 36]}} ci/Thread) :go/pos {:name-pos [529 33]}} t ^{:tag ^{:go/pos {:lbrack [529 49]}} (slice ^{:go/pos {:dot [529 53] :name-pos [529 54] :x-pos [529 51]}} ci/Arg) :go/pos {:name-pos [529 47]}} a]
+        ^{:go/pos {:if [530 3] :lbrace [530 42] :rbrace [533 3]}} (when [^{:go/pos {:tok-pos [530 12]}} (values ^{:go/pos {:name-pos [530 6]}} _ ^{:go/pos {:name-pos [530 9]}} ok) ^{:go/pos {:lbrack [530 21] :rbrack [530 36]}} (aget ^{:go/pos {:name-pos [530 15]}} cLocks ^{:go/pos {:lparen [530 28] :rparen [530 35]}} (conv ^{:go/pos {:name-pos [530 22]}} uint64 ^{:go/pos {:dot [530 33] :name-pos [530 34]}} (.-I ^{:go/apos {2 [530 31]} :go/pos {:lbrack [530 30] :rbrack [530 32]}} (aget ^{:go/pos {:name-pos [530 29]}} a 0))))] ^{:go/pos {:name-pos [530 39]}} ok
+          ^{:go/pos {:lparen [531 10] :rparen [531 33]}} (^{:go/pos {:name-pos [531 4]}} delete ^{:go/pos {:name-pos [531 11]}} cLocks ^{:go/pos {:lparen [531 25] :rparen [531 32]}} (conv ^{:go/pos {:name-pos [531 19]}} uint64 ^{:go/pos {:dot [531 30] :name-pos [531 31]}} (.-I ^{:go/apos {2 [531 28]} :go/pos {:lbrack [531 27] :rbrack [531 29]}} (aget ^{:go/pos {:name-pos [531 26]}} a 0))))
+          ^{:go/pos {:dot [532 10] :lparen [532 15] :name-pos [532 11] :rparen [532 30]}} (.Free ^{:go/pos {:dot [532 8] :name-pos [532 9]}} (.-L ^{:go/pos {:lparen [532 6] :rparen [532 7]}} (^{:go/pos {:name-pos [532 4]}} cw)) ^{:go/pos {:lparen [532 22] :rparen [532 29]}} (conv ^{:go/pos {:name-pos [532 16]}} uint64 ^{:go/pos {:dot [532 27] :name-pos [532 28]}} (.-I ^{:go/apos {2 [532 25]} :go/pos {:lbrack [532 24] :rbrack [532 26]}} (aget ^{:go/pos {:name-pos [532 23]}} a 0)))))
+
+        ^{:go/apos {1 [534 13]} :go/pos {:lparen [534 12] :rparen [534 14]}} (^{:go/pos {:name-pos [534 10]}} ai 0)))
+
+    ;; PyThread_acquire_lock(lock, waitflag): 1 (PY_LOCK_ACQUIRED) or 0; PyThread_acquire_lock_timed(lock, microseconds,
+    ;; intr_flag): microseconds < 0 waits as long as it takes, 0 does not wait
+    (let [^{:go/pos {:name-pos [538 2] :tok-pos [538 10]}} acquire ^{:go/pos {:func [538 13] :lbrace [538 67] :rbrace [557 2] :return [556 3]}} (fn ^{:tag ^{:go/pos {:name-pos [538 61]}} int64 :go/pos {:closing [538 59] :opening [538 17]}} [^{:tag ^{:go/pos {:name-pos [538 21]}} Object :go/pos {:name-pos [538 18]}} lk ^{:tag ^{:go/pos {:name-pos [538 38]}} bool :go/pos {:name-pos [538 29]}} blocking ^{:tag ^{:go/pos {:name-pos [538 52]}} float64 :go/pos {:name-pos [538 44]}} timeout]
+          (let [^{:go/pos {:name-pos [539 3] :tok-pos [539 8]}} args ^{:go/pos {:lbrace [539 19] :rbrace [539 25]}} (lit ^{:go/pos {:lbrack [539 11]}} (slice ^{:go/pos {:name-pos [539 13]}} Object) ^{:go/pos {:name-pos [539 20]}} False)]
+            ^{:go/pos {:if [540 3] :lbrace [540 15] :rbrace [542 3]}} (when ^{:go/pos {:name-pos [540 6]}} blocking
+              ^{:go/pos {:tok-pos [541 9]}} (set! ^{:go/pos {:name-pos [541 4]}} args ^{:go/pos {:lbrace [541 19] :rbrace [541 43]}} (lit ^{:go/pos {:lbrack [541 11]}} (slice ^{:go/pos {:name-pos [541 13]}} Object) ^{:go/pos {:name-pos [541 20]}} True ^{:go/pos {:lparen [541 34] :rparen [541 42]}} (^{:go/pos {:name-pos [541 26]}} NewFloat ^{:go/pos {:name-pos [541 35]}} timeout))))
+
+            ^{:go/apos {5 [556 10]}} (let [^{:tag ^{:go/pos {:name-pos [543 9]}} Object :go/pos {:name-pos [543 7] :tok-pos [543 3]}} r (zero ^{:go/pos {:name-pos [543 9]}} Object)
+                ^{:tag ^{:go/pos {:name-pos [544 11]}} error :go/pos {:name-pos [544 7] :tok-pos [544 3]}} err (zero ^{:go/pos {:name-pos [544 11]}} error)]
+              ^{:go/pos {:else-lbrace [547 10] :else-rbrace [549 3] :if [545 3] :lbrace [545 15] :rbrace [547 3]}} (if ^{:go/pos {:name-pos [545 6]}} blocking
+                ^{:go/pos {:lparen [546 16] :rparen [546 69]}} (^{:go/pos {:name-pos [546 4]}} blockingWait ^{:go/pos {:func [546 17] :lbrace [546 24] :rbrace [546 68]}} (fn ^{:go/pos {:closing [546 22] :opening [546 21]}} [] ^{:go/pos {:tok-pos [546 33]}} (set! (values ^{:go/pos {:name-pos [546 26]}} r ^{:go/pos {:name-pos [546 29]}} err) ^{:go/apos {2 [546 48]} :go/pos {:ellipsis [546 63] :lparen [546 43] :rparen [546 66]}} (^{:go/pos {:name-pos [546 35]}} callMeth ^{:go/pos {:name-pos [546 44]}} lk "acquire" (spread ^{:go/pos {:name-pos [546 59]}} args)))))
+
+                ^{:go/pos {:tok-pos [548 11]}} (set! (values ^{:go/pos {:name-pos [548 4]}} r ^{:go/pos {:name-pos [548 7]}} err) ^{:go/apos {2 [548 26]} :go/pos {:ellipsis [548 41] :lparen [548 21] :rparen [548 44]}} (^{:go/pos {:name-pos [548 13]}} callMeth ^{:go/pos {:name-pos [548 22]}} lk "acquire" (spread ^{:go/pos {:name-pos [548 37]}} args))))
+
+              ^{:go/pos {:if [550 3] :lbrace [550 17] :rbrace [552 3]}} (when ^{:go/apos {2 [550 13]} :go/pos {:op-pos [550 10]}} (!= ^{:go/pos {:name-pos [550 6]}} err nil)
+                ^{:go/apos {1 [551 11]} :go/pos {:return [551 4]}} (return 0))
+
+              ^{:go/pos {:if [553 3] :lbrace [553 27] :rbrace [555 3]}} (when [^{:go/pos {:tok-pos [553 11]}} (values ^{:go/pos {:name-pos [553 6]}} b ^{:go/pos {:name-pos [553 9]}} _) ^{:go/pos {:lparen [553 20] :rparen [553 22]}} (^{:go/pos {:name-pos [553 14]}} Truthy ^{:go/pos {:name-pos [553 21]}} r)] ^{:go/pos {:name-pos [553 25]}} b
+                ^{:go/apos {1 [554 11]} :go/pos {:return [554 4]}} (return 1))
+
+              0)))]
+
+      ^{:go/apos {2 [558 4]} :go/pos {:lbrack [558 3] :rbrack [558 27] :tok-pos [558 29]}} (aset ^{:go/pos {:name-pos [558 2]}} n "PyThread_acquire_lock" ^{:go/pos {:func [558 31] :lbrace [558 69] :rbrace [560 2] :return [559 3]}} (fn ^{:tag ^{:go/pos {:dot [558 64] :name-pos [558 65] :x-pos [558 62]}} ci/Arg :go/pos {:closing [558 60] :opening [558 35]}} [^{:tag ^{:go/pos {:star [558 38]}} (* ^{:go/pos {:dot [558 41] :name-pos [558 42] :x-pos [558 39]}} ci/Thread) :go/pos {:name-pos [558 36]}} t ^{:tag ^{:go/pos {:lbrack [558 52]}} (slice ^{:go/pos {:dot [558 56] :name-pos [558 57] :x-pos [558 54]}} ci/Arg) :go/pos {:name-pos [558 50]}} a]
+          ^{:go/pos {:lparen [559 12] :rparen [559 58]}} (^{:go/pos {:name-pos [559 10]}} ai ^{:go/apos {3 [559 55]} :go/pos {:lparen [559 20] :rparen [559 57]}} (^{:go/pos {:name-pos [559 13]}} acquire ^{:go/pos {:lparen [559 27] :rparen [559 32]}} (^{:go/pos {:name-pos [559 21]}} lockOf ^{:go/apos {2 [559 30]} :go/pos {:lbrack [559 29] :rbrack [559 31]}} (aget ^{:go/pos {:name-pos [559 28]}} a 0)) ^{:go/apos {2 [559 52]} :go/pos {:op-pos [559 49]}} (!= ^{:go/pos {:lparen [559 40] :rparen [559 47]}} (conv ^{:go/pos {:name-pos [559 35]}} int32 ^{:go/pos {:dot [559 45] :name-pos [559 46]}} (.-I ^{:go/apos {2 [559 43]} :go/pos {:lbrack [559 42] :rbrack [559 44]}} (aget ^{:go/pos {:name-pos [559 41]}} a 1))) 0) -1))))
+
+      ^{:go/apos {2 [561 4]} :go/pos {:lbrack [561 3] :rbrack [561 33] :tok-pos [561 35]}} (aset ^{:go/pos {:name-pos [561 2]}} n "PyThread_acquire_lock_timed" ^{:go/pos {:func [561 37] :lbrace [561 75] :rbrace [571 2] :return [570 3]}} (fn ^{:tag ^{:go/pos {:dot [561 70] :name-pos [561 71] :x-pos [561 68]}} ci/Arg :go/pos {:closing [561 66] :opening [561 41]}} [^{:tag ^{:go/pos {:star [561 44]}} (* ^{:go/pos {:dot [561 47] :name-pos [561 48] :x-pos [561 45]}} ci/Thread) :go/pos {:name-pos [561 42]}} t ^{:tag ^{:go/pos {:lbrack [561 58]}} (slice ^{:go/pos {:dot [561 62] :name-pos [561 63] :x-pos [561 60]}} ci/Arg) :go/pos {:name-pos [561 56]}} a]
+          (let [^{:go/pos {:name-pos [562 3] :tok-pos [562 6]}} us ^{:go/pos {:dot [562 13] :name-pos [562 14]}} (.-I ^{:go/apos {2 [562 11]} :go/pos {:lbrack [562 10] :rbrack [562 12]}} (aget ^{:go/pos {:name-pos [562 9]}} a 1))]
+            ^{:go/pos {:if [563 3] :lbrace [563 14] :rbrace [565 3]}} (when ^{:go/apos {2 [563 12]} :go/pos {:op-pos [563 9]}} (== ^{:go/pos {:name-pos [563 6]}} us 0)
+              ^{:go/pos {:return [564 4]}} (return ^{:go/pos {:lparen [564 13] :rparen [564 45]}} (^{:go/pos {:name-pos [564 11]}} ai ^{:go/apos {2 [564 36] 3 [564 43]} :go/pos {:lparen [564 21] :rparen [564 44]}} (^{:go/pos {:name-pos [564 14]}} acquire ^{:go/pos {:lparen [564 28] :rparen [564 33]}} (^{:go/pos {:name-pos [564 22]}} lockOf ^{:go/apos {2 [564 31]} :go/pos {:lbrack [564 30] :rbrack [564 32]}} (aget ^{:go/pos {:name-pos [564 29]}} a 0)) false 0))))
+
+            (let ^{:go/apos {1 [566 14]}} [^{:go/pos {:name-pos [566 3] :tok-pos [566 11]}} timeout -1.0]
+              ^{:go/pos {:if [567 3] :lbrace [567 13] :rbrace [569 3]}} (when ^{:go/apos {2 [567 11]} :go/pos {:op-pos [567 9]}} (> ^{:go/pos {:name-pos [567 6]}} us 0)
+                ^{:go/pos {:tok-pos [568 12]}} (set! ^{:go/pos {:name-pos [568 4]}} timeout ^{:go/apos {2 [568 28]} :go/atext {2 "1e6"} :go/pos {:op-pos [568 26]}} (/ ^{:go/pos {:lparen [568 21] :rparen [568 24]}} (conv ^{:go/pos {:name-pos [568 14]}} float64 ^{:go/pos {:name-pos [568 22]}} us) 1000000.0)))
+
+              ^{:go/pos {:lparen [570 12] :rparen [570 49]}} (^{:go/pos {:name-pos [570 10]}} ai ^{:go/apos {2 [570 35]} :go/pos {:lparen [570 20] :rparen [570 48]}} (^{:go/pos {:name-pos [570 13]}} acquire ^{:go/pos {:lparen [570 27] :rparen [570 32]}} (^{:go/pos {:name-pos [570 21]}} lockOf ^{:go/apos {2 [570 30]} :go/pos {:lbrack [570 29] :rbrack [570 31]}} (aget ^{:go/pos {:name-pos [570 28]}} a 0)) true ^{:go/pos {:name-pos [570 41]}} timeout))))))
+
+      ^{:go/apos {2 [572 4]} :go/pos {:lbrack [572 3] :rbrack [572 27] :tok-pos [572 29]}} (aset ^{:go/pos {:name-pos [572 2]}} n "PyThread_release_lock" ^{:go/pos {:func [572 31] :lbrace [572 69] :rbrace [576 2] :return [575 3]}} (fn ^{:tag ^{:go/pos {:dot [572 64] :name-pos [572 65] :x-pos [572 62]}} ci/Arg :go/pos {:closing [572 60] :opening [572 35]}} [^{:tag ^{:go/pos {:star [572 38]}} (* ^{:go/pos {:dot [572 41] :name-pos [572 42] :x-pos [572 39]}} ci/Thread) :go/pos {:name-pos [572 36]}} t ^{:tag ^{:go/pos {:lbrack [572 52]}} (slice ^{:go/pos {:dot [572 56] :name-pos [572 57] :x-pos [572 54]}} ci/Arg) :go/pos {:name-pos [572 50]}} a]
+          ;; a lock not held stays released (thread_pthread.h's semaphore lock posts; the error is no one's to see)
+          ^{:go/pos {:tok-pos [574 8]}} (set! (values ^{:go/pos {:name-pos [574 3]}} _ ^{:go/pos {:name-pos [574 6]}} _) ^{:go/apos {2 [574 33]} :go/pos {:lparen [574 18] :rparen [574 42]}} (^{:go/pos {:name-pos [574 10]}} callMeth ^{:go/pos {:lparen [574 25] :rparen [574 30]}} (^{:go/pos {:name-pos [574 19]}} lockOf ^{:go/apos {2 [574 28]} :go/pos {:lbrack [574 27] :rbrack [574 29]}} (aget ^{:go/pos {:name-pos [574 26]}} a 0)) "release"))
+          ^{:go/apos {1 [575 13]} :go/pos {:lparen [575 12] :rparen [575 14]}} (^{:go/pos {:name-pos [575 10]}} ai 0)))
+
+      ;; PySlice_Unpack (queue 262's, capi_limited.go) when an index of the slice is no int or None: its __index__ is Python
+      ;; code that may change any object C sees (gh-72054: test_slice's PopIndex pops from the list whose Py_SIZE the
+      ;; macro PySlice_GetIndicesEx reads after the call), so the mirrors are synchronized around it as around a call
+      ;; into C: C's writes taken first, then Go's state written back to C
+      ^{:go/pos {:if [581 2] :lbrace [581 60] :rbrace [592 2]}} (when [^{:go/pos {:name-pos [581 5] :tok-pos [581 12]}} unpack ^{:go/apos {2 [581 27]} :go/pos {:lbrack [581 26] :rbrack [581 43]}} (aget ^{:go/pos {:name-pos [581 15]}} capiNatives "PySlice_Unpack")] ^{:go/apos {2 [581 56]} :go/pos {:op-pos [581 53]}} (!= ^{:go/pos {:name-pos [581 46]}} unpack nil)
+        ^{:go/apos {2 [582 5]} :go/pos {:lbrack [582 4] :rbrack [582 21] :tok-pos [582 23]}} (aset ^{:go/pos {:name-pos [582 3]}} n "PySlice_Unpack" ^{:go/pos {:func [582 25] :lbrace [582 63] :rbrace [591 3] :return [590 4]}} (fn ^{:tag ^{:go/pos {:dot [582 58] :name-pos [582 59] :x-pos [582 56]}} ci/Arg :go/pos {:closing [582 54] :opening [582 29]}} [^{:tag ^{:go/pos {:star [582 32]}} (* ^{:go/pos {:dot [582 35] :name-pos [582 36] :x-pos [582 33]}} ci/Thread) :go/pos {:name-pos [582 30]}} t ^{:tag ^{:go/pos {:lbrack [582 46]}} (slice ^{:go/pos {:dot [582 50] :name-pos [582 51] :x-pos [582 48]}} ci/Arg) :go/pos {:name-pos [582 44]}} a]
+            (let [^{:go/pos {:tok-pos [583 10]}} (values ^{:go/pos {:name-pos [583 4]}} s ^{:go/pos {:name-pos [583 7]}} ok) ^{:go/pos {:dot [583 25] :lparen [583 26] :rparen [583 33]}} (assert ^{:go/pos {:star [583 27]}} (* ^{:go/pos {:name-pos [583 28]}} Slice) ^{:go/pos {:lparen [583 19] :rparen [583 24]}} (^{:go/pos {:name-pos [583 13]}} argObj ^{:go/apos {2 [583 22]} :go/pos {:lbrack [583 21] :rbrack [583 23]}} (aget ^{:go/pos {:name-pos [583 20]}} a 0)))]
+              ^{:go/pos {:if [584 4] :lbrace [584 80] :rbrace [586 4]}} (when ^{:go/pos {:op-pos [584 11]}} (or ^{:go/pos {:op-pos [584 7]}} (not ^{:go/pos {:name-pos [584 8]}} ok) ^:go/paren ^{:go/ops [[584 35] [584 57]] :go/parens [[[584 14] [584 78]]] :go/pos {:op-pos [584 57]}} (and ^{:go/pos {:lparen [584 25] :rparen [584 33]}} (^{:go/pos {:name-pos [584 15]}} plainIndex ^{:go/pos {:dot [584 27] :name-pos [584 28]}} (.-Start ^{:go/pos {:name-pos [584 26]}} s)) ^{:go/pos {:lparen [584 48] :rparen [584 55]}} (^{:go/pos {:name-pos [584 38]}} plainIndex ^{:go/pos {:dot [584 50] :name-pos [584 51]}} (.-Stop ^{:go/pos {:name-pos [584 49]}} s)) ^{:go/pos {:lparen [584 70] :rparen [584 77]}} (^{:go/pos {:name-pos [584 60]}} plainIndex ^{:go/pos {:dot [584 72] :name-pos [584 73]}} (.-Step ^{:go/pos {:name-pos [584 71]}} s))))
+                ^{:go/pos {:return [585 5]}} (return ^{:go/pos {:lparen [585 18] :rparen [585 23]}} (^{:go/pos {:name-pos [585 12]}} unpack ^{:go/pos {:name-pos [585 19]}} t ^{:go/pos {:name-pos [585 22]}} a)))
+
+              ^{:go/pos {:lparen [587 16] :rparen [587 17]}} (^{:go/pos {:name-pos [587 4]}} syncAllFromC)
+              (let [^{:go/pos {:name-pos [588 4] :tok-pos [588 6]}} r ^{:go/pos {:lparen [588 15] :rparen [588 20]}} (^{:go/pos {:name-pos [588 9]}} unpack ^{:go/pos {:name-pos [588 16]}} t ^{:go/pos {:name-pos [588 19]}} a)]
+                ^{:go/pos {:lparen [589 14] :rparen [589 15]}} (^{:go/pos {:name-pos [589 4]}} syncAllToC)
+                ^{:go/pos {:name-pos [590 11]}} r)))))
+
+
+      ^{:go/pos {:name-pos [593 9]}} n)))
+
+
+
+^{:go/pos {:doc [596 1] :func [597 1] :lbrace [597 32] :rbrace [603 1] :return [602 2]}} (go/func ^{:go/pos {:name-pos [597 6]}} plainIndex "plainIndex is a slice index whose evaluation runs no Python code: None or an exact int.\n" ^{:tag ^{:go/pos {:name-pos [597 27]}} bool :go/pos {:closing [597 25] :opening [597 16]}} [^{:tag ^{:go/pos {:name-pos [597 19]}} Object :go/pos {:name-pos [597 17]}} o]
+  ^{:go/pos {:if [598 2] :lbrace [598 27] :rbrace [600 2]}} (when ^{:go/pos {:op-pos [598 14]}} (or ^{:go/apos {2 [598 10]} :go/pos {:op-pos [598 7]}} (== ^{:go/pos {:name-pos [598 5]}} o nil) ^{:go/pos {:op-pos [598 19]}} (== ^{:go/pos {:name-pos [598 17]}} o ^{:go/pos {:name-pos [598 22]}} None))
+    ^{:go/apos {1 [599 10]} :go/pos {:return [599 3]}} (return true))
+
+  (let [^{:go/pos {:tok-pos [601 8]}} (values ^{:go/pos {:name-pos [601 2]}} _ ^{:go/pos {:name-pos [601 5]}} ok) ^{:go/pos {:dot [601 12] :lparen [601 13] :rparen [601 18]}} (assert ^{:go/pos {:star [601 14]}} (* ^{:go/pos {:name-pos [601 15]}} Int) ^{:go/pos {:name-pos [601 11]}} o)]
+    ^{:go/pos {:name-pos [602 9]}} ok))

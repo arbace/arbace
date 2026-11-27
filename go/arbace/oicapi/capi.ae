@@ -103,6 +103,60 @@
 (go/var ^{:tag (func [int string (slice int64)] [(slice int64)]) :doc "RuntimeEvents, when set, answers the C consumer of runtime events (__oi_re_control op 0, __oi_re_cursor 1, __oi_re_next 2,\ntheir arguments as RuntimeEventsControl's, RuntimeEventsCursor's and RuntimeEventsNext's, the results in their order) from the AOT\nruntime's ring in place of oi's (queue 583: a program's events are the runtime's).\n"}
   RuntimeEvents)
 
+(go/var ^{:tag (func []) :doc "MajorCycle, when set, tells the AOT runtime that the stubs' allocations ended a major cycle of the simulated heap (oc-tail:\nthe runtime's collection then fires its own finalisers, which run at its next allocation: c-api/alloc_async), as oi's CAlloc fires\noi's.\n"}
+  MajorCycle)
+
+(go/var ^{:tag (map any bool) :doc "managedNew is the bigarrays the C allocated with memory the collector manages (CAML_BA_MANAGED) not yet sent to the AOT
+runtime (oc-tail: kept only when MajorCycle is set, the light level's server).
+"}
+  managedNew)
+
+(go/func Managed "Managed tells whether v is a bigarray the C allocated with memory the collector manages, not yet sent (managedNew; oc-tail: the
+light level's server marks it so in the wire form, and the runtime samples its memory as oi does); it is then forgotten.
+" ^bool [^oi/Value v]
+  (when [(values _ ok) (aget managedNew (conv any v))] ok
+    (delete managedNew (conv any v))
+    (return true))
+  false)
+
+(go/var ^{:tag int :doc "cWords is the words the stubs allocated since the simulated major heap's last cycle end, as oi's CAlloc counts them\n(cMajorUsed; oc-tail: counted here, not read back through GcCount, whose figures read Go's memory statistics).\n"} cWords)
+(go/var ^{:tag int :doc "cCycle is the words of a cycle, oi's minor heap's (OCAMLRUNPARAM's s as minorHeapInit normalizes it, else 256 Ki), read once.\n"} cCycle)
+
+(go/func cycleWords "cycleWords is cCycle, read once from OCAMLRUNPARAM (or CAMLRUNPARAM) as oi's minorHeapInit reads it.\n" ^int []
+  (when (== cCycle 0)
+    (let [(values opt ok) (os/LookupEnv "OCAMLRUNPARAM")
+          n 262144]
+      (when (not ok)
+        (set! opt (os/Getenv "CAMLRUNPARAM")))
+      (range [_ o (strings/Split opt ",")]
+        (when (strings/HasPrefix o "s=")
+          (let [v (subslice o 2)
+                m 1]
+            (when (strings/HasSuffix v "k")
+              (set! m 1024)
+              (set! v (strings/TrimSuffix v "k")))
+            (when (strings/HasSuffix v "M")
+              (set! m 1048576)
+              (set! v (strings/TrimSuffix v "M")))
+            (when (strings/HasSuffix v "G")
+              (set! m 1073741824)
+              (set! v (strings/TrimSuffix v "G")))
+            (when [(values x err) (strconv/Atoi v)] (== err nil)
+              (set! n (* x m))
+              (when (< n 257)
+                (set! n 257))
+              (set! n (* (/ (+ n 511) 512) 512))))))
+      (set! cCycle n)))
+  cCycle)
+
+(go/func cAlloc "cAlloc is oi's CAlloc of a stub's block of wosize words, then MajorCycle when it ended a major cycle of the simulated heap\n(the stubs' words since the last reaching a minor heap's, as CAlloc's cMajorUsed).\n" [^int wosize]
+  (oi/CAlloc wosize)
+  (when (!= MajorCycle nil)
+    (set! cWords (+ cWords (+ wosize 1)))
+    (when (>= cWords (cycleWords))
+      (set! cWords 0)
+      (MajorCycle))))
+
 (go/func reNext "reNext is the C consumer's read at pos: RuntimeEvents' (op 2), else oi's RuntimeEventsNext.\n" [^int pos]
   :results [^int status ^int next ^int kind ^int dom ^int64 ts ^int id ^int64 data]
   (when (!= RuntimeEvents nil)
@@ -689,6 +743,10 @@ call's copies forgotten.\n" [^{:tag (* capi)} c]
                   ;; as the C runtime's caml_ba_alloc does (caml_alloc_custom_mem); an external array's is not
                   (when (== (bit-and flags 0x600) 0x200)
                     (oi/MemprofCustom (.-th c) v)
+                    (when (!= MajorCycle nil)
+                      (when (== managedNew nil)
+                        (set! managedNew (lit (map any bool))))
+                      (aset managedNew (conv any v) true))
                     (when (== (.-cdata c) nil)
                       (set! (.-cdata c) (lit (map any uint64))))
                     (aset (.-cdata c) (conv any v) (.Load64 m (+ w 8))))
@@ -911,11 +969,11 @@ here, not a null pointer (queue 478).
                       (when (== (.-depth c) 0)
                         (return (ai (.allocStatic c (arg a 0) (conv int (arg a 1))))))
                       ;; a stub's allocation counted by oi (queue 523: Gc's words, the simulated heaps' collections)
-                      (oi/CAlloc (conv int (arg a 0)))
+                      (cAlloc (conv int (arg a 0)))
                       (ai (.alloc c (arg a 0) (conv int (arg a 1)))))]
       ["__oi_alloc_static" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                              (when (> (.-depth c) 0)
-                               (oi/CAlloc (conv int (arg a 0))))
+                               (cAlloc (conv int (arg a 0))))
                              (ai (.allocStatic c (arg a 0) (conv int (arg a 1)))))]
       ["__oi_gc_count" (fn ^ci/Arg [^{:tag (* ci/Thread)} _ ^{:tag (slice ci/Arg)} a]
                          (ai (conv uint64 (oi/GcCount (conv int (arg a 0))))))]
