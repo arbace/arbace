@@ -5972,7 +5972,11 @@
                            ;; value is undefined, so no constant expression, [expr.const]/5.8: GCC's "control reaches end of
                            ;; non-void function" in the call's expansion, cpp1y/constexpr-return2.C)
                            (and (checking?) (= :normal (first r)) (not= "main" (:name f)) (not (:coroutine f))
-                                (not (:implicit f)) (not (:defaulted f)) (:body f) (:node f) (not (header-node? (:node f))))
+                                (not (:implicit f)) (not (:defaulted f)) (:body f) (:node f) (not (header-node? (:node f)))
+                                (not (:cx-stmt-refused (fnd (:id f))))
+                                ;; (nor a body with a VLA, GNU's, the pedantic error its own: cpp1y/pr63996.C)
+                                (not (some #(and (map? %) (= :decl (:s %)) (:var %) (some-> (var* (:var %)) :ty abi/unq :vla))
+                                           (tree-seq #(or (map? %) (vector? %)) #(if (map? %) (vals (select-keys % [:items :then :else :body :s])) (seq %)) (:tbody f)))))
                            (ub! e "'" (:name f) "' flows off the end of a function that returns a value")
                            :else (not-constant "no return")))))))
        ;; (CP374 (a): pointers into string literals and arrays, as clang's ExprConstant's LValue with its designator: a
@@ -15048,6 +15052,9 @@
                                                    (when (and (= :constexpr (:codegen/refused (ex-data e))) (:fn-id ctx) (:constexpr (fnd (:fn-id ctx)))
                                                               (not (:consteval (fnd (:fn-id ctx)))) (re-find #"constexpr variable '" (str (ex-message e))))
                                                      (upd-fn! (:fn-id ctx) assoc :cx-body-error true))
+                                                   ;; (cpp-sema-const: the function's body now has a statement left out, its
+                                                   ;; evaluation no longer the program's: :cx-stmt-refused, the flowing-off check's)
+                                                   (when (:fn-id ctx) (upd-fn! (:fn-id ctx) assoc :cx-stmt-refused true))
                                                    (h e (some-> *at* deref)) {:s :null})
                                                (throw e)))))
                               #(stmt c %))]
@@ -15199,6 +15206,7 @@
                                                                           (if (and (:codegen/refused (ex-data e)) (not= "CompoundStmt" (:kind x)))
                                                                             (do (when (and (= :constexpr (:codegen/refused (ex-data e))) (:fn-id ctx) (:consteval (fnd (:fn-id ctx))))
                                                                                   (upd-fn! (:fn-id ctx) assoc :cx-imm-error true))
+                                                                                (when (:fn-id ctx) (upd-fn! (:fn-id ctx) assoc :cx-stmt-refused true))
                                                                                 (h e (some-> *at* deref)) {:s :null})
                                                                             (throw e))))
                                                                    (stmt (block-ctx c) x)))]
@@ -15684,8 +15692,13 @@
 (defn analyze-fn!
   "Analyzes a function's body (and a constructor's mem-initializers) into :tbody."
   [fid]
+  ;; (cpp-sema-const, the checker: an error reported while the body is analyzed marks it :cx-stmt-refused, the flowing-off
+  ;; check's: GCC evaluates no erroneous constexpr body, cpp1y/pr63996.C's VLA in foo then `constexpr int j = foo (1);`)
+  (binding [*on-refusal* (if-let [h (when (checking?) *on-refusal*)]
+                           (fn [e n] (upd-fn! fid assoc :cx-stmt-refused true) (h e n))
+                           *on-refusal*)]
   ;; (cpp-extfloat: a body analyzed while a requirement is (an instantiation it asks) is no requirement's expression)
-  (if *cx-requirement* (binding [*cx-requirement* false] (analyze-fn!* fid)) (analyze-fn!* fid)))
+  (if *cx-requirement* (binding [*cx-requirement* false] (analyze-fn!* fid)) (analyze-fn!* fid))))
 
 (defn- analyze-fn!*
   [fid]
