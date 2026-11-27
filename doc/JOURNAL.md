@@ -27230,3 +27230,28 @@ level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83
 - Java (bin/reap): read 7,843 / 0 / 1 -> 7,844 / 0 / 0; eval 3,205 / 0 / 51 (69 n/a) -> 3,222 / 0 / 31 (72 n/a); AOT
   3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
   --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.
+
+## 2026-11-27 — C++ read independence: the own front end's fifth pass over the clang-only dg rows (cpp-read-indep-1127)
+
+Branch `cpp-read-indep-1127` (host agent, off next 120b1b912; 20 commits `5cacd0245`..`871ae470a`), merged into next by fast-forward.
+Asked: what keeps C++'s read stage at 0.926 of independence (bin/crops-score), then make it own (the user approved the agent, 2026-11-27).
+- Measured: the one input left not Arbace's own is clang's recorded dumps (the pack `cxxdump-dg-error`) behind the dg check's dg-error
+  rows. The token check's 1,934 files are own already; the dg check counts 4,171 rows (4,564 less 324 n/a and 69 in
+  dg-dialect-out.edn): 3,273 passed by the own front end (score 1), 898 not (0.5): (1934 + 3273 + 0.5 x 898) / 6105 = 0.9265. Of the
+  898, clang passes 825 and fails 73 (the read cell's 73 deferred rows). None is the oracle tier's by design: a row moves to 1 only
+  when Arbace's own Sema gives the test's expected errors on their lines (CX12's long tail).
+- Built: about 60 rules from the standard's text in arbace/cpp/sema.ae, arbace/cpp/template.ae, arbace/repr/cpp/diag.ae and
+  arbace/repr/cpp/parse.ae (nullptr and pointer operands, function names without a call, pseudo-destructors, access on trivial
+  copies, default arguments at their declaration, local classes' use of enclosing locals, typename T::X for non-class T,
+  operator() and user-defined literals, array new, noexcept operands, asm operands, -fno-rtti, alignas, GNU typeof); one crash fixed
+  (template/qualttp2.C).
+- Checked: four regression runs over the 3,273 recorded passes and the 825 candidates (4,098 files, no whole corpora); the final run
+  lost no pass (cpp2a/concepts-pr67774.C timed out under load at 300 s, 199 s alone, recorded from its run alone); the dg negative
+  control (dr2082-vs-dr1423) failed as it must; crops-score --judge --strict, records-check, markers-check 0 problems.
+- Result: own dg passes 3,273 -> 3,332 (59 moved, 0 lost; test/cpp/check-dg-own-linux-amd64.edn); C++ read independence 0.926 ->
+  0.931, the crop's 0.9852 -> 0.9862 (test/crops/scores.edn); completeness and the REAP matrix unchanged (the 59 were clang passes).
+- Left: 839 rows (766 clang passes, 73 clang also fails): overload no-match and ambiguity, incomplete types, constant evaluation,
+  templates before instantiation, pack deduction, access through private bases, complete-class contexts; noexcept missing from the
+  checker's function types (cpp1z/noexcept-type3.C), C++20 parenthesized array new (cpp2a/paren-init36.C, 37). At this pass's rate
+  (about 59 rows a pass) read reaches 1.0 after about 14 more passes; put to the user.
+Alternatives: a ruling on counting these rows was not assumed; the stage stays measured as it is until the user decides.
