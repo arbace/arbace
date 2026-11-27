@@ -5599,3 +5599,16 @@ of the whole world 0 failures, the changed classes' stubs only sun.misc.Unsafe's
 lacks: none on t03656's path), and all seven rows analyzed at the compiled level (t03656 refused before). Waiting for the
 train's build: every row, interpreted and compiled (the classes are the world's, translated), after `bin/jrt-convert update`
 (the provenance) and `bin/j2g-edge update` (sun.misc.Unsafe's edge).
+
+## As built: train 8 (2026-11-27; branch `train-8`: java-tail2, java-tail3, java-krb-1126, t4-print-1125 on train 4's next)
+
+Built at `1e5fa9c99` (executables `04cc536dc3788fa7cfd4`, javac's tool `javac-9a1f4720034459311183`). On the way: j2g's renames
+for sun.misc.Unsafe (Misc_Unsafe, apart from jrt's Unsafe), the jrt: handler (Jrt_Handler) and DOMDigestMethod's nested digest
+classes (apart from its static fields of their names); the XML closure's files by each class's SourceFile (15 auxiliary
+classes' lines gone); `*runtime-varhandles*` false in every branch of j2g's run (the edges' recordings on the frozen JVM).
+Recorded: interp 17 and compiled 13 rows now passing (Kerberos's five, sun.misc.Unsafe's t03656, t08053, the jrt: URL, the
+interpreter's frames and access checks, t05254's auxiliary class, t08092, t08235, t04989 by its status, t05172), diffcheck's
+13 Java forms' cases (FxCode, FxVarHandles) agreeing, t07536 and t07537 at diagnostics, the whole print level (24 rows
+passing again; 33 to their classes under the user's stricter print judge, 556b-1 (a)). Java: read 7,844 / 0 / 0, eval
+3,222 / 0 / 31, AOT 3,238 / 0 / 37, print 3,291 / 0 / 34. Left: FFM's eight rows (JavaNioAccess, VM.isDirectMemoryPageAligned),
+XML's six (ModuleDescriptor$Builder, XSLTC's internal error), t05766 compiled.

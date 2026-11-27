@@ -26336,3 +26336,47 @@ alloc's slice: abort.rs's 296 alloc defines as targets, the rounds exporting cor
 instances taken by reference (mono/unit-refs, shared mono.ae; build-run's L2 follows them, shared build_run.ae) for a second pass.
 alloc 210 of 296 equal; own tree 1,234 -> 1,447; abort.rs 7,849 -> 7,639 rustc's. The compare, the own tree's check and own-std
 run once, at the slice's end (the user's 2026-11-26 line: no checks within the rounds).
+
+## 2026-11-27: train 8 (Java) built and recorded: java-tail2, java-tail3, java-krb-1126, t4-print-1125
+
+Branch `train-8` from mac/next `eb408fb7f` with mac/java-krb-1126 (`6d93dbcc8`) and mac/t4-print-1125 (`5567d401a`, added by
+the coordinator: javac on Arbace's counts once, t07537, and the printer's round-trip fixes) merged. The provenance batch on
+train 4's javac tool (`javac-e585cbd9ee084dd57abd`, REPR_JAVA_STALE_OK=1): `bin/jrt-convert update` (VarHandles', the jrt:
+handler's forms), `bin/j2g-edge update`, `bin/javac-vendor convert` and `edge` (the static XML closure: javac's edge 727 classes
+beyond jdk/edge.edn -> 34, the XML world now forms), `bin/jrt modules` (after the convert: it reads jdk/javac/sources.txt) and
+`provides`: `1e5fa9c99`. No fixtures, forms or declarations update: repr/java's reader, arbace/lang and arbace/java unchanged
+since train 4's build (provenance-check). Built: executables `04cc536dc3788fa7cfd4`, javac's tool `javac-9a1f4720034459311183`;
+`bin/javac-vendor verify` byte for byte but the platform pins and the provenance's :host (train 4's note).
+Three fixes on the way, each its commit on train-8, each found before the gate build:
+- `3c7bf1f0e`: j2g's renames: sun.misc.Unsafe (java-krb's derived overlay) and its two nested classes Misc_Unsafe*, apart from
+  jrt's own Unsafe (jdk.internal.misc.Unsafe, jrt/unsafe.ae: j2g-edge stopped on 16 names declared twice); java-tail2's
+  sun.net.www.protocol.jrt.Handler Jrt_Handler, apart from java.util.logging.Handler (`bin/javac-vendor names` found it; neither
+  branch had run the gonames check).
+- `7172c7346`: `bin/javac-vendor xml-closure` named a class's file by its top-level name: 15 auxiliary classes (XSLTC's
+  parser_actions in XPathParser.java, Xerces' traversers' containers, XPath's comparators, SymbMap, NameSpaceSymbEntry,
+  XPath2NodeFilter) became files jdk26u does not have (the convert's cp failed). jrt.classfile reads SourceFile now and the
+  closure maps a class to its SourceFile in its package: the 15 lines gone, none added (their files were listed).
+  Alternative considered (the coordinator's): XSLTC out of javac's world; it has been in it since train 4 (the XML tests).
+- `5b5d47a2a`: java-tail3's `*runtime-varhandles*` was bound false in j2g run's default branch alone: the edges' recordings
+  (--record-edge on the frozen JVM) analyzed ByteArrayAccess, ByteArrayAccess$BE, SHA3 and LayoutPath with run-time VarHandles
+  once jdk/forms held jdk.internal.jrt.VarHandles, and stubbed them (4 analysis failures; train 7's edge, without those forms,
+  0); bound at the top of run now (0 failures). And DOMDigestMethod's nested SHA224 ... SHA3_512 beside its static String
+  fields of those names (C$N's Go name is C.N's): renamed; a scan of 14 modules' class files for a static field named as a
+  nested class found no other pair.
+The javac-convert step was proved alone under the lock (convert-8.sh: j2g-edge update, then the convert) before the build.
+Records on the train's build (`.tmp/t8/rec.sh`): read and interp of 32 ids, read and compiled of 28 (t05172 passed in its
+shard: no run alone), bin/diffcheck --only FxCode and FxVarHandles' 12 cases, diagnostics t07536 and t07537, the whole print
+level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83f06`) with `--judge --partial --record`:
+- interp 17 now passing (t03656 t04613 t04680 t04829 t04989 t05019 t05254 t05298 t07688 t08051 t08052 t08053 t08092 t08195
+  t08199 t08201 t08235), compiled 12 (the same less t04613 t04680 t04829 t05254 t07688) and t05172 passing, 0 regressions;
+  14 still failing at each level in their classes (FFM's JavaNioAccess and VM.isDirectMemoryPageAligned: t03584 t03640 t05096
+  t05812 t05828 t05829 t05830 t07775, :jd1123-next-train; XML's ModuleDescriptor$Builder and XSLTC's internal error: t08083
+  t08091 t08093 t08094 t08095 t08096; t05766 compiled, "Bad method name" where it was "Bad class name").
+- diffcheck: the 13 known cases agree; their entry dropped from test/diffcheck/known.edn (`8bcc0d784`, before the merge).
+- diagnostics: t07536 and t07537 pass. read: 60 pass.
+- print, whole: 3,291 pass, 30 differ, 4 fail; t4-print-1125's 24 rows pass; the 33 pass -> non-pass rows are exactly the
+  print agent's lists (the user's 556b-1 (a) stricter judge: 29 in :print-classes-unnamed, 3 in :print-type-arguments, t06125 in
+  :print-pin-casts), recorded on the coordinator's word; no other row left a pass. 140 passing rows' notes changed.
+- Java (bin/reap): read 7,843 / 0 / 1 -> 7,844 / 0 / 0; eval 3,205 / 0 / 51 (69 n/a) -> 3,222 / 0 / 31 (72 n/a); AOT
+  3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
+  --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.
