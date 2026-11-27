@@ -3262,7 +3262,13 @@
                 ;; not convert 'A::X' from 'A' to 'int'", cpp0x/pr66243.C; at the enumerator, its value 0 then)
                 xt (when (and x (checking?))
                      (try (some-> (binding [*unevaluated* true] (analyze {:scope bs} x)) :ty abi/non-ref abi/unq)
-                          (catch arbace.lang.ExceptionInfo _ nil)))
+                          (catch arbace.lang.ExceptionInfo e
+                            ;; (cpp-sema-types: an operand of sizeof of incomplete type in the initializer is the program's error,
+                            ;; reported at the enumerator's initializer: ext/flexary6.C's `e = sizeof a` of a flexible array member)
+                            (when (and *on-refusal* (= :incomplete (:codegen/refused (ex-data e)))
+                                       (re-find #"^codegen: invalid application of sizeof to incomplete type" (str (ex-message e))))
+                              (*on-refusal* e x))
+                            nil)))
                 ;; (cpp-read-indep, the checker: [dcl.enum]/5, an enumeration without a fixed underlying type is incomplete until
                 ;; the closing brace of its enumerator list: a cast to it in an enumerator's initializer converts to an incomplete
                 ;; type, GCC's "invalid conversion to incomplete type 'E'" (diagnostic/pr59838.C's `b = (E) a`))
@@ -14140,7 +14146,12 @@
           ;; the class's definition)
           _ (when (and (checking?) (not (some-> (:fn-id ctx) fnd :tinst)))
               (when-let [c (cx-incomplete-cls (loop [t t] (if (abi/arr? t) (recur (:of t)) t)))]
-                (fail :incomplete "invalid application of " (:name n) " to incomplete type '" (:name c) "'")))
+                (fail :incomplete "invalid application of " (:name n) " to incomplete type '" (:name c) "'"))
+              ;; (cpp-sema-types: an array of unknown bound is an incomplete type too, [basic.types.general]/6 -- a flexible array
+              ;; member's, an `extern int a[];`'s --, sizeof and alignof of it ill-formed (alignof takes the element type,
+              ;; [expr.alignof]/3): GCC's "invalid application of 'sizeof' to incomplete type 'int []'"; ext/flexary6.C)
+              (when (and (= "sizeof" (:name n)) (map? t) (abi/arr? (abi/unq t)) (nil? (:n (abi/unq t))) (not (:vla (abi/unq t))) (not (header-node? n)))
+                (fail :incomplete "invalid application of sizeof to incomplete type (an array of unknown bound)")))
           ;; (cpp-def, the checker: [expr.alignof]/1, alignof of void, an incomplete type, is GCC's "invalid application of
           ;; '__alignof__' to a void type" (GNU's __alignof and sizeof of void are its pedwarns, not errors); cpp0x/alignas20.C)
           _ (when (and (checking?) (= "alignof" (:name n)) at (= abi/void (abi/unq t)))
