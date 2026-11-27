@@ -12612,6 +12612,7 @@ each rule from the standard's text, its valid forms probed beside the invalid on
   template's placeholder parameters' type-constraints (cpp2a/concepts-template-parm2.C, -parm6.C); an alias template's
   constraints not satisfied a template constraint failure at its use or at the alias naming it (cpp2a/concepts-alias.C); a
   variable template's explicit specialization satisfying its constraints (cpp2a/concepts-var-templ1.C); a variadic concept
-  constraining a pack, C<Ts...> whole ([temp.param]/4; cpp2a/concepts-fn3.C); no type named in a complete class a sure
+  constraining a pack, (C<T> && ...) with each element its pack of one ([temp.param]/4; cpp2a/concepts-fn3.C; r3's C<Ts...>
+  whole had lost concepts-template-parm6.C); no type named in a complete class a sure
   substitution failure (cpp2a/concepts-pr65854.C); a compound requirement surely false by its type-constraint whatever its
   noexcept, which the checker leaves unjudged (concepts/diagnostic7.C).
