@@ -8862,7 +8862,10 @@
                          (case (:k e)
                            :plain (and (nil? (:cls f)) (nil? ti) (= (:ns e) p) (= (:ps e) ps))
                            :tmpl (and (nil? (:cls f)) (some? ti) (= (:ns e) p))
-                           :spec (and (some? ti) (contains? (:tids e) (:tid ti)) (= (:ps e) ps))
+                           :spec (and (some? ti) (contains? (:tids e) (:tid ti)) (= (:ps e) ps)
+                                      (or (nil? (:targs e)) (not (vector? (:args ti)))
+                                          (not= (count (:targs e)) (count (:args ti)))
+                                          (= (:targs e) (mapv #(if (map? %) (abi/unq %) %) (:args ti)))))
                            true))
                        es))))))
 
@@ -8978,8 +8981,16 @@
                 (not= "FunctionDecl" (:kind fd)) :any
                 (some #(= "TemplateArgument" (:kind %)) (:inner fd))
                 (let [tids (try (set (keep #(when (= :tmpl (:e %)) (:id %)) (lookup cs nm))) (catch arbace.lang.ExceptionInfo _ nil))
-                      p (ps)]
-                  (if (and (seq tids) p) {:k :spec :tids tids :ps p} :any))
+                      p (ps)
+                      ;; (cpp-sema-types: the template-id's written type arguments, so that only that specialization is
+                      ;; befriended, template/access36.C's `friend void fr<int> ();` not fr<char>; nil when one is no type or
+                      ;; dependent)
+                      tas (let [as (filter #(= "TemplateArgument" (:kind %)) (:inner fd))]
+                            (when (and (seq as) (every? #(get-in % [:type :qualType]) as))
+                              (try (let [ts (mapv #(resolve-type cs (get-in % [:type :qualType])) as)]
+                                     (when (not-any? cx-dependent-type? ts) (mapv abi/unq ts)))
+                                   (catch arbace.lang.ExceptionInfo _ nil))))]
+                  (if (and (seq tids) p) (cond-> {:k :spec :tids tids :ps p} tas (assoc :targs tas)) :any))
                 ;; (a template of the name visible: `friend void t<>(int);`, a template-id the tree does not mark, may be meant)
                 (try (some #(= :tmpl (:e %)) (lookup cs nm)) (catch arbace.lang.ExceptionInfo _ true)) :any
                 :else (if-let [p (ps)] {:k :plain :ns (vec (:path ns)) :ps p} :any))]
@@ -14637,8 +14648,27 @@
   (let [t (try (binding [*cx-vla* (:scope ctx)] (resolve-type (:scope ctx) qt)) (catch arbace.lang.ExceptionInfo _ nil))]
     (if (and t (cx-vm? t) (not (:vla (abi/unq t)))) t (throw x))))
 
+(declare cx-mptr-access!)
+(defn- cx-mptr-targ-access!
+  "cpp-sema-types (the checker): a template argument `&A::j` in a declaration's type `qt` forms a pointer to member, naming the
+  member j through A where the declaration is ([temp.arg.nontype] with [class.access]/1-2 and [expr.unary.op]/4), checked as
+  cx-mptr-access! checks `&A::j` in an expression: GCC's \"'int B::i' is protected within this context\" (template/access36.C's
+  `X<&B::i> x1;` in fr<char>). Reported at the declaration `node`, the analysis going on."
+  [ctx qt node]
+  (when (and (checking?) *on-refusal* (string? qt) (str/includes? qt "&") (str/includes? qt "<") (not (header-node? node)))
+    (doseq [[_ q0 nm] (re-seq #"[<,]\s*&\s*((?:[A-Za-z_]\w*\s*::\s*)+)([A-Za-z_]\w*)\s*(?=[>,])" qt)
+            :let [parts (vec (remove str/blank? (map str/trim (str/split q0 #"::"))))
+                  es (try (lookup-qualified (:scope ctx) (conj parts nm)) (catch arbace.lang.ExceptionInfo _ nil))]
+            :when (seq es)]
+      (try (cx-mptr-access! ctx es parts nil nm)
+           (catch arbace.lang.ExceptionInfo e
+             (if (= :access (:codegen/refused (ex-data e)))
+               (*on-refusal* (ex-info (ex-message e) (assoc (ex-data e) :cx/node node)) node)
+               (throw e)))))))
+
 (defn- local-var! [ctx n storage]
-  (let [qt (get-in n [:type :qualType])
+  (let [_ (cx-mptr-targ-access! ctx (get-in n [:type :qualType]) n)
+        qt (get-in n [:type :qualType])
         ct (ctad-template (:scope ctx) (or (:_ctad n) qt))
         cv (if ct (ctad-var ctx n ct qt) (ctad-compound-var (:scope ctx) n qt))
         vla (atom nil)
