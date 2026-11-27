@@ -14724,7 +14724,21 @@
             (and (checking?) (:constexpr n)) (assoc :cx-constexpr true :cx-range (:range n))
             (and (checking?) (not (:constexpr n)) (or (:_constinit n) (some #(= "ConstInitAttr" (:kind %)) (:inner n)))) (assoc :cx-constinit true :cx-range (:range n)))
         ;; a constant local's initializer, for constant expressions (an array bound, a template argument)
-        v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)]
+        v (if (and (:c ty) (abi/integral? (abi/unq ty)) (init-kid n)) (assoc v :init (init-kid n) :def-scope (:scope ctx)) v)
+        ;; (cpp-sema-types, the checker: [basic.link]/8 and /11, block-scope extern declarations of one name in the same namespace
+        ;; declare one entity, so of the same type: another's type -- two specializations of a function template, `extern T
+        ;; const text;` of g<H> and g<I> -- is GCC's "conflicting declaration 'const I text'", at the later; init/pr42844.C)
+        v (if (and (checking?) (= "extern" (:storageClass n)) (map? ty) (not (header-node? n)))
+            (assoc v :cx-extern-local (or (loop [s (:scope ctx) k 0] (cond (or (nil? s) (> k 64)) nil (= :ns (:kind s)) (vec (:path s)) :else (recur (:parent s) (inc k)))) []))
+            v)
+        _ (when (and (:cx-extern-local v) *on-refusal* (string? (:name n)))
+            (when (some (fn [[_ o]] (and (= (:cx-extern-local o) (:cx-extern-local v)) (= (:name o) (:name n)) (map? (:ty o))
+                                         (not (dt-dependent? (:ty o))) (not (dt-dependent? ty))
+                                         (not= (abi/unq (:ty o)) (abi/unq ty))))
+                        @*vars*)
+              (*on-refusal* (ex-info (str "codegen: conflicting declaration of '" (:name n) "' (a block-scope extern declaration of another type)")
+                                     {:codegen/refused :redecl :cx/node n})
+                            n)))]
     (swap! *vars* assoc id v)
     id))
 
