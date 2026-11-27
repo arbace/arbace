@@ -2103,7 +2103,12 @@
                              {:off start :inactive t}))))
         placed (IdentityHashMap.)
         where (HashMap.)
-        place! (fn [owner items d]
+        ;; queue 611: the list each directive went to, for the families' check below: a directive placed between a statement's
+        ;; labels and what they label (label-inner) is its list's, whose items the labels are (stmt-items), though placed with
+        ;; the labeled statement (sqlite3.c's `#ifndef SQLITE_OMIT_SUBQUERY` / `case TK_SELECT: case TK_EXISTS:` / `#endif` /
+        ;; `case TK_IN:`, whose print's #endif stands between case TK_EXISTS: and case TK_IN:'s statement)
+        where-list (HashMap.)
+        place! (fn [owner items d & [list-owner]]
                  ;; items: the list's nodes; d placed before the first item starting after it
                  (let [off (:off d)
                        idx (loop [i 0]
@@ -2122,6 +2127,7 @@
                                             (has-main? (nth items idx)) (< (min-po (nth items idx)) (long (:end d))))))]
                    (when ok
                      (.put where (:off d) [owner idx])
+                     (.put where-list (:off d) (or list-owner owner))
                      true)))]
     (letfn [(lists-of [owner items]
               ;; directives inside an item go to its nested lists
@@ -2169,7 +2175,7 @@
                         (place-in (first sub) (second sub) [d])
                         ;; between a statement's labels and what they label (c23-named-loops-1.c's `g: h: #pragma GCC unroll 2
                         ;; while ...`): before the labeled statement's form (stmt-items), the labels' forms before it
-                        (when-let [s (label-inner inside off)] (place! s [s] d))))
+                        (when-let [s (label-inner inside off)] (place! s [s] d owner))))
                     (place! owner items d)))))
             (label-inner [it off]
               (loop [x (if (= (nt it) "BlockItem") (g it :Statement) it)]
@@ -2187,8 +2193,8 @@
     ;; a conditional family's lines all in one list, else none of them
     (let [drop (HashSet.)]
       (doseq [[id offs] fam-lines]
-        (let [ws (map #(.get where %) offs)]
-          (when (or (some nil? ws) (not (apply = (map first ws))))
+        (let [ws (map #(.get where-list %) offs)]
+          (when (or (some nil? ws) (not (apply = ws)))
             (doseq [o offs] (.add drop o)))))
       (doseq [d active
               :let [w (.get where (:off d))]
@@ -2269,7 +2275,16 @@
                       (.put m (Long/valueOf a) (Long/valueOf (max e (long (or prev 0))))))))))
             (doseq [c (children x)] (when (instance? HashMap c) (.push stack c)))))
         (recur)))
-    m))
+    ;; queue 611: the outermost lists alone (a nested struct's or union's list merged into its enclosing one), so that
+    ;; dropped-define?'s floorEntry finds the list holding an offset: sqlite3.c's `#define WHERE_LOOP_XFER_SZ` inside struct
+    ;; WhereLoop's list after its union u's inner structs, the last list beginning before it the inner `vtab`'s, ended
+    (let [out (java.util.TreeMap.)]
+      (doseq [[a e] m]
+        (let [lst (.lastEntry out)]
+          (if (and lst (< (long a) (long (.getValue lst))))
+            (when (> (long e) (long (.getValue lst))) (.put out (.getKey lst) e))
+            (.put out a e))))
+      out)))
 
 (defn- dropped-define?
   "Queue 540c: the main file's last #define of `nm` before offset `po` stands inside a struct or union member list (`bodies`,

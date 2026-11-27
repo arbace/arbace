@@ -30,6 +30,7 @@
   both runs of the Java forms' pair."
   (:require [arbace.string :as str]
             [arbace.java.io :as io]
+            [arbace.classes.lower]
             [oracle.runner :as runner]))
 
 ;; the corpora with Java forms: their classes compiled by j2g against interpreted
@@ -83,6 +84,67 @@
              (list* 'import (map #(list 'quote %) (rest c))))
       nil)))
 
+;; queue 611: a class body's Clojure names the namespace's vars, and a deftype in it is a class of
+;; the program, as the compiled pipeline gives them to j2g (arbace.c2j.main's java-forms-file: the
+;; vars as (c2j/refer-vars ...), the edge of the compiled tree, REAP3, RPS6 (a); a deftype the code
+;; makes as a class of its own, arbace.classes.native's compile-deftype)
+
+(def ^:private def-heads
+  "The defining forms whose vars a class body's Clojure may name: head -> the var's metadata."
+  {"def" {} "defn" {} "defn-" {:private true} "defonce" {} "defmulti" {} "declare" {}})
+
+(defn- defs-of
+  "The vars a case's top-level form defines: [[name metadata] ...] (a macro's left out: its
+  expander is the evaluator's, which j2g's analysis does not have)."
+  [f]
+  (when (and (seq? f) (symbol? (first f)))
+    (let [h (name (first f))]
+      (cond
+        (= "do" h) (mapcat defs-of (rest f))
+        (contains? def-heads h)
+        (for [s (if (= "declare" h) (rest f) [(second f)])
+              :when (symbol? s)]
+          [(with-meta s nil)
+           (merge (get def-heads h)
+                  (select-keys (meta s) [:dynamic :private])
+                  (when-let [t (:tag (meta s))] (when (or (symbol? t) (string? t)) {:tag t})))])
+        :else nil))))
+
+(defn- form-symbols
+  "The unqualified symbols occurring in form."
+  [form]
+  (cond
+    (symbol? form) (if (namespace form) #{} #{(with-meta form nil)})
+    (or (seq? form) (vector? form) (set? form)) (reduce into #{} (map form-symbols form))
+    (map? form) (reduce into #{} (map form-symbols (mapcat identity form)))
+    :else #{}))
+
+(defn- deftype-forms
+  "The (deftype ...) and (defrecord ...) forms inside form, outermost first."
+  [form]
+  (cond
+    (and (seq? form) (symbol? (first form)) (#{"deftype" "defrecord"} (name (first form)))) [form]
+    (or (seq? form) (vector? form) (set? form)) (mapcat deftype-forms form)
+    (map? form) (mapcat deftype-forms (mapcat identity form))
+    :else []))
+
+(defn- deftype*-forms [form]
+  (cond
+    (and (seq? form) (= 'deftype* (first form))) [form]
+    (seq? form) (mapcat deftype*-forms form)
+    :else []))
+
+(defn- body-classes
+  "The Java forms (each the rest of a defclass form) of the deftypes and records a case's class
+  forms make in their bodies, in namespace ns: the macro expanded there, its deftype* lowered as
+  arbace.classes.native/compile-deftype lowers it."
+  [ns fm]
+  (let [n (create-ns ns)]
+    (binding [*ns* n]
+      (refer 'arbace.core)
+      (vec (for [d (deftype-forms fm), t (deftype*-forms (macroexpand-1 d))]
+             (arbace.classes.lower/deftype-class-form t))))))
+
 (defn- emit-str [x] (oracle.driver/emit x))
 
 (defn- write! [^java.io.File f ^String text]
@@ -127,15 +189,24 @@
         ;; the namespace and the imports at each case (Java forms corpora: static, top-level)
         cases (if-not java?
                 cases
-                (loop [cs cases ns (symbol nsname) imports {} acc []]
+                (loop [cs cases ns (symbol nsname) imports {} defs {} acc []]
                   (if-let [c (first cs)]
                     (let [fm (:form c)
                           ns' (or (ns-switch fm) ns)
                           c (if (class-form? fm)
-                              (assoc c :classes (mapv #(class-name ns %) (class-forms fm))
-                                       :ns ns :imports (get imports ns []))
+                              (let [d (get defs ns {})
+                                    body (body-classes ns fm)]
+                                (cond-> (assoc c :classes (mapv #(class-name ns %) (class-forms fm))
+                                               :ns ns :imports (get imports ns []))
+                                  ;; the namespace's vars the body names, defined by earlier cases
+                                  (seq d) (assoc :vars (vec (for [s (sort-by str (form-symbols fm))
+                                                                  :when (contains? d s)]
+                                                              [s (str ns) (str s) (get d s)])))
+                                  (seq body) (assoc :body-classes body
+                                                    :body-names (mapv #(class-name ns (cons 'defclass %)) body))))
                               c)]
-                      (recur (rest cs) ns' (update imports ns' (fnil into []) (imports-of fm)) (conj acc c)))
+                      (recur (rest cs) ns' (update imports ns' (fnil into []) (imports-of fm))
+                             (update defs ns (fnil into {}) (defs-of fm)) (conj acc c)))
                     acc)))]
     {:file file :stem (str (when harvest? "harvest/") stem) :ns nsname :java java? :compiled (not java?)
      :cases cases}))
@@ -214,7 +285,7 @@
       (write! (io/file out "src" "dcf" (str stem ".ae")) (source-text c false excluded-cases))
       (when java
         (write! (io/file out "src" "dcj" (str stem ".ae")) (source-text c true excluded-cases))
-        (doseq [{:keys [id ns imports text load jcompiled]} cases :when jcompiled]
+        (doseq [{:keys [id ns imports text load jcompiled vars body-classes]} cases :when jcompiled]
           (if load
             (write! (io/file out "jforms" "j2g_fixtures" (.getName (io/file load))) (slurp load :encoding "UTF-8"))
             (write! (io/file out "jforms" (str/replace (munge (name ns)) "." "/") (str stem "_c" id ".ae"))
@@ -222,13 +293,15 @@
                       (str ";; Written by test/diffcheck/gen.ae from " (:file c) ", case " id ".\n\n"
                            (pr-str (list 'in-ns (list 'quote ns))) "\n"
                            (apply str (for [i imports] (str (pr-str i) "\n")))
+                           (when (seq vars) (str (pr-str (list 'c2j/refer-vars vars)) "\n"))
                            ;; j2g reads defclass forms, at the top or in a do
-                           "\n" (str/replace-first text #"^\(defclasses\b" "(do") "\n")))))))
+                           "\n" (str/replace-first text #"^\(defclasses\b" "(do") "\n"
+                           (apply str (for [b body-classes] (str "\n" (pr-str (cons 'defclass b)) "\n"))))))))))
     ;; each Java package's classes in a Go package of their own (j2g puts the classes of no
     ;; compiled namespace in lang, where two simple names of two packages collide)
     (spit (io/file out "jforms" "packages.edn")
           (pr-str (into (sorted-map)
-                        (for [c corpora, k (:cases c) :when (:jcompiled k), n (:classes k)
+                        (for [c corpora, k (:cases c) :when (:jcompiled k), n (concat (:classes k) (:body-names k))
                               :let [i (.lastIndexOf ^String n ".")]]
                           [(str/replace n "." "/") (str "jf_" (str/replace (str/replace (subs n 0 (max 0 i)) "." "_") "-" "_"))]))))
     (let [index (vec (for [{:keys [file stem java compiled cases]} corpora]
