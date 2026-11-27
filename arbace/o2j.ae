@@ -478,6 +478,23 @@
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
   (list 'do (bt-push ev) (value-then f (concat (clear ts) [bt-pop]))))
 
+(defn- passing
+  "(oc-light) Argument forms as of a call that is no tail call with the temporaries among them (mutable t$ locals: with-args',
+  with-all-args') cleared as they are passed: the last argument's form clears the others' (the call has read them) and is read
+  and cleared itself when a temporary (take-form). At the light level the frame's slot kept an argument the callee alone holds for
+  the whole call, cleared only after it: match-exception/streams' stream head, the whole forced stream reachable through the
+  10,000,000 iterations, every collection marking it (as ocamlopt's caller frame holds no argument it passed)."
+  [as]
+  (let [as (vec as)
+        temp? (fn [a] (and (symbol? a) (:mutable (meta a)) (str/starts-with? (name a) "t$")))
+        ts (filterv temp? as)]
+    (if (or *in-ns* (empty? as) (empty? ts) (holds-call? (peek as)))
+      as
+      (let [l (peek as)
+            others (distinct (remove #(= % l) ts))
+            l2 (if (temp? l) (take-form l) l)]
+        (conj (pop as) (if (seq others) (concat (list 'do) (clear others) [l2]) l2))))))
+
 (defn- apply-ev-node
   "A non-tail application with an after-event: its slot entered once the arguments and the function are evaluated (bytegen's
   APPLY1-3), before the arguments for four or more (PUSH_RETADDR)."
@@ -485,8 +502,8 @@
   (if (>= (count args) 4)
     (list 'do (bt-push ev)
           (with-all-args ctx (into [f] args)
-                         (fn [as ts] (value-then (call-form (first as) (rest as)) (concat (clear ts) [bt-pop])))))
-    (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
+                         (fn [as ts] (value-then (call-form (first as) (passing (rest as))) (concat (clear ts) [bt-pop])))))
+    (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (passing (rest as))) ts)))))
 
 (declare prim-value const-arg)
 (def ^:private ^:dynamic *simple-args* "Whether the primitive's argument nodes are all simple (prim-node), or all
@@ -539,6 +556,14 @@
         body (apply list 'continue label forms)]
     (if (seq bindings) (list 'let bindings body) body)))
 
+(defn- loop-init
+  "(oc-light) A self loop's initial value of its parameter p: at the light level p read and cleared (take-form; the method's
+  parameter p mutable), so that the method's parameter slot, which the loop's own local shadows, does not keep the first value
+  through the whole loop (match-exception/streams' iter_stream_match: the stream's head, and so every element forced, reachable
+  through its 10,000,000 turns, the collector's marking growing with it); the compiled level reads p (Go's liveness)."
+  [p]
+  (if *in-ns* p (take-form p)))
+
 (defn- substitute
   "Form x with the symbols of map m replaced by their forms."
   [x m]
@@ -580,9 +605,9 @@
                    (and tail? (not *in-ns*))
                    (with-all-args ctx (into [f] args) (fn [as ts] (tail-form (first as) (rest as) ts)))
                    (simple? f)
-                   (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+                   (with-args ctx args (fn [as] (call-form (expr ctx f false) (if tail? as (passing as)))) (not tail?))
                    :else
-                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))]
+                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (if tail? (rest as) (passing (rest as))))) (not tail?)))]
         (if clears (list 'do (apply list 'o2j$clears clears) call) call))))))
 
 ;; ---- functions
@@ -594,7 +619,7 @@
           (into ['this] (if mutable? (map #(with-meta % {:mutable true}) params) params)) body)
     (let [a (symbol "args$")]
       (list 'method (with-meta 'an {:public true}) ['this (with-meta a {:tag 'Object/1})]
-            (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) body)))))
+            (list 'let (vec (mapcat (fn [i p] [(if mutable? (with-meta p {:mutable true}) p) (list 'aget a i)]) (range) params)) body)))))
 
 (defn- closure-class!
   "Defines the member class of function node f (its free variables fields, self-id's references
@@ -628,7 +653,7 @@
         b (tail-clears b clears?)
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
         b (if (empty? longs)
-            (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
+            (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p (loop-init p)]) params)) (concat (list 'do) tick-forms [b]))) b)
             ;; (oc-light) the int parameters' longs: the loop's (the parameter's boxed value bound in each turn when the body names
             ;; it), else bound once at the entry
             (let [b (realize b)
@@ -636,7 +661,7 @@
                   sub (into {} (map (fn [[i l]] [(nth params i) (list 'cast 'Object l)]) longs))
                   inner (if @used (substitute b sub) b)]
               (if @used
-                (list 'label lbl (list 'loop (vec (mapcat (fn [i p] (if-let [l (longs i)] [(with-meta l {:tag 'long}) (unbox p)] [p p])) (range) params))
+                (list 'label lbl (list 'loop (vec (mapcat (fn [i p] (if-let [l (longs i)] [(with-meta l {:tag 'long}) (unbox p)] [p (loop-init p)])) (range) params))
                                        (concat (list 'do) tick-forms [inner])))
                 (let [ls (vec (mapcat (fn [[i l]] (when (mentions? b l) [(with-meta l {:tag 'long}) (unbox (nth params i))])) (sort longs)))]
                   (if (seq ls) (list 'let ls b) b)))))
@@ -648,7 +673,7 @@
         tb (when @tails
              (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
                    ;; (queue 604) a group function's body returns to its entry's bounce: its tail calls may return Tails (ok$)
-                   (list 'let (vec (concat (when-not *in-ns* '[ok$ true]) (mapcat (fn [i p] [p (list 'aget a i)]) (range) params))) b)))
+                   (list 'let (vec (concat (when-not *in-ns* '[ok$ true]) (mapcat (fn [i p] [(if (and @used (not *in-ns*)) (with-meta p {:mutable true}) p) (list 'aget a i)]) (range) params))) b)))
         b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (entered)
         b (entered b params)]
@@ -660,7 +685,7 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b clears?)
+             (method-for arity params b (or clears? (and @used (not *in-ns*))))
              ;; Marshal's Closures flag (OC216 (a); ocaml.rt.Marshal's closureFields, fixClosures): the free variables, a closure
              ;; of the class with none set, and their setting
              (list 'method (with-meta 'envOf {:public true}) (with-meta ['this] {:tag 'Object/1})
