@@ -12555,3 +12555,257 @@ checker's types -- the checker leaves :nx out, cpp1z/noexcept-type3.C's false de
 complete-class contexts, GCC's parenthesized array new in C++20 (cpp2a/paren-init36.C, 37.C's false errors) and the rest), and 73 that
 clang fails as well (the cell's deferred rows). At this pass's rate (59 rows a day's pass) the stage reaches 1 only by CX12's tail
 done row by row; no input of it is the oracle tier's by design.
+
+## As built: cpp-sema-ovl, the own front end's overload resolution (2026-11-27; branch `cpp-sema-ovl-1127` from mac/next `2e2cd3ef1`)
+
+One of three agents splitting the fifth pass's tail by area (overload resolution here; incomplete types and class rules,
+cpp-sema-types-1127; constant evaluation and templates, cpp-sema-const-1127). The rows it moves to own are listed in
+test/cpp/sema-pass-ovl.txt (CORPUS/FILE a line), recorded with the other two branches' at their merge. The rules, each from the
+standard's text (and the GCC 15.2 manual for GCC's built-ins and vector types), in arbace/cpp/sema.ae, arbace/cpp/template.ae and
+arbace/repr/cpp/diag.ae's sema-rules, the checker's alone (`checking?`), the code generator's paths untouched:
+
+- noexcept in C++17's function types ([except.spec]/1 with [dcl.fct]/1, P0012R1): the checker's function types carry :nx as the
+  code generator's member function pointers did (`noexcept`, `noexcept(true)`, `throw()`; a lambda's call operator and its
+  conversion's function type too); the function pointer conversion ([conv.fctptr]) is an Exact Match ranked behind the identity
+  ([over.ics.rank]/3.2.1, :fnptr), in [over.over]'s matching, reference binding, the composite pointer type ([expr.type]/4.4),
+  static_cast ([expr.static.cast]/4, /7), template argument deduction ([temp.deduct.call]/4) and non-type template arguments;
+  nothing adds noexcept (a pointer, pointer to member, a pointer to pointer below the first level, a conversion function's
+  result): cpp1z/noexcept-type1.C, 3.C (the false deleted call), 4.C, 6.C, 7.C, 23.C. Declarations of one function whose types
+  differ in noexcept leave it without (GCC's discarding of a system header's throw(), noexcept-type19.C).
+- Declarations: [over.load]/2.1 with [basic.link]/11, a redeclaration with another return type, and
+  [dcl.spec.auto.general]/13's placeholder kept, GCC's "ambiguating new declaration" (cpp0x/inline-ns10.C, pr87155.C,
+  cpp1y/auto-fn8.C); GCC's built-in functions redeclared with another return type, "ambiguates built-in declaration"
+  (ext/pr84724-3.C, pr84843-1.C, -2.C; a warning under -fpermissive when the parameters are the built-in's);
+  [dcl.fct.def.delete]/4 for an explicit specialization (cpp0x/deleted10.C).
+- Operator candidates: [over.match.oper]/3.2, no class operand: a non-member candidate only for an enumeration operand's exact
+  parameter (overload/operator6.C); a built-in candidate of promoted arithmetic types viable by user-defined conversions beside a
+  non-member operator taking each operand by another one, ambiguous (overload/builtin1.C); == of one class converting to two
+  pointer types, ambiguous (overload/operator5.C); every candidate surely not viable and no built-in candidate (class operands of
+  no conversion function), "no match" (cpp0x/pr51313.C, diagnostic/param-type-mismatch-2.C; not under -fpermissive for a
+  postfix ++ whose prefix operator exists, parse/pr16696-permissive.C); C++20's reversed == candidates, non-member and member,
+  [over.match.oper]/3.4.4 and /4 (P2468R2) with [over.match.best]/2.8 (the same function reversed only under
+  -pedantic-errors): cpp2a/spaceship-rewrite1.C, rewrite3.C; [class.access]/4 for the member operator chosen
+  (diagnostic/inhibit-warn-2.C); ++ and -- whose class converts to no modifiable arithmetic or pointer lvalue ([over.built]/3-6).
+- Calls and conversions: [over.call.object]/2-3's surrogate call functions, ambiguous or none viable (conversion/ambig3.C);
+  [over.over]/3-5, two templates' specializations for a pointer to function and none more specialized (template/overload10.C);
+  [temp.deduct.decl]/2 for an explicit instantiation (template/crash92.C); [basic.lookup.argdep]/3.2, no ADL after a block-scope
+  function declaration (lookup/koenig15.C); [over.ics.rank]/3.2.1 between a reference binding and a by-value conversion
+  (CWG 2352: cpp0x/ref-bind4.C's false ambiguities gone, its f8 diagnosed) and /3.2.5 with P0388R4's arrays of unknown bound
+  (cpp2a/array-conv4.C; array-conv3.C's and 6.C's false ambiguities gone); [over.match.conv]: two conversion functions to the
+  target's scalar type (cpp1z/using-variadic1c.C), the one chosen deleted or GNU-unavailable (template/conv12.C's first,
+  ext/attr-unavailable-3.C); decltype of an overload set (cpp0x/decltype2.C); no pointer conversion between object and function
+  pointers or to a GNU vector, nor a scalar to a vector (diagnostic/aka4.C, aka5a.C, aka5b.C); C++20's parenthesized aggregate
+  initialization, an aggregate element from a scalar (cpp2a/paren-init13.C, 30.C, 32.C); an array bound of class type with no
+  or two conversion functions ([dcl.array]/1, cpp0x/constexpr-47969.C, constexpr-ex2.C); a pointer to data member as a
+  non-type template argument of another type (cpp2a/nontype-class10.C), a member function's of a class no base of the parameter's
+  ([conv.mem]/2, template/ptrmem20.C); a union's braced list of one undesignated item, its first member's conversion judged
+  ([dcl.init.aggr]/5, cpp2a/desig5.C); [class.dtor]/15, an expression statement's temporary of
+  deleted destructor (cpp0x/initlist47.C).
+
+Checks: .tmp/bin/dm and .tmp/bin/cmp of the fifth pass, probes beside each rule (the valid forms: f(g) of a non-noexcept g,
+`p1 == p2` of the two pointer types, a single surrogate, `x == x`, a == b of a const member ==), and full regressions over the
+3,332 recorded own passes and the 949 clang-pass candidates (4,281 files), r1 at the first pass `14bffede3`, r2 at the second
+`a38a38bed`, r3 at the third `41b1782f9`: r1 lost parse/pr16696-permissive.C (the no-viable-operator rule under -fpermissive,
+fixed in the second pass); r2 and r3 lost no recorded pass but to the read's 300 s cap under the host's load (four agents' runs at
+once): cpp2a/concepts-pr67774.C (255 s alone at the third pass's code, 261 s at the base `2e2cd3ef1` under the same load) and in
+r3 cpp1z/constexpr-asm-3.C, constexpr-asm-3.C a pass when rerun beside one other file, concepts-pr67774.C a pass rerun alone (255 s; it timed out again
+beside a second thread, as at the fifth pass: the load's, not the rules'). The dg negative control (dr2082-vs-dr1423) failed as it
+must in each run. r3: own passes 3,332 -> 3,379 of the files run, 49 rows moved to own (test/cpp/sema-pass-ovl.txt, all clang's
+passes): the 42 named above with the rules' own reach besides, gomp/pr92504.C, parse/error44.C, parse/pr16696.C,
+template/crash41.C, overload9.C, ttp5.C (the no-viable-operator rule) and overload/conv-op1.C (the surrogate call functions).
+
+Left in the area (each one or a few files a rule): the overload sets deduced as arguments ([temp.deduct.call]/6, cpp0x/pr69056.C),
+templates before instantiation (template/new14.C, cast3.C, cpp1y/var-templ76.C; area C's), OpenMP clauses (gomp/), built-in
+candidates for conversion function templates (template/operator12.C), copy-initialization's second step before C++17
+(template/copy1.C), GCC's own built-ins' argument rules (ext/builtin_alloca.C), lambdas in templates (lambda-template17.C).
+
+## As built: cpp-sema-types, clang-only dg rows by the own front end: types and classes (2026-11-27; branch `cpp-sema-types-1127` from mac/next `2e2cd3ef1`)
+
+One of three parallel passes over the read stage's clang-only dg rows (after cpp-read-indep's fifth pass, 0.931), split by
+semantic area; this one took types and classes: incomplete types, complete-class contexts, access, the class rules (special
+members, virtual functions, unions, bit-fields, member declarations) and C++20's parenthesized array new. The others took
+overload resolution with noexcept in function types, and constant evaluation with templates before instantiation and pack
+deduction. Each rule from the standard's text, no GCC or clang code (arbace/cpp/sema.ae, arbace/cpp/template.ae,
+arbace/repr/cpp/diag.ae, arbace/repr/cpp/parse.ae):
+
+- New-expressions ([expr.new]/5, /7, /25; [dcl.init.general]/16.5): a parenthesized array type-id or a typedef of an array,
+  `new (int[2])(1, 2)`, is an array new of its element type, its bound the array's; an omitted first bound, `new char[]("foo")`, is
+  deduced from the initializer (the parser marks :sizeOmitted); one parenthesized expression of an array new an expression-list
+  (cpp2a/paren-init36.C, paren-init37.C's false errors gone); the class's allocation and deallocation functions' access
+  (init/delete4.C).
+- Access ([class.access]/1-2, [class.access.base]/4-6, [namespace.udecl]/19, [temp.deduct.guide]/3): a template-id's type
+  arguments in a qualifier or a declaration's type (template/access26.C); a template argument `&A::j` of a local's type
+  (template/access36.C); the derived-to-base pointer conversion (inherit/access2.C); a static member function as a value, `foo.g`,
+  `&C::f` (inherit/access6.C); member operator functions called by operator expressions (diagnostic/inhibit-warn-2.C); a
+  qualified non-static member's naming class an accessible base of the object's class, a public static member through an
+  inaccessible base, a base's injected-class-name through an inaccessible base (lookup/scoped1.C, tc1/dr142.C); a
+  using-declaration's data members, checked at the declaration and given its access at the uses, and the using-declarator-list
+  (lookup/using26.C, cpp1z/using9.C); a specialization's friend declaration of another class's member (template/friend32.C); a
+  friend template-id befriending its arguments' specialization alone; a member deduction guide's access (cpp1z/class-deduction94.C).
+- Incomplete types ([basic.types.general]/5-6, [class.mem]/8, [dcl.enum]/6, [basic.def]/5): the class being defined in its static
+  data members' initializers (offsetof, sizeof, alignof: ext/builtin-offsetof4.C) and as an inline static member's type
+  (cpp0x/constexpr-ice10.C); an enumeration without a fixed type in its enumerators (__underlying_type, ext/underlying_type12.C);
+  sizeof of an array of unknown bound, an enumerator's too (ext/flexary6.C); a static data member's out-of-class definition
+  (init/pr71516.C); a variable reported of incomplete type is erroneous, its uses quiet (template/error1.C's false error gone).
+- Non-static members ([expr.prim.id.general]/2, [dcl.fct.default]/9): a non-static member function as decltype's or typeid's
+  operand, a member whose decltype names one reported and the class going on (cpp0x/decltype50.C, decltype31.C, pr66130.C,
+  rtti/typeid8.C); a non-static data member in a member function's default argument (template/error15.C); a discarded statement
+  outside a template checked ([stmt.if]/2, cpp1z/constexpr-if11.C).
+- Class rules: the virt-specifiers ([class.virtual]/4-5, [class.mem.general]/1: override without overriding, final on no virtual,
+  overriding a final function, virt-specifiers outside a member-declarator or on a friend or a member template;
+  cpp0x/override1.C); covariant return types ([class.virtual]/8, inherit/covariant14.C); an implicit virtual destructor deleted
+  (a subobject's deleted destructor, an inaccessible operator delete) overriding a non-deleted one ([class.dtor]/7,
+  [class.virtual]/18; cpp0x/implicit1.C); a union's default constructor deleted for a variant member without one
+  (other/anon-union2.C); const objects default-initialized of a class not const-default-constructible, unions, specializations
+  and namespace scope (cpp2a/constexpr-init7.C, init/pr42844.C); bit-fields: zero and negative widths, a specialization's
+  non-integral type, the address of one, sizeof of a qualified one ([class.bit]/1, /3; template/bitfield2.C, parse/bitfield2.C,
+  cpp1z/decomp-bitfield1.C, diagnostic/alignof3.C); designators of direct members alone ([dcl.init.aggr]/3.1, cpp2a/desig20.C);
+  an expression for an aggregate element with no element ([dcl.init.aggr]/16, cpp1z/aggr-base3.C); a member using-declaration
+  naming its own class ([namespace.udecl]/3, inherit/using5.C); a mem-initializer naming no direct or virtual base
+  ([class.base.init]/2, template/ctor5.C); a constructor taking its class by value with the other parameters defaulted
+  ([class.copy.ctor]/5); a friend function two specializations define (template/friend47.C); a flexible array member's default
+  member initializer used anywhere (ext/flexary20.C); C language linkage of one name and two types ([dcl.link]/6-7,
+  parse/friend5.C); block-scope extern declarations of one name and namespace of different types ([basic.link]/8, /11).
+
+Checks (the worktree's .tmp/own/, the fifth pass's .tmp/bin/dm and cmp): per rule the rows it aims at and hand-made probes with the
+valid forms beside the invalid ones (friends and members granted access, protected bases from derived classes, `::B::si`,
+covariant overriders, `S(int = 0)` as a default constructor, `sizeof(B*)` and `T<int>` in a static member's initializer, `new A` of
+`typedef int A[2]`, unions with one initialized member, std's headers). A targeted run over the 484 recorded passes the first rules
+could touch (q1: 0 lost but concepts-pr67774.C's load timeout), then three regressions over the 3,332 recorded passes and the 880
+counted clang-only candidates (4,212 files, 6 threads beside the other two agents' runs): r1 at `beef3f71a` (0 lost but 4 load
+timeouts, 14 gained), r2 at `93c27e36f` (4 lost and fixed: cpp2a/consteval11.C's discarded `bar (13)` evaluated -- a discarded
+statement's immediate invocations are not --, parse/array-size3.C's `int f : -1ULL;` taken for a negative width -- an unsigned
+width's value is none --, init/ptrfn2.C's and cpp2a/paren-init26.C's elision -- the empty-subaggregate rule left to arrays'
+cx-empty-agg-elide! and off in parenthesized initialization), r3 at `c14565dc9`, the branch's code: 0 lost but four read timeouts
+under the host's load 21 (cpp1z/constexpr-asm-3.C, abi/mangle41.C, template/pr69961a.C and cpp2a/concepts-pr67774.C, each passing
+alone at the same commit, concepts-pr67774.C in 255 s against the base's 267 s), 48 rows to own pass, listed in
+test/cpp/sema-pass-types.txt (3 of them, template/crash41.C, error15.C and ttp5.C, of test/cpp/divergences-dg.edn's :na class
+:ifndr-uninstantiated-template, outside the counted rows); the dg negative control (dr2082-vs-dr1423) failed as it must. Not
+recorded here (the three branches are merged and recorded once): with the 45 counted rows the read stage would be (1934 + 3377 +
+0.5 x 794) / 6105 = 0.935.
+
+Left in the area (the candidates read, not done): templates' definitions before instantiation and two-phase lookup
+(template/incomplete1.C, incomplete11.C, sizeof11.C, member4.C, non-dependent13.C, parse/new1.C, template/access43.C,
+parse/non-dependent2.C's false ambiguity through a dependent base), the point of completion of a class defined later
+(cpp1z/has-unique-obj-representations4.C, cpp1z/static2.C: the unit's classes complete before the initializers are analyzed),
+pointer-to-member template arguments (parse/access14.C, which also needs the specialization of B<&A::i>), friend and nested
+templates' access contexts (template/memfriend16.C, memfriend17.C, friend82.C, friend31.C), access in SFINAE (cpp0x/sfinae58.C),
+an out-of-line defaulted copy that cannot bind (cpp0x/defaulted60.C), designated `.x = {}` as copy-list-initialization
+(cpp2a/desig30.C, which the positional `Aggr{{}}` would share), a declined class's covariant return (inherit/error2.C).
+
+## As built: cpp-sema-const, the own front end's constant evaluation and templates (2026-11-27; branch `cpp-sema-const-1127` from mac/next `2e2cd3ef1`)
+
+One of three agents over the 766 dg rows clang passes that the own front end did not (the fifth pass's "Left"), split by
+semantic area; this one constant evaluation and templates (constexpr and consteval, core constant expressions, static_assert,
+constinit; templates before instantiation; deduction, packs; concepts), the other two overload resolution with noexcept in
+function types, and incomplete types, complete-class contexts, access, class rules and parenthesized init. The method the fifth
+pass's: each candidate read against its dg lines (the worktree's .tmp/bin/dm, a file's diagnostics with the checker's refusals),
+each rule from the standard's text, its valid forms probed beside the invalid ones (.tmp/p/ok*.C give no diagnostic). The rules
+(arbace/cpp/sema.ae, arbace/cpp/template.ae, arbace/repr/cpp/diag.ae's sema-rules):
+
+- Constant evaluation: a pointer to function converted to a pointer to an object type (void among them), or back, a
+  reinterpret_cast ([expr.reinterpret.cast]/6, /8; cpp0x/constexpr-89599.C), and a reinterpret_cast's glvalue read
+  (constexpr-union.C); a constexpr array's braced initializer evaluated, its class elements no indeterminate subobject
+  ([dcl.init.aggr]/4, [expr.const]/13-14; constexpr-init3.C); a global array from a string literal read element by element
+  ([dcl.init.string]/3; constexpr-array13.C's `*(p-1)`); a reference of static storage duration bound to a temporary of a type
+  not const, its referent no object usable in constant expressions, and a const variable of pointer or floating type none either
+  ([expr.const]/4-5; constexpr-ref10.C, constexpr-59686.C, constexpr-object2.C); a member function used before its outermost
+  enclosing class is complete, outside the class's own member functions ([class.mem.general]/7, [expr.const]/5.3;
+  constexpr-54002.C); a GNU vector operation's operands evaluated (pr59641.C); flowing off the end of a user-written function
+  that returns a value ([stmt.return]/4; cpp1y/constexpr-return2.C), not judged for a body with a statement left out, an error
+  reported or a VLA; -INT_MIN of a type narrower than long ([expr.pre]/4); an array member of scalars, or of class elements,
+  with an element holding no value ([expr.const]/13-14; cpp2a/constexpr-init21.C, whose arrays are maps of their set elements);
+  a pointer or a reference to an object of automatic storage duration as no permitted result ([expr.const]/13;
+  diagnostic/constexpr3.C, cpp0x/constexpr-ref2.C); an ellipsis's arguments evaluated ([expr.call]/12;
+  constexpr-ellipsis2.C); a closure type no literal type before C++17 ([expr.prim.lambda]/3 of C++14); a constexpr
+  constructor's mem-initializer calling a constructor not constexpr ([dcl.constexpr]/3-6 of C++11-C++20; constexpr-ctor2.C,
+  constexpr-ice5.C) and, before C++20, a member of class type default-initialized by a trivial constructor while its class has
+  members (constexpr-diag4.C); the consteval branch of `if consteval` analyzed as an immediate function context
+  ([stmt.if]/4, [expr.const]/16; cpp23/consteval-if12.C); __is_same judged in a static_assert; C++03's floating operations in an
+  enumerator's integral constant expression ([expr.const]/1 of C++03; parse/constant5.C); a constexpr constructor's
+  mem-initializer argument reading a variable not usable in constant expressions (constexpr-non-const-arg.C); GCC's
+  -fconstexpr-ops-limit=N when the file gives it (cpp1y/constexpr-87481.C).
+- Templates: a non-type template argument naming a function parameter, a variable neither const nor constexpr, a volatile one or
+  a const floating one ([expr.const]/4-5, /5.9; template/crash131.C's cascade aside, parse/error2.C, constexpr-volatile2.C);
+  structural class types for non-type parameters, a base or member not public, mutable, an rvalue reference
+  ([temp.param]/7; cpp2a/nontype-class25.C); a placeholder parameter deduced from a floating literal before C++20, and an
+  instance's non-type parameter whose substituted type is void, a reference to void or (before C++20) floating
+  ([temp.param]/4 of C++17; cpp1z/nontype-auto3.C, template/nontype12.C, template/instantiate7.C); a class template's
+  instance forming a reference to void or a pointer to member of void, reported at the member, and in a constraint's
+  substitution the same a sure failure ([temp.inst]/3, [temp.constr.atomic]/3; template/ptrmem15.C,
+  cpp2a/concepts-requires18.C); an array bound greater than zero for a variable or a member, an instance's too ([dcl.array]/1;
+  template/dependent-name3.C); a variable template's non-dependent constrained placeholder and initialization checked at its
+  definition ([temp.res.general]/6; cpp2a/concepts-placeholder4.C, warn/Waddress-of-packed-member2.C); before C++20 no
+  placeholder for a deduced class type as a non-type parameter's type (cpp1z/class-deduction64.C); an address cast to an
+  integer type in a template argument ([expr.const]/5.15; template/pr79650.C).
+- Deduction and packs: a placeholder parameter's type from another placeholder's argument, a character literal or a literal
+  default ([dcl.type.auto.deduct]); a trailing pack's explicit arguments extended by deduction ([temp.arg.explicit]/9;
+  cpp0x/variadic35.C's `get_ith<1, float>(1, 2.0, 'x')`, a false error before); packs of different lengths in one expansion
+  an error ([temp.variadic]/7; cpp0x/variadic78.C).
+- Concepts: an atomic constraint's type other than bool for a literal, a cast or an arithmetic result ([temp.constr.atomic]/3;
+  concepts/pr94252.C, cpp2a/concepts-nonbool3.C); a call through a pointer to function of too many arguments, an implicit
+  conversion no standard conversion makes and too many initializers sure substitution failures (concepts/diagnostic17.C,
+  cpp2a/concepts-class2.C); a nested requirement's own sure evaluation error reported (cpp2a/concepts-pr67697.C); a class
+  template's placeholder parameters' type-constraints (cpp2a/concepts-template-parm2.C, -parm6.C); an alias template's
+  constraints not satisfied a template constraint failure at its use or at the alias naming it (cpp2a/concepts-alias.C); a
+  variable template's explicit specialization satisfying its constraints (cpp2a/concepts-var-templ1.C); a variadic concept
+  constraining a pack, (C<T> && ...) with each element its pack of one ([temp.param]/4; cpp2a/concepts-fn3.C; r3's C<Ts...>
+  whole had lost concepts-template-parm6.C); no type named in a complete class a sure
+  substitution failure (cpp2a/concepts-pr65854.C); a compound requirement surely false by its type-constraint whatever its
+  noexcept, which the checker leaves unjudged (concepts/diagnostic7.C).
+
+Checks (the worktree's .tmp/own/, .tmp/bin/jr NAME LIST a dg-error run of `--front native --only LIST` with .tmp/bin/cmp
+against the record): regressions over the 3,332 recorded own passes and the area's 359 candidates (3,691 files, every one of
+the fifth pass's tooling's names in .tmp/an/reg1.list). r1 at `bf64cc2cc` lost four to flowing off the end (a body whose
+refused statement the checker had left out, or whose error was reported elsewhere -- cpp2a/consteval3.C, consteval34.C,
+cpp1z/launder2.C, cpp1y/pr63996.C's VLA; fixed, `c837280b4`) and cpp2a/concepts-pr67774.C to its timeout; r2 at `c837280b4`
+lost ext/flexary9.C and template/builtin-atomic-overloads6.C to the zero-size array rule (an error under -pedantic-errors alone,
+-Wno-pedantic honoured: `70ced3e61`) and two to the cap (cpp1z/constexpr-asm-3.C, 147 s alone; concepts-pr67774.C);
+r3 at `70ced3e61` gained 52 and lost concepts-pr67774.C's timeout alone (268.5 s run alone under the host's load of 18; 99.7 s
+with this branch and 100.2 s at the base `2e2cd3ef1` side by side in one process each: the load's, not the rules'), while
+cpp2a/concepts-template-parm6.C, r2's gain, failed: a variadic concept constraining a pack had been taken as C<Ts...> whole, the
+standard's (C<T> && ...) since (`c21f00084`); r4 at `c21f00084`, the branch's last rule: 53 rows to own pass, 0 recorded passes
+lost but two timeouts under the load (lookup/missing-std-include-3.C, 73 s run alone, a pass; concepts-pr67774.C, 266 s run alone at `c21f00084`, a pass, near the 300 s cap: record it from a run alone, as the fifth pass did), the
+dg negative control (dr2082-vs-dr1423) failing as it must. The 53 are test/cpp/sema-pass-const.txt (one CORPUS/FILE a line), every
+one a counted row clang passes; the record (test/cpp/check-dg-own-linux-amd64.edn) and test/crops/scores.edn are left to the
+three branches' merge, recorded once.
+
+Left in the area: of the 359 rows the area's words and directories select among the 766 (a wide net: others' rows among them),
+306 still fail. The kinds: the evaluator's own gaps (a `this` pointer into the object being initialized,
+cpp1y/constexpr-nsdmi6a.C; weak symbols' addresses, constexpr-array-ptr10.C; __builtin_launder, diagnostic/constexpr3.C; GNU
+array designators, cpp0x/desig4.C; a reference to a temporary returned, constexpr-48324.C); templates' definitions checked before
+instantiation (a non-dependent noexcept operand, cpp0x/pr88987.C, cpp1y/noexcept1.C; the checker analyzes a function template's
+body and signature at its instantiations alone); a member template's packs of an enclosing template's instance
+(cpp0x/variadic10.C, variadic-ex13.C, the mismatch never reached); non-trailing packs' non-deduced contexts
+(cpp0x/variadic-nondeduce1.C); deduced return types used before their definition (cpp2a/concepts-requires23.C); variable template
+instances' placeholders not deduced (cpp2a/concepts-var-templ2.C); class template argument deduction's aggregate and explicit
+guides (cpp2a/class-deduction-aggr*.C, explicit18.C, cpp1z/class-deduction-new1.C); requirements on const objects' assignment
+(concepts/diagnostic15.C, a requirement's `*o = 1` of a const int* analyzes). Rows of the other areas met here:
+cpp0x/noexcept90.C, cpp1y/static_assert3.C (noexcept's value, the checker's types without :nx: overload and noexcept's);
+cpp0x/static_assert9.C, cpp1z/constexpr-if11.C (a non-static member or destructor named without an object: class rules);
+cpp0x/constexpr-array12.C (a variable named in its own initializer reported undeclared, [basic.scope.pdecl]/1);
+template/crash131.C (a declaration whose type refused, its later use's cascade reported).
+
+## As built: cpp-sema-int, the three areas merged and recorded (2026-11-27; branch `cpp-sema-int-1127` from mac/next `2e2cd3ef1`)
+
+cpp-sema-ovl-1127 (`02a247a22`), cpp-sema-types-1127 (`febca839f`) and cpp-sema-const-1127 (`976730eba`) merged one by one, then
+mac/next `2017d2d7b` (train 9, no C++ file). One conflict in the checker: arbace/cpp/sema.ae's operator-call, where ovl and types
+had each added [class.access]/4's check of the member operator function an operator expression chooses (both for
+diagnostic/inhibit-warn-2.C); types' form kept, which covers ovl's (not in an implicit or defaulted member's body, the object's
+class the first operand's for a non-static member, the function checked non-nil). ovl's rule for C++20 parenthesized aggregate
+elements from a scalar and types' empty-subaggregate rule off in parenthesized initialization merged by git beside each other, in
+different functions (ctor-init's fallback, elide-agg's binding). The sections above merged by `git merge-file --union`.
+
+Checked: one regression over the merged checker (the worktree's .tmp/own/r1; .tmp/bin/reg and cmp of the fifth pass): the 3,332
+recorded own passes and the union of the three branches' candidates, 4,281 files (ovl's set, which holds types' 4,212 and const's
+3,691), 6 threads under the host's load: 0 passes lost but five read timeouts (cpp23/elision3.C, cpp0x/udlit-concat-neg.C,
+cpp1z/constexpr-asm-3.C, abi/mangle41.C, cpp2a/concepts-pr67774.C), the four first passes rerun together at 3 threads (t1), and
+concepts-pr67774.C a pass alone (t2, 250 s against the 300 s cap); every one of the three lists' 146 rows (150 less the four in two
+lists: template/crash41.C, ttp5.C, diagnostic/inhibit-warn-2.C, cpp0x/constexpr-ice10.C) passes, and three rows no branch had
+alone (cpp0x/pr65398.C, cpp1z/using-variadic2.C, gomp/pr47963.C): 149 gained; the dg negative control (dr2082-vs-dr1423) failed as
+it must. Recorded from r1, t1 and t2 (`--judge --record`): own passes 3,332 -> 3,481; C++ read independence 0.931 -> 0.943
+((1934 + 3481 + 0.5 x 697) / 6112: the passing :na rows of crash41.C, error15.C, ttp5.C and the four test/cpp/dg-dialect-out.edn
+rows now own, ext/pr84843-1.C, gomp/pr47963.C, gomp/pr92504.C, parse/error44.C, counted as passes), the crop's 0.9862 -> 0.9886;
+`bin/reap --record` unchanged (the rows were clang's passes); `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+Left: 697 counted rows, 624 of them clang's passes, 73 clang fails too (the read cell's deferred rows); the areas' "Left" above.
