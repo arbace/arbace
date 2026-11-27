@@ -5351,3 +5351,63 @@ tail calls: `dequeue`'s `continue k ()`, the effc's `dequeue ()`) keeps its dept
   main corpus's `:na-native-code` keeps backtrace/lazy and typing-modules/struct_include_optimisation (both still failing) and
   the native-code tests classed by their headers. discard_in_callback, passing since queue 603, is moved out of the suite's
   `:programs` and `:reasons`; the class stays.
+
+## As built: oc-light (2026-11-27, branch `oc-light-1127`, from mac/next `120b1b912` with queue 604's `45fb9d2ab`): the light level's speed
+
+The AOT cell's deferred rows of the light level (`:light-speed` 24, `:c-api` 2; `:light-depth` empty since 604), on stage 0 (no gate
+executable). The light level runs o2j's Java forms on stage 0's Java forms interpreter, which this branch cannot change (the seed's):
+the work is in what o2j writes (arbace/o2j.ae, the light level only: the compiled level's forms, `o2j clib`, byte for byte as before)
+and in how it is measured.
+
+- **A profile of a light-level run by OCaml's call sites** (by hand, not committed): a copy of jdk/ocaml whose `Bt` starts a sampler
+  thread under `O2J_PROF=FILE` (the shadow stack's top two slots and every slot in flight, every 2 ms, the counts written every 3 s),
+  beside Go's `ARBACE_CPUPROFILE` for the interpreter's own. They showed where each program spends its time: the calls' protocol
+  (Bt/push an interpreted call of its own, the closure's class and arity tested at a function's call of itself), Rt's primitives
+  (each an interpreted call: a frame), the boxing of ints in loops, the load of the library's units (Printf's CamlinternalFormat:
+  about 30 s of CPU, a third of it ClassNotFoundExceptions), and a heap growing through a run (the collector's marking).
+- **What o2j writes now at the light level** (commits `05355cac5`, `fd02eb163`, `198a4e124`, `95dde0fdd`):
+  - Bt/push's fast path in place (the method only to grow the stack); a function's application of itself with its arity a direct
+    `.aN` on `this`; an int constant a literal operand of the int primitives (its static field's read, cast and unboxing were
+    three nodes);
+  - the int primitives `neg land lor lxor lsl lsr asr div mod compare_ints isout isint`, physical equality's int case, a block's
+    field set, an array's element (get, set, checked or not) and length, a string's element (get, set, checked or not) and length
+    in place, the representation OCaml's types give (a Long, a Block, a byte array) on the fast path and Rt's method for any other
+    (a float array, an error); an operand used twice is a local or an int primitive's form, never bound to a local of its own (a
+    let's slot keeps what it held for the frame's life: weak-ephe-final/ephetest's test7 failed with the first version);
+  - longs where OCaml has ints: a for loop's index, a self loop's `[int]` parameters (the loop carries them as longs, a value use
+    boxes there: `*longs*`, `self-continue`), an `[int]` mutable variable (`mutlet`, set by its assignments: `*mutlongs*`);
+  - java.lang's classes named in full in the written forms (`qualified`): the loader resolved `Object`, `Long` ... in the unit's own
+    package ocaml.u first, each miss a ClassNotFoundException with its stack trace; a Printf program's load 38 to 24 s of CPU;
+  - no frame keeps what a call was passed: a self loop's method parameter (which the loop's local shadows) read and cleared into
+    the loop (`loop-init`), and a call's argument temporaries cleared as they are passed (`passing`), as ocamlopt's caller frame
+    holds no argument it passed. match-exception/streams' iter_stream_match kept its stream's head for its 10,000,000 turns, every
+    forced element reachable, the collector's marking growing with them (1,500,000 turns: 77 s, then 46 s).
+- **Probes** (each against its .reference, module names normalised): backtrace/backtrace2, backtrace3, backtrace_bounds_exn,
+  effects/backtrace (`b=1`), effects/evenodd, sched, basic/divint, min_int, equality, arrays, patmatch, stringmatch, boxedints,
+  eval_order_1, switch_opts, zero_divided_by_n, lib-sys/opaque, weak-ephe-final/ephetest, and an edge program of the new
+  primitives (every pair of 14 ints through the int operations, division by zero, out-of-bounds gets and sets of arrays, float
+  arrays and strings) against oi's output (its one difference the light level's shared constant block `Some 3`, ocamlopt's).
+- **Measured** (each row alone as `o2j_alone` runs it, stage 0, GOMAXPROCS=1, 2500MiB, GOGC off; CPU user + system from
+  `ARBACE_CPU_LOG`; the main host at load 60 to 85, the other agents' runs). A first pass at `05355cac5`'s translator, every row of the
+  two classes that could finish under a temporary 1,200 s limit (`bin/oi check --aot --record --only-list`, `suite check --aot ...`):
+  basic/tailcalls 321 s, lib-buffer/test 288, lazy/lazy3 351, lib-bytes-utf/test 572, lazy/lazy5 616, weak_array_par 356, misc/sorts
+  349, tool-ocamldep-shadowing/a 319 (its 26 compiler-libs units' load), the suite's callback_effects_domains_gc 278, chi2 423,
+  memory-model/forbidden 619, publish 390, parsetree/test 1,051; each row's cap the user's 1.5x rule (test/ocaml/aot-cpu-caps.tsv,
+  rounded up to 10 s). match-exception/streams, parallel/churn, gc-roots/globroots_sequential and lib-bigarray/subarraystub did not
+  finish in 1,220 s. The final pass at `95dde0fdd` under those caps, with --record: the 14 rows pass (tailcalls 317, sorts 319,
+  weak_array_par 332, lazy3 344, lazy5 563, lib-buffer 288, lib-bytes-utf 547, streams 242 (its cap 370 from this run), ocamldep
+  315, callback_effects_domains_gc 273, chi2 421, forbidden 610, publish 353, parsetree 1,004), with, as a regression check of the
+  frames' liveness, the run corpus's and the suite's 30 passing rows that observe the collector (statmemprof's, weak-ephe-final's,
+  lib-sys/opaque, regression/pr5233, callback/test_finaliser_gc, lazy/minor_major_force): all pass, their rows unchanged. The 14 out of
+  aot-slow.edn. OCaml AOT (bin/reap, not recorded: the matrix's record is refused on 604's two rows outside every class,
+  typing-labels/mixin2 and opam/fmt/test_fmt, which this branch does not touch) 568 / 11 / 29 -> 582 / 11 / 15.
+- **Left in `:light-speed`** (10): parallel/fib_threads (four fib 42: about 3.5 billion calls; oi 759 s), opam/uutf/test_uutf (oi
+  1,344 s), ast-invariants/test (oi 208 s: about ten times that here), lazy/lazy7 (lazy5's 10^9 turns with four domains), parallel/churn
+  (oi itself past 120 s), gc-roots/globroots_sequential and lib-bigarray/subarraystub (past 1,220 s: the C API's
+  boundary, a bigarray copied each call), and statmemprof's arrays_in_minor, lists_in_minor and minor_heap_edge (each simulated minor
+  collection with tracked values a Go collection over stage 0's whole heap). Their judgment is the compiled level's.
+- **`:c-api` left** (2): unboxed-primitive-args/test's stubs keep the pointers `Caml_ba_data_val` gave (test_set_buffers) and read and
+  write the bigarrays through them in later calls in which the bigarrays do not cross: the light level's server copies a bigarray only
+  for the call it crosses in (oicapi's boundary memory, freed at the outermost call's end), so a fix is a persistent mapping of such a
+  bigarray synced before and after every call (oicapi, CApi's wire form and caml/bigarray.h's macro), not built here.
+  lib-unix/common/cloexec needs Unix.execv at the light level, which OC208 (b) leaves to the compiled level.
