@@ -815,6 +815,14 @@
 ;; operand of a decltype among them that surely fails is the constraint's substitution failure, not a dependent type.
 (def ^:dynamic *cx-tc-args* false)
 
+(declare fnd)
+(defn- cx-nonstatic-fnset?
+  "cpp-sema-types: whether `x` is an overload set of non-static member functions alone (no template), a name that is only a
+  call's operand ([expr.prim.id.general]/2, [expr.ref]/6.3.2)."
+  [x]
+  (boolean (and (= :fnset (:op x)) (seq (:fns x)) (empty? (:tmpls x))
+                (every? #(let [f (fnd %)] (and f (:cls f) (not (:static f)) (#{:method :conv} (:kind f)))) (:fns x)))))
+
 (defn- decltype-of
   "decltype(e) ([dcl.type.decltype]/1): the operand the native parser kept for the text `t`, analyzed in `scope`
   (unevaluated: its result is not kept); an unparenthesized id-expression or member access its entity's declared type,
@@ -860,6 +868,13 @@
                          (when (and outer (= :name (:codegen/refused (ex-data e)))) (reset! outer true))
                          {:dependent-decltype t})
                      (throw e))))]
+      ;; (cpp-sema-types, the checker: [expr.prim.id.general]/2 and [expr.ref]/6.3.2, a non-static member function named --
+      ;; `zip`, `A::zip`, `this->A::zip`, `A().zip` -- or the result of .* or ->* with a pointer to member function is only a
+      ;; call's operand (or &C::f's), none of decltype's: GCC's "invalid use of non-static member function"; cpp0x/decltype50.C,
+      ;; decltype31.C)
+      (when (and (checking?) (map? x) (not (header-node? n)) (not (:dependent-decltype x))
+                 (or (= :mbound (:op x)) (cx-nonstatic-fnset? x)))
+        (fail :expr "invalid use of non-static member function (a decltype's operand)"))
       (cond
         ;; (cpp-s15, CP391 (a): in a function's type, an operand that analyzed but is type-dependent ([temp.dep.expr]: its
         ;; type, or a parameter it names, depends on the template's parameters) is the dependent decltype too, clang's DT
@@ -11744,7 +11759,16 @@
           ;; operator<(strong_ordering, __unspec))
           (rewritten-better? ctx o args best ms)
           (operator-call ctx o [(operator-call ctx "<=>" args) {:op :int :v 0 :ty abi/int* :cat :pr}])
-          (contains? ms best) (method-call ctx best l more true)
+          (contains? ms best) (do ;; (cpp-sema-types, the checker: [over.match.oper]/2 with [class.access]/1-2, an operator
+                                  ;; expression that calls a member operator function names it, its access checked where the
+                                  ;; expression is, the first operand's class the naming class: GCC's "'... D::operator=(Expr)' is
+                                  ;; private within this context"; diagnostic/inhibit-warn-2.C; not in an implicit or defaulted
+                                  ;; member's body, whose deletion is the rule there)
+                                  (when (and (checking?) (not *cx-in-implicit*) (not (some-> (:fn-id ctx) fnd ((some-fn :implicit :defaulted)))))
+                                    (let [f (fnd best)]
+                                      (when (and f (:cls f) (#{:private :protected} (:access f)) (not (:implicit f)))
+                                        (check-access! ctx (:cls f) (:name f) (:access f) lc (when-not (:static f) lc)))))
+                                  (method-call ctx best l more true))
           :else (fn-call ctx best args))))))
 
 (defn- rewritten-relational
@@ -14143,6 +14167,10 @@
           (when (and (checking?) (cx-vm? t)) (cx-vm-typeid! n))
           {:op :typeid :t (abi/unq (abi/non-ref t)) :ty ti :cat :lv})
         (let [e (analyze ctx (first (kids n)))
+              ;; (cpp-sema-types, the checker: typeid's operand no non-static member function's name, [expr.prim.id.general]/2:
+              ;; GCC's "invalid use of non-static member function"; rtti/typeid8.C)
+              _ (when (and (checking?) (cx-nonstatic-fnset? e) (not (header-node? n)))
+                  (fail :expr "invalid use of non-static member function (typeid's operand)"))
               _ (when (and (checking?) (cx-vm? (:ty e))) (cx-vm-typeid! n))
               cid (class-id (:ty e))]
           (if (and cid (lv? e) (abi/dynamic? cid))
