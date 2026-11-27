@@ -9567,3 +9567,68 @@ object inside the test: no moment at a rebinding), test_pickle's delayed writer 
 test_pointer_types_factory and test_xml_etree_c's test_cyclic_gc (cycles through the C world's objects), test_sqlite3's
 test_table_lock_cursor_non_readonly_select (passes alone and in test_sqlite3.test_regression whole, compiled, fails in the
 package's run: an earlier test's state).
+
+## As built: py-last6-1127, the eval cell's last six deferred rows (2026-11-27, the main host)
+
+Train 9's record (mac/next 2017d2d7b) left six deferred rows in the eval cell, each passing alone and failing in its module's
+run. Each module was run once whole in its order at the base (`bin/pyi check --fresh --only`, train 9's executable
+e89947b7637c5ceb2de8, `PYI_RUNTIME_REQUIRE=compiled`): all six failed as recorded. The dependencies were then narrowed with
+probes, not with more module runs. Commits on py-last6-1127: e7e05baf4 (pysqlite3), 2434f6b70 (the threads' masks), 16f1c72fc
+and bb1095afb (the exports), 2a913f0ee (the moment at a return). No record or class was edited: the rows leave their classes
+at the next record.
+
+- **:multiprocessing-children, spawn's and forkserver's WithProcessesTestPollEintr.test_poll_eintr.** The mask of
+  pthread_sigmask was the process's: multiprocessing.resource_sharer's `_serve` thread blocks every signal in itself
+  (`signal.pthread_sigmask(SIG_BLOCK, valid_signals())`), and in pyi that held SIGUSR1 (and every other signal) from the main
+  thread for the rest of the process, so the test's handler never ran. The earlier test is TestPicklingConnections.test_access
+  (`conn.send(w)` pickles a Connection in the parent: reduction.DupFd, the resource sharer). Measured at the base:
+  `--only` test_access + test_poll_eintr fails; a probe (a thread that blocks everything, then the main thread's SIGUSR1)
+  shows the main thread's mask full and no handler run. Fixed (builtins_signal.go, builtins_thread.go): each thread has its own
+  mask (sigMasks by ident, its creator's at its start, the start's mask for the main thread), pthread_sigmask sets and returns
+  the calling thread's, and a signal is held only while every running thread blocks it (applyProcessMask, also at a thread's
+  end), as the kernel delivers a process-directed signal to a thread that does not block it; a child started by ForkExec gets
+  its thread's mask. 607's "both drivers at once" was the load; train 9 ran the modules one at a time and failed them both.
+- **:buffer-exports, test_memoryio's PyBytesIOTest.test_getbuffer_empty and test_writelines_concurrent_export** ("BufferError
+  not raised"): no train 9 member regressed them; they fail in the module's run only. A refused resize asks Go's collector
+  whether the views died within a budget (exportsSpent: 200 ms and a tenth of the wall time), past which the resize is allowed;
+  CBytesIOTest's refusals spend it before PyBytesIOTest's run. Probe: 300 refusals of fresh exporters first, then a held
+  view's resize is allowed. Fixed (buffer_export.go's exportsHeldNear): before any collection, a view not released that the
+  running thread's frames hold (a fast local, a cell, the value stack, or one level below: an instance's attribute, a list's,
+  tuple's or dict's item) refuses the resize at once, with no collection and none of the budget; a view held elsewhere or
+  dropped is the collector's question as before. Such a view is alive in CPython too, so the refusal is never a false one.
+  Not within a finalizers' drain (bb1095afb): there the resize is allowed as exportsVerify allows it, since a `__del__`'s
+  refusal (_pyio.BytesIO.close's clear while a view is held, CPython's unraisable BufferError) left the dying BytesIO held by
+  the unraisable's traceback past gc.collect() (test_getbuffer_gc_collect failed with 16f1c72fc alone).
+- **:os-and-files-misc, test_tempfile's TestMktemp.test_basic** ("Directory not empty" at tearDown): the moment at a frame's
+  return (finAtReturn, the user's decision of 2026-11-22) runs a collection whenever a frame that made an object with a
+  `__del__` returns, within finSpent's budget (50 ms and a tenth of the wall time). Most of those collections find a survivor:
+  a factory's returned value (do_create's mktemped), an object its `__init__` stored (tempfile's `_TemporaryFileCloser` in its
+  wrapper), each noted up to finPendChecks times, so the module's earlier NamedTemporaryFile tests spent the budget and
+  test_basic's five deaths waited past its tearDown. Probe: 3000 survivors' returns first, then the test's body: "Directory not
+  empty". Fixed (finalize.go's finPendNear, eval.go passes the returned value): when every noted object is held by the
+  returned value or by the frames left running (as exportsHeldNear looks), the notes are settled as survivors with no
+  collection and none of the budget; a collection runs only when one may be dead. The collection would have found exactly
+  those alive, so only its cost changes.
+- **:finalization-goi, test_sqlite3's test_table_lock_cursor_non_readonly_select** ("database table is locked"): the earlier
+  tests are test_hooks' AuthorizerTests.test_authorizer_concurrent_mutation_in_call and _with_overflown_value: any nested C
+  call inside an authorizer callback (set_authorizer(None), set_progress_handler, sqlite3.complete_statement) moved goi's
+  depths so that the next select whose function callback ran a nested execute left its cursor in goi's slots above the stack's
+  top (pysqlite3 is a lazy package goi interprets: the executable does not list it), alive after `del` and gc.collect(). The
+  same probe passes compiled (`bin/pyi aot`). Fixed (pysqlite3's connection.go): reset_dead_cursors, which runs the
+  finalizers' rounds before a write when a statement is still busy, first runs goiScrub(256), py's scrubSlots in the
+  interpreted package. A weak reference to a pysqlite3 cursor also kept it alive past gc.collect() in a probe at the base (on
+  goi); not this row's cause (the test makes none), left noted.
+
+**Measured.** At the base each module's run fails its rows (test_memoryio, test_tempfile, the test_sqlite3 package; for
+test_poll_eintr the selection test_access + the row). With the changes:
+- test_sqlite3's row, at the eval level on train 9's executable (pysqlite3 is interpreted from the checkout): `--only` over
+  the two AuthorizerTests and the row, 44 of 44, the row "now pass".
+- The runtime's changes need the build for the eval level; until it, they were checked with the checkout's runtime: on goi
+  (`bin/pyi run`, `bin/pyi check --only`) and compiled by `bin/pyi aot`.
+  - test_memoryio whole by unittest on goi: 188 run, no failure (the two rows and test_getbuffer_gc_collect together).
+  - test_tempfile whole by unittest under `bin/pyi aot` (the module imported at run time, on the eval loop, the runtime
+    compiled): 121 run, no failure. On goi its `check --only` run still failed test_basic: goi's registers keep the returned
+    objects (`:finalization-goi`'s mechanism), so goi cannot show this row.
+  - test_poll_eintr: on goi the probe's handler runs, and `check --only` over test_access + the row for spawn and
+    forkserver: 45 of 45, both rows "now pass".
+- gofmt, go vet and go test (`bin/pyi runtime vet`) clean; `git status` clean on go/arbace/pytls after the read.
