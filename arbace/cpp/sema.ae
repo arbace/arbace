@@ -9623,6 +9623,29 @@
              :cond (or (cx-bitfield-lv? (:then e)) (cx-bitfield-lv? (:else e)))
              false)))
 
+(defn- cx-conversion-access!
+  "cpp-sema-types (the checker): the access an implicit conversion of `src` (its prvalue `e`) to the scalar type `tu` needs
+  where it is made, in the analysis context `ctx` (an initialization's, an assignment's right operand)."
+  [ctx src e tu]
+  (when (checking?)
+    (let [ft (abi/unq (:ty e))]
+          ;; (cpp-sema-types, the checker: [over.over]/1 with [class.access]/1-2, an overload set named by a class member access
+          ;; or a qualified name, `foo.g` of a static member function, converted to a pointer to function names the function
+          ;; the target selects, its access checked where it is named: GCC's "'static void Foo::g()' is private within this
+          ;; context"; inherit/access6.C)
+          (when (and (map? src) (= :fnset (:op src)) (or (:member-access src) (:qualified src)) (abi/ptr? tu) (abi/fn? (:to tu)))
+            (when-let [f (some-> (fn-matching src (:to tu)) fnd)]
+              (when (and (:cls f) (:static f) (#{:private :protected} (:access f)))
+                (cx-access! ctx (:cls f) (:name f) (:access f) (:cx-nc src) nil))))
+          ;; (cpp-sema-types, the checker: [conv.ptr]/3 with [class.access.base]/4, a pointer to a derived class converts to a
+          ;; pointer to its base only where the base is accessible -- an invented public member of it accessible as a member of
+          ;; the derived class --, not in a member of the base itself: GCC's "'A' is an inaccessible base of 'B'",
+          ;; inherit/access2.C's `A* ap = &b;` in A::f with `struct B : private A`)
+          (when (and (abi/ptr? tu) (abi/ptr? ft))
+            (let [dc (class-id (abi/unq (:to ft))) bc (class-id (abi/unq (:to tu)))]
+              (when (and dc bc (not= dc bc) (abi/derived-from? dc bc) (= 1 (count (cx-paths dc bc))))
+                (cx-access! ctx bc (:name (abi/cls bc)) :public dc nil)))))))
+
 (defn init-for
   "The initializer of an object of type `t` from `src`: nil (none), a typed expression, an init-list node
   {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
@@ -9874,6 +9897,7 @@
           (fail :conversion "cannot initialize a variable of type '" (:name (abi/enm (:id tu))) "' with a value of another type"))
         ;; (queue 460: an implicit conversion no standard conversion makes, the checker's)
         (when-not (abi/class? ft) (cx-implicit-scalar! e tu style))
+        (cx-conversion-access! ctx src e tu)
         ;; (direct-initialization: the explicit conversion functions too, [over.match.conv]/1.1; CP280 (a))
         {:i :expr :e (convert-scalar (if (abi/class? (abi/unq (:ty e))) (user-conv ctx e tu (= style :direct)) e) tu false)}))))
 
@@ -10514,9 +10538,10 @@
                           ;; (queue 412: x = {e} as T{e}, [expr.assign]/8: narrowing judged)
                           1 (:e (narrow-check! {:i :expr :e (convert-scalar (rv (first (:items r))) t false)} t (first (:items r))))
                           (fail :assign "a list of several values assigned to a scalar"))
-                        (let [r (rv r)]
+                        (let [r0 r r (rv r)]
                           ;; (queue 460: [expr.assign]/3, the right operand implicitly converted, the checker's)
                           (when-not (abi/class? (abi/unq (:ty r))) (cx-implicit-scalar! r t :copy))
+                          (cx-conversion-access! ctx r0 r t)
                           ;; (cpp-diag-b, 2026-11-22: [expr.assign]/3 with [conv.integral]/1: no implicit conversion yields an
                           ;; enumeration, so an enumeration is assigned from its own type alone: from another enumeration GCC's
                           ;; "cannot convert 'Y' to 'X' in assignment", from an arithmetic value its permerror "invalid conversion")
@@ -10887,9 +10912,12 @@
                    ;; parse/access5.C's &A::a in B derived from A; likewise a member function's below, parse/access4.C)
                    (when (#{:private :protected} a) (cx-access! ctx (:cls e) nm a qc qc)))
           :fn (let [fs (keep #(when (= :fn (:e %)) (fnd (:id %))) es)]
-                (when (and (seq fs) (every? #(and (:cls %) (not (:static %)) (#{:private :protected} (:access %))) fs))
+                ;; (cpp-sema-types: a static member function's too, &C::f an ordinary pointer to it, [expr.unary.op]/3, the name's
+                ;; access checked as any qualified name's, the protected object rule not applying to a static member,
+                ;; [class.protected]/1)
+                (when (and (seq fs) (every? #(and (:cls %) (#{:private :protected} (:access %))) fs))
                   (when-let [cx (cx-context ctx)]
-                    (when (every? #(false? (cx-access-ok? cx (:cls %) (:access %) (if (or (= qc (:cls %)) (abi/derived-from? qc (:cls %))) qc (:cls %)) qc)) fs)
+                    (when (every? #(false? (cx-access-ok? cx (:cls %) (:access %) (if (or (= qc (:cls %)) (abi/derived-from? qc (:cls %))) qc (:cls %)) (when-not (:static %) qc))) fs)
                       (fail :access "'" nm "' is a " (name (:access (first fs))) " member of '" (:name (abi/cls (:cls (first fs)))) "'")))))
           nil)))))
 
@@ -11988,6 +12016,15 @@
         place (vec (if initn (rest ks) ks))
         pargs (when (:isPlacement n) (vec (analyze-args ctx place)))
         fa (find-allocation ctx (if nexpr et et) (boolean nexpr) (boolean (:isGlobal n)) (vec pargs))
+        ;; (cpp-sema-types, the checker: [expr.new]/25 (C++23 /26), a new-expression creating an object of class type does
+        ;; access control for its allocation and deallocation functions, a class's private or protected operator new or
+        ;; operator delete inaccessible where the expression is: GCC's "'static void X::operator delete(void*)' is private
+        ;; within this context"; init/delete4.C)
+        _ (when (and (checking?) (not (header-node? n)))
+            (doseq [fid [(:fn (:alloc fa)) (:fn (:dealloc fa))]
+                    :let [f (when fid (fnd fid))]
+                    :when (and f (:cls f) (#{:private :protected} (:access f)) (not (:implicit f)))]
+              (cx-access! ctx (:cls f) (:name f) (:access f) nil nil)))
         ;; the reserved placement form new (p) T: clang's CodeGen uses its argument, calls nothing
         placement (when (:reserved fa) (convert-scalar (rv (first pargs)) (abi/ptr abi/void) false))
         ;; (queue 570, the checker: a new-expression's type of GNU's VLA type, a local typedef's: `new A[5]` and `new (A[0])`
