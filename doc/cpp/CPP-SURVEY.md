@@ -12618,3 +12618,76 @@ Left in the area (each one or a few files a rule): the overload sets deduced as 
 templates before instantiation (template/new14.C, cast3.C, cpp1y/var-templ76.C; area C's), OpenMP clauses (gomp/), built-in
 candidates for conversion function templates (template/operator12.C), copy-initialization's second step before C++17
 (template/copy1.C), GCC's own built-ins' argument rules (ext/builtin_alloca.C), lambdas in templates (lambda-template17.C).
+## As built: cpp-sema-types, clang-only dg rows by the own front end: types and classes (2026-11-27; branch `cpp-sema-types-1127` from mac/next `2e2cd3ef1`)
+
+One of three parallel passes over the read stage's clang-only dg rows (after cpp-read-indep's fifth pass, 0.931), split by
+semantic area; this one took types and classes: incomplete types, complete-class contexts, access, the class rules (special
+members, virtual functions, unions, bit-fields, member declarations) and C++20's parenthesized array new. The others took
+overload resolution with noexcept in function types, and constant evaluation with templates before instantiation and pack
+deduction. Each rule from the standard's text, no GCC or clang code (arbace/cpp/sema.ae, arbace/cpp/template.ae,
+arbace/repr/cpp/diag.ae, arbace/repr/cpp/parse.ae):
+
+- New-expressions ([expr.new]/5, /7, /25; [dcl.init.general]/16.5): a parenthesized array type-id or a typedef of an array,
+  `new (int[2])(1, 2)`, is an array new of its element type, its bound the array's; an omitted first bound, `new char[]("foo")`, is
+  deduced from the initializer (the parser marks :sizeOmitted); one parenthesized expression of an array new an expression-list
+  (cpp2a/paren-init36.C, paren-init37.C's false errors gone); the class's allocation and deallocation functions' access
+  (init/delete4.C).
+- Access ([class.access]/1-2, [class.access.base]/4-6, [namespace.udecl]/19, [temp.deduct.guide]/3): a template-id's type
+  arguments in a qualifier or a declaration's type (template/access26.C); a template argument `&A::j` of a local's type
+  (template/access36.C); the derived-to-base pointer conversion (inherit/access2.C); a static member function as a value, `foo.g`,
+  `&C::f` (inherit/access6.C); member operator functions called by operator expressions (diagnostic/inhibit-warn-2.C); a
+  qualified non-static member's naming class an accessible base of the object's class, a public static member through an
+  inaccessible base, a base's injected-class-name through an inaccessible base (lookup/scoped1.C, tc1/dr142.C); a
+  using-declaration's data members, checked at the declaration and given its access at the uses, and the using-declarator-list
+  (lookup/using26.C, cpp1z/using9.C); a specialization's friend declaration of another class's member (template/friend32.C); a
+  friend template-id befriending its arguments' specialization alone; a member deduction guide's access (cpp1z/class-deduction94.C).
+- Incomplete types ([basic.types.general]/5-6, [class.mem]/8, [dcl.enum]/6, [basic.def]/5): the class being defined in its static
+  data members' initializers (offsetof, sizeof, alignof: ext/builtin-offsetof4.C) and as an inline static member's type
+  (cpp0x/constexpr-ice10.C); an enumeration without a fixed type in its enumerators (__underlying_type, ext/underlying_type12.C);
+  sizeof of an array of unknown bound, an enumerator's too (ext/flexary6.C); a static data member's out-of-class definition
+  (init/pr71516.C); a variable reported of incomplete type is erroneous, its uses quiet (template/error1.C's false error gone).
+- Non-static members ([expr.prim.id.general]/2, [dcl.fct.default]/9): a non-static member function as decltype's or typeid's
+  operand, a member whose decltype names one reported and the class going on (cpp0x/decltype50.C, decltype31.C, pr66130.C,
+  rtti/typeid8.C); a non-static data member in a member function's default argument (template/error15.C); a discarded statement
+  outside a template checked ([stmt.if]/2, cpp1z/constexpr-if11.C).
+- Class rules: the virt-specifiers ([class.virtual]/4-5, [class.mem.general]/1: override without overriding, final on no virtual,
+  overriding a final function, virt-specifiers outside a member-declarator or on a friend or a member template;
+  cpp0x/override1.C); covariant return types ([class.virtual]/8, inherit/covariant14.C); an implicit virtual destructor deleted
+  (a subobject's deleted destructor, an inaccessible operator delete) overriding a non-deleted one ([class.dtor]/7,
+  [class.virtual]/18; cpp0x/implicit1.C); a union's default constructor deleted for a variant member without one
+  (other/anon-union2.C); const objects default-initialized of a class not const-default-constructible, unions, specializations
+  and namespace scope (cpp2a/constexpr-init7.C, init/pr42844.C); bit-fields: zero and negative widths, a specialization's
+  non-integral type, the address of one, sizeof of a qualified one ([class.bit]/1, /3; template/bitfield2.C, parse/bitfield2.C,
+  cpp1z/decomp-bitfield1.C, diagnostic/alignof3.C); designators of direct members alone ([dcl.init.aggr]/3.1, cpp2a/desig20.C);
+  an expression for an aggregate element with no element ([dcl.init.aggr]/16, cpp1z/aggr-base3.C); a member using-declaration
+  naming its own class ([namespace.udecl]/3, inherit/using5.C); a mem-initializer naming no direct or virtual base
+  ([class.base.init]/2, template/ctor5.C); a constructor taking its class by value with the other parameters defaulted
+  ([class.copy.ctor]/5); a friend function two specializations define (template/friend47.C); a flexible array member's default
+  member initializer used anywhere (ext/flexary20.C); C language linkage of one name and two types ([dcl.link]/6-7,
+  parse/friend5.C); block-scope extern declarations of one name and namespace of different types ([basic.link]/8, /11).
+
+Checks (the worktree's .tmp/own/, the fifth pass's .tmp/bin/dm and cmp): per rule the rows it aims at and hand-made probes with the
+valid forms beside the invalid ones (friends and members granted access, protected bases from derived classes, `::B::si`,
+covariant overriders, `S(int = 0)` as a default constructor, `sizeof(B*)` and `T<int>` in a static member's initializer, `new A` of
+`typedef int A[2]`, unions with one initialized member, std's headers). A targeted run over the 484 recorded passes the first rules
+could touch (q1: 0 lost but concepts-pr67774.C's load timeout), then three regressions over the 3,332 recorded passes and the 880
+counted clang-only candidates (4,212 files, 6 threads beside the other two agents' runs): r1 at `beef3f71a` (0 lost but 4 load
+timeouts, 14 gained), r2 at `93c27e36f` (4 lost and fixed: cpp2a/consteval11.C's discarded `bar (13)` evaluated -- a discarded
+statement's immediate invocations are not --, parse/array-size3.C's `int f : -1ULL;` taken for a negative width -- an unsigned
+width's value is none --, init/ptrfn2.C's and cpp2a/paren-init26.C's elision -- the empty-subaggregate rule left to arrays'
+cx-empty-agg-elide! and off in parenthesized initialization), r3 at `c14565dc9`, the branch's code: 0 lost but four read timeouts
+under the host's load 21 (cpp1z/constexpr-asm-3.C, abi/mangle41.C, template/pr69961a.C and cpp2a/concepts-pr67774.C, each passing
+alone at the same commit, concepts-pr67774.C in 255 s against the base's 267 s), 48 rows to own pass, listed in
+test/cpp/sema-pass-types.txt (3 of them, template/crash41.C, error15.C and ttp5.C, of test/cpp/divergences-dg.edn's :na class
+:ifndr-uninstantiated-template, outside the counted rows); the dg negative control (dr2082-vs-dr1423) failed as it must. Not
+recorded here (the three branches are merged and recorded once): with the 45 counted rows the read stage would be (1934 + 3377 +
+0.5 x 794) / 6105 = 0.935.
+
+Left in the area (the candidates read, not done): templates' definitions before instantiation and two-phase lookup
+(template/incomplete1.C, incomplete11.C, sizeof11.C, member4.C, non-dependent13.C, parse/new1.C, template/access43.C,
+parse/non-dependent2.C's false ambiguity through a dependent base), the point of completion of a class defined later
+(cpp1z/has-unique-obj-representations4.C, cpp1z/static2.C: the unit's classes complete before the initializers are analyzed),
+pointer-to-member template arguments (parse/access14.C, which also needs the specialization of B<&A::i>), friend and nested
+templates' access contexts (template/memfriend16.C, memfriend17.C, friend82.C, friend31.C), access in SFINAE (cpp0x/sfinae58.C),
+an out-of-line defaulted copy that cannot bind (cpp0x/defaulted60.C), designated `.x = {}` as copy-list-initialization
+(cpp2a/desig30.C, which the positional `Aggr{{}}` would share), a declined class's covariant return (inherit/error2.C).
