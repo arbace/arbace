@@ -27230,3 +27230,34 @@ level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83
 - Java (bin/reap): read 7,843 / 0 / 1 -> 7,844 / 0 / 0; eval 3,205 / 0 / 51 (69 n/a) -> 3,222 / 0 / 31 (72 n/a); AOT
   3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
   --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.
+
+
+## 2026-11-26 — OCaml AOT: tail calls at the light level (queue 604, VM)
+
+The user's DECISION 603-1 (c) (2026-11-26): build tail calls at the light level so that parallel/mctest passes under the default
+DEPTH_LIMIT, the depth gone at its cause. Branch `604-ocaml-light-tail-calls` from `89b381f6c` (doc/ocaml/OCAML-SURVEY.md, "As built:
+queue 604").
+- The protocol: `Rt/tok` set at a tail call's site just before its callee's entry, which takes it (`ok$`) and clears it; a function
+  entered from a tail call returns its own tail call as a `Tail` once its thread is deeper than `Rt/TAIL_DEPTH` (256), else makes it in
+  place; a function entered from no tail call bounces the Tails its tail call returns (`Rt/bounce`, which now runs Tails beside the
+  letrec groups' TailCalls). Effects' runstack, resume and reperform in a function's tail dispatch the handler's function as from a tail
+  call (`runstackT`, `resumeT`, `reperformT`), so mctest's handlers continue the next fiber through `continue`'s Tail. The runtime's own
+  calls are never tail calls (`Rt/ap` passes tok only to an exact application; Native and OiFn clear it). The compiled level is
+  unchanged (*in-ns*: Go's stack).
+- Alternatives considered: a Tail for every tail call (an allocation and a bounce for each, the light level's hot path; the depth test
+  keeps shallow calls direct); a per-call-site bounce check on every non-tail call (a check or a frame at every call); a second entry
+  method per closure for tail calls (every body twice); unwinding by an exception to a trampoline (the non-tail frames in between
+  would lose their continuation).
+- The n/a class `:na-native-code` (the user's 2026-11-24 decision for discard_in_callback): its other rows still fail (asmcomp/optargs
+  in the suite; backtrace/lazy and struct_include_optimisation in the main corpus) or are classed by header, so the class stays and
+  discard_in_callback, passing since queue 603, leaves the suite class's :programs and :reasons. No decision needed.
+- Records (2026-11-27, after the VM's suspend of 23:01-07:28): the whole light run, `bin/oi check --aot --record` (544 programs, 432 pass at
+  its end) and `bin/oi suite check --aot --record` (132, 115 pass), then `--only-list --record` reruns of statmemprof/intern (its known
+  entry without the pin: it now finishes, on line 176), typing-labels/mixin2 and opam/fmt/test_fmt. Passing now beside mctest:
+  parallel/test_issue_11094 (its known entry gone), lib-filename/quotecommand, lib-hashtbl/htbl, lib-marshal/intern_final, misc/taku,
+  parallel/major_gc_wait_backup, lib-dynarray/test, lib-floatarray/floatarray (their aot-slow.edn entries gone). weak-ephe-final/
+  weaklifetime has a known entry: it passed in batches only because Gc.quick_stat's counter is the process's; alone it fails with 603's
+  translator too. Two rows fail outside o2j and in no class, so `bin/reap --record` refuses to write the matrix (OCaml AOT would be
+  568 / 11 / 29): typing-labels/mixin2's typing (arbace.repr.ocaml.typer's unify, oi's own row the same "typer: Unify"), and
+  opam/fmt/test_fmt's C stubs (repr/c's reader on b0's vendored xxhash.h, line 3938), both reproducible here and untouched by this
+  branch (the typer's and repr/c's commits of 2026-11-25 on next are the candidates); left to the host, crops-score with them.

@@ -5318,3 +5318,36 @@ oc-tail's leftover rows of the light level that are not its speed, each probed a
   stop_start_in_callback pass, and discard_in_callback (`:na`'s by 2026-11-24's decision: ocamlopt's combined allocations, which the
   light level now runs) passes too, its known entry gone; unboxed-primitive-args/test runs (`:c-api`, as before by its header). OCaml
   AOT 558 / 11 / 40 -> 563 / 11 / 36 (66 n/a); completeness 98.07%.
+
+## As built: queue 604 (2026-11-26, branch `604-ocaml-light-tail-calls`, from `89b381f6c`): tail calls at the light level
+
+The user's DECISION 603-1 (c): the light level makes OCaml's tail calls, so parallel/mctest's scheduler (every yield a handler's
+tail calls: `dequeue`'s `continue k ()`, the effc's `dequeue ()`) keeps its depth under the default DEPTH_LIMIT.
+
+- **The protocol** (jdk/ocaml's `Rt/tok`, `Tail`, `Rt/bounce`; arbace/o2j.ae's `entered`, `tail-form`). A tail call's site sets
+  `Rt/tok` just before the callee's entry, which takes it into its frame (`ok$`) and clears it: a function knows whether it was
+  entered from a tail call. Every argument and the function are evaluated into temporaries first (with-all-args), so nothing runs
+  between the setting and the entry. At a tail call's site:
+  - entered from a tail call and its thread's frames deeper than `Rt/TAIL_DEPTH` (256 OCaml calls above hopBase): the call is
+    returned as a `Tail` (the function value and its arguments), unwinding every tail frame below to the nearest frame entered from
+    no tail call;
+  - entered from a tail call, not deep: the call made in place as a tail call (its result, a Tail perhaps, returned as this one's);
+  - entered from no tail call: the call made as a tail call, and a Tail it returns made here (`Rt/bounce`, each Tail's call made as a
+    tail call through `Rt/ap`), the temporaries read and cleared as passed (take-form).
+  So shallow code calls as before (a static store and a slot more an entry), and a chain of tail calls never holds more than
+  TAIL_DEPTH frames above the frame that bounces it; Rt/depth goes back with each frame returned, Stack_overflow stays the non-tail
+  recursions'. Self tail calls stay loops, a letrec group's TailCalls its entry's bounce (its `tb` taken as entered from a tail
+  call). The runtime's calls are no tail calls: `Rt/ap` keeps the caller's tok only for an exact application, Native's and OiFn's
+  entries clear it; a hop's worker is entered from none.
+- **Effects** (`Effects/runstackT`, `resumeT`, `reperformT`): the primitive in the tail of a function entered from a tail call
+  (o2j's prim-node) dispatches the handler's function as from a tail call, so a handler that continues the next fiber in its tail
+  returns its Tail through `continue` to the scheduler's bouncing frame.
+- **Measured** (stage 0, alone): a CPS chain of 1,000,000 closures, a mutual recursion through a reference of 1,000,000, 500,000
+  tail calls through `apply`, 300,000 before a raise, and Stack_overflow still raised by a non-tail recursion; a reduced mctest of
+  80,000 yields in 15 s; parallel/mctest passes with the default DEPTH_LIMIT in 174 s of CPU (206 s with a 1,000,000 limit
+  before), its cap 270 s by the 1.5x rule (aot-cpu-caps.tsv). The compiled level (*in-ns*) is unchanged: Go's stack is its depth.
+- **discard_in_callback's class.** `:na-native-code` (divergences-suite-aot.edn; the user's 528-10 (a), 528-14, and 2026-11-24's
+  for discard_in_callback) keeps asmcomp/optargs, which still fails (ocamlopt's inlining of the optional-argument wrapper); the
+  main corpus's `:na-native-code` keeps backtrace/lazy and typing-modules/struct_include_optimisation (both still failing) and
+  the native-code tests classed by their headers. discard_in_callback, passing since queue 603, is moved out of the suite's
+  `:programs` and `:reasons`; the class stays.
