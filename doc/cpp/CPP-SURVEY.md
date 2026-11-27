@@ -12785,3 +12785,27 @@ cpp0x/noexcept90.C, cpp1y/static_assert3.C (noexcept's value, the checker's type
 cpp0x/static_assert9.C, cpp1z/constexpr-if11.C (a non-static member or destructor named without an object: class rules);
 cpp0x/constexpr-array12.C (a variable named in its own initializer reported undeclared, [basic.scope.pdecl]/1);
 template/crash131.C (a declaration whose type refused, its later use's cascade reported).
+
+## As built: cpp-sema-int, the three areas merged and recorded (2026-11-27; branch `cpp-sema-int-1127` from mac/next `2e2cd3ef1`)
+
+cpp-sema-ovl-1127 (`02a247a22`), cpp-sema-types-1127 (`febca839f`) and cpp-sema-const-1127 (`976730eba`) merged one by one, then
+mac/next `2017d2d7b` (train 9, no C++ file). One conflict in the checker: arbace/cpp/sema.ae's operator-call, where ovl and types
+had each added [class.access]/4's check of the member operator function an operator expression chooses (both for
+diagnostic/inhibit-warn-2.C); types' form kept, which covers ovl's (not in an implicit or defaulted member's body, the object's
+class the first operand's for a non-static member, the function checked non-nil). ovl's rule for C++20 parenthesized aggregate
+elements from a scalar and types' empty-subaggregate rule off in parenthesized initialization merged by git beside each other, in
+different functions (ctor-init's fallback, elide-agg's binding). The sections above merged by `git merge-file --union`.
+
+Checked: one regression over the merged checker (the worktree's .tmp/own/r1; .tmp/bin/reg and cmp of the fifth pass): the 3,332
+recorded own passes and the union of the three branches' candidates, 4,281 files (ovl's set, which holds types' 4,212 and const's
+3,691), 6 threads under the host's load: 0 passes lost but five read timeouts (cpp23/elision3.C, cpp0x/udlit-concat-neg.C,
+cpp1z/constexpr-asm-3.C, abi/mangle41.C, cpp2a/concepts-pr67774.C), the four first passes rerun together at 3 threads (t1), and
+concepts-pr67774.C a pass alone (t2, 250 s against the 300 s cap); every one of the three lists' 146 rows (150 less the four in two
+lists: template/crash41.C, ttp5.C, diagnostic/inhibit-warn-2.C, cpp0x/constexpr-ice10.C) passes, and three rows no branch had
+alone (cpp0x/pr65398.C, cpp1z/using-variadic2.C, gomp/pr47963.C): 149 gained; the dg negative control (dr2082-vs-dr1423) failed as
+it must. Recorded from r1, t1 and t2 (`--judge --record`): own passes 3,332 -> 3,481; C++ read independence 0.931 -> 0.943
+((1934 + 3481 + 0.5 x 697) / 6112: the passing :na rows of crash41.C, error15.C, ttp5.C and the four test/cpp/dg-dialect-out.edn
+rows now own, ext/pr84843-1.C, gomp/pr47963.C, gomp/pr92504.C, parse/error44.C, counted as passes), the crop's 0.9862 -> 0.9886;
+`bin/reap --record` unchanged (the rows were clang's passes); `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+Left: 697 counted rows, 624 of them clang's passes, 73 clang fails too (the read cell's deferred rows); the areas' "Left" above.

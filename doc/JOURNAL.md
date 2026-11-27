@@ -27370,3 +27370,45 @@ test_writelines_concurrent_export, BufferError not raised), :multiprocessing-chi
 WithProcessesTestPollEintr.test_poll_eintr, "False is not true"), :finalization-goi 1 (test_sqlite3's
 test_table_lock_cursor_non_readonly_select, "database table is locked"), :os-and-files-misc 1 (test_tempfile's
 TestMktemp.test_basic, "Directory not empty").
+
+## 2026-11-27 — C++ read independence: the three semantic areas merged (cpp-sema-int-1127): own passes 3,332 -> 3,481, read 0.931 -> 0.943
+
+Branch `cpp-sema-int-1127` (host agent, off mac/next `2e2cd3ef1`), merged into next by fast-forward. The fifth pass's tail
+(766 counted clang-pass rows) had been split by area among three agents, each off `2e2cd3ef1`, none touching the shared records:
+`cpp-sema-ovl-1127` (`02a247a22`: overload resolution and noexcept in C++17 function types, 49 rows, test/cpp/sema-pass-ovl.txt),
+`cpp-sema-types-1127` (`febca839f`: types, classes, access, parenthesized array new, 48 rows, 3 of them in the :na class
+:ifndr-uninstantiated-template, test/cpp/sema-pass-types.txt), `cpp-sema-const-1127` (`976730eba`: constant evaluation, templates,
+deduction, concepts, 53 rows, test/cpp/sema-pass-const.txt). Their rules are in doc/cpp/CPP-SURVEY.md's "As built: cpp-sema-ovl",
+"cpp-sema-types", "cpp-sema-const"; the merge's in "As built: cpp-sema-int".
+- Merged one by one (ovl, types, const), then mac/next `2017d2d7b` (train 9: no C++ file). One conflict in the checker files:
+  arbace/cpp/sema.ae's operator-call, where ovl and types had each written [class.access]/4's check of the member operator
+  function an operator expression chooses, both for diagnostic/inhibit-warn-2.C; types' form kept (it skips an implicit or
+  defaulted member's body, whose deletion is the rule there, and passes the first operand's class as the object's for a
+  non-static member, where ovl passed the operand's node), a note naming both. template.ae, diag.ae and parse.ae merged without
+  conflict; the overlap the briefs named, ovl's C++20 parenthesized-aggregate element from a scalar beside types' empty-subaggregate
+  rule off in parenthesized initialization, sits in two functions and merged as is (the run below shows neither lost). The
+  survey's three sections by `git merge-file --union`, a blank line put back between them. Rows in two lists: template/crash41.C,
+  ttp5.C and diagnostic/inhibit-warn-2.C (ovl, types), cpp0x/constexpr-ice10.C (types, const): 146 distinct rows of 150.
+- Checked: one regression over the merged checker, `--front native --only` the union of the branches' candidate sets (4,281 files:
+  the 3,332 recorded own passes and every counted clang-pass candidate, ovl's set holding types' 4,212 and const's 3,691), 6 threads
+  under `bin/heavy-lock` (HEAVY_MEM_GIB=10) beside train 9's runs, 3,002 s: 0 passes lost but five read timeouts at the 300 s cap
+  (cpp23/elision3.C, cpp0x/udlit-concat-neg.C, cpp1z/constexpr-asm-3.C, abi/mangle41.C, cpp2a/concepts-pr67774.C), the first four
+  passes rerun together at 3 threads, concepts-pr67774.C a pass alone in 250 s; all 146 rows of the lists pass, and three rows no
+  branch reached alone (cpp0x/pr65398.C, cpp1z/using-variadic2.C, gomp/pr47963.C): 149 gained, no rule pair in conflict. The dg
+  negative control (dr2082-vs-dr1423) failed as it must.
+- Recorded from the run and the two reruns (`bin/repr-cpp dg --corpus dg-error --front native --judge --record`, each merging its
+  rows): test/cpp/check-dg-own-linux-amd64.edn own passes 3,332 -> 3,481; `bin/crops-score --record`: C++ read independence 0.931
+  -> 0.943 ((1934 + 3481 + 0.5 x 697) / 6112; the three :na rows and four test/cpp/dg-dialect-out.edn rows that now pass are counted
+  as passes, as both files say), the crop's 0.9862 -> 0.9886, completeness 0.9971 unchanged; `bin/reap --record` unchanged (all 149
+  were clang's passes, the read cell 6,205 / 0 / 73); `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+- Left: 697 counted rows, 624 clang passes and 73 clang fails too. Per area (the sections' "Left"): overload, the overload sets
+  deduced as arguments, built-in candidates for conversion function templates, copy-initialization's second step before C++17,
+  GCC's built-ins' argument rules, OpenMP clauses; types, templates' definitions before instantiation and two-phase lookup, the
+  point of completion of a class defined later, friend and nested templates' access contexts, access in SFINAE; const, the
+  evaluator's own gaps (this into the object being initialized, weak symbols' addresses, __builtin_launder, GNU array designators),
+  non-dependent noexcept operands before instantiation, member templates' packs of an enclosing instance, non-trailing packs,
+  deduced return types used before their definition, CTAD's aggregate and explicit guides. Templates before instantiation is the
+  one gap all three areas name: the checker analyzes a template's body at its instantiations alone.
+Alternatives: merging the three in one octopus merge (refused: one conflict is easier to read per pair); recording each branch's own
+run (each ran on its own base, without the others' rules: only the merged checker's run says nothing is lost); keeping ovl's
+access check beside types' (the same error twice on one line).
