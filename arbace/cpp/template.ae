@@ -1461,6 +1461,26 @@
                          (and (seq es) (every? #(or (= :fn (:e %)) (and (= :tmpl (:e %)) (= :fn (:tk %)))) es))))
               (throw (ex-info (str "codegen: could not convert a function's name to the non-type template argument of " (:name p))
                               {:codegen/refused :template :cx/sure-drop true})))
+          ;; (cpp-sema-ovl, the checker: `&C::m`, a pointer to a data member, for a parameter of an arithmetic, enumeration or
+          ;; class type, or of a pointer to a member of another type ([temp.arg.nontype]/1's converted constant expression,
+          ;; [expr.const]/12: no conversion between them, [conv.mem] keeping the member's type): GCC's "could not convert",
+          ;; cpp0x/ptrmem-cst-arg1.C's A<&B::i> for template<int>, template/non-dependent8.C's X<&S::i> of a char i for int S::*,
+          ;; cpp2a/nontype-class10.C's D<&C::c> for template<C>)
+          _ (when-let [[_ q m] (and (sema/checking?) (map? pt) (seq? f) (= 'cpp/text (first f))
+                                    (re-matches #"\s*&\s*([A-Za-z_]\w*(?:\s*::\s*[A-Za-z_]\w*)*)\s*::\s*([A-Za-z_]\w*)\s*" (str (second f))))]
+              (let [qs (mapv str/trim (str/split q #"::"))
+                    es (try (sema/lookup-qualified scope (conj qs m)) (catch Exception _ nil))
+                    e (first es)
+                    fty (when (and e (= :field (:e e)) (= 1 (count es)) (abi/cls (:cls e)))
+                          (:ty (nth (:fields (abi/cls (:cls e))) (:i e) nil)))
+                    u (abi/unq pt)]
+                (when (and (map? fty) (not (dependent? u))
+                           (or (abi/arith? u) (abi/enum? u) (abi/class? u)
+                               (and (abi/mptr? u) (map? (:to u)) (not (abi/fn? (abi/unq (:to u))))
+                                    (#'sema/cx-sure-scalar? (abi/unq (:to u))) (#'sema/cx-sure-scalar? (abi/unq fty))
+                                    (not= (abi/unq (:to u)) (abi/unq fty)))))
+                  (throw (ex-info (str "codegen: could not convert an expression of type pointer to member to the parameter's type in a converted constant expression")
+                                  {:codegen/refused :conversion :cx/sure-drop true})))))
 ]
       (if (or (abi/ptr? pt) (abi/ref? pt))
         (decl-arg scope pt f)
@@ -4406,6 +4426,13 @@
         ps (if cid
              (new-scope :tparams scope :cls cid :path (:path scope) :internal (:internal scope))
              (new-scope :tparams scope :internal (:internal scope)))
+        ;; (cpp-sema-ovl, the checker: [dcl.fct.def.delete]/4, a deleted definition is the function's first declaration: an
+        ;; explicit specialization declared before, not deleted, then defined as deleted, GCC's "deleted definition of ... is not
+        ;; first declaration", cpp0x/deleted10.C's foo<int>)
+        _ (when-let [prev (and (sema/checking?) (:explicitlyDeleted n) (not (#'sema/header-node? n)) (get-in (tmpl (:id t)) [:insts args]))]
+            (let [g (sema/fnd prev)]
+              (when (and g (:cx-espec g) (not (:deleted g)))
+                (sema/*on-refusal* (ex-info (str "codegen: deleted definition of '" (:name n) "' is not its first declaration") {:codegen/refused :redecl}) n))))
         fid (#'sema/declare-fn! ps n)
         _ (.remove ^java.util.HashMap (:names ps) (:name n))
         _ (when cid (upd-fn! fid assoc :inline (boolean (:inline n))))
@@ -4860,6 +4887,17 @@
     ;; ostream& operator<<(ostream&, char);`)
     (when (System/getenv "CPP_EXPLICIT_TRACE")
       (binding [*out* *err*] (println "explicit fn" fname "class" (some-> qc :name) "ctor" ctor? "templates" (count (filter #(= :tmpl (:e %)) es)) "type" (pr-str ft) "found" (count found))))
+    ;; (cpp-sema-ovl, the checker: [temp.deduct.decl]/2, two or more templates' specializations match and partial ordering
+    ;; ([temp.func.order]) leaves no one most specialized: the explicit instantiation is ill-formed, GCC's "ambiguous template
+    ;; specialization", template/crash92.C's foo(T, T) and foo(T, int) for `template void foo(int, int);`; no deduction in doubt)
+    (when (and (sema/checking?) (> (count (distinct (map (comp :id first) found))) 1) (not @doubt) ft (not (re-find #"::" text))
+               (every? #(and (= :tmpl (:e %)) (= :fn (:tk %))) es) (not (sema/header-node? n)))
+      (let [np (count (:ps ft))
+            best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)]
+        (when-not (= 1 (count best))
+          (sema/*on-refusal* (ex-info (str "codegen: ambiguous template specialization '" fname "' for an explicit instantiation")
+                                      {:codegen/refused :template})
+                             n))))
     (let [found (if (and (> (count found) 1) (not (sema/checking?)) ft)
                   (let [np (count (:ps ft))
                         best (filter (fn [[t _]] (every? (fn [[u _]] (or (= (:id t) (:id u)) (more-specialized-fn? (:id t) (:id u) np))) found)) found)]
