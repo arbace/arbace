@@ -280,6 +280,31 @@ preproc_src() {
   fi
 }
 
+# xml_clean SRC DATA (java-ffm-1127): java.xml's resource files under SRC (its share/classes) into DATA as the JDK build
+# puts them into the module: the .dtd, .xsd, .xml, .ent and .mod files copied (Java.gmk's COPY), the .properties files
+# cleaned (Java.gmk's CLEAN: make/common/JavaCompilation.gmk's add_file_to_clean, its two seds and its sort, make's
+# LC_ALL=C), the base locale's alone (a name ending _xx or _xx_YY is a translation); held to the build's module
+# (generated.edn's :data, modules/java.xml) byte for byte
+xml_clean() {
+  local src=$1 dst=$2 rel
+  (cd "$src" && find . -type f \( -name '*.dtd' -o -name '*.xsd' -o -name '*.xml' -o -name '*.ent' -o -name '*.mod' \
+       -o -name '*.properties' \) | sed 's|^\./||' | LC_ALL=C sort) |
+    grep -v -E '_[a-z][a-z](_[A-Z][A-Z])?\.properties$' > "$dst/.xml-resources" || return 1
+  [ -s "$dst/.xml-resources" ] || { echo "jrt-convert: no java.xml resources under $src" >&2; return 1; }
+  while read -r rel; do
+    mkdir -p "$dst/$(dirname "$rel")" || return 1
+    case $rel in
+      *.properties)
+        ( cat "$src/$rel" && echo "" ) \
+          | sed -e 's/\([^\\]\):/\1\\:/g' -e 's/\([^\\]\)=/\1\\=/g' -e 's/\([^\\]\)!/\1\\!/g' -e 's/^[ 	]*#.*/#/g' \
+          | sed -e '/^#/d' -e '/^$/d' -e :a -e '/\\$/N; s/\\\n//; ta' -e 's/^[ 	]*//;s/[ 	]*$//' -e 's/\\=/=/' \
+          | LC_ALL=C sort > "$dst/$rel" || return 1 ;;
+      *) cp "$src/$rel" "$dst/$rel" || return 1 ;;
+    esac
+  done < "$dst/.xml-resources"
+  rm -f "$dst/.xml-resources"
+}
+
 generate() {
   local tree=$1 out tools=$2 u c t f
   u=$jdk/src/java.base/share/data/unicodedata
@@ -606,6 +631,14 @@ generate() {
   # installs it: a copy of src/java.logging/share/conf/logging.properties (LogManager's variant
   # reads it as the resource conf/logging.properties)
   cp "$jdk/src/java.logging/share/conf/logging.properties" "$data/conf/logging.properties" || return 1
+  # java.xml's resources (java-ffm-1127): the java.xml module's resource files as make/modules/java.xml/Java.gmk puts
+  # them into the module (COPY += .dtd .xsd .xml .ent .mod: copied; CLEAN += .properties: JavaCompilation.gmk's
+  # add_file_to_clean, below), the base locale's alone (the Go build's locales are en-US's): Xerces', Xalan's and the
+  # catalog's message bundles, the serializer's entities and encodings, and the JDK's built-in catalog with its W3C DTDs
+  # and schemas, which javac's tool world reads (its ResourceBundle variant reads NAME.properties from the executable's
+  # resources; JdkXmlConfig's CatalogHolder variant the catalog). Without them Xerces' regular expressions fail
+  # ("Installation Problem???": every XML Schema's built-in types, t08094-t08096) and so does the JDK catalog's parse
+  xml_clean "$jdk/src/java.xml/share/classes" "$data" || return 1
   # F9's sun.nio.fs.UnixConstants (B2, 2026-11-15), as make/modules/java.base/gensrc/GensrcMisc.gmk's
   # generate-preproc-src makes it, the way bin/javac-vendor gensrc does (JCS369 (a), test/javac-platform/gensrc.bash's
   # gensrc_preproc): the template preprocessed by repr/c's preprocessor on C's own target (no gcc) with the build's
@@ -853,7 +886,12 @@ if has generate; then
     echo " :data {"
     (cd "$work/data" && find . -type f | sed 's|^\./||' | LC_ALL=C sort) | while read -r rel; do
       # lib/ and conf/: the image's own files (tzdb.dat, java.security), against the build's jdk/
-      case $rel in lib/*|conf/*) ref=${conf:+$(dirname "$conf")/jdk/$rel} ;; *) ref=${modules_ref:+$modules_ref/$rel} ;; esac
+      # java.xml's (xml_clean), against the build's modules/java.xml
+      case $rel in
+        lib/*|conf/*) ref=${conf:+$(dirname "$conf")/jdk/$rel} ;;
+        com/sun/org/apache/*|javax/xml/*|jdk/xml/*) ref=${modules_ref:+$(dirname "$modules_ref")/java.xml/$rel} ;;
+        *) ref=${modules_ref:+$modules_ref/$rel} ;;
+      esac
       if [ -z "$ref" ] || [ ! -f "$ref" ]; then v=:no-reference
       elif [ "$rel" = lib/security/cacerts ] && cmp -s "$work/data/$rel" "$ref"; then v=:build-image  # copied from it (above)
       elif cmp -s "$work/data/$rel" "$ref"; then v=:same

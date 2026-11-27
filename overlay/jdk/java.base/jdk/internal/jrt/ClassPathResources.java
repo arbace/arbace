@@ -33,6 +33,9 @@
  * translated class as a names-only entry whose bytes are refused (FileNotFoundException, as A5's connection
  * refuses a class file's). The JarFile is a stored zip of the entry written once to java.io.tmpdir and
  * deleted as it is opened (ZipFile.OPEN_DELETE); getName() is the entry's name.
+ * Since java-ffm-1127 URL's default jar: handler is this class's (jarHandler): a jar: URL naming the executable opens its
+ * embedded resource whatever made it (a URL's string read back, a relative spec resolved against one), another jar file's
+ * as the JDK's handler opens it.
  * Copyright (c) the Arbace authors; Eclipse Public License 1.0.
  */
 package jdk.internal.jrt;
@@ -47,6 +50,7 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.net.URLConnection;
+import java.net.URLStreamHandler;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
@@ -477,7 +481,32 @@ public final class ClassPathResources {
         return getResourceAsStream(ClassLoader.getSystemClassLoader(), name);
     }
 
-    /** The handler of the embedded resources' jar: URLs: their connection reads the resource. */
+    /**
+     * The jar: handler of java.net.URL's default factory (overlay/jdk/variants/URL.ae; java-ffm-1127): a jar: URL naming
+     * the executable, however it was made (new URL(spec), URI.toURL: an embedded resource's URL read back from its
+     * string, or resolved against one, as java.xml's catalog resolves its entries against the JDK catalog's URL), is
+     * opened as the embedded resource it names, as the JVM opens a URL of a jar on its class path; any other jar: URL
+     * the JDK's way (sun.net.www.protocol.jar.Handler's connection to the jar file).
+     */
+    public static URLStreamHandler jarHandler() {
+        return handler;
+    }
+
+    /** Does the jar: URL's file part (before "!/") name the executable? */
+    private static boolean namesExecutable(String jarFile) {
+        File exe = new File(executable());
+        if (jarFile.equals(ParseUtil.fileToEncodedURL(exe).toString()))
+            return true;
+        if (!jarFile.startsWith("file:"))
+            return false;
+        return new File(ParseUtil.decode(jarFile.substring("file:".length()))).getAbsolutePath()
+                .equals(exe.getAbsolutePath());
+    }
+
+    /**
+     * The handler of the embedded resources' jar: URLs: their connection reads the resource; since java-ffm-1127 also
+     * URL's default jar: handler (jarHandler), a URL of another jar file opened as the JDK's handler opens it.
+     */
     static final class EmbeddedHandler extends sun.net.www.protocol.jar.Handler {
         @Override
         protected URLConnection openConnection(URL u) throws IOException {
@@ -485,6 +514,8 @@ public final class ClassPathResources {
             int i = s.indexOf("!/");
             if (i < 0)
                 throw new MalformedURLException("no !/ in spec");
+            if (!namesExecutable(s.substring(0, i)))
+                return super.openConnection(u);
             return new EmbeddedConnection(u, ParseUtil.decode(s.substring(i + 2)));
         }
     }

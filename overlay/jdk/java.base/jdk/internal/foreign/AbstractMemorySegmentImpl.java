@@ -5,8 +5,9 @@
  * (test/jrt/derive.ae, each replacement asserted as often as the table says): the accessors at a value layout
  * (get, set, getAtIndex, setAtIndex) go through private helpers that check as jdk26u's SegmentVarHandle and access
  * as its X-VarHandleSegmentView template (ScopedMemoryAccess at the layout's byte order), not through the layout's
- * var handle (java.lang.invoke's segment views are not in the Go build); an address layout's access is refused. The
- * changes Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.
+ * var handle (java.lang.invoke's segment views are not in the Go build); an address layout's access is refused; a
+ * buffer's reference for a heap session is its array (bufferRef: every buffer of the Go build is backed by one, no
+ * sun.nio.ch.DirectBuffer). The changes Copyright (c) the Arbace authors; Eclipse Public License 1.0. jdk26u's notice follows.
  */
 /*
  * Copyright (c) 2020, 2025, Oracle and/or its affiliates. All rights reserved.
@@ -45,7 +46,6 @@ import jdk.internal.util.ArraysSupport;
 import jdk.internal.util.Preconditions;
 import jdk.internal.vm.annotation.DontInline;
 import jdk.internal.vm.annotation.ForceInline;
-import sun.nio.ch.DirectBuffer;
 
 import java.lang.foreign.AddressLayout;
 import java.lang.foreign.Arena;
@@ -616,14 +616,9 @@ public abstract sealed class AbstractMemorySegmentImpl
 
     @ForceInline
     private static Object bufferRef(Buffer buffer) {
-        if (buffer instanceof DirectBuffer directBuffer) {
-            // direct buffer, return either the buffer attachment (for slices and views), or the buffer itself
-            return directBuffer.attachment() != null ?
-                    directBuffer.attachment() : directBuffer;
-        } else {
-            // heap buffer, return the underlying array
-            return NIO_ACCESS.getBufferBase(buffer);
-        }
+        // Arbace (java-ffm-1127): every buffer of the Go build is backed by an array (its direct buffers are heap
+        // buffers), so the underlying array, as jdk26u's heap buffer's; no sun.nio.ch.DirectBuffer in the world
+        return NIO_ACCESS.getBufferBase(buffer);
     }
 
     @ForceInline
