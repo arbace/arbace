@@ -6225,3 +6225,36 @@ scratch directory under RSI_RECORD_STD=own (the three own-std files written); cr
 (one case's C6 own over a row with the other six own: 0 -> 1 of 6, the stage 0.583; without the file 0 of 6), and
 `--judge --strict` unchanged without it; `bin/rsi judge-test` passes. No records-check or markers-check entry is needed
 (neither lists Rust's records; crops-score's gate inputs already cover `test/rust/*.edn`).
+
+## As built: C6's L2 over the whole closure, slice 1: core (2026-11-26, queue 600, VM)
+
+On next `cd94d28e9`. L2 (lib-unit's build of the items' callees) followed transitively to the closure's defines in core's units
+(`LIB_UNIT_L2_TARGETS`, by default `test/rust/front/lib-unit-CRATE-targets.txt`: synthetic/abort.rs's closure in CRATE's units, the
+first case to get there; 687 for core), through each built instance's calls and its `#[inline(always)]` callees' calls; each round's
+definitions the export lacks wanted, gathered (`lib-unit inline-keys core`) and exported (`export core --add`), until no new key:
+eight rounds (14, 8, 4, 2, 1, 1 then 18, 4 bodies), each about 7 minutes of build and 5-14 of export at 2 threads. The wanted keys
+are recorded in `test/rust/front/lib-unit-core-keys.txt` (529).
+
+| core, abort.rs's 687 defines in core's units | before (L1 items, L2 one level) | after |
+|---|---|---|
+| equal (own) | 157 (never spliced: core had no own file) | **450** |
+| differ / refused | 7 / 82 | 37 / 29 |
+| not built | 441 | 171 |
+
+The compare over everything built: items 215 of 275 equal, L2 355 of 404. The own tree: 688 -> **1,234** own defines in 39 units,
+every define equal to rustc's up to names, both controls differing. **abort.rs: 8,299 -> 7,849 rustc's of 8,935** (1,086 own);
+eval/std.rs 8,975 -> 8,435 of 9,651.
+
+Left in core: 171 not reached by calls (function pointers and vtables, the `fmt::rt::Argument::new_*` instances, drop glue), 20
+items the export refuses, and the differences, mostly a local's or array's size and alignment (`[MaybeUninit<u8>; MAX_DIG_N]` and
+`Self::MAX_DIGITS`'s unevaluated associated constants in fmt::num, 19 of them), the "blocks or locals" class.
+
+### Slice 2: alloc (queue 600)
+
+abort.rs's 296 defines in alloc's units (`test/rust/front/lib-unit-alloc-targets.txt`): rounds as core's, core's wanted
+definitions exported each round too (alloc's instances of core's generics; 6 then 6 rounds, 23 core bodies added in all), the
+second pass with the instances taken by reference followed too (mono/unit-refs: reified function constants and the vtables'
+methods; build-run's L2, `LIB_UNIT_L2_REFS=0` not). alloc: **210 of 296 equal** (13 differ, 3 refused, 70 not built); items 21 of
+25, L2 192 of 206. The own tree **1,447** own defines in 43 units, the check and both controls as before. **abort.rs: 7,849 ->
+7,639 rustc's of 8,935** (1,296 own); eval/std.rs 8,435 -> 8,223. The wanted keys recorded (`lib-unit-alloc-keys.txt`,
+`lib-unit-core-keys.txt`).

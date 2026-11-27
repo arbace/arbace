@@ -1,0 +1,915 @@
+;; Converted from jdk26u src/java.xml/share/classes/com/sun/org/apache/xpath/internal/axes/WalkerFactory.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'com.sun.org.apache.xpath.internal.axes)
+
+(import '(com.sun.org.apache.xalan.internal.res XSLMessages)
+        '(com.sun.org.apache.xml.internal.dtm Axis DTMFilter DTMIterator)
+        '(com.sun.org.apache.xpath.internal Expression)
+        '(com.sun.org.apache.xpath.internal.compiler FunctionTable OpCodes OpMap)
+        '(com.sun.org.apache.xpath.internal.patterns
+           ContextMatchStepPattern
+           FunctionPattern
+           NodeTest
+           StepPattern)
+        '(com.sun.org.apache.xpath.internal.res XPATHErrorResources)
+        '(javax.xml.transform TransformerException))
+
+(defclass ^:public WalkerFactory
+  (method ^:static loadOneWalker :throws [TransformerException] ^AxesWalker [^WalkingIterator lpi
+                                                                             ^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                             ^int stepOpCodePos]
+    (let [^:mutable ^AxesWalker firstWalker nil
+          stepType (.getOp compiler stepOpCodePos)]
+      (when-not (== stepType OpCodes/ENDOP)
+        (set! firstWalker (WalkerFactory/createDefaultWalker compiler stepType lpi 0))
+        (.init firstWalker compiler stepOpCodePos stepType))
+      firstWalker))
+
+  (method ^:static loadWalkers :throws [TransformerException] ^AxesWalker [^WalkingIterator lpi
+                                                                           ^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                           ^:mutable ^int stepOpCodePos
+                                                                           ^int stepIndex]
+    (let [^:mutable ^int stepType 0
+          ^:mutable ^AxesWalker firstWalker nil
+          ^:mutable ^AxesWalker walker nil
+          ^:mutable ^AxesWalker prevWalker nil
+          analysis (WalkerFactory/analyze compiler stepOpCodePos stepIndex)]
+      (while (not (== OpCodes/ENDOP (set! stepType (.getOp compiler stepOpCodePos))))
+        (set! walker (WalkerFactory/createDefaultWalker compiler stepOpCodePos lpi analysis))
+        (.init walker compiler stepOpCodePos stepType)
+        (.exprSetParent walker lpi)
+        (if (nil? firstWalker)
+            (set! firstWalker walker)
+            (do (.setNextWalker prevWalker walker) (.setPrevWalker walker prevWalker)))
+        (set! prevWalker walker)
+        (set! stepOpCodePos (.getNextStepPos compiler stepOpCodePos))
+        (when (< stepOpCodePos 0) (break)))
+      firstWalker))
+
+  (method ^:public ^:static isSet ^boolean [^int analysis ^int bits]
+    (not (== 0 (bit-and-int analysis bits))))
+
+  (method ^:public ^:static diagnoseIterator ^void [^String name ^int analysis
+                                                    ^com.sun.org.apache.xpath.internal.compiler.Compiler compiler]
+    (.println System/out
+              (java-str (.toString compiler)
+                        ", "
+                        name
+                        ", "
+                        (Integer/toBinaryString analysis)
+                        ", "
+                        (WalkerFactory/getAnalysisString analysis))))
+
+  (method ^:public ^:static newDTMIterator :throws [TransformerException] ^DTMIterator [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                        ^int opPos
+                                                                                        ^boolean isTopLevel]
+    (let [firstStepPos (OpMap/getFirstChildPos opPos)
+          analysis (WalkerFactory/analyze compiler firstStepPos 0)
+          isOneStep (WalkerFactory/isOneStep analysis)
+          ^:mutable ^DTMIterator iter nil]
+      (cond
+        (and (and (and isOneStep (WalkerFactory/walksSelfOnly analysis))
+                  (WalkerFactory/isWild analysis))
+             (not (WalkerFactory/hasPredicate analysis)))
+          (do
+            (when DEBUG_ITERATOR_CREATION
+              (WalkerFactory/diagnoseIterator "SelfIteratorNoPredicate" analysis compiler))
+            (set! iter (SelfIteratorNoPredicate. compiler opPos analysis)))
+        (and (WalkerFactory/walksChildrenOnly analysis) isOneStep)
+          (if (and (WalkerFactory/isWild analysis) (not (WalkerFactory/hasPredicate analysis)))
+              (do
+                (when DEBUG_ITERATOR_CREATION
+                  (WalkerFactory/diagnoseIterator "ChildIterator" analysis compiler))
+                (set! iter (ChildIterator. compiler opPos analysis)))
+              (do
+                (when DEBUG_ITERATOR_CREATION
+                  (WalkerFactory/diagnoseIterator "ChildTestIterator" analysis compiler))
+                (set! iter (ChildTestIterator. compiler opPos analysis))))
+        (and isOneStep (WalkerFactory/walksAttributes analysis))
+          (do
+            (when DEBUG_ITERATOR_CREATION
+              (WalkerFactory/diagnoseIterator "AttributeIterator" analysis compiler))
+            (set! iter (AttributeIterator. compiler opPos analysis)))
+        (and isOneStep (not (WalkerFactory/walksFilteredList analysis)))
+          (if (and (not (WalkerFactory/walksNamespaces analysis))
+                   (or (WalkerFactory/walksInDocOrder analysis)
+                       (WalkerFactory/isSet analysis BIT_PARENT)))
+              (do
+                (when (or false DEBUG_ITERATOR_CREATION)
+                  (WalkerFactory/diagnoseIterator "OneStepIteratorForward" analysis compiler))
+                (set! iter (OneStepIteratorForward. compiler opPos analysis)))
+              (do
+                (when (or false DEBUG_ITERATOR_CREATION)
+                  (WalkerFactory/diagnoseIterator "OneStepIterator" analysis compiler))
+                (set! iter (OneStepIterator. compiler opPos analysis))))
+        (WalkerFactory/isOptimizableForDescendantIterator compiler firstStepPos 0)
+          (do
+            (when DEBUG_ITERATOR_CREATION
+              (WalkerFactory/diagnoseIterator "DescendantIterator" analysis compiler))
+            (set! iter (DescendantIterator. compiler opPos analysis)))
+        (WalkerFactory/isNaturalDocOrder compiler firstStepPos 0 analysis)
+          (do
+            (when (or false DEBUG_ITERATOR_CREATION)
+              (WalkerFactory/diagnoseIterator "WalkingIterator" analysis compiler))
+            (set! iter (WalkingIterator. compiler opPos analysis true)))
+        :else
+          (do
+            (when DEBUG_ITERATOR_CREATION
+              (WalkerFactory/diagnoseIterator "WalkingIteratorSorted" analysis compiler))
+            (set! iter (WalkingIteratorSorted. compiler opPos analysis true))))
+      (when (instance? LocPathIterator iter)
+        (.setIsTopLevel (cast LocPathIterator iter) isTopLevel))
+      iter))
+
+  (method ^:public ^:static getAxisFromStep :throws [TransformerException] ^int [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                 ^int stepOpCodePos]
+    (let [stepType (.getOp compiler stepOpCodePos)]
+      (switch stepType
+        OpCodes/FROM_FOLLOWING (return Axis/FOLLOWING)
+        OpCodes/FROM_FOLLOWING_SIBLINGS (return Axis/FOLLOWINGSIBLING)
+        OpCodes/FROM_PRECEDING (return Axis/PRECEDING)
+        OpCodes/FROM_PRECEDING_SIBLINGS (return Axis/PRECEDINGSIBLING)
+        OpCodes/FROM_PARENT (return Axis/PARENT)
+        OpCodes/FROM_NAMESPACE (return Axis/NAMESPACE)
+        OpCodes/FROM_ANCESTORS (return Axis/ANCESTOR)
+        OpCodes/FROM_ANCESTORS_OR_SELF (return Axis/ANCESTORORSELF)
+        OpCodes/FROM_ATTRIBUTES (return Axis/ATTRIBUTE)
+        OpCodes/FROM_ROOT (return Axis/ROOT)
+        OpCodes/FROM_CHILDREN (return Axis/CHILD)
+        OpCodes/FROM_DESCENDANTS_OR_SELF (return Axis/DESCENDANTORSELF)
+        OpCodes/FROM_DESCENDANTS (return Axis/DESCENDANT)
+        OpCodes/FROM_SELF (return Axis/SELF)
+        (OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP OpCodes/OP_VARIABLE)
+          (return Axis/FILTEREDLIST))
+      (throw (RuntimeException.
+               (XSLMessages/createXPATHMessage XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                                               (new Object/1 [(Integer/toString stepType)]))))))
+
+  (method ^:public ^:static getAnalysisBitFromAxes ^int [^int axis]
+    (switch axis
+      Axis/ANCESTOR BIT_ANCESTOR
+      Axis/ANCESTORORSELF BIT_ANCESTOR_OR_SELF
+      Axis/ATTRIBUTE BIT_ATTRIBUTE
+      Axis/CHILD BIT_CHILD
+      Axis/DESCENDANT BIT_DESCENDANT
+      Axis/DESCENDANTORSELF BIT_DESCENDANT_OR_SELF
+      Axis/FOLLOWING BIT_FOLLOWING
+      Axis/FOLLOWINGSIBLING BIT_FOLLOWING_SIBLING
+      (Axis/NAMESPACE Axis/NAMESPACEDECLS) BIT_NAMESPACE
+      Axis/PARENT BIT_PARENT
+      Axis/PRECEDING BIT_PRECEDING
+      Axis/PRECEDINGSIBLING BIT_PRECEDING_SIBLING
+      Axis/SELF BIT_SELF
+      Axis/ALLFROMNODE BIT_DESCENDANT_OR_SELF
+      (Axis/DESCENDANTSFROMROOT Axis/ALL Axis/DESCENDANTSORSELFFROMROOT)
+        BIT_ANY_DESCENDANT_FROM_ROOT
+      Axis/ROOT BIT_ROOT
+      Axis/FILTEREDLIST BIT_FILTER
+      BIT_FILTER))
+
+  (method ^:static functionProximateOrContainsProximate ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                  ^:mutable ^int opPos]
+    (let [endFunc (unchecked-subtract-int
+                    (unchecked-add-int opPos (.getOp compiler (unchecked-add-int opPos 1)))
+                    1)]
+      (set! opPos (OpMap/getFirstChildPos opPos))
+      (let [funcID (.getOp compiler opPos)]
+        (switch funcID
+          (FunctionTable/FUNC_LAST FunctionTable/FUNC_POSITION) (return true)
+          (do
+            (set! opPos (unchecked-inc-int opPos))
+            (let [^:mutable ^int i 0
+                  ^:mutable p opPos]
+              (while (< p endFunc)
+                (let [innerExprOpPos (unchecked-add-int p 2)
+                      argOp (.getOp compiler innerExprOpPos)
+                      prox (WalkerFactory/isProximateInnerExpr compiler innerExprOpPos)]
+                  (when prox (return true)))
+                (set! p (.getNextOpPos compiler p))
+                (set! i (unchecked-inc-int i))))))
+        false)))
+
+  (method ^:static isProximateInnerExpr ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                  ^int opPos]
+    (let [op (.getOp compiler opPos)
+          innerExprOpPos (unchecked-add-int opPos 2)]
+      (let [^:mutable ^boolean isProx false]
+        (switch op
+          OpCodes/OP_ARGUMENT
+            (when (WalkerFactory/isProximateInnerExpr compiler innerExprOpPos) (return true))
+          (OpCodes/OP_VARIABLE OpCodes/OP_NUMBERLIT OpCodes/OP_LITERAL OpCodes/OP_LOCATIONPATH) nil
+          OpCodes/OP_FUNCTION
+            (do
+              (set! isProx (WalkerFactory/functionProximateOrContainsProximate compiler opPos))
+              (when isProx (return true)))
+          (OpCodes/OP_GT OpCodes/OP_GTE OpCodes/OP_LT OpCodes/OP_LTE OpCodes/OP_EQUALS)
+            (let [leftPos (OpMap/getFirstChildPos op)
+                  rightPos (.getNextOpPos compiler leftPos)]
+              (set! isProx (WalkerFactory/isProximateInnerExpr compiler leftPos))
+              (when isProx (return true))
+              (set! isProx (WalkerFactory/isProximateInnerExpr compiler rightPos))
+              (when isProx (return true)))
+          (return true)))
+      false))
+
+  (method ^:public ^:static mightBeProximate :throws [TransformerException] ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                      ^int opPos
+                                                                                      ^int stepType]
+    (let [mightBeProximate false
+          ^:mutable ^int argLen 0]
+      (switch stepType
+        (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+          (set! argLen (.getArgLength compiler opPos))
+        (set! argLen (.getArgLengthOfStep compiler opPos)))
+      (let [^:mutable predPos (.getFirstPredicateOpPos compiler opPos)
+            ^:mutable ^int count 0]
+        (while (== OpCodes/OP_PREDICATE (.getOp compiler predPos))
+          (set! count (unchecked-inc-int count))
+          (let [innerExprOpPos (unchecked-add-int predPos 2)
+                predOp (.getOp compiler innerExprOpPos)]
+            (let [^:mutable ^boolean isProx false]
+              (switch predOp
+                OpCodes/OP_VARIABLE (return true)
+                OpCodes/OP_LOCATIONPATH nil
+                (OpCodes/OP_NUMBER OpCodes/OP_NUMBERLIT) (return true)
+                OpCodes/OP_FUNCTION
+                  (do
+                    (set! isProx
+                          (WalkerFactory/functionProximateOrContainsProximate
+                            compiler
+                            innerExprOpPos))
+                    (when isProx (return true)))
+                (OpCodes/OP_GT OpCodes/OP_GTE OpCodes/OP_LT OpCodes/OP_LTE OpCodes/OP_EQUALS)
+                  (let [leftPos (OpMap/getFirstChildPos innerExprOpPos)
+                        rightPos (.getNextOpPos compiler leftPos)]
+                    (set! isProx (WalkerFactory/isProximateInnerExpr compiler leftPos))
+                    (when isProx (return true))
+                    (set! isProx (WalkerFactory/isProximateInnerExpr compiler rightPos))
+                    (when isProx (return true)))
+                (return true)))
+            (set! predPos (.getNextOpPos compiler predPos))))
+        mightBeProximate)))
+
+  (method ^:private ^:static isOptimizableForDescendantIterator :throws [TransformerException] ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                                         ^:mutable ^int stepOpCodePos
+                                                                                                         ^int stepIndex]
+    (let [^:mutable ^int stepType 0
+          ^:mutable ^int stepCount 0
+          ^:mutable foundDorDS false
+          ^:mutable foundSelf false
+          ^:mutable foundDS false
+          ^:mutable nodeTestType OpCodes/NODETYPE_NODE]
+      (while (not (== OpCodes/ENDOP (set! stepType (.getOp compiler stepOpCodePos))))
+        (when (and (not (== nodeTestType OpCodes/NODETYPE_NODE))
+                   (not (== nodeTestType OpCodes/NODETYPE_ROOT)))
+          (return false))
+        (set! stepCount (unchecked-inc-int stepCount))
+        (when (> stepCount 3) (return false))
+        (let [mightBeProximate (WalkerFactory/mightBeProximate compiler stepOpCodePos stepType)]
+          (when mightBeProximate (return false))
+          (switch stepType
+            (OpCodes/FROM_FOLLOWING OpCodes/FROM_FOLLOWING_SIBLINGS
+                                    OpCodes/FROM_PRECEDING
+                                    OpCodes/FROM_PRECEDING_SIBLINGS
+                                    OpCodes/FROM_PARENT
+                                    OpCodes/OP_VARIABLE
+                                    OpCodes/OP_EXTFUNCTION
+                                    OpCodes/OP_FUNCTION
+                                    OpCodes/OP_GROUP
+                                    OpCodes/FROM_NAMESPACE
+                                    OpCodes/FROM_ANCESTORS
+                                    OpCodes/FROM_ANCESTORS_OR_SELF
+                                    OpCodes/FROM_ATTRIBUTES
+                                    OpCodes/MATCH_ATTRIBUTE
+                                    OpCodes/MATCH_ANY_ANCESTOR
+                                    OpCodes/MATCH_IMMEDIATE_ANCESTOR)
+              (return false)
+            OpCodes/FROM_ROOT (when-not (== 1 stepCount) (return false))
+            OpCodes/FROM_CHILDREN
+              (when (and (not foundDS) (not (and foundDorDS foundSelf))) (return false))
+            OpCodes/FROM_DESCENDANTS_OR_SELF
+              (do (set! foundDS true) (when (== 3 stepCount) (return false)) (set! foundDorDS true))
+            OpCodes/FROM_DESCENDANTS
+              (do (when (== 3 stepCount) (return false)) (set! foundDorDS true))
+            OpCodes/FROM_SELF (do (when-not (== 1 stepCount) (return false)) (set! foundSelf true))
+            (throw (RuntimeException.
+                     (XSLMessages/createXPATHMessage
+                       XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                       (new Object/1 [(Integer/toString stepType)])))))
+          (set! nodeTestType (.getStepTestType compiler stepOpCodePos))
+          (let [nextStepOpCodePos (.getNextStepPos compiler stepOpCodePos)]
+            (when (< nextStepOpCodePos 0) (break))
+            (when-not (== OpCodes/ENDOP (.getOp compiler nextStepOpCodePos))
+              (when (> (.countPredicates compiler stepOpCodePos) 0) (return false)))
+            (set! stepOpCodePos nextStepOpCodePos))))
+      true))
+
+  (method ^:private ^:static analyze :throws [TransformerException] ^int [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                          ^:mutable ^int stepOpCodePos
+                                                                          ^int stepIndex]
+    (let [^:mutable ^int stepType 0
+          ^:mutable ^int stepCount 0
+          ^:mutable ^int analysisResult 0x00000000]
+      (while (not (== OpCodes/ENDOP (set! stepType (.getOp compiler stepOpCodePos))))
+        (set! stepCount (unchecked-inc-int stepCount))
+        (let [predAnalysis (WalkerFactory/analyzePredicate compiler stepOpCodePos stepType)]
+          (when predAnalysis (set! analysisResult (bit-or-int analysisResult BIT_PREDICATE)))
+          (switch stepType
+            (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+              (set! analysisResult (bit-or-int analysisResult BIT_FILTER))
+            OpCodes/FROM_ROOT (set! analysisResult (bit-or-int analysisResult BIT_ROOT))
+            OpCodes/FROM_ANCESTORS (set! analysisResult (bit-or-int analysisResult BIT_ANCESTOR))
+            OpCodes/FROM_ANCESTORS_OR_SELF
+              (set! analysisResult (bit-or-int analysisResult BIT_ANCESTOR_OR_SELF))
+            OpCodes/FROM_ATTRIBUTES (set! analysisResult (bit-or-int analysisResult BIT_ATTRIBUTE))
+            OpCodes/FROM_NAMESPACE (set! analysisResult (bit-or-int analysisResult BIT_NAMESPACE))
+            OpCodes/FROM_CHILDREN (set! analysisResult (bit-or-int analysisResult BIT_CHILD))
+            OpCodes/FROM_DESCENDANTS
+              (set! analysisResult (bit-or-int analysisResult BIT_DESCENDANT))
+            OpCodes/FROM_DESCENDANTS_OR_SELF
+              (do
+                (when (and (== 2 stepCount) (== BIT_ROOT analysisResult))
+                  (set! analysisResult (bit-or-int analysisResult BIT_ANY_DESCENDANT_FROM_ROOT)))
+                (set! analysisResult (bit-or-int analysisResult BIT_DESCENDANT_OR_SELF)))
+            OpCodes/FROM_FOLLOWING (set! analysisResult (bit-or-int analysisResult BIT_FOLLOWING))
+            OpCodes/FROM_FOLLOWING_SIBLINGS
+              (set! analysisResult (bit-or-int analysisResult BIT_FOLLOWING_SIBLING))
+            OpCodes/FROM_PRECEDING (set! analysisResult (bit-or-int analysisResult BIT_PRECEDING))
+            OpCodes/FROM_PRECEDING_SIBLINGS
+              (set! analysisResult (bit-or-int analysisResult BIT_PRECEDING_SIBLING))
+            OpCodes/FROM_PARENT (set! analysisResult (bit-or-int analysisResult BIT_PARENT))
+            OpCodes/FROM_SELF (set! analysisResult (bit-or-int analysisResult BIT_SELF))
+            OpCodes/MATCH_ATTRIBUTE
+              (set! analysisResult
+                    (bit-or-int analysisResult (bit-or-int BIT_MATCH_PATTERN BIT_ATTRIBUTE)))
+            OpCodes/MATCH_ANY_ANCESTOR
+              (set! analysisResult
+                    (bit-or-int analysisResult (bit-or-int BIT_MATCH_PATTERN BIT_ANCESTOR)))
+            OpCodes/MATCH_IMMEDIATE_ANCESTOR
+              (set! analysisResult
+                    (bit-or-int analysisResult (bit-or-int BIT_MATCH_PATTERN BIT_PARENT)))
+            (throw (RuntimeException.
+                     (XSLMessages/createXPATHMessage
+                       XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                       (new Object/1 [(Integer/toString stepType)])))))
+          (when (== OpCodes/NODETYPE_NODE (.getOp compiler (unchecked-add-int stepOpCodePos 3)))
+            (set! analysisResult (bit-or-int analysisResult BIT_NODETEST_ANY)))
+          (set! stepOpCodePos (.getNextStepPos compiler stepOpCodePos))
+          (when (< stepOpCodePos 0) (break))))
+      (set! analysisResult (bit-or-int analysisResult (bit-and-int stepCount BITS_COUNT)))
+      analysisResult))
+
+  (method ^:public ^:static isDownwardAxisOfMany ^boolean [^int axis]
+    (or (or (or (== Axis/DESCENDANTORSELF axis) (== Axis/DESCENDANT axis)) (== Axis/FOLLOWING axis))
+        (== Axis/PRECEDING axis)))
+
+  (method ^:static loadSteps :throws [TransformerException] ^StepPattern [^MatchPatternIterator mpi
+                                                                          ^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                          ^:mutable ^int stepOpCodePos
+                                                                          ^int stepIndex]
+    (when DEBUG_PATTERN_CREATION
+      (.println System/out "================")
+      (.println System/out (java-str "loadSteps for: " (.getPatternString compiler))))
+    (let [^:mutable ^int stepType 0
+          ^:mutable ^StepPattern step nil
+          ^:mutable ^StepPattern firstStep nil
+          ^:mutable ^StepPattern prevStep nil
+          analysis (WalkerFactory/analyze compiler stepOpCodePos stepIndex)]
+      (while (not (== OpCodes/ENDOP (set! stepType (.getOp compiler stepOpCodePos))))
+        (set! step
+              (WalkerFactory/createDefaultStepPattern
+                compiler
+                stepOpCodePos
+                mpi
+                analysis
+                firstStep
+                prevStep))
+        (if (nil? firstStep) (set! firstStep step) (.setRelativePathPattern step prevStep))
+        (set! prevStep step)
+        (set! stepOpCodePos (.getNextStepPos compiler stepOpCodePos))
+        (when (< stepOpCodePos 0) (break)))
+      (let [^:mutable axis Axis/SELF
+            paxis Axis/SELF
+            ^:mutable tail step]
+        (let [^:mutable pat step]
+          (while (some? pat)
+            (let [nextAxis (.getAxis pat)]
+              (.setAxis pat axis)
+              (let [whatToShow (.getWhatToShow pat)]
+                (when (or (== whatToShow DTMFilter/SHOW_ATTRIBUTE)
+                          (== whatToShow DTMFilter/SHOW_NAMESPACE))
+                  (let [^int newAxis (if (== whatToShow DTMFilter/SHOW_ATTRIBUTE)
+                                         Axis/ATTRIBUTE
+                                         Axis/NAMESPACE)]
+                    (cond
+                      (WalkerFactory/isDownwardAxisOfMany axis)
+                        (let [attrPat (StepPattern.
+                                        whatToShow
+                                        (.getNamespace pat)
+                                        (.getLocalName pat)
+                                        newAxis
+                                        0)
+                              score (.getStaticScore pat)]
+                          (.setNamespace pat nil)
+                          (.setLocalName pat NodeTest/WILD)
+                          (.setPredicates attrPat (.getPredicates pat))
+                          (.setPredicates pat nil)
+                          (.setWhatToShow pat DTMFilter/SHOW_ELEMENT)
+                          (let [rel (.getRelativePathPattern pat)]
+                            (.setRelativePathPattern pat attrPat)
+                            (.setRelativePathPattern attrPat rel)
+                            (.setStaticScore attrPat score)
+                            (cond
+                              (== Axis/PRECEDING (.getAxis pat))
+                                (.setAxis pat Axis/PRECEDINGANDANCESTOR)
+                              (== Axis/DESCENDANT (.getAxis pat))
+                                (.setAxis pat Axis/DESCENDANTORSELF))
+                            (set! pat attrPat)))
+                      (== Axis/CHILD (.getAxis pat)) (.setAxis pat Axis/ATTRIBUTE))))
+                (set! axis nextAxis)
+                (set! tail pat)))
+            (set! pat (.getRelativePathPattern pat))))
+        (when (< axis Axis/ALL)
+          (let [^StepPattern selfPattern (ContextMatchStepPattern. axis paxis)
+                score (.getStaticScore tail)]
+            (.setRelativePathPattern tail selfPattern)
+            (.setStaticScore tail score)
+            (.setStaticScore selfPattern score)))
+        (when DEBUG_PATTERN_CREATION
+          (.println System/out (java-str "Done loading steps: " (.toString step)))
+          (.println System/out ""))
+        step)))
+
+  (method ^:private ^:static createDefaultStepPattern :throws [TransformerException] ^StepPattern [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                                   ^int opPos
+                                                                                                   ^MatchPatternIterator mpi
+                                                                                                   ^int analysis
+                                                                                                   ^StepPattern tail
+                                                                                                   ^StepPattern head]
+    (let [stepType (.getOp compiler opPos)
+          ^:mutable simpleInit false
+          ^:mutable prevIsOneStepDown true
+          ^:mutable whatToShow (.getWhatToShow compiler opPos)
+          ^:mutable ^StepPattern ai nil
+          ^:mutable ^int axis 0
+          ^:mutable ^int predicateAxis 0]
+      (switch stepType
+        (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+          (do
+            (set! prevIsOneStepDown false)
+            (let [^:mutable ^Expression expr nil]
+              (switch stepType
+                (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+                  (set! expr (.compileExpression compiler opPos))
+                (set! expr (.compileExpression compiler (unchecked-add-int opPos 2))))
+              (set! axis Axis/FILTEREDLIST)
+              (set! predicateAxis Axis/FILTEREDLIST)
+              (set! ai (FunctionPattern. expr axis predicateAxis))
+              (set! simpleInit true)))
+        OpCodes/FROM_ROOT
+          (do
+            (set! whatToShow (bit-or-int DTMFilter/SHOW_DOCUMENT DTMFilter/SHOW_DOCUMENT_FRAGMENT))
+            (set! axis Axis/ROOT)
+            (set! predicateAxis Axis/ROOT)
+            (set! ai
+                  (StepPattern. (bit-or-int DTMFilter/SHOW_DOCUMENT
+                                            DTMFilter/SHOW_DOCUMENT_FRAGMENT)
+                                axis
+                                predicateAxis)))
+        OpCodes/FROM_ATTRIBUTES
+          (do
+            (set! whatToShow DTMFilter/SHOW_ATTRIBUTE)
+            (set! axis Axis/PARENT)
+            (set! predicateAxis Axis/ATTRIBUTE))
+        OpCodes/FROM_NAMESPACE
+          (do
+            (set! whatToShow DTMFilter/SHOW_NAMESPACE)
+            (set! axis Axis/PARENT)
+            (set! predicateAxis Axis/NAMESPACE))
+        OpCodes/FROM_ANCESTORS (do (set! axis Axis/DESCENDANT) (set! predicateAxis Axis/ANCESTOR))
+        OpCodes/FROM_CHILDREN (do (set! axis Axis/PARENT) (set! predicateAxis Axis/CHILD))
+        OpCodes/FROM_ANCESTORS_OR_SELF
+          (do (set! axis Axis/DESCENDANTORSELF) (set! predicateAxis Axis/ANCESTORORSELF))
+        OpCodes/FROM_SELF (do (set! axis Axis/SELF) (set! predicateAxis Axis/SELF))
+        OpCodes/FROM_PARENT (do (set! axis Axis/CHILD) (set! predicateAxis Axis/PARENT))
+        OpCodes/FROM_PRECEDING_SIBLINGS
+          (do (set! axis Axis/FOLLOWINGSIBLING) (set! predicateAxis Axis/PRECEDINGSIBLING))
+        OpCodes/FROM_PRECEDING (do (set! axis Axis/FOLLOWING) (set! predicateAxis Axis/PRECEDING))
+        OpCodes/FROM_FOLLOWING_SIBLINGS
+          (do (set! axis Axis/PRECEDINGSIBLING) (set! predicateAxis Axis/FOLLOWINGSIBLING))
+        OpCodes/FROM_FOLLOWING (do (set! axis Axis/PRECEDING) (set! predicateAxis Axis/FOLLOWING))
+        OpCodes/FROM_DESCENDANTS_OR_SELF
+          (do (set! axis Axis/ANCESTORORSELF) (set! predicateAxis Axis/DESCENDANTORSELF))
+        OpCodes/FROM_DESCENDANTS (do (set! axis Axis/ANCESTOR) (set! predicateAxis Axis/DESCENDANT))
+        (throw (RuntimeException.
+                 (XSLMessages/createXPATHMessage
+                   XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                   (new Object/1 [(Integer/toString stepType)])))))
+      (when (nil? ai)
+        (set! whatToShow (.getWhatToShow compiler opPos))
+        (set! ai
+              (StepPattern. whatToShow
+                            (.getStepNS compiler opPos)
+                            (.getStepLocalName compiler opPos)
+                            axis
+                            predicateAxis)))
+      (when (or false DEBUG_PATTERN_CREATION)
+        (.print System/out (java-str "new step: " ai))
+        (.print System/out (java-str ", axis: " (Axis/getNames (.getAxis ai))))
+        (.print System/out (java-str ", predAxis: " (Axis/getNames (.getAxis ai))))
+        (.print System/out ", what: ")
+        (.print System/out "    ")
+        (NodeTest/debugWhatToShow (.getWhatToShow ai)))
+      (let [argLen (.getFirstPredicateOpPos compiler opPos)]
+        (.setPredicates ai (.getCompiledPredicates compiler argLen))
+        ai)))
+
+  (method ^:static analyzePredicate :throws [TransformerException] ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                             ^int opPos
+                                                                             ^int stepType]
+    (let [^:mutable ^int argLen 0]
+      (switch stepType
+        (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+          (set! argLen (.getArgLength compiler opPos))
+        (set! argLen (.getArgLengthOfStep compiler opPos)))
+      (let [pos (.getFirstPredicateOpPos compiler opPos)
+            nPredicates (.countPredicates compiler pos)]
+        (if (> nPredicates 0) true false))))
+
+  (method ^:private ^:static createDefaultWalker ^AxesWalker [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                              ^int opPos ^WalkingIterator lpi
+                                                              ^int analysis]
+    (let [^:mutable ^AxesWalker ai nil
+          stepType (.getOp compiler opPos)
+          ^:mutable simpleInit false
+          totalNumberWalkers (bit-and-int analysis BITS_COUNT)
+          ^:mutable prevIsOneStepDown true]
+      (switch stepType
+        (OpCodes/OP_VARIABLE OpCodes/OP_EXTFUNCTION OpCodes/OP_FUNCTION OpCodes/OP_GROUP)
+          (do
+            (set! prevIsOneStepDown false)
+            (when DEBUG_WALKER_CREATION
+              (.println System/out
+                        (java-str "new walker:  FilterExprWalker: "
+                                  analysis
+                                  ", "
+                                  (.toString compiler))))
+            (set! ai (FilterExprWalker. lpi))
+            (set! simpleInit true))
+        OpCodes/FROM_ROOT (set! ai (AxesWalker. lpi Axis/ROOT))
+        OpCodes/FROM_ANCESTORS
+          (do (set! prevIsOneStepDown false) (set! ai (ReverseAxesWalker. lpi Axis/ANCESTOR)))
+        OpCodes/FROM_ANCESTORS_OR_SELF
+          (do (set! prevIsOneStepDown false) (set! ai (ReverseAxesWalker. lpi Axis/ANCESTORORSELF)))
+        OpCodes/FROM_ATTRIBUTES (set! ai (AxesWalker. lpi Axis/ATTRIBUTE))
+        OpCodes/FROM_NAMESPACE (set! ai (AxesWalker. lpi Axis/NAMESPACE))
+        OpCodes/FROM_CHILDREN (set! ai (AxesWalker. lpi Axis/CHILD))
+        OpCodes/FROM_DESCENDANTS
+          (do (set! prevIsOneStepDown false) (set! ai (AxesWalker. lpi Axis/DESCENDANT)))
+        OpCodes/FROM_DESCENDANTS_OR_SELF
+          (do (set! prevIsOneStepDown false) (set! ai (AxesWalker. lpi Axis/DESCENDANTORSELF)))
+        OpCodes/FROM_FOLLOWING
+          (do (set! prevIsOneStepDown false) (set! ai (AxesWalker. lpi Axis/FOLLOWING)))
+        OpCodes/FROM_FOLLOWING_SIBLINGS
+          (do (set! prevIsOneStepDown false) (set! ai (AxesWalker. lpi Axis/FOLLOWINGSIBLING)))
+        OpCodes/FROM_PRECEDING
+          (do (set! prevIsOneStepDown false) (set! ai (ReverseAxesWalker. lpi Axis/PRECEDING)))
+        OpCodes/FROM_PRECEDING_SIBLINGS
+          (do
+            (set! prevIsOneStepDown false)
+            (set! ai (ReverseAxesWalker. lpi Axis/PRECEDINGSIBLING)))
+        OpCodes/FROM_PARENT
+          (do (set! prevIsOneStepDown false) (set! ai (ReverseAxesWalker. lpi Axis/PARENT)))
+        OpCodes/FROM_SELF (set! ai (AxesWalker. lpi Axis/SELF))
+        (throw (RuntimeException.
+                 (XSLMessages/createXPATHMessage
+                   XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                   (new Object/1 [(Integer/toString stepType)])))))
+      (if simpleInit
+          (.initNodeTest ai DTMFilter/SHOW_ALL)
+          (let [whatToShow (.getWhatToShow compiler opPos)]
+            (if (or (== 0
+                        (bit-and-int whatToShow
+                                     (bit-or-int
+                                       (bit-or-int
+                                         (bit-or-int
+                                           DTMFilter/SHOW_ATTRIBUTE
+                                           DTMFilter/SHOW_NAMESPACE)
+                                         DTMFilter/SHOW_ELEMENT)
+                                       DTMFilter/SHOW_PROCESSING_INSTRUCTION)))
+                    (== whatToShow DTMFilter/SHOW_ALL))
+                (.initNodeTest ai whatToShow)
+                (.initNodeTest ai
+                               whatToShow
+                               (.getStepNS compiler opPos)
+                               (.getStepLocalName compiler opPos)))))
+      ai))
+
+  (method ^:public ^:static getAnalysisString ^String [^int analysis]
+    (let [buf (StringBuffer.)]
+      (.append (.append (.append buf "count: ") (WalkerFactory/getStepCount analysis)) \space)
+      (when-not (== (bit-and-int analysis BIT_NODETEST_ANY) 0) (.append buf "NTANY|"))
+      (when-not (== (bit-and-int analysis BIT_PREDICATE) 0) (.append buf "PRED|"))
+      (when-not (== (bit-and-int analysis BIT_ANCESTOR) 0) (.append buf "ANC|"))
+      (when-not (== (bit-and-int analysis BIT_ANCESTOR_OR_SELF) 0) (.append buf "ANCOS|"))
+      (when-not (== (bit-and-int analysis BIT_ATTRIBUTE) 0) (.append buf "ATTR|"))
+      (when-not (== (bit-and-int analysis BIT_CHILD) 0) (.append buf "CH|"))
+      (when-not (== (bit-and-int analysis BIT_DESCENDANT) 0) (.append buf "DESC|"))
+      (when-not (== (bit-and-int analysis BIT_DESCENDANT_OR_SELF) 0) (.append buf "DESCOS|"))
+      (when-not (== (bit-and-int analysis BIT_FOLLOWING) 0) (.append buf "FOL|"))
+      (when-not (== (bit-and-int analysis BIT_FOLLOWING_SIBLING) 0) (.append buf "FOLS|"))
+      (when-not (== (bit-and-int analysis BIT_NAMESPACE) 0) (.append buf "NS|"))
+      (when-not (== (bit-and-int analysis BIT_PARENT) 0) (.append buf "P|"))
+      (when-not (== (bit-and-int analysis BIT_PRECEDING) 0) (.append buf "PREC|"))
+      (when-not (== (bit-and-int analysis BIT_PRECEDING_SIBLING) 0) (.append buf "PRECS|"))
+      (when-not (== (bit-and-int analysis BIT_SELF) 0) (.append buf ".|"))
+      (when-not (== (bit-and-int analysis BIT_FILTER) 0) (.append buf "FLT|"))
+      (when-not (== (bit-and-int analysis BIT_ROOT) 0) (.append buf "R|"))
+      (.toString buf)))
+
+  (field ^:static ^:final ^boolean DEBUG_PATTERN_CREATION false)
+
+  (field ^:static ^:final ^boolean DEBUG_WALKER_CREATION false)
+
+  (field ^:static ^:final ^boolean DEBUG_ITERATOR_CREATION false)
+
+  (method ^:public ^:static hasPredicate ^boolean [^int analysis]
+    (not (== 0 (bit-and-int analysis BIT_PREDICATE))))
+
+  (method ^:public ^:static isWild ^boolean [^int analysis]
+    (not (== 0 (bit-and-int analysis BIT_NODETEST_ANY))))
+
+  (method ^:public ^:static walksAncestors ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis (bit-or-int BIT_ANCESTOR BIT_ANCESTOR_OR_SELF)))
+
+  (method ^:public ^:static walksAttributes ^boolean [^int analysis]
+    (not (== 0 (bit-and-int analysis BIT_ATTRIBUTE))))
+
+  (method ^:public ^:static walksNamespaces ^boolean [^int analysis]
+    (not (== 0 (bit-and-int analysis BIT_NAMESPACE))))
+
+  (method ^:public ^:static walksChildren ^boolean [^int analysis]
+    (not (== 0 (bit-and-int analysis BIT_CHILD))))
+
+  (method ^:public ^:static walksDescendants ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis (bit-or-int BIT_DESCENDANT BIT_DESCENDANT_OR_SELF)))
+
+  (method ^:public ^:static walksSubtree ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis
+                         (bit-or-int (bit-or-int BIT_DESCENDANT BIT_DESCENDANT_OR_SELF) BIT_CHILD)))
+
+  (method ^:public ^:static walksSubtreeOnlyMaybeAbsolute ^boolean [^int analysis]
+    (and (and (and (WalkerFactory/walksSubtree analysis)
+                   (not (WalkerFactory/walksExtraNodes analysis)))
+              (not (WalkerFactory/walksUp analysis)))
+         (not (WalkerFactory/walksSideways analysis))))
+
+  (method ^:public ^:static walksSubtreeOnly ^boolean [^int analysis]
+    (and (WalkerFactory/walksSubtreeOnlyMaybeAbsolute analysis)
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static walksFilteredList ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis BIT_FILTER))
+
+  (method ^:public ^:static walksSubtreeOnlyFromRootOrContext ^boolean [^int analysis]
+    (and (and (and (and (WalkerFactory/walksSubtree analysis)
+                        (not (WalkerFactory/walksExtraNodes analysis)))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isSet analysis BIT_FILTER))))
+
+  (method ^:public ^:static walksInDocOrder ^boolean [^int analysis]
+    (and (or (or (WalkerFactory/walksSubtreeOnlyMaybeAbsolute analysis)
+                 (WalkerFactory/walksExtraNodesOnly analysis))
+             (WalkerFactory/walksFollowingOnlyMaybeAbsolute analysis))
+         (not (WalkerFactory/isSet analysis BIT_FILTER))))
+
+  (method ^:public ^:static walksFollowingOnlyMaybeAbsolute ^boolean [^int analysis]
+    (and (and (and (WalkerFactory/isSet analysis
+                                        (bit-or-int
+                                          (bit-or-int BIT_SELF BIT_FOLLOWING_SIBLING)
+                                          BIT_FOLLOWING))
+                   (not (WalkerFactory/walksSubtree analysis)))
+              (not (WalkerFactory/walksUp analysis)))
+         (not (WalkerFactory/walksSideways analysis))))
+
+  (method ^:public ^:static walksUp ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis
+                         (bit-or-int (bit-or-int BIT_PARENT BIT_ANCESTOR) BIT_ANCESTOR_OR_SELF)))
+
+  (method ^:public ^:static walksSideways ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis
+                         (bit-or-int (bit-or-int
+                                       (bit-or-int BIT_FOLLOWING BIT_FOLLOWING_SIBLING)
+                                       BIT_PRECEDING)
+                                     BIT_PRECEDING_SIBLING)))
+
+  (method ^:public ^:static walksExtraNodes ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis (bit-or-int BIT_NAMESPACE BIT_ATTRIBUTE)))
+
+  (method ^:public ^:static walksExtraNodesOnly ^boolean [^int analysis]
+    (and (and (and (and (and (WalkerFactory/walksExtraNodes analysis)
+                             (not (WalkerFactory/isSet analysis BIT_SELF)))
+                        (not (WalkerFactory/walksSubtree analysis)))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static isAbsolute ^boolean [^int analysis]
+    (WalkerFactory/isSet analysis (bit-or-int BIT_ROOT BIT_FILTER)))
+
+  (method ^:public ^:static walksChildrenOnly ^boolean [^int analysis]
+    (and (and (and (and (and (and (WalkerFactory/walksChildren analysis)
+                                  (not (WalkerFactory/isSet analysis BIT_SELF)))
+                             (not (WalkerFactory/walksExtraNodes analysis)))
+                        (not (WalkerFactory/walksDescendants analysis)))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (or (not (WalkerFactory/isAbsolute analysis)) (WalkerFactory/isSet analysis BIT_ROOT))))
+
+  (method ^:public ^:static walksChildrenAndExtraAndSelfOnly ^boolean [^int analysis]
+    (and (and (and (and (WalkerFactory/walksChildren analysis)
+                        (not (WalkerFactory/walksDescendants analysis)))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (or (not (WalkerFactory/isAbsolute analysis)) (WalkerFactory/isSet analysis BIT_ROOT))))
+
+  (method ^:public ^:static walksDescendantsAndExtraAndSelfOnly ^boolean [^int analysis]
+    (and (and (and (and (not (WalkerFactory/walksChildren analysis))
+                        (WalkerFactory/walksDescendants analysis))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (or (not (WalkerFactory/isAbsolute analysis)) (WalkerFactory/isSet analysis BIT_ROOT))))
+
+  (method ^:public ^:static walksSelfOnly ^boolean [^int analysis]
+    (and (and (and (and (WalkerFactory/isSet analysis BIT_SELF)
+                        (not (WalkerFactory/walksSubtree analysis)))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static walksUpOnly ^boolean [^int analysis]
+    (and (and (and (not (WalkerFactory/walksSubtree analysis)) (WalkerFactory/walksUp analysis))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static walksDownOnly ^boolean [^int analysis]
+    (and (and (and (WalkerFactory/walksSubtree analysis) (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static walksDownExtraOnly ^boolean [^int analysis]
+    (and (and (and (and (WalkerFactory/walksSubtree analysis)
+                        (WalkerFactory/walksExtraNodes analysis))
+                   (not (WalkerFactory/walksUp analysis)))
+              (not (WalkerFactory/walksSideways analysis)))
+         (not (WalkerFactory/isAbsolute analysis))))
+
+  (method ^:public ^:static canSkipSubtrees ^boolean [^int analysis]
+    (let [a-1 (WalkerFactory/isSet analysis BIT_CHILD)
+          b-2 (WalkerFactory/walksSideways analysis)]
+      (or a-1 b-2)))
+
+  (method ^:public ^:static canCrissCross ^boolean [^int analysis]
+    (cond
+      (WalkerFactory/walksSelfOnly analysis) false
+      (and (WalkerFactory/walksDownOnly analysis) (not (WalkerFactory/canSkipSubtrees analysis)))
+        false
+      (WalkerFactory/walksChildrenAndExtraAndSelfOnly analysis) false
+      (WalkerFactory/walksDescendantsAndExtraAndSelfOnly analysis) false
+      (WalkerFactory/walksUpOnly analysis) false
+      (WalkerFactory/walksExtraNodesOnly analysis) false
+      (and (WalkerFactory/walksSubtree analysis)
+           (or (or (WalkerFactory/walksSideways analysis) (WalkerFactory/walksUp analysis))
+               (WalkerFactory/canSkipSubtrees analysis)))
+        true
+      :else false))
+
+  (method ^:public ^:static isNaturalDocOrder ^boolean [^int analysis]
+    (cond
+      (or (or (WalkerFactory/canCrissCross analysis) (WalkerFactory/isSet analysis BIT_NAMESPACE))
+          (WalkerFactory/walksFilteredList analysis))
+        false
+      (WalkerFactory/walksInDocOrder analysis) true
+      :else false))
+
+  (method ^:private ^:static isNaturalDocOrder :throws [TransformerException] ^boolean [^com.sun.org.apache.xpath.internal.compiler.Compiler compiler
+                                                                                        ^:mutable ^int stepOpCodePos
+                                                                                        ^int stepIndex
+                                                                                        ^int analysis]
+    (cond
+      (WalkerFactory/canCrissCross analysis) false
+      (WalkerFactory/isSet analysis BIT_NAMESPACE) false
+      (and (WalkerFactory/isSet analysis (bit-or-int BIT_FOLLOWING BIT_FOLLOWING_SIBLING))
+           (WalkerFactory/isSet analysis (bit-or-int BIT_PRECEDING BIT_PRECEDING_SIBLING)))
+        false
+      :else
+        (let [^:mutable ^int stepType 0
+              ^:mutable ^int stepCount 0
+              ^:mutable foundWildAttribute false
+              ^:mutable ^int potentialDuplicateMakingStepCount 0]
+          (while (not (== OpCodes/ENDOP (set! stepType (.getOp compiler stepOpCodePos))))
+            (set! stepCount (unchecked-inc-int stepCount))
+            (switch stepType
+              (OpCodes/FROM_ATTRIBUTES OpCodes/MATCH_ATTRIBUTE)
+                (do
+                  (when foundWildAttribute (return false))
+                  (let [localName (.getStepLocalName compiler stepOpCodePos)]
+                    (when (.equals localName "*") (set! foundWildAttribute true))))
+              (OpCodes/FROM_FOLLOWING OpCodes/FROM_FOLLOWING_SIBLINGS
+                                      OpCodes/FROM_PRECEDING
+                                      OpCodes/FROM_PRECEDING_SIBLINGS
+                                      OpCodes/FROM_PARENT
+                                      OpCodes/OP_VARIABLE
+                                      OpCodes/OP_EXTFUNCTION
+                                      OpCodes/OP_FUNCTION
+                                      OpCodes/OP_GROUP
+                                      OpCodes/FROM_NAMESPACE
+                                      OpCodes/FROM_ANCESTORS
+                                      OpCodes/FROM_ANCESTORS_OR_SELF
+                                      OpCodes/MATCH_ANY_ANCESTOR
+                                      OpCodes/MATCH_IMMEDIATE_ANCESTOR
+                                      OpCodes/FROM_DESCENDANTS_OR_SELF
+                                      OpCodes/FROM_DESCENDANTS)
+                (do
+                  (when (> potentialDuplicateMakingStepCount 0) (return false))
+                  (set! potentialDuplicateMakingStepCount
+                        (unchecked-inc-int potentialDuplicateMakingStepCount))
+                  (when foundWildAttribute (return false)))
+              (OpCodes/FROM_ROOT OpCodes/FROM_CHILDREN OpCodes/FROM_SELF)
+                (when foundWildAttribute (return false))
+              (throw (RuntimeException.
+                       (XSLMessages/createXPATHMessage
+                         XPATHErrorResources/ER_NULL_ERROR_HANDLER
+                         (new Object/1 [(Integer/toString stepType)])))))
+            (let [nextStepOpCodePos (.getNextStepPos compiler stepOpCodePos)]
+              (when (< nextStepOpCodePos 0) (break))
+              (set! stepOpCodePos nextStepOpCodePos)))
+          true)))
+
+  (method ^:public ^:static isOneStep ^boolean [^int analysis]
+    (== (bit-and-int analysis BITS_COUNT) 0x00000001))
+
+  (method ^:public ^:static getStepCount ^int [^int analysis]
+    (bit-and-int analysis BITS_COUNT))
+
+  (field ^:public ^:static ^:final ^int BITS_COUNT 0x000000FF)
+
+  (field ^:public ^:static ^:final ^int BITS_RESERVED 0x00000F00)
+
+  (field ^:public ^:static ^:final ^int BIT_PREDICATE 0x00001000)
+
+  (field ^:public ^:static ^:final ^int BIT_ANCESTOR (bit-shift-left-int 0x00001000 1))
+
+  (field ^:public ^:static ^:final ^int BIT_ANCESTOR_OR_SELF (bit-shift-left-int 0x00001000 2))
+
+  (field ^:public ^:static ^:final ^int BIT_ATTRIBUTE (bit-shift-left-int 0x00001000 3))
+
+  (field ^:public ^:static ^:final ^int BIT_CHILD (bit-shift-left-int 0x00001000 4))
+
+  (field ^:public ^:static ^:final ^int BIT_DESCENDANT (bit-shift-left-int 0x00001000 5))
+
+  (field ^:public ^:static ^:final ^int BIT_DESCENDANT_OR_SELF (bit-shift-left-int 0x00001000 6))
+
+  (field ^:public ^:static ^:final ^int BIT_FOLLOWING (bit-shift-left-int 0x00001000 7))
+
+  (field ^:public ^:static ^:final ^int BIT_FOLLOWING_SIBLING (bit-shift-left-int 0x00001000 8))
+
+  (field ^:public ^:static ^:final ^int BIT_NAMESPACE (bit-shift-left-int 0x00001000 9))
+
+  (field ^:public ^:static ^:final ^int BIT_PARENT (bit-shift-left-int 0x00001000 10))
+
+  (field ^:public ^:static ^:final ^int BIT_PRECEDING (bit-shift-left-int 0x00001000 11))
+
+  (field ^:public ^:static ^:final ^int BIT_PRECEDING_SIBLING (bit-shift-left-int 0x00001000 12))
+
+  (field ^:public ^:static ^:final ^int BIT_SELF (bit-shift-left-int 0x00001000 13))
+
+  (field ^:public ^:static ^:final ^int BIT_FILTER (bit-shift-left-int 0x00001000 14))
+
+  (field ^:public ^:static ^:final ^int BIT_ROOT (bit-shift-left-int 0x00001000 15))
+
+  (field ^:public ^:static ^:final ^int BITMASK_TRAVERSES_OUTSIDE_SUBTREE
+    (bit-or-int (bit-or-int (bit-or-int (bit-or-int
+                                          (bit-or-int
+                                            (bit-or-int
+                                              (bit-or-int
+                                                (bit-or-int
+                                                  (bit-or-int BIT_NAMESPACE BIT_PRECEDING_SIBLING)
+                                                  BIT_PRECEDING)
+                                                BIT_FOLLOWING_SIBLING)
+                                              BIT_FOLLOWING)
+                                            BIT_PARENT)
+                                          BIT_ANCESTOR_OR_SELF)
+                                        BIT_ANCESTOR)
+                            BIT_FILTER)
+                BIT_ROOT))
+
+  (field ^:public ^:static ^:final ^int BIT_BACKWARDS_SELF (bit-shift-left-int 0x00001000 16))
+
+  (field ^:public ^:static ^:final ^int BIT_ANY_DESCENDANT_FROM_ROOT
+    (bit-shift-left-int 0x00001000 17))
+
+  (field ^:public ^:static ^:final ^int BIT_NODETEST_ANY (bit-shift-left-int 0x00001000 18))
+
+  (field ^:public ^:static ^:final ^int BIT_MATCH_PATTERN (bit-shift-left-int 0x00001000 19)))

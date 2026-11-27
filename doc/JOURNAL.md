@@ -26677,6 +26677,39 @@ verdicts (1, 2, 3, 5), the others built (4, 6, 7: below):
 - For the next Java train: `bin/jrt-convert update` (VarHandles' overlay), `bin/javac-vendor convert` (the closure's
   705 files, then `bin/javac-vendor edge` if j2g asks), the gate build and javac's tool; java-krb-1126 rides the same train.
 
+## 2026-11-26: java-krb-1126, Kerberos's and sun.misc.Unsafe's gaps (:kerberos, :foreign to build; branch `java-krb-1126`)
+
+The user's by-design review of this morning made `:kerberos` (t05298 t08051 t08052 t08199 t08201, interpreted and compiled)
+and `:foreign` (t03656 and t08053 interpreted) deferred, to build. Branch `java-krb-1126` from `mac/train-4` (82b1dfff1) with
+`mac/next` (0b3174413) merged (the conflicts: the journal a union; test/java/divergences.edn, check-diagnostics.edn and
+jdk/javac/provenance.edn train 4's, the newer in those places; test/reap/matrix.edn and test/crops/scores.edn derived again
+by `bin/reap --record` and `bin/crops-score --record`).
+
+What stopped the rows (their traces on train 4's executable, `.tmp/gate-exe/9564e7a0c725952e4bb8`, and its j2g report's
+`:unavailable`): every row but t03656 died in sun.security.krb5.PrincipalName's static initializer, whose
+`Unsafe.objectFieldOffset(PrincipalName.class.getDeclaredField("nameStrings"))` j2g stubbed (jrt's Unsafe has the offset by
+name only; jrt's member tables list public fields), and every Config.getInstance would then fail: the derived Config still
+asked jdk.internal.util.OperatingSystem, outside the world, so j2g left getNativeFileName, getDefaultRealm and getKDCList out.
+t03656 (FillArrayWithUnsafe) needs sun.misc.Unsafe (jdk.unsupported), not in the world.
+
+Built (test/jrt/derive.ae, origins https://github.com/openjdk/jdk26u at baf63fb, src/java.security.jgss/share/classes/ and
+src/jdk.unsupported/share/classes/; LICENSE.md's new item): PrincipalName derived (the offset by name,
+objectFieldOffset(Class, String), as java.util.Random's variant asks it); Config's derivation's isWindows and isMacOS
+`false` (the Go build runs on Linux); sun.misc.Unsafe derived (no jdk.internal.reflect.Reflection: getUnsafe's caller check
+the JDK's SecurityException for every caller outside the JDK, the method filter dropped; the memory-access warned flag a
+plain static under the class's lock, jrt's Unsafe having no static field bases; the warning to System.err, naming the caller
+without a code source); `sun/misc/Unsafe` `theUnsafe` added to arbace.j2g.model's reflection roots (the user's short list of
+2026-11-24) for getDeclaredField("theUnsafe"). The derived Unsafe's warning path ran interpreted in a scratch copy on train 4's
+executable: status 0, the JDK's four warning lines but the location. `bin/jrt-convert predict --list` of the seven rows: the
+forms read (committed with their two source lines), vet 0 refused, j2g's analysis 0 failures, the changed classes' stubs
+sun.misc.Unsafe's 37 jrt-lacking members (none on t03656's path), the seven rows analyzed compiled.
+
+Alternatives considered: jrt's Unsafe.objectFieldOffset(Field) with PrincipalName.nameStrings a reflection root (the general
+form, but the list is the user's short one, and jrt's manifest and tables would be regenerated); jdk.internal.util.OperatingSystem
+in the world (its generated PlatformProps; the derivations so far keep it out, ExtendedSocketOptions' too); sun.misc.Unsafe
+hand-written (the derivation keeps jdk26u's text). Every row waits for the next Java train's build: `bin/jrt-convert update`
+(provenance), `bin/j2g-edge update` (the new class), then the interp and compiled records of the seven rows.
+
 ## 2026-11-26 — C++ read: the shared regression of cpp-indep3 and cpp-def3, recorded (branch `cpp-indep3-1126`)
 
 - The coordinator's decision of 2026-11-26: one regression for both lanes, run and recorded here. mac/cpp-def3-1126 `a89f09b10` and
@@ -27022,3 +27055,178 @@ queued from a shell holding no lock), judged by `bin/pyi check --judge`, recorde
   :finalization-collect 3, :host-memory 2, :regrtest-children 2, one each in :pickle-c-gaps, :code-objects, :ctypes-port,
   :sys-module, :testcapi, :testcapi-behaviour, :finalization-goi, :audit-hooks, :os-and-files-misc, :tools-misc,
   :sys-getsizeof.
+## 2026-11-26 — OCaml AOT: oc-tail's leftovers (oc-tail2, branch `oc-tail2-1126`)
+
+- The user's decision (2026-11-26): parallel/test_issue_11094 is judged at the compiled level only, as callback_effects_domains_gc was
+  (2026-11-25). Its light row stays where it is, `:light-depth` (deferred, the light level's), with the decision in the class's
+  `:decided`; no light cap. At the light level it now ends at Rt's DEPTH_LIMIT (200,000 OCaml calls, about 5 a nested handler; its
+  100,000 suspended fibers are Java threads, past 6 GB when let further), its aot-known.edn entry's text kept (the record's row). It is
+  in test/ocaml/light-compiled.txt (the compiled level's by-list run) and joins the compiled level's follow-up after its chain (583's
+  list, callback_effects_domains_gc's).
+- regression/pr3612 gets a light cap by the user's 1.5x rule (oc-tail's option (a)): measured alone on this host, 210.05 s user + 34.87 s
+  system (203.07 + 35.28 with mac/next 0b3174413's runtime and translator, the same program and C API server), so 1.5 x 244.9 s, 370 s
+  in test/ocaml/aot-cpu-caps.tsv (the coordinator's 310 s counted the user CPU alone; the cap and the limit count both). Confirmed by
+  `bin/oi check --aot --only-list` of pr3612 alone under the cap: pass (287 s of wall, its row in check-aot-native.edn already
+  the recorded pass, unchanged).
+- parallel/mctest's stall is the Mac's queue 603; the execv rows keep OC208 (b).
+## 2026-11-26 — C++ read independence, slice 4: the clang-only rows by cause (queue 602, VM)
+
+Branch `602-cpp-indep-slice4` from origin/next `e8e2c1ac3`. The 883 rows clang's recorded dumps pass and the own record fails (less
+dg-dialect-out and the :na classes) grouped by cause and the next groups after cpp-indep3's taken, each rule from the standard's text or
+GCC's documented messages, no GCC or clang code (doc/cpp/CPP-SURVEY.md, "As built: 602"): explicit conversion functions in direct- and
+copy-list-initialization, switch and operators; the conditional operator's [expr.cond]/4.3 and /6; aggregates before C++20 and their
+elements' destructors; hidden friend declarations; x87 asm outputs and read-only asm outputs; `C::C (...)`; [class.protected] for
+pointers to members and base access in reference binding; `this` in lambdas; bit-field and rvalue reference binding; xvalue operands;
+inconsistent `auto` return deduction; using-declaration conflicts; single rules (bound member function values, noexcept(noexcept(f())),
+a variable template without arguments, calls through function pointers, defaulted copy constructors' parameter, static_cast rules).
+Checks: a base run of the 883 rows (.tmp/q602/dgw-base), targeted run t1 (the candidates plus 1,115 recorded own passes the first rules
+reach, 1,998 files): 31 rows to own pass, 1 recorded pass lost (template/friend77.C: a template-id-qualified friend declared as a hidden
+friend; fixed, probed); t2 (the candidates plus 975 recorded passes the later rules reach, 1,858 files): 0 recorded own passes
+lost, 56 rows to own pass (the 48 probed and 8 side effects, named in the survey's section). No record
+yet: the coordinator runs one regression over this branch and 601's merged. Alternatives left: the static_assert traits and noexcept
+operands (the evaluator's unsure nodes), definition-time narrowing in templates' signatures, substitution order (DR 1227).
+
+## 2026-11-26 — C++ read: the deferred tail, round 1, and the shared regression with 602 (queue 601, VM)
+
+- Branch `601-cpp-deferred-tail` from origin/next `e8e2c1ac3`, worktree q573. The 95 deferred read rows probed at the base (one `--only`
+  run), g++ 15.2.0 by hand for GCC's messages; rows taken cheapest first, an hour each at most (the coordinator's direction). IFNDR:
+  test/cpp/ifndr/template-body.sh over the rows qualifies five, four already decided by the user (lambda-variadic11.C and defarg19.C out,
+  vt-34052.C and void14.C to be built), cpp1z/typename1.C kept deferred: no proposal.
+- Rules (doc/cpp/CPP-SURVEY.md, "As built: 601"): parse.ae's undeclared type in a block, member operators in class scope, erroneous
+  template template parameters, CTAD with no argument, crash11's three, the template keyword on a non-template, a block-scope function
+  of the injected-class-name; sema.ae and template.ae's dependent name yielding a type in a signature, pre-C++20 implicit constexpr default
+  constructors, CTAD's non-forwarding class parameters and undeducible guides; diag.ae's lambda pack captures. Each committed with its
+  targeted check (the rows and the recorded passes it reaches): 0 lost each.
+- Alternatives tried and withdrawn: P0466R5's builtins as known names (lost three passes that pass by their undeclared errors; round 2
+  with the builtins' own checks); void in a nested-name-specifier (lost template/eh2.C); several rows past the time-box (the survey).
+- The shared regression with 602 (the coordinator): origin/602-cpp-indep-slice4 `2f80e7a9e` merged without conflicts (`0ad4b146e`); 4,173
+  files in two parts: lost cpp0x/nsdmi-dr1397.C (602's aggregate rule), template/eh2.C and parse/error66.C (601's), fixed at `fc7d3ac73`,
+  rerun over the fixes' reach (552 files): 0 lost. Recorded from the three parts: 3,195 -> 3,266 own passes, 0 lost; 601's 13 deferred
+  rows and 602's 58 clang-only rows. `bin/reap --record`: C++ read 6,185 / 0 / 97 -> 6,198 / 0 / 84; `bin/crops-score --record`: read
+  independence 0.920 -> 0.926, completeness 0.9961 -> 0.9967; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
+
+## 2026-11-26 — Rust C6: L2 over the whole closure, slice 1, core (queue 600, VM)
+
+596 showed every case needs its whole closure own (abort.rs's 8,935 defines, 8,299 rustc's, 8,190 never built). This grows L2 over
+it. build-run's lib-unit-run (shared front-end file, two commits) follows the items' callees transitively to the closure's defines
+in the crate's units (LIB_UNIT_L2_TARGETS), through the `#[inline(always)]` callees' calls too; bin/rust-front's build takes
+`test/rust/front/lib-unit-CRATE-targets.txt` by default (abort.rs's closure: the goal is one case all own first; the union of the 73
+cases, 1,482 core defines, was considered and left for later as it doubles the rounds). Rounds of build, inline-keys and export --add
+until no new key (scratch script, logs in .tmp/q600/logs). core: 157 -> 450 of abort's 687 equal; the own tree 688 -> 1,234; abort.rs
+8,299 -> 7,849 rustc's. Details in doc/rust/FRONTEND-SURVEY.md, "As built: C6's L2 over the whole closure, slice 1: core".
+## 2026-11-26 — OCaml AOT: the light level's tail after oc-tail (queue 603, VM)
+
+Queue task 603 (branch `603-ocaml-light-tail2` from next `e8e2c1ac3`, oc-tail-1126's merge): the light AOT level's rows oc-tail left
+that are not its speed, each probed alone on stage 0 (doc/ocaml/OCAML-SURVEY.md, "As built: queue 603"). Found and built:
+- The cause common to ephetest's test7, statmemprof/bigarray and the suite's exception_comballoc: stage 0's Java forms interpreter
+  (seed of 2026-11-17 04:15) predates n-java-serial's slot release (arbace/classes/interp.ae's `release!`, 2026-11-17 22:28), so every
+  let binding holds its slot for the frame's lifetime, and oc-tail's clears still carried each call's result past them in a local
+  (`r$`). arbace/o2j.ae's `value-then` passes the value through a two-element array at the light level (the compiled level keeps the
+  local). Alternatives: a runtime helper that returns its first argument (an interpreted call a use: queue 414's frames back);
+  re-seeding so stage 0 releases slots (a re-seed, not this lane's).
+- unboxed-primitive-args' 7.6 GB (45 GB at the compiled level): call-form wrote the arguments in both branches of its arity test,
+  and with-args leaves the leftmost impure argument in place, so a call nested in an argument doubled per level; the GADT values'
+  36 nested `( ** )` applications gave 2^36 forms (a 4.7 KB reduction took 14 GB). An argument that holds a call is bound first and,
+  at the light level, cleared as it is passed (`take-form`; clearing it after the call kept bigarray's bigstring alive through the
+  callee's full_major). main.ml translates in 2 s, 0.5 GB; header.awk's gen mode now runs at the light level (aot 1), the compiled
+  level's still behind `gnon` (the host's chain to measure). The row then fails on the C API (the C's writes into the server's copy of
+  a bigarray): aot-known.edn's c-api entry, the same `:c-api` class as before.
+- stop_start_in_callback: ocamlopt's combined allocation. A tree of makeblocks of simple fields is translated, while a Gc.Memprof
+  profile samples, between `ExtGc/combBegin` and `combEnd` (the outermost tree alone), its samples' callbacks run after the tree is
+  made, as memprof.c runs a combined allocation's. Alternative: the bytecode semantics (Sys.backend_type would be Bytecode: no).
+- parallel/mctest's stall: its last worker's `exit 0` ran in a fiber the second domain resumed; the Exit reached the domain's thread,
+  whose spawn made it the domain's Error result, and the main domain waited for work forever (a reduced mctest, 300 yields a worker,
+  printed its four `done` and never ended). Main/otherExit ends the program from a domain's or a system thread's Exit (System/exit;
+  the batch runner, Main/batch, takes the status as the row's and ends its process after it, status 4). With it and the slots, mctest
+  reaches DEPTH_LIMIT (200,000) in 39 s, or, when the domains share the yields evenly, runs past the CPU limit: every yield is five calls
+  deeper on its handler's thread, the light level making no tail call. It passes with O2J_DEPTH_LIMIT=1000000 in 206 s of CPU.
+  DECISION 603-1 (the user's; recommended (a)): (a) the light level's DEPTH_LIMIT clip raised to 1,000,000 with mctest's CPU cap 310 s,
+  the Stack_overflow rows measured at the next whole run; (b) mctest stays `:light-depth`; (c) tail calls at the light level.
+Records: `bin/oi check --aot --only-list` (31 rows: the lane's four main-corpus rows, oc-tail's moved rows, statmemprof's and
+weak-ephe-final's that finish within the limit) and `bin/oi suite check --aot --only-list` (statmemprof's five suite rows), each one
+whole run with `--record` (the first main run was not recorded from: mctest's timeout kind was not in its known entry yet); the suite
+run found discard_in_callback passing too (the combined allocations), its known entry removed, its `:na` class (the user's, 2026-11-24)
+left for the user. `bin/reap --record`: OCaml AOT 558 / 11 / 40 -> 563 / 11 / 36; `bin/crops-score --record`: 97.91% -> 98.07%.
+## 2026-11-26 — C++ read: NFC identifiers, the Unicode data's origin (queue 601, VM)
+
+- arbace/cpp/nfcdata.ae (commit 432a245e6) is generated by test/cpp/nfcdata.ae from the Unicode Character Database 16.0.0's
+  UnicodeData.txt (SHA-256 ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f) and DerivedNormalizationProps.txt
+  (4d4c03892dea9146d674b686e495df2d55a28d071ac474041d73518f887abddc), https://www.unicode.org/Public/16.0.0/ucd/, as pinned by
+  test/scheme/ucd.edn and already fetched into the main checkout's .tmp/scheme/ucd-16.0.0 (no network: both files checked against
+  their pins), through arbace.repr.scheme.ucd/normalization (the generator of si's go/arbace/scm/normdata.ae), its D, C and N lines
+  (K, the compatibility decompositions, left out). arbace/cpp/nfc.ae is UAX #15's NFC over it, Arbace's own; test/cpp/nfc-test.ae runs
+  it against the pinned NormalizationTest.txt: 19,965 lines, 0 failing. LICENSE.md's Unicode entry names the file now (Unicode License
+  V3 for the data). Alternative not taken: java.text.Normalizer, which jrt does not have and the coordinator ruled out.
+
+## 2026-11-26 — C++ read: the deferred tail by mechanism, round 3 recorded (queue 601, VM)
+
+- The coordinator's groups after the record of 718e19c8c: P0466R5's builtins with their own checks (52687fdad), NFC identifiers
+  (432a245e6, cbf6f2661: the UCD 16.0.0 already on the VM, pinned by test/scheme/ucd.edn), macro spelling locations (ba70caecd),
+  two-phase lookup in signatures and instance members' decltype (08e9d9164). Details and the rules' sources in doc/cpp/CPP-SURVEY.md,
+  "As built: 601, round 3".
+- Not built, for the user: overload/builtin4.C (GCC's built-in candidate set, against [over.built]/16 with [conv.ptr]/1), the CWG rows
+  partial-specialization12.C (CWG 455) and pr39425.C (CWG 727), and init/new38.C as an :ifndr-uninstantiated-template candidate (its one
+  missed line [-Wtemplate-body] in a template never instantiated). Tried and reverted: non-dependent26.C's decltype qualifier check,
+  constexpr-ref12.C's local references.
+- Checks per rule on the rows and the recorded passes each reaches; one regression at 08e9d9164 (3,348 files): 0 lost, 7 rows own;
+  recorded: own passes 3,266 -> 3,273; `bin/reap --record`: C++ read 6,198 / 0 / 84 -> 6,205 / 0 / 77; completeness 0.9967 -> 0.9969;
+  `--judge --strict`, records-check, markers-check: 0 problems (the user's "avoid redundancy": no rerun of a passing run).
+
+## 2026-11-26 — C++ read: the user's answers to 601's DECISIONs applied (queue 601, VM)
+
+- The user, 2026-11-26: 601-1 (a) overload/builtin4.C n/a (GCC's built-in candidate set against [over.built]/16), 601-2 (a)
+  init/new38.C to :ifndr-uninstantiated-template, 601-3 (a) template/partial-specialization12.C (CWG 455) and template/pr39425.C
+  (CWG 727) n/a as parse/explicit1.C. test/cpp/divergences-dg.edn's :gxx-only-rules and :ifndr-uninstantiated-template take them, the
+  records judged again as they are (no run). `bin/reap --record`: C++ read 6,205 / 0 / 77 -> 6,205 / 0 / 73 (n/a 249 -> 253);
+  `bin/crops-score --record`: completeness 0.9969 -> 0.9971; `--judge --strict`, records-check, markers-check: 0 problems.
+
+## 2026-11-26 — Rust C6: L2 over the closure, slice 2, alloc (queue 600, VM)
+
+alloc's slice: abort.rs's 296 alloc defines as targets, the rounds exporting core's wanted definitions beside alloc's; then the
+instances taken by reference (mono/unit-refs, shared mono.ae; build-run's L2 follows them, shared build_run.ae) for a second pass.
+alloc 210 of 296 equal; own tree 1,234 -> 1,447; abort.rs 7,849 -> 7,639 rustc's. The compare, the own tree's check and own-std
+run once, at the slice's end (the user's 2026-11-26 line: no checks within the rounds).
+
+## 2026-11-27: train 8 (Java) built and recorded: java-tail2, java-tail3, java-krb-1126, t4-print-1125
+
+Branch `train-8` from mac/next `eb408fb7f` with mac/java-krb-1126 (`6d93dbcc8`) and mac/t4-print-1125 (`5567d401a`, added by
+the coordinator: javac on Arbace's counts once, t07537, and the printer's round-trip fixes) merged. The provenance batch on
+train 4's javac tool (`javac-e585cbd9ee084dd57abd`, REPR_JAVA_STALE_OK=1): `bin/jrt-convert update` (VarHandles', the jrt:
+handler's forms), `bin/j2g-edge update`, `bin/javac-vendor convert` and `edge` (the static XML closure: javac's edge 727 classes
+beyond jdk/edge.edn -> 34, the XML world now forms), `bin/jrt modules` (after the convert: it reads jdk/javac/sources.txt) and
+`provides`: `1e5fa9c99`. No fixtures, forms or declarations update: repr/java's reader, arbace/lang and arbace/java unchanged
+since train 4's build (provenance-check). Built: executables `04cc536dc3788fa7cfd4`, javac's tool `javac-9a1f4720034459311183`;
+`bin/javac-vendor verify` byte for byte but the platform pins and the provenance's :host (train 4's note).
+Three fixes on the way, each its commit on train-8, each found before the gate build:
+- `3c7bf1f0e`: j2g's renames: sun.misc.Unsafe (java-krb's derived overlay) and its two nested classes Misc_Unsafe*, apart from
+  jrt's own Unsafe (jdk.internal.misc.Unsafe, jrt/unsafe.ae: j2g-edge stopped on 16 names declared twice); java-tail2's
+  sun.net.www.protocol.jrt.Handler Jrt_Handler, apart from java.util.logging.Handler (`bin/javac-vendor names` found it; neither
+  branch had run the gonames check).
+- `7172c7346`: `bin/javac-vendor xml-closure` named a class's file by its top-level name: 15 auxiliary classes (XSLTC's
+  parser_actions in XPathParser.java, Xerces' traversers' containers, XPath's comparators, SymbMap, NameSpaceSymbEntry,
+  XPath2NodeFilter) became files jdk26u does not have (the convert's cp failed). jrt.classfile reads SourceFile now and the
+  closure maps a class to its SourceFile in its package: the 15 lines gone, none added (their files were listed).
+  Alternative considered (the coordinator's): XSLTC out of javac's world; it has been in it since train 4 (the XML tests).
+- `5b5d47a2a`: java-tail3's `*runtime-varhandles*` was bound false in j2g run's default branch alone: the edges' recordings
+  (--record-edge on the frozen JVM) analyzed ByteArrayAccess, ByteArrayAccess$BE, SHA3 and LayoutPath with run-time VarHandles
+  once jdk/forms held jdk.internal.jrt.VarHandles, and stubbed them (4 analysis failures; train 7's edge, without those forms,
+  0); bound at the top of run now (0 failures). And DOMDigestMethod's nested SHA224 ... SHA3_512 beside its static String
+  fields of those names (C$N's Go name is C.N's): renamed; a scan of 14 modules' class files for a static field named as a
+  nested class found no other pair.
+The javac-convert step was proved alone under the lock (convert-8.sh: j2g-edge update, then the convert) before the build.
+Records on the train's build (`.tmp/t8/rec.sh`): read and interp of 32 ids, read and compiled of 28 (t05172 passed in its
+shard: no run alone), bin/diffcheck --only FxCode and FxVarHandles' 12 cases, diagnostics t07536 and t07537, the whole print
+level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83f06`) with `--judge --partial --record`:
+- interp 17 now passing (t03656 t04613 t04680 t04829 t04989 t05019 t05254 t05298 t07688 t08051 t08052 t08053 t08092 t08195
+  t08199 t08201 t08235), compiled 12 (the same less t04613 t04680 t04829 t05254 t07688) and t05172 passing, 0 regressions;
+  14 still failing at each level in their classes (FFM's JavaNioAccess and VM.isDirectMemoryPageAligned: t03584 t03640 t05096
+  t05812 t05828 t05829 t05830 t07775, :jd1123-next-train; XML's ModuleDescriptor$Builder and XSLTC's internal error: t08083
+  t08091 t08093 t08094 t08095 t08096; t05766 compiled, "Bad method name" where it was "Bad class name").
+- diffcheck: the 13 known cases agree; their entry dropped from test/diffcheck/known.edn (`8bcc0d784`, before the merge).
+- diagnostics: t07536 and t07537 pass. read: 60 pass.
+- print, whole: 3,291 pass, 30 differ, 4 fail; t4-print-1125's 24 rows pass; the 33 pass -> non-pass rows are exactly the
+  print agent's lists (the user's 556b-1 (a) stricter judge: 29 in :print-classes-unnamed, 3 in :print-type-arguments, t06125 in
+  :print-pin-casts), recorded on the coordinator's word; no other row left a pass. 140 passing rows' notes changed.
+- Java (bin/reap): read 7,843 / 0 / 1 -> 7,844 / 0 / 0; eval 3,205 / 0 / 51 (69 n/a) -> 3,222 / 0 / 31 (72 n/a); AOT
+  3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
+  --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.

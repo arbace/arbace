@@ -1,0 +1,322 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/org/jcp/xml/dsig/internal/dom/DOMRSAPSSSignatureMethod.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'org.jcp.xml.dsig.internal.dom)
+
+(import '(com.sun.org.apache.xml.internal.security.algorithms.implementations
+           SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm)
+        '(com.sun.org.apache.xml.internal.security.utils Constants XMLUtils)
+        '(com.sun.org.slf4j.internal Logger LoggerFactory)
+        '(java.io IOException)
+        '(java.security InvalidAlgorithmParameterException
+                        InvalidKeyException
+                        Key
+                        NoSuchAlgorithmException
+                        PrivateKey
+                        Provider
+                        PublicKey
+                        SecureRandom
+                        Signature
+                        SignatureException)
+        '(java.security.spec AlgorithmParameterSpec MGF1ParameterSpec PSSParameterSpec)
+        '(javax.xml.crypto MarshalException)
+        '(javax.xml.crypto.dsig DigestMethod
+                                SignedInfo
+                                XMLSignContext
+                                XMLSignature
+                                XMLSignatureException
+                                XMLValidateContext)
+        '(javax.xml.crypto.dsig.spec RSAPSSParameterSpec SignatureMethodParameterSpec)
+        '(org.jcp.xml.dsig.internal SignerOutputStream)
+        '(org.w3c.dom DOMException Element))
+
+(defclass ^:public ^:abstract DOMRSAPSSSignatureMethod
+  :extends AbstractDOMSignatureMethod
+
+  (field ^:private ^:static ^:final ^String DOM_SIGNATURE_PROVIDER
+    "org.jcp.xml.dsig.internal.dom.SignatureProvider")
+
+  (field ^:private ^:static ^:final ^String DOM_SIGNATURE_RANDOM "jdk.xmldsig.SecureRandom")
+
+  (field ^:private ^:static ^:final ^Logger LOG (LoggerFactory/getLogger DOMRSAPSSSignatureMethod))
+
+  (field ^:private ^:final ^SignatureMethodParameterSpec params)
+
+  (field ^:private ^Signature signature)
+
+  (field ^:static ^:final ^String RSA_PSS "http://www.w3.org/2007/05/xmldsig-more#rsa-pss")
+
+  (field ^:private ^:static ^:final ^RSAPSSParameterSpec DEFAULT_PSS_SPEC
+    (RSAPSSParameterSpec.
+      (PSSParameterSpec. "SHA-256"
+                         "MGF1"
+                         (MGF1ParameterSpec. "SHA-256")
+                         32
+                         PSSParameterSpec/TRAILER_FIELD_BC)))
+
+  (field ^:private ^PSSParameterSpec spec)
+
+  (constructor :throws [InvalidAlgorithmParameterException] [this
+                                                             ^:mutable ^AlgorithmParameterSpec params]
+    (when (and (some? params) (not (instance? SignatureMethodParameterSpec params)))
+      (throw (InvalidAlgorithmParameterException.
+               "params must be of type SignatureMethodParameterSpec")))
+    (when (nil? params) (set! params DEFAULT_PSS_SPEC))
+    (.checkParams this (cast SignatureMethodParameterSpec params))
+    (set! (.-params this) (cast SignatureMethodParameterSpec params)))
+
+  (constructor :throws [MarshalException] [this ^Element smElem]
+    (let [paramsElem (DOMUtils/getFirstChildElement smElem)]
+      (if (some? paramsElem)
+          (set! params (.unmarshalParams this paramsElem))
+          (set! params DEFAULT_PSS_SPEC))
+      (try
+        (.checkParams this params)
+        (catch InvalidAlgorithmParameterException iape (throw (MarshalException. iape))))))
+
+  (method checkParams :throws [InvalidAlgorithmParameterException] ^void [this
+                                                                          ^SignatureMethodParameterSpec params]
+    (when-not (instance? RSAPSSParameterSpec params)
+      (throw (InvalidAlgorithmParameterException. "params must be of type RSAPSSParameterSpec")))
+    (set! spec (.getPSSParameterSpec (cast RSAPSSParameterSpec params)))
+    (.debug LOG "Setting RSAPSSParameterSpec to: {}" (new Object/1 [(.toString params)])))
+
+  (method ^:public ^:final getParameterSpec ^AlgorithmParameterSpec [this]
+    params)
+
+  (method marshalParams :throws [MarshalException] ^void [this ^Element parent ^String prefix]
+    (let [ownerDoc (DOMUtils/getOwnerDocument parent)
+          rsaPssParamsElement (.createElementNS ownerDoc
+                                                Constants/XML_DSIG_NS_MORE_07_05
+                                                (java-str "pss:" Constants/_TAG_RSAPSSPARAMS))]
+      (.setAttributeNS rsaPssParamsElement
+                       Constants/NamespaceSpecNS
+                       "xmlns:pss"
+                       Constants/XML_DSIG_NS_MORE_07_05)
+      (let [^:mutable ^SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm digestAlgorithm nil]
+        (try
+          (set! digestAlgorithm
+                (SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/fromDigestAlgorithm
+                  (.getDigestAlgorithm spec)))
+          (let [xmlDigestAlgorithm (.getXmlDigestAlgorithm digestAlgorithm)]
+            (when-not (.equals xmlDigestAlgorithm DigestMethod/SHA256)
+              (let [digestMethodElement (DOMUtils/createElement
+                                          (.getOwnerDocument rsaPssParamsElement)
+                                          Constants/_TAG_DIGESTMETHOD
+                                          XMLSignature/XMLNS
+                                          prefix)]
+                (.setAttributeNS digestMethodElement
+                                 nil
+                                 Constants/_ATT_ALGORITHM
+                                 xmlDigestAlgorithm)
+                (.appendChild rsaPssParamsElement digestMethodElement)))
+            (when-not (== (.getSaltLength spec) (.getSaltLength digestAlgorithm))
+              (let [saltLengthElement (.createElementNS
+                                        (.getOwnerDocument rsaPssParamsElement)
+                                        Constants/XML_DSIG_NS_MORE_07_05
+                                        (java-str "pss:" Constants/_TAG_SALTLENGTH))
+                    saltLengthText (.createTextNode
+                                     (.getOwnerDocument rsaPssParamsElement)
+                                     (String/valueOf (.getSaltLength spec)))]
+                (.appendChild saltLengthElement saltLengthText)
+                (.appendChild rsaPssParamsElement saltLengthElement))))
+          (catch [DOMException
+                  com.sun.org.apache.xml.internal.security.signature.XMLSignatureException] e
+            (throw (MarshalException.
+                     (java-str "Invalid digest name supplied: " (.getDigestAlgorithm spec))))))
+        (when-not (.equals (.getMGFAlgorithm spec) "MGF1")
+          (throw (MarshalException.
+                   (java-str "Unsupported MGF algorithm supplied: " (.getMGFAlgorithm spec)))))
+        (let [mgfSpec (cast MGF1ParameterSpec (.getMGFParameters spec))]
+          (try
+            (let [mgfDigestAlgorithm
+                    (SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/fromDigestAlgorithm
+                      (.getDigestAlgorithm mgfSpec))]
+              (when-not (identical? mgfDigestAlgorithm digestAlgorithm)
+                (let [mgfElement (.createElementNS
+                                   (.getOwnerDocument rsaPssParamsElement)
+                                   Constants/XML_DSIG_NS_MORE_07_05
+                                   (java-str "pss:" Constants/_TAG_MGF))]
+                  (try
+                    (.setAttributeNS mgfElement
+                                     nil
+                                     Constants/_ATT_ALGORITHM
+                                     "http://www.w3.org/2007/05/xmldsig-more#MGF1")
+                    (catch DOMException e (throw (MarshalException. "Should not happen"))))
+                  (let [mgfDigestMethodElement (DOMUtils/createElement
+                                                 (.getOwnerDocument rsaPssParamsElement)
+                                                 Constants/_TAG_DIGESTMETHOD
+                                                 XMLSignature/XMLNS
+                                                 prefix)
+                        xmlDigestAlgorithm (.getXmlDigestAlgorithm mgfDigestAlgorithm)]
+                    (.setAttributeNS mgfDigestMethodElement
+                                     nil
+                                     Constants/_ATT_ALGORITHM
+                                     xmlDigestAlgorithm)
+                    (.appendChild mgfElement mgfDigestMethodElement)
+                    (.appendChild rsaPssParamsElement mgfElement)))))
+            (catch [DOMException
+                    com.sun.org.apache.xml.internal.security.signature.XMLSignatureException] e
+              (throw (MarshalException.
+                       (java-str "Invalid digest name supplied: " (.getDigestAlgorithm mgfSpec))))))
+          (when-not (== (.getTrailerField spec) 1)
+            (let [trailerFieldElement (.createElementNS
+                                        (.getOwnerDocument rsaPssParamsElement)
+                                        Constants/XML_DSIG_NS_MORE_07_05
+                                        (java-str "pss:" Constants/_TAG_TRAILERFIELD))
+                  trailerFieldText (.createTextNode
+                                     (.getOwnerDocument rsaPssParamsElement)
+                                     (String/valueOf (.getTrailerField spec)))]
+              (.appendChild trailerFieldElement trailerFieldText)
+              (.appendChild rsaPssParamsElement trailerFieldElement)))
+          (when (.hasChildNodes rsaPssParamsElement) (.appendChild parent rsaPssParamsElement))))))
+
+  (method ^:private ^:static validateDigestAlgorithm :throws [MarshalException] ^SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm [^String input]
+    (try
+      (SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/fromXmlDigestAlgorithm input)
+      (catch com.sun.org.apache.xml.internal.security.signature.XMLSignatureException e
+        (throw (MarshalException. (java-str "Invalid digest algorithm supplied: " input))))))
+
+  (method unmarshalParams :throws [MarshalException] ^SignatureMethodParameterSpec [this
+                                                                                    ^Element paramsElem]
+    (if (some? paramsElem)
+        (let [saltLengthNode (XMLUtils/selectNode
+                               (.getFirstChild paramsElem)
+                               Constants/XML_DSIG_NS_MORE_07_05
+                               Constants/_TAG_SALTLENGTH
+                               0)
+              trailerFieldNode (XMLUtils/selectNode
+                                 (.getFirstChild paramsElem)
+                                 Constants/XML_DSIG_NS_MORE_07_05
+                                 Constants/_TAG_TRAILERFIELD
+                                 0)
+              digestAlgorithmNode (XMLUtils/selectDsNode
+                                    (.getFirstChild paramsElem)
+                                    Constants/_TAG_DIGESTMETHOD
+                                    0)
+              mgfNode (XMLUtils/selectNode (.getFirstChild paramsElem)
+                                           Constants/XML_DSIG_NS_MORE_07_05
+                                           Constants/_TAG_MGF
+                                           0)
+              ^SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm digestAlgorithm (if (some?
+                                                                                         digestAlgorithmNode)
+                                                                                       (DOMRSAPSSSignatureMethod/validateDigestAlgorithm
+                                                                                         (.getAttribute
+                                                                                           digestAlgorithmNode
+                                                                                           Constants/_ATT_ALGORITHM))
+                                                                                       SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/SHA256)
+              ^:mutable mgfDigestAlgorithm digestAlgorithm]
+          (when (some? mgfNode)
+            (let [mgfAlgorithm (.getAttribute mgfNode Constants/_ATT_ALGORITHM)]
+              (when-not (.equals mgfAlgorithm "http://www.w3.org/2007/05/xmldsig-more#MGF1")
+                (throw (MarshalException. (java-str "Unknown MGF algorithm: " mgfAlgorithm))))
+              (let [mgfDigestAlgorithmNode (XMLUtils/selectDsNode
+                                             (.getFirstChild mgfNode)
+                                             Constants/_TAG_DIGESTMETHOD
+                                             0)]
+                (when (some? mgfDigestAlgorithmNode)
+                  (set! mgfDigestAlgorithm
+                        (DOMRSAPSSSignatureMethod/validateDigestAlgorithm
+                          (.getAttribute mgfDigestAlgorithmNode Constants/_ATT_ALGORITHM)))))))
+          (let [^:mutable ^int saltLength 0]
+            (try
+              (set! saltLength
+                    (if (nil? saltLengthNode)
+                        (.getSaltLength digestAlgorithm)
+                        (Integer/parseUnsignedInt (.getTextContent saltLengthNode))))
+              (catch NumberFormatException ex
+                (throw (MarshalException.
+                         (java-str "Invalid salt length supplied: "
+                                   (.getTextContent saltLengthNode))))))
+            (let [^:mutable ^int trailerField 0]
+              (try
+                (set! trailerField
+                      (if (nil? trailerFieldNode)
+                          1
+                          (Integer/parseUnsignedInt (.getTextContent trailerFieldNode))))
+                (catch NumberFormatException ex
+                  (throw (MarshalException.
+                           (java-str "Invalid trailer field supplied: "
+                                     (.getTextContent trailerFieldNode))))))
+              (RSAPSSParameterSpec.
+                (PSSParameterSpec. (.getDigestAlgorithm digestAlgorithm)
+                                   "MGF1"
+                                   (MGF1ParameterSpec. (.getDigestAlgorithm mgfDigestAlgorithm))
+                                   saltLength
+                                   trailerField)))))
+        DEFAULT_PSS_SPEC))
+
+  (method verify :throws [InvalidKeyException SignatureException XMLSignatureException] ^boolean [this
+                                                                                                  ^Key key
+                                                                                                  ^SignedInfo si
+                                                                                                  ^byte/1 sig
+                                                                                                  ^XMLValidateContext context]
+    (when (or (or (nil? key) (nil? si)) (nil? sig)) (throw (NullPointerException.)))
+    (when-not (instance? PublicKey key) (throw (InvalidKeyException. "key must be PublicKey")))
+    (when (nil? signature)
+      (try
+        (let [p (cast Provider (.getProperty context DOM_SIGNATURE_PROVIDER))]
+          (set! signature
+                (if (nil? p)
+                    (Signature/getInstance (.getJCAAlgorithm this))
+                    (Signature/getInstance (.getJCAAlgorithm this) p))))
+        (catch NoSuchAlgorithmException nsae (throw (XMLSignatureException. nsae)))))
+    (.initVerify signature (cast PublicKey key))
+    (try
+      (.setParameter signature spec)
+      (catch InvalidAlgorithmParameterException e (throw (XMLSignatureException. e))))
+    (.debug LOG "Signature provider: {}" (new Object/1 [(.getProvider signature)]))
+    (.debug LOG "Verifying with key: {}" (new Object/1 [key]))
+    (.debug LOG "JCA Algorithm: {}" (new Object/1 [(.getJCAAlgorithm this)]))
+    (.debug LOG "Signature Bytes length: {}" (new Object/1 [(alength sig)]))
+    (try
+      (with-resources [^:final outputStream (SignerOutputStream. signature)]
+        (.canonicalize (cast DOMSignedInfo si) context outputStream)
+        (.verify signature sig))
+      (catch IOException ioe (throw (XMLSignatureException. ioe)))))
+
+  (method sign :throws [InvalidKeyException XMLSignatureException] ^byte/1 [this ^Key key
+                                                                            ^SignedInfo si
+                                                                            ^XMLSignContext context]
+    (when (or (nil? key) (nil? si)) (throw (NullPointerException.)))
+    (when-not (instance? PrivateKey key) (throw (InvalidKeyException. "key must be PrivateKey")))
+    (when (nil? signature)
+      (try
+        (let [p (cast Provider (.getProperty context DOM_SIGNATURE_PROVIDER))]
+          (set! signature
+                (if (nil? p)
+                    (Signature/getInstance (.getJCAAlgorithm this))
+                    (Signature/getInstance (.getJCAAlgorithm this) p))))
+        (catch NoSuchAlgorithmException nsae (throw (XMLSignatureException. nsae)))))
+    (let [sr (cast SecureRandom (.getProperty context DOM_SIGNATURE_RANDOM))]
+      (if (some? sr)
+          (.initSign signature (cast PrivateKey key) sr)
+          (.initSign signature (cast PrivateKey key)))
+      (try
+        (.setParameter signature spec)
+        (catch InvalidAlgorithmParameterException e (throw (XMLSignatureException. e))))
+      (.debug LOG "Signature provider: {}" (new Object/1 [(.getProvider signature)]))
+      (.debug LOG "JCA Algorithm: {}" (new Object/1 [(.getJCAAlgorithm this)]))
+      (try
+        (with-resources [^:final outputStream (SignerOutputStream. signature)]
+          (.canonicalize (cast DOMSignedInfo si) context outputStream)
+          (.sign signature))
+        (catch [SignatureException IOException] e (throw (XMLSignatureException. e))))))
+
+  (method paramsEqual ^boolean [this ^AlgorithmParameterSpec spec]
+    (.equals (.getParameterSpec this) spec))
+
+  (defclass ^:static ^:final RSAPSS
+    :extends DOMRSAPSSSignatureMethod
+
+    (constructor :throws [InvalidAlgorithmParameterException] [this ^AlgorithmParameterSpec params]
+      (super. params))
+
+    (constructor :throws [MarshalException] [this ^Element dmElem]
+      (super. dmElem))
+
+    (method ^:public getAlgorithm ^String [this] RSAPSS/RSA_PSS)
+
+    (method getJCAAlgorithm ^String [this] "RSASSA-PSS")
+
+    (method getAlgorithmType ^AbstractDOMSignatureMethod$Type [this]
+      AbstractDOMSignatureMethod$Type/RSA)))

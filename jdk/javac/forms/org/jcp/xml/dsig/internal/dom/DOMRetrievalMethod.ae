@@ -1,0 +1,174 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/org/jcp/xml/dsig/internal/dom/DOMRetrievalMethod.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'org.jcp.xml.dsig.internal.dom)
+
+(import '(com.sun.org.apache.xml.internal.security.utils XMLUtils)
+        '(java.io ByteArrayInputStream InputStream)
+        '(java.net URI URISyntaxException)
+        '(java.security Provider)
+        '(java.util ArrayList Collections Iterator List)
+        '(javax.xml.crypto Data
+                           MarshalException
+                           NodeSetData
+                           URIReferenceException
+                           XMLCryptoContext
+                           XMLStructure)
+        '(javax.xml.crypto.dom DOMCryptoContext DOMURIReference)
+        '(javax.xml.crypto.dsig Transform XMLSignature)
+        '(javax.xml.crypto.dsig.keyinfo RetrievalMethod)
+        '(org.w3c.dom Attr Element Node))
+
+(defclass ^:public ^:final DOMRetrievalMethod
+  :extends DOMStructure
+  :implements [RetrievalMethod DOMURIReference]
+
+  (field ^:private ^:final ^{:tag (List Transform)} transforms)
+
+  (field ^:private ^String uri)
+
+  (field ^:private ^String type)
+
+  (field ^:private ^Attr here)
+
+  (constructor ^:public [this ^String uri ^String type
+                         ^{:tag (List (? extends Transform))} transforms]
+    (when (nil? uri) (throw (NullPointerException. "uri cannot be null")))
+    (if (or (nil? transforms) (.isEmpty transforms))
+        (set! (.-transforms this) (Collections/emptyList))
+        (do
+          (set! (.-transforms this) (Collections/unmodifiableList (ArrayList. transforms)))
+          (loop [^int i 0
+                 ^int size (.size (.-transforms this))]
+            (if (< i size)
+                (if (not (instance? Transform (.get (.-transforms this) i)))
+                    (throw (ClassCastException. (java-str "transforms[" i "] is not a valid type")))
+                    (recur (unchecked-inc-int i) size))
+                nil))))
+    (set! (.-uri this) uri)
+    (when-not (.isEmpty uri)
+      (try
+        (URI. uri)
+        (catch URISyntaxException e (throw (IllegalArgumentException. (.getMessage e))))))
+    (set! (.-type this) type))
+
+  (constructor :throws [MarshalException] ^:public [this ^Element rmElem ^XMLCryptoContext context
+                                                    ^Provider provider]
+    (set! uri (DOMUtils/getAttributeValue rmElem "URI"))
+    (set! type (DOMUtils/getAttributeValue rmElem "Type"))
+    (set! here (.getAttributeNodeNS rmElem nil "URI"))
+    (let [secVal (Utils/secureValidation context)
+          ^{:tag (List Transform)} newTransforms (ArrayList.)
+          transformsElem (DOMUtils/getFirstChildElement rmElem)]
+      (when (some? transformsElem)
+        (let [localName (.getLocalName transformsElem)
+              ^:mutable namespace (.getNamespaceURI transformsElem)]
+          (when (or (not (.equals "Transforms" localName))
+                    (not (.equals XMLSignature/XMLNS namespace)))
+            (throw (MarshalException.
+                     (java-str "Invalid element name: "
+                               namespace
+                               ":"
+                               localName
+                               ", expected Transforms"))))
+          (let [^:mutable transformElem (DOMUtils/getFirstChildElement
+                                          transformsElem
+                                          "Transform"
+                                          XMLSignature/XMLNS)]
+            (while (some? transformElem)
+              (let [name (.getLocalName transformElem)]
+                (set! namespace (.getNamespaceURI transformElem))
+                (when (or (not (.equals "Transform" name))
+                          (not (.equals XMLSignature/XMLNS namespace)))
+                  (throw (MarshalException.
+                           (java-str "Invalid element name: " name ", expected Transform"))))
+                (.add newTransforms (DOMTransform. transformElem context provider))
+                (when (and secVal (Policy/restrictNumTransforms (.size newTransforms)))
+                  (let [error (java-str
+                                "A maximum of "
+                                (Policy/maxTransforms)
+                                " transforms per Reference are allowed when secure validation is enabled")]
+                    (throw (MarshalException. error))))
+                (set! transformElem (DOMUtils/getNextSiblingElement transformElem)))))))
+      (if (.isEmpty newTransforms)
+          (set! (.-transforms this) (Collections/emptyList))
+          (set! (.-transforms this) (Collections/unmodifiableList newTransforms)))))
+
+  (method ^:public getURI ^String [this] uri)
+
+  (method ^:public getType ^String [this] type)
+
+  (method ^:public getTransforms ^{:tag (List Transform)} [this]
+    transforms)
+
+  (method ^:public marshal :throws [MarshalException] ^void [this ^Node parent ^String dsPrefix
+                                                             ^DOMCryptoContext context]
+    (let [ownerDoc (DOMUtils/getOwnerDocument parent)
+          rmElem (DOMUtils/createElement ownerDoc "RetrievalMethod" XMLSignature/XMLNS dsPrefix)]
+      (DOMUtils/setAttribute rmElem "URI" uri)
+      (DOMUtils/setAttribute rmElem "Type" type)
+      (when-not (.isEmpty transforms)
+        (let [transformsElem (DOMUtils/createElement
+                               ownerDoc
+                               "Transforms"
+                               XMLSignature/XMLNS
+                               dsPrefix)]
+          (.appendChild rmElem transformsElem)
+          (for-each [^Transform transform transforms]
+            (.marshal (cast DOMTransform transform) transformsElem dsPrefix context))))
+      (.appendChild parent rmElem)
+      (set! here (.getAttributeNodeNS rmElem nil "URI"))))
+
+  (method ^:public getHere ^Node [this] here)
+
+  (method ^:public dereference :throws [URIReferenceException] ^Data [this ^XMLCryptoContext context]
+    (when (nil? context) (throw (NullPointerException. "context cannot be null")))
+    (let [^:mutable deref (.getURIDereferencer context)]
+      (when (nil? deref) (set! deref DOMURIDereferencer/INSTANCE))
+      (let [^:mutable data (.dereference deref this context)]
+        (try
+          (for-each [^Transform transform transforms]
+            (set! data (.transform (cast DOMTransform transform) data context)))
+          (catch Exception e (throw (URIReferenceException. e))))
+        (when (and (and (instance? NodeSetData data) (Utils/secureValidation context))
+                   (Policy/restrictRetrievalMethodLoops))
+          (let [^{:tag (NodeSetData ?)} nsd (cast NodeSetData data)
+                ^{:tag (Iterator ?)} i (.iterator nsd)]
+            (when (.hasNext i)
+              (let [root (cast Node (.next i))]
+                (when (.equals "RetrievalMethod" (.getLocalName root))
+                  (throw
+                    (URIReferenceException.
+                      "It is forbidden to have one RetrievalMethod point to another when secure validation is enabled")))))))
+        data)))
+
+  (method ^:public dereferenceAsXMLStructure :throws [URIReferenceException] ^XMLStructure [this
+                                                                                            ^XMLCryptoContext context]
+    (let [secVal (Utils/secureValidation context)
+          data (cast ApacheData (.dereference this context))]
+      (try
+        (with-resources [^:final ^InputStream is (ByteArrayInputStream.
+                                                   (.getBytes (.getXMLSignatureInput data)))]
+          (let [doc (XMLUtils/read is secVal)
+                kiElem (.getDocumentElement doc)]
+            (when (and (.equals "X509Data" (.getLocalName kiElem))
+                       (.equals XMLSignature/XMLNS (.getNamespaceURI kiElem)))
+              (DOMX509Data. kiElem))))
+        (catch Exception e (throw (URIReferenceException. e))))))
+
+  (method ^:public equals ^boolean [this obj]
+    (cond
+      (identical? this obj) true
+      (not (instance? RetrievalMethod obj)) false
+      :else
+        (let [orm (cast RetrievalMethod obj)
+              typesEqual (if (nil? type) (nil? (.getType orm)) (.equals type (.getType orm)))]
+          (and (and (.equals uri (.getURI orm)) (.equals transforms (.getTransforms orm)))
+               typesEqual))))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable ^int result 17]
+      (when (some? type)
+        (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode type))))
+      (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode uri)))
+      (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode transforms)))
+      result)))

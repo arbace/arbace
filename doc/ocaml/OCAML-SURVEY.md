@@ -5268,3 +5268,53 @@ The lane's rows (test/ocaml/divergences-aot.edn, divergences-suite-aot.edn): `:l
   lib-dynlink-bytecode/main), their entries out of aot-known.edn and the classes' `:programs`. regression/pr3612 timed out (its million
   deserializations through the server): 203 s of CPU alone with mac/next's runtime and translator as with these (an A/B), so its row is
   left as recorded. OCaml AOT 547 / 11 / 51 -> 558 / 11 / 40 (67 n/a).
+
+## As built: queue 603 (2026-11-26, branch `603-ocaml-light-tail2`, from next `e8e2c1ac3`): the light AOT level's tail after oc-tail
+
+oc-tail's leftover rows of the light level that are not its speed, each probed alone on stage 0.
+
+- **The frames' result slots** (arbace/o2j.ae's `value-then`). Stage 0's Java forms interpreter (the seed of 2026-11-17 04:15) gives
+  every let binding a slot of its own for the frame's lifetime: the interpreter that releases a let's slots after its body
+  (arbace/classes/interp.ae's `release!`, n-java-serial, 2026-11-17 22:28) is later than stage 0's, so oc-tail's `scoped` and the
+  slots' clears (`around-slot`, `apply-ev-node`) still bound the value they carried past the clears to a local, `r$`, which kept it
+  reachable until the frame returned. At the light level the value now goes through a two-element array, `(aget (new Object/1 [f
+  (do clears... nil)]) 0)`, no slot's; the compiled level (*in-ns*) keeps the local (Go's liveness drops it). weak-ephe-final/
+  ephetest's test7 (the ephemeron K1.make returned, held by its call's `r$` after the program dropped it), statmemprof/bigarray (its
+  dealloc callbacks a collection late: the argument's call result) and the suite's statmemprof/exception_comballoc pass with it.
+  Alternative: a runtime helper returning its first argument (an interpreted call a use, the frame queue 414 removed).
+- **Combined allocations** (o2j's `comb-tree?`, jdk/ocaml's `ExtGc/combBegin`, `combEnd`). ocamlopt allocates a tree of blocks of
+  simple fields as one combined allocation, and memprof.c runs its samples' callbacks after it: a callback that stops or replaces the
+  profile leaves the rest of the tree's samples without theirs. At the light level a tree of makeblocks (the outermost alone, its form
+  written twice) runs, while a profile samples, between combBegin and combEnd: its blocks' callbacks queue as they are made and run at
+  combEnd (memprofAlloc runs none while combDepth is above 0). statmemprof/stop_start_in_callback (11 allocations, 50 words with a
+  restart, as ocamlopt's) passes; exception_comballoc still passes (a callback's exception raised at combEnd, the tree's blocks dead).
+- **A call's arguments written once** (o2j's `call-form`, `holds-call?`). call-form writes the arguments in both branches of its
+  arity test (`.aN` or Rt/ap); with-args evaluates the leftmost argument that is not simple in place, so a call nested in an argument
+  doubled at each level: unboxed-primitive-args' GADT values (`Float ** Int32 ** ...`, 36 applications of `Common.( ** )` deep) made
+  2^36 forms, o2j past 14 GB on 4.7 KB of Lambda (the 7.6 GB, then 45 GB at the compiled level, of the burst of 2026-11-23). An
+  argument that holds a call is now bound first (the function form is simple then, so the order is as before) and, at the light level,
+  read and cleared as it is passed (`take-form`, `(aget (new Object/1 [a (set! a nil)]) 0)`: cleared after the call, the local held
+  statmemprof/bigarray's bigstring through test's full_major): main.ml's 600 KB of Lambda translates in 2 s and 0.5 GB. The row runs
+  and fails on the C API: its stubs write the results into the C's buffers (test_set_buffers' Caml_ba_data_val of two bigarrays), the
+  C API server's copies of the runtime's bigarrays, never read back (aot-known.edn's c-api entry; it was the class's by its header). header.awk's gen mode runs at the light level (aot 1);
+  the compiled level's (aot 2) stays behind `gnon` until the host's compiled chain measures it.
+- **Exit in another thread** (jdk/ocaml's `Main/otherExit`, test/ocaml/o2j/run.ae). parallel/mctest's fourth worker calls `exit 0`
+  from a fiber the second domain resumed: the Exit reached the domain's thread, whose spawn made it the domain's Error result, and the
+  main domain went on waiting for work (the "stall": a reduced mctest, 300 yields a worker, printed its four `done` and never ended).
+  A domain's thread (Effects/spawn) and a system thread's (ExtThread, which called System/exit itself) now end the program with the
+  status (System/exit; in the batch runner, `Main/batch`, the status is the program's row and the batch process ends after it, status 4,
+  as with domains still running).
+- **parallel/mctest left: DECISION 603-1.** With the exit and the frames fixed mctest runs fast enough to reach DEPTH_LIMIT (200,000
+  OCaml calls) in 39 s: every yield deepens its handler's stack by about five calls (the light level makes no tail call but a self
+  loop's, so `dequeue`'s `continue k ()` keeps the frame ocamlopt drops), 40,000 yields. With O2J_DEPTH_LIMIT=1000000 it passes, 206 s
+  of CPU alone; when the two domains share the yields evenly no thread reaches the limit and it runs past the 120 s CPU limit (the
+  record's run). Its known entry takes both (`["status " "timeout "]`). DECISION 603-1 (the user's): (a) at the light level a larger
+  DEPTH_LIMIT clip (1,000,000) with mctest's CPU cap 310 s by the 1.5x rule, the Stack_overflow rows measured at the next whole run;
+  (b) the row stays `:light-depth`; (c) tail calls at the light level (a call in tail position made by the caller's caller), the
+  general fix, a larger piece of work.
+- **Records**: one `bin/oi check --aot --only-list` run of the lane's main-corpus rows and 27 recorded passes of the same modules (the
+  oc-tail rows, statmemprof's and weak-ephe-final's that finish within the limit), and `suite check --aot --only-list` over the suite's
+  statmemprof rows, both `--record`: weak-ephe-final/ephetest, statmemprof/bigarray, statmemprof/exception_comballoc and
+  stop_start_in_callback pass, and discard_in_callback (`:na`'s by 2026-11-24's decision: ocamlopt's combined allocations, which the
+  light level now runs) passes too, its known entry gone; unboxed-primitive-args/test runs (`:c-api`, as before by its header). OCaml
+  AOT 558 / 11 / 40 -> 563 / 11 / 36 (66 n/a); completeness 98.07%.

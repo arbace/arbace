@@ -192,7 +192,9 @@
 (def ^:private gcc-only-builtins
   "cpp-gnu (2026-11-22): GCC's builtins clang's table does not hold (the GCC 15.2 manual's \"Constructing Function Calls\":
   __builtin_va_arg_pack, __builtin_va_arg_pack_len), never undeclared."
-  #{"__builtin_va_arg_pack" "__builtin_va_arg_pack_len" "__integer_pack"})
+  ;; (queue 601: and P0466R5's two, arbace.cpp.sema's value builtins, their own checks there)
+  #{"__builtin_va_arg_pack" "__builtin_va_arg_pack_len" "__integer_pack"
+    "__builtin_is_pointer_interconvertible_with_class" "__builtin_is_corresponding_member"})
 
 (defn- dunder-ok?
   "Whether the unqualified name `nm` no lookup found may be undeclared: any name not starting with __; a __ name only when
@@ -313,7 +315,9 @@
   "A declaration's class for the redeclaration rules: [cls def? sig] or nil (not a name this check follows)."
   [n]
   (case (:kind n)
-    "VarDecl" [:var (or (not= "extern" (:storageClass n)) (contains? n :init)) nil]
+    ;; (queue 601: not a block's `X y;` whose X names nothing, parse.ae's :_undecltype: GCC reads it as an expression, y declared
+    ;; by nothing, so a later `char y[2];` is no redefinition; spellcheck-stdlib.C)
+    "VarDecl" (when-not (:_undecltype n) [:var (or (not= "extern" (:storageClass n)) (contains? n :init)) nil])
     ("FunctionDecl" "CXXMethodDecl" "CXXConstructorDecl" "CXXDestructorDecl" "CXXConversionDecl")
     [:fn (fn-def? n) (strip-noexcept (get-in n [:type :qualType]))]
     "FieldDecl" [:field true nil]
@@ -925,6 +929,16 @@
                   ;; (cpp-def: a node a macro of the main file expands, GCC's error at the expansion: cpp0x/constexpr-arith-overflow2.C's
                   ;; `Assert (...)`, a static_assert by a macro; for the constant evaluation's errors alone, the evaluator's sure
                   ;; judgments, the checker's other rules over macro-made code left as they were: cpp0x/decltype3.C)
+                  ;; (queue 601 (group 5): a node a macro of the main file wrote, its first token spelled in the main file -- the
+                  ;; macro's #define, or the use for an argument's token: GCC's location, its default -ftrack-macro-expansion=2
+                  ;; (init/pr43064-2.C's `#define NULL ((void *)0)` in `m_int(NULL)`))
+                  ;; (not the constant evaluation's nor a static assertion's, which GCC gives at the expansion: the rule below,
+                  ;; cpp0x/constexpr-arith-overflow2.C, cpp0x/decltype3.C)
+                  n (if (and (nil? (get-in n [:range :begin :offset])) (get-in n [:range :begin :spellingLoc :_main])
+                             (not (#{:constexpr :sassert} cls))
+                             (= main (get-in n [:range :begin :expansionLoc :file])))
+                      (assoc-in n [:range :begin] {:offset (get-in n [:range :begin :spellingLoc :_main]) :file main})
+                      n)
                   n (if (and (nil? (get-in n [:range :begin :offset])) (get-in n [:range :begin :expansionLoc :offset])
                              (or (= :constexpr cls) (and (= :sassert cls) (str/starts-with? m "codegen: non-constant condition")))
                              (= main (get-in n [:range :begin :expansionLoc :file])))
@@ -1597,6 +1611,9 @@
 
 ;; (round 54, fifth pass) the standard's year exc-class reads, bound by exception-specs
 (def ^:dynamic *exc-year* nil)
+;; (queue 602) the unit's functions by name, each the class of its own exception specification when all of that name agree and
+;; take no parameter: a noexcept-specifier `noexcept(noexcept(f()))` of one is that class ([expr.unary.noexcept]/3, [except.spec]/5)
+(def ^:dynamic *exc-fns* nil)
 
 (defn- exc-class
   "An exception specification's class: :none (potentially-throwing), :nothrow, [:dep expr] (a dependent noexcept-specifier,
@@ -1606,6 +1623,9 @@
         (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
         (= "noexcept(false)" exc) :nfalse
         (and (str/starts-with? exc "noexcept(") (str/includes? exc "@tp")) [:dep exc]
+        ;; (queue 602: noexcept(noexcept(f())) of a function f of the unit, the class of f's own specification: cpp0x/noexcept47.C)
+        (and *exc-fns* (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc))
+        (get *exc-fns* (second (re-matches #"noexcept\(noexcept\(([A-Za-z_][A-Za-z_0-9]*)\(\)\)\)" exc)))
         ;; (round 54, fifth pass: before C++17 a dynamic exception specification, its set of types)
         (and *exc-year* (< (long *exc-year*) 17) (re-matches #"throw\((.+)\)" exc))
         {:dyn (set (map str/trim (str/split (second (re-matches #"throw\((.+)\)" exc)) #",")))}
@@ -1636,7 +1656,20 @@
 (defn exception-specs
   "The exception specifications' checks of the unit `u` (see above)."
   [u starts ^String src ^String main]
-  (binding [*exc-year* (cxx-year (:std u))]
+  (binding [*exc-year* (cxx-year (:std u))
+            *exc-fns* (let [acc (java.util.HashMap.)]
+                        (walk-nodes (fn [n _]
+                                      (when (and (#{"FunctionDecl" "CXXMethodDecl"} (:kind n)) (string? (:name n)) (seq (:name n)))
+                                        (let [qt (str (get-in n [:type :qualType]))
+                                              [sig exc] (split-exc qt)
+                                              c (if (re-find #"\(\s*(void)?\s*\)" sig)
+                                                  (cond (nil? exc) :none
+                                                        (#{"noexcept" "noexcept(true)" "throw()"} exc) :nothrow
+                                                        :else ::unknown)
+                                                  ::unknown)]
+                                          (.put acc (:name n) (conj (or (.get acc (:name n)) #{}) c)))))
+                                    (:nodes u) nil)
+                        (into {} (for [[k cs] acc :when (and (= 1 (count cs)) (not= ::unknown (first cs)))] [k (first cs)])))]
   (let [out (java.util.ArrayList.)
         decls (java.util.HashMap.)
         heads (java.util.HashMap.)
@@ -2347,6 +2380,22 @@
                (when (map? x)
                  (let [k (:kind x)
                        here (or at x)]
+                   ;; (queue 601: [temp.variadic]/5 with [expr.prim.lambda.capture]/? -- a lambda's simple-capture `x...` is a pack
+                   ;; expansion within the lambda, the captured entities a pack of its own the lambda's body expands; the body's
+                   ;; unexpanded `x` is no element of an enclosing expansion's pattern: GCC's "parameter packs not expanded with
+                   ;; '...'", at the lambda's full expression; cpp0x/lambda/lambda-variadic11.C's `foo([x...] { return x; }...)`)
+                   (when (and (= "PackExpansionExpr" k) (mine? x))
+                     (walk-nodes (fn [y par]
+                                   (when (and (= "LambdaExpr" (:kind y)) (mine? y))
+                                     (when-let [o (off-of y)]
+                                       (let [lb (.indexOf src "[" (int o)) rb (when (>= lb 0) (.indexOf src "]" (int lb)))]
+                                         (when (and (>= lb 0) rb (< (- (long rb) (long lb)) 200))
+                                           (let [caps (set (map second (re-seq #"(?:^|[\[,]\s*)&?\s*([A-Za-z_][A-Za-z_0-9]*)\s*\.\.\.\s*(?=[,\]])"
+                                                                               (subs src (int lb) (inc (int rb))))))]
+                                             (when (seq caps)
+                                               (doseq [z (:inner y) :when (and (map? z) (= "CompoundStmt" (:kind z)))]
+                                                 (walk z caps (lam-at y par) y)))))))))
+                                 (:inner x) x))
                    (when-not (and (pack-expanders k) (not (and (= "CXXCtorInitializer" k) (ctor-init-unexpanded? x))))
                      (let [;; a template head's parameters: its packs added, a non-pack of the same name hiding an outer pack
                            ps (filter #(tparam-kinds (:kind %)) (when (vector? (:inner x)) (:inner x)))
@@ -3531,7 +3580,23 @@
                               :when (and c e (reg-only? (str c)))
                               :let [t (type-of e) r (when t (cls-of t))]
                               :when (and r (memory-class? r))]
-                        (report! x "impossible constraint in 'asm'"))))
+                        (report! x "impossible constraint in 'asm'"))
+                      ;; (queue 602: the GCC manual's "x86 Floating-Point asm Operands": an output operand names the x87 stack
+                      ;; register it is in after the asm, so `=f` or `+f`, a class of several registers, is GCC's "output
+                      ;; constraint N must specify a single register": ext/pr84683.C, pr84828.C, pr106877.C)
+                      (doseq [[i [_ c]] (map-indexed vector (:outputs a))
+                              :when (and c (str/includes? (str/replace (str c) #"[\"=+&%*#!?]" "") "f"))]
+                        (report! x (str "output constraint " i " must specify a single register")))
+                      ;; (queue 602: the manual's "Output Operands", an output operand is a modifiable lvalue: a variable or
+                      ;; parameter of a const-qualified type that is no pointer or reference is GCC's "read-only variable 'i' used
+                      ;; as 'asm' output", ext/asm7.C)
+                      (doseq [[_ e] (map vector (:outputs a) (:inner x))
+                              :let [e (when (map? e) (strip e))
+                                    nm (when (= "DeclRefExpr" (:kind e)) (get-in e [:referencedDecl :name]))
+                                    d (when nm (or (get vars nm) (get globals nm)))
+                                    t (some-> d (get-in [:type :qualType]) str str/trim)]
+                              :when (and t (or (re-find #"^const\b|\bconst$" t) (:_const d)) (not (re-find #"[*&\[]" t)))]
+                        (report! x (str "read-only " (if (= "ParmVarDecl" (:kind d)) "parameter" "variable") " '" nm "' used as 'asm' output")))))
                   (when (and (= "UnaryOperator" k) (= "&" (:opcode x)))
                     (let [e (strip (first (:inner x)))]
                       (when (= "DeclRefExpr" (:kind e))
@@ -6085,7 +6150,11 @@
                       (let [e (first (filter map? (:inner n)))]
                         (when (and (#{"BinaryOperator" "ParenExpr" "ConditionalOperator" "UnaryOperator"} (:kind e))
                                    (not (and (= "ParenExpr" (:kind e)) (= "IntegerLiteral" (:kind (first (:inner e))))))
-                                   (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true)))
+                                   (try (some? (ce-eval e)) (catch arbace.lang.ExceptionInfo _ true))
+                                   ;; (queue 602: a conditional both of whose arms are integral constants; one of class type
+                                   ;; makes the result its conversion's pointer, [expr.cond]/6, conversion/op8.C's `1 ? 0 : a`)
+                                   (or (not= "ConditionalOperator" (:kind e))
+                                       (every? #(try (some? (ce-eval %)) (catch arbace.lang.ExceptionInfo _ true)) (rest (filter map? (:inner e))))))
                           (add! n "invalid conversion from 'int' to a pointer type")))))
                   (:nodes u) nil))
     ;; (cpp-read, 2026-11-24: C++98's [expr.const]/1, an integral constant expression uses no function call and no comma operator,
@@ -8678,9 +8747,33 @@
        ;; (cpp-singles: the notes too, for the dg-errors' later branches, arbace.repr.cpp.dg/read-own's alt-hits)
        :notes (mapv #(format-diag main %) (filter #(= :note (:kind %)) (:diags r)))})))
 
+;; queue 602 (2026-11-26): a lambda's simple-capture `this` where no `this` is ([expr.prim.lambda.capture]/3, arbace.cpp.sema's
+;; lambda-expr): GCC's "invalid use of 'this' in non-member function"
+(alter-var-root #'sema-rules conj
+  [:this #"^codegen: invalid use of 'this' in non-member function" "invalid use of 'this' in non-member function"]
+  ;; ([dcl.init.ref]/5.1: a non-const lvalue reference binds no bit-field, arbace.cpp.sema's init-for)
+  [:init #"^codegen: cannot bind bit-field" "cannot bind bit-field"]
+  ;; ([dcl.init.ref]/5.4.4: an rvalue reference binds no lvalue of a reference-related type, arbace.cpp.sema's init-for)
+  [:init #"^codegen: cannot bind rvalue reference to an lvalue$" "cannot bind rvalue reference to an lvalue"]
+  ;; ([dcl.spec.auto.general]/9: an `auto` return type deduced differently by two return statements, arbace.cpp.sema's ReturnStmt)
+  [:deduce #"^codegen: inconsistent deduction for auto return type$" "inconsistent deduction for auto return type"]
+  ;; ([namespace.udecl]/11: a using-declaration's function and the scope's own of one parameter-type-list, arbace.cpp.sema's
+  ;; UsingDecl and declare-fn!)
+  [:redecl #"^codegen: '.*' conflicts with a previous declaration \(a using-declaration" "conflicts with a previous declaration"]
+  ;; (a variable template's name without its arguments, arbace.cpp.template's var-template)
+  [:template #"^codegen: missing template arguments after the variable template" "missing template arguments"]
+  ;; ([expr.call]/7: a call through a pointer to function of more arguments than parameters, arbace.cpp.sema's analyze-call)
+  [:call #"^codegen: too many arguments \(a call through a pointer to function\)" "too many arguments to function"]
+  ;; ([dcl.fct.def.default]/2 before C++20: a defaulted copy constructor of the wrong parameter type, arbace.cpp.sema's finish-class)
+  [:defaulted #"^codegen: '.*' is implicitly deleted because its declared type does not match" "is implicitly deleted because its declared type does not match"])
+
 ;; cpp-tpl (2026-11-23): the checker's refusals of templates' instantiations ([temp.res.general]/3, [temp.inst])
 (alter-var-root #'sema-rules conj
   [:name #"^codegen: '.*' is not a class, struct, or union type" "is not a class, struct, or union type"])
+
+;; queue 601: P0466R5's builtins' own checks (arbace.cpp.sema's :ptm-interconv, :ptm-corresponding), GCC's words
+(alter-var-root #'sema-rules conj
+  [:call #"^codegen: '__builtin_is_(?:pointer_interconvertible_with_class|corresponding_member)' (?:needs|argument is not)" "P0466R5 builtin's arguments"])
 
 ;; cpp-1123 (2026-11-23): the checker's objects of abstract class types ([class.abstract]/3, arbace.cpp.sema/cx-abstract!)
 (alter-var-root #'sema-rules conj

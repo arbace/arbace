@@ -1,0 +1,205 @@
+;; Converted from jdk26u src/java.xml.crypto/share/classes/org/jcp/xml/dsig/internal/dom/DOMSignedInfo.java by arbace.repr.java. Regenerate rather than edit.
+
+(in-ns 'org.jcp.xml.dsig.internal.dom)
+
+(import '(com.sun.org.apache.xml.internal.security.algorithms.implementations
+           SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm)
+        '(com.sun.org.apache.xml.internal.security.utils UnsyncBufferedOutputStream XMLUtils)
+        '(com.sun.org.slf4j.internal Logger LoggerFactory)
+        '(java.io ByteArrayInputStream ByteArrayOutputStream IOException InputStream OutputStream)
+        '(java.security Provider)
+        '(java.security.spec MGF1ParameterSpec)
+        '(java.util ArrayList Collections List)
+        '(javax.xml.crypto MarshalException XMLCryptoContext)
+        '(javax.xml.crypto.dom DOMCryptoContext)
+        '(javax.xml.crypto.dsig CanonicalizationMethod
+                                Reference
+                                SignatureMethod
+                                SignedInfo
+                                TransformException
+                                XMLSignature
+                                XMLSignatureException)
+        '(javax.xml.crypto.dsig.spec RSAPSSParameterSpec)
+        '(org.w3c.dom Document Element Node))
+
+(defclass ^:public ^:final DOMSignedInfo
+  :extends DOMStructure
+  :implements [SignedInfo]
+
+  (field ^:private ^:static ^:final ^Logger LOG (LoggerFactory/getLogger DOMSignedInfo))
+
+  (field ^:private ^:final ^{:tag (List Reference)} references)
+
+  (field ^:private ^:final ^CanonicalizationMethod canonicalizationMethod)
+
+  (field ^:private ^:final ^SignatureMethod signatureMethod)
+
+  (field ^:private ^String id)
+
+  (field ^:private ^Document ownerDoc)
+
+  (field ^:private ^Element localSiElem)
+
+  (field ^:private ^InputStream canonData)
+
+  (constructor ^:public [this ^CanonicalizationMethod cm ^SignatureMethod sm
+                         ^{:tag (List (? extends Reference))} references]
+    (when (or (or (nil? cm) (nil? sm)) (nil? references)) (throw (NullPointerException.)))
+    (set! (.-canonicalizationMethod this) cm)
+    (set! (.-signatureMethod this) sm)
+    (set! (.-references this) (Collections/unmodifiableList (ArrayList. references)))
+    (when (.isEmpty (.-references this))
+      (throw (IllegalArgumentException. "list of references must contain at least one entry")))
+    (for-each [obj (.-references this)]
+      (when-not (instance? Reference obj)
+        (throw (ClassCastException.
+                 (java-str "list of references contains an illegal " (.getClass obj)))))))
+
+  (constructor ^:public [this ^CanonicalizationMethod cm ^SignatureMethod sm
+                         ^{:tag (List (? extends Reference))} references ^String id]
+    (this. cm sm references)
+    (set! (.-id this) id))
+
+  (constructor :throws [MarshalException] ^:public [this ^Element siElem ^XMLCryptoContext context
+                                                    ^Provider provider]
+    (set! localSiElem siElem)
+    (set! ownerDoc (.getOwnerDocument siElem))
+    (set! id (DOMUtils/getAttributeValue siElem "Id"))
+    (let [cmElem (DOMUtils/getFirstChildElement siElem "CanonicalizationMethod" XMLSignature/XMLNS)]
+      (set! canonicalizationMethod (DOMCanonicalizationMethod. cmElem context provider))
+      (let [smElem (DOMUtils/getNextSiblingElement cmElem "SignatureMethod" XMLSignature/XMLNS)]
+        (set! signatureMethod (DOMSignatureMethod/unmarshal smElem))
+        (let [secVal (Utils/secureValidation context)
+              signatureMethodAlgorithm (.getAlgorithm signatureMethod)]
+          (when (and secVal (Policy/restrictAlg signatureMethodAlgorithm))
+            (throw (MarshalException.
+                     (java-str "It is forbidden to use algorithm "
+                               signatureMethodAlgorithm
+                               " when secure validation is enabled"))))
+          (when (and secVal (instance? DOMRSAPSSSignatureMethod$RSAPSS signatureMethod))
+            (let [spec (.getParameterSpec signatureMethod)]
+              (when (instance? RSAPSSParameterSpec spec)
+                (try
+                  (let [pspec (.getPSSParameterSpec (cast RSAPSSParameterSpec spec))
+                        da (.getXmlDigestAlgorithm
+                             (SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/fromDigestAlgorithm
+                               (.getDigestAlgorithm pspec)))]
+                    (when (Policy/restrictAlg da)
+                      (throw (MarshalException.
+                               (java-str "It is forbidden to use algorithm "
+                                         da
+                                         " in PSS when secure validation is enabled"))))
+                    (let [mspec (.getMGFParameters pspec)]
+                      (when (instance? MGF1ParameterSpec mspec)
+                        (let [da2 (.getXmlDigestAlgorithm
+                                    (SignatureBaseRSA$SignatureRSASSAPSS$DigestAlgorithm/fromDigestAlgorithm
+                                      (.getDigestAlgorithm (cast MGF1ParameterSpec mspec))))]
+                          (when (Policy/restrictAlg da2)
+                            (throw (MarshalException.
+                                     (java-str "It is forbidden to use algorithm "
+                                               da2
+                                               " in MGF1 when secure validation is enabled"))))))))
+                  (catch com.sun.org.apache.xml.internal.security.signature.XMLSignatureException e)))))
+          (let [^{:tag (ArrayList Reference)} refList (ArrayList. 5)
+                ^:mutable refElem (DOMUtils/getNextSiblingElement
+                                    smElem
+                                    "Reference"
+                                    XMLSignature/XMLNS)]
+            (.add refList (DOMReference. refElem context provider))
+            (set! refElem (DOMUtils/getNextSiblingElement refElem))
+            (while (some? refElem)
+              (let [name (.getLocalName refElem)
+                    namespace (.getNamespaceURI refElem)]
+                (when (or (not (.equals "Reference" name))
+                          (not (.equals XMLSignature/XMLNS namespace)))
+                  (throw (MarshalException.
+                           (java-str "Invalid element name: "
+                                     namespace
+                                     ":"
+                                     name
+                                     ", expected Reference"))))
+                (.add refList (DOMReference. refElem context provider))
+                (when (and secVal (Policy/restrictNumReferences (.size refList)))
+                  (let [error (java-str
+                                "A maximum of "
+                                (Policy/maxReferences)
+                                " references per Manifest are allowed when secure validation is enabled")]
+                    (throw (MarshalException. error))))
+                (set! refElem (DOMUtils/getNextSiblingElement refElem))))
+            (set! references (Collections/unmodifiableList refList)))))))
+
+  (method ^:public getCanonicalizationMethod ^CanonicalizationMethod [this]
+    canonicalizationMethod)
+
+  (method ^:public getSignatureMethod ^SignatureMethod [this]
+    signatureMethod)
+
+  (method ^:public getId ^String [this] id)
+
+  (method ^:public getReferences ^{:tag (List Reference)} [this]
+    references)
+
+  (method ^:public getCanonicalizedData ^InputStream [this] canonData)
+
+  (method ^:public canonicalize :throws [XMLSignatureException] ^void [this
+                                                                       ^XMLCryptoContext context
+                                                                       ^ByteArrayOutputStream bos]
+    (when (nil? context) (throw (NullPointerException. "context cannot be null")))
+    (let [subTree (DOMSubTreeData. localSiElem true)]
+      (try
+        (with-resources [^:final ^OutputStream os (UnsyncBufferedOutputStream. bos)]
+          (.canonicalize (cast DOMCanonicalizationMethod canonicalizationMethod) subTree context os)
+          (.flush os)
+          (let [signedInfoBytes (.toByteArray bos)]
+            (when (.isDebugEnabled LOG)
+              (.debug LOG "Canonicalized SignedInfo:")
+              (let [sb (StringBuilder. (alength signedInfoBytes))]
+                (for-each [^byte signedInfoByte signedInfoBytes]
+                  (.append sb (unchecked-char signedInfoByte)))
+                (.debug LOG (.toString sb))
+                (.debug LOG
+                        (java-str "Data to be signed/verified:"
+                                  (XMLUtils/encodeToString signedInfoBytes)))))
+            (set! (.-canonData this) (ByteArrayInputStream. signedInfoBytes))))
+        (catch TransformException te (throw (XMLSignatureException. te)))
+        (catch IOException e (.debug LOG (.getMessage e) e)))))
+
+  (method ^:public marshal :throws [MarshalException] ^void [this ^Node parent ^String dsPrefix
+                                                             ^DOMCryptoContext context]
+    (set! ownerDoc (DOMUtils/getOwnerDocument parent))
+    (let [siElem (DOMUtils/createElement ownerDoc "SignedInfo" XMLSignature/XMLNS dsPrefix)
+          dcm (cast DOMCanonicalizationMethod canonicalizationMethod)]
+      (.marshal dcm siElem dsPrefix context)
+      (.marshal (cast DOMStructure signatureMethod) siElem dsPrefix context)
+      (for-each [^Reference reference references]
+        (.marshal (cast DOMReference reference) siElem dsPrefix context))
+      (DOMUtils/setAttributeID siElem "Id" id)
+      (.appendChild parent siElem)
+      (set! localSiElem siElem)))
+
+  (method ^:public equals ^boolean [this o]
+    (cond
+      (identical? this o) true
+      (not (instance? SignedInfo o)) false
+      :else
+        (let [osi (cast SignedInfo o)
+              idEqual (if (nil? id) (nil? (.getId osi)) (.equals id (.getId osi)))]
+          (and (and (and (.equals canonicalizationMethod (.getCanonicalizationMethod osi))
+                         (.equals signatureMethod (.getSignatureMethod osi)))
+                    (.equals references (.getReferences osi)))
+               idEqual))))
+
+  (method ^:public ^:static getSignedInfoReferences ^{:tag (List Reference)} [^SignedInfo si]
+    (.getReferences si))
+
+  (method ^:public hashCode ^int [this]
+    (let [^:mutable ^int result 17]
+      (when (some? id)
+        (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode id))))
+      (set! result
+            (unchecked-add-int (unchecked-multiply-int 31 result)
+                               (.hashCode canonicalizationMethod)))
+      (set! result
+            (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode signatureMethod)))
+      (set! result (unchecked-add-int (unchecked-multiply-int 31 result) (.hashCode references)))
+      result)))

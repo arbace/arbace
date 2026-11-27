@@ -11,6 +11,8 @@
  */
 package jdk.internal.jrt.javac;
 
+import com.sun.source.util.TaskEvent;
+import com.sun.source.util.TaskListener;
 import com.sun.tools.javac.api.JavacTaskImpl;
 import com.sun.tools.javac.api.JavacTool;
 import com.sun.tools.javac.main.JavaCompiler;
@@ -206,6 +208,7 @@ public final class Main {
             return 2;
         }
         Boolean ok;
+        boolean compiledRan;
         Log log;
         JavaCompiler comp;
         try {
@@ -220,7 +223,23 @@ public final class Main {
                 fm.handleOption(Option.MODULE_PATH, modulePath);
             }
             log = Log.instance(context);
+            // whether JavaCompiler.compile ran (it prints the counts at its end, whatever stopped it): its
+            // COMPILATION event, the listener removed at once so that no later taskListener.isEmpty() sees it
+            // (compile's todo.retainFiles, the events' guards); a source read is no witness, an error of
+            // compile's annotation processing (-processor NotThere -proc:only, t07537) stops it before parsing
+            boolean[] compiled = {false};
+            TaskListener entered = new TaskListener() {
+                @Override
+                public void started(TaskEvent e) {
+                    if (e.getKind() == TaskEvent.Kind.COMPILATION) {
+                        compiled[0] = true;
+                        task.removeTaskListener(this);
+                    }
+                }
+            };
+            task.addTaskListener(entered);
             ok = task.call();
+            compiledRan = compiled[0];
             // the context's compiler (the task's cleanup closed it; its counts' printing needs the log alone)
             comp = JavaCompiler.instance(context);
         } catch (IllegalArgumentException | IllegalStateException e) {
@@ -231,7 +250,7 @@ public final class Main {
         // an error of the task's preparation (a plug-in not found, -Werror over Arguments' warnings):
         // javac's API task returns before JavaCompiler.compile, whose end prints the counts; Main.compile
         // goes on into it (the files are parsed, nothing more after the error), so its counts are printed
-        if (!ok && !fm.sourceRead) {
+        if (!ok && !compiledRan) {
             comp.printCount("error", comp.errorCount());
             comp.printCount("warn", comp.warningCount());
         }

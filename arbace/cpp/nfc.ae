@@ -1,0 +1,86 @@
+;; Part of Arbace. queue 601 (group 4): Unicode Normalization Form C for the C++ front end (P1949R7, [lex.name]/1: an identifier's
+;; characters in NFC), UAX #15's algorithm over the data arbace.cpp.nfcdata holds (the Unicode Character Database 16.0.0, generated
+;; by test/cpp/nfcdata.ae): the full canonical decomposition (D lines, the Hangul syllables algorithmic, UAX #15 3.12), the canonical
+;; ordering by combining class (N lines, 3.11), then the canonical composition of the primary composites (C lines, and Hangul's) of
+;; each starter with the characters after it that are not blocked (3.11's composition algorithm). Read with the Clojure reader.
+(ns arbace.cpp.nfc
+  (:require [arbace.cpp.nfcdata :as d] [arbace.string :as str]))
+
+(defn- hex ^long [^String s] (Long/parseLong s 16))
+
+(def ^:private tables
+  (delay
+    (let [dec (java.util.HashMap.) comp (java.util.HashMap.) ccc (java.util.HashMap.)]
+      (doseq [^String l (str/split-lines d/data) :when (not (str/blank? l))]
+        (let [[tag & fs] (str/split l #" ")]
+          (case tag
+            "D" (.put dec (hex (first fs)) (mapv hex (rest fs)))
+            "C" (.put comp [(hex (nth fs 1)) (hex (nth fs 2))] (hex (first fs)))
+            "N" (let [c (Long/parseLong ^String (first fs))]
+                  (doseq [^String r (rest fs)]
+                    (let [[a b] (str/split r #"-")
+                          lo (hex a) hi (if b (hex b) lo)]
+                      (loop [x lo] (when (<= x hi) (.put ccc x c) (recur (inc x)))))))
+            nil)))
+      ;; the classes of the decomposable code points too: a decomposition's last character's when it has one of its own (UAX #15
+      ;; uses each code point's class; the D code points with a class above 0 are those whose decomposition starts with one)
+      {:dec dec :comp comp :ccc ccc})))
+
+(def ^:private s-base 0xAC00) (def ^:private l-base 0x1100) (def ^:private v-base 0x1161) (def ^:private t-base 0x11A7)
+(def ^:private l-count 19) (def ^:private v-count 21) (def ^:private t-count 28)
+(def ^:private n-count (* 21 28)) (def ^:private s-count (* 19 21 28))
+
+(defn- ccc ^long [^long c] (long (or (.get ^java.util.HashMap (:ccc @tables) c) 0)))
+
+(defn- decompose
+  "The full canonical decomposition of the code point c (UAX #15 3.7, 3.12 for the Hangul syllables)."
+  [^long c]
+  (let [s (- c s-base)]
+    (if (and (>= s 0) (< s s-count))
+      (let [l (+ l-base (quot s n-count)) v (+ v-base (quot (rem s n-count) t-count)) t (+ t-base (rem s t-count))]
+        (if (== t t-base) [l v] [l v t]))
+      (or (.get ^java.util.HashMap (:dec @tables) c) [c]))))
+
+(defn- canonical-order
+  "UAX #15 3.11: each run of characters of class above 0 sorted by class, stably."
+  [xs]
+  (loop [xs (seq xs) acc [] run []]
+    (let [flush (fn [] (into acc (sort-by ccc run)))]
+      (cond (nil? xs) (flush)
+            (pos? (ccc (first xs))) (recur (next xs) acc (conj run (first xs)))
+            :else (recur (next xs) (conj (flush) (first xs)) [])))))
+
+(defn- compose-pair
+  "The primary composite of the starter a and the character b, or nil (the C lines, and Hangul's L V and LV T)."
+  [^long a ^long b]
+  (let [li (- a l-base) vi (- b v-base) si (- a s-base) ti (- b t-base)]
+    (cond (and (>= li 0) (< li l-count) (>= vi 0) (< vi v-count)) (+ s-base (* (+ (* li v-count) vi) t-count))
+          (and (>= si 0) (< si s-count) (zero? (rem si t-count)) (> ti 0) (< ti t-count)) (+ a ti)
+          :else (.get ^java.util.HashMap (:comp @tables) [a b]))))
+
+(defn- compose
+  "UAX #15's canonical composition of the canonically ordered xs: each character after the last starter composed with it when it
+  is not blocked (no character between of class 0 or of a class at least its own) and a primary composite exists."
+  [xs]
+  (let [out (java.util.ArrayList. ^java.util.Collection (vec xs))]
+    (loop [i 1 si (if (and (pos? (.size out)) (zero? (ccc (.get out 0)))) 0 -1) last-cc (if (pos? (.size out)) (if (zero? (ccc (.get out 0))) 0 256) 0)]
+      (if (>= i (.size out))
+        (vec out)
+        (let [c (long (.get out i)) cc (ccc c)
+              p (when (and (>= si 0) (or (< last-cc cc) (and (zero? last-cc) (== si (dec i)))))
+                  (compose-pair (long (.get out si)) c))]
+          (if p
+            (do (.set out si p) (.remove out (int i)) (recur i si last-cc))
+            (if (zero? cc)
+              (recur (inc i) i 0)
+              (recur (inc i) si cc))))))))
+
+(defn nfc
+  "The NFC of the code points cps (a sequence of longs)."
+  [cps]
+  (compose (canonical-order (mapcat #(decompose (long %)) cps))))
+
+(defn nfc?
+  "Whether the code points cps are in NFC."
+  [cps]
+  (= (vec (map long cps)) (nfc cps)))
