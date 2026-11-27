@@ -131,44 +131,6 @@ def testinternalcapi_stand_in(name):
     sys.modules["_testinternalcapi"] = m
 
 
-def large_pool_adjust(name, mod):
-    """The user's decision of 2026-11-27, for now: _test_multiprocessing's MiscTestCase.test_large_pool (gh-89240) runs
-    its script with multiprocessing.Pool(20) in place of CPython's Pool(200). Each pyi child is a whole Arbace process,
-    about 260-320 MB of its own at train 7 against CPython's 9.5 MB (spawn) and 6.5 MB (forkserver), so Pool(200) needs
-    about 61 GB and was killed past a 50 GiB cap (class :process-footprint's why). The test is CPython's but the
-    number: the same script, map, sum and checks; for the three test_misc modules alone, under pyi alone (python3, the
-    oracle's control, runs the original). Removed when pyi's children are small enough for Pool(200)."""
-    if sys.implementation.name == "cpython":
-        return
-    if name not in ("test.test_multiprocessing_spawn.test_misc", "test.test_multiprocessing_forkserver.test_misc",
-                    "test.test_multiprocessing_fork.test_misc"):
-        return
-    import textwrap
-    from test.support import os_helper, script_helper
-
-    def test_large_pool(self):
-        testfn = os_helper.TESTFN
-        self.addCleanup(os_helper.unlink, testfn)
-        with open(testfn, 'w', encoding='utf-8') as f:
-            f.write(textwrap.dedent('''\
-                import multiprocessing
-                def f(x): return x*x
-                if __name__ == '__main__':
-                    with multiprocessing.Pool(20) as p:
-                        print(sum(p.map(f, range(1000))))
-            '''))
-        rc, out, err = script_helper.assert_python_ok(testfn)
-        self.assertEqual("332833500", out.decode('utf-8').strip())
-        self.assertFalse(err, msg=err.decode('utf-8'))
-
-    # install_tests_in_module_dict gives each module a subclass of its own (Temp, named MiscTestCase): set on it, the
-    # base class _test_multiprocessing.MiscTestCase untouched
-    for v in list(vars(mod).values()):
-        if isinstance(v, type) and v.__module__ == name and callable(getattr(v, "test_large_pool", None)):
-            test_large_pool.__qualname__ = v.__qualname__ + ".test_large_pool"
-            v.test_large_pool = test_large_pool
-
-
 def main():
     name = sys.argv[1]
     skipfile = sys.argv[2] if len(sys.argv) > 2 else None
@@ -193,7 +155,6 @@ def main():
         inline_values_stand_in(modname)
         testinternalcapi_stand_in(modname)
         mod = __import__(modname, fromlist=["*"])
-        large_pool_adjust(modname, mod)
         import unittest
     except BaseException as e:
         line("IMPORT", type(e).__name__ + ": " + str(e))
