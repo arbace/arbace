@@ -4142,6 +4142,19 @@
                       (try (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
                            (catch arbace.lang.ExceptionInfo x
                              (swap! *order* conj [:cx-error (ex-info (.getMessage x) (assoc (ex-data x) :cx/node n))]))))
+                    ;; (cpp-sema-types: and a non-static data member it names, [namespace.udecl]/19, accessible where the
+                    ;; using-declaration is (its own access, or an earlier using-declaration's): GCC's "'int B::next' is private
+                    ;; within this context", at the declaration; lookup/using26.C)
+                    (when (:cls scope)
+                      (when-let [x (first (keep (fn [e]
+                                                  (when (and (= :field (:e e)) (:cls e) (integer? (:i e)))
+                                                    (try (if (and (:ucls e) (:uaccess e))
+                                                           (cx-access! {:scope scope} (:ucls e) (last parts) (:uaccess e) nil nil)
+                                                           (cx-access! {:scope scope} (:cls e) (last parts) (:access (nth (:fields (abi/cls (:cls e))) (:i e) nil)) nil nil))
+                                                         nil
+                                                         (catch arbace.lang.ExceptionInfo x (when (= :access (:codegen/refused (ex-data x))) x)))))
+                                                es))]
+                        (swap! *order* conj [:cx-error (ex-info (.getMessage ^Throwable x) (assoc (ex-data x) :cx/node n))])))
                     ;; (CP324 (a): a class's using-declaration of member functions, [namespace.udecl]/19: each function it
                     ;; names accessible where it is (its own access, or a using-declaration's that named it), not a
                     ;; constructor's)
@@ -4183,7 +4196,7 @@
                                                                              (same-sig? g h) (= (rq (:node g)) (rq (:node h)))))))
                                                          (.get ^java.util.HashMap (:names scope) (last parts)))))))]
                     (enter! scope (last parts) (cond-> (assoc e :pos (long (or (:_b n) 0)))
-                                                             (and (checking?) (:cls scope) (#{:enumerator :type} (:e e)))
+                                                             (and (checking?) (:cls scope) (#{:enumerator :type :field} (:e e)))
                                                              (assoc :ucls (:cls scope) :uaccess (or *member-access* :public))
                                                              ;; (CP324 (a): a member function's synonym has the using-declaration's
                                                              ;; access as a member of its class, [namespace.udecl]/19)
@@ -10216,8 +10229,12 @@
                  (fail :member-use "invalid use of non-static data member '" (get-in n [:referencedDecl :name]) "'"))
                ;; (the rest of CP313 (a): a member named in a member function, its access through the naming class)
                (when (and (checking?) tc (not (:lambda ctx)))
-                 (check-access! ctx (:cls e) (get-in n [:referencedDecl :name]) (:access (nth (:fields (abi/cls (:cls e))) (:i e)))
-                                (or (cx-naming-class ctx n) tc) tc))
+                 ;; (cpp-sema-types: a member a class's using-declaration names has the using-declaration's access as a member of
+                 ;; that class, [namespace.udecl]/19, :ucls and :uaccess; lookup/using26.C's `using B::next;` in D)
+                 (if (and (:ucls e) (:uaccess e))
+                   (check-access! ctx (:ucls e) (get-in n [:referencedDecl :name]) (:uaccess e) (or (cx-naming-class ctx n) tc) tc)
+                   (check-access! ctx (:cls e) (get-in n [:referencedDecl :name]) (:access (nth (:fields (abi/cls (:cls e))) (:i e)))
+                                  (or (cx-naming-class ctx n) tc) tc)))
                (field-node (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:cls e) (:i e)))
       :indirect (reduce (fn [o [c i]] (field-node o c i)) (cx-via (deref-node (this-expr ctx)) (cx-naming-class ctx n)) (:chain e))
       :enumerator (do ;; (queue 492, the checker: an enumerator of a private or protected member enumeration, unscoped, a member
@@ -11121,7 +11138,9 @@
                                    (try (conv-specs (or qcid cid) t) (catch arbace.lang.ExceptionInfo _ nil))))))
         (fail :conv-name "a conversion function template's specialization named: " nm)
         (nil? e) (fail :member "no member " nm (when (System/getenv "CPP_HDR_TRACE") (str " (" (node-text n) ") of " (:name (abi/cls (or qcid cid))) " " (pr-str (:targs (abi/cls (or qcid cid)))) " fields " (pr-str (mapv :name (:fields (abi/cls (or qcid cid))))))))
-        (= :field (:e e)) (do (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid)
+        (= :field (:e e)) (do (if (and (:ucls e) (:uaccess e))
+                                (check-access! ctx (:ucls e) nm (:uaccess e) (or qcid cid) cid)
+                                (check-access! ctx (:cls e) nm (:access (nth (:fields (abi/cls (:cls e))) (:i e))) (or qcid cid) cid))
                               ;; (cpp-decl2, the checker: a data member of a virtual base through a null pointer constant cast,
                               ;; `((B*)0)->i`, whose virtual base's place no object gives: GCC's "invalid access to non-static data
                               ;; member 'A::i' of NULL object", other/offsetof8.C)
