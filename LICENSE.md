@@ -1078,6 +1078,14 @@ covers what.
   `jk1126-derivations`, whose tables hold their replaced text; each file's header says so): Copyright (c) Oracle and/or its
   affiliates, under the GNU General Public License version 2 with the Classpath Exception (text below), the derivations
   Arbace's own (Eclipse Public License 1.0).
+- The foreign memory API's and java.nio's access derived overlays (doc/classes/JAVA-DEFERRED-TRIAGE.md, java-design-1122;
+  doc/classes/JAVA-CONFORMANCE-SURVEY.md, "As built: java-ffm-1127"; train 10, 2026-11-27; recorded by the rule of B7):
+  `overlay/jdk/java.base/jdk/internal/foreign/{Utils,AbstractMemorySegmentImpl,LayoutPath}.java`,
+  `jdk/internal/foreign/layout/AbstractLayout.java`, `jdk/internal/access/JavaNioAccess.java` and `java/nio/Buffer.java` are
+  jdk26u's files of the same paths (https://github.com/openjdk/jdk26u at `baf63fb`, `src/java.base/share/classes/`) with the
+  exact replacements `test/jrt/derive.ae` makes (the `ffm-*-derivation` tables and `nio-buffer-derivation`, which hold their
+  replaced text; each file's header says so): Copyright (c) Oracle and/or its affiliates, under the GNU General Public License
+  version 2 with the Classpath Exception (text below), the derivations Arbace's own (Eclipse Public License 1.0).
 - JMX's core, AccessFlag and type annotations (doc/classes/JAVA-DEFERRED-TRIAGE.md, "As built: JMX-1 (write-ahead)", "As built:
   JCS273 (write-ahead)", "As built: JCS271 (b) (write-ahead)"; recorded by the rule of B7): the derived overlays
   `overlay/jdk/java.base/{com/sun/jmx,javax/management}/...` (21 files), `java/lang/management/ThreadInfo.java`,
