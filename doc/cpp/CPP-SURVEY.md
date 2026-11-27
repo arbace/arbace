@@ -12481,3 +12481,56 @@ and template/pr39425.C (601-3) into test/cpp/divergences-dg.edn's :gxx-only-rule
 into :ifndr-uninstantiated-template. `bin/reap --record`: C++ read 6,205 / 0 / 77 (249 n/a) -> 6,205 / 0 / 73 (253 n/a);
 `bin/crops-score --record`: completeness 0.9969 -> 0.9971; `--judge --strict`, `bin/records-check`, `bin/markers-check`: 0 problems.
 cpp2a/spaceship-eq15.C stays deferred, for a lane of its own.
+
+## As built: cpp-read-indep, clang-only dg rows by the own front end, fifth pass (2026-11-27; branch `cpp-read-indep-1127` from mac/next `120b1b912`)
+
+What kept the read stage at 0.926 (`bin/crops-score` on mac/next `120b1b912`, test/crops/independence.edn's :cpp :read, its :count-from
+over test/cpp/check-dg-own-linux-amd64.edn): the read cell's 6,105 judged cases are the token check's 1,934 files, own (1), and the dg
+check's 4,171 counted rows (4,564 rows less 324 the :na classes of test/cpp/divergences-dg.edn name and 69 test/cpp/dg-dialect-out.edn
+leaves out), of which the own front end passed 3,273 (1) and 898 not (0.5): (1934 + 3273 + 0.5 x 898) / 6105 = 0.9265. No other input
+is left: the token check reads no installed header and no g++ record (CP241 (b), CP244 (b)), and the 898 rows' only non-own input is
+clang's recorded dumps (the pack cxxdump-dg-error), which the read cell's judgment of those rows consumes: 825 of them clang passes (565
+`missed: accepted`, 172 other `missed`, 57 `both`, 28 `extra`, 2 timeouts, 1 crash) and 73 clang fails too (the cell's 73 deferred
+rows). Nothing of it is the oracle tier's by design: each row moves to 1 when the own front end's errors pass the test's own dg-error
+lines, CX12's work, and the tail is a long one (the most frequent expected message, "no match", in 18 files).
+
+This pass took the 825 rows by size, each read against its dg lines; the rules from the standard's text and GCC's documented
+messages, no GCC or clang code. The rules (arbace/cpp/sema.ae, arbace/cpp/template.ae, arbace/repr/cpp/diag.ae, arbace/repr/cpp/parse.ae):
+
+- Operands: std::nullptr_t in arithmetic and compared with no null pointer constant ([expr.eq]/2-4; cpp0x/nullptr07.C, nullptr10.C);
+  a pointer compared with an integer ([expr.eq]/3; nullptr37.C), the checker typing wide and UTF character literals by their own
+  types so L'\0' is no null pointer constant ([lex.ccon]); pointers in * / % & | ^ << >>, two pointers added, a pointer subtracted
+  from an integer ([expr.mul], [expr.add]; diagnostic/bitfld1.C); an integer to a pointer outside a null pointer constant
+  ([conv.ptr]/1; template/pr34938-2.C); a non-null integer to std::nullptr_t; vector comparisons lane by lane and a vector to no bool
+  (ext/pr80363.C; a vector conditional left as before, ext/vector23.C); float vectors' bitwise operators.
+- Functions named without a call ([expr.ref]/6.3.2, [expr.mptr.oper]/6, [over.over]/1): a .*/->* result as an expression statement,
+  an initializer, an argument or another operator's operand (expr/ptrmem5.C, expr/bound-mem-fun.C, template/crash51.C, crash72.C); a
+  for statement's iteration expression (expr/for1.C); a conditional's or GNU ?:'s operand (conversion/memfn2.C, ext/pr77496.C,
+  other/pr77548.C); dynamic_cast's operand (conversion/dynamic1.C); an argument (template/ptrmem4.C); an overload set to an arithmetic
+  target or deduced by auto (lookup/pr83287-2.C, cpp0x/lambda/lambda-deduce2.C); `&f` unqualified to a pointer to member (warn/pmf1.C).
+- Pseudo-destructors and destructor names ([expr.prim.id.dtor]): T1::~T2 of different types, an undeclared name, an object of
+  function type (expr/dtor4.C, cpp0x/enum18.C, template/error32.C); a class object's `~T` of a scalar T or of a name no declaration
+  declares (template/pseudodtor2.C, dtor5.C).
+- Access: a trivial copy's derived-to-base binding ([class.access.base]/4; parse/crash51.C) and its copy constructor's access, outside
+  an unevaluated operand (cpp0x/defaulted28.C).
+- Default arguments ([dcl.fct.default]/4-9): checked at the declaration of a namespace- or block-scope function that is no template's,
+  the earlier parameters in scope (overload/defarg6.C, diagnostic/ref1.C); `this`, so a member named through it, in none
+  (overload/defarg5.C, template/defarg17.C); a member's default argument a complete-class context for the undeclared check
+  (cpp0x/constexpr-inhctor1.C's false error gone); a function template's redeclaration adding one (other/default9.C).
+- Declarations: an enumerator's cast to its incomplete enumeration (diagnostic/pr59838.C); a variable acquiring a function type
+  (template/crash61.C); auto non-static data members with an initializer (cpp0x/auto29.C); a deduced return type overriding a virtual
+  function (cpp1y/auto-fn18.C; not over a virtual itself deduced, auto-fn25.C); `decltype(auto)` of a name declared T&&
+  (cpp1y/decltype-auto1.C); alignas of a function's name (cpp0x/alignas8.C, alignas12.C); GNU typeof of a function's name
+  (expr/call5.C); an enclosing function's local entities in a local class ([basic.def.odr]/10; cpp0x/error1.C, pr85015.C); a
+  member named in a function with no object (template/error42.C's friend); a member template's name as a non-type argument
+  (template/qualttp2.C, a crash before).
+- Templates: `typename T::X` of a non-class T at a class template's instantiation, the instance's member error no longer swallowed by
+  ctad-compound-var's probe (template/crash73.C, crash76.C); a call of an object whose class has no operator() and no conversion
+  function, or is incomplete (template/crash93.C, parse/crash32.C).
+- Initialization and new: copy-list-initialization of bool from nullptr (DRs/dr1423.C); new's braced and C++20 parenthesized array
+  initializers against a constant bound, a string literal's length, a negative constant bound, a const array's elements
+  (cpp0x/initlist-new4.C, initlist21.C, init/pr20039.C); an xvalue array's subscript an xvalue (pr60517.C).
+- Literals and the rest: numeric and character literal operators ([lex.ext]/3-6; cpp0x/udlit-implicit-conv-neg.C, -char8_t.C);
+  inconsistent string literal ud-suffixes (udlit-concat-neg.C); noexcept(noexcept(this -> f ())) in the exception-specification check,
+  undeclared names in a member's noexcept operand (cpp0x/noexcept53.C); a mem-initializer pack expansion outside every template
+  (other/error21.C); an extended asm's operand numbers (opt/pr69213.C); -fno-rtti's dynamic_cast (rtti/no-rtti.C).
