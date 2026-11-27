@@ -5649,8 +5649,10 @@ probes (`bin/repr-java read` of a probe's Java, run by `test/java/run.ae` on the
   TemplatesImpl variant now replaces defineTransletClasses (no descriptor; the loader's unnamed module, as createModule's
   variant had it) and cuts createModule. Probed: a translet XSLTC wrote (`generate-translet`) and defined through
   `Lookup.defineClass` on the tool stops at "a class extending ...AbstractTranslet is not in the Go build": AbstractTranslet
-  joins `arbace.j2g.model/class-supers` (javac's tool world alone). Not probed past that: the translet's bytecode calling
-  XSLTC's runtime through JD3's interpreter.
+  joins `arbace.j2g.model/class-supers` (javac's tool world alone); j2g's analysis of javac's world then found jdk26u's
+  `thisModule.addReads(m)` stubbed ("jrt lacks java.lang.Module.addReads"): jrt's Module.addReads, the module itself, as
+  addExports (queue 575's rule: nothing encapsulated in the closed world). Not probed past that: the translet's bytecode
+  calling XSLTC's runtime through JD3's interpreter.
 - **The frames of lambdas and method references in compiled code** (t05766 compiled, "Bad method name"). A lambda's or a method
   reference's Go function literal, unregistered, stood for its enclosing method: TestInferCaller's `testLambda(count,
   logger::severe, ...)` inferred the caller `test5` (the literal's), where the JDK's walk hides the reference's frame (its
@@ -5662,10 +5664,13 @@ probes (`bin/repr-java read` of a probe's Java, run by `test/java/run.ae` on the
   the expected and actual names waited behind train 9 (`.tmp/worktrees/java-ffm-1127-base/.tmp/c5766.sh`). j2g unit test
   `test-ffm-1127`.
 
-Proven by day: `bin/jrt-convert derive --check` (111 overlays); `bin/jrt-convert predict --list` of the eight FFM rows (light:
+Proven by day: `bin/jrt-convert derive --check` (110 overlays, 0 not as derived); `bin/jrt-convert predict --list` of the eight FFM rows (light:
 2.9 GB): the changed files read with context, their forms laid into jdk/forms (JavaNioAccess, the proxies, ClassPathResources;
 the provenance's counts by hand, 3,866 sources, 4,112 forms, 130 data), vet 151 variants with Buffer's replacing its
 initializer (one refusal, SHA3's, the same on 1e5fa9c99), j2g's analysis of the world with no stub left in Buffer, the
 segments' JavaNioAccess and SegmentFactories (the remaining FFM stubs are the var handles', Reflection's and VectorSupport's,
-as before), all eight rows analyzed at the compiled level; `bin/javac-vendor names` (7,192 and 10,841 classes, 0 Go names
+as before), all eight rows analyzed at the compiled level (a second predict, `--since 1e5fa9c99`, for bufferRef's forms);
+j2g's analysis of javac's tool world (`--analyze-only` over jdk/javac/forms with both variant directories, 4.7 GB): 12,708
+classes, 0 analysis failures, the variants of TemplatesImpl (1 replaced, 1 cut), CatalogHolder, URL and Buffer applied, the
+only stub in TemplatesImpl, JdkXmlConfig, ClassPathResources and URL the addReads above (built since); `bin/javac-vendor names` (7,192 and 10,841 classes, 0 Go names
 twice); `bin/j2g-unit`'s new test (the other 7 failures the same on next).
