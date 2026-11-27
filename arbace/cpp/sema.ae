@@ -4683,6 +4683,9 @@
      (cond
        (abi/arr? t) (cx-non-literal (:of t) seen)
        (not (abi/class? t)) nil
+       ;; (cpp-sema-const: before C++17 a closure type is no literal type, [expr.prim.lambda]/3 of C++14 -- C++17's P0170R1 made
+       ;; it one: cpp1z/constexpr-lambda15.C's `auto f = [i]{};` in a constexpr constructor in C++14)
+       (and (< (long *cxx-year*) 17) (some-> (abi/cls (:id t)) :lambda)) "a lambda closure type is not a literal type before C++17"
        :else
        (let [id (:id t) c (abi/cls id) nm (:name c)]
          (when (and c (:finished c) (string? nm) (not (:lambda c)) (not (:header c)) (not (:union c)) (not (seen id)))
@@ -16863,7 +16866,14 @@ protected:
                             (let [fl (nth (:fields c) field nil)
                                   t (when fl (abi/unq (loop [t (:ty fl)] (if (abi/arr? t) (recur (:of t)) t))))]
                               (when (and fl (not (:static fl)) (string? (:name fl)) (seq (:name fl)) (not (:anon fl)) (not (:bits fl))
-                                         (abi/scalar? t) (or (nil? init) (= :none (:i init))))
+                                         (or (and (abi/scalar? t) (or (nil? init) (= :none (:i init))))
+                                             ;; (cpp-sema-const: a member of class type default-initialized by its trivial implicit
+                                             ;; constructor while that class has members, as a base is below: cpp0x/constexpr-diag4.C's
+                                             ;; B1::a1 of A1 { int a; ~A1(); })
+                                             (and (abi/class? t) (not (:union (abi/cls (:id t)))) (not (abi/arr? (abi/unq (:ty fl))))
+                                                  (let [g (when (and (map? init) (= :ctor (:i init))) (fnd (:fn init)))]
+                                                    (or (and (map? init) (= :none (:i init))) (and g (:implicit g) (:trivial g))))
+                                                  (some #(and (not (:static %)) (seq (str (:name %))) (abi/scalar? (abi/unq (:ty %)))) (:fields (abi/cls (:id t)))))))
                                 (str "member '" (:name c) "::" (:name fl) "'"))))
                           (:fields ti))
                     (some (fn [{:keys [base init]}]
@@ -16889,7 +16899,24 @@ protected:
                (:node f) (not (header-node? (:node f))) (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda))))
       (when-let [[m at] (binding [*ce-steps* (atom 0) *ce-pos* nil *ce-dead* nil *ce-temps* nil *ce-const* nil] (pce-stmt (:tbody f)))]
         (when-let [h *on-refusal*]
-          (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil))))))
+          (h (ex-info (str "codegen: expression is not a constant expression (" m ")") {:codegen/refused :constexpr :cx/node {:range at}}) nil))))
+    ;; (cpp-sema-const: [dcl.constexpr]/3-6 of C++11-C++20, a constexpr constructor's mem-initializer -- a base's or a member's,
+    ;; an array member's elements' -- that calls a constructor surely not constexpr makes no invocation constant: GCC's "call to
+    ;; non-'constexpr' function 'A::A()'" at the constructor; cpp0x/constexpr-ctor2.C's `constexpr B(): A() { }`, constexpr-ice5.C)
+    (when (and (checking?) *invalid-constexpr-error* (= :ctor (:kind f)) (:constexpr f) (not (:consteval f)) (not (:tinst f)) (< (long *cxx-year*) 23)
+               (:tinits f) (not (:delegate (:tinits f))) (:node f) (not (header-node? (:node f))) (cx-plain-class? (:cls f))
+               (not (:implicit f)) (not (:defaulted f)))
+      (let [callee (fn callee [i] (when (map? i)
+                                    (case (:i i)
+                                      :ctor (some-> (:fn i) fnd)
+                                      :zero-then (callee (:then i))
+                                      (some callee (concat (when (map? (:fill i)) [(:fill i)]) (filter map? (:items i)))))))
+            g (some (fn [{:keys [init]}] (let [g (callee init)] (when (and g (ce-not-constexpr? g)) g)))
+                    (concat (:bases (:tinits f)) (:fields (:tinits f))))]
+        (when-let [h (when g *on-refusal*)]
+          (h (ex-info (str "codegen: expression is not a constant expression (call to non-'constexpr' function '" (:name g) "' in a constexpr constructor's initialization)")
+                      {:codegen/refused :constexpr :cx/node (:node f)})
+             nil))))))
 
 (defn analyze-program
   "The program of the native parse's nodes (its global scope `proot`) of the source text `src`: {:fns {id fn} :vars
