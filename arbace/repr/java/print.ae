@@ -783,6 +783,8 @@
             ;; a record's components' declared types (a record pattern's types by its type
             ;; variables, selector-text)
             :comps (mapv tag-of comps)
+            ;; queue 610: the superclass as declared, with its type arguments (for-each over this)
+            :super-form (when (and ext (not (vector? ext)) (not (#{:interface :annotation :enum :record} kind))) ext)
             :super (cond
                      (#{:interface :annotation} kind) nil
                      (= kind :enum) "java.lang.Enum"
@@ -1204,10 +1206,18 @@
     (str "-(" (int-literal a long?) ")")
     (unary-text "-" (ex env a))))
 
+(defn- floating? [env x]
+  (or (float? x) (contains? #{"double" "float" "java.lang.Double" "java.lang.Float"} (type-of env x))))
+
 (defn- binop-text [env op-name a b]
   (let [[op p] (binops op-name)
-        a-t (if (and (long-shifts op-name) (integer? a)) (wrap (int-lit a true) p) (operand env op-name a p))
-        b-t (operand env op-name b (inc p))]
+        ;; queue 610: an operator on a double or float operand promotes the other to it, so an integer literal there (also a
+        ;; conditional of them) is the source's int, not a long (1E100 + (c ? 1 : 2): i2d, not l2d; t03380)
+        fl? (and (long-ops op-name) (or (floating? env a) (floating? env b)))
+        a-t (cond (and (long-shifts op-name) (integer? a)) (wrap (int-lit a true) p)
+                  fl? (ex-text env a p)
+                  :else (operand env op-name a p))
+        b-t (if fl? (ex-text env b (inc p)) (operand env op-name b (inc p)))]
     (e p (str a-t " " op " " b-t))))
 
 (def ^:private int-ish #{"int" "short" "byte" "char"})
@@ -1460,6 +1470,7 @@
                                               ;; widening cast, which chose the overload and the converter
                                               ;; dropped (the pin records the choice)
                                               (and (:pinned (first cands)) (= 1 (count cands)) (some? a)
+                                                   (not (get (:ctvar-ps (first cands)) i))
                                                    (not (and (seq? a) (#{"lambda" "method-ref"} (str (head a)))))
                                                    (let [p (param-at (first cands) i) at (nth ats i nil)]
                                                      (and p at (string? at) (not (prim-names p)) (not (prim-names at))
@@ -1632,13 +1643,23 @@
   ([env recv-t m head args owner]
    (let [ta (type-args-text env head)
          pins (:param-tags (meta head))
-         cands (cond
-                 pins [{:ps (mapv #(erase (:scope env) %) pins) :pinned true}]
-                 owner (find-methods owner m (count args)))
          ;; the class the method is looked up in, for spread-varargs (Arrays.asList's, Stream.of's)
          lb (or owner
                 (and (symbol? head) (namespace head) (not (str/starts-with? (name head) "."))
                      (class-binary (:scope env) (ns-sym (namespace head)))))
+         cands (cond
+                 pins (let [ps (mapv #(erase (:scope env) %) pins)
+                            ;; queue 610: a pin's parameter that is the erasure of a type variable, the declaring class's
+                            ;; (GenObject<T>.foo(T) inherited by a subclass of GenObject<String>, pinned ^[Object]: t06095) or
+                            ;; the method's (<T extends A & B<String>> f(T), pinned ^[A]: t06076): the pin's widening cast
+                            ;; would give javac an Object for the instantiated T, or an A outside T's bounds
+                            lb (or lb (and (symbol? head) (namespace head) (str/starts-with? (name head) ".")
+                                           (class-binary (:scope env) (ns-sym (namespace head)))))
+                            decls (when lb (filter #(= ps (:ps %)) (find-methods lb m (count args))))
+                            ctvar (set (for [d decls [j t] (map-indexed vector (map #(or %1 %2) (:ps-ctvar d) (:ps-mtvar d)))
+                                             :when t] j))]
+                        [{:ps ps :pinned true :ctvar-ps ctvar}])
+                 owner (find-methods owner m (count args)))
          spread (when (and lb (not pins))
                   (spread-varargs env args (or cands (find-methods lb m (count args))) #(find-methods lb m %)))]
      (e P-POSTFIX
@@ -3815,6 +3836,20 @@
             bl (vec (loop-tail env' (apply list 'do body)))]
         (labeled frame (block "while (true)" bl))))))
 
+(defn- this-elem-tvar
+  "queue 610: the element type of a for-each over this in a generic class that extends a collection of one of its type
+  variables (MapperList<A> extends ArrayList<A>: for (A elem : this)), whose untagged binding the converter left as the
+  type variable's erasure; Object there would give javac no A where the body needs one (t06269). nil otherwise."
+  [env coll]
+  (when (= 'this coll)
+    (let [d (get *decls* (:bin env))
+          sf (:super-form d)
+          sup (:super d)]
+      (when (and (seq? sf) (= 2 (count sf)) (symbol? (second sf)) (nil? (namespace (second sf)))
+                 (some #{(second sf)} (:tparams d))
+                 sup (some #{"java.lang.Iterable"} (supertypes sup)))
+        (second sf)))))
+
 (defn- for-each-coll-text
   "The collection of a for-each whose binding has type `t`: a raw collection type gets the
   binding's type as its argument, (Collection<T>) x, as Java needs and the forms do not show
@@ -3909,7 +3944,7 @@
                                         (str "while (" (ex-text env c P-ASSIGN) ")"))
                                       bl)))
       "for-each" (let [[_ [b coll] & body] x
-                       t (tag-of b)
+                       t (or (tag-of b) (this-elem-tvar env coll))
                        env' (push-loop (add-local env b :jt (when-not t "java.lang.Object")) frame)
                        bl (body-lines env' body :stmt)]
                    ;; an untagged binding is Object's (the converter tags every other type, the
