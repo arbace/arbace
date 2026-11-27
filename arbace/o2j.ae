@@ -285,7 +285,7 @@
                (or (str/starts-with? n "global ")
                    (and (str/starts-with? n "field_imm ") (simple? (first args)))))))))
 
-(declare scoped holds-call? take-form unbox mentions?)
+(declare scoped holds-call? take-form unbox mentions? substitute let-chain)
 
 (defn- with-args
   "Evaluates arg nodes right to left (as ocamlc's code does) and calls (k forms): every argument
@@ -306,6 +306,10 @@
   "(oc-light) The locals of the method being translated whose int value is also a long local: {Object local, long local} (a for
   loop's index, a self loop's int parameters), read by unbox. Bound by the method (closure-class!) and by each loop over its
   body: a nested function's field of the same name is its own."
+  {})
+
+(def ^:private ^:dynamic *mutlongs*
+  "(oc-light) The int variables (mutlet [int]) of the method being translated that are long locals: {variable, long local}."
   {})
 
 (def ^:private ^:dynamic *self-arity*
@@ -617,7 +621,8 @@
               ;; (oc-tail) the method's own parameters (arity 6 at most), which a tail call clears when it does not name them
               :params (when (<= arity 6) (mapv (fn [[p] s] [p s]) ps params))}
         b (binding [*self-arity* (when (and self-id (<= arity 6)) arity)
-                    *longs* (into {} (map (fn [[i l]] [(nth params i) l]) longs))]
+                    *longs* (into {} (map (fn [[i l]] [(nth params i) l]) longs))
+                    *mutlongs* {}]
             (realize (expr ictx body true)))
         clears? (and (not @used) (not @tails) (not (:group ictx)) (<= arity 6))
         b (tail-clears b clears?)
@@ -706,9 +711,19 @@
                 k (const-arg ctx def)
                 ctx2 (cond-> (assoc-in ctx [:env id] s) k (assoc-in [:kconst id] k) (nil? k) (update :kconst dissoc id))]
             (recur body ctx2 (conj bindings s (expr ctx def false))))
-      mutlet (let [[_ id def body] (node-body x)
-                   s (with-meta (munge-id id) {:mutable true :tag 'Object})]
-               (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
+      mutlet (let [[kind id def body] (node-body x)]
+               (if (and (not *in-ns*) (= "[int]" kind))
+                 ;; (oc-light) an int variable a long local at the light level: the int primitives read it (*longs*), an
+                 ;; assignment sets it (*mutlongs*), a use as a value boxes it there; the chain goes on inside
+                 (let [ml (fresh "m$") s (munge-id id)
+                       init (unbox (expr ctx def false))
+                       inner (binding [*longs* (assoc *longs* s ml) *mutlongs* (assoc *mutlongs* s ml)]
+                               (realize (let-chain (assoc-in ctx [:env id] s) body tail?)))
+                       inner (substitute inner {s (list 'cast 'Object ml)})]
+                   (list 'let (conj bindings (with-meta ml {:tag 'long :mutable true}) init)
+                         (if tail? inner (scoped inner (take-nth 2 bindings)))))
+                 (let [s (with-meta (munge-id id) {:mutable true :tag 'Object})]
+                   (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))))
       (list 'let bindings (if tail?
                             (expr ctx x tail?)
                             (scoped (expr ctx x tail?) (take-nth 2 bindings)))))))
@@ -1201,7 +1216,10 @@
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
       while (let [[c body] b] (list 'do (concat (list 'while (test-form ctx c)) tick-forms [(expr ctx body false)]) UNIT))
       for (for-node ctx b)
-      assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
+      assign (let [[id e] b]
+               (if-let [ml (get *mutlongs* (lookup ctx id))]
+                 (list 'do (list 'set! ml (unbox (expr ctx e false))) UNIT)
+                 (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT)))
       send (let [[kind m o args] b
                  ts (vec (repeatedly (count args) #(fresh "t$")))
                  ov (fresh "o$") mv (fresh "m$")]
