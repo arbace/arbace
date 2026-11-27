@@ -9473,3 +9473,46 @@ out-of-band read-only buffer wrote it, and the loaded view stayed writable.
   read-only and none alive, as CPython.
 - Left: train 6's B run of test_process_pool and 12 multiprocessing modules hung on Pickler_dealloc (the journal's "Train
   6"), not measured here; their pickles take no out-of-band buffers, so it may be another cause.
+
+## As built: py-small-1127, the eval cell's small deferred classes (2026-11-27, the main host)
+
+The small classes of test/python/divergences.edn's eval cell (31 rows at train 7's head), each row's cause read from its test
+and fixed in the runtime where pyi lacked something; targeted runs only (`bin/pyi check --only`, on train 7's executable;
+the checkout's runtime by goi, or compiled with `check --aot --lib-test --only` where the C world is needed).
+
+- **Already passing at train 7's head** (the record is older): test_weakset's union, intersection, symmetric_difference and
+  test_weak_destroy_and_mutate_while_iterating (:core-objects-287), test_memoryio's three PyBytesIO exports (:buffer-exports:
+  bytearray counts its exports since queue 595), test_tempfile's TestMktemp.test_basic (:os-and-files-misc), and, in train 7's
+  own run, fork's three resource tracker signal tests (:finalization-collect) and spawn's test_rapid_restart
+  (:goi-liveness-fallthrough); test_generators' test_raise_and_yield_from (:testcapi) passes with SIGINT at its default
+  action (train 7's wd-run.sh); its crash (status 130) was the driver's SIGINT inherited ignored.
+- **An exception subclass's `__del__`** (exc.go's trackExcDel): an instance of an exception class is an `*Exception` made by
+  BaseException's `__new__` (and NewException, ExceptionGroup's), not object's, so it was never tracked and its `__del__`
+  never ran. Tracked as class.go tracks an instance (test_unittest's test_no_exception_leak, :finalization-collect).
+- **The code object's cycle** (finalize.go, code.go): `Code.obj` (`__code__`'s identity) and `CodeObject.Code` hold each
+  other, a cycle Go never frees once the code object has a Go finalizer (a weak reference to it); the code object and its
+  Code are nodes of the cycle collection now (a function's Code slot, the code's free frames' Code slots listed too), so
+  gc.collect() finds them dead with the function that held them (test_code's CodeWeakRefTest.test_basic, :code-objects).
+- **Audit events of readline and ssl** (builtins_readline.go, builtins_ssl.go): read_init_file's, read_history_file's,
+  write_history_file's and append_history_file's `open` events as readline.c raises them (the filename, else
+  `<readline_init_file>` or `~/.history`, the mode's letter, 0), SSLContext.load_dh_params' Py_fopen event (test_audit's
+  test_open, :audit-hooks).
+- **sys.getsizeof** of `object()` (16) and of a memoryview (memory_sizeof: 144 and 24 a dimension, no GC header, as pyi's
+  memoryview names no Py_TPFLAGS_HAVE_GC) (test_buffer's test_memoryview_sizeof, :sys-getsizeof; test_capi's
+  test_heaptype_relative_special_members_errors, :testcapi-behaviour, sizes its heap type from `sys.getsizeof(object())`).
+- **Py_TPFLAGS_METHOD_DESCRIPTOR** on function, method_descriptor and wrapper_descriptor (typeflags.go; test_call's
+  test_method_descriptor_flag, :capi-port).
+- **The kwargs dict of a METH_VARARGS | METH_KEYWORDS C function** (eval.go's and aot.go's CALL_FUNCTION_EX, pyctypes'
+  callWith): `f(**{k: v})` whose key is a str subclass's instance passes the dict itself, its keys as given, as cfunction_call
+  does (pyi's keyword names are exact strs, so a key whose `__hash__` or `__eq__` is not str's was found by its text: test_getargs'
+  test_weird_str_subclass and test_weird_str_subclass2, :capi-port).
+- **_testinternalcapi.TIER2_THRESHOLD** (JUMP_BACKWARD_INITIAL_VALUE + 1; test_sys's test_jit_is_active, :sys-module).
+- **ctypes' complex arguments** (pyctypes' convParam): a simple type's from_param whose ffi type is a struct of its parts
+  (c_double_complex, c_float_complex, c_longdouble_complex) passes its bytes, not the address 0 of a struct by reference
+  (test_libc's test_csqrt's segmentation fault, :ctypes-port).
+- **PyConfig_Get("buffered_stdio")** from the start's -u (pyi's StdioUnbuffered: PYI_UNBUFFERED, which the start removes, so
+  the environment no longer told it; test_regrtest's test_add_python_opts, --fast-ci's worker, :regrtest-children).
+- **`help`'s pickle** (builtins_sys_info.go): `_sitebuiltins._Helper()` in the receiver, as queue 595 made the Quitters'
+  (test_interpreters' test_modified_arg: the exec() globals' `__builtins__` shared back, :tools-misc).
+- **A raise() of a signal the process ignores** (builtins_signal.go's ExtRaiseSignal): discarded, as the kernel discards it,
+  not the C world's default action, which ended the driver.
