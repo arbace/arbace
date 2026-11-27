@@ -3371,7 +3371,8 @@
     (let [args (resolve-args scope t forms true)]
       (if (= :alias (:tk t))
         ;; an alias template's specialization is its pattern's type with the arguments substituted ([temp.alias]/2)
-        (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))]
+        (let [args (or (complete-args t args) (fail :template "missing template arguments for " nm))
+              outer-alias *alias-node*]
           (binding [*alias-node* (when (:range (:pattern t)) (:pattern t))]
             (let [bs (bind-scope (:scope t) (:params t) args nil)
                   ;; (cpp-tzdb: an alias template's requires-clause, its associated constraints, [temp.alias]/2 with
@@ -3389,8 +3390,14 @@
                                         (sema/constraint-satisfied? bs rc))
                                       (catch arbace.lang.ExceptionInfo _ (reset! d true) true))]
                           (when-not ok
-                            (throw (ex-info (str "codegen: constraints not satisfied for the alias template " (:name t))
-                                            {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))}))))))
+                            ;; (cpp-sema-const, the checker: not satisfied with no doubt, GCC's "template constraint failure",
+                            ;; at the alias template's use, or at the alias whose pattern names it: cpp2a/concepts-alias.C)
+                            (if (and (sema/checking?) (not @d))
+                              (throw (ex-info (str "codegen: template constraint failure for '" (:name t) "' (an alias template's constraints)")
+                                              (cond-> {:codegen/refused :template :cx/constraint-false true :cx/sure-drop true}
+                                                (and outer-alias (not (sema/header-node? outer-alias))) (assoc :cx/node outer-alias))))
+                              (throw (ex-info (str "codegen: constraints not satisfied for the alias template " (:name t))
+                                              {:codegen/refused :template :cx/constraint-false (and (sema/checking?) (not @d))})))))))
                   ty (sema/resolve-type bs (get-in (:pattern t) [:type :qualType]))]
               ;; (queue 506, the checker: named by a declaration's own type, its T::X's access in the alias's context)
               (when (identical? f sema/*cx-alias-check*) (sema/cx-alias-access! t bs))
@@ -5100,11 +5107,33 @@
           (let [at (if-let [o (get-in f [:loc :offset])] {:range {:begin (:loc f)}} f)]
             (h (ex-info (str "codegen: literal operator template '" (:name f) "' has invalid parameter list") {:codegen/refused :template :cx/node at}) f)))))))
 
+(defn- cx-var-template-placeholder!
+  "cpp-sema-const (the checker): [temp.res.general]/6 with [dcl.type.auto.deduct]/2, a variable template's constrained placeholder
+  type whose constraint and initializer name none of the template's parameters is deduced and checked at the definition, the
+  template never instantiated: GCC's \"placeholder constraints not satisfied\" there; cpp2a/concepts-placeholder4.C's `template
+  <class T> same_as<int> auto w = true;`."
+  [scope n]
+  (when-let [h (when (and (sema/checking?) (not (sema/header-node? n))) sema/*on-refusal*)]
+    (let [v (last (kids n))
+          qt (str (get-in v [:type :qualType]))
+          init (first (kids v))
+          names (keep #(when (#{"TemplateTypeParmDecl" "NonTypeTemplateParmDecl" "TemplateTemplateParmDecl"} (:kind %)) (:name %)) (kids n))
+          mentions? (fn [^String t] (some #(and (string? %) (seq %) (re-find (re-pattern (str "(?<![A-Za-z0-9_$])" (java.util.regex.Pattern/quote %) "(?![A-Za-z0-9_$])")) t)) names))]
+      (when (and (= "VarDecl" (:kind v)) init (re-find #"\bauto\s*$" qt) (re-find #"<" qt) (not (mentions? qt))
+                 (not (mentions? (str (#'sema/node-text init)))))
+        (try (let [t (sema/resolve-type scope qt)]
+               (when (and (map? t) (= :auto (:k t)) (:tc t))
+                 (let [x (sema/rv (binding [sema/*cutoff* Long/MAX_VALUE] (sema/analyze {:scope scope} init)))]
+                   (sema/deduce-auto t x scope "initializer" v))))
+             (catch arbace.lang.ExceptionInfo e
+               (when (= :placeholder (:codegen/refused (ex-data e))) (h e v))))))))
+
 (defn declare-template
   "The :declare hook: a template's declaration node entered (nil when the node is not one of a template's)."
   [scope n]
   (when (#{"FunctionTemplateDecl" "ClassTemplateDecl" "VarTemplateDecl" "TypeAliasTemplateDecl"} (:kind n))
     (cx-structural-params! scope n))
+  (when (= "VarTemplateDecl" (:kind n)) (cx-var-template-placeholder! scope n))
   (case (:kind n)
     "ClassTemplateDecl"
     (if-let [[cn qt nested] (when (:completeDefinition (first (filter #(= "CXXRecordDecl" (:kind %)) (kids n)))) (ool-qualifier n))]
