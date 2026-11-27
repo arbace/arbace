@@ -26956,3 +26956,69 @@ test_set_chunking; 568's :pickle-c-gaps row DumpPickle_CLoadPickle.test_optional
   whole runs; its pickle has no list or memoryview). test_copy 81 of 81, test_copyreg 6 of 6, 597's
   test_xml_etree_c test_late_tail_mix_pi_comments passes. :pickle-c-gaps' test_evil_pickler_mutating_collection and
   DumpPickle_CLoadPickle.test_optional_frames pass in all three. No record written: test_pickle's eval record is train 7's.
+
+## 2026-11-27: train 7 recorded (Python's 100% train): eval 43,375 / 6 / 482 -> 43,838 / 0 / 39, completeness 0.9972 -> 0.9998
+
+Train 7 (mac/train-7) after its assembly (above): py-pickle-heap-1126 (`6554acac8`: the memoryview mirror, 597's leaked list
+items; only go/arbace/pyctypes/capi_mirror.ae, so no Go-level merge, the merged runtime printed, gofmt, vet and test clean)
+folded in before the records at the coordinator's call, so the records ran on no executable with test_pickle's known heap
+corruption; mac/next `62e466f13` (train 6) merged, its divergences.edn conflicts merged class by class, 3-way
+(.tmp/t7/tools/dvmerge.py: headers by git merge-file, :tests as 3-way sets); py-frame-1126's runner fix `e99044991` (a
+driver's kill takes its whole run and a dead driver's orphans holding its pipe) and py-pool20-1127 `f3da80d1c`. The
+ctypestest world was rebuilt once from the merged sources (`0302e69d7`, 40 min, 6.0 GB; verify equal, 33 min) and is not
+an input pyctypes changes. Built twice under the big lock (bin/arbace-go --gate-build, the second after py-pickle-heap,
+j2g's edge skipped: nothing j2g asks moved): KEY20 `c04e326d97bedc4262f7` at `72ffbd1b5` (2 h 05 min, 30.6 GB peak), smoke ok;
+the first build `2eb4f1a8537e` (ca5a378f4) is superseded. assets/587 of the queue: train 7's seed archive for the Mac
+(bin/seed --make of the first build's module, SHA-256 f391efab..., queue `20af1dd50`).
+
+Records (the train's own executable, PYI_RUNTIME_REQUIRE=compiled, whole modules, each run under .tmp/t7/wd-run.sh: a run
+with no module finished in its largest module timeout plus 900 s killed whole, its started modules held; the record runs
+queued from a shell holding no lock), judged by `bin/pyi check --judge`, recorded by `--record`:
+- batch 1 (records-7.sh, 16 GiB: 115 modules 2 at once, 14 multiprocessing modules 1 at once; 3 h 31 min): 108 modules
+  recorded with no failing method, test_pickle with them (its one non-pass, CPicklingErrorTests.test_wrong_newobj_ex_class,
+  a skip as CPython's reference has it); then test_capi, test_datetime, test_import and test_interpreters, which the judge
+  held only on 169 subtest rows the record had (not-run) and the run no longer gives, their parents now running (passing,
+  or in n/a classes): no class added; 598's seven test_capi rows moved from :capi-port to :capi-refcounts with it.
+  test_crossinterp's record is kept as it was: the run gave 5,171 skipped subtest rows whose ids hold an object's address
+  and the worktree's path (not a reproducible record; the maturity item's absolute path), all :testinternalcapi's (n/a).
+- batch 2 (records-7b.sh): the SIGINT lesson. A command started with & by a non-interactive bash runs with SIGINT and
+  SIGQUIT ignored (SigIgn 0x6), and the children inherit it: wd-run.sh's first version started bin/pyi check so, and every
+  KeyboardInterrupt test skipped ("test requires SIGINT to not be ignored") or failed (test_signal, test_runpy's TestExit,
+  test_threading's interrupt_main, test_unittest's test_break, test_pdb's issue_20766, forkserver's test_interrupt). Fixed:
+  `setsid env --default-signal=INT,QUIT ...`; the eight modules rerun and recorded with 0 failing (test_signal, test_runpy,
+  test_threading, test_unittest, test_pdb, concurrent_futures' test_shutdown, test_wait, test_as_completed). Train 6's
+  records had no such row (the coordinator's check). Also my lesson: a ticket queued from inside a held lock (ARBACE_HEAVY_HELD
+  set) runs at once, with no ticket and no cgroup: the first records ran unlocked 20 minutes and raced the runner's AOT
+  compile (stopped by PID, nothing recorded); every later ticket queued with `env -u ARBACE_HEAVY_HELD -u ARBACE_HEAVY_SLOT`.
+- Pool(200) (the user's request): a spawn Pool(2)'s workers about 260-320 MB of their own each on the build, so Pool(200)
+  about 61 GB; spawn's and forkserver's test_misc run alone in a cgroup of exactly 50 GiB (HEAVY_LOCK_CAP_PCT 100) were
+  killed at the cap within a minute (peaks 53.7 and 52.3 GB; the runner's 5 s memory check did not fire first); fork's
+  test_misc runs the same Pool(200) (the script's default start method) and was killed at its ticket's 20 GiB cap. CPython
+  3.14.10 here: about 9.5 MB a spawn worker, 6.5 MB a forkserver worker (.tmp/pool200). Then the user's decision of
+  2026-11-27: test_large_pool with Pool(20) for now (`f3da80d1c`, test/python/libtest_run.py's large_pool_adjust, under pyi
+  alone; removed once pyi's children fit Pool(200)): the three test_misc modules recorded (records-7d.sh, 0 failing), the
+  three test_large_pool rows passing that variant of CPython's test; :process-footprint emptied and dropped.
+- the process modules with raised limits (the user, 2026-11-27; records-7c2.sh, 40 GiB with HEAVY_LOCK_CAP_PCT 100, 1 at a
+  time; spawn's and forkserver's test_processes 38912 MB and 14400 s, test_process_pool 38912 MB and 7200 s): spawn's
+  test_processes 696 s, forkserver's 710 s, test_process_pool 658 s, recorded whole with per-row holds (the old rows kept,
+  .tmp/t7/tools/holdrows.py and by hand where the writer leaves a failing row out): test_process_pool's spawn
+  test_free_reference and test_shutdown_race_issue12456 (segmentation faults in the C world: two Python threads on one C
+  stack, the C _pickle's first record run), forkserver's WithProcessesTestProcess.test_interrupt and spawn's
+  WithProcessesTestPool.test_async_timeout (idle past 90 s, the record passing them): owed to py-regress-1127's `678975e2a`
+  (train 9). Forkserver's test_ressources_gced_in_workers joins its spawn twin in :multiprocessing-children (py-mp-1127's
+  fix in train 9).
+- Held whole, records untouched (owed to py-regress-1127, train 9, `45d37d16c` and after): test_sys (test_getallocatedblocks:
+  594's partial _testinternalcapi lacks pymem_getallocatorsname; owed, a small fix), test_support (test_recursion,
+  test_get_recursion_depth: 594's get_recursion_depth one frame too many), test_gc (test_trash_weakref_clear: py-breaker's
+  ExtReap calls the callback of a weak reference that is itself garbage, bpo-38006).
+- The classes: 210 passing names dropped; emptied and dropped :warnings-c, :elementtree-c, :pickle-core,
+  :extension-subinterp-check, :signal-wakeup-errors, :process-footprint and :spawn-children-timing (:c-accelerators and
+  :zstd-multithread empty, their :match kept); the user's decisions of 2026-11-27: :gc-referrers-empty and :child-is-pyi
+  n/a (were by design); forkserver's TestManagerExceptions.test_dispatch and test_queue_get to :finalization (n/a, 537-2 (a),
+  as spawn's twins). bin/pyi divergences rc 0, bin/reap --record (56 of 56 cells, 0 problems), bin/crops-score --record
+  (Python completeness 0.9972 -> 0.9998, maturity and independence 1.0) and --judge --strict 0 problems, records-check 0,
+  markers ok. No bin/gate (the user: none until Python is 100%).
+- Left deferred (39): :multiprocessing-children 6, :core-objects-287 5, :runner-limits 4, :buffer-exports 3, :capi-port 3,
+  :finalization-collect 3, :host-memory 2, :regrtest-children 2, one each in :pickle-c-gaps, :code-objects, :ctypes-port,
+  :sys-module, :testcapi, :testcapi-behaviour, :finalization-goi, :audit-hooks, :os-and-files-misc, :tools-misc,
+  :sys-getsizeof.
