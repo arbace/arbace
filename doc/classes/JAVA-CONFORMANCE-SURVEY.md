@@ -5660,9 +5660,8 @@ probes (`bin/repr-java read` of a probe's Java, run by `test/java/run.ae` on the
   method-ref-val: elided) and registers them in the frame table by gc's names (`out/literal-frames`: the function's
   `.funcK`, a literal in a literal `.K`, counted in source order: cmd/compile's closureName, checked on a Go program, an
   inlined function's literals keeping their names); jrt's frameOf takes a try body's literal in a lambda as the lambda's
-  frame. The diagnosis is by reading (train 8's record keeps the message's first line); the compiled run that would show
-  the expected and actual names waited behind train 9 (`.tmp/worktrees/java-ffm-1127-base/.tmp/c5766.sh`). j2g unit test
-  `test-ffm-1127`.
+  frame. The diagnosis is by reading (train 8's record keeps the message's first line, not the expected and actual names;
+  a compiled run of t05766 alone, 24 GiB, could not run beside train 9 and was withdrawn). j2g unit test `test-ffm-1127`.
 
 Proven by day: `bin/jrt-convert derive --check` (110 overlays, 0 not as derived); `bin/jrt-convert predict --list` of the eight FFM rows (light:
 2.9 GB): the changed files read with context, their forms laid into jdk/forms (JavaNioAccess, the proxies, ClassPathResources;
@@ -5673,4 +5672,5 @@ as before), all eight rows analyzed at the compiled level (a second predict, `--
 j2g's analysis of javac's tool world (`--analyze-only` over jdk/javac/forms with both variant directories, 4.7 GB): 12,708
 classes, 0 analysis failures, the variants of TemplatesImpl (1 replaced, 1 cut), CatalogHolder, URL and Buffer applied, the
 only stub in TemplatesImpl, JdkXmlConfig, ClassPathResources and URL the addReads above (built since); `bin/javac-vendor names` (7,192 and 10,841 classes, 0 Go names
-twice); `bin/j2g-unit`'s new test (the other 7 failures the same on next).
+twice); `bin/j2g-unit`'s new test (the other 7 failures the same on next); jrt's Go printed by `bin/jrt test`'s print step, `go vet`
+and `go test` of arbace/jrt with the runtime overlay (every test but the 11 that read the JVM's test data, not made here).
