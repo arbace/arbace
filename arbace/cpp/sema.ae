@@ -5083,6 +5083,8 @@
         (ce-sure! "the value of '" (:name v) "' is not usable in a constant expression"))))
   (when (and (= ::unknown @(::cell l)) (checking?) (::uref l))
     (ce-sure! "'" (:name (var* (::uref l))) "' is not a constant expression"))
+  (when (and (= ::unknown @(::cell l)) (checking?) (::utemp l))
+    (ce-sure! "the value of '<temporary>' that '" (:name (var* (::utemp l))) "' binds is not usable in a constant expression"))
   (when (= ::unknown @(::cell l)) (not-constant "a read of an object of unknown value"))
   (let [p (::path l) v @(::cell l)
         x (loop [x v ks (seq p)]
@@ -5432,6 +5434,12 @@
                                       (and (= Long/MIN_VALUE (long v)) (abi/integral? t) (abi/signed? t))
                                       (if (checking?) (ub! e "value 9223372036854775808 is outside the range of representable values")
                                           (not-constant "a signed overflow"))
+                                      ;; (cpp-sema-const, the checker: [expr.pre]/4 for a narrower signed type too, -INT_MIN's
+                                      ;; 2147483648: cpp0x/constexpr-overflow.C's abs_s)
+                                      (and (checking?) (integer? v) (abi/integral? t) (abi/signed? t)
+                                           (< (long (abi/size-of (abi/underlying (abi/unq t)))) 8)
+                                           (= (long v) (- (bit-shift-left 1 (dec (* 8 (long (abi/size-of (abi/underlying (abi/unq t))))))))))
+                                      (ub! e "value " (- (long v)) " is outside the range of representable values")
                                       :else (unchecked-negate (long v)))
                             "+" v "~" (if (wide? t) (- -1 (bigint v)) (bit-not (long v))))))
        :not (if (zero? (ce-num (ev (:e e)))) 1 0)
@@ -5623,6 +5631,14 @@
                  (and (checking?) (= :var (:op x)) (:raw x) (abi/ref? (:ty x))
                       (= :param (:storage (var* (:id x)))) (:name (var* (:id x))))
                  (assoc (ce-unknown-loc [:ref (:id x)]) ::uref (:id x))
+                 ;; (cpp-sema-const, the checker: [expr.const]/4-5, a reference of static storage duration bound to a temporary
+                 ;; of a type that is not const -- `int &&r = 42;` -- refers to an object not usable in constant expressions:
+                 ;; its address alone, a read of it surely no constant, ce-get's ::utemp; cpp0x/constexpr-ref10.C)
+                 (and (checking?) (= :var (:op x)) (:raw x) (abi/ref? (:ty x))
+                      (let [v (var* (:id x))]
+                        (and (:name v) (#{:global :member-static :static-local} (:storage v)) (not (:constexpr v)) (not (:cx-constexpr v))
+                             (= :bind-temp (:i (or (:ginit v) (:sinit v)))) (not (:c (:to (abi/unq (:ty v))))) (not (:v (:to (abi/unq (:ty v))))))))
+                 (assoc (ce-unknown-loc [:ref (:id x)]) ::utemp (:id x))
                  ;; (h-cpp-consteval: an assignment's lvalue read, `return (u.i = 42);`: the value stored)
                  (and (#{:assign :cassign} (:op x)) (not (abi/class? (abi/unq (:ty x)))))
                  (ev x)
@@ -5656,7 +5672,12 @@
                      ;; const double)
                      ;; (cpp-sweep: a function parameter's too, outside the evaluation of its function's call, GCC's "'p' is not
                      ;; a constant expression": cpp0x/constexpr-ref13.C's array_size_ptr(param))
-                     (do (when (and v (not (:constexpr v)) (not (:c (:ty v))) (not (abi/ref? (:ty v)))
+                     (do (when (and v (not (:constexpr v)) (or (not (:c (:ty v)))
+                                                                   ;; (cpp-sema-const: [expr.const]/4, a const variable of pointer
+                                                                   ;; type no potentially-constant one, its value not usable:
+                                                                   ;; cpp0x/constexpr-59686.C's `const int * const y`)
+                                                                   (and (checking?) (or (abi/ptr? (abi/unq (:ty v))) (abi/mptr? (abi/unq (:ty v))))))
+                                    (not (abi/ref? (:ty v)))
                                     (#{:global :local :static-local :member-static :param} (:storage v)) (:name v))
                            ;; (cpp-sweep, the checker: inside an evaluated call too, at the read: a constexpr function's static
                            ;; local, cpp23/constexpr-nonlit5.C's `return v;`)
@@ -5860,6 +5881,11 @@
                          _ (ce-end-lives! (keep #(get env2 %) (:params f)) e)]
                      (cond (abi/void? (abi/unq rt)) 0
                            (= :ret (first r)) (if (or (abi/ref? rt) (abi/class? (abi/unq rt))) (ce-store rt (second r)) (ce-wrap t (second r)))
+                           ;; (cpp-sema-const, the checker: [stmt.return]/4, flowing off the end of a function that returns a
+                           ;; value is undefined, so no constant expression, [expr.const]/5.8: GCC's "control reaches end of
+                           ;; non-void function" in the call's expansion, cpp1y/constexpr-return2.C)
+                           (and (checking?) (= :normal (first r)) (not= "main" (:name f)) (not (:coroutine f)))
+                           (ub! e "'" (:name f) "' flows off the end of a function that returns a value")
                            :else (not-constant "no return")))))))
        ;; (CP374 (a): pointers into string literals and arrays, as clang's ExprConstant's LValue with its designator: a
        ;; string literal's or a local array's first element by decay, moved by + and -, read by a subscript or *, compared;
@@ -5887,10 +5913,14 @@
                             (init-for (:ty v) (analyze ctx (or (:init v) (:init-node v))) ctx :copy))
                         el (fn [i] (case (:i i) :expr (ce-wrap (:of at) (binding [*ce-manifest* true *vci-active* (conj *vci-active* (:id a))] (ce-eval (:e i) {})))
                                      (:zero :none nil) 0 (not-constant "an element's initializer")))]
-                    (if (and (= :list (:i i)) (:n at) (not (abi/class? (abi/unq (:of at)))) (abi/scalar? (abi/unq (:of at))))
+                    (cond
+                      (and (= :list (:i i)) (:n at) (not (abi/class? (abi/unq (:of at)))) (abi/scalar? (abi/unq (:of at))))
                       (let [xs (mapv el (:items i))]
                         {::base (into xs (repeat (- (long (:n at)) (count xs)) (el (:fill i)))) ::i 0})
-                      (not-constant "the decay of a global array")))
+                      ;; (cpp-sema-const: one from a string literal, [dcl.init.string]/3: its code units and zeros to its bound;
+                      ;; cpp0x/constexpr-array13.C's `*(p-1)` before its first element)
+                      (and (= :string (:i i)) (:n at)) {::base (ce-init (:ty v) i {}) ::i 0}
+                      :else (not-constant "the decay of a global array")))
                   ;; (cpp-def, the checker: an array of static storage duration not usable in constant expressions, its address
                   ;; alone -- [expr.const]/13's address constant: elements' addresses formed and compared, none read -- a pointer into
                   ;; its unknown object, *ce-unknown*'s, its bound kept: cpp1y/constexpr-89074-3.C's `&a[0] == &v[4]`)
@@ -5984,6 +6014,10 @@
                 (if-let [fid (and (map? p) (::fnp p))]
                   (ev {:op :call :fn fid :args (:args e) :ty (:ty e) :cat (:cat e) :cx-at (:cx-at e)})
                   (not-constant "the expression :icall")))
+       ;; (cpp-sema-const, the checker: a GNU vector's lane by lane operation, its operands evaluated first, their errors the
+       ;; evaluation's -- [expr.const]/5's reads among them, cpp0x/pr59641.C's `a < b` of reference parameters --, the lanes'
+       ;; results not computed)
+       :vec-binop (do (when (checking?) (ev (:l e)) (ev (:r e))) (not-constant "the expression :vec-binop"))
        (not-constant "the expression " (:op e))))))
 
 
@@ -6709,6 +6743,7 @@
                          (let [fl (str (:file (loc-of (get-in (:node f) [:range :begin]))))]
                            (and (re-find #"/usr/include/" fl) (not (re-find #"/c\+\+/|/lib/gcc/|/lib/clang/" fl))))))))))
 
+(declare cx-enclosing-classes)
 (defn- ce-undefined?
   "cpp-ce3 (the checker): whether the constexpr function `f` of the main file has no definition yet where the evaluation is
   ([expr.const]/5.3): no body, or one after *ce-point* in the same file; not defaulted or implicit, no template's specialization,
@@ -6718,7 +6753,26 @@
                 (or (and (not (:body f)) (not (:tbody f)))
                     (when-let [pt *ce-point*]
                       (let [a (some-> (get-in (:node f) [:range :begin]) loc-of) b (some-> (:begin pt) loc-of)]
-                        (and (:body f) (:offset a) (:offset b) (= (:file a) (:file b)) (> (long (:offset a)) (long (:offset b)))))))
+                        (and (:body f) (:offset a) (:offset b) (= (:file a) (:file b))
+                             (or (> (long (:offset a)) (long (:offset b)))
+                                 ;; (cpp-sema-const: [class.mem.general]/7, a member function's body inside its class is a
+                                 ;; complete-class context, so not defined before the outermost enclosing class is complete:
+                                 ;; where the evaluation is inside that class, the function used before its definition --
+                                 ;; cpp0x/constexpr-54002.C's `constexpr static int bar = foo(sizeof(int));`)
+                                 (when-let [cs (some-> (:cls f) cx-enclosing-classes)]
+                                   (some (fn [cid] (let [r (:range (:cx-node (abi/cls cid)))
+                                                         ca (some-> (:begin r) loc-of) ce (some-> (:end r) loc-of)]
+                                                     (and (:offset ca) (:offset ce) (= (:file ca) (:file a))
+                                                          (< (long (:offset ca)) (long (:offset a)) (long (:offset ce)))
+                                                          (< (long (:offset ca)) (long (:offset b)) (long (:offset ce)))
+                                                          ;; (the evaluation in no member function of those classes, itself a
+                                                          ;; complete-class context)
+                                                          (not-any? (fn [g] (and (contains? cs (:cls g))
+                                                                                 (let [gr (:range (:node g)) ga (some-> (:begin gr) loc-of) ge (some-> (:end gr) loc-of)]
+                                                                                   (and (:offset ga) (:offset ge) (= (:file ga) (:file b))
+                                                                                        (<= (long (:offset ga)) (long (:offset b)) (long (:offset ge)))))))
+                                                                    (vals @*fns*)))))
+                                         cs)))))))
                 (not (:defaulted f)) (not (:implicit f))
                 (not (:out-of-line-default f)) (not (:ool-defaulted f)) (not (:deleted f)) (not (:tinst f))
                 (not (and (:cls f) (some-> (abi/cls (:cls f)) :lambda)))
@@ -10514,8 +10568,12 @@
   [r]
   (let [unrelated? (fn [a b]
                      (let [a (abi/unq a) b (abi/unq b) ca (class-id a) cb (class-id b)]
+                       ;; (cpp-sema-const: [expr.reinterpret.cast]/6 and /8, a pointer to function converted to a pointer to an
+                       ;; object type, void among them, or back, or to another function type: no static_cast's, a reinterpret_cast;
+                       ;; cpp0x/constexpr-89599.C's `(void*) &foo`)
+                       (or (and (not= a b) (or (abi/fn? a) (abi/fn? b)))
                        (and (not= a b) (not (abi/void? a)) (not (abi/void? b)) (not (abi/fn? a)) (not (abi/fn? b))
-                            (not (and ca cb (or (abi/derived-from? ca cb) (abi/derived-from? cb ca)))))))]
+                            (not (and ca cb (or (abi/derived-from? ca cb) (abi/derived-from? cb ca))))))))]
     (case (:op r)
       :cast (and (= :noop (:ck r)) (abi/ptr? (abi/unq (:ty r))) (some-> r :e :ty abi/unq abi/ptr?)
                  (unrelated? (:to (abi/unq (:ty r))) (:to (abi/unq (:ty (:e r))))))
@@ -16139,6 +16197,14 @@
     (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
            (let [o (ce-init (:ty v) i {})]
              (when (and (vector? o) (every? map? o)) (ce-destroy-cells! (map atom (rseq o))))))
+         (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x))))
+  ;; (cpp-sema-const: [dcl.constexpr]/10 with [dcl.init.aggr]/4, an array's braced initializer the full-expression too, each
+  ;; element's initialization evaluated: cpp0x/constexpr-89599.C's `constexpr void *arr[2] = { (void*) &foo, ... }`)
+  (when (and (checking?) (or (:cx-constexpr v) (:cx-constinit v)) (= :list (:i i)) (abi/arr? (abi/unq (:ty v)))
+             (not (and (:cx-constexpr v) (>= (long *cxx-year*) 20)
+                       (let [et (abi/unq (:of (abi/unq (:ty v))))] (and (abi/class? et) (not (trivial-dtor? (:id et))))))))
+    (try (binding [*ce-manifest* true *ce-point* (:cx-range v) *ce-steps* (atom 0) *ce-wide* true *ce-const* (atom #{}) *ce-pos* (atom nil) *ce-dead* (atom #{}) *ce-temps* (atom [])]
+           (ce-init (:ty v) i {}))
          (catch arbace.lang.ExceptionInfo x (cx-sure-error! v x)))))
 
 ;; cpp-p2564 (the checker): P2564R3's immediate escalation ([expr.const]/16-18), *cx-consteval-unit* above.
