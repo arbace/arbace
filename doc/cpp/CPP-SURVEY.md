@@ -12555,3 +12555,51 @@ checker's types -- the checker leaves :nx out, cpp1z/noexcept-type3.C's false de
 complete-class contexts, GCC's parenthesized array new in C++20 (cpp2a/paren-init36.C, 37.C's false errors) and the rest), and 73 that
 clang fails as well (the cell's deferred rows). At this pass's rate (59 rows a day's pass) the stage reaches 1 only by CX12's tail
 done row by row; no input of it is the oracle tier's by design.
+
+## As built: cpp-sema-types, clang-only dg rows by the own front end: types and classes (2026-11-27; branch `cpp-sema-types-1127` from mac/next `2e2cd3ef1`)
+
+One of three parallel passes over the read stage's clang-only dg rows (after cpp-read-indep's fifth pass, 0.931), split by
+semantic area; this one took types and classes: incomplete types, complete-class contexts, access, the class rules (special
+members, virtual functions, unions, bit-fields, member declarations) and C++20's parenthesized array new. The others took
+overload resolution with noexcept in function types, and constant evaluation with templates before instantiation and pack
+deduction. Each rule from the standard's text, no GCC or clang code (arbace/cpp/sema.ae, arbace/cpp/template.ae,
+arbace/repr/cpp/diag.ae, arbace/repr/cpp/parse.ae):
+
+- New-expressions ([expr.new]/5, /7, /25; [dcl.init.general]/16.5): a parenthesized array type-id or a typedef of an array,
+  `new (int[2])(1, 2)`, is an array new of its element type, its bound the array's; an omitted first bound, `new char[]("foo")`, is
+  deduced from the initializer (the parser marks :sizeOmitted); one parenthesized expression of an array new an expression-list
+  (cpp2a/paren-init36.C, paren-init37.C's false errors gone); the class's allocation and deallocation functions' access
+  (init/delete4.C).
+- Access ([class.access]/1-2, [class.access.base]/4-6, [namespace.udecl]/19, [temp.deduct.guide]/3): a template-id's type
+  arguments in a qualifier or a declaration's type (template/access26.C); a template argument `&A::j` of a local's type
+  (template/access36.C); the derived-to-base pointer conversion (inherit/access2.C); a static member function as a value, `foo.g`,
+  `&C::f` (inherit/access6.C); member operator functions called by operator expressions (diagnostic/inhibit-warn-2.C); a
+  qualified non-static member's naming class an accessible base of the object's class, a public static member through an
+  inaccessible base, a base's injected-class-name through an inaccessible base (lookup/scoped1.C, tc1/dr142.C); a
+  using-declaration's data members, checked at the declaration and given its access at the uses, and the using-declarator-list
+  (lookup/using26.C, cpp1z/using9.C); a specialization's friend declaration of another class's member (template/friend32.C); a
+  friend template-id befriending its arguments' specialization alone; a member deduction guide's access (cpp1z/class-deduction94.C).
+- Incomplete types ([basic.types.general]/5-6, [class.mem]/8, [dcl.enum]/6, [basic.def]/5): the class being defined in its static
+  data members' initializers (offsetof, sizeof, alignof: ext/builtin-offsetof4.C) and as an inline static member's type
+  (cpp0x/constexpr-ice10.C); an enumeration without a fixed type in its enumerators (__underlying_type, ext/underlying_type12.C);
+  sizeof of an array of unknown bound, an enumerator's too (ext/flexary6.C); a static data member's out-of-class definition
+  (init/pr71516.C); a variable reported of incomplete type is erroneous, its uses quiet (template/error1.C's false error gone).
+- Non-static members ([expr.prim.id.general]/2, [dcl.fct.default]/9): a non-static member function as decltype's or typeid's
+  operand, a member whose decltype names one reported and the class going on (cpp0x/decltype50.C, decltype31.C, pr66130.C,
+  rtti/typeid8.C); a non-static data member in a member function's default argument (template/error15.C); a discarded statement
+  outside a template checked ([stmt.if]/2, cpp1z/constexpr-if11.C).
+- Class rules: the virt-specifiers ([class.virtual]/4-5, [class.mem.general]/1: override without overriding, final on no virtual,
+  overriding a final function, virt-specifiers outside a member-declarator or on a friend or a member template;
+  cpp0x/override1.C); covariant return types ([class.virtual]/8, inherit/covariant14.C); an implicit virtual destructor deleted
+  (a subobject's deleted destructor, an inaccessible operator delete) overriding a non-deleted one ([class.dtor]/7,
+  [class.virtual]/18; cpp0x/implicit1.C); a union's default constructor deleted for a variant member without one
+  (other/anon-union2.C); const objects default-initialized of a class not const-default-constructible, unions, specializations
+  and namespace scope (cpp2a/constexpr-init7.C, init/pr42844.C); bit-fields: zero and negative widths, a specialization's
+  non-integral type, the address of one, sizeof of a qualified one ([class.bit]/1, /3; template/bitfield2.C, parse/bitfield2.C,
+  cpp1z/decomp-bitfield1.C, diagnostic/alignof3.C); designators of direct members alone ([dcl.init.aggr]/3.1, cpp2a/desig20.C);
+  an expression for an aggregate element with no element ([dcl.init.aggr]/16, cpp1z/aggr-base3.C); a member using-declaration
+  naming its own class ([namespace.udecl]/3, inherit/using5.C); a mem-initializer naming no direct or virtual base
+  ([class.base.init]/2, template/ctor5.C); a constructor taking its class by value with the other parameters defaulted
+  ([class.copy.ctor]/5); a friend function two specializations define (template/friend47.C); a flexible array member's default
+  member initializer used anywhere (ext/flexary20.C); C language linkage of one name and two types ([dcl.link]/6-7,
+  parse/friend5.C); block-scope extern declarations of one name and namespace of different types ([basic.link]/8, /11).

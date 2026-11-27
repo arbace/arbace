@@ -3693,7 +3693,12 @@
                               ;; an unnamed bit-field: GCC's "negative width in bit-field 'x'", "zero width for bit-field 'x'", at
                               ;; the member; a specialization's too, its width from the template's arguments, template/bitfield2.C)
                               _ (when (and (checking?) *on-refusal* (integer? bits) (not (header-node? k))
-                                           (or (neg? (long bits)) (and (zero? (long bits)) (:name k))))
+                                           (or (and (neg? (long bits))
+                                                    ;; (an unsigned width's value is no negative one, parse/array-size3.C's -1ULL)
+                                                    (let [wt (try (some-> (binding [*unevaluated* true] (analyze {:scope cs} (first (kids k)))) :ty abi/unq)
+                                                                  (catch arbace.lang.ExceptionInfo _ nil))]
+                                                      (and (map? wt) (abi/integral? wt) (not (contains? abi/unsigned-ns (abi/bn wt))))))
+                                               (and (zero? (long bits)) (:name k))))
                                   (*on-refusal* (ex-info (str "codegen: " (if (neg? (long bits)) "negative width in" "zero width for") " bit-field '" (:name k) "'")
                                                          {:codegen/refused :bitfield-width :cx/node k})
                                                 k))
@@ -9733,6 +9738,10 @@
 
 (declare elide-agg)
 
+;; (cpp-sema-types: elide-sub's empty-subaggregate rule off for a parenthesized aggregate initialization, which elides no braces,
+;; and an array's elements, cx-empty-agg-elide!'s)
+(def ^:dynamic *cx-elide-off* false)
+
 (defn- elide-sub
   "One element of type `st` initialized from the flat items `items` ([dcl.init.aggr]/16, brace elision): a braced
   item, an item that initializes it whole, or as many items as a subaggregate takes. [item rest]."
@@ -9743,7 +9752,7 @@
       ;; (cpp-sema-types, the checker: [dcl.init.aggr]/16, an expression of no class type for an element of an aggregate class
       ;; with no element: no implicit conversion makes the element from it, and the brace elision it then assumes has no first
       ;; element to give it to: GCC's "could not convert '1' from 'int' to 'base'"; cpp1z/aggr-base3.C's `derived d1{1}`)
-      (and (checking?) (map? it) (:ty it) (abi/class? u) (aggregate? u) (empty? (aggr-subs u 0))
+      (and (checking?) (not *cx-elide-off*) (map? it) (:ty it) (abi/class? u) (aggregate? u) (empty? (aggr-subs u 0))
            (not (abi/class? (abi/unq (abi/non-ref (:ty it))))) (not= :init-list (:k (:ty it))))
       (fail :init "initializer for '" (:name (abi/cls (:id u))) "' must be brace-enclosed (an element with no element of its own)")
       (and (or (abi/arr? u) (and (abi/class? u) (aggregate? u)))
@@ -9753,10 +9762,11 @@
       :else [it (rest items)])))
 
 (defn- elide-agg [u items]
+  (binding [*cx-elide-off* (or *cx-elide-off* (abi/arr? u))]
   (loop [ts (aggr-subs u (count items)) items items out []]
     (if (or (empty? ts) (empty? items))
       [out items]
-      (let [[x r] (elide-sub (first ts) items)] (recur (rest ts) r (conj out x))))))
+      (let [[x r] (elide-sub (first ts) items)] (recur (rest ts) r (conj out x)))))))
 
 ;; (cpp-singles, the checker: [dcl.init.aggr]/16, an array's element of an aggregate class with no element (no base, no named
 ;; non-static data member) from an expression of a type that is no class: no implicit conversion makes the element from it, so
@@ -9786,7 +9796,7 @@
         src (assoc src :items items)]
     (if (and (= 1 (count items)) (abi/class? u) (= (class-id (:ty (first items))) (:id u)))
       src
-      (let [[out r] (elide-agg u items)]
+      (let [[out r] (binding [*cx-elide-off* (or *cx-elide-off* (boolean (:paren src)))] (elide-agg u items))]
         (if (seq r) src (assoc src :items out))))))
 
 
@@ -15517,7 +15527,9 @@
                                                            (let [ss (if (= "CompoundStmt" (:kind dk)) (kids dk) [dk])
                                                                  bc (block-ctx c)]
                                                              (doseq [x ss]
-                                                               (try (stmt bc x)
+                                                               ;; (its immediate invocations not evaluated: a discarded statement's
+                                                               ;; call of a consteval function is no error, cpp2a/consteval11.C)
+                                                               (try (binding [*cx-no-imm* true] (stmt bc x))
                                                                     (catch arbace.lang.ExceptionInfo e
                                                                       (when (and (:codegen/refused (ex-data e)) (not (:cx/reported (ex-data e))))
                                                                         (*on-refusal* e x)))))))]
