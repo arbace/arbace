@@ -94,7 +94,9 @@
 #                                  (test/python/check-lib-test-linux-amd64.edn, PYI_CHECK_RECORD) passes that does not pass now a
 #                                  regression, "   failing: ID" a line each; the negative controls (test/python/controls.edn);
 #                                  --only FILE: MODULE or MODULE/TEST-ID lines (the gate's rotation's lists); --record writes the
-#                                  record (the main host's); --judge DIR judged again, nothing run; RUN/results.tsv the rows
+#                                  record (the main host's); --judge DIR judged again, nothing run; RUN/results.tsv the rows;
+#                                  py-footprint-1127: the drivers' children (sys.executable) by the compiled launcher (bin/pyi
+#                                  launcher), as --aot's; PYI_CHILD_LAUNCHER=0: by pyi on the tools' host (tools/pyi/python3)
 #   bin/pyi runner [VERB ARGS...]  queue 234: tools/pyi/libtest_all.py compiled by pyi's AOT (kept by the runtime's key, the
 #                                  generator's and the script's digests), its path; with VERB, that verb run by it (owned,
 #                                  run, controls, table: the check's; PYI_RUNNER=python3 or pyi another runner)
@@ -493,6 +495,9 @@ runner_exe() { script_exe "$root/tools/pyi/libtest_all.py"; }
 # and its wrapper WORK/aot/bin/python3, sys.executable of a compiled Lib/test driver: CPython's command line by bin/pyi python
 # (cmd_python), the program run by the launcher's executable, not pyi on goi (a child's start about 3 s where goi's took 30 s
 # and more). The paths are written into the wrapper, so a child started with an empty environment starts compiled too.
+# py-footprint-1127: a child's collector at GOGC 100 (PYI_CHILD_GOGC another; set after PYI_ENTRY_ENV, so os.environ is the
+# caller's), not a compiled program's 400 (AotMain's, a benchmark's): its heap about twice its live data, a spawn worker
+# importing test._test_multiprocessing about 120 MB of its own where 400 gave about 145 MB.
 # Prints the wrapper's path
 launcher_py() {
   local exe w="$AOT/bin/python3" arch
@@ -502,7 +507,7 @@ launcher_py() {
   # platform.libc_ver(sys.executable) reads the next line as tools/pyi/python3's (test.support.linked_to_musl)
   printf '#!/bin/sh
 # bin/pyi'"'"'s compiled launcher (queue 284): pyi'"'"'s C library semantics are musl'"'"'s, ld-musl-%s.so.1
-PYI_ENTRY_ENV=$(env -u PYI_ENTRY_ENV -0 | tr '"'"'\\0\\n'"'"' '"'"'\\036\\035'"'"') PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
+PYI_ENTRY_ENV=$(env -u PYI_ENTRY_ENV -0 | tr '"'"'\\0\\n'"'"' '"'"'\\036\\035'"'"') GOGC=${PYI_CHILD_GOGC:-100} PYI_LAUNCHER=%q PYI_LAUNCHER_PY=%q PYI_LAUNCHER_COMPILER=%q exec %q python "$@"
 ' \
     "$arch" "$exe" "$w" "$AOT/compiler.sh" "$root/bin/pyi" > "$w.$$"
   chmod +x "$w.$$"; mv "$w.$$" "$w"
@@ -841,7 +846,8 @@ pytop() {
 site_args=(--site "$root/tools/pyi/lib-dynload${PYI_SITE:+:$PYI_SITE}")
 
 # the host's side of the runtime (arbace.python.run): its work directory and a run's id for its scratch
-pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$" PYI_EXECUTABLE="$root/tools/pyi/python3"; }
+# py-footprint-1127: PYI_CHILD_EXECUTABLE another sys.executable (bin/pyi check's: the compiled launcher's wrapper, launcher_py)
+pyi_env() { export PYI_ROOT="$root" PYI_WORK="$WORK" PYI_RUN_ID="$$" PYI_EXECUTABLE="${PYI_CHILD_EXECUTABLE:-$root/tools/pyi/python3}"; }
 
 cmd_repl() {
   if [ "${1:-}" = --check ]; then repl_check; return; fi
@@ -1803,6 +1809,14 @@ cmd_check_lib() {
     if [ -n "$aot" ] && [ "$batch" -gt 0 ] 2>/dev/null; then
       rm -f "$d"/_batch.*; split -l "$batch" -d -a 3 "$d/modules.txt" "$d/_batch."
       parts=("$d"/_batch.*)
+    fi
+    # py-footprint-1127: pyi's drivers' children (sys.executable: script_helper's, subprocess's, multiprocessing's spawn and
+    # forkserver) by the compiled launcher too, as --aot's (queue 284), not a whole pyi on the tools' host each: a spawn
+    # worker about 70-150 MB of its own and started in about 0.5-1 s, where pyi on the host's was 260-320 MB at train 7
+    # (500-650 MB on train 6's stage 0) and 3-12 s (Pool(200) about 61 GB; _TestBarrier's parties late,
+    # :spawn-children-timing). PYI_CHILD_LAUNCHER=0: tools/pyi/python3 (pyi on the host) as before
+    if [ -z "$aot$oracle$cover" ] && [ "${PYI_CHILD_LAUNCHER:-1}" != 0 ]; then
+      local cpy; cpy=$(launcher_py) || return 1; export PYI_CHILD_EXECUTABLE="$cpy"
     fi
     for part in "${parts[@]}"; do
       local drvdir=""; if [ -n "$aot" ]; then drvdir=$(aot_lib_drivers "$d" "$part") || return 1; fi
