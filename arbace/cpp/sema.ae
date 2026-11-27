@@ -7513,6 +7513,11 @@
       (fail :conversion "cannot convert " (cx-tyname from) " to " (cx-tyname to) " implicitly")
       ;; (cpp-read-indep, the checker: [conv.ptr]/1, only a null pointer constant converts to std::nullptr_t -- an arithmetic value
       ;; of another value does not, GCC's "cannot convert 'int' to 'std::nullptr_t' in assignment", cpp0x/nullptr10.C)
+      ;; (cpp-read-indep, the checker: [expr.unary.op]/4, `&f` of a member function named unqualified is no pointer to member
+      ;; (only `&C::f` forms one), and [conv.mem] converts no pointer to function to a pointer to member: GCC's "ISO C++ forbids
+      ;; taking the address of an unbound member function to form a pointer to member function.  Say '&a::f'", warn/pmf1.C)
+      (and (checking?) (not explicit?) (abi/mptr? (abi/unq to)) (abi/ptr? (abi/unq from)) (abi/fn? (abi/unq (:to (abi/unq from)))))
+      (fail :conversion "cannot convert a pointer to function to a pointer to member implicitly (say '&C::f')")
       (and (checking?) (not explicit?) (not *cx-union-init*) (= :nullptr (abi/bn to)) (abi/arith? (abi/unq from)))
       (fail :conversion "cannot convert " (cx-tyname from) " to std::nullptr_t implicitly")
       :else (fail :conversion "conversion from " (pr-str from) " to " (pr-str to)))))
@@ -9569,6 +9574,11 @@
   {:op :init-list :items [...]}, or a vector of constructor arguments (direct-initialization); `style` :copy :direct
   :list :value :default."
   [t src ctx style]
+  ;; (cpp-read-indep, the checker: [expr.mptr.oper]/6, the result of .* or ->* with a pointer to member function is only a
+  ;; call's operand, so no initializer nor argument: GCC's "invalid use of non-static member function", expr/bound-mem-fun.C's
+  ;; `A a = B().*(&B::foo);` of a constructor template)
+  (when (and (checking?) (or (= :mbound (:op src)) (and (vector? src) (some #(= :mbound (:op %)) src))))
+    (fail :expr "invalid use of non-static member function (the result of a pointer-to-member operator not called)"))
   (let [tu (abi/unq t)]
     (cond
       ;; a semantic list's value-initialized element (the native parser's ImplicitValueInitExpr fill, [dcl.init.aggr]/5.2)
@@ -13540,7 +13550,14 @@
                            (when (and (nil? dt) (re-matches #"[A-Za-z_]\w*" nm) c (:complete c) (not= nm (:name c))
                                       (empty? (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))
                                       (empty? (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ [:unknown]))))
-                             (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' has not been declared")))))
+                             (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '" nm "' has not been declared"))
+                           ;; (a name whose every declaration found is another class's: GCC's "'~A' does not match destructor
+                           ;; name" for an object of class B, template/dtor7.C)
+                           (let [es (when (and c (:complete c) (re-matches #"[A-Za-z_]\w*" nm) (not= nm (:name c)))
+                                      (try (lookup (:scope ctx) nm) (catch arbace.lang.ExceptionInfo _ nil)))]
+                             (when (and (seq es) (empty? (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ [:unknown])))
+                                        (every? #(and (= :type (:e %)) (abi/class? (abi/unq (:ty %))) (not= (:id (abi/unq (:ty %))) (:id c))) es))
+                               (fail :pseudo-dtor "the type being destroyed is not the one the destructor names: '~" nm "' does not match destructor name"))))))
                      (when-not (class-id (:ty o)) o)))]
      (if pseudo
       (let [c (cast-expr ctx abi/void pseudo true)] (if (and (checking?) (= :cast (:op c)) (= :void (:ck c))) (assoc c :cx-pseudo-dtor true) c))
