@@ -495,8 +495,12 @@ public final class ClassPathResources {
     /** Does the jar: URL's file part (before "!/") name the executable? */
     private static boolean namesExecutable(String jarFile) {
         File exe = new File(executable());
-        if (jarFile.equals(ParseUtil.fileToEncodedURL(exe).toString()))
-            return true;
+        try {
+            if (jarFile.equals(ParseUtil.fileToEncodedURL(exe).toString()))
+                return true;
+        } catch (MalformedURLException e) {
+            // no URL of the executable's path: the file: comparison below decides
+        }
         if (!jarFile.startsWith("file:"))
             return false;
         return new File(ParseUtil.decode(jarFile.substring("file:".length()))).getAbsolutePath()
