@@ -12603,3 +12603,29 @@ arbace/repr/cpp/diag.ae, arbace/repr/cpp/parse.ae):
   ([class.copy.ctor]/5); a friend function two specializations define (template/friend47.C); a flexible array member's default
   member initializer used anywhere (ext/flexary20.C); C language linkage of one name and two types ([dcl.link]/6-7,
   parse/friend5.C); block-scope extern declarations of one name and namespace of different types ([basic.link]/8, /11).
+
+Checks (the worktree's .tmp/own/, the fifth pass's .tmp/bin/dm and cmp): per rule the rows it aims at and hand-made probes with the
+valid forms beside the invalid ones (friends and members granted access, protected bases from derived classes, `::B::si`,
+covariant overriders, `S(int = 0)` as a default constructor, `sizeof(B*)` and `T<int>` in a static member's initializer, `new A` of
+`typedef int A[2]`, unions with one initialized member, std's headers). A targeted run over the 484 recorded passes the first rules
+could touch (q1: 0 lost but concepts-pr67774.C's load timeout), then three regressions over the 3,332 recorded passes and the 880
+counted clang-only candidates (4,212 files, 6 threads beside the other two agents' runs): r1 at `beef3f71a` (0 lost but 4 load
+timeouts, 14 gained), r2 at `93c27e36f` (4 lost and fixed: cpp2a/consteval11.C's discarded `bar (13)` evaluated -- a discarded
+statement's immediate invocations are not --, parse/array-size3.C's `int f : -1ULL;` taken for a negative width -- an unsigned
+width's value is none --, init/ptrfn2.C's and cpp2a/paren-init26.C's elision -- the empty-subaggregate rule left to arrays'
+cx-empty-agg-elide! and off in parenthesized initialization), r3 at `c14565dc9`, the branch's code: 0 lost but four read timeouts
+under the host's load 21 (cpp1z/constexpr-asm-3.C, abi/mangle41.C, template/pr69961a.C and cpp2a/concepts-pr67774.C, each passing
+alone at the same commit, concepts-pr67774.C in 255 s against the base's 267 s), 48 rows to own pass, listed in
+test/cpp/sema-pass-types.txt (3 of them, template/crash41.C, error15.C and ttp5.C, of test/cpp/divergences-dg.edn's :na class
+:ifndr-uninstantiated-template, outside the counted rows); the dg negative control (dr2082-vs-dr1423) failed as it must. Not
+recorded here (the three branches are merged and recorded once): with the 45 counted rows the read stage would be (1934 + 3377 +
+0.5 x 794) / 6105 = 0.935.
+
+Left in the area (the candidates read, not done): templates' definitions before instantiation and two-phase lookup
+(template/incomplete1.C, incomplete11.C, sizeof11.C, member4.C, non-dependent13.C, parse/new1.C, template/access43.C,
+parse/non-dependent2.C's false ambiguity through a dependent base), the point of completion of a class defined later
+(cpp1z/has-unique-obj-representations4.C, cpp1z/static2.C: the unit's classes complete before the initializers are analyzed),
+pointer-to-member template arguments (parse/access14.C, which also needs the specialization of B<&A::i>), friend and nested
+templates' access contexts (template/memfriend16.C, memfriend17.C, friend82.C, friend31.C), access in SFINAE (cpp0x/sfinae58.C),
+an out-of-line defaulted copy that cannot bind (cpp0x/defaulted60.C), designated `.x = {}` as copy-list-initialization
+(cpp2a/desig30.C, which the positional `Aggr{{}}` would share), a declined class's covariant return (inherit/error2.C).
