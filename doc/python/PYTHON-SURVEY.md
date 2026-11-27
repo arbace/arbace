@@ -9507,3 +9507,63 @@ line, on train 7's executable c04e326d97bedc4262f7) or read from train 7's own r
   are `:finalization`'s (n/a, 537-2 (a), py-mp-1125): the handler's `e = None; del e` deletes None, the exception dies at the
   handler's end only under reference counting. **test_large_pool** (fork's test_misc, its script's Pool(200) past the memory cap)
   is the user's decision of 2026-11-27 (libtest_run.py's Pool(20)), recorded by train 7.
+## As built: py-small-1127, the eval cell's small deferred classes (2026-11-27, the main host)
+
+The small classes of test/python/divergences.edn's eval cell (31 rows at train 7's head), each row's cause read from its test
+and fixed in the runtime where pyi lacked something; targeted runs only (`bin/pyi check --only`, on train 7's executable;
+the checkout's runtime by goi, or compiled with `check --aot --lib-test --only` where the C world is needed).
+
+- **Already passing at train 7's head** (the record is older): test_weakset's union, intersection, symmetric_difference and
+  test_weak_destroy_and_mutate_while_iterating (:core-objects-287), test_memoryio's three PyBytesIO exports (:buffer-exports:
+  bytearray counts its exports since queue 595), test_tempfile's TestMktemp.test_basic (:os-and-files-misc), and, in train 7's
+  own run, fork's three resource tracker signal tests (:finalization-collect) and spawn's test_rapid_restart
+  (:goi-liveness-fallthrough); test_generators' test_raise_and_yield_from (:testcapi) passes with SIGINT at its default
+  action (train 7's wd-run.sh); its crash (status 130) was the driver's SIGINT inherited ignored.
+- **An exception subclass's `__del__`** (exc.go's trackExcDel): an instance of an exception class is an `*Exception` made by
+  BaseException's `__new__` (and NewException, ExceptionGroup's), not object's, so it was never tracked and its `__del__`
+  never ran. Tracked as class.go tracks an instance (test_unittest's test_no_exception_leak, :finalization-collect).
+- **The code object's cycle** (finalize.go, code.go): `Code.obj` (`__code__`'s identity) and `CodeObject.Code` hold each
+  other, a cycle Go never frees once the code object has a Go finalizer (a weak reference to it); the code object and its
+  Code are nodes of the cycle collection now (a function's Code slot, the code's free frames' Code slots listed too), so
+  gc.collect() finds them dead with the function that held them; and a nested code no longer holds its parent (queue 229's
+  `parent`, read by the bytecode view's isImportOriginated and irSuperOK): the parent's constants held the nested code's
+  own code object, a chain on which Go runs one finalizer a collection, so the probe of the code object never fired. The
+  outermost code's kind, instructions, names and imports are a `codeTop` the nested codes reach by `up` (code.go's
+  linkTops, at ReadIR) (test_code's CodeWeakRefTest.test_basic, :code-objects).
+- **Audit events of readline and ssl** (builtins_readline.go, builtins_ssl.go): read_init_file's, read_history_file's,
+  write_history_file's and append_history_file's `open` events as readline.c raises them (the filename, else
+  `<readline_init_file>` or `~/.history`, the mode's letter, 0), SSLContext.load_dh_params' Py_fopen event (test_audit's
+  test_open, :audit-hooks).
+- **sys.getsizeof** of `object()` (16) and of a memoryview (memory_sizeof: 144 and 24 a dimension, no GC header, as pyi's
+  memoryview names no Py_TPFLAGS_HAVE_GC) (test_buffer's test_memoryview_sizeof, :sys-getsizeof; test_capi's
+  test_heaptype_relative_special_members_errors, :testcapi-behaviour, sizes its heap type from `sys.getsizeof(object())`).
+- **Py_TPFLAGS_METHOD_DESCRIPTOR** on function, method_descriptor and wrapper_descriptor (typeflags.go; test_call's
+  test_method_descriptor_flag, :capi-port).
+- **The kwargs dict of a METH_VARARGS | METH_KEYWORDS C function** (eval.go's and aot.go's CALL_FUNCTION_EX, pyctypes'
+  callWith): `f(**{k: v})` whose key is a str subclass's instance passes the dict itself, its keys as given, as cfunction_call
+  does (pyi's keyword names are exact strs, so a key whose `__hash__` or `__eq__` is not str's was found by its text: test_getargs'
+  test_weird_str_subclass and test_weird_str_subclass2, :capi-port).
+- **_testinternalcapi.TIER2_THRESHOLD** (JUMP_BACKWARD_INITIAL_VALUE + 1; test_sys's test_jit_is_active, :sys-module).
+- **ctypes' complex arguments** (pyctypes' convParam): a simple type's from_param whose ffi type is a struct of its parts
+  (c_double_complex, c_float_complex, c_longdouble_complex) passes its bytes, not the address 0 of a struct by reference
+  (test_libc's test_csqrt's segmentation fault, :ctypes-port).
+- **PyConfig_Get("buffered_stdio")** from the start's -u (pyi's StdioUnbuffered: PYI_UNBUFFERED, which the start removes, so
+  the environment no longer told it; test_regrtest's test_add_python_opts, --fast-ci's worker, :regrtest-children).
+- **`help`'s pickle** (builtins_sys_info.go): `_sitebuiltins._Helper()` in the receiver, as queue 595 made the Quitters'
+  (test_interpreters' test_modified_arg: the exec() globals' `__builtins__` shared back, :tools-misc).
+- **A raise() of a signal the process ignores** (builtins_signal.go's ExtRaiseSignal): discarded, as the kernel discards it,
+  not the C world's default action, which ended the driver.
+
+**Measured** (each row once): on goi with the checkout's runtime (`bin/pyi check --only`, train 7's executable): test_audit's
+test_open and test_unittest's test_no_exception_leak pass; compiled, `bin/pyi check --aot --lib-test --only` (the C world needs
+the compiled runtime): test_buffer's test_memoryview_sizeof, test_capi's test_heaptype_relative_special_members_errors,
+test_weird_str_subclass and test_weird_str_subclass2, test_call's test_method_descriptor_flag, test_sys's test_jit_is_active,
+test_ctypes' test_libc test_csqrt, test_regrtest's test_add_python_opts, test_interpreters' test_modified_arg and test_code's
+CodeWeakRefTest.test_basic pass, with test_dis's test_disassemble_instance_method and test__find_imports and test_monitoring's
+TestLoadSuperAttr test_attr and test_method_call (the bytecode view's import and super checks over codeTop) passing as before.
+Left: test_weakset's test_weak_destroy_while_iterating (the item dies when the generator's `item` is rebound, at a refcount's
+moment pyi has none), test_regrtest's test_unraisable_exc (`obj = None` drops the last reference of a weakly referenced
+object inside the test: no moment at a rebinding), test_pickle's delayed writer (past the 300 s limit compiled), test_ctypes'
+test_pointer_types_factory and test_xml_etree_c's test_cyclic_gc (cycles through the C world's objects), test_sqlite3's
+test_table_lock_cursor_non_readonly_select (passes alone and in test_sqlite3.test_regression whole, compiled, fails in the
+package's run: an earlier test's state).
